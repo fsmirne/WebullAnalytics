@@ -14,6 +14,7 @@ class Program
         var asOf = DateTime.Today;
         var outputFormat = "console";
         string? excelPath = null;
+        string? textPath = null;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -36,15 +37,19 @@ class Program
             else if (args[i] == "--output" && i + 1 < args.Length)
             {
                 outputFormat = args[++i].ToLower();
-                if (outputFormat != "console" && outputFormat != "excel")
+                if (outputFormat != "console" && outputFormat != "excel" && outputFormat != "text")
                 {
-                    Console.WriteLine("Error: --output must be 'console' or 'excel'");
+                    Console.WriteLine("Error: --output must be 'console', 'excel', or 'text'");
                     return 1;
                 }
             }
             else if (args[i] == "--excel-path" && i + 1 < args.Length)
             {
                 excelPath = args[++i];
+            }
+            else if (args[i] == "--text-path" && i + 1 < args.Length)
+            {
+                textPath = args[++i];
             }
             else if (args[i] == "--help" || args[i] == "-h")
             {
@@ -53,7 +58,7 @@ class Program
             }
         }
 
-        return Execute(dataDir, asOf, outputFormat, excelPath);
+        return Execute(dataDir, asOf, outputFormat, excelPath, textPath);
     }
 
     static void PrintHelp()
@@ -65,12 +70,13 @@ class Program
         Console.WriteLine("Options:");
         Console.WriteLine("  --data-dir <path>    Directory containing CSV order exports (default: data)");
         Console.WriteLine("  --as-of <date>       Include expirations on or before this date in YYYY-MM-DD format (default: today)");
-        Console.WriteLine("  --output <format>    Output format: 'console' or 'excel' (default: console)");
+        Console.WriteLine("  --output <format>    Output format: 'console', 'excel', or 'text' (default: console)");
         Console.WriteLine("  --excel-path <path>  Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)");
+        Console.WriteLine("  --text-path <path>   Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)");
         Console.WriteLine("  --help, -h           Show this help message");
     }
 
-    static int Execute(string dataDirPath, DateTime asOf, string outputFormat, string? excelPath)
+    static int Execute(string dataDirPath, DateTime asOf, string outputFormat, string? excelPath, string? textPath)
     {
         if (!Directory.Exists(dataDirPath))
         {
@@ -100,6 +106,17 @@ class Program
             }
 
             ExcelExporter.ExportToExcel(rows, positionRows, trades, running, excelPath);
+        }
+        else if (outputFormat == "text")
+        {
+            // Generate default filename if not provided
+            if (string.IsNullOrEmpty(textPath))
+            {
+                var dateStr = DateTime.Now.ToString("yyyyMMdd");
+                textPath = $"WebullAnalytics_{dateStr}.txt";
+            }
+
+            TextFileExporter.ExportToTextFile(rows, positionRows, running, textPath);
         }
         else
         {
