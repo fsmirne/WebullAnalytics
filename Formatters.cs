@@ -4,61 +4,67 @@ using Spectre.Console;
 
 namespace WebullAnalytics;
 
+/// <summary>
+/// Formatting utilities for displaying quantities, prices, and dates.
+/// </summary>
 public static class Formatters
 {
+    /// <summary>
+    /// Formats a quantity, removing unnecessary trailing zeros.
+    /// </summary>
     public static string FormatQty(decimal qty)
     {
         var text = qty.ToString("F", CultureInfo.InvariantCulture);
-        if (text.Contains('.'))
-        {
-            text = text.TrimEnd('0').TrimEnd('.');
-        }
-        return text;
+        return text.Contains('.') ? text.TrimEnd('0').TrimEnd('.') : text;
     }
 
+    /// <summary>
+    /// Formats a price with appropriate decimal places.
+    /// Options use 3 decimals, stocks use 2. Trailing zeros are trimmed but at least 2 decimals are kept.
+    /// </summary>
     public static string FormatPrice(decimal value, string asset)
     {
-        var text = asset.StartsWith("Option")
-            ? value.ToString("F3", CultureInfo.InvariantCulture)
-            : value.ToString("F2", CultureInfo.InvariantCulture);
+        var decimals = asset.StartsWith("Option", StringComparison.Ordinal) ? 3 : 2;
+        var text = value.ToString($"F{decimals}", CultureInfo.InvariantCulture).TrimEnd('0');
 
-        // Trim trailing zeros but keep at least 2 decimal places
-        text = text.TrimEnd('0');
+        // Ensure at least 2 decimal places
         if (!text.Contains('.'))
             return text + ".00";
 
-        var parts = text.Split('.');
-        if (parts[1].Length == 0)
-            return parts[0] + ".00";
-        if (parts[1].Length == 1)
-            return text + "0";
-
-        return text;
+        var decimalPart = text.Split('.')[1];
+        return decimalPart.Length switch
+        {
+            0 => text + "00",
+            1 => text + "0",
+            _ => text
+        };
     }
 
+    /// <summary>
+    /// Formats a P&L value with color (green for positive, red for negative).
+    /// </summary>
     public static Markup FormatPnL(decimal value)
     {
-        var style = value >= 0 ? "green" : "red";
+        var color = value >= 0 ? "green" : "red";
         var text = value.ToString("+0.00;-0.00", CultureInfo.InvariantCulture);
-        return new Markup($"[{style}]{text}[/]");
+        return new Markup($"[{color}]{text}[/]");
     }
 
-    public static string FormatExpiry(DateTime? expiry)
-    {
-        if (!expiry.HasValue)
-            return "-";
+    /// <summary>
+    /// Formats an optional expiry date, returning "-" if null.
+    /// </summary>
+    public static string FormatExpiry(DateTime? expiry) =>
+        expiry.HasValue ? FormatOptionDate(expiry.Value) : "-";
 
-        return FormatOptionDate(expiry.Value);
-    }
+    /// <summary>
+    /// Formats a date for option display (e.g., "13 Feb 2026").
+    /// </summary>
+    public static string FormatOptionDate(DateTime date) =>
+        date.ToString("dd MMM yyyy", CultureInfo.InvariantCulture);
 
-    public static string FormatOptionDate(DateTime expDate)
-    {
-        return expDate.ToString("dd MMM yyyy", CultureInfo.InvariantCulture);
-    }
-
-    public static string FormatOptionDisplay(string root, DateTime expDate, decimal strike)
-    {
-        var strikeText = FormatQty(strike);
-        return $"{root} {FormatOptionDate(expDate)} ${strikeText}";
-    }
+    /// <summary>
+    /// Formats an option for display (e.g., "GME 13 Feb 2026 $25").
+    /// </summary>
+    public static string FormatOptionDisplay(string root, DateTime expiryDate, decimal strike) =>
+        $"{root} {FormatOptionDate(expiryDate)} ${FormatQty(strike)}";
 }

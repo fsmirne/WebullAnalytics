@@ -2,6 +2,21 @@ using System;
 
 namespace WebullAnalytics;
 
+/// <summary>
+/// Represents a single trade (buy/sell/expire) of a stock, option, or strategy.
+/// </summary>
+/// <param name="Seq">Sequence number for ordering trades with the same timestamp</param>
+/// <param name="Timestamp">When the trade was executed</param>
+/// <param name="Instrument">Human-readable description (e.g., "GME 13 Feb 2026 $25")</param>
+/// <param name="MatchKey">Unique key for matching opposite trades (e.g., "option:GME260213C00025000")</param>
+/// <param name="Asset">Asset type: "Stock", "Option", or "Option Strategy"</param>
+/// <param name="OptionKind">For options: "Call"/"Put"; for strategies: "Calendar"/"Spread"/etc.</param>
+/// <param name="Side">"Buy", "Sell", or "Expire"</param>
+/// <param name="Qty">Number of shares or contracts</param>
+/// <param name="Price">Price per share/contract</param>
+/// <param name="Multiplier">Contract multiplier (100 for options, 1 for stocks)</param>
+/// <param name="Expiry">Option expiration date, if applicable</param>
+/// <param name="ParentStrategySeq">For strategy legs, the Seq of the parent strategy trade</param>
 public record Trade(
     int Seq,
     DateTime Timestamp,
@@ -17,12 +32,19 @@ public record Trade(
     int? ParentStrategySeq = null
 );
 
+/// <summary>
+/// Represents a position lot for FIFO accounting.
+/// Multiple lots can exist for the same position if acquired at different prices.
+/// </summary>
 public record Lot(
     string Side,
     decimal Qty,
     decimal Price
 );
 
+/// <summary>
+/// A row in the realized P&L report showing a single transaction.
+/// </summary>
 public record ReportRow(
     DateTime Timestamp,
     string Instrument,
@@ -37,6 +59,11 @@ public record ReportRow(
     bool IsStrategyLeg = false
 );
 
+/// <summary>
+/// A row in the open positions table.
+/// </summary>
+/// <param name="InitialAvgPrice">Original average price before roll adjustments</param>
+/// <param name="AdjustedAvgPrice">Price after applying credits from rolled short legs</param>
 public record PositionRow(
     string Instrument,
     string Asset,
@@ -46,10 +73,17 @@ public record PositionRow(
     decimal AvgPrice,
     DateTime? Expiry,
     bool IsStrategyLeg = false,
-    decimal? InitialAvgPrice = null,  // Original price before adjustments
-    decimal? AdjustedAvgPrice = null  // Price after applying credits from rolls
+    decimal? InitialAvgPrice = null,
+    decimal? AdjustedAvgPrice = null
 );
 
+/// <summary>
+/// Parsed components of an OCC option symbol.
+/// </summary>
+/// <param name="Root">Underlying symbol (e.g., "GME")</param>
+/// <param name="ExpiryDate">Option expiration date</param>
+/// <param name="CallPut">"C" for call, "P" for put</param>
+/// <param name="Strike">Strike price</param>
 public record OptionParsed(
     string Root,
     DateTime ExpiryDate,
