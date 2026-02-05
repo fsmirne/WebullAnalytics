@@ -1,90 +1,123 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.IO;
-using System.Linq;
 
 namespace WebullAnalytics;
 
+/// <summary>
+/// Entry point for WebullAnalytics CLI.
+/// Generates realized P&L reports from Webull CSV order exports.
+/// </summary>
 class Program
 {
     static int Main(string[] args)
     {
-        // Parse command-line arguments
+        var options = ParseArguments(args);
+
+        if (options == null)
+            return 1;
+
+        if (options.ShowHelp)
+        {
+            PrintHelp();
+            return 0;
+        }
+
+        return Execute(options);
+    }
+
+    /// <summary>
+    /// Command-line options for the application.
+    /// </summary>
+    private record Options(
+        string DataDir,
+        DateTime SinceDate,
+        string OutputFormat,
+        string? ExcelPath,
+        string? TextPath,
+        bool ShowHelp = false
+    );
+
+    /// <summary>
+    /// Parses command-line arguments into an Options record.
+    /// Returns null if there was a parsing error.
+    /// </summary>
+    private static Options? ParseArguments(string[] args)
+    {
         var dataDir = "data";
         var sinceDate = DateTime.MinValue;
         var outputFormat = "console";
         string? excelPath = null;
         string? textPath = null;
 
-        for (int i = 0; i < args.Length; i++)
+        for (var i = 0; i < args.Length; i++)
         {
-            if (args[i] == "--data-dir" && i + 1 < args.Length)
+            switch (args[i])
             {
-                dataDir = args[++i];
-            }
-            else if (args[i] == "--since" && i + 1 < args.Length)
-            {
-                if (DateTime.TryParseExact(args[++i], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
-                {
-                    sinceDate = parsed;
-                }
-                else
-                {
-                    Console.WriteLine("Error: --since must be in YYYY-MM-DD format");
-                    return 1;
-                }
-            }
-            else if (args[i] == "--output" && i + 1 < args.Length)
-            {
-                outputFormat = args[++i].ToLower();
-                if (outputFormat != "console" && outputFormat != "excel" && outputFormat != "text")
-                {
-                    Console.WriteLine("Error: --output must be 'console', 'excel', or 'text'");
-                    return 1;
-                }
-            }
-            else if (args[i] == "--excel-path" && i + 1 < args.Length)
-            {
-                excelPath = args[++i];
-            }
-            else if (args[i] == "--text-path" && i + 1 < args.Length)
-            {
-                textPath = args[++i];
-            }
-            else if (args[i] == "--help" || args[i] == "-h")
-            {
-                PrintHelp();
-                return 0;
+                case "--data-dir" when i + 1 < args.Length:
+                    dataDir = args[++i];
+                    break;
+
+                case "--since" when i + 1 < args.Length:
+                    if (!DateTime.TryParseExact(args[++i], "yyyy-MM-dd",
+                        CultureInfo.InvariantCulture, DateTimeStyles.None, out sinceDate))
+                    {
+                        Console.WriteLine("Error: --since must be in YYYY-MM-DD format");
+                        return null;
+                    }
+                    break;
+
+                case "--output" when i + 1 < args.Length:
+                    outputFormat = args[++i].ToLowerInvariant();
+                    if (outputFormat is not ("console" or "excel" or "text"))
+                    {
+                        Console.WriteLine("Error: --output must be 'console', 'excel', or 'text'");
+                        return null;
+                    }
+                    break;
+
+                case "--excel-path" when i + 1 < args.Length:
+                    excelPath = args[++i];
+                    break;
+
+                case "--text-path" when i + 1 < args.Length:
+                    textPath = args[++i];
+                    break;
+
+                case "--help" or "-h":
+                    return new Options(dataDir, sinceDate, outputFormat, excelPath, textPath, ShowHelp: true);
             }
         }
 
-        return Execute(dataDir, sinceDate, outputFormat, excelPath, textPath);
+        return new Options(dataDir, sinceDate, outputFormat, excelPath, textPath);
     }
 
-    static void PrintHelp()
+    private static void PrintHelp()
     {
-        Console.WriteLine("WebullAnalytics - Generate a realized P&L report from Webull CSV order exports");
-        Console.WriteLine();
-        Console.WriteLine("Usage: WebullAnalytics [options]");
-        Console.WriteLine();
-        Console.WriteLine("Options:");
-        Console.WriteLine("  --data-dir <path>    Directory containing CSV order exports (default: data)");
-        Console.WriteLine("  --since <date>       Include only trades on or after this date in YYYY-MM-DD format (default: all trades)");
-        Console.WriteLine("  --output <format>    Output format: 'console', 'excel', or 'text' (default: console)");
-        Console.WriteLine("  --excel-path <path>  Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)");
-        Console.WriteLine("  --text-path <path>   Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)");
-        Console.WriteLine("  --help, -h           Show this help message");
+        Console.WriteLine("""
+            WebullAnalytics - Generate a realized P&L report from Webull CSV order exports
+
+            Usage: WebullAnalytics [options]
+
+            Options:
+              --data-dir <path>    Directory containing CSV order exports (default: data)
+              --since <date>       Include only trades on or after this date in YYYY-MM-DD format (default: all trades)
+              --output <format>    Output format: 'console', 'excel', or 'text' (default: console)
+              --excel-path <path>  Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)
+              --text-path <path>   Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)
+              --help, -h           Show this help message
+            """);
     }
 
-    static int Execute(string dataDirPath, DateTime sinceDate, string outputFormat, string? excelPath, string? textPath)
+    private static int Execute(Options options)
     {
-        if (!Directory.Exists(dataDirPath))
+        if (!Directory.Exists(options.DataDir))
         {
-            Console.WriteLine($"Error: Data directory '{dataDirPath}' does not exist.");
+            Console.WriteLine($"Error: Data directory '{options.DataDir}' does not exist.");
             return 1;
         }
 
-        var trades = PositionTracker.LoadTrades(dataDirPath);
+        var trades = PositionTracker.LoadTrades(options.DataDir);
 
         if (trades.Count == 0)
         {
@@ -92,35 +125,27 @@ class Program
             return 0;
         }
 
-        var (rows, positions, running) = PositionTracker.ComputeReport(trades, sinceDate);
+        var (rows, positions, running) = PositionTracker.ComputeReport(trades, options.SinceDate);
         var tradeIndex = PositionTracker.BuildTradeIndex(trades);
         var positionRows = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
-        if (outputFormat == "excel")
-        {
-            // Generate default filename if not provided
-            if (string.IsNullOrEmpty(excelPath))
-            {
-                var dateStr = DateTime.Now.ToString("yyyyMMdd");
-                excelPath = $"WebullAnalytics_{dateStr}.xlsx";
-            }
+        var dateStr = DateTime.Now.ToString("yyyyMMdd");
 
-            ExcelExporter.ExportToExcel(rows, positionRows, trades, running, excelPath);
-        }
-        else if (outputFormat == "text")
+        switch (options.OutputFormat)
         {
-            // Generate default filename if not provided
-            if (string.IsNullOrEmpty(textPath))
-            {
-                var dateStr = DateTime.Now.ToString("yyyyMMdd");
-                textPath = $"WebullAnalytics_{dateStr}.txt";
-            }
+            case "excel":
+                var excelPath = options.ExcelPath ?? $"WebullAnalytics_{dateStr}.xlsx";
+                ExcelExporter.ExportToExcel(rows, positionRows, trades, running, excelPath);
+                break;
 
-            TextFileExporter.ExportToTextFile(rows, positionRows, running, textPath);
-        }
-        else
-        {
-            TableRenderer.RenderReport(rows, positionRows, running);
+            case "text":
+                var textPath = options.TextPath ?? $"WebullAnalytics_{dateStr}.txt";
+                TextFileExporter.ExportToTextFile(rows, positionRows, running, textPath);
+                break;
+
+            default:
+                TableRenderer.RenderReport(rows, positionRows, running);
+                break;
         }
 
         return 0;

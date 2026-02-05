@@ -8,12 +8,40 @@ using CsvHelper.Configuration;
 
 namespace WebullAnalytics;
 
+/// <summary>
+/// Parses Webull CSV export files into Trade objects.
+/// Handles both single-leg options/stocks and multi-leg strategy orders.
+/// </summary>
 public static class CsvParser
 {
     private const decimal OptionMultiplier = 100m;
     private const decimal StockMultiplier = 1m;
 
+    /// <summary>
+    /// Parses a CSV file and returns all filled trades.
+    /// Strategy orders are split into a parent trade plus individual leg trades.
+    /// </summary>
+    /// <param name="path">Path to the CSV file</param>
+    /// <param name="seqStart">Starting sequence number for trades</param>
+    /// <returns>List of trades and the next available sequence number</returns>
     public static (List<Trade> trades, int nextSeq) ParseCsv(string path, int seqStart)
+    {
+        var rows = ReadCsvRows(path);
+        if (rows == null)
+            return (new List<Trade>(), seqStart);
+
+        var isOptions = Path.GetFileName(path).Contains("Options", StringComparison.OrdinalIgnoreCase);
+
+        if (!isOptions)
+            return ParseStockTrades(rows, seqStart);
+
+        return ParseOptionTrades(rows, seqStart);
+    }
+
+    /// <summary>
+    /// Reads all rows from a CSV file into dictionaries.
+    /// </summary>
+    private static List<Dictionary<string, string>>? ReadCsvRows(string path)
     {
         var config = new CsvConfiguration(CultureInfo.InvariantCulture)
         {
@@ -28,45 +56,63 @@ public static class CsvParser
         csv.ReadHeader();
         var headers = csv.HeaderRecord;
 
+        // Validate required columns exist
         if (headers == null || !headers.Contains("Side") || !headers.Contains("Filled"))
-            return (new List<Trade>(), seqStart);
+            return null;
 
         var rows = new List<Dictionary<string, string>>();
         while (csv.Read())
         {
-            var row = new Dictionary<string, string>();
-            foreach (var header in headers)
-            {
-                row[header] = csv.GetField(header) ?? "";
-            }
+            var row = headers.ToDictionary(h => h, h => csv.GetField(h) ?? "");
             rows.Add(row);
         }
 
-        var isOptions = Path.GetFileName(path).Contains("Options", StringComparison.OrdinalIgnoreCase);
-        var parentTimes = new HashSet<string>();
+        return rows;
+    }
 
-        if (isOptions)
-        {
-            foreach (var row in rows)
-            {
-                var name = row.GetValueOrDefault("Name", "").Trim();
-                var symbol = row.GetValueOrDefault("Symbol", "").Trim();
-
-                if (!string.IsNullOrEmpty(name) && string.IsNullOrEmpty(symbol))
-                {
-                    var placed = row.GetValueOrDefault("Placed Time", "").Trim();
-                    if (!string.IsNullOrEmpty(placed))
-                        parentTimes.Add(placed);
-                }
-            }
-        }
-
-        var strategyMeta = isOptions ? BuildStrategyMeta(rows, parentTimes) : new Dictionary<string, StrategyMeta>();
-
+    /// <summary>
+    /// Parses stock trades from CSV rows.
+    /// </summary>
+    private static (List<Trade>, int) ParseStockTrades(List<Dictionary<string, string>> rows, int seqStart)
+    {
         var trades = new List<Trade>();
         var seq = seqStart;
 
-        // Track which strategy seq belongs to which placed time
+        foreach (var row in rows)
+        {
+            var core = ExtractCoreFields(row);
+            if (core == null)
+                continue;
+
+            var symbol = row.GetValueOrDefault("Symbol", "").Trim();
+            if (string.IsNullOrEmpty(symbol))
+                continue;
+
+            trades.Add(BuildStockTrade(seq++, core.Value, symbol));
+        }
+
+        return (trades, seq);
+    }
+
+    /// <summary>
+    /// Parses option trades from CSV rows, including multi-leg strategies.
+    /// Strategy rows have a Name but no Symbol; leg rows have a Symbol but no Name.
+    /// </summary>
+    private static (List<Trade>, int) ParseOptionTrades(List<Dictionary<string, string>> rows, int seqStart)
+    {
+        // Identify strategy parent rows by their placed time
+        var parentTimes = rows
+            .Where(r => !string.IsNullOrEmpty(r.GetValueOrDefault("Name", "").Trim()) &&
+                       string.IsNullOrEmpty(r.GetValueOrDefault("Symbol", "").Trim()) &&
+                       !string.IsNullOrEmpty(r.GetValueOrDefault("Placed Time", "").Trim()))
+            .Select(r => r.GetValueOrDefault("Placed Time", "").Trim())
+            .ToHashSet();
+
+        // Build metadata for each strategy (root symbol, expiration, legs)
+        var strategyMeta = BuildStrategyMeta(rows, parentTimes);
+
+        var trades = new List<Trade>();
+        var seq = seqStart;
         var strategySeqByPlacedTime = new Dictionary<string, int>();
 
         foreach (var row in rows)
@@ -75,184 +121,209 @@ public static class CsvParser
             if (core == null)
                 continue;
 
-            var (side, qty, price, timestamp) = core.Value;
+            var name = row.GetValueOrDefault("Name", "").Trim();
+            var symbol = row.GetValueOrDefault("Symbol", "").Trim();
+            var placed = row.GetValueOrDefault("Placed Time", "").Trim();
 
-            if (isOptions)
+            // Strategy parent row (has name, no symbol)
+            if (!string.IsNullOrEmpty(name) && string.IsNullOrEmpty(symbol))
             {
-                var name = row.GetValueOrDefault("Name", "").Trim();
-                var symbol = row.GetValueOrDefault("Symbol", "").Trim();
-                var placed = row.GetValueOrDefault("Placed Time", "").Trim();
-
-                if (!string.IsNullOrEmpty(name) && string.IsNullOrEmpty(symbol))
-                {
-                    // This is a strategy parent row
-                    var meta = strategyMeta.GetValueOrDefault(placed, new StrategyMeta());
-                    trades.Add(BuildStrategyTrade(seq, timestamp, name, side, qty, price, meta));
-                    strategySeqByPlacedTime[placed] = seq;
-                    seq++;
-                    continue;
-                }
-
-                if (parentTimes.Contains(placed) && string.IsNullOrEmpty(name))
-                {
-                    // This is a leg of a strategy - create it with parent reference
-                    if (!string.IsNullOrEmpty(symbol) && strategySeqByPlacedTime.TryGetValue(placed, out var parentSeq))
-                    {
-                        trades.Add(BuildOptionTrade(seq, timestamp, symbol, side, qty, price, parentSeq));
-                        seq++;
-                    }
-                    continue;
-                }
-
-                if (!string.IsNullOrEmpty(symbol))
-                {
-                    trades.Add(BuildOptionTrade(seq, timestamp, symbol, side, qty, price));
-                    seq++;
-                }
-
+                var meta = strategyMeta.GetValueOrDefault(placed, new StrategyMeta());
+                trades.Add(BuildStrategyTrade(seq, core.Value, name, meta));
+                strategySeqByPlacedTime[placed] = seq;
+                seq++;
                 continue;
             }
 
-            var stockSymbol = row.GetValueOrDefault("Symbol", "").Trim();
-            if (string.IsNullOrEmpty(stockSymbol))
+            // Strategy leg row (placed time matches a parent, no name)
+            if (parentTimes.Contains(placed) && string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(symbol))
+            {
+                if (strategySeqByPlacedTime.TryGetValue(placed, out var parentSeq))
+                {
+                    trades.Add(BuildOptionTrade(seq++, core.Value, symbol, parentSeq));
+                }
                 continue;
+            }
 
-            trades.Add(BuildStockTrade(seq, timestamp, stockSymbol, side, qty, price));
-            seq++;
+            // Standalone option trade
+            if (!string.IsNullOrEmpty(symbol))
+            {
+                trades.Add(BuildOptionTrade(seq++, core.Value, symbol, parentStrategySeq: null));
+            }
         }
 
         return (trades, seq);
     }
 
-    private static (string side, decimal qty, decimal price, DateTime timestamp)? ExtractCoreFields(Dictionary<string, string> row)
+    /// <summary>
+    /// Extracts and validates core trade fields (side, qty, price, timestamp).
+    /// Returns null for non-filled or invalid rows.
+    /// </summary>
+    private static (string side, decimal qty, decimal price, DateTime timestamp)? ExtractCoreFields(
+        Dictionary<string, string> row)
     {
-        var status = row.GetValueOrDefault("Status", "").Trim().ToLower();
+        // Skip non-filled orders
+        var status = row.GetValueOrDefault("Status", "").Trim().ToLowerInvariant();
         if (!string.IsNullOrEmpty(status) && status != "filled")
             return null;
 
-        var side = row.GetValueOrDefault("Side", "").Trim();
-        side = char.ToUpper(side[0]) + side[1..].ToLower();
+        // Normalize side to "Buy" or "Sell"
+        var sideRaw = row.GetValueOrDefault("Side", "").Trim();
+        if (string.IsNullOrEmpty(sideRaw))
+            return null;
 
-        if (side != "Buy" && side != "Sell")
+        var side = char.ToUpper(sideRaw[0]) + sideRaw[1..].ToLower();
+        if (side is not ("Buy" or "Sell"))
             return null;
 
         var qty = ParsingHelpers.ParseDecimal(row.GetValueOrDefault("Filled", ""));
-        if (qty == null || qty <= 0)
+        if (qty is null or <= 0)
             return null;
 
-        var price = ParsingHelpers.ParseDecimal(row.GetValueOrDefault("Avg Price") ?? row.GetValueOrDefault("Price"));
+        var price = ParsingHelpers.ParseDecimal(
+            row.GetValueOrDefault("Avg Price") ?? row.GetValueOrDefault("Price"));
         if (price == null)
             return null;
 
-        var timeVal = row.GetValueOrDefault("Filled Time") ?? row.GetValueOrDefault("Placed Time") ?? "";
-        var timestamp = ParsingHelpers.ParseTime(timeVal);
+        var timestamp = ParsingHelpers.ParseTime(
+            row.GetValueOrDefault("Filled Time") ?? row.GetValueOrDefault("Placed Time") ?? "");
         if (timestamp == null)
             return null;
 
         return (side, qty.Value, price.Value, timestamp.Value);
     }
 
-    private static Dictionary<string, StrategyMeta> BuildStrategyMeta(List<Dictionary<string, string>> rows, HashSet<string> parentTimes)
+    /// <summary>
+    /// Builds metadata for strategy orders by parsing their leg symbols.
+    /// </summary>
+    private static Dictionary<string, StrategyMeta> BuildStrategyMeta(
+        List<Dictionary<string, string>> rows, HashSet<string> parentTimes)
     {
-        var meta = new Dictionary<string, StrategyMeta>();
-
-        foreach (var row in rows)
-        {
-            var placed = row.GetValueOrDefault("Placed Time", "").Trim();
-            var symbol = row.GetValueOrDefault("Symbol", "").Trim();
-
-            if (!parentTimes.Contains(placed) || string.IsNullOrEmpty(symbol))
-                continue;
-
-            var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
-            if (parsed == null)
-                continue;
-
-            if (!meta.ContainsKey(placed))
-                meta[placed] = new StrategyMeta();
-
-            var entry = meta[placed];
-            entry.Root ??= parsed.Root;
-            entry.ExpDate ??= parsed.ExpiryDate;
-            entry.Legs.Add((parsed.CallPut, parsed.Strike));
-        }
-
-        return meta;
+        return rows
+            .Where(r => parentTimes.Contains(r.GetValueOrDefault("Placed Time", "").Trim()) &&
+                       !string.IsNullOrEmpty(r.GetValueOrDefault("Symbol", "").Trim()))
+            .Select(r => (
+                placed: r.GetValueOrDefault("Placed Time", "").Trim(),
+                parsed: ParsingHelpers.ParseOptionSymbol(r.GetValueOrDefault("Symbol", "").Trim())
+            ))
+            .Where(x => x.parsed != null)
+            .GroupBy(x => x.placed)
+            .ToDictionary(
+                g => g.Key,
+                g =>
+                {
+                    var first = g.First().parsed!;
+                    return new StrategyMeta
+                    {
+                        Root = first.Root,
+                        ExpDate = first.ExpiryDate,
+                        Legs = g.Select(x => (x.parsed!.CallPut, x.parsed.Strike)).ToList()
+                    };
+                });
     }
 
-    private static string BuildStrategyKey(string name, string optionKind, string? root, DateTime? expDate, List<(string, decimal)>? legs)
+    /// <summary>
+    /// Creates a unique key for matching strategy trades.
+    /// Format: strategy:{kind}:{root}:{expDate}:{sorted legs}
+    /// </summary>
+    private static string BuildStrategyKey(string name, string optionKind, StrategyMeta meta)
     {
-        if (root == null || expDate == null)
+        if (meta.Root == null || meta.ExpDate == null)
             return $"strategy:{name}";
 
-        var key = $"strategy:{optionKind}:{root}:{expDate:yyyy-MM-dd}";
+        var key = $"strategy:{optionKind}:{meta.Root}:{meta.ExpDate:yyyy-MM-dd}";
 
-        if (legs != null && legs.Count > 0)
+        if (meta.Legs.Any())
         {
             var legsKey = string.Join(",",
-                legs.OrderBy(v => v.Item1).ThenBy(v => v.Item2)
-                    .Select(v => $"{v.Item1}{Formatters.FormatQty(v.Item2)}"));
+                meta.Legs
+                    .OrderBy(l => l.CallPut)
+                    .ThenBy(l => l.Strike)
+                    .Select(l => $"{l.CallPut}{Formatters.FormatQty(l.Strike)}"));
             key = $"{key}:{legsKey}";
         }
 
         return key;
     }
 
-    private static Trade BuildStrategyTrade(int seq, DateTime timestamp, string name, string side, decimal qty, decimal price, StrategyMeta meta)
+    private static Trade BuildStrategyTrade(
+        int seq,
+        (string side, decimal qty, decimal price, DateTime timestamp) core,
+        string name,
+        StrategyMeta meta)
     {
         var optionKind = ParsingHelpers.StrategyKindFromName(name);
-        var root = meta.Root;
-        var expDate = meta.ExpDate;
-        var legs = meta.Legs.Count > 0 ? meta.Legs : null;
 
-        var instrument = name;
-        if (root != null && expDate != null)
-            instrument = $"{root} {Formatters.FormatOptionDate(expDate.Value)}";
-        else if (root != null)
-            instrument = root;
-        else if (expDate != null)
-            instrument = $"{name} {Formatters.FormatOptionDate(expDate.Value)}";
-
-        var matchKey = BuildStrategyKey(name, optionKind, root, expDate, legs);
+        var instrument = (meta.Root, meta.ExpDate) switch
+        {
+            (not null, not null) => $"{meta.Root} {Formatters.FormatOptionDate(meta.ExpDate.Value)}",
+            (not null, null) => meta.Root,
+            (null, not null) => $"{name} {Formatters.FormatOptionDate(meta.ExpDate.Value)}",
+            _ => name
+        };
 
         return new Trade(
-            seq, timestamp, instrument, matchKey, "Option Strategy", optionKind,
-            side, qty, price, OptionMultiplier, expDate
+            Seq: seq,
+            Timestamp: core.timestamp,
+            Instrument: instrument,
+            MatchKey: BuildStrategyKey(name, optionKind, meta),
+            Asset: "Option Strategy",
+            OptionKind: optionKind,
+            Side: core.side,
+            Qty: core.qty,
+            Price: core.price,
+            Multiplier: OptionMultiplier,
+            Expiry: meta.ExpDate
         );
     }
 
-    private static Trade BuildOptionTrade(int seq, DateTime timestamp, string symbol, string side, decimal qty, decimal price, int? parentStrategySeq = null)
+    private static Trade BuildOptionTrade(
+        int seq,
+        (string side, decimal qty, decimal price, DateTime timestamp) core,
+        string symbol,
+        int? parentStrategySeq)
     {
         var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
 
-        string instrument;
-        string optionKind;
-        DateTime? expiry;
-
-        if (parsed != null)
-        {
-            optionKind = parsed.CallPut == "C" ? "Call" : "Put";
-            instrument = Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike);
-            expiry = parsed.ExpiryDate;
-        }
-        else
-        {
-            optionKind = "Option";
-            instrument = symbol;
-            expiry = null;
-        }
+        var (instrument, optionKind, expiry) = parsed != null
+            ? (Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike),
+               parsed.CallPut == "C" ? "Call" : "Put",
+               (DateTime?)parsed.ExpiryDate)
+            : (symbol, "Option", null);
 
         return new Trade(
-            seq, timestamp, instrument, $"option:{symbol}", "Option", optionKind,
-            side, qty, price, OptionMultiplier, expiry, parentStrategySeq
+            Seq: seq,
+            Timestamp: core.timestamp,
+            Instrument: instrument,
+            MatchKey: $"option:{symbol}",
+            Asset: "Option",
+            OptionKind: optionKind,
+            Side: core.side,
+            Qty: core.qty,
+            Price: core.price,
+            Multiplier: OptionMultiplier,
+            Expiry: expiry,
+            ParentStrategySeq: parentStrategySeq
         );
     }
 
-    private static Trade BuildStockTrade(int seq, DateTime timestamp, string symbol, string side, decimal qty, decimal price)
+    private static Trade BuildStockTrade(
+        int seq,
+        (string side, decimal qty, decimal price, DateTime timestamp) core,
+        string symbol)
     {
         return new Trade(
-            seq, timestamp, symbol, $"stock:{symbol}", "Stock", "",
-            side, qty, price, StockMultiplier, null
+            Seq: seq,
+            Timestamp: core.timestamp,
+            Instrument: symbol,
+            MatchKey: $"stock:{symbol}",
+            Asset: "Stock",
+            OptionKind: "",
+            Side: core.side,
+            Qty: core.qty,
+            Price: core.price,
+            Multiplier: StockMultiplier,
+            Expiry: null
         );
     }
 
@@ -260,6 +331,6 @@ public static class CsvParser
     {
         public string? Root { get; set; }
         public DateTime? ExpDate { get; set; }
-        public List<(string, decimal)> Legs { get; set; } = new();
+        public List<(string CallPut, decimal Strike)> Legs { get; set; } = new();
     }
 }
