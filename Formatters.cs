@@ -22,14 +22,25 @@ public static class Formatters
             ? value.ToString("F3", CultureInfo.InvariantCulture)
             : value.ToString("F2", CultureInfo.InvariantCulture);
 
-        return text.TrimEnd('0').TrimEnd('.');
+        // Trim trailing zeros but keep at least 2 decimal places
+        text = text.TrimEnd('0');
+        if (!text.Contains('.'))
+            return text + ".00";
+
+        var parts = text.Split('.');
+        if (parts[1].Length == 0)
+            return parts[0] + ".00";
+        if (parts[1].Length == 1)
+            return text + "0";
+
+        return text;
     }
 
     public static Markup FormatPnL(decimal value)
     {
         var style = value >= 0 ? "green" : "red";
         var text = value.ToString("+0.00;-0.00", CultureInfo.InvariantCulture);
-        return new Markup($"[{style}]{text.Replace(",", ",")}[/]");
+        return new Markup($"[{style}]{text}[/]");
     }
 
     public static string FormatExpiry(DateTime? expiry)

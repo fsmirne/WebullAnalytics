@@ -12,6 +12,8 @@ class Program
         // Parse command-line arguments
         var dataDir = "data";
         var asOf = DateTime.Today;
+        var outputFormat = "console";
+        string? excelPath = null;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -31,6 +33,19 @@ class Program
                     return 1;
                 }
             }
+            else if (args[i] == "--output" && i + 1 < args.Length)
+            {
+                outputFormat = args[++i].ToLower();
+                if (outputFormat != "console" && outputFormat != "excel")
+                {
+                    Console.WriteLine("Error: --output must be 'console' or 'excel'");
+                    return 1;
+                }
+            }
+            else if (args[i] == "--excel-path" && i + 1 < args.Length)
+            {
+                excelPath = args[++i];
+            }
             else if (args[i] == "--help" || args[i] == "-h")
             {
                 PrintHelp();
@@ -38,7 +53,7 @@ class Program
             }
         }
 
-        return Execute(dataDir, asOf);
+        return Execute(dataDir, asOf, outputFormat, excelPath);
     }
 
     static void PrintHelp()
@@ -50,10 +65,12 @@ class Program
         Console.WriteLine("Options:");
         Console.WriteLine("  --data-dir <path>    Directory containing CSV order exports (default: data)");
         Console.WriteLine("  --as-of <date>       Include expirations on or before this date in YYYY-MM-DD format (default: today)");
+        Console.WriteLine("  --output <format>    Output format: 'console' or 'excel' (default: console)");
+        Console.WriteLine("  --excel-path <path>  Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)");
         Console.WriteLine("  --help, -h           Show this help message");
     }
 
-    static int Execute(string dataDirPath, DateTime asOf)
+    static int Execute(string dataDirPath, DateTime asOf, string outputFormat, string? excelPath)
     {
         if (!Directory.Exists(dataDirPath))
         {
@@ -71,9 +88,24 @@ class Program
 
         var (rows, positions, running) = PositionTracker.ComputeReport(trades, asOf);
         var tradeIndex = PositionTracker.BuildTradeIndex(trades);
-        var positionRows = PositionTracker.BuildPositionRows(positions, tradeIndex);
+        var positionRows = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
-        TableRenderer.RenderReport(rows, positionRows, running);
+        if (outputFormat == "excel")
+        {
+            // Generate default filename if not provided
+            if (string.IsNullOrEmpty(excelPath))
+            {
+                var dateStr = DateTime.Now.ToString("yyyyMMdd");
+                excelPath = $"WebullAnalytics_{dateStr}.xlsx";
+            }
+
+            ExcelExporter.ExportToExcel(rows, positionRows, trades, running, excelPath);
+        }
+        else
+        {
+            TableRenderer.RenderReport(rows, positionRows, running);
+        }
+
         return 0;
     }
 }

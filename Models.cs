@@ -13,7 +13,8 @@ public record Trade(
     decimal Qty,
     decimal Price,
     decimal Multiplier,
-    DateTime? Expiry = null
+    DateTime? Expiry = null,
+    int? ParentStrategySeq = null
 );
 
 public record Lot(
@@ -32,7 +33,8 @@ public record ReportRow(
     decimal Price,
     decimal ClosedQty,
     decimal Realized,
-    decimal Running
+    decimal Running,
+    bool IsStrategyLeg = false
 );
 
 public record PositionRow(
@@ -42,7 +44,10 @@ public record PositionRow(
     string Side,
     decimal Qty,
     decimal AvgPrice,
-    DateTime? Expiry
+    DateTime? Expiry,
+    bool IsStrategyLeg = false,
+    decimal? InitialAvgPrice = null,  // Original price before adjustments
+    decimal? AdjustedAvgPrice = null  // Price after applying credits from rolls
 );
 
 public record OptionParsed(
