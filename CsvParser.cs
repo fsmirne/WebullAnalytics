@@ -66,6 +66,9 @@ public static class CsvParser
         var trades = new List<Trade>();
         var seq = seqStart;
 
+        // Track which strategy seq belongs to which placed time
+        var strategySeqByPlacedTime = new Dictionary<string, int>();
+
         foreach (var row in rows)
         {
             var core = ExtractCoreFields(row);
@@ -82,14 +85,24 @@ public static class CsvParser
 
                 if (!string.IsNullOrEmpty(name) && string.IsNullOrEmpty(symbol))
                 {
+                    // This is a strategy parent row
                     var meta = strategyMeta.GetValueOrDefault(placed, new StrategyMeta());
                     trades.Add(BuildStrategyTrade(seq, timestamp, name, side, qty, price, meta));
+                    strategySeqByPlacedTime[placed] = seq;
                     seq++;
                     continue;
                 }
 
                 if (parentTimes.Contains(placed) && string.IsNullOrEmpty(name))
+                {
+                    // This is a leg of a strategy - create it with parent reference
+                    if (!string.IsNullOrEmpty(symbol) && strategySeqByPlacedTime.TryGetValue(placed, out var parentSeq))
+                    {
+                        trades.Add(BuildOptionTrade(seq, timestamp, symbol, side, qty, price, parentSeq));
+                        seq++;
+                    }
                     continue;
+                }
 
                 if (!string.IsNullOrEmpty(symbol))
                 {
@@ -208,7 +221,7 @@ public static class CsvParser
         );
     }
 
-    private static Trade BuildOptionTrade(int seq, DateTime timestamp, string symbol, string side, decimal qty, decimal price)
+    private static Trade BuildOptionTrade(int seq, DateTime timestamp, string symbol, string side, decimal qty, decimal price, int? parentStrategySeq = null)
     {
         var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
 
@@ -231,7 +244,7 @@ public static class CsvParser
 
         return new Trade(
             seq, timestamp, instrument, $"option:{symbol}", "Option", optionKind,
-            side, qty, price, OptionMultiplier, expiry
+            side, qty, price, OptionMultiplier, expiry, parentStrategySeq
         );
     }
 

@@ -1,90 +1,208 @@
-# Webull Analytics (C# Version)
+# WebullAnalytics
 
-This is a C# port of the `cli.py` Python script that analyzes trading data from Webull CSV exports and generates realized P&L reports.
+A C# command-line tool for analyzing trading performance from Webull CSV order exports. This tool generates comprehensive realized P&L reports with support for stocks, options, and complex multi-leg option strategies.
 
 ## Features
 
-- Parses Webull CSV order exports for stocks and options
-- Tracks positions using lot-based FIFO accounting
-- Calculates realized P&L for closed positions
-- Handles option expirations automatically
-- Supports multi-leg option strategies (Iron Condors, Butterflies, Spreads, etc.)
-- Displays formatted tables with transaction history and open positions
+- **FIFO Lot-Based Position Tracking**: Accurately tracks positions using First-In-First-Out lot accounting
+- **Option Strategy Support**: Recognizes and properly handles multi-leg strategies including:
+  - Calendar Spreads
+  - Diagonals
+  - Butterflies
+  - Iron Condors
+  - Straddles/Strangles
+  - Vertical Spreads
+- **Calendar Roll Tracking**: Intelligently groups rolled positions and tracks adjusted cost basis
+- **Dual Output Modes**:
+  - Console: Color-coded tables with detailed transaction history
+  - Excel: Formatted workbook with charts and analytics
+- **Transaction History**: Complete trade-by-trade P&L calculation
+- **Open Position Analysis**: Shows both initial and adjusted average prices for rolled positions
+- **Daily P&L Tracking**: Visual chart showing cumulative P&L over time
 
-## Requirements
+## Prerequisites
 
 - .NET 10.0 SDK or later
+- Windows, macOS, or Linux
 
-## Dependencies
+## Installation
 
-- **Spectre.Console** - For Rich-like table formatting
-- **CsvHelper** - For CSV parsing
+1. Clone or download this repository
+2. Navigate to the `WebullAnalytics` directory
+3. Build the project:
+   ```bash
+   dotnet build
+   ```
 
-## Building
+## Usage
+
+### Basic Usage
+
+Run the tool with default settings (console output, today's date):
 
 ```bash
-cd WebullAnalytics
-dotnet build
+dotnet run
 ```
 
-## Running
+### Command-Line Options
 
-```bash
-dotnet run -- [options]
 ```
-
-### Options
-
-- `--data-dir <path>` - Directory containing CSV order exports (default: `data`)
-- `--as-of <date>` - Include expirations on or before this date in YYYY-MM-DD format (default: today)
-- `--help`, `-h` - Show help message
+Options:
+  --data-dir <path>    Directory containing CSV order exports (default: data)
+  --as-of <date>       Include expirations on or before this date in YYYY-MM-DD format (default: today)
+  --output <format>    Output format: 'console' or 'excel' (default: console)
+  --excel-path <path>  Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)
+  --help, -h           Show this help message
+```
 
 ### Examples
 
+**Console output with custom data directory:**
 ```bash
-# Use default data directory (./data) and today's date
-dotnet run
-
-# Specify custom data directory
-dotnet run -- --data-dir C:\trading\exports
-
-# Specify as-of date for expiration calculation
-dotnet run -- --as-of 2024-12-31
-
-# Both options
-dotnet run -- --data-dir ../data --as-of 2024-12-31
+dotnet run -- --data-dir "C:\MyTrades\data"
 ```
 
-## Publishing
-
-To create a standalone executable:
-
+**Export to Excel with default filename:**
 ```bash
-# Windows
-dotnet publish -c Release -r win-x64 --self-contained
-
-# Linux
-dotnet publish -c Release -r linux-x64 --self-contained
-
-# macOS
-dotnet publish -c Release -r osx-x64 --self-contained
+dotnet run -- --output excel
 ```
 
-The executable will be in `bin/Release/net10.0/<runtime>/publish/`
+**Export to Excel with custom path:**
+```bash
+dotnet run -- --output excel --excel-path "January2026_Report.xlsx"
+```
 
-## Project Structure
+**Generate report as of a specific date:**
+```bash
+dotnet run -- --as-of 2026-01-31 --output excel
+```
 
-- **Models.cs** - Data models (Trade, Lot, ReportRow, PositionRow, etc.)
-- **ParsingHelpers.cs** - CSV parsing utilities
-- **Formatters.cs** - Output formatting functions
-- **CsvParser.cs** - CSV file parsing logic
-- **PositionTracker.cs** - Position tracking and P&L calculation (lot-based FIFO)
-- **TableRenderer.cs** - Table rendering with Spectre.Console
-- **Program.cs** - Main entry point and CLI argument parsing
+## Data Format
 
-## Differences from Python Version
+Place your Webull CSV order export files in the `data` directory (or specify a custom directory with `--data-dir`). The tool will automatically process all CSV files in the directory.
 
-1. Manual command-line argument parsing instead of Click library
-2. Uses Spectre.Console instead of Rich for table formatting
-3. Uses CsvHelper for CSV parsing
-4. All core logic and calculations remain identical
+### Required CSV Columns
+
+The tool expects Webull CSV exports with the following columns:
+- Placed Time
+- Filled Time
+- Name
+- Symbol
+- Side
+- Quantity
+- Avg Fill Price
+
+## Output Formats
+
+### Console Output
+
+The console output displays three sections:
+
+1. **Realized P&L by Transaction**: Chronological list of all trades with:
+   - Date and time
+   - Instrument details
+   - Option strategy legs (indented under parent strategy)
+   - Side (Buy/Sell)
+   - Quantity and price
+   - Closed quantity
+   - Realized P&L (color-coded: green for profit, red for loss)
+   - Running total P&L
+
+2. **Open Positions**: Current positions grouped by instrument showing:
+   - Position details (asset, side, quantity)
+   - Initial average price (original cost basis)
+   - Adjusted average price (cost basis after calendar roll credits)
+   - Expiration date
+   - Calendar strategies are intelligently grouped with their legs
+
+3. **Final Summary**: Total realized P&L
+
+### Excel Output
+
+The Excel workbook contains three worksheets:
+
+1. **Transactions**: Complete transaction history with:
+   - Color-coded P&L columns
+   - Formatted currency values
+   - All trade details
+
+2. **Open Positions**: Current positions with:
+   - Initial and adjusted prices
+   - Strategy grouping
+   - Expiration tracking
+
+3. **Daily P&L**: Daily summary featuring:
+   - Date-by-date P&L breakdown
+   - Daily realized gains/losses
+   - Cumulative P&L column
+   - Line chart visualizing cumulative P&L over time
+
+## Position Tracking Details
+
+### FIFO Lot Accounting
+
+The tool uses First-In-First-Out (FIFO) lot accounting to match closing trades with opening trades. This ensures accurate P&L calculation even with multiple entries and exits in the same instrument.
+
+### Calendar Strategy Recognition
+
+For open positions, the tool intelligently groups option legs into calendar strategies when:
+- Multiple legs share the same root symbol, strike price, and call/put type
+- The legs have different expiration dates
+- The legs have opposite sides (one long, one short)
+
+### Adjusted Cost Basis
+
+For long legs in calendar strategies, the tool tracks:
+- **Initial Average Price**: The original cost paid to open the position
+- **Adjusted Average Price**: The cost basis after subtracting credits from fully closed short legs (calendar rolls)
+
+This helps traders understand their true cost basis after collecting credits from rolling short legs.
+
+## Strategy Leg Display
+
+Multi-leg option strategies are displayed with their parent strategy and individual legs:
+
+```
+2026-01-29  GME Calendar   Option Strategy  Buy   30   2.12   0   +0.00   +0.00
+            └─ GME Call    Option           Buy   30   2.64   -     -
+            └─ GME Call    Option           Sell  30   0.52   -     -
+```
+
+The parent strategy shows the net debit/credit and contributes to P&L calculation, while individual legs are shown for reference and position tracking.
+
+## Dependencies
+
+- **CsvHelper** (33.1.0): CSV parsing
+- **Spectre.Console** (0.54.0): Console formatting and tables
+- **EPPlus** (7.6.0): Excel file generation
+
+## License
+
+This tool uses EPPlus configured for non-commercial use. For commercial use, you must obtain an appropriate EPPlus license.
+
+## Troubleshooting
+
+**No trades found:**
+- Ensure CSV files are in the data directory
+- Verify CSV files are Webull export format
+
+**Excel export fails:**
+- Ensure the output directory is writable
+- Check that no other program has the Excel file open
+
+**Incorrect P&L calculations:**
+- Verify the `--as-of` date includes all relevant expirations
+- Check that all trade CSV files are in the data directory
+
+## Future Enhancements
+
+Potential features for future versions:
+- Support for other broker CSV formats
+- Unrealized P&L calculation with market data
+- Tax reporting (wash sales, short-term vs long-term gains)
+- Performance metrics (win rate, average gain/loss, etc.)
+- Multiple account support
+
+## Contributing
+
+Contributions are welcome! Please ensure any changes maintain accurate FIFO lot accounting and properly handle multi-leg option strategies.

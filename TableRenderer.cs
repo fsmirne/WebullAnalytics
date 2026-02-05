@@ -52,18 +52,38 @@ public static class TableRenderer
 
         foreach (var row in rows)
         {
-            table.AddRow(
-                new Text(row.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")),
-                new Text(row.Instrument),
-                new Text(row.Asset),
-                new Text(row.OptionKind),
-                new Text(row.Side),
-                new Text(Formatters.FormatQty(row.Qty)),
-                new Text(Formatters.FormatPrice(row.Price, row.Asset)),
-                new Text(Formatters.FormatQty(row.ClosedQty)),
-                Formatters.FormatPnL(row.Realized),
-                Formatters.FormatPnL(row.Running)
-            );
+            if (row.IsStrategyLeg)
+            {
+                // This is a strategy leg - show with indentation and no P&L
+                table.AddRow(
+                    new Text(""),  // Empty timestamp for legs
+                    new Text($"  └─ {row.Instrument}"),  // Indented instrument
+                    new Text(row.Asset),
+                    new Text(row.OptionKind),
+                    new Text(row.Side),
+                    new Text(Formatters.FormatQty(row.Qty)),
+                    new Text(Formatters.FormatPrice(row.Price, row.Asset)),
+                    new Text("-"),  // No closed qty for legs
+                    new Text("-"),  // No realized P&L for legs
+                    new Text("")   // No running P&L for legs
+                );
+            }
+            else
+            {
+                // Regular trade or strategy parent
+                table.AddRow(
+                    new Text(row.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")),
+                    new Text(row.Instrument),
+                    new Text(row.Asset),
+                    new Text(row.OptionKind),
+                    new Text(row.Side),
+                    new Text(Formatters.FormatQty(row.Qty)),
+                    new Text(Formatters.FormatPrice(row.Price, row.Asset)),
+                    new Text(Formatters.FormatQty(row.ClosedQty)),
+                    Formatters.FormatPnL(row.Realized),
+                    Formatters.FormatPnL(row.Running)
+                );
+            }
         }
 
         return table;
@@ -84,20 +104,49 @@ public static class TableRenderer
         table.AddColumn(new TableColumn("Option").LeftAligned());
         table.AddColumn(new TableColumn("Side").LeftAligned());
         table.AddColumn(new TableColumn("Qty").RightAligned());
-        table.AddColumn(new TableColumn("Avg Price").RightAligned());
+        table.AddColumn(new TableColumn("Init Price").RightAligned());
+        table.AddColumn(new TableColumn("Adj Price").RightAligned());
         table.AddColumn(new TableColumn("Expiry").RightAligned());
 
         foreach (var row in rows)
         {
-            table.AddRow(
-                new Text(row.Instrument),
-                new Text(row.Asset),
-                new Text(row.OptionKind),
-                new Text(row.Side),
-                new Text(Formatters.FormatQty(row.Qty)),
-                new Text(Formatters.FormatPrice(row.AvgPrice, row.Asset)),
-                new Text(Formatters.FormatExpiry(row.Expiry))
-            );
+            // Format prices - show both initial and adjusted if available
+            var initPrice = row.InitialAvgPrice.HasValue
+                ? Formatters.FormatPrice(row.InitialAvgPrice.Value, row.Asset)
+                : Formatters.FormatPrice(row.AvgPrice, row.Asset);
+
+            var adjPrice = row.AdjustedAvgPrice.HasValue
+                ? Formatters.FormatPrice(row.AdjustedAvgPrice.Value, row.Asset)
+                : "-";
+
+            if (row.IsStrategyLeg)
+            {
+                // This is a strategy leg - show with indentation
+                table.AddRow(
+                    new Text($"  └─ {row.Instrument}"),
+                    new Text(row.Asset),
+                    new Text(row.OptionKind),
+                    new Text(row.Side),
+                    new Text(Formatters.FormatQty(row.Qty)),
+                    new Text(initPrice),
+                    new Text(adjPrice),
+                    new Text(Formatters.FormatExpiry(row.Expiry))
+                );
+            }
+            else
+            {
+                // Regular position or strategy parent
+                table.AddRow(
+                    new Text(row.Instrument),
+                    new Text(row.Asset),
+                    new Text(row.OptionKind),
+                    new Text(row.Side),
+                    new Text(Formatters.FormatQty(row.Qty)),
+                    new Text(initPrice),
+                    new Text(adjPrice),
+                    new Text(Formatters.FormatExpiry(row.Expiry))
+                );
+            }
         }
 
         return table;
