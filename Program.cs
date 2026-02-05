@@ -11,7 +11,7 @@ class Program
     {
         // Parse command-line arguments
         var dataDir = "data";
-        var asOf = DateTime.Today;
+        var sinceDate = DateTime.MinValue;
         var outputFormat = "console";
         string? excelPath = null;
         string? textPath = null;
@@ -22,15 +22,15 @@ class Program
             {
                 dataDir = args[++i];
             }
-            else if (args[i] == "--as-of" && i + 1 < args.Length)
+            else if (args[i] == "--since" && i + 1 < args.Length)
             {
                 if (DateTime.TryParseExact(args[++i], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
                 {
-                    asOf = parsed;
+                    sinceDate = parsed;
                 }
                 else
                 {
-                    Console.WriteLine("Error: --as-of must be in YYYY-MM-DD format");
+                    Console.WriteLine("Error: --since must be in YYYY-MM-DD format");
                     return 1;
                 }
             }
@@ -58,7 +58,7 @@ class Program
             }
         }
 
-        return Execute(dataDir, asOf, outputFormat, excelPath, textPath);
+        return Execute(dataDir, sinceDate, outputFormat, excelPath, textPath);
     }
 
     static void PrintHelp()
@@ -69,14 +69,14 @@ class Program
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  --data-dir <path>    Directory containing CSV order exports (default: data)");
-        Console.WriteLine("  --as-of <date>       Include expirations on or before this date in YYYY-MM-DD format (default: today)");
+        Console.WriteLine("  --since <date>       Include only trades on or after this date in YYYY-MM-DD format (default: all trades)");
         Console.WriteLine("  --output <format>    Output format: 'console', 'excel', or 'text' (default: console)");
         Console.WriteLine("  --excel-path <path>  Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)");
         Console.WriteLine("  --text-path <path>   Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)");
         Console.WriteLine("  --help, -h           Show this help message");
     }
 
-    static int Execute(string dataDirPath, DateTime asOf, string outputFormat, string? excelPath, string? textPath)
+    static int Execute(string dataDirPath, DateTime sinceDate, string outputFormat, string? excelPath, string? textPath)
     {
         if (!Directory.Exists(dataDirPath))
         {
@@ -92,7 +92,7 @@ class Program
             return 0;
         }
 
-        var (rows, positions, running) = PositionTracker.ComputeReport(trades, asOf);
+        var (rows, positions, running) = PositionTracker.ComputeReport(trades, sinceDate);
         var tradeIndex = PositionTracker.BuildTradeIndex(trades);
         var positionRows = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 

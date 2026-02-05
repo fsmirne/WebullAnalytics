@@ -29,10 +29,10 @@ public static class PositionTracker
     }
 
     public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(
-        List<Trade> trades, DateTime asOfDate)
+        List<Trade> trades, DateTime sinceDate)
     {
-        var allTrades = new List<Trade>(trades);
-        allTrades.AddRange(BuildExpirationTrades(trades, asOfDate));
+        var allTrades = new List<Trade>(trades.Where(t => t.Timestamp.Date >= sinceDate.Date));
+        allTrades.AddRange(BuildExpirationTrades(trades, sinceDate));
         allTrades.Sort((a, b) =>
         {
             var cmp = a.Timestamp.CompareTo(b.Timestamp);
@@ -72,7 +72,9 @@ public static class PositionTracker
                 closedQty = closedQuantity;
 
                 // If parent strategy has no P&L (like in a roll), calculate P&L from legs
-                if (realized == 0m && closedQty == 0m)
+                // BUT only for SELL strategies (credit spreads closing).
+                // For BUY strategies (debit spreads), the cost is already reflected in opening the position
+                if (realized == 0m && closedQty == 0m && trade.Side == "Sell")
                 {
                     // Find all legs for this parent strategy
                     var legs = allTrades.Where(t => t.ParentStrategySeq == trade.Seq).ToList();
@@ -139,7 +141,7 @@ public static class PositionTracker
         return (rows, positions, running);
     }
 
-    private static List<Trade> BuildExpirationTrades(List<Trade> trades, DateTime asOfDate)
+    private static List<Trade> BuildExpirationTrades(List<Trade> trades, DateTime sinceDate)
     {
         if (trades.Count == 0)
             return new List<Trade>();
@@ -149,7 +151,7 @@ public static class PositionTracker
 
         foreach (var trade in trades)
         {
-            if (trade.Expiry == null || trade.Expiry.Value.Date > asOfDate.Date)
+            if (trade.Expiry == null || trade.Expiry.Value.Date > sinceDate.Date)
                 continue;
 
             if (!seen.ContainsKey(trade.MatchKey))
@@ -316,64 +318,124 @@ public static class PositionTracker
         var grouped = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
         var processed = new HashSet<string>();
 
+        // Group by root/strike/callput
+        var byRootStrikeType = new Dictionary<string, List<(string matchKey, PositionRow row, Trade trade, OptionParsed parsed)>>();
+
         foreach (var pos in optionPositions)
         {
-            if (processed.Contains(pos.matchKey) || pos.trade == null)
-                continue;
+            if (pos.trade == null) continue;
 
-            // Extract option symbol from match key (format: "option:SYMBOL")
             var symbol = pos.matchKey.StartsWith("option:") ? pos.matchKey.Substring(7) : null;
-            if (symbol == null)
-            {
-                grouped.Add(new List<(string, PositionRow, Trade?)> { pos });
-                processed.Add(pos.matchKey);
-                continue;
-            }
+            if (symbol == null) continue;
 
-            // Try to parse the option symbol
             var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
-            if (parsed == null)
+            if (parsed == null) continue;
+
+            var key = $"{parsed.Root}|{parsed.Strike}|{parsed.CallPut}";
+            if (!byRootStrikeType.ContainsKey(key))
+                byRootStrikeType[key] = new List<(string, PositionRow, Trade, OptionParsed)>();
+
+            byRootStrikeType[key].Add((pos.matchKey, pos.row, pos.trade, parsed));
+        }
+
+        // For each group, match legs by quantity to create separate calendars
+        foreach (var (key, legs) in byRootStrikeType)
+        {
+            // Separate into long and short positions
+            var longLegs = legs.Where(l => l.row.Side == "Buy")
+                .OrderByDescending(l => l.parsed.ExpiryDate)
+                .ToList();
+
+            var shortLegs = legs.Where(l => l.row.Side == "Sell")
+                .OrderBy(l => l.parsed.ExpiryDate)
+                .ToList();
+
+            // Track remaining quantities
+            var longRemaining = longLegs.ToDictionary(l => l.matchKey, l => l.row.Qty);
+            var shortRemaining = shortLegs.ToDictionary(l => l.matchKey, l => l.row.Qty);
+
+            // If we have both long and short legs, try to match them by quantity
+            if (longLegs.Any() && shortLegs.Any())
             {
-                // Can't parse - add as standalone
-                grouped.Add(new List<(string, PositionRow, Trade?)> { pos });
-                processed.Add(pos.matchKey);
-                continue;
-            }
+                foreach (var shortLeg in shortLegs)
+                {
+                    var shortQty = shortRemaining[shortLeg.matchKey];
+                    if (shortQty <= 0 || processed.Contains(shortLeg.matchKey)) continue;
 
-            // Look for matching legs (same root, same strike, different expiry, opposite side)
-            var matchingLegs = optionPositions.Where(other =>
-            {
-                if (other.matchKey == pos.matchKey || processed.Contains(other.matchKey) || other.trade == null)
-                    return false;
+                    // Find a long leg with remaining quantity
+                    foreach (var longLeg in longLegs)
+                    {
+                        var longQty = longRemaining[longLeg.matchKey];
+                        if (longQty <= 0 || processed.Contains(longLeg.matchKey)) continue;
 
-                var otherSymbol = other.matchKey.StartsWith("option:") ? other.matchKey.Substring(7) : null;
-                if (otherSymbol == null)
-                    return false;
+                        // Match up to the minimum of the two quantities
+                        var matchedQty = Math.Min(longQty, shortQty);
 
-                var otherParsed = ParsingHelpers.ParseOptionSymbol(otherSymbol);
-                if (otherParsed == null)
-                    return false;
+                        // Create a calendar for this matched quantity
+                        var calendarLegs = new List<(string, PositionRow, Trade?)>();
 
-                return parsed.Root == otherParsed.Root &&
-                       parsed.Strike == otherParsed.Strike &&
-                       parsed.CallPut == otherParsed.CallPut &&
-                       parsed.ExpiryDate != otherParsed.ExpiryDate &&
-                       pos.row.Side != other.row.Side;
-            }).ToList();
+                        // Add long leg with matched quantity
+                        calendarLegs.Add((longLeg.matchKey, longLeg.row with { Qty = matchedQty }, longLeg.trade));
 
-            if (matchingLegs.Any())
-            {
-                // Found a calendar strategy
-                var strategyGroup = new List<(string, PositionRow, Trade?)> { pos };
-                strategyGroup.AddRange(matchingLegs);
-                grouped.Add(strategyGroup);
-                processed.Add(pos.matchKey);
-                foreach (var leg in matchingLegs)
-                    processed.Add(leg.matchKey);
+                        // Add short leg with matched quantity
+                        calendarLegs.Add((shortLeg.matchKey, shortLeg.row with { Qty = matchedQty }, shortLeg.trade));
+
+                        grouped.Add(calendarLegs);
+
+                        // Update remaining quantities
+                        longRemaining[longLeg.matchKey] -= matchedQty;
+                        shortRemaining[shortLeg.matchKey] -= matchedQty;
+                        shortQty -= matchedQty;
+
+                        // Mark as processed if fully consumed
+                        if (shortRemaining[shortLeg.matchKey] <= 0)
+                        {
+                            processed.Add(shortLeg.matchKey);
+                            break;
+                        }
+                    }
+                }
+
+                // Mark fully consumed long legs as processed
+                foreach (var longLeg in longLegs)
+                {
+                    if (longRemaining[longLeg.matchKey] <= 0)
+                        processed.Add(longLeg.matchKey);
+                }
+
+                // Add any unmatched legs as standalone positions
+                foreach (var longLeg in longLegs)
+                {
+                    var remaining = longRemaining[longLeg.matchKey];
+                    if (remaining > 0 && !processed.Contains(longLeg.matchKey))
+                    {
+                        grouped.Add(new List<(string, PositionRow, Trade?)>
+                        {
+                            (longLeg.matchKey, longLeg.row with { Qty = remaining }, longLeg.trade)
+                        });
+                        processed.Add(longLeg.matchKey);
+                    }
+                }
             }
             else
             {
-                // Standalone position
+                // No matching, add all legs as standalone
+                foreach (var leg in legs)
+                {
+                    if (!processed.Contains(leg.matchKey))
+                    {
+                        grouped.Add(new List<(string, PositionRow, Trade?)> { (leg.matchKey, leg.row, leg.trade) });
+                        processed.Add(leg.matchKey);
+                    }
+                }
+            }
+        }
+
+        // Add option positions that weren't parsed or grouped
+        foreach (var pos in optionPositions)
+        {
+            if (!processed.Contains(pos.matchKey))
+            {
                 grouped.Add(new List<(string, PositionRow, Trade?)> { pos });
                 processed.Add(pos.matchKey);
             }
