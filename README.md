@@ -61,27 +61,27 @@ Options:
 
 **Console output with custom data directory:**
 ```bash
-dotnet run -- --data-dir "C:\MyTrades\data"
+dotnet run --data-dir "C:\MyTrades\data"
 ```
 
 **Export to Excel with default filename:**
 ```bash
-dotnet run -- --output excel
+dotnet run --output excel
 ```
 
 **Export to Excel with custom path:**
 ```bash
-dotnet run -- --output excel --excel-path "January2026_Report.xlsx"
+dotnet run --output excel --excel-path "January2026_Report.xlsx"
 ```
 
 **Filter trades since a specific date:**
 ```bash
-dotnet run -- --since 2026-01-01 --output excel
+dotnet run --since 2026-01-01 --output excel
 ```
 
 **Export to text file:**
 ```bash
-dotnet run -- --output text --text-path "January2026_Report.txt"
+dotnet run --output text --text-path "January2026_Report.txt"
 ```
 
 ## Data Format
