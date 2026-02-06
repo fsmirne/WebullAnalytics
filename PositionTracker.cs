@@ -605,8 +605,10 @@ public static class PositionTracker
     }
 
     /// <summary>
-    /// Calculates total credits from fully closed short legs for a given underlying/strike/type.
+    /// Calculates total credits from closed short legs for a given underlying/strike/type.
     /// Used to adjust the cost basis of long legs in calendar rolls.
+    /// Tracks short-side P&L per cycle (a cycle ends when lots hit zero at an expiry).
+    /// Only positive short cycles and partial short closes count as credits.
     /// </summary>
     private static decimal CalculateClosedLegsCredits(List<Trade> allTrades, string root, decimal strike, string callPut)
     {
@@ -626,23 +628,48 @@ public static class PositionTracker
             .OrderBy(x => x.trade.Timestamp)
             .ToList();
 
-        // Track P&L by expiration date
-        var pnlByExpiry = new Dictionary<DateTime, (List<Lot> lots, decimal pnl)>();
+        // Track lots and short-side P&L per cycle per expiration date
+        var lotsByExpiry = new Dictionary<DateTime, List<Lot>>();
+        var shortPnlByExpiry = new Dictionary<DateTime, decimal>();
+        var totalCredits = 0m;
 
         foreach (var (trade, parsed) in matchingLegs)
         {
-            if (!pnlByExpiry.ContainsKey(parsed!.ExpiryDate))
-                pnlByExpiry[parsed.ExpiryDate] = (new List<Lot>(), 0m);
+            var expiry = parsed!.ExpiryDate;
 
-            var (lots, totalPnl) = pnlByExpiry[parsed.ExpiryDate];
+            if (!lotsByExpiry.ContainsKey(expiry))
+            {
+                lotsByExpiry[expiry] = new List<Lot>();
+                shortPnlByExpiry[expiry] = 0m;
+            }
+
+            var lots = lotsByExpiry[expiry];
             var (updatedLots, realized, _) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
-            pnlByExpiry[parsed.ExpiryDate] = (updatedLots, totalPnl + realized);
+
+            // Only track realized P&L from Buy trades (closing short positions)
+            if (trade.Side == "Buy" && realized != 0)
+                shortPnlByExpiry[expiry] += realized;
+
+            lotsByExpiry[expiry] = updatedLots;
+
+            // Cycle complete - position fully closed at this expiry
+            if (!updatedLots.Any())
+            {
+                var cyclePnl = shortPnlByExpiry[expiry];
+                if (cyclePnl > 0)
+                    totalCredits += cyclePnl;
+                shortPnlByExpiry[expiry] = 0m; // Reset for potential next cycle
+            }
         }
 
-        // Sum credits from fully closed expirations (no remaining lots, positive P&L)
-        return pnlByExpiry
-            .Where(kvp => !kvp.Value.lots.Any() && kvp.Value.pnl > 0)
-            .Sum(kvp => kvp.Value.pnl);
+        // Add credits from partially closed short positions (still have open lots)
+        foreach (var (_, pnl) in shortPnlByExpiry)
+        {
+            if (pnl > 0)
+                totalCredits += pnl;
+        }
+
+        return totalCredits;
     }
 
     /// <summary>
