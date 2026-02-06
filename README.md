@@ -13,9 +13,10 @@ A C# command-line tool for analyzing trading performance from Webull CSV order e
   - Straddles/Strangles
   - Vertical Spreads
 - **Calendar Roll Tracking**: Intelligently groups rolled positions and tracks adjusted cost basis
-- **Dual Output Modes**:
+- **Multiple Output Modes**:
   - Console: Color-coded tables with detailed transaction history
   - Excel: Formatted workbook with charts and analytics
+  - Text: Plain text file for sharing or archiving
 - **Transaction History**: Complete trade-by-trade P&L calculation
 - **Open Position Analysis**: Shows both initial and adjusted average prices for rolled positions
 - **Daily P&L Tracking**: Visual chart showing cumulative P&L over time
@@ -38,7 +39,7 @@ A C# command-line tool for analyzing trading performance from Webull CSV order e
 
 ### Basic Usage
 
-Run the tool with default settings (console output, today's date):
+Run the tool with default settings (console output, all trades):
 
 ```bash
 dotnet run
@@ -49,9 +50,10 @@ dotnet run
 ```
 Options:
   --data-dir <path>    Directory containing CSV order exports (default: data)
-  --as-of <date>       Include expirations on or before this date in YYYY-MM-DD format (default: today)
-  --output <format>    Output format: 'console' or 'excel' (default: console)
+  --since <date>       Include only trades on or after this date in YYYY-MM-DD format (default: all trades)
+  --output <format>    Output format: 'console', 'excel', or 'text' (default: console)
   --excel-path <path>  Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)
+  --text-path <path>   Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)
   --help, -h           Show this help message
 ```
 
@@ -72,9 +74,14 @@ dotnet run -- --output excel
 dotnet run -- --output excel --excel-path "January2026_Report.xlsx"
 ```
 
-**Generate report as of a specific date:**
+**Filter trades since a specific date:**
 ```bash
-dotnet run -- --as-of 2026-01-31 --output excel
+dotnet run -- --since 2026-01-01 --output excel
+```
+
+**Export to text file:**
+```bash
+dotnet run -- --output text --text-path "January2026_Report.txt"
 ```
 
 ## Data Format
@@ -137,6 +144,16 @@ The Excel workbook contains three worksheets:
    - Cumulative P&L column
    - Line chart visualizing cumulative P&L over time
 
+### Text Output
+
+The text output produces a plain text file containing:
+- ASCII-formatted tables matching the console output
+- Transaction history with all trade details
+- Open positions summary
+- Final realized P&L
+
+This format is useful for sharing reports via email, archiving, or importing into other tools.
+
 ## Position Tracking Details
 
 ### FIFO Lot Accounting
@@ -191,7 +208,7 @@ This tool uses EPPlus configured for non-commercial use. For commercial use, you
 - Check that no other program has the Excel file open
 
 **Incorrect P&L calculations:**
-- Verify the `--as-of` date includes all relevant expirations
+- If using `--since`, verify the date includes all relevant trades
 - Check that all trade CSV files are in the data directory
 
 ## Future Enhancements
