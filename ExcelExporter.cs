@@ -81,15 +81,8 @@ public static class ExcelExporter
             sheet.Cells[row, 10].Style.Numberformat.Format = "#,##0.00";
 
             // Color code P&L
-            if (reportRow.Realized > 0)
-                sheet.Cells[row, 9].Style.Font.Color.SetColor(System.Drawing.Color.Green);
-            else if (reportRow.Realized < 0)
-                sheet.Cells[row, 9].Style.Font.Color.SetColor(System.Drawing.Color.Red);
-
-            if (reportRow.Running > 0)
-                sheet.Cells[row, 10].Style.Font.Color.SetColor(System.Drawing.Color.Green);
-            else if (reportRow.Running < 0)
-                sheet.Cells[row, 10].Style.Font.Color.SetColor(System.Drawing.Color.Red);
+            ColorCodePnL(sheet.Cells[row, 9], reportRow.Realized);
+            ColorCodePnL(sheet.Cells[row, 10], reportRow.Running);
 
             row++;
         }
@@ -101,10 +94,7 @@ public static class ExcelExporter
         sheet.Cells[row, 10].Value = (double)finalPnL;
         sheet.Cells[row, 10].Style.Numberformat.Format = "#,##0.00";
         sheet.Cells[row, 10].Style.Font.Bold = true;
-        if (finalPnL > 0)
-            sheet.Cells[row, 10].Style.Font.Color.SetColor(System.Drawing.Color.Green);
-        else if (finalPnL < 0)
-            sheet.Cells[row, 10].Style.Font.Color.SetColor(System.Drawing.Color.Red);
+        ColorCodePnL(sheet.Cells[row, 10], finalPnL);
 
         // Auto-fit columns
         sheet.Cells.AutoFitColumns();
@@ -196,15 +186,8 @@ public static class ExcelExporter
             sheet.Cells[row, 3].Style.Numberformat.Format = "#,##0.00";
 
             // Color code P&L
-            if (day.DailyPnL > 0)
-                sheet.Cells[row, 2].Style.Font.Color.SetColor(System.Drawing.Color.Green);
-            else if (day.DailyPnL < 0)
-                sheet.Cells[row, 2].Style.Font.Color.SetColor(System.Drawing.Color.Red);
-
-            if (day.EndOfDayRunning > 0)
-                sheet.Cells[row, 3].Style.Font.Color.SetColor(System.Drawing.Color.Green);
-            else if (day.EndOfDayRunning < 0)
-                sheet.Cells[row, 3].Style.Font.Color.SetColor(System.Drawing.Color.Red);
+            ColorCodePnL(sheet.Cells[row, 2], day.DailyPnL);
+            ColorCodePnL(sheet.Cells[row, 3], day.EndOfDayRunning);
 
             row++;
         }
@@ -231,5 +214,13 @@ public static class ExcelExporter
             chart.YAxis.Title.Text = "P&L ($)";
             chart.YAxis.Format = "#,##0.00";
         }
+    }
+
+    private static void ColorCodePnL(ExcelRange cell, decimal value)
+    {
+        if (value > 0)
+            cell.Style.Font.Color.SetColor(System.Drawing.Color.Green);
+        else if (value < 0)
+            cell.Style.Font.Color.SetColor(System.Drawing.Color.Red);
     }
 }

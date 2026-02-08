@@ -167,7 +167,7 @@ public static class CsvParser
             return null;
 
         var side = char.ToUpper(sideRaw[0]) + sideRaw[1..].ToLower();
-        if (side is not ("Buy" or "Sell"))
+        if (side is not (Sides.Buy or Sides.Sell))
             return null;
 
         var qty = ParsingHelpers.ParseDecimal(row.GetValueOrDefault("Filled", ""));
@@ -241,7 +241,7 @@ public static class CsvParser
             _ => name
         };
 
-        return new Trade(Seq: seq, Timestamp: core.timestamp, Instrument: instrument, MatchKey: BuildStrategyKey(name, optionKind, meta), Asset: "Option Strategy", OptionKind: optionKind, Side: core.side, Qty: core.qty, Price: core.price, Multiplier: OptionMultiplier, Expiry: meta.ExpDate);
+        return new Trade(Seq: seq, Timestamp: core.timestamp, Instrument: instrument, MatchKey: BuildStrategyKey(name, optionKind, meta), Asset: Assets.OptionStrategy, OptionKind: optionKind, Side: core.side, Qty: core.qty, Price: core.price, Multiplier: OptionMultiplier, Expiry: meta.ExpDate);
     }
 
     private static Trade BuildOptionTrade(int seq, (string side, decimal qty, decimal price, DateTime timestamp) core, string symbol, int? parentStrategySeq)
@@ -250,12 +250,12 @@ public static class CsvParser
 
         var (instrument, optionKind, expiry) = parsed != null ? (Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike), parsed.CallPut == "C" ? "Call" : "Put", (DateTime?)parsed.ExpiryDate) : (symbol, "Option", null);
 
-        return new Trade(Seq: seq, Timestamp: core.timestamp, Instrument: instrument, MatchKey: $"option:{symbol}", Asset: "Option", OptionKind: optionKind, Side: core.side, Qty: core.qty, Price: core.price, Multiplier: OptionMultiplier, Expiry: expiry, ParentStrategySeq: parentStrategySeq);
+        return new Trade(Seq: seq, Timestamp: core.timestamp, Instrument: instrument, MatchKey: $"option:{symbol}", Asset: Assets.Option, OptionKind: optionKind, Side: core.side, Qty: core.qty, Price: core.price, Multiplier: OptionMultiplier, Expiry: expiry, ParentStrategySeq: parentStrategySeq);
     }
 
     private static Trade BuildStockTrade(int seq, (string side, decimal qty, decimal price, DateTime timestamp) core, string symbol)
     {
-        return new Trade(Seq: seq, Timestamp: core.timestamp, Instrument: symbol, MatchKey: $"stock:{symbol}", Asset: "Stock", OptionKind: "", Side: core.side, Qty: core.qty, Price: core.price, Multiplier: StockMultiplier, Expiry: null);
+        return new Trade(Seq: seq, Timestamp: core.timestamp, Instrument: symbol, MatchKey: $"stock:{symbol}", Asset: Assets.Stock, OptionKind: "", Side: core.side, Qty: core.qty, Price: core.price, Multiplier: StockMultiplier, Expiry: null);
     }
 
     private class StrategyMeta
