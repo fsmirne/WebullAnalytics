@@ -47,10 +47,7 @@ public static partial class ParsingHelpers
         if (parts.Length > 0 && parts[^1].All(char.IsLetter) && parts[^1].Length <= 4)
             text = string.Join(" ", parts[..^1]);
 
-        return DateTime.TryParseExact(text, "M/d/yyyy H:mm:ss",
-            CultureInfo.InvariantCulture, DateTimeStyles.None, out var result)
-            ? result
-            : null;
+        return DateTime.TryParseExact(text, "M/d/yyyy H:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var result) ? result : null;
     }
 
     /// <summary>
@@ -69,9 +66,7 @@ public static partial class ParsingHelpers
 
         text = text.Replace(",", "");
 
-        return decimal.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out var result)
-            ? result
-            : null;
+        return decimal.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out var result) ? result : null;
     }
 
     /// <summary>
@@ -99,9 +94,6 @@ public static partial class ParsingHelpers
     {
         var normalized = name.Replace(" ", "");
 
-        return StrategyKeywords
-            .Where(kvp => normalized.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase))
-            .Select(kvp => kvp.Value)
-            .FirstOrDefault() ?? "Strategy";
+        return StrategyKeywords.Where(kvp => normalized.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase)).Select(kvp => kvp.Value).FirstOrDefault() ?? "Strategy";
     }
 }

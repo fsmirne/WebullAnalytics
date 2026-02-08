@@ -146,13 +146,9 @@ public static class TextFileExporter
         foreach (var row in rows)
         {
             // Format prices - show both initial and adjusted if available
-            var initPrice = row.InitialAvgPrice.HasValue
-                ? Formatters.FormatPrice(row.InitialAvgPrice.Value, row.Asset)
-                : Formatters.FormatPrice(row.AvgPrice, row.Asset);
+            var initPrice = row.InitialAvgPrice.HasValue ? Formatters.FormatPrice(row.InitialAvgPrice.Value, row.Asset) : Formatters.FormatPrice(row.AvgPrice, row.Asset);
 
-            var adjPrice = row.AdjustedAvgPrice.HasValue
-                ? Formatters.FormatPrice(row.AdjustedAvgPrice.Value, row.Asset)
-                : "-";
+            var adjPrice = row.AdjustedAvgPrice.HasValue ? Formatters.FormatPrice(row.AdjustedAvgPrice.Value, row.Asset) : "-";
 
             if (row.IsStrategyLeg)
             {

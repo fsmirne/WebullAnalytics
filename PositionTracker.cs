@@ -20,8 +20,7 @@ public static class PositionTracker
     /// </summary>
     public static List<Trade> LoadTrades(string dataDir)
     {
-        var csvFiles = Directory.GetFiles(dataDir, "*.csv", SearchOption.AllDirectories)
-            .OrderBy(f => f);
+        var csvFiles = Directory.GetFiles(dataDir, "*.csv", SearchOption.AllDirectories).OrderBy(f => f);
 
         var trades = new List<Trade>();
         var seq = 0;
@@ -37,22 +36,25 @@ public static class PositionTracker
     }
 
     /// <summary>
+    /// Loads trades from a single CSV file.
+    /// </summary>
+    public static List<Trade> LoadTradesFromFile(string filePath)
+    {
+        var (trades, _) = CsvParser.ParseCsv(filePath, 0);
+        return trades;
+    }
+
+    /// <summary>
     /// Computes the realized P&L report by processing all trades chronologically.
     /// Generates synthetic expiration trades for options that expired within the date range.
     /// </summary>
     /// <param name="trades">All trades loaded from CSV files</param>
     /// <param name="sinceDate">Only include trades on or after this date (DateTime.MinValue for all)</param>
     /// <returns>Report rows, final positions, and total realized P&L</returns>
-    public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(
-        List<Trade> trades, DateTime sinceDate)
+    public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(List<Trade> trades, DateTime sinceDate)
     {
         // Filter trades by date and add synthetic expiration trades
-        var allTrades = trades
-            .Where(t => t.Timestamp.Date >= sinceDate.Date)
-            .Concat(BuildExpirationTrades(trades, sinceDate))
-            .OrderBy(t => t.Timestamp)
-            .ThenBy(t => t.Seq)
-            .ToList();
+        var allTrades = trades.Where(t => t.Timestamp.Date >= sinceDate.Date).Concat(BuildExpirationTrades(trades, sinceDate)).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
 
         var positions = new Dictionary<string, List<Lot>>();
         var running = 0m;
@@ -75,8 +77,7 @@ public static class PositionTracker
     /// Processes a single trade and returns the realized P&L and updated positions.
     /// Handles regular trades, strategy parents, and strategy legs differently.
     /// </summary>
-    private static (decimal realized, decimal closedQty, Dictionary<string, List<Lot>> positions) ProcessTrade(
-        Trade trade, Dictionary<string, List<Lot>> positions, List<Trade> allTrades)
+    private static (decimal realized, decimal closedQty, Dictionary<string, List<Lot>> positions) ProcessTrade(Trade trade, Dictionary<string, List<Lot>> positions, List<Trade> allTrades)
     {
         var isStrategyParent = trade.Asset == "Option Strategy";
 
@@ -129,12 +130,7 @@ public static class PositionTracker
         // Strategy legs: show in report but don't affect running P&L
         if (isLeg)
         {
-            return new ReportRow(
-                trade.Timestamp, trade.Instrument, trade.Asset, optionKind,
-                trade.Side, trade.Qty, trade.Price,
-                ClosedQty: 0m, Realized: 0m, running,
-                IsStrategyLeg: true
-            );
+            return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, trade.Qty, trade.Price, ClosedQty: 0m, Realized: 0m, running, IsStrategyLeg: true);
         }
 
         // Skip expirations that didn't close any positions
@@ -145,12 +141,7 @@ public static class PositionTracker
         running += realized;
         var displayQty = trade.Side == ExpireSide ? closedQty : trade.Qty;
 
-        return new ReportRow(
-            trade.Timestamp, trade.Instrument, trade.Asset, optionKind,
-            trade.Side, displayQty, trade.Price,
-            closedQty, realized, running,
-            IsStrategyLeg: false
-        );
+        return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, displayQty, trade.Price, closedQty, realized, running, IsStrategyLeg: false);
     }
 
     /// <summary>
@@ -165,26 +156,10 @@ public static class PositionTracker
         var maxSeq = trades.Max(t => t.Seq);
 
         // Get one trade per unique option (to extract metadata for expiration trade)
-        var uniqueOptions = trades
-            .Where(t => t.Expiry.HasValue && t.Expiry.Value.Date <= sinceDate.Date)
-            .GroupBy(t => t.MatchKey)
-            .Select(g => g.First())
-            .ToList();
+        var uniqueOptions = trades.Where(t => t.Expiry.HasValue && t.Expiry.Value.Date <= sinceDate.Date).GroupBy(t => t.MatchKey).Select(g => g.First()).ToList();
 
         return uniqueOptions
-            .Select((trade, index) => new Trade(
-                Seq: maxSeq + index + 1,
-                Timestamp: trade.Expiry!.Value.Date + ExpirationTime,
-                trade.Instrument,
-                trade.MatchKey,
-                trade.Asset,
-                trade.OptionKind,
-                Side: ExpireSide,
-                Qty: 0m,
-                Price: 0m,
-                trade.Multiplier,
-                trade.Expiry
-            ))
+            .Select((trade, index) => new Trade(Seq: maxSeq + index + 1, Timestamp: trade.Expiry!.Value.Date + ExpirationTime, trade.Instrument, trade.MatchKey, trade.Asset, trade.OptionKind, Side: ExpireSide, Qty: 0m, Price: 0m, trade.Multiplier, trade.Expiry))
             .ToList();
     }
 
@@ -192,14 +167,11 @@ public static class PositionTracker
     /// Applies a trade to the current positions using FIFO accounting.
     /// Returns updated positions, realized P&L, and quantity closed.
     /// </summary>
-    private static (Dictionary<string, List<Lot>>, decimal realized, decimal closedQty) ApplyTrade(
-        Dictionary<string, List<Lot>> positions, Trade trade)
+    private static (Dictionary<string, List<Lot>>, decimal realized, decimal closedQty) ApplyTrade(Dictionary<string, List<Lot>> positions, Trade trade)
     {
         var lots = positions.GetValueOrDefault(trade.MatchKey, new List<Lot>());
 
-        var (updatedLots, realized, closedQty) = trade.Side == ExpireSide
-            ? ApplyExpiration(lots, trade.Multiplier)
-            : ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
+        var (updatedLots, realized, closedQty) = trade.Side == ExpireSide ? ApplyExpiration(lots, trade.Multiplier) : ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
 
         if (updatedLots.SequenceEqual(lots))
             return (positions, realized, closedQty);
@@ -223,11 +195,8 @@ public static class PositionTracker
         if (!lots.Any())
             return (new List<Lot>(), 0m, 0m);
 
-        var realized = lots.Sum(lot =>
-            lot.Side == "Buy"
-                ? -lot.Price * lot.Qty * multiplier  // Long position expires worthless
-                : lot.Price * lot.Qty * multiplier   // Short position keeps premium
-        );
+        // Long position expires worthless (negative P&L), short position keeps premium (positive P&L)
+        var realized = lots.Sum(lot => lot.Side == "Buy" ? -lot.Price * lot.Qty * multiplier : lot.Price * lot.Qty * multiplier);
 
         var closedQty = lots.Sum(lot => lot.Qty);
 
@@ -238,8 +207,7 @@ public static class PositionTracker
     /// Applies a buy/sell trade to existing lots using FIFO matching.
     /// Opposite-side lots are closed first, then remaining quantity opens new position.
     /// </summary>
-    private static (List<Lot>, decimal realized, decimal closedQty) ApplyToLots(
-        List<Lot> lots, string tradeSide, decimal tradeQty, decimal tradePrice, decimal multiplier)
+    private static (List<Lot>, decimal realized, decimal closedQty) ApplyToLots(List<Lot> lots, string tradeSide, decimal tradeQty, decimal tradePrice, decimal multiplier)
     {
         var remaining = tradeQty;
         var realized = 0m;
@@ -256,9 +224,7 @@ public static class PositionTracker
                 // P&L = (exit price - entry price) * qty * multiplier
                 // For buys closing shorts: lot.Price - tradePrice (we sold high, bought low)
                 // For sells closing longs: tradePrice - lot.Price (we bought low, sold high)
-                var pnlPerContract = tradeSide == "Buy"
-                    ? lot.Price - tradePrice
-                    : tradePrice - lot.Price;
+                var pnlPerContract = tradeSide == "Buy" ? lot.Price - tradePrice : tradePrice - lot.Price;
 
                 realized += pnlPerContract * matchQty * multiplier;
                 closedQty += matchQty;
@@ -285,8 +251,7 @@ public static class PositionTracker
     /// <summary>
     /// Builds position rows for display, grouping options into calendar spreads where applicable.
     /// </summary>
-    public static List<PositionRow> BuildPositionRows(
-        Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades)
+    public static List<PositionRow> BuildPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades)
     {
         var allPositions = BuildRawPositionRows(positions, tradeIndex);
         var grouped = GroupIntoStrategies(allPositions);
@@ -296,8 +261,7 @@ public static class PositionTracker
     /// <summary>
     /// Converts raw position data (lots) into position rows with calculated averages.
     /// </summary>
-    private static List<(string matchKey, PositionRow row, Trade? trade)> BuildRawPositionRows(
-        Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex)
+    private static List<(string matchKey, PositionRow row, Trade? trade)> BuildRawPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex)
     {
         var result = new List<(string matchKey, PositionRow row, Trade? trade)>();
 
@@ -315,16 +279,7 @@ public static class PositionTracker
             var totalQty = lots.Sum(l => l.Qty);
             var avgPrice = lots.Sum(l => l.Price * l.Qty) / totalQty;
 
-            var row = new PositionRow(
-                Instrument: trade?.Instrument ?? matchKey,
-                Asset: trade?.Asset ?? "-",
-                OptionKind: !string.IsNullOrEmpty(trade?.OptionKind) ? trade.OptionKind : "-",
-                Side: lots[0].Side,
-                Qty: totalQty,
-                AvgPrice: avgPrice,
-                Expiry: trade?.Expiry,
-                IsStrategyLeg: false
-            );
+            var row = new PositionRow(Instrument: trade?.Instrument ?? matchKey, Asset: trade?.Asset ?? "-", OptionKind: !string.IsNullOrEmpty(trade?.OptionKind) ? trade.OptionKind : "-", Side: lots[0].Side, Qty: totalQty, AvgPrice: avgPrice, Expiry: trade?.Expiry, IsStrategyLeg: false);
 
             result.Add((matchKey, row, trade));
         }
@@ -337,8 +292,7 @@ public static class PositionTracker
     /// with the same underlying, strike, and call/put type but different expirations.
     /// Handles partial rolls by creating separate calendars for different quantities.
     /// </summary>
-    private static List<List<(string matchKey, PositionRow row, Trade? trade)>> GroupIntoStrategies(
-        List<(string matchKey, PositionRow row, Trade? trade)> allPositions)
+    private static List<List<(string matchKey, PositionRow row, Trade? trade)>> GroupIntoStrategies(List<(string matchKey, PositionRow row, Trade? trade)> allPositions)
     {
         var grouped = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
         var processed = new HashSet<string>();
@@ -346,12 +300,7 @@ public static class PositionTracker
         // Parse and group options by underlying/strike/type
         var optionsByKey = allPositions
             .Where(p => p.trade?.Asset == "Option")
-            .Select(p => (
-                pos: p,
-                parsed: p.matchKey.StartsWith("option:")
-                    ? ParsingHelpers.ParseOptionSymbol(p.matchKey[7..])
-                    : null
-            ))
+            .Select(p => (pos: p, parsed: p.matchKey.StartsWith("option:") ? ParsingHelpers.ParseOptionSymbol(p.matchKey[7..]) : null))
             .Where(x => x.parsed != null)
             .GroupBy(x => $"{x.parsed!.Root}|{x.parsed.Strike}|{x.parsed.CallPut}")
             .ToDictionary(g => g.Key, g => g.ToList());
@@ -390,12 +339,7 @@ public static class PositionTracker
     /// Matches long and short legs into calendar spreads by quantity.
     /// Creates separate calendar groups when quantities don't match exactly (partial rolls).
     /// </summary>
-    private static List<List<(string matchKey, PositionRow row, Trade? trade)>> MatchCalendarLegs(
-        List<(
-            (string matchKey, PositionRow row, Trade? trade) pos,
-            OptionParsed? parsed
-        )> legs,
-        HashSet<string> processed)
+    private static List<List<(string matchKey, PositionRow row, Trade? trade)>> MatchCalendarLegs(List<((string matchKey, PositionRow row, Trade? trade) pos, OptionParsed? parsed)> legs, HashSet<string> processed)
     {
         var result = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
 
@@ -477,9 +421,7 @@ public static class PositionTracker
     /// Builds the final position rows, creating strategy summary rows for multi-leg positions
     /// and calculating adjusted prices based on credits from rolled legs.
     /// </summary>
-    private static List<PositionRow> BuildFinalPositionRows(
-        List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped,
-        List<Trade> allTrades)
+    private static List<PositionRow> BuildFinalPositionRows(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, List<Trade> allTrades)
     {
         var rows = new List<PositionRow>();
 
@@ -503,9 +445,7 @@ public static class PositionTracker
     /// Builds rows for a multi-leg strategy (calendar spread).
     /// Creates a summary row plus individual leg rows with adjusted prices.
     /// </summary>
-    private static List<PositionRow> BuildStrategyRows(
-        List<(string matchKey, PositionRow row, Trade? trade)> group,
-        List<Trade> allTrades)
+    private static List<PositionRow> BuildStrategyRows(List<(string matchKey, PositionRow row, Trade? trade)> group, List<Trade> allTrades)
     {
         var rows = new List<PositionRow>();
         var firstLeg = group[0];
@@ -530,18 +470,7 @@ public static class PositionTracker
         var longestExpiry = group.Max(g => g.row.Expiry) ?? DateTime.MinValue;
 
         // Strategy summary row
-        rows.Add(new PositionRow(
-            Instrument: $"{parsed.Root} {Formatters.FormatOptionDate(longestExpiry)}",
-            Asset: "Option Strategy",
-            OptionKind: "Calendar",
-            Side: side,
-            Qty: qty,
-            AvgPrice: Math.Abs(netAdjusted),
-            Expiry: longestExpiry,
-            IsStrategyLeg: false,
-            InitialAvgPrice: Math.Abs(netInitial),
-            AdjustedAvgPrice: Math.Abs(netAdjusted)
-        ));
+        rows.Add(new PositionRow(Instrument: $"{parsed.Root} {Formatters.FormatOptionDate(longestExpiry)}", Asset: "Option Strategy", OptionKind: "Calendar", Side: side, Qty: qty, AvgPrice: Math.Abs(netAdjusted), Expiry: longestExpiry, IsStrategyLeg: false, InitialAvgPrice: Math.Abs(netInitial), AdjustedAvgPrice: Math.Abs(netAdjusted)));
 
         // Add leg rows with adjusted prices (sorted by expiry descending)
         foreach (var leg in group.OrderByDescending(g => g.row.Expiry))
@@ -556,12 +485,7 @@ public static class PositionTracker
                 adjustedPrice = initialPrice - creditPerShare;
             }
 
-            rows.Add(leg.row with
-            {
-                IsStrategyLeg = true,
-                InitialAvgPrice = initialPrice,
-                AdjustedAvgPrice = adjustedPrice
-            });
+            rows.Add(leg.row with { IsStrategyLeg = true, InitialAvgPrice = initialPrice, AdjustedAvgPrice = adjustedPrice });
         }
 
         return rows;
@@ -571,9 +495,7 @@ public static class PositionTracker
     /// Calculates net initial and adjusted prices for a calendar spread.
     /// Net price = sum of long prices - sum of short prices.
     /// </summary>
-    private static (decimal initial, decimal adjusted) CalculateNetPrices(
-        List<(string matchKey, PositionRow row, Trade? trade)> group,
-        decimal closedCredits)
+    private static (decimal initial, decimal adjusted) CalculateNetPrices(List<(string matchKey, PositionRow row, Trade? trade)> group, decimal closedCredits)
     {
         var netInitial = 0m;
         var netAdjusted = 0m;
@@ -615,16 +537,8 @@ public static class PositionTracker
         // Find all strategy leg trades matching this underlying/strike/type
         var matchingLegs = allTrades
             .Where(t => t.Asset == "Option" && t.ParentStrategySeq.HasValue)
-            .Select(t => (
-                trade: t,
-                parsed: t.MatchKey.StartsWith("option:")
-                    ? ParsingHelpers.ParseOptionSymbol(t.MatchKey[7..])
-                    : null
-            ))
-            .Where(x => x.parsed != null &&
-                        x.parsed.Root == root &&
-                        x.parsed.Strike == strike &&
-                        x.parsed.CallPut == callPut)
+            .Select(t => (trade: t, parsed: t.MatchKey.StartsWith("option:") ? ParsingHelpers.ParseOptionSymbol(t.MatchKey[7..]) : null))
+            .Where(x => x.parsed != null && x.parsed.Root == root && x.parsed.Strike == strike && x.parsed.CallPut == callPut)
             .OrderBy(x => x.trade.Timestamp)
             .ToList();
 
@@ -675,8 +589,5 @@ public static class PositionTracker
     /// <summary>
     /// Builds an index mapping match keys to their first trade (for metadata lookup).
     /// </summary>
-    public static Dictionary<string, Trade> BuildTradeIndex(IEnumerable<Trade> trades) =>
-        trades
-            .GroupBy(t => t.MatchKey)
-            .ToDictionary(g => g.Key, g => g.First());
+    public static Dictionary<string, Trade> BuildTradeIndex(IEnumerable<Trade> trades) => trades.GroupBy(t => t.MatchKey).ToDictionary(g => g.Key, g => g.First());
 }

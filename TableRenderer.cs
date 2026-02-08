@@ -108,9 +108,7 @@ public static class TableRenderer
         foreach (var row in rows)
         {
             var initPrice = Formatters.FormatPrice(row.InitialAvgPrice ?? row.AvgPrice, row.Asset);
-            var adjPrice = row.AdjustedAvgPrice.HasValue
-                ? Formatters.FormatPrice(row.AdjustedAvgPrice.Value, row.Asset)
-                : "-";
+            var adjPrice = row.AdjustedAvgPrice.HasValue ? Formatters.FormatPrice(row.AdjustedAvgPrice.Value, row.Asset) : "-";
 
             var instrument = row.IsStrategyLeg ? $"  └─ {row.Instrument}" : row.Instrument;
 
