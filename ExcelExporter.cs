@@ -10,12 +10,7 @@ namespace WebullAnalytics;
 
 public static class ExcelExporter
 {
-    public static void ExportToExcel(
-        List<ReportRow> reportRows,
-        List<PositionRow> positionRows,
-        List<Trade> allTrades,
-        decimal finalPnL,
-        string outputPath)
+    public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, string outputPath)
     {
         // EPPlus requires a license context
         ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -160,9 +155,7 @@ public static class ExcelExporter
                 sheet.Cells[row, 7].Value = "-";
             }
 
-            sheet.Cells[row, 8].Value = posRow.Expiry.HasValue
-                ? posRow.Expiry.Value.ToString("dd MMM yyyy")
-                : "-";
+            sheet.Cells[row, 8].Value = posRow.Expiry.HasValue ? posRow.Expiry.Value.ToString("dd MMM yyyy") : "-";
 
             row++;
         }
@@ -174,17 +167,7 @@ public static class ExcelExporter
     private static void ExportDailyPnL(ExcelWorksheet sheet, List<ReportRow> rows)
     {
         // Calculate daily P&L (group by date)
-        var dailyData = rows
-            .Where(r => !r.IsStrategyLeg && r.Realized != 0)
-            .GroupBy(r => r.Timestamp.Date)
-            .Select(g => new
-            {
-                Date = g.Key,
-                DailyPnL = g.Sum(r => r.Realized),
-                EndOfDayRunning = g.Last().Running
-            })
-            .OrderBy(d => d.Date)
-            .ToList();
+        var dailyData = rows.Where(r => !r.IsStrategyLeg && r.Realized != 0).GroupBy(r => r.Timestamp.Date).Select(g => new { Date = g.Key, DailyPnL = g.Sum(r => r.Realized), EndOfDayRunning = g.Last().Running }).OrderBy(d => d.Date).ToList();
 
         // Headers
         sheet.Cells[1, 1].Value = "Date";
@@ -237,10 +220,8 @@ public static class ExcelExporter
             chart.SetPosition(1, 0, 4, 0);
             chart.SetSize(800, 400);
 
-            // Add series for cumulative P&L
-            var series = chart.Series.Add(
-                sheet.Cells[2, 3, row - 1, 3],  // Values (Cumulative P&L)
-                sheet.Cells[2, 1, row - 1, 1]); // X-axis (Dates)
+            // Add series for cumulative P&L (values = col 3, x-axis = col 1)
+            var series = chart.Series.Add(sheet.Cells[2, 3, row - 1, 3], sheet.Cells[2, 1, row - 1, 1]);
 
             series.Header = "Cumulative P&L";
 
