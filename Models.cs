@@ -2,6 +2,9 @@ using System;
 
 namespace WebullAnalytics;
 
+public static class Sides { public const string Buy = "Buy"; public const string Sell = "Sell"; public const string Expire = "Expire"; }
+public static class Assets { public const string Stock = "Stock"; public const string Option = "Option"; public const string OptionStrategy = "Option Strategy"; }
+
 /// <summary>
 /// Represents a single trade (buy/sell/expire) of a stock, option, or strategy.
 /// </summary>

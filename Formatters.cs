@@ -24,7 +24,7 @@ public static class Formatters
     /// </summary>
     public static string FormatPrice(decimal value, string asset)
     {
-        var decimals = asset.StartsWith("Option", StringComparison.Ordinal) ? 3 : 2;
+        var decimals = asset.StartsWith(Assets.Option, StringComparison.Ordinal) ? 3 : 2;
         var text = value.ToString($"F{decimals}", CultureInfo.InvariantCulture).TrimEnd('0');
 
         // Ensure at least 2 decimal places

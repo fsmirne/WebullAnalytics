@@ -11,7 +11,6 @@ namespace WebullAnalytics;
 /// </summary>
 public static class PositionTracker
 {
-    private const string ExpireSide = "Expire";
     private static readonly TimeSpan ExpirationTime = new(23, 59, 59);
 
     /// <summary>
@@ -79,7 +78,7 @@ public static class PositionTracker
     /// </summary>
     private static (decimal realized, decimal closedQty, Dictionary<string, List<Lot>> positions) ProcessTrade(Trade trade, Dictionary<string, List<Lot>> positions, List<Trade> allTrades)
     {
-        var isStrategyParent = trade.Asset == "Option Strategy";
+        var isStrategyParent = trade.Asset == Assets.OptionStrategy;
 
         if (!isStrategyParent)
         {
@@ -88,13 +87,13 @@ public static class PositionTracker
             return (realized, closedQty, updatedPositions);
         }
 
-        // Strategy parent: calculate P&L but track position separately
+        // Strategy parent: calculate P&L and track position in a single call
         var lots = positions.GetValueOrDefault(trade.MatchKey, new List<Lot>());
-        var (_, realized2, closedQty2) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
+        var (updatedLots, realized2, closedQty2) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
 
         // For SELL strategies with no direct P&L, calculate from legs (closing a spread)
         // For BUY strategies (opening/rolling), don't count leg P&L - cost is in the spread price
-        if (realized2 == 0m && closedQty2 == 0m && trade.Side == "Sell")
+        if (realized2 == 0m && closedQty2 == 0m && trade.Side == Sides.Sell)
         {
             realized2 = allTrades
                 .Where(t => t.ParentStrategySeq == trade.Seq)
@@ -106,8 +105,6 @@ public static class PositionTracker
                 });
         }
 
-        // Update strategy parent position
-        var (updatedLots, _, _) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
         var updatedPositions2 = new Dictionary<string, List<Lot>>(positions);
 
         if (updatedLots.Count > 0)
@@ -134,12 +131,12 @@ public static class PositionTracker
         }
 
         // Skip expirations that didn't close any positions
-        if (trade.Side == ExpireSide && closedQty == 0)
+        if (trade.Side == Sides.Expire && closedQty == 0)
             return null;
 
         // Regular trade or strategy parent: update running P&L
         running += realized;
-        var displayQty = trade.Side == ExpireSide ? closedQty : trade.Qty;
+        var displayQty = trade.Side == Sides.Expire ? closedQty : trade.Qty;
 
         return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, displayQty, trade.Price, closedQty, realized, running, IsStrategyLeg: false);
     }
@@ -159,7 +156,7 @@ public static class PositionTracker
         var uniqueOptions = trades.Where(t => t.Expiry.HasValue && t.Expiry.Value.Date <= sinceDate.Date).GroupBy(t => t.MatchKey).Select(g => g.First()).ToList();
 
         return uniqueOptions
-            .Select((trade, index) => new Trade(Seq: maxSeq + index + 1, Timestamp: trade.Expiry!.Value.Date + ExpirationTime, trade.Instrument, trade.MatchKey, trade.Asset, trade.OptionKind, Side: ExpireSide, Qty: 0m, Price: 0m, trade.Multiplier, trade.Expiry))
+            .Select((trade, index) => new Trade(Seq: maxSeq + index + 1, Timestamp: trade.Expiry!.Value.Date + ExpirationTime, trade.Instrument, trade.MatchKey, trade.Asset, trade.OptionKind, Side: Sides.Expire, Qty: 0m, Price: 0m, trade.Multiplier, trade.Expiry))
             .ToList();
     }
 
@@ -171,7 +168,7 @@ public static class PositionTracker
     {
         var lots = positions.GetValueOrDefault(trade.MatchKey, new List<Lot>());
 
-        var (updatedLots, realized, closedQty) = trade.Side == ExpireSide ? ApplyExpiration(lots, trade.Multiplier) : ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
+        var (updatedLots, realized, closedQty) = trade.Side == Sides.Expire ? ApplyExpiration(lots, trade.Multiplier) : ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
 
         if (updatedLots.SequenceEqual(lots))
             return (positions, realized, closedQty);
@@ -196,7 +193,7 @@ public static class PositionTracker
             return (new List<Lot>(), 0m, 0m);
 
         // Long position expires worthless (negative P&L), short position keeps premium (positive P&L)
-        var realized = lots.Sum(lot => lot.Side == "Buy" ? -lot.Price * lot.Qty * multiplier : lot.Price * lot.Qty * multiplier);
+        var realized = lots.Sum(lot => lot.Side == Sides.Buy ? -lot.Price * lot.Qty * multiplier : lot.Price * lot.Qty * multiplier);
 
         var closedQty = lots.Sum(lot => lot.Qty);
 
@@ -224,7 +221,7 @@ public static class PositionTracker
                 // P&L = (exit price - entry price) * qty * multiplier
                 // For buys closing shorts: lot.Price - tradePrice (we sold high, bought low)
                 // For sells closing longs: tradePrice - lot.Price (we bought low, sold high)
-                var pnlPerContract = tradeSide == "Buy" ? lot.Price - tradePrice : tradePrice - lot.Price;
+                var pnlPerContract = tradeSide == Sides.Buy ? lot.Price - tradePrice : tradePrice - lot.Price;
 
                 realized += pnlPerContract * matchQty * multiplier;
                 closedQty += matchQty;
@@ -273,7 +270,7 @@ public static class PositionTracker
             var trade = tradeIndex.GetValueOrDefault(matchKey);
 
             // Skip strategy parents - show legs only
-            if (trade?.Asset == "Option Strategy")
+            if (trade?.Asset == Assets.OptionStrategy)
                 continue;
 
             var totalQty = lots.Sum(l => l.Qty);
@@ -299,7 +296,7 @@ public static class PositionTracker
 
         // Parse and group options by underlying/strike/type
         var optionsByKey = allPositions
-            .Where(p => p.trade?.Asset == "Option")
+            .Where(p => p.trade?.Asset == Assets.Option)
             .Select(p => (pos: p, parsed: p.matchKey.StartsWith("option:") ? ParsingHelpers.ParseOptionSymbol(p.matchKey[7..]) : null))
             .Where(x => x.parsed != null)
             .GroupBy(x => $"{x.parsed!.Root}|{x.parsed.Strike}|{x.parsed.CallPut}")
@@ -313,7 +310,7 @@ public static class PositionTracker
 
         // Add unprocessed options as standalone
         grouped.AddRange(allPositions
-            .Where(p => p.trade?.Asset == "Option" && !processed.Contains(p.matchKey))
+            .Where(p => p.trade?.Asset == Assets.Option && !processed.Contains(p.matchKey))
             .Select(p =>
             {
                 processed.Add(p.matchKey);
@@ -322,7 +319,7 @@ public static class PositionTracker
 
         // Add non-option positions
         grouped.AddRange(allPositions
-            .Where(p => p.trade?.Asset != "Option")
+            .Where(p => p.trade?.Asset != Assets.Option)
             .Select(p => new List<(string, PositionRow, Trade?)> { p }));
 
         // Sort by asset type, then instrument
@@ -344,8 +341,8 @@ public static class PositionTracker
         var result = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
 
         // Separate and sort legs: longs by expiry desc (furthest first), shorts by expiry asc (nearest first)
-        var longLegs = legs.Where(l => l.pos.row.Side == "Buy").OrderByDescending(l => l.parsed!.ExpiryDate).ToList();
-        var shortLegs = legs.Where(l => l.pos.row.Side == "Sell").OrderBy(l => l.parsed!.ExpiryDate).ToList();
+        var longLegs = legs.Where(l => l.pos.row.Side == Sides.Buy).OrderByDescending(l => l.parsed!.ExpiryDate).ToList();
+        var shortLegs = legs.Where(l => l.pos.row.Side == Sides.Sell).OrderBy(l => l.parsed!.ExpiryDate).ToList();
 
         if (!longLegs.Any() || !shortLegs.Any())
         {
@@ -460,7 +457,7 @@ public static class PositionTracker
         }
 
         var qty = group[0].row.Qty;
-        var side = group.Any(g => g.row.Side == "Buy") ? "Buy" : "Sell";
+        var side = group.Any(g => g.row.Side == Sides.Buy) ? Sides.Buy : Sides.Sell;
 
         // Calculate credits from previously closed short legs (rolls)
         var closedCredits = CalculateClosedLegsCredits(allTrades, parsed.Root, parsed.Strike, parsed.CallPut);
@@ -470,7 +467,7 @@ public static class PositionTracker
         var longestExpiry = group.Max(g => g.row.Expiry) ?? DateTime.MinValue;
 
         // Strategy summary row
-        rows.Add(new PositionRow(Instrument: $"{parsed.Root} {Formatters.FormatOptionDate(longestExpiry)}", Asset: "Option Strategy", OptionKind: "Calendar", Side: side, Qty: qty, AvgPrice: Math.Abs(netAdjusted), Expiry: longestExpiry, IsStrategyLeg: false, InitialAvgPrice: Math.Abs(netInitial), AdjustedAvgPrice: Math.Abs(netAdjusted)));
+        rows.Add(new PositionRow(Instrument: $"{parsed.Root} {Formatters.FormatOptionDate(longestExpiry)}", Asset: Assets.OptionStrategy, OptionKind: "Calendar", Side: side, Qty: qty, AvgPrice: Math.Abs(netAdjusted), Expiry: longestExpiry, IsStrategyLeg: false, InitialAvgPrice: Math.Abs(netInitial), AdjustedAvgPrice: Math.Abs(netAdjusted)));
 
         // Add leg rows with adjusted prices (sorted by expiry descending)
         foreach (var leg in group.OrderByDescending(g => g.row.Expiry))
@@ -479,11 +476,8 @@ public static class PositionTracker
             var adjustedPrice = initialPrice;
 
             // Reduce long leg cost basis by credits from closed short legs
-            if (leg.row.Side == "Buy" && closedCredits > 0)
-            {
-                var creditPerShare = closedCredits / (leg.row.Qty * 100m);
-                adjustedPrice = initialPrice - creditPerShare;
-            }
+            if (leg.row.Side == Sides.Buy && closedCredits > 0)
+                adjustedPrice = AdjustPriceForCredits(initialPrice, closedCredits, leg.row.Qty);
 
             rows.Add(leg.row with { IsStrategyLeg = true, InitialAvgPrice = initialPrice, AdjustedAvgPrice = adjustedPrice });
         }
@@ -505,13 +499,10 @@ public static class PositionTracker
             var initial = leg.row.AvgPrice;
             var adjusted = initial;
 
-            if (leg.row.Side == "Buy" && closedCredits > 0)
-            {
-                var creditPerShare = closedCredits / (leg.row.Qty * 100m);
-                adjusted = initial - creditPerShare;
-            }
+            if (leg.row.Side == Sides.Buy && closedCredits > 0)
+                adjusted = AdjustPriceForCredits(initial, closedCredits, leg.row.Qty);
 
-            if (leg.row.Side == "Buy")
+            if (leg.row.Side == Sides.Buy)
             {
                 netInitial += initial;
                 netAdjusted += adjusted;
@@ -527,6 +518,11 @@ public static class PositionTracker
     }
 
     /// <summary>
+    /// Adjusts a price by subtracting credits earned per share from rolled short legs.
+    /// </summary>
+    private static decimal AdjustPriceForCredits(decimal price, decimal credits, decimal qty) => price - credits / (qty * 100m);
+
+    /// <summary>
     /// Calculates total credits from closed short legs for a given underlying/strike/type.
     /// Used to adjust the cost basis of long legs in calendar rolls.
     /// Tracks short-side P&L per cycle (a cycle ends when lots hit zero at an expiry).
@@ -536,7 +532,7 @@ public static class PositionTracker
     {
         // Find all strategy leg trades matching this underlying/strike/type
         var matchingLegs = allTrades
-            .Where(t => t.Asset == "Option" && t.ParentStrategySeq.HasValue)
+            .Where(t => t.Asset == Assets.Option && t.ParentStrategySeq.HasValue)
             .Select(t => (trade: t, parsed: t.MatchKey.StartsWith("option:") ? ParsingHelpers.ParseOptionSymbol(t.MatchKey[7..]) : null))
             .Where(x => x.parsed != null && x.parsed.Root == root && x.parsed.Strike == strike && x.parsed.CallPut == callPut)
             .OrderBy(x => x.trade.Timestamp)
@@ -561,7 +557,7 @@ public static class PositionTracker
             var (updatedLots, realized, _) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
 
             // Only track realized P&L from Buy trades (closing short positions)
-            if (trade.Side == "Buy" && realized != 0)
+            if (trade.Side == Sides.Buy && realized != 0)
                 shortPnlByExpiry[expiry] += realized;
 
             lotsByExpiry[expiry] = updatedLots;
