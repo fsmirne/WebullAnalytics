@@ -20,6 +20,7 @@ class Program
         app.Configure(config =>
         {
             config.SetApplicationName("WebullAnalytics");
+            config.Settings.StrictParsing = true;
         });
         return app.Run(args);
     }
