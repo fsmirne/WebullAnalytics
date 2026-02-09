@@ -9,7 +9,7 @@ namespace WebullAnalytics;
 /// </summary>
 public static class TableBuilder
 {
-    public static Table BuildReportTable(List<ReportRow> rows, string legPrefix, TableBorder? border = null)
+    public static Table BuildReportTable(List<ReportRow> rows, string legPrefix, decimal initialAmount = 0m, TableBorder? border = null)
     {
         var table = new Table { Title = new TableTitle("Realized P&L by Transaction") };
         if (border != null)
@@ -25,6 +25,8 @@ public static class TableBuilder
         table.AddColumn(new TableColumn("Closed Qty").RightAligned());
         table.AddColumn(new TableColumn("Realized P&L").RightAligned());
         table.AddColumn(new TableColumn("Running P&L").RightAligned());
+        table.AddColumn(new TableColumn("Cash").RightAligned());
+        table.AddColumn(new TableColumn("Total").RightAligned());
 
         foreach (var row in rows)
         {
@@ -40,6 +42,8 @@ public static class TableBuilder
                     new Text(Formatters.FormatPrice(row.Price, row.Asset)),
                     new Text("-"),
                     new Text("-"),
+                    new Text(""),
+                    new Text(""),
                     new Text("")
                 );
             }
@@ -55,7 +59,9 @@ public static class TableBuilder
                     new Text(Formatters.FormatPrice(row.Price, row.Asset)),
                     new Text(Formatters.FormatQty(row.ClosedQty)),
                     Formatters.FormatPnL(row.Realized),
-                    Formatters.FormatPnL(row.Running)
+                    Formatters.FormatPnL(row.Running),
+                    Formatters.FormatMoney(row.Cash, 0m),
+                    Formatters.FormatMoney(row.Total, initialAmount)
                 );
             }
         }

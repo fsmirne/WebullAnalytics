@@ -50,13 +50,14 @@ public static class PositionTracker
     /// <param name="trades">All trades loaded from CSV files</param>
     /// <param name="sinceDate">Only include trades on or after this date (DateTime.MinValue for all)</param>
     /// <returns>Report rows, final positions, and total realized P&L</returns>
-    public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(List<Trade> trades, DateTime sinceDate)
+    public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(List<Trade> trades, DateTime sinceDate, decimal initialAmount = 0m)
     {
         // Filter trades by date and add synthetic expiration trades
         var allTrades = trades.Where(t => t.Timestamp.Date >= sinceDate.Date).Concat(BuildExpirationTrades(trades, sinceDate)).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
 
         var positions = new Dictionary<string, List<Lot>>();
         var running = 0m;
+        var cash = initialAmount;
         var rows = new List<ReportRow>();
 
         foreach (var trade in allTrades)
@@ -64,7 +65,7 @@ public static class PositionTracker
             var (realized, closedQty, updatedPositions) = ProcessTrade(trade, positions, allTrades);
             positions = updatedPositions;
 
-            var row = BuildReportRow(trade, realized, closedQty, ref running);
+            var row = BuildReportRow(trade, realized, closedQty, ref running, ref cash, initialAmount);
             if (row != null)
                 rows.Add(row);
         }
@@ -117,28 +118,34 @@ public static class PositionTracker
 
     /// <summary>
     /// Builds a report row for the given trade. Returns null if the row should be skipped.
-    /// Strategy legs are shown but don't affect running P&L.
+    /// Strategy legs are shown but don't affect running P&L or cash.
     /// </summary>
-    private static ReportRow? BuildReportRow(Trade trade, decimal realized, decimal closedQty, ref decimal running)
+    private static ReportRow? BuildReportRow(Trade trade, decimal realized, decimal closedQty, ref decimal running, ref decimal cash, decimal initialAmount)
     {
         var optionKind = string.IsNullOrEmpty(trade.OptionKind) ? "-" : trade.OptionKind;
         var isLeg = trade.ParentStrategySeq.HasValue;
 
-        // Strategy legs: show in report but don't affect running P&L
+        // Strategy legs: show in report but don't affect running P&L or cash
         if (isLeg)
         {
-            return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, trade.Qty, trade.Price, ClosedQty: 0m, Realized: 0m, running, IsStrategyLeg: true);
+            return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, trade.Qty, trade.Price, ClosedQty: 0m, Realized: 0m, running, Cash: cash, Total: initialAmount + running, IsStrategyLeg: true);
         }
 
         // Skip expirations that didn't close any positions
         if (trade.Side == Sides.Expire && closedQty == 0)
             return null;
 
+        // Update cash: buys spend cash, sells receive cash, expires don't move cash
+        if (trade.Side == Sides.Buy)
+            cash -= trade.Qty * trade.Price * trade.Multiplier;
+        else if (trade.Side == Sides.Sell)
+            cash += trade.Qty * trade.Price * trade.Multiplier;
+
         // Regular trade or strategy parent: update running P&L
         running += realized;
         var displayQty = trade.Side == Sides.Expire ? closedQty : trade.Qty;
 
-        return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, displayQty, trade.Price, closedQty, realized, running, IsStrategyLeg: false);
+        return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, displayQty, trade.Price, closedQty, realized, running, Cash: cash, Total: initialAmount + running, IsStrategyLeg: false);
     }
 
     /// <summary>

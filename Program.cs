@@ -55,6 +55,11 @@ class ReportSettings : CommandSettings
     [CommandOption("--text-path")]
     public string? TextPath { get; set; }
 
+    [Description("Initial portfolio amount in dollars (default: 0)")]
+    [CommandOption("--initial-amount")]
+    [DefaultValue(0)]
+    public decimal InitialAmount { get; set; } = 0m;
+
     public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
 
     public override ValidationResult Validate()
@@ -116,7 +121,8 @@ class ReportCommand : Command<ReportSettings>
             return 0;
         }
 
-        var (rows, positions, running) = PositionTracker.ComputeReport(trades, settings.SinceDate);
+        var initialAmount = settings.InitialAmount;
+        var (rows, positions, running) = PositionTracker.ComputeReport(trades, settings.SinceDate, initialAmount);
         var tradeIndex = PositionTracker.BuildTradeIndex(trades);
         var positionRows = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
@@ -126,16 +132,16 @@ class ReportCommand : Command<ReportSettings>
         {
             case "excel":
                 var excelPath = settings.ExcelPath ?? $"WebullAnalytics_{dateStr}.xlsx";
-                ExcelExporter.ExportToExcel(rows, positionRows, trades, running, excelPath);
+                ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, excelPath);
                 break;
 
             case "text":
                 var textPath = settings.TextPath ?? $"WebullAnalytics_{dateStr}.txt";
-                TextFileExporter.ExportToTextFile(rows, positionRows, running, textPath);
+                TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, textPath);
                 break;
 
             default:
-                TableRenderer.RenderReport(rows, positionRows, running);
+                TableRenderer.RenderReport(rows, positionRows, running, initialAmount);
                 break;
         }
 

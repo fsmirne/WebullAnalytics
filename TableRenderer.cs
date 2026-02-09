@@ -10,11 +10,11 @@ public static class TableRenderer
 {
     private const string LegPrefix = "  └─ ";
 
-    public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running)
+    public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount = 0m)
     {
         var console = AnsiConsole.Console;
 
-        console.Write(TableBuilder.BuildReportTable(rows, LegPrefix));
+        console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount));
         console.WriteLine();
 
         if (positions.Count > 0)
@@ -29,6 +29,10 @@ public static class TableRenderer
 
         console.Write("Final realized P&L: ");
         console.Write(Formatters.FormatPnL(running));
+        console.WriteLine();
+
+        console.Write("Final amount: ");
+        console.Write(Formatters.FormatMoney(initialAmount + running, initialAmount));
         console.WriteLine();
     }
 }
