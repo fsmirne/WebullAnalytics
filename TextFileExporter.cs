@@ -10,7 +10,7 @@ public static class TextFileExporter
 {
     private const string LegPrefix = "    L- ";
 
-    public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, string outputPath)
+    public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath)
     {
         // Create a string writer to capture the console output
         var stringWriter = new StringWriter();
@@ -30,7 +30,7 @@ public static class TextFileExporter
         console.Profile.Width = 200;
 
         // Render report table
-        console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, TableBorder.Ascii));
+        console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, TableBorder.Ascii));
         console.WriteLine();
 
         // Render positions table
@@ -47,6 +47,11 @@ public static class TextFileExporter
         // Final P&L
         console.Write("Final realized P&L: ");
         console.Write(Formatters.FormatPnL(running));
+        console.WriteLine();
+
+        // Final amount
+        console.Write("Final amount: ");
+        console.Write(Formatters.FormatMoney(initialAmount + running, initialAmount));
         console.WriteLine();
 
         // Get the rendered output and strip ANSI codes

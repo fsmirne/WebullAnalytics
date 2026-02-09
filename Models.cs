@@ -59,6 +59,8 @@ public record ReportRow(
     decimal ClosedQty,
     decimal Realized,
     decimal Running,
+    decimal Cash,
+    decimal Total,
     bool IsStrategyLeg = false
 );
 

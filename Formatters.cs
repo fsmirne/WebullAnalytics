@@ -51,6 +51,16 @@ public static class Formatters
     }
 
     /// <summary>
+    /// Formats a money value with color (green if above initial, red if below).
+    /// </summary>
+    public static Markup FormatMoney(decimal value, decimal initialAmount)
+    {
+        var color = value >= initialAmount ? "green" : "red";
+        var text = value.ToString("$#,##0.00", CultureInfo.InvariantCulture);
+        return new Markup($"[{color}]{text}[/]");
+    }
+
+    /// <summary>
     /// Formats an optional expiry date, returning "-" if null.
     /// </summary>
     public static string FormatExpiry(DateTime? expiry) =>

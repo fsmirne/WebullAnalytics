@@ -10,7 +10,7 @@ namespace WebullAnalytics;
 
 public static class ExcelExporter
 {
-    public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, string outputPath)
+    public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath)
     {
         // EPPlus requires a license context
         ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -23,7 +23,7 @@ public static class ExcelExporter
         var dailyPnLSheet = package.Workbook.Worksheets.Add("Daily P&L");
 
         // Export transaction report
-        ExportTransactions(transactionSheet, reportRows, finalPnL);
+        ExportTransactions(transactionSheet, reportRows, finalPnL, initialAmount);
 
         // Export open positions
         ExportPositions(positionsSheet, positionRows);
@@ -38,7 +38,7 @@ public static class ExcelExporter
         Console.WriteLine($"Excel report exported to: {outputPath}");
     }
 
-    private static void ExportTransactions(ExcelWorksheet sheet, List<ReportRow> rows, decimal finalPnL)
+    private static void ExportTransactions(ExcelWorksheet sheet, List<ReportRow> rows, decimal finalPnL, decimal initialAmount)
     {
         // Headers
         sheet.Cells[1, 1].Value = "Date";
@@ -51,9 +51,11 @@ public static class ExcelExporter
         sheet.Cells[1, 8].Value = "Closed Qty";
         sheet.Cells[1, 9].Value = "Realized P&L";
         sheet.Cells[1, 10].Value = "Running P&L";
+        sheet.Cells[1, 11].Value = "Cash";
+        sheet.Cells[1, 12].Value = "Total";
 
         // Format headers
-        using (var range = sheet.Cells[1, 1, 1, 10])
+        using (var range = sheet.Cells[1, 1, 1, 12])
         {
             range.Style.Font.Bold = true;
             range.Style.Fill.PatternType = ExcelFillStyle.Solid;
@@ -74,11 +76,15 @@ public static class ExcelExporter
             sheet.Cells[row, 8].Value = (double)reportRow.ClosedQty;
             sheet.Cells[row, 9].Value = (double)reportRow.Realized;
             sheet.Cells[row, 10].Value = (double)reportRow.Running;
+            sheet.Cells[row, 11].Value = (double)reportRow.Cash;
+            sheet.Cells[row, 12].Value = (double)reportRow.Total;
 
             // Format currency columns
             sheet.Cells[row, 7].Style.Numberformat.Format = "#,##0.00";
             sheet.Cells[row, 9].Style.Numberformat.Format = "#,##0.00";
             sheet.Cells[row, 10].Style.Numberformat.Format = "#,##0.00";
+            sheet.Cells[row, 11].Style.Numberformat.Format = "$#,##0.00";
+            sheet.Cells[row, 12].Style.Numberformat.Format = "$#,##0.00";
 
             // Color code P&L
             ColorCodePnL(sheet.Cells[row, 9], reportRow.Realized);
@@ -95,6 +101,11 @@ public static class ExcelExporter
         sheet.Cells[row, 10].Style.Numberformat.Format = "#,##0.00";
         sheet.Cells[row, 10].Style.Font.Bold = true;
         ColorCodePnL(sheet.Cells[row, 10], finalPnL);
+
+        // Add final amount
+        sheet.Cells[row, 12].Value = (double)(initialAmount + finalPnL);
+        sheet.Cells[row, 12].Style.Numberformat.Format = "$#,##0.00";
+        sheet.Cells[row, 12].Style.Font.Bold = true;
 
         // Auto-fit columns
         sheet.Cells.AutoFitColumns();
