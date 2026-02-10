@@ -99,11 +99,12 @@ public static class ExcelExporter
         // Add total fees
         row++;
         var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
-        sheet.Cells[row, 8].Value = "Total fees:";
+        sheet.Cells[row, 7].Value = "Total fees:";
+        sheet.Cells[row, 7].Style.Font.Bold = true;
+        sheet.Cells[row, 8].Value = (double)totalFees;
+        sheet.Cells[row, 8].Style.Numberformat.Format = "#,##0.00";
+		sheet.Cells[row, 8].Style.Font.Color.SetColor(System.Drawing.Color.Red);
         sheet.Cells[row, 8].Style.Font.Bold = true;
-        sheet.Cells[row, 9].Value = (double)totalFees;
-        sheet.Cells[row, 9].Style.Numberformat.Format = "#,##0.00";
-        sheet.Cells[row, 9].Style.Font.Bold = true;
 
         // Add final P&L
         row++;
