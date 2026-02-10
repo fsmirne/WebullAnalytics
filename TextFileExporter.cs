@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using Spectre.Console;
 
@@ -43,6 +44,10 @@ public static class TextFileExporter
         {
             console.WriteLine("No open positions.");
         }
+
+        // Total fees
+        var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
+        console.WriteLine($"Total fees: {totalFees:0.00}");
 
         // Final P&L
         console.Write("Final realized P&L: ");

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 
 namespace WebullAnalytics;
@@ -12,27 +11,6 @@ namespace WebullAnalytics;
 public static class PositionTracker
 {
     private static readonly TimeSpan ExpirationTime = new(23, 59, 59);
-
-    /// <summary>
-    /// Loads all trades from CSV files in the specified directory.
-    /// Files are processed in alphabetical order to ensure consistent sequencing.
-    /// </summary>
-    public static List<Trade> LoadTrades(string dataDir)
-    {
-        var csvFiles = Directory.GetFiles(dataDir, "*.csv", SearchOption.AllDirectories).OrderBy(f => f);
-
-        var trades = new List<Trade>();
-        var seq = 0;
-
-        foreach (var path in csvFiles)
-        {
-            var (parsed, nextSeq) = CsvParser.ParseCsv(path, seq);
-            trades.AddRange(parsed);
-            seq = nextSeq;
-        }
-
-        return trades;
-    }
 
     /// <summary>
     /// Loads trades from a single CSV file.
@@ -50,7 +28,7 @@ public static class PositionTracker
     /// <param name="trades">All trades loaded from CSV files</param>
     /// <param name="sinceDate">Only include trades on or after this date (DateTime.MinValue for all)</param>
     /// <returns>Report rows, final positions, and total realized P&L</returns>
-    public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(List<Trade> trades, DateTime sinceDate, decimal initialAmount = 0m)
+    public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(List<Trade> trades, DateTime sinceDate, decimal initialAmount = 0m, Dictionary<(DateTime timestamp, string side, decimal qty, decimal price), decimal>? feeLookup = null)
     {
         // Filter trades by date and add synthetic expiration trades
         var allTrades = trades.Where(t => t.Timestamp.Date >= sinceDate.Date).Concat(BuildExpirationTrades(trades, sinceDate)).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
@@ -65,12 +43,28 @@ public static class PositionTracker
             var (realized, closedQty, updatedPositions) = ProcessTrade(trade, positions, allTrades);
             positions = updatedPositions;
 
-            var row = BuildReportRow(trade, realized, closedQty, ref running, ref cash, initialAmount);
+            var fee = LookupFee(trade, allTrades, feeLookup);
+            var row = BuildReportRow(trade, realized, closedQty, fee, ref running, ref cash, initialAmount);
             if (row != null)
                 rows.Add(row);
         }
 
         return (rows, positions, running);
+    }
+
+    /// <summary>
+    /// Looks up the fee for a trade. For strategy parents, sums up fees from all child legs.
+    /// </summary>
+    private static decimal LookupFee(Trade trade, List<Trade> allTrades, Dictionary<(DateTime timestamp, string side, decimal qty, decimal price), decimal>? feeLookup)
+    {
+        if (feeLookup == null) return 0m;
+
+        // Strategy parent: sum fees from child legs
+        if (trade.Asset == Assets.OptionStrategy)
+            return allTrades.Where(t => t.ParentStrategySeq == trade.Seq).Sum(leg => feeLookup.GetValueOrDefault((leg.Timestamp, leg.Side, leg.Qty, leg.Price), 0m));
+
+        // Strategy leg or standalone: direct lookup
+        return feeLookup.GetValueOrDefault((trade.Timestamp, trade.Side, trade.Qty, trade.Price), 0m);
     }
 
     /// <summary>
@@ -120,7 +114,7 @@ public static class PositionTracker
     /// Builds a report row for the given trade. Returns null if the row should be skipped.
     /// Strategy legs are shown but don't affect running P&L or cash.
     /// </summary>
-    private static ReportRow? BuildReportRow(Trade trade, decimal realized, decimal closedQty, ref decimal running, ref decimal cash, decimal initialAmount)
+    private static ReportRow? BuildReportRow(Trade trade, decimal realized, decimal closedQty, decimal fee, ref decimal running, ref decimal cash, decimal initialAmount)
     {
         var optionKind = string.IsNullOrEmpty(trade.OptionKind) ? "-" : trade.OptionKind;
         var isLeg = trade.ParentStrategySeq.HasValue;
@@ -128,7 +122,7 @@ public static class PositionTracker
         // Strategy legs: show in report but don't affect running P&L or cash
         if (isLeg)
         {
-            return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, trade.Qty, trade.Price, ClosedQty: 0m, Realized: 0m, running, Cash: cash, Total: initialAmount + running, IsStrategyLeg: true);
+            return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, trade.Qty, trade.Price, ClosedQty: 0m, Realized: 0m, running, Cash: cash, Total: initialAmount + running, IsStrategyLeg: true, Fees: fee);
         }
 
         // Skip expirations that didn't close any positions
@@ -141,11 +135,15 @@ public static class PositionTracker
         else if (trade.Side == Sides.Sell)
             cash += trade.Qty * trade.Price * trade.Multiplier;
 
+        // Subtract fees from realized P&L and cash
+        realized -= fee;
+        cash -= fee;
+
         // Regular trade or strategy parent: update running P&L
         running += realized;
         var displayQty = trade.Side == Sides.Expire ? closedQty : trade.Qty;
 
-        return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, displayQty, trade.Price, closedQty, realized, running, Cash: cash, Total: initialAmount + running, IsStrategyLeg: false);
+        return new ReportRow(trade.Timestamp, trade.Instrument, trade.Asset, optionKind, trade.Side, displayQty, trade.Price, closedQty, realized, running, Cash: cash, Total: initialAmount + running, IsStrategyLeg: false, Fees: fee);
     }
 
     /// <summary>

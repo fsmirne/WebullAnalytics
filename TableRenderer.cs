@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Spectre.Console;
 
 namespace WebullAnalytics;
@@ -26,6 +27,11 @@ public static class TableRenderer
         {
             console.WriteLine("No open positions.");
         }
+
+        var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
+        console.Write($"Total fees: ");
+		console.Write(Formatters.FormatMoney(totalFees, decimal.MaxValue));
+		console.WriteLine();
 
         console.Write("Final realized P&L: ");
         console.Write(Formatters.FormatPnL(running));

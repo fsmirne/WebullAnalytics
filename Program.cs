@@ -31,13 +31,9 @@ class Program
 /// </summary>
 class ReportSettings : CommandSettings
 {
-    [Description("Directory containing CSV order exports (default: data)")]
-    [CommandOption("--data-dir")]
-    public string? DataDir { get; set; }
-
-    [Description("Path to a single CSV order export file")]
-    [CommandOption("--data-file")]
-    public string? DataFile { get; set; }
+    [Description("Path to a CSV order export file")]
+    [CommandOption("--data-trades")]
+    public string? DataTrades { get; set; }
 
     [Description("Include only trades on or after this date (YYYY-MM-DD format)")]
     [CommandOption("--since")]
@@ -61,15 +57,14 @@ class ReportSettings : CommandSettings
     [DefaultValue(0)]
     public decimal InitialAmount { get; set; } = 0m;
 
+    [Description("Path to a CSV file containing fee information per trade")]
+    [CommandOption("--data-fees")]
+    public string? DataFees { get; set; }
+
     public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
 
     public override ValidationResult Validate()
     {
-        if (DataDir != null && DataFile != null)
-        {
-            return ValidationResult.Error("--data-dir and --data-file are mutually exclusive");
-        }
-
         if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
         {
             return ValidationResult.Error("--since must be in YYYY-MM-DD format");
@@ -92,29 +87,19 @@ class ReportCommand : Command<ReportSettings>
 {
     public override int Execute(CommandContext context, ReportSettings settings, CancellationToken cancellation)
     {
-        List<Trade> trades;
-
-        if (settings.DataFile != null)
+        if (settings.DataTrades == null)
         {
-            if (!File.Exists(settings.DataFile))
-            {
-                Console.WriteLine($"Error: Data file '{settings.DataFile}' does not exist.");
-                return 1;
-            }
-
-            trades = PositionTracker.LoadTradesFromFile(settings.DataFile);
+            Console.WriteLine("Error: --data-trades is required.");
+            return 1;
         }
-        else
+
+        if (!File.Exists(settings.DataTrades))
         {
-            var dataDir = settings.DataDir ?? "data";
-            if (!Directory.Exists(dataDir))
-            {
-                Console.WriteLine($"Error: Data directory '{dataDir}' does not exist.");
-                return 1;
-            }
-
-            trades = PositionTracker.LoadTrades(dataDir);
+            Console.WriteLine($"Error: Trades file '{settings.DataTrades}' does not exist.");
+            return 1;
         }
+
+        var trades = PositionTracker.LoadTradesFromFile(settings.DataTrades);
 
         if (trades.Count == 0)
         {
@@ -122,8 +107,20 @@ class ReportCommand : Command<ReportSettings>
             return 0;
         }
 
+        // Load fee data if provided
+        Dictionary<(DateTime, string, decimal, decimal), decimal>? feeLookup = null;
+        if (settings.DataFees != null)
+        {
+            if (!File.Exists(settings.DataFees))
+            {
+                Console.WriteLine($"Error: Fees file '{settings.DataFees}' does not exist.");
+                return 1;
+            }
+            feeLookup = CsvParser.ParseFeeCsv(settings.DataFees);
+        }
+
         var initialAmount = settings.InitialAmount;
-        var (rows, positions, running) = PositionTracker.ComputeReport(trades, settings.SinceDate, initialAmount);
+        var (rows, positions, running) = PositionTracker.ComputeReport(trades, settings.SinceDate, initialAmount, feeLookup);
         var tradeIndex = PositionTracker.BuildTradeIndex(trades);
         var positionRows = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 

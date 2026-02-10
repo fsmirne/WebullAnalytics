@@ -258,6 +258,56 @@ public static class CsvParser
         return new Trade(Seq: seq, Timestamp: core.timestamp, Instrument: symbol, MatchKey: $"stock:{symbol}", Asset: Assets.Stock, OptionKind: "", Side: core.side, Qty: core.qty, Price: core.price, Multiplier: StockMultiplier, Expiry: null);
     }
 
+    /// <summary>
+    /// Parses a fee CSV file and returns a dictionary mapping (Timestamp, Side, Qty, Price) to the fee amount.
+    /// The fee file is expected to have columns: Symbol, Time, Side, Quantity, Avg Price, Amount, Fees.
+    /// </summary>
+    public static Dictionary<(DateTime timestamp, string side, decimal qty, decimal price), decimal> ParseFeeCsv(string path)
+    {
+        var config = new CsvConfiguration(CultureInfo.InvariantCulture) { HeaderValidated = null, MissingFieldFound = null };
+
+        using var reader = new StreamReader(path);
+        using var csv = new CsvReader(reader, config);
+
+        csv.Read();
+        csv.ReadHeader();
+        var headers = csv.HeaderRecord;
+
+        if (headers == null || !headers.Contains("Fees"))
+            return new();
+
+        var result = new Dictionary<(DateTime, string, decimal, decimal), decimal>();
+
+        while (csv.Read())
+        {
+            var timeStr = csv.GetField("Time")?.Trim() ?? "";
+            var sideRaw = csv.GetField("Side")?.Trim() ?? "";
+            var qtyStr = csv.GetField("Quantity")?.Trim() ?? "";
+            var priceStr = csv.GetField("Avg Price")?.Trim() ?? "";
+            var feeStr = csv.GetField("Fees")?.Trim() ?? "";
+
+            var time = ParsingHelpers.ParseTime(timeStr);
+            if (time == null) continue;
+
+            if (string.IsNullOrEmpty(sideRaw)) continue;
+            var side = char.ToUpper(sideRaw[0]) + sideRaw[1..].ToLower();
+            if (side is not (Sides.Buy or Sides.Sell)) continue;
+
+            var qty = ParsingHelpers.ParseDecimal(qtyStr);
+            var price = ParsingHelpers.ParseDecimal(priceStr);
+            var fee = ParsingHelpers.ParseDecimal(feeStr);
+            if (qty == null || price == null || fee == null || fee.Value <= 0) continue;
+
+            var key = (time.Value, side, qty.Value, price.Value);
+            if (result.ContainsKey(key))
+                result[key] += fee.Value;
+            else
+                result[key] = fee.Value;
+        }
+
+        return result;
+    }
+
     private class StrategyMeta
     {
         public string? Root { get; set; }
