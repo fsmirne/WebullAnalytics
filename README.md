@@ -1,6 +1,6 @@
 # WebullAnalytics
 
-A C# command-line tool for analyzing trading performance from Webull CSV order exports. This tool generates comprehensive realized P&L reports with support for stocks, options, and complex multi-leg option strategies.
+A C# command-line tool for analyzing trading performance from Webull CSV order exports. Generates comprehensive realized P&L reports with support for stocks, options, and complex multi-leg option strategies.
 
 ## Features
 
@@ -13,11 +13,13 @@ A C# command-line tool for analyzing trading performance from Webull CSV order e
   - Straddles/Strangles
   - Vertical Spreads
 - **Calendar Roll Tracking**: Intelligently groups rolled positions and tracks adjusted cost basis
+- **Fee Tracking**: Optional fee CSV import for accurate net P&L after commissions and fees
+- **Cash Tracking**: Tracks current cash in hand starting from an optional initial amount
 - **Multiple Output Modes**:
   - Console: Color-coded tables with detailed transaction history
   - Excel: Formatted workbook with charts and analytics
   - Text: Plain text file for sharing or archiving
-- **Transaction History**: Complete trade-by-trade P&L calculation
+- **Transaction History**: Complete trade-by-trade P&L calculation with fees, cash, and running totals
 - **Open Position Analysis**: Shows both initial and adjusted average prices for rolled positions
 - **Daily P&L Tracking**: Visual chart showing cumulative P&L over time
 
@@ -28,6 +30,8 @@ A C# command-line tool for analyzing trading performance from Webull CSV order e
 
 ## Installation
 
+### From Source
+
 1. Clone or download this repository
 2. Navigate to the `WebullAnalytics` directory
 3. Build the project:
@@ -35,85 +39,137 @@ A C# command-line tool for analyzing trading performance from Webull CSV order e
    dotnet build
    ```
 
+### Windows Installer
+
+Run `install.bat` to build a self-contained executable and add it to your PATH:
+
+```batch
+install.bat
+```
+
+By default this installs to `%LOCALAPPDATA%\WebullAnalytics`. You can specify a custom directory:
+
+```batch
+install.bat "C:\MyTools"
+```
+
+Alternatively, use `build.bat` to just build the executable without installing:
+
+```batch
+build.bat
+```
+
+The output will be in `bin\Release\net10.0\win-x64\publish\`.
+
 ## Usage
 
 ### Basic Usage
 
-Run the tool with default settings (console output, all trades):
-
 ```bash
-dotnet run
+WebullAnalytics --data-trades path/to/orders.csv
 ```
 
 ### Command-Line Options
 
 ```
 Options:
-  --data-dir <path>    Directory containing CSV order exports (default: data)
-  --since <date>       Include only trades on or after this date in YYYY-MM-DD format (default: all trades)
-  --output <format>    Output format: 'console', 'excel', or 'text' (default: console)
-  --excel-path <path>  Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)
-  --text-path <path>   Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)
-  --help, -h           Show this help message
+  --data-trades <path>      Path to a CSV order export file (required)
+  --data-fees <path>        Path to a CSV file containing fee information per trade
+  --since <date>            Include only trades on or after this date (YYYY-MM-DD format)
+  --output <format>         Output format: 'console', 'excel', or 'text' (default: console)
+  --excel-path <path>       Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)
+  --text-path <path>        Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)
+  --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
+  --help, -h                Show help message
 ```
 
 ### Examples
 
-**Console output with custom data directory:**
+**Console output from a trades file:**
 ```bash
-dotnet run --data-dir "C:\MyTrades\data"
+WebullAnalytics --data-trades "C:\MyTrades\Options_Orders.csv"
+```
+
+**Include fee data for accurate net P&L:**
+```bash
+WebullAnalytics --data-trades orders.csv --data-fees fees.csv
+```
+
+**Set an initial portfolio amount to track cash:**
+```bash
+WebullAnalytics --data-trades orders.csv --initial-amount 10000
 ```
 
 **Export to Excel with default filename:**
 ```bash
-dotnet run --output excel
+WebullAnalytics --data-trades orders.csv --output excel
 ```
 
 **Export to Excel with custom path:**
 ```bash
-dotnet run --output excel --excel-path "January2026_Report.xlsx"
+WebullAnalytics --data-trades orders.csv --output excel --excel-path "January2026_Report.xlsx"
 ```
 
 **Filter trades since a specific date:**
 ```bash
-dotnet run --since 2026-01-01 --output excel
+WebullAnalytics --data-trades orders.csv --since 2026-01-01 --output excel
 ```
 
 **Export to text file:**
 ```bash
-dotnet run --output text --text-path "January2026_Report.txt"
+WebullAnalytics --data-trades orders.csv --output text --text-path "January2026_Report.txt"
+```
+
+**Combine all options:**
+```bash
+WebullAnalytics --data-trades orders.csv --data-fees fees.csv --initial-amount 10000 --since 2026-01-01 --output excel
 ```
 
 ## Data Format
 
-Place your Webull CSV order export files in the `data` directory (or specify a custom directory with `--data-dir`). The tool will automatically process all CSV files in the directory.
+### Trades CSV
 
-### Required CSV Columns
+Provide your Webull CSV order export file via the `--data-trades` option. The tool determines whether the file contains stock or option orders based on the filename (files with "Options" in the name are parsed as option orders).
 
-The tool expects Webull CSV exports with the following columns:
-- Placed Time
-- Filled Time
-- Name
-- Symbol
-- Side
-- Quantity
-- Avg Fill Price
+Required columns:
+- **Side** - Buy or Sell
+- **Filled** - Filled quantity
+- **Avg Price** (or **Price**) - Average fill price
+- **Filled Time** (or **Placed Time**) - Timestamp of the fill
+- **Status** - Must be "Filled" (non-filled orders are skipped)
+- **Symbol** - Ticker symbol (for stocks) or OCC option symbol (for options)
+- **Name** - Strategy name (for multi-leg option strategies)
+- **Placed Time** - Used to associate strategy legs with their parent order
+
+### Fee CSV (Optional)
+
+Provide a separate fee CSV via `--data-fees` to include trading fees and commissions in the P&L report. Expected columns:
+- **Time** - Timestamp matching the trade
+- **Side** - Buy or Sell
+- **Quantity** - Trade quantity
+- **Avg Price** - Trade price
+- **Fees** - Fee amount for the trade
+
+Fees are matched to trades by timestamp, side, quantity, and price. For multi-leg strategies, fees from individual legs are summed under the parent strategy.
 
 ## Output Formats
 
 ### Console Output
 
-The console output displays three sections:
+The console output displays:
 
 1. **Realized P&L by Transaction**: Chronological list of all trades with:
    - Date and time
    - Instrument details
    - Option strategy legs (indented under parent strategy)
-   - Side (Buy/Sell)
+   - Side (Buy/Sell/Expire)
    - Quantity and price
+   - Fees
    - Closed quantity
    - Realized P&L (color-coded: green for profit, red for loss)
    - Running total P&L
+   - Cash balance
+   - Total portfolio value
 
 2. **Open Positions**: Current positions grouped by instrument showing:
    - Position details (asset, side, quantity)
@@ -122,7 +178,7 @@ The console output displays three sections:
    - Expiration date
    - Calendar strategies are intelligently grouped with their legs
 
-3. **Final Summary**: Total realized P&L
+3. **Final Summary**: Total fees, final realized P&L, and final portfolio amount
 
 ### Excel Output
 
@@ -131,7 +187,9 @@ The Excel workbook contains three worksheets:
 1. **Transactions**: Complete transaction history with:
    - Color-coded P&L columns
    - Formatted currency values
-   - All trade details
+   - Fees column
+   - Cash and Total columns
+   - Summary row with total fees, final P&L, and final amount
 
 2. **Open Positions**: Current positions with:
    - Initial and adjusted prices
@@ -150,7 +208,7 @@ The text output produces a plain text file containing:
 - ASCII-formatted tables matching the console output
 - Transaction history with all trade details
 - Open positions summary
-- Final realized P&L
+- Total fees, final realized P&L, and final amount
 
 This format is useful for sharing reports via email, archiving, or importing into other tools.
 
@@ -160,12 +218,18 @@ This format is useful for sharing reports via email, archiving, or importing int
 
 The tool uses First-In-First-Out (FIFO) lot accounting to match closing trades with opening trades. This ensures accurate P&L calculation even with multiple entries and exits in the same instrument.
 
+### Option Expiration
+
+Options that expire within the reporting date range are automatically handled. Long positions expire worthless (loss), and short positions keep the full premium (gain). Synthetic expiration trades are generated at market close on the expiration date.
+
 ### Calendar Strategy Recognition
 
 For open positions, the tool intelligently groups option legs into calendar strategies when:
 - Multiple legs share the same root symbol, strike price, and call/put type
 - The legs have different expiration dates
 - The legs have opposite sides (one long, one short)
+
+Partial rolls are handled by splitting quantities into separate calendar groups when leg sizes don't match.
 
 ### Adjusted Cost Basis
 
@@ -174,6 +238,14 @@ For long legs in calendar strategies, the tool tracks:
 - **Adjusted Average Price**: The cost basis after subtracting credits from fully closed short legs (calendar rolls)
 
 This helps traders understand their true cost basis after collecting credits from rolling short legs.
+
+### Cash Tracking
+
+When `--initial-amount` is specified, the tool tracks the cash balance throughout the report:
+- Buys reduce cash by `quantity * price * multiplier`
+- Sells increase cash by `quantity * price * multiplier`
+- Fees reduce cash
+- The Total column shows `initial amount + running P&L`
 
 ## Strategy Leg Display
 
@@ -191,6 +263,7 @@ The parent strategy shows the net debit/credit and contributes to P&L calculatio
 
 - **CsvHelper** (33.1.0): CSV parsing
 - **Spectre.Console** (0.54.0): Console formatting and tables
+- **Spectre.Console.Cli** (0.53.1): Command-line argument parsing with validation
 - **EPPlus** (7.6.0): Excel file generation
 
 ## License
@@ -200,16 +273,24 @@ This tool uses EPPlus configured for non-commercial use. For commercial use, you
 ## Troubleshooting
 
 **No trades found:**
-- Ensure CSV files are in the data directory
-- Verify CSV files are Webull export format
+- Verify the CSV file path passed to `--data-trades` is correct
+- Ensure the CSV file is a Webull order export with the required columns
+- Check that orders have a "Filled" status
+
+**Fee matching issues:**
+- Ensure the fee CSV timestamps, sides, quantities, and prices exactly match the trades CSV
+- Fees with no matching trade are silently ignored
 
 **Excel export fails:**
 - Ensure the output directory is writable
 - Check that no other program has the Excel file open
 
 **Incorrect P&L calculations:**
-- If using `--since`, verify the date includes all relevant trades
-- Check that all trade CSV files are in the data directory
+- If using `--since`, note that only trades on or after this date are included; earlier context is not considered
+- For options files, ensure the filename contains "Options" so they are parsed correctly
+
+**Invalid option errors:**
+- The tool uses strict parsing; any unrecognized command-line options will produce an error
 
 ## Future Enhancements
 
