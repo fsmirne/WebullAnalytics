@@ -61,7 +61,8 @@ public record ReportRow(
     decimal Running,
     decimal Cash,
     decimal Total,
-    bool IsStrategyLeg = false
+    bool IsStrategyLeg = false,
+    decimal Fees = 0m
 );
 
 /// <summary>

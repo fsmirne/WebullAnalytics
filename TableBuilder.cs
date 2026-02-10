@@ -9,6 +9,8 @@ namespace WebullAnalytics;
 /// </summary>
 public static class TableBuilder
 {
+    private static string FormatFee(decimal fees) => fees > 0 ? fees.ToString("0.00") : "-";
+
     public static Table BuildReportTable(List<ReportRow> rows, string legPrefix, decimal initialAmount = 0m, TableBorder? border = null)
     {
         var table = new Table { Title = new TableTitle("Realized P&L by Transaction") };
@@ -22,6 +24,7 @@ public static class TableBuilder
         table.AddColumn(new TableColumn("Side").LeftAligned());
         table.AddColumn(new TableColumn("Qty").RightAligned());
         table.AddColumn(new TableColumn("Price").RightAligned());
+        table.AddColumn(new TableColumn("Fees").RightAligned());
         table.AddColumn(new TableColumn("Closed Qty").RightAligned());
         table.AddColumn(new TableColumn("Realized P&L").RightAligned());
         table.AddColumn(new TableColumn("Running P&L").RightAligned());
@@ -40,6 +43,7 @@ public static class TableBuilder
                     new Text(row.Side),
                     new Text(Formatters.FormatQty(row.Qty)),
                     new Text(Formatters.FormatPrice(row.Price, row.Asset)),
+                    new Text(FormatFee(row.Fees)),
                     new Text("-"),
                     new Text("-"),
                     new Text(""),
@@ -57,6 +61,7 @@ public static class TableBuilder
                     new Text(row.Side),
                     new Text(Formatters.FormatQty(row.Qty)),
                     new Text(Formatters.FormatPrice(row.Price, row.Asset)),
+                    new Text(FormatFee(row.Fees)),
                     new Text(Formatters.FormatQty(row.ClosedQty)),
                     Formatters.FormatPnL(row.Realized),
                     Formatters.FormatPnL(row.Running),

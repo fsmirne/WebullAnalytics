@@ -48,14 +48,15 @@ public static class ExcelExporter
         sheet.Cells[1, 5].Value = "Side";
         sheet.Cells[1, 6].Value = "Qty";
         sheet.Cells[1, 7].Value = "Price";
-        sheet.Cells[1, 8].Value = "Closed Qty";
-        sheet.Cells[1, 9].Value = "Realized P&L";
-        sheet.Cells[1, 10].Value = "Running P&L";
-        sheet.Cells[1, 11].Value = "Cash";
-        sheet.Cells[1, 12].Value = "Total";
+        sheet.Cells[1, 8].Value = "Fees";
+        sheet.Cells[1, 9].Value = "Closed Qty";
+        sheet.Cells[1, 10].Value = "Realized P&L";
+        sheet.Cells[1, 11].Value = "Running P&L";
+        sheet.Cells[1, 12].Value = "Cash";
+        sheet.Cells[1, 13].Value = "Total";
 
         // Format headers
-        using (var range = sheet.Cells[1, 1, 1, 12])
+        using (var range = sheet.Cells[1, 1, 1, 13])
         {
             range.Style.Font.Bold = true;
             range.Style.Fill.PatternType = ExcelFillStyle.Solid;
@@ -73,39 +74,50 @@ public static class ExcelExporter
             sheet.Cells[row, 5].Value = reportRow.Side;
             sheet.Cells[row, 6].Value = (double)reportRow.Qty;
             sheet.Cells[row, 7].Value = (double)reportRow.Price;
-            sheet.Cells[row, 8].Value = (double)reportRow.ClosedQty;
-            sheet.Cells[row, 9].Value = (double)reportRow.Realized;
-            sheet.Cells[row, 10].Value = (double)reportRow.Running;
-            sheet.Cells[row, 11].Value = (double)reportRow.Cash;
-            sheet.Cells[row, 12].Value = (double)reportRow.Total;
+            sheet.Cells[row, 8].Value = (double)reportRow.Fees;
+            sheet.Cells[row, 8].Style.Numberformat.Format = "#,##0.00";
+            sheet.Cells[row, 9].Value = (double)reportRow.ClosedQty;
+            sheet.Cells[row, 10].Value = (double)reportRow.Realized;
+            sheet.Cells[row, 11].Value = (double)reportRow.Running;
+            sheet.Cells[row, 12].Value = (double)reportRow.Cash;
+            sheet.Cells[row, 13].Value = (double)reportRow.Total;
 
             // Format currency columns
             sheet.Cells[row, 7].Style.Numberformat.Format = "#,##0.00";
-            sheet.Cells[row, 9].Style.Numberformat.Format = "#,##0.00";
             sheet.Cells[row, 10].Style.Numberformat.Format = "#,##0.00";
-            sheet.Cells[row, 11].Style.Numberformat.Format = "$#,##0.00";
+            sheet.Cells[row, 11].Style.Numberformat.Format = "#,##0.00";
             sheet.Cells[row, 12].Style.Numberformat.Format = "$#,##0.00";
+            sheet.Cells[row, 13].Style.Numberformat.Format = "$#,##0.00";
 
             // Color code P&L
-            ColorCodePnL(sheet.Cells[row, 9], reportRow.Realized);
-            ColorCodePnL(sheet.Cells[row, 10], reportRow.Running);
+            ColorCodePnL(sheet.Cells[row, 10], reportRow.Realized);
+            ColorCodePnL(sheet.Cells[row, 11], reportRow.Running);
 
             row++;
         }
 
+        // Add total fees
+        row++;
+        var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
+        sheet.Cells[row, 8].Value = "Total fees:";
+        sheet.Cells[row, 8].Style.Font.Bold = true;
+        sheet.Cells[row, 9].Value = (double)totalFees;
+        sheet.Cells[row, 9].Style.Numberformat.Format = "#,##0.00";
+        sheet.Cells[row, 9].Style.Font.Bold = true;
+
         // Add final P&L
         row++;
-        sheet.Cells[row, 9].Value = "Final P&L:";
-        sheet.Cells[row, 9].Style.Font.Bold = true;
-        sheet.Cells[row, 10].Value = (double)finalPnL;
-        sheet.Cells[row, 10].Style.Numberformat.Format = "#,##0.00";
+        sheet.Cells[row, 10].Value = "Final P&L:";
         sheet.Cells[row, 10].Style.Font.Bold = true;
-        ColorCodePnL(sheet.Cells[row, 10], finalPnL);
+        sheet.Cells[row, 11].Value = (double)finalPnL;
+        sheet.Cells[row, 11].Style.Numberformat.Format = "#,##0.00";
+        sheet.Cells[row, 11].Style.Font.Bold = true;
+        ColorCodePnL(sheet.Cells[row, 11], finalPnL);
 
         // Add final amount
-        sheet.Cells[row, 12].Value = (double)(initialAmount + finalPnL);
-        sheet.Cells[row, 12].Style.Numberformat.Format = "$#,##0.00";
-        sheet.Cells[row, 12].Style.Font.Bold = true;
+        sheet.Cells[row, 13].Value = (double)(initialAmount + finalPnL);
+        sheet.Cells[row, 13].Style.Numberformat.Format = "$#,##0.00";
+        sheet.Cells[row, 13].Style.Font.Bold = true;
 
         // Auto-fit columns
         sheet.Cells.AutoFitColumns();
