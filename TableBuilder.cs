@@ -17,6 +17,8 @@ public static class TableBuilder
         if (border != null)
             table.Border = border;
 
+        table.Expand = true;
+
         table.AddColumn(new TableColumn("Date").LeftAligned());
         table.AddColumn(new TableColumn("Instrument").LeftAligned());
         table.AddColumn(new TableColumn("Asset").LeftAligned());
@@ -79,6 +81,8 @@ public static class TableBuilder
         var table = new Table { Title = new TableTitle("Open Positions") };
         if (border != null)
             table.Border = border;
+
+        table.Expand = true;
 
         table.AddColumn(new TableColumn("Instrument").LeftAligned());
         table.AddColumn(new TableColumn("Asset").LeftAligned());
