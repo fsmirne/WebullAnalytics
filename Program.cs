@@ -1,10 +1,7 @@
-using System;
-using System.ComponentModel;
-using System.Globalization;
-using System.IO;
-using System.Threading;
 using Spectre.Console;
 using Spectre.Console.Cli;
+using System.ComponentModel;
+using System.Globalization;
 
 namespace WebullAnalytics;
 
@@ -108,7 +105,7 @@ class ReportCommand : Command<ReportSettings>
         }
 
         // Load fee data if provided
-        Dictionary<(DateTime, string, decimal), decimal>? feeLookup = null;
+        Dictionary<(DateTime, Side, int), decimal>? feeLookup = null;
         if (settings.DataFees != null)
         {
             if (!File.Exists(settings.DataFees))

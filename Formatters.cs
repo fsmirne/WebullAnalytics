@@ -1,6 +1,5 @@
-using System;
-using System.Globalization;
 using Spectre.Console;
+using System.Globalization;
 
 namespace WebullAnalytics;
 
@@ -22,9 +21,9 @@ public static class Formatters
     /// Formats a price with appropriate decimal places.
     /// Options use 3 decimals, stocks use 2. Trailing zeros are trimmed but at least 2 decimals are kept.
     /// </summary>
-    public static string FormatPrice(decimal value, string asset)
+    public static string FormatPrice(decimal value, Asset asset)
     {
-        var decimals = asset.StartsWith(Assets.Option, StringComparison.Ordinal) ? 3 : 2;
+        var decimals = asset is Asset.Option or Asset.OptionStrategy ? 3 : 2;
         var text = value.ToString($"F{decimals}", CultureInfo.InvariantCulture).TrimEnd('0');
 
         // Ensure at least 2 decimal places

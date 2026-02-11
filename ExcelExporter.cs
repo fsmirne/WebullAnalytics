@@ -1,7 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using OfficeOpenXml;
 using OfficeOpenXml.Drawing.Chart;
 using OfficeOpenXml.Style;
@@ -69,7 +65,7 @@ public static class ExcelExporter
         {
             sheet.Cells[row, 1].Value = reportRow.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
             sheet.Cells[row, 2].Value = reportRow.Instrument;
-            sheet.Cells[row, 3].Value = reportRow.Asset;
+            sheet.Cells[row, 3].Value = reportRow.Asset.DisplayName();
             sheet.Cells[row, 4].Value = reportRow.OptionKind;
             sheet.Cells[row, 5].Value = reportRow.Side;
             sheet.Cells[row, 6].Value = (double)reportRow.Qty;
@@ -150,7 +146,7 @@ public static class ExcelExporter
         {
             var indent = posRow.IsStrategyLeg ? "  └─ " : "";
             sheet.Cells[row, 1].Value = indent + posRow.Instrument;
-            sheet.Cells[row, 2].Value = posRow.Asset;
+            sheet.Cells[row, 2].Value = posRow.Asset.DisplayName();
             sheet.Cells[row, 3].Value = posRow.OptionKind;
             sheet.Cells[row, 4].Value = posRow.Side;
             sheet.Cells[row, 5].Value = (double)posRow.Qty;
