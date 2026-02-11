@@ -150,7 +150,7 @@ Provide a separate fee CSV via `--data-fees` to include trading fees and commiss
 - **Avg Price** - Trade price
 - **Fees** - Fee amount for the trade
 
-Fees are matched to trades by timestamp, side, quantity, and price. For multi-leg strategies, fees from individual legs are summed under the parent strategy.
+Fees are matched to trades by timestamp, side and quantity. For multi-leg strategies, fees from individual legs are summed under the parent strategy.
 
 ## Output Formats
 
