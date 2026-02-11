@@ -28,7 +28,7 @@ public static class PositionTracker
     /// <param name="trades">All trades loaded from CSV files</param>
     /// <param name="sinceDate">Only include trades on or after this date (DateTime.MinValue for all)</param>
     /// <returns>Report rows, final positions, and total realized P&L</returns>
-    public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(List<Trade> trades, DateTime sinceDate, decimal initialAmount = 0m, Dictionary<(DateTime timestamp, string side, decimal qty, decimal price), decimal>? feeLookup = null)
+    public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(List<Trade> trades, DateTime sinceDate, decimal initialAmount = 0m, Dictionary<(DateTime timestamp, string side, decimal qty), decimal>? feeLookup = null)
     {
         // Filter trades by date and add synthetic expiration trades
         var allTrades = trades.Where(t => t.Timestamp.Date >= sinceDate.Date).Concat(BuildExpirationTrades(trades, sinceDate)).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
@@ -55,16 +55,16 @@ public static class PositionTracker
     /// <summary>
     /// Looks up the fee for a trade. For strategy parents, sums up fees from all child legs.
     /// </summary>
-    private static decimal LookupFee(Trade trade, List<Trade> allTrades, Dictionary<(DateTime timestamp, string side, decimal qty, decimal price), decimal>? feeLookup)
+    private static decimal LookupFee(Trade trade, List<Trade> allTrades, Dictionary<(DateTime timestamp, string side, decimal qty), decimal>? feeLookup)
     {
         if (feeLookup == null) return 0m;
 
         // Strategy parent: sum fees from child legs
         if (trade.Asset == Assets.OptionStrategy)
-            return allTrades.Where(t => t.ParentStrategySeq == trade.Seq).Sum(leg => feeLookup.GetValueOrDefault((leg.Timestamp, leg.Side, leg.Qty, leg.Price), 0m));
+            return allTrades.Where(t => t.ParentStrategySeq == trade.Seq).Sum(leg => feeLookup.GetValueOrDefault((leg.Timestamp, leg.Side, leg.Qty), 0m));
 
         // Strategy leg or standalone: direct lookup
-        return feeLookup.GetValueOrDefault((trade.Timestamp, trade.Side, trade.Qty, trade.Price), 0m);
+        return feeLookup.GetValueOrDefault((trade.Timestamp, trade.Side, trade.Qty), 0m);
     }
 
     /// <summary>

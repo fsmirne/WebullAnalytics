@@ -259,10 +259,10 @@ public static class CsvParser
     }
 
     /// <summary>
-    /// Parses a fee CSV file and returns a dictionary mapping (Timestamp, Side, Qty, Price) to the fee amount.
+    /// Parses a fee CSV file and returns a dictionary mapping (Timestamp, Side, Qty) to the fee amount.
     /// The fee file is expected to have columns: Symbol, Time, Side, Quantity, Avg Price, Amount, Fees.
     /// </summary>
-    public static Dictionary<(DateTime timestamp, string side, decimal qty, decimal price), decimal> ParseFeeCsv(string path)
+    public static Dictionary<(DateTime timestamp, string side, decimal qty), decimal> ParseFeeCsv(string path)
     {
         var config = new CsvConfiguration(CultureInfo.InvariantCulture) { HeaderValidated = null, MissingFieldFound = null };
 
@@ -276,14 +276,13 @@ public static class CsvParser
         if (headers == null || !headers.Contains("Fees"))
             return new();
 
-        var result = new Dictionary<(DateTime, string, decimal, decimal), decimal>();
+        var result = new Dictionary<(DateTime, string, decimal), decimal>();
 
         while (csv.Read())
         {
             var timeStr = csv.GetField("Time")?.Trim() ?? "";
             var sideRaw = csv.GetField("Side")?.Trim() ?? "";
             var qtyStr = csv.GetField("Quantity")?.Trim() ?? "";
-            var priceStr = csv.GetField("Avg Price")?.Trim() ?? "";
             var feeStr = csv.GetField("Fees")?.Trim() ?? "";
 
             var time = ParsingHelpers.ParseTime(timeStr);
@@ -294,11 +293,10 @@ public static class CsvParser
             if (side is not (Sides.Buy or Sides.Sell)) continue;
 
             var qty = ParsingHelpers.ParseDecimal(qtyStr);
-            var price = ParsingHelpers.ParseDecimal(priceStr);
             var fee = ParsingHelpers.ParseDecimal(feeStr);
-            if (qty == null || price == null || fee == null || fee.Value <= 0) continue;
+            if (qty == null || fee == null || fee.Value <= 0) continue;
 
-            var key = (time.Value, side, qty.Value, price.Value);
+            var key = (time.Value, side, qty.Value);
             if (result.ContainsKey(key))
                 result[key] += fee.Value;
             else

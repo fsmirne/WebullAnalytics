@@ -108,7 +108,7 @@ class ReportCommand : Command<ReportSettings>
         }
 
         // Load fee data if provided
-        Dictionary<(DateTime, string, decimal, decimal), decimal>? feeLookup = null;
+        Dictionary<(DateTime, string, decimal), decimal>? feeLookup = null;
         if (settings.DataFees != null)
         {
             if (!File.Exists(settings.DataFees))
