@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using Spectre.Console;
 
 namespace WebullAnalytics;
@@ -40,14 +39,14 @@ public static class TableBuilder
                 table.AddRow(
                     new Text(""),
                     new Text($"{legPrefix}{row.Instrument}"),
-                    new Text(row.Asset),
+                    new Text(row.Asset.DisplayName()),
                     new Text(row.OptionKind),
-                    new Text(row.Side),
+                    new Text(row.Side.ToString()),
                     new Text(Formatters.FormatQty(row.Qty)),
                     new Text(Formatters.FormatPrice(row.Price, row.Asset)),
                     new Text(FormatFee(row.Fees)),
                     new Text("-"),
-                    new Text("-"),
+                    new Text(""),
                     new Text(""),
                     new Text(""),
                     new Text("")
@@ -58,9 +57,9 @@ public static class TableBuilder
                 table.AddRow(
                     new Text(row.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")),
                     new Text(row.Instrument),
-                    new Text(row.Asset),
+                    new Text(row.Asset.DisplayName()),
                     new Text(row.OptionKind),
-                    new Text(row.Side),
+                    new Text(row.Side.ToString()),
                     new Text(Formatters.FormatQty(row.Qty)),
                     new Text(Formatters.FormatPrice(row.Price, row.Asset)),
                     new Text(FormatFee(row.Fees)),
@@ -101,9 +100,9 @@ public static class TableBuilder
 
             table.AddRow(
                 new Text(instrument),
-                new Text(row.Asset),
+                new Text(row.Asset.DisplayName()),
                 new Text(row.OptionKind),
-                new Text(row.Side),
+                new Text(row.Side.ToString()),
                 new Text(Formatters.FormatQty(row.Qty)),
                 new Text(initPrice),
                 new Text(adjPrice),
