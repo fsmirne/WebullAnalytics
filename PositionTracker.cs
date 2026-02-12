@@ -8,6 +8,9 @@ public static class PositionTracker
 {
     private static readonly TimeSpan ExpirationTime = new(23, 59, 59);
 
+	private static bool IsStrategyParent(Trade trade) => trade.Asset == Asset.OptionStrategy;
+	private static bool IsStrategyLeg(Trade trade) => trade.ParentStrategySeq.HasValue;
+
     /// <summary>
     /// Loads trades from a single CSV file.
     /// </summary>
@@ -69,9 +72,7 @@ public static class PositionTracker
     /// </summary>
     private static (decimal realized, int closedQty, Dictionary<string, List<Lot>> positions) ProcessTrade(Trade trade, Dictionary<string, List<Lot>> positions, List<Trade> allTrades)
     {
-        var isStrategyParent = trade.Asset == Asset.OptionStrategy;
-
-        if (!isStrategyParent)
+        if (!IsStrategyParent(trade))
         {
             // Regular trade (stock, option, or strategy leg) - track position normally
             var (updatedPositions, realized, closedQty) = ApplyTrade(positions, trade);
@@ -96,14 +97,12 @@ public static class PositionTracker
                 });
         }
 
-        var updatedPositions2 = new Dictionary<string, List<Lot>>(positions);
-
         if (updatedLots.Count > 0)
-            updatedPositions2[trade.MatchKey] = updatedLots;
+            positions[trade.MatchKey] = updatedLots;
         else
-            updatedPositions2.Remove(trade.MatchKey);
+            positions.Remove(trade.MatchKey);
 
-        return (realized2, closedQty2, updatedPositions2);
+        return (realized2, closedQty2, positions);
     }
 
     /// <summary>
@@ -113,7 +112,7 @@ public static class PositionTracker
     private static ReportRow? BuildReportRow(Trade trade, decimal realized, int closedQty, decimal fee, ref decimal running, ref decimal cash, decimal initialAmount)
     {
         var optionKind = string.IsNullOrEmpty(trade.OptionKind) ? "-" : trade.OptionKind;
-        var isLeg = trade.ParentStrategySeq.HasValue;
+        var isLeg = IsStrategyLeg(trade);
 
         // Strategy legs: show in report but don't affect running P&L or cash
         if (isLeg)
@@ -181,17 +180,12 @@ public static class PositionTracker
 
         var (updatedLots, realized, closedQty) = trade.Side == Side.Expire ? ApplyExpiration(lots, trade.Multiplier) : ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
 
-        if (updatedLots.SequenceEqual(lots))
-            return (positions, realized, closedQty);
-
-        var updatedPositions = new Dictionary<string, List<Lot>>(positions);
-
         if (updatedLots.Count > 0)
-            updatedPositions[trade.MatchKey] = updatedLots;
+            positions[trade.MatchKey] = updatedLots;
         else
-            updatedPositions.Remove(trade.MatchKey);
+            positions.Remove(trade.MatchKey);
 
-        return (updatedPositions, realized, closedQty);
+        return (positions, realized, closedQty);
     }
 
     /// <summary>
@@ -308,7 +302,7 @@ public static class PositionTracker
         // Parse and group options by underlying/strike/type
         var optionsByKey = allPositions
             .Where(p => p.trade?.Asset == Asset.Option)
-            .Select(p => (pos: p, parsed: p.matchKey.StartsWith("option:") ? ParsingHelpers.ParseOptionSymbol(p.matchKey[7..]) : null))
+            .Select(p => (pos: p, parsed: MatchKeys.TryGetOptionSymbol(p.matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
             .Where(x => x.parsed != null)
             .GroupBy(x => $"{x.parsed!.Root}|{x.parsed.Strike}|{x.parsed.CallPut}")
             .ToDictionary(g => g.Key, g => g.ToList());
@@ -458,8 +452,9 @@ public static class PositionTracker
         var rows = new List<PositionRow>();
         var firstLeg = group[0];
 
-        var symbol = firstLeg.matchKey.StartsWith("option:") ? firstLeg.matchKey[7..] : null;
-        var parsed = symbol != null ? ParsingHelpers.ParseOptionSymbol(symbol) : null;
+        var parsed = MatchKeys.TryGetOptionSymbol(firstLeg.matchKey, out var symbol)
+			? ParsingHelpers.ParseOptionSymbol(symbol)
+			: null;
 
         if (parsed == null)
         {
@@ -544,7 +539,7 @@ public static class PositionTracker
         // Find all strategy leg trades matching this underlying/strike/type
         var matchingLegs = allTrades
             .Where(t => t.Asset == Asset.Option && t.ParentStrategySeq.HasValue)
-            .Select(t => (trade: t, parsed: t.MatchKey.StartsWith("option:") ? ParsingHelpers.ParseOptionSymbol(t.MatchKey[7..]) : null))
+            .Select(t => (trade: t, parsed: MatchKeys.TryGetOptionSymbol(t.MatchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
             .Where(x => x.parsed != null && x.parsed.Root == root && x.parsed.Strike == strike && x.parsed.CallPut == callPut)
             .OrderBy(x => x.trade.Timestamp)
             .ToList();
