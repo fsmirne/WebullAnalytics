@@ -57,13 +57,22 @@ public static partial class ParsingHelpers
 
         var text = value.Trim();
 
-        // Remove @ prefix (used in Webull limit price display)
-        if (text.StartsWith('@'))
-            text = text[1..];
+        return TryParseWebullDecimal(text, out var result) ? result : null;
+    }
 
-        text = text.Replace(",", "");
+    /// <summary>
+    /// Tries to parse a decimal value from Webull exports.
+    /// Handles @ prefixes, commas, and occasional non-numeric characters.
+    /// </summary>
+    public static bool TryParseWebullDecimal(string? value, out decimal result)
+    {
+        result = 0m;
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
 
-        return decimal.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out var result) ? result : null;
+		var text = Regex.Replace(value.Trim(), @"[^\d.\-]", "");
+
+		return decimal.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out result);
     }
 
     /// <summary>

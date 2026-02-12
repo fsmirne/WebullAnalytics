@@ -16,6 +16,14 @@ public static class CsvParser
     private const decimal OptionMultiplier = 100m;
     private const decimal StockMultiplier = 1m;
 
+    private static CsvConfiguration CreateLenientConfig() => new(CultureInfo.InvariantCulture)
+    {
+        IgnoreBlankLines = true,
+        ShouldSkipRecord = args => args.Row.Parser.Record != null && args.Row.Parser.Record.All(field => string.IsNullOrWhiteSpace(field)),
+        BadDataFound = null,
+        MissingFieldFound = null
+    };
+
     /// <summary>
     /// Parses a trade CSV file and returns all filled trades.
     /// Strategy orders are split into a parent trade plus individual leg trades.
@@ -37,14 +45,7 @@ public static class CsvParser
     /// </summary>
     public static List<RawTrade> ParseRawTradeCsv(string path)
     {
-        var config = new CsvConfiguration(CultureInfo.InvariantCulture)
-        {
-            IgnoreBlankLines = true,
-            ShouldSkipRecord = args => args.Row.Parser.Record != null && args.Row.Parser.Record.All(field => string.IsNullOrWhiteSpace(field)),
-            BadDataFound = null,
-            MissingFieldFound = null
-        };
-
+        var config = CreateLenientConfig();
         using var reader = new StreamReader(path);
         using var csv = new CsvReader(reader, config);
         csv.Context.RegisterClassMap<RawTradeMap>();
@@ -56,14 +57,7 @@ public static class CsvParser
     /// </summary>
     public static Dictionary<(DateTime timestamp, Side side, int qty), decimal> ParseFeeCsv(string path)
     {
-        var config = new CsvConfiguration(CultureInfo.InvariantCulture)
-        {
-            IgnoreBlankLines = true,
-            ShouldSkipRecord = args => args.Row.Parser.Record != null && args.Row.Parser.Record.All(field => string.IsNullOrWhiteSpace(field)),
-            BadDataFound = null,
-            MissingFieldFound = null
-        };
-
+        var config = CreateLenientConfig();
         using var reader = new StreamReader(path);
         using var csv = new CsvReader(reader, config);
         csv.Context.RegisterClassMap<FeeMap>();
@@ -89,7 +83,7 @@ public static class CsvParser
             if (string.IsNullOrEmpty(rt.Symbol))
                 continue;
 
-            trades.Add(new Trade(Seq: seq++, Timestamp: GetTimestamp(rt), Instrument: rt.Symbol, MatchKey: $"stock:{rt.Symbol}", Asset: Asset.Stock, OptionKind: "", Side: rt.Side, Qty: rt.Filled, Price: GetPrice(rt), Multiplier: StockMultiplier, Expiry: null));
+            trades.Add(new Trade(Seq: seq++, Timestamp: GetTimestamp(rt), Instrument: rt.Symbol, MatchKey: MatchKeys.Stock(rt.Symbol), Asset: Asset.Stock, OptionKind: "", Side: rt.Side, Qty: rt.Filled, Price: GetPrice(rt), Multiplier: StockMultiplier, Expiry: null));
         }
 
         return (trades, seq);
@@ -194,7 +188,7 @@ public static class CsvParser
         var parsed = ParsingHelpers.ParseOptionSymbol(rt.Symbol);
         var (instrument, optionKind, expiry) = parsed != null ? (Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike), parsed.CallPut == "C" ? "Call" : "Put", (DateTime?)parsed.ExpiryDate) : (rt.Symbol, "Option", null);
 
-        return new Trade(Seq: seq, Timestamp: GetTimestamp(rt), Instrument: instrument, MatchKey: $"option:{rt.Symbol}", Asset: Asset.Option, OptionKind: optionKind, Side: rt.Side, Qty: rt.Filled, Price: GetPrice(rt), Multiplier: OptionMultiplier, Expiry: expiry, ParentStrategySeq: parentStrategySeq);
+        return new Trade(Seq: seq, Timestamp: GetTimestamp(rt), Instrument: instrument, MatchKey: MatchKeys.Option(rt.Symbol), Asset: Asset.Option, OptionKind: optionKind, Side: rt.Side, Qty: rt.Filled, Price: GetPrice(rt), Multiplier: OptionMultiplier, Expiry: expiry, ParentStrategySeq: parentStrategySeq);
     }
 
     private class StrategyMeta
@@ -276,13 +270,11 @@ public static class CsvParser
     {
         public override object? ConvertFromString(string? text, IReaderRow row, MemberMapData memberMapData)
         {
-            if (string.IsNullOrEmpty(text))
-                return null;
-
-            string cleanText = Regex.Replace(text, @"[^\d\.]", "");
-
-            if (decimal.TryParse(cleanText, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal result))
+            if (ParsingHelpers.TryParseWebullDecimal(text, out var result))
                 return result;
+
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
 
             return base.ConvertFromString(text, row, memberMapData);
         }

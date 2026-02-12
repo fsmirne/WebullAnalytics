@@ -26,12 +26,12 @@ public static class Formatters
         var decimals = asset is Asset.Option or Asset.OptionStrategy ? 3 : 2;
         var text = value.ToString($"F{decimals}", CultureInfo.InvariantCulture).TrimEnd('0');
 
-        // Ensure at least 2 decimal places
-        if (!text.Contains('.'))
+        var dot = text.IndexOf('.');
+        if (dot < 0)
             return text + ".00";
 
-        var decimalPart = text.Split('.')[1];
-        return decimalPart.Length switch
+        var decimalLen = text.Length - dot - 1;
+        return decimalLen switch
         {
             0 => text + "00",
             1 => text + "0",
