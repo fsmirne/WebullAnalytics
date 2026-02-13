@@ -307,10 +307,11 @@ public static class PositionTracker
             .GroupBy(x => $"{x.parsed!.Root}|{x.parsed.Strike}|{x.parsed.CallPut}")
             .ToDictionary(g => g.Key, g => g.ToList());
 
-        foreach (var (key, legs) in optionsByKey)
+        foreach (var (_, legs) in optionsByKey)
         {
-            var calendarGroups = MatchCalendarLegs(legs, processed);
-            grouped.AddRange(calendarGroups);
+            var longs = legs.Where(l => l.pos.row.Side == Side.Buy).OrderByDescending(l => l.parsed!.ExpiryDate).ToList();
+            var shorts = legs.Where(l => l.pos.row.Side == Side.Sell).OrderBy(l => l.parsed!.ExpiryDate).ToList();
+            grouped.AddRange(MatchSpreadLegs(longs, shorts, processed, addLongRemainders: true));
         }
 
         // Second pass: match remaining unprocessed options as vertical spreads (same root + expiry + callput, different strikes)
@@ -321,10 +322,11 @@ public static class PositionTracker
             .GroupBy(x => $"{x.parsed!.Root}|{x.parsed.ExpiryDate:yyyyMMdd}|{x.parsed.CallPut}")
             .ToDictionary(g => g.Key, g => g.ToList());
 
-        foreach (var (key, legs) in verticalCandidates)
+        foreach (var (_, legs) in verticalCandidates)
         {
-            var verticalGroups = MatchVerticalLegs(legs, processed);
-            grouped.AddRange(verticalGroups);
+            var longs = legs.Where(l => l.pos.row.Side == Side.Buy).OrderBy(l => l.parsed!.Strike).ToList();
+            var shorts = legs.Where(l => l.pos.row.Side == Side.Sell).OrderBy(l => l.parsed!.Strike).ToList();
+            grouped.AddRange(MatchSpreadLegs(longs, shorts, processed));
         }
 
         // Add unprocessed options as standalone
@@ -352,103 +354,27 @@ public static class PositionTracker
     }
 
     /// <summary>
-    /// Matches long and short legs into calendar spreads by quantity.
-    /// Creates separate calendar groups when quantities don't match exactly (partial rolls).
+    /// Matches pre-sorted long and short option legs into spread groups by quantity.
+    /// Used for both calendar spreads (sorted by expiry) and vertical spreads (sorted by strike).
+    /// When addLongRemainders is true, unmatched long quantities are added as standalone groups.
     /// </summary>
-    private static List<List<(string matchKey, PositionRow row, Trade? trade)>> MatchCalendarLegs(List<((string matchKey, PositionRow row, Trade? trade) pos, OptionParsed? parsed)> legs, HashSet<string> processed)
+    private static List<List<(string matchKey, PositionRow row, Trade? trade)>> MatchSpreadLegs(List<((string matchKey, PositionRow row, Trade? trade) pos, OptionParsed? parsed)> sortedLongs, List<((string matchKey, PositionRow row, Trade? trade) pos, OptionParsed? parsed)> sortedShorts, HashSet<string> processed, bool addLongRemainders = false)
     {
         var result = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
 
-        // Separate and sort legs: longs by expiry desc (furthest first), shorts by expiry asc (nearest first)
-        var longLegs = legs.Where(l => l.pos.row.Side == Side.Buy).OrderByDescending(l => l.parsed!.ExpiryDate).ToList();
-        var shortLegs = legs.Where(l => l.pos.row.Side == Side.Sell).OrderBy(l => l.parsed!.ExpiryDate).ToList();
-
-        if (!longLegs.Any() || !shortLegs.Any())
+        if (!sortedLongs.Any() || !sortedShorts.Any())
             return result;
 
-        // Track remaining quantities for matching
-        var longRemaining = longLegs.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
-        var shortRemaining = shortLegs.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
+        var longRemaining = sortedLongs.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
+        var shortRemaining = sortedShorts.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
 
-        // Match each short leg with available long legs
-        foreach (var shortLeg in shortLegs)
+        foreach (var shortLeg in sortedShorts)
         {
             var shortQty = shortRemaining[shortLeg.pos.matchKey];
             if (shortQty <= 0 || processed.Contains(shortLeg.pos.matchKey))
                 continue;
 
-            foreach (var longLeg in longLegs)
-            {
-                var longQty = longRemaining[longLeg.pos.matchKey];
-                if (longQty <= 0)
-                    continue;
-
-                var matchedQty = Math.Min(longQty, shortQty);
-
-                // Create calendar with matched quantities
-                result.Add(new List<(string, PositionRow, Trade?)>
-                {
-                    (longLeg.pos.matchKey, longLeg.pos.row with { Qty = matchedQty }, longLeg.pos.trade),
-                    (shortLeg.pos.matchKey, shortLeg.pos.row with { Qty = matchedQty }, shortLeg.pos.trade)
-                });
-
-                longRemaining[longLeg.pos.matchKey] -= matchedQty;
-                shortRemaining[shortLeg.pos.matchKey] -= matchedQty;
-                shortQty -= matchedQty;
-
-                if (shortQty <= 0)
-                {
-                    processed.Add(shortLeg.pos.matchKey);
-                    break;
-                }
-            }
-        }
-
-        // Mark fully consumed legs as processed
-        foreach (var leg in longLegs.Where(l => longRemaining[l.pos.matchKey] <= 0))
-            processed.Add(leg.pos.matchKey);
-
-        // Add unmatched long leg remainders as standalone
-        foreach (var longLeg in longLegs)
-        {
-            var remaining = longRemaining[longLeg.pos.matchKey];
-            if (remaining > 0 && !processed.Contains(longLeg.pos.matchKey))
-            {
-                processed.Add(longLeg.pos.matchKey);
-                result.Add(new List<(string, PositionRow, Trade?)>
-                {
-                    (longLeg.pos.matchKey, longLeg.pos.row with { Qty = remaining }, longLeg.pos.trade)
-                });
-            }
-        }
-
-        return result;
-    }
-
-    /// <summary>
-    /// Matches long and short legs into vertical spreads by quantity.
-    /// Legs within the same group share root, expiry, and call/put but have different strikes.
-    /// </summary>
-    private static List<List<(string matchKey, PositionRow row, Trade? trade)>> MatchVerticalLegs(List<((string matchKey, PositionRow row, Trade? trade) pos, OptionParsed? parsed)> legs, HashSet<string> processed)
-    {
-        var result = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
-
-        var longLegs = legs.Where(l => l.pos.row.Side == Side.Buy).OrderBy(l => l.parsed!.Strike).ToList();
-        var shortLegs = legs.Where(l => l.pos.row.Side == Side.Sell).OrderBy(l => l.parsed!.Strike).ToList();
-
-        if (!longLegs.Any() || !shortLegs.Any())
-            return result;
-
-        var longRemaining = longLegs.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
-        var shortRemaining = shortLegs.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
-
-        foreach (var shortLeg in shortLegs)
-        {
-            var shortQty = shortRemaining[shortLeg.pos.matchKey];
-            if (shortQty <= 0 || processed.Contains(shortLeg.pos.matchKey))
-                continue;
-
-            foreach (var longLeg in longLegs)
+            foreach (var longLeg in sortedLongs)
             {
                 var longQty = longRemaining[longLeg.pos.matchKey];
                 if (longQty <= 0)
@@ -475,8 +401,21 @@ public static class PositionTracker
         }
 
         // Mark fully consumed legs as processed
-        foreach (var leg in longLegs.Where(l => longRemaining[l.pos.matchKey] <= 0))
+        foreach (var leg in sortedLongs.Where(l => longRemaining[l.pos.matchKey] <= 0))
             processed.Add(leg.pos.matchKey);
+
+        if (addLongRemainders)
+        {
+            foreach (var longLeg in sortedLongs)
+            {
+                var remaining = longRemaining[longLeg.pos.matchKey];
+                if (remaining > 0 && !processed.Contains(longLeg.pos.matchKey))
+                {
+                    processed.Add(longLeg.pos.matchKey);
+                    result.Add(new List<(string, PositionRow, Trade?)> { (longLeg.pos.matchKey, longLeg.pos.row with { Qty = remaining }, longLeg.pos.trade) });
+                }
+            }
+        }
 
         return result;
     }
