@@ -313,6 +313,20 @@ public static class PositionTracker
             grouped.AddRange(calendarGroups);
         }
 
+        // Second pass: match remaining unprocessed options as vertical spreads (same root + expiry + callput, different strikes)
+        var verticalCandidates = allPositions
+            .Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey))
+            .Select(p => (pos: p, parsed: MatchKeys.TryGetOptionSymbol(p.matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
+            .Where(x => x.parsed != null)
+            .GroupBy(x => $"{x.parsed!.Root}|{x.parsed.ExpiryDate:yyyyMMdd}|{x.parsed.CallPut}")
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        foreach (var (key, legs) in verticalCandidates)
+        {
+            var verticalGroups = MatchVerticalLegs(legs, processed);
+            grouped.AddRange(verticalGroups);
+        }
+
         // Add unprocessed options as standalone
         grouped.AddRange(allPositions
             .Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey))
@@ -350,15 +364,7 @@ public static class PositionTracker
         var shortLegs = legs.Where(l => l.pos.row.Side == Side.Sell).OrderBy(l => l.parsed!.ExpiryDate).ToList();
 
         if (!longLegs.Any() || !shortLegs.Any())
-        {
-            // No calendar possible - add all as standalone
-            foreach (var leg in legs.Where(l => !processed.Contains(l.pos.matchKey)))
-            {
-                processed.Add(leg.pos.matchKey);
-                result.Add(new List<(string, PositionRow, Trade?)> { leg.pos });
-            }
             return result;
-        }
 
         // Track remaining quantities for matching
         var longRemaining = longLegs.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
@@ -420,6 +426,62 @@ public static class PositionTracker
     }
 
     /// <summary>
+    /// Matches long and short legs into vertical spreads by quantity.
+    /// Legs within the same group share root, expiry, and call/put but have different strikes.
+    /// </summary>
+    private static List<List<(string matchKey, PositionRow row, Trade? trade)>> MatchVerticalLegs(List<((string matchKey, PositionRow row, Trade? trade) pos, OptionParsed? parsed)> legs, HashSet<string> processed)
+    {
+        var result = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
+
+        var longLegs = legs.Where(l => l.pos.row.Side == Side.Buy).OrderBy(l => l.parsed!.Strike).ToList();
+        var shortLegs = legs.Where(l => l.pos.row.Side == Side.Sell).OrderBy(l => l.parsed!.Strike).ToList();
+
+        if (!longLegs.Any() || !shortLegs.Any())
+            return result;
+
+        var longRemaining = longLegs.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
+        var shortRemaining = shortLegs.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
+
+        foreach (var shortLeg in shortLegs)
+        {
+            var shortQty = shortRemaining[shortLeg.pos.matchKey];
+            if (shortQty <= 0 || processed.Contains(shortLeg.pos.matchKey))
+                continue;
+
+            foreach (var longLeg in longLegs)
+            {
+                var longQty = longRemaining[longLeg.pos.matchKey];
+                if (longQty <= 0)
+                    continue;
+
+                var matchedQty = Math.Min(longQty, shortQty);
+
+                result.Add(new List<(string, PositionRow, Trade?)>
+                {
+                    (longLeg.pos.matchKey, longLeg.pos.row with { Qty = matchedQty }, longLeg.pos.trade),
+                    (shortLeg.pos.matchKey, shortLeg.pos.row with { Qty = matchedQty }, shortLeg.pos.trade)
+                });
+
+                longRemaining[longLeg.pos.matchKey] -= matchedQty;
+                shortRemaining[shortLeg.pos.matchKey] -= matchedQty;
+                shortQty -= matchedQty;
+
+                if (shortQty <= 0)
+                {
+                    processed.Add(shortLeg.pos.matchKey);
+                    break;
+                }
+            }
+        }
+
+        // Mark fully consumed legs as processed
+        foreach (var leg in longLegs.Where(l => longRemaining[l.pos.matchKey] <= 0))
+            processed.Add(leg.pos.matchKey);
+
+        return result;
+    }
+
+    /// <summary>
     /// Builds the final position rows, creating strategy summary rows for multi-leg positions
     /// and calculating adjusted prices based on credits from rolled legs.
     /// </summary>
@@ -444,39 +506,51 @@ public static class PositionTracker
     }
 
     /// <summary>
-    /// Builds rows for a multi-leg strategy (calendar spread).
+    /// Builds rows for a multi-leg strategy (calendar, vertical, or diagonal spread).
     /// Creates a summary row plus individual leg rows with adjusted prices.
     /// </summary>
     private static List<PositionRow> BuildStrategyRows(List<(string matchKey, PositionRow row, Trade? trade)> group, List<Trade> allTrades)
     {
         var rows = new List<PositionRow>();
-        var firstLeg = group[0];
 
-        var parsed = MatchKeys.TryGetOptionSymbol(firstLeg.matchKey, out var symbol)
-			? ParsingHelpers.ParseOptionSymbol(symbol)
-			: null;
+        // Parse all legs to determine strategy type
+        var parsedLegs = group.Select(g => (leg: g, parsed: MatchKeys.TryGetOptionSymbol(g.matchKey, out var symbol) ? ParsingHelpers.ParseOptionSymbol(symbol) : null)).Where(x => x.parsed != null).ToList();
 
-        if (parsed == null)
+        if (!parsedLegs.Any())
         {
             rows.AddRange(group.Select(g => g.row));
             return rows;
         }
 
-        var qty = group[0].row.Qty;
-        var side = group.Any(g => g.row.Side == Side.Buy) ? Side.Buy : Side.Sell;
+        var firstParsed = parsedLegs[0].parsed!;
+        var distinctExpiries = parsedLegs.Select(x => x.parsed!.ExpiryDate).Distinct().Count();
+        var distinctStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().Count();
 
-        // Calculate credits from previously closed short legs (rolls)
-        var closedCredits = CalculateClosedLegsCredits(allTrades, parsed.Root, parsed.Strike, parsed.CallPut);
+        var strategyKind = (distinctExpiries > 1, distinctStrikes > 1) switch
+        {
+            (true, false) => "Calendar",
+            (false, true) => "Vertical",
+            (true, true) => "Diagonal",
+            _ => "Strategy"
+        };
+
+        var qty = group[0].row.Qty;
+
+        // Calculate credits from previously closed short legs (calendars and diagonals roll short legs for premium)
+        var closedCredits = strategyKind is "Calendar" or "Diagonal" ? CalculateClosedLegsCredits(allTrades, firstParsed.Root, firstParsed.Strike, firstParsed.CallPut) : 0m;
 
         // Calculate net prices (long - short)
         var (netInitial, netAdjusted) = CalculateNetPrices(group, closedCredits);
+
+        // Determine side from net price: positive = debit (Buy), negative = credit (Sell)
+        var side = netInitial >= 0 ? Side.Buy : Side.Sell;
         var longestExpiry = group.Max(g => g.row.Expiry) ?? DateTime.MinValue;
 
         // Strategy summary row
-        rows.Add(new PositionRow(Instrument: $"{parsed.Root} {Formatters.FormatOptionDate(longestExpiry)}", Asset: Asset.OptionStrategy, OptionKind: "Calendar", Side: side, Qty: qty, AvgPrice: Math.Abs(netAdjusted), Expiry: longestExpiry, IsStrategyLeg: false, InitialAvgPrice: Math.Abs(netInitial), AdjustedAvgPrice: Math.Abs(netAdjusted)));
+        rows.Add(new PositionRow(Instrument: $"{firstParsed.Root} {Formatters.FormatOptionDate(longestExpiry)}", Asset: Asset.OptionStrategy, OptionKind: strategyKind, Side: side, Qty: qty, AvgPrice: Math.Abs(netAdjusted), Expiry: longestExpiry, IsStrategyLeg: false, InitialAvgPrice: Math.Abs(netInitial), AdjustedAvgPrice: Math.Abs(netAdjusted)));
 
-        // Add leg rows with adjusted prices (sorted by expiry descending)
-        foreach (var leg in group.OrderByDescending(g => g.row.Expiry))
+        // Add leg rows with adjusted prices (sorted by expiry descending, then strike descending)
+        foreach (var leg in group.OrderByDescending(g => g.row.Expiry).ThenByDescending(g => parsedLegs.FirstOrDefault(p => p.leg.matchKey == g.matchKey).parsed?.Strike ?? 0))
         {
             var initialPrice = leg.row.AvgPrice;
             var adjustedPrice = initialPrice;
