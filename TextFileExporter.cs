@@ -3,70 +3,69 @@ using System.Text.RegularExpressions;
 
 namespace WebullAnalytics;
 
-public static class TextFileExporter
+public static partial class TextFileExporter
 {
-    private const string LegPrefix = "    L- ";
+	private const string LegPrefix = "    L- ";
 
-    public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath)
-    {
-        // Create a string writer to capture the console output
-        var stringWriter = new StringWriter();
+	[GeneratedRegex(@"\x1B\[[0-9;]*[a-zA-Z]")]
+	private static partial Regex AnsiEscapeRegex();
 
-        // Create an ANSI console that writes to our string writer
-        var settings = new AnsiConsoleSettings
-        {
-            Ansi = AnsiSupport.Yes,
-            ColorSystem = ColorSystemSupport.Standard,
-            Out = new AnsiConsoleOutput(stringWriter),
-            Interactive = InteractionSupport.No
-        };
+	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath)
+	{
+		// Create a string writer to capture the console output
+		var stringWriter = new StringWriter();
 
-        var console = AnsiConsole.Create(settings);
+		// Create an ANSI console that writes to our string writer
+		var settings = new AnsiConsoleSettings
+		{
+			Ansi = AnsiSupport.Yes,
+			ColorSystem = ColorSystemSupport.Standard,
+			Out = new AnsiConsoleOutput(stringWriter),
+			Interactive = InteractionSupport.No
+		};
 
-        // Set a larger width to prevent wrapping
-        console.Profile.Width = 200;
+		var console = AnsiConsole.Create(settings);
 
-        // Render report table
-        console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, TableBorder.Ascii));
-        console.WriteLine();
+		// Set a larger width to prevent wrapping
+		console.Profile.Width = 200;
 
-        // Render positions table
-        if (positions.Count > 0)
-        {
-            console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, TableBorder.Ascii));
-            console.WriteLine();
-        }
-        else
-        {
-            console.WriteLine("No open positions.");
-        }
+		// Render report table
+		console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, TableBorder.Ascii));
+		console.WriteLine();
 
-        // Total fees
-        var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
-        console.WriteLine($"Total fees: {totalFees:0.00}");
+		// Render positions table
+		if (positions.Count > 0)
+		{
+			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, TableBorder.Ascii));
+			console.WriteLine();
+		}
+		else
+		{
+			console.WriteLine("No open positions.");
+		}
 
-        // Final P&L
-        console.Write("Final realized P&L: ");
-        console.Write(Formatters.FormatPnL(running));
-        console.WriteLine();
+		// Total fees
+		var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
+		console.WriteLine($"Total fees: {totalFees:0.00}");
 
-        // Final amount
-        console.Write("Final amount: ");
-        console.Write(Formatters.FormatMoney(initialAmount + running, initialAmount));
-        console.WriteLine();
+		// Final P&L
+		console.Write("Final realized P&L: ");
+		console.Write(Formatters.FormatPnL(running));
+		console.WriteLine();
 
-        // Get the rendered output and strip ANSI codes
-        var output = stringWriter.ToString();
-        var cleanOutput = StripAnsiCodes(output);
+		// Final amount
+		console.Write("Final amount: ");
+		console.Write(Formatters.FormatMoney(initialAmount + running, initialAmount));
+		console.WriteLine();
 
-        // Write to file
-        File.WriteAllText(outputPath, cleanOutput);
-        Console.WriteLine($"Text report exported to: {outputPath}");
-    }
+		// Get the rendered output and strip ANSI codes
+		var output = stringWriter.ToString();
+		var cleanOutput = StripAnsiCodes(output);
 
-    private static string StripAnsiCodes(string text)
-    {
-        // Remove ANSI escape sequences
-        return Regex.Replace(text, @"\x1B\[[0-9;]*[a-zA-Z]", string.Empty);
-    }
+		// Write to file
+		File.WriteAllText(outputPath, cleanOutput);
+		Console.WriteLine($"Text report exported to: {outputPath}");
+	}
+
+	private static string StripAnsiCodes(string text) => AnsiEscapeRegex().Replace(text, string.Empty);
 }
