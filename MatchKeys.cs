@@ -4,11 +4,9 @@ public static class MatchKeys
 {
 	public const string StockPrefix = "stock:";
 	public const string OptionPrefix = "option:";
-	public const string StrategyPrefix = "strategy:";
 
 	public static string Stock(string symbol) => $"{StockPrefix}{symbol}";
 	public static string Option(string symbol) => $"{OptionPrefix}{symbol}";
-	public static string Strategy(string keyRemainder) => $"{StrategyPrefix}{keyRemainder}";
 
 	public static bool TryGetOptionSymbol(string matchKey, out string symbol)
 	{

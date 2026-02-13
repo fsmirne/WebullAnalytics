@@ -77,7 +77,7 @@ public class Fee
 	public decimal AveragePrice { get; set; }
 	public decimal Amount { get; set; }
 	public decimal Fees { get; set; }
-};
+}
 
 /// <summary>
 /// Represents a position lot for FIFO accounting.
