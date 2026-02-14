@@ -136,6 +136,7 @@ class ReportCommand : Command<ReportSettings>
 				break;
 
 			default:
+				TerminalHelper.EnsureTerminalWidth();
 				TableRenderer.RenderReport(rows, positionRows, running, initialAmount);
 				break;
 		}
