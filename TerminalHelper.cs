@@ -7,7 +7,7 @@ namespace WebullAnalytics;
 /// </summary>
 static class TerminalHelper
 {
-	public const int MinimumWidth = 180;
+	public const int MinimumWidth = 185;
 
 	/// <summary>
 	/// Ensures the terminal is wide enough for report tables. Prompts the user to resize if not.
