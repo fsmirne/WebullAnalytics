@@ -36,6 +36,7 @@ public static class PositionTracker
 		var running = 0m;
 		var cash = initialAmount;
 		var rows = new List<ReportRow>();
+		var skippedParentSeqs = new HashSet<int>();
 
 		foreach (var trade in allTrades)
 		{
@@ -43,6 +44,15 @@ public static class PositionTracker
 
 			var fee = LookupFee(trade, allTrades, feeLookup);
 			var row = BuildReportRow(trade, realized, closedQty, fee, ref running, ref cash, initialAmount);
+
+			// Track skipped strategy parents so their legs can also be skipped
+			if (row == null && IsStrategyParent(trade))
+				skippedParentSeqs.Add(trade.Seq);
+
+			// Skip strategy legs whose parent expiration was skipped (no positions to close)
+			if (row != null && trade.ParentStrategySeq.HasValue && skippedParentSeqs.Contains(trade.ParentStrategySeq.Value))
+				row = null;
+
 			if (row != null)
 				rows.Add(row);
 		}
@@ -74,15 +84,44 @@ public static class PositionTracker
 		if (!IsStrategyParent(trade))
 			return ApplyTrade(positions, trade);
 
+		// Strategy parent expiration: expire each leg and sum P&L
+		if (trade.Side == Side.Expire)
+		{
+			var legs = allTrades.Where(t => t.ParentStrategySeq == trade.Seq).ToList();
+
+			if (legs.Count >= 2)
+			{
+				// Expire legs and compute combined P&L
+				var realized = 0m;
+				var maxLegClosed = 0;
+				foreach (var leg in legs)
+				{
+					var legLots = positions.GetValueOrDefault(leg.MatchKey, []);
+					var (_, legRealized, legClosed) = ApplyExpiration(legLots, leg.Multiplier);
+					realized += legRealized;
+					maxLegClosed = Math.Max(maxLegClosed, legClosed);
+					positions.Remove(leg.MatchKey);
+				}
+
+				// Clean up strategy parent lots (P&L already captured via legs)
+				positions.Remove(trade.MatchKey);
+				return (realized, maxLegClosed);
+			}
+
+			// No linked legs: just clean up parent lots, legs will be expired individually
+			positions.Remove(trade.MatchKey);
+			return (0m, 0);
+		}
+
 		// Strategy parent: calculate P&L and track position
 		var lots = positions.GetValueOrDefault(trade.MatchKey, new List<Lot>());
-		var (updatedLots, realized, closedQty) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
+		var (updatedLots, realized2, closedQty) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
 
 		// For SELL strategies with no direct P&L, calculate from legs (closing a spread)
 		// For BUY strategies (opening/rolling), don't count leg P&L - cost is in the spread price
-		if (realized == 0m && closedQty == 0 && trade.Side == Side.Sell)
+		if (realized2 == 0m && closedQty == 0 && trade.Side == Side.Sell)
 		{
-			realized = allTrades
+			realized2 = allTrades
 				.Where(t => t.ParentStrategySeq == trade.Seq)
 				.Sum(leg =>
 				{
@@ -97,7 +136,7 @@ public static class PositionTracker
 		else
 			positions.Remove(trade.MatchKey);
 
-		return (realized, closedQty);
+		return (realized2, closedQty);
 	}
 
 	/// <summary>
@@ -139,6 +178,7 @@ public static class PositionTracker
 	/// <summary>
 	/// Creates synthetic expiration trades for all options that have expired (before today).
 	/// These trades close out any remaining positions at $0.
+	/// Preserves strategy parent/leg relationships so expired spreads display as strategies.
 	/// </summary>
 	private static List<Trade> BuildExpirationTrades(List<Trade> trades)
 	{
@@ -147,13 +187,51 @@ public static class PositionTracker
 
 		var maxSeq = trades.Max(t => t.Seq);
 		var today = DateTime.Today;
+		var seq = maxSeq + 1;
 
-		// Get one trade per unique option (to extract metadata for expiration trade)
-		var uniqueOptions = trades.Where(t => t.Expiry.HasValue && t.Expiry.Value.Date < today).GroupBy(t => t.MatchKey).Select(g => g.First()).ToList();
+		// Get one trade per unique match key that has expired
+		var uniqueExpired = trades.Where(t => t.Expiry.HasValue && t.Expiry.Value.Date < today).GroupBy(t => t.MatchKey).Select(g => g.First()).ToList();
 
-		return uniqueOptions
-			.Select((trade, index) => new Trade(Seq: maxSeq + index + 1, Timestamp: trade.Expiry!.Value.Date + ExpirationTime, trade.Instrument, trade.MatchKey, trade.Asset, trade.OptionKind, Side: Side.Expire, Qty: 0, Price: 0m, trade.Multiplier, trade.Expiry))
-			.ToList();
+		// Build mapping: leg match key → parent match key (from original strategy trades)
+		var legToParentKey = new Dictionary<string, string>();
+		foreach (var trade in trades.Where(t => t.ParentStrategySeq.HasValue && t.Asset == Asset.Option))
+		{
+			var parent = trades.FirstOrDefault(t => t.Seq == trade.ParentStrategySeq!.Value);
+			if (parent != null)
+				legToParentKey.TryAdd(trade.MatchKey, parent.MatchKey);
+		}
+
+		var result = new List<Trade>();
+
+		// First pass: create strategy parent expirations and record their seq numbers
+		var parentInfo = new Dictionary<string, (int seq, DateTime? expiry)>();
+		foreach (var trade in uniqueExpired.Where(t => t.Asset == Asset.OptionStrategy))
+		{
+			var expSeq = seq++;
+			parentInfo[trade.MatchKey] = (expSeq, trade.Expiry);
+			result.Add(new Trade(Seq: expSeq, Timestamp: trade.Expiry!.Value.Date + ExpirationTime, trade.Instrument, trade.MatchKey, trade.Asset, trade.OptionKind, Side: Side.Expire, Qty: 0, Price: 0m, trade.Multiplier, trade.Expiry));
+		}
+
+		// Second pass: create option expirations, linking legs to their parent when both expire on the same date
+		foreach (var trade in uniqueExpired.Where(t => t.Asset == Asset.Option))
+		{
+			int? parentStrategySeq = null;
+			if (legToParentKey.TryGetValue(trade.MatchKey, out var parentMatchKey) && parentInfo.TryGetValue(parentMatchKey, out var info) && trade.Expiry?.Date == info.expiry?.Date)
+				parentStrategySeq = info.seq;
+
+			result.Add(new Trade(Seq: seq++, Timestamp: trade.Expiry!.Value.Date + ExpirationTime, trade.Instrument, trade.MatchKey, trade.Asset, trade.OptionKind, Side: Side.Expire, Qty: 0, Price: 0m, trade.Multiplier, trade.Expiry, ParentStrategySeq: parentStrategySeq));
+		}
+
+		// Unlink parents with fewer than 2 linked legs (e.g., calendar with only one leg expiring)
+		var legsPerParent = result.Where(t => t.ParentStrategySeq.HasValue).GroupBy(t => t.ParentStrategySeq!.Value).ToDictionary(g => g.Key, g => g.Count());
+		result = result.Select(t =>
+		{
+			if (t.ParentStrategySeq.HasValue && legsPerParent.GetValueOrDefault(t.ParentStrategySeq.Value) < 2)
+				return t with { ParentStrategySeq = null };
+			return t;
+		}).ToList();
+
+		return result;
 	}
 
 	/// <summary>
