@@ -58,6 +58,10 @@ class ReportSettings : CommandSettings
 	[CommandOption("--data-fees")]
 	public string? DataFees { get; set; }
 
+	[Description("Path to a JSONL orders file (unified trades + fees)")]
+	[CommandOption("--data-orders")]
+	public string? DataOrders { get; set; }
+
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
 
 	public override ValidationResult Validate()
@@ -84,36 +88,42 @@ class ReportCommand : Command<ReportSettings>
 {
 	public override int Execute(CommandContext context, ReportSettings settings, CancellationToken cancellation)
 	{
-		if (settings.DataTrades == null)
-		{
-			Console.WriteLine("Error: --data-trades is required.");
-			return 1;
-		}
-
-		if (!File.Exists(settings.DataTrades))
-		{
-			Console.WriteLine($"Error: Trades file '{settings.DataTrades}' does not exist.");
-			return 1;
-		}
-
-		var trades = PositionTracker.LoadTradesFromFile(settings.DataTrades);
-
-		if (trades.Count == 0)
-		{
-			Console.WriteLine("No trades found.");
-			return 0;
-		}
-
-		// Load fee data if provided
+		List<Trade> trades;
 		Dictionary<(DateTime, Side, int), decimal>? feeLookup = null;
-		if (settings.DataFees != null)
+
+		if (settings.DataOrders != null)
 		{
-			if (!File.Exists(settings.DataFees))
+			if (!File.Exists(settings.DataOrders))
 			{
-				Console.WriteLine($"Error: Fees file '{settings.DataFees}' does not exist.");
+				Console.WriteLine($"Error: Orders file '{settings.DataOrders}' does not exist.");
 				return 1;
 			}
-			feeLookup = CsvParser.ParseFeeCsv(settings.DataFees);
+			(trades, feeLookup) = JsonlParser.ParseOrdersJsonl(settings.DataOrders);
+		}
+		else if (settings.DataTrades != null)
+		{
+			if (!File.Exists(settings.DataTrades))
+			{
+				Console.WriteLine($"Error: Trades file '{settings.DataTrades}' does not exist.");
+				return 1;
+			}
+
+			trades = PositionTracker.LoadTradesFromFile(settings.DataTrades);
+
+			if (settings.DataFees != null)
+			{
+				if (!File.Exists(settings.DataFees))
+				{
+					Console.WriteLine($"Error: Fees file '{settings.DataFees}' does not exist.");
+					return 1;
+				}
+				feeLookup = CsvParser.ParseFeeCsv(settings.DataFees);
+			}
+		}
+		else
+		{
+			Console.WriteLine("Error: --data-trades or --data-orders is required.");
+			return 1;
 		}
 
 		var initialAmount = settings.InitialAmount;

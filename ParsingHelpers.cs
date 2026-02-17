@@ -17,18 +17,19 @@ public static partial class ParsingHelpers
 	private static partial Regex NonNumericRegex();
 
 	// Maps strategy name keywords to standardized strategy types
-	private static readonly Dictionary<string, string> StrategyKeywords = new(StringComparer.OrdinalIgnoreCase)
-	{
-		["butterfly"] = "Butterfly",
-		["calendar"] = "Calendar",
-		["condor"] = "Condor",
-		["diagonal"] = "Diagonal",
-		["ironcondor"] = "IronCondor",
-		["spread"] = "Spread",
-		["straddle"] = "Straddle",
-		["strangle"] = "Strangle",
-		["vertical"] = "Vertical"
-	};
+	// Ordered longest-first so "ironcondor" matches before "condor"
+	private static readonly (string keyword, string kind)[] StrategyKeywords =
+	[
+		("butterfly", "Butterfly"),
+		("calendar", "Calendar"),
+		("ironcondor", "IronCondor"),
+		("condor", "Condor"),
+		("diagonal", "Diagonal"),
+		("spread", "Spread"),
+		("straddle", "Straddle"),
+		("strangle", "Strangle"),
+		("vertical", "Vertical"),
+	];
 
 	/// <summary>
 	/// Tries to parse a decimal value from Webull exports.
@@ -75,6 +76,6 @@ public static partial class ParsingHelpers
 	{
 		var normalized = name.Replace(" ", "");
 
-		return StrategyKeywords.Where(kvp => normalized.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase)).Select(kvp => kvp.Value).FirstOrDefault() ?? "Strategy";
+		return StrategyKeywords.Where(x => normalized.Contains(x.keyword, StringComparison.OrdinalIgnoreCase)).Select(x => x.kind).FirstOrDefault() ?? "Strategy";
 	}
 }
