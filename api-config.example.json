@@ -1,0 +1,20 @@
+{
+	"secAccountId": "YOUR_ACCOUNT_ID",
+	"tickerIds": [123456789, 987654321],
+	"startDate": "2026-01-01",
+	"endDate": "2026-12-31",
+	"limit": 10000,
+	"headers": {
+		"access_token": "dc_us_tech1.xxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+		"did": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+		"lzone": "dc_core_r001",
+		"osv": "xxxx",
+		"ph": "Windows Edge",
+		"t_time": "1234567890123",
+		"t_token": "xxxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+		"tz": "America/New_York",
+		"ver": "6.3.1",
+		"x-s": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+		"x-sv": "xxxxxxxx"
+	}
+}

@@ -64,6 +64,12 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
+REM Create data directory if it doesn't exist
+if not exist "%INSTALL_DIR%\data" (
+    echo Creating data directory...
+    mkdir "%INSTALL_DIR%\data"
+)
+
 REM Add install directory to user PATH if not already present
 echo Checking PATH...
 

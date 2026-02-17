@@ -1,9 +1,10 @@
 # WebullAnalytics
 
-A C# command-line tool for analyzing trading performance from Webull CSV order exports. Generates comprehensive realized P&L reports with support for stocks, options, and complex multi-leg option strategies.
+A C# command-line tool for analyzing trading performance from Webull order data. Generates comprehensive realized P&L reports with support for stocks, options, and complex multi-leg option strategies.
 
 ## Features
 
+- **Webull API Integration**: Fetch order data directly from the Webull API
 - **FIFO Lot-Based Position Tracking**: Accurately tracks positions using First-In-First-Out lot accounting
 - **Option Strategy Support**: Recognizes and properly handles multi-leg strategies including:
   - Calendar Spreads
@@ -13,7 +14,7 @@ A C# command-line tool for analyzing trading performance from Webull CSV order e
   - Straddles/Strangles
   - Vertical Spreads
 - **Calendar Roll Tracking**: Intelligently groups rolled positions and tracks adjusted cost basis
-- **Fee Tracking**: Optional fee CSV import for accurate net P&L after commissions and fees
+- **Fee Tracking**: Commissions and fees embedded in the order data
 - **Cash Tracking**: Tracks current cash in hand starting from an optional initial amount
 - **Multiple Output Modes**:
   - Console: Color-coded tables with detailed transaction history
@@ -63,18 +64,43 @@ The output will be in `bin\Release\net10.0\win-x64\publish\`.
 
 ## Usage
 
-### Basic Usage
+### Commands
+
+WebullAnalytics has two commands: `report` (generate a P&L report) and `fetch` (download order data from the Webull API).
+
+### Report Command
 
 ```bash
-WebullAnalytics --data-trades path/to/orders.csv
+# Generate a report using default data/orders.jsonl
+WebullAnalytics report
+
+# Fetch fresh data from the API, then generate the report
+WebullAnalytics report --fetch
+
+# Use Webull CSV exports as the source of truth (fees from JSONL if available)
+WebullAnalytics report --source export
+
+# Filter trades since a specific date
+WebullAnalytics report --since 2026-01-01
+
+# Export to Excel
+WebullAnalytics report --output excel
+
+# Set an initial portfolio amount to track cash
+WebullAnalytics report --initial-amount 10000
+
+# Combine options
+WebullAnalytics report --fetch --since 2026-01-01 --output excel --initial-amount 10000
 ```
 
-### Command-Line Options
+#### Report Options
 
 ```
 Options:
-  --data-trades <path>      Path to a CSV order export file (required)
-  --data-fees <path>        Path to a CSV file containing fee information per trade
+  --source <source>         Data source: 'api' or 'export' (default: api)
+  --data-orders <path>      Path to the JSONL orders file (default: data/orders.jsonl)
+  --fetch                   Fetch orders from the Webull API before generating the report
+  --config <path>           Path to the API config JSON file, used with --fetch (default: data/api-config.json)
   --since <date>            Include only trades on or after this date (YYYY-MM-DD format)
   --output <format>         Output format: 'console', 'excel', or 'text' (default: console)
   --excel-path <path>       Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)
@@ -83,74 +109,104 @@ Options:
   --help, -h                Show help message
 ```
 
-### Examples
+### Fetch Command
 
-**Console output from a trades file:**
 ```bash
-WebullAnalytics --data-trades "C:\MyTrades\Options_Orders.csv"
+# Fetch order data using default paths
+WebullAnalytics fetch
+
+# Custom config and output paths
+WebullAnalytics fetch --config my-config.json --output my-orders.jsonl
 ```
 
-**Include fee data for accurate net P&L:**
-```bash
-WebullAnalytics --data-trades orders.csv --data-fees fees.csv
+#### Fetch Options
+
+```
+Options:
+  --config <path>   Path to the API config JSON file (default: data/api-config.json)
+  --output <path>   Output path for the JSONL orders file (default: data/orders.jsonl)
+  --help, -h        Show help message
 ```
 
-**Set an initial portfolio amount to track cash:**
-```bash
-WebullAnalytics --data-trades orders.csv --initial-amount 10000
+## Data Sources
+
+The `--source` option controls which data source provides the trades:
+
+- **`api`** (default): Uses the JSONL orders file as the primary source. Trades, fees, and commissions all come from the API data. If Webull CSV exports are present in the same directory, their prices are used to correct sub-penny rounding in strategy parent prices.
+
+- **`export`**: Uses Webull CSV export files as the primary source. This gives exact prices matching Webull's accounting. If an `orders.jsonl` file exists in the same directory, its fee data is used to populate the fees column (CSV exports don't include fees).
+
+### JSONL Orders File
+
+A JSONL file where each line is a JSON object containing an `orderList` array for one ticker. This file is produced by the `fetch` command or can be manually exported.
+
+Each order includes the symbol, fill price, fill time, action (buy/sell), quantity, fees, and commission. Orders sharing the same `transactTime` are treated as legs of a single strategy.
+
+### Webull CSV Exports (Optional Price Override)
+
+If Webull CSV export files are present in the same directory as the JSONL file, their prices are automatically used to override the JSONL-computed values. This corrects sub-penny rounding differences in strategy parent prices that the API doesn't preserve.
+
+The recognized CSV files are:
+- `Webull_Orders_Records.csv`
+- `Webull_Orders_Records_Bonds.csv`
+- `Webull_Orders_Records_Options.csv`
+
+No configuration is needed. If the files exist, they're used; if not, the JSONL data is sufficient on its own.
+
+## API Configuration
+
+The `fetch` command and the `--fetch` flag on the report command require an API config file. This file contains your Webull session credentials and account information.
+
+### Setup
+
+1. Copy the example config:
+   ```bash
+   cp api-config.example.json data/api-config.json
+   ```
+
+2. Open your browser, log into [app.webull.com](https://app.webull.com/), and navigate to the P&L section.
+
+3. Open browser DevTools (F12), go to the Network tab, and look for requests to `profitloss/ticker/orderList`. Copy the header values from the request into your config file.
+
+### Config File Format
+
+```json
+{
+  "secAccountId": "YOUR_ACCOUNT_ID",
+  "tickerIds": [123456789, 987654321],
+  "startDate": "2026-01-01",
+  "endDate": "2026-12-31",
+  "limit": 10000,
+  "headers": {
+    "access_token": "dc_us_tech1.xxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "did": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "lzone": "dc_core_r001",
+    "osv": "xxxx",
+    "ph": "Windows Edge",
+    "t_time": "1234567890123",
+    "t_token": "xxxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "tz": "America/New_York",
+    "ver": "6.3.1",
+    "x-s": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "x-sv": "xxxxxxxx"
+  }
+}
 ```
 
-**Export to Excel with default filename:**
-```bash
-WebullAnalytics --data-trades orders.csv --output excel
-```
+### Config Fields
 
-**Export to Excel with custom path:**
-```bash
-WebullAnalytics --data-trades orders.csv --output excel --excel-path "January2026_Report.xlsx"
-```
+| Field | Description |
+|---|---|
+| `secAccountId` | Your Webull securities account ID (visible in the API request URL) |
+| `tickerIds` | Array of Webull ticker IDs to fetch. Each ticker produces one line in the JSONL output. Find these in the `tickerId` query parameter of the API requests in your browser's Network tab. |
+| `startDate` | Start of the date range to fetch (YYYY-MM-DD) |
+| `endDate` | End of the date range to fetch (YYYY-MM-DD) |
+| `limit` | Maximum number of orders to return per ticker (default: 10000) |
+| `headers` | Authentication and session headers copied from your browser. These are session-specific and will expire. |
 
-**Filter trades since a specific date:**
-```bash
-WebullAnalytics --data-trades orders.csv --since 2026-01-01 --output excel
-```
+### Session Tokens
 
-**Export to text file:**
-```bash
-WebullAnalytics --data-trades orders.csv --output text --text-path "January2026_Report.txt"
-```
-
-**Combine all options:**
-```bash
-WebullAnalytics --data-trades orders.csv --data-fees fees.csv --initial-amount 10000 --since 2026-01-01 --output excel
-```
-
-## Data Format
-
-### Trades CSV
-
-Provide your Webull CSV order export file via the `--data-trades` option. The tool determines whether the file contains stock or option orders based on the filename (files with "Options" in the name are parsed as option orders).
-
-Required columns:
-- **Side** - Buy or Sell
-- **Filled** - Filled quantity
-- **Avg Price** (or **Price**) - Average fill price
-- **Filled Time** (or **Placed Time**) - Timestamp of the fill
-- **Status** - Must be "Filled" (non-filled orders are skipped)
-- **Symbol** - Ticker symbol (for stocks) or OCC option symbol (for options)
-- **Name** - Strategy name (for multi-leg option strategies)
-- **Placed Time** - Used to associate strategy legs with their parent order
-
-### Fee CSV (Optional)
-
-Provide a separate fee CSV via `--data-fees` to include trading fees and commissions in the P&L report. Expected columns:
-- **Time** - Timestamp matching the trade
-- **Side** - Buy or Sell
-- **Quantity** - Trade quantity
-- **Avg Price** - Trade price
-- **Fees** - Fee amount for the trade
-
-Fees are matched to trades by timestamp, side and quantity. For multi-leg strategies, fees from individual legs are summed under the parent strategy.
+The `access_token`, `t_token`, `x-s`, and `x-sv` headers are session tokens that expire. When they expire, the API will return an error. To refresh them, log into Webull in your browser again and copy the updated values from the Network tab.
 
 ## Output Formats
 
@@ -272,34 +328,26 @@ This tool uses EPPlus configured for non-commercial use. For commercial use, you
 
 ## Troubleshooting
 
-**No trades found:**
-- Verify the CSV file path passed to `--data-trades` is correct
-- Ensure the CSV file is a Webull order export with the required columns
-- Check that orders have a "Filled" status
+**API fetch fails:**
+- Verify your `data/api-config.json` has valid session tokens
+- Session tokens expire; log into Webull in your browser and copy fresh values from the Network tab
+- The `x-s` header may be request-specific; try copying it from a recent request
 
-**Fee matching issues:**
-- Ensure the fee CSV timestamps, sides, quantities, and prices exactly match the trades CSV
-- Fees with no matching trade are silently ignored
+**No trades found:**
+- Verify the JSONL file exists at the expected path (default: `data/orders.jsonl`)
+- Run `WebullAnalytics fetch` to download fresh data
+- Check that the `tickerIds` in your config cover all tickers you trade
+
+**Incorrect P&L calculations:**
+- If using `--since`, note that only trades on or after this date are included; earlier context is not considered
+- Place Webull CSV exports in the same directory as the JSONL file for exact price matching
 
 **Excel export fails:**
 - Ensure the output directory is writable
 - Check that no other program has the Excel file open
 
-**Incorrect P&L calculations:**
-- If using `--since`, note that only trades on or after this date are included; earlier context is not considered
-- For options files, ensure the filename contains "Options" so they are parsed correctly
-
 **Invalid option errors:**
 - The tool uses strict parsing; any unrecognized command-line options will produce an error
-
-## Future Enhancements
-
-Potential features for future versions:
-- Support for other broker CSV formats
-- Unrealized P&L calculation with market data
-- Tax reporting (wash sales, short-term vs long-term gains)
-- Performance metrics (win rate, average gain/loss, etc.)
-- Multiple account support
 
 ## Contributing
 
