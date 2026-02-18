@@ -22,37 +22,56 @@ public static class ApiClient
 	{
 		using var client = new HttpClient();
 		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
+		var tmpPath = outputPath + ".tmp";
+		var wroteAny = false;
 
-		await using var writer = new StreamWriter(outputPath);
-
-		foreach (var tickerId in config.TickerIds)
+		try
 		{
-			var url = $"{OrderListUrl}?tickerId={tickerId}&startDate={config.StartDate}&endDate={config.EndDate}&limit={config.Limit}&secAccountId={config.SecAccountId}";
-			var request = new HttpRequestMessage(HttpMethod.Get, url);
+			await using var writer = new StreamWriter(tmpPath);
 
-			foreach (var (key, value) in DefaultHeaders)
-				request.Headers.TryAddWithoutValidation(key, value);
-			foreach (var (key, value) in config.Headers)
-				request.Headers.TryAddWithoutValidation(key, value);
-
-			var response = await client.SendAsync(request);
-			response.EnsureSuccessStatusCode();
-
-			var json = await response.Content.ReadAsStringAsync();
-
-			// Validate it's a JSON object with an orderList before writing
-			using var doc = JsonDocument.Parse(json);
-			if (!doc.RootElement.TryGetProperty("orderList", out var orderList))
+			foreach (var tickerId in config.TickerIds)
 			{
-				Console.WriteLine($"Warning: tickerId {tickerId} returned no orderList, skipping.");
-				continue;
+				var url = $"{OrderListUrl}?tickerId={tickerId}&startDate={config.StartDate}&endDate={config.EndDate}&limit={config.Limit}&secAccountId={config.SecAccountId}";
+				var request = new HttpRequestMessage(HttpMethod.Get, url);
+
+				foreach (var (key, value) in DefaultHeaders)
+					request.Headers.TryAddWithoutValidation(key, value);
+				foreach (var (key, value) in config.Headers)
+					request.Headers.TryAddWithoutValidation(key, value);
+
+				var response = await client.SendAsync(request);
+				response.EnsureSuccessStatusCode();
+
+				var json = await response.Content.ReadAsStringAsync();
+
+				// Validate it's a JSON object with an orderList before writing
+				using var doc = JsonDocument.Parse(json);
+				if (!doc.RootElement.TryGetProperty("orderList", out var orderList))
+				{
+					Console.WriteLine($"Warning: tickerId {tickerId} returned no orderList, skipping.");
+					continue;
+				}
+
+				Console.WriteLine($"Fetched tickerId {tickerId}: {orderList.GetArrayLength()} orders");
+
+				// Write compact single-line JSON (one ticker per line)
+				await writer.WriteLineAsync(json);
+				wroteAny = true;
 			}
-
-			Console.WriteLine($"Fetched tickerId {tickerId}: {orderList.GetArrayLength()} orders");
-
-			// Write compact single-line JSON (one ticker per line)
-			await writer.WriteLineAsync(json);
 		}
+		catch
+		{
+			try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+			throw;
+		}
+
+		if (!wroteAny)
+		{
+			try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+			throw new InvalidOperationException("No valid orderList responses were returned; refusing to overwrite existing orders file.");
+		}
+
+		File.Move(tmpPath, outputPath, overwrite: true);
 	}
 }
 
