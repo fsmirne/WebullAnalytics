@@ -9,16 +9,16 @@ public static class TableRenderer
 {
 	private const string LegPrefix = "  └─ ";
 
-	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount = 0m)
+	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount = 0m, bool simplified = false)
 	{
 		var console = AnsiConsole.Console;
 
-		console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount));
+		console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, simplified: simplified));
 		console.WriteLine();
 
 		if (positions.Count > 0)
 		{
-			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix));
+			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, simplified: simplified));
 			console.WriteLine();
 		}
 		else

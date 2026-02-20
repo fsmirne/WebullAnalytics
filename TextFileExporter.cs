@@ -10,7 +10,7 @@ public static partial class TextFileExporter
 	[GeneratedRegex(@"\x1B\[[0-9;]*[a-zA-Z]")]
 	private static partial Regex AnsiEscapeRegex();
 
-	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath)
+	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified = false)
 	{
 		// Create a string writer to capture the console output
 		var stringWriter = new StringWriter();
@@ -30,13 +30,13 @@ public static partial class TextFileExporter
 		console.Profile.Width = 200;
 
 		// Render report table
-		console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, TableBorder.Ascii));
+		console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, TableBorder.Ascii, simplified));
 		console.WriteLine();
 
 		// Render positions table
 		if (positions.Count > 0)
 		{
-			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, TableBorder.Ascii));
+			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, TableBorder.Ascii, simplified));
 			console.WriteLine();
 		}
 		else

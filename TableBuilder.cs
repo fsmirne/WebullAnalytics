@@ -1,4 +1,5 @@
 using Spectre.Console;
+using Spectre.Console.Rendering;
 
 namespace WebullAnalytics;
 
@@ -10,7 +11,7 @@ public static class TableBuilder
 {
 	private static string FormatFee(decimal fees) => fees > 0 ? fees.ToString("0.00") : "-";
 
-	public static Table BuildReportTable(List<ReportRow> rows, string legPrefix, decimal initialAmount = 0m, TableBorder? border = null)
+	public static Table BuildReportTable(List<ReportRow> rows, string legPrefix, decimal initialAmount = 0m, TableBorder? border = null, bool simplified = false)
 	{
 		var table = new Table { Title = new TableTitle("Realized P&L by Transaction") };
 		if (border != null)
@@ -20,15 +21,15 @@ public static class TableBuilder
 
 		table.AddColumn(new TableColumn("Date").LeftAligned());
 		table.AddColumn(new TableColumn("Instrument").LeftAligned());
-		table.AddColumn(new TableColumn("Asset").LeftAligned());
-		table.AddColumn(new TableColumn("Option").LeftAligned());
+		if (!simplified) table.AddColumn(new TableColumn("Asset").LeftAligned());
+		if (!simplified) table.AddColumn(new TableColumn("Option").LeftAligned());
 		table.AddColumn(new TableColumn("Side").LeftAligned());
 		table.AddColumn(new TableColumn("Qty").RightAligned());
 		table.AddColumn(new TableColumn("Price").RightAligned());
 		table.AddColumn(new TableColumn("Fees").RightAligned());
-		table.AddColumn(new TableColumn("Closed Qty").RightAligned());
+		if (!simplified) table.AddColumn(new TableColumn("Closed Qty").RightAligned());
 		table.AddColumn(new TableColumn("Realized P&L").RightAligned());
-		table.AddColumn(new TableColumn("Running P&L").RightAligned());
+		if (!simplified) table.AddColumn(new TableColumn("Running P&L").RightAligned());
 		table.AddColumn(new TableColumn("Cash").RightAligned());
 		table.AddColumn(new TableColumn("Total").RightAligned());
 
@@ -36,46 +37,50 @@ public static class TableBuilder
 		{
 			if (row.IsStrategyLeg)
 			{
-				table.AddRow(
+				var cells = new List<IRenderable>
+				{
 					new Text(""),
 					new Text($"{legPrefix}{row.Instrument}"),
-					new Text(row.Asset.DisplayName()),
-					new Text(row.OptionKind),
-					new Text(row.Side.ToString()),
-					new Text(Formatters.FormatQty(row.Qty)),
-					new Text(Formatters.FormatPrice(row.Price, row.Asset)),
-					new Text(FormatFee(row.Fees)),
-					new Text("-"),
-					new Text(""),
-					new Text(""),
-					new Text(""),
-					new Text("")
-				);
+				};
+				if (!simplified) cells.Add(new Text(row.Asset.DisplayName()));
+				if (!simplified) cells.Add(new Text(row.OptionKind));
+				cells.Add(new Text(row.Side.ToString()));
+				cells.Add(new Text(Formatters.FormatQty(row.Qty)));
+				cells.Add(new Text(Formatters.FormatPrice(row.Price, row.Asset)));
+				cells.Add(new Text(FormatFee(row.Fees)));
+				if (!simplified) cells.Add(new Text("-"));
+				cells.Add(new Text(""));
+				if (!simplified) cells.Add(new Text(""));
+				cells.Add(new Text(""));
+				cells.Add(new Text(""));
+				table.AddRow(cells.ToArray());
 			}
 			else
 			{
-				table.AddRow(
+				var cells = new List<IRenderable>
+				{
 					new Text(row.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")),
 					new Text(row.Instrument),
-					new Text(row.Asset.DisplayName()),
-					new Text(row.OptionKind),
-					new Text(row.Side.ToString()),
-					new Text(Formatters.FormatQty(row.Qty)),
-					new Text(Formatters.FormatPrice(row.Price, row.Asset)),
-					new Text(FormatFee(row.Fees)),
-					new Text(Formatters.FormatQty(row.ClosedQty)),
-					Formatters.FormatPnL(row.Realized),
-					Formatters.FormatPnL(row.Running),
-					Formatters.FormatMoney(row.Cash, 0m),
-					Formatters.FormatMoney(row.Total, initialAmount)
-				);
+				};
+				if (!simplified) cells.Add(new Text(row.Asset.DisplayName()));
+				if (!simplified) cells.Add(new Text(row.OptionKind));
+				cells.Add(new Text(row.Side.ToString()));
+				cells.Add(new Text(Formatters.FormatQty(row.Qty)));
+				cells.Add(new Text(Formatters.FormatPrice(row.Price, row.Asset)));
+				cells.Add(new Text(FormatFee(row.Fees)));
+				if (!simplified) cells.Add(new Text(Formatters.FormatQty(row.ClosedQty)));
+				cells.Add(Formatters.FormatPnL(row.Realized));
+				if (!simplified) cells.Add(Formatters.FormatPnL(row.Running));
+				cells.Add(Formatters.FormatMoney(row.Cash, 0m));
+				cells.Add(Formatters.FormatMoney(row.Total, initialAmount));
+				table.AddRow(cells.ToArray());
 			}
 		}
 
 		return table;
 	}
 
-	public static Table BuildPositionsTable(List<PositionRow> rows, string legPrefix, TableBorder? border = null)
+	public static Table BuildPositionsTable(List<PositionRow> rows, string legPrefix, TableBorder? border = null, bool simplified = false)
 	{
 		var table = new Table { Title = new TableTitle("Open Positions") };
 		if (border != null)
@@ -84,8 +89,8 @@ public static class TableBuilder
 		table.Expand = true;
 
 		table.AddColumn(new TableColumn("Instrument").LeftAligned());
-		table.AddColumn(new TableColumn("Asset").LeftAligned());
-		table.AddColumn(new TableColumn("Option").LeftAligned());
+		if (!simplified) table.AddColumn(new TableColumn("Asset").LeftAligned());
+		if (!simplified) table.AddColumn(new TableColumn("Option").LeftAligned());
 		table.AddColumn(new TableColumn("Side").LeftAligned());
 		table.AddColumn(new TableColumn("Qty").RightAligned());
 		table.AddColumn(new TableColumn("Init Price").RightAligned());
@@ -98,16 +103,15 @@ public static class TableBuilder
 			var adjPrice = row.AdjustedAvgPrice.HasValue ? Formatters.FormatPrice(row.AdjustedAvgPrice.Value, row.Asset) : "-";
 			var instrument = row.IsStrategyLeg ? $"{legPrefix}{row.Instrument}" : row.Instrument;
 
-			table.AddRow(
-				new Text(instrument),
-				new Text(row.Asset.DisplayName()),
-				new Text(row.OptionKind),
-				new Text(row.Side.ToString()),
-				new Text(Formatters.FormatQty(row.Qty)),
-				new Text(initPrice),
-				new Text(adjPrice),
-				new Text(Formatters.FormatExpiry(row.Expiry))
-			);
+			var cells = new List<IRenderable> { new Text(instrument) };
+			if (!simplified) cells.Add(new Text(row.Asset.DisplayName()));
+			if (!simplified) cells.Add(new Text(row.OptionKind));
+			cells.Add(new Text(row.Side.ToString()));
+			cells.Add(new Text(Formatters.FormatQty(row.Qty)));
+			cells.Add(new Text(initPrice));
+			cells.Add(new Text(adjPrice));
+			cells.Add(new Text(Formatters.FormatExpiry(row.Expiry)));
+			table.AddRow(cells.ToArray());
 		}
 
 		return table;

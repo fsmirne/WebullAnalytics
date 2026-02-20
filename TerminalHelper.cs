@@ -7,27 +7,30 @@ namespace WebullAnalytics;
 /// </summary>
 static class TerminalHelper
 {
-	public const int MinimumWidth = 185;
+	public const int DetailedMinWidth = 185;
+	public const int SimplifiedMinWidth = 130;
 
 	/// <summary>
 	/// Ensures the terminal is wide enough for report tables. Prompts the user to resize if not.
 	/// Returns true in all cases (resize success, user declined, or detection failure) so rendering always proceeds.
 	/// </summary>
-	public static bool EnsureTerminalWidth()
+	public static bool EnsureTerminalWidth(bool simplified = false)
 	{
+		var minimumWidth = simplified ? SimplifiedMinWidth : DetailedMinWidth;
+
 		int currentWidth;
 		try { currentWidth = Console.WindowWidth; }
 		catch { return true; } // Can't determine width (e.g. WSL interop, piped output), proceed optimistically
 
-		if (currentWidth >= MinimumWidth)
+		if (currentWidth >= minimumWidth)
 			return true;
 
-		var proceed = AnsiConsole.Confirm($"Your terminal is [yellow]{currentWidth}[/] columns wide. This report displays best at [green]{MinimumWidth}+[/] columns. Expand terminal to {MinimumWidth} columns?", defaultValue: true);
+		var proceed = AnsiConsole.Confirm($"Your terminal is [yellow]{currentWidth}[/] columns wide. This report displays best at [green]{minimumWidth}+[/] columns. Expand terminal to {minimumWidth} columns?", defaultValue: true);
 
 		if (!proceed)
 			return true;
 
-		if (TryResize(MinimumWidth, Console.WindowHeight))
+		if (TryResize(minimumWidth, Console.WindowHeight))
 			return true;
 
 		AnsiConsole.MarkupLine("[yellow]Warning:[/] Could not resize terminal. Report may appear wrapped.");
