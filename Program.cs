@@ -81,6 +81,13 @@ class ReportSettings : CommandSettings
 	[DefaultValue(0)]
 	public decimal InitialAmount { get; set; } = 0m;
 
+	[Description("Report view: 'detailed' (all columns, default) or 'simplified' (hides Asset, Option, Closed Qty, Realized P&L)")]
+	[CommandOption("--view")]
+	[DefaultValue("detailed")]
+	public string View { get; set; } = "detailed";
+
+	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
+
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
 
 	public override ValidationResult Validate()
@@ -101,6 +108,10 @@ class ReportSettings : CommandSettings
 		var format = OutputFormat.ToLowerInvariant();
 		if (format is not ("console" or "excel" or "text"))
 			return ValidationResult.Error("--output must be 'console', 'excel', or 'text'");
+
+		var view = View.ToLowerInvariant();
+		if (view is not ("detailed" or "simplified"))
+			return ValidationResult.Error("--view must be 'detailed' or 'simplified'");
 
 		return ValidationResult.Success();
 	}
@@ -219,12 +230,12 @@ class ReportCommand : AsyncCommand<ReportSettings>
 
 			case "text":
 				var textPath = settings.TextPath ?? $"WebullAnalytics_{dateStr}.txt";
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, textPath);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, textPath, settings.Simplified);
 				break;
 
 			default:
-				TerminalHelper.EnsureTerminalWidth();
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount);
+				TerminalHelper.EnsureTerminalWidth(settings.Simplified);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified);
 				break;
 		}
 
