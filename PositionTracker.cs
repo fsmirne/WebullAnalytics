@@ -2,7 +2,7 @@ namespace WebullAnalytics;
 
 /// <summary>
 /// Tracks option and stock positions, calculates realized P&L, and builds reports.
-/// Uses FIFO (First-In-First-Out) accounting for matching lots.
+/// Uses FIFO (First-In-First-Out) accounting for P&L matching and average cost method for position display.
 /// </summary>
 public static class PositionTracker
 {
@@ -319,15 +319,48 @@ public static class PositionTracker
 	/// </summary>
 	public static List<PositionRow> BuildPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades)
 	{
-		var allPositions = BuildRawPositionRows(positions, tradeIndex);
+		var avgCosts = ComputeAverageCosts(allTrades);
+		var allPositions = BuildRawPositionRows(positions, tradeIndex, avgCosts);
 		var grouped = GroupIntoStrategies(allPositions);
 		return BuildFinalPositionRows(grouped, allTrades);
 	}
 
 	/// <summary>
-	/// Converts raw position data (lots) into position rows with calculated averages.
+	/// Computes average cost per position using the average cost method (matching Webull's display).
+	/// Opening trades update the weighted average; closing trades leave it unchanged.
 	/// </summary>
-	private static List<(string matchKey, PositionRow row, Trade? trade)> BuildRawPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex)
+	private static Dictionary<string, decimal> ComputeAverageCosts(List<Trade> allTrades)
+	{
+		var state = new Dictionary<string, (int qty, decimal avg)>();
+
+		foreach (var trade in allTrades.Where(t => t.Side is Side.Buy or Side.Sell && t.Asset != Asset.OptionStrategy).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq))
+		{
+			var key = trade.MatchKey;
+			var (qty, avg) = state.GetValueOrDefault(key);
+
+			var tradeSign = trade.Side == Side.Buy ? 1 : -1;
+			var newQty = qty + tradeSign * trade.Qty;
+			var isOpening = qty == 0 || (qty > 0 && trade.Side == Side.Buy) || (qty < 0 && trade.Side == Side.Sell);
+
+			if (isOpening)
+				avg = (Math.Abs(qty) * avg + trade.Qty * trade.Price) / Math.Abs(newQty);
+			else if (newQty == 0)
+				avg = 0m;
+			else if ((qty > 0 && newQty < 0) || (qty < 0 && newQty > 0))
+				avg = trade.Price;
+			// else: partial close, avg stays the same
+
+			state[key] = (newQty, avg);
+		}
+
+		return state.Where(kvp => kvp.Value.qty != 0).ToDictionary(kvp => kvp.Key, kvp => kvp.Value.avg);
+	}
+
+	/// <summary>
+	/// Converts raw position data (lots) into position rows with calculated averages.
+	/// Uses average cost method for display prices (matching broker display).
+	/// </summary>
+	private static List<(string matchKey, PositionRow row, Trade? trade)> BuildRawPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, Dictionary<string, decimal> avgCosts)
 	{
 		var result = new List<(string matchKey, PositionRow row, Trade? trade)>();
 
@@ -343,7 +376,7 @@ public static class PositionTracker
 				continue;
 
 			var totalQty = lots.Sum(l => l.Qty);
-			var avgPrice = lots.Sum(l => l.Price * l.Qty) / totalQty;
+			var avgPrice = avgCosts.GetValueOrDefault(matchKey, lots.Sum(l => l.Price * l.Qty) / totalQty);
 
 			var row = new PositionRow(Instrument: trade?.Instrument ?? matchKey, Asset: trade?.Asset ?? Asset.Stock, OptionKind: !string.IsNullOrEmpty(trade?.OptionKind) ? trade.OptionKind : "-", Side: lots[0].Side, Qty: totalQty, AvgPrice: avgPrice, Expiry: trade?.Expiry, IsStrategyLeg: false, MatchKey: matchKey);
 
@@ -510,7 +543,8 @@ public static class PositionTracker
 
 	/// <summary>
 	/// Builds rows for a multi-leg strategy (calendar, vertical, or diagonal spread).
-	/// Creates a summary row plus individual leg rows with adjusted prices.
+	/// Creates a summary row plus individual leg rows. For calendars/diagonals, the adjusted
+	/// price is the exact break-even computed from total strategy-level cash flows.
 	/// </summary>
 	private static List<PositionRow> BuildStrategyRows(List<(string matchKey, PositionRow row, Trade? trade)> group, List<Trade> allTrades)
 	{
@@ -539,11 +573,21 @@ public static class PositionTracker
 
 		var qty = group[0].row.Qty;
 
-		// Calculate credits from previously closed short legs (calendars and diagonals roll short legs for premium)
-		var closedCredits = strategyKind is "Calendar" or "Diagonal" ? CalculateClosedLegsCredits(allTrades, firstParsed.Root, firstParsed.Strike, firstParsed.CallPut) : 0m;
+		// Calculate net initial price from average cost of each leg
+		var netInitial = group.Sum(leg => leg.row.Side == Side.Buy ? leg.row.AvgPrice : -leg.row.AvgPrice);
 
-		// Calculate net prices (long - short)
-		var (netInitial, netAdjusted) = CalculateNetPrices(group, closedCredits);
+		// For calendars/diagonals, compute adjusted price from total cash flows (exact break-even).
+		// For other strategies, adjusted = initial (no roll activity to account for).
+		var netAdjusted = netInitial;
+		if (strategyKind is "Calendar" or "Diagonal")
+		{
+			var totalNetDebit = CalculateTotalNetDebit(allTrades, firstParsed.Root, firstParsed.Strike, firstParsed.CallPut);
+			netAdjusted = totalNetDebit / (qty * 100m);
+		}
+
+		// The per-leg adjustment = difference between initial and adjusted at the strategy level.
+		// Applied entirely to the long leg; short leg stays at its average cost.
+		var longLegAdjustment = netInitial - netAdjusted;
 
 		// Determine side from net price: positive = debit (Buy), negative = credit (Sell)
 		var side = netInitial >= 0 ? Side.Buy : Side.Sell;
@@ -556,11 +600,7 @@ public static class PositionTracker
 		foreach (var leg in group.OrderByDescending(g => g.row.Expiry).ThenByDescending(g => parsedLegs.FirstOrDefault(p => p.leg.matchKey == g.matchKey).parsed?.Strike ?? 0))
 		{
 			var initialPrice = leg.row.AvgPrice;
-			var adjustedPrice = initialPrice;
-
-			// Reduce long leg cost basis by credits from closed short legs
-			if (leg.row.Side == Side.Buy && closedCredits > 0)
-				adjustedPrice = AdjustPriceForCredits(initialPrice, closedCredits, leg.row.Qty);
+			var adjustedPrice = leg.row.Side == Side.Buy ? initialPrice - longLegAdjustment : initialPrice;
 
 			rows.Add(leg.row with { IsStrategyLeg = true, InitialAvgPrice = initialPrice, AdjustedAvgPrice = adjustedPrice });
 		}
@@ -569,100 +609,20 @@ public static class PositionTracker
 	}
 
 	/// <summary>
-	/// Calculates net initial and adjusted prices for a calendar spread.
-	/// Net price = sum of long prices - sum of short prices.
+	/// Computes total net debit (cash spent minus cash received) from strategy parent trades
+	/// for all calendars/diagonals at a given underlying/strike/type. Matches strategy parents
+	/// by their match key pattern (same root, same legs key across all expiration dates).
+	/// This gives the exact break-even basis for positions rolled through multiple short expirations.
 	/// </summary>
-	private static (decimal initial, decimal adjusted) CalculateNetPrices(List<(string matchKey, PositionRow row, Trade? trade)> group, decimal closedCredits)
+	private static decimal CalculateTotalNetDebit(List<Trade> allTrades, string root, decimal strike, string callPut)
 	{
-		var netInitial = 0m;
-		var netAdjusted = 0m;
+		var strikeStr = Formatters.FormatQty(strike);
+		var legsKeySuffix = $":{callPut}{strikeStr},{callPut}{strikeStr}";
+		var rootSegment = $":{root}:";
 
-		foreach (var leg in group)
-		{
-			var initial = leg.row.AvgPrice;
-			var adjusted = initial;
-
-			if (leg.row.Side == Side.Buy && closedCredits > 0)
-				adjusted = AdjustPriceForCredits(initial, closedCredits, leg.row.Qty);
-
-			if (leg.row.Side == Side.Buy)
-			{
-				netInitial += initial;
-				netAdjusted += adjusted;
-			}
-			else
-			{
-				netInitial -= initial;
-				netAdjusted -= adjusted;
-			}
-		}
-
-		return (netInitial, netAdjusted);
-	}
-
-	/// <summary>
-	/// Adjusts a price by subtracting credits earned per share from rolled short legs.
-	/// </summary>
-	private static decimal AdjustPriceForCredits(decimal price, decimal credits, decimal qty) => price - credits / (qty * 100m);
-
-	/// <summary>
-	/// Calculates total credits from closed short legs for a given underlying/strike/type.
-	/// Used to adjust the cost basis of long legs in calendar rolls.
-	/// Tracks short-side P&L per cycle (a cycle ends when lots hit zero at an expiry).
-	/// Only positive short cycles and partial short closes count as credits.
-	/// </summary>
-	private static decimal CalculateClosedLegsCredits(List<Trade> allTrades, string root, decimal strike, string callPut)
-	{
-		// Find all strategy leg trades matching this underlying/strike/type
-		var matchingLegs = allTrades
-			.Where(t => t.Asset == Asset.Option && t.ParentStrategySeq.HasValue)
-			.Select(t => (trade: t, parsed: MatchKeys.TryGetOptionSymbol(t.MatchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
-			.Where(x => x.parsed != null && x.parsed.Root == root && x.parsed.Strike == strike && x.parsed.CallPut == callPut)
-			.OrderBy(x => x.trade.Timestamp)
-			.ToList();
-
-		// Track lots and short-side P&L per cycle per expiration date
-		var lotsByExpiry = new Dictionary<DateTime, List<Lot>>();
-		var shortPnlByExpiry = new Dictionary<DateTime, decimal>();
-		var totalCredits = 0m;
-
-		foreach (var (trade, parsed) in matchingLegs)
-		{
-			var expiry = parsed!.ExpiryDate;
-
-			if (!lotsByExpiry.ContainsKey(expiry))
-			{
-				lotsByExpiry[expiry] = new List<Lot>();
-				shortPnlByExpiry[expiry] = 0m;
-			}
-
-			var lots = lotsByExpiry[expiry];
-			var (updatedLots, realized, _) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
-
-			// Only track realized P&L from Buy trades (closing short positions)
-			if (trade.Side == Side.Buy && realized != 0)
-				shortPnlByExpiry[expiry] += realized;
-
-			lotsByExpiry[expiry] = updatedLots;
-
-			// Cycle complete - position fully closed at this expiry
-			if (!updatedLots.Any())
-			{
-				var cyclePnl = shortPnlByExpiry[expiry];
-				if (cyclePnl > 0)
-					totalCredits += cyclePnl;
-				shortPnlByExpiry[expiry] = 0m; // Reset for potential next cycle
-			}
-		}
-
-		// Add credits from partially closed short positions (still have open lots)
-		foreach (var (_, pnl) in shortPnlByExpiry)
-		{
-			if (pnl > 0)
-				totalCredits += pnl;
-		}
-
-		return totalCredits;
+		return allTrades
+			.Where(t => t.Asset == Asset.OptionStrategy && t.Side is Side.Buy or Side.Sell && t.MatchKey.Contains(rootSegment) && t.MatchKey.EndsWith(legsKeySuffix))
+			.Sum(t => (t.Side == Side.Buy ? 1m : -1m) * t.Qty * t.Price * t.Multiplier);
 	}
 
 	/// <summary>

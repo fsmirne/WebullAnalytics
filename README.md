@@ -5,7 +5,7 @@ A C# command-line tool for analyzing trading performance from Webull order data.
 ## Features
 
 - **Webull API Integration**: Fetch order data directly from the Webull API
-- **FIFO Lot-Based Position Tracking**: Accurately tracks positions using First-In-First-Out lot accounting
+- **Position Tracking**: FIFO lot accounting for P&L calculations, average cost method for position display (matching Webull)
 - **Option Strategy Support**: Recognizes and properly handles multi-leg strategies including:
   - Calendar Spreads
   - Diagonals
@@ -106,6 +106,8 @@ Options:
   --excel-path <path>       Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)
   --text-path <path>        Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
+  --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
+  --iv <volatility>         Implied volatility for break-even analysis (annual %, e.g., 50 for 50%)
   --help, -h                Show help message
 ```
 
@@ -229,8 +231,8 @@ The console output displays:
 
 2. **Open Positions**: Current positions grouped by instrument showing:
    - Position details (asset, side, quantity)
-   - Initial average price (original cost basis)
-   - Adjusted average price (cost basis after calendar roll credits)
+   - Initial average price (average cost method, matching Webull's display)
+   - Adjusted average price (break-even price accounting for all cash flows including rolls)
    - Expiration date
    - Calendar strategies are intelligently grouped with their legs
 
@@ -272,7 +274,7 @@ This format is useful for sharing reports via email, archiving, or importing int
 
 ### FIFO Lot Accounting
 
-The tool uses First-In-First-Out (FIFO) lot accounting to match closing trades with opening trades. This ensures accurate P&L calculation even with multiple entries and exits in the same instrument.
+The tool uses First-In-First-Out (FIFO) lot accounting to match closing trades with opening trades for realized P&L calculations. For open position display, the average cost method is used instead — this matches Webull's position cost basis and means the displayed average price doesn't change when you partially close a position.
 
 ### Option Expiration
 
@@ -289,11 +291,11 @@ Partial rolls are handled by splitting quantities into separate calendar groups 
 
 ### Adjusted Cost Basis
 
-For long legs in calendar strategies, the tool tracks:
-- **Initial Average Price**: The original cost paid to open the position
-- **Adjusted Average Price**: The cost basis after subtracting credits from fully closed short legs (calendar rolls)
+For strategies with rolled legs, the tool tracks:
+- **Initial Average Price**: The average cost of the current position (average cost method, matching Webull)
+- **Adjusted Average Price**: The exact break-even price computed from total cash flows across all related strategy trades, including rolls. Selling the position at this price recovers the total net debit invested.
 
-This helps traders understand their true cost basis after collecting credits from rolling short legs.
+At the per-leg level, the long leg's adjusted price reflects the full rolling history, while the short leg's adjusted price remains at its average cost.
 
 ### Cash Tracking
 
@@ -351,4 +353,4 @@ This tool uses EPPlus configured for non-commercial use. For commercial use, you
 
 ## Contributing
 
-Contributions are welcome! Please ensure any changes maintain accurate FIFO lot accounting and properly handle multi-leg option strategies.
+Contributions are welcome! Please ensure any changes maintain accurate FIFO lot accounting for P&L, average cost for position display, and properly handle multi-leg option strategies.
