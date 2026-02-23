@@ -124,7 +124,8 @@ public record PositionRow(
 	DateTime? Expiry,
 	bool IsStrategyLeg = false,
 	decimal? InitialAvgPrice = null,
-	decimal? AdjustedAvgPrice = null
+	decimal? AdjustedAvgPrice = null,
+	string? MatchKey = null
 );
 
 /// <summary>
@@ -139,4 +140,31 @@ public record OptionParsed(
 	DateTime ExpiryDate,
 	string CallPut,
 	decimal Strike
+);
+
+public record PricePnL(decimal UnderlyingPrice, decimal PnL);
+
+/// <summary>
+/// Break-even and P&L analysis for a single position or strategy at expiration.
+/// </summary>
+/// <param name="Title">e.g., "GME Long Call $25" or "GME Vertical Call $25/$30"</param>
+/// <param name="Details">e.g., "2x @ $2.50 adj, Exp 13 Feb 2026"</param>
+/// <param name="BreakEvens">Break-even prices (empty if can't be determined; may have 1 or 2 values)</param>
+/// <param name="MaxProfit">null = unlimited</param>
+/// <param name="MaxLoss">null = unlimited (stored as positive value, displayed with "-")</param>
+/// <param name="DaysToExpiry">null for stocks; negative if expired</param>
+/// <param name="Note">e.g., "Long leg (exp 15 May 2026) retains time value"</param>
+/// <param name="Legs">Individual leg descriptions for strategies</param>
+public record BreakEvenResult(
+	string Title,
+	string Details,
+	int Qty,
+	List<decimal> BreakEvens,
+	decimal? MaxProfit,
+	decimal? MaxLoss,
+	int? DaysToExpiry,
+	List<PricePnL> PriceLadder,
+	string? Note,
+	List<string>? Legs = null,
+	List<PricePnL>? ChartData = null
 );

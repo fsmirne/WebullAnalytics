@@ -1,3 +1,4 @@
+using System.Globalization;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 
@@ -115,5 +116,64 @@ public static class TableBuilder
 		}
 
 		return table;
+	}
+
+	public static Panel BuildBreakEvenPanel(BreakEvenResult result, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false)
+	{
+		var dteText = result.DaysToExpiry.HasValue ? result.DaysToExpiry.Value.ToString() : (ascii ? "-" : "—");
+		var sep = ascii ? "|" : "│";
+		var legPrefix = ascii ? "  L- " : "  └─ ";
+
+		var items = new List<IRenderable>
+		{
+			new Markup($"{Markup.Escape(result.Details)} {sep} DTE: {dteText}"),
+		};
+
+		if (result.Legs != null)
+		{
+			foreach (var leg in result.Legs)
+				items.Add(new Markup($"{legPrefix}{Markup.Escape(leg)}"));
+		}
+
+		if (result.PriceLadder.Count > 0)
+		{
+			// Summary line with break-even, max profit/loss
+			var beText = result.BreakEvens.Count > 0 ? string.Join(", ", result.BreakEvens.Select(be => $"${be.ToString("N2", CultureInfo.InvariantCulture)}")) : "N/A";
+			var maxProfitText = result.MaxProfit.HasValue ? $"[green]${result.MaxProfit.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
+			var maxLossText = result.MaxLoss.HasValue ? $"[red]-${result.MaxLoss.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
+			items.Add(new Markup($"Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}"));
+
+			// Price ladder table
+			var table = new Table();
+			if (tableBorder != null) table.Border = tableBorder;
+			table.AddColumn(new TableColumn("Price").RightAligned());
+			table.AddColumn(new TableColumn("P&L").RightAligned());
+
+			foreach (var point in result.PriceLadder)
+			{
+				var isBreakEven = result.BreakEvens.Any(be => Math.Abs(point.UnderlyingPrice - be) < 0.005m);
+				var pricePrefix = isBreakEven ? "*" : " ";
+				var priceText = $"{pricePrefix}${point.UnderlyingPrice.ToString("N2", CultureInfo.InvariantCulture)}";
+				var pnlColor = point.PnL >= 0 ? "green" : "red";
+				var pnlText = FormatLadderPnL(point.PnL);
+				table.AddRow(new Text(priceText), new Markup($"[{pnlColor}]{Markup.Escape(pnlText)}[/]"));
+			}
+
+			items.Add(new Text(""));
+			items.Add(table);
+		}
+
+		if (result.Note != null)
+			items.Add(new Markup($"[italic]{Markup.Escape(result.Note)}[/]"));
+
+		var panel = new Panel(new Rows(items)) { Header = new PanelHeader(result.Title), Expand = true };
+		if (panelBorder != null) panel.Border = panelBorder;
+		return panel;
+	}
+
+	private static string FormatLadderPnL(decimal value)
+	{
+		if (value == 0) return "$0.00";
+		return value > 0 ? $"+${value.ToString("N2", CultureInfo.InvariantCulture)}" : $"-${Math.Abs(value).ToString("N2", CultureInfo.InvariantCulture)}";
 	}
 }

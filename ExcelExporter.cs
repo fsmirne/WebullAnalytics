@@ -6,7 +6,7 @@ namespace WebullAnalytics;
 
 public static class ExcelExporter
 {
-	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath)
+	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, decimal? iv = null)
 	{
 		// EPPlus requires a license context
 		ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -17,6 +17,7 @@ public static class ExcelExporter
 		var transactionSheet = package.Workbook.Worksheets.Add("Transactions");
 		var positionsSheet = package.Workbook.Worksheets.Add("Open Positions");
 		var dailyPnLSheet = package.Workbook.Worksheets.Add("Daily P&L");
+		var breakEvenSheet = package.Workbook.Worksheets.Add("Break-Even Analysis");
 
 		// Export transaction report
 		ExportTransactions(transactionSheet, reportRows, finalPnL, initialAmount);
@@ -26,6 +27,9 @@ public static class ExcelExporter
 
 		// Export daily P&L with chart
 		ExportDailyPnL(dailyPnLSheet, reportRows);
+
+		// Export break-even analysis
+		ExportBreakEven(breakEvenSheet, positionRows, iv);
 
 		// Save the file
 		var file = new FileInfo(outputPath);
@@ -234,6 +238,144 @@ public static class ExcelExporter
 			chart.YAxis.Title.Text = "P&L ($)";
 			chart.YAxis.Format = "#,##0.00";
 		}
+	}
+
+	private static void ExportBreakEven(ExcelWorksheet sheet, List<PositionRow> positionRows, decimal? iv)
+	{
+		var results = BreakEvenAnalyzer.Analyze(positionRows, iv);
+		if (results.Count == 0)
+		{
+			sheet.Cells[1, 1].Value = "No positions to analyze.";
+			return;
+		}
+
+		int row = 1;
+		int chartIndex = 0;
+		foreach (var result in results)
+		{
+			int sectionStartRow = row;
+
+			// Title row
+			sheet.Cells[row, 1].Value = result.Title;
+			sheet.Cells[row, 1].Style.Font.Bold = true;
+			sheet.Cells[row, 1].Style.Font.Size = 12;
+			row++;
+
+			// Details row
+			sheet.Cells[row, 1].Value = result.Details;
+			var dteText = result.DaysToExpiry.HasValue ? result.DaysToExpiry.Value.ToString() : "N/A";
+			sheet.Cells[row, 2].Value = $"DTE: {dteText}";
+			row++;
+
+			// Leg descriptions
+			if (result.Legs != null)
+			{
+				foreach (var leg in result.Legs)
+				{
+					sheet.Cells[row, 1].Value = $"  └─ {leg}";
+					row++;
+				}
+			}
+
+			// Note
+			if (result.Note != null)
+			{
+				sheet.Cells[row, 1].Value = result.Note;
+				sheet.Cells[row, 1].Style.Font.Italic = true;
+				row++;
+			}
+
+			if (result.PriceLadder.Count > 0)
+			{
+				// Summary row
+				sheet.Cells[row, 1].Value = "Break-even:";
+				if (result.BreakEvens.Count > 0)
+				{
+					for (int i = 0; i < result.BreakEvens.Count; i++)
+					{
+						sheet.Cells[row, 2 + i].Value = (double)result.BreakEvens[i];
+						sheet.Cells[row, 2 + i].Style.Numberformat.Format = "$#,##0.00";
+						sheet.Cells[row, 2 + i].Style.Font.Bold = true;
+					}
+				}
+				else
+				{
+					sheet.Cells[row, 2].Value = "N/A";
+				}
+				row++;
+
+				sheet.Cells[row, 1].Value = "Max Profit:";
+				if (result.MaxProfit.HasValue)
+				{
+					sheet.Cells[row, 2].Value = (double)result.MaxProfit.Value;
+					sheet.Cells[row, 2].Style.Numberformat.Format = "$#,##0.00";
+					sheet.Cells[row, 2].Style.Font.Color.SetColor(System.Drawing.Color.Green);
+				}
+				else
+				{
+					sheet.Cells[row, 2].Value = "Unlimited";
+				}
+				sheet.Cells[row, 3].Value = "Max Loss:";
+				if (result.MaxLoss.HasValue)
+				{
+					sheet.Cells[row, 4].Value = -(double)result.MaxLoss.Value;
+					sheet.Cells[row, 4].Style.Numberformat.Format = "$#,##0.00";
+					sheet.Cells[row, 4].Style.Font.Color.SetColor(System.Drawing.Color.Red);
+				}
+				else
+				{
+					sheet.Cells[row, 4].Value = "Unlimited";
+				}
+				row++;
+			}
+
+			// Chart data in columns 8-9, chart starts at column 11 (one empty column gap)
+			var chartData = result.ChartData ?? result.PriceLadder;
+			if (chartData.Count > 0)
+			{
+				int dataStartRow = sectionStartRow;
+				sheet.Cells[dataStartRow, 8].Value = "Price";
+				sheet.Cells[dataStartRow, 9].Value = "P&L";
+				sheet.Cells[dataStartRow, 8].Style.Font.Bold = true;
+				sheet.Cells[dataStartRow, 9].Style.Font.Bold = true;
+				dataStartRow++;
+
+				foreach (var point in chartData)
+				{
+					sheet.Cells[dataStartRow, 8].Value = (double)point.UnderlyingPrice;
+					sheet.Cells[dataStartRow, 8].Style.Numberformat.Format = "$#,##0.00";
+					sheet.Cells[dataStartRow, 9].Value = (double)point.PnL;
+					sheet.Cells[dataStartRow, 9].Style.Numberformat.Format = "$#,##0.00";
+					dataStartRow++;
+				}
+
+				// Create scatter chart (column 11, skipping column 10 as gap)
+				var chart = sheet.Drawings.AddScatterChart($"PnL_Chart_{chartIndex}", eScatterChartType.XYScatterSmoothNoMarkers);
+				chart.Title.Text = result.Title;
+				chart.SetPosition(sectionStartRow - 1, 0, 10, 0); // column K onward
+				chart.SetSize(600, 350);
+
+				var xRange = sheet.Cells[sectionStartRow + 1, 8, dataStartRow - 1, 8]; // Price column (skip header)
+				var yRange = sheet.Cells[sectionStartRow + 1, 9, dataStartRow - 1, 9]; // P&L column (skip header)
+				var series = chart.Series.Add(yRange, xRange);
+				series.Header = "P&L at Expiration";
+
+				chart.XAxis.Title.Text = "Underlying Price";
+				chart.XAxis.Format = "$#,##0.00";
+				chart.YAxis.Title.Text = "P&L";
+				chart.YAxis.Format = "$#,##0.00";
+				chart.Legend.Position = eLegendPosition.Bottom;
+
+				chartIndex++;
+
+				// Ensure row advances past chart data
+				if (dataStartRow > row) row = dataStartRow;
+			}
+
+			row += 2; // blank separator rows
+		}
+
+		sheet.Cells.AutoFitColumns();
 	}
 
 	private static void ColorCodePnL(ExcelRange cell, decimal value)
