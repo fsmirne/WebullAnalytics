@@ -9,7 +9,7 @@ public static class TableRenderer
 {
 	private const string LegPrefix = "  └─ ";
 
-	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount = 0m, bool simplified = false)
+	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount = 0m, bool simplified = false, decimal? iv = null)
 	{
 		var console = AnsiConsole.Console;
 
@@ -20,6 +20,13 @@ public static class TableRenderer
 		{
 			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, simplified: simplified));
 			console.WriteLine();
+
+			var breakEvens = BreakEvenAnalyzer.Analyze(positions, iv);
+			foreach (var result in breakEvens)
+			{
+				console.Write(TableBuilder.BuildBreakEvenPanel(result));
+				console.WriteLine();
+			}
 		}
 		else
 		{

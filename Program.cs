@@ -86,6 +86,10 @@ class ReportSettings : CommandSettings
 	[DefaultValue("detailed")]
 	public string View { get; set; } = "detailed";
 
+	[Description("Implied volatility for break-even analysis of calendar/diagonal spreads (annual %, e.g., 50 for 50%)")]
+	[CommandOption("--iv")]
+	public decimal? ImpliedVolatility { get; set; }
+
 	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
 
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
@@ -220,22 +224,23 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var positionRows = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
+		var iv = settings.ImpliedVolatility.HasValue ? settings.ImpliedVolatility.Value / 100m : (decimal?)null;
 
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
 				var excelPath = settings.ExcelPath ?? $"WebullAnalytics_{dateStr}.xlsx";
-				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, excelPath);
+				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, excelPath, iv);
 				break;
 
 			case "text":
 				var textPath = settings.TextPath ?? $"WebullAnalytics_{dateStr}.txt";
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, textPath, settings.Simplified);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, textPath, settings.Simplified, iv);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, iv);
 				break;
 		}
 

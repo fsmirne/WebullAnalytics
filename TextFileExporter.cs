@@ -10,7 +10,7 @@ public static partial class TextFileExporter
 	[GeneratedRegex(@"\x1B\[[0-9;]*[a-zA-Z]")]
 	private static partial Regex AnsiEscapeRegex();
 
-	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified = false)
+	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified = false, decimal? iv = null)
 	{
 		// Create a string writer to capture the console output
 		var stringWriter = new StringWriter();
@@ -38,6 +38,13 @@ public static partial class TextFileExporter
 		{
 			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, TableBorder.Ascii, simplified));
 			console.WriteLine();
+
+			var breakEvens = BreakEvenAnalyzer.Analyze(positions, iv);
+			foreach (var result in breakEvens)
+			{
+				console.Write(TableBuilder.BuildBreakEvenPanel(result, Spectre.Console.BoxBorder.Ascii, TableBorder.Ascii, ascii: true));
+				console.WriteLine();
+			}
 		}
 		else
 		{
