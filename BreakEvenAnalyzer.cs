@@ -130,7 +130,19 @@ public static class BreakEvenAnalyzer
 
 		// Build title
 		string title;
-		if (strikes.Count > 1)
+		if (strategyKind is "IronCondor" or "IronButterfly")
+		{
+			var putStrikes = parsedLegs.Where(l => l.parsed.CallPut == "P").Select(l => l.parsed.Strike).Distinct().OrderBy(s => s);
+			var callStrikes = parsedLegs.Where(l => l.parsed.CallPut == "C").Select(l => l.parsed.Strike).Distinct().OrderBy(s => s);
+			var allStrikes = putStrikes.Concat(callStrikes).Select(s => $"${Formatters.FormatQty(s)}");
+			title = $"{root} {strategyKind} {string.Join("/", allStrikes)}";
+		}
+		else if (strategyKind is "Condor" or "Butterfly")
+		{
+			var allStrikes = strikes.Select(s => $"${Formatters.FormatQty(s)}");
+			title = $"{root} {strategyKind} {callPutDisplay} {string.Join("/", allStrikes)}";
+		}
+		else if (strikes.Count > 1)
 			title = $"{root} {strategyKind} {callPutDisplay} ${Formatters.FormatQty(strikes[0])}/${Formatters.FormatQty(strikes[^1])}";
 		else
 			title = $"{root} {strategyKind} {callPutDisplay} ${Formatters.FormatQty(strikes[0])}";
@@ -221,7 +233,7 @@ public static class BreakEvenAnalyzer
 			if (maxPnL > 0) maxProfit = maxPnL;
 		}
 
-		if (isTimeSpread)
+		if (!maxLoss.HasValue)
 		{
 			var minPnL = ladder.Min(p => p.PnL);
 			if (minPnL < 0)

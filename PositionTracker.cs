@@ -69,7 +69,7 @@ public static class PositionTracker
 
 		// Strategy parent: sum fees from child legs
 		if (trade.Asset == Asset.OptionStrategy)
-			return allTrades.Where(t => t.ParentStrategySeq == trade.Seq).Sum(leg => feeLookup.GetValueOrDefault((leg.Timestamp, leg.Side, leg.Qty), 0m));
+			return allTrades.Where(t => t.ParentStrategySeq == trade.Seq).Select(leg => (leg.Timestamp, leg.Side, leg.Qty)).Distinct().Sum(key => feeLookup.GetValueOrDefault(key, 0m));
 
 		// Strategy leg or standalone: direct lookup
 		return feeLookup.GetValueOrDefault((trade.Timestamp, trade.Side, trade.Qty), 0m);
@@ -426,6 +426,9 @@ public static class PositionTracker
 			grouped.AddRange(MatchSpreadLegs(longs, shorts, processed));
 		}
 
+		// Third pass: merge vertical pairs into multi-leg strategies (iron condors, condors, butterflies, etc.)
+		MergeVerticalsIntoMultiLegStrategies(grouped);
+
 		// Add unprocessed options as standalone
 		grouped.AddRange(allPositions
 			.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey))
@@ -518,6 +521,49 @@ public static class PositionTracker
 	}
 
 	/// <summary>
+	/// Merges vertical spread pairs sharing the same root, expiry, and quantity into multi-leg strategies.
+	/// Covers iron condors/butterflies (call + put verticals) and condors/butterflies (same-type verticals).
+	/// </summary>
+	private static void MergeVerticalsIntoMultiLegStrategies(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped)
+	{
+		var verticals = new List<(int index, string root, DateTime expiry, int qty)>();
+
+		for (int i = 0; i < grouped.Count; i++)
+		{
+			var group = grouped[i];
+			if (group.Count != 2) continue;
+			var parsedLegs = group.Select(g => MatchKeys.TryGetOptionSymbol(g.matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null).Where(p => p != null).ToList();
+			if (parsedLegs.Count != 2) continue;
+			if (parsedLegs[0]!.Root != parsedLegs[1]!.Root || parsedLegs[0]!.ExpiryDate != parsedLegs[1]!.ExpiryDate) continue;
+			// Both legs must be same call/put type (i.e. this is a vertical, not some other 2-leg combo)
+			if (parsedLegs[0]!.CallPut != parsedLegs[1]!.CallPut) continue;
+			verticals.Add((i, parsedLegs[0]!.Root, parsedLegs[0]!.ExpiryDate, group[0].row.Qty));
+		}
+
+		// Group by root + expiry + qty; any group of 2+ verticals forms a multi-leg strategy
+		var mergeGroups = verticals.GroupBy(v => (v.root, v.expiry, v.qty)).Where(g => g.Count() >= 2).ToList();
+
+		var mergedIndices = new HashSet<int>();
+		var toAdd = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
+
+		foreach (var mg in mergeGroups)
+		{
+			var combined = new List<(string matchKey, PositionRow row, Trade? trade)>();
+			foreach (var v in mg)
+			{
+				mergedIndices.Add(v.index);
+				combined.AddRange(grouped[v.index]);
+			}
+			toAdd.Add(combined);
+		}
+
+		if (mergedIndices.Count == 0) return;
+		foreach (var idx in mergedIndices.OrderByDescending(i => i))
+			grouped.RemoveAt(idx);
+		grouped.AddRange(toAdd);
+	}
+
+	/// <summary>
 	/// Builds the final position rows, creating strategy summary rows for multi-leg positions
 	/// and calculating adjusted prices based on credits from rolled legs.
 	/// </summary>
@@ -562,14 +608,21 @@ public static class PositionTracker
 		var firstParsed = parsedLegs[0].parsed!;
 		var distinctExpiries = parsedLegs.Select(x => x.parsed!.ExpiryDate).Distinct().Count();
 		var distinctStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().Count();
+		var distinctCallPut = parsedLegs.Select(x => x.parsed!.CallPut).Distinct().Count();
 
-		var strategyKind = (distinctExpiries > 1, distinctStrikes > 1) switch
-		{
-			(true, false) => "Calendar",
-			(false, true) => "Vertical",
-			(true, true) => "Diagonal",
-			_ => "Strategy"
-		};
+		string strategyKind;
+		if (parsedLegs.Count >= 4 && distinctCallPut > 1)
+			strategyKind = distinctStrikes <= 3 ? "IronButterfly" : "IronCondor";
+		else if (parsedLegs.Count >= 4 && distinctExpiries == 1)
+			strategyKind = distinctStrikes <= 3 ? "Butterfly" : "Condor";
+		else
+			strategyKind = (distinctExpiries > 1, distinctStrikes > 1) switch
+			{
+				(true, false) => "Calendar",
+				(false, true) => "Vertical",
+				(true, true) => "Diagonal",
+				_ => "Strategy"
+			};
 
 		var qty = group[0].row.Qty;
 
