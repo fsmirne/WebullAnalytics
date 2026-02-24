@@ -150,8 +150,8 @@ public static partial class JsonlParser
 		var distinctStrikes = legs.Select(l => l.Strike).Distinct().Count();
 		var distinctCallPut = legs.Select(l => l.CallPut).Distinct().Count();
 
-		if (legs.Count >= 4 && distinctCallPut == 2) return "IronCondor";
-		if (legs.Count >= 4) return "Condor";
+		if (legs.Count >= 4 && distinctCallPut == 2) return distinctStrikes <= 3 ? "IronButterfly" : "IronCondor";
+		if (legs.Count >= 4) return distinctStrikes <= 3 ? "Butterfly" : "Condor";
 
 		return (distinctExpiries > 1, distinctStrikes > 1) switch
 		{
