@@ -145,6 +145,16 @@ public record OptionParsed(
 public record PricePnL(decimal UnderlyingPrice, decimal PnL, decimal? ContractValue = null);
 
 /// <summary>
+/// 2D grid of option values across dates and underlying prices for time-decay visualization.
+/// </summary>
+/// <param name="DateColumns">Column dates from now through expiration</param>
+/// <param name="PriceRows">Underlying prices (rows)</param>
+/// <param name="Values">Contract value per share at [priceIdx, dateIdx]</param>
+/// <param name="PnLs">Total P&L at [priceIdx, dateIdx]</param>
+/// <param name="Strikes">Strike prices of the legs</param>
+public record TimeDecayGrid(List<DateTime> DateColumns, List<decimal> PriceRows, decimal[,] Values, decimal[,] PnLs, List<decimal> Strikes);
+
+/// <summary>
 /// Early exercise boundary from Bjerksund-Stensland 2002 approximation.
 /// For puts: exercise when stock drops below the boundary price.
 /// </summary>
@@ -177,5 +187,6 @@ public record BreakEvenResult(
 	string? Note,
 	List<string>? Legs = null,
 	List<PricePnL>? ChartData = null,
-	EarlyExerciseBoundary? EarlyExercise = null
+	EarlyExerciseBoundary? EarlyExercise = null,
+	TimeDecayGrid? Grid = null
 );

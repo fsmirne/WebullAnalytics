@@ -118,7 +118,7 @@ public static class TableBuilder
 		return table;
 	}
 
-	public static Panel BuildBreakEvenPanel(BreakEvenResult result, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false)
+	public static Panel BuildBreakEvenPanel(BreakEvenResult result, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false, string displayMode = "pnl")
 	{
 		var dteText = result.DaysToExpiry.HasValue ? result.DaysToExpiry.Value.ToString() : (ascii ? "-" : "—");
 		var sep = ascii ? "|" : "│";
@@ -151,26 +151,34 @@ public static class TableBuilder
 				items.Add(new Markup($"[yellow]Early Exercise: {direction} ${ex.BoundaryNear.ToString("N2", CultureInfo.InvariantCulture)} until {Markup.Escape(transitionDate)}, then {direction} ${ex.BoundaryFar.ToString("N2", CultureInfo.InvariantCulture)}[/]"));
 			}
 
-			// Price ladder table
-			var table = new Table();
-			if (tableBorder != null) table.Border = tableBorder;
-			table.AddColumn(new TableColumn("Price").RightAligned());
-			table.AddColumn(new TableColumn("Value").RightAligned());
-			table.AddColumn(new TableColumn("P&L").RightAligned());
-
-			foreach (var point in result.PriceLadder)
-			{
-				var isBreakEven = result.BreakEvens.Any(be => Math.Abs(point.UnderlyingPrice - be) < 0.005m);
-				var pricePrefix = isBreakEven ? "*" : " ";
-				var priceText = $"{pricePrefix}${point.UnderlyingPrice.ToString("N2", CultureInfo.InvariantCulture)}";
-				var valueText = point.ContractValue.HasValue ? $"${point.ContractValue.Value.ToString("N2", CultureInfo.InvariantCulture)}" : "-";
-				var pnlColor = point.PnL >= 0 ? "green" : "red";
-				var pnlText = FormatLadderPnL(point.PnL);
-				table.AddRow(new Text(priceText), new Text(valueText), new Markup($"[{pnlColor}]{Markup.Escape(pnlText)}[/]"));
-			}
-
 			items.Add(new Text(""));
-			items.Add(table);
+
+			if (result.Grid != null)
+			{
+				items.Add(BuildTimeDecayGridTable(result.Grid, result.BreakEvens, displayMode, tableBorder));
+			}
+			else
+			{
+				// 1D price ladder fallback
+				var table = new Table();
+				if (tableBorder != null) table.Border = tableBorder;
+				table.AddColumn(new TableColumn("Price").RightAligned());
+				table.AddColumn(new TableColumn("Value").RightAligned());
+				table.AddColumn(new TableColumn("P&L").RightAligned());
+
+				foreach (var point in result.PriceLadder)
+				{
+					var isBreakEven = result.BreakEvens.Any(be => Math.Abs(point.UnderlyingPrice - be) < 0.005m);
+					var pricePrefix = isBreakEven ? "*" : " ";
+					var priceText = $"{pricePrefix}${point.UnderlyingPrice.ToString("N2", CultureInfo.InvariantCulture)}";
+					var valueText = point.ContractValue.HasValue ? $"${point.ContractValue.Value.ToString("N2", CultureInfo.InvariantCulture)}" : "-";
+					var pnlColor = point.PnL >= 0 ? "green" : "red";
+					var pnlText = FormatLadderPnL(point.PnL);
+					table.AddRow(new Text(priceText), new Text(valueText), new Markup($"[{pnlColor}]{Markup.Escape(pnlText)}[/]"));
+				}
+
+				items.Add(table);
+			}
 		}
 
 		if (result.Note != null)
@@ -179,6 +187,53 @@ public static class TableBuilder
 		var panel = new Panel(new Rows(items)) { Header = new PanelHeader(result.Title), Expand = true };
 		if (panelBorder != null) panel.Border = panelBorder;
 		return panel;
+	}
+
+	private static Table BuildTimeDecayGridTable(TimeDecayGrid grid, List<decimal> breakEvens, string displayMode, TableBorder? tableBorder)
+	{
+		var showPnL = displayMode == "pnl";
+		var table = new Table();
+		if (tableBorder != null) table.Border = tableBorder;
+
+		table.AddColumn(new TableColumn("Price").RightAligned());
+		foreach (var date in grid.DateColumns)
+		{
+			var isExpiryClose = date == grid.DateColumns[^1] && date.TimeOfDay != TimeSpan.Zero;
+			var label = isExpiryClose ? "At Exp" : date.ToString("dd MMM", CultureInfo.InvariantCulture);
+			table.AddColumn(new TableColumn(label).RightAligned());
+		}
+
+		for (int pi = 0; pi < grid.PriceRows.Count; pi++)
+		{
+			var price = grid.PriceRows[pi];
+			var isBreakEven = breakEvens.Any(be => Math.Abs(price - be) < 0.005m);
+			var pricePrefix = isBreakEven ? "*" : " ";
+			var priceText = $"{pricePrefix}${price.ToString("N2", CultureInfo.InvariantCulture)}";
+
+			var cells = new List<IRenderable> { new Text(priceText) };
+			for (int di = 0; di < grid.DateColumns.Count; di++)
+			{
+				var cellValue = showPnL ? grid.PnLs[pi, di] : grid.Values[pi, di];
+				string cellText;
+				string color;
+
+				if (showPnL)
+				{
+					cellText = FormatLadderPnL(cellValue);
+					color = cellValue >= 0 ? "green" : "red";
+				}
+				else
+				{
+					cellText = $"${cellValue.ToString("N2", CultureInfo.InvariantCulture)}";
+					color = grid.PnLs[pi, di] >= 0 ? "green" : "red";
+				}
+
+				cells.Add(new Markup($"[{color}]{Markup.Escape(cellText)}[/]"));
+			}
+			table.AddRow(cells.ToArray());
+		}
+
+		return table;
 	}
 
 	private static string FormatLadderPnL(decimal value)

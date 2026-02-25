@@ -23,6 +23,7 @@ A C# command-line tool for analyzing trading performance from Webull order data.
 - **Transaction History**: Complete trade-by-trade P&L calculation with fees, cash, and running totals
 - **Open Position Analysis**: Shows both initial and adjusted average prices for rolled positions
 - **Daily P&L Tracking**: Visual chart showing cumulative P&L over time
+- **Time-Decay Grid**: 2D grid showing option values across dates and underlying prices, visualizing how time decay and price movement affect position value
 
 ## Prerequisites
 
@@ -91,6 +92,15 @@ WebullAnalytics report --initial-amount 10000
 
 # Combine options
 WebullAnalytics report --fetch --since 2026-01-01 --output excel --initial-amount 10000
+
+# Show time-decay grid with implied volatility (enables 2D grid for options)
+WebullAnalytics report --iv 50
+
+# Show P&L instead of contract value in the grid
+WebullAnalytics report --iv 50 --display pnl
+
+# Widen the price range to ±5% around strikes (default is ±2%)
+WebullAnalytics report --iv 50 --range 10
 ```
 
 #### Report Options
@@ -107,7 +117,9 @@ Options:
   --text-path <path>        Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
   --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
-  --iv <volatility>         Implied volatility for break-even analysis (annual %, e.g., 50 for 50%)
+  --iv <volatility>         Implied volatility (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
+  --range <percent>         Total price range as percentage around strike price for the grid (default: 4, meaning ±2%)
+  --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --help, -h                Show help message
 ```
 
@@ -269,6 +281,18 @@ The text output produces a plain text file containing:
 - Total fees, final realized P&L, and final amount
 
 This format is useful for sharing reports via email, archiving, or importing into other tools.
+
+## Time-Decay Grid
+
+When `--iv` is provided, the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
+
+- **Date columns**: Evenly-spaced dates from today through expiration. The last two columns show the expiration date (with remaining intraday time value via Black-Scholes) and "At Exp" (intrinsic value only). The number of columns adapts to the terminal width — dates are skipped as needed so the grid never overflows horizontally.
+- **Price rows**: 10 evenly-spaced prices centered on the average strike, spanning ±half the `--range` percentage (default 4%, meaning ±2%). Break-even prices (marked with `*`) and strike prices are always included, with at least 2 rows of padding beyond them.
+- **Display modes**: `--display value` (default) shows the contract value per share; `--display pnl` shows total P&L.
+- **Cell colors**: Green for profit, red for loss.
+- **Calendar/diagonal spreads**: The grid ends at the short leg's expiration. The long leg's remaining time value is reflected via Black-Scholes pricing at each date, including the "At Exp" column.
+
+Without `--iv`, the existing 1D price ladder (Price | Value | P&L at expiration) is shown instead.
 
 ## Position Tracking Details
 
