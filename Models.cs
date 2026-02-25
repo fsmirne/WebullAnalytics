@@ -145,6 +145,16 @@ public record OptionParsed(
 public record PricePnL(decimal UnderlyingPrice, decimal PnL);
 
 /// <summary>
+/// Early exercise boundary from Bjerksund-Stensland 2002 approximation.
+/// For puts: exercise when stock drops below the boundary price.
+/// </summary>
+/// <param name="BoundaryNear">Exercise threshold for [now, t1] period</param>
+/// <param name="BoundaryFar">Exercise threshold for [t1, T] period</param>
+/// <param name="TransitionDays">Days until boundary shifts from near to far</param>
+/// <param name="IsCall">true = exercise above boundary, false = exercise below</param>
+public record EarlyExerciseBoundary(decimal BoundaryNear, decimal BoundaryFar, int TransitionDays, bool IsCall);
+
+/// <summary>
 /// Break-even and P&L analysis for a single position or strategy at expiration.
 /// </summary>
 /// <param name="Title">e.g., "GME Long Call $25" or "GME Vertical Call $25/$30"</param>
@@ -166,5 +176,6 @@ public record BreakEvenResult(
 	List<PricePnL> PriceLadder,
 	string? Note,
 	List<string>? Legs = null,
-	List<PricePnL>? ChartData = null
+	List<PricePnL>? ChartData = null,
+	EarlyExerciseBoundary? EarlyExercise = null
 );

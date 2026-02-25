@@ -143,6 +143,14 @@ public static class TableBuilder
 			var maxLossText = result.MaxLoss.HasValue ? $"[red]-${result.MaxLoss.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
 			items.Add(new Markup($"Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}"));
 
+			if (result.EarlyExercise != null)
+			{
+				var ex = result.EarlyExercise;
+				var direction = ex.IsCall ? "above" : "below";
+				var transitionDate = DateTime.Today.AddDays(ex.TransitionDays).ToString("dd MMM yyyy");
+				items.Add(new Markup($"[yellow]Early Exercise: {direction} ${ex.BoundaryNear.ToString("N2", CultureInfo.InvariantCulture)} until {Markup.Escape(transitionDate)}, then {direction} ${ex.BoundaryFar.ToString("N2", CultureInfo.InvariantCulture)}[/]"));
+			}
+
 			// Price ladder table
 			var table = new Table();
 			if (tableBorder != null) table.Border = tableBorder;
