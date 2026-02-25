@@ -241,7 +241,7 @@ public static class BreakEvenAnalyzer
 		foreach (var be in breakEvens)
 		{
 			if (!ladder.Any(p => Math.Abs(p.UnderlyingPrice - be) < 0.005m))
-				ladder.Add(new PricePnL(be, Math.Round(pnlFunc(be), 2)));
+				ladder.Add(new PricePnL(be, 0m));
 		}
 		ladder.Sort((a, b) => a.UnderlyingPrice.CompareTo(b.UnderlyingPrice));
 
