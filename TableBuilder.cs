@@ -155,6 +155,7 @@ public static class TableBuilder
 			var table = new Table();
 			if (tableBorder != null) table.Border = tableBorder;
 			table.AddColumn(new TableColumn("Price").RightAligned());
+			table.AddColumn(new TableColumn("Value").RightAligned());
 			table.AddColumn(new TableColumn("P&L").RightAligned());
 
 			foreach (var point in result.PriceLadder)
@@ -162,9 +163,10 @@ public static class TableBuilder
 				var isBreakEven = result.BreakEvens.Any(be => Math.Abs(point.UnderlyingPrice - be) < 0.005m);
 				var pricePrefix = isBreakEven ? "*" : " ";
 				var priceText = $"{pricePrefix}${point.UnderlyingPrice.ToString("N2", CultureInfo.InvariantCulture)}";
+				var valueText = point.ContractValue.HasValue ? $"${point.ContractValue.Value.ToString("N2", CultureInfo.InvariantCulture)}" : "-";
 				var pnlColor = point.PnL >= 0 ? "green" : "red";
 				var pnlText = FormatLadderPnL(point.PnL);
-				table.AddRow(new Text(priceText), new Markup($"[{pnlColor}]{Markup.Escape(pnlText)}[/]"));
+				table.AddRow(new Text(priceText), new Text(valueText), new Markup($"[{pnlColor}]{Markup.Escape(pnlText)}[/]"));
 			}
 
 			items.Add(new Text(""));

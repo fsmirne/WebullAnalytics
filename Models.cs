@@ -142,7 +142,7 @@ public record OptionParsed(
 	decimal Strike
 );
 
-public record PricePnL(decimal UnderlyingPrice, decimal PnL);
+public record PricePnL(decimal UnderlyingPrice, decimal PnL, decimal? ContractValue = null);
 
 /// <summary>
 /// Early exercise boundary from Bjerksund-Stensland 2002 approximation.
