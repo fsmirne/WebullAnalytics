@@ -90,6 +90,16 @@ class ReportSettings : CommandSettings
 	[CommandOption("--iv")]
 	public decimal? ImpliedVolatility { get; set; }
 
+	[Description("Total price range as percentage around strike price for the time-decay grid (default: 4, meaning ±2%)")]
+	[CommandOption("--range")]
+	[DefaultValue(4)]
+	public int Range { get; set; } = 4;
+
+	[Description("Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)")]
+	[CommandOption("--display")]
+	[DefaultValue("value")]
+	public string DisplayMode { get; set; } = "value";
+
 	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
 
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
@@ -116,6 +126,13 @@ class ReportSettings : CommandSettings
 		var view = View.ToLowerInvariant();
 		if (view is not ("detailed" or "simplified"))
 			return ValidationResult.Error("--view must be 'detailed' or 'simplified'");
+
+		if (Range < 1 || Range > 100)
+			return ValidationResult.Error("--range must be between 1 and 100");
+
+		var display = DisplayMode.ToLowerInvariant();
+		if (display is not ("value" or "pnl"))
+			return ValidationResult.Error("--display must be 'value' or 'pnl'");
 
 		return ValidationResult.Success();
 	}
@@ -226,6 +243,8 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
 		var iv = settings.ImpliedVolatility.HasValue ? settings.ImpliedVolatility.Value / 100m : (decimal?)null;
 
+		var displayMode = settings.DisplayMode.ToLowerInvariant();
+
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
@@ -235,12 +254,12 @@ class ReportCommand : AsyncCommand<ReportSettings>
 
 			case "text":
 				var textPath = settings.TextPath ?? $"WebullAnalytics_{dateStr}.txt";
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, textPath, settings.Simplified, iv);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, textPath, settings.Simplified, iv, settings.Range, displayMode);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, iv);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, iv, settings.Range, displayMode);
 				break;
 		}
 

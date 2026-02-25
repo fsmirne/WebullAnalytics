@@ -10,7 +10,7 @@ public static partial class TextFileExporter
 	[GeneratedRegex(@"\x1B\[[0-9;]*[a-zA-Z]")]
 	private static partial Regex AnsiEscapeRegex();
 
-	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified = false, decimal? iv = null)
+	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified = false, decimal? iv = null, int range = 10, string displayMode = "pnl")
 	{
 		// Create a string writer to capture the console output
 		var stringWriter = new StringWriter();
@@ -39,10 +39,13 @@ public static partial class TextFileExporter
 			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, TableBorder.Ascii, simplified));
 			console.WriteLine();
 
-			var breakEvens = BreakEvenAnalyzer.Analyze(positions, iv);
+			// Text export uses 200-char width; compute max columns to fit
+			var colWidth = displayMode == "pnl" ? 15 : 10;
+			var maxGridColumns = Math.Max(3, (200 - 17) / colWidth);
+			var breakEvens = BreakEvenAnalyzer.Analyze(positions, iv, range, maxGridColumns);
 			foreach (var result in breakEvens)
 			{
-				console.Write(TableBuilder.BuildBreakEvenPanel(result, Spectre.Console.BoxBorder.Ascii, TableBorder.Ascii, ascii: true));
+				console.Write(TableBuilder.BuildBreakEvenPanel(result, Spectre.Console.BoxBorder.Ascii, TableBorder.Ascii, ascii: true, displayMode: displayMode));
 				console.WriteLine();
 			}
 		}
