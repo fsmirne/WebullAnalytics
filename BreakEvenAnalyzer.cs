@@ -48,7 +48,7 @@ public static class BreakEvenAnalyzer
 			return AnalyzeStock(parent);
 
 		if (parent.Asset == Asset.Option)
-			return AnalyzeSingleOption(parent);
+			return AnalyzeSingleOption(parent, iv);
 
 		if (parent.Asset == Asset.OptionStrategy && group.Count > 1)
 			return AnalyzeStrategy(parent, group.Skip(1).ToList(), iv);
@@ -73,7 +73,7 @@ public static class BreakEvenAnalyzer
 		return new BreakEvenResult(Title: title, Details: details, Qty: row.Qty, BreakEvens: [avgPrice], MaxProfit: isLong ? null : avgPrice * row.Qty, MaxLoss: isLong ? avgPrice * row.Qty : null, DaysToExpiry: null, PriceLadder: ladder, Note: null, ChartData: chartData);
 	}
 
-	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row)
+	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, decimal? iv)
 	{
 		var parsed = ParseOption(row);
 		if (parsed == null) return null;
@@ -110,7 +110,15 @@ public static class BreakEvenAnalyzer
 		var chartData = BuildChartData(notablePrices, step, pnlFunc);
 
 		var dte = row.Expiry.HasValue ? (int)(row.Expiry.Value.Date - DateTime.Today).TotalDays : (int?)null;
-		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, null, ChartData: chartData);
+
+		EarlyExerciseBoundary? earlyExercise = null;
+		if (isLong && iv.HasValue && dte.HasValue && dte.Value > 0)
+		{
+			var timeYears = dte.Value / 365.0;
+			earlyExercise = BjerksundStensland.ComputeExerciseBoundary(strike, timeYears, RiskFreeRate, (double)iv.Value, parsed.CallPut);
+		}
+
+		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, null, ChartData: chartData, EarlyExercise: earlyExercise);
 	}
 
 	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, decimal? iv)
@@ -155,7 +163,18 @@ public static class BreakEvenAnalyzer
 			var longShort = l.row.Side == Side.Buy ? "Long" : "Short";
 			var cpDisplay = l.parsed.CallPut == "C" ? "Call" : "Put";
 			var legPremium = GetPremium(l.row);
-			return $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
+			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
+			if (l.row.Side == Side.Buy && iv.HasValue)
+			{
+				var legDte = (l.parsed.ExpiryDate.Date - DateTime.Today).TotalDays;
+				if (legDte > 0)
+				{
+					var boundary = BjerksundStensland.ComputeExerciseBoundary(l.parsed.Strike, legDte / 365.0, RiskFreeRate, (double)iv.Value, l.parsed.CallPut);
+					if (boundary != null)
+						desc += $" | Exercise below ${boundary.BoundaryNear.ToString("N2", System.Globalization.CultureInfo.InvariantCulture)}";
+				}
+			}
+			return desc;
 		}).ToList();
 
 		var isTimeSpread = expiries.Count > 1;

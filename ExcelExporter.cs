@@ -327,6 +327,19 @@ public static class ExcelExporter
 					sheet.Cells[row, 4].Value = "Unlimited";
 				}
 				row++;
+
+				if (result.EarlyExercise != null)
+				{
+					var ex = result.EarlyExercise;
+					var direction = ex.IsCall ? "above" : "below";
+					var transitionDate = DateTime.Today.AddDays(ex.TransitionDays).ToString("dd MMM yyyy");
+					sheet.Cells[row, 1].Value = "Early Exercise:";
+					sheet.Cells[row, 2].Value = $"{direction} ${ex.BoundaryNear:N2} until {transitionDate}";
+					sheet.Cells[row, 3].Value = "then:";
+					sheet.Cells[row, 4].Value = $"{direction} ${ex.BoundaryFar:N2}";
+					sheet.Cells[row, 1].Style.Font.Bold = true;
+					row++;
+				}
 			}
 
 			// Chart data in columns 8-9, chart starts at column 11 (one empty column gap)
