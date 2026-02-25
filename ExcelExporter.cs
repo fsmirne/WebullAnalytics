@@ -342,34 +342,47 @@ public static class ExcelExporter
 				}
 			}
 
-			// Chart data in columns 8-9, chart starts at column 11 (one empty column gap)
+			// Chart data in columns 8-10, chart starts at column 12 (one empty column gap)
 			var chartData = result.ChartData ?? result.PriceLadder;
 			if (chartData.Count > 0)
 			{
 				int dataStartRow = sectionStartRow;
 				sheet.Cells[dataStartRow, 8].Value = "Price";
-				sheet.Cells[dataStartRow, 9].Value = "P&L";
+				sheet.Cells[dataStartRow, 9].Value = "Value";
+				sheet.Cells[dataStartRow, 10].Value = "P&L";
 				sheet.Cells[dataStartRow, 8].Style.Font.Bold = true;
 				sheet.Cells[dataStartRow, 9].Style.Font.Bold = true;
+				sheet.Cells[dataStartRow, 10].Style.Font.Bold = true;
 				dataStartRow++;
 
 				foreach (var point in chartData)
 				{
 					sheet.Cells[dataStartRow, 8].Value = (double)point.UnderlyingPrice;
 					sheet.Cells[dataStartRow, 8].Style.Numberformat.Format = "$#,##0.00";
-					sheet.Cells[dataStartRow, 9].Value = (double)point.PnL;
-					sheet.Cells[dataStartRow, 9].Style.Numberformat.Format = "$#,##0.00";
+					
+					if (point.ContractValue.HasValue)
+					{
+						sheet.Cells[dataStartRow, 9].Value = (double)point.ContractValue.Value;
+						sheet.Cells[dataStartRow, 9].Style.Numberformat.Format = "$#,##0.00";
+					}
+					else
+					{
+						sheet.Cells[dataStartRow, 9].Value = "-";
+					}
+
+					sheet.Cells[dataStartRow, 10].Value = (double)point.PnL;
+					sheet.Cells[dataStartRow, 10].Style.Numberformat.Format = "$#,##0.00";
 					dataStartRow++;
 				}
 
-				// Create scatter chart (column 11, skipping column 10 as gap)
+				// Create scatter chart (column 12, skipping column 11 as gap)
 				var chart = sheet.Drawings.AddScatterChart($"PnL_Chart_{chartIndex}", eScatterChartType.XYScatterSmoothNoMarkers);
 				chart.Title.Text = result.Title;
-				chart.SetPosition(sectionStartRow - 1, 0, 10, 0); // column K onward
+				chart.SetPosition(sectionStartRow - 1, 0, 11, 0); // column L onward
 				chart.SetSize(600, 350);
 
 				var xRange = sheet.Cells[sectionStartRow + 1, 8, dataStartRow - 1, 8]; // Price column (skip header)
-				var yRange = sheet.Cells[sectionStartRow + 1, 9, dataStartRow - 1, 9]; // P&L column (skip header)
+				var yRange = sheet.Cells[sectionStartRow + 1, 10, dataStartRow - 1, 10]; // P&L column (skip header)
 				var series = chart.Series.Add(yRange, xRange);
 				series.Header = "P&L at Expiration";
 

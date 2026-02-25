@@ -65,10 +65,9 @@ public static class BreakEvenAnalyzer
 
 		var step = GetPriceStep(avgPrice);
 		var notablePrices = new List<decimal> { avgPrice };
-		var ladder = BuildPriceLadder(notablePrices, step, s => isLong ? (s - avgPrice) * row.Qty : (avgPrice - s) * row.Qty);
-
 		Func<decimal, decimal> pnlFunc = s => isLong ? (s - avgPrice) * row.Qty : (avgPrice - s) * row.Qty;
-		var chartData = BuildChartData(notablePrices, step, pnlFunc);
+		var ladder = BuildPriceLadder(notablePrices, step, pnlFunc, (s, pnl) => null);
+		var chartData = BuildChartData(notablePrices, step, pnlFunc, (s, pnl) => null);
 
 		return new BreakEvenResult(Title: title, Details: details, Qty: row.Qty, BreakEvens: [avgPrice], MaxProfit: isLong ? null : avgPrice * row.Qty, MaxLoss: isLong ? avgPrice * row.Qty : null, DaysToExpiry: null, PriceLadder: ladder, Note: null, ChartData: chartData);
 	}
@@ -106,8 +105,9 @@ public static class BreakEvenAnalyzer
 		var notablePrices = new List<decimal> { strike, breakEven };
 		var step = GetPriceStep(strike);
 		Func<decimal, decimal> pnlFunc = s => OptionPnLAtExpiration(s, strike, parsed.CallPut, row.Side, qty, premium);
-		var ladder = BuildPriceLadder(notablePrices, step, pnlFunc);
-		var chartData = BuildChartData(notablePrices, step, pnlFunc);
+		Func<decimal, decimal, decimal?> valueAt = (s, pnl) => isLong ? (pnl / (qty * 100m)) + premium : premium - (pnl / (qty * 100m));
+		var ladder = BuildPriceLadder(notablePrices, step, pnlFunc, valueAt);
+		var chartData = BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
 		var dte = row.Expiry.HasValue ? (int)(row.Expiry.Value.Date - DateTime.Today).TotalDays : (int?)null;
 
@@ -231,7 +231,8 @@ public static class BreakEvenAnalyzer
 		else
 			pnlFunc = s => StrategyPnLAtExpiration(s, parsedLegs, qty);
 
-		var ladder = BuildPriceLadder(notablePrices, step, pnlFunc);
+		Func<decimal, decimal, decimal?> valueAt = (s, pnl) => parent.Side == Side.Buy ? (pnl / (qty * 100m)) + netPremium : netPremium - (pnl / (qty * 100m));
+		var ladder = BuildPriceLadder(notablePrices, step, pnlFunc, valueAt);
 
 		// Find break-evens numerically if not already set analytically
 		if (breakEvens.Count == 0)
@@ -241,7 +242,7 @@ public static class BreakEvenAnalyzer
 		foreach (var be in breakEvens)
 		{
 			if (!ladder.Any(p => Math.Abs(p.UnderlyingPrice - be) < 0.005m))
-				ladder.Add(new PricePnL(be, 0m));
+				ladder.Add(new PricePnL(be, 0m, valueAt(be, 0m)));
 		}
 		ladder.Sort((a, b) => a.UnderlyingPrice.CompareTo(b.UnderlyingPrice));
 
@@ -259,7 +260,7 @@ public static class BreakEvenAnalyzer
 				maxLoss = Math.Abs(minPnL);
 		}
 
-		var chartData = BuildChartData(notablePrices, step, pnlFunc);
+		var chartData = BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
 		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData);
 	}
@@ -407,7 +408,7 @@ public static class BreakEvenAnalyzer
 	/// <summary>
 	/// Generates a price ladder of ~10 price points centered around notable prices (strikes, break-evens).
 	/// </summary>
-	private static List<PricePnL> BuildPriceLadder(List<decimal> notablePrices, decimal step, Func<decimal, decimal> pnlAt)
+	private static List<PricePnL> BuildPriceLadder(List<decimal> notablePrices, decimal step, Func<decimal, decimal> pnlAt, Func<decimal, decimal, decimal?> valueAt)
 	{
 		var min = notablePrices.Min() - 2 * step;
 		var max = notablePrices.Max() + 2 * step;
@@ -428,14 +429,18 @@ public static class BreakEvenAnalyzer
 		foreach (var p in notablePrices.Where(np => np >= 0))
 			prices.Add(Math.Round(p, 2));
 
-		return prices.Select(p => new PricePnL(p, Math.Round(pnlAt(p), 2))).ToList();
+		return prices.Select(p => 
+		{ 
+			var pnl = Math.Round(pnlAt(p), 2); 
+			return new PricePnL(p, pnl, valueAt(p, pnl)); 
+		}).ToList();
 	}
 
 	/// <summary>
 	/// Generates ~100 evenly-spaced data points for smooth chart rendering.
 	/// Uses the same price range as the discrete ladder but with finer granularity.
 	/// </summary>
-	private static List<PricePnL> BuildChartData(List<decimal> notablePrices, decimal step, Func<decimal, decimal> pnlAt)
+	private static List<PricePnL> BuildChartData(List<decimal> notablePrices, decimal step, Func<decimal, decimal> pnlAt, Func<decimal, decimal, decimal?> valueAt)
 	{
 		var min = notablePrices.Min() - 2 * step;
 		var max = notablePrices.Max() + 2 * step;
@@ -453,7 +458,8 @@ public static class BreakEvenAnalyzer
 		for (int i = 0; i < pointCount; i++)
 		{
 			var price = Math.Round(min + chartStep * i, 4);
-			points.Add(new PricePnL(price, Math.Round(pnlAt(price), 2)));
+			var pnl = Math.Round(pnlAt(price), 2);
+			points.Add(new PricePnL(price, pnl, valueAt(price, pnl)));
 		}
 
 		return points;
