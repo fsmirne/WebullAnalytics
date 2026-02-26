@@ -10,7 +10,7 @@ public static partial class TextFileExporter
 	[GeneratedRegex(@"\x1B\[[0-9;]*[a-zA-Z]")]
 	private static partial Regex AnsiEscapeRegex();
 
-	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified = false, decimal? iv = null, int range = 10, string displayMode = "pnl")
+	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified = false, decimal? iv = null, decimal range = 2, string displayMode = "pnl")
 	{
 		// Create a string writer to capture the console output
 		var stringWriter = new StringWriter();

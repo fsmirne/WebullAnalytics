@@ -90,10 +90,10 @@ class ReportSettings : CommandSettings
 	[CommandOption("--iv")]
 	public decimal? ImpliedVolatility { get; set; }
 
-	[Description("Total price range as percentage around strike price for the time-decay grid (default: 4, meaning ±2%)")]
+	[Description("Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)")]
 	[CommandOption("--range")]
-	[DefaultValue(4)]
-	public int Range { get; set; } = 4;
+	[DefaultValue(2.0)]
+	public decimal Range { get; set; } = 2;
 
 	[Description("Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)")]
 	[CommandOption("--display")]
@@ -127,8 +127,8 @@ class ReportSettings : CommandSettings
 		if (view is not ("detailed" or "simplified"))
 			return ValidationResult.Error("--view must be 'detailed' or 'simplified'");
 
-		if (Range < 1 || Range > 100)
-			return ValidationResult.Error("--range must be between 1 and 100");
+		if (Range <= 0)
+			return ValidationResult.Error("--range must be greater than 0");
 
 		var display = DisplayMode.ToLowerInvariant();
 		if (display is not ("value" or "pnl"))

@@ -11,14 +11,16 @@ namespace WebullAnalytics;
 public static class BreakEvenAnalyzer
 {
 	private const double RiskFreeRate = 0.043; // ~4.3% annual, reasonable default
+	private static readonly TimeSpan MarketOpen = new(9, 30, 0);
+	private static readonly TimeSpan MarketClose = new(16, 30, 0);
 
-	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, decimal? impliedVolatility = null, int rangePercent = 10, int maxGridColumns = 7)
+	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, decimal? impliedVolatility = null, decimal padding = 2, int maxGridColumns = 7)
 	{
 		var groups = GroupPositions(positionRows);
 		var results = new List<BreakEvenResult>();
 		foreach (var group in groups)
 		{
-			var result = AnalyzeGroup(group, impliedVolatility, rangePercent, maxGridColumns);
+			var result = AnalyzeGroup(group, impliedVolatility, padding, maxGridColumns);
 			if (result != null) results.Add(result);
 		}
 		return results;
@@ -40,7 +42,7 @@ public static class BreakEvenAnalyzer
 		return groups;
 	}
 
-	private static BreakEvenResult? AnalyzeGroup(List<PositionRow> group, decimal? iv, int rangePercent, int maxGridColumns)
+	private static BreakEvenResult? AnalyzeGroup(List<PositionRow> group, decimal? iv, decimal padding, int maxGridColumns)
 	{
 		var parent = group[0];
 
@@ -48,10 +50,10 @@ public static class BreakEvenAnalyzer
 			return AnalyzeStock(parent);
 
 		if (parent.Asset == Asset.Option)
-			return AnalyzeSingleOption(parent, iv, rangePercent, maxGridColumns);
+			return AnalyzeSingleOption(parent, iv, padding, maxGridColumns);
 
 		if (parent.Asset == Asset.OptionStrategy && group.Count > 1)
-			return AnalyzeStrategy(parent, group.Skip(1).ToList(), iv, rangePercent, maxGridColumns);
+			return AnalyzeStrategy(parent, group.Skip(1).ToList(), iv, padding, maxGridColumns);
 
 		return null;
 	}
@@ -72,7 +74,7 @@ public static class BreakEvenAnalyzer
 		return new BreakEvenResult(Title: title, Details: details, Qty: row.Qty, BreakEvens: [avgPrice], MaxProfit: isLong ? null : avgPrice * row.Qty, MaxLoss: isLong ? avgPrice * row.Qty : null, DaysToExpiry: null, PriceLadder: ladder, Note: null, ChartData: chartData);
 	}
 
-	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, decimal? iv, int rangePercent, int maxGridColumns)
+	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, decimal? iv, decimal padding, int maxGridColumns)
 	{
 		var parsed = ParseOption(row);
 		if (parsed == null) return null;
@@ -122,13 +124,13 @@ public static class BreakEvenAnalyzer
 		if (iv.HasValue && dte.HasValue && dte.Value > 0)
 		{
 			var legs = new List<(PositionRow row, OptionParsed parsed)> { (row, parsed) };
-			grid = BuildTimeDecayGrid(legs, qty, row.Side, premium, parsed.ExpiryDate, iv.Value, rangePercent, strike, [breakEven], maxGridColumns);
+			grid = BuildTimeDecayGrid(legs, qty, row.Side, premium, parsed.ExpiryDate, iv.Value, padding, strike, [breakEven], maxGridColumns);
 		}
 
 		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, null, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid);
 	}
 
-	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, decimal? iv, int rangePercent, int maxGridColumns)
+	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, decimal? iv, decimal padding, int maxGridColumns)
 	{
 		var parsedLegs = legs.Select(l => (row: l, parsed: ParseOption(l))).Where(x => x.parsed != null).Select(x => (x.row, parsed: x.parsed!)).ToList();
 		if (parsedLegs.Count < 2) return null;
@@ -234,7 +236,7 @@ public static class BreakEvenAnalyzer
 
 		Func<decimal, decimal> pnlFunc;
 		if (isTimeSpread)
-			pnlFunc = s => StrategyPnLWithBs(s, parsedLegs, qty, nearestExpiry, iv!.Value);
+			pnlFunc = s => StrategyPnLWithBs(s, parsedLegs, qty, nearestExpiry.Date + MarketClose, iv!.Value);
 		else
 			pnlFunc = s => StrategyPnLAtExpiration(s, parsedLegs, qty);
 
@@ -272,7 +274,7 @@ public static class BreakEvenAnalyzer
 		TimeDecayGrid? grid = null;
 		if (iv.HasValue && dte > 0)
 		{
-			grid = BuildTimeDecayGrid(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, iv.Value, rangePercent, strikes.Average(), breakEvens, maxGridColumns);
+			grid = BuildTimeDecayGrid(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, iv.Value, padding, strikes.Average(), breakEvens, maxGridColumns);
 		}
 
 		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid);
@@ -298,13 +300,15 @@ public static class BreakEvenAnalyzer
 	/// <summary>
 	/// Computes P&L for a single leg. Uses Black-Scholes if the leg has time remaining
 	/// past the evaluation date; otherwise uses intrinsic value (at-expiration).
+	/// Option expiration is defined as market close (4:30 PM) on the expiry date.
 	/// </summary>
 	private static decimal LegPnLWithBs(decimal underlyingPrice, OptionParsed parsed, Side side, int qty, decimal premium, DateTime evaluationDate, decimal iv)
 	{
 		decimal legValue;
-		if (parsed.ExpiryDate > evaluationDate)
+		var expirationTime = parsed.ExpiryDate.Date + MarketClose;
+		if (evaluationDate < expirationTime)
 		{
-			var timeYears = (parsed.ExpiryDate - evaluationDate).TotalDays / 365.0;
+			var timeYears = (expirationTime - evaluationDate).TotalDays / 365.0;
 			legValue = BlackScholes(underlyingPrice, parsed.Strike, timeYears, RiskFreeRate, iv, parsed.CallPut);
 		}
 		else
@@ -380,11 +384,11 @@ public static class BreakEvenAnalyzer
 	/// <summary>
 	/// Builds a 2D grid of option values across dates and underlying prices.
 	/// </summary>
-	private static TimeDecayGrid BuildTimeDecayGrid(List<(PositionRow row, OptionParsed parsed)> legs, int qty, Side parentSide, decimal netPremium, DateTime latestExpiry, decimal iv, int rangePercent, decimal centerPrice, List<decimal> breakEvens, int maxColumns)
+	private static TimeDecayGrid BuildTimeDecayGrid(List<(PositionRow row, OptionParsed parsed)> legs, int qty, Side parentSide, decimal netPremium, DateTime latestExpiry, decimal iv, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns)
 	{
 		var dates = BuildDateColumns(latestExpiry, maxColumns);
 		var strikes = legs.Select(l => l.parsed.Strike).Distinct().ToList();
-		var priceRows = BuildPriceRows(centerPrice, rangePercent, breakEvens, strikes);
+		var priceRows = BuildPriceRows(centerPrice, padding, breakEvens, strikes);
 
 		var values = new decimal[priceRows.Count, dates.Count];
 		var pnls = new decimal[priceRows.Count, dates.Count];
@@ -410,17 +414,18 @@ public static class BreakEvenAnalyzer
 	/// <summary>
 	/// Generates ~7 evenly-spaced date columns from today to expiration.
 	/// If DTE &lt; 7, uses daily intervals.
-	/// The last two columns are always expiration day open (midnight) and close (23:59),
+	/// All non-expiration dates use market open (9:30 AM).
+	/// The last two columns are expiration day at market open (9:30 AM) and market close (4:30 PM),
 	/// representing BS value with remaining intraday time vs intrinsic at expiry.
 	/// </summary>
 	private static List<DateTime> BuildDateColumns(DateTime expiry, int maxColumns)
 	{
 		var today = DateTime.Today;
 		var totalDays = (int)(expiry.Date - today).TotalDays;
-		if (totalDays <= 0) return [today, expiry.Date.AddHours(23).AddMinutes(59)];
+		if (totalDays <= 0) return [today + MarketOpen, expiry.Date + MarketClose];
 
-		var expiryOpen = expiry.Date;            // start of expiration day — BS with small remaining time
-		var expiryClose = expiry.Date.AddHours(23).AddMinutes(59); // end of expiration day — intrinsic only
+		var expiryOpen = expiry.Date + MarketOpen;   // start of expiration trading day — BS with ~7h remaining
+		var expiryClose = expiry.Date + MarketClose;  // end of expiration trading day — intrinsic only
 
 		// Reserve 2 slots for expiry open/close, rest are interior dates
 		var interiorSlots = Math.Max(1, maxColumns - 2);
@@ -429,7 +434,7 @@ public static class BreakEvenAnalyzer
 		if (totalDays <= interiorSlots)
 		{
 			for (int d = 0; d < totalDays; d++)
-				dates.Add(today.AddDays(d));
+				dates.Add(today.AddDays(d) + MarketOpen);
 		}
 		else
 		{
@@ -438,7 +443,7 @@ public static class BreakEvenAnalyzer
 				var dayOffset = (int)Math.Round((double)i * (totalDays - 1) / (interiorSlots - 1));
 				var date = today.AddDays(dayOffset);
 				if (date.Date >= expiry.Date) break;
-				dates.Add(date);
+				dates.Add(date + MarketOpen);
 			}
 		}
 
@@ -451,36 +456,54 @@ public static class BreakEvenAnalyzer
 	}
 
 	/// <summary>
-	/// Generates exactly 10 evenly-spaced price rows centered on centerPrice,
-	/// spanning rangePercent above and below.
+	/// Generates price rows for the grid. Step size is derived from the smallest gap
+	/// between strikes (or strike-to-break-even for single-strike positions), divided by
+	/// the granularity parameter. Higher granularity = smaller steps = more rows.
+	/// Always includes 2 padding rows beyond the outermost notable price.
 	/// </summary>
-	private static List<decimal> BuildPriceRows(decimal centerPrice, int rangePercent, List<decimal> breakEvens, List<decimal> strikes)
+	private static List<decimal> BuildPriceRows(decimal centerPrice, decimal granularity, List<decimal> breakEvens, List<decimal> strikes)
 	{
-		var halfRange = rangePercent / 200m;
-		var low = Math.Max(0.01m, centerPrice * (1 - halfRange));
-		var high = centerPrice * (1 + halfRange);
+		var notablePrices = breakEvens.Concat(strikes).Where(p => p > 0).Distinct().OrderBy(p => p).ToList();
 
-		// Ensure break-evens and strikes have at least 2 rows of padding beyond them
-		var notablePrices = breakEvens.Concat(strikes).Where(p => p > 0).ToList();
-		var step = (high - low) / 9m;
-		foreach (var p in notablePrices)
+		// Find the reference gap to derive step size from.
+		var distinctStrikes = strikes.Where(s => s > 0).Distinct().OrderBy(s => s).ToList();
+		decimal referenceGap;
+		if (distinctStrikes.Count >= 2)
 		{
-			if (p - 2 * step < low) low = Math.Max(0.01m, p - 2 * step);
-			if (p + 2 * step > high) high = p + 2 * step;
+			referenceGap = decimal.MaxValue;
+			for (int i = 1; i < distinctStrikes.Count; i++)
+			{
+				var gap = distinctStrikes[i] - distinctStrikes[i - 1];
+				if (gap > 0 && gap < referenceGap) referenceGap = gap;
+			}
+		}
+		else if (distinctStrikes.Count == 1 && breakEvens.Count > 0)
+		{
+			referenceGap = breakEvens.Where(b => b > 0).Select(b => Math.Abs(b - distinctStrikes[0])).Where(g => g > 0).DefaultIfEmpty(0).Min();
+			if (referenceGap == 0) referenceGap = centerPrice * 0.01m;
+		}
+		else
+		{
+			referenceGap = centerPrice * 0.01m;
 		}
 
-		// Recompute step with the possibly expanded range
-		const int rowCount = 10;
-		step = (high - low) / (rowCount - 1);
+		// Step = reference gap divided by granularity. Default granularity of 2 gives 2 rows per gap.
+		var step = Math.Max(0.01m, referenceGap / granularity);
+
+		// 2 padding rows beyond outermost notable prices, minimum 5 steps each side of center
+		const int paddingRows = 2;
+		var low = Math.Min(centerPrice - 5 * step, notablePrices[0] - paddingRows * step);
+		var high = Math.Max(centerPrice + 5 * step, notablePrices[^1] + paddingRows * step);
+		low = Math.Max(0.01m, low);
 
 		var prices = new SortedSet<decimal>();
-		for (int i = 0; i < rowCount; i++)
-			prices.Add(Math.Round(low + step * i, 2));
+		for (var p = low; p <= high + step / 2; p += step)
+			prices.Add(Math.Round(p, 2));
 
 		foreach (var p in notablePrices)
 			prices.Add(Math.Round(p, 2));
 
-		return prices.ToList();
+		return prices.Reverse().ToList();
 	}
 
 	// --- Helpers ---
