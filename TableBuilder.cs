@@ -198,8 +198,7 @@ public static class TableBuilder
 		table.AddColumn(new TableColumn("Price").RightAligned());
 		foreach (var date in grid.DateColumns)
 		{
-			var isExpiryClose = date == grid.DateColumns[^1] && date.TimeOfDay != TimeSpan.Zero;
-			var label = isExpiryClose ? "At Exp" : date.ToString("dd MMM", CultureInfo.InvariantCulture);
+			var label = date == grid.DateColumns[^1] ? "At Exp" : date.ToString("dd MMM", CultureInfo.InvariantCulture);
 			table.AddColumn(new TableColumn(label).RightAligned());
 		}
 

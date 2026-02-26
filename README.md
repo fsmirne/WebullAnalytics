@@ -99,8 +99,8 @@ WebullAnalytics report --iv 50
 # Show P&L instead of contract value in the grid
 WebullAnalytics report --iv 50 --display pnl
 
-# Widen the price range to ±5% around strikes (default is ±2%)
-WebullAnalytics report --iv 50 --range 10
+# Increase grid granularity (more rows between strikes, default: 2)
+WebullAnalytics report --iv 50 --range 4
 ```
 
 #### Report Options
@@ -118,7 +118,7 @@ Options:
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
   --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
   --iv <volatility>         Implied volatility (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
-  --range <percent>         Total price range as percentage around strike price for the grid (default: 4, meaning ±2%)
+  --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --help, -h                Show help message
 ```
@@ -286,8 +286,8 @@ This format is useful for sharing reports via email, archiving, or importing int
 
 When `--iv` is provided, the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
 
-- **Date columns**: Evenly-spaced dates from today through expiration. The last two columns show the expiration date (with remaining intraday time value via Black-Scholes) and "At Exp" (intrinsic value only). The number of columns adapts to the terminal width — dates are skipped as needed so the grid never overflows horizontally.
-- **Price rows**: 10 evenly-spaced prices centered on the average strike, spanning ±half the `--range` percentage (default 4%, meaning ±2%). Break-even prices (marked with `*`) and strike prices are always included, with at least 2 rows of padding beyond them.
+- **Date columns**: Evenly-spaced dates from today through expiration, evaluated at market open (9:30 AM). The last two columns show expiration day at market open (with remaining intraday time value via Black-Scholes) and "At Exp" at market close (4:30 PM, intrinsic value only). The number of columns adapts to the terminal width — dates are skipped as needed so the grid never overflows horizontally.
+- **Price rows**: Step size is derived from the position's strike spacing (or strike-to-break-even distance for single-strike positions like calendars), so the grid adapts to any stock price. The `--range` parameter controls granularity — it sets how many rows fit per strike gap (default: 2). Break-even prices (marked with `*`) and strike prices are always included, with 2 padding rows beyond the outermost notable price.
 - **Display modes**: `--display value` (default) shows the contract value per share; `--display pnl` shows total P&L.
 - **Cell colors**: Green for profit, red for loss.
 - **Calendar/diagonal spreads**: The grid ends at the short leg's expiration. The long leg's remaining time value is reflected via Black-Scholes pricing at each date, including the "At Exp" column.

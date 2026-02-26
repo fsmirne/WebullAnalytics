@@ -9,7 +9,7 @@ public static class TableRenderer
 {
 	private const string LegPrefix = "  └─ ";
 
-	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount = 0m, bool simplified = false, decimal? iv = null, int range = 10, string displayMode = "pnl")
+	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount = 0m, bool simplified = false, decimal? iv = null, decimal range = 2, string displayMode = "pnl")
 	{
 		var console = AnsiConsole.Console;
 
