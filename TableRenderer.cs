@@ -41,6 +41,7 @@ public static class TableRenderer
 
 		console.Write("Final realized P&L: ");
 		console.Write(Formatters.FormatPnL(running));
+		console.Write(Formatters.FormatPnLPercent(running, initialAmount));
 		console.WriteLine();
 
 		console.Write("Final amount: ");

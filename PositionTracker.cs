@@ -113,30 +113,19 @@ public static class PositionTracker
 			return (0m, 0);
 		}
 
-		// Strategy parent: calculate P&L and track position
-		var lots = positions.GetValueOrDefault(trade.MatchKey, new List<Lot>());
-		var (updatedLots, realized2, closedQty) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
-
-		// For SELL strategies with no direct P&L, calculate from legs (closing a spread)
-		// For BUY strategies (opening/rolling), don't count leg P&L - cost is in the spread price
-		if (realized2 == 0m && closedQty == 0 && trade.Side == Side.Sell)
+		// Strategy parent: compute P&L from leg-level FIFO matching.
+		// Parent-level FIFO is unreliable because legs can be modified by intermediate strategy trades,
+		// causing parent open/close prices to diverge from actual leg P&L.
+		var pnl = 0m;
+		var closedQty = 0;
+		foreach (var leg in allTrades.Where(t => t.ParentStrategySeq == trade.Seq))
 		{
-			realized2 = allTrades
-				.Where(t => t.ParentStrategySeq == trade.Seq)
-				.Sum(leg =>
-				{
-					var legLots = positions.GetValueOrDefault(leg.MatchKey, []);
-					var (_, legPnl, _) = ApplyToLots(legLots, leg.Side, leg.Qty, leg.Price, leg.Multiplier);
-					return legPnl;
-				});
+			var legLots = positions.GetValueOrDefault(leg.MatchKey, []);
+			var (_, legPnl, legClosed) = ApplyToLots(legLots, leg.Side, leg.Qty, leg.Price, leg.Multiplier);
+			pnl += legPnl;
+			closedQty = Math.Max(closedQty, legClosed);
 		}
-
-		if (updatedLots.Count > 0)
-			positions[trade.MatchKey] = updatedLots;
-		else
-			positions.Remove(trade.MatchKey);
-
-		return (realized2, closedQty);
+		return (pnl, closedQty);
 	}
 
 	/// <summary>

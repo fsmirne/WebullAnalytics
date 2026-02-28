@@ -235,6 +235,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			ApplyOfficialPrices(trades, dataDir);
 		}
 
+		ReconcileParentPrices(trades);
 		var initialAmount = settings.InitialAmount;
 		var (rows, positions, running) = PositionTracker.ComputeReport(trades, settings.SinceDate, initialAmount, feeLookup);
 		var tradeIndex = PositionTracker.BuildTradeIndex(trades);
@@ -279,6 +280,31 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			seq = nextSeq;
 		}
 		return trades;
+	}
+
+	/// <summary>
+	/// Recomputes strategy parent prices from their stored leg prices.
+	/// Parent prices are originally computed from raw JSONL values, but leg prices may differ
+	/// due to rounding or CSV overrides. This ensures parent cash flows match leg-level P&L.
+	/// </summary>
+	private static void ReconcileParentPrices(List<Trade> trades)
+	{
+		for (int i = 0; i < trades.Count; i++)
+		{
+			var trade = trades[i];
+			if (trade.Asset != Asset.OptionStrategy || trade.Side is not (Side.Buy or Side.Sell))
+				continue;
+
+			var legs = trades.Where(t => t.ParentStrategySeq == trade.Seq).ToList();
+			if (legs.Count < 2) continue;
+
+			var netCash = legs.Sum(leg => (leg.Side == Side.Sell ? 1m : -1m) * leg.Price * leg.Qty);
+			var expectedSide = netCash >= 0 ? Side.Sell : Side.Buy;
+			var expectedPrice = Math.Abs(netCash) / trade.Qty;
+
+			if (expectedPrice != trade.Price || expectedSide != trade.Side)
+				trades[i] = trade with { Price = expectedPrice, Side = expectedSide };
+		}
 	}
 
 	/// <summary>
