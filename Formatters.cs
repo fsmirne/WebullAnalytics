@@ -50,6 +50,17 @@ public static class Formatters
 	}
 
 	/// <summary>
+	/// Formats a P&L percentage with color (e.g., " (65.37%)").
+	/// </summary>
+	public static Markup FormatPnLPercent(decimal pnl, decimal initialAmount)
+	{
+		var pct = initialAmount == 0 ? 0m : pnl / initialAmount * 100m;
+		var color = pct >= 0 ? "green" : "red";
+		var text = pct.ToString("+0.00;-0.00", CultureInfo.InvariantCulture);
+		return new Markup($" [{color}]({text}%)[/]");
+	}
+
+	/// <summary>
 	/// Formats a money value with color (green if above initial, red if below).
 	/// </summary>
 	public static Markup FormatMoney(decimal value, decimal initialAmount)

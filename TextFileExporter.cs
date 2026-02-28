@@ -61,6 +61,7 @@ public static partial class TextFileExporter
 		// Final P&L
 		console.Write("Final realized P&L: ");
 		console.Write(Formatters.FormatPnL(running));
+		console.Write(Formatters.FormatPnLPercent(running, initialAmount));
 		console.WriteLine();
 
 		// Final amount

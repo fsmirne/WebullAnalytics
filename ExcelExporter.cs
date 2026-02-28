@@ -114,6 +114,10 @@ public static class ExcelExporter
 		sheet.Cells[row, 11].Style.Numberformat.Format = "#,##0.00";
 		sheet.Cells[row, 11].Style.Font.Bold = true;
 		ColorCodePnL(sheet.Cells[row, 11], finalPnL);
+		sheet.Cells[row, 12].Value = initialAmount == 0 ? 0d : (double)(finalPnL / initialAmount);
+		sheet.Cells[row, 12].Style.Numberformat.Format = "0.00%";
+		sheet.Cells[row, 12].Style.Font.Bold = true;
+		ColorCodePnL(sheet.Cells[row, 12], finalPnL);
 
 		// Add final amount
 		sheet.Cells[row, 13].Value = (double)(initialAmount + finalPnL);
