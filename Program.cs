@@ -232,10 +232,9 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				return 1;
 			}
 			(trades, feeLookup) = JsonlParser.ParseOrdersJsonl(ordersPath);
+			ReconcileParentPrices(trades);
 			ApplyOfficialPrices(trades, dataDir);
 		}
-
-		ReconcileParentPrices(trades);
 		var initialAmount = settings.InitialAmount;
 		var (rows, positions, running) = PositionTracker.ComputeReport(trades, settings.SinceDate, initialAmount, feeLookup);
 		var tradeIndex = PositionTracker.BuildTradeIndex(trades);
