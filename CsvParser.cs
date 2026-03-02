@@ -160,7 +160,7 @@ public static partial class CsvParser
 					return new StrategyMeta
 					{
 						Root = first.Root,
-						ExpDate = first.ExpiryDate,
+						ExpDate = g.Max(x => x.parsed!.ExpiryDate),
 						Legs = g.Select(x => (x.parsed!.CallPut, x.parsed.Strike)).ToList()
 					};
 				});

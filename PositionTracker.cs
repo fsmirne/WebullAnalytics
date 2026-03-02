@@ -652,9 +652,10 @@ public static class PositionTracker
 
 	/// <summary>
 	/// Computes total net debit (cash spent minus cash received) from strategy parent trades
-	/// for all calendars/diagonals at a given underlying/strike/type. Matches strategy parents
-	/// by their match key pattern (same root, same legs key across all expiration dates).
-	/// This gives the exact break-even basis for positions rolled through multiple short expirations.
+	/// for the CURRENT calendar/diagonal position at a given underlying/strike/type.
+	/// Tracks per-contract positions at the strike level to find when the position was last flat,
+	/// then only includes strategy trades after that point. This prevents closed historical positions
+	/// from contaminating the break-even of a newly opened position.
 	/// </summary>
 	private static decimal CalculateTotalNetDebit(List<Trade> allTrades, string root, decimal strike, string callPut)
 	{
@@ -662,8 +663,52 @@ public static class PositionTracker
 		var legsKeySuffix = $":{callPut}{strikeStr},{callPut}{strikeStr}";
 		var rootSegment = $":{root}:";
 
+		// Build OCC suffix to match all options at this root/strike/callPut across any expiry
+		var strikeInt = (long)(strike * 1000m);
+		var occSuffix = $"{callPut}{strikeInt:D8}";
+		var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{root}";
+		var today = DateTime.Today;
+
+		// Collect all option leg trades at this strike, plus synthetic expiry events
+		var legEvents = allTrades
+			.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && t.MatchKey.EndsWith(occSuffix, StringComparison.Ordinal))
+			.Select(t => (t.Timestamp, t.Seq, t.MatchKey, t.Side, t.Qty, IsExpiry: false))
+			.ToList();
+
+		// Generate synthetic expiry-close events for contracts whose expiry has passed
+		var expiredContracts = legEvents.Select(e => e.MatchKey).Distinct()
+			.Select(mk => (matchKey: mk, parsed: MatchKeys.TryGetOptionSymbol(mk, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
+			.Where(x => x.parsed != null && x.parsed.ExpiryDate.Date < today)
+			.ToList();
+
+		foreach (var (matchKey, parsed) in expiredContracts)
+			legEvents.Add((parsed!.ExpiryDate.Date + ExpirationTime, int.MaxValue, matchKey, Side.Expire, 0, IsExpiry: true));
+
+		legEvents.Sort((a, b) => { var cmp = a.Timestamp.CompareTo(b.Timestamp); return cmp != 0 ? cmp : a.Seq.CompareTo(b.Seq); });
+
+		// Track per-contract net positions and find the last time ALL were simultaneously zero
+		var positions = new Dictionary<string, int>();
+		DateTime lastFlatTime = DateTime.MinValue;
+		int lastFlatSeq = int.MinValue;
+
+		foreach (var e in legEvents)
+		{
+			if (e.IsExpiry)
+				positions[e.MatchKey] = 0;
+			else
+				positions[e.MatchKey] = positions.GetValueOrDefault(e.MatchKey) + (e.Side == Side.Buy ? e.Qty : -e.Qty);
+
+			if (positions.Values.All(v => v == 0))
+			{
+				lastFlatTime = e.Timestamp;
+				lastFlatSeq = e.Seq;
+			}
+		}
+
+		// Only include strategy parent trades after the last flat point
 		return allTrades
 			.Where(t => t.Asset == Asset.OptionStrategy && t.Side is Side.Buy or Side.Sell && t.MatchKey.Contains(rootSegment) && t.MatchKey.EndsWith(legsKeySuffix))
+			.Where(t => t.Timestamp > lastFlatTime || (t.Timestamp == lastFlatTime && t.Seq > lastFlatSeq))
 			.Sum(t => (t.Side == Side.Buy ? 1m : -1m) * t.Qty * t.Price * t.Multiplier);
 	}
 
