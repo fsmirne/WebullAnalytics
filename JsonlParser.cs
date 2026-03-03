@@ -21,8 +21,6 @@ public static partial class JsonlParser
 	[GeneratedRegex(@"^(\d{1,2})\s+(\w{3})\s+(\d{2,4})\s+(Call|Put)\s+(\d+)$")]
 	private static partial Regex SubSymbolRegex();
 
-	[GeneratedRegex(@"\s[A-Za-z]{3}$")]
-	private static partial Regex TimezoneSuffixRegex();
 
 	/// <summary>
 	/// Parses a JSONL orders file and returns trades and a fee lookup dictionary.
@@ -91,8 +89,7 @@ public static partial class JsonlParser
 		var strikeInt = (long)(strike * 1000m);
 		var occSymbol = $"{root}{expiryDate:yyMMdd}{callPut}{strikeInt:D8}";
 
-		var cleanTime = TimezoneSuffixRegex().Replace(filledTimeStr.Trim(), "");
-		if (!DateTime.TryParseExact(cleanTime, ["MM/dd/yyyy HH:mm:ss", "M/d/yyyy H:mm:ss", "MM/dd/yyyy H:mm:ss", "M/d/yyyy HH:mm:ss"], CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var filledTime))
+		if (!ParsingHelpers.TryParseWebullDateTime(filledTimeStr, out var filledTime))
 			return null;
 
 		var side = action.Equals("BUY", StringComparison.OrdinalIgnoreCase) ? Side.Buy : Side.Sell;
@@ -144,23 +141,12 @@ public static partial class JsonlParser
 		}
 	}
 
-	private static string DetectStrategyKind(List<ParsedOrder> legs)
-	{
-		var distinctExpiries = legs.Select(l => l.ExpiryDate).Distinct().Count();
-		var distinctStrikes = legs.Select(l => l.Strike).Distinct().Count();
-		var distinctCallPut = legs.Select(l => l.CallPut).Distinct().Count();
-
-		if (legs.Count >= 4 && distinctCallPut == 2) return distinctStrikes <= 3 ? "IronButterfly" : "IronCondor";
-		if (legs.Count >= 4) return distinctStrikes <= 3 ? "Butterfly" : "Condor";
-
-		return (distinctExpiries > 1, distinctStrikes > 1) switch
-		{
-			(true, false) => "Calendar",
-			(false, true) => "Vertical",
-			(true, true) => "Diagonal",
-			_ => "Spread"
-		};
-	}
+	private static string DetectStrategyKind(List<ParsedOrder> legs) =>
+		ParsingHelpers.ClassifyStrategyKind(
+			legs.Count,
+			legs.Select(l => l.ExpiryDate).Distinct().Count(),
+			legs.Select(l => l.Strike).Distinct().Count(),
+			legs.Select(l => l.CallPut).Distinct().Count());
 
 	private static decimal RoundPrice(decimal price) => Math.Round(price, 3, MidpointRounding.AwayFromZero);
 

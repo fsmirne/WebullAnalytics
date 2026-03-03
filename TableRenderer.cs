@@ -51,20 +51,12 @@ public static class TableRenderer
 
 	/// <summary>
 	/// Computes the maximum number of date columns that fit in the terminal width.
-	/// Layout: panel borders (4) + table outer borders (2) + price column (11) + N × date column (15 for pnl, 10 for value).
-	/// Each Spectre table column = content + 2 padding + 1 separator.
 	/// </summary>
 	private static int ComputeMaxGridColumns(string displayMode)
 	{
 		int terminalWidth;
 		try { terminalWidth = Console.WindowWidth; }
 		catch { return 7; }
-
-		// panel left/right border+padding (4) + table outer left+right borders (2) + price column (content 8 + pad 2 + sep 1 = 11)
-		const int fixedOverhead = 4 + 2 + 11;
-		var colWidth = displayMode == "pnl" ? 15 : 10; // pnl: "$+1,520.00" (10) + 2 pad + 1 sep; value: "$25.38" (6) + 2 pad + 1 sep
-		var available = terminalWidth - fixedOverhead;
-		var maxCols = Math.Max(3, available / colWidth); // minimum 3: today, expiry open, at exp
-		return maxCols;
+		return TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode);
 	}
 }
