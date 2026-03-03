@@ -40,8 +40,7 @@ public static partial class TextFileExporter
 			console.WriteLine();
 
 			// Text export uses 200-char width; compute max columns to fit
-			var colWidth = displayMode == "pnl" ? 15 : 10;
-			var maxGridColumns = Math.Max(3, (200 - 17) / colWidth);
+			var maxGridColumns = TableBuilder.ComputeMaxGridColumns(200, displayMode);
 			var breakEvens = BreakEvenAnalyzer.Analyze(positions, iv, range, maxGridColumns);
 			foreach (var result in breakEvens)
 			{

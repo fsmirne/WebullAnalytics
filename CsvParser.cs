@@ -16,8 +16,6 @@ public static partial class CsvParser
 	private const decimal OptionMultiplier = 100m;
 	private const decimal StockMultiplier = 1m;
 
-	[GeneratedRegex(@"\s[A-Za-z]{3}$")]
-	private static partial Regex TimezoneSuffixRegex();
 
 	private static CsvConfiguration CreateLenientConfig() => new(CultureInfo.InvariantCulture)
 	{
@@ -252,17 +250,7 @@ public static partial class CsvParser
 				return base.ConvertFromString(text, row, memberMapData);
 			}
 
-			text = TimezoneSuffixRegex().Replace(text.Trim(), "");
-
-			var formats = new[]
-			{
-				"MM/dd/yyyy HH:mm:ss",
-				"M/d/yyyy H:mm:ss",
-				"MM/dd/yyyy H:mm:ss",
-				"M/d/yyyy HH:mm:ss"
-			};
-
-			if (DateTime.TryParseExact(text, formats, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var dt))
+			if (ParsingHelpers.TryParseWebullDateTime(text, out var dt))
 				return dt;
 
 			return base.ConvertFromString(text, row, memberMapData);

@@ -172,7 +172,7 @@ public static class PositionTracker
 	private static List<Trade> BuildExpirationTrades(List<Trade> trades)
 	{
 		if (!trades.Any())
-			return new List<Trade>();
+			return [];
 
 		var maxSeq = trades.Max(t => t.Seq);
 		var today = DateTime.Today;
@@ -599,19 +599,7 @@ public static class PositionTracker
 		var distinctStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().Count();
 		var distinctCallPut = parsedLegs.Select(x => x.parsed!.CallPut).Distinct().Count();
 
-		string strategyKind;
-		if (parsedLegs.Count >= 4 && distinctCallPut > 1)
-			strategyKind = distinctStrikes <= 3 ? "IronButterfly" : "IronCondor";
-		else if (parsedLegs.Count >= 4 && distinctExpiries == 1)
-			strategyKind = distinctStrikes <= 3 ? "Butterfly" : "Condor";
-		else
-			strategyKind = (distinctExpiries > 1, distinctStrikes > 1) switch
-			{
-				(true, false) => "Calendar",
-				(false, true) => "Vertical",
-				(true, true) => "Diagonal",
-				_ => "Strategy"
-			};
+		var strategyKind = ParsingHelpers.ClassifyStrategyKind(parsedLegs.Count, distinctExpiries, distinctStrikes, distinctCallPut);
 
 		var qty = group[0].row.Qty;
 

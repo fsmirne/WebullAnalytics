@@ -16,6 +16,19 @@ public static partial class ParsingHelpers
 	[GeneratedRegex(@"[^\d.\-]")]
 	private static partial Regex NonNumericRegex();
 
+	// Matches trailing 3-letter timezone abbreviations like " EST", " EDT", " UTC"
+	[GeneratedRegex(@"\s[A-Za-z]{3}$")]
+	public static partial Regex TimezoneSuffixRegex();
+
+	/// <summary>Datetime formats used in Webull CSV and JSONL exports.</summary>
+	public static readonly string[] DateTimeFormats =
+	[
+		"MM/dd/yyyy HH:mm:ss",
+		"M/d/yyyy H:mm:ss",
+		"MM/dd/yyyy H:mm:ss",
+		"M/d/yyyy HH:mm:ss"
+	];
+
 	// Maps strategy name keywords to standardized strategy types
 	// Ordered longest-first so "ironcondor" matches before "condor"
 	private static readonly (string keyword, string kind)[] StrategyKeywords =
@@ -44,6 +57,20 @@ public static partial class ParsingHelpers
 		var text = NonNumericRegex().Replace(value.Trim(), "");
 
 		return decimal.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out result);
+	}
+
+	/// <summary>
+	/// Parses a Webull datetime string, stripping any trailing timezone suffix.
+	/// Returns false if parsing fails.
+	/// </summary>
+	public static bool TryParseWebullDateTime(string? text, out DateTime result)
+	{
+		result = default;
+		if (string.IsNullOrWhiteSpace(text))
+			return false;
+
+		var clean = TimezoneSuffixRegex().Replace(text.Trim(), "");
+		return DateTime.TryParseExact(clean, DateTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out result);
 	}
 
 	/// <summary>
@@ -77,5 +104,26 @@ public static partial class ParsingHelpers
 		var normalized = name.Replace(" ", "");
 
 		return StrategyKeywords.Where(x => normalized.Contains(x.keyword, StringComparison.OrdinalIgnoreCase)).Select(x => x.kind).FirstOrDefault() ?? "Strategy";
+	}
+
+	/// <summary>
+	/// Classifies a multi-leg option strategy type based on leg counts.
+	/// </summary>
+	/// <param name="legCount">Total number of legs</param>
+	/// <param name="distinctExpiries">Number of distinct expiration dates</param>
+	/// <param name="distinctStrikes">Number of distinct strike prices</param>
+	/// <param name="distinctCallPut">Number of distinct call/put types (1 or 2)</param>
+	public static string ClassifyStrategyKind(int legCount, int distinctExpiries, int distinctStrikes, int distinctCallPut)
+	{
+		if (legCount >= 4 && distinctCallPut == 2) return distinctStrikes <= 3 ? "IronButterfly" : "IronCondor";
+		if (legCount >= 4) return distinctStrikes <= 3 ? "Butterfly" : "Condor";
+
+		return (distinctExpiries > 1, distinctStrikes > 1) switch
+		{
+			(true, false) => "Calendar",
+			(false, true) => "Vertical",
+			(true, true) => "Diagonal",
+			_ => "Spread"
+		};
 	}
 }

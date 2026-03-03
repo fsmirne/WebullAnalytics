@@ -240,4 +240,19 @@ public static class TableBuilder
 		if (value == 0) return "$0.00";
 		return value > 0 ? $"+${value.ToString("N2", CultureInfo.InvariantCulture)}" : $"-${Math.Abs(value).ToString("N2", CultureInfo.InvariantCulture)}";
 	}
+
+	/// <summary>
+	/// Computes the maximum number of date columns that fit in a given total width.
+	/// Layout: panel borders (4) + table outer borders (2) + price column (11) + N × date column (15 for pnl, 10 for value).
+	/// Each Spectre table column = content + 2 padding + 1 separator.
+	/// </summary>
+	public static int ComputeMaxGridColumns(int totalWidth, string displayMode)
+	{
+		// panel left/right border+padding (4) + table outer left+right borders (2) + price column (content 8 + pad 2 + sep 1 = 11)
+		const int fixedOverhead = 4 + 2 + 11;
+		var colWidth = displayMode == "pnl" ? 15 : 10; // pnl: "$+1,520.00" (10) + 2 pad + 1 sep; value: "$25.38" (6) + 2 pad + 1 sep
+		var available = totalWidth - fixedOverhead;
+		return Math.Max(3, available / colWidth); // minimum 3: today, expiry open, at exp
+	}
 }
+

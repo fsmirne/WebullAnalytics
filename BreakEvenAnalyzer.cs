@@ -554,16 +554,7 @@ public static class BreakEvenAnalyzer
 	/// </summary>
 	private static List<PricePnL> BuildPriceLadder(List<decimal> notablePrices, decimal step, Func<decimal, decimal> pnlAt, Func<decimal, decimal, decimal?> valueAt)
 	{
-		var min = notablePrices.Min() - 2 * step;
-		var max = notablePrices.Max() + 2 * step;
-		if (min < 0) min = 0;
-
-		// Extend range if fewer than ~8 stepped points
-		while ((max - min) / step + 1 < 8)
-		{
-			min = Math.Max(0, min - step);
-			max += step;
-		}
+		ComputePriceRange(notablePrices, step, out var min, out var max);
 
 		var prices = new SortedSet<decimal>();
 
@@ -573,11 +564,28 @@ public static class BreakEvenAnalyzer
 		foreach (var p in notablePrices.Where(np => np >= 0))
 			prices.Add(Math.Round(p, 2));
 
-		return prices.Select(p => 
+		return prices.Select(p =>
 		{ 
 			var pnl = Math.Round(pnlAt(p), 2); 
 			return new PricePnL(p, pnl, valueAt(p, pnl)); 
 		}).ToList();
+	}
+
+	/// <summary>
+	/// Computes the price range [min, max] for a price ladder or chart.
+	/// Expands the range until it spans at least 8 step-sized intervals.
+	/// </summary>
+	private static void ComputePriceRange(List<decimal> notablePrices, decimal step, out decimal min, out decimal max)
+	{
+		min = notablePrices.Min() - 2 * step;
+		max = notablePrices.Max() + 2 * step;
+		if (min < 0) min = 0;
+
+		while ((max - min) / step + 1 < 8)
+		{
+			min = Math.Max(0, min - step);
+			max += step;
+		}
 	}
 
 	/// <summary>
@@ -586,15 +594,7 @@ public static class BreakEvenAnalyzer
 	/// </summary>
 	private static List<PricePnL> BuildChartData(List<decimal> notablePrices, decimal step, Func<decimal, decimal> pnlAt, Func<decimal, decimal, decimal?> valueAt)
 	{
-		var min = notablePrices.Min() - 2 * step;
-		var max = notablePrices.Max() + 2 * step;
-		if (min < 0) min = 0;
-
-		while ((max - min) / step + 1 < 8)
-		{
-			min = Math.Max(0, min - step);
-			max += step;
-		}
+		ComputePriceRange(notablePrices, step, out var min, out var max);
 
 		const int pointCount = 100;
 		var chartStep = (max - min) / (pointCount - 1);
