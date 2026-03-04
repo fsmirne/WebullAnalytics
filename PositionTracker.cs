@@ -42,6 +42,21 @@ public static class PositionTracker
 		{
 			var (realized, closedQty) = ProcessTrade(trade, positions, allTrades);
 
+			// Adjust P&L for strategy parent/leg price discrepancy.
+			// CSV parent prices reflect actual broker cash flow, but individual leg prices
+			// may not sum to the parent price due to rounding. Without this adjustment,
+			// leg-level FIFO P&L diverges from actual cash flow.
+			if (IsStrategyParent(trade) && trade.Side is Side.Buy or Side.Sell)
+			{
+				var legs = allTrades.Where(t => t.ParentStrategySeq == trade.Seq).ToList();
+				if (legs.Count >= 2)
+				{
+					var parentCash = (trade.Side == Side.Sell ? 1m : -1m) * trade.Qty * trade.Price * trade.Multiplier;
+					var legCash = legs.Sum(leg => (leg.Side == Side.Sell ? 1m : -1m) * leg.Qty * leg.Price * leg.Multiplier);
+					realized += parentCash - legCash;
+				}
+			}
+
 			var fee = LookupFee(trade, allTrades, feeLookup);
 			var row = BuildReportRow(trade, realized, closedQty, fee, ref running, ref cash, initialAmount);
 
