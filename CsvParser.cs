@@ -65,7 +65,7 @@ public static partial class CsvParser
 		return csv.GetRecords<Fee>().GroupBy(g => (g.DateTime, g.Side, g.Quantity)).Select(g => new { g.Key, Fees = g.Sum(x => x.Fees) }).ToDictionary(k => k.Key, v => v.Fees);
 	}
 
-	private static bool IsFilledTrade(RawTrade rt) => (string.IsNullOrEmpty(rt.Status) || rt.Status.Equals("Filled", StringComparison.OrdinalIgnoreCase)) && rt.Side is Side.Buy or Side.Sell && rt.Filled > 0 && (rt.AveragePrice ?? rt.Price) is not null;
+	private static bool IsFilledTrade(RawTrade rt) => rt.Side is Side.Buy or Side.Sell && rt.Filled > 0 && (rt.AveragePrice ?? rt.Price) is not null;
 
 	private static decimal GetPrice(RawTrade rt) => rt.AveragePrice ?? rt.Price ?? 0m;
 
