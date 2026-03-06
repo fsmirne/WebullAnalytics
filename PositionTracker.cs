@@ -246,7 +246,7 @@ public static class PositionTracker
 	{
 		var lots = positions.GetValueOrDefault(trade.MatchKey, []);
 
-		var (updatedLots, realized, closedQty) = trade.Side == Side.Expire ? ApplyExpiration(lots, trade.Multiplier) : ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier);
+		var (updatedLots, realized, closedQty) = trade.Side == Side.Expire ? ApplyExpiration(lots, trade.Multiplier) : ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier, trade.ParentStrategySeq);
 
 		if (updatedLots.Count > 0)
 			positions[trade.MatchKey] = updatedLots;
@@ -277,7 +277,7 @@ public static class PositionTracker
 	/// Applies a buy/sell trade to existing lots using FIFO matching.
 	/// Opposite-side lots are closed first, then remaining quantity opens new position.
 	/// </summary>
-	private static (List<Lot>, decimal realized, int closedQty) ApplyToLots(List<Lot> lots, Side tradeSide, int tradeQty, decimal tradePrice, decimal multiplier)
+	private static (List<Lot>, decimal realized, int closedQty) ApplyToLots(List<Lot> lots, Side tradeSide, int tradeQty, decimal tradePrice, decimal multiplier, int? parentStrategySeq = null)
 	{
 		var remaining = tradeQty;
 		var realized = 0m;
@@ -313,19 +313,19 @@ public static class PositionTracker
 
 		// Add remaining quantity as new lot
 		if (remaining > 0)
-			updated.Add(new Lot(tradeSide, remaining, tradePrice));
+			updated.Add(new Lot(tradeSide, remaining, tradePrice, parentStrategySeq));
 
 		return (updated, realized, closedQty);
 	}
 
 	/// <summary>
-	/// Builds position rows for display, grouping options into calendar spreads where applicable.
+	/// Builds position rows for display, grouping options into strategies using trade relationships.
 	/// </summary>
 	public static List<PositionRow> BuildPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades)
 	{
 		var avgCosts = ComputeAverageCosts(allTrades);
 		var allPositions = BuildRawPositionRows(positions, tradeIndex, avgCosts);
-		var grouped = GroupIntoStrategies(allPositions);
+		var grouped = GroupIntoStrategies(allPositions, positions);
 		return BuildFinalPositionRows(grouped, allTrades);
 	}
 
@@ -391,61 +391,60 @@ public static class PositionTracker
 	}
 
 	/// <summary>
-	/// Groups option positions into calendar spreads by matching long/short legs
-	/// with the same underlying, strike, and call/put type but different expirations.
-	/// Handles partial rolls by creating separate calendars for different quantities.
+	/// Groups option positions into strategies using trade relationships.
+	/// Legs that share a ParentStrategySeq in their lots were traded together as part of the same strategy.
 	/// </summary>
-	private static List<List<(string matchKey, PositionRow row, Trade? trade)>> GroupIntoStrategies(List<(string matchKey, PositionRow row, Trade? trade)> allPositions)
+	private static List<List<(string matchKey, PositionRow row, Trade? trade)>> GroupIntoStrategies(List<(string matchKey, PositionRow row, Trade? trade)> allPositions, Dictionary<string, List<Lot>> positions)
 	{
 		var grouped = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
 		var processed = new HashSet<string>();
 
-		// Parse and group options by underlying/strike/type
-		var optionsByKey = allPositions
-			.Where(p => p.trade?.Asset == Asset.Option)
-			.Select(p => (pos: p, parsed: MatchKeys.TryGetOptionSymbol(p.matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
-			.Where(x => x.parsed != null)
-			.GroupBy(x => $"{x.parsed!.Root}|{x.parsed.Strike}|{x.parsed.CallPut}")
-			.ToDictionary(g => g.Key, g => g.ToList());
+		// Build reverse index: parentSeq → set of option matchKeys whose lots reference it
+		var parentToKeys = new Dictionary<int, HashSet<string>>();
+		foreach (var p in allPositions.Where(p => p.trade?.Asset == Asset.Option))
+			foreach (var lot in positions.GetValueOrDefault(p.matchKey, []).Where(l => l.ParentStrategySeq.HasValue))
+			{
+				if (!parentToKeys.TryGetValue(lot.ParentStrategySeq!.Value, out var set))
+					parentToKeys[lot.ParentStrategySeq!.Value] = set = [];
+				set.Add(p.matchKey);
+			}
 
-		foreach (var (_, legs) in optionsByKey)
+		// Build strategy groups from parentSeqs that link ≥2 positions, merging overlapping groups
+		var strategyGroups = new List<HashSet<string>>();
+		foreach (var (_, keys) in parentToKeys.Where(kvp => kvp.Value.Count >= 2))
 		{
-			var longs = legs.Where(l => l.pos.row.Side == Side.Buy).OrderByDescending(l => l.parsed!.ExpiryDate).ToList();
-			var shorts = legs.Where(l => l.pos.row.Side == Side.Sell).OrderBy(l => l.parsed!.ExpiryDate).ToList();
-			grouped.AddRange(MatchSpreadLegs(longs, shorts, processed, addLongRemainders: true));
+			// Find an existing group that overlaps with this set
+			var existing = strategyGroups.FirstOrDefault(g => g.Overlaps(keys));
+			if (existing != null)
+				existing.UnionWith(keys);
+			else
+				strategyGroups.Add(new HashSet<string>(keys));
 		}
 
-		// Second pass: match remaining unprocessed options as vertical spreads (same root + expiry + callput, different strikes)
-		var verticalCandidates = allPositions
-			.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey))
-			.Select(p => (pos: p, parsed: MatchKeys.TryGetOptionSymbol(p.matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
-			.Where(x => x.parsed != null)
-			.GroupBy(x => $"{x.parsed!.Root}|{x.parsed.ExpiryDate:yyyyMMdd}|{x.parsed.CallPut}")
-			.ToDictionary(g => g.Key, g => g.ToList());
+		// Second merge pass: collapse groups that now overlap after the first pass
+		for (int i = 0; i < strategyGroups.Count; i++)
+			for (int j = i + 1; j < strategyGroups.Count; j++)
+				if (strategyGroups[i].Overlaps(strategyGroups[j]))
+				{
+					strategyGroups[i].UnionWith(strategyGroups[j]);
+					strategyGroups.RemoveAt(j);
+					j--;
+				}
 
-		foreach (var (_, legs) in verticalCandidates)
+		// Convert hashsets to position groups
+		var positionLookup = allPositions.Where(p => p.trade?.Asset == Asset.Option).ToDictionary(p => p.matchKey);
+		foreach (var keySet in strategyGroups)
 		{
-			var longs = legs.Where(l => l.pos.row.Side == Side.Buy).OrderBy(l => l.parsed!.Strike).ToList();
-			var shorts = legs.Where(l => l.pos.row.Side == Side.Sell).OrderBy(l => l.parsed!.Strike).ToList();
-			grouped.AddRange(MatchSpreadLegs(longs, shorts, processed));
+			var group = keySet.Select(k => positionLookup[k]).ToList();
+			grouped.Add(group);
+			foreach (var k in keySet) processed.Add(k);
 		}
-
-		// Third pass: merge vertical pairs into multi-leg strategies (iron condors, condors, butterflies, etc.)
-		MergeVerticalsIntoMultiLegStrategies(grouped);
 
 		// Add unprocessed options as standalone
-		grouped.AddRange(allPositions
-			.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey))
-			.Select(p =>
-			{
-				processed.Add(p.matchKey);
-				return new List<(string, PositionRow, Trade?)> { p };
-			}));
+		grouped.AddRange(allPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
 
 		// Add non-option positions
-		grouped.AddRange(allPositions
-			.Where(p => p.trade?.Asset != Asset.Option)
-			.Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		grouped.AddRange(allPositions.Where(p => p.trade?.Asset != Asset.Option).Select(p => new List<(string, PositionRow, Trade?)> { p }));
 
 		// Sort by asset type, then instrument
 		grouped.Sort((a, b) =>
@@ -455,116 +454,6 @@ public static class PositionTracker
 		});
 
 		return grouped;
-	}
-
-	/// <summary>
-	/// Matches pre-sorted long and short option legs into spread groups by quantity.
-	/// Used for both calendar spreads (sorted by expiry) and vertical spreads (sorted by strike).
-	/// When addLongRemainders is true, unmatched long quantities are added as standalone groups.
-	/// </summary>
-	private static List<List<(string matchKey, PositionRow row, Trade? trade)>> MatchSpreadLegs(List<((string matchKey, PositionRow row, Trade? trade) pos, OptionParsed? parsed)> sortedLongs, List<((string matchKey, PositionRow row, Trade? trade) pos, OptionParsed? parsed)> sortedShorts, HashSet<string> processed, bool addLongRemainders = false)
-	{
-		var result = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
-
-		if (!sortedLongs.Any() || !sortedShorts.Any())
-			return result;
-
-		var longRemaining = sortedLongs.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
-		var shortRemaining = sortedShorts.ToDictionary(l => l.pos.matchKey, l => l.pos.row.Qty);
-
-		foreach (var shortLeg in sortedShorts)
-		{
-			var shortQty = shortRemaining[shortLeg.pos.matchKey];
-			if (shortQty <= 0 || processed.Contains(shortLeg.pos.matchKey))
-				continue;
-
-			foreach (var longLeg in sortedLongs)
-			{
-				var longQty = longRemaining[longLeg.pos.matchKey];
-				if (longQty <= 0)
-					continue;
-
-				var matchedQty = Math.Min(longQty, shortQty);
-
-				result.Add(new List<(string, PositionRow, Trade?)>
-				{
-					(longLeg.pos.matchKey, longLeg.pos.row with { Qty = matchedQty }, longLeg.pos.trade),
-					(shortLeg.pos.matchKey, shortLeg.pos.row with { Qty = matchedQty }, shortLeg.pos.trade)
-				});
-
-				longRemaining[longLeg.pos.matchKey] -= matchedQty;
-				shortRemaining[shortLeg.pos.matchKey] -= matchedQty;
-				shortQty -= matchedQty;
-
-				if (shortQty <= 0)
-				{
-					processed.Add(shortLeg.pos.matchKey);
-					break;
-				}
-			}
-		}
-
-		// Mark fully consumed legs as processed
-		foreach (var leg in sortedLongs.Where(l => longRemaining[l.pos.matchKey] <= 0))
-			processed.Add(leg.pos.matchKey);
-
-		if (addLongRemainders)
-		{
-			foreach (var longLeg in sortedLongs)
-			{
-				var remaining = longRemaining[longLeg.pos.matchKey];
-				if (remaining > 0 && !processed.Contains(longLeg.pos.matchKey))
-				{
-					processed.Add(longLeg.pos.matchKey);
-					result.Add(new List<(string, PositionRow, Trade?)> { (longLeg.pos.matchKey, longLeg.pos.row with { Qty = remaining }, longLeg.pos.trade) });
-				}
-			}
-		}
-
-		return result;
-	}
-
-	/// <summary>
-	/// Merges vertical spread pairs sharing the same root, expiry, and quantity into multi-leg strategies.
-	/// Covers iron condors/butterflies (call + put verticals) and condors/butterflies (same-type verticals).
-	/// </summary>
-	private static void MergeVerticalsIntoMultiLegStrategies(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped)
-	{
-		var verticals = new List<(int index, string root, DateTime expiry, int qty)>();
-
-		for (int i = 0; i < grouped.Count; i++)
-		{
-			var group = grouped[i];
-			if (group.Count != 2) continue;
-			var parsedLegs = group.Select(g => MatchKeys.TryGetOptionSymbol(g.matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null).Where(p => p != null).ToList();
-			if (parsedLegs.Count != 2) continue;
-			if (parsedLegs[0]!.Root != parsedLegs[1]!.Root || parsedLegs[0]!.ExpiryDate != parsedLegs[1]!.ExpiryDate) continue;
-			// Both legs must be same call/put type (i.e. this is a vertical, not some other 2-leg combo)
-			if (parsedLegs[0]!.CallPut != parsedLegs[1]!.CallPut) continue;
-			verticals.Add((i, parsedLegs[0]!.Root, parsedLegs[0]!.ExpiryDate, group[0].row.Qty));
-		}
-
-		// Group by root + expiry + qty; any group of 2+ verticals forms a multi-leg strategy
-		var mergeGroups = verticals.GroupBy(v => (v.root, v.expiry, v.qty)).Where(g => g.Count() >= 2).ToList();
-
-		var mergedIndices = new HashSet<int>();
-		var toAdd = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
-
-		foreach (var mg in mergeGroups)
-		{
-			var combined = new List<(string matchKey, PositionRow row, Trade? trade)>();
-			foreach (var v in mg)
-			{
-				mergedIndices.Add(v.index);
-				combined.AddRange(grouped[v.index]);
-			}
-			toAdd.Add(combined);
-		}
-
-		if (mergedIndices.Count == 0) return;
-		foreach (var idx in mergedIndices.OrderByDescending(i => i))
-			grouped.RemoveAt(idx);
-		grouped.AddRange(toAdd);
 	}
 
 	/// <summary>
@@ -626,7 +515,8 @@ public static class PositionTracker
 		var netAdjusted = netInitial;
 		if (strategyKind is "Calendar" or "Diagonal")
 		{
-			var totalNetDebit = CalculateTotalNetDebit(allTrades, firstParsed.Root, firstParsed.Strike, firstParsed.CallPut);
+			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
+			var totalNetDebit = CalculateTotalNetDebit(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut);
 			netAdjusted = totalNetDebit / (qty * 100m);
 		}
 
@@ -655,26 +545,24 @@ public static class PositionTracker
 
 	/// <summary>
 	/// Computes total net debit (cash spent minus cash received) from strategy parent trades
-	/// for the CURRENT calendar/diagonal position at a given underlying/strike/type.
+	/// for the CURRENT calendar/diagonal position at a given underlying/strikes/type.
 	/// Tracks per-contract positions at the strike level to find when the position was last flat,
 	/// then only includes strategy trades after that point. This prevents closed historical positions
 	/// from contaminating the break-even of a newly opened position.
 	/// </summary>
-	private static decimal CalculateTotalNetDebit(List<Trade> allTrades, string root, decimal strike, string callPut)
+	private static decimal CalculateTotalNetDebit(List<Trade> allTrades, string root, List<decimal> strikes, string callPut)
 	{
-		var strikeStr = Formatters.FormatQty(strike);
-		var legsKeySuffix = $":{callPut}{strikeStr},{callPut}{strikeStr}";
+		var legsKeySuffix = ":" + string.Join(",", strikes.Select(s => $"{callPut}{Formatters.FormatQty(s)}"));
 		var rootSegment = $":{root}:";
 
-		// Build OCC suffix to match all options at this root/strike/callPut across any expiry
-		var strikeInt = (long)(strike * 1000m);
-		var occSuffix = $"{callPut}{strikeInt:D8}";
+		// Build OCC suffixes to match all options at these root/strikes/callPut across any expiry
+		var occSuffixes = strikes.Select(s => $"{callPut}{(long)(s * 1000m):D8}").ToHashSet();
 		var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{root}";
 		var today = DateTime.Today;
 
-		// Collect all option leg trades at this strike, plus synthetic expiry events
+		// Collect all option leg trades at these strikes, plus synthetic expiry events
 		var legEvents = allTrades
-			.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && t.MatchKey.EndsWith(occSuffix, StringComparison.Ordinal))
+			.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(suffix => t.MatchKey.EndsWith(suffix, StringComparison.Ordinal)))
 			.Select(t => (t.Timestamp, t.Seq, t.MatchKey, t.Side, t.Qty, IsExpiry: false))
 			.ToList();
 

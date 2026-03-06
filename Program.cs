@@ -68,13 +68,9 @@ class ReportSettings : CommandSettings
 	[DefaultValue("console")]
 	public string OutputFormat { get; set; } = "console";
 
-	[Description("Path for Excel output file")]
-	[CommandOption("--excel-path")]
-	public string? ExcelPath { get; set; }
-
-	[Description("Path for text output file")]
-	[CommandOption("--text-path")]
-	public string? TextPath { get; set; }
+	[Description("Path for output file (used with --output excel or text)")]
+	[CommandOption("--output-path")]
+	public string? OutputPath { get; set; }
 
 	[Description("Initial portfolio amount in dollars (default: 0)")]
 	[CommandOption("--initial-amount")]
@@ -248,13 +244,11 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
-				var excelPath = settings.ExcelPath ?? $"WebullAnalytics_{dateStr}.xlsx";
-				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, excelPath, iv);
+				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", iv);
 				break;
 
 			case "text":
-				var textPath = settings.TextPath ?? $"WebullAnalytics_{dateStr}.txt";
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, textPath, settings.Simplified, iv, settings.Range, displayMode);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, iv, settings.Range, displayMode);
 				break;
 
 			default:

@@ -86,7 +86,8 @@ public class Fee
 public record Lot(
 	Side Side,
 	int Qty,
-	decimal Price
+	decimal Price,
+	int? ParentStrategySeq = null
 );
 
 /// <summary>
