@@ -143,6 +143,18 @@ public record OptionParsed(
 	decimal Strike
 );
 
+public record OptionContractQuote(
+	string ContractSymbol,
+	decimal? LastPrice,
+	decimal? Bid,
+	decimal? Ask,
+	decimal? Change,
+	decimal? PercentChange,
+	long? Volume,
+	long? OpenInterest,
+	decimal? ImpliedVolatility
+);
+
 public record PricePnL(decimal UnderlyingPrice, decimal PnL, decimal? ContractValue = null);
 
 /// <summary>

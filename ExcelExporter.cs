@@ -6,7 +6,7 @@ namespace WebullAnalytics;
 
 public static class ExcelExporter
 {
-	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, decimal? ivLong = null, decimal? ivShort = null)
+	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, decimal? ivLong = null, decimal? ivShort = null, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null)
 	{
 		// EPPlus requires a license context
 		ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -29,7 +29,7 @@ public static class ExcelExporter
 		ExportDailyPnL(dailyPnLSheet, reportRows);
 
 		// Export break-even analysis
-		ExportBreakEven(breakEvenSheet, positionRows, ivLong, ivShort);
+		ExportBreakEven(breakEvenSheet, positionRows, ivLong, ivShort, optionQuotesBySymbol);
 
 		// Save the file
 		var file = new FileInfo(outputPath);
@@ -244,9 +244,9 @@ public static class ExcelExporter
 		}
 	}
 
-	private static void ExportBreakEven(ExcelWorksheet sheet, List<PositionRow> positionRows, decimal? ivLong, decimal? ivShort)
+	private static void ExportBreakEven(ExcelWorksheet sheet, List<PositionRow> positionRows, decimal? ivLong, decimal? ivShort, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol)
 	{
-		var results = BreakEvenAnalyzer.Analyze(positionRows, ivLong, ivShort);
+		var results = BreakEvenAnalyzer.Analyze(positionRows, ivLong, ivShort, optionQuotesBySymbol: optionQuotesBySymbol);
 		if (results.Count == 0)
 		{
 			sheet.Cells[1, 1].Value = "No positions to analyze.";
