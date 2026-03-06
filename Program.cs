@@ -90,6 +90,11 @@ class ReportSettings : CommandSettings
 	[CommandOption("--iv-short")]
 	public decimal? ImpliedVolatilityShort { get; set; }
 
+	[Description("Fetch option chain data from Yahoo Finance for break-even analysis (bid/ask/IV/etc)")]
+	[CommandOption("--yahoo")]
+	[DefaultValue(false)]
+	public bool UseYahoo { get; set; }
+
 	[Description("Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)")]
 	[CommandOption("--range")]
 	[DefaultValue(2.0)]
@@ -243,22 +248,37 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
 		var ivLong = settings.ImpliedVolatilityLong.HasValue ? settings.ImpliedVolatilityLong.Value / 100m : (decimal?)null;
 		var ivShort = settings.ImpliedVolatilityShort.HasValue ? settings.ImpliedVolatilityShort.Value / 100m : (decimal?)null;
+		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null;
+		if (settings.UseYahoo)
+		{
+			try
+			{
+				Console.WriteLine("Yahoo Finance: fetching option chain data...");
+				optionQuotesBySymbol = await YahooOptionsClient.FetchOptionQuotesAsync(positionRows, cancellation);
+				Console.WriteLine($"Yahoo Finance: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
+			}
+			catch (Exception ex)
+			{
+				if (ex is OperationCanceledException) throw;
+				Console.WriteLine($"Warning: Failed to fetch Yahoo Finance option data: {ex.Message}");
+			}
+		}
 
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
-				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort);
+				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort, optionQuotesBySymbol);
 				break;
 
 			case "text":
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol);
 				break;
 		}
 
