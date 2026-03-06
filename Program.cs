@@ -82,9 +82,13 @@ class ReportSettings : CommandSettings
 	[DefaultValue("detailed")]
 	public string View { get; set; } = "detailed";
 
-	[Description("Implied volatility for break-even analysis of calendar/diagonal spreads (annual %, e.g., 50 for 50%)")]
-	[CommandOption("--iv")]
-	public decimal? ImpliedVolatility { get; set; }
+	[Description("Implied volatility for long legs (annual %, e.g., 50 for 50%)")]
+	[CommandOption("--iv-long")]
+	public decimal? ImpliedVolatilityLong { get; set; }
+
+	[Description("Implied volatility for short legs (annual %, e.g., 50 for 50%)")]
+	[CommandOption("--iv-short")]
+	public decimal? ImpliedVolatilityShort { get; set; }
 
 	[Description("Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)")]
 	[CommandOption("--range")]
@@ -237,23 +241,24 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var positionRows = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
-		var iv = settings.ImpliedVolatility.HasValue ? settings.ImpliedVolatility.Value / 100m : (decimal?)null;
+		var ivLong = settings.ImpliedVolatilityLong.HasValue ? settings.ImpliedVolatilityLong.Value / 100m : (decimal?)null;
+		var ivShort = settings.ImpliedVolatilityShort.HasValue ? settings.ImpliedVolatilityShort.Value / 100m : (decimal?)null;
 
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
-				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", iv);
+				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort);
 				break;
 
 			case "text":
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, iv, settings.Range, displayMode);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, iv, settings.Range, displayMode);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode);
 				break;
 		}
 
