@@ -93,14 +93,14 @@ WebullAnalytics report --initial-amount 10000
 # Combine options
 WebullAnalytics report --fetch --since 2026-01-01 --output excel --initial-amount 10000
 
-# Show time-decay grid with implied volatility (enables 2D grid for options)
-WebullAnalytics report --iv 50
+# Show time-decay grid with separate implied volatilities for long and short legs (enables 2D grid for options)
+WebullAnalytics report --iv-long 50 --iv-short 45
 
 # Show P&L instead of contract value in the grid
-WebullAnalytics report --iv 50 --display pnl
+WebullAnalytics report --iv-long 50 --iv-short 45 --display pnl
 
 # Increase grid granularity (more rows between strikes, default: 2)
-WebullAnalytics report --iv 50 --range 4
+WebullAnalytics report --iv-long 50 --iv-short 45 --range 4
 ```
 
 #### Report Options
@@ -117,7 +117,8 @@ Options:
   --text-path <path>        Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
   --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
-  --iv <volatility>         Implied volatility (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
+  --iv-long <volatility>    Implied volatility for long legs (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
+  --iv-short <volatility>   Implied volatility for short legs (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
   --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --help, -h                Show help message
@@ -284,7 +285,7 @@ This format is useful for sharing reports via email, archiving, or importing int
 
 ## Time-Decay Grid
 
-When `--iv` is provided, the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
+When `--iv-long` or `--iv-short` is provided, the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
 
 - **Date columns**: Evenly-spaced dates from today through expiration, evaluated at market open (9:30 AM). The last two columns show expiration day at market open (with remaining intraday time value via Black-Scholes) and "At Exp" at market close (4:30 PM, intrinsic value only). The number of columns adapts to the terminal width — dates are skipped as needed so the grid never overflows horizontally.
 - **Price rows**: Step size is derived from the position's strike spacing (or strike-to-break-even distance for single-strike positions like calendars), so the grid adapts to any stock price. The `--range` parameter controls granularity — it sets how many rows fit per strike gap (default: 2). Break-even prices (marked with `*`) and strike prices are always included, with 2 padding rows beyond the outermost notable price.
@@ -292,7 +293,7 @@ When `--iv` is provided, the break-even panel for each option position includes 
 - **Cell colors**: Green for profit, red for loss.
 - **Calendar/diagonal spreads**: The grid ends at the short leg's expiration. The long leg's remaining time value is reflected via Black-Scholes pricing at each date, including the "At Exp" column.
 
-Without `--iv`, the existing 1D price ladder (Price | Value | P&L at expiration) is shown instead.
+Without `--iv-long` and `--iv-short`, the existing 1D price ladder (Price | Value | P&L at expiration) is shown instead.
 
 ## Position Tracking Details
 

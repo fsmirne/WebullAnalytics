@@ -14,13 +14,13 @@ public static class BreakEvenAnalyzer
 	private static readonly TimeSpan MarketOpen = new(9, 30, 0);
 	private static readonly TimeSpan MarketClose = new(16, 30, 0);
 
-	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, decimal? impliedVolatility = null, decimal padding = 2, int maxGridColumns = 7)
+	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, decimal? ivLong = null, decimal? ivShort = null, decimal padding = 2, int maxGridColumns = 7)
 	{
 		var groups = GroupPositions(positionRows);
 		var results = new List<BreakEvenResult>();
 		foreach (var group in groups)
 		{
-			var result = AnalyzeGroup(group, impliedVolatility, padding, maxGridColumns);
+			var result = AnalyzeGroup(group, ivLong, ivShort, padding, maxGridColumns);
 			if (result != null) results.Add(result);
 		}
 		return results;
@@ -42,7 +42,7 @@ public static class BreakEvenAnalyzer
 		return groups;
 	}
 
-	private static BreakEvenResult? AnalyzeGroup(List<PositionRow> group, decimal? iv, decimal padding, int maxGridColumns)
+	private static BreakEvenResult? AnalyzeGroup(List<PositionRow> group, decimal? ivLong, decimal? ivShort, decimal padding, int maxGridColumns)
 	{
 		var parent = group[0];
 
@@ -50,10 +50,10 @@ public static class BreakEvenAnalyzer
 			return AnalyzeStock(parent);
 
 		if (parent.Asset == Asset.Option)
-			return AnalyzeSingleOption(parent, iv, padding, maxGridColumns);
+			return AnalyzeSingleOption(parent, ivLong, ivShort, padding, maxGridColumns);
 
 		if (parent.Asset == Asset.OptionStrategy && group.Count > 1)
-			return AnalyzeStrategy(parent, group.Skip(1).ToList(), iv, padding, maxGridColumns);
+			return AnalyzeStrategy(parent, group.Skip(1).ToList(), ivLong, ivShort, padding, maxGridColumns);
 
 		return null;
 	}
@@ -74,7 +74,7 @@ public static class BreakEvenAnalyzer
 		return new BreakEvenResult(Title: title, Details: details, Qty: row.Qty, BreakEvens: [avgPrice], MaxProfit: isLong ? null : avgPrice * row.Qty, MaxLoss: isLong ? avgPrice * row.Qty : null, DaysToExpiry: null, PriceLadder: ladder, Note: null, ChartData: chartData);
 	}
 
-	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, decimal? iv, decimal padding, int maxGridColumns)
+	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, decimal? ivLong, decimal? ivShort, decimal padding, int maxGridColumns)
 	{
 		var parsed = ParseOption(row);
 		if (parsed == null) return null;
@@ -114,6 +114,7 @@ public static class BreakEvenAnalyzer
 		var dte = row.Expiry.HasValue ? (int)(row.Expiry.Value.Date - DateTime.Today).TotalDays : (int?)null;
 
 		EarlyExerciseBoundary? earlyExercise = null;
+		var iv = isLong ? ivLong : ivShort;
 		if (isLong && iv.HasValue && dte.HasValue && dte.Value > 0)
 		{
 			var timeYears = dte.Value / 365.0;
@@ -124,13 +125,13 @@ public static class BreakEvenAnalyzer
 		if (iv.HasValue && dte.HasValue && dte.Value > 0)
 		{
 			var legs = new List<(PositionRow row, OptionParsed parsed)> { (row, parsed) };
-			grid = BuildTimeDecayGrid(legs, qty, row.Side, premium, parsed.ExpiryDate, iv.Value, padding, strike, [breakEven], maxGridColumns);
+			grid = BuildTimeDecayGrid(legs, qty, row.Side, premium, parsed.ExpiryDate, ivLong, ivShort, padding, strike, [breakEven], maxGridColumns);
 		}
 
 		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, null, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid);
 	}
 
-	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, decimal? iv, decimal padding, int maxGridColumns)
+	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, decimal? ivLong, decimal? ivShort, decimal padding, int maxGridColumns)
 	{
 		var parsedLegs = legs.Select(l => (row: l, parsed: ParseOption(l))).Where(x => x.parsed != null).Select(x => (x.row, parsed: x.parsed!)).ToList();
 		if (parsedLegs.Count < 2) return null;
@@ -173,12 +174,12 @@ public static class BreakEvenAnalyzer
 			var cpDisplay = l.parsed.CallPut == "C" ? "Call" : "Put";
 			var legPremium = GetPremium(l.row);
 			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
-			if (l.row.Side == Side.Buy && iv.HasValue)
+			if (l.row.Side == Side.Buy && ivLong.HasValue)
 			{
 				var legDte = (l.parsed.ExpiryDate.Date - DateTime.Today).TotalDays;
 				if (legDte > 0)
 				{
-					var boundary = BjerksundStensland.ComputeExerciseBoundary(l.parsed.Strike, legDte / 365.0, RiskFreeRate, (double)iv.Value, l.parsed.CallPut);
+					var boundary = BjerksundStensland.ComputeExerciseBoundary(l.parsed.Strike, legDte / 365.0, RiskFreeRate, (double)ivLong.Value, l.parsed.CallPut);
 					if (boundary != null)
 						desc += $" | Exercise below ${boundary.BoundaryNear.ToString("N2", System.Globalization.CultureInfo.InvariantCulture)}";
 				}
@@ -214,16 +215,16 @@ public static class BreakEvenAnalyzer
 				maxLoss = (width - netPremium) * qty * 100;
 			}
 		}
-		else if (isTimeSpread && !iv.HasValue)
+		else if (isTimeSpread && !ivLong.HasValue && !ivShort.HasValue)
 		{
 			// Cannot compute accurate P&L without implied volatility
-			note = "Break-even analysis requires implied volatility. Use --iv to specify (e.g., --iv 50 for 50%).";
+			note = "Break-even analysis requires implied volatility. Use --iv-long or --iv-short to specify.";
 			return new BreakEvenResult(title, details, qty, [], null, null, dte, [], note, legDescriptions);
 		}
 		else if (isTimeSpread)
 		{
 			// Black-Scholes pricing: evaluate at the short leg's expiry
-			note = $"P&L estimated using {(iv!.Value * 100):G}% IV at short leg expiry. Actual results will vary with volatility.";
+			note = "P&L estimated using Black-Scholes at short leg expiry. Actual results will vary with volatility.";
 
 			if (parent.Side == Side.Buy)
 				maxLoss = netPremium * qty * 100;
@@ -236,7 +237,7 @@ public static class BreakEvenAnalyzer
 
 		Func<decimal, decimal> pnlFunc;
 		if (isTimeSpread)
-			pnlFunc = s => StrategyPnLWithBs(s, parsedLegs, qty, nearestExpiry.Date + MarketClose, iv!.Value);
+			pnlFunc = s => StrategyPnLWithBs(s, parsedLegs, qty, nearestExpiry.Date + MarketClose, ivLong, ivShort);
 		else
 			pnlFunc = s => StrategyPnLAtExpiration(s, parsedLegs, qty);
 
@@ -272,9 +273,9 @@ public static class BreakEvenAnalyzer
 		var chartData = BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
 		TimeDecayGrid? grid = null;
-		if (iv.HasValue && dte > 0)
+		if ((ivLong.HasValue || ivShort.HasValue) && dte > 0)
 		{
-			grid = BuildTimeDecayGrid(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, iv.Value, padding, strikes.Average(), breakEvens, maxGridColumns);
+			grid = BuildTimeDecayGrid(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, ivLong, ivShort, padding, strikes.Average(), breakEvens, maxGridColumns);
 		}
 
 		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid);
@@ -292,9 +293,9 @@ public static class BreakEvenAnalyzer
 	/// Computes total P&L at the evaluation date using Black-Scholes for legs with remaining time,
 	/// and intrinsic value for legs expiring at or before the evaluation date.
 	/// </summary>
-	private static decimal StrategyPnLWithBs(decimal underlyingPrice, List<(PositionRow row, OptionParsed parsed)> legs, int qty, DateTime evaluationDate, decimal iv)
+	private static decimal StrategyPnLWithBs(decimal underlyingPrice, List<(PositionRow row, OptionParsed parsed)> legs, int qty, DateTime evaluationDate, decimal? ivLong, decimal? ivShort)
 	{
-		return legs.Sum(l => LegPnLWithBs(underlyingPrice, l.parsed, l.row.Side, qty, GetPremium(l.row), evaluationDate, iv));
+		return legs.Sum(l => LegPnLWithBs(underlyingPrice, l.parsed, l.row.Side, qty, GetPremium(l.row), evaluationDate, ivLong, ivShort));
 	}
 
 	/// <summary>
@@ -302,14 +303,16 @@ public static class BreakEvenAnalyzer
 	/// past the evaluation date; otherwise uses intrinsic value (at-expiration).
 	/// Option expiration is defined as market close (4:30 PM) on the expiry date.
 	/// </summary>
-	private static decimal LegPnLWithBs(decimal underlyingPrice, OptionParsed parsed, Side side, int qty, decimal premium, DateTime evaluationDate, decimal iv)
+	private static decimal LegPnLWithBs(decimal underlyingPrice, OptionParsed parsed, Side side, int qty, decimal premium, DateTime evaluationDate, decimal? ivLong, decimal? ivShort)
 	{
 		decimal legValue;
 		var expirationTime = parsed.ExpiryDate.Date + MarketClose;
-		if (evaluationDate < expirationTime)
+		var iv = side == Side.Buy ? ivLong : ivShort;
+
+		if (iv.HasValue && evaluationDate < expirationTime)
 		{
 			var timeYears = (expirationTime - evaluationDate).TotalDays / 365.0;
-			legValue = BlackScholes(underlyingPrice, parsed.Strike, timeYears, RiskFreeRate, iv, parsed.CallPut);
+			legValue = BlackScholes(underlyingPrice, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
 		}
 		else
 		{
@@ -384,7 +387,7 @@ public static class BreakEvenAnalyzer
 	/// <summary>
 	/// Builds a 2D grid of option values across dates and underlying prices.
 	/// </summary>
-	private static TimeDecayGrid BuildTimeDecayGrid(List<(PositionRow row, OptionParsed parsed)> legs, int qty, Side parentSide, decimal netPremium, DateTime latestExpiry, decimal iv, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns)
+	private static TimeDecayGrid BuildTimeDecayGrid(List<(PositionRow row, OptionParsed parsed)> legs, int qty, Side parentSide, decimal netPremium, DateTime latestExpiry, decimal? ivLong, decimal? ivShort, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns)
 	{
 		var dates = BuildDateColumns(latestExpiry, maxColumns);
 		var strikes = legs.Select(l => l.parsed.Strike).Distinct().ToList();
@@ -400,7 +403,7 @@ public static class BreakEvenAnalyzer
 			{
 				var price = priceRows[pi];
 				// LegPnLWithBs handles per-leg expiry: intrinsic for expired legs, BS for legs with remaining time
-				var totalPnL = legs.Sum(l => LegPnLWithBs(price, l.parsed, l.row.Side, qty, GetPremium(l.row), evalDate, iv));
+				var totalPnL = legs.Sum(l => LegPnLWithBs(price, l.parsed, l.row.Side, qty, GetPremium(l.row), evalDate, ivLong, ivShort));
 
 				pnls[pi, di] = Math.Round(totalPnL, 2);
 				// Contract value per share: netPremium + P&L / (qty × 100)
