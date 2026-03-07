@@ -484,5 +484,8 @@ $RECYCLE.BIN/
 # claude code
 .claude
 
+# app config (contains user defaults)
+config.json
+
 # data files
 data/

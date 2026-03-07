@@ -14,7 +14,7 @@ static class TerminalHelper
 	/// Ensures the terminal is wide enough for report tables. Prompts the user to resize if not.
 	/// Returns true in all cases (resize success, user declined, or detection failure) so rendering always proceeds.
 	/// </summary>
-	public static bool EnsureTerminalWidth(bool simplified = false)
+	public static bool EnsureTerminalWidth(bool simplified = false, bool autoExpand = false)
 	{
 		var minimumWidth = simplified ? SimplifiedMinWidth : DetailedMinWidth;
 
@@ -25,7 +25,11 @@ static class TerminalHelper
 		if (currentWidth >= minimumWidth)
 			return true;
 
-		var proceed = AnsiConsole.Confirm($"Your terminal is [yellow]{currentWidth}[/] columns wide. This report displays best at [green]{minimumWidth}+[/] columns. Expand terminal to {minimumWidth} columns?", defaultValue: true);
+		bool proceed;
+		if (autoExpand)
+			proceed = true;
+		else
+			proceed = AnsiConsole.Confirm($"Your terminal is [yellow]{currentWidth}[/] columns wide. This report displays best at [green]{minimumWidth}+[/] columns. Expand terminal to {minimumWidth} columns?", defaultValue: true);
 
 		if (!proceed)
 			return true;

@@ -1,0 +1,23 @@
+{
+	"autoExpandTerminal": false,
+	"report": {
+		"source": "api",
+		"dataOrders": "data/orders.jsonl",
+		"fetch": false,
+		"config": "data/api-config.json",
+		"since": null,
+		"output": "console",
+		"outputPath": null,
+		"initialAmount": 0,
+		"view": "detailed",
+		"ivLong": null,
+		"ivShort": null,
+		"yahoo": false,
+		"range": 2,
+		"display": "value"
+	},
+	"fetch": {
+		"config": "data/api-config.json",
+		"output": "data/orders.jsonl"
+	}
+}
