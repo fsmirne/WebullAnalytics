@@ -23,8 +23,12 @@ class Program
 	/// </summary>
 	internal static string ResolvePath(string path) => Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(BaseDir, path));
 
+	/// <summary>Raw CLI args, used to detect which options were explicitly provided on the command line.</summary>
+	internal static string[] RawArgs = [];
+
 	static int Main(string[] args)
 	{
+		RawArgs = args;
 		var app = new CommandApp();
 		app.Configure(config =>
 		{
@@ -35,6 +39,33 @@ class Program
 		});
 		return app.Run(args);
 	}
+
+	private static Dictionary<string, JsonElement>? _appConfigRoot;
+	private static bool _appConfigLoaded;
+
+	/// <summary>Loads and caches the root config.json dictionary. Returns null if the file doesn't exist or is invalid.</summary>
+	internal static Dictionary<string, JsonElement>? LoadAppConfigRoot()
+	{
+		if (_appConfigLoaded) return _appConfigRoot;
+		_appConfigLoaded = true;
+		var path = ResolvePath("data/config.json");
+		if (!File.Exists(path)) return null;
+		try { _appConfigRoot = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(path)); }
+		catch (JsonException ex) { Console.WriteLine($"Warning: Failed to parse config.json: {ex.Message}"); }
+		return _appConfigRoot;
+	}
+
+	/// <summary>Returns a named section (e.g. "report", "fetch") from config.json, or null if missing.</summary>
+	internal static Dictionary<string, JsonElement>? LoadAppConfig(string section)
+	{
+		var root = LoadAppConfigRoot();
+		if (root != null && root.TryGetValue(section, out var sectionElement))
+			return JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(sectionElement.GetRawText());
+		return null;
+	}
+
+	/// <summary>Returns true if the given CLI option name (e.g. "source", "iv-long") was explicitly passed on the command line.</summary>
+	internal static bool HasCliOption(string optionName) => RawArgs.Any(a => a.Equals($"--{optionName}", StringComparison.OrdinalIgnoreCase));
 }
 
 class ReportSettings : CommandSettings
@@ -109,6 +140,25 @@ class ReportSettings : CommandSettings
 
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
 
+	/// <summary>Applies config.json defaults for any option not explicitly passed on the CLI.</summary>
+	internal void ApplyConfig(Dictionary<string, JsonElement> cfg)
+	{
+		if (!Program.HasCliOption("source") && cfg.TryGetString("source", out var source)) Source = source;
+		if (!Program.HasCliOption("data-orders") && cfg.TryGetString("dataOrders", out var dataOrders)) DataOrders = dataOrders;
+		if (!Program.HasCliOption("fetch") && cfg.TryGetBool("fetch", out var fetch)) Fetch = fetch;
+		if (!Program.HasCliOption("config") && cfg.TryGetString("config", out var config)) Config = config;
+		if (!Program.HasCliOption("since") && cfg.TryGetString("since", out var since)) Since = since;
+		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) OutputFormat = output;
+		if (!Program.HasCliOption("output-path") && cfg.TryGetString("outputPath", out var outputPath)) OutputPath = outputPath;
+		if (!Program.HasCliOption("initial-amount") && cfg.TryGetDecimal("initialAmount", out var initialAmount)) InitialAmount = initialAmount;
+		if (!Program.HasCliOption("view") && cfg.TryGetString("view", out var view)) View = view;
+		if (!Program.HasCliOption("iv-long") && cfg.TryGetDecimal("ivLong", out var ivLong)) ImpliedVolatilityLong = ivLong;
+		if (!Program.HasCliOption("iv-short") && cfg.TryGetDecimal("ivShort", out var ivShort)) ImpliedVolatilityShort = ivShort;
+		if (!Program.HasCliOption("yahoo") && cfg.TryGetBool("yahoo", out var yahoo)) UseYahoo = yahoo;
+		if (!Program.HasCliOption("range") && cfg.TryGetDecimal("range", out var range)) Range = range;
+		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
+	}
+
 	public override ValidationResult Validate()
 	{
 		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
@@ -155,6 +205,13 @@ class FetchSettings : CommandSettings
 	[DefaultValue("data/orders.jsonl")]
 	public string Output { get; set; } = "data/orders.jsonl";
 
+	/// <summary>Applies config.json defaults for any option not explicitly passed on the CLI.</summary>
+	internal void ApplyConfig(Dictionary<string, JsonElement> cfg)
+	{
+		if (!Program.HasCliOption("config") && cfg.TryGetString("config", out var config)) Config = config;
+		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) Output = output;
+	}
+
 	public override ValidationResult Validate()
 	{
 		if (!File.Exists(Program.ResolvePath(Config))) return ValidationResult.Error($"Config file '{Config}' does not exist.");
@@ -166,6 +223,9 @@ class FetchCommand : AsyncCommand<FetchSettings>
 {
 	public override async Task<int> ExecuteAsync(CommandContext context, FetchSettings settings, CancellationToken cancellation)
 	{
+		var appConfig = Program.LoadAppConfig("fetch");
+		if (appConfig != null) settings.ApplyConfig(appConfig);
+
 		var configPath = Program.ResolvePath(settings.Config);
 		var outputPath = Program.ResolvePath(settings.Output);
 
@@ -202,6 +262,11 @@ class ReportCommand : AsyncCommand<ReportSettings>
 
 	public override async Task<int> ExecuteAsync(CommandContext context, ReportSettings settings, CancellationToken cancellation)
 	{
+		var appConfig = Program.LoadAppConfig("report");
+		if (appConfig != null) settings.ApplyConfig(appConfig);
+		var rootConfig = Program.LoadAppConfigRoot();
+		var autoExpandTerminal = rootConfig != null && rootConfig.TryGetBool("autoExpandTerminal", out var ae) && ae;
+
 		var ordersPath = Program.ResolvePath(settings.DataOrders);
 		var dataDir = Path.GetDirectoryName(ordersPath) ?? ".";
 
@@ -277,7 +342,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				break;
 
 			default:
-				TerminalHelper.EnsureTerminalWidth(settings.Simplified);
+				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal);
 				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol);
 				break;
 		}
@@ -345,5 +410,32 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			if (csvPriceByKey.TryGetValue((t.MatchKey, t.Side, t.Timestamp), out var officialPrice) && officialPrice != t.Price)
 				trades[i] = t with { Price = officialPrice };
 		}
+	}
+}
+
+static class JsonElementExtensions
+{
+	internal static bool TryGetString(this Dictionary<string, JsonElement> cfg, string key, out string value)
+	{
+		value = "";
+		if (!cfg.TryGetValue(key, out var el) || el.ValueKind != JsonValueKind.String) return false;
+		value = el.GetString()!;
+		return true;
+	}
+
+	internal static bool TryGetBool(this Dictionary<string, JsonElement> cfg, string key, out bool value)
+	{
+		value = false;
+		if (!cfg.TryGetValue(key, out var el) || el.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return false;
+		value = el.GetBoolean();
+		return true;
+	}
+
+	internal static bool TryGetDecimal(this Dictionary<string, JsonElement> cfg, string key, out decimal value)
+	{
+		value = 0;
+		if (!cfg.TryGetValue(key, out var el) || el.ValueKind != JsonValueKind.Number) return false;
+		value = el.GetDecimal();
+		return true;
 	}
 }
