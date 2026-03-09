@@ -12,15 +12,6 @@ public static class PositionTracker
 	private static bool IsStrategyLeg(Trade trade) => trade.ParentStrategySeq.HasValue;
 
 	/// <summary>
-	/// Loads trades from a single CSV file.
-	/// </summary>
-	public static List<Trade> LoadTradesFromFile(string filePath)
-	{
-		var (trades, _) = CsvParser.ParseTradeCsv(filePath, 0);
-		return trades;
-	}
-
-	/// <summary>
 	/// Computes the realized P&L report by processing all trades chronologically.
 	/// Generates synthetic expiration trades for options that have expired.
 	/// </summary>

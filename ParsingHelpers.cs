@@ -97,6 +97,11 @@ public static partial class ParsingHelpers
 	}
 
 	/// <summary>
+	/// Returns "Call" or "Put" for the given OCC call/put code ("C" or "P").
+	/// </summary>
+	public static string CallPutDisplayName(string callPut) => callPut == "C" ? "Call" : "Put";
+
+	/// <summary>
 	/// Extracts the strategy type from a Webull strategy name.
 	/// </summary>
 	public static string StrategyKindFromName(string name)

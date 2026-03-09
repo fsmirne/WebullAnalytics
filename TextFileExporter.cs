@@ -53,20 +53,7 @@ public static partial class TextFileExporter
 			console.WriteLine("No open positions.");
 		}
 
-		// Total fees
-		var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
-		console.WriteLine($"Total fees: {totalFees:0.00}");
-
-		// Final P&L
-		console.Write("Final realized P&L: ");
-		console.Write(Formatters.FormatPnL(running));
-		console.Write(Formatters.FormatPnLPercent(running, initialAmount));
-		console.WriteLine();
-
-		// Final amount
-		console.Write("Final amount: ");
-		console.Write(Formatters.FormatMoney(initialAmount + running, initialAmount));
-		console.WriteLine();
+		TableBuilder.RenderSummary(console, rows, running, initialAmount);
 
 		// Get the rendered output and strip ANSI codes
 		var output = stringWriter.ToString();

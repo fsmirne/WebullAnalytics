@@ -55,13 +55,7 @@ public static class ExcelExporter
 		sheet.Cells[1, 12].Value = "Cash";
 		sheet.Cells[1, 13].Value = "Total";
 
-		// Format headers
-		using (var range = sheet.Cells[1, 1, 1, 13])
-		{
-			range.Style.Font.Bold = true;
-			range.Style.Fill.PatternType = ExcelFillStyle.Solid;
-			range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.LightGray);
-		}
+		FormatHeaderRow(sheet, 1, 1, 13);
 
 		// Data rows (only non-leg rows)
 		int row = 2;
@@ -140,13 +134,7 @@ public static class ExcelExporter
 		sheet.Cells[1, 7].Value = "Adjusted Price";
 		sheet.Cells[1, 8].Value = "Expiry";
 
-		// Format headers
-		using (var range = sheet.Cells[1, 1, 1, 8])
-		{
-			range.Style.Font.Bold = true;
-			range.Style.Fill.PatternType = ExcelFillStyle.Solid;
-			range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.LightGray);
-		}
+		FormatHeaderRow(sheet, 1, 1, 8);
 
 		// Data rows
 		int row = 2;
@@ -192,13 +180,7 @@ public static class ExcelExporter
 		sheet.Cells[1, 2].Value = "Daily P&L";
 		sheet.Cells[1, 3].Value = "Cumulative P&L";
 
-		// Format headers
-		using (var range = sheet.Cells[1, 1, 1, 3])
-		{
-			range.Style.Font.Bold = true;
-			range.Style.Fill.PatternType = ExcelFillStyle.Solid;
-			range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.LightGray);
-		}
+		FormatHeaderRow(sheet, 1, 1, 3);
 
 		// Data rows
 		int row = 2;
@@ -416,6 +398,14 @@ public static class ExcelExporter
 		}
 
 		sheet.Cells.AutoFitColumns();
+	}
+
+	private static void FormatHeaderRow(ExcelWorksheet sheet, int row, int fromCol, int toCol)
+	{
+		using var range = sheet.Cells[row, fromCol, row, toCol];
+		range.Style.Font.Bold = true;
+		range.Style.Fill.PatternType = ExcelFillStyle.Solid;
+		range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.LightGray);
 	}
 
 	private static void ColorCodePnL(ExcelRange cell, decimal value)
