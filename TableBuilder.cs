@@ -137,11 +137,12 @@ public static class TableBuilder
 
 		if (result.PriceLadder.Count > 0)
 		{
-			// Summary line with break-even, max profit/loss
+			// Summary line with current price, break-even, max profit/loss
+			var spotText = result.UnderlyingPrice.HasValue ? $"Current Price: ${result.UnderlyingPrice.Value.ToString("N2", CultureInfo.InvariantCulture)} {sep} " : "";
 			var beText = result.BreakEvens.Count > 0 ? string.Join(", ", result.BreakEvens.Select(be => $"${be.ToString("N2", CultureInfo.InvariantCulture)}")) : "N/A";
 			var maxProfitText = result.MaxProfit.HasValue ? $"[green]${result.MaxProfit.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
 			var maxLossText = result.MaxLoss.HasValue ? $"[red]-${result.MaxLoss.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
-			items.Add(new Markup($"Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}"));
+			items.Add(new Markup($"{Markup.Escape(spotText)}Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}"));
 
 			if (result.EarlyExercise != null)
 			{
@@ -155,7 +156,7 @@ public static class TableBuilder
 
 			if (result.Grid != null)
 			{
-				items.Add(BuildTimeDecayGridTable(result.Grid, result.BreakEvens, displayMode, tableBorder));
+				items.Add(BuildTimeDecayGridTable(result.Grid, result.BreakEvens, result.UnderlyingPrice, displayMode, tableBorder));
 			}
 			else
 			{
@@ -169,12 +170,16 @@ public static class TableBuilder
 				foreach (var point in result.PriceLadder)
 				{
 					var isBreakEven = result.BreakEvens.Any(be => Math.Abs(point.UnderlyingPrice - be) < 0.005m);
-					var pricePrefix = isBreakEven ? "*" : " ";
+					var isCurrentPrice = result.UnderlyingPrice.HasValue && Math.Abs(point.UnderlyingPrice - result.UnderlyingPrice.Value) < 0.005m;
+					var pricePrefix = isBreakEven ? "*" : isCurrentPrice ? ">" : " ";
 					var priceText = $"{pricePrefix}${point.UnderlyingPrice.ToString("N2", CultureInfo.InvariantCulture)}";
 					var valueText = point.ContractValue.HasValue ? $"${point.ContractValue.Value.ToString("N2", CultureInfo.InvariantCulture)}" : "-";
 					var pnlColor = point.PnL >= 0 ? "green" : "red";
 					var pnlText = FormatLadderPnL(point.PnL);
-					table.AddRow(new Text(priceText), new Text(valueText), new Markup($"[{pnlColor}]{Markup.Escape(pnlText)}[/]"));
+					if (isCurrentPrice)
+						table.AddRow(new Markup($"[bold yellow]{Markup.Escape(priceText)}[/]"), new Markup($"[bold yellow]{Markup.Escape(valueText)}[/]"), new Markup($"[bold yellow]{Markup.Escape(pnlText)}[/]"));
+					else
+						table.AddRow(new Text(priceText), new Text(valueText), new Markup($"[{pnlColor}]{Markup.Escape(pnlText)}[/]"));
 				}
 
 				items.Add(table);
@@ -211,7 +216,7 @@ public static class TableBuilder
 		return new Markup($"{legPrefix}{Markup.Escape(before)}[{color}]{Markup.Escape(chgPart)}[/]{Markup.Escape(after)}");
 	}
 
-	private static Table BuildTimeDecayGridTable(TimeDecayGrid grid, List<decimal> breakEvens, string displayMode, TableBorder? tableBorder)
+	private static Table BuildTimeDecayGridTable(TimeDecayGrid grid, List<decimal> breakEvens, decimal? underlyingPrice, string displayMode, TableBorder? tableBorder)
 	{
 		var showPnL = displayMode == "pnl";
 		var table = new Table();
@@ -228,28 +233,28 @@ public static class TableBuilder
 		{
 			var price = grid.PriceRows[pi];
 			var isBreakEven = breakEvens.Any(be => Math.Abs(price - be) < 0.005m);
-			var pricePrefix = isBreakEven ? "*" : " ";
+			var isCurrentPrice = underlyingPrice.HasValue && Math.Abs(price - underlyingPrice.Value) < 0.005m;
+			var pricePrefix = isBreakEven ? "*" : isCurrentPrice ? ">" : " ";
 			var priceText = $"{pricePrefix}${price.ToString("N2", CultureInfo.InvariantCulture)}";
 
-			var cells = new List<IRenderable> { new Text(priceText) };
+			var cells = new List<IRenderable> { isCurrentPrice ? new Markup($"[bold yellow]{Markup.Escape(priceText)}[/]") : new Text(priceText) };
 			for (int di = 0; di < grid.DateColumns.Count; di++)
 			{
 				var cellValue = showPnL ? grid.PnLs[pi, di] : grid.Values[pi, di];
 				string cellText;
-				string color;
 
 				if (showPnL)
-				{
 					cellText = FormatLadderPnL(cellValue);
-					color = cellValue >= 0 ? "green" : "red";
-				}
+				else
+					cellText = $"${cellValue.ToString("N2", CultureInfo.InvariantCulture)}";
+
+				if (isCurrentPrice)
+					cells.Add(new Markup($"[bold yellow]{Markup.Escape(cellText)}[/]"));
 				else
 				{
-					cellText = $"${cellValue.ToString("N2", CultureInfo.InvariantCulture)}";
-					color = grid.PnLs[pi, di] >= 0 ? "green" : "red";
+					var color = showPnL ? (cellValue >= 0 ? "green" : "red") : (grid.PnLs[pi, di] >= 0 ? "green" : "red");
+					cells.Add(new Markup($"[{color}]{Markup.Escape(cellText)}[/]"));
 				}
-
-				cells.Add(new Markup($"[{color}]{Markup.Escape(cellText)}[/]"));
 			}
 			table.AddRow(cells.ToArray());
 		}

@@ -15,7 +15,7 @@ public static class YahooOptionsClient
 	private const string CrumbUrl = "https://query1.finance.yahoo.com/v1/test/getcrumb";
 	private const string CookieBootstrapUrl = "https://fc.yahoo.com";
 
-	public static async Task<IReadOnlyDictionary<string, OptionContractQuote>> FetchOptionQuotesAsync(IEnumerable<PositionRow> positionRows, CancellationToken cancellationToken)
+	public static async Task<(IReadOnlyDictionary<string, OptionContractQuote> OptionQuotes, IReadOnlyDictionary<string, decimal> UnderlyingPrices)> FetchOptionQuotesAsync(IEnumerable<PositionRow> positionRows, CancellationToken cancellationToken)
 	{
 		var wantedSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		foreach (var row in positionRows)
@@ -26,7 +26,7 @@ public static class YahooOptionsClient
 		}
 
 		if (wantedSymbols.Count == 0)
-			return new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+			return (new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase), new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase));
 
 		var groups = wantedSymbols
 			.Select(s => (symbol: s, parsed: ParsingHelpers.ParseOptionSymbol(s)))
@@ -46,6 +46,7 @@ public static class YahooOptionsClient
 		client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
 
 		var result = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		var underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		string? crumb = null;
 
 		foreach (var group in groups)
@@ -84,7 +85,10 @@ public static class YahooOptionsClient
 				}
 
 				var json = await response.Content.ReadAsStringAsync(cancellationToken);
-				foreach (var quote in ParseOptionQuotes(json))
+				var parsed = ParseOptionChain(json);
+				if (parsed.UnderlyingPrice.HasValue)
+					underlyingPrices[ticker] = parsed.UnderlyingPrice.Value;
+				foreach (var quote in parsed.Quotes)
 				{
 					if (!wantedSymbols.Contains(quote.ContractSymbol)) continue;
 					result[quote.ContractSymbol] = quote;
@@ -92,7 +96,49 @@ public static class YahooOptionsClient
 			}
 		}
 
-		return result;
+		// Fetch underlying prices for any tickers not already captured from the options response.
+		var allTickers = groups.Select(g => g.Key.Root).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+		var missingTickers = allTickers.Where(t => !underlyingPrices.ContainsKey(t)).ToList();
+		if (missingTickers.Count > 0)
+		{
+			var fetched = await FetchUnderlyingPricesAsync(client, missingTickers, crumb, cancellationToken);
+			foreach (var (ticker2, price) in fetched)
+				underlyingPrices[ticker2] = price;
+		}
+
+		return (result, underlyingPrices);
+	}
+
+	private static async Task<Dictionary<string, decimal>> FetchUnderlyingPricesAsync(HttpClient client, List<string> tickers, string? crumb, CancellationToken cancellationToken)
+	{
+		var prices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		foreach (var ticker in tickers)
+		{
+			try
+			{
+				var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(ticker)}?range=1d&interval=1d";
+				if (!string.IsNullOrWhiteSpace(crumb))
+					url += $"&crumb={Uri.EscapeDataString(crumb)}";
+				var request = new HttpRequestMessage(HttpMethod.Get, url);
+				request.Headers.Referrer = new Uri($"https://finance.yahoo.com/quote/{Uri.EscapeDataString(ticker)}/");
+				using var response = await client.SendAsync(request, cancellationToken);
+				if (!response.IsSuccessStatusCode) continue;
+				var json = await response.Content.ReadAsStringAsync(cancellationToken);
+				using var doc = JsonDocument.Parse(json);
+				if (doc.RootElement.TryGetProperty("chart", out var chart) && chart.TryGetProperty("result", out var chartResult) && chartResult.ValueKind == JsonValueKind.Array && chartResult.GetArrayLength() > 0)
+				{
+					var meta = chartResult[0].GetProperty("meta");
+					var price = GetDecimal(meta, "regularMarketPrice");
+					if (price.HasValue)
+						prices[ticker] = price.Value;
+				}
+			}
+			catch (Exception ex)
+			{
+				if (ex is OperationCanceledException) throw;
+			}
+		}
+		return prices;
 	}
 
 	private static async Task<HttpResponseMessage> SendOptionsRequestAsync(HttpClient client, string ticker, long unixDate, string? crumb, CancellationToken cancellationToken)
@@ -137,19 +183,27 @@ public static class YahooOptionsClient
 		}
 	}
 
-	private static IEnumerable<OptionContractQuote> ParseOptionQuotes(string json)
+	private static (List<OptionContractQuote> Quotes, decimal? UnderlyingPrice) ParseOptionChain(string json)
 	{
+		var quotes = new List<OptionContractQuote>();
 		using var doc = JsonDocument.Parse(json);
 		var root = doc.RootElement;
 
 		if (!root.TryGetProperty("optionChain", out var optionChain))
-			yield break;
+			return (quotes, null);
 		if (!optionChain.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Array || result.GetArrayLength() == 0)
-			yield break;
+			return (quotes, null);
 
 		var res0 = result[0];
+
+		// The v7 options endpoint may include a quote object, or the underlying price at the top level.
+		decimal? underlyingPrice = null;
+		if (res0.TryGetProperty("quote", out var quote) && quote.ValueKind == JsonValueKind.Object)
+			underlyingPrice = GetDecimal(quote, "regularMarketPrice");
+		underlyingPrice ??= GetDecimal(res0, "underlyingPrice");
+
 		if (!res0.TryGetProperty("options", out var options) || options.ValueKind != JsonValueKind.Array || options.GetArrayLength() == 0)
-			yield break;
+			return (quotes, underlyingPrice);
 
 		var chain = options[0];
 
@@ -158,7 +212,7 @@ public static class YahooOptionsClient
 			foreach (var item in calls.EnumerateArray())
 			{
 				var q = ParseContractQuote(item);
-				if (q != null) yield return q;
+				if (q != null) quotes.Add(q);
 			}
 		}
 
@@ -167,9 +221,11 @@ public static class YahooOptionsClient
 			foreach (var item in puts.EnumerateArray())
 			{
 				var q = ParseContractQuote(item);
-				if (q != null) yield return q;
+				if (q != null) quotes.Add(q);
 			}
 		}
+
+		return (quotes, underlyingPrice);
 	}
 
 	private static OptionContractQuote? ParseContractQuote(JsonElement item)

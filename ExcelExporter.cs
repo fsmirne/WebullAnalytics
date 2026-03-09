@@ -6,7 +6,7 @@ namespace WebullAnalytics;
 
 public static class ExcelExporter
 {
-	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, decimal? ivLong = null, decimal? ivShort = null, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null)
+	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, decimal? ivLong = null, decimal? ivShort = null, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null)
 	{
 		// EPPlus requires a license context
 		ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -29,7 +29,7 @@ public static class ExcelExporter
 		ExportDailyPnL(dailyPnLSheet, reportRows);
 
 		// Export break-even analysis
-		ExportBreakEven(breakEvenSheet, positionRows, ivLong, ivShort, optionQuotesBySymbol);
+		ExportBreakEven(breakEvenSheet, positionRows, ivLong, ivShort, optionQuotesBySymbol, underlyingPrices);
 
 		// Save the file
 		var file = new FileInfo(outputPath);
@@ -244,9 +244,9 @@ public static class ExcelExporter
 		}
 	}
 
-	private static void ExportBreakEven(ExcelWorksheet sheet, List<PositionRow> positionRows, decimal? ivLong, decimal? ivShort, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol)
+	private static void ExportBreakEven(ExcelWorksheet sheet, List<PositionRow> positionRows, decimal? ivLong, decimal? ivShort, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices)
 	{
-		var results = BreakEvenAnalyzer.Analyze(positionRows, ivLong, ivShort, optionQuotesBySymbol: optionQuotesBySymbol);
+		var results = BreakEvenAnalyzer.Analyze(positionRows, ivLong, ivShort, optionQuotesBySymbol: optionQuotesBySymbol, underlyingPrices: underlyingPrices);
 		if (results.Count == 0)
 		{
 			sheet.Cells[1, 1].Value = "No positions to analyze.";
@@ -291,6 +291,16 @@ public static class ExcelExporter
 
 			if (result.PriceLadder.Count > 0)
 			{
+				// Current price row
+				if (result.UnderlyingPrice.HasValue)
+				{
+					sheet.Cells[row, 1].Value = "Current Price:";
+					sheet.Cells[row, 2].Value = (double)result.UnderlyingPrice.Value;
+					sheet.Cells[row, 2].Style.Numberformat.Format = "$#,##0.00";
+					sheet.Cells[row, 2].Style.Font.Bold = true;
+					row++;
+				}
+
 				// Summary row
 				sheet.Cells[row, 1].Value = "Break-even:";
 				if (result.BreakEvens.Count > 0)

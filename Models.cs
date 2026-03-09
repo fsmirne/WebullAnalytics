@@ -201,5 +201,6 @@ public record BreakEvenResult(
 	List<string>? Legs = null,
 	List<PricePnL>? ChartData = null,
 	EarlyExerciseBoundary? EarlyExercise = null,
-	TimeDecayGrid? Grid = null
+	TimeDecayGrid? Grid = null,
+	decimal? UnderlyingPrice = null
 );
