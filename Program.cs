@@ -314,12 +314,15 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var ivLong = settings.ImpliedVolatilityLong.HasValue ? settings.ImpliedVolatilityLong.Value / 100m : (decimal?)null;
 		var ivShort = settings.ImpliedVolatilityShort.HasValue ? settings.ImpliedVolatilityShort.Value / 100m : (decimal?)null;
 		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null;
+		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
 		if (settings.UseYahoo)
 		{
 			try
 			{
 				Console.WriteLine("Yahoo Finance: fetching option chain data...");
-				optionQuotesBySymbol = await YahooOptionsClient.FetchOptionQuotesAsync(positionRows, cancellation);
+				var yahooData = await YahooOptionsClient.FetchOptionQuotesAsync(positionRows, cancellation);
+				optionQuotesBySymbol = yahooData.OptionQuotes;
+				underlyingPrices = yahooData.UnderlyingPrices;
 				Console.WriteLine($"Yahoo Finance: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
 			}
 			catch (Exception ex)
@@ -334,16 +337,16 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
-				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort, optionQuotesBySymbol);
+				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort, optionQuotesBySymbol, underlyingPrices);
 				break;
 
 			case "text":
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices);
 				break;
 		}
 
