@@ -20,5 +20,8 @@
 	"fetch": {
 		"config": "data/api-config.json",
 		"output": "data/orders.jsonl"
+	},
+	"sniff": {
+		"autoCloseEdge": false
 	}
 }

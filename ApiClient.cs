@@ -92,6 +92,9 @@ public sealed class ApiConfig
 	[JsonPropertyName("limit")]
 	public int Limit { get; set; } = 10000;
 
+	[JsonPropertyName("pin")]
+	public string Pin { get; set; } = "";
+
 	[JsonPropertyName("headers")]
 	public Dictionary<string, string> Headers { get; set; } = new();
 }
