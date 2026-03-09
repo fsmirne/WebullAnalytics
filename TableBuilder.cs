@@ -269,6 +269,26 @@ public static class TableBuilder
 	}
 
 	/// <summary>
+	/// Renders the summary footer (total fees, final P&amp;L, final amount) to the given console.
+	/// </summary>
+	public static void RenderSummary(IAnsiConsole console, List<ReportRow> rows, decimal running, decimal initialAmount)
+	{
+		var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
+		console.Write("Total fees: ");
+		console.Write(Formatters.FormatMoney(totalFees, decimal.MaxValue));
+		console.WriteLine();
+
+		console.Write("Final realized P&L: ");
+		console.Write(Formatters.FormatPnL(running));
+		console.Write(Formatters.FormatPnLPercent(running, initialAmount));
+		console.WriteLine();
+
+		console.Write("Final amount: ");
+		console.Write(Formatters.FormatMoney(initialAmount + running, initialAmount));
+		console.WriteLine();
+	}
+
+	/// <summary>
 	/// Computes the maximum number of date columns that fit in a given total width.
 	/// Layout: panel borders (4) + table outer borders (2) + price column (11) + N × date column (15 for pnl, 10 for value).
 	/// Each Spectre table column = content + 2 padding + 1 separator.

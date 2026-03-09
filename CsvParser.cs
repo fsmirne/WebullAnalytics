@@ -13,8 +13,8 @@ namespace WebullAnalytics;
 /// </summary>
 public static partial class CsvParser
 {
-	private const decimal OptionMultiplier = 100m;
-	private const decimal StockMultiplier = 1m;
+	private const decimal OptionMultiplier = Trade.OptionMultiplier;
+	private const decimal StockMultiplier = Trade.StockMultiplier;
 
 
 	private static CsvConfiguration CreateLenientConfig() => new(CultureInfo.InvariantCulture)
@@ -187,7 +187,7 @@ public static partial class CsvParser
 	private static Trade BuildOptionTrade(int seq, RawTrade rt, int? parentStrategySeq)
 	{
 		var parsed = ParsingHelpers.ParseOptionSymbol(rt.Symbol);
-		var (instrument, optionKind, expiry) = parsed != null ? (Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike), parsed.CallPut == "C" ? "Call" : "Put", (DateTime?)parsed.ExpiryDate) : (rt.Symbol, "Option", null);
+		var (instrument, optionKind, expiry) = parsed != null ? (Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike), ParsingHelpers.CallPutDisplayName(parsed.CallPut), (DateTime?)parsed.ExpiryDate) : (rt.Symbol, "Option", null);
 
 		return new Trade(Seq: seq, Timestamp: GetTimestamp(rt), Instrument: instrument, MatchKey: MatchKeys.Option(rt.Symbol), Asset: Asset.Option, OptionKind: optionKind, Side: rt.Side, Qty: rt.Filled, Price: GetPrice(rt), Multiplier: OptionMultiplier, Expiry: expiry, ParentStrategySeq: parentStrategySeq);
 	}

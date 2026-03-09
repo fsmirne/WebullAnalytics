@@ -64,7 +64,11 @@ public record Trade
 	decimal Multiplier,
 	DateTime? Expiry = null,
 	int? ParentStrategySeq = null
-);
+)
+{
+	public const decimal OptionMultiplier = 100m;
+	public const decimal StockMultiplier = 1m;
+}
 
 // CsvHelper doesn't reliably populate positional records (primary-ctor records) via ClassMap.
 // Use a POCO with settable properties instead.

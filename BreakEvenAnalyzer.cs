@@ -86,7 +86,7 @@ public static class BreakEvenAnalyzer
 		var strike = parsed.Strike;
 		var qty = row.Qty;
 
-		var title = $"{parsed.Root} {(isLong ? "Long" : "Short")} {(isCall ? "Call" : "Put")} ${Formatters.FormatQty(strike)}";
+		var title = $"{parsed.Root} {(isLong ? "Long" : "Short")} {ParsingHelpers.CallPutDisplayName(parsed.CallPut)} ${Formatters.FormatQty(strike)}";
 		var details = BuildDetailsString(row);
 
 		decimal breakEven;
@@ -148,7 +148,7 @@ public static class BreakEvenAnalyzer
 
 		var root = parsedLegs[0].parsed.Root;
 		var callPut = parsedLegs[0].parsed.CallPut;
-		var callPutDisplay = callPut == "C" ? "Call" : "Put";
+		var callPutDisplay = ParsingHelpers.CallPutDisplayName(callPut);
 		var strategyKind = parent.OptionKind;
 		var qty = parent.Qty;
 		var netPremium = GetPremium(parent);
@@ -181,7 +181,7 @@ public static class BreakEvenAnalyzer
 		var legDescriptions = parsedLegs.Select(l =>
 		{
 			var longShort = l.row.Side == Side.Buy ? "Long" : "Short";
-			var cpDisplay = l.parsed.CallPut == "C" ? "Call" : "Put";
+			var cpDisplay = ParsingHelpers.CallPutDisplayName(l.parsed.CallPut);
 			var legPremium = GetPremium(l.row);
 			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
 
@@ -336,7 +336,7 @@ public static class BreakEvenAnalyzer
 		}
 		else
 		{
-			legValue = parsed.CallPut == "C" ? Math.Max(0, underlyingPrice - parsed.Strike) : Math.Max(0, parsed.Strike - underlyingPrice);
+			legValue = Intrinsic(underlyingPrice, parsed.Strike, parsed.CallPut);
 		}
 
 		var pnlPerContract = side == Side.Buy ? legValue - premium : premium - legValue;
@@ -357,10 +357,7 @@ public static class BreakEvenAnalyzer
 	private static decimal BlackScholes(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv, string callPut)
 	{
 		if (timeYears <= 0)
-		{
-			var intrinsic = callPut == "C" ? Math.Max(0, spot - strike) : Math.Max(0, strike - spot);
-			return intrinsic;
-		}
+			return Intrinsic(spot, strike, callPut);
 
 		double s = (double)spot;
 		double k = (double)strike;
@@ -546,13 +543,6 @@ public static class BreakEvenAnalyzer
 		return side == Side.Buy ? ivLong : ivShort;
 	}
 
-	private static bool HasAnyImpliedVolatility(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, decimal? ivLong, decimal? ivShort)
-	{
-		if (ivLong.HasValue || ivShort.HasValue) return true;
-		if (optionQuotesBySymbol == null) return false;
-		return legs.Any(l => GetLegIv(l.row.Side, l.symbol, optionQuotesBySymbol, ivLong, ivShort).HasValue);
-	}
-
 	private static bool HasIvForRemainingTimeLegs(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, DateTime evaluationExpiry, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, decimal? ivLong, decimal? ivShort)
 	{
 		if (ivLong.HasValue || ivShort.HasValue) return true;
@@ -606,12 +596,16 @@ public static class BreakEvenAnalyzer
 	}
 
 	/// <summary>
+	/// Computes intrinsic value of an option at a given underlying price.
+	/// </summary>
+	private static decimal Intrinsic(decimal underlyingPrice, decimal strike, string callPut) => callPut == "C" ? Math.Max(0, underlyingPrice - strike) : Math.Max(0, strike - underlyingPrice);
+
+	/// <summary>
 	/// Calculates P&L for a single option leg at a given underlying price (at expiration, intrinsic only).
 	/// </summary>
 	private static decimal OptionPnLAtExpiration(decimal underlyingPrice, decimal strike, string callPut, Side side, int qty, decimal premium)
 	{
-		var intrinsic = callPut == "C" ? Math.Max(0, underlyingPrice - strike) : Math.Max(0, strike - underlyingPrice);
-		var pnlPerContract = side == Side.Buy ? intrinsic - premium : premium - intrinsic;
+		var pnlPerContract = side == Side.Buy ? Intrinsic(underlyingPrice, strike, callPut) - premium : premium - Intrinsic(underlyingPrice, strike, callPut);
 		return pnlPerContract * qty * 100;
 	}
 

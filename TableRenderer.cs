@@ -34,19 +34,7 @@ public static class TableRenderer
 			console.WriteLine("No open positions.");
 		}
 
-		var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
-		console.Write($"Total fees: ");
-		console.Write(Formatters.FormatMoney(totalFees, decimal.MaxValue));
-		console.WriteLine();
-
-		console.Write("Final realized P&L: ");
-		console.Write(Formatters.FormatPnL(running));
-		console.Write(Formatters.FormatPnLPercent(running, initialAmount));
-		console.WriteLine();
-
-		console.Write("Final amount: ");
-		console.Write(Formatters.FormatMoney(initialAmount + running, initialAmount));
-		console.WriteLine();
+		TableBuilder.RenderSummary(console, rows, running, initialAmount);
 	}
 
 	/// <summary>

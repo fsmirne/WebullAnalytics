@@ -11,7 +11,7 @@ namespace WebullAnalytics;
 /// </summary>
 public static partial class JsonlParser
 {
-	private const decimal OptionMultiplier = 100m;
+	private const decimal OptionMultiplier = Trade.OptionMultiplier;
 
 	// Matches "SPXW $6845.00" or "GME $24.00" → root + strike
 	[GeneratedRegex(@"^(.+?)\s+\$(.+)$")]
@@ -104,7 +104,7 @@ public static partial class JsonlParser
 	private static void BuildStandaloneTrade(ParsedOrder order, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal> fees, ref int seq)
 	{
 		var instrument = Formatters.FormatOptionDisplay(order.Root, order.ExpiryDate, order.Strike);
-		var optionKind = order.CallPut == "C" ? "Call" : "Put";
+		var optionKind = ParsingHelpers.CallPutDisplayName(order.CallPut);
 
 		trades.Add(new Trade(Seq: seq++, Timestamp: order.FilledTime, Instrument: instrument, MatchKey: MatchKeys.Option(order.OccSymbol), Asset: Asset.Option, OptionKind: optionKind, Side: order.Side, Qty: order.Qty, Price: RoundPrice(order.Price), Multiplier: OptionMultiplier, Expiry: order.ExpiryDate));
 		AddFee(fees, order.FilledTime, order.Side, order.Qty, order.TotalFee);
@@ -134,7 +134,7 @@ public static partial class JsonlParser
 		foreach (var leg in orders)
 		{
 			var legInstrument = Formatters.FormatOptionDisplay(leg.Root, leg.ExpiryDate, leg.Strike);
-			var legOptionKind = leg.CallPut == "C" ? "Call" : "Put";
+			var legOptionKind = ParsingHelpers.CallPutDisplayName(leg.CallPut);
 
 			trades.Add(new Trade(Seq: seq++, Timestamp: leg.FilledTime, Instrument: legInstrument, MatchKey: MatchKeys.Option(leg.OccSymbol), Asset: Asset.Option, OptionKind: legOptionKind, Side: leg.Side, Qty: leg.Qty, Price: RoundPrice(leg.Price), Multiplier: OptionMultiplier, Expiry: leg.ExpiryDate, ParentStrategySeq: parentSeq));
 			AddFee(fees, leg.FilledTime, leg.Side, leg.Qty, leg.TotalFee);
