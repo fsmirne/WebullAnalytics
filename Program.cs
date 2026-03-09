@@ -136,6 +136,10 @@ class ReportSettings : CommandSettings
 	[DefaultValue("value")]
 	public string DisplayMode { get; set; } = "value";
 
+	[Description("Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88). Comma-separated for multiple tickers (e.g., GME:24.88,SPY:580.50)")]
+	[CommandOption("--current-underlying-price")]
+	public string? CurrentUnderlyingPrice { get; set; }
+
 	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
 
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
@@ -157,6 +161,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("yahoo") && cfg.TryGetBool("yahoo", out var yahoo)) UseYahoo = yahoo;
 		if (!Program.HasCliOption("range") && cfg.TryGetDecimal("range", out var range)) Range = range;
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
+		if (!Program.HasCliOption("current-underlying-price") && cfg.TryGetString("currentUnderlyingPrice", out var cup)) CurrentUnderlyingPrice = cup;
 	}
 
 	public override ValidationResult Validate()
@@ -188,6 +193,16 @@ class ReportSettings : CommandSettings
 		var display = DisplayMode.ToLowerInvariant();
 		if (display is not ("value" or "pnl"))
 			return ValidationResult.Error("--display must be 'value' or 'pnl'");
+
+		if (CurrentUnderlyingPrice != null)
+		{
+			foreach (var pair in CurrentUnderlyingPrice.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			{
+				var parts = pair.Split(':', 2);
+				if (parts.Length != 2 || !decimal.TryParse(parts[1].Trim(), NumberStyles.Number, CultureInfo.InvariantCulture, out _))
+					return ValidationResult.Error($"--current-underlying-price: invalid entry '{pair}'. Expected format: TICKER:PRICE (e.g., GME:24.88)");
+			}
+		}
 
 		return ValidationResult.Success();
 	}
@@ -332,6 +347,18 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			}
 		}
 
+		if (settings.CurrentUnderlyingPrice != null)
+		{
+			var overrides = ParseUnderlyingPriceOverrides(settings.CurrentUnderlyingPrice);
+			if (overrides.Count > 0)
+			{
+				var mutable = underlyingPrices != null ? new Dictionary<string, decimal>(underlyingPrices) : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+				foreach (var (ticker, price) in overrides)
+					mutable[ticker] = price;
+				underlyingPrices = mutable;
+			}
+		}
+
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
 		switch (settings.OutputFormat.ToLowerInvariant())
@@ -351,6 +378,20 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		}
 
 		return 0;
+	}
+
+	private static Dictionary<string, decimal> ParseUnderlyingPriceOverrides(string input)
+	{
+		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		foreach (var pair in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			var parts = pair.Split(':', 2);
+			if (parts.Length == 2 && decimal.TryParse(parts[1].Trim(), NumberStyles.Number, CultureInfo.InvariantCulture, out var price))
+				result[parts[0].Trim().ToUpperInvariant()] = price;
+			else
+				Console.WriteLine($"Warning: Ignoring invalid underlying price override '{pair}'. Expected format: TICKER:PRICE");
+		}
+		return result;
 	}
 
 	private static List<Trade> LoadCsvTrades(string dataDir)

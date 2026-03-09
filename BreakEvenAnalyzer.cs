@@ -130,7 +130,7 @@ public static class BreakEvenAnalyzer
 			var legsList = new List<(PositionRow row, OptionParsed parsed, string symbol)> { (row, parsed, symbol) };
 			var gridBreakEvens = new List<decimal> { breakEven };
 			if (spot.HasValue) gridBreakEvens.Add(spot.Value);
-			grid = BuildTimeDecayGrid(legsList, qty, row.Side, premium, parsed.ExpiryDate, ivLong, ivShort, padding, strike, gridBreakEvens, maxGridColumns, optionQuotesBySymbol);
+			grid = BuildTimeDecayGrid(legsList, qty, row.Side, premium, parsed.ExpiryDate, ivLong, ivShort, padding, strike, gridBreakEvens, maxGridColumns, optionQuotesBySymbol, spot);
 		}
 
 		List<string>? legsDisplay = null;
@@ -295,7 +295,7 @@ public static class BreakEvenAnalyzer
 		{
 			var gridNotable = new List<decimal>(breakEvens);
 			if (spot.HasValue) gridNotable.Add(spot.Value);
-			grid = BuildTimeDecayGrid(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, ivLong, ivShort, padding, strikes.Average(), gridNotable, maxGridColumns, optionQuotesBySymbol);
+			grid = BuildTimeDecayGrid(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, ivLong, ivShort, padding, strikes.Average(), gridNotable, maxGridColumns, optionQuotesBySymbol, spot);
 		}
 
 		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid, UnderlyingPrice: spot);
@@ -404,7 +404,7 @@ public static class BreakEvenAnalyzer
 	/// <summary>
 	/// Builds a 2D grid of option values across dates and underlying prices.
 	/// </summary>
-	private static TimeDecayGrid BuildTimeDecayGrid(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty, Side parentSide, decimal netPremium, DateTime latestExpiry, decimal? ivLong, decimal? ivShort, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol)
+	private static TimeDecayGrid BuildTimeDecayGrid(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty, Side parentSide, decimal netPremium, DateTime latestExpiry, decimal? ivLong, decimal? ivShort, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, decimal? underlyingPrice)
 	{
 		var dates = BuildDateColumns(latestExpiry, maxColumns);
 		var strikes = legs.Select(l => l.parsed.Strike).Distinct().ToList();
@@ -419,12 +419,40 @@ public static class BreakEvenAnalyzer
 			for (int pi = 0; pi < priceRows.Count; pi++)
 			{
 				var price = priceRows[pi];
-				// LegPnLWithBs handles per-leg expiry: intrinsic for expired legs, BS for legs with remaining time
-					var totalPnL = legs.Sum(l => LegPnLWithBs(price, l.parsed, l.symbol, l.row.Side, qty, GetPremium(l.row), evalDate, ivLong, ivShort, optionQuotesBySymbol));
+				var totalPnL = legs.Sum(l => LegPnLWithBs(price, l.parsed, l.symbol, l.row.Side, qty, GetPremium(l.row), evalDate, ivLong, ivShort, optionQuotesBySymbol));
 
 				pnls[pi, di] = Math.Round(totalPnL, 2);
-				// Contract value per share: netPremium + P&L / (qty × 100)
 				values[pi, di] = parentSide == Side.Buy ? Math.Round(netPremium + totalPnL / (qty * 100m), 4) : Math.Round(netPremium - totalPnL / (qty * 100m), 4);
+			}
+		}
+
+		// Anchor the first column (today) to market bid/ask mid-prices when available.
+		// This corrects for IV discrepancies between Yahoo and the broker by computing the
+		// offset between BS theoretical and market mid at the current underlying price,
+		// then applying that offset to all rows in the today column.
+		if (optionQuotesBySymbol != null && underlyingPrice.HasValue)
+		{
+			var marketMid = ComputeSpreadMarketMid(legs, optionQuotesBySymbol);
+			if (marketMid.HasValue)
+			{
+				int closestRow = 0;
+				var closestDist = decimal.MaxValue;
+				for (int pi = 0; pi < priceRows.Count; pi++)
+				{
+					var dist = Math.Abs(priceRows[pi] - underlyingPrice.Value);
+					if (dist < closestDist) { closestDist = dist; closestRow = pi; }
+				}
+
+				var bsValue = values[closestRow, 0];
+				var adjustment = bsValue - marketMid.Value;
+				if (adjustment != 0)
+				{
+					for (int pi = 0; pi < priceRows.Count; pi++)
+					{
+						values[pi, 0] = Math.Round(values[pi, 0] - adjustment, 4);
+						pnls[pi, 0] = parentSide == Side.Buy ? Math.Round((values[pi, 0] - netPremium) * qty * 100, 2) : Math.Round((netPremium - values[pi, 0]) * qty * 100, 2);
+					}
+				}
 			}
 		}
 
@@ -526,6 +554,23 @@ public static class BreakEvenAnalyzer
 		return prices.Reverse().ToList();
 	}
 
+	/// <summary>
+	/// Computes the spread's market mid-price from Yahoo bid/ask quotes.
+	/// Returns null if any leg is missing bid or ask data.
+	/// </summary>
+	private static decimal? ComputeSpreadMarketMid(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		decimal total = 0;
+		foreach (var leg in legs)
+		{
+			if (!quotes.TryGetValue(leg.symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue)
+				return null;
+			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+			total += leg.row.Side == Side.Buy ? mid : -mid;
+		}
+		return total;
+	}
+
 	// --- Helpers ---
 
 	private static (OptionParsed parsed, string symbol)? ParseOption(PositionRow row)
@@ -538,9 +583,11 @@ public static class BreakEvenAnalyzer
 
 	private static decimal? GetLegIv(Side side, string symbol, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, decimal? ivLong, decimal? ivShort)
 	{
+		var cliIv = side == Side.Buy ? ivLong : ivShort;
+		if (cliIv.HasValue) return cliIv.Value;
 		if (optionQuotesBySymbol != null && optionQuotesBySymbol.TryGetValue(symbol, out var quote) && quote.ImpliedVolatility.HasValue && quote.ImpliedVolatility.Value > 0)
 			return quote.ImpliedVolatility.Value;
-		return side == Side.Buy ? ivLong : ivShort;
+		return null;
 	}
 
 	private static bool HasIvForRemainingTimeLegs(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, DateTime evaluationExpiry, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, decimal? ivLong, decimal? ivShort)
