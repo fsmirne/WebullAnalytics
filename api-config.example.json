@@ -4,6 +4,7 @@
 	"startDate": "2026-01-01",
 	"endDate": "2026-12-31",
 	"limit": 10000,
+	"pin": "YOUR_6_DIGIT_UNLOCK_CODE",
 	"headers": {
 		"access_token": "dc_us_tech1.xxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
 		"did": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
