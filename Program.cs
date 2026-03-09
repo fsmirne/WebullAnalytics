@@ -36,7 +36,7 @@ class Program
 			config.Settings.StrictParsing = true;
 			config.AddCommand<ReportCommand>("report");
 			config.AddCommand<FetchCommand>("fetch");
-		config.AddCommand<SniffCommand>("sniff");
+			config.AddCommand<SniffCommand>("sniff");
 		});
 		return app.Run(args);
 	}
