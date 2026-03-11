@@ -402,16 +402,12 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			}
 		}
 
+		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null;
 		if (settings.CurrentUnderlyingPrice != null)
 		{
 			var overrides = ParseUnderlyingPriceOverrides(settings.CurrentUnderlyingPrice);
 			if (overrides.Count > 0)
-			{
-				var mutable = underlyingPrices != null ? new Dictionary<string, decimal>(underlyingPrices) : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-				foreach (var (ticker, price) in overrides)
-					mutable[ticker] = price;
-				underlyingPrices = mutable;
-			}
+				underlyingPriceOverrides = overrides;
 		}
 
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
@@ -419,16 +415,16 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
-				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort, optionQuotesBySymbol, underlyingPrices);
+				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides);
 				break;
 
 			case "text":
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides);
 				break;
 		}
 

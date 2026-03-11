@@ -6,7 +6,7 @@ namespace WebullAnalytics;
 
 public static class ExcelExporter
 {
-	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, decimal? ivLong = null, decimal? ivShort = null, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null)
+	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, decimal? ivLong = null, decimal? ivShort = null, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null)
 	{
 		// EPPlus requires a license context
 		ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -29,7 +29,7 @@ public static class ExcelExporter
 		ExportDailyPnL(dailyPnLSheet, reportRows);
 
 		// Export break-even analysis
-		ExportBreakEven(breakEvenSheet, positionRows, ivLong, ivShort, optionQuotesBySymbol, underlyingPrices);
+		ExportBreakEven(breakEvenSheet, positionRows, ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides);
 
 		// Save the file
 		var file = new FileInfo(outputPath);
@@ -226,9 +226,9 @@ public static class ExcelExporter
 		}
 	}
 
-	private static void ExportBreakEven(ExcelWorksheet sheet, List<PositionRow> positionRows, decimal? ivLong, decimal? ivShort, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices)
+	private static void ExportBreakEven(ExcelWorksheet sheet, List<PositionRow> positionRows, decimal? ivLong, decimal? ivShort, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides)
 	{
-		var results = BreakEvenAnalyzer.Analyze(positionRows, ivLong, ivShort, optionQuotesBySymbol: optionQuotesBySymbol, underlyingPrices: underlyingPrices);
+		var results = BreakEvenAnalyzer.Analyze(positionRows, ivLong, ivShort, optionQuotesBySymbol: optionQuotesBySymbol, underlyingPrices: underlyingPrices, underlyingPriceOverrides: underlyingPriceOverrides);
 		if (results.Count == 0)
 		{
 			sheet.Cells[1, 1].Value = "No positions to analyze.";
@@ -258,7 +258,7 @@ public static class ExcelExporter
 			{
 				foreach (var leg in result.Legs)
 				{
-					sheet.Cells[row, 1].Value = $"  └─ {leg}";
+					WriteRichTextWithStrikethrough(sheet.Cells[row, 1], $"  └─ {leg}");
 					row++;
 				}
 			}
@@ -277,9 +277,22 @@ public static class ExcelExporter
 				if (result.UnderlyingPrice.HasValue)
 				{
 					sheet.Cells[row, 1].Value = "Current Price:";
-					sheet.Cells[row, 2].Value = (double)result.UnderlyingPrice.Value;
-					sheet.Cells[row, 2].Style.Numberformat.Format = "$#,##0.00";
-					sheet.Cells[row, 2].Style.Font.Bold = true;
+					if (result.OriginalUnderlyingPrice.HasValue)
+					{
+						sheet.Cells[row, 2].Value = (double)result.OriginalUnderlyingPrice.Value;
+						sheet.Cells[row, 2].Style.Numberformat.Format = "$#,##0.00";
+						sheet.Cells[row, 2].Style.Font.Strike = true;
+						sheet.Cells[row, 2].Style.Font.Color.SetColor(System.Drawing.Color.Gray);
+						sheet.Cells[row, 3].Value = (double)result.UnderlyingPrice.Value;
+						sheet.Cells[row, 3].Style.Numberformat.Format = "$#,##0.00";
+						sheet.Cells[row, 3].Style.Font.Bold = true;
+					}
+					else
+					{
+						sheet.Cells[row, 2].Value = (double)result.UnderlyingPrice.Value;
+						sheet.Cells[row, 2].Style.Numberformat.Format = "$#,##0.00";
+						sheet.Cells[row, 2].Style.Font.Bold = true;
+					}
 					row++;
 				}
 
@@ -406,6 +419,51 @@ public static class ExcelExporter
 		range.Style.Font.Bold = true;
 		range.Style.Fill.PatternType = ExcelFillStyle.Solid;
 		range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.LightGray);
+	}
+
+	/// <summary>
+	/// Writes text to a cell, converting ~...~ markers into strikethrough rich text segments.
+	/// </summary>
+	private static void WriteRichTextWithStrikethrough(ExcelRange cell, string text)
+	{
+		var idx = text.IndexOf('~');
+		if (idx < 0)
+		{
+			cell.Value = text;
+			return;
+		}
+
+		var rt = cell.RichText;
+		var pos = 0;
+		while (pos < text.Length)
+		{
+			var start = text.IndexOf('~', pos);
+			if (start < 0)
+			{
+				var normal = rt.Add(text[pos..]);
+				normal.Strike = false;
+				normal.Color = System.Drawing.Color.Black;
+				break;
+			}
+			var end = text.IndexOf('~', start + 1);
+			if (end < 0)
+			{
+				var normal = rt.Add(text[pos..]);
+				normal.Strike = false;
+				normal.Color = System.Drawing.Color.Black;
+				break;
+			}
+			if (start > pos)
+			{
+				var normal = rt.Add(text[pos..start]);
+				normal.Strike = false;
+				normal.Color = System.Drawing.Color.Black;
+			}
+			var struck = rt.Add(text[(start + 1)..end]);
+			struck.Strike = true;
+			struck.Color = System.Drawing.Color.Gray;
+			pos = end + 1;
+		}
 	}
 
 	private static void ColorCodePnL(ExcelRange cell, decimal value)
