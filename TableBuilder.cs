@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 
@@ -132,7 +133,7 @@ public static class TableBuilder
 		if (result.Legs != null)
 		{
 			foreach (var leg in result.Legs)
-				items.Add(BuildLegMarkup(legPrefix, leg));
+				items.Add(BuildLegMarkup(legPrefix, leg, ascii));
 		}
 
 		if (result.PriceLadder.Count > 0)
@@ -194,26 +195,38 @@ public static class TableBuilder
 		return panel;
 	}
 
-	private static IRenderable BuildLegMarkup(string legPrefix, string leg)
+	private static IRenderable BuildLegMarkup(string legPrefix, string leg, bool ascii)
 	{
+		// In ASCII/text mode, strip ~...~ markers entirely (the override value follows, so only it remains).
+		// In console mode, render ~...~ as strikethrough to show the original Yahoo IV crossed out.
+		var processed = ascii ? Regex.Replace(leg, @"~[^~]+~ ", "") : leg;
+
 		// Colorize the "Chg ..." portion (from Yahoo option-chain data) without allowing arbitrary markup.
 		const string token = "Chg ";
-		var start = leg.IndexOf(token, StringComparison.Ordinal);
+		var start = processed.IndexOf(token, StringComparison.Ordinal);
+
+		string markup;
 		if (start < 0)
-			return new Markup($"{legPrefix}{Markup.Escape(leg)}");
+		{
+			markup = $"{legPrefix}{Markup.Escape(processed)}";
+		}
+		else
+		{
+			var end = processed.IndexOf(" | ", start, StringComparison.Ordinal);
+			if (end < 0) end = processed.Length;
 
-		var end = leg.IndexOf(" | ", start, StringComparison.Ordinal);
-		if (end < 0) end = leg.Length;
+			var before = processed[..start];
+			var chgPart = processed[start..end];
+			var after = processed[end..];
 
-		var before = leg[..start];
-		var chgPart = leg[start..end];
-		var after = leg[end..];
+			var color = chgPart.Contains("Chg -", StringComparison.Ordinal) ? "red" : chgPart.Contains("Chg +", StringComparison.Ordinal) ? "green" : "white";
+			markup = $"{legPrefix}{Markup.Escape(before)}[{color}]{Markup.Escape(chgPart)}[/]{Markup.Escape(after)}";
+		}
 
-		var color = chgPart.Contains("Chg -", StringComparison.Ordinal) ? "red"
-			: chgPart.Contains("Chg +", StringComparison.Ordinal) ? "green"
-			: "white";
+		if (!ascii)
+			markup = Regex.Replace(markup, @"~([^~]+)~", "[strikethrough dim]$1[/]");
 
-		return new Markup($"{legPrefix}{Markup.Escape(before)}[{color}]{Markup.Escape(chgPart)}[/]{Markup.Escape(after)}");
+		return new Markup(markup);
 	}
 
 	private static Table BuildTimeDecayGridTable(TimeDecayGrid grid, List<decimal> breakEvens, decimal? underlyingPrice, string displayMode, TableBorder? tableBorder)

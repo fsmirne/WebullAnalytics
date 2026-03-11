@@ -134,7 +134,8 @@ public static class BreakEvenAnalyzer
 		}
 
 		List<string>? legsDisplay = null;
-		var yahooInfo = TryFormatYahooQuote(symbol, optionQuotesBySymbol);
+		var legIvOverride = row.Side == Side.Buy ? ivLong : ivShort;
+		var yahooInfo = TryFormatYahooQuote(symbol, optionQuotesBySymbol, legIvOverride);
 		if (yahooInfo != null)
 			legsDisplay = [$"Market: {yahooInfo}"];
 
@@ -186,7 +187,8 @@ public static class BreakEvenAnalyzer
 			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
 
 			var legIv = GetLegIv(l.row.Side, l.symbol, optionQuotesBySymbol, ivLong, ivShort);
-			var yahooInfo = TryFormatYahooQuote(l.symbol, optionQuotesBySymbol);
+			var legIvOverride = l.row.Side == Side.Buy ? ivLong : ivShort;
+			var yahooInfo = TryFormatYahooQuote(l.symbol, optionQuotesBySymbol, legIvOverride);
 			if (yahooInfo != null)
 				desc += $" | {yahooInfo}";
 
@@ -601,7 +603,7 @@ public static class BreakEvenAnalyzer
 			.Any(l => GetLegIv(l.row.Side, l.symbol, optionQuotesBySymbol, ivLong, ivShort).HasValue);
 	}
 
-	private static string? TryFormatYahooQuote(string symbol, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol)
+	private static string? TryFormatYahooQuote(string symbol, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, decimal? ivOverride = null)
 	{
 		if (optionQuotesBySymbol == null) return null;
 		if (!optionQuotesBySymbol.TryGetValue(symbol, out var quote)) return null;
@@ -618,10 +620,18 @@ public static class BreakEvenAnalyzer
 		}
 		if (quote.Volume.HasValue) parts.Add($"Vol {quote.Volume.Value.ToString("N0", CultureInfo.InvariantCulture)}");
 		if (quote.OpenInterest.HasValue) parts.Add($"OI {quote.OpenInterest.Value.ToString("N0", CultureInfo.InvariantCulture)}");
-		if (quote.ImpliedVolatility.HasValue) parts.Add($"IV {(quote.ImpliedVolatility.Value * 100m).ToString("N1", CultureInfo.InvariantCulture)}%");
+		var yahooIv = quote.ImpliedVolatility;
+		if (yahooIv.HasValue && ivOverride.HasValue)
+			parts.Add($"IV ~{FormatIvPct(yahooIv.Value)}~ {FormatIvPct(ivOverride.Value)}");
+		else if (yahooIv.HasValue)
+			parts.Add($"IV {FormatIvPct(yahooIv.Value)}");
+		else if (ivOverride.HasValue)
+			parts.Add($"IV {FormatIvPct(ivOverride.Value)}");
 
 		return parts.Count == 0 ? null : string.Join(" | ", parts);
 	}
+
+	private static string FormatIvPct(decimal iv) => $"{(iv * 100m).ToString("N1", CultureInfo.InvariantCulture)}%";
 
 	private static decimal? LookupUnderlyingPrice(string root, IReadOnlyDictionary<string, decimal>? underlyingPrices)
 	{
