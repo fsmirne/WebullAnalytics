@@ -139,11 +139,21 @@ public static class TableBuilder
 		if (result.PriceLadder.Count > 0)
 		{
 			// Summary line with current price, break-even, max profit/loss
-			var spotText = result.UnderlyingPrice.HasValue ? $"Current Price: ${result.UnderlyingPrice.Value.ToString("N2", CultureInfo.InvariantCulture)} {sep} " : "";
+			string spotText;
+			if (result.UnderlyingPrice.HasValue && result.OriginalUnderlyingPrice.HasValue)
+			{
+				var originalText = $"${result.OriginalUnderlyingPrice.Value.ToString("N2", CultureInfo.InvariantCulture)}";
+				var overrideText = $"${result.UnderlyingPrice.Value.ToString("N2", CultureInfo.InvariantCulture)}";
+				spotText = ascii ? $"Current Price: {overrideText} {sep} " : $"Current Price: [strikethrough dim]{Markup.Escape(originalText)}[/] {Markup.Escape(overrideText)} {sep} ";
+			}
+			else if (result.UnderlyingPrice.HasValue)
+				spotText = $"Current Price: {Markup.Escape($"${result.UnderlyingPrice.Value.ToString("N2", CultureInfo.InvariantCulture)}")} {sep} ";
+			else
+				spotText = "";
 			var beText = result.BreakEvens.Count > 0 ? string.Join(", ", result.BreakEvens.Select(be => $"${be.ToString("N2", CultureInfo.InvariantCulture)}")) : "N/A";
 			var maxProfitText = result.MaxProfit.HasValue ? $"[green]${result.MaxProfit.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
 			var maxLossText = result.MaxLoss.HasValue ? $"[red]-${result.MaxLoss.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
-			items.Add(new Markup($"{Markup.Escape(spotText)}Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}"));
+			items.Add(new Markup($"{spotText}Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}"));
 
 			if (result.EarlyExercise != null)
 			{
