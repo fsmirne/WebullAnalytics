@@ -141,6 +141,11 @@ class ReportSettings : CommandSettings
 	[CommandOption("--current-underlying-price")]
 	public string? CurrentUnderlyingPrice { get; set; }
 
+	[Description("Use Black-Scholes theoretical price instead of market mid for today's option value in the time-decay grid")]
+	[CommandOption("--theoretical")]
+	[DefaultValue(false)]
+	public bool Theoretical { get; set; }
+
 	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
 
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
@@ -163,6 +168,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("range") && cfg.TryGetDecimal("range", out var range)) Range = range;
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
 		if (!Program.HasCliOption("current-underlying-price") && cfg.TryGetString("currentUnderlyingPrice", out var cup)) CurrentUnderlyingPrice = cup;
+		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
 	}
 
 	public override ValidationResult Validate()
@@ -415,16 +421,16 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
-				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides);
+				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical);
 				break;
 
 			case "text":
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical);
 				break;
 		}
 
