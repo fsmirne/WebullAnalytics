@@ -10,7 +10,7 @@ public static partial class TextFileExporter
 	[GeneratedRegex(@"\x1B\[[0-9;]*[a-zA-Z]")]
 	private static partial Regex AnsiEscapeRegex();
 
-	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified = false, decimal? ivLong = null, decimal? ivShort = null, decimal range = 2, string displayMode = "pnl", IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null)
+	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified = false, decimal? ivLong = null, decimal? ivShort = null, decimal range = 2, string displayMode = "pnl", IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null, bool theoretical = false)
 	{
 		// Create a string writer to capture the console output
 		var stringWriter = new StringWriter();
@@ -41,7 +41,7 @@ public static partial class TextFileExporter
 
 			// Text export uses 200-char width; compute max columns to fit
 			var maxGridColumns = TableBuilder.ComputeMaxGridColumns(200, displayMode);
-			var breakEvens = BreakEvenAnalyzer.Analyze(positions, ivLong, ivShort, range, maxGridColumns, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides);
+			var breakEvens = BreakEvenAnalyzer.Analyze(positions, ivLong, ivShort, range, maxGridColumns, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, theoretical);
 			foreach (var result in breakEvens)
 			{
 				console.Write(TableBuilder.BuildBreakEvenPanel(result, Spectre.Console.BoxBorder.Ascii, TableBorder.Ascii, ascii: true, displayMode: displayMode));

@@ -15,7 +15,8 @@
 		"ivShort": null,
 		"yahoo": false,
 		"range": 2,
-		"display": "value"
+		"display": "value",
+		"theoretical": false
 	},
 	"fetch": {
 		"config": "data/api-config.json",

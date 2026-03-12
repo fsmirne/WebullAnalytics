@@ -6,7 +6,7 @@ namespace WebullAnalytics;
 
 public static class ExcelExporter
 {
-	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, decimal? ivLong = null, decimal? ivShort = null, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null)
+	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, decimal? ivLong = null, decimal? ivShort = null, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null, bool theoretical = false)
 	{
 		// EPPlus requires a license context
 		ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -29,7 +29,7 @@ public static class ExcelExporter
 		ExportDailyPnL(dailyPnLSheet, reportRows);
 
 		// Export break-even analysis
-		ExportBreakEven(breakEvenSheet, positionRows, ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides);
+		ExportBreakEven(breakEvenSheet, positionRows, ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, theoretical);
 
 		// Save the file
 		var file = new FileInfo(outputPath);
@@ -226,9 +226,9 @@ public static class ExcelExporter
 		}
 	}
 
-	private static void ExportBreakEven(ExcelWorksheet sheet, List<PositionRow> positionRows, decimal? ivLong, decimal? ivShort, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides)
+	private static void ExportBreakEven(ExcelWorksheet sheet, List<PositionRow> positionRows, decimal? ivLong, decimal? ivShort, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides, bool theoretical)
 	{
-		var results = BreakEvenAnalyzer.Analyze(positionRows, ivLong, ivShort, optionQuotesBySymbol: optionQuotesBySymbol, underlyingPrices: underlyingPrices, underlyingPriceOverrides: underlyingPriceOverrides);
+		var results = BreakEvenAnalyzer.Analyze(positionRows, ivLong, ivShort, optionQuotesBySymbol: optionQuotesBySymbol, underlyingPrices: underlyingPrices, underlyingPriceOverrides: underlyingPriceOverrides, theoretical: theoretical);
 		if (results.Count == 0)
 		{
 			sheet.Cells[1, 1].Value = "No positions to analyze.";
