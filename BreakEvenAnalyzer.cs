@@ -118,14 +118,14 @@ public static class BreakEvenAnalyzer
 
 		EarlyExerciseBoundary? earlyExercise = null;
 		var iv = GetLegIv(row.Side, symbol, optionQuotesBySymbol, ivLong, ivShort);
-		if (isLong && iv.HasValue && dte.HasValue && dte.Value > 0)
+		if (isLong && iv.HasValue && dte.HasValue && dte.Value >= 0)
 		{
 			var timeYears = dte.Value / 365.0;
 			earlyExercise = BjerksundStensland.ComputeExerciseBoundary(strike, timeYears, RiskFreeRate, (double)iv.Value, parsed.CallPut);
 		}
 
 		TimeDecayGrid? grid = null;
-		if (iv.HasValue && dte.HasValue && dte.Value > 0)
+		if (iv.HasValue && dte.HasValue && dte.Value >= 0)
 		{
 			var legsList = new List<(PositionRow row, OptionParsed parsed, string symbol)> { (row, parsed, symbol) };
 			var gridBreakEvens = new List<decimal> { breakEven };
@@ -293,7 +293,7 @@ public static class BreakEvenAnalyzer
 		var chartData = BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
 		TimeDecayGrid? grid = null;
-		if (dte > 0 && HasIvForRemainingTimeLegs(parsedLegs, nearestExpiry, optionQuotesBySymbol, ivLong, ivShort))
+		if (dte >= 0 && HasIvForRemainingTimeLegs(parsedLegs, nearestExpiry, optionQuotesBySymbol, ivLong, ivShort))
 		{
 			var gridNotable = new List<decimal>(breakEvens);
 			if (spot.HasValue) gridNotable.Add(spot.Value);
