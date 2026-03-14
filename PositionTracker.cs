@@ -390,9 +390,37 @@ public static class PositionTracker
 		var grouped = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
 		var processed = new HashSet<string>();
 
+		// Split positions with mixed lots: some strategy-linked (ParentStrategySeq set), some standalone.
+		// The strategy-linked portion stays in allPositions for grouping; the standalone portion is held separately.
+		var standaloneSplits = new List<(string matchKey, PositionRow row, Trade? trade)>();
+		var workingPositions = new List<(string matchKey, PositionRow row, Trade? trade)>();
+		foreach (var p in allPositions)
+		{
+			if (p.trade?.Asset != Asset.Option) { workingPositions.Add(p); continue; }
+
+			var lots = positions.GetValueOrDefault(p.matchKey, []);
+			var strategyLots = lots.Where(l => l.ParentStrategySeq.HasValue).ToList();
+			var standaloneLots = lots.Where(l => !l.ParentStrategySeq.HasValue).ToList();
+
+			if (strategyLots.Count > 0 && standaloneLots.Count > 0)
+			{
+				var strategyQty = strategyLots.Sum(l => l.Qty);
+				var strategyAvg = strategyLots.Sum(l => l.Price * l.Qty) / strategyQty;
+				workingPositions.Add((p.matchKey, p.row with { Qty = strategyQty, AvgPrice = strategyAvg }, p.trade));
+
+				var standaloneQty = standaloneLots.Sum(l => l.Qty);
+				var standaloneAvg = standaloneLots.Sum(l => l.Price * l.Qty) / standaloneQty;
+				standaloneSplits.Add((p.matchKey, p.row with { Qty = standaloneQty, AvgPrice = standaloneAvg }, p.trade));
+			}
+			else
+			{
+				workingPositions.Add(p);
+			}
+		}
+
 		// Build reverse index: parentSeq → set of option matchKeys whose lots reference it
 		var parentToKeys = new Dictionary<int, HashSet<string>>();
-		foreach (var p in allPositions.Where(p => p.trade?.Asset == Asset.Option))
+		foreach (var p in workingPositions.Where(p => p.trade?.Asset == Asset.Option))
 			foreach (var lot in positions.GetValueOrDefault(p.matchKey, []).Where(l => l.ParentStrategySeq.HasValue))
 			{
 				if (!parentToKeys.TryGetValue(lot.ParentStrategySeq!.Value, out var set))
@@ -423,7 +451,7 @@ public static class PositionTracker
 				}
 
 		// Convert hashsets to position groups
-		var positionLookup = allPositions.Where(p => p.trade?.Asset == Asset.Option).ToDictionary(p => p.matchKey);
+		var positionLookup = workingPositions.Where(p => p.trade?.Asset == Asset.Option).ToDictionary(p => p.matchKey);
 		foreach (var keySet in strategyGroups)
 		{
 			var group = keySet.Select(k => positionLookup[k]).ToList();
@@ -431,11 +459,14 @@ public static class PositionTracker
 			foreach (var k in keySet) processed.Add(k);
 		}
 
+		// Add standalone splits from positions that were partially strategy-linked
+		grouped.AddRange(standaloneSplits.Select(p => new List<(string, PositionRow, Trade?)> { p }));
+
 		// Add unprocessed options as standalone
-		grouped.AddRange(allPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		grouped.AddRange(workingPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
 
 		// Add non-option positions
-		grouped.AddRange(allPositions.Where(p => p.trade?.Asset != Asset.Option).Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		grouped.AddRange(workingPositions.Where(p => p.trade?.Asset != Asset.Option).Select(p => new List<(string, PositionRow, Trade?)> { p }));
 
 		// Sort by asset type, then instrument
 		grouped.Sort((a, b) =>
