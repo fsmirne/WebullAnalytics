@@ -317,7 +317,7 @@ public static class PositionTracker
 		var avgCosts = ComputeAverageCosts(allTrades);
 		var allPositions = BuildRawPositionRows(positions, tradeIndex, avgCosts);
 		var grouped = GroupIntoStrategies(allPositions, positions);
-		return BuildFinalPositionRows(grouped, allTrades);
+		return BuildFinalPositionRows(grouped, allTrades, positions);
 	}
 
 	/// <summary>
@@ -459,11 +459,25 @@ public static class PositionTracker
 			foreach (var k in keySet) processed.Add(k);
 		}
 
-		// Add standalone splits from positions that were partially strategy-linked
-		grouped.AddRange(standaloneSplits.Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		// Recombine standalone splits with their strategy-linked counterparts that didn't end up in a group
+		// (e.g., the other leg expired, so the strategy couldn't form). Remaining splits stay separate.
+		var recombinedKeys = new HashSet<string>();
+		foreach (var split in standaloneSplits)
+		{
+			if (!processed.Contains(split.matchKey))
+			{
+				// Strategy-linked portion is unprocessed — recombine into a single position using the original allPositions entry
+				recombinedKeys.Add(split.matchKey);
+			}
+			else
+			{
+				grouped.Add(new List<(string, PositionRow, Trade?)> { split });
+			}
+		}
 
-		// Add unprocessed options as standalone
-		grouped.AddRange(workingPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		// Add unprocessed options as standalone (recombined keys use the original unsplit row from allPositions)
+		grouped.AddRange(workingPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey) && !recombinedKeys.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		grouped.AddRange(allPositions.Where(p => recombinedKeys.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
 
 		// Add non-option positions
 		grouped.AddRange(workingPositions.Where(p => p.trade?.Asset != Asset.Option).Select(p => new List<(string, PositionRow, Trade?)> { p }));
@@ -482,8 +496,11 @@ public static class PositionTracker
 	/// Builds the final position rows, creating strategy summary rows for multi-leg positions
 	/// and calculating adjusted prices based on credits from rolled legs.
 	/// </summary>
-	private static List<PositionRow> BuildFinalPositionRows(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, List<Trade> allTrades)
+	private static List<PositionRow> BuildFinalPositionRows(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, List<Trade> allTrades, Dictionary<string, List<Lot>> positions)
 	{
+		// Index strategy parent trades by Seq for quick lookup
+		var tradeBySeq = allTrades.Where(t => t.Asset == Asset.OptionStrategy).ToDictionary(t => t.Seq);
+
 		var rows = new List<PositionRow>();
 
 		foreach (var group in grouped)
@@ -495,11 +512,52 @@ public static class PositionTracker
 			}
 			else
 			{
-				rows.Add(group[0].row);
+				rows.Add(AdjustForExpiredStrategyLegs(group[0], positions, allTrades, tradeBySeq));
 			}
 		}
 
 		return rows;
+	}
+
+	/// <summary>
+	/// For a single-leg option position that was part of a strategy whose other legs have expired/closed,
+	/// computes an adjusted price reflecting the credits/debits from those expired legs.
+	/// The effective per-contract cost for strategy-linked lots is the strategy parent's net price,
+	/// not the individual leg price. The adjustment = (legPrice - parentPrice) per strategy-linked lot.
+	/// </summary>
+	private static PositionRow AdjustForExpiredStrategyLegs((string matchKey, PositionRow row, Trade? trade) entry, Dictionary<string, List<Lot>> positions, List<Trade> allTrades, Dictionary<int, Trade> tradeBySeq)
+	{
+		var (matchKey, row, trade) = entry;
+		if (trade?.Asset != Asset.Option) return row;
+
+		var lots = positions.GetValueOrDefault(matchKey, []);
+		var strategyLots = lots.Where(l => l.ParentStrategySeq.HasValue).ToList();
+		if (strategyLots.Count == 0) return row;
+
+		// For each strategy-linked lot, check if the other legs from that strategy are gone (expired/closed).
+		// If so, the effective cost is the parent trade's net price, not the individual leg price.
+		var totalAdjustment = 0m;
+		var adjustedQty = 0;
+		foreach (var lot in strategyLots)
+		{
+			if (!tradeBySeq.TryGetValue(lot.ParentStrategySeq!.Value, out var parentTrade)) continue;
+
+			// Find other legs from this strategy
+			var otherLegs = allTrades.Where(t => t.ParentStrategySeq == parentTrade.Seq && t.MatchKey != matchKey).ToList();
+			if (otherLegs.Count == 0) continue;
+
+			// Check if ALL other legs have no remaining position
+			if (otherLegs.Any(leg => positions.ContainsKey(leg.MatchKey) && positions[leg.MatchKey].Sum(l => l.Qty) > 0)) continue;
+
+			// Other legs are gone: this lot's effective cost is the parent's net spread price
+			totalAdjustment += (lot.Price - parentTrade.Price) * lot.Qty;
+			adjustedQty += lot.Qty;
+		}
+
+		if (adjustedQty == 0) return row;
+
+		var adjustedPrice = row.AvgPrice - totalAdjustment / row.Qty;
+		return row with { InitialAvgPrice = row.AvgPrice, AdjustedAvgPrice = adjustedPrice };
 	}
 
 	/// <summary>
