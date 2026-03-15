@@ -14,13 +14,13 @@ public static class BreakEvenAnalyzer
 	private static readonly TimeSpan MarketOpen = new(9, 30, 0);
 	private static readonly TimeSpan MarketClose = new(16, 30, 0);
 
-	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, decimal? ivLong = null, decimal? ivShort = null, decimal padding = 2, int maxGridColumns = 7, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null, bool theoretical = false)
+	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, decimal? ivLong = null, decimal? ivShort = null, decimal padding = 2, int maxGridColumns = 7, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null, bool theoretical = false, IReadOnlyDictionary<string, List<decimal>>? extraNotablePrices = null)
 	{
 		var groups = GroupPositions(positionRows);
 		var results = new List<BreakEvenResult>();
 		foreach (var group in groups)
 		{
-			var result = AnalyzeGroup(group, ivLong, ivShort, padding, maxGridColumns, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, theoretical);
+			var result = AnalyzeGroup(group, ivLong, ivShort, padding, maxGridColumns, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, theoretical, extraNotablePrices);
 			if (result != null) results.Add(result);
 		}
 		return results;
@@ -42,23 +42,23 @@ public static class BreakEvenAnalyzer
 		return groups;
 	}
 
-	private static BreakEvenResult? AnalyzeGroup(List<PositionRow> group, decimal? ivLong, decimal? ivShort, decimal padding, int maxGridColumns, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides, bool theoretical)
+	private static BreakEvenResult? AnalyzeGroup(List<PositionRow> group, decimal? ivLong, decimal? ivShort, decimal padding, int maxGridColumns, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides, bool theoretical, IReadOnlyDictionary<string, List<decimal>>? extraNotablePrices)
 	{
 		var parent = group[0];
 
 		if (parent.Asset == Asset.Stock)
-			return AnalyzeStock(parent);
+			return AnalyzeStock(parent, extraNotablePrices);
 
 		if (parent.Asset == Asset.Option)
-			return AnalyzeSingleOption(parent, ivLong, ivShort, padding, maxGridColumns, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, theoretical);
+			return AnalyzeSingleOption(parent, ivLong, ivShort, padding, maxGridColumns, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, theoretical, extraNotablePrices);
 
 		if (parent.Asset == Asset.OptionStrategy && group.Count > 1)
-			return AnalyzeStrategy(parent, group.Skip(1).ToList(), ivLong, ivShort, padding, maxGridColumns, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, theoretical);
+			return AnalyzeStrategy(parent, group.Skip(1).ToList(), ivLong, ivShort, padding, maxGridColumns, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, theoretical, extraNotablePrices);
 
 		return null;
 	}
 
-	private static BreakEvenResult AnalyzeStock(PositionRow row)
+	private static BreakEvenResult AnalyzeStock(PositionRow row, IReadOnlyDictionary<string, List<decimal>>? extraNotablePrices)
 	{
 		var avgPrice = row.AvgPrice;
 		var isLong = row.Side == Side.Buy;
@@ -67,6 +67,7 @@ public static class BreakEvenAnalyzer
 
 		var step = GetPriceStep(avgPrice);
 		var notablePrices = new List<decimal> { avgPrice };
+		notablePrices.AddRange(LookupExtraNotablePrices(row.Instrument, extraNotablePrices));
 		Func<decimal, decimal> pnlFunc = s => isLong ? (s - avgPrice) * row.Qty : (avgPrice - s) * row.Qty;
 		var ladder = BuildPriceLadder(notablePrices, step, pnlFunc, (s, pnl) => null);
 		var chartData = BuildChartData(notablePrices, step, pnlFunc, (s, pnl) => null);
@@ -74,7 +75,7 @@ public static class BreakEvenAnalyzer
 		return new BreakEvenResult(Title: title, Details: details, Qty: row.Qty, BreakEvens: [avgPrice], MaxProfit: isLong ? null : avgPrice * row.Qty, MaxLoss: isLong ? avgPrice * row.Qty : null, DaysToExpiry: null, PriceLadder: ladder, Note: null, ChartData: chartData);
 	}
 
-	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, decimal? ivLong, decimal? ivShort, decimal padding, int maxGridColumns, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides, bool theoretical)
+	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, decimal? ivLong, decimal? ivShort, decimal padding, int maxGridColumns, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides, bool theoretical, IReadOnlyDictionary<string, List<decimal>>? extraNotablePrices)
 	{
 		var parsedInfo = ParseOption(row);
 		if (parsedInfo == null) return null;
@@ -108,6 +109,7 @@ public static class BreakEvenAnalyzer
 		var spot = LookupUnderlyingPrice(parsed.Root, underlyingPrices, underlyingPriceOverrides);
 		var notablePrices = new List<decimal> { strike, breakEven };
 		if (spot.HasValue) notablePrices.Add(spot.Value);
+		notablePrices.AddRange(LookupExtraNotablePrices(parsed.Root, extraNotablePrices));
 		var step = GetPriceStep(strike);
 		Func<decimal, decimal> pnlFunc = s => OptionPnLAtExpiration(s, strike, parsed.CallPut, row.Side, qty, premium);
 		Func<decimal, decimal, decimal?> valueAt = (s, pnl) => isLong ? (pnl / (qty * 100m)) + premium : premium - (pnl / (qty * 100m));
@@ -130,6 +132,7 @@ public static class BreakEvenAnalyzer
 			var legsList = new List<(PositionRow row, OptionParsed parsed, string symbol)> { (row, parsed, symbol) };
 			var gridBreakEvens = new List<decimal> { breakEven };
 			if (spot.HasValue) gridBreakEvens.Add(spot.Value);
+			gridBreakEvens.AddRange(LookupExtraNotablePrices(parsed.Root, extraNotablePrices));
 			grid = BuildTimeDecayGrid(legsList, qty, row.Side, premium, parsed.ExpiryDate, ivLong, ivShort, padding, strike, gridBreakEvens, maxGridColumns, optionQuotesBySymbol, spot, theoretical);
 		}
 
@@ -142,7 +145,7 @@ public static class BreakEvenAnalyzer
 		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, Note: null, Legs: legsDisplay, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(parsed.Root, underlyingPrices, underlyingPriceOverrides));
 	}
 
-	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, decimal? ivLong, decimal? ivShort, decimal padding, int maxGridColumns, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides, bool theoretical)
+	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, decimal? ivLong, decimal? ivShort, decimal padding, int maxGridColumns, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, IReadOnlyDictionary<string, decimal>? underlyingPrices, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides, bool theoretical, IReadOnlyDictionary<string, List<decimal>>? extraNotablePrices)
 	{
 		var parsedLegs = legs.Select(l => (row: l, parsed: ParseOption(l))).Where(x => x.parsed != null).Select(x => (x.row, x.parsed!.Value.parsed, x.parsed!.Value.symbol)).ToList();
 		if (parsedLegs.Count < 2) return null;
@@ -253,6 +256,7 @@ public static class BreakEvenAnalyzer
 		var notablePrices = new List<decimal>(strikes);
 		notablePrices.AddRange(breakEvens);
 		if (spot.HasValue) notablePrices.Add(spot.Value);
+		notablePrices.AddRange(LookupExtraNotablePrices(root, extraNotablePrices));
 		var step = GetPriceStep(strikes.Average());
 
 		Func<decimal, decimal> pnlFunc;
@@ -297,6 +301,7 @@ public static class BreakEvenAnalyzer
 		{
 			var gridNotable = new List<decimal>(breakEvens);
 			if (spot.HasValue) gridNotable.Add(spot.Value);
+			gridNotable.AddRange(LookupExtraNotablePrices(root, extraNotablePrices));
 			grid = BuildTimeDecayGrid(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, ivLong, ivShort, padding, strikes.Average(), gridNotable, maxGridColumns, optionQuotesBySymbol, spot, theoretical);
 		}
 
@@ -648,6 +653,13 @@ public static class BreakEvenAnalyzer
 		if (underlyingPrices != null && underlyingPrices.TryGetValue(root, out var price))
 			return Math.Round(price, 2);
 		return null;
+	}
+
+	private static List<decimal> LookupExtraNotablePrices(string ticker, IReadOnlyDictionary<string, List<decimal>>? overrides)
+	{
+		if (overrides != null && overrides.TryGetValue(ticker, out var prices))
+			return prices;
+		return [];
 	}
 
 	private static decimal GetPremium(PositionRow row) => row.AdjustedAvgPrice ?? row.AvgPrice;

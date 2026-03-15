@@ -101,6 +101,9 @@ WebullAnalytics report --iv-long 50 --iv-short 45 --display pnl
 
 # Increase grid granularity (more rows between strikes, default: 2)
 WebullAnalytics report --iv-long 50 --iv-short 45 --range 4
+
+# Add custom notable prices to break-even reports (e.g., support/resistance levels)
+WebullAnalytics report --notable-prices GME:20/25/30
 ```
 
 #### Report Options
@@ -119,8 +122,12 @@ Options:
   --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
   --iv-long <volatility>    Implied volatility for long legs (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
   --iv-short <volatility>   Implied volatility for short legs (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
+  --yahoo                   Fetch option chain data from Yahoo Finance for break-even analysis (bid/ask/IV/etc)
   --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
+  --current-underlying-price <prices>  Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
+  --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
+  --notable-prices <prices> Additional prices to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
   --help, -h                Show help message
 ```
 

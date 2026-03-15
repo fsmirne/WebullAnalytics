@@ -146,6 +146,10 @@ class ReportSettings : CommandSettings
 	[DefaultValue(false)]
 	public bool Theoretical { get; set; }
 
+	[Description("Additional prices to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)")]
+	[CommandOption("--notable-prices")]
+	public string? NotablePrices { get; set; }
+
 	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
 
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
@@ -169,6 +173,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
 		if (!Program.HasCliOption("current-underlying-price") && cfg.TryGetString("currentUnderlyingPrice", out var cup)) CurrentUnderlyingPrice = cup;
 		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
+		if (!Program.HasCliOption("notable-prices") && cfg.TryGetString("notablePrices", out var notablePrices)) NotablePrices = notablePrices;
 	}
 
 	public override ValidationResult Validate()
@@ -208,6 +213,21 @@ class ReportSettings : CommandSettings
 				var parts = pair.Split(':', 2);
 				if (parts.Length != 2 || !decimal.TryParse(parts[1].Trim(), NumberStyles.Number, CultureInfo.InvariantCulture, out _))
 					return ValidationResult.Error($"--current-underlying-price: invalid entry '{pair}'. Expected format: TICKER:PRICE (e.g., GME:24.88)");
+			}
+		}
+
+		if (NotablePrices != null)
+		{
+			foreach (var pair in NotablePrices.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			{
+				var parts = pair.Split(':', 2);
+				if (parts.Length != 2)
+					return ValidationResult.Error($"--notable-prices: invalid entry '{pair}'. Expected format: TICKER:P1/P2/P3 (e.g., GME:20/25/30)");
+				foreach (var priceStr in parts[1].Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+				{
+					if (!decimal.TryParse(priceStr, NumberStyles.Number, CultureInfo.InvariantCulture, out _))
+						return ValidationResult.Error($"--notable-prices: invalid price '{priceStr}' for ticker '{parts[0].Trim()}'. Prices must be numeric.");
+				}
 			}
 		}
 
@@ -418,19 +438,27 @@ class ReportCommand : AsyncCommand<ReportSettings>
 
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
+		IReadOnlyDictionary<string, List<decimal>>? extraNotablePrices = null;
+		if (settings.NotablePrices != null)
+		{
+			var parsed = ParseNotablePrices(settings.NotablePrices);
+			if (parsed.Count > 0)
+				extraNotablePrices = parsed;
+		}
+
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
-				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical);
+				ExcelExporter.ExportToExcel(rows, positionRows, trades, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraNotablePrices);
 				break;
 
 			case "text":
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraNotablePrices);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, ivLong, ivShort, settings.Range, displayMode, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraNotablePrices);
 				break;
 		}
 
@@ -447,6 +475,31 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				result[parts[0].Trim().ToUpperInvariant()] = price;
 			else
 				Console.WriteLine($"Warning: Ignoring invalid underlying price override '{pair}'. Expected format: TICKER:PRICE");
+		}
+		return result;
+	}
+
+	private static Dictionary<string, List<decimal>> ParseNotablePrices(string input)
+	{
+		var result = new Dictionary<string, List<decimal>>(StringComparer.OrdinalIgnoreCase);
+		foreach (var pair in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			var parts = pair.Split(':', 2);
+			if (parts.Length != 2) continue;
+			var ticker = parts[0].Trim().ToUpperInvariant();
+			var prices = new List<decimal>();
+			foreach (var priceStr in parts[1].Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			{
+				if (decimal.TryParse(priceStr, NumberStyles.Number, CultureInfo.InvariantCulture, out var price))
+					prices.Add(price);
+			}
+			if (prices.Count > 0)
+			{
+				if (!result.TryGetValue(ticker, out var existing))
+					result[ticker] = prices;
+				else
+					existing.AddRange(prices);
+			}
 		}
 		return result;
 	}
