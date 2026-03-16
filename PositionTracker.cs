@@ -459,8 +459,11 @@ public static class PositionTracker
 			foreach (var k in keySet) processed.Add(k);
 		}
 
-		// Recombine standalone splits with their strategy-linked counterparts that didn't end up in a group
-		// (e.g., the other leg expired, so the strategy couldn't form). Remaining splits stay separate.
+		// Recombine standalone splits with their strategy-linked counterparts.
+		// If the strategy-linked portion ended up in a multi-leg group, merge the standalone quantity back
+		// into that group (the position is the same regardless of how the trades were placed).
+		// If the strategy-linked portion didn't form a group (e.g., other leg expired), recombine into
+		// a single standalone position using the original allPositions entry.
 		var recombinedKeys = new HashSet<string>();
 		foreach (var split in standaloneSplits)
 		{
@@ -471,7 +474,18 @@ public static class PositionTracker
 			}
 			else
 			{
-				grouped.Add(new List<(string, PositionRow, Trade?)> { split });
+				// Strategy-linked portion is in a group — merge standalone back by replacing the leg with the original unsplit position
+				var targetGroup = grouped.FirstOrDefault(g => g.Any(p => p.matchKey == split.matchKey));
+				if (targetGroup != null)
+				{
+					var legIndex = targetGroup.FindIndex(p => p.matchKey == split.matchKey);
+					var original = allPositions.First(p => p.matchKey == split.matchKey);
+					targetGroup[legIndex] = original;
+				}
+				else
+				{
+					grouped.Add(new List<(string, PositionRow, Trade?)> { split });
+				}
 			}
 		}
 
@@ -596,7 +610,11 @@ public static class PositionTracker
 		if (strategyKind is "Calendar" or "Diagonal")
 		{
 			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
-			var totalNetDebit = CalculateTotalNetDebit(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut);
+			var (totalNetDebit, accountedQty) = CalculateTotalNetDebit(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut);
+			// When some contracts were opened through non-matching strategy trades (e.g., a vertical + standalone sell
+			// that together form a calendar), supplement with netInitial for the unaccounted portion.
+			if (accountedQty < qty)
+				totalNetDebit += (qty - accountedQty) * netInitial * 100m;
 			netAdjusted = totalNetDebit / (qty * 100m);
 		}
 
@@ -629,8 +647,9 @@ public static class PositionTracker
 	/// Tracks per-contract positions at the strike level to find when the position was last flat,
 	/// then only includes strategy trades after that point. This prevents closed historical positions
 	/// from contaminating the break-even of a newly opened position.
+	/// Returns the total debit and the net contract quantity accounted for by matching strategy parents.
 	/// </summary>
-	private static decimal CalculateTotalNetDebit(List<Trade> allTrades, string root, List<decimal> strikes, string callPut)
+	private static (decimal totalDebit, int accountedQty) CalculateTotalNetDebit(List<Trade> allTrades, string root, List<decimal> strikes, string callPut)
 	{
 		var legsKeySuffix = ":" + string.Join(",", strikes.Select(s => $"{callPut}{Formatters.FormatQty(s)}"));
 		var rootSegment = $":{root}:";
@@ -677,10 +696,14 @@ public static class PositionTracker
 		}
 
 		// Only include strategy parent trades after the last flat point
-		return allTrades
+		var matchingParents = allTrades
 			.Where(t => t.Asset == Asset.OptionStrategy && t.Side is Side.Buy or Side.Sell && t.MatchKey.Contains(rootSegment) && t.MatchKey.EndsWith(legsKeySuffix))
 			.Where(t => t.Timestamp > lastFlatTime || (t.Timestamp == lastFlatTime && t.Seq > lastFlatSeq))
-			.Sum(t => (t.Side == Side.Buy ? 1m : -1m) * t.Qty * t.Price * t.Multiplier);
+			.ToList();
+
+		var totalDebit = matchingParents.Sum(t => (t.Side == Side.Buy ? 1m : -1m) * t.Qty * t.Price * t.Multiplier);
+		var accountedQty = matchingParents.Sum(t => (t.Side == Side.Buy ? 1 : -1) * t.Qty);
+		return (totalDebit, accountedQty);
 	}
 
 	/// <summary>
