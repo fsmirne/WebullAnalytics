@@ -489,9 +489,29 @@ public static class PositionTracker
 			}
 		}
 
-		// Add unprocessed options as standalone (recombined keys use the original unsplit row from allPositions)
-		grouped.AddRange(workingPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey) && !recombinedKeys.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
-		grouped.AddRange(allPositions.Where(p => recombinedKeys.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		// Fallback grouping: group ungrouped options that form calendars/diagonals/verticals.
+		// This handles cases where strategy linkage is broken by rolls (e.g., short leg bought back
+		// via a new calendar, leaving the remaining legs from different strategy parents unlinked).
+		var ungroupedOptions = workingPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey) && !recombinedKeys.Contains(p.matchKey))
+			.Concat(allPositions.Where(p => recombinedKeys.Contains(p.matchKey)))
+			.ToList();
+
+		var fallbackGrouped = new HashSet<string>();
+		var byRootCallPut = ungroupedOptions
+			.Select(p => (entry: p, parsed: MatchKeys.TryGetOptionSymbol(p.matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
+			.Where(x => x.parsed != null)
+			.GroupBy(x => (x.parsed!.Root, x.parsed.CallPut))
+			.Where(g => g.Count() >= 2);
+
+		foreach (var group in byRootCallPut)
+		{
+			var entries = group.Select(x => x.entry).ToList();
+			grouped.Add(entries);
+			foreach (var e in entries) fallbackGrouped.Add(e.matchKey);
+		}
+
+		// Add remaining unprocessed options as standalone
+		grouped.AddRange(ungroupedOptions.Where(p => !fallbackGrouped.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
 
 		// Add non-option positions
 		grouped.AddRange(workingPositions.Where(p => p.trade?.Asset != Asset.Option).Select(p => new List<(string, PositionRow, Trade?)> { p }));
@@ -610,11 +630,7 @@ public static class PositionTracker
 		if (strategyKind is "Calendar" or "Diagonal")
 		{
 			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
-			var (totalNetDebit, accountedQty) = CalculateTotalNetDebit(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut);
-			// When some contracts were opened through non-matching strategy trades (e.g., a vertical + standalone sell
-			// that together form a calendar), supplement with netInitial for the unaccounted portion.
-			if (accountedQty < qty)
-				totalNetDebit += (qty - accountedQty) * netInitial * 100m;
+			var (totalNetDebit, _) = CalculateTotalNetDebit(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut);
 			netAdjusted = totalNetDebit / (qty * 100m);
 		}
 
@@ -642,18 +658,15 @@ public static class PositionTracker
 	}
 
 	/// <summary>
-	/// Computes total net debit (cash spent minus cash received) from strategy parent trades
+	/// Computes total net debit (cash spent minus cash received) from individual leg trades
 	/// for the CURRENT calendar/diagonal position at a given underlying/strikes/type.
 	/// Tracks per-contract positions at the strike level to find when the position was last flat,
-	/// then only includes strategy trades after that point. This prevents closed historical positions
-	/// from contaminating the break-even of a newly opened position.
-	/// Returns the total debit and the net contract quantity accounted for by matching strategy parents.
+	/// then sums all leg-level cash flows after that point. Using individual leg trades instead of
+	/// strategy parents ensures all cash flows are captured regardless of what strategy type
+	/// (calendar, vertical, standalone) originally opened each contract.
 	/// </summary>
 	private static (decimal totalDebit, int accountedQty) CalculateTotalNetDebit(List<Trade> allTrades, string root, List<decimal> strikes, string callPut)
 	{
-		var legsKeySuffix = ":" + string.Join(",", strikes.Select(s => $"{callPut}{Formatters.FormatQty(s)}"));
-		var rootSegment = $":{root}:";
-
 		// Build OCC suffixes to match all options at these root/strikes/callPut across any expiry
 		var occSuffixes = strikes.Select(s => $"{callPut}{(long)(s * 1000m):D8}").ToHashSet();
 		var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{root}";
@@ -662,7 +675,7 @@ public static class PositionTracker
 		// Collect all option leg trades at these strikes, plus synthetic expiry events
 		var legEvents = allTrades
 			.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(suffix => t.MatchKey.EndsWith(suffix, StringComparison.Ordinal)))
-			.Select(t => (t.Timestamp, t.Seq, t.MatchKey, t.Side, t.Qty, IsExpiry: false))
+			.Select(t => (t.Timestamp, t.Seq, t.MatchKey, t.Side, t.Qty, t.Price, t.Multiplier, IsExpiry: false))
 			.ToList();
 
 		// Generate synthetic expiry-close events for contracts whose expiry has passed
@@ -672,7 +685,7 @@ public static class PositionTracker
 			.ToList();
 
 		foreach (var (matchKey, parsed) in expiredContracts)
-			legEvents.Add((parsed!.ExpiryDate.Date + ExpirationTime, int.MaxValue, matchKey, Side.Expire, 0, IsExpiry: true));
+			legEvents.Add((parsed!.ExpiryDate.Date + ExpirationTime, int.MaxValue, matchKey, Side.Expire, 0, 0m, 0m, IsExpiry: true));
 
 		legEvents.Sort((a, b) => { var cmp = a.Timestamp.CompareTo(b.Timestamp); return cmp != 0 ? cmp : a.Seq.CompareTo(b.Seq); });
 
@@ -695,15 +708,13 @@ public static class PositionTracker
 			}
 		}
 
-		// Only include strategy parent trades after the last flat point
-		var matchingParents = allTrades
-			.Where(t => t.Asset == Asset.OptionStrategy && t.Side is Side.Buy or Side.Sell && t.MatchKey.Contains(rootSegment) && t.MatchKey.EndsWith(legsKeySuffix))
-			.Where(t => t.Timestamp > lastFlatTime || (t.Timestamp == lastFlatTime && t.Seq > lastFlatSeq))
-			.ToList();
+		// Sum cash flows from individual leg trades after the last flat point
+		var totalDebit = legEvents
+			.Where(e => !e.IsExpiry && (e.Timestamp > lastFlatTime || (e.Timestamp == lastFlatTime && e.Seq > lastFlatSeq)))
+			.Sum(e => (e.Side == Side.Buy ? 1m : -1m) * e.Qty * e.Price * e.Multiplier);
 
-		var totalDebit = matchingParents.Sum(t => (t.Side == Side.Buy ? 1m : -1m) * t.Qty * t.Price * t.Multiplier);
-		var accountedQty = matchingParents.Sum(t => (t.Side == Side.Buy ? 1 : -1) * t.Qty);
-		return (totalDebit, accountedQty);
+		// All contracts at these strikes are accounted for by leg-level cash flows
+		return (totalDebit, int.MaxValue);
 	}
 
 	/// <summary>
