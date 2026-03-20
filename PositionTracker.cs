@@ -595,9 +595,9 @@ public static class PositionTracker
 	}
 
 	/// <summary>
-	/// Builds rows for a multi-leg strategy (calendar, vertical, or diagonal spread).
-	/// Creates a summary row plus individual leg rows. For calendars/diagonals, the adjusted
-	/// price is the exact break-even computed from total strategy-level cash flows.
+	/// Builds rows for a multi-leg strategy (calendar, vertical, diagonal, etc.).
+	/// Creates a summary row plus individual leg rows. The adjusted price is the exact break-even
+	/// computed from total cash flows at the strategy's strikes, accounting for rolls.
 	/// </summary>
 	private static List<PositionRow> BuildStrategyRows(List<(string matchKey, PositionRow row, Trade? trade)> group, List<Trade> allTrades)
 	{
@@ -624,15 +624,13 @@ public static class PositionTracker
 		// Calculate net initial price from average cost of each leg
 		var netInitial = group.Sum(leg => leg.row.Side == Side.Buy ? leg.row.AvgPrice : -leg.row.AvgPrice);
 
-		// For calendars/diagonals, compute adjusted price from total cash flows (exact break-even).
-		// For other strategies, adjusted = initial (no roll activity to account for).
+		// Compute adjusted price from total cash flows at these strikes.
+		// This handles rolls: if a vertical was rolled from one expiry to another, CalculateTotalNetDebit
+		// tracks all cash flows at these root/strikes/callPut and finds the effective cost of the current position.
 		var netAdjusted = netInitial;
-		if (strategyKind is "Calendar" or "Diagonal")
-		{
-			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
-			var (totalNetDebit, _) = CalculateTotalNetDebit(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut);
-			netAdjusted = totalNetDebit / (qty * 100m);
-		}
+		var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
+		var (totalNetDebit, _) = CalculateTotalNetDebit(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut);
+		netAdjusted = totalNetDebit / (qty * 100m);
 
 		// The per-leg adjustment = difference between initial and adjusted at the strategy level.
 		// Applied entirely to the long leg; short leg stays at its average cost.
@@ -643,7 +641,11 @@ public static class PositionTracker
 		var longestExpiry = group.Max(g => g.row.Expiry) ?? DateTime.MinValue;
 
 		// Strategy summary row
-		rows.Add(new PositionRow(Instrument: $"{firstParsed.Root} {Formatters.FormatOptionDate(longestExpiry)}", Asset: Asset.OptionStrategy, OptionKind: strategyKind, Side: side, Qty: qty, AvgPrice: Math.Abs(netAdjusted), Expiry: longestExpiry, IsStrategyLeg: false, InitialAvgPrice: Math.Abs(netInitial), AdjustedAvgPrice: Math.Abs(netAdjusted)));
+		// For Sell (credit) positions, price is the credit received. If the adjusted net is a debit
+		// (positive netAdjusted due to roll costs exceeding original credit), show as negative price.
+		var displayPrice = side == Side.Sell ? -netAdjusted : netAdjusted;
+		var displayInitial = side == Side.Sell ? -netInitial : netInitial;
+		rows.Add(new PositionRow(Instrument: $"{firstParsed.Root} {Formatters.FormatOptionDate(longestExpiry)}", Asset: Asset.OptionStrategy, OptionKind: strategyKind, Side: side, Qty: qty, AvgPrice: displayPrice, Expiry: longestExpiry, IsStrategyLeg: false, InitialAvgPrice: displayInitial, AdjustedAvgPrice: displayPrice));
 
 		// Add leg rows with adjusted prices (sorted by expiry descending, then strike descending)
 		foreach (var leg in group.OrderByDescending(g => g.row.Expiry).ThenByDescending(g => parsedLegs.FirstOrDefault(p => p.leg.matchKey == g.matchKey).parsed?.Strike ?? 0))
@@ -694,17 +696,28 @@ public static class PositionTracker
 		DateTime lastFlatTime = DateTime.MinValue;
 		int lastFlatSeq = int.MinValue;
 
-		foreach (var e in legEvents)
+		// Process events in batches by timestamp so that multi-leg strategies (e.g., a condor that
+		// simultaneously closes old legs and opens new ones) are treated atomically. A flat point
+		// is only recognized after ALL events at the same timestamp have been applied.
+		for (int i = 0; i < legEvents.Count;)
 		{
-			if (e.IsExpiry)
-				positions[e.MatchKey] = 0;
-			else
-				positions[e.MatchKey] = positions.GetValueOrDefault(e.MatchKey) + (e.Side == Side.Buy ? e.Qty : -e.Qty);
+			var batchTime = legEvents[i].Timestamp;
+			var batchEndSeq = legEvents[i].Seq;
+			while (i < legEvents.Count && legEvents[i].Timestamp == batchTime)
+			{
+				var e = legEvents[i];
+				if (e.IsExpiry)
+					positions[e.MatchKey] = 0;
+				else
+					positions[e.MatchKey] = positions.GetValueOrDefault(e.MatchKey) + (e.Side == Side.Buy ? e.Qty : -e.Qty);
+				batchEndSeq = e.Seq;
+				i++;
+			}
 
 			if (positions.Values.All(v => v == 0))
 			{
-				lastFlatTime = e.Timestamp;
-				lastFlatSeq = e.Seq;
+				lastFlatTime = batchTime;
+				lastFlatSeq = batchEndSeq;
 			}
 		}
 

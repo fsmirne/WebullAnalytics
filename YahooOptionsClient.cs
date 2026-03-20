@@ -15,6 +15,11 @@ public static class YahooOptionsClient
 	private const string CrumbUrl = "https://query1.finance.yahoo.com/v1/test/getcrumb";
 	private const string CookieBootstrapUrl = "https://fc.yahoo.com";
 
+	// Webull root symbols that differ from Yahoo Finance ticker symbols.
+	private static readonly Dictionary<string, string> YahooTickerMap = new(StringComparer.OrdinalIgnoreCase) { { "SPXW", "^SPX" }, { "SPX", "^SPX" }, { "NDX", "^NDX" }, { "RUT", "^RUT" }, { "DJX", "^DJI" }, { "VIX", "^VIX" } };
+
+	private static string ToYahooTicker(string root) => YahooTickerMap.TryGetValue(root, out var mapped) ? mapped : root;
+
 	public static async Task<(IReadOnlyDictionary<string, OptionContractQuote> OptionQuotes, IReadOnlyDictionary<string, decimal> UnderlyingPrices)> FetchOptionQuotesAsync(IEnumerable<PositionRow> positionRows, CancellationToken cancellationToken)
 	{
 		var wantedSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -51,7 +56,8 @@ public static class YahooOptionsClient
 
 		foreach (var group in groups)
 		{
-			var ticker = group.Key.Root;
+			var root = group.Key.Root;
+			var ticker = ToYahooTicker(root);
 			var expiry = group.Key.Expiry;
 			var unixDate = new DateTimeOffset(DateTime.SpecifyKind(expiry, DateTimeKind.Utc)).ToUnixTimeSeconds();
 			Console.WriteLine($"Yahoo Finance: requesting {ticker} options for {expiry:yyyy-MM-dd}...");
@@ -87,7 +93,7 @@ public static class YahooOptionsClient
 				var json = await response.Content.ReadAsStringAsync(cancellationToken);
 				var parsed = ParseOptionChain(json);
 				if (parsed.UnderlyingPrice.HasValue)
-					underlyingPrices[ticker] = parsed.UnderlyingPrice.Value;
+					underlyingPrices[root] = parsed.UnderlyingPrice.Value;
 				foreach (var quote in parsed.Quotes)
 				{
 					if (!wantedSymbols.Contains(quote.ContractSymbol)) continue;
@@ -109,18 +115,19 @@ public static class YahooOptionsClient
 		return (result, underlyingPrices);
 	}
 
-	private static async Task<Dictionary<string, decimal>> FetchUnderlyingPricesAsync(HttpClient client, List<string> tickers, string? crumb, CancellationToken cancellationToken)
+	private static async Task<Dictionary<string, decimal>> FetchUnderlyingPricesAsync(HttpClient client, List<string> roots, string? crumb, CancellationToken cancellationToken)
 	{
 		var prices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-		foreach (var ticker in tickers)
+		foreach (var root in roots)
 		{
 			try
 			{
-				var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(ticker)}?range=1d&interval=1d";
+				var yahooTicker = ToYahooTicker(root);
+				var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(yahooTicker)}?range=1d&interval=1d";
 				if (!string.IsNullOrWhiteSpace(crumb))
 					url += $"&crumb={Uri.EscapeDataString(crumb)}";
 				var request = new HttpRequestMessage(HttpMethod.Get, url);
-				request.Headers.Referrer = new Uri($"https://finance.yahoo.com/quote/{Uri.EscapeDataString(ticker)}/");
+				request.Headers.Referrer = new Uri($"https://finance.yahoo.com/quote/{Uri.EscapeDataString(yahooTicker)}/");
 				using var response = await client.SendAsync(request, cancellationToken);
 				if (!response.IsSuccessStatusCode) continue;
 				var json = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -130,7 +137,7 @@ public static class YahooOptionsClient
 					var meta = chartResult[0].GetProperty("meta");
 					var price = GetDecimal(meta, "regularMarketPrice");
 					if (price.HasValue)
-						prices[ticker] = price.Value;
+						prices[root] = price.Value;
 				}
 			}
 			catch (Exception ex)
