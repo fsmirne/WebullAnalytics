@@ -151,7 +151,7 @@ public static class TableBuilder
 			else
 				spotText = "";
 			var beText = result.BreakEvens.Count > 0 ? string.Join(", ", result.BreakEvens.Select(be => $"${be.ToString("N2", CultureInfo.InvariantCulture)}")) : "N/A";
-			var maxProfitText = result.MaxProfit.HasValue ? $"[green]${result.MaxProfit.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
+			var maxProfitText = result.MaxProfit.HasValue ? (result.MaxProfit.Value >= 0 ? $"[green]${result.MaxProfit.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : $"[red]-${Math.Abs(result.MaxProfit.Value).ToString("N2", CultureInfo.InvariantCulture)}[/]") : "Unlimited";
 			var maxLossText = result.MaxLoss.HasValue ? $"[red]-${result.MaxLoss.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
 			items.Add(new Markup($"{spotText}Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}"));
 

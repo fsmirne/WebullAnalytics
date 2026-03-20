@@ -70,6 +70,7 @@ public static class BreakEvenAnalyzer
 		notablePrices.AddRange(LookupExtraNotablePrices(row.Instrument, extraNotablePrices));
 		Func<decimal, decimal> pnlFunc = s => isLong ? (s - avgPrice) * row.Qty : (avgPrice - s) * row.Qty;
 		var ladder = BuildPriceLadder(notablePrices, step, pnlFunc, (s, pnl) => null);
+		ladder.Reverse();
 		var chartData = BuildChartData(notablePrices, step, pnlFunc, (s, pnl) => null);
 
 		return new BreakEvenResult(Title: title, Details: details, Qty: row.Qty, BreakEvens: [avgPrice], MaxProfit: isLong ? null : avgPrice * row.Qty, MaxLoss: isLong ? avgPrice * row.Qty : null, DaysToExpiry: null, PriceLadder: ladder, Note: null, ChartData: chartData);
@@ -114,6 +115,7 @@ public static class BreakEvenAnalyzer
 		Func<decimal, decimal> pnlFunc = s => OptionPnLAtExpiration(s, strike, parsed.CallPut, row.Side, qty, premium);
 		Func<decimal, decimal, decimal?> valueAt = (s, pnl) => isLong ? (pnl / (qty * 100m)) + premium : premium - (pnl / (qty * 100m));
 		var ladder = BuildPriceLadder(notablePrices, step, pnlFunc, valueAt);
+		ladder.Reverse();
 		var chartData = BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
 		var dte = row.Expiry.HasValue ? (int)(row.Expiry.Value.Date - DateTime.Today).TotalDays : (int?)null;
@@ -221,20 +223,11 @@ public static class BreakEvenAnalyzer
 		{
 			var lowK = strikes[0];
 			var highK = strikes[1];
-			var width = highK - lowK;
 
 			breakEvens.Add(callPut == "C" ? lowK + netPremium : highK - netPremium);
 
-			if (parent.Side == Side.Buy) // debit spread
-			{
-				maxProfit = (width - netPremium) * qty * 100;
-				maxLoss = netPremium * qty * 100;
-			}
-			else // credit spread
-			{
-				maxProfit = netPremium * qty * 100;
-				maxLoss = (width - netPremium) * qty * 100;
-			}
+			// Max profit/loss are computed numerically from the price ladder (lines below)
+			// rather than analytically, because rolls can shift the premium basis.
 		}
 		else if (isTimeSpread && !HasIvForRemainingTimeLegs(parsedLegs, nearestExpiry, optionQuotesBySymbol, ivLong, ivShort))
 		{
@@ -284,16 +277,16 @@ public static class BreakEvenAnalyzer
 		if (!maxProfit.HasValue)
 		{
 			var maxPnL = ladder.Max(p => p.PnL);
-			if (maxPnL > 0) maxProfit = maxPnL;
+			maxProfit = maxPnL;
 		}
 
 		if (!maxLoss.HasValue)
 		{
 			var minPnL = ladder.Min(p => p.PnL);
-			if (minPnL < 0)
-				maxLoss = Math.Abs(minPnL);
+			maxLoss = Math.Abs(minPnL);
 		}
 
+		ladder.Reverse();
 		var chartData = BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
 		TimeDecayGrid? grid = null;
@@ -450,8 +443,16 @@ public static class BreakEvenAnalyzer
 					if (dist < closestDist) { closestDist = dist; closestRow = pi; }
 				}
 
+				// Convert market mid to the same "value" scale as the grid.
+				// Grid values represent cost-to-close: for Buy positions, value = premium + pnl;
+				// for Sell positions, value = premium - pnl. Market mid is the signed net from legs'
+				// perspective (positive = debit/long value, negative = credit/short value).
+				// For Sell: market value = -marketMid (cost to close a short position).
+				// For Buy: market value = marketMid (value of a long position).
+				var marketValue = parentSide == Side.Sell ? -marketMid.Value : marketMid.Value;
+
 				var bsValue = values[closestRow, 0];
-				var adjustment = bsValue - marketMid.Value;
+				var adjustment = bsValue - marketValue;
 				if (adjustment != 0)
 				{
 					for (int pi = 0; pi < priceRows.Count; pi++)
@@ -602,10 +603,17 @@ public static class BreakEvenAnalyzer
 		if (ivLong.HasValue || ivShort.HasValue) return true;
 		if (optionQuotesBySymbol == null) return false;
 
-		// For time spreads we evaluate at the nearest expiry; only legs expiring after that retain time value.
-		return legs
-			.Where(l => l.parsed.ExpiryDate.Date > evaluationExpiry.Date)
-			.Any(l => GetLegIv(l.row.Side, l.symbol, optionQuotesBySymbol, ivLong, ivShort).HasValue);
+		var isTimeSpread = legs.Select(l => l.parsed.ExpiryDate.Date).Distinct().Count() > 1;
+		if (isTimeSpread)
+		{
+			// For time spreads, only legs expiring after the evaluation date retain time value.
+			return legs
+				.Where(l => l.parsed.ExpiryDate.Date > evaluationExpiry.Date)
+				.Any(l => GetLegIv(l.row.Side, l.symbol, optionQuotesBySymbol, ivLong, ivShort).HasValue);
+		}
+
+		// For same-expiry strategies (verticals, condors, etc.), any leg with IV is sufficient.
+		return legs.Any(l => GetLegIv(l.row.Side, l.symbol, optionQuotesBySymbol, ivLong, ivShort).HasValue);
 	}
 
 	private static string? TryFormatYahooQuote(string symbol, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol, decimal? ivOverride = null)
