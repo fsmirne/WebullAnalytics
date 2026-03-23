@@ -20,7 +20,8 @@ public static class ExcelExporter
 		var breakEvenSheet = package.Workbook.Worksheets.Add("Break-Even Analysis");
 
 		// Export transaction report
-		ExportTransactions(transactionSheet, reportRows, finalPnL, initialAmount);
+		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(positionRows, optionQuotesBySymbol);
+		ExportTransactions(transactionSheet, reportRows, finalPnL, initialAmount, unrealizedPnL);
 
 		// Export open positions
 		ExportPositions(positionsSheet, positionRows);
@@ -38,7 +39,7 @@ public static class ExcelExporter
 		Console.WriteLine($"Excel report exported to: {outputPath}");
 	}
 
-	private static void ExportTransactions(ExcelWorksheet sheet, List<ReportRow> rows, decimal finalPnL, decimal initialAmount)
+	private static void ExportTransactions(ExcelWorksheet sheet, List<ReportRow> rows, decimal finalPnL, decimal initialAmount, decimal? unrealizedPnL)
 	{
 		// Headers
 		sheet.Cells[1, 1].Value = "Date";
@@ -100,9 +101,9 @@ public static class ExcelExporter
 		sheet.Cells[row, 8].Style.Font.Color.SetColor(System.Drawing.Color.Red);
 		sheet.Cells[row, 8].Style.Font.Bold = true;
 
-		// Add final P&L
+		// Add final P&L (realized)
 		row++;
-		sheet.Cells[row, 10].Value = "Final P&L:";
+		sheet.Cells[row, 10].Value = "Final P&L (realized):";
 		sheet.Cells[row, 10].Style.Font.Bold = true;
 		sheet.Cells[row, 11].Value = (double)finalPnL;
 		sheet.Cells[row, 11].Style.Numberformat.Format = "#,##0.00";
@@ -113,10 +114,37 @@ public static class ExcelExporter
 		sheet.Cells[row, 12].Style.Font.Bold = true;
 		ColorCodePnL(sheet.Cells[row, 12], finalPnL);
 
-		// Add final amount
-		sheet.Cells[row, 13].Value = (double)(initialAmount + finalPnL);
-		sheet.Cells[row, 13].Style.Numberformat.Format = "$#,##0.00";
+		// Add final amount (realized)
+		sheet.Cells[row, 13].Value = "Realized:";
 		sheet.Cells[row, 13].Style.Font.Bold = true;
+		sheet.Cells[row, 14].Value = (double)(initialAmount + finalPnL);
+		sheet.Cells[row, 14].Style.Numberformat.Format = "$#,##0.00";
+		sheet.Cells[row, 14].Style.Font.Bold = true;
+
+		// Add unrealized P&L and amount if quotes are available
+		if (unrealizedPnL.HasValue)
+		{
+			var totalPnL = finalPnL + unrealizedPnL.Value;
+
+			row++;
+			sheet.Cells[row, 10].Value = "Final P&L (unrealized):";
+			sheet.Cells[row, 10].Style.Font.Bold = true;
+			sheet.Cells[row, 11].Value = (double)totalPnL;
+			sheet.Cells[row, 11].Style.Numberformat.Format = "#,##0.00";
+			sheet.Cells[row, 11].Style.Font.Bold = true;
+			ColorCodePnL(sheet.Cells[row, 11], totalPnL);
+			sheet.Cells[row, 12].Value = initialAmount == 0 ? 0d : (double)(totalPnL / initialAmount);
+			sheet.Cells[row, 12].Style.Numberformat.Format = "0.00%";
+			sheet.Cells[row, 12].Style.Font.Bold = true;
+			ColorCodePnL(sheet.Cells[row, 12], totalPnL);
+
+			sheet.Cells[row, 13].Value = "Unrealized:";
+			sheet.Cells[row, 13].Style.Font.Bold = true;
+			sheet.Cells[row, 14].Value = (double)(initialAmount + totalPnL);
+			sheet.Cells[row, 14].Style.Numberformat.Format = "$#,##0.00";
+			sheet.Cells[row, 14].Style.Font.Bold = true;
+			ColorCodePnL(sheet.Cells[row, 14], totalPnL);
+		}
 
 		// Auto-fit columns
 		sheet.Cells.AutoFitColumns();

@@ -53,7 +53,8 @@ public static partial class TextFileExporter
 			console.WriteLine("No open positions.");
 		}
 
-		TableBuilder.RenderSummary(console, rows, running, initialAmount);
+		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(positions, optionQuotesBySymbol);
+		TableBuilder.RenderSummary(console, rows, running, initialAmount, unrealizedPnL);
 
 		// Get the rendered output and strip ANSI codes
 		var output = stringWriter.ToString();
