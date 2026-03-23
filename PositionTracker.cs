@@ -636,8 +636,9 @@ public static class PositionTracker
 		// Applied entirely to the long leg; short leg stays at its average cost.
 		var longLegAdjustment = netInitial - netAdjusted;
 
-		// Determine side from net price: positive = debit (Buy), negative = credit (Sell)
-		var side = netInitial >= 0 ? Side.Buy : Side.Sell;
+		// Determine side from adjusted net price: positive = debit (Buy), negative = credit (Sell).
+		// Uses adjusted rather than initial because rolls can flip a debit into a credit.
+		var side = netAdjusted >= 0 ? Side.Buy : Side.Sell;
 		var longestExpiry = group.Max(g => g.row.Expiry) ?? DateTime.MinValue;
 
 		// Strategy summary row
@@ -669,9 +670,40 @@ public static class PositionTracker
 	/// </summary>
 	private static (decimal totalDebit, int accountedQty) CalculateTotalNetDebit(List<Trade> allTrades, string root, List<decimal> strikes, string callPut)
 	{
-		// Build OCC suffixes to match all options at these root/strikes/callPut across any expiry
-		var occSuffixes = strikes.Select(s => $"{callPut}{(long)(s * 1000m):D8}").ToHashSet();
 		var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{root}";
+
+		// Expand strikes transitively by following strategy parent relationships, but only when the
+		// sibling strike was OPENED by the strategy trade (had zero prior position at that specific MatchKey).
+		// This captures intermediate strikes from rolls (e.g., rolling short $6525 to $6535 means $6525
+		// cash flows must be included) while excluding unrelated positions that were coincidentally traded
+		// in the same strategy order (e.g., closing an independent $25 position while opening $24).
+		var expandedStrikes = new HashSet<decimal>(strikes);
+		var optionBuySellTrades = allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell).ToList();
+		bool changed = true;
+		while (changed)
+		{
+			changed = false;
+			var suffixes = expandedStrikes.Select(s => $"{callPut}{(long)(s * 1000m):D8}").ToHashSet();
+			foreach (var trade in optionBuySellTrades.Where(t => t.ParentStrategySeq.HasValue && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && suffixes.Any(suffix => t.MatchKey.EndsWith(suffix, StringComparison.Ordinal))))
+				foreach (var sibling in allTrades.Where(t => t.ParentStrategySeq == trade.ParentStrategySeq && t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal)))
+				{
+					if (!MatchKeys.TryGetOptionSymbol(sibling.MatchKey, out var sym)) continue;
+					var parsed = ParsingHelpers.ParseOptionSymbol(sym);
+					if (parsed == null || parsed.CallPut != callPut || expandedStrikes.Contains(parsed.Strike)) continue;
+
+					// Only expand if this sibling's specific contract had no prior position — the strategy trade opened it
+					// as a roll intermediate, rather than closing a pre-existing independent position.
+					var priorQty = optionBuySellTrades.Where(t => t.MatchKey == sibling.MatchKey && t.Timestamp < sibling.Timestamp).Sum(t => t.Side == Side.Buy ? t.Qty : -t.Qty);
+					if (priorQty == 0)
+					{
+						expandedStrikes.Add(parsed.Strike);
+						changed = true;
+					}
+				}
+		}
+
+		// Build OCC suffixes to match all options at these root/strikes/callPut across any expiry
+		var occSuffixes = expandedStrikes.Select(s => $"{callPut}{(long)(s * 1000m):D8}").ToHashSet();
 		var today = DateTime.Today;
 
 		// Collect all option leg trades at these strikes, plus synthetic expiry events
