@@ -294,21 +294,69 @@ public static class TableBuilder
 	/// <summary>
 	/// Renders the summary footer (total fees, final P&amp;L, final amount) to the given console.
 	/// </summary>
-	public static void RenderSummary(IAnsiConsole console, List<ReportRow> rows, decimal running, decimal initialAmount)
+	public static void RenderSummary(IAnsiConsole console, List<ReportRow> rows, decimal running, decimal initialAmount, decimal? unrealizedPnL = null)
 	{
 		var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
 		console.Write("Total fees: ");
 		console.Write(Formatters.FormatMoney(totalFees, decimal.MaxValue));
 		console.WriteLine();
 
-		console.Write("Final realized P&L: ");
+		console.Write("Final P&L (realized): ");
 		console.Write(Formatters.FormatPnL(running));
 		console.Write(Formatters.FormatPnLPercent(running, initialAmount));
 		console.WriteLine();
 
-		console.Write("Final amount: ");
+		console.Write("Final amount (realized): ");
 		console.Write(Formatters.FormatMoney(initialAmount + running, initialAmount));
 		console.WriteLine();
+
+		if (unrealizedPnL.HasValue)
+		{
+			var totalPnL = running + unrealizedPnL.Value;
+
+			console.Write("Final P&L (unrealized): ");
+			console.Write(Formatters.FormatPnL(totalPnL));
+			console.Write(Formatters.FormatPnLPercent(totalPnL, initialAmount));
+			console.WriteLine();
+
+			console.Write("Final amount (unrealized): ");
+			console.Write(Formatters.FormatMoney(initialAmount + totalPnL, initialAmount));
+			console.WriteLine();
+		}
+	}
+
+	/// <summary>
+	/// Computes unrealized P&L for all open positions using current market mid prices from Yahoo quotes.
+	/// Returns null if no quotes are available.
+	/// </summary>
+	public static decimal? ComputeUnrealizedPnL(List<PositionRow> positions, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol)
+	{
+		if (optionQuotesBySymbol == null || optionQuotesBySymbol.Count == 0 || positions.Count == 0)
+			return null;
+
+		decimal total = 0;
+		bool anyQuoted = false;
+
+		foreach (var pos in positions)
+		{
+			// Skip strategy parents — their value is captured via legs
+			if (pos.Asset == Asset.OptionStrategy)
+				continue;
+
+			if (pos.MatchKey == null || !MatchKeys.TryGetOptionSymbol(pos.MatchKey, out var symbol))
+				continue;
+
+			if (!optionQuotesBySymbol.TryGetValue(symbol, out var quote) || !quote.Bid.HasValue || !quote.Ask.HasValue)
+				continue;
+
+			var mid = (quote.Bid.Value + quote.Ask.Value) / 2m;
+			var multiplier = pos.Asset == Asset.Stock ? Trade.StockMultiplier : Trade.OptionMultiplier;
+			var unrealized = pos.Side == Side.Buy ? (mid - pos.AvgPrice) * pos.Qty * multiplier : (pos.AvgPrice - mid) * pos.Qty * multiplier;
+			total += unrealized;
+			anyQuoted = true;
+		}
+
+		return anyQuoted ? total : null;
 	}
 
 	/// <summary>

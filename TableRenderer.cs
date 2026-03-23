@@ -34,7 +34,8 @@ public static class TableRenderer
 			console.WriteLine("No open positions.");
 		}
 
-		TableBuilder.RenderSummary(console, rows, running, initialAmount);
+		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(positions, optionQuotesBySymbol);
+		TableBuilder.RenderSummary(console, rows, running, initialAmount, unrealizedPnL);
 	}
 
 	/// <summary>
