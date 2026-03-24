@@ -729,6 +729,10 @@ public static class BreakEvenAnalyzer
 		for (var p = min; p <= max + step / 2; p += step)
 			prices.Add(Math.Round(p, 2));
 
+		// Always include the upper boundary so the sign change at the edge is captured
+		// even when max doesn't align with the step grid starting from min.
+		prices.Add(Math.Round(max, 2));
+
 		foreach (var p in notablePrices.Where(np => np >= 0))
 			prices.Add(Math.Round(p, 2));
 
