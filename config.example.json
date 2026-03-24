@@ -16,7 +16,9 @@
 		"yahoo": false,
 		"range": 2,
 		"display": "value",
-		"theoretical": false
+		"theoretical": false,
+		"notablePrices": null,
+		"tickers": null
 	},
 	"fetch": {
 		"config": "data/api-config.json",

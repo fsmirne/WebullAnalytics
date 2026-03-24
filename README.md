@@ -104,6 +104,9 @@ WebullAnalytics report --iv-long 50 --iv-short 45 --range 4
 
 # Add custom notable prices to break-even reports (e.g., support/resistance levels)
 WebullAnalytics report --notable-prices GME:20/25/30
+
+# Show only specific tickers in the report
+WebullAnalytics report --tickers GME,SPY
 ```
 
 #### Report Options
@@ -116,8 +119,7 @@ Options:
   --config <path>           Path to the API config JSON file, used with --fetch (default: data/api-config.json)
   --since <date>            Include only trades on or after this date (YYYY-MM-DD format)
   --output <format>         Output format: 'console', 'excel', or 'text' (default: console)
-  --excel-path <path>       Path for Excel output file (default: WebullAnalytics_YYYYMMDD.xlsx)
-  --text-path <path>        Path for text output file (default: WebullAnalytics_YYYYMMDD.txt)
+  --output-path <path>      Path for output file, used with --output excel or text (default: WebullAnalytics_YYYYMMDD.xlsx/.txt)
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
   --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
   --iv-long <volatility>    Implied volatility for long legs (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
@@ -128,6 +130,7 @@ Options:
   --current-underlying-price <prices>  Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
   --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
   --notable-prices <prices> Additional prices to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
+  --tickers <list>          Show only these tickers in the report. Comma-separated (e.g., GME,SPY,AAPL)
   --help, -h                Show help message
 ```
 

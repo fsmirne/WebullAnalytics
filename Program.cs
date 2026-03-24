@@ -150,9 +150,15 @@ class ReportSettings : CommandSettings
 	[CommandOption("--notable-prices")]
 	public string? NotablePrices { get; set; }
 
+	[Description("Show only these tickers in the report. Comma-separated list (e.g., GME,SPY,AAPL)")]
+	[CommandOption("--tickers")]
+	public string? Tickers { get; set; }
+
 	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
 
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
+
+	public HashSet<string>? TickerFilter => Tickers != null ? new HashSet<string>(Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), StringComparer.OrdinalIgnoreCase) : null;
 
 	/// <summary>Applies config.json defaults for any option not explicitly passed on the CLI.</summary>
 	internal void ApplyConfig(Dictionary<string, JsonElement> cfg)
@@ -174,6 +180,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("current-underlying-price") && cfg.TryGetString("currentUnderlyingPrice", out var cup)) CurrentUnderlyingPrice = cup;
 		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
 		if (!Program.HasCliOption("notable-prices") && cfg.TryGetString("notablePrices", out var notablePrices)) NotablePrices = notablePrices;
+		if (!Program.HasCliOption("tickers") && cfg.TryGetString("tickers", out var tickers)) Tickers = tickers;
 	}
 
 	public override ValidationResult Validate()
@@ -401,6 +408,10 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			ReconcileParentPrices(trades);
 			ApplyOfficialPrices(trades, dataDir);
 		}
+		var tickerFilter = settings.TickerFilter;
+		if (tickerFilter != null)
+			trades.RemoveAll(t => { var ticker = MatchKeys.GetTicker(t.MatchKey); return ticker == null || !tickerFilter.Contains(ticker); });
+
 		var initialAmount = settings.InitialAmount;
 		var (rows, positions, running) = PositionTracker.ComputeReport(trades, settings.SinceDate, initialAmount, feeLookup);
 		var tradeIndex = PositionTracker.BuildTradeIndex(trades);
