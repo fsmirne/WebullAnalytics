@@ -715,6 +715,15 @@ public static class BreakEvenAnalyzer
 	{
 		ComputePriceRange(notablePrices, step, out var min, out var max);
 
+		// Extend range to capture zero crossings that fall beyond the initial bounds.
+		// If P&L at a boundary is positive, the curve hasn't reached its negative
+		// asymptote yet, so a breakeven likely lies just beyond.
+		const int maxExtensions = 50;
+		for (int i = 0; i < maxExtensions && Math.Round(pnlAt(max), 2) > 0; i++)
+			max += step;
+		for (int i = 0; i < maxExtensions && min > 0 && Math.Round(pnlAt(min), 2) > 0; i++)
+			min = Math.Max(0, min - step);
+
 		var prices = new SortedSet<decimal>();
 
 		for (var p = min; p <= max + step / 2; p += step)
@@ -724,9 +733,9 @@ public static class BreakEvenAnalyzer
 			prices.Add(Math.Round(p, 2));
 
 		return prices.Select(p =>
-		{ 
-			var pnl = Math.Round(pnlAt(p), 2); 
-			return new PricePnL(p, pnl, valueAt(p, pnl)); 
+		{
+			var pnl = Math.Round(pnlAt(p), 2);
+			return new PricePnL(p, pnl, valueAt(p, pnl));
 		}).ToList();
 	}
 
