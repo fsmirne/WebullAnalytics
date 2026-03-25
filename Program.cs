@@ -422,7 +422,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var ivShort = settings.ImpliedVolatilityShort.HasValue ? settings.ImpliedVolatilityShort.Value / 100m : (decimal?)null;
 		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
-		if (settings.UseYahoo)
+		if (settings.UseYahoo && positionRows.Count > 0)
 		{
 			try
 			{
