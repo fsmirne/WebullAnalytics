@@ -275,7 +275,8 @@ public static class TableBuilder
 					cells.Add(new Markup($"[bold yellow]{Markup.Escape(cellText)}[/]"));
 				else
 				{
-					var color = showPnL ? (cellValue >= 0 ? "green" : "red") : (grid.PnLs[pi, di] >= 0 ? "green" : "red");
+					var pnl = grid.PnLs[pi, di];
+					var color = pnl >= 0 ? "green" : "red";
 					cells.Add(new Markup($"[{color}]{Markup.Escape(cellText)}[/]"));
 				}
 			}

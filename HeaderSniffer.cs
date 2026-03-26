@@ -45,7 +45,7 @@ public static class HeaderSniffer
 
 			// Wait for the page to load
 			Console.WriteLine("Waiting for page to load...");
-			await Task.Delay(5000, cancellation);
+			await Task.Delay(2000, cancellation);
 
 			// Click the "unlock" link to open the PIN dialog
 			Console.WriteLine("Clicking unlock link...");
@@ -70,14 +70,25 @@ public static class HeaderSniffer
 			using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
 			cts.CancelAfter(TimeSpan.FromSeconds(30));
 
+			Dictionary<string, string> headers;
 			try
 			{
-				return await ReadUntilHeaders(ws, cts.Token);
+				headers = await ReadUntilHeaders(ws, cts.Token);
 			}
 			catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
 			{
 				throw new TimeoutException("Timed out waiting for a Webull API request. The unlock code may be incorrect, or the page did not trigger an API call.");
 			}
+
+			// Clear the page before closing the browser
+			try
+			{
+				await CdpSend(ws, ++cmdId, "Page.navigate", new { url = "about:blank" }, CancellationToken.None);
+				await Task.Delay(500);
+			}
+			catch { }
+
+			return headers;
 		}
 		finally
 		{

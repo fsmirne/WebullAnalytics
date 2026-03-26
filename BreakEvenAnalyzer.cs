@@ -263,7 +263,7 @@ public static class BreakEvenAnalyzer
 
 		// Find break-evens numerically if not already set analytically
 		if (breakEvens.Count == 0)
-			breakEvens = FindBreakEvensNumerically(ladder);
+			breakEvens = FindBreakEvensNumerically(ladder, pnlFunc);
 
 		// Insert numerically-found break-even prices into the ladder
 		foreach (var be in breakEvens)
@@ -421,8 +421,11 @@ public static class BreakEvenAnalyzer
 				var price = priceRows[pi];
 				var totalPnL = legs.Sum(l => LegPnLWithBs(price, l.parsed, l.symbol, l.row.Side, qty, GetPremium(l.row), evalDate, ivLong, ivShort, optionQuotesBySymbol));
 
-				pnls[pi, di] = Math.Round(totalPnL, 2);
-				values[pi, di] = parentSide == Side.Buy ? Math.Round(netPremium + totalPnL / (qty * 100m), 4) : Math.Round(netPremium - totalPnL / (qty * 100m), 4);
+				var value = parentSide == Side.Buy ? netPremium + totalPnL / (qty * 100m) : netPremium - totalPnL / (qty * 100m);
+				values[pi, di] = Math.Round(value, 4);
+				// Derive P&L from the display-rounded value (2dp) so color always matches the displayed number.
+				var displayValue = Math.Round(value, 2);
+				pnls[pi, di] = parentSide == Side.Buy ? Math.Round((displayValue - netPremium) * qty * 100m, 2) : Math.Round((netPremium - displayValue) * qty * 100m, 2);
 			}
 		}
 
@@ -458,7 +461,8 @@ public static class BreakEvenAnalyzer
 					for (int pi = 0; pi < priceRows.Count; pi++)
 					{
 						values[pi, 0] = Math.Round(values[pi, 0] - adjustment, 4);
-						pnls[pi, 0] = parentSide == Side.Buy ? Math.Round((values[pi, 0] - netPremium) * qty * 100, 2) : Math.Round((netPremium - values[pi, 0]) * qty * 100, 2);
+						var adjDisplayValue = Math.Round(values[pi, 0], 2);
+						pnls[pi, 0] = parentSide == Side.Buy ? Math.Round((adjDisplayValue - netPremium) * qty * 100, 2) : Math.Round((netPremium - adjDisplayValue) * qty * 100, 2);
 					}
 				}
 			}
@@ -553,8 +557,9 @@ public static class BreakEvenAnalyzer
 		low = Math.Max(0.01m, low);
 
 		var prices = new SortedSet<decimal>();
-		for (var p = low; p <= high + step / 2; p += step)
-			prices.Add(Math.Round(p, 2));
+		var numSteps = (int)Math.Round((high - low) / step);
+		for (int i = 0; i <= numSteps; i++)
+			prices.Add(Math.Round(low + i * step, 2));
 
 		foreach (var p in notablePrices)
 			prices.Add(Math.Round(p, 2));
@@ -784,7 +789,7 @@ public static class BreakEvenAnalyzer
 	/// <summary>
 	/// Finds all prices where P&L crosses zero using linear interpolation.
 	/// </summary>
-	private static List<decimal> FindBreakEvensNumerically(List<PricePnL> ladder)
+	private static List<decimal> FindBreakEvensNumerically(List<PricePnL> ladder, Func<decimal, decimal>? pnlFunc = null)
 	{
 		var results = new List<decimal>();
 
@@ -801,8 +806,13 @@ public static class BreakEvenAnalyzer
 
 			if ((curr.PnL > 0 && next.PnL < 0) || (curr.PnL < 0 && next.PnL > 0))
 			{
-				var fraction = Math.Abs(curr.PnL) / (Math.Abs(curr.PnL) + Math.Abs(next.PnL));
-				results.Add(Math.Round(curr.UnderlyingPrice + fraction * (next.UnderlyingPrice - curr.UnderlyingPrice), 2));
+				if (pnlFunc != null)
+					results.Add(BisectBreakEven(pnlFunc, curr.UnderlyingPrice, curr.PnL, next.UnderlyingPrice, next.PnL));
+				else
+				{
+					var fraction = Math.Abs(curr.PnL) / (Math.Abs(curr.PnL) + Math.Abs(next.PnL));
+					results.Add(Math.Round(curr.UnderlyingPrice + fraction * (next.UnderlyingPrice - curr.UnderlyingPrice), 2));
+				}
 			}
 		}
 
@@ -810,5 +820,26 @@ public static class BreakEvenAnalyzer
 			results.Add(ladder[^1].UnderlyingPrice);
 
 		return results;
+	}
+
+	/// <summary>
+	/// Refines a breakeven price using bisection between two points with opposite P&L signs.
+	/// </summary>
+	private static decimal BisectBreakEven(Func<decimal, decimal> pnlFunc, decimal lo, decimal loVal, decimal hi, decimal hiVal)
+	{
+		// Ensure lo is the negative side and hi is the positive side
+		if (loVal > 0) { (lo, hi) = (hi, lo); (loVal, hiVal) = (hiVal, loVal); }
+
+		for (int i = 0; i < 50; i++)
+		{
+			var mid = Math.Round((lo + hi) / 2, 4);
+			if (mid == lo || mid == hi) break;
+			var midVal = Math.Round(pnlFunc(mid), 2);
+			if (midVal == 0) { lo = hi = mid; break; }
+			if (midVal < 0) lo = mid;
+			else hi = mid;
+		}
+
+		return Math.Round((lo + hi) / 2, 2);
 	}
 }
