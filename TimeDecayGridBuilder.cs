@@ -145,7 +145,22 @@ internal static class TimeDecayGridBuilder
 		foreach (var p in notablePrices)
 			prices.Add(Math.Round(p, 2));
 
-		return prices.Reverse().ToList();
+		// Trim to exactly paddingRows beyond the outermost notable prices.
+		// The evenly-spaced grid may produce more points than intended due to
+		// rounding, causing asymmetric padding above vs below break-evens.
+		var sortedList = prices.ToList();
+		var lowestNotable = Math.Round(notablePrices[0], 2);
+		var highestNotable = Math.Round(notablePrices[^1], 2);
+		int firstNotableIdx = sortedList.IndexOf(lowestNotable);
+		int lastNotableIdx = sortedList.IndexOf(highestNotable);
+		if (firstNotableIdx >= 0 && lastNotableIdx >= 0)
+		{
+			int trimStart = Math.Max(0, firstNotableIdx - paddingRows);
+			int trimEnd = Math.Min(sortedList.Count - 1, lastNotableIdx + paddingRows);
+			sortedList = sortedList.GetRange(trimStart, trimEnd - trimStart + 1);
+		}
+		sortedList.Reverse();
+		return sortedList;
 	}
 
 	/// <summary>
