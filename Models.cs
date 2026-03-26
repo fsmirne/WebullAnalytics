@@ -68,6 +68,10 @@ public record Trade
 {
 	public const decimal OptionMultiplier = 100m;
 	public const decimal StockMultiplier = 1m;
+
+	/// <summary>Returns all trades that are legs of the given parent strategy.</summary>
+	public static List<Trade> GetLegs(IEnumerable<Trade> trades, int parentSeq) =>
+		trades.Where(t => t.ParentStrategySeq == parentSeq).ToList();
 }
 
 // CsvHelper doesn't reliably populate positional records (primary-ctor records) via ClassMap.
@@ -192,6 +196,19 @@ public record EarlyExerciseBoundary(decimal BoundaryNear, decimal BoundaryFar, i
 /// <param name="DaysToExpiry">null for stocks; negative if expired</param>
 /// <param name="Note">e.g., "Long leg (exp 15 May 2026) retains time value"</param>
 /// <param name="Legs">Individual leg descriptions for strategies</param>
+/// <summary>
+/// Bundles pricing/market parameters passed through the analysis and rendering pipeline.
+/// </summary>
+public record AnalysisOptions(
+	decimal? IvLong = null,
+	decimal? IvShort = null,
+	IReadOnlyDictionary<string, OptionContractQuote>? OptionQuotes = null,
+	IReadOnlyDictionary<string, decimal>? UnderlyingPrices = null,
+	IReadOnlyDictionary<string, decimal>? UnderlyingPriceOverrides = null,
+	bool Theoretical = false,
+	IReadOnlyDictionary<string, List<decimal>>? ExtraNotablePrices = null
+);
+
 public record BreakEvenResult(
 	string Title,
 	string Details,

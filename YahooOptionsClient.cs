@@ -20,6 +20,62 @@ public static class YahooOptionsClient
 
 	private static string ToYahooTicker(string root) => YahooTickerMap.TryGetValue(root, out var mapped) ? mapped : root;
 
+	/// <summary>
+	/// Fetches the 13-week T-bill yield (^IRX) from Yahoo Finance as a risk-free rate.
+	/// Returns the rate as a decimal (e.g., 0.043 for 4.3%), or null on failure.
+	/// </summary>
+	public static async Task<double?> FetchRiskFreeRateAsync(CancellationToken cancellationToken)
+	{
+		var handler = new HttpClientHandler
+		{
+			CookieContainer = new CookieContainer(),
+			AutomaticDecompression = DecompressionMethods.All,
+		};
+		using var client = new HttpClient(handler);
+		client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebullAnalytics/1.0");
+		client.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/plain, */*");
+		client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+		string? crumb = null;
+		var result = await FetchRiskFreeRateAsync(client, crumb, cancellationToken);
+		if (result == null)
+		{
+			crumb = await TryGetCrumbAsync(client, cancellationToken);
+			if (!string.IsNullOrWhiteSpace(crumb))
+				result = await FetchRiskFreeRateAsync(client, crumb, cancellationToken);
+		}
+		return result;
+	}
+
+	private static async Task<double?> FetchRiskFreeRateAsync(HttpClient client, string? crumb, CancellationToken cancellationToken)
+	{
+		try
+		{
+			var url = "https://query2.finance.yahoo.com/v8/finance/chart/%5EIRX?range=1d&interval=1d";
+			if (!string.IsNullOrWhiteSpace(crumb))
+				url += $"&crumb={Uri.EscapeDataString(crumb)}";
+			var request = new HttpRequestMessage(HttpMethod.Get, url);
+			request.Headers.Referrer = new Uri("https://finance.yahoo.com/quote/%5EIRX/");
+			using var response = await client.SendAsync(request, cancellationToken);
+			if (!response.IsSuccessStatusCode) return null;
+			var json = await response.Content.ReadAsStringAsync(cancellationToken);
+			using var doc = JsonDocument.Parse(json);
+			if (doc.RootElement.TryGetProperty("chart", out var chart)
+				&& chart.TryGetProperty("result", out var chartResult)
+				&& chartResult.ValueKind == JsonValueKind.Array && chartResult.GetArrayLength() > 0)
+			{
+				var meta = chartResult[0].GetProperty("meta");
+				var price = GetDecimal(meta, "regularMarketPrice");
+				if (price.HasValue && price.Value > 0)
+					return (double)(price.Value / 100m); // ^IRX quotes in percentage points
+			}
+		}
+		catch (Exception ex)
+		{
+			if (ex is OperationCanceledException) throw;
+		}
+		return null;
+	}
+
 	public static async Task<(IReadOnlyDictionary<string, OptionContractQuote> OptionQuotes, IReadOnlyDictionary<string, decimal> UnderlyingPrices)> FetchOptionQuotesAsync(IEnumerable<PositionRow> positionRows, CancellationToken cancellationToken)
 	{
 		var wantedSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

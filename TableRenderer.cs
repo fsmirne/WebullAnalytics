@@ -9,7 +9,7 @@ public static class TableRenderer
 {
 	private const string LegPrefix = "  └─ ";
 
-	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount = 0m, bool simplified = false, decimal? ivLong = null, decimal? ivShort = null, decimal range = 2, string displayMode = "pnl", IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null, IReadOnlyDictionary<string, decimal>? underlyingPrices = null, IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null, bool theoretical = false, IReadOnlyDictionary<string, List<decimal>>? extraNotablePrices = null)
+	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl")
 	{
 		var console = AnsiConsole.Console;
 
@@ -22,7 +22,7 @@ public static class TableRenderer
 			console.WriteLine();
 
 			var maxGridColumns = ComputeMaxGridColumns(displayMode);
-			var breakEvens = BreakEvenAnalyzer.Analyze(positions, ivLong, ivShort, range, maxGridColumns, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, theoretical, extraNotablePrices);
+			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns);
 			foreach (var result in breakEvens)
 			{
 				console.Write(TableBuilder.BuildBreakEvenPanel(result, displayMode: displayMode));
@@ -34,7 +34,7 @@ public static class TableRenderer
 			console.WriteLine("No open positions.");
 		}
 
-		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(positions, optionQuotesBySymbol);
+		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(positions, opts.OptionQuotes);
 		TableBuilder.RenderSummary(console, rows, running, initialAmount, unrealizedPnL);
 	}
 
