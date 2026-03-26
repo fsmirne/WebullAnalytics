@@ -483,6 +483,9 @@ $RECYCLE.BIN/
 
 # claude code
 .claude
+.claude-flow
+.mcp.json
+CLAUDE.md
 
 # app config (contains user defaults)
 config.json
