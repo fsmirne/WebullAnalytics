@@ -5,7 +5,7 @@ namespace WebullAnalytics;
 public record CostStep(DateTime Timestamp, string Instrument, Side Side, int TradeQty, decimal Price, int RunningQty, decimal RunningAvg);
 public record StrategyCredit(string Instrument, int Qty, decimal LotPrice, decimal ParentPrice);
 public record NetDebitTrade(DateTime Timestamp, string Instrument, Side Side, int Qty, decimal Price, decimal CashImpact);
-public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, decimal InitPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime);
+public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, decimal InitPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime, string? OptionKind = null);
 
 /// <summary>
 /// Builds per-position breakdowns showing how each adjusted price was calculated.
@@ -121,7 +121,7 @@ internal static class AdjustmentReportBuilder
         if (netDebitTrades.Count <= 2 && summaryRow.AdjustedAvgPrice == (summaryRow.InitialAvgPrice ?? summaryRow.AvgPrice)) return null;
 
         var initPrice = summaryRow.InitialAvgPrice ?? summaryRow.AvgPrice;
-        return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, netDebitTrades, totalNetDebit, lastFlatTime);
+        return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, netDebitTrades, totalNetDebit, lastFlatTime, summaryRow.OptionKind);
     }
 
     private static (List<NetDebitTrade> trades, decimal totalNetDebit, DateTime? lastFlatTime) ReplayNetDebitCalculation(List<Trade> allTrades, string root, List<decimal> strikes, string callPut)
