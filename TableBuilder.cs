@@ -379,13 +379,13 @@ public static class TableBuilder
 				var diff = netDebit - initDebit;
 				var diffText = Math.Abs(diff).ToString("N2", CultureInfo.InvariantCulture);
 				var diffSign = diff >= 0 ? "+" : "-";
-				var diffFormatted = $"Difference: {diffSign}${diffText}";
+				var diffAmount = $"{diffSign}${diffText}";
 				if (ascii)
-					items.Add(new Text(diffFormatted));
+					items.Add(new Text($"Difference: {diffAmount}"));
 				else
 				{
 					var diffColor = diff <= 0 ? "green" : "red";
-					items.Add(new Markup($"[{diffColor}]{Markup.Escape(diffFormatted)}[/]"));
+					items.Add(new Markup($"Difference: [{diffColor}]{Markup.Escape(diffAmount)}[/]"));
 				}
 			}
 
