@@ -401,7 +401,7 @@ public static class TableBuilder
 			items.Add(new Text($"Avg: ${initText} (no adjustment)"));
 		}
 
-		var sideText = b.PositionSide == Side.Buy ? "Long" : "Short";
+		var sideText = b.OptionKind ?? (b.PositionSide == Side.Buy ? "Long" : "Short");
 		var title = $"{b.Instrument} ({sideText} {b.Qty}x)";
 		var panel = new Panel(new Rows(items)) { Header = new PanelHeader(title), Expand = true };
 		if (panelBorder != null) panel.Border = panelBorder;
