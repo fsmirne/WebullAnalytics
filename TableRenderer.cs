@@ -9,7 +9,7 @@ public static class TableRenderer
 {
 	private const string LegPrefix = "  └─ ";
 
-	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl")
+	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null)
 	{
 		var console = AnsiConsole.Console;
 
@@ -20,6 +20,15 @@ public static class TableRenderer
 		{
 			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, simplified: simplified));
 			console.WriteLine();
+
+			if (adjustmentBreakdowns != null && adjustmentBreakdowns.Count > 0)
+			{
+				foreach (var b in adjustmentBreakdowns)
+				{
+					console.Write(TableBuilder.BuildAdjustmentPanel(b));
+					console.WriteLine();
+				}
+			}
 
 			var maxGridColumns = ComputeMaxGridColumns(displayMode);
 			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns);

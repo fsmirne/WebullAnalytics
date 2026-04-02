@@ -292,6 +292,122 @@ public static class TableBuilder
 		return value > 0 ? $"+${value.ToString("N2", CultureInfo.InvariantCulture)}" : $"-${Math.Abs(value).ToString("N2", CultureInfo.InvariantCulture)}";
 	}
 
+	public static Panel BuildAdjustmentPanel(PriceBreakdown b, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false)
+	{
+		var items = new List<IRenderable>();
+		var sep = ascii ? "|" : "│";
+
+		if (b.CostSteps != null && b.CostSteps.Count > 0)
+		{
+			var table = new Table();
+			if (tableBorder != null) table.Border = tableBorder;
+			table.AddColumn(new TableColumn("Date").LeftAligned());
+			table.AddColumn(new TableColumn("Side").LeftAligned());
+			table.AddColumn(new TableColumn("Qty").RightAligned());
+			table.AddColumn(new TableColumn("Price").RightAligned());
+			table.AddColumn(new TableColumn("Position").RightAligned());
+			table.AddColumn(new TableColumn("Avg").RightAligned());
+
+			foreach (var step in b.CostSteps)
+			{
+				table.AddRow(step.Timestamp.ToString("yyyy-MM-dd HH:mm"), step.Side.ToString(), step.TradeQty.ToString(), Formatters.FormatPrice(step.Price, b.Asset), step.RunningQty.ToString(), Formatters.FormatPrice(step.RunningAvg, b.Asset));
+			}
+			items.Add(table);
+		}
+
+		if (b.Credits != null && b.Credits.Count > 0)
+		{
+			items.Add(new Text(""));
+			items.Add(ascii ? new Text("Strategy adjustments:") : new Markup("[bold]Strategy adjustments:[/]"));
+			foreach (var c in b.Credits)
+			{
+				var credit = (c.LotPrice - c.ParentPrice) * c.Qty;
+				var lotText = Formatters.FormatPrice(c.LotPrice, b.Asset);
+				var parentText = Formatters.FormatPrice(c.ParentPrice, b.Asset);
+				var creditText = credit.ToString("N2", CultureInfo.InvariantCulture);
+				items.Add(new Text($"  {c.Instrument}: (${lotText} - ${parentText}) x {c.Qty} = ${creditText}"));
+			}
+		}
+
+		if (b.NetDebitTrades != null && b.NetDebitTrades.Count > 0)
+		{
+			if (b.LastFlatTime.HasValue)
+				items.Add(ascii ? new Text($"Trades since {b.LastFlatTime.Value:yyyy-MM-dd} (last flat):") : new Markup($"Trades since [bold]{b.LastFlatTime.Value:yyyy-MM-dd}[/] (last flat):"));
+			else
+				items.Add(new Text("All trades:"));
+
+			items.Add(new Text(""));
+
+			var table = new Table();
+			if (tableBorder != null) table.Border = tableBorder;
+			table.AddColumn(new TableColumn("Date").LeftAligned());
+			table.AddColumn(new TableColumn("Instrument").LeftAligned());
+			table.AddColumn(new TableColumn("Side").LeftAligned());
+			table.AddColumn(new TableColumn("Qty").RightAligned());
+			table.AddColumn(new TableColumn("Price").RightAligned());
+			table.AddColumn(new TableColumn("Cash").RightAligned());
+
+			foreach (var t in b.NetDebitTrades)
+			{
+				var cashText = t.CashImpact >= 0 ? $"+${t.CashImpact.ToString("N2", CultureInfo.InvariantCulture)}" : $"-${Math.Abs(t.CashImpact).ToString("N2", CultureInfo.InvariantCulture)}";
+				IRenderable cashCell = ascii ? new Text(cashText) : new Markup(t.CashImpact >= 0 ? $"[green]{Markup.Escape(cashText)}[/]" : $"[red]{Markup.Escape(cashText)}[/]");
+				table.AddRow(new Text(t.Timestamp.ToString("yyyy-MM-dd HH:mm")), new Text(t.Instrument), new Text(t.Side.ToString()), new Text(t.Qty.ToString()), new Text(Formatters.FormatPrice(t.Price, Asset.Option)), cashCell);
+			}
+			items.Add(table);
+		}
+
+		// Summary line
+		items.Add(new Text(""));
+		var initText = Formatters.FormatPrice(b.InitPrice, b.Asset);
+
+		if (b.AdjPrice.HasValue && b.AdjPrice.Value != b.InitPrice)
+		{
+			var adjText = Formatters.FormatPrice(b.AdjPrice.Value, b.Asset);
+
+			if (b.TotalNetDebit.HasValue)
+			{
+				var initDebit = (b.PositionSide == Side.Buy ? 1m : -1m) * b.InitPrice * b.Qty * 100m;
+				var initDebitLabel = initDebit >= 0 ? "Init Net Debit" : "Init Net Credit";
+				var initDebitText = Math.Abs(initDebit).ToString("N2", CultureInfo.InvariantCulture);
+				items.Add(new Text($"{initDebitLabel}: ${initDebitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${initText}/contract"));
+
+				var netDebit = b.TotalNetDebit.Value;
+				var adjLabel = netDebit >= 0 ? "Adj Net Debit" : "Adj Net Credit";
+				var debitText = Math.Abs(netDebit).ToString("N2", CultureInfo.InvariantCulture);
+				items.Add(new Text($"{adjLabel}: ${debitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${adjText}/contract"));
+
+				var diff = netDebit - initDebit;
+				var diffText = Math.Abs(diff).ToString("N2", CultureInfo.InvariantCulture);
+				var diffSign = diff >= 0 ? "+" : "-";
+				var diffFormatted = $"Difference: {diffSign}${diffText}";
+				if (ascii)
+					items.Add(new Text(diffFormatted));
+				else
+				{
+					var diffColor = diff <= 0 ? "green" : "red";
+					items.Add(new Markup($"[{diffColor}]{Markup.Escape(diffFormatted)}[/]"));
+				}
+			}
+
+			if (b.Credits != null && b.Credits.Count > 0)
+			{
+				var totalAdj = b.Credits.Sum(c => (c.LotPrice - c.ParentPrice) * c.Qty);
+				var adjAmount = totalAdj.ToString("N2", CultureInfo.InvariantCulture);
+				items.Add(new Text($"Adj = ${initText} - ${adjAmount} {(ascii ? "/" : "÷")} {b.Qty} = ${adjText}"));
+			}
+		}
+		else
+		{
+			items.Add(new Text($"Avg: ${initText} (no adjustment)"));
+		}
+
+		var sideText = b.PositionSide == Side.Buy ? "Long" : "Short";
+		var title = $"{b.Instrument} ({sideText} {b.Qty}x)";
+		var panel = new Panel(new Rows(items)) { Header = new PanelHeader(title), Expand = true };
+		if (panelBorder != null) panel.Border = panelBorder;
+		return panel;
+	}
+
 	/// <summary>
 	/// Renders the summary footer (total fees, final P&amp;L, final amount) to the given console.
 	/// </summary>
