@@ -290,6 +290,8 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var opts = new AnalysisOptions(ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraNotablePrices);
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
+		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions);
+
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
 			case "excel":
@@ -297,12 +299,12 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				break;
 
 			case "text":
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, opts, settings.Range, displayMode);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, opts, settings.Range, displayMode);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns);
 				break;
 		}
 

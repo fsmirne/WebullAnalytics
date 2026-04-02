@@ -10,7 +10,7 @@ public static partial class TextFileExporter
 	[GeneratedRegex(@"\x1B\[[0-9;]*[a-zA-Z]")]
 	private static partial Regex AnsiEscapeRegex();
 
-	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl")
+	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, string outputPath, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null)
 	{
 		var stringWriter = new StringWriter();
 
@@ -32,6 +32,15 @@ public static partial class TextFileExporter
 		{
 			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, TableBorder.Ascii, simplified));
 			console.WriteLine();
+
+			if (adjustmentBreakdowns != null && adjustmentBreakdowns.Count > 0)
+			{
+				foreach (var b in adjustmentBreakdowns)
+				{
+					console.Write(TableBuilder.BuildAdjustmentPanel(b, Spectre.Console.BoxBorder.Ascii, TableBorder.Ascii, ascii: true));
+					console.WriteLine();
+				}
+			}
 
 			var maxGridColumns = TableBuilder.ComputeMaxGridColumns(200, displayMode);
 			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns);
