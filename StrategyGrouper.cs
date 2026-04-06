@@ -73,13 +73,54 @@ internal static class StrategyGrouper
 					j--;
 				}
 
-		// Convert hashsets to position groups
+		// Convert hashsets to position groups — restrict qty to lots matching the group's parentSeqs
 		var positionLookup = workingPositions.Where(p => p.trade?.Asset == Asset.Option).ToDictionary(p => p.matchKey);
+		var allocatedParentSeqs = new Dictionary<string, HashSet<int>>();
+
 		foreach (var keySet in strategyGroups)
 		{
-			var group = keySet.Select(k => positionLookup[k]).ToList();
+			var groupParentSeqs = parentToKeys.Where(kvp => kvp.Value.Count >= 2 && kvp.Value.Overlaps(keySet)).Select(kvp => kvp.Key).ToHashSet();
+
+			var group = new List<(string matchKey, PositionRow row, Trade? trade)>();
+			foreach (var k in keySet)
+			{
+				var entry = positionLookup[k];
+				var lots = positions.GetValueOrDefault(k, []);
+				var matchingLots = lots.Where(l => l.ParentStrategySeq.HasValue && groupParentSeqs.Contains(l.ParentStrategySeq.Value)).ToList();
+
+				if (matchingLots.Count > 0 && matchingLots.Count < lots.Count)
+				{
+					var qty = matchingLots.Sum(l => l.Qty);
+					var avg = matchingLots.Sum(l => l.Price * l.Qty) / qty;
+					group.Add((k, entry.row with { Qty = qty, AvgPrice = avg }, entry.trade));
+				}
+				else
+				{
+					group.Add(entry);
+				}
+
+				if (!allocatedParentSeqs.TryGetValue(k, out var allocated))
+					allocatedParentSeqs[k] = allocated = [];
+				allocated.UnionWith(groupParentSeqs);
+			}
+
 			grouped.Add(group);
 			foreach (var k in keySet) processed.Add(k);
+		}
+
+		// Compute remainders for positions partially allocated to strategy groups
+		var remainderPositions = new List<(string matchKey, PositionRow row, Trade? trade)>();
+		foreach (var (key, usedSeqs) in allocatedParentSeqs)
+		{
+			var entry = positionLookup[key];
+			var lots = positions.GetValueOrDefault(key, []);
+			var remainingLots = lots.Where(l => !l.ParentStrategySeq.HasValue || !usedSeqs.Contains(l.ParentStrategySeq.Value)).ToList();
+			if (remainingLots.Count > 0)
+			{
+				var qty = remainingLots.Sum(l => l.Qty);
+				var avg = remainingLots.Sum(l => l.Price * l.Qty) / qty;
+				remainderPositions.Add((key, entry.row with { Qty = qty, AvgPrice = avg }, entry.trade));
+			}
 		}
 
 		// Recombine standalone splits with their strategy-linked counterparts
@@ -109,6 +150,7 @@ internal static class StrategyGrouper
 		// Fallback grouping: group ungrouped options that form calendars/diagonals/verticals
 		var ungroupedOptions = workingPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey) && !recombinedKeys.Contains(p.matchKey))
 			.Concat(allPositions.Where(p => recombinedKeys.Contains(p.matchKey)))
+			.Concat(remainderPositions)
 			.ToList();
 
 		var fallbackGrouped = new HashSet<string>();
@@ -144,21 +186,73 @@ internal static class StrategyGrouper
 
 	/// <summary>
 	/// Builds the final position rows, creating strategy summary rows for multi-leg positions.
+	/// Returns the rows and a dictionary of pre-computed timeline replays keyed by summary row index.
 	/// </summary>
-	internal static List<PositionRow> BuildFinalPositionRows(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, List<Trade> allTrades, Dictionary<string, List<Lot>> positions)
+	internal static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments) BuildFinalPositionRows(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, List<Trade> allTrades, Dictionary<string, List<Lot>> positions)
 	{
 		var tradeBySeq = allTrades.Where(t => t.Asset == Asset.OptionStrategy).ToDictionary(t => t.Seq);
-		var rows = new List<PositionRow>();
 
-		foreach (var group in grouped)
+		// Identify pure strategy groups (all lots from one parent, all parent legs present).
+		// Pure groups don't need the timeline replay — their adjusted price equals their initial price.
+		// Non-pure groups exclude pure siblings' parentStrategySeqs from the replay to avoid double-counting.
+		var pureParentSeqs = new HashSet<int>();
+		var isPure = new bool[grouped.Count];
+		for (int i = 0; i < grouped.Count; i++)
 		{
+			if (grouped[i].Count <= 1) continue;
+			var parentSeq = GetPureStrategyParentSeq(grouped[i], positions, allTrades);
+			if (parentSeq.HasValue)
+			{
+				isPure[i] = true;
+				pureParentSeqs.Add(parentSeq.Value);
+			}
+		}
+
+		var rows = new List<PositionRow>();
+		var adjustments = new Dictionary<int, StrategyAdjustment>();
+
+		for (int i = 0; i < grouped.Count; i++)
+		{
+			var group = grouped[i];
 			if (group.Count > 1)
-				rows.AddRange(BuildStrategyRows(group, allTrades));
+			{
+				var summaryIndex = rows.Count;
+				var (strategyRows, adjustment) = BuildStrategyRows(group, allTrades, isPure[i] ? null : pureParentSeqs);
+				rows.AddRange(strategyRows);
+				if (adjustment != null)
+					adjustments[summaryIndex] = adjustment;
+			}
 			else
 				rows.Add(AdjustForExpiredStrategyLegs(group[0], positions, allTrades, tradeBySeq));
 		}
 
-		return rows;
+		return (rows, adjustments);
+	}
+
+	/// <summary>
+	/// Returns the parentStrategySeq if the group is a "pure" strategy: all lots originate from
+	/// a single parent trade and all of that parent's legs are present in the group.
+	/// </summary>
+	private static int? GetPureStrategyParentSeq(List<(string matchKey, PositionRow row, Trade? trade)> group, Dictionary<string, List<Lot>> positions, List<Trade> allTrades)
+	{
+		var candidates = new HashSet<int>();
+		foreach (var leg in group)
+			foreach (var lot in positions.GetValueOrDefault(leg.matchKey, []))
+				if (lot.ParentStrategySeq.HasValue)
+					candidates.Add(lot.ParentStrategySeq.Value);
+
+		var groupKeys = group.Select(g => g.matchKey).ToHashSet();
+		foreach (var seq in candidates)
+		{
+			if (!group.All(leg => positions.GetValueOrDefault(leg.matchKey, []).Where(l => l.ParentStrategySeq == seq).Sum(l => l.Qty) >= leg.row.Qty))
+				continue;
+
+			var parentLegKeys = allTrades.Where(t => t.ParentStrategySeq == seq && t.Asset == Asset.Option).Select(t => t.MatchKey).ToHashSet();
+			if (parentLegKeys.IsSubsetOf(groupKeys))
+				return seq;
+		}
+
+		return null;
 	}
 
 	/// <summary>
@@ -194,8 +288,13 @@ internal static class StrategyGrouper
 
 	/// <summary>
 	/// Builds rows for a multi-leg strategy (calendar, vertical, diagonal, etc.).
+	/// Returns the position rows and, for non-pure strategies, the timeline replay data for the adjustment report.
 	/// </summary>
-	private static List<PositionRow> BuildStrategyRows(List<(string matchKey, PositionRow row, Trade? trade)> group, List<Trade> allTrades)
+	/// <param name="excludedParentSeqs">
+	/// Null = pure strategy (no replay needed, adj = init).
+	/// Non-null = exclude trades belonging to these parentStrategySeqs from the timeline replay.
+	/// </param>
+	private static (List<PositionRow> rows, StrategyAdjustment? adjustment) BuildStrategyRows(List<(string matchKey, PositionRow row, Trade? trade)> group, List<Trade> allTrades, HashSet<int>? excludedParentSeqs)
 	{
 		var rows = new List<PositionRow>();
 
@@ -204,7 +303,7 @@ internal static class StrategyGrouper
 		if (!parsedLegs.Any())
 		{
 			rows.AddRange(group.Select(g => g.row));
-			return rows;
+			return (rows, null);
 		}
 
 		var firstParsed = parsedLegs[0].parsed!;
@@ -217,10 +316,16 @@ internal static class StrategyGrouper
 
 		var netInitial = group.Sum(leg => leg.row.Side == Side.Buy ? leg.row.AvgPrice : -leg.row.AvgPrice);
 
+		// Pure strategies: adj = init, no replay needed.
+		// Non-pure strategies: replay the timeline to compute the adjusted price.
+		StrategyAdjustment? adjustment = null;
 		var netAdjusted = netInitial;
-		var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
-		var (totalNetDebit, _) = CalculateTotalNetDebit(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut);
-		netAdjusted = totalNetDebit / (qty * 100m);
+		if (excludedParentSeqs != null)
+		{
+			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
+			adjustment = ReplayTimeline(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut, excludedParentSeqs);
+			netAdjusted = adjustment.TotalNetDebit / (qty * 100m);
+		}
 
 		var longLegAdjustment = netInitial - netAdjusted;
 		var side = netAdjusted >= 0 ? Side.Buy : Side.Sell;
@@ -237,19 +342,23 @@ internal static class StrategyGrouper
 			rows.Add(leg.row with { IsStrategyLeg = true, InitialAvgPrice = initialPrice, AdjustedAvgPrice = adjustedPrice });
 		}
 
-		return rows;
+		return (rows, adjustment);
 	}
 
 	/// <summary>
-	/// Computes total net debit from individual leg trades for the current position at given root/strikes/type.
+	/// Replays the trade timeline for a set of strikes, computing the total net debit and producing
+	/// a trade-by-trade breakdown. Expands strikes transitively through strategy parent relationships
+	/// and finds the last point where all related positions were flat.
 	/// </summary>
-	private static (decimal totalDebit, int accountedQty) CalculateTotalNetDebit(List<Trade> allTrades, string root, List<decimal> strikes, string callPut)
+	private static StrategyAdjustment ReplayTimeline(List<Trade> allTrades, string root, List<decimal> strikes, string callPut, HashSet<int>? excludedParentSeqs = null)
 	{
 		var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{root}";
 
+		// Filter trades, excluding those belonging to other strategy groups
+		var optionBuySellTrades = allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && (excludedParentSeqs == null || excludedParentSeqs.Count == 0 || !t.ParentStrategySeq.HasValue || !excludedParentSeqs.Contains(t.ParentStrategySeq.Value))).ToList();
+
 		// Expand strikes transitively by following strategy parent relationships
 		var expandedStrikes = new HashSet<decimal>(strikes);
-		var optionBuySellTrades = allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell).ToList();
 		bool changed = true;
 		while (changed)
 		{
@@ -274,21 +383,19 @@ internal static class StrategyGrouper
 		var occSuffixes = expandedStrikes.Select(s => $"{callPut}{(long)(s * 1000m):D8}").ToHashSet();
 		var today = DateTime.Today;
 
-		var legEvents = allTrades
-			.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(suffix => t.MatchKey.EndsWith(suffix, StringComparison.Ordinal)))
-			.Select(t => (t.Timestamp, t.Seq, t.MatchKey, t.Side, t.Qty, t.Price, t.Multiplier, IsExpiry: false))
+		var legEvents = optionBuySellTrades
+			.Where(t => t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(suffix => t.MatchKey.EndsWith(suffix, StringComparison.Ordinal)))
+			.Select(t => (t.Timestamp, t.Seq, t.MatchKey, t.Side, t.Qty, t.Price, t.Multiplier, t.Instrument, IsExpiry: false))
 			.ToList();
 
-		var expiredContracts = legEvents.Select(e => e.MatchKey).Distinct()
-			.Select(mk => (matchKey: mk, parsed: MatchKeys.TryGetOptionSymbol(mk, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
-			.Where(x => x.parsed != null && x.parsed.ExpiryDate.Date < today)
-			.ToList();
-
+		// Add expiration events for expired contracts (needed to find flat time)
+		var expiredContracts = legEvents.Select(e => e.MatchKey).Distinct().Select(mk => (matchKey: mk, parsed: MatchKeys.TryGetOptionSymbol(mk, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null)).Where(x => x.parsed != null && x.parsed.ExpiryDate.Date < today).ToList();
 		foreach (var (matchKey, parsed) in expiredContracts)
-			legEvents.Add((parsed!.ExpiryDate.Date + PositionTracker.ExpirationTime, int.MaxValue, matchKey, Side.Expire, 0, 0m, 0m, IsExpiry: true));
+			legEvents.Add((parsed!.ExpiryDate.Date + PositionTracker.ExpirationTime, int.MaxValue, matchKey, Side.Expire, 0, 0m, 0m, Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike) + " " + ParsingHelpers.CallPutDisplayName(parsed.CallPut), IsExpiry: true));
 
 		legEvents.Sort((a, b) => { var cmp = a.Timestamp.CompareTo(b.Timestamp); return cmp != 0 ? cmp : a.Seq.CompareTo(b.Seq); });
 
+		// Walk events chronologically to find the last point where all positions were flat
 		var positions = new Dictionary<string, int>();
 		DateTime lastFlatTime = DateTime.MinValue;
 		int lastFlatSeq = int.MinValue;
@@ -315,10 +422,17 @@ internal static class StrategyGrouper
 			}
 		}
 
-		var totalDebit = legEvents
-			.Where(e => !e.IsExpiry && (e.Timestamp > lastFlatTime || (e.Timestamp == lastFlatTime && e.Seq > lastFlatSeq)))
-			.Sum(e => (e.Side == Side.Buy ? 1m : -1m) * e.Qty * e.Price * e.Multiplier);
+		// Sum cash flows and collect trade details since the last flat point
+		var trades = new List<NetDebitTrade>();
+		decimal totalDebit = 0m;
 
-		return (totalDebit, int.MaxValue);
+		foreach (var e in legEvents.Where(e => !e.IsExpiry && (e.Timestamp > lastFlatTime || (e.Timestamp == lastFlatTime && e.Seq > lastFlatSeq))))
+		{
+			var cashImpact = (e.Side == Side.Buy ? -1m : 1m) * e.Qty * e.Price * e.Multiplier;
+			totalDebit -= cashImpact;
+			trades.Add(new NetDebitTrade(e.Timestamp, e.Instrument, e.Side, e.Qty, e.Price, cashImpact));
+		}
+
+		return new StrategyAdjustment(trades, totalDebit, lastFlatTime == DateTime.MinValue ? null : lastFlatTime);
 	}
 }
