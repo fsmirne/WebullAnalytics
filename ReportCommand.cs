@@ -240,7 +240,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var initialAmount = settings.InitialAmount;
 		var (rows, positions, running) = PositionTracker.ComputeReport(trades, settings.SinceDate, initialAmount, feeLookup);
 		var tradeIndex = PositionTracker.BuildTradeIndex(trades);
-		var positionRows = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
+		var (positionRows, strategyAdjustments) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
 		var ivLong = settings.ImpliedVolatilityLong.HasValue ? settings.ImpliedVolatilityLong.Value / 100m : (decimal?)null;
@@ -290,7 +290,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var opts = new AnalysisOptions(ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraNotablePrices);
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
-		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions);
+		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments);
 
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{

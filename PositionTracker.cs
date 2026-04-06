@@ -252,7 +252,7 @@ public static class PositionTracker
 	}
 
 	/// <summary>Builds position rows for display, grouping options into strategies.</summary>
-	public static List<PositionRow> BuildPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades)
+	public static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments) BuildPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades)
 	{
 		var avgCosts = ComputeAverageCosts(allTrades);
 		var allPositions = BuildRawPositionRows(positions, tradeIndex, avgCosts);
