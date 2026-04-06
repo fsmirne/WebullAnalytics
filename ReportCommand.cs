@@ -32,6 +32,10 @@ class ReportSettings : CommandSettings
 	[CommandOption("--since")]
 	public string? Since { get; set; }
 
+	[Description("Include only trades on or before this date (YYYY-MM-DD format)")]
+	[CommandOption("--until")]
+	public string? Until { get; set; }
+
 	[Description("Output format: 'console', 'excel', or 'text'")]
 	[CommandOption("--output")]
 	[DefaultValue("console")]
@@ -95,6 +99,8 @@ class ReportSettings : CommandSettings
 
 	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
 
+	public DateTime UntilDate => Until != null ? DateTime.ParseExact(Until, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MaxValue;
+
 	public HashSet<string>? TickerFilter => Tickers != null ? new HashSet<string>(Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), StringComparer.OrdinalIgnoreCase) : null;
 
 	/// <summary>Applies config.json defaults for any option not explicitly passed on the CLI.</summary>
@@ -105,6 +111,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("fetch") && cfg.TryGetBool("fetch", out var fetch)) Fetch = fetch;
 		if (!Program.HasCliOption("config") && cfg.TryGetString("config", out var config)) Config = config;
 		if (!Program.HasCliOption("since") && cfg.TryGetString("since", out var since)) Since = since;
+		if (!Program.HasCliOption("until") && cfg.TryGetString("until", out var until)) Until = until;
 		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) OutputFormat = output;
 		if (!Program.HasCliOption("output-path") && cfg.TryGetString("outputPath", out var outputPath)) OutputPath = outputPath;
 		if (!Program.HasCliOption("initial-amount") && cfg.TryGetDecimal("initialAmount", out var initialAmount)) InitialAmount = initialAmount;
@@ -124,6 +131,12 @@ class ReportSettings : CommandSettings
 	{
 		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
 			return ValidationResult.Error("--since must be in YYYY-MM-DD format");
+
+		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+			return ValidationResult.Error("--until must be in YYYY-MM-DD format");
+
+		if (Since != null && Until != null && SinceDate > UntilDate)
+			return ValidationResult.Error("--since date must not be after --until date");
 
 		var source = Source.ToLowerInvariant();
 		if (source is not ("api" or "export"))
@@ -236,9 +249,13 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var tickerFilter = settings.TickerFilter;
 		if (tickerFilter != null)
 			trades.RemoveAll(t => { var ticker = MatchKeys.GetTicker(t.MatchKey); return ticker == null || !tickerFilter.Contains(ticker); });
+		if (settings.Since != null)
+			trades.RemoveAll(t => t.Timestamp.Date < settings.SinceDate.Date);
+		if (settings.Until != null)
+			trades.RemoveAll(t => t.Timestamp.Date > settings.UntilDate.Date);
 
 		var initialAmount = settings.InitialAmount;
-		var (rows, positions, running) = PositionTracker.ComputeReport(trades, settings.SinceDate, initialAmount, feeLookup);
+		var (rows, positions, running) = PositionTracker.ComputeReport(trades, initialAmount, feeLookup);
 		var tradeIndex = PositionTracker.BuildTradeIndex(trades);
 		var (positionRows, strategyAdjustments) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 

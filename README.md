@@ -84,6 +84,12 @@ WebullAnalytics report --source export
 # Filter trades since a specific date
 WebullAnalytics report --since 2026-01-01
 
+# Filter trades until a specific date
+WebullAnalytics report --until 2026-03-31
+
+# Filter trades within a date range
+WebullAnalytics report --since 2026-01-01 --until 2026-03-31
+
 # Export to Excel
 WebullAnalytics report --output excel
 
@@ -118,6 +124,7 @@ Options:
   --fetch                   Fetch orders from the Webull API before generating the report
   --config <path>           Path to the API config JSON file, used with --fetch (default: data/api-config.json)
   --since <date>            Include only trades on or after this date (YYYY-MM-DD format)
+  --until <date>            Include only trades on or before this date (YYYY-MM-DD format)
   --output <format>         Output format: 'console', 'excel', or 'text' (default: console)
   --output-path <path>      Path for output file, used with --output excel or text (default: WebullAnalytics_YYYYMMDD.xlsx/.txt)
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
@@ -376,7 +383,7 @@ This tool uses EPPlus configured for non-commercial use. For commercial use, you
 - Check that the `tickerIds` in your config cover all tickers you trade
 
 **Incorrect P&L calculations:**
-- If using `--since`, note that only trades on or after this date are included; earlier context is not considered
+- If using `--since` or `--until`, note that only trades within the specified date range are included; earlier or later context is not considered
 - Place Webull CSV exports in the same directory as the JSONL file for exact price matching
 
 **Excel export fails:**
