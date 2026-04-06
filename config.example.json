@@ -6,6 +6,7 @@
 		"fetch": false,
 		"config": "data/api-config.json",
 		"since": null,
+		"until": null,
 		"output": "console",
 		"outputPath": null,
 		"initialAmount": 0,
