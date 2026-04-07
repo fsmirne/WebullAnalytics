@@ -200,13 +200,12 @@ public record EarlyExerciseBoundary(decimal BoundaryNear, decimal BoundaryFar, i
 /// Bundles pricing/market parameters passed through the analysis and rendering pipeline.
 /// </summary>
 public record AnalysisOptions(
-	decimal? IvLong = null,
-	decimal? IvShort = null,
 	IReadOnlyDictionary<string, OptionContractQuote>? OptionQuotes = null,
 	IReadOnlyDictionary<string, decimal>? UnderlyingPrices = null,
 	IReadOnlyDictionary<string, decimal>? UnderlyingPriceOverrides = null,
 	bool Theoretical = false,
-	IReadOnlyDictionary<string, List<decimal>>? ExtraNotablePrices = null
+	IReadOnlyDictionary<string, List<decimal>>? ExtraNotablePrices = null,
+	IReadOnlyDictionary<string, decimal>? IvOverrides = null
 );
 
 public record BreakEvenResult(

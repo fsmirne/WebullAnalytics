@@ -85,7 +85,7 @@ public static class BreakEvenAnalyzer
 		var qty = row.Qty;
 
 		var title = $"{parsed.Root} {(isLong ? "Long" : "Short")} {ParsingHelpers.CallPutDisplayName(parsed.CallPut)} ${Formatters.FormatQty(strike)}";
-		var details = BuildDetailsString(row);
+		var details = $"{BuildDetailsString(row)} [{symbol}]";
 
 		decimal breakEven;
 		decimal? maxProfit, maxLoss;
@@ -135,8 +135,8 @@ public static class BreakEvenAnalyzer
 		}
 
 		List<string>? legsDisplay = null;
-		var legIvOverride = row.Side == Side.Buy ? opts.IvLong : opts.IvShort;
-		var yahooInfo = TryFormatYahooQuote(symbol, opts, legIvOverride);
+		var ivOverride = opts.IvOverrides != null && opts.IvOverrides.TryGetValue(symbol, out var ov) ? ov : (decimal?)null;
+		var yahooInfo = TryFormatYahooQuote(symbol, opts, ivOverride);
 		if (yahooInfo != null)
 			legsDisplay = [$"Market: {yahooInfo}"];
 
@@ -185,10 +185,10 @@ public static class BreakEvenAnalyzer
 			var longShort = l.row.Side == Side.Buy ? "Long" : "Short";
 			var cpDisplay = ParsingHelpers.CallPutDisplayName(l.parsed.CallPut);
 			var legPremium = OptionMath.GetPremium(l.row);
-			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
+			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)} [{l.symbol}]";
 
 			var legIv = OptionMath.GetLegIv(l.row.Side, l.symbol, opts);
-			var legIvOverride = l.row.Side == Side.Buy ? opts.IvLong : opts.IvShort;
+			var legIvOverride = opts.IvOverrides != null && opts.IvOverrides.TryGetValue(l.symbol, out var legOv) ? legOv : (decimal?)null;
 			var yahooInfo = TryFormatYahooQuote(l.symbol, opts, legIvOverride);
 			if (yahooInfo != null)
 				desc += $" | {yahooInfo}";
@@ -223,7 +223,7 @@ public static class BreakEvenAnalyzer
 		}
 		else if (isTimeSpread && !HasIvForRemainingTimeLegs(parsedLegs, nearestExpiry, opts))
 		{
-			note = "Break-even analysis requires implied volatility. Provide --iv-long/--iv-short or enable Yahoo option-chain lookup with --yahoo.";
+			note = "Break-even analysis requires implied volatility. Enable Yahoo option-chain lookup with --yahoo, or use the interactive IV override after the report renders.";
 			return new BreakEvenResult(title, details, qty, [], null, null, dte, [], note, legDescriptions, UnderlyingPrice: LookupUnderlyingPrice(root, opts), OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts));
 		}
 		else if (isTimeSpread)
@@ -295,7 +295,7 @@ public static class BreakEvenAnalyzer
 
 	private static bool HasIvForRemainingTimeLegs(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, DateTime evaluationExpiry, AnalysisOptions opts)
 	{
-		if (opts.IvLong.HasValue || opts.IvShort.HasValue) return true;
+		if (opts.IvOverrides != null && legs.Any(l => opts.IvOverrides.ContainsKey(l.symbol))) return true;
 		if (opts.OptionQuotes == null) return false;
 
 		var isTimeSpread = legs.Select(l => l.parsed.ExpiryDate.Date).Distinct().Count() > 1;

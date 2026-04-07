@@ -66,6 +66,6 @@ class Program
 		return null;
 	}
 
-	/// <summary>Returns true if the given CLI option name (e.g. "source", "iv-long") was explicitly passed on the command line.</summary>
+	/// <summary>Returns true if the given CLI option name (e.g. "source", "yahoo") was explicitly passed on the command line.</summary>
 	internal static bool HasCliOption(string optionName) => RawArgs.Any(a => a.Equals($"--{optionName}", StringComparison.OrdinalIgnoreCase));
 }
