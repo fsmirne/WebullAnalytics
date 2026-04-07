@@ -75,9 +75,6 @@ WebullAnalytics has two commands: `report` (generate a P&L report) and `fetch` (
 # Generate a report using default data/orders.jsonl
 WebullAnalytics report
 
-# Fetch fresh data from the API, then generate the report
-WebullAnalytics report --fetch
-
 # Use Webull CSV exports as the source of truth (fees from JSONL if available)
 WebullAnalytics report --source export
 
@@ -97,7 +94,7 @@ WebullAnalytics report --output excel
 WebullAnalytics report --initial-amount 10000
 
 # Combine options
-WebullAnalytics report --fetch --since 2026-01-01 --output excel --initial-amount 10000
+WebullAnalytics report --since 2026-01-01 --output excel --initial-amount 10000
 
 # Show time-decay grid with separate implied volatilities for long and short legs (enables 2D grid for options)
 WebullAnalytics report --iv-long 50 --iv-short 45
@@ -120,9 +117,6 @@ WebullAnalytics report --tickers GME,SPY
 ```
 Options:
   --source <source>         Data source: 'api' or 'export' (default: api)
-  --data-orders <path>      Path to the JSONL orders file (default: data/orders.jsonl)
-  --fetch                   Fetch orders from the Webull API before generating the report
-  --config <path>           Path to the API config JSON file, used with --fetch (default: data/api-config.json)
   --since <date>            Include only trades on or after this date (YYYY-MM-DD format)
   --until <date>            Include only trades on or before this date (YYYY-MM-DD format)
   --output <format>         Output format: 'console', 'excel', or 'text' (default: console)
@@ -144,21 +138,11 @@ Options:
 ### Fetch Command
 
 ```bash
-# Fetch order data using default paths
+# Fetch order data from the Webull API
 WebullAnalytics fetch
-
-# Custom config and output paths
-WebullAnalytics fetch --config my-config.json --output my-orders.jsonl
 ```
 
-#### Fetch Options
-
-```
-Options:
-  --config <path>   Path to the API config JSON file (default: data/api-config.json)
-  --output <path>   Output path for the JSONL orders file (default: data/orders.jsonl)
-  --help, -h        Show help message
-```
+Reads API credentials from `data/api-config.json` and writes orders to `data/orders.jsonl`.
 
 ## Data Sources
 
@@ -187,7 +171,7 @@ No configuration is needed. If the files exist, they're used; if not, the JSONL 
 
 ## API Configuration
 
-The `fetch` command and the `--fetch` flag on the report command require an API config file. This file contains your Webull session credentials and account information.
+The `fetch` command requires an API config file. This file contains your Webull session credentials and account information.
 
 ### Setup
 

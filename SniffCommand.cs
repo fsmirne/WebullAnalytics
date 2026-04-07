@@ -1,20 +1,14 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
-using System.ComponentModel;
 using System.Text.Json;
 
 namespace WebullAnalytics;
 
 class SniffSettings : CommandSettings
 {
-	[Description("Path to the API config JSON file")]
-	[CommandOption("--config")]
-	[DefaultValue("data/api-config.json")]
-	public string Config { get; set; } = "data/api-config.json";
-
 	public override ValidationResult Validate()
 	{
-		if (!File.Exists(Program.ResolvePath(Config))) return ValidationResult.Error($"Config file '{Config}' does not exist.");
+		if (!File.Exists(Program.ResolvePath(Program.ApiConfigPath))) return ValidationResult.Error($"Config file '{Program.ApiConfigPath}' does not exist.");
 		return ValidationResult.Success();
 	}
 }
@@ -23,7 +17,7 @@ class SniffCommand : AsyncCommand<SniffSettings>
 {
 	public override async Task<int> ExecuteAsync(CommandContext context, SniffSettings settings, CancellationToken cancellation)
 	{
-		var configPath = Program.ResolvePath(settings.Config);
+		var configPath = Program.ResolvePath(Program.ApiConfigPath);
 		var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
 		if (config == null)
 		{

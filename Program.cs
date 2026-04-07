@@ -15,6 +15,10 @@ class Program
 	/// </summary>
 	internal static readonly string BaseDir = Path.GetDirectoryName(Environment.ProcessPath ?? AppContext.BaseDirectory)!;
 
+	internal const string ApiConfigPath = "data/api-config.json";
+	internal const string OrdersPath = "data/orders.jsonl";
+	internal const string AppConfigPath = "data/config.json";
+
 	/// <summary>
 	/// Resolves a path relative to the executable's directory. Absolute paths are returned as-is.
 	/// </summary>
@@ -46,7 +50,7 @@ class Program
 	{
 		if (_appConfigLoaded) return _appConfigRoot;
 		_appConfigLoaded = true;
-		var path = ResolvePath("data/config.json");
+		var path = ResolvePath(AppConfigPath);
 		if (!File.Exists(path)) return null;
 		try { _appConfigRoot = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(path)); }
 		catch (JsonException ex) { Console.WriteLine($"Warning: Failed to parse config.json: {ex.Message}"); }

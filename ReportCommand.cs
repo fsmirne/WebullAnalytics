@@ -13,21 +13,6 @@ class ReportSettings : CommandSettings
 	[DefaultValue("api")]
 	public string Source { get; set; } = "api";
 
-	[Description("Path to the JSONL orders file")]
-	[CommandOption("--data-orders")]
-	[DefaultValue("data/orders.jsonl")]
-	public string DataOrders { get; set; } = "data/orders.jsonl";
-
-	[Description("Fetch orders from the Webull API before generating the report")]
-	[CommandOption("--fetch")]
-	[DefaultValue(false)]
-	public bool Fetch { get; set; }
-
-	[Description("Path to the API config JSON file (used with --fetch)")]
-	[CommandOption("--config")]
-	[DefaultValue("data/api-config.json")]
-	public string Config { get; set; } = "data/api-config.json";
-
 	[Description("Include only trades on or after this date (YYYY-MM-DD format)")]
 	[CommandOption("--since")]
 	public string? Since { get; set; }
@@ -107,9 +92,6 @@ class ReportSettings : CommandSettings
 	internal void ApplyConfig(Dictionary<string, JsonElement> cfg)
 	{
 		if (!Program.HasCliOption("source") && cfg.TryGetString("source", out var source)) Source = source;
-		if (!Program.HasCliOption("data-orders") && cfg.TryGetString("dataOrders", out var dataOrders)) DataOrders = dataOrders;
-		if (!Program.HasCliOption("fetch") && cfg.TryGetBool("fetch", out var fetch)) Fetch = fetch;
-		if (!Program.HasCliOption("config") && cfg.TryGetString("config", out var config)) Config = config;
 		if (!Program.HasCliOption("since") && cfg.TryGetString("since", out var since)) Since = since;
 		if (!Program.HasCliOption("until") && cfg.TryGetString("until", out var until)) Until = until;
 		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) OutputFormat = output;
@@ -141,12 +123,6 @@ class ReportSettings : CommandSettings
 		var source = Source.ToLowerInvariant();
 		if (source is not ("api" or "export"))
 			return ValidationResult.Error("--source must be 'api' or 'export'");
-
-		if (Fetch && source == "export")
-			return ValidationResult.Error("--fetch cannot be used with --source export");
-
-		if (Fetch && !File.Exists(Program.ResolvePath(Config)))
-			return ValidationResult.Error($"--fetch requires a config file. '{Config}' does not exist.");
 
 		var format = OutputFormat.ToLowerInvariant();
 		if (format is not ("console" or "excel" or "text"))
@@ -208,18 +184,8 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var rootConfig = Program.LoadAppConfigRoot();
 		var autoExpandTerminal = rootConfig != null && rootConfig.TryGetBool("autoExpandTerminal", out var ae) && ae;
 
-		var ordersPath = Program.ResolvePath(settings.DataOrders);
+		var ordersPath = Program.ResolvePath(Program.OrdersPath);
 		var dataDir = Path.GetDirectoryName(ordersPath) ?? ".";
-
-		if (settings.Fetch)
-		{
-			var configPath = Program.ResolvePath(settings.Config);
-			var config = FetchCommand.LoadApiConfig(configPath);
-			if (config == null) return 1;
-
-			Console.WriteLine($"Fetching orders for {config.TickerIds.Length} ticker(s)...");
-			await ApiClient.FetchOrdersToJsonl(config, ordersPath);
-		}
 
 		List<Trade> trades;
 		Dictionary<(DateTime, Side, int), decimal>? feeLookup = null;
