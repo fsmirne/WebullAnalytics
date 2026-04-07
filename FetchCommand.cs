@@ -1,32 +1,14 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
-using System.ComponentModel;
 using System.Text.Json;
 
 namespace WebullAnalytics;
 
 class FetchSettings : CommandSettings
 {
-	[Description("Path to the API config JSON file")]
-	[CommandOption("--config")]
-	[DefaultValue("data/api-config.json")]
-	public string Config { get; set; } = "data/api-config.json";
-
-	[Description("Output path for the JSONL orders file")]
-	[CommandOption("--output")]
-	[DefaultValue("data/orders.jsonl")]
-	public string Output { get; set; } = "data/orders.jsonl";
-
-	/// <summary>Applies config.json defaults for any option not explicitly passed on the CLI.</summary>
-	internal void ApplyConfig(Dictionary<string, JsonElement> cfg)
-	{
-		if (!Program.HasCliOption("config") && cfg.TryGetString("config", out var config)) Config = config;
-		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) Output = output;
-	}
-
 	public override ValidationResult Validate()
 	{
-		if (!File.Exists(Program.ResolvePath(Config))) return ValidationResult.Error($"Config file '{Config}' does not exist.");
+		if (!File.Exists(Program.ResolvePath(Program.ApiConfigPath))) return ValidationResult.Error($"Config file '{Program.ApiConfigPath}' does not exist.");
 		return ValidationResult.Success();
 	}
 }
@@ -35,11 +17,8 @@ class FetchCommand : AsyncCommand<FetchSettings>
 {
 	public override async Task<int> ExecuteAsync(CommandContext context, FetchSettings settings, CancellationToken cancellation)
 	{
-		var appConfig = Program.LoadAppConfig("fetch");
-		if (appConfig != null) settings.ApplyConfig(appConfig);
-
-		var configPath = Program.ResolvePath(settings.Config);
-		var outputPath = Program.ResolvePath(settings.Output);
+		var configPath = Program.ResolvePath(Program.ApiConfigPath);
+		var outputPath = Program.ResolvePath(Program.OrdersPath);
 
 		var config = LoadApiConfig(configPath);
 		if (config == null) return 1;
