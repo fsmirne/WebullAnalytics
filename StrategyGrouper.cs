@@ -15,36 +15,9 @@ internal static class StrategyGrouper
 		var grouped = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
 		var processed = new HashSet<string>();
 
-		// Split positions with mixed lots: some strategy-linked, some standalone.
-		var standaloneSplits = new List<(string matchKey, PositionRow row, Trade? trade)>();
-		var workingPositions = new List<(string matchKey, PositionRow row, Trade? trade)>();
-		foreach (var p in allPositions)
-		{
-			if (p.trade?.Asset != Asset.Option) { workingPositions.Add(p); continue; }
-
-			var lots = positions.GetValueOrDefault(p.matchKey, []);
-			var strategyLots = lots.Where(l => l.ParentStrategySeq.HasValue).ToList();
-			var standaloneLots = lots.Where(l => !l.ParentStrategySeq.HasValue).ToList();
-
-			if (strategyLots.Count > 0 && standaloneLots.Count > 0)
-			{
-				var strategyQty = strategyLots.Sum(l => l.Qty);
-				var strategyAvg = strategyLots.Sum(l => l.Price * l.Qty) / strategyQty;
-				workingPositions.Add((p.matchKey, p.row with { Qty = strategyQty, AvgPrice = strategyAvg }, p.trade));
-
-				var standaloneQty = standaloneLots.Sum(l => l.Qty);
-				var standaloneAvg = standaloneLots.Sum(l => l.Price * l.Qty) / standaloneQty;
-				standaloneSplits.Add((p.matchKey, p.row with { Qty = standaloneQty, AvgPrice = standaloneAvg }, p.trade));
-			}
-			else
-			{
-				workingPositions.Add(p);
-			}
-		}
-
 		// Build reverse index: parentSeq → set of option matchKeys whose lots reference it
 		var parentToKeys = new Dictionary<int, HashSet<string>>();
-		foreach (var p in workingPositions.Where(p => p.trade?.Asset == Asset.Option))
+		foreach (var p in allPositions.Where(p => p.trade?.Asset == Asset.Option))
 			foreach (var lot in positions.GetValueOrDefault(p.matchKey, []).Where(l => l.ParentStrategySeq.HasValue))
 			{
 				if (!parentToKeys.TryGetValue(lot.ParentStrategySeq!.Value, out var set))
@@ -73,8 +46,10 @@ internal static class StrategyGrouper
 					j--;
 				}
 
-		// Convert hashsets to position groups — restrict qty to lots matching the group's parentSeqs
-		var positionLookup = workingPositions.Where(p => p.trade?.Asset == Asset.Option).ToDictionary(p => p.matchKey);
+		// Convert hashsets to position groups — restrict qty to lots matching the group's parentSeqs.
+		// This correctly partitions lots when a matchKey's lots belong to different strategies
+		// (e.g., 100 lots in a diagonal via parentSeq B, 299 lots orphaned from an expired leg via parentSeq A).
+		var positionLookup = allPositions.Where(p => p.trade?.Asset == Asset.Option).ToDictionary(p => p.matchKey);
 		var allocatedParentSeqs = new Dictionary<string, HashSet<int>>();
 
 		foreach (var keySet in strategyGroups)
@@ -108,8 +83,8 @@ internal static class StrategyGrouper
 			foreach (var k in keySet) processed.Add(k);
 		}
 
-		// Compute remainders for positions partially allocated to strategy groups
-		var remainderPositions = new List<(string matchKey, PositionRow row, Trade? trade)>();
+		// Compute remainders: lots not allocated to any strategy group (orphaned parentSeqs, standalone lots).
+		var remaindersByKey = new Dictionary<string, (string matchKey, PositionRow row, Trade? trade)>();
 		foreach (var (key, usedSeqs) in allocatedParentSeqs)
 		{
 			var entry = positionLookup[key];
@@ -119,38 +94,32 @@ internal static class StrategyGrouper
 			{
 				var qty = remainingLots.Sum(l => l.Qty);
 				var avg = remainingLots.Sum(l => l.Price * l.Qty) / qty;
-				remainderPositions.Add((key, entry.row with { Qty = qty, AvgPrice = avg }, entry.trade));
+				remaindersByKey[key] = (key, entry.row with { Qty = qty, AvgPrice = avg }, entry.trade);
 			}
 		}
 
-		// Recombine standalone splits with their strategy-linked counterparts
-		var recombinedKeys = new HashSet<string>();
-		foreach (var split in standaloneSplits)
+		// Merge remainders into existing strategy groups when ALL legs have remainders.
+		// This handles lots entered via standalone trades (no ParentStrategySeq) or linked to
+		// expired legs — they belong with the strategy group rather than forming a separate one.
+		// When only SOME legs have remainders, merging would create unbalanced legs, so those
+		// remainders go to fallback grouping instead (e.g., 299 orphaned longs pair with 299 shorts).
+		foreach (var group in grouped)
 		{
-			if (!processed.Contains(split.matchKey))
+			if (!group.All(leg => remaindersByKey.ContainsKey(leg.matchKey))) continue;
+			for (int li = 0; li < group.Count; li++)
 			{
-				recombinedKeys.Add(split.matchKey);
-			}
-			else
-			{
-				var targetGroup = grouped.FirstOrDefault(g => g.Any(p => p.matchKey == split.matchKey));
-				if (targetGroup != null)
-				{
-					var legIndex = targetGroup.FindIndex(p => p.matchKey == split.matchKey);
-					var original = allPositions.First(p => p.matchKey == split.matchKey);
-					targetGroup[legIndex] = original;
-				}
-				else
-				{
-					grouped.Add(new List<(string, PositionRow, Trade?)> { split });
-				}
+				var leg = group[li];
+				var rem = remaindersByKey[leg.matchKey];
+				var combinedQty = leg.row.Qty + rem.row.Qty;
+				var combinedAvg = (leg.row.AvgPrice * leg.row.Qty + rem.row.AvgPrice * rem.row.Qty) / combinedQty;
+				group[li] = (leg.matchKey, leg.row with { Qty = combinedQty, AvgPrice = combinedAvg }, leg.trade);
+				remaindersByKey.Remove(leg.matchKey);
 			}
 		}
 
 		// Fallback grouping: group ungrouped options that form calendars/diagonals/verticals
-		var ungroupedOptions = workingPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey) && !recombinedKeys.Contains(p.matchKey))
-			.Concat(allPositions.Where(p => recombinedKeys.Contains(p.matchKey)))
-			.Concat(remainderPositions)
+		var ungroupedOptions = allPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey))
+			.Concat(remaindersByKey.Values)
 			.ToList();
 
 		var fallbackGrouped = new HashSet<string>();
@@ -172,7 +141,7 @@ internal static class StrategyGrouper
 		grouped.AddRange(ungroupedOptions.Where(p => !fallbackGrouped.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
 
 		// Add non-option positions
-		grouped.AddRange(workingPositions.Where(p => p.trade?.Asset != Asset.Option).Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		grouped.AddRange(allPositions.Where(p => p.trade?.Asset != Asset.Option).Select(p => new List<(string, PositionRow, Trade?)> { p }));
 
 		// Sort by asset type, then instrument
 		grouped.Sort((a, b) =>
