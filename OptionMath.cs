@@ -96,8 +96,8 @@ internal static class OptionMath
 
 	internal static decimal? GetLegIv(Side side, string symbol, AnalysisOptions opts)
 	{
-		var cliIv = side == Side.Buy ? opts.IvLong : opts.IvShort;
-		if (cliIv.HasValue) return cliIv.Value;
+		if (opts.IvOverrides != null && opts.IvOverrides.TryGetValue(symbol, out var perLegIv))
+			return perLegIv;
 		if (opts.OptionQuotes != null && opts.OptionQuotes.TryGetValue(symbol, out var quote) && quote.ImpliedVolatility.HasValue && quote.ImpliedVolatility.Value > 0)
 			return quote.ImpliedVolatility.Value;
 		return null;

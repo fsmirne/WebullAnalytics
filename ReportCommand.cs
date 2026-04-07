@@ -40,13 +40,9 @@ class ReportSettings : CommandSettings
 	[DefaultValue("detailed")]
 	public string View { get; set; } = "detailed";
 
-	[Description("Implied volatility for long legs (annual %, e.g., 50 for 50%)")]
-	[CommandOption("--iv-long")]
-	public decimal? ImpliedVolatilityLong { get; set; }
-
-	[Description("Implied volatility for short legs (annual %, e.g., 50 for 50%)")]
-	[CommandOption("--iv-short")]
-	public decimal? ImpliedVolatilityShort { get; set; }
+	[Description("Override implied volatility per option leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple legs.")]
+	[CommandOption("--iv")]
+	public string? IvOverrides { get; set; }
 
 	[Description("Fetch option chain data from Yahoo Finance for break-even analysis (bid/ask/IV/etc)")]
 	[CommandOption("--yahoo")]
@@ -98,8 +94,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("output-path") && cfg.TryGetString("outputPath", out var outputPath)) OutputPath = outputPath;
 		if (!Program.HasCliOption("initial-amount") && cfg.TryGetDecimal("initialAmount", out var initialAmount)) InitialAmount = initialAmount;
 		if (!Program.HasCliOption("view") && cfg.TryGetString("view", out var view)) View = view;
-		if (!Program.HasCliOption("iv-long") && cfg.TryGetDecimal("ivLong", out var ivLong)) ImpliedVolatilityLong = ivLong;
-		if (!Program.HasCliOption("iv-short") && cfg.TryGetDecimal("ivShort", out var ivShort)) ImpliedVolatilityShort = ivShort;
+		if (!Program.HasCliOption("iv") && cfg.TryGetString("iv", out var iv)) IvOverrides = iv;
 		if (!Program.HasCliOption("yahoo") && cfg.TryGetBool("yahoo", out var yahoo)) UseYahoo = yahoo;
 		if (!Program.HasCliOption("range") && cfg.TryGetDecimal("range", out var range)) Range = range;
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
@@ -226,8 +221,6 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var (positionRows, strategyAdjustments) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
-		var ivLong = settings.ImpliedVolatilityLong.HasValue ? settings.ImpliedVolatilityLong.Value / 100m : (decimal?)null;
-		var ivShort = settings.ImpliedVolatilityShort.HasValue ? settings.ImpliedVolatilityShort.Value / 100m : (decimal?)null;
 		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
 		if (settings.UseYahoo && positionRows.Count > 0)
@@ -270,7 +263,15 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				extraNotablePrices = parsed;
 		}
 
-		var opts = new AnalysisOptions(ivLong, ivShort, optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraNotablePrices);
+		IReadOnlyDictionary<string, decimal>? ivOverrides = null;
+		if (settings.IvOverrides != null)
+		{
+			var parsed = ParseIvOverrides(settings.IvOverrides);
+			if (parsed.Count > 0)
+				ivOverrides = parsed;
+		}
+
+		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraNotablePrices, ivOverrides);
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
 		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments);
@@ -304,6 +305,20 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				result[parts[0].Trim().ToUpperInvariant()] = price;
 			else
 				Console.WriteLine($"Warning: Ignoring invalid underlying price override '{pair}'. Expected format: TICKER:PRICE");
+		}
+		return result;
+	}
+
+	private static Dictionary<string, decimal> ParseIvOverrides(string input)
+	{
+		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		foreach (var pair in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			var parts = pair.Split(':', 2);
+			if (parts.Length == 2 && decimal.TryParse(parts[1].Trim(), NumberStyles.Number, CultureInfo.InvariantCulture, out var ivPct) && ivPct > 0)
+				result[parts[0].Trim().ToUpperInvariant()] = ivPct / 100m;
+			else
+				Console.WriteLine($"Warning: Ignoring invalid IV override '{pair}'. Expected format: SYMBOL:IV% (e.g., GME260213C00025000:50)");
 		}
 		return result;
 	}

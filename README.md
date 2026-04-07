@@ -67,7 +67,7 @@ The output will be in `bin\Release\net10.0\win-x64\publish\`.
 
 ### Commands
 
-WebullAnalytics has two commands: `report` (generate a P&L report) and `fetch` (download order data from the Webull API).
+WebullAnalytics has three commands: `report` (generate a P&L report), `fetch` (download order data from the Webull API), and `sniff` (automatically capture fresh API session headers).
 
 ### Report Command
 
@@ -96,14 +96,20 @@ WebullAnalytics report --initial-amount 10000
 # Combine options
 WebullAnalytics report --since 2026-01-01 --output excel --initial-amount 10000
 
-# Show time-decay grid with separate implied volatilities for long and short legs (enables 2D grid for options)
-WebullAnalytics report --iv-long 50 --iv-short 45
+# Fetch Yahoo Finance data for break-even analysis with time-decay grids
+WebullAnalytics report --yahoo
+
+# Override implied volatility for specific option legs (per OCC symbol)
+WebullAnalytics report --iv GME260213C00025000:50,GME260516C00025000:45
+
+# Combine Yahoo data with manual IV overrides (overrides take priority)
+WebullAnalytics report --yahoo --iv GME260213C00025000:60
 
 # Show P&L instead of contract value in the grid
-WebullAnalytics report --iv-long 50 --iv-short 45 --display pnl
+WebullAnalytics report --yahoo --display pnl
 
 # Increase grid granularity (more rows between strikes, default: 2)
-WebullAnalytics report --iv-long 50 --iv-short 45 --range 4
+WebullAnalytics report --yahoo --range 4
 
 # Add custom notable prices to break-even reports (e.g., support/resistance levels)
 WebullAnalytics report --notable-prices GME:20/25/30
@@ -123,8 +129,7 @@ Options:
   --output-path <path>      Path for output file, used with --output excel or text (default: WebullAnalytics_YYYYMMDD.xlsx/.txt)
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
   --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
-  --iv-long <volatility>    Implied volatility for long legs (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
-  --iv-short <volatility>   Implied volatility for short legs (annual %, e.g., 50 for 50%). Enables the time-decay grid for options.
+  --iv <overrides>          Override implied volatility per leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple.
   --yahoo                   Fetch option chain data from Yahoo Finance for break-even analysis (bid/ask/IV/etc)
   --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
@@ -143,6 +148,26 @@ WebullAnalytics fetch
 ```
 
 Reads API credentials from `data/api-config.json` and writes orders to `data/orders.jsonl`.
+
+### Sniff Command
+
+```bash
+# Automatically capture fresh API session headers
+WebullAnalytics sniff
+```
+
+Launches Microsoft Edge with remote debugging, navigates to Webull, enters your unlock PIN, and captures the API session headers from the network traffic. The captured headers are written directly into `data/api-config.json`, replacing the existing `headers` object.
+
+**Requirements:**
+- Microsoft Edge must be installed
+- Edge will be closed if running (prompts for confirmation)
+- The `pin` field must be set in `data/api-config.json`
+
+**Configuration** (in `config.json` under `"sniff"`):
+
+| Field | Description |
+|---|---|
+| `autoCloseEdge` | If `true`, closes Edge without prompting (default: `false`) |
 
 ## Data Sources
 
@@ -193,6 +218,7 @@ The `fetch` command requires an API config file. This file contains your Webull 
   "startDate": "2026-01-01",
   "endDate": "2026-12-31",
   "limit": 10000,
+  "pin": "YOUR_6_DIGIT_UNLOCK_CODE",
   "headers": {
     "access_token": "dc_us_tech1.xxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     "did": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
@@ -218,11 +244,12 @@ The `fetch` command requires an API config file. This file contains your Webull 
 | `startDate` | Start of the date range to fetch (YYYY-MM-DD) |
 | `endDate` | End of the date range to fetch (YYYY-MM-DD) |
 | `limit` | Maximum number of orders to return per ticker (default: 10000) |
-| `headers` | Authentication and session headers copied from your browser. These are session-specific and will expire. |
+| `pin` | Your 6-digit Webull unlock code. Required by the `sniff` command to automate header capture. Not used by `fetch`. |
+| `headers` | Authentication and session headers copied from your browser or captured by `sniff`. These are session-specific and will expire. |
 
 ### Session Tokens
 
-The `access_token`, `t_token`, `x-s`, and `x-sv` headers are session tokens that expire. When they expire, the API will return an error. To refresh them, log into Webull in your browser again and copy the updated values from the Network tab.
+The `access_token`, `t_token`, `x-s`, and `x-sv` headers are session tokens that expire. When they expire, the API will return an error. To refresh them, either run `WebullAnalytics sniff` to capture fresh headers automatically, or log into Webull in your browser and copy the updated values from the Network tab manually.
 
 ## Output Formats
 
@@ -286,7 +313,7 @@ This format is useful for sharing reports via email, archiving, or importing int
 
 ## Time-Decay Grid
 
-When `--iv-long` or `--iv-short` is provided, the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
+When implied volatility is available (via `--yahoo` or `--iv` overrides), the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
 
 - **Date columns**: Evenly-spaced dates from today through expiration, evaluated at market open (9:30 AM). The last two columns show expiration day at market open (with remaining intraday time value via Black-Scholes) and "At Exp" at market close (4:30 PM, intrinsic value only). The number of columns adapts to the terminal width — dates are skipped as needed so the grid never overflows horizontally.
 - **Price rows**: Step size is derived from the position's strike spacing (or strike-to-break-even distance for single-strike positions like calendars), so the grid adapts to any stock price. The `--range` parameter controls granularity — it sets how many rows fit per strike gap (default: 2). Break-even prices (marked with `*`) and strike prices are always included, with 2 padding rows beyond the outermost notable price.
@@ -294,7 +321,7 @@ When `--iv-long` or `--iv-short` is provided, the break-even panel for each opti
 - **Cell colors**: Green for profit, red for loss.
 - **Calendar/diagonal spreads**: The grid ends at the short leg's expiration. The long leg's remaining time value is reflected via Black-Scholes pricing at each date, including the "At Exp" column.
 
-Without `--iv-long` and `--iv-short`, the existing 1D price ladder (Price | Value | P&L at expiration) is shown instead.
+Without implied volatility data, the existing 1D price ladder (Price | Value | P&L at expiration) is shown instead.
 
 ## Position Tracking Details
 
@@ -358,7 +385,7 @@ This tool uses EPPlus configured for non-commercial use. For commercial use, you
 
 **API fetch fails:**
 - Verify your `data/api-config.json` has valid session tokens
-- Session tokens expire; log into Webull in your browser and copy fresh values from the Network tab
+- Session tokens expire; run `WebullAnalytics sniff` to capture fresh headers, or log into Webull in your browser and copy fresh values from the Network tab
 - The `x-s` header may be request-specific; try copying it from a recent request
 
 **No trades found:**
