@@ -289,11 +289,30 @@ internal static class StrategyGrouper
 		// Non-pure strategies: replay the timeline to compute the adjusted price.
 		StrategyAdjustment? adjustment = null;
 		var netAdjusted = netInitial;
+		var strategyInitial = netInitial;
 		if (excludedParentSeqs != null)
 		{
 			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
 			adjustment = ReplayTimeline(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut, excludedParentSeqs);
 			netAdjusted = adjustment.TotalNetDebit / (qty * 100m);
+
+			// Derive Init from the first batch of trades after the last flat point.
+			// This preserves the original entry price as a fixed reference, even after
+			// adding more contracts at different prices.
+			if (adjustment.Trades.Count > 0)
+			{
+				var firstTs = adjustment.Trades[0].Timestamp;
+				var firstBatchDebit = 0m;
+				var firstBatchQty = 0;
+				foreach (var t in adjustment.Trades)
+				{
+					if (t.Timestamp != firstTs) break;
+					firstBatchDebit -= t.CashImpact;
+					firstBatchQty = Math.Max(firstBatchQty, t.Qty);
+				}
+				if (firstBatchQty > 0)
+					strategyInitial = firstBatchDebit / (firstBatchQty * 100m);
+			}
 		}
 
 		var longLegAdjustment = netInitial - netAdjusted;
@@ -301,7 +320,7 @@ internal static class StrategyGrouper
 		var longestExpiry = group.Max(g => g.row.Expiry) ?? DateTime.MinValue;
 
 		var displayPrice = side == Side.Sell ? -netAdjusted : netAdjusted;
-		var displayInitial = side == Side.Sell ? -netInitial : netInitial;
+		var displayInitial = side == Side.Sell ? -strategyInitial : strategyInitial;
 		rows.Add(new PositionRow(Instrument: $"{firstParsed.Root} {Formatters.FormatOptionDate(longestExpiry)}", Asset: Asset.OptionStrategy, OptionKind: strategyKind, Side: side, Qty: qty, AvgPrice: displayPrice, Expiry: longestExpiry, IsStrategyLeg: false, InitialAvgPrice: displayInitial, AdjustedAvgPrice: displayPrice));
 
 		foreach (var leg in group.OrderByDescending(g => g.row.Expiry).ThenByDescending(g => parsedLegs.FirstOrDefault(p => p.leg.matchKey == g.matchKey).parsed?.Strike ?? 0))
