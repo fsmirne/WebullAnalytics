@@ -323,6 +323,34 @@ When implied volatility is available (via `--yahoo` or `--iv` overrides), the br
 
 Without implied volatility data, the existing 1D price ladder (Price | Value | P&L at expiration) is shown instead.
 
+## Volatility Analysis
+
+When using the Webull data source (`--webull` or default when `api-config.json` exists), the break-even leg descriptions include volatility metrics for each option contract:
+
+```
+└─ ... | IV 32.3% | HV 43.0% | IV5 40.0%
+```
+
+| Metric | Description |
+|--------|-------------|
+| **IV** | Current implied volatility — the market's expectation of future movement priced into the option |
+| **HV** | Historical (realized) volatility — how much the underlying has actually been moving |
+| **IV5** | 5-day implied volatility — short-term IV trend |
+
+### Pricing Signal
+
+The IV value is color-coded based on the IV/HV ratio (volatility risk premium):
+
+| IV Value Color | Condition | Meaning |
+|----------------|-----------|---------|
+| Green | IV/HV < 0.90 | Options are priced below realized movement — favors buying |
+| Red | IV/HV > 1.10 | Options are priced above realized movement — favors selling |
+| White | 0.90 ≤ IV/HV ≤ 1.10 | Options are fairly priced relative to realized movement |
+
+The IV5 metric provides additional context: if IV5 is rising toward HV, a cheap signal may be closing; if IV5 is falling away from HV, a rich signal may be strengthening.
+
+These metrics are sourced from the Webull option chain API and are not available when using Yahoo Finance (`--yahoo`).
+
 ## Position Tracking Details
 
 ### FIFO Lot Accounting

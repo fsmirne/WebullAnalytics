@@ -84,8 +84,8 @@ public static class BreakEvenAnalyzer
 		var strike = parsed.Strike;
 		var qty = row.Qty;
 
-		var title = $"{parsed.Root} {(isLong ? "Long" : "Short")} {ParsingHelpers.CallPutDisplayName(parsed.CallPut)} ${Formatters.FormatQty(strike)}";
-		var details = $"{BuildDetailsString(row)} [{symbol}]";
+		var title = $"{parsed.Root} {(isLong ? "Long" : "Short")} {ParsingHelpers.CallPutDisplayName(parsed.CallPut)} ${Formatters.FormatQty(strike)} [{symbol}]";
+		var details = BuildDetailsString(row);
 
 		decimal breakEven;
 		decimal? maxProfit, maxLoss;
@@ -177,6 +177,9 @@ public static class BreakEvenAnalyzer
 		else
 			title = $"{root} {strategyKind} {callPutDisplay} ${Formatters.FormatQty(strikes[0])}";
 
+		var legSymbols = string.Join(", ", parsedLegs.Select(l => l.symbol));
+		title += $" [{legSymbols}]";
+
 		var details = BuildDetailsString(parent);
 
 		// Build leg descriptions
@@ -185,7 +188,7 @@ public static class BreakEvenAnalyzer
 			var longShort = l.row.Side == Side.Buy ? "Long" : "Short";
 			var cpDisplay = ParsingHelpers.CallPutDisplayName(l.parsed.CallPut);
 			var legPremium = OptionMath.GetPremium(l.row);
-			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)} [{l.symbol}]";
+			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
 
 			var legIv = OptionMath.GetLegIv(l.row.Side, l.symbol, opts);
 			var legIvOverride = opts.IvOverrides != null && opts.IvOverrides.TryGetValue(l.symbol, out var legOv) ? legOv : (decimal?)null;
@@ -323,17 +326,34 @@ public static class BreakEvenAnalyzer
 		if (quote.Volume.HasValue) parts.Add($"Vol {quote.Volume.Value.ToString("N0", CultureInfo.InvariantCulture)}");
 		if (quote.OpenInterest.HasValue) parts.Add($"OI {quote.OpenInterest.Value.ToString("N0", CultureInfo.InvariantCulture)}");
 		var yahooIv = quote.ImpliedVolatility;
+		var volParts = new List<string>();
+		string? ivColor = null;
+		var effectiveIv = ivOverride ?? yahooIv;
+		if (effectiveIv.HasValue && quote.HistoricalVolatility.HasValue && quote.HistoricalVolatility.Value != 0)
+		{
+			var vrp = effectiveIv.Value / quote.HistoricalVolatility.Value;
+			if (vrp < 0.90m) ivColor = "cheap";
+			else if (vrp > 1.10m) ivColor = "rich";
+		}
 		if (yahooIv.HasValue && ivOverride.HasValue)
-			parts.Add($"IV ~{FormatIvPct(yahooIv.Value)}~ {FormatIvPct(ivOverride.Value)}");
+			volParts.Add($"~{FormatIvPct(yahooIv.Value)}~ {FormatIvVal(ivOverride.Value, ivColor)}");
 		else if (yahooIv.HasValue)
-			parts.Add($"IV {FormatIvPct(yahooIv.Value)}");
+			volParts.Add(FormatIvVal(yahooIv.Value, ivColor));
 		else if (ivOverride.HasValue)
-			parts.Add($"IV {FormatIvPct(ivOverride.Value)}");
+			volParts.Add(FormatIvVal(ivOverride.Value, ivColor));
+		if (quote.HistoricalVolatility.HasValue)
+			volParts.Add($"HV {FormatIvPct(quote.HistoricalVolatility.Value)}");
+		if (quote.ImpliedVolatility5Day.HasValue)
+			volParts.Add($"IV5 {FormatIvPct(quote.ImpliedVolatility5Day.Value)}");
+		if (volParts.Count > 0)
+			parts.Add($"IV {string.Join(" | ", volParts)}");
 
 		return parts.Count == 0 ? null : string.Join(" | ", parts);
 	}
 
 	private static string FormatIvPct(decimal iv) => $"{(iv * 100m).ToString("N1", CultureInfo.InvariantCulture)}%";
+
+	private static string FormatIvVal(decimal iv, string? color) => color != null ? $"{{{color}}}{FormatIvPct(iv)}{{/{color}}}" : FormatIvPct(iv);
 
 	private static decimal? LookupUnderlyingPrice(string root, AnalysisOptions opts)
 	{

@@ -220,7 +220,9 @@ public static class WebullOptionsClient
                         PercentChange: GetDecimal(contract, "changeRatio"),
                         Volume: GetLong(contract, "volume"),
                         OpenInterest: GetLong(contract, "openInterest"),
-                        ImpliedVolatility: GetDecimal(contract, "impVol")
+                        ImpliedVolatility: GetDecimal(contract, "impVol"),
+                        HistoricalVolatility: GetDecimal(contract, "hiv"),
+                        ImpliedVolatility5Day: GetDecimal(contract, "iv5")
                     ));
                 }
             }
@@ -267,7 +269,9 @@ public static class WebullOptionsClient
                     PercentChange: GetDecimal(contract, "changeRatio"),
                     Volume: GetLong(contract, "volume"),
                     OpenInterest: GetLong(contract, "openInterest"),
-                    ImpliedVolatility: GetDecimal(contract, "impVol")
+                    ImpliedVolatility: GetDecimal(contract, "impVol"),
+                    HistoricalVolatility: GetDecimal(contract, "hiv"),
+                    ImpliedVolatility5Day: GetDecimal(contract, "iv5")
                 ));
             }
         }

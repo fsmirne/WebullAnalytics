@@ -200,7 +200,7 @@ public static class TableBuilder
 		if (result.Note != null)
 			items.Add(new Markup($"[italic]{Markup.Escape(result.Note)}[/]"));
 
-		var panel = new Panel(new Rows(items)) { Header = new PanelHeader(result.Title), Expand = true };
+		var panel = new Panel(new Rows(items)) { Header = new PanelHeader(Markup.Escape(result.Title)), Expand = true };
 		if (panelBorder != null) panel.Border = panelBorder;
 		return panel;
 	}
@@ -234,7 +234,16 @@ public static class TableBuilder
 		}
 
 		if (!ascii)
+		{
 			markup = Regex.Replace(markup, @"~([^~]+)~", "[strikethrough dim]$1[/]");
+			markup = Regex.Replace(markup, @"\{cheap\}([^{]+)\{/cheap\}", "[green]$1[/]");
+			markup = Regex.Replace(markup, @"\{rich\}([^{]+)\{/rich\}", "[red]$1[/]");
+		}
+		else
+		{
+			markup = Regex.Replace(markup, @"\{cheap\}([^{]+)\{/cheap\}", "$1");
+			markup = Regex.Replace(markup, @"\{rich\}([^{]+)\{/rich\}", "$1");
+		}
 
 		return new Markup(markup);
 	}
