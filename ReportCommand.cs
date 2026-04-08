@@ -44,10 +44,9 @@ class ReportSettings : CommandSettings
 	[CommandOption("--iv")]
 	public string? IvOverrides { get; set; }
 
-	[Description("Fetch option chain data from Yahoo Finance for break-even analysis (bid/ask/IV/etc)")]
-	[CommandOption("--yahoo")]
-	[DefaultValue(false)]
-	public bool UseYahoo { get; set; }
+	[Description("Option chain data source for break-even analysis: 'yahoo' or 'webull' (requires sniffed headers via 'sniff' command)")]
+	[CommandOption("--api")]
+	public string? Api { get; set; }
 
 	[Description("Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)")]
 	[CommandOption("--range")]
@@ -95,7 +94,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("initial-amount") && cfg.TryGetDecimal("initialAmount", out var initialAmount)) InitialAmount = initialAmount;
 		if (!Program.HasCliOption("view") && cfg.TryGetString("view", out var view)) View = view;
 		if (!Program.HasCliOption("iv") && cfg.TryGetString("iv", out var iv)) IvOverrides = iv;
-		if (!Program.HasCliOption("yahoo") && cfg.TryGetBool("yahoo", out var yahoo)) UseYahoo = yahoo;
+		if (!Program.HasCliOption("api") && cfg.TryGetString("api", out var api)) Api = api;
 		if (!Program.HasCliOption("range") && cfg.TryGetDecimal("range", out var range)) Range = range;
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
 		if (!Program.HasCliOption("current-underlying-price") && cfg.TryGetString("currentUnderlyingPrice", out var cup)) CurrentUnderlyingPrice = cup;
@@ -133,6 +132,9 @@ class ReportSettings : CommandSettings
 		var display = DisplayMode.ToLowerInvariant();
 		if (display is not ("value" or "pnl"))
 			return ValidationResult.Error("--display must be 'value' or 'pnl'");
+
+		if (Api != null && Api.ToLowerInvariant() is not ("yahoo" or "webull"))
+			return ValidationResult.Error("--api must be 'yahoo' or 'webull'");
 
 		if (CurrentUnderlyingPrice != null)
 		{
@@ -223,27 +225,57 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
 		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
-		if (settings.UseYahoo && positionRows.Count > 0)
+		var apiSource = settings.Api?.ToLowerInvariant();
+		if (apiSource != null && positionRows.Count > 0)
 		{
 			try
 			{
-				Console.WriteLine("Yahoo Finance: fetching option chain data...");
 				var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
-				var yahooData = await YahooOptionsClient.FetchOptionQuotesAsync(positionRows, cancellation);
-				optionQuotesBySymbol = yahooData.OptionQuotes;
-				underlyingPrices = yahooData.UnderlyingPrices;
+
+				if (apiSource == "yahoo")
+				{
+					Console.WriteLine("Yahoo Finance: fetching option chain data...");
+					var yahooData = await YahooOptionsClient.FetchOptionQuotesAsync(positionRows, cancellation);
+					optionQuotesBySymbol = yahooData.OptionQuotes;
+					underlyingPrices = yahooData.UnderlyingPrices;
+					Console.WriteLine($"Yahoo Finance: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
+				}
+				else if (apiSource == "webull")
+				{
+					var configPath = Program.ResolvePath(Program.ApiConfigPath);
+					if (!File.Exists(configPath))
+					{
+						Console.WriteLine("Error: api-config.json not found. Run 'sniff' first to capture Webull headers.");
+					}
+					else
+					{
+						var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+						if (config == null || config.Headers.Count == 0)
+						{
+							Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' to capture them.");
+						}
+						else
+						{
+							Console.WriteLine("Webull: fetching option chain data...");
+							var webullData = await WebullOptionsClient.FetchOptionQuotesAsync(config, positionRows, cancellation);
+							optionQuotesBySymbol = webullData.OptionQuotes;
+							underlyingPrices = webullData.UnderlyingPrices;
+							Console.WriteLine($"Webull: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
+						}
+					}
+				}
+
 				var riskFreeRate = await riskFreeTask;
 				if (riskFreeRate.HasValue)
 				{
 					OptionMath.RiskFreeRate = riskFreeRate.Value;
-					Console.WriteLine($"Yahoo Finance: risk-free rate (13-week T-bill): {riskFreeRate.Value:P2}");
+					Console.WriteLine($"Risk-free rate (13-week T-bill): {riskFreeRate.Value:P2}");
 				}
-				Console.WriteLine($"Yahoo Finance: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
 			}
 			catch (Exception ex)
 			{
 				if (ex is OperationCanceledException) throw;
-				Console.WriteLine($"Warning: Failed to fetch Yahoo Finance option data: {ex.Message}");
+				Console.WriteLine($"Warning: Failed to fetch option data: {ex.Message}");
 			}
 		}
 

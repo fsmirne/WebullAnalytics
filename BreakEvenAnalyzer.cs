@@ -223,7 +223,7 @@ public static class BreakEvenAnalyzer
 		}
 		else if (isTimeSpread && !HasIvForRemainingTimeLegs(parsedLegs, nearestExpiry, opts))
 		{
-			note = "Break-even analysis requires implied volatility. Enable Yahoo option-chain lookup with --yahoo, or use the interactive IV override after the report renders.";
+			note = "Break-even analysis requires implied volatility. Enable option-chain lookup with --api yahoo (or --api webull), or use the interactive IV override after the report renders.";
 			return new BreakEvenResult(title, details, qty, [], null, null, dte, [], note, legDescriptions, UnderlyingPrice: LookupUnderlyingPrice(root, opts), OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts));
 		}
 		else if (isTimeSpread)

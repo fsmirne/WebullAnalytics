@@ -18,7 +18,7 @@ public static class ApiClient
 		["platform"] = "web",
 	};
 
-	public static async Task FetchOrdersToJsonl(ApiConfig config, string outputPath)
+	public static async Task FetchOrdersToJsonl(ApiConfig config, IReadOnlyCollection<long> tickerIds, string outputPath)
 	{
 		using var client = new HttpClient();
 		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
@@ -29,7 +29,7 @@ public static class ApiClient
 		{
 			await using var writer = new StreamWriter(tmpPath);
 
-			foreach (var tickerId in config.TickerIds)
+			foreach (var tickerId in tickerIds)
 			{
 				var url = $"{OrderListUrl}?tickerId={tickerId}&startDate={config.StartDate}&endDate={config.EndDate}&limit={config.Limit}&secAccountId={config.SecAccountId}";
 				var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -80,8 +80,8 @@ public sealed class ApiConfig
 	[JsonPropertyName("secAccountId")]
 	public string SecAccountId { get; set; } = "";
 
-	[JsonPropertyName("tickerIds")]
-	public long[] TickerIds { get; set; } = [];
+	[JsonPropertyName("tickers")]
+	public string[] Tickers { get; set; } = [];
 
 	[JsonPropertyName("startDate")]
 	public string StartDate { get; set; } = "";
