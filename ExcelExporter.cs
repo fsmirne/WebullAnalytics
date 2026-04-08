@@ -20,7 +20,7 @@ public static class ExcelExporter
 		var breakEvenSheet = package.Workbook.Worksheets.Add("Break-Even Analysis");
 
 		// Export transaction report
-		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(positionRows, opts.OptionQuotes);
+		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(positionRows, opts);
 		ExportTransactions(transactionSheet, reportRows, finalPnL, initialAmount, unrealizedPnL);
 
 		// Export open positions

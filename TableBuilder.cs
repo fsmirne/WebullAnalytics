@@ -443,16 +443,18 @@ public static class TableBuilder
 	}
 
 	/// <summary>
-	/// Computes unrealized P&L for all open positions using current market mid prices from Yahoo quotes.
-	/// Returns null if no quotes are available.
+	/// Computes unrealized P&L for all open positions. When theoretical mode is active and IV
+	/// is available, uses Black-Scholes pricing; otherwise uses market mid prices from Yahoo quotes.
+	/// Returns null if no pricing source is available.
 	/// </summary>
-	public static decimal? ComputeUnrealizedPnL(List<PositionRow> positions, IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol)
+	public static decimal? ComputeUnrealizedPnL(List<PositionRow> positions, AnalysisOptions opts)
 	{
-		if (optionQuotesBySymbol == null || optionQuotesBySymbol.Count == 0 || positions.Count == 0)
+		if (positions.Count == 0)
 			return null;
 
+		var now = DateTime.Now;
 		decimal total = 0;
-		bool anyQuoted = false;
+		bool anyPriced = false;
 
 		foreach (var pos in positions)
 		{
@@ -463,17 +465,36 @@ public static class TableBuilder
 			if (pos.MatchKey == null || !MatchKeys.TryGetOptionSymbol(pos.MatchKey, out var symbol))
 				continue;
 
-			if (!optionQuotesBySymbol.TryGetValue(symbol, out var quote) || !quote.Bid.HasValue || !quote.Ask.HasValue)
+			var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
+			if (parsed == null)
 				continue;
 
-			var mid = (quote.Bid.Value + quote.Ask.Value) / 2m;
+			decimal currentValue;
+			if (opts.Theoretical)
+			{
+				var iv = OptionMath.GetLegIv(pos.Side, symbol, opts);
+				var spot = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var op) ? op : opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var up) ? up : (decimal?)null;
+				if (!iv.HasValue || !spot.HasValue)
+					continue;
+				var expirationTime = parsed.ExpiryDate.Date + OptionMath.MarketClose;
+				var timeYears = Math.Max(0, (expirationTime - now).TotalDays / 365.0);
+				currentValue = OptionMath.BlackScholes(spot.Value, parsed.Strike, timeYears, OptionMath.RiskFreeRate, iv.Value, parsed.CallPut);
+			}
+			else
+			{
+				if (opts.OptionQuotes == null || !opts.OptionQuotes.TryGetValue(symbol, out var quote) || !quote.Bid.HasValue || !quote.Ask.HasValue)
+					continue;
+				currentValue = (quote.Bid.Value + quote.Ask.Value) / 2m;
+			}
+
+			var premium = pos.AdjustedAvgPrice ?? pos.AvgPrice;
 			var multiplier = pos.Asset == Asset.Stock ? Trade.StockMultiplier : Trade.OptionMultiplier;
-			var unrealized = pos.Side == Side.Buy ? (mid - pos.AvgPrice) * pos.Qty * multiplier : (pos.AvgPrice - mid) * pos.Qty * multiplier;
+			var unrealized = pos.Side == Side.Buy ? (currentValue - premium) * pos.Qty * multiplier : (premium - currentValue) * pos.Qty * multiplier;
 			total += unrealized;
-			anyQuoted = true;
+			anyPriced = true;
 		}
 
-		return anyQuoted ? total : null;
+		return anyPriced ? total : null;
 	}
 
 	/// <summary>
