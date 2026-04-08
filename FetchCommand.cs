@@ -23,8 +23,16 @@ class FetchCommand : AsyncCommand<FetchSettings>
 		var config = LoadApiConfig(configPath);
 		if (config == null) return 1;
 
-		Console.WriteLine($"Fetching orders for {config.TickerIds.Length} ticker(s)...");
-		await ApiClient.FetchOrdersToJsonl(config, outputPath);
+		Console.WriteLine($"Resolving {config.Tickers.Length} ticker symbol(s) to Webull IDs...");
+		var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(config.Tickers, cancellation);
+		if (resolved.Count == 0)
+		{
+			Console.WriteLine("Error: Could not resolve any ticker symbols.");
+			return 1;
+		}
+
+		Console.WriteLine($"Fetching orders for {resolved.Count} ticker(s)...");
+		await ApiClient.FetchOrdersToJsonl(config, resolved.Values.ToArray(), outputPath);
 		Console.WriteLine($"Written to {outputPath}");
 		return 0;
 	}
@@ -33,9 +41,9 @@ class FetchCommand : AsyncCommand<FetchSettings>
 	{
 		var json = File.ReadAllText(path);
 		var config = JsonSerializer.Deserialize<ApiConfig>(json);
-		if (config == null || config.TickerIds.Length == 0)
+		if (config == null || config.Tickers.Length == 0)
 		{
-			Console.WriteLine("Error: Config file must contain tickerIds.");
+			Console.WriteLine("Error: Config file must contain 'tickers'.");
 			return null;
 		}
 		return config;

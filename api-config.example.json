@@ -1,6 +1,6 @@
 {
 	"secAccountId": "YOUR_ACCOUNT_ID",
-	"tickerIds": [123456789, 987654321],
+	"tickers": ["GME", "SPY"],
 	"startDate": "2026-01-01",
 	"endDate": "2026-12-31",
 	"limit": 10000,
