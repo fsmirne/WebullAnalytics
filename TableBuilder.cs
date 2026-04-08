@@ -229,8 +229,9 @@ public static class TableBuilder
 			var chgPart = processed[start..end];
 			var after = processed[end..];
 
+			var chgValue = chgPart[token.Length..];
 			var color = chgPart.Contains("Chg -", StringComparison.Ordinal) ? "red" : chgPart.Contains("Chg +", StringComparison.Ordinal) ? "green" : "white";
-			markup = $"{legPrefix}{Markup.Escape(before)}[{color}]{Markup.Escape(chgPart)}[/]{Markup.Escape(after)}";
+			markup = $"{legPrefix}{Markup.Escape(before)}{Markup.Escape(token)}[{color}]{Markup.Escape(chgValue)}[/]{Markup.Escape(after)}";
 		}
 
 		if (!ascii)
