@@ -10,7 +10,7 @@
 		"view": "detailed",
 		"currentUnderlyingPrice": "GME:1000,SPY:600",
 		"iv": null,
-		"yahoo": false,
+		"api": "yahoo",
 		"range": 2,
 		"display": "value",
 		"theoretical": false,
