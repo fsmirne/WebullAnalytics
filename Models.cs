@@ -160,7 +160,9 @@ public record OptionContractQuote(
 	decimal? PercentChange,
 	long? Volume,
 	long? OpenInterest,
-	decimal? ImpliedVolatility
+	decimal? ImpliedVolatility,
+	decimal? HistoricalVolatility = null,
+	decimal? ImpliedVolatility5Day = null
 );
 
 public record PricePnL(decimal UnderlyingPrice, decimal PnL, decimal? ContractValue = null);

@@ -24,7 +24,7 @@ public static class ExcelExporter
 		ExportTransactions(transactionSheet, reportRows, finalPnL, initialAmount, unrealizedPnL);
 
 		// Export open positions
-		ExportPositions(positionsSheet, positionRows);
+		ExportPositions(positionsSheet, positionRows, opts);
 
 		// Export daily P&L with chart
 		ExportDailyPnL(dailyPnLSheet, reportRows);
@@ -150,7 +150,7 @@ public static class ExcelExporter
 		sheet.Cells.AutoFitColumns();
 	}
 
-	private static void ExportPositions(ExcelWorksheet sheet, List<PositionRow> rows)
+	private static void ExportPositions(ExcelWorksheet sheet, List<PositionRow> rows, AnalysisOptions opts)
 	{
 		// Headers
 		sheet.Cells[1, 1].Value = "Instrument";
@@ -161,8 +161,11 @@ public static class ExcelExporter
 		sheet.Cells[1, 6].Value = "Initial Price";
 		sheet.Cells[1, 7].Value = "Adjusted Price";
 		sheet.Cells[1, 8].Value = "Expiry";
+		sheet.Cells[1, 9].Value = "IV";
+		sheet.Cells[1, 10].Value = "HV";
+		sheet.Cells[1, 11].Value = "IV5";
 
-		FormatHeaderRow(sheet, 1, 1, 8);
+		FormatHeaderRow(sheet, 1, 1, 11);
 
 		// Data rows
 		int row = 2;
@@ -191,11 +194,37 @@ public static class ExcelExporter
 
 			sheet.Cells[row, 8].Value = posRow.Expiry.HasValue ? posRow.Expiry.Value.ToString("dd MMM yyyy") : "-";
 
+			if (posRow.MatchKey != null && MatchKeys.TryGetOptionSymbol(posRow.MatchKey, out var sym) && opts.OptionQuotes != null && opts.OptionQuotes.TryGetValue(sym, out var q))
+			{
+				FormatIvCell(sheet.Cells[row, 9], q.ImpliedVolatility);
+				FormatIvCell(sheet.Cells[row, 10], q.HistoricalVolatility);
+				FormatIvCell(sheet.Cells[row, 11], q.ImpliedVolatility5Day);
+			}
+			else
+			{
+				sheet.Cells[row, 9].Value = "-";
+				sheet.Cells[row, 10].Value = "-";
+				sheet.Cells[row, 11].Value = "-";
+			}
+
 			row++;
 		}
 
 		// Auto-fit columns
 		sheet.Cells.AutoFitColumns();
+	}
+
+	private static void FormatIvCell(ExcelRange cell, decimal? iv)
+	{
+		if (iv.HasValue)
+		{
+			cell.Value = (double)(iv.Value * 100m);
+			cell.Style.Numberformat.Format = "0.0\"%\"";
+		}
+		else
+		{
+			cell.Value = "-";
+		}
 	}
 
 	private static void ExportDailyPnL(ExcelWorksheet sheet, List<ReportRow> rows)
