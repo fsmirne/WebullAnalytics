@@ -311,7 +311,10 @@ internal static class StrategyGrouper
 					firstBatchQty = Math.Max(firstBatchQty, t.Qty);
 				}
 				if (firstBatchQty > 0)
+				{
 					strategyInitial = firstBatchDebit / (firstBatchQty * 100m);
+					adjustment = adjustment with { InitNetDebit = firstBatchDebit };
+				}
 			}
 		}
 
