@@ -376,17 +376,19 @@ public static class TableBuilder
 
 			if (b.TotalNetDebit.HasValue)
 			{
-				var initDebit = (b.PositionSide == Side.Buy ? 1m : -1m) * b.InitPrice * b.Qty * 100m;
+				var initDebit = b.InitNetDebit ?? (b.PositionSide == Side.Buy ? 1m : -1m) * b.InitPrice * b.Qty * 100m;
+				var initQty = b.InitNetDebit.HasValue ? (int)Math.Round(Math.Abs(b.InitNetDebit.Value) / (b.InitPrice * 100m)) : b.Qty;
 				var initDebitLabel = initDebit >= 0 ? "Init Net Debit" : "Init Net Credit";
 				var initDebitText = Math.Abs(initDebit).ToString("N2", CultureInfo.InvariantCulture);
-				items.Add(new Text($"{initDebitLabel}: ${initDebitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${initText}/contract"));
+				items.Add(new Text($"{initDebitLabel}: ${initDebitText} {(ascii ? "/" : "÷")} ({initQty} x $100) = ${initText}/contract"));
 
 				var netDebit = b.TotalNetDebit.Value;
 				var adjLabel = netDebit >= 0 ? "Adj Net Debit" : "Adj Net Credit";
 				var debitText = Math.Abs(netDebit).ToString("N2", CultureInfo.InvariantCulture);
 				items.Add(new Text($"{adjLabel}: ${debitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${adjText}/contract"));
 
-				var diff = netDebit - initDebit;
+				var perContractDiff = b.AdjPrice.Value - b.InitPrice;
+				var diff = perContractDiff * b.Qty * 100m;
 				var diffText = Math.Abs(diff).ToString("N2", CultureInfo.InvariantCulture);
 				var diffSign = diff >= 0 ? "+" : "-";
 				var diffAmount = $"{diffSign}${diffText}";

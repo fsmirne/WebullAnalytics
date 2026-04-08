@@ -3,8 +3,8 @@ namespace WebullAnalytics;
 public record CostStep(DateTime Timestamp, string Instrument, Side Side, int TradeQty, decimal Price, int RunningQty, decimal RunningAvg);
 public record StrategyCredit(string Instrument, int Qty, decimal LotPrice, decimal ParentPrice);
 public record NetDebitTrade(DateTime Timestamp, string Instrument, Side Side, int Qty, decimal Price, decimal CashImpact);
-public record StrategyAdjustment(List<NetDebitTrade> Trades, decimal TotalNetDebit, DateTime? LastFlatTime);
-public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, decimal InitPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime, string? OptionKind = null);
+public record StrategyAdjustment(List<NetDebitTrade> Trades, decimal TotalNetDebit, DateTime? LastFlatTime, decimal? InitNetDebit = null);
+public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, decimal InitPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime, string? OptionKind = null, decimal? InitNetDebit = null);
 
 /// <summary>
 /// Builds per-position breakdowns showing how each adjusted price was calculated.
@@ -116,7 +116,7 @@ internal static class AdjustmentReportBuilder
         if (adjustment != null)
         {
             if (adjustment.Trades.Count <= 2) return null;
-            return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, adjustment.Trades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind);
+            return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, adjustment.Trades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind, adjustment.InitNetDebit);
         }
 
         // Pure strategy (adj == init): show only the strategy's own leg trades if there are more than 2
