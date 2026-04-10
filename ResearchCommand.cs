@@ -264,9 +264,14 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 
 		var prices = new SortedSet<decimal>();
 		for (var p = minPrice; p <= maxPrice; p += step) prices.Add(p);
-		// Always include the strike and current price
+		// Always include the strike, current price, and notable prices
 		prices.Add(strike);
 		if (spot >= minPrice && spot <= maxPrice) prices.Add(Math.Round(spot, 2));
+		if (settings.NotablePrices != null)
+			foreach (var pair in ReportCommand.ParseNotablePrices(settings.NotablePrices))
+				if (pair.Key.Equals(oldParsed.Root, StringComparison.OrdinalIgnoreCase))
+					foreach (var np in pair.Value)
+						if (np >= minPrice && np <= maxPrice) prices.Add(np);
 
 		// Find the exact optimal price via fine search and insert it
 		var searchStep = step / 10m;

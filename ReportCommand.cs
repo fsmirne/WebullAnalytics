@@ -369,7 +369,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		return result;
 	}
 
-	private static Dictionary<string, List<decimal>> ParseNotablePrices(string input)
+	internal static Dictionary<string, List<decimal>> ParseNotablePrices(string input)
 	{
 		var result = new Dictionary<string, List<decimal>>(StringComparer.OrdinalIgnoreCase);
 		foreach (var pair in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
