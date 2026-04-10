@@ -67,7 +67,7 @@ The output will be in `bin\Release\net10.0\win-x64\publish\`.
 
 ### Commands
 
-WebullAnalytics has three commands: `report` (generate a P&L report), `fetch` (download order data from the Webull API), and `sniff` (automatically capture fresh API session headers).
+WebullAnalytics has four commands: `report` (generate a P&L report), `research` (hypothetical what-if analysis), `fetch` (download order data from the Webull API), and `sniff` (automatically capture fresh API session headers).
 
 ### Report Command
 
@@ -138,6 +138,46 @@ Options:
   --notable-prices <prices> Additional prices to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
   --tickers <list>          Show only these tickers in the report. Comma-separated (e.g., GME,SPY,AAPL)
   --help, -h                Show help message
+```
+
+### Research Command
+
+The `research` command runs a hypothetical what-if analysis by injecting synthetic trades into the report pipeline without modifying any data files. It accepts all the same options as `report` plus a `--trades` option.
+
+#### Trade Format
+
+```
+--trades "SYMBOL:PRICExQTY,SYMBOL:PRICExQTY,..."
+```
+
+- **SYMBOL**: OCC option symbol (e.g., `GME260501C00023000`)
+- **PRICE**: Signed decimal — positive = buy, negative = sell
+- **QTY**: Optional quantity after `x` (default: 1)
+
+#### Examples
+
+```bash
+# What if I roll the calendar short from Apr 10 to Apr 17 for $0.24 credit?
+WebullAnalytics research --trades "GME260410C00023000:0.14x300,GME260417C00023000:-0.38x300"
+
+# What if I close 100 contracts of my long call?
+WebullAnalytics research --trades "GME260501C00023000:-0.70x100"
+
+# What if I add a protective put?
+WebullAnalytics research --trades "GME260501P00022000:0.25x455"
+
+# Combine with report options (output to text, override underlying price)
+WebullAnalytics research --trades "GME260410C00023000:0.14x300,GME260417C00023000:-0.38x300" --output text --current-underlying-price GME:23.20
+```
+
+The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
+
+#### Research Options
+
+All `report` options are available, plus:
+
+```
+  --trades <trades>       Hypothetical trades. Format: SYMBOL:PRICExQTY (positive=buy, negative=sell, qty defaults to 1). Comma-separated for multiple.
 ```
 
 ### Fetch Command

@@ -178,9 +178,15 @@ class ReportCommand : AsyncCommand<ReportSettings>
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
-		var rootConfig = Program.LoadAppConfigRoot();
-		var autoExpandTerminal = rootConfig != null && rootConfig.TryGetBool("autoExpandTerminal", out var ae) && ae;
 
+		var (trades, feeLookup, err) = LoadTrades(settings);
+		if (err != 0) return err;
+
+		return await RunReportPipeline(settings, trades, feeLookup, cancellation);
+	}
+
+	internal static (List<Trade> trades, Dictionary<(DateTime, Side, int), decimal>? feeLookup, int errorCode) LoadTrades(ReportSettings settings)
+	{
 		var ordersPath = Program.ResolvePath(Program.OrdersPath);
 		var dataDir = Path.GetDirectoryName(ordersPath) ?? ".";
 
@@ -193,7 +199,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			if (trades.Count == 0)
 			{
 				Console.WriteLine($"Error: No Webull CSV export files found in '{dataDir}'.");
-				return 1;
+				return (trades, null, 1);
 			}
 			if (File.Exists(ordersPath))
 				(_, feeLookup) = JsonlParser.ParseOrdersJsonl(ordersPath);
@@ -203,12 +209,20 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			if (!File.Exists(ordersPath))
 			{
 				Console.WriteLine($"Error: Orders file '{ordersPath}' does not exist.");
-				return 1;
+				return ([], null, 1);
 			}
 			(trades, feeLookup) = JsonlParser.ParseOrdersJsonl(ordersPath);
 			ReconcileParentPrices(trades);
 			ApplyOfficialPrices(trades, dataDir);
 		}
+		return (trades, feeLookup, 0);
+	}
+
+	internal static async Task<int> RunReportPipeline(ReportSettings settings, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal>? feeLookup, CancellationToken cancellation)
+	{
+		var rootConfig = Program.LoadAppConfigRoot();
+		var autoExpandTerminal = rootConfig != null && rootConfig.TryGetBool("autoExpandTerminal", out var ae) && ae;
+
 		var tickerFilter = settings.TickerFilter;
 		if (tickerFilter != null)
 			trades.RemoveAll(t => { var ticker = MatchKeys.GetTicker(t.MatchKey); return ticker == null || !tickerFilter.Contains(ticker); });
