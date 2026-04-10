@@ -403,7 +403,7 @@ public static class TableBuilder
 
 			if (b.Credits != null && b.Credits.Count > 0)
 			{
-				var totalAdj = b.Credits.Sum(c => (c.LotPrice - c.ParentPrice) * c.Qty);
+				var totalAdj = (b.InitPrice - b.AdjPrice.Value) * b.Qty;
 				var adjAmount = totalAdj.ToString("N2", CultureInfo.InvariantCulture);
 				items.Add(new Text($"Adj = ${initText} - ${adjAmount} {(ascii ? "/" : "÷")} {b.Qty} = ${adjText}"));
 			}

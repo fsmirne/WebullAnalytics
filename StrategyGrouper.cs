@@ -293,7 +293,8 @@ internal static class StrategyGrouper
 
 	/// <summary>
 	/// For a single-leg option that was part of a strategy whose other legs have expired/closed,
-	/// computes an adjusted price reflecting the credits/debits from those expired legs.
+	/// computes an adjusted price reflecting the credits/debits from those expired legs
+	/// and any standalone roll trades that modified the position after the strategy entry.
 	/// </summary>
 	private static PositionRow AdjustForExpiredStrategyLegs((string matchKey, PositionRow row, Trade? trade) entry, Dictionary<string, List<Lot>> positions, List<Trade> allTrades, Dictionary<int, Trade> tradeBySeq)
 	{
@@ -304,17 +305,68 @@ internal static class StrategyGrouper
 		var strategyLots = lots.Where(l => l.ParentStrategySeq.HasValue).ToList();
 		if (strategyLots.Count == 0) return row;
 
-		var totalAdjustment = 0m;
-		var adjustedQty = 0;
-		foreach (var lot in strategyLots)
+		// Collect all parentSeqs where the other legs have fully expired/closed
+		var expiredParentSeqs = new HashSet<int>();
+		var allOtherLegKeys = new HashSet<string>();
+		var latestEntryTime = DateTime.MinValue;
+		foreach (var seqGroup in strategyLots.GroupBy(l => l.ParentStrategySeq!.Value))
 		{
-			if (!tradeBySeq.TryGetValue(lot.ParentStrategySeq!.Value, out var parentTrade)) continue;
+			if (!tradeBySeq.TryGetValue(seqGroup.Key, out var parentTrade)) continue;
 			var otherLegs = allTrades.Where(t => t.ParentStrategySeq == parentTrade.Seq && t.MatchKey != matchKey).ToList();
 			if (otherLegs.Count == 0) continue;
 			if (otherLegs.Any(leg => positions.ContainsKey(leg.MatchKey) && positions[leg.MatchKey].Sum(l => l.Qty) > 0)) continue;
+			expiredParentSeqs.Add(seqGroup.Key);
+			allOtherLegKeys.UnionWith(otherLegs.Select(l => l.MatchKey));
+			if (parentTrade.Timestamp > latestEntryTime) latestEntryTime = parentTrade.Timestamp;
+		}
+		if (expiredParentSeqs.Count == 0) return row;
 
+		// Basic adjustment: credit from the expired short legs of each parent strategy
+		var totalAdjustment = 0m;
+		var adjustedQty = 0;
+		foreach (var lot in strategyLots.Where(l => expiredParentSeqs.Contains(l.ParentStrategySeq!.Value)))
+		{
+			var parentTrade = tradeBySeq[lot.ParentStrategySeq!.Value];
 			totalAdjustment += (lot.Price - parentTrade.Price) * lot.Qty;
 			adjustedQty += lot.Qty;
+		}
+
+		// Standalone roll credit: find trades that rolled expired legs to new strikes.
+		// Computed ONCE across all expired parentSeqs to avoid double-counting when
+		// multiple parent batches (e.g., 450x + 5x fills) share the same expired legs.
+		var parsed = MatchKeys.TryGetOptionSymbol(matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null;
+		if (parsed != null && allOtherLegKeys.Count > 0)
+		{
+			var parentLegStrikes = allOtherLegKeys.Select(mk => MatchKeys.TryGetOptionSymbol(mk, out var s) ? ParsingHelpers.ParseOptionSymbol(s) : null).Where(p => p != null).Select(p => p!.Strike).Distinct().Concat(new[] { parsed.Strike }).ToHashSet();
+			var occSuffixes = parentLegStrikes.Select(s => $"{parsed.CallPut}{(long)(s * 1000m):D8}").ToHashSet();
+			var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{parsed.Root}";
+
+			var standaloneTrades = allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && !t.ParentStrategySeq.HasValue && t.Timestamp > latestEntryTime && t.MatchKey != matchKey && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(s => t.MatchKey.EndsWith(s, StringComparison.Ordinal))).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
+			if (standaloneTrades.Count > 0)
+			{
+				// The close qty of the expired other legs determines how many contracts were rolled.
+				// Limit opening trades at new strikes to the close qty to exclude unrelated trades.
+				var closeQty = standaloneTrades.Where(t => allOtherLegKeys.Contains(t.MatchKey) && t.Side == Side.Buy).Sum(t => t.Qty);
+				if (closeQty > 0)
+				{
+					var sellQtyUsed = 0;
+					var totalCredit = 0m;
+					foreach (var st in standaloneTrades)
+					{
+						if (allOtherLegKeys.Contains(st.MatchKey))
+							totalCredit += (st.Side == Side.Sell ? 1m : -1m) * st.Qty * st.Price * st.Multiplier;
+						else
+						{
+							var available = closeQty - sellQtyUsed;
+							if (available <= 0) continue;
+							var qty = Math.Min(st.Qty, available);
+							totalCredit += (st.Side == Side.Sell ? 1m : -1m) * qty * st.Price * st.Multiplier;
+							sellQtyUsed += qty;
+						}
+					}
+					totalAdjustment += totalCredit / Trade.OptionMultiplier;
+				}
+			}
 		}
 
 		if (adjustedQty == 0) return row;
