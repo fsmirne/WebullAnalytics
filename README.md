@@ -151,7 +151,7 @@ The `research` command runs a hypothetical what-if analysis by injecting synthet
 ```
 
 - **SYMBOL**: OCC option symbol (e.g., `GME260501C00023000`)
-- **PRICE**: Signed value — positive = buy, negative = sell. Can be:
+- **PRICE**: Signed value — positive = sell/credit, negative = buy/debit. Can be:
   - A decimal number (e.g., `0.50`, `-0.38`)
   - A market price keyword: `BID`, `MID`, or `ASK` (requires `--api`)
 - **QTY**: Optional quantity after `x` (default: 1)
@@ -204,7 +204,7 @@ The output shows a table of roll credits at each underlying price, with markers 
 All `report` options are available, plus:
 
 ```
-  --trades <trades>       Hypothetical trades. Format: SYMBOL:PRICExQTY (positive=buy, negative=sell, qty defaults to 1).
+  --trades <trades>       Hypothetical trades. Format: SYMBOL:PRICExQTY (positive=sell/credit, negative=buy/debit, qty defaults to 1).
                           Price can be a number or BID/MID/ASK (requires --api). Comma-separated for multiple.
   --roll <roll>           Analyze a roll: shows credit/debit at various underlying prices using Black-Scholes.
                           Format: OLD_SYMBOL>NEW_SYMBOLxQTY. Requires --api.
