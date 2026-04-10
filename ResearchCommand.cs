@@ -189,10 +189,13 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 
 		// Build price grid: roll credit at various underlying prices
 		var strike = oldParsed.Strike;
-		var step = OptionMath.GetPriceStep(strike) / settings.Range;
+		// Use fine-grained steps for roll credit analysis (10x finer than break-even grid)
+		var step = OptionMath.GetPriceStep(strike) / settings.Range / 5m;
 		var padding = step * 10;
-		var minPrice = strike - padding;
-		var maxPrice = strike + padding;
+		// Center on current price if available, otherwise on strike
+		var center = Math.Abs(spot - strike) < padding ? spot : strike;
+		var minPrice = Math.Min(strike, center) - padding;
+		var maxPrice = Math.Max(strike, center) + padding;
 
 		var today = DateTime.Today;
 		var oldExpiry = oldParsed.ExpiryDate;
@@ -210,43 +213,118 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 		Console.WriteLine($"Current roll credit (natural): ${currentCredit:N4}/contract = ${currentCredit * qty * 100m:N2} total");
 		Console.WriteLine();
 
-		// Build the table
-		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
-		table.AddColumn(new TableColumn("[bold]Price[/]").RightAligned());
-		table.AddColumn(new TableColumn("[bold]Close[/]").RightAligned());
-		table.AddColumn(new TableColumn("[bold]Open[/]").RightAligned());
-		table.AddColumn(new TableColumn("[bold]Credit[/]").RightAligned());
-		table.AddColumn(new TableColumn("[bold]Total[/]").RightAligned());
+		// Compute max columns from terminal width. Cell format: "0.13/0.37/0.24" or "120.39/135.50/15.11"
+		var sampleWidth = Math.Max(strike, newParsed.Strike).ToString("N2").Length;
+		var cellWidth = sampleWidth * 3 + 5; // 3 values + 2 slashes + 2 padding + 1 sign on net
+		const int fixedOverhead = 11; // borders + price column
+		var terminalWidth = settings.Simplified ? TerminalHelper.SimplifiedMinWidth : TerminalHelper.DetailedMinWidth;
+		try { terminalWidth = Math.Max(terminalWidth, Console.WindowWidth); } catch { /* use default */ }
+		var maxCols = Math.Max(3, (terminalWidth - fixedOverhead) / cellWidth);
 
-		var maxCredit = decimal.MinValue;
-		var maxCreditPrice = 0m;
-
-		// Precompute all rows to find the max
-		var rows = new List<(decimal price, decimal oldVal, decimal newVal, decimal credit)>();
-		for (var p = minPrice; p <= maxPrice; p += step)
+		// Build time columns: hourly on expiry day for <=1 DTE, daily otherwise
+		var oldDays = (int)(oldExpiry.Date - today).TotalDays;
+		var evalTimes = new List<DateTime>();
+		var isIntraday = oldDays <= 1;
+		if (isIntraday)
 		{
-			var oldDte = (oldExpiry.Date - today).TotalDays / 365.0;
-			var newDte = (newExpiry.Date - today).TotalDays / 365.0;
-			var oldVal = OptionMath.BlackScholes(p, oldParsed.Strike, oldDte, rfr, oldIv.Value, oldParsed.CallPut);
-			var newVal = OptionMath.BlackScholes(p, newParsed.Strike, newDte, rfr, newIv.Value, newParsed.CallPut);
-			var credit = newVal - oldVal;
-			rows.Add((p, oldVal, newVal, credit));
-			if (credit > maxCredit) { maxCredit = credit; maxCreditPrice = p; }
+			// Hourly on the expiry day from market open to 4 PM (options stop trading)
+			var optionsClose = new TimeSpan(16, 0, 0);
+			var expiryDay = oldExpiry.Date;
+			var allHours = new List<DateTime>();
+			for (var h = OptionMath.MarketOpen; h < optionsClose; h += TimeSpan.FromHours(1))
+				allHours.Add(expiryDay + h);
+			allHours.Add(expiryDay + optionsClose);
+
+			if (allHours.Count <= maxCols)
+				evalTimes.AddRange(allHours);
+			else
+			{
+				var hourStep = Math.Max(1, (allHours.Count - 1) / (maxCols - 1));
+				for (var i = 0; i < allHours.Count - 1; i += hourStep)
+					evalTimes.Add(allHours[i]);
+				if (evalTimes[^1] != allHours[^1])
+					evalTimes.Add(allHours[^1]);
+			}
+		}
+		else
+		{
+			var dayStep = Math.Max(1, oldDays / (maxCols - 1));
+			for (var d = 0; d < oldDays; d += dayStep)
+				evalTimes.Add(today.AddDays(d) + OptionMath.MarketOpen);
+			var expiryOpen = oldExpiry.Date + OptionMath.MarketOpen;
+			if (evalTimes[^1] != expiryOpen)
+				evalTimes.Add(expiryOpen);
 		}
 
-		foreach (var (price, oldVal, newVal, credit) in rows)
+		// Build 2D grid: prices × times
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
+		table.AddColumn(new TableColumn("[bold]Price[/]").RightAligned().NoWrap());
+		foreach (var t in evalTimes)
+			table.AddColumn(new TableColumn($"[bold]{(isIntraday ? t.ToString("h tt") : t.ToString("dd MMM"))}[/]").RightAligned().NoWrap());
+
+		var prices = new SortedSet<decimal>();
+		for (var p = minPrice; p <= maxPrice; p += step) prices.Add(p);
+		// Always include the strike and current price
+		prices.Add(strike);
+		if (spot >= minPrice && spot <= maxPrice) prices.Add(Math.Round(spot, 2));
+
+		// Find the exact optimal price via fine search and insert it
+		var searchStep = step / 10m;
+		var bestPrice = strike;
+		var bestCredit = decimal.MinValue;
+		for (var p = minPrice; p <= maxPrice; p += searchStep)
 		{
-			var isMax = credit == maxCredit;
-			var isCurrent = Math.Abs(price - spot) < step / 2;
-			var prefix = isMax && isCurrent ? "[bold green]>*[/]" : isMax ? "[bold green] *[/]" : isCurrent ? "[bold] >[/]" : "  ";
-			var creditColor = credit >= 0 ? "green" : "red";
-			var total = credit * qty * 100m;
-			var totalColor = total >= 0 ? "green" : "red";
-			table.AddRow($"{prefix}${price:N2}", $"${oldVal:N4}", $"${newVal:N4}", $"[{creditColor}]${credit:N4}[/]", $"[{totalColor}]{(total >= 0 ? "+" : "")}${total:N2}[/]");
+			var credit = evalTimes.Max(t => OptionMath.BlackScholes(p, newParsed.Strike, (newExpiry.Date + OptionMath.MarketClose - t).TotalDays / 365.0, rfr, newIv.Value, newParsed.CallPut) - OptionMath.BlackScholes(p, oldParsed.Strike, (oldExpiry.Date + OptionMath.MarketClose - t).TotalDays / 365.0, rfr, oldIv.Value, oldParsed.CallPut));
+			if (credit > bestCredit) { bestCredit = credit; bestPrice = Math.Round(p, 2); }
+		}
+		prices.Add(bestPrice);
+
+		var priceList = prices.Reverse().ToList();
+
+		// Precompute all cells: old value, new value, credit
+		var oldGrid = new decimal[priceList.Count, evalTimes.Count];
+		var newGrid = new decimal[priceList.Count, evalTimes.Count];
+		var creditGrid = new decimal[priceList.Count, evalTimes.Count];
+		var maxCredit = decimal.MinValue;
+		var maxCreditPrice = 0m;
+		var maxCreditDate = today;
+		for (int pi = 0; pi < priceList.Count; pi++)
+			for (int di = 0; di < evalTimes.Count; di++)
+			{
+				var oldDte = (oldExpiry.Date + OptionMath.MarketClose - evalTimes[di]).TotalDays / 365.0;
+				var newDte = (newExpiry.Date + OptionMath.MarketClose - evalTimes[di]).TotalDays / 365.0;
+				oldGrid[pi, di] = OptionMath.BlackScholes(priceList[pi], oldParsed.Strike, oldDte, rfr, oldIv.Value, oldParsed.CallPut);
+				newGrid[pi, di] = OptionMath.BlackScholes(priceList[pi], newParsed.Strike, newDte, rfr, newIv.Value, newParsed.CallPut);
+				creditGrid[pi, di] = newGrid[pi, di] - oldGrid[pi, di];
+				if (creditGrid[pi, di] > maxCredit) { maxCredit = creditGrid[pi, di]; maxCreditPrice = priceList[pi]; maxCreditDate = evalTimes[di]; }
+			}
+
+		for (int pi = 0; pi < priceList.Count; pi++)
+		{
+			var isCurrent = priceList[pi] == Math.Round(spot, 2);
+			var isMaxRow = Enumerable.Range(0, evalTimes.Count).Any(di => creditGrid[pi, di] == maxCredit);
+			var priceStr = $"${priceList[pi]:N2}";
+			if (isMaxRow && isCurrent) priceStr = $"[bold green]{priceStr}[/]";
+			else if (isMaxRow) priceStr = $"[green]{priceStr}[/]";
+			else if (isCurrent) priceStr = $"[bold]{priceStr}[/]";
+
+			var cells = new List<string> { priceStr };
+			for (int di = 0; di < evalTimes.Count; di++)
+			{
+				var c = creditGrid[pi, di];
+				var isGlobalMax = c == maxCredit;
+				var creditColor = c >= 0 ? "green" : "red";
+				var creditSign = Math.Round(c, 2) >= 0 ? "+" : "";
+				var creditStr = isGlobalMax ? $"[bold underline {creditColor}]{creditSign}{c:N2}[/]" : $"[{creditColor}]{creditSign}{c:N2}[/]";
+				cells.Add($"[grey]{oldGrid[pi, di]:N2}[/]/[grey]{newGrid[pi, di]:N2}[/]/{creditStr}");
+			}
+			table.AddRow(cells.ToArray());
 		}
 
 		AnsiConsole.Write(table);
-		Console.WriteLine($"  * = max credit (${maxCredit:N4} @ ${maxCreditPrice:N2})    > = current price");
+		var maxDateLabel = isIntraday ? $"at {maxCreditDate:h:mm tt}" : $"on {maxCreditDate:dd MMM}";
+		Console.WriteLine($"  * = max credit (${maxCredit:N4} @ ${maxCreditPrice:N2} {maxDateLabel})    > = current price");
+		Console.WriteLine($"  Each cell: Close / Open / Net per contract. Total for {qty}x: max ${maxCredit * qty * 100m:N2}");
 		Console.WriteLine();
 
 		return 0;
