@@ -96,20 +96,23 @@ WebullAnalytics report --initial-amount 10000
 # Combine options
 WebullAnalytics report --since 2026-01-01 --output excel --initial-amount 10000
 
-# Fetch Yahoo Finance data for break-even analysis with time-decay grids
-WebullAnalytics report --yahoo
+# Fetch option chain data for break-even analysis with time-decay grids (Yahoo Finance)
+WebullAnalytics report --api yahoo
+
+# Use Webull option chain data (requires sniffed headers via 'sniff' command)
+WebullAnalytics report --api webull
 
 # Override implied volatility for specific option legs (per OCC symbol)
 WebullAnalytics report --iv GME260213C00025000:50,GME260516C00025000:45
 
-# Combine Yahoo data with manual IV overrides (overrides take priority)
-WebullAnalytics report --yahoo --iv GME260213C00025000:60
+# Combine API data with manual IV overrides (overrides take priority)
+WebullAnalytics report --api yahoo --iv GME260213C00025000:60
 
 # Show P&L instead of contract value in the grid
-WebullAnalytics report --yahoo --display pnl
+WebullAnalytics report --api yahoo --display pnl
 
 # Increase grid granularity (more rows between strikes, default: 2)
-WebullAnalytics report --yahoo --range 4
+WebullAnalytics report --api yahoo --range 4
 
 # Add custom notable prices to break-even reports (e.g., support/resistance levels)
 WebullAnalytics report --notable-prices GME:20/25/30
@@ -130,7 +133,7 @@ Options:
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
   --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
   --iv <overrides>          Override implied volatility per leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple.
-  --yahoo                   Fetch option chain data from Yahoo Finance for break-even analysis (bid/ask/IV/etc)
+  --api <source>            Option chain data source for break-even analysis: 'yahoo' or 'webull' (webull requires sniffed headers)
   --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --current-underlying-price <prices>  Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
@@ -174,6 +177,9 @@ WebullAnalytics research --trades "GME260501C00023000:-0.70x100"
 # What if I add a protective put?
 WebullAnalytics research --trades "GME260501P00022000:0.25x455"
 
+# Simulate running on a future date (e.g., after short leg expiration)
+WebullAnalytics research --trades "GME260417C00023000:-0.38x300" --date 2026-04-11
+
 # Combine with report options (output to text, override underlying price)
 WebullAnalytics research --trades "GME260410C00023000:0.14x300,GME260417C00023000:-0.38x300" --output text --current-underlying-price GME:23.20
 ```
@@ -197,7 +203,9 @@ WebullAnalytics research --roll "GME260410C00023000>GME260417C00023500x300"
 WebullAnalytics research --roll "GME260410C00023000>GME260417C00023000x300" --iv GME260410C00023000:37,GME260417C00023000:31
 ```
 
-The output shows a table of roll credits at each underlying price, with markers for the current price (`>`) and max credit (`*`). It also shows the current market roll credit based on live bid/ask quotes.
+The output is a 2D grid of roll credits across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows the close/open/net values, color-coded green for credit and red for debit. The current price row is marked with `>` and the optimal credit with `*`. Live market credit from bid/ask quotes is shown below the grid.
+
+Notable prices from `--notable-prices` are included as additional rows in the grid.
 
 #### Research Options
 
@@ -206,8 +214,10 @@ All `report` options are available, plus:
 ```
   --trades <trades>       Hypothetical trades. Format: SYMBOL:PRICExQTY (positive=sell/credit, negative=buy/debit, qty defaults to 1).
                           Price can be a number or BID/MID/ASK (requires --api). Comma-separated for multiple.
-  --roll <roll>           Analyze a roll: shows credit/debit at various underlying prices using Black-Scholes.
+  --roll <roll>           Analyze a roll: shows credit/debit at various underlying prices and times using Black-Scholes.
                           Format: OLD_SYMBOL>NEW_SYMBOLxQTY. Requires --api.
+  --date <date>           Override 'today' for evaluation (YYYY-MM-DD). Simulates running on a future date — options expiring
+                          on or before this date generate synthetic expirations, and all DTE/Black-Scholes calculations use it.
 ```
 
 ### Fetch Command
@@ -284,7 +294,7 @@ The `fetch` command requires an API config file. This file contains your Webull 
 ```json
 {
   "secAccountId": "YOUR_ACCOUNT_ID",
-  "tickerIds": [123456789, 987654321],
+  "tickers": ["GME", "SPY"],
   "startDate": "2026-01-01",
   "endDate": "2026-12-31",
   "limit": 10000,
@@ -310,7 +320,7 @@ The `fetch` command requires an API config file. This file contains your Webull 
 | Field | Description |
 |---|---|
 | `secAccountId` | Your Webull securities account ID (visible in the API request URL) |
-| `tickerIds` | Array of Webull ticker IDs to fetch. Each ticker produces one line in the JSONL output. Find these in the `tickerId` query parameter of the API requests in your browser's Network tab. |
+| `tickers` | Array of ticker symbols to fetch (e.g., `["GME", "SPY"]`). Each ticker produces one line in the JSONL output. |
 | `startDate` | Start of the date range to fetch (YYYY-MM-DD) |
 | `endDate` | End of the date range to fetch (YYYY-MM-DD) |
 | `limit` | Maximum number of orders to return per ticker (default: 10000) |
@@ -320,6 +330,38 @@ The `fetch` command requires an API config file. This file contains your Webull 
 ### Session Tokens
 
 The `access_token`, `t_token`, `x-s`, and `x-sv` headers are session tokens that expire. When they expire, the API will return an error. To refresh them, either run `WebullAnalytics sniff` to capture fresh headers automatically, or log into Webull in your browser and copy the updated values from the Network tab manually.
+
+## Application Configuration
+
+An optional `data/config.json` file provides default values for command-line options. CLI arguments always take precedence over config values.
+
+```json
+{
+  "autoExpandTerminal": false,
+  "report": {
+    "source": "api",
+    "since": null,
+    "until": null,
+    "output": "console",
+    "outputPath": null,
+    "initialAmount": 0,
+    "view": "detailed",
+    "api": "yahoo",
+    "iv": null,
+    "range": 2,
+    "display": "value",
+    "currentUnderlyingPrice": null,
+    "theoretical": false,
+    "notablePrices": null,
+    "tickers": null
+  },
+  "sniff": {
+    "autoCloseEdge": false
+  }
+}
+```
+
+Copy and customize from `config.example.json`. The `report` section maps directly to the report/research command options. The `autoExpandTerminal` flag, when `true`, automatically resizes the terminal to fit wide tables.
 
 ## Output Formats
 
@@ -383,7 +425,7 @@ This format is useful for sharing reports via email, archiving, or importing int
 
 ## Time-Decay Grid
 
-When implied volatility is available (via `--yahoo` or `--iv` overrides), the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
+When implied volatility is available (via `--api` or `--iv` overrides), the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
 
 - **Date columns**: Evenly-spaced dates from today through expiration, evaluated at market open (9:30 AM). The last two columns show expiration day at market open (with remaining intraday time value via Black-Scholes) and "At Exp" at market close (4:30 PM, intrinsic value only). The number of columns adapts to the terminal width — dates are skipped as needed so the grid never overflows horizontally.
 - **Price rows**: Step size is derived from the position's strike spacing (or strike-to-break-even distance for single-strike positions like calendars), so the grid adapts to any stock price. The `--range` parameter controls granularity — it sets how many rows fit per strike gap (default: 2). Break-even prices (marked with `*`) and strike prices are always included, with 2 padding rows beyond the outermost notable price.
@@ -395,7 +437,7 @@ Without implied volatility data, the existing 1D price ladder (Price | Value | P
 
 ## Volatility Analysis
 
-When using the Webull data source (`--webull` or default when `api-config.json` exists), the break-even leg descriptions include volatility metrics for each option contract:
+When using the Webull data source (`--api webull`), the break-even leg descriptions include volatility metrics for each option contract:
 
 ```
 └─ ... | IV 32.3% | HV 43.0% | IV5 40.0%
@@ -419,7 +461,7 @@ The IV value is color-coded based on the IV/HV ratio (volatility risk premium):
 
 The IV5 metric provides additional context: if IV5 is rising toward HV, a cheap signal may be closing; if IV5 is falling away from HV, a rich signal may be strengthening.
 
-These metrics are sourced from the Webull option chain API and are not available when using Yahoo Finance (`--yahoo`).
+These metrics are sourced from the Webull option chain API and are not available when using Yahoo Finance (`--api yahoo`).
 
 ## Position Tracking Details
 
@@ -489,7 +531,7 @@ This tool uses EPPlus configured for non-commercial use. For commercial use, you
 **No trades found:**
 - Verify the JSONL file exists at the expected path (default: `data/orders.jsonl`)
 - Run `WebullAnalytics fetch` to download fresh data
-- Check that the `tickerIds` in your config cover all tickers you trade
+- Check that the `tickers` in your config cover all tickers you trade
 
 **Incorrect P&L calculations:**
 - If using `--since` or `--until`, note that only trades within the specified date range are included; earlier or later context is not considered
