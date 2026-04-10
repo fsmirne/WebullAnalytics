@@ -151,7 +151,9 @@ The `research` command runs a hypothetical what-if analysis by injecting synthet
 ```
 
 - **SYMBOL**: OCC option symbol (e.g., `GME260501C00023000`)
-- **PRICE**: Signed decimal — positive = buy, negative = sell
+- **PRICE**: Signed value — positive = buy, negative = sell. Can be:
+  - A decimal number (e.g., `0.50`, `-0.38`)
+  - A market price keyword: `BID`, `MID`, or `ASK` (requires `--api`)
 - **QTY**: Optional quantity after `x` (default: 1)
 
 #### Examples
@@ -159,6 +161,12 @@ The `research` command runs a hypothetical what-if analysis by injecting synthet
 ```bash
 # What if I roll the calendar short from Apr 10 to Apr 17 for $0.24 credit?
 WebullAnalytics research --trades "GME260410C00023000:0.14x300,GME260417C00023000:-0.38x300"
+
+# Same roll but use live market prices (buy at bid, sell at ask)
+WebullAnalytics research --trades "GME260410C00023000:BIDx300,GME260417C00023000:-ASKx300"
+
+# Use mid-market prices for both legs
+WebullAnalytics research --trades "GME260410C00023000:MIDx300,GME260417C00023000:-MIDx300"
 
 # What if I close 100 contracts of my long call?
 WebullAnalytics research --trades "GME260501C00023000:-0.70x100"
@@ -170,6 +178,8 @@ WebullAnalytics research --trades "GME260501P00022000:0.25x455"
 WebullAnalytics research --trades "GME260410C00023000:0.14x300,GME260417C00023000:-0.38x300" --output text --current-underlying-price GME:23.20
 ```
 
+When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the configured API source (`--api webull` or `--api yahoo`) before building the hypothetical trades.
+
 The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
 
 #### Research Options
@@ -177,7 +187,8 @@ The synthetic trades are appended after all real trades and processed through th
 All `report` options are available, plus:
 
 ```
-  --trades <trades>       Hypothetical trades. Format: SYMBOL:PRICExQTY (positive=buy, negative=sell, qty defaults to 1). Comma-separated for multiple.
+  --trades <trades>       Hypothetical trades. Format: SYMBOL:PRICExQTY (positive=buy, negative=sell, qty defaults to 1).
+                          Price can be a number or BID/MID/ASK (requires --api). Comma-separated for multiple.
 ```
 
 ### Fetch Command
