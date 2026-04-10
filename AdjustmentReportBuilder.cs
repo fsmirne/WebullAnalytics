@@ -24,15 +24,11 @@ internal static class AdjustmentReportBuilder
 
             if (row.Asset == Asset.OptionStrategy && !row.IsStrategyLeg)
             {
-                var legs = new List<PositionRow>();
                 int j = i + 1;
                 while (j < positionRows.Count && positionRows[j].IsStrategyLeg)
-                {
-                    legs.Add(positionRows[j]);
                     j++;
-                }
                 var adjustment = strategyAdjustments?.GetValueOrDefault(i);
-                var breakdown = BuildStrategyBreakdown(row, legs, allTrades, adjustment);
+                var breakdown = BuildStrategyBreakdown(row, adjustment);
                 if (breakdown != null) result.Add(breakdown);
                 i = j;
             }
@@ -58,7 +54,8 @@ internal static class AdjustmentReportBuilder
         var costSteps = BuildCostSteps(row.MatchKey, allTrades);
         var credits = BuildStrategyCredits(row.MatchKey, positions, allTrades, tradeBySeq);
 
-        if (costSteps.Count <= 1 && credits.Count == 0) return null;
+        var hasAdjustment = row.AdjustedAvgPrice.HasValue && row.InitialAvgPrice.HasValue && row.AdjustedAvgPrice.Value != row.InitialAvgPrice.Value;
+        if (!hasAdjustment && credits.Count == 0) return null;
 
         var initPrice = row.InitialAvgPrice ?? row.AvgPrice;
         return new PriceBreakdown(row.Instrument, row.Asset, row.Side, row.Qty, initPrice, row.AdjustedAvgPrice, costSteps, credits.Count > 0 ? credits : null, null, null, null);
@@ -108,22 +105,10 @@ internal static class AdjustmentReportBuilder
         return credits;
     }
 
-    private static PriceBreakdown? BuildStrategyBreakdown(PositionRow summaryRow, List<PositionRow> legs, List<Trade> allTrades, StrategyAdjustment? adjustment)
+    private static PriceBreakdown? BuildStrategyBreakdown(PositionRow summaryRow, StrategyAdjustment? adjustment)
     {
+        if (adjustment == null || adjustment.Trades.Count < 2) return null;
         var initPrice = summaryRow.InitialAvgPrice ?? summaryRow.AvgPrice;
-
-        // Non-pure strategy with pre-computed replay data
-        if (adjustment != null)
-        {
-            if (adjustment.Trades.Count <= 2) return null;
-            return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, adjustment.Trades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind, adjustment.InitNetDebit);
-        }
-
-        // Pure strategy (adj == init): show only the strategy's own leg trades if there are more than 2
-        var legMatchKeys = legs.Where(l => l.MatchKey != null).Select(l => l.MatchKey!).ToHashSet();
-        var ownTrades = allTrades.Where(t => legMatchKeys.Contains(t.MatchKey) && t.Side is Side.Buy or Side.Sell && t.Asset == Asset.Option).OrderByDescending(t => t.Timestamp).ThenByDescending(t => t.Seq).Take(legs.Count).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq)
-            .Select(t => new NetDebitTrade(t.Timestamp, t.Instrument, t.Side, t.Qty, t.Price, (t.Side == Side.Buy ? -1m : 1m) * t.Qty * t.Price * t.Multiplier)).ToList();
-        if (ownTrades.Count <= 2) return null;
-        return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, ownTrades, null, null, summaryRow.OptionKind);
+        return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, adjustment.Trades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind, adjustment.InitNetDebit);
     }
 }
