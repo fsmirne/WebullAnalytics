@@ -182,6 +182,23 @@ When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the conf
 
 The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
 
+#### Roll Analysis
+
+The `--roll` option computes the theoretical roll credit at various underlying prices using Black-Scholes, helping you find the optimal moment to roll a short leg.
+
+```bash
+# Analyze rolling the $23 short from Apr 10 to Apr 17 (300 contracts)
+WebullAnalytics research --roll "GME260410C00023000>GME260417C00023000x300"
+
+# Roll to a different strike
+WebullAnalytics research --roll "GME260410C00023000>GME260417C00023500x300"
+
+# Override IV for the analysis
+WebullAnalytics research --roll "GME260410C00023000>GME260417C00023000x300" --iv GME260410C00023000:37,GME260417C00023000:31
+```
+
+The output shows a table of roll credits at each underlying price, with markers for the current price (`>`) and max credit (`*`). It also shows the current market roll credit based on live bid/ask quotes.
+
 #### Research Options
 
 All `report` options are available, plus:
@@ -189,6 +206,8 @@ All `report` options are available, plus:
 ```
   --trades <trades>       Hypothetical trades. Format: SYMBOL:PRICExQTY (positive=buy, negative=sell, qty defaults to 1).
                           Price can be a number or BID/MID/ASK (requires --api). Comma-separated for multiple.
+  --roll <roll>           Analyze a roll: shows credit/debit at various underlying prices using Black-Scholes.
+                          Format: OLD_SYMBOL>NEW_SYMBOLxQTY. Requires --api.
 ```
 
 ### Fetch Command

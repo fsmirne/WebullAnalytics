@@ -12,6 +12,10 @@ class ResearchSettings : ReportSettings
 	[CommandOption("--trades")]
 	public string? Trades { get; set; }
 
+	[Description("Analyze a roll: shows credit/debit at various underlying prices. Format: OLD_SYMBOL>NEW_SYMBOLxQTY. Example: GME260410C00023000>GME260417C00023000x300")]
+	[CommandOption("--roll")]
+	public string? Roll { get; set; }
+
 	internal static readonly HashSet<string> MarketPriceKeywords = new(StringComparer.OrdinalIgnoreCase) { "BID", "MID", "ASK" };
 
 	public override ValidationResult Validate()
@@ -50,6 +54,25 @@ class ResearchSettings : ReportSettings
 			}
 		}
 
+		if (Roll != null)
+		{
+			var gtIdx = Roll.IndexOf('>');
+			if (gtIdx < 1)
+				return ValidationResult.Error("--roll: expected format OLD_SYMBOL>NEW_SYMBOLxQTY");
+			var remaining = Roll[(gtIdx + 1)..];
+			var xIdx = remaining.IndexOf('x');
+			var oldSym = Roll[..gtIdx];
+			var newSym = xIdx >= 0 ? remaining[..xIdx] : remaining;
+			var qtyStr = xIdx >= 0 ? remaining[(xIdx + 1)..] : null;
+
+			if (ParsingHelpers.ParseOptionSymbol(oldSym) == null)
+				return ValidationResult.Error($"--roll: invalid OCC symbol '{oldSym}'");
+			if (ParsingHelpers.ParseOptionSymbol(newSym) == null)
+				return ValidationResult.Error($"--roll: invalid OCC symbol '{newSym}'");
+			if (qtyStr != null && (!int.TryParse(qtyStr, out var rqty) || rqty <= 0))
+				return ValidationResult.Error($"--roll: invalid quantity '{qtyStr}'");
+		}
+
 		return ValidationResult.Success();
 	}
 }
@@ -60,6 +83,11 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
+
+		if (!string.IsNullOrEmpty(settings.Roll))
+		{
+			return await AnalyzeRoll(settings, cancellation);
+		}
 
 		var (trades, feeLookup, err) = ReportCommand.LoadTrades(settings);
 		if (err != 0) return err;
@@ -80,6 +108,148 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 		}
 
 		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation);
+	}
+
+	private static async Task<int> AnalyzeRoll(ResearchSettings settings, CancellationToken cancellation)
+	{
+		var gtIdx = settings.Roll!.IndexOf('>');
+		var remaining = settings.Roll[(gtIdx + 1)..];
+		var xIdx = remaining.IndexOf('x');
+		var oldSymbol = settings.Roll[..gtIdx];
+		var newSymbol = xIdx >= 0 ? remaining[..xIdx] : remaining;
+		var qty = xIdx >= 0 ? int.Parse(remaining[(xIdx + 1)..]) : 1;
+
+		var oldParsed = ParsingHelpers.ParseOptionSymbol(oldSymbol)!;
+		var newParsed = ParsingHelpers.ParseOptionSymbol(newSymbol)!;
+
+		// Fetch quotes for both legs to get IV and current prices
+		var allSymbols = new[] { oldSymbol, newSymbol };
+		var minimalRows = allSymbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
+
+		var apiSource = settings.Api?.ToLowerInvariant();
+		if (apiSource == null) { Console.WriteLine("Error: --api (yahoo or webull) is required for --roll analysis"); return 1; }
+
+		IReadOnlyDictionary<string, OptionContractQuote> quotes;
+		IReadOnlyDictionary<string, decimal> underlyingPrices;
+		try
+		{
+			if (apiSource == "webull")
+			{
+				var configPath = Program.ResolvePath(Program.ApiConfigPath);
+				if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found."); return 1; }
+				var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+				if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers."); return 1; }
+				Console.WriteLine("Webull: fetching option chain data for roll analysis...");
+				(quotes, underlyingPrices) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
+			}
+			else
+			{
+				Console.WriteLine("Yahoo Finance: fetching option chain data for roll analysis...");
+				(quotes, underlyingPrices) = await YahooOptionsClient.FetchOptionQuotesAsync(minimalRows, cancellation);
+			}
+
+			var riskFreeRate = await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
+			if (riskFreeRate.HasValue)
+			{
+				OptionMath.RiskFreeRate = riskFreeRate.Value;
+				Console.WriteLine($"Risk-free rate (13-week T-bill): {riskFreeRate.Value:P2}");
+			}
+		}
+		catch (Exception ex)
+		{
+			if (ex is OperationCanceledException) throw;
+			Console.WriteLine($"Error: Failed to fetch option data: {ex.Message}");
+			return 1;
+		}
+
+		// Resolve IVs (--iv overrides take priority)
+		var ivOverrides = settings.IvOverrides != null ? ReportCommand.ParseIvOverrides(settings.IvOverrides) : null;
+		decimal? oldIv = ivOverrides != null && ivOverrides.TryGetValue(oldSymbol, out var oiv) ? oiv : quotes.TryGetValue(oldSymbol, out var oq) && oq.ImpliedVolatility > 0 ? oq.ImpliedVolatility : null;
+		decimal? newIv = ivOverrides != null && ivOverrides.TryGetValue(newSymbol, out var niv) ? niv : quotes.TryGetValue(newSymbol, out var nq) && nq.ImpliedVolatility > 0 ? nq.ImpliedVolatility : null;
+
+		if (!oldIv.HasValue || !newIv.HasValue)
+		{
+			Console.WriteLine($"Error: Could not determine IV for {(!oldIv.HasValue ? oldSymbol : newSymbol)}. Use --iv to override.");
+			return 1;
+		}
+
+		var spot = underlyingPrices.TryGetValue(oldParsed.Root, out var sp) ? sp : 0m;
+		if (settings.CurrentUnderlyingPrice != null)
+		{
+			var overrides = ReportCommand.ParseUnderlyingPriceOverrides(settings.CurrentUnderlyingPrice);
+			if (overrides.TryGetValue(oldParsed.Root, out var ovr)) spot = ovr;
+		}
+		if (spot == 0) { Console.WriteLine($"Error: Could not determine underlying price for {oldParsed.Root}"); return 1; }
+
+		// Current market prices
+		var oldBid = quotes.TryGetValue(oldSymbol, out var obq) ? obq.Bid : null;
+		var oldAsk = quotes.TryGetValue(oldSymbol, out var oaq) ? oaq.Ask : null;
+		var newBid = quotes.TryGetValue(newSymbol, out var nbq) ? nbq.Bid : null;
+		var newAsk = quotes.TryGetValue(newSymbol, out var naq) ? naq.Ask : null;
+
+		// Build price grid: roll credit at various underlying prices
+		var strike = oldParsed.Strike;
+		var step = OptionMath.GetPriceStep(strike) / settings.Range;
+		var padding = step * 10;
+		var minPrice = strike - padding;
+		var maxPrice = strike + padding;
+
+		var today = DateTime.Today;
+		var oldExpiry = oldParsed.ExpiryDate;
+		var newExpiry = newParsed.ExpiryDate;
+		var rfr = OptionMath.RiskFreeRate;
+
+		// Header
+		Console.WriteLine();
+		Console.WriteLine($"Roll Analysis: {Formatters.FormatOptionDisplay(oldParsed.Root, oldParsed.ExpiryDate, oldParsed.Strike)} {ParsingHelpers.CallPutDisplayName(oldParsed.CallPut)} → {Formatters.FormatOptionDisplay(newParsed.Root, newParsed.ExpiryDate, newParsed.Strike)} {ParsingHelpers.CallPutDisplayName(newParsed.CallPut)}  ({qty}x)");
+		Console.WriteLine($"Current: {oldParsed.Root} @ ${spot}  |  Close {oldSymbol}: Bid ${oldBid?.ToString("N2") ?? "?"} / Ask ${oldAsk?.ToString("N2") ?? "?"}  |  Open {newSymbol}: Bid ${newBid?.ToString("N2") ?? "?"} / Ask ${newAsk?.ToString("N2") ?? "?"}");
+		Console.WriteLine($"IV: Close leg {oldIv.Value:P1} | Open leg {newIv.Value:P1}");
+
+		// Compute current market roll credit
+		var currentCredit = (newBid ?? 0m) - (oldAsk ?? 0m);
+		Console.WriteLine($"Current roll credit (natural): ${currentCredit:N4}/contract = ${currentCredit * qty * 100m:N2} total");
+		Console.WriteLine();
+
+		// Build the table
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
+		table.AddColumn(new TableColumn("[bold]Price[/]").RightAligned());
+		table.AddColumn(new TableColumn("[bold]Close[/]").RightAligned());
+		table.AddColumn(new TableColumn("[bold]Open[/]").RightAligned());
+		table.AddColumn(new TableColumn("[bold]Credit[/]").RightAligned());
+		table.AddColumn(new TableColumn("[bold]Total[/]").RightAligned());
+
+		var maxCredit = decimal.MinValue;
+		var maxCreditPrice = 0m;
+
+		// Precompute all rows to find the max
+		var rows = new List<(decimal price, decimal oldVal, decimal newVal, decimal credit)>();
+		for (var p = minPrice; p <= maxPrice; p += step)
+		{
+			var oldDte = (oldExpiry.Date - today).TotalDays / 365.0;
+			var newDte = (newExpiry.Date - today).TotalDays / 365.0;
+			var oldVal = OptionMath.BlackScholes(p, oldParsed.Strike, oldDte, rfr, oldIv.Value, oldParsed.CallPut);
+			var newVal = OptionMath.BlackScholes(p, newParsed.Strike, newDte, rfr, newIv.Value, newParsed.CallPut);
+			var credit = newVal - oldVal;
+			rows.Add((p, oldVal, newVal, credit));
+			if (credit > maxCredit) { maxCredit = credit; maxCreditPrice = p; }
+		}
+
+		foreach (var (price, oldVal, newVal, credit) in rows)
+		{
+			var isMax = credit == maxCredit;
+			var isCurrent = Math.Abs(price - spot) < step / 2;
+			var prefix = isMax && isCurrent ? "[bold green]>*[/]" : isMax ? "[bold green] *[/]" : isCurrent ? "[bold] >[/]" : "  ";
+			var creditColor = credit >= 0 ? "green" : "red";
+			var total = credit * qty * 100m;
+			var totalColor = total >= 0 ? "green" : "red";
+			table.AddRow($"{prefix}${price:N2}", $"${oldVal:N4}", $"${newVal:N4}", $"[{creditColor}]${credit:N4}[/]", $"[{totalColor}]{(total >= 0 ? "+" : "")}${total:N2}[/]");
+		}
+
+		AnsiConsole.Write(table);
+		Console.WriteLine($"  * = max credit (${maxCredit:N4} @ ${maxCreditPrice:N2})    > = current price");
+		Console.WriteLine();
+
+		return 0;
 	}
 
 	private static bool NeedsMarketPrices(string tradesSpec) =>
