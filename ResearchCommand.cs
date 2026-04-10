@@ -8,7 +8,7 @@ namespace WebullAnalytics;
 
 class ResearchSettings : ReportSettings
 {
-	[Description("Hypothetical trades to include. Format: SYMBOL:PRICExQTY where PRICE is a number (positive=buy, negative=sell) or -/+BID/MID/ASK for market prices. QTY is optional (default 1). Comma-separated for multiple. Example: GME260501C00023000:-MIDx300")]
+	[Description("Hypothetical trades to include. Format: SYMBOL:PRICExQTY where PRICE is a number (positive=sell/credit, negative=buy/debit) or -/+BID/MID/ASK for market prices. QTY is optional (default 1). Comma-separated for multiple. Example: GME260501C00023000:-MIDx300")]
 	[CommandOption("--trades")]
 	public string? Trades { get; set; }
 
@@ -380,7 +380,7 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 
 	private static decimal ResolvePrice(string priceStr, string symbol, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
-		var isSell = priceStr.StartsWith('-');
+		var isBuy = priceStr.StartsWith('-');
 		var unsigned = priceStr.TrimStart('-', '+');
 
 		if (!ResearchSettings.MarketPriceKeywords.Contains(unsigned))
@@ -397,7 +397,7 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 			_ => throw new InvalidOperationException($"Unknown price keyword '{unsigned}'")
 		};
 
-		return isSell ? -price : price;
+		return isBuy ? -price : price;
 	}
 
 	internal static List<Trade> ParseSyntheticTrades(string tradesSpec, int startSeq, DateTime baseTimestamp, IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
@@ -417,7 +417,7 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 
 			var signedPrice = ResolvePrice(priceStr, symbol, quotes);
 			var parsed = ParsingHelpers.ParseOptionSymbol(symbol)!;
-			var side = signedPrice > 0 ? Side.Buy : Side.Sell;
+			var side = signedPrice > 0 ? Side.Sell : Side.Buy;
 			var price = Math.Abs(signedPrice);
 			var timestamp = baseTimestamp.AddSeconds(seq - startSeq + 1);
 
