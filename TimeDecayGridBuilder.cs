@@ -70,7 +70,7 @@ internal static class TimeDecayGridBuilder
 	/// </summary>
 	private static List<DateTime> BuildDateColumns(DateTime expiry, int maxColumns)
 	{
-		var today = DateTime.Today;
+		var today = EvaluationDate.Today;
 		var totalDays = (int)(expiry.Date - today).TotalDays;
 		if (totalDays <= 0) return [today + OptionMath.MarketOpen, expiry.Date + OptionMath.MarketClose];
 

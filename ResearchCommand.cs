@@ -16,6 +16,12 @@ class ResearchSettings : ReportSettings
 	[CommandOption("--roll")]
 	public string? Roll { get; set; }
 
+	[Description("Override 'today' for evaluation. Simulates running on a different date (e.g., after short leg expiration). Format: YYYY-MM-DD")]
+	[CommandOption("--date")]
+	public string? Date { get; set; }
+
+	internal DateTime? EvaluationDateOverride => Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
+
 	internal static readonly HashSet<string> MarketPriceKeywords = new(StringComparer.OrdinalIgnoreCase) { "BID", "MID", "ASK" };
 
 	public override ValidationResult Validate()
@@ -73,6 +79,9 @@ class ResearchSettings : ReportSettings
 				return ValidationResult.Error($"--roll: invalid quantity '{qtyStr}'");
 		}
 
+		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+			return ValidationResult.Error("--date must be in YYYY-MM-DD format");
+
 		return ValidationResult.Success();
 	}
 }
@@ -83,6 +92,12 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
+
+		if (settings.EvaluationDateOverride.HasValue)
+		{
+			EvaluationDate.Set(settings.EvaluationDateOverride.Value);
+			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
+		}
 
 		if (!string.IsNullOrEmpty(settings.Roll))
 		{
@@ -197,7 +212,7 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 		var minPrice = Math.Min(strike, center) - padding;
 		var maxPrice = Math.Max(strike, center) + padding;
 
-		var today = DateTime.Today;
+		var today = EvaluationDate.Today;
 		var oldExpiry = oldParsed.ExpiryDate;
 		var newExpiry = newParsed.ExpiryDate;
 		var rfr = OptionMath.RiskFreeRate;
