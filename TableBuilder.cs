@@ -377,7 +377,7 @@ public static class TableBuilder
 			if (b.TotalNetDebit.HasValue)
 			{
 				var initDebit = b.InitNetDebit ?? (b.PositionSide == Side.Buy ? 1m : -1m) * b.InitPrice * b.Qty * 100m;
-				var initQty = b.InitNetDebit.HasValue ? (int)Math.Round(Math.Abs(b.InitNetDebit.Value) / (b.InitPrice * 100m)) : b.Qty;
+				var initQty = b.InitNetDebit.HasValue && b.InitPrice != 0 ? (int)Math.Round(Math.Abs(b.InitNetDebit.Value) / (b.InitPrice * 100m)) : b.Qty;
 				var initDebitLabel = initDebit >= 0 ? "Init Net Debit" : "Init Net Credit";
 				var initDebitText = Math.Abs(initDebit).ToString("N2", CultureInfo.InvariantCulture);
 				items.Add(new Text($"{initDebitLabel}: ${initDebitText} {(ascii ? "/" : "÷")} ({initQty} x $100) = ${initText}/contract"));
@@ -407,6 +407,13 @@ public static class TableBuilder
 				var adjAmount = totalAdj.ToString("N2", CultureInfo.InvariantCulture);
 				items.Add(new Text($"Adj = ${initText} - ${adjAmount} {(ascii ? "/" : "÷")} {b.Qty} = ${adjText}"));
 			}
+		}
+		else if (b.TotalNetDebit.HasValue)
+		{
+			var netDebit = b.TotalNetDebit.Value;
+			var label = netDebit >= 0 ? "Net Debit" : "Net Credit";
+			var debitText = Math.Abs(netDebit).ToString("N2", CultureInfo.InvariantCulture);
+			items.Add(new Text($"{label}: ${debitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${initText}/contract"));
 		}
 		else
 		{

@@ -154,26 +154,8 @@ internal static class StrategyGrouper
 				remaindersByKey[key] = entry;
 		}
 
-		// Merge remainders into existing strategy groups when ALL legs have remainders.
-		// This handles lots entered via standalone trades (no ParentStrategySeq) or linked to
-		// expired legs — they belong with the strategy group rather than forming a separate one.
-		// When only SOME legs have remainders, merging would create unbalanced legs, so those
-		// remainders go to fallback grouping instead (e.g., 299 orphaned longs pair with 299 shorts).
-		foreach (var group in grouped)
-		{
-			if (!group.All(leg => remaindersByKey.ContainsKey(leg.matchKey))) continue;
-			for (int li = 0; li < group.Count; li++)
-			{
-				var leg = group[li];
-				var rem = remaindersByKey[leg.matchKey];
-				var combinedQty = leg.row.Qty + rem.row.Qty;
-				var combinedAvg = (leg.row.AvgPrice * leg.row.Qty + rem.row.AvgPrice * rem.row.Qty) / combinedQty;
-				group[li] = (leg.matchKey, leg.row with { Qty = combinedQty, AvgPrice = combinedAvg }, leg.trade);
-				remaindersByKey.Remove(leg.matchKey);
-			}
-		}
-
-		// Fallback grouping: group ungrouped options that form calendars/diagonals/verticals
+		// Fallback grouping: group ungrouped options that form calendars/diagonals/verticals.
+		// Remainders (lots not allocated to primary groups) flow here for balanced grouping.
 		var ungroupedOptions = allPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey))
 			.Concat(remaindersByKey.Values)
 			.ToList();
@@ -189,7 +171,31 @@ internal static class StrategyGrouper
 		foreach (var group in byRootCallPut)
 		{
 			var entries = group.Select(x => x.entry).ToList();
-			grouped.Add(entries);
+			var minQty = entries.Min(e => e.row.Qty);
+
+			var balanced = new List<(string matchKey, PositionRow row, Trade? trade)>();
+			foreach (var e in entries)
+			{
+				if (e.row.Qty <= minQty)
+					balanced.Add(e);
+				else
+				{
+					// Split avg prices using FIFO lots: balanced gets earlier lots, excess gets later lots.
+					var lots = positions.GetValueOrDefault(e.matchKey, []);
+					var balQty = 0; var balValue = 0m; var exQty = 0; var exValue = 0m;
+					foreach (var lot in lots)
+					{
+						var toBal = Math.Min(lot.Qty, minQty - balQty);
+						if (toBal > 0) { balQty += toBal; balValue += lot.Price * toBal; }
+						var toEx = lot.Qty - toBal;
+						if (toEx > 0) { exQty += toEx; exValue += lot.Price * toEx; }
+					}
+					balanced.Add((e.matchKey, e.row with { Qty = minQty, AvgPrice = balQty > 0 ? balValue / balQty : e.row.AvgPrice }, e.trade));
+					grouped.Add(new List<(string, PositionRow, Trade?)> { (e.matchKey, e.row with { Qty = e.row.Qty - minQty, AvgPrice = exQty > 0 ? exValue / exQty : e.row.AvgPrice }, e.trade) });
+				}
+			}
+
+			grouped.Add(balanced);
 			foreach (var e in entries) fallbackGrouped.Add(e.matchKey);
 		}
 
@@ -348,18 +354,19 @@ internal static class StrategyGrouper
 		var strategyKind = ParsingHelpers.ClassifyStrategyKind(parsedLegs.Count, distinctExpiries, distinctStrikes, distinctCallPut);
 		var qty = group[0].row.Qty;
 
-		// For pure multi-batch groups, compute adj from blended parent strategy trade prices
-		// (avoids FIFO distortion of leg-level avg prices) and init from the first batch entry.
+		// For pure groups, compute adj from parent strategy trade prices (immune to lot contamination).
+		// For multi-batch, init = first batch entry; single-batch, init = same as adj.
 		var netInitial = group.Sum(leg => leg.row.Side == Side.Buy ? leg.row.AvgPrice : -leg.row.AvgPrice);
 		decimal? pureInitOverride = null;
-		if (pureSeqs != null && pureSeqs.Count > 1)
+		if (pureSeqs != null)
 		{
 			var parentTrades = allTrades.Where(t => pureSeqs.Contains(t.Seq) && t.Asset == Asset.OptionStrategy).OrderBy(t => t.Timestamp).ToList();
 			if (parentTrades.Count > 0)
 			{
 				var totalQty = parentTrades.Sum(p => p.Qty);
 				netInitial = parentTrades.Sum(p => (p.Side == Side.Buy ? p.Price : -p.Price) * p.Qty) / totalQty;
-				pureInitOverride = parentTrades[0].Side == Side.Buy ? parentTrades[0].Price : -parentTrades[0].Price;
+				if (pureSeqs.Count > 1)
+					pureInitOverride = parentTrades[0].Side == Side.Buy ? parentTrades[0].Price : -parentTrades[0].Price;
 			}
 		}
 
@@ -371,14 +378,16 @@ internal static class StrategyGrouper
 		if (excludedParentSeqs != null)
 		{
 			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
-			var replay = ReplayTimeline(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut, excludedParentSeqs);
+			var qtyLimits = group.ToDictionary(g => g.matchKey, g => g.row.Qty);
+			var replay = ReplayTimeline(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut, excludedParentSeqs, qtyLimits);
 
 			// Detect incomplete replays: if the replay is missing key trades (e.g., entry
 			// trades excluded as belonging to a pure sibling group), the debit/credit direction
 			// will disagree with the leg-based pricing. Fall back to leg-based pricing.
 			var replayNetAdjusted = replay.TotalNetDebit / (qty * 100m);
-			var replayUsable = (replay.LastFlatTime != null || excludedParentSeqs.Count == 0)
-				&& !(netInitial != 0 && replayNetAdjusted != 0 && Math.Sign(replayNetAdjusted) != Math.Sign(netInitial));
+			// qtyLimits scopes the replay to the group's allocation, so a flat time isn't
+			// required to validate completeness. Only reject on sign mismatch (incomplete data).
+			var replayUsable = !(netInitial != 0 && replayNetAdjusted != 0 && Math.Sign(replayNetAdjusted) != Math.Sign(netInitial));
 			if (replayUsable)
 			{
 				adjustment = replay;
@@ -425,15 +434,67 @@ internal static class StrategyGrouper
 						var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{firstParsed.Root}";
 						var lastEntryTime = parentTrades.Max(t => t.Timestamp);
 
-						var standaloneTrades = allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && !t.ParentStrategySeq.HasValue && t.Timestamp > lastEntryTime && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(s => t.MatchKey.EndsWith(s, StringComparison.Ordinal))).ToList();
+						var standaloneTrades = allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && !t.ParentStrategySeq.HasValue && t.Timestamp > lastEntryTime && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(s => t.MatchKey.EndsWith(s, StringComparison.Ordinal))).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
+
+						// Apply qtyLimits to standalone trades: exclude trades that push any
+						// matchKey beyond the group's allocation (e.g., synthetic excess).
+						if (standaloneTrades.Count > 0)
+						{
+							var saQtyTrack = new Dictionary<string, int>();
+							standaloneTrades = standaloneTrades.Where(t =>
+							{
+								if (!qtyLimits.TryGetValue(t.MatchKey, out var saLimit)) return true;
+								var saDelta = t.Side == Side.Buy ? t.Qty : -t.Qty;
+								var saNew = saQtyTrack.GetValueOrDefault(t.MatchKey) + saDelta;
+								if (Math.Abs(saNew) > saLimit) return false;
+								saQtyTrack[t.MatchKey] = saNew;
+								return true;
+							}).ToList();
+						}
+
+						// Build adjustment with parent entry + standalone roll trades
+						var adjTrades = new List<NetDebitTrade>();
+						decimal adjDebit = 0m;
+						foreach (var pt in parentTrades)
+						{
+							var ptCash = (pt.Side == Side.Buy ? -1m : 1m) * pt.Qty * pt.Price * pt.Multiplier;
+							adjDebit -= ptCash;
+							adjTrades.Add(new NetDebitTrade(pt.Timestamp, pt.Instrument, pt.Side, pt.Qty, pt.Price, ptCash));
+						}
+						foreach (var st in standaloneTrades)
+						{
+							var stCash = (st.Side == Side.Buy ? -1m : 1m) * st.Qty * st.Price * st.Multiplier;
+							adjDebit -= stCash;
+							adjTrades.Add(new NetDebitTrade(st.Timestamp, st.Instrument, st.Side, st.Qty, st.Price, stCash));
+						}
+
 						if (standaloneTrades.Count > 0)
 						{
 							var totalCredit = standaloneTrades.Sum(t => (t.Side == Side.Sell ? 1m : -1m) * t.Qty * t.Price * t.Multiplier);
 							var creditQty = standaloneTrades.Max(t => t.Qty);
-							netAdjusted = entryPrice - totalCredit / (creditQty * Trade.OptionMultiplier);
+							netAdjusted = entryPrice - totalCredit / (creditQty * standaloneTrades[0].Multiplier);
 						}
+
+						var initDebitInherited = parentTrades.Sum(p => (p.Side == Side.Buy ? 1m : -1m) * p.Qty * p.Price * p.Multiplier);
+						adjustment = new StrategyAdjustment(adjTrades, adjDebit, null, initDebitInherited);
 					}
 				}
+			}
+		}
+
+		// For strategies without replay data (pure or unusable replay), compute trades directly.
+		// Pure strategies filter by pureSeqs to exclude trades from other groups sharing the same matchKey.
+		if (adjustment == null)
+		{
+			var legMatchKeys = group.Select(g => g.matchKey).ToHashSet();
+			var filterByPureSeqs = pureSeqs != null && pureSeqs.Count > 0;
+			var ownTrades = allTrades.Where(t => legMatchKeys.Contains(t.MatchKey) && t.Side is Side.Buy or Side.Sell && t.Asset == Asset.Option && (!filterByPureSeqs || (t.ParentStrategySeq.HasValue && pureSeqs!.Contains(t.ParentStrategySeq.Value)))).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).Select(t => new NetDebitTrade(t.Timestamp, t.Instrument, t.Side, t.Qty, t.Price, (t.Side == Side.Buy ? -1m : 1m) * t.Qty * t.Price * t.Multiplier)).ToList();
+			if (ownTrades.Count >= 2)
+			{
+				var totalDebit = ownTrades.Sum(t => -t.CashImpact);
+				var firstTs = ownTrades[0].Timestamp;
+				var initDebit = ownTrades.TakeWhile(t => t.Timestamp == firstTs).Sum(t => -t.CashImpact);
+				adjustment = new StrategyAdjustment(ownTrades, totalDebit, null, initDebit);
 			}
 		}
 
@@ -460,7 +521,7 @@ internal static class StrategyGrouper
 	/// a trade-by-trade breakdown. Expands strikes transitively through strategy parent relationships
 	/// and finds the last point where all related positions were flat.
 	/// </summary>
-	private static StrategyAdjustment ReplayTimeline(List<Trade> allTrades, string root, List<decimal> strikes, string callPut, HashSet<int>? excludedParentSeqs = null)
+	private static StrategyAdjustment ReplayTimeline(List<Trade> allTrades, string root, List<decimal> strikes, string callPut, HashSet<int>? excludedParentSeqs = null, Dictionary<string, int>? qtyLimits = null)
 	{
 		var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{root}";
 
@@ -505,7 +566,8 @@ internal static class StrategyGrouper
 
 		legEvents.Sort((a, b) => { var cmp = a.Timestamp.CompareTo(b.Timestamp); return cmp != 0 ? cmp : a.Seq.CompareTo(b.Seq); });
 
-		// Walk events chronologically to find the last point where all positions were flat
+		// Walk events chronologically to find the last point where all positions were flat.
+		// This uses the FULL unfiltered event list — qtyLimits must not interfere here.
 		var positions = new Dictionary<string, int>();
 		DateTime lastFlatTime = DateTime.MinValue;
 		int lastFlatSeq = int.MinValue;
@@ -532,15 +594,36 @@ internal static class StrategyGrouper
 			}
 		}
 
-		// Sum cash flows and collect trade details since the last flat point
+		// Sum cash flows since the last flat point, applying qtyLimits to cap each leg's
+		// contribution to the group's allocated qty. Trades exceeding the limit are partially
+		// included (pro-rated) so that e.g. a 450-contract buy only contributes 300 to a
+		// 300-contract strategy. This prevents trades belonging to other groups from polluting
+		// this strategy's adjusted price.
 		var trades = new List<NetDebitTrade>();
 		decimal totalDebit = 0m;
+		var qtyTracking = qtyLimits != null ? new Dictionary<string, int>() : null;
 
 		foreach (var e in legEvents.Where(e => !e.IsExpiry && (e.Timestamp > lastFlatTime || (e.Timestamp == lastFlatTime && e.Seq > lastFlatSeq))))
 		{
-			var cashImpact = (e.Side == Side.Buy ? -1m : 1m) * e.Qty * e.Price * e.Multiplier;
+			var qty = e.Qty;
+			if (qtyTracking != null && qtyLimits!.TryGetValue(e.MatchKey, out var limit))
+			{
+				var currentPos = qtyTracking.GetValueOrDefault(e.MatchKey);
+				var delta = e.Side == Side.Buy ? qty : -qty;
+				var newPos = currentPos + delta;
+				if (Math.Abs(newPos) > limit)
+				{
+					var allowedPos = delta > 0 ? limit : -limit;
+					qty = Math.Abs(allowedPos - currentPos);
+					newPos = allowedPos;
+				}
+				if (qty <= 0) continue;
+				qtyTracking[e.MatchKey] = newPos;
+			}
+
+			var cashImpact = (e.Side == Side.Buy ? -1m : 1m) * qty * e.Price * e.Multiplier;
 			totalDebit -= cashImpact;
-			trades.Add(new NetDebitTrade(e.Timestamp, e.Instrument, e.Side, e.Qty, e.Price, cashImpact));
+			trades.Add(new NetDebitTrade(e.Timestamp, e.Instrument, e.Side, qty, e.Price, cashImpact));
 		}
 
 		return new StrategyAdjustment(trades, totalDebit, lastFlatTime == DateTime.MinValue ? null : lastFlatTime);
