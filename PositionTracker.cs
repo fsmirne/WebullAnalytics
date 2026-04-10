@@ -144,7 +144,7 @@ public static class PositionTracker
 			return [];
 
 		var maxSeq = trades.Max(t => t.Seq);
-		var today = DateTime.Today;
+		var today = EvaluationDate.Today;
 		var seq = maxSeq + 1;
 
 		var uniqueExpired = trades.Where(t => t.Expiry.HasValue && t.Expiry.Value.Date < today).GroupBy(t => t.MatchKey).Select(g => g.First()).ToList();

@@ -114,7 +114,7 @@ public static class BreakEvenAnalyzer
 		ladder.Reverse();
 		var chartData = OptionMath.BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
-		var dte = row.Expiry.HasValue ? (int)(row.Expiry.Value.Date - DateTime.Today).TotalDays : (int?)null;
+		var dte = row.Expiry.HasValue ? (int)(row.Expiry.Value.Date - EvaluationDate.Today).TotalDays : (int?)null;
 
 		EarlyExerciseBoundary? earlyExercise = null;
 		var iv = OptionMath.GetLegIv(row.Side, symbol, opts);
@@ -198,7 +198,7 @@ public static class BreakEvenAnalyzer
 
 			if (l.row.Side == Side.Buy && legIv.HasValue)
 			{
-				var legDte = (l.parsed.ExpiryDate.Date - DateTime.Today).TotalDays;
+				var legDte = (l.parsed.ExpiryDate.Date - EvaluationDate.Today).TotalDays;
 				if (legDte > 0)
 				{
 					var boundary = BjerksundStensland.ComputeExerciseBoundary(l.parsed.Strike, legDte / 365.0, OptionMath.RiskFreeRate, (double)legIv.Value, l.parsed.CallPut);
@@ -211,7 +211,7 @@ public static class BreakEvenAnalyzer
 
 		var isTimeSpread = expiries.Count > 1;
 		var nearestExpiry = expiries[0];
-		var dte = (int)(nearestExpiry.Date - DateTime.Today).TotalDays;
+		var dte = (int)(nearestExpiry.Date - EvaluationDate.Today).TotalDays;
 
 		var breakEvens = new List<decimal>();
 		decimal? maxProfit = null;

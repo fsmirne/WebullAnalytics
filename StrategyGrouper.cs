@@ -552,7 +552,7 @@ internal static class StrategyGrouper
 		}
 
 		var occSuffixes = expandedStrikes.Select(s => $"{callPut}{(long)(s * 1000m):D8}").ToHashSet();
-		var today = DateTime.Today;
+		var today = EvaluationDate.Today;
 
 		var legEvents = optionBuySellTrades
 			.Where(t => t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(suffix => t.MatchKey.EndsWith(suffix, StringComparison.Ordinal)))

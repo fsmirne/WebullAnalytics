@@ -159,7 +159,7 @@ public static class TableBuilder
 			{
 				var ex = result.EarlyExercise;
 				var direction = ex.IsCall ? "above" : "below";
-				var transitionDate = DateTime.Today.AddDays(ex.TransitionDays).ToString("dd MMM yyyy");
+				var transitionDate = EvaluationDate.Today.AddDays(ex.TransitionDays).ToString("dd MMM yyyy");
 				items.Add(new Markup($"[yellow]Early Exercise: {direction} ${ex.BoundaryNear.ToString("N2", CultureInfo.InvariantCulture)} until {Markup.Escape(transitionDate)}, then {direction} ${ex.BoundaryFar.ToString("N2", CultureInfo.InvariantCulture)}[/]"));
 			}
 
@@ -471,7 +471,7 @@ public static class TableBuilder
 		if (positions.Count == 0)
 			return null;
 
-		var now = DateTime.Now;
+		var now = EvaluationDate.Now;
 		decimal total = 0;
 		bool anyPriced = false;
 

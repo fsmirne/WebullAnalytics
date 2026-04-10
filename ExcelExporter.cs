@@ -398,7 +398,7 @@ public static class ExcelExporter
 				{
 					var ex = result.EarlyExercise;
 					var direction = ex.IsCall ? "above" : "below";
-					var transitionDate = DateTime.Today.AddDays(ex.TransitionDays).ToString("dd MMM yyyy");
+					var transitionDate = EvaluationDate.Today.AddDays(ex.TransitionDays).ToString("dd MMM yyyy");
 					sheet.Cells[row, 1].Value = "Early Exercise:";
 					sheet.Cells[row, 2].Value = $"{direction} ${ex.BoundaryNear:N2} until {transitionDate}";
 					sheet.Cells[row, 3].Value = "then:";
