@@ -341,7 +341,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		return 0;
 	}
 
-	private static Dictionary<string, decimal> ParseUnderlyingPriceOverrides(string input)
+	internal static Dictionary<string, decimal> ParseUnderlyingPriceOverrides(string input)
 	{
 		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		foreach (var pair in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -355,7 +355,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		return result;
 	}
 
-	private static Dictionary<string, decimal> ParseIvOverrides(string input)
+	internal static Dictionary<string, decimal> ParseIvOverrides(string input)
 	{
 		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		foreach (var pair in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
