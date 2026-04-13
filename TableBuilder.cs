@@ -506,7 +506,7 @@ public static class TableBuilder
 				currentValue = (quote.Bid.Value + quote.Ask.Value) / 2m;
 			}
 
-			var premium = pos.AdjustedAvgPrice ?? pos.AvgPrice;
+			var premium = pos.InitialAvgPrice ?? pos.AvgPrice;
 			var multiplier = pos.Asset == Asset.Stock ? Trade.StockMultiplier : Trade.OptionMultiplier;
 			var unrealized = pos.Side == Side.Buy ? (currentValue - premium) * pos.Qty * multiplier : (premium - currentValue) * pos.Qty * multiplier;
 			total += unrealized;
