@@ -13,6 +13,7 @@
 		"api": "yahoo",
 		"range": 2,
 		"display": "value",
+		"grid": "simple",
 		"theoretical": false,
 		"notablePrices": null,
 		"tickers": null

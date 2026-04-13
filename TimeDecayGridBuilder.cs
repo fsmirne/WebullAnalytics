@@ -16,6 +16,8 @@ internal static class TimeDecayGridBuilder
 
 		var values = new decimal[priceRows.Count, dates.Count];
 		var pnls = new decimal[priceRows.Count, dates.Count];
+		var includeLegs = legs.Count > 1;
+		var legValues = includeLegs ? new decimal[legs.Count, priceRows.Count, dates.Count] : null;
 
 		for (int di = 0; di < dates.Count; di++)
 		{
@@ -23,12 +25,30 @@ internal static class TimeDecayGridBuilder
 			for (int pi = 0; pi < priceRows.Count; pi++)
 			{
 				var price = priceRows[pi];
-				var totalPnL = legs.Sum(l => OptionMath.LegPnLWithBs(price, l.parsed, l.symbol, l.row.Side, qty, OptionMath.GetPremium(l.row), evalDate, opts));
+				decimal totalPnL = 0m;
+				for (int li = 0; li < legs.Count; li++)
+				{
+					var l = legs[li];
+					totalPnL += OptionMath.LegPnLWithBs(price, l.parsed, l.symbol, l.row.Side, qty, OptionMath.GetPremium(l.row), evalDate, opts);
+					if (legValues != null)
+						legValues[li, pi, di] = Math.Round(OptionMath.LegContractValueWithBs(price, l.parsed, l.symbol, l.row.Side, evalDate, opts), 4);
+				}
 
 				var value = parentSide == Side.Buy ? netPremium + totalPnL / (qty * 100m) : netPremium - totalPnL / (qty * 100m);
 				values[pi, di] = Math.Round(value, 4);
 				var displayValue = Math.Round(value, 2);
 				pnls[pi, di] = parentSide == Side.Buy ? Math.Round((displayValue - netPremium) * qty * 100m, 2) : Math.Round((netPremium - displayValue) * qty * 100m, 2);
+			}
+		}
+
+		List<string>? legLabels = null;
+		if (includeLegs)
+		{
+			legLabels = new List<string>(legs.Count);
+			foreach (var l in legs)
+			{
+				var sideStr = l.row.Side == Side.Buy ? "L" : "S";
+				legLabels.Add($"{sideStr}{l.parsed.CallPut}{l.parsed.Strike.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}");
 			}
 		}
 
@@ -61,7 +81,7 @@ internal static class TimeDecayGridBuilder
 			}
 		}
 
-		return new TimeDecayGrid(dates, priceRows, values, pnls, strikes);
+		return new TimeDecayGrid(dates, priceRows, values, pnls, strikes, legValues, legLabels);
 	}
 
 	/// <summary>

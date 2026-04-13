@@ -58,6 +58,13 @@ class ReportSettings : CommandSettings
 	[DefaultValue("value")]
 	public string DisplayMode { get; set; } = "value";
 
+	[Description("Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg contract values before the net, e.g. '1.23/0.45/$0.78')")]
+	[CommandOption("--grid")]
+	[DefaultValue("simple")]
+	public string Grid { get; set; } = "simple";
+
+	public bool ShowLegs => Grid.Equals("verbose", StringComparison.OrdinalIgnoreCase);
+
 	[Description("Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88). Comma-separated for multiple tickers (e.g., GME:24.88,SPY:580.50)")]
 	[CommandOption("--current-underlying-price")]
 	public string? CurrentUnderlyingPrice { get; set; }
@@ -97,6 +104,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("api") && cfg.TryGetString("api", out var api)) Api = api;
 		if (!Program.HasCliOption("range") && cfg.TryGetDecimal("range", out var range)) Range = range;
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
+		if (!Program.HasCliOption("grid") && cfg.TryGetString("grid", out var grid)) Grid = grid;
 		if (!Program.HasCliOption("current-underlying-price") && cfg.TryGetString("currentUnderlyingPrice", out var cup)) CurrentUnderlyingPrice = cup;
 		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
 		if (!Program.HasCliOption("notable-prices") && cfg.TryGetString("notablePrices", out var notablePrices)) NotablePrices = notablePrices;
@@ -132,6 +140,10 @@ class ReportSettings : CommandSettings
 		var display = DisplayMode.ToLowerInvariant();
 		if (display is not ("value" or "pnl"))
 			return ValidationResult.Error("--display must be 'value' or 'pnl'");
+
+		var grid = Grid.ToLowerInvariant();
+		if (grid is not ("simple" or "verbose"))
+			return ValidationResult.Error("--grid must be 'simple' or 'verbose'");
 
 		if (Api != null && Api.ToLowerInvariant() is not ("yahoo" or "webull"))
 			return ValidationResult.Error("--api must be 'yahoo' or 'webull'");
@@ -329,12 +341,12 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				break;
 
 			case "text":
-				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns);
+				TextFileExporter.ExportToTextFile(rows, positionRows, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns, settings.ShowLegs);
 				break;
 
 			default:
 				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal);
-				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns);
+				TableRenderer.RenderReport(rows, positionRows, running, initialAmount, settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns, settings.ShowLegs);
 				break;
 		}
 

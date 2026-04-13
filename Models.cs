@@ -175,7 +175,9 @@ public record PricePnL(decimal UnderlyingPrice, decimal PnL, decimal? ContractVa
 /// <param name="Values">Contract value per share at [priceIdx, dateIdx]</param>
 /// <param name="PnLs">Total P&L at [priceIdx, dateIdx]</param>
 /// <param name="Strikes">Strike prices of the legs</param>
-public record TimeDecayGrid(List<DateTime> DateColumns, List<decimal> PriceRows, decimal[,] Values, decimal[,] PnLs, List<decimal> Strikes);
+/// <param name="LegValues">Per-leg Black-Scholes contract value (per share) at [legIdx, priceIdx, dateIdx]. null for single-leg grids.</param>
+/// <param name="LegLabels">Short labels for each leg (e.g., "Buy C25", "Sell C30"), aligned with LegValues' first dimension.</param>
+public record TimeDecayGrid(List<DateTime> DateColumns, List<decimal> PriceRows, decimal[,] Values, decimal[,] PnLs, List<decimal> Strikes, decimal[,,]? LegValues = null, List<string>? LegLabels = null);
 
 /// <summary>
 /// Early exercise boundary from Bjerksund-Stensland 2002 approximation.
