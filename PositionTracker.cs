@@ -256,8 +256,8 @@ public static class PositionTracker
 	{
 		var avgCosts = ComputeAverageCosts(allTrades);
 		var allPositions = BuildRawPositionRows(positions, tradeIndex, avgCosts);
-		var grouped = StrategyGrouper.GroupIntoStrategies(allPositions, positions);
-		return StrategyGrouper.BuildFinalPositionRows(grouped, allTrades, positions);
+		var (grouped, foreignKeys, brandNewGroups) = StrategyGrouper.GroupIntoStrategies(allPositions, positions);
+		return StrategyGrouper.BuildFinalPositionRows(grouped, allTrades, positions, foreignKeys, brandNewGroups);
 	}
 
 	/// <summary>Computes average cost per position using the average cost method.</summary>

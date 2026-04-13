@@ -10,9 +10,11 @@ internal static class StrategyGrouper
 	/// Groups option positions into strategies using trade relationships.
 	/// Legs that share a ParentStrategySeq in their lots were traded together as part of the same strategy.
 	/// </summary>
-	internal static List<List<(string matchKey, PositionRow row, Trade? trade)>> GroupIntoStrategies(List<(string matchKey, PositionRow row, Trade? trade)> allPositions, Dictionary<string, List<Lot>> positions)
+	internal static (List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, Dictionary<List<(string matchKey, PositionRow row, Trade? trade)>, HashSet<string>> foreignKeysByGroup, HashSet<List<(string matchKey, PositionRow row, Trade? trade)>> brandNewGroups) GroupIntoStrategies(List<(string matchKey, PositionRow row, Trade? trade)> allPositions, Dictionary<string, List<Lot>> positions)
 	{
 		var grouped = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
+		var foreignKeysByGroup = new Dictionary<List<(string matchKey, PositionRow row, Trade? trade)>, HashSet<string>>(ReferenceEqualityComparer.Instance);
+		var brandNewGroups = new HashSet<List<(string matchKey, PositionRow row, Trade? trade)>>(ReferenceEqualityComparer.Instance);
 		var processed = new HashSet<string>();
 
 		// Build reverse index: parentSeq → set of option matchKeys whose lots reference it
@@ -171,32 +173,74 @@ internal static class StrategyGrouper
 		foreach (var group in byRootCallPut)
 		{
 			var entries = group.Select(x => x.entry).ToList();
-			var minQty = entries.Min(e => e.row.Qty);
+			foreach (var e in entries) fallbackGrouped.Add(e.matchKey);
 
-			var balanced = new List<(string matchKey, PositionRow row, Trade? trade)>();
-			foreach (var e in entries)
+			var buys = entries.Where(e => e.row.Side == Side.Buy).ToList();
+			var sells = entries.Where(e => e.row.Side == Side.Sell).ToList();
+
+			// Single-side group (rare — e.g., two shorts at different strikes): preserve legacy
+			// "balance to minQty" behavior since there's no buy↔sell pairing to do.
+			if (buys.Count == 0 || sells.Count == 0)
 			{
-				if (e.row.Qty <= minQty)
-					balanced.Add(e);
-				else
-				{
-					// Split avg prices using FIFO lots: balanced gets earlier lots, excess gets later lots.
-					var lots = positions.GetValueOrDefault(e.matchKey, []);
-					var balQty = 0; var balValue = 0m; var exQty = 0; var exValue = 0m;
-					foreach (var lot in lots)
-					{
-						var toBal = Math.Min(lot.Qty, minQty - balQty);
-						if (toBal > 0) { balQty += toBal; balValue += lot.Price * toBal; }
-						var toEx = lot.Qty - toBal;
-						if (toEx > 0) { exQty += toEx; exValue += lot.Price * toEx; }
-					}
-					balanced.Add((e.matchKey, e.row with { Qty = minQty, AvgPrice = balQty > 0 ? balValue / balQty : e.row.AvgPrice }, e.trade));
-					grouped.Add(new List<(string, PositionRow, Trade?)> { (e.matchKey, e.row with { Qty = e.row.Qty - minQty, AvgPrice = exQty > 0 ? exValue / exQty : e.row.AvgPrice }, e.trade) });
-				}
+				BalanceToMinQty(entries, positions, grouped);
+				continue;
 			}
 
-			grouped.Add(balanced);
-			foreach (var e in entries) fallbackGrouped.Add(e.matchKey);
+			// Greedy pair buys with sells: match exact-qty first to form 2-leg strategies
+			// (vertical/calendar/diagonal). Remaining qty from each leg becomes standalone.
+			// Tracks consumed qty per matchKey so each pair draws FIFO-ordered lots.
+			var partitionKeys = entries.Select(e => e.matchKey).ToHashSet();
+			var remaining = entries.ToDictionary(e => e.matchKey, e => e.row.Qty);
+			var consumed = entries.ToDictionary(e => e.matchKey, _ => 0);
+			var createdPairs = new List<List<(string, PositionRow, Trade?)>>();
+
+			while (buys.Any(b => remaining[b.matchKey] > 0) && sells.Any(s => remaining[s.matchKey] > 0))
+			{
+				var buy = buys.Where(b => remaining[b.matchKey] > 0).OrderByDescending(b => remaining[b.matchKey]).First();
+				var buyQty = remaining[buy.matchKey];
+				var availableSells = sells.Where(s => remaining[s.matchKey] > 0).ToList();
+				var exactMatchIdx = availableSells.FindIndex(s => remaining[s.matchKey] == buyQty);
+				var sell = exactMatchIdx >= 0 ? availableSells[exactMatchIdx] : availableSells.OrderByDescending(s => remaining[s.matchKey]).First();
+				var pairQty = Math.Min(buyQty, remaining[sell.matchKey]);
+
+				var pair = new List<(string, PositionRow, Trade?)>
+				{
+					SliceEntry(buy, positions, consumed[buy.matchKey], pairQty),
+					SliceEntry(sell, positions, consumed[sell.matchKey], pairQty),
+				};
+				grouped.Add(pair);
+				createdPairs.Add(pair);
+
+				// A pair is "brand new" if every allocated lot on both legs has no parentStrategySeq
+				// (pure synthetic / standalone entry with no roll history). Such groups need no replay —
+				// their adjusted price equals the blended entry price from allocated lots.
+				if (AllocationHasNoParentSeq(positions.GetValueOrDefault(buy.matchKey, []), consumed[buy.matchKey], pairQty)
+					&& AllocationHasNoParentSeq(positions.GetValueOrDefault(sell.matchKey, []), consumed[sell.matchKey], pairQty))
+					brandNewGroups.Add(pair);
+
+				consumed[buy.matchKey] += pairQty;
+				consumed[sell.matchKey] += pairQty;
+				remaining[buy.matchKey] -= pairQty;
+				remaining[sell.matchKey] -= pairQty;
+			}
+
+			// Record foreign matchKeys per pair: matchKeys from sibling pairs in the same partition.
+			// Used by ReplayTimeline to exclude trades that belong to another group's allocation,
+			// preventing synthetic trades in one pair from polluting another pair's adjusted price.
+			foreach (var pair in createdPairs)
+			{
+				var pairKeys = pair.Select(p => p.Item1).ToHashSet();
+				var foreign = partitionKeys.Where(k => !pairKeys.Contains(k)).ToHashSet();
+				if (foreign.Count > 0)
+					foreignKeysByGroup[pair] = foreign;
+			}
+
+			// Remaining qty (unmatched side) becomes standalone
+			foreach (var e in entries)
+			{
+				if (remaining[e.matchKey] > 0)
+					grouped.Add(new List<(string, PositionRow, Trade?)> { SliceEntry(e, positions, consumed[e.matchKey], remaining[e.matchKey]) });
+			}
 		}
 
 		// Add remaining unprocessed options as standalone
@@ -212,14 +256,79 @@ internal static class StrategyGrouper
 			return cmp != 0 ? cmp : string.Compare(a[0].row.Instrument, b[0].row.Instrument, StringComparison.Ordinal);
 		});
 
-		return grouped;
+		return (grouped, foreignKeysByGroup, brandNewGroups);
+	}
+
+	/// <summary>
+	/// Returns an entry representing a FIFO-ordered slice of the source entry's lots: skip the first
+	/// <paramref name="offset"/> contracts, then take <paramref name="qty"/>. AvgPrice is computed
+	/// from the sliced lots' prices.
+	/// </summary>
+	private static (string matchKey, PositionRow row, Trade? trade) SliceEntry((string matchKey, PositionRow row, Trade? trade) entry, Dictionary<string, List<Lot>> positions, int offset, int qty)
+	{
+		if (qty == entry.row.Qty && offset == 0) return entry;
+
+		var lots = positions.GetValueOrDefault(entry.matchKey, []);
+		var skip = offset; var remaining = qty; var total = 0m; var taken = 0;
+		foreach (var lot in lots)
+		{
+			var available = lot.Qty;
+			if (skip > 0) { var s = Math.Min(skip, available); skip -= s; available -= s; }
+			if (available == 0 || remaining == 0) continue;
+			var take = Math.Min(available, remaining);
+			total += lot.Price * take; taken += take; remaining -= take;
+			if (remaining == 0) break;
+		}
+		var avg = taken > 0 ? total / taken : entry.row.AvgPrice;
+		return (entry.matchKey, entry.row with { Qty = qty, AvgPrice = avg }, entry.trade);
+	}
+
+	/// <summary>
+	/// Returns true if every lot in the FIFO window [offset, offset+qty) has no ParentStrategySeq.
+	/// Used to detect brand-new fallback pairs whose allocated lots came from standalone/synthetic
+	/// trades only (no rolling history worth replaying).
+	/// </summary>
+	private static bool AllocationHasNoParentSeq(List<Lot> lots, int offset, int qty)
+	{
+		var skip = offset; var remaining = qty;
+		foreach (var lot in lots)
+		{
+			var available = lot.Qty;
+			if (skip > 0) { var s = Math.Min(skip, available); skip -= s; available -= s; }
+			if (available == 0 || remaining == 0) continue;
+			if (lot.ParentStrategySeq != null) return false;
+			remaining -= Math.Min(available, remaining);
+			if (remaining == 0) break;
+		}
+		return true;
+	}
+
+	/// <summary>
+	/// Legacy fallback balancing used for single-side groups: caps every entry to the minimum qty
+	/// and emits the excess as standalone groups.
+	/// </summary>
+	private static void BalanceToMinQty(List<(string matchKey, PositionRow row, Trade? trade)> entries, Dictionary<string, List<Lot>> positions, List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped)
+	{
+		var minQty = entries.Min(e => e.row.Qty);
+		var balanced = new List<(string matchKey, PositionRow row, Trade? trade)>();
+		foreach (var e in entries)
+		{
+			if (e.row.Qty <= minQty)
+				balanced.Add(e);
+			else
+			{
+				balanced.Add(SliceEntry(e, positions, 0, minQty));
+				grouped.Add(new List<(string, PositionRow, Trade?)> { SliceEntry(e, positions, minQty, e.row.Qty - minQty) });
+			}
+		}
+		grouped.Add(balanced);
 	}
 
 	/// <summary>
 	/// Builds the final position rows, creating strategy summary rows for multi-leg positions.
 	/// Returns the rows and a dictionary of pre-computed timeline replays keyed by summary row index.
 	/// </summary>
-	internal static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments) BuildFinalPositionRows(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, List<Trade> allTrades, Dictionary<string, List<Lot>> positions)
+	internal static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments) BuildFinalPositionRows(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, List<Trade> allTrades, Dictionary<string, List<Lot>> positions, Dictionary<List<(string matchKey, PositionRow row, Trade? trade)>, HashSet<string>>? foreignKeysByGroup = null, HashSet<List<(string matchKey, PositionRow row, Trade? trade)>>? brandNewGroups = null)
 	{
 		var tradeBySeq = allTrades.Where(t => t.Asset == Asset.OptionStrategy).ToDictionary(t => t.Seq);
 
@@ -250,7 +359,9 @@ internal static class StrategyGrouper
 			if (group.Count > 1)
 			{
 				var summaryIndex = rows.Count;
-				var (strategyRows, adjustment) = BuildStrategyRows(group, allTrades, isPure[i] ? null : pureParentSeqs, isPure[i] ? pureSeqsByGroup[i] : null);
+				var foreign = foreignKeysByGroup != null && foreignKeysByGroup.TryGetValue(group, out var fk) ? fk : null;
+				var isBrandNew = brandNewGroups != null && brandNewGroups.Contains(group);
+				var (strategyRows, adjustment) = BuildStrategyRows(group, allTrades, isBrandNew ? null : (isPure[i] ? null : pureParentSeqs), isPure[i] ? pureSeqsByGroup[i] : null, foreign, isBrandNew);
 				rows.AddRange(strategyRows);
 				if (adjustment != null)
 					adjustments[summaryIndex] = adjustment;
@@ -386,7 +497,7 @@ internal static class StrategyGrouper
 	/// For pure strategies with multiple entry batches, the set of parent trade seqs.
 	/// Used to compute init price from strategy-level prices instead of FIFO-distorted leg prices.
 	/// </param>
-	private static (List<PositionRow> rows, StrategyAdjustment? adjustment) BuildStrategyRows(List<(string matchKey, PositionRow row, Trade? trade)> group, List<Trade> allTrades, HashSet<int>? excludedParentSeqs, HashSet<int>? pureSeqs = null)
+	private static (List<PositionRow> rows, StrategyAdjustment? adjustment) BuildStrategyRows(List<(string matchKey, PositionRow row, Trade? trade)> group, List<Trade> allTrades, HashSet<int>? excludedParentSeqs, HashSet<int>? pureSeqs = null, HashSet<string>? foreignMatchKeys = null, bool isBrandNewFallback = false)
 	{
 		var rows = new List<PositionRow>();
 
@@ -431,6 +542,11 @@ internal static class StrategyGrouper
 		{
 			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
 			var qtyLimits = group.ToDictionary(g => g.matchKey, g => g.row.Qty);
+			// Foreign matchKeys (sibling-group legs) get limit=0 so their trades are excluded from
+			// this group's replay, preventing cross-contamination between fallback-paired groups.
+			if (foreignMatchKeys != null)
+				foreach (var fk in foreignMatchKeys)
+					qtyLimits.TryAdd(fk, 0);
 			var replay = ReplayTimeline(allTrades, firstParsed.Root, legStrikes, firstParsed.CallPut, excludedParentSeqs, qtyLimits);
 
 			// Detect incomplete replays: if the replay is missing key trades (e.g., entry
@@ -536,16 +652,20 @@ internal static class StrategyGrouper
 
 		// For strategies without replay data (pure or unusable replay), compute trades directly.
 		// Pure strategies filter by pureSeqs to exclude trades from other groups sharing the same matchKey.
+		// Brand-new fallback pairs filter to only synthetic trades (no parentSeq) since their allocated
+		// lots came from standalone entries — historical trades with parentSeq belong to closed strategies.
 		if (adjustment == null)
 		{
 			var legMatchKeys = group.Select(g => g.matchKey).ToHashSet();
 			var filterByPureSeqs = pureSeqs != null && pureSeqs.Count > 0;
-			var ownTrades = allTrades.Where(t => legMatchKeys.Contains(t.MatchKey) && t.Side is Side.Buy or Side.Sell && t.Asset == Asset.Option && (!filterByPureSeqs || (t.ParentStrategySeq.HasValue && pureSeqs!.Contains(t.ParentStrategySeq.Value)))).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).Select(t => new NetDebitTrade(t.Timestamp, t.Instrument, t.Side, t.Qty, t.Price, (t.Side == Side.Buy ? -1m : 1m) * t.Qty * t.Price * t.Multiplier)).ToList();
+			var ownTrades = allTrades.Where(t => legMatchKeys.Contains(t.MatchKey) && t.Side is Side.Buy or Side.Sell && t.Asset == Asset.Option && (!filterByPureSeqs || (t.ParentStrategySeq.HasValue && pureSeqs!.Contains(t.ParentStrategySeq.Value))) && (!isBrandNewFallback || !t.ParentStrategySeq.HasValue)).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).Select(t => new NetDebitTrade(t.Timestamp, t.Instrument, t.Side, t.Qty, t.Price, (t.Side == Side.Buy ? -1m : 1m) * t.Qty * t.Price * t.Multiplier)).ToList();
 			if (ownTrades.Count >= 2)
 			{
 				var totalDebit = ownTrades.Sum(t => -t.CashImpact);
 				var firstTs = ownTrades[0].Timestamp;
-				var initDebit = ownTrades.TakeWhile(t => t.Timestamp == firstTs).Sum(t => -t.CashImpact);
+				// Brand-new fallback: all ownTrades ARE the entry, so initDebit equals totalDebit
+				// (no later rolling/adjustment trades). Otherwise, initDebit is just the first batch.
+				var initDebit = isBrandNewFallback ? totalDebit : ownTrades.TakeWhile(t => t.Timestamp == firstTs).Sum(t => -t.CashImpact);
 				adjustment = new StrategyAdjustment(ownTrades, totalDebit, null, initDebit);
 			}
 		}
