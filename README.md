@@ -111,8 +111,17 @@ WebullAnalytics report --api yahoo --iv GME260213C00025000:60
 # Show P&L instead of contract value in the grid
 WebullAnalytics report --api yahoo --display pnl
 
+# Show each leg's contract value alongside the net in every grid cell
+WebullAnalytics report --api yahoo --grid verbose
+
 # Increase grid granularity (more rows between strikes, default: 2)
 WebullAnalytics report --api yahoo --range 4
+
+# Override the current underlying price (for "what-if" evaluation)
+WebullAnalytics report --api yahoo --current-underlying-price GME:24.88,SPY:580.50
+
+# Use Black-Scholes theoretical prices instead of market mid for today's grid column
+WebullAnalytics report --api yahoo --theoretical
 
 # Add custom notable prices to break-even reports (e.g., support/resistance levels)
 WebullAnalytics report --notable-prices GME:20/25/30
@@ -136,6 +145,7 @@ Options:
   --api <source>            Option chain data source for break-even analysis: 'yahoo' or 'webull' (webull requires sniffed headers)
   --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
+  --grid <layout>           Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg values '1.23|0.45|$0.78')
   --current-underlying-price <prices>  Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
   --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
   --notable-prices <prices> Additional prices to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
@@ -203,7 +213,7 @@ WebullAnalytics research --roll "GME260410C00023000>GME260417C00023500x300"
 WebullAnalytics research --roll "GME260410C00023000>GME260417C00023000x300" --iv GME260410C00023000:37,GME260417C00023000:31
 ```
 
-The output is a 2D grid of roll credits across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows the close/open/net values, color-coded green for credit and red for debit. The current price row is marked with `>` and the optimal credit with `*`. Live market credit from bid/ask quotes is shown below the grid.
+The output is a 2D grid of roll credits across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-credit cell (globally) in **bold underline green**, and any row whose max credit matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
 
 Notable prices from `--notable-prices` are included as additional rows in the grid.
 
@@ -346,11 +356,12 @@ An optional `data/config.json` file provides default values for command-line opt
     "outputPath": null,
     "initialAmount": 0,
     "view": "detailed",
-    "api": "yahoo",
+    "currentUnderlyingPrice": null,
     "iv": null,
+    "api": "yahoo",
     "range": 2,
     "display": "value",
-    "currentUnderlyingPrice": null,
+    "grid": "simple",
     "theoretical": false,
     "notablePrices": null,
     "tickers": null
@@ -428,9 +439,10 @@ This format is useful for sharing reports via email, archiving, or importing int
 When implied volatility is available (via `--api` or `--iv` overrides), the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
 
 - **Date columns**: Evenly-spaced dates from today through expiration, evaluated at market open (9:30 AM). The last two columns show expiration day at market open (with remaining intraday time value via Black-Scholes) and "At Exp" at market close (4:30 PM, intrinsic value only). The number of columns adapts to the terminal width — dates are skipped as needed so the grid never overflows horizontally.
-- **Price rows**: Step size is derived from the position's strike spacing (or strike-to-break-even distance for single-strike positions like calendars), so the grid adapts to any stock price. The `--range` parameter controls granularity — it sets how many rows fit per strike gap (default: 2). Break-even prices (marked with `*`) and strike prices are always included, with 2 padding rows beyond the outermost notable price.
+- **Price rows**: Step size is derived from the position's strike spacing (or strike-to-break-even distance for single-strike positions like calendars), so the grid adapts to any stock price. The `--range` parameter controls granularity — it sets how many rows fit per strike gap (default: 2). Break-even prices (marked with `*`) and strike prices are always included, with 2 padding rows beyond the outermost notable price. The current underlying-price row is marked with `>` and rendered in bold yellow.
 - **Display modes**: `--display value` (default) shows the contract value per share; `--display pnl` shows total P&L.
-- **Cell colors**: Green for profit, red for loss.
+- **Cell layout**: `--grid simple` (default) shows one value per cell (the net). `--grid verbose` prefixes each cell with the per-share Black-Scholes contract value of every leg, separated by `|` — e.g. `1.23|0.45|$0.78` for a two-leg spread. Leg order matches the leg descriptions shown above the grid, and a legend below repeats the order (e.g. `LC23|SC23.5|Net`).
+- **Cell colors**: Green for profit, red for loss. Legs in verbose mode render in grey.
 - **Calendar/diagonal spreads**: The grid ends at the short leg's expiration. The long leg's remaining time value is reflected via Black-Scholes pricing at each date, including the "At Exp" column.
 
 Without implied volatility data, the existing 1D price ladder (Price | Value | P&L at expiration) is shown instead.
