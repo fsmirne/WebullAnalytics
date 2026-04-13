@@ -119,7 +119,7 @@ public static class TableBuilder
 		return table;
 	}
 
-	public static Panel BuildBreakEvenPanel(BreakEvenResult result, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false, string displayMode = "pnl")
+	public static Panel BuildBreakEvenPanel(BreakEvenResult result, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false, string displayMode = "pnl", bool showLegs = false)
 	{
 		var dteText = result.DaysToExpiry.HasValue ? result.DaysToExpiry.Value.ToString() : (ascii ? "-" : "—");
 		var sep = ascii ? "|" : "│";
@@ -167,7 +167,13 @@ public static class TableBuilder
 
 			if (result.Grid != null)
 			{
-				items.Add(BuildTimeDecayGridTable(result.Grid, result.BreakEvens, result.UnderlyingPrice, displayMode, tableBorder));
+				var gridShowLegs = showLegs && result.Grid.LegValues != null;
+				items.Add(BuildTimeDecayGridTable(result.Grid, result.BreakEvens, result.UnderlyingPrice, displayMode, tableBorder, gridShowLegs));
+				if (gridShowLegs && result.Grid.LegLabels != null)
+				{
+					var legendOrder = string.Join("/", result.Grid.LegLabels);
+					items.Add(new Markup($"[dim]Each cell: {Markup.Escape(legendOrder)}/Net (per share). Legs are Black-Scholes contract values.[/]"));
+				}
 			}
 			else
 			{
@@ -249,9 +255,10 @@ public static class TableBuilder
 		return new Markup(markup);
 	}
 
-	private static Table BuildTimeDecayGridTable(TimeDecayGrid grid, List<decimal> breakEvens, decimal? underlyingPrice, string displayMode, TableBorder? tableBorder)
+	private static Table BuildTimeDecayGridTable(TimeDecayGrid grid, List<decimal> breakEvens, decimal? underlyingPrice, string displayMode, TableBorder? tableBorder, bool showLegs = false)
 	{
 		var showPnL = displayMode == "pnl";
+		var legCount = showLegs && grid.LegValues != null ? grid.LegValues.GetLength(0) : 0;
 		var table = new Table();
 		if (tableBorder != null) table.Border = tableBorder;
 
@@ -261,6 +268,27 @@ public static class TableBuilder
 			var label = date == grid.DateColumns[^1] ? "At Exp" : date.ToString("dd MMM", CultureInfo.InvariantCulture);
 			table.AddColumn(new TableColumn(label).RightAligned());
 		}
+
+		// Pre-format all leg/net text and compute per-segment max widths so that slashes line up vertically across rows.
+		// Use a figure space (U+2007) for padding: it is the width of a digit in monospace fonts and is not collapsed by Spectre's markup renderer.
+		string NetTextAt(int pi, int di) => showPnL ? FormatLadderPnL(grid.PnLs[pi, di]) : $"${grid.Values[pi, di].ToString("N2", CultureInfo.InvariantCulture)}";
+		string LegTextAt(int li, int pi, int di) => grid.LegValues![li, pi, di].ToString("N2", CultureInfo.InvariantCulture);
+
+		var legWidths = new int[Math.Max(legCount, 0)];
+		var netWidth = 0;
+		if (legCount > 0)
+		{
+			for (int pi = 0; pi < grid.PriceRows.Count; pi++)
+			{
+				for (int di = 0; di < grid.DateColumns.Count; di++)
+				{
+					for (int li = 0; li < legCount; li++)
+						legWidths[li] = Math.Max(legWidths[li], LegTextAt(li, pi, di).Length);
+					netWidth = Math.Max(netWidth, NetTextAt(pi, di).Length);
+				}
+			}
+		}
+		const char pad = '\u2007';
 
 		for (int pi = 0; pi < grid.PriceRows.Count; pi++)
 		{
@@ -273,21 +301,21 @@ public static class TableBuilder
 			var cells = new List<IRenderable> { isCurrentPrice ? new Markup($"[bold yellow]{Markup.Escape(priceText)}[/]") : new Text(priceText) };
 			for (int di = 0; di < grid.DateColumns.Count; di++)
 			{
-				var cellValue = showPnL ? grid.PnLs[pi, di] : grid.Values[pi, di];
-				string cellText;
+				var netText = NetTextAt(pi, di);
+				var pnl = grid.PnLs[pi, di];
+				var netColor = isCurrentPrice ? "bold yellow" : (pnl >= 0 ? "green" : "red");
 
-				if (showPnL)
-					cellText = FormatLadderPnL(cellValue);
-				else
-					cellText = $"${cellValue.ToString("N2", CultureInfo.InvariantCulture)}";
-
-				if (isCurrentPrice)
-					cells.Add(new Markup($"[bold yellow]{Markup.Escape(cellText)}[/]"));
+				if (legCount > 0)
+				{
+					var parts = new List<string>(legCount + 1);
+					for (int li = 0; li < legCount; li++)
+						parts.Add($"[grey]{Markup.Escape(LegTextAt(li, pi, di).PadLeft(legWidths[li], pad))}[/]");
+					parts.Add($"[{netColor}]{Markup.Escape(netText.PadLeft(netWidth, pad))}[/]");
+					cells.Add(new Markup(string.Join("/", parts)));
+				}
 				else
 				{
-					var pnl = grid.PnLs[pi, di];
-					var color = pnl >= 0 ? "green" : "red";
-					cells.Add(new Markup($"[{color}]{Markup.Escape(cellText)}[/]"));
+					cells.Add(new Markup($"[{netColor}]{Markup.Escape(netText)}[/]"));
 				}
 			}
 			table.AddRow(cells.ToArray());
@@ -521,11 +549,13 @@ public static class TableBuilder
 	/// Layout: panel borders (4) + table outer borders (2) + price column (11) + N × date column (15 for pnl, 10 for value).
 	/// Each Spectre table column = content + 2 padding + 1 separator.
 	/// </summary>
-	public static int ComputeMaxGridColumns(int totalWidth, string displayMode)
+	public static int ComputeMaxGridColumns(int totalWidth, string displayMode, bool showLegs = false)
 	{
 		// panel left/right border+padding (4) + table outer left+right borders (2) + price column (content 8 + pad 2 + sep 1 = 11)
 		const int fixedOverhead = 4 + 2 + 11;
-		var colWidth = displayMode == "pnl" ? 15 : 10; // pnl: "$+1,520.00" (10) + 2 pad + 1 sep; value: "$25.38" (6) + 2 pad + 1 sep
+		var netWidth = displayMode == "pnl" ? 12 : 7; // pnl: "$+1,520.00" (10) + 2 pad + 1 sep; value: "$25.38" (6) + 2 pad + 1 sep
+		// When showing legs, conservatively budget for two leg cells per column (~6 chars each + slash); larger spreads will simply consume more horizontal space.
+		var colWidth = showLegs ? netWidth + 14 : netWidth + 3;
 		var available = totalWidth - fixedOverhead;
 		return Math.Max(3, available / colWidth); // minimum 3: today, expiry open, at exp
 	}

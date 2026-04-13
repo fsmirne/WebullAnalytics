@@ -9,7 +9,7 @@ public static class TableRenderer
 {
 	private const string LegPrefix = "  └─ ";
 
-	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null)
+	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null, bool showLegs = false)
 	{
 		var console = AnsiConsole.Console;
 
@@ -30,11 +30,11 @@ public static class TableRenderer
 				}
 			}
 
-			var maxGridColumns = ComputeMaxGridColumns(displayMode);
+			var maxGridColumns = ComputeMaxGridColumns(displayMode, showLegs);
 			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns);
 			foreach (var result in breakEvens)
 			{
-				console.Write(TableBuilder.BuildBreakEvenPanel(result, displayMode: displayMode));
+				console.Write(TableBuilder.BuildBreakEvenPanel(result, displayMode: displayMode, showLegs: showLegs));
 				console.WriteLine();
 			}
 		}
@@ -50,11 +50,11 @@ public static class TableRenderer
 	/// <summary>
 	/// Computes the maximum number of date columns that fit in the terminal width.
 	/// </summary>
-	private static int ComputeMaxGridColumns(string displayMode)
+	private static int ComputeMaxGridColumns(string displayMode, bool showLegs)
 	{
 		int terminalWidth;
 		try { terminalWidth = Console.WindowWidth; }
 		catch { return 7; }
-		return TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode);
+		return TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs);
 	}
 }

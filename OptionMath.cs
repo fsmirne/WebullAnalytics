@@ -66,22 +66,26 @@ internal static class OptionMath
 	/// </summary>
 	internal static decimal LegPnLWithBs(decimal underlyingPrice, OptionParsed parsed, string symbol, Side side, int qty, decimal premium, DateTime evaluationDate, AnalysisOptions opts)
 	{
-		decimal legValue;
+		var legValue = LegContractValueWithBs(underlyingPrice, parsed, symbol, side, evaluationDate, opts);
+		var pnlPerContract = side == Side.Buy ? legValue - premium : premium - legValue;
+		return pnlPerContract * qty * 100;
+	}
+
+	/// <summary>
+	/// Computes the per-share contract value for a single leg at a given underlying price and date,
+	/// using Black-Scholes when the leg has remaining time and IV is available, intrinsic otherwise.
+	/// </summary>
+	internal static decimal LegContractValueWithBs(decimal underlyingPrice, OptionParsed parsed, string symbol, Side side, DateTime evaluationDate, AnalysisOptions opts)
+	{
 		var expirationTime = parsed.ExpiryDate.Date + MarketClose;
 		var iv = GetLegIv(side, symbol, opts);
 
 		if (iv.HasValue && evaluationDate < expirationTime)
 		{
 			var timeYears = (expirationTime - evaluationDate).TotalDays / 365.0;
-			legValue = BlackScholes(underlyingPrice, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
+			return BlackScholes(underlyingPrice, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
 		}
-		else
-		{
-			legValue = Intrinsic(underlyingPrice, parsed.Strike, parsed.CallPut);
-		}
-
-		var pnlPerContract = side == Side.Buy ? legValue - premium : premium - legValue;
-		return pnlPerContract * qty * 100;
+		return Intrinsic(underlyingPrice, parsed.Strike, parsed.CallPut);
 	}
 
 	/// <summary>Computes total P&L at expiration for all legs (intrinsic value only).</summary>
