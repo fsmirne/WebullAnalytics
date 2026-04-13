@@ -171,8 +171,8 @@ public static class TableBuilder
 				items.Add(BuildTimeDecayGridTable(result.Grid, result.BreakEvens, result.UnderlyingPrice, displayMode, tableBorder, gridShowLegs));
 				if (gridShowLegs && result.Grid.LegLabels != null)
 				{
-					var legendOrder = string.Join("/", result.Grid.LegLabels);
-					items.Add(new Markup($"[dim]Each cell: {Markup.Escape(legendOrder)}/Net (per share). Legs are Black-Scholes contract values.[/]"));
+					var legendOrder = string.Join("|", result.Grid.LegLabels);
+					items.Add(new Markup($"[dim]Each cell: {Markup.Escape(legendOrder)}|Net (per share). Legs are Black-Scholes contract values.[/]"));
 				}
 			}
 			else
@@ -311,7 +311,7 @@ public static class TableBuilder
 					for (int li = 0; li < legCount; li++)
 						parts.Add($"[grey]{Markup.Escape(LegTextAt(li, pi, di).PadLeft(legWidths[li], pad))}[/]");
 					parts.Add($"[{netColor}]{Markup.Escape(netText.PadLeft(netWidth, pad))}[/]");
-					cells.Add(new Markup(string.Join("/", parts)));
+					cells.Add(new Markup(string.Join("|", parts)));
 				}
 				else
 				{

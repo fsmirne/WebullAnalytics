@@ -319,14 +319,26 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 				if (creditGrid[pi, di] > maxCredit) { maxCredit = creditGrid[pi, di]; maxCreditPrice = priceList[pi]; maxCreditDate = evalTimes[di]; }
 			}
 
+		// Right-pad old, new, and credit text to uniform widths with figure spaces so the '|' separators align vertically.
+		int oldWidth = 0, newWidth = 0, creditWidth = 0;
+		for (int pi = 0; pi < priceList.Count; pi++)
+			for (int di = 0; di < evalTimes.Count; di++)
+			{
+				oldWidth = Math.Max(oldWidth, oldGrid[pi, di].ToString("N2").Length);
+				newWidth = Math.Max(newWidth, newGrid[pi, di].ToString("N2").Length);
+				var c = creditGrid[pi, di];
+				var sign = Math.Round(c, 2) >= 0 ? "+" : "";
+				creditWidth = Math.Max(creditWidth, $"{sign}{c:N2}".Length);
+			}
+		const char pad = '\u2007';
+
 		for (int pi = 0; pi < priceList.Count; pi++)
 		{
 			var isCurrent = priceList[pi] == Math.Round(spot, 2);
 			var isMaxRow = Enumerable.Range(0, evalTimes.Count).Any(di => creditGrid[pi, di] == maxCredit);
 			var priceStr = $"${priceList[pi]:N2}";
-			if (isMaxRow && isCurrent) priceStr = $"[bold green]{priceStr}[/]";
+			if (isCurrent) priceStr = $"[bold yellow]{priceStr}[/]";
 			else if (isMaxRow) priceStr = $"[green]{priceStr}[/]";
-			else if (isCurrent) priceStr = $"[bold]{priceStr}[/]";
 
 			var cells = new List<string> { priceStr };
 			for (int di = 0; di < evalTimes.Count; di++)
@@ -335,16 +347,22 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 				var isGlobalMax = c == maxCredit;
 				var creditColor = c >= 0 ? "green" : "red";
 				var creditSign = Math.Round(c, 2) >= 0 ? "+" : "";
-				var creditStr = isGlobalMax ? $"[bold underline {creditColor}]{creditSign}{c:N2}[/]" : $"[{creditColor}]{creditSign}{c:N2}[/]";
-				cells.Add($"[grey]{oldGrid[pi, di]:N2}[/]/[grey]{newGrid[pi, di]:N2}[/]/{creditStr}");
+				var creditText = $"{creditSign}{c:N2}".PadLeft(creditWidth, pad);
+				string creditStr;
+				if (isCurrent) creditStr = $"[bold yellow]{creditText}[/]";
+				else if (isGlobalMax) creditStr = $"[bold underline {creditColor}]{creditText}[/]";
+				else creditStr = $"[{creditColor}]{creditText}[/]";
+				var oldText = oldGrid[pi, di].ToString("N2").PadLeft(oldWidth, pad);
+				var newText = newGrid[pi, di].ToString("N2").PadLeft(newWidth, pad);
+				cells.Add($"[grey]{oldText}[/]|[grey]{newText}[/]|{creditStr}");
 			}
 			table.AddRow(cells.ToArray());
 		}
 
 		AnsiConsole.Write(table);
 		var maxDateLabel = isIntraday ? $"at {maxCreditDate:h:mm tt}" : $"on {maxCreditDate:dd MMM}";
-		Console.WriteLine($"  * = max credit (${maxCredit:N4} @ ${maxCreditPrice:N2} {maxDateLabel})    > = current price");
-		Console.WriteLine($"  Each cell: Close / Open / Net per contract. Total for {qty}x: max ${maxCredit * qty * 100m:N2}");
+		AnsiConsole.MarkupLine($"  [bold underline green]max credit[/] (${maxCredit:N4} @ ${maxCreditPrice:N2} {maxDateLabel})    [bold yellow]current price[/]    [green]price with max credit[/]");
+		Console.WriteLine($"  Each cell: Close|Open|Net per contract. Total for {qty}x: max ${maxCredit * qty * 100m:N2}");
 		Console.WriteLine();
 
 		return 0;

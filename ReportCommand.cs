@@ -58,7 +58,7 @@ class ReportSettings : CommandSettings
 	[DefaultValue("value")]
 	public string DisplayMode { get; set; } = "value";
 
-	[Description("Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg contract values before the net, e.g. '1.23/0.45/$0.78')")]
+	[Description("Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg contract values before the net, e.g. '1.23|0.45|$0.78')")]
 	[CommandOption("--grid")]
 	[DefaultValue("simple")]
 	public string Grid { get; set; } = "simple";
