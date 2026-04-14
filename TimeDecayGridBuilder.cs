@@ -78,6 +78,24 @@ internal static class TimeDecayGridBuilder
 						pnls[pi, 0] = parentSide == Side.Buy ? Math.Round((adjDisplayValue - netPremium) * qty * 100, 2) : Math.Round((netPremium - adjDisplayValue) * qty * 100, 2);
 					}
 				}
+
+				// Anchor per-leg values to market mid as well.
+				if (legValues != null)
+				{
+					for (int li = 0; li < legs.Count; li++)
+					{
+						var l = legs[li];
+						if (!opts.OptionQuotes.TryGetValue(l.symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) continue;
+						var legMid = (q.Bid.Value + q.Ask.Value) / 2m;
+						var legBs = legValues[li, closestRow, 0];
+						var legAdj = legBs - legMid;
+						if (legAdj != 0)
+						{
+							for (int pi = 0; pi < priceRows.Count; pi++)
+								legValues[li, pi, 0] = Math.Round(legValues[li, pi, 0] - legAdj, 4);
+						}
+					}
+				}
 			}
 		}
 
