@@ -31,11 +31,11 @@ class SniffCommand : AsyncCommand<SniffSettings>
 		}
 
 		var sniffConfig = Program.LoadAppConfig("sniff");
-		var autoCloseEdge = sniffConfig != null && sniffConfig.TryGetBool("autoCloseEdge", out var ace) && ace;
+		var autoCloseBrowser = sniffConfig != null && sniffConfig.TryGetBool("autoCloseBrowser", out var acb) && acb;
 
 		try
 		{
-			var headers = await HeaderSniffer.CaptureAsync(config.Pin, autoCloseEdge, cancellation);
+			var headers = await HeaderSniffer.CaptureAsync(config.Pin, autoCloseBrowser, cancellation);
 			Console.WriteLine($"Captured {headers.Count} header(s).");
 
 			var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(configPath))!.AsObject();

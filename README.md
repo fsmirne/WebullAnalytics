@@ -63,6 +63,20 @@ build.bat
 
 The output will be in `bin\Release\net10.0\win-x64\publish\`.
 
+### Linux Installer
+
+Run `install.sh` to build a self-contained executable and add it to your PATH:
+
+```bash
+./install.sh
+```
+
+By default this installs to `~/.local/bin`. You can specify a custom directory:
+
+```bash
+./install.sh /opt/webull-analytics
+```
+
 ## Usage
 
 ### Commands
@@ -246,18 +260,22 @@ Reads API credentials from `data/api-config.json` and writes orders to `data/ord
 WebullAnalytics sniff
 ```
 
-Launches Microsoft Edge with remote debugging, navigates to Webull, enters your unlock PIN, and captures the API session headers from the network traffic. The captured headers are written directly into `data/api-config.json`, replacing the existing `headers` object.
+Launches a browser with remote debugging, navigates to Webull, enters your unlock PIN, and captures the API session headers from the network traffic. The captured headers are written directly into `data/api-config.json`, replacing the existing `headers` object.
+
+**Browser selection:**
+- **Windows**: Microsoft Edge
+- **Linux/macOS**: Microsoft Edge if installed, otherwise Firefox
 
 **Requirements:**
-- Microsoft Edge must be installed
-- Edge will be closed if running (prompts for confirmation)
+- A supported browser must be installed
+- The browser will be closed if running (prompts for confirmation)
 - The `pin` field must be set in `data/api-config.json`
 
 **Configuration** (in `config.json` under `"sniff"`):
 
 | Field | Description |
 |---|---|
-| `autoCloseEdge` | If `true`, closes Edge without prompting (default: `false`) |
+| `autoCloseBrowser` | If `true`, closes the browser without prompting (default: `false`) |
 
 ## Data Sources
 
@@ -367,7 +385,7 @@ An optional `data/config.json` file provides default values for command-line opt
     "tickers": null
   },
   "sniff": {
-    "autoCloseEdge": false
+    "autoCloseBrowser": false
   }
 }
 ```
