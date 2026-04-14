@@ -37,9 +37,9 @@ public static class HeaderSniffer
 			await CdpSend(ws, ++cmdId, "Runtime.enable", null, cancellation);
 			await CdpSend(ws, ++cmdId, "Network.enable", null, cancellation);
 
-			// Wait for the page to actually finish loading instead of a fixed delay.
+			// Poll readyState instead of waiting for Page.loadEventFired, which may have already fired before we connected.
 			Console.WriteLine("Waiting for page to load...");
-			await WaitForCdpEvent(ws, "Page.loadEventFired", TimeSpan.FromSeconds(30), cancellation);
+			cmdId = await WaitForPageReady(ws, cmdId, TimeSpan.FromSeconds(30), cancellation);
 
 			// Poll for the unlock link — SPAs may render asynchronously after load.
 			Console.WriteLine("Clicking unlock link...");
@@ -274,6 +274,36 @@ public static class HeaderSniffer
 		catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
 		{
 			throw new TimeoutException($"Timed out waiting for {eventName}.");
+		}
+	}
+
+	private static async Task<int> WaitForPageReady(ClientWebSocket ws, int cmdId, TimeSpan timeout, CancellationToken cancellation)
+	{
+		using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+		cts.CancelAfter(timeout);
+		try
+		{
+			while (true)
+			{
+				var id = ++cmdId;
+				await CdpSend(ws, id, "Runtime.evaluate", new { expression = "document.readyState", returnByValue = true }, cts.Token);
+				while (true)
+				{
+					var msg = await CdpReceive(ws, cts.Token);
+					if (msg == null) continue;
+					if (msg.Value.TryGetProperty("id", out var rid) && rid.GetInt32() == id)
+					{
+						if (msg.Value.TryGetProperty("result", out var res) && res.TryGetProperty("result", out var val) && val.TryGetProperty("value", out var v) && v.GetString() == "complete")
+							return cmdId;
+						break;
+					}
+				}
+				await Task.Delay(250, cts.Token);
+			}
+		}
+		catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+		{
+			throw new TimeoutException("Timed out waiting for page to finish loading.");
 		}
 	}
 
