@@ -19,6 +19,6 @@
 		"tickers": null
 	},
 	"sniff": {
-		"autoCloseEdge": false
+		"autoCloseBrowser": false
 	}
 }
