@@ -658,7 +658,31 @@ internal static class StrategyGrouper
 		{
 			var legMatchKeys = group.Select(g => g.matchKey).ToHashSet();
 			var filterByPureSeqs = pureSeqs != null && pureSeqs.Count > 0;
-			var ownTrades = allTrades.Where(t => legMatchKeys.Contains(t.MatchKey) && t.Side is Side.Buy or Side.Sell && t.Asset == Asset.Option && (!filterByPureSeqs || (t.ParentStrategySeq.HasValue && pureSeqs!.Contains(t.ParentStrategySeq.Value))) && (!isBrandNewFallback || !t.ParentStrategySeq.HasValue)).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).Select(t => new NetDebitTrade(t.Timestamp, t.Instrument, t.Side, t.Qty, t.Price, (t.Side == Side.Buy ? -1m : 1m) * t.Qty * t.Price * t.Multiplier)).ToList();
+			var rawOwnTrades = allTrades.Where(t => legMatchKeys.Contains(t.MatchKey) && t.Side is Side.Buy or Side.Sell && t.Asset == Asset.Option && (!filterByPureSeqs || (t.ParentStrategySeq.HasValue && pureSeqs!.Contains(t.ParentStrategySeq.Value))) && (!isBrandNewFallback || !t.ParentStrategySeq.HasValue)).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
+
+			// Brand-new fallback groups get FIFO-allocated lots from the END of the lot list.
+			// Skip earlier contracts per matchKey that belong to other groups sharing the key.
+			if (isBrandNewFallback)
+			{
+				var groupQtyPerKey = group.ToDictionary(g => g.matchKey, g => g.row.Qty);
+				var totalPerKey = rawOwnTrades.GroupBy(t => t.MatchKey).ToDictionary(g => g.Key, g => g.Sum(t => t.Qty));
+				var skipPerKey = legMatchKeys.ToDictionary(mk => mk, mk => totalPerKey.GetValueOrDefault(mk) - groupQtyPerKey.GetValueOrDefault(mk, 0));
+				if (skipPerKey.Values.Any(v => v > 0))
+				{
+					var skippedPerKey = new Dictionary<string, int>();
+					var filtered = new List<Trade>();
+					foreach (var t in rawOwnTrades)
+					{
+						var toSkip = skipPerKey.GetValueOrDefault(t.MatchKey) - skippedPerKey.GetValueOrDefault(t.MatchKey);
+						if (toSkip >= t.Qty) { skippedPerKey[t.MatchKey] = skippedPerKey.GetValueOrDefault(t.MatchKey) + t.Qty; continue; }
+						if (toSkip > 0) { skippedPerKey[t.MatchKey] = skippedPerKey.GetValueOrDefault(t.MatchKey) + toSkip; filtered.Add(t with { Qty = t.Qty - toSkip }); }
+						else filtered.Add(t);
+					}
+					rawOwnTrades = filtered;
+				}
+			}
+
+			var ownTrades = rawOwnTrades.Select(t => new NetDebitTrade(t.Timestamp, t.Instrument, t.Side, t.Qty, t.Price, (t.Side == Side.Buy ? -1m : 1m) * t.Qty * t.Price * t.Multiplier)).ToList();
 			if (ownTrades.Count >= 2)
 			{
 				var totalDebit = ownTrades.Sum(t => -t.CashImpact);
