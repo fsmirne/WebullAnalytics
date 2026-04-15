@@ -118,7 +118,7 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 			}
 
 			var maxSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
-			var baseTime = trades.Count > 0 ? trades.Max(t => t.Timestamp) : DateTime.Now;
+			var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : trades.Count > 0 ? trades.Max(t => t.Timestamp) : DateTime.Now;
 			trades.AddRange(ParseSyntheticTrades(settings.Trades, maxSeq, baseTime, quotes));
 		}
 
