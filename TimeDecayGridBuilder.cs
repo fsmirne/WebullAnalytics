@@ -36,7 +36,7 @@ internal static class TimeDecayGridBuilder
 
 				var value = parentSide == Side.Buy ? netPremium + totalPnL / (qty * 100m) : netPremium - totalPnL / (qty * 100m);
 				values[pi, di] = Math.Round(value, 4);
-				var displayValue = Math.Round(value, 2);
+				var displayValue = Math.Round(values[pi, di], 2, MidpointRounding.AwayFromZero);
 				pnls[pi, di] = parentSide == Side.Buy ? Math.Round((displayValue - netPremium) * qty * 100m, 2) : Math.Round((netPremium - displayValue) * qty * 100m, 2);
 			}
 		}
@@ -103,41 +103,73 @@ internal static class TimeDecayGridBuilder
 	}
 
 	/// <summary>
-	/// Generates ~7 evenly-spaced date columns from today to expiration.
+	/// Generates evenly-spaced date columns from today to expiration.
 	/// The last two columns are expiration day at market open and market close.
+	/// Slots are filled by priority: trading days first, then holidays, then weekends.
+	/// Each tier is shown in full before drawing from the next; within a tier, selection is evenly spaced.
 	/// </summary>
 	private static List<DateTime> BuildDateColumns(DateTime expiry, int maxColumns)
 	{
 		var today = EvaluationDate.Today;
-		var totalDays = (int)(expiry.Date - today).TotalDays;
-		if (totalDays <= 0) return [today + OptionMath.MarketOpen, expiry.Date + OptionMath.MarketClose];
+		if ((expiry.Date - today).TotalDays <= 0)
+			return [today + OptionMath.MarketOpen, expiry.Date + OptionMath.MarketClose];
 
-		var expiryOpen = expiry.Date + OptionMath.MarketOpen;
-		var expiryClose = expiry.Date + OptionMath.MarketClose;
+		// Classify every calendar day from today up to (not including) expiry by priority tier.
+		var tradingDays = new List<DateTime>();
+		var holidays    = new List<DateTime>();
+		var weekends    = new List<DateTime>();
+		for (var d = today; d.Date < expiry.Date; d = d.AddDays(1))
+		{
+			var dt = d.Date + OptionMath.MarketOpen;
+			if (MarketCalendar.IsOpen(d))                                                    tradingDays.Add(dt);
+			else if (d.DayOfWeek != DayOfWeek.Saturday && d.DayOfWeek != DayOfWeek.Sunday)  holidays.Add(dt);
+			else                                                                              weekends.Add(dt);
+		}
 
 		var interiorSlots = Math.Max(1, maxColumns - 2);
-		var dates = new List<DateTime>();
+		List<DateTime> selected;
 
-		if (totalDays <= interiorSlots)
+		var allCount = tradingDays.Count + holidays.Count + weekends.Count;
+		if (allCount <= interiorSlots)
 		{
-			for (int d = 0; d < totalDays; d++)
-				dates.Add(today.AddDays(d) + OptionMath.MarketOpen);
+			// Every calendar day fits — show them all.
+			selected = tradingDays.Concat(holidays).Concat(weekends).OrderBy(d => d).ToList();
+		}
+		else if (tradingDays.Count + holidays.Count <= interiorSlots)
+		{
+			// All trading days and holidays fit; fill remaining slots with evenly-spaced weekends.
+			var remaining = interiorSlots - tradingDays.Count - holidays.Count;
+			selected = tradingDays.Concat(holidays).Concat(EvenlySpaced(weekends, remaining)).OrderBy(d => d).ToList();
+		}
+		else if (tradingDays.Count <= interiorSlots)
+		{
+			// All trading days fit; fill remaining slots with evenly-spaced holidays.
+			var remaining = interiorSlots - tradingDays.Count;
+			selected = tradingDays.Concat(EvenlySpaced(holidays, remaining)).OrderBy(d => d).ToList();
 		}
 		else
 		{
-			for (int i = 0; i < interiorSlots; i++)
-			{
-				var dayOffset = (int)Math.Round((double)i * (totalDays - 1) / (interiorSlots - 1));
-				var date = today.AddDays(dayOffset);
-				if (date.Date >= expiry.Date) break;
-				dates.Add(date + OptionMath.MarketOpen);
-			}
+			// Too many trading days — select evenly-spaced trading days only.
+			selected = EvenlySpaced(tradingDays, interiorSlots);
 		}
 
-		dates.RemoveAll(d => d.Date >= expiry.Date);
-		dates.Add(expiryOpen);
-		dates.Add(expiryClose);
-		return dates;
+		selected.Add(expiry.Date + OptionMath.MarketOpen);
+		selected.Add(expiry.Date + OptionMath.MarketClose);
+		return selected;
+	}
+
+	/// <summary>
+	/// Selects <paramref name="count"/> evenly-spaced items from <paramref name="source"/> by index.
+	/// </summary>
+	private static List<DateTime> EvenlySpaced(List<DateTime> source, int count)
+	{
+		if (count <= 0 || source.Count == 0) return [];
+		if (count >= source.Count)           return [.. source];
+		if (count == 1)                      return [source[0]];
+		var result = new List<DateTime>(count);
+		for (int i = 0; i < count; i++)
+			result.Add(source[(int)Math.Round((double)i * (source.Count - 1) / (count - 1))]);
+		return result;
 	}
 
 	/// <summary>
