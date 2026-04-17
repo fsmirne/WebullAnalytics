@@ -64,24 +64,12 @@ internal static class AdjustmentReportBuilder
     private static List<CostStep> BuildCostSteps(string matchKey, List<Trade> allTrades)
     {
         var steps = new List<CostStep>();
-        int qty = 0;
-        decimal avg = 0m;
+        var state = (qty: 0, avg: 0m);
 
         foreach (var trade in allTrades.Where(t => t.MatchKey == matchKey && t.Side is Side.Buy or Side.Sell && t.Asset != Asset.OptionStrategy).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq))
         {
-            var tradeSign = trade.Side == Side.Buy ? 1 : -1;
-            var newQty = qty + tradeSign * trade.Qty;
-            var isOpening = qty == 0 || (qty > 0 && trade.Side == Side.Buy) || (qty < 0 && trade.Side == Side.Sell);
-
-            if (isOpening)
-                avg = (Math.Abs(qty) * avg + trade.Qty * trade.Price) / Math.Abs(newQty);
-            else if (newQty == 0)
-                avg = 0m;
-            else if ((qty > 0 && newQty < 0) || (qty < 0 && newQty > 0))
-                avg = trade.Price;
-
-            qty = newQty;
-            steps.Add(new CostStep(trade.Timestamp, trade.Instrument, trade.Side, trade.Qty, trade.Price, Math.Abs(qty), avg));
+            state = PositionTracker.StepAverageCost(state, trade.Side, trade.Qty, trade.Price);
+            steps.Add(new CostStep(trade.Timestamp, trade.Instrument, trade.Side, trade.Qty, trade.Price, Math.Abs(state.qty), state.avg));
         }
 
         return steps;

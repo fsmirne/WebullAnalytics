@@ -67,49 +67,39 @@ public static class PositionTracker
 		return feeLookup.GetValueOrDefault((trade.Timestamp, trade.Side, trade.Qty), 0m);
 	}
 
-	/// <summary>Processes a single trade, updating positions in-place.</summary>
+	/// <summary>
+	/// Processes a single trade. Non-parent trades mutate positions via FIFO. Strategy-parent trades
+	/// fold leg-level P&L; for expiry, they also eagerly consume leg positions (so the legs' own
+	/// expiry trades become no-ops); for buy/sell, leg trades (processed separately) do the mutation.
+	/// </summary>
 	private static (decimal realized, int closedQty) ProcessTrade(Trade trade, Dictionary<string, List<Lot>> positions, List<Trade> allTrades)
 	{
 		if (!IsStrategyParent(trade))
 			return ApplyTrade(positions, trade);
 
-		// Strategy parent expiration: expire each leg and sum P&L
-		if (trade.Side == Side.Expire)
+		var legs = Trade.GetLegs(allTrades, trade.Seq);
+		var isExpiry = trade.Side == Side.Expire;
+
+		if (isExpiry && legs.Count < 2)
 		{
-			var legs = Trade.GetLegs(allTrades, trade.Seq);
-
-			if (legs.Count >= 2)
-			{
-				var realized = 0m;
-				var maxLegClosed = 0;
-				foreach (var leg in legs)
-				{
-					var legLots = positions.GetValueOrDefault(leg.MatchKey, []);
-					var (_, legRealized, legClosed) = ApplyExpiration(legLots, leg.Multiplier);
-					realized += legRealized;
-					maxLegClosed = Math.Max(maxLegClosed, legClosed);
-					positions.Remove(leg.MatchKey);
-				}
-
-				positions.Remove(trade.MatchKey);
-				return (realized, maxLegClosed);
-			}
-
 			positions.Remove(trade.MatchKey);
 			return (0m, 0);
 		}
 
-		// Strategy parent buy/sell: compute P&L from leg-level FIFO matching
-		var pnl = 0m;
-		var closedQty = 0;
-		foreach (var leg in Trade.GetLegs(allTrades, trade.Seq))
+		var realized = 0m;
+		var maxClosed = 0;
+		foreach (var leg in legs)
 		{
 			var legLots = positions.GetValueOrDefault(leg.MatchKey, []);
-			var (_, legPnl, legClosed) = ApplyToLots(legLots, leg.Side, leg.Qty, leg.Price, leg.Multiplier);
-			pnl += legPnl;
-			closedQty = Math.Max(closedQty, legClosed);
+			var (_, legRealized, legClosed) = isExpiry
+				? ApplyExpiration(legLots, leg.Multiplier)
+				: ApplyToLots(legLots, leg.Side, leg.Qty, leg.Price, leg.Multiplier);
+			realized += legRealized;
+			maxClosed = Math.Max(maxClosed, legClosed);
+			if (isExpiry) positions.Remove(leg.MatchKey);
 		}
-		return (pnl, closedQty);
+		if (isExpiry) positions.Remove(trade.MatchKey);
+		return (realized, maxClosed);
 	}
 
 	/// <summary>Builds a report row for the given trade. Returns null if the row should be skipped.</summary>
@@ -260,29 +250,34 @@ public static class PositionTracker
 		return StrategyGrouper.BuildFinalPositionRows(groups, allTrades, positions);
 	}
 
+	/// <summary>
+	/// Advances running (qty, avg) state for one trade. Handles opening (add), closing (FIFO-equivalent
+	/// average method), and position flips (new avg = trade price).
+	/// </summary>
+	internal static (int qty, decimal avg) StepAverageCost((int qty, decimal avg) state, Side side, int tradeQty, decimal tradePrice)
+	{
+		var (qty, avg) = state;
+		var tradeSign = side == Side.Buy ? 1 : -1;
+		var newQty = qty + tradeSign * tradeQty;
+		var isOpening = qty == 0 || (qty > 0 && side == Side.Buy) || (qty < 0 && side == Side.Sell);
+
+		if (isOpening)
+			avg = (Math.Abs(qty) * avg + tradeQty * tradePrice) / Math.Abs(newQty);
+		else if (newQty == 0)
+			avg = 0m;
+		else if ((qty > 0 && newQty < 0) || (qty < 0 && newQty > 0))
+			avg = tradePrice;
+
+		return (newQty, avg);
+	}
+
 	/// <summary>Computes average cost per position using the average cost method.</summary>
 	private static Dictionary<string, decimal> ComputeAverageCosts(List<Trade> allTrades)
 	{
 		var state = new Dictionary<string, (int qty, decimal avg)>();
 
 		foreach (var trade in allTrades.Where(t => t.Side is Side.Buy or Side.Sell && t.Asset != Asset.OptionStrategy).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq))
-		{
-			var key = trade.MatchKey;
-			var (qty, avg) = state.GetValueOrDefault(key);
-
-			var tradeSign = trade.Side == Side.Buy ? 1 : -1;
-			var newQty = qty + tradeSign * trade.Qty;
-			var isOpening = qty == 0 || (qty > 0 && trade.Side == Side.Buy) || (qty < 0 && trade.Side == Side.Sell);
-
-			if (isOpening)
-				avg = (Math.Abs(qty) * avg + trade.Qty * trade.Price) / Math.Abs(newQty);
-			else if (newQty == 0)
-				avg = 0m;
-			else if ((qty > 0 && newQty < 0) || (qty < 0 && newQty > 0))
-				avg = trade.Price;
-
-			state[key] = (newQty, avg);
-		}
+			state[trade.MatchKey] = StepAverageCost(state.GetValueOrDefault(trade.MatchKey), trade.Side, trade.Qty, trade.Price);
 
 		return state.Where(kvp => kvp.Value.qty != 0).ToDictionary(kvp => kvp.Key, kvp => kvp.Value.avg);
 	}
