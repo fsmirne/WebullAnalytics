@@ -260,6 +260,25 @@ internal static class StrategyGrouper
 	}
 
 	/// <summary>
+	/// Yields (lot, take) pairs covering the FIFO window [offset, offset+qty) in the lot list.
+	/// Callers fold these into whatever aggregate they need (avg price, parent-seq check, etc.).
+	/// </summary>
+	private static IEnumerable<(Lot lot, int take)> FifoSlice(List<Lot> lots, int offset, int qty)
+	{
+		var skip = offset; var remaining = qty;
+		foreach (var lot in lots)
+		{
+			var available = lot.Qty;
+			if (skip > 0) { var s = Math.Min(skip, available); skip -= s; available -= s; }
+			if (available == 0 || remaining == 0) continue;
+			var take = Math.Min(available, remaining);
+			yield return (lot, take);
+			remaining -= take;
+			if (remaining == 0) yield break;
+		}
+	}
+
+	/// <summary>
 	/// Returns an entry representing a FIFO-ordered slice of the source entry's lots: skip the first
 	/// <paramref name="offset"/> contracts, then take <paramref name="qty"/>. AvgPrice is computed
 	/// from the sliced lots' prices.
@@ -268,16 +287,11 @@ internal static class StrategyGrouper
 	{
 		if (qty == entry.Row.Qty && offset == 0) return entry;
 
-		var lots = positions.GetValueOrDefault(entry.MatchKey, []);
-		var skip = offset; var remaining = qty; var total = 0m; var taken = 0;
-		foreach (var lot in lots)
+		var total = 0m; var taken = 0;
+		foreach (var (lot, take) in FifoSlice(positions.GetValueOrDefault(entry.MatchKey, []), offset, qty))
 		{
-			var available = lot.Qty;
-			if (skip > 0) { var s = Math.Min(skip, available); skip -= s; available -= s; }
-			if (available == 0 || remaining == 0) continue;
-			var take = Math.Min(available, remaining);
-			total += lot.Price * take; taken += take; remaining -= take;
-			if (remaining == 0) break;
+			total += lot.Price * take;
+			taken += take;
 		}
 		var avg = taken > 0 ? total / taken : entry.Row.AvgPrice;
 		return new PositionEntry(entry.MatchKey, entry.Row with { Qty = qty, AvgPrice = avg }, entry.Trade);
@@ -289,19 +303,7 @@ internal static class StrategyGrouper
 	/// trades only (no rolling history worth replaying).
 	/// </summary>
 	private static bool AllocationHasNoParentSeq(List<Lot> lots, int offset, int qty)
-	{
-		var skip = offset; var remaining = qty;
-		foreach (var lot in lots)
-		{
-			var available = lot.Qty;
-			if (skip > 0) { var s = Math.Min(skip, available); skip -= s; available -= s; }
-			if (available == 0 || remaining == 0) continue;
-			if (lot.ParentStrategySeq != null) return false;
-			remaining -= Math.Min(available, remaining);
-			if (remaining == 0) break;
-		}
-		return true;
-	}
+		=> FifoSlice(lots, offset, qty).All(x => x.lot.ParentStrategySeq == null);
 
 	/// <summary>
 	/// Legacy fallback balancing used for single-side groups: caps every entry to the minimum qty
