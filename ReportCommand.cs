@@ -241,7 +241,10 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		if (settings.Since != null)
 			trades.RemoveAll(t => t.Timestamp.Date < settings.SinceDate.Date);
 		if (settings.Until != null)
+		{
 			trades.RemoveAll(t => t.Timestamp.Date > settings.UntilDate.Date);
+			EvaluationDate.Set(settings.UntilDate);
+		}
 
 		var initialAmount = settings.InitialAmount;
 		var (rows, positions, running) = PositionTracker.ComputeReport(trades, initialAmount, feeLookup);
