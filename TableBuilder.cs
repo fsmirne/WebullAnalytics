@@ -492,11 +492,15 @@ public static class TableBuilder
 	/// <summary>
 	/// Computes unrealized P&L for all open positions. When theoretical mode is active and IV
 	/// is available, uses Black-Scholes pricing; otherwise uses market mid prices from Yahoo quotes.
-	/// Returns null if no pricing source is available.
+	/// Returns null if no pricing source is available, or if the report is pinned to a past
+	/// snapshot date (via --until) — historical positions can't be valued with today's quotes.
 	/// </summary>
 	public static decimal? ComputeUnrealizedPnL(List<PositionRow> positions, AnalysisOptions opts)
 	{
 		if (positions.Count == 0)
+			return null;
+
+		if (EvaluationDate.Today < DateTime.Today)
 			return null;
 
 		var now = EvaluationDate.Now;
