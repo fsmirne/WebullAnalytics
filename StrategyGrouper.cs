@@ -449,10 +449,7 @@ internal static class StrategyGrouper
 		if (parsed != null && allOtherLegKeys.Count > 0)
 		{
 			var parentLegStrikes = allOtherLegKeys.Select(mk => MatchKeys.ParseOption(mk)?.parsed).Where(p => p != null).Select(p => p!.Strike).Distinct().Concat(new[] { parsed.Strike }).ToHashSet();
-			var occSuffixes = parentLegStrikes.Select(s => MatchKeys.OccSuffix(s, parsed.CallPut)).ToHashSet();
-			var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{parsed.Root}";
-
-			var standaloneTrades = allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && !t.ParentStrategySeq.HasValue && t.Timestamp > latestEntryTime && t.MatchKey != matchKey && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(s => t.MatchKey.EndsWith(s, StringComparison.Ordinal))).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
+			var standaloneTrades = FindStandaloneRollCandidates(allTrades, parsed.Root, parsed.CallPut, parentLegStrikes, latestEntryTime, matchKey);
 			if (standaloneTrades.Count > 0)
 			{
 				// The close qty of the expired other legs determines how many contracts were rolled.
@@ -601,11 +598,8 @@ internal static class StrategyGrouper
 
 						// Expand to parent leg strikes (e.g., include original $23.5 short that was rolled)
 						var parentLegStrikes = allTrades.Where(t => t.Asset == Asset.Option && t.ParentStrategySeq.HasValue && excludedParentSeqs.Contains(t.ParentStrategySeq.Value)).Select(t => MatchKeys.ParseOption(t.MatchKey)?.parsed).Where(p => p != null).Select(p => p!.Strike).Distinct().ToHashSet();
-						var occSuffixes = parentLegStrikes.Select(s => MatchKeys.OccSuffix(s, firstParsed.CallPut)).ToHashSet();
-						var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{firstParsed.Root}";
 						var lastEntryTime = parentTrades.Max(t => t.Timestamp);
-
-						var standaloneTrades = allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && !t.ParentStrategySeq.HasValue && t.Timestamp > lastEntryTime && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(s => t.MatchKey.EndsWith(s, StringComparison.Ordinal))).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
+						var standaloneTrades = FindStandaloneRollCandidates(allTrades, firstParsed.Root, firstParsed.CallPut, parentLegStrikes, lastEntryTime);
 
 						// Apply qtyLimits to standalone trades: exclude trades that push any
 						// matchKey beyond the group's allocation (e.g., synthetic excess).
@@ -713,6 +707,24 @@ internal static class StrategyGrouper
 		}
 
 		return (rows, adjustment);
+	}
+
+	/// <summary>
+	/// Finds standalone (parent-free) option trades at a given root+callPut whose strike falls in the
+	/// provided set, filed after <paramref name="afterTime"/>. Used by both single-leg and multi-leg
+	/// roll-credit scans to locate the candidate trades; callers apply their own qty/pairing rules.
+	/// </summary>
+	private static List<Trade> FindStandaloneRollCandidates(List<Trade> allTrades, string root, string callPut, IEnumerable<decimal> strikes, DateTime afterTime, string? excludeMatchKey = null)
+	{
+		var occSuffixes = strikes.Select(s => MatchKeys.OccSuffix(s, callPut)).ToHashSet();
+		var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{root}";
+		return allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell
+				&& !t.ParentStrategySeq.HasValue
+				&& t.Timestamp > afterTime
+				&& (excludeMatchKey == null || t.MatchKey != excludeMatchKey)
+				&& t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal)
+				&& occSuffixes.Any(s => t.MatchKey.EndsWith(s, StringComparison.Ordinal)))
+			.OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
 	}
 
 	/// <summary>
