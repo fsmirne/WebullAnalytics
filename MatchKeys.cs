@@ -17,6 +17,20 @@ public static class MatchKeys
 		return symbol.Length > 0;
 	}
 
+	/// <summary>Parses an option match key into (parsed, symbol), or null if it's not a valid option match key.</summary>
+	public static (OptionParsed parsed, string symbol)? ParseOption(string matchKey)
+	{
+		if (!TryGetOptionSymbol(matchKey, out var symbol)) return null;
+		var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
+		return parsed == null ? null : (parsed, symbol);
+	}
+
+	/// <summary>
+	/// Returns the trailing OCC suffix "{C|P}{strike*1000 as 8-digit}" used to match option
+	/// match keys by strike and right. Example: strike=25, callPut="C" → "C00025000".
+	/// </summary>
+	public static string OccSuffix(decimal strike, string callPut) => $"{callPut}{(long)(strike * 1000m):D8}";
+
 	private const string StrategyPrefix = "strategy:";
 
 	/// <summary>

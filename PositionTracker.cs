@@ -256,8 +256,8 @@ public static class PositionTracker
 	{
 		var avgCosts = ComputeAverageCosts(allTrades);
 		var allPositions = BuildRawPositionRows(positions, tradeIndex, avgCosts);
-		var (grouped, foreignKeys, brandNewGroups) = StrategyGrouper.GroupIntoStrategies(allPositions, positions);
-		return StrategyGrouper.BuildFinalPositionRows(grouped, allTrades, positions, foreignKeys, brandNewGroups);
+		var groups = StrategyGrouper.GroupIntoStrategies(allPositions, positions);
+		return StrategyGrouper.BuildFinalPositionRows(groups, allTrades, positions);
 	}
 
 	/// <summary>Computes average cost per position using the average cost method.</summary>
@@ -288,9 +288,9 @@ public static class PositionTracker
 	}
 
 	/// <summary>Converts raw position data (lots) into position rows with calculated averages.</summary>
-	private static List<(string matchKey, PositionRow row, Trade? trade)> BuildRawPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, Dictionary<string, decimal> avgCosts)
+	private static List<PositionEntry> BuildRawPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, Dictionary<string, decimal> avgCosts)
 	{
-		var result = new List<(string matchKey, PositionRow row, Trade? trade)>();
+		var result = new List<PositionEntry>();
 
 		foreach (var (matchKey, lots) in positions)
 		{
@@ -307,7 +307,7 @@ public static class PositionTracker
 
 			var row = new PositionRow(Instrument: trade?.Instrument ?? matchKey, Asset: trade?.Asset ?? Asset.Stock, OptionKind: !string.IsNullOrEmpty(trade?.OptionKind) ? trade.OptionKind : "-", Side: lots[0].Side, Qty: totalQty, AvgPrice: avgPrice, Expiry: trade?.Expiry, IsStrategyLeg: false, MatchKey: matchKey);
 
-			result.Add((matchKey, row, trade));
+			result.Add(new PositionEntry(matchKey, row, trade));
 		}
 
 		return result;
