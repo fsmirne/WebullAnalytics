@@ -10,21 +10,19 @@ internal static class StrategyGrouper
 	/// Groups option positions into strategies using trade relationships.
 	/// Legs that share a ParentStrategySeq in their lots were traded together as part of the same strategy.
 	/// </summary>
-	internal static (List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, Dictionary<List<(string matchKey, PositionRow row, Trade? trade)>, HashSet<string>> foreignKeysByGroup, HashSet<List<(string matchKey, PositionRow row, Trade? trade)>> brandNewGroups) GroupIntoStrategies(List<(string matchKey, PositionRow row, Trade? trade)> allPositions, Dictionary<string, List<Lot>> positions)
+	internal static List<StrategyGroup> GroupIntoStrategies(List<PositionEntry> allPositions, Dictionary<string, List<Lot>> positions)
 	{
-		var grouped = new List<List<(string matchKey, PositionRow row, Trade? trade)>>();
-		var foreignKeysByGroup = new Dictionary<List<(string matchKey, PositionRow row, Trade? trade)>, HashSet<string>>(ReferenceEqualityComparer.Instance);
-		var brandNewGroups = new HashSet<List<(string matchKey, PositionRow row, Trade? trade)>>(ReferenceEqualityComparer.Instance);
+		var grouped = new List<StrategyGroup>();
 		var processed = new HashSet<string>();
 
 		// Build reverse index: parentSeq → set of option matchKeys whose lots reference it
 		var parentToKeys = new Dictionary<int, HashSet<string>>();
-		foreach (var p in allPositions.Where(p => p.trade?.Asset == Asset.Option))
-			foreach (var lot in positions.GetValueOrDefault(p.matchKey, []).Where(l => l.ParentStrategySeq.HasValue))
+		foreach (var p in allPositions.Where(p => p.Trade?.Asset == Asset.Option))
+			foreach (var lot in positions.GetValueOrDefault(p.MatchKey, []).Where(l => l.ParentStrategySeq.HasValue))
 			{
 				if (!parentToKeys.TryGetValue(lot.ParentStrategySeq!.Value, out var set))
 					parentToKeys[lot.ParentStrategySeq!.Value] = set = [];
-				set.Add(p.matchKey);
+				set.Add(p.MatchKey);
 			}
 
 		// Build strategy groups from parentSeqs that link ≥2 positions
@@ -51,15 +49,15 @@ internal static class StrategyGrouper
 		// Convert hashsets to position groups — restrict qty to lots matching the group's parentSeqs.
 		// This correctly partitions lots when a matchKey's lots belong to different strategies
 		// (e.g., 100 lots in a diagonal via parentSeq B, 299 lots orphaned from an expired leg via parentSeq A).
-		var positionLookup = allPositions.Where(p => p.trade?.Asset == Asset.Option).ToDictionary(p => p.matchKey);
+		var positionLookup = allPositions.Where(p => p.Trade?.Asset == Asset.Option).ToDictionary(p => p.MatchKey);
 		var allocatedParentSeqs = new Dictionary<string, HashSet<int>>();
-		var balanceExcess = new Dictionary<string, (string matchKey, PositionRow row, Trade? trade)>();
+		var balanceExcess = new Dictionary<string, PositionEntry>();
 
 		foreach (var keySet in strategyGroups)
 		{
 			var groupParentSeqs = parentToKeys.Where(kvp => kvp.Value.Count >= 2 && kvp.Value.Overlaps(keySet)).Select(kvp => kvp.Key).ToHashSet();
 
-			var group = new List<(string matchKey, PositionRow row, Trade? trade)>();
+			var group = new List<PositionEntry>();
 			foreach (var k in keySet)
 			{
 				var entry = positionLookup[k];
@@ -70,7 +68,7 @@ internal static class StrategyGrouper
 				{
 					var qty = matchingLots.Sum(l => l.Qty);
 					var avg = matchingLots.Sum(l => l.Price * l.Qty) / qty;
-					group.Add((k, entry.row with { Qty = qty, AvgPrice = avg }, entry.trade));
+					group.Add(new PositionEntry(k, entry.Row with { Qty = qty, AvgPrice = avg }, entry.Trade));
 				}
 				else
 				{
@@ -87,18 +85,18 @@ internal static class StrategyGrouper
 			// creating uneven legs. Cap each leg to the minimum qty across the group.
 			if (group.Count >= 2)
 			{
-				var minQty = group.Min(g => g.row.Qty);
+				var minQty = group.Min(g => g.Row.Qty);
 				for (int gi = 0; gi < group.Count; gi++)
 				{
 					var leg = group[gi];
-					if (leg.row.Qty <= minQty) continue;
+					if (leg.Row.Qty <= minQty) continue;
 
-					var lots = positions.GetValueOrDefault(leg.matchKey, []);
+					var lots = positions.GetValueOrDefault(leg.MatchKey, []);
 					var matchingLots = lots.Where(l => l.ParentStrategySeq.HasValue && groupParentSeqs.Contains(l.ParentStrategySeq.Value)).ToList();
 					// Assign excess FIRST (FIFO), then remaining to kept. This ensures the excess
 					// (spun-off position) gets the main batch's homogeneous price, while smaller
 					// tail batches stay in the kept (original strategy) group.
-					var excessTarget = leg.row.Qty - minQty;
+					var excessTarget = leg.Row.Qty - minQty;
 					var keptQty = 0; var keptValue = 0m; var exQty = 0; var exValue = 0m;
 					foreach (var lot in matchingLots)
 					{
@@ -109,28 +107,28 @@ internal static class StrategyGrouper
 					}
 
 					if (keptQty > 0)
-						group[gi] = (leg.matchKey, leg.row with { Qty = keptQty, AvgPrice = keptValue / keptQty }, leg.trade);
+						group[gi] = new PositionEntry(leg.MatchKey, leg.Row with { Qty = keptQty, AvgPrice = keptValue / keptQty }, leg.Trade);
 
 					if (exQty > 0)
 					{
 						var exAvg = exValue / exQty;
-						if (balanceExcess.TryGetValue(leg.matchKey, out var prev))
+						if (balanceExcess.TryGetValue(leg.MatchKey, out var prev))
 						{
-							var cq = prev.row.Qty + exQty; var ca = (prev.row.AvgPrice * prev.row.Qty + exAvg * exQty) / cq;
-							balanceExcess[leg.matchKey] = (leg.matchKey, prev.row with { Qty = cq, AvgPrice = ca }, prev.trade);
+							var cq = prev.Row.Qty + exQty; var ca = (prev.Row.AvgPrice * prev.Row.Qty + exAvg * exQty) / cq;
+							balanceExcess[leg.MatchKey] = new PositionEntry(leg.MatchKey, prev.Row with { Qty = cq, AvgPrice = ca }, prev.Trade);
 						}
 						else
-							balanceExcess[leg.matchKey] = (leg.matchKey, positionLookup[leg.matchKey].row with { Qty = exQty, AvgPrice = exAvg }, leg.trade);
+							balanceExcess[leg.MatchKey] = new PositionEntry(leg.MatchKey, positionLookup[leg.MatchKey].Row with { Qty = exQty, AvgPrice = exAvg }, leg.Trade);
 					}
 				}
 			}
 
-			grouped.Add(group);
+			grouped.Add(new StrategyGroup(group));
 			foreach (var k in keySet) processed.Add(k);
 		}
 
 		// Compute remainders: lots not allocated to any strategy group (orphaned parentSeqs, standalone lots).
-		var remaindersByKey = new Dictionary<string, (string matchKey, PositionRow row, Trade? trade)>();
+		var remaindersByKey = new Dictionary<string, PositionEntry>();
 		foreach (var (key, usedSeqs) in allocatedParentSeqs)
 		{
 			var entry = positionLookup[key];
@@ -140,7 +138,7 @@ internal static class StrategyGrouper
 			{
 				var qty = remainingLots.Sum(l => l.Qty);
 				var avg = remainingLots.Sum(l => l.Price * l.Qty) / qty;
-				remaindersByKey[key] = (key, entry.row with { Qty = qty, AvgPrice = avg }, entry.trade);
+				remaindersByKey[key] = new PositionEntry(key, entry.Row with { Qty = qty, AvgPrice = avg }, entry.Trade);
 			}
 		}
 
@@ -149,8 +147,8 @@ internal static class StrategyGrouper
 		{
 			if (remaindersByKey.TryGetValue(key, out var existing))
 			{
-				var cq = existing.row.Qty + entry.row.Qty; var ca = (existing.row.AvgPrice * existing.row.Qty + entry.row.AvgPrice * entry.row.Qty) / cq;
-				remaindersByKey[key] = (key, existing.row with { Qty = cq, AvgPrice = ca }, existing.trade);
+				var cq = existing.Row.Qty + entry.Row.Qty; var ca = (existing.Row.AvgPrice * existing.Row.Qty + entry.Row.AvgPrice * entry.Row.Qty) / cq;
+				remaindersByKey[key] = new PositionEntry(key, existing.Row with { Qty = cq, AvgPrice = ca }, existing.Trade);
 			}
 			else
 				remaindersByKey[key] = entry;
@@ -158,14 +156,14 @@ internal static class StrategyGrouper
 
 		// Fallback grouping: group ungrouped options that form calendars/diagonals/verticals.
 		// Remainders (lots not allocated to primary groups) flow here for balanced grouping.
-		var ungroupedOptions = allPositions.Where(p => p.trade?.Asset == Asset.Option && !processed.Contains(p.matchKey))
+		var ungroupedOptions = allPositions.Where(p => p.Trade?.Asset == Asset.Option && !processed.Contains(p.MatchKey))
 			.Concat(remaindersByKey.Values)
 			.ToList();
 
 		var fallbackGrouped = new HashSet<string>();
 
 		var byRootCallPut = ungroupedOptions
-			.Select(p => (entry: p, parsed: MatchKeys.TryGetOptionSymbol(p.matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null))
+			.Select(p => (entry: p, parsed: MatchKeys.ParseOption(p.MatchKey)?.parsed))
 			.Where(x => x.parsed != null)
 			.GroupBy(x => (x.parsed!.Root, x.parsed.CallPut))
 			.Where(g => g.Count() >= 2);
@@ -173,10 +171,10 @@ internal static class StrategyGrouper
 		foreach (var group in byRootCallPut)
 		{
 			var entries = group.Select(x => x.entry).ToList();
-			foreach (var e in entries) fallbackGrouped.Add(e.matchKey);
+			foreach (var e in entries) fallbackGrouped.Add(e.MatchKey);
 
-			var buys = entries.Where(e => e.row.Side == Side.Buy).ToList();
-			var sells = entries.Where(e => e.row.Side == Side.Sell).ToList();
+			var buys = entries.Where(e => e.Row.Side == Side.Buy).ToList();
+			var sells = entries.Where(e => e.Row.Side == Side.Sell).ToList();
 
 			// Single-side group (rare — e.g., two shorts at different strikes): preserve legacy
 			// "balance to minQty" behavior since there's no buy↔sell pairing to do.
@@ -189,39 +187,41 @@ internal static class StrategyGrouper
 			// Greedy pair buys with sells: match exact-qty first to form 2-leg strategies
 			// (vertical/calendar/diagonal). Remaining qty from each leg becomes standalone.
 			// Tracks consumed qty per matchKey so each pair draws FIFO-ordered lots.
-			var partitionKeys = entries.Select(e => e.matchKey).ToHashSet();
-			var remaining = entries.ToDictionary(e => e.matchKey, e => e.row.Qty);
-			var consumed = entries.ToDictionary(e => e.matchKey, _ => 0);
-			var createdPairs = new List<List<(string, PositionRow, Trade?)>>();
+			var partitionKeys = entries.Select(e => e.MatchKey).ToHashSet();
+			var remaining = entries.ToDictionary(e => e.MatchKey, e => e.Row.Qty);
+			var consumed = entries.ToDictionary(e => e.MatchKey, _ => 0);
+			var createdPairs = new List<StrategyGroup>();
 
-			while (buys.Any(b => remaining[b.matchKey] > 0) && sells.Any(s => remaining[s.matchKey] > 0))
+			while (buys.Any(b => remaining[b.MatchKey] > 0) && sells.Any(s => remaining[s.MatchKey] > 0))
 			{
-				var buy = buys.Where(b => remaining[b.matchKey] > 0).OrderByDescending(b => remaining[b.matchKey]).First();
-				var buyQty = remaining[buy.matchKey];
-				var availableSells = sells.Where(s => remaining[s.matchKey] > 0).ToList();
-				var exactMatchIdx = availableSells.FindIndex(s => remaining[s.matchKey] == buyQty);
-				var sell = exactMatchIdx >= 0 ? availableSells[exactMatchIdx] : availableSells.OrderByDescending(s => remaining[s.matchKey]).First();
-				var pairQty = Math.Min(buyQty, remaining[sell.matchKey]);
+				var buy = buys.Where(b => remaining[b.MatchKey] > 0).OrderByDescending(b => remaining[b.MatchKey]).First();
+				var buyQty = remaining[buy.MatchKey];
+				var availableSells = sells.Where(s => remaining[s.MatchKey] > 0).ToList();
+				var exactMatchIdx = availableSells.FindIndex(s => remaining[s.MatchKey] == buyQty);
+				var sell = exactMatchIdx >= 0 ? availableSells[exactMatchIdx] : availableSells.OrderByDescending(s => remaining[s.MatchKey]).First();
+				var pairQty = Math.Min(buyQty, remaining[sell.MatchKey]);
 
-				var pair = new List<(string, PositionRow, Trade?)>
+				var pairLegs = new List<PositionEntry>
 				{
-					SliceEntry(buy, positions, consumed[buy.matchKey], pairQty),
-					SliceEntry(sell, positions, consumed[sell.matchKey], pairQty),
+					SliceEntry(buy, positions, consumed[buy.MatchKey], pairQty),
+					SliceEntry(sell, positions, consumed[sell.MatchKey], pairQty),
 				};
-				grouped.Add(pair);
-				createdPairs.Add(pair);
+				var pair = new StrategyGroup(pairLegs);
 
 				// A pair is "brand new" if every allocated lot on both legs has no parentStrategySeq
 				// (pure synthetic / standalone entry with no roll history). Such groups need no replay —
 				// their adjusted price equals the blended entry price from allocated lots.
-				if (AllocationHasNoParentSeq(positions.GetValueOrDefault(buy.matchKey, []), consumed[buy.matchKey], pairQty)
-					&& AllocationHasNoParentSeq(positions.GetValueOrDefault(sell.matchKey, []), consumed[sell.matchKey], pairQty))
-					brandNewGroups.Add(pair);
+				if (AllocationHasNoParentSeq(positions.GetValueOrDefault(buy.MatchKey, []), consumed[buy.MatchKey], pairQty)
+					&& AllocationHasNoParentSeq(positions.GetValueOrDefault(sell.MatchKey, []), consumed[sell.MatchKey], pairQty))
+					pair.IsBrandNew = true;
 
-				consumed[buy.matchKey] += pairQty;
-				consumed[sell.matchKey] += pairQty;
-				remaining[buy.matchKey] -= pairQty;
-				remaining[sell.matchKey] -= pairQty;
+				grouped.Add(pair);
+				createdPairs.Add(pair);
+
+				consumed[buy.MatchKey] += pairQty;
+				consumed[sell.MatchKey] += pairQty;
+				remaining[buy.MatchKey] -= pairQty;
+				remaining[sell.MatchKey] -= pairQty;
 			}
 
 			// Record foreign matchKeys per pair: matchKeys from sibling pairs in the same partition.
@@ -229,34 +229,34 @@ internal static class StrategyGrouper
 			// preventing synthetic trades in one pair from polluting another pair's adjusted price.
 			foreach (var pair in createdPairs)
 			{
-				var pairKeys = pair.Select(p => p.Item1).ToHashSet();
+				var pairKeys = pair.Legs.Select(p => p.MatchKey).ToHashSet();
 				var foreign = partitionKeys.Where(k => !pairKeys.Contains(k)).ToHashSet();
 				if (foreign.Count > 0)
-					foreignKeysByGroup[pair] = foreign;
+					pair.ForeignKeys = foreign;
 			}
 
 			// Remaining qty (unmatched side) becomes standalone
 			foreach (var e in entries)
 			{
-				if (remaining[e.matchKey] > 0)
-					grouped.Add(new List<(string, PositionRow, Trade?)> { SliceEntry(e, positions, consumed[e.matchKey], remaining[e.matchKey]) });
+				if (remaining[e.MatchKey] > 0)
+					grouped.Add(new StrategyGroup([SliceEntry(e, positions, consumed[e.MatchKey], remaining[e.MatchKey])]));
 			}
 		}
 
 		// Add remaining unprocessed options as standalone
-		grouped.AddRange(ungroupedOptions.Where(p => !fallbackGrouped.Contains(p.matchKey)).Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		grouped.AddRange(ungroupedOptions.Where(p => !fallbackGrouped.Contains(p.MatchKey)).Select(p => new StrategyGroup([p])));
 
 		// Add non-option positions
-		grouped.AddRange(allPositions.Where(p => p.trade?.Asset != Asset.Option).Select(p => new List<(string, PositionRow, Trade?)> { p }));
+		grouped.AddRange(allPositions.Where(p => p.Trade?.Asset != Asset.Option).Select(p => new StrategyGroup([p])));
 
 		// Sort by asset type, then instrument
 		grouped.Sort((a, b) =>
 		{
-			var cmp = a[0].row.Asset.CompareTo(b[0].row.Asset);
-			return cmp != 0 ? cmp : string.Compare(a[0].row.Instrument, b[0].row.Instrument, StringComparison.Ordinal);
+			var cmp = a.Legs[0].Row.Asset.CompareTo(b.Legs[0].Row.Asset);
+			return cmp != 0 ? cmp : string.Compare(a.Legs[0].Row.Instrument, b.Legs[0].Row.Instrument, StringComparison.Ordinal);
 		});
 
-		return (grouped, foreignKeysByGroup, brandNewGroups);
+		return grouped;
 	}
 
 	/// <summary>
@@ -264,11 +264,11 @@ internal static class StrategyGrouper
 	/// <paramref name="offset"/> contracts, then take <paramref name="qty"/>. AvgPrice is computed
 	/// from the sliced lots' prices.
 	/// </summary>
-	private static (string matchKey, PositionRow row, Trade? trade) SliceEntry((string matchKey, PositionRow row, Trade? trade) entry, Dictionary<string, List<Lot>> positions, int offset, int qty)
+	private static PositionEntry SliceEntry(PositionEntry entry, Dictionary<string, List<Lot>> positions, int offset, int qty)
 	{
-		if (qty == entry.row.Qty && offset == 0) return entry;
+		if (qty == entry.Row.Qty && offset == 0) return entry;
 
-		var lots = positions.GetValueOrDefault(entry.matchKey, []);
+		var lots = positions.GetValueOrDefault(entry.MatchKey, []);
 		var skip = offset; var remaining = qty; var total = 0m; var taken = 0;
 		foreach (var lot in lots)
 		{
@@ -279,8 +279,8 @@ internal static class StrategyGrouper
 			total += lot.Price * take; taken += take; remaining -= take;
 			if (remaining == 0) break;
 		}
-		var avg = taken > 0 ? total / taken : entry.row.AvgPrice;
-		return (entry.matchKey, entry.row with { Qty = qty, AvgPrice = avg }, entry.trade);
+		var avg = taken > 0 ? total / taken : entry.Row.AvgPrice;
+		return new PositionEntry(entry.MatchKey, entry.Row with { Qty = qty, AvgPrice = avg }, entry.Trade);
 	}
 
 	/// <summary>
@@ -307,28 +307,28 @@ internal static class StrategyGrouper
 	/// Legacy fallback balancing used for single-side groups: caps every entry to the minimum qty
 	/// and emits the excess as standalone groups.
 	/// </summary>
-	private static void BalanceToMinQty(List<(string matchKey, PositionRow row, Trade? trade)> entries, Dictionary<string, List<Lot>> positions, List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped)
+	private static void BalanceToMinQty(List<PositionEntry> entries, Dictionary<string, List<Lot>> positions, List<StrategyGroup> grouped)
 	{
-		var minQty = entries.Min(e => e.row.Qty);
-		var balanced = new List<(string matchKey, PositionRow row, Trade? trade)>();
+		var minQty = entries.Min(e => e.Row.Qty);
+		var balanced = new List<PositionEntry>();
 		foreach (var e in entries)
 		{
-			if (e.row.Qty <= minQty)
+			if (e.Row.Qty <= minQty)
 				balanced.Add(e);
 			else
 			{
 				balanced.Add(SliceEntry(e, positions, 0, minQty));
-				grouped.Add(new List<(string, PositionRow, Trade?)> { SliceEntry(e, positions, minQty, e.row.Qty - minQty) });
+				grouped.Add(new StrategyGroup([SliceEntry(e, positions, minQty, e.Row.Qty - minQty)]));
 			}
 		}
-		grouped.Add(balanced);
+		grouped.Add(new StrategyGroup(balanced));
 	}
 
 	/// <summary>
 	/// Builds the final position rows, creating strategy summary rows for multi-leg positions.
 	/// Returns the rows and a dictionary of pre-computed timeline replays keyed by summary row index.
 	/// </summary>
-	internal static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments) BuildFinalPositionRows(List<List<(string matchKey, PositionRow row, Trade? trade)>> grouped, List<Trade> allTrades, Dictionary<string, List<Lot>> positions, Dictionary<List<(string matchKey, PositionRow row, Trade? trade)>, HashSet<string>>? foreignKeysByGroup = null, HashSet<List<(string matchKey, PositionRow row, Trade? trade)>>? brandNewGroups = null)
+	internal static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments) BuildFinalPositionRows(List<StrategyGroup> groups, List<Trade> allTrades, Dictionary<string, List<Lot>> positions)
 	{
 		var tradeBySeq = allTrades.Where(t => t.Asset == Asset.OptionStrategy).ToDictionary(t => t.Seq);
 
@@ -336,12 +336,12 @@ internal static class StrategyGrouper
 		// Pure groups don't need the timeline replay — their adjusted price equals their initial price.
 		// Non-pure groups exclude pure siblings' parentStrategySeqs from the replay to avoid double-counting.
 		var pureParentSeqs = new HashSet<int>();
-		var isPure = new bool[grouped.Count];
-		var pureSeqsByGroup = new HashSet<int>?[grouped.Count];
-		for (int i = 0; i < grouped.Count; i++)
+		var isPure = new bool[groups.Count];
+		var pureSeqsByGroup = new HashSet<int>?[groups.Count];
+		for (int i = 0; i < groups.Count; i++)
 		{
-			if (grouped[i].Count <= 1) continue;
-			var seqs = GetPureStrategyParentSeqs(grouped[i], positions, allTrades);
+			if (groups[i].Legs.Count <= 1) continue;
+			var seqs = GetPureStrategyParentSeqs(groups[i].Legs, positions, allTrades);
 			if (seqs != null)
 			{
 				isPure[i] = true;
@@ -353,21 +353,19 @@ internal static class StrategyGrouper
 		var rows = new List<PositionRow>();
 		var adjustments = new Dictionary<int, StrategyAdjustment>();
 
-		for (int i = 0; i < grouped.Count; i++)
+		for (int i = 0; i < groups.Count; i++)
 		{
-			var group = grouped[i];
-			if (group.Count > 1)
+			var group = groups[i];
+			if (group.Legs.Count > 1)
 			{
 				var summaryIndex = rows.Count;
-				var foreign = foreignKeysByGroup != null && foreignKeysByGroup.TryGetValue(group, out var fk) ? fk : null;
-				var isBrandNew = brandNewGroups != null && brandNewGroups.Contains(group);
-				var (strategyRows, adjustment) = BuildStrategyRows(group, allTrades, isBrandNew ? null : (isPure[i] ? null : pureParentSeqs), isPure[i] ? pureSeqsByGroup[i] : null, foreign, isBrandNew);
+				var (strategyRows, adjustment) = BuildStrategyRows(group, allTrades, group.IsBrandNew ? null : (isPure[i] ? null : pureParentSeqs), isPure[i] ? pureSeqsByGroup[i] : null);
 				rows.AddRange(strategyRows);
 				if (adjustment != null)
 					adjustments[summaryIndex] = adjustment;
 			}
 			else
-				rows.Add(AdjustForExpiredStrategyLegs(group[0], positions, allTrades, tradeBySeq));
+				rows.Add(AdjustForExpiredStrategyLegs(group.Legs[0], positions, allTrades, tradeBySeq));
 		}
 
 		return (rows, adjustments);
@@ -378,15 +376,15 @@ internal static class StrategyGrouper
 	/// from strategy parent trades whose legs match the group's keys, and the combined lots cover
 	/// the group qty for every leg. Supports multiple batches (e.g., 450x + 5x fills).
 	/// </summary>
-	private static HashSet<int>? GetPureStrategyParentSeqs(List<(string matchKey, PositionRow row, Trade? trade)> group, Dictionary<string, List<Lot>> positions, List<Trade> allTrades)
+	private static HashSet<int>? GetPureStrategyParentSeqs(List<PositionEntry> group, Dictionary<string, List<Lot>> positions, List<Trade> allTrades)
 	{
 		var candidates = new HashSet<int>();
 		foreach (var leg in group)
-			foreach (var lot in positions.GetValueOrDefault(leg.matchKey, []))
+			foreach (var lot in positions.GetValueOrDefault(leg.MatchKey, []))
 				if (lot.ParentStrategySeq.HasValue)
 					candidates.Add(lot.ParentStrategySeq.Value);
 
-		var groupKeys = group.Select(g => g.matchKey).ToHashSet();
+		var groupKeys = group.Select(g => g.MatchKey).ToHashSet();
 		var validSeqs = new HashSet<int>();
 		foreach (var seq in candidates)
 		{
@@ -396,7 +394,7 @@ internal static class StrategyGrouper
 		}
 
 		if (validSeqs.Count == 0) return null;
-		if (!group.All(leg => positions.GetValueOrDefault(leg.matchKey, []).Where(l => l.ParentStrategySeq.HasValue && validSeqs.Contains(l.ParentStrategySeq.Value)).Sum(l => l.Qty) >= leg.row.Qty))
+		if (!group.All(leg => positions.GetValueOrDefault(leg.MatchKey, []).Where(l => l.ParentStrategySeq.HasValue && validSeqs.Contains(l.ParentStrategySeq.Value)).Sum(l => l.Qty) >= leg.Row.Qty))
 			return null;
 
 		return validSeqs;
@@ -407,9 +405,9 @@ internal static class StrategyGrouper
 	/// computes an adjusted price reflecting the credits/debits from those expired legs
 	/// and any standalone roll trades that modified the position after the strategy entry.
 	/// </summary>
-	private static PositionRow AdjustForExpiredStrategyLegs((string matchKey, PositionRow row, Trade? trade) entry, Dictionary<string, List<Lot>> positions, List<Trade> allTrades, Dictionary<int, Trade> tradeBySeq)
+	private static PositionRow AdjustForExpiredStrategyLegs(PositionEntry entry, Dictionary<string, List<Lot>> positions, List<Trade> allTrades, Dictionary<int, Trade> tradeBySeq)
 	{
-		var (matchKey, row, trade) = entry;
+		var (matchKey, row, trade) = (entry.MatchKey, entry.Row, entry.Trade);
 		if (trade?.Asset != Asset.Option) return row;
 
 		var lots = positions.GetValueOrDefault(matchKey, []);
@@ -445,11 +443,11 @@ internal static class StrategyGrouper
 		// Standalone roll credit: find trades that rolled expired legs to new strikes.
 		// Computed ONCE across all expired parentSeqs to avoid double-counting when
 		// multiple parent batches (e.g., 450x + 5x fills) share the same expired legs.
-		var parsed = MatchKeys.TryGetOptionSymbol(matchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null;
+		var parsed = MatchKeys.ParseOption(matchKey)?.parsed;
 		if (parsed != null && allOtherLegKeys.Count > 0)
 		{
-			var parentLegStrikes = allOtherLegKeys.Select(mk => MatchKeys.TryGetOptionSymbol(mk, out var s) ? ParsingHelpers.ParseOptionSymbol(s) : null).Where(p => p != null).Select(p => p!.Strike).Distinct().Concat(new[] { parsed.Strike }).ToHashSet();
-			var occSuffixes = parentLegStrikes.Select(s => $"{parsed.CallPut}{(long)(s * 1000m):D8}").ToHashSet();
+			var parentLegStrikes = allOtherLegKeys.Select(mk => MatchKeys.ParseOption(mk)?.parsed).Where(p => p != null).Select(p => p!.Strike).Distinct().Concat(new[] { parsed.Strike }).ToHashSet();
+			var occSuffixes = parentLegStrikes.Select(s => MatchKeys.OccSuffix(s, parsed.CallPut)).ToHashSet();
 			var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{parsed.Root}";
 
 			var standaloneTrades = allTrades.Where(t => t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && !t.ParentStrategySeq.HasValue && t.Timestamp > latestEntryTime && t.MatchKey != matchKey && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && occSuffixes.Any(s => t.MatchKey.EndsWith(s, StringComparison.Ordinal))).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
@@ -497,15 +495,18 @@ internal static class StrategyGrouper
 	/// For pure strategies with multiple entry batches, the set of parent trade seqs.
 	/// Used to compute init price from strategy-level prices instead of FIFO-distorted leg prices.
 	/// </param>
-	private static (List<PositionRow> rows, StrategyAdjustment? adjustment) BuildStrategyRows(List<(string matchKey, PositionRow row, Trade? trade)> group, List<Trade> allTrades, HashSet<int>? excludedParentSeqs, HashSet<int>? pureSeqs = null, HashSet<string>? foreignMatchKeys = null, bool isBrandNewFallback = false)
+	private static (List<PositionRow> rows, StrategyAdjustment? adjustment) BuildStrategyRows(StrategyGroup group, List<Trade> allTrades, HashSet<int>? excludedParentSeqs, HashSet<int>? pureSeqs = null)
 	{
 		var rows = new List<PositionRow>();
+		var legs = group.Legs;
+		var foreignMatchKeys = group.ForeignKeys;
+		var isBrandNewFallback = group.IsBrandNew;
 
-		var parsedLegs = group.Select(g => (leg: g, parsed: MatchKeys.TryGetOptionSymbol(g.matchKey, out var symbol) ? ParsingHelpers.ParseOptionSymbol(symbol) : null)).Where(x => x.parsed != null).ToList();
+		var parsedLegs = legs.Select(g => (leg: g, parsed: MatchKeys.ParseOption(g.MatchKey)?.parsed)).Where(x => x.parsed != null).ToList();
 
 		if (!parsedLegs.Any())
 		{
-			rows.AddRange(group.Select(g => g.row));
+			rows.AddRange(legs.Select(g => g.Row));
 			return (rows, null);
 		}
 
@@ -515,11 +516,11 @@ internal static class StrategyGrouper
 		var distinctCallPut = parsedLegs.Select(x => x.parsed!.CallPut).Distinct().Count();
 
 		var strategyKind = ParsingHelpers.ClassifyStrategyKind(parsedLegs.Count, distinctExpiries, distinctStrikes, distinctCallPut);
-		var qty = group[0].row.Qty;
+		var qty = legs[0].Row.Qty;
 
 		// For pure groups, compute adj from parent strategy trade prices (immune to lot contamination).
 		// For multi-batch, init = first batch entry; single-batch, init = same as adj.
-		var netInitial = group.Sum(leg => leg.row.Side == Side.Buy ? leg.row.AvgPrice : -leg.row.AvgPrice);
+		var netInitial = legs.Sum(leg => leg.Row.Side == Side.Buy ? leg.Row.AvgPrice : -leg.Row.AvgPrice);
 		decimal? pureInitOverride = null;
 		if (pureSeqs != null)
 		{
@@ -541,7 +542,7 @@ internal static class StrategyGrouper
 		if (excludedParentSeqs != null)
 		{
 			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
-			var qtyLimits = group.ToDictionary(g => g.matchKey, g => g.row.Qty);
+			var qtyLimits = legs.ToDictionary(g => g.MatchKey, g => g.Row.Qty);
 			// Foreign matchKeys (sibling-group legs) get limit=0 so their trades are excluded from
 			// this group's replay, preventing cross-contamination between fallback-paired groups.
 			if (foreignMatchKeys != null)
@@ -588,7 +589,7 @@ internal static class StrategyGrouper
 				// a calendar formed by rolling a diagonal's short leg). Compute adj as the
 				// parent entry price minus the per-contract roll credit from standalone trades.
 				var inheritedKeys = allTrades.Where(t => t.Asset == Asset.Option && t.ParentStrategySeq.HasValue && excludedParentSeqs.Contains(t.ParentStrategySeq.Value)).Select(t => t.MatchKey).ToHashSet();
-				if (group.Any(leg => inheritedKeys.Contains(leg.matchKey)))
+				if (legs.Any(leg => inheritedKeys.Contains(leg.MatchKey)))
 				{
 					var parentTrades = allTrades.Where(t => excludedParentSeqs.Contains(t.Seq) && t.Asset == Asset.OptionStrategy).OrderBy(t => t.Timestamp).ToList();
 					if (parentTrades.Count > 0)
@@ -597,8 +598,8 @@ internal static class StrategyGrouper
 						var entryPrice = parentTrades.Sum(p => (p.Side == Side.Buy ? p.Price : -p.Price) * p.Qty) / entryQty;
 
 						// Expand to parent leg strikes (e.g., include original $23.5 short that was rolled)
-						var parentLegStrikes = allTrades.Where(t => t.Asset == Asset.Option && t.ParentStrategySeq.HasValue && excludedParentSeqs.Contains(t.ParentStrategySeq.Value)).Select(t => MatchKeys.TryGetOptionSymbol(t.MatchKey, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null).Where(p => p != null).Select(p => p!.Strike).Distinct().ToHashSet();
-						var occSuffixes = parentLegStrikes.Select(s => $"{firstParsed.CallPut}{(long)(s * 1000m):D8}").ToHashSet();
+						var parentLegStrikes = allTrades.Where(t => t.Asset == Asset.Option && t.ParentStrategySeq.HasValue && excludedParentSeqs.Contains(t.ParentStrategySeq.Value)).Select(t => MatchKeys.ParseOption(t.MatchKey)?.parsed).Where(p => p != null).Select(p => p!.Strike).Distinct().ToHashSet();
+						var occSuffixes = parentLegStrikes.Select(s => MatchKeys.OccSuffix(s, firstParsed.CallPut)).ToHashSet();
 						var optionKeyPrefix = $"{MatchKeys.OptionPrefix}{firstParsed.Root}";
 						var lastEntryTime = parentTrades.Max(t => t.Timestamp);
 
@@ -656,7 +657,7 @@ internal static class StrategyGrouper
 		// lots came from standalone entries — historical trades with parentSeq belong to closed strategies.
 		if (adjustment == null)
 		{
-			var legMatchKeys = group.Select(g => g.matchKey).ToHashSet();
+			var legMatchKeys = legs.Select(g => g.MatchKey).ToHashSet();
 			var filterByPureSeqs = pureSeqs != null && pureSeqs.Count > 0;
 			var rawOwnTrades = allTrades.Where(t => legMatchKeys.Contains(t.MatchKey) && t.Side is Side.Buy or Side.Sell && t.Asset == Asset.Option && (!filterByPureSeqs || (t.ParentStrategySeq.HasValue && pureSeqs!.Contains(t.ParentStrategySeq.Value))) && (!isBrandNewFallback || !t.ParentStrategySeq.HasValue)).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
 
@@ -664,7 +665,7 @@ internal static class StrategyGrouper
 			// Skip earlier contracts per matchKey that belong to other groups sharing the key.
 			if (isBrandNewFallback)
 			{
-				var groupQtyPerKey = group.ToDictionary(g => g.matchKey, g => g.row.Qty);
+				var groupQtyPerKey = legs.ToDictionary(g => g.MatchKey, g => g.Row.Qty);
 				var totalPerKey = rawOwnTrades.GroupBy(t => t.MatchKey).ToDictionary(g => g.Key, g => g.Sum(t => t.Qty));
 				var skipPerKey = legMatchKeys.ToDictionary(mk => mk, mk => totalPerKey.GetValueOrDefault(mk) - groupQtyPerKey.GetValueOrDefault(mk, 0));
 				if (skipPerKey.Values.Any(v => v > 0))
@@ -696,17 +697,17 @@ internal static class StrategyGrouper
 
 		var longLegAdjustment = netInitial - netAdjusted;
 		var side = netAdjusted >= 0 ? Side.Buy : Side.Sell;
-		var longestExpiry = group.Max(g => g.row.Expiry) ?? DateTime.MinValue;
+		var longestExpiry = legs.Max(g => g.Row.Expiry) ?? DateTime.MinValue;
 
 		var displayPrice = side == Side.Sell ? -netAdjusted : netAdjusted;
 		var displayInitial = side == Side.Sell ? -strategyInitial : strategyInitial;
 		rows.Add(new PositionRow(Instrument: $"{firstParsed.Root} {Formatters.FormatOptionDate(longestExpiry)}", Asset: Asset.OptionStrategy, OptionKind: strategyKind, Side: side, Qty: qty, AvgPrice: displayPrice, Expiry: longestExpiry, IsStrategyLeg: false, InitialAvgPrice: displayInitial, AdjustedAvgPrice: displayPrice));
 
-		foreach (var leg in group.OrderByDescending(g => g.row.Expiry).ThenByDescending(g => parsedLegs.FirstOrDefault(p => p.leg.matchKey == g.matchKey).parsed?.Strike ?? 0))
+		foreach (var leg in legs.OrderByDescending(g => g.Row.Expiry).ThenByDescending(g => parsedLegs.FirstOrDefault(p => p.leg.MatchKey == g.MatchKey).parsed?.Strike ?? 0))
 		{
-			var initialPrice = leg.row.AvgPrice;
-			var adjustedPrice = leg.row.Side == Side.Buy ? initialPrice - longLegAdjustment : initialPrice;
-			rows.Add(leg.row with { IsStrategyLeg = true, InitialAvgPrice = initialPrice, AdjustedAvgPrice = adjustedPrice });
+			var initialPrice = leg.Row.AvgPrice;
+			var adjustedPrice = leg.Row.Side == Side.Buy ? initialPrice - longLegAdjustment : initialPrice;
+			rows.Add(leg.Row with { IsStrategyLeg = true, InitialAvgPrice = initialPrice, AdjustedAvgPrice = adjustedPrice });
 		}
 
 		return (rows, adjustment);
@@ -730,12 +731,11 @@ internal static class StrategyGrouper
 		while (changed)
 		{
 			changed = false;
-			var suffixes = expandedStrikes.Select(s => $"{callPut}{(long)(s * 1000m):D8}").ToHashSet();
+			var suffixes = expandedStrikes.Select(s => MatchKeys.OccSuffix(s, callPut)).ToHashSet();
 			foreach (var trade in optionBuySellTrades.Where(t => t.ParentStrategySeq.HasValue && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal) && suffixes.Any(suffix => t.MatchKey.EndsWith(suffix, StringComparison.Ordinal))))
 				foreach (var sibling in allTrades.Where(t => t.ParentStrategySeq == trade.ParentStrategySeq && t.Asset == Asset.Option && t.Side is Side.Buy or Side.Sell && t.MatchKey.StartsWith(optionKeyPrefix, StringComparison.Ordinal)))
 				{
-					if (!MatchKeys.TryGetOptionSymbol(sibling.MatchKey, out var sym)) continue;
-					var parsed = ParsingHelpers.ParseOptionSymbol(sym);
+					var parsed = MatchKeys.ParseOption(sibling.MatchKey)?.parsed;
 					if (parsed == null || parsed.CallPut != callPut || expandedStrikes.Contains(parsed.Strike)) continue;
 
 					var priorQty = optionBuySellTrades.Where(t => t.MatchKey == sibling.MatchKey && t.Timestamp < sibling.Timestamp).Sum(t => t.Side == Side.Buy ? t.Qty : -t.Qty);
@@ -747,7 +747,7 @@ internal static class StrategyGrouper
 				}
 		}
 
-		var occSuffixes = expandedStrikes.Select(s => $"{callPut}{(long)(s * 1000m):D8}").ToHashSet();
+		var occSuffixes = expandedStrikes.Select(s => MatchKeys.OccSuffix(s, callPut)).ToHashSet();
 		var today = EvaluationDate.Today;
 
 		var legEvents = optionBuySellTrades
@@ -756,7 +756,7 @@ internal static class StrategyGrouper
 			.ToList();
 
 		// Add expiration events for expired contracts (needed to find flat time)
-		var expiredContracts = legEvents.Select(e => e.MatchKey).Distinct().Select(mk => (matchKey: mk, parsed: MatchKeys.TryGetOptionSymbol(mk, out var sym) ? ParsingHelpers.ParseOptionSymbol(sym) : null)).Where(x => x.parsed != null && x.parsed.ExpiryDate.Date < today).ToList();
+		var expiredContracts = legEvents.Select(e => e.MatchKey).Distinct().Select(mk => (matchKey: mk, parsed: MatchKeys.ParseOption(mk)?.parsed)).Where(x => x.parsed != null && x.parsed.ExpiryDate.Date < today).ToList();
 		foreach (var (matchKey, parsed) in expiredContracts)
 			legEvents.Add((parsed!.ExpiryDate.Date + PositionTracker.ExpirationTime, int.MaxValue, matchKey, Side.Expire, 0, 0m, 0m, Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike) + " " + ParsingHelpers.CallPutDisplayName(parsed.CallPut), IsExpiry: true));
 

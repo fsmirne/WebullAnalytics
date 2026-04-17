@@ -289,12 +289,7 @@ public static class BreakEvenAnalyzer
 	// --- Helpers ---
 
 	private static (OptionParsed parsed, string symbol)? ParseOption(PositionRow row)
-	{
-		if (row.MatchKey == null || !MatchKeys.TryGetOptionSymbol(row.MatchKey, out var symbol))
-			return null;
-		var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
-		return parsed == null ? null : (parsed, symbol);
-	}
+		=> row.MatchKey != null ? MatchKeys.ParseOption(row.MatchKey) : null;
 
 	private static bool HasIvForRemainingTimeLegs(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, DateTime evaluationExpiry, AnalysisOptions opts)
 	{
