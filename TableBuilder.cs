@@ -353,17 +353,31 @@ public static class TableBuilder
 			items.Add(table);
 		}
 
-		if (b.Credits != null && b.Credits.Count > 0)
+		if ((b.Credits != null && b.Credits.Count > 0) || (b.StandaloneAdjustments != null && b.StandaloneAdjustments.Count > 0))
 		{
 			items.Add(new Text(""));
 			items.Add(ascii ? new Text("Strategy adjustments:") : new Markup("[bold]Strategy adjustments:[/]"));
-			foreach (var c in b.Credits)
+			if (b.Credits != null)
 			{
-				var credit = (c.LotPrice - c.ParentPrice) * c.Qty;
-				var lotText = Formatters.FormatPrice(c.LotPrice, b.Asset);
-				var parentText = Formatters.FormatPrice(c.ParentPrice, b.Asset);
-				var creditText = credit.ToString("N2", CultureInfo.InvariantCulture);
-				items.Add(new Text($"  {c.Instrument}: (${lotText} - ${parentText}) x {c.Qty} = ${creditText}"));
+				foreach (var c in b.Credits)
+				{
+					var credit = (c.LotPrice - c.ParentPrice) * c.Qty;
+					var lotText = Formatters.FormatPrice(c.LotPrice, b.Asset);
+					var parentText = Formatters.FormatPrice(c.ParentPrice, b.Asset);
+					var creditText = credit.ToString("N2", CultureInfo.InvariantCulture);
+					items.Add(new Text($"  {c.Instrument}: (${lotText} - ${parentText}) x {c.Qty} = ${creditText}"));
+				}
+			}
+			if (b.StandaloneAdjustments != null)
+			{
+				foreach (var s in b.StandaloneAdjustments)
+				{
+					var priceText = Formatters.FormatPrice(s.Price, b.Asset);
+					var adjUnits = s.CashImpact / 100m;
+					var sign = adjUnits >= 0 ? "+" : "-";
+					var adjText = Math.Abs(adjUnits).ToString("N2", CultureInfo.InvariantCulture);
+					items.Add(new Text($"  {s.Instrument} {s.Side}: ${priceText} x {s.Qty} = {sign}${adjText}"));
+				}
 			}
 		}
 
@@ -538,7 +552,7 @@ public static class TableBuilder
 				currentValue = (quote.Bid.Value + quote.Ask.Value) / 2m;
 			}
 
-			var premium = pos.InitialAvgPrice ?? pos.AvgPrice;
+			var premium = pos.AdjustedAvgPrice ?? pos.AvgPrice;
 			var multiplier = pos.Asset == Asset.Stock ? Trade.StockMultiplier : Trade.OptionMultiplier;
 			var unrealized = pos.Side == Side.Buy ? (currentValue - premium) * pos.Qty * multiplier : (premium - currentValue) * pos.Qty * multiplier;
 			total += unrealized;

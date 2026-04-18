@@ -249,7 +249,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var initialAmount = settings.InitialAmount;
 		var (rows, positions, running) = PositionTracker.ComputeReport(trades, initialAmount, feeLookup);
 		var tradeIndex = PositionTracker.BuildTradeIndex(trades);
-		var (positionRows, strategyAdjustments) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
+		var (positionRows, strategyAdjustments, singleLegStandalones) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
 		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null;
@@ -335,7 +335,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraNotablePrices, ivOverrides);
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
-		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments);
+		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments, singleLegStandalones);
 
 		switch (settings.OutputFormat.ToLowerInvariant())
 		{
