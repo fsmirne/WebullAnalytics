@@ -81,7 +81,7 @@ By default this installs to `~/.local/bin`. You can specify a custom directory:
 
 ### Commands
 
-WebullAnalytics has four commands: `report` (generate a P&L report), `research` (hypothetical what-if analysis), `fetch` (download order data from the Webull API), and `sniff` (automatically capture fresh API session headers).
+WebullAnalytics has four commands: `report` (generate a P&L report), `analyze` (hypothetical what-if analysis), `fetch` (download order data from the Webull API), and `sniff` (automatically capture fresh API session headers).
 
 ### Report Command
 
@@ -167,9 +167,9 @@ Options:
   --help, -h                Show help message
 ```
 
-### Research Command
+### Analyze Command
 
-The `research` command runs a hypothetical what-if analysis by injecting synthetic trades into the report pipeline without modifying any data files. It accepts all the same options as `report` plus a `--trades` option.
+The `analyze` command runs a hypothetical what-if analysis by injecting synthetic trades into the report pipeline without modifying any data files. It accepts all the same options as `report` plus a `--trades` option.
 
 #### Trade Format
 
@@ -187,25 +187,25 @@ The `research` command runs a hypothetical what-if analysis by injecting synthet
 
 ```bash
 # What if I roll the calendar short from Apr 10 to Apr 17 for $0.24 credit?
-WebullAnalytics research --trades "GME260410C00023000:0.14x300,GME260417C00023000:-0.38x300"
+WebullAnalytics analyze --trades "GME260410C00023000:0.14x300,GME260417C00023000:-0.38x300"
 
 # Same roll but use live market prices (buy at bid, sell at ask)
-WebullAnalytics research --trades "GME260410C00023000:BIDx300,GME260417C00023000:-ASKx300"
+WebullAnalytics analyze --trades "GME260410C00023000:BIDx300,GME260417C00023000:-ASKx300"
 
 # Use mid-market prices for both legs
-WebullAnalytics research --trades "GME260410C00023000:MIDx300,GME260417C00023000:-MIDx300"
+WebullAnalytics analyze --trades "GME260410C00023000:MIDx300,GME260417C00023000:-MIDx300"
 
 # What if I close 100 contracts of my long call?
-WebullAnalytics research --trades "GME260501C00023000:-0.70x100"
+WebullAnalytics analyze --trades "GME260501C00023000:-0.70x100"
 
 # What if I add a protective put?
-WebullAnalytics research --trades "GME260501P00022000:0.25x455"
+WebullAnalytics analyze --trades "GME260501P00022000:0.25x455"
 
 # Simulate running on a future date (e.g., after short leg expiration)
-WebullAnalytics research --trades "GME260417C00023000:-0.38x300" --date 2026-04-11
+WebullAnalytics analyze --trades "GME260417C00023000:-0.38x300" --date 2026-04-11
 
 # Combine with report options (output to text, override underlying price)
-WebullAnalytics research --trades "GME260410C00023000:0.14x300,GME260417C00023000:-0.38x300" --output text --current-underlying-price GME:23.20
+WebullAnalytics analyze --trades "GME260410C00023000:0.14x300,GME260417C00023000:-0.38x300" --output text --current-underlying-price GME:23.20
 ```
 
 When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the configured API source (`--api webull` or `--api yahoo`) before building the hypothetical trades.
@@ -218,20 +218,20 @@ The `--roll` option computes the theoretical roll credit at various underlying p
 
 ```bash
 # Analyze rolling the $23 short from Apr 10 to Apr 17 (300 contracts)
-WebullAnalytics research --roll "GME260410C00023000>GME260417C00023000x300"
+WebullAnalytics analyze --roll "GME260410C00023000>GME260417C00023000x300"
 
 # Roll to a different strike
-WebullAnalytics research --roll "GME260410C00023000>GME260417C00023500x300"
+WebullAnalytics analyze --roll "GME260410C00023000>GME260417C00023500x300"
 
 # Override IV for the analysis
-WebullAnalytics research --roll "GME260410C00023000>GME260417C00023000x300" --iv GME260410C00023000:37,GME260417C00023000:31
+WebullAnalytics analyze --roll "GME260410C00023000>GME260417C00023000x300" --iv GME260410C00023000:37,GME260417C00023000:31
 ```
 
 The output is a 2D grid of roll credits across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-credit cell (globally) in **bold underline green**, and any row whose max credit matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
 
 Notable prices from `--notable-prices` are included as additional rows in the grid.
 
-#### Research Options
+#### Analyze Options
 
 All `report` options are available, plus:
 
@@ -390,7 +390,7 @@ An optional `data/config.json` file provides default values for command-line opt
 }
 ```
 
-Copy and customize from `config.example.json`. The `report` section maps directly to the report/research command options. The `autoExpandTerminal` flag, when `true`, automatically resizes the terminal to fit wide tables.
+Copy and customize from `config.example.json`. The `report` section maps directly to the report/analyze command options. The `autoExpandTerminal` flag, when `true`, automatically resizes the terminal to fit wide tables.
 
 ## Output Formats
 

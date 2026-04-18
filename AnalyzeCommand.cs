@@ -6,7 +6,7 @@ using System.Text.Json;
 
 namespace WebullAnalytics;
 
-class ResearchSettings : ReportSettings
+class AnalyzeSettings : ReportSettings
 {
 	[Description("Hypothetical trades to include. Format: SYMBOL:PRICExQTY where PRICE is a number (positive=sell/credit, negative=buy/debit) or -/+BID/MID/ASK for market prices. QTY is optional (default 1). Comma-separated for multiple. Example: GME260501C00023000:-MIDx300")]
 	[CommandOption("--trades")]
@@ -86,9 +86,9 @@ class ResearchSettings : ReportSettings
 	}
 }
 
-class ResearchCommand : AsyncCommand<ResearchSettings>
+class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, ResearchSettings settings, CancellationToken cancellation)
+	public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeSettings settings, CancellationToken cancellation)
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
@@ -125,7 +125,7 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation);
 	}
 
-	private static async Task<int> AnalyzeRoll(ResearchSettings settings, CancellationToken cancellation)
+	private static async Task<int> AnalyzeRoll(AnalyzeSettings settings, CancellationToken cancellation)
 	{
 		var gtIdx = settings.Roll!.IndexOf('>');
 		var remaining = settings.Roll[(gtIdx + 1)..];
@@ -374,10 +374,10 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 			{
 				var priceQty = entry[(entry.IndexOf(':') + 1)..];
 				var priceStr = priceQty.Contains('x') ? priceQty[..priceQty.IndexOf('x')] : priceQty;
-				return ResearchSettings.MarketPriceKeywords.Contains(priceStr.TrimStart('-', '+'));
+				return AnalyzeSettings.MarketPriceKeywords.Contains(priceStr.TrimStart('-', '+'));
 			});
 
-	private static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(ResearchSettings settings, string tradesSpec, CancellationToken cancellation)
+	private static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(AnalyzeSettings settings, string tradesSpec, CancellationToken cancellation)
 	{
 		var symbols = tradesSpec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(e => e[..e.IndexOf(':')]).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 		var minimalRows = symbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
@@ -421,7 +421,7 @@ class ResearchCommand : AsyncCommand<ResearchSettings>
 		var isBuy = priceStr.StartsWith('-');
 		var unsigned = priceStr.TrimStart('-', '+');
 
-		if (!ResearchSettings.MarketPriceKeywords.Contains(unsigned))
+		if (!AnalyzeSettings.MarketPriceKeywords.Contains(unsigned))
 			return decimal.Parse(priceStr, CultureInfo.InvariantCulture);
 
 		if (quotes == null || !quotes.TryGetValue(symbol, out var quote))

@@ -2,7 +2,7 @@ namespace WebullAnalytics;
 
 /// <summary>
 /// Centralized "today" for the evaluation pipeline. Defaults to the real date.
-/// Set via --date on ResearchCommand to simulate a future (or past) trading day.
+/// Set via --date on AnalyzeCommand to simulate a future (or past) trading day.
 /// </summary>
 internal static class EvaluationDate
 {
