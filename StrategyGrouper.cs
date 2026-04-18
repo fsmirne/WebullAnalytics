@@ -330,7 +330,7 @@ internal static class StrategyGrouper
 	/// Builds the final position rows, creating strategy summary rows for multi-leg positions.
 	/// Returns the rows and a dictionary of pre-computed timeline replays keyed by summary row index.
 	/// </summary>
-	internal static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments) BuildFinalPositionRows(List<StrategyGroup> groups, List<Trade> allTrades, Dictionary<string, List<Lot>> positions)
+	internal static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments, Dictionary<string, List<NetDebitTrade>> singleLegStandalones) BuildFinalPositionRows(List<StrategyGroup> groups, List<Trade> allTrades, Dictionary<string, List<Lot>> positions)
 	{
 		var tradeBySeq = allTrades.Where(t => t.Asset == Asset.OptionStrategy).ToDictionary(t => t.Seq);
 
@@ -354,6 +354,7 @@ internal static class StrategyGrouper
 
 		var rows = new List<PositionRow>();
 		var adjustments = new Dictionary<int, StrategyAdjustment>();
+		var singleLegStandalones = new Dictionary<string, List<NetDebitTrade>>();
 
 		for (int i = 0; i < groups.Count; i++)
 		{
@@ -367,10 +368,15 @@ internal static class StrategyGrouper
 					adjustments[summaryIndex] = adjustment;
 			}
 			else
-				rows.Add(AdjustForExpiredStrategyLegs(group.Legs[0], positions, allTrades, tradeBySeq));
+			{
+				var (row, standaloneTrades) = AdjustForExpiredStrategyLegs(group.Legs[0], positions, allTrades, tradeBySeq);
+				rows.Add(row);
+				if (standaloneTrades.Count > 0)
+					singleLegStandalones[group.Legs[0].MatchKey] = standaloneTrades;
+			}
 		}
 
-		return (rows, adjustments);
+		return (rows, adjustments, singleLegStandalones);
 	}
 
 	/// <summary>
@@ -407,14 +413,15 @@ internal static class StrategyGrouper
 	/// computes an adjusted price reflecting the credits/debits from those expired legs
 	/// and any standalone roll trades that modified the position after the strategy entry.
 	/// </summary>
-	private static PositionRow AdjustForExpiredStrategyLegs(PositionEntry entry, Dictionary<string, List<Lot>> positions, List<Trade> allTrades, Dictionary<int, Trade> tradeBySeq)
+	private static (PositionRow row, List<NetDebitTrade> standaloneTrades) AdjustForExpiredStrategyLegs(PositionEntry entry, Dictionary<string, List<Lot>> positions, List<Trade> allTrades, Dictionary<int, Trade> tradeBySeq)
 	{
 		var (matchKey, row, trade) = (entry.MatchKey, entry.Row, entry.Trade);
-		if (trade?.Asset != Asset.Option) return row;
+		var emptyStandalones = new List<NetDebitTrade>();
+		if (trade?.Asset != Asset.Option) return (row, emptyStandalones);
 
 		var lots = positions.GetValueOrDefault(matchKey, []);
 		var strategyLots = lots.Where(l => l.ParentStrategySeq.HasValue).ToList();
-		if (strategyLots.Count == 0) return row;
+		if (strategyLots.Count == 0) return (row, emptyStandalones);
 
 		// Collect all parentSeqs where the other legs have fully expired/closed
 		var expiredParentSeqs = new HashSet<int>();
@@ -430,7 +437,7 @@ internal static class StrategyGrouper
 			allOtherLegKeys.UnionWith(otherLegs.Select(l => l.MatchKey));
 			if (parentTrade.Timestamp > latestEntryTime) latestEntryTime = parentTrade.Timestamp;
 		}
-		if (expiredParentSeqs.Count == 0) return row;
+		if (expiredParentSeqs.Count == 0) return (row, emptyStandalones);
 
 		// Basic adjustment: credit from the expired short legs of each parent strategy
 		var totalAdjustment = 0m;
@@ -445,6 +452,7 @@ internal static class StrategyGrouper
 		// Standalone roll credit: find trades that rolled expired legs to new strikes.
 		// Computed ONCE across all expired parentSeqs to avoid double-counting when
 		// multiple parent batches (e.g., 450x + 5x fills) share the same expired legs.
+		var standaloneUsed = new List<NetDebitTrade>();
 		var parsed = MatchKeys.ParseOption(matchKey)?.parsed;
 		if (parsed != null && allOtherLegKeys.Count > 0)
 		{
@@ -461,25 +469,28 @@ internal static class StrategyGrouper
 					var totalCredit = 0m;
 					foreach (var st in standaloneTrades)
 					{
+						int qty;
 						if (allOtherLegKeys.Contains(st.MatchKey))
-							totalCredit += (st.Side == Side.Sell ? 1m : -1m) * st.Qty * st.Price * st.Multiplier;
+							qty = st.Qty;
 						else
 						{
 							var available = closeQty - sellQtyUsed;
 							if (available <= 0) continue;
-							var qty = Math.Min(st.Qty, available);
-							totalCredit += (st.Side == Side.Sell ? 1m : -1m) * qty * st.Price * st.Multiplier;
+							qty = Math.Min(st.Qty, available);
 							sellQtyUsed += qty;
 						}
+						var cashImpact = (st.Side == Side.Sell ? 1m : -1m) * qty * st.Price * st.Multiplier;
+						totalCredit += cashImpact;
+						standaloneUsed.Add(new NetDebitTrade(st.Timestamp, st.Instrument, st.Side, qty, st.Price, cashImpact));
 					}
 					totalAdjustment += totalCredit / Trade.OptionMultiplier;
 				}
 			}
 		}
 
-		if (adjustedQty == 0) return row;
+		if (adjustedQty == 0) return (row, emptyStandalones);
 		var adjustedPrice = row.AvgPrice - totalAdjustment / row.Qty;
-		return row with { InitialAvgPrice = row.AvgPrice, AdjustedAvgPrice = adjustedPrice };
+		return (row with { InitialAvgPrice = row.AvgPrice, AdjustedAvgPrice = adjustedPrice }, standaloneUsed);
 	}
 
 	/// <summary>
@@ -521,6 +532,7 @@ internal static class StrategyGrouper
 		// For multi-batch, init = first batch entry; single-batch, init = same as adj.
 		var netInitial = legs.Sum(leg => leg.Row.Side == Side.Buy ? leg.Row.AvgPrice : -leg.Row.AvgPrice);
 		decimal? pureInitOverride = null;
+		int? firstPureParentSeq = null;
 		if (pureSeqs != null)
 		{
 			var parentTrades = allTrades.Where(t => pureSeqs.Contains(t.Seq) && t.Asset == Asset.OptionStrategy).OrderBy(t => t.Timestamp).ToList();
@@ -529,7 +541,10 @@ internal static class StrategyGrouper
 				var totalQty = parentTrades.Sum(p => p.Qty);
 				netInitial = parentTrades.Sum(p => (p.Side == Side.Buy ? p.Price : -p.Price) * p.Qty) / totalQty;
 				if (pureSeqs.Count > 1)
+				{
 					pureInitOverride = parentTrades[0].Side == Side.Buy ? parentTrades[0].Price : -parentTrades[0].Price;
+					firstPureParentSeq = parentTrades[0].Seq;
+				}
 			}
 		}
 
@@ -701,8 +716,19 @@ internal static class StrategyGrouper
 
 		foreach (var leg in legs.OrderByDescending(g => g.Row.Expiry).ThenByDescending(g => parsedLegs.FirstOrDefault(p => p.leg.MatchKey == g.MatchKey).parsed?.Strike ?? 0))
 		{
-			var initialPrice = leg.Row.AvgPrice;
-			var adjustedPrice = leg.Row.Side == Side.Buy ? initialPrice - longLegAdjustment : initialPrice;
+			decimal initialPrice;
+			decimal adjustedPrice;
+			if (firstPureParentSeq.HasValue)
+			{
+				var firstBatchLeg = allTrades.FirstOrDefault(t => t.ParentStrategySeq == firstPureParentSeq.Value && t.MatchKey == leg.MatchKey);
+				initialPrice = firstBatchLeg?.Price ?? leg.Row.AvgPrice;
+				adjustedPrice = leg.Row.AvgPrice;
+			}
+			else
+			{
+				initialPrice = leg.Row.AvgPrice;
+				adjustedPrice = leg.Row.Side == Side.Buy ? initialPrice - longLegAdjustment : initialPrice;
+			}
 			rows.Add(leg.Row with { IsStrategyLeg = true, InitialAvgPrice = initialPrice, AdjustedAvgPrice = adjustedPrice });
 		}
 

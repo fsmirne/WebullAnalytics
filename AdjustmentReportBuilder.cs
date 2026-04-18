@@ -4,7 +4,7 @@ public record CostStep(DateTime Timestamp, string Instrument, Side Side, int Tra
 public record StrategyCredit(string Instrument, int Qty, decimal LotPrice, decimal ParentPrice);
 public record NetDebitTrade(DateTime Timestamp, string Instrument, Side Side, int Qty, decimal Price, decimal CashImpact);
 public record StrategyAdjustment(List<NetDebitTrade> Trades, decimal TotalNetDebit, DateTime? LastFlatTime, decimal? InitNetDebit = null);
-public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, decimal InitPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime, string? OptionKind = null, decimal? InitNetDebit = null);
+public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, decimal InitPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime, string? OptionKind = null, decimal? InitNetDebit = null, List<NetDebitTrade>? StandaloneAdjustments = null);
 
 /// <summary>
 /// Builds per-position breakdowns showing how each adjusted price was calculated.
@@ -12,7 +12,7 @@ public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, 
 /// </summary>
 internal static class AdjustmentReportBuilder
 {
-    internal static List<PriceBreakdown> Build(List<PositionRow> positionRows, List<Trade> allTrades, Dictionary<string, List<Lot>> positions, Dictionary<int, StrategyAdjustment>? strategyAdjustments = null)
+    internal static List<PriceBreakdown> Build(List<PositionRow> positionRows, List<Trade> allTrades, Dictionary<string, List<Lot>> positions, Dictionary<int, StrategyAdjustment>? strategyAdjustments = null, Dictionary<string, List<NetDebitTrade>>? singleLegStandalones = null)
     {
         var result = new List<PriceBreakdown>();
         var tradeBySeq = allTrades.Where(t => t.Asset == Asset.OptionStrategy).ToDictionary(t => t.Seq);
@@ -34,7 +34,8 @@ internal static class AdjustmentReportBuilder
             }
             else if (!row.IsStrategyLeg)
             {
-                var breakdown = BuildSingleBreakdown(row, allTrades, positions, tradeBySeq);
+                var standalones = row.MatchKey != null ? singleLegStandalones?.GetValueOrDefault(row.MatchKey) : null;
+                var breakdown = BuildSingleBreakdown(row, allTrades, positions, tradeBySeq, standalones);
                 if (breakdown != null) result.Add(breakdown);
                 i++;
             }
@@ -47,7 +48,7 @@ internal static class AdjustmentReportBuilder
         return result;
     }
 
-    private static PriceBreakdown? BuildSingleBreakdown(PositionRow row, List<Trade> allTrades, Dictionary<string, List<Lot>> positions, Dictionary<int, Trade> tradeBySeq)
+    private static PriceBreakdown? BuildSingleBreakdown(PositionRow row, List<Trade> allTrades, Dictionary<string, List<Lot>> positions, Dictionary<int, Trade> tradeBySeq, List<NetDebitTrade>? standaloneAdjustments)
     {
         if (row.MatchKey == null) return null;
 
@@ -58,19 +59,24 @@ internal static class AdjustmentReportBuilder
         if (!hasAdjustment && credits.Count == 0) return null;
 
         var initPrice = row.InitialAvgPrice ?? row.AvgPrice;
-        return new PriceBreakdown(row.Instrument, row.Asset, row.Side, row.Qty, initPrice, row.AdjustedAvgPrice, costSteps, credits.Count > 0 ? credits : null, null, null, null);
+        return new PriceBreakdown(row.Instrument, row.Asset, row.Side, row.Qty, initPrice, row.AdjustedAvgPrice, costSteps, credits.Count > 0 ? credits : null, null, null, null, StandaloneAdjustments: standaloneAdjustments);
     }
 
     private static List<CostStep> BuildCostSteps(string matchKey, List<Trade> allTrades)
     {
         var steps = new List<CostStep>();
         var state = (qty: 0, avg: 0m);
+        int lastFlatIndex = -1;
 
         foreach (var trade in allTrades.Where(t => t.MatchKey == matchKey && t.Side is Side.Buy or Side.Sell && t.Asset != Asset.OptionStrategy).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq))
         {
             state = PositionTracker.StepAverageCost(state, trade.Side, trade.Qty, trade.Price);
             steps.Add(new CostStep(trade.Timestamp, trade.Instrument, trade.Side, trade.Qty, trade.Price, Math.Abs(state.qty), state.avg));
+            if (state.qty == 0) lastFlatIndex = steps.Count - 1;
         }
+
+        if (lastFlatIndex >= 0)
+            return steps.GetRange(lastFlatIndex + 1, steps.Count - lastFlatIndex - 1);
 
         return steps;
     }
