@@ -147,8 +147,8 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		if (optionRoots.Count > 1)
 		{ AnsiConsole.MarkupLine("[red]Error:[/] combo order legs must share one underlying symbol."); return 2; }
 
-		// 5. Sign-sanity warning.
-		if (limit.HasValue && legs.All(l => l.Action == LegAction.Buy) && limit > 0)
+		// 5. Sign-sanity warning (multi-leg combos only; single-leg limits are always positive regardless of side).
+		if (limit.HasValue && legs.Count > 1 && legs.All(l => l.Action == LegAction.Buy) && limit > 0)
 			AnsiConsole.MarkupLine("[yellow]Warning:[/] all legs are buys but --limit is positive (credit). Double-check the sign.");
 
 		// 6. Build order.
