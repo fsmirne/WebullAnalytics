@@ -395,14 +395,14 @@ internal static class AnalyzeCommon
 			var newCov = ComputeLegMargin(newParsed, qty, spot, newMarketMid, longOpt, longStockTicker, longQty, pairMid);
 
 			var header = settings.Pair != null
-				? $"Spread margin (Reg-T estimate, at spot ${spot:N2}, with static pair {Markup.Escape(settings.Pair)}):"
+				? $"Spread margin (Reg-T estimate, at spot ${spot:N2}, with pair {Markup.Escape(settings.Pair)}):"
 				: $"Naked short margin (Reg-T estimate, at spot ${spot:N2}):";
 			Console.WriteLine(header);
-			Console.WriteLine($"  Close leg: {oldCov.StatusLabel} = ${oldCov.Total:N2} total");
-			Console.WriteLine($"  Open leg:  {newCov.StatusLabel} = ${newCov.Total:N2} total");
+			Console.WriteLine($"  Pre-roll position (MTM):  {oldCov.StatusLabel} = ${oldCov.Total:N2} total");
+			Console.WriteLine($"  Post-roll position:       {newCov.StatusLabel} = ${newCov.Total:N2} total");
 			var deltaMargin = newCov.Total - oldCov.Total;
 			var deltaSign = deltaMargin >= 0 ? "+" : "-";
-			Console.WriteLine($"  Delta:     {deltaSign}${Math.Abs(deltaMargin):N2} total");
+			Console.WriteLine($"  Additional BP (MTM):      {deltaSign}${Math.Abs(deltaMargin):N2} total");
 		}
 
 		Console.WriteLine();
