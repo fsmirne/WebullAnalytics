@@ -81,7 +81,7 @@ By default this installs to `~/.local/bin`. You can specify a custom directory:
 
 ### Commands
 
-WebullAnalytics has four commands: `report` (generate a P&L report), `analyze` (hypothetical what-if analysis), `fetch` (download order data from the Webull API), and `sniff` (automatically capture fresh API session headers).
+WebullAnalytics has five commands: `report` (generate a P&L report), `analyze` (hypothetical what-if analysis), `fetch` (download order data from the Webull API), `sniff` (automatically capture fresh API session headers), and `trade` (place, cancel, and inspect orders via the Webull OpenAPI).
 
 ### Report Command
 
@@ -276,6 +276,96 @@ Launches a browser with remote debugging, navigates to Webull, enters your unloc
 | Field | Description |
 |---|---|
 | `autoCloseBrowser` | If `true`, closes the browser without prompting (default: `false`) |
+
+### Trade Command
+
+The `trade` command places orders via the Webull OpenAPI. It supports single-leg equity orders, single-leg option orders, and multi-leg option strategies (including stock+option combos like covered calls). Unlike `fetch` — which uses Webull's session-based web API — `trade` uses the OpenAPI with App Key + App Secret authentication.
+
+Every `trade place` invocation runs a preview against the broker by default. The order is only submitted when you pass `--submit`, and every mutating action (`place --submit`, `cancel`, `cancel --all`) prompts interactively before sending.
+
+#### Setup
+
+Copy the example config and fill in your own account(s):
+
+```bash
+cp trade-config.example.json data/trade-config.json
+```
+
+The example ships with the three sandbox test accounts Webull publishes in its OpenAPI documentation. For a production account, add a new entry with `sandbox: false` and edit `defaultAccount` to point at it.
+
+#### Commands
+
+```bash
+# Preview a single equity limit buy (no order is placed).
+WebullAnalytics trade place --trades "buy:SPY:10" --limit 580
+
+# Place the same order.
+WebullAnalytics trade place --trades "buy:SPY:10" --limit 580 --submit
+
+# Preview a vertical call spread for 1 contract, net debit $0.75.
+WebullAnalytics trade place --trades "buy:SPY260515C00580000:1,sell:SPY260515C00590000:1" --limit -0.75
+
+# Calendar roll — sell near, buy far.
+WebullAnalytics trade place --trades "sell:GME260410C00023000:1,buy:GME260417C00023000:1" --limit -0.20
+
+# Covered call — long 100 shares + short 1 call.
+WebullAnalytics trade place --trades "buy:GME:100,sell:GME260501C00025000:1" --limit -23.50
+
+# Market order, single equity.
+WebullAnalytics trade place --trades "buy:SPY:10" --type market --submit
+
+# Cancel a single order.
+WebullAnalytics trade cancel <clientOrderId>
+
+# Cancel every open order for the account.
+WebullAnalytics trade cancel --all
+
+# Check an order's status.
+WebullAnalytics trade status <clientOrderId>
+
+# Use a non-default account.
+WebullAnalytics trade place --trades "buy:SPY:1" --limit 1 --account test2
+```
+
+#### `--trades` syntax
+
+Format: `ACTION:SYMBOL:QTY`, comma-separated for multiple legs.
+
+- `ACTION` — `buy` or `sell` (explicit, no sign math).
+- `SYMBOL` — equity ticker (e.g. `GME`) or OCC option symbol (e.g. `GME260501C00023000`).
+- `QTY` — positive integer.
+
+Per-leg prices (`@PRICE`) are **not** allowed in `trade` — combo orders use a single `--limit` for the net price across all legs. Positive `--limit` means net credit; negative means net debit.
+
+#### Options
+
+```
+Options (place):
+  --trades <legs>           Comma-separated legs in ACTION:SYMBOL:QTY format (required).
+  --limit <net>             Net limit price. Required for --type limit. Positive = credit; negative = debit.
+  --type <type>             limit or market. Default: limit. Market is rejected for multi-leg orders.
+  --tif <tif>               Time-in-force: day or gtc. Default: day.
+  --strategy <name>         Override auto-detected strategy. Values: single, stock, vertical, calendar,
+                            diagonal, iron_condor, iron_butterfly, butterfly, condor, straddle, strangle,
+                            covered_call, protective_put, collar.
+  --account <id-or-alias>   Pick an account from trade-config.json. Defaults to defaultAccount.
+  --submit                  Actually place the order. Without this, runs preview only.
+
+Options (cancel):
+  <clientOrderId>           Client order ID of the order to cancel.
+  --all                     Cancel every open order for the account.
+  --account <id-or-alias>   Pick a non-default account.
+
+Options (status):
+  <clientOrderId>           Client order ID to look up.
+  --account <id-or-alias>   Pick a non-default account.
+```
+
+#### Sandbox vs production
+
+Each account in `trade-config.json` has a `sandbox: true|false` flag. Sandbox accounts hit `https://us-openapi-alb.uat.webullbroker.com`; production accounts hit `https://api.webull.com`. A colored banner (green `[SANDBOX]` / red `[PRODUCTION]`) is printed at the top of every `trade` invocation so you always know which environment you are in.
+
+There is no `--yes` flag — every place, cancel, and cancel-all prompts interactively. Piped empty input aborts.
 
 ## Data Sources
 
