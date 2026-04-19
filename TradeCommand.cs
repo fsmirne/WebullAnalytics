@@ -349,7 +349,7 @@ internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
 		{
 			AnsiConsole.MarkupLine($"[bold]Order[/] {Markup.Escape(o.ClientOrderId ?? "-")}  [dim]id[/]={Markup.Escape(o.OrderId ?? "-")}  [dim]status[/]={Markup.Escape(o.Status ?? "-")}");
 			AnsiConsole.MarkupLine($"  {Markup.Escape(o.Symbol ?? "-")} {Markup.Escape(o.Side ?? "-")} {Markup.Escape(o.FilledQuantity ?? "0")}/{Markup.Escape(o.TotalQuantity ?? "-")} @ {Markup.Escape(o.FilledPrice ?? "-")}");
-			AnsiConsole.MarkupLine($"  [dim]placed[/] {Markup.Escape(o.PlaceTime ?? "-")}  [dim]filled[/] {Markup.Escape(o.FilledTime ?? "-")}  [dim]intent[/] {Markup.Escape(o.PositionIntent ?? "-")}");
+			AnsiConsole.MarkupLine($"  [dim]placed[/] {Markup.Escape(o.PlaceTimeAt ?? o.PlaceTime ?? "-")}  [dim]filled[/] {Markup.Escape(o.FilledTimeAt ?? o.FilledTime ?? "-")}  [dim]intent[/] {Markup.Escape(o.PositionIntent ?? "-")}");
 			if (o.Legs != null)
 				foreach (var leg in o.Legs)
 					AnsiConsole.MarkupLine($"  └─ {Markup.Escape(leg.Symbol ?? "-")} {Markup.Escape(leg.Side ?? "-")} {Markup.Escape(leg.Quantity ?? "-")} {Markup.Escape(leg.OptionType ?? "")} strike={Markup.Escape(leg.StrikePrice ?? "-")} exp={Markup.Escape(leg.OptionExpireDate ?? "-")}");
