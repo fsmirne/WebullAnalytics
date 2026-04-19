@@ -279,7 +279,7 @@ Launches a browser with remote debugging, navigates to Webull, enters your unloc
 
 ### Trade Command
 
-The `trade` command places orders via the Webull OpenAPI. It supports single-leg equity orders, single-leg option orders, and multi-leg option strategies (including stock+option combos like covered calls). Unlike `fetch` — which uses Webull's session-based web API — `trade` uses the OpenAPI with App Key + App Secret authentication.
+The `trade` command places, cancels, lists, and inspects orders via the Webull OpenAPI. It supports single-leg equity orders, single-leg option orders, and multi-leg option strategies (including stock+option combos like covered calls). Unlike `fetch` — which uses Webull's session-based web API — `trade` uses the OpenAPI with App Key + App Secret authentication.
 
 Every `trade place` invocation runs a preview against the broker by default. The order is only submitted when you pass `--submit`, and every mutating action (`place --submit`, `cancel`, `cancel --all`) prompts interactively before sending.
 
@@ -320,6 +320,9 @@ WebullAnalytics trade cancel <clientOrderId>
 # Cancel every open order for the account.
 WebullAnalytics trade cancel --all
 
+# List all open orders for the account.
+WebullAnalytics trade list
+
 # Check an order's status.
 WebullAnalytics trade status <clientOrderId>
 
@@ -359,6 +362,9 @@ Options (cancel):
 
 Options (status):
   <clientOrderId>           Client order ID to look up.
+  --account <id-or-alias>   Pick a non-default account.
+
+Options (list):
   --account <id-or-alias>   Pick a non-default account.
 ```
 
