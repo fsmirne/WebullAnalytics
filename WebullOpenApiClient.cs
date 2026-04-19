@@ -20,6 +20,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 {
 	private readonly HttpClient _http;
 	private readonly TradeAccount _account;
+	private string Host => new Uri(_account.BaseUrl).Host;
 
 	internal WebullOpenApiClient(TradeAccount account)
 	{
@@ -150,7 +151,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 	private async Task<T> PostAsync<T>(string path, object body, CancellationToken ct)
 	{
 		var json = JsonSerializer.Serialize(body, JsonOptions);
-		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, path, new Dictionary<string, string>(), json);
+		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, new Dictionary<string, string>(), json);
 		using var req = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
 		using var resp = await _http.SendAsync(req, ct);
@@ -159,7 +160,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 
 	private async Task<T> GetAsync<T>(string path, IReadOnlyDictionary<string, string> query, CancellationToken ct)
 	{
-		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, path, query, null);
+		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null);
 		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
 		var uri = string.IsNullOrEmpty(qs) ? path : $"{path}?{qs}";
 		using var req = new HttpRequestMessage(HttpMethod.Get, uri);

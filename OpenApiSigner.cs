@@ -23,15 +23,17 @@ internal static class OpenApiSigner
 	internal static Dictionary<string, string> SignRequest(
 		string appKey,
 		string appSecret,
+		string host,
 		string path,
 		IReadOnlyDictionary<string, string> queryParams,
 		string? jsonBody)
-		=> SignRequest(appKey, appSecret, path, queryParams, jsonBody, DateTime.UtcNow, Guid.NewGuid().ToString("N"));
+		=> SignRequest(appKey, appSecret, host, path, queryParams, jsonBody, DateTime.UtcNow, Guid.NewGuid().ToString("N"));
 
 	/// <summary>Test-friendly overload: timestamp and nonce injectable for deterministic output.</summary>
 	internal static Dictionary<string, string> SignRequest(
 		string appKey,
 		string appSecret,
+		string host,
 		string path,
 		IReadOnlyDictionary<string, string> queryParams,
 		string? jsonBody,
@@ -48,6 +50,7 @@ internal static class OpenApiSigner
 			["x-signature-algorithm"] = "HMAC-SHA1",
 			["x-signature-nonce"] = nonce,
 			["x-signature-version"] = "1.0",
+			["host"] = host,
 		};
 
 		// Merge query + headers, sort alphabetically, join.
