@@ -350,6 +350,7 @@ Options (place):
                             covered_call, protective_put, collar.
   --account <id-or-alias>   Pick an account from trade-config.json. Defaults to defaultAccount.
   --submit                  Actually place the order. Without this, runs preview only.
+  --debug                   Print the raw JSON payload that will be sent to the Webull API.
 
 Options (cancel):
   <clientOrderId>           Client order ID of the order to cancel.
