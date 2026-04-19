@@ -266,7 +266,10 @@ internal sealed class TradeCancelCommand : AsyncCommand<TradeCancelSettings>
 
 			AnsiConsole.MarkupLine($"[bold]{orders.Count} open order(s):[/]");
 			foreach (var o in orders)
-				AnsiConsole.MarkupLine($"  {Markup.Escape(o.ClientOrderId ?? "?"),-22} {Markup.Escape(o.Symbol ?? "?"),-22} {Markup.Escape(o.Side ?? "?"),-5} {Markup.Escape(o.FilledQuantity ?? "0")}/{Markup.Escape(o.TotalQuantity ?? "?")} {Markup.Escape(o.Status ?? "?")}");
+			{
+				var inner = o.Orders?.FirstOrDefault();
+				AnsiConsole.MarkupLine($"  {Markup.Escape(o.ClientOrderId ?? "?"),-22} {Markup.Escape(inner?.Symbol ?? "?"),-8} {Markup.Escape(inner?.Side ?? "?"),-5} {Markup.Escape(inner?.FilledQuantity ?? "0")}/{Markup.Escape(inner?.TotalQuantity ?? "?")} {Markup.Escape(inner?.Status ?? "?")}");
+			}
 
 			if (!TradeContext.Confirm($"Cancel all {orders.Count} open orders?")) { AnsiConsole.MarkupLine("[dim]Aborted.[/]"); return 0; }
 
@@ -393,7 +396,10 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 
 		AnsiConsole.MarkupLine($"[bold]{orders.Count} open order(s):[/]");
 		foreach (var o in orders)
-			AnsiConsole.MarkupLine($"  {Markup.Escape(o.ClientOrderId ?? "?"),-22} {Markup.Escape(o.Symbol ?? "?"),-22} {Markup.Escape(o.Side ?? "?"),-5} {Markup.Escape(o.FilledQuantity ?? "0")}/{Markup.Escape(o.TotalQuantity ?? "?")} {Markup.Escape(o.Status ?? "?")}");
+		{
+			var inner = o.Orders?.FirstOrDefault();
+			AnsiConsole.MarkupLine($"  {Markup.Escape(o.ClientOrderId ?? "?"),-22} {Markup.Escape(inner?.Symbol ?? "?"),-8} {Markup.Escape(inner?.Side ?? "?"),-5} {Markup.Escape(inner?.FilledQuantity ?? "0")}/{Markup.Escape(inner?.TotalQuantity ?? "?")} {Markup.Escape(inner?.Status ?? "?")}");
+		}
 		return 0;
 	}
 }

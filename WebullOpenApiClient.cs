@@ -67,16 +67,12 @@ internal sealed class WebullOpenApiClient : IDisposable
 
 	// ─── List open orders ─────────────────────────────────────────────────────
 
+	/// <summary>Open-orders envelope: outer ClientOrderId is the cancellation key; Orders[] holds the actual detail records (same shape as /order/detail).</summary>
 	internal sealed record OpenOrder(
 		[property: JsonPropertyName("client_order_id")] string? ClientOrderId,
-		[property: JsonPropertyName("order_id")] string? OrderId,
-		[property: JsonPropertyName("symbol")] string? Symbol,
-		[property: JsonPropertyName("side")] string? Side,
-		[property: JsonPropertyName("status")] string? Status,
-		[property: JsonPropertyName("total_quantity")] string? TotalQuantity,
-		[property: JsonPropertyName("filled_quantity")] string? FilledQuantity,
-		[property: JsonPropertyName("order_type")] string? OrderType,
-		[property: JsonPropertyName("combo_type")] string? ComboType);
+		[property: JsonPropertyName("combo_type")] string? ComboType,
+		[property: JsonPropertyName("combo_order_id")] string? ComboOrderId,
+		[property: JsonPropertyName("orders")] List<OrderDetailOrder>? Orders);
 
 	/// <summary>Diagnostic: fetches the first page of open orders as raw JSON string (bypasses deserialization).</summary>
 	internal async Task<string> ListOpenOrdersRawAsync(CancellationToken ct = default)
