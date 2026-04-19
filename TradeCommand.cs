@@ -357,7 +357,9 @@ internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
 		{
 			AnsiConsole.MarkupLine($"[bold]Order[/] {Markup.Escape(o.ClientOrderId ?? "-")}  [dim]id[/]={Markup.Escape(o.OrderId ?? "-")}  [dim]status[/]={Markup.Escape(o.Status ?? "-")}");
 			AnsiConsole.MarkupLine($"  {Markup.Escape(o.Symbol ?? "-")} {Markup.Escape(o.Side ?? "-")} {Markup.Escape(TradeContext.FormatQty(o.TotalQuantity))} @ {Markup.Escape(TradeContext.FormatCurrency(o.LimitPrice))}");
-			AnsiConsole.MarkupLine($"  [dim]placed:[/] {Markup.Escape(o.PlaceTimeAt ?? o.PlaceTime ?? "-")}  [dim]filled:[/] {Markup.Escape(TradeContext.FormatQty(o.FilledQuantity))}/{Markup.Escape(TradeContext.FormatQty(o.TotalQuantity))}  [dim]intent:[/] {Markup.Escape(o.PositionIntent ?? "-")}");
+			var hasFill = decimal.TryParse(o.FilledQuantity, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var fq) && fq > 0m;
+			var fillPriceSuffix = hasFill && !string.IsNullOrEmpty(o.FilledPrice) ? $" @ {TradeContext.FormatCurrency(o.FilledPrice)}" : "";
+			AnsiConsole.MarkupLine($"  [dim]placed:[/] {Markup.Escape(o.PlaceTimeAt ?? o.PlaceTime ?? "-")}  [dim]filled:[/] {Markup.Escape(TradeContext.FormatQty(o.FilledQuantity))}/{Markup.Escape(TradeContext.FormatQty(o.TotalQuantity))}{Markup.Escape(fillPriceSuffix)}  [dim]intent:[/] {Markup.Escape(o.PositionIntent ?? "-")}");
 			if (o.Legs != null)
 				foreach (var leg in o.Legs)
 					AnsiConsole.MarkupLine($"  └─ {Markup.Escape(leg.Symbol ?? "-")} {Markup.Escape(leg.Side ?? "-")} {Markup.Escape(TradeContext.FormatQty(leg.Quantity))} {Markup.Escape(leg.OptionType ?? "")} strike={Markup.Escape(leg.StrikePrice ?? "-")} exp={Markup.Escape(leg.OptionExpireDate ?? "-")}");
