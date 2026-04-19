@@ -1,0 +1,45 @@
+{
+	"tickers": ["GME"],
+	"tickIntervalSeconds": 60,
+	"marketHours": {
+		"start": "09:30",
+		"end": "16:00",
+		"tz": "America/New_York"
+	},
+	"quoteSource": "webull",
+	"positionSource": {
+		"type": "openapi",
+		"account": "default"
+	},
+	"cashReserve": {
+		"mode": "percent",
+		"value": 25
+	},
+	"log": {
+		"path": "data/ai-proposals.log",
+		"consoleVerbosity": "normal"
+	},
+	"rules": {
+		"stopLoss": {
+			"enabled": true,
+			"maxDebitMultiplier": 1.5,
+			"spotBeyondBreakevenPct": 3.0
+		},
+		"takeProfit": {
+			"enabled": true,
+			"pctOfMaxProfit": 40
+		},
+		"defensiveRoll": {
+			"enabled": true,
+			"spotWithinPctOfShortStrike": 1.0,
+			"triggerDTE": 3,
+			"strikeStep": 0.50
+		},
+		"rollShortOnExpiry": {
+			"enabled": true,
+			"triggerDTE": 2,
+			"maxShortPremium": 0.10,
+			"minRollCredit": 0.05
+		}
+	}
+}
