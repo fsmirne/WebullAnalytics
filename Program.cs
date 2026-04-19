@@ -39,6 +39,11 @@ class Program
 			config.AddCommand<AnalyzeCommand>("analyze");
 			config.AddCommand<FetchCommand>("fetch");
 			config.AddCommand<SniffCommand>("sniff");
+			config.AddBranch("trade", trade =>
+			{
+				trade.AddCommand<TradePlaceCommand>("place");
+				// trade cancel and status commands registered in Tasks 9–10.
+			});
 		});
 		return app.Run(args);
 	}
