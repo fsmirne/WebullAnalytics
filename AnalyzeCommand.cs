@@ -103,6 +103,10 @@ internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
 	[Description("Static paired leg for spread margin calculation. Format: SYMBOL:QTY where SYMBOL is an equity ticker or OCC option symbol. Only meaningful with --side short. Example: --pair GME260515C00025000:499 or --pair GME:500")]
 	public string? Pair { get; set; }
 
+	[CommandOption("--cash")]
+	[Description("Available cash for funding the roll. Format: dollar amount (e.g. 23015 or 23015.50). Prints a funding-check block against the BP delta. Only meaningful with --side short.")]
+	public string? Cash { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -156,6 +160,16 @@ internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
 				}
 			}
 			// else: equity ticker, no additional validation (we don't validate ticker strings against any registry).
+		}
+
+		if (Cash != null)
+		{
+			if (!decimal.TryParse(Cash, NumberStyles.Any, CultureInfo.InvariantCulture, out var c) || c < 0m)
+				return ValidationResult.Error($"--cash: must be a non-negative decimal, got '{Cash}'");
+
+			var isLongSide = string.Equals(Side, "long", StringComparison.OrdinalIgnoreCase);
+			if (isLongSide)
+				return ValidationResult.Error("--cash is only meaningful with --side short (the default). Long-side rolls don't affect Reg-T margin.");
 		}
 
 		return ValidationResult.Success();
@@ -403,6 +417,24 @@ internal static class AnalyzeCommon
 			var deltaMargin = newCov.Total - oldCov.Total;
 			var deltaSign = deltaMargin >= 0 ? "+" : "-";
 			Console.WriteLine($"  BP delta:             {deltaSign}${Math.Abs(deltaMargin):N2} total");
+
+			if (!string.IsNullOrEmpty(settings.Cash))
+			{
+				var cash = decimal.Parse(settings.Cash, CultureInfo.InvariantCulture);
+				var rollNetTotal = currentCredit * qty * 100m; // positive = credit; negative = debit
+				var available = cash + rollNetTotal;
+				var net = available - deltaMargin;
+				var rollLabel = rollNetTotal >= 0m
+					? $"${cash:N2} cash + ${rollNetTotal:N2} roll credit = ${available:N2}"
+					: $"${cash:N2} cash - ${Math.Abs(rollNetTotal):N2} roll debit = ${available:N2}";
+				var netSign = net >= 0m ? "+" : "-";
+				var netLabel = net >= 0m ? "sufficient" : "shortfall — needs additional funds";
+				Console.WriteLine();
+				Console.WriteLine($"Funding check (--cash ${cash:N2}):");
+				Console.WriteLine($"  Available:  {rollLabel}");
+				Console.WriteLine($"  Required:   ${deltaMargin:N2} (BP delta)");
+				Console.WriteLine($"  Net:        {netSign}${Math.Abs(net):N2} ({netLabel})");
+			}
 		}
 
 		Console.WriteLine();
