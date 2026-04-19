@@ -18,7 +18,7 @@ internal sealed class NewOrder
 {
 	[JsonPropertyName("client_order_id")] public string ClientOrderId { get; set; } = "";
 	[JsonPropertyName("combo_type")] public string ComboType { get; set; } = "NORMAL";
-	[JsonPropertyName("entrust_type")] public string EntrustType { get; set; } = "LMT";
+	[JsonPropertyName("entrust_type")] public string EntrustType { get; set; } = "QTY";
 	[JsonPropertyName("instrument_type")] public string InstrumentType { get; set; } = "EQUITY";
 	[JsonPropertyName("market")] public string Market { get; set; } = "US";
 	[JsonPropertyName("order_type")] public string OrderType { get; set; } = "LIMIT";
@@ -64,8 +64,8 @@ internal static class OrderRequestBuilder
 		["IronButterfly"] = "IRON_BUTTERFLY",
 		["IronCondor"] = "IRON_CONDOR",
 		["CoveredCall"] = "COVERED_STOCK",
-		["ProtectivePut"] = "PROTECTIVE_PUT",
-		["Collar"] = "COLLAR",
+		["ProtectivePut"] = "COVERED_STOCK",
+		["Collar"] = "COLLAR_WITH_STOCK",
 	};
 
 	/// <summary>Generates an 18-char client order ID: YYMMDD-HHMMSS-XXXX.</summary>
@@ -129,7 +129,7 @@ internal static class OrderRequestBuilder
 		// Multi-leg combo (may include a stock leg for covered call / protective put / collar).
 		body.ClientComboOrderId = GenerateClientOrderId();
 		order.InstrumentType = "OPTION";
-		order.ComboType = "COMBO";
+		order.ComboType = "NORMAL";
 		order.Symbol = optionLegs[0].Option!.Root;
 		// Side for a combo is typically the net side; Webull expects BUY for net-debit, SELL for net-credit.
 		// Convention: if --limit is negative (net debit), side=BUY; else side=SELL.
