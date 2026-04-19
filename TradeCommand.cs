@@ -63,6 +63,20 @@ internal static class TradeContext
 		if (!decimal.TryParse(raw, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d)) return raw;
 		return d.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
 	}
+
+	/// <summary>Synthesizes an OCC option symbol from leg fields. Returns null if any required field is missing/malformed.</summary>
+	internal static string? BuildOccSymbol(WebullOpenApiClient.OrderDetailLeg leg)
+	{
+		if (string.IsNullOrEmpty(leg.Symbol) || string.IsNullOrEmpty(leg.OptionType) || string.IsNullOrEmpty(leg.OptionExpireDate) || string.IsNullOrEmpty(leg.StrikePrice))
+			return null;
+		if (!System.DateTime.TryParseExact(leg.OptionExpireDate, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var expiry))
+			return null;
+		if (!decimal.TryParse(leg.StrikePrice, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var strike))
+			return null;
+		var cp = leg.OptionType == "CALL" ? "C" : leg.OptionType == "PUT" ? "P" : null;
+		if (cp == null) return null;
+		return $"{leg.Symbol}{expiry:yyMMdd}{MatchKeys.OccSuffix(strike, cp)}";
+	}
 }
 
 // ─── `trade place` ────────────────────────────────────────────────────────────
@@ -356,7 +370,9 @@ internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
 		foreach (var o in detail.Orders)
 		{
 			AnsiConsole.MarkupLine($"[bold]Order[/] {Markup.Escape(o.ClientOrderId ?? "-")}  [dim]id[/]={Markup.Escape(o.OrderId ?? "-")}  [dim]status[/]={Markup.Escape(o.Status ?? "-")}");
-			AnsiConsole.MarkupLine($"  {Markup.Escape(o.Symbol ?? "-")} {Markup.Escape(o.Side ?? "-")} {Markup.Escape(TradeContext.FormatQty(o.TotalQuantity))} @ {Markup.Escape(TradeContext.FormatCurrency(o.LimitPrice))}");
+			var occ = o.Legs != null && o.Legs.Count == 1 ? TradeContext.BuildOccSymbol(o.Legs[0]) : null;
+			var occSuffix = occ != null ? $" {Markup.Escape(occ)}" : "";
+			AnsiConsole.MarkupLine($"  {Markup.Escape(o.Symbol ?? "-")} {Markup.Escape(o.Side ?? "-")} {Markup.Escape(TradeContext.FormatQty(o.TotalQuantity))}{occSuffix} @ {Markup.Escape(TradeContext.FormatCurrency(o.LimitPrice))}");
 			var hasFill = decimal.TryParse(o.FilledQuantity, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var fq) && fq > 0m;
 			var fillPriceSuffix = hasFill && !string.IsNullOrEmpty(o.FilledPrice) ? $" @ {TradeContext.FormatCurrency(o.FilledPrice)}" : "";
 			AnsiConsole.MarkupLine($"  [dim]placed:[/] {Markup.Escape(o.PlaceTimeAt ?? o.PlaceTime ?? "-")}  [dim]filled:[/] {Markup.Escape(TradeContext.FormatQty(o.FilledQuantity))}/{Markup.Escape(TradeContext.FormatQty(o.TotalQuantity))}{Markup.Escape(fillPriceSuffix)}  [dim]intent:[/] {Markup.Escape(o.PositionIntent ?? "-")}");
