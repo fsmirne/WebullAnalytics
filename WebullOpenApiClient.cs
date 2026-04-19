@@ -135,6 +135,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		[property: JsonPropertyName("total_quantity")] string? TotalQuantity,
 		[property: JsonPropertyName("filled_quantity")] string? FilledQuantity,
 		[property: JsonPropertyName("filled_price")] string? FilledPrice,
+		[property: JsonPropertyName("limit_price")] string? LimitPrice,
 		[property: JsonPropertyName("place_time")] string? PlaceTime,
 		[property: JsonPropertyName("place_time_at")] string? PlaceTimeAt,
 		[property: JsonPropertyName("filled_time")] string? FilledTime,

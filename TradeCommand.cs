@@ -55,6 +55,14 @@ internal static class TradeContext
 		var sign = d < 0m ? "-" : "";
 		return $"{sign}${Math.Abs(d).ToString("N2", System.Globalization.CultureInfo.InvariantCulture)}";
 	}
+
+	/// <summary>Formats an API-returned decimal-string as a quantity with no trailing zeros. Returns "-" if null/empty, returns the raw string if not a decimal.</summary>
+	internal static string FormatQty(string? raw)
+	{
+		if (string.IsNullOrEmpty(raw)) return "-";
+		if (!decimal.TryParse(raw, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d)) return raw;
+		return d.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+	}
 }
 
 // ─── `trade place` ────────────────────────────────────────────────────────────
@@ -348,11 +356,11 @@ internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
 		foreach (var o in detail.Orders)
 		{
 			AnsiConsole.MarkupLine($"[bold]Order[/] {Markup.Escape(o.ClientOrderId ?? "-")}  [dim]id[/]={Markup.Escape(o.OrderId ?? "-")}  [dim]status[/]={Markup.Escape(o.Status ?? "-")}");
-			AnsiConsole.MarkupLine($"  {Markup.Escape(o.Symbol ?? "-")} {Markup.Escape(o.Side ?? "-")} {Markup.Escape(o.FilledQuantity ?? "0")}/{Markup.Escape(o.TotalQuantity ?? "-")} @ {Markup.Escape(o.FilledPrice ?? "-")}");
-			AnsiConsole.MarkupLine($"  [dim]placed[/] {Markup.Escape(o.PlaceTimeAt ?? o.PlaceTime ?? "-")}  [dim]filled[/] {Markup.Escape(o.FilledTimeAt ?? o.FilledTime ?? "-")}  [dim]intent[/] {Markup.Escape(o.PositionIntent ?? "-")}");
+			AnsiConsole.MarkupLine($"  {Markup.Escape(o.Symbol ?? "-")} {Markup.Escape(o.Side ?? "-")} {Markup.Escape(TradeContext.FormatQty(o.TotalQuantity))} @ {Markup.Escape(TradeContext.FormatCurrency(o.LimitPrice))}");
+			AnsiConsole.MarkupLine($"  [dim]placed:[/] {Markup.Escape(o.PlaceTimeAt ?? o.PlaceTime ?? "-")}  [dim]filled:[/] {Markup.Escape(TradeContext.FormatQty(o.FilledQuantity))}/{Markup.Escape(TradeContext.FormatQty(o.TotalQuantity))}  [dim]intent:[/] {Markup.Escape(o.PositionIntent ?? "-")}");
 			if (o.Legs != null)
 				foreach (var leg in o.Legs)
-					AnsiConsole.MarkupLine($"  └─ {Markup.Escape(leg.Symbol ?? "-")} {Markup.Escape(leg.Side ?? "-")} {Markup.Escape(leg.Quantity ?? "-")} {Markup.Escape(leg.OptionType ?? "")} strike={Markup.Escape(leg.StrikePrice ?? "-")} exp={Markup.Escape(leg.OptionExpireDate ?? "-")}");
+					AnsiConsole.MarkupLine($"  └─ {Markup.Escape(leg.Symbol ?? "-")} {Markup.Escape(leg.Side ?? "-")} {Markup.Escape(TradeContext.FormatQty(leg.Quantity))} {Markup.Escape(leg.OptionType ?? "")} strike={Markup.Escape(leg.StrikePrice ?? "-")} exp={Markup.Escape(leg.OptionExpireDate ?? "-")}");
 		}
 		return 0;
 	}
