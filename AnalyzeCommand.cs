@@ -8,11 +8,11 @@ namespace WebullAnalytics;
 
 class AnalyzeSettings : ReportSettings
 {
-	[Description("Hypothetical trades to include. Format: SYMBOL:PRICExQTY where PRICE is a number (positive=sell/credit, negative=buy/debit) or -/+BID/MID/ASK for market prices. QTY is optional (default 1). Comma-separated for multiple. Example: GME260501C00023000:-MIDx300")]
+	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, QTY is a positive integer, and PRICE is a decimal or BID|MID|ASK (market keywords require --api). Comma-separated for multiple. Example: buy:GME260501C00023000:300@MID")]
 	[CommandOption("--trades")]
 	public string? Trades { get; set; }
 
-	[Description("Analyze a roll: shows credit/debit at various underlying prices. Format: OLD_SYMBOL>NEW_SYMBOLxQTY. Example: GME260410C00023000>GME260417C00023000x300")]
+	[Description("Analyze a roll: shows credit/debit at various underlying prices. Format: OLD_SYMBOL>NEW_SYMBOL:QTY. Example: GME260410C00023000>GME260417C00023000:300")]
 	[CommandOption("--roll")]
 	public string? Roll { get; set; }
 
@@ -22,8 +22,6 @@ class AnalyzeSettings : ReportSettings
 
 	internal DateTime? EvaluationDateOverride => Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
 
-	internal static readonly HashSet<string> MarketPriceKeywords = new(StringComparer.OrdinalIgnoreCase) { "BID", "MID", "ASK" };
-
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -31,32 +29,16 @@ class AnalyzeSettings : ReportSettings
 
 		if (Trades != null)
 		{
-			foreach (var entry in Trades.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			List<ParsedLeg> legs;
+			try { legs = TradeLegParser.Parse(Trades); }
+			catch (FormatException ex) { return ValidationResult.Error($"--trades: {ex.Message}"); }
+
+			foreach (var leg in legs)
 			{
-				var colonIdx = entry.IndexOf(':');
-				if (colonIdx < 1)
-					return ValidationResult.Error($"--trades: invalid entry '{entry}'. Expected format: SYMBOL:PRICExQTY");
-
-				var symbol = entry[..colonIdx];
-				var priceQty = entry[(colonIdx + 1)..];
-
-				if (ParsingHelpers.ParseOptionSymbol(symbol) == null)
-					return ValidationResult.Error($"--trades: invalid OCC symbol '{symbol}'");
-
-				var xIdx = priceQty.IndexOf('x');
-				var priceStr = xIdx >= 0 ? priceQty[..xIdx] : priceQty;
-				var qtyStr = xIdx >= 0 ? priceQty[(xIdx + 1)..] : null;
-
-				// Strip sign to get the keyword or number
-				var unsigned = priceStr.TrimStart('-', '+');
-				if (!MarketPriceKeywords.Contains(unsigned))
-				{
-					if (!decimal.TryParse(priceStr, NumberStyles.Number, CultureInfo.InvariantCulture, out var price) || price == 0)
-						return ValidationResult.Error($"--trades: invalid price '{priceStr}' in entry '{entry}'");
-				}
-
-				if (qtyStr != null && (!int.TryParse(qtyStr, out var qty) || qty <= 0))
-					return ValidationResult.Error($"--trades: invalid quantity '{qtyStr}' in entry '{entry}'");
+				if (leg.Option == null)
+					return ValidationResult.Error($"--trades: '{leg.Symbol}' is not an OCC option symbol (analyze supports option legs only)");
+				if (leg.Price == null && leg.PriceKeyword == null)
+					return ValidationResult.Error($"--trades: leg '{leg.Symbol}' is missing @PRICE (analyze requires a price per leg; use a decimal or BID|MID|ASK)");
 			}
 		}
 
@@ -64,12 +46,12 @@ class AnalyzeSettings : ReportSettings
 		{
 			var gtIdx = Roll.IndexOf('>');
 			if (gtIdx < 1)
-				return ValidationResult.Error("--roll: expected format OLD_SYMBOL>NEW_SYMBOLxQTY");
+				return ValidationResult.Error("--roll: expected format OLD_SYMBOL>NEW_SYMBOL:QTY");
 			var remaining = Roll[(gtIdx + 1)..];
-			var xIdx = remaining.IndexOf('x');
+			var colonIdx = remaining.IndexOf(':');
 			var oldSym = Roll[..gtIdx];
-			var newSym = xIdx >= 0 ? remaining[..xIdx] : remaining;
-			var qtyStr = xIdx >= 0 ? remaining[(xIdx + 1)..] : null;
+			var newSym = colonIdx >= 0 ? remaining[..colonIdx] : remaining;
+			var qtyStr = colonIdx >= 0 ? remaining[(colonIdx + 1)..] : null;
 
 			if (ParsingHelpers.ParseOptionSymbol(oldSym) == null)
 				return ValidationResult.Error($"--roll: invalid OCC symbol '{oldSym}'");
@@ -129,10 +111,10 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 	{
 		var gtIdx = settings.Roll!.IndexOf('>');
 		var remaining = settings.Roll[(gtIdx + 1)..];
-		var xIdx = remaining.IndexOf('x');
+		var colonIdx = remaining.IndexOf(':');
 		var oldSymbol = settings.Roll[..gtIdx];
-		var newSymbol = xIdx >= 0 ? remaining[..xIdx] : remaining;
-		var qty = xIdx >= 0 ? int.Parse(remaining[(xIdx + 1)..]) : 1;
+		var newSymbol = colonIdx >= 0 ? remaining[..colonIdx] : remaining;
+		var qty = colonIdx >= 0 ? int.Parse(remaining[(colonIdx + 1)..]) : 1;
 
 		var oldParsed = ParsingHelpers.ParseOptionSymbol(oldSymbol)!;
 		var newParsed = ParsingHelpers.ParseOptionSymbol(newSymbol)!;
@@ -369,17 +351,11 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 	}
 
 	private static bool NeedsMarketPrices(string tradesSpec) =>
-		tradesSpec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-			.Any(entry =>
-			{
-				var priceQty = entry[(entry.IndexOf(':') + 1)..];
-				var priceStr = priceQty.Contains('x') ? priceQty[..priceQty.IndexOf('x')] : priceQty;
-				return AnalyzeSettings.MarketPriceKeywords.Contains(priceStr.TrimStart('-', '+'));
-			});
+		TradeLegParser.Parse(tradesSpec).Any(leg => leg.PriceKeyword != null);
 
 	private static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(AnalyzeSettings settings, string tradesSpec, CancellationToken cancellation)
 	{
-		var symbols = tradesSpec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(e => e[..e.IndexOf(':')]).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+		var symbols = TradeLegParser.Parse(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 		var minimalRows = symbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
 
 		var apiSource = settings.Api?.ToLowerInvariant();
@@ -416,50 +392,35 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 		}
 	}
 
-	private static decimal ResolvePrice(string priceStr, string symbol, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	private static decimal ResolvePrice(ParsedLeg leg, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
-		var isBuy = priceStr.StartsWith('-');
-		var unsigned = priceStr.TrimStart('-', '+');
-
-		if (!AnalyzeSettings.MarketPriceKeywords.Contains(unsigned))
-			return decimal.Parse(priceStr, CultureInfo.InvariantCulture);
-
-		if (quotes == null || !quotes.TryGetValue(symbol, out var quote))
-			throw new InvalidOperationException($"No quote found for '{symbol}'");
-
-		var price = unsigned.ToUpperInvariant() switch
+		if (leg.Price.HasValue) return leg.Price.Value;
+		if (leg.PriceKeyword == null) throw new InvalidOperationException($"Leg '{leg.Symbol}' has no price");
+		if (quotes == null || !quotes.TryGetValue(leg.Symbol, out var quote))
+			throw new InvalidOperationException($"No quote found for '{leg.Symbol}'");
+		return leg.PriceKeyword switch
 		{
-			"BID" => quote.Bid ?? throw new InvalidOperationException($"No bid price for '{symbol}'"),
-			"ASK" => quote.Ask ?? throw new InvalidOperationException($"No ask price for '{symbol}'"),
-			"MID" => (quote.Bid ?? 0m) + (quote.Ask ?? 0m) == 0m ? throw new InvalidOperationException($"No bid/ask for '{symbol}'") : ((quote.Bid ?? 0m) + (quote.Ask ?? 0m)) / 2m,
-			_ => throw new InvalidOperationException($"Unknown price keyword '{unsigned}'")
+			"BID" => quote.Bid ?? throw new InvalidOperationException($"No bid price for '{leg.Symbol}'"),
+			"ASK" => quote.Ask ?? throw new InvalidOperationException($"No ask price for '{leg.Symbol}'"),
+			"MID" => (quote.Bid ?? 0m) + (quote.Ask ?? 0m) == 0m ? throw new InvalidOperationException($"No bid/ask for '{leg.Symbol}'") : ((quote.Bid ?? 0m) + (quote.Ask ?? 0m)) / 2m,
+			_ => throw new InvalidOperationException($"Unknown price keyword '{leg.PriceKeyword}'")
 		};
-
-		return isBuy ? -price : price;
 	}
 
 	internal static List<Trade> ParseSyntheticTrades(string tradesSpec, int startSeq, DateTime baseTimestamp, IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
 	{
 		var result = new List<Trade>();
 		var seq = startSeq;
+		var legs = TradeLegParser.Parse(tradesSpec);
 
-		foreach (var entry in tradesSpec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		foreach (var leg in legs)
 		{
-			var colonIdx = entry.IndexOf(':');
-			var symbol = entry[..colonIdx];
-			var priceQty = entry[(colonIdx + 1)..];
-
-			var xIdx = priceQty.IndexOf('x');
-			var priceStr = xIdx >= 0 ? priceQty[..xIdx] : priceQty;
-			var qty = xIdx >= 0 ? int.Parse(priceQty[(xIdx + 1)..]) : 1;
-
-			var signedPrice = ResolvePrice(priceStr, symbol, quotes);
-			var parsed = ParsingHelpers.ParseOptionSymbol(symbol)!;
-			var side = signedPrice > 0 ? Side.Sell : Side.Buy;
-			var price = Math.Abs(signedPrice);
+			var parsed = leg.Option!;
+			var price = ResolvePrice(leg, quotes);
+			var side = leg.Action == LegAction.Buy ? Side.Buy : Side.Sell;
 			var timestamp = baseTimestamp.AddSeconds(seq - startSeq + 1);
 
-			result.Add(new Trade(Seq: seq++, Timestamp: timestamp, Instrument: Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike), MatchKey: MatchKeys.Option(symbol), Asset: Asset.Option, OptionKind: ParsingHelpers.CallPutDisplayName(parsed.CallPut), Side: side, Qty: qty, Price: price, Multiplier: Trade.OptionMultiplier, Expiry: parsed.ExpiryDate));
+			result.Add(new Trade(Seq: seq++, Timestamp: timestamp, Instrument: Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike), MatchKey: MatchKeys.Option(leg.Symbol), Asset: Asset.Option, OptionKind: ParsingHelpers.CallPutDisplayName(parsed.CallPut), Side: side, Qty: leg.Quantity, Price: price, Multiplier: Trade.OptionMultiplier, Expiry: parsed.ExpiryDate));
 		}
 
 		return result;
