@@ -185,3 +185,80 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		_ => throw new ArgumentException($"Unknown --strategy value '{flag}'")
 	};
 }
+
+// ─── `trade cancel` ───────────────────────────────────────────────────────────
+
+internal sealed class TradeCancelSettings : TradeSubcommandSettings
+{
+	[CommandArgument(0, "[clientOrderId]")]
+	[Description("Client order ID to cancel. Omit when using --all.")]
+	public string? ClientOrderId { get; set; }
+
+	[CommandOption("--all")]
+	[Description("Cancel every open order for the account.")]
+	public bool All { get; set; }
+}
+
+internal sealed class TradeCancelCommand : AsyncCommand<TradeCancelSettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, TradeCancelSettings s, CancellationToken cancellation)
+	{
+		var account = TradeContext.ResolveOrExit(s.Account);
+		if (account == null) return 2;
+
+		if (s.All && !string.IsNullOrEmpty(s.ClientOrderId))
+		{ AnsiConsole.MarkupLine("[red]Error:[/] pass either <clientOrderId> or --all, not both."); return 2; }
+		if (!s.All && string.IsNullOrEmpty(s.ClientOrderId))
+		{ AnsiConsole.MarkupLine("[red]Error:[/] pass a client order ID, or --all."); return 2; }
+
+		using var client = new WebullOpenApiClient(account);
+
+		if (s.All)
+		{
+			List<WebullOpenApiClient.OpenOrder> orders;
+			try { orders = await client.ListOpenOrdersAsync(cancellation); }
+			catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]List failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+
+			if (orders.Count == 0) { AnsiConsole.MarkupLine("[dim]No open orders.[/]"); return 0; }
+
+			AnsiConsole.MarkupLine($"[bold]{orders.Count} open order(s):[/]");
+			foreach (var o in orders)
+				AnsiConsole.MarkupLine($"  {Markup.Escape(o.ClientOrderId ?? "?"),-22} {Markup.Escape(o.Symbol ?? "?"),-22} {Markup.Escape(o.Side ?? "?"),-5} {Markup.Escape(o.FilledQuantity ?? "0")}/{Markup.Escape(o.TotalQuantity ?? "?")} {Markup.Escape(o.Status ?? "?")}");
+
+			if (!TradeContext.Confirm($"Cancel all {orders.Count} open orders?")) { AnsiConsole.MarkupLine("[dim]Aborted.[/]"); return 0; }
+
+			int succeeded = 0, failed = 0;
+			foreach (var o in orders)
+			{
+				if (string.IsNullOrEmpty(o.ClientOrderId)) { AnsiConsole.MarkupLine("[yellow]Skipped:[/] missing client_order_id."); failed++; continue; }
+				try
+				{
+					await client.CancelOrderAsync(o.ClientOrderId, cancellation);
+					AnsiConsole.MarkupLine($"  [green]cancelled[/] {Markup.Escape(o.ClientOrderId)}");
+					succeeded++;
+				}
+				catch (WebullOpenApiException ex)
+				{
+					AnsiConsole.MarkupLine($"  [red]failed[/] {Markup.Escape(o.ClientOrderId)} [[{Markup.Escape(ex.ErrorCode ?? "?")}]] {Markup.Escape(ex.Message)}");
+					failed++;
+				}
+			}
+			AnsiConsole.MarkupLine($"[bold]Summary:[/] cancelled {succeeded} of {orders.Count}. Failed: {failed}.");
+			return failed == 0 ? 0 : 3;
+		}
+
+		// Single cancel.
+		if (!TradeContext.Confirm($"Cancel order {s.ClientOrderId}?")) { AnsiConsole.MarkupLine("[dim]Aborted.[/]"); return 0; }
+		try
+		{
+			var result = await client.CancelOrderAsync(s.ClientOrderId!, cancellation);
+			AnsiConsole.MarkupLine($"[green]Cancelled.[/] order_id={Markup.Escape(result.OrderId ?? "-")}  client_order_id={Markup.Escape(result.ClientOrderId ?? s.ClientOrderId!)}");
+			return 0;
+		}
+		catch (WebullOpenApiException ex)
+		{
+			AnsiConsole.MarkupLine($"[red]Cancel failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]");
+			return 3;
+		}
+	}
+}
