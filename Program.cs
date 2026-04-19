@@ -43,7 +43,7 @@ class Program
 			{
 				trade.AddCommand<TradePlaceCommand>("place");
 				trade.AddCommand<TradeCancelCommand>("cancel");
-				// trade status command registered in Task 10.
+				trade.AddCommand<TradeStatusCommand>("status");
 			});
 		});
 		return app.Run(args);
