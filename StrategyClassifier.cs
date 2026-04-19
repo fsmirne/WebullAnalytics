@@ -74,7 +74,10 @@ internal static class StrategyClassifier
 			if (optionLegs.Count == 2 && distinctStrikes == 2 && distinctExpiries == 1 && distinctCallPut == 2)
 				return "Strangle";
 
-			return ParsingHelpers.ClassifyStrategyKind(optionLegs.Count, distinctExpiries, distinctStrikes, distinctCallPut);
+			var kind = ParsingHelpers.ClassifyStrategyKind(optionLegs.Count, distinctExpiries, distinctStrikes, distinctCallPut);
+			// "Spread" means legs are structurally degenerate (same contract on all legs).
+			// Return null so the caller prompts the user to pass --strategy explicitly.
+			return kind == "Spread" ? null : kind;
 		}
 
 		return null;

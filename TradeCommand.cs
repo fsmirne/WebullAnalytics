@@ -2,6 +2,7 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
+using System.Net.Http;
 
 namespace WebullAnalytics;
 
@@ -68,7 +69,7 @@ internal sealed class TradePlaceSettings : TradeSubcommandSettings
 	public string Tif { get; set; } = "day";
 
 	[CommandOption("--strategy <VALUE>")]
-	[Description("Override auto-detected strategy. Values: single|stock|vertical|calendar|diagonal|iron_condor|butterfly|straddle|strangle|covered_call|protective_put|collar.")]
+	[Description("Override auto-detected strategy. Values: single|stock|vertical|calendar|diagonal|iron_condor|iron_butterfly|butterfly|condor|straddle|strangle|covered_call|protective_put|collar.")]
 	public string? Strategy { get; set; }
 
 	[CommandOption("--submit")]
@@ -101,6 +102,10 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		if (type == "limit" && string.IsNullOrEmpty(s.Limit)) { AnsiConsole.MarkupLine("[red]Error:[/] --limit is required with --type limit."); return 2; }
 		if (type == "market" && legs.Count > 1) { AnsiConsole.MarkupLine("[red]Error:[/] multi-leg combo orders must be limit."); return 2; }
 
+		// 2b. Validate --tif.
+		var tifLower = s.Tif.ToLowerInvariant();
+		if (tifLower != "day" && tifLower != "gtc") { AnsiConsole.MarkupLine("[red]Error:[/] --tif must be 'day' or 'gtc'."); return 2; }
+
 		decimal? limit = null;
 		if (type == "limit")
 		{
@@ -115,6 +120,23 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		catch (ArgumentException ex) { AnsiConsole.MarkupLine($"[red]Error:[/] {Markup.Escape(ex.Message)}"); return 2; }
 		if (strategy == null)
 		{ AnsiConsole.MarkupLine("[red]Error:[/] could not classify legs; pass --strategy explicitly."); return 2; }
+
+		// 3b. Validate leg count matches the declared/inferred strategy.
+		var stockCount = legs.Count(l => l.Option == null);
+		var optionCount = legs.Count(l => l.Option != null);
+		string? legCountError = strategy switch
+		{
+			"Stock" => (stockCount == 1 && optionCount == 0) ? null : "Stock requires 1 equity leg, 0 option legs.",
+			"Single" => (stockCount == 0 && optionCount == 1) ? null : "Single requires 0 equity legs, 1 option leg.",
+			"Vertical" or "Calendar" or "Diagonal" or "Straddle" or "Strangle" => (stockCount == 0 && optionCount == 2) ? null : $"{strategy} requires 0 equity legs, 2 option legs.",
+			"Butterfly" or "Condor" => (stockCount == 0 && optionCount == 3) ? null : $"{strategy} requires 0 equity legs, 3 option legs.",
+			"IronButterfly" or "IronCondor" => (stockCount == 0 && optionCount == 4) ? null : $"{strategy} requires 0 equity legs, 4 option legs.",
+			"CoveredCall" or "ProtectivePut" => (stockCount == 1 && optionCount == 1) ? null : $"{strategy} requires 1 equity leg, 1 option leg.",
+			"Collar" => (stockCount == 1 && optionCount == 2) ? null : "Collar requires 1 equity leg, 2 option legs.",
+			_ => null
+		};
+		if (legCountError != null)
+		{ AnsiConsole.MarkupLine($"[red]Error:[/] {Markup.Escape(legCountError)}"); return 2; }
 
 		// 4. Cross-underlying / single-root check for multi-leg.
 		var optionRoots = legs.Where(l => l.Option != null).Select(l => l.Option!.Root).Distinct().ToList();
@@ -144,6 +166,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		WebullOpenApiClient.PreviewResult preview;
 		try { preview = await client.PreviewOrderAsync(body); }
 		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]Preview failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+		catch (HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
 		AnsiConsole.MarkupLine($"[bold]Preview:[/] cost={preview.EstimatedCost ?? "-"}  fees={preview.EstimatedTransactionFee ?? "-"}");
 
 		if (!s.Submit) { AnsiConsole.MarkupLine("[dim]Preview only (no --submit). Exiting.[/]"); return 0; }
@@ -162,6 +185,12 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		{
 			AnsiConsole.MarkupLine($"[red]Place failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]");
 			AnsiConsole.MarkupLine("[dim](Preview succeeded but place was rejected.)[/]");
+			return 3;
+		}
+		catch (HttpRequestException ex)
+		{
+			AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}");
+			AnsiConsole.MarkupLine("[dim](Preview succeeded but place could not be sent.)[/]");
 			return 3;
 		}
 	}
@@ -218,6 +247,7 @@ internal sealed class TradeCancelCommand : AsyncCommand<TradeCancelSettings>
 			List<WebullOpenApiClient.OpenOrder> orders;
 			try { orders = await client.ListOpenOrdersAsync(cancellation); }
 			catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]List failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+			catch (HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
 
 			if (orders.Count == 0) { AnsiConsole.MarkupLine("[dim]No open orders.[/]"); return 0; }
 
@@ -242,6 +272,11 @@ internal sealed class TradeCancelCommand : AsyncCommand<TradeCancelSettings>
 					AnsiConsole.MarkupLine($"  [red]failed[/] {Markup.Escape(o.ClientOrderId)} [[{Markup.Escape(ex.ErrorCode ?? "?")}]] {Markup.Escape(ex.Message)}");
 					failed++;
 				}
+				catch (HttpRequestException ex)
+				{
+					AnsiConsole.MarkupLine($"  [red]failed[/] {Markup.Escape(o.ClientOrderId)} (network) {Markup.Escape(ex.Message)}");
+					failed++;
+				}
 			}
 			AnsiConsole.MarkupLine($"[bold]Summary:[/] cancelled {succeeded} of {orders.Count}. Failed: {failed}.");
 			return failed == 0 ? 0 : 3;
@@ -258,6 +293,11 @@ internal sealed class TradeCancelCommand : AsyncCommand<TradeCancelSettings>
 		catch (WebullOpenApiException ex)
 		{
 			AnsiConsole.MarkupLine($"[red]Cancel failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]");
+			return 3;
+		}
+		catch (HttpRequestException ex)
+		{
+			AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}");
 			return 3;
 		}
 	}
@@ -283,6 +323,7 @@ internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
 		WebullOpenApiClient.OrderDetail detail;
 		try { detail = await client.GetOrderAsync(s.ClientOrderId, cancellation); }
 		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]Lookup failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+		catch (HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
 
 		AnsiConsole.MarkupLine($"[bold]Combo type:[/] {Markup.Escape(detail.ComboType ?? "-")}  [bold]Combo order ID:[/] {Markup.Escape(detail.ComboOrderId ?? "-")}");
 		if (detail.Orders == null || detail.Orders.Count == 0)
