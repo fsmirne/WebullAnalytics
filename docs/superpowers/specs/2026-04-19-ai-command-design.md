@@ -13,12 +13,12 @@ The feature ships as three subcommands sharing one evaluation engine:
 - `ai once` — single evaluation pass; prints proposals and exits.
 - `ai replay` — evaluate the rules against historical `orders.jsonl` data to validate how the rules would have behaved on past trades.
 
-The rule set targets the trading patterns already established in the user's history: GME call-side calendars and diagonals, short leg 2–7 DTE, long leg 2–8 weeks out, managed by rolling or closing within 1–3 days. SPXW verticals and other experimental strategies are explicitly out of scope.
+The rule set targets multi-day managed calendar and diagonal positions — short leg 2–7 DTE, long leg 2–8 weeks out, held 1–3 days and managed by rolling the short leg, taking profit when short-leg decay is captured, or cutting loss on adverse underlying moves. Short-dated directional verticals and 0DTE index patterns are explicitly out of scope for phase 1. The feature is ticker-agnostic: the user configures which tickers to monitor in `ai-config.json`.
 
 ## Goals / Non-goals
 
 **Goals (phase 1):**
-- Dry-run monitor for open GME calendar/diagonal positions.
+- Dry-run monitor for open calendar/diagonal positions on any user-configured tickers.
 - Four management rules: `StopLoss`, `TakeProfit`, `DefensiveRoll`, `RollShortOnExpiry`.
 - Structured JSONL proposal log + human-readable console output.
 - Config-driven thresholds via `data/ai-config.json`.
@@ -32,8 +32,8 @@ The rule set targets the trading patterns already established in the user's hist
 - No entry proposals (no option-chain scanning).
 - No IV-regime gating on rules.
 - No notifications (desktop / push / Slack).
-- No multi-ticker rule overrides.
-- No SPXW, no directional verticals, no 0DTE.
+- No per-ticker rule overrides (all configured tickers share the same rule thresholds).
+- No short-dated directional verticals, no 0DTE index patterns. Focus is on multi-day managed calendar/diagonal structures.
 - No remote control / web UI.
 - Rules apply symmetrically to calls and puts by construction (strike-aware logic), but put-specific threshold tuning is phase 2.
 
@@ -143,13 +143,13 @@ Rules are evaluated per-position per-tick in priority order. The first rule to m
 
 - **Trigger:** position mark-to-market debit ≥ `maxDebitMultiplier` × initial debit, OR spot beyond the adjusted break-even by > `spotBeyondBreakevenPct`.
 - **Action:** propose flat-close at current mid.
-- **Rationale:** losers in the user's history (Feb 23, Mar 16, Apr 14) held through sustained adverse moves past break-even. A 1.5× debit stop would have cut each earlier.
+- **Rationale:** losses on calendar/diagonal positions typically compound when held through sustained adverse moves past break-even; an early, bounded stop prevents a single unfavorable move from dominating the period's P&L.
 
 ### Priority 2 — `TakeProfitRule`
 
 - **Trigger:** position mark ≥ `pctOfMaxProfit` × max-projected-profit from the current-date column of the time-decay grid (via the existing `TimeDecayGridBuilder`).
 - **Action:** propose flat-close at current mid.
-- **Rationale:** winners in the user's history closed when the short leg had decayed 70%+ of entry premium. A 40% max-profit rule fires in a similar zone and aligns with the grid the user already visually scans.
+- **Rationale:** calendar/diagonal winners typically realize most of their profit when short-leg theta decay is largely captured but before short-leg expiry creates roll or assignment risk. A percentage-of-max-profit rule fires in that zone and is directly comparable to the grid the user already visually scans via `report` and `analyze`.
 
 ### Priority 3 — `DefensiveRollRule`
 
@@ -176,6 +176,8 @@ Each proposal carries a fingerprint `(ruleName, positionKey, structurallyMateria
 ## Config Schema
 
 New file: `data/ai-config.json`. Mirrors the pattern of `trade-config.json` — feature-specific, separate from `config.json`.
+
+The `tickers` field has no baked-in default — it must be explicitly set in `ai-config.json` or supplied via `--tickers`. This keeps the feature ticker-agnostic and prevents silent assumptions about which symbols to monitor.
 
 ```json
 {
@@ -227,7 +229,7 @@ New file: `data/ai-config.json`. Mirrors the pattern of `trade-config.json` — 
 
 ### Field semantics
 
-- **`tickers`** — scope. Phase 1 defaults to `["GME"]`.
+- **`tickers`** — required. User-configured list of symbols to monitor. No default; an empty list or missing field is a startup error.
 - **`tickIntervalSeconds`** — watch-loop tick period. Ignored by `once` and `replay`.
 - **`marketHours`** — watch loop sleeps outside this window unless `--ignore-market-hours`.
 - **`quoteSource`** — `webull` (default; richer IV data) or `yahoo` (free, session-stable fallback).
@@ -239,7 +241,7 @@ New file: `data/ai-config.json`. Mirrors the pattern of `trade-config.json` — 
 
 ### Resolution rules
 
-- Missing `ai-config.json` → use baked-in defaults (all rules enabled, thresholds as above).
+- Missing `ai-config.json` → the `tickers` field is required, so missing config is a startup error with guidance to copy `ai-config.example.json`. Rule defaults apply when the file exists but omits rule sections.
 - Missing rule key → that rule is enabled with defaults.
 - Missing threshold field inside a rule → default applied.
 - Invalid value (e.g., `triggerDTE: -1`, `pctOfMaxProfit: 150`) → fail fast at startup with the field name and valid range.
