@@ -391,18 +391,18 @@ internal static class AnalyzeCommon
 			var oldMarketMid = (oldBid.HasValue && oldAsk.HasValue) ? (oldBid.Value + oldAsk.Value) / 2m : 0m;
 			var newMarketMid = (newBid.HasValue && newAsk.HasValue) ? (newBid.Value + newAsk.Value) / 2m : 0m;
 
-			var oldCov = ComputeLegMargin(oldParsed, qty, spot, oldMarketMid, longOpt, longStockTicker, longQty, pairMid);
-			var newCov = ComputeLegMargin(newParsed, qty, spot, newMarketMid, longOpt, longStockTicker, longQty, pairMid);
+			var oldCov = ComputeLegMargin(oldParsed, qty, spot, oldMarketMid, longOpt, longStockTicker, longQty, pairMid, isExisting: true);
+			var newCov = ComputeLegMargin(newParsed, qty, spot, newMarketMid, longOpt, longStockTicker, longQty, pairMid, isExisting: false);
 
 			var header = settings.Pair != null
-				? $"Spread margin (Reg-T estimate, at spot ${spot:N2}, with pair {Markup.Escape(settings.Pair)}):"
-				: $"Naked short margin (Reg-T estimate, at spot ${spot:N2}):";
+				? $"Margin analysis (Reg-T estimate, at spot ${spot:N2}, with pair {Markup.Escape(settings.Pair)}):"
+				: $"Margin analysis (Reg-T estimate, at spot ${spot:N2}):";
 			Console.WriteLine(header);
-			Console.WriteLine($"  Pre-roll position (MTM):  {oldCov.StatusLabel} = ${oldCov.Total:N2} total");
-			Console.WriteLine($"  Post-roll position:       {newCov.StatusLabel} = ${newCov.Total:N2} total");
+			Console.WriteLine($"  Current requirement:  {oldCov.StatusLabel} = ${oldCov.Total:N2} total");
+			Console.WriteLine($"  New requirement:      {newCov.StatusLabel} = ${newCov.Total:N2} total");
 			var deltaMargin = newCov.Total - oldCov.Total;
 			var deltaSign = deltaMargin >= 0 ? "+" : "-";
-			Console.WriteLine($"  Additional BP (MTM):      {deltaSign}${Math.Abs(deltaMargin):N2} total");
+			Console.WriteLine($"  BP delta:             {deltaSign}${Math.Abs(deltaMargin):N2} total");
 		}
 
 		Console.WriteLine();
@@ -583,7 +583,7 @@ internal static class AnalyzeCommon
 	/// Cases still treated as naked: no pair, wrong ticker, wrong call/put type, long expires before
 	/// short, or long stock paired with a short put (long stock covers only short calls).
 	/// </summary>
-	internal static LegMargin ComputeLegMargin(OptionParsed shortLeg, int shortQty, decimal spot, decimal shortPremium, OptionParsed? longOpt, string? longStockTicker, int longQty, decimal longPremium)
+	internal static LegMargin ComputeLegMargin(OptionParsed shortLeg, int shortQty, decimal spot, decimal shortPremium, OptionParsed? longOpt, string? longStockTicker, int longQty, decimal longPremium, bool isExisting)
 	{
 		var naked = EstimateNakedShortMargin(spot, shortLeg.Strike, shortLeg.CallPut, shortPremium);
 
@@ -620,7 +620,7 @@ internal static class AnalyzeCommon
 			? Math.Max(lo.Strike - shortLeg.Strike, 0m)
 			: Math.Max(shortLeg.Strike - lo.Strike, 0m);
 		var debit = Math.Max(longPremium - shortPremium, 0m);
-		var coveredPer = strikeLoss * 100m + debit * 100m;
+		var coveredPer = strikeLoss * 100m + (isExisting ? 0m : debit * 100m);
 
 		var coverableOpt = Math.Min(shortQty, longQty);
 		var uncoveredOpt = shortQty - coverableOpt;
@@ -630,7 +630,9 @@ internal static class AnalyzeCommon
 		var structureLabel = strikeLoss == 0m
 			? (lo.Strike == shortLeg.Strike ? "calendar" : "covered vertical")
 			: $"inverted diagonal (strike loss ${strikeLoss * 100m:N2})";
-		var costBreakdown = $"${strikeLoss * 100m:N2} strike + ${debit * 100m:N2} debit = ${coveredPer:N2}/contract";
+		var costBreakdown = isExisting
+			? $"${strikeLoss * 100m:N2} strike (debit sunk) = ${coveredPer:N2}/contract"
+			: $"${strikeLoss * 100m:N2} strike + ${debit * 100m:N2} debit = ${coveredPer:N2}/contract";
 		var labelOpt = uncoveredOpt == 0
 			? $"{structureLabel}  {costBreakdown} × {shortQty}"
 			: $"partial cover ({structureLabel}: {coverableOpt} @ ${coveredPer:N2}, {uncoveredOpt} naked @ ${naked:N2})";
