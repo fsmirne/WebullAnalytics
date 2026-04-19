@@ -161,8 +161,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 			TimeInForce: s.Tif.ToUpperInvariant()
 		));
 
-		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]");
-		AnsiConsole.MarkupLine($"[dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}");
+		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]  [dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}");
 		if (s.Debug)
 			AnsiConsole.MarkupLine($"[dim]Payload:[/] {Markup.Escape(OrderRequestBuilder.Serialize(body))}");
 
