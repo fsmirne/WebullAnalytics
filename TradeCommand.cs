@@ -46,6 +46,15 @@ internal static class TradeContext
 		var t = input.Trim().ToLowerInvariant();
 		return t == "y" || t == "yes";
 	}
+
+	/// <summary>Formats an API-returned decimal-string as USD currency. Returns "-" if null/empty, returns the raw string if not a decimal.</summary>
+	internal static string FormatCurrency(string? raw)
+	{
+		if (string.IsNullOrEmpty(raw)) return "-";
+		if (!decimal.TryParse(raw, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d)) return raw;
+		var sign = d < 0m ? "-" : "";
+		return $"{sign}${Math.Abs(d).ToString("N2", System.Globalization.CultureInfo.InvariantCulture)}";
+	}
 }
 
 // ─── `trade place` ────────────────────────────────────────────────────────────
@@ -171,7 +180,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		try { preview = await client.PreviewOrderAsync(body); }
 		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]Preview failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
 		catch (HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
-		AnsiConsole.MarkupLine($"[bold]Preview:[/] cost={preview.EstimatedCost ?? "-"}  fees={preview.EstimatedTransactionFee ?? "-"}");
+		AnsiConsole.MarkupLine($"[bold]Preview:[/] cost={TradeContext.FormatCurrency(preview.EstimatedCost)}  fees={TradeContext.FormatCurrency(preview.EstimatedTransactionFee)}");
 
 		if (!s.Submit) { AnsiConsole.MarkupLine("[dim]Preview only (no --submit). Exiting.[/]"); return 0; }
 
