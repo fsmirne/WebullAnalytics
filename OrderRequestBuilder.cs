@@ -164,7 +164,9 @@ internal static class OrderRequestBuilder
 		OptionType = leg.Option.CallPut == "C" ? "CALL" : "PUT",
 	};
 
+	private static readonly JsonSerializerOptions CompactJson = new() { WriteIndented = false };
+
 	/// <summary>Serializes the body to compact JSON (no whitespace between keys and values).</summary>
 	internal static string Serialize(OrderRequestBody body) =>
-		JsonSerializer.Serialize(body, new JsonSerializerOptions { WriteIndented = false });
+		JsonSerializer.Serialize(body, CompactJson);
 }
