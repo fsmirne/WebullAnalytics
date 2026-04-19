@@ -1,0 +1,26 @@
+{
+	"defaultAccount": "test1",
+	"accounts": [
+		{
+			"alias": "test1",
+			"accountId": "J6HA4EBQRQFJD2J6NQH0F7M649",
+			"appKey": "a88f2efed4dca02b9bc1a3cecbc35dba",
+			"appSecret": "c2895b3526cc7c7588758351ddf425d6",
+			"sandbox": true
+		},
+		{
+			"alias": "test2",
+			"accountId": "HBGQE8NM0CQG4Q34ABOM83HD09",
+			"appKey": "6d9f1a0aa919a127697b567bb704369e",
+			"appSecret": "adb8931f708ea3d57ec1486f10abf58c",
+			"sandbox": true
+		},
+		{
+			"alias": "test3",
+			"accountId": "4BJITU00JUIVEDO5V3PRA5C5G8",
+			"appKey": "eecbf4489f460ad2f7aecef37b267618",
+			"appSecret": "8abf920a9cc3cb7af3ea5e9e03850692",
+			"sandbox": true
+		}
+	]
+}
