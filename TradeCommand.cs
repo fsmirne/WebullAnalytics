@@ -354,3 +354,29 @@ internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
 		return 0;
 	}
 }
+
+// ─── `trade list` ─────────────────────────────────────────────────────────────
+
+internal sealed class TradeListSettings : TradeSubcommandSettings { }
+
+internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, TradeListSettings s, CancellationToken cancellation)
+	{
+		var account = TradeContext.ResolveOrExit(s.Account);
+		if (account == null) return 2;
+
+		using var client = new WebullOpenApiClient(account);
+		List<WebullOpenApiClient.OpenOrder> orders;
+		try { orders = await client.ListOpenOrdersAsync(cancellation); }
+		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]List failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+		catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
+
+		if (orders.Count == 0) { AnsiConsole.MarkupLine("[dim]No open orders.[/]"); return 0; }
+
+		AnsiConsole.MarkupLine($"[bold]{orders.Count} open order(s):[/]");
+		foreach (var o in orders)
+			AnsiConsole.MarkupLine($"  {Markup.Escape(o.ClientOrderId ?? "?"),-22} {Markup.Escape(o.Symbol ?? "?"),-22} {Markup.Escape(o.Side ?? "?"),-5} {Markup.Escape(o.FilledQuantity ?? "0")}/{Markup.Escape(o.TotalQuantity ?? "?")} {Markup.Escape(o.Status ?? "?")}");
+		return 0;
+	}
+}

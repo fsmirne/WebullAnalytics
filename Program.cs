@@ -44,6 +44,7 @@ class Program
 				trade.AddCommand<TradePlaceCommand>("place");
 				trade.AddCommand<TradeCancelCommand>("cancel");
 				trade.AddCommand<TradeStatusCommand>("status");
+				trade.AddCommand<TradeListCommand>("list");
 			});
 		});
 		return app.Run(args);
