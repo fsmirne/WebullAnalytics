@@ -158,9 +158,9 @@ internal static class OrderRequestBuilder
 		InstrumentType = "OPTION",
 		Market = "US",
 		Side = leg.Action == LegAction.Buy ? "BUY" : "SELL",
-		Symbol = leg.Symbol,
+		Symbol = leg.Option!.Root,
 		Quantity = leg.Quantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
-		StrikePrice = leg.Option!.Strike.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+		StrikePrice = leg.Option.Strike.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
 		OptionExpireDate = leg.Option.ExpiryDate.ToString("yyyy-MM-dd"),
 		OptionType = leg.Option.CallPut == "C" ? "CALL" : "PUT",
 	};
