@@ -262,3 +262,41 @@ internal sealed class TradeCancelCommand : AsyncCommand<TradeCancelSettings>
 		}
 	}
 }
+
+// ─── `trade status` ───────────────────────────────────────────────────────────
+
+internal sealed class TradeStatusSettings : TradeSubcommandSettings
+{
+	[CommandArgument(0, "<clientOrderId>")]
+	[Description("Client order ID to look up.")]
+	public string ClientOrderId { get; set; } = "";
+}
+
+internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, TradeStatusSettings s, CancellationToken cancellation)
+	{
+		var account = TradeContext.ResolveOrExit(s.Account, quietBanner: false);
+		if (account == null) return 2;
+
+		using var client = new WebullOpenApiClient(account);
+		WebullOpenApiClient.OrderDetail detail;
+		try { detail = await client.GetOrderAsync(s.ClientOrderId, cancellation); }
+		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]Lookup failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+
+		AnsiConsole.MarkupLine($"[bold]Combo type:[/] {Markup.Escape(detail.ComboType ?? "-")}  [bold]Combo order ID:[/] {Markup.Escape(detail.ComboOrderId ?? "-")}");
+		if (detail.Orders == null || detail.Orders.Count == 0)
+		{ AnsiConsole.MarkupLine("[dim]No orders returned.[/]"); return 0; }
+
+		foreach (var o in detail.Orders)
+		{
+			AnsiConsole.MarkupLine($"[bold]Order[/] {Markup.Escape(o.ClientOrderId ?? "-")}  [dim]id[/]={Markup.Escape(o.OrderId ?? "-")}  [dim]status[/]={Markup.Escape(o.Status ?? "-")}");
+			AnsiConsole.MarkupLine($"  {Markup.Escape(o.Symbol ?? "-")} {Markup.Escape(o.Side ?? "-")} {Markup.Escape(o.FilledQuantity ?? "0")}/{Markup.Escape(o.TotalQuantity ?? "-")} @ {Markup.Escape(o.FilledPrice ?? "-")}");
+			AnsiConsole.MarkupLine($"  [dim]placed[/] {Markup.Escape(o.PlaceTime ?? "-")}  [dim]filled[/] {Markup.Escape(o.FilledTime ?? "-")}  [dim]intent[/] {Markup.Escape(o.PositionIntent ?? "-")}");
+			if (o.Legs != null)
+				foreach (var leg in o.Legs)
+					AnsiConsole.MarkupLine($"  └─ {Markup.Escape(leg.Symbol ?? "-")} {Markup.Escape(leg.Side ?? "-")} {Markup.Escape(leg.Quantity ?? "-")} {Markup.Escape(leg.OptionType ?? "")} strike={Markup.Escape(leg.StrikePrice ?? "-")} exp={Markup.Escape(leg.OptionExpireDate ?? "-")}");
+		}
+		return 0;
+	}
+}
