@@ -14,6 +14,17 @@ internal abstract class AnalyzeSubcommandSettings : ReportSettings
 	public string? Date { get; set; }
 
 	internal DateTime? EvaluationDateOverride => Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
+
+	public override ValidationResult Validate()
+	{
+		var baseResult = base.Validate();
+		if (!baseResult.Successful) return baseResult;
+
+		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+			return ValidationResult.Error($"--date: expected format YYYY-MM-DD, got '{Date}'");
+
+		return ValidationResult.Success();
+	}
 }
 
 // ─── `analyze trade` ──────────────────────────────────────────────────────────
@@ -325,11 +336,11 @@ internal static class AnalyzeCommon
 			var oldMargin = EstimateNakedShortMargin(spot, oldParsed.Strike, oldParsed.CallPut, oldMarketMid);
 			var newMargin = EstimateNakedShortMargin(spot, newParsed.Strike, newParsed.CallPut, newMarketMid);
 			var deltaMargin = newMargin - oldMargin;
-			var deltaSign = deltaMargin >= 0 ? "+" : "";
+			var deltaSign = deltaMargin >= 0 ? "+" : "-";
 			Console.WriteLine($"Naked short margin (Reg-T estimate, at spot ${spot:N2}):");
 			Console.WriteLine($"  Close leg: ${oldMargin:N2}/contract × {qty} = ${oldMargin * qty:N2}");
 			Console.WriteLine($"  Open leg:  ${newMargin:N2}/contract × {qty} = ${newMargin * qty:N2}");
-			Console.WriteLine($"  Delta:     {deltaSign}${deltaMargin:N2}/contract × {qty} = {deltaSign}${deltaMargin * qty:N2}");
+			Console.WriteLine($"  Delta:     {deltaSign}${Math.Abs(deltaMargin):N2}/contract × {qty} = {deltaSign}${Math.Abs(deltaMargin * qty):N2}");
 		}
 
 		Console.WriteLine();
