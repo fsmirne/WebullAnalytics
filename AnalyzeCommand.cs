@@ -6,80 +6,48 @@ using System.Text.Json;
 
 namespace WebullAnalytics;
 
-class AnalyzeSettings : ReportSettings
+// Shared base for both subcommands.
+internal abstract class AnalyzeSubcommandSettings : ReportSettings
 {
-	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, QTY is a positive integer, and PRICE is a decimal or BID|MID|ASK (market keywords require --api). Comma-separated for multiple. Example: buy:GME260501C00023000:300@MID")]
-	[CommandOption("--trades")]
-	public string? Trades { get; set; }
-
-	[Description("Analyze a roll: shows credit/debit at various underlying prices. Format: OLD_SYMBOL>NEW_SYMBOL:QTY. Example: GME260410C00023000>GME260417C00023000:300")]
-	[CommandOption("--roll")]
-	public string? Roll { get; set; }
-
-	[Description("Position side for --roll. 'short' computes closing short on old / opening short on new (credit = new_bid - old_ask). 'long' computes closing long on old / opening long on new (credit = old_bid - new_ask). Default: short.")]
-	[CommandOption("--side")]
-	public string? Side { get; set; }
-
-	[Description("Override 'today' for evaluation. Simulates running on a different date (e.g., after short leg expiration). Format: YYYY-MM-DD")]
 	[CommandOption("--date")]
+	[Description("Override 'today' for evaluation. Simulates running on a different date (e.g., after short leg expiration). Format: YYYY-MM-DD")]
 	public string? Date { get; set; }
 
 	internal DateTime? EvaluationDateOverride => Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
+}
+
+// ─── `analyze trade` ──────────────────────────────────────────────────────────
+
+internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
+{
+	[CommandArgument(0, "<spec>")]
+	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, and PRICE is a decimal or BID|MID|ASK (keywords require --api). Comma-separated for multiple. Example: buy:GME260501C00023000:300@MID")]
+	public string Spec { get; set; } = "";
 
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 
-		if (Trades != null)
+		List<ParsedLeg> legs;
+		try { legs = TradeLegParser.Parse(Spec); }
+		catch (FormatException ex) { return ValidationResult.Error($"<spec>: {ex.Message}"); }
+
+		foreach (var leg in legs)
 		{
-			List<ParsedLeg> legs;
-			try { legs = TradeLegParser.Parse(Trades); }
-			catch (FormatException ex) { return ValidationResult.Error($"--trades: {ex.Message}"); }
-
-			foreach (var leg in legs)
-			{
-				if (leg.Option == null)
-					return ValidationResult.Error($"--trades: '{leg.Symbol}' is not an OCC option symbol (analyze supports option legs only)");
-				if (leg.Price == null && leg.PriceKeyword == null)
-					return ValidationResult.Error($"--trades: leg '{leg.Symbol}' is missing @PRICE (analyze requires a price per leg; use a decimal or BID|MID|ASK)");
-			}
+			if (leg.Option == null)
+				return ValidationResult.Error($"<spec>: '{leg.Symbol}' is not an OCC option symbol (analyze trade supports option legs only)");
+			if (leg.Price == null && leg.PriceKeyword == null)
+				return ValidationResult.Error($"<spec>: leg '{leg.Symbol}' is missing @PRICE (a decimal or BID|MID|ASK is required)");
 		}
-
-		if (Roll != null)
-		{
-			var gtIdx = Roll.IndexOf('>');
-			if (gtIdx < 1)
-				return ValidationResult.Error("--roll: expected format OLD_SYMBOL>NEW_SYMBOL:QTY");
-			var remaining = Roll[(gtIdx + 1)..];
-			var colonIdx = remaining.IndexOf(':');
-			var oldSym = Roll[..gtIdx];
-			var newSym = colonIdx >= 0 ? remaining[..colonIdx] : remaining;
-			var qtyStr = colonIdx >= 0 ? remaining[(colonIdx + 1)..] : null;
-
-			if (ParsingHelpers.ParseOptionSymbol(oldSym) == null)
-				return ValidationResult.Error($"--roll: invalid OCC symbol '{oldSym}'");
-			if (ParsingHelpers.ParseOptionSymbol(newSym) == null)
-				return ValidationResult.Error($"--roll: invalid OCC symbol '{newSym}'");
-			if (qtyStr != null && (!int.TryParse(qtyStr, out var rqty) || rqty <= 0))
-				return ValidationResult.Error($"--roll: invalid quantity '{qtyStr}'");
-			if (Side != null && !string.Equals(Side, "long", StringComparison.OrdinalIgnoreCase) && !string.Equals(Side, "short", StringComparison.OrdinalIgnoreCase))
-				return ValidationResult.Error($"--side: must be 'long' or 'short', got '{Side}'");
-		}
-
-		if (Roll == null && Side != null)
-			return ValidationResult.Error("--side requires --roll");
-
-		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
-			return ValidationResult.Error("--date must be in YYYY-MM-DD format");
 
 		return ValidationResult.Success();
 	}
 }
 
-class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
+internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeSettings settings, CancellationToken cancellation)
+	public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeTradeSettings settings, CancellationToken cancellation)
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
@@ -90,38 +58,167 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
 		}
 
-		if (!string.IsNullOrEmpty(settings.Roll))
-		{
-			return await AnalyzeRoll(settings, cancellation);
-		}
-
 		var (trades, feeLookup, err) = ReportCommand.LoadTrades(settings);
 		if (err != 0) return err;
 
-		if (!string.IsNullOrEmpty(settings.Trades))
+		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
+		if (AnalyzeCommon.NeedsMarketPrices(settings.Spec))
 		{
-			// Resolve market price keywords (BID/MID/ASK) by fetching quotes
-			IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
-			if (NeedsMarketPrices(settings.Trades))
-			{
-				quotes = await FetchQuotesForSymbols(settings, settings.Trades, cancellation);
-				if (quotes == null) return 1;
-			}
-
-			var maxSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
-			var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : trades.Count > 0 ? trades.Max(t => t.Timestamp) : DateTime.Now;
-			trades.AddRange(ParseSyntheticTrades(settings.Trades, maxSeq, baseTime, quotes));
+			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings, settings.Spec, cancellation);
+			if (quotes == null) return 1;
 		}
+
+		var maxSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
+		var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : trades.Count > 0 ? trades.Max(t => t.Timestamp) : DateTime.Now;
+		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(settings.Spec, maxSeq, baseTime, quotes));
 
 		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation);
 	}
+}
 
-	private static async Task<int> AnalyzeRoll(AnalyzeSettings settings, CancellationToken cancellation)
+// ─── `analyze roll` ───────────────────────────────────────────────────────────
+
+internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
+{
+	[CommandArgument(0, "<spec>")]
+	[Description("Roll spec. Format: OLD_SYMBOL>NEW_SYMBOL:QTY. Example: GME260410C00023000>GME260417C00023000:300")]
+	public string Spec { get; set; } = "";
+
+	[CommandOption("--side")]
+	[Description("Position side. 'short' computes close-short-on-old / open-short-on-new (credit = new_bid - old_ask). 'long' computes close-long-on-old / open-long-on-new (credit = old_bid - new_ask). Default: short.")]
+	public string? Side { get; set; }
+
+	public override ValidationResult Validate()
 	{
-		var gtIdx = settings.Roll!.IndexOf('>');
-		var remaining = settings.Roll[(gtIdx + 1)..];
+		var baseResult = base.Validate();
+		if (!baseResult.Successful) return baseResult;
+
+		var gtIdx = Spec.IndexOf('>');
+		if (gtIdx < 1)
+			return ValidationResult.Error("<spec>: expected format OLD_SYMBOL>NEW_SYMBOL:QTY");
+		var remaining = Spec[(gtIdx + 1)..];
 		var colonIdx = remaining.IndexOf(':');
-		var oldSymbol = settings.Roll[..gtIdx];
+		var oldSym = Spec[..gtIdx];
+		var newSym = colonIdx >= 0 ? remaining[..colonIdx] : remaining;
+		var qtyStr = colonIdx >= 0 ? remaining[(colonIdx + 1)..] : null;
+
+		if (ParsingHelpers.ParseOptionSymbol(oldSym) == null)
+			return ValidationResult.Error($"<spec>: invalid OCC symbol '{oldSym}'");
+		if (ParsingHelpers.ParseOptionSymbol(newSym) == null)
+			return ValidationResult.Error($"<spec>: invalid OCC symbol '{newSym}'");
+		if (qtyStr != null && (!int.TryParse(qtyStr, out var rqty) || rqty <= 0))
+			return ValidationResult.Error($"<spec>: invalid quantity '{qtyStr}'");
+
+		if (Side != null && !string.Equals(Side, "long", StringComparison.OrdinalIgnoreCase) && !string.Equals(Side, "short", StringComparison.OrdinalIgnoreCase))
+			return ValidationResult.Error($"--side: must be 'long' or 'short', got '{Side}'");
+
+		return ValidationResult.Success();
+	}
+}
+
+internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeRollSettings settings, CancellationToken cancellation)
+	{
+		var appConfig = Program.LoadAppConfig("report");
+		if (appConfig != null) settings.ApplyConfig(appConfig);
+
+		if (settings.EvaluationDateOverride.HasValue)
+		{
+			EvaluationDate.Set(settings.EvaluationDateOverride.Value);
+			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
+		}
+
+		return await AnalyzeCommon.RunRollAnalysis(settings, cancellation);
+	}
+}
+
+// ─── Shared helpers (ported from old AnalyzeCommand) ─────────────────────────
+
+internal static class AnalyzeCommon
+{
+	internal static bool NeedsMarketPrices(string tradesSpec) =>
+		TradeLegParser.Parse(tradesSpec).Any(leg => leg.PriceKeyword != null);
+
+	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(AnalyzeSubcommandSettings settings, string tradesSpec, CancellationToken cancellation)
+	{
+		var symbols = TradeLegParser.Parse(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+		var minimalRows = symbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
+
+		var apiSource = settings.Api?.ToLowerInvariant();
+		if (apiSource == null)
+		{
+			Console.WriteLine("Error: --api (yahoo or webull) is required when using BID/MID/ASK price keywords");
+			return null;
+		}
+
+		try
+		{
+			if (apiSource == "webull")
+			{
+				var configPath = Program.ResolvePath(Program.ApiConfigPath);
+				if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return null; }
+				var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+				if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return null; }
+				Console.WriteLine("Webull: fetching quotes for hypothetical trades...");
+				var (quotes, _) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
+				return quotes;
+			}
+			else
+			{
+				Console.WriteLine("Yahoo Finance: fetching quotes for hypothetical trades...");
+				var (quotes, _) = await YahooOptionsClient.FetchOptionQuotesAsync(minimalRows, cancellation);
+				return quotes;
+			}
+		}
+		catch (Exception ex)
+		{
+			if (ex is OperationCanceledException) throw;
+			Console.WriteLine($"Error: Failed to fetch quotes: {ex.Message}");
+			return null;
+		}
+	}
+
+	internal static decimal ResolvePrice(ParsedLeg leg, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	{
+		if (leg.Price.HasValue) return leg.Price.Value;
+		if (leg.PriceKeyword == null) throw new InvalidOperationException($"Leg '{leg.Symbol}' has no price");
+		if (quotes == null || !quotes.TryGetValue(leg.Symbol, out var quote))
+			throw new InvalidOperationException($"No quote found for '{leg.Symbol}'");
+		return leg.PriceKeyword switch
+		{
+			"BID" => quote.Bid ?? throw new InvalidOperationException($"No bid price for '{leg.Symbol}'"),
+			"ASK" => quote.Ask ?? throw new InvalidOperationException($"No ask price for '{leg.Symbol}'"),
+			"MID" => (quote.Bid ?? 0m) + (quote.Ask ?? 0m) == 0m ? throw new InvalidOperationException($"No bid/ask for '{leg.Symbol}'") : ((quote.Bid ?? 0m) + (quote.Ask ?? 0m)) / 2m,
+			_ => throw new InvalidOperationException($"Unknown price keyword '{leg.PriceKeyword}'")
+		};
+	}
+
+	internal static List<Trade> ParseSyntheticTrades(string tradesSpec, int startSeq, DateTime baseTimestamp, IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
+	{
+		var result = new List<Trade>();
+		var seq = startSeq;
+		var legs = TradeLegParser.Parse(tradesSpec);
+
+		foreach (var leg in legs)
+		{
+			var parsed = leg.Option!;
+			var price = ResolvePrice(leg, quotes);
+			var side = leg.Action == LegAction.Buy ? Side.Buy : Side.Sell;
+			var timestamp = baseTimestamp.AddSeconds(seq - startSeq + 1);
+
+			result.Add(new Trade(Seq: seq++, Timestamp: timestamp, Instrument: Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike), MatchKey: MatchKeys.Option(leg.Symbol), Asset: Asset.Option, OptionKind: ParsingHelpers.CallPutDisplayName(parsed.CallPut), Side: side, Qty: leg.Quantity, Price: price, Multiplier: Trade.OptionMultiplier, Expiry: parsed.ExpiryDate));
+		}
+
+		return result;
+	}
+
+	internal static async Task<int> RunRollAnalysis(AnalyzeRollSettings settings, CancellationToken cancellation)
+	{
+		var gtIdx = settings.Spec.IndexOf('>');
+		var remaining = settings.Spec[(gtIdx + 1)..];
+		var colonIdx = remaining.IndexOf(':');
+		var oldSymbol = settings.Spec[..gtIdx];
 		var newSymbol = colonIdx >= 0 ? remaining[..colonIdx] : remaining;
 		var qty = colonIdx >= 0 ? int.Parse(remaining[(colonIdx + 1)..]) : 1;
 
@@ -220,6 +317,21 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 		// Compute current market roll net: short-roll = new_bid - old_ask; long-roll = old_bid - new_ask.
 		var currentCredit = isLong ? (oldBid ?? 0m) - (newAsk ?? 0m) : (newBid ?? 0m) - (oldAsk ?? 0m);
 		Console.WriteLine($"Current roll net (natural, {sideLabel}): ${currentCredit:N4}/contract = ${currentCredit * qty * 100m:N2} total");
+
+		if (!isLong)
+		{
+			var oldMarketMid = (oldBid.HasValue && oldAsk.HasValue) ? (oldBid.Value + oldAsk.Value) / 2m : 0m;
+			var newMarketMid = (newBid.HasValue && newAsk.HasValue) ? (newBid.Value + newAsk.Value) / 2m : 0m;
+			var oldMargin = EstimateNakedShortMargin(spot, oldParsed.Strike, oldParsed.CallPut, oldMarketMid);
+			var newMargin = EstimateNakedShortMargin(spot, newParsed.Strike, newParsed.CallPut, newMarketMid);
+			var deltaMargin = newMargin - oldMargin;
+			var deltaSign = deltaMargin >= 0 ? "+" : "";
+			Console.WriteLine($"Naked short margin (Reg-T estimate, at spot ${spot:N2}):");
+			Console.WriteLine($"  Close leg: ${oldMargin:N2}/contract × {qty} = ${oldMargin * qty:N2}");
+			Console.WriteLine($"  Open leg:  ${newMargin:N2}/contract × {qty} = ${newMargin * qty:N2}");
+			Console.WriteLine($"  Delta:     {deltaSign}${deltaMargin:N2}/contract × {qty} = {deltaSign}${deltaMargin * qty:N2}");
+		}
+
 		Console.WriteLine();
 
 		// Compute max columns from terminal width. Cell format: "0.13/0.37/0.24" or "120.39/135.50/15.11"
@@ -367,79 +479,18 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 		return 0;
 	}
 
-	private static bool NeedsMarketPrices(string tradesSpec) =>
-		TradeLegParser.Parse(tradesSpec).Any(leg => leg.PriceKeyword != null);
-
-	private static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(AnalyzeSettings settings, string tradesSpec, CancellationToken cancellation)
+	/// <summary>
+	/// Reg-T naked short option margin estimate (per contract, = per 100-share unit).
+	/// Formula: max(0.20 * spot * 100 - OTM_amount * 100, 0.10 * strike * 100) + premium * 100.
+	/// For calls, OTM_amount = max(strike - spot, 0).
+	/// For puts,  OTM_amount = max(spot - strike, 0).
+	/// premium is the per-share option value used to anchor the collateral (pass the market mid if available, else 0 for a conservative lower bound).
+	/// </summary>
+	internal static decimal EstimateNakedShortMargin(decimal spot, decimal strike, string callPut, decimal premium)
 	{
-		var symbols = TradeLegParser.Parse(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-		var minimalRows = symbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
-
-		var apiSource = settings.Api?.ToLowerInvariant();
-		if (apiSource == null)
-		{
-			Console.WriteLine("Error: --api (yahoo or webull) is required when using BID/MID/ASK price keywords");
-			return null;
-		}
-
-		try
-		{
-			if (apiSource == "webull")
-			{
-				var configPath = Program.ResolvePath(Program.ApiConfigPath);
-				if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return null; }
-				var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-				if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return null; }
-				Console.WriteLine("Webull: fetching quotes for hypothetical trades...");
-				var (quotes, _) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
-				return quotes;
-			}
-			else
-			{
-				Console.WriteLine("Yahoo Finance: fetching quotes for hypothetical trades...");
-				var (quotes, _) = await YahooOptionsClient.FetchOptionQuotesAsync(minimalRows, cancellation);
-				return quotes;
-			}
-		}
-		catch (Exception ex)
-		{
-			if (ex is OperationCanceledException) throw;
-			Console.WriteLine($"Error: Failed to fetch quotes: {ex.Message}");
-			return null;
-		}
-	}
-
-	private static decimal ResolvePrice(ParsedLeg leg, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
-	{
-		if (leg.Price.HasValue) return leg.Price.Value;
-		if (leg.PriceKeyword == null) throw new InvalidOperationException($"Leg '{leg.Symbol}' has no price");
-		if (quotes == null || !quotes.TryGetValue(leg.Symbol, out var quote))
-			throw new InvalidOperationException($"No quote found for '{leg.Symbol}'");
-		return leg.PriceKeyword switch
-		{
-			"BID" => quote.Bid ?? throw new InvalidOperationException($"No bid price for '{leg.Symbol}'"),
-			"ASK" => quote.Ask ?? throw new InvalidOperationException($"No ask price for '{leg.Symbol}'"),
-			"MID" => (quote.Bid ?? 0m) + (quote.Ask ?? 0m) == 0m ? throw new InvalidOperationException($"No bid/ask for '{leg.Symbol}'") : ((quote.Bid ?? 0m) + (quote.Ask ?? 0m)) / 2m,
-			_ => throw new InvalidOperationException($"Unknown price keyword '{leg.PriceKeyword}'")
-		};
-	}
-
-	internal static List<Trade> ParseSyntheticTrades(string tradesSpec, int startSeq, DateTime baseTimestamp, IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
-	{
-		var result = new List<Trade>();
-		var seq = startSeq;
-		var legs = TradeLegParser.Parse(tradesSpec);
-
-		foreach (var leg in legs)
-		{
-			var parsed = leg.Option!;
-			var price = ResolvePrice(leg, quotes);
-			var side = leg.Action == LegAction.Buy ? Side.Buy : Side.Sell;
-			var timestamp = baseTimestamp.AddSeconds(seq - startSeq + 1);
-
-			result.Add(new Trade(Seq: seq++, Timestamp: timestamp, Instrument: Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike), MatchKey: MatchKeys.Option(leg.Symbol), Asset: Asset.Option, OptionKind: ParsingHelpers.CallPutDisplayName(parsed.CallPut), Side: side, Qty: leg.Quantity, Price: price, Multiplier: Trade.OptionMultiplier, Expiry: parsed.ExpiryDate));
-		}
-
-		return result;
+		var otm = callPut == "C" ? Math.Max(strike - spot, 0m) : Math.Max(spot - strike, 0m);
+		var primary = 0.20m * spot * 100m - otm * 100m;
+		var floor = 0.10m * strike * 100m;
+		return Math.Max(primary, floor) + premium * 100m;
 	}
 }

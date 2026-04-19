@@ -36,7 +36,11 @@ class Program
 			config.SetApplicationName("WebullAnalytics");
 			config.Settings.StrictParsing = true;
 			config.AddCommand<ReportCommand>("report");
-			config.AddCommand<AnalyzeCommand>("analyze");
+			config.AddBranch("analyze", analyze =>
+			{
+				analyze.AddCommand<AnalyzeTradeCommand>("trade");
+				analyze.AddCommand<AnalyzeRollCommand>("roll");
+			});
 			config.AddCommand<FetchCommand>("fetch");
 			config.AddCommand<SniffCommand>("sniff");
 			config.AddBranch("trade", trade =>
