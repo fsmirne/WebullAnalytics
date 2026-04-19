@@ -78,6 +78,24 @@ internal sealed class WebullOpenApiClient : IDisposable
 		[property: JsonPropertyName("order_type")] string? OrderType,
 		[property: JsonPropertyName("combo_type")] string? ComboType);
 
+	/// <summary>Diagnostic: fetches the first page of open orders as raw JSON string (bypasses deserialization).</summary>
+	internal async Task<string> ListOpenOrdersRawAsync(CancellationToken ct = default)
+	{
+		var query = new SortedDictionary<string, string>(StringComparer.Ordinal)
+		{
+			["account_id"] = _account.AccountId,
+			["page_size"] = "100",
+		};
+		const string path = "/openapi/trade/order/open";
+		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null);
+		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+		var uri = $"{path}?{qs}";
+		using var req = new HttpRequestMessage(HttpMethod.Get, uri);
+		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
+		using var resp = await _http.SendAsync(req, ct);
+		return await resp.Content.ReadAsStringAsync(ct);
+	}
+
 	/// <summary>Iterates pages until the server returns fewer than page_size results.</summary>
 	internal async Task<List<OpenOrder>> ListOpenOrdersAsync(CancellationToken ct = default)
 	{
