@@ -42,7 +42,8 @@ class Program
 			config.AddBranch("trade", trade =>
 			{
 				trade.AddCommand<TradePlaceCommand>("place");
-				// trade cancel and status commands registered in Tasks 9–10.
+				trade.AddCommand<TradeCancelCommand>("cancel");
+				// trade status command registered in Task 10.
 			});
 		});
 		return app.Run(args);
