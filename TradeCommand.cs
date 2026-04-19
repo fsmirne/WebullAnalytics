@@ -357,7 +357,12 @@ internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
 
 // ─── `trade list` ─────────────────────────────────────────────────────────────
 
-internal sealed class TradeListSettings : TradeSubcommandSettings { }
+internal sealed class TradeListSettings : TradeSubcommandSettings
+{
+	[CommandOption("--debug")]
+	[Description("Print the raw JSON response from Webull instead of the formatted table.")]
+	public bool Debug { get; set; }
+}
 
 internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 {
@@ -367,6 +372,18 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 		if (account == null) return 2;
 
 		using var client = new WebullOpenApiClient(account);
+
+		if (s.Debug)
+		{
+			try
+			{
+				var raw = await client.ListOpenOrdersRawAsync(cancellation);
+				AnsiConsole.WriteLine(raw);
+				return 0;
+			}
+			catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
+		}
+
 		List<WebullOpenApiClient.OpenOrder> orders;
 		try { orders = await client.ListOpenOrdersAsync(cancellation); }
 		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]List failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
