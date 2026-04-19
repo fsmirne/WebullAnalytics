@@ -132,6 +132,7 @@ internal static class OrderRequestBuilder
 		order.InstrumentType = "OPTION";
 		order.ComboType = "NORMAL";
 		order.Symbol = optionLegs[0].Option!.Root;
+		order.Quantity = optionLegs[0].Quantity.ToString(System.Globalization.CultureInfo.InvariantCulture);
 		// Side for a combo is typically the net side; Webull expects BUY for net-debit, SELL for net-credit.
 		// Convention: if --limit is negative (net debit), side=BUY; else side=SELL.
 		order.Side = (p.LimitPrice ?? 0m) < 0m ? "BUY" : "SELL";
