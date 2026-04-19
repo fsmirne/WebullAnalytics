@@ -227,7 +227,7 @@ When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the conf
 Computes the theoretical roll credit/debit at various underlying prices using Black-Scholes, helping you find the optimal moment to roll a leg.
 
 ```
-WebullAnalytics analyze roll "<spec>" [--side long|short] [--api <source>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
+WebullAnalytics analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--api <source>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
 ```
 
 The `<spec>` is `OLD_SYMBOL>NEW_SYMBOL:QTY`. `--api` is required.
@@ -251,11 +251,21 @@ WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023500:300" --api y
 
 # Override IV for the analysis
 WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo --iv GME260410C00023000:37,GME260417C00023000:31
+
+# Short-side roll paired with a static long call leg (calendar/diagonal margin)
+WebullAnalytics analyze roll "GME260424C00025000>GME260424C00024500:499" --api yahoo --pair GME260515C00025000:499
+
+# Short-side roll paired with long stock (covered-call margin)
+WebullAnalytics analyze roll "GME260515C00025000>GME260522C00025000:5" --api yahoo --pair GME:500
 ```
 
 The output is a 2D grid of roll net values across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-net cell (globally) in **bold underline green**, and any row whose max net matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
 
-When `--side short`, the command also prints a Reg-T naked short-option margin estimate at the current spot, showing the margin for the close leg, the open leg, and the delta — useful for gauging collateral impact alongside the credit/debit grid.
+When `--side short`, the command also prints a Reg-T margin estimate at the current spot, showing the margin for the close leg, the open leg, and the delta — useful for gauging collateral impact alongside the credit/debit grid. Without `--pair`, the estimate is a naked-short margin. With `--pair <SYMBOL:QTY>`, the estimate becomes a combined-position margin that accounts for coverage from the paired leg:
+
+- **Long stock** paired with a short call covers the short one contract per 100 shares (margin drops to 0 for covered contracts; naked for any uncovered). Long stock does not cover short puts.
+- **Long option** paired with a same-type short option covers when (for calls) long strike ≤ short strike and long expiry ≥ short expiry, or (for puts) long strike ≥ short strike and long expiry ≥ short expiry. Covered contracts use the vertical-spread formula `max(short_strike − long_strike, 0) × 100` (calls) or `max(long_strike − short_strike, 0) × 100` (puts); anything else is naked.
+- The output line labels each leg with its coverage status (e.g. `covered`, `partial cover`, `no cover (reason)`, `naked`).
 
 Notable prices from `--notable-prices` are included as additional rows in the grid.
 
@@ -269,6 +279,8 @@ Both `analyze trade` and `analyze roll` accept all `report` options, plus:
 
 analyze roll only:
   --side <long|short>     Position side. Default: short. See above for the math each side uses.
+  --pair <SYMBOL:QTY>     Static paired leg for spread margin calculation. SYMBOL is an equity ticker or OCC option
+                          symbol; QTY is a positive integer. Only meaningful with --side short.
 ```
 
 ### Fetch Command
