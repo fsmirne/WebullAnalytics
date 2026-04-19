@@ -169,79 +169,106 @@ Options:
 
 ### Analyze Command
 
-The `analyze` command runs a hypothetical what-if analysis by injecting synthetic trades into the report pipeline without modifying any data files. It accepts all the same options as `report` plus a `--trades` option.
+The `analyze` command has two subcommands:
 
-#### Trade Format
+- `analyze trade` — inject hypothetical trades into the report pipeline for what-if analysis.
+- `analyze roll` — show a 2D grid of theoretical roll credit/debit across underlying prices × times using Black-Scholes.
+
+Both subcommands accept all of the `report` command's options plus `--date` for simulating a future evaluation date.
+
+#### `analyze trade`
+
+Runs a hypothetical what-if analysis by injecting synthetic trades into the report pipeline without modifying any data files.
 
 ```
---trades "ACTION:SYMBOL:QTY@PRICE,ACTION:SYMBOL:QTY@PRICE,..."
+WebullAnalytics analyze trade "<spec>" [--date <YYYY-MM-DD>] [report options]
 ```
 
-- **ACTION**: `buy` or `sell` (explicit; no sign math).
-- **SYMBOL**: OCC option symbol (e.g., `GME260501C00023000`). Analyze supports option legs only.
+The `<spec>` is a comma-separated list of legs:
+
+```
+ACTION:SYMBOL:QTY@PRICE,ACTION:SYMBOL:QTY@PRICE,...
+```
+
+- **ACTION**: `buy` or `sell`.
+- **SYMBOL**: OCC option symbol (e.g., `GME260501C00023000`). `analyze trade` supports option legs only.
 - **QTY**: Positive integer.
-- **PRICE**: Required. A decimal (e.g., `0.50`, `0.38`) or a market price keyword (`BID`, `MID`, `ASK`, case-insensitive). Keywords require `--api`.
+- **PRICE**: Required. A decimal (e.g., `0.50`) or a market-price keyword (`BID`, `MID`, `ASK`, case-insensitive). Keywords require `--api`.
 
-#### Examples
+Examples:
 
 ```bash
 # What if I roll the calendar short from Apr 10 to Apr 17 for $0.24 credit?
-WebullAnalytics analyze --trades "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38"
+WebullAnalytics analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38"
 
 # Same roll but use live market prices (buy at ask, sell at bid)
-WebullAnalytics analyze --trades "sell:GME260410C00023000:300@BID,buy:GME260417C00023000:300@ASK"
+WebullAnalytics analyze trade "sell:GME260410C00023000:300@BID,buy:GME260417C00023000:300@ASK" --api yahoo
 
 # Use mid-market prices for both legs
-WebullAnalytics analyze --trades "sell:GME260410C00023000:300@MID,buy:GME260417C00023000:300@MID"
+WebullAnalytics analyze trade "sell:GME260410C00023000:300@MID,buy:GME260417C00023000:300@MID" --api yahoo
 
 # What if I close 100 contracts of my long call?
-WebullAnalytics analyze --trades "sell:GME260501C00023000:100@0.70"
+WebullAnalytics analyze trade "sell:GME260501C00023000:100@0.70"
 
 # What if I add a protective put?
-WebullAnalytics analyze --trades "sell:GME260501P00022000:455@0.25"
+WebullAnalytics analyze trade "sell:GME260501P00022000:455@0.25"
 
 # Simulate running on a future date (e.g., after short leg expiration)
-WebullAnalytics analyze --trades "buy:GME260417C00023000:300@0.38" --date 2026-04-11
+WebullAnalytics analyze trade "buy:GME260417C00023000:300@0.38" --date 2026-04-11
 
 # Combine with report options (output to text, override underlying price)
-WebullAnalytics analyze --trades "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --current-underlying-price GME:23.20
+WebullAnalytics analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --current-underlying-price GME:23.20
 ```
 
-When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the configured API source (`--api webull` or `--api yahoo`) before building the hypothetical trades.
+When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the configured API source (`--api webull` or `--api yahoo`) before building the hypothetical trades. The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
 
-The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
+#### `analyze roll`
 
-#### Roll Analysis
+Computes the theoretical roll credit/debit at various underlying prices using Black-Scholes, helping you find the optimal moment to roll a leg.
 
-The `--roll` option computes the theoretical roll credit at various underlying prices using Black-Scholes, helping you find the optimal moment to roll a short leg.
+```
+WebullAnalytics analyze roll "<spec>" [--side long|short] [--api <source>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
+```
+
+The `<spec>` is `OLD_SYMBOL>NEW_SYMBOL:QTY`. `--api` is required.
+
+`--side` selects the math:
+
+- **`short`** (default): closes a short on the OLD strike (buy at ask), opens a short on the NEW strike (sell at bid). Credit = `new_bid − old_ask`.
+- **`long`**: closes a long on the OLD strike (sell at bid), opens a long on the NEW strike (buy at ask). Credit = `old_bid − new_ask`.
+
+Examples:
 
 ```bash
-# Analyze rolling the $23 short from Apr 10 to Apr 17 (300 contracts)
-WebullAnalytics analyze --roll "GME260410C00023000>GME260417C00023000:300"
+# Short-side roll of the $23 short from Apr 10 to Apr 17 (300 contracts)
+WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo
+
+# Same roll but I'm long the old position
+WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo --side long
 
 # Roll to a different strike
-WebullAnalytics analyze --roll "GME260410C00023000>GME260417C00023500:300"
+WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023500:300" --api yahoo
 
 # Override IV for the analysis
-WebullAnalytics analyze --roll "GME260410C00023000>GME260417C00023000:300" --iv GME260410C00023000:37,GME260417C00023000:31
+WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo --iv GME260410C00023000:37,GME260417C00023000:31
 ```
 
-The output is a 2D grid of roll credits across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-credit cell (globally) in **bold underline green**, and any row whose max credit matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
+The output is a 2D grid of roll net values across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-net cell (globally) in **bold underline green**, and any row whose max net matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
+
+When `--side short`, the command also prints a Reg-T naked short-option margin estimate at the current spot, showing the margin for the close leg, the open leg, and the delta — useful for gauging collateral impact alongside the credit/debit grid.
 
 Notable prices from `--notable-prices` are included as additional rows in the grid.
 
-#### Analyze Options
+#### Options
 
-All `report` options are available, plus:
+Both `analyze trade` and `analyze roll` accept all `report` options, plus:
 
 ```
-  --trades <trades>       Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC
-                          option symbol, and PRICE is a decimal or BID|MID|ASK (keywords require --api). Comma-separated
-                          for multiple.
-  --roll <roll>           Analyze a roll: shows credit/debit at various underlying prices and times using Black-Scholes.
-                          Format: OLD_SYMBOL>NEW_SYMBOL:QTY. Requires --api.
   --date <date>           Override 'today' for evaluation (YYYY-MM-DD). Simulates running on a future date — options expiring
                           on or before this date generate synthetic expirations, and all DTE/Black-Scholes calculations use it.
+
+analyze roll only:
+  --side <long|short>     Position side. Default: short. See above for the math each side uses.
 ```
 
 ### Fetch Command
