@@ -227,7 +227,7 @@ When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the conf
 Computes the theoretical roll credit/debit at various underlying prices using Black-Scholes, helping you find the optimal moment to roll a leg.
 
 ```
-WebullAnalytics analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--api <source>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
+WebullAnalytics analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--cash <amount>] [--api <source>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
 ```
 
 The `<spec>` is `OLD_SYMBOL>NEW_SYMBOL:QTY`. `--api` is required.
@@ -257,15 +257,33 @@ WebullAnalytics analyze roll "GME260424C00025000>GME260424C00024500:499" --api y
 
 # Short-side roll paired with long stock (covered-call margin)
 WebullAnalytics analyze roll "GME260515C00025000>GME260522C00025000:5" --api yahoo --pair GME:500
+
+# Check whether your available cash is enough to fund the roll
+WebullAnalytics analyze roll "GME260424C00025000>GME260424C00024500:499" --api yahoo --pair GME260515C00025000:499 --cash 23015
 ```
 
 The output is a 2D grid of roll net values across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-net cell (globally) in **bold underline green**, and any row whose max net matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
 
-When `--side short`, the command also prints a Reg-T margin estimate at the current spot, showing the margin for the close leg, the open leg, and the delta — useful for gauging collateral impact alongside the credit/debit grid. Without `--pair`, the estimate is a naked-short margin. With `--pair <SYMBOL:QTY>`, the estimate becomes a combined-position margin that accounts for coverage from the paired leg:
+When `--side short`, the command also prints a Reg-T margin analysis at the current spot. It shows three numbers: the **current requirement** (ongoing BPR of the pre-roll position), the **new requirement** (BPR required to open the post-roll position as a fresh order), and the **BP delta** between them. This answers "how much additional buying power do I need to free up to execute this roll?" — useful for gauging collateral impact alongside the credit/debit grid.
 
-- **Long stock** paired with a short call covers the short one contract per 100 shares (margin drops to 0 for covered contracts; naked for any uncovered). Long stock does not cover short puts.
-- **Long option** paired with a same-type short option covers when (for calls) long strike ≤ short strike and long expiry ≥ short expiry, or (for puts) long strike ≥ short strike and long expiry ≥ short expiry. Covered contracts use the vertical-spread formula `max(short_strike − long_strike, 0) × 100` (calls) or `max(long_strike − short_strike, 0) × 100` (puts); anything else is naked.
-- The output line labels each leg with its coverage status (e.g. `covered`, `partial cover`, `no cover (reason)`, `naked`).
+The two sides use different (but realistic) formulas:
+
+- **Current requirement** is the ongoing BPR of the existing position. The debit you paid at entry is treated as sunk (already deducted from cash long ago), so covered structures (standard calendars, bull call/put spreads, covered calls, protective puts) show **$0** here. Inverted diagonals show only the strike-loss collateral. Naked shorts use the Reg-T naked formula.
+- **New requirement** is the BPR required at order time to open the post-roll position from scratch. Covered structures charge the market debit (cash out). Inverted diagonals charge strike-loss collateral plus debit. Naked shorts use the Reg-T naked formula.
+
+Both sides apply to whichever pair type you provide:
+
+- **Without `--pair`**: both sides are treated as naked Reg-T.
+- **With `--pair <SYMBOL:QTY>` (long stock)**: covers short calls one contract per 100 shares (drops to $0 for covered contracts); doesn't cover short puts.
+- **With `--pair <SYMBOL:QTY>` (long option)**: must be the same underlying root and same call/put type. Coverage is valid when — for calls — long strike ≤ short strike and long expiry ≥ short expiry, or — for puts — long strike ≥ short strike and long expiry ≥ short expiry. When the strike relationship is inverted but the expiry relationship holds, the position is an inverted diagonal with a bounded max loss (strike-loss collateral required); when the expiry relationship fails, the long doesn't cover at all and the short falls back to naked.
+
+The output line for each side labels its structure (`calendar`, `covered vertical`, `inverted diagonal (strike loss $X)`, `covered by stock`, `naked`, `no cover (reason)`) and shows the cost breakdown for that side.
+
+If you pass `--cash <amount>`, a funding-check block is printed after the margin analysis:
+
+- **Available** = cash + roll credit (or − roll debit). The roll's natural-market credit/debit is added here because it's received or paid at the moment of execution.
+- **Required** = BP delta.
+- **Net** = Available − Required. A positive value means the roll is fundable; a negative value means you're short that amount in free BP to execute.
 
 Notable prices from `--notable-prices` are included as additional rows in the grid.
 
@@ -281,6 +299,9 @@ analyze roll only:
   --side <long|short>     Position side. Default: short. See above for the math each side uses.
   --pair <SYMBOL:QTY>     Static paired leg for spread margin calculation. SYMBOL is an equity ticker or OCC option
                           symbol; QTY is a positive integer. Only meaningful with --side short.
+  --cash <amount>         Available cash for funding the roll. Prints a Net surplus/shortfall line that combines
+                          cash with the roll's natural-market credit/debit and compares against the BP delta.
+                          Only meaningful with --side short.
 ```
 
 ### Fetch Command
