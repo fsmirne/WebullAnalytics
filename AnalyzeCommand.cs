@@ -99,6 +99,10 @@ internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
 	[Description("Position side. 'short' computes close-short-on-old / open-short-on-new (credit = new_bid - old_ask). 'long' computes close-long-on-old / open-long-on-new (credit = old_bid - new_ask). Default: short.")]
 	public string? Side { get; set; }
 
+	[CommandOption("--long")]
+	[Description("Static long leg for spread margin calculation. Format: SYMBOL:QTY where SYMBOL is an equity ticker or OCC option symbol. Only meaningful with --side short. Example: --long GME260515C00025000:499 or --long GME:500")]
+	public string? Long { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -122,6 +126,37 @@ internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
 
 		if (Side != null && !string.Equals(Side, "long", StringComparison.OrdinalIgnoreCase) && !string.Equals(Side, "short", StringComparison.OrdinalIgnoreCase))
 			return ValidationResult.Error($"--side: must be 'long' or 'short', got '{Side}'");
+
+		if (Long != null)
+		{
+			var isLongSide = string.Equals(Side, "long", StringComparison.OrdinalIgnoreCase);
+			if (isLongSide)
+				return ValidationResult.Error("--long is only meaningful with --side short (the default). Long-side rolls don't affect Reg-T margin.");
+
+			var parts = Long.Split(':');
+			if (parts.Length != 2)
+				return ValidationResult.Error($"--long: expected SYMBOL:QTY, got '{Long}'");
+			if (string.IsNullOrWhiteSpace(parts[0]))
+				return ValidationResult.Error($"--long: SYMBOL is empty");
+			if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var lqty) || lqty <= 0)
+				return ValidationResult.Error($"--long: QTY must be a positive integer, got '{parts[1]}'");
+
+			// SYMBOL must be either a valid OCC option or an equity ticker. If it parses as OCC, also verify the root matches the rolled leg's root.
+			var longOpt = ParsingHelpers.ParseOptionSymbol(parts[0]);
+			if (longOpt != null)
+			{
+				// Cross-check root against the rolled leg.
+				var specGtIdx = Spec.IndexOf('>');
+				if (specGtIdx > 0)
+				{
+					var oldSymSpec = Spec[..specGtIdx];
+					var oldOpt = ParsingHelpers.ParseOptionSymbol(oldSymSpec);
+					if (oldOpt != null && !string.Equals(longOpt.Root, oldOpt.Root, StringComparison.OrdinalIgnoreCase))
+						return ValidationResult.Error($"--long: option root '{longOpt.Root}' does not match rolled leg root '{oldOpt.Root}'");
+				}
+			}
+			// else: equity ticker, no additional validation (we don't validate ticker strings against any registry).
+		}
 
 		return ValidationResult.Success();
 	}
@@ -236,6 +271,18 @@ internal static class AnalyzeCommon
 		var oldParsed = ParsingHelpers.ParseOptionSymbol(oldSymbol)!;
 		var newParsed = ParsingHelpers.ParseOptionSymbol(newSymbol)!;
 
+		// Parse optional --long leg for spread margin.
+		OptionParsed? longOpt = null;
+		string? longStockTicker = null;
+		int longQty = 0;
+		if (!string.IsNullOrEmpty(settings.Long))
+		{
+			var parts = settings.Long.Split(':');
+			longQty = int.Parse(parts[1], CultureInfo.InvariantCulture);
+			longOpt = ParsingHelpers.ParseOptionSymbol(parts[0]);
+			if (longOpt == null) longStockTicker = parts[0];
+		}
+
 		// Fetch quotes for both legs to get IV and current prices
 		var allSymbols = new[] { oldSymbol, newSymbol };
 		var minimalRows = allSymbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
@@ -333,14 +380,19 @@ internal static class AnalyzeCommon
 		{
 			var oldMarketMid = (oldBid.HasValue && oldAsk.HasValue) ? (oldBid.Value + oldAsk.Value) / 2m : 0m;
 			var newMarketMid = (newBid.HasValue && newAsk.HasValue) ? (newBid.Value + newAsk.Value) / 2m : 0m;
-			var oldMargin = EstimateNakedShortMargin(spot, oldParsed.Strike, oldParsed.CallPut, oldMarketMid);
-			var newMargin = EstimateNakedShortMargin(spot, newParsed.Strike, newParsed.CallPut, newMarketMid);
-			var deltaMargin = newMargin - oldMargin;
+
+			var oldCov = ComputeLegMargin(oldParsed, qty, spot, oldMarketMid, longOpt, longStockTicker, longQty);
+			var newCov = ComputeLegMargin(newParsed, qty, spot, newMarketMid, longOpt, longStockTicker, longQty);
+
+			var header = settings.Long != null
+				? $"Spread margin (Reg-T estimate, at spot ${spot:N2}, with static long {Markup.Escape(settings.Long)}):"
+				: $"Naked short margin (Reg-T estimate, at spot ${spot:N2}):";
+			Console.WriteLine(header);
+			Console.WriteLine($"  Close leg: {oldCov.StatusLabel} = ${oldCov.Total:N2} total");
+			Console.WriteLine($"  Open leg:  {newCov.StatusLabel} = ${newCov.Total:N2} total");
+			var deltaMargin = newCov.Total - oldCov.Total;
 			var deltaSign = deltaMargin >= 0 ? "+" : "-";
-			Console.WriteLine($"Naked short margin (Reg-T estimate, at spot ${spot:N2}):");
-			Console.WriteLine($"  Close leg: ${oldMargin:N2}/contract × {qty} = ${oldMargin * qty:N2}");
-			Console.WriteLine($"  Open leg:  ${newMargin:N2}/contract × {qty} = ${newMargin * qty:N2}");
-			Console.WriteLine($"  Delta:     {deltaSign}${Math.Abs(deltaMargin):N2}/contract × {qty} = {deltaSign}${Math.Abs(deltaMargin * qty):N2}");
+			Console.WriteLine($"  Delta:     {deltaSign}${Math.Abs(deltaMargin):N2} total");
 		}
 
 		Console.WriteLine();
@@ -503,5 +555,79 @@ internal static class AnalyzeCommon
 		var primary = 0.20m * spot * 100m - otm * 100m;
 		var floor = 0.10m * strike * 100m;
 		return Math.Max(primary, floor) + premium * 100m;
+	}
+
+	/// <summary>
+	/// Holds a per-leg combined margin result: status label for display plus the total margin in dollars.
+	/// </summary>
+	internal sealed record LegMargin(string StatusLabel, decimal Total);
+
+	/// <summary>
+	/// Computes combined margin for a single short leg paired with an optional static long leg.
+	/// - If no long leg (longOpt and longStockTicker both null/empty): naked margin on all contracts.
+	/// - If long is stock: covers short calls at 0 per contract, up to stock_qty / 100 contracts; doesn't cover short puts.
+	/// - If long is option: must be same underlying root and same call/put type. For calls, long_strike ≤ short_strike AND long_expiry ≥ short_expiry. For puts, long_strike ≥ short_strike AND long_expiry ≥ short_expiry. When valid, per-contract margin = max(short_strike - long_strike, 0) × 100 for calls, max(long_strike - short_strike, 0) × 100 for puts. Coverable contracts = min(qty, long_qty).
+	/// - Remaining (uncovered) contracts pay naked short margin.
+	/// </summary>
+	internal static LegMargin ComputeLegMargin(OptionParsed shortLeg, int shortQty, decimal spot, decimal shortPremium, OptionParsed? longOpt, string? longStockTicker, int longQty)
+	{
+		var naked = EstimateNakedShortMargin(spot, shortLeg.Strike, shortLeg.CallPut, shortPremium);
+
+		// No long leg → naked on all contracts.
+		if (longOpt == null && string.IsNullOrEmpty(longStockTicker))
+			return new LegMargin($"naked  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+
+		// Long stock.
+		if (longStockTicker != null)
+		{
+			if (!string.Equals(longStockTicker, shortLeg.Root, StringComparison.OrdinalIgnoreCase))
+				return new LegMargin($"no cover (stock ticker '{longStockTicker}' ≠ '{shortLeg.Root}')  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+			if (shortLeg.CallPut != "C")
+				return new LegMargin($"no cover (long stock does not cover short puts)  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+			var coverable = Math.Min(shortQty, longQty / 100);
+			var uncovered = shortQty - coverable;
+			var total = uncovered * naked;
+			var label = uncovered == 0
+				? $"covered (long {longQty} shares covers all {shortQty})  $0.00/contract × {shortQty}"
+				: $"partial cover ({coverable} covered by stock, {uncovered} naked @ ${naked:N2})";
+			return new LegMargin(label, total);
+		}
+
+		// Long option — longOpt is guaranteed non-null here.
+		var lo = longOpt!;
+		if (shortLeg.CallPut != lo.CallPut)
+			return new LegMargin($"no cover (long {(lo.CallPut == "C" ? "call" : "put")} does not cover short {(shortLeg.CallPut == "C" ? "call" : "put")})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+
+		var sameExpiryOrLater = lo.ExpiryDate >= shortLeg.ExpiryDate;
+		bool coverValid;
+		decimal coveredPer;
+		string reason;
+		if (shortLeg.CallPut == "C")
+		{
+			coverValid = lo.Strike <= shortLeg.Strike && sameExpiryOrLater;
+			coveredPer = Math.Max(shortLeg.Strike - lo.Strike, 0m) * 100m;
+			reason = !sameExpiryOrLater ? $"long expiry {lo.ExpiryDate:yyyy-MM-dd} < short expiry {shortLeg.ExpiryDate:yyyy-MM-dd}"
+					: lo.Strike > shortLeg.Strike ? $"long strike ${lo.Strike} > short strike ${shortLeg.Strike}"
+					: "";
+		}
+		else
+		{
+			coverValid = lo.Strike >= shortLeg.Strike && sameExpiryOrLater;
+			coveredPer = Math.Max(lo.Strike - shortLeg.Strike, 0m) * 100m;
+			reason = !sameExpiryOrLater ? $"long expiry {lo.ExpiryDate:yyyy-MM-dd} < short expiry {shortLeg.ExpiryDate:yyyy-MM-dd}"
+					: lo.Strike < shortLeg.Strike ? $"long strike ${lo.Strike} < short strike ${shortLeg.Strike}"
+					: "";
+		}
+
+		if (!coverValid)
+			return new LegMargin($"no cover ({reason})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+
+		var coverableOpt = Math.Min(shortQty, longQty);
+		var uncoveredOpt = shortQty - coverableOpt;
+		var totalOpt = coverableOpt * coveredPer + uncoveredOpt * naked;
+		var labelOpt = uncoveredOpt == 0
+			? $"covered  ${coveredPer:N2}/contract × {shortQty}"
+			: $"partial cover ({coverableOpt} covered @ ${coveredPer:N2}, {uncoveredOpt} naked @ ${naked:N2})";
+		return new LegMargin(labelOpt, totalOpt);
 	}
 }
