@@ -25,6 +25,7 @@ internal sealed class NewOrder
 	[JsonPropertyName("side")] public string Side { get; set; } = "BUY";
 	[JsonPropertyName("symbol")] public string Symbol { get; set; } = "";
 	[JsonPropertyName("time_in_force")] public string TimeInForce { get; set; } = "DAY";
+	[JsonPropertyName("support_trading_session")] public string SupportTradingSession { get; set; } = "CORE";
 	[JsonPropertyName("quantity"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Quantity { get; set; }
 	[JsonPropertyName("limit_price"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? LimitPrice { get; set; }
 	[JsonPropertyName("option_strategy"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? OptionStrategy { get; set; }
