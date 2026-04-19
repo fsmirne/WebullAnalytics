@@ -75,6 +75,10 @@ internal sealed class TradePlaceSettings : TradeSubcommandSettings
 	[CommandOption("--submit")]
 	[Description("Actually place the order. Without this, runs preview only.")]
 	public bool Submit { get; set; }
+
+	[CommandOption("--debug")]
+	[Description("Print the raw JSON payload that will be sent to the Webull API.")]
+	public bool Debug { get; set; }
 }
 
 internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
@@ -159,7 +163,8 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 
 		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]");
 		AnsiConsole.MarkupLine($"[dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}");
-		AnsiConsole.MarkupLine($"[dim]Payload:[/] {Markup.Escape(OrderRequestBuilder.Serialize(body))}");
+		if (s.Debug)
+			AnsiConsole.MarkupLine($"[dim]Payload:[/] {Markup.Escape(OrderRequestBuilder.Serialize(body))}");
 
 		// 7. Preview.
 		using var client = new WebullOpenApiClient(account);
