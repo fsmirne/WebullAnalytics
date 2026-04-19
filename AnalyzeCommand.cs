@@ -16,6 +16,10 @@ class AnalyzeSettings : ReportSettings
 	[CommandOption("--roll")]
 	public string? Roll { get; set; }
 
+	[Description("Position side for --roll. 'short' computes closing short on old / opening short on new (credit = new_bid - old_ask). 'long' computes closing long on old / opening long on new (credit = old_bid - new_ask). Default: short.")]
+	[CommandOption("--side")]
+	public string? Side { get; set; }
+
 	[Description("Override 'today' for evaluation. Simulates running on a different date (e.g., after short leg expiration). Format: YYYY-MM-DD")]
 	[CommandOption("--date")]
 	public string? Date { get; set; }
@@ -59,7 +63,12 @@ class AnalyzeSettings : ReportSettings
 				return ValidationResult.Error($"--roll: invalid OCC symbol '{newSym}'");
 			if (qtyStr != null && (!int.TryParse(qtyStr, out var rqty) || rqty <= 0))
 				return ValidationResult.Error($"--roll: invalid quantity '{qtyStr}'");
+			if (Side != null && !string.Equals(Side, "long", StringComparison.OrdinalIgnoreCase) && !string.Equals(Side, "short", StringComparison.OrdinalIgnoreCase))
+				return ValidationResult.Error($"--side: must be 'long' or 'short', got '{Side}'");
 		}
+
+		if (Roll == null && Side != null)
+			return ValidationResult.Error("--side requires --roll");
 
 		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
 			return ValidationResult.Error("--date must be in YYYY-MM-DD format");
@@ -205,9 +214,12 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 		Console.WriteLine($"Current: {oldParsed.Root} @ ${spot}  |  Close {oldSymbol}: Bid ${oldBid?.ToString("N2") ?? "?"} / Ask ${oldAsk?.ToString("N2") ?? "?"}  |  Open {newSymbol}: Bid ${newBid?.ToString("N2") ?? "?"} / Ask ${newAsk?.ToString("N2") ?? "?"}");
 		Console.WriteLine($"IV: Close leg {oldIv.Value:P1} | Open leg {newIv.Value:P1}");
 
-		// Compute current market roll credit
-		var currentCredit = (newBid ?? 0m) - (oldAsk ?? 0m);
-		Console.WriteLine($"Current roll credit (natural): ${currentCredit:N4}/contract = ${currentCredit * qty * 100m:N2} total");
+		var isLong = string.Equals(settings.Side, "long", StringComparison.OrdinalIgnoreCase);
+		var sideLabel = isLong ? "long" : "short";
+
+		// Compute current market roll net: short-roll = new_bid - old_ask; long-roll = old_bid - new_ask.
+		var currentCredit = isLong ? (oldBid ?? 0m) - (newAsk ?? 0m) : (newBid ?? 0m) - (oldAsk ?? 0m);
+		Console.WriteLine($"Current roll net (natural, {sideLabel}): ${currentCredit:N4}/contract = ${currentCredit * qty * 100m:N2} total");
 		Console.WriteLine();
 
 		// Compute max columns from terminal width. Cell format: "0.13/0.37/0.24" or "120.39/135.50/15.11"
@@ -276,7 +288,12 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 		var bestCredit = decimal.MinValue;
 		for (var p = minPrice; p <= maxPrice; p += searchStep)
 		{
-			var credit = evalTimes.Max(t => OptionMath.BlackScholes(p, newParsed.Strike, (newExpiry.Date + OptionMath.MarketClose - t).TotalDays / 365.0, rfr, newIv.Value, newParsed.CallPut) - OptionMath.BlackScholes(p, oldParsed.Strike, (oldExpiry.Date + OptionMath.MarketClose - t).TotalDays / 365.0, rfr, oldIv.Value, oldParsed.CallPut));
+			var credit = evalTimes.Max(t =>
+			{
+				var newVal = OptionMath.BlackScholes(p, newParsed.Strike, (newExpiry.Date + OptionMath.MarketClose - t).TotalDays / 365.0, rfr, newIv.Value, newParsed.CallPut);
+				var oldVal = OptionMath.BlackScholes(p, oldParsed.Strike, (oldExpiry.Date + OptionMath.MarketClose - t).TotalDays / 365.0, rfr, oldIv.Value, oldParsed.CallPut);
+				return isLong ? oldVal - newVal : newVal - oldVal;
+			});
 			if (credit > bestCredit) { bestCredit = credit; bestPrice = Math.Round(p, 2); }
 		}
 		prices.Add(bestPrice);
@@ -297,7 +314,7 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 				var newDte = (newExpiry.Date + OptionMath.MarketClose - evalTimes[di]).TotalDays / 365.0;
 				oldGrid[pi, di] = OptionMath.BlackScholes(priceList[pi], oldParsed.Strike, oldDte, rfr, oldIv.Value, oldParsed.CallPut);
 				newGrid[pi, di] = OptionMath.BlackScholes(priceList[pi], newParsed.Strike, newDte, rfr, newIv.Value, newParsed.CallPut);
-				creditGrid[pi, di] = newGrid[pi, di] - oldGrid[pi, di];
+				creditGrid[pi, di] = isLong ? oldGrid[pi, di] - newGrid[pi, di] : newGrid[pi, di] - oldGrid[pi, di];
 				if (creditGrid[pi, di] > maxCredit) { maxCredit = creditGrid[pi, di]; maxCreditPrice = priceList[pi]; maxCreditDate = evalTimes[di]; }
 			}
 
@@ -343,7 +360,7 @@ class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 
 		AnsiConsole.Write(table);
 		var maxDateLabel = isIntraday ? $"at {maxCreditDate:h:mm tt}" : $"on {maxCreditDate:dd MMM}";
-		AnsiConsole.MarkupLine($"  [bold underline green]max credit[/] (${maxCredit:N4} @ ${maxCreditPrice:N2} {maxDateLabel})    [bold yellow]current price[/]    [green]price with max credit[/]");
+		AnsiConsole.MarkupLine($"  [bold underline green]max net ({sideLabel})[/] (${maxCredit:N4} @ ${maxCreditPrice:N2} {maxDateLabel})    [bold yellow]current price[/]    [green]price with max net[/]");
 		Console.WriteLine($"  Each cell: Close|Open|Net per contract. Total for {qty}x: max ${maxCredit * qty * 100m:N2}");
 		Console.WriteLine();
 
