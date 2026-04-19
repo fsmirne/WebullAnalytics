@@ -99,9 +99,9 @@ internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
 	[Description("Position side. 'short' computes close-short-on-old / open-short-on-new (credit = new_bid - old_ask). 'long' computes close-long-on-old / open-long-on-new (credit = old_bid - new_ask). Default: short.")]
 	public string? Side { get; set; }
 
-	[CommandOption("--long")]
-	[Description("Static long leg for spread margin calculation. Format: SYMBOL:QTY where SYMBOL is an equity ticker or OCC option symbol. Only meaningful with --side short. Example: --long GME260515C00025000:499 or --long GME:500")]
-	public string? Long { get; set; }
+	[CommandOption("--pair")]
+	[Description("Static paired leg for spread margin calculation. Format: SYMBOL:QTY where SYMBOL is an equity ticker or OCC option symbol. Only meaningful with --side short. Example: --pair GME260515C00025000:499 or --pair GME:500")]
+	public string? Pair { get; set; }
 
 	public override ValidationResult Validate()
 	{
@@ -127,19 +127,19 @@ internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
 		if (Side != null && !string.Equals(Side, "long", StringComparison.OrdinalIgnoreCase) && !string.Equals(Side, "short", StringComparison.OrdinalIgnoreCase))
 			return ValidationResult.Error($"--side: must be 'long' or 'short', got '{Side}'");
 
-		if (Long != null)
+		if (Pair != null)
 		{
 			var isLongSide = string.Equals(Side, "long", StringComparison.OrdinalIgnoreCase);
 			if (isLongSide)
-				return ValidationResult.Error("--long is only meaningful with --side short (the default). Long-side rolls don't affect Reg-T margin.");
+				return ValidationResult.Error("--pair is only meaningful with --side short (the default). Long-side rolls don't affect Reg-T margin.");
 
-			var parts = Long.Split(':');
+			var parts = Pair.Split(':');
 			if (parts.Length != 2)
-				return ValidationResult.Error($"--long: expected SYMBOL:QTY, got '{Long}'");
+				return ValidationResult.Error($"--pair: expected SYMBOL:QTY, got '{Pair}'");
 			if (string.IsNullOrWhiteSpace(parts[0]))
-				return ValidationResult.Error($"--long: SYMBOL is empty");
+				return ValidationResult.Error($"--pair: SYMBOL is empty");
 			if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var lqty) || lqty <= 0)
-				return ValidationResult.Error($"--long: QTY must be a positive integer, got '{parts[1]}'");
+				return ValidationResult.Error($"--pair: QTY must be a positive integer, got '{parts[1]}'");
 
 			// SYMBOL must be either a valid OCC option or an equity ticker. If it parses as OCC, also verify the root matches the rolled leg's root.
 			var longOpt = ParsingHelpers.ParseOptionSymbol(parts[0]);
@@ -152,7 +152,7 @@ internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
 					var oldSymSpec = Spec[..specGtIdx];
 					var oldOpt = ParsingHelpers.ParseOptionSymbol(oldSymSpec);
 					if (oldOpt != null && !string.Equals(longOpt.Root, oldOpt.Root, StringComparison.OrdinalIgnoreCase))
-						return ValidationResult.Error($"--long: option root '{longOpt.Root}' does not match rolled leg root '{oldOpt.Root}'");
+						return ValidationResult.Error($"--pair: option root '{longOpt.Root}' does not match rolled leg root '{oldOpt.Root}'");
 				}
 			}
 			// else: equity ticker, no additional validation (we don't validate ticker strings against any registry).
@@ -271,13 +271,13 @@ internal static class AnalyzeCommon
 		var oldParsed = ParsingHelpers.ParseOptionSymbol(oldSymbol)!;
 		var newParsed = ParsingHelpers.ParseOptionSymbol(newSymbol)!;
 
-		// Parse optional --long leg for spread margin.
+		// Parse optional --pair leg for spread margin.
 		OptionParsed? longOpt = null;
 		string? longStockTicker = null;
 		int longQty = 0;
-		if (!string.IsNullOrEmpty(settings.Long))
+		if (!string.IsNullOrEmpty(settings.Pair))
 		{
-			var parts = settings.Long.Split(':');
+			var parts = settings.Pair.Split(':');
 			longQty = int.Parse(parts[1], CultureInfo.InvariantCulture);
 			longOpt = ParsingHelpers.ParseOptionSymbol(parts[0]);
 			if (longOpt == null) longStockTicker = parts[0];
@@ -384,8 +384,8 @@ internal static class AnalyzeCommon
 			var oldCov = ComputeLegMargin(oldParsed, qty, spot, oldMarketMid, longOpt, longStockTicker, longQty);
 			var newCov = ComputeLegMargin(newParsed, qty, spot, newMarketMid, longOpt, longStockTicker, longQty);
 
-			var header = settings.Long != null
-				? $"Spread margin (Reg-T estimate, at spot ${spot:N2}, with static long {Markup.Escape(settings.Long)}):"
+			var header = settings.Pair != null
+				? $"Spread margin (Reg-T estimate, at spot ${spot:N2}, with static pair {Markup.Escape(settings.Pair)}):"
 				: $"Naked short margin (Reg-T estimate, at spot ${spot:N2}):";
 			Console.WriteLine(header);
 			Console.WriteLine($"  Close leg: {oldCov.StatusLabel} = ${oldCov.Total:N2} total");
