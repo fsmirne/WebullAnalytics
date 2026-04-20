@@ -562,6 +562,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	{
 		var table = new Table().Expand();
 		table.ShowRowSeparators();
+		table.BorderColor(Color.Grey);
 		table.AddColumn("Scenario");
 		table.AddColumn(new TableColumn("Cash now").RightAligned());
 		table.AddColumn(new TableColumn("Projected @ target").RightAligned());
