@@ -434,6 +434,71 @@ Each account in `trade-config.json` has a `sandbox: true|false` flag. Sandbox ac
 
 There is no `--yes` flag — every place, cancel, and cancel-all prompts interactively. Piped empty input aborts.
 
+### AI Command
+
+The `ai` command monitors open calendar/diagonal positions during market hours and emits structured proposals (roll / take-profit / stop-loss / defensive-roll) to a JSONL log. It is **read-only in phase 1**: the command never places orders.
+
+Three subcommands share one evaluation engine:
+
+```bash
+# Continuous monitoring during market hours (default: until 4 PM ET)
+WebullAnalytics ai watch
+
+# Single evaluation pass, print proposals, exit
+WebullAnalytics ai once
+
+# Replay the rules against historical orders.jsonl with agreement analysis
+WebullAnalytics ai replay --since 2026-01-01 --until 2026-04-17
+```
+
+#### Setup
+
+1. Copy the example config:
+   ```bash
+   cp ai-config.example.json data/ai-config.json
+   ```
+2. Edit `data/ai-config.json` and set the `tickers` array to the symbols you want to monitor, and set `positionSource.account` to one of the aliases in your `data/trade-config.json`.
+3. Ensure `data/trade-config.json` exists (same setup as the `trade` command) — the loop reads position state from the Webull OpenAPI.
+
+#### Rules
+
+| Rule | Priority | Trigger |
+|---|---|---|
+| `StopLossRule` | 1 | MTM debit ≥ 1.5× initial, or spot beyond break-even by > 3% |
+| `TakeProfitRule` | 2 | MTM ≥ 40% of max projected profit |
+| `DefensiveRollRule` | 3 | Spot within 1% of short strike and short DTE ≤ 3 |
+| `RollShortOnExpiryRule` | 4 | Short DTE ≤ 2 and short mid ≤ $0.10 |
+
+All thresholds are configurable in `ai-config.json`. Rules evaluate per-position in priority order — the first rule to match for a position wins; lower-priority rules are skipped for that position in that tick.
+
+#### Output
+
+Proposals are written to two places:
+
+- **Console**: Spectre-formatted, color-coded by action (close = yellow, roll = cyan, alert-only = grey).
+- **JSONL log** at `data/ai-proposals.log`: one proposal per line, machine-parseable with `jq` or similar. Includes `mode` field ("once" / "watch" / "replay") to distinguish source runs.
+
+#### Cash reserve
+
+Every proposal is funding-checked. Proposals that would leave free cash below the configured reserve get a `⚠ blocked by cash reserve` tag. This is informational in phase 1; no action is blocked since nothing executes.
+
+#### Historical replay: supplying price data
+
+`ai replay` needs daily closes for each ticker to price options via Black-Scholes. The built-in Yahoo fetcher hits `query1.finance.yahoo.com/v7/finance/download` which currently returns 401 without authentication. Until an alternative automated fetcher is wired, you can supply historical closes manually:
+
+1. Export daily closes for each ticker from any source (Yahoo Finance web UI → "Historical Data" → Download, or a broker export).
+2. Save to `data/history/<TICKER>.csv`. The parser accepts either:
+   - **Two-column native format** with header `date,close` and rows like `2026-04-17,24.55`, or
+   - **Yahoo's seven-column export** with header `Date,Open,High,Low,Close,Adj Close,Volume` — drop in as-is.
+3. Run `ai replay`. The cache picks up the CSV automatically; no further conversion needed.
+
+#### Phase-1 stubs
+
+Two pieces are intentionally deferred and will be wired in follow-up specs:
+
+- **`LivePositionSource`** returns empty positions. `ai once` and `ai watch` therefore always report "0 position(s)". The wiring to Webull OpenAPI position/balance endpoints plus strategy grouping is the next major effort.
+- **`TakeProfitRule`** never fires because its profit-projector bridge returns null. The other three rules (StopLoss, DefensiveRoll, RollShortOnExpiry) work normally.
+
 ## Data Sources
 
 The `--source` option controls which data source provides the trades:
