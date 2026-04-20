@@ -53,6 +53,7 @@ class Program
 			config.AddBranch("ai", ai =>
 			{
 				ai.AddCommand<AI.AIOnceCommand>("once");
+				ai.AddCommand<AI.AIWatchCommand>("watch");
 			});
 		});
 		return app.Run(args);
