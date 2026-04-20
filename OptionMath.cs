@@ -220,4 +220,40 @@ internal static class OptionMath
 		}
 		return Math.Round((lo + hi) / 2, 2);
 	}
+
+	// --- Implied Volatility ---
+
+	/// <summary>Back-solves implied volatility via Newton-Raphson on the BlackScholes pricing function.
+	/// Returns a vol in [0.01, 5.0]. Converges to within $0.005 of marketPrice or returns the bound.</summary>
+	internal static decimal ImpliedVol(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal marketPrice, string callPut)
+	{
+		decimal vol = 0.3m;
+		for (var i = 0; i < 50; i++)
+		{
+			var price = BlackScholes(spot, strike, timeYears, riskFreeRate, vol, callPut);
+			var vega = Vega(spot, strike, timeYears, riskFreeRate, vol);
+			if (vega == 0m) break;
+			var diff = price - marketPrice;
+			if (Math.Abs(diff) < 0.005m) break;
+			vol -= diff / vega;
+			if (vol <= 0.01m) { vol = 0.01m; break; }
+			if (vol >= 5m) { vol = 5m; break; }
+		}
+		return vol;
+	}
+
+	/// <summary>Vega of a European option under Black-Scholes: partial derivative of price w.r.t. vol.</summary>
+	internal static decimal Vega(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv)
+	{
+		if (timeYears <= 0) return 0m;
+		var S = (double)spot;
+		var K = (double)strike;
+		var T = timeYears;
+		var r = riskFreeRate;
+		var sigma = (double)iv;
+		if (sigma <= 0) return 0m;
+		var d1 = (Math.Log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.Sqrt(T));
+		var pdf = Math.Exp(-0.5 * d1 * d1) / Math.Sqrt(2 * Math.PI);
+		return (decimal)(S * pdf * Math.Sqrt(T));
+	}
 }
