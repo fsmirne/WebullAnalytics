@@ -430,6 +430,28 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 	}
 }
 
+// ─── `trade token` (diagnostic) ───────────────────────────────────────────────
+
+internal sealed class TradeTokenSettings : TradeSubcommandSettings { }
+
+internal sealed class TradeTokenCommand : AsyncCommand<TradeTokenSettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, TradeTokenSettings s, CancellationToken cancellation)
+	{
+		var account = TradeContext.ResolveOrExit(s.Account);
+		if (account == null) return 2;
+
+		using var client = new WebullOpenApiClient(account);
+		try
+		{
+			var raw = await client.CreateTokenRawAsync(cancellation);
+			AnsiConsole.WriteLine(raw);
+			return 0;
+		}
+		catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
+	}
+}
+
 // ─── `trade accounts` ─────────────────────────────────────────────────────────
 
 internal sealed class TradeAccountsSettings : TradeSubcommandSettings { }
