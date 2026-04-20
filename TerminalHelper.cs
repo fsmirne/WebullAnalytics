@@ -11,6 +11,19 @@ static class TerminalHelper
 	public const int SimplifiedMinWidth = 130;
 
 	/// <summary>
+	/// Ensures the terminal is wide enough for wide tables, honoring the 'autoExpandTerminal' flag
+	/// from data/config.json. Callers that already have the flag resolved can call EnsureTerminalWidth
+	/// directly; callers starting from a CLI entry point should use this overload to share the
+	/// root-config lookup.
+	/// </summary>
+	public static void EnsureTerminalWidthFromConfig(bool simplified = false)
+	{
+		var rootConfig = Program.LoadAppConfigRoot();
+		var autoExpand = rootConfig != null && rootConfig.TryGetBool("autoExpandTerminal", out var ae) && ae;
+		EnsureTerminalWidth(simplified, autoExpand);
+	}
+
+	/// <summary>
 	/// Ensures the terminal is wide enough for report tables. Prompts the user to resize if not.
 	/// </summary>
 	public static void EnsureTerminalWidth(bool simplified = false, bool autoExpand = false)
