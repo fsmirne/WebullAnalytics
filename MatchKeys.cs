@@ -31,6 +31,10 @@ public static class MatchKeys
 	/// </summary>
 	public static string OccSuffix(decimal strike, string callPut) => $"{callPut}{(long)(strike * 1000m):D8}";
 
+	/// <summary>Builds a full OCC option symbol from components. Example: root="GME", expiry=2026-02-13, strike=25, callPut="C" → "GME260213C00025000".</summary>
+	public static string OccSymbol(string root, DateTime expiry, decimal strike, string callPut) =>
+		$"{root}{expiry:yyMMdd}{OccSuffix(strike, callPut)}";
+
 	private const string StrategyPrefix = "strategy:";
 
 	/// <summary>
