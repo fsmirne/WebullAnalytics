@@ -119,3 +119,73 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		return 0;
 	}
 }
+
+/// <summary>`ai replay` — historical replay against orders.jsonl with agreement analysis.</summary>
+internal sealed class AIReplaySettings : AISubcommandSettings
+{
+	[CommandOption("--since <DATE>")]
+	[Description("Start date YYYY-MM-DD. Default: earliest fill.")]
+	public string? Since { get; set; }
+
+	[CommandOption("--until <DATE>")]
+	[Description("End date YYYY-MM-DD. Default: latest fill.")]
+	public string? Until { get; set; }
+
+	[CommandOption("--granularity <LEVEL>")]
+	[Description("daily or hourly. Default: daily.")]
+	public string Granularity { get; set; } = "daily";
+
+	public override ValidationResult Validate()
+	{
+		var baseResult = base.Validate();
+		if (!baseResult.Successful) return baseResult;
+
+		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
+			return ValidationResult.Error($"--since: must be YYYY-MM-DD, got '{Since}'");
+		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
+			return ValidationResult.Error($"--until: must be YYYY-MM-DD, got '{Until}'");
+		if (Granularity != "daily" && Granularity != "hourly")
+			return ValidationResult.Error($"--granularity: must be 'daily' or 'hourly', got '{Granularity}'");
+		return ValidationResult.Success();
+	}
+}
+
+internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, AIReplaySettings settings, CancellationToken cancellation)
+	{
+		var config = AIContext.ResolveConfig(settings);
+		if (config == null) return 1;
+
+		// Load all historical trades using the existing pipeline.
+		var reportSettings = new ReportSettings();
+		var (trades, feeLookup, err) = ReportCommand.LoadTrades(reportSettings);
+		if (err != 0) return err;
+
+		var since = settings.Since != null
+			? DateTime.ParseExact(settings.Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
+			: trades.Count > 0 ? trades.Min(t => t.Timestamp).Date : DateTime.Today;
+		var until = settings.Until != null
+			? DateTime.ParseExact(settings.Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
+			: trades.Count > 0 ? trades.Max(t => t.Timestamp).Date : DateTime.Today;
+
+		// Build historical price cache and IV back-solver seeded with user's option fills.
+		var priceCache = new Replay.HistoricalPriceCache();
+		var ivSolver = new Replay.IVBackSolver();
+		foreach (var t in trades.Where(t => t.Asset == Asset.Option))
+		{
+			var occ = t.MatchKey.StartsWith("option:") ? t.MatchKey[7..] : t.MatchKey;
+			var parsed = ParsingHelpers.ParseOptionSymbol(occ);
+			if (parsed == null) continue;
+			var spot = await priceCache.GetCloseAsync(parsed.Root, t.Timestamp.Date, cancellation);
+			if (!spot.HasValue) continue;
+			ivSolver.RegisterFill(occ, t.Timestamp, t.Price, spot.Value);
+		}
+
+		var positions = new Sources.ReplayPositionSource(trades, feeLookup);
+		var quotes = new Sources.ReplayQuoteSource(priceCache, ivSolver, riskFreeRate: 0.036);
+
+		var runner = new Replay.ReplayRunner(config, positions, quotes, trades);
+		return await runner.RunAsync(since, until, settings.Granularity, cancellation);
+	}
+}
