@@ -383,30 +383,38 @@ internal static class StrategyGrouper
 			}
 		}
 
-		// Inherit leg adjusted prices for partial-brand-new groups from sibling groups that
-		// share the same leg matchkey. When a user synthesizes a partial roll via `analyze trade`,
-		// the new structure (e.g., a 135-contract diagonal spliced off a 499-contract calendar) is
-		// classified IsPartialBrandNew. Its long leg came from a pool with accumulated roll-credit
-		// adjustments — we want those credits to carry into the split. For each partial-brand-new
-		// parent row, find the matching leg rows that follow it and look up the adjusted price for
-		// each leg matchkey from any sibling group's leg rows, falling back to the raw avg.
+		// Compute basis for partial-brand-new groups from the sibling's parent basis, adjusted
+		// for the roll's net cash flow. When a user synthesizes a partial roll via `analyze trade`
+		// (e.g., splitting 135 contracts off a 499-contract calendar into a diagonal), we want the
+		// diagonal's adj basis to reflect the sibling calendar's per-share basis minus the net
+		// credit received from the roll pair.
+		//
+		// Formula: diagonal_adj_per_share = sibling_parent_adj_per_share − net_roll_credit_per_share
+		// where net_roll_credit_per_share is summed across all synthesized (no parent_seq) trades
+		// whose matchkey belongs to this group OR a sibling group, normalized by the own group's qty.
+		// For the Init price, leg-level avgs are used directly (raw entry prices).
 		if (partialBrandNewIndices.Count > 0)
 		{
-			// Build a lookup: (matchKey, Side) → adjusted price from non-partial sibling groups.
-			var siblingAdj = new Dictionary<(string MatchKey, Side Side), decimal>();
+			// Collect sibling parent adj basis keyed by (matchKey, Side) — any leg of any non-partial
+			// parent row marks that leg as "sibling".
+			var siblingParentByLegKey = new Dictionary<(string MatchKey, Side Side), (int parentIdx, decimal parentAdj, decimal parentInit)>();
 			for (int i = 0; i < rows.Count; i++)
 			{
 				var r = rows[i];
-				if (!r.IsStrategyLeg || r.MatchKey == null || !r.AdjustedAvgPrice.HasValue) continue;
-				// Skip legs that belong to a partial-brand-new parent (they haven't inherited yet).
-				// Check by walking backward to the nearest non-leg row.
-				var parentIdx = i - 1;
-				while (parentIdx >= 0 && rows[parentIdx].IsStrategyLeg) parentIdx--;
-				if (parentIdx >= 0 && partialBrandNewIndices.Contains(parentIdx)) continue;
-				siblingAdj[(r.MatchKey, r.Side)] = r.AdjustedAvgPrice.Value;
+				if (r.IsStrategyLeg || r.Asset != Asset.OptionStrategy) continue;
+				if (partialBrandNewIndices.Contains(i)) continue;
+				if (!r.AdjustedAvgPrice.HasValue || !r.InitialAvgPrice.HasValue) continue;
+				// Record each leg's (matchKey, side) → this parent's adj basis per share.
+				var parentIdx = i;
+				for (int j = i + 1; j < rows.Count && rows[j].IsStrategyLeg; j++)
+				{
+					var leg = rows[j];
+					if (leg.MatchKey == null) continue;
+					siblingParentByLegKey[(leg.MatchKey, leg.Side)] = (parentIdx, r.AdjustedAvgPrice.Value, r.InitialAvgPrice.Value);
+				}
 			}
 
-			// Apply sibling adjustments to partial-brand-new groups' leg rows and recompute the parent.
+			// For each partial-brand-new group, compute its basis from the sibling + roll cash flow.
 			foreach (var parentIdx in partialBrandNewIndices)
 			{
 				if (parentIdx >= rows.Count) continue;
@@ -415,26 +423,82 @@ internal static class StrategyGrouper
 				var legEnd = legStart;
 				while (legEnd < rows.Count && rows[legEnd].IsStrategyLeg) legEnd++;
 
-				// Rewrite leg rows with inherited adjusted prices where available.
-				decimal parentAdjDebit = 0m;
-				decimal parentInitDebit = 0m;
+				// Gather own matchkeys + find the sibling group that shares at least one leg with us.
+				var ownMatchKeys = new HashSet<string>();
+				(int parentIdx, decimal parentAdj, decimal parentInit)? siblingRef = null;
 				for (int i = legStart; i < legEnd; i++)
 				{
 					var leg = rows[i];
-					if (leg.MatchKey != null && siblingAdj.TryGetValue((leg.MatchKey, leg.Side), out var siblingPrice))
-					{
-						rows[i] = leg with { AdjustedAvgPrice = siblingPrice };
-					}
-					var initPrice = rows[i].InitialAvgPrice ?? rows[i].AvgPrice;
-					var adjPrice = rows[i].AdjustedAvgPrice ?? rows[i].AvgPrice;
-					var sign = rows[i].Side == Side.Buy ? 1m : -1m;
-					parentInitDebit += sign * initPrice;
-					parentAdjDebit += sign * adjPrice;
+					if (leg.MatchKey == null) continue;
+					ownMatchKeys.Add(leg.MatchKey);
+					if (siblingParentByLegKey.TryGetValue((leg.MatchKey, leg.Side), out var match))
+						siblingRef ??= match;
 				}
 
-				// Recompute parent's Init/Adj from the (possibly inherited) leg prices.
+				// Identify sibling matchkeys by looking at the sibling group's legs (if we found one).
+				var siblingMatchKeys = new HashSet<string>();
+				if (siblingRef != null)
+				{
+					var siblingStart = siblingRef.Value.parentIdx + 1;
+					for (int j = siblingStart; j < rows.Count && rows[j].IsStrategyLeg; j++)
+						if (rows[j].MatchKey != null) siblingMatchKeys.Add(rows[j].MatchKey!);
+				}
+
+				// Sum net cash flow (credit +, debit −) from synthesized trades whose matchkey is
+				// in either group's legs. This captures the full roll event: buy-to-close on the
+				// sibling's leg + sell-to-open on our new leg.
+				var ownQty = rows.Count > legStart ? rows[legStart].Qty : parent.Qty;
+				decimal rollCashTotal = 0m;
+				foreach (var t in allTrades)
+				{
+					if (t.ParentStrategySeq.HasValue) continue;
+					if (t.Side is not (Side.Buy or Side.Sell)) continue;
+					if (t.Asset != Asset.Option) continue;
+					if (!ownMatchKeys.Contains(t.MatchKey) && !siblingMatchKeys.Contains(t.MatchKey)) continue;
+					var sign = t.Side == Side.Sell ? 1m : -1m; // sell = credit, buy = debit
+					rollCashTotal += sign * t.Price * t.Qty * t.Multiplier;
+				}
+				// Per-own-contract-share (divide by 100 for per-share).
+				var rollCashPerShare = ownQty > 0 ? rollCashTotal / ownQty / 100m : 0m;
+
+				// Parent adj = sibling's parent adj − net roll credit per share.
+				// Parent init still uses leg-level avg (entry prices).
+				decimal parentInitDebitLegSum = 0m;
+				for (int i = legStart; i < legEnd; i++)
+				{
+					var leg = rows[i];
+					var initPrice = leg.InitialAvgPrice ?? leg.AvgPrice;
+					var sign = leg.Side == Side.Buy ? 1m : -1m;
+					parentInitDebitLegSum += sign * initPrice;
+				}
+
+				decimal parentAdjDebit;
+				if (siblingRef != null)
+					parentAdjDebit = siblingRef.Value.parentAdj - rollCashPerShare;
+				else
+					parentAdjDebit = parentInitDebitLegSum; // fallback: no sibling → use leg-avg init
+
+				// For the leg rows: inherit from siblings where available (e.g., long leg), keep raw for fresh legs.
+				for (int i = legStart; i < legEnd; i++)
+				{
+					var leg = rows[i];
+					if (leg.MatchKey != null && siblingParentByLegKey.ContainsKey((leg.MatchKey, leg.Side)))
+					{
+						// Look up the specific leg's adjusted price from that sibling's leg rows.
+						var siblingParentIdx = siblingParentByLegKey[(leg.MatchKey, leg.Side)].parentIdx;
+						for (int j = siblingParentIdx + 1; j < rows.Count && rows[j].IsStrategyLeg; j++)
+						{
+							if (rows[j].MatchKey == leg.MatchKey && rows[j].Side == leg.Side && rows[j].AdjustedAvgPrice.HasValue)
+							{
+								rows[i] = leg with { AdjustedAvgPrice = rows[j].AdjustedAvgPrice };
+								break;
+							}
+						}
+					}
+				}
+
 				var parentSide = parentAdjDebit >= 0m ? Side.Buy : Side.Sell;
-				var parentInitDisplay = parentSide == Side.Sell ? -parentInitDebit : parentInitDebit;
+				var parentInitDisplay = parentSide == Side.Sell ? -parentInitDebitLegSum : parentInitDebitLegSum;
 				var parentAdjDisplay = parentSide == Side.Sell ? -parentAdjDebit : parentAdjDebit;
 				rows[parentIdx] = parent with
 				{
