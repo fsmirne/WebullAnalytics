@@ -303,7 +303,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var newBp = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
 				var bpDelta = newBp - currentBp;
 				EmitFullAndPartial(list, legs, settings.Cash,
-					name: $"Roll short to {newExp:yyyy-MM-dd} same strike",
+					name: $"Roll short ({newExp:MM-dd}, same strike)",
 					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {newSym} x{{qty}}",
 					cashPerShareOfChange: cashPerShare,
 					newProjectedPerShare: newProjectedPerShare,
@@ -334,7 +334,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					? (newStrike < longLeg.Parsed.Strike ? "inverted diagonal" : newStrike > longLeg.Parsed.Strike ? "covered diagonal" : "calendar")
 					: (newStrike > longLeg.Parsed.Strike ? "inverted diagonal" : newStrike < longLeg.Parsed.Strike ? "covered diagonal" : "calendar");
 				EmitFullAndPartial(list, legs, settings.Cash,
-					name: $"Roll short to {newExp:yyyy-MM-dd} ${newStrike:F2} strike (→ {structureLabel})",
+					name: $"Roll short to ${newStrike:F2} ({newExp:MM-dd}, {structureLabel})",
 					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {newSym} x{{qty}}",
 					cashPerShareOfChange: cashPerShare,
 					newProjectedPerShare: newProjectedPerShare,
@@ -374,7 +374,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var bpDelta = newBp - currentBp;
 
 				EmitFullAndPartial(list, legs, settings.Cash,
-					name: $"Reset at ${newStrike:F2} (new calendar)",
+					name: $"Reset to ${newStrike:F2} calendar",
 					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {longLeg.Symbol} x{{qty}}, BUY {newLongSym} x{{qty}}, SELL {newShortSym} x{{qty}}",
 					cashPerShareOfChange: cashPerShare,
 					newProjectedPerShare: newProjectedPerShare,
@@ -431,7 +431,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var partialProjectedTotal = newProjectedPerShare * 100m * maxPartial + unchangedProjectedPerShare * 100m * (fullQty - maxPartial);
 		var partialTotalPnL = partialCashTotal + partialProjectedTotal - initialDebitPerContract * fullQty;
 		list.Add(new Scenario(
-			$"{name} — partial {maxPartial}/{fullQty}",
+			$"{name} · partial {maxPartial}/{fullQty}",
 			actionSummary.Replace("{qty}", maxPartial.ToString()),
 			CashImpactPerContract: partialCashTotal / fullQty,
 			ProjectedValuePerContract: partialProjectedTotal / fullQty,
@@ -561,6 +561,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, decimal? availableCash)
 	{
 		var table = new Table().Expand();
+		table.ShowRowSeparators();
 		table.AddColumn("Scenario");
 		table.AddColumn(new TableColumn("Cash now").RightAligned());
 		table.AddColumn(new TableColumn("Projected @ target").RightAligned());
