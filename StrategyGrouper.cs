@@ -515,7 +515,10 @@ internal static class StrategyGrouper
 		var rows = new List<PositionRow>();
 		var legs = group.Legs;
 		var foreignMatchKeys = group.ForeignKeys;
-		var isBrandNewFallback = group.IsBrandNew;
+		// Both fully brand-new and partial-brand-new groups filter to synthesized trades only —
+		// parent-strategy trades from the shared leg's history (e.g., the original calendar's buys)
+		// don't belong to a freshly-opened diagonal/calendar structure.
+		var isBrandNewFallback = group.IsBrandNew || group.IsPartialBrandNew;
 
 		var parsedLegs = legs.Select(g => (leg: g, parsed: MatchKeys.ParseOption(g.MatchKey)?.parsed)).Where(x => x.parsed != null).ToList();
 
