@@ -211,10 +211,24 @@ internal sealed class WebullOpenApiClient : IDisposable
 
 	// ─── Account positions ────────────────────────────────────────────────────
 
+	internal sealed record HoldingLeg(
+		[property: JsonPropertyName("symbol")] string? Symbol,
+		[property: JsonPropertyName("leg_id")] string? LegId,
+		[property: JsonPropertyName("instrument_type")] string? InstrumentType,
+		[property: JsonPropertyName("cost")] string? Cost,
+		[property: JsonPropertyName("last_price")] string? LastPrice,
+		[property: JsonPropertyName("proportion")] string? Proportion,
+		[property: JsonPropertyName("unrealized_profit_loss")] string? UnrealizedProfitLoss,
+		[property: JsonPropertyName("option_type")] string? OptionType,
+		[property: JsonPropertyName("option_expire_date")] string? OptionExpireDate,
+		[property: JsonPropertyName("option_exercise_price")] string? OptionExercisePrice,
+		[property: JsonPropertyName("option_contract_multiplier")] string? OptionContractMultiplier);
+
 	internal sealed record AccountHolding(
 		[property: JsonPropertyName("position_id")] string? PositionId,
 		[property: JsonPropertyName("symbol")] string? Symbol,
 		[property: JsonPropertyName("instrument_type")] string? InstrumentType,
+		[property: JsonPropertyName("option_strategy")] string? OptionStrategy,
 		[property: JsonPropertyName("currency")] string? Currency,
 		[property: JsonPropertyName("cost_price")] string? CostPrice,
 		[property: JsonPropertyName("quantity")] string? Quantity,
@@ -225,7 +239,26 @@ internal sealed class WebullOpenApiClient : IDisposable
 		[property: JsonPropertyName("unrealized_profit_loss_rate")] string? UnrealizedProfitLossRate,
 		[property: JsonPropertyName("proportion")] string? Proportion,
 		[property: JsonPropertyName("day_profit_loss")] string? DayProfitLoss,
-		[property: JsonPropertyName("day_realized_profit_loss")] string? DayRealizedProfitLoss);
+		[property: JsonPropertyName("day_realized_profit_loss")] string? DayRealizedProfitLoss,
+		[property: JsonPropertyName("legs")] List<HoldingLeg>? Legs);
+
+	/// <summary>Diagnostic: returns the raw positions response body.</summary>
+	internal async Task<string> FetchAccountPositionsRawAsync(CancellationToken ct = default)
+	{
+		var query = new SortedDictionary<string, string>(StringComparer.Ordinal)
+		{
+			["account_id"] = _account.AccountId,
+			["page_size"] = "100",
+		};
+		const string path = "/openapi/assets/positions";
+		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null, _account.AppId);
+		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+		using var req = new HttpRequestMessage(HttpMethod.Get, $"{path}?{qs}");
+		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
+		ApplyAccessTokenHeader(req, path);
+		using var resp = await _http.SendAsync(req, ct);
+		return await resp.Content.ReadAsStringAsync(ct);
+	}
 
 	/// <summary>Fetches all account positions. The endpoint returns a flat array; the sandbox does not
 	/// appear to paginate — if production requires it, the caller can extend this to loop on last_position_id.</summary>

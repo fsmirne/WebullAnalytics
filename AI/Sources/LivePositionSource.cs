@@ -5,20 +5,29 @@ namespace WebullAnalytics.AI.Sources;
 /// <summary>
 /// Live position source backed by the Webull OpenAPI.
 ///
-/// Grouping strategy (phase 1, calendar/diagonal focus):
-///   1. Fetch all holdings for the configured account.
-///   2. Filter to OPTION holdings whose OCC symbol parses to a root in the configured ticker set.
-///   3. Within each ticker, pair short legs (qty &lt; 0) with long legs (qty &gt; 0) of the same callPut
-///      whose expiry is later than the short leg's. Same strike = Calendar, different strike = Diagonal.
-///   4. Unmatched legs (naked shorts, standalone longs, iron condors, butterflies, etc.) are skipped.
-/// This covers the structures the rules target; more exotic structures are deferred.
+/// The broker response already groups multi-leg option strategies: each holding with a non-null
+/// option_strategy value (e.g., "CALENDAR", "DIAGONAL", "VERTICAL") has a legs[] array, and the
+/// parent record carries the aggregate quantity and net debit (cost_price) per contract.
 ///
-/// Cost basis note: phase-1 InitialNetDebit comes from the broker's unit_cost at the time of query.
-/// AdjustedNetDebit (break-even including roll history) requires cross-referencing the local trade log;
-/// for now we set it equal to InitialNetDebit. A follow-up can wire in PositionTracker's adjusted basis.
+/// For CALENDAR/DIAGONAL call-side positions — the structures the rules target — we map:
+///   - Quantity ← parent.quantity
+///   - InitialNetDebit / AdjustedNetDebit ← parent.cost_price (per-contract)
+///   - Short leg ← the leg with the earliest expiry
+///   - Long leg  ← the leg with the later expiry
+///
+/// Positions whose option_strategy is null (single-leg) or whose strategy is not in the supported
+/// set (currently CALENDAR and DIAGONAL) are skipped. Iron condors, verticals, and other structures
+/// are out of scope for phase 1 and will produce no proposals.
+///
+/// Phase-1 caveat: AdjustedNetDebit equals InitialNetDebit because the broker API reports current
+/// cost basis, not roll-history-adjusted break-even. Integrating local trade-log adjustments is a
+/// follow-up.
 /// </summary>
 internal sealed class LivePositionSource : IPositionSource
 {
+	private static readonly HashSet<string> SupportedStrategies =
+		new(StringComparer.OrdinalIgnoreCase) { "CALENDAR", "DIAGONAL" };
+
 	private readonly TradeAccount _account;
 
 	public LivePositionSource(TradeAccount account) { _account = account; }
@@ -39,69 +48,53 @@ internal sealed class LivePositionSource : IPositionSource
 			return new Dictionary<string, OpenPosition>();
 		}
 
-		// Parse each option holding and filter by ticker.
-		var parsed = new List<ParsedOptionHolding>();
+		var result = new Dictionary<string, OpenPosition>();
+
 		foreach (var h in holdings)
 		{
-			if (h.InstrumentType is not "OPTION") continue;
 			if (string.IsNullOrEmpty(h.Symbol)) continue;
-			var p = ParsingHelpers.ParseOptionSymbol(h.Symbol);
-			if (p == null) continue;
-			if (!tickers.Contains(p.Root)) continue;
-			if (!decimal.TryParse(h.Quantity, NumberStyles.Any, CultureInfo.InvariantCulture, out var qty) || qty == 0m) continue;
-			if (!decimal.TryParse(h.CostPrice, NumberStyles.Any, CultureInfo.InvariantCulture, out var unitCost)) unitCost = 0m;
-			parsed.Add(new ParsedOptionHolding(h.Symbol, p.Root, p.CallPut, p.Strike, p.ExpiryDate, qty, unitCost));
-		}
+			if (!tickers.Contains(h.Symbol)) continue;
+			if (string.IsNullOrEmpty(h.OptionStrategy) || !SupportedStrategies.Contains(h.OptionStrategy)) continue;
+			if (h.Legs == null || h.Legs.Count < 2) continue;
 
-		var result = new Dictionary<string, OpenPosition>();
-		var byTickerAndType = parsed.GroupBy(x => (x.Root, x.CallPut));
+			if (!int.TryParse(h.Quantity, NumberStyles.Any, CultureInfo.InvariantCulture, out var qty) || qty <= 0) continue;
+			if (!decimal.TryParse(h.CostPrice, NumberStyles.Any, CultureInfo.InvariantCulture, out var netDebit)) netDebit = 0m;
 
-		foreach (var grp in byTickerAndType)
-		{
-			var (root, callPut) = grp.Key;
-			var shorts = grp.Where(x => x.Qty < 0).OrderBy(x => x.Expiry).ToList();
-			var longs = grp.Where(x => x.Qty > 0).OrderBy(x => x.Expiry).ToList();
-			var longsRemaining = new List<ParsedOptionHolding>(longs);
-
-			foreach (var shortLeg in shorts)
+			// Parse every leg.
+			var parsedLegs = new List<ParsedLeg>();
+			foreach (var leg in h.Legs)
 			{
-				// Find a long leg with the same call/put whose expiry is strictly after the short's.
-				// Prefer same strike (calendar) over different strike (diagonal).
-				var match = longsRemaining.FirstOrDefault(l => l.Expiry > shortLeg.Expiry && l.Strike == shortLeg.Strike)
-					?? longsRemaining.FirstOrDefault(l => l.Expiry > shortLeg.Expiry);
-				if (match == null) continue;
-
-				var kind = shortLeg.Strike == match.Strike ? "Calendar" : "Diagonal";
-				var absShortQty = (int)Math.Abs(shortLeg.Qty);
-				var absLongQty = (int)Math.Abs(match.Qty);
-				var qty = Math.Min(absShortQty, absLongQty);
-				if (qty == 0) continue;
-
-				// NetDebit per contract = long cost - short credit. Short unit_cost is reported as
-				// a positive magnitude by Webull (per their convention); we subtract because selling
-				// a short generated credit.
-				var shortCredit = Math.Abs(shortLeg.UnitCost);
-				var longCost = Math.Abs(match.UnitCost);
-				var netDebit = longCost - shortCredit;
-
-				var key = $"{root}_{kind}_{shortLeg.Strike:F2}_{shortLeg.Expiry:yyyyMMdd}";
-
-				result[key] = new OpenPosition(
-					Key: key,
-					Ticker: root,
-					StrategyKind: kind,
-					Legs: new[]
-					{
-						new PositionLeg(shortLeg.Symbol, Side.Sell, shortLeg.Strike, shortLeg.Expiry, callPut, qty),
-						new PositionLeg(match.Symbol, Side.Buy, match.Strike, match.Expiry, callPut, qty)
-					},
-					InitialNetDebit: netDebit,
-					AdjustedNetDebit: netDebit,
-					Quantity: qty
-				);
-
-				longsRemaining.Remove(match);
+				var p = ParseLeg(leg);
+				if (p == null) { parsedLegs.Clear(); break; }
+				parsedLegs.Add(p);
 			}
+			if (parsedLegs.Count < 2) continue;
+
+			// Short = earliest expiry; Long = latest expiry. For CALENDAR/DIAGONAL call-side this
+			// matches the standard structure.
+			parsedLegs.Sort((a, b) => a.Expiry.CompareTo(b.Expiry));
+			var shortLeg = parsedLegs[0];
+			var longLeg = parsedLegs[^1];
+
+			// Build position legs.
+			var positionLegs = new List<PositionLeg>
+			{
+				new(shortLeg.OccSymbol, Side.Sell, shortLeg.Strike, shortLeg.Expiry, shortLeg.CallPut, qty),
+				new(longLeg.OccSymbol, Side.Buy, longLeg.Strike, longLeg.Expiry, longLeg.CallPut, qty)
+			};
+
+			var kind = h.OptionStrategy!;
+			var key = $"{h.Symbol}_{kind}_{shortLeg.Strike:F2}_{shortLeg.Expiry:yyyyMMdd}";
+
+			result[key] = new OpenPosition(
+				Key: key,
+				Ticker: h.Symbol,
+				StrategyKind: kind,
+				Legs: positionLegs,
+				InitialNetDebit: netDebit,
+				AdjustedNetDebit: netDebit,
+				Quantity: qty
+			);
 		}
 
 		return result;
@@ -124,9 +117,32 @@ internal sealed class LivePositionSource : IPositionSource
 		}
 	}
 
+	private static ParsedLeg? ParseLeg(WebullOpenApiClient.HoldingLeg leg)
+	{
+		if (string.IsNullOrEmpty(leg.Symbol) || string.IsNullOrEmpty(leg.OptionType)
+			|| string.IsNullOrEmpty(leg.OptionExpireDate) || string.IsNullOrEmpty(leg.OptionExercisePrice))
+			return null;
+
+		var callPut = leg.OptionType.ToUpperInvariant() switch
+		{
+			"CALL" => "C",
+			"PUT" => "P",
+			_ => null
+		};
+		if (callPut == null) return null;
+
+		if (!DateTime.TryParseExact(leg.OptionExpireDate, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry))
+			return null;
+
+		if (!decimal.TryParse(leg.OptionExercisePrice, NumberStyles.Any, CultureInfo.InvariantCulture, out var strike))
+			return null;
+
+		var occ = MatchKeys.OccSymbol(leg.Symbol, expiry, strike, callPut);
+		return new ParsedLeg(occ, leg.Symbol, callPut, strike, expiry);
+	}
+
 	private static decimal ParseDecimal(string? s) =>
 		decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : 0m;
 
-	private sealed record ParsedOptionHolding(
-		string Symbol, string Root, string CallPut, decimal Strike, DateTime Expiry, decimal Qty, decimal UnitCost);
+	private sealed record ParsedLeg(string OccSymbol, string Root, string CallPut, decimal Strike, DateTime Expiry);
 }
