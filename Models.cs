@@ -147,11 +147,16 @@ internal record PositionEntry(string MatchKey, PositionRow Row, Trade? Trade);
 /// </summary>
 /// <param name="ForeignKeys">Match keys from sibling fallback-paired groups; excluded from this group's replay.</param>
 /// <param name="IsBrandNew">True when every allocated lot has no ParentStrategySeq (pure standalone entries).</param>
+/// <param name="IsPartialBrandNew">True when exactly one leg's allocated lots have no ParentStrategySeq
+/// (typical of an analyze-style synthesized partial roll: one leg is a newly-opened standalone position,
+/// the other is spliced off an existing multi-leg strategy). Such groups bypass adjusted-basis replay
+/// and use leg average prices directly, since the structure is fresh.</param>
 internal sealed class StrategyGroup
 {
 	public List<PositionEntry> Legs { get; }
 	public HashSet<string>? ForeignKeys { get; set; }
 	public bool IsBrandNew { get; set; }
+	public bool IsPartialBrandNew { get; set; }
 	public StrategyGroup(List<PositionEntry> legs) { Legs = legs; }
 }
 

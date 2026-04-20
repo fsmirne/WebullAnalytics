@@ -211,9 +211,14 @@ internal static class StrategyGrouper
 				// A pair is "brand new" if every allocated lot on both legs has no parentStrategySeq
 				// (pure synthetic / standalone entry with no roll history). Such groups need no replay —
 				// their adjusted price equals the blended entry price from allocated lots.
-				if (AllocationHasNoParentSeq(positions.GetValueOrDefault(buy.MatchKey, []), consumed[buy.MatchKey], pairQty)
-					&& AllocationHasNoParentSeq(positions.GetValueOrDefault(sell.MatchKey, []), consumed[sell.MatchKey], pairQty))
-					pair.IsBrandNew = true;
+				//
+				// When exactly ONE leg is brand new (typical of a synthesized partial roll — one leg
+				// spliced off an existing strategy, the other freshly opened), mark IsPartialBrandNew.
+				// The resulting structure is new; we use leg avg prices directly for both init and adj.
+				var buyBrandNew = AllocationHasNoParentSeq(positions.GetValueOrDefault(buy.MatchKey, []), consumed[buy.MatchKey], pairQty);
+				var sellBrandNew = AllocationHasNoParentSeq(positions.GetValueOrDefault(sell.MatchKey, []), consumed[sell.MatchKey], pairQty);
+				if (buyBrandNew && sellBrandNew) pair.IsBrandNew = true;
+				else if (buyBrandNew ^ sellBrandNew) pair.IsPartialBrandNew = true;
 
 				grouped.Add(pair);
 				createdPairs.Add(pair);
@@ -550,10 +555,16 @@ internal static class StrategyGrouper
 
 		// Pure strategies: adj = blended avg, init = first batch entry.
 		// Non-pure strategies: replay the timeline to compute the adjusted price.
+		// Partial brand-new strategies: one leg is fresh, one is spliced from an existing strategy.
+		// The resulting structure is new — no roll history applies — so init == adj == leg avg prices.
 		StrategyAdjustment? adjustment = null;
 		var netAdjusted = netInitial;
 		var strategyInitial = pureInitOverride ?? netInitial;
-		if (excludedParentSeqs != null)
+		if (group.IsPartialBrandNew)
+		{
+			// Skip replay entirely; netInitial is already leg-avg-based.
+		}
+		else if (excludedParentSeqs != null)
 		{
 			var legStrikes = parsedLegs.Select(x => x.parsed!.Strike).Distinct().OrderBy(s => s).ToList();
 			var qtyLimits = legs.ToDictionary(g => g.MatchKey, g => g.Row.Qty);
