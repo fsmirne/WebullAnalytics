@@ -9,6 +9,7 @@ internal sealed class TradeAccount
 	[JsonPropertyName("accountId")] public string AccountId { get; set; } = "";
 	[JsonPropertyName("appKey")] public string AppKey { get; set; } = "";
 	[JsonPropertyName("appSecret")] public string AppSecret { get; set; } = "";
+	[JsonPropertyName("appId")] public string? AppId { get; set; }
 	[JsonPropertyName("sandbox")] public bool Sandbox { get; set; } = true;
 
 	public string BaseUrl => Sandbox

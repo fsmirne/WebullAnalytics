@@ -429,3 +429,37 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 		return 0;
 	}
 }
+
+// ─── `trade accounts` ─────────────────────────────────────────────────────────
+
+internal sealed class TradeAccountsSettings : TradeSubcommandSettings { }
+
+internal sealed class TradeAccountsCommand : AsyncCommand<TradeAccountsSettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, TradeAccountsSettings s, CancellationToken cancellation)
+	{
+		var account = TradeContext.ResolveOrExit(s.Account);
+		if (account == null) return 2;
+
+		using var client = new WebullOpenApiClient(account);
+		List<WebullOpenApiClient.AppSubscription> subs;
+		try { subs = await client.ListAppSubscriptionsAsync(cancellation); }
+		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]List failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+		catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
+
+		if (subs.Count == 0) { AnsiConsole.MarkupLine("[dim]No account subscriptions.[/]"); return 0; }
+
+		AnsiConsole.MarkupLine($"[bold]{subs.Count} account subscription(s):[/]");
+		AnsiConsole.MarkupLine("  [dim]Copy [bold]account_id[/] (not account_number) into your trade-config.json as 'accountId'.[/]");
+		AnsiConsole.WriteLine();
+		foreach (var sub in subs)
+		{
+			AnsiConsole.MarkupLine($"  [bold]account_id:[/]       {Markup.Escape(sub.AccountId ?? "?")}");
+			AnsiConsole.MarkupLine($"  [dim]account_number:[/]   {Markup.Escape(sub.AccountNumber ?? "?")}");
+			AnsiConsole.MarkupLine($"  [dim]subscription_id:[/]  {Markup.Escape(sub.SubscriptionId ?? "?")}");
+			AnsiConsole.MarkupLine($"  [dim]user_id:[/]          {Markup.Escape(sub.UserId ?? "?")}");
+			AnsiConsole.WriteLine();
+		}
+		return 0;
+	}
+}

@@ -83,7 +83,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 			["page_size"] = "100",
 		};
 		const string path = "/openapi/trade/order/open";
-		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null);
+		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null, _account.AppId);
 		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
 		var uri = $"{path}?{qs}";
 		using var req = new HttpRequestMessage(HttpMethod.Get, uri);
@@ -156,6 +156,20 @@ internal sealed class WebullOpenApiClient : IDisposable
 				["client_order_id"] = clientOrderId,
 			}, ct);
 
+	// ─── App subscriptions (account list) ────────────────────────────────────
+
+	internal sealed record AppSubscription(
+		[property: JsonPropertyName("subscription_id")] string? SubscriptionId,
+		[property: JsonPropertyName("user_id")] string? UserId,
+		[property: JsonPropertyName("account_id")] string? AccountId,
+		[property: JsonPropertyName("account_number")] string? AccountNumber);
+
+	/// <summary>Lists the accounts this app is subscribed to. The account_id field in the response
+	/// is the identifier required for all other trade/account endpoints — distinct from the visible
+	/// brokerage account_number. Does not require account_id in the request.</summary>
+	internal async Task<List<AppSubscription>> ListAppSubscriptionsAsync(CancellationToken ct = default) =>
+		await GetAsync<List<AppSubscription>>("/openapi/account/list", new SortedDictionary<string, string>(StringComparer.Ordinal), ct);
+
 	// ─── Account positions ────────────────────────────────────────────────────
 
 	internal sealed record AccountHolding(
@@ -211,7 +225,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 	private async Task<T> PostAsync<T>(string path, object body, CancellationToken ct)
 	{
 		var json = JsonSerializer.Serialize(body, JsonOptions);
-		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, new Dictionary<string, string>(), json);
+		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, new Dictionary<string, string>(), json, _account.AppId);
 		using var req = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
 		using var resp = await _http.SendAsync(req, ct);
@@ -220,7 +234,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 
 	private async Task<T> GetAsync<T>(string path, IReadOnlyDictionary<string, string> query, CancellationToken ct)
 	{
-		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null);
+		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null, _account.AppId);
 		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
 		var uri = string.IsNullOrEmpty(qs) ? path : $"{path}?{qs}";
 		using var req = new HttpRequestMessage(HttpMethod.Get, uri);
