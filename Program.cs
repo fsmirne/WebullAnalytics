@@ -40,6 +40,7 @@ class Program
 			{
 				analyze.AddCommand<AnalyzeTradeCommand>("trade");
 				analyze.AddCommand<AnalyzeRollCommand>("roll");
+				analyze.AddCommand<AnalyzePositionCommand>("position");
 			});
 			config.AddCommand<FetchCommand>("fetch");
 			config.AddCommand<SniffCommand>("sniff");
