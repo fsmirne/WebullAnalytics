@@ -174,10 +174,13 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var newLongExp = longLeg.Parsed.ExpiryDate > newExpiry ? longLeg.Parsed.ExpiryDate : newExpiry.AddDays(21);
 			foreach (var strike in BracketStrikes(spot, settings.StrikeStep))
 			{
-				if (strike > 0m && strike != shortLeg.Parsed.Strike)
-					yield return MatchKeys.OccSymbol(root, newExpiry, strike, callPut);
-				if (strike > 0m)
-					yield return MatchKeys.OccSymbol(root, newLongExp, strike, callPut);
+				if (strike <= 0m) continue;
+				if (strike != shortLeg.Parsed.Strike)
+				{
+					yield return MatchKeys.OccSymbol(root, shortLeg.Parsed.ExpiryDate, strike, callPut); // same-expiry strike roll
+					yield return MatchKeys.OccSymbol(root, newExpiry, strike, callPut);                 // next-weekly strike roll
+				}
+				yield return MatchKeys.OccSymbol(root, newLongExp, strike, callPut);                     // reset-to-new-calendar long leg
 			}
 		}
 	}
@@ -315,6 +318,41 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					bpPerContract: bpDelta,
 					rationale: $"buy short @${shortAskNow:F2} ask, sell new @${newShortBid:F2} bid → net ${cashPerShare:+0.00;-0.00}/share; at new exp: ${newProjectedPerShare:F2}");
 				}
+			}
+
+			// 4.5. Roll short to bracket strikes, SAME expiry — keeps the short on the current week
+			// so theta keeps working over the next few days. Projects at the original short expiry.
+			foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
+			{
+				if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
+
+				var sameExpSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate, newStrike, callPut);
+				if (quotes != null && !HasLiveQuote(quotes, sameExpSym)) continue;
+
+				var ivSameExp = ResolveIV(sameExpSym, settings, quotes);
+				var dteSameExp = Math.Max(1, (shortLeg.Parsed.ExpiryDate - asOf).Days);
+				var newShortMidSameExp = LiveOrBsMid(quotes, sameExpSym, spot, newStrike, dteSameExp, ivSameExp, callPut);
+				var (newShortBidSameExp, _) = LiveBidAsk(quotes, sameExpSym, newShortMidSameExp);
+				var cashPerShareSameExp = newShortBidSameExp - shortAskNow;
+				// At original short expiry: long has full remaining DTE to long expiry; new short at intrinsic.
+				var longAtOrigExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate);
+				var newShortIntrinsicAtExp = Intrinsic(spot, newStrike, callPut);
+				var projSameExpPerShare = longAtOrigExp - newShortIntrinsicAtExp;
+				var sameExpShortParsed = new OptionParsed(shortLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate, callPut, newStrike);
+				var sameExpBp = AnalyzeCommon.ComputeLegMargin(sameExpShortParsed, 1, spot, newShortMidSameExp, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
+				var sameExpBpDelta = sameExpBp - currentBp;
+
+				var sameExpStructure = callPut == "C"
+					? (newStrike < longLeg.Parsed.Strike ? "inverted diagonal" : newStrike > longLeg.Parsed.Strike ? "covered diagonal" : "calendar")
+					: (newStrike > longLeg.Parsed.Strike ? "inverted diagonal" : newStrike < longLeg.Parsed.Strike ? "covered diagonal" : "calendar");
+				EmitFullAndPartial(list, legs, settings.Cash,
+					name: $"Roll short to ${newStrike:F2} (same exp {shortLeg.Parsed.ExpiryDate:MM-dd}, {sameExpStructure})",
+					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {sameExpSym} x{{qty}}",
+					cashPerShareOfChange: cashPerShareSameExp,
+					newProjectedPerShare: projSameExpPerShare,
+					unchangedProjectedPerShare: holdNetPerShare,
+					bpPerContract: sameExpBpDelta,
+					rationale: $"shift to ${newStrike:F2} strike, keep {shortLeg.Parsed.ExpiryDate:MM-dd} expiry — collect theta this week; credit ${cashPerShareSameExp:+0.00;-0.00}/share; at exp: ${projSameExpPerShare:F2}");
 			}
 
 			// 5. Roll short to bracket strikes near spot (one per strike).
