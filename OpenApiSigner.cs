@@ -30,7 +30,9 @@ internal static class OpenApiSigner
 		string? appId = null)
 		=> SignRequest(appKey, appSecret, host, path, queryParams, jsonBody, DateTime.UtcNow, Guid.NewGuid().ToString("N"), appId);
 
-	/// <summary>Test-friendly overload: timestamp and nonce injectable for deterministic output.</summary>
+	/// <summary>Test-friendly overload: timestamp and nonce injectable for deterministic output.
+	/// The appId parameter is accepted for forward-compatibility but not currently sent as a header —
+	/// Webull's production non-2FA keys reject requests that include x-app-id.</summary>
 	internal static Dictionary<string, string> SignRequest(
 		string appKey,
 		string appSecret,
@@ -42,6 +44,7 @@ internal static class OpenApiSigner
 		string nonce,
 		string? appId = null)
 	{
+		_ = appId; // reserved
 		var timestamp = timestampUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
 		// Signing headers (exclude x-signature and x-version per spec).
@@ -54,8 +57,6 @@ internal static class OpenApiSigner
 			["x-signature-version"] = "1.0",
 			["host"] = host,
 		};
-		if (!string.IsNullOrEmpty(appId))
-			signingHeaders["x-app-id"] = appId;
 
 		// Merge query + headers, sort alphabetically, join.
 		var merged = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -73,7 +74,7 @@ internal static class OpenApiSigner
 		using var hmac = new HMACSHA1(signingKey);
 		var signature = Convert.ToBase64String(hmac.ComputeHash(Encoding.UTF8.GetBytes(encoded)));
 
-		var result = new Dictionary<string, string>
+		return new Dictionary<string, string>
 		{
 			["x-app-key"] = appKey,
 			["x-timestamp"] = timestamp,
@@ -83,9 +84,6 @@ internal static class OpenApiSigner
 			["x-signature-nonce"] = nonce,
 			["x-version"] = "v2",
 		};
-		if (!string.IsNullOrEmpty(appId))
-			result["x-app-id"] = appId;
-		return result;
 	}
 
 	private static string UppercaseMd5(string input)
