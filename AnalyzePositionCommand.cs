@@ -561,8 +561,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, decimal? availableCash)
 	{
 		var table = new Table().Expand();
-		table.ShowRowSeparators();
-		table.BorderColor(Color.Grey);
 		table.AddColumn("Scenario");
 		table.AddColumn(new TableColumn("Cash now").RightAligned());
 		table.AddColumn(new TableColumn("Projected @ target").RightAligned());
@@ -579,8 +577,17 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (!availableCash.HasValue || delta <= availableCash.Value) { topFundable = sc; break; }
 		}
 
-		foreach (var sc in scenarios)
+		// Separator row of dim dashes, inserted between scenarios so the user can tell where one
+		// multi-line cell ends and the next begins. Spectre doesn't support coloring row separators
+		// separately from the outer frame, so we render our own "separator row" at grey. Overflow.Crop
+		// keeps the dashes on a single line regardless of cell width.
+		var dashes = new string('─', 200);
+		var separatorCells = Enumerable.Range(0, 6).Select(_ =>
+			(Spectre.Console.Rendering.IRenderable)new Markup($"[grey]{dashes}[/]").Overflow(Overflow.Crop)).ToArray();
+
+		for (int i = 0; i < scenarios.Count; i++)
 		{
+			var sc = scenarios[i];
 			var bpTotal = sc.BPDeltaPerContract * sc.Qty;
 			var fundable = !availableCash.HasValue || bpTotal <= availableCash.Value;
 			var isRecommended = topFundable != null && ReferenceEquals(sc, topFundable);
@@ -611,6 +618,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				new Markup(totalMarkup),
 				new Markup(bpStr),
 				new Markup($"[dim]{Markup.Escape(sc.Rationale)}[/]"));
+
+			if (i < scenarios.Count - 1)
+				table.AddRow(separatorCells);
 		}
 
 		AnsiConsole.Write(table);
