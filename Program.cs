@@ -50,6 +50,7 @@ class Program
 				trade.AddCommand<TradeStatusCommand>("status");
 				trade.AddCommand<TradeListCommand>("list");
 				trade.AddCommand<TradeAccountsCommand>("accounts");
+				trade.AddCommand<TradePositionsCommand>("positions");
 				trade.AddBranch("token", token =>
 				{
 					token.AddCommand<TradeTokenCreateCommand>("create");
