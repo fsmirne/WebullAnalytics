@@ -50,6 +50,10 @@ class Program
 				trade.AddCommand<TradeStatusCommand>("status");
 				trade.AddCommand<TradeListCommand>("list");
 			});
+			config.AddBranch("ai", ai =>
+			{
+				ai.AddCommand<AI.AIOnceCommand>("once");
+			});
 		});
 		return app.Run(args);
 	}
