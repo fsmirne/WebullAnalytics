@@ -464,8 +464,10 @@ internal static class StrategyGrouper
 				// Per-own-contract-share (divide by 100 for per-share).
 				var rollCashPerShare = ownQty > 0 ? rollCashTotal / ownQty / 100m : 0m;
 
-				// Parent adj = sibling's parent adj − net roll credit per share.
-				// Parent init still uses leg-level avg (entry prices).
+				// Parent basis derives from the sibling's parent adj (cost just before the roll).
+				// Parent init = sibling's parent adj (pre-roll basis).
+				// Parent adj  = parent init − net roll credit per share.
+				// The Difference shown in the breakdown equals the net roll credit exactly.
 				decimal parentInitDebitLegSum = 0m;
 				for (int i = legStart; i < legEnd; i++)
 				{
@@ -475,11 +477,19 @@ internal static class StrategyGrouper
 					parentInitDebitLegSum += sign * initPrice;
 				}
 
+				decimal parentInitBasis;
 				decimal parentAdjDebit;
 				if (siblingRef != null)
-					parentAdjDebit = siblingRef.Value.parentAdj - rollCashPerShare;
+				{
+					parentInitBasis = siblingRef.Value.parentAdj;
+					parentAdjDebit = parentInitBasis - rollCashPerShare;
+				}
 				else
-					parentAdjDebit = parentInitDebitLegSum; // fallback: no sibling → use leg-avg init
+				{
+					// Fallback: no sibling found — fall back to leg-avg-derived init/adj.
+					parentInitBasis = parentInitDebitLegSum;
+					parentAdjDebit = parentInitDebitLegSum;
+				}
 
 				// For the leg rows: inherit from siblings where available (e.g., long leg), keep raw for fresh legs.
 				for (int i = legStart; i < legEnd; i++)
@@ -501,7 +511,7 @@ internal static class StrategyGrouper
 				}
 
 				var parentSide = parentAdjDebit >= 0m ? Side.Buy : Side.Sell;
-				var parentInitDisplay = parentSide == Side.Sell ? -parentInitDebitLegSum : parentInitDebitLegSum;
+				var parentInitDisplay = parentSide == Side.Sell ? -parentInitBasis : parentInitBasis;
 				var parentAdjDisplay = parentSide == Side.Sell ? -parentAdjDebit : parentAdjDebit;
 				rows[parentIdx] = parent with
 				{
