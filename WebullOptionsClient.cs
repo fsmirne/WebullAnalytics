@@ -127,11 +127,11 @@ public static class WebullOptionsClient
             if (id.HasValue)
             {
                 result[symbol] = id.Value;
-                Console.WriteLine($"  {symbol} -> {id.Value}");
+                Console.WriteLine($"  {symbol} → {id.Value}");
             }
             else
             {
-                Console.WriteLine($"  {symbol} -> not found, skipping");
+                Console.WriteLine($"  {symbol} → not found, skipping");
             }
         }
         return result;
