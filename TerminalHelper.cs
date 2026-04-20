@@ -7,7 +7,7 @@ namespace WebullAnalytics;
 /// </summary>
 static class TerminalHelper
 {
-	public const int DetailedMinWidth = 185;
+	public const int DetailedMinWidth = 200;
 	public const int SimplifiedMinWidth = 130;
 
 	/// <summary>
