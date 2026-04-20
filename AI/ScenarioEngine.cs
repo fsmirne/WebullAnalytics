@@ -76,6 +76,7 @@ internal static class ScenarioEngine
 			var newExpiry = NextWeekly(shortLeg.Parsed.ExpiryDate);
 			yield return MatchKeys.OccSymbol(root, newExpiry, shortLeg.Parsed.Strike, callPut);
 			var newLongExp = longLeg.Parsed.ExpiryDate > newExpiry ? longLeg.Parsed.ExpiryDate : newExpiry.AddDays(21);
+			var oppositeCp = callPut == "C" ? "P" : "C";
 			foreach (var strike in BracketStrikes(spot, strikeStep))
 			{
 				if (strike <= 0m) continue;
@@ -85,6 +86,9 @@ internal static class ScenarioEngine
 					yield return MatchKeys.OccSymbol(root, newExpiry, strike, callPut);                 // next-weekly
 				}
 				yield return MatchKeys.OccSymbol(root, newLongExp, strike, callPut);                     // reset long leg
+				// "Add" scenarios: same-side new calendar + opposite-side double calendar/diagonal.
+				yield return MatchKeys.OccSymbol(root, newExpiry, strike, oppositeCp);
+				yield return MatchKeys.OccSymbol(root, newLongExp, strike, oppositeCp);
 			}
 		}
 	}
@@ -324,6 +328,62 @@ internal static class ScenarioEngine
 			}
 		}
 
+		// 7. Add new position alongside existing (hedging / diversification).
+		// Iterates both same-side (add second call/put at different strike) and opposite-side
+		// (create double calendar/diagonal) structures at bracket strikes. Existing position is untouched.
+		{
+			var addShortExp = newExp;
+			var addLongExp = longLeg.Parsed.ExpiryDate > addShortExp ? longLeg.Parsed.ExpiryDate : addShortExp.AddDays(21);
+			foreach (var addCp in new[] { callPut, callPut == "C" ? "P" : "C" })
+			{
+				var isOppositeSide = addCp != callPut;
+				foreach (var newStrike in BracketStrikes(spot, opt.StrikeStep))
+				{
+					if (newStrike <= 0m) continue;
+					if (!isOppositeSide && newStrike == shortLeg.Parsed.Strike) continue; // avoid doubling same-CP same-strike
+
+					var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, addShortExp, newStrike, addCp);
+					var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, addLongExp, newStrike, addCp);
+					if (quotes != null && (!HasLiveQuote(quotes, newShortSym) || !HasLiveQuote(quotes, newLongSym))) continue;
+
+					var ivNewShort = ResolveIV(newShortSym, opt, quotes);
+					var ivNewLong = ResolveIV(newLongSym, opt, quotes);
+					var dteNewShort = Math.Max(1, (addShortExp - asOf).Days);
+					var dteNewLong = Math.Max(1, (addLongExp - asOf).Days);
+					var newShortMid = LiveOrBsMid(quotes, newShortSym, spot, newStrike, dteNewShort, ivNewShort, addCp);
+					var newLongMid = LiveOrBsMid(quotes, newLongSym, spot, newStrike, dteNewLong, ivNewLong, addCp);
+					var (newShortBid, _) = LiveBidAsk(quotes, newShortSym, newShortMid);
+					var (_, newLongAsk) = LiveBidAsk(quotes, newLongSym, newLongMid);
+					var cashPerShare = newShortBid - newLongAsk; // debit (negative) to open new calendar
+
+					// Project the NEW position at the existing short's expiry (first milestone).
+					var origShortExp = shortLeg.Parsed.ExpiryDate;
+					var daysToOrigShort = origShortDte;
+					var tRemainNewShort = Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0;
+					var tRemainNewLong = Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0;
+					var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewShort, 0.036, ivNewShort, addCp);
+					var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewLong, 0.036, ivNewLong, addCp);
+					var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp;
+
+					// Opening a long calendar/diagonal is pure-debit: BP required = actual cash debit paid,
+					// using realistic worst-case fill (long ask, short bid). Mid-based ComputeLegMargin
+					// would understate BP when bid/ask spreads are wide (e.g. put legs) and cause partial-qty
+					// sizing to suggest more contracts than the cash can actually fund.
+					var newBp = Math.Max(-cashPerShare, 0m) * 100m;
+
+					var sideLabel = addCp == "C" ? "call" : "put";
+					var structureLabel = addCp == callPut
+						? (addLongExp == longLeg.Parsed.ExpiryDate ? "second-strike calendar" : "second-strike diagonal")
+						: (addLongExp == longLeg.Parsed.ExpiryDate ? "double calendar" : "double diagonal");
+
+					EmitAdd(list, qty, $"Add ${newStrike:F2} {sideLabel} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({structureLabel}, keep existing)",
+						newShortSym, newLongSym, cashPerShare, newPositionValuePerShare, holdNetPerShare,
+						newBp, initialDebit, daysToOrigShort, opt.AvailableCash,
+						$"open new {sideLabel} calendar at ${newStrike:F2} (debit ${-cashPerShare:F2}/share); existing untouched → at {origShortExp:MM-dd}: existing ${holdNetPerShare:F2} + new ${newPositionValuePerShare:F2} = ${holdNetPerShare + newPositionValuePerShare:F2}/share");
+				}
+			}
+		}
+
 		return list.OrderByDescending(s => s.TotalPnLPerContract / Math.Max(1m, s.DaysToTarget)).ToList();
 	}
 
@@ -407,6 +467,46 @@ internal static class ScenarioEngine
 			$"BUY {oldShortSym} x{maxPartial}, SELL {oldLongSym} x{maxPartial}, BUY {newLongSym} x{maxPartial}, SELL {newShortSym} x{maxPartial}",
 			partialLegs, ProposalKind.Roll, partialCashTotal / fullQty, partialProjectedTotal / fullQty, partialTotalPnL / fullQty, bpPerContract * maxPartial / fullQty, fullQty, daysToTarget,
 			$"execute on {maxPartial} contracts (${bpPerContract * maxPartial:N0} BP); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp"));
+	}
+
+	/// <summary>Emits an "add new position alongside existing" scenario. Existing position is untouched;
+	/// new structure adds BP and debit. Combined projection = existing hold + new position value at target.
+	/// Partial variant sizes the added quantity to fit available cash while keeping ALL existing contracts.</summary>
+	private static void EmitAdd(List<ScenarioResult> list, int fullQty, string name, string newShortSym, string newLongSym, decimal cashPerShareOfChange, decimal newProjectedPerShare, decimal unchangedProjectedPerShare, decimal bpPerContract, decimal initialDebitPerShare, int daysToTarget, decimal? availableCash, string rationale)
+	{
+		var initialDebitPerContract = initialDebitPerShare * 100m;
+		var action = $"BUY {newLongSym} x{fullQty}, SELL {newShortSym} x{fullQty}";
+		var fullLegs = new[]
+		{
+			new ProposalLeg("buy", newLongSym, fullQty),
+			new ProposalLeg("sell", newShortSym, fullQty),
+		};
+
+		var fullCashPerContract = cashPerShareOfChange * 100m;
+		var fullCombinedValuePerContract = (unchangedProjectedPerShare + newProjectedPerShare) * 100m;
+		var fullTotalPerContract = fullCombinedValuePerContract + fullCashPerContract - initialDebitPerContract;
+		list.Add(new ScenarioResult(name, action, fullLegs, ProposalKind.Roll, fullCashPerContract, fullCombinedValuePerContract, fullTotalPerContract, bpPerContract, fullQty, daysToTarget, rationale));
+
+		if (!availableCash.HasValue || bpPerContract <= 0m) return;
+		var maxPartial = (int)Math.Floor(availableCash.Value / bpPerContract);
+		if (maxPartial <= 0 || maxPartial >= fullQty) return;
+
+		// Partial: add `maxPartial` new contracts, keep all `fullQty` existing.
+		var partialCashTotal = cashPerShareOfChange * 100m * maxPartial;
+		var partialNewValue = newProjectedPerShare * 100m * maxPartial;
+		var partialExistingValue = unchangedProjectedPerShare * 100m * fullQty;
+		var partialCombinedValue = partialNewValue + partialExistingValue;
+		var partialTotalPnL = partialCashTotal + partialCombinedValue - initialDebitPerContract * fullQty;
+
+		var partialLegs = new[]
+		{
+			new ProposalLeg("buy", newLongSym, maxPartial),
+			new ProposalLeg("sell", newShortSym, maxPartial),
+		};
+		list.Add(new ScenarioResult($"{name} · partial {maxPartial}",
+			$"BUY {newLongSym} x{maxPartial}, SELL {newShortSym} x{maxPartial}",
+			partialLegs, ProposalKind.Roll, partialCashTotal / fullQty, partialCombinedValue / fullQty, partialTotalPnL / fullQty, bpPerContract * maxPartial / fullQty, fullQty, daysToTarget,
+			$"add {maxPartial} new contract(s) (${bpPerContract * maxPartial:N0} BP); keep all {fullQty} existing"));
 	}
 
 	// ─── Helpers ─────────────────────────────────────────────────────────────
