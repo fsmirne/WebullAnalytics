@@ -528,7 +528,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				new Markup(totalMarkup),
 				new Markup(bpStr),
 				new Markup($"[dim]{Markup.Escape(sc.Rationale)}[/]"));
-			first = false;
 		}
 
 		AnsiConsole.Write(table);
