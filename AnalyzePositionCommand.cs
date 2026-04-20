@@ -293,6 +293,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			// 4. Roll short same strike, next weekly.
 			{
 				var newSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newExp, shortLeg.Parsed.Strike, callPut);
+				if (quotes == null || HasLiveQuote(quotes, newSym))
+				{
 				var ivNewShort = ResolveIV(newSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newExp - asOf).Days);
 				var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, shortLeg.Parsed.Strike, dteNewShort, ivNewShort, callPut);
@@ -312,6 +314,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					bpPerContract: bpDelta,
 					rationale: $"buy short @${shortAskNow:F2} ask, sell new @${newShortBid:F2} bid → net ${cashPerShare:+0.00;-0.00}/share; at new exp: ${newProjectedPerShare:F2}");
+				}
 			}
 
 			// 5. Roll short to bracket strikes near spot (one per strike).
@@ -320,6 +323,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
 
 				var newSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newExp, newStrike, callPut);
+				if (quotes != null && !HasLiveQuote(quotes, newSym)) continue; // skip if contract not listed
 				var ivNewShort = ResolveIV(newSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newExp - asOf).Days);
 				var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
@@ -356,6 +360,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 				var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newShortExp, newStrike, callPut);
 				var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, newLongExp, newStrike, callPut);
+				if (quotes != null && (!HasLiveQuote(quotes, newShortSym) || !HasLiveQuote(quotes, newLongSym))) continue;
 				var ivNewShort = ResolveIV(newShortSym, settings, quotes);
 				var ivNewLong = ResolveIV(newLongSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newShortExp - asOf).Days);
@@ -463,6 +468,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
 		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, qty, rationale);
 	}
+
+	/// <summary>Returns true if the quote dictionary has a real, usable quote for this symbol
+	/// (both bid and ask populated, ask > 0). Used when --api is set to skip scenarios whose
+	/// hypothetical contracts aren't listed at the exchange (e.g., odd strikes at non-standard expiries).</summary>
+	private static bool HasLiveQuote(IReadOnlyDictionary<string, OptionContractQuote> quotes, string symbol) =>
+		quotes.TryGetValue(symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m;
 
 	/// <summary>Returns live mid from quotes if both bid and ask are populated; otherwise a BS theoretical mid.</summary>
 	private static decimal LiveOrBsMid(IReadOnlyDictionary<string, OptionContractQuote>? quotes, string symbol, decimal spot, decimal strike, int dte, decimal iv, string callPut)
