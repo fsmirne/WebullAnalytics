@@ -173,6 +173,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var newExpiry = NextWeekly(shortLeg.Parsed.ExpiryDate);
 			yield return MatchKeys.OccSymbol(root, newExpiry, shortLeg.Parsed.Strike, callPut);
 			var newLongExp = longLeg.Parsed.ExpiryDate > newExpiry ? longLeg.Parsed.ExpiryDate : newExpiry.AddDays(21);
+			var oppositeCp = callPut == "C" ? "P" : "C";
 			foreach (var strike in BracketStrikes(spot, settings.StrikeStep))
 			{
 				if (strike <= 0m) continue;
@@ -182,6 +183,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					yield return MatchKeys.OccSymbol(root, newExpiry, strike, callPut);                 // next-weekly strike roll
 				}
 				yield return MatchKeys.OccSymbol(root, newLongExp, strike, callPut);                     // reset-to-new-calendar long leg
+				// "Add" scenarios: same-side second calendar + opposite-side double calendar/diagonal.
+				yield return MatchKeys.OccSymbol(root, newExpiry, strike, oppositeCp);
+				yield return MatchKeys.OccSymbol(root, newLongExp, strike, oppositeCp);
 			}
 		}
 	}
@@ -437,7 +441,128 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 		}
 
+		// 7. Add new position alongside existing (hedging / diversification).
+		// Same-side: second calendar/diagonal at a different strike.
+		// Opposite-side: creates a double calendar or double diagonal.
+		// Existing position untouched; new position projected at existing short's expiry.
+		{
+			var addShortExp = newExp;
+			var addLongExp = longLeg.Parsed.ExpiryDate > addShortExp ? longLeg.Parsed.ExpiryDate : addShortExp.AddDays(21);
+			foreach (var addCp in new[] { callPut, callPut == "C" ? "P" : "C" })
+			{
+				var isOppositeSide = addCp != callPut;
+				foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
+				{
+					if (newStrike <= 0m) continue;
+					if (!isOppositeSide && newStrike == shortLeg.Parsed.Strike) continue; // avoid doubling same-CP same-strike
+
+					var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, addShortExp, newStrike, addCp);
+					var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, addLongExp, newStrike, addCp);
+					if (quotes != null && (!HasLiveQuote(quotes, newShortSym) || !HasLiveQuote(quotes, newLongSym))) continue;
+
+					var ivNewShort = ResolveIV(newShortSym, settings, quotes);
+					var ivNewLong = ResolveIV(newLongSym, settings, quotes);
+					var dteNewShort = Math.Max(1, (addShortExp - asOf).Days);
+					var dteNewLong = Math.Max(1, (addLongExp - asOf).Days);
+					var newShortMidExec = LiveOrBsMid(quotes, newShortSym, spot, newStrike, dteNewShort, ivNewShort, addCp);
+					var newLongMidExec = LiveOrBsMid(quotes, newLongSym, spot, newStrike, dteNewLong, ivNewLong, addCp);
+					var (newShortBid, _) = LiveBidAsk(quotes, newShortSym, newShortMidExec);
+					var (_, newLongAsk) = LiveBidAsk(quotes, newLongSym, newLongMidExec);
+					var cashPerShare = newShortBid - newLongAsk; // debit (negative) to open new calendar
+
+					// Project the NEW position at existing short's expiry (first milestone).
+					var origShortExp = shortLeg.Parsed.ExpiryDate;
+					var tRemainNewShort = Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0;
+					var tRemainNewLong = Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0;
+					var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewShort, 0.036, ivNewShort, addCp);
+					var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewLong, 0.036, ivNewLong, addCp);
+					var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp;
+
+					// Opening a long calendar/diagonal is pure-debit: BP required = actual cash debit paid,
+					// using the realistic worst-case fill (long ask, short bid). Using mid-based ComputeLegMargin
+					// here would understate BP when bid/ask spreads are wide (e.g. put legs), and cause the
+					// partial-qty sizing to suggest more contracts than the cash can actually fund.
+					var newBp = Math.Max(-cashPerShare, 0m) * 100m;
+
+					var sideLabel = addCp == "C" ? "call" : "put";
+					var isDiagonal = addLongExp != longLeg.Parsed.ExpiryDate || kind == StructureKind.Diagonal;
+					var structureType = isOppositeSide
+						? (isDiagonal ? "double diagonal" : "double calendar")
+						: (isDiagonal ? "second-strike diagonal" : "second-strike calendar");
+
+					EmitAdd(list, legs, settings.Cash,
+						name: $"Add ${newStrike:F2} {sideLabel} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({structureType}, keep existing)",
+						newShortSym: newShortSym,
+						newLongSym: newLongSym,
+						cashPerShareOfChange: cashPerShare,
+						newProjectedPerShare: newPositionValuePerShare,
+						unchangedProjectedPerShare: holdNetPerShare,
+						bpPerContract: newBp,
+						daysToTarget: origShortDte,
+						rationale: $"open new {sideLabel} calendar at ${newStrike:F2} (debit ${-cashPerShare:F2}/share); existing untouched → at {origShortExp:MM-dd}: existing ${holdNetPerShare:F2} + new ${newPositionValuePerShare:F2} = ${holdNetPerShare + newPositionValuePerShare:F2}/share");
+				}
+			}
+		}
+
 		return list.OrderByDescending(s => s.TotalPnLPerContract / Math.Max(1m, s.DaysToTarget)).ToList();
+	}
+
+	/// <summary>Appends an "add new position alongside existing" scenario. Existing untouched;
+	/// new position adds BP and debit. Combined projection = existing hold + new position value at target.
+	/// Partial variant sizes the added qty to fit available cash while keeping all existing contracts.</summary>
+	private static void EmitAdd(
+		List<Scenario> list,
+		IReadOnlyList<PositionSnapshot> legs,
+		decimal? availableCash,
+		string name,
+		string newShortSym,
+		string newLongSym,
+		decimal cashPerShareOfChange,
+		decimal newProjectedPerShare,
+		decimal unchangedProjectedPerShare,
+		decimal bpPerContract,
+		int daysToTarget,
+		string rationale)
+	{
+		var fullQty = legs[0].Qty;
+		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
+		var initialDebitPerContract = initialDebitPerShare * 100m;
+
+		var fullCashPerContract = cashPerShareOfChange * 100m;
+		var fullCombinedValuePerContract = (unchangedProjectedPerShare + newProjectedPerShare) * 100m;
+		var fullTotalPerContract = fullCombinedValuePerContract + fullCashPerContract - initialDebitPerContract;
+		list.Add(new Scenario(
+			name,
+			$"BUY {newLongSym} x{fullQty}, SELL {newShortSym} x{fullQty}",
+			CashImpactPerContract: fullCashPerContract,
+			ProjectedValuePerContract: fullCombinedValuePerContract,
+			TotalPnLPerContract: fullTotalPerContract,
+			BPDeltaPerContract: bpPerContract,
+			Qty: fullQty,
+			DaysToTarget: daysToTarget,
+			Rationale: rationale));
+
+		if (!availableCash.HasValue || bpPerContract <= 0m) return;
+		var maxPartial = (int)Math.Floor(availableCash.Value / bpPerContract);
+		if (maxPartial <= 0 || maxPartial >= fullQty) return;
+
+		// Partial: add `maxPartial` new contracts, keep all `fullQty` existing.
+		var partialCashTotal = cashPerShareOfChange * 100m * maxPartial;
+		var partialNewValue = newProjectedPerShare * 100m * maxPartial;
+		var partialExistingValue = unchangedProjectedPerShare * 100m * fullQty;
+		var partialCombinedValue = partialNewValue + partialExistingValue;
+		var partialTotalPnL = partialCashTotal + partialCombinedValue - initialDebitPerContract * fullQty;
+
+		list.Add(new Scenario(
+			$"{name} · partial {maxPartial}",
+			$"BUY {newLongSym} x{maxPartial}, SELL {newShortSym} x{maxPartial}",
+			CashImpactPerContract: partialCashTotal / fullQty,
+			ProjectedValuePerContract: partialCombinedValue / fullQty,
+			TotalPnLPerContract: partialTotalPnL / fullQty,
+			BPDeltaPerContract: bpPerContract * maxPartial / fullQty,
+			Qty: fullQty,
+			DaysToTarget: daysToTarget,
+			Rationale: $"add {maxPartial} new contract(s) (${bpPerContract * maxPartial:N0} BP); keep all {fullQty} existing"));
 	}
 
 	/// <summary>Appends a full-quantity scenario to the list. If the full BP delta exceeds available
