@@ -156,6 +156,49 @@ internal sealed class WebullOpenApiClient : IDisposable
 				["client_order_id"] = clientOrderId,
 			}, ct);
 
+	// ─── Account positions ────────────────────────────────────────────────────
+
+	internal sealed record AccountHolding(
+		[property: JsonPropertyName("position_id")] string? PositionId,
+		[property: JsonPropertyName("symbol")] string? Symbol,
+		[property: JsonPropertyName("instrument_type")] string? InstrumentType,
+		[property: JsonPropertyName("currency")] string? Currency,
+		[property: JsonPropertyName("cost_price")] string? CostPrice,
+		[property: JsonPropertyName("quantity")] string? Quantity,
+		[property: JsonPropertyName("cost")] string? Cost,
+		[property: JsonPropertyName("last_price")] string? LastPrice,
+		[property: JsonPropertyName("market_value")] string? MarketValue,
+		[property: JsonPropertyName("unrealized_profit_loss")] string? UnrealizedProfitLoss,
+		[property: JsonPropertyName("unrealized_profit_loss_rate")] string? UnrealizedProfitLossRate,
+		[property: JsonPropertyName("proportion")] string? Proportion,
+		[property: JsonPropertyName("day_profit_loss")] string? DayProfitLoss,
+		[property: JsonPropertyName("day_realized_profit_loss")] string? DayRealizedProfitLoss);
+
+	/// <summary>Fetches all account positions. The endpoint returns a flat array; the sandbox does not
+	/// appear to paginate — if production requires it, the caller can extend this to loop on last_position_id.</summary>
+	internal async Task<List<AccountHolding>> FetchAccountPositionsAsync(CancellationToken ct = default)
+	{
+		var query = new SortedDictionary<string, string>(StringComparer.Ordinal)
+		{
+			["account_id"] = _account.AccountId,
+			["page_size"] = "100",
+		};
+		var list = await GetAsync<List<AccountHolding>>("/openapi/assets/positions", query, ct);
+		return list;
+	}
+
+	// ─── Account balance ──────────────────────────────────────────────────────
+
+	internal sealed record AccountBalance(
+		[property: JsonPropertyName("total_cash_balance")] string? TotalCashBalance,
+		[property: JsonPropertyName("total_unrealized_profit_loss")] string? TotalUnrealizedProfitLoss,
+		[property: JsonPropertyName("total_asset_currency")] string? TotalAssetCurrency);
+
+	/// <summary>Fetches the account balance summary.</summary>
+	internal async Task<AccountBalance> FetchAccountBalanceAsync(CancellationToken ct = default) =>
+		await GetAsync<AccountBalance>("/openapi/assets/balance",
+			new SortedDictionary<string, string>(StringComparer.Ordinal) { ["account_id"] = _account.AccountId }, ct);
+
 	// ─── Transport ────────────────────────────────────────────────────────────
 
 	private static readonly JsonSerializerOptions JsonOptions = new()
