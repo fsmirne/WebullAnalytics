@@ -156,6 +156,33 @@ internal sealed class WebullOpenApiClient : IDisposable
 				["client_order_id"] = clientOrderId,
 			}, ct);
 
+	// ─── Auth / Token ─────────────────────────────────────────────────────────
+
+	internal sealed record TokenCreateResult(
+		[property: JsonPropertyName("token")] string? Token,
+		[property: JsonPropertyName("status")] string? Status,
+		[property: JsonPropertyName("expire_time")] string? ExpireTime,
+		[property: JsonPropertyName("token_id")] string? TokenId);
+
+	internal sealed record TokenCheckResult(
+		[property: JsonPropertyName("status")] string? Status,
+		[property: JsonPropertyName("expire_time")] string? ExpireTime);
+
+	/// <summary>Creates a new token. Returns the raw response so the caller can inspect
+	/// status (NORMAL / PENDING / INVALID / EXPIRED) and token value. Requires user approval
+	/// via Webull mobile app before the token becomes active (PENDING → NORMAL).</summary>
+	internal async Task<string> CreateTokenRawAsync(CancellationToken ct = default)
+	{
+		const string path = "/openapi/auth/token/create";
+		var body = "{}";
+		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, new Dictionary<string, string>(), body, _account.AppId);
+		using var req = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
+		using var resp = await _http.SendAsync(req, ct);
+		var respBody = await resp.Content.ReadAsStringAsync(ct);
+		return $"HTTP {(int)resp.StatusCode}\n{respBody}";
+	}
+
 	// ─── App subscriptions (account list) ────────────────────────────────────
 
 	internal sealed record AppSubscription(
