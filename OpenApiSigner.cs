@@ -26,8 +26,9 @@ internal static class OpenApiSigner
 		string host,
 		string path,
 		IReadOnlyDictionary<string, string> queryParams,
-		string? jsonBody)
-		=> SignRequest(appKey, appSecret, host, path, queryParams, jsonBody, DateTime.UtcNow, Guid.NewGuid().ToString("N"));
+		string? jsonBody,
+		string? appId = null)
+		=> SignRequest(appKey, appSecret, host, path, queryParams, jsonBody, DateTime.UtcNow, Guid.NewGuid().ToString("N"), appId);
 
 	/// <summary>Test-friendly overload: timestamp and nonce injectable for deterministic output.</summary>
 	internal static Dictionary<string, string> SignRequest(
@@ -38,7 +39,8 @@ internal static class OpenApiSigner
 		IReadOnlyDictionary<string, string> queryParams,
 		string? jsonBody,
 		DateTime timestampUtc,
-		string nonce)
+		string nonce,
+		string? appId = null)
 	{
 		var timestamp = timestampUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
@@ -52,6 +54,8 @@ internal static class OpenApiSigner
 			["x-signature-version"] = "1.0",
 			["host"] = host,
 		};
+		if (!string.IsNullOrEmpty(appId))
+			signingHeaders["x-app-id"] = appId;
 
 		// Merge query + headers, sort alphabetically, join.
 		var merged = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -69,7 +73,7 @@ internal static class OpenApiSigner
 		using var hmac = new HMACSHA1(signingKey);
 		var signature = Convert.ToBase64String(hmac.ComputeHash(Encoding.UTF8.GetBytes(encoded)));
 
-		return new Dictionary<string, string>
+		var result = new Dictionary<string, string>
 		{
 			["x-app-key"] = appKey,
 			["x-timestamp"] = timestamp,
@@ -79,6 +83,9 @@ internal static class OpenApiSigner
 			["x-signature-nonce"] = nonce,
 			["x-version"] = "v2",
 		};
+		if (!string.IsNullOrEmpty(appId))
+			result["x-app-id"] = appId;
+		return result;
 	}
 
 	private static string UppercaseMd5(string input)
