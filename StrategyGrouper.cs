@@ -360,6 +360,7 @@ internal static class StrategyGrouper
 		var rows = new List<PositionRow>();
 		var adjustments = new Dictionary<int, StrategyAdjustment>();
 		var singleLegStandalones = new Dictionary<string, List<NetDebitTrade>>();
+		var partialBrandNewIndices = new List<int>();
 
 		for (int i = 0; i < groups.Count; i++)
 		{
@@ -367,6 +368,7 @@ internal static class StrategyGrouper
 			if (group.Legs.Count > 1)
 			{
 				var summaryIndex = rows.Count;
+				if (group.IsPartialBrandNew) partialBrandNewIndices.Add(summaryIndex);
 				var (strategyRows, adjustment) = BuildStrategyRows(group, allTrades, group.IsBrandNew ? null : (isPure[i] ? null : pureParentSeqs), isPure[i] ? pureSeqsByGroup[i] : null);
 				rows.AddRange(strategyRows);
 				if (adjustment != null)
@@ -378,6 +380,69 @@ internal static class StrategyGrouper
 				rows.Add(row);
 				if (standaloneTrades.Count > 0)
 					singleLegStandalones[group.Legs[0].MatchKey] = standaloneTrades;
+			}
+		}
+
+		// Inherit leg adjusted prices for partial-brand-new groups from sibling groups that
+		// share the same leg matchkey. When a user synthesizes a partial roll via `analyze trade`,
+		// the new structure (e.g., a 135-contract diagonal spliced off a 499-contract calendar) is
+		// classified IsPartialBrandNew. Its long leg came from a pool with accumulated roll-credit
+		// adjustments — we want those credits to carry into the split. For each partial-brand-new
+		// parent row, find the matching leg rows that follow it and look up the adjusted price for
+		// each leg matchkey from any sibling group's leg rows, falling back to the raw avg.
+		if (partialBrandNewIndices.Count > 0)
+		{
+			// Build a lookup: (matchKey, Side) → adjusted price from non-partial sibling groups.
+			var siblingAdj = new Dictionary<(string MatchKey, Side Side), decimal>();
+			for (int i = 0; i < rows.Count; i++)
+			{
+				var r = rows[i];
+				if (!r.IsStrategyLeg || r.MatchKey == null || !r.AdjustedAvgPrice.HasValue) continue;
+				// Skip legs that belong to a partial-brand-new parent (they haven't inherited yet).
+				// Check by walking backward to the nearest non-leg row.
+				var parentIdx = i - 1;
+				while (parentIdx >= 0 && rows[parentIdx].IsStrategyLeg) parentIdx--;
+				if (parentIdx >= 0 && partialBrandNewIndices.Contains(parentIdx)) continue;
+				siblingAdj[(r.MatchKey, r.Side)] = r.AdjustedAvgPrice.Value;
+			}
+
+			// Apply sibling adjustments to partial-brand-new groups' leg rows and recompute the parent.
+			foreach (var parentIdx in partialBrandNewIndices)
+			{
+				if (parentIdx >= rows.Count) continue;
+				var parent = rows[parentIdx];
+				var legStart = parentIdx + 1;
+				var legEnd = legStart;
+				while (legEnd < rows.Count && rows[legEnd].IsStrategyLeg) legEnd++;
+
+				// Rewrite leg rows with inherited adjusted prices where available.
+				decimal parentAdjDebit = 0m;
+				decimal parentInitDebit = 0m;
+				for (int i = legStart; i < legEnd; i++)
+				{
+					var leg = rows[i];
+					if (leg.MatchKey != null && siblingAdj.TryGetValue((leg.MatchKey, leg.Side), out var siblingPrice))
+					{
+						rows[i] = leg with { AdjustedAvgPrice = siblingPrice };
+					}
+					var initPrice = rows[i].InitialAvgPrice ?? rows[i].AvgPrice;
+					var adjPrice = rows[i].AdjustedAvgPrice ?? rows[i].AvgPrice;
+					var sign = rows[i].Side == Side.Buy ? 1m : -1m;
+					parentInitDebit += sign * initPrice;
+					parentAdjDebit += sign * adjPrice;
+				}
+
+				// Recompute parent's Init/Adj from the (possibly inherited) leg prices.
+				var parentSide = parentAdjDebit >= 0m ? Side.Buy : Side.Sell;
+				var parentInitDisplay = parentSide == Side.Sell ? -parentInitDebit : parentInitDebit;
+				var parentAdjDisplay = parentSide == Side.Sell ? -parentAdjDebit : parentAdjDebit;
+				rows[parentIdx] = parent with
+				{
+					Side = parentSide,
+					InitialAvgPrice = parentInitDisplay,
+					AdjustedAvgPrice = parentAdjDisplay,
+					AvgPrice = parentAdjDisplay,
+				};
 			}
 		}
 
