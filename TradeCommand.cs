@@ -430,25 +430,69 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 	}
 }
 
-// ─── `trade token` (diagnostic) ───────────────────────────────────────────────
+// ─── `trade token create` / `trade token check` ──────────────────────────────
 
-internal sealed class TradeTokenSettings : TradeSubcommandSettings { }
+internal sealed class TradeTokenCreateSettings : TradeSubcommandSettings { }
 
-internal sealed class TradeTokenCommand : AsyncCommand<TradeTokenSettings>
+internal sealed class TradeTokenCreateCommand : AsyncCommand<TradeTokenCreateSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradeTokenSettings s, CancellationToken cancellation)
+	public override async Task<int> ExecuteAsync(CommandContext context, TradeTokenCreateSettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;
 
 		using var client = new WebullOpenApiClient(account);
-		try
-		{
-			var raw = await client.CreateTokenRawAsync(cancellation);
-			AnsiConsole.WriteLine(raw);
-			return 0;
-		}
+		WebullOpenApiClient.TokenCreateResult result;
+		try { result = await client.CreateTokenAsync(cancellation); }
+		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]Create failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
 		catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
+
+		if (string.IsNullOrEmpty(result.Token)) { AnsiConsole.MarkupLine("[red]No token in response.[/]"); return 3; }
+
+		TokenStore.Save(account.Alias, result.Token, result.Expires ?? 0, result.Status ?? "");
+		AnsiConsole.MarkupLine($"[bold]Token created:[/] status=[yellow]{Markup.Escape(result.Status ?? "?")}[/]");
+		AnsiConsole.MarkupLine($"  [dim]token:[/]   {Markup.Escape(result.Token)}");
+		AnsiConsole.MarkupLine($"  [dim]expires:[/] {result.Expires}");
+		AnsiConsole.MarkupLine($"  [dim]saved to:[/] {TokenStore.StorePath}");
+		if (result.Status == "PENDING")
+		{
+			AnsiConsole.WriteLine();
+			AnsiConsole.MarkupLine("[bold yellow]Approve within 5 minutes:[/]");
+			AnsiConsole.MarkupLine("  1. Open the Webull mobile app");
+			AnsiConsole.MarkupLine("  2. Menu → Messages → OpenAPI Notifications");
+			AnsiConsole.MarkupLine("  3. Tap the latest verification message → Check Now");
+			AnsiConsole.MarkupLine("  4. Enter the SMS code → Confirm");
+			AnsiConsole.MarkupLine($"  5. Run: [bold]WebullAnalytics trade token check --account {Markup.Escape(account.Alias)}[/]");
+		}
+		return 0;
+	}
+}
+
+internal sealed class TradeTokenCheckSettings : TradeSubcommandSettings { }
+
+internal sealed class TradeTokenCheckCommand : AsyncCommand<TradeTokenCheckSettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, TradeTokenCheckSettings s, CancellationToken cancellation)
+	{
+		var account = TradeContext.ResolveOrExit(s.Account);
+		if (account == null) return 2;
+
+		var cached = TokenStore.Load(account.Alias);
+		if (cached == null) { AnsiConsole.MarkupLine($"[red]No cached token for '{Markup.Escape(account.Alias)}'. Run 'trade token create --account {Markup.Escape(account.Alias)}' first.[/]"); return 3; }
+
+		using var client = new WebullOpenApiClient(account);
+		WebullOpenApiClient.TokenCheckResult result;
+		try { result = await client.CheckTokenAsync(cached.Token, cancellation); }
+		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]Check failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+		catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
+
+		TokenStore.Save(account.Alias, cached.Token, result.Expires ?? cached.Expires, result.Status ?? "");
+		var color = result.Status switch { "NORMAL" => "green", "PENDING" => "yellow", _ => "red" };
+		AnsiConsole.MarkupLine($"[bold]Token status:[/] [{color}]{Markup.Escape(result.Status ?? "?")}[/]");
+		AnsiConsole.MarkupLine($"  [dim]expires:[/] {result.Expires}");
+		if (result.Status == "NORMAL")
+			AnsiConsole.MarkupLine("[green]Ready — other trade/ai commands will authenticate with this token.[/]");
+		return 0;
 	}
 }
 

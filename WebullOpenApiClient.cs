@@ -20,15 +20,27 @@ internal sealed class WebullOpenApiClient : IDisposable
 {
 	private readonly HttpClient _http;
 	private readonly TradeAccount _account;
+	private readonly string? _accessToken;
 	private string Host => new Uri(_account.BaseUrl).Host;
 
 	internal WebullOpenApiClient(TradeAccount account)
 	{
 		_account = account;
 		_http = new HttpClient { BaseAddress = new Uri(account.BaseUrl) };
+		// Load cached token so subsequent requests include x-access-token automatically.
+		var cached = TokenStore.Load(account.Alias);
+		_accessToken = cached?.Status == "NORMAL" ? cached.Token : null;
 	}
 
 	public void Dispose() => _http.Dispose();
+
+	private void ApplyAccessTokenHeader(HttpRequestMessage req, string path)
+	{
+		// Token create/check paths don't need x-access-token — they're used to obtain/validate one.
+		if (path.StartsWith("/openapi/auth/token/")) return;
+		if (!string.IsNullOrEmpty(_accessToken))
+			req.Headers.TryAddWithoutValidation("x-access-token", _accessToken);
+	}
 
 	// ─── Preview / Place ──────────────────────────────────────────────────────
 
@@ -160,28 +172,28 @@ internal sealed class WebullOpenApiClient : IDisposable
 
 	internal sealed record TokenCreateResult(
 		[property: JsonPropertyName("token")] string? Token,
-		[property: JsonPropertyName("status")] string? Status,
-		[property: JsonPropertyName("expire_time")] string? ExpireTime,
-		[property: JsonPropertyName("token_id")] string? TokenId);
+		[property: JsonPropertyName("expires")] long? Expires,
+		[property: JsonPropertyName("status")] string? Status);
 
 	internal sealed record TokenCheckResult(
 		[property: JsonPropertyName("status")] string? Status,
-		[property: JsonPropertyName("expire_time")] string? ExpireTime);
+		[property: JsonPropertyName("expires")] long? Expires);
 
-	/// <summary>Creates a new token. Returns the raw response so the caller can inspect
-	/// status (NORMAL / PENDING / INVALID / EXPIRED) and token value. Requires user approval
-	/// via Webull mobile app before the token becomes active (PENDING → NORMAL).</summary>
-	internal async Task<string> CreateTokenRawAsync(CancellationToken ct = default)
+	/// <summary>Creates a new token. Returns token value + status (NORMAL / PENDING / INVALID / EXPIRED).
+	/// On production, a PENDING token must be approved via the Webull mobile app
+	/// (Menu → Messages → OpenAPI Notifications → Check Now → SMS code) within 5 minutes.
+	/// Sandbox skips 2FA verification.</summary>
+	internal async Task<TokenCreateResult> CreateTokenAsync(CancellationToken ct = default) =>
+		await PostAsync<TokenCreateResult>("/openapi/auth/token/create", new { }, ct);
+
+	private sealed class TokenCheckRequest
 	{
-		const string path = "/openapi/auth/token/create";
-		var body = "{}";
-		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, new Dictionary<string, string>(), body, _account.AppId);
-		using var req = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
-		using var resp = await _http.SendAsync(req, ct);
-		var respBody = await resp.Content.ReadAsStringAsync(ct);
-		return $"HTTP {(int)resp.StatusCode}\n{respBody}";
+		[JsonPropertyName("token")] public string Token { get; set; } = "";
 	}
+
+	/// <summary>Queries the status of a token. Use the value returned by CreateTokenAsync.</summary>
+	internal async Task<TokenCheckResult> CheckTokenAsync(string token, CancellationToken ct = default) =>
+		await PostAsync<TokenCheckResult>("/openapi/auth/token/check", new TokenCheckRequest { Token = token }, ct);
 
 	// ─── App subscriptions (account list) ────────────────────────────────────
 
@@ -255,6 +267,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, new Dictionary<string, string>(), json, _account.AppId);
 		using var req = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
+		ApplyAccessTokenHeader(req, path);
 		using var resp = await _http.SendAsync(req, ct);
 		return await Read<T>(resp);
 	}
@@ -266,6 +279,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		var uri = string.IsNullOrEmpty(qs) ? path : $"{path}?{qs}";
 		using var req = new HttpRequestMessage(HttpMethod.Get, uri);
 		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
+		ApplyAccessTokenHeader(req, path);
 		using var resp = await _http.SendAsync(req, ct);
 		return await Read<T>(resp);
 	}
