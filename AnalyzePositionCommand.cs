@@ -68,6 +68,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
 		}
 
+		TerminalHelper.EnsureTerminalWidthFromConfig();
+
 		var legs = TradeLegParser.Parse(settings.Spec);
 		var positionLegs = legs.Select(l => new PositionSnapshot(
 			Symbol: l.Symbol,

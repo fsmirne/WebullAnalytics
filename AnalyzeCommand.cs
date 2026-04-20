@@ -281,6 +281,8 @@ internal static class AnalyzeCommon
 
 	internal static async Task<int> RunRollAnalysis(AnalyzeRollSettings settings, CancellationToken cancellation)
 	{
+		TerminalHelper.EnsureTerminalWidthFromConfig();
+
 		var gtIdx = settings.Spec.IndexOf('>');
 		var remaining = settings.Spec[(gtIdx + 1)..];
 		var colonIdx = remaining.IndexOf(':');
