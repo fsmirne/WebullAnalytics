@@ -89,8 +89,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				var now = DateTime.Now;
 				var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
 				var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
-				var optionSymbols = openPositions.Values.SelectMany(p => p.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol)).ToHashSet();
-				var quoteSnapshot = await quotes.GetQuotesAsync(now, optionSymbols, tickerSet, cancellation);
+				var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
 
 				var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue);
 				var results = evaluator.Evaluate(ctx);

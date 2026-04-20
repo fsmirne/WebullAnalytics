@@ -25,18 +25,24 @@
 			"maxDebitMultiplier": 1.5,
 			"spotBeyondBreakevenPct": 3.0
 		},
-		"takeProfit": {
+		"opportunisticRoll": {
 			"enabled": true,
+			"minImprovementPerDayPerContract": 0.50,
+			"ivDefaultPct": 40,
+			"strikeStep": 0.50
+		},
+		"takeProfit": {
+			"enabled": false,
 			"pctOfMaxProfit": 40
 		},
 		"defensiveRoll": {
-			"enabled": true,
+			"enabled": false,
 			"spotWithinPctOfShortStrike": 1.0,
 			"triggerDTE": 3,
 			"strikeStep": 0.50
 		},
 		"rollShortOnExpiry": {
-			"enabled": true,
+			"enabled": false,
 			"triggerDTE": 2,
 			"maxShortPremium": 0.10,
 			"minRollCredit": 0.05

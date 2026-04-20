@@ -69,6 +69,7 @@ internal sealed class RuleEvaluator
 	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config) => new IManagementRule[]
 	{
 		new StopLossRule(config.Rules.StopLoss),
+		new OpportunisticRollRule(config.Rules.OpportunisticRoll),
 		new TakeProfitRule(config.Rules.TakeProfit),
 		new DefensiveRollRule(config.Rules.DefensiveRoll),
 		new RollShortOnExpiryRule(config.Rules.RollShortOnExpiry)

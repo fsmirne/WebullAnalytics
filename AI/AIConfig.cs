@@ -44,9 +44,19 @@ internal sealed class LogConfig
 internal sealed class RulesConfig
 {
 	[JsonPropertyName("stopLoss")] public StopLossConfig StopLoss { get; set; } = new();
-	[JsonPropertyName("takeProfit")] public TakeProfitConfig TakeProfit { get; set; } = new();
-	[JsonPropertyName("defensiveRoll")] public DefensiveRollConfig DefensiveRoll { get; set; } = new();
-	[JsonPropertyName("rollShortOnExpiry")] public RollShortOnExpiryConfig RollShortOnExpiry { get; set; } = new();
+	[JsonPropertyName("opportunisticRoll")] public OpportunisticRollConfig OpportunisticRoll { get; set; } = new();
+	[JsonPropertyName("takeProfit")] public TakeProfitConfig TakeProfit { get; set; } = new() { Enabled = false };
+	[JsonPropertyName("defensiveRoll")] public DefensiveRollConfig DefensiveRoll { get; set; } = new() { Enabled = false };
+	[JsonPropertyName("rollShortOnExpiry")] public RollShortOnExpiryConfig RollShortOnExpiry { get; set; } = new() { Enabled = false };
+}
+
+internal sealed class OpportunisticRollConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+	/// <summary>Minimum P&L-per-day-per-contract improvement (dollars) vs hold required to fire a proposal.</summary>
+	[JsonPropertyName("minImprovementPerDayPerContract")] public decimal MinImprovementPerDayPerContract { get; set; } = 0.50m;
+	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;
+	[JsonPropertyName("strikeStep")] public decimal StrikeStep { get; set; } = 0.50m;
 }
 
 internal sealed class StopLossConfig
