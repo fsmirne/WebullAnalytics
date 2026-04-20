@@ -227,7 +227,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			list.Add(NewScenario($"Convert to calendar (sell {shortExpiry:yyyy-MM-dd} @ ${longLeg.Parsed.Strike:F2})",
 				longLeg, $"SELL {newShortSym} x{longLeg.Qty}",
 				cashNow: shortMid, valueAtTarget: net, bpDeltaPerContract: 0m,
-				rationale: $"collect ${shortMid:F2}/share short premium; at short exp: long ${longAtShortExp:F2} − short ${shortAtShortExp:F2} = ${net:F2}"));
+				rationale: $"collect ${shortMid:F2}/share short premium; at short exp: long ${longAtShortExp:F2} - short ${shortAtShortExp:F2} = ${net:F2}"));
 		}
 
 		return list.OrderByDescending(s => s.TotalPnLPerContract).ToList();
@@ -261,7 +261,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// 1. Hold to short expiry.
 		list.Add(NewScenarioSpread("Hold to short expiry", legs, "—",
 			cashNow: 0m, valueAtTarget: holdNetPerShare, bpDeltaPerContract: 0m,
-			rationale: $"at {shortLeg.Parsed.ExpiryDate:yyyy-MM-dd}: long ${longAtOriginalExp:F2} − short ${shortAtOriginalExp:F2} intrinsic = ${holdNetPerShare:F2}"));
+			rationale: $"at {shortLeg.Parsed.ExpiryDate:yyyy-MM-dd}: long ${longAtOriginalExp:F2} - short ${shortAtOriginalExp:F2} intrinsic = ${holdNetPerShare:F2}"));
 
 		// 2. Close short only (realistic: pay short ask).
 		{

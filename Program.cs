@@ -29,6 +29,11 @@ class Program
 
 	static int Main(string[] args)
 	{
+		// Windows defaults to legacy code page (1252/437) for Console output; force UTF-8 so
+		// Unicode characters in Spectre tables, markup, and rationales render correctly even
+		// in terminals that support UTF-8.
+		Console.OutputEncoding = System.Text.Encoding.UTF8;
+
 		RawArgs = args;
 		var app = new CommandApp();
 		app.Configure(config =>
