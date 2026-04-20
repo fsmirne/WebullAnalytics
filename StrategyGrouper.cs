@@ -532,7 +532,69 @@ internal static class StrategyGrouper
 			}
 		}
 
+		ReconcileLegPricesToParent(rows);
+
 		return (rows, adjustments, singleLegStandalones);
+	}
+
+	/// <summary>
+	/// For every multi-leg strategy, ensure Σ signed leg Init/Adj = parent Init/Adj by applying the
+	/// gap to the first long leg. Leg prices pull from inconsistent sources (FIFO slicing, running
+	/// avg-cost, sibling inheritance) while parent prices come from weighted parent-trade avg or
+	/// roll-credit math — so their sums drift. Reconciling also fixes the time-decay grid: its
+	/// formula reduces to Σ sign·legValue only when leg premiums sum to netPremium.
+	/// </summary>
+	private static void ReconcileLegPricesToParent(List<PositionRow> rows)
+	{
+		for (int i = 0; i < rows.Count; i++)
+		{
+			var parent = rows[i];
+			if (parent.IsStrategyLeg || parent.Asset != Asset.OptionStrategy) continue;
+			var legStart = i + 1;
+			var legEnd = legStart;
+			while (legEnd < rows.Count && rows[legEnd].IsStrategyLeg) legEnd++;
+			if (legEnd - legStart < 2) continue;
+
+			var targetIdx = -1;
+			for (int j = legStart; j < legEnd; j++)
+				if (rows[j].Side == Side.Buy) { targetIdx = j; break; }
+			if (targetIdx == -1) targetIdx = legStart;
+			var targetSign = rows[targetIdx].Side == Side.Buy ? 1m : -1m;
+
+			var parentSign = parent.Side == Side.Sell ? -1m : 1m;
+
+			if (parent.AdjustedAvgPrice.HasValue)
+			{
+				var legSum = SignedLegPriceSum(rows, legStart, legEnd, r => r.AdjustedAvgPrice);
+				if (legSum.HasValue && Math.Abs(parentSign * parent.AdjustedAvgPrice.Value - legSum.Value) > 0.0001m)
+				{
+					var delta = (parentSign * parent.AdjustedAvgPrice.Value - legSum.Value) / targetSign;
+					rows[targetIdx] = rows[targetIdx] with { AdjustedAvgPrice = rows[targetIdx].AdjustedAvgPrice!.Value + delta };
+				}
+			}
+
+			if (parent.InitialAvgPrice.HasValue)
+			{
+				var legSum = SignedLegPriceSum(rows, legStart, legEnd, r => r.InitialAvgPrice);
+				if (legSum.HasValue && Math.Abs(parentSign * parent.InitialAvgPrice.Value - legSum.Value) > 0.0001m)
+				{
+					var delta = (parentSign * parent.InitialAvgPrice.Value - legSum.Value) / targetSign;
+					rows[targetIdx] = rows[targetIdx] with { InitialAvgPrice = rows[targetIdx].InitialAvgPrice!.Value + delta };
+				}
+			}
+		}
+	}
+
+	private static decimal? SignedLegPriceSum(List<PositionRow> rows, int legStart, int legEnd, Func<PositionRow, decimal?> selector)
+	{
+		decimal sum = 0m;
+		for (int j = legStart; j < legEnd; j++)
+		{
+			var v = selector(rows[j]);
+			if (!v.HasValue) return null;
+			sum += (rows[j].Side == Side.Buy ? 1m : -1m) * v.Value;
+		}
+		return sum;
 	}
 
 	/// <summary>
