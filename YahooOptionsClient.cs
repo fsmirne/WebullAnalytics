@@ -330,4 +330,34 @@ public static class YahooOptionsClient
 			_ => null,
 		};
 	}
+
+	public static async Task<Dictionary<DateTime, decimal>> FetchHistoricalClosesAsync(string ticker, DateTime from, DateTime to, CancellationToken cancellation)
+	{
+		// Yahoo's v7/finance/download endpoint may 401 without auth. If the fetch fails, return empty.
+		var url = $"https://query1.finance.yahoo.com/v7/finance/download/{Uri.EscapeDataString(ticker)}"
+			+ $"?period1={new DateTimeOffset(from).ToUnixTimeSeconds()}"
+			+ $"&period2={new DateTimeOffset(to).ToUnixTimeSeconds()}&interval=1d&events=history";
+
+		var result = new Dictionary<DateTime, decimal>();
+		try
+		{
+			using var http = new HttpClient();
+			http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (WebullAnalytics)");
+			var csv = await http.GetStringAsync(url, cancellation);
+
+			foreach (var line in csv.Split('\n').Skip(1))
+			{
+				var parts = line.Split(',');
+				if (parts.Length < 5) continue;
+				if (!DateTime.TryParseExact(parts[0], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
+				if (!decimal.TryParse(parts[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var close)) continue;
+				result[d] = close;
+			}
+		}
+		catch (HttpRequestException ex)
+		{
+			Console.Error.WriteLine($"Warning: Yahoo historical fetch for {ticker} failed: {ex.Message}. Cache will be empty.");
+		}
+		return result;
+	}
 }
