@@ -54,6 +54,7 @@ class Program
 			{
 				ai.AddCommand<AI.AIOnceCommand>("once");
 				ai.AddCommand<AI.AIWatchCommand>("watch");
+				ai.AddCommand<AI.AIReplayCommand>("replay");
 			});
 		});
 		return app.Run(args);
