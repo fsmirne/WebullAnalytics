@@ -101,8 +101,23 @@ internal static class AdjustmentReportBuilder
 
     private static PriceBreakdown? BuildStrategyBreakdown(PositionRow summaryRow, StrategyAdjustment? adjustment)
     {
-        if (adjustment == null || adjustment.Trades.Count < 2) return null;
-        var initPrice = summaryRow.InitialAvgPrice ?? summaryRow.AvgPrice;
-        return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, adjustment.Trades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind, adjustment.InitNetDebit);
+        if (adjustment != null && adjustment.Trades.Count >= 2)
+        {
+            var initPrice = summaryRow.InitialAvgPrice ?? summaryRow.AvgPrice;
+            return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, adjustment.Trades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind, adjustment.InitNetDebit);
+        }
+
+        // Fallback: for partial-brand-new groups the replay produced no trades, but the strategy still
+        // has a non-trivial Init vs Adj delta because one leg inherited an adjusted price from a sibling
+        // group. Emit a minimal breakdown so the user can see where the adjustment came from.
+        if (summaryRow.InitialAvgPrice.HasValue && summaryRow.AdjustedAvgPrice.HasValue
+            && summaryRow.InitialAvgPrice.Value != summaryRow.AdjustedAvgPrice.Value)
+        {
+            var initDebit = summaryRow.InitialAvgPrice.Value * summaryRow.Qty * Trade.OptionMultiplier;
+            var adjDebit = summaryRow.AdjustedAvgPrice.Value * summaryRow.Qty * Trade.OptionMultiplier;
+            return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, summaryRow.InitialAvgPrice.Value, summaryRow.AdjustedAvgPrice, null, null, new List<NetDebitTrade>(), adjDebit, null, summaryRow.OptionKind, initDebit);
+        }
+
+        return null;
     }
 }
