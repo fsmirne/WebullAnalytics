@@ -70,6 +70,6 @@ internal sealed class TakeProfitRule : IManagementRule
 	/// </summary>
 	private static decimal? GetMaxProjectedProfitPerContract(OpenPosition p, EvaluationContext ctx)
 	{
-		return null;
+		return ProfitProjector.MaxForCurrentColumn(p, ctx);
 	}
 }
