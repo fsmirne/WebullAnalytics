@@ -203,12 +203,18 @@ internal static class AnalyzeCommon
 	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(AnalyzeSubcommandSettings settings, string tradesSpec, CancellationToken cancellation)
 	{
 		var symbols = TradeLegParser.Parse(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+		return await FetchQuotesForSymbolList(settings, symbols, cancellation);
+	}
+
+	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbolList(AnalyzeSubcommandSettings settings, IReadOnlyCollection<string> symbols, CancellationToken cancellation)
+	{
+		if (symbols.Count == 0) return new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		var minimalRows = symbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
 
 		var apiSource = settings.Api?.ToLowerInvariant();
 		if (apiSource == null)
 		{
-			Console.WriteLine("Error: --api (yahoo or webull) is required when using BID/MID/ASK price keywords");
+			Console.WriteLine("Error: --api (yahoo or webull) is required to fetch quotes");
 			return null;
 		}
 
@@ -220,13 +226,13 @@ internal static class AnalyzeCommon
 				if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return null; }
 				var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
 				if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return null; }
-				Console.WriteLine("Webull: fetching quotes for hypothetical trades...");
+				Console.WriteLine($"Webull: fetching quotes for {symbols.Count} symbol(s)...");
 				var (quotes, _) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
 				return quotes;
 			}
 			else
 			{
-				Console.WriteLine("Yahoo Finance: fetching quotes for hypothetical trades...");
+				Console.WriteLine($"Yahoo Finance: fetching quotes for {symbols.Count} symbol(s)...");
 				var (quotes, _) = await YahooOptionsClient.FetchOptionQuotesAsync(minimalRows, cancellation);
 				return quotes;
 			}
