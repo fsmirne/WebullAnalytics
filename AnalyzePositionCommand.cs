@@ -169,13 +169,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var longLeg = legs.First(l => l.Action == LegAction.Buy);
 			var newExpiry = NextWeekly(shortLeg.Parsed.ExpiryDate);
 			yield return MatchKeys.OccSymbol(root, newExpiry, shortLeg.Parsed.Strike, callPut);
-			var nearSpot = NearestStrike(spot, settings.StrikeStep);
-			if (nearSpot > 0m && nearSpot != shortLeg.Parsed.Strike)
-				yield return MatchKeys.OccSymbol(root, newExpiry, nearSpot, callPut);
-			// Reset-at-spot new-calendar legs (short = newExpiry, long = same long expiry if later else newExpiry+21).
 			var newLongExp = longLeg.Parsed.ExpiryDate > newExpiry ? longLeg.Parsed.ExpiryDate : newExpiry.AddDays(21);
-			if (nearSpot > 0m)
-				yield return MatchKeys.OccSymbol(root, newLongExp, nearSpot, callPut);
+			foreach (var strike in BracketStrikes(spot, settings.StrikeStep))
+			{
+				if (strike > 0m && strike != shortLeg.Parsed.Strike)
+					yield return MatchKeys.OccSymbol(root, newExpiry, strike, callPut);
+				if (strike > 0m)
+					yield return MatchKeys.OccSymbol(root, newLongExp, strike, callPut);
+			}
 		}
 	}
 
@@ -252,15 +253,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal LongValueAtShortExpiry(decimal longStrike, DateTime shortExpiry) =>
 			(decimal)OptionMath.BlackScholes(spot, longStrike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days) / 365.0, 0.036, ivLong, callPut);
 
+		// Compute the "hold" per-share value once — used as the unchanged-portion projection for partial variants.
+		var longAtOriginalExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate);
+		var shortAtOriginalExp = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
+		var holdNetPerShare = longAtOriginalExp - shortAtOriginalExp;
+
 		// 1. Hold to short expiry.
-		{
-			var longAtExpiry = LongValueAtShortExpiry(longLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate);
-			var shortAtExpiry = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
-			var net = longAtExpiry - shortAtExpiry;
-			list.Add(NewScenarioSpread("Hold to short expiry", legs, "—",
-				cashNow: 0m, valueAtTarget: net, bpDeltaPerContract: 0m,
-				rationale: $"at {shortLeg.Parsed.ExpiryDate:yyyy-MM-dd}: long ${longAtExpiry:F2} − short ${shortAtExpiry:F2} intrinsic = ${net:F2}"));
-		}
+		list.Add(NewScenarioSpread("Hold to short expiry", legs, "—",
+			cashNow: 0m, valueAtTarget: holdNetPerShare, bpDeltaPerContract: 0m,
+			rationale: $"at {shortLeg.Parsed.ExpiryDate:yyyy-MM-dd}: long ${longAtOriginalExp:F2} − short ${shortAtOriginalExp:F2} intrinsic = ${holdNetPerShare:F2}"));
 
 		// 2. Close short only (realistic: pay short ask).
 		{
@@ -284,62 +285,73 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				rationale: $"sell long @${longBidNow:F2} bid, buy short @${shortAskNow:F2} ask → net ${cash:+0.00;-0.00}/share"));
 		}
 
-		// 4. Roll short same strike, next weekly.
+		var newExp = NextWeekly(shortLeg.Parsed.ExpiryDate);
+		if (newExp < longLeg.Parsed.ExpiryDate)
 		{
-			var newExp = NextWeekly(shortLeg.Parsed.ExpiryDate);
-			if (newExp < longLeg.Parsed.ExpiryDate)
+			// 4. Roll short same strike, next weekly.
 			{
 				var newSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newExp, shortLeg.Parsed.Strike, callPut);
 				var ivNewShort = ResolveIV(newSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newExp - asOf).Days);
 				var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, shortLeg.Parsed.Strike, dteNewShort, ivNewShort, callPut);
 				var (newShortBid, _) = LiveBidAsk(quotes, newSym, newShortMidExec);
-				var cash = newShortBid - shortAskNow;
+				var cashPerShare = newShortBid - shortAskNow;
 				var longAtNewShortExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, newExp);
 				var shortAtNewShortExp = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
-				var net = longAtNewShortExp - shortAtNewShortExp;
+				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, shortLeg.Parsed.Strike);
 				var newBp = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
 				var bpDelta = newBp - currentBp;
-				list.Add(NewScenarioSpread($"Roll short to {newExp:yyyy-MM-dd} same strike", legs,
-					$"BUY {shortLeg.Symbol} x{shortLeg.Qty}, SELL {newSym} x{shortLeg.Qty}",
-					cashNow: cash, valueAtTarget: net, bpDeltaPerContract: bpDelta,
-					rationale: $"buy short @${shortAskNow:F2} ask, sell new @${newShortBid:F2} bid → net ${cash:+0.00;-0.00}; at exp: ${net:F2}"));
+				EmitFullAndPartial(list, legs, settings.Cash,
+					name: $"Roll short to {newExp:yyyy-MM-dd} same strike",
+					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {newSym} x{{qty}}",
+					cashPerShareOfChange: cashPerShare,
+					newProjectedPerShare: newProjectedPerShare,
+					unchangedProjectedPerShare: holdNetPerShare,
+					bpPerContract: bpDelta,
+					rationale: $"buy short @${shortAskNow:F2} ask, sell new @${newShortBid:F2} bid → net ${cashPerShare:+0.00;-0.00}/share; at new exp: ${newProjectedPerShare:F2}");
 			}
-		}
 
-		// 5. Roll short to near-spot strike (calendar → diagonal or diagonal shift).
-		{
-			var newExp = NextWeekly(shortLeg.Parsed.ExpiryDate);
-			var newStrike = NearestStrike(spot, settings.StrikeStep);
-			if (newExp < longLeg.Parsed.ExpiryDate && newStrike != shortLeg.Parsed.Strike && newStrike > 0m)
+			// 5. Roll short to bracket strikes near spot (one per strike).
+			foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
 			{
+				if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
+
 				var newSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newExp, newStrike, callPut);
 				var ivNewShort = ResolveIV(newSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newExp - asOf).Days);
 				var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
 				var (newShortBid, _) = LiveBidAsk(quotes, newSym, newShortMidExec);
-				var cash = newShortBid - shortAskNow;
+				var cashPerShare = newShortBid - shortAskNow;
 				var longAtNewShortExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, newExp);
 				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
-				var net = longAtNewShortExp - shortAtNewShortExp;
+				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, newStrike);
 				var newBp = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
 				var bpDelta = newBp - currentBp;
-				list.Add(NewScenarioSpread($"Roll short to {newExp:yyyy-MM-dd} ${newStrike:F2} strike (→ diagonal)", legs,
-					$"BUY {shortLeg.Symbol} x{shortLeg.Qty}, SELL {newSym} x{shortLeg.Qty}",
-					cashNow: cash, valueAtTarget: net, bpDeltaPerContract: bpDelta,
-					rationale: $"step short to ${newStrike:F2} (spot ${spot:F2}); credit ${cash:+0.00;-0.00}/share; at exp: ${net:F2}"));
+
+				var structureLabel = callPut == "C"
+					? (newStrike < longLeg.Parsed.Strike ? "inverted diagonal" : newStrike > longLeg.Parsed.Strike ? "covered diagonal" : "calendar")
+					: (newStrike > longLeg.Parsed.Strike ? "inverted diagonal" : newStrike < longLeg.Parsed.Strike ? "covered diagonal" : "calendar");
+				EmitFullAndPartial(list, legs, settings.Cash,
+					name: $"Roll short to {newExp:yyyy-MM-dd} ${newStrike:F2} strike (→ {structureLabel})",
+					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {newSym} x{{qty}}",
+					cashPerShareOfChange: cashPerShare,
+					newProjectedPerShare: newProjectedPerShare,
+					unchangedProjectedPerShare: holdNetPerShare,
+					bpPerContract: bpDelta,
+					rationale: $"step short to ${newStrike:F2} (spot ${spot:F2}); credit ${cashPerShare:+0.00;-0.00}/share; at new exp: ${newProjectedPerShare:F2}");
 			}
 		}
 
-		// 6. Close all and reopen a fresh calendar at near-spot strike.
+		// 6. Close all and reopen a fresh calendar at bracket strikes near spot.
 		{
-			var newStrike = NearestStrike(spot, settings.StrikeStep);
-			var newShortExp = NextWeekly(shortLeg.Parsed.ExpiryDate);
+			var newShortExp = newExp;
 			var newLongExp = longLeg.Parsed.ExpiryDate > newShortExp ? longLeg.Parsed.ExpiryDate : newShortExp.AddDays(21);
-			if (newStrike > 0m)
+			foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
 			{
+				if (newStrike <= 0m) continue;
+
 				var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newShortExp, newStrike, callPut);
 				var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, newLongExp, newStrike, callPut);
 				var ivNewShort = ResolveIV(newShortSym, settings, quotes);
@@ -352,22 +364,81 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var (_, newLongAsk) = LiveBidAsk(quotes, newLongSym, newLongMidExec);
 				var closeNet = longBidNow - shortAskNow;
 				var openNet = newShortBid - newLongAsk;
-				var cash = closeNet + openNet;
+				var cashPerShare = closeNet + openNet;
 				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(spot, newStrike, Math.Max(1, (newLongExp.Date - newShortExp.Date).Days) / 365.0, 0.036, ivNewLong, callPut);
 				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
-				var net = longAtNewShortExp - shortAtNewShortExp;
+				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newShortExp, callPut, newStrike);
 				var newLongParsed = new OptionParsed(longLeg.Parsed.Root, newLongExp, callPut, newStrike);
 				var newBp = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, newLongParsed, null, 1, newLongMidExec, isExisting: false).Total;
 				var bpDelta = newBp - currentBp;
-				list.Add(NewScenarioSpread($"Reset at ${newStrike:F2} (new calendar)", legs,
-					$"BUY {shortLeg.Symbol} x{shortLeg.Qty}, SELL {longLeg.Symbol} x{longLeg.Qty}, BUY {newLongSym} x{shortLeg.Qty}, SELL {newShortSym} x{shortLeg.Qty}",
-					cashNow: cash, valueAtTarget: net, bpDeltaPerContract: bpDelta,
-					rationale: $"close net ${closeNet:+0.00;-0.00}, open new net ${openNet:+0.00;-0.00}; projected at new short exp: ${net:F2}"));
+
+				EmitFullAndPartial(list, legs, settings.Cash,
+					name: $"Reset at ${newStrike:F2} (new calendar)",
+					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {longLeg.Symbol} x{{qty}}, BUY {newLongSym} x{{qty}}, SELL {newShortSym} x{{qty}}",
+					cashPerShareOfChange: cashPerShare,
+					newProjectedPerShare: newProjectedPerShare,
+					unchangedProjectedPerShare: holdNetPerShare,
+					bpPerContract: bpDelta,
+					rationale: $"close net ${closeNet:+0.00;-0.00}, open new net ${openNet:+0.00;-0.00}; projected at new short exp: ${newProjectedPerShare:F2}");
 			}
 		}
 
 		return list.OrderByDescending(s => s.TotalPnLPerContract).ToList();
+	}
+
+	/// <summary>Appends a full-quantity scenario to the list. If the full BP delta exceeds available
+	/// cash AND there's a positive max-fundable partial quantity, also appends a partial variant.
+	/// In the partial, the unchanged portion is valued at its natural terminal date (the hold projection),
+	/// so the mix doesn't double-count time decay.</summary>
+	private static void EmitFullAndPartial(
+		List<Scenario> list,
+		IReadOnlyList<PositionSnapshot> legs,
+		decimal? availableCash,
+		string name,
+		string actionSummary,
+		decimal cashPerShareOfChange,
+		decimal newProjectedPerShare,
+		decimal unchangedProjectedPerShare,
+		decimal bpPerContract,
+		string rationale)
+	{
+		var fullQty = legs[0].Qty;
+		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
+		var initialDebitPerContract = initialDebitPerShare * 100m;
+
+		// Full scenario.
+		var fullCashPerContract = cashPerShareOfChange * 100m;
+		var fullProjectedPerContract = newProjectedPerShare * 100m;
+		var fullTotalPerContract = fullProjectedPerContract + fullCashPerContract - initialDebitPerContract;
+		list.Add(new Scenario(
+			name,
+			actionSummary.Replace("{qty}", fullQty.ToString()),
+			CashImpactPerContract: fullCashPerContract,
+			ProjectedValuePerContract: fullProjectedPerContract,
+			TotalPnLPerContract: fullTotalPerContract,
+			BPDeltaPerContract: bpPerContract,
+			Qty: fullQty,
+			Rationale: rationale));
+
+		// Partial variant: only emit if BP is positive and cash is constrained below full.
+		if (!availableCash.HasValue || bpPerContract <= 0m) return;
+		var maxPartial = (int)Math.Floor(availableCash.Value / bpPerContract);
+		if (maxPartial <= 0 || maxPartial >= fullQty) return;
+
+		// Per-contract-of-total values for the partial mix.
+		var partialCashTotal = cashPerShareOfChange * 100m * maxPartial;
+		var partialProjectedTotal = newProjectedPerShare * 100m * maxPartial + unchangedProjectedPerShare * 100m * (fullQty - maxPartial);
+		var partialTotalPnL = partialCashTotal + partialProjectedTotal - initialDebitPerContract * fullQty;
+		list.Add(new Scenario(
+			$"{name} — partial {maxPartial}/{fullQty}",
+			actionSummary.Replace("{qty}", maxPartial.ToString()),
+			CashImpactPerContract: partialCashTotal / fullQty,
+			ProjectedValuePerContract: partialProjectedTotal / fullQty,
+			TotalPnLPerContract: partialTotalPnL / fullQty,
+			BPDeltaPerContract: bpPerContract * maxPartial / fullQty,
+			Qty: fullQty,
+			Rationale: $"execute on {maxPartial} contracts (${bpPerContract * maxPartial:N0} BP); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp"));
 	}
 
 	// ─── Helpers ─────────────────────────────────────────────────────────────
@@ -460,6 +531,16 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	private static decimal NearestStrike(decimal spot, decimal step) =>
 		Math.Round(spot / step) * step;
+
+	/// <summary>Returns the two strikes bracketing spot on the configured step grid. When spot lands
+	/// exactly on a strike, the same value is yielded once.</summary>
+	private static IEnumerable<decimal> BracketStrikes(decimal spot, decimal step)
+	{
+		var below = Math.Floor(spot / step) * step;
+		var above = Math.Ceiling(spot / step) * step;
+		yield return below;
+		if (above != below) yield return above;
+	}
 
 	// ─── Rendering ───────────────────────────────────────────────────────────
 
