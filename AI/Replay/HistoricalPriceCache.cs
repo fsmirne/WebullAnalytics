@@ -48,6 +48,10 @@ internal sealed class HistoricalPriceCache
 		return map;
 	}
 
+	/// <summary>Parses either the two-column native format ("date,close") or Yahoo's seven-column
+	/// historical export ("Date,Open,High,Low,Close,Adj Close,Volume"). Skips the header row
+	/// regardless of format. When ≥5 columns are present, column index 4 (Close) is used; otherwise
+	/// column index 1.</summary>
 	private static Dictionary<DateTime, decimal> ParseCsv(string content)
 	{
 		var map = new Dictionary<DateTime, decimal>();
@@ -56,7 +60,8 @@ internal sealed class HistoricalPriceCache
 			var parts = line.Split(',');
 			if (parts.Length < 2) continue;
 			if (!DateTime.TryParseExact(parts[0], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
-			if (!decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var close)) continue;
+			var closeIdx = parts.Length >= 5 ? 4 : 1;
+			if (!decimal.TryParse(parts[closeIdx], NumberStyles.Any, CultureInfo.InvariantCulture, out var close)) continue;
 			map[d] = close;
 		}
 		return map;
