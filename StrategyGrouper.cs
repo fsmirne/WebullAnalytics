@@ -449,6 +449,7 @@ internal static class StrategyGrouper
 				// sibling's leg + sell-to-open on our new leg.
 				var ownQty = rows.Count > legStart ? rows[legStart].Qty : parent.Qty;
 				decimal rollCashTotal = 0m;
+				var rollTrades = new List<NetDebitTrade>();
 				foreach (var t in allTrades)
 				{
 					if (t.ParentStrategySeq.HasValue) continue;
@@ -456,7 +457,9 @@ internal static class StrategyGrouper
 					if (t.Asset != Asset.Option) continue;
 					if (!ownMatchKeys.Contains(t.MatchKey) && !siblingMatchKeys.Contains(t.MatchKey)) continue;
 					var sign = t.Side == Side.Sell ? 1m : -1m; // sell = credit, buy = debit
-					rollCashTotal += sign * t.Price * t.Qty * t.Multiplier;
+					var cashImpact = sign * t.Price * t.Qty * t.Multiplier;
+					rollCashTotal += cashImpact;
+					rollTrades.Add(new NetDebitTrade(t.Timestamp, t.Instrument, t.Side, t.Qty, t.Price, cashImpact));
 				}
 				// Per-own-contract-share (divide by 100 for per-share).
 				var rollCashPerShare = ownQty > 0 ? rollCashTotal / ownQty / 100m : 0m;
@@ -507,6 +510,15 @@ internal static class StrategyGrouper
 					AdjustedAvgPrice = parentAdjDisplay,
 					AvgPrice = parentAdjDisplay,
 				};
+
+				// Record a StrategyAdjustment so the breakdown panel can show the roll trades.
+				// Init debit = sibling-allocated basis × qty × multiplier; total debit = init − net roll credit.
+				if (rollTrades.Count > 0 && siblingRef != null)
+				{
+					var initDebitTotal = siblingRef.Value.parentAdj * ownQty * Trade.OptionMultiplier;
+					var totalNetDebit = initDebitTotal - rollCashTotal;
+					adjustments[parentIdx] = new StrategyAdjustment(rollTrades, totalNetDebit, null, initDebitTotal);
+				}
 			}
 		}
 
