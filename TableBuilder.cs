@@ -424,9 +424,13 @@ public static class TableBuilder
 				var initDebitText = Math.Abs(initDebit).ToString("N2", CultureInfo.InvariantCulture);
 				items.Add(new Text($"{initDebitLabel}: ${initDebitText} {(ascii ? "/" : "÷")} ({initQty} x $100) = ${initText}/contract"));
 
-				var netDebit = b.TotalNetDebit.Value;
-				var adjLabel = netDebit >= 0 ? "Adj Net Debit" : "Adj Net Credit";
-				var debitText = Math.Abs(netDebit).ToString("N2", CultureInfo.InvariantCulture);
+				// Adj Net Debit is derived from current Qty × AdjPrice so numerator, denominator,
+				// and per-contract result are self-consistent. Using the replay's TotalNetDebit
+				// (which is cumulative across the full position history) would mismatch the
+				// denominator when contracts have split off into a sibling group.
+				var adjDebit = (b.PositionSide == Side.Buy ? 1m : -1m) * b.AdjPrice.Value * b.Qty * 100m;
+				var adjLabel = adjDebit >= 0 ? "Adj Net Debit" : "Adj Net Credit";
+				var debitText = Math.Abs(adjDebit).ToString("N2", CultureInfo.InvariantCulture);
 				items.Add(new Text($"{adjLabel}: ${debitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${adjText}/contract"));
 
 				var perContractDiff = b.AdjPrice.Value - b.InitPrice;
