@@ -129,20 +129,23 @@ internal static class TimeDecayGridBuilder
 			for (int pi = 0; pi < priceRows.Count; pi++)
 			{
 				var price = priceRows[pi];
+				decimal perShareValue = 0m;
 				decimal totalDollarPnL = 0m;
 				for (int li = 0; li < optionLegs.Count; li++)
 				{
 					var l = optionLegs[li];
+					var legBs = OptionMath.LegContractValueWithBs(price, l.Parsed!, l.Symbol, l.Side, evalDate, opts);
+					var signed = l.Side == Side.Buy ? 1 : -1;
+					perShareValue += signed * legBs;
 					totalDollarPnL += OptionMath.LegPnLWithBs(price, l.Parsed!, l.Symbol, l.Side, l.Qty, l.Price, evalDate, opts);
 					if (legValues != null)
-						legValues[li, pi, di] = Math.Round(OptionMath.LegContractValueWithBs(price, l.Parsed!, l.Symbol, l.Side, evalDate, opts), 4);
+						legValues[li, pi, di] = Math.Round(legBs, 4);
 				}
 
-				// Synthetic qty=1 frame: value per share = netPremium + dollarPnL / 100.
-				var value = netPremium + totalDollarPnL / 100m;
-				values[pi, di] = Math.Round(value, 4);
-				var displayValue = Math.Round(values[pi, di], 2, MidpointRounding.AwayFromZero);
-				pnls[pi, di] = Math.Round((displayValue - netPremium) * 100m, 2);
+				// "value" cell: per-share signed spread value (matches per-leg value scale).
+				// "pnls" cell: total dollar P&L across all legs using each leg's own qty.
+				values[pi, di] = Math.Round(perShareValue, 4);
+				pnls[pi, di] = Math.Round(totalDollarPnL, 2);
 			}
 		}
 
@@ -171,15 +174,27 @@ internal static class TimeDecayGridBuilder
 					if (dist < closestDist) { closestDist = dist; closestRow = pi; }
 				}
 
-				var bsValue = values[closestRow, 0];
-				var adjustment = bsValue - marketMid.Value;
-				if (adjustment != 0)
+				var bsPerShareValue = values[closestRow, 0];
+				var perShareAdjustment = bsPerShareValue - marketMid.Value;
+
+				// Total dollar P&L adjustment: each leg's BS→mid gap scaled by its qty × 100.
+				decimal dollarPnLAdjustment = 0m;
+				for (int li = 0; li < optionLegs.Count; li++)
+				{
+					var l = optionLegs[li];
+					if (!opts.OptionQuotes.TryGetValue(l.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) continue;
+					var legMid = (q.Bid.Value + q.Ask.Value) / 2m;
+					var legBs = OptionMath.LegContractValueWithBs(priceRows[closestRow], l.Parsed!, l.Symbol, l.Side, dates[0], opts);
+					var signed = l.Side == Side.Buy ? 1 : -1;
+					dollarPnLAdjustment += signed * (legBs - legMid) * l.Qty * 100m;
+				}
+
+				if (perShareAdjustment != 0 || dollarPnLAdjustment != 0)
 				{
 					for (int pi = 0; pi < priceRows.Count; pi++)
 					{
-						values[pi, 0] = Math.Round(values[pi, 0] - adjustment, 4);
-						var adjDisplayValue = Math.Round(values[pi, 0], 2);
-						pnls[pi, 0] = Math.Round((adjDisplayValue - netPremium) * 100, 2);
+						values[pi, 0] = Math.Round(values[pi, 0] - perShareAdjustment, 4);
+						pnls[pi, 0] = Math.Round(pnls[pi, 0] - dollarPnLAdjustment, 2);
 					}
 				}
 
@@ -206,8 +221,8 @@ internal static class TimeDecayGridBuilder
 	}
 
 	/// <summary>
-	/// Signed market mid across merged option legs: each leg contributes qty × sign × mid,
-	/// scaled back to a per-share value consistent with netPremium.
+	/// Per-share signed market mid across merged option legs: each leg contributes sign × mid,
+	/// matching the per-share scale of the "value" cell.
 	/// </summary>
 	private static decimal? ComputeMergedMarketMid(List<MergedLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
@@ -217,8 +232,7 @@ internal static class TimeDecayGridBuilder
 			if (!quotes.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue)
 				return null;
 			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-			var signed = leg.Side == Side.Buy ? mid : -mid;
-			total += signed * leg.Qty;
+			total += leg.Side == Side.Buy ? mid : -mid;
 		}
 		return total;
 	}
