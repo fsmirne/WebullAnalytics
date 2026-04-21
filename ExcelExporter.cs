@@ -468,8 +468,29 @@ public static class ExcelExporter
 			row += 2; // blank separator rows
 		}
 
+		var combined = CombinedBreakEvenAnalyzer.Analyze(positionRows, opts);
+		var combinedByTicker = new Dictionary<string, BreakEvenResult>(StringComparer.Ordinal);
+		foreach (var c in combined)
+		{
+			var sp = c.Title.IndexOf(' ');
+			if (sp > 0) combinedByTicker[c.Title[..sp]] = c;
+		}
+
+		string? lastTicker = null;
 		foreach (var result in results)
+		{
+			var sp = result.Title.IndexOf(' ');
+			var ticker = sp > 0 ? result.Title[..sp] : null;
+			if (lastTicker != null && ticker != lastTicker && combinedByTicker.TryGetValue(lastTicker, out var prev))
+			{
+				WriteResult(prev);
+				combinedByTicker.Remove(lastTicker);
+			}
 			WriteResult(result);
+			lastTicker = ticker;
+		}
+		if (lastTicker != null && combinedByTicker.TryGetValue(lastTicker, out var finalCombined))
+			WriteResult(finalCombined);
 
 		sheet.Cells.AutoFitColumns();
 	}
