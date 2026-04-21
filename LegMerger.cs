@@ -50,11 +50,13 @@ internal static class LegMerger
 			if (row.Asset == Asset.Stock)
 			{
 				if (!buckets.TryGetValue(row.MatchKey, out var b))
+				{
 					b = new Bucket(row.Instrument, parsed: null, symbol: row.Instrument);
+					buckets[row.MatchKey] = b;
+				}
 				b.SignedQty += signedQty;
 				b.SignedValue += signedQty * price;
 				b.Sources.Add(row);
-				buckets[row.MatchKey] = b;
 				continue;
 			}
 
@@ -64,11 +66,13 @@ internal static class LegMerger
 				if (parsedInfo == null) continue;
 				var (parsed, symbol) = parsedInfo.Value;
 				if (!buckets.TryGetValue(row.MatchKey, out var b))
+				{
 					b = new Bucket(parsed.Root, parsed, symbol);
+					buckets[row.MatchKey] = b;
+				}
 				b.SignedQty += signedQty;
 				b.SignedValue += signedQty * price;
 				b.Sources.Add(row);
-				buckets[row.MatchKey] = b;
 			}
 		}
 
