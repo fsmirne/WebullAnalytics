@@ -512,10 +512,15 @@ public static class TableBuilder
 	/// is available, uses Black-Scholes pricing; otherwise uses market mid prices from Yahoo quotes.
 	/// Returns null if no pricing source is available, or if the report is pinned to a past
 	/// snapshot date (via --until) — historical positions can't be valued with today's quotes.
+	///
+	/// Iterates raw FIFO lots (not the aggregated PositionRow) so cost basis stays consistent
+	/// with how realized P&L is accounted. Using PositionRow.AvgPrice or AdjustedAvgPrice would
+	/// mix weighted-average basis (or roll-credit-adjusted strategy basis) with FIFO realized,
+	/// double-counting credits that are already captured in the realized total.
 	/// </summary>
-	public static decimal? ComputeUnrealizedPnL(List<PositionRow> positions, AnalysisOptions opts)
+	public static decimal? ComputeUnrealizedPnL(Dictionary<string, List<Lot>> lotsByMatchKey, AnalysisOptions opts)
 	{
-		if (positions.Count == 0)
+		if (lotsByMatchKey.Count == 0)
 			return null;
 
 		if (EvaluationDate.Today < DateTime.Today)
@@ -525,13 +530,12 @@ public static class TableBuilder
 		decimal total = 0;
 		bool anyPriced = false;
 
-		foreach (var pos in positions)
+		foreach (var (matchKey, lots) in lotsByMatchKey)
 		{
-			// Skip strategy parents — their value is captured via legs
-			if (pos.Asset == Asset.OptionStrategy)
+			if (lots.Count == 0)
 				continue;
 
-			if (pos.MatchKey == null || !MatchKeys.TryGetOptionSymbol(pos.MatchKey, out var symbol))
+			if (!MatchKeys.TryGetOptionSymbol(matchKey, out var symbol))
 				continue;
 
 			var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
@@ -541,7 +545,8 @@ public static class TableBuilder
 			decimal currentValue;
 			if (opts.Theoretical)
 			{
-				var iv = OptionMath.GetLegIv(pos.Side, symbol, opts);
+				var sideForIv = lots[0].Side;
+				var iv = OptionMath.GetLegIv(sideForIv, symbol, opts);
 				var spot = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var op) ? op : opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var up) ? up : (decimal?)null;
 				if (!iv.HasValue || !spot.HasValue)
 					continue;
@@ -556,10 +561,13 @@ public static class TableBuilder
 				currentValue = (quote.Bid.Value + quote.Ask.Value) / 2m;
 			}
 
-			var premium = pos.AdjustedAvgPrice ?? pos.AvgPrice;
-			var multiplier = pos.Asset == Asset.Stock ? Trade.StockMultiplier : Trade.OptionMultiplier;
-			var unrealized = pos.Side == Side.Buy ? (currentValue - premium) * pos.Qty * multiplier : (premium - currentValue) * pos.Qty * multiplier;
-			total += unrealized;
+			foreach (var lot in lots)
+			{
+				var unrealized = lot.Side == Side.Buy
+					? (currentValue - lot.Price) * lot.Qty * Trade.OptionMultiplier
+					: (lot.Price - currentValue) * lot.Qty * Trade.OptionMultiplier;
+				total += unrealized;
+			}
 			anyPriced = true;
 		}
 
