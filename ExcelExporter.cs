@@ -6,7 +6,7 @@ namespace WebullAnalytics;
 
 public static class ExcelExporter
 {
-	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, decimal finalPnL, decimal initialAmount, string outputPath, AnalysisOptions opts)
+	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, Dictionary<string, List<Lot>> lotsByMatchKey, decimal finalPnL, decimal initialAmount, string outputPath, AnalysisOptions opts)
 	{
 		// EPPlus requires a license context
 		ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
@@ -20,7 +20,7 @@ public static class ExcelExporter
 		var breakEvenSheet = package.Workbook.Worksheets.Add("Break-Even Analysis");
 
 		// Export transaction report
-		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(positionRows, opts);
+		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(lotsByMatchKey, opts);
 		ExportTransactions(transactionSheet, reportRows, finalPnL, initialAmount, unrealizedPnL);
 
 		// Export open positions

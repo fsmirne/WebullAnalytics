@@ -9,7 +9,7 @@ public static class TableRenderer
 {
 	private const string LegPrefix = "  └─ ";
 
-	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, decimal running, decimal initialAmount, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null, bool showLegs = false)
+	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, Dictionary<string, List<Lot>> lotsByMatchKey, decimal running, decimal initialAmount, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null, bool showLegs = false)
 	{
 		var console = AnsiConsole.Console;
 
@@ -65,7 +65,7 @@ public static class TableRenderer
 			console.WriteLine("No open positions.");
 		}
 
-		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(positions, opts);
+		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(lotsByMatchKey, opts);
 		TableBuilder.RenderSummary(console, rows, running, initialAmount, unrealizedPnL);
 	}
 
