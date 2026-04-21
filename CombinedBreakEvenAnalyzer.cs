@@ -240,11 +240,13 @@ public static class CombinedBreakEvenAnalyzer
 
 	private static bool HasIvForUnexpiredLegs(List<MergedLeg> optionLegs, DateTime evaluationExpiry, AnalysisOptions opts)
 	{
-		if (opts.IvOverrides != null && optionLegs.Any(l => opts.IvOverrides.ContainsKey(l.Symbol))) return true;
-		if (opts.OptionQuotes == null) return false;
+		if (opts.OptionQuotes == null && opts.IvOverrides == null) return false;
 
 		var unexpired = optionLegs.Where(l => l.Parsed!.ExpiryDate.Date > evaluationExpiry.Date).ToList();
 		if (unexpired.Count == 0) return true;
+
+		if (opts.IvOverrides != null && unexpired.All(l => opts.IvOverrides.ContainsKey(l.Symbol))) return true;
+		if (opts.OptionQuotes == null) return false;
 		return unexpired.All(l => OptionMath.GetLegIv(l.Side, l.Symbol, opts).HasValue);
 	}
 
