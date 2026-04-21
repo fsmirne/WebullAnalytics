@@ -101,6 +101,39 @@ public static class CombinedBreakEvenAnalyzer
 			detailsParts.Add($"DTE {dte}");
 		}
 		if (hasMixedExpiries) detailsParts.Add("mixed expiries");
+
+		// Net adj basis across all merged option legs: Σ signed × qty × price × 100.
+		// Positive = net debit paid to establish; negative = net credit received.
+		decimal totalAdjDollars = 0m;
+		foreach (var leg in optionLegs)
+		{
+			var signed = leg.Side == Side.Buy ? 1 : -1;
+			totalAdjDollars += signed * leg.Qty * leg.Price * 100m;
+		}
+		if (optionLegs.Count > 0)
+		{
+			var longQty = optionLegs.Where(l => l.Side == Side.Buy).Sum(l => l.Qty);
+			var shortQty = optionLegs.Where(l => l.Side == Side.Sell).Sum(l => l.Qty);
+			var pairQty = Math.Min(longQty, shortQty);
+			var direction = totalAdjDollars >= 0 ? "Net Debit" : "Net Credit";
+			var totalText = Math.Abs(totalAdjDollars).ToString("N2", CultureInfo.InvariantCulture);
+			if (pairQty > 0)
+			{
+				// Balanced or partly balanced: quote as per-spread basis using the matched-pair count.
+				var perShare = Math.Abs(totalAdjDollars) / (pairQty * 100m);
+				var perShareText = Formatters.FormatPrice(perShare, Asset.Option);
+				detailsParts.Add($"{pairQty}x @ ${perShareText} adj, {direction} ${totalText}");
+			}
+			else
+			{
+				// Single-sided: no natural pair count; omit qty and show per-share weighted average.
+				var totalQty = optionLegs.Sum(l => l.Qty);
+				var perShare = totalQty > 0 ? Math.Abs(totalAdjDollars) / (totalQty * 100m) : 0m;
+				var perShareText = Formatters.FormatPrice(perShare, Asset.Option);
+				detailsParts.Add($"@ ${perShareText} adj, {direction} ${totalText}");
+			}
+		}
+
 		var details = string.Join(" · ", detailsParts);
 
 		int? daysToExpiry = nearestExpiry.HasValue ? (int)(nearestExpiry.Value.Date - EvaluationDate.Today).TotalDays : null;
