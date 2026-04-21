@@ -44,11 +44,35 @@ public static partial class TextFileExporter
 
 			var maxGridColumns = TableBuilder.ComputeMaxGridColumns(200, displayMode, showLegs);
 			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns);
-			foreach (var result in breakEvens)
+			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns);
+			var combinedByTicker = new Dictionary<string, BreakEvenResult>(StringComparer.Ordinal);
+			foreach (var c in combined)
 			{
-				console.Write(TableBuilder.BuildBreakEvenPanel(result, Spectre.Console.BoxBorder.Ascii, TableBorder.Ascii, ascii: true, displayMode: displayMode, showLegs: showLegs));
+				var sp = c.Title.IndexOf(' ');
+				if (sp > 0) combinedByTicker[c.Title[..sp]] = c;
+			}
+
+			void WriteResult(BreakEvenResult r)
+			{
+				console.Write(TableBuilder.BuildBreakEvenPanel(r, Spectre.Console.BoxBorder.Ascii, TableBorder.Ascii, ascii: true, displayMode: displayMode, showLegs: showLegs));
 				console.WriteLine();
 			}
+
+			string? lastTicker = null;
+			foreach (var result in breakEvens)
+			{
+				var sp = result.Title.IndexOf(' ');
+				var ticker = sp > 0 ? result.Title[..sp] : null;
+				if (lastTicker != null && ticker != lastTicker && combinedByTicker.TryGetValue(lastTicker, out var prev))
+				{
+					WriteResult(prev);
+					combinedByTicker.Remove(lastTicker);
+				}
+				WriteResult(result);
+				lastTicker = ticker;
+			}
+			if (lastTicker != null && combinedByTicker.TryGetValue(lastTicker, out var finalCombined))
+				WriteResult(finalCombined);
 		}
 		else
 		{
