@@ -16,9 +16,7 @@ public static class CombinedBreakEvenAnalyzer
 		var byTicker = new Dictionary<string, List<List<PositionRow>>>(StringComparer.Ordinal);
 		foreach (var unit in units)
 		{
-			var parent = unit[0];
-			if (parent.MatchKey == null) continue;
-			var ticker = MatchKeys.GetTicker(parent.MatchKey);
+			var ticker = GetUnitTicker(unit);
 			if (ticker == null) continue;
 			if (!byTicker.TryGetValue(ticker, out var list))
 			{
@@ -42,6 +40,21 @@ public static class CombinedBreakEvenAnalyzer
 			if (result != null) results.Add(result);
 		}
 		return results;
+	}
+
+	/// <summary>
+	/// Derives the ticker for a unit. Strategy parent rows are constructed without a
+	/// MatchKey, so we scan every row in the unit and take the first parseable MatchKey.
+	/// </summary>
+	private static string? GetUnitTicker(List<PositionRow> unit)
+	{
+		foreach (var row in unit)
+		{
+			if (row.MatchKey == null) continue;
+			var ticker = MatchKeys.GetTicker(row.MatchKey);
+			if (ticker != null) return ticker;
+		}
+		return null;
 	}
 
 	/// <summary>
