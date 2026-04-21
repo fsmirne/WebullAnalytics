@@ -103,6 +103,127 @@ internal static class TimeDecayGridBuilder
 	}
 
 	/// <summary>
+	/// Builds a 2D grid for merged legs where each leg carries its own signed quantity
+	/// (as produced by <see cref="LegMerger"/>). Unlike the uniform-qty overload, signs
+	/// and magnitudes are baked per leg, so no parentSide flip is applied.
+	/// Stock legs are not rendered as grid rows; callers add stock P&L to net cells
+	/// after this method returns.
+	/// </summary>
+	internal static TimeDecayGrid Build(List<MergedLeg> mergedLegs, decimal netPremium, DateTime latestExpiry, AnalysisOptions opts, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns, decimal? underlyingPrice)
+	{
+		// Only option legs participate in the grid math; stock is a linear overlay added by the caller.
+		var optionLegs = mergedLegs.Where(l => !l.IsStock).ToList();
+
+		var dates = BuildDateColumns(latestExpiry, maxColumns);
+		var strikes = optionLegs.Select(l => l.Parsed!.Strike).Distinct().ToList();
+		var priceRows = BuildPriceRows(centerPrice, padding, breakEvens, strikes);
+
+		var values = new decimal[priceRows.Count, dates.Count];
+		var pnls = new decimal[priceRows.Count, dates.Count];
+		var includeLegs = optionLegs.Count > 1;
+		var legValues = includeLegs ? new decimal[optionLegs.Count, priceRows.Count, dates.Count] : null;
+
+		for (int di = 0; di < dates.Count; di++)
+		{
+			var evalDate = dates[di];
+			for (int pi = 0; pi < priceRows.Count; pi++)
+			{
+				var price = priceRows[pi];
+				decimal totalDollarPnL = 0m;
+				for (int li = 0; li < optionLegs.Count; li++)
+				{
+					var l = optionLegs[li];
+					totalDollarPnL += OptionMath.LegPnLWithBs(price, l.Parsed!, l.Symbol, l.Side, l.Qty, l.Price, evalDate, opts);
+					if (legValues != null)
+						legValues[li, pi, di] = Math.Round(OptionMath.LegContractValueWithBs(price, l.Parsed!, l.Symbol, l.Side, evalDate, opts), 4);
+				}
+
+				// Synthetic qty=1 frame: value per share = netPremium + dollarPnL / 100.
+				var value = netPremium + totalDollarPnL / 100m;
+				values[pi, di] = Math.Round(value, 4);
+				var displayValue = Math.Round(values[pi, di], 2, MidpointRounding.AwayFromZero);
+				pnls[pi, di] = Math.Round((displayValue - netPremium) * 100m, 2);
+			}
+		}
+
+		List<string>? legLabels = null;
+		if (includeLegs)
+		{
+			legLabels = new List<string>(optionLegs.Count);
+			foreach (var l in optionLegs)
+			{
+				var sideStr = l.Side == Side.Buy ? "L" : "S";
+				legLabels.Add($"{sideStr}{l.Parsed!.CallPut}{l.Parsed!.Strike.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}");
+			}
+		}
+
+		// Anchor the first column (today) to market bid/ask mid if all merged option legs have quotes.
+		if (!opts.Theoretical && opts.OptionQuotes != null && underlyingPrice.HasValue)
+		{
+			var marketMid = ComputeMergedMarketMid(optionLegs, opts.OptionQuotes);
+			if (marketMid.HasValue)
+			{
+				int closestRow = 0;
+				var closestDist = decimal.MaxValue;
+				for (int pi = 0; pi < priceRows.Count; pi++)
+				{
+					var dist = Math.Abs(priceRows[pi] - underlyingPrice.Value);
+					if (dist < closestDist) { closestDist = dist; closestRow = pi; }
+				}
+
+				var bsValue = values[closestRow, 0];
+				var adjustment = bsValue - marketMid.Value;
+				if (adjustment != 0)
+				{
+					for (int pi = 0; pi < priceRows.Count; pi++)
+					{
+						values[pi, 0] = Math.Round(values[pi, 0] - adjustment, 4);
+						var adjDisplayValue = Math.Round(values[pi, 0], 2);
+						pnls[pi, 0] = Math.Round((adjDisplayValue - netPremium) * 100, 2);
+					}
+				}
+
+				if (legValues != null)
+				{
+					for (int li = 0; li < optionLegs.Count; li++)
+					{
+						var l = optionLegs[li];
+						if (!opts.OptionQuotes.TryGetValue(l.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) continue;
+						var legMid = (q.Bid.Value + q.Ask.Value) / 2m;
+						var legBs = legValues[li, closestRow, 0];
+						var legAdj = legBs - legMid;
+						if (legAdj != 0)
+						{
+							for (int pi = 0; pi < priceRows.Count; pi++)
+								legValues[li, pi, 0] = Math.Round(legValues[li, pi, 0] - legAdj, 4);
+						}
+					}
+				}
+			}
+		}
+
+		return new TimeDecayGrid(dates, priceRows, values, pnls, strikes, legValues, legLabels);
+	}
+
+	/// <summary>
+	/// Signed market mid across merged option legs: each leg contributes qty × sign × mid,
+	/// scaled back to a per-share value consistent with netPremium.
+	/// </summary>
+	private static decimal? ComputeMergedMarketMid(List<MergedLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		decimal total = 0m;
+		foreach (var leg in legs)
+		{
+			if (!quotes.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue)
+				return null;
+			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+			var signed = leg.Side == Side.Buy ? mid : -mid;
+			total += signed * leg.Qty;
+		}
+		return total;
+	}
+
+	/// <summary>
 	/// Generates evenly-spaced date columns from today to expiration.
 	/// The last two columns are expiration day at market open and market close.
 	/// Slots are filled by priority: trading days first, then holidays, then weekends.
