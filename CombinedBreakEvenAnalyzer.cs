@@ -79,18 +79,18 @@ public static class CombinedBreakEvenAnalyzer
 		var optionLegs = merged.Where(l => !l.IsStock).ToList();
 		var stockLeg = merged.FirstOrDefault(l => l.IsStock);
 
-		// Net premium in the synthetic qty=1 frame: Σ(signedQty × price) across option legs.
+		// Per-share net premium: Σ(signed × price) across option legs, unweighted by qty so
+		// the grid's "value" column stays on the same per-share scale as the per-leg values.
 		decimal netPremium = 0m;
 		foreach (var leg in optionLegs)
 		{
 			var signed = leg.Side == Side.Buy ? 1 : -1;
-			netPremium += signed * leg.Qty * leg.Price;
+			netPremium += signed * leg.Price;
 		}
 
 		var title = BuildTitle(ticker, merged);
 
 		DateTime? nearestExpiry = optionLegs.Count > 0 ? optionLegs.Min(l => l.Parsed!.ExpiryDate) : null;
-		DateTime? latestExpiry = optionLegs.Count > 0 ? optionLegs.Max(l => l.Parsed!.ExpiryDate) : null;
 		var hasMixedExpiries = optionLegs.Count > 0 && optionLegs.Select(l => l.Parsed!.ExpiryDate.Date).Distinct().Count() > 1;
 
 		var detailsParts = new List<string> { $"{unitCount} positions" };
@@ -161,12 +161,12 @@ public static class CombinedBreakEvenAnalyzer
 		var chartData = OptionMath.BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
 		TimeDecayGrid? grid = null;
-		if (optionLegs.Count > 0 && latestExpiry.HasValue && canComputeBsAtNearest)
+		if (optionLegs.Count > 0 && nearestExpiry.HasValue && canComputeBsAtNearest)
 		{
 			var gridNotable = new List<decimal>(breakEvens);
 			if (spot.HasValue) gridNotable.Add(spot.Value);
 			gridNotable.AddRange(LookupExtraNotablePrices(ticker, opts));
-			grid = TimeDecayGridBuilder.Build(merged, netPremium, latestExpiry.Value, opts, padding, centerPrice, gridNotable, maxGridColumns, spot);
+			grid = TimeDecayGridBuilder.Build(merged, netPremium, nearestExpiry.Value, opts, padding, centerPrice, gridNotable, maxGridColumns, spot);
 
 			if (stockLeg != null)
 			{
@@ -205,22 +205,13 @@ public static class CombinedBreakEvenAnalyzer
 
 	private static string BuildTitle(string ticker, List<MergedLeg> merged)
 	{
-		var descriptors = new List<string>();
+		var symbols = new List<string>();
 		foreach (var leg in merged)
 		{
-			if (leg.IsStock)
-			{
-				var sideWord = leg.Side == Side.Buy ? "sh" : "sh short";
-				descriptors.Add($"{leg.Qty} {sideWord} Stock");
-			}
-			else
-			{
-				var sideWord = leg.Side == Side.Buy ? "Long" : "Short";
-				var kind = ParsingHelpers.CallPutDisplayName(leg.Parsed!.CallPut);
-				descriptors.Add($"{sideWord} {leg.Qty}× {kind} ${Formatters.FormatQty(leg.Parsed.Strike)}");
-			}
+			if (leg.IsStock) symbols.Add(ticker);
+			else symbols.Add(leg.Symbol);
 		}
-		return $"{ticker} Combined — {string.Join(", ", descriptors)}";
+		return $"{ticker} Combined — [{string.Join(", ", symbols)}]";
 	}
 
 	private static List<string> BuildLegDescriptions(List<MergedLeg> merged, AnalysisOptions opts)
