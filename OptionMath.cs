@@ -96,6 +96,22 @@ internal static class OptionMath
 	internal static decimal StrategyPnLWithBs(decimal underlyingPrice, List<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty, DateTime evaluationDate, AnalysisOptions opts) =>
 		legs.Sum(l => LegPnLWithBs(underlyingPrice, l.parsed, l.symbol, l.row.Side, qty, GetPremium(l.row), evaluationDate, opts));
 
+	/// <summary>
+	/// Computes total P&L across merged legs where each leg has its own net qty.
+	/// Used by the combined break-even analyzer. Unlike <see cref="StrategyPnLWithBs"/>,
+	/// this does not assume a uniform per-leg quantity.
+	/// </summary>
+	internal static decimal StrategyPnLWithBsMixed(decimal underlyingPrice, List<MergedLeg> legs, DateTime evaluationDate, AnalysisOptions opts)
+	{
+		decimal total = 0m;
+		foreach (var leg in legs)
+		{
+			if (leg.IsStock) continue;
+			total += LegPnLWithBs(underlyingPrice, leg.Parsed!, leg.Symbol, leg.Side, leg.Qty, leg.Price, evaluationDate, opts);
+		}
+		return total;
+	}
+
 	// --- IV Lookup ---
 
 	internal static decimal? GetLegIv(Side side, string symbol, AnalysisOptions opts)
