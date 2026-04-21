@@ -45,7 +45,7 @@ internal static class LegMerger
 			if (row.MatchKey == null) continue;
 
 			var signedQty = row.Side == Side.Buy ? row.Qty : -row.Qty;
-			var price = row.AdjustedAvgPrice ?? row.InitialAvgPrice ?? row.AvgPrice;
+			var price = row.AdjustedAvgPrice ?? row.AvgPrice;
 
 			if (row.Asset == Asset.Stock)
 			{
