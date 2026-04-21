@@ -79,13 +79,27 @@ public static class CombinedBreakEvenAnalyzer
 		var optionLegs = merged.Where(l => !l.IsStock).ToList();
 		var stockLeg = merged.FirstOrDefault(l => l.IsStock);
 
-		// Per-share net premium: Σ(signed × price) across option legs, unweighted by qty so
-		// the grid's "value" column stays on the same per-share scale as the per-leg values.
+		// Normalizing qty keeps the grid "value" column on the same per-pair scale as the adj basis
+		// displayed in the details line: balanced / partly balanced portfolios quote per matched pair;
+		// single-sided portfolios quote per weighted contract.
+		var longQty = optionLegs.Where(l => l.Side == Side.Buy).Sum(l => l.Qty);
+		var shortQty = optionLegs.Where(l => l.Side == Side.Sell).Sum(l => l.Qty);
+		var pairQty = Math.Min(longQty, shortQty);
+		var totalQty = optionLegs.Sum(l => l.Qty);
+		var normalizingQty = pairQty > 0 ? pairQty : totalQty;
+
+		// Per-pair net premium: Σ signed × (legQty / normalizingQty) × legPrice.
+		// The grid cell uses (displayValue − netPremium) × normalizingQty × 100 to derive pnl,
+		// so colors stay consistent with the rounded display value.
 		decimal netPremium = 0m;
-		foreach (var leg in optionLegs)
+		if (normalizingQty > 0)
 		{
-			var signed = leg.Side == Side.Buy ? 1 : -1;
-			netPremium += signed * leg.Price;
+			foreach (var leg in optionLegs)
+			{
+				var signed = leg.Side == Side.Buy ? 1 : -1;
+				var weight = (decimal)leg.Qty / normalizingQty;
+				netPremium += signed * weight * leg.Price;
+			}
 		}
 
 		var title = BuildTitle(ticker, merged);
@@ -112,9 +126,6 @@ public static class CombinedBreakEvenAnalyzer
 		}
 		if (optionLegs.Count > 0)
 		{
-			var longQty = optionLegs.Where(l => l.Side == Side.Buy).Sum(l => l.Qty);
-			var shortQty = optionLegs.Where(l => l.Side == Side.Sell).Sum(l => l.Qty);
-			var pairQty = Math.Min(longQty, shortQty);
 			var direction = totalAdjDollars >= 0 ? "Net Debit" : "Net Credit";
 			var totalText = Math.Abs(totalAdjDollars).ToString("N2", CultureInfo.InvariantCulture);
 			if (pairQty > 0)
@@ -127,7 +138,6 @@ public static class CombinedBreakEvenAnalyzer
 			else
 			{
 				// Single-sided: no natural pair count; omit qty and show per-share weighted average.
-				var totalQty = optionLegs.Sum(l => l.Qty);
 				var perShare = totalQty > 0 ? Math.Abs(totalAdjDollars) / (totalQty * 100m) : 0m;
 				var perShareText = Formatters.FormatPrice(perShare, Asset.Option);
 				detailsParts.Add($"@ ${perShareText} adj, {direction} ${totalText}");
@@ -199,7 +209,7 @@ public static class CombinedBreakEvenAnalyzer
 			var gridNotable = new List<decimal>(breakEvens);
 			if (spot.HasValue) gridNotable.Add(spot.Value);
 			gridNotable.AddRange(LookupExtraNotablePrices(ticker, opts));
-			grid = TimeDecayGridBuilder.Build(merged, netPremium, nearestExpiry.Value, opts, padding, centerPrice, gridNotable, maxGridColumns, spot);
+			grid = TimeDecayGridBuilder.Build(merged, netPremium, normalizingQty, nearestExpiry.Value, opts, padding, centerPrice, gridNotable, maxGridColumns, spot);
 
 			if (stockLeg != null)
 			{
