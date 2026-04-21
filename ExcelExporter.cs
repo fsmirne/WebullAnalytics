@@ -294,7 +294,8 @@ public static class ExcelExporter
 
 		int row = 1;
 		int chartIndex = 0;
-		foreach (var result in results)
+
+		void WriteResult(BreakEvenResult result)
 		{
 			int sectionStartRow = row;
 
@@ -466,6 +467,9 @@ public static class ExcelExporter
 
 			row += 2; // blank separator rows
 		}
+
+		foreach (var result in results)
+			WriteResult(result);
 
 		sheet.Cells.AutoFitColumns();
 	}
