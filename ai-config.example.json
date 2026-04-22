@@ -29,11 +29,21 @@
 			"enabled": true,
 			"minImprovementPerDayPerContract": 0.50,
 			"ivDefaultPct": 40,
-			"strikeStep": 0.50
+			"strikeStep": 0.50,
+			"technicalFilter": {
+				"enabled": true,
+				"lookbackDays": 20,
+				"smaWeight": 1.0,
+				"rsiWeight": 1.0,
+				"momentumWeight": 1.0,
+				"momentumDays": 5,
+				"bullishBlockThreshold": 0.25,
+				"bearishBlockThreshold": -0.25
+			}
 		},
 		"takeProfit": {
-			"enabled": false,
-			"pctOfMaxProfit": 40
+			"enabled": true,
+			"pctOfMaxProfit": 60
 		},
 		"defensiveRoll": {
 			"enabled": false,
