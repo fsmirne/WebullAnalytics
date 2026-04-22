@@ -102,12 +102,17 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
 		var now = DateTime.Now;
 
+		var priceCache = new Replay.HistoricalPriceCache();
+
 		var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
 		var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
 
 		var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
 
-		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, new Dictionary<string, TechnicalBias>());
+		var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(
+			tickerSet, priceCache, config.Rules.OpportunisticRoll.TechnicalFilter, now, cancellation);
+
+		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config), config);
 
 		using var sink = new ProposalSink(config.Log, mode: "once");
