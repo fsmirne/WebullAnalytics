@@ -333,31 +333,68 @@ public static class YahooOptionsClient
 
 	public static async Task<Dictionary<DateTime, decimal>> FetchHistoricalClosesAsync(string ticker, DateTime from, DateTime to, CancellationToken cancellation)
 	{
-		// Yahoo's v7/finance/download endpoint may 401 without auth. If the fetch fails, return empty.
-		var url = $"https://query1.finance.yahoo.com/v7/finance/download/{Uri.EscapeDataString(ticker)}"
-			+ $"?period1={new DateTimeOffset(from).ToUnixTimeSeconds()}"
-			+ $"&period2={new DateTimeOffset(to).ToUnixTimeSeconds()}&interval=1d&events=history";
+		var yahoTicker = ToYahooTicker(ticker);
+		var period1 = new DateTimeOffset(from, TimeSpan.Zero).ToUnixTimeSeconds();
+		var period2 = new DateTimeOffset(to, TimeSpan.Zero).ToUnixTimeSeconds();
 
-		var result = new Dictionary<DateTime, decimal>();
-		try
+		var handler = new HttpClientHandler { CookieContainer = new System.Net.CookieContainer(), AutomaticDecompression = System.Net.DecompressionMethods.All };
+		using var client = new HttpClient(handler);
+		client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebullAnalytics/1.0");
+		client.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/plain, */*");
+		client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+
+		string? crumb = null;
+		var result = await FetchHistoricalClosesAsync(client, yahoTicker, period1, period2, crumb, cancellation);
+		if (result == null)
 		{
-			using var http = new HttpClient();
-			http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (WebullAnalytics)");
-			var csv = await http.GetStringAsync(url, cancellation);
-
-			foreach (var line in csv.Split('\n').Skip(1))
-			{
-				var parts = line.Split(',');
-				if (parts.Length < 5) continue;
-				if (!DateTime.TryParseExact(parts[0], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
-				if (!decimal.TryParse(parts[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var close)) continue;
-				result[d] = close;
-			}
+			crumb = await TryGetCrumbAsync(client, cancellation);
+			result = await FetchHistoricalClosesAsync(client, yahoTicker, period1, period2, crumb, cancellation);
 		}
-		catch (HttpRequestException ex)
+
+		if (result == null)
 		{
-			Console.Error.WriteLine($"Warning: Yahoo historical fetch for {ticker} failed: {ex.Message}. Cache will be empty.");
+			Console.Error.WriteLine($"Warning: Yahoo historical fetch for {ticker} failed. Cache will be empty.");
+			return new Dictionary<DateTime, decimal>();
 		}
 		return result;
+	}
+
+	private static async Task<Dictionary<DateTime, decimal>?> FetchHistoricalClosesAsync(HttpClient client, string ticker, long period1, long period2, string? crumb, CancellationToken cancellation)
+	{
+		try
+		{
+			var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(ticker)}?period1={period1}&period2={period2}&interval=1d&events=history";
+			if (!string.IsNullOrWhiteSpace(crumb)) url += $"&crumb={Uri.EscapeDataString(crumb)}";
+			var request = new HttpRequestMessage(HttpMethod.Get, url);
+			request.Headers.Referrer = new Uri($"https://finance.yahoo.com/quote/{Uri.EscapeDataString(ticker)}/history/");
+			using var response = await client.SendAsync(request, cancellation);
+			if (!response.IsSuccessStatusCode) return null;
+
+			var json = await response.Content.ReadAsStringAsync(cancellation);
+			using var doc = JsonDocument.Parse(json);
+			if (!doc.RootElement.TryGetProperty("chart", out var chart)) return null;
+			if (!chart.TryGetProperty("result", out var resultArr) || resultArr.ValueKind != JsonValueKind.Array || resultArr.GetArrayLength() == 0) return null;
+			var series = resultArr[0];
+			if (!series.TryGetProperty("timestamp", out var tsArr)) return null;
+			if (!series.TryGetProperty("indicators", out var indicators)) return null;
+			if (!indicators.TryGetProperty("quote", out var quoteArr) || quoteArr.GetArrayLength() == 0) return null;
+			if (!quoteArr[0].TryGetProperty("close", out var closeArr)) return null;
+
+			var map = new Dictionary<DateTime, decimal>();
+			var timestamps = tsArr.EnumerateArray().ToArray();
+			var closes = closeArr.EnumerateArray().ToArray();
+			for (int i = 0; i < Math.Min(timestamps.Length, closes.Length); i++)
+			{
+				if (closes[i].ValueKind == JsonValueKind.Null) continue;
+				if (!closes[i].TryGetDecimal(out var close)) continue;
+				var date = DateTimeOffset.FromUnixTimeSeconds(timestamps[i].GetInt64()).UtcDateTime.Date;
+				map[date] = close;
+			}
+			return map;
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			return null;
+		}
 	}
 }
