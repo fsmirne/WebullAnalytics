@@ -1,3 +1,4 @@
+using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.Sources;
 
 namespace WebullAnalytics.AI;
@@ -54,5 +55,26 @@ internal static class AIPipelineHelper
 		var merged = new Dictionary<string, OptionContractQuote>(phase1.Options, StringComparer.OrdinalIgnoreCase);
 		foreach (var (k, v) in phase2.Options) merged[k] = v;
 		return new QuoteSnapshot(merged, phase1.Underlyings);
+	}
+
+	/// <summary>Fetches recent daily closes per ticker and computes a composite technical bias.
+	/// Returns an empty dict when filter is disabled. Missing tickers (insufficient data) are omitted —
+	/// rules treat a missing entry as neutral.</summary>
+	public static async Task<IReadOnlyDictionary<string, TechnicalBias>> ComputeTechnicalSignalsAsync(
+		IReadOnlySet<string> tickers,
+		HistoricalPriceCache priceCache,
+		TechnicalFilterConfig filter,
+		DateTime asOf,
+		CancellationToken cancellation)
+	{
+		var result = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
+		if (!filter.Enabled) return result;
+		foreach (var ticker in tickers)
+		{
+			var closes = await priceCache.GetRecentClosesAsync(ticker, filter.LookbackDays, asOf, cancellation);
+			var bias = TechnicalIndicators.Compute(closes, filter);
+			if (bias != null) result[ticker] = bias;
+		}
+		return result;
 	}
 }
