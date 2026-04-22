@@ -37,6 +37,14 @@ internal sealed class OpportunisticRollRule : IManagementRule
 
 		if (!ctx.UnderlyingPrices.TryGetValue(position.Ticker, out var spot) || spot <= 0m) return null;
 
+		var shortLeg = legInfos.FirstOrDefault(l => !l.IsLong);
+		var callPut = shortLeg?.Parsed.CallPut ?? legInfos[0].Parsed.CallPut;
+
+		if (_config.TechnicalFilter.Enabled
+			&& ctx.TechnicalSignals.TryGetValue(position.Ticker, out var bias)
+			&& bias.IsAdverse(callPut, _config.TechnicalFilter.BullishBlockThreshold, _config.TechnicalFilter.BearishBlockThreshold))
+			return null;
+
 		var availableCash = Math.Max(0m, ctx.AccountCash - CashReserveHelper.ComputeReserve("percent", 0m, ctx.AccountValue));
 		var opt = new ScenarioEngine.EvaluateOptions(
 			InitialNetDebitPerShare: position.AdjustedNetDebit,
@@ -73,7 +81,8 @@ internal sealed class OpportunisticRollRule : IManagementRule
 
 		// Build the proposal.
 		var netDebitPerContract = topFundable.CashImpactPerContract;
-		var rationale = $"optimizer: {topFundable.Name} projects ${topPerDay:+0.00;-0.00}/ct/day vs hold ${holdPerDay:+0.00;-0.00}/ct/day (Δ ${improvementPerDayPerContract:+0.00;-0.00}/ct/day over {topFundable.DaysToTarget}d). {topFundable.Rationale}";
+		var biasNote = ctx.TechnicalSignals.TryGetValue(position.Ticker, out var biasFired) ? $" [tech score {biasFired.Score:+0.00;-0.00}]" : "";
+		var rationale = $"optimizer: {topFundable.Name} projects ${topPerDay:+0.00;-0.00}/ct/day vs hold ${holdPerDay:+0.00;-0.00}/ct/day (Δ ${improvementPerDayPerContract:+0.00;-0.00}/ct/day over {topFundable.DaysToTarget}d){biasNote}. {topFundable.Rationale}";
 
 		return new ManagementProposal(
 			Rule: "OpportunisticRollRule",
