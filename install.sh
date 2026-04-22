@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Webull Analytics
+# Install wa (Webull Analytics)
 # Builds the project and copies the executable to the install directory.
 # Adds the install directory to the user's PATH if not already present.
 #
@@ -12,7 +12,7 @@ set -euo pipefail
 INSTALL_DIR="${1:-$HOME/.local/bin}"
 
 echo "============================================"
-echo " Webull Analytics Installer (Linux)"
+echo " wa (Webull Analytics) Installer (Linux)"
 echo "============================================"
 echo
 echo "Install directory: $INSTALL_DIR"
@@ -39,9 +39,9 @@ echo
 mkdir -p "$INSTALL_DIR"
 
 # Copy the executable
-echo "Copying WebullAnalytics to $INSTALL_DIR..."
-cp -f "bin/Release/net10.0/linux-x64/publish/WebullAnalytics" "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/WebullAnalytics"
+echo "Copying wa to $INSTALL_DIR..."
+cp -f "bin/Release/net10.0/linux-x64/publish/wa" "$INSTALL_DIR/"
+chmod +x "$INSTALL_DIR/wa"
 
 # Create data directory if it doesn't exist
 mkdir -p "$INSTALL_DIR/data"
@@ -74,5 +74,5 @@ echo "============================================"
 echo " Installation complete!"
 echo "============================================"
 echo
-echo "You can now run: WebullAnalytics"
+echo "You can now run: wa"
 echo

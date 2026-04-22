@@ -1,7 +1,7 @@
 @echo off
-REM Build Webull Analytics
+REM Build wa (Webull Analytics)
 
-echo Building Webull Analytics...
+echo Building wa (Webull Analytics)...
 echo.
 
 REM Check if dotnet is installed

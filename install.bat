@@ -1,19 +1,19 @@
 @echo off
-REM Install Webull Analytics
+REM Install wa (Webull Analytics)
 REM Builds the project and copies the executable to the install directory.
 REM Adds the install directory to the user's PATH if not already present.
 REM
 REM Usage:
-REM   install.bat              - installs to %LOCALAPPDATA%\WebullAnalytics
+REM   install.bat              - installs to %LOCALAPPDATA%\wa
 REM   install.bat "C:\mydir"   - installs to the specified directory
 
 setlocal enabledelayedexpansion
 
 set "INSTALL_DIR=%~1"
-if "%INSTALL_DIR%"=="" set "INSTALL_DIR=%LOCALAPPDATA%\WebullAnalytics"
+if "%INSTALL_DIR%"=="" set "INSTALL_DIR=%LOCALAPPDATA%\wa"
 
 echo ============================================
-echo  Webull Analytics Installer
+echo  wa (Webull Analytics) Installer
 echo ============================================
 echo.
 echo Install directory: %INSTALL_DIR%
@@ -56,8 +56,8 @@ if not exist "%INSTALL_DIR%" (
 )
 
 REM Copy the executable
-echo Copying WebullAnalytics.exe to %INSTALL_DIR%...
-copy /y "bin\Release\net10.0\win-x64\publish\WebullAnalytics.exe" "%INSTALL_DIR%\" >nul
+echo Copying wa.exe to %INSTALL_DIR%...
+copy /y "bin\Release\net10.0\win-x64\publish\wa.exe" "%INSTALL_DIR%\" >nul
 if %errorLevel% neq 0 (
     echo ERROR: Failed to copy executable.
     pause
@@ -100,6 +100,6 @@ echo ============================================
 echo  Installation complete!
 echo ============================================
 echo.
-echo You can now run: WebullAnalytics
+echo You can now run: wa
 echo.
 pause
