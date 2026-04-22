@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Spectre.Console;
 
@@ -79,7 +80,20 @@ internal sealed class ProposalSink : IDisposable
 		AnsiConsole.MarkupLine($"  [italic]{Markup.Escape(p.Rationale)}[/]");
 		if (p.CashReserveBlocked && p.CashReserveDetail != null)
 			AnsiConsole.MarkupLine($"  [yellow]{Markup.Escape(p.CashReserveDetail)}[/]");
+		WriteCommands(p);
 		AnsiConsole.WriteLine();
+	}
+
+	private static void WriteCommands(ManagementProposal p)
+	{
+		if (p.Kind == ProposalKind.AlertOnly || p.Legs.Count == 0) return;
+
+		var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+		var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@MID"));
+		var limit = (p.NetDebit / 100m).ToString("F2", CultureInfo.InvariantCulture);
+
+		AnsiConsole.MarkupLine($"  [dim]trade place --trades \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]");
+		AnsiConsole.MarkupLine($"  [dim]analyze trade \"{Markup.Escape(analyzeArg)}\" --api yahoo[/]");
 	}
 
 	public void Dispose() => _file.Dispose();
