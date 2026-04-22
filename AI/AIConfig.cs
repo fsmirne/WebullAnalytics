@@ -57,6 +57,7 @@ internal sealed class OpportunisticRollConfig
 	[JsonPropertyName("minImprovementPerDayPerContract")] public decimal MinImprovementPerDayPerContract { get; set; } = 0.50m;
 	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;
 	[JsonPropertyName("strikeStep")] public decimal StrikeStep { get; set; } = 0.50m;
+	[JsonPropertyName("technicalFilter")] public TechnicalFilterConfig TechnicalFilter { get; set; } = new();
 }
 
 internal sealed class StopLossConfig
@@ -69,7 +70,7 @@ internal sealed class StopLossConfig
 internal sealed class TakeProfitConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
-	[JsonPropertyName("pctOfMaxProfit")] public decimal PctOfMaxProfit { get; set; } = 40m;
+	[JsonPropertyName("pctOfMaxProfit")] public decimal PctOfMaxProfit { get; set; } = 60m;
 }
 
 internal sealed class DefensiveRollConfig
@@ -86,6 +87,21 @@ internal sealed class RollShortOnExpiryConfig
 	[JsonPropertyName("triggerDTE")] public int TriggerDTE { get; set; } = 2;
 	[JsonPropertyName("maxShortPremium")] public decimal MaxShortPremium { get; set; } = 0.10m;
 	[JsonPropertyName("minRollCredit")] public decimal MinRollCredit { get; set; } = 0.05m;
+}
+
+internal sealed class TechnicalFilterConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+	/// <summary>Number of daily closes to fetch. Must be ≥ 20 (required for SMA20).</summary>
+	[JsonPropertyName("lookbackDays")] public int LookbackDays { get; set; } = 20;
+	[JsonPropertyName("smaWeight")] public decimal SmaWeight { get; set; } = 1.0m;
+	[JsonPropertyName("rsiWeight")] public decimal RsiWeight { get; set; } = 1.0m;
+	[JsonPropertyName("momentumWeight")] public decimal MomentumWeight { get; set; } = 1.0m;
+	[JsonPropertyName("momentumDays")] public int MomentumDays { get; set; } = 5;
+	/// <summary>Composite score threshold above which call positions are blocked from rolling.</summary>
+	[JsonPropertyName("bullishBlockThreshold")] public decimal BullishBlockThreshold { get; set; } = 0.25m;
+	/// <summary>Composite score threshold below which put positions are blocked from rolling.</summary>
+	[JsonPropertyName("bearishBlockThreshold")] public decimal BearishBlockThreshold { get; set; } = -0.25m;
 }
 
 internal static class AIConfigLoader
@@ -145,6 +161,13 @@ internal static class AIConfigLoader
 		if (rr.TriggerDTE < 0) return $"rules.rollShortOnExpiry.triggerDTE: must be ≥ 0, got {rr.TriggerDTE}";
 		if (rr.MaxShortPremium < 0m) return $"rules.rollShortOnExpiry.maxShortPremium: must be ≥ 0, got {rr.MaxShortPremium}";
 		if (rr.MinRollCredit < 0m) return $"rules.rollShortOnExpiry.minRollCredit: must be ≥ 0, got {rr.MinRollCredit}";
+
+		var tf = c.Rules.OpportunisticRoll.TechnicalFilter;
+		if (tf.LookbackDays < 20) return $"rules.opportunisticRoll.technicalFilter.lookbackDays: must be ≥ 20, got {tf.LookbackDays}";
+		if (tf.SmaWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.smaWeight: must be ≥ 0, got {tf.SmaWeight}";
+		if (tf.RsiWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.rsiWeight: must be ≥ 0, got {tf.RsiWeight}";
+		if (tf.MomentumWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.momentumWeight: must be ≥ 0, got {tf.MomentumWeight}";
+		if (tf.MomentumDays < 1) return $"rules.opportunisticRoll.technicalFilter.momentumDays: must be ≥ 1, got {tf.MomentumDays}";
 
 		return null;
 	}
