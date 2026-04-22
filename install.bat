@@ -4,13 +4,13 @@ REM Builds the project and copies the executable to the install directory.
 REM Adds the install directory to the user's PATH if not already present.
 REM
 REM Usage:
-REM   install.bat              - installs to %LOCALAPPDATA%\wa
+REM   install.bat              - installs to %LOCALAPPDATA%\WebullAnalytics
 REM   install.bat "C:\mydir"   - installs to the specified directory
 
 setlocal enabledelayedexpansion
 
 set "INSTALL_DIR=%~1"
-if "%INSTALL_DIR%"=="" set "INSTALL_DIR=%LOCALAPPDATA%\wa"
+if "%INSTALL_DIR%"=="" set "INSTALL_DIR=%LOCALAPPDATA%\WebullAnalytics"
 
 echo ============================================
 echo  wa (Webull Analytics) Installer
