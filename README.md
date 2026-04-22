@@ -462,20 +462,56 @@ wa ai replay --since 2026-01-01 --until 2026-04-17
 
 #### Rules
 
+Rules evaluate per-position in priority order — the first rule to match for a position wins; lower-priority rules are skipped for that position in that tick. All thresholds are configurable in `ai-config.json`.
+
 | Rule | Priority | Trigger |
 |---|---|---|
 | `StopLossRule` | 1 | MTM debit ≥ 1.5× initial, or spot beyond break-even by > 3% |
-| `TakeProfitRule` | 2 | MTM ≥ 40% of max projected profit |
+| `TakeProfitRule` | 2 | MTM ≥ 60% of max projected profit |
 | `DefensiveRollRule` | 3 | Spot within 1% of short strike and short DTE ≤ 3 |
 | `RollShortOnExpiryRule` | 4 | Short DTE ≤ 2 and short mid ≤ $0.10 |
+| `OpportunisticRollRule` | 5 | A roll scenario improves P&L-per-day by at least `minImprovementPerDayPerContract` vs holding, and passes all four safety gates |
 
-All thresholds are configurable in `ai-config.json`. Rules evaluate per-position in priority order — the first rule to match for a position wins; lower-priority rules are skipped for that position in that tick.
+#### OpportunisticRollRule
+
+The opportunistic roll rule selects the highest-theta roll candidate from the scenario engine and accepts it only if it passes four sequential safety gates. If no candidate passes all four gates the rule fires nothing — there is no AlertOnly fallback.
+
+1. **OTM guard** — the new short leg must be out-of-the-money. ITM proposals are blocked unconditionally.
+2. **OTM buffer** — spot must clear a minimum distance from the new short strike. The buffer widens when technicals are extended:
+   ```
+   adjustedOtmPct = baseOtmBufferPct × (1 + |compositeScore| × technicalBufferMultiplier)
+   ```
+3. **Break-even margin** — the position must be profitable at current spot (evaluated at new short expiry) by at least `minBreakEvenMarginPct` of spot. This ensures a meaningful cushion above break-even rather than a bare sign check. The threshold widens with the same technical factor as the OTM buffer.
+4. **Delta cap** — the roll may not increase the net position delta magnitude by more than `maxDeltaIncreasePct`.
+
+When a proposal fires, the rationale includes a safety summary showing what was required vs. achieved:
+```
+[OTM: 2.6% (req 2.2%), BE: +$0.18/sh (min $0.13/sh), Δ: −0.12→−0.09]
+```
+
+**Technical filter** — before any scenario is evaluated, the rule checks a composite technical bias score built from SMA position, RSI, and short-term momentum. When the score exceeds `bullishBlockThreshold` (extended bullish setup) or falls below `bearishBlockThreshold` (extended bearish), the rule skips the position entirely for that tick.
+
+**Config fields** (`rules.opportunisticRoll`):
+
+| Field | Default | Description |
+|---|---|---|
+| `minImprovementPerDayPerContract` | 0.50 | Minimum P&L-per-day-per-contract improvement over holding, in dollars |
+| `ivDefaultPct` | 40 | Default implied volatility used when live IV is unavailable, in percent |
+| `strikeStep` | 0.50 | Strike increment for candidate roll selection |
+| `baseOtmBufferPct` | 2.0 | Minimum OTM distance for new short at neutral technicals, as % of spot |
+| `technicalBufferMultiplier` | 1.5 | Scales OTM buffer and break-even threshold by `(1 + \|score\| × multiplier)` |
+| `maxDeltaIncreasePct` | 25.0 | Maximum allowed delta magnitude increase after the roll, as % of current delta |
+| `minBreakEvenMarginPct` | 0.5 | Minimum required profit cushion at current spot, as % of spot |
+| `technicalFilter.enabled` | true | Enable/disable the technical bias filter |
+| `technicalFilter.lookbackDays` | 20 | Lookback window for SMA and momentum signals |
+| `technicalFilter.bullishBlockThreshold` | 0.25 | Composite score above this blocks the rule (extended bullish) |
+| `technicalFilter.bearishBlockThreshold` | −0.25 | Composite score below this blocks the rule (extended bearish) |
 
 #### Output
 
 Proposals are written to two places:
 
-- **Console**: Spectre-formatted, color-coded by action (close = yellow, roll = cyan, alert-only = grey).
+- **Console**: Spectre-formatted, color-coded by action (close = yellow, roll = cyan, alert-only = grey). Each proposal shows the legs and net credit/debit, followed by ready-to-run `wa trade place` and `wa analyze trade` commands, and the rule rationale.
 - **JSONL log** at `data/ai-proposals.log`: one proposal per line, machine-parseable with `jq` or similar. Includes `mode` field ("once" / "watch" / "replay") to distinguish source runs.
 
 #### Cash reserve
@@ -492,12 +528,11 @@ Every proposal is funding-checked. Proposals that would leave free cash below th
    - **Yahoo's seven-column export** with header `Date,Open,High,Low,Close,Adj Close,Volume` — drop in as-is.
 3. Run `ai replay`. The cache picks up the CSV automatically; no further conversion needed.
 
-#### Phase-1 stubs
+The replay output includes an **agreement analysis** — for each day where rules fired and you also traded that position, it shows what the rule proposed alongside what you actually did, and scores each as `match`, `partial`, `miss`, or `divergent`.
 
-Two pieces are intentionally deferred and will be wired in follow-up specs:
+#### Phase-1 note
 
-- **`LivePositionSource`** returns empty positions. `ai once` and `ai watch` therefore always report "0 position(s)". The wiring to Webull OpenAPI position/balance endpoints plus strategy grouping is the next major effort.
-- **`TakeProfitRule`** never fires because its profit-projector bridge returns null. The other three rules (StopLoss, DefensiveRoll, RollShortOnExpiry) work normally.
+**`TakeProfitRule`** is implemented but its profit-projector bridge currently returns null, so it never fires. The other four rules (StopLoss, DefensiveRoll, RollShortOnExpiry, OpportunisticRoll) work normally.
 
 ## Data Sources
 
