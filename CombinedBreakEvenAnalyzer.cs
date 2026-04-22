@@ -107,44 +107,35 @@ public static class CombinedBreakEvenAnalyzer
 		DateTime? nearestExpiry = optionLegs.Count > 0 ? optionLegs.Min(l => l.Parsed!.ExpiryDate) : null;
 		var hasMixedExpiries = optionLegs.Count > 0 && optionLegs.Select(l => l.Parsed!.ExpiryDate.Date).Distinct().Count() > 1;
 
-		var detailsParts = new List<string> { $"{unitCount} positions" };
-		if (nearestExpiry.HasValue)
-		{
-			detailsParts.Add($"Earliest expiry {Formatters.FormatOptionDate(nearestExpiry.Value)}");
-			var dte = (int)(nearestExpiry.Value.Date - EvaluationDate.Today).TotalDays;
-			detailsParts.Add($"DTE {dte}");
-		}
-		if (hasMixedExpiries) detailsParts.Add("mixed expiries");
-
 		// Net adj basis across all merged option legs: Σ signed × qty × price × 100.
-		// Positive = net debit paid to establish; negative = net credit received.
+		// Used for per-share/per-spread quoting; sign is absorbed into the absolute value.
 		decimal totalAdjDollars = 0m;
 		foreach (var leg in optionLegs)
 		{
 			var signed = leg.Side == Side.Buy ? 1 : -1;
 			totalAdjDollars += signed * leg.Qty * leg.Price * 100m;
 		}
+
+		string details;
 		if (optionLegs.Count > 0)
 		{
-			var direction = totalAdjDollars >= 0 ? "Net Debit" : "Net Credit";
-			var totalText = Math.Abs(totalAdjDollars).ToString("N2", CultureInfo.InvariantCulture);
+			string qtyPart;
 			if (pairQty > 0)
 			{
-				// Balanced or partly balanced: quote as per-spread basis using the matched-pair count.
 				var perShare = Math.Abs(totalAdjDollars) / (pairQty * 100m);
-				var perShareText = Formatters.FormatPrice(perShare, Asset.Option);
-				detailsParts.Add($"{pairQty}x @ ${perShareText} adj, {direction} ${totalText}");
+				qtyPart = $"{pairQty}x @ ${Formatters.FormatPrice(perShare, Asset.Option)} adj";
 			}
 			else
 			{
-				// Single-sided: no natural pair count; omit qty and show per-share weighted average.
 				var perShare = totalQty > 0 ? Math.Abs(totalAdjDollars) / (totalQty * 100m) : 0m;
-				var perShareText = Formatters.FormatPrice(perShare, Asset.Option);
-				detailsParts.Add($"@ ${perShareText} adj, {direction} ${totalText}");
+				qtyPart = $"@ ${Formatters.FormatPrice(perShare, Asset.Option)} adj";
 			}
+			details = $"{qtyPart}, Exp {Formatters.FormatOptionDate(nearestExpiry!.Value)}";
 		}
-
-		var details = string.Join(" · ", detailsParts);
+		else
+		{
+			details = $"{unitCount} positions";
+		}
 
 		int? daysToExpiry = nearestExpiry.HasValue ? (int)(nearestExpiry.Value.Date - EvaluationDate.Today).TotalDays : null;
 
