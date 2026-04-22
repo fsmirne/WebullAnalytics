@@ -33,6 +33,16 @@ internal static class OptionMath
 		return (decimal)Math.Max(0, price);
 	}
 
+	/// <summary>Computes the Black-Scholes delta for a European option. Returns signed delta: positive for calls, negative for puts.</summary>
+	internal static decimal Delta(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv, string callPut)
+	{
+		if (timeYears <= 0)
+			return callPut == "C" ? (spot > strike ? 1m : 0m) : (spot < strike ? -1m : 0m);
+		double s = (double)spot, k = (double)strike, sigma = (double)iv, t = timeYears, r = riskFreeRate;
+		double d1 = (Math.Log(s / k) + (r + sigma * sigma / 2.0) * t) / (sigma * Math.Sqrt(t));
+		return callPut == "C" ? (decimal)NormalCdf(d1) : (decimal)(NormalCdf(d1) - 1.0);
+	}
+
 	/// <summary>
 	/// Cumulative distribution function of the standard normal distribution.
 	/// Uses the Abramowitz &amp; Stegun approximation (accuracy ~1.5e-7).
