@@ -56,9 +56,10 @@ internal sealed class ReplayRunner
 				sink.Emit(r.Proposal, r.IsRepeat);
 				ruleFireCounts[r.Proposal.Rule] = (ruleFireCounts.TryGetValue(r.Proposal.Rule, out var n) ? n : 0) + 1;
 
-				var agreement = ClassifyAgreement(r.Proposal, step);
+				var sameDayFills = GetSameDayFills(r.Proposal, step);
+				var agreement = ClassifyAgreement(r.Proposal, sameDayFills);
 				agreementCounts[agreement]++;
-				RenderFillAnnotation(r.Proposal, step, agreement);
+				RenderFillAnnotation(sameDayFills, agreement);
 			}
 		}
 
@@ -86,44 +87,30 @@ internal sealed class ReplayRunner
 		}
 	}
 
+	private List<Trade> GetSameDayFills(ManagementProposal p, DateTime step) =>
+		_allTrades.Where(t => t.Timestamp.Date == step.Date && t.MatchKey.Contains(p.Ticker, StringComparison.OrdinalIgnoreCase)).ToList();
+
 	/// <summary>Classifies whether the proposal aligns with what the user actually did.
 	/// match: every proposed leg found in same-day fills.
 	/// divergent: at least one fill shares a proposed leg symbol.
 	/// partial: same-day fills on ticker but no overlap.
 	/// miss: no same-day fills on the ticker.</summary>
-	private string ClassifyAgreement(ManagementProposal p, DateTime step)
+	private static string ClassifyAgreement(ManagementProposal p, IReadOnlyList<Trade> sameDayFills)
 	{
-		var sameDayFills = _allTrades
-			.Where(t => t.Timestamp.Date == step.Date && t.MatchKey.Contains(p.Ticker, StringComparison.OrdinalIgnoreCase))
-			.ToList();
-
 		if (sameDayFills.Count == 0) return "miss";
 
-		// Extract the OCC symbols from proposed legs.
 		var proposedOcc = p.Legs.Select(l => l.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-		// Extract OCC symbols from same-day fills (MatchKey format: "option:GME260424C00025000").
 		var fillOcc = sameDayFills
 			.Select(t => t.MatchKey.StartsWith("option:", StringComparison.OrdinalIgnoreCase) ? t.MatchKey[7..] : t.MatchKey)
 			.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-		// match: every proposed leg symbol found in fills.
 		if (proposedOcc.Count > 0 && proposedOcc.All(s => fillOcc.Contains(s))) return "match";
-
-		// divergent: at least one fill symbol overlaps with a proposed leg symbol (same position managed, different legs).
 		if (proposedOcc.Any(s => fillOcc.Contains(s))) return "divergent";
-
-		// partial: fills exist on the ticker but no overlap with proposed legs.
 		return "partial";
 	}
 
-	private void RenderFillAnnotation(ManagementProposal p, DateTime step, string agreement)
+	private static void RenderFillAnnotation(IReadOnlyList<Trade> sameDayFills, string agreement)
 	{
-		var sameDayFills = _allTrades
-			.Where(t => t.Timestamp.Date == step.Date && t.MatchKey.Contains(p.Ticker, StringComparison.OrdinalIgnoreCase))
-			.Take(3)
-			.ToList();
-
 		string fillText;
 		if (sameDayFills.Count == 0)
 		{
@@ -131,7 +118,7 @@ internal sealed class ReplayRunner
 		}
 		else
 		{
-			var parts = sameDayFills.Select(t =>
+			var parts = sameDayFills.Take(3).Select(t =>
 			{
 				var occ = t.MatchKey.StartsWith("option:", StringComparison.OrdinalIgnoreCase) ? t.MatchKey[7..] : t.MatchKey;
 				return $"{t.Side.ToString().ToUpperInvariant()} {occ} x{t.Qty}";
@@ -139,7 +126,7 @@ internal sealed class ReplayRunner
 			fillText = string.Join(", ", parts);
 		}
 
-		Spectre.Console.AnsiConsole.MarkupLine($"[dim]  ↳ actual: {Spectre.Console.Markup.Escape(fillText)}  [[{agreement}]][/]");
+		AnsiConsole.MarkupLine($"[dim]  ↳ actual: {Markup.Escape(fillText)}  [[{agreement}]][/]");
 	}
 
 	private static void PrintDisclaimer()
