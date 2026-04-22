@@ -163,11 +163,14 @@ internal static class AIConfigLoader
 		if (rr.MinRollCredit < 0m) return $"rules.rollShortOnExpiry.minRollCredit: must be ≥ 0, got {rr.MinRollCredit}";
 
 		var tf = c.Rules.OpportunisticRoll.TechnicalFilter;
-		if (tf.LookbackDays < 20) return $"rules.opportunisticRoll.technicalFilter.lookbackDays: must be ≥ 20, got {tf.LookbackDays}";
-		if (tf.SmaWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.smaWeight: must be ≥ 0, got {tf.SmaWeight}";
-		if (tf.RsiWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.rsiWeight: must be ≥ 0, got {tf.RsiWeight}";
-		if (tf.MomentumWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.momentumWeight: must be ≥ 0, got {tf.MomentumWeight}";
-		if (tf.MomentumDays < 1) return $"rules.opportunisticRoll.technicalFilter.momentumDays: must be ≥ 1, got {tf.MomentumDays}";
+		if (tf.Enabled)
+		{
+			if (tf.LookbackDays < 20) return $"rules.opportunisticRoll.technicalFilter.lookbackDays: must be ≥ 20, got {tf.LookbackDays}";
+			if (tf.SmaWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.smaWeight: must be ≥ 0, got {tf.SmaWeight}";
+			if (tf.RsiWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.rsiWeight: must be ≥ 0, got {tf.RsiWeight}";
+			if (tf.MomentumWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.momentumWeight: must be ≥ 0, got {tf.MomentumWeight}";
+			if (tf.MomentumDays < 1) return $"rules.opportunisticRoll.technicalFilter.momentumDays: must be ≥ 1, got {tf.MomentumDays}";
+		}
 
 		return null;
 	}
