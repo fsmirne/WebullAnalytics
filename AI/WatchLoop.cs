@@ -68,6 +68,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
 
 		using var sink = new ProposalSink(config.Log, mode: "watch");
+		var priceCache = new Replay.HistoricalPriceCache();
 
 		AnsiConsole.MarkupLine($"[bold]ai watch[/] tickers={string.Join(",", config.Tickers)} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss}");
 
@@ -90,8 +91,9 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
 				var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
 				var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
+				var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, priceCache, config.Rules.OpportunisticRoll.TechnicalFilter, now, cancellation);
 
-				var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, new Dictionary<string, TechnicalBias>());
+				var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 				var results = evaluator.Evaluate(ctx);
 				foreach (var r in results) { sink.Emit(r.Proposal, r.IsRepeat); proposalsEmitted++; }
 
