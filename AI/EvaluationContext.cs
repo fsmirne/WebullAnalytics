@@ -10,13 +10,15 @@ namespace WebullAnalytics.AI;
 /// <param name="Quotes">Per-leg option quotes by OCC symbol.</param>
 /// <param name="AccountCash">Free cash available (before applying reserve).</param>
 /// <param name="AccountValue">Total account value (cash + positions marked to market).</param>
+/// <param name="TechnicalSignals">Composite technical bias per ticker. Missing entry = neutral (no block).</param>
 internal sealed record EvaluationContext(
 	DateTime Now,
 	IReadOnlyDictionary<string, OpenPosition> OpenPositions,
 	IReadOnlyDictionary<string, decimal> UnderlyingPrices,
 	IReadOnlyDictionary<string, OptionContractQuote> Quotes,
 	decimal AccountCash,
-	decimal AccountValue
+	decimal AccountValue,
+	IReadOnlyDictionary<string, TechnicalBias> TechnicalSignals
 );
 
 /// <summary>
