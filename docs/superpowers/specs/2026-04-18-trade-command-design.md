@@ -27,27 +27,27 @@ The command is structured as a subcommand branch with three actions: `place`, `c
 - IOC / FOK time-in-force (DAY and GTC only).
 - Polling for fill status after placing (user runs `trade status` manually).
 - A test project with automated tests (no test infrastructure exists today; pure-function seams are designed in so tests can be added later without rework).
-- Migrating `analyze --trades` to the new shared syntax (deferred to a follow-up).
+- Migrating `analyze --trade` to the new shared syntax (deferred to a follow-up).
 - Auto-retry, idempotency flags, or debug-mode signature dumps.
 
 ## Command Surface
 
 ```
-WebullAnalytics trade place   --trades "<legs>" [--limit <net>] [--type limit|market]
+wa trade place   --trade "<legs>" [--limit <net>] [--type limit|market]
                               [--tif day|gtc] [--strategy <name>] [--account <id>]
                               [--submit]
 
-WebullAnalytics trade cancel  <clientOrderId>
-WebullAnalytics trade cancel  --all [--account <id>]
+wa trade cancel  <clientOrderId>
+wa trade cancel  --all [--account <id>]
 
-WebullAnalytics trade status  <clientOrderId> [--account <id>]
+wa trade status  <clientOrderId> [--account <id>]
 ```
 
 ### `trade place`
 
 | Option | Description |
 |---|---|
-| `--trades "<legs>"` | Comma-separated leg list in `ACTION:SYMBOL:QTY` format. No per-leg `@PRICE` allowed (that is `analyze` syntax). |
+| `--trade "<legs>"` | Comma-separated leg list in `ACTION:SYMBOL:QTY` format. No per-leg `@PRICE` allowed (that is `analyze` syntax). |
 | `--limit <net>` | Required for `--type limit` (default). Net limit price across all legs. Positive = net credit; negative = net debit. |
 | `--type limit\|market` | Default `limit`. `market` is rejected for any multi-leg order. |
 | `--tif day\|gtc` | Time-in-force. Default `day`. |
@@ -57,7 +57,7 @@ WebullAnalytics trade status  <clientOrderId> [--account <id>]
 
 There is no `--yes` flag. Every mutating action prompts interactively; piping empty input aborts.
 
-### `--trades` syntax
+### `--trade` syntax
 
 Format: `ACTION:SYMBOL:QTY[@PRICE]`
 
@@ -68,7 +68,7 @@ Format: `ACTION:SYMBOL:QTY[@PRICE]`
 
 Examples:
 
-| Scenario | `--trades` value | Other flags |
+| Scenario | `--trade` value | Other flags |
 |---|---|---|
 | Equity limit buy | `buy:SPY:10` | `--limit 580` |
 | Equity market buy | `buy:SPY:10` | `--type market` |
@@ -228,7 +228,7 @@ App Secret is used only client-side to derive the signing key; it is **never** t
 1. Parse CLI args → PlaceSettings
 2. Load data/trade-config.json → resolve account (alias or --account flag)
 3. Print environment banner ([SANDBOX] green / [PRODUCTION] red)
-4. TradeLegParser.Parse(--trades)  → ParsedLeg[]
+4. TradeLegParser.Parse(--trade)  → ParsedLeg[]
 5. Reject any leg with @PRICE
 6. Determine strategy:
    - If --strategy provided: use it verbatim, skip auto-detection.
@@ -359,7 +359,7 @@ This matrix doubles as the manual regression set after any change to the trade s
 
 ## Deferred / Follow-up
 
-- Migrate `analyze --trades` to the new `ACTION:SYMBOL:QTY[@PRICE]` shared parser. Deferred until the `trade` command has been in use long enough to shake out any syntax-design issues.
+- Migrate `analyze --trade` to the new `ACTION:SYMBOL:QTY[@PRICE]` shared parser. Deferred until the `trade` command has been in use long enough to shake out any syntax-design issues.
 - Automated test project (xUnit or similar). Once added, Layers 1–3 above convert directly.
 - `--force` / `--yes` equivalent to bypass prompts when scripting becomes a real need.
 - Additional order types (stop, stop-limit, trailing) and TIFs (IOC, FOK).

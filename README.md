@@ -81,67 +81,67 @@ By default this installs to `~/.local/bin`. You can specify a custom directory:
 
 ### Commands
 
-WebullAnalytics has five commands: `report` (generate a P&L report), `analyze` (hypothetical what-if analysis), `fetch` (download order data from the Webull API), `sniff` (automatically capture fresh API session headers), and `trade` (place, cancel, and inspect orders via the Webull OpenAPI).
+wa has five commands: `report` (generate a P&L report), `analyze` (hypothetical what-if analysis), `fetch` (download order data from the Webull API), `sniff` (automatically capture fresh API session headers), and `trade` (place, cancel, and inspect orders via the Webull OpenAPI).
 
 ### Report Command
 
 ```bash
 # Generate a report using default data/orders.jsonl
-WebullAnalytics report
+wa report
 
 # Use Webull CSV exports as the source of truth (fees from JSONL if available)
-WebullAnalytics report --source export
+wa report --source export
 
 # Filter trades since a specific date
-WebullAnalytics report --since 2026-01-01
+wa report --since 2026-01-01
 
 # Filter trades until a specific date
-WebullAnalytics report --until 2026-03-31
+wa report --until 2026-03-31
 
 # Filter trades within a date range
-WebullAnalytics report --since 2026-01-01 --until 2026-03-31
+wa report --since 2026-01-01 --until 2026-03-31
 
 # Export to Excel
-WebullAnalytics report --output excel
+wa report --output excel
 
 # Set an initial portfolio amount to track cash
-WebullAnalytics report --initial-amount 10000
+wa report --initial-amount 10000
 
 # Combine options
-WebullAnalytics report --since 2026-01-01 --output excel --initial-amount 10000
+wa report --since 2026-01-01 --output excel --initial-amount 10000
 
 # Fetch option chain data for break-even analysis with time-decay grids (Yahoo Finance)
-WebullAnalytics report --api yahoo
+wa report --api yahoo
 
 # Use Webull option chain data (requires sniffed headers via 'sniff' command)
-WebullAnalytics report --api webull
+wa report --api webull
 
 # Override implied volatility for specific option legs (per OCC symbol)
-WebullAnalytics report --iv GME260213C00025000:50,GME260516C00025000:45
+wa report --iv GME260213C00025000:50,GME260516C00025000:45
 
 # Combine API data with manual IV overrides (overrides take priority)
-WebullAnalytics report --api yahoo --iv GME260213C00025000:60
+wa report --api yahoo --iv GME260213C00025000:60
 
 # Show P&L instead of contract value in the grid
-WebullAnalytics report --api yahoo --display pnl
+wa report --api yahoo --display pnl
 
 # Show each leg's contract value alongside the net in every grid cell
-WebullAnalytics report --api yahoo --grid verbose
+wa report --api yahoo --grid verbose
 
 # Increase grid granularity (more rows between strikes, default: 2)
-WebullAnalytics report --api yahoo --range 4
+wa report --api yahoo --range 4
 
 # Override the current underlying price (for "what-if" evaluation)
-WebullAnalytics report --api yahoo --current-underlying-price GME:24.88,SPY:580.50
+wa report --api yahoo --current-underlying-price GME:24.88,SPY:580.50
 
 # Use Black-Scholes theoretical prices instead of market mid for today's grid column
-WebullAnalytics report --api yahoo --theoretical
+wa report --api yahoo --theoretical
 
 # Add custom notable prices to break-even reports (e.g., support/resistance levels)
-WebullAnalytics report --notable-prices GME:20/25/30
+wa report --notable-prices GME:20/25/30
 
 # Show only specific tickers in the report
-WebullAnalytics report --tickers GME,SPY
+wa report --tickers GME,SPY
 ```
 
 #### Report Options
@@ -181,7 +181,7 @@ Both subcommands accept all of the `report` command's options plus `--date` for 
 Runs a hypothetical what-if analysis by injecting synthetic trades into the report pipeline without modifying any data files.
 
 ```
-WebullAnalytics analyze trade "<spec>" [--date <YYYY-MM-DD>] [report options]
+wa analyze trade "<spec>" [--date <YYYY-MM-DD>] [report options]
 ```
 
 The `<spec>` is a comma-separated list of legs:
@@ -199,25 +199,25 @@ Examples:
 
 ```bash
 # What if I roll the calendar short from Apr 10 to Apr 17 for $0.24 credit?
-WebullAnalytics analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38"
+wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38"
 
 # Same roll but use live market prices (buy at ask, sell at bid)
-WebullAnalytics analyze trade "sell:GME260410C00023000:300@BID,buy:GME260417C00023000:300@ASK" --api yahoo
+wa analyze trade "sell:GME260410C00023000:300@BID,buy:GME260417C00023000:300@ASK" --api yahoo
 
 # Use mid-market prices for both legs
-WebullAnalytics analyze trade "sell:GME260410C00023000:300@MID,buy:GME260417C00023000:300@MID" --api yahoo
+wa analyze trade "sell:GME260410C00023000:300@MID,buy:GME260417C00023000:300@MID" --api yahoo
 
 # What if I close 100 contracts of my long call?
-WebullAnalytics analyze trade "sell:GME260501C00023000:100@0.70"
+wa analyze trade "sell:GME260501C00023000:100@0.70"
 
 # What if I add a protective put?
-WebullAnalytics analyze trade "sell:GME260501P00022000:455@0.25"
+wa analyze trade "sell:GME260501P00022000:455@0.25"
 
 # Simulate running on a future date (e.g., after short leg expiration)
-WebullAnalytics analyze trade "buy:GME260417C00023000:300@0.38" --date 2026-04-11
+wa analyze trade "buy:GME260417C00023000:300@0.38" --date 2026-04-11
 
 # Combine with report options (output to text, override underlying price)
-WebullAnalytics analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --current-underlying-price GME:23.20
+wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --current-underlying-price GME:23.20
 ```
 
 When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the configured API source (`--api webull` or `--api yahoo`) before building the hypothetical trades. The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
@@ -227,7 +227,7 @@ When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the conf
 Computes the theoretical roll credit/debit at various underlying prices using Black-Scholes, helping you find the optimal moment to roll a leg.
 
 ```
-WebullAnalytics analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--cash <amount>] [--api <source>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
+wa analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--cash <amount>] [--api <source>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
 ```
 
 The `<spec>` is `OLD_SYMBOL>NEW_SYMBOL:QTY`. `--api` is required.
@@ -241,25 +241,25 @@ Examples:
 
 ```bash
 # Short-side roll of the $23 short from Apr 10 to Apr 17 (300 contracts)
-WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo
+wa analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo
 
 # Same roll but I'm long the old position
-WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo --side long
+wa analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo --side long
 
 # Roll to a different strike
-WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023500:300" --api yahoo
+wa analyze roll "GME260410C00023000>GME260417C00023500:300" --api yahoo
 
 # Override IV for the analysis
-WebullAnalytics analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo --iv GME260410C00023000:37,GME260417C00023000:31
+wa analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo --iv GME260410C00023000:37,GME260417C00023000:31
 
 # Short-side roll paired with a static long call leg (calendar/diagonal margin)
-WebullAnalytics analyze roll "GME260424C00025000>GME260424C00024500:499" --api yahoo --pair GME260515C00025000:499
+wa analyze roll "GME260424C00025000>GME260424C00024500:499" --api yahoo --pair GME260515C00025000:499
 
 # Short-side roll paired with long stock (covered-call margin)
-WebullAnalytics analyze roll "GME260515C00025000>GME260522C00025000:5" --api yahoo --pair GME:500
+wa analyze roll "GME260515C00025000>GME260522C00025000:5" --api yahoo --pair GME:500
 
 # Check whether your available cash is enough to fund the roll
-WebullAnalytics analyze roll "GME260424C00025000>GME260424C00024500:499" --api yahoo --pair GME260515C00025000:499 --cash 23015
+wa analyze roll "GME260424C00025000>GME260424C00024500:499" --api yahoo --pair GME260515C00025000:499 --cash 23015
 ```
 
 The output is a 2D grid of roll net values across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-net cell (globally) in **bold underline green**, and any row whose max net matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
@@ -308,7 +308,7 @@ analyze roll only:
 
 ```bash
 # Fetch order data from the Webull API
-WebullAnalytics fetch
+wa fetch
 ```
 
 Reads API credentials from `data/api-config.json` and writes orders to `data/orders.jsonl`.
@@ -317,7 +317,7 @@ Reads API credentials from `data/api-config.json` and writes orders to `data/ord
 
 ```bash
 # Automatically capture fresh API session headers
-WebullAnalytics sniff
+wa sniff
 ```
 
 Launches a browser with remote debugging, navigates to Webull, enters your unlock PIN, and captures the API session headers from the network traffic. The captured headers are written directly into `data/api-config.json`, replacing the existing `headers` object.
@@ -357,40 +357,40 @@ The example ships with the three sandbox test accounts Webull publishes in its O
 
 ```bash
 # Preview a single equity limit buy (no order is placed).
-WebullAnalytics trade place --trades "buy:SPY:10" --limit 580
+wa trade place --trade "buy:SPY:10" --limit 580
 
 # Place the same order.
-WebullAnalytics trade place --trades "buy:SPY:10" --limit 580 --submit
+wa trade place --trade "buy:SPY:10" --limit 580 --submit
 
 # Preview a vertical call spread for 1 contract, net debit $0.75.
-WebullAnalytics trade place --trades "buy:SPY260515C00580000:1,sell:SPY260515C00590000:1" --limit -0.75
+wa trade place --trade "buy:SPY260515C00580000:1,sell:SPY260515C00590000:1" --limit -0.75
 
 # Calendar roll — sell near, buy far.
-WebullAnalytics trade place --trades "sell:GME260410C00023000:1,buy:GME260417C00023000:1" --limit -0.20
+wa trade place --trade "sell:GME260410C00023000:1,buy:GME260417C00023000:1" --limit -0.20
 
 # Covered call — long 100 shares + short 1 call.
-WebullAnalytics trade place --trades "buy:GME:100,sell:GME260501C00025000:1" --limit -23.50
+wa trade place --trade "buy:GME:100,sell:GME260501C00025000:1" --limit -23.50
 
 # Market order, single equity.
-WebullAnalytics trade place --trades "buy:SPY:10" --type market --submit
+wa trade place --trade "buy:SPY:10" --type market --submit
 
 # Cancel a single order.
-WebullAnalytics trade cancel <clientOrderId>
+wa trade cancel <clientOrderId>
 
 # Cancel every open order for the account.
-WebullAnalytics trade cancel --all
+wa trade cancel --all
 
 # List all open orders for the account.
-WebullAnalytics trade list
+wa trade list
 
 # Check an order's status.
-WebullAnalytics trade status <clientOrderId>
+wa trade status <clientOrderId>
 
 # Use a non-default account.
-WebullAnalytics trade place --trades "buy:SPY:1" --limit 1 --account test2
+wa trade place --trade "buy:SPY:1" --limit 1 --account test2
 ```
 
-#### `--trades` syntax
+#### `--trade` syntax
 
 Format: `ACTION:SYMBOL:QTY`, comma-separated for multiple legs.
 
@@ -404,7 +404,7 @@ Per-leg prices (`@PRICE`) are **not** allowed in `trade` — combo orders use a 
 
 ```
 Options (place):
-  --trades <legs>           Comma-separated legs in ACTION:SYMBOL:QTY format (required).
+  --trade <legs>           Comma-separated legs in ACTION:SYMBOL:QTY format (required).
   --limit <net>             Net limit price. Required for --type limit. Positive = credit; negative = debit.
   --type <type>             limit or market. Default: limit. Market is rejected for multi-leg orders.
   --tif <tif>               Time-in-force: day or gtc. Default: day.
@@ -442,13 +442,13 @@ Three subcommands share one evaluation engine:
 
 ```bash
 # Continuous monitoring during market hours (default: until 4 PM ET)
-WebullAnalytics ai watch
+wa ai watch
 
 # Single evaluation pass, print proposals, exit
-WebullAnalytics ai once
+wa ai once
 
 # Replay the rules against historical orders.jsonl with agreement analysis
-WebullAnalytics ai replay --since 2026-01-01 --until 2026-04-17
+wa ai replay --since 2026-01-01 --until 2026-04-17
 ```
 
 #### Setup
@@ -579,7 +579,7 @@ The `fetch` command requires an API config file. This file contains your Webull 
 
 ### Session Tokens
 
-The `access_token`, `t_token`, `x-s`, and `x-sv` headers are session tokens that expire. When they expire, the API will return an error. To refresh them, either run `WebullAnalytics sniff` to capture fresh headers automatically, or log into Webull in your browser and copy the updated values from the Network tab manually.
+The `access_token`, `t_token`, `x-s`, and `x-sv` headers are session tokens that expire. When they expire, the API will return an error. To refresh them, either run `wa sniff` to capture fresh headers automatically, or log into Webull in your browser and copy the updated values from the Network tab manually.
 
 ## Application Configuration
 
@@ -777,12 +777,12 @@ This tool uses EPPlus configured for non-commercial use. For commercial use, you
 
 **API fetch fails:**
 - Verify your `data/api-config.json` has valid session tokens
-- Session tokens expire; run `WebullAnalytics sniff` to capture fresh headers, or log into Webull in your browser and copy fresh values from the Network tab
+- Session tokens expire; run `wa sniff` to capture fresh headers, or log into Webull in your browser and copy fresh values from the Network tab
 - The `x-s` header may be request-specific; try copying it from a recent request
 
 **No trades found:**
 - Verify the JSONL file exists at the expected path (default: `data/orders.jsonl`)
-- Run `WebullAnalytics fetch` to download fresh data
+- Run `wa fetch` to download fresh data
 - Check that the `tickers` in your config cover all tickers you trade
 
 **Incorrect P&L calculations:**
