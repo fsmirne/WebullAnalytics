@@ -78,8 +78,8 @@ internal sealed class ProposalSink : IDisposable
 			var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 			var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@MID"));
 			var limit = (p.NetDebit / 100m).ToString("F2", CultureInfo.InvariantCulture);
-			AnsiConsole.MarkupLine($"  [dim]trade: wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]");
-			AnsiConsole.MarkupLine($"  [dim]analyze: wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]");
+			AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]");
+			AnsiConsole.MarkupLine($"  [dim]wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]");
 		}
 
 		AnsiConsole.MarkupLine($"  [italic]{Markup.Escape(p.Rationale)}[/]");
