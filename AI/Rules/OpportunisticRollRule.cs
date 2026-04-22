@@ -81,7 +81,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 
 		// Build the proposal.
 		var netDebitPerContract = topFundable.CashImpactPerContract;
-		var biasNote = ctx.TechnicalSignals.TryGetValue(position.Ticker, out var biasFired) ? $" [tech score {biasFired.Score:+0.00;-0.00}]" : "";
+		var biasNote = ctx.TechnicalSignals.TryGetValue(position.Ticker, out var biasSignal) ? $" [tech score {biasSignal.Score:+0.00;-0.00}]" : "";
 		var rationale = $"optimizer: {topFundable.Name} projects ${topPerDay:+0.00;-0.00}/ct/day vs hold ${holdPerDay:+0.00;-0.00}/ct/day (Δ ${improvementPerDayPerContract:+0.00;-0.00}/ct/day over {topFundable.DaysToTarget}d){biasNote}. {topFundable.Rationale}";
 
 		return new ManagementProposal(
