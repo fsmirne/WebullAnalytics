@@ -22,8 +22,8 @@ internal static class TechnicalIndicators
 			changes.Add(closes[i + 1] - closes[i]);
 
 		// Seed: simple average of first 14 gains/losses.
-		var seedGain = changes.Take(14).Where(c => c > 0).DefaultIfEmpty(0m).Average();
-		var seedLoss = changes.Take(14).Where(c => c < 0).Select(c => -c).DefaultIfEmpty(0m).Average();
+		var seedGain = changes.Take(14).Select(c => Math.Max(0m, c)).Average();
+		var seedLoss = changes.Take(14).Select(c => Math.Max(0m, -c)).Average();
 
 		var avgGain = seedGain;
 		var avgLoss = seedLoss;
