@@ -74,4 +74,18 @@ internal sealed class HistoricalPriceCache
 			sb.Append(kv.Key.ToString("yyyy-MM-dd")).Append(',').Append(kv.Value.ToString(CultureInfo.InvariantCulture)).Append('\n');
 		return sb.ToString();
 	}
+
+	/// <summary>Returns the last <paramref name="count"/> daily closes on or before <paramref name="asOf"/>,
+	/// oldest-first. Returns fewer than <paramref name="count"/> entries if the cache has less data.</summary>
+	public async Task<IReadOnlyList<decimal>> GetRecentClosesAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
+	{
+		var map = await LoadOrFetchAsync(ticker, cancellation);
+		return map
+			.Where(kv => kv.Key.Date <= asOf.Date)
+			.OrderByDescending(kv => kv.Key)
+			.Take(count)
+			.OrderBy(kv => kv.Key)
+			.Select(kv => kv.Value)
+			.ToList();
+	}
 }
