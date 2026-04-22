@@ -115,15 +115,17 @@ internal sealed class OpportunisticRollRule : IManagementRule
 
 		// Gate 2: OTM buffer adjusted by technical extension.
 		var compositeScore = ctx.TechnicalSignals.TryGetValue(position.Ticker, out var bias) ? bias.Score : 0m;
-		var requiredOtmFraction = config.BaseOtmBufferPct * (1m + Math.Abs(compositeScore) * config.TechnicalBufferMultiplier) / 100m;
+		var technicalFactor = 1m + Math.Abs(compositeScore) * config.TechnicalBufferMultiplier;
+		var requiredOtmFraction = config.BaseOtmBufferPct * technicalFactor / 100m;
 		var actualOtmFraction = newShort.CallPut == "P"
 			? (spot - newShort.Strike) / spot
 			: (newShort.Strike - spot) / spot;
 		if (actualOtmFraction < requiredOtmFraction) return false;
 
-		// Gate 3: Break-even at current spot at new short expiry.
+		// Gate 3: Break-even at current spot at new short expiry — must be profitable by at least minBreakEvenMarginPct of spot (widened by same technical factor as OTM buffer).
+		var minBeMargin = spot * config.MinBreakEvenMarginPct * technicalFactor / 100m;
 		var beMargin = ComputeBreakEvenMargin(position, newShort, spot, ctx, config);
-		if (beMargin < 0m) return false;
+		if (beMargin < minBeMargin) return false;
 
 		// Gate 4: Delta change cap.
 		var ivDefault = config.IvDefaultPct / 100m;
@@ -132,7 +134,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		var maxAllowedAbsDelta = Math.Abs(currentDelta) * (1m + config.MaxDeltaIncreasePct / 100m);
 		if (Math.Abs(proposedDelta) > maxAllowedAbsDelta) return false;
 
-		safetyNote = $" [OTM: {actualOtmFraction * 100m:F1}% (req {requiredOtmFraction * 100m:F1}%), BE: {(beMargin >= 0m ? "+" : "")}${beMargin:F2}/sh, Δ: {currentDelta:+0.00;-0.00}→{proposedDelta:+0.00;-0.00}]";
+		safetyNote = $" [OTM: {actualOtmFraction * 100m:F1}% (req {requiredOtmFraction * 100m:F1}%), BE: +${beMargin:F2}/sh (min ${minBeMargin:F2}/sh), Δ: {currentDelta:+0.00;-0.00}→{proposedDelta:+0.00;-0.00}]";
 		return true;
 	}
 

@@ -33,6 +33,7 @@
 			"baseOtmBufferPct": 2.0,
 			"technicalBufferMultiplier": 1.5,
 			"maxDeltaIncreasePct": 25.0,
+			"minBreakEvenMarginPct": 0.5,
 			"technicalFilter": {
 				"enabled": true,
 				"lookbackDays": 20,
