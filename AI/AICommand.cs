@@ -107,7 +107,7 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 
 		var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
 
-		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue);
+		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, new Dictionary<string, TechnicalBias>());
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config), config);
 
 		using var sink = new ProposalSink(config.Log, mode: "once");
