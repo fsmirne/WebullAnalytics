@@ -157,6 +157,7 @@ public static class BreakEvenAnalyzer
 
 		var strikes = parsedLegs.Select(l => l.parsed.Strike).Distinct().OrderBy(x => x).ToList();
 		var expiries = parsedLegs.Select(l => l.parsed.ExpiryDate).Distinct().OrderBy(x => x).ToList();
+		var earliestExpiry = expiries[0];
 
 		// Build title
 		string title;
@@ -180,7 +181,7 @@ public static class BreakEvenAnalyzer
 		var legSymbols = string.Join(", ", parsedLegs.Select(l => l.symbol));
 		title += $" [{legSymbols}]";
 
-		var details = BuildDetailsString(parent);
+		var details = BuildDetailsString(parent, earliestExpiry);
 
 		// Build leg descriptions
 		var legDescriptions = parsedLegs.Select(l =>
@@ -374,13 +375,14 @@ public static class BreakEvenAnalyzer
 		return [];
 	}
 
-	private static string BuildDetailsString(PositionRow row)
+	private static string BuildDetailsString(PositionRow row, DateTime? expiryOverride = null)
 	{
 		var premium = OptionMath.GetPremium(row);
 		var premiumStr = Formatters.FormatPrice(premium, row.Asset);
 		var hasAdjustment = row.AdjustedAvgPrice.HasValue && row.AdjustedAvgPrice.Value != (row.InitialAvgPrice ?? row.AvgPrice);
 		var adjSuffix = hasAdjustment ? " adj" : "";
-		var expiryStr = row.Expiry.HasValue ? Formatters.FormatOptionDate(row.Expiry.Value) : "N/A";
+		var expiry = expiryOverride ?? row.Expiry;
+		var expiryStr = expiry.HasValue ? Formatters.FormatOptionDate(expiry.Value) : "N/A";
 		return $"{row.Qty}x @ ${premiumStr}{adjSuffix}, Exp {expiryStr}";
 	}
 }
