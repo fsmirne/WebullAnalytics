@@ -1,6 +1,7 @@
 using Spectre.Console;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Sources;
+using WebullAnalytics.AI;
 
 namespace WebullAnalytics.AI.Replay;
 
@@ -10,13 +11,15 @@ internal sealed class ReplayRunner
 	private readonly ReplayPositionSource _positions;
 	private readonly ReplayQuoteSource _quotes;
 	private readonly List<Trade> _allTrades;
+	private readonly HistoricalPriceCache _priceCache;
 
-	public ReplayRunner(AIConfig config, ReplayPositionSource positions, ReplayQuoteSource quotes, List<Trade> allTrades)
+	public ReplayRunner(AIConfig config, ReplayPositionSource positions, ReplayQuoteSource quotes, List<Trade> allTrades, HistoricalPriceCache priceCache)
 	{
 		_config = config;
 		_positions = positions;
 		_quotes = quotes;
 		_allTrades = allTrades;
+		_priceCache = priceCache;
 	}
 
 	public async Task<int> RunAsync(DateTime since, DateTime until, string granularity, CancellationToken cancellation)
@@ -44,7 +47,8 @@ internal sealed class ReplayRunner
 			var optionSymbols = openPositions.Values.SelectMany(p => p.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol)).ToHashSet();
 			var quoteSnapshot = await _quotes.GetQuotesAsync(step, optionSymbols, tickerSet, cancellation);
 
-			var ctx = new EvaluationContext(step, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, new Dictionary<string, TechnicalBias>());
+			var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _priceCache, _config.Rules.OpportunisticRoll.TechnicalFilter, step, cancellation);
+			var ctx = new EvaluationContext(step, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 			var results = evaluator.Evaluate(ctx);
 
 			foreach (var r in results)

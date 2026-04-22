@@ -189,7 +189,7 @@ internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 		var positions = new Sources.ReplayPositionSource(trades, feeLookup);
 		var quotes = new Sources.ReplayQuoteSource(priceCache, ivSolver, riskFreeRate: 0.036);
 
-		var runner = new Replay.ReplayRunner(config, positions, quotes, trades);
+		var runner = new Replay.ReplayRunner(config, positions, quotes, trades, priceCache);
 		return await runner.RunAsync(since, until, settings.Granularity, cancellation);
 	}
 }
