@@ -834,3 +834,10 @@ This tool uses EPPlus configured for non-commercial use. For commercial use, you
 ## Contributing
 
 Contributions are welcome! Please ensure any changes maintain accurate FIFO lot accounting for P&L, average cost for position display, and properly handle multi-leg option strategies.
+
+---
+
+## Referral
+
+If you're not on Webull yet, you can sign up using my referral link and get free rewards:
+[https://www.webull.com/s/FCxAAumTOqwPwR1AgM](https://www.webull.com/s/FCxAAumTOqwPwR1AgM)
