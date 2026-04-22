@@ -2,7 +2,7 @@ namespace WebullAnalytics.AI.Rules;
 
 /// <summary>
 /// Priority 2: close the position when mark-to-market has captured a configured percentage of
-/// max projected profit (estimated via the existing TimeDecayGridBuilder for the current-date column).
+/// max projected profit (estimated via ProfitProjector across the full remaining lifetime grid).
 /// </summary>
 internal sealed class TakeProfitRule : IManagementRule
 {
@@ -62,14 +62,6 @@ internal sealed class TakeProfitRule : IManagementRule
 		return total;
 	}
 
-	/// <summary>
-	/// Bridges to the existing BreakEvenAnalyzer / TimeDecayGridBuilder to estimate max projected profit
-	/// per contract at today's date column. Phase-1 stub: returns null, so TakeProfit does not fire.
-	/// Follow-up task will wire this to ProfitProjector.MaxForCurrentColumn once the BreakEvenAnalyzer
-	/// entry-point signature is finalized.
-	/// </summary>
-	private static decimal? GetMaxProjectedProfitPerContract(OpenPosition p, EvaluationContext ctx)
-	{
-		return ProfitProjector.MaxForCurrentColumn(p, ctx);
-	}
+	private static decimal? GetMaxProjectedProfitPerContract(OpenPosition p, EvaluationContext ctx) =>
+		ProfitProjector.MaxForCurrentColumn(p, ctx);
 }
