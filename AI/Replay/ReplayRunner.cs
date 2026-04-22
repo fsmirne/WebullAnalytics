@@ -58,6 +58,7 @@ internal sealed class ReplayRunner
 
 				var agreement = ClassifyAgreement(r.Proposal, step);
 				agreementCounts[agreement]++;
+				RenderFillAnnotation(r.Proposal, step, agreement);
 			}
 		}
 
@@ -114,6 +115,31 @@ internal sealed class ReplayRunner
 
 		// partial: fills exist on the ticker but no overlap with proposed legs.
 		return "partial";
+	}
+
+	private void RenderFillAnnotation(ManagementProposal p, DateTime step, string agreement)
+	{
+		var sameDayFills = _allTrades
+			.Where(t => t.Timestamp.Date == step.Date && t.MatchKey.Contains(p.Ticker, StringComparison.OrdinalIgnoreCase))
+			.Take(3)
+			.ToList();
+
+		string fillText;
+		if (sameDayFills.Count == 0)
+		{
+			fillText = "no fills on this position";
+		}
+		else
+		{
+			var parts = sameDayFills.Select(t =>
+			{
+				var occ = t.MatchKey.StartsWith("option:", StringComparison.OrdinalIgnoreCase) ? t.MatchKey[7..] : t.MatchKey;
+				return $"{t.Side.ToString().ToUpperInvariant()} {occ} x{t.Qty}";
+			});
+			fillText = string.Join(", ", parts);
+		}
+
+		Spectre.Console.AnsiConsole.MarkupLine($"[dim]  ↳ actual: {fillText}  [{agreement}][/]");
 	}
 
 	private static void PrintDisclaimer()
