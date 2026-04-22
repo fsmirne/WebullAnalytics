@@ -139,7 +139,7 @@ internal sealed class ReplayRunner
 			fillText = string.Join(", ", parts);
 		}
 
-		Spectre.Console.AnsiConsole.MarkupLine($"[dim]  ↳ actual: {fillText}  [{agreement}][/]");
+		Spectre.Console.AnsiConsole.MarkupLine($"[dim]  ↳ actual: {Spectre.Console.Markup.Escape(fillText)}  [{agreement}][/]");
 	}
 
 	private static void PrintDisclaimer()
