@@ -49,9 +49,9 @@ The rule set targets multi-day managed calendar and diagonal positions — short
 ## Command Surface
 
 ```
-WebullAnalytics ai watch   [options]                — foreground loop
-WebullAnalytics ai once    [options]                — single pass, print, exit
-WebullAnalytics ai replay  [options]                — historical replay
+wa ai watch   [options]                — foreground loop
+wa ai once    [options]                — single pass, print, exit
+wa ai replay  [options]                — historical replay
 ```
 
 ### Shared options (all subcommands)
