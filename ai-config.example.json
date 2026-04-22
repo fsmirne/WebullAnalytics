@@ -30,6 +30,9 @@
 			"minImprovementPerDayPerContract": 0.50,
 			"ivDefaultPct": 40,
 			"strikeStep": 0.50,
+			"baseOtmBufferPct": 2.0,
+			"technicalBufferMultiplier": 1.5,
+			"maxDeltaIncreasePct": 25.0,
 			"technicalFilter": {
 				"enabled": true,
 				"lookbackDays": 20,
