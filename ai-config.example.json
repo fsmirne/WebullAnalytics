@@ -9,7 +9,7 @@
 	"quoteSource": "webull",
 	"positionSource": {
 		"type": "openapi",
-		"account": "default"
+		"account": "test1"
 	},
 	"cashReserve": {
 		"mode": "percent",
