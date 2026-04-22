@@ -83,7 +83,7 @@ internal static class TradeContext
 
 internal sealed class TradePlaceSettings : TradeSubcommandSettings
 {
-	[CommandOption("--trades <VALUE>")]
+	[CommandOption("--trade <VALUE>")]
 	[Description("Comma-separated legs in ACTION:SYMBOL:QTY format. Example: \"buy:GME260501C00023000:1,sell:GME260501C00024000:1\"")]
 	public string Trades { get; set; } = "";
 
@@ -122,7 +122,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		// 1. Parse legs.
 		List<ParsedLeg> legs;
 		try { legs = TradeLegParser.Parse(s.Trades); }
-		catch (FormatException ex) { AnsiConsole.MarkupLine($"[red]Error parsing --trades:[/] {Markup.Escape(ex.Message)}"); return 2; }
+		catch (FormatException ex) { AnsiConsole.MarkupLine($"[red]Error parsing --trade:[/] {Markup.Escape(ex.Message)}"); return 2; }
 
 		if (legs.Any(l => l.Price != null || l.PriceKeyword != null))
 		{
