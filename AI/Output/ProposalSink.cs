@@ -70,7 +70,7 @@ internal sealed class ProposalSink : IDisposable
 		{
 			var legsText = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
 			var netLabel = p.NetDebit >= 0m ? $"net credit ${p.NetDebit:F2}" : $"net debit ${-p.NetDebit:F2}";
-			AnsiConsole.MarkupLine($"  {Markup.Escape(legsText)} [dim]> {Markup.Escape(netLabel)}[/]");
+			AnsiConsole.MarkupLine($"  {Markup.Escape(legsText)} [dim]→ {Markup.Escape(netLabel)}[/]");
 		}
 
 		if (p.Kind != ProposalKind.AlertOnly && p.Legs.Count > 0)
