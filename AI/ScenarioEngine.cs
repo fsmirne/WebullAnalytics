@@ -75,6 +75,9 @@ internal static class ScenarioEngine
 			var longLeg = legs.First(l => l.IsLong);
 			var newExpiry = NextWeekly(shortLeg.Parsed.ExpiryDate);
 			yield return MatchKeys.OccSymbol(root, newExpiry, shortLeg.Parsed.Strike, callPut);
+			// DefensiveRollRule steps the short strike one increment in either direction; BracketStrikes(spot) may not include those strikes.
+			if (shortLeg.Parsed.Strike - strikeStep > 0m) yield return MatchKeys.OccSymbol(root, newExpiry, shortLeg.Parsed.Strike - strikeStep, callPut);
+			yield return MatchKeys.OccSymbol(root, newExpiry, shortLeg.Parsed.Strike + strikeStep, callPut);
 			var newLongExp = longLeg.Parsed.ExpiryDate > newExpiry ? longLeg.Parsed.ExpiryDate : newExpiry.AddDays(21);
 			var oppositeCp = callPut == "C" ? "P" : "C";
 			foreach (var strike in BracketStrikes(spot, strikeStep))
