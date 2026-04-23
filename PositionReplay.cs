@@ -51,6 +51,7 @@ internal static class PositionReplay
 			var active = new List<Lineage>();
 			foreach (var evt in events)
 				ApplyEvent(active, evt, underlying, ref lineageIdCounter);
+			AssertInvariants(active, $"end of replay for {underlying}");
 			allLineages.AddRange(active);
 		}
 
@@ -101,11 +102,49 @@ internal static class PositionReplay
 		return parsed?.parsed.Root ?? t.MatchKey;
 	}
 
+	/// <summary>Called at the end of every event's state transition and at end of replay.
+	/// Throws with diagnostic state dump if any invariant is violated — those indicate state-machine bugs,
+	/// not valid runtime state.</summary>
+	private static void AssertInvariants(IEnumerable<Lineage> active, string context)
+	{
+		foreach (var lin in active)
+		{
+			if (lin.OpenLegs.Count == 0) continue;
+
+			// Inv1: every open leg has positive qty.
+			foreach (var (mk, leg) in lin.OpenLegs)
+				if (leg.Qty <= 0)
+					throw new InvalidOperationException($"Invariant: lineage {lin.Id} on {lin.Underlying} has open leg {mk} with non-positive qty {leg.Qty} (context: {context})");
+
+			// Inv2: multi-leg lineages are balanced.
+			if (lin.OpenLegs.Count > 1)
+			{
+				var qtys = lin.OpenLegs.Values.Select(v => v.Qty).Distinct().ToList();
+				if (qtys.Count > 1)
+					throw new InvalidOperationException($"Invariant: lineage {lin.Id} on {lin.Underlying} is imbalanced: legs have qtys [{string.Join(",", qtys)}] (context: {context})");
+			}
+
+			// Inv3: UnitQty > 0 for active lineages.
+			if (lin.UnitQty <= 0)
+				throw new InvalidOperationException($"Invariant: lineage {lin.Id} on {lin.Underlying} has non-positive UnitQty {lin.UnitQty} (context: {context})");
+
+			// Inv4: RunningCash is finite (guard against future refactoring that introduces double arithmetic).
+			var cashAsDouble = (double)lin.RunningCash;
+			if (double.IsNaN(cashAsDouble) || double.IsInfinity(cashAsDouble))
+				throw new InvalidOperationException($"Invariant: lineage {lin.Id} on {lin.Underlying} has non-finite RunningCash {lin.RunningCash} (context: {context})");
+		}
+	}
+
 	/// <summary>Applies one event to the active-lineage list.</summary>
 	private static void ApplyEvent(List<Lineage> active, Event evt, string underlying, ref int lineageIdCounter)
 	{
-		if (evt.IsStrategyOrder) { ApplyStrategyOrderEvent(active, evt, underlying, ref lineageIdCounter); return; }
-		ApplyStandaloneEvent(active, evt, underlying, ref lineageIdCounter);
+		if (evt.IsStrategyOrder) ApplyStrategyOrderEvent(active, evt, underlying, ref lineageIdCounter);
+		else ApplyStandaloneEvent(active, evt, underlying, ref lineageIdCounter);
+
+		// Deactivate any lineage whose open legs are all zero.
+		active.RemoveAll(lin => lin.OpenLegs.Count == 0);
+
+		AssertInvariants(active, $"after event at {evt.Timestamp}");
 	}
 
 	private static void ApplyStandaloneEvent(List<Lineage> active, Event evt, string underlying, ref int lineageIdCounter)
