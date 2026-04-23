@@ -361,9 +361,9 @@ internal static class AnalyzeCommon
 		}
 
 		var spot = underlyingPrices.TryGetValue(oldParsed.Root, out var sp) ? sp : 0m;
-		if (settings.CurrentUnderlyingPrice != null)
+		if (settings.TickerPrice != null)
 		{
-			var overrides = ReportCommand.ParseUnderlyingPriceOverrides(settings.CurrentUnderlyingPrice);
+			var overrides = ReportCommand.ParseUnderlyingPriceOverrides(settings.TickerPrice);
 			if (overrides.TryGetValue(oldParsed.Root, out var ovr)) spot = ovr;
 		}
 		if (spot == 0) { Console.WriteLine($"Error: Could not determine underlying price for {oldParsed.Root}"); return 1; }

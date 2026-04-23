@@ -8,7 +8,7 @@
 		"outputPath": null,
 		"initialAmount": 0,
 		"view": "detailed",
-		"currentUnderlyingPrice": "GME:1000,SPY:600",
+		"tickerPrice": "GME:1000,SPY:600",
 		"iv": null,
 		"api": "yahoo",
 		"range": 2,
