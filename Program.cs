@@ -41,6 +41,7 @@ class Program
 			config.SetApplicationName("WebullAnalytics");
 			config.Settings.StrictParsing = true;
 			config.AddCommand<ReportCommand>("report");
+			config.AddCommand<DiffPositionsCommand>("diff-positions");
 			config.AddBranch("analyze", analyze =>
 			{
 				analyze.AddCommand<AnalyzeTradeCommand>("trade");
