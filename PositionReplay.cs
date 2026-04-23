@@ -53,6 +53,7 @@ internal static class PositionReplay
 			foreach (var evt in events)
 				ApplyEvent(active, evt, underlying, ref lineageIdCounter);
 			ApplyExpiries(active, evaluationDate);
+			SettleImbalances(active, ref lineageIdCounter);
 			AssertInvariants(active, $"end of replay for {underlying}");
 			allLineages.AddRange(active);
 		}
@@ -378,34 +379,34 @@ internal static class PositionReplay
 		// UnitQty = min of leg qtys across open legs (balanced after strategy orders in the common case).
 		lin.UnitQty = lin.OpenLegs.Values.Count > 0 ? lin.OpenLegs.Values.Min(v => v.Qty) : 0;
 
-		// Post-event invariant: every multi-leg lineage must be balanced (all open legs share one qty).
-		// Any imbalance is split off immediately — keeping the lineage balanced at the common-qty minimum
-		// and spawning a new standalone lineage for the excess, with proportional cash allocation.
-		RebalanceLineage(lin, evt, active, ref lineageIdCounter);
+		// Imbalance (if any) is deferred to end-of-replay settlement via SettleImbalances —
+		// partial-fill strategy orders temporarily imbalance lineages mid-replay but usually
+		// self-resolve before the replay ends.
 	}
 
 	/// <summary>
 	/// If `lin` has any open leg whose qty exceeds the minimum leg qty, split the excess into a new
 	/// standalone lineage. Proportionally allocates cash: the split lineage gets (excess/origUnit) × cash.
 	/// Original lineage's RunningCash and FirstEntryCash are scaled down by (min/origUnit).
+	/// Called once per lineage at end of per-underlying replay (after all events, after ApplyExpiries).
 	/// </summary>
-	private static void RebalanceLineage(Lineage lin, Event causingEvent, List<Lineage> active, ref int lineageIdCounter)
+	private static void SettleImbalance(Lineage lin, List<Lineage> active, ref int lineageIdCounter)
 	{
 		if (lin.OpenLegs.Count < 2) return;
 		var minQty = lin.OpenLegs.Values.Min(v => v.Qty);
 		var maxQty = lin.OpenLegs.Values.Max(v => v.Qty);
 		if (minQty == maxQty) return; // balanced
 
-		// For each leg whose qty > minQty, split off the excess as a new standalone lineage.
 		var imbalancedKeys = lin.OpenLegs.Where(kv => kv.Value.Qty > minQty).Select(kv => kv.Key).ToList();
 		var origUnit = maxQty;
+
+		// Split-marker timestamp: use the lineage's most-recent trade timestamp (no causing Event at settlement).
+		var markerTimestamp = lin.TradeHistory.Count > 0 ? lin.TradeHistory[^1].Timestamp : lin.FirstEntryTimestamp;
 
 		foreach (var key in imbalancedKeys)
 		{
 			var (side, qty) = lin.OpenLegs[key];
 			var excess = qty - minQty;
-
-			// Proportional cash: spawn gets (excess / origUnit) of original cash values.
 			var spawnRatio = (decimal)excess / origUnit;
 			var spawn = new Lineage
 			{
@@ -419,12 +420,8 @@ internal static class PositionReplay
 				UnitQty = excess
 			};
 			spawn.OpenLegs[key] = (side, excess);
-			// Copy a portion of trade history as a single synthetic split marker; downstream AdjustmentReportBuilder
-			// reads this list for the "how we got here" display.
-			spawn.TradeHistory.Add(new NetDebitTrade(causingEvent.Timestamp, $"[split from lineage {lin.Id}]", Side.Buy, excess, 0m, spawn.RunningCash));
+			spawn.TradeHistory.Add(new NetDebitTrade(markerTimestamp, $"[split from lineage {lin.Id} at end of replay]", Side.Buy, excess, 0m, spawn.RunningCash));
 			active.Add(spawn);
-
-			// Original lineage keeps the minQty on this leg; cash scales by complementary ratio.
 			lin.OpenLegs[key] = (side, minQty);
 		}
 
@@ -433,6 +430,22 @@ internal static class PositionReplay
 		lin.FirstEntryCash *= keepRatio;
 		lin.FirstEntryQty = minQty;
 		lin.UnitQty = minQty;
+	}
+
+	/// <summary>
+	/// End-of-replay settlement: walks active lineages once, calling SettleImbalance on each.
+	/// Any imbalance that survived the event loop (e.g., a deliberate partial close that wasn't
+	/// rebalanced by subsequent trades) becomes a standalone orphan lineage at this point.
+	/// Partial-fill strategy orders, by contrast, self-resolve during the event loop and produce
+	/// no imbalance at settlement.
+	/// </summary>
+	private static void SettleImbalances(List<Lineage> active, ref int lineageIdCounter)
+	{
+		// Snapshot the current list; spawned lineages append to `active` but shouldn't be re-examined
+		// (they're single-leg by construction and have nothing to settle).
+		var snapshot = active.ToList();
+		foreach (var lin in snapshot)
+			SettleImbalance(lin, active, ref lineageIdCounter);
 	}
 
 	private static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments, Dictionary<string, List<NetDebitTrade>> singleLegStandalones)
