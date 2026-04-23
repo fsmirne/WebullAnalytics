@@ -473,7 +473,8 @@ internal static class AnalyzeCommon
 				evalTimes.AddRange(allHours);
 			else
 			{
-				var hourStep = Math.Max(1, (allHours.Count - 1) / (maxCols - 1));
+				// Ceiling division: ensures loop produces ≤ (maxCols-1) items so total (with appended last) stays within maxCols.
+				var hourStep = Math.Max(1, (allHours.Count - 1 + maxCols - 2) / (maxCols - 1));
 				for (var i = 0; i < allHours.Count - 1; i += hourStep)
 					evalTimes.Add(allHours[i]);
 				if (evalTimes[^1] != allHours[^1])
@@ -482,7 +483,8 @@ internal static class AnalyzeCommon
 		}
 		else
 		{
-			var dayStep = Math.Max(1, oldDays / (maxCols - 1));
+			// Ceiling division: ensures loop produces ≤ (maxCols-1) items so total (with appended expiry) stays within maxCols.
+			var dayStep = Math.Max(1, (oldDays + maxCols - 2) / (maxCols - 1));
 			for (var d = 0; d < oldDays; d += dayStep)
 				evalTimes.Add(today.AddDays(d) + OptionMath.MarketOpen);
 			var expiryOpen = oldExpiry.Date + OptionMath.MarketOpen;
