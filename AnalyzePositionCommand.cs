@@ -119,7 +119,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			return 0;
 		}
 
-		RenderScenarioTable(scenarios, settings.Cash);
+		RenderScenarioTable(scenarios, settings);
 		return 0;
 	}
 
@@ -862,8 +862,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		AnsiConsole.WriteLine();
 	}
 
-	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, decimal? availableCash)
+	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, AnalyzePositionSettings settings)
 	{
+		var availableCash = settings.Cash;
 		var table = new Table().Expand();
 		table.ShowRowSeparators();
 		table.AddColumn("Scenario");
@@ -919,5 +920,46 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		AnsiConsole.Write(table);
 		if (availableCash.HasValue)
 			AnsiConsole.MarkupLine($"[dim]Fundability check: available cash/BP = ${availableCash.Value:N2}. Scenarios exceeding this are dimmed.[/]");
+
+		var commands = scenarios
+			.Select(sc => (sc, cmd: BuildAnalyzeTradeCommand(sc.ActionSummary, settings)))
+			.Where(x => x.cmd != null)
+			.ToList();
+		if (commands.Count == 0) return;
+
+		AnsiConsole.WriteLine();
+		AnsiConsole.MarkupLine("[bold]Reproduce any scenario:[/]");
+		foreach (var (sc, cmd) in commands)
+		{
+			var marker = ReferenceEquals(sc, topFundable) ? "[green]★[/] " : "  ";
+			AnsiConsole.MarkupLine($"{marker}[dim]{Markup.Escape(sc.Name)}[/]");
+			AnsiConsole.MarkupLine($"  [grey50]{Markup.Escape(cmd!)}[/]");
+		}
+	}
+
+	/// <summary>Converts a scenario ActionSummary like "BUY SYM x200, SELL SYM2 x200" into a
+	/// reproducible 'wa analyze trade' command, carrying over --ticker-price and --date from
+	/// the current settings. Returns null for hold/no-op scenarios.</summary>
+	private static string? BuildAnalyzeTradeCommand(string actionSummary, AnalyzePositionSettings settings)
+	{
+		if (string.IsNullOrWhiteSpace(actionSummary) || actionSummary == "—") return null;
+		var parts = actionSummary.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		var legs = new List<string>();
+		foreach (var part in parts)
+		{
+			var tokens = part.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+			if (tokens.Length != 3) return null;
+			var action = tokens[0].ToLowerInvariant();
+			if (action != "buy" && action != "sell") return null;
+			var symbol = tokens[1];
+			var qty = tokens[2].TrimStart('x');
+			legs.Add($"{action}:{symbol}:{qty}@MID");
+		}
+
+		var extras = new List<string>();
+		if (!string.IsNullOrEmpty(settings.TickerPrice)) extras.Add($"--ticker-price {settings.TickerPrice}");
+		if (!string.IsNullOrEmpty(settings.Date)) extras.Add($"--date {settings.Date}");
+		var suffix = extras.Count > 0 ? " " + string.Join(" ", extras) : "";
+		return $"wa analyze trade \"{string.Join(",", legs)}\"{suffix}";
 	}
 }
