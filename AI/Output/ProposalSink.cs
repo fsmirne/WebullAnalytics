@@ -77,8 +77,11 @@ internal sealed class ProposalSink : IDisposable
 		{
 			var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 			var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@MID"));
-			var limit = (p.NetDebit / 100m).ToString("F2", CultureInfo.InvariantCulture);
-			AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]");
+			// `wa trade place` takes absolute --limit and a --side (buy=net-debit, sell=net-credit).
+			// Sign of NetDebit: positive → credit → SELL; negative → debit → BUY.
+			var limit = Math.Abs(p.NetDebit / 100m).ToString("F2", CultureInfo.InvariantCulture);
+			var side = p.NetDebit >= 0m ? "sell" : "buy";
+			AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit} --side {side}[/]");
 			AnsiConsole.MarkupLine($"  [dim]wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]");
 		}
 
