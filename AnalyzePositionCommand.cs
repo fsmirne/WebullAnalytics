@@ -9,8 +9,8 @@ namespace WebullAnalytics;
 
 internal sealed class AnalyzePositionSettings : AnalyzeSubcommandSettings
 {
-	[CommandArgument(0, "<spec>")]
-	[Description("Open position. Format: ACTION:SYMBOL:QTY@PRICE,... where PRICE is your cost basis per leg. Example: sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499@1.11")]
+	[CommandArgument(0, "[spec]")]
+	[Description("Open position. Format: ACTION:SYMBOL:QTY@PRICE,... where PRICE is your cost basis per leg. Example: sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499@1.11. Omit to select from open positions interactively.")]
 	public string Spec { get; set; } = "";
 
 	[CommandOption("--iv-default")]
@@ -30,16 +30,19 @@ internal sealed class AnalyzePositionSettings : AnalyzeSubcommandSettings
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 
-		List<ParsedLeg> legs;
-		try { legs = TradeLegParser.Parse(Spec); }
-		catch (FormatException ex) { return ValidationResult.Error($"<spec>: {ex.Message}"); }
-
-		foreach (var leg in legs)
+		if (!string.IsNullOrEmpty(Spec))
 		{
-			if (leg.Option == null)
-				return ValidationResult.Error($"<spec>: '{leg.Symbol}' is not an OCC option symbol (analyze position requires option legs)");
-			if (!leg.Price.HasValue)
-				return ValidationResult.Error($"<spec>: leg '{leg.Symbol}' is missing @PRICE (cost basis per share is required)");
+			List<ParsedLeg> legs;
+			try { legs = TradeLegParser.Parse(Spec); }
+			catch (FormatException ex) { return ValidationResult.Error($"<spec>: {ex.Message}"); }
+
+			foreach (var leg in legs)
+			{
+				if (leg.Option == null)
+					return ValidationResult.Error($"<spec>: '{leg.Symbol}' is not an OCC option symbol (analyze position requires option legs)");
+				if (!leg.Price.HasValue)
+					return ValidationResult.Error($"<spec>: leg '{leg.Symbol}' is missing @PRICE (cost basis per share is required)");
+			}
 		}
 
 		if (IvDefault <= 0m || IvDefault > 500m)
@@ -70,19 +73,28 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
-		var legs = TradeLegParser.Parse(settings.Spec);
-		var positionLegs = legs.Select(l => new PositionSnapshot(
-			Symbol: l.Symbol,
-			Action: l.Action,
-			Qty: l.Quantity,
-			CostBasis: l.Price!.Value,
-			Parsed: l.Option!)).ToList();
+		List<PositionSnapshot> positionLegs;
+		if (string.IsNullOrEmpty(settings.Spec))
+		{
+			var (loaded, error) = SelectPositionFromLog();
+			if (loaded == null)
+			{
+				Console.Error.WriteLine($"Error: {error}");
+				return 1;
+			}
+			positionLegs = loaded;
+		}
+		else
+		{
+			var legs = TradeLegParser.Parse(settings.Spec);
+			positionLegs = legs.Select(l => new PositionSnapshot(Symbol: l.Symbol, Action: l.Action, Qty: l.Quantity, CostBasis: l.Price!.Value, Parsed: l.Option!)).ToList();
+		}
 
 		var ticker = positionLegs[0].Parsed.Root;
 		var spot = ResolveSpot(ticker, settings);
 		if (spot == null)
 		{
-			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --current-underlying-price {ticker}:<price>.");
+			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --ticker-price {ticker}:<price>.");
 			return 1;
 		}
 
@@ -116,6 +128,105 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	internal sealed record PositionSnapshot(string Symbol, LegAction Action, int Qty, decimal CostBasis, OptionParsed Parsed);
 
 	internal enum StructureKind { SingleLong, SingleShort, Calendar, Diagonal, Vertical, Unsupported }
+
+	// ─── Load from trade log ──────────────────────────────────────────────────
+
+	private static (List<PositionSnapshot>? snapshots, string? error) SelectPositionFromLog()
+	{
+		var ordersPath = Program.ResolvePath(Program.OrdersPath);
+		if (!File.Exists(ordersPath))
+			return (null, $"Orders file '{ordersPath}' does not exist.");
+
+		var (trades, feeLookup) = JsonlParser.ParseOrdersJsonl(ordersPath);
+		var (_, positions, _) = PositionTracker.ComputeReport(trades, feeLookup: feeLookup);
+		var tradeIndex = PositionTracker.BuildTradeIndex(trades);
+		var (rows, _, _) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
+
+		var strategies = FindAllStrategyGroups(rows);
+
+		if (strategies.Count == 0)
+			return (null, "No open strategy positions found in the trade log.");
+
+		var chosen = strategies.Count == 1
+			? strategies[0]
+			: AnsiConsole.Prompt(new SelectionPrompt<(PositionRow parent, List<PositionRow> legs)>()
+				.Title("Select a position to analyze:")
+				.UseConverter(item => FormatPositionLabel(item.parent, item.legs))
+				.AddChoices(strategies));
+
+		var snapshots = BuildSnapshotsFromLegs(chosen.legs);
+		return snapshots.Count == 0
+			? (null, "Could not parse any option legs for the selected position.")
+			: (snapshots, null);
+	}
+
+	private static List<(PositionRow parent, List<PositionRow> legs)> FindAllStrategyGroups(IReadOnlyList<PositionRow> rows)
+	{
+		var result = new List<(PositionRow, List<PositionRow>)>();
+		PositionRow? currentParent = null;
+		var currentLegs = new List<PositionRow>();
+
+		foreach (var row in rows)
+		{
+			if (row.IsStrategyLeg)
+			{
+				if (currentParent != null) currentLegs.Add(row);
+				continue;
+			}
+
+			if (currentParent != null && currentLegs.Count > 0)
+				result.Add((currentParent, new List<PositionRow>(currentLegs)));
+			currentParent = null;
+			currentLegs = new List<PositionRow>();
+			if (row.Asset == Asset.OptionStrategy) currentParent = row;
+		}
+
+		if (currentParent != null && currentLegs.Count > 0)
+			result.Add((currentParent, new List<PositionRow>(currentLegs)));
+
+		return result;
+	}
+
+	private static string FormatPositionLabel(PositionRow parent, List<PositionRow> legs)
+	{
+		var parsedLegs = new List<(PositionRow row, OptionParsed opt)>();
+		foreach (var leg in legs)
+		{
+			if (leg.MatchKey == null) continue;
+			var occ = leg.MatchKey.StartsWith("option:") ? leg.MatchKey[7..] : leg.MatchKey;
+			var parsed = ParsingHelpers.ParseOptionSymbol(occ);
+			if (parsed != null) parsedLegs.Add((leg, parsed));
+		}
+
+		if (parsedLegs.Count == 0) return parent.Instrument;
+
+		parsedLegs.Sort((a, b) => a.opt.ExpiryDate.CompareTo(b.opt.ExpiryDate));
+		var ticker = parsedLegs[0].opt.Root;
+		var callPut = parsedLegs[0].opt.CallPut == "C" ? "Call" : "Put";
+		var qty = parsedLegs[0].row.Qty;
+		var shortOpt = parsedLegs[0].opt;
+		var longOpt = parsedLegs[^1].opt;
+
+		var strikeStr = shortOpt.Strike == longOpt.Strike ? $"${shortOpt.Strike:F2}" : $"${shortOpt.Strike:F2}→${longOpt.Strike:F2}";
+		var expiryStr = parsedLegs.Count > 1 ? $"{shortOpt.ExpiryDate:MM-dd}/{longOpt.ExpiryDate:MM-dd}" : $"{shortOpt.ExpiryDate:MM-dd}";
+
+		return $"{ticker}  {parent.OptionKind}  {callPut}  {strikeStr}  {expiryStr}  x{qty}";
+	}
+
+	private static List<PositionSnapshot> BuildSnapshotsFromLegs(List<PositionRow> legRows)
+	{
+		var snapshots = new List<PositionSnapshot>();
+		foreach (var leg in legRows)
+		{
+			if (leg.MatchKey == null) continue;
+			var occ = leg.MatchKey.StartsWith("option:") ? leg.MatchKey[7..] : leg.MatchKey;
+			var parsed = ParsingHelpers.ParseOptionSymbol(occ);
+			if (parsed == null) continue;
+			var action = leg.Side == Side.Buy ? LegAction.Buy : LegAction.Sell;
+			snapshots.Add(new PositionSnapshot(Symbol: occ, Action: action, Qty: leg.Qty, CostBasis: leg.AvgPrice, Parsed: parsed));
+		}
+		return snapshots;
+	}
 
 	// ─── Classifier ──────────────────────────────────────────────────────────
 
@@ -206,6 +317,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var list = new List<Scenario>();
 		var iv = ResolveIV(longLeg.Symbol, settings, quotes);
 		var callPut = longLeg.Parsed.CallPut;
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
 
 		// 1. Hold (do nothing) — value at expiry = intrinsic.
 		var valueAtExpiry = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
@@ -216,7 +328,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		// 2. Close now at theoretical mid (or live mid if available).
 		var dteNow = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
-		var midNow = LiveOrBsMid(quotes, longLeg.Symbol, spot, longLeg.Parsed.Strike, dteNow, iv, callPut);
+		var midNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, dteNow, iv, callPut);
 		list.Add(NewScenario("Close now", longLeg, $"SELL {longLeg.Symbol} x{longLeg.Qty}",
 			cashNow: midNow, valueAtTarget: 0m, bpDeltaPerContract: 0m, daysToTarget: 1,
 			rationale: $"sell at mid ${midNow:F2}/share → close position"));
@@ -228,7 +340,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var newShortSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, shortExpiry, longLeg.Parsed.Strike, callPut);
 			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
 			var dteShort = Math.Max(1, (shortExpiry - asOf).Days);
-			var shortMid = LiveOrBsMid(quotes, newShortSym, spot, longLeg.Parsed.Strike, dteShort, ivNewShort, callPut);
+			var shortMid = LiveOrBsMid(quotesForPricing, newShortSym, spot, longLeg.Parsed.Strike, dteShort, ivNewShort, callPut);
 			// Project value at short expiry: long BS value, short intrinsic.
 			var dteLongAtShortExp = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days);
 			var longAtShortExp = (decimal)OptionMath.BlackScholes(spot, longLeg.Parsed.Strike, dteLongAtShortExp / 365.0, 0.036, iv, callPut);
@@ -253,10 +365,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var ivShort = ResolveIV(shortLeg.Symbol, settings, quotes);
 		var ivLong = ResolveIV(longLeg.Symbol, settings, quotes);
 
-		var shortMidNow = LiveOrBsMid(quotes, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivShort, callPut);
-		var longMidNow = LiveOrBsMid(quotes, longLeg.Symbol, spot, longLeg.Parsed.Strike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivLong, callPut);
-		var (shortBidNow, shortAskNow) = LiveBidAsk(quotes, shortLeg.Symbol, shortMidNow);
-		var (longBidNow, longAskNow) = LiveBidAsk(quotes, longLeg.Symbol, longMidNow);
+		// When a date override is active, live bid/ask reflects today's market prices, not the
+		// evaluation date's. Null out quotes for pricing so LiveOrBsMid/LiveBidAsk always use
+		// Black-Scholes with the correct DTE from asOf. IV is still sourced from live quotes above.
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
+
+		var shortMidNow = LiveOrBsMid(quotesForPricing, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivShort, callPut);
+		var longMidNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivLong, callPut);
+		var (shortBidNow, shortAskNow) = LiveBidAsk(quotesForPricing, shortLeg.Symbol, shortMidNow);
+		var (longBidNow, longAskNow) = LiveBidAsk(quotesForPricing, longLeg.Symbol, longMidNow);
 
 		// Current BP (ongoing; covered-structure debit is sunk).
 		var currentBp = AnalyzeCommon.ComputeLegMargin(shortLeg.Parsed, 1, spot, shortMidNow, longLeg.Parsed, null, 1, longMidNow, isExisting: true).Total;
@@ -304,12 +421,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			// 4. Roll short same strike, next weekly.
 			{
 				var newSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newExp, shortLeg.Parsed.Strike, callPut);
-				if (quotes == null || HasLiveQuote(quotes, newSym))
+				if (quotesForPricing == null || HasLiveQuote(quotesForPricing, newSym))
 				{
 				var ivNewShort = ResolveIV(newSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newExp - asOf).Days);
-				var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, shortLeg.Parsed.Strike, dteNewShort, ivNewShort, callPut);
-				var (newShortBid, _) = LiveBidAsk(quotes, newSym, newShortMidExec);
+				var newShortMidExec = LiveOrBsMid(quotesForPricing, newSym, spot, shortLeg.Parsed.Strike, dteNewShort, ivNewShort, callPut);
+				var (newShortBid, _) = LiveBidAsk(quotesForPricing, newSym, newShortMidExec);
 				var cashPerShare = newShortBid - shortAskNow;
 				var longAtNewShortExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, newExp);
 				var shortAtNewShortExp = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
@@ -336,12 +453,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
 
 				var sameExpSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate, newStrike, callPut);
-				if (quotes != null && !HasLiveQuote(quotes, sameExpSym)) continue;
+				if (quotesForPricing != null && !HasLiveQuote(quotesForPricing, sameExpSym)) continue;
 
 				var ivSameExp = ResolveIV(sameExpSym, settings, quotes);
 				var dteSameExp = Math.Max(1, (shortLeg.Parsed.ExpiryDate - asOf).Days);
-				var newShortMidSameExp = LiveOrBsMid(quotes, sameExpSym, spot, newStrike, dteSameExp, ivSameExp, callPut);
-				var (newShortBidSameExp, _) = LiveBidAsk(quotes, sameExpSym, newShortMidSameExp);
+				var newShortMidSameExp = LiveOrBsMid(quotesForPricing, sameExpSym, spot, newStrike, dteSameExp, ivSameExp, callPut);
+				var (newShortBidSameExp, _) = LiveBidAsk(quotesForPricing, sameExpSym, newShortMidSameExp);
 				var cashPerShareSameExp = newShortBidSameExp - shortAskNow;
 				// At original short expiry: long has full remaining DTE to long expiry; new short at intrinsic.
 				var longAtOrigExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate);
@@ -371,11 +488,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
 
 				var newSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newExp, newStrike, callPut);
-				if (quotes != null && !HasLiveQuote(quotes, newSym)) continue; // skip if contract not listed
+				if (quotesForPricing != null && !HasLiveQuote(quotesForPricing, newSym)) continue; // skip if contract not listed
 				var ivNewShort = ResolveIV(newSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newExp - asOf).Days);
-				var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
-				var (newShortBid, _) = LiveBidAsk(quotes, newSym, newShortMidExec);
+				var newShortMidExec = LiveOrBsMid(quotesForPricing, newSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
+				var (newShortBid, _) = LiveBidAsk(quotesForPricing, newSym, newShortMidExec);
 				var cashPerShare = newShortBid - shortAskNow;
 				var longAtNewShortExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, newExp);
 				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
@@ -409,15 +526,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 				var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newShortExp, newStrike, callPut);
 				var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, newLongExp, newStrike, callPut);
-				if (quotes != null && (!HasLiveQuote(quotes, newShortSym) || !HasLiveQuote(quotes, newLongSym))) continue;
+				if (quotesForPricing != null && (!HasLiveQuote(quotesForPricing, newShortSym) || !HasLiveQuote(quotesForPricing, newLongSym))) continue;
 				var ivNewShort = ResolveIV(newShortSym, settings, quotes);
 				var ivNewLong = ResolveIV(newLongSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newShortExp - asOf).Days);
 				var dteNewLong = Math.Max(1, (newLongExp - asOf).Days);
-				var newShortMidExec = LiveOrBsMid(quotes, newShortSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
-				var newLongMidExec = LiveOrBsMid(quotes, newLongSym, spot, newStrike, dteNewLong, ivNewLong, callPut);
-				var (newShortBid, _) = LiveBidAsk(quotes, newShortSym, newShortMidExec);
-				var (_, newLongAsk) = LiveBidAsk(quotes, newLongSym, newLongMidExec);
+				var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
+				var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newStrike, dteNewLong, ivNewLong, callPut);
+				var (newShortBid, _) = LiveBidAsk(quotesForPricing, newShortSym, newShortMidExec);
+				var (_, newLongAsk) = LiveBidAsk(quotesForPricing, newLongSym, newLongMidExec);
 				var closeNet = longBidNow - shortAskNow;
 				var openNet = newShortBid - newLongAsk;
 				var cashPerShare = closeNet + openNet;
@@ -458,16 +575,16 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 					var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, addShortExp, newStrike, addCp);
 					var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, addLongExp, newStrike, addCp);
-					if (quotes != null && (!HasLiveQuote(quotes, newShortSym) || !HasLiveQuote(quotes, newLongSym))) continue;
+					if (quotesForPricing != null && (!HasLiveQuote(quotesForPricing, newShortSym) || !HasLiveQuote(quotesForPricing, newLongSym))) continue;
 
 					var ivNewShort = ResolveIV(newShortSym, settings, quotes);
 					var ivNewLong = ResolveIV(newLongSym, settings, quotes);
 					var dteNewShort = Math.Max(1, (addShortExp - asOf).Days);
 					var dteNewLong = Math.Max(1, (addLongExp - asOf).Days);
-					var newShortMidExec = LiveOrBsMid(quotes, newShortSym, spot, newStrike, dteNewShort, ivNewShort, addCp);
-					var newLongMidExec = LiveOrBsMid(quotes, newLongSym, spot, newStrike, dteNewLong, ivNewLong, addCp);
-					var (newShortBid, _) = LiveBidAsk(quotes, newShortSym, newShortMidExec);
-					var (_, newLongAsk) = LiveBidAsk(quotes, newLongSym, newLongMidExec);
+					var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newStrike, dteNewShort, ivNewShort, addCp);
+					var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newStrike, dteNewLong, ivNewLong, addCp);
+					var (newShortBid, _) = LiveBidAsk(quotesForPricing, newShortSym, newShortMidExec);
+					var (_, newLongAsk) = LiveBidAsk(quotesForPricing, newLongSym, newLongMidExec);
 					var cashPerShare = newShortBid - newLongAsk; // debit (negative) to open new calendar
 
 					// Project the NEW position at existing short's expiry (first milestone).
@@ -688,8 +805,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	private static decimal? ResolveSpot(string ticker, AnalyzePositionSettings settings)
 	{
-		if (string.IsNullOrEmpty(settings.CurrentUnderlyingPrice)) return null;
-		foreach (var entry in settings.CurrentUnderlyingPrice.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		if (string.IsNullOrEmpty(settings.TickerPrice)) return null;
+		foreach (var entry in settings.TickerPrice.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 		{
 			var parts = entry.Split(':');
 			if (parts.Length == 2 && parts[0].Equals(ticker, StringComparison.OrdinalIgnoreCase)
