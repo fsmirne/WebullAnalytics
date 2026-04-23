@@ -101,10 +101,96 @@ internal static class PositionReplay
 		return parsed?.parsed.Root ?? t.MatchKey;
 	}
 
-	/// <summary>Applies one event to the active-lineage list. Rules are added in subsequent tasks; for now this is a no-op.</summary>
+	/// <summary>Applies one event to the active-lineage list.</summary>
 	private static void ApplyEvent(List<Lineage> active, Event evt, string underlying, ref int lineageIdCounter)
 	{
-		// Rules added in Tasks 5–8.
+		if (evt.IsStrategyOrder) ApplyStrategyOrderEvent(active, evt, underlying, ref lineageIdCounter);
+		// Standalone rules added in Tasks 6–8.
+	}
+
+	private static void ApplyStrategyOrderEvent(List<Lineage> active, Event evt, string underlying, ref int lineageIdCounter)
+	{
+		// Determine which active lineages this event touches (any event leg matches an open leg).
+		var touchedLineages = new HashSet<Lineage>();
+		foreach (var t in evt.Trades)
+		{
+			foreach (var lin in active)
+			{
+				if (lin.OpenLegs.ContainsKey(t.MatchKey))
+					touchedLineages.Add(lin);
+			}
+		}
+
+		Lineage target;
+		if (touchedLineages.Count == 0)
+		{
+			// Zero touched → new lineage with all event legs.
+			target = new Lineage
+			{
+				Id = ++lineageIdCounter,
+				Underlying = underlying,
+				Multiplier = (int)evt.Trades[0].Multiplier,
+				FirstEntryTimestamp = evt.Timestamp
+			};
+			active.Add(target);
+		}
+		else if (touchedLineages.Count == 1)
+		{
+			target = touchedLineages.First();
+		}
+		else
+		{
+			// Multiple touched: oldest by FirstEntryTimestamp wins (deterministic tiebreaker). Log for audit.
+			target = touchedLineages.OrderBy(l => l.FirstEntryTimestamp).First();
+			Console.Error.WriteLine($"[PositionReplay] Warning: event at {evt.Timestamp} touches {touchedLineages.Count} lineages on {underlying}; assigned to oldest (id={target.Id}).");
+		}
+
+		ApplyEventToLineage(target, evt, isNewLineage: touchedLineages.Count == 0);
+	}
+
+	/// <summary>Updates a lineage's open legs and running cash for one event. For a new lineage, also sets FirstEntry*.</summary>
+	private static void ApplyEventToLineage(Lineage lin, Event evt, bool isNewLineage)
+	{
+		// Compute event's total cash impact: Σ over legs of (side_sign × qty × price × multiplier), where side_sign = +1 for Buy, −1 for Sell.
+		// This "positive = cash paid out" convention matches RunningCash semantics.
+		decimal eventCash = 0m;
+		int eventQty = 0;
+		foreach (var t in evt.Trades)
+		{
+			var signedCash = (t.Side == Side.Buy ? 1m : -1m) * t.Qty * t.Price * t.Multiplier;
+			eventCash += signedCash;
+			eventQty = Math.Max(eventQty, t.Qty); // for strategy orders, all legs share qty
+			lin.TradeHistory.Add(new NetDebitTrade(t.Timestamp, t.Instrument, t.Side, t.Qty, t.Price, signedCash));
+		}
+
+		lin.RunningCash += eventCash;
+
+		if (isNewLineage)
+		{
+			lin.FirstEntryCash = eventCash;
+			lin.FirstEntryQty = eventQty;
+		}
+
+		// Apply each leg: match existing open leg (reduce/add) or add as new leg.
+		foreach (var t in evt.Trades)
+		{
+			var signedQty = t.Side == Side.Buy ? t.Qty : -t.Qty;
+			if (lin.OpenLegs.TryGetValue(t.MatchKey, out var existing))
+			{
+				var newSigned = (existing.Side == Side.Buy ? existing.Qty : -existing.Qty) + signedQty;
+				if (newSigned == 0)
+					lin.OpenLegs.Remove(t.MatchKey);
+				else
+					lin.OpenLegs[t.MatchKey] = (newSigned > 0 ? Side.Buy : Side.Sell, Math.Abs(newSigned));
+			}
+			else
+			{
+				lin.OpenLegs[t.MatchKey] = (t.Side, t.Qty);
+			}
+		}
+
+		// UnitQty = min of leg qtys across open legs (balanced after strategy orders in the common case).
+		lin.UnitQty = lin.OpenLegs.Values.Count > 0 ? lin.OpenLegs.Values.Min(v => v.Qty) : 0;
 	}
 
 	/// <summary>Emits PositionRow output from finalized lineages. Filled out in Task 10.</summary>
