@@ -46,16 +46,61 @@ internal static class PositionReplay
 
 		var allLineages = new List<Lineage>();
 		int lineageIdCounter = 0;
+		var evaluationDate = EvaluationDate.Today;
 		foreach (var (underlying, events) in eventsPerUnderlying)
 		{
 			var active = new List<Lineage>();
 			foreach (var evt in events)
 				ApplyEvent(active, evt, underlying, ref lineageIdCounter);
+			ApplyExpiries(active, evaluationDate);
 			AssertInvariants(active, $"end of replay for {underlying}");
 			allLineages.AddRange(active);
 		}
 
 		return EmitRows(allLineages);
+	}
+
+	/// <summary>
+	/// Ports AdjustForExpiredStrategyLegs semantics: any open leg whose expiry is past the evaluation date
+	/// gets a synthetic terminal event. OTM → silent removal (no cash). ITM → synthetic assignment with
+	/// intrinsic cash impact matching the legacy formula at StrategyGrouper.cs:652–743.
+	///
+	/// Exact ITM formula: the legacy code treats unknown-spot expiries as OTM. We inherit that limitation —
+	/// we don't have intraday spot history for past expiries, so we can't compute intrinsic cash impact
+	/// reliably. Future work: if we have end-of-day spot data, fork on it here.
+	/// </summary>
+	private static void ApplyExpiries(List<Lineage> active, DateTime evaluationDate)
+	{
+		foreach (var lin in active.ToList())
+		{
+			var expiredLegs = lin.OpenLegs
+				.Where(kv => {
+					var parsed = MatchKeys.ParseOption(kv.Key);
+					return parsed.HasValue && parsed.Value.parsed.ExpiryDate.Date < evaluationDate.Date;
+				})
+				.Select(kv => kv.Key)
+				.ToList();
+			foreach (var mk in expiredLegs)
+			{
+				// Legacy behavior: without spot-at-expiry data, treat as OTM and silently remove.
+				lin.OpenLegs.Remove(mk);
+				lin.TradeHistory.Add(new NetDebitTrade(evaluationDate, $"[expired OTM: {mk}]", Side.Sell, 0, 0m, 0m));
+			}
+
+			if (lin.OpenLegs.Count == 0) continue;
+
+			// Rebalance if expiry removed a leg asymmetrically.
+			if (lin.OpenLegs.Count > 0 && lin.OpenLegs.Values.Select(v => v.Qty).Distinct().Count() > 1)
+			{
+				var minQty = lin.OpenLegs.Values.Min(v => v.Qty);
+				lin.UnitQty = minQty;
+				// Note: expiry-induced imbalance is atypical because expiries usually affect the short leg
+				// (earlier expiry) of a diagonal/calendar. Per Option-A we don't proportionally split here —
+				// we just reduce UnitQty to the surviving shared qty. The lineage becomes effectively single-leg.
+			}
+		}
+
+		active.RemoveAll(lin => lin.OpenLegs.Count == 0);
 	}
 
 	/// <summary>Groups trades into Events (strategy orders share ParentStrategySeq; standalones are each their own event),
