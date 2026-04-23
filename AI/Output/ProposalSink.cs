@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Spectre.Console;
+using WebullAnalytics;
 
 namespace WebullAnalytics.AI.Output;
 
@@ -75,13 +76,30 @@ internal sealed class ProposalSink : IDisposable
 
 		if (p.Kind != ProposalKind.AlertOnly && p.Legs.Count > 0)
 		{
-			var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 			var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@MID"));
-			// `wa trade place` takes absolute --limit and a --side (buy=net-debit, sell=net-credit).
-			// Sign of NetDebit: positive → credit → SELL; negative → debit → BUY.
-			var limit = Math.Abs(p.NetDebit / 100m).ToString("F2", CultureInfo.InvariantCulture);
-			var side = p.NetDebit >= 0m ? "sell" : "buy";
-			AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit} --side {side}[/]");
+
+			// Non-calendar rolls get split into per-leg orders so Webull's combo engine accepts the reversal.
+			// Requires every leg to carry PricePerShare; otherwise fall back to the combo line.
+			var canSplit = p.Kind == ProposalKind.Roll
+				&& p.Legs.Count == 2
+				&& p.Legs.All(l => l.PricePerShare.HasValue)
+				&& !RollShape.IsSameStrikeCalendar(p.Legs.Select(l => l.Symbol));
+
+			if (canSplit)
+			{
+				foreach (var leg in p.Legs)
+				{
+					var legLimit = leg.PricePerShare!.Value.ToString("F2", CultureInfo.InvariantCulture);
+					AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape($"{leg.Action}:{leg.Symbol}:{leg.Qty}")}\" --limit {legLimit}[/]");
+				}
+			}
+			else
+			{
+				var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+				var limit = Math.Abs(p.NetDebit / 100m).ToString("F2", CultureInfo.InvariantCulture);
+				AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]");
+			}
+
 			AnsiConsole.MarkupLine($"  [dim]wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]");
 		}
 
