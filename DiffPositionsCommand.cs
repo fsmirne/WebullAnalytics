@@ -42,8 +42,8 @@ internal sealed class DiffPositionsCommand : AsyncCommand<DiffPositionsSettings>
 
 		// Build a key → row map for each. Key = Instrument + "|" + Expiry (matches visible display).
 		string RowKey(PositionRow r) => $"{r.Instrument}|{r.Expiry?.ToString("yyyy-MM-dd") ?? "-"}|{r.Side}";
-		var legacyByKey = legacyRows.Where(r => !r.IsStrategyLeg).ToDictionary(RowKey, r => r);
-		var replayByKey = replayRows.Where(r => !r.IsStrategyLeg).ToDictionary(RowKey, r => r);
+		var legacyByKey = legacyRows.Where(r => !r.IsStrategyLeg).GroupBy(RowKey).ToDictionary(g => g.Key, g => g.First());
+		var replayByKey = replayRows.Where(r => !r.IsStrategyLeg).GroupBy(RowKey).ToDictionary(g => g.Key, g => g.First());
 		var allKeys = legacyByKey.Keys.Union(replayByKey.Keys).OrderBy(k => k).ToList();
 
 		var table = new Table().Title("[bold]Position adj-basis diff — legacy vs replay[/]");
