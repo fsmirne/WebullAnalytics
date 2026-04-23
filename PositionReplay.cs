@@ -112,7 +112,7 @@ internal static class PositionReplay
 	{
 		var t = evt.Trades[0];
 
-		// Rule 1: if the trade's matchKey exists in an active lineage with OPPOSITE direction, this is a reduce.
+		// Rule 1: reduce existing open leg (opposite direction).
 		foreach (var lin in active)
 		{
 			if (!lin.OpenLegs.TryGetValue(t.MatchKey, out var existing)) continue;
@@ -123,7 +123,51 @@ internal static class PositionReplay
 			}
 		}
 
-		// Rules 2 and 3 handled in later tasks.
+		// Rule 2 handled in Task 8.
+
+		// Rule 3: new-leg trade. Search orphans in the same bucket (underlying + call/put) with UnitQty == trade.Qty.
+		var bucket = GetLegBucket(t);
+		var orphansInBucket = active
+			.Where(lin => lin.OpenLegs.Count == 1 && lin.UnitQty == t.Qty && LineageBucket(lin) == bucket)
+			.ToList();
+
+		if (orphansInBucket.Count == 1)
+		{
+			ApplyEventToLineage(orphansInBucket[0], evt, isNewLineage: false);
+			return;
+		}
+
+		// Zero or multiple orphans: spawn new standalone lineage.
+		var newLineage = new Lineage
+		{
+			Id = ++lineageIdCounter,
+			Underlying = underlying,
+			Multiplier = (int)t.Multiplier,
+			FirstEntryTimestamp = evt.Timestamp
+		};
+		active.Add(newLineage);
+		ApplyEventToLineage(newLineage, evt, isNewLineage: true);
+	}
+
+	/// <summary>Bucket key: stock vs per-call-put. Two standalone legs in different buckets cannot match as orphan.</summary>
+	private static string GetLegBucket(Trade t)
+	{
+		if (t.Asset == Asset.Stock) return "stock";
+		var parsed = MatchKeys.ParseOption(t.MatchKey);
+		return parsed?.parsed.CallPut == "C" ? "call" : "put";
+	}
+
+	/// <summary>A lineage's bucket is the bucket of its first (and in single-leg lineages, only) open leg.</summary>
+	private static string LineageBucket(Lineage lin)
+	{
+		if (lin.OpenLegs.Count == 0) return "stock"; // deactivated; bucket irrelevant
+		var firstKey = lin.OpenLegs.Keys.First();
+		if (firstKey.StartsWith("option:", StringComparison.Ordinal))
+		{
+			var parsed = MatchKeys.ParseOption(firstKey);
+			return parsed?.parsed.CallPut == "C" ? "call" : "put";
+		}
+		return "stock";
 	}
 
 	private static void ApplyStrategyOrderEvent(List<Lineage> active, Event evt, string underlying, ref int lineageIdCounter)
