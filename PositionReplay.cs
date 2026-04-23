@@ -54,7 +54,7 @@ internal static class PositionReplay
 				ApplyEvent(active, evt, underlying, ref lineageIdCounter);
 			ApplyExpiries(active, evaluationDate);
 			SettleImbalances(active, ref lineageIdCounter);
-			AssertInvariants(active, $"end of replay for {underlying}");
+			AssertInvariants(active, $"end of replay for {underlying}", enforceBalance: true);
 			allLineages.AddRange(active);
 		}
 
@@ -151,7 +151,7 @@ internal static class PositionReplay
 	/// <summary>Called at the end of every event's state transition and at end of replay.
 	/// Throws with diagnostic state dump if any invariant is violated — those indicate state-machine bugs,
 	/// not valid runtime state.</summary>
-	private static void AssertInvariants(IEnumerable<Lineage> active, string context)
+	private static void AssertInvariants(IEnumerable<Lineage> active, string context, bool enforceBalance = false)
 	{
 		foreach (var lin in active)
 		{
@@ -162,8 +162,9 @@ internal static class PositionReplay
 				if (leg.Qty <= 0)
 					throw new InvalidOperationException($"Invariant: lineage {lin.Id} on {lin.Underlying} has open leg {mk} with non-positive qty {leg.Qty} (context: {context})");
 
-			// Inv2: multi-leg lineages are balanced.
-			if (lin.OpenLegs.Count > 1)
+			// Inv2: multi-leg lineages are balanced. Only enforced at end-of-replay (after SettleImbalances);
+			// mid-replay imbalance is expected for partial-fill strategy orders.
+			if (enforceBalance && lin.OpenLegs.Count > 1)
 			{
 				var qtys = lin.OpenLegs.Values.Select(v => v.Qty).Distinct().ToList();
 				if (qtys.Count > 1)
