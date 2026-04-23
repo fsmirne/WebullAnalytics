@@ -37,26 +37,31 @@ internal sealed class DefensiveRollRule : IManagementRule
 		var newExpiry = NextWeekly(shortLeg.Expiry.Value);
 		var newSymbol = MatchKeys.OccSymbol(position.Ticker, newExpiry, newStrike, shortLeg.CallPut!);
 
-		var legs = new[]
-		{
-			new ProposalLeg("buy", shortLeg.Symbol, shortLeg.Qty),   // close the old short
-			new ProposalLeg("sell", newSymbol, shortLeg.Qty)          // open the new short
-		};
-
-		// Look up quotes to estimate the net. If missing, we still emit as AlertOnly.
+		// Look up quotes to estimate the net. If missing, we still emit as AlertOnly (legs get no prices).
 		if (!ctx.Quotes.TryGetValue(shortLeg.Symbol, out var oldQ) || !ctx.Quotes.TryGetValue(newSymbol, out var newQ) ||
 		    oldQ.Ask == null || newQ.Bid == null)
 		{
+			var alertLegs = new[]
+			{
+				new ProposalLeg("buy", shortLeg.Symbol, shortLeg.Qty),
+				new ProposalLeg("sell", newSymbol, shortLeg.Qty)
+			};
 			return new ManagementProposal(
 				Rule: "DefensiveRollRule",
 				Ticker: position.Ticker,
 				PositionKey: position.Key,
 				Kind: ProposalKind.AlertOnly,
-				Legs: legs,
+				Legs: alertLegs,
 				NetDebit: 0m,
 				Rationale: $"spot ${spot:F2} within {_config.SpotWithinPctOfShortStrike}% of short strike ${shortLeg.Strike:F2}, DTE {dte}. Quote unavailable for new symbol {newSymbol}."
 			);
 		}
+
+		var legs = new[]
+		{
+			new ProposalLeg("buy", shortLeg.Symbol, shortLeg.Qty, oldQ.Ask),   // close the old short at ask
+			new ProposalLeg("sell", newSymbol, shortLeg.Qty, newQ.Bid)          // open the new short at bid
+		};
 
 		// netCredit = newBid - oldAsk (we sell the new short, buy to close the old).
 		var netCredit = newQ.Bid.Value - oldQ.Ask.Value;
