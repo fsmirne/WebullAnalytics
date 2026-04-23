@@ -104,8 +104,26 @@ internal static class PositionReplay
 	/// <summary>Applies one event to the active-lineage list.</summary>
 	private static void ApplyEvent(List<Lineage> active, Event evt, string underlying, ref int lineageIdCounter)
 	{
-		if (evt.IsStrategyOrder) ApplyStrategyOrderEvent(active, evt, underlying, ref lineageIdCounter);
-		// Standalone rules added in Tasks 6–8.
+		if (evt.IsStrategyOrder) { ApplyStrategyOrderEvent(active, evt, underlying, ref lineageIdCounter); return; }
+		ApplyStandaloneEvent(active, evt, underlying, ref lineageIdCounter);
+	}
+
+	private static void ApplyStandaloneEvent(List<Lineage> active, Event evt, string underlying, ref int lineageIdCounter)
+	{
+		var t = evt.Trades[0];
+
+		// Rule 1: if the trade's matchKey exists in an active lineage with OPPOSITE direction, this is a reduce.
+		foreach (var lin in active)
+		{
+			if (!lin.OpenLegs.TryGetValue(t.MatchKey, out var existing)) continue;
+			if (existing.Side != t.Side)
+			{
+				ApplyEventToLineage(lin, evt, isNewLineage: false);
+				return;
+			}
+		}
+
+		// Rules 2 and 3 handled in later tasks.
 	}
 
 	private static void ApplyStrategyOrderEvent(List<Lineage> active, Event evt, string underlying, ref int lineageIdCounter)
