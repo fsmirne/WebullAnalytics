@@ -435,13 +435,29 @@ internal static class StrategyGrouper
 						siblingRef ??= match;
 				}
 
-				// Identify sibling matchkeys by looking at the sibling group's legs (if we found one).
+				// Identify sibling matchkeys by looking at the sibling group's legs (if we found one),
+				// plus historical siblings: matchkeys that were legs of the same original parent
+				// strategy as our real leg(s), even if those matchkeys have since been fully closed
+				// by synthetic trades (e.g., a short leg rolled out entirely).
 				var siblingMatchKeys = new HashSet<string>();
 				if (siblingRef != null)
 				{
 					var siblingStart = siblingRef.Value.parentIdx + 1;
 					for (int j = siblingStart; j < rows.Count && rows[j].IsStrategyLeg; j++)
 						if (rows[j].MatchKey != null) siblingMatchKeys.Add(rows[j].MatchKey!);
+				}
+				var historicalParentSeqs = new HashSet<int>();
+				foreach (var ownKey in ownMatchKeys)
+				{
+					if (!positions.TryGetValue(ownKey, out var lots)) continue;
+					foreach (var lot in lots)
+						if (lot.ParentStrategySeq.HasValue) historicalParentSeqs.Add(lot.ParentStrategySeq.Value);
+				}
+				if (historicalParentSeqs.Count > 0)
+				{
+					foreach (var t in allTrades)
+						if (t.ParentStrategySeq.HasValue && historicalParentSeqs.Contains(t.ParentStrategySeq.Value) && !ownMatchKeys.Contains(t.MatchKey))
+							siblingMatchKeys.Add(t.MatchKey);
 				}
 
 				// Sum net cash flow (credit +, debit −) from synthesized trades whose matchkey is
@@ -486,9 +502,11 @@ internal static class StrategyGrouper
 				}
 				else
 				{
-					// Fallback: no sibling found — fall back to leg-avg-derived init/adj.
+					// No current sibling — use leg-avg sum as init basis. Apply the roll credit
+					// from synthetic trades (including those closing a fully-rolled-out leg that's
+					// no longer in positions, captured via historicalParentSeqs above).
 					parentInitBasis = parentInitDebitLegSum;
-					parentAdjDebit = parentInitDebitLegSum;
+					parentAdjDebit = parentInitBasis - rollCashPerShare;
 				}
 
 				// For the leg rows: inherit from siblings where available (e.g., long leg), keep raw for fresh legs.
@@ -522,10 +540,10 @@ internal static class StrategyGrouper
 				};
 
 				// Record a StrategyAdjustment so the breakdown panel can show the roll trades.
-				// Init debit = sibling-allocated basis × qty × multiplier; total debit = init − net roll credit.
-				if (rollTrades.Count > 0 && siblingRef != null)
+				// Init debit = pre-roll basis × qty × multiplier; total debit = init − net roll credit.
+				if (rollTrades.Count > 0)
 				{
-					var initDebitTotal = siblingRef.Value.parentAdj * ownQty * Trade.OptionMultiplier;
+					var initDebitTotal = parentInitBasis * ownQty * Trade.OptionMultiplier;
 					var totalNetDebit = initDebitTotal - rollCashTotal;
 					adjustments[parentIdx] = new StrategyAdjustment(rollTrades, totalNetDebit, null, initDebitTotal);
 				}
