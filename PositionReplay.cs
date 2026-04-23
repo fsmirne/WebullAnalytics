@@ -118,7 +118,7 @@ internal static class PositionReplay
 			if (!lin.OpenLegs.TryGetValue(t.MatchKey, out var existing)) continue;
 			if (existing.Side != t.Side)
 			{
-				ApplyEventToLineage(lin, evt, isNewLineage: false);
+				ApplyEventToLineage(lin, evt, isNewLineage: false, active, ref lineageIdCounter);
 				return;
 			}
 		}
@@ -132,7 +132,7 @@ internal static class PositionReplay
 				if (lin.OpenLegs.Count == 1)
 				{
 					// Single-leg target: grow qty.
-					ApplyEventToLineage(lin, evt, isNewLineage: false);
+					ApplyEventToLineage(lin, evt, isNewLineage: false, active, ref lineageIdCounter);
 				}
 				else
 				{
@@ -145,7 +145,7 @@ internal static class PositionReplay
 						FirstEntryTimestamp = evt.Timestamp
 					};
 					active.Add(spawn);
-					ApplyEventToLineage(spawn, evt, isNewLineage: true);
+					ApplyEventToLineage(spawn, evt, isNewLineage: true, active, ref lineageIdCounter);
 				}
 				return;
 			}
@@ -159,7 +159,7 @@ internal static class PositionReplay
 
 		if (orphansInBucket.Count == 1)
 		{
-			ApplyEventToLineage(orphansInBucket[0], evt, isNewLineage: false);
+			ApplyEventToLineage(orphansInBucket[0], evt, isNewLineage: false, active, ref lineageIdCounter);
 			return;
 		}
 
@@ -172,7 +172,7 @@ internal static class PositionReplay
 			FirstEntryTimestamp = evt.Timestamp
 		};
 		active.Add(newLineage);
-		ApplyEventToLineage(newLineage, evt, isNewLineage: true);
+		ApplyEventToLineage(newLineage, evt, isNewLineage: true, active, ref lineageIdCounter);
 	}
 
 	/// <summary>Bucket key: stock vs per-call-put. Two standalone legs in different buckets cannot match as orphan.</summary>
@@ -233,11 +233,11 @@ internal static class PositionReplay
 			Console.Error.WriteLine($"[PositionReplay] Warning: event at {evt.Timestamp} touches {touchedLineages.Count} lineages on {underlying}; assigned to oldest (id={target.Id}).");
 		}
 
-		ApplyEventToLineage(target, evt, isNewLineage: touchedLineages.Count == 0);
+		ApplyEventToLineage(target, evt, isNewLineage: touchedLineages.Count == 0, active, ref lineageIdCounter);
 	}
 
 	/// <summary>Updates a lineage's open legs and running cash for one event. For a new lineage, also sets FirstEntry*.</summary>
-	private static void ApplyEventToLineage(Lineage lin, Event evt, bool isNewLineage)
+	private static void ApplyEventToLineage(Lineage lin, Event evt, bool isNewLineage, List<Lineage> active, ref int lineageIdCounter)
 	{
 		// Compute event's total cash impact: Σ over legs of (side_sign × qty × price × multiplier), where side_sign = +1 for Buy, −1 for Sell.
 		// This "positive = cash paid out" convention matches RunningCash semantics.
@@ -279,6 +279,62 @@ internal static class PositionReplay
 
 		// UnitQty = min of leg qtys across open legs (balanced after strategy orders in the common case).
 		lin.UnitQty = lin.OpenLegs.Values.Count > 0 ? lin.OpenLegs.Values.Min(v => v.Qty) : 0;
+
+		// Post-event invariant: every multi-leg lineage must be balanced (all open legs share one qty).
+		// Any imbalance is split off immediately — keeping the lineage balanced at the common-qty minimum
+		// and spawning a new standalone lineage for the excess, with proportional cash allocation.
+		RebalanceLineage(lin, evt, active, ref lineageIdCounter);
+	}
+
+	/// <summary>
+	/// If `lin` has any open leg whose qty exceeds the minimum leg qty, split the excess into a new
+	/// standalone lineage. Proportionally allocates cash: the split lineage gets (excess/origUnit) × cash.
+	/// Original lineage's RunningCash and FirstEntryCash are scaled down by (min/origUnit).
+	/// </summary>
+	private static void RebalanceLineage(Lineage lin, Event causingEvent, List<Lineage> active, ref int lineageIdCounter)
+	{
+		if (lin.OpenLegs.Count < 2) return;
+		var minQty = lin.OpenLegs.Values.Min(v => v.Qty);
+		var maxQty = lin.OpenLegs.Values.Max(v => v.Qty);
+		if (minQty == maxQty) return; // balanced
+
+		// For each leg whose qty > minQty, split off the excess as a new standalone lineage.
+		var imbalancedKeys = lin.OpenLegs.Where(kv => kv.Value.Qty > minQty).Select(kv => kv.Key).ToList();
+		var origUnit = maxQty;
+
+		foreach (var key in imbalancedKeys)
+		{
+			var (side, qty) = lin.OpenLegs[key];
+			var excess = qty - minQty;
+
+			// Proportional cash: spawn gets (excess / origUnit) of original cash values.
+			var spawnRatio = (decimal)excess / origUnit;
+			var spawn = new Lineage
+			{
+				Id = ++lineageIdCounter,
+				Underlying = lin.Underlying,
+				Multiplier = lin.Multiplier,
+				FirstEntryTimestamp = lin.FirstEntryTimestamp,
+				RunningCash = lin.RunningCash * spawnRatio,
+				FirstEntryCash = lin.FirstEntryCash * spawnRatio,
+				FirstEntryQty = excess,
+				UnitQty = excess
+			};
+			spawn.OpenLegs[key] = (side, excess);
+			// Copy a portion of trade history as a single synthetic split marker; downstream AdjustmentReportBuilder
+			// reads this list for the "how we got here" display.
+			spawn.TradeHistory.Add(new NetDebitTrade(causingEvent.Timestamp, $"[split from lineage {lin.Id}]", Side.Buy, excess, 0m, spawn.RunningCash));
+			active.Add(spawn);
+
+			// Original lineage keeps the minQty on this leg; cash scales by complementary ratio.
+			lin.OpenLegs[key] = (side, minQty);
+		}
+
+		var keepRatio = (decimal)minQty / origUnit;
+		lin.RunningCash *= keepRatio;
+		lin.FirstEntryCash *= keepRatio;
+		lin.FirstEntryQty = minQty;
+		lin.UnitQty = minQty;
 	}
 
 	/// <summary>Emits PositionRow output from finalized lineages. Filled out in Task 10.</summary>
