@@ -346,7 +346,21 @@ internal static class PositionReplay
 		// Apply each leg: match existing open leg (reduce/add) or add as new leg.
 		foreach (var t in evt.Trades)
 		{
-			var signedQty = t.Side == Side.Buy ? t.Qty : -t.Qty;
+			// For stock legs, the multiplier difference matters: 100 shares = 1 option-equivalent qty.
+			// Internally we track the option-equivalent qty in OpenLegs (so matching/balance work uniformly),
+			// and the actual share count in StockShareCount for downstream display.
+			int qtyInLineageUnits;
+			if (t.Asset == Asset.Stock)
+			{
+				qtyInLineageUnits = t.Qty / 100; // assume 100-share lots align with option contract count
+				lin.StockShareCount[t.MatchKey] = lin.StockShareCount.GetValueOrDefault(t.MatchKey) + (t.Side == Side.Buy ? t.Qty : -t.Qty);
+			}
+			else
+			{
+				qtyInLineageUnits = t.Qty;
+			}
+			var signedQty = t.Side == Side.Buy ? qtyInLineageUnits : -qtyInLineageUnits;
+
 			if (lin.OpenLegs.TryGetValue(t.MatchKey, out var existing))
 			{
 				var newSigned = (existing.Side == Side.Buy ? existing.Qty : -existing.Qty) + signedQty;
@@ -357,7 +371,7 @@ internal static class PositionReplay
 			}
 			else
 			{
-				lin.OpenLegs[t.MatchKey] = (t.Side, t.Qty);
+				lin.OpenLegs[t.MatchKey] = (t.Side, qtyInLineageUnits);
 			}
 		}
 
@@ -440,12 +454,13 @@ internal static class PositionReplay
 			{
 				var (matchKey, leg) = lin.OpenLegs.First();
 				var (asset, optionKind, expiry, instrument) = ResolveLegMetadata(matchKey, lin);
+				var displayQty = asset == Asset.Stock && lin.StockShareCount.TryGetValue(matchKey, out var shares) ? Math.Abs(shares) : leg.Qty;
 				rows.Add(new PositionRow(
 					Instrument: instrument,
 					Asset: asset,
 					OptionKind: optionKind,
 					Side: leg.Side,
-					Qty: leg.Qty,
+					Qty: displayQty,
 					AvgPrice: Math.Abs(parentAdj),
 					Expiry: expiry,
 					IsStrategyLeg: false,
