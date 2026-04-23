@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using Spectre.Console;
 using Spectre.Console.Cli;
+using Spectre.Console.Rendering;
 
 namespace WebullAnalytics;
 
@@ -879,9 +880,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (!availableCash.HasValue || delta <= availableCash.Value) { topFundable = sc; break; }
 		}
 
-		for (int i = 0; i < scenarios.Count; i++)
+		foreach (var sc in scenarios)
 		{
-			var sc = scenarios[i];
 			var bpTotal = sc.BPDeltaPerContract * sc.Qty;
 			var fundable = !availableCash.HasValue || bpTotal <= availableCash.Value;
 			var isRecommended = topFundable != null && ReferenceEquals(sc, topFundable);
@@ -899,17 +899,22 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 						? $"[red]BP +${bpTotal:N2} (NEEDS ${bpTotal - availableCash.Value:N2} MORE)[/]"
 						: $"[yellow]BP +${bpTotal:N2}[/]");
 			var fundMarker = !fundable ? " [red](not fundable)[/]" : "";
-			var prefix = isRecommended ? "★ " : "  ";
+			var prefix = isRecommended ? "★ " : "";
 
-			AnsiConsole.MarkupLine($"[{style}]{prefix}{Markup.Escape(sc.Name)}[/]{fundMarker}");
-			AnsiConsole.MarkupLine($"  [dim]Cash {Markup.Escape(cashStr)}  │  Projected {Markup.Escape(projStr)}  │  P&L {Markup.Escape(totalStr)}  │  {bpMarkup}[/]");
-			AnsiConsole.MarkupLine($"  [dim]{Markup.Escape(sc.Rationale)}[/]");
-
+			var lines = new List<IRenderable>
+			{
+				new Markup($"[dim]Cash {Markup.Escape(cashStr)}  │  Projected {Markup.Escape(projStr)}  │  P&L {Markup.Escape(totalStr)}  │  {bpMarkup}[/]"),
+				new Markup($"[dim]{Markup.Escape(sc.Rationale)}[/]"),
+			};
 			var command = BuildAnalyzeTradeCommand(sc.ActionSummary, settings);
 			if (command != null)
-				AnsiConsole.MarkupLine($"  [grey50]↪ {Markup.Escape(command)}[/]");
+				lines.Add(new Markup($"[grey50]↪ {Markup.Escape(command)}[/]"));
 
-			if (i < scenarios.Count - 1) AnsiConsole.WriteLine();
+			var panel = new Panel(new Rows(lines))
+				.Header($"[{style}]{prefix}{Markup.Escape(sc.Name)}[/]{fundMarker}")
+				.Expand()
+				.BorderColor(isRecommended ? Color.Green : (fundable ? Color.Grey : Color.Grey35));
+			AnsiConsole.Write(panel);
 		}
 
 		if (availableCash.HasValue)
