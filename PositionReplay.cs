@@ -298,12 +298,54 @@ internal static class PositionReplay
 		}
 		else
 		{
-			// Multiple touched: oldest by FirstEntryTimestamp wins (deterministic tiebreaker). Log for audit.
+			// Multiple touched: merge them all into the oldest. This handles the case where earlier
+			// state-machine routing produced overlapping lineages (e.g., cross-expiry same-strike
+			// sequences) that now need to be reconciled when an event spans their shared leg.
 			target = touchedLineages.OrderBy(l => l.FirstEntryTimestamp).First();
-			Console.Error.WriteLine($"[PositionReplay] Warning: event at {evt.Timestamp} touches {touchedLineages.Count} lineages on {underlying}; assigned to oldest (id={target.Id}).");
+			foreach (var donor in touchedLineages.Where(l => l != target).ToList())
+			{
+				MergeLineageInto(target, donor);
+				active.Remove(donor);
+			}
 		}
 
 		ApplyEventToLineage(target, evt, isNewLineage: touchedLineages.Count == 0, active, ref lineageIdCounter);
+	}
+
+	/// <summary>
+	/// Merges `donor` into `target`. Sums OpenLegs by matchKey (handling opposite-side cancellation),
+	/// adds RunningCash + FirstEntryCash (target's first-entry history is preserved; donor's is absorbed).
+	/// Appends donor's TradeHistory to target's. Donor StockShareCount sums into target's per matchKey.
+	/// Recomputes target.UnitQty = min of leg qtys after merge.
+	/// Caller is responsible for removing `donor` from the active list.
+	/// </summary>
+	private static void MergeLineageInto(Lineage target, Lineage donor)
+	{
+		foreach (var (mk, donorLeg) in donor.OpenLegs)
+		{
+			if (target.OpenLegs.TryGetValue(mk, out var existing))
+			{
+				var signedExisting = existing.Side == Side.Buy ? existing.Qty : -existing.Qty;
+				var signedDonor = donorLeg.Side == Side.Buy ? donorLeg.Qty : -donorLeg.Qty;
+				var newSigned = signedExisting + signedDonor;
+				if (newSigned == 0)
+					target.OpenLegs.Remove(mk);
+				else
+					target.OpenLegs[mk] = (newSigned > 0 ? Side.Buy : Side.Sell, Math.Abs(newSigned));
+			}
+			else
+			{
+				target.OpenLegs[mk] = donorLeg;
+			}
+		}
+
+		foreach (var (mk, shares) in donor.StockShareCount)
+			target.StockShareCount[mk] = target.StockShareCount.GetValueOrDefault(mk) + shares;
+
+		target.RunningCash += donor.RunningCash;
+		target.FirstEntryCash += donor.FirstEntryCash;
+		target.TradeHistory.AddRange(donor.TradeHistory);
+		target.UnitQty = target.OpenLegs.Values.Count > 0 ? target.OpenLegs.Values.Min(v => v.Qty) : 0;
 	}
 
 	/// <summary>Updates a lineage's open legs and running cash for one event. For a new lineage, also sets FirstEntry*.</summary>
