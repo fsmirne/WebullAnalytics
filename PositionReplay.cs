@@ -123,7 +123,33 @@ internal static class PositionReplay
 			}
 		}
 
-		// Rule 2 handled in Task 8.
+		// Rule 2: standalone add (same direction as an existing open leg).
+		foreach (var lin in active)
+		{
+			if (!lin.OpenLegs.TryGetValue(t.MatchKey, out var existing)) continue;
+			if (existing.Side == t.Side)
+			{
+				if (lin.OpenLegs.Count == 1)
+				{
+					// Single-leg target: grow qty.
+					ApplyEventToLineage(lin, evt, isNewLineage: false);
+				}
+				else
+				{
+					// Multi-leg target: adding would break balance. Spawn a new standalone lineage for the add.
+					var spawn = new Lineage
+					{
+						Id = ++lineageIdCounter,
+						Underlying = underlying,
+						Multiplier = (int)t.Multiplier,
+						FirstEntryTimestamp = evt.Timestamp
+					};
+					active.Add(spawn);
+					ApplyEventToLineage(spawn, evt, isNewLineage: true);
+				}
+				return;
+			}
+		}
 
 		// Rule 3: new-leg trade. Search orphans in the same bucket (underlying + call/put) with UnitQty == trade.Qty.
 		var bucket = GetLegBucket(t);
