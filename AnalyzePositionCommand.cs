@@ -931,9 +931,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				new Markup($"[dim]Cash {Markup.Escape(cashStr)}  │  Projected {Markup.Escape(projStr)}  │  P&L {Markup.Escape(totalStr)}  │  {bpMarkup}[/]"),
 				new Markup($"[dim]{Markup.Escape(sc.Rationale)}[/]"),
 			};
-			var command = BuildAnalyzeTradeCommand(sc.ActionSummary, settings);
-			if (command != null)
-				lines.Add(new Markup($"[grey50]↪ {Markup.Escape(command)}[/]"));
+			var (tradeCmd, analyzeCmd) = BuildReproductionCommands(sc, settings);
+			if (tradeCmd != null)
+				lines.Add(new Markup($"[grey50]↪ {Markup.Escape(tradeCmd)}[/]"));
+			if (analyzeCmd != null)
+				lines.Add(new Markup($"[grey50]↪ {Markup.Escape(analyzeCmd)}[/]"));
 
 			var panel = new Panel(new Rows(lines))
 				.Header($"[{style}]{prefix}{Markup.Escape(sc.Name)}[/]{fundMarker}")
@@ -954,30 +956,40 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	private static string FmtPrice(decimal price) => price.ToString("0.###", CultureInfo.InvariantCulture);
 
 	/// <summary>Converts a scenario ActionSummary like "BUY SYM x200 @0.305, SELL SYM2 x200 @0.44"
-	/// into a reproducible 'wa analyze trade' command with literal prices, carrying over
-	/// --ticker-price and --date from the current settings. Returns null for hold/no-op scenarios.</summary>
-	private static string? BuildAnalyzeTradeCommand(string actionSummary, AnalyzePositionSettings settings)
+	/// into a reproducible pair of commands: a 'wa trade place' for execution (legs without prices,
+	/// net --limit from CashImpactPerContract) and a 'wa analyze trade' for validation (literal prices,
+	/// carrying over --ticker-price and --date). Returns (null, null) for hold/no-op scenarios.</summary>
+	private static (string? trade, string? analyze) BuildReproductionCommands(Scenario sc, AnalyzePositionSettings settings)
 	{
-		if (string.IsNullOrWhiteSpace(actionSummary) || actionSummary == "—") return null;
-		var parts = actionSummary.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-		var legs = new List<string>();
+		if (string.IsNullOrWhiteSpace(sc.ActionSummary) || sc.ActionSummary == "—") return (null, null);
+		var parts = sc.ActionSummary.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		var tradeLegs = new List<string>();
+		var analyzeLegs = new List<string>();
 		foreach (var part in parts)
 		{
 			// Expected format: "ACTION SYMBOL xQTY @PRICE"
 			var tokens = part.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-			if (tokens.Length != 4) return null;
+			if (tokens.Length != 4) return (null, null);
 			var action = tokens[0].ToLowerInvariant();
-			if (action != "buy" && action != "sell") return null;
+			if (action != "buy" && action != "sell") return (null, null);
 			var symbol = tokens[1];
 			var qty = tokens[2].TrimStart('x');
 			var price = tokens[3].TrimStart('@');
-			legs.Add($"{action}:{symbol}:{qty}@{price}");
+			tradeLegs.Add($"{action}:{symbol}:{qty}");
+			analyzeLegs.Add($"{action}:{symbol}:{qty}@{price}");
 		}
+
+		// `wa trade place` takes absolute --limit and a --side (buy=net-debit, sell=net-credit).
+		// Sign of CashImpactPerContract: negative → cash out (debit → BUY); positive → cash in (credit → SELL).
+		var limit = Math.Abs(sc.CashImpactPerContract / 100m).ToString("F2", CultureInfo.InvariantCulture);
+		var side = sc.CashImpactPerContract < 0m ? "buy" : "sell";
+		var trade = $"wa trade place --trade \"{string.Join(",", tradeLegs)}\" --limit {limit} --side {side}";
 
 		var extras = new List<string>();
 		if (!string.IsNullOrEmpty(settings.TickerPrice)) extras.Add($"--ticker-price {settings.TickerPrice}");
 		if (!string.IsNullOrEmpty(settings.Date)) extras.Add($"--date {settings.Date}");
 		var suffix = extras.Count > 0 ? " " + string.Join(" ", extras) : "";
-		return $"wa analyze trade \"{string.Join(",", legs)}\"{suffix}";
+		var analyze = $"wa analyze trade \"{string.Join(",", analyzeLegs)}\"{suffix}";
+		return (trade, analyze);
 	}
 }

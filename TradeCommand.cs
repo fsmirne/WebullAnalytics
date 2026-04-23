@@ -88,8 +88,12 @@ internal sealed class TradePlaceSettings : TradeSubcommandSettings
 	public string Trades { get; set; } = "";
 
 	[CommandOption("--limit <VALUE>")]
-	[Description("Net limit price. Required for --type limit. Positive = net credit; negative = net debit.")]
+	[Description("Absolute per-share net limit price (always positive). Required for --type limit.")]
 	public string? Limit { get; set; }
+
+	[CommandOption("--side <VALUE>")]
+	[Description("Combo direction override: buy (net-debit, pay to open) or sell (net-credit, receive to open). Auto-inferred from the leg structure; only pass this for unusual constructions the inferrer gets wrong.")]
+	public string? Side { get; set; }
 
 	[CommandOption("--type <VALUE>")]
 	[Description("Order type: limit|market. Default: limit. Market is rejected for multi-leg orders.")]
@@ -146,6 +150,8 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		{
 			if (!decimal.TryParse(s.Limit, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedLimit))
 			{ AnsiConsole.MarkupLine($"[red]Error:[/] --limit '{Markup.Escape(s.Limit!)}' is not a valid decimal."); return 2; }
+			if (parsedLimit < 0m)
+			{ AnsiConsole.MarkupLine($"[red]Error:[/] --limit must be a positive absolute value. Use --side buy for net-debit orders, --side sell for net-credit orders."); return 2; }
 			limit = parsedLimit;
 		}
 
@@ -178,21 +184,34 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		if (optionRoots.Count > 1)
 		{ AnsiConsole.MarkupLine("[red]Error:[/] combo order legs must share one underlying symbol."); return 2; }
 
-		// 5. Sign-sanity warning (multi-leg combos only; single-leg limits are always positive regardless of side).
-		if (limit.HasValue && legs.Count > 1 && legs.All(l => l.Action == LegAction.Buy) && limit > 0)
-			AnsiConsole.MarkupLine("[yellow]Warning:[/] all legs are buys but --limit is positive (credit). Double-check the sign.");
+		// 5. Resolve combo side (explicit --side or inferred from leg structure).
+		string? side;
+		if (!string.IsNullOrEmpty(s.Side))
+		{
+			var normalized = s.Side.ToLowerInvariant();
+			if (normalized != "buy" && normalized != "sell")
+			{ AnsiConsole.MarkupLine("[red]Error:[/] --side must be 'buy' or 'sell'."); return 2; }
+			side = normalized.ToUpperInvariant();
+		}
+		else
+		{
+			side = SideInferrer.Infer(legs, strategy);
+			if (side == null)
+			{ AnsiConsole.MarkupLine($"[red]Error:[/] cannot infer --side for strategy '{strategy}'. Pass --side buy (net-debit) or --side sell (net-credit) explicitly."); return 2; }
+		}
 
 		// 6. Build order.
 		var body = OrderRequestBuilder.Build(new OrderRequestBuilder.BuildParams(
 			AccountId: account.AccountId,
 			Legs: legs,
 			Strategy: strategy,
+			Side: side,
 			OrderType: type.ToUpperInvariant(),
 			LimitPrice: limit,
 			TimeInForce: s.Tif.ToUpperInvariant()
 		));
 
-		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]  [dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}");
+		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]  [dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Side:[/] {Markup.Escape(side)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}");
 		if (s.Debug)
 			AnsiConsole.MarkupLine($"[dim]Payload:[/] {Markup.Escape(OrderRequestBuilder.Serialize(body))}");
 

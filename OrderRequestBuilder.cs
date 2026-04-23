@@ -82,19 +82,22 @@ internal static class OrderRequestBuilder
 		string AccountId,
 		IReadOnlyList<ParsedLeg> Legs,
 		string Strategy,          // value from StrategyClassifier / --strategy flag
+		string Side,              // "BUY" or "SELL" — explicit combo direction
 		string OrderType,         // "LIMIT" or "MARKET"
-		decimal? LimitPrice,      // null only when OrderType == MARKET
+		decimal? LimitPrice,      // absolute per-share combo price; null only when OrderType == MARKET
 		string TimeInForce);      // "DAY" or "GTC"
 
 	internal static OrderRequestBody Build(BuildParams p)
 	{
 		var body = new OrderRequestBody { AccountId = p.AccountId };
+		// Webull requires limit_price to be the ABSOLUTE per-share combo price; direction is encoded in `side`.
+		// A signed value (e.g. "-0.35" with side=BUY) is rejected with OAUTH_OPENAPI_OPTION_MULTI_ORDER_BUY_NOT_NEGATIVE.
 		var order = new NewOrder
 		{
 			ClientOrderId = GenerateClientOrderId(),
 			OrderType = p.OrderType,
 			TimeInForce = p.TimeInForce,
-			LimitPrice = p.OrderType == "LIMIT" ? p.LimitPrice?.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture) : null,
+			LimitPrice = p.OrderType == "LIMIT" ? Math.Abs(p.LimitPrice!.Value).ToString("0.####", System.Globalization.CultureInfo.InvariantCulture) : null,
 		};
 		body.NewOrders.Add(order);
 
@@ -109,7 +112,7 @@ internal static class OrderRequestBuilder
 			order.InstrumentType = "EQUITY";
 			order.ComboType = "NORMAL";
 			order.Symbol = leg.Symbol;
-			order.Side = leg.Action == LegAction.Buy ? "BUY" : "SELL";
+			order.Side = p.Side;
 			order.Quantity = leg.Quantity.ToString(System.Globalization.CultureInfo.InvariantCulture);
 			return body;
 		}
@@ -120,7 +123,7 @@ internal static class OrderRequestBuilder
 			order.InstrumentType = "OPTION";
 			order.ComboType = "NORMAL";
 			order.Symbol = leg.Option!.Root;
-			order.Side = leg.Action == LegAction.Buy ? "BUY" : "SELL";
+			order.Side = p.Side;
 			order.Quantity = leg.Quantity.ToString(System.Globalization.CultureInfo.InvariantCulture);
 			order.OptionStrategy = OptionStrategyEnum["Single"];
 			order.Legs = new List<OrderLeg> { BuildOptionLeg(leg) };
@@ -133,9 +136,7 @@ internal static class OrderRequestBuilder
 		order.ComboType = "NORMAL";
 		order.Symbol = optionLegs[0].Option!.Root;
 		order.Quantity = optionLegs[0].Quantity.ToString(System.Globalization.CultureInfo.InvariantCulture);
-		// Side for a combo is typically the net side; Webull expects BUY for net-debit, SELL for net-credit.
-		// Convention: if --limit is negative (net debit), side=BUY; else side=SELL.
-		order.Side = (p.LimitPrice ?? 0m) < 0m ? "BUY" : "SELL";
+		order.Side = p.Side;
 		order.OptionStrategy = OptionStrategyEnum.TryGetValue(strat, out var mapped)
 			? mapped
 			: throw new InvalidOperationException($"Unknown strategy '{strat}' — extend OptionStrategyEnum");
