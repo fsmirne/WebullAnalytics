@@ -625,10 +625,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					var newBp = Math.Max(-cashPerShare, 0m) * 100m;
 
 					var sideLabel = addCp == "C" ? "call" : "put";
-					var isDiagonal = addLongExp != longLeg.Parsed.ExpiryDate || kind == StructureKind.Diagonal;
-					var structureType = isOppositeSide
-						? (isDiagonal ? "double diagonal" : "double calendar")
-						: (isDiagonal ? "second-strike diagonal" : "second-strike calendar");
+					// The added trade has both legs at `newStrike` with different expiries — always a calendar.
+					// Same-side adds a second calendar at a different strike; opposite-side creates a double calendar.
+					var structureType = isOppositeSide ? "double calendar" : "second-strike calendar";
 
 					EmitAdd(list, legs, settings.Cash,
 						name: $"Add ${newStrike:F2} {sideLabel} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({structureType}, keep existing)",

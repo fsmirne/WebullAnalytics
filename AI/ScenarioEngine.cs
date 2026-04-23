@@ -375,9 +375,9 @@ internal static class ScenarioEngine
 					var newBp = Math.Max(-cashPerShare, 0m) * 100m;
 
 					var sideLabel = addCp == "C" ? "call" : "put";
-					var structureLabel = addCp == callPut
-						? (addLongExp == longLeg.Parsed.ExpiryDate ? "second-strike calendar" : "second-strike diagonal")
-						: (addLongExp == longLeg.Parsed.ExpiryDate ? "double calendar" : "double diagonal");
+					// The added trade has both legs at `newStrike` with different expiries — always a calendar.
+					// Same-side adds a second calendar at a different strike; opposite-side creates a double calendar.
+					var structureLabel = addCp == callPut ? "second-strike calendar" : "double calendar";
 
 					EmitAdd(list, qty, $"Add ${newStrike:F2} {sideLabel} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({structureLabel}, keep existing)",
 						newShortSym, newLongSym, cashPerShare, newPositionValuePerShare, holdNetPerShare,
