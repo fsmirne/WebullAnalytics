@@ -939,9 +939,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				new Markup($"[dim]Cash {Markup.Escape(cashStr)}  │  Projected {Markup.Escape(projStr)}  │  P&L {Markup.Escape(totalStr)}  │  {bpMarkup}[/]"),
 				new Markup($"[dim]{Markup.Escape(sc.Rationale)}[/]"),
 			};
-			var (tradeCmd, analyzeCmd) = BuildReproductionCommands(sc, settings);
-			if (tradeCmd != null)
-				lines.Add(new Markup($"[grey50]↪ {Markup.Escape(tradeCmd)}[/]"));
+			var (tradeCmds, analyzeCmd) = BuildReproductionCommands(sc, settings);
+			if (tradeCmds != null)
+				foreach (var cmd in tradeCmds)
+					lines.Add(new Markup($"[grey50]↪ {Markup.Escape(cmd)}[/]"));
 			if (analyzeCmd != null)
 				lines.Add(new Markup($"[grey50]↪ {Markup.Escape(analyzeCmd)}[/]"));
 
@@ -964,40 +965,49 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	private static string FmtPrice(decimal price) => price.ToString("0.###", CultureInfo.InvariantCulture);
 
 	/// <summary>Converts a scenario ActionSummary like "BUY SYM x200 @0.305, SELL SYM2 x200 @0.44"
-	/// into a reproducible pair of commands: a 'wa trade place' for execution (legs without prices,
-	/// net --limit from CashImpactPerContract) and a 'wa analyze trade' for validation (literal prices,
-	/// carrying over --ticker-price and --date). Returns (null, null) for hold/no-op scenarios.</summary>
-	private static (string? trade, string? analyze) BuildReproductionCommands(Scenario sc, AnalyzePositionSettings settings)
+	/// into reproducible commands: one or more 'wa trade place' lines for execution and a single
+	/// 'wa analyze trade' line for validation. For same-strike calendar rolls and non-roll scenarios,
+	/// one combo 'wa trade place' line is emitted with the net `--limit` derived from CashImpactPerContract.
+	/// For non-calendar rolls (diagonals, same-expiry-different-strike), Webull's combo engine rejects
+	/// the reversal, so two separate single-leg 'wa trade place' lines are emitted in the order the legs
+	/// appear in ActionSummary (close-first, open-second — a contract upheld by the scenario generators).
+	/// Each uses that leg's per-share price as its `--limit`. Returns (null, null) for hold/no-op scenarios.</summary>
+	private static (IReadOnlyList<string>? Trades, string? Analyze) BuildReproductionCommands(Scenario sc, AnalyzePositionSettings settings)
 	{
 		if (string.IsNullOrWhiteSpace(sc.ActionSummary) || sc.ActionSummary == "—") return (null, null);
 		var parts = sc.ActionSummary.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-		var tradeLegs = new List<string>();
-		var analyzeLegs = new List<string>();
+
+		// Parse each "ACTION SYMBOL xQTY @PRICE" part into (action, symbol, qty, price).
+		var legs = new List<(string Action, string Symbol, string Qty, string Price)>(parts.Length);
 		foreach (var part in parts)
 		{
-			// Expected format: "ACTION SYMBOL xQTY @PRICE"
 			var tokens = part.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 			if (tokens.Length != 4) return (null, null);
 			var action = tokens[0].ToLowerInvariant();
 			if (action != "buy" && action != "sell") return (null, null);
-			var symbol = tokens[1];
-			var qty = tokens[2].TrimStart('x');
-			var price = tokens[3].TrimStart('@');
-			tradeLegs.Add($"{action}:{symbol}:{qty}");
-			analyzeLegs.Add($"{action}:{symbol}:{qty}@{price}");
+			legs.Add((action, tokens[1], tokens[2].TrimStart('x'), tokens[3].TrimStart('@')));
 		}
 
-		// `wa trade place` takes absolute --limit and a --side (buy=net-debit, sell=net-credit).
-		// Sign of CashImpactPerContract: negative → cash out (debit → BUY); positive → cash in (credit → SELL).
-		var limit = Math.Abs(sc.CashImpactPerContract / 100m).ToString("F2", CultureInfo.InvariantCulture);
-		var side = sc.CashImpactPerContract < 0m ? "buy" : "sell";
-		var trade = $"wa trade place --trade \"{string.Join(",", tradeLegs)}\" --limit {limit} --side {side}";
-
+		// Analyze-trade line: one combined command, per-leg @PRICE preserved.
+		var analyzeLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}");
 		var extras = new List<string>();
 		if (!string.IsNullOrEmpty(settings.TickerPrice)) extras.Add($"--ticker-price {settings.TickerPrice}");
 		if (!string.IsNullOrEmpty(settings.Date)) extras.Add($"--date {settings.Date}");
 		var suffix = extras.Count > 0 ? " " + string.Join(" ", extras) : "";
 		var analyze = $"wa analyze trade \"{string.Join(",", analyzeLegs)}\"{suffix}";
-		return (trade, analyze);
+
+		// Split non-calendar rolls into per-leg orders so Webull's combo engine accepts them.
+		var splittable = sc.IsRoll && legs.Count == 2 && !RollShape.IsSameStrikeCalendar(legs.Select(l => l.Symbol));
+		if (splittable)
+		{
+			var trades = legs.Select(l => $"wa trade place --trade \"{l.Action}:{l.Symbol}:{l.Qty}\" --limit {l.Price}").ToList();
+			return (trades, analyze);
+		}
+
+		// Combo line: legs without per-leg prices, net limit from CashImpactPerContract.
+		var tradeLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}");
+		var limit = Math.Abs(sc.CashImpactPerContract / 100m).ToString("F2", CultureInfo.InvariantCulture);
+		var combo = $"wa trade place --trade \"{string.Join(",", tradeLegs)}\" --limit {limit}";
+		return (new[] { combo }, analyze);
 	}
 }
