@@ -246,7 +246,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var parsed = ParsingHelpers.ParseOptionSymbol(occ);
 			if (parsed == null) continue;
 			var action = leg.Side == Side.Buy ? LegAction.Buy : LegAction.Sell;
-			snapshots.Add(new PositionSnapshot(Symbol: occ, Action: action, Qty: leg.Qty, CostBasis: leg.AvgPrice, Parsed: parsed));
+			snapshots.Add(new PositionSnapshot(Symbol: occ, Action: action, Qty: leg.Qty, CostBasis: OptionMath.GetPremium(leg), Parsed: parsed));
 		}
 		return snapshots;
 	}
