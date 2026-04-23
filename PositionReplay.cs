@@ -209,30 +209,14 @@ internal static class PositionReplay
 			}
 		}
 
-		// Rule 2: standalone add (same direction as an existing open leg).
+		// Rule 2: standalone add (same direction as an existing open leg) — always grow that leg.
+		// Any resulting imbalance is deferred to end-of-replay settlement via SettleImbalances.
 		foreach (var lin in active)
 		{
 			if (!lin.OpenLegs.TryGetValue(t.MatchKey, out var existing)) continue;
 			if (existing.Side == t.Side)
 			{
-				if (lin.OpenLegs.Count == 1)
-				{
-					// Single-leg target: grow qty.
-					ApplyEventToLineage(lin, evt, isNewLineage: false, active, ref lineageIdCounter);
-				}
-				else
-				{
-					// Multi-leg target: adding would break balance. Spawn a new standalone lineage for the add.
-					var spawn = new Lineage
-					{
-						Id = ++lineageIdCounter,
-						Underlying = underlying,
-						Multiplier = (int)t.Multiplier,
-						FirstEntryTimestamp = evt.Timestamp
-					};
-					active.Add(spawn);
-					ApplyEventToLineage(spawn, evt, isNewLineage: true, active, ref lineageIdCounter);
-				}
+				ApplyEventToLineage(lin, evt, isNewLineage: false, active, ref lineageIdCounter);
 				return;
 			}
 		}
