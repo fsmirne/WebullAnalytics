@@ -244,6 +244,12 @@ public static class PositionTracker
 	/// <summary>Builds position rows for display, grouping options into strategies.</summary>
 	public static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments, Dictionary<string, List<NetDebitTrade>> singleLegStandalones) BuildPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades)
 	{
+		// Dispatch: legacy StrategyGrouper path vs new PositionReplay path.
+		// Controlled by WA_ADJ_BASIS env var ("replay" selects the new path; default is legacy through Phase 2).
+		var backend = Environment.GetEnvironmentVariable("WA_ADJ_BASIS");
+		if (string.Equals(backend, "replay", StringComparison.OrdinalIgnoreCase))
+			return PositionReplay.Execute(positions, tradeIndex, allTrades);
+
 		var avgCosts = ComputeAverageCosts(allTrades);
 		var allPositions = BuildRawPositionRows(positions, tradeIndex, avgCosts);
 		var groups = StrategyGrouper.GroupIntoStrategies(allPositions, positions);
