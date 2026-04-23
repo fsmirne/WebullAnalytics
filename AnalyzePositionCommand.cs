@@ -329,7 +329,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// 2. Close now at theoretical mid (or live mid if available).
 		var dteNow = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
 		var midNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, dteNow, iv, callPut);
-		list.Add(NewScenario("Close now", longLeg, $"SELL {longLeg.Symbol} x{longLeg.Qty}",
+		list.Add(NewScenario("Close now", longLeg, $"SELL {longLeg.Symbol} x{longLeg.Qty} @{FmtPrice(midNow)}",
 			cashNow: midNow, valueAtTarget: 0m, bpDeltaPerContract: 0m, daysToTarget: 1,
 			rationale: $"sell at mid ${midNow:F2}/share → close position"));
 
@@ -348,7 +348,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var net = longAtShortExp - shortAtShortExp;
 			// BP delta: becomes a calendar (strike_loss = 0). Current is single long (no BP). Delta = 0.
 			list.Add(NewScenario($"Convert to calendar (sell {shortExpiry:yyyy-MM-dd} @ ${longLeg.Parsed.Strike:F2})",
-				longLeg, $"SELL {newShortSym} x{longLeg.Qty}",
+				longLeg, $"SELL {newShortSym} x{longLeg.Qty} @{FmtPrice(shortMid)}",
 				cashNow: shortMid, valueAtTarget: net, bpDeltaPerContract: 0m, daysToTarget: dteShort,
 				rationale: $"collect ${shortMid:F2}/share short premium; at short exp: long ${longAtShortExp:F2} - short ${shortAtShortExp:F2} = ${net:F2}"));
 		}
@@ -400,7 +400,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			// Post-action: single long. No short = no BP requirement.
 			var bpDelta = 0m - currentBp;
 			list.Add(NewScenarioSpread("Close short only", legs,
-				$"BUY {shortLeg.Symbol} x{shortLeg.Qty}",
+				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortAskNow)}",
 				cashNow: cash, valueAtTarget: longAtExpiry, bpDeltaPerContract: bpDelta, daysToTarget: origShortDte,
 				rationale: $"pay ${shortAskNow:F2} ask to buy back short; keep long → ${longAtExpiry:F2}/share at short exp"));
 		}
@@ -410,7 +410,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var cash = longBidNow - shortAskNow;
 			var bpDelta = 0m - currentBp;
 			list.Add(NewScenarioSpread("Close all", legs,
-				$"BUY {shortLeg.Symbol} x{shortLeg.Qty}, SELL {longLeg.Symbol} x{longLeg.Qty}",
+				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortAskNow)}, SELL {longLeg.Symbol} x{longLeg.Qty} @{FmtPrice(longBidNow)}",
 				cashNow: cash, valueAtTarget: 0m, bpDeltaPerContract: bpDelta, daysToTarget: 1,
 				rationale: $"sell long @${longBidNow:F2} bid, buy short @${shortAskNow:F2} ask → net ${cash:+0.00;-0.00}/share"));
 		}
@@ -436,7 +436,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var bpDelta = newBp - currentBp;
 				EmitFullAndPartial(list, legs, settings.Cash,
 					name: $"Roll short ({newExp:MM-dd}, same strike)",
-					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {newSym} x{{qty}}",
+					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}} @{FmtPrice(shortAskNow)}, SELL {newSym} x{{qty}} @{FmtPrice(newShortBid)}",
 					cashPerShareOfChange: cashPerShare,
 					newProjectedPerShare: newProjectedPerShare,
 					unchangedProjectedPerShare: holdNetPerShare,
@@ -473,7 +473,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					: (newStrike > longLeg.Parsed.Strike ? "inverted diagonal" : newStrike < longLeg.Parsed.Strike ? "covered diagonal" : "calendar");
 				EmitFullAndPartial(list, legs, settings.Cash,
 					name: $"Roll short to ${newStrike:F2} (same exp {shortLeg.Parsed.ExpiryDate:MM-dd}, {sameExpStructure})",
-					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {sameExpSym} x{{qty}}",
+					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}} @{FmtPrice(shortAskNow)}, SELL {sameExpSym} x{{qty}} @{FmtPrice(newShortBidSameExp)}",
 					cashPerShareOfChange: cashPerShareSameExp,
 					newProjectedPerShare: projSameExpPerShare,
 					unchangedProjectedPerShare: holdNetPerShare,
@@ -506,7 +506,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					: (newStrike > longLeg.Parsed.Strike ? "inverted diagonal" : newStrike < longLeg.Parsed.Strike ? "covered diagonal" : "calendar");
 				EmitFullAndPartial(list, legs, settings.Cash,
 					name: $"Roll short to ${newStrike:F2} ({newExp:MM-dd}, {structureLabel})",
-					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {newSym} x{{qty}}",
+					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}} @{FmtPrice(shortAskNow)}, SELL {newSym} x{{qty}} @{FmtPrice(newShortBid)}",
 					cashPerShareOfChange: cashPerShare,
 					newProjectedPerShare: newProjectedPerShare,
 					unchangedProjectedPerShare: holdNetPerShare,
@@ -548,7 +548,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 				EmitFullAndPartial(list, legs, settings.Cash,
 					name: $"Reset to ${newStrike:F2} calendar",
-					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}}, SELL {longLeg.Symbol} x{{qty}}, BUY {newLongSym} x{{qty}}, SELL {newShortSym} x{{qty}}",
+					actionSummary: $"BUY {shortLeg.Symbol} x{{qty}} @{FmtPrice(shortAskNow)}, SELL {longLeg.Symbol} x{{qty}} @{FmtPrice(longBidNow)}, BUY {newLongSym} x{{qty}} @{FmtPrice(newLongAsk)}, SELL {newShortSym} x{{qty}} @{FmtPrice(newShortBid)}",
 					cashPerShareOfChange: cashPerShare,
 					newProjectedPerShare: newProjectedPerShare,
 					unchangedProjectedPerShare: holdNetPerShare,
@@ -611,6 +611,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 						name: $"Add ${newStrike:F2} {sideLabel} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({structureType}, keep existing)",
 						newShortSym: newShortSym,
 						newLongSym: newLongSym,
+						newShortPrice: newShortBid,
+						newLongPrice: newLongAsk,
 						cashPerShareOfChange: cashPerShare,
 						newProjectedPerShare: newPositionValuePerShare,
 						unchangedProjectedPerShare: holdNetPerShare,
@@ -634,6 +636,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		string name,
 		string newShortSym,
 		string newLongSym,
+		decimal newShortPrice,
+		decimal newLongPrice,
 		decimal cashPerShareOfChange,
 		decimal newProjectedPerShare,
 		decimal unchangedProjectedPerShare,
@@ -650,7 +654,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var fullTotalPerContract = fullCombinedValuePerContract + fullCashPerContract - initialDebitPerContract;
 		list.Add(new Scenario(
 			name,
-			$"BUY {newLongSym} x{fullQty}, SELL {newShortSym} x{fullQty}",
+			$"BUY {newLongSym} x{fullQty} @{FmtPrice(newLongPrice)}, SELL {newShortSym} x{fullQty} @{FmtPrice(newShortPrice)}",
 			CashImpactPerContract: fullCashPerContract,
 			ProjectedValuePerContract: fullCombinedValuePerContract,
 			TotalPnLPerContract: fullTotalPerContract,
@@ -672,7 +676,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		list.Add(new Scenario(
 			$"{name} · partial {maxPartial}",
-			$"BUY {newLongSym} x{maxPartial}, SELL {newShortSym} x{maxPartial}",
+			$"BUY {newLongSym} x{maxPartial} @{FmtPrice(newLongPrice)}, SELL {newShortSym} x{maxPartial} @{FmtPrice(newShortPrice)}",
 			CashImpactPerContract: partialCashTotal / fullQty,
 			ProjectedValuePerContract: partialCombinedValue / fullQty,
 			TotalPnLPerContract: partialTotalPnL / fullQty,
@@ -865,14 +869,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, AnalyzePositionSettings settings)
 	{
 		var availableCash = settings.Cash;
-		var table = new Table().Expand();
-		table.ShowRowSeparators();
-		table.AddColumn("Scenario");
-		table.AddColumn(new TableColumn("Cash now").RightAligned());
-		table.AddColumn(new TableColumn("Projected @ target").RightAligned());
-		table.AddColumn(new TableColumn("Total P&L").RightAligned());
-		table.AddColumn(new TableColumn("BP Impact").RightAligned());
-		table.AddColumn("Rationale");
 
 		// Identify the first fundable scenario so we can highlight it (green). The top-ranked
 		// scenario may be unfundable — the actionable recommendation is the best fundable one.
@@ -883,63 +879,53 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (!availableCash.HasValue || delta <= availableCash.Value) { topFundable = sc; break; }
 		}
 
-		foreach (var sc in scenarios)
+		for (int i = 0; i < scenarios.Count; i++)
 		{
+			var sc = scenarios[i];
 			var bpTotal = sc.BPDeltaPerContract * sc.Qty;
 			var fundable = !availableCash.HasValue || bpTotal <= availableCash.Value;
 			var isRecommended = topFundable != null && ReferenceEquals(sc, topFundable);
-			var rowStyle = isRecommended ? "bold green" : (fundable ? "" : "dim");
+			var style = isRecommended ? "bold green" : (fundable ? "white" : "dim");
 
 			var totalTotal = sc.TotalPnLPerContract * sc.Qty;
 			var totalStr = $"${sc.TotalPnLPerContract:F2}/contract → {(totalTotal >= 0 ? "+" : "-")}${Math.Abs(totalTotal):N2} total";
 			var cashStr = $"${sc.CashImpactPerContract:+0.00;-0.00}/contract";
 			var projStr = $"${sc.ProjectedValuePerContract:F2}/contract";
-			var bpStr = bpTotal == 0m
-				? "[dim]no change[/]"
+			var bpMarkup = bpTotal == 0m
+				? "[dim]no BP change[/]"
 				: bpTotal < 0m
-					? $"[green]{bpTotal:+$0;-$0;0} frees up[/]"
+					? $"[green]BP {bpTotal:+$0;-$0;0} frees up[/]"
 					: (availableCash.HasValue && bpTotal > availableCash.Value
-						? $"[red]+${bpTotal:N2} (NEEDS ${bpTotal - availableCash.Value:N2} MORE)[/]"
-						: $"[yellow]+${bpTotal:N2}[/]");
-			var nameMarkup = !fundable
-				? $"[dim]{Markup.Escape(sc.Name)} [red](not fundable)[/][/]"
-				: isRecommended
-					? $"[{rowStyle}]★ {Markup.Escape(sc.Name)}[/]"
-					: $"[{rowStyle}]{Markup.Escape(sc.Name)}[/]";
-			var totalMarkup = $"[{rowStyle}]{Markup.Escape(totalStr)}[/]";
+						? $"[red]BP +${bpTotal:N2} (NEEDS ${bpTotal - availableCash.Value:N2} MORE)[/]"
+						: $"[yellow]BP +${bpTotal:N2}[/]");
+			var fundMarker = !fundable ? " [red](not fundable)[/]" : "";
+			var prefix = isRecommended ? "★ " : "  ";
 
-			table.AddRow(
-				new Markup(nameMarkup),
-				new Markup(cashStr),
-				new Markup(projStr),
-				new Markup(totalMarkup),
-				new Markup(bpStr),
-				new Markup($"[dim]{Markup.Escape(sc.Rationale)}[/]"));
+			AnsiConsole.MarkupLine($"[{style}]{prefix}{Markup.Escape(sc.Name)}[/]{fundMarker}");
+			AnsiConsole.MarkupLine($"  [dim]Cash {Markup.Escape(cashStr)}  │  Projected {Markup.Escape(projStr)}  │  P&L {Markup.Escape(totalStr)}  │  {bpMarkup}[/]");
+			AnsiConsole.MarkupLine($"  [dim]{Markup.Escape(sc.Rationale)}[/]");
+
+			var command = BuildAnalyzeTradeCommand(sc.ActionSummary, settings);
+			if (command != null)
+				AnsiConsole.MarkupLine($"  [grey50]↪ {Markup.Escape(command)}[/]");
+
+			if (i < scenarios.Count - 1) AnsiConsole.WriteLine();
 		}
 
-		AnsiConsole.Write(table);
 		if (availableCash.HasValue)
-			AnsiConsole.MarkupLine($"[dim]Fundability check: available cash/BP = ${availableCash.Value:N2}. Scenarios exceeding this are dimmed.[/]");
-
-		var commands = scenarios
-			.Select(sc => (sc, cmd: BuildAnalyzeTradeCommand(sc.ActionSummary, settings)))
-			.Where(x => x.cmd != null)
-			.ToList();
-		if (commands.Count == 0) return;
-
-		AnsiConsole.WriteLine();
-		AnsiConsole.MarkupLine("[bold]Reproduce any scenario:[/]");
-		foreach (var (sc, cmd) in commands)
 		{
-			var marker = ReferenceEquals(sc, topFundable) ? "[green]★[/] " : "  ";
-			AnsiConsole.MarkupLine($"{marker}[dim]{Markup.Escape(sc.Name)}[/]");
-			AnsiConsole.MarkupLine($"  [grey50]{Markup.Escape(cmd!)}[/]");
+			AnsiConsole.WriteLine();
+			AnsiConsole.MarkupLine($"[dim]Fundability check: available cash/BP = ${availableCash.Value:N2}.[/]");
 		}
 	}
 
-	/// <summary>Converts a scenario ActionSummary like "BUY SYM x200, SELL SYM2 x200" into a
-	/// reproducible 'wa analyze trade' command, carrying over --ticker-price and --date from
-	/// the current settings. Returns null for hold/no-op scenarios.</summary>
+	/// <summary>Formats a per-share option price for inclusion in a trade-spec leg. Uses 3 decimals
+	/// to preserve sub-penny mid precision without gratuitous trailing zeros.</summary>
+	private static string FmtPrice(decimal price) => price.ToString("0.###", CultureInfo.InvariantCulture);
+
+	/// <summary>Converts a scenario ActionSummary like "BUY SYM x200 @0.305, SELL SYM2 x200 @0.44"
+	/// into a reproducible 'wa analyze trade' command with literal prices, carrying over
+	/// --ticker-price and --date from the current settings. Returns null for hold/no-op scenarios.</summary>
 	private static string? BuildAnalyzeTradeCommand(string actionSummary, AnalyzePositionSettings settings)
 	{
 		if (string.IsNullOrWhiteSpace(actionSummary) || actionSummary == "—") return null;
@@ -947,13 +933,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var legs = new List<string>();
 		foreach (var part in parts)
 		{
+			// Expected format: "ACTION SYMBOL xQTY @PRICE"
 			var tokens = part.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-			if (tokens.Length != 3) return null;
+			if (tokens.Length != 4) return null;
 			var action = tokens[0].ToLowerInvariant();
 			if (action != "buy" && action != "sell") return null;
 			var symbol = tokens[1];
 			var qty = tokens[2].TrimStart('x');
-			legs.Add($"{action}:{symbol}:{qty}@MID");
+			var price = tokens[3].TrimStart('@');
+			legs.Add($"{action}:{symbol}:{qty}@{price}");
 		}
 
 		var extras = new List<string>();
