@@ -283,7 +283,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal BPDeltaPerContract,         // per-contract additional BP required (negative = BP frees up)
 		int Qty,
 		int DaysToTarget,                   // days from evaluation date to this scenario's target date; used to rank P&L per day
-		string Rationale);
+		string Rationale,
+		bool IsRoll = false);               // true iff this scenario closes an existing leg and opens a new one (consulted by BuildReproductionCommands)
 
 	/// <summary>Hypothetical OCC symbols the scenario generators will reference. Pre-enumerated so we can
 	/// include them in a single up-front quote fetch.</summary>
@@ -465,7 +466,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					bpPerContract: bpDelta,
 					daysToTarget: dteNewShort,
-					rationale: $"buy short @${shortAskNow:F2} ask, sell new @${newShortBid:F2} bid → net ${cashPerShare:+0.00;-0.00}/share; at new exp: ${newProjectedPerShare:F2}");
+					rationale: $"buy short @${shortAskNow:F2} ask, sell new @${newShortBid:F2} bid → net ${cashPerShare:+0.00;-0.00}/share; at new exp: ${newProjectedPerShare:F2}",
+					isRoll: true);
 				}
 			}
 
@@ -502,7 +504,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					bpPerContract: sameExpBpDelta,
 					daysToTarget: dteSameExp,
-					rationale: $"shift to ${newStrike:F2} strike, keep {shortLeg.Parsed.ExpiryDate:MM-dd} expiry — collect theta this week; credit ${cashPerShareSameExp:+0.00;-0.00}/share; at exp: ${projSameExpPerShare:F2}");
+					rationale: $"shift to ${newStrike:F2} strike, keep {shortLeg.Parsed.ExpiryDate:MM-dd} expiry — collect theta this week; credit ${cashPerShareSameExp:+0.00;-0.00}/share; at exp: ${projSameExpPerShare:F2}",
+					isRoll: true);
 			}
 
 			// 5. Roll short to bracket strikes near spot (one per strike).
@@ -535,7 +538,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					bpPerContract: bpDelta,
 					daysToTarget: dteNewShort,
-					rationale: $"step short to ${newStrike:F2} (spot ${spot:F2}); credit ${cashPerShare:+0.00;-0.00}/share; at new exp: ${newProjectedPerShare:F2}");
+					rationale: $"step short to ${newStrike:F2} (spot ${spot:F2}); credit ${cashPerShare:+0.00;-0.00}/share; at new exp: ${newProjectedPerShare:F2}",
+					isRoll: true);
 			}
 		}
 
@@ -577,7 +581,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					bpPerContract: bpDelta,
 					daysToTarget: dteNewShort,
-					rationale: $"close net ${closeNet:+0.00;-0.00}, open new net ${openNet:+0.00;-0.00}; projected at new short exp: ${newProjectedPerShare:F2}");
+					rationale: $"close net ${closeNet:+0.00;-0.00}, open new net ${openNet:+0.00;-0.00}; projected at new short exp: ${newProjectedPerShare:F2}",
+					isRoll: true);
 			}
 		}
 
@@ -723,7 +728,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal unchangedProjectedPerShare,
 		decimal bpPerContract,
 		int daysToTarget,
-		string rationale)
+		string rationale,
+		bool isRoll = false)
 	{
 		var fullQty = legs[0].Qty;
 		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
@@ -742,7 +748,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			BPDeltaPerContract: bpPerContract,
 			Qty: fullQty,
 			DaysToTarget: daysToTarget,
-			Rationale: rationale));
+			Rationale: rationale,
+			IsRoll: isRoll));
 
 		// Partial variant: only emit if BP is positive and cash is constrained below full.
 		if (!availableCash.HasValue || bpPerContract <= 0m) return;
@@ -762,28 +769,29 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			BPDeltaPerContract: bpPerContract * maxPartial / fullQty,
 			Qty: fullQty,
 			DaysToTarget: daysToTarget,
-			Rationale: $"execute on {maxPartial} contracts (${bpPerContract * maxPartial:N0} BP); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp"));
+			Rationale: $"execute on {maxPartial} contracts (${bpPerContract * maxPartial:N0} BP); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp",
+			IsRoll: isRoll));
 	}
 
 	// ─── Helpers ─────────────────────────────────────────────────────────────
 
-	private static Scenario NewScenario(string name, PositionSnapshot longLeg, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal bpDeltaPerContract, int daysToTarget, string rationale)
+	private static Scenario NewScenario(string name, PositionSnapshot longLeg, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal bpDeltaPerContract, int daysToTarget, string rationale, bool isRoll = false)
 	{
 		var initialDebit = longLeg.CostBasis;
 		var cashPerContract = cashNow * 100m;
 		var valuePerContract = valueAtTarget * 100m;
 		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
-		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, longLeg.Qty, daysToTarget, rationale);
+		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, longLeg.Qty, daysToTarget, rationale, isRoll);
 	}
 
-	private static Scenario NewScenarioSpread(string name, IReadOnlyList<PositionSnapshot> legs, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal bpDeltaPerContract, int daysToTarget, string rationale)
+	private static Scenario NewScenarioSpread(string name, IReadOnlyList<PositionSnapshot> legs, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal bpDeltaPerContract, int daysToTarget, string rationale, bool isRoll = false)
 	{
 		var initialDebit = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
 		var qty = legs[0].Qty;
 		var cashPerContract = cashNow * 100m;
 		var valuePerContract = valueAtTarget * 100m;
 		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
-		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, qty, daysToTarget, rationale);
+		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, qty, daysToTarget, rationale, isRoll);
 	}
 
 	/// <summary>Returns true if the quote dictionary has a real, usable quote for this symbol
