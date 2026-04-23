@@ -716,7 +716,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	/// <summary>Appends a full-quantity scenario to the list. If the full BP delta exceeds available
 	/// cash AND there's a positive max-fundable partial quantity, also appends a partial variant.
 	/// In the partial, the unchanged portion is valued at its natural terminal date (the hold projection),
-	/// so the mix doesn't double-count time decay.</summary>
+	/// so the mix doesn't double-count time decay. Pass isRoll:true when the scenario closes an existing
+	/// leg and opens a new one — BuildReproductionCommands uses the flag to decide whether to split the
+	/// emitted `wa trade place` command into two single-leg orders for non-calendar rolls.</summary>
 	private static void EmitFullAndPartial(
 		List<Scenario> list,
 		IReadOnlyList<PositionSnapshot> legs,
@@ -997,10 +999,17 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var analyze = $"wa analyze trade \"{string.Join(",", analyzeLegs)}\"{suffix}";
 
 		// Split non-calendar rolls into per-leg orders so Webull's combo engine accepts them.
+		// Per-leg --limit is rounded to cents so it round-trips through the broker (sub-penny isn't a valid tick).
 		var splittable = sc.IsRoll && legs.Count == 2 && !RollShape.IsSameStrikeCalendar(legs.Select(l => l.Symbol));
 		if (splittable)
 		{
-			var trades = legs.Select(l => $"wa trade place --trade \"{l.Action}:{l.Symbol}:{l.Qty}\" --limit {l.Price}").ToList();
+			var trades = legs.Select(l =>
+			{
+				var legLimit = decimal.TryParse(l.Price, NumberStyles.Any, CultureInfo.InvariantCulture, out var p)
+					? p.ToString("F2", CultureInfo.InvariantCulture)
+					: l.Price;
+				return $"wa trade place --trade \"{l.Action}:{l.Symbol}:{l.Qty}\" --limit {legLimit}";
+			}).ToList();
 			return (trades, analyze);
 		}
 
