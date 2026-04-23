@@ -18,7 +18,7 @@ internal enum ProposalKind
 /// <param name="Action">"buy" or "sell" (explicit, no sign math).</param>
 /// <param name="Symbol">OCC option symbol or equity ticker.</param>
 /// <param name="Qty">Positive integer.</param>
-internal record ProposalLeg(string Action, string Symbol, int Qty);
+internal record ProposalLeg(string Action, string Symbol, int Qty, decimal? PricePerShare = null);
 
 /// <summary>
 /// Output of a single rule evaluation.
