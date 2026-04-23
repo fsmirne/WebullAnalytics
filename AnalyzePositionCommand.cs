@@ -92,24 +92,46 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 
 		var ticker = positionLegs[0].Parsed.Root;
-		var spot = ResolveSpot(ticker, settings);
+
+		// Phase 1: fetch quotes for the position legs. We need spot before we can enumerate
+		// hypothetical strikes for scenarios, and the underlying price comes back as a byproduct
+		// of this same fetch. --ticker-price still wins if supplied.
+		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
+		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
+		if (!string.IsNullOrEmpty(settings.Api))
+		{
+			var positionSymbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(settings, positionSymbols, cancellation);
+		}
+
+		var spot = ResolveSpot(ticker, settings, underlyingPrices);
 		if (spot == null)
 		{
-			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --ticker-price {ticker}:<price>.");
+			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --ticker-price {ticker}:<price> or configure --api yahoo|webull.");
 			return 1;
 		}
 
 		var structure = ClassifyStructure(positionLegs);
 
-		// Build the full list of OCC symbols we'll need quotes for: current legs plus every hypothetical
-		// new leg we'll generate. Fetched once up front so the scenario generator has real IV and bid/ask.
-		var symbolsNeeded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-		foreach (var l in positionLegs) symbolsNeeded.Add(l.Symbol);
-		foreach (var s in EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot.Value)) symbolsNeeded.Add(s);
-
-		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
+		// Phase 2: fetch quotes for the hypothetical-scenario symbols we couldn't enumerate without spot.
 		if (!string.IsNullOrEmpty(settings.Api))
-			quotes = await AnalyzeCommon.FetchQuotesForSymbolList(settings, symbolsNeeded.ToList(), cancellation);
+		{
+			var alreadyFetched = quotes ?? new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+			var hypotheticalSymbols = EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot.Value)
+				.Where(s => !alreadyFetched.ContainsKey(s))
+				.Distinct(StringComparer.OrdinalIgnoreCase)
+				.ToList();
+			if (hypotheticalSymbols.Count > 0)
+			{
+				var hypotheticalQuotes = await AnalyzeCommon.FetchQuotesForSymbolList(settings, hypotheticalSymbols, cancellation);
+				if (hypotheticalQuotes != null)
+				{
+					var merged = new Dictionary<string, OptionContractQuote>(alreadyFetched, StringComparer.OrdinalIgnoreCase);
+					foreach (var kvp in hypotheticalQuotes) merged[kvp.Key] = kvp.Value;
+					quotes = merged;
+				}
+			}
+		}
 
 		RenderHeader(positionLegs, structure, spot.Value);
 
@@ -808,16 +830,20 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return settings.IvDefault / 100m;
 	}
 
-	private static decimal? ResolveSpot(string ticker, AnalyzePositionSettings settings)
+	private static decimal? ResolveSpot(string ticker, AnalyzePositionSettings settings, IReadOnlyDictionary<string, decimal>? underlyingPrices)
 	{
-		if (string.IsNullOrEmpty(settings.TickerPrice)) return null;
-		foreach (var entry in settings.TickerPrice.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		if (!string.IsNullOrEmpty(settings.TickerPrice))
 		{
-			var parts = entry.Split(':');
-			if (parts.Length == 2 && parts[0].Equals(ticker, StringComparison.OrdinalIgnoreCase)
-				&& decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var p))
-				return p;
+			foreach (var entry in settings.TickerPrice.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			{
+				var parts = entry.Split(':');
+				if (parts.Length == 2 && parts[0].Equals(ticker, StringComparison.OrdinalIgnoreCase)
+					&& decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var p))
+					return p;
+			}
 		}
+		if (underlyingPrices != null && underlyingPrices.TryGetValue(ticker, out var apiPrice) && apiPrice > 0m)
+			return apiPrice;
 		return null;
 	}
 
