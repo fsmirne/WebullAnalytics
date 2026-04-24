@@ -1,4 +1,4 @@
-namespace WebullAnalytics;
+namespace WebullAnalytics.Positions;
 
 /// <summary>
 /// A single leg after netting across all positions on one ticker. Either an option leg

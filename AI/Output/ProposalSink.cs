@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using Spectre.Console;
 using WebullAnalytics;
+using WebullAnalytics.Positions;
 
 namespace WebullAnalytics.AI.Output;
 

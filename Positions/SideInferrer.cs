@@ -1,4 +1,4 @@
-namespace WebullAnalytics;
+namespace WebullAnalytics.Positions;
 
 /// <summary>
 /// Infers the combo `side` (BUY for net-debit, SELL for net-credit) from the leg structure.

@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Net.Http;
 using WebullAnalytics.Api;
+using WebullAnalytics.Positions;
 
 namespace WebullAnalytics;
 
