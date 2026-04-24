@@ -241,19 +241,10 @@ public static class PositionTracker
 		return (updated, realized, closedQty);
 	}
 
-	/// <summary>Builds position rows for display, grouping options into strategies.</summary>
+	/// <summary>Builds position rows for display, using the PositionReplay linear-cash-flow state machine.</summary>
 	public static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments, Dictionary<string, List<NetDebitTrade>> singleLegStandalones) BuildPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades)
 	{
-		// Dispatch: legacy StrategyGrouper path vs new PositionReplay path.
-		// Controlled by WA_ADJ_BASIS env var ("replay" selects the new path; default is legacy through Phase 2).
-		var backend = Environment.GetEnvironmentVariable("WA_ADJ_BASIS");
-		if (string.Equals(backend, "replay", StringComparison.OrdinalIgnoreCase))
-			return PositionReplay.Execute(positions, tradeIndex, allTrades);
-
-		var avgCosts = ComputeAverageCosts(allTrades);
-		var allPositions = BuildRawPositionRows(positions, tradeIndex, avgCosts);
-		var groups = StrategyGrouper.GroupIntoStrategies(allPositions, positions);
-		return StrategyGrouper.BuildFinalPositionRows(groups, allTrades, positions);
+		return PositionReplay.Execute(positions, tradeIndex, allTrades);
 	}
 
 	/// <summary>
@@ -275,43 +266,6 @@ public static class PositionTracker
 			avg = tradePrice;
 
 		return (newQty, avg);
-	}
-
-	/// <summary>Computes average cost per position using the average cost method.</summary>
-	private static Dictionary<string, decimal> ComputeAverageCosts(List<Trade> allTrades)
-	{
-		var state = new Dictionary<string, (int qty, decimal avg)>();
-
-		foreach (var trade in allTrades.Where(t => t.Side is Side.Buy or Side.Sell && t.Asset != Asset.OptionStrategy).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq))
-			state[trade.MatchKey] = StepAverageCost(state.GetValueOrDefault(trade.MatchKey), trade.Side, trade.Qty, trade.Price);
-
-		return state.Where(kvp => kvp.Value.qty != 0).ToDictionary(kvp => kvp.Key, kvp => kvp.Value.avg);
-	}
-
-	/// <summary>Converts raw position data (lots) into position rows with calculated averages.</summary>
-	private static List<PositionEntry> BuildRawPositionRows(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, Dictionary<string, decimal> avgCosts)
-	{
-		var result = new List<PositionEntry>();
-
-		foreach (var (matchKey, lots) in positions)
-		{
-			if (!lots.Any() || lots.Sum(l => l.Qty) <= 0)
-				continue;
-
-			var trade = tradeIndex.GetValueOrDefault(matchKey);
-
-			if (trade?.Asset == Asset.OptionStrategy)
-				continue;
-
-			var totalQty = lots.Sum(l => l.Qty);
-			var avgPrice = avgCosts.GetValueOrDefault(matchKey, lots.Sum(l => l.Price * l.Qty) / totalQty);
-
-			var row = new PositionRow(Instrument: trade?.Instrument ?? matchKey, Asset: trade?.Asset ?? Asset.Stock, OptionKind: !string.IsNullOrEmpty(trade?.OptionKind) ? trade.OptionKind : "-", Side: lots[0].Side, Qty: totalQty, AvgPrice: avgPrice, Expiry: trade?.Expiry, IsStrategyLeg: false, MatchKey: matchKey);
-
-			result.Add(new PositionEntry(matchKey, row, trade));
-		}
-
-		return result;
 	}
 
 	/// <summary>Builds an index mapping match keys to their first trade.</summary>
