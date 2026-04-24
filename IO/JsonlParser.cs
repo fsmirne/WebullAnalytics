@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.IO;
 
 /// <summary>
 /// Parses Webull JSONL order export files into Trade objects and fee data.
