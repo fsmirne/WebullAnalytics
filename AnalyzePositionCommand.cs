@@ -5,6 +5,7 @@ using Spectre.Console.Cli;
 using Spectre.Console.Rendering;
 using WebullAnalytics.IO;
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Utils;
 
 namespace WebullAnalytics;
 

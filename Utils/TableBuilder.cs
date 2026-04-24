@@ -5,7 +5,7 @@ using Spectre.Console.Rendering;
 using WebullAnalytics.IO;
 using WebullAnalytics.Pricing;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Utils;
 
 /// <summary>
 /// Builds Spectre.Console tables for report and position data.

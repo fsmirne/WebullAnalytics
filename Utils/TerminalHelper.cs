@@ -1,6 +1,6 @@
 using Spectre.Console;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Utils;
 
 /// <summary>
 /// Checks terminal width before rendering wide console tables and offers to resize if too narrow.

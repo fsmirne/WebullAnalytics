@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Utils;
 
 static class JsonElementExtensions
 {
