@@ -39,7 +39,9 @@ internal static class RiskDiagnosticRenderer
 				lines.Add($"  • [cyan]{Markup.Escape(r.Id)}[/] — {Markup.Escape(r.Message)}");
 		}
 
-		var panel = new Panel(string.Join("\n", lines)).Header("Risk diagnostic").BorderColor(Color.Grey);
+		var panel = new Panel(string.Join("\n", lines))
+			.Header("[white]Risk diagnostic[/]")
+			.BorderColor(Color.Grey);
 		console.Write(panel);
 	}
 
