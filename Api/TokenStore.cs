@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Api;
 
 /// <summary>
 /// Persists Webull OpenAPI access tokens to disk, keyed by account alias.

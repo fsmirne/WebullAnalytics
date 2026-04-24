@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Text.Json;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Api;
 
 public static class YahooOptionsClient
 {
