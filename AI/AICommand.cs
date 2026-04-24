@@ -123,7 +123,17 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		var results = evaluator.Evaluate(ctx);
 		foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
 
-		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {results.Count} proposal(s) emitted[/]");
+		var openCount = 0;
+		if (config.Opener.Enabled && !settings.NoOpenProposals)
+		{
+			using var openSink = new OpenProposalSink(config.Log, mode: "once");
+			var openEvaluator = new OpenCandidateEvaluator(config, quotes);
+			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
+			foreach (var p in openResults) openSink.Emit(p);
+			openCount = openResults.Count;
+		}
+
+		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {results.Count} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
 		return 0;
 	}
 }
