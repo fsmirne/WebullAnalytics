@@ -52,5 +52,6 @@ internal sealed record OpenProposal(
     string Rationale,
     string Fingerprint,
     bool CashReserveBlocked = false,
-    string? CashReserveDetail = null
+    string? CashReserveDetail = null,
+    WebullAnalytics.AI.RiskDiagnostics.RiskDiagnostic? Diagnostic = null
 );
