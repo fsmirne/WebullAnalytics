@@ -25,8 +25,15 @@ public static partial class TextFileExporter
 		var console = AnsiConsole.Create(settings);
 		console.Profile.Width = 200;
 
-		console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, TableBorder.Ascii, simplified));
-		console.WriteLine();
+		if (rows.Count > 0)
+		{
+			console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, TableBorder.Ascii, simplified));
+			console.WriteLine();
+		}
+		else
+		{
+			console.WriteLine("No trades.");
+		}
 
 		if (positions.Count > 0)
 		{

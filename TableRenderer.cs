@@ -13,8 +13,15 @@ public static class TableRenderer
 	{
 		var console = AnsiConsole.Console;
 
-		console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, simplified: simplified));
-		console.WriteLine();
+		if (rows.Count > 0)
+		{
+			console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, simplified: simplified));
+			console.WriteLine();
+		}
+		else
+		{
+			console.WriteLine("No trades.");
+		}
 
 		if (positions.Count > 0)
 		{
