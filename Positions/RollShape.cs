@@ -1,10 +1,13 @@
 namespace WebullAnalytics.Positions;
 
 /// <summary>
-/// Shared helper for detecting whether a list of option legs forms a same-strike calendar
-/// roll — the one roll shape Webull's combo engine accepts when it includes a position reversal.
-/// Used by the `wa analyze position` and AI `ProposalSink` reproduction-command emitters to
-/// decide whether to emit one combo `wa trade place` line or two separate single-leg lines.
+/// Shared helper for detecting whether a 2-leg roll is a same-strike calendar — the one 2-leg roll
+/// shape Webull's combo engine accepts when it includes a position reversal. Used by the
+/// `wa analyze position` and AI `ProposalSink` reproduction-command emitters to decide whether to
+/// emit one combo `wa trade place` line or two separate single-leg lines.
+/// Note: 4-leg resets (close existing + open new) are split by the emitters themselves — Webull
+/// only accepts iron condor/butterfly as 4-leg combos, so resets always emit as two 2-leg combos
+/// (close half + open half) based on EmitReset's positional contract, not on shape detection.
 /// </summary>
 internal static class RollShape
 {
