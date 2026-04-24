@@ -25,30 +25,50 @@ internal sealed class OpenCandidateEvaluator
         var tickerSet = new HashSet<string>(_config.Tickers, StringComparer.OrdinalIgnoreCase);
         var output = new List<OpenProposal>();
 
+        // Phase A0: bootstrap spots + chains for tickers missing from ctx.UnderlyingPrices.
+        // The live-quote clients return the full chain plus the underlying spot for any OCC symbol,
+        // so one placeholder per root suffices. Without this, tickers without open positions have
+        // no spot in ctx and we enumerate nothing.
+        var bootstrapSpots = new Dictionary<string, decimal>(ctx.UnderlyingPrices, StringComparer.OrdinalIgnoreCase);
+        var bootstrapOptions = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+        var missingTickers = _config.Tickers.Where(t => !bootstrapSpots.ContainsKey(t) || bootstrapSpots[t] <= 0m).ToList();
+        if (missingTickers.Count > 0)
+        {
+            var placeholderExpiry = OpenerExpiryHelpers.NextWeeklyExpiriesInRange(ctx.Now, 1, 14).FirstOrDefault();
+            if (placeholderExpiry == default) placeholderExpiry = ctx.Now.Date.AddDays(7);
+            var placeholders = missingTickers.Select(t => MatchKeys.OccSymbol(t, placeholderExpiry, 1m, "C")).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var boot = await _quotes.GetQuotesAsync(ctx.Now, placeholders, tickerSet, cancellation);
+            foreach (var (k, v) in boot.Underlyings) bootstrapSpots[k] = v;
+            foreach (var (k, v) in boot.Options) bootstrapOptions[k] = v;
+        }
+
         // Phase A: enumerate across all tickers.
         var allSkeletons = new List<CandidateSkeleton>();
         foreach (var ticker in _config.Tickers)
         {
-            if (!ctx.UnderlyingPrices.TryGetValue(ticker, out var spot) || spot <= 0m) continue;
+            if (!bootstrapSpots.TryGetValue(ticker, out var spot) || spot <= 0m) continue;
             allSkeletons.AddRange(CandidateEnumerator.Enumerate(ticker, spot, ctx.Now, cfg));
         }
         if (allSkeletons.Count == 0) return Array.Empty<OpenProposal>();
 
-        // Phase B (phase-3 quote fetch): pull any symbols not already in ctx.Quotes.
+        // Phase B (phase-3 quote fetch): pull any symbols not already in ctx.Quotes or the bootstrap result.
         var neededSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var skel in allSkeletons)
             foreach (var leg in skel.Legs)
-                if (!ctx.Quotes.ContainsKey(leg.Symbol)) neededSymbols.Add(leg.Symbol);
+                if (!ctx.Quotes.ContainsKey(leg.Symbol) && !bootstrapOptions.ContainsKey(leg.Symbol)) neededSymbols.Add(leg.Symbol);
 
         // Keep ctx.Quotes as the primary lookup; overlay fetched symbols only for the new ones.
         // Do NOT copy ctx.Quotes by enumeration — callers may supply non-enumerable fakes (tests) or large live dictionaries.
-        IReadOnlyDictionary<string, OptionContractQuote> mergedQuotes = ctx.Quotes;
+        IReadOnlyDictionary<string, OptionContractQuote> mergedQuotes = bootstrapOptions.Count > 0
+            ? new OverlayQuoteDictionary(ctx.Quotes, bootstrapOptions)
+            : ctx.Quotes;
         if (neededSymbols.Count > 0)
         {
             var extra = await _quotes.GetQuotesAsync(ctx.Now, neededSymbols, tickerSet, cancellation);
             if (extra.Options.Count > 0)
             {
                 var overlay = new Dictionary<string, OptionContractQuote>(extra.Options, StringComparer.OrdinalIgnoreCase);
+                foreach (var (k, v) in bootstrapOptions) overlay.TryAdd(k, v);
                 mergedQuotes = new OverlayQuoteDictionary(ctx.Quotes, overlay);
             }
         }
@@ -59,7 +79,7 @@ internal sealed class OpenCandidateEvaluator
 
         foreach (var tickerGroup in allSkeletons.GroupBy(s => s.Ticker))
         {
-            if (!ctx.UnderlyingPrices.TryGetValue(tickerGroup.Key, out var spot) || spot <= 0m) continue;
+            if (!bootstrapSpots.TryGetValue(tickerGroup.Key, out var spot) || spot <= 0m) continue;
             ctx.TechnicalSignals.TryGetValue(tickerGroup.Key, out var biasSignal);
             var bias = biasSignal?.Score ?? 0m;
 
@@ -95,12 +115,13 @@ internal sealed class OpenCandidateEvaluator
         if (p.CapitalAtRiskPerContract <= 0m)
             return p with { Rationale = CandidateScorer.BuildRationale(p, bias, cfg) };
 
-        var maxQty = (int)Math.Floor(freeCash / p.CapitalAtRiskPerContract);
+        var rawMax = Math.Floor(freeCash / p.CapitalAtRiskPerContract);
+        var maxQty = rawMax >= cfg.MaxQtyPerProposal ? cfg.MaxQtyPerProposal : (int)rawMax;
         OpenProposal updated;
         if (maxQty >= 1)
         {
             var qty = Math.Min(maxQty, cfg.MaxQtyPerProposal);
-            updated = p with { Qty = qty };
+            updated = p with { Qty = qty, Legs = ScaleLegs(p.Legs, qty) };
         }
         else
         {
@@ -117,6 +138,9 @@ internal sealed class OpenCandidateEvaluator
             Fingerprint = CandidateScorer.ComputeFingerprint(updated.Ticker, updated.StructureKind, updated.Legs, updated.Qty)
         };
     }
+
+    private static IReadOnlyList<ProposalLeg> ScaleLegs(IReadOnlyList<ProposalLeg> legs, int qty) =>
+        legs.Select(l => l with { Qty = qty }).ToList();
 }
 
 /// <summary>Read-only dictionary that layers a small overlay (phase-3 fetched quotes) over a base dictionary (ctx.Quotes).
