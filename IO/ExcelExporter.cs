@@ -2,7 +2,7 @@ using OfficeOpenXml;
 using OfficeOpenXml.Drawing.Chart;
 using OfficeOpenXml.Style;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.IO;
 
 public static class ExcelExporter
 {

@@ -1,7 +1,7 @@
 using Spectre.Console;
 using System.Text.RegularExpressions;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.IO;
 
 public static partial class TextFileExporter
 {

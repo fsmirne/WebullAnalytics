@@ -5,7 +5,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Text.RegularExpressions;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.IO;
 
 /// <summary>
 /// Parses Webull CSV export files into Trade objects.
