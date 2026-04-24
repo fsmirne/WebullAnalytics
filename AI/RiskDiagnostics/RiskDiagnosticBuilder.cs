@@ -66,9 +66,13 @@ internal static class RiskDiagnosticBuilder
 		var longLegDteMax = longLegs.Count == 0 ? 0 : longLegs.Max(l => Math.Max(0, (l.Parsed.ExpiryDate - asOf.Date).Days));
 		var dteGap = (shortLegs.Count == 0 || longLegs.Count == 0) ? 0 : longLegDteMax - shortLegDteMin;
 
-		// Premium economics (per-share)
-		var longPaid = longLegs.Sum(l => l.PricePerShare ?? 0m);
-		var shortReceived = shortLegs.Sum(l => l.PricePerShare ?? 0m);
+		// Premium economics (per-share). For the manage pipeline (cost basis on every leg) this reflects
+		// what was paid/received at entry; for the open pipeline (no cost basis) it reflects current
+		// prices. CurrentValuePerShare/UnrealizedPnlPerShare separately convey the "now" view.
+		bool useCostBasis = legs.Count > 0 && legs.All(l => l.CostBasisPerShare.HasValue);
+		decimal PremiumOf(DiagnosticLeg l) => useCostBasis ? l.CostBasisPerShare!.Value : (l.PricePerShare ?? 0m);
+		var longPaid = longLegs.Sum(PremiumOf);
+		var shortReceived = shortLegs.Sum(PremiumOf);
 		var netCash = shortReceived - longPaid;
 		decimal? premiumRatio = shortReceived == 0m ? null : longPaid / shortReceived;
 
@@ -186,8 +190,10 @@ internal static class RiskDiagnosticBuilder
 			var cp = L.Parsed.CallPut;
 			if (L.Parsed.ExpiryDate == S.Parsed.ExpiryDate)
 			{
-				var longPrice = L.PricePerShare ?? 0m;
-				var shortPrice = S.PricePerShare ?? 0m;
+				// Use cost basis when both legs have it (manage pipeline) so debit/credit matches entry,
+				// not current mark-to-market. Falls back to current prices for the open pipeline.
+				var longPrice = L.CostBasisPerShare ?? L.PricePerShare ?? 0m;
+				var shortPrice = S.CostBasisPerShare ?? S.PricePerShare ?? 0m;
 				var debit = longPrice > shortPrice;
 				if (debit)
 				{

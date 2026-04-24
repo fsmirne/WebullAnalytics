@@ -37,9 +37,10 @@ public class RiskDiagnosticBuilderTests
         Assert.Equal(0, diag.ShortLegDteMin);
         Assert.Equal(7, diag.LongLegDteMax);
         Assert.Equal(7, diag.DteGapDays);
-        Assert.Equal(0.71m, diag.LongPremiumPaid);
-        Assert.Equal(0.07m, diag.ShortPremiumReceived);
-        Assert.Equal(-0.64m, diag.NetCashPerShare);
+        // Premium fields reflect cost basis (entry economics) when manage-pipeline cost basis is present.
+        Assert.Equal(0.976m, diag.LongPremiumPaid);
+        Assert.Equal(0.256m, diag.ShortPremiumReceived);
+        Assert.Equal(0.256m - 0.976m, diag.NetCashPerShare);
         Assert.NotNull(diag.PremiumRatio);
         Assert.Equal(24.72m, diag.SpotAtEvaluation);
         Assert.True(diag.ShortLegOtm);
@@ -97,6 +98,32 @@ public class RiskDiagnosticBuilderTests
         var ids = diag.Rules.Select(r => r.Id).ToHashSet();
         Assert.Contains("directional_mismatch_near_term", ids);
         Assert.Contains("directional_mismatch_today", ids);
+    }
+
+    [Fact]
+    public void OpenPipelineFallsBackToCurrentPriceForPremiumWhenCostBasisAbsent()
+    {
+        // Open pipeline: pre-trade, no cost basis. Premium math should use the live mid (PricePerShare).
+        var asOf = new DateTime(2026, 4, 24);
+        var longLeg = new DiagnosticLeg(
+            "GME260501C00024500",
+            new OptionParsed("GME", new DateTime(2026, 5, 1), "C", 24.50m),
+            IsLong: true, Qty: 100, PricePerShare: 0.71m, CostBasisPerShare: null);
+        var shortLeg = new DiagnosticLeg(
+            "GME260424C00025000",
+            new OptionParsed("GME", new DateTime(2026, 4, 24), "C", 25.00m),
+            IsLong: false, Qty: 100, PricePerShare: 0.07m, CostBasisPerShare: null);
+
+        var diag = RiskDiagnosticBuilder.Build(
+            new[] { longLeg, shortLeg }, spot: 24.72m, asOf: asOf,
+            ivResolver: _ => 0.40m, trend: null);
+
+        Assert.Equal(0.71m, diag.LongPremiumPaid);
+        Assert.Equal(0.07m, diag.ShortPremiumReceived);
+        Assert.Equal(0.07m - 0.71m, diag.NetCashPerShare);
+        // P&L unavailable because cost basis is missing.
+        Assert.Null(diag.CostBasisPerShare);
+        Assert.Null(diag.UnrealizedPnlPerShare);
     }
 
     [Fact]
