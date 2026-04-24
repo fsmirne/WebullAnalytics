@@ -3,7 +3,7 @@ using Spectre.Console.Cli;
 using System.Text.Json;
 using WebullAnalytics.Api;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Fetch;
 
 class FetchSettings : CommandSettings
 {
