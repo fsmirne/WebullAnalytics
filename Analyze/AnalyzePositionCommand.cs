@@ -3,6 +3,7 @@ using System.Globalization;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using Spectre.Console.Rendering;
+using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.IO;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
@@ -140,6 +141,33 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 
 		RenderHeader(positionLegs, structure, spot.Value);
+
+		// Risk diagnostic: structured analysis of the current position (greeks, geometry, premium ratio,
+		// trend alignment, rule hits). Logged to data/analyze-position.jsonl for AI consumers.
+		var asOfForDiagnostic = EvaluationDate.Today;
+		var tickerForTrend = positionLegs.Count > 0 ? positionLegs[0].Parsed.Root : null;
+		TrendSnapshot? trendSnap = null;
+		if (!string.IsNullOrEmpty(tickerForTrend))
+			trendSnap = await TrendFetcher.FetchAsync(tickerForTrend, asOfForDiagnostic, cancellation);
+
+		BuildAndLogDiagnostic(
+			logPath: Program.ResolvePath("data/analyze-position.jsonl"),
+			ticker: tickerForTrend ?? "UNKNOWN",
+			positionKey: string.Join("|", positionLegs.Select(l => l.Symbol)),
+			legs: positionLegs,
+			spot: spot.Value,
+			asOf: asOfForDiagnostic,
+			ivResolver: sym => ResolveIV(sym, settings, quotes),
+			legPriceResolver: sym =>
+			{
+				var leg = positionLegs.FirstOrDefault(l => l.Symbol == sym);
+				if (leg == null) return 0m;
+				var iv = ResolveIV(sym, settings, quotes);
+				var dte = Math.Max(1, (leg.Parsed.ExpiryDate - asOfForDiagnostic.Date).Days);
+				return LiveOrBsMid(quotes, sym, spot.Value, leg.Parsed.Strike, dte, iv, leg.Parsed.CallPut);
+			},
+			trend: trendSnap,
+			console: AnsiConsole.Console);
 
 		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes);
 		if (scenarios.Count == 0)
@@ -1048,4 +1076,82 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var halfArg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 		return $"wa trade place --trade \"{halfArg}\" --limit {halfLimit}";
 	}
+
+	/// <summary>Builds a RiskDiagnostic for the given position, appends it to the analyze-position JSONL
+	/// log at <paramref name="logPath"/>, and renders it to <paramref name="console"/>. Separated from
+	/// ExecuteAsync for direct unit testing of the JSON shape.</summary>
+	internal static void BuildAndLogDiagnostic(
+		string logPath,
+		string ticker,
+		string positionKey,
+		IReadOnlyList<PositionSnapshot> legs,
+		decimal spot,
+		DateTime asOf,
+		Func<string, decimal> ivResolver,
+		Func<string, decimal> legPriceResolver,
+		TrendSnapshot? trend,
+		IAnsiConsole console)
+	{
+		var diagLegs = legs.Select(l => new DiagnosticLeg(
+			Symbol: l.Symbol,
+			Parsed: l.Parsed,
+			IsLong: l.Action == LegAction.Buy,
+			Qty: l.Qty,
+			PricePerShare: legPriceResolver(l.Symbol),
+			CostBasisPerShare: l.CostBasis)).ToList();
+
+		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend);
+
+		Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+		using (var writer = new StreamWriter(File.Open(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)))
+		{
+			writer.AutoFlush = true;
+			var record = new
+			{
+				type = "analyze_position",
+				ts = DateTime.Now.ToString("o"),
+				ticker,
+				positionKey,
+				spot,
+				diagnostic = SerializeDiagnostic(diagnostic),
+				mode = "analyze_position",
+			};
+			writer.WriteLine(System.Text.Json.JsonSerializer.Serialize(record));
+		}
+
+		RiskDiagnosticRenderer.WriteConsole(console, diagnostic);
+	}
+
+	/// <summary>Shapes a RiskDiagnostic into a stable lowerCamel JSON object. Shared between manage and
+	/// open pipeline emitters so the schema is identical across both log streams.</summary>
+	internal static object SerializeDiagnostic(RiskDiagnostic d) => new
+	{
+		structureLabel = d.StructureLabel,
+		directionalBias = d.DirectionalBias,
+		netDelta = d.NetDelta,
+		netThetaPerDay = d.NetThetaPerDay,
+		netVega = d.NetVega,
+		shortLegDteMin = d.ShortLegDteMin,
+		longLegDteMax = d.LongLegDteMax,
+		dteGapDays = d.DteGapDays,
+		longPremiumPaid = d.LongPremiumPaid,
+		shortPremiumReceived = d.ShortPremiumReceived,
+		netCashPerShare = d.NetCashPerShare,
+		premiumRatio = d.PremiumRatio,
+		spotAtEvaluation = d.SpotAtEvaluation,
+		shortLegOtm = d.ShortLegOtm,
+		shortLegExtrinsic = d.ShortLegExtrinsic,
+		trend = d.Trend is null ? null : new
+		{
+			changePctIntraday = d.Trend.ChangePctIntraday,
+			changePct5Day = d.Trend.ChangePct5Day,
+			changePct20Day = d.Trend.ChangePct20Day,
+			spot20DayAtrPct = d.Trend.Spot20DayAtrPct,
+			asOf = d.Trend.AsOf,
+		},
+		costBasisPerShare = d.CostBasisPerShare,
+		currentValuePerShare = d.CurrentValuePerShare,
+		unrealizedPnlPerShare = d.UnrealizedPnlPerShare,
+		rules = d.Rules.Select(r => new { id = r.Id, message = r.Message, inputs = r.Inputs }),
+	};
 }
