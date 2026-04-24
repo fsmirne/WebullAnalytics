@@ -3,7 +3,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Sniff;
 
 public static class HeaderSniffer
 {

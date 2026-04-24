@@ -4,7 +4,7 @@ using System.Text.Json;
 using WebullAnalytics.Api;
 using WebullAnalytics.Utils;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Sniff;
 
 class SniffSettings : CommandSettings
 {
