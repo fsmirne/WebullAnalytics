@@ -68,7 +68,8 @@ internal sealed class OpenProposalSink : IDisposable
             rationale = p.Rationale,
             fingerprint = p.Fingerprint,
             cashReserveBlocked = p.CashReserveBlocked,
-            cashReserveDetail = p.CashReserveDetail
+            cashReserveDetail = p.CashReserveDetail,
+            diagnostic = p.Diagnostic is null ? null : WebullAnalytics.Analyze.AnalyzePositionCommand.SerializeDiagnostic(p.Diagnostic),
         };
         _file.WriteLine(JsonSerializer.Serialize(record));
     }
@@ -89,6 +90,8 @@ internal sealed class OpenProposalSink : IDisposable
         AnsiConsole.MarkupLine($"  [italic]{Markup.Escape(p.Rationale)}[/]");
         if (p.CashReserveBlocked && p.CashReserveDetail != null)
             AnsiConsole.MarkupLine($"  [yellow]{Markup.Escape(p.CashReserveDetail)}[/]");
+        if (p.Diagnostic is not null)
+            WebullAnalytics.AI.RiskDiagnostics.RiskDiagnosticRenderer.WriteConsole(AnsiConsole.Console, p.Diagnostic);
         AnsiConsole.WriteLine();
     }
 
