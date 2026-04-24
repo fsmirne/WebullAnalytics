@@ -1,3 +1,5 @@
+using System.Linq;
+
 namespace WebullAnalytics.AI;
 
 internal static class CandidateScorer
@@ -47,5 +49,106 @@ internal static class CandidateScorer
             points[i] = new ScenarioPoint(sT, w);
         }
         return points;
+    }
+
+    /// <summary>Resolves IV from live quote → config default, as a decimal fraction (e.g. 0.40).</summary>
+    public static decimal ResolveIv(string symbol, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultPct)
+    {
+        if (quotes.TryGetValue(symbol, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m)
+            return q.ImpliedVolatility.Value;
+        return defaultPct / 100m;
+    }
+
+    /// <summary>Looks up bid/ask, returning null if any leg lacks a usable two-sided quote.</summary>
+    public static (decimal bid, decimal ask)? TryLiveBidAsk(string symbol, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+    {
+        if (!quotes.TryGetValue(symbol, out var q)) return null;
+        if (!q.Bid.HasValue || !q.Ask.HasValue) return null;
+        if (q.Bid.Value < 0m || q.Ask.Value <= 0m) return null;
+        return (q.Bid.Value, q.Ask.Value);
+    }
+
+    /// <summary>sha1-hex fingerprint of (ticker | kind | sorted legs | qty). Stable across ticks.</summary>
+    public static string ComputeFingerprint(string ticker, OpenStructureKind kind, IReadOnlyList<ProposalLeg> legs, int qty)
+    {
+        var sortedLegs = string.Join("|", legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}").OrderBy(s => s, StringComparer.Ordinal));
+        var payload = $"{ticker}|{kind}|{sortedLegs}|{qty}";
+        using var sha = System.Security.Cryptography.SHA1.Create();
+        var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(payload));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    internal enum Direction { Above, Below }
+
+    /// <summary>
+    /// P(S_T &gt; level) or P(S_T &lt; level) under log-normal neutral drift:
+    /// d2 = (ln(S/K) − σ²·T/2) / (σ·√T); P(S_T &gt; K) = N(d2); P(S_T &lt; K) = 1 − N(d2).
+    /// </summary>
+    public static decimal LogNormalProbability(Direction dir, decimal spot, decimal level, double years, double ivAnnual)
+    {
+        if (level <= 0m || spot <= 0m || years <= 0 || ivAnnual <= 0) return 0m;
+        var sigmaSqrtT = ivAnnual * Math.Sqrt(years);
+        var d2 = (Math.Log((double)spot / (double)level) - 0.5 * ivAnnual * ivAnnual * years) / sigmaSqrtT;
+        var N_d2 = OptionMath.NormalCdf(d2);
+        return (decimal)(dir == Direction.Above ? N_d2 : 1.0 - N_d2);
+    }
+
+    public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg)
+    {
+        var leg = skel.Legs[0];
+        var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
+        if (parsed == null) return null;
+
+        var quote = TryLiveBidAsk(leg.Symbol, quotes);
+        if (quote == null) return null;
+        var (_, ask) = quote.Value;
+
+        var years = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
+        var iv = ResolveIv(leg.Symbol, quotes, cfg.IvDefaultPct);
+
+        var debitPerShare = ask;
+        var debitPerContract = debitPerShare * 100m;
+        var breakeven = parsed.CallPut == "C" ? parsed.Strike + debitPerShare : parsed.Strike - debitPerShare;
+
+        var pop = LogNormalProbability(parsed.CallPut == "C" ? Direction.Above : Direction.Below, spot, breakeven, years, (double)iv);
+
+        var grid = BuildScenarioGrid(spot, iv, years);
+        decimal ev = 0m;
+        decimal maxProfit = 0m;
+        decimal maxLoss = -debitPerContract;
+        foreach (var pt in grid)
+        {
+            var intrinsic = parsed.CallPut == "C" ? Math.Max(0m, pt.SpotAtExpiry - parsed.Strike) : Math.Max(0m, parsed.Strike - pt.SpotAtExpiry);
+            var pnl = intrinsic * 100m - debitPerContract;
+            ev += pt.Weight * pnl;
+            if (pnl > maxProfit) maxProfit = pnl;
+        }
+
+        var capitalAtRisk = debitPerContract;
+        var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
+        var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
+        var fit = DirectionalFit.SignFor(skel.StructureKind);
+        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+        var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
+
+        return new OpenProposal(
+            Ticker: skel.Ticker,
+            StructureKind: skel.StructureKind,
+            Legs: skel.Legs,
+            Qty: 1,
+            DebitOrCreditPerContract: -debitPerContract,
+            MaxProfitPerContract: maxProfit,
+            MaxLossPerContract: maxLoss,
+            CapitalAtRiskPerContract: capitalAtRisk,
+            Breakevens: new[] { breakeven },
+            ProbabilityOfProfit: pop,
+            ExpectedValuePerContract: ev,
+            DaysToTarget: daysToTarget,
+            RawScore: rawScore,
+            BiasAdjustedScore: biasAdj,
+            DirectionalFit: fit,
+            Rationale: "",
+            Fingerprint: fp
+        );
     }
 }
