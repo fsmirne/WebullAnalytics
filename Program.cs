@@ -1,6 +1,7 @@
 using Spectre.Console.Cli;
 using System.Text.Json;
 using WebullAnalytics.Fetch;
+using WebullAnalytics.Sniff;
 
 namespace WebullAnalytics;
 
