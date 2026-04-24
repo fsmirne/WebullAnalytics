@@ -3,6 +3,7 @@ namespace WebullAnalytics;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using WebullAnalytics.Utils;
 
 /// <summary>
 /// Linear cash-flow replay that produces PositionRows directly from a trade stream.

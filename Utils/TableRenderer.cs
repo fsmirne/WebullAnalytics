@@ -1,6 +1,6 @@
 using Spectre.Console;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Utils;
 
 /// <summary>
 /// Renders P&L reports and position tables to the console using Spectre.Console.
