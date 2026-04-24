@@ -1,7 +1,7 @@
 using Spectre.Console;
 using System.Globalization;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Utils;
 
 /// <summary>
 /// Formatting utilities for displaying quantities, prices, and dates.

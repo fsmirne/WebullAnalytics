@@ -1,6 +1,7 @@
 using OfficeOpenXml;
 using OfficeOpenXml.Drawing.Chart;
 using OfficeOpenXml.Style;
+using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.IO;
 
