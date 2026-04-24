@@ -15,6 +15,10 @@ internal static class CandidateEnumerator
         if (cfg.Structures.ShortVertical.Enabled)
             foreach (var sk in EnumerateShortVerticals(ticker, spot, asOf, cfg))
                 yield return sk;
+
+        if (cfg.Structures.LongCallPut.Enabled)
+            foreach (var sk in EnumerateLongCallPut(ticker, spot, asOf, cfg))
+                yield return sk;
     }
 
     private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind)
@@ -157,5 +161,41 @@ internal static class CandidateEnumerator
             new ProposalLeg("buy", longSym, 1)
         };
         return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: exp);
+    }
+
+    private static IEnumerable<CandidateSkeleton> EnumerateLongCallPut(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg)
+    {
+        var sCfg = cfg.Structures.LongCallPut;
+        var exps = OpenerExpiryHelpers.MonthlyExpiriesInRange(asOf, sCfg.DteMin, sCfg.DteMax).Take(2).ToList();
+        if (exps.Count == 0) yield break;
+
+        var iv = cfg.IvDefaultPct / 100m;
+        var step = cfg.StrikeStep;
+
+        foreach (var exp in exps)
+        {
+            var years = Math.Max(1, (exp.Date - asOf.Date).Days) / 365.0;
+
+            foreach (var callPut in new[] { "C", "P" })
+            {
+                foreach (var strike in StrikesAroundSpot(spot, step, count: 10))
+                {
+                    var delta = Math.Abs(OptionMath.Delta(spot, strike, years, OptionMath.RiskFreeRate, iv, callPut));
+                    if (delta < sCfg.DeltaMin || delta > sCfg.DeltaMax) continue;
+
+                    var sym = MatchKeys.OccSymbol(ticker, exp, strike, callPut);
+                    var legs = new[] { new ProposalLeg("buy", sym, 1) };
+                    var kind = callPut == "C" ? OpenStructureKind.LongCall : OpenStructureKind.LongPut;
+                    yield return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: exp);
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<decimal> StrikesAroundSpot(decimal spot, decimal step, int count)
+    {
+        var below = StrikesBelowSpot(spot, step, count).ToList();
+        var above = StrikesAboveSpot(spot, step, count).ToList();
+        return below.Concat(above).Distinct();
     }
 }
