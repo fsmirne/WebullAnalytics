@@ -1,3 +1,5 @@
+using WebullAnalytics.Report;
+
 namespace WebullAnalytics.Positions;
 
 /// <summary>

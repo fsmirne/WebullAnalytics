@@ -9,7 +9,7 @@ using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Utils;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Report;
 
 class ReportSettings : CommandSettings
 {
