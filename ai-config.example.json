@@ -61,5 +61,21 @@
 			"maxShortPremium": 0.10,
 			"minRollCredit": 0.05
 		}
+	},
+	"opener": {
+		"enabled": true,
+		"topNPerTicker": 5,
+		"maxCandidatesPerStructurePerTicker": 8,
+		"maxQtyPerProposal": 10,
+		"directionalFitWeight": 0.5,
+		"profitBandPct": 5.0,
+		"ivDefaultPct": 40,
+		"strikeStep": 0.50,
+		"structures": {
+			"longCalendar":  { "enabled": true, "shortDteMin": 3, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },
+			"longDiagonal":  { "enabled": true, "shortDteMin": 3, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },
+			"shortVertical": { "enabled": true, "dteMin": 3, "dteMax": 10, "widthSteps": [1, 2], "shortDeltaMin": 0.15, "shortDeltaMax": 0.30 },
+			"longCallPut":   { "enabled": true, "dteMin": 21, "dteMax": 60, "deltaMin": 0.30, "deltaMax": 0.60 }
+		}
 	}
 }
