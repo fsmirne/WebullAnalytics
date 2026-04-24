@@ -1,4 +1,5 @@
 using System.Linq;
+using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI;
 

@@ -1,4 +1,4 @@
-namespace WebullAnalytics;
+namespace WebullAnalytics.Pricing;
 
 /// <summary>
 /// Bjerksund-Stensland 2002 early exercise boundary approximation for American options.

@@ -1,4 +1,5 @@
 using WebullAnalytics.AI.Replay;
+using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.Sources;
 
