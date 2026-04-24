@@ -6,7 +6,7 @@ using System.Net.Http;
 using WebullAnalytics.Api;
 using WebullAnalytics.Positions;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Trading;
 
 // ─── Branch & shared settings ─────────────────────────────────────────────────
 

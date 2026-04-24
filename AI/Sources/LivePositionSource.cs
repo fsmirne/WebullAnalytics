@@ -1,5 +1,6 @@
 using System.Globalization;
 using WebullAnalytics.Api;
+using WebullAnalytics.Trading;
 
 namespace WebullAnalytics.AI.Sources;
 
