@@ -974,13 +974,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	/// <summary>Converts a scenario ActionSummary like "BUY SYM x200 @0.305, SELL SYM2 x200 @0.44"
 	/// into reproducible commands: one or more 'wa trade place' lines for execution and a single
-	/// 'wa analyze trade' line for validation. For same-strike calendar rolls and non-roll scenarios,
-	/// one combo 'wa trade place' line is emitted with the net `--limit` derived from CashImpactPerContract.
-	/// For non-calendar rolls (diagonals, same-expiry-different-strike), Webull's combo engine rejects
-	/// the reversal, so two separate single-leg 'wa trade place' lines are emitted in the order the legs
-	/// appear in ActionSummary (close-first, open-second — a contract upheld by the scenario generators).
-	/// Each uses that leg's per-share price as its `--limit`. Returns (null, null) for hold/no-op scenarios.</summary>
-	private static (IReadOnlyList<string>? Trades, string? Analyze) BuildReproductionCommands(Scenario sc, AnalyzePositionSettings settings)
+	/// 'wa analyze trade' line for validation. Output shape depends on scenario structure:
+	///   - Same-strike calendar rolls (2 legs) and non-roll scenarios → one combo line, net `--limit` from CashImpactPerContract.
+	///   - Non-calendar rolls (2 legs, diagonal/vertical) → two single-leg lines; Webull's combo engine rejects roll reversals across diagonals.
+	///   - 4-leg resets (close existing position + open new one) → two combo lines (close half + open half); Webull's combo engine only accepts 3-leg butterflies and 4-leg iron condor/butterfly as 4-leg shapes, so resets can't ride as a single combo. Split by position — EmitReset's contract is legs[0..1] close existing, legs[2..3] open new.
+	/// Returns (null, null) for hold/no-op scenarios.</summary>
+	internal static (IReadOnlyList<string>? Trades, string? Analyze) BuildReproductionCommands(Scenario sc, AnalyzePositionSettings settings)
 	{
 		if (string.IsNullOrWhiteSpace(sc.ActionSummary) || sc.ActionSummary == "—") return (null, null);
 		var parts = sc.ActionSummary.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -1004,6 +1003,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var suffix = extras.Count > 0 ? " " + string.Join(" ", extras) : "";
 		var analyze = $"wa analyze trade \"{string.Join(",", analyzeLegs)}\"{suffix}";
 
+		// 4-leg reset: split into close-half and open-half combos.
+		if (sc.IsRoll && legs.Count == 4)
+		{
+			var closeCmd = BuildComboFromLegs(legs.Take(2));
+			var openCmd = BuildComboFromLegs(legs.Skip(2));
+			return (new[] { closeCmd, openCmd }, analyze);
+		}
+
 		// Split non-calendar rolls into per-leg orders so Webull's combo engine accepts them.
 		// Per-leg --limit is rounded to cents so it round-trips through the broker (sub-penny isn't a valid tick).
 		var splittable = sc.IsRoll && legs.Count == 2 && !RollShape.IsSameStrikeCalendar(legs.Select(l => l.Symbol));
@@ -1024,5 +1031,21 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var limit = Math.Abs(sc.CashImpactPerContract / 100m).ToString("F2", CultureInfo.InvariantCulture);
 		var combo = $"wa trade place --trade \"{string.Join(",", tradeLegs)}\" --limit {limit}";
 		return (new[] { combo }, analyze);
+	}
+
+	/// <summary>Builds a single combo `wa trade place` line from parsed legs. `--limit` is the absolute
+	/// per-share signed net (sell prices add, buy prices subtract); Webull infers side from the legs.</summary>
+	private static string BuildComboFromLegs(IEnumerable<(string Action, string Symbol, string Qty, string Price)> halfLegs)
+	{
+		var list = halfLegs.ToList();
+		decimal signedNet = 0m;
+		foreach (var l in list)
+		{
+			if (!decimal.TryParse(l.Price, NumberStyles.Any, CultureInfo.InvariantCulture, out var p)) continue;
+			signedNet += l.Action == "sell" ? p : -p;
+		}
+		var halfLimit = Math.Abs(signedNet).ToString("F2", CultureInfo.InvariantCulture);
+		var halfArg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+		return $"wa trade place --trade \"{halfArg}\" --limit {halfLimit}";
 	}
 }

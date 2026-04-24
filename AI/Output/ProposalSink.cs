@@ -80,14 +80,25 @@ internal sealed class ProposalSink : IDisposable
 		{
 			var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@MID"));
 
-			// Non-calendar rolls get split into per-leg orders so Webull's combo engine accepts the reversal.
-			// Requires every leg to carry PricePerShare; otherwise fall back to the combo line.
-			var canSplit = p.Kind == ProposalKind.Roll
+			// 4-leg reset (close existing + open new): split into close-half and open-half combos — Webull
+			// rejects 4-leg orders that aren't iron condor/butterfly. ScenarioEngine.EmitReset emits legs
+			// in close-first/open-second order, so slice by position.
+			var canSplitReset = p.Kind == ProposalKind.Roll
+				&& p.Legs.Count == 4
+				&& p.Legs.All(l => l.PricePerShare.HasValue);
+
+			// Non-calendar 2-leg rolls get split into per-leg orders so Webull's combo engine accepts the reversal.
+			var canSplit2 = p.Kind == ProposalKind.Roll
 				&& p.Legs.Count == 2
 				&& p.Legs.All(l => l.PricePerShare.HasValue)
 				&& !RollShape.IsSameStrikeCalendar(p.Legs.Select(l => l.Symbol));
 
-			if (canSplit)
+			if (canSplitReset)
+			{
+				EmitComboLine(p.Legs.Take(2));
+				EmitComboLine(p.Legs.Skip(2));
+			}
+			else if (canSplit2)
 			{
 				foreach (var leg in p.Legs)
 				{
@@ -109,6 +120,20 @@ internal sealed class ProposalSink : IDisposable
 		if (p.CashReserveBlocked && p.CashReserveDetail != null)
 			AnsiConsole.MarkupLine($"  [yellow]{Markup.Escape(p.CashReserveDetail)}[/]");
 		AnsiConsole.WriteLine();
+	}
+
+	/// <summary>Emits a single combo `wa trade place` line for the given legs. `--limit` is the absolute
+	/// per-share signed net (sell prices add, buy prices subtract); Webull infers side from the legs.
+	/// Callers must ensure every leg has PricePerShare set.</summary>
+	private static void EmitComboLine(IEnumerable<ProposalLeg> legs)
+	{
+		var list = legs.ToList();
+		decimal signedNet = 0m;
+		foreach (var l in list)
+			signedNet += l.Action == "sell" ? l.PricePerShare!.Value : -l.PricePerShare!.Value;
+		var limit = Math.Abs(signedNet).ToString("F2", CultureInfo.InvariantCulture);
+		var arg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+		AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(arg)}\" --limit {limit}[/]");
 	}
 
 	public void Dispose() => _file.Dispose();
