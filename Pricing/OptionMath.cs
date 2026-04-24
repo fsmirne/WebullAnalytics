@@ -1,6 +1,6 @@
 using System.Globalization;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Pricing;
 
 /// <summary>
 /// Pure math and pricing utilities for options: Black-Scholes, intrinsic value, P&L,

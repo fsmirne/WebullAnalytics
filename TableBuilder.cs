@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using Spectre.Console;
 using Spectre.Console.Rendering;
+using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics;
 

@@ -1,3 +1,5 @@
+using WebullAnalytics.Pricing;
+
 namespace WebullAnalytics;
 
 /// <summary>
