@@ -174,7 +174,7 @@ internal static class CandidateScorer
         return new OpenProposal(
             Ticker: skel.Ticker,
             StructureKind: skel.StructureKind,
-            Legs: skel.Legs,
+            Legs: PriceLegs(skel.Legs, quotes),
             Qty: 1,
             DebitOrCreditPerContract: creditPerContract,   // positive = credit received
             MaxProfitPerContract: maxProfit,
@@ -198,6 +198,21 @@ internal static class CandidateScorer
     private static decimal StructureWeight(OpenerConfig cfg, OpenStructureKind kind)
     {
         return cfg.StructureWeight.TryGetValue(kind.ToString(), out var w) ? w : 1.0m;
+    }
+
+    /// <summary>Returns a copy of <paramref name="legs"/> with PricePerShare set to the execution
+    /// price for each leg: buys fill at ask, sells fill at bid. Callers must ensure a usable
+    /// two-sided quote exists for every leg (the Score* methods verify this upfront).</summary>
+    private static IReadOnlyList<ProposalLeg> PriceLegs(IReadOnlyList<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+    {
+        var priced = new List<ProposalLeg>(legs.Count);
+        foreach (var leg in legs)
+        {
+            var q = TryLiveBidAsk(leg.Symbol, quotes);
+            decimal? price = q.HasValue ? (leg.Action == "buy" ? q.Value.ask : q.Value.bid) : null;
+            priced.Add(leg with { PricePerShare = price });
+        }
+        return priced;
     }
 
     private static decimal VerticalPnLAtExpiry(decimal sT, decimal shortStrike, decimal longStrike, decimal creditPerContract, bool isCall)
@@ -276,7 +291,7 @@ internal static class CandidateScorer
         return new OpenProposal(
             Ticker: skel.Ticker,
             StructureKind: skel.StructureKind,
-            Legs: skel.Legs,
+            Legs: PriceLegs(skel.Legs, quotes),
             Qty: 1,
             DebitOrCreditPerContract: -debitPerContract,
             MaxProfitPerContract: maxProfit,
@@ -335,7 +350,7 @@ internal static class CandidateScorer
         return new OpenProposal(
             Ticker: skel.Ticker,
             StructureKind: skel.StructureKind,
-            Legs: skel.Legs,
+            Legs: PriceLegs(skel.Legs, quotes),
             Qty: 1,
             DebitOrCreditPerContract: -debitPerContract,
             MaxProfitPerContract: maxProfit,
