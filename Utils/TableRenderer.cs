@@ -1,4 +1,5 @@
 using Spectre.Console;
+using WebullAnalytics.Analyze;
 using WebullAnalytics.Report;
 
 namespace WebullAnalytics.Utils;
