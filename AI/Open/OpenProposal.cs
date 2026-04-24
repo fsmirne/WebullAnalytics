@@ -1,0 +1,56 @@
+namespace WebullAnalytics.AI;
+
+public enum OpenStructureKind
+{
+    LongCalendar,
+    LongDiagonal,
+    ShortPutVertical,
+    ShortCallVertical,
+    LongCall,
+    LongPut
+}
+
+/// <summary>
+/// Output of the opener pipeline. One proposal per candidate that survives scoring and ranking.
+/// Peer to ManagementProposal — there is no PositionKey because no position exists.
+/// </summary>
+/// <param name="Ticker">Underlying symbol.</param>
+/// <param name="StructureKind">Which structure family this proposal belongs to.</param>
+/// <param name="Legs">Opening legs in OCC notation. Reuses ProposalLeg from the management side.</param>
+/// <param name="Qty">Sized to available cash. 0 when CashReserveBlocked.</param>
+/// <param name="DebitOrCreditPerContract">Negative = debit paid; positive = credit received (dollars per contract, i.e. ×100).</param>
+/// <param name="MaxProfitPerContract">Positive dollars. For unlimited-profit structures (long call/put), taken as projected profit at +2σ grid point.</param>
+/// <param name="MaxLossPerContract">Negative dollars (loss magnitude).</param>
+/// <param name="CapitalAtRiskPerContract">Debit for longs/calendars; (width×100 − credit) for short verticals. Always ≥ 0.</param>
+/// <param name="Breakevens">Underlying price levels where P&amp;L crosses zero at the target date.</param>
+/// <param name="ProbabilityOfProfit">[0, 1] from Black-Scholes with neutral drift.</param>
+/// <param name="ExpectedValuePerContract">From the 5-point scenario grid, dollars.</param>
+/// <param name="DaysToTarget">DTE of the leg whose expiry defines the target evaluation date.</param>
+/// <param name="RawScore">EV / max(1, DaysToTarget) / CapitalAtRiskPerContract.</param>
+/// <param name="BiasAdjustedScore">RawScore × (1 + α · bias · fit).</param>
+/// <param name="DirectionalFit">+1 / 0 / −1 from the structure-fit table.</param>
+/// <param name="Rationale">Human-readable line; see spec for format.</param>
+/// <param name="Fingerprint">sha1-hex of (ticker | kind | sorted(legs) | qty) — used for cross-tick dedup.</param>
+/// <param name="CashReserveBlocked">True when sizing fell to 0 contracts due to the cash reserve.</param>
+/// <param name="CashReserveDetail">"free $X, requires $Y per contract" when blocked; null otherwise.</param>
+internal sealed record OpenProposal(
+    string Ticker,
+    OpenStructureKind StructureKind,
+    IReadOnlyList<ProposalLeg> Legs,
+    int Qty,
+    decimal DebitOrCreditPerContract,
+    decimal MaxProfitPerContract,
+    decimal MaxLossPerContract,
+    decimal CapitalAtRiskPerContract,
+    IReadOnlyList<decimal> Breakevens,
+    decimal ProbabilityOfProfit,
+    decimal ExpectedValuePerContract,
+    int DaysToTarget,
+    decimal RawScore,
+    decimal BiasAdjustedScore,
+    int DirectionalFit,
+    string Rationale,
+    string Fingerprint,
+    bool CashReserveBlocked = false,
+    string? CashReserveDetail = null
+);
