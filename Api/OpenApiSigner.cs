@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Api;
 
 /// <summary>
 /// Builds the seven x-* headers required by the Webull OpenAPI.

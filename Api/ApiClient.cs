@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Api;
 
 public static class ApiClient
 {

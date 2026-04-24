@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Api;
 
 internal sealed class WebullOpenApiException : Exception
 {
