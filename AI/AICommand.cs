@@ -33,6 +33,10 @@ internal abstract class AISubcommandSettings : CommandSettings
 	[Description("quiet | normal | debug. Overrides config.")]
 	public string? Verbosity { get; set; }
 
+	[CommandOption("--no-open-proposals")]
+	[Description("Disable the opening-proposal pass for this run; management rules still run.")]
+	public bool NoOpenProposals { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		if (Output != "console" && Output != "text") return ValidationResult.Error($"--output: must be 'console' or 'text', got '{Output}'");
