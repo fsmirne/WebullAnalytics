@@ -68,6 +68,13 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
 
 		using var sink = new ProposalSink(config.Log, mode: "watch");
+		OpenProposalSink? openSink = null;
+		OpenCandidateEvaluator? openEvaluator = null;
+		if (config.Opener.Enabled && !settings.NoOpenProposals)
+		{
+			openSink = new OpenProposalSink(config.Log, mode: "watch");
+			openEvaluator = new OpenCandidateEvaluator(config, quotes);
+		}
 		var priceCache = new Replay.HistoricalPriceCache();
 
 		AnsiConsole.MarkupLine($"[bold]ai watch[/] tickers={string.Join(",", config.Tickers)} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss}");
@@ -97,6 +104,12 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				var results = evaluator.Evaluate(ctx);
 				foreach (var r in results) { sink.Emit(r.Proposal, r.IsRepeat); proposalsEmitted++; }
 
+				if (openEvaluator != null && openSink != null)
+				{
+					var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
+					foreach (var p in openResults) { openSink.Emit(p); proposalsEmitted++; }
+				}
+
 				ticksRun++;
 				failures = 0;
 			}
@@ -120,6 +133,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			try { await Task.Delay(TimeSpan.FromSeconds(tickSeconds), cancellation); } catch (OperationCanceledException) { break; }
 		}
 
+		openSink?.Dispose();
 		AnsiConsole.MarkupLine($"[dim]Loop exited. ticks={ticksRun} proposals={proposalsEmitted} failures={failures}[/]");
 		return 0;
 	}
