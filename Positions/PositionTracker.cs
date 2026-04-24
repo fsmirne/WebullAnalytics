@@ -1,4 +1,4 @@
-namespace WebullAnalytics;
+namespace WebullAnalytics.Positions;
 
 /// <summary>
 /// Tracks option and stock positions, calculates realized P&L, and builds reports.

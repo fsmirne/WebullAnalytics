@@ -1,4 +1,4 @@
-namespace WebullAnalytics;
+namespace WebullAnalytics.Positions;
 
 /// <summary>
 /// Shared helper for detecting whether a list of option legs forms a same-strike calendar
