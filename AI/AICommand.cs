@@ -4,6 +4,7 @@ using Spectre.Console.Cli;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Rules;
 using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Trading;
 
 namespace WebullAnalytics.AI;
 

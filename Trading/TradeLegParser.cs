@@ -1,6 +1,6 @@
 using System.Globalization;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Trading;
 
 /// <summary>
 /// Represents a single leg after parsing the --trades syntax (ACTION:SYMBOL:QTY[@PRICE]).

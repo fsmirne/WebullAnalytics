@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Trading;
 
 /// <summary>
 /// Holds the parameters for a single "new order" submission plus the account ID.
