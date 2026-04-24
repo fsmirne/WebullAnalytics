@@ -35,6 +35,7 @@ internal sealed class ProposalSink : IDisposable
 	{
 		var record = new
 		{
+			type = "management",
 			ts = DateTime.Now.ToString("o"),
 			rule = p.Rule,
 			ticker = p.Ticker,
