@@ -2,7 +2,7 @@ using System.Globalization;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Utils;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Analyze;
 
 /// <summary>
 /// Analyzes open positions to calculate break-even prices, max profit/loss,

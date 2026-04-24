@@ -3,7 +3,7 @@ using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Utils;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Analyze;
 
 /// <summary>
 /// Produces an aggregated break-even panel per ticker that has 2+ open positions.

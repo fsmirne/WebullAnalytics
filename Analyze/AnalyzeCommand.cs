@@ -9,7 +9,7 @@ using WebullAnalytics.Report;
 using WebullAnalytics.Trading;
 using WebullAnalytics.Utils;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Analyze;
 
 // Shared base for both subcommands.
 internal abstract class AnalyzeSubcommandSettings : ReportSettings
