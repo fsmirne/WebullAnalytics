@@ -22,7 +22,7 @@ internal sealed class ProposalSink : IDisposable
 		_mode = mode;
 		var path = Program.ResolvePath(log.Path);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.Read)) { AutoFlush = true };
+		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
 	}
 
 	public void Emit(ManagementProposal p, bool isRepeat)
