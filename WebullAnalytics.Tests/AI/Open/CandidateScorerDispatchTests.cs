@@ -5,7 +5,7 @@ namespace WebullAnalytics.Tests.AI.Open;
 
 public class CandidateScorerDispatchTests
 {
-    private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m };
+    private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m, StructureWeight = new() };
 
     [Fact]
     public void ScoreDispatchesLongCall()
