@@ -182,6 +182,82 @@ internal static class CandidateScorer
         }
     }
 
+    public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg)
+    {
+        var shortLeg = skel.Legs.First(l => l.Action == "sell");
+        var longLeg = skel.Legs.First(l => l.Action == "buy");
+        var shortParsed = ParsingHelpers.ParseOptionSymbol(shortLeg.Symbol);
+        var longParsed = ParsingHelpers.ParseOptionSymbol(longLeg.Symbol);
+        if (shortParsed == null || longParsed == null) return null;
+
+        var shortQ = TryLiveBidAsk(shortLeg.Symbol, quotes);
+        var longQ = TryLiveBidAsk(longLeg.Symbol, quotes);
+        if (shortQ == null || longQ == null) return null;
+
+        var debitPerShare = longQ.Value.ask - shortQ.Value.bid;
+        if (debitPerShare <= 0m) return null;
+
+        var debitPerContract = debitPerShare * 100m;
+        var capitalAtRisk = debitPerContract;
+
+        var shortYears = Math.Max(1, (shortParsed.ExpiryDate.Date - asOf.Date).Days) / 365.0;
+        var longAtShortYears = Math.Max(1, (longParsed.ExpiryDate.Date - shortParsed.ExpiryDate.Date).Days) / 365.0;
+        var ivShort = ResolveIv(shortLeg.Symbol, quotes, cfg.IvDefaultPct);
+        var ivLong = ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct);
+
+        // POP = P(|S_T − K_short| / spot < profitBandPct / 100)
+        var band = spot * cfg.ProfitBandPct / 100m;
+        var popUpper = LogNormalProbability(Direction.Below, spot, shortParsed.Strike + band, shortYears, (double)ivShort);
+        var popLower = LogNormalProbability(Direction.Below, spot, shortParsed.Strike - band, shortYears, (double)ivShort);
+        var pop = popUpper - popLower;
+        if (pop < 0m) pop = 0m;
+
+        var grid = BuildScenarioGrid(spot, ivShort, shortYears);
+        decimal ev = 0m;
+        decimal maxProfit = decimal.MinValue;
+        decimal maxLossPoint = decimal.MaxValue;
+        foreach (var pt in grid)
+        {
+            // Long leg valued via BS at short expiry with IV_long; short leg is intrinsic.
+            var longBS = OptionMath.BlackScholes(pt.SpotAtExpiry, longParsed.Strike, longAtShortYears, OptionMath.RiskFreeRate, ivLong, longParsed.CallPut);
+            var shortIntrinsic = longParsed.CallPut == "C"
+                ? Math.Max(0m, pt.SpotAtExpiry - shortParsed.Strike)
+                : Math.Max(0m, shortParsed.Strike - pt.SpotAtExpiry);
+            var positionValue = (longBS - shortIntrinsic) * 100m;
+            var pnl = positionValue - debitPerContract;
+            ev += pt.Weight * pnl;
+            if (pnl > maxProfit) maxProfit = pnl;
+            if (pnl < maxLossPoint) maxLossPoint = pnl;
+        }
+        if (maxLossPoint > -debitPerContract) maxLossPoint = -debitPerContract;
+
+        var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
+        var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
+        var fit = DirectionalFit.SignFor(skel.StructureKind);
+        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+        var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
+
+        return new OpenProposal(
+            Ticker: skel.Ticker,
+            StructureKind: skel.StructureKind,
+            Legs: skel.Legs,
+            Qty: 1,
+            DebitOrCreditPerContract: -debitPerContract,
+            MaxProfitPerContract: maxProfit,
+            MaxLossPerContract: maxLossPoint,
+            CapitalAtRiskPerContract: capitalAtRisk,
+            Breakevens: Array.Empty<decimal>(),   // calendar breakevens require numeric root-finding; omitted in phase 1
+            ProbabilityOfProfit: pop,
+            ExpectedValuePerContract: ev,
+            DaysToTarget: daysToTarget,
+            RawScore: rawScore,
+            BiasAdjustedScore: biasAdj,
+            DirectionalFit: fit,
+            Rationale: "",
+            Fingerprint: fp
+        );
+    }
+
     public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg)
     {
         var leg = skel.Legs[0];
