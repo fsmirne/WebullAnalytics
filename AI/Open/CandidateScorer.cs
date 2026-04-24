@@ -24,14 +24,17 @@ internal static class CandidateScorer
     }
 
     /// <summary>
-    /// Builds 5 scenario points at S_T ∈ {spot·e^(−2σ), spot·e^(−σ), spot, spot·e^(+σ), spot·e^(+2σ)}
-    /// where σ = ivAnnual · √years. Weights = log-normal density at each point, renormalized to sum to 1.
-    /// Neutral drift.
+    /// Builds 5 scenario points at S_T ∈ {spot·e^(−sigmaRange·σ), spot·e^(−sigmaRange·σ/2), spot,
+    /// spot·e^(+sigmaRange·σ/2), spot·e^(+sigmaRange·σ)} where σ = ivAnnual · √years.
+    /// Weights = log-normal density at each point, renormalized to sum to 1. Neutral drift.
+    /// sigmaRange defaults to 1.0 (±1σ and ±0.5σ). Larger values test further-out scenarios and
+    /// overweight fat tails, favoring unbounded-upside structures over pin/theta structures.
     /// </summary>
-    public static IReadOnlyList<ScenarioPoint> BuildScenarioGrid(decimal spot, decimal ivAnnual, double years)
+    public static IReadOnlyList<ScenarioPoint> BuildScenarioGrid(decimal spot, decimal ivAnnual, double years, decimal sigmaRange = 1.0m)
     {
         var sigma = (double)ivAnnual * Math.Sqrt(Math.Max(1e-9, years));
-        var multipliers = new[] { -2.0, -1.0, 0.0, 1.0, 2.0 };
+        var range = (double)sigmaRange;
+        var multipliers = new[] { -range, -range * 0.5, 0.0, range * 0.5, range };
         var points = new ScenarioPoint[5];
 
         // Unnormalized log-normal density at each z-point: φ(z) = (1/√(2π)) · e^(−z²/2). Weights are the densities.
@@ -154,7 +157,7 @@ internal static class CandidateScorer
         var pop = LogNormalProbability(isCall ? Direction.Below : Direction.Above, spot, breakeven, years, (double)iv);
 
         // EV via scenario grid — payoff at expiry is piecewise linear.
-        var grid = BuildScenarioGrid(spot, iv, years);
+        var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma);
         decimal ev = 0m;
         foreach (var pt in grid)
         {
@@ -165,7 +168,7 @@ internal static class CandidateScorer
         var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
         var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
         var fit = DirectionalFit.SignFor(skel.StructureKind);
-        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind);
         var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
         return new OpenProposal(
@@ -187,6 +190,14 @@ internal static class CandidateScorer
             Rationale: "",
             Fingerprint: fp
         );
+    }
+
+    /// <summary>Looks up the structure-specific multiplier from config, defaulting to 1.0 when a
+    /// kind isn't listed. Used by every Score* method as the final multiplicative factor on
+    /// BiasAdjustedScore so the ranking reflects the user's historical edge per structure.</summary>
+    private static decimal StructureWeight(OpenerConfig cfg, OpenStructureKind kind)
+    {
+        return cfg.StructureWeight.TryGetValue(kind.ToString(), out var w) ? w : 1.0m;
     }
 
     private static decimal VerticalPnLAtExpiry(decimal sT, decimal shortStrike, decimal longStrike, decimal creditPerContract, bool isCall)
@@ -237,7 +248,7 @@ internal static class CandidateScorer
         var pop = popUpper - popLower;
         if (pop < 0m) pop = 0m;
 
-        var grid = BuildScenarioGrid(spot, ivShort, shortYears);
+        var grid = BuildScenarioGrid(spot, ivShort, shortYears, cfg.ScenarioGridSigma);
         decimal ev = 0m;
         decimal maxProfit = decimal.MinValue;
         decimal maxLossPoint = decimal.MaxValue;
@@ -259,7 +270,7 @@ internal static class CandidateScorer
         var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
         var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
         var fit = DirectionalFit.SignFor(skel.StructureKind);
-        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind);
         var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
         return new OpenProposal(
@@ -302,7 +313,7 @@ internal static class CandidateScorer
 
         var pop = LogNormalProbability(parsed.CallPut == "C" ? Direction.Above : Direction.Below, spot, breakeven, years, (double)iv);
 
-        var grid = BuildScenarioGrid(spot, iv, years);
+        var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma);
         decimal ev = 0m;
         decimal maxProfit = 0m;
         decimal maxLoss = -debitPerContract;
@@ -318,7 +329,7 @@ internal static class CandidateScorer
         var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
         var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
         var fit = DirectionalFit.SignFor(skel.StructureKind);
-        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind);
         var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
         return new OpenProposal(
