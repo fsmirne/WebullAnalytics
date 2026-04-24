@@ -2,6 +2,7 @@ using Spectre.Console.Cli;
 using System.Text.Json;
 using WebullAnalytics.Fetch;
 using WebullAnalytics.Sniff;
+using WebullAnalytics.Trading;
 
 namespace WebullAnalytics;
 

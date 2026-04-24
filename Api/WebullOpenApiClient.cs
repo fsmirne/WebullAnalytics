@@ -3,6 +3,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+using WebullAnalytics.Trading;
+
 namespace WebullAnalytics.Api;
 
 internal sealed class WebullOpenApiException : Exception
