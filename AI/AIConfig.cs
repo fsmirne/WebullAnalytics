@@ -14,6 +14,7 @@ internal sealed class AIConfig
 	[JsonPropertyName("cashReserve")] public CashReserveConfig CashReserve { get; set; } = new();
 	[JsonPropertyName("log")] public LogConfig Log { get; set; } = new();
 	[JsonPropertyName("rules")] public RulesConfig Rules { get; set; } = new();
+	[JsonPropertyName("opener")] public OpenerConfig Opener { get; set; } = new();
 }
 
 internal sealed class MarketHoursConfig
@@ -185,6 +186,42 @@ internal static class AIConfigLoader
 			if (tf.MomentumWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.momentumWeight: must be ≥ 0, got {tf.MomentumWeight}";
 			if (tf.MomentumDays < 1) return $"rules.opportunisticRoll.technicalFilter.momentumDays: must be ≥ 1, got {tf.MomentumDays}";
 		}
+
+		var op = c.Opener;
+		if (op.TopNPerTicker < 1) return $"opener.topNPerTicker: must be ≥ 1, got {op.TopNPerTicker}";
+		if (op.MaxCandidatesPerStructurePerTicker < 1) return $"opener.maxCandidatesPerStructurePerTicker: must be ≥ 1, got {op.MaxCandidatesPerStructurePerTicker}";
+		if (op.MaxQtyPerProposal < 1) return $"opener.maxQtyPerProposal: must be ≥ 1, got {op.MaxQtyPerProposal}";
+		if (op.DirectionalFitWeight < 0m) return $"opener.directionalFitWeight: must be ≥ 0, got {op.DirectionalFitWeight}";
+		if (op.ProfitBandPct <= 0m || op.ProfitBandPct > 50m) return $"opener.profitBandPct: must be in (0, 50], got {op.ProfitBandPct}";
+		if (op.IvDefaultPct <= 0m) return $"opener.ivDefaultPct: must be > 0, got {op.IvDefaultPct}";
+		if (op.StrikeStep <= 0m) return $"opener.strikeStep: must be > 0, got {op.StrikeStep}";
+
+		var lc = op.Structures.LongCalendar;
+		if (lc.ShortDteMin < 0) return $"opener.structures.longCalendar.shortDteMin: must be ≥ 0, got {lc.ShortDteMin}";
+		if (lc.ShortDteMax < lc.ShortDteMin) return $"opener.structures.longCalendar.shortDteMax: must be ≥ shortDteMin, got {lc.ShortDteMax}";
+		if (lc.LongDteMin < 0) return $"opener.structures.longCalendar.longDteMin: must be ≥ 0, got {lc.LongDteMin}";
+		if (lc.LongDteMax < lc.LongDteMin) return $"opener.structures.longCalendar.longDteMax: must be ≥ longDteMin, got {lc.LongDteMax}";
+
+		var ld = op.Structures.LongDiagonal;
+		if (ld.ShortDteMin < 0) return $"opener.structures.longDiagonal.shortDteMin: must be ≥ 0, got {ld.ShortDteMin}";
+		if (ld.ShortDteMax < ld.ShortDteMin) return $"opener.structures.longDiagonal.shortDteMax: must be ≥ shortDteMin, got {ld.ShortDteMax}";
+		if (ld.LongDteMin < 0) return $"opener.structures.longDiagonal.longDteMin: must be ≥ 0, got {ld.LongDteMin}";
+		if (ld.LongDteMax < ld.LongDteMin) return $"opener.structures.longDiagonal.longDteMax: must be ≥ longDteMin, got {ld.LongDteMax}";
+
+		var sv = op.Structures.ShortVertical;
+		if (sv.DteMin < 0) return $"opener.structures.shortVertical.dteMin: must be ≥ 0, got {sv.DteMin}";
+		if (sv.DteMax < sv.DteMin) return $"opener.structures.shortVertical.dteMax: must be ≥ dteMin, got {sv.DteMax}";
+		if (sv.WidthSteps.Count == 0) return "opener.structures.shortVertical.widthSteps: must have at least one value";
+		foreach (var w in sv.WidthSteps)
+			if (w < 1) return $"opener.structures.shortVertical.widthSteps: each value must be ≥ 1, got {w}";
+		if (sv.ShortDeltaMin <= 0m || sv.ShortDeltaMin >= 1m) return $"opener.structures.shortVertical.shortDeltaMin: must be in (0, 1), got {sv.ShortDeltaMin}";
+		if (sv.ShortDeltaMax <= sv.ShortDeltaMin || sv.ShortDeltaMax >= 1m) return $"opener.structures.shortVertical.shortDeltaMax: must be in (shortDeltaMin, 1), got {sv.ShortDeltaMax}";
+
+		var lcp = op.Structures.LongCallPut;
+		if (lcp.DteMin < 0) return $"opener.structures.longCallPut.dteMin: must be ≥ 0, got {lcp.DteMin}";
+		if (lcp.DteMax < lcp.DteMin) return $"opener.structures.longCallPut.dteMax: must be ≥ dteMin, got {lcp.DteMax}";
+		if (lcp.DeltaMin <= 0m || lcp.DeltaMin >= 1m) return $"opener.structures.longCallPut.deltaMin: must be in (0, 1), got {lcp.DeltaMin}";
+		if (lcp.DeltaMax <= lcp.DeltaMin || lcp.DeltaMax >= 1m) return $"opener.structures.longCallPut.deltaMax: must be in (deltaMin, 1), got {lcp.DeltaMax}";
 
 		return null;
 	}
