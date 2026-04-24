@@ -12,6 +12,27 @@ internal sealed class OpenerConfig
     [JsonPropertyName("profitBandPct")] public decimal ProfitBandPct { get; set; } = 5.0m;
     [JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;
     [JsonPropertyName("strikeStep")] public decimal StrikeStep { get; set; } = 0.50m;
+
+    /// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at
+    /// ±sigma and ±sigma/2 around spot. Default 1.0 gives a ±1σ / ±0.5σ grid that better matches
+    /// realized moves on high-IV names and doesn't overweight fat tails. Prior behavior (and stress tests)
+    /// used 2.0 which pumps long-call EV at the expense of pin/theta structures.</summary>
+    [JsonPropertyName("scenarioGridSigma")] public decimal ScenarioGridSigma { get; set; } = 1.0m;
+
+    /// <summary>Per-structure multiplier applied to BiasAdjustedScore before ranking. Defaults below
+    /// reflect historical edge on the Calendar/Diagonal pair and de-emphasize short verticals and
+    /// purely directional long calls/puts. Keyed by OpenStructureKind.ToString(). Override in
+    /// ai-config.json under opener.structureWeight.</summary>
+    [JsonPropertyName("structureWeight")] public Dictionary<string, decimal> StructureWeight { get; set; } = new(StringComparer.Ordinal)
+    {
+        ["LongCalendar"] = 1.3m,
+        ["LongDiagonal"] = 1.2m,
+        ["ShortPutVertical"] = 0.7m,
+        ["ShortCallVertical"] = 0.7m,
+        ["LongCall"] = 0.3m,
+        ["LongPut"] = 0.3m,
+    };
+
     [JsonPropertyName("structures")] public OpenerStructuresConfig Structures { get; set; } = new();
 }
 

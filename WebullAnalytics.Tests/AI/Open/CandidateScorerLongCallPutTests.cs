@@ -7,7 +7,7 @@ public class CandidateScorerLongCallPutTests
 {
     private const decimal Alpha = 0.5m;
 
-    private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = Alpha, ProfitBandPct = 5m };
+    private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = Alpha, ProfitBandPct = 5m, StructureWeight = new() };
 
     [Fact]
     public void LongCallBreakevenIsStrikePlusDebit()
