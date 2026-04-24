@@ -11,6 +11,10 @@ internal static class CandidateEnumerator
         if (cfg.Structures.LongDiagonal.Enabled)
             foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongDiagonal, OpenStructureKind.LongDiagonal))
                 yield return sk;
+
+        if (cfg.Structures.ShortVertical.Enabled)
+            foreach (var sk in EnumerateShortVerticals(ticker, spot, asOf, cfg))
+                yield return sk;
     }
 
     private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind)
@@ -78,5 +82,80 @@ internal static class CandidateEnumerator
             new ProposalLeg("buy", longSym, 1)
         };
         return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: shortExp);
+    }
+
+    private static IEnumerable<CandidateSkeleton> EnumerateShortVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg)
+    {
+        var sCfg = cfg.Structures.ShortVertical;
+        var exps = OpenerExpiryHelpers.NextWeeklyExpiriesInRange(asOf, sCfg.DteMin, sCfg.DteMax).ToList();
+        if (exps.Count == 0) yield break;
+
+        var iv = cfg.IvDefaultPct / 100m;
+        var step = cfg.StrikeStep;
+
+        foreach (var exp in exps)
+        {
+            var years = Math.Max(1, (exp.Date - asOf.Date).Days) / 365.0;
+
+            // Put credit side (bullish): short strike below spot.
+            foreach (var shortStrike in StrikesBelowSpot(spot, step, count: 8))
+            {
+                var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "P"));
+                if (delta < sCfg.ShortDeltaMin || delta > sCfg.ShortDeltaMax) continue;
+                foreach (var widthSteps in sCfg.WidthSteps)
+                {
+                    var longStrike = shortStrike - widthSteps * step;
+                    if (longStrike <= 0m) continue;
+                    yield return BuildVertical(ticker, OpenStructureKind.ShortPutVertical, exp, shortStrike, longStrike, "P");
+                }
+            }
+
+            // Call credit side (bearish): short strike above spot.
+            foreach (var shortStrike in StrikesAboveSpot(spot, step, count: 8))
+            {
+                var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "C"));
+                if (delta < sCfg.ShortDeltaMin || delta > sCfg.ShortDeltaMax) continue;
+                foreach (var widthSteps in sCfg.WidthSteps)
+                {
+                    var longStrike = shortStrike + widthSteps * step;
+                    yield return BuildVertical(ticker, OpenStructureKind.ShortCallVertical, exp, shortStrike, longStrike, "C");
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<decimal> StrikesBelowSpot(decimal spot, decimal step, int count)
+    {
+        var k = Math.Floor(spot / step) * step;
+        if (k == spot) k -= step;
+        for (int i = 0; i < count; i++)
+        {
+            if (k <= 0m) yield break;
+            yield return k;
+            k -= step;
+        }
+    }
+
+    private static IEnumerable<decimal> StrikesAboveSpot(decimal spot, decimal step, int count)
+    {
+        var k = Math.Ceiling(spot / step) * step;
+        if (k == spot) k += step;
+        for (int i = 0; i < count; i++)
+        {
+            yield return k;
+            k += step;
+        }
+    }
+
+    private static CandidateSkeleton BuildVertical(string ticker, OpenStructureKind kind, DateTime exp, decimal shortStrike, decimal longStrike, string callPut)
+    {
+        var shortSym = MatchKeys.OccSymbol(ticker, exp, shortStrike, callPut);
+        var longSym = MatchKeys.OccSymbol(ticker, exp, longStrike, callPut);
+        var legs = new[]
+        {
+            new ProposalLeg("sell", shortSym, 1),
+            new ProposalLeg("buy", longSym, 1)
+        };
+        return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: exp);
     }
 }
