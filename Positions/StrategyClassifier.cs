@@ -1,4 +1,4 @@
-namespace WebullAnalytics;
+namespace WebullAnalytics.Positions;
 
 internal static class StrategyClassifier
 {

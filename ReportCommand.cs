@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Text.Json;
 using WebullAnalytics.Api;
 using WebullAnalytics.IO;
+using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Utils;
 

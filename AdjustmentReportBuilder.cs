@@ -1,3 +1,5 @@
+using WebullAnalytics.Positions;
+
 namespace WebullAnalytics;
 
 public record CostStep(DateTime Timestamp, string Instrument, Side Side, int TradeQty, decimal Price, int RunningQty, decimal RunningAvg);
