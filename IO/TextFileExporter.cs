@@ -1,5 +1,6 @@
 using Spectre.Console;
 using System.Text.RegularExpressions;
+using WebullAnalytics.Report;
 using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.IO;

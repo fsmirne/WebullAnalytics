@@ -1,6 +1,6 @@
 using WebullAnalytics.Positions;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Report;
 
 public record CostStep(DateTime Timestamp, string Instrument, Side Side, int TradeQty, decimal Price, int RunningQty, decimal RunningAvg);
 public record StrategyCredit(string Instrument, int Qty, decimal LotPrice, decimal ParentPrice);

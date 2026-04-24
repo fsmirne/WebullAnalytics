@@ -3,6 +3,7 @@ namespace WebullAnalytics.Positions;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using WebullAnalytics.Report;
 using WebullAnalytics.Utils;
 
 /// <summary>
