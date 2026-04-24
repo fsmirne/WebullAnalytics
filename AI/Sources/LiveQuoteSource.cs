@@ -1,4 +1,5 @@
 using System.Text.Json;
+using WebullAnalytics.Api;
 
 namespace WebullAnalytics.AI.Sources;
 

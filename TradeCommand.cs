@@ -3,6 +3,7 @@ using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
 using System.Net.Http;
+using WebullAnalytics.Api;
 
 namespace WebullAnalytics;
 

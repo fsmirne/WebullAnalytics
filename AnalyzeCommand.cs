@@ -3,6 +3,7 @@ using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
+using WebullAnalytics.Api;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Utils;
 

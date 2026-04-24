@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text;
+using WebullAnalytics.Api;
+using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.Replay;
 
