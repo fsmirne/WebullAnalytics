@@ -107,7 +107,46 @@ internal sealed class OpenCandidateEvaluator
             output.AddRange(survivors.OrderByDescending(p => p.BiasAdjustedScore).Take(cfg.TopNPerTicker));
         }
 
-        return output;
+        // Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker.
+        var trendByTicker = new Dictionary<string, WebullAnalytics.AI.RiskDiagnostics.TrendSnapshot?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
+            trendByTicker[ticker] = await WebullAnalytics.AI.RiskDiagnostics.TrendFetcher.FetchAsync(ticker, ctx.Now, cancellation);
+
+        var annotated = new List<OpenProposal>(output.Count);
+        foreach (var p in output)
+        {
+            var diagLegs = p.Legs.Select(l =>
+            {
+                var parsed = ParsingHelpers.ParseOptionSymbol(l.Symbol);
+                return new WebullAnalytics.AI.RiskDiagnostics.DiagnosticLeg(
+                    Symbol: l.Symbol,
+                    Parsed: parsed!,
+                    IsLong: l.Action == "buy",
+                    Qty: l.Qty,
+                    PricePerShare: l.PricePerShare,
+                    CostBasisPerShare: null);
+            }).Where(l => l.Parsed != null).ToList();
+
+            if (diagLegs.Count != p.Legs.Count)
+            {
+                annotated.Add(p);
+                continue;
+            }
+
+            var spotForDiag = bootstrapSpots.TryGetValue(p.Ticker, out var s) ? s : 0m;
+            trendByTicker.TryGetValue(p.Ticker, out var trend);
+            var diagnostic = WebullAnalytics.AI.RiskDiagnostics.RiskDiagnosticBuilder.Build(
+                legs: diagLegs,
+                spot: spotForDiag,
+                asOf: ctx.Now,
+                ivResolver: sym => mergedQuotes.TryGetValue(sym, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m
+                    ? q.ImpliedVolatility.Value
+                    : 0.40m,
+                trend: trend);
+
+            annotated.Add(p with { Diagnostic = diagnostic });
+        }
+        return annotated;
     }
 
     private static OpenProposal ApplyCashSizing(OpenProposal p, decimal freeCash, OpenerConfig cfg, decimal bias)
