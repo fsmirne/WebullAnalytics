@@ -93,6 +93,95 @@ internal static class CandidateScorer
         return (decimal)(dir == Direction.Above ? N_d2 : 1.0 - N_d2);
     }
 
+    public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg)
+    {
+        var shortLeg = skel.Legs.First(l => l.Action == "sell");
+        var longLeg = skel.Legs.First(l => l.Action == "buy");
+        var shortParsed = ParsingHelpers.ParseOptionSymbol(shortLeg.Symbol);
+        var longParsed = ParsingHelpers.ParseOptionSymbol(longLeg.Symbol);
+        if (shortParsed == null || longParsed == null) return null;
+
+        var shortQ = TryLiveBidAsk(shortLeg.Symbol, quotes);
+        var longQ = TryLiveBidAsk(longLeg.Symbol, quotes);
+        if (shortQ == null || longQ == null) return null;
+
+        // Credit execution assumes short fills at bid, long fills at ask (conservative).
+        var creditPerShare = shortQ.Value.bid - longQ.Value.ask;
+        if (creditPerShare <= 0m) return null; // not a credit spread at these quotes
+
+        var creditPerContract = creditPerShare * 100m;
+        var width = Math.Abs(shortParsed.Strike - longParsed.Strike);
+        var capitalAtRisk = width * 100m - creditPerContract;
+        if (capitalAtRisk <= 0m) return null;
+
+        var maxProfit = creditPerContract;
+        var maxLoss = -capitalAtRisk;
+
+        var isCall = skel.StructureKind == OpenStructureKind.ShortCallVertical;
+        var breakeven = isCall
+            ? shortParsed.Strike + creditPerShare   // call credit: loses if S_T > short + credit
+            : shortParsed.Strike - creditPerShare;  // put credit: loses if S_T < short − credit
+
+        var years = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
+        var iv = ResolveIv(shortLeg.Symbol, quotes, cfg.IvDefaultPct);
+
+        // POP = P(S_T inside profitable side of breakeven).
+        var pop = LogNormalProbability(isCall ? Direction.Below : Direction.Above, spot, breakeven, years, (double)iv);
+
+        // EV via scenario grid — payoff at expiry is piecewise linear.
+        var grid = BuildScenarioGrid(spot, iv, years);
+        decimal ev = 0m;
+        foreach (var pt in grid)
+        {
+            var pnl = VerticalPnLAtExpiry(pt.SpotAtExpiry, shortParsed.Strike, longParsed.Strike, creditPerContract, isCall);
+            ev += pt.Weight * pnl;
+        }
+
+        var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
+        var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
+        var fit = DirectionalFit.SignFor(skel.StructureKind);
+        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+        var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
+
+        return new OpenProposal(
+            Ticker: skel.Ticker,
+            StructureKind: skel.StructureKind,
+            Legs: skel.Legs,
+            Qty: 1,
+            DebitOrCreditPerContract: creditPerContract,   // positive = credit received
+            MaxProfitPerContract: maxProfit,
+            MaxLossPerContract: maxLoss,
+            CapitalAtRiskPerContract: capitalAtRisk,
+            Breakevens: new[] { breakeven },
+            ProbabilityOfProfit: pop,
+            ExpectedValuePerContract: ev,
+            DaysToTarget: daysToTarget,
+            RawScore: rawScore,
+            BiasAdjustedScore: biasAdj,
+            DirectionalFit: fit,
+            Rationale: "",
+            Fingerprint: fp
+        );
+    }
+
+    private static decimal VerticalPnLAtExpiry(decimal sT, decimal shortStrike, decimal longStrike, decimal creditPerContract, bool isCall)
+    {
+        if (isCall)
+        {
+            // Call credit: short above long. Profit = credit when S_T ≤ short. Loss ramps to −(width − credit) at S_T ≥ long.
+            var shortPayoff = Math.Max(0m, sT - shortStrike) * 100m;
+            var longPayoff = Math.Max(0m, sT - longStrike) * 100m;
+            return creditPerContract - shortPayoff + longPayoff;
+        }
+        else
+        {
+            // Put credit: short below spot, long further below. Profit = credit when S_T ≥ short. Loss ramps down.
+            var shortPayoff = Math.Max(0m, shortStrike - sT) * 100m;
+            var longPayoff = Math.Max(0m, longStrike - sT) * 100m;
+            return creditPerContract - shortPayoff + longPayoff;
+        }
+    }
+
     public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg)
     {
         var leg = skel.Legs[0];
