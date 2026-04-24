@@ -78,6 +78,30 @@ internal static class CandidateScorer
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
+    public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg) => skel.StructureKind switch
+    {
+        OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg),
+        OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg),
+        OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg),
+        _ => null
+    };
+
+    public static string BuildRationale(OpenProposal p, decimal bias, OpenerConfig cfg)
+    {
+        var cashSide = p.DebitOrCreditPerContract >= 0m
+            ? $"credit ${p.DebitOrCreditPerContract:F2}"
+            : $"debit ${-p.DebitOrCreditPerContract:F2}";
+
+        var biasEffectPct = cfg.DirectionalFitWeight * bias * p.DirectionalFit * 100m;
+        var biasTag = p.DirectionalFit == 0
+            ? $"[tech {bias:+0.00;-0.00}, fit 0 → no adjustment]"
+            : $"[tech {bias:+0.00;-0.00}, fit {p.DirectionalFit:+0;-0} → {biasEffectPct:+0;-0}% {(biasEffectPct >= 0 ? "boost" : "cut")}]";
+
+        var beStr = p.Breakevens.Count > 0 ? $"BE ${string.Join("/", p.Breakevens.Select(b => b.ToString("F2")))}, " : "";
+
+        return $"{p.StructureKind} — {cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, {beStr}POP {p.ProbabilityOfProfit * 100m:F0}%, EV ${p.ExpectedValuePerContract:F2}, score {p.BiasAdjustedScore:F4} {biasTag}";
+    }
+
     internal enum Direction { Above, Below }
 
     /// <summary>
