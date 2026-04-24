@@ -1,7 +1,7 @@
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Analyze;
 
 /// <summary>
 /// Builds 2D grids of option values across dates and underlying prices for time-decay visualization.

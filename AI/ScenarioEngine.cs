@@ -1,4 +1,5 @@
 using System.Globalization;
+using WebullAnalytics.Analyze;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI;

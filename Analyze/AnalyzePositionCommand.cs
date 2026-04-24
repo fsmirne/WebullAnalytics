@@ -10,7 +10,7 @@ using WebullAnalytics.Report;
 using WebullAnalytics.Trading;
 using WebullAnalytics.Utils;
 
-namespace WebullAnalytics;
+namespace WebullAnalytics.Analyze;
 
 // ─── `analyze position` ───────────────────────────────────────────────────────
 
