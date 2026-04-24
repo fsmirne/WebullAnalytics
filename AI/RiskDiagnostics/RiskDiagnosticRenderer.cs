@@ -41,6 +41,7 @@ internal static class RiskDiagnosticRenderer
 
 		var panel = new Panel(string.Join("\n", lines))
 			.Header("[white]Risk diagnostic[/]")
+			.Expand()
 			.BorderColor(Color.Grey);
 		console.Write(panel);
 	}
