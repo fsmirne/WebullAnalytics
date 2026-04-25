@@ -90,9 +90,25 @@ internal sealed class OpenProposalSink : IDisposable
         AnsiConsole.MarkupLine($"  [italic]{Markup.Escape(p.Rationale)}[/]");
         if (p.CashReserveBlocked && p.CashReserveDetail != null)
             AnsiConsole.MarkupLine($"  [yellow]{Markup.Escape(p.CashReserveDetail)}[/]");
+        if (!p.CashReserveBlocked && p.Qty > 0)
+            EmitReproductionCommands(p);
         if (p.Diagnostic is not null)
             WebullAnalytics.AI.RiskDiagnostics.RiskDiagnosticRenderer.WriteConsole(AnsiConsole.Console, p.Diagnostic);
         AnsiConsole.WriteLine();
+    }
+
+    /// <summary>Emits copy-pasteable `wa trade place` and `wa analyze trade` lines for the proposal.
+    /// trade place uses the absolute per-share net from DebitOrCreditPerContract (already computed at
+    /// conservative execution prices: buys at ask, sells at bid). analyze trade uses @MID placeholders
+    /// so the user can re-run against live quotes.</summary>
+    private static void EmitReproductionCommands(OpenProposal p)
+    {
+        var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+        var limit = Math.Abs(p.DebitOrCreditPerContract / 100m).ToString("F2", CultureInfo.InvariantCulture);
+        AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]");
+
+        var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@MID"));
+        AnsiConsole.MarkupLine($"  [dim]wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]");
     }
 
     public void Dispose() => _file.Dispose();
