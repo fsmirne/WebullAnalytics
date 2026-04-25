@@ -23,7 +23,7 @@ public class GeometryBullishCoveredDiagonalRuleTests
     [Fact]
     public void IncludesTrendAlignedWhenTrendProvided()
     {
-        var trend = new TrendSnapshot(ChangePctIntraday: -1.4m, ChangePct5Day: -3.2m, ChangePct20Day: -1.8m, Spot20DayAtrPct: 3.6m, AsOf: DateTime.Today);
+        var trend = new TrendSnapshot(ChangePctIntraday: -1.4m, ChangePct5Day: -3.2m, ChangePct20Day: -1.8m, Atr14Pct: 3.6m, AsOf: DateTime.Today);
         var hit = new GeometryBullishCoveredDiagonalRule().TryEvaluate(RuleTestFacts.Default(
             structureLabel: "covered_diagonal", directionalBias: "bullish", trend: trend));
         Assert.NotNull(hit);

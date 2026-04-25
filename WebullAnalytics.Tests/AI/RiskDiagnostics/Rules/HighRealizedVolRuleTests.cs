@@ -7,7 +7,7 @@ namespace WebullAnalytics.Tests.AI.RiskDiagnostics.Rules;
 public class HighRealizedVolRuleTests
 {
     private static TrendSnapshot Trend(decimal atrPct) =>
-        new(ChangePctIntraday: null, ChangePct5Day: 0m, ChangePct20Day: 0m, Spot20DayAtrPct: atrPct, AsOf: DateTime.Today);
+        new(ChangePctIntraday: null, ChangePct5Day: 0m, ChangePct20Day: 0m, Atr14Pct: atrPct, AsOf: DateTime.Today);
 
     [Fact]
     public void FiresWhenAtrAboveThreshold()

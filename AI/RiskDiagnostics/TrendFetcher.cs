@@ -58,15 +58,23 @@ internal static class TrendFetcher
 			var change5 = closes[idx5] == 0m ? 0m : 100m * (spot - closes[idx5]) / closes[idx5];
 			var change20 = closes[idx20] == 0m ? 0m : 100m * (spot - closes[idx20]) / closes[idx20];
 
-			decimal atrSum = 0m;
-			int atrCount = 0;
-			for (int i = Math.Max(1, closes.Count - 20); i < closes.Count; i++)
+			// 14-period Wilder ATR to match broker displays (Webull, TradingView, most terminals).
+			// Seed with SMA of the first 14 TR values, then apply Wilder smoothing:
+			//   ATR[i] = ((N−1) × ATR[i−1] + TR[i]) / N    // equivalent to EMA with alpha = 1/N.
+			const int atrPeriod = 14;
+			decimal atr = 0m;
+			if (closes.Count > atrPeriod)
 			{
-				var tr = Math.Max(highs[i] - lows[i], Math.Max(Math.Abs(highs[i] - closes[i - 1]), Math.Abs(lows[i] - closes[i - 1])));
-				atrSum += tr;
-				atrCount++;
+				decimal seed = 0m;
+				for (int i = 1; i <= atrPeriod; i++)
+					seed += Math.Max(highs[i] - lows[i], Math.Max(Math.Abs(highs[i] - closes[i - 1]), Math.Abs(lows[i] - closes[i - 1])));
+				atr = seed / atrPeriod;
+				for (int i = atrPeriod + 1; i < closes.Count; i++)
+				{
+					var tr = Math.Max(highs[i] - lows[i], Math.Max(Math.Abs(highs[i] - closes[i - 1]), Math.Abs(lows[i] - closes[i - 1])));
+					atr = ((atrPeriod - 1) * atr + tr) / atrPeriod;
+				}
 			}
-			var atr = atrCount > 0 ? atrSum / atrCount : 0m;
 			var atrPct = spot > 0m ? 100m * atr / spot : 0m;
 
 			decimal? intraday = null;
@@ -77,7 +85,7 @@ internal static class TrendFetcher
 				ChangePctIntraday: intraday,
 				ChangePct5Day: change5,
 				ChangePct20Day: change20,
-				Spot20DayAtrPct: atrPct,
+				Atr14Pct: atrPct,
 				AsOf: asOf);
 		}
 		catch

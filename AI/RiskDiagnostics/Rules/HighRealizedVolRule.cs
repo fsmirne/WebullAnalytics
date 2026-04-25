@@ -12,14 +12,14 @@ internal sealed class HighRealizedVolRule : IRiskRule
 	public RiskRuleHit? TryEvaluate(RiskDiagnosticFacts f)
 	{
 		if (f.Trend is not TrendSnapshot t) return null;
-		if (t.Spot20DayAtrPct <= Threshold) return null;
+		if (t.Atr14Pct <= Threshold) return null;
 
 		var inputs = new Dictionary<string, decimal>(StringComparer.Ordinal)
 		{
-			["atr_pct"] = t.Spot20DayAtrPct,
+			["atr_pct"] = t.Atr14Pct,
 			["threshold"] = Threshold,
 		};
-		var message = $"Underlying has realized {t.Spot20DayAtrPct.ToString("F1", CultureInfo.InvariantCulture)}% ATR over 20 days; position is exposed to larger-than-usual moves.";
+		var message = $"Underlying has realized {t.Atr14Pct.ToString("F1", CultureInfo.InvariantCulture)}% ATR(14); position is exposed to larger-than-usual moves.";
 		return new RiskRuleHit(Id, message, inputs);
 	}
 }

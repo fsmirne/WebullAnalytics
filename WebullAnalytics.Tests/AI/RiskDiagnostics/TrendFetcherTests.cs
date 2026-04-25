@@ -43,7 +43,7 @@ public class TrendFetcherTests
         // 20-day return: spot 24.72 vs closes[4] = 25.20 → ≈ −1.9%
         Assert.InRange(snap.ChangePct20Day, -2.0m, -1.8m);
 
-        Assert.True(snap.Spot20DayAtrPct > 0m);
+        Assert.True(snap.Atr14Pct > 0m);
     }
 
     [Fact]

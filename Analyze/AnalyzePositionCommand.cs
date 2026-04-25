@@ -1146,7 +1146,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			changePctIntraday = d.Trend.ChangePctIntraday,
 			changePct5Day = d.Trend.ChangePct5Day,
 			changePct20Day = d.Trend.ChangePct20Day,
-			spot20DayAtrPct = d.Trend.Spot20DayAtrPct,
+			atr14Pct = d.Trend.Atr14Pct,
 			asOf = d.Trend.AsOf,
 		},
 		costBasisPerShare = d.CostBasisPerShare,

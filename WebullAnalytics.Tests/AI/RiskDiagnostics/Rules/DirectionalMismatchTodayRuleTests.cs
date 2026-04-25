@@ -7,7 +7,7 @@ namespace WebullAnalytics.Tests.AI.RiskDiagnostics.Rules;
 public class DirectionalMismatchTodayRuleTests
 {
     private static TrendSnapshot Trend(decimal? intraday) =>
-        new(ChangePctIntraday: intraday, ChangePct5Day: 0m, ChangePct20Day: 0m, Spot20DayAtrPct: 3m, AsOf: DateTime.Today);
+        new(ChangePctIntraday: intraday, ChangePct5Day: 0m, ChangePct20Day: 0m, Atr14Pct: 3m, AsOf: DateTime.Today);
 
     [Fact]
     public void FiresWhenDeltaPositiveAndIntradayNegative()

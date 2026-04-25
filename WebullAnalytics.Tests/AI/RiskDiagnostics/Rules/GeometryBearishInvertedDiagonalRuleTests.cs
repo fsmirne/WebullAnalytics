@@ -21,7 +21,7 @@ public class GeometryBearishInvertedDiagonalRuleTests
     [Fact]
     public void IncludesTrendAlignedWhenTrendProvided()
     {
-        var trend = new TrendSnapshot(ChangePctIntraday: 1m, ChangePct5Day: -4m, ChangePct20Day: -2m, Spot20DayAtrPct: 3m, AsOf: DateTime.Today);
+        var trend = new TrendSnapshot(ChangePctIntraday: 1m, ChangePct5Day: -4m, ChangePct20Day: -2m, Atr14Pct: 3m, AsOf: DateTime.Today);
         var hit = new GeometryBearishInvertedDiagonalRule().TryEvaluate(RuleTestFacts.Default(
             structureLabel: "inverted_diagonal", directionalBias: "bearish", trend: trend));
         Assert.NotNull(hit);
