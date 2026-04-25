@@ -23,7 +23,7 @@ internal static class RiskDiagnosticRenderer
 			var intraday = t.ChangePctIntraday is decimal i
 				? $"intraday {i.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  "
 				: "";
-			lines.Add($"[bold]Trend:[/]     5d {t.ChangePct5Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  20d {t.ChangePct20Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  {intraday}ATR20 {t.Spot20DayAtrPct.ToString("F1", CultureInfo.InvariantCulture)}%");
+			lines.Add($"[bold]Trend:[/]     5d {t.ChangePct5Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  20d {t.ChangePct20Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  {intraday}ATR14 {t.Atr14Pct.ToString("F1", CultureInfo.InvariantCulture)}%");
 		}
 
 		if (d.UnrealizedPnlPerShare is decimal pnl)

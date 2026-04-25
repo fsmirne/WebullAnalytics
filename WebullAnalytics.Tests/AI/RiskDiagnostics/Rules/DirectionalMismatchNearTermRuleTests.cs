@@ -7,7 +7,7 @@ namespace WebullAnalytics.Tests.AI.RiskDiagnostics.Rules;
 public class DirectionalMismatchNearTermRuleTests
 {
     private static TrendSnapshot Trend(decimal change5Day) =>
-        new(ChangePctIntraday: null, ChangePct5Day: change5Day, ChangePct20Day: 0m, Spot20DayAtrPct: 3m, AsOf: DateTime.Today);
+        new(ChangePctIntraday: null, ChangePct5Day: change5Day, ChangePct20Day: 0m, Atr14Pct: 3m, AsOf: DateTime.Today);
 
     [Fact]
     public void FiresWhenBullishAnd5DayNegative()
