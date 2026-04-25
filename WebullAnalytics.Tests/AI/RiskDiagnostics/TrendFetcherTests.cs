@@ -33,9 +33,9 @@ public class TrendFetcherTests
         var snap = TrendFetcher.ParseSnapshot(CannedJson, new DateTime(2026, 4, 24));
         Assert.NotNull(snap);
 
-        // Intraday: 24.72 vs prev close 25.08
+        // Intraday: spot 24.72 vs yesterday's close (second-to-last bar) = 25.18 → ≈ −1.83%
         Assert.NotNull(snap!.ChangePctIntraday);
-        Assert.InRange(snap.ChangePctIntraday!.Value, -1.45m, -1.41m);
+        Assert.InRange(snap.ChangePctIntraday!.Value, -1.85m, -1.80m);
 
         // 5-day return: spot 24.72 vs closes[19] = 25.26 → ≈ −2.14%
         Assert.InRange(snap.ChangePct5Day, -2.2m, -2.0m);
