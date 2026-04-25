@@ -86,7 +86,7 @@ public class RiskDiagnosticBuilderTests
         var asOf = new DateTime(2026, 4, 24);
         var trend = new TrendSnapshot(
             ChangePctIntraday: -1.4m, ChangePct5Day: -3.2m, ChangePct20Day: -1.8m,
-            Spot20DayAtrPct: 3.6m, AsOf: asOf);
+            Atr14Pct: 3.6m, AsOf: asOf);
 
         var diag = RiskDiagnosticBuilder.Build(
             new[] { LongLeg(), ShortLeg() }, spot: 24.72m, asOf: asOf,

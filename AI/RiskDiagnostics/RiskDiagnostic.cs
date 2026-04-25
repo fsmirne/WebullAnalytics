@@ -32,7 +32,7 @@ internal sealed record TrendSnapshot(
 	decimal? ChangePctIntraday,
 	decimal ChangePct5Day,
 	decimal ChangePct20Day,
-	decimal Spot20DayAtrPct,
+	decimal Atr14Pct,
 	DateTime AsOf);
 
 internal sealed record DiagnosticLeg(
