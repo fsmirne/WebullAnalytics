@@ -37,7 +37,6 @@ internal static class TrendFetcher
 			var root = doc.RootElement.GetProperty("chart").GetProperty("result")[0];
 			var meta = root.GetProperty("meta");
 			var spot = meta.GetProperty("regularMarketPrice").GetDecimal();
-			decimal? prevClose = meta.TryGetProperty("chartPreviousClose", out var pc) && pc.ValueKind == JsonValueKind.Number ? pc.GetDecimal() : null;
 
 			var quotes = root.GetProperty("indicators").GetProperty("quote")[0];
 			var closes = ParseDecimalArray(quotes.GetProperty("close"));
@@ -45,6 +44,13 @@ internal static class TrendFetcher
 			var lows = ParseDecimalArray(quotes.GetProperty("low"));
 
 			if (closes.Count < 21) return null;
+
+			// Yesterday's close = second-to-last bar. Do NOT use meta.chartPreviousClose — that's the
+			// close BEFORE the first bar in the requested range, which for a 50-day window is ~51
+			// trading days ago, not yesterday. Verified against real Yahoo responses.
+			decimal? prevClose = closes.Count >= 2 && closes[closes.Count - 2] > 0m
+				? closes[closes.Count - 2]
+				: (decimal?)null;
 
 			var idx5 = closes.Count - 1 - 5;
 			var idx20 = closes.Count - 1 - 20;
