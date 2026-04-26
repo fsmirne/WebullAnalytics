@@ -2,12 +2,21 @@ namespace WebullAnalytics.AI;
 
 internal static class OpenerExpiryHelpers
 {
+   private static DateTime AdjustToPreviousOpen(DateTime date)
+    {
+        var d = date.Date;
+        while (!MarketCalendar.IsOpen(d))
+            d = d.AddDays(-1);
+        return d;
+    }
+
     /// <summary>Returns the 3rd-Friday date in the given month. No holiday adjustment — standard monthly expiries.</summary>
     public static DateTime ThirdFridayInMonth(int year, int month)
     {
         var first = new DateTime(year, month, 1);
         var firstFridayOffset = ((int)DayOfWeek.Friday - (int)first.DayOfWeek + 7) % 7;
-        return first.AddDays(firstFridayOffset + 14);
+       var thirdFriday = first.AddDays(firstFridayOffset + 14);
+        return AdjustToPreviousOpen(thirdFriday);
     }
 
     /// <summary>Enumerates all Fridays strictly after <paramref name="asOf"/> whose DTE lands in [minDte, maxDte].</summary>
@@ -17,8 +26,12 @@ internal static class OpenerExpiryHelpers
         var end = asOf.Date.AddDays(maxDte);
         // Find the first Friday on or after `start`.
         var firstFridayOffset = ((int)DayOfWeek.Friday - (int)start.DayOfWeek + 7) % 7;
-        for (var d = start.AddDays(firstFridayOffset); d <= end; d = d.AddDays(7))
-            yield return d;
+      for (var d = start.AddDays(firstFridayOffset); d <= end; d = d.AddDays(7))
+        {
+            var adjusted = AdjustToPreviousOpen(d);
+            if (adjusted >= start && adjusted <= end)
+                yield return adjusted;
+        }
     }
 
     /// <summary>Enumerates 3rd-Friday monthlies whose DTE falls in [minDte, maxDte], ordered by date.</summary>

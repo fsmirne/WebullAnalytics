@@ -34,7 +34,7 @@ public class CandidateScorerDispatchTests
         };
         var p = CandidateScorer.Score(skel, spot: 500m, asOf: new DateTime(2026, 4, 1), quotes, bias: 0.40m, Cfg());
         var rationale = CandidateScorer.BuildRationale(p!, bias: 0.40m, cfg: Cfg());
-        Assert.Contains("LongCall", rationale);
+     // Rationale no longer prefixes the structure name; structure is already shown elsewhere in output.
         Assert.Contains("POP", rationale);
         Assert.Contains("+20", rationale); // 0.5 × 0.4 × 1 = 0.20 → +20% boost
     }

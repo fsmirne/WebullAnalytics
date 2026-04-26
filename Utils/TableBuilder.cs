@@ -478,7 +478,7 @@ public static class TableBuilder
 	}
 
 	/// <summary>
-	/// Renders the summary footer (total fees, final P&amp;L, final amount) to the given console.
+	/// Renders the summary footer (total fees, final P&L, final amount) to the given console.
 	/// </summary>
 	public static void RenderSummary(IAnsiConsole console, List<ReportRow> rows, decimal running, decimal initialAmount, decimal? unrealizedPnL = null)
 	{
