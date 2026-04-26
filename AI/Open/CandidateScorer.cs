@@ -103,7 +103,12 @@ internal static class CandidateScorer
 
         var beStr = p.Breakevens.Count > 0 ? $"BE ${string.Join("/", p.Breakevens.Select(b => b.ToString("F2")))}, " : "";
 
-        return $"{p.StructureKind} — {cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, {beStr}POP {p.ProbabilityOfProfit * 100m:F0}%, EV ${p.ExpectedValuePerContract:F2}, score {p.BiasAdjustedScore:F4} {biasTag}";
+        // R/R and premium_ratio surface the asymmetry/cushion factors that BalanceFactor folds into the
+        // score. Showing them inline lets the reader compare two similarly-scored trades by their shape.
+        var rr = Math.Abs(p.MaxLossPerContract) > 0m ? Math.Max(0m, p.MaxProfitPerContract / Math.Abs(p.MaxLossPerContract)) : 0m;
+        var ratioStr = p.PremiumRatio.HasValue ? $", prem {p.PremiumRatio.Value:F2}x" : "";
+
+        return $"{p.StructureKind} — {cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F0}%, EV ${p.ExpectedValuePerContract:F2}, score {p.BiasAdjustedScore:F4} {biasTag}";
     }
 
     internal enum Direction { Above, Below }
@@ -168,7 +173,9 @@ internal static class CandidateScorer
         var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
         var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
         var fit = DirectionalFit.SignFor(skel.StructureKind);
-        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind);
+        var premiumRatio = ComputePremiumRatio(skel.Legs, quotes);
+        var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
+        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance;
         var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
         return new OpenProposal(
@@ -188,7 +195,8 @@ internal static class CandidateScorer
             BiasAdjustedScore: biasAdj,
             DirectionalFit: fit,
             Rationale: "",
-            Fingerprint: fp
+            Fingerprint: fp,
+            PremiumRatio: premiumRatio
         );
     }
 
@@ -198,6 +206,39 @@ internal static class CandidateScorer
     private static decimal StructureWeight(OpenerConfig cfg, OpenStructureKind kind)
     {
         return cfg.StructureWeight.TryGetValue(kind.ToString(), out var w) ? w : 1.0m;
+    }
+
+    /// <summary>Total long-leg premium paid divided by total short-leg premium received, summed across
+    /// all legs (qty-weighted). Generalizes naturally to any multi-leg structure: 2-leg debits
+    /// (calendar/diagonal) get long_ask/short_bid; 2-leg credits (vertical) get the same expression
+    /// which lands &lt;1 because short_bid &gt; long_ask; 4-leg double diagonals / iron butterflies /
+    /// broken-wing butterflies sum across both call- and put-side legs. Single-leg structures (long
+    /// call/put) have no shorts so we return 1 — premium_ratio adjustment is a no-op for them.</summary>
+    private static decimal ComputePremiumRatio(IReadOnlyList<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+    {
+        decimal totalLongPaid = 0m;
+        decimal totalShortReceived = 0m;
+        foreach (var leg in legs)
+        {
+            var q = TryLiveBidAsk(leg.Symbol, quotes);
+            if (q == null) return 1m;   // missing quote — fall back to neutral so callers don't crash
+            if (leg.Action == "buy") totalLongPaid += q.Value.ask * leg.Qty;
+            else totalShortReceived += q.Value.bid * leg.Qty;
+        }
+        if (totalShortReceived <= 0m) return 1m;   // no shorts (or all-zero short bids): single-leg fallback
+        return totalLongPaid / totalShortReceived;
+    }
+
+    /// <summary>Multiplicative factor applied to BiasAdjustedScore that captures payoff asymmetry (R/R)
+    /// and premium efficiency (1/premium_ratio) in one continuous expression. Both pieces are
+    /// observable trade properties — no thresholds, no magic numbers. Works uniformly across
+    /// structures: high-R/R high-cushion trades get boosted, low-R/R thin-cushion trades get reduced.</summary>
+    private static decimal BalanceFactor(decimal maxProfit, decimal maxLoss, decimal premiumRatio)
+    {
+        var lossAbs = Math.Abs(maxLoss);
+        var rr = lossAbs > 0m ? Math.Max(0m, maxProfit / lossAbs) : 0m;
+        var ratio = Math.Max(0.01m, premiumRatio);   // guard against div-by-zero on degenerate quotes
+        return rr / ratio;
     }
 
     /// <summary>Returns a copy of <paramref name="legs"/> with PricePerShare set to the execution
@@ -213,6 +254,90 @@ internal static class CandidateScorer
             priced.Add(leg with { PricePerShare = price });
         }
         return priced;
+    }
+
+    /// <summary>Position P&amp;L per contract at the short leg's expiry as a function of S_T, used for
+    /// numerical breakeven root-finding on calendars/diagonals. Long leg is BS-priced with its
+    /// remaining time; short leg is intrinsic (already at expiry). The whole expression in dollars per
+    /// contract minus the entry debit gives signed P&amp;L.</summary>
+    private static decimal CalendarOrDiagonalPnLAtShortExpiry(decimal sT, OptionParsed shortLeg, OptionParsed longLeg, double longAtShortYears, decimal ivLong, decimal debitPerContract)
+    {
+        var longBS = OptionMath.BlackScholes(sT, longLeg.Strike, longAtShortYears, OptionMath.RiskFreeRate, ivLong, longLeg.CallPut);
+        var shortIntrinsic = longLeg.CallPut == "C"
+            ? Math.Max(0m, sT - shortLeg.Strike)
+            : Math.Max(0m, shortLeg.Strike - sT);
+        return (longBS - shortIntrinsic) * 100m - debitPerContract;
+    }
+
+    /// <summary>Locates the lower and upper breakeven of a calendar/diagonal at the short leg's expiry
+    /// via bisection. Scans a wide grid (±60% from spot in 121 steps) to find an interval that brackets
+    /// each sign change, then bisects to ~$0.01 precision. Returns (null, null) if the payoff is never
+    /// positive (no breakevens exist) or if bisection can't bracket two roots.</summary>
+    private static (decimal? lower, decimal? upper) ComputeCalendarOrDiagonalBreakevens(decimal spot, OptionParsed shortLeg, OptionParsed longLeg, double longAtShortYears, decimal ivLong, decimal debitPerContract)
+    {
+        decimal Pnl(decimal s) => CalendarOrDiagonalPnLAtShortExpiry(s, shortLeg, longLeg, longAtShortYears, ivLong, debitPerContract);
+
+        const int steps = 120;
+        var sMin = spot * 0.4m;
+        var sMax = spot * 1.6m;
+        var stepSize = (sMax - sMin) / steps;
+
+        var sPrev = sMin;
+        var pnlPrev = Pnl(sPrev);
+        decimal? lower = null, upper = null;
+        for (var i = 1; i <= steps; i++)
+        {
+            var sNext = sMin + stepSize * i;
+            var pnlNext = Pnl(sNext);
+            if ((pnlPrev < 0m && pnlNext >= 0m) || (pnlPrev >= 0m && pnlNext < 0m))
+            {
+                var root = BisectBreakeven(Pnl, sPrev, sNext);
+                if (lower == null) lower = root;
+                else upper = root;
+                if (upper != null) break;
+            }
+            sPrev = sNext;
+            pnlPrev = pnlNext;
+        }
+        return (lower, upper);
+    }
+
+    /// <summary>Bisection on a continuous P&amp;L curve known to have a single sign change in [a, b].
+    /// Stops when the interval is ≤ 0.005 (sub-cent on a $25 underlying), capped at 60 iterations.</summary>
+    private static decimal BisectBreakeven(Func<decimal, decimal> pnl, decimal a, decimal b)
+    {
+        var fa = pnl(a);
+        for (var i = 0; i < 60; i++)
+        {
+            var mid = (a + b) / 2m;
+            if (b - a <= 0.005m) return mid;
+            var fm = pnl(mid);
+            if ((fa < 0m && fm < 0m) || (fa >= 0m && fm >= 0m)) { a = mid; fa = fm; }
+            else { b = mid; }
+        }
+        return (a + b) / 2m;
+    }
+
+    /// <summary>Locates the peak P&amp;L of a calendar/diagonal at the short leg's expiry by scanning a
+    /// fine grid (±60% from spot, 240 points) and returning the maximum-PnL value sampled. The 5-point
+    /// scenario grid the EV calculation uses misses the peak — for a $25 ATM diagonal the actual peak
+    /// sits between two grid points, so the scenario-max underestimates max_profit by ~30%. R/R needs
+    /// the true peak to be meaningful.</summary>
+    private static decimal FindCalendarOrDiagonalPeakPnl(decimal spot, OptionParsed shortLeg, OptionParsed longLeg, double longAtShortYears, decimal ivLong, decimal debitPerContract)
+    {
+        const int steps = 240;
+        var sMin = spot * 0.4m;
+        var sMax = spot * 1.6m;
+        var stepSize = (sMax - sMin) / steps;
+
+        var peak = decimal.MinValue;
+        for (var i = 0; i <= steps; i++)
+        {
+            var s = sMin + stepSize * i;
+            var pnl = CalendarOrDiagonalPnLAtShortExpiry(s, shortLeg, longLeg, longAtShortYears, ivLong, debitPerContract);
+            if (pnl > peak) peak = pnl;
+        }
+        return peak;
     }
 
     private static decimal VerticalPnLAtExpiry(decimal sT, decimal shortStrike, decimal longStrike, decimal creditPerContract, bool isCall)
@@ -256,36 +381,52 @@ internal static class CandidateScorer
         var ivShort = ResolveIv(shortLeg.Symbol, quotes, cfg.IvDefaultPct);
         var ivLong = ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct);
 
-        // POP = P(|S_T − K_short| / spot < profitBandPct / 100)
-        var band = spot * cfg.ProfitBandPct / 100m;
-        var popUpper = LogNormalProbability(Direction.Below, spot, shortParsed.Strike + band, shortYears, (double)ivShort);
-        var popLower = LogNormalProbability(Direction.Below, spot, shortParsed.Strike - band, shortYears, (double)ivShort);
-        var pop = popUpper - popLower;
-        if (pop < 0m) pop = 0m;
+        // Breakevens are the roots of the position-value-at-short-expiry curve, found numerically because
+        // the curve mixes Black-Scholes (long leg) with piecewise-linear intrinsic (short leg) and has
+        // no closed form. POP = P(BE_lower < S_T < BE_upper) under the same log-normal used for EV — a
+        // proper breakeven-based probability rather than the fixed 5%-band stand-in we used to ship.
+        var (beLower, beUpper) = ComputeCalendarOrDiagonalBreakevens(spot, shortParsed, longParsed, longAtShortYears, ivLong, debitPerContract);
+        decimal pop;
+        if (beLower.HasValue && beUpper.HasValue)
+        {
+            var pAboveLower = LogNormalProbability(Direction.Above, spot, beLower.Value, shortYears, (double)ivShort);
+            var pAboveUpper = LogNormalProbability(Direction.Above, spot, beUpper.Value, shortYears, (double)ivShort);
+            pop = pAboveLower - pAboveUpper;
+            if (pop < 0m) pop = 0m;
+        }
+        else
+        {
+            // Fallback: payoff-positive nowhere (or bisection couldn't find both roots) — POP = 0.
+            pop = 0m;
+        }
 
+        // EV uses the 5-point grid — a probability-weighted average across realistic outcomes.
+        // max_profit comes from a separate fine-grid scan because the true peak typically falls between
+        // 5-point grid points (e.g. an ATM call diagonal peaks at the short strike, which the ±0.5σ
+        // sampling misses) — using the scenario-grid max would understate R/R by ~30%.
         var grid = BuildScenarioGrid(spot, ivShort, shortYears, cfg.ScenarioGridSigma);
         decimal ev = 0m;
-        decimal maxProfit = decimal.MinValue;
-        decimal maxLossPoint = decimal.MaxValue;
         foreach (var pt in grid)
         {
-            // Long leg valued via BS at short expiry with IV_long; short leg is intrinsic.
             var longBS = OptionMath.BlackScholes(pt.SpotAtExpiry, longParsed.Strike, longAtShortYears, OptionMath.RiskFreeRate, ivLong, longParsed.CallPut);
             var shortIntrinsic = longParsed.CallPut == "C"
                 ? Math.Max(0m, pt.SpotAtExpiry - shortParsed.Strike)
                 : Math.Max(0m, shortParsed.Strike - pt.SpotAtExpiry);
             var positionValue = (longBS - shortIntrinsic) * 100m;
-            var pnl = positionValue - debitPerContract;
-            ev += pt.Weight * pnl;
-            if (pnl > maxProfit) maxProfit = pnl;
-            if (pnl < maxLossPoint) maxLossPoint = pnl;
+            ev += pt.Weight * (positionValue - debitPerContract);
         }
-        if (maxLossPoint > -debitPerContract) maxLossPoint = -debitPerContract;
+        var maxProfit = FindCalendarOrDiagonalPeakPnl(spot, shortParsed, longParsed, longAtShortYears, ivLong, debitPerContract);
+        var maxLossPoint = -debitPerContract;   // long can decay to 0 at extreme moves; short is fully covered
 
         var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
         var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
-        var fit = DirectionalFit.SignFor(skel.StructureKind);
-        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind);
+        // Diagonals get fit=0 like calendars: the user's edge with horizontal spreads is structural
+        // (long-DTE adjustment runway, theta, wide profit zone), not directional bias from strike geometry.
+        // The technical bias signal still flows through verticals/long-call-puts where direction IS the bet.
+        var fit = 0;
+        var premiumRatio = ComputePremiumRatio(skel.Legs, quotes);
+        var balance = BalanceFactor(maxProfit, maxLossPoint, premiumRatio);
+        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance;
         var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
         return new OpenProposal(
@@ -297,7 +438,7 @@ internal static class CandidateScorer
             MaxProfitPerContract: maxProfit,
             MaxLossPerContract: maxLossPoint,
             CapitalAtRiskPerContract: capitalAtRisk,
-            Breakevens: Array.Empty<decimal>(),   // calendar breakevens require numeric root-finding; omitted in phase 1
+            Breakevens: (beLower.HasValue && beUpper.HasValue) ? new[] { beLower.Value, beUpper.Value } : Array.Empty<decimal>(),
             ProbabilityOfProfit: pop,
             ExpectedValuePerContract: ev,
             DaysToTarget: daysToTarget,
@@ -305,7 +446,8 @@ internal static class CandidateScorer
             BiasAdjustedScore: biasAdj,
             DirectionalFit: fit,
             Rationale: "",
-            Fingerprint: fp
+            Fingerprint: fp,
+            PremiumRatio: premiumRatio
         );
     }
 
@@ -344,7 +486,11 @@ internal static class CandidateScorer
         var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
         var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
         var fit = DirectionalFit.SignFor(skel.StructureKind);
-        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind);
+        // Single-leg structures: premium_ratio defaults to 1 (no shorts to receive from). BalanceFactor
+        // collapses to just the R/R term, where R/R = projected_max_profit_at_+2σ / debit.
+        var premiumRatio = ComputePremiumRatio(skel.Legs, quotes);
+        var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
+        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance;
         var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
         return new OpenProposal(
@@ -364,7 +510,8 @@ internal static class CandidateScorer
             BiasAdjustedScore: biasAdj,
             DirectionalFit: fit,
             Rationale: "",
-            Fingerprint: fp
+            Fingerprint: fp,
+            PremiumRatio: null   // single-leg: ratio collapses to 1 (no shorts), don't display "prem 1.00x"
         );
     }
 }

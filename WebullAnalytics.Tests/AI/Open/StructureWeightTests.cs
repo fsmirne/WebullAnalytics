@@ -35,11 +35,12 @@ public class StructureWeightTests
         var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongCall, new[] { new ProposalLeg("buy", sym, 1) }, TargetExpiry: exp);
         var quotes = new Dictionary<string, OptionContractQuote> { [sym] = TestQuote.Q(5m, 5.10m, 0.40m) };
 
-        // Empty StructureWeight dict → LongCall kind not listed → weight defaults to 1.0.
-        var cfg = new OpenerConfig { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m, StructureWeight = new() };
-        var p = CandidateScorer.ScoreLongCallPut(skel, spot: 500m, asOf: new DateTime(2026, 4, 20), quotes, bias: 0m, cfg)!;
-
-        // With bias = 0, BiasAdjust returns raw. With weight = 1.0, final also equals raw.
-        Assert.Equal(p.RawScore, p.BiasAdjustedScore);
+        // Empty StructureWeight dict → LongCall kind not listed → weight defaults to 1.0. Verify by
+        // comparing against an explicit weight=1.0 config: both should produce the same score.
+        var emptyCfg = new OpenerConfig { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m, StructureWeight = new() };
+        var explicitCfg = CfgWithWeight("LongCall", 1.0m);
+        var pEmpty = CandidateScorer.ScoreLongCallPut(skel, spot: 500m, asOf: new DateTime(2026, 4, 20), quotes, bias: 0m, emptyCfg)!;
+        var pExplicit = CandidateScorer.ScoreLongCallPut(skel, spot: 500m, asOf: new DateTime(2026, 4, 20), quotes, bias: 0m, explicitCfg)!;
+        Assert.Equal(pExplicit.BiasAdjustedScore, pEmpty.BiasAdjustedScore);
     }
 }
