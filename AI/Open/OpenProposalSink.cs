@@ -88,7 +88,6 @@ internal sealed class OpenProposalSink : IDisposable
         var rows = new List<IRenderable>();
         var legsText = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
         rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/]"));
-        rows.Add(new Markup($"[italic]{Markup.Escape(p.Rationale)}[/]"));
         if (p.CashReserveBlocked && p.CashReserveDetail != null)
             rows.Add(new Markup($"[yellow]{Markup.Escape(p.CashReserveDetail)}[/]"));
         if (!p.CashReserveBlocked && p.Qty > 0)

@@ -3,7 +3,9 @@ using System.Globalization;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using Spectre.Console.Rendering;
+using WebullAnalytics.AI;
 using WebullAnalytics.AI.RiskDiagnostics;
+using WebullAnalytics.AI.Replay;
 using WebullAnalytics.IO;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
@@ -118,7 +120,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			return 1;
 		}
 
-		var structure = ClassifyStructure(positionLegs);
+        var structure = ClassifyStructure(positionLegs);
 
 		// Phase 2: fetch quotes for the hypothetical-scenario symbols we couldn't enumerate without spot.
 		if (!string.IsNullOrEmpty(settings.Api))
@@ -145,6 +147,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// Risk diagnostic: structured analysis of the current position (greeks, geometry, premium ratio,
 		// trend alignment, rule hits). Logged to data/analyze-position.jsonl for AI consumers.
 		var asOfForDiagnostic = EvaluationDate.Today;
+       var technicalBias = await TryComputeTechnicalBiasAsync(ticker, asOfForDiagnostic, cancellation);
 		var tickerForTrend = positionLegs.Count > 0 ? positionLegs[0].Parsed.Root : null;
 		TrendSnapshot? trendSnap = null;
 		if (!string.IsNullOrEmpty(tickerForTrend))
@@ -167,7 +170,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				return LiveOrBsMid(quotes, sym, spot.Value, leg.Parsed.Strike, dte, iv, leg.Parsed.CallPut);
 			},
 			trend: trendSnap,
-			console: AnsiConsole.Console);
+          console: AnsiConsole.Console,
+            quotesForProbe: quotes,
+			technicalBiasForProbe: technicalBias);
 
 		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes);
 		if (scenarios.Count == 0)
@@ -178,6 +183,34 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		RenderScenarioTable(scenarios, settings);
 		return 0;
+	}
+
+	private static async Task<decimal> TryComputeTechnicalBiasAsync(string ticker, DateTime asOf, CancellationToken cancellation)
+	{
+		try
+		{
+			var path = Program.ResolvePath(AIConfigLoader.ConfigPath);
+			if (!File.Exists(path)) return 0m;
+			var cfg = System.Text.Json.JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(path));
+			if (cfg == null) return 0m;
+			if (AIConfigLoader.Validate(cfg) != null) return 0m;
+
+			var filter = cfg.Rules.OpportunisticRoll.TechnicalFilter;
+			if (!filter.Enabled) return 0m;
+
+			var cache = new HistoricalPriceCache();
+			var res = await WebullAnalytics.AI.AIPipelineHelper.ComputeTechnicalSignalsAsync(
+				tickers: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker },
+				priceCache: cache,
+				filter: filter,
+				asOf: asOf,
+				cancellation: cancellation);
+			return res.TryGetValue(ticker, out var b) ? b.Score : 0m;
+		}
+		catch
+		{
+			return 0m;
+		}
 	}
 
 	// ─── Input model ──────────────────────────────────────────────────────────
@@ -287,7 +320,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	// ─── Classifier ──────────────────────────────────────────────────────────
 
-	private static StructureKind ClassifyStructure(IReadOnlyList<PositionSnapshot> legs)
+    internal static StructureKind ClassifyStructure(IReadOnlyList<PositionSnapshot> legs)
 	{
 		if (legs.Count == 1)
 			return legs[0].Action == LegAction.Buy ? StructureKind.SingleLong : StructureKind.SingleShort;
@@ -837,7 +870,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		quotes.TryGetValue(symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m;
 
 	/// <summary>Returns live mid from quotes if both bid and ask are populated; otherwise a BS theoretical mid.</summary>
-	private static decimal LiveOrBsMid(IReadOnlyDictionary<string, OptionContractQuote>? quotes, string symbol, decimal spot, decimal strike, int dte, decimal iv, string callPut)
+  internal static decimal LiveOrBsMid(IReadOnlyDictionary<string, OptionContractQuote>? quotes, string symbol, decimal spot, decimal strike, int dte, decimal iv, string callPut)
 	{
 		if (quotes != null && quotes.TryGetValue(symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue && q.Bid.Value >= 0m && q.Ask.Value > 0m)
 			return (q.Bid.Value + q.Ask.Value) / 2m;
@@ -856,7 +889,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	/// <summary>Returns IV as a fraction (0.40 for 40%). Sources in priority order:
 	/// per-symbol --iv override (user-supplied percent, divided by 100), then live quote
 	/// (already a fraction), then --iv-default (percent, divided by 100).</summary>
-	private static decimal ResolveIV(string symbol, AnalyzePositionSettings settings, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+ internal static decimal ResolveIV(string symbol, AnalyzePositionSettings settings, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		if (!string.IsNullOrEmpty(settings.IvOverrides))
 		{
@@ -873,7 +906,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return settings.IvDefault / 100m;
 	}
 
-	private static decimal? ResolveSpot(string ticker, AnalyzePositionSettings settings, IReadOnlyDictionary<string, decimal>? underlyingPrices)
+    internal static decimal? ResolveSpot(string ticker, AnalyzePositionSettings settings, IReadOnlyDictionary<string, decimal>? underlyingPrices)
 	{
 		if (!string.IsNullOrEmpty(settings.TickerPrice))
 		{
@@ -922,7 +955,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	// ─── Rendering ───────────────────────────────────────────────────────────
 
-	private static void RenderHeader(IReadOnlyList<PositionSnapshot> legs, StructureKind kind, decimal spot)
+    internal static void RenderHeader(IReadOnlyList<PositionSnapshot> legs, StructureKind kind, decimal spot)
 	{
 		var ticker = legs[0].Parsed.Root;
 		var initialDebit = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
@@ -1090,7 +1123,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		Func<string, decimal> ivResolver,
 		Func<string, decimal> legPriceResolver,
 		TrendSnapshot? trend,
-		IAnsiConsole console)
+       IAnsiConsole console,
+        IReadOnlyDictionary<string, OptionContractQuote>? quotesForProbe = null,
+		decimal technicalBiasForProbe = 0m)
 	{
 		var diagLegs = legs.Select(l => new DiagnosticLeg(
 			Symbol: l.Symbol,
@@ -1100,7 +1135,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			PricePerShare: legPriceResolver(l.Symbol),
 			CostBasisPerShare: l.CostBasis)).ToList();
 
-		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend);
+        var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend);
+       var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe);
+		diagnostic = diagnostic with { Probe = probe };
 
 		Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
 		using (var writer = new StreamWriter(File.Open(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)))
@@ -1141,6 +1178,37 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		spotAtEvaluation = d.SpotAtEvaluation,
 		shortLegOtm = d.ShortLegOtm,
 		shortLegExtrinsic = d.ShortLegExtrinsic,
+        probe = d.Probe is null ? null : new
+		{
+			enumDelta = d.Probe.EnumDelta,
+			enumDeltaMin = d.Probe.EnumDeltaMin,
+			enumDeltaMax = d.Probe.EnumDeltaMax,
+			enumDeltaPass = d.Probe.EnumDeltaPass,
+			legQuotes = d.Probe.LegQuotes.Select(q => new
+			{
+				label = q.Label,
+				symbol = q.Symbol,
+				bid = q.Bid,
+				ask = q.Ask,
+				impliedVolatility = q.ImpliedVolatility,
+				openInterest = q.OpenInterest,
+				volume = q.Volume,
+			}),
+			openerScore = d.Probe.OpenerScore is null ? null : new
+			{
+				structure = d.Probe.OpenerScore.Structure,
+				debitOrCreditPerContract = d.Probe.OpenerScore.DebitOrCreditPerContract,
+				maxProfitPerContract = d.Probe.OpenerScore.MaxProfitPerContract,
+				maxLossPerContract = d.Probe.OpenerScore.MaxLossPerContract,
+				capitalAtRiskPerContract = d.Probe.OpenerScore.CapitalAtRiskPerContract,
+				probabilityOfProfit = d.Probe.OpenerScore.ProbabilityOfProfit,
+				expectedValuePerContract = d.Probe.OpenerScore.ExpectedValuePerContract,
+				daysToTarget = d.Probe.OpenerScore.DaysToTarget,
+				rawScore = d.Probe.OpenerScore.RawScore,
+				biasAdjustedScore = d.Probe.OpenerScore.BiasAdjustedScore,
+				rationale = d.Probe.OpenerScore.Rationale,
+			}
+		},
 		trend = d.Trend is null ? null : new
 		{
 			changePctIntraday = d.Trend.ChangePctIntraday,

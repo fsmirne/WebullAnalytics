@@ -108,7 +108,7 @@ internal static class CandidateScorer
         var rr = Math.Abs(p.MaxLossPerContract) > 0m ? Math.Max(0m, p.MaxProfitPerContract / Math.Abs(p.MaxLossPerContract)) : 0m;
         var ratioStr = p.PremiumRatio.HasValue ? $", prem {p.PremiumRatio.Value:F2}x" : "";
 
-        return $"{p.StructureKind} — {cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F0}%, EV ${p.ExpectedValuePerContract:F2}, score {p.BiasAdjustedScore:F4} {biasTag}";
+       return $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}, raw {p.RawScore:F6}, score {p.BiasAdjustedScore:F6} {biasTag}";
     }
 
     internal enum Direction { Above, Below }
@@ -200,6 +200,75 @@ internal static class CandidateScorer
         );
     }
 
+    internal enum ShortVerticalRejectReason
+    {
+        Unknown,
+        ParseFailed,
+        MissingShortQuote,
+        MissingLongQuote,
+        NotCreditAtBidAsk,
+        NonPositiveCapitalAtRisk,
+    }
+
+    internal static ShortVerticalRejectReason DiagnoseShortVerticalRejection(
+        CandidateSkeleton skel,
+        IReadOnlyDictionary<string, OptionContractQuote> quotes,
+        out string detail)
+    {
+        var shortLeg = skel.Legs.First(l => l.Action == "sell");
+        var longLeg = skel.Legs.First(l => l.Action == "buy");
+
+        var shortParsed = ParsingHelpers.ParseOptionSymbol(shortLeg.Symbol);
+        var longParsed = ParsingHelpers.ParseOptionSymbol(longLeg.Symbol);
+        if (shortParsed == null || longParsed == null)
+        {
+            detail = $"parse_failed short={shortLeg.Symbol} long={longLeg.Symbol}";
+            return ShortVerticalRejectReason.ParseFailed;
+        }
+
+        var shortQ = TryLiveBidAsk(shortLeg.Symbol, quotes);
+        if (shortQ == null)
+        {
+            detail = $"missing_short_quote {shortLeg.Symbol} ({DescribeQuote(shortLeg.Symbol, quotes)})";
+            return ShortVerticalRejectReason.MissingShortQuote;
+        }
+
+        var longQ = TryLiveBidAsk(longLeg.Symbol, quotes);
+        if (longQ == null)
+        {
+            detail = $"missing_long_quote {longLeg.Symbol} ({DescribeQuote(longLeg.Symbol, quotes)})";
+            return ShortVerticalRejectReason.MissingLongQuote;
+        }
+
+        var creditPerShare = shortQ.Value.bid - longQ.Value.ask;
+        if (creditPerShare <= 0m)
+        {
+            detail = $"not_credit shortBid={shortQ.Value.bid:F2} longAsk={longQ.Value.ask:F2} (credit={creditPerShare:F2})";
+            return ShortVerticalRejectReason.NotCreditAtBidAsk;
+        }
+
+        var creditPerContract = creditPerShare * 100m;
+        var width = Math.Abs(shortParsed.Strike - longParsed.Strike);
+        var capitalAtRisk = width * 100m - creditPerContract;
+        if (capitalAtRisk <= 0m)
+        {
+            detail = $"capital_at_risk<=0 width={width:F2} credit={creditPerContract:F2}";
+            return ShortVerticalRejectReason.NonPositiveCapitalAtRisk;
+        }
+
+        detail = "unknown";
+        return ShortVerticalRejectReason.Unknown;
+    }
+
+    private static string DescribeQuote(string symbol, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+    {
+        if (!quotes.TryGetValue(symbol, out var q)) return "no_symbol";
+        var bid = q.Bid.HasValue ? q.Bid.Value.ToString("F2") : "null";
+        var ask = q.Ask.HasValue ? q.Ask.Value.ToString("F2") : "null";
+        var iv = q.ImpliedVolatility.HasValue ? q.ImpliedVolatility.Value.ToString("F2") : "null";
+        return $"bid={bid} ask={ask} iv={iv}";
+    }
+
     /// <summary>Looks up the structure-specific multiplier from config, defaulting to 1.0 when a
     /// kind isn't listed. Used by every Score* method as the final multiplicative factor on
     /// BiasAdjustedScore so the ranking reflects the user's historical edge per structure.</summary>
@@ -256,10 +325,10 @@ internal static class CandidateScorer
         return priced;
     }
 
-    /// <summary>Position P&amp;L per contract at the short leg's expiry as a function of S_T, used for
+    /// <summary>Position P&L per contract at the short leg's expiry as a function of S_T, used for
     /// numerical breakeven root-finding on calendars/diagonals. Long leg is BS-priced with its
     /// remaining time; short leg is intrinsic (already at expiry). The whole expression in dollars per
-    /// contract minus the entry debit gives signed P&amp;L.</summary>
+    /// contract minus the entry debit gives signed P&L.</summary>
     private static decimal CalendarOrDiagonalPnLAtShortExpiry(decimal sT, OptionParsed shortLeg, OptionParsed longLeg, double longAtShortYears, decimal ivLong, decimal debitPerContract)
     {
         var longBS = OptionMath.BlackScholes(sT, longLeg.Strike, longAtShortYears, OptionMath.RiskFreeRate, ivLong, longLeg.CallPut);
@@ -302,7 +371,7 @@ internal static class CandidateScorer
         return (lower, upper);
     }
 
-    /// <summary>Bisection on a continuous P&amp;L curve known to have a single sign change in [a, b].
+    /// <summary>Bisection on a continuous P&L curve known to have a single sign change in [a, b].
     /// Stops when the interval is ≤ 0.005 (sub-cent on a $25 underlying), capped at 60 iterations.</summary>
     private static decimal BisectBreakeven(Func<decimal, decimal> pnl, decimal a, decimal b)
     {
@@ -318,7 +387,7 @@ internal static class CandidateScorer
         return (a + b) / 2m;
     }
 
-    /// <summary>Locates the peak P&amp;L of a calendar/diagonal at the short leg's expiry by scanning a
+    /// <summary>Locates the peak P&L of a calendar/diagonal at the short leg's expiry by scanning a
     /// fine grid (±60% from spot, 240 points) and returning the maximum-PnL value sampled. The 5-point
     /// scenario grid the EV calculation uses misses the peak — for a $25 ATM diagonal the actual peak
     /// sits between two grid points, so the scenario-max underestimates max_profit by ~30%. R/R needs

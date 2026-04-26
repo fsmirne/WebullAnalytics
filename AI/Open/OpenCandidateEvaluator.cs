@@ -22,6 +22,8 @@ internal sealed class OpenCandidateEvaluator
         var cfg = _config.Opener;
         if (!cfg.Enabled) return Array.Empty<OpenProposal>();
 
+        var debug = string.Equals(_config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase);
+
         var tickerSet = new HashSet<string>(_config.Tickers, StringComparer.OrdinalIgnoreCase);
         var output = new List<OpenProposal>();
 
@@ -104,15 +106,36 @@ internal sealed class OpenCandidateEvaluator
             ctx.TechnicalSignals.TryGetValue(tickerGroup.Key, out var biasSignal);
             var bias = biasSignal?.Score ?? 0m;
 
+            var shortVerticalRejects = debug
+                ? new Dictionary<CandidateScorer.ShortVerticalRejectReason, int>()
+                : null;
+            var debugRejectLinesLeft = 25;
+
             var scoredByStructure = new Dictionary<OpenStructureKind, List<OpenProposal>>();
 
             foreach (var skel in tickerGroup)
             {
                 var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg);
-                if (p == null) continue;
+                if (p == null)
+                {
+                    if (debug && (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical))
+                    {
+                        var reason = CandidateScorer.DiagnoseShortVerticalRejection(skel, mergedQuotes, out var detail);
+                        shortVerticalRejects![reason] = shortVerticalRejects.GetValueOrDefault(reason) + 1;
+                        if (debugRejectLinesLeft-- > 0)
+                            Console.Error.WriteLine($"[debug] {skel.Ticker} {skel.StructureKind} dropped: {reason} ({detail})");
+                    }
+                    continue;
+                }
                 if (!scoredByStructure.TryGetValue(p.StructureKind, out var list))
                     scoredByStructure[p.StructureKind] = list = new List<OpenProposal>();
                 list.Add(p);
+            }
+
+            if (debug && shortVerticalRejects != null && shortVerticalRejects.Count > 0)
+            {
+                var summary = string.Join(", ", shortVerticalRejects.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key}={kv.Value}"));
+                Console.Error.WriteLine($"[debug] {tickerGroup.Key} short-vertical rejections: {summary}");
             }
 
             // Per-structure top-N truncation.
@@ -165,7 +188,32 @@ internal sealed class OpenCandidateEvaluator
                     : 0.40m,
                 trend: trend);
 
-            annotated.Add(p with { Diagnostic = diagnostic });
+            var openerScore = (
+             bias: ctx.TechnicalSignals.TryGetValue(p.Ticker, out var bs) ? (bs?.Score ?? 0m) : 0m,
+                cfg: cfg,
+                structure: p.StructureKind.ToString(),
+                rationale: p.Rationale,
+                creditPerContract: p.DebitOrCreditPerContract,
+                maxProfit: p.MaxProfitPerContract,
+                maxLoss: p.MaxLossPerContract,
+                risk: p.CapitalAtRiskPerContract,
+                pop: p.ProbabilityOfProfit,
+                ev: p.ExpectedValuePerContract,
+                days: p.DaysToTarget,
+                rawScore: p.RawScore,
+                biasScore: p.BiasAdjustedScore);
+
+            var probe = WebullAnalytics.AI.RiskDiagnostics.RiskDiagnosticProbeBuilder.Build(
+                legs: diagLegs,
+                spot: spotForDiag,
+                asOf: ctx.Now,
+                ivResolver: sym => mergedQuotes.TryGetValue(sym, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m
+                    ? q.ImpliedVolatility.Value
+                    : 0.40m,
+                quotes: mergedQuotes,
+                opener: openerScore);
+
+            annotated.Add(p with { Diagnostic = diagnostic with { Probe = probe } });
         }
         return annotated;
     }

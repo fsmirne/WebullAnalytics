@@ -22,7 +22,7 @@ public enum OpenStructureKind
 /// <param name="MaxProfitPerContract">Positive dollars. For unlimited-profit structures (long call/put), taken as projected profit at +2σ grid point.</param>
 /// <param name="MaxLossPerContract">Negative dollars (loss magnitude).</param>
 /// <param name="CapitalAtRiskPerContract">Debit for longs/calendars; (width×100 − credit) for short verticals. Always ≥ 0.</param>
-/// <param name="Breakevens">Underlying price levels where P&amp;L crosses zero at the target date.</param>
+/// <param name="Breakevens">Underlying price levels where P&L crosses zero at the target date.</param>
 /// <param name="ProbabilityOfProfit">[0, 1] from Black-Scholes with neutral drift.</param>
 /// <param name="ExpectedValuePerContract">From the 5-point scenario grid, dollars.</param>
 /// <param name="DaysToTarget">DTE of the leg whose expiry defines the target evaluation date.</param>

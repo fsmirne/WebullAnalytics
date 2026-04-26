@@ -8,7 +8,7 @@ namespace WebullAnalytics.AI.Replay;
 /// <summary>
 /// Disk-cached daily closes from Yahoo. On first read for a ticker the cache fetches
 /// the full historical series via YahooOptionsClient.FetchHistoricalClosesAsync and writes to
-/// data/history/&lt;ticker&gt;.csv. Subsequent reads hit the disk cache.
+/// data/history/<ticker>.csv. Subsequent reads hit the disk cache.
 /// </summary>
 internal sealed class HistoricalPriceCache
 {

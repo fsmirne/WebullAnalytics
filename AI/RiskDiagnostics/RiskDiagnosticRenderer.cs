@@ -12,13 +12,13 @@ internal static class RiskDiagnosticRenderer
 
 	internal static IRenderable Build(RiskDiagnostic d)
 	{
-		var lines = new List<string>
+      var items = new List<(string Label, string Value)>
 		{
-			$"[bold]Structure:[/] {Markup.Escape(d.StructureLabel)} ([italic]{Markup.Escape(d.DirectionalBias)}[/])",
-			$"[bold]Greeks:[/]    Δ {FormatDelta(d.NetDelta)}   θ {FormatDollars(d.NetThetaPerDay)}/day   ν {FormatDollars(d.NetVega)}/IV pt",
-			$"[bold]DTE:[/]       short {d.ShortLegDteMin}d  long {d.LongLegDteMax}d  gap {d.DteGapDays}d",
-			$"[bold]Premium:[/]   long ${d.LongPremiumPaid.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.ShortPremiumReceived.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatio(d.PremiumRatio)}, net {FormatNet(d.NetCashPerShare)}",
-			$"[bold]Spot:[/]      ${d.SpotAtEvaluation.ToString("F2", CultureInfo.InvariantCulture)}  short OTM: {(d.ShortLegOtm ? "yes" : "no")}  short extrinsic ${d.ShortLegExtrinsic.ToString("F2", CultureInfo.InvariantCulture)}",
+			("Structure:", $"{Markup.Escape(d.StructureLabel)} ([italic]{Markup.Escape(d.DirectionalBias)}[/])"),
+			("Greeks:", $"Δ {FormatDelta(d.NetDelta)}   θ {FormatDollars(d.NetThetaPerDay)}/day   ν {FormatDollars(d.NetVega)}/IV pt"),
+			("DTE:", $"short {d.ShortLegDteMin}d  long {d.LongLegDteMax}d  gap {d.DteGapDays}d"),
+			("Premium:", $"long ${d.LongPremiumPaid.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.ShortPremiumReceived.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatio(d.PremiumRatio)}, net {FormatNet(d.NetCashPerShare)}"),
+			("Spot:", $"${d.SpotAtEvaluation.ToString("F2", CultureInfo.InvariantCulture)}  short OTM: {(d.ShortLegOtm ? "yes" : "no")}  short extrinsic ${d.ShortLegExtrinsic.ToString("F2", CultureInfo.InvariantCulture)}"),
 		};
 
 		if (d.Trend is TrendSnapshot t)
@@ -26,14 +26,40 @@ internal static class RiskDiagnosticRenderer
 			var intraday = t.ChangePctIntraday is decimal i
 				? $"intraday {i.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  "
 				: "";
-			lines.Add($"[bold]Trend:[/]     5d {t.ChangePct5Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  20d {t.ChangePct20Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  {intraday}ATR14 {t.Atr14Pct.ToString("F1", CultureInfo.InvariantCulture)}%");
+			items.Add(("Trend:", $"5d {t.ChangePct5Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  20d {t.ChangePct20Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  {intraday}ATR14 {t.Atr14Pct.ToString("F1", CultureInfo.InvariantCulture)}%"));
 		}
 
 		if (d.UnrealizedPnlPerShare is decimal pnl)
 		{
 			var color = pnl >= 0m ? "green" : "red";
-			lines.Add($"[bold]P&L:[/]       cost ${d.CostBasisPerShare!.Value.ToString("F2", CultureInfo.InvariantCulture)}  now ${d.CurrentValuePerShare!.Value.ToString("F2", CultureInfo.InvariantCulture)}  [{color}]{pnl.ToString("+0.00;-0.00", CultureInfo.InvariantCulture)}[/]/share");
+			items.Add(("P&L:", $"cost ${d.CostBasisPerShare!.Value.ToString("F2", CultureInfo.InvariantCulture)}  now ${d.CurrentValuePerShare!.Value.ToString("F2", CultureInfo.InvariantCulture)}  [{color}]{pnl.ToString("+0.00;-0.00", CultureInfo.InvariantCulture)}[/]/share"));
 		}
+
+		if (d.Probe is RiskDiagnosticProbe p)
+		{
+			if (p.EnumDelta.HasValue && p.EnumDeltaMin.HasValue && p.EnumDeltaMax.HasValue && p.EnumDeltaPass.HasValue)
+			{
+				var pass = p.EnumDeltaPass.Value ? "PASS" : "FAIL";
+				items.Add(("Enum delta:", $"≈{p.EnumDelta.Value:F3} (band {p.EnumDeltaMin.Value:F2}-{p.EnumDeltaMax.Value:F2}) ⇒ {pass}"));
+			}
+
+			foreach (var q in p.LegQuotes)
+			{
+				var label = $"{CapProbeLabel(q.Label)} quote:";
+				var bid = q.Bid.HasValue ? q.Bid.Value.ToString("F2", CultureInfo.InvariantCulture) : "null";
+				var ask = q.Ask.HasValue ? q.Ask.Value.ToString("F2", CultureInfo.InvariantCulture) : "null";
+				var iv = q.ImpliedVolatility.HasValue ? q.ImpliedVolatility.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
+				var oi = q.OpenInterest.HasValue ? q.OpenInterest.Value.ToString(CultureInfo.InvariantCulture) : "null";
+				var vol = q.Volume.HasValue ? q.Volume.Value.ToString(CultureInfo.InvariantCulture) : "null";
+				items.Add((label, $"bid={bid} ask={ask} iv={iv} oi={oi} vol={vol} sym={Markup.Escape(q.Symbol)}"));
+			}
+
+			if (p.OpenerScore is RiskDiagnosticOpenerScore s && !string.IsNullOrWhiteSpace(s.Rationale))
+				items.Add(("Rationale:", Markup.Escape(s.Rationale)));
+		}
+
+		var labelWidth = items.Max(i => i.Label.Length);
+		var lines = items.Select(i => $"[bold]{Markup.Escape(i.Label.PadRight(labelWidth))}[/] {i.Value}").ToList();
 
 		if (d.Rules.Count > 0)
 		{
@@ -54,4 +80,14 @@ internal static class RiskDiagnosticRenderer
 	private static string FormatNet(decimal n) => n >= 0m
 		? $"credit ${n.ToString("F2", CultureInfo.InvariantCulture)}"
 		: $"debit ${Math.Abs(n).ToString("F2", CultureInfo.InvariantCulture)}";
+
+	private static string CapProbeLabel(string label)
+	{
+		if (string.IsNullOrWhiteSpace(label)) return label;
+		if (label.StartsWith("short", StringComparison.OrdinalIgnoreCase))
+			return "Short" + label[5..];
+		if (label.StartsWith("long", StringComparison.OrdinalIgnoreCase))
+			return "Long" + label[4..];
+		return char.ToUpperInvariant(label[0]) + label[1..];
+	}
 }
