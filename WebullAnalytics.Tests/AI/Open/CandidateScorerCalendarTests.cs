@@ -59,6 +59,33 @@ public class CandidateScorerCalendarTests
     }
 
     [Fact]
+    public void InvertedDiagonalMaxLossIncludesStrikeGapPlusDebit()
+    {
+        var asOf = new DateTime(2026, 4, 26);
+        var shortExp = new DateTime(2026, 5, 1);
+        var longExp = new DateTime(2026, 5, 22);
+        // Inverted call diagonal: long strike > short strike.
+        var shortSym = MatchKeys.OccSymbol("GME", shortExp, 25.5m, "C");
+        var longSym = MatchKeys.OccSymbol("GME", longExp, 26m, "C");
+        var skel = new CandidateSkeleton("GME", OpenStructureKind.LongDiagonal, new[]
+        {
+            new ProposalLeg("sell", shortSym, 1),
+            new ProposalLeg("buy", longSym, 1)
+        }, TargetExpiry: shortExp);
+        var quotes = new Dictionary<string, OptionContractQuote>
+        {
+            // debit = long_ask - short_bid = 0.95 - 0.36 = 0.59/share ($59/contract)
+            [shortSym] = TestQuote.Q(bid: 0.36m, ask: 0.39m, iv: 0.40m),
+            [longSym] = TestQuote.Q(bid: 0.81m, ask: 0.95m, iv: 0.40m)
+        };
+        var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 24.95m, asOf, quotes, bias: 0m, Cfg())!;
+        // Max loss = debit + strike gap = 0.59 + 0.50 = 1.09/share ($109/contract)
+        Assert.Equal(-59m, p.DebitOrCreditPerContract);
+        Assert.Equal(-109m, p.MaxLossPerContract);
+        Assert.Equal(109m, p.CapitalAtRiskPerContract);
+    }
+
+    [Fact]
     public void CalendarPopIsProbInProfitBand()
     {
         var asOf = new DateTime(2026, 4, 20);
