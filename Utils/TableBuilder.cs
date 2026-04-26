@@ -583,15 +583,95 @@ public static class TableBuilder
 	/// Layout: panel borders (4) + table outer borders (2) + price column (11) + N × date column (15 for pnl, 10 for value).
 	/// Each Spectre table column = content + 2 padding + 1 separator.
 	/// </summary>
-	public static int ComputeMaxGridColumns(int totalWidth, string displayMode, bool showLegs = false)
+    public static int ComputeMaxGridColumns(int totalWidth, string displayMode, bool showLegs = false, int maxLegCount = 2, int maxLegValueWidth = 6, int gridTableOuterBorders = 0)
 	{
-		// panel left/right border+padding (4) + table outer left+right borders (2) + price column (content 8 + pad 2 + sep 1 = 11)
-		const int fixedOverhead = 4 + 2 + 11;
+     // panel left/right border+padding (4) + table outer left+right borders (usually 0 inside panels) + price column (content 8 + pad 2 + sep 1 = 11)
+		var fixedOverhead = 4 + gridTableOuterBorders + 11;
 		var netWidth = displayMode == "pnl" ? 12 : 7; // pnl: "$+1,520.00" (10) + 2 pad + 1 sep; value: "$25.38" (6) + 2 pad + 1 sep
-		// When showing legs, conservatively budget for two leg cells per column (~6 chars each + slash); larger spreads will simply consume more horizontal space.
-		var colWidth = showLegs ? netWidth + 14 : netWidth + 3;
+     // When showing legs, each date column's cell becomes "leg1|leg2|...|net".
+       // Estimate leg-segment width from a caller-provided max leg value width (in characters).
+		// This is intentionally per-panel so small-premium spreads can fit more date columns without wrapping.
+		var effectiveShowLegs = showLegs && maxLegCount > 1;
+        var perLegSegmentWidth = Math.Max(4, maxLegValueWidth) + 1; // +1 for the internal '|' separator
+		var colWidth = effectiveShowLegs
+         ? netWidth + (Math.Max(2, maxLegCount) * perLegSegmentWidth)
+			: netWidth + 3;
 		var available = totalWidth - fixedOverhead;
 		return Math.Max(3, available / colWidth); // minimum 3: today, expiry open, at exp
+	}
+
+	/// <summary>
+	/// Computes the approximate total terminal width required to render the given time-decay grid
+	/// inside a break-even panel, matching the formatting used by <see cref="BuildTimeDecayGridTable"/>.
+	/// </summary>
+    internal static int ComputeTimeDecayGridRequiredWidth(TimeDecayGrid grid, string displayMode, bool showLegs, int gridTableOuterBorders = 0)
+	{
+		const int panelOverhead = 4; // panel left/right border+padding
+      var tableOuterBorders = gridTableOuterBorders; // table outer left+right borders (0 when border is TableBorder.None)
+
+		var effectiveShowLegs = showLegs && grid.LegValues != null;
+		var legCount = effectiveShowLegs ? grid.LegValues!.GetLength(0) : 0;
+
+		static string FormatNetPnL(decimal value)
+		{
+			if (value == 0) return "$0.00";
+			return value > 0
+               ? $"+${value.ToString("N2", CultureInfo.InvariantCulture)}"
+				: $"-${Math.Abs(value).ToString("N2", CultureInfo.InvariantCulture)}";
+		}
+
+		int priceContentWidth = "Price".Length;
+		foreach (var price in grid.PriceRows)
+		{
+			var n = price.ToString("N2", CultureInfo.InvariantCulture);
+			// Prefix (' ', '*', '>') + '$' + number
+			priceContentWidth = Math.Max(priceContentWidth, 2 + n.Length);
+		}
+
+		var dateColContentWidths = new int[grid.DateColumns.Count];
+		for (int di = 0; di < grid.DateColumns.Count; di++)
+		{
+			var date = grid.DateColumns[di];
+			var header = date == grid.DateColumns[^1]
+				? "At Exp"
+				: date.ToString("dd MMM", CultureInfo.InvariantCulture);
+
+			var maxNetWidth = header.Length;
+			for (int pi = 0; pi < grid.PriceRows.Count; pi++)
+			{
+				var netText = displayMode == "pnl"
+					? FormatNetPnL(grid.PnLs[pi, di])
+                 : $"${grid.Values[pi, di].ToString("N2", CultureInfo.InvariantCulture)}";
+				maxNetWidth = Math.Max(maxNetWidth, netText.Length);
+			}
+
+			if (legCount > 0)
+			{
+				var legSegWidths = new int[legCount];
+				for (int pi = 0; pi < grid.PriceRows.Count; pi++)
+					for (int li = 0; li < legCount; li++)
+					{
+						var legText = grid.LegValues![li, pi, di].ToString("N2", CultureInfo.InvariantCulture);
+						legSegWidths[li] = Math.Max(legSegWidths[li], legText.Length);
+					}
+
+				// Cell content is "leg1|leg2|...|net" (separators = legCount)
+				dateColContentWidths[di] = legSegWidths.Sum() + maxNetWidth + legCount;
+			}
+			else
+			{
+				dateColContentWidths[di] = maxNetWidth;
+			}
+		}
+
+		// Spectre column layout: each column gets 2 chars padding (1 left + 1 right).
+		// Separators are between columns only (colCount-1), not after the last column.
+		var colCount = 1 + grid.DateColumns.Count;
+		var sumContent = priceContentWidth + dateColContentWidths.Sum();
+		var sumPadding = colCount * 2;
+		var separators = colCount - 1;
+
+		return panelOverhead + tableOuterBorders + sumContent + sumPadding + separators;
 	}
 }
 
