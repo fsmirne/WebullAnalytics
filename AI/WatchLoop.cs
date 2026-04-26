@@ -4,6 +4,7 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
 
@@ -58,6 +59,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
+
+		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var tickSeconds = settings.Tick ?? config.TickIntervalSeconds;
 		var stopAt = ComputeStopTime(settings, config);

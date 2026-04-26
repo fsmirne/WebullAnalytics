@@ -6,6 +6,7 @@ using WebullAnalytics.AI.Rules;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Report;
 using WebullAnalytics.Trading;
+using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
 
@@ -102,6 +103,8 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
 
+		TerminalHelper.EnsureTerminalWidthFromConfig();
+
 		var positions = AIContext.BuildLivePositionSource(config);
 		var quotes = AIContext.BuildLiveQuoteSource(config);
 
@@ -176,6 +179,8 @@ internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
+
+		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		// Load all historical trades using the existing pipeline.
 		var reportSettings = new ReportSettings();
