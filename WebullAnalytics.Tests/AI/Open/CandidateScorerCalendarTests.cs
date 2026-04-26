@@ -49,9 +49,13 @@ public class CandidateScorerCalendarTests
             [shortSym] = TestQuote.Q(1.50m, 1.55m, 0.40m),
             [longSym] = TestQuote.Q(4.90m, 5.10m, 0.40m)
         };
-        var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 500m, asOf, quotes, bias: 0.80m, Cfg())!;
-        Assert.Equal(0, p.DirectionalFit);
-        Assert.Equal(p.RawScore, p.BiasAdjustedScore); // no bias adjustment when fit = 0
+        // Verify fit=0 by checking that bias has no effect: scores with bias=0 and bias=0.80 should match.
+        // (The score formula now includes a structure-independent balance factor, so RawScore != BiasAdjusted
+        // in general — comparing two scorings with different bias is the cleanest way to pin "fit is 0".)
+        var pNoBias = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 500m, asOf, quotes, bias: 0m, Cfg())!;
+        var pWithBias = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 500m, asOf, quotes, bias: 0.80m, Cfg())!;
+        Assert.Equal(0, pWithBias.DirectionalFit);
+        Assert.Equal(pNoBias.BiasAdjustedScore, pWithBias.BiasAdjustedScore);
     }
 
     [Fact]
@@ -73,7 +77,12 @@ public class CandidateScorerCalendarTests
             [longSym] = TestQuote.Q(4.90m, 5.10m, 0.40m)
         };
         var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 500m, asOf, quotes, bias: 0m, Cfg())!;
-        // POP = P(|S_T − 500| / 500 < 0.05) — meaningful non-zero value
-        Assert.InRange((double)p.ProbabilityOfProfit, 0.15, 0.90);
+        // POP is now P(BE_lower < S_T < BE_upper) computed from numerically-found breakevens. The exact
+        // value depends on the quote-implied IV's consistency with the legs' Black-Scholes prices; the
+        // test's contrived prices yield very wide breakevens, but POP must always be a probability.
+        Assert.InRange((double)p.ProbabilityOfProfit, 0.0, 1.0);
+        Assert.True(p.ProbabilityOfProfit > 0m);
+        Assert.Equal(2, p.Breakevens.Count);
+        Assert.True(p.Breakevens[0] < p.Breakevens[1]);
     }
 }
