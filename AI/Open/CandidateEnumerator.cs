@@ -4,29 +4,55 @@ namespace WebullAnalytics.AI;
 
 internal static class CandidateEnumerator
 {
-    public static IEnumerable<CandidateSkeleton> Enumerate(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg)
+    /// <summary>Enumerates candidate skeletons for a ticker. <paramref name="availableExpirations"/>, when
+    /// non-null, is the set of real expirations from the chain — using these (rather than computed
+    /// 3rd-Friday/Friday helpers) is what makes holiday-shifted monthlies (e.g. Juneteenth pushes June
+    /// monthly to Thursday) match the OCC symbols Webull actually returns. Pass null to fall back to the
+    /// computed Friday helpers, used by tests that don't model a chain.</summary>
+    public static IEnumerable<CandidateSkeleton> Enumerate(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations = null)
     {
         if (cfg.Structures.LongCalendar.Enabled)
-            foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongCalendar, OpenStructureKind.LongCalendar))
+            foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongCalendar, OpenStructureKind.LongCalendar, availableExpirations))
                 yield return sk;
 
         if (cfg.Structures.LongDiagonal.Enabled)
-            foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongDiagonal, OpenStructureKind.LongDiagonal))
+            foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongDiagonal, OpenStructureKind.LongDiagonal, availableExpirations))
                 yield return sk;
 
         if (cfg.Structures.ShortVertical.Enabled)
-            foreach (var sk in EnumerateShortVerticals(ticker, spot, asOf, cfg))
+            foreach (var sk in EnumerateShortVerticals(ticker, spot, asOf, cfg, availableExpirations))
                 yield return sk;
 
         if (cfg.Structures.LongCallPut.Enabled)
-            foreach (var sk in EnumerateLongCallPut(ticker, spot, asOf, cfg))
+            foreach (var sk in EnumerateLongCallPut(ticker, spot, asOf, cfg, availableExpirations))
                 yield return sk;
     }
 
-    private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind)
+    /// <summary>When the chain is known, take its real expirations within the DTE window; otherwise fall
+    /// back to the computed weekly Fridays in the same window.</summary>
+    private static IEnumerable<DateTime> WeeklyExpiriesInRange(IReadOnlySet<DateTime>? available, DateTime asOf, int minDte, int maxDte)
     {
-        var shortExps = OpenerExpiryHelpers.NextWeeklyExpiriesInRange(asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
-        var longExps = OpenerExpiryHelpers.MonthlyExpiriesInRange(asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
+        if (available == null) return OpenerExpiryHelpers.NextWeeklyExpiriesInRange(asOf, minDte, maxDte);
+        var start = asOf.Date.AddDays(minDte);
+        var end = asOf.Date.AddDays(maxDte);
+        return available.Where(d => d >= start && d <= end).OrderBy(d => d);
+    }
+
+    /// <summary>Same as <see cref="WeeklyExpiriesInRange"/> for chain-known expirations — the chain's real
+    /// dates are intrinsically holiday-adjusted, so there's no separate "monthly" carve-out to make. The
+    /// fallback path still uses the computed 3rd-Friday helper for tests that don't supply a chain.</summary>
+    private static IEnumerable<DateTime> MonthlyExpiriesInRange(IReadOnlySet<DateTime>? available, DateTime asOf, int minDte, int maxDte)
+    {
+        if (available == null) return OpenerExpiryHelpers.MonthlyExpiriesInRange(asOf, minDte, maxDte);
+        var start = asOf.Date.AddDays(minDte);
+        var end = asOf.Date.AddDays(maxDte);
+        return available.Where(d => d >= start && d <= end).OrderBy(d => d);
+    }
+
+    private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind, IReadOnlySet<DateTime>? availableExpirations)
+    {
+        var shortExps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
+        var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
         if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
         var step = cfg.StrikeStep;
@@ -90,10 +116,10 @@ internal static class CandidateEnumerator
         return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: shortExp);
     }
 
-    private static IEnumerable<CandidateSkeleton> EnumerateShortVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg)
+    private static IEnumerable<CandidateSkeleton> EnumerateShortVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
     {
         var sCfg = cfg.Structures.ShortVertical;
-        var exps = OpenerExpiryHelpers.NextWeeklyExpiriesInRange(asOf, sCfg.DteMin, sCfg.DteMax).ToList();
+        var exps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
         if (exps.Count == 0) yield break;
 
         var iv = cfg.IvDefaultPct / 100m;
@@ -165,10 +191,10 @@ internal static class CandidateEnumerator
         return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: exp);
     }
 
-    private static IEnumerable<CandidateSkeleton> EnumerateLongCallPut(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg)
+    private static IEnumerable<CandidateSkeleton> EnumerateLongCallPut(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
     {
         var sCfg = cfg.Structures.LongCallPut;
-        var exps = OpenerExpiryHelpers.MonthlyExpiriesInRange(asOf, sCfg.DteMin, sCfg.DteMax).Take(2).ToList();
+        var exps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).Take(2).ToList();
         if (exps.Count == 0) yield break;
 
         var iv = cfg.IvDefaultPct / 100m;
