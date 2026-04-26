@@ -255,8 +255,15 @@ public static class BreakEvenAnalyzer
 		else if (isTimeSpread)
 		{
 			note = "P&L estimated using Black-Scholes at short leg expiry. Actual results will vary with volatility.";
-			if (parent.Side == Side.Buy)
-				maxLoss = netPremium * qty * 100;
+            if (parent.Side == Side.Buy)
+			{
+				// For debit diagonals/calendars, max loss is often just the debit.
+				// But for inverted-strike diagonals (e.g., long call strike > short call strike),
+				// assignment at the short expiry can force exercising the long leg, realizing the
+				// strike difference in addition to the debit.
+				var assignmentStrikeLoss = EstimateTimeSpreadAssignmentStrikeLossPerShare(parsedLegs, nearestExpiry);
+				maxLoss = (netPremium + assignmentStrikeLoss) * qty * 100m;
+			}
 		}
 
 		// Build price ladder
@@ -341,6 +348,55 @@ public static class BreakEvenAnalyzer
 		}
 
 		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts), Margin: margin);
+	}
+
+	private static decimal EstimateTimeSpreadAssignmentStrikeLossPerShare(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, DateTime nearestExpiry)
+	{
+		// Only shorts at the earliest expiry can be assigned before later-dated longs expire.
+		var nearShorts = legs
+			.Where(l => l.row.Side == Side.Sell && l.parsed.ExpiryDate.Date == nearestExpiry.Date)
+			.ToList();
+		if (nearShorts.Count == 0) return 0m;
+
+		// Only later-expiring longs can be exercised to cover those assignments.
+		var laterLongs = legs
+			.Where(l => l.row.Side == Side.Buy && l.parsed.ExpiryDate.Date > nearestExpiry.Date)
+			.ToList();
+		if (laterLongs.Count == 0) return 0m;
+
+		// Pair each short with a long of the same type (call/put) that minimizes strike loss.
+		// This is a conservative estimate of assignment-driven loss that ignores remaining time value.
+		var availableLongStrikes = laterLongs
+			.GroupBy(l => l.parsed.CallPut)
+			.ToDictionary(g => g.Key, g => g.Select(x => x.parsed.Strike).OrderBy(s => s).ToList());
+
+		decimal totalStrikeLoss = 0m;
+		foreach (var sl in nearShorts)
+		{
+			if (!availableLongStrikes.TryGetValue(sl.parsed.CallPut, out var longStrikes) || longStrikes.Count == 0)
+				continue;
+
+			var shortStrike = sl.parsed.Strike;
+			decimal chosenLongStrike;
+			if (sl.parsed.CallPut == "C")
+			{
+				// Calls: best cover is any long strike <= short strike (0 strike loss), otherwise the lowest long strike.
+				var idx = longStrikes.FindLastIndex(k => k <= shortStrike);
+				if (idx >= 0) { chosenLongStrike = longStrikes[idx]; longStrikes.RemoveAt(idx); }
+				else { chosenLongStrike = longStrikes[0]; longStrikes.RemoveAt(0); }
+				totalStrikeLoss += Math.Max(chosenLongStrike - shortStrike, 0m);
+			}
+			else
+			{
+				// Puts: best cover is any long strike >= short strike (0 strike loss), otherwise the highest long strike.
+				var idx = longStrikes.FindIndex(k => k >= shortStrike);
+				if (idx >= 0) { chosenLongStrike = longStrikes[idx]; longStrikes.RemoveAt(idx); }
+				else { chosenLongStrike = longStrikes[^1]; longStrikes.RemoveAt(longStrikes.Count - 1); }
+				totalStrikeLoss += Math.Max(shortStrike - chosenLongStrike, 0m);
+			}
+		}
+
+		return totalStrikeLoss;
 	}
 
 	// --- Helpers ---

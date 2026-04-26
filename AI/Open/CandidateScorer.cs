@@ -443,7 +443,14 @@ internal static class CandidateScorer
         if (debitPerShare <= 0m) return null;
 
         var debitPerContract = debitPerShare * 100m;
-        var capitalAtRisk = debitPerContract;
+        // For calendars and "covered" diagonals, max loss is typically the debit.
+        // For inverted-strike diagonals, assignment at the short expiry can force exercising the long,
+        // realizing the strike gap in addition to the debit.
+        var strikeLossPerShare = longParsed.CallPut == "C"
+            ? Math.Max(longParsed.Strike - shortParsed.Strike, 0m)
+            : Math.Max(shortParsed.Strike - longParsed.Strike, 0m);
+        var strikeLossPerContract = strikeLossPerShare * 100m;
+        var capitalAtRisk = debitPerContract + strikeLossPerContract;
 
         var shortYears = Math.Max(1, (shortParsed.ExpiryDate.Date - asOf.Date).Days) / 365.0;
         var longAtShortYears = Math.Max(1, (longParsed.ExpiryDate.Date - shortParsed.ExpiryDate.Date).Days) / 365.0;
@@ -485,7 +492,7 @@ internal static class CandidateScorer
             ev += pt.Weight * (positionValue - debitPerContract);
         }
         var maxProfit = FindCalendarOrDiagonalPeakPnl(spot, shortParsed, longParsed, longAtShortYears, ivLong, debitPerContract);
-        var maxLossPoint = -debitPerContract;   // long can decay to 0 at extreme moves; short is fully covered
+        var maxLossPoint = -(debitPerContract + strikeLossPerContract);
 
         var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
         var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
