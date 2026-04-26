@@ -16,7 +16,8 @@ internal static class RiskDiagnosticProbeBuilder
         Func<string, decimal> ivResolver,
         IReadOnlyDictionary<string, OptionContractQuote>? quotes,
        (decimal bias, OpenerConfig cfg, string structure, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore)? opener = null,
-        decimal? technicalBiasOverride = null)
+        decimal? technicalBiasOverride = null,
+        bool useCostBasisForOpenerScore = false)
     {
         var legQuotes = new List<RiskDiagnosticLegQuote>();
         if (quotes != null)
@@ -50,30 +51,38 @@ internal static class RiskDiagnosticProbeBuilder
         decimal? enumMax = null;
         bool? enumPass = null;
 
-        // If this looks like a 2-leg vertical, try to compute the opener delta-gate against ai-config.json's shortVertical band.
+        // If this is a 2-leg short vertical, compute the opener delta-gate against ai-config.json's shortVertical band.
+        // (Calendars/diagonals are also 2 legs but should not be shown here.)
         if (legs.Count == 2)
         {
             var shortLeg = legs.FirstOrDefault(l => !l.IsLong);
             var longLeg = legs.FirstOrDefault(l => l.IsLong);
             if (shortLeg != null && longLeg != null
                 && shortLeg.Parsed.Root.Equals(longLeg.Parsed.Root, StringComparison.OrdinalIgnoreCase)
-                && shortLeg.Parsed.CallPut == longLeg.Parsed.CallPut)
+                && shortLeg.Parsed.CallPut == longLeg.Parsed.CallPut
+                && shortLeg.Parsed.ExpiryDate.Date == longLeg.Parsed.ExpiryDate.Date)
             {
-                var band = opener.HasValue
-                    ? (opener.Value.cfg.Structures.ShortVertical.ShortDeltaMin, opener.Value.cfg.Structures.ShortVertical.ShortDeltaMax)
-                    : TryLoadAiConfigQuiet() is AIConfig ai
-                        ? (ai.Opener.Structures.ShortVertical.ShortDeltaMin, ai.Opener.Structures.ShortVertical.ShortDeltaMax)
-                        : ((decimal?)null, (decimal?)null);
+                var isShortPutVertical = shortLeg.Parsed.CallPut == "P" && shortLeg.Parsed.Strike > longLeg.Parsed.Strike;
+                var isShortCallVertical = shortLeg.Parsed.CallPut == "C" && shortLeg.Parsed.Strike < longLeg.Parsed.Strike;
 
-                if (band.Item1.HasValue && band.Item2.HasValue)
+                if (isShortPutVertical || isShortCallVertical)
                 {
-                    enumMin = band.Item1.Value;
-                    enumMax = band.Item2.Value;
-                    var dte = Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
-                    var t = dte / 365.0;
-                    var iv = ivResolver(shortLeg.Symbol);
-                    enumDelta = Math.Abs(OptionMath.Delta(spot, shortLeg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, shortLeg.Parsed.CallPut));
-                    enumPass = enumDelta >= enumMin && enumDelta <= enumMax;
+                    var band = opener.HasValue
+                        ? (opener.Value.cfg.Structures.ShortVertical.ShortDeltaMin, opener.Value.cfg.Structures.ShortVertical.ShortDeltaMax)
+                        : TryLoadAiConfigQuiet() is AIConfig ai
+                            ? (ai.Opener.Structures.ShortVertical.ShortDeltaMin, ai.Opener.Structures.ShortVertical.ShortDeltaMax)
+                            : ((decimal?)null, (decimal?)null);
+
+                    enumMin = band.Item1;
+                    enumMax = band.Item2;
+                    if (enumMin.HasValue && enumMax.HasValue)
+                    {
+                        var dte = Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
+                        var t = dte / 365.0;
+                        var iv = ivResolver(shortLeg.Symbol);
+                        enumDelta = Math.Abs(OptionMath.Delta(spot, shortLeg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, shortLeg.Parsed.CallPut));
+                        enumPass = enumDelta >= enumMin && enumDelta <= enumMax;
+                    }
                 }
             }
         }
@@ -102,6 +111,10 @@ internal static class RiskDiagnosticProbeBuilder
             var ai = TryLoadAiConfigQuiet();
             if (ai != null && quotes != null)
             {
+                var scoringQuotes = useCostBasisForOpenerScore
+                    ? OverrideBidAskWithCostBasis(quotes, legs)
+                    : quotes;
+
              var bias = technicalBiasOverride ?? 0m;
                 CandidateSkeleton? skel = null;
                 if (legs.Count == 1)
@@ -153,7 +166,7 @@ internal static class RiskDiagnosticProbeBuilder
 
                 if (skel != null)
                 {
-                    var scored = CandidateScorer.Score(skel, spot, asOf, quotes, bias, ai.Opener);
+                    var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener);
                     if (scored != null)
                     {
                         var rationale = CandidateScorer.BuildRationale(scored, bias, ai.Opener);
@@ -212,6 +225,21 @@ internal static class RiskDiagnosticProbeBuilder
             EnumDeltaPass: enumPass,
             LegQuotes: legQuotes,
             OpenerScore: openerScore);
+    }
+
+    private static IReadOnlyDictionary<string, OptionContractQuote> OverrideBidAskWithCostBasis(
+        IReadOnlyDictionary<string, OptionContractQuote> quotes,
+        IReadOnlyList<DiagnosticLeg> legs)
+    {
+        var map = new Dictionary<string, OptionContractQuote>(quotes, StringComparer.OrdinalIgnoreCase);
+        foreach (var leg in legs)
+        {
+            if (!leg.CostBasisPerShare.HasValue) continue;
+            if (!map.TryGetValue(leg.Symbol, out var q)) continue;
+            var px = leg.CostBasisPerShare.Value;
+            map[leg.Symbol] = q with { Bid = px, Ask = px };
+        }
+        return map;
     }
 
     private static AIConfig? TryLoadAiConfigQuiet()
