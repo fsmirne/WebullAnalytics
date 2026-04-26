@@ -33,6 +33,8 @@ public enum OpenStructureKind
 /// <param name="Fingerprint">sha1-hex of (ticker | kind | sorted(legs) | qty) — used for cross-tick dedup.</param>
 /// <param name="CashReserveBlocked">True when sizing fell to 0 contracts due to the cash reserve.</param>
 /// <param name="CashReserveDetail">"free $X, requires $Y per contract" when blocked; null otherwise.</param>
+/// <param name="PremiumRatio">Σ(buy-leg ask × qty) / Σ(sell-leg bid × qty), or null for single-leg structures
+/// where the ratio collapses to 1. Surfaced separately so the rationale can render it without recomputing.</param>
 internal sealed record OpenProposal(
     string Ticker,
     OpenStructureKind StructureKind,
@@ -53,5 +55,6 @@ internal sealed record OpenProposal(
     string Fingerprint,
     bool CashReserveBlocked = false,
     string? CashReserveDetail = null,
-    WebullAnalytics.AI.RiskDiagnostics.RiskDiagnostic? Diagnostic = null
+    WebullAnalytics.AI.RiskDiagnostics.RiskDiagnostic? Diagnostic = null,
+    decimal? PremiumRatio = null
 );
