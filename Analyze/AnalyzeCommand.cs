@@ -46,7 +46,7 @@ internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
 		if (!baseResult.Successful) return baseResult;
 
 		List<ParsedLeg> legs;
-		try { legs = TradeLegParser.Parse(Spec); }
+		try { legs = AnalyzeCommon.ParseAllLegs(Spec).ToList(); }
 		catch (FormatException ex) { return ValidationResult.Error($"<spec>: {ex.Message}"); }
 
 		foreach (var leg in legs)
@@ -202,12 +202,20 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 
 internal static class AnalyzeCommon
 {
+	/// <summary>Splits a trade spec on ';' into strategy groups, then parses each as a comma-separated leg
+	/// list. Empty groups are skipped. Used wherever we need a flat list of legs irrespective of which
+	/// group they belong to (e.g. quote prefetching, validation).</summary>
+	internal static IEnumerable<ParsedLeg> ParseAllLegs(string tradesSpec) =>
+		tradesSpec
+			.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+			.SelectMany(g => TradeLegParser.Parse(g));
+
 	internal static bool NeedsMarketPrices(string tradesSpec) =>
-		TradeLegParser.Parse(tradesSpec).Any(leg => leg.PriceKeyword != null);
+		ParseAllLegs(tradesSpec).Any(leg => leg.PriceKeyword != null);
 
 	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(AnalyzeSubcommandSettings settings, string tradesSpec, CancellationToken cancellation)
 	{
-		var symbols = TradeLegParser.Parse(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+		var symbols = ParseAllLegs(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(settings, symbols, cancellation);
 		return quotes;
 	}
@@ -274,18 +282,61 @@ internal static class AnalyzeCommon
 
 	internal static List<Trade> ParseSyntheticTrades(string tradesSpec, int startSeq, DateTime baseTimestamp, IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
 	{
+		// Spec format: legs comma-separated within a strategy group, groups separated by ';'.
+		// Each multi-leg group becomes one PositionReplay Event AND emits an Asset.OptionStrategy
+		// parent row — without that parent row, the report-table renderer sees orphan legs (no parent
+		// at the synthetic ParentStrategySeq) and visually attaches them to whichever parent row
+		// precedes them in seq order, lumping the synthetic into the last real strategy trade.
+		// Mirrors JsonlParser's parent emission (line 131-141) for real Webull strategy orders.
+		// Examples:
+		//   "sell:A,buy:B"           → one strategy parent + 2 legs
+		//   "sell:A,buy:B;sell:C,buy:D" → two parents + 4 legs
+		//   "buy:A"                  → single standalone leg, no parent
 		var result = new List<Trade>();
 		var seq = startSeq;
-		var legs = TradeLegParser.Parse(tradesSpec);
-
-		foreach (var leg in legs)
+		var groups = tradesSpec.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		foreach (var groupSpec in groups)
 		{
-			var parsed = leg.Option!;
-			var price = ResolvePrice(leg, quotes);
-			var side = leg.Action == LegAction.Buy ? Side.Buy : Side.Sell;
-			var timestamp = baseTimestamp.AddSeconds(seq - startSeq + 1);
+			var legs = TradeLegParser.Parse(groupSpec);
+			if (legs.Count == 0) continue;
 
-			result.Add(new Trade(Seq: seq++, Timestamp: timestamp, Instrument: Formatters.FormatOptionDisplay(parsed.Root, parsed.ExpiryDate, parsed.Strike), MatchKey: MatchKeys.Option(leg.Symbol), Asset: Asset.Option, OptionKind: ParsingHelpers.CallPutDisplayName(parsed.CallPut), Side: side, Qty: leg.Quantity, Price: price, Multiplier: Trade.OptionMultiplier, Expiry: parsed.ExpiryDate));
+			// Resolve all leg prices/sides up front so we can compute net cash for the parent row.
+			var resolvedLegs = legs.Select(leg => new
+			{
+				Leg = leg,
+				Parsed = leg.Option!,
+				Price = ResolvePrice(leg, quotes),
+				Side = leg.Action == LegAction.Buy ? Side.Buy : Side.Sell
+			}).ToList();
+
+			int? parentSeq = null;
+			if (resolvedLegs.Count > 1)
+			{
+				parentSeq = seq++;
+				var parentTimestamp = baseTimestamp.AddSeconds(seq - startSeq);
+				var qty = resolvedLegs[0].Leg.Quantity; // strategy orders share qty across legs
+				// Cash convention: positive = received, negative = paid. Mirror JsonlParser.
+				var netCash = resolvedLegs.Sum(r => (r.Side == Side.Sell ? 1m : -1m) * r.Price * r.Leg.Quantity);
+				var parentSide = netCash >= 0m ? Side.Sell : Side.Buy;
+				var parentPrice = qty > 0 ? Math.Abs(netCash) / qty : 0m;
+				var expDate = resolvedLegs.Max(r => r.Parsed.ExpiryDate);
+				var root = resolvedLegs[0].Parsed.Root;
+				var legsKey = string.Join(",", resolvedLegs.Select(r => $"{r.Parsed.CallPut}{Formatters.FormatQty(r.Parsed.Strike)}").OrderBy(s => s));
+				var strategyKind = ParsingHelpers.ClassifyStrategyKind(
+					legCount: resolvedLegs.Count,
+					distinctExpiries: resolvedLegs.Select(r => r.Parsed.ExpiryDate).Distinct().Count(),
+					distinctStrikes: resolvedLegs.Select(r => r.Parsed.Strike).Distinct().Count(),
+					distinctCallPut: resolvedLegs.Select(r => r.Parsed.CallPut).Distinct().Count());
+				var matchKey = $"strategy:{strategyKind}:{root}:{expDate:yyyy-MM-dd}:{legsKey}";
+				var instrument = $"{root} {Formatters.FormatOptionDate(expDate)}";
+				result.Add(new Trade(Seq: parentSeq.Value, Timestamp: parentTimestamp, Instrument: instrument, MatchKey: matchKey, Asset: Asset.OptionStrategy, OptionKind: strategyKind, Side: parentSide, Qty: qty, Price: parentPrice, Multiplier: Trade.OptionMultiplier, Expiry: expDate));
+			}
+
+			foreach (var r in resolvedLegs)
+			{
+				var timestamp = baseTimestamp.AddSeconds(seq - startSeq + 1);
+				result.Add(new Trade(Seq: seq++, Timestamp: timestamp, Instrument: Formatters.FormatOptionDisplay(r.Parsed.Root, r.Parsed.ExpiryDate, r.Parsed.Strike), MatchKey: MatchKeys.Option(r.Leg.Symbol), Asset: Asset.Option, OptionKind: ParsingHelpers.CallPutDisplayName(r.Parsed.CallPut), Side: r.Side, Qty: r.Leg.Quantity, Price: r.Price, Multiplier: Trade.OptionMultiplier, Expiry: r.Parsed.ExpiryDate, ParentStrategySeq: parentSeq));
+			}
 		}
 
 		return result;
