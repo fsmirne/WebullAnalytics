@@ -1,5 +1,6 @@
 using System.Globalization;
 using Spectre.Console;
+using Spectre.Console.Rendering;
 
 namespace WebullAnalytics.AI.RiskDiagnostics;
 
@@ -7,7 +8,9 @@ namespace WebullAnalytics.AI.RiskDiagnostics;
 /// comes from the record. Used by both the manage and open pipelines.</summary>
 internal static class RiskDiagnosticRenderer
 {
-	internal static void WriteConsole(IAnsiConsole console, RiskDiagnostic d)
+	internal static void WriteConsole(IAnsiConsole console, RiskDiagnostic d) => console.Write(Build(d));
+
+	internal static IRenderable Build(RiskDiagnostic d)
 	{
 		var lines = new List<string>
 		{
@@ -39,11 +42,10 @@ internal static class RiskDiagnosticRenderer
 				lines.Add($"  • [cyan]{Markup.Escape(r.Id)}[/] — {Markup.Escape(r.Message)}");
 		}
 
-		var panel = new Panel(string.Join("\n", lines))
+		return new Panel(string.Join("\n", lines))
 			.Header("[white]Risk diagnostic[/]")
 			.Expand()
 			.BorderColor(Color.Grey);
-		console.Write(panel);
 	}
 
 	private static string FormatDelta(decimal d) => d.ToString("+0.00;-0.00", CultureInfo.InvariantCulture);
