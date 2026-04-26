@@ -49,6 +49,7 @@ class Program
 			config.AddBranch("analyze", analyze =>
 			{
 				analyze.AddCommand<AnalyzeTradeCommand>("trade");
+				analyze.AddCommand<AnalyzeRiskCommand>("risk");
 				analyze.AddCommand<AnalyzeRollCommand>("roll");
 				analyze.AddCommand<AnalyzePositionCommand>("position");
 			});

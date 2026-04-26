@@ -21,7 +21,38 @@ internal sealed record RiskDiagnostic(
 	decimal? CostBasisPerShare,
 	decimal? CurrentValuePerShare,
 	decimal? UnrealizedPnlPerShare,
-	IReadOnlyList<RiskRuleHit> Rules);
+  IReadOnlyList<RiskRuleHit> Rules,
+	RiskDiagnosticProbe? Probe = null);
+
+internal sealed record RiskDiagnosticProbe(
+	decimal? EnumDelta,
+	decimal? EnumDeltaMin,
+	decimal? EnumDeltaMax,
+	bool? EnumDeltaPass,
+	IReadOnlyList<RiskDiagnosticLegQuote> LegQuotes,
+	RiskDiagnosticOpenerScore? OpenerScore);
+
+internal sealed record RiskDiagnosticLegQuote(
+	string Label,
+	string Symbol,
+	decimal? Bid,
+	decimal? Ask,
+	decimal? ImpliedVolatility,
+	long? OpenInterest,
+	long? Volume);
+
+internal sealed record RiskDiagnosticOpenerScore(
+	string Structure,
+	decimal? DebitOrCreditPerContract,
+	decimal? MaxProfitPerContract,
+	decimal? MaxLossPerContract,
+	decimal? CapitalAtRiskPerContract,
+	decimal? ProbabilityOfProfit,
+	decimal? ExpectedValuePerContract,
+	int? DaysToTarget,
+	decimal? RawScore,
+	decimal? BiasAdjustedScore,
+	string? Rationale);
 
 internal sealed record RiskRuleHit(
 	string Id,
