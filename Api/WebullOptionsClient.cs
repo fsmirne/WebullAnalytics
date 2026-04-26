@@ -95,7 +95,7 @@ public static class WebullOptionsClient
                 }
 
                 var json = await response.Content.ReadAsStringAsync(cancellationToken);
-                var parsed = ParseStrategyListResponse(json, wantedSymbols, derivativeIdMap);
+                var parsed = ParseStrategyListResponse(json, derivativeIdMap);
                 if (parsed.UnderlyingPrice.HasValue)
                     underlyingPrices[root] = parsed.UnderlyingPrice.Value;
                 foreach (var quote in parsed.Quotes)
@@ -103,8 +103,10 @@ public static class WebullOptionsClient
             }
         }
 
-        // Batch-fetch quotes for contracts that had no pricing data in the strategy/list response.
-        var needsBatch = result.Where(kv => kv.Value.Bid == null && kv.Value.Ask == null && kv.Value.ImpliedVolatility == null).Select(kv => kv.Key).Where(derivativeIdMap.ContainsKey).ToList();
+        // Batch-fetch quotes for contracts the caller asked about that came back without pricing.
+        // Restrict to wantedSymbols so we don't hammer the batch endpoint with the thousands of
+        // illiquid strikes the chain returns now that ParseStrategyListResponse keeps them all.
+        var needsBatch = wantedSymbols.Where(s => result.TryGetValue(s, out var q) && q.Bid == null && q.Ask == null && q.ImpliedVolatility == null && derivativeIdMap.ContainsKey(s)).ToList();
         if (needsBatch.Count > 0)
         {
             var ids = needsBatch.Select(s => derivativeIdMap[s]).ToList();
@@ -235,7 +237,11 @@ public static class WebullOptionsClient
         return quotes;
     }
 
-    private static (List<OptionContractQuote> Quotes, decimal? UnderlyingPrice) ParseStrategyListResponse(string json, HashSet<string> wantedSymbols, Dictionary<string, long> derivativeIdMap)
+    /// <summary>Parses every contract in the strategy/list response into the result list. The caller-side
+    /// <c>wantedSymbols</c> filter that used to live here was removed so a single chain fetch populates the
+    /// entire chain — the opener bootstrap pass (which only knows a placeholder symbol) needs all contracts
+    /// downstream, and other callers tolerate the larger dictionary because they look up by symbol anyway.</summary>
+    private static (List<OptionContractQuote> Quotes, decimal? UnderlyingPrice) ParseStrategyListResponse(string json, Dictionary<string, long> derivativeIdMap)
     {
         var quotes = new List<OptionContractQuote>();
         using var doc = JsonDocument.Parse(json);
@@ -254,9 +260,8 @@ public static class WebullOptionsClient
             foreach (var contract in data.EnumerateArray())
             {
                 var symbol = contract.TryGetProperty("symbol", out var s) ? s.GetString() : null;
-                if (string.IsNullOrWhiteSpace(symbol) || !wantedSymbols.Contains(symbol)) continue;
+                if (string.IsNullOrWhiteSpace(symbol)) continue;
 
-                // Always capture the derivative tickerId for potential batch refresh.
                 if (contract.TryGetProperty("tickerId", out var tid) && tid.TryGetInt64(out var derivId))
                     derivativeIdMap[symbol] = derivId;
 
