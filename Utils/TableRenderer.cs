@@ -39,9 +39,12 @@ public static class TableRenderer
 				}
 			}
 
-			var maxGridColumns = ComputeMaxGridColumns(displayMode, showLegs);
-			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns);
-			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns, breakEvens);
+         int terminalWidth;
+			try { terminalWidth = Console.WindowWidth; }
+			catch { terminalWidth = 200; }
+
+           var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: false);
+			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: false, individualResults: breakEvens);
 			var combinedByTicker = new Dictionary<string, BreakEvenResult>(StringComparer.Ordinal);
 			foreach (var c in combined)
 			{
@@ -78,16 +81,7 @@ public static class TableRenderer
 		TableBuilder.RenderSummary(console, rows, running, initialAmount, unrealizedPnL);
 	}
 
-	/// <summary>
-	/// Computes the maximum number of date columns that fit in the terminal width.
-	/// </summary>
-	private static int ComputeMaxGridColumns(string displayMode, bool showLegs)
-	{
-		int terminalWidth;
-		try { terminalWidth = Console.WindowWidth; }
-		catch { return 7; }
-		return TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs);
-	}
+   // Max-grid-columns is computed per panel inside the analyzers based on each panel's leg count.
 
 	/// <summary>
 	/// Extracts the ticker from an individual break-even result title.

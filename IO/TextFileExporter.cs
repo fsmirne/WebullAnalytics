@@ -52,9 +52,9 @@ public static partial class TextFileExporter
 				}
 			}
 
-			var maxGridColumns = TableBuilder.ComputeMaxGridColumns(200, displayMode, showLegs);
-			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns);
-			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, maxGridColumns, breakEvens);
+            const int terminalWidth = 200;
+           var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true);
+			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true, individualResults: breakEvens);
 			var combinedByTicker = new Dictionary<string, BreakEvenResult>(StringComparer.Ordinal);
 			foreach (var c in combined)
 			{
