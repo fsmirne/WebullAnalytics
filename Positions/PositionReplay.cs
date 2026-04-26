@@ -535,6 +535,8 @@ internal static class PositionReplay
 				AdjustedAvgPrice: Math.Abs(parentAdj)
 			));
 
+			var parentRowIndex = rows.Count - 1;
+
 			// Per-leg rows: InitialAvgPrice = leg's own entry price (from trade history filtered by matchKey);
 			// AdjustedAvgPrice = init + apportioned delta so signed sum equals parent's adj.
 			var legEntryPrices = ComputeLegEntryPrices(lin);
@@ -572,7 +574,7 @@ internal static class PositionReplay
 				));
 			}
 
-			adjustments[lin.Id] = new StrategyAdjustment(lin.TradeHistory, lin.RunningCash, null, lin.FirstEntryCash);
+          adjustments[parentRowIndex] = new StrategyAdjustment(lin.TradeHistory, lin.RunningCash, null, lin.FirstEntryCash);
 		}
 
 		return (rows, adjustments, singleLegStandalones);
