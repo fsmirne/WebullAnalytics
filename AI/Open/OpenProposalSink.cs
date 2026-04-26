@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Spectre.Console;
+using Spectre.Console.Rendering;
 
 namespace WebullAnalytics.AI.Output;
 
@@ -83,33 +84,49 @@ internal sealed class OpenProposalSink : IDisposable
             OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => "magenta",
             _ => "white"
         };
-        var blocked = p.CashReserveBlocked ? " [yellow]⚠ blocked[/]" : "";
-        AnsiConsole.MarkupLine($"[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}");
+
+        var rows = new List<IRenderable>();
         var legsText = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
-        AnsiConsole.MarkupLine($"  {Markup.Escape(legsText)}");
-        AnsiConsole.MarkupLine($"  [italic]{Markup.Escape(p.Rationale)}[/]");
+        rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/]"));
+        rows.Add(new Markup($"[italic]{Markup.Escape(p.Rationale)}[/]"));
         if (p.CashReserveBlocked && p.CashReserveDetail != null)
-            AnsiConsole.MarkupLine($"  [yellow]{Markup.Escape(p.CashReserveDetail)}[/]");
+            rows.Add(new Markup($"[yellow]{Markup.Escape(p.CashReserveDetail)}[/]"));
         if (!p.CashReserveBlocked && p.Qty > 0)
-            EmitReproductionCommands(p);
+            AppendReproductionCommands(rows, p);
         if (p.Diagnostic is not null)
-            WebullAnalytics.AI.RiskDiagnostics.RiskDiagnosticRenderer.WriteConsole(AnsiConsole.Console, p.Diagnostic);
+            rows.Add(WebullAnalytics.AI.RiskDiagnostics.RiskDiagnosticRenderer.Build(p.Diagnostic));
+
+        var blocked = p.CashReserveBlocked ? " [yellow]⚠ blocked[/]" : "";
+        var header = $"[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}";
+        var panel = new Panel(new Rows(rows))
+            .Header(header)
+            .Expand()
+            .BorderColor(SpectreColor(color));
+        AnsiConsole.Write(panel);
         AnsiConsole.WriteLine();
     }
 
-    /// <summary>Emits copy-pasteable `wa trade place` and `wa analyze trade` lines for the proposal.
+    /// <summary>Appends copy-pasteable `wa trade place` and `wa analyze trade` lines as Markup rows.
     /// trade place uses the absolute per-share net from DebitOrCreditPerContract (already computed at
     /// conservative execution prices: buys at ask, sells at bid). analyze trade uses @MID placeholders
     /// so the user can re-run against live quotes.</summary>
-    private static void EmitReproductionCommands(OpenProposal p)
+    private static void AppendReproductionCommands(List<IRenderable> rows, OpenProposal p)
     {
         var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
         var limit = Math.Abs(p.DebitOrCreditPerContract / 100m).ToString("F2", CultureInfo.InvariantCulture);
-        AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]");
+        rows.Add(new Markup($"[dim]↪ wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
 
         var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@MID"));
-        AnsiConsole.MarkupLine($"  [dim]wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]");
+        rows.Add(new Markup($"[dim]↪ wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));
     }
+
+    private static Color SpectreColor(string name) => name switch
+    {
+        "green" => Color.Green,
+        "cyan" => Color.Cyan1,
+        "magenta" => Color.Magenta1,
+        _ => Color.White
+    };
 
     public void Dispose() => _file.Dispose();
 }
