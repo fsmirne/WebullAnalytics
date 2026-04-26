@@ -13,7 +13,7 @@ namespace WebullAnalytics.Analyze;
 /// </summary>
 public static class CombinedBreakEvenAnalyzer
 {
-	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding = 2, int maxGridColumns = 7)
+	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding = 2, int maxGridColumns = 7, IReadOnlyList<BreakEvenResult>? individualResults = null)
 	{
 		var units = GroupUnits(positionRows);
 		var byTicker = new Dictionary<string, List<List<PositionRow>>>(StringComparer.Ordinal);
@@ -29,6 +29,20 @@ public static class CombinedBreakEvenAnalyzer
 			list.Add(unit);
 		}
 
+		// Sum individual margins per ticker so the combined panel inherits correct per-position pairing.
+		var marginByTicker = new Dictionary<string, decimal>(StringComparer.Ordinal);
+		if (individualResults != null)
+		{
+			foreach (var r in individualResults)
+			{
+				if (!r.Margin.HasValue) continue;
+				var sp = r.Title.IndexOf(' ');
+				if (sp <= 0) continue;
+				var t = r.Title[..sp];
+				marginByTicker[t] = (marginByTicker.TryGetValue(t, out var existing) ? existing : 0m) + r.Margin.Value;
+			}
+		}
+
 		var results = new List<BreakEvenResult>();
 		foreach (var ticker in byTicker.Keys.OrderBy(k => k, StringComparer.Ordinal))
 		{
@@ -39,7 +53,8 @@ public static class CombinedBreakEvenAnalyzer
 			var merged = LegMerger.Merge(allRows);
 			if (merged.Count == 0) continue; // fully offsetting portfolio
 
-			var result = BuildResult(ticker, unitsForTicker.Count, merged, opts, padding, maxGridColumns);
+			var tickerMargin = marginByTicker.TryGetValue(ticker, out var m) ? m : (decimal?)null;
+			var result = BuildResult(ticker, unitsForTicker.Count, merged, opts, padding, maxGridColumns, tickerMargin);
 			if (result != null) results.Add(result);
 		}
 		return results;
@@ -77,7 +92,7 @@ public static class CombinedBreakEvenAnalyzer
 		return groups;
 	}
 
-	private static BreakEvenResult? BuildResult(string ticker, int unitCount, List<MergedLeg> merged, AnalysisOptions opts, decimal padding, int maxGridColumns)
+	private static BreakEvenResult? BuildResult(string ticker, int unitCount, List<MergedLeg> merged, AnalysisOptions opts, decimal padding, int maxGridColumns, decimal? margin)
 	{
 		var optionLegs = merged.Where(l => !l.IsStock).ToList();
 		var stockLeg = merged.FirstOrDefault(l => l.IsStock);
@@ -236,7 +251,8 @@ public static class CombinedBreakEvenAnalyzer
 			EarlyExercise: null,
 			Grid: grid,
 			UnderlyingPrice: spot,
-			OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(ticker, opts)
+			OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(ticker, opts),
+			Margin: margin
 		);
 	}
 

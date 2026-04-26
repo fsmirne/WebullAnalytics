@@ -227,5 +227,6 @@ public record BreakEvenResult(
 	EarlyExerciseBoundary? EarlyExercise = null,
 	TimeDecayGrid? Grid = null,
 	decimal? UnderlyingPrice = null,
-	decimal? OriginalUnderlyingPrice = null
+	decimal? OriginalUnderlyingPrice = null,
+	decimal? Margin = null
 );
