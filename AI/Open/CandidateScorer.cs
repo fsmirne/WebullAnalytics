@@ -23,6 +23,45 @@ internal static class CandidateScorer
         return raw * factor;
     }
 
+    public static decimal? ComputeHistoricalVolatilityAnnualized(IReadOnlyList<decimal> closes)
+    {
+        if (closes.Count < 3) return null;
+
+        var returns = new List<double>(closes.Count - 1);
+        for (var i = 1; i < closes.Count; i++)
+        {
+            var prior = closes[i - 1];
+            var current = closes[i];
+            if (prior <= 0m || current <= 0m) continue;
+            returns.Add(Math.Log((double)(current / prior)));
+        }
+
+        if (returns.Count < 2) return null;
+
+        var mean = returns.Average();
+        var variance = returns.Sum(r => Math.Pow(r - mean, 2)) / (returns.Count - 1);
+        var annualized = Math.Sqrt(variance) * Math.Sqrt(252.0);
+        return double.IsFinite(annualized) ? (decimal)annualized : null;
+    }
+
+    public static decimal? ComputeVolatilityAdjustmentFactor(OpenStructureKind kind, decimal ivAnnual, decimal? historicalVolAnnual, decimal weight)
+    {
+        if (weight <= 0m || ivAnnual <= 0m || !historicalVolAnnual.HasValue || historicalVolAnnual.Value <= 0m)
+            return null;
+
+        var fit = VolatilityFitSign(kind);
+        if (fit == 0) return null;
+
+        var richness = Math.Clamp(ivAnnual / historicalVolAnnual.Value - 1m, -1m, 1m);
+        return Math.Max(0.10m, 1m + weight * richness * fit);
+    }
+
+    public static decimal VolatilityAdjust(decimal score, OpenStructureKind kind, decimal ivAnnual, decimal? historicalVolAnnual, decimal weight)
+    {
+        var factor = ComputeVolatilityAdjustmentFactor(kind, ivAnnual, historicalVolAnnual, weight);
+        return factor.HasValue ? score * factor.Value : score;
+    }
+
     /// <summary>
     /// Builds 5 scenario points at S_T ∈ {spot·e^(−sigmaRange·σ), spot·e^(−sigmaRange·σ/2), spot,
     /// spot·e^(+sigmaRange·σ/2), spot·e^(+sigmaRange·σ)} where σ = ivAnnual · √years.
@@ -82,11 +121,11 @@ internal static class CandidateScorer
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
-    public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg) => skel.StructureKind switch
+    public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null) => skel.StructureKind switch
     {
-        OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg),
-        OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg),
-        OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg),
+        OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual),
+        OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual),
+        OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual),
         _ => null
     };
 
@@ -110,9 +149,15 @@ internal static class CandidateScorer
         var rr = Math.Abs(p.MaxLossPerContract) > 0m ? Math.Max(0m, p.MaxProfitPerContract / Math.Abs(p.MaxLossPerContract)) : 0m;
         var ratioStr = p.PremiumRatio.HasValue ? $", prem {p.PremiumRatio.Value:F2}x" : "";
         var balance = BalanceFactor(p.MaxProfitPerContract, p.MaxLossPerContract, p.PremiumRatio ?? 1m);
+        var volStr = "";
+        if (p.VolatilityAdjustmentFactor.HasValue && p.ImpliedVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.Value > 0m)
+        {
+            var richness = p.ImpliedVolatilityAnnual.Value / p.HistoricalVolatilityAnnual.Value;
+            volStr = $" × vol {p.VolatilityAdjustmentFactor.Value:F2} (IV {p.ImpliedVolatilityAnnual.Value:P1} / HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x)";
+        }
 
         var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
-        var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6} (× structure {structureWeight:F2} × balance {balance:F2})";
+       var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6} (× structure {structureWeight:F2} × balance {balance:F2}{volStr})";
 
         return $"{rationaleLine}\n{scoreLine}";
     }
@@ -132,7 +177,7 @@ internal static class CandidateScorer
         return (decimal)(dir == Direction.Above ? N_d2 : 1.0 - N_d2);
     }
 
-    public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg)
+    public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null)
     {
         var shortLeg = skel.Legs.First(l => l.Action == "sell");
         var longLeg = skel.Legs.First(l => l.Action == "buy");
@@ -181,7 +226,9 @@ internal static class CandidateScorer
         var fit = DirectionalFit.SignFor(skel.StructureKind);
         var premiumRatio = ComputePremiumRatio(skel.Legs, quotes);
         var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
-        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance;
+        var representativeIv = (iv + ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct)) / 2m;
+        var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
+        var biasAdj = VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
         var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
         return new OpenProposal(
@@ -193,7 +240,7 @@ internal static class CandidateScorer
             MaxProfitPerContract: maxProfit,
             MaxLossPerContract: maxLoss,
             CapitalAtRiskPerContract: capitalAtRisk,
-            Breakevens: new[] { breakeven },
+            Breakevens: [breakeven],
             ProbabilityOfProfit: pop,
             ExpectedValuePerContract: ev,
             DaysToTarget: daysToTarget,
@@ -202,7 +249,10 @@ internal static class CandidateScorer
             DirectionalFit: fit,
             Rationale: "",
             Fingerprint: fp,
-            PremiumRatio: premiumRatio
+            PremiumRatio: premiumRatio,
+            ImpliedVolatilityAnnual: representativeIv,
+            HistoricalVolatilityAnnual: historicalVolAnnual,
+            VolatilityAdjustmentFactor: volFactor
         );
     }
 
@@ -315,6 +365,13 @@ internal static class CandidateScorer
         var ratio = Math.Max(0.01m, premiumRatio);   // guard against div-by-zero on degenerate quotes
         return rr / ratio;
     }
+
+    private static int VolatilityFitSign(OpenStructureKind kind) => kind switch
+    {
+        OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => 1,
+        OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.LongCall or OpenStructureKind.LongPut => -1,
+        _ => 0,
+    };
 
     /// <summary>Returns a copy of <paramref name="legs"/> with PricePerShare set to the execution
     /// price for each leg: buys fill at ask, sells fill at bid. Callers must ensure a usable
@@ -433,7 +490,7 @@ internal static class CandidateScorer
         }
     }
 
-    public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg)
+    public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null)
     {
         var shortLeg = skel.Legs.First(l => l.Action == "sell");
         var longLeg = skel.Legs.First(l => l.Action == "buy");
@@ -508,7 +565,9 @@ internal static class CandidateScorer
         var fit = 0;
         var premiumRatio = ComputePremiumRatio(skel.Legs, quotes);
         var balance = BalanceFactor(maxProfit, maxLossPoint, premiumRatio);
-        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance;
+        var representativeIv = (ivShort + ivLong) / 2m;
+        var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
+        var biasAdj = VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
         var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
         return new OpenProposal(
@@ -529,11 +588,14 @@ internal static class CandidateScorer
             DirectionalFit: fit,
             Rationale: "",
             Fingerprint: fp,
-            PremiumRatio: premiumRatio
+            PremiumRatio: premiumRatio,
+            ImpliedVolatilityAnnual: representativeIv,
+            HistoricalVolatilityAnnual: historicalVolAnnual,
+            VolatilityAdjustmentFactor: volFactor
         );
     }
 
-    public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg)
+    public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null)
     {
         var leg = skel.Legs[0];
         var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
@@ -572,7 +634,8 @@ internal static class CandidateScorer
         // collapses to just the R/R term, where R/R = projected_max_profit_at_+2σ / debit.
         var premiumRatio = ComputePremiumRatio(skel.Legs, quotes);
         var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
-        var biasAdj = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance;
+        var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight);
+        var biasAdj = VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight);
         var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
         return new OpenProposal(
@@ -593,7 +656,10 @@ internal static class CandidateScorer
             DirectionalFit: fit,
             Rationale: "",
             Fingerprint: fp,
-            PremiumRatio: null   // single-leg: ratio collapses to 1 (no shorts), don't display "prem 1.00x"
+            PremiumRatio: null,   // single-leg: ratio collapses to 1 (no shorts), don't display "prem 1.00x"
+            ImpliedVolatilityAnnual: iv,
+            HistoricalVolatilityAnnual: historicalVolAnnual,
+            VolatilityAdjustmentFactor: volFactor
         );
     }
 }

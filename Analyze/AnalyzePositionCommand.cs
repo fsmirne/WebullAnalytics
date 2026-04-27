@@ -1452,12 +1452,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				bid = q.Bid,
 				ask = q.Ask,
 				impliedVolatility = q.ImpliedVolatility,
+				historicalVolatility = q.HistoricalVolatility,
+				impliedVolatility5Day = q.ImpliedVolatility5Day,
 				openInterest = q.OpenInterest,
 				volume = q.Volume,
 			}),
 			openerScore = d.Probe.OpenerScore is null ? null : new
 			{
 				structure = d.Probe.OpenerScore.Structure,
+                qty = d.Probe.OpenerScore.Qty,
 				debitOrCreditPerContract = d.Probe.OpenerScore.DebitOrCreditPerContract,
 				maxProfitPerContract = d.Probe.OpenerScore.MaxProfitPerContract,
 				maxLossPerContract = d.Probe.OpenerScore.MaxLossPerContract,

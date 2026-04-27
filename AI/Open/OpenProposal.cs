@@ -37,6 +37,9 @@ public enum OpenStructureKind
 /// <param name="CashReserveDetail">"free $X, requires $Y per contract" when blocked; null otherwise.</param>
 /// <param name="PremiumRatio">Σ(buy-leg ask × qty) / Σ(sell-leg bid × qty), or null for single-leg structures
 /// where the ratio collapses to 1. Surfaced separately so the rationale can render it without recomputing.</param>
+/// <param name="ImpliedVolatilityAnnual">Representative annualized IV used for ranking, as a fraction (0.40 = 40%).</param>
+/// <param name="HistoricalVolatilityAnnual">Annualized realized volatility over the configured lookback, as a fraction.</param>
+/// <param name="VolatilityAdjustmentFactor">IV-vs-HV multiplier applied during ranking; null when HV was unavailable.</param>
 internal sealed record OpenProposal(
     string Ticker,
     OpenStructureKind StructureKind,
@@ -58,5 +61,8 @@ internal sealed record OpenProposal(
     bool CashReserveBlocked = false,
     string? CashReserveDetail = null,
     RiskDiagnostic? Diagnostic = null,
-    decimal? PremiumRatio = null
+    decimal? PremiumRatio = null,
+    decimal? ImpliedVolatilityAnnual = null,
+    decimal? HistoricalVolatilityAnnual = null,
+    decimal? VolatilityAdjustmentFactor = null
 );

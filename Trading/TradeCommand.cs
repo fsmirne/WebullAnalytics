@@ -219,7 +219,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 
 		// 7. Preview.
 		using var client = new WebullOpenApiClient(account);
-      WebullOpenApiClient.PreviewResponse previewResponse;
+		WebullOpenApiClient.PreviewResponse previewResponse;
 		try
 		{
 			previewResponse = s.Debug

@@ -1,4 +1,5 @@
 using WebullAnalytics.AI.RiskDiagnostics;
+using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.Sources;
 
 namespace WebullAnalytics.AI;
@@ -83,9 +84,7 @@ internal sealed class OpenCandidateEvaluator
 
         // Keep ctx.Quotes as the primary lookup; overlay fetched symbols only for the new ones.
         // Do NOT copy ctx.Quotes by enumeration — callers may supply non-enumerable fakes (tests) or large live dictionaries.
-        IReadOnlyDictionary<string, OptionContractQuote> mergedQuotes = bootstrapOptions.Count > 0
-            ? new OverlayQuoteDictionary(ctx.Quotes, bootstrapOptions)
-            : ctx.Quotes;
+        IReadOnlyDictionary<string, OptionContractQuote> mergedQuotes = bootstrapOptions.Count > 0 ? new OverlayQuoteDictionary(ctx.Quotes, bootstrapOptions) : ctx.Quotes;
         if (neededSymbols.Count > 0)
         {
             var extra = await _quotes.GetQuotesAsync(ctx.Now, neededSymbols, tickerSet, cancellation);
@@ -100,12 +99,25 @@ internal sealed class OpenCandidateEvaluator
         // Phase C: score per ticker.
         var reserve = CashReserveHelper.ComputeReserve(_config.CashReserve.Mode, _config.CashReserve.Value, ctx.AccountValue);
         var freeCash = Math.Max(0m, ctx.AccountCash - reserve);
+        var historicalVolByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        if (cfg.VolatilityFitWeight > 0m)
+        {
+            var priceCache = new HistoricalPriceCache();
+            foreach (var ticker in _config.Tickers)
+            {
+                var closes = await priceCache.GetRecentClosesAsync(ticker, cfg.VolatilityLookbackDays + 1, ctx.Now, cancellation);
+                var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+                if (hv.HasValue && hv.Value > 0m)
+                    historicalVolByTicker[ticker] = hv.Value;
+            }
+        }
 
         foreach (var tickerGroup in allSkeletons.GroupBy(s => s.Ticker))
         {
             if (!bootstrapSpots.TryGetValue(tickerGroup.Key, out var spot) || spot <= 0m) continue;
             ctx.TechnicalSignals.TryGetValue(tickerGroup.Key, out var biasSignal);
             var bias = biasSignal?.Score ?? 0m;
+            historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
 
             var shortVerticalRejects = debug
                 ? new Dictionary<CandidateScorer.ShortVerticalRejectReason, int>()
@@ -116,7 +128,7 @@ internal sealed class OpenCandidateEvaluator
 
             foreach (var skel in tickerGroup)
             {
-                var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg);
+                var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null);
                 if (p == null)
                 {
                     if (debug && (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical))
@@ -193,6 +205,7 @@ internal sealed class OpenCandidateEvaluator
              bias: ctx.TechnicalSignals.TryGetValue(p.Ticker, out var bs) ? (bs?.Score ?? 0m) : 0m,
                 cfg: cfg,
                 structure: p.StructureKind.ToString(),
+                qty: p.Qty,
                 rationale: p.Rationale,
                 creditPerContract: p.DebitOrCreditPerContract,
                 maxProfit: p.MaxProfitPerContract,
