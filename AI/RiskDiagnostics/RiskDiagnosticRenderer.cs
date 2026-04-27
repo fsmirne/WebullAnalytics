@@ -1,6 +1,7 @@
 using System.Globalization;
 using Spectre.Console;
 using Spectre.Console.Rendering;
+	using WebullAnalytics.AI;
 
 namespace WebullAnalytics.AI.RiskDiagnostics;
 
@@ -48,26 +49,36 @@ internal static class RiskDiagnosticRenderer
 				var label = $"{CapProbeLabel(q.Label)} quote:";
 				var bid = q.Bid.HasValue ? q.Bid.Value.ToString("F2", CultureInfo.InvariantCulture) : "null";
 				var ask = q.Ask.HasValue ? q.Ask.Value.ToString("F2", CultureInfo.InvariantCulture) : "null";
+                var mid = q.Bid.HasValue && q.Ask.HasValue
+					? ((q.Bid.Value + q.Ask.Value) / 2m).ToString("F2", CultureInfo.InvariantCulture)
+					: "null";
 				var iv = q.ImpliedVolatility.HasValue ? q.ImpliedVolatility.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
 				var oi = q.OpenInterest.HasValue ? q.OpenInterest.Value.ToString(CultureInfo.InvariantCulture) : "null";
 				var vol = q.Volume.HasValue ? q.Volume.Value.ToString(CultureInfo.InvariantCulture) : "null";
-				items.Add((label, $"bid={bid} ask={ask} iv={iv} oi={oi} vol={vol} sym={Markup.Escape(q.Symbol)}"));
+             items.Add((label, $"bid={bid} ask={ask} mid={mid} iv={iv} oi={oi} vol={vol} sym={Markup.Escape(q.Symbol)}"));
 			}
 
-            if (p.OpenerScore is RiskDiagnosticOpenerScore s && !string.IsNullOrWhiteSpace(s.Rationale))
+            if (p.OpenerScore is RiskDiagnosticOpenerScore s)
 			{
-				var sections = s.Rationale
-					.Replace("\r\n", "\n", StringComparison.Ordinal)
-					.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+              var margin = TryFormatMarginRequirement(s);
+				if (margin != null)
+					items.Add(("Margin:", margin));
 
-				if (sections.Length > 0)
-					items.Add(("Rationale:", Markup.Escape(sections[0])));
+				if (!string.IsNullOrWhiteSpace(s.Rationale))
+				{
+					var sections = s.Rationale
+						.Replace("\r\n", "\n", StringComparison.Ordinal)
+						.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-				if (sections.Length > 1)
-					items.Add(("Score:", Markup.Escape(sections[1])));
+                    if (sections.Length > 0)
+						items.Add(("Rationale:", Markup.Escape(sections[0])));
 
-				for (var i = 2; i < sections.Length; i++)
-					items.Add(("Detail:", Markup.Escape(sections[i])));
+                    if (sections.Length > 1)
+						items.Add(("Score:", Markup.Escape(sections[1])));
+
+                   for (var i = 2; i < sections.Length; i++)
+						items.Add(("Detail:", Markup.Escape(sections[i])));
+				}
 			}
 		}
 
@@ -93,6 +104,21 @@ internal static class RiskDiagnosticRenderer
 	private static string FormatNet(decimal n) => n >= 0m
 		? $"credit ${n.ToString("F2", CultureInfo.InvariantCulture)}"
 		: $"debit ${Math.Abs(n).ToString("F2", CultureInfo.InvariantCulture)}";
+
+	private static string? TryFormatMarginRequirement(RiskDiagnosticOpenerScore s)
+	{
+		if (string.IsNullOrWhiteSpace(s.Structure) || s.Structure.Equals("probe", StringComparison.OrdinalIgnoreCase))
+			return null;
+
+		var margin = RequiresMargin(s.Structure) ? s.CapitalAtRiskPerContract ?? 0m : 0m;
+		return margin == 0m
+			? "$0"
+			: $"${margin.ToString("N2", CultureInfo.InvariantCulture)}/contract";
+	}
+
+	private static bool RequiresMargin(string structure) =>
+		structure.Equals(nameof(OpenStructureKind.ShortPutVertical), StringComparison.OrdinalIgnoreCase)
+		|| structure.Equals(nameof(OpenStructureKind.ShortCallVertical), StringComparison.OrdinalIgnoreCase);
 
 	private static string CapProbeLabel(string label)
 	{
