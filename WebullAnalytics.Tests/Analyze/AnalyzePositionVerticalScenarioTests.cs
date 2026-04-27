@@ -64,4 +64,36 @@ public class AnalyzePositionVerticalScenarioTests
         Assert.Contains("BUY GME260501C00027000", ironCondor.ActionSummary, StringComparison.Ordinal);
         Assert.Contains(scenarios, s => s.Name.StartsWith("Reset to $25.50/$24.50 vertical", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void GenerateScenarios_CalendarShowsFundablePartialRollInsteadOfUnfundableFullRoll()
+    {
+        var shortExpiry = new DateTime(2026, 5, 1);
+        var longExpiry = new DateTime(2026, 5, 29);
+        var legs = new List<AnalyzePositionCommand.PositionSnapshot>
+        {
+            new("GME260501C00026000", LegAction.Sell, 10, 0.35m, new OptionParsed("GME", shortExpiry, "C", 26.00m)),
+            new("GME260529C00026000", LegAction.Buy, 10, 1.05m, new OptionParsed("GME", longExpiry, "C", 26.00m)),
+        };
+        var settings = new AnalyzePositionSettings
+        {
+            Cash = 400m,
+            IvDefault = 40m,
+            StrikeStep = 0.50m,
+        };
+
+        var scenarios = AnalyzePositionCommand.GenerateScenarios(
+            legs,
+            AnalyzePositionCommand.StructureKind.Calendar,
+            settings,
+            spot: 25.56m,
+            asOf: new DateTime(2026, 4, 27),
+            quotes: null);
+
+        Assert.DoesNotContain(scenarios, s => s.Name == "Roll short to $25.50 (same exp 05-01, inverted diagonal)");
+
+        var partialRoll = Assert.Single(scenarios, s => s.Name.StartsWith("Roll short to $25.50 (same exp 05-01, inverted diagonal) · partial ", StringComparison.Ordinal));
+        Assert.True(partialRoll.BPDeltaPerContract * partialRoll.Qty <= settings.Cash);
+        Assert.Contains("full size would need", partialRoll.Rationale, StringComparison.Ordinal);
+    }
 }
