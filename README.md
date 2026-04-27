@@ -476,8 +476,11 @@ wa trade status <clientOrderId>
 # List the account subscriptions tied to this OpenAPI app.
 wa trade accounts
 
-# Dump the raw positions payload for the account.
+# Show a readable positions summary for the account.
 wa trade positions
+
+# Dump the raw positions payload for the account.
+wa trade positions --debug
 
 # Start the OpenAPI trade-token approval flow.
 wa trade token create
@@ -534,7 +537,7 @@ Options (accounts / positions / token create / token check):
 #### Account and token utilities
 
 - `trade accounts` lists the account subscriptions returned by the OpenAPI app and highlights the `account_id` value you should copy into `trade-config.json`.
-- `trade positions` prints the raw account-positions payload for debugging account state and position sourcing.
+- `trade positions` prints a readable account-positions summary; add `--debug` to dump the raw payload.
 - `trade token create` starts the OpenAPI trade-token approval flow and caches the token locally.
 - `trade token check` re-checks the cached token status and updates the local cache.
 
