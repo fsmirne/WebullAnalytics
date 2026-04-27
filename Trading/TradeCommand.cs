@@ -598,7 +598,7 @@ internal sealed class TradePositionsCommand : AsyncCommand<TradePositionsSetting
 				return 0;
 			}
 
-           var holdings = await client.FetchAccountPositionsAsync(cancellation);
+			var holdings = await client.FetchAccountPositionsAsync(cancellation);
 			if (holdings.Count == 0)
 			{
 				AnsiConsole.MarkupLine("[dim]No positions.[/]");
