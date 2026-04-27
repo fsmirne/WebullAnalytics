@@ -1,3 +1,4 @@
+using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.AI.Sources;
 
 namespace WebullAnalytics.AI;
@@ -152,9 +153,9 @@ internal sealed class OpenCandidateEvaluator
         }
 
         // Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker.
-        var trendByTicker = new Dictionary<string, WebullAnalytics.AI.RiskDiagnostics.TrendSnapshot?>(StringComparer.OrdinalIgnoreCase);
+        var trendByTicker = new Dictionary<string, TrendSnapshot?>(StringComparer.OrdinalIgnoreCase);
         foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
-            trendByTicker[ticker] = await WebullAnalytics.AI.RiskDiagnostics.TrendFetcher.FetchAsync(ticker, ctx.Now, cancellation);
+            trendByTicker[ticker] = await TrendFetcher.FetchAsync(ticker, ctx.Now, cancellation);
 
         var annotated = new List<OpenProposal>(output.Count);
         foreach (var p in output)
@@ -162,7 +163,7 @@ internal sealed class OpenCandidateEvaluator
             var diagLegs = p.Legs.Select(l =>
             {
                 var parsed = ParsingHelpers.ParseOptionSymbol(l.Symbol);
-                return new WebullAnalytics.AI.RiskDiagnostics.DiagnosticLeg(
+                return new DiagnosticLeg(
                     Symbol: l.Symbol,
                     Parsed: parsed!,
                     IsLong: l.Action == "buy",
@@ -179,7 +180,7 @@ internal sealed class OpenCandidateEvaluator
 
             var spotForDiag = bootstrapSpots.TryGetValue(p.Ticker, out var s) ? s : 0m;
             trendByTicker.TryGetValue(p.Ticker, out var trend);
-            var diagnostic = WebullAnalytics.AI.RiskDiagnostics.RiskDiagnosticBuilder.Build(
+            var diagnostic = RiskDiagnosticBuilder.Build(
                 legs: diagLegs,
                 spot: spotForDiag,
                 asOf: ctx.Now,
@@ -203,7 +204,7 @@ internal sealed class OpenCandidateEvaluator
                 rawScore: p.RawScore,
                 biasScore: p.BiasAdjustedScore);
 
-            var probe = WebullAnalytics.AI.RiskDiagnostics.RiskDiagnosticProbeBuilder.Build(
+            var probe = RiskDiagnosticProbeBuilder.Build(
                 legs: diagLegs,
                 spot: spotForDiag,
                 asOf: ctx.Now,

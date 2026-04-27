@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text.Json;
 using Spectre.Console;
 using Spectre.Console.Rendering;
+using WebullAnalytics.AI.RiskDiagnostics;
+using WebullAnalytics.Analyze;
 
 namespace WebullAnalytics.AI.Output;
 
@@ -70,7 +72,7 @@ internal sealed class OpenProposalSink : IDisposable
             fingerprint = p.Fingerprint,
             cashReserveBlocked = p.CashReserveBlocked,
             cashReserveDetail = p.CashReserveDetail,
-            diagnostic = p.Diagnostic is null ? null : WebullAnalytics.Analyze.AnalyzePositionCommand.SerializeDiagnostic(p.Diagnostic),
+            diagnostic = p.Diagnostic is null ? null : AnalyzePositionCommand.SerializeDiagnostic(p.Diagnostic),
         };
         _file.WriteLine(JsonSerializer.Serialize(record));
     }
@@ -93,7 +95,7 @@ internal sealed class OpenProposalSink : IDisposable
         if (!p.CashReserveBlocked && p.Qty > 0)
             AppendReproductionCommands(rows, p);
         if (p.Diagnostic is not null)
-            rows.Add(WebullAnalytics.AI.RiskDiagnostics.RiskDiagnosticRenderer.Build(p.Diagnostic));
+            rows.Add(RiskDiagnosticRenderer.Build(p.Diagnostic));
 
         var blocked = p.CashReserveBlocked ? " [yellow]⚠ blocked[/]" : "";
         var header = $"[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}";
