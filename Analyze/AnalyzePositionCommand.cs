@@ -174,10 +174,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
             quotesForProbe: quotes,
 			technicalBiasForProbe: technicalBias);
 
-		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes);
-		if (scenarios.Count == 0)
+     var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias);
+       if (scenarios.Count == 0)
 		{
-			AnsiConsole.MarkupLine($"[yellow]No scenarios defined yet for structure type '{structure}'. Phase 1 supports single-long and calendar/diagonal.[/]");
+			AnsiConsole.MarkupLine($"[yellow]No scenarios defined yet for structure type '{structure}'. Phase 1 supports single-long, vertical, and calendar/diagonal.[/]");
 			return 0;
 		}
 
@@ -351,7 +351,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		int Qty,
 		int DaysToTarget,                   // days from evaluation date to this scenario's target date; used to rank P&L per day
 		string Rationale,
-		bool IsRoll = false);               // true iff this scenario closes an existing leg and opens a new one (consulted by BuildReproductionCommands)
+       bool IsRoll = false,
+		decimal? RankScore = null);         // true iff this scenario closes an existing leg and opens a new one (consulted by BuildReproductionCommands)
 
 	/// <summary>Hypothetical OCC symbols the scenario generators will reference. Pre-enumerated so we can
 	/// include them in a single up-front quote fetch.</summary>
@@ -390,15 +391,46 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				yield return MatchKeys.OccSymbol(root, newLongExp, strike, oppositeCp);
 			}
 		}
+       else if (kind == StructureKind.Vertical)
+		{
+			var shortLeg = legs.First(l => l.Action == LegAction.Sell);
+			var longLeg = legs.First(l => l.Action == LegAction.Buy);
+          var strikeOffset = longLeg.Parsed.Strike - shortLeg.Parsed.Strike;
+			var width = Math.Abs(strikeOffset);
+			var newExpiry = NextWeekly(shortLeg.Parsed.ExpiryDate);
+			foreach (var strike in BracketStrikes(spot, settings.StrikeStep))
+			{
+				if (strike <= 0m) continue;
+				if (strike != shortLeg.Parsed.Strike)
+					yield return MatchKeys.OccSymbol(root, shortLeg.Parsed.ExpiryDate, strike, callPut);
+
+				var newLongStrike = strike + strikeOffset;
+				if (newLongStrike <= 0m) continue;
+				yield return MatchKeys.OccSymbol(root, newExpiry, strike, callPut);
+				yield return MatchKeys.OccSymbol(root, newExpiry, newLongStrike, callPut);
+			}
+
+			var oppositeCp = callPut == "C" ? "P" : "C";
+			foreach (var strike in BracketStrikes(spot, settings.StrikeStep))
+			{
+				if (!IsComplementaryShortStrike(oppositeCp, strike, spot)) continue;
+				var newLongStrike = ComplementaryLongStrike(oppositeCp, strike, width);
+				if (newLongStrike <= 0m) continue;
+				yield return MatchKeys.OccSymbol(root, shortLeg.Parsed.ExpiryDate, strike, oppositeCp);
+				yield return MatchKeys.OccSymbol(root, shortLeg.Parsed.ExpiryDate, newLongStrike, oppositeCp);
+			}
+		}
 	}
 
-	private static List<Scenario> GenerateScenarios(
+    internal static List<Scenario> GenerateScenarios(
 		List<PositionSnapshot> legs, StructureKind kind,
 		AnalyzePositionSettings settings, decimal spot, DateTime asOf,
-		IReadOnlyDictionary<string, OptionContractQuote>? quotes) =>
+        IReadOnlyDictionary<string, OptionContractQuote>? quotes,
+		decimal technicalBias = 0m) =>
 		kind switch
 		{
 			StructureKind.SingleLong => GenerateSingleLongScenarios(legs[0], settings, spot, asOf, quotes),
+            StructureKind.Vertical => GenerateVerticalScenarios(legs, settings, spot, asOf, quotes, technicalBias),
 			StructureKind.Calendar or StructureKind.Diagonal => GenerateSpreadScenarios(legs, settings, spot, asOf, kind, quotes),
 			_ => new List<Scenario>()
 		};
@@ -445,6 +477,167 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 
 		return list.OrderByDescending(s => s.TotalPnLPerContract / Math.Max(1m, s.DaysToTarget)).ToList();
+	}
+
+   private static List<Scenario> GenerateVerticalScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, decimal technicalBias)
+	{
+		var list = new List<Scenario>();
+		var shortLeg = legs.First(l => l.Action == LegAction.Sell);
+		var longLeg = legs.First(l => l.Action == LegAction.Buy);
+		var callPut = shortLeg.Parsed.CallPut;
+		var ivShort = ResolveIV(shortLeg.Symbol, settings, quotes);
+		var ivLong = ResolveIV(longLeg.Symbol, settings, quotes);
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
+
+		var expiry = shortLeg.Parsed.ExpiryDate;
+		var expiryDte = Math.Max(1, (expiry.Date - asOf.Date).Days);
+		var shortMidNow = LiveOrBsMid(quotesForPricing, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, expiryDte, ivShort, callPut);
+		var longMidNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, expiryDte, ivLong, callPut);
+		var (_, shortAskNow) = LiveBidAsk(quotesForPricing, shortLeg.Symbol, shortMidNow);
+		var (longBidNow, _) = LiveBidAsk(quotesForPricing, longLeg.Symbol, longMidNow);
+
+		var currentBp = AnalyzeCommon.ComputeLegMargin(shortLeg.Parsed, 1, spot, shortMidNow, longLeg.Parsed, null, 1, longMidNow, isExisting: true).Total;
+		var longAtExpiry = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
+		var shortAtExpiry = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
+		var holdNetPerShare = longAtExpiry - shortAtExpiry;
+		var strikeOffset = longLeg.Parsed.Strike - shortLeg.Parsed.Strike;
+
+		list.Add(NewScenarioSpread("Hold to expiry", legs, "—",
+			cashNow: 0m, valueAtTarget: holdNetPerShare, bpDeltaPerContract: 0m, daysToTarget: expiryDte,
+			rationale: $"at {expiry:yyyy-MM-dd}: long ${longAtExpiry:F2} intrinsic - short ${shortAtExpiry:F2} intrinsic = ${holdNetPerShare:F2}"));
+
+		{
+			var cash = -shortAskNow;
+			var bpDelta = 0m - currentBp;
+			list.Add(NewScenarioSpread("Close short only", legs,
+				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortAskNow)}",
+				cashNow: cash, valueAtTarget: longAtExpiry, bpDeltaPerContract: bpDelta, daysToTarget: expiryDte,
+				rationale: $"pay ${shortAskNow:F2} ask to buy back short; keep long → intrinsic ${longAtExpiry:F2}/share at expiry"));
+		}
+
+		{
+			var cash = longBidNow - shortAskNow;
+			var bpDelta = 0m - currentBp;
+			list.Add(NewScenarioSpread("Close all", legs,
+				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortAskNow)}, SELL {longLeg.Symbol} x{longLeg.Qty} @{FmtPrice(longBidNow)}",
+				cashNow: cash, valueAtTarget: 0m, bpDeltaPerContract: bpDelta, daysToTarget: 1,
+				rationale: $"sell long @${longBidNow:F2} bid, buy short @${shortAskNow:F2} ask → net ${cash:+0.00;-0.00}/share"));
+		}
+
+		foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
+		{
+			if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
+
+			var sameExpSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, expiry, newStrike, callPut);
+			if (quotesForPricing != null && !HasLiveQuote(quotesForPricing, sameExpSym)) continue;
+
+			var ivSameExp = ResolveIV(sameExpSym, settings, quotes);
+			var newShortMidSameExp = LiveOrBsMid(quotesForPricing, sameExpSym, spot, newStrike, expiryDte, ivSameExp, callPut);
+			var (newShortBidSameExp, _) = LiveBidAsk(quotesForPricing, sameExpSym, newShortMidSameExp);
+			var cashPerShareSameExp = newShortBidSameExp - shortAskNow;
+			var projSameExpPerShare = longAtExpiry - Intrinsic(spot, newStrike, callPut);
+			var sameExpShortParsed = new OptionParsed(shortLeg.Parsed.Root, expiry, callPut, newStrike);
+			var sameExpBp = AnalyzeCommon.ComputeLegMargin(sameExpShortParsed, 1, spot, newShortMidSameExp, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
+			var sameExpBpDelta = sameExpBp - currentBp;
+
+			EmitFullAndPartial(list, legs, settings.Cash,
+				name: $"Roll short to ${newStrike:F2} (same exp {expiry:MM-dd}, {VerticalStructureLabel(callPut, newStrike, longLeg.Parsed.Strike)})",
+				actionSummary: $"BUY {shortLeg.Symbol} x{{qty}} @{FmtPrice(shortAskNow)}, SELL {sameExpSym} x{{qty}} @{FmtPrice(newShortBidSameExp)}",
+				cashPerShareOfChange: cashPerShareSameExp,
+				newProjectedPerShare: projSameExpPerShare,
+				unchangedProjectedPerShare: holdNetPerShare,
+				bpPerContract: sameExpBpDelta,
+				daysToTarget: expiryDte,
+				rationale: $"shift short to ${newStrike:F2}, keep {expiry:MM-dd} expiry; net ${cashPerShareSameExp:+0.00;-0.00}/share; at expiry: ${projSameExpPerShare:F2}",
+				isRoll: true);
+		}
+
+		var width = Math.Abs(longLeg.Parsed.Strike - shortLeg.Parsed.Strike);
+		var oppositeCp = callPut == "C" ? "P" : "C";
+		foreach (var newShortStrike in BracketStrikes(spot, settings.StrikeStep))
+		{
+			if (!IsComplementaryShortStrike(oppositeCp, newShortStrike, spot)) continue;
+
+			var newLongStrike = ComplementaryLongStrike(oppositeCp, newShortStrike, width);
+			if (newLongStrike <= 0m) continue;
+
+			var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, expiry, newShortStrike, oppositeCp);
+			var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, expiry, newLongStrike, oppositeCp);
+			if (quotesForPricing != null && (!HasLiveQuote(quotesForPricing, newShortSym) || !HasLiveQuote(quotesForPricing, newLongSym))) continue;
+
+			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
+			var ivNewLong = ResolveIV(newLongSym, settings, quotes);
+			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newShortStrike, expiryDte, ivNewShort, oppositeCp);
+			var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newLongStrike, expiryDte, ivNewLong, oppositeCp);
+			var (newShortBid, _) = LiveBidAsk(quotesForPricing, newShortSym, newShortMidExec);
+			var (_, newLongAsk) = LiveBidAsk(quotesForPricing, newLongSym, newLongMidExec);
+			var cashPerShare = newShortBid - newLongAsk;
+			var newPositionValuePerShare = Intrinsic(spot, newLongStrike, oppositeCp) - Intrinsic(spot, newShortStrike, oppositeCp);
+			var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, expiry, oppositeCp, newShortStrike);
+			var newLongParsed = new OptionParsed(longLeg.Parsed.Root, expiry, oppositeCp, newLongStrike);
+			var newBp = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, newLongParsed, null, 1, newLongMidExec, isExisting: false).Total;
+			var bpDelta = Math.Max(currentBp, newBp) - currentBp;
+			if (bpDelta > 0m) continue;
+
+			var wingLabel = oppositeCp == "C" ? "call" : "put";
+			EmitAdd(list, legs, settings.Cash,
+				name: $"Add complementary {wingLabel} spread (${newShortStrike:F2}/${newLongStrike:F2}) → iron condor",
+				newShortSym: newShortSym,
+				newLongSym: newLongSym,
+				newShortPrice: newShortBid,
+				newLongPrice: newLongAsk,
+				cashPerShareOfChange: cashPerShare,
+				newProjectedPerShare: newPositionValuePerShare,
+				unchangedProjectedPerShare: holdNetPerShare,
+				bpPerContract: bpDelta,
+				daysToTarget: expiryDte,
+				rationale: $"add the opposite-side {wingLabel} wing at the same expiry; combined iron condor stays within current width collateral, so additional margin is ${bpDelta:N0}. At expiry: existing ${holdNetPerShare:F2} + new ${newPositionValuePerShare:F2} = ${holdNetPerShare + newPositionValuePerShare:F2}/share");
+		}
+
+		var newExpiry = NextWeekly(expiry);
+		foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
+		{
+			if (newStrike <= 0m) continue;
+
+			var newLongStrike = newStrike + strikeOffset;
+			if (newLongStrike <= 0m) continue;
+
+			var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, newExpiry, newStrike, callPut);
+			var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, newExpiry, newLongStrike, callPut);
+			if (quotesForPricing != null && (!HasLiveQuote(quotesForPricing, newShortSym) || !HasLiveQuote(quotesForPricing, newLongSym))) continue;
+
+			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
+			var ivNewLong = ResolveIV(newLongSym, settings, quotes);
+			var dteNew = Math.Max(1, (newExpiry - asOf).Days);
+			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newStrike, dteNew, ivNewShort, callPut);
+			var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newLongStrike, dteNew, ivNewLong, callPut);
+			var (newShortBid, _) = LiveBidAsk(quotesForPricing, newShortSym, newShortMidExec);
+			var (_, newLongAsk) = LiveBidAsk(quotesForPricing, newLongSym, newLongMidExec);
+			var closeNet = longBidNow - shortAskNow;
+			var openNet = newShortBid - newLongAsk;
+			var cashPerShare = closeNet + openNet;
+			var newProjectedPerShare = Intrinsic(spot, newLongStrike, callPut) - Intrinsic(spot, newStrike, callPut);
+			var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExpiry, callPut, newStrike);
+			var newLongParsed = new OptionParsed(longLeg.Parsed.Root, newExpiry, callPut, newLongStrike);
+			var newBp = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, newLongParsed, null, 1, newLongMidExec, isExisting: false).Total;
+			var bpDelta = newBp - currentBp;
+
+			EmitFullAndPartial(list, legs, settings.Cash,
+				name: $"Reset to ${newStrike:F2}/${newLongStrike:F2} vertical ({newExpiry:MM-dd})",
+				actionSummary: $"BUY {shortLeg.Symbol} x{{qty}} @{FmtPrice(shortAskNow)}, SELL {longLeg.Symbol} x{{qty}} @{FmtPrice(longBidNow)}, BUY {newLongSym} x{{qty}} @{FmtPrice(newLongAsk)}, SELL {newShortSym} x{{qty}} @{FmtPrice(newShortBid)}",
+				cashPerShareOfChange: cashPerShare,
+				newProjectedPerShare: newProjectedPerShare,
+				unchangedProjectedPerShare: holdNetPerShare,
+				bpPerContract: bpDelta,
+				daysToTarget: dteNew,
+				rationale: $"close net ${closeNet:+0.00;-0.00}, open next-week vertical net ${openNet:+0.00;-0.00}; projected at {newExpiry:MM-dd}: ${newProjectedPerShare:F2}",
+				isRoll: true);
+		}
+
+      return list
+			.Select(s => s with { RankScore = ComputeVerticalScenarioRankScore(s, shortLeg, spot, settings.StrikeStep, technicalBias) })
+			.OrderByDescending(s => s.RankScore ?? DefaultRankScore(s))
+			.ToList();
 	}
 
 	private static List<Scenario> GenerateSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
@@ -850,7 +1043,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var cashPerContract = cashNow * 100m;
 		var valuePerContract = valueAtTarget * 100m;
 		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
-		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, longLeg.Qty, daysToTarget, rationale, isRoll);
+        return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, longLeg.Qty, daysToTarget, rationale, isRoll, RankScore: totalPerContract / Math.Max(1m, daysToTarget));
 	}
 
 	private static Scenario NewScenarioSpread(string name, IReadOnlyList<PositionSnapshot> legs, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal bpDeltaPerContract, int daysToTarget, string rationale, bool isRoll = false)
@@ -860,8 +1053,76 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var cashPerContract = cashNow * 100m;
 		var valuePerContract = valueAtTarget * 100m;
 		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
-		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, qty, daysToTarget, rationale, isRoll);
+        return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, qty, daysToTarget, rationale, isRoll, RankScore: totalPerContract / Math.Max(1m, daysToTarget));
 	}
+
+	private static decimal DefaultRankScore(Scenario sc) => sc.TotalPnLPerContract / Math.Max(1m, sc.DaysToTarget);
+
+	private static decimal ComputeVerticalScenarioRankScore(Scenario sc, PositionSnapshot currentShortLeg, decimal spot, decimal strikeStep, decimal technicalBias)
+	{
+		var baseScore = DefaultRankScore(sc);
+      var shortSymbols = sc.ActionSummary == "—"
+			? new List<string> { currentShortLeg.Symbol }
+			: ExtractShortOptionSymbols(sc.ActionSummary, currentShortLeg.Symbol, sc.Name.StartsWith("Add complementary ", StringComparison.Ordinal)
+				? new[] { currentShortLeg.Symbol }
+				: Array.Empty<string>());
+
+		if (shortSymbols.Count == 0) return baseScore;
+
+		var maxPenalty = shortSymbols
+			.Select(ParsingHelpers.ParseOptionSymbol)
+			.Where(p => p != null)
+			.Select(p => ComputeAssignmentRiskPenaltyPerContract(spot, p!.Strike, p.CallPut, sc.DaysToTarget, strikeStep, technicalBias))
+			.DefaultIfEmpty(0m)
+			.Max();
+
+		return baseScore - maxPenalty / Math.Max(1m, sc.DaysToTarget);
+	}
+
+	private static List<string> ExtractShortOptionSymbols(string actionSummary, string currentLongSymbol, IEnumerable<string>? includeSymbols = null)
+	{
+		var symbols = new List<string>();
+		if (includeSymbols != null) symbols.AddRange(includeSymbols);
+		if (string.IsNullOrWhiteSpace(actionSummary) || actionSummary == "—") return symbols;
+
+		foreach (var part in actionSummary.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			var tokens = part.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+			if (tokens.Length < 2) continue;
+			if (!tokens[0].Equals("SELL", StringComparison.OrdinalIgnoreCase)) continue;
+			var symbol = tokens[1];
+			if (symbol.Equals(currentLongSymbol, StringComparison.OrdinalIgnoreCase)) continue;
+			symbols.Add(symbol);
+		}
+
+		return symbols;
+	}
+
+	internal static decimal ComputeAssignmentRiskPenaltyPerContract(decimal spot, decimal shortStrike, string callPut, int daysToTarget, decimal strikeStep, decimal technicalBias)
+	{
+		var otmBuffer = callPut == "P" ? spot - shortStrike : shortStrike - spot;
+		var safeBuffer = Math.Max(strikeStep, spot * 0.01m);
+		var nearMoneyDistance = Math.Max(safeBuffer - Math.Max(otmBuffer, 0m), 0m);
+		var itmAmount = Math.Max(-otmBuffer, 0m);
+		var directionalRelief = callPut == "P"
+			? Math.Clamp(technicalBias, 0m, 1m)
+			: Math.Clamp(-technicalBias, 0m, 1m);
+		var timeFactor = Math.Clamp(7m / Math.Max(1m, daysToTarget), 0.5m, 2.5m);
+		var reliefFactor = 1m - 0.85m * directionalRelief;
+		var penaltyPerShare = (nearMoneyDistance * 0.75m + itmAmount * 1.50m) * timeFactor * reliefFactor;
+		return penaltyPerShare * 100m;
+	}
+
+	private static string VerticalStructureLabel(string callPut, decimal shortStrike, decimal longStrike) =>
+		callPut == "C"
+			? (shortStrike > longStrike ? "debit vertical" : "credit vertical")
+			: (shortStrike < longStrike ? "debit vertical" : "credit vertical");
+
+	private static bool IsComplementaryShortStrike(string callPut, decimal strike, decimal spot) =>
+		callPut == "C" ? strike >= spot : strike <= spot;
+
+	private static decimal ComplementaryLongStrike(string callPut, decimal shortStrike, decimal width) =>
+		callPut == "C" ? shortStrike + width : shortStrike - width;
 
 	/// <summary>Returns true if the quote dictionary has a real, usable quote for this symbol
 	/// (both bid and ask populated, ask > 0). Used when --api is set to skip scenarios whose
