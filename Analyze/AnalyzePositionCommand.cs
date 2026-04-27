@@ -3,6 +3,7 @@ using System.Globalization;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using Spectre.Console.Rendering;
+using WebullAnalytics.Api;
 using WebullAnalytics.AI;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.AI.Replay;
@@ -34,6 +35,10 @@ internal sealed class AnalyzePositionSettings : AnalyzeSubcommandSettings
 	[CommandOption("--cash")]
 	[Description("Available cash/BP for funding. Scenarios whose BP delta exceeds this amount are flagged as not fundable.")]
 	public decimal? Cash { get; set; }
+
+	[CommandOption("--account <VALUE>")]
+	[Description("Account alias or ID from trade-config.json used to auto-detect cash/BP when selecting an existing open position.")]
+	public string? Account { get; set; }
 
 	public override ValidationResult Validate()
 	{
@@ -101,6 +106,17 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 
 		var ticker = positionLegs[0].Parsed.Root;
+
+		if (string.IsNullOrEmpty(settings.Spec) && !settings.Cash.HasValue)
+		{
+			var detectedCash = await TryResolveAvailableCashAsync(settings.Account, cancellation);
+			if (detectedCash.HasValue)
+			{
+				settings.Cash = detectedCash.Value.Cash;
+				AnsiConsole.MarkupLine($"[dim]Using available cash/BP from account '{Markup.Escape(detectedCash.Value.AccountAlias)}': ${detectedCash.Value.Cash:N2}.[/]");
+				AnsiConsole.WriteLine();
+			}
+		}
 
 		// Phase 1: fetch quotes for the position legs. We need spot before we can enumerate
 		// hypothetical strikes for scenarios, and the underlying price comes back as a byproduct
@@ -183,6 +199,31 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		RenderScenarioTable(scenarios, settings);
 		return 0;
+	}
+
+	private static async Task<(decimal Cash, string AccountAlias)?> TryResolveAvailableCashAsync(string? accountFlag, CancellationToken cancellation)
+	{
+		var config = TradeConfig.Load(quiet: true);
+		if (config == null) return null;
+
+		var account = TradeConfig.Resolve(config, accountFlag, quiet: true);
+		if (account == null) return null;
+
+		try
+		{
+			using var client = new WebullOpenApiClient(account);
+			var balance = await client.FetchAccountBalanceAsync(cancellation);
+			var availableFunds = balance.TryGetAvailableFunds();
+			return availableFunds.HasValue ? (availableFunds.Value, account.Alias) : null;
+		}
+		catch (WebullOpenApiException)
+		{
+			return null;
+		}
+		catch (System.Net.Http.HttpRequestException)
+		{
+			return null;
+		}
 	}
 
 	private static async Task<decimal> TryComputeTechnicalBiasAsync(string ticker, DateTime asOf, CancellationToken cancellation)
@@ -476,7 +517,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				rationale: $"collect ${shortMid:F2}/share short premium; at short exp: long ${longAtShortExp:F2} - short ${shortAtShortExp:F2} = ${net:F2}"));
 		}
 
-		return list.OrderByDescending(s => s.TotalPnLPerContract / Math.Max(1m, s.DaysToTarget)).ToList();
+		return OrderScenariosForDisplay(list, settings.Cash);
 	}
 
    private static List<Scenario> GenerateVerticalScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, decimal technicalBias)
@@ -634,10 +675,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				isRoll: true);
 		}
 
-      return list
+		return OrderScenariosForDisplay(list
 			.Select(s => s with { RankScore = ComputeVerticalScenarioRankScore(s, shortLeg, spot, settings.StrikeStep, technicalBias) })
-			.OrderByDescending(s => s.RankScore ?? DefaultRankScore(s))
-			.ToList();
+			.ToList(), settings.Cash);
 	}
 
 	private static List<Scenario> GenerateSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
@@ -910,7 +950,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 		}
 
-		return list.OrderByDescending(s => s.TotalPnLPerContract / Math.Max(1m, s.DaysToTarget)).ToList();
+		return OrderScenariosForDisplay(list, settings.Cash);
 	}
 
 	/// <summary>Appends an "add new position alongside existing" scenario. Existing untouched;
@@ -935,23 +975,31 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var fullQty = legs[0].Qty;
 		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
 		var initialDebitPerContract = initialDebitPerShare * 100m;
+		var fullBpTotal = bpPerContract * fullQty;
+		var maxPartial = !availableCash.HasValue || bpPerContract <= 0m
+			? 0
+			: (int)Math.Floor(availableCash.Value / bpPerContract);
+		var fullFundable = !availableCash.HasValue || fullBpTotal <= availableCash.Value;
+		var hasFundablePartial = maxPartial > 0 && maxPartial < fullQty;
 
-		var fullCashPerContract = cashPerShareOfChange * 100m;
-		var fullCombinedValuePerContract = (unchangedProjectedPerShare + newProjectedPerShare) * 100m;
-		var fullTotalPerContract = fullCombinedValuePerContract + fullCashPerContract - initialDebitPerContract;
-		list.Add(new Scenario(
-			name,
-			$"BUY {newLongSym} x{fullQty} @{FmtPrice(newLongPrice)}, SELL {newShortSym} x{fullQty} @{FmtPrice(newShortPrice)}",
-			CashImpactPerContract: fullCashPerContract,
-			ProjectedValuePerContract: fullCombinedValuePerContract,
-			TotalPnLPerContract: fullTotalPerContract,
-			BPDeltaPerContract: bpPerContract,
-			Qty: fullQty,
-			DaysToTarget: daysToTarget,
-			Rationale: rationale));
+		if (fullFundable || !hasFundablePartial)
+		{
+			var fullCashPerContract = cashPerShareOfChange * 100m;
+			var fullCombinedValuePerContract = (unchangedProjectedPerShare + newProjectedPerShare) * 100m;
+			var fullTotalPerContract = fullCombinedValuePerContract + fullCashPerContract - initialDebitPerContract;
+			list.Add(new Scenario(
+				name,
+				$"BUY {newLongSym} x{fullQty} @{FmtPrice(newLongPrice)}, SELL {newShortSym} x{fullQty} @{FmtPrice(newShortPrice)}",
+				CashImpactPerContract: fullCashPerContract,
+				ProjectedValuePerContract: fullCombinedValuePerContract,
+				TotalPnLPerContract: fullTotalPerContract,
+				BPDeltaPerContract: bpPerContract,
+				Qty: fullQty,
+				DaysToTarget: daysToTarget,
+				Rationale: rationale));
+		}
 
-		if (!availableCash.HasValue || bpPerContract <= 0m) return;
-		var maxPartial = (int)Math.Floor(availableCash.Value / bpPerContract);
+     if (!availableCash.HasValue || bpPerContract <= 0m) return;
 		if (maxPartial <= 0 || maxPartial >= fullQty) return;
 
 		// Partial: add `maxPartial` new contracts, keep all `fullQty` existing.
@@ -970,7 +1018,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			BPDeltaPerContract: bpPerContract * maxPartial / fullQty,
 			Qty: fullQty,
 			DaysToTarget: daysToTarget,
-			Rationale: $"add {maxPartial} new contract(s) (${bpPerContract * maxPartial:N0} BP); keep all {fullQty} existing"));
+            Rationale: $"add {maxPartial} new contract(s) (${bpPerContract * maxPartial:N0} BP; full size would need ${fullBpTotal:N0}); keep all {fullQty} existing"));
 	}
 
 	/// <summary>Appends a full-quantity scenario to the list. If the full BP delta exceeds available
@@ -996,26 +1044,31 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var fullQty = legs[0].Qty;
 		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
 		var initialDebitPerContract = initialDebitPerShare * 100m;
+		var fullBpTotal = bpPerContract * fullQty;
+		var maxPartial = !availableCash.HasValue || bpPerContract <= 0m ? 0 : (int)Math.Floor(availableCash.Value / bpPerContract);
+		var fullFundable = !availableCash.HasValue || fullBpTotal <= availableCash.Value;
+		var hasFundablePartial = maxPartial > 0 && maxPartial < fullQty;
 
-		// Full scenario.
-		var fullCashPerContract = cashPerShareOfChange * 100m;
-		var fullProjectedPerContract = newProjectedPerShare * 100m;
-		var fullTotalPerContract = fullProjectedPerContract + fullCashPerContract - initialDebitPerContract;
-		list.Add(new Scenario(
-			name,
-			actionSummary.Replace("{qty}", fullQty.ToString()),
-			CashImpactPerContract: fullCashPerContract,
-			ProjectedValuePerContract: fullProjectedPerContract,
-			TotalPnLPerContract: fullTotalPerContract,
-			BPDeltaPerContract: bpPerContract,
-			Qty: fullQty,
-			DaysToTarget: daysToTarget,
-			Rationale: rationale,
-			IsRoll: isRoll));
+		if (fullFundable || !hasFundablePartial)
+		{
+			var fullCashPerContract = cashPerShareOfChange * 100m;
+			var fullProjectedPerContract = newProjectedPerShare * 100m;
+			var fullTotalPerContract = fullProjectedPerContract + fullCashPerContract - initialDebitPerContract;
+			list.Add(new Scenario(
+				name,
+				actionSummary.Replace("{qty}", fullQty.ToString()),
+				CashImpactPerContract: fullCashPerContract,
+				ProjectedValuePerContract: fullProjectedPerContract,
+				TotalPnLPerContract: fullTotalPerContract,
+				BPDeltaPerContract: bpPerContract,
+				Qty: fullQty,
+				DaysToTarget: daysToTarget,
+				Rationale: rationale,
+				IsRoll: isRoll));
+		}
 
 		// Partial variant: only emit if BP is positive and cash is constrained below full.
 		if (!availableCash.HasValue || bpPerContract <= 0m) return;
-		var maxPartial = (int)Math.Floor(availableCash.Value / bpPerContract);
 		if (maxPartial <= 0 || maxPartial >= fullQty) return;
 
 		// Per-contract-of-total values for the partial mix.
@@ -1031,7 +1084,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			BPDeltaPerContract: bpPerContract * maxPartial / fullQty,
 			Qty: fullQty,
 			DaysToTarget: daysToTarget,
-			Rationale: $"execute on {maxPartial} contracts (${bpPerContract * maxPartial:N0} BP); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp",
+			Rationale: $"execute on {maxPartial} contracts (${bpPerContract * maxPartial:N0} BP; full size would need ${fullBpTotal:N0}); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp",
 			IsRoll: isRoll));
 	}
 
@@ -1057,6 +1110,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	}
 
 	private static decimal DefaultRankScore(Scenario sc) => sc.TotalPnLPerContract / Math.Max(1m, sc.DaysToTarget);
+
+	private static List<Scenario> OrderScenariosForDisplay(IEnumerable<Scenario> scenarios, decimal? availableCash) => scenarios
+		.OrderByDescending(s => IsScenarioFundable(s, availableCash))
+		.ThenByDescending(s => s.RankScore ?? DefaultRankScore(s))
+		.ToList();
+
+	private static bool IsScenarioFundable(Scenario sc, decimal? availableCash) =>
+		!availableCash.HasValue || sc.BPDeltaPerContract * sc.Qty <= availableCash.Value;
 
 	private static decimal ComputeVerticalScenarioRankScore(Scenario sc, PositionSnapshot currentShortLeg, decimal spot, decimal strikeStep, decimal technicalBias)
 	{

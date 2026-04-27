@@ -376,7 +376,80 @@ internal sealed class WebullOpenApiClient : IDisposable
 	internal sealed record AccountBalance(
 		[property: JsonPropertyName("total_cash_balance")] string? TotalCashBalance,
 		[property: JsonPropertyName("total_unrealized_profit_loss")] string? TotalUnrealizedProfitLoss,
-		[property: JsonPropertyName("total_asset_currency")] string? TotalAssetCurrency);
+		[property: JsonPropertyName("total_asset_currency")] string? TotalAssetCurrency)
+	{
+		[JsonExtensionData]
+		public Dictionary<string, JsonElement>? ExtraFields { get; init; }
+
+		internal decimal? TryGetAvailableFunds()
+		{
+			foreach (var name in new[] { "option_buying_power", "buying_power", "buyingPower", "buying_power_balance", "cash_available", "available_cash", "available_funds", "settled_funds", "withdrawable_cash" })
+			{
+				if (TryFindDecimal(name, out var value))
+					return value;
+			}
+
+			return TryParseDecimal(TotalCashBalance, out var totalCash) ? totalCash : null;
+		}
+
+		private bool TryFindDecimal(string name, out decimal value)
+		{
+			if (ExtraFields != null)
+			{
+				foreach (var property in ExtraFields)
+				{
+					if (property.Key.Equals(name, StringComparison.OrdinalIgnoreCase) && TryParseDecimal(property.Value, out value))
+						return true;
+					if (TryFindDecimal(property.Value, name, out value))
+						return true;
+				}
+			}
+
+			value = 0m;
+			return false;
+		}
+
+		private static bool TryFindDecimal(JsonElement element, string name, out decimal value)
+		{
+			switch (element.ValueKind)
+			{
+				case JsonValueKind.Object:
+					foreach (var property in element.EnumerateObject())
+					{
+						if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && TryParseDecimal(property.Value, out value))
+							return true;
+						if (TryFindDecimal(property.Value, name, out value))
+							return true;
+					}
+					break;
+				case JsonValueKind.Array:
+					foreach (var item in element.EnumerateArray())
+						if (TryFindDecimal(item, name, out value))
+							return true;
+					break;
+			}
+
+			value = 0m;
+			return false;
+		}
+
+		private static bool TryParseDecimal(JsonElement element, out decimal value) =>
+			element.ValueKind switch
+			{
+				JsonValueKind.Number => element.TryGetDecimal(out value),
+				JsonValueKind.String => TryParseDecimal(element.GetString(), out value),
+				_ => TryReset(out value)
+			};
+
+		private static bool TryParseDecimal(string? raw, out decimal value) =>
+			decimal.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out value);
+
+		private static bool TryReset(out decimal value)
+		{
+			value = 0m;
+			return false;
+		}
+	}
 
 	/// <summary>Fetches the account balance summary.</summary>
 	internal async Task<AccountBalance> FetchAccountBalanceAsync(CancellationToken ct = default) =>
