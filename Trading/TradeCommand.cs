@@ -234,7 +234,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		{
 			var placed = await client.PlaceOrderAsync(body);
 			AnsiConsole.MarkupLine($"[green]Placed.[/] order_id={Markup.Escape(placed.OrderId ?? "-")}  client_order_id={Markup.Escape(placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId)}");
-			AnsiConsole.MarkupLine($"[dim]Check status with:[/] WebullAnalytics trade status {Markup.Escape(placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId)}");
+			AnsiConsole.MarkupLine($"[dim]Check status with:[/] wa trade status {Markup.Escape(placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId)}");
 			return 0;
 		}
 		catch (WebullOpenApiException ex)
