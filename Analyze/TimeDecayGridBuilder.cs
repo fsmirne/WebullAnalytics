@@ -250,14 +250,14 @@ internal static class TimeDecayGridBuilder
 
 		// Classify every calendar day from today up to (not including) expiry by priority tier.
 		var tradingDays = new List<DateTime>();
-		var holidays    = new List<DateTime>();
-		var weekends    = new List<DateTime>();
+		var holidays = new List<DateTime>();
+		var weekends = new List<DateTime>();
 		for (var d = today; d.Date < expiry.Date; d = d.AddDays(1))
 		{
 			var dt = d.Date + OptionMath.MarketOpen;
-			if (MarketCalendar.IsOpen(d))                                                    tradingDays.Add(dt);
-			else if (d.DayOfWeek != DayOfWeek.Saturday && d.DayOfWeek != DayOfWeek.Sunday)  holidays.Add(dt);
-			else                                                                              weekends.Add(dt);
+			if (MarketCalendar.IsOpen(d)) tradingDays.Add(dt);
+			else if (d.DayOfWeek != DayOfWeek.Saturday && d.DayOfWeek != DayOfWeek.Sunday) holidays.Add(dt);
+			else weekends.Add(dt);
 		}
 
 		var interiorSlots = Math.Max(1, maxColumns - 2);
@@ -298,8 +298,8 @@ internal static class TimeDecayGridBuilder
 	private static List<DateTime> EvenlySpaced(List<DateTime> source, int count)
 	{
 		if (count <= 0 || source.Count == 0) return [];
-		if (count >= source.Count)           return [.. source];
-		if (count == 1)                      return [source[0]];
+		if (count >= source.Count) return [.. source];
+		if (count == 1) return [source[0]];
 		var result = new List<DateTime>(count);
 		for (int i = 0; i < count; i++)
 			result.Add(source[(int)Math.Round((double)i * (source.Count - 1) / (count - 1))]);

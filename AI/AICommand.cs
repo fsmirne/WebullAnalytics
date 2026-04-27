@@ -1,12 +1,9 @@
-using System.ComponentModel;
-using System.Globalization;
 using Spectre.Console;
 using Spectre.Console.Cli;
+using System.ComponentModel;
 using WebullAnalytics.AI.Output;
-using WebullAnalytics.AI.Rules;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Report;
-using WebullAnalytics.Pricing;
 using WebullAnalytics.Trading;
 using WebullAnalytics.Utils;
 
@@ -16,6 +13,7 @@ internal abstract class AISubcommandSettings : CommandSettings
 {
 	private static readonly string[] ValidLogLevels = ["debug", "information", "error"];
 	private static readonly string[] ValidProposalModes = ["all", "open", "management"];
+	private static readonly string[] ValidPricingModes = [SuggestionPricing.Mid, SuggestionPricing.BidAsk];
 
 	[CommandOption("--config <PATH>")]
 	[Description("Path to ai-config.json. Default: data/ai-config.json.")]
@@ -45,6 +43,10 @@ internal abstract class AISubcommandSettings : CommandSettings
 	[Description("Which proposal sets to emit: all | open | management. Default: all.")]
 	public string Proposals { get; set; } = "all";
 
+	[CommandOption("--pricing <MODE>")]
+	[Description("Price basis for AI suggestion output and pricing math: mid | bidask. Default: mid.")]
+	public string Pricing { get; set; } = SuggestionPricing.Mid;
+
 	public override ValidationResult Validate()
 	{
 		if (Output != "console" && Output != "text") return ValidationResult.Error($"--output: must be 'console' or 'text', got '{Output}'");
@@ -54,6 +56,8 @@ internal abstract class AISubcommandSettings : CommandSettings
 			return ValidationResult.Error($"--log-level: must be debug|information|error, got '{LogLevel}'");
 		if (!ValidProposalModes.Contains(Proposals, StringComparer.OrdinalIgnoreCase))
 			return ValidationResult.Error($"--proposals: must be all|open|management, got '{Proposals}'");
+		if (!ValidPricingModes.Contains(Pricing, StringComparer.OrdinalIgnoreCase))
+			return ValidationResult.Error($"--pricing: must be mid|bidask, got '{Pricing}'");
 		return ValidationResult.Success();
 	}
 
@@ -113,7 +117,7 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
 
-        if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
+		if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
 			Console.Error.WriteLine($"[debug] wa ai once: log-level=debug baseDir='{Program.BaseDir}' quoteSource='{config.QuoteSource}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals}");
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
@@ -135,27 +139,27 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 			tickerSet, priceCache, config.Rules.OpportunisticRoll.TechnicalFilter, now, cancellation);
 
 		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
-		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config), config);
+		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 
 		var results = evaluator.Evaluate(ctx);
 		var managementCount = settings.EmitManagementProposals ? results.Count : 0;
 		if (settings.EmitManagementProposals)
 		{
-			using var sink = new ProposalSink(config.Log, mode: "once");
+			using var sink = new ProposalSink(config.Log, mode: "once", suggestPricing: settings.Pricing);
 			foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
 		}
 
 		var openCount = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			using var openSink = new OpenProposalSink(config.Log, mode: "once");
-			var openEvaluator = new OpenCandidateEvaluator(config, quotes);
+			var openSink = new OpenProposalSink(config.Log, mode: "once", suggestPricing: settings.Pricing);
+			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			foreach (var p in openResults) openSink.Emit(p);
 			openCount = openResults.Count;
 		}
 
-        AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
+		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
 		return 0;
 	}
 }

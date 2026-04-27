@@ -1,7 +1,6 @@
+using Spectre.Console;
 using System.Globalization;
 using System.Text.Json;
-using Spectre.Console;
-using WebullAnalytics;
 using WebullAnalytics.Positions;
 
 namespace WebullAnalytics.AI.Output;
@@ -16,11 +15,13 @@ internal sealed class ProposalSink : IDisposable
 	private readonly StreamWriter _file;
 	private readonly LogConfig _log;
 	private readonly string _mode; // "watch" | "once" | "replay"
+	private readonly string _suggestPricing;
 
-	public ProposalSink(LogConfig log, string mode)
+	public ProposalSink(LogConfig log, string mode, string suggestPricing = SuggestionPricing.Mid)
 	{
 		_log = log;
 		_mode = mode;
+		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
 		var path = Program.ResolvePath(log.Path);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
@@ -79,38 +80,39 @@ internal sealed class ProposalSink : IDisposable
 
 		if (p.Kind != ProposalKind.AlertOnly && p.Legs.Count > 0)
 		{
-			var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@MID"));
+			var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{SuggestionPricing.AnalyzeKeywordFor(l, _suggestPricing)}"));
 
 			// 4-leg reset (close existing + open new): split into close-half and open-half combos — Webull
 			// rejects 4-leg orders that aren't iron condor/butterfly. ScenarioEngine.EmitReset emits legs
 			// in close-first/open-second order, so slice by position.
 			var canSplitReset = p.Kind == ProposalKind.Roll
 				&& p.Legs.Count == 4
-				&& p.Legs.All(l => l.PricePerShare.HasValue);
+				&& p.Legs.All(l => SuggestionPricing.PriceFor(l, _suggestPricing).HasValue);
 
 			// Non-calendar 2-leg rolls get split into per-leg orders so Webull's combo engine accepts the reversal.
 			var canSplit2 = p.Kind == ProposalKind.Roll
 				&& p.Legs.Count == 2
-				&& p.Legs.All(l => l.PricePerShare.HasValue)
+				&& p.Legs.All(l => SuggestionPricing.PriceFor(l, _suggestPricing).HasValue)
 				&& !RollShape.IsSameStrikeCalendar(p.Legs.Select(l => l.Symbol));
 
 			if (canSplitReset)
 			{
-				EmitComboLine(p.Legs.Take(2));
-				EmitComboLine(p.Legs.Skip(2));
+				EmitComboLine(p.Legs.Take(2), _suggestPricing, null);
+				EmitComboLine(p.Legs.Skip(2), _suggestPricing, null);
 			}
 			else if (canSplit2)
 			{
 				foreach (var leg in p.Legs)
 				{
-					var legLimit = leg.PricePerShare!.Value.ToString("F2", CultureInfo.InvariantCulture);
+					var legLimit = SuggestionPricing.PriceFor(leg, _suggestPricing)!.Value.ToString("F2", CultureInfo.InvariantCulture);
 					AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape($"{leg.Action}:{leg.Symbol}:{leg.Qty}")}\" --limit {legLimit}[/]");
 				}
 			}
 			else
 			{
 				var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-				var limit = Math.Abs(p.NetDebit / 100m).ToString("F2", CultureInfo.InvariantCulture);
+				var limitPerShare = SuggestionPricing.TryGetLimitPerShare(p.Legs, _suggestPricing) ?? Math.Abs(p.NetDebit / 100m);
+				var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
 				AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]");
 			}
 
@@ -126,13 +128,13 @@ internal sealed class ProposalSink : IDisposable
 	/// <summary>Emits a single combo `wa trade place` line for the given legs. `--limit` is the absolute
 	/// per-share signed net (sell prices add, buy prices subtract); Webull infers side from the legs.
 	/// Callers must ensure every leg has PricePerShare set.</summary>
-	private static void EmitComboLine(IEnumerable<ProposalLeg> legs)
+	private static void EmitComboLine(IEnumerable<ProposalLeg> legs, string suggestPricing, decimal? fallbackLimitPerShare)
 	{
 		var list = legs.ToList();
-		decimal signedNet = 0m;
-		foreach (var l in list)
-			signedNet += l.Action == "sell" ? l.PricePerShare!.Value : -l.PricePerShare!.Value;
-		var limit = Math.Abs(signedNet).ToString("F2", CultureInfo.InvariantCulture);
+		var limitPerShare = SuggestionPricing.TryGetLimitPerShare(list, suggestPricing)
+			   ?? fallbackLimitPerShare
+			   ?? 0m;
+		var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
 		var arg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 		AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(arg)}\" --limit {limit}[/]");
 	}

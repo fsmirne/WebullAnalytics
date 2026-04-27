@@ -18,7 +18,9 @@ internal enum ProposalKind
 /// <param name="Action">"buy" or "sell" (explicit, no sign math).</param>
 /// <param name="Symbol">OCC option symbol or equity ticker.</param>
 /// <param name="Qty">Positive integer.</param>
-internal record ProposalLeg(string Action, string Symbol, int Qty, decimal? PricePerShare = null);
+/// <param name="PricePerShare">Suggested default limit price per share, typically mid.</param>
+/// <param name="ExecutionPricePerShare">Optional bid/ask execution price per share for conservative suggestions.</param>
+internal record ProposalLeg(string Action, string Symbol, int Qty, decimal? PricePerShare = null, decimal? ExecutionPricePerShare = null);
 
 /// <summary>
 /// Output of a single rule evaluation.

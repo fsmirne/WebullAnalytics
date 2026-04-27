@@ -9,8 +9,8 @@ namespace WebullAnalytics.AI;
 /// <param name="Legs">Opening legs (buy/sell × OCC × qty=1). Scorer multiplies out per-contract numbers.</param>
 /// <param name="TargetExpiry">The date used as the "target" for scoring: short-leg expiry for calendars/diagonals and short verticals; the leg's own expiry for long call/put.</param>
 internal sealed record CandidateSkeleton(
-    string Ticker,
-    OpenStructureKind StructureKind,
-    IReadOnlyList<ProposalLeg> Legs,
-    DateTime TargetExpiry
+	string Ticker,
+	OpenStructureKind StructureKind,
+	IReadOnlyList<ProposalLeg> Legs,
+	DateTime TargetExpiry
 );

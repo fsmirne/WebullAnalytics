@@ -2,7 +2,6 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
-using System.Net.Http;
 using WebullAnalytics.Api;
 using WebullAnalytics.Positions;
 
@@ -228,7 +227,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		}
 		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]Preview failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
 		catch (HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
-        var preview = previewResponse.Result;
+		var preview = previewResponse.Result;
 		var marginSummary = preview.TryGetMarginSummary();
 		var marginText = string.IsNullOrEmpty(marginSummary) ? "" : $"  {Markup.Escape(marginSummary)}";
 		AnsiConsole.MarkupLine($"[bold]Preview:[/] cost={TradeContext.FormatCurrency(preview.EstimatedCost)}  fees={TradeContext.FormatCurrency(preview.EstimatedTransactionFee)}{marginText}");

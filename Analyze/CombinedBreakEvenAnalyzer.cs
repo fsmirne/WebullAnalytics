@@ -13,13 +13,13 @@ namespace WebullAnalytics.Analyze;
 /// </summary>
 public static class CombinedBreakEvenAnalyzer
 {
-  public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding = 2, int maxGridColumns = 7, IReadOnlyList<BreakEvenResult>? individualResults = null)
-		=> Analyze(positionRows, opts, padding, terminalWidth: TerminalHelper.DetailedMinWidth, displayMode: "pnl", showLegs: false, gridTableHasBorder: false, individualResults, forcedMaxGridColumns: maxGridColumns);
+	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding = 2, int maxGridColumns = 7, IReadOnlyList<BreakEvenResult>? individualResults = null)
+		  => Analyze(positionRows, opts, padding, terminalWidth: TerminalHelper.DetailedMinWidth, displayMode: "pnl", showLegs: false, gridTableHasBorder: false, individualResults, forcedMaxGridColumns: maxGridColumns);
 
-  public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, bool gridTableHasBorder = false, IReadOnlyList<BreakEvenResult>? individualResults = null)
-		=> Analyze(positionRows, opts, padding, terminalWidth, displayMode, showLegs, gridTableHasBorder, individualResults, forcedMaxGridColumns: null);
+	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, bool gridTableHasBorder = false, IReadOnlyList<BreakEvenResult>? individualResults = null)
+		  => Analyze(positionRows, opts, padding, terminalWidth, displayMode, showLegs, gridTableHasBorder, individualResults, forcedMaxGridColumns: null);
 
- private static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, bool gridTableHasBorder, IReadOnlyList<BreakEvenResult>? individualResults, int? forcedMaxGridColumns)
+	private static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, bool gridTableHasBorder, IReadOnlyList<BreakEvenResult>? individualResults, int? forcedMaxGridColumns)
 	{
 		var units = GroupUnits(positionRows);
 		var byTicker = new Dictionary<string, List<List<PositionRow>>>(StringComparer.Ordinal);
@@ -60,7 +60,7 @@ public static class CombinedBreakEvenAnalyzer
 			if (merged.Count == 0) continue; // fully offsetting portfolio
 
 			var tickerMargin = marginByTicker.TryGetValue(ticker, out var m) ? m : (decimal?)null;
-          var result = BuildResult(ticker, unitsForTicker.Count, merged, opts, padding, terminalWidth, displayMode, showLegs, gridTableHasBorder, tickerMargin, forcedMaxGridColumns);
+			var result = BuildResult(ticker, unitsForTicker.Count, merged, opts, padding, terminalWidth, displayMode, showLegs, gridTableHasBorder, tickerMargin, forcedMaxGridColumns);
 			if (result != null) results.Add(result);
 		}
 		return results;
@@ -98,7 +98,7 @@ public static class CombinedBreakEvenAnalyzer
 		return groups;
 	}
 
-    private static BreakEvenResult? BuildResult(string ticker, int unitCount, List<MergedLeg> merged, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, bool gridTableHasBorder, decimal? margin, int? forcedMaxGridColumns)
+	private static BreakEvenResult? BuildResult(string ticker, int unitCount, List<MergedLeg> merged, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, bool gridTableHasBorder, decimal? margin, int? forcedMaxGridColumns)
 	{
 		var optionLegs = merged.Where(l => !l.IsStock).ToList();
 		var stockLeg = merged.FirstOrDefault(l => l.IsStock);
@@ -224,7 +224,7 @@ public static class CombinedBreakEvenAnalyzer
 			var gridNotable = new List<decimal>(breakEvens);
 			if (spot.HasValue) gridNotable.Add(spot.Value);
 			gridNotable.AddRange(LookupExtraNotablePrices(ticker, opts));
-          var build = (int maxCols) => TimeDecayGridBuilder.Build(merged, netPremium, normalizingQty, nearestExpiry.Value, opts, padding, centerPrice, gridNotable, maxCols, spot);
+			var build = (int maxCols) => TimeDecayGridBuilder.Build(merged, netPremium, normalizingQty, nearestExpiry.Value, opts, padding, centerPrice, gridNotable, maxCols, spot);
 			if (forcedMaxGridColumns.HasValue)
 			{
 				grid = build(forcedMaxGridColumns.Value);
@@ -235,7 +235,7 @@ public static class CombinedBreakEvenAnalyzer
 					.Select(l => l.Price.ToString("N2", CultureInfo.InvariantCulture).Length)
 					.DefaultIfEmpty(0)
 					.Max();
-                var initialMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs, maxLegCount: optionLegs.Count, maxLegValueWidth: maxLegWidth, gridTableOuterBorders: gridTableHasBorder ? 2 : 0);
+				var initialMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs, maxLegCount: optionLegs.Count, maxLegValueWidth: maxLegWidth, gridTableOuterBorders: gridTableHasBorder ? 2 : 0);
 				grid = BuildFittedGrid(build, initialMax, terminalWidth, displayMode, showLegs, gridTableHasBorder ? 2 : 0);
 			}
 
@@ -275,7 +275,7 @@ public static class CombinedBreakEvenAnalyzer
 		);
 	}
 
-   private static TimeDecayGrid BuildFittedGrid(Func<int, TimeDecayGrid> buildGrid, int initialMaxColumns, int terminalWidth, string displayMode, bool showLegs, int gridTableOuterBorders)
+	private static TimeDecayGrid BuildFittedGrid(Func<int, TimeDecayGrid> buildGrid, int initialMaxColumns, int terminalWidth, string displayMode, bool showLegs, int gridTableOuterBorders)
 	{
 		var maxColumns = Math.Max(3, initialMaxColumns);
 		var grid = buildGrid(maxColumns);
@@ -287,7 +287,7 @@ public static class CombinedBreakEvenAnalyzer
 			if (expanded.DateColumns.Count <= grid.DateColumns.Count)
 				break;
 
-         var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
+			var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
 			if (required > terminalWidth)
 				break;
 

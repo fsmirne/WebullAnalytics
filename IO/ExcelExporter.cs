@@ -428,7 +428,7 @@ public static class ExcelExporter
 				{
 					sheet.Cells[dataStartRow, 8].Value = (double)point.UnderlyingPrice;
 					sheet.Cells[dataStartRow, 8].Style.Numberformat.Format = "$#,##0.00";
-					
+
 					if (point.ContractValue.HasValue)
 					{
 						sheet.Cells[dataStartRow, 9].Value = (double)point.ContractValue.Value;

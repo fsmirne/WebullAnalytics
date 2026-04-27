@@ -1,5 +1,6 @@
-using Xunit;
 using WebullAnalytics.Analyze;
+using WebullAnalytics.Trading;
+using Xunit;
 
 namespace WebullAnalytics.Tests.Analyze;
 
@@ -91,5 +92,35 @@ public class BuildReproductionCommandsTests
 		var (trades, analyze) = AnalyzePositionCommand.BuildReproductionCommands(sc, new AnalyzePositionSettings());
 		Assert.Null(trades);
 		Assert.Null(analyze);
+	}
+
+	[Fact]
+	public void GenerateScenarios_UsesMidPricesInAnalyzePositionSuggestions()
+	{
+		var expiry = new DateTime(2026, 5, 1);
+		var shortSymbol = "GME260501C00025000";
+		var longSymbol = "GME260501C00025500";
+		var legs = new List<AnalyzePositionCommand.PositionSnapshot>
+		{
+			new(shortSymbol, LegAction.Sell, 100, 0.15m, new OptionParsed("GME", expiry, "C", 25.0m)),
+			new(longSymbol, LegAction.Buy, 100, 0.65m, new OptionParsed("GME", expiry, "C", 25.5m)),
+		};
+		var quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase)
+		{
+			[shortSymbol] = new(shortSymbol, null, 0.10m, 0.30m, null, null, null, null, 0.40m),
+			[longSymbol] = new(longSymbol, null, 0.60m, 0.80m, null, null, null, null, 0.40m),
+		};
+
+		var scenarios = AnalyzePositionCommand.GenerateScenarios(
+			legs,
+			AnalyzePositionCommand.StructureKind.Vertical,
+			new AnalyzePositionSettings(),
+			spot: 25.2m,
+			asOf: new DateTime(2026, 4, 20),
+			quotes: quotes);
+
+		Assert.Equal(50m, scenarios[0].CashImpactPerContract);
+		var closeAll = Assert.Single(scenarios, s => s.Name == "Close all");
+		Assert.Equal($"BUY {shortSymbol} x100 @0.2, SELL {longSymbol} x100 @0.7", closeAll.ActionSummary);
 	}
 }

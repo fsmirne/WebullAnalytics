@@ -83,7 +83,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		if (AnalyzeCommon.NeedsMarketPrices(normalizedSpec))
 		{
-          quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings, normalizedSpec, cancellation);
+			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings, normalizedSpec, cancellation);
 			if (quotes == null) return 1;
 		}
 
@@ -347,7 +347,7 @@ internal static class AnalyzeCommon
 				parentSeq = seq++;
 				var parentTimestamp = baseTimestamp.AddSeconds(seq - startSeq);
 				var qty = resolvedLegs[0].Leg.Quantity; // strategy orders share qty across legs
-				// Cash convention: positive = received, negative = paid. Mirror JsonlParser.
+														// Cash convention: positive = received, negative = paid. Mirror JsonlParser.
 				var netCash = resolvedLegs.Sum(r => (r.Side == Side.Sell ? 1m : -1m) * r.Price * r.Leg.Quantity);
 				var parentSide = netCash >= 0m ? Side.Sell : Side.Buy;
 				var parentPrice = qty > 0 ? Math.Abs(netCash) / qty : 0m;
@@ -711,7 +711,7 @@ internal static class AnalyzeCommon
 
 	/// <summary>
 	/// Computes combined margin for a single short leg paired with an optional static long leg.
- /// Covered time spreads / debit spreads do not require broker margin here — the debit is cash paid,
+	/// Covered time spreads / debit spreads do not require broker margin here — the debit is cash paid,
 	/// not collateral. We therefore surface only true Reg-T-style collateral requirements:
 	///   - naked shorts => naked margin
 	///   - protected credit spreads / inverted diagonals => strike-width collateral on the covered leg
@@ -753,14 +753,14 @@ internal static class AnalyzeCommon
 		if (lo.ExpiryDate < shortLeg.ExpiryDate)
 			return new LegMargin($"no cover (long expires {lo.ExpiryDate:yyyy-MM-dd} < short expires {shortLeg.ExpiryDate:yyyy-MM-dd})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
 
-      // Covered spread / diagonal collateral:
+		// Covered spread / diagonal collateral:
 		// - calendars / covered diagonals / debit verticals => $0
 		// - credit verticals => strike-width collateral
 		// - inverted diagonals => strike-width assignment loss + entry debit
 		var strikeLoss = shortLeg.CallPut == "C"
 			? Math.Max(lo.Strike - shortLeg.Strike, 0m)
 			: Math.Max(shortLeg.Strike - lo.Strike, 0m);
-      var isTimeSpread = lo.ExpiryDate > shortLeg.ExpiryDate;
+		var isTimeSpread = lo.ExpiryDate > shortLeg.ExpiryDate;
 		var debit = Math.Max(longPremium - shortPremium, 0m);
 		var coveredPer = strikeLoss == 0m
 			? 0m
@@ -772,13 +772,13 @@ internal static class AnalyzeCommon
 		var uncoveredOpt = shortQty - coverableOpt;
 		var totalOpt = coverableOpt * coveredPer + uncoveredOpt * naked;
 
-     // Label explains the structure: strike_loss = 0 → no-margin covered structure; positive → margin-capped spread.
+		// Label explains the structure: strike_loss = 0 → no-margin covered structure; positive → margin-capped spread.
 		var structureLabel = strikeLoss == 0m
-          ? (lo.Strike == shortLeg.Strike ? "calendar" : lo.ExpiryDate == shortLeg.ExpiryDate ? "debit vertical" : "covered diagonal")
+		  ? (lo.Strike == shortLeg.Strike ? "calendar" : lo.ExpiryDate == shortLeg.ExpiryDate ? "debit vertical" : "covered diagonal")
 			: lo.ExpiryDate == shortLeg.ExpiryDate ? $"credit vertical (width ${strikeLoss * 100m:N2})" : $"inverted diagonal (strike loss ${strikeLoss * 100m:N2})";
 		var costBreakdown = coveredPer == 0m
 			? "$0.00 margin/contract"
-          : isTimeSpread && strikeLoss > 0m
+		  : isTimeSpread && strikeLoss > 0m
 				? $"${strikeLoss * 100m:N2} strike + ${debit * 100m:N2} debit = ${coveredPer:N2} margin/contract"
 			: $"${coveredPer:N2} margin/contract";
 		var labelOpt = uncoveredOpt == 0

@@ -1,8 +1,7 @@
-using System.Globalization;
-using System.Text.RegularExpressions;
 using Spectre.Console;
 using Spectre.Console.Rendering;
-using WebullAnalytics.IO;
+using System.Globalization;
+using System.Text.RegularExpressions;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Report;
 
@@ -583,18 +582,18 @@ public static class TableBuilder
 	/// Layout: panel borders (4) + table outer borders (2) + price column (11) + N × date column (15 for pnl, 10 for value).
 	/// Each Spectre table column = content + 2 padding + 1 separator.
 	/// </summary>
-    public static int ComputeMaxGridColumns(int totalWidth, string displayMode, bool showLegs = false, int maxLegCount = 2, int maxLegValueWidth = 6, int gridTableOuterBorders = 0)
+	public static int ComputeMaxGridColumns(int totalWidth, string displayMode, bool showLegs = false, int maxLegCount = 2, int maxLegValueWidth = 6, int gridTableOuterBorders = 0)
 	{
-     // panel left/right border+padding (4) + table outer left+right borders (usually 0 inside panels) + price column (content 8 + pad 2 + sep 1 = 11)
+		// panel left/right border+padding (4) + table outer left+right borders (usually 0 inside panels) + price column (content 8 + pad 2 + sep 1 = 11)
 		var fixedOverhead = 4 + gridTableOuterBorders + 11;
 		var netWidth = displayMode == "pnl" ? 12 : 7; // pnl: "$+1,520.00" (10) + 2 pad + 1 sep; value: "$25.38" (6) + 2 pad + 1 sep
-     // When showing legs, each date column's cell becomes "leg1|leg2|...|net".
-       // Estimate leg-segment width from a caller-provided max leg value width (in characters).
-		// This is intentionally per-panel so small-premium spreads can fit more date columns without wrapping.
+													  // When showing legs, each date column's cell becomes "leg1|leg2|...|net".
+													  // Estimate leg-segment width from a caller-provided max leg value width (in characters).
+													  // This is intentionally per-panel so small-premium spreads can fit more date columns without wrapping.
 		var effectiveShowLegs = showLegs && maxLegCount > 1;
-        var perLegSegmentWidth = Math.Max(4, maxLegValueWidth) + 1; // +1 for the internal '|' separator
+		var perLegSegmentWidth = Math.Max(4, maxLegValueWidth) + 1; // +1 for the internal '|' separator
 		var colWidth = effectiveShowLegs
-         ? netWidth + (Math.Max(2, maxLegCount) * perLegSegmentWidth)
+		 ? netWidth + (Math.Max(2, maxLegCount) * perLegSegmentWidth)
 			: netWidth + 3;
 		var available = totalWidth - fixedOverhead;
 		return Math.Max(3, available / colWidth); // minimum 3: today, expiry open, at exp
@@ -604,10 +603,10 @@ public static class TableBuilder
 	/// Computes the approximate total terminal width required to render the given time-decay grid
 	/// inside a break-even panel, matching the formatting used by <see cref="BuildTimeDecayGridTable"/>.
 	/// </summary>
-    internal static int ComputeTimeDecayGridRequiredWidth(TimeDecayGrid grid, string displayMode, bool showLegs, int gridTableOuterBorders = 0)
+	internal static int ComputeTimeDecayGridRequiredWidth(TimeDecayGrid grid, string displayMode, bool showLegs, int gridTableOuterBorders = 0)
 	{
 		const int panelOverhead = 4; // panel left/right border+padding
-      var tableOuterBorders = gridTableOuterBorders; // table outer left+right borders (0 when border is TableBorder.None)
+		var tableOuterBorders = gridTableOuterBorders; // table outer left+right borders (0 when border is TableBorder.None)
 
 		var effectiveShowLegs = showLegs && grid.LegValues != null;
 		var legCount = effectiveShowLegs ? grid.LegValues!.GetLength(0) : 0;
@@ -616,7 +615,7 @@ public static class TableBuilder
 		{
 			if (value == 0) return "$0.00";
 			return value > 0
-               ? $"+${value.ToString("N2", CultureInfo.InvariantCulture)}"
+			   ? $"+${value.ToString("N2", CultureInfo.InvariantCulture)}"
 				: $"-${Math.Abs(value).ToString("N2", CultureInfo.InvariantCulture)}";
 		}
 
@@ -641,7 +640,7 @@ public static class TableBuilder
 			{
 				var netText = displayMode == "pnl"
 					? FormatNetPnL(grid.PnLs[pi, di])
-                 : $"${grid.Values[pi, di].ToString("N2", CultureInfo.InvariantCulture)}";
+				 : $"${grid.Values[pi, di].ToString("N2", CultureInfo.InvariantCulture)}";
 				maxNetWidth = Math.Max(maxNetWidth, netText.Length);
 			}
 
