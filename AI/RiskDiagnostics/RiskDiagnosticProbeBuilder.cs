@@ -15,7 +15,7 @@ internal static class RiskDiagnosticProbeBuilder
         DateTime asOf,
         Func<string, decimal> ivResolver,
         IReadOnlyDictionary<string, OptionContractQuote>? quotes,
-       (decimal bias, OpenerConfig cfg, string structure, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore)? opener = null,
+        (decimal bias, OpenerConfig cfg, string structure, int qty, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore)? opener = null,
         decimal? technicalBiasOverride = null,
         bool useCostBasisForOpenerScore = false)
     {
@@ -27,12 +27,10 @@ internal static class RiskDiagnosticProbeBuilder
             var longIdx = 0;
             foreach (var leg in legs)
             {
-                var label = leg.IsLong
-                    ? (longIdx++ == 0 ? "long" : $"long{longIdx}")
-                    : (shortIdx++ == 0 ? "short" : $"short{shortIdx}");
+                var label = leg.IsLong ? (longIdx++ == 0 ? "long" : $"long{longIdx}") : (shortIdx++ == 0 ? "short" : $"short{shortIdx}");
                 if (!quotes.TryGetValue(leg.Symbol, out var q))
                 {
-                    legQuotes.Add(new RiskDiagnosticLegQuote(label, leg.Symbol, null, null, null, null, null));
+                    legQuotes.Add(new RiskDiagnosticLegQuote(label, leg.Symbol, null, null, null, null, null, null, null));
                     continue;
                 }
                 legQuotes.Add(new RiskDiagnosticLegQuote(
@@ -41,6 +39,8 @@ internal static class RiskDiagnosticProbeBuilder
                     Bid: q.Bid,
                     Ask: q.Ask,
                     ImpliedVolatility: q.ImpliedVolatility,
+                    HistoricalVolatility: q.HistoricalVolatility,
+                    ImpliedVolatility5Day: q.ImpliedVolatility5Day,
                     OpenInterest: q.OpenInterest,
                     Volume: q.Volume));
             }
@@ -87,12 +87,13 @@ internal static class RiskDiagnosticProbeBuilder
             }
         }
 
-      RiskDiagnosticOpenerScore? openerScore = null;
+        RiskDiagnosticOpenerScore? openerScore = null;
         if (opener.HasValue)
         {
             var o = opener.Value;
             openerScore = new RiskDiagnosticOpenerScore(
                 Structure: o.structure,
+                Qty: o.qty,
                 DebitOrCreditPerContract: o.creditPerContract,
                 MaxProfitPerContract: o.maxProfit,
                 MaxLossPerContract: o.maxLoss,
@@ -172,6 +173,7 @@ internal static class RiskDiagnosticProbeBuilder
                         var rationale = CandidateScorer.BuildRationale(scored, bias, ai.Opener);
                         openerScore = new RiskDiagnosticOpenerScore(
                             Structure: scored.StructureKind.ToString(),
+                            Qty: scored.Qty,
                             DebitOrCreditPerContract: scored.DebitOrCreditPerContract,
                             MaxProfitPerContract: scored.MaxProfitPerContract,
                             MaxLossPerContract: scored.MaxLossPerContract,
@@ -206,6 +208,7 @@ internal static class RiskDiagnosticProbeBuilder
             var legsStr = legParts.Count > 0 ? $" ({string.Join(", ", legParts)})" : "";
             openerScore = new RiskDiagnosticOpenerScore(
                 Structure: "probe",
+                Qty: legs.Count > 0 ? legs[0].Qty : 1,
                 DebitOrCreditPerContract: null,
                 MaxProfitPerContract: null,
                 MaxLossPerContract: null,

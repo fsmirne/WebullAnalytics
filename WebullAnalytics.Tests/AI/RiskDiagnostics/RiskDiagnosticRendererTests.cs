@@ -56,8 +56,8 @@ public class RiskDiagnosticRendererTests
                 EnumDeltaPass: null,
                 LegQuotes: new[]
                 {
-                    new RiskDiagnosticLegQuote("short", "GME260501C00025000", 0.10m, 0.14m, 0.400m, 100, 10),
-                    new RiskDiagnosticLegQuote("long", "GME260522C00025000", 0.80m, 0.90m, 0.420m, 200, 20),
+                    new RiskDiagnosticLegQuote("short", "GME260501C00025000", 0.10m, 0.14m, 0.400m, 0.350m, 0.380m, 100, 10),
+                    new RiskDiagnosticLegQuote("long", "GME260522C00025000", 0.80m, 0.90m, 0.420m, 0.360m, 0.410m, 200, 20),
                 },
                 OpenerScore: null));
 
@@ -66,6 +66,8 @@ public class RiskDiagnosticRendererTests
         Assert.Contains("Long quote:", text);
         Assert.Contains("mid=0.12", text);
         Assert.Contains("mid=0.85", text);
+        Assert.Contains("iv=0.400 hv=0.350 iv5=0.380", text);
+        Assert.Contains("iv=0.420 hv=0.360 iv5=0.410", text);
     }
 
     [Fact]
@@ -101,6 +103,7 @@ public class RiskDiagnosticRendererTests
                 LegQuotes: Array.Empty<RiskDiagnosticLegQuote>(),
                 OpenerScore: new RiskDiagnosticOpenerScore(
                     Structure: nameof(OpenStructureKind.ShortPutVertical),
+                    Qty: 250,
                     DebitOrCreditPerContract: 38m,
                     MaxProfitPerContract: 38m,
                     MaxLossPerContract: -62m,
@@ -114,6 +117,7 @@ public class RiskDiagnosticRendererTests
 
         var text = Render(diagnostic);
         Assert.Contains("Margin:", text);
+        Assert.Contains("$15,500.00 total", text);
         Assert.Contains("$62.00/contract", text);
     }
 
@@ -150,6 +154,7 @@ public class RiskDiagnosticRendererTests
                 LegQuotes: Array.Empty<RiskDiagnosticLegQuote>(),
                 OpenerScore: new RiskDiagnosticOpenerScore(
                     Structure: nameof(OpenStructureKind.LongCalendar),
+                    Qty: 250,
                     DebitOrCreditPerContract: -50m,
                     MaxProfitPerContract: 100m,
                     MaxLossPerContract: -50m,
@@ -163,6 +168,6 @@ public class RiskDiagnosticRendererTests
 
         var text = Render(diagnostic);
         Assert.Contains("Margin:", text);
-        Assert.Contains("$0", text);
+        Assert.Contains("$0 total ($0/contract)", text);
     }
 }

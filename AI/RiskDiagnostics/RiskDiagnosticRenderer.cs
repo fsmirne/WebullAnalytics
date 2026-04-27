@@ -53,9 +53,11 @@ internal static class RiskDiagnosticRenderer
 					? ((q.Bid.Value + q.Ask.Value) / 2m).ToString("F2", CultureInfo.InvariantCulture)
 					: "null";
 				var iv = q.ImpliedVolatility.HasValue ? q.ImpliedVolatility.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
+                var hv = q.HistoricalVolatility.HasValue ? q.HistoricalVolatility.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
+				var iv5 = q.ImpliedVolatility5Day.HasValue ? q.ImpliedVolatility5Day.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
 				var oi = q.OpenInterest.HasValue ? q.OpenInterest.Value.ToString(CultureInfo.InvariantCulture) : "null";
 				var vol = q.Volume.HasValue ? q.Volume.Value.ToString(CultureInfo.InvariantCulture) : "null";
-             items.Add((label, $"bid={bid} ask={ask} mid={mid} iv={iv} oi={oi} vol={vol} sym={Markup.Escape(q.Symbol)}"));
+				items.Add((label, $"bid={bid} ask={ask} mid={mid} iv={iv} hv={hv} iv5={iv5} oi={oi} vol={vol} sym={Markup.Escape(q.Symbol)}"));
 			}
 
             if (p.OpenerScore is RiskDiagnosticOpenerScore s)
@@ -105,15 +107,18 @@ internal static class RiskDiagnosticRenderer
 		? $"credit ${n.ToString("F2", CultureInfo.InvariantCulture)}"
 		: $"debit ${Math.Abs(n).ToString("F2", CultureInfo.InvariantCulture)}";
 
-	private static string? TryFormatMarginRequirement(RiskDiagnosticOpenerScore s)
+  private static string? TryFormatMarginRequirement(RiskDiagnosticOpenerScore s)
 	{
 		if (string.IsNullOrWhiteSpace(s.Structure) || s.Structure.Equals("probe", StringComparison.OrdinalIgnoreCase))
 			return null;
 
-		var margin = RequiresMargin(s.Structure) ? s.CapitalAtRiskPerContract ?? 0m : 0m;
-		return margin == 0m
-			? "$0"
-			: $"${margin.ToString("N2", CultureInfo.InvariantCulture)}/contract";
+		var perContract = RequiresMargin(s.Structure) ? s.CapitalAtRiskPerContract ?? 0m : 0m;
+		var qty = Math.Max(1, s.Qty);
+		var total = perContract * qty;
+		if (qty <= 1)
+			return perContract == 0m ? "$0" : $"${perContract.ToString("N2", CultureInfo.InvariantCulture)}/contract";
+
+		return total == 0m ? "$0 total ($0/contract)" : $"${total.ToString("N2", CultureInfo.InvariantCulture)} total (${perContract.ToString("N2", CultureInfo.InvariantCulture)}/contract)";
 	}
 
 	private static bool RequiresMargin(string structure) =>

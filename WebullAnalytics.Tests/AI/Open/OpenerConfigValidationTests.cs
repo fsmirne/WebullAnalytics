@@ -49,4 +49,12 @@ public class OpenerConfigValidationTests
         cfg.Opener.Structures.LongCalendar.ShortDteMax = 5;
         Assert.Contains("longCalendar.shortDteMax", AIConfigLoader.Validate(cfg) ?? "");
     }
+
+    [Fact]
+    public void VolatilityFitWeightMustBeNonNegative()
+    {
+        var cfg = MinimalValidConfig();
+        cfg.Opener.VolatilityFitWeight = -0.1m;
+        Assert.Contains("opener.volatilityFitWeight", AIConfigLoader.Validate(cfg) ?? "");
+    }
 }
