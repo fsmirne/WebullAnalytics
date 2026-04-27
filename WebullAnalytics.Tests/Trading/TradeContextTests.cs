@@ -31,7 +31,7 @@ public class TradeContextTests
             new(
                 PositionId: "pos-1",
                 Symbol: "GME",
-                InstrumentType: "OPTION",
+				InstrumentType: "OPTION",
                 OptionStrategy: "calendar",
                 Currency: "USD",
                 CostPrice: "1.25",
