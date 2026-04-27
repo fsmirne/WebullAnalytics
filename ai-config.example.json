@@ -17,7 +17,7 @@
 	},
 	"log": {
 		"path": "data/ai-proposals.log",
-		"consoleVerbosity": "normal"
+		"level": "information"
 	},
 	"opener": {
 		"enabled": true,

@@ -32,7 +32,7 @@ public class OpenProposalSinkTests
         var tmp = Path.GetTempFileName();
         try
         {
-            using (var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "quiet" }, mode: "once"))
+            using (var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "error" }, mode: "once"))
             {
                 sink.Emit(MakeProposal(0.01m, "fp1"));
                 sink.Flush();
@@ -51,7 +51,7 @@ public class OpenProposalSinkTests
         var tmp = Path.GetTempFileName();
         try
         {
-            using (var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "quiet" }, mode: "once"))
+            using (var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "error" }, mode: "once"))
             {
                 sink.Emit(MakeProposal(0.01m, "fp1"));
                 sink.Emit(MakeProposal(0.01m, "fp1"));
@@ -69,7 +69,7 @@ public class OpenProposalSinkTests
         var tmp = Path.GetTempFileName();
         try
         {
-            using var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "quiet" }, mode: "once");
+            using var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "error" }, mode: "once");
             Assert.False(sink.IsRepeat(MakeProposal(0.01m, "fp1")));
             sink.Emit(MakeProposal(0.01m, "fp1"));
             Assert.True(sink.IsRepeat(MakeProposal(0.01m, "fp1")));
@@ -83,7 +83,7 @@ public class OpenProposalSinkTests
         var tmp = Path.GetTempFileName();
         try
         {
-            using var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "quiet" }, mode: "once");
+            using var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "error" }, mode: "once");
             sink.Emit(MakeProposal(0.01m, "fp1"));
             Assert.False(sink.IsRepeat(MakeProposal(0.0111m, "fp1"))); // +11%
             Assert.True(sink.IsRepeat(MakeProposal(0.0105m, "fp1")));  // +5% — still repeat
