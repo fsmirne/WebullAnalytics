@@ -54,8 +54,21 @@ internal static class RiskDiagnosticRenderer
 				items.Add((label, $"bid={bid} ask={ask} iv={iv} oi={oi} vol={vol} sym={Markup.Escape(q.Symbol)}"));
 			}
 
-			if (p.OpenerScore is RiskDiagnosticOpenerScore s && !string.IsNullOrWhiteSpace(s.Rationale))
-				items.Add(("Rationale:", Markup.Escape(s.Rationale)));
+            if (p.OpenerScore is RiskDiagnosticOpenerScore s && !string.IsNullOrWhiteSpace(s.Rationale))
+			{
+				var sections = s.Rationale
+					.Replace("\r\n", "\n", StringComparison.Ordinal)
+					.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+				if (sections.Length > 0)
+					items.Add(("Rationale:", Markup.Escape(sections[0])));
+
+				if (sections.Length > 1)
+					items.Add(("Score:", Markup.Escape(sections[1])));
+
+				for (var i = 2; i < sections.Length; i++)
+					items.Add(("Detail:", Markup.Escape(sections[i])));
+			}
 		}
 
 		var labelWidth = items.Max(i => i.Label.Length);
