@@ -1,7 +1,6 @@
 using Spectre.Console;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Sources;
-using WebullAnalytics.AI;
 
 namespace WebullAnalytics.AI.Replay;
 

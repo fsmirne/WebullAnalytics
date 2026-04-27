@@ -79,7 +79,8 @@ internal static class PositionReplay
 		foreach (var lin in active.ToList())
 		{
 			var expiredLegs = lin.OpenLegs
-				.Where(kv => {
+				.Where(kv =>
+				{
 					var parsed = MatchKeys.ParseOption(kv.Key);
 					return parsed.HasValue && parsed.Value.parsed.ExpiryDate.Date < evaluationDate.Date;
 				})
@@ -780,7 +781,7 @@ internal static class PositionReplay
 				));
 			}
 
-		  adjustments[parentRowIndex] = new StrategyAdjustment(lin.TradeHistory, lin.RunningCash, null, lin.FirstEntryCash);
+			adjustments[parentRowIndex] = new StrategyAdjustment(lin.TradeHistory, lin.RunningCash, null, lin.FirstEntryCash);
 		}
 
 		return (rows, adjustments, singleLegStandalones);

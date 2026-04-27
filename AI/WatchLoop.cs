@@ -1,9 +1,8 @@
-using System.ComponentModel;
-using System.Globalization;
 using Spectre.Console;
 using Spectre.Console.Cli;
+using System.ComponentModel;
+using System.Globalization;
 using WebullAnalytics.AI.Output;
-using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
@@ -67,16 +66,16 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 		var positions = AIContext.BuildLivePositionSource(config);
 		var quotes = AIContext.BuildLiveQuoteSource(config);
-		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config), config);
+		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
 
-		using var sink = new ProposalSink(config.Log, mode: "watch");
+		using var sink = new ProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing);
 		OpenProposalSink? openSink = null;
 		OpenCandidateEvaluator? openEvaluator = null;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			openSink = new OpenProposalSink(config.Log, mode: "watch");
-			openEvaluator = new OpenCandidateEvaluator(config, quotes);
+			openSink = new OpenProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing);
+			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing);
 		}
 		var priceCache = new Replay.HistoricalPriceCache();
 

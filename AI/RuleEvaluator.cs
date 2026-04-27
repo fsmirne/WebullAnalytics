@@ -1,3 +1,4 @@
+using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Rules;
 
 namespace WebullAnalytics.AI;
@@ -66,13 +67,14 @@ internal sealed class RuleEvaluator
 	}
 
 	/// <summary>Constructs the default rule set from config.</summary>
- internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config)
+	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config, string pricingMode = SuggestionPricing.Mid)
 	{
-        var debug = string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase);
+		var debug = string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase);
+		var normalizedPricing = SuggestionPricing.Normalize(pricingMode);
 		return new IManagementRule[]
 		{
 			new StopLossRule(config.Rules.StopLoss),
-			new OpportunisticRollRule(config.Rules.OpportunisticRoll, debug),
+			new OpportunisticRollRule(config.Rules.OpportunisticRoll, debug, normalizedPricing),
 			new TakeProfitRule(config.Rules.TakeProfit),
 			new DefensiveRollRule(config.Rules.DefensiveRoll),
 			new RollShortOnExpiryRule(config.Rules.RollShortOnExpiry)

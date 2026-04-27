@@ -1,4 +1,3 @@
-using System.Globalization;
 using WebullAnalytics.Positions;
 
 namespace WebullAnalytics.Pricing;

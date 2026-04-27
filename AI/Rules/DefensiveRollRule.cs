@@ -39,7 +39,7 @@ internal sealed class DefensiveRollRule : IManagementRule
 
 		// Look up quotes to estimate the net. If missing, we still emit as AlertOnly (legs get no prices).
 		if (!ctx.Quotes.TryGetValue(shortLeg.Symbol, out var oldQ) || !ctx.Quotes.TryGetValue(newSymbol, out var newQ) ||
-		    oldQ.Ask == null || newQ.Bid == null)
+			oldQ.Ask == null || newQ.Bid == null)
 		{
 			var alertLegs = new[]
 			{
@@ -59,8 +59,8 @@ internal sealed class DefensiveRollRule : IManagementRule
 
 		var legs = new[]
 		{
-			new ProposalLeg("buy", shortLeg.Symbol, shortLeg.Qty, oldQ.Ask),   // close the old short at ask
-			new ProposalLeg("sell", newSymbol, shortLeg.Qty, newQ.Bid)          // open the new short at bid
+			new ProposalLeg("buy", shortLeg.Symbol, shortLeg.Qty, (oldQ.Bid!.Value + oldQ.Ask.Value) / 2m, oldQ.Ask),   // close the old short at ask
+			new ProposalLeg("sell", newSymbol, shortLeg.Qty, (newQ.Bid!.Value + newQ.Ask!.Value) / 2m, newQ.Bid)          // open the new short at bid
 		};
 
 		// netCredit = newBid - oldAsk (we sell the new short, buy to close the old).

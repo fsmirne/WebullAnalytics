@@ -152,7 +152,7 @@ internal static class AIConfigLoader
 		if (c.CashReserve.Mode is not ("percent" or "absolute")) return $"cashReserve.mode: must be 'percent' or 'absolute', got '{c.CashReserve.Mode}'";
 		if (c.CashReserve.Value < 0m) return $"cashReserve.value: must be non-negative, got {c.CashReserve.Value}";
 		if (c.CashReserve.Mode == "percent" && c.CashReserve.Value > 100m) return $"cashReserve.value: must be ≤ 100 for mode 'percent', got {c.CashReserve.Value}";
-      if (c.Log.ConsoleVerbosity is not ("error" or "information" or "debug")) return $"log.level: must be error|information|debug, got '{c.Log.ConsoleVerbosity}'";
+		if (c.Log.ConsoleVerbosity is not ("error" or "information" or "debug")) return $"log.level: must be error|information|debug, got '{c.Log.ConsoleVerbosity}'";
 
 		var sl = c.Rules.StopLoss;
 		if (sl.MaxDebitMultiplier <= 0m) return $"rules.stopLoss.maxDebitMultiplier: must be > 0, got {sl.MaxDebitMultiplier}";

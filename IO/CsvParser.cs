@@ -3,7 +3,6 @@ using CsvHelper.Configuration;
 using CsvHelper.TypeConversion;
 using System.Globalization;
 using System.Reflection;
-using System.Text.RegularExpressions;
 using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.IO;
