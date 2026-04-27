@@ -1378,13 +1378,29 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			legs.Add((action, tokens[1], tokens[2].TrimStart('x'), tokens[3].TrimStart('@')));
 		}
 
-		// Analyze-trade line: one combined command, per-leg @PRICE preserved.
-		var analyzeLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}");
+		// Analyze-trade line mirrors the executable broker order grouping: unsupported roll reversals
+		// must be separated with ';' so the synthetic replay doesn't force them into one combo event.
+		var analyzeGroups = new List<string>();
+		var analyzeLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}").ToList();
+		var splittable = sc.IsRoll && legs.Count == 2 && !RollShape.IsSameStrikeCalendar(legs.Select(l => l.Symbol));
+		if (sc.IsRoll && legs.Count == 4)
+		{
+			analyzeGroups.Add(string.Join(",", analyzeLegs.Take(2)));
+			analyzeGroups.Add(string.Join(",", analyzeLegs.Skip(2)));
+		}
+		else if (splittable)
+		{
+			analyzeGroups.AddRange(analyzeLegs);
+		}
+		else
+		{
+			analyzeGroups.Add(string.Join(",", analyzeLegs));
+		}
 		var extras = new List<string>();
 		if (!string.IsNullOrEmpty(settings.TickerPrice)) extras.Add($"--ticker-price {settings.TickerPrice}");
 		if (!string.IsNullOrEmpty(settings.Date)) extras.Add($"--date {settings.Date}");
 		var suffix = extras.Count > 0 ? " " + string.Join(" ", extras) : "";
-		var analyze = $"wa analyze trade \"{string.Join(",", analyzeLegs)}\"{suffix}";
+		var analyze = $"wa analyze trade \"{string.Join(";", analyzeGroups)}\"{suffix}";
 
 		// 4-leg reset: split into close-half and open-half combos.
 		if (sc.IsRoll && legs.Count == 4)
@@ -1396,7 +1412,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		// Split non-calendar rolls into per-leg orders so Webull's combo engine accepts them.
 		// Per-leg --limit is rounded to cents so it round-trips through the broker (sub-penny isn't a valid tick).
-		var splittable = sc.IsRoll && legs.Count == 2 && !RollShape.IsSameStrikeCalendar(legs.Select(l => l.Symbol));
 		if (splittable)
 		{
 			var trades = legs.Select(l =>

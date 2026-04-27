@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
 using WebullAnalytics.Api;
+using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Report;
 using WebullAnalytics.Trading;
@@ -77,16 +78,18 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		var (trades, feeLookup, err) = ReportCommand.LoadTrades(settings);
 		if (err != 0) return err;
 
+		var normalizedSpec = AnalyzeCommon.NormalizeTradeSpecForSyntheticExecution(settings.Spec);
+
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
-		if (AnalyzeCommon.NeedsMarketPrices(settings.Spec))
+		if (AnalyzeCommon.NeedsMarketPrices(normalizedSpec))
 		{
-			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings, settings.Spec, cancellation);
+          quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings, normalizedSpec, cancellation);
 			if (quotes == null) return 1;
 		}
 
 		var maxSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
 		var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : trades.Count > 0 ? trades.Max(t => t.Timestamp) : DateTime.Now;
-		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(settings.Spec, maxSeq, baseTime, quotes));
+		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(normalizedSpec, maxSeq, baseTime, quotes));
 
 		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation);
 	}
@@ -212,6 +215,35 @@ internal static class AnalyzeCommon
 
 	internal static bool NeedsMarketPrices(string tradesSpec) =>
 		ParseAllLegs(tradesSpec).Any(leg => leg.PriceKeyword != null);
+
+	internal static string NormalizeTradeSpecForSyntheticExecution(string tradesSpec)
+	{
+		var groups = tradesSpec.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		if (groups.Length == 0) return tradesSpec;
+
+		var normalized = new List<string>(groups.Length);
+		foreach (var group in groups)
+		{
+			var legs = TradeLegParser.Parse(group);
+			if (legs.Count == 2 && !RollShape.IsSameStrikeCalendar(legs.Select(l => l.Symbol)))
+			{
+				normalized.AddRange(legs.Select(FormatLegSpec));
+				continue;
+			}
+
+			normalized.Add(string.Join(',', legs.Select(FormatLegSpec)));
+		}
+
+		return string.Join(';', normalized);
+	}
+
+	private static string FormatLegSpec(ParsedLeg leg)
+	{
+		var price = leg.Price?.ToString(CultureInfo.InvariantCulture) ?? leg.PriceKeyword;
+		return price == null
+			? $"{leg.Action.ToString().ToLowerInvariant()}:{leg.Symbol}:{leg.Quantity}"
+			: $"{leg.Action.ToString().ToLowerInvariant()}:{leg.Symbol}:{leg.Quantity}@{price}";
+	}
 
 	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(AnalyzeSubcommandSettings settings, string tradesSpec, CancellationToken cancellation)
 	{

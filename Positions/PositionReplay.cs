@@ -19,6 +19,7 @@ internal static class PositionReplay
 		public int Id;
 		public string Underlying = "";
 		public Dictionary<string, (Side Side, int Qty)> OpenLegs = new(StringComparer.Ordinal);
+		public Dictionary<string, (decimal InitPrice, decimal AdjPrice)> CarriedLegPrices = new(StringComparer.Ordinal);
 		public int Multiplier;
 		public decimal RunningCash;
 		public int UnitQty;
@@ -56,6 +57,7 @@ internal static class PositionReplay
 				ApplyEvent(active, evt, underlying, ref lineageIdCounter);
 			ApplyExpiries(active, evaluationDate);
 			SettleImbalances(active, ref lineageIdCounter);
+			MergeCompatibleSingleLegOrphans(active);
 			AssertInvariants(active, $"end of replay for {underlying}", enforceBalance: true);
 			allLineages.AddRange(active);
 		}
@@ -331,7 +333,10 @@ internal static class PositionReplay
 				var signedDonor = donorLeg.Side == Side.Buy ? donorLeg.Qty : -donorLeg.Qty;
 				var newSigned = signedExisting + signedDonor;
 				if (newSigned == 0)
+				{
 					target.OpenLegs.Remove(mk);
+					target.CarriedLegPrices.Remove(mk);
+				}
 				else
 					target.OpenLegs[mk] = (newSigned > 0 ? Side.Buy : Side.Sell, Math.Abs(newSigned));
 			}
@@ -340,6 +345,9 @@ internal static class PositionReplay
 				target.OpenLegs[mk] = donorLeg;
 			}
 		}
+
+		foreach (var (mk, prices) in donor.CarriedLegPrices)
+			target.CarriedLegPrices[mk] = prices;
 
 		foreach (var (mk, shares) in donor.StockShareCount)
 			target.StockShareCount[mk] = target.StockShareCount.GetValueOrDefault(mk) + shares;
@@ -426,6 +434,9 @@ internal static class PositionReplay
 		var maxQty = lin.OpenLegs.Values.Max(v => v.Qty);
 		if (minQty == maxQty) return; // balanced
 
+		if (TrySplitSharedLegFanOut(lin, active, ref lineageIdCounter, minQty))
+			return;
+
 		var imbalancedKeys = lin.OpenLegs.Where(kv => kv.Value.Qty > minQty).Select(kv => kv.Key).ToList();
 		var origUnit = maxQty;
 
@@ -450,6 +461,9 @@ internal static class PositionReplay
 			};
 			spawn.OpenLegs[key] = (side, excess);
 			spawn.TradeHistory.Add(new NetDebitTrade(markerTimestamp, $"[split from lineage {lin.Id} at end of replay]", Side.Buy, excess, 0m, spawn.RunningCash));
+			var initPrice = spawn.FirstEntryQty > 0 ? Math.Abs(spawn.FirstEntryCash / (spawn.FirstEntryQty * (decimal)spawn.Multiplier)) : 0m;
+			var adjPrice = spawn.UnitQty > 0 ? Math.Abs(spawn.RunningCash / (spawn.UnitQty * (decimal)spawn.Multiplier)) : 0m;
+			spawn.CarriedLegPrices[key] = (initPrice, adjPrice);
 			active.Add(spawn);
 			lin.OpenLegs[key] = (side, minQty);
 		}
@@ -460,6 +474,88 @@ internal static class PositionReplay
 		lin.FirstEntryQty = minQty;
 		lin.UnitQty = minQty;
 	}
+
+	private static bool TrySplitSharedLegFanOut(Lineage lin, List<Lineage> active, ref int lineageIdCounter, int minQty)
+	{
+		if (lin.OpenLegs.Count < 3) return false;
+
+		var legs = lin.OpenLegs
+			.Select(kv => new OpenLegInfo(kv.Key, kv.Value.Side, kv.Value.Qty, MatchKeys.ParseOption(kv.Key)?.parsed))
+			.ToList();
+		if (legs.Any(l => l.Parsed == null)) return false;
+		if (legs.Select(l => l.Parsed!.CallPut).Distinct().Count() != 1) return false;
+
+		var sharedLegs = legs.Where(l => l.Qty > minQty).ToList();
+		if (sharedLegs.Count != 1) return false;
+
+		var shared = sharedLegs[0];
+		var companions = legs.Where(l => l.Key != shared.Key).ToList();
+		if (companions.Count < 2) return false;
+		if (companions.Any(l => l.Qty != minQty || l.Side == shared.Side)) return false;
+		if (shared.Qty != minQty * companions.Count) return false;
+
+		var legCash = ComputeOpenLegCashTotals(lin);
+		var residualCash = lin.RunningCash - legCash.Values.Sum();
+		var firstEntryShare = (decimal)minQty / shared.Qty;
+		var sharedLegCashPerGroup = legCash.GetValueOrDefault(shared.Key, 0m) * firstEntryShare;
+		var orderedCompanions = companions
+			.OrderBy(l => PairingPriority(shared.Parsed!, l.Parsed!))
+			.ThenBy(l => l.Parsed!.ExpiryDate)
+			.ThenBy(l => l.Parsed!.Strike)
+			.ThenBy(l => l.Key, StringComparer.Ordinal)
+			.ToList();
+
+		var originalFirstEntryCash = lin.FirstEntryCash;
+		var history = new List<NetDebitTrade>(lin.TradeHistory);
+
+		for (int i = 0; i < orderedCompanions.Count; i++)
+		{
+			var companion = orderedCompanions[i];
+			var target = i == 0
+				? lin
+				: new Lineage
+				{
+					Id = ++lineageIdCounter,
+					Underlying = lin.Underlying,
+					Multiplier = lin.Multiplier,
+					FirstEntryTimestamp = lin.FirstEntryTimestamp,
+					TradeHistory = new List<NetDebitTrade>(history)
+				};
+
+			target.OpenLegs = new Dictionary<string, (Side Side, int Qty)>(StringComparer.Ordinal)
+			{
+				[shared.Key] = (shared.Side, minQty),
+				[companion.Key] = (companion.Side, minQty)
+			};
+			target.UnitQty = minQty;
+			target.FirstEntryQty = minQty;
+			target.FirstEntryCash = originalFirstEntryCash * firstEntryShare;
+			target.RunningCash = sharedLegCashPerGroup + legCash.GetValueOrDefault(companion.Key, 0m) + (residualCash / orderedCompanions.Count);
+
+			if (i > 0)
+				active.Add(target);
+		}
+
+		return true;
+	}
+
+	private static Dictionary<string, decimal> ComputeOpenLegCashTotals(Lineage lin)
+	{
+		var totals = new Dictionary<string, decimal>(StringComparer.Ordinal);
+		foreach (var (mk, leg) in lin.OpenLegs)
+			totals[mk] = lin.TradeHistory.Where(h => SameMatchKey(h, mk, leg.Side)).Sum(h => h.CashImpact);
+		return totals;
+	}
+
+	private static int PairingPriority(OptionParsed shared, OptionParsed companion)
+	{
+		if (shared.Strike == companion.Strike && shared.ExpiryDate != companion.ExpiryDate) return 0;
+		if (shared.Strike != companion.Strike && shared.ExpiryDate == companion.ExpiryDate) return 1;
+		if (shared.Strike != companion.Strike && shared.ExpiryDate != companion.ExpiryDate) return 2;
+		return 3;
+	}
+
+	private sealed record OpenLegInfo(string Key, Side Side, int Qty, OptionParsed? Parsed);
 
 	/// <summary>
 	/// End-of-replay settlement: walks active lineages once, calling SettleImbalance on each.
@@ -476,6 +572,108 @@ internal static class PositionReplay
 		foreach (var lin in snapshot)
 			SettleImbalance(lin, active, ref lineageIdCounter);
 	}
+
+	private static void MergeCompatibleSingleLegOrphans(List<Lineage> active)
+	{
+		var merged = true;
+		while (merged)
+		{
+			merged = false;
+			var singles = active
+				.Where(IsMergeableSingleOptionLineage)
+				.OrderBy(l => l.FirstEntryTimestamp)
+				.ThenBy(l => l.Id)
+				.ToList();
+
+			foreach (var lin in singles)
+			{
+				if (!active.Contains(lin) || !TryGetSingleOptionLegInfo(lin, out var leg))
+					continue;
+
+				var candidates = active
+					.Where(other => other != lin)
+					.Select(other => new { Lineage = other, HasLeg = TryGetSingleOptionLegInfo(other, out var otherLeg), Leg = otherLeg })
+					.Where(x => x.HasLeg && AreCompatibleSingleLegOrphans(leg, x.Leg))
+					.Select(x => new { x.Lineage, x.Leg, Score = ScoreSingleLegOrphanPair(leg.Parsed, x.Leg.Parsed) })
+					.Where(x => x.Score < int.MaxValue)
+					.ToList();
+
+				if (candidates.Count == 0)
+					continue;
+
+				var bestScore = candidates.Min(c => c.Score);
+				var best = candidates.Where(c => c.Score == bestScore).ToList();
+				if (best.Count != 1)
+					continue;
+
+				var match = best[0].Lineage;
+				var target = lin.FirstEntryTimestamp <= match.FirstEntryTimestamp ? lin : match;
+				var donor = ReferenceEquals(target, lin) ? match : lin;
+				MergeLineageInto(target, donor);
+				active.Remove(donor);
+				merged = true;
+				break;
+			}
+		}
+	}
+
+	private static bool IsMergeableSingleOptionLineage(Lineage lin) => TryGetSingleOptionLegInfo(lin, out _);
+
+	private static bool TryGetSingleOptionLegInfo(Lineage lin, out SingleOptionLegInfo leg)
+	{
+		leg = default;
+		if (lin.OpenLegs.Count != 1)
+			return false;
+
+		var (matchKey, openLeg) = lin.OpenLegs.First();
+		var parsed = MatchKeys.ParseOption(matchKey)?.parsed;
+		if (parsed == null)
+			return false;
+		if (lin.UnitQty != openLeg.Qty)
+			return false;
+
+		leg = new SingleOptionLegInfo(matchKey, openLeg.Side, openLeg.Qty, lin.UnitQty, parsed);
+		return true;
+	}
+
+	private static bool AreCompatibleSingleLegOrphans(SingleOptionLegInfo left, SingleOptionLegInfo right)
+	{
+		if (left.MatchKey == right.MatchKey)
+			return false;
+		if (left.Side == right.Side)
+			return false;
+		if (left.LineageQty != right.LineageQty)
+			return false;
+		if (left.Qty != right.Qty)
+			return false;
+		if (left.Qty != left.LineageQty || right.Qty != right.LineageQty)
+			return false;
+		if (!string.Equals(left.Parsed.Root, right.Parsed.Root, StringComparison.Ordinal))
+			return false;
+		if (!string.Equals(left.Parsed.CallPut, right.Parsed.CallPut, StringComparison.Ordinal))
+			return false;
+
+		return ScoreSingleLegOrphanPair(left.Parsed, right.Parsed) < int.MaxValue;
+	}
+
+	private static int ScoreSingleLegOrphanPair(OptionParsed left, OptionParsed right)
+	{
+		var kind = ParsingHelpers.ClassifyStrategyKind(
+			legCount: 2,
+			distinctExpiries: left.ExpiryDate == right.ExpiryDate ? 1 : 2,
+			distinctStrikes: left.Strike == right.Strike ? 1 : 2,
+			distinctCallPut: 1);
+
+		return kind switch
+		{
+			"Calendar" => 0,
+			"Vertical" => 1,
+			"Diagonal" => 2,
+			_ => int.MaxValue
+		};
+	}
+
+	private readonly record struct SingleOptionLegInfo(string MatchKey, Side Side, int Qty, int LineageQty, OptionParsed Parsed);
 
 	private static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments, Dictionary<string, List<NetDebitTrade>> singleLegStandalones)
 		EmitRows(List<Lineage> lineages)
@@ -540,13 +738,20 @@ internal static class PositionReplay
 			// Per-leg rows: InitialAvgPrice = leg's own entry price (from trade history filtered by matchKey);
 			// AdjustedAvgPrice = init + apportioned delta so signed sum equals parent's adj.
 			var legEntryPrices = ComputeLegEntryPrices(lin);
+			var carriedLegPrices = ResolveCarriedLegPrices(lin, legEntryPrices);
 			var legInitSum = 0m;
 			foreach (var (mk, leg) in lin.OpenLegs)
 			{
-				var entryPrice = legEntryPrices.GetValueOrDefault(mk, 0m);
+				var entryPrice = carriedLegPrices.GetValueOrDefault(mk).InitPrice;
 				legInitSum += (leg.Side == Side.Buy ? 1m : -1m) * entryPrice;
 			}
-			var perLegAdjDelta = Math.Abs(parentAdj) * (parentSide == Side.Buy ? 1m : -1m) - legInitSum;
+			var carriedAdjSum = 0m;
+			foreach (var (mk, leg) in lin.OpenLegs)
+			{
+				var adjPrice = carriedLegPrices.GetValueOrDefault(mk).AdjPrice;
+				carriedAdjSum += (leg.Side == Side.Buy ? 1m : -1m) * adjPrice;
+			}
+			var perLegAdjDelta = Math.Abs(parentAdj) * (parentSide == Side.Buy ? 1m : -1m) - carriedAdjSum;
 
 			// Allocate the entire delta to a single "target leg" so per-leg signed sum equals parent adj.
 			// Convention: prefer the first Buy leg (matches legacy ReconcileLegPricesToParent); for
@@ -557,8 +762,9 @@ internal static class PositionReplay
 			foreach (var (mk, leg) in lin.OpenLegs.OrderByDescending(kv => kv.Key))
 			{
 				var (asset, optionKind, expiry, instrument) = ResolveLegMetadata(mk, lin);
-				var initPrice = legEntryPrices.GetValueOrDefault(mk, 0m);
-				var adjPrice = (mk == longLegKey) ? initPrice + perLegAdjDelta : initPrice;
+				var carried = carriedLegPrices.GetValueOrDefault(mk);
+				var initPrice = carried.InitPrice;
+				var adjPrice = (mk == longLegKey) ? carried.AdjPrice + perLegAdjDelta : carried.AdjPrice;
 				rows.Add(new PositionRow(
 					Instrument: instrument,
 					Asset: asset,
@@ -574,7 +780,7 @@ internal static class PositionReplay
 				));
 			}
 
-          adjustments[parentRowIndex] = new StrategyAdjustment(lin.TradeHistory, lin.RunningCash, null, lin.FirstEntryCash);
+		  adjustments[parentRowIndex] = new StrategyAdjustment(lin.TradeHistory, lin.RunningCash, null, lin.FirstEntryCash);
 		}
 
 		return (rows, adjustments, singleLegStandalones);
@@ -637,6 +843,19 @@ internal static class PositionReplay
 			var totalQty = relevant.Sum(h => h.Qty);
 			var weighted = relevant.Sum(h => h.Price * h.Qty) / Math.Max(totalQty, 1);
 			result[mk] = weighted;
+		}
+		return result;
+	}
+
+	private static Dictionary<string, (decimal InitPrice, decimal AdjPrice)> ResolveCarriedLegPrices(Lineage lin, IReadOnlyDictionary<string, decimal> legEntryPrices)
+	{
+		var result = new Dictionary<string, (decimal InitPrice, decimal AdjPrice)>(StringComparer.Ordinal);
+		foreach (var (mk, leg) in lin.OpenLegs)
+		{
+			var fallback = legEntryPrices.GetValueOrDefault(mk, 0m);
+			result[mk] = lin.CarriedLegPrices.TryGetValue(mk, out var carried)
+				? carried
+				: (fallback, fallback);
 		}
 		return result;
 	}
