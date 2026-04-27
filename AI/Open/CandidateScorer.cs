@@ -96,10 +96,12 @@ internal static class CandidateScorer
             ? $"credit ${p.DebitOrCreditPerContract:F2}"
             : $"debit ${-p.DebitOrCreditPerContract:F2}";
 
+        var techAdjusted = BiasAdjust(p.RawScore, bias, p.DirectionalFit, cfg.DirectionalFitWeight);
+        var structureWeight = StructureWeight(cfg, p.StructureKind);
         var biasEffectPct = cfg.DirectionalFitWeight * bias * p.DirectionalFit * 100m;
         var biasTag = p.DirectionalFit == 0
-            ? $"[tech {bias:+0.00;-0.00}, fit 0 → no adjustment]"
-            : $"[tech {bias:+0.00;-0.00}, fit {p.DirectionalFit:+0;-0} → {biasEffectPct:+0;-0}% {(biasEffectPct >= 0 ? "boost" : "cut")}]";
+            ? $"[tech {bias:+0.00;-0.00}, fit 0 → no tech adjustment]"
+            : $"[tech {bias:+0.00;-0.00}, fit {p.DirectionalFit:+0;-0} → {biasEffectPct:+0;-0}% {(biasEffectPct >= 0 ? "tech boost" : "tech cut")}]";
 
         var beStr = p.Breakevens.Count > 0 ? $"BE ${string.Join("/", p.Breakevens.Select(b => b.ToString("F2")))}, " : "";
 
@@ -107,8 +109,12 @@ internal static class CandidateScorer
         // score. Showing them inline lets the reader compare two similarly-scored trades by their shape.
         var rr = Math.Abs(p.MaxLossPerContract) > 0m ? Math.Max(0m, p.MaxProfitPerContract / Math.Abs(p.MaxLossPerContract)) : 0m;
         var ratioStr = p.PremiumRatio.HasValue ? $", prem {p.PremiumRatio.Value:F2}x" : "";
+        var balance = BalanceFactor(p.MaxProfitPerContract, p.MaxLossPerContract, p.PremiumRatio ?? 1m);
 
-       return $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}, raw {p.RawScore:F6}, score {p.BiasAdjustedScore:F6} {biasTag}";
+        var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
+        var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6} (× structure {structureWeight:F2} × balance {balance:F2})";
+
+        return $"{rationaleLine}\n{scoreLine}";
     }
 
     internal enum Direction { Above, Below }
