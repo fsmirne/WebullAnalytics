@@ -495,3 +495,6 @@ data/
 
 # local-only superpowers specs/plans/followups
 docs/
+
+# github copilot
+.github
