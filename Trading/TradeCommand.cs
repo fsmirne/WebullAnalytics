@@ -219,11 +219,21 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 
 		// 7. Preview.
 		using var client = new WebullOpenApiClient(account);
-		WebullOpenApiClient.PreviewResult preview;
-		try { preview = await client.PreviewOrderAsync(body); }
+      WebullOpenApiClient.PreviewResponse previewResponse;
+		try
+		{
+			previewResponse = s.Debug
+				? await client.PreviewOrderWithRawAsync(body)
+				: new WebullOpenApiClient.PreviewResponse(await client.PreviewOrderAsync(body), "");
+		}
 		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]Preview failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
 		catch (HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
-		AnsiConsole.MarkupLine($"[bold]Preview:[/] cost={TradeContext.FormatCurrency(preview.EstimatedCost)}  fees={TradeContext.FormatCurrency(preview.EstimatedTransactionFee)}");
+        var preview = previewResponse.Result;
+		var marginSummary = preview.TryGetMarginSummary();
+		var marginText = string.IsNullOrEmpty(marginSummary) ? "" : $"  {Markup.Escape(marginSummary)}";
+		AnsiConsole.MarkupLine($"[bold]Preview:[/] cost={TradeContext.FormatCurrency(preview.EstimatedCost)}  fees={TradeContext.FormatCurrency(preview.EstimatedTransactionFee)}{marginText}");
+		if (s.Debug)
+			AnsiConsole.MarkupLine($"[dim]Preview response:[/] {Markup.Escape(previewResponse.RawJson)}");
 
 		if (!s.Submit) { AnsiConsole.MarkupLine("[dim]Preview only (no --submit). Exiting.[/]"); return 0; }
 

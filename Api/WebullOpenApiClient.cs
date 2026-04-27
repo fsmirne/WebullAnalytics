@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -48,7 +49,96 @@ internal sealed class WebullOpenApiClient : IDisposable
 
 	internal sealed record PreviewResult(
 		[property: JsonPropertyName("estimated_cost")] string? EstimatedCost,
-		[property: JsonPropertyName("estimated_transaction_fee")] string? EstimatedTransactionFee);
+		[property: JsonPropertyName("estimated_transaction_fee")] string? EstimatedTransactionFee)
+	{
+		[JsonExtensionData]
+		public Dictionary<string, JsonElement>? ExtraFields { get; init; }
+
+		internal string? TryGetMarginSummary()
+		{
+			if (ExtraFields == null || ExtraFields.Count == 0) return null;
+
+			var parts = new List<string>();
+			TryAdd(parts, "margin", "margin_requirement", "required_margin", "estimated_margin", "margin_required", "marginRequirement", "requiredMargin");
+			TryAdd(parts, "initial", "initial_margin", "initialMargin");
+			TryAdd(parts, "maintenance", "maintenance_margin", "maintenanceMargin");
+			TryAdd(parts, "BP effect", "buying_power_effect", "buyingPowerEffect", "option_buying_power_effect", "bp_effect");
+			return parts.Count == 0 ? null : string.Join("  ", parts);
+		}
+
+		private void TryAdd(List<string> parts, string label, params string[] names)
+		{
+			foreach (var name in names)
+			{
+				if (!TryFindPropertyRecursive(name, out var value)) continue;
+				var formatted = FormatCurrencyLike(value);
+				if (formatted == null) continue;
+				parts.Add($"{label} {formatted}");
+				return;
+			}
+		}
+
+		private bool TryFindPropertyRecursive(string name, out JsonElement value)
+		{
+			foreach (var property in ExtraFields!)
+			{
+             if (property.Key.Equals(name, StringComparison.OrdinalIgnoreCase))
+				{
+					value = property.Value;
+					return true;
+				}
+				if (TryFindPropertyRecursive(property.Value, name, out value))
+					return true;
+			}
+
+			value = default;
+			return false;
+		}
+
+		private static bool TryFindPropertyRecursive(JsonElement element, string name, out JsonElement value)
+		{
+			switch (element.ValueKind)
+			{
+				case JsonValueKind.Object:
+					foreach (var property in element.EnumerateObject())
+					{
+						if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+						{
+							value = property.Value;
+							return true;
+						}
+						if (TryFindPropertyRecursive(property.Value, name, out value))
+							return true;
+					}
+					break;
+				case JsonValueKind.Array:
+					foreach (var item in element.EnumerateArray())
+						if (TryFindPropertyRecursive(item, name, out value))
+							return true;
+					break;
+			}
+
+			value = default;
+			return false;
+		}
+
+		private static string? FormatCurrencyLike(JsonElement value) => value.ValueKind switch
+		{
+			JsonValueKind.String => FormatNumericString(value.GetString()),
+			JsonValueKind.Number => FormatNumericString(value.GetRawText()),
+			_ => null
+		};
+
+		private static string? FormatNumericString(string? raw)
+		{
+			if (string.IsNullOrWhiteSpace(raw)) return null;
+			if (!decimal.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var amount)) return null;
+			var sign = amount < 0m ? "-" : "";
+			return $"{sign}${Math.Abs(amount).ToString("N2", CultureInfo.InvariantCulture)}";
+		}
+	}
+
+	internal sealed record PreviewResponse(PreviewResult Result, string RawJson);
 
 	internal sealed record PlaceResult(
 		[property: JsonPropertyName("client_order_id")] string? ClientOrderId,
@@ -58,6 +148,12 @@ internal sealed class WebullOpenApiClient : IDisposable
 
 	internal async Task<PreviewResult> PreviewOrderAsync(OrderRequestBody body, CancellationToken ct = default) =>
 		await PostAsync<PreviewResult>("/openapi/trade/order/preview", body, ct);
+
+	internal async Task<PreviewResponse> PreviewOrderWithRawAsync(OrderRequestBody body, CancellationToken ct = default)
+	{
+		var (result, raw) = await PostWithRawAsync<PreviewResult>("/openapi/trade/order/preview", body, ct);
+		return new PreviewResponse(result, raw);
+	}
 
 	internal async Task<PlaceResult> PlaceOrderAsync(OrderRequestBody body, CancellationToken ct = default) =>
 		await PostAsync<PlaceResult>("/openapi/trade/order/place", body, ct);
@@ -298,13 +394,19 @@ internal sealed class WebullOpenApiClient : IDisposable
 
 	private async Task<T> PostAsync<T>(string path, object body, CancellationToken ct)
 	{
+     var (result, _) = await PostWithRawAsync<T>(path, body, ct);
+		return result;
+	}
+
+	private async Task<(T Result, string RawJson)> PostWithRawAsync<T>(string path, object body, CancellationToken ct)
+	{
 		var json = JsonSerializer.Serialize(body, JsonOptions);
 		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, new Dictionary<string, string>(), json, _account.AppId);
 		using var req = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
 		ApplyAccessTokenHeader(req, path);
 		using var resp = await _http.SendAsync(req, ct);
-		return await Read<T>(resp);
+     return await ReadWithRaw<T>(resp);
 	}
 
 	private async Task<T> GetAsync<T>(string path, IReadOnlyDictionary<string, string> query, CancellationToken ct)
@@ -320,6 +422,12 @@ internal sealed class WebullOpenApiClient : IDisposable
 	}
 
 	private static async Task<T> Read<T>(HttpResponseMessage resp)
+   {
+		var (result, _) = await ReadWithRaw<T>(resp);
+		return result;
+	}
+
+	private static async Task<(T Result, string RawJson)> ReadWithRaw<T>(HttpResponseMessage resp)
 	{
 		var body = await resp.Content.ReadAsStringAsync();
 		if ((int)resp.StatusCode >= 500)
@@ -340,7 +448,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		}
 		var result = JsonSerializer.Deserialize<T>(body, JsonOptions);
 		if (result == null) throw new WebullOpenApiException(null, "Empty response body", (int)resp.StatusCode);
-		return result;
+      return (result, body);
 	}
 
 	private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
