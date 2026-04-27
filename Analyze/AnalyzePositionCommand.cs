@@ -199,7 +199,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (!filter.Enabled) return 0m;
 
 			var cache = new HistoricalPriceCache();
-			var res = await WebullAnalytics.AI.AIPipelineHelper.ComputeTechnicalSignalsAsync(
+			var res = await AIPipelineHelper.ComputeTechnicalSignalsAsync(
 				tickers: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker },
 				priceCache: cache,
 				filter: filter,

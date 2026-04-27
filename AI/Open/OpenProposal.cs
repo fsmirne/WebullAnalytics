@@ -1,3 +1,5 @@
+using WebullAnalytics.AI.RiskDiagnostics;
+
 namespace WebullAnalytics.AI;
 
 public enum OpenStructureKind
@@ -55,6 +57,6 @@ internal sealed record OpenProposal(
     string Fingerprint,
     bool CashReserveBlocked = false,
     string? CashReserveDetail = null,
-    WebullAnalytics.AI.RiskDiagnostics.RiskDiagnostic? Diagnostic = null,
+    RiskDiagnostic? Diagnostic = null,
     decimal? PremiumRatio = null
 );
