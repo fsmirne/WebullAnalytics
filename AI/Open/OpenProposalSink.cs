@@ -40,7 +40,7 @@ internal sealed class OpenProposalSink : IDisposable
     {
         var repeat = IsRepeat(p);
         WriteJsonl(p);
-        if (!repeat || _log.ConsoleVerbosity == "debug") WriteConsole(p);
+        if (_log.ConsoleVerbosity != "error" && (!repeat || _log.ConsoleVerbosity == "debug")) WriteConsole(p);
         _lastScoreByFingerprint[p.Fingerprint] = p.BiasAdjustedScore;
     }
 

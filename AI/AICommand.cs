@@ -14,6 +14,9 @@ namespace WebullAnalytics.AI;
 
 internal abstract class AISubcommandSettings : CommandSettings
 {
+	private static readonly string[] ValidLogLevels = ["debug", "information", "error"];
+	private static readonly string[] ValidProposalModes = ["all", "open", "management"];
+
 	[CommandOption("--config <PATH>")]
 	[Description("Path to ai-config.json. Default: data/ai-config.json.")]
 	public string? ConfigPath { get; set; }
@@ -34,23 +37,28 @@ internal abstract class AISubcommandSettings : CommandSettings
 	[Description("Override quoteSource: webull or yahoo.")]
 	public string? Api { get; set; }
 
-	[CommandOption("--verbosity <LEVEL>")]
-	[Description("quiet | normal | debug. Overrides config.")]
-	public string? Verbosity { get; set; }
+	[CommandOption("--log-level <LEVEL>")]
+	[Description("debug | information | error. Overrides config.")]
+	public string? LogLevel { get; set; }
 
-	[CommandOption("--no-open-proposals")]
-	[Description("Disable the opening-proposal pass for this run; management rules still run.")]
-	public bool NoOpenProposals { get; set; }
+	[CommandOption("--proposals <MODE>")]
+	[Description("Which proposal sets to emit: all | open | management. Default: all.")]
+	public string Proposals { get; set; } = "all";
 
 	public override ValidationResult Validate()
 	{
 		if (Output != "console" && Output != "text") return ValidationResult.Error($"--output: must be 'console' or 'text', got '{Output}'");
 		if (Output == "text" && string.IsNullOrWhiteSpace(OutputPath)) return ValidationResult.Error("--output text requires --output-path");
 		if (Api != null && Api != "webull" && Api != "yahoo") return ValidationResult.Error($"--api: must be 'webull' or 'yahoo', got '{Api}'");
-		if (Verbosity != null && Verbosity != "quiet" && Verbosity != "normal" && Verbosity != "debug")
-			return ValidationResult.Error($"--verbosity: must be quiet|normal|debug, got '{Verbosity}'");
+		if (LogLevel != null && !ValidLogLevels.Contains(LogLevel, StringComparer.OrdinalIgnoreCase))
+			return ValidationResult.Error($"--log-level: must be debug|information|error, got '{LogLevel}'");
+		if (!ValidProposalModes.Contains(Proposals, StringComparer.OrdinalIgnoreCase))
+			return ValidationResult.Error($"--proposals: must be all|open|management, got '{Proposals}'");
 		return ValidationResult.Success();
 	}
+
+	internal bool EmitManagementProposals => !string.Equals(Proposals, "open", StringComparison.OrdinalIgnoreCase);
+	internal bool EmitOpenProposals => !string.Equals(Proposals, "management", StringComparison.OrdinalIgnoreCase);
 }
 
 internal static class AIContext
@@ -77,7 +85,7 @@ internal static class AIContext
 		if (!string.IsNullOrWhiteSpace(settings.Tickers))
 			config.Tickers = settings.Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 		if (!string.IsNullOrWhiteSpace(settings.Api)) config.QuoteSource = settings.Api;
-		if (!string.IsNullOrWhiteSpace(settings.Verbosity)) config.Log.ConsoleVerbosity = settings.Verbosity;
+		if (!string.IsNullOrWhiteSpace(settings.LogLevel)) config.Log.ConsoleVerbosity = settings.LogLevel;
 
 		var err = AIConfigLoader.Validate(config);
 		if (err != null) { Console.Error.WriteLine($"Error: ai-config.json: {err}"); return null; }
@@ -105,8 +113,8 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
 
-		if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
-			Console.Error.WriteLine($"[debug] wa ai once: verbosity=debug baseDir='{Program.BaseDir}' quoteSource='{config.QuoteSource}' tickers=[{string.Join(",", config.Tickers)}]");
+        if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
+			Console.Error.WriteLine($"[debug] wa ai once: log-level=debug baseDir='{Program.BaseDir}' quoteSource='{config.QuoteSource}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals}");
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
@@ -129,12 +137,16 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config), config);
 
-		using var sink = new ProposalSink(config.Log, mode: "once");
 		var results = evaluator.Evaluate(ctx);
-		foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
+		var managementCount = settings.EmitManagementProposals ? results.Count : 0;
+		if (settings.EmitManagementProposals)
+		{
+			using var sink = new ProposalSink(config.Log, mode: "once");
+			foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
+		}
 
 		var openCount = 0;
-		if (config.Opener.Enabled && !settings.NoOpenProposals)
+		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
 			using var openSink = new OpenProposalSink(config.Log, mode: "once");
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes);
@@ -143,7 +155,7 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 			openCount = openResults.Count;
 		}
 
-		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {results.Count} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
+        AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
 		return 0;
 	}
 }

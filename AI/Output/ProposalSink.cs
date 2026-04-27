@@ -57,7 +57,8 @@ internal sealed class ProposalSink : IDisposable
 
 	private void WriteConsole(ManagementProposal p, bool isRepeat)
 	{
-		if (isRepeat && _log.ConsoleVerbosity == "normal") return;
+		if (_log.ConsoleVerbosity == "error") return;
+		if (isRepeat && _log.ConsoleVerbosity == "information") return;
 
 		var color = p.Kind switch
 		{

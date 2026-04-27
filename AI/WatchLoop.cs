@@ -73,7 +73,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		using var sink = new ProposalSink(config.Log, mode: "watch");
 		OpenProposalSink? openSink = null;
 		OpenCandidateEvaluator? openEvaluator = null;
-		if (config.Opener.Enabled && !settings.NoOpenProposals)
+		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
 			openSink = new OpenProposalSink(config.Log, mode: "watch");
 			openEvaluator = new OpenCandidateEvaluator(config, quotes);
@@ -105,7 +105,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 				var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 				var results = evaluator.Evaluate(ctx);
-				foreach (var r in results) { sink.Emit(r.Proposal, r.IsRepeat); proposalsEmitted++; }
+				if (settings.EmitManagementProposals)
+					foreach (var r in results) { sink.Emit(r.Proposal, r.IsRepeat); proposalsEmitted++; }
 
 				if (openEvaluator != null && openSink != null)
 				{
