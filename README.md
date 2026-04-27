@@ -1,11 +1,11 @@
 # WebullAnalytics
 
-A C# command-line tool for analyzing trading performance from Webull order data. Generates comprehensive realized P&L reports with support for stocks, options, and complex multi-leg option strategies.
+A C# command-line tool for reviewing Webull trading activity end-to-end. It generates realized P&L reports, models hypothetical option adjustments, inspects Webull OpenAPI account state, and emits AI-assisted trade proposals for stocks and options.
 
 ## Features
 
-- **Webull API Integration**: Fetch order data directly from the Webull API
-- **Position Tracking**: FIFO lot accounting for P&L calculations, average cost method for position display (matching Webull)
+- **Webull API Integration**: Fetch order data from Webull's web API and inspect/place orders through the Webull OpenAPI
+- **Position Tracking**: FIFO lot accounting for realized P&L calculations, average cost display for open positions (matching Webull)
 - **Option Strategy Support**: Recognizes and properly handles multi-leg strategies including:
   - Calendar Spreads
   - Diagonals
@@ -14,6 +14,9 @@ A C# command-line tool for analyzing trading performance from Webull order data.
   - Straddles/Strangles
   - Vertical Spreads
 - **Calendar Roll Tracking**: Intelligently groups rolled positions and tracks adjusted cost basis
+- **Scenario Analysis**: Evaluate hypothetical trades, roll grids, scenario-ranked position adjustments, and structured risk diagnostics
+- **Broker Utilities**: Preview/place/cancel orders, inspect status, list app subscriptions, check positions, and manage OpenAPI trade tokens
+- **AI Proposal Engine**: Run one-shot, watch-loop, or historical replay evaluation for management proposals and new-opening ideas
 - **Fee Tracking**: Commissions and fees embedded in the order data
 - **Cash Tracking**: Tracks current cash in hand starting from an optional initial amount
 - **Multiple Output Modes**:
@@ -81,7 +84,14 @@ By default this installs to `~/.local/bin`. You can specify a custom directory:
 
 ### Commands
 
-wa has five commands: `report` (generate a P&L report), `analyze` (hypothetical what-if analysis), `fetch` (download order data from the Webull API), `sniff` (automatically capture fresh API session headers), and `trade` (place, cancel, and inspect orders via the Webull OpenAPI).
+`wa` has six top-level commands:
+
+- `report` — generate realized P&L reports and open-position break-even analysis
+- `analyze` — run hypothetical trade, roll, position, and risk analysis
+- `fetch` — download order data from the Webull web API
+- `sniff` — capture fresh Webull session headers for the web API
+- `trade` — preview/place/cancel orders and inspect OpenAPI account state
+- `ai` — emit management and opening proposals from live or replayed data
 
 ### Report Command
 
@@ -132,7 +142,7 @@ wa report --api yahoo --grid verbose
 wa report --api yahoo --range 4
 
 # Override the current underlying price (for "what-if" evaluation)
-wa report --api yahoo --current-underlying-price GME:24.88,SPY:580.50
+wa report --api yahoo --ticker-price GME:24.88,SPY:580.50
 
 # Use Black-Scholes theoretical prices instead of market mid for today's grid column
 wa report --api yahoo --theoretical
@@ -160,7 +170,7 @@ Options:
   --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --grid <layout>           Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg values '1.23|0.45|$0.78')
-  --current-underlying-price <prices>  Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
+  --ticker-price <prices>   Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
   --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
   --notable-prices <prices> Additional prices to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
   --tickers <list>          Show only these tickers in the report. Comma-separated (e.g., GME,SPY,AAPL)
@@ -169,12 +179,14 @@ Options:
 
 ### Analyze Command
 
-The `analyze` command has two subcommands:
+The `analyze` command has four subcommands:
 
 - `analyze trade` — inject hypothetical trades into the report pipeline for what-if analysis.
 - `analyze roll` — show a 2D grid of theoretical roll credit/debit across underlying prices × times using Black-Scholes.
+- `analyze risk` — render a structured risk diagnostic for an option structure using live quotes.
+- `analyze position` — analyze an existing or manually specified option position and rank adjustment scenarios.
 
-Both subcommands accept all of the `report` command's options plus `--date` for simulating a future evaluation date.
+All four subcommands accept the `report` command's options plus `--date` for simulating a future evaluation date. Some subcommands add extra flags documented below.
 
 #### `analyze trade`
 
@@ -184,7 +196,7 @@ Runs a hypothetical what-if analysis by injecting synthetic trades into the repo
 wa analyze trade "<spec>" [--date <YYYY-MM-DD>] [report options]
 ```
 
-The `<spec>` is a comma-separated list of legs:
+The `<spec>` is a comma-separated list of legs. You can also separate independent execution groups with `;` when you want multiple synthetic order events in one run:
 
 ```
 ACTION:SYMBOL:QTY@PRICE,ACTION:SYMBOL:QTY@PRICE,...
@@ -217,7 +229,7 @@ wa analyze trade "sell:GME260501P00022000:455@0.25"
 wa analyze trade "buy:GME260417C00023000:300@0.38" --date 2026-04-11
 
 # Combine with report options (output to text, override underlying price)
-wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --current-underlying-price GME:23.20
+wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --ticker-price GME:23.20
 ```
 
 When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the configured API source (`--api webull` or `--api yahoo`) before building the hypothetical trades. The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
@@ -287,13 +299,88 @@ If you pass `--cash <amount>`, a funding-check block is printed after the margin
 
 Notable prices from `--notable-prices` are included as additional rows in the grid.
 
+#### `analyze risk`
+
+Evaluates an option structure with current market quotes and prints the same structured risk diagnostics used by the AI pipeline.
+
+```
+wa analyze risk "<spec>" [--iv-default <pct>] [--ticker-price <TICKER:PRICE>] [--date <YYYY-MM-DD>] [report options]
+```
+
+The `<spec>` format is:
+
+```
+ACTION:SYMBOL[:QTY][@PRICE],ACTION:SYMBOL[:QTY][@PRICE],...
+```
+
+- `ACTION` — `buy` or `sell`.
+- `SYMBOL` — OCC option symbol.
+- `QTY` — optional; defaults to `1` if omitted.
+- `@PRICE` — optional cost basis per share. Accepts a decimal or `BID`, `MID`, `ASK`. If omitted, `MID` is used.
+
+Examples:
+
+```bash
+# Evaluate a 1-lot diagonal at current mid prices
+wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000" --api yahoo
+
+# Evaluate a 10-lot using explicit cost bases
+wa analyze risk "sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12" --api yahoo
+
+# Supply spot manually instead of fetching an underlying quote
+wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000" --api yahoo --ticker-price GME:24.88
+```
+
+The command appends a machine-readable record to `data/analyze-risk.jsonl` after each run.
+
+#### `analyze position`
+
+Loads an existing open option strategy from `data/orders.jsonl` or accepts a manual position spec, then ranks hold/roll/reset scenarios with projected P&L and buying-power impact.
+
+```
+wa analyze position ["<spec>"] [--iv-default <pct>] [--strike-step <step>] [--cash <amount>] [--account <alias>] [--date <YYYY-MM-DD>] [report options]
+```
+
+If `<spec>` is omitted, the command scans open strategy positions from the trade log and lets you pick one interactively.
+
+Manual `<spec>` format:
+
+```
+ACTION:SYMBOL:QTY@PRICE,ACTION:SYMBOL:QTY@PRICE,...
+```
+
+Examples:
+
+```bash
+# Pick an existing open strategy from orders.jsonl and auto-detect available cash/BP from trade-config.json
+wa analyze position --api yahoo --account test1
+
+# Analyze a manually specified calendar position
+wa analyze position "sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499@1.11" --api yahoo --cash 23015
+
+# Analyze a single long call with a custom scenario strike step
+wa analyze position "buy:GME260620C00025000:10@1.25" --api yahoo --strike-step 0.50 --ticker-price GME:24.88
+```
+
+The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa analyze trade` reproduction commands, and appends a machine-readable record to `data/analyze-position.jsonl`.
+
 #### Options
 
-Both `analyze trade` and `analyze roll` accept all `report` options, plus:
+All `analyze` subcommands accept all `report` options, plus:
 
 ```
   --date <date>           Override 'today' for evaluation (YYYY-MM-DD). Simulates running on a future date — options expiring
                           on or before this date generate synthetic expirations, and all DTE/Black-Scholes calculations use it.
+
+analyze risk only:
+  --iv-default <pct>      Fallback implied volatility used when live IV is unavailable.
+
+analyze position only:
+  --iv-default <pct>      Fallback implied volatility used when live IV is unavailable.
+  --strike-step <step>    Strike increment used for near-spot scenario generation.
+  --cash <amount>         Available cash/BP used to flag scenarios as fundable or not fundable.
+  --account <alias>       Account alias or ID from trade-config.json used to auto-detect available cash/BP
+                          when you select an existing open position.
 
 analyze roll only:
   --side <long|short>     Position side. Default: short. See above for the math each side uses.
@@ -339,7 +426,7 @@ Launches a browser with remote debugging, navigates to Webull, enters your unloc
 
 ### Trade Command
 
-The `trade` command places, cancels, lists, and inspects orders via the Webull OpenAPI. It supports single-leg equity orders, single-leg option orders, and multi-leg option strategies (including stock+option combos like covered calls). Unlike `fetch` — which uses Webull's session-based web API — `trade` uses the OpenAPI with App Key + App Secret authentication.
+The `trade` command previews, places, cancels, lists, and inspects orders via the Webull OpenAPI. It also exposes account-subscription lookup, raw-position inspection, and token lifecycle helpers. It supports single-leg equity orders, single-leg option orders, and multi-leg option strategies (including stock+option combos like covered calls). Unlike `fetch` — which uses Webull's session-based web API — `trade` uses the OpenAPI with App Key + App Secret authentication.
 
 Every `trade place` invocation runs a preview against the broker by default. The order is only submitted when you pass `--submit`, and every mutating action (`place --submit`, `cancel`, `cancel --all`) prompts interactively before sending.
 
@@ -363,13 +450,13 @@ wa trade place --trade "buy:SPY:10" --limit 580
 wa trade place --trade "buy:SPY:10" --limit 580 --submit
 
 # Preview a vertical call spread for 1 contract, net debit $0.75.
-wa trade place --trade "buy:SPY260515C00580000:1,sell:SPY260515C00590000:1" --limit -0.75
+wa trade place --trade "buy:SPY260515C00580000:1,sell:SPY260515C00590000:1" --limit 0.75
 
 # Calendar roll — sell near, buy far.
-wa trade place --trade "sell:GME260410C00023000:1,buy:GME260417C00023000:1" --limit -0.20
+wa trade place --trade "sell:GME260410C00023000:1,buy:GME260417C00023000:1" --limit 0.20
 
 # Covered call — long 100 shares + short 1 call.
-wa trade place --trade "buy:GME:100,sell:GME260501C00025000:1" --limit -23.50
+wa trade place --trade "buy:GME:100,sell:GME260501C00025000:1" --limit 23.50
 
 # Market order, single equity.
 wa trade place --trade "buy:SPY:10" --type market --submit
@@ -386,6 +473,18 @@ wa trade list
 # Check an order's status.
 wa trade status <clientOrderId>
 
+# List the account subscriptions tied to this OpenAPI app.
+wa trade accounts
+
+# Dump the raw positions payload for the account.
+wa trade positions
+
+# Start the OpenAPI trade-token approval flow.
+wa trade token create
+
+# Poll an existing token until it becomes usable.
+wa trade token check
+
 # Use a non-default account.
 wa trade place --trade "buy:SPY:1" --limit 1 --account test2
 ```
@@ -398,14 +497,15 @@ Format: `ACTION:SYMBOL:QTY`, comma-separated for multiple legs.
 - `SYMBOL` — equity ticker (e.g. `GME`) or OCC option symbol (e.g. `GME260501C00023000`).
 - `QTY` — positive integer.
 
-Per-leg prices (`@PRICE`) are **not** allowed in `trade` — combo orders use a single `--limit` for the net price across all legs. Positive `--limit` means net credit; negative means net debit.
+Per-leg prices (`@PRICE`) are **not** allowed in `trade` — combo orders use a single `--limit` for the absolute net price across all legs. `--limit` is always positive. The broker-side direction is auto-inferred from the legs, and you can override it with `--side buy|sell` if needed.
 
 #### Options
 
 ```
 Options (place):
   --trade <legs>           Comma-separated legs in ACTION:SYMBOL:QTY format (required).
-  --limit <net>             Net limit price. Required for --type limit. Positive = credit; negative = debit.
+  --limit <net>            Absolute per-share net limit price. Required for --type limit.
+  --side <buy|sell>        Override inferred combo direction. Use only when auto-inference is not what you want.
   --type <type>             limit or market. Default: limit. Market is rejected for multi-leg orders.
   --tif <tif>               Time-in-force: day or gtc. Default: day.
   --strategy <name>         Override auto-detected strategy. Values: single, stock, vertical, calendar,
@@ -426,7 +526,17 @@ Options (status):
 
 Options (list):
   --account <id-or-alias>   Pick a non-default account.
+
+Options (accounts / positions / token create / token check):
+  --account <id-or-alias>   Pick a non-default account.
 ```
+
+#### Account and token utilities
+
+- `trade accounts` lists the account subscriptions returned by the OpenAPI app and highlights the `account_id` value you should copy into `trade-config.json`.
+- `trade positions` prints the raw account-positions payload for debugging account state and position sourcing.
+- `trade token create` starts the OpenAPI trade-token approval flow and caches the token locally.
+- `trade token check` re-checks the cached token status and updates the local cache.
 
 #### Sandbox vs production
 
@@ -436,7 +546,7 @@ There is no `--yes` flag — every place, cancel, and cancel-all prompts interac
 
 ### AI Command
 
-The `ai` command monitors open calendar/diagonal positions during market hours and emits structured proposals (roll / take-profit / stop-loss / defensive-roll) to a JSONL log. It is **read-only in phase 1**: the command never places orders.
+The `ai` command evaluates live or replayed positions and emits structured proposal logs. It can emit both management proposals (roll / take-profit / stop-loss / defensive-roll) and opening candidates for new positions. It is **read-only in phase 1**: the command never places orders.
 
 Three subcommands share one evaluation engine:
 
@@ -449,6 +559,12 @@ wa ai once
 
 # Replay the rules against historical orders.jsonl with agreement analysis
 wa ai replay --since 2026-01-01 --until 2026-04-17
+
+# Run the watch loop every 30 seconds for 90 minutes, ignoring market-hours checks
+wa ai watch --tick 30 --duration 90m --ignore-market-hours
+
+# Emit only opening ideas
+wa ai once --proposals open
 ```
 
 #### Setup
@@ -515,6 +631,29 @@ Proposals are written to two places:
 - **JSONL log** at `data/ai-proposals.log`: one proposal per line, machine-parseable with `jq` or similar. Includes `mode` field ("once" / "watch" / "replay") to distinguish source runs.
 
 AI commands accept `--pricing mid|bidask` to control both displayed command prices and the pricing basis used in proposal math. Default: `mid`.
+
+Shared AI options:
+
+```
+  --config <path>          Path to ai-config.json. Default: data/ai-config.json
+  --tickers <list>         Override config tickers (comma-separated)
+  --output <format>        console or text. `text` requires --output-path
+  --output-path <path>     Path for --output text
+  --api <source>           Override quote source: webull or yahoo
+  --log-level <level>      debug | information | error
+  --proposals <mode>       all | open | management
+  --pricing <mode>         mid | bidask
+
+ai watch only:
+  --tick <seconds>         Override tickIntervalSeconds
+  --duration <duration>    Stop after a duration such as 6h, 90m, or 30s
+  --ignore-market-hours    Run regardless of market-hours checks
+
+ai replay only:
+  --since <date>           Start date YYYY-MM-DD. Default: earliest fill
+  --until <date>           End date YYYY-MM-DD. Default: latest fill
+  --granularity <level>    daily or hourly. Default: daily
+```
 
 #### Cash reserve
 
