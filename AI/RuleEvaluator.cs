@@ -66,12 +66,16 @@ internal sealed class RuleEvaluator
 	}
 
 	/// <summary>Constructs the default rule set from config.</summary>
-	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config) => new IManagementRule[]
+ internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config)
 	{
-		new StopLossRule(config.Rules.StopLoss),
-		new OpportunisticRollRule(config.Rules.OpportunisticRoll),
-		new TakeProfitRule(config.Rules.TakeProfit),
-		new DefensiveRollRule(config.Rules.DefensiveRoll),
-		new RollShortOnExpiryRule(config.Rules.RollShortOnExpiry)
-	};
+        var debug = string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase);
+		return new IManagementRule[]
+		{
+			new StopLossRule(config.Rules.StopLoss),
+			new OpportunisticRollRule(config.Rules.OpportunisticRoll, debug),
+			new TakeProfitRule(config.Rules.TakeProfit),
+			new DefensiveRollRule(config.Rules.DefensiveRoll),
+			new RollShortOnExpiryRule(config.Rules.RollShortOnExpiry)
+		};
+	}
 }
