@@ -1,5 +1,6 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
+using Spectre.Console.Rendering;
 using System.ComponentModel;
 using System.Globalization;
 using WebullAnalytics.Api;
@@ -63,6 +64,117 @@ internal static class TradeContext
 		if (string.IsNullOrEmpty(raw)) return "-";
 		if (!decimal.TryParse(raw, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d)) return raw;
 		return d.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+	}
+
+	internal static string FormatPercent(string? raw)
+	{
+		if (string.IsNullOrEmpty(raw)) return "-";
+		if (!decimal.TryParse(raw, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d)) return raw;
+		var pct = Math.Abs(d) <= 1m ? d * 100m : d;
+		return $"{pct.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}%";
+	}
+
+	internal static List<Panel> BuildPositionPanels(List<WebullOpenApiClient.AccountHolding> holdings)
+	{
+		var panels = new List<Panel>(holdings.Count);
+		foreach (var holding in holdings)
+			panels.Add(BuildPositionPanel(holding));
+		return panels;
+	}
+
+	internal static Panel BuildPositionPanel(WebullOpenApiClient.AccountHolding holding)
+	{
+		var symbol = string.IsNullOrWhiteSpace(holding.Symbol) ? "-" : holding.Symbol;
+		var instrumentType = string.IsNullOrWhiteSpace(holding.InstrumentType) ? "-" : holding.InstrumentType;
+		var title = $"{symbol} ({instrumentType} {FormatQty(holding.Quantity)}x)";
+		var items = new List<IRenderable>();
+
+		var summary = new List<string>();
+		if (!string.IsNullOrWhiteSpace(holding.OptionStrategy)) summary.Add($"Strategy: {holding.OptionStrategy}");
+		if (!string.IsNullOrWhiteSpace(holding.PositionId)) summary.Add($"Position ID: {holding.PositionId}");
+		if (!string.IsNullOrWhiteSpace(holding.Currency)) summary.Add($"Currency: {holding.Currency}");
+		if (!string.IsNullOrWhiteSpace(holding.Proportion)) summary.Add($"Weight: {FormatPercent(holding.Proportion)}");
+		if (summary.Count > 0)
+			items.Add(new Text(string.Join(" │ ", summary)));
+
+		items.Add(new Text($"Cost Price: {FormatCurrency(holding.CostPrice)} │ Last Price: {FormatCurrency(holding.LastPrice)} │ Cost: {FormatCurrency(holding.Cost)} │ Market Value: {FormatCurrency(holding.MarketValue)}"));
+		items.Add(new Text($"Unrealized P/L: {FormatCurrency(holding.UnrealizedProfitLoss)} ({FormatPercent(holding.UnrealizedProfitLossRate)}) │ Day P/L: {FormatCurrency(holding.DayProfitLoss)} │ Day Realized P/L: {FormatCurrency(holding.DayRealizedProfitLoss)}"));
+
+		if (holding.Legs is { Count: > 0 })
+		{
+			items.Add(new Text(""));
+			items.Add(new Markup("[bold]Legs:[/]"));
+			foreach (var leg in holding.Legs)
+			{
+				var legParts = new List<string> { string.IsNullOrWhiteSpace(leg.Symbol) ? "-" : leg.Symbol };
+				if (!string.IsNullOrWhiteSpace(leg.InstrumentType)) legParts.Add($"[{leg.InstrumentType}]");
+				if (!string.IsNullOrWhiteSpace(leg.OptionType)) legParts.Add(leg.OptionType);
+				if (!string.IsNullOrWhiteSpace(leg.OptionExercisePrice)) legParts.Add($"strike={FormatCurrency(leg.OptionExercisePrice)}");
+				if (!string.IsNullOrWhiteSpace(leg.OptionExpireDate)) legParts.Add($"exp={leg.OptionExpireDate}");
+				if (!string.IsNullOrWhiteSpace(leg.LastPrice)) legParts.Add($"last={FormatCurrency(leg.LastPrice)}");
+				if (!string.IsNullOrWhiteSpace(leg.Cost)) legParts.Add($"cost={FormatCurrency(leg.Cost)}");
+				if (!string.IsNullOrWhiteSpace(leg.UnrealizedProfitLoss)) legParts.Add($"uPnL={FormatCurrency(leg.UnrealizedProfitLoss)}");
+				if (!string.IsNullOrWhiteSpace(leg.Proportion)) legParts.Add($"weight={FormatPercent(leg.Proportion)}");
+				items.Add(new Text($"- {string.Join(" ", legParts)}"));
+			}
+		}
+
+		return new Panel(new Rows(items))
+		{
+			Header = new PanelHeader(title),
+			Expand = true,
+		};
+	}
+
+	internal static List<string> FormatPositions(List<WebullOpenApiClient.AccountHolding> holdings)
+	{
+		if (holdings.Count == 0)
+			return ["No positions."];
+
+		var lines = new List<string> { $"{holdings.Count} position(s):" };
+
+		for (var i = 0; i < holdings.Count; i++)
+		{
+			var holding = holdings[i];
+			var instrumentType = string.IsNullOrWhiteSpace(holding.InstrumentType) ? "-" : holding.InstrumentType;
+			var symbol = string.IsNullOrWhiteSpace(holding.Symbol) ? "-" : holding.Symbol;
+			var header = $"{symbol} [{instrumentType}] qty={FormatQty(holding.Quantity)}";
+			if (!string.IsNullOrWhiteSpace(holding.OptionStrategy))
+				header += $" strategy={holding.OptionStrategy}";
+			lines.Add(header);
+			lines.Add($"  Cost Price: {FormatCurrency(holding.CostPrice)}  Last Price: {FormatCurrency(holding.LastPrice)}  Cost: {FormatCurrency(holding.Cost)}  Market Value: {FormatCurrency(holding.MarketValue)}");
+			lines.Add($"  Unrealized P/L: {FormatCurrency(holding.UnrealizedProfitLoss)} ({FormatPercent(holding.UnrealizedProfitLossRate)})  Day P/L: {FormatCurrency(holding.DayProfitLoss)}  Day Realized P/L: {FormatCurrency(holding.DayRealizedProfitLoss)}");
+
+			var metadata = new List<string>();
+			if (!string.IsNullOrWhiteSpace(holding.PositionId)) metadata.Add($"Position ID: {holding.PositionId}");
+			if (!string.IsNullOrWhiteSpace(holding.Currency)) metadata.Add($"Currency: {holding.Currency}");
+			if (!string.IsNullOrWhiteSpace(holding.Proportion)) metadata.Add($"Proportion: {FormatPercent(holding.Proportion)}");
+			if (metadata.Count > 0)
+				lines.Add($"  {string.Join("  ", metadata)}");
+
+			if (holding.Legs is { Count: > 0 })
+			{
+				lines.Add("  Legs:");
+				foreach (var leg in holding.Legs)
+				{
+					var legParts = new List<string> { string.IsNullOrWhiteSpace(leg.Symbol) ? "-" : leg.Symbol };
+					if (!string.IsNullOrWhiteSpace(leg.InstrumentType)) legParts.Add($"[{leg.InstrumentType}]");
+					if (!string.IsNullOrWhiteSpace(leg.OptionType)) legParts.Add(leg.OptionType);
+					if (!string.IsNullOrWhiteSpace(leg.OptionExercisePrice)) legParts.Add($"strike={FormatCurrency(leg.OptionExercisePrice)}");
+					if (!string.IsNullOrWhiteSpace(leg.OptionExpireDate)) legParts.Add($"exp={leg.OptionExpireDate}");
+					if (!string.IsNullOrWhiteSpace(leg.LastPrice)) legParts.Add($"last={FormatCurrency(leg.LastPrice)}");
+					if (!string.IsNullOrWhiteSpace(leg.Cost)) legParts.Add($"cost={FormatCurrency(leg.Cost)}");
+					if (!string.IsNullOrWhiteSpace(leg.UnrealizedProfitLoss)) legParts.Add($"uPnL={FormatCurrency(leg.UnrealizedProfitLoss)}");
+					if (!string.IsNullOrWhiteSpace(leg.Proportion)) legParts.Add($"weight={FormatPercent(leg.Proportion)}");
+					lines.Add($"    - {string.Join(" ", legParts)}");
+				}
+			}
+
+			if (i < holdings.Count - 1)
+				lines.Add(string.Empty);
+		}
+
+		return lines;
 	}
 
 	/// <summary>Synthesizes an OCC option symbol from leg fields. Returns null if any required field is missing/malformed.</summary>
@@ -462,7 +574,12 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 
 // ─── `trade positions` (diagnostic) ───────────────────────────────────────────
 
-internal sealed class TradePositionsSettings : TradeSubcommandSettings { }
+internal sealed class TradePositionsSettings : TradeSubcommandSettings
+{
+	[CommandOption("--debug")]
+	[Description("Print the raw JSON response from Webull instead of formatted position text.")]
+	public bool Debug { get; set; }
+}
 
 internal sealed class TradePositionsCommand : AsyncCommand<TradePositionsSettings>
 {
@@ -474,10 +591,31 @@ internal sealed class TradePositionsCommand : AsyncCommand<TradePositionsSetting
 		using var client = new WebullOpenApiClient(account);
 		try
 		{
-			var raw = await client.FetchAccountPositionsRawAsync(cancellation);
-			AnsiConsole.WriteLine(raw);
+			if (s.Debug)
+			{
+				var raw = await client.FetchAccountPositionsRawAsync(cancellation);
+				AnsiConsole.WriteLine(raw);
+				return 0;
+			}
+
+           var holdings = await client.FetchAccountPositionsAsync(cancellation);
+			if (holdings.Count == 0)
+			{
+				AnsiConsole.MarkupLine("[dim]No positions.[/]");
+				return 0;
+			}
+
+			AnsiConsole.MarkupLine($"[bold]{holdings.Count} position(s):[/]");
+			var panels = TradeContext.BuildPositionPanels(holdings);
+			for (var i = 0; i < panels.Count; i++)
+			{
+				AnsiConsole.Write(panels[i]);
+				if (i < panels.Count - 1)
+					AnsiConsole.WriteLine();
+			}
 			return 0;
 		}
+		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]Positions lookup failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
 		catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
 	}
 }
