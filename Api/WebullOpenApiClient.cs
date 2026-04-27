@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -82,7 +81,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		{
 			foreach (var property in ExtraFields!)
 			{
-             if (property.Key.Equals(name, StringComparison.OrdinalIgnoreCase))
+				if (property.Key.Equals(name, StringComparison.OrdinalIgnoreCase))
 				{
 					value = property.Value;
 					return true;
@@ -467,7 +466,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 
 	private async Task<T> PostAsync<T>(string path, object body, CancellationToken ct)
 	{
-     var (result, _) = await PostWithRawAsync<T>(path, body, ct);
+		var (result, _) = await PostWithRawAsync<T>(path, body, ct);
 		return result;
 	}
 
@@ -479,7 +478,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
 		ApplyAccessTokenHeader(req, path);
 		using var resp = await _http.SendAsync(req, ct);
-     return await ReadWithRaw<T>(resp);
+		return await ReadWithRaw<T>(resp);
 	}
 
 	private async Task<T> GetAsync<T>(string path, IReadOnlyDictionary<string, string> query, CancellationToken ct)
@@ -495,7 +494,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 	}
 
 	private static async Task<T> Read<T>(HttpResponseMessage resp)
-   {
+	{
 		var (result, _) = await ReadWithRaw<T>(resp);
 		return result;
 	}
@@ -521,7 +520,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		}
 		var result = JsonSerializer.Deserialize<T>(body, JsonOptions);
 		if (result == null) throw new WebullOpenApiException(null, "Empty response body", (int)resp.StatusCode);
-      return (result, body);
+		return (result, body);
 	}
 
 	private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";

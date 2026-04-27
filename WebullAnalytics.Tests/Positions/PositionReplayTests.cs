@@ -9,7 +9,7 @@ public class PositionReplayTests
 	[Fact]
 	public void Execute_SplitsSharedLongLegIntoCalendarAndDiagonal()
 	{
-	  var backExpiry = new DateTime(2026, 6, 19);
+		var backExpiry = new DateTime(2026, 6, 19);
 		var frontExpiry = new DateTime(2026, 5, 15);
 		var longSymbol = MatchKeys.OccSymbol("GME", backExpiry, 25m, "P");
 		var calendarShortSymbol = MatchKeys.OccSymbol("GME", frontExpiry, 25m, "P");

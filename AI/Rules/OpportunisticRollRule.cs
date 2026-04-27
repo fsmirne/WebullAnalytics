@@ -1,4 +1,4 @@
-using System.Globalization;
+using WebullAnalytics.AI.Output;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.Rules;
@@ -13,11 +13,13 @@ internal sealed class OpportunisticRollRule : IManagementRule
 {
 	private readonly OpportunisticRollConfig _config;
 	private readonly bool _debug;
+	private readonly string _pricingMode;
 
-	public OpportunisticRollRule(OpportunisticRollConfig config, bool debug = false)
+	public OpportunisticRollRule(OpportunisticRollConfig config, bool debug = false, string pricingMode = SuggestionPricing.Mid)
 	{
 		_config = config;
 		_debug = debug;
+		_pricingMode = SuggestionPricing.Normalize(pricingMode);
 	}
 
 	public string Name => "OpportunisticRollRule";
@@ -40,7 +42,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		var legInfos = new List<ScenarioEngine.LegInfo>(position.Legs.Count);
 		foreach (var leg in position.Legs)
 		{
-           if (leg.CallPut == null || !leg.Expiry.HasValue)
+			if (leg.CallPut == null || !leg.Expiry.HasValue)
 			{
 				Debug(position, $"skipped: leg '{leg.Symbol}' missing option metadata");
 				return null;
@@ -51,12 +53,12 @@ internal sealed class OpportunisticRollRule : IManagementRule
 
 		var kind = ScenarioEngine.Classify(legInfos);
 		if (kind is ScenarioEngine.StructureKind.Unsupported or ScenarioEngine.StructureKind.Vertical or ScenarioEngine.StructureKind.SingleShort)
-        {
+		{
 			Debug(position, $"skipped: unsupported structure kind {kind}");
 			return null;
 		}
 
-        if (!ctx.UnderlyingPrices.TryGetValue(position.Ticker, out var spot) || spot <= 0m)
+		if (!ctx.UnderlyingPrices.TryGetValue(position.Ticker, out var spot) || spot <= 0m)
 		{
 			Debug(position, "skipped: missing or non-positive spot");
 			return null;
@@ -68,7 +70,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		if (_config.TechnicalFilter.Enabled
 			&& ctx.TechnicalSignals.TryGetValue(position.Ticker, out var bias)
 			&& bias.IsAdverse(callPut, _config.TechnicalFilter.BullishBlockThreshold, _config.TechnicalFilter.BearishBlockThreshold))
-        {
+		{
 			Debug(position, $"skipped: technical filter adverse for {callPut} short (score {bias.Score:+0.00;-0.00})");
 			return null;
 		}
@@ -79,7 +81,8 @@ internal sealed class OpportunisticRollRule : IManagementRule
 			IvDefault: _config.IvDefaultPct,
 			StrikeStep: _config.StrikeStep,
 			AvailableCash: availableCash > 0m ? availableCash : null,
-			IvOverrides: null);
+			IvOverrides: null,
+			PricingMode: _pricingMode);
 
 		var scenarios = ScenarioEngine.Evaluate(legInfos, kind, spot, ctx.Now, ctx.Quotes, opt);
 		if (scenarios.Count == 0)
@@ -92,13 +95,13 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		// fundable scenario (positive BPDelta ≤ availableCash, or BPDelta ≤ 0) that passes risk checks.
 		ScenarioEngine.ScenarioResult? hold = scenarios.FirstOrDefault(s => s.ProposalLegs.Count == 0);
 		ScenarioEngine.ScenarioResult? topFundable = null;
-        ScenarioEngine.ScenarioResult? bestCandidate = scenarios.FirstOrDefault(s => s.ProposalLegs.Count > 0);
+		ScenarioEngine.ScenarioResult? bestCandidate = scenarios.FirstOrDefault(s => s.ProposalLegs.Count > 0);
 		var rollSafetyNote = "";
 		foreach (var s in scenarios)
 		{
 			if (s.ProposalLegs.Count == 0) continue; // skip "hold"/alert-only
 			var bpTotal = s.BPDeltaPerContract * s.Qty;
-            if (bpTotal > 0m && availableCash > 0m && bpTotal > availableCash)
+			if (bpTotal > 0m && availableCash > 0m && bpTotal > availableCash)
 			{
 				Debug(position, $"candidate '{s.Name}' skipped: BP ${bpTotal:N2} exceeds available ${availableCash:N2}");
 				continue;
@@ -126,7 +129,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		// Require absolute P&L-per-day improvement above the configured threshold, in dollars per contract per day.
 		// (Relative-percent thresholds are unreliable near zero.)
 		var improvementPerDayPerContract = topPerDay - holdPerDay;
-        if (improvementPerDayPerContract < _config.MinImprovementPerDayPerContract)
+		if (improvementPerDayPerContract < _config.MinImprovementPerDayPerContract)
 		{
 			Debug(position, $"skipped: best '{topFundable.Name}' improves ${improvementPerDayPerContract:+0.00;-0.00}/ct/day vs hold ${holdPerDay:+0.00;-0.00}/ct/day; threshold ${_config.MinImprovementPerDayPerContract:F2}/ct/day");
 			return null;
@@ -157,14 +160,14 @@ internal sealed class OpportunisticRollRule : IManagementRule
 
 	/// <summary>Runs the four sequential safety gates on a Roll scenario. Returns false to skip, true to accept.
 	/// On true, safetyNote contains a formatted string to embed in the proposal rationale.</summary>
-    private static bool PassesRollRiskChecks(ScenarioEngine.ScenarioResult s, OpenPosition position, decimal spot, EvaluationContext ctx, OpportunisticRollConfig config, out string safetyNote, out string rejectReason)
+	private static bool PassesRollRiskChecks(ScenarioEngine.ScenarioResult s, OpenPosition position, decimal spot, EvaluationContext ctx, OpportunisticRollConfig config, out string safetyNote, out string rejectReason)
 	{
 		safetyNote = "";
 		rejectReason = "";
 
 		var newShortProposalLeg = s.ProposalLegs.FirstOrDefault(l => l.Action == "sell");
 		var oldShortProposalLeg = s.ProposalLegs.FirstOrDefault(l => l.Action == "buy");
-       if (newShortProposalLeg == null) return true; // "Close short only" scenario: buys back existing short without a new short leg — reduces risk, accept unconditionally
+		if (newShortProposalLeg == null) return true; // "Close short only" scenario: buys back existing short without a new short leg — reduces risk, accept unconditionally
 
 		var newShort = ParsingHelpers.ParseOptionSymbol(newShortProposalLeg.Symbol);
 		if (newShort == null)

@@ -12,19 +12,19 @@ namespace WebullAnalytics.Analyze;
 /// </summary>
 public static class BreakEvenAnalyzer
 {
-  public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding = 2, int maxGridColumns = 7)
-     => Analyze(positionRows, opts, padding, terminalWidth: TerminalHelper.DetailedMinWidth, displayMode: "pnl", showLegs: false, forcedMaxGridColumns: maxGridColumns, gridTableHasBorder: false);
+	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding = 2, int maxGridColumns = 7)
+	   => Analyze(positionRows, opts, padding, terminalWidth: TerminalHelper.DetailedMinWidth, displayMode: "pnl", showLegs: false, forcedMaxGridColumns: maxGridColumns, gridTableHasBorder: false);
 
-    public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, bool gridTableHasBorder = false)
+	public static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, bool gridTableHasBorder = false)
 		=> Analyze(positionRows, opts, padding, terminalWidth, displayMode, showLegs, forcedMaxGridColumns: null, gridTableHasBorder: gridTableHasBorder);
 
-    private static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
+	private static List<BreakEvenResult> Analyze(List<PositionRow> positionRows, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
 	{
 		var groups = GroupPositions(positionRows);
 		var results = new List<BreakEvenResult>();
 		foreach (var group in groups)
 		{
-          var result = AnalyzeGroup(group, opts, padding, terminalWidth, displayMode, showLegs, forcedMaxGridColumns, gridTableHasBorder);
+			var result = AnalyzeGroup(group, opts, padding, terminalWidth, displayMode, showLegs, forcedMaxGridColumns, gridTableHasBorder);
 			if (result != null) results.Add(result);
 		}
 		return results;
@@ -46,7 +46,7 @@ public static class BreakEvenAnalyzer
 		return groups;
 	}
 
- private static BreakEvenResult? AnalyzeGroup(List<PositionRow> group, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
+	private static BreakEvenResult? AnalyzeGroup(List<PositionRow> group, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
 	{
 		var parent = group[0];
 
@@ -54,10 +54,10 @@ public static class BreakEvenAnalyzer
 			return AnalyzeStock(parent, opts);
 
 		if (parent.Asset == Asset.Option)
-            return AnalyzeSingleOption(parent, opts, padding, terminalWidth, displayMode, showLegs, forcedMaxGridColumns, gridTableHasBorder);
+			return AnalyzeSingleOption(parent, opts, padding, terminalWidth, displayMode, showLegs, forcedMaxGridColumns, gridTableHasBorder);
 
 		if (parent.Asset == Asset.OptionStrategy && group.Count > 1)
-            return AnalyzeStrategy(parent, group.Skip(1).ToList(), opts, padding, terminalWidth, displayMode, showLegs, forcedMaxGridColumns, gridTableHasBorder);
+			return AnalyzeStrategy(parent, group.Skip(1).ToList(), opts, padding, terminalWidth, displayMode, showLegs, forcedMaxGridColumns, gridTableHasBorder);
 
 		return null;
 	}
@@ -80,7 +80,7 @@ public static class BreakEvenAnalyzer
 		return new BreakEvenResult(Title: title, Details: details, Qty: row.Qty, BreakEvens: [avgPrice], MaxProfit: isLong ? null : avgPrice * row.Qty, MaxLoss: isLong ? avgPrice * row.Qty : null, DaysToExpiry: null, PriceLadder: ladder, Note: null, ChartData: chartData);
 	}
 
-  private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
+	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
 	{
 		var parsedInfo = ParseOption(row);
 		if (parsedInfo == null) return null;
@@ -139,7 +139,7 @@ public static class BreakEvenAnalyzer
 			var gridBreakEvens = new List<decimal> { breakEven };
 			if (spot.HasValue) gridBreakEvens.Add(spot.Value);
 			gridBreakEvens.AddRange(LookupExtraNotablePrices(parsed.Root, opts));
-         var build = (int maxCols) => TimeDecayGridBuilder.Build(legsList, qty, row.Side, premium, parsed.ExpiryDate, opts, padding, strike, gridBreakEvens, maxCols, spot);
+			var build = (int maxCols) => TimeDecayGridBuilder.Build(legsList, qty, row.Side, premium, parsed.ExpiryDate, opts, padding, strike, gridBreakEvens, maxCols, spot);
 			if (forcedMaxGridColumns.HasValue)
 			{
 				grid = build(forcedMaxGridColumns.Value);
@@ -147,7 +147,7 @@ public static class BreakEvenAnalyzer
 			else
 			{
 				var legWidth = premium.ToString("N2", CultureInfo.InvariantCulture).Length;
-              var initialMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs, maxLegCount: 1, maxLegValueWidth: legWidth, gridTableOuterBorders: gridTableHasBorder ? 2 : 0);
+				var initialMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs, maxLegCount: 1, maxLegValueWidth: legWidth, gridTableOuterBorders: gridTableHasBorder ? 2 : 0);
 				grid = BuildFittedGrid(build, initialMax, terminalWidth, displayMode, showLegs, gridTableHasBorder ? 2 : 0);
 			}
 		}
@@ -165,7 +165,7 @@ public static class BreakEvenAnalyzer
 		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, Note: null, Legs: legsDisplay, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(parsed.Root, opts), Margin: margin);
 	}
 
-   private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
+	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
 	{
 		var parsedLegs = legs.Select(l => (row: l, parsed: ParseOption(l))).Where(x => x.parsed != null).Select(x => (x.row, x.parsed!.Value.parsed, x.parsed!.Value.symbol)).ToList();
 		if (parsedLegs.Count < 2) return null;
@@ -255,7 +255,7 @@ public static class BreakEvenAnalyzer
 		else if (isTimeSpread)
 		{
 			note = "P&L estimated using Black-Scholes at short leg expiry. Actual results will vary with volatility.";
-            if (parent.Side == Side.Buy)
+			if (parent.Side == Side.Buy)
 			{
 				// For debit diagonals/calendars, max loss is often just the debit.
 				// But for inverted-strike diagonals (e.g., long call strike > short call strike),
@@ -310,7 +310,7 @@ public static class BreakEvenAnalyzer
 			var gridNotable = new List<decimal>(breakEvens);
 			if (spot.HasValue) gridNotable.Add(spot.Value);
 			gridNotable.AddRange(LookupExtraNotablePrices(root, opts));
-            var build = (int maxCols) => TimeDecayGridBuilder.Build(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, opts, padding, strikes.Average(), gridNotable, maxCols, spot);
+			var build = (int maxCols) => TimeDecayGridBuilder.Build(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, opts, padding, strikes.Average(), gridNotable, maxCols, spot);
 			if (forcedMaxGridColumns.HasValue)
 			{
 				grid = build(forcedMaxGridColumns.Value);
@@ -321,7 +321,7 @@ public static class BreakEvenAnalyzer
 					.Select(l => OptionMath.GetPremium(l.row).ToString("N2", CultureInfo.InvariantCulture).Length)
 					.DefaultIfEmpty(0)
 					.Max();
-                var initialMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs, maxLegCount: parsedLegs.Count, maxLegValueWidth: maxLegWidth, gridTableOuterBorders: gridTableHasBorder ? 2 : 0);
+				var initialMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs, maxLegCount: parsedLegs.Count, maxLegValueWidth: maxLegWidth, gridTableOuterBorders: gridTableHasBorder ? 2 : 0);
 				grid = BuildFittedGrid(build, initialMax, terminalWidth, displayMode, showLegs, gridTableHasBorder ? 2 : 0);
 			}
 		}
@@ -343,7 +343,7 @@ public static class BreakEvenAnalyzer
 					var longQty = coveringLong != default ? qty : 0;
 					totalMargin += AnalyzeCommon.ComputeLegMargin(sl.parsed, qty, spot.Value, shortPremium, longParsed, null, longQty, longPremium, isExisting: false).Total;
 				}
-              margin = totalMargin;
+				margin = totalMargin;
 			}
 		}
 
@@ -416,7 +416,7 @@ public static class BreakEvenAnalyzer
 		return legs.Any(l => OptionMath.GetLegIv(l.row.Side, l.symbol, opts).HasValue);
 	}
 
-   private static TimeDecayGrid BuildFittedGrid(Func<int, TimeDecayGrid> buildGrid, int initialMaxColumns, int terminalWidth, string displayMode, bool showLegs, int gridTableOuterBorders)
+	private static TimeDecayGrid BuildFittedGrid(Func<int, TimeDecayGrid> buildGrid, int initialMaxColumns, int terminalWidth, string displayMode, bool showLegs, int gridTableOuterBorders)
 	{
 		var maxColumns = Math.Max(3, initialMaxColumns);
 		var grid = buildGrid(maxColumns);
@@ -430,7 +430,7 @@ public static class BreakEvenAnalyzer
 			if (expanded.DateColumns.Count <= grid.DateColumns.Count)
 				break;
 
-         var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
+			var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
 			if (required > terminalWidth)
 				break;
 

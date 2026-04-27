@@ -1,12 +1,12 @@
-using Xunit;
 using WebullAnalytics.AI.RiskDiagnostics;
+using Xunit;
 
 namespace WebullAnalytics.Tests.AI.RiskDiagnostics;
 
 public class TrendFetcherTests
 {
-    // Yahoo-style chart payload with 25 bars. Spot = 24.72, prev close = 25.08 → intraday ≈ −1.43%.
-    private const string CannedJson = """
+	// Yahoo-style chart payload with 25 bars. Spot = 24.72, prev close = 25.08 → intraday ≈ −1.43%.
+	private const string CannedJson = """
     {"chart":{"result":[{"meta":{"regularMarketPrice":24.72,"regularMarketTime":1777044900,"chartPreviousClose":25.08},
     "timestamp":[1774550400,1774636800,1774723200,1774809600,1774896000,
                  1775155200,1775241600,1775328000,1775414400,1775500800,
@@ -27,40 +27,40 @@ public class TrendFetcherTests
                                     25.24,25.22,25.20,25.18,24.72]}]}}]}}
     """;
 
-    [Fact]
-    public void ParsesSnapshotFromCannedJson()
-    {
-        var snap = TrendFetcher.ParseSnapshot(CannedJson, new DateTime(2026, 4, 24));
-        Assert.NotNull(snap);
+	[Fact]
+	public void ParsesSnapshotFromCannedJson()
+	{
+		var snap = TrendFetcher.ParseSnapshot(CannedJson, new DateTime(2026, 4, 24));
+		Assert.NotNull(snap);
 
-        // Intraday: spot 24.72 vs yesterday's close (second-to-last bar) = 25.18 → ≈ −1.83%
-        Assert.NotNull(snap!.ChangePctIntraday);
-        Assert.InRange(snap.ChangePctIntraday!.Value, -1.85m, -1.80m);
+		// Intraday: spot 24.72 vs yesterday's close (second-to-last bar) = 25.18 → ≈ −1.83%
+		Assert.NotNull(snap!.ChangePctIntraday);
+		Assert.InRange(snap.ChangePctIntraday!.Value, -1.85m, -1.80m);
 
-        // 5-day return: spot 24.72 vs closes[19] = 25.26 → ≈ −2.14%
-        Assert.InRange(snap.ChangePct5Day, -2.2m, -2.0m);
+		// 5-day return: spot 24.72 vs closes[19] = 25.26 → ≈ −2.14%
+		Assert.InRange(snap.ChangePct5Day, -2.2m, -2.0m);
 
-        // 20-day return: spot 24.72 vs closes[4] = 25.20 → ≈ −1.9%
-        Assert.InRange(snap.ChangePct20Day, -2.0m, -1.8m);
+		// 20-day return: spot 24.72 vs closes[4] = 25.20 → ≈ −1.9%
+		Assert.InRange(snap.ChangePct20Day, -2.0m, -1.8m);
 
-        Assert.True(snap.Atr14Pct > 0m);
-    }
+		Assert.True(snap.Atr14Pct > 0m);
+	}
 
-    [Fact]
-    public void ReturnsNullOnInsufficientBars()
-    {
-        const string shortJson = """
+	[Fact]
+	public void ReturnsNullOnInsufficientBars()
+	{
+		const string shortJson = """
         {"chart":{"result":[{"meta":{"regularMarketPrice":24.72,"chartPreviousClose":25.08},
         "timestamp":[1,2,3],
         "indicators":{"quote":[{"open":[1,2,3],"high":[1,2,3],"low":[1,2,3],"close":[1,2,3]}]}}]}}
         """;
-        Assert.Null(TrendFetcher.ParseSnapshot(shortJson, DateTime.Today));
-    }
+		Assert.Null(TrendFetcher.ParseSnapshot(shortJson, DateTime.Today));
+	}
 
-    [Fact]
-    public void ReturnsNullOnMalformedJson()
-    {
-        Assert.Null(TrendFetcher.ParseSnapshot("not json", DateTime.Today));
-        Assert.Null(TrendFetcher.ParseSnapshot("{}", DateTime.Today));
-    }
+	[Fact]
+	public void ReturnsNullOnMalformedJson()
+	{
+		Assert.Null(TrendFetcher.ParseSnapshot("not json", DateTime.Today));
+		Assert.Null(TrendFetcher.ParseSnapshot("{}", DateTime.Today));
+	}
 }

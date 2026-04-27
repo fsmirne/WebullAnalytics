@@ -39,11 +39,11 @@ public static class TableRenderer
 				}
 			}
 
-         int terminalWidth;
+			int terminalWidth;
 			try { terminalWidth = Console.WindowWidth; }
 			catch { terminalWidth = 200; }
 
-           var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: false);
+			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: false);
 			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: false, individualResults: breakEvens);
 			var combinedByTicker = new Dictionary<string, BreakEvenResult>(StringComparer.Ordinal);
 			foreach (var c in combined)
@@ -81,7 +81,7 @@ public static class TableRenderer
 		TableBuilder.RenderSummary(console, rows, running, initialAmount, unrealizedPnL);
 	}
 
-   // Max-grid-columns is computed per panel inside the analyzers based on each panel's leg count.
+	// Max-grid-columns is computed per panel inside the analyzers based on each panel's leg count.
 
 	/// <summary>
 	/// Extracts the ticker from an individual break-even result title.

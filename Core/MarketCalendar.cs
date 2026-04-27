@@ -34,7 +34,7 @@ internal static class MarketCalendar
 	private static DateTime Observed(DateTime holiday)
 	{
 		if (holiday.DayOfWeek == DayOfWeek.Saturday) return holiday.AddDays(-1);
-		if (holiday.DayOfWeek == DayOfWeek.Sunday)   return holiday.AddDays(1);
+		if (holiday.DayOfWeek == DayOfWeek.Sunday) return holiday.AddDays(1);
 		return holiday;
 	}
 
@@ -67,7 +67,7 @@ internal static class MarketCalendar
 		int l = (32 + 2 * e + 2 * i - h - k) % 7;
 		int m = (a + 11 * h + 22 * l) / 451;
 		int month = (h + l - 7 * m + 114) / 31;
-		int day   = (h + l - 7 * m + 114) % 31 + 1;
+		int day = (h + l - 7 * m + 114) % 31 + 1;
 		return new DateTime(year, month, day).AddDays(-2);
 	}
 }

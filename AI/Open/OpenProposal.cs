@@ -4,12 +4,12 @@ namespace WebullAnalytics.AI;
 
 public enum OpenStructureKind
 {
-    LongCalendar,
-    LongDiagonal,
-    ShortPutVertical,
-    ShortCallVertical,
-    LongCall,
-    LongPut
+	LongCalendar,
+	LongDiagonal,
+	ShortPutVertical,
+	ShortCallVertical,
+	LongCall,
+	LongPut
 }
 
 /// <summary>
@@ -41,28 +41,28 @@ public enum OpenStructureKind
 /// <param name="HistoricalVolatilityAnnual">Annualized realized volatility over the configured lookback, as a fraction.</param>
 /// <param name="VolatilityAdjustmentFactor">IV-vs-HV multiplier applied during ranking; null when HV was unavailable.</param>
 internal sealed record OpenProposal(
-    string Ticker,
-    OpenStructureKind StructureKind,
-    IReadOnlyList<ProposalLeg> Legs,
-    int Qty,
-    decimal DebitOrCreditPerContract,
-    decimal MaxProfitPerContract,
-    decimal MaxLossPerContract,
-    decimal CapitalAtRiskPerContract,
-    IReadOnlyList<decimal> Breakevens,
-    decimal ProbabilityOfProfit,
-    decimal ExpectedValuePerContract,
-    int DaysToTarget,
-    decimal RawScore,
-    decimal BiasAdjustedScore,
-    int DirectionalFit,
-    string Rationale,
-    string Fingerprint,
-    bool CashReserveBlocked = false,
-    string? CashReserveDetail = null,
-    RiskDiagnostic? Diagnostic = null,
-    decimal? PremiumRatio = null,
-    decimal? ImpliedVolatilityAnnual = null,
-    decimal? HistoricalVolatilityAnnual = null,
-    decimal? VolatilityAdjustmentFactor = null
+	string Ticker,
+	OpenStructureKind StructureKind,
+	IReadOnlyList<ProposalLeg> Legs,
+	int Qty,
+	decimal DebitOrCreditPerContract,
+	decimal MaxProfitPerContract,
+	decimal MaxLossPerContract,
+	decimal CapitalAtRiskPerContract,
+	IReadOnlyList<decimal> Breakevens,
+	decimal ProbabilityOfProfit,
+	decimal ExpectedValuePerContract,
+	int DaysToTarget,
+	decimal RawScore,
+	decimal BiasAdjustedScore,
+	int DirectionalFit,
+	string Rationale,
+	string Fingerprint,
+	bool CashReserveBlocked = false,
+	string? CashReserveDetail = null,
+	RiskDiagnostic? Diagnostic = null,
+	decimal? PremiumRatio = null,
+	decimal? ImpliedVolatilityAnnual = null,
+	decimal? HistoricalVolatilityAnnual = null,
+	decimal? VolatilityAdjustmentFactor = null
 );

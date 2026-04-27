@@ -6,10 +6,10 @@ namespace WebullAnalytics.Tests.Api;
 
 public class WebullOpenApiClientAccountBalanceTests
 {
-    [Fact]
-    public void TryGetAvailableFunds_PrefersBuyingPowerWhenPresent()
-    {
-        const string json = """
+	[Fact]
+	public void TryGetAvailableFunds_PrefersBuyingPowerWhenPresent()
+	{
+		const string json = """
         {
           "total_cash_balance": "11190.95",
           "balances": {
@@ -18,15 +18,15 @@ public class WebullOpenApiClientAccountBalanceTests
         }
         """;
 
-        var balance = JsonSerializer.Deserialize<WebullOpenApiClient.AccountBalance>(json)!;
+		var balance = JsonSerializer.Deserialize<WebullOpenApiClient.AccountBalance>(json)!;
 
-        Assert.Equal(12500.50m, balance.TryGetAvailableFunds());
-    }
+		Assert.Equal(12500.50m, balance.TryGetAvailableFunds());
+	}
 
-    [Fact]
-    public void TryGetAvailableFunds_FallsBackToTotalCashBalance()
-    {
-        const string json = """
+	[Fact]
+	public void TryGetAvailableFunds_FallsBackToTotalCashBalance()
+	{
+		const string json = """
         {
           "total_cash_balance": "11190.95",
           "total_unrealized_profit_loss": "15.00",
@@ -34,8 +34,8 @@ public class WebullOpenApiClientAccountBalanceTests
         }
         """;
 
-        var balance = JsonSerializer.Deserialize<WebullOpenApiClient.AccountBalance>(json)!;
+		var balance = JsonSerializer.Deserialize<WebullOpenApiClient.AccountBalance>(json)!;
 
-        Assert.Equal(11190.95m, balance.TryGetAvailableFunds());
-    }
+		Assert.Equal(11190.95m, balance.TryGetAvailableFunds());
+	}
 }

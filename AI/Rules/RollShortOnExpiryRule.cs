@@ -42,8 +42,8 @@ internal sealed class RollShortOnExpiryRule : IManagementRule
 
 		var legs = new[]
 		{
-			new ProposalLeg("buy", shortLeg.Symbol, shortLeg.Qty, oldQ.Ask),
-			new ProposalLeg("sell", newSymbol, shortLeg.Qty, newQ.Bid)
+			new ProposalLeg("buy", shortLeg.Symbol, shortLeg.Qty, oldMid, oldQ.Ask),
+			new ProposalLeg("sell", newSymbol, shortLeg.Qty, newMid, newQ.Bid)
 		};
 
 		return new ManagementProposal(

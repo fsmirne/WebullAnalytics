@@ -6,10 +6,10 @@ namespace WebullAnalytics.Tests.Api;
 
 public class WebullOpenApiClientPreviewResultTests
 {
-    [Fact]
-    public void TryGetMarginSummary_ReadsTopLevelMarginFields()
-    {
-        const string json = """
+	[Fact]
+	public void TryGetMarginSummary_ReadsTopLevelMarginFields()
+	{
+		const string json = """
         {
           "estimated_cost": "-75.32",
           "estimated_transaction_fee": "1.25",
@@ -17,17 +17,17 @@ public class WebullOpenApiClientPreviewResultTests
         }
         """;
 
-        var preview = JsonSerializer.Deserialize<WebullOpenApiClient.PreviewResult>(json)!;
+		var preview = JsonSerializer.Deserialize<WebullOpenApiClient.PreviewResult>(json)!;
 
-        var summary = preview.TryGetMarginSummary();
+		var summary = preview.TryGetMarginSummary();
 
-        Assert.Equal("margin $26,900.00", summary);
-    }
+		Assert.Equal("margin $26,900.00", summary);
+	}
 
-    [Fact]
-    public void TryGetMarginSummary_ReadsNestedBuyingPowerFields()
-    {
-        const string json = """
+	[Fact]
+	public void TryGetMarginSummary_ReadsNestedBuyingPowerFields()
+	{
+		const string json = """
         {
           "estimated_cost": "-75.32",
           "estimated_transaction_fee": "1.25",
@@ -37,25 +37,25 @@ public class WebullOpenApiClientPreviewResultTests
         }
         """;
 
-        var preview = JsonSerializer.Deserialize<WebullOpenApiClient.PreviewResult>(json)!;
+		var preview = JsonSerializer.Deserialize<WebullOpenApiClient.PreviewResult>(json)!;
 
-        var summary = preview.TryGetMarginSummary();
+		var summary = preview.TryGetMarginSummary();
 
-        Assert.Equal("BP effect -$125.50", summary);
-    }
+		Assert.Equal("BP effect -$125.50", summary);
+	}
 
-    [Fact]
-    public void TryGetMarginSummary_ReturnsNullWhenMarginFieldsAbsent()
-    {
-        const string json = """
+	[Fact]
+	public void TryGetMarginSummary_ReturnsNullWhenMarginFieldsAbsent()
+	{
+		const string json = """
         {
           "estimated_cost": "-75.32",
           "estimated_transaction_fee": "1.25"
         }
         """;
 
-        var preview = JsonSerializer.Deserialize<WebullOpenApiClient.PreviewResult>(json)!;
+		var preview = JsonSerializer.Deserialize<WebullOpenApiClient.PreviewResult>(json)!;
 
-        Assert.Null(preview.TryGetMarginSummary());
-    }
+		Assert.Null(preview.TryGetMarginSummary());
+	}
 }
