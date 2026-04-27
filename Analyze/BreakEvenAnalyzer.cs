@@ -343,7 +343,7 @@ public static class BreakEvenAnalyzer
 					var longQty = coveringLong != default ? qty : 0;
 					totalMargin += AnalyzeCommon.ComputeLegMargin(sl.parsed, qty, spot.Value, shortPremium, longParsed, null, longQty, longPremium, isExisting: false).Total;
 				}
-				margin = totalMargin;
+              margin = totalMargin;
 			}
 		}
 
