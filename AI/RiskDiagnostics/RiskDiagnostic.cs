@@ -38,11 +38,14 @@ internal sealed record RiskDiagnosticLegQuote(
 	decimal? Bid,
 	decimal? Ask,
 	decimal? ImpliedVolatility,
+	decimal? HistoricalVolatility,
+	decimal? ImpliedVolatility5Day,
 	long? OpenInterest,
 	long? Volume);
 
 internal sealed record RiskDiagnosticOpenerScore(
 	string Structure,
+	int Qty,
 	decimal? DebitOrCreditPerContract,
 	decimal? MaxProfitPerContract,
 	decimal? MaxLossPerContract,

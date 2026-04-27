@@ -53,4 +53,30 @@ public class CandidateScorerBiasTests
     {
         Assert.Equal(0m, CandidateScorer.ComputeRawScore(ev: 50m, daysToTarget: 5, capitalAtRisk: 0m));
     }
+
+    [Fact]
+    public void HighIvRelativeToHvBoostsShortPremiumStructures()
+    {
+        var adjusted = CandidateScorer.VolatilityAdjust(
+            score: 0.010m,
+            kind: OpenStructureKind.ShortPutVertical,
+            ivAnnual: 0.60m,
+            historicalVolAnnual: 0.30m,
+            weight: 0.50m);
+
+        Assert.Equal(0.015m, adjusted);
+    }
+
+    [Fact]
+    public void HighIvRelativeToHvCutsLongPremiumStructures()
+    {
+        var adjusted = CandidateScorer.VolatilityAdjust(
+            score: 0.010m,
+            kind: OpenStructureKind.LongCall,
+            ivAnnual: 0.60m,
+            historicalVolAnnual: 0.30m,
+            weight: 0.50m);
+
+        Assert.Equal(0.005m, adjusted);
+    }
 }
