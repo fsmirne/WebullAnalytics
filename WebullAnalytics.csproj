@@ -24,4 +24,8 @@
     <InternalsVisibleTo Include="WebullAnalytics.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include=".github\copilot-instructions.md" />
+  </ItemGroup>
+
 </Project>
