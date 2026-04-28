@@ -62,6 +62,63 @@ internal static class CandidateScorer
 		return factor.HasValue ? score * factor.Value : score;
 	}
 
+	public static decimal? ComputeMaxPainPrice(string ticker, DateTime expiry, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot = null)
+	{
+		var chain = quotes
+			.Select(kv => (parsed: ParsingHelpers.ParseOptionSymbol(kv.Key), quote: kv.Value))
+			.Where(x => x.parsed != null
+				&& string.Equals(x.parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)
+				&& x.parsed.ExpiryDate.Date == expiry.Date
+				&& x.quote.OpenInterest.HasValue
+				&& x.quote.OpenInterest.Value > 0)
+			.Select(x => (parsed: x.parsed!, openInterest: x.quote.OpenInterest!.Value))
+			.ToList();
+
+		if (chain.Count == 0)
+			return null;
+
+		var candidateStrikes = chain.Select(x => x.parsed.Strike).Distinct().OrderBy(s => s).ToList();
+		decimal? bestStrike = null;
+		decimal? bestPain = null;
+		foreach (var settle in candidateStrikes)
+		{
+			decimal totalPain = 0m;
+			foreach (var leg in chain)
+			{
+				var intrinsic = leg.parsed.CallPut == "C"
+					? Math.Max(0m, settle - leg.parsed.Strike)
+					: Math.Max(0m, leg.parsed.Strike - settle);
+				totalPain += intrinsic * leg.openInterest;
+			}
+
+			if (!bestPain.HasValue || totalPain < bestPain.Value)
+			{
+				bestPain = totalPain;
+				bestStrike = settle;
+				continue;
+			}
+
+			if (totalPain != bestPain.Value || !bestStrike.HasValue)
+				continue;
+
+			if (spot.HasValue)
+			{
+				var currentDistance = Math.Abs(settle - spot.Value);
+				var bestDistance = Math.Abs(bestStrike.Value - spot.Value);
+				if (currentDistance < bestDistance || (currentDistance == bestDistance && settle < bestStrike.Value))
+					bestStrike = settle;
+			}
+			else if (settle < bestStrike.Value)
+			{
+				bestStrike = settle;
+			}
+		}
+
+		return bestStrike;
+	}
+
+	public static decimal MaxPainAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
+
 	/// <summary>
 	/// Builds 5 scenario points at S_T ∈ {spot·e^(−sigmaRange·σ), spot·e^(−sigmaRange·σ/2), spot,
 	/// spot·e^(+sigmaRange·σ/2), spot·e^(+sigmaRange·σ)} where σ = ivAnnual · √years.
@@ -153,13 +210,73 @@ internal static class CandidateScorer
 		if (p.VolatilityAdjustmentFactor.HasValue && p.ImpliedVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.Value > 0m)
 		{
 			var richness = p.ImpliedVolatilityAnnual.Value / p.HistoricalVolatilityAnnual.Value;
-			volStr = $" × vol {p.VolatilityAdjustmentFactor.Value:F2} (IV {p.ImpliedVolatilityAnnual.Value:P1} / HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x)";
+			volStr = $" × vol {p.VolatilityAdjustmentFactor.Value:F2} (rep IV {p.ImpliedVolatilityAnnual.Value:P1} / underlying HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x)";
 		}
+		var painStr = "";
+		if (p.MaxPainAdjustmentFactor.HasValue && p.TargetExpiryMaxPain.HasValue)
+			painStr = $" × maxPain {p.MaxPainAdjustmentFactor.Value:F2} (target ${p.TargetExpiryMaxPain.Value:F2})";
 
 		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
-		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6} (× structure {structureWeight:F2} × balance {balance:F2}{volStr})";
+        var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6}";
+		var factorsLine = $"raw × structure {structureWeight:F2} × balance {balance:F2}{volStr}{painStr}";
 
-		return $"{rationaleLine}\n{scoreLine}";
+		return $"{rationaleLine}\n{scoreLine}\n{factorsLine}";
+	}
+
+   private static decimal? ComputeMaxPainAdjustmentFactor(CandidateSkeleton skel, decimal spot, DateTime asOf, decimal targetIv, decimal? maxPain, OpenerConfig cfg, IReadOnlyList<decimal>? breakevens = null)
+	{
+		if (cfg.MaxPainWeight <= 0m || !maxPain.HasValue || spot <= 0m || targetIv <= 0m)
+			return null;
+
+		var targetYears = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
+		var expectedMove = Math.Max(cfg.StrikeStep, spot * targetIv * (decimal)Math.Sqrt(targetYears));
+     var signal = ComputeMaxPainSignal(skel, spot, maxPain.Value, expectedMove, breakevens);
+		return Math.Max(0.10m, 1m + cfg.MaxPainWeight * signal);
+	}
+
+    internal static decimal ComputeMaxPainSignal(CandidateSkeleton skel, decimal spot, decimal maxPain, decimal expectedMove, IReadOnlyList<decimal>? breakevens = null)
+	{
+		var scale = Math.Max(0.01m, expectedMove);
+		var fit = DirectionalFit.SignFor(skel.StructureKind);
+		if (fit != 0)
+			return Math.Clamp(((maxPain - spot) / scale) * fit, -1m, 1m);
+
+		var shortLeg = skel.Legs.FirstOrDefault(l => l.Action == "sell");
+		var shortParsed = shortLeg != null ? ParsingHelpers.ParseOptionSymbol(shortLeg.Symbol) : null;
+		if (shortParsed == null)
+			return 0m;
+
+        var pinSignal = 1m - 2m * Math.Clamp(Math.Abs(shortParsed.Strike - maxPain) / scale, 0m, 1m);
+		var sideSignal = SameSideOfSpotSignal(shortParsed.Strike - spot, maxPain - spot);
+		var beSignal = BreakevenBandSignal(maxPain, scale, breakevens);
+
+      if (breakevens != null && breakevens.Count >= 2)
+			return Math.Clamp(0.45m * beSignal + 0.35m * sideSignal + 0.20m * pinSignal, -1m, 1m);
+
+		return Math.Clamp(0.65m * sideSignal + 0.35m * pinSignal, -1m, 1m);
+	}
+
+	private static decimal SameSideOfSpotSignal(decimal shortOffset, decimal painOffset)
+	{
+		var shortSign = Math.Sign(shortOffset);
+		var painSign = Math.Sign(painOffset);
+		if (shortSign == 0 && painSign == 0) return 1m;
+		if (shortSign == 0 || painSign == 0) return 0m;
+		return shortSign == painSign ? 1m : -1m;
+	}
+
+	private static decimal BreakevenBandSignal(decimal maxPain, decimal scale, IReadOnlyList<decimal>? breakevens)
+	{
+        if (breakevens == null || breakevens.Count < 2)
+			return 0m;
+
+		var lower = breakevens.Min();
+		var upper = breakevens.Max();
+		if (maxPain >= lower && maxPain <= upper)
+			return 1m;
+
+		var outside = maxPain < lower ? lower - maxPain : maxPain - upper;
+		return -Math.Clamp(outside / scale, 0m, 1m);
 	}
 
 	internal enum Direction { Above, Below }
@@ -229,7 +346,9 @@ internal static class CandidateScorer
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
 		var representativeIv = (iv + ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct)) / 2m;
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
-		var biasAdj = VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
+		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
+		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
 		return new OpenProposal(
@@ -253,7 +372,9 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
-			VolatilityAdjustmentFactor: volFactor
+			VolatilityAdjustmentFactor: volFactor,
+			TargetExpiryMaxPain: maxPain,
+			MaxPainAdjustmentFactor: maxPainFactor
 		);
 	}
 
@@ -572,7 +693,9 @@ internal static class CandidateScorer
 		var balance = BalanceFactor(maxProfit, maxLossPoint, premiumRatio);
 		var representativeIv = (ivShort + ivLong) / 2m;
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
-		var biasAdj = VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
+		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, ivShort, maxPain, cfg);
+		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
 		return new OpenProposal(
@@ -596,7 +719,9 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
-			VolatilityAdjustmentFactor: volFactor
+			VolatilityAdjustmentFactor: volFactor,
+			TargetExpiryMaxPain: maxPain,
+			MaxPainAdjustmentFactor: maxPainFactor
 		);
 	}
 
@@ -641,7 +766,9 @@ internal static class CandidateScorer
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight);
-		var biasAdj = VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight);
+		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
+		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
 		return new OpenProposal(
@@ -665,7 +792,9 @@ internal static class CandidateScorer
 			PremiumRatio: null,   // single-leg: ratio collapses to 1 (no shorts), don't display "prem 1.00x"
 			ImpliedVolatilityAnnual: iv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
-			VolatilityAdjustmentFactor: volFactor
+			VolatilityAdjustmentFactor: volFactor,
+			TargetExpiryMaxPain: maxPain,
+			MaxPainAdjustmentFactor: maxPainFactor
 		);
 	}
 

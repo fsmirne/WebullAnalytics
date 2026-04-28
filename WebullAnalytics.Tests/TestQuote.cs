@@ -3,7 +3,7 @@ namespace WebullAnalytics.Tests;
 /// <summary>Compact constructor for OptionContractQuote in tests. Only sets the fields tests need.</summary>
 internal static class TestQuote
 {
-	public static OptionContractQuote Q(decimal bid, decimal ask, decimal? iv = null) =>
+    public static OptionContractQuote Q(decimal bid, decimal ask, decimal? iv = null, long? openInterest = null) =>
 		new OptionContractQuote(
 			ContractSymbol: "",
 			LastPrice: null,
@@ -12,6 +12,6 @@ internal static class TestQuote
 			Change: null,
 			PercentChange: null,
 			Volume: null,
-			OpenInterest: null,
+			OpenInterest: openInterest,
 			ImpliedVolatility: iv);
 }

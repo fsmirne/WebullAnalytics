@@ -78,7 +78,7 @@ internal static class RiskDiagnosticProbeBuilder
 					{
 						var dte = Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
 						var t = dte / 365.0;
-						var iv = ivResolver(shortLeg.Symbol);
+						var iv = opener.HasValue ? opener.Value.cfg.IvDefaultPct / 100m : ivResolver(shortLeg.Symbol);
 						enumDelta = Math.Abs(OptionMath.Delta(spot, shortLeg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, shortLeg.Parsed.CallPut));
 						enumPass = enumDelta >= enumMin && enumDelta <= enumMax;
 					}

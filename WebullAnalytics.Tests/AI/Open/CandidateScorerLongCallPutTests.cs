@@ -104,4 +104,33 @@ public class CandidateScorerLongCallPutTests
 		var p = CandidateScorer.ScoreLongCallPut(skel, spot: 500m, asOf, quotes, bias: 0m, Cfg());
 		Assert.Null(p);
 	}
+
+	[Fact]
+	public void LongCallGetsBoostWhenMaxPainIsAboveSpot()
+	{
+		var asOf = new DateTime(2026, 4, 1);
+		var exp = new DateTime(2026, 5, 1);
+		var call100 = MatchKeys.OccSymbol("GME", exp, 100m, "C");
+		var put105 = MatchKeys.OccSymbol("GME", exp, 105m, "P");
+		var put110 = MatchKeys.OccSymbol("GME", exp, 110m, "P");
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.LongCall, new[] { new ProposalLeg("buy", call100, 1) }, TargetExpiry: exp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[call100] = TestQuote.Q(5.00m, 5.00m, 0.40m),
+			[put105] = TestQuote.Q(6.00m, 6.10m, 0.40m, openInterest: 100),
+			[put110] = TestQuote.Q(8.50m, 8.70m, 0.40m, openInterest: 50)
+		};
+
+		var baseCfg = Cfg();
+		var painCfg = Cfg();
+		painCfg.MaxPainWeight = 0.50m;
+
+		var withoutPain = CandidateScorer.ScoreLongCallPut(skel, spot: 100m, asOf, quotes, bias: 0m, baseCfg)!;
+		var withPain = CandidateScorer.ScoreLongCallPut(skel, spot: 100m, asOf, quotes, bias: 0m, painCfg)!;
+
+		Assert.Equal(110m, withPain.TargetExpiryMaxPain);
+		Assert.True(withPain.MaxPainAdjustmentFactor > 1m);
+        Assert.Equal(Math.Sign(withoutPain.BiasAdjustedScore), Math.Sign(withPain.BiasAdjustedScore));
+		Assert.True(Math.Abs(withPain.BiasAdjustedScore) > Math.Abs(withoutPain.BiasAdjustedScore));
+	}
 }

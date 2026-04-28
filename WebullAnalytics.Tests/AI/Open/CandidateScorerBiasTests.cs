@@ -79,4 +79,50 @@ public class CandidateScorerBiasTests
 
 		Assert.Equal(0.005m, adjusted);
 	}
+
+	[Fact]
+	public void CalendarMaxPainBoostsWhenPullSupportsShortSideOfSpot()
+	{
+		var shortExp = new DateTime(2026, 5, 1);
+		var longExp = new DateTime(2026, 5, 29);
+		var shortSym = MatchKeys.OccSymbol("GME", shortExp, 24.5m, "P");
+		var longSym = MatchKeys.OccSymbol("GME", longExp, 24.5m, "P");
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.LongCalendar, new[]
+		{
+			new ProposalLeg("sell", shortSym, 1),
+			new ProposalLeg("buy", longSym, 1)
+		}, TargetExpiry: shortExp);
+
+		var signal = CandidateScorer.ComputeMaxPainSignal(
+			skel,
+			spot: 25.20m,
+			maxPain: 23.00m,
+			expectedMove: 2.00m,
+			breakevens: new[] { 23.33m, 25.91m });
+
+		Assert.True(signal > 0m);
+	}
+
+	[Fact]
+	public void CalendarMaxPainCutsWhenPullIsOppositeShortSideOfSpot()
+	{
+		var shortExp = new DateTime(2026, 5, 1);
+		var longExp = new DateTime(2026, 5, 29);
+		var shortSym = MatchKeys.OccSymbol("GME", shortExp, 24.5m, "P");
+		var longSym = MatchKeys.OccSymbol("GME", longExp, 24.5m, "P");
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.LongCalendar, new[]
+		{
+			new ProposalLeg("sell", shortSym, 1),
+			new ProposalLeg("buy", longSym, 1)
+		}, TargetExpiry: shortExp);
+
+		var signal = CandidateScorer.ComputeMaxPainSignal(
+			skel,
+			spot: 25.20m,
+			maxPain: 26.20m,
+			expectedMove: 2.00m,
+			breakevens: new[] { 23.33m, 25.91m });
+
+		Assert.True(signal < 0m);
+	}
 }

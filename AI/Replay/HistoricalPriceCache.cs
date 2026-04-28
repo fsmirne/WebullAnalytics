@@ -12,35 +12,46 @@ namespace WebullAnalytics.AI.Replay;
 internal sealed class HistoricalPriceCache
 {
 	private readonly string _cacheDir;
+	private readonly Func<string, DateTime, DateTime, CancellationToken, Task<Dictionary<DateTime, decimal>>> _fetchHistoricalClosesAsync;
 	private readonly Dictionary<string, Dictionary<DateTime, decimal>> _memory = new(StringComparer.OrdinalIgnoreCase);
 
-	public HistoricalPriceCache(string? cacheDir = null)
+	public HistoricalPriceCache(string? cacheDir = null) : this(cacheDir, YahooOptionsClient.FetchHistoricalClosesAsync)
+	{
+	}
+
+	internal HistoricalPriceCache(string? cacheDir, Func<string, DateTime, DateTime, CancellationToken, Task<Dictionary<DateTime, decimal>>> fetchHistoricalClosesAsync)
 	{
 		_cacheDir = cacheDir ?? Program.ResolvePath("data/history");
+		_fetchHistoricalClosesAsync = fetchHistoricalClosesAsync;
 		Directory.CreateDirectory(_cacheDir);
 	}
 
 	public async Task<decimal?> GetCloseAsync(string ticker, DateTime date, CancellationToken cancellation)
 	{
-		var map = await LoadOrFetchAsync(ticker, cancellation);
+		var map = await LoadOrFetchAsync(ticker, date.Date, cancellation);
 		return map.TryGetValue(date.Date, out var close) ? close : null;
 	}
 
-	private async Task<Dictionary<DateTime, decimal>> LoadOrFetchAsync(string ticker, CancellationToken cancellation)
+	private async Task<Dictionary<DateTime, decimal>> LoadOrFetchAsync(string ticker, DateTime neededThrough, CancellationToken cancellation)
 	{
-		if (_memory.TryGetValue(ticker, out var cached)) return cached;
+		if (_memory.TryGetValue(ticker, out var cached) && !NeedsRefresh(cached, neededThrough)) return cached;
 
 		var path = Path.Combine(_cacheDir, $"{ticker.ToUpperInvariant()}.csv");
 		Dictionary<DateTime, decimal> map;
 		if (File.Exists(path))
 		{
 			map = ParseCsv(await File.ReadAllTextAsync(path, cancellation));
+			if (NeedsRefresh(map, neededThrough))
+			{
+				var refreshed = await FetchRangeAsync(ticker, map.Count > 0 ? map.Keys.Max().Date.AddDays(1) : neededThrough.AddYears(-2), neededThrough, cancellation);
+				Merge(map, refreshed);
+				if (refreshed.Count > 0)
+					await File.WriteAllTextAsync(path, SerializeCsv(map), cancellation);
+			}
 		}
 		else
 		{
-			var from = DateTime.UtcNow.AddYears(-2);
-			var to = DateTime.UtcNow;
-			map = await YahooOptionsClient.FetchHistoricalClosesAsync(ticker, from, to, cancellation);
+			map = await FetchRangeAsync(ticker, neededThrough.AddYears(-2), neededThrough, cancellation);
 			if (map.Count > 0)
 				await File.WriteAllTextAsync(path, SerializeCsv(map), cancellation);
 		}
@@ -80,7 +91,7 @@ internal sealed class HistoricalPriceCache
 	/// oldest-first. Returns fewer than <paramref name="count"/> entries if the cache has less data.</summary>
 	public async Task<IReadOnlyList<decimal>> GetRecentClosesAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
 	{
-		var map = await LoadOrFetchAsync(ticker, cancellation);
+		var map = await LoadOrFetchAsync(ticker, asOf.Date, cancellation);
 		return map
 			.Where(kv => kv.Key.Date <= asOf.Date)
 			.OrderByDescending(kv => kv.Key)
@@ -88,5 +99,23 @@ internal sealed class HistoricalPriceCache
 			.OrderBy(kv => kv.Key)
 			.Select(kv => kv.Value)
 			.ToList();
+	}
+
+	private static bool NeedsRefresh(Dictionary<DateTime, decimal> map, DateTime neededThrough)
+	{
+		if (map.Count == 0) return true;
+		return map.Keys.Max().Date < neededThrough.Date;
+	}
+
+	private async Task<Dictionary<DateTime, decimal>> FetchRangeAsync(string ticker, DateTime from, DateTime to, CancellationToken cancellation)
+	{
+		if (from.Date > to.Date) return new Dictionary<DateTime, decimal>();
+		return await _fetchHistoricalClosesAsync(ticker, from.Date, to.Date.AddDays(1), cancellation);
+	}
+
+	private static void Merge(Dictionary<DateTime, decimal> target, Dictionary<DateTime, decimal> source)
+	{
+		foreach (var (date, close) in source)
+			target[date.Date] = close;
 	}
 }
