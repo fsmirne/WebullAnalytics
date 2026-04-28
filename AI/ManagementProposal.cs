@@ -1,3 +1,5 @@
+using WebullAnalytics.AI.RiskDiagnostics;
+
 namespace WebullAnalytics.AI;
 
 /// <summary>
@@ -43,6 +45,7 @@ internal sealed record ManagementProposal(
 	IReadOnlyList<ProposalLeg> Legs,
 	decimal NetDebit,
 	string Rationale,
+    RiskDiagnostic? Diagnostic = null,
 	bool CashReserveBlocked = false,
 	string? CashReserveDetail = null
 );
