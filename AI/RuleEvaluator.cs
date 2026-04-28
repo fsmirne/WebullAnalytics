@@ -1,5 +1,7 @@
 using WebullAnalytics.AI.Output;
+using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.AI.Rules;
+using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI;
 
@@ -40,6 +42,8 @@ internal sealed class RuleEvaluator
 			}
 			if (proposal == null) continue;
 
+			proposal = AttachDiagnostic(proposal, position, ctx);
+
 			// Apply cash-reserve tag.
 			var check = CashReserveHelper.Check(
 				netDebit: proposal.NetDebit,
@@ -64,6 +68,57 @@ internal sealed class RuleEvaluator
 		foreach (var k in stale) _lastFingerprintByPositionKey.Remove(k);
 
 		return results;
+	}
+
+	private static ManagementProposal AttachDiagnostic(ManagementProposal proposal, OpenPosition position, EvaluationContext ctx)
+	{
+		if (!ctx.UnderlyingPrices.TryGetValue(position.Ticker, out var spot) || spot <= 0m)
+			return proposal;
+
+		var diagLegs = position.Legs
+			.Where(l => l.CallPut != null && l.Expiry.HasValue)
+			.Select(l => new DiagnosticLeg(
+				Symbol: l.Symbol,
+				Parsed: new OptionParsed(position.Ticker, l.Expiry!.Value, l.CallPut!, l.Strike),
+				IsLong: l.Side == Side.Buy,
+				Qty: l.Qty,
+				PricePerShare: TryGetMid(ctx.Quotes, l.Symbol),
+				CostBasisPerShare: null))
+			.ToList();
+
+		if (diagLegs.Count == 0)
+			return proposal;
+
+		decimal IvResolver(string symbol)
+		{
+			if (ctx.Quotes.TryGetValue(symbol, out var q) && q.ImpliedVolatility is decimal iv && iv > 0m)
+				return iv;
+
+			var leg = diagLegs.FirstOrDefault(l => l.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase));
+			var mid = TryGetMid(ctx.Quotes, symbol);
+			if (leg != null && mid.HasValue)
+			{
+				var expiryTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
+				var timeYears = (expiryTime - ctx.Now).TotalDays / 365.0;
+				if (timeYears > 0)
+					return OptionMath.ImpliedVol(spot, leg.Parsed.Strike, timeYears, OptionMath.RiskFreeRate, mid.Value, leg.Parsed.CallPut);
+			}
+
+			return 0.40m;
+		}
+
+		var technicalBias = ctx.TechnicalSignals.TryGetValue(position.Ticker, out var signal) ? signal.Score : 0m;
+		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, ctx.Now, IvResolver, trend: null);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, ctx.Now, IvResolver, ctx.Quotes, opener: null, technicalBiasOverride: technicalBias);
+		return proposal with { Diagnostic = diagnostic with { Probe = probe } };
+	}
+
+	private static decimal? TryGetMid(IReadOnlyDictionary<string, OptionContractQuote> quotes, string symbol)
+	{
+		if (!quotes.TryGetValue(symbol, out var q) || q.Bid == null || q.Ask == null)
+			return null;
+
+		return (q.Bid.Value + q.Ask.Value) / 2m;
 	}
 
 	/// <summary>Constructs the default rule set from config.</summary>

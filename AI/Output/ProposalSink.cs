@@ -1,6 +1,9 @@
 using Spectre.Console;
+using Spectre.Console.Rendering;
 using System.Globalization;
 using System.Text.Json;
+using WebullAnalytics.Analyze;
+using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.Positions;
 
 namespace WebullAnalytics.AI.Output;
@@ -49,6 +52,7 @@ internal sealed class ProposalSink : IDisposable
 				netDebit = p.NetDebit
 			},
 			rationale = p.Rationale,
+			diagnostic = p.Diagnostic is null ? null : AnalyzePositionCommand.SerializeDiagnostic(p.Diagnostic),
 			cashReserveBlocked = p.CashReserveBlocked,
 			cashReserveDetail = p.CashReserveDetail,
 			mode = _mode
@@ -64,19 +68,22 @@ internal sealed class ProposalSink : IDisposable
 		var color = p.Kind switch
 		{
 			ProposalKind.Close => "yellow",
-			ProposalKind.Roll => "cyan",
+			ProposalKind.Roll => "blue",
 			ProposalKind.AlertOnly => "grey",
 			_ => "white"
 		};
-		var blocked = p.CashReserveBlocked ? " [yellow]⚠ blocked[/]" : "";
-		AnsiConsole.MarkupLine($"[bold {color}]{p.Rule}[/] [grey]{p.Ticker}[/] [dim]{p.PositionKey}[/]{blocked}");
+
+		var rows = new List<IRenderable>();
 
 		if (p.Legs.Count > 0)
 		{
 			var legsText = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
 			var netLabel = p.NetDebit >= 0m ? $"net credit ${p.NetDebit:F2}" : $"net debit ${-p.NetDebit:F2}";
-			AnsiConsole.MarkupLine($"  {Markup.Escape(legsText)} [dim]→ {Markup.Escape(netLabel)}[/]");
+			rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/] [dim]→ {Markup.Escape(netLabel)}[/]"));
 		}
+
+		if (p.CashReserveBlocked && p.CashReserveDetail != null)
+			rows.Add(new Markup($"[yellow]{Markup.Escape(p.CashReserveDetail)}[/]"));
 
 		if (p.Kind != ProposalKind.AlertOnly && p.Legs.Count > 0)
 		{
@@ -97,15 +104,15 @@ internal sealed class ProposalSink : IDisposable
 
 			if (canSplitReset)
 			{
-				EmitComboLine(p.Legs.Take(2), _suggestPricing, null);
-				EmitComboLine(p.Legs.Skip(2), _suggestPricing, null);
+				AppendComboLine(rows, p.Legs.Take(2), _suggestPricing, null);
+				AppendComboLine(rows, p.Legs.Skip(2), _suggestPricing, null);
 			}
 			else if (canSplit2)
 			{
 				foreach (var leg in p.Legs)
 				{
 					var legLimit = SuggestionPricing.PriceFor(leg, _suggestPricing)!.Value.ToString("F2", CultureInfo.InvariantCulture);
-					AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape($"{leg.Action}:{leg.Symbol}:{leg.Qty}")}\" --limit {legLimit}[/]");
+					rows.Add(new Markup($"[dim]↪ wa trade place --trade \"{Markup.Escape($"{leg.Action}:{leg.Symbol}:{leg.Qty}")}\" --limit {legLimit}[/]"));
 				}
 			}
 			else
@@ -113,22 +120,31 @@ internal sealed class ProposalSink : IDisposable
 				var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 				var limitPerShare = SuggestionPricing.TryGetLimitPerShare(p.Legs, _suggestPricing) ?? Math.Abs(p.NetDebit / 100m);
 				var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
-				AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]");
+				rows.Add(new Markup($"[dim]↪ wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
 			}
 
-			AnsiConsole.MarkupLine($"  [dim]wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]");
+			rows.Add(new Markup($"[dim]↪ wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));
 		}
 
-		AnsiConsole.MarkupLine($"  [italic]{Markup.Escape(p.Rationale)}[/]");
-		if (p.CashReserveBlocked && p.CashReserveDetail != null)
-			AnsiConsole.MarkupLine($"  [yellow]{Markup.Escape(p.CashReserveDetail)}[/]");
+		if (p.Diagnostic is not null)
+			rows.Add(RiskDiagnosticRenderer.Build(p.Diagnostic));
+
+		rows.Add(new Markup($"[italic]{Markup.Escape(p.Rationale)}[/]"));
+
+		var blocked = p.CashReserveBlocked ? " [yellow]⚠ blocked[/]" : "";
+		var header = $"[bold {color}]Manage: {p.Rule}[/] [grey]{p.Ticker}[/] [dim]{p.PositionKey}[/]{blocked}";
+		var panel = new Panel(new Rows(rows))
+			.Header(header)
+			.Expand()
+			.BorderColor(SpectreColor(color));
+		AnsiConsole.Write(panel);
 		AnsiConsole.WriteLine();
 	}
 
 	/// <summary>Emits a single combo `wa trade place` line for the given legs. `--limit` is the absolute
 	/// per-share signed net (sell prices add, buy prices subtract); Webull infers side from the legs.
 	/// Callers must ensure every leg has PricePerShare set.</summary>
-	private static void EmitComboLine(IEnumerable<ProposalLeg> legs, string suggestPricing, decimal? fallbackLimitPerShare)
+	private static void AppendComboLine(List<IRenderable> rows, IEnumerable<ProposalLeg> legs, string suggestPricing, decimal? fallbackLimitPerShare)
 	{
 		var list = legs.ToList();
 		var limitPerShare = SuggestionPricing.TryGetLimitPerShare(list, suggestPricing)
@@ -136,8 +152,16 @@ internal sealed class ProposalSink : IDisposable
 			   ?? 0m;
 		var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
 		var arg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-		AnsiConsole.MarkupLine($"  [dim]wa trade place --trade \"{Markup.Escape(arg)}\" --limit {limit}[/]");
+		rows.Add(new Markup($"[dim]↪ wa trade place --trade \"{Markup.Escape(arg)}\" --limit {limit}[/]"));
 	}
+
+	private static Color SpectreColor(string name) => name switch
+	{
+		"yellow" => Color.Yellow,
+		"blue" => Color.Blue,
+		"grey" => Color.Grey,
+		_ => Color.White
+	};
 
 	public void Dispose() => _file.Dispose();
 }
