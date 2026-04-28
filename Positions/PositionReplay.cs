@@ -172,7 +172,7 @@ internal static class PositionReplay
 			if (enforceBalance && lin.OpenLegs.Count > 1)
 			{
 				var qtys = lin.OpenLegs.Values.Select(v => v.Qty).Distinct().ToList();
-				if (qtys.Count > 1)
+				if ( qtys.Count > 1)
 					throw new InvalidOperationException($"Invariant: lineage {lin.Id} on {lin.Underlying} is imbalanced: legs have qtys [{string.Join(",", qtys)}] (context: {context})");
 			}
 
@@ -215,13 +215,29 @@ internal static class PositionReplay
 		}
 
 		// Rule 2: standalone add (same direction as an existing open leg) — always grow that leg.
-		// Any resulting imbalance is deferred to end-of-replay settlement via SettleImbalances.
+		// For single-leg lineages, grow that leg in place. For multi-leg lineages, keep the existing
+		// structure balanced and treat the add as a new standalone orphan that can later pair with a
+		// compatible leg.
 		foreach (var lin in active)
 		{
 			if (!lin.OpenLegs.TryGetValue(t.MatchKey, out var existing)) continue;
 			if (existing.Side == t.Side)
 			{
-				ApplyEventToLineage(lin, evt, isNewLineage: false, active, ref lineageIdCounter);
+				if (lin.OpenLegs.Count == 1)
+				{
+					ApplyEventToLineage(lin, evt, isNewLineage: false, active, ref lineageIdCounter);
+					return;
+				}
+
+				var spawnedLineage = new Lineage
+				{
+					Id = ++lineageIdCounter,
+					Underlying = underlying,
+					Multiplier = (int)t.Multiplier,
+					FirstEntryTimestamp = evt.Timestamp
+				};
+				active.Add(spawnedLineage);
+				ApplyEventToLineage(spawnedLineage, evt, isNewLineage: true, active, ref lineageIdCounter);
 				return;
 			}
 		}
@@ -300,6 +316,19 @@ internal static class PositionReplay
 		else if (touchedLineages.Count == 1)
 		{
 			target = touchedLineages.First();
+			if (ShouldSpawnSiblingLineageForStrategyAdd(target, evt))
+			{
+				var sibling = new Lineage
+				{
+					Id = ++lineageIdCounter,
+					Underlying = underlying,
+					Multiplier = (int)evt.Trades[0].Multiplier,
+					FirstEntryTimestamp = evt.Timestamp
+				};
+				active.Add(sibling);
+				ApplyEventToLineage(sibling, evt, isNewLineage: true, active, ref lineageIdCounter);
+				return;
+			}
 		}
 		else
 		{
@@ -315,6 +344,28 @@ internal static class PositionReplay
 		}
 
 		ApplyEventToLineage(target, evt, isNewLineage: touchedLineages.Count == 0, active, ref lineageIdCounter);
+	}
+
+	private static bool ShouldSpawnSiblingLineageForStrategyAdd(Lineage lin, Event evt)
+	{
+		if (lin.OpenLegs.Count < 2) return false;
+
+		var hasNewLeg = false;
+		var hasMatchedLeg = false;
+		foreach (var trade in evt.Trades)
+		{
+			if (!lin.OpenLegs.TryGetValue(trade.MatchKey, out var existing))
+			{
+				hasNewLeg = true;
+				continue;
+			}
+
+			hasMatchedLeg = true;
+			if (existing.Side != trade.Side)
+				return false;
+		}
+
+		return hasMatchedLeg && hasNewLeg;
 	}
 
 	/// <summary>
