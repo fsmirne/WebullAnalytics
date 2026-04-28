@@ -32,44 +32,11 @@
 		"volatilityFitWeight": 0.50,
 		"maxPainWeight": 0.25,
 		"scenarioGridSigma": 1.0,
-		"structureWeight": {
-			"LongCalendar": 1.3,
-			"LongDiagonal": 1.3,
-			"ShortPutVertical": 0.5,
-			"ShortCallVertical": 0.5,
-			"LongCall": 0.0,
-			"LongPut": 0.0
-		},
 		"structures": {
-			"longCalendar": {
-				"enabled": true,
-				"shortDteMin": 3,
-				"shortDteMax": 10,
-				"longDteMin": 21,
-				"longDteMax": 60
-			},
-			"longDiagonal": {
-				"enabled": true,
-				"shortDteMin": 3,
-				"shortDteMax": 10,
-				"longDteMin": 21,
-				"longDteMax": 60
-			},
-			"shortVertical": {
-				"enabled": true,
-				"dteMin": 3,
-				"dteMax": 10,
-				"widthSteps": [ 1, 2 ],
-				"shortDeltaMin": 0.15,
-				"shortDeltaMax": 0.30
-			},
-			"longCallPut": {
-				"enabled": false,
-				"dteMin": 21,
-				"dteMax": 60,
-				"deltaMin": 0.30,
-				"deltaMax": 0.60
-			}
+			"longCalendar":  { "enabled": true, "shortDteMin": 3, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },
+			"longDiagonal":  { "enabled": true, "shortDteMin": 3, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },
+			"shortVertical": { "enabled": true, "dteMin": 3, "dteMax": 10, "widthSteps": [1, 2, 3, 4], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
+			"longCallPut":   { "enabled": true, "dteMin": 21, "dteMax": 60, "deltaMin": 0.30, "deltaMax": 0.60 }
 		}
 	},
 	"rules": {

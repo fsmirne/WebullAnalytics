@@ -193,7 +193,6 @@ internal static class CandidateScorer
 			: $"debit ${-p.DebitOrCreditPerContract:F2}";
 
 		var techAdjusted = BiasAdjust(p.RawScore, bias, p.DirectionalFit, cfg.DirectionalFitWeight);
-		var structureWeight = StructureWeight(cfg, p.StructureKind);
 		var biasEffectPct = cfg.DirectionalFitWeight * bias * p.DirectionalFit * 100m;
 		var biasTag = p.DirectionalFit == 0
 			? $"[tech {bias:+0.00;-0.00}, fit 0 → no tech adjustment]"
@@ -215,26 +214,29 @@ internal static class CandidateScorer
 		var painStr = "";
 		if (p.MaxPainAdjustmentFactor.HasValue && p.TargetExpiryMaxPain.HasValue)
 			painStr = $" × maxPain {p.MaxPainAdjustmentFactor.Value:F2} (target ${p.TargetExpiryMaxPain.Value:F2})";
+		var thetaStr = p.ThetaPerDayPerContract.HasValue
+			? $" × theta/day {p.ThetaPerDayPerContract.Value:+0.00;-0.00}/contract"
+			: "";
 
 		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
 		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6}";
-		var factorsLine = $"tech-adjusted × structure {structureWeight:F2} × balance {balance:F2}{volStr}{painStr}";
+     var factorsLine = $"tech-adjusted × balance {balance:F2}{thetaStr}{volStr}{painStr}";
 
 		return $"{rationaleLine}\n{scoreLine}\n{factorsLine}";
 	}
 
-   private static decimal? ComputeMaxPainAdjustmentFactor(CandidateSkeleton skel, decimal spot, DateTime asOf, decimal targetIv, decimal? maxPain, OpenerConfig cfg, IReadOnlyList<decimal>? breakevens = null)
+	private static decimal? ComputeMaxPainAdjustmentFactor(CandidateSkeleton skel, decimal spot, DateTime asOf, decimal targetIv, decimal? maxPain, OpenerConfig cfg, IReadOnlyList<decimal>? breakevens = null)
 	{
 		if (cfg.MaxPainWeight <= 0m || !maxPain.HasValue || spot <= 0m || targetIv <= 0m)
 			return null;
 
 		var targetYears = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
 		var expectedMove = Math.Max(cfg.StrikeStep, spot * targetIv * (decimal)Math.Sqrt(targetYears));
-     var signal = ComputeMaxPainSignal(skel, spot, maxPain.Value, expectedMove, breakevens);
+		var signal = ComputeMaxPainSignal(skel, spot, maxPain.Value, expectedMove, breakevens);
 		return Math.Max(0.10m, 1m + cfg.MaxPainWeight * signal);
 	}
 
-    internal static decimal ComputeMaxPainSignal(CandidateSkeleton skel, decimal spot, decimal maxPain, decimal expectedMove, IReadOnlyList<decimal>? breakevens = null)
+	internal static decimal ComputeMaxPainSignal(CandidateSkeleton skel, decimal spot, decimal maxPain, decimal expectedMove, IReadOnlyList<decimal>? breakevens = null)
 	{
 		var scale = Math.Max(0.01m, expectedMove);
 		var fit = DirectionalFit.SignFor(skel.StructureKind);
@@ -246,11 +248,11 @@ internal static class CandidateScorer
 		if (shortParsed == null)
 			return 0m;
 
-        var pinSignal = 1m - 2m * Math.Clamp(Math.Abs(shortParsed.Strike - maxPain) / scale, 0m, 1m);
+		var pinSignal = 1m - 2m * Math.Clamp(Math.Abs(shortParsed.Strike - maxPain) / scale, 0m, 1m);
 		var sideSignal = SameSideOfSpotSignal(shortParsed.Strike - spot, maxPain - spot);
 		var beSignal = BreakevenBandSignal(maxPain, scale, breakevens);
 
-      if (breakevens != null && breakevens.Count >= 2)
+		if (breakevens != null && breakevens.Count >= 2)
 			return Math.Clamp(0.45m * beSignal + 0.35m * sideSignal + 0.20m * pinSignal, -1m, 1m);
 
 		return Math.Clamp(0.65m * sideSignal + 0.35m * pinSignal, -1m, 1m);
@@ -267,7 +269,7 @@ internal static class CandidateScorer
 
 	private static decimal BreakevenBandSignal(decimal maxPain, decimal scale, IReadOnlyList<decimal>? breakevens)
 	{
-        if (breakevens == null || breakevens.Count < 2)
+		if (breakevens == null || breakevens.Count < 2)
 			return 0m;
 
 		var lower = breakevens.Min();
@@ -342,13 +344,19 @@ internal static class CandidateScorer
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel.StructureKind);
+		var longIv = ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct);
+		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(
+			(Parsed: shortParsed, Iv: iv, IsLong: false),
+			(Parsed: longParsed, Iv: longIv, IsLong: true),
+			asOf,
+			spot);
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
-		var representativeIv = (iv + ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct)) / 2m;
+		var representativeIv = (iv + longIv) / 2m;
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
-		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
+		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
 		return new OpenProposal(
@@ -374,7 +382,8 @@ internal static class CandidateScorer
 			HistoricalVolatilityAnnual: historicalVolAnnual,
 			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
-			MaxPainAdjustmentFactor: maxPainFactor
+			MaxPainAdjustmentFactor: maxPainFactor,
+			ThetaPerDayPerContract: thetaPerDayPerContract
 		);
 	}
 
@@ -445,14 +454,6 @@ internal static class CandidateScorer
 		var ask = q.Ask.HasValue ? q.Ask.Value.ToString("F2") : "null";
 		var iv = q.ImpliedVolatility.HasValue ? q.ImpliedVolatility.Value.ToString("F2") : "null";
 		return $"bid={bid} ask={ask} iv={iv}";
-	}
-
-	/// <summary>Looks up the structure-specific multiplier from config, defaulting to 1.0 when a
-	/// kind isn't listed. Used by every Score* method as the final multiplicative factor on
-	/// BiasAdjustedScore so the ranking reflects the user's historical edge per structure.</summary>
-	private static decimal StructureWeight(OpenerConfig cfg, OpenStructureKind kind)
-	{
-		return cfg.StructureWeight.TryGetValue(kind.ToString(), out var w) ? w : 1.0m;
 	}
 
 	/// <summary>Total long-leg premium paid divided by total short-leg premium received, summed across
@@ -689,13 +690,18 @@ internal static class CandidateScorer
 		// (long-DTE adjustment runway, theta, wide profit zone), not directional bias from strike geometry.
 		// The technical bias signal still flows through verticals/long-call-puts where direction IS the bet.
 		var fit = 0;
+		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(
+			(Parsed: shortParsed, Iv: ivShort, IsLong: false),
+			(Parsed: longParsed, Iv: ivLong, IsLong: true),
+			asOf,
+			spot);
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLossPoint, premiumRatio);
 		var representativeIv = (ivShort + ivLong) / 2m;
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, ivShort, maxPain, cfg);
-		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
+		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
 		return new OpenProposal(
@@ -721,8 +727,34 @@ internal static class CandidateScorer
 			HistoricalVolatilityAnnual: historicalVolAnnual,
 			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
-			MaxPainAdjustmentFactor: maxPainFactor
+			MaxPainAdjustmentFactor: maxPainFactor,
+			ThetaPerDayPerContract: thetaPerDayPerContract
 		);
+	}
+
+	private static decimal ComputeNetThetaPerDayPerContract((OptionParsed Parsed, decimal Iv, bool IsLong) leg0, (OptionParsed Parsed, decimal Iv, bool IsLong) leg1, DateTime asOf, decimal spot)
+	{
+		return ComputeNetThetaPerDayPerContract(new[] { leg0, leg1 }, asOf, spot);
+	}
+
+	private static decimal ComputeNetThetaPerDayPerContract((OptionParsed Parsed, decimal Iv, bool IsLong) leg, DateTime asOf, decimal spot)
+	{
+		return ComputeNetThetaPerDayPerContract(new[] { leg }, asOf, spot);
+	}
+
+	private static decimal ComputeNetThetaPerDayPerContract(IEnumerable<(OptionParsed Parsed, decimal Iv, bool IsLong)> legs, DateTime asOf, decimal spot)
+	{
+		decimal netThetaPerShare = 0m;
+		foreach (var leg in legs)
+		{
+			var dte = Math.Max(1, (leg.Parsed.ExpiryDate - asOf.Date).Days);
+			var now = OptionMath.BlackScholes(spot, leg.Parsed.Strike, dte / 365.0, OptionMath.RiskFreeRate, leg.Iv, leg.Parsed.CallPut);
+			var tomorrow = OptionMath.BlackScholes(spot, leg.Parsed.Strike, Math.Max(1, dte - 1) / 365.0, OptionMath.RiskFreeRate, leg.Iv, leg.Parsed.CallPut);
+			var thetaPerShare = tomorrow - now;
+			netThetaPerShare += leg.IsLong ? thetaPerShare : -thetaPerShare;
+		}
+
+		return netThetaPerShare * 100m;
 	}
 
 	public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid)
@@ -761,6 +793,7 @@ internal static class CandidateScorer
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel.StructureKind);
+		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract((Parsed: parsed, Iv: iv, IsLong: true), asOf, spot);
 		// Single-leg structures: premium_ratio defaults to 1 (no shorts to receive from). BalanceFactor
 		// collapses to just the R/R term, where R/R = projected_max_profit_at_+2σ / debit.
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
@@ -768,7 +801,7 @@ internal static class CandidateScorer
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight);
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
-		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * StructureWeight(cfg, skel.StructureKind) * balance, skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
+		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * balance, skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
 		return new OpenProposal(
@@ -794,7 +827,8 @@ internal static class CandidateScorer
 			HistoricalVolatilityAnnual: historicalVolAnnual,
 			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
-			MaxPainAdjustmentFactor: maxPainFactor
+			MaxPainAdjustmentFactor: maxPainFactor,
+			ThetaPerDayPerContract: thetaPerDayPerContract
 		);
 	}
 

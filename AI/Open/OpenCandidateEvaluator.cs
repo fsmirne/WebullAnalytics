@@ -157,14 +157,14 @@ internal sealed class OpenCandidateEvaluator
 			// Per-structure top-N truncation.
 			var survivors = new List<OpenProposal>();
 			foreach (var list in scoredByStructure.Values)
-				survivors.AddRange(list.OrderByDescending(p => p.BiasAdjustedScore).Take(cfg.MaxCandidatesPerStructurePerTicker));
+				survivors.AddRange(RankForOutput(list).Take(cfg.MaxCandidatesPerStructurePerTicker));
 
 			// Apply cash sizing.
 			for (int i = 0; i < survivors.Count; i++)
 				survivors[i] = ApplyCashSizing(survivors[i], freeCash, cfg, bias);
 
 			// Per-ticker top-N.
-			output.AddRange(survivors.OrderByDescending(p => p.BiasAdjustedScore).Take(cfg.TopNPerTicker));
+			output.AddRange(RankForOutput(survivors).Take(cfg.TopNPerTicker));
 		}
 
 		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker.
@@ -218,7 +218,8 @@ internal sealed class OpenCandidateEvaluator
 				ev: p.ExpectedValuePerContract,
 				days: p.DaysToTarget,
 				rawScore: p.RawScore,
-				biasScore: p.BiasAdjustedScore);
+                biasScore: p.BiasAdjustedScore,
+				thetaPerDayPerContract: p.ThetaPerDayPerContract);
 
 			var probe = RiskDiagnosticProbeBuilder.Build(
 				legs: diagLegs,
@@ -233,6 +234,19 @@ internal sealed class OpenCandidateEvaluator
 			annotated.Add(p with { Diagnostic = diagnostic with { Probe = probe } });
 		}
 		return annotated;
+	}
+
+	internal static IReadOnlyList<OpenProposal> RankForOutput(IEnumerable<OpenProposal> proposals)
+	{
+		var list = proposals.ToList();
+		if (list.Count <= 1) return list;
+
+		return list
+			.OrderByDescending(RankingScoreForOutput)
+			.ThenByDescending(p => p.ThetaPerDayPerContract ?? decimal.MinValue)
+			.ThenByDescending(p => p.BiasAdjustedScore)
+			.ThenBy(p => IsCalendarLike(p) ? p.DaysToTarget : int.MaxValue)
+			.ToList();
 	}
 
 	private static OpenProposal ApplyCashSizing(OpenProposal p, decimal freeCash, OpenerConfig cfg, decimal bias)
@@ -266,6 +280,14 @@ internal sealed class OpenCandidateEvaluator
 
 	private static IReadOnlyList<ProposalLeg> ScaleLegs(IReadOnlyList<ProposalLeg> legs, int qty) =>
 		legs.Select(l => l with { Qty = qty }).ToList();
+
+	private static decimal RankingScoreForOutput(OpenProposal proposal)
+	{
+		var thetaPerDay = proposal.ThetaPerDayPerContract ?? 0m;
+		return thetaPerDay > 0m ? proposal.BiasAdjustedScore * thetaPerDay : proposal.BiasAdjustedScore;
+	}
+
+	private static bool IsCalendarLike(OpenProposal proposal) => proposal.StructureKind is OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal;
 
 	/// <summary>Returns true when the symbol exists and has both a non-null bid and a positive ask.
 	/// Mirrors <c>CandidateScorer.TryLiveBidAsk</c>'s acceptance criteria so Phase B's "needs refresh"
