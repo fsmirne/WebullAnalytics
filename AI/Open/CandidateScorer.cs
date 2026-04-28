@@ -214,13 +214,11 @@ internal static class CandidateScorer
 		var painStr = "";
 		if (p.MaxPainAdjustmentFactor.HasValue && p.TargetExpiryMaxPain.HasValue)
 			painStr = $" × maxPain {p.MaxPainAdjustmentFactor.Value:F2} (target ${p.TargetExpiryMaxPain.Value:F2})";
-		var thetaStr = p.ThetaPerDayPerContract.HasValue
-			? $" × theta/day {p.ThetaPerDayPerContract.Value:+0.00;-0.00}/contract"
-			: "";
+		var thetaStr = p.ThetaPerDayPerContract.HasValue ? $" × theta/day {p.ThetaPerDayPerContract.Value:+0.00;-0.00}/contract" : "";
 
 		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
 		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6}";
-     var factorsLine = $"tech-adjusted × balance {balance:F2}{thetaStr}{volStr}{painStr}";
+		var factorsLine = $"tech-adjusted × balance {balance:F2}{thetaStr}{volStr}{painStr}";
 
 		return $"{rationaleLine}\n{scoreLine}\n{factorsLine}";
 	}

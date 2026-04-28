@@ -213,7 +213,7 @@ public class RiskDiagnosticRendererTests
 					DaysToTarget: 7,
 					RawScore: 0.01m,
 					BiasAdjustedScore: 0.01m,
-                  Rationale: "debit $50.00\nraw 0.010000 → adjusted 0.020000\ntech-adjusted × balance 0.16 × theta/day +1.23/contract",
+					Rationale: "debit $50.00\nraw 0.010000 → adjusted 0.020000\ntech-adjusted × balance 0.16 × theta/day +1.23/contract",
 					ThetaPerDayPerContract: 1.23m)));
 
 		var text = Render(diagnostic);
