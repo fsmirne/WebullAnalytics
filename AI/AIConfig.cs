@@ -197,6 +197,7 @@ internal static class AIConfigLoader
 		if (op.StrikeStep <= 0m) return $"opener.strikeStep: must be > 0, got {op.StrikeStep}";
 		if (op.VolatilityLookbackDays < 5) return $"opener.volatilityLookbackDays: must be ≥ 5, got {op.VolatilityLookbackDays}";
 		if (op.VolatilityFitWeight < 0m) return $"opener.volatilityFitWeight: must be ≥ 0, got {op.VolatilityFitWeight}";
+		if (op.MaxPainWeight < 0m) return $"opener.maxPainWeight: must be ≥ 0, got {op.MaxPainWeight}";
 
 		var lc = op.Structures.LongCalendar;
 		if (lc.ShortDteMin < 0) return $"opener.structures.longCalendar.shortDteMin: must be ≥ 0, got {lc.ShortDteMin}";

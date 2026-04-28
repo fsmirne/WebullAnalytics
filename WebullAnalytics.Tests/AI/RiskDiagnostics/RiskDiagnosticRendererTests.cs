@@ -169,4 +169,56 @@ public class RiskDiagnosticRendererTests
 		Assert.Contains("Margin:", text);
 		Assert.Contains("$0 total ($0/contract)", text);
 	}
+
+	[Fact]
+	public void MultiLineOpenerRationaleUsesScoreAndFactorsLabels()
+	{
+		var diagnostic = new RiskDiagnostic(
+			StructureLabel: "calendar",
+			DirectionalBias: "neutral",
+			NetDelta: 0m,
+			NetThetaPerDay: 0m,
+			NetVega: 0m,
+			ShortLegDteMin: 7,
+			LongLegDteMax: 30,
+			DteGapDays: 23,
+			LongPremiumPaid: 1.00m,
+			ShortPremiumReceived: 0.50m,
+			NetCashPerShare: -0.50m,
+			PremiumRatio: 2.0m,
+			SpotAtEvaluation: 25.00m,
+			BreakevenDistancePct: null,
+			ShortLegOtm: true,
+			ShortLegExtrinsic: 0.20m,
+			Trend: null,
+			CostBasisPerShare: null,
+			CurrentValuePerShare: null,
+			UnrealizedPnlPerShare: null,
+			Rules: Array.Empty<RiskRuleHit>(),
+			Probe: new RiskDiagnosticProbe(
+				EnumDelta: null,
+				EnumDeltaMin: null,
+				EnumDeltaMax: null,
+				EnumDeltaPass: null,
+				LegQuotes: Array.Empty<RiskDiagnosticLegQuote>(),
+				OpenerScore: new RiskDiagnosticOpenerScore(
+					Structure: nameof(OpenStructureKind.LongCalendar),
+					Qty: 1,
+					DebitOrCreditPerContract: -50m,
+					MaxProfitPerContract: 100m,
+					MaxLossPerContract: -50m,
+					CapitalAtRiskPerContract: 50m,
+					ProbabilityOfProfit: 0.50m,
+					ExpectedValuePerContract: 10m,
+					DaysToTarget: 7,
+					RawScore: 0.01m,
+					BiasAdjustedScore: 0.01m,
+					Rationale: "debit $50.00\nraw 0.010000 → adjusted 0.020000\n× structure 1.30 × balance 0.16")));
+
+		var text = Render(diagnostic);
+		Assert.Contains("Score:", text);
+		Assert.Contains("Factors:", text);
+		Assert.DoesNotContain("Factors: × factors", text);
+		Assert.DoesNotContain("Factors: factors:", text);
+	}
 }
