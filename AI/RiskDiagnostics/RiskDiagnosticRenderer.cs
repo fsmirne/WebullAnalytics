@@ -74,10 +74,13 @@ internal static class RiskDiagnosticRenderer
 					if (sections.Length > 0)
 						items.Add(("Rationale:", Markup.Escape(sections[0])));
 
-					if (sections.Length > 1)
-						items.Add(("Score:", Markup.Escape(sections[1])));
+                    if (sections.Length > 1)
+                        items.Add(("Score:", Markup.Escape(sections[1])));
 
-					for (var i = 2; i < sections.Length; i++)
+					if (sections.Length > 2)
+						items.Add(("Factors:", Markup.Escape(sections[2])));
+
+					for (var i = 3; i < sections.Length; i++)
 						items.Add(("Detail:", Markup.Escape(sections[i])));
 				}
 			}

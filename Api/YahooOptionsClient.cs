@@ -334,8 +334,8 @@ public static class YahooOptionsClient
 	public static async Task<Dictionary<DateTime, decimal>> FetchHistoricalClosesAsync(string ticker, DateTime from, DateTime to, CancellationToken cancellation)
 	{
 		var yahoTicker = ToYahooTicker(ticker);
-		var period1 = new DateTimeOffset(from, TimeSpan.Zero).ToUnixTimeSeconds();
-		var period2 = new DateTimeOffset(to, TimeSpan.Zero).ToUnixTimeSeconds();
+		var period1 = ToUnixTimeSecondsUtc(from);
+		var period2 = ToUnixTimeSecondsUtc(to);
 
 		var handler = new HttpClientHandler { CookieContainer = new System.Net.CookieContainer(), AutomaticDecompression = System.Net.DecompressionMethods.All };
 		using var client = new HttpClient(handler);
@@ -357,6 +357,14 @@ public static class YahooOptionsClient
 			return new Dictionary<DateTime, decimal>();
 		}
 		return result;
+	}
+
+	internal static long ToUnixTimeSecondsUtc(DateTime value)
+	{
+		if (value.Kind == DateTimeKind.Utc)
+			return new DateTimeOffset(value).ToUnixTimeSeconds();
+
+		return new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc)).ToUnixTimeSeconds();
 	}
 
 	private static async Task<Dictionary<DateTime, decimal>?> FetchHistoricalClosesAsync(HttpClient client, string ticker, long period1, long period2, string? crumb, CancellationToken cancellation)

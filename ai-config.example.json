@@ -30,6 +30,7 @@
 		"strikeStep": 0.50,
 		"volatilityLookbackDays": 20,
 		"volatilityFitWeight": 0.50,
+		"maxPainWeight": 0.25,
 		"scenarioGridSigma": 1.0,
 		"structureWeight": {
 			"LongCalendar": 1.3,

@@ -57,4 +57,12 @@ public class OpenerConfigValidationTests
 		cfg.Opener.VolatilityFitWeight = -0.1m;
 		Assert.Contains("opener.volatilityFitWeight", AIConfigLoader.Validate(cfg) ?? "");
 	}
+
+	[Fact]
+	public void MaxPainWeightMustBeNonNegative()
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Opener.MaxPainWeight = -0.1m;
+		Assert.Contains("opener.maxPainWeight", AIConfigLoader.Validate(cfg) ?? "");
+	}
 }

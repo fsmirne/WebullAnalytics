@@ -14,6 +14,7 @@ internal sealed class OpenerConfig
 	[JsonPropertyName("strikeStep")] public decimal StrikeStep { get; set; } = 0.50m;
 	[JsonPropertyName("volatilityLookbackDays")] public int VolatilityLookbackDays { get; set; } = 20;
 	[JsonPropertyName("volatilityFitWeight")] public decimal VolatilityFitWeight { get; set; } = 0.50m;
+	[JsonPropertyName("maxPainWeight")] public decimal MaxPainWeight { get; set; } = 0m;
 
 	/// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at
 	/// ±sigma and ±sigma/2 around spot. Default 1.0 gives a ±1σ / ±0.5σ grid that better matches

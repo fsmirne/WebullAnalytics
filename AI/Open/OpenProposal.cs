@@ -40,6 +40,8 @@ public enum OpenStructureKind
 /// <param name="ImpliedVolatilityAnnual">Representative annualized IV used for ranking, as a fraction (0.40 = 40%).</param>
 /// <param name="HistoricalVolatilityAnnual">Annualized realized volatility over the configured lookback, as a fraction.</param>
 /// <param name="VolatilityAdjustmentFactor">IV-vs-HV multiplier applied during ranking; null when HV was unavailable.</param>
+/// <param name="TargetExpiryMaxPain">Max-pain price inferred from open interest for the proposal's target expiry.</param>
+/// <param name="MaxPainAdjustmentFactor">Max-pain multiplier applied during ranking; null when disabled or unavailable.</param>
 internal sealed record OpenProposal(
 	string Ticker,
 	OpenStructureKind StructureKind,
@@ -64,5 +66,7 @@ internal sealed record OpenProposal(
 	decimal? PremiumRatio = null,
 	decimal? ImpliedVolatilityAnnual = null,
 	decimal? HistoricalVolatilityAnnual = null,
-	decimal? VolatilityAdjustmentFactor = null
+	decimal? VolatilityAdjustmentFactor = null,
+	decimal? TargetExpiryMaxPain = null,
+	decimal? MaxPainAdjustmentFactor = null
 );
