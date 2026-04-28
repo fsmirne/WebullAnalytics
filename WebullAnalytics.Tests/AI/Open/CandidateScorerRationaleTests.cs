@@ -40,7 +40,7 @@ public class CandidateScorerRationaleTests
 		Assert.Contains("raw 0.025756 → tech-adjusted 0.025756", lines[1]);
 		Assert.Contains("[tech +0.13, fit 0 → no tech adjustment]", lines[1]);
 		Assert.Contains("adjusted 0.005466", lines[1]);
-		Assert.Equal("raw × structure 1.30 × balance 0.16", lines[2]);
+		Assert.Equal("tech-adjusted × structure 1.30 × balance 0.16", lines[2]);
 	}
 
 	[Fact]

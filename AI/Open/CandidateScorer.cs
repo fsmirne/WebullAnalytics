@@ -217,8 +217,8 @@ internal static class CandidateScorer
 			painStr = $" × maxPain {p.MaxPainAdjustmentFactor.Value:F2} (target ${p.TargetExpiryMaxPain.Value:F2})";
 
 		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
-        var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6}";
-		var factorsLine = $"raw × structure {structureWeight:F2} × balance {balance:F2}{volStr}{painStr}";
+		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6}";
+		var factorsLine = $"tech-adjusted × structure {structureWeight:F2} × balance {balance:F2}{volStr}{painStr}";
 
 		return $"{rationaleLine}\n{scoreLine}\n{factorsLine}";
 	}
