@@ -1,3 +1,5 @@
+using WebullAnalytics.Pricing;
+
 namespace WebullAnalytics.AI.Rules;
 
 /// <summary>
@@ -30,6 +32,14 @@ internal sealed class DefensiveRollRule : IManagementRule
 		var nearStrike = Math.Abs(spot - shortLeg.Strike) <= shortLeg.Strike * pctBand;
 		if (!nearStrike) return null;
 
+		var currentEdgePerShare = EstimateShortExpiryEdge(position, shortLeg, spot, ctx);
+		var (beLow, beHigh) = EstimateBreakEvenBand(position, shortLeg, spot, ctx);
+		var insideBreakEvenBand = beLow.HasValue && beHigh.HasValue && spot >= beLow.Value && spot <= beHigh.Value;
+		if (insideBreakEvenBand || currentEdgePerShare > 0m)
+			return null;
+
+		var beText = beLow.HasValue && beHigh.HasValue ? $", current break-evens ${beLow.Value:F2}-${beHigh.Value:F2}" : $", short-expiry edge ${currentEdgePerShare:+0.00;-0.00}/share";
+
 		// Propose roll: step strike away from spot by StrikeStep; step expiry to next weekly (+7 calendar days).
 		var newStrike = shortLeg.CallPut == "C"
 			? shortLeg.Strike + _config.StrikeStep
@@ -53,7 +63,7 @@ internal sealed class DefensiveRollRule : IManagementRule
 				Kind: ProposalKind.AlertOnly,
 				Legs: alertLegs,
 				NetDebit: 0m,
-				Rationale: $"spot ${spot:F2} within {_config.SpotWithinPctOfShortStrike}% of short strike ${shortLeg.Strike:F2}, DTE {dte}. Quote unavailable for new symbol {newSymbol}."
+              Rationale: $"spot ${spot:F2} within {_config.SpotWithinPctOfShortStrike}% of short strike ${shortLeg.Strike:F2}, DTE {dte}{beText}. Quote unavailable for new symbol {newSymbol}."
 			);
 		}
 
@@ -68,7 +78,7 @@ internal sealed class DefensiveRollRule : IManagementRule
 		var isCredit = netCredit >= 0m;
 
 		var kind = isCredit ? ProposalKind.Roll : ProposalKind.AlertOnly;
-		var rationaleBase = $"spot ${spot:F2} within {_config.SpotWithinPctOfShortStrike}% of short strike ${shortLeg.Strike:F2}, DTE {dte}";
+       var rationaleBase = $"spot ${spot:F2} within {_config.SpotWithinPctOfShortStrike}% of short strike ${shortLeg.Strike:F2}, DTE {dte}{beText}";
 		var rationale = isCredit
 			? $"{rationaleBase}; roll {shortLeg.Symbol}→{newSymbol} for net credit ${netCredit:F2}"
 			: $"{rationaleBase}; no-better-alternative (proposed roll debit ${-netCredit:F2}, not a credit)";
@@ -90,5 +100,73 @@ internal sealed class DefensiveRollRule : IManagementRule
 		var d = from.AddDays(1);
 		while (d.DayOfWeek != DayOfWeek.Friday) d = d.AddDays(1);
 		return d;
+	}
+
+	private static (decimal? Low, decimal? High) EstimateBreakEvenBand(OpenPosition position, PositionLeg shortLeg, decimal spot, EvaluationContext ctx)
+	{
+		var range = Math.Max(1m, Math.Max(Math.Abs(position.AdjustedNetDebit) * 6m, shortLeg.Strike * 0.12m));
+		var notablePrices = position.Legs
+			.Where(l => l.CallPut != null)
+			.Select(l => l.Strike)
+			.Append(shortLeg.Strike)
+			.Append(spot)
+			.Append(Math.Max(0m, shortLeg.Strike - range))
+			.Append(shortLeg.Strike + range)
+			.Distinct()
+			.ToList();
+
+		var step = OptionMath.GetPriceStep(shortLeg.Strike);
+		var ladder = OptionMath.BuildPriceLadder(notablePrices, step, price => EstimateShortExpiryEdge(position, shortLeg, price, ctx), (_, _) => null);
+		var breakEvens = OptionMath.FindBreakEvensNumerically(ladder, price => EstimateShortExpiryEdge(position, shortLeg, price, ctx)).OrderBy(x => x).ToList();
+
+		return breakEvens.Count switch
+		{
+			0 => (null, null),
+			1 => (breakEvens[0], breakEvens[0]),
+			_ => (breakEvens[0], breakEvens[^1])
+		};
+	}
+
+	private static decimal EstimateShortExpiryEdge(OpenPosition position, PositionLeg shortLeg, decimal underlyingPrice, EvaluationContext ctx)
+	{
+		if (!shortLeg.Expiry.HasValue)
+			return 0m;
+
+		var shortExpiry = shortLeg.Expiry.Value.Date + OptionMath.MarketClose;
+		var qtyRef = Math.Max(1m, position.Quantity);
+		decimal netValuePerShare = 0m;
+
+		foreach (var leg in position.Legs)
+		{
+			if (leg.CallPut == null || !leg.Expiry.HasValue)
+				continue;
+
+			var sign = leg.Side == Side.Buy ? 1m : -1m;
+			var weight = leg.Qty / qtyRef;
+			var remainingYears = (leg.Expiry.Value.Date + OptionMath.MarketClose - shortExpiry).TotalDays / 365.0;
+			var value = remainingYears > 0
+				? OptionMath.BlackScholes(underlyingPrice, leg.Strike, remainingYears, OptionMath.RiskFreeRate, ResolveIv(leg, underlyingPrice, ctx, shortExpiry), leg.CallPut)
+				: OptionMath.Intrinsic(underlyingPrice, leg.Strike, leg.CallPut);
+			netValuePerShare += sign * weight * value;
+		}
+
+		return netValuePerShare - position.AdjustedNetDebit;
+	}
+
+	private static decimal ResolveIv(PositionLeg leg, decimal spot, EvaluationContext ctx, DateTime valuationTime)
+	{
+		if (ctx.Quotes.TryGetValue(leg.Symbol, out var q) && q.ImpliedVolatility is decimal iv && iv > 0m)
+			return iv;
+
+		if (ctx.Quotes.TryGetValue(leg.Symbol, out q) && q.Bid is decimal bid && q.Ask is decimal ask && leg.Expiry.HasValue)
+		{
+			var mid = (bid + ask) / 2m;
+			var expiryTime = leg.Expiry.Value.Date + OptionMath.MarketClose;
+			var timeYears = (expiryTime - valuationTime).TotalDays / 365.0;
+			if (timeYears > 0)
+				return OptionMath.ImpliedVol(spot, leg.Strike, timeYears, OptionMath.RiskFreeRate, mid, leg.CallPut!);
+		}
+
+		return 0.40m;
 	}
 }
