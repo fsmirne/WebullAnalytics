@@ -70,13 +70,13 @@
 			"pctOfMaxProfit": 60
 		},
 		"defensiveRoll": {
-			"enabled": false,
+			"enabled": true,
 			"spotWithinPctOfShortStrike": 1.0,
 			"triggerDTE": 3,
 			"strikeStep": 0.50
 		},
 		"rollShortOnExpiry": {
-			"enabled": false,
+			"enabled": true,
 			"triggerDTE": 2,
 			"maxShortPremium": 0.10,
 			"minRollCredit": 0.05
