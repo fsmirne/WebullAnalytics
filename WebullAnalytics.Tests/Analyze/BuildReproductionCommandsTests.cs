@@ -77,12 +77,16 @@ public class BuildReproductionCommandsTests
 	}
 
 	[Fact]
-	public void NormalizeTradeSpecForSyntheticExecution_SplitsTwoLegNonCalendarGroup()
+	public void ParseSyntheticTrades_KeepsExplicitDiagonalGroupAsSingleStrategyOrder()
 	{
-		var normalized = AnalyzeCommon.NormalizeTradeSpecForSyntheticExecution(
-			"buy:GME260501P00025000:122@0.29,sell:GME260501P00025500:122@0.5");
+		var trades = AnalyzeCommon.ParseSyntheticTrades("sell:GME260501P00025000:152@0.32,buy:GME260522P00025500:152@1.255", startSeq: 1, baseTimestamp: new DateTime(2026, 4, 28, 12, 0, 0, DateTimeKind.Utc));
+		var parent = Assert.Single(trades, t => t.Asset == Asset.OptionStrategy);
+		var legs = trades.Where(t => t.Asset == Asset.Option).ToList();
 
-		Assert.Equal("buy:GME260501P00025000:122@0.29;sell:GME260501P00025500:122@0.5", normalized);
+		Assert.Equal("Diagonal", parent.OptionKind);
+		Assert.Equal(152, parent.Qty);
+		Assert.Equal(2, legs.Count);
+		Assert.All(legs, leg => Assert.Equal(parent.Seq, leg.ParentStrategySeq));
 	}
 
 	[Fact]

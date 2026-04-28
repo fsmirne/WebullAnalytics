@@ -78,18 +78,16 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		var (trades, feeLookup, err) = ReportCommand.LoadTrades(settings);
 		if (err != 0) return err;
 
-		var normalizedSpec = AnalyzeCommon.NormalizeTradeSpecForSyntheticExecution(settings.Spec);
-
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
-		if (AnalyzeCommon.NeedsMarketPrices(normalizedSpec))
+		if (AnalyzeCommon.NeedsMarketPrices(settings.Spec))
 		{
-			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings, normalizedSpec, cancellation);
+			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings, settings.Spec, cancellation);
 			if (quotes == null) return 1;
 		}
 
 		var maxSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
 		var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : trades.Count > 0 ? trades.Max(t => t.Timestamp) : DateTime.Now;
-		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(normalizedSpec, maxSeq, baseTime, quotes));
+		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(settings.Spec, maxSeq, baseTime, quotes));
 
 		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation);
 	}
@@ -215,27 +213,6 @@ internal static class AnalyzeCommon
 
 	internal static bool NeedsMarketPrices(string tradesSpec) =>
 		ParseAllLegs(tradesSpec).Any(leg => leg.PriceKeyword != null);
-
-	internal static string NormalizeTradeSpecForSyntheticExecution(string tradesSpec)
-	{
-		var groups = tradesSpec.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-		if (groups.Length == 0) return tradesSpec;
-
-		var normalized = new List<string>(groups.Length);
-		foreach (var group in groups)
-		{
-			var legs = TradeLegParser.Parse(group);
-			if (legs.Count == 2 && !RollShape.IsSameStrikeCalendar(legs.Select(l => l.Symbol)))
-			{
-				normalized.AddRange(legs.Select(FormatLegSpec));
-				continue;
-			}
-
-			normalized.Add(string.Join(',', legs.Select(FormatLegSpec)));
-		}
-
-		return string.Join(';', normalized);
-	}
 
 	private static string FormatLegSpec(ParsedLeg leg)
 	{
@@ -543,12 +520,10 @@ internal static class AnalyzeCommon
 		Console.WriteLine();
 
 		// Compute max columns from terminal width. Cell format: "0.13/0.37/0.24" or "120.39/135.50/15.11"
-		var sampleWidth = Math.Max(strike, newParsed.Strike).ToString("N2").Length;
-		var cellWidth = sampleWidth * 3 + 5; // 3 values + 2 slashes + 2 padding + 1 sign on net
 		const int fixedOverhead = 11; // borders + price column
 		var terminalWidth = settings.Simplified ? TerminalHelper.SimplifiedMinWidth : TerminalHelper.DetailedMinWidth;
 		try { terminalWidth = Math.Max(terminalWidth, Console.WindowWidth); } catch { /* use default */ }
-		var maxCols = Math.Max(3, (terminalWidth - fixedOverhead) / cellWidth);
+		var maxCols = Math.Max(3, (terminalWidth - fixedOverhead) / (strike.ToString("N2").Length * 3 + 5));
 
 		// Build time columns: hourly on expiry day for <=1 DTE, daily otherwise
 		var oldDays = (int)(oldExpiry.Date - today).TotalDays;
