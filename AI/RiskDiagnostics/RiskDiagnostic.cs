@@ -55,7 +55,8 @@ internal sealed record RiskDiagnosticOpenerScore(
 	int? DaysToTarget,
 	decimal? RawScore,
 	decimal? BiasAdjustedScore,
-	string? Rationale);
+	string? Rationale,
+	decimal? ThetaPerDayPerContract = null);
 
 internal sealed record RiskRuleHit(
 	string Id,

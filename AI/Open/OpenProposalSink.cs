@@ -74,6 +74,7 @@ internal sealed class OpenProposalSink : IDisposable
 			fingerprint = p.Fingerprint,
 			cashReserveBlocked = p.CashReserveBlocked,
 			cashReserveDetail = p.CashReserveDetail,
+            thetaPerDayPerContract = p.ThetaPerDayPerContract,
 			diagnostic = p.Diagnostic is null ? null : AnalyzePositionCommand.SerializeDiagnostic(p.Diagnostic),
 		};
 		_file.WriteLine(JsonSerializer.Serialize(record));

@@ -31,6 +31,27 @@ public class OpenCandidateEvaluatorTests
 		TechnicalSignals: new Dictionary<string, TechnicalBias>()
 	);
 
+	private static OpenProposal MakeProposal(OpenStructureKind kind, int daysToTarget, decimal score, string fingerprint, decimal? thetaPerDayPerContract = null) => new(
+		Ticker: "SPY",
+		StructureKind: kind,
+		Legs: new[] { new ProposalLeg("buy", "SPY   260515C00500000", 1) },
+		Qty: 1,
+		DebitOrCreditPerContract: -500m,
+		MaxProfitPerContract: 1000m,
+		MaxLossPerContract: -500m,
+		CapitalAtRiskPerContract: 500m,
+		Breakevens: new[] { 505m },
+		ProbabilityOfProfit: 0.45m,
+		ExpectedValuePerContract: 25m,
+		DaysToTarget: daysToTarget,
+		RawScore: score,
+		BiasAdjustedScore: score,
+		DirectionalFit: 0,
+		Rationale: "test rationale",
+		Fingerprint: fingerprint,
+		ThetaPerDayPerContract: thetaPerDayPerContract
+	);
+
 	[Fact]
 	public async Task NoQuotesReturnsNoProposals()
 	{
@@ -78,6 +99,39 @@ public class OpenCandidateEvaluatorTests
 		var proposals = await ev.EvaluateAsync(ctx, default);
 		Assert.NotEmpty(proposals);
 		Assert.All(proposals, p => Assert.True(p.Qty <= 3));
+	}
+
+	[Fact]
+	public void RankForOutputPrefersHigherCalendarThetaPerDay()
+	{
+		var currentWeek = MakeProposal(OpenStructureKind.LongCalendar, daysToTarget: 4, score: 0.40m, fingerprint: "near", thetaPerDayPerContract: 4.00m);
+		var nextWeek = MakeProposal(OpenStructureKind.LongCalendar, daysToTarget: 11, score: 1.00m, fingerprint: "far", thetaPerDayPerContract: 1.00m);
+
+		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { nextWeek, currentWeek });
+
+		Assert.Equal(new[] { "near", "far" }, ranked.Select(p => p.Fingerprint).ToArray());
+	}
+
+	[Fact]
+	public void RankForOutputStillUsesScoreWhenCalendarThetaIsComparable()
+	{
+		var currentWeek = MakeProposal(OpenStructureKind.LongDiagonal, daysToTarget: 4, score: 1.00m, fingerprint: "near", thetaPerDayPerContract: 1.00m);
+		var nextWeek = MakeProposal(OpenStructureKind.LongDiagonal, daysToTarget: 11, score: 1.30m, fingerprint: "far", thetaPerDayPerContract: 1.10m);
+
+		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { currentWeek, nextWeek });
+
+		Assert.Equal(new[] { "far", "near" }, ranked.Select(p => p.Fingerprint).ToArray());
+	}
+
+	[Fact]
+	public void RankForOutputPrefersHigherVerticalThetaPerDay()
+	{
+		var highTheta = MakeProposal(OpenStructureKind.ShortPutVertical, daysToTarget: 4, score: 0.40m, fingerprint: "high-theta", thetaPerDayPerContract: 3.00m);
+		var highScore = MakeProposal(OpenStructureKind.ShortPutVertical, daysToTarget: 10, score: 1.00m, fingerprint: "high-score", thetaPerDayPerContract: 1.00m);
+
+		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { highScore, highTheta });
+
+		Assert.Equal(new[] { "high-theta", "high-score" }, ranked.Select(p => p.Fingerprint).ToArray());
 	}
 
 	/// <summary>Fake quote dictionary: returns a constant 1.00/1.10 quote with the given IV for every requested symbol.</summary>

@@ -213,11 +213,14 @@ public class RiskDiagnosticRendererTests
 					DaysToTarget: 7,
 					RawScore: 0.01m,
 					BiasAdjustedScore: 0.01m,
-					Rationale: "debit $50.00\nraw 0.010000 → adjusted 0.020000\n× structure 1.30 × balance 0.16")));
+                  Rationale: "debit $50.00\nraw 0.010000 → adjusted 0.020000\ntech-adjusted × balance 0.16 × theta/day +1.23/contract",
+					ThetaPerDayPerContract: 1.23m)));
 
 		var text = Render(diagnostic);
 		Assert.Contains("Score:", text);
 		Assert.Contains("Factors:", text);
+        Assert.Contains("theta/day", text);
+		Assert.DoesNotContain("Theta/day:", text);
 		Assert.DoesNotContain("Factors: × factors", text);
 		Assert.DoesNotContain("Factors: factors:", text);
 	}
