@@ -27,7 +27,7 @@ public class RiskDiagnosticProbeBuilderTests
         Assert.InRange(defaultIvDelta, 0.15m, 0.35m);
         Assert.True(liveIvDelta > 0.35m);
 
-        var probe = RiskDiagnosticProbeBuilder.Build(
+       var probe = RiskDiagnosticProbeBuilder.Build(
             legs: new[] { shortLeg, longLeg },
             spot: spot,
             asOf: asOf,
@@ -47,7 +47,8 @@ public class RiskDiagnosticProbeBuilderTests
                 ev: 1m,
                 days: 4,
                 rawScore: 0.01m,
-                biasScore: 0.01m));
+                biasScore: 0.01m,
+                thetaPerDayPerContract: 1.23m));
 
         Assert.NotNull(probe.EnumDelta);
         Assert.Equal(Math.Round(defaultIvDelta, 12), Math.Round(probe.EnumDelta!.Value, 12));

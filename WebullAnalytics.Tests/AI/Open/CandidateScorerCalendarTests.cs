@@ -5,7 +5,7 @@ namespace WebullAnalytics.Tests.AI.Open;
 
 public class CandidateScorerCalendarTests
 {
-	private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m, StructureWeight = new() };
+	private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m };
 
 	[Fact]
 	public void CalendarDebitIsLongAskMinusShortBid()
@@ -26,9 +26,9 @@ public class CandidateScorerCalendarTests
 			[longSym] = TestQuote.Q(4.90m, 5.10m, 0.40m)
 		};
 		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 500m, asOf, quotes, bias: 0m, Cfg())!;
-		// debit = long_ask − short_bid = 5.10 − 1.50 = 3.60 per share → 360 per contract
-		Assert.Equal(-360m, p.DebitOrCreditPerContract);
-		Assert.Equal(360m, p.CapitalAtRiskPerContract);
+		// Default pricing uses mid, so debit = long_mid − short_mid = 5.00 − 1.525 = 3.475/share.
+		Assert.Equal(-347.500m, p.DebitOrCreditPerContract);
+		Assert.Equal(347.500m, p.CapitalAtRiskPerContract);
 	}
 
 	[Fact]
@@ -79,10 +79,10 @@ public class CandidateScorerCalendarTests
 			[longSym] = TestQuote.Q(bid: 0.81m, ask: 0.95m, iv: 0.40m)
 		};
 		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 24.95m, asOf, quotes, bias: 0m, Cfg())!;
-		// Max loss = debit + strike gap = 0.59 + 0.50 = 1.09/share ($109/contract)
-		Assert.Equal(-59m, p.DebitOrCreditPerContract);
-		Assert.Equal(-109m, p.MaxLossPerContract);
-		Assert.Equal(109m, p.CapitalAtRiskPerContract);
+		// Default pricing uses mid, so debit = 0.88 − 0.375 = 0.505/share ($50.50/contract).
+		Assert.Equal(-50.500m, p.DebitOrCreditPerContract);
+		Assert.Equal(-100.500m, p.MaxLossPerContract);
+		Assert.Equal(100.500m, p.CapitalAtRiskPerContract);
 	}
 
 	[Fact]

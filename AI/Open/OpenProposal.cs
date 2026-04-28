@@ -42,6 +42,7 @@ public enum OpenStructureKind
 /// <param name="VolatilityAdjustmentFactor">IV-vs-HV multiplier applied during ranking; null when HV was unavailable.</param>
 /// <param name="TargetExpiryMaxPain">Max-pain price inferred from open interest for the proposal's target expiry.</param>
 /// <param name="MaxPainAdjustmentFactor">Max-pain multiplier applied during ranking; null when disabled or unavailable.</param>
+/// <param name="ThetaPerDayPerContract">Finite-difference net theta per day in dollars per contract. Used as a merit signal during opener ranking.</param>
 internal sealed record OpenProposal(
 	string Ticker,
 	OpenStructureKind StructureKind,
@@ -68,5 +69,6 @@ internal sealed record OpenProposal(
 	decimal? HistoricalVolatilityAnnual = null,
 	decimal? VolatilityAdjustmentFactor = null,
 	decimal? TargetExpiryMaxPain = null,
-	decimal? MaxPainAdjustmentFactor = null
+	decimal? MaxPainAdjustmentFactor = null,
+	decimal? ThetaPerDayPerContract = null
 );
