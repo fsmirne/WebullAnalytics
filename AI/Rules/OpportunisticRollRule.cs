@@ -92,7 +92,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		}
 
 		// Find "Hold" baseline (highest-P&L-per-day scenario that involves no execution) and top
-		// fundable scenario (positive BPDelta ≤ availableCash, or BPDelta ≤ 0) that passes risk checks.
+		// fundable scenario (positive MarginDelta ≤ availableCash, or MarginDelta ≤ 0) that passes risk checks.
 		ScenarioEngine.ScenarioResult? hold = scenarios.FirstOrDefault(s => s.ProposalLegs.Count == 0);
 		ScenarioEngine.ScenarioResult? topFundable = null;
 		ScenarioEngine.ScenarioResult? bestCandidate = scenarios.FirstOrDefault(s => s.ProposalLegs.Count > 0);
@@ -100,10 +100,10 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		foreach (var s in scenarios)
 		{
 			if (s.ProposalLegs.Count == 0) continue; // skip "hold"/alert-only
-			var bpTotal = s.BPDeltaPerContract * s.Qty;
-			if (bpTotal > 0m && availableCash > 0m && bpTotal > availableCash)
+			var marginTotal = s.MarginDeltaPerContract * s.Qty;
+			if (marginTotal > 0m && availableCash > 0m && marginTotal > availableCash)
 			{
-				Debug(position, $"candidate '{s.Name}' skipped: BP ${bpTotal:N2} exceeds available ${availableCash:N2}");
+				Debug(position, $"candidate '{s.Name}' skipped: margin ${marginTotal:N2} exceeds available ${availableCash:N2}");
 				continue;
 			}
 			if (s.Kind == ProposalKind.Roll && !PassesRollRiskChecks(s, position, spot, ctx, _config, out rollSafetyNote, out var rejectReason))

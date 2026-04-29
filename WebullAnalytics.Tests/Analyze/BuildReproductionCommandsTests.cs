@@ -13,7 +13,7 @@ public class BuildReproductionCommandsTests
 			CashImpactPerContract: cashImpactPerContract,
 			ProjectedValuePerContract: 0m,
 			TotalPnLPerContract: 0m,
-			BPDeltaPerContract: 0m,
+			MarginDeltaPerContract: 0m,
 			Qty: 100,
 			DaysToTarget: 7,
 			Rationale: "",
