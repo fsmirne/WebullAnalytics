@@ -43,7 +43,7 @@ public class CandidateScorerRationaleTests
 		Assert.Contains("raw 0.025756 → tech-adjusted 0.025756", lines[1]);
 		Assert.Contains("[tech +0.13, fit 0 → no tech adjustment]", lines[1]);
 		Assert.Contains("adjusted 0.010411 → final 0.010723", lines[1]);
-		Assert.Equal("tech-adjusted × pop 1.09 × scale 0.65 × geometry 0.58 × balance 0.40 = adjusted 0.010411", lines[2]);
+		Assert.Equal("tech-adjusted × pop 1.09 × scale 0.65 × geom 0.58 × bal 0.40 = adjusted 0.010411", lines[2]);
 		Assert.Equal("adjusted × theta factor 1.03 (+1.50/day on $74 risk) = final 0.010723", lines[3]);
 	}
 
@@ -81,6 +81,8 @@ public class CandidateScorerRationaleTests
 		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
 		var lines = rationale.Split('\n');
 
-		Assert.Contains("rep IV 44.1% / underlying HV 34.6% = 1.27x", lines[2]);
+        Assert.StartsWith("tech-adjusted × pop ", lines[2]);
+		Assert.Contains(" × vol 0.86 = adjusted 0.010000", lines[2]);
+		Assert.Equal("rep IV 44.1% / underlying HV 34.6% = 1.27x → vol 0.86; adjusted = final 0.010000", lines[3]);
 	}
 }

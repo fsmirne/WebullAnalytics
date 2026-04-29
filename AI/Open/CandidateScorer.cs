@@ -340,30 +340,48 @@ internal static class CandidateScorer
 		var popFactor = ComputeProbabilityFactor(p.ProbabilityOfProfit);
 		var scaleFactor = ComputeCapitalScaleFactor(p.CapitalAtRiskPerContract);
 		var setupFactor = p.SetupFactor;
-		var balance = BalanceFactor(p.MaxProfitPerContract, p.MaxLossPerContract, p.PremiumRatio ?? 1m);
-		var volStr = "";
+        var balance = BalanceFactor(p.MaxProfitPerContract, p.MaxLossPerContract, p.PremiumRatio ?? 1m);
+		var factorParts = new List<string>
+		{
+			$"pop {popFactor:F2}",
+			$"scale {scaleFactor:F2}",
+		};
+		if (setupFactor.HasValue)
+			factorParts.Add($"setup {setupFactor.Value:F2}");
+		if (p.GeometryFactor.HasValue)
+			factorParts.Add($"geom {p.GeometryFactor.Value:F2}");
+		factorParts.Add($"bal {balance:F2}");
+
+		var detailLines = new List<string>();
+		string? volDetail = null;
 		if (p.VolatilityAdjustmentFactor.HasValue && p.ImpliedVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.Value > 0m)
 		{
 			var richness = p.ImpliedVolatilityAnnual.Value / p.HistoricalVolatilityAnnual.Value;
-         volStr = $" × vol {p.VolatilityAdjustmentFactor.Value:F2} (rep IV {p.ImpliedVolatilityAnnual.Value:P1} / underlying HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x)";
+			factorParts.Add($"vol {p.VolatilityAdjustmentFactor.Value:F2}");
+			volDetail = $"rep IV {p.ImpliedVolatilityAnnual.Value:P1} / underlying HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x → vol {p.VolatilityAdjustmentFactor.Value:F2};";
 		}
 		var painStr = "";
 		if (p.MaxPainAdjustmentFactor.HasValue && p.TargetExpiryMaxPain.HasValue)
-           painStr = $" × maxPain {p.MaxPainAdjustmentFactor.Value:F2} (target ${p.TargetExpiryMaxPain.Value:F2})";
-		var geometryStr = p.GeometryFactor.HasValue ? $" × geometry {p.GeometryFactor.Value:F2}" : "";
-		var assignmentStr = p.AssignmentRiskFactor.HasValue ? $" × assign {p.AssignmentRiskFactor.Value:F2}" : "";
+		{
+			factorParts.Add($"pain {p.MaxPainAdjustmentFactor.Value:F2}");
+			painStr = $"target ${p.TargetExpiryMaxPain.Value:F2}";
+		}
+		if (p.AssignmentRiskFactor.HasValue)
+			factorParts.Add($"assign {p.AssignmentRiskFactor.Value:F2}");
 		var finalScore = p.FinalScore ?? ComputeFinalScore(p.BiasAdjustedScore, p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
 		var thetaFactor = ComputeThetaFactor(p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
 
 		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
 		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6} → final {finalScore:F6}";
-		var setupStr = setupFactor.HasValue ? $" × setup {setupFactor.Value:F2}" : "";
-		var factorsLine = $"tech-adjusted × pop {popFactor:F2} × scale {scaleFactor:F2}{setupStr}{geometryStr} × balance {balance:F2}{volStr}{painStr}{assignmentStr} = adjusted {p.BiasAdjustedScore:F6}";
-		var finalLine = p.ThetaPerDayPerContract.HasValue
-          ? $"adjusted × theta factor {thetaFactor:F2} ({p.ThetaPerDayPerContract.Value:+0.00;-0.00}/day on ${p.CapitalAtRiskPerContract:F0} risk) = final {finalScore:F6}"
+		var factorsLine = $"tech-adjusted × {string.Join(" × ", factorParts)} = adjusted {p.BiasAdjustedScore:F6}";
+		var finalCore = p.ThetaPerDayPerContract.HasValue
+			? $"adjusted × theta factor {thetaFactor:F2} ({p.ThetaPerDayPerContract.Value:+0.00;-0.00}/day on ${p.CapitalAtRiskPerContract:F0} risk) = final {finalScore:F6}"
 			: $"adjusted = final {finalScore:F6}";
+		var finalLine = !string.IsNullOrEmpty(volDetail) ? $"{volDetail} {finalCore}" : finalCore;
+		if (!string.IsNullOrEmpty(painStr))
+			detailLines.Add(painStr);
 
-		return $"{rationaleLine}\n{scoreLine}\n{factorsLine}\n{finalLine}";
+		return string.Join("\n", new[] { rationaleLine, scoreLine, factorsLine, finalLine }.Concat(detailLines));
 	}
 
 	private static decimal? ComputeMaxPainAdjustmentFactor(CandidateSkeleton skel, decimal spot, DateTime asOf, decimal targetIv, decimal? maxPain, OpenerConfig cfg, IReadOnlyList<decimal>? breakevens = null)
