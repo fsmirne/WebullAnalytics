@@ -6,7 +6,7 @@ public record CostStep(DateTime Timestamp, string Instrument, Side Side, int Tra
 public record StrategyCredit(string Instrument, int Qty, decimal LotPrice, decimal ParentPrice);
 public record NetDebitTrade(DateTime Timestamp, string Instrument, Side Side, int Qty, decimal Price, decimal CashImpact);
 public record StrategyAdjustment(List<NetDebitTrade> Trades, decimal TotalNetDebit, DateTime? LastFlatTime, decimal? InitNetDebit = null);
-public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, int OpenQty, decimal InitPrice, decimal AvgPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime, string? OptionKind = null, decimal? InitNetDebit = null, List<NetDebitTrade>? StandaloneAdjustments = null);
+public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, int OpenQty, decimal InitPrice, decimal AvgPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime, string? OptionKind = null, decimal? InitNetDebit = null, List<NetDebitTrade>? StandaloneAdjustments = null, string? NetDebitTradesLabel = null);
 
 /// <summary>
 /// Builds per-position breakdowns showing how each adjusted price was calculated.
@@ -30,7 +30,7 @@ internal static class AdjustmentReportBuilder
 				while (j < positionRows.Count && positionRows[j].IsStrategyLeg)
 					j++;
 				var adjustment = strategyAdjustments?.GetValueOrDefault(i);
-				var breakdown = BuildStrategyBreakdown(row, adjustment);
+                var breakdown = BuildStrategyBreakdown(row, positionRows.Skip(i + 1).Take(j - i - 1).ToList(), adjustment);
 				if (breakdown != null) result.Add(breakdown);
 				i = j;
 			}
@@ -103,12 +103,28 @@ internal static class AdjustmentReportBuilder
 		return credits;
 	}
 
-	private static PriceBreakdown? BuildStrategyBreakdown(PositionRow summaryRow, StrategyAdjustment? adjustment)
+	private static PriceBreakdown? BuildStrategyBreakdown(PositionRow summaryRow, List<PositionRow> legRows, StrategyAdjustment? adjustment)
 	{
 		if (adjustment != null && adjustment.Trades.Count >= 2)
 		{
 			var openCost = summaryRow.InitialAvgPrice ?? summaryRow.AvgPrice;
-			return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, summaryRow.OpenQty ?? summaryRow.Qty, openCost, summaryRow.AvgPrice, summaryRow.AdjustedAvgPrice, null, null, adjustment.Trades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind, adjustment.InitNetDebit);
+            var afterRollCost = summaryRow.AdjustedAvgPrice ?? summaryRow.AvgPrice;
+			var hasAfterRollChange = afterRollCost != summaryRow.AvgPrice;
+			var visibleTrades = adjustment.Trades;
+			string? tradesLabel = null;
+
+			if (!hasAfterRollChange)
+			{
+				var activeLegs = legRows.Where(r => r.MatchKey != null).Select(r => (r.Instrument, r.Side)).ToHashSet();
+				var basisTrades = adjustment.Trades.Where(t => activeLegs.Contains((t.Instrument, t.Side))).ToList();
+				if (basisTrades.Count > 0 && basisTrades.Count < adjustment.Trades.Count)
+				{
+					visibleTrades = basisTrades;
+					tradesLabel = "Basis trades:";
+				}
+			}
+
+			return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, summaryRow.OpenQty ?? summaryRow.Qty, openCost, summaryRow.AvgPrice, summaryRow.AdjustedAvgPrice, null, null, visibleTrades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind, adjustment.InitNetDebit, NetDebitTradesLabel: tradesLabel);
 		}
 
 		// Fallback: for partial-brand-new groups the replay produced no trades, but the strategy still
