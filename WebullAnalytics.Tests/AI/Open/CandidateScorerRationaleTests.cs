@@ -81,8 +81,49 @@ public class CandidateScorerRationaleTests
 		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
 		var lines = rationale.Split('\n');
 
-        Assert.StartsWith("tech-adjusted × pop ", lines[2]);
-		Assert.Contains(" × vol 0.86 = adjusted 0.010000", lines[2]);
-		Assert.Equal("rep IV 44.1% / underlying HV 34.6% = 1.27x → vol 0.86; adjusted = final 0.010000", lines[3]);
+      Assert.Equal(5, lines.Length);
+		Assert.Equal("rep IV 44.1% / underlying HV 34.6% = 1.27x → vol 0.86", lines[2]);
+		Assert.StartsWith("tech-adjusted × pop ", lines[3]);
+		Assert.Contains(" × vol 0.86 = adjusted 0.010000", lines[3]);
+		Assert.Equal("adjusted = final 0.010000", lines[4]);
+	}
+
+	[Fact]
+	public void BuildRationalePlacesMaxPainTargetOnIndicatorsLine()
+	{
+		var proposal = new OpenProposal(
+			Ticker: "GME",
+			StructureKind: OpenStructureKind.LongCalendar,
+			Legs: new[]
+			{
+				new ProposalLeg("buy", "GME   260529P00024500", 1),
+				new ProposalLeg("sell", "GME   260501P00024500", 1)
+			},
+			Qty: 1,
+			DebitOrCreditPerContract: -50m,
+			MaxProfitPerContract: 100m,
+			MaxLossPerContract: -50m,
+			CapitalAtRiskPerContract: 50m,
+			Breakevens: new[] { 23.33m, 25.91m },
+			ProbabilityOfProfit: 0.50m,
+			ExpectedValuePerContract: 10m,
+			DaysToTarget: 7,
+			RawScore: 0.010000m,
+			BiasAdjustedScore: 0.010000m,
+			DirectionalFit: 0,
+			Rationale: "",
+			Fingerprint: "fp",
+			PremiumRatio: 3.06m,
+			MaxPainAdjustmentFactor: 1.19m,
+			TargetExpiryMaxPain: 24.50m,
+			FinalScore: 0.010000m);
+
+		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
+		var lines = rationale.Split('\n');
+
+        Assert.Equal(5, lines.Length);
+       Assert.Equal("max-pain target $24.50 → pain 1.19", lines[2]);
+		Assert.DoesNotContain("max pain target", lines[3]);
+		Assert.DoesNotContain("max-pain target", lines[3]);
 	}
 }
