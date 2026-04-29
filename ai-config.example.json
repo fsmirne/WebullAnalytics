@@ -38,13 +38,13 @@
 		"maxPainWeight": 0.25,
 		"scenarioGridSigma": 1.0,
 		"structures": {
-			"longCalendar":  { "enabled": true, "shortDteMin": 3, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },
-			"doubleCalendar": { "enabled": true, "shortDteMin": 3, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60, "widthSteps": [2, 4] },
-			"longDiagonal":  { "enabled": true, "shortDteMin": 3, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },
-			"doubleDiagonal": { "enabled": true, "shortDteMin": 3, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60, "widthSteps": [2, 4], "longWingSteps": [1] },
-			"ironButterfly": { "enabled": true, "dteMin": 3, "dteMax": 10, "wingSteps": [1, 2, 3, 4] },
-			"ironCondor": { "enabled": true, "dteMin": 3, "dteMax": 10, "widthSteps": [1, 2, 3, 4], "bodyWidthSteps": [2, 4], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
-			"shortVertical": { "enabled": true, "dteMin": 3, "dteMax": 10, "widthSteps": [1, 2, 3, 4], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
+			"longCalendar":  { "enabled": true, "shortDteMin": 1, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },
+			"doubleCalendar": { "enabled": true, "shortDteMin": 1, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60, "widthSteps": [2, 4] },
+			"longDiagonal":  { "enabled": true, "shortDteMin": 1, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },
+			"doubleDiagonal": { "enabled": true, "shortDteMin": 1, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60, "widthSteps": [2, 4], "longWingSteps": [1] },
+			"ironButterfly": { "enabled": true, "dteMin": 1, "dteMax": 10, "wingSteps": [1, 2, 3, 4] },
+			"ironCondor": { "enabled": true, "dteMin": 1, "dteMax": 10, "widthSteps": [1, 2, 3, 4], "bodyWidthSteps": [2, 4], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
+			"shortVertical": { "enabled": true, "dteMin": 1, "dteMax": 10, "widthSteps": [1, 2, 3, 4], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
 			"longCallPut":   { "enabled": true, "dteMin": 21, "dteMax": 60, "deltaMin": 0.30, "deltaMax": 0.60 }
 		}
 	},
