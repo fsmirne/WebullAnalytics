@@ -120,6 +120,59 @@ internal static class CandidateScorer
 
 	public static decimal MaxPainAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
 	public static decimal AssignmentRiskAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
+	public static decimal StatArbAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
+
+	internal readonly record struct MarketTheoreticalAggregate(decimal MarketNet, decimal TheoreticalNet, decimal GrossTheoretical);
+
+	/// <summary>
+	/// Per-share aggregate of market mid vs Black-Scholes theoretical priced at each leg's quoted IV.
+	/// Returns null if any leg lacks a two-sided live quote, IV, or yields a non-positive theoretical price.
+	/// Sign convention: net = long_sum − short_sum (positive = debit, negative = credit). GrossTheoretical
+	/// is the unsigned sum (theoLong + theoShort) used to normalize the edge into a unitless ratio.
+	/// </summary>
+	internal static MarketTheoreticalAggregate? ComputeMarketTheoreticalAggregate(
+		IEnumerable<(string Symbol, OptionParsed Parsed, bool IsLong)> legs,
+		decimal spot,
+		DateTime asOf,
+		IReadOnlyDictionary<string, OptionContractQuote> quotes,
+		decimal defaultIvPct)
+	{
+		decimal marketLong = 0m, marketShort = 0m, theoLong = 0m, theoShort = 0m;
+		foreach (var leg in legs)
+		{
+			var live = TryLiveBidAsk(leg.Symbol, quotes);
+			if (live == null) return null;
+			var mid = (live.Value.bid + live.Value.ask) / 2m;
+
+			if (!quotes.TryGetValue(leg.Symbol, out var q) || !q.ImpliedVolatility.HasValue || q.ImpliedVolatility.Value <= 0m) return null;
+			var iv = q.ImpliedVolatility.Value;
+
+			var dte = Math.Max(1, (leg.Parsed.ExpiryDate.Date - asOf.Date).Days);
+			var theo = OptionMath.BlackScholes(spot, leg.Parsed.Strike, dte / 365.0, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
+			if (theo <= 0m) return null;
+
+			if (leg.IsLong) { marketLong += mid; theoLong += theo; }
+			else { marketShort += mid; theoShort += theo; }
+		}
+		var gross = theoLong + theoShort;
+		if (gross <= 0m) return null;
+		return new MarketTheoreticalAggregate(marketLong - marketShort, theoLong - theoShort, gross);
+	}
+
+	/// <summary>
+	/// Stat-arb factor: market option prices vs Black-Scholes theoretical. Edge = theoreticalNet − marketNet.
+	/// Positive edge means the market entry is favorable to whoever opened — paid less than BS-fair on a debit
+	/// or received more than BS-fair on a credit. Same sign for both directions because the signed-net
+	/// difference encodes the direction inherently. Factor = max(0.10, 1 + weight × clamp(edge / gross, −1, 1)).
+	/// </summary>
+	public static decimal? ComputeStatArbAdjustmentFactor(decimal? marketNet, decimal? theoreticalNet, decimal? grossTheoretical, decimal weight)
+	{
+		if (weight <= 0m || !marketNet.HasValue || !theoreticalNet.HasValue || !grossTheoretical.HasValue || grossTheoretical.Value <= 0m)
+			return null;
+		var edge = theoreticalNet.Value - marketNet.Value;
+		var relative = Math.Clamp(edge / grossTheoretical.Value, -1m, 1m);
+		return Math.Max(0.10m, 1m + weight * relative);
+	}
 
 	public static decimal ComputeThetaFactor(decimal? thetaPerDayPerContract, decimal capitalAtRiskPerContract)
 	{
@@ -292,7 +345,7 @@ internal static class CandidateScorer
 	/// Builds 5 scenario points at S_T ∈ {spot·e^(−sigmaRange·σ), spot·e^(−sigmaRange·σ/2), spot,
 	/// spot·e^(+sigmaRange·σ/2), spot·e^(+sigmaRange·σ)} where σ = ivAnnual · √years.
 	/// Weights = log-normal density at each point, renormalized to sum to 1. Neutral drift.
-    /// sigmaRange defaults to 1.0 (±1σ and ±0.5σ). Larger values test further-out scenarios and
+	/// sigmaRange defaults to 1.0 (±1σ and ±0.5σ). Larger values test further-out scenarios and
 	/// overweight fat tails, favoring unbounded-upside structures over pin/theta structures.
 	/// </summary>
 	public static IReadOnlyList<ScenarioPoint> BuildScenarioGrid(decimal spot, decimal ivAnnual, double years, decimal sigmaRange = 1.0m)
@@ -302,7 +355,7 @@ internal static class CandidateScorer
 		var multipliers = new[] { -range, -range * 0.5, 0.0, range * 0.5, range };
 		var points = new ScenarioPoint[5];
 
-        // Unnormalized log-normal density at each z-point: φ(z) = (1/√(2π)) · e^(−z²/2). Weights are the densities.
+		// Unnormalized log-normal density at each z-point: φ(z) = (1/√(2π)) · e^(−z²/2). Weights are the densities.
 		double[] rawWeights = new double[5];
 		double totalWeight = 0;
 		for (int i = 0; i < 5; i++)
@@ -341,7 +394,7 @@ internal static class CandidateScorer
 
 	private static ResolvedLegPrice? ResolveLegPrice(string symbol, OptionParsed parsed, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultIv)
 	{
-       if (!quotes.TryGetValue(symbol, out _))
+	   if (!quotes.TryGetValue(symbol, out _))
 			return null;
 
 		var live = TryLiveBidAsk(symbol, quotes);
@@ -398,7 +451,7 @@ internal static class CandidateScorer
 		var techAdjusted = BiasAdjust(p.RawScore, bias, p.DirectionalFit, cfg.DirectionalFitWeight);
 		var biasEffectPct = cfg.DirectionalFitWeight * bias * p.DirectionalFit * 100m;
 		var biasTag = p.DirectionalFit == 0
-            ? $"[tech {bias:+0.00;-0.00}, fit 0 → no tech adjustment]"
+			? $"[tech {bias:+0.00;-0.00}, fit 0 → no tech adjustment]"
 			: $"[tech {bias:+0.00;-0.00}, fit {p.DirectionalFit:+0;-0} → {biasEffectPct:+0;-0}% {(biasEffectPct >= 0 ? "tech boost" : "tech cut")}]";
 
 		var beStr = p.Breakevens.Count > 0 ? $"BE ${string.Join("/", p.Breakevens.Select(b => b.ToString("F2")))}, " : "";
@@ -409,7 +462,7 @@ internal static class CandidateScorer
 		var ratioStr = p.PremiumRatio.HasValue ? $", prem {p.PremiumRatio.Value:F2}x" : "";
 		var popFactor = ComputeProbabilityFactor(p.ProbabilityOfProfit);
 		var scaleFactor = ComputeCapitalScaleFactor(p.CapitalAtRiskPerContract);
-        var setupFactor = p.SetupFactor;
+		var setupFactor = p.SetupFactor;
 		var balance = BalanceFactor(p.MaxProfitPerContract, p.MaxLossPerContract, p.PremiumRatio ?? 1m);
 		var factorParts = new List<string>
 		{
@@ -440,6 +493,12 @@ internal static class CandidateScorer
 		}
 		if (p.AssignmentRiskFactor.HasValue)
 			factorParts.Add($"assign {p.AssignmentRiskFactor.Value:F2}");
+		if (p.StatArbAdjustmentFactor.HasValue && p.MarketNetPremiumPerShare.HasValue && p.TheoreticalNetPremiumPerShare.HasValue)
+		{
+			factorParts.Add($"arb {p.StatArbAdjustmentFactor.Value:F2}");
+			var edge = p.TheoreticalNetPremiumPerShare.Value - p.MarketNetPremiumPerShare.Value;
+			indicatorParts.Add($"market net ${p.MarketNetPremiumPerShare.Value:+0.00;-0.00} / theoretical net ${p.TheoreticalNetPremiumPerShare.Value:+0.00;-0.00}, edge ${edge:+0.00;-0.00}/share → arb {p.StatArbAdjustmentFactor.Value:F2}");
+		}
 		var finalScore = p.FinalScore ?? ComputeFinalScore(p.BiasAdjustedScore, p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
 		var thetaFactor = ComputeThetaFactor(p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
 
@@ -542,7 +601,7 @@ internal static class CandidateScorer
 
 	internal enum Direction { Above, Below }
 
-   /// <summary>
+	/// <summary>
 	/// P(S_T &gt; level) or P(S_T &lt; level) under log-normal neutral drift:
 	/// d2 = (ln(S/K) − σ²·T/2) / (σ·√T); P(S_T &gt; K) = N(d2); P(S_T &lt; K) = 1 − N(d2).
 	/// </summary>
@@ -563,7 +622,7 @@ internal static class CandidateScorer
 		var longParsed = ParsingHelpers.ParseOptionSymbol(longLeg.Symbol);
 		if (shortParsed == null || longParsed == null) return null;
 
-        var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
+		var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		var longQ = ResolveLegPrice(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (shortQ == null || longQ == null) return null;
 		var pricingWarning = BuildPricingWarning(shortQ.Value.UsedFallback || longQ.Value.UsedFallback);
@@ -584,7 +643,7 @@ internal static class CandidateScorer
 		var isCall = skel.StructureKind == OpenStructureKind.ShortCallVertical;
 		var breakeven = isCall
 			? shortParsed.Strike + creditPerShare   // call credit: loses if S_T > short + credit
-          : shortParsed.Strike - creditPerShare;  // put credit: loses if S_T < short − credit
+		  : shortParsed.Strike - creditPerShare;  // put credit: loses if S_T < short − credit
 
 		var years = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
 		var iv = ResolveIv(shortLeg.Symbol, quotes, cfg.IvDefaultPct);
@@ -592,7 +651,7 @@ internal static class CandidateScorer
 		// POP = P(S_T inside profitable side of breakeven).
 		var pop = LogNormalProbability(isCall ? Direction.Below : Direction.Above, spot, breakeven, years, (double)iv);
 
-       // EV via scenario grid — payoff at expiry is piecewise linear.
+	   // EV via scenario grid — payoff at expiry is piecewise linear.
 		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -620,7 +679,11 @@ internal static class CandidateScorer
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
-		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
+		var statArb = ComputeMarketTheoreticalAggregate(
+			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
+			spot, asOf, quotes, cfg.IvDefaultPct);
+		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
+		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -652,6 +715,9 @@ internal static class CandidateScorer
 			SetupFactor: setupFactor,
 			AssignmentRiskFactor: assignmentFactor,
 			ThetaPerDayPerContract: thetaPerDayPerContract,
+			MarketNetPremiumPerShare: statArb?.MarketNet,
+			TheoreticalNetPremiumPerShare: statArb?.TheoreticalNet,
+			StatArbAdjustmentFactor: statArbFactor,
 			FinalScore: finalScore
 		);
 	}
@@ -730,7 +796,7 @@ internal static class CandidateScorer
 	/// (calendar/diagonal) get long_ask/short_bid; 2-leg credits (vertical) get the same expression
 	/// which lands &lt;1 because short_bid &gt; long_ask; 4-leg double diagonals / iron butterflies /
 	/// broken-wing butterflies sum across both call- and put-side legs. Single-leg structures (long
- /// call/put) have no shorts so we return 1 — premium_ratio adjustment is a no-op for them.</summary>
+	/// call/put) have no shorts so we return 1 — premium_ratio adjustment is a no-op for them.</summary>
 	private static decimal ComputePremiumRatio(IReadOnlyList<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, string pricingMode)
 	{
 		decimal totalLongPaid = 0m;
@@ -738,7 +804,7 @@ internal static class CandidateScorer
 		foreach (var leg in legs)
 		{
 			var q = TryLiveBidAsk(leg.Symbol, quotes);
-            if (q == null) return 1m;   // missing quote — fall back to neutral so callers don't crash
+			if (q == null) return 1m;   // missing quote — fall back to neutral so callers don't crash
 			var mid = (q.Value.bid + q.Value.ask) / 2m;
 			if (leg.Action == "buy") totalLongPaid += PriceForBuy(mid, q.Value.ask, pricingMode) * leg.Qty;
 			else totalShortReceived += PriceForSell(mid, q.Value.bid, pricingMode) * leg.Qty;
@@ -749,7 +815,7 @@ internal static class CandidateScorer
 
 	/// <summary>Multiplicative factor applied to BiasAdjustedScore that captures payoff asymmetry (R/R)
 	/// and premium efficiency (1/premium_ratio) in one continuous expression. Both pieces are
- /// observable trade properties — no thresholds, no magic numbers. Works uniformly across
+	/// observable trade properties — no thresholds, no magic numbers. Works uniformly across
 	/// structures: high-R/R high-cushion trades get boosted, low-R/R thin-cushion trades get reduced.</summary>
 	internal static decimal BalanceFactor(decimal maxProfit, decimal maxLoss, decimal premiumRatio)
 	{
@@ -802,7 +868,7 @@ internal static class CandidateScorer
 	}
 
 	/// <summary>Locates the lower and upper breakeven of a calendar/diagonal at the short leg's expiry
-   /// via bisection. Scans a wide grid (±60% from spot in 121 steps) to find an interval that brackets
+	/// via bisection. Scans a wide grid (±60% from spot in 121 steps) to find an interval that brackets
 	/// each sign change, then bisects to ~$0.01 precision. Returns (null, null) if the payoff is never
 	/// positive (no breakevens exist) or if bisection can't bracket two roots.</summary>
 	private static (decimal? lower, decimal? upper) ComputeCalendarOrDiagonalBreakevens(decimal spot, OptionParsed shortLeg, OptionParsed longLeg, double longAtShortYears, decimal ivLong, decimal debitPerContract)
@@ -835,7 +901,7 @@ internal static class CandidateScorer
 	}
 
 	/// <summary>Bisection on a continuous P&L curve known to have a single sign change in [a, b].
- /// Stops when the interval is ≤ 0.005 (sub-cent on a $25 underlying), capped at 60 iterations.</summary>
+	/// Stops when the interval is ≤ 0.005 (sub-cent on a $25 underlying), capped at 60 iterations.</summary>
 	private static decimal BisectBreakeven(Func<decimal, decimal> pnl, decimal a, decimal b)
 	{
 		var fa = pnl(a);
@@ -851,7 +917,7 @@ internal static class CandidateScorer
 	}
 
 	/// <summary>Locates the peak P&L of a calendar/diagonal at the short leg's expiry by scanning a
-    /// fine grid (±60% from spot, 240 points) and returning the maximum-PnL value sampled. The 5-point
+	/// fine grid (±60% from spot, 240 points) and returning the maximum-PnL value sampled. The 5-point
 	/// scenario grid the EV calculation uses misses the peak — for a $25 ATM diagonal the actual peak
 	/// sits between two grid points, so the scenario-max underestimates max_profit by ~30%. R/R needs
 	/// the true peak to be meaningful.</summary>
@@ -876,14 +942,14 @@ internal static class CandidateScorer
 	{
 		if (isCall)
 		{
-          // Call credit: short above long. Profit = credit when S_T ≤ short. Loss ramps to −(width − credit) at S_T ≥ long.
+		  // Call credit: short above long. Profit = credit when S_T ≤ short. Loss ramps to −(width − credit) at S_T ≥ long.
 			var shortPayoff = Math.Max(0m, sT - shortStrike) * 100m;
 			var longPayoff = Math.Max(0m, sT - longStrike) * 100m;
 			return creditPerContract - shortPayoff + longPayoff;
 		}
 		else
 		{
-           // Put credit: short below spot, long further below. Profit = credit when S_T ≥ short. Loss ramps down.
+		   // Put credit: short below spot, long further below. Profit = credit when S_T ≥ short. Loss ramps down.
 			var shortPayoff = Math.Max(0m, shortStrike - sT) * 100m;
 			var longPayoff = Math.Max(0m, longStrike - sT) * 100m;
 			return creditPerContract - shortPayoff + longPayoff;
@@ -1035,7 +1101,7 @@ internal static class CandidateScorer
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, breakevens);
 		var geometryFactor = ComputeDiagonalGeometryFactor(skel, quotes, pricingMode);
-        var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
+		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(defs.Select(d => (d.Parsed, d.Iv, d.IsLong)), asOf, spot);
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
@@ -1043,7 +1109,9 @@ internal static class CandidateScorer
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, representativeIv, maxPain, cfg, breakevens);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
-		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
+		var statArb = ComputeMarketTheoreticalAggregate(defs.Select(d => (d.Proposal.Symbol, d.Parsed, d.IsLong)), spot, asOf, quotes, cfg.IvDefaultPct);
+		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
+		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1077,6 +1145,9 @@ internal static class CandidateScorer
 			RunwayFactor: runwayFactor,
 			AssignmentRiskFactor: assignmentFactor,
 			ThetaPerDayPerContract: thetaPerDayPerContract,
+			MarketNetPremiumPerShare: statArb?.MarketNet,
+			TheoreticalNetPremiumPerShare: statArb?.TheoreticalNet,
+			StatArbAdjustmentFactor: statArbFactor,
 			FinalScore: finalScore);
 	}
 
@@ -1088,7 +1159,7 @@ internal static class CandidateScorer
 		var longParsed = ParsingHelpers.ParseOptionSymbol(longLeg.Symbol);
 		if (shortParsed == null || longParsed == null) return null;
 
-        var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
+		var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		var longQ = ResolveLegPrice(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (shortQ == null || longQ == null) return null;
 		var pricingWarning = BuildPricingWarning(shortQ.Value.UsedFallback || longQ.Value.UsedFallback);
@@ -1115,7 +1186,7 @@ internal static class CandidateScorer
 
 		// Breakevens are the roots of the position-value-at-short-expiry curve, found numerically because
 		// the curve mixes Black-Scholes (long leg) with piecewise-linear intrinsic (short leg) and has
-       // no closed form. POP = P(BE_lower < S_T < BE_upper) under the same log-normal used for EV — a
+		// no closed form. POP = P(BE_lower < S_T < BE_upper) under the same log-normal used for EV — a
 		// proper breakeven-based probability rather than the fixed 5%-band stand-in we used to ship.
 		var (beLower, beUpper) = ComputeCalendarOrDiagonalBreakevens(spot, shortParsed, longParsed, longAtShortYears, ivLong, debitPerContract);
 		decimal pop;
@@ -1128,13 +1199,13 @@ internal static class CandidateScorer
 		}
 		else
 		{
-           // Fallback: payoff-positive nowhere (or bisection couldn't find both roots) — POP = 0.
+		   // Fallback: payoff-positive nowhere (or bisection couldn't find both roots) — POP = 0.
 			pop = 0m;
 		}
 
-       // EV uses the 5-point grid — a probability-weighted average across realistic outcomes.
+		// EV uses the 5-point grid — a probability-weighted average across realistic outcomes.
 		// max_profit comes from a separate fine-grid scan because the true peak typically falls between
-      // 5-point grid points (e.g. an ATM call diagonal peaks at the short strike, which the ±0.5σ
+		// 5-point grid points (e.g. an ATM call diagonal peaks at the short strike, which the ±0.5σ
 		// sampling misses) — using the scenario-grid max would understate R/R by ~30%.
 		var grid = BuildScenarioGrid(spot, ivShort, shortYears, cfg.ScenarioGridSigma);
 		decimal ev = 0m;
@@ -1173,7 +1244,11 @@ internal static class CandidateScorer
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, ivShort, maxPain, cfg);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
-		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
+		var statArb = ComputeMarketTheoreticalAggregate(
+			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
+			spot, asOf, quotes, cfg.IvDefaultPct);
+		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
+		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1207,6 +1282,9 @@ internal static class CandidateScorer
 			RunwayFactor: runwayFactor,
 			AssignmentRiskFactor: assignmentFactor,
 			ThetaPerDayPerContract: thetaPerDayPerContract,
+			MarketNetPremiumPerShare: statArb?.MarketNet,
+			TheoreticalNetPremiumPerShare: statArb?.TheoreticalNet,
+			StatArbAdjustmentFactor: statArbFactor,
 			FinalScore: finalScore
 		);
 	}
@@ -1286,7 +1364,9 @@ internal static class CandidateScorer
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
-		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance, skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
+		var statArb = ComputeMarketTheoreticalAggregate(new (string, OptionParsed, bool)[] { (leg.Symbol, parsed, true) }, spot, asOf, quotes, cfg.IvDefaultPct);
+		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
+		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance, skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1318,6 +1398,9 @@ internal static class CandidateScorer
 			SetupFactor: setupFactor,
 			AssignmentRiskFactor: assignmentFactor,
 			ThetaPerDayPerContract: thetaPerDayPerContract,
+			MarketNetPremiumPerShare: statArb?.MarketNet,
+			TheoreticalNetPremiumPerShare: statArb?.TheoreticalNet,
+			StatArbAdjustmentFactor: statArbFactor,
 			FinalScore: finalScore
 		);
 	}
