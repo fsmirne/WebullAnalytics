@@ -27,6 +27,11 @@ public class OpenProposalSinkTests
 		FinalScore: score
 	);
 
+	private static OpenProposal MakeProposalWithWarning(decimal score, string fingerprint) => MakeProposal(score, fingerprint) with
+	{
+		PricingWarning = "Warning: fallback Black-Scholes pricing used for one or more legs because live bid/ask was unavailable."
+	};
+
 	[Fact]
 	public void WriteJsonlAppendsLine()
 	{
@@ -42,6 +47,24 @@ public class OpenProposalSinkTests
 			Assert.Single(contents);
 			Assert.Contains("\"type\":\"open\"", contents[0]);
 			Assert.Contains("\"ticker\":\"SPY\"", contents[0]);
+		}
+		finally { File.Delete(tmp); }
+	}
+
+	[Fact]
+	public void WriteJsonlIncludesPricingWarning()
+	{
+		var tmp = Path.GetTempFileName();
+		try
+		{
+			using (var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "error" }, mode: "once"))
+			{
+				sink.Emit(MakeProposalWithWarning(0.01m, "fp-warning"));
+				sink.Flush();
+			}
+			var contents = File.ReadAllLines(tmp);
+			Assert.Single(contents);
+			Assert.Contains("\"pricingWarning\":\"Warning: fallback Black-Scholes pricing used for one or more legs because live bid/ask was unavailable.\"", contents[0]);
 		}
 		finally { File.Delete(tmp); }
 	}
