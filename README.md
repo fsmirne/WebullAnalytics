@@ -558,7 +558,7 @@ Three subcommands share one evaluation engine:
 wa ai watch
 
 # Single evaluation pass, print proposals, exit
-wa ai once
+wa ai scan
 
 # Replay the rules against historical orders.jsonl with agreement analysis
 wa ai replay --since 2026-01-01 --until 2026-04-17
@@ -567,7 +567,7 @@ wa ai replay --since 2026-01-01 --until 2026-04-17
 wa ai watch --tick 30 --duration 90m --ignore-market-hours
 
 # Emit only opening ideas
-wa ai once --proposals open
+wa ai scan --proposals open
 ```
 
 #### Setup
@@ -631,7 +631,7 @@ When a proposal fires, the rationale includes a safety summary showing what was 
 Proposals are written to two places:
 
 - **Console**: Spectre-formatted, color-coded by action (close = yellow, roll = cyan, alert-only = grey). Each proposal shows the legs and net credit/debit, followed by ready-to-run `wa trade place` and `wa analyze trade` commands, and the rule rationale.
-- **JSONL log** at `data/ai-proposals.log`: one proposal per line, machine-parseable with `jq` or similar. Includes `mode` field ("once" / "watch" / "replay") to distinguish source runs.
+- **JSONL log** at `data/ai-proposals.log`: one proposal per line, machine-parseable with `jq` or similar. Includes `mode` field ("scan" / "watch" / "replay") to distinguish source runs.
 
 AI commands accept `--pricing mid|bidask` to control both displayed command prices and the pricing basis used in proposal math. Default: `mid`.
 
