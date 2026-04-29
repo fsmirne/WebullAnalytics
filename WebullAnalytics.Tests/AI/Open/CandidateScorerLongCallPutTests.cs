@@ -130,7 +130,7 @@ public class CandidateScorerLongCallPutTests
 
 		Assert.Equal(110m, withPain.TargetExpiryMaxPain);
 		Assert.True(withPain.MaxPainAdjustmentFactor > 1m);
-        Assert.Equal(Math.Sign(withoutPain.BiasAdjustedScore), Math.Sign(withPain.BiasAdjustedScore));
+		Assert.Equal(Math.Sign(withoutPain.BiasAdjustedScore), Math.Sign(withPain.BiasAdjustedScore));
 		Assert.True(Math.Abs(withPain.BiasAdjustedScore) > Math.Abs(withoutPain.BiasAdjustedScore));
 	}
 }

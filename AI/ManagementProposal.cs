@@ -45,7 +45,7 @@ internal sealed record ManagementProposal(
 	IReadOnlyList<ProposalLeg> Legs,
 	decimal NetDebit,
 	string Rationale,
-    RiskDiagnostic? Diagnostic = null,
+	RiskDiagnostic? Diagnostic = null,
 	bool CashReserveBlocked = false,
 	string? CashReserveDetail = null
 );

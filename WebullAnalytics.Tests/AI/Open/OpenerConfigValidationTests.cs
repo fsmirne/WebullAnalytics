@@ -7,7 +7,11 @@ public class OpenerConfigValidationTests
 {
 	private static AIConfig MinimalValidConfig() => new()
 	{
-		Tickers = new() { "GME" }
+		Tickers = new() { "GME" },
+		Opener = new OpenerConfig
+		{
+			StrikeSteps = new() { ["GME"] = 0.50m }
+		}
 	};
 
 	[Fact]
@@ -64,5 +68,53 @@ public class OpenerConfigValidationTests
 		var cfg = MinimalValidConfig();
 		cfg.Opener.MaxPainWeight = -0.1m;
 		Assert.Contains("opener.maxPainWeight", AIConfigLoader.Validate(cfg) ?? "");
+	}
+
+	[Fact]
+	public void TickerStrikeStepsMustBePositive()
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Opener.StrikeSteps["GME"] = 0m;
+		Assert.Contains("opener.strikeSteps.GME", AIConfigLoader.Validate(cfg) ?? "");
+	}
+
+	[Fact]
+	public void TickerStrikeStepsMustExistForAllConfiguredTickers()
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Tickers.Add("SPY");
+		Assert.Contains("opener.strikeSteps.SPY", AIConfigLoader.Validate(cfg) ?? "");
+	}
+
+	[Fact]
+	public void DoubleCalendarWidthStepsMustBePresent()
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Opener.Structures.DoubleCalendar.WidthSteps.Clear();
+		Assert.Contains("doubleCalendar.widthSteps", AIConfigLoader.Validate(cfg) ?? "");
+	}
+
+	[Fact]
+	public void IronButterflyWingStepsMustBePresent()
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Opener.Structures.IronButterfly.WingSteps.Clear();
+		Assert.Contains("ironButterfly.wingSteps", AIConfigLoader.Validate(cfg) ?? "");
+	}
+
+	[Fact]
+	public void IronCondorWidthStepsMustBePresent()
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Opener.Structures.IronCondor.WidthSteps.Clear();
+		Assert.Contains("ironCondor.widthSteps", AIConfigLoader.Validate(cfg) ?? "");
+	}
+
+	[Fact]
+	public void DoubleDiagonalLongWingStepsMustBePresent()
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Opener.Structures.DoubleDiagonal.LongWingSteps.Clear();
+		Assert.Contains("doubleDiagonal.longWingSteps", AIConfigLoader.Validate(cfg) ?? "");
 	}
 }

@@ -10,12 +10,12 @@ public class WebullOpenApiClientPreviewResultTests
 	public void TryGetMarginSummary_ReadsTopLevelMarginFields()
 	{
 		const string json = """
-        {
-          "estimated_cost": "-75.32",
-          "estimated_transaction_fee": "1.25",
-          "margin_requirement": "26900"
-        }
-        """;
+		{
+			"estimated_cost": "-75.32",
+			"estimated_transaction_fee": "1.25",
+			"margin_requirement": "26900"
+		}
+		""";
 
 		var preview = JsonSerializer.Deserialize<WebullOpenApiClient.PreviewResult>(json)!;
 
@@ -28,14 +28,14 @@ public class WebullOpenApiClientPreviewResultTests
 	public void TryGetMarginSummary_ReadsNestedBuyingPowerFields()
 	{
 		const string json = """
-        {
-          "estimated_cost": "-75.32",
-          "estimated_transaction_fee": "1.25",
-          "risk": {
-            "buying_power_effect": "-125.5"
-          }
-        }
-        """;
+		{
+			"estimated_cost": "-75.32",
+			"estimated_transaction_fee": "1.25",
+			"risk": {
+			"buying_power_effect": "-125.5"
+			}
+		}
+		""";
 
 		var preview = JsonSerializer.Deserialize<WebullOpenApiClient.PreviewResult>(json)!;
 
@@ -48,11 +48,11 @@ public class WebullOpenApiClientPreviewResultTests
 	public void TryGetMarginSummary_ReturnsNullWhenMarginFieldsAbsent()
 	{
 		const string json = """
-        {
-          "estimated_cost": "-75.32",
-          "estimated_transaction_fee": "1.25"
-        }
-        """;
+		{
+			"estimated_cost": "-75.32",
+			"estimated_transaction_fee": "1.25"
+		}
+		""";
 
 		var preview = JsonSerializer.Deserialize<WebullOpenApiClient.PreviewResult>(json)!;
 

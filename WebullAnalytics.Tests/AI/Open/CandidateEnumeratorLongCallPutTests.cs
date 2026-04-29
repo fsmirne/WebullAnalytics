@@ -7,7 +7,7 @@ public class CandidateEnumeratorLongCallPutTests
 {
 	private static OpenerConfig Cfg() => new()
 	{
-		StrikeStep = 1.0m,
+		StrikeSteps = new() { ["SPY"] = 1.0m },
 		IvDefaultPct = 40m,
 		Structures = new OpenerStructuresConfig
 		{

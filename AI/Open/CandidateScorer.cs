@@ -183,6 +183,7 @@ internal static class CandidateScorer
 		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode),
 		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode),
 		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode),
+		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode),
 		_ => null
 	};
 
@@ -229,7 +230,7 @@ internal static class CandidateScorer
 			return null;
 
 		var targetYears = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
-		var expectedMove = Math.Max(cfg.StrikeStep, spot * targetIv * (decimal)Math.Sqrt(targetYears));
+		var expectedMove = Math.Max(cfg.StrikeStepFor(skel.Ticker), spot * targetIv * (decimal)Math.Sqrt(targetYears));
 		var signal = ComputeMaxPainSignal(skel, spot, maxPain.Value, expectedMove, breakevens);
 		return Math.Max(0.10m, 1m + cfg.MaxPainWeight * signal);
 	}
@@ -241,19 +242,46 @@ internal static class CandidateScorer
 		if (fit != 0)
 			return Math.Clamp(((maxPain - spot) / scale) * fit, -1m, 1m);
 
-		var shortLeg = skel.Legs.FirstOrDefault(l => l.Action == "sell");
-		var shortParsed = shortLeg != null ? ParsingHelpers.ParseOptionSymbol(shortLeg.Symbol) : null;
-		if (shortParsed == null)
+	 var shortStrikes = skel.Legs
+			.Where(l => l.Action == "sell")
+			.Select(l => ParsingHelpers.ParseOptionSymbol(l.Symbol))
+			.Where(p => p != null)
+			.Select(p => p!.Strike)
+			.OrderBy(s => s)
+			.ToList();
+		if (shortStrikes.Count == 0)
 			return 0m;
 
-		var pinSignal = 1m - 2m * Math.Clamp(Math.Abs(shortParsed.Strike - maxPain) / scale, 0m, 1m);
-		var sideSignal = SameSideOfSpotSignal(shortParsed.Strike - spot, maxPain - spot);
+		var pinSignal = ShortStrikeRangeSignal(shortStrikes, maxPain, scale);
+		var sideSignal = ShortStrikeSideSignal(shortStrikes, spot, maxPain);
 		var beSignal = BreakevenBandSignal(maxPain, scale, breakevens);
 
 		if (breakevens != null && breakevens.Count >= 2)
 			return Math.Clamp(0.45m * beSignal + 0.35m * sideSignal + 0.20m * pinSignal, -1m, 1m);
 
 		return Math.Clamp(0.65m * sideSignal + 0.35m * pinSignal, -1m, 1m);
+	}
+
+	private static decimal ShortStrikeRangeSignal(IReadOnlyList<decimal> shortStrikes, decimal maxPain, decimal scale)
+	{
+		var lower = shortStrikes.Min();
+		var upper = shortStrikes.Max();
+		if (maxPain >= lower && maxPain <= upper)
+			return 1m;
+
+		var distance = maxPain < lower ? lower - maxPain : maxPain - upper;
+		return 1m - 2m * Math.Clamp(distance / scale, 0m, 1m);
+	}
+
+	private static decimal ShortStrikeSideSignal(IReadOnlyList<decimal> shortStrikes, decimal spot, decimal maxPain)
+	{
+		var lower = shortStrikes.Min();
+		var upper = shortStrikes.Max();
+		if (maxPain >= lower && maxPain <= upper)
+			return 1m;
+
+		var anchor = (lower + upper) / 2m;
+		return SameSideOfSpotSignal(anchor - spot, maxPain - spot);
 	}
 
 	private static decimal SameSideOfSpotSignal(decimal shortOffset, decimal painOffset)
@@ -490,10 +518,11 @@ internal static class CandidateScorer
 
 	private static int VolatilityFitSign(OpenStructureKind kind) => kind switch
 	{
-		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => 1,
-		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.LongCall or OpenStructureKind.LongPut => -1,
+		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => 1,
+		OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal or OpenStructureKind.LongCall or OpenStructureKind.LongPut => -1,
 		_ => 0,
 	};
+	private readonly record struct MultiLegDefinition(ProposalLeg Proposal, OptionParsed Parsed, bool IsLong, decimal Iv);
 
 	/// <summary>Returns a copy of <paramref name="legs"/> with PricePerShare set to the midpoint
 	/// for default suggestions and ExecutionPricePerShare set to conservative bid/ask fills.
@@ -611,6 +640,179 @@ internal static class CandidateScorer
 			var longPayoff = Math.Max(0m, longStrike - sT) * 100m;
 			return creditPerContract - shortPayoff + longPayoff;
 		}
+	}
+
+	private static decimal NetEntryPerContract(IReadOnlyList<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, string pricingMode)
+	{
+		decimal netPerShare = 0m;
+		foreach (var leg in legs)
+		{
+			var q = TryLiveBidAsk(leg.Symbol, quotes);
+			if (q == null) return 0m;
+			var mid = (q.Value.bid + q.Value.ask) / 2m;
+			var price = leg.Action == "buy" ? PriceForBuy(mid, q.Value.ask, pricingMode) : PriceForSell(mid, q.Value.bid, pricingMode);
+			netPerShare += leg.Action == "buy" ? -price * leg.Qty : price * leg.Qty;
+		}
+		return netPerShare * 100m;
+	}
+
+	private static decimal OptionValueAtTarget(decimal spotAtTarget, DateTime targetExpiry, OptionParsed parsed, decimal iv)
+	{
+		if (parsed.ExpiryDate.Date <= targetExpiry.Date)
+			return parsed.CallPut == "C" ? Math.Max(0m, spotAtTarget - parsed.Strike) : Math.Max(0m, parsed.Strike - spotAtTarget);
+
+		var years = Math.Max(1, (parsed.ExpiryDate.Date - targetExpiry.Date).Days) / 365.0;
+		return OptionMath.BlackScholes(spotAtTarget, parsed.Strike, years, OptionMath.RiskFreeRate, iv, parsed.CallPut);
+	}
+
+	private static decimal PositionValueAtTarget(decimal spotAtTarget, DateTime targetExpiry, IReadOnlyList<MultiLegDefinition> legs)
+	{
+		decimal total = 0m;
+		foreach (var leg in legs)
+		{
+			var valuePerShare = OptionValueAtTarget(spotAtTarget, targetExpiry, leg.Parsed, leg.Iv);
+			var signed = leg.IsLong ? valuePerShare : -valuePerShare;
+			total += signed * leg.Proposal.Qty * 100m;
+		}
+		return total;
+	}
+
+	private static (decimal lower, decimal upper) GetScanRange(decimal spot, IReadOnlyList<MultiLegDefinition> legs, decimal step)
+	{
+		var minStrike = legs.Min(l => l.Parsed.Strike);
+		var maxStrike = legs.Max(l => l.Parsed.Strike);
+		var lower = Math.Max(0.01m, Math.Min(spot * 0.40m, minStrike - 4m * step));
+		var upper = Math.Max(spot * 1.60m, maxStrike + 4m * step);
+		return (lower, upper);
+	}
+
+	private static IReadOnlyList<decimal> FindBreakevens(Func<decimal, decimal> pnl, decimal lower, decimal upper, int steps = 240)
+	{
+		var roots = new List<decimal>();
+		var stepSize = (upper - lower) / steps;
+		var sPrev = lower;
+		var pnlPrev = pnl(sPrev);
+		for (var i = 1; i <= steps; i++)
+		{
+			var sNext = lower + stepSize * i;
+			var pnlNext = pnl(sNext);
+			if ((pnlPrev < 0m && pnlNext >= 0m) || (pnlPrev >= 0m && pnlNext < 0m))
+				roots.Add(BisectBreakeven(pnl, sPrev, sNext));
+			sPrev = sNext;
+			pnlPrev = pnlNext;
+		}
+		return roots;
+	}
+
+	private static decimal ProbabilityBetween(decimal spot, decimal? lower, decimal? upper, double years, decimal ivAnnual)
+	{
+		if (lower.HasValue && upper.HasValue)
+			return LogNormalProbability(Direction.Above, spot, lower.Value, years, (double)ivAnnual) - LogNormalProbability(Direction.Above, spot, upper.Value, years, (double)ivAnnual);
+		if (lower.HasValue)
+			return LogNormalProbability(Direction.Above, spot, lower.Value, years, (double)ivAnnual);
+		if (upper.HasValue)
+			return LogNormalProbability(Direction.Below, spot, upper.Value, years, (double)ivAnnual);
+		return 1m;
+	}
+
+	private static decimal ComputeProbabilityOfProfit(Func<decimal, decimal> pnl, IReadOnlyList<decimal> breakevens, decimal spot, double years, decimal ivAnnual)
+	{
+		decimal pop = 0m;
+		for (var i = 0; i <= breakevens.Count; i++)
+		{
+			decimal? lower = i == 0 ? null : breakevens[i - 1];
+			decimal? upper = i == breakevens.Count ? null : breakevens[i];
+			var sample = lower.HasValue && upper.HasValue
+				? (lower.Value + upper.Value) / 2m
+				: lower.HasValue
+					? Math.Max(lower.Value + 1m, lower.Value * 1.50m)
+					: upper.HasValue
+						? Math.Max(0.01m, upper.Value / 2m)
+						: spot;
+			if (pnl(sample) > 0m)
+				pop += ProbabilityBetween(spot, lower, upper, years, ivAnnual);
+		}
+		return Math.Clamp(pop, 0m, 1m);
+	}
+
+	private static (decimal maxProfit, decimal maxLoss) ScanPnlRange(Func<decimal, decimal> pnl, decimal lower, decimal upper, int steps = 360)
+	{
+		var stepSize = (upper - lower) / steps;
+		var maxProfit = decimal.MinValue;
+		var maxLoss = decimal.MaxValue;
+		for (var i = 0; i <= steps; i++)
+		{
+			var s = lower + stepSize * i;
+			var value = pnl(s);
+			if (value > maxProfit) maxProfit = value;
+			if (value < maxLoss) maxLoss = value;
+		}
+		return (maxProfit, maxLoss);
+	}
+
+	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid)
+	{
+		var defs = new List<MultiLegDefinition>(skel.Legs.Count);
+		foreach (var leg in skel.Legs)
+		{
+			var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
+			if (parsed == null) return null;
+			if (TryLiveBidAsk(leg.Symbol, quotes) == null) return null;
+			defs.Add(new MultiLegDefinition(leg, parsed, leg.Action == "buy", ResolveIv(leg.Symbol, quotes, cfg.IvDefaultPct)));
+		}
+
+		var netEntryPerContract = NetEntryPerContract(skel.Legs, quotes, pricingMode);
+		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
+		var years = daysToTarget / 365.0;
+		var targetLegs = defs.Where(l => l.Parsed.ExpiryDate.Date == skel.TargetExpiry.Date).ToList();
+		var representativeIv = (targetLegs.Count > 0 ? targetLegs : defs).Average(l => l.Iv);
+		var pnl = (decimal sT) => PositionValueAtTarget(sT, skel.TargetExpiry.Date, defs) + netEntryPerContract;
+		var (scanLower, scanUpper) = GetScanRange(spot, defs, cfg.StrikeStepFor(skel.Ticker));
+		var breakevens = FindBreakevens(pnl, scanLower, scanUpper);
+		var pop = ComputeProbabilityOfProfit(pnl, breakevens, spot, years, representativeIv);
+		var grid = BuildScenarioGrid(spot, representativeIv, years, cfg.ScenarioGridSigma);
+		decimal ev = 0m;
+		foreach (var pt in grid)
+			ev += pt.Weight * pnl(pt.SpotAtExpiry);
+		var (maxProfit, maxLoss) = ScanPnlRange(pnl, scanLower, scanUpper);
+		var capitalAtRisk = Math.Abs(Math.Min(0m, maxLoss));
+		if (capitalAtRisk <= 0m) return null;
+		var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
+		var fit = DirectionalFit.SignFor(skel.StructureKind);
+		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(defs.Select(d => (d.Parsed, d.Iv, d.IsLong)), asOf, spot);
+		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
+		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
+		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
+		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, representativeIv, maxPain, cfg, breakevens);
+		var biasAdj = MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor);
+		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
+
+		return new OpenProposal(
+			Ticker: skel.Ticker,
+			StructureKind: skel.StructureKind,
+			Legs: PriceLegs(skel.Legs, quotes),
+			Qty: 1,
+			DebitOrCreditPerContract: netEntryPerContract,
+			MaxProfitPerContract: maxProfit,
+			MaxLossPerContract: maxLoss,
+			CapitalAtRiskPerContract: capitalAtRisk,
+			Breakevens: breakevens,
+			ProbabilityOfProfit: pop,
+			ExpectedValuePerContract: ev,
+			DaysToTarget: daysToTarget,
+			RawScore: rawScore,
+			BiasAdjustedScore: biasAdj,
+			DirectionalFit: fit,
+			Rationale: "",
+			Fingerprint: fp,
+			PremiumRatio: premiumRatio,
+			ImpliedVolatilityAnnual: representativeIv,
+			HistoricalVolatilityAnnual: historicalVolAnnual,
+			VolatilityAdjustmentFactor: volFactor,
+			TargetExpiryMaxPain: maxPain,
+			MaxPainAdjustmentFactor: maxPainFactor,
+			ThetaPerDayPerContract: thetaPerDayPerContract);
 	}
 
 	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid)

@@ -15,8 +15,24 @@ internal static class CandidateEnumerator
 			foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongCalendar, OpenStructureKind.LongCalendar, availableExpirations))
 				yield return sk;
 
+		if (cfg.Structures.DoubleCalendar.Enabled)
+			foreach (var sk in EnumerateDoubleCalendars(ticker, spot, asOf, cfg, availableExpirations))
+				yield return sk;
+
 		if (cfg.Structures.LongDiagonal.Enabled)
 			foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongDiagonal, OpenStructureKind.LongDiagonal, availableExpirations))
+				yield return sk;
+
+		if (cfg.Structures.DoubleDiagonal.Enabled)
+			foreach (var sk in EnumerateDoubleDiagonals(ticker, spot, asOf, cfg, availableExpirations))
+				yield return sk;
+
+		if (cfg.Structures.IronButterfly.Enabled)
+			foreach (var sk in EnumerateIronButterflies(ticker, spot, asOf, cfg, availableExpirations))
+				yield return sk;
+
+		if (cfg.Structures.IronCondor.Enabled)
+			foreach (var sk in EnumerateIronCondors(ticker, spot, asOf, cfg, availableExpirations))
 				yield return sk;
 
 		if (cfg.Structures.ShortVertical.Enabled)
@@ -55,7 +71,7 @@ internal static class CandidateEnumerator
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
-		var step = cfg.StrikeStep;
+		var step = cfg.StrikeStepFor(ticker);
 		foreach (var shortStrike in StrikeGrid(spot, step))
 		{
 			// Skip strikes that are ITM by more than one step on either side (bad entry for a debit calendar).
@@ -116,6 +132,199 @@ internal static class CandidateEnumerator
 		return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: shortExp);
 	}
 
+	private static IEnumerable<CandidateSkeleton> EnumerateDoubleCalendars(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	{
+		var sCfg = cfg.Structures.DoubleCalendar;
+		var shortExps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
+		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
+		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
+
+		var step = cfg.StrikeStepFor(ticker);
+		var strikes = StrikeGrid(spot, step);
+		foreach (var shortExp in shortExps)
+			foreach (var longExp in longExps)
+			{
+				if (longExp <= shortExp) continue;
+
+				foreach (var widthSteps in sCfg.WidthSteps.Distinct().OrderBy(w => w))
+				{
+					var width = widthSteps * step;
+					foreach (var lowerStrike in strikes)
+					{
+						var upperStrike = lowerStrike + width;
+						if (upperStrike <= lowerStrike) continue;
+						if (spot < lowerStrike || spot > upperStrike) continue;
+						yield return BuildDoubleCalendar(ticker, shortExp, longExp, lowerStrike, upperStrike);
+					}
+				}
+			}
+	}
+
+	private static CandidateSkeleton BuildDoubleCalendar(string ticker, DateTime shortExp, DateTime longExp, decimal putStrike, decimal callStrike)
+	{
+		var shortPut = MatchKeys.OccSymbol(ticker, shortExp, putStrike, "P");
+		var longPut = MatchKeys.OccSymbol(ticker, longExp, putStrike, "P");
+		var shortCall = MatchKeys.OccSymbol(ticker, shortExp, callStrike, "C");
+		var longCall = MatchKeys.OccSymbol(ticker, longExp, callStrike, "C");
+		var legs = new[]
+		{
+			new ProposalLeg("sell", shortPut, 1),
+			new ProposalLeg("buy", longPut, 1),
+			new ProposalLeg("sell", shortCall, 1),
+			new ProposalLeg("buy", longCall, 1)
+		};
+		return new CandidateSkeleton(ticker, OpenStructureKind.DoubleCalendar, legs, TargetExpiry: shortExp);
+	}
+
+	private static IEnumerable<CandidateSkeleton> EnumerateDoubleDiagonals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	{
+		var sCfg = cfg.Structures.DoubleDiagonal;
+		var shortExps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
+		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
+		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
+
+		var step = cfg.StrikeStepFor(ticker);
+		var strikes = StrikeGrid(spot, step);
+		foreach (var shortExp in shortExps)
+			foreach (var longExp in longExps)
+			{
+				if (longExp <= shortExp) continue;
+
+				foreach (var widthSteps in sCfg.WidthSteps.Distinct().OrderBy(w => w))
+					foreach (var longWingSteps in sCfg.LongWingSteps.Distinct().OrderBy(w => w))
+					{
+						var width = widthSteps * step;
+						var wing = longWingSteps * step;
+						foreach (var lowerShortStrike in strikes)
+						{
+							var upperShortStrike = lowerShortStrike + width;
+							if (upperShortStrike <= lowerShortStrike) continue;
+							if (spot < lowerShortStrike || spot > upperShortStrike) continue;
+
+							var lowerLongStrike = lowerShortStrike - wing;
+							var upperLongStrike = upperShortStrike + wing;
+							if (lowerLongStrike <= 0m) continue;
+
+							yield return BuildDoubleDiagonal(ticker, shortExp, longExp, lowerShortStrike, lowerLongStrike, upperShortStrike, upperLongStrike);
+						}
+					}
+			}
+	}
+
+	private static CandidateSkeleton BuildDoubleDiagonal(string ticker, DateTime shortExp, DateTime longExp, decimal putShortStrike, decimal putLongStrike, decimal callShortStrike, decimal callLongStrike)
+	{
+		var shortPut = MatchKeys.OccSymbol(ticker, shortExp, putShortStrike, "P");
+		var longPut = MatchKeys.OccSymbol(ticker, longExp, putLongStrike, "P");
+		var shortCall = MatchKeys.OccSymbol(ticker, shortExp, callShortStrike, "C");
+		var longCall = MatchKeys.OccSymbol(ticker, longExp, callLongStrike, "C");
+		var legs = new[]
+		{
+			new ProposalLeg("sell", shortPut, 1),
+			new ProposalLeg("buy", longPut, 1),
+			new ProposalLeg("sell", shortCall, 1),
+			new ProposalLeg("buy", longCall, 1)
+		};
+		return new CandidateSkeleton(ticker, OpenStructureKind.DoubleDiagonal, legs, TargetExpiry: shortExp);
+	}
+
+	private static IEnumerable<CandidateSkeleton> EnumerateIronButterflies(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	{
+		var sCfg = cfg.Structures.IronButterfly;
+		var exps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
+		if (exps.Count == 0) yield break;
+
+		var step = cfg.StrikeStepFor(ticker);
+		var bodyStrikes = StrikeGrid(spot, step);
+		foreach (var exp in exps)
+			foreach (var bodyStrike in bodyStrikes)
+				foreach (var wingSteps in sCfg.WingSteps.Distinct().OrderBy(w => w))
+				{
+					var putWing = bodyStrike - wingSteps * step;
+					var callWing = bodyStrike + wingSteps * step;
+					if (putWing <= 0m) continue;
+					yield return BuildIronButterfly(ticker, exp, putWing, bodyStrike, callWing);
+				}
+	}
+
+	private static CandidateSkeleton BuildIronButterfly(string ticker, DateTime exp, decimal putWingStrike, decimal bodyStrike, decimal callWingStrike)
+	{
+		var longPut = MatchKeys.OccSymbol(ticker, exp, putWingStrike, "P");
+		var shortPut = MatchKeys.OccSymbol(ticker, exp, bodyStrike, "P");
+		var shortCall = MatchKeys.OccSymbol(ticker, exp, bodyStrike, "C");
+		var longCall = MatchKeys.OccSymbol(ticker, exp, callWingStrike, "C");
+		var legs = new[]
+		{
+			new ProposalLeg("buy", longPut, 1),
+			new ProposalLeg("sell", shortPut, 1),
+			new ProposalLeg("sell", shortCall, 1),
+			new ProposalLeg("buy", longCall, 1)
+		};
+		return new CandidateSkeleton(ticker, OpenStructureKind.IronButterfly, legs, TargetExpiry: exp);
+	}
+
+	private static IEnumerable<CandidateSkeleton> EnumerateIronCondors(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	{
+		var sCfg = cfg.Structures.IronCondor;
+		var exps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
+		if (exps.Count == 0) yield break;
+
+		var iv = cfg.IvDefaultPct / 100m;
+		var step = cfg.StrikeStepFor(ticker);
+
+		foreach (var exp in exps)
+		{
+			var years = Math.Max(1, (exp.Date - asOf.Date).Days) / 365.0;
+			var putShorts = StrikesBelowSpot(spot, step, count: 8)
+				.Where(shortStrike =>
+				{
+					var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "P"));
+					return delta >= sCfg.ShortDeltaMin && delta <= sCfg.ShortDeltaMax;
+				})
+				.ToList();
+			var callShorts = StrikesAboveSpot(spot, step, count: 8)
+				.Where(shortStrike =>
+				{
+					var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "C"));
+					return delta >= sCfg.ShortDeltaMin && delta <= sCfg.ShortDeltaMax;
+				})
+				.ToList();
+
+			foreach (var putShortStrike in putShorts)
+				foreach (var callShortStrike in callShorts)
+				{
+					var bodyWidth = callShortStrike - putShortStrike;
+					var bodyWidthSteps = bodyWidth / step;
+					if (callShortStrike <= putShortStrike) continue;
+					if (bodyWidthSteps != decimal.Truncate(bodyWidthSteps)) continue;
+					if (!sCfg.BodyWidthSteps.Contains((int)bodyWidthSteps)) continue;
+
+					foreach (var widthSteps in sCfg.WidthSteps.Distinct().OrderBy(w => w))
+					{
+						var putLongStrike = putShortStrike - widthSteps * step;
+						var callLongStrike = callShortStrike + widthSteps * step;
+						if (putLongStrike <= 0m) continue;
+						yield return BuildIronCondor(ticker, exp, putLongStrike, putShortStrike, callShortStrike, callLongStrike);
+					}
+				}
+		}
+	}
+
+	private static CandidateSkeleton BuildIronCondor(string ticker, DateTime exp, decimal putLongStrike, decimal putShortStrike, decimal callShortStrike, decimal callLongStrike)
+	{
+		var longPut = MatchKeys.OccSymbol(ticker, exp, putLongStrike, "P");
+		var shortPut = MatchKeys.OccSymbol(ticker, exp, putShortStrike, "P");
+		var shortCall = MatchKeys.OccSymbol(ticker, exp, callShortStrike, "C");
+		var longCall = MatchKeys.OccSymbol(ticker, exp, callLongStrike, "C");
+		var legs = new[]
+		{
+			new ProposalLeg("buy", longPut, 1),
+			new ProposalLeg("sell", shortPut, 1),
+			new ProposalLeg("sell", shortCall, 1),
+			new ProposalLeg("buy", longCall, 1)
+		};
+		return new CandidateSkeleton(ticker, OpenStructureKind.IronCondor, legs, TargetExpiry: exp);
+	}
+
 	private static IEnumerable<CandidateSkeleton> EnumerateShortVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
 	{
 		var sCfg = cfg.Structures.ShortVertical;
@@ -123,7 +332,7 @@ internal static class CandidateEnumerator
 		if (exps.Count == 0) yield break;
 
 		var iv = cfg.IvDefaultPct / 100m;
-		var step = cfg.StrikeStep;
+		var step = cfg.StrikeStepFor(ticker);
 
 		foreach (var exp in exps)
 		{
@@ -198,7 +407,7 @@ internal static class CandidateEnumerator
 		if (exps.Count == 0) yield break;
 
 		var iv = cfg.IvDefaultPct / 100m;
-		var step = cfg.StrikeStep;
+		var step = cfg.StrikeStepFor(ticker);
 
 		foreach (var exp in exps)
 		{

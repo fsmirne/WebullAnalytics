@@ -219,7 +219,7 @@ public class RiskDiagnosticRendererTests
 		var text = Render(diagnostic);
 		Assert.Contains("Score:", text);
 		Assert.Contains("Factors:", text);
-        Assert.Contains("theta/day", text);
+		Assert.Contains("theta/day", text);
 		Assert.DoesNotContain("Theta/day:", text);
 		Assert.DoesNotContain("Factors: × factors", text);
 		Assert.DoesNotContain("Factors: factors:", text);

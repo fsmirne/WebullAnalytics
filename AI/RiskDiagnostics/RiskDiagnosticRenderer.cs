@@ -74,8 +74,8 @@ internal static class RiskDiagnosticRenderer
 					if (sections.Length > 0)
 						items.Add(("Rationale:", Markup.Escape(sections[0])));
 
-                    if (sections.Length > 1)
-                        items.Add(("Score:", Markup.Escape(sections[1])));
+					if (sections.Length > 1)
+						items.Add(("Score:", Markup.Escape(sections[1])));
 
 					if (sections.Length > 2)
 						items.Add(("Factors:", Markup.Escape(sections[2])));
@@ -125,7 +125,9 @@ internal static class RiskDiagnosticRenderer
 
 	private static bool RequiresMargin(string structure) =>
 		structure.Equals(nameof(OpenStructureKind.ShortPutVertical), StringComparison.OrdinalIgnoreCase)
-		|| structure.Equals(nameof(OpenStructureKind.ShortCallVertical), StringComparison.OrdinalIgnoreCase);
+		|| structure.Equals(nameof(OpenStructureKind.ShortCallVertical), StringComparison.OrdinalIgnoreCase)
+		|| structure.Equals(nameof(OpenStructureKind.IronButterfly), StringComparison.OrdinalIgnoreCase)
+		|| structure.Equals(nameof(OpenStructureKind.IronCondor), StringComparison.OrdinalIgnoreCase);
 
 	private static string CapProbeLabel(string label)
 	{
