@@ -21,7 +21,7 @@ internal sealed record RiskDiagnostic(
 	decimal? CostBasisPerShare,
 	decimal? CurrentValuePerShare,
 	decimal? UnrealizedPnlPerShare,
-  IReadOnlyList<RiskRuleHit> Rules,
+	IReadOnlyList<RiskRuleHit> Rules,
 	RiskDiagnosticProbe? Probe = null);
 
 internal sealed record RiskDiagnosticProbe(

@@ -1,4 +1,5 @@
 using WebullAnalytics.AI;
+using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Sources;
 using Xunit;
 
@@ -113,6 +114,17 @@ public class OpenCandidateEvaluatorTests
 	}
 
 	[Fact]
+	public void RankForOutputTreatsDoubleDiagonalAsCalendarLike()
+	{
+		var near = MakeProposal(OpenStructureKind.DoubleDiagonal, daysToTarget: 4, score: 0.40m, fingerprint: "near", thetaPerDayPerContract: 4.00m);
+		var far = MakeProposal(OpenStructureKind.DoubleDiagonal, daysToTarget: 11, score: 1.00m, fingerprint: "far", thetaPerDayPerContract: 1.00m);
+
+		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { far, near });
+
+		Assert.Equal(new[] { "near", "far" }, ranked.Select(p => p.Fingerprint).ToArray());
+	}
+
+	[Fact]
 	public void RankForOutputStillUsesScoreWhenCalendarThetaIsComparable()
 	{
 		var currentWeek = MakeProposal(OpenStructureKind.LongDiagonal, daysToTarget: 4, score: 1.00m, fingerprint: "near", thetaPerDayPerContract: 1.00m);
@@ -124,6 +136,17 @@ public class OpenCandidateEvaluatorTests
 	}
 
 	[Fact]
+	public void RankForOutputTreatsDoubleCalendarAsCalendarLike()
+	{
+		var near = MakeProposal(OpenStructureKind.DoubleCalendar, daysToTarget: 4, score: 0.40m, fingerprint: "near", thetaPerDayPerContract: 4.00m);
+		var far = MakeProposal(OpenStructureKind.DoubleCalendar, daysToTarget: 11, score: 1.00m, fingerprint: "far", thetaPerDayPerContract: 1.00m);
+
+		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { far, near });
+
+		Assert.Equal(new[] { "near", "far" }, ranked.Select(p => p.Fingerprint).ToArray());
+	}
+
+	[Fact]
 	public void RankForOutputPrefersHigherVerticalThetaPerDay()
 	{
 		var highTheta = MakeProposal(OpenStructureKind.ShortPutVertical, daysToTarget: 4, score: 0.40m, fingerprint: "high-theta", thetaPerDayPerContract: 3.00m);
@@ -132,6 +155,106 @@ public class OpenCandidateEvaluatorTests
 		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { highScore, highTheta });
 
 		Assert.Equal(new[] { "high-theta", "high-score" }, ranked.Select(p => p.Fingerprint).ToArray());
+	}
+
+	[Fact]
+	public void ExpandExecutableProposalsSplitsDoubleCalendarIntoTwoCalendars()
+	{
+		var shortExp = new DateTime(2026, 4, 24);
+		var longExp = new DateTime(2026, 5, 15);
+		var shortPut = MatchKeys.OccSymbol("SPY", shortExp, 495m, "P");
+		var longPut = MatchKeys.OccSymbol("SPY", longExp, 495m, "P");
+		var shortCall = MatchKeys.OccSymbol("SPY", shortExp, 505m, "C");
+		var longCall = MatchKeys.OccSymbol("SPY", longExp, 505m, "C");
+		var proposal = new OpenProposal(
+			Ticker: "SPY",
+			StructureKind: OpenStructureKind.DoubleCalendar,
+			Legs: new[]
+			{
+				new ProposalLeg("sell", shortPut, 2, 1.00m, 0.95m),
+				new ProposalLeg("buy", longPut, 2, 1.50m, 1.55m),
+				new ProposalLeg("sell", shortCall, 2, 1.00m, 0.95m),
+				new ProposalLeg("buy", longCall, 2, 1.50m, 1.55m)
+			},
+			Qty: 2,
+			DebitOrCreditPerContract: -100m,
+			MaxProfitPerContract: 50m,
+			MaxLossPerContract: -100m,
+			CapitalAtRiskPerContract: 100m,
+			Breakevens: new[] { 495m, 505m },
+			ProbabilityOfProfit: 0.40m,
+			ExpectedValuePerContract: 10m,
+			DaysToTarget: 4,
+			RawScore: 0.10m,
+			BiasAdjustedScore: 0.10m,
+			DirectionalFit: 0,
+			Rationale: "double calendar",
+			Fingerprint: "dc",
+			ThetaPerDayPerContract: 2m);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortPut] = TestQuote.Q(0.95m, 1.05m, 0.40m),
+			[longPut] = TestQuote.Q(1.45m, 1.55m, 0.40m),
+			[shortCall] = TestQuote.Q(0.95m, 1.05m, 0.40m),
+			[longCall] = TestQuote.Q(1.45m, 1.55m, 0.40m)
+		};
+
+		var expanded = OpenCandidateEvaluator.ExpandExecutableProposals(proposal, 500m, new DateTime(2026, 4, 20), quotes, 0m, new OpenerConfig(), null, SuggestionPricing.Mid);
+
+		Assert.Equal(2, expanded.Count);
+		Assert.All(expanded, p => Assert.Equal(OpenStructureKind.LongCalendar, p.StructureKind));
+		Assert.All(expanded, p => Assert.Equal(2, p.Qty));
+		Assert.All(expanded, p => Assert.Equal(2, p.Legs.Count));
+	}
+
+	[Fact]
+	public void ExpandExecutableProposalsSplitsDoubleDiagonalIntoTwoDiagonals()
+	{
+		var shortExp = new DateTime(2026, 4, 24);
+		var longExp = new DateTime(2026, 5, 15);
+		var shortPut = MatchKeys.OccSymbol("SPY", shortExp, 495m, "P");
+		var longPut = MatchKeys.OccSymbol("SPY", longExp, 494m, "P");
+		var shortCall = MatchKeys.OccSymbol("SPY", shortExp, 505m, "C");
+		var longCall = MatchKeys.OccSymbol("SPY", longExp, 506m, "C");
+		var proposal = new OpenProposal(
+			Ticker: "SPY",
+			StructureKind: OpenStructureKind.DoubleDiagonal,
+			Legs: new[]
+			{
+				new ProposalLeg("sell", shortPut, 1, 1.00m, 0.95m),
+				new ProposalLeg("buy", longPut, 1, 1.60m, 1.65m),
+				new ProposalLeg("sell", shortCall, 1, 1.00m, 0.95m),
+				new ProposalLeg("buy", longCall, 1, 1.60m, 1.65m)
+			},
+			Qty: 1,
+			DebitOrCreditPerContract: -120m,
+			MaxProfitPerContract: 80m,
+			MaxLossPerContract: -120m,
+			CapitalAtRiskPerContract: 120m,
+			Breakevens: new[] { 495m, 505m },
+			ProbabilityOfProfit: 0.35m,
+			ExpectedValuePerContract: 8m,
+			DaysToTarget: 4,
+			RawScore: 0.06m,
+			BiasAdjustedScore: 0.06m,
+			DirectionalFit: 0,
+			Rationale: "double diagonal",
+			Fingerprint: "dd",
+			ThetaPerDayPerContract: 1m);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortPut] = TestQuote.Q(0.95m, 1.05m, 0.40m),
+			[longPut] = TestQuote.Q(1.55m, 1.65m, 0.40m),
+			[shortCall] = TestQuote.Q(0.95m, 1.05m, 0.40m),
+			[longCall] = TestQuote.Q(1.55m, 1.65m, 0.40m)
+		};
+
+		var expanded = OpenCandidateEvaluator.ExpandExecutableProposals(proposal, 500m, new DateTime(2026, 4, 20), quotes, 0m, new OpenerConfig(), null, SuggestionPricing.Mid);
+
+		Assert.Equal(2, expanded.Count);
+		Assert.All(expanded, p => Assert.Equal(OpenStructureKind.LongDiagonal, p.StructureKind));
+		Assert.All(expanded, p => Assert.Equal(1, p.Qty));
+		Assert.All(expanded, p => Assert.Equal(2, p.Legs.Count));
 	}
 
 	/// <summary>Fake quote dictionary: returns a constant 1.00/1.10 quote with the given IV for every requested symbol.</summary>

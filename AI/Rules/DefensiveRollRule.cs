@@ -63,7 +63,7 @@ internal sealed class DefensiveRollRule : IManagementRule
 				Kind: ProposalKind.AlertOnly,
 				Legs: alertLegs,
 				NetDebit: 0m,
-              Rationale: $"spot ${spot:F2} within {_config.SpotWithinPctOfShortStrike}% of short strike ${shortLeg.Strike:F2}, DTE {dte}{beText}. Quote unavailable for new symbol {newSymbol}."
+				Rationale: $"spot ${spot:F2} within {_config.SpotWithinPctOfShortStrike}% of short strike ${shortLeg.Strike:F2}, DTE {dte}{beText}. Quote unavailable for new symbol {newSymbol}."
 			);
 		}
 
@@ -78,7 +78,7 @@ internal sealed class DefensiveRollRule : IManagementRule
 		var isCredit = netCredit >= 0m;
 
 		var kind = isCredit ? ProposalKind.Roll : ProposalKind.AlertOnly;
-       var rationaleBase = $"spot ${spot:F2} within {_config.SpotWithinPctOfShortStrike}% of short strike ${shortLeg.Strike:F2}, DTE {dte}{beText}";
+		var rationaleBase = $"spot ${spot:F2} within {_config.SpotWithinPctOfShortStrike}% of short strike ${shortLeg.Strike:F2}, DTE {dte}{beText}";
 		var rationale = isCredit
 			? $"{rationaleBase}; roll {shortLeg.Symbol}→{newSymbol} for net credit ${netCredit:F2}"
 			: $"{rationaleBase}; no-better-alternative (proposed roll debit ${-netCredit:F2}, not a credit)";

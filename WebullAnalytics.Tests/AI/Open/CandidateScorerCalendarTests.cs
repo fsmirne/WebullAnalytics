@@ -130,7 +130,7 @@ public class CandidateScorerCalendarTests
 		var quotes = new Dictionary<string, OptionContractQuote>
 		{
 			[shortSym] = TestQuote.Q(1.50m, 1.55m, 0.40m, openInterest: 100),
-           [longSym] = TestQuote.Q(1.80m, 1.90m, 0.40m),
+			[longSym] = TestQuote.Q(1.80m, 1.90m, 0.40m),
 			[extraCall] = TestQuote.Q(0.20m, 0.25m, 0.40m, openInterest: 40)
 		};
 
@@ -143,7 +143,85 @@ public class CandidateScorerCalendarTests
 
 		Assert.Equal(25m, withPain.TargetExpiryMaxPain);
 		Assert.Equal(1.50m, withPain.MaxPainAdjustmentFactor);
-        Assert.Equal(Math.Sign(withoutPain.BiasAdjustedScore), Math.Sign(withPain.BiasAdjustedScore));
+		Assert.Equal(Math.Sign(withoutPain.BiasAdjustedScore), Math.Sign(withPain.BiasAdjustedScore));
 		Assert.True(Math.Abs(withPain.BiasAdjustedScore) > Math.Abs(withoutPain.BiasAdjustedScore));
+	}
+
+	[Fact]
+	public void DoubleCalendarScoresAsNeutralDebitStructure()
+	{
+		var asOf = new DateTime(2026, 4, 20);
+		var shortExp = new DateTime(2026, 4, 24);
+		var longExp = new DateTime(2026, 5, 15);
+		var shortPut = MatchKeys.OccSymbol("GME", shortExp, 24.5m, "P");
+		var longPut = MatchKeys.OccSymbol("GME", longExp, 24.5m, "P");
+		var shortCall = MatchKeys.OccSymbol("GME", shortExp, 25.5m, "C");
+		var longCall = MatchKeys.OccSymbol("GME", longExp, 25.5m, "C");
+		var extraOi = MatchKeys.OccSymbol("GME", shortExp, 25m, "C");
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.DoubleCalendar, new[]
+		{
+			new ProposalLeg("sell", shortPut, 1),
+			new ProposalLeg("buy", longPut, 1),
+			new ProposalLeg("sell", shortCall, 1),
+			new ProposalLeg("buy", longCall, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortPut] = TestQuote.Q(0.35m, 0.40m, 0.40m, openInterest: 50),
+			[longPut] = TestQuote.Q(0.90m, 1.00m, 0.40m),
+			[shortCall] = TestQuote.Q(0.35m, 0.40m, 0.40m, openInterest: 50),
+			[longCall] = TestQuote.Q(0.90m, 1.00m, 0.40m),
+			[extraOi] = TestQuote.Q(0.55m, 0.60m, 0.40m, openInterest: 300)
+		};
+
+		var cfg = Cfg();
+		cfg.MaxPainWeight = 0.50m;
+		var p = CandidateScorer.ScoreMultiLeg(skel, spot: 25m, asOf, quotes, bias: 0m, cfg)!;
+
+		Assert.Equal(OpenStructureKind.DoubleCalendar, p.StructureKind);
+		Assert.True(p.DebitOrCreditPerContract < 0m);
+		Assert.Equal(0, p.DirectionalFit);
+		Assert.True(p.Breakevens.Count >= 2);
+		Assert.Equal(25m, p.TargetExpiryMaxPain);
+		Assert.True(p.MaxPainAdjustmentFactor > 1m);
+	}
+
+	[Fact]
+	public void DoubleDiagonalScoresAsNeutralDebitStructure()
+	{
+		var asOf = new DateTime(2026, 4, 20);
+		var shortExp = new DateTime(2026, 4, 24);
+		var longExp = new DateTime(2026, 5, 15);
+		var shortPut = MatchKeys.OccSymbol("GME", shortExp, 24.5m, "P");
+		var longPut = MatchKeys.OccSymbol("GME", longExp, 24m, "P");
+		var shortCall = MatchKeys.OccSymbol("GME", shortExp, 25.5m, "C");
+		var longCall = MatchKeys.OccSymbol("GME", longExp, 26m, "C");
+		var extraOi = MatchKeys.OccSymbol("GME", shortExp, 25m, "C");
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.DoubleDiagonal, new[]
+		{
+			new ProposalLeg("sell", shortPut, 1),
+			new ProposalLeg("buy", longPut, 1),
+			new ProposalLeg("sell", shortCall, 1),
+			new ProposalLeg("buy", longCall, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortPut] = TestQuote.Q(0.40m, 0.45m, 0.40m, openInterest: 50),
+			[longPut] = TestQuote.Q(0.95m, 1.05m, 0.40m),
+			[shortCall] = TestQuote.Q(0.40m, 0.45m, 0.40m, openInterest: 50),
+			[longCall] = TestQuote.Q(0.95m, 1.05m, 0.40m),
+			[extraOi] = TestQuote.Q(0.55m, 0.60m, 0.40m, openInterest: 300)
+		};
+
+		var cfg = Cfg();
+		cfg.MaxPainWeight = 0.50m;
+		var p = CandidateScorer.ScoreMultiLeg(skel, spot: 25m, asOf, quotes, bias: 0m, cfg)!;
+
+		Assert.Equal(OpenStructureKind.DoubleDiagonal, p.StructureKind);
+		Assert.True(p.DebitOrCreditPerContract < 0m);
+		Assert.Equal(0, p.DirectionalFit);
+		Assert.True(p.Breakevens.Count >= 2);
+		Assert.Equal(25m, p.TargetExpiryMaxPain);
+		Assert.True(p.MaxPainAdjustmentFactor > 1m);
 	}
 }

@@ -14,7 +14,7 @@ internal static class RiskDiagnosticProbeBuilder
 		DateTime asOf,
 		Func<string, decimal> ivResolver,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes,
-      (decimal bias, OpenerConfig cfg, string structure, int qty, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore, decimal? thetaPerDayPerContract)? opener = null,
+		(decimal bias, OpenerConfig cfg, string structure, int qty, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore, decimal? thetaPerDayPerContract)? opener = null,
 		decimal? technicalBiasOverride = null,
 		bool useCostBasisForOpenerScore = false)
 	{
@@ -102,7 +102,7 @@ internal static class RiskDiagnosticProbeBuilder
 				DaysToTarget: o.days,
 				RawScore: o.rawScore,
 				BiasAdjustedScore: o.biasScore,
-                Rationale: o.rationale,
+				Rationale: o.rationale,
 				ThetaPerDayPerContract: o.thetaPerDayPerContract);
 		}
 		else
@@ -183,7 +183,7 @@ internal static class RiskDiagnosticProbeBuilder
 							DaysToTarget: scored.DaysToTarget,
 							RawScore: scored.RawScore,
 							BiasAdjustedScore: scored.BiasAdjustedScore,
-                      Rationale: rationale,
+							Rationale: rationale,
 						ThetaPerDayPerContract: scored.ThetaPerDayPerContract);
 					}
 				}

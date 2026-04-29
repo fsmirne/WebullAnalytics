@@ -35,12 +35,12 @@ public class CandidateScorerRationaleTests
 		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
 		var lines = rationale.Split('\n');
 
-      Assert.Equal(3, lines.Length);
+		Assert.Equal(3, lines.Length);
 		Assert.Equal("debit $74.00, maxProfit $36.91, maxLoss $74.00, R/R 0.50, prem 3.06x, BE $24.66/26.49, POP 51.1%, EV $7.62", lines[0]);
 		Assert.Contains("raw 0.025756 → tech-adjusted 0.025756", lines[1]);
 		Assert.Contains("[tech +0.13, fit 0 → no tech adjustment]", lines[1]);
 		Assert.Contains("adjusted 0.005466", lines[1]);
-        Assert.Equal("tech-adjusted × balance 0.16", lines[2]);
+		Assert.Equal("tech-adjusted × balance 0.16", lines[2]);
 	}
 
 	[Fact]

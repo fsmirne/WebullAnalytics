@@ -164,7 +164,8 @@ internal sealed class OpenCandidateEvaluator
 				survivors[i] = ApplyCashSizing(survivors[i], freeCash, cfg, bias);
 
 			// Per-ticker top-N.
-			output.AddRange(RankForOutput(survivors).Take(cfg.TopNPerTicker));
+			foreach (var proposal in RankForOutput(survivors).Take(cfg.TopNPerTicker))
+				output.AddRange(ExpandExecutableProposals(proposal, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode));
 		}
 
 		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker.
@@ -205,7 +206,7 @@ internal sealed class OpenCandidateEvaluator
 				trend: trend);
 
 			var openerScore = (
-			 bias: ctx.TechnicalSignals.TryGetValue(p.Ticker, out var bs) ? (bs?.Score ?? 0m) : 0m,
+				bias: ctx.TechnicalSignals.TryGetValue(p.Ticker, out var bs) ? (bs?.Score ?? 0m) : 0m,
 				cfg: cfg,
 				structure: p.StructureKind.ToString(),
 				qty: p.Qty,
@@ -218,7 +219,7 @@ internal sealed class OpenCandidateEvaluator
 				ev: p.ExpectedValuePerContract,
 				days: p.DaysToTarget,
 				rawScore: p.RawScore,
-                biasScore: p.BiasAdjustedScore,
+				biasScore: p.BiasAdjustedScore,
 				thetaPerDayPerContract: p.ThetaPerDayPerContract);
 
 			var probe = RiskDiagnosticProbeBuilder.Build(
@@ -287,7 +288,67 @@ internal sealed class OpenCandidateEvaluator
 		return thetaPerDay > 0m ? proposal.BiasAdjustedScore * thetaPerDay : proposal.BiasAdjustedScore;
 	}
 
-	private static bool IsCalendarLike(OpenProposal proposal) => proposal.StructureKind is OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal;
+	internal static IReadOnlyList<OpenProposal> ExpandExecutableProposals(OpenProposal proposal, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual, string pricingMode)
+	{
+		if (proposal.StructureKind is not (OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal))
+			return new[] { proposal };
+
+		var parsed = proposal.Legs
+			.Select(l => (Leg: l, Parsed: ParsingHelpers.ParseOptionSymbol(l.Symbol)))
+			.Where(x => x.Parsed != null)
+			.Select(x => (x.Leg, Parsed: x.Parsed!))
+			.ToList();
+		if (parsed.Count != proposal.Legs.Count)
+			return new[] { proposal };
+
+		var groups = parsed
+			.GroupBy(x => x.Parsed.CallPut, StringComparer.Ordinal)
+			.OrderBy(g => g.Key, StringComparer.Ordinal)
+			.ToList();
+		if (groups.Count != 2 || groups.Any(g => g.Count() != 2))
+			return new[] { proposal };
+
+		var expanded = new List<OpenProposal>(2);
+		foreach (var group in groups)
+		{
+			var legs = group.Select(x => new ProposalLeg(x.Leg.Action, x.Leg.Symbol, 1)).ToList();
+			var shortLeg = group.FirstOrDefault(x => x.Leg.Action == "sell");
+			var longLeg = group.FirstOrDefault(x => x.Leg.Action == "buy");
+			if (shortLeg.Parsed == null || longLeg.Parsed == null)
+				return new[] { proposal };
+
+			var kind = shortLeg.Parsed.Strike == longLeg.Parsed.Strike ? OpenStructureKind.LongCalendar : OpenStructureKind.LongDiagonal;
+			var skel = new CandidateSkeleton(proposal.Ticker, kind, legs, shortLeg.Parsed.ExpiryDate);
+			var rescored = CandidateScorer.Score(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode);
+			if (rescored == null)
+				return new[] { proposal };
+
+			var label = group.Key == "P" ? "put-side" : "call-side";
+			var component = proposal.CashReserveBlocked || proposal.Qty == 0
+				? rescored with
+				{
+					Qty = 0,
+					CashReserveBlocked = true,
+					CashReserveDetail = proposal.CashReserveDetail
+				}
+				: rescored with
+				{
+					Qty = proposal.Qty,
+					Legs = ScaleLegs(rescored.Legs, proposal.Qty)
+				};
+
+			var rationale = CandidateScorer.BuildRationale(component, bias, cfg);
+			expanded.Add(component with
+			{
+				Rationale = $"{label} of {proposal.StructureKind}: {rationale}",
+				Fingerprint = CandidateScorer.ComputeFingerprint(component.Ticker, component.StructureKind, component.Legs, component.Qty)
+			});
+		}
+
+		return expanded;
+	}
+
+	private static bool IsCalendarLike(OpenProposal proposal) => proposal.StructureKind is OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal;
 
 	/// <summary>Returns true when the symbol exists and has both a non-null bid and a positive ask.
 	/// Mirrors <c>CandidateScorer.TryLiveBidAsk</c>'s acceptance criteria so Phase B's "needs refresh"

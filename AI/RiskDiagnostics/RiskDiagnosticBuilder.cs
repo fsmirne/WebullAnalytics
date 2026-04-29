@@ -212,6 +212,35 @@ internal static class RiskDiagnosticBuilder
 				return ("covered_diagonal", cp == "C" ? "bullish" : "bearish");
 			return ("inverted_diagonal", cp == "C" ? "bearish" : "bullish");
 		}
+
+		if (longLegs.Count == 2 && shortLegs.Count == 2)
+		{
+			var allLegs = longLegs.Concat(shortLegs).ToList();
+			var expiries = allLegs.Select(l => l.Parsed.ExpiryDate).Distinct().ToList();
+			if (expiries.Count == 1)
+			{
+				var longCalls = longLegs.Where(l => l.Parsed.CallPut == "C").ToList();
+				var longPuts = longLegs.Where(l => l.Parsed.CallPut == "P").ToList();
+				var shortCalls = shortLegs.Where(l => l.Parsed.CallPut == "C").ToList();
+				var shortPuts = shortLegs.Where(l => l.Parsed.CallPut == "P").ToList();
+				if (longCalls.Count == 1 && longPuts.Count == 1 && shortCalls.Count == 1 && shortPuts.Count == 1)
+				{
+					var shortCall = shortCalls[0].Parsed;
+					var shortPut = shortPuts[0].Parsed;
+					var longCall = longCalls[0].Parsed;
+					var longPut = longPuts[0].Parsed;
+					if (shortCall.Strike == shortPut.Strike
+						&& longPut.Strike < shortPut.Strike
+						&& longCall.Strike > shortCall.Strike)
+						return ("iron_butterfly", "neutral");
+					if (shortPut.Strike < shortCall.Strike
+						&& longPut.Strike < shortPut.Strike
+						&& longCall.Strike > shortCall.Strike)
+						return ("iron_condor", "neutral");
+				}
+			}
+		}
+
 		return ("unknown", "neutral");
 	}
 }

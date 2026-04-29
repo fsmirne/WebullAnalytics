@@ -194,7 +194,12 @@ internal static class AIConfigLoader
 		if (op.DirectionalFitWeight < 0m) return $"opener.directionalFitWeight: must be ≥ 0, got {op.DirectionalFitWeight}";
 		if (op.ProfitBandPct <= 0m || op.ProfitBandPct > 50m) return $"opener.profitBandPct: must be in (0, 50], got {op.ProfitBandPct}";
 		if (op.IvDefaultPct <= 0m) return $"opener.ivDefaultPct: must be > 0, got {op.IvDefaultPct}";
-		if (op.StrikeStep <= 0m) return $"opener.strikeStep: must be > 0, got {op.StrikeStep}";
+		foreach (var ticker in c.Tickers)
+			if (!op.StrikeSteps.TryGetValue(ticker, out var step)) return $"opener.strikeSteps.{ticker}: missing ticker-specific strike step";
+			else if (step <= 0m) return $"opener.strikeSteps.{ticker}: must be > 0, got {step}";
+
+		foreach (var kv in op.StrikeSteps)
+			if (kv.Value <= 0m) return $"opener.strikeSteps.{kv.Key}: must be > 0, got {kv.Value}";
 		if (op.VolatilityLookbackDays < 5) return $"opener.volatilityLookbackDays: must be ≥ 5, got {op.VolatilityLookbackDays}";
 		if (op.VolatilityFitWeight < 0m) return $"opener.volatilityFitWeight: must be ≥ 0, got {op.VolatilityFitWeight}";
 		if (op.MaxPainWeight < 0m) return $"opener.maxPainWeight: must be ≥ 0, got {op.MaxPainWeight}";
@@ -205,11 +210,51 @@ internal static class AIConfigLoader
 		if (lc.LongDteMin < 0) return $"opener.structures.longCalendar.longDteMin: must be ≥ 0, got {lc.LongDteMin}";
 		if (lc.LongDteMax < lc.LongDteMin) return $"opener.structures.longCalendar.longDteMax: must be ≥ longDteMin, got {lc.LongDteMax}";
 
+		var dc = op.Structures.DoubleCalendar;
+		if (dc.ShortDteMin < 0) return $"opener.structures.doubleCalendar.shortDteMin: must be ≥ 0, got {dc.ShortDteMin}";
+		if (dc.ShortDteMax < dc.ShortDteMin) return $"opener.structures.doubleCalendar.shortDteMax: must be ≥ shortDteMin, got {dc.ShortDteMax}";
+		if (dc.LongDteMin < 0) return $"opener.structures.doubleCalendar.longDteMin: must be ≥ 0, got {dc.LongDteMin}";
+		if (dc.LongDteMax < dc.LongDteMin) return $"opener.structures.doubleCalendar.longDteMax: must be ≥ longDteMin, got {dc.LongDteMax}";
+		if (dc.WidthSteps.Count == 0) return "opener.structures.doubleCalendar.widthSteps: must have at least one value";
+		foreach (var w in dc.WidthSteps)
+			if (w < 1) return $"opener.structures.doubleCalendar.widthSteps: each value must be ≥ 1, got {w}";
+
 		var ld = op.Structures.LongDiagonal;
 		if (ld.ShortDteMin < 0) return $"opener.structures.longDiagonal.shortDteMin: must be ≥ 0, got {ld.ShortDteMin}";
 		if (ld.ShortDteMax < ld.ShortDteMin) return $"opener.structures.longDiagonal.shortDteMax: must be ≥ shortDteMin, got {ld.ShortDteMax}";
 		if (ld.LongDteMin < 0) return $"opener.structures.longDiagonal.longDteMin: must be ≥ 0, got {ld.LongDteMin}";
 		if (ld.LongDteMax < ld.LongDteMin) return $"opener.structures.longDiagonal.longDteMax: must be ≥ longDteMin, got {ld.LongDteMax}";
+
+		var dd = op.Structures.DoubleDiagonal;
+		if (dd.ShortDteMin < 0) return $"opener.structures.doubleDiagonal.shortDteMin: must be ≥ 0, got {dd.ShortDteMin}";
+		if (dd.ShortDteMax < dd.ShortDteMin) return $"opener.structures.doubleDiagonal.shortDteMax: must be ≥ shortDteMin, got {dd.ShortDteMax}";
+		if (dd.LongDteMin < 0) return $"opener.structures.doubleDiagonal.longDteMin: must be ≥ 0, got {dd.LongDteMin}";
+		if (dd.LongDteMax < dd.LongDteMin) return $"opener.structures.doubleDiagonal.longDteMax: must be ≥ longDteMin, got {dd.LongDteMax}";
+		if (dd.WidthSteps.Count == 0) return "opener.structures.doubleDiagonal.widthSteps: must have at least one value";
+		foreach (var w in dd.WidthSteps)
+			if (w < 1) return $"opener.structures.doubleDiagonal.widthSteps: each value must be ≥ 1, got {w}";
+		if (dd.LongWingSteps.Count == 0) return "opener.structures.doubleDiagonal.longWingSteps: must have at least one value";
+		foreach (var w in dd.LongWingSteps)
+			if (w < 1) return $"opener.structures.doubleDiagonal.longWingSteps: each value must be ≥ 1, got {w}";
+
+		var ib = op.Structures.IronButterfly;
+		if (ib.DteMin < 0) return $"opener.structures.ironButterfly.dteMin: must be ≥ 0, got {ib.DteMin}";
+		if (ib.DteMax < ib.DteMin) return $"opener.structures.ironButterfly.dteMax: must be ≥ dteMin, got {ib.DteMax}";
+		if (ib.WingSteps.Count == 0) return "opener.structures.ironButterfly.wingSteps: must have at least one value";
+		foreach (var w in ib.WingSteps)
+			if (w < 1) return $"opener.structures.ironButterfly.wingSteps: each value must be ≥ 1, got {w}";
+
+		var ic = op.Structures.IronCondor;
+		if (ic.DteMin < 0) return $"opener.structures.ironCondor.dteMin: must be ≥ 0, got {ic.DteMin}";
+		if (ic.DteMax < ic.DteMin) return $"opener.structures.ironCondor.dteMax: must be ≥ dteMin, got {ic.DteMax}";
+		if (ic.WidthSteps.Count == 0) return "opener.structures.ironCondor.widthSteps: must have at least one value";
+		foreach (var w in ic.WidthSteps)
+			if (w < 1) return $"opener.structures.ironCondor.widthSteps: each value must be ≥ 1, got {w}";
+		if (ic.BodyWidthSteps.Count == 0) return "opener.structures.ironCondor.bodyWidthSteps: must have at least one value";
+		foreach (var w in ic.BodyWidthSteps)
+			if (w < 1) return $"opener.structures.ironCondor.bodyWidthSteps: each value must be ≥ 1, got {w}";
+		if (ic.ShortDeltaMin <= 0m || ic.ShortDeltaMin >= 1m) return $"opener.structures.ironCondor.shortDeltaMin: must be in (0, 1), got {ic.ShortDeltaMin}";
+		if (ic.ShortDeltaMax <= ic.ShortDeltaMin || ic.ShortDeltaMax >= 1m) return $"opener.structures.ironCondor.shortDeltaMax: must be in (shortDeltaMin, 1), got {ic.ShortDeltaMax}";
 
 		var sv = op.Structures.ShortVertical;
 		if (sv.DteMin < 0) return $"opener.structures.shortVertical.dteMin: must be ≥ 0, got {sv.DteMin}";

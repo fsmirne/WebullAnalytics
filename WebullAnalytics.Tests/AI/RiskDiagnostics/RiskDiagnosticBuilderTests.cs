@@ -140,4 +140,50 @@ public class RiskDiagnosticBuilderTests
 		Assert.Equal("single_long", diag.StructureLabel);
 		Assert.Equal("bullish", diag.DirectionalBias);
 	}
+
+	[Fact]
+	public void IronButterflyLabelsAsNeutralIronButterfly()
+	{
+		var expiry = new DateTime(2026, 5, 1);
+		var legs = new[]
+		{
+			new DiagnosticLeg("GME260501P00024000", new OptionParsed("GME", expiry, "P", 24m), IsLong: true, Qty: 100, PricePerShare: 0.20m, CostBasisPerShare: 0.20m),
+			new DiagnosticLeg("GME260501P00025000", new OptionParsed("GME", expiry, "P", 25m), IsLong: false, Qty: 100, PricePerShare: 0.55m, CostBasisPerShare: 0.55m),
+			new DiagnosticLeg("GME260501C00025000", new OptionParsed("GME", expiry, "C", 25m), IsLong: false, Qty: 100, PricePerShare: 0.60m, CostBasisPerShare: 0.60m),
+			new DiagnosticLeg("GME260501C00026000", new OptionParsed("GME", expiry, "C", 26m), IsLong: true, Qty: 100, PricePerShare: 0.22m, CostBasisPerShare: 0.22m)
+		};
+
+		var diag = RiskDiagnosticBuilder.Build(
+			legs: legs,
+			spot: 25m,
+			asOf: new DateTime(2026, 4, 24),
+			ivResolver: _ => 0.40m,
+			trend: null);
+
+		Assert.Equal("iron_butterfly", diag.StructureLabel);
+		Assert.Equal("neutral", diag.DirectionalBias);
+	}
+
+	[Fact]
+	public void IronCondorLabelsAsNeutralIronCondor()
+	{
+		var expiry = new DateTime(2026, 5, 1);
+		var legs = new[]
+		{
+			new DiagnosticLeg("GME260501P00024000", new OptionParsed("GME", expiry, "P", 24m), IsLong: true, Qty: 100, PricePerShare: 0.20m, CostBasisPerShare: 0.20m),
+			new DiagnosticLeg("GME260501P00025000", new OptionParsed("GME", expiry, "P", 25m), IsLong: false, Qty: 100, PricePerShare: 0.55m, CostBasisPerShare: 0.55m),
+			new DiagnosticLeg("GME260501C00027000", new OptionParsed("GME", expiry, "C", 27m), IsLong: false, Qty: 100, PricePerShare: 0.50m, CostBasisPerShare: 0.50m),
+			new DiagnosticLeg("GME260501C00028000", new OptionParsed("GME", expiry, "C", 28m), IsLong: true, Qty: 100, PricePerShare: 0.18m, CostBasisPerShare: 0.18m)
+		};
+
+		var diag = RiskDiagnosticBuilder.Build(
+			legs: legs,
+			spot: 26m,
+			asOf: new DateTime(2026, 4, 24),
+			ivResolver: _ => 0.40m,
+			trend: null);
+
+		Assert.Equal("iron_condor", diag.StructureLabel);
+		Assert.Equal("neutral", diag.DirectionalBias);
+	}
 }
