@@ -102,12 +102,17 @@ internal static class RiskDiagnosticRenderer
 			.BorderColor(Color.Grey);
 	}
 
-	private static string FormatDelta(decimal d) => d.ToString("+0.00;-0.00", CultureInfo.InvariantCulture);
+    private static string FormatDelta(decimal d)
+	{
+		if (d == 0m)
+			return "+0.00";
+
+		var format = Math.Abs(d) < 0.01m ? "+0.0000;-0.0000" : "+0.00;-0.00";
+		return d.ToString(format, CultureInfo.InvariantCulture);
+	}
 	private static string FormatDollars(decimal d) => (d >= 0m ? "+$" : "-$") + Math.Abs(d).ToString("F2", CultureInfo.InvariantCulture);
 	private static string FormatRatio(decimal? r) => r is decimal v ? $" ({v.ToString("F1", CultureInfo.InvariantCulture)}× ratio)" : "";
-	private static string FormatNet(decimal n) => n >= 0m
-		? $"credit ${n.ToString("F2", CultureInfo.InvariantCulture)}"
-		: $"debit ${Math.Abs(n).ToString("F2", CultureInfo.InvariantCulture)}";
+	private static string FormatNet(decimal n) => n >= 0m ? $"credit ${n.ToString("F2", CultureInfo.InvariantCulture)}" : $"debit ${Math.Abs(n).ToString("F2", CultureInfo.InvariantCulture)}";
 
 	private static string? TryFormatMarginRequirement(RiskDiagnosticOpenerScore s)
 	{
