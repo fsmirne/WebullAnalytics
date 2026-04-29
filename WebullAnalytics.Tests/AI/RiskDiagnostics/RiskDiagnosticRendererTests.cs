@@ -70,6 +70,37 @@ public class RiskDiagnosticRendererTests
 	}
 
 	[Fact]
+	public void GreeksLineShowsSmallNonZeroDeltaWithoutRoundingToZero()
+	{
+		var diagnostic = new RiskDiagnostic(
+			StructureLabel: "calendar",
+			DirectionalBias: "neutral",
+			NetDelta: 0.0043m,
+			NetThetaPerDay: 5.14m,
+			NetVega: -0.80m,
+			ShortLegDteMin: 7,
+			LongLegDteMax: 30,
+			DteGapDays: 23,
+			LongPremiumPaid: 1.00m,
+			ShortPremiumReceived: 0.50m,
+			NetCashPerShare: -0.50m,
+			PremiumRatio: 2.0m,
+			SpotAtEvaluation: 25.00m,
+			BreakevenDistancePct: null,
+			ShortLegOtm: true,
+			ShortLegExtrinsic: 0.20m,
+			Trend: null,
+			CostBasisPerShare: null,
+			CurrentValuePerShare: null,
+			UnrealizedPnlPerShare: null,
+			Rules: Array.Empty<RiskRuleHit>());
+
+		var text = Render(diagnostic);
+		Assert.Contains("Δ +0.0043", text);
+		Assert.DoesNotContain("Δ +0.00   θ +$5.14/day", text);
+	}
+
+	[Fact]
 	public void ShortVerticalProposalShowsMarginRequirement()
 	{
 		var diagnostic = new RiskDiagnostic(
