@@ -8,7 +8,7 @@ namespace WebullAnalytics.AI;
 /// Shared scenario enumeration and scoring engine used by both `analyze position` and the
 /// AI rule pipeline. Given an open option position and market snapshot, produces a ranked
 /// list of candidate management moves (hold, close, various rolls, reset) with projected
-/// P&L, cash impact, BP impact, and days-to-target.
+/// P&L, cash impact, margin impact, and days-to-target.
 ///
 /// Neutral over the caller's position representation — both `PositionSnapshot` (user-spec input)
 /// and `OpenPosition` (broker-fed state) convert to `LegInfo` before invoking.
@@ -31,7 +31,7 @@ internal static class ScenarioEngine
 		decimal CashImpactPerContract,
 		decimal ProjectedValuePerContract,
 		decimal TotalPnLPerContract,
-		decimal BPDeltaPerContract,
+		decimal MarginDeltaPerContract,
 		int Qty,
 		int DaysToTarget,
 		string Rationale);
@@ -188,7 +188,7 @@ internal static class ScenarioEngine
 		var shortCloseNow = BuyPrice(shortMidNow, shortAskNow, opt.PricingMode);
 		var longCloseNow = SellPrice(longMidNow, longBidNow, opt.PricingMode);
 
-		var currentBp = AnalyzeCommon.ComputeLegMargin(shortLeg.Parsed, 1, spot, shortMidNow, longLeg.Parsed, null, 1, longMidNow, isExisting: true).Total;
+		var currentMargin = AnalyzeCommon.ComputeLegMargin(shortLeg.Parsed, 1, spot, shortMidNow, longLeg.Parsed, null, 1, longMidNow, isExisting: true).Total;
 
 		decimal LongValueAtShortExpiry(decimal longStrike, DateTime shortExpiry) =>
 			(decimal)OptionMath.BlackScholes(spot, longStrike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days) / 365.0, 0.036, ivLong, callPut);
@@ -205,8 +205,8 @@ internal static class ScenarioEngine
 		// 2. Close short only.
 		{
 			var cash = -shortCloseNow;
-			var bpDelta = 0m - currentBp;
-			list.Add(BuildSpread("Close short only", $"BUY {shortLeg.Symbol} x{qty}", qty, cash, longAtOriginalExp, bpDelta, initialDebit, origShortDte,
+			var marginDelta = 0m - currentMargin;
+			list.Add(BuildSpread("Close short only", $"BUY {shortLeg.Symbol} x{qty}", qty, cash, longAtOriginalExp, marginDelta, initialDebit, origShortDte,
 				$"buy back short at ${shortCloseNow:F2}/share; keep long → ${longAtOriginalExp:F2}/share at short exp",
 				ProposalKind.Roll, [new ProposalLeg("buy", shortLeg.Symbol, qty, shortMidNow, shortAskNow)]));
 		}
@@ -214,8 +214,8 @@ internal static class ScenarioEngine
 		// 3. Close all.
 		{
 			var cash = longCloseNow - shortCloseNow;
-			var bpDelta = 0m - currentBp;
-			list.Add(BuildSpread("Close all", $"BUY {shortLeg.Symbol} x{qty}, SELL {longLeg.Symbol} x{qty}", qty, cash, 0m, bpDelta, initialDebit, 1,
+			var marginDelta = 0m - currentMargin;
+			list.Add(BuildSpread("Close all", $"BUY {shortLeg.Symbol} x{qty}, SELL {longLeg.Symbol} x{qty}", qty, cash, 0m, marginDelta, initialDebit, 1,
 				$"close at ${cash:+0.00;-0.00}/share net using {PricingLabel(opt.PricingMode)} pricing",
 				ProposalKind.Close, new[]
 				{
@@ -243,10 +243,10 @@ internal static class ScenarioEngine
 					var shortAtNewShortExp = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
 					var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 					var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, shortLeg.Parsed.Strike);
-					var newBp = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
-					var bpDelta = newBp - currentBp;
+					var newMargin = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
+					var marginDelta = newMargin - currentMargin;
 					EmitRoll(list, qty, $"Roll short ({newExp:MM-dd}, same strike)",
-					  shortLeg.Symbol, newSym, oldShortPrice: shortMidNow, newShortPrice: newShortMidExec, oldShortExecutionPrice: shortAskNow, newShortExecutionPrice: newShortBid, cashPerShare, newProjectedPerShare, holdNetPerShare, bpDelta, initialDebit, dteNewShort, opt.AvailableCash,
+					  shortLeg.Symbol, newSym, oldShortPrice: shortMidNow, newShortPrice: newShortMidExec, oldShortExecutionPrice: shortAskNow, newShortExecutionPrice: newShortBid, cashPerShare, newProjectedPerShare, holdNetPerShare, marginDelta, initialDebit, dteNewShort, opt.AvailableCash,
 						$"roll at ${cashPerShare:+0.00;-0.00}/share using {PricingLabel(opt.PricingMode)} pricing; at new exp: ${newProjectedPerShare:F2}");
 				}
 			}
@@ -269,12 +269,12 @@ internal static class ScenarioEngine
 				var newShortIntrinsicAtExp = Intrinsic(spot, newStrike, callPut);
 				var projSameExpPerShare = longAtOrigExp - newShortIntrinsicAtExp;
 				var sameExpShortParsed = new OptionParsed(shortLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate, callPut, newStrike);
-				var sameExpBp = AnalyzeCommon.ComputeLegMargin(sameExpShortParsed, 1, spot, newShortMidSameExp, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
-				var sameExpBpDelta = sameExpBp - currentBp;
+				var sameExpMargin = AnalyzeCommon.ComputeLegMargin(sameExpShortParsed, 1, spot, newShortMidSameExp, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
+				var sameExpMarginDelta = sameExpMargin - currentMargin;
 				var sameExpStructure = StructureLabel(callPut, newStrike, longLeg.Parsed.Strike);
 
 				EmitRoll(list, qty, $"Roll short to ${newStrike:F2} (same exp {shortLeg.Parsed.ExpiryDate:MM-dd}, {sameExpStructure})",
-					shortLeg.Symbol, sameExpSym, oldShortPrice: shortMidNow, newShortPrice: newShortMidSameExp, oldShortExecutionPrice: shortAskNow, newShortExecutionPrice: newShortBidSameExp, cashPerShareSameExp, projSameExpPerShare, holdNetPerShare, sameExpBpDelta, initialDebit, dteSameExp, opt.AvailableCash,
+					shortLeg.Symbol, sameExpSym, oldShortPrice: shortMidNow, newShortPrice: newShortMidSameExp, oldShortExecutionPrice: shortAskNow, newShortExecutionPrice: newShortBidSameExp, cashPerShareSameExp, projSameExpPerShare, holdNetPerShare, sameExpMarginDelta, initialDebit, dteSameExp, opt.AvailableCash,
 				  $"shift to ${newStrike:F2} strike, keep {shortLeg.Parsed.ExpiryDate:MM-dd} expiry — collect theta this week; net ${cashPerShareSameExp:+0.00;-0.00}/share using {PricingLabel(opt.PricingMode)} pricing; at exp: ${projSameExpPerShare:F2}");
 			}
 
@@ -296,12 +296,12 @@ internal static class ScenarioEngine
 				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, newStrike);
-				var newBp = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
-				var bpDelta = newBp - currentBp;
+				var newMargin = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
+				var marginDelta = newMargin - currentMargin;
 				var structureLabel = StructureLabel(callPut, newStrike, longLeg.Parsed.Strike);
 
 				EmitRoll(list, qty, $"Roll short to ${newStrike:F2} ({newExp:MM-dd}, {structureLabel})",
-					shortLeg.Symbol, newSym, oldShortPrice: shortMidNow, newShortPrice: newShortMidExec, oldShortExecutionPrice: shortAskNow, newShortExecutionPrice: newShortBid, cashPerShare, newProjectedPerShare, holdNetPerShare, bpDelta, initialDebit, dteNewShort, opt.AvailableCash,
+					shortLeg.Symbol, newSym, oldShortPrice: shortMidNow, newShortPrice: newShortMidExec, oldShortExecutionPrice: shortAskNow, newShortExecutionPrice: newShortBid, cashPerShare, newProjectedPerShare, holdNetPerShare, marginDelta, initialDebit, dteNewShort, opt.AvailableCash,
 				  $"step short to ${newStrike:F2} (spot ${spot:F2}); net ${cashPerShare:+0.00;-0.00}/share using {PricingLabel(opt.PricingMode)} pricing; at new exp: ${newProjectedPerShare:F2}");
 			}
 		}
@@ -333,12 +333,12 @@ internal static class ScenarioEngine
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newShortExp, callPut, newStrike);
 				var newLongParsed = new OptionParsed(longLeg.Parsed.Root, newLongExp, callPut, newStrike);
-				var newBp = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, newLongParsed, null, 1, newLongMidExec, isExisting: false).Total;
-				var bpDelta = newBp - currentBp;
+				var newMargin = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, newLongParsed, null, 1, newLongMidExec, isExisting: false).Total;
+				var marginDelta = newMargin - currentMargin;
 
 				EmitReset(list, qty, $"Reset to ${newStrike:F2} calendar",
 					shortLeg.Symbol, longLeg.Symbol, newShortSym, newLongSym, oldShortPrice: shortMidNow, oldLongPrice: longMidNow, newShortPrice: newShortMidExec, newLongPrice: newLongMidExec, oldShortExecutionPrice: shortAskNow, oldLongExecutionPrice: longBidNow, newShortExecutionPrice: newShortBid, newLongExecutionPrice: newLongAsk,
-					cashPerShare, newProjectedPerShare, holdNetPerShare, bpDelta, initialDebit, dteNewShort, opt.AvailableCash,
+					cashPerShare, newProjectedPerShare, holdNetPerShare, marginDelta, initialDebit, dteNewShort, opt.AvailableCash,
 				 $"close net ${closeNet:+0.00;-0.00}, open new net ${openNet:+0.00;-0.00} using {PricingLabel(opt.PricingMode)} pricing; projected at new short exp: ${newProjectedPerShare:F2}");
 			}
 		}
@@ -380,9 +380,9 @@ internal static class ScenarioEngine
 					var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewLong, 0.036, ivNewLong, addCp);
 					var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp;
 
-					// Opening a long calendar/diagonal is pure-debit: BP required = the selected price-basis
+					// Opening a long calendar/diagonal is pure-debit: margin required = the selected price-basis
 					// debit paid. MID is the default; bid/ask is available only when explicitly requested.
-					var newBp = Math.Max(-cashPerShare, 0m) * 100m;
+					var newMargin = Math.Max(-cashPerShare, 0m) * 100m;
 
 					var sideLabel = addCp == "C" ? "call" : "put";
 					// The added trade has both legs at `newStrike` with different expiries — always a calendar.
@@ -391,7 +391,7 @@ internal static class ScenarioEngine
 
 					EmitAdd(list, qty, $"Add ${newStrike:F2} {sideLabel} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({structureLabel}, keep existing)",
 						newShortSym, newLongSym, newShortMid, newLongMid, newShortBid, newLongAsk, cashPerShare, newPositionValuePerShare, holdNetPerShare,
-						newBp, initialDebit, daysToOrigShort, opt.AvailableCash,
+						newMargin, initialDebit, daysToOrigShort, opt.AvailableCash,
 						$"open new {sideLabel} calendar at ${newStrike:F2} (debit ${-cashPerShare:F2}/share); existing untouched → at {origShortExp:MM-dd}: existing ${holdNetPerShare:F2} + new ${newPositionValuePerShare:F2} = ${holdNetPerShare + newPositionValuePerShare:F2}/share");
 				}
 			}
@@ -402,24 +402,24 @@ internal static class ScenarioEngine
 
 	// ─── Scenario builders ───────────────────────────────────────────────────
 
-	private static ScenarioResult BuildSingleLeg(string name, string actionSummary, int qty, decimal cashNow, decimal valueAtTarget, decimal bpDeltaPerContract, decimal initialDebit, int daysToTarget, string rationale, ProposalKind kind, IReadOnlyList<ProposalLeg> legs)
+	private static ScenarioResult BuildSingleLeg(string name, string actionSummary, int qty, decimal cashNow, decimal valueAtTarget, decimal marginDeltaPerContract, decimal initialDebit, int daysToTarget, string rationale, ProposalKind kind, IReadOnlyList<ProposalLeg> legs)
 	{
 		var cashPerContract = cashNow * 100m;
 		var valuePerContract = valueAtTarget * 100m;
 		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
-		return new ScenarioResult(name, actionSummary, legs, kind, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, qty, daysToTarget, rationale);
+		return new ScenarioResult(name, actionSummary, legs, kind, cashPerContract, valuePerContract, totalPerContract, marginDeltaPerContract, qty, daysToTarget, rationale);
 	}
 
-	private static ScenarioResult BuildSpread(string name, string actionSummary, int qty, decimal cashNow, decimal valueAtTarget, decimal bpDeltaPerContract, decimal initialDebit, int daysToTarget, string rationale, ProposalKind kind, IReadOnlyList<ProposalLeg> legs)
+	private static ScenarioResult BuildSpread(string name, string actionSummary, int qty, decimal cashNow, decimal valueAtTarget, decimal marginDeltaPerContract, decimal initialDebit, int daysToTarget, string rationale, ProposalKind kind, IReadOnlyList<ProposalLeg> legs)
 	{
 		var cashPerContract = cashNow * 100m;
 		var valuePerContract = valueAtTarget * 100m;
 		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
-		return new ScenarioResult(name, actionSummary, legs, kind, cashPerContract, valuePerContract, totalPerContract, bpDeltaPerContract, qty, daysToTarget, rationale);
+		return new ScenarioResult(name, actionSummary, legs, kind, cashPerContract, valuePerContract, totalPerContract, marginDeltaPerContract, qty, daysToTarget, rationale);
 	}
 
 	/// <summary>Emits a full-qty roll scenario plus (when cash-constrained) a partial variant sized to fit.</summary>
-	private static void EmitRoll(List<ScenarioResult> list, int fullQty, string name, string oldShortSym, string newShortSym, decimal oldShortPrice, decimal newShortPrice, decimal oldShortExecutionPrice, decimal newShortExecutionPrice, decimal cashPerShareOfChange, decimal newProjectedPerShare, decimal unchangedProjectedPerShare, decimal bpPerContract, decimal initialDebitPerShare, int daysToTarget, decimal? availableCash, string rationale)
+	private static void EmitRoll(List<ScenarioResult> list, int fullQty, string name, string oldShortSym, string newShortSym, decimal oldShortPrice, decimal newShortPrice, decimal oldShortExecutionPrice, decimal newShortExecutionPrice, decimal cashPerShareOfChange, decimal newProjectedPerShare, decimal unchangedProjectedPerShare, decimal marginPerContract, decimal initialDebitPerShare, int daysToTarget, decimal? availableCash, string rationale)
 	{
 		var initialDebitPerContract = initialDebitPerShare * 100m;
 
@@ -428,10 +428,10 @@ internal static class ScenarioEngine
 		var fullTotalPerContract = fullProjectedPerContract + fullCashPerContract - initialDebitPerContract;
 		list.Add(new ScenarioResult(name, $"BUY {oldShortSym} x{fullQty}, SELL {newShortSym} x{fullQty}",
 			new[] { new ProposalLeg("buy", oldShortSym, fullQty, oldShortPrice, oldShortExecutionPrice), new ProposalLeg("sell", newShortSym, fullQty, newShortPrice, newShortExecutionPrice) },
-			ProposalKind.Roll, fullCashPerContract, fullProjectedPerContract, fullTotalPerContract, bpPerContract, fullQty, daysToTarget, rationale));
+			ProposalKind.Roll, fullCashPerContract, fullProjectedPerContract, fullTotalPerContract, marginPerContract, fullQty, daysToTarget, rationale));
 
-		if (!availableCash.HasValue || bpPerContract <= 0m) return;
-		var maxPartial = (int)Math.Floor(availableCash.Value / bpPerContract);
+		if (!availableCash.HasValue || marginPerContract <= 0m) return;
+		var maxPartial = (int)Math.Floor(availableCash.Value / marginPerContract);
 		if (maxPartial <= 0 || maxPartial >= fullQty) return;
 
 		var partialCashTotal = cashPerShareOfChange * 100m * maxPartial;
@@ -440,12 +440,12 @@ internal static class ScenarioEngine
 		list.Add(new ScenarioResult($"{name} · partial {maxPartial}/{fullQty}",
 			$"BUY {oldShortSym} x{maxPartial}, SELL {newShortSym} x{maxPartial}",
 			new[] { new ProposalLeg("buy", oldShortSym, maxPartial, oldShortPrice, oldShortExecutionPrice), new ProposalLeg("sell", newShortSym, maxPartial, newShortPrice, newShortExecutionPrice) },
-			ProposalKind.Roll, partialCashTotal / fullQty, partialProjectedTotal / fullQty, partialTotalPnL / fullQty, bpPerContract * maxPartial / fullQty, fullQty, daysToTarget,
-			$"execute on {maxPartial} contracts (${bpPerContract * maxPartial:N0} BP); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp"));
+			ProposalKind.Roll, partialCashTotal / fullQty, partialProjectedTotal / fullQty, partialTotalPnL / fullQty, marginPerContract * maxPartial / fullQty, fullQty, daysToTarget,
+			$"execute on {maxPartial} contracts (${marginPerContract * maxPartial:N0} margin); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp"));
 	}
 
 	/// <summary>Emits a reset (close-all + reopen) scenario plus optional partial variant.</summary>
-	private static void EmitReset(List<ScenarioResult> list, int fullQty, string name, string oldShortSym, string oldLongSym, string newShortSym, string newLongSym, decimal oldShortPrice, decimal oldLongPrice, decimal newShortPrice, decimal newLongPrice, decimal oldShortExecutionPrice, decimal oldLongExecutionPrice, decimal newShortExecutionPrice, decimal newLongExecutionPrice, decimal cashPerShareOfChange, decimal newProjectedPerShare, decimal unchangedProjectedPerShare, decimal bpPerContract, decimal initialDebitPerShare, int daysToTarget, decimal? availableCash, string rationale)
+	private static void EmitReset(List<ScenarioResult> list, int fullQty, string name, string oldShortSym, string oldLongSym, string newShortSym, string newLongSym, decimal oldShortPrice, decimal oldLongPrice, decimal newShortPrice, decimal newLongPrice, decimal oldShortExecutionPrice, decimal oldLongExecutionPrice, decimal newShortExecutionPrice, decimal newLongExecutionPrice, decimal cashPerShareOfChange, decimal newProjectedPerShare, decimal unchangedProjectedPerShare, decimal marginPerContract, decimal initialDebitPerShare, int daysToTarget, decimal? availableCash, string rationale)
 	{
 		var initialDebitPerContract = initialDebitPerShare * 100m;
 		var action = $"BUY {oldShortSym} x{fullQty}, SELL {oldLongSym} x{fullQty}, BUY {newLongSym} x{fullQty}, SELL {newShortSym} x{fullQty}";
@@ -460,10 +460,10 @@ internal static class ScenarioEngine
 		var fullCashPerContract = cashPerShareOfChange * 100m;
 		var fullProjectedPerContract = newProjectedPerShare * 100m;
 		var fullTotalPerContract = fullProjectedPerContract + fullCashPerContract - initialDebitPerContract;
-		list.Add(new ScenarioResult(name, action, fullLegs, ProposalKind.Roll, fullCashPerContract, fullProjectedPerContract, fullTotalPerContract, bpPerContract, fullQty, daysToTarget, rationale));
+		list.Add(new ScenarioResult(name, action, fullLegs, ProposalKind.Roll, fullCashPerContract, fullProjectedPerContract, fullTotalPerContract, marginPerContract, fullQty, daysToTarget, rationale));
 
-		if (!availableCash.HasValue || bpPerContract <= 0m) return;
-		var maxPartial = (int)Math.Floor(availableCash.Value / bpPerContract);
+		if (!availableCash.HasValue || marginPerContract <= 0m) return;
+		var maxPartial = (int)Math.Floor(availableCash.Value / marginPerContract);
 		if (maxPartial <= 0 || maxPartial >= fullQty) return;
 
 		var partialCashTotal = cashPerShareOfChange * 100m * maxPartial;
@@ -478,14 +478,14 @@ internal static class ScenarioEngine
 		};
 		list.Add(new ScenarioResult($"{name} · partial {maxPartial}/{fullQty}",
 			$"BUY {oldShortSym} x{maxPartial}, SELL {oldLongSym} x{maxPartial}, BUY {newLongSym} x{maxPartial}, SELL {newShortSym} x{maxPartial}",
-			partialLegs, ProposalKind.Roll, partialCashTotal / fullQty, partialProjectedTotal / fullQty, partialTotalPnL / fullQty, bpPerContract * maxPartial / fullQty, fullQty, daysToTarget,
-			$"execute on {maxPartial} contracts (${bpPerContract * maxPartial:N0} BP); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp"));
+			partialLegs, ProposalKind.Roll, partialCashTotal / fullQty, partialProjectedTotal / fullQty, partialTotalPnL / fullQty, marginPerContract * maxPartial / fullQty, fullQty, daysToTarget,
+			$"execute on {maxPartial} contracts (${marginPerContract * maxPartial:N0} margin); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp"));
 	}
 
 	/// <summary>Emits an "add new position alongside existing" scenario. Existing position is untouched;
-	/// new structure adds BP and debit. Combined projection = existing hold + new position value at target.
+	/// new structure adds margin and debit. Combined projection = existing hold + new position value at target.
 	/// Partial variant sizes the added quantity to fit available cash while keeping ALL existing contracts.</summary>
-	private static void EmitAdd(List<ScenarioResult> list, int fullQty, string name, string newShortSym, string newLongSym, decimal newShortPrice, decimal newLongPrice, decimal newShortExecutionPrice, decimal newLongExecutionPrice, decimal cashPerShareOfChange, decimal newProjectedPerShare, decimal unchangedProjectedPerShare, decimal bpPerContract, decimal initialDebitPerShare, int daysToTarget, decimal? availableCash, string rationale)
+	private static void EmitAdd(List<ScenarioResult> list, int fullQty, string name, string newShortSym, string newLongSym, decimal newShortPrice, decimal newLongPrice, decimal newShortExecutionPrice, decimal newLongExecutionPrice, decimal cashPerShareOfChange, decimal newProjectedPerShare, decimal unchangedProjectedPerShare, decimal marginPerContract, decimal initialDebitPerShare, int daysToTarget, decimal? availableCash, string rationale)
 	{
 		var initialDebitPerContract = initialDebitPerShare * 100m;
 		var action = $"BUY {newLongSym} x{fullQty}, SELL {newShortSym} x{fullQty}";
@@ -498,10 +498,10 @@ internal static class ScenarioEngine
 		var fullCashPerContract = cashPerShareOfChange * 100m;
 		var fullCombinedValuePerContract = (unchangedProjectedPerShare + newProjectedPerShare) * 100m;
 		var fullTotalPerContract = fullCombinedValuePerContract + fullCashPerContract - initialDebitPerContract;
-		list.Add(new ScenarioResult(name, action, fullLegs, ProposalKind.Roll, fullCashPerContract, fullCombinedValuePerContract, fullTotalPerContract, bpPerContract, fullQty, daysToTarget, rationale));
+		list.Add(new ScenarioResult(name, action, fullLegs, ProposalKind.Roll, fullCashPerContract, fullCombinedValuePerContract, fullTotalPerContract, marginPerContract, fullQty, daysToTarget, rationale));
 
-		if (!availableCash.HasValue || bpPerContract <= 0m) return;
-		var maxPartial = (int)Math.Floor(availableCash.Value / bpPerContract);
+		if (!availableCash.HasValue || marginPerContract <= 0m) return;
+		var maxPartial = (int)Math.Floor(availableCash.Value / marginPerContract);
 		if (maxPartial <= 0 || maxPartial >= fullQty) return;
 
 		// Partial: add `maxPartial` new contracts, keep all `fullQty` existing.
@@ -518,8 +518,8 @@ internal static class ScenarioEngine
 		};
 		list.Add(new ScenarioResult($"{name} · partial {maxPartial}",
 			$"BUY {newLongSym} x{maxPartial}, SELL {newShortSym} x{maxPartial}",
-			partialLegs, ProposalKind.Roll, partialCashTotal / fullQty, partialCombinedValue / fullQty, partialTotalPnL / fullQty, bpPerContract * maxPartial / fullQty, fullQty, daysToTarget,
-			$"add {maxPartial} new contract(s) (${bpPerContract * maxPartial:N0} BP); keep all {fullQty} existing"));
+			partialLegs, ProposalKind.Roll, partialCashTotal / fullQty, partialCombinedValue / fullQty, partialTotalPnL / fullQty, marginPerContract * maxPartial / fullQty, fullQty, daysToTarget,
+			$"add {maxPartial} new contract(s) (${marginPerContract * maxPartial:N0} margin); keep all {fullQty} existing"));
 	}
 
 	// ─── Helpers ─────────────────────────────────────────────────────────────
