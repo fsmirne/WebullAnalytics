@@ -1,4 +1,4 @@
-using WebullAnalytics.AI;
+﻿using WebullAnalytics.AI;
 using WebullAnalytics.AI.Output;
 using Xunit;
 
@@ -23,7 +23,8 @@ public class OpenProposalSinkTests
 		BiasAdjustedScore: score,
 		DirectionalFit: 1,
 		Rationale: "test rationale",
-		Fingerprint: fingerprint
+		Fingerprint: fingerprint,
+		FinalScore: score
 	);
 
 	[Fact]

@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.RiskDiagnostics;
@@ -14,7 +14,7 @@ internal static class RiskDiagnosticProbeBuilder
 		DateTime asOf,
 		Func<string, decimal> ivResolver,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes,
-		(decimal bias, OpenerConfig cfg, string structure, int qty, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore, decimal? thetaPerDayPerContract)? opener = null,
+		(decimal bias, OpenerConfig cfg, string structure, int qty, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore, decimal? thetaPerDayPerContract, decimal? finalScore)? opener = null,
 		decimal? technicalBiasOverride = null,
 		bool useCostBasisForOpenerScore = false)
 	{
@@ -184,7 +184,8 @@ internal static class RiskDiagnosticProbeBuilder
 							RawScore: scored.RawScore,
 							BiasAdjustedScore: scored.BiasAdjustedScore,
 							Rationale: rationale,
-						ThetaPerDayPerContract: scored.ThetaPerDayPerContract);
+							ThetaPerDayPerContract: scored.ThetaPerDayPerContract,
+							FinalScore: scored.FinalScore);
 					}
 				}
 			}

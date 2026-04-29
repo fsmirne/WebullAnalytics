@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Utils;
 
@@ -420,6 +420,14 @@ public static class BreakEvenAnalyzer
 	{
 		var maxColumns = Math.Max(3, initialMaxColumns);
 		var grid = buildGrid(maxColumns);
+		var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
+
+		while (required > terminalWidth && maxColumns > 3)
+		{
+			maxColumns--;
+			grid = buildGrid(maxColumns);
+			required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
+		}
 
 		// Expand opportunistically if the next date column still fits the terminal width.
 		// This avoids leaving unused space in wide terminals, especially for combined panels.
@@ -430,8 +438,8 @@ public static class BreakEvenAnalyzer
 			if (expanded.DateColumns.Count <= grid.DateColumns.Count)
 				break;
 
-			var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
-			if (required > terminalWidth)
+			var expandedRequired = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
+			if (expandedRequired > terminalWidth)
 				break;
 
 			grid = expanded;

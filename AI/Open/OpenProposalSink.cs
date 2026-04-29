@@ -1,4 +1,4 @@
-using Spectre.Console;
+﻿using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Globalization;
 using System.Text.Json;
@@ -18,13 +18,17 @@ internal sealed class OpenProposalSink : IDisposable
 	private readonly LogConfig _log;
 	private readonly string _mode;
 	private readonly string _suggestPricing;
+	private readonly bool _ascii;
+	private readonly string _cmdPrefix;
 	private readonly Dictionary<string, decimal> _lastScoreByFingerprint = new();
 
-	public OpenProposalSink(LogConfig log, string mode, string suggestPricing = SuggestionPricing.Mid)
+	public OpenProposalSink(LogConfig log, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
 	{
 		_log = log;
 		_mode = mode;
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
+		_ascii = ascii;
+		_cmdPrefix = ascii ? "L-" : "↪";
 		var path = Program.ResolvePath(log.Path);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
@@ -33,7 +37,8 @@ internal sealed class OpenProposalSink : IDisposable
 	public bool IsRepeat(OpenProposal p)
 	{
 		if (!_lastScoreByFingerprint.TryGetValue(p.Fingerprint, out var last)) return false;
-		var abs = Math.Abs(p.BiasAdjustedScore - last);
+		var current = p.FinalScore ?? p.BiasAdjustedScore;
+		var abs = Math.Abs(current - last);
 		var threshold = Math.Abs(last) * 0.10m;
 		return abs < threshold;
 	}
@@ -43,7 +48,7 @@ internal sealed class OpenProposalSink : IDisposable
 		var repeat = IsRepeat(p);
 		WriteJsonl(p);
 		if (_log.ConsoleVerbosity != "error" && (!repeat || _log.ConsoleVerbosity == "debug")) WriteConsole(p);
-		_lastScoreByFingerprint[p.Fingerprint] = p.BiasAdjustedScore;
+		_lastScoreByFingerprint[p.Fingerprint] = p.FinalScore ?? p.BiasAdjustedScore;
 	}
 
 	public void Flush() => _file.Flush();
@@ -68,6 +73,7 @@ internal sealed class OpenProposalSink : IDisposable
 			daysToTarget = p.DaysToTarget,
 			rawScore = p.RawScore,
 			biasAdjustedScore = p.BiasAdjustedScore,
+			finalScore = p.FinalScore,
 			directionalFit = p.DirectionalFit,
 			breakevens = p.Breakevens,
 			rationale = p.Rationale,
@@ -98,13 +104,14 @@ internal sealed class OpenProposalSink : IDisposable
 		if (!p.CashReserveBlocked && p.Qty > 0)
 			AppendReproductionCommands(rows, p, _suggestPricing);
 		if (p.Diagnostic is not null)
-			rows.Add(RiskDiagnosticRenderer.Build(p.Diagnostic));
+			rows.Add(RiskDiagnosticRenderer.Build(p.Diagnostic, ascii: _ascii));
 
 		var blocked = p.CashReserveBlocked ? " [yellow]⚠ blocked[/]" : "";
 		var header = $"[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}";
 		var panel = new Panel(new Rows(rows))
 			.Header(header)
 			.Expand()
+			.Border(_ascii ? BoxBorder.Ascii : BoxBorder.Rounded)
 			.BorderColor(SpectreColor(color));
 		AnsiConsole.Write(panel);
 		AnsiConsole.WriteLine();
@@ -113,15 +120,15 @@ internal sealed class OpenProposalSink : IDisposable
 	/// <summary>Appends copy-pasteable `wa trade place` and `wa analyze trade` lines as Markup rows.
 	/// trade place uses the selected price basis (mid by default, bid/ask when explicitly requested).
 	/// analyze trade uses the matching placeholder keywords for the same basis.</summary>
-	private static void AppendReproductionCommands(List<IRenderable> rows, OpenProposal p, string suggestPricing)
+	private void AppendReproductionCommands(List<IRenderable> rows, OpenProposal p, string suggestPricing)
 	{
 		var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 		var limitPerShare = SuggestionPricing.TryGetLimitPerShare(p.Legs, suggestPricing) ?? Math.Abs(p.DebitOrCreditPerContract / 100m);
 		var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
-		rows.Add(new Markup($"[dim]↪ wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
+		rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
 
 		var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{SuggestionPricing.AnalyzeKeywordFor(l, suggestPricing)}"));
-		rows.Add(new Markup($"[dim]↪ wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));
+		rows.Add(new Markup($"[dim]{_cmdPrefix} wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));
 	}
 
 	private static Color SpectreColor(string name) => name switch

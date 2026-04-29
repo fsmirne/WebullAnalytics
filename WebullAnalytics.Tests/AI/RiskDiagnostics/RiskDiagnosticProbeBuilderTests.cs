@@ -1,4 +1,4 @@
-using WebullAnalytics.AI;
+﻿using WebullAnalytics.AI;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.Pricing;
 using Xunit;
@@ -48,7 +48,8 @@ public class RiskDiagnosticProbeBuilderTests
 				days: 4,
 				rawScore: 0.01m,
 				biasScore: 0.01m,
-				thetaPerDayPerContract: 1.23m));
+				thetaPerDayPerContract: 1.23m,
+				finalScore: 0.0103075m));
 
 		Assert.NotNull(probe.EnumDelta);
 		Assert.Equal(Math.Round(defaultIvDelta, 12), Math.Round(probe.EnumDelta!.Value, 12));

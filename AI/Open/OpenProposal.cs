@@ -1,4 +1,4 @@
-using WebullAnalytics.AI.RiskDiagnostics;
+﻿using WebullAnalytics.AI.RiskDiagnostics;
 
 namespace WebullAnalytics.AI;
 
@@ -33,7 +33,7 @@ public enum OpenStructureKind
 /// <param name="ExpectedValuePerContract">From the 5-point scenario grid, dollars.</param>
 /// <param name="DaysToTarget">DTE of the leg whose expiry defines the target evaluation date.</param>
 /// <param name="RawScore">EV / max(1, DaysToTarget) / CapitalAtRiskPerContract.</param>
-/// <param name="BiasAdjustedScore">RawScore × (1 + α · bias · fit).</param>
+/// <param name="BiasAdjustedScore">Legacy field name: the adjusted pre-theta score after the tech, balance, volatility, and max-pain multipliers. Displayed as "adjusted".</param>
 /// <param name="DirectionalFit">+1 / 0 / −1 from the structure-fit table.</param>
 /// <param name="Rationale">Human-readable line; see spec for format.</param>
 /// <param name="Fingerprint">sha1-hex of (ticker | kind | sorted(legs) | qty) — used for cross-tick dedup.</param>
@@ -46,7 +46,10 @@ public enum OpenStructureKind
 /// <param name="VolatilityAdjustmentFactor">IV-vs-HV multiplier applied during ranking; null when HV was unavailable.</param>
 /// <param name="TargetExpiryMaxPain">Max-pain price inferred from open interest for the proposal's target expiry.</param>
 /// <param name="MaxPainAdjustmentFactor">Max-pain multiplier applied during ranking; null when disabled or unavailable.</param>
+/// <param name="GeometryFactor">Diagonal carry-quality multiplier applied during ranking when the front short fails to collect enough rent relative to the long premium/debit.</param>
+/// <param name="AssignmentRiskFactor">Short-option assignment/near-spot risk multiplier applied during ranking; null when no short-leg penalty applied.</param>
 /// <param name="ThetaPerDayPerContract">Finite-difference net theta per day in dollars per contract. Used as a merit signal during opener ranking.</param>
+/// <param name="FinalScore">Final opener ranking score. This is the score used for output ordering.</param>
 internal sealed record OpenProposal(
 	string Ticker,
 	OpenStructureKind StructureKind,
@@ -74,5 +77,9 @@ internal sealed record OpenProposal(
 	decimal? VolatilityAdjustmentFactor = null,
 	decimal? TargetExpiryMaxPain = null,
 	decimal? MaxPainAdjustmentFactor = null,
-	decimal? ThetaPerDayPerContract = null
+	decimal? SetupFactor = null,
+	decimal? GeometryFactor = null,
+	decimal? AssignmentRiskFactor = null,
+	decimal? ThetaPerDayPerContract = null,
+	decimal? FinalScore = null
 );

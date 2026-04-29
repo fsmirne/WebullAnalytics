@@ -1,4 +1,4 @@
-using Spectre.Console;
+﻿using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
@@ -55,6 +55,7 @@ internal sealed class AIWatchSettings : AISubcommandSettings
 internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 {
 	public override async Task<int> ExecuteAsync(CommandContext context, AIWatchSettings settings, CancellationToken cancellation)
+		=> await AITextOutput.RunAsync(settings, "ai_watch", async () =>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
@@ -69,12 +70,12 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
 
-		using var sink = new ProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing);
+		using var sink = new ProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 		OpenProposalSink? openSink = null;
 		OpenCandidateEvaluator? openEvaluator = null;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			openSink = new OpenProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing);
+			openSink = new OpenProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing);
 		}
 		var priceCache = new Replay.HistoricalPriceCache();
@@ -139,7 +140,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		openSink?.Dispose();
 		AnsiConsole.MarkupLine($"[dim]Loop exited. ticks={ticksRun} proposals={proposalsEmitted} failures={failures}[/]");
 		return 0;
-	}
+	});
 
 	private static DateTime ComputeStopTime(AIWatchSettings s, AIConfig config)
 	{
