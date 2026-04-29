@@ -107,7 +107,7 @@ internal static class AIContext
 	internal static IQuoteSource BuildLiveQuoteSource(AIConfig config) => new LiveQuoteSource(config.QuoteSource);
 }
 
-/// <summary>`ai once` — one evaluation pass, print proposals, exit.</summary>
+/// <summary>`ai scan` — one evaluation pass, print proposals, exit.</summary>
 internal sealed class AIOnceSettings : AISubcommandSettings;
 
 internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
@@ -118,7 +118,7 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		if (config == null) return 1;
 
 		if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
-			Console.Error.WriteLine($"[debug] wa ai once: log-level=debug baseDir='{Program.BaseDir}' quoteSource='{config.QuoteSource}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals}");
+			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' quoteSource='{config.QuoteSource}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals}");
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
@@ -145,7 +145,7 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		var managementCount = settings.EmitManagementProposals ? results.Count : 0;
 		if (settings.EmitManagementProposals)
 		{
-			using var sink = new ProposalSink(config.Log, mode: "once", suggestPricing: settings.Pricing);
+			using var sink = new ProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing);
 			foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
 		}
 

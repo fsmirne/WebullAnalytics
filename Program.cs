@@ -71,7 +71,7 @@ class Program
 			});
 			config.AddBranch("ai", ai =>
 			{
-				ai.AddCommand<AI.AIOnceCommand>("once");
+                ai.AddCommand<AI.AIOnceCommand>("scan");
 				ai.AddCommand<AI.AIWatchCommand>("watch");
 				ai.AddCommand<AI.AIReplayCommand>("replay");
 			});
