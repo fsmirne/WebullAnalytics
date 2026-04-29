@@ -13,12 +13,12 @@ internal static class RiskDiagnosticRenderer
 
 	internal static IRenderable Build(RiskDiagnostic d, bool ascii = false)
 	{
-		var items = new List<(string Label, string Value)>
+      var items = new List<(string Label, string Value)>
 		{
 			("Structure:", $"{Markup.Escape(d.StructureLabel)} ([italic]{Markup.Escape(d.DirectionalBias)}[/])"),
-           ("Greeks:", $"Δ {FormatDelta(d.NetDelta)}   θ {FormatDollars(d.NetThetaPerDay)}/day   ν {FormatDollars(d.NetVega)}/IV pt"),
+			("Greeks:", $"Δ {FormatDelta(d.NetDelta)}   θ {FormatDollars(d.NetThetaPerDay)}/day   ν {FormatDollars(d.NetVega)}/IV pt"),
 			("DTE:", $"short {d.ShortLegDteMin}d  long {d.LongLegDteMax}d  gap {d.DteGapDays}d"),
-			("Premium:", $"long ${d.LongPremiumPaid.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.ShortPremiumReceived.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatio(d.PremiumRatio)}, net {FormatNet(d.NetCashPerShare)}"),
+			("Premium:", FormatPremium(d)),
 			("Spot:", $"${d.SpotAtEvaluation.ToString("F2", CultureInfo.InvariantCulture)}  short OTM: {(d.ShortLegOtm ? "yes" : "no")}  short extrinsic ${d.ShortLegExtrinsic.ToString("F2", CultureInfo.InvariantCulture)}"),
 		};
 
@@ -122,8 +122,21 @@ internal static class RiskDiagnosticRenderer
 		return d.ToString(format, CultureInfo.InvariantCulture);
 	}
 	private static string FormatDollars(decimal d) => (d >= 0m ? "+$" : "-$") + Math.Abs(d).ToString("F2", CultureInfo.InvariantCulture);
- private static string FormatRatio(decimal? r) => r is decimal v ? $" ({v.ToString("F1", CultureInfo.InvariantCulture)}× ratio)" : "";
+	private static string FormatRatio(decimal? r) => r is decimal v ? $" ({v.ToString("F1", CultureInfo.InvariantCulture)}× ratio)" : "";
+	private static string FormatRatioDetailed(decimal? r) => r is decimal v ? $" ({v.ToString("F2", CultureInfo.InvariantCulture)}× ratio)" : "";
 	private static string FormatNet(decimal n) => n >= 0m ? $"credit ${n.ToString("F2", CultureInfo.InvariantCulture)}" : $"debit ${Math.Abs(n).ToString("F2", CultureInfo.InvariantCulture)}";
+	private static string FormatDebitCredit(decimal n) => n >= 0m ? $"debit ${n.ToString("F2", CultureInfo.InvariantCulture)}" : $"credit ${Math.Abs(n).ToString("F2", CultureInfo.InvariantCulture)}";
+
+	private static string FormatPremium(RiskDiagnostic d)
+	{
+		if (d.MarketLongPremiumPaid.HasValue && d.MarketShortPremiumReceived.HasValue && d.MarketNetPremiumPerShare.HasValue && d.TheoreticalLongPremiumPaid.HasValue && d.TheoreticalShortPremiumReceived.HasValue && d.TheoreticalNetPremiumPerShare.HasValue)
+			return $"market → long ${d.MarketLongPremiumPaid.Value.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.MarketShortPremiumReceived.Value.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatioDetailed(d.MarketPremiumRatio)}, net {FormatDebitCredit(d.MarketNetPremiumPerShare.Value)} | theoretical → long ${d.TheoreticalLongPremiumPaid.Value.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.TheoreticalShortPremiumReceived.Value.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatioDetailed(d.TheoreticalPremiumRatio)}, net {FormatDebitCredit(d.TheoreticalNetPremiumPerShare.Value)}";
+
+		if (d.NetMidPerShare.HasValue && d.TheoreticalValuePerShare.HasValue)
+			return $"MID: {FormatDebitCredit(d.NetMidPerShare.Value)} / Theoretical: {FormatDebitCredit(d.TheoreticalValuePerShare.Value)}";
+
+		return $"long ${d.LongPremiumPaid.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.ShortPremiumReceived.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatio(d.PremiumRatio)}, net {FormatNet(d.NetCashPerShare)}";
+	}
 
 	private static string? TryFormatMarginRequirement(RiskDiagnosticOpenerScore s)
 	{

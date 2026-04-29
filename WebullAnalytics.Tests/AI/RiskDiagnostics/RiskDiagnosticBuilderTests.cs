@@ -1,4 +1,5 @@
 using WebullAnalytics.AI.RiskDiagnostics;
+using WebullAnalytics.Pricing;
 using Xunit;
 
 namespace WebullAnalytics.Tests.AI.RiskDiagnostics;
@@ -40,6 +41,15 @@ public class RiskDiagnosticBuilderTests
 		Assert.Equal(0.976m, diag.LongPremiumPaid);
 		Assert.Equal(0.256m, diag.ShortPremiumReceived);
 		Assert.Equal(0.256m - 0.976m, diag.NetCashPerShare);
+		Assert.Equal(0.71m, diag.MarketLongPremiumPaid);
+		Assert.Equal(0.07m, diag.MarketShortPremiumReceived);
+		Assert.Equal(0.71m - 0.07m, diag.NetMidPerShare);
+		Assert.Equal(0.71m - 0.07m, diag.MarketNetPremiumPerShare);
+		Assert.Equal(0.71m / 0.07m, diag.MarketPremiumRatio);
+		Assert.Equal(OptionMath.BlackScholes(24.72m, 24.50m, 7 / 365.0, OptionMath.RiskFreeRate, 0.40m, "C") - OptionMath.BlackScholes(24.72m, 25.00m, 1 / 365.0, OptionMath.RiskFreeRate, 0.40m, "C"), diag.TheoreticalValuePerShare);
+		Assert.Equal(OptionMath.BlackScholes(24.72m, 24.50m, 7 / 365.0, OptionMath.RiskFreeRate, 0.40m, "C"), diag.TheoreticalLongPremiumPaid);
+		Assert.Equal(OptionMath.BlackScholes(24.72m, 25.00m, 1 / 365.0, OptionMath.RiskFreeRate, 0.40m, "C"), diag.TheoreticalShortPremiumReceived);
+		Assert.Equal(diag.TheoreticalValuePerShare, diag.TheoreticalNetPremiumPerShare);
 		Assert.NotNull(diag.PremiumRatio);
 		Assert.Equal(24.72m, diag.SpotAtEvaluation);
 		Assert.True(diag.ShortLegOtm);

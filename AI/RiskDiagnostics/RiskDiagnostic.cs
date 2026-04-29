@@ -22,7 +22,17 @@ internal sealed record RiskDiagnostic(
 	decimal? CurrentValuePerShare,
 	decimal? UnrealizedPnlPerShare,
 	IReadOnlyList<RiskRuleHit> Rules,
-	RiskDiagnosticProbe? Probe = null);
+	RiskDiagnosticProbe? Probe = null,
+	decimal? NetMidPerShare = null,
+	decimal? TheoreticalValuePerShare = null,
+	decimal? MarketLongPremiumPaid = null,
+	decimal? MarketShortPremiumReceived = null,
+	decimal? MarketNetPremiumPerShare = null,
+	decimal? MarketPremiumRatio = null,
+	decimal? TheoreticalLongPremiumPaid = null,
+	decimal? TheoreticalShortPremiumReceived = null,
+	decimal? TheoreticalNetPremiumPerShare = null,
+	decimal? TheoreticalPremiumRatio = null);
 
 internal sealed record RiskDiagnosticProbe(
 	decimal? EnumDelta,
