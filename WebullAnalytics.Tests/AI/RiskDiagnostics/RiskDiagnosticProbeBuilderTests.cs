@@ -8,6 +8,26 @@ namespace WebullAnalytics.Tests.AI.RiskDiagnostics;
 public class RiskDiagnosticProbeBuilderTests
 {
 	[Fact]
+	public void TryBuildCandidateSkeletonRecognizesIronCondor()
+	{
+		var expiry = new DateTime(2026, 5, 8);
+		var legs = new[]
+		{
+			new DiagnosticLeg(MatchKeys.OccSymbol("GME", expiry, 23.5m, "P"), new OptionParsed("GME", expiry, "P", 23.5m), IsLong: true, Qty: 1, PricePerShare: 0.11m, CostBasisPerShare: null),
+			new DiagnosticLeg(MatchKeys.OccSymbol("GME", expiry, 24.0m, "P"), new OptionParsed("GME", expiry, "P", 24.0m), IsLong: false, Qty: 1, PricePerShare: 0.21m, CostBasisPerShare: null),
+			new DiagnosticLeg(MatchKeys.OccSymbol("GME", expiry, 26.0m, "C"), new OptionParsed("GME", expiry, "C", 26.0m), IsLong: false, Qty: 1, PricePerShare: 0.42m, CostBasisPerShare: null),
+			new DiagnosticLeg(MatchKeys.OccSymbol("GME", expiry, 26.5m, "C"), new OptionParsed("GME", expiry, "C", 26.5m), IsLong: true, Qty: 1, PricePerShare: 0.31m, CostBasisPerShare: null),
+		};
+
+		var skel = RiskDiagnosticProbeBuilder.TryBuildCandidateSkeleton(legs);
+
+		Assert.NotNull(skel);
+		Assert.Equal(OpenStructureKind.IronCondor, skel!.StructureKind);
+		Assert.Equal(expiry, skel.TargetExpiry);
+		Assert.Equal(4, skel.Legs.Count);
+	}
+
+	[Fact]
 	public void OpenerEnumDeltaUsesEnumerationDefaultIvInsteadOfLiveQuoteIv()
 	{
 		var asOf = new DateTime(2026, 4, 20);

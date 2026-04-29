@@ -117,53 +117,7 @@ internal static class RiskDiagnosticProbeBuilder
 					: quotes;
 
 				var bias = technicalBiasOverride ?? 0m;
-				CandidateSkeleton? skel = null;
-				if (legs.Count == 1)
-				{
-					var only = legs[0];
-					if (only.IsLong)
-					{
-						var kind = only.Parsed.CallPut == "C" ? OpenStructureKind.LongCall : OpenStructureKind.LongPut;
-						skel = new CandidateSkeleton(only.Parsed.Root, kind, new[] { new ProposalLeg("buy", only.Symbol, 1) }, TargetExpiry: only.Parsed.ExpiryDate);
-					}
-				}
-				else if (legs.Count == 2)
-				{
-					var shortLeg = legs.FirstOrDefault(l => !l.IsLong);
-					var longLeg = legs.FirstOrDefault(l => l.IsLong);
-					if (shortLeg != null && longLeg != null
-						&& shortLeg.Parsed.Root.Equals(longLeg.Parsed.Root, StringComparison.OrdinalIgnoreCase)
-						&& shortLeg.Parsed.CallPut == longLeg.Parsed.CallPut)
-					{
-						OpenStructureKind? kind = null;
-						DateTime target;
-
-						if (shortLeg.Parsed.ExpiryDate.Date == longLeg.Parsed.ExpiryDate.Date)
-						{
-							target = shortLeg.Parsed.ExpiryDate;
-							if (shortLeg.Parsed.CallPut == "P" && shortLeg.Parsed.Strike > longLeg.Parsed.Strike)
-								kind = OpenStructureKind.ShortPutVertical;
-							if (shortLeg.Parsed.CallPut == "C" && shortLeg.Parsed.Strike < longLeg.Parsed.Strike)
-								kind = OpenStructureKind.ShortCallVertical;
-						}
-						else if (shortLeg.Parsed.ExpiryDate.Date < longLeg.Parsed.ExpiryDate.Date)
-						{
-							target = shortLeg.Parsed.ExpiryDate;
-							kind = shortLeg.Parsed.Strike == longLeg.Parsed.Strike
-								? OpenStructureKind.LongCalendar
-								: OpenStructureKind.LongDiagonal;
-						}
-						else
-						{
-							target = shortLeg.Parsed.ExpiryDate;
-						}
-
-						if (kind.HasValue)
-							skel = new CandidateSkeleton(shortLeg.Parsed.Root, kind.Value,
-								new[] { new ProposalLeg("sell", shortLeg.Symbol, 1), new ProposalLeg("buy", longLeg.Symbol, 1) },
-								TargetExpiry: target);
-					}
-				}
+				var skel = TryBuildCandidateSkeleton(legs);
 
 				if (skel != null)
 				{
@@ -230,6 +184,103 @@ internal static class RiskDiagnosticProbeBuilder
 			EnumDeltaPass: enumPass,
 			LegQuotes: legQuotes,
 			OpenerScore: openerScore);
+	}
+
+	internal static CandidateSkeleton? TryBuildCandidateSkeleton(IReadOnlyList<DiagnosticLeg> legs)
+	{
+		if (legs.Count == 0) return null;
+		if (legs.Select(l => l.Parsed.Root).Distinct(StringComparer.OrdinalIgnoreCase).Count() != 1) return null;
+
+		if (legs.Count == 1)
+		{
+			var only = legs[0];
+			if (!only.IsLong) return null;
+			var kind = only.Parsed.CallPut == "C" ? OpenStructureKind.LongCall : OpenStructureKind.LongPut;
+			return new CandidateSkeleton(only.Parsed.Root, kind, new[] { new ProposalLeg("buy", only.Symbol, 1) }, only.Parsed.ExpiryDate);
+		}
+
+		if (legs.Count == 2)
+		{
+			var shortLeg = legs.FirstOrDefault(l => !l.IsLong);
+			var longLeg = legs.FirstOrDefault(l => l.IsLong);
+			if (shortLeg == null || longLeg == null) return null;
+			if (!shortLeg.Parsed.Root.Equals(longLeg.Parsed.Root, StringComparison.OrdinalIgnoreCase) || shortLeg.Parsed.CallPut != longLeg.Parsed.CallPut)
+				return null;
+
+			OpenStructureKind? kind = null;
+			DateTime target;
+
+			if (shortLeg.Parsed.ExpiryDate.Date == longLeg.Parsed.ExpiryDate.Date)
+			{
+				target = shortLeg.Parsed.ExpiryDate;
+				if (shortLeg.Parsed.CallPut == "P" && shortLeg.Parsed.Strike > longLeg.Parsed.Strike)
+					kind = OpenStructureKind.ShortPutVertical;
+				if (shortLeg.Parsed.CallPut == "C" && shortLeg.Parsed.Strike < longLeg.Parsed.Strike)
+					kind = OpenStructureKind.ShortCallVertical;
+			}
+			else if (shortLeg.Parsed.ExpiryDate.Date < longLeg.Parsed.ExpiryDate.Date)
+			{
+				target = shortLeg.Parsed.ExpiryDate;
+				kind = shortLeg.Parsed.Strike == longLeg.Parsed.Strike ? OpenStructureKind.LongCalendar : OpenStructureKind.LongDiagonal;
+			}
+			else
+			{
+				return null;
+			}
+
+			return kind.HasValue
+				? new CandidateSkeleton(shortLeg.Parsed.Root, kind.Value, new[] { new ProposalLeg("sell", shortLeg.Symbol, 1), new ProposalLeg("buy", longLeg.Symbol, 1) }, target)
+				: null;
+		}
+
+		if (legs.Count == 4)
+		{
+			var shorts = legs.Where(l => !l.IsLong).ToList();
+			var longs = legs.Where(l => l.IsLong).ToList();
+			if (shorts.Count != 2 || longs.Count != 2) return null;
+
+			var distinctExpiries = legs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().Count();
+			var distinctStrikes = legs.Select(l => l.Parsed.Strike).Distinct().Count();
+			var distinctCallPut = legs.Select(l => l.Parsed.CallPut).Distinct().Count();
+
+			if (distinctExpiries == 1 && distinctCallPut == 2)
+			{
+				var exp = legs[0].Parsed.ExpiryDate;
+				var kind = distinctStrikes <= 3 ? OpenStructureKind.IronButterfly : OpenStructureKind.IronCondor;
+				var orderedLegs = longs.Where(l => l.Parsed.CallPut == "P").Select(l => new ProposalLeg("buy", l.Symbol, 1))
+					.Concat(shorts.Where(l => l.Parsed.CallPut == "P").Select(l => new ProposalLeg("sell", l.Symbol, 1)))
+					.Concat(shorts.Where(l => l.Parsed.CallPut == "C").Select(l => new ProposalLeg("sell", l.Symbol, 1)))
+					.Concat(longs.Where(l => l.Parsed.CallPut == "C").Select(l => new ProposalLeg("buy", l.Symbol, 1)))
+					.ToList();
+				return new CandidateSkeleton(legs[0].Parsed.Root, kind, orderedLegs, exp);
+			}
+
+			if (distinctExpiries == 2 && distinctCallPut == 2)
+			{
+				var shortPut = shorts.FirstOrDefault(l => l.Parsed.CallPut == "P");
+				var longPut = longs.FirstOrDefault(l => l.Parsed.CallPut == "P");
+				var shortCall = shorts.FirstOrDefault(l => l.Parsed.CallPut == "C");
+				var longCall = longs.FirstOrDefault(l => l.Parsed.CallPut == "C");
+				if (shortPut == null || longPut == null || shortCall == null || longCall == null) return null;
+				if (shortPut.Parsed.ExpiryDate.Date != shortCall.Parsed.ExpiryDate.Date) return null;
+				if (longPut.Parsed.ExpiryDate.Date != longCall.Parsed.ExpiryDate.Date) return null;
+				if (shortPut.Parsed.ExpiryDate.Date >= longPut.Parsed.ExpiryDate.Date || shortCall.Parsed.ExpiryDate.Date >= longCall.Parsed.ExpiryDate.Date) return null;
+
+				var kind = shortPut.Parsed.Strike == longPut.Parsed.Strike && shortCall.Parsed.Strike == longCall.Parsed.Strike
+					? OpenStructureKind.DoubleCalendar
+					: OpenStructureKind.DoubleDiagonal;
+				var orderedLegs = new[]
+				{
+					new ProposalLeg("sell", shortPut.Symbol, 1),
+					new ProposalLeg("buy", longPut.Symbol, 1),
+					new ProposalLeg("sell", shortCall.Symbol, 1),
+					new ProposalLeg("buy", longCall.Symbol, 1),
+				};
+				return new CandidateSkeleton(legs[0].Parsed.Root, kind, orderedLegs, shortPut.Parsed.ExpiryDate);
+			}
+		}
+
+		return null;
 	}
 
 	private static IReadOnlyDictionary<string, OptionContractQuote> OverrideBidAskWithCostBasis(
