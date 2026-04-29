@@ -94,15 +94,36 @@ public class CandidateScorerLongCallPutTests
 	}
 
 	[Fact]
-	public void MissingQuoteReturnsNull()
+	public void MissingContractStillReturnsNull()
 	{
 		var asOf = new DateTime(2026, 4, 1);
 		var exp = new DateTime(2026, 5, 1);
 		var sym = MatchKeys.OccSymbol("SPY", exp, 500m, "C");
 		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongCall, new[] { new ProposalLeg("buy", sym, 1) }, TargetExpiry: exp);
-		var quotes = new Dictionary<string, OptionContractQuote>(); // empty
+		var quotes = new Dictionary<string, OptionContractQuote>();
+
 		var p = CandidateScorer.ScoreLongCallPut(skel, spot: 500m, asOf, quotes, bias: 0m, Cfg());
+
 		Assert.Null(p);
+	}
+
+	[Fact]
+	public void MissingBidAskFallsBackToBlackScholesWithWarning()
+	{
+		var asOf = new DateTime(2026, 4, 1);
+		var exp = new DateTime(2026, 5, 1);
+		var sym = MatchKeys.OccSymbol("SPY", exp, 500m, "C");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongCall, new[] { new ProposalLeg("buy", sym, 1) }, TargetExpiry: exp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[sym] = new OptionContractQuote(sym, LastPrice: null, Bid: null, Ask: null, Change: null, PercentChange: null, Volume: null, OpenInterest: null, ImpliedVolatility: 0.40m)
+		};
+
+		var p = CandidateScorer.ScoreLongCallPut(skel, spot: 500m, asOf, quotes, bias: 0m, Cfg())!;
+
+		Assert.NotNull(p);
+		Assert.NotNull(p.PricingWarning);
+		Assert.Contains("fallback Black-Scholes pricing", p.PricingWarning);
 	}
 
 	[Fact]

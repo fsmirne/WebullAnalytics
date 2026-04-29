@@ -205,6 +205,52 @@ public class CandidateScorerBiasTests
 	}
 
 	[Fact]
+	public void AdjustmentRunwayFactorRewardsResidualLongExtrinsicAfterTargetExpiry()
+	{
+		var shortExp = new DateTime(2026, 5, 1);
+		var longExp = new DateTime(2026, 5, 29);
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.LongCalendar, new[]
+		{
+			new ProposalLeg("sell", MatchKeys.OccSymbol("GME", shortExp, 25m, "P"), 1),
+			new ProposalLeg("buy", MatchKeys.OccSymbol("GME", longExp, 25m, "P"), 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[MatchKeys.OccSymbol("GME", shortExp, 25m, "P")] = TestQuote.Q(0.32m, 0.36m, 0.42m),
+			[MatchKeys.OccSymbol("GME", longExp, 25m, "P")] = TestQuote.Q(0.95m, 1.03m, 0.41m)
+		};
+
+		var factor = CandidateScorer.ComputeAdjustmentRunwayFactor(skel, new DateTime(2026, 4, 29), spot: 25.09m, quotes);
+
+		Assert.NotNull(factor);
+		Assert.True(factor.Value > 1m);
+	}
+
+	[Fact]
+	public void AdjustmentRunwayFactorIsNullWhenAllLegsExpireAtTarget()
+	{
+		var expiry = new DateTime(2026, 5, 1);
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.IronCondor, new[]
+		{
+			new ProposalLeg("buy", MatchKeys.OccSymbol("GME", expiry, 24m, "P"), 1),
+			new ProposalLeg("sell", MatchKeys.OccSymbol("GME", expiry, 24.5m, "P"), 1),
+			new ProposalLeg("sell", MatchKeys.OccSymbol("GME", expiry, 25.5m, "C"), 1),
+			new ProposalLeg("buy", MatchKeys.OccSymbol("GME", expiry, 26m, "C"), 1)
+		}, TargetExpiry: expiry);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[MatchKeys.OccSymbol("GME", expiry, 24m, "P")] = TestQuote.Q(0.05m, 0.06m, 0.43m),
+			[MatchKeys.OccSymbol("GME", expiry, 24.5m, "P")] = TestQuote.Q(0.13m, 0.14m, 0.40m),
+			[MatchKeys.OccSymbol("GME", expiry, 25.5m, "C")] = TestQuote.Q(0.24m, 0.26m, 0.46m),
+			[MatchKeys.OccSymbol("GME", expiry, 26m, "C")] = TestQuote.Q(0.14m, 0.16m, 0.51m)
+		};
+
+		var factor = CandidateScorer.ComputeAdjustmentRunwayFactor(skel, new DateTime(2026, 4, 29), spot: 25.09m, quotes);
+
+		Assert.Null(factor);
+	}
+
+	[Fact]
 	public void AssignmentRiskFactorCutsNearMoneyShortRisk()
 	{
 		var expiry = new DateTime(2026, 5, 1);

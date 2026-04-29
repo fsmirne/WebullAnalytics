@@ -80,6 +80,7 @@ internal sealed class OpenProposalSink : IDisposable
 			fingerprint = p.Fingerprint,
 			cashReserveBlocked = p.CashReserveBlocked,
 			cashReserveDetail = p.CashReserveDetail,
+			pricingWarning = p.PricingWarning,
 			thetaPerDayPerContract = p.ThetaPerDayPerContract,
 			diagnostic = p.Diagnostic is null ? null : AnalyzePositionCommand.SerializeDiagnostic(p.Diagnostic),
 		};
@@ -99,6 +100,8 @@ internal sealed class OpenProposalSink : IDisposable
 		var rows = new List<IRenderable>();
 		var legsText = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
 		rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/]"));
+        if (!string.IsNullOrWhiteSpace(p.PricingWarning))
+			rows.Add(new Markup($"[yellow]{Markup.Escape(p.PricingWarning)}[/]"));
 		if (p.CashReserveBlocked && p.CashReserveDetail != null)
 			rows.Add(new Markup($"[yellow]{Markup.Escape(p.CashReserveDetail)}[/]"));
 		if (!p.CashReserveBlocked && p.Qty > 0)
