@@ -59,7 +59,7 @@ public class AnalyzePositionVerticalScenarioTests
 		Assert.Contains(scenarios, s => s.Name == "Close all");
 		Assert.Contains(scenarios, s => s.Name.StartsWith("Roll short to $25.50", StringComparison.Ordinal));
 		var ironCondor = Assert.Single(scenarios, s => s.Name.StartsWith("Add complementary call spread", StringComparison.Ordinal));
-		Assert.Equal(0m, ironCondor.BPDeltaPerContract);
+		Assert.Equal(0m, ironCondor.MarginDeltaPerContract);
 		Assert.Contains("SELL GME260501C00026000", ironCondor.ActionSummary, StringComparison.Ordinal);
 		Assert.Contains("BUY GME260501C00027000", ironCondor.ActionSummary, StringComparison.Ordinal);
 		Assert.Contains(scenarios, s => s.Name.StartsWith("Reset to $25.50/$24.50 vertical", StringComparison.Ordinal));
@@ -93,7 +93,7 @@ public class AnalyzePositionVerticalScenarioTests
 		Assert.DoesNotContain(scenarios, s => s.Name == "Roll short to $25.50 (same exp 05-01, inverted diagonal)");
 
 		var partialRoll = Assert.Single(scenarios, s => s.Name.StartsWith("Roll short to $25.50 (same exp 05-01, inverted diagonal) · partial ", StringComparison.Ordinal));
-		Assert.True(partialRoll.BPDeltaPerContract * partialRoll.Qty <= settings.Cash);
+		Assert.True(partialRoll.MarginDeltaPerContract * partialRoll.Qty <= settings.Cash);
 		Assert.Contains("full size would need", partialRoll.Rationale, StringComparison.Ordinal);
 	}
 }
