@@ -389,7 +389,9 @@ public static class TableBuilder
 
 		if (b.NetDebitTrades != null && b.NetDebitTrades.Count > 0)
 		{
-			if (b.LastFlatTime.HasValue)
+			if (!string.IsNullOrEmpty(b.NetDebitTradesLabel))
+				items.Add(ascii ? new Text(b.NetDebitTradesLabel) : new Markup($"[bold]{Markup.Escape(b.NetDebitTradesLabel)}[/]"));
+			else if (b.LastFlatTime.HasValue)
 				items.Add(ascii ? new Text($"Trades since {b.LastFlatTime.Value:yyyy-MM-dd} (last flat):") : new Markup($"Trades since [bold]{b.LastFlatTime.Value:yyyy-MM-dd}[/] (last flat):"));
 			else
 				items.Add(new Text("All trades:"));
@@ -424,6 +426,15 @@ public static class TableBuilder
 		var afterRollNetCost = (b.PositionSide == Side.Buy ? 1m : -1m) * (b.AdjPrice ?? b.AvgPrice) * b.Qty * 100m;
 
 		string FormatSignedCost(decimal amount) => $"{(amount >= 0 ? "+" : "-")}${Math.Abs(amount).ToString("N2", CultureInfo.InvariantCulture)}";
+		IRenderable FormatChangeLine(string label, decimal amount)
+		{
+			var valueText = FormatSignedCost(amount);
+			if (ascii)
+				return new Text($"{label}: {valueText}");
+
+			var valueColor = amount < 0m ? "green" : "red";
+			return new Markup($"{Markup.Escape(label)}: [{valueColor}]{Markup.Escape(valueText)}[/]");
+		}
 		items.Add(new Text($"Open Net Cost: {FormatSignedCost(openNetCost)} {(ascii ? "/" : "÷")} ({b.OpenQty} x $100) = ${openText}/contract"));
 		items.Add(new Text($"Avg Net Cost: {FormatSignedCost(avgNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${avgText}/contract"));
 		items.Add(new Text($"After-Roll Net Cost: {FormatSignedCost(afterRollNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${afterRollText}/contract"));
@@ -431,9 +442,9 @@ public static class TableBuilder
 		var averagingChange = avgNetCost - openNetCost;
 		var rollChange = afterRollNetCost - avgNetCost;
 		if (averagingChange != 0m)
-			items.Add(new Text($"Averaging Change: {FormatSignedCost(averagingChange)}"));
+			items.Add(FormatChangeLine("Averaging Change", averagingChange));
 		if (rollChange != 0m)
-			items.Add(new Text($"Roll Change: {FormatSignedCost(rollChange)}"));
+			items.Add(FormatChangeLine("Roll Change", rollChange));
 
 		var sideText = b.OptionKind ?? (b.PositionSide == Side.Buy ? "Long" : "Short");
 		var title = $"{b.Instrument} ({sideText} {b.Qty}x)";
