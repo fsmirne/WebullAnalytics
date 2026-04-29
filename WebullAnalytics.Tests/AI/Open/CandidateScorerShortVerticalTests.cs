@@ -5,7 +5,7 @@ namespace WebullAnalytics.Tests.AI.Open;
 
 public class CandidateScorerShortVerticalTests
 {
-    private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m };
+	private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m, StrikeSteps = new() { ["SPY"] = 1.0m } };
 
 	private static (CandidateSkeleton skel, Dictionary<string, OptionContractQuote> quotes) PutCreditSpread()
 	{
@@ -83,5 +83,67 @@ public class CandidateScorerShortVerticalTests
 		var p = CandidateScorer.ScoreShortVertical(skel, spot: 500m, asOf: new DateTime(2026, 4, 20), quotes, bias: 0m, Cfg(), pricingMode: "bidask")!;
 		Assert.Equal(38m, p.DebitOrCreditPerContract);
 		Assert.Equal(62m, p.CapitalAtRiskPerContract);
+	}
+
+	[Fact]
+	public void IronButterflyCreditAndRiskAreComputed()
+	{
+		var exp = new DateTime(2026, 4, 24);
+		var longPut = MatchKeys.OccSymbol("SPY", exp, 495m, "P");
+		var shortPut = MatchKeys.OccSymbol("SPY", exp, 500m, "P");
+		var shortCall = MatchKeys.OccSymbol("SPY", exp, 500m, "C");
+		var longCall = MatchKeys.OccSymbol("SPY", exp, 505m, "C");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.IronButterfly, new[]
+		{
+			new ProposalLeg("buy", longPut, 1),
+			new ProposalLeg("sell", shortPut, 1),
+			new ProposalLeg("sell", shortCall, 1),
+			new ProposalLeg("buy", longCall, 1)
+		}, TargetExpiry: exp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[longPut] = TestQuote.Q(0.80m, 0.90m, 0.40m),
+			[shortPut] = TestQuote.Q(2.70m, 2.90m, 0.40m),
+			[shortCall] = TestQuote.Q(2.80m, 3.00m, 0.40m),
+			[longCall] = TestQuote.Q(0.75m, 0.85m, 0.40m)
+		};
+
+		var p = CandidateScorer.ScoreMultiLeg(skel, spot: 500m, asOf: new DateTime(2026, 4, 20), quotes, bias: 0m, Cfg())!;
+
+		Assert.True(p.DebitOrCreditPerContract > 0m);
+		Assert.True(p.CapitalAtRiskPerContract > 0m);
+		Assert.Equal(0, p.DirectionalFit);
+		Assert.True(p.Breakevens.Count >= 2);
+	}
+
+	[Fact]
+	public void IronCondorCreditAndRiskAreComputed()
+	{
+		var exp = new DateTime(2026, 4, 24);
+		var longPut = MatchKeys.OccSymbol("SPY", exp, 495m, "P");
+		var shortPut = MatchKeys.OccSymbol("SPY", exp, 500m, "P");
+		var shortCall = MatchKeys.OccSymbol("SPY", exp, 505m, "C");
+		var longCall = MatchKeys.OccSymbol("SPY", exp, 510m, "C");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.IronCondor, new[]
+		{
+			new ProposalLeg("buy", longPut, 1),
+			new ProposalLeg("sell", shortPut, 1),
+			new ProposalLeg("sell", shortCall, 1),
+			new ProposalLeg("buy", longCall, 1)
+		}, TargetExpiry: exp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[longPut] = TestQuote.Q(0.80m, 0.90m, 0.40m),
+			[shortPut] = TestQuote.Q(2.10m, 2.30m, 0.40m),
+			[shortCall] = TestQuote.Q(1.90m, 2.10m, 0.40m),
+			[longCall] = TestQuote.Q(0.75m, 0.85m, 0.40m)
+		};
+
+		var p = CandidateScorer.ScoreMultiLeg(skel, spot: 502m, asOf: new DateTime(2026, 4, 20), quotes, bias: 0m, Cfg())!;
+
+		Assert.True(p.DebitOrCreditPerContract > 0m);
+		Assert.True(p.CapitalAtRiskPerContract > 0m);
+		Assert.Equal(0, p.DirectionalFit);
+		Assert.True(p.Breakevens.Count >= 2);
 	}
 }

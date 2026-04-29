@@ -5,7 +5,11 @@ namespace WebullAnalytics.AI;
 public enum OpenStructureKind
 {
 	LongCalendar,
+	DoubleCalendar,
 	LongDiagonal,
+	DoubleDiagonal,
+	IronButterfly,
+	IronCondor,
 	ShortPutVertical,
 	ShortCallVertical,
 	LongCall,

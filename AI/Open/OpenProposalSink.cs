@@ -74,7 +74,7 @@ internal sealed class OpenProposalSink : IDisposable
 			fingerprint = p.Fingerprint,
 			cashReserveBlocked = p.CashReserveBlocked,
 			cashReserveDetail = p.CashReserveDetail,
-            thetaPerDayPerContract = p.ThetaPerDayPerContract,
+			thetaPerDayPerContract = p.ThetaPerDayPerContract,
 			diagnostic = p.Diagnostic is null ? null : AnalyzePositionCommand.SerializeDiagnostic(p.Diagnostic),
 		};
 		_file.WriteLine(JsonSerializer.Serialize(record));
@@ -84,9 +84,9 @@ internal sealed class OpenProposalSink : IDisposable
 	{
 		var color = p.StructureKind switch
 		{
-			OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => "green",
+			OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => "green",
 			OpenStructureKind.LongCall or OpenStructureKind.LongPut => "cyan",
-			OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => "magenta",
+			OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal => "magenta",
 			_ => "white"
 		};
 

@@ -13,7 +13,11 @@ internal static class DirectionalFit
 		OpenStructureKind.LongPut => -1,
 		OpenStructureKind.ShortCallVertical => -1,
 		OpenStructureKind.LongCalendar => 0,
+		OpenStructureKind.DoubleCalendar => 0,
 		OpenStructureKind.LongDiagonal => 0,
+		OpenStructureKind.DoubleDiagonal => 0,
+		OpenStructureKind.IronButterfly => 0,
+		OpenStructureKind.IronCondor => 0,
 		_ => 0
 	};
 }
