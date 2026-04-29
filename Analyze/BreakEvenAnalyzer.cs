@@ -524,8 +524,8 @@ public static class BreakEvenAnalyzer
 	{
 		var premium = OptionMath.GetPremium(row);
 		var premiumStr = Formatters.FormatPrice(premium, row.Asset);
-		var hasAdjustment = row.AdjustedAvgPrice.HasValue && row.AdjustedAvgPrice.Value != (row.InitialAvgPrice ?? row.AvgPrice);
-		var adjSuffix = hasAdjustment ? " adj" : "";
+		var hasRollAdjustment = row.AdjustedAvgPrice.HasValue && row.AdjustedAvgPrice.Value != row.AvgPrice;
+		var adjSuffix = hasRollAdjustment ? " after-roll" : "";
 		var expiry = expiryOverride ?? row.Expiry;
 		var expiryStr = expiry.HasValue ? Formatters.FormatOptionDate(expiry.Value) : "N/A";
 		return $"{row.Qty}x @ ${premiumStr}{adjSuffix}, Exp {expiryStr}";

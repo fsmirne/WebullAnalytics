@@ -61,10 +61,10 @@ public class PositionReplayTests
 
 		Assert.Equal(2, parents.Count);
 		Assert.Contains(parents, row => row.OptionKind == "Calendar" && row.Qty == 348);
-		Assert.Equal(0.24m, decimal.Round(diagonalParent.InitialAvgPrice!.Value, 2));
-		Assert.Equal(0.314m, decimal.Round(diagonalParent.AdjustedAvgPrice!.Value, 3));
-		Assert.Equal(0.71m, decimal.Round(diagonalLong.InitialAvgPrice!.Value, 2));
-		Assert.Equal(0.784m, decimal.Round(diagonalLong.AdjustedAvgPrice!.Value, 3));
+		Assert.Equal(0.71m, decimal.Round(diagonalParent.InitialAvgPrice!.Value, 2));
+		Assert.Equal(0.52m, decimal.Round(diagonalParent.AdjustedAvgPrice!.Value, 2));
+		Assert.Equal(1.07m, decimal.Round(diagonalLong.InitialAvgPrice!.Value, 2));
+		Assert.Equal(0.99m, decimal.Round(diagonalLong.AdjustedAvgPrice!.Value, 2));
 		Assert.Equal(0.47m, decimal.Round(diagonalShort.InitialAvgPrice!.Value, 2));
 		Assert.Equal(0.47m, decimal.Round(diagonalShort.AdjustedAvgPrice!.Value, 2));
 		Assert.DoesNotContain(rows, row => row.Asset == Asset.Option && !row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(shortDiagonalSymbol));
@@ -100,7 +100,7 @@ public class PositionReplayTests
 		Assert.Equal(2, parents.Count);
 		Assert.Equal(0.71m, decimal.Round(calendarParent.InitialAvgPrice!.Value, 2));
 		Assert.Equal(0.71m, decimal.Round(calendarParent.AdjustedAvgPrice!.Value, 2));
-		Assert.Equal(0.32m, decimal.Round(diagonalParent.InitialAvgPrice!.Value, 2));
+	  Assert.Equal(0.32m, decimal.Round(diagonalParent.InitialAvgPrice!.Value, 2));
 		Assert.Equal(0.935m, decimal.Round(diagonalParent.AdjustedAvgPrice!.Value, 3));
 		Assert.Equal(1.255m, decimal.Round(diagonalLong.InitialAvgPrice!.Value, 3));
 		Assert.Equal(1.255m, decimal.Round(diagonalLong.AdjustedAvgPrice!.Value, 3));
@@ -134,7 +134,9 @@ public class PositionReplayTests
 		var diagonalParent = parents.Single(row => row.OptionKind == "Diagonal" && row.Qty == 152);
 
 		Assert.Equal(2, parents.Count);
+		Assert.Equal(0.71m, decimal.Round(calendarParent.InitialAvgPrice!.Value, 2));
 		Assert.Equal(0.71m, decimal.Round(calendarParent.AdjustedAvgPrice!.Value, 2));
+		Assert.Equal(0.935m, decimal.Round(diagonalParent.InitialAvgPrice!.Value, 3));
 		Assert.Equal(0.935m, decimal.Round(diagonalParent.AdjustedAvgPrice!.Value, 3));
 		Assert.DoesNotContain(rows, row => row.Asset == Asset.OptionStrategy && row.Qty == 152 && row.MatchKey == null && row.OptionKind == "Butterfly");
 		Assert.DoesNotContain(rows, row => row.Asset == Asset.Option && !row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(shortCalendarSymbol));
@@ -161,5 +163,54 @@ public class PositionReplayTests
 		Assert.DoesNotContain(rows, row => row.Asset == Asset.OptionStrategy);
 		Assert.Contains(rows, row => row.Asset == Asset.Option && !row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(longSymbol) && row.Qty == 126);
 		Assert.Contains(rows, row => row.Asset == Asset.Option && !row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(shortSymbol) && row.Qty == 100);
+	}
+
+	[Fact]
+	public void Execute_SplitsMixedQuantitySharedShortIntoSeparateCalendars()
+	{
+		var shortExpiry = new DateTime(2026, 5, 1);
+		var midExpiry = new DateTime(2026, 5, 15);
+		var longExpiry = new DateTime(2026, 5, 22);
+		var shortSymbol = MatchKeys.OccSymbol("GME", shortExpiry, 25m, "P");
+		var midSymbol = MatchKeys.OccSymbol("GME", midExpiry, 25m, "P");
+		var longSymbol = MatchKeys.OccSymbol("GME", longExpiry, 25m, "P");
+		var timestamp = new DateTime(2026, 4, 27, 12, 37, 2, DateTimeKind.Utc);
+
+		var trades = new List<Trade>
+		{
+			new(1, timestamp, "GME 22 May 2026", "strategy:Calendar:GME:2026-05-22:P25", Asset.OptionStrategy, "Calendar", Side.Buy, 474, 0.71m, Trade.OptionMultiplier, longExpiry),
+			new(2, timestamp, Formatters.FormatOptionDisplay("GME", shortExpiry, 25m), MatchKeys.Option(shortSymbol), Asset.Option, "Put", Side.Sell, 474, 0.36m, Trade.OptionMultiplier, shortExpiry, 1),
+			new(3, timestamp, Formatters.FormatOptionDisplay("GME", longExpiry, 25m), MatchKeys.Option(longSymbol), Asset.Option, "Put", Side.Buy, 474, 1.07m, Trade.OptionMultiplier, longExpiry, 1),
+			new(4, timestamp.AddDays(2), "GME 22 May 2026", "strategy:Calendar:GME:2026-05-22:P25", Asset.OptionStrategy, "Calendar", Side.Buy, 115, 0.53m, Trade.OptionMultiplier, longExpiry),
+			new(5, timestamp.AddDays(2), Formatters.FormatOptionDisplay("GME", shortExpiry, 25m), MatchKeys.Option(shortSymbol), Asset.Option, "Put", Side.Sell, 115, 0.8942m, Trade.OptionMultiplier, shortExpiry, 4),
+			new(6, timestamp.AddDays(2), Formatters.FormatOptionDisplay("GME", longExpiry, 25m), MatchKeys.Option(longSymbol), Asset.Option, "Put", Side.Buy, 115, 1.42m, Trade.OptionMultiplier, longExpiry, 4),
+			new(7, timestamp.AddDays(2).AddHours(1), "GME 15 May 2026", "strategy:Calendar:GME:2026-05-15:P25", Asset.OptionStrategy, "Calendar", Side.Sell, 300, 0.130134m, Trade.OptionMultiplier, midExpiry),
+			new(8, timestamp.AddDays(2).AddHours(1), Formatters.FormatOptionDisplay("GME", longExpiry, 25m), MatchKeys.Option(longSymbol), Asset.Option, "Put", Side.Sell, 300, 1.36m, Trade.OptionMultiplier, longExpiry, 7),
+			new(9, timestamp.AddDays(2).AddHours(1), Formatters.FormatOptionDisplay("GME", midExpiry, 25m), MatchKeys.Option(midSymbol), Asset.Option, "Put", Side.Buy, 300, 1.23m, Trade.OptionMultiplier, midExpiry, 7),
+		};
+
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var parents = rows.Where(r => r.Asset == Asset.OptionStrategy).OrderBy(r => r.Qty).ToList();
+
+		Assert.Equal(2, parents.Count);
+		Assert.Contains(parents, row => row.OptionKind == "Calendar" && row.Qty == 289 && row.Instrument == "GME 22 May 2026");
+		Assert.Contains(parents, row => row.OptionKind == "Calendar" && row.Qty == 300 && row.Instrument == "GME 15 May 2026");
+		Assert.Contains(parents, row => row.OptionKind == "Calendar" && row.Qty == 289 && decimal.Round(row.InitialAvgPrice!.Value, 2) == 0.71m && row.OpenQty == 474);
+		Assert.Contains(parents, row => row.OptionKind == "Calendar" && row.Qty == 300 && decimal.Round(row.InitialAvgPrice!.Value, 2) == 0.71m && row.OpenQty == 474);
+		Assert.Contains(parents, row => row.OptionKind == "Calendar" && row.Qty == 289 && decimal.Round(row.AdjustedAvgPrice!.Value, 3) == 0.674m);
+		Assert.Contains(parents, row => row.OptionKind == "Calendar" && row.Qty == 300 && decimal.Round(row.AdjustedAvgPrice!.Value, 3) == 0.544m);
+		Assert.DoesNotContain(rows, row => row.Asset == Asset.OptionStrategy && row.OptionKind == "Butterfly");
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(shortSymbol) && row.Qty == 289 && decimal.Round(row.InitialAvgPrice!.Value, 2) == 0.36m);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(shortSymbol) && row.Qty == 300 && decimal.Round(row.InitialAvgPrice!.Value, 2) == 0.36m);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(longSymbol) && row.Qty == 289 && decimal.Round(row.InitialAvgPrice!.Value, 2) == 1.07m);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(midSymbol) && row.Qty == 300 && decimal.Round(row.InitialAvgPrice!.Value, 2) == 1.23m);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(shortSymbol) && row.Qty == 289 && decimal.Round(row.AdjustedAvgPrice!.Value, 3) == 0.464m);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(shortSymbol) && row.Qty == 300 && decimal.Round(row.AdjustedAvgPrice!.Value, 3) == 0.464m);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(longSymbol) && row.Qty == 289 && decimal.Round(row.AdjustedAvgPrice!.Value, 3) == 1.138m);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(midSymbol) && row.Qty == 300 && decimal.Round(row.AdjustedAvgPrice!.Value, 3) == 1.008m);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(shortSymbol) && row.Qty == 289);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(shortSymbol) && row.Qty == 300);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(longSymbol) && row.Qty == 289);
+		Assert.Contains(rows, row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(midSymbol) && row.Qty == 300);
 	}
 }
