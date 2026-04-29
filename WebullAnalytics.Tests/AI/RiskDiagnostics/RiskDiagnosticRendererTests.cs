@@ -96,8 +96,8 @@ public class RiskDiagnosticRendererTests
 			Rules: Array.Empty<RiskRuleHit>());
 
 		var text = Render(diagnostic);
-		Assert.Contains("Î” +0.0043", text);
-		Assert.DoesNotContain("Î” +0.00   Î¸ +$5.14/day", text);
+		Assert.Contains("Δ +0.0043", text);
+		Assert.DoesNotContain("Δ +0.00   θ +$5.14/day", text);
 	}
 
 	[Fact]
