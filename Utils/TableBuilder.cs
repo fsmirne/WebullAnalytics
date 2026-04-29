@@ -97,14 +97,16 @@ public static class TableBuilder
 		if (!simplified) table.AddColumn(new TableColumn("Option").LeftAligned());
 		table.AddColumn(new TableColumn("Side").LeftAligned());
 		table.AddColumn(new TableColumn("Qty").RightAligned());
-		table.AddColumn(new TableColumn("Init Price").RightAligned());
-		table.AddColumn(new TableColumn("Adj Price").RightAligned());
+		table.AddColumn(new TableColumn("Open Cost").RightAligned());
+		table.AddColumn(new TableColumn("Avg Cost").RightAligned());
+		table.AddColumn(new TableColumn("After-Roll Cost").RightAligned());
 		table.AddColumn(new TableColumn("Expiry").RightAligned());
 
 		foreach (var row in rows)
 		{
-			var initPrice = Formatters.FormatPrice(row.InitialAvgPrice ?? row.AvgPrice, row.Asset);
-			var adjPrice = row.AdjustedAvgPrice.HasValue ? Formatters.FormatPrice(row.AdjustedAvgPrice.Value, row.Asset) : "-";
+			var openCost = Formatters.FormatPrice(row.InitialAvgPrice ?? row.AvgPrice, row.Asset);
+			var avgCost = Formatters.FormatPrice(row.AvgPrice, row.Asset);
+			var afterRollCost = Formatters.FormatPrice(row.AdjustedAvgPrice ?? row.AvgPrice, row.Asset);
 			var instrument = row.IsStrategyLeg ? $"{legPrefix}{row.Instrument}" : row.Instrument;
 
 			var cells = new List<IRenderable> { new Text(instrument) };
@@ -112,8 +114,9 @@ public static class TableBuilder
 			if (!simplified) cells.Add(new Text(row.OptionKind));
 			cells.Add(new Text(row.Side.ToString()));
 			cells.Add(new Text(Formatters.FormatQty(row.Qty)));
-			cells.Add(new Text(initPrice));
-			cells.Add(new Text(adjPrice));
+			cells.Add(new Text(openCost));
+			cells.Add(new Text(avgCost));
+			cells.Add(new Text(afterRollCost));
 			cells.Add(new Text(Formatters.FormatExpiry(row.Expiry)));
 			table.AddRow(cells.ToArray());
 		}
@@ -121,7 +124,7 @@ public static class TableBuilder
 		return table;
 	}
 
-  public static Panel BuildBreakEvenPanel(BreakEvenResult result, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false, string displayMode = "pnl", bool showLegs = false)
+	public static Panel BuildBreakEvenPanel(BreakEvenResult result, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false, string displayMode = "pnl", bool showLegs = false)
 	{
 		var dteText = result.DaysToExpiry.HasValue ? result.DaysToExpiry.Value.ToString() : (ascii ? "-" : "—");
 		var sep = ascii ? "|" : "│";
@@ -335,7 +338,7 @@ public static class TableBuilder
 
 	public static Panel BuildAdjustmentPanel(PriceBreakdown b, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false)
 	{
-        var items = new List<IRenderable>();
+		var items = new List<IRenderable>();
 		var sep = ascii ? "|" : "│";
 
 		if (b.CostSteps != null && b.CostSteps.Count > 0)
@@ -413,61 +416,24 @@ public static class TableBuilder
 
 		// Summary line
 		items.Add(new Text(""));
-		var initText = Formatters.FormatPrice(b.InitPrice, b.Asset);
+		var openText = Formatters.FormatPrice(b.InitPrice, b.Asset);
+		var avgText = Formatters.FormatPrice(b.AvgPrice, b.Asset);
+		var afterRollText = Formatters.FormatPrice(b.AdjPrice ?? b.AvgPrice, b.Asset);
+		var openNetCost = b.InitNetDebit ?? ((b.PositionSide == Side.Buy ? 1m : -1m) * b.InitPrice * b.OpenQty * 100m);
+		var avgNetCost = (b.PositionSide == Side.Buy ? 1m : -1m) * b.AvgPrice * b.Qty * 100m;
+		var afterRollNetCost = (b.PositionSide == Side.Buy ? 1m : -1m) * (b.AdjPrice ?? b.AvgPrice) * b.Qty * 100m;
 
-		if (b.AdjPrice.HasValue && b.AdjPrice.Value != b.InitPrice)
-		{
-			var adjText = Formatters.FormatPrice(b.AdjPrice.Value, b.Asset);
+		string FormatSignedCost(decimal amount) => $"{(amount >= 0 ? "+" : "-")}${Math.Abs(amount).ToString("N2", CultureInfo.InvariantCulture)}";
+		items.Add(new Text($"Open Net Cost: {FormatSignedCost(openNetCost)} {(ascii ? "/" : "÷")} ({b.OpenQty} x $100) = ${openText}/contract"));
+		items.Add(new Text($"Avg Net Cost: {FormatSignedCost(avgNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${avgText}/contract"));
+		items.Add(new Text($"After-Roll Net Cost: {FormatSignedCost(afterRollNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${afterRollText}/contract"));
 
-			if (b.TotalNetDebit.HasValue)
-			{
-				var initDebit = b.InitNetDebit ?? (b.PositionSide == Side.Buy ? 1m : -1m) * b.InitPrice * b.Qty * 100m;
-				var initQty = b.InitNetDebit.HasValue && b.InitPrice != 0 ? (int)Math.Round(Math.Abs(b.InitNetDebit.Value) / (b.InitPrice * 100m)) : b.Qty;
-				var initDebitLabel = initDebit >= 0 ? "Init Net Debit" : "Init Net Credit";
-               var initDebitText = Math.Abs(initDebit).ToString("N2", CultureInfo.InvariantCulture);
-				items.Add(new Text($"{initDebitLabel}: ${initDebitText} {(ascii ? "/" : "÷")} ({initQty} x $100) = ${initText}/contract"));
-
-             // Adj Net Debit is derived from current Qty × AdjPrice so numerator, denominator,
-				// and per-contract result are self-consistent. Using the replay's TotalNetDebit
-				// (which is cumulative across the full position history) would mismatch the
-				// denominator when contracts have split off into a sibling group.
-				var adjDebit = (b.PositionSide == Side.Buy ? 1m : -1m) * b.AdjPrice.Value * b.Qty * 100m;
-              var adjLabel = adjDebit >= 0 ? "Adj Net Debit" : "Adj Net Credit";
-				var debitText = Math.Abs(adjDebit).ToString("N2", CultureInfo.InvariantCulture);
-				items.Add(new Text($"{adjLabel}: ${debitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${adjText}/contract"));
-
-				var perContractDiff = b.AdjPrice.Value - b.InitPrice;
-				var diff = perContractDiff * b.Qty * 100m;
-				var diffText = Math.Abs(diff).ToString("N2", CultureInfo.InvariantCulture);
-				var diffSign = diff >= 0 ? "+" : "-";
-				var diffAmount = $"{diffSign}${diffText}";
-				if (ascii)
-					items.Add(new Text($"Difference: {diffAmount}"));
-				else
-				{
-					var diffColor = diff <= 0 ? "green" : "red";
-					items.Add(new Markup($"Difference: [{diffColor}]{Markup.Escape(diffAmount)}[/]"));
-				}
-			}
-
-			if (b.Credits != null && b.Credits.Count > 0)
-			{
-                var totalAdj = (b.InitPrice - b.AdjPrice.Value) * b.Qty;
-				var adjAmount = totalAdj.ToString("N2", CultureInfo.InvariantCulture);
-				items.Add(new Text($"Adj = ${initText} - ${adjAmount} {(ascii ? "/" : "÷")} {b.Qty} = ${adjText}"));
-			}
-		}
-		else if (b.TotalNetDebit.HasValue)
-		{
-			var netDebit = b.TotalNetDebit.Value;
-         var label = netDebit >= 0 ? "Net Debit" : "Net Credit";
-			var debitText = Math.Abs(netDebit).ToString("N2", CultureInfo.InvariantCulture);
-			items.Add(new Text($"{label}: ${debitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${initText}/contract"));
-		}
-		else
-		{
-			items.Add(new Text($"Avg: ${initText} (no adjustment)"));
-		}
+		var averagingChange = avgNetCost - openNetCost;
+		var rollChange = afterRollNetCost - avgNetCost;
+		if (averagingChange != 0m)
+			items.Add(new Text($"Averaging Change: {FormatSignedCost(averagingChange)}"));
+		if (rollChange != 0m)
+			items.Add(new Text($"Roll Change: {FormatSignedCost(rollChange)}"));
 
 		var sideText = b.OptionKind ?? (b.PositionSide == Side.Buy ? "Long" : "Short");
 		var title = $"{b.Instrument} ({sideText} {b.Qty}x)";
@@ -511,7 +477,7 @@ public static class TableBuilder
 	}
 
 	/// <summary>
-  /// Computes unrealized P&L for all open positions. When theoretical mode is active and IV
+	/// Computes unrealized P&L for all open positions. When theoretical mode is active and IV
 	/// is available, uses Black-Scholes pricing; otherwise uses market mid prices from Yahoo quotes.
 	/// Returns null if no pricing source is available, or if the report is pinned to a past
 	/// snapshot date (via --until) — historical positions can't be valued with today's quotes.
@@ -578,7 +544,7 @@ public static class TableBuilder
 	}
 
 	/// <summary>
-    /// Computes the maximum number of date columns that fit in a given total width.
+	/// Computes the maximum number of date columns that fit in a given total width.
 	/// Layout: panel borders (4) + table outer borders (2) + price column (11) + N × date column (15 for pnl, 10 for value).
 	/// Each Spectre table column = content + 2 padding + 1 separator.
 	/// </summary>

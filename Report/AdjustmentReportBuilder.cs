@@ -6,7 +6,7 @@ public record CostStep(DateTime Timestamp, string Instrument, Side Side, int Tra
 public record StrategyCredit(string Instrument, int Qty, decimal LotPrice, decimal ParentPrice);
 public record NetDebitTrade(DateTime Timestamp, string Instrument, Side Side, int Qty, decimal Price, decimal CashImpact);
 public record StrategyAdjustment(List<NetDebitTrade> Trades, decimal TotalNetDebit, DateTime? LastFlatTime, decimal? InitNetDebit = null);
-public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, decimal InitPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime, string? OptionKind = null, decimal? InitNetDebit = null, List<NetDebitTrade>? StandaloneAdjustments = null);
+public record PriceBreakdown(string Instrument, Asset Asset, Side PositionSide, int Qty, int OpenQty, decimal InitPrice, decimal AvgPrice, decimal? AdjPrice, List<CostStep>? CostSteps, List<StrategyCredit>? Credits, List<NetDebitTrade>? NetDebitTrades, decimal? TotalNetDebit, DateTime? LastFlatTime, string? OptionKind = null, decimal? InitNetDebit = null, List<NetDebitTrade>? StandaloneAdjustments = null);
 
 /// <summary>
 /// Builds per-position breakdowns showing how each adjusted price was calculated.
@@ -57,11 +57,13 @@ internal static class AdjustmentReportBuilder
 		var costSteps = BuildCostSteps(row.MatchKey, allTrades);
 		var credits = BuildStrategyCredits(row.MatchKey, positions, allTrades, tradeBySeq);
 
-		var hasAdjustment = row.AdjustedAvgPrice.HasValue && row.InitialAvgPrice.HasValue && row.AdjustedAvgPrice.Value != row.InitialAvgPrice.Value;
-		if (!hasAdjustment && credits.Count == 0) return null;
+		var openCost = row.InitialAvgPrice ?? row.AvgPrice;
+		var avgCost = row.AvgPrice;
+		var afterRollCost = row.AdjustedAvgPrice ?? row.AvgPrice;
+		var hasChange = openCost != avgCost || afterRollCost != avgCost;
+		if (!hasChange && credits.Count == 0) return null;
 
-		var initPrice = row.InitialAvgPrice ?? row.AvgPrice;
-		return new PriceBreakdown(row.Instrument, row.Asset, row.Side, row.Qty, initPrice, row.AdjustedAvgPrice, costSteps, credits.Count > 0 ? credits : null, null, null, null, StandaloneAdjustments: standaloneAdjustments);
+		return new PriceBreakdown(row.Instrument, row.Asset, row.Side, row.Qty, row.OpenQty ?? row.Qty, openCost, avgCost, row.AdjustedAvgPrice, costSteps, credits.Count > 0 ? credits : null, null, null, null, StandaloneAdjustments: standaloneAdjustments);
 	}
 
 	private static List<CostStep> BuildCostSteps(string matchKey, List<Trade> allTrades)
@@ -105,19 +107,20 @@ internal static class AdjustmentReportBuilder
 	{
 		if (adjustment != null && adjustment.Trades.Count >= 2)
 		{
-			var initPrice = summaryRow.InitialAvgPrice ?? summaryRow.AvgPrice;
-			return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, initPrice, summaryRow.AdjustedAvgPrice, null, null, adjustment.Trades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind, adjustment.InitNetDebit);
+			var openCost = summaryRow.InitialAvgPrice ?? summaryRow.AvgPrice;
+			return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, summaryRow.OpenQty ?? summaryRow.Qty, openCost, summaryRow.AvgPrice, summaryRow.AdjustedAvgPrice, null, null, adjustment.Trades, adjustment.TotalNetDebit, adjustment.LastFlatTime, summaryRow.OptionKind, adjustment.InitNetDebit);
 		}
 
 		// Fallback: for partial-brand-new groups the replay produced no trades, but the strategy still
 		// has a non-trivial Init vs Adj delta because one leg inherited an adjusted price from a sibling
 		// group. Emit a minimal breakdown so the user can see where the adjustment came from.
-		if (summaryRow.InitialAvgPrice.HasValue && summaryRow.AdjustedAvgPrice.HasValue
-			&& summaryRow.InitialAvgPrice.Value != summaryRow.AdjustedAvgPrice.Value)
+		var openCostFallback = summaryRow.InitialAvgPrice ?? summaryRow.AvgPrice;
+		var afterRollFallback = summaryRow.AdjustedAvgPrice ?? summaryRow.AvgPrice;
+		if (openCostFallback != summaryRow.AvgPrice || afterRollFallback != summaryRow.AvgPrice)
 		{
-			var initDebit = summaryRow.InitialAvgPrice.Value * summaryRow.Qty * Trade.OptionMultiplier;
-			var adjDebit = summaryRow.AdjustedAvgPrice.Value * summaryRow.Qty * Trade.OptionMultiplier;
-			return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, summaryRow.InitialAvgPrice.Value, summaryRow.AdjustedAvgPrice, null, null, new List<NetDebitTrade>(), adjDebit, null, summaryRow.OptionKind, initDebit);
+			var initDebit = openCostFallback * summaryRow.Qty * Trade.OptionMultiplier;
+			var adjDebit = afterRollFallback * summaryRow.Qty * Trade.OptionMultiplier;
+			return new PriceBreakdown(summaryRow.Instrument, summaryRow.Asset, summaryRow.Side, summaryRow.Qty, summaryRow.OpenQty ?? summaryRow.Qty, openCostFallback, summaryRow.AvgPrice, summaryRow.AdjustedAvgPrice, null, null, new List<NetDebitTrade>(), adjDebit, null, summaryRow.OptionKind, initDebit);
 		}
 
 		return null;
