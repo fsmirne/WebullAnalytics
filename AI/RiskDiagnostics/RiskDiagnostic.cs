@@ -1,4 +1,4 @@
-namespace WebullAnalytics.AI.RiskDiagnostics;
+﻿namespace WebullAnalytics.AI.RiskDiagnostics;
 
 internal sealed record RiskDiagnostic(
 	string StructureLabel,
@@ -56,7 +56,8 @@ internal sealed record RiskDiagnosticOpenerScore(
 	decimal? RawScore,
 	decimal? BiasAdjustedScore,
 	string? Rationale,
-	decimal? ThetaPerDayPerContract = null);
+	decimal? ThetaPerDayPerContract = null,
+	decimal? FinalScore = null);
 
 internal sealed record RiskRuleHit(
 	string Id,

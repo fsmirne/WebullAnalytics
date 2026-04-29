@@ -1,4 +1,4 @@
-using WebullAnalytics.AI;
+﻿using WebullAnalytics.AI;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Sources;
 using Xunit;
@@ -15,12 +15,16 @@ public class OpenCandidateEvaluatorTests
 			=> Task.FromResult(_snapshot);
 	}
 
-	private static AIConfig BuildConfig(OpenerConfig opener) => new()
+	private static AIConfig BuildConfig(OpenerConfig opener)
 	{
-		Tickers = new() { "SPY" },
-		Opener = opener,
-		CashReserve = new CashReserveConfig { Mode = "absolute", Value = 0m }
-	};
+		opener.StrikeSteps["SPY"] = 1m;
+		return new AIConfig
+		{
+			Tickers = new() { "SPY" },
+			Opener = opener,
+			CashReserve = new CashReserveConfig { Mode = "absolute", Value = 0m }
+		};
+	}
 
 	private static EvaluationContext BuildContext(decimal cash, decimal spot, IReadOnlyDictionary<string, OptionContractQuote> quotes) => new(
 		Now: new DateTime(2026, 4, 20, 10, 0, 0),
@@ -50,7 +54,8 @@ public class OpenCandidateEvaluatorTests
 		DirectionalFit: 0,
 		Rationale: "test rationale",
 		Fingerprint: fingerprint,
-		ThetaPerDayPerContract: thetaPerDayPerContract
+		ThetaPerDayPerContract: thetaPerDayPerContract,
+		FinalScore: score * CandidateScorer.ComputeThetaFactor(thetaPerDayPerContract, 500m)
 	);
 
 	[Fact]
@@ -103,29 +108,29 @@ public class OpenCandidateEvaluatorTests
 	}
 
 	[Fact]
-	public void RankForOutputPrefersHigherCalendarThetaPerDay()
+	public void RankForOutputUsesFinalScoreForCalendars()
 	{
 		var currentWeek = MakeProposal(OpenStructureKind.LongCalendar, daysToTarget: 4, score: 0.40m, fingerprint: "near", thetaPerDayPerContract: 4.00m);
 		var nextWeek = MakeProposal(OpenStructureKind.LongCalendar, daysToTarget: 11, score: 1.00m, fingerprint: "far", thetaPerDayPerContract: 1.00m);
 
 		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { nextWeek, currentWeek });
 
-		Assert.Equal(new[] { "near", "far" }, ranked.Select(p => p.Fingerprint).ToArray());
+		Assert.Equal(new[] { "far", "near" }, ranked.Select(p => p.Fingerprint).ToArray());
 	}
 
 	[Fact]
-	public void RankForOutputTreatsDoubleDiagonalAsCalendarLike()
+	public void RankForOutputUsesFinalScoreForDoubleDiagonal()
 	{
 		var near = MakeProposal(OpenStructureKind.DoubleDiagonal, daysToTarget: 4, score: 0.40m, fingerprint: "near", thetaPerDayPerContract: 4.00m);
 		var far = MakeProposal(OpenStructureKind.DoubleDiagonal, daysToTarget: 11, score: 1.00m, fingerprint: "far", thetaPerDayPerContract: 1.00m);
 
 		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { far, near });
 
-		Assert.Equal(new[] { "near", "far" }, ranked.Select(p => p.Fingerprint).ToArray());
+		Assert.Equal(new[] { "far", "near" }, ranked.Select(p => p.Fingerprint).ToArray());
 	}
 
 	[Fact]
-	public void RankForOutputStillUsesScoreWhenCalendarThetaIsComparable()
+	public void RankForOutputUsesFinalScoreWhenCalendarThetaIsComparable()
 	{
 		var currentWeek = MakeProposal(OpenStructureKind.LongDiagonal, daysToTarget: 4, score: 1.00m, fingerprint: "near", thetaPerDayPerContract: 1.00m);
 		var nextWeek = MakeProposal(OpenStructureKind.LongDiagonal, daysToTarget: 11, score: 1.30m, fingerprint: "far", thetaPerDayPerContract: 1.10m);
@@ -136,25 +141,25 @@ public class OpenCandidateEvaluatorTests
 	}
 
 	[Fact]
-	public void RankForOutputTreatsDoubleCalendarAsCalendarLike()
+	public void RankForOutputUsesFinalScoreForDoubleCalendar()
 	{
 		var near = MakeProposal(OpenStructureKind.DoubleCalendar, daysToTarget: 4, score: 0.40m, fingerprint: "near", thetaPerDayPerContract: 4.00m);
 		var far = MakeProposal(OpenStructureKind.DoubleCalendar, daysToTarget: 11, score: 1.00m, fingerprint: "far", thetaPerDayPerContract: 1.00m);
 
 		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { far, near });
 
-		Assert.Equal(new[] { "near", "far" }, ranked.Select(p => p.Fingerprint).ToArray());
+		Assert.Equal(new[] { "far", "near" }, ranked.Select(p => p.Fingerprint).ToArray());
 	}
 
 	[Fact]
-	public void RankForOutputPrefersHigherVerticalThetaPerDay()
+	public void RankForOutputUsesFinalScoreForVerticals()
 	{
 		var highTheta = MakeProposal(OpenStructureKind.ShortPutVertical, daysToTarget: 4, score: 0.40m, fingerprint: "high-theta", thetaPerDayPerContract: 3.00m);
 		var highScore = MakeProposal(OpenStructureKind.ShortPutVertical, daysToTarget: 10, score: 1.00m, fingerprint: "high-score", thetaPerDayPerContract: 1.00m);
 
 		var ranked = OpenCandidateEvaluator.RankForOutput(new[] { highScore, highTheta });
 
-		Assert.Equal(new[] { "high-theta", "high-score" }, ranked.Select(p => p.Fingerprint).ToArray());
+		Assert.Equal(new[] { "high-score", "high-theta" }, ranked.Select(p => p.Fingerprint).ToArray());
 	}
 
 	[Fact]
@@ -199,7 +204,9 @@ public class OpenCandidateEvaluatorTests
 			[longCall] = TestQuote.Q(1.45m, 1.55m, 0.40m)
 		};
 
-		var expanded = OpenCandidateEvaluator.ExpandExecutableProposals(proposal, 500m, new DateTime(2026, 4, 20), quotes, 0m, new OpenerConfig(), null, SuggestionPricing.Mid);
+		var cfg = new OpenerConfig();
+		cfg.StrikeSteps["SPY"] = 1m;
+		var expanded = OpenCandidateEvaluator.ExpandExecutableProposals(proposal, 500m, new DateTime(2026, 4, 20), quotes, 0m, cfg, null, SuggestionPricing.Mid);
 
 		Assert.Equal(2, expanded.Count);
 		Assert.All(expanded, p => Assert.Equal(OpenStructureKind.LongCalendar, p.StructureKind));
@@ -249,7 +256,9 @@ public class OpenCandidateEvaluatorTests
 			[longCall] = TestQuote.Q(1.55m, 1.65m, 0.40m)
 		};
 
-		var expanded = OpenCandidateEvaluator.ExpandExecutableProposals(proposal, 500m, new DateTime(2026, 4, 20), quotes, 0m, new OpenerConfig(), null, SuggestionPricing.Mid);
+		var cfg = new OpenerConfig();
+		cfg.StrikeSteps["SPY"] = 1m;
+		var expanded = OpenCandidateEvaluator.ExpandExecutableProposals(proposal, 500m, new DateTime(2026, 4, 20), quotes, 0m, cfg, null, SuggestionPricing.Mid);
 
 		Assert.Equal(2, expanded.Count);
 		Assert.All(expanded, p => Assert.Equal(OpenStructureKind.LongDiagonal, p.StructureKind));

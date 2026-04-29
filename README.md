@@ -640,8 +640,8 @@ Shared AI options:
 ```
   --config <path>          Path to ai-config.json. Default: data/ai-config.json
   --tickers <list>         Override config tickers (comma-separated)
-  --output <format>        console or text. `text` requires --output-path
-  --output-path <path>     Path for --output text
+  --output <format>        console or text. `text` writes to a default .txt file when --output-path is omitted
+  --output-path <path>     Optional path for --output text
   --api <source>           Override quote source: webull or yahoo
   --log-level <level>      debug | information | error
   --proposals <mode>       all | open | management

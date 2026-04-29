@@ -1,4 +1,4 @@
-using Spectre.Console;
+﻿using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Globalization;
 
@@ -9,13 +9,14 @@ namespace WebullAnalytics.AI.RiskDiagnostics;
 internal static class RiskDiagnosticRenderer
 {
 	internal static void WriteConsole(IAnsiConsole console, RiskDiagnostic d) => console.Write(Build(d));
+	internal static void WriteAscii(IAnsiConsole console, RiskDiagnostic d) => console.Write(Build(d, ascii: true));
 
-	internal static IRenderable Build(RiskDiagnostic d)
+	internal static IRenderable Build(RiskDiagnostic d, bool ascii = false)
 	{
 		var items = new List<(string Label, string Value)>
 		{
 			("Structure:", $"{Markup.Escape(d.StructureLabel)} ([italic]{Markup.Escape(d.DirectionalBias)}[/])"),
-			("Greeks:", $"Δ {FormatDelta(d.NetDelta)}   θ {FormatDollars(d.NetThetaPerDay)}/day   ν {FormatDollars(d.NetVega)}/IV pt"),
+           ("Greeks:", $"Δ {FormatDelta(d.NetDelta)}   θ {FormatDollars(d.NetThetaPerDay)}/day   ν {FormatDollars(d.NetVega)}/IV pt"),
 			("DTE:", $"short {d.ShortLegDteMin}d  long {d.LongLegDteMax}d  gap {d.DteGapDays}d"),
 			("Premium:", $"long ${d.LongPremiumPaid.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.ShortPremiumReceived.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatio(d.PremiumRatio)}, net {FormatNet(d.NetCashPerShare)}"),
 			("Spot:", $"${d.SpotAtEvaluation.ToString("F2", CultureInfo.InvariantCulture)}  short OTM: {(d.ShortLegOtm ? "yes" : "no")}  short extrinsic ${d.ShortLegExtrinsic.ToString("F2", CultureInfo.InvariantCulture)}"),
@@ -40,7 +41,7 @@ internal static class RiskDiagnosticRenderer
 			if (p.EnumDelta.HasValue && p.EnumDeltaMin.HasValue && p.EnumDeltaMax.HasValue && p.EnumDeltaPass.HasValue)
 			{
 				var pass = p.EnumDeltaPass.Value ? "PASS" : "FAIL";
-				items.Add(("Enum delta:", $"≈{p.EnumDelta.Value:F3} (band {p.EnumDeltaMin.Value:F2}-{p.EnumDeltaMax.Value:F2}) ⇒ {pass}"));
+                items.Add(("Enum delta:", $"≈{p.EnumDelta.Value:F3} (band {p.EnumDeltaMin.Value:F2}-{p.EnumDeltaMax.Value:F2}) ⇒ {pass}"));
 			}
 
 			foreach (var q in p.LegQuotes)
@@ -80,7 +81,10 @@ internal static class RiskDiagnosticRenderer
 					if (sections.Length > 2)
 						items.Add(("Factors:", Markup.Escape(sections[2])));
 
-					for (var i = 3; i < sections.Length; i++)
+					if (sections.Length > 3)
+						items.Add(("Final:", Markup.Escape(sections[3])));
+
+					for (var i = 4; i < sections.Length; i++)
 						items.Add(("Detail:", Markup.Escape(sections[i])));
 				}
 			}
@@ -93,16 +97,17 @@ internal static class RiskDiagnosticRenderer
 		{
 			lines.Add("[bold]Rules fired:[/]");
 			foreach (var r in d.Rules)
-				lines.Add($"  • [cyan]{Markup.Escape(r.Id)}[/] — {Markup.Escape(r.Message)}");
+                lines.Add($"  {(ascii ? "-" : "•")} [cyan]{Markup.Escape(r.Id)}[/] {(ascii ? "-" : "—")} {Markup.Escape(r.Message)}");
 		}
 
 		return new Panel(string.Join("\n", lines))
 			.Header("[white]Risk diagnostic[/]")
 			.Expand()
+			.Border(ascii ? BoxBorder.Ascii : BoxBorder.Rounded)
 			.BorderColor(Color.Grey);
 	}
 
-    private static string FormatDelta(decimal d)
+	private static string FormatDelta(decimal d)
 	{
 		if (d == 0m)
 			return "+0.00";
@@ -111,7 +116,7 @@ internal static class RiskDiagnosticRenderer
 		return d.ToString(format, CultureInfo.InvariantCulture);
 	}
 	private static string FormatDollars(decimal d) => (d >= 0m ? "+$" : "-$") + Math.Abs(d).ToString("F2", CultureInfo.InvariantCulture);
-	private static string FormatRatio(decimal? r) => r is decimal v ? $" ({v.ToString("F1", CultureInfo.InvariantCulture)}× ratio)" : "";
+ private static string FormatRatio(decimal? r) => r is decimal v ? $" ({v.ToString("F1", CultureInfo.InvariantCulture)}× ratio)" : "";
 	private static string FormatNet(decimal n) => n >= 0m ? $"credit ${n.ToString("F2", CultureInfo.InvariantCulture)}" : $"debit ${Math.Abs(n).ToString("F2", CultureInfo.InvariantCulture)}";
 
 	private static string? TryFormatMarginRequirement(RiskDiagnosticOpenerScore s)

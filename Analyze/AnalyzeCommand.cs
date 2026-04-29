@@ -1,4 +1,4 @@
-using Spectre.Console;
+﻿using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
@@ -292,13 +292,13 @@ internal static class AnalyzeCommon
 	internal static List<Trade> ParseSyntheticTrades(string tradesSpec, int startSeq, DateTime baseTimestamp, IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
 	{
 		// Spec format: legs comma-separated within a strategy group, groups separated by ';'.
-		// Each multi-leg group becomes one PositionReplay Event AND emits an Asset.OptionStrategy
+      // Each multi-leg group becomes one PositionReplay Event AND emits an Asset.OptionStrategy
 		// parent row — without that parent row, the report-table renderer sees orphan legs (no parent
 		// at the synthetic ParentStrategySeq) and visually attaches them to whichever parent row
 		// precedes them in seq order, lumping the synthetic into the last real strategy trade.
 		// Mirrors JsonlParser's parent emission (line 131-141) for real Webull strategy orders.
 		// Examples:
-		//   "sell:A,buy:B"           → one strategy parent + 2 legs
+      //   "sell:A,buy:B"           → one strategy parent + 2 legs
 		//   "sell:A,buy:B;sell:C,buy:D" → two parents + 4 legs
 		//   "buy:A"                  → single standalone leg, no parent
 		var result = new List<Trade>();
@@ -469,7 +469,7 @@ internal static class AnalyzeCommon
 
 		// Header
 		Console.WriteLine();
-		Console.WriteLine($"Roll Analysis: {Formatters.FormatOptionDisplay(oldParsed.Root, oldParsed.ExpiryDate, oldParsed.Strike)} {ParsingHelpers.CallPutDisplayName(oldParsed.CallPut)} → {Formatters.FormatOptionDisplay(newParsed.Root, newParsed.ExpiryDate, newParsed.Strike)} {ParsingHelpers.CallPutDisplayName(newParsed.CallPut)}  ({qty}x)");
+      Console.WriteLine($"Roll Analysis: {Formatters.FormatOptionDisplay(oldParsed.Root, oldParsed.ExpiryDate, oldParsed.Strike)} {ParsingHelpers.CallPutDisplayName(oldParsed.CallPut)} → {Formatters.FormatOptionDisplay(newParsed.Root, newParsed.ExpiryDate, newParsed.Strike)} {ParsingHelpers.CallPutDisplayName(newParsed.CallPut)}  ({qty}x)");
 		Console.WriteLine($"Current: {oldParsed.Root} @ ${spot}  |  Close {oldSymbol}: Bid ${oldBid?.ToString("N2") ?? "?"} / Ask ${oldAsk?.ToString("N2") ?? "?"}  |  Open {newSymbol}: Bid ${newBid?.ToString("N2") ?? "?"} / Ask ${newAsk?.ToString("N2") ?? "?"}");
 		Console.WriteLine($"IV: Close leg {oldIv.Value:P1} | Open leg {newIv.Value:P1}");
 
@@ -508,7 +508,7 @@ internal static class AnalyzeCommon
 					? $"${cash:N2} cash + ${rollNetTotal:N2} roll credit = ${available:N2}"
 					: $"${cash:N2} cash - ${Math.Abs(rollNetTotal):N2} roll debit = ${available:N2}";
 				var netSign = net >= 0m ? "+" : "-";
-				var netLabel = net >= 0m ? "sufficient" : "shortfall — needs additional funds";
+              var netLabel = net >= 0m ? "sufficient" : "shortfall — needs additional funds";
 				Console.WriteLine();
 				Console.WriteLine($"Funding check (--cash ${cash:N2}):");
 				Console.WriteLine($"  Available:  {rollLabel}");
@@ -519,11 +519,14 @@ internal static class AnalyzeCommon
 
 		Console.WriteLine();
 
-		// Compute max columns from terminal width. Cell format: "0.13/0.37/0.24" or "120.39/135.50/15.11"
-		const int fixedOverhead = 11; // borders + price column
+		// Compute max columns from terminal width using the same estimator as the report/break-even grids.
+		// Each cell renders old|new|net, so size columns based on the widest leg/credit text rather than
+		// the strike string length. This avoids overestimating how many date columns fit and prevents the
+		// last columns from wrapping in narrower detailed windows.
 		var terminalWidth = settings.Simplified ? TerminalHelper.SimplifiedMinWidth : TerminalHelper.DetailedMinWidth;
 		try { terminalWidth = Math.Max(terminalWidth, Console.WindowWidth); } catch { /* use default */ }
-		var maxCols = Math.Max(3, (terminalWidth - fixedOverhead) / (strike.ToString("N2").Length * 3 + 5));
+		var maxLegValueWidth = Math.Max(oldBid ?? 0m, Math.Max(oldAsk ?? 0m, Math.Max(newBid ?? 0m, newAsk ?? 0m))).ToString("N2", CultureInfo.InvariantCulture).Length;
+		var maxCols = Math.Max(3, TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode: "value", showLegs: true, maxLegCount: 2, maxLegValueWidth: maxLegValueWidth, gridTableOuterBorders: 2) - 2);
 
 		// Build time columns: hourly on expiry day for <=1 DTE, daily otherwise
 		var oldDays = (int)(oldExpiry.Date - today).TotalDays;
@@ -543,7 +546,7 @@ internal static class AnalyzeCommon
 				evalTimes.AddRange(allHours);
 			else
 			{
-				// Ceiling division: ensures loop produces ≤ (maxCols-1) items so total (with appended last) stays within maxCols.
+              // Ceiling division: ensures loop produces ≤ (maxCols-1) items so total (with appended last) stays within maxCols.
 				var hourStep = Math.Max(1, (allHours.Count - 1 + maxCols - 2) / (maxCols - 1));
 				for (var i = 0; i < allHours.Count - 1; i += hourStep)
 					evalTimes.Add(allHours[i]);
@@ -553,7 +556,7 @@ internal static class AnalyzeCommon
 		}
 		else
 		{
-			// Ceiling division: ensures loop produces ≤ (maxCols-1) items so total (with appended expiry) stays within maxCols.
+          // Ceiling division: ensures loop produces ≤ (maxCols-1) items so total (with appended expiry) stays within maxCols.
 			var dayStep = Math.Max(1, (oldDays + maxCols - 2) / (maxCols - 1));
 			for (var d = 0; d < oldDays; d += dayStep)
 				evalTimes.Add(today.AddDays(d) + OptionMath.MarketOpen);
@@ -562,7 +565,7 @@ internal static class AnalyzeCommon
 				evalTimes.Add(expiryOpen);
 		}
 
-		// Build 2D grid: prices × times
+     // Build 2D grid: prices × times
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
 		table.AddColumn(new TableColumn("[bold]Price[/]").RightAligned().NoWrap());
 		foreach (var t in evalTimes)
@@ -686,7 +689,7 @@ internal static class AnalyzeCommon
 
 	/// <summary>
 	/// Computes combined margin for a single short leg paired with an optional static long leg.
-	/// Covered time spreads / debit spreads do not require broker margin here — the debit is cash paid,
+  /// Covered time spreads / debit spreads do not require broker margin here — the debit is cash paid,
 	/// not collateral. We therefore surface only true Reg-T-style collateral requirements:
 	///   - naked shorts => naked margin
 	///   - protected credit spreads / inverted diagonals => strike-width collateral on the covered leg
@@ -700,33 +703,33 @@ internal static class AnalyzeCommon
 	{
 		var naked = EstimateNakedShortMargin(spot, shortLeg.Strike, shortLeg.CallPut, shortPremium);
 
-		// No pair → naked on all contracts.
+      // No pair → naked on all contracts.
 		if (longOpt == null && string.IsNullOrEmpty(longStockTicker))
-			return new LegMargin($"naked  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+         return new LegMargin($"naked  ${naked:N2}/contract × {shortQty}", naked * shortQty);
 
 		// Long stock.
 		if (longStockTicker != null)
 		{
-			if (!string.Equals(longStockTicker, shortLeg.Root, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(longStockTicker, shortLeg.Root, StringComparison.OrdinalIgnoreCase))
 				return new LegMargin($"no cover (stock ticker '{longStockTicker}' ≠ '{shortLeg.Root}')  ${naked:N2}/contract × {shortQty}", naked * shortQty);
 			if (shortLeg.CallPut != "C")
-				return new LegMargin($"no cover (long stock does not cover short puts)  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+             return new LegMargin($"no cover (long stock does not cover short puts)  ${naked:N2}/contract × {shortQty}", naked * shortQty);
 			var coverable = Math.Min(shortQty, longQty / 100);
 			var uncovered = shortQty - coverable;
 			var total = uncovered * naked;
-			var label = uncovered == 0
+            var label = uncovered == 0
 				? $"covered by stock (long {longQty} shares)  $0.00/contract × {shortQty}"
 				: $"partial cover ({coverable} covered by stock, {uncovered} naked @ ${naked:N2})";
 			return new LegMargin(label, total);
 		}
 
-		// Long option — longOpt is guaranteed non-null here.
+      // Long option — longOpt is guaranteed non-null here.
 		var lo = longOpt!;
 		if (shortLeg.CallPut != lo.CallPut)
-			return new LegMargin($"no cover (long {(lo.CallPut == "C" ? "call" : "put")} does not cover short {(shortLeg.CallPut == "C" ? "call" : "put")})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+         return new LegMargin($"no cover (long {(lo.CallPut == "C" ? "call" : "put")} does not cover short {(shortLeg.CallPut == "C" ? "call" : "put")})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
 
 		if (lo.ExpiryDate < shortLeg.ExpiryDate)
-			return new LegMargin($"no cover (long expires {lo.ExpiryDate:yyyy-MM-dd} < short expires {shortLeg.ExpiryDate:yyyy-MM-dd})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+         return new LegMargin($"no cover (long expires {lo.ExpiryDate:yyyy-MM-dd} < short expires {shortLeg.ExpiryDate:yyyy-MM-dd})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
 
 		// Covered spread / diagonal collateral:
 		// - calendars / covered diagonals / debit verticals => $0
@@ -747,7 +750,7 @@ internal static class AnalyzeCommon
 		var uncoveredOpt = shortQty - coverableOpt;
 		var totalOpt = coverableOpt * coveredPer + uncoveredOpt * naked;
 
-		// Label explains the structure: strike_loss = 0 → no-margin covered structure; positive → margin-capped spread.
+        // Label explains the structure: strike_loss = 0 → no-margin covered structure; positive → margin-capped spread.
 		var structureLabel = strikeLoss == 0m
 		  ? (lo.Strike == shortLeg.Strike ? "calendar" : lo.ExpiryDate == shortLeg.ExpiryDate ? "debit vertical" : "covered diagonal")
 			: lo.ExpiryDate == shortLeg.ExpiryDate ? $"credit vertical (width ${strikeLoss * 100m:N2})" : $"inverted diagonal (strike loss ${strikeLoss * 100m:N2})";
@@ -756,7 +759,7 @@ internal static class AnalyzeCommon
 		  : isTimeSpread && strikeLoss > 0m
 				? $"${strikeLoss * 100m:N2} strike + ${debit * 100m:N2} debit = ${coveredPer:N2} margin/contract"
 			: $"${coveredPer:N2} margin/contract";
-		var labelOpt = uncoveredOpt == 0
+        var labelOpt = uncoveredOpt == 0
 			? $"{structureLabel}  {costBreakdown} × {shortQty}"
 			: $"partial cover ({structureLabel}: {coverableOpt} @ ${coveredPer:N2}, {uncoveredOpt} naked @ ${naked:N2})";
 		return new LegMargin(labelOpt, totalOpt);

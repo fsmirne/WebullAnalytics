@@ -1,4 +1,4 @@
-using Spectre.Console;
+﻿using Spectre.Console;
 using WebullAnalytics.AI;
 using WebullAnalytics.AI.RiskDiagnostics;
 using Xunit;
@@ -96,8 +96,8 @@ public class RiskDiagnosticRendererTests
 			Rules: Array.Empty<RiskRuleHit>());
 
 		var text = Render(diagnostic);
-		Assert.Contains("Δ +0.0043", text);
-		Assert.DoesNotContain("Δ +0.00   θ +$5.14/day", text);
+		Assert.Contains("Î” +0.0043", text);
+		Assert.DoesNotContain("Î” +0.00   Î¸ +$5.14/day", text);
 	}
 
 	[Fact]
@@ -244,13 +244,15 @@ public class RiskDiagnosticRendererTests
 					DaysToTarget: 7,
 					RawScore: 0.01m,
 					BiasAdjustedScore: 0.01m,
-					Rationale: "debit $50.00\nraw 0.010000 → adjusted 0.020000\ntech-adjusted × balance 0.16 × theta/day +1.23/contract",
-					ThetaPerDayPerContract: 1.23m)));
+                    Rationale: "debit $50.00\nraw 0.010000 → adjusted 0.020000 → final 0.020492\ntech-adjusted × balance 0.16 = adjusted 0.020000\nadjusted × theta factor 1.02 (+1.23/day on $50 risk) = final 0.020492",
+					ThetaPerDayPerContract: 1.23m,
+					FinalScore: 0.020492m)));
 
 		var text = Render(diagnostic);
 		Assert.Contains("Score:", text);
 		Assert.Contains("Factors:", text);
-		Assert.Contains("theta/day", text);
+		Assert.Contains("Final:", text);
+		Assert.Contains("+1.23/day on $50 risk", text);
 		Assert.DoesNotContain("Theta/day:", text);
 		Assert.DoesNotContain("Factors: × factors", text);
 		Assert.DoesNotContain("Factors: factors:", text);

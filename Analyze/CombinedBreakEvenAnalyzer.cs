@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Utils;
@@ -112,7 +112,7 @@ public static class CombinedBreakEvenAnalyzer
 		var totalQty = optionLegs.Sum(l => l.Qty);
 		var normalizingQty = pairQty > 0 ? pairQty : totalQty;
 
-		// Per-pair net premium: Σ signed × (legQty / normalizingQty) × legPrice.
+       // Per-pair net premium: Σ signed × (legQty / normalizingQty) × legPrice.
 		// The grid cell uses (displayValue − netPremium) × normalizingQty × 100 to derive pnl,
 		// so colors stay consistent with the rounded display value.
 		decimal netPremium = 0m;
@@ -131,7 +131,7 @@ public static class CombinedBreakEvenAnalyzer
 		DateTime? nearestExpiry = optionLegs.Count > 0 ? optionLegs.Min(l => l.Parsed!.ExpiryDate) : null;
 		var hasMixedExpiries = optionLegs.Count > 0 && optionLegs.Select(l => l.Parsed!.ExpiryDate.Date).Distinct().Count() > 1;
 
-		// Net adj basis across all merged option legs: Σ signed × qty × price × 100.
+        // Net adj basis across all merged option legs: Σ signed × qty × price × 100.
 		// Used for per-share/per-spread quoting; sign is absorbed into the absolute value.
 		decimal totalAdjDollars = 0m;
 		foreach (var leg in optionLegs)
@@ -279,6 +279,14 @@ public static class CombinedBreakEvenAnalyzer
 	{
 		var maxColumns = Math.Max(3, initialMaxColumns);
 		var grid = buildGrid(maxColumns);
+		var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
+
+		while (required > terminalWidth && maxColumns > 3)
+		{
+			maxColumns--;
+			grid = buildGrid(maxColumns);
+			required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
+		}
 
 		for (int i = 0; i < 5; i++)
 		{
@@ -287,8 +295,8 @@ public static class CombinedBreakEvenAnalyzer
 			if (expanded.DateColumns.Count <= grid.DateColumns.Count)
 				break;
 
-			var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
-			if (required > terminalWidth)
+			var expandedRequired = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
+			if (expandedRequired > terminalWidth)
 				break;
 
 			grid = expanded;
@@ -306,7 +314,7 @@ public static class CombinedBreakEvenAnalyzer
 			if (leg.IsStock) symbols.Add(ticker);
 			else symbols.Add(leg.Symbol);
 		}
-		return $"{ticker} Combined — [{string.Join(", ", symbols)}]";
+      return $"{ticker} Combined — [{string.Join(", ", symbols)}]";
 	}
 
 	private static List<string> BuildLegDescriptions(List<MergedLeg> merged, AnalysisOptions opts)
@@ -317,14 +325,14 @@ public static class CombinedBreakEvenAnalyzer
 			if (leg.IsStock)
 			{
 				var sideWord = leg.Side == Side.Buy ? "Long" : "Short";
-				var line = $"Stock — {sideWord} {leg.Qty} sh @ ${leg.Price.ToString("N2", CultureInfo.InvariantCulture)}";
+              var line = $"Stock — {sideWord} {leg.Qty} sh @ ${leg.Price.ToString("N2", CultureInfo.InvariantCulture)}";
 				legs.Add(line);
 				continue;
 			}
 
 			var longShort = leg.Side == Side.Buy ? "Long" : "Short";
 			var cpDisplay = ParsingHelpers.CallPutDisplayName(leg.Parsed!.CallPut);
-			var desc = $"{longShort} {leg.Qty}× {cpDisplay} ${Formatters.FormatQty(leg.Parsed.Strike)} @ ${Formatters.FormatPrice(leg.Price, Asset.Option)}, Exp {Formatters.FormatOptionDate(leg.Parsed.ExpiryDate)}";
+         var desc = $"{longShort} {leg.Qty}× {cpDisplay} ${Formatters.FormatQty(leg.Parsed.Strike)} @ ${Formatters.FormatPrice(leg.Price, Asset.Option)}, Exp {Formatters.FormatOptionDate(leg.Parsed.ExpiryDate)}";
 
 			var yahooInfo = TryFormatYahooQuote(leg.Symbol, opts);
 			if (yahooInfo != null) desc += $" | {yahooInfo}";
