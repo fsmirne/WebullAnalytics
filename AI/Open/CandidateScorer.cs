@@ -339,8 +339,8 @@ internal static class CandidateScorer
 		var ratioStr = p.PremiumRatio.HasValue ? $", prem {p.PremiumRatio.Value:F2}x" : "";
 		var popFactor = ComputeProbabilityFactor(p.ProbabilityOfProfit);
 		var scaleFactor = ComputeCapitalScaleFactor(p.CapitalAtRiskPerContract);
-		var setupFactor = p.SetupFactor;
-        var balance = BalanceFactor(p.MaxProfitPerContract, p.MaxLossPerContract, p.PremiumRatio ?? 1m);
+        var setupFactor = p.SetupFactor;
+		var balance = BalanceFactor(p.MaxProfitPerContract, p.MaxLossPerContract, p.PremiumRatio ?? 1m);
 		var factorParts = new List<string>
 		{
 			$"pop {popFactor:F2}",
@@ -352,19 +352,19 @@ internal static class CandidateScorer
 			factorParts.Add($"geom {p.GeometryFactor.Value:F2}");
 		factorParts.Add($"bal {balance:F2}");
 
-		var detailLines = new List<string>();
+		var indicatorParts = new List<string>();
 		string? volDetail = null;
 		if (p.VolatilityAdjustmentFactor.HasValue && p.ImpliedVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.Value > 0m)
 		{
 			var richness = p.ImpliedVolatilityAnnual.Value / p.HistoricalVolatilityAnnual.Value;
 			factorParts.Add($"vol {p.VolatilityAdjustmentFactor.Value:F2}");
-			volDetail = $"rep IV {p.ImpliedVolatilityAnnual.Value:P1} / underlying HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x → vol {p.VolatilityAdjustmentFactor.Value:F2};";
+			volDetail = $"rep IV {p.ImpliedVolatilityAnnual.Value:P1} / underlying HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x → vol {p.VolatilityAdjustmentFactor.Value:F2}";
+			indicatorParts.Add(volDetail);
 		}
-		var painStr = "";
 		if (p.MaxPainAdjustmentFactor.HasValue && p.TargetExpiryMaxPain.HasValue)
 		{
 			factorParts.Add($"pain {p.MaxPainAdjustmentFactor.Value:F2}");
-			painStr = $"target ${p.TargetExpiryMaxPain.Value:F2}";
+           indicatorParts.Add($"max-pain target ${p.TargetExpiryMaxPain.Value:F2} → pain {p.MaxPainAdjustmentFactor.Value:F2}");
 		}
 		if (p.AssignmentRiskFactor.HasValue)
 			factorParts.Add($"assign {p.AssignmentRiskFactor.Value:F2}");
@@ -374,14 +374,15 @@ internal static class CandidateScorer
 		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
 		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6} → final {finalScore:F6}";
 		var factorsLine = $"tech-adjusted × {string.Join(" × ", factorParts)} = adjusted {p.BiasAdjustedScore:F6}";
-		var finalCore = p.ThetaPerDayPerContract.HasValue
+		var indicatorsLine = string.Join("; ", indicatorParts);
+		var resultLine = p.ThetaPerDayPerContract.HasValue
 			? $"adjusted × theta factor {thetaFactor:F2} ({p.ThetaPerDayPerContract.Value:+0.00;-0.00}/day on ${p.CapitalAtRiskPerContract:F0} risk) = final {finalScore:F6}"
 			: $"adjusted = final {finalScore:F6}";
-		var finalLine = !string.IsNullOrEmpty(volDetail) ? $"{volDetail} {finalCore}" : finalCore;
-		if (!string.IsNullOrEmpty(painStr))
-			detailLines.Add(painStr);
 
-		return string.Join("\n", new[] { rationaleLine, scoreLine, factorsLine, finalLine }.Concat(detailLines));
+		if (!string.IsNullOrEmpty(indicatorsLine))
+			return string.Join("\n", new[] { rationaleLine, scoreLine, indicatorsLine, factorsLine, resultLine });
+
+		return string.Join("\n", new[] { rationaleLine, scoreLine, factorsLine, resultLine });
 	}
 
 	private static decimal? ComputeMaxPainAdjustmentFactor(CandidateSkeleton skel, decimal spot, DateTime asOf, decimal targetIv, decimal? maxPain, OpenerConfig cfg, IReadOnlyList<decimal>? breakevens = null)
