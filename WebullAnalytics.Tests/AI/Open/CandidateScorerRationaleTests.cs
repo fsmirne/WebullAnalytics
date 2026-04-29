@@ -32,6 +32,7 @@ public class CandidateScorerRationaleTests
 			Fingerprint: "fp",
 			PremiumRatio: 3.06m,
 			GeometryFactor: 0.58m,
+			RunwayFactor: 1.14m,
 			ThetaPerDayPerContract: 1.50m,
 			FinalScore: 0.01072333m);
 
@@ -43,7 +44,7 @@ public class CandidateScorerRationaleTests
 		Assert.Contains("raw 0.025756 → tech-adjusted 0.025756", lines[1]);
 		Assert.Contains("[tech +0.13, fit 0 → no tech adjustment]", lines[1]);
 		Assert.Contains("adjusted 0.010411 → final 0.010723", lines[1]);
-		Assert.Equal("tech-adjusted × pop 1.09 × scale 0.65 × geom 0.58 × bal 0.40 = adjusted 0.010411", lines[2]);
+		Assert.Equal("tech-adjusted × pop 1.09 × scale 0.65 × geom 0.58 × runway 1.14 × bal 0.40 = adjusted 0.010411", lines[2]);
 		Assert.Equal("adjusted × theta factor 1.03 (+1.50/day on $74 risk) = final 0.010723", lines[3]);
 	}
 

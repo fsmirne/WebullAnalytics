@@ -227,6 +227,43 @@ internal static class CandidateScorer
 		return Math.Clamp(totalFactor, 0.20m, 1m);
 	}
 
+	internal static decimal? ComputeAdjustmentRunwayFactor(CandidateSkeleton skel, DateTime asOf, decimal spot, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		var targetExpiry = skel.TargetExpiry.Date;
+		var targetDte = Math.Max(1, (targetExpiry - asOf.Date).Days);
+		var longLegs = skel.Legs
+			.Where(l => l.Action == "buy")
+			.Select(l => (Leg: l, Parsed: ParsingHelpers.ParseOptionSymbol(l.Symbol)))
+			.Where(x => x.Parsed != null && x.Parsed.ExpiryDate.Date > targetExpiry)
+			.Select(x => (x.Leg, Parsed: x.Parsed!))
+			.ToList();
+		if (longLegs.Count == 0)
+			return null;
+
+		decimal totalRatio = 0m;
+		var counted = 0;
+		foreach (var (leg, parsed) in longLegs)
+		{
+			var q = TryLiveBidAsk(leg.Symbol, quotes);
+			if (q == null)
+				continue;
+
+			var mid = (q.Value.bid + q.Value.ask) / 2m;
+			var intrinsic = parsed.CallPut == "C" ? Math.Max(0m, spot - parsed.Strike) : Math.Max(0m, parsed.Strike - spot);
+			var extrinsic = Math.Max(0m, mid - intrinsic);
+			var extrinsicRatio = mid > 0m ? Math.Clamp(extrinsic / mid, 0m, 1m) : 0m;
+			var residualDays = Math.Max(0, (parsed.ExpiryDate.Date - targetExpiry).Days);
+			var runwayRatio = Math.Clamp((decimal)residualDays / Math.Max(7m, targetDte), 0m, 4m);
+			totalRatio += extrinsicRatio * runwayRatio;
+			counted++;
+		}
+		if (counted == 0)
+			return null;
+
+		var averageRatio = totalRatio / counted;
+		return Math.Clamp(1m + 0.18m * averageRatio, 1m, 1.35m);
+	}
+
 	public static decimal? ComputeAssignmentRiskFactor(CandidateSkeleton skel, decimal spot, DateTime asOf, decimal strikeStep, decimal technicalBias)
 	{
 		var shortLegs = skel.Legs
@@ -300,6 +337,39 @@ internal static class CandidateScorer
 		return (q.Bid.Value, q.Ask.Value);
 	}
 
+	private readonly record struct ResolvedLegPrice(decimal Bid, decimal Ask, bool UsedFallback);
+
+	private static ResolvedLegPrice? ResolveLegPrice(string symbol, OptionParsed parsed, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultIv)
+	{
+       if (!quotes.TryGetValue(symbol, out _))
+			return null;
+
+		var live = TryLiveBidAsk(symbol, quotes);
+		if (live.HasValue)
+			return new ResolvedLegPrice(live.Value.bid, live.Value.ask, UsedFallback: false);
+
+		var iv = ResolveIv(symbol, quotes, defaultIv);
+		var years = Math.Max(1, (parsed.ExpiryDate.Date - asOf.Date).Days) / 365.0;
+		var theoretical = OptionMath.BlackScholes(spot, parsed.Strike, years, OptionMath.RiskFreeRate, iv, parsed.CallPut);
+		return theoretical > 0m ? new ResolvedLegPrice(theoretical, theoretical, UsedFallback: true) : null;
+	}
+
+	private static string? BuildPricingWarning(bool usedFallback) => usedFallback
+		? "Warning: fallback Black-Scholes pricing used for one or more legs because live bid/ask was unavailable."
+		: null;
+
+	private static decimal ResolveStrikeStep(OpenerConfig cfg, string ticker)
+	{
+		try
+		{
+			return cfg.StrikeStepFor(ticker);
+		}
+		catch (KeyNotFoundException)
+		{
+			return 1.0m;
+		}
+	}
+
 	/// <summary>sha1-hex fingerprint of (ticker | kind | sorted legs | qty). Stable across ticks.</summary>
 	public static string ComputeFingerprint(string ticker, OpenStructureKind kind, IReadOnlyList<ProposalLeg> legs, int qty)
 	{
@@ -350,6 +420,8 @@ internal static class CandidateScorer
 			factorParts.Add($"setup {setupFactor.Value:F2}");
 		if (p.GeometryFactor.HasValue)
 			factorParts.Add($"geom {p.GeometryFactor.Value:F2}");
+		if (p.RunwayFactor.HasValue)
+			factorParts.Add($"runway {p.RunwayFactor.Value:F2}");
 		factorParts.Add($"bal {balance:F2}");
 
 		var indicatorParts = new List<string>();
@@ -391,7 +463,7 @@ internal static class CandidateScorer
 			return null;
 
 		var targetYears = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
-		var expectedMove = Math.Max(cfg.StrikeStepFor(skel.Ticker), spot * targetIv * (decimal)Math.Sqrt(targetYears));
+		var expectedMove = Math.Max(ResolveStrikeStep(cfg, skel.Ticker), spot * targetIv * (decimal)Math.Sqrt(targetYears));
 		var signal = ComputeMaxPainSignal(skel, spot, maxPain.Value, expectedMove, breakevens);
 		return Math.Max(0.10m, 1m + cfg.MaxPainWeight * signal);
 	}
@@ -491,13 +563,14 @@ internal static class CandidateScorer
 		var longParsed = ParsingHelpers.ParseOptionSymbol(longLeg.Symbol);
 		if (shortParsed == null || longParsed == null) return null;
 
-		var shortQ = TryLiveBidAsk(shortLeg.Symbol, quotes);
-		var longQ = TryLiveBidAsk(longLeg.Symbol, quotes);
+        var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
+		var longQ = ResolveLegPrice(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (shortQ == null || longQ == null) return null;
+		var pricingWarning = BuildPricingWarning(shortQ.Value.UsedFallback || longQ.Value.UsedFallback);
 
-		var shortMid = (shortQ.Value.bid + shortQ.Value.ask) / 2m;
-		var longMid = (longQ.Value.bid + longQ.Value.ask) / 2m;
-		var creditPerShare = PriceForSell(shortMid, shortQ.Value.bid, pricingMode) - PriceForBuy(longMid, longQ.Value.ask, pricingMode);
+		var shortMid = (shortQ.Value.Bid + shortQ.Value.Ask) / 2m;
+		var longMid = (longQ.Value.Bid + longQ.Value.Ask) / 2m;
+		var creditPerShare = PriceForSell(shortMid, shortQ.Value.Bid, pricingMode) - PriceForBuy(longMid, longQ.Value.Ask, pricingMode);
 		if (creditPerShare <= 0m) return null; // not a credit spread at these quotes
 
 		var creditPerContract = creditPerShare * 100m;
@@ -546,7 +619,7 @@ internal static class CandidateScorer
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
-		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, cfg.StrikeStepFor(skel.Ticker), bias);
+		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
@@ -569,6 +642,7 @@ internal static class CandidateScorer
 			DirectionalFit: fit,
 			Rationale: "",
 			Fingerprint: fp,
+			PricingWarning: pricingWarning,
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
@@ -927,13 +1001,17 @@ internal static class CandidateScorer
 	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid)
 	{
 		var defs = new List<MultiLegDefinition>(skel.Legs.Count);
+		var usedFallback = false;
 		foreach (var leg in skel.Legs)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
 			if (parsed == null) return null;
-			if (TryLiveBidAsk(leg.Symbol, quotes) == null) return null;
+			var resolved = ResolveLegPrice(leg.Symbol, parsed, spot, asOf, quotes, cfg.IvDefaultPct);
+			if (resolved == null) return null;
+			usedFallback |= resolved.Value.UsedFallback;
 			defs.Add(new MultiLegDefinition(leg, parsed, leg.Action == "buy", ResolveIv(leg.Symbol, quotes, cfg.IvDefaultPct)));
 		}
+		var pricingWarning = BuildPricingWarning(usedFallback);
 
 		var netEntryPerContract = NetEntryPerContract(skel.Legs, quotes, pricingMode);
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
@@ -941,7 +1019,7 @@ internal static class CandidateScorer
 		var targetLegs = defs.Where(l => l.Parsed.ExpiryDate.Date == skel.TargetExpiry.Date).ToList();
 		var representativeIv = (targetLegs.Count > 0 ? targetLegs : defs).Average(l => l.Iv);
 		var pnl = (decimal sT) => PositionValueAtTarget(sT, skel.TargetExpiry.Date, defs) + netEntryPerContract;
-		var (scanLower, scanUpper) = GetScanRange(spot, defs, cfg.StrikeStepFor(skel.Ticker));
+		var (scanLower, scanUpper) = GetScanRange(spot, defs, ResolveStrikeStep(cfg, skel.Ticker));
 		var breakevens = FindBreakevens(pnl, scanLower, scanUpper);
 		var pop = ComputeProbabilityOfProfit(pnl, breakevens, spot, years, representativeIv);
 		var grid = BuildScenarioGrid(spot, representativeIv, years, cfg.ScenarioGridSigma);
@@ -957,14 +1035,15 @@ internal static class CandidateScorer
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, breakevens);
 		var geometryFactor = ComputeDiagonalGeometryFactor(skel, quotes, pricingMode);
+        var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(defs.Select(d => (d.Parsed, d.Iv, d.IsLong)), asOf, spot);
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, representativeIv, maxPain, cfg, breakevens);
-		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, cfg.StrikeStepFor(skel.Ticker), bias);
-		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
+		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
+		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -986,6 +1065,7 @@ internal static class CandidateScorer
 			DirectionalFit: fit,
 			Rationale: "",
 			Fingerprint: fp,
+			PricingWarning: pricingWarning,
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
@@ -994,6 +1074,7 @@ internal static class CandidateScorer
 			MaxPainAdjustmentFactor: maxPainFactor,
 			SetupFactor: setupFactor,
 			GeometryFactor: geometryFactor,
+			RunwayFactor: runwayFactor,
 			AssignmentRiskFactor: assignmentFactor,
 			ThetaPerDayPerContract: thetaPerDayPerContract,
 			FinalScore: finalScore);
@@ -1007,13 +1088,14 @@ internal static class CandidateScorer
 		var longParsed = ParsingHelpers.ParseOptionSymbol(longLeg.Symbol);
 		if (shortParsed == null || longParsed == null) return null;
 
-		var shortQ = TryLiveBidAsk(shortLeg.Symbol, quotes);
-		var longQ = TryLiveBidAsk(longLeg.Symbol, quotes);
+        var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
+		var longQ = ResolveLegPrice(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (shortQ == null || longQ == null) return null;
+		var pricingWarning = BuildPricingWarning(shortQ.Value.UsedFallback || longQ.Value.UsedFallback);
 
-		var shortMid = (shortQ.Value.bid + shortQ.Value.ask) / 2m;
-		var longMid = (longQ.Value.bid + longQ.Value.ask) / 2m;
-		var debitPerShare = PriceForBuy(longMid, longQ.Value.ask, pricingMode) - PriceForSell(shortMid, shortQ.Value.bid, pricingMode);
+		var shortMid = (shortQ.Value.Bid + shortQ.Value.Ask) / 2m;
+		var longMid = (longQ.Value.Bid + longQ.Value.Ask) / 2m;
+		var debitPerShare = PriceForBuy(longMid, longQ.Value.Ask, pricingMode) - PriceForSell(shortMid, shortQ.Value.Bid, pricingMode);
 		if (debitPerShare <= 0m) return null;
 
 		var debitPerContract = debitPerShare * 100m;
@@ -1078,6 +1160,7 @@ internal static class CandidateScorer
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, (beLower.HasValue && beUpper.HasValue) ? [beLower.Value, beUpper.Value] : Array.Empty<decimal>());
 		var geometryFactor = ComputeDiagonalGeometryFactor(skel, quotes, pricingMode);
+		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(
 			(Parsed: shortParsed, Iv: ivShort, IsLong: false),
 			(Parsed: longParsed, Iv: ivLong, IsLong: true),
@@ -1089,8 +1172,8 @@ internal static class CandidateScorer
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, ivShort, maxPain, cfg);
-		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, cfg.StrikeStepFor(skel.Ticker), bias);
-		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
+		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
+		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1112,6 +1195,7 @@ internal static class CandidateScorer
 			DirectionalFit: fit,
 			Rationale: "",
 			Fingerprint: fp,
+			PricingWarning: pricingWarning,
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
@@ -1120,6 +1204,7 @@ internal static class CandidateScorer
 			MaxPainAdjustmentFactor: maxPainFactor,
 			SetupFactor: setupFactor,
 			GeometryFactor: geometryFactor,
+			RunwayFactor: runwayFactor,
 			AssignmentRiskFactor: assignmentFactor,
 			ThetaPerDayPerContract: thetaPerDayPerContract,
 			FinalScore: finalScore
@@ -1157,9 +1242,11 @@ internal static class CandidateScorer
 		var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
 		if (parsed == null) return null;
 
-		var quote = TryLiveBidAsk(leg.Symbol, quotes);
+		var quote = ResolveLegPrice(leg.Symbol, parsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (quote == null) return null;
-		var (bid, ask) = quote.Value;
+		var pricingWarning = BuildPricingWarning(quote.Value.UsedFallback);
+		var bid = quote.Value.Bid;
+		var ask = quote.Value.Ask;
 		var mid = (bid + ask) / 2m;
 
 		var years = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
@@ -1198,7 +1285,7 @@ internal static class CandidateScorer
 		var volFactor = ComputeVolatilityAdjustmentFactor(skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight);
 		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
-		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, cfg.StrikeStepFor(skel.Ticker), bias);
+		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var biasAdj = AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance, skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
@@ -1221,6 +1308,7 @@ internal static class CandidateScorer
 			DirectionalFit: fit,
 			Rationale: "",
 			Fingerprint: fp,
+			PricingWarning: pricingWarning,
 			PremiumRatio: null,   // single-leg: ratio collapses to 1 (no shorts), don't display "prem 1.00x"
 			ImpliedVolatilityAnnual: iv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,

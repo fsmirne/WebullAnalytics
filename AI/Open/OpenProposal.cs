@@ -39,6 +39,7 @@ public enum OpenStructureKind
 /// <param name="Fingerprint">sha1-hex of (ticker | kind | sorted(legs) | qty) — used for cross-tick dedup.</param>
 /// <param name="CashReserveBlocked">True when sizing fell to 0 contracts due to the cash reserve.</param>
 /// <param name="CashReserveDetail">"free $X, requires $Y per contract" when blocked; null otherwise.</param>
+/// <param name="PricingWarning">Warning surfaced when any leg had to use fallback Black-Scholes pricing because live bid/ask was unavailable.</param>
 /// <param name="PremiumRatio">Σ(buy-leg ask × qty) / Σ(sell-leg bid × qty), or null for single-leg structures
 /// where the ratio collapses to 1. Surfaced separately so the rationale can render it without recomputing.</param>
 /// <param name="ImpliedVolatilityAnnual">Representative annualized IV used for ranking, as a fraction (0.40 = 40%).</param>
@@ -47,6 +48,7 @@ public enum OpenStructureKind
 /// <param name="TargetExpiryMaxPain">Max-pain price inferred from open interest for the proposal's target expiry.</param>
 /// <param name="MaxPainAdjustmentFactor">Max-pain multiplier applied during ranking; null when disabled or unavailable.</param>
 /// <param name="GeometryFactor">Diagonal carry-quality multiplier applied during ranking when the front short fails to collect enough rent relative to the long premium/debit.</param>
+/// <param name="RunwayFactor">Residual long-leg extrinsic/adjustment-runway multiplier applied during ranking when time remains after the target expiry.</param>
 /// <param name="AssignmentRiskFactor">Short-option assignment/near-spot risk multiplier applied during ranking; null when no short-leg penalty applied.</param>
 /// <param name="ThetaPerDayPerContract">Finite-difference net theta per day in dollars per contract. Used as a merit signal during opener ranking.</param>
 /// <param name="FinalScore">Final opener ranking score. This is the score used for output ordering.</param>
@@ -70,6 +72,7 @@ internal sealed record OpenProposal(
 	string Fingerprint,
 	bool CashReserveBlocked = false,
 	string? CashReserveDetail = null,
+	string? PricingWarning = null,
 	RiskDiagnostic? Diagnostic = null,
 	decimal? PremiumRatio = null,
 	decimal? ImpliedVolatilityAnnual = null,
@@ -79,6 +82,7 @@ internal sealed record OpenProposal(
 	decimal? MaxPainAdjustmentFactor = null,
 	decimal? SetupFactor = null,
 	decimal? GeometryFactor = null,
+	decimal? RunwayFactor = null,
 	decimal? AssignmentRiskFactor = null,
 	decimal? ThetaPerDayPerContract = null,
 	decimal? FinalScore = null

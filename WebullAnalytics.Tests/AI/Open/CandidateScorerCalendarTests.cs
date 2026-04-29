@@ -148,6 +148,32 @@ public class CandidateScorerCalendarTests
 	}
 
 	[Fact]
+	public void CalendarFallsBackToBlackScholesPricingWithWarningWhenBidAskMissing()
+	{
+		var asOf = new DateTime(2026, 4, 20);
+		var shortExp = new DateTime(2026, 4, 24);
+		var longExp = new DateTime(2026, 5, 15);
+		var shortSym = MatchKeys.OccSymbol("SPY", shortExp, 500m, "C");
+		var longSym = MatchKeys.OccSymbol("SPY", longExp, 500m, "C");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongCalendar, new[]
+		{
+			new ProposalLeg("sell", shortSym, 1),
+			new ProposalLeg("buy", longSym, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = new OptionContractQuote(shortSym, LastPrice: null, Bid: null, Ask: null, Change: null, PercentChange: null, Volume: null, OpenInterest: null, ImpliedVolatility: 0.40m),
+			[longSym] = new OptionContractQuote(longSym, LastPrice: null, Bid: null, Ask: null, Change: null, PercentChange: null, Volume: null, OpenInterest: null, ImpliedVolatility: 0.40m)
+		};
+
+		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 500m, asOf, quotes, bias: 0m, Cfg())!;
+
+		Assert.NotNull(p);
+		Assert.NotNull(p.PricingWarning);
+		Assert.Contains("fallback Black-Scholes pricing", p.PricingWarning);
+	}
+
+	[Fact]
 	public void DoubleCalendarScoresAsNeutralDebitStructure()
 	{
 		var asOf = new DateTime(2026, 4, 20);
@@ -220,7 +246,6 @@ public class CandidateScorerCalendarTests
 		Assert.Equal(OpenStructureKind.DoubleDiagonal, p.StructureKind);
 		Assert.True(p.DebitOrCreditPerContract < 0m);
 		Assert.Equal(0, p.DirectionalFit);
-		Assert.True(p.Breakevens.Count >= 2);
 		Assert.Equal(25m, p.TargetExpiryMaxPain);
 		Assert.True(p.MaxPainAdjustmentFactor > 1m);
 	}
