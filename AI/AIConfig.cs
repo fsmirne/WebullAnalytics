@@ -203,6 +203,7 @@ internal static class AIConfigLoader
 		if (op.VolatilityLookbackDays < 5) return $"opener.volatilityLookbackDays: must be ≥ 5, got {op.VolatilityLookbackDays}";
 		if (op.VolatilityFitWeight < 0m) return $"opener.volatilityFitWeight: must be ≥ 0, got {op.VolatilityFitWeight}";
 		if (op.MaxPainWeight < 0m) return $"opener.maxPainWeight: must be ≥ 0, got {op.MaxPainWeight}";
+		if (op.StatArbWeight < 0m) return $"opener.statArbWeight: must be ≥ 0, got {op.StatArbWeight}";
 
 		var lc = op.Structures.LongCalendar;
 		if (lc.ShortDteMin < 0) return $"opener.structures.longCalendar.shortDteMin: must be ≥ 0, got {lc.ShortDteMin}";
