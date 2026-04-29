@@ -31,10 +31,10 @@ internal static class RiskDiagnosticBuilder
 		var longLegs = legs.Where(l => l.IsLong).ToList();
 		var shortLegs = legs.Where(l => !l.IsLong).ToList();
 
-		// Greeks (per-contract). For each leg: signed × qty × per-share greek; then divide aggregate
+       // Greeks (per-contract). For each leg: signed × qty × per-share greek; then divide aggregate
 		// by reference qty to express as per-contract. Reference qty is the first leg's qty — pipelines
 		// always pass legs at the same contract multiple.
-		decimal netDeltaSum = 0m, netThetaSum = 0m, netVegaSum = 0m;
+		decimal netDeltaSum = 0m, netThetaSum = 0m, netVegaSum = 0m, netTheoreticalValueSum = 0m, theoreticalLongPaidSum = 0m, theoreticalShortReceivedSum = 0m;
 		foreach (var leg in legs)
 		{
 			var sign = leg.IsLong ? 1m : -1m;
@@ -55,11 +55,21 @@ internal static class RiskDiagnosticBuilder
 			netDeltaSum += sign * leg.Qty * delta;
 			netThetaSum += sign * leg.Qty * 100m * thetaPerShare;
 			netVegaSum += sign * leg.Qty * 100m * vegaPerShare;
+			netTheoreticalValueSum += sign * leg.Qty * pNow;
+			if (leg.IsLong)
+				theoreticalLongPaidSum += leg.Qty * pNow;
+			else
+				theoreticalShortReceivedSum += leg.Qty * pNow;
 		}
 		var qtyRef = legs.Count > 0 ? legs[0].Qty : 1;
 		decimal netDelta = qtyRef > 0 ? netDeltaSum / qtyRef : 0m;
 		decimal netTheta = qtyRef > 0 ? netThetaSum / qtyRef : 0m;
 		decimal netVega = qtyRef > 0 ? netVegaSum / qtyRef : 0m;
+		decimal? netTheoreticalValuePerShare = qtyRef > 0 ? netTheoreticalValueSum / qtyRef : null;
+		decimal? theoreticalLongPaidPerShare = qtyRef > 0 ? theoreticalLongPaidSum / qtyRef : null;
+		decimal? theoreticalShortReceivedPerShare = qtyRef > 0 ? theoreticalShortReceivedSum / qtyRef : null;
+		decimal? theoreticalNetPremiumPerShare = theoreticalLongPaidPerShare.HasValue && theoreticalShortReceivedPerShare.HasValue ? theoreticalLongPaidPerShare.Value - theoreticalShortReceivedPerShare.Value : null;
+		decimal? theoreticalPremiumRatio = theoreticalShortReceivedPerShare is decimal theoreticalShort && theoreticalShort != 0m && theoreticalLongPaidPerShare.HasValue ? theoreticalLongPaidPerShare.Value / theoreticalShort : null;
 
 		// DTE geometry
 		var shortLegDteMin = shortLegs.Count == 0 ? 0 : shortLegs.Min(l => Math.Max(0, (l.Parsed.ExpiryDate - asOf.Date).Days));
@@ -75,6 +85,11 @@ internal static class RiskDiagnosticBuilder
 		var shortReceived = shortLegs.Sum(PremiumOf);
 		var netCash = shortReceived - longPaid;
 		decimal? premiumRatio = shortReceived == 0m ? null : longPaid / shortReceived;
+		var hasMarketPrices = legs.All(l => l.PricePerShare.HasValue);
+		decimal? marketLongPaid = hasMarketPrices ? longLegs.Sum(l => l.PricePerShare!.Value) : null;
+		decimal? marketShortReceived = hasMarketPrices ? shortLegs.Sum(l => l.PricePerShare!.Value) : null;
+		decimal? netMidPerShare = marketLongPaid.HasValue && marketShortReceived.HasValue ? marketLongPaid.Value - marketShortReceived.Value : null;
+		decimal? marketPremiumRatio = marketShortReceived is decimal marketShort && marketShort != 0m && marketLongPaid.HasValue ? marketLongPaid.Value / marketShort : null;
 
 		// Strike geometry
 		var shortOtm = shortLegs.Count > 0 && shortLegs.All(l =>
@@ -167,7 +182,17 @@ internal static class RiskDiagnosticBuilder
 			CostBasisPerShare: costBasisPerShare,
 			CurrentValuePerShare: currentValuePerShare,
 			UnrealizedPnlPerShare: unrealizedPnlPerShare,
-			Rules: hits);
+			Rules: hits,
+			NetMidPerShare: netMidPerShare,
+			TheoreticalValuePerShare: netTheoreticalValuePerShare,
+			MarketLongPremiumPaid: marketLongPaid,
+			MarketShortPremiumReceived: marketShortReceived,
+			MarketNetPremiumPerShare: netMidPerShare,
+			MarketPremiumRatio: marketPremiumRatio,
+			TheoreticalLongPremiumPaid: theoreticalLongPaidPerShare,
+			TheoreticalShortPremiumReceived: theoreticalShortReceivedPerShare,
+			TheoreticalNetPremiumPerShare: theoreticalNetPremiumPerShare,
+			TheoreticalPremiumRatio: theoreticalPremiumRatio);
 	}
 
 	private static (string StructureLabel, string DirectionalBias) ClassifyStructure(
