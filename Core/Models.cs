@@ -121,8 +121,9 @@ public record ReportRow(
 /// <summary>
 /// A row in the open positions table.
 /// </summary>
-/// <param name="InitialAvgPrice">Original average price before roll adjustments</param>
-/// <param name="AdjustedAvgPrice">Price after applying credits from rolled short legs</param>
+/// <param name="AvgPrice">Current average cost of the open position before roll adjustments</param>
+/// <param name="InitialAvgPrice">Opening cost when the position lineage was first opened</param>
+/// <param name="AdjustedAvgPrice">Roll-adjusted average cost after applying roll credits/debits</param>
 public record PositionRow(
 	string Instrument,
 	Asset Asset,
@@ -134,7 +135,8 @@ public record PositionRow(
 	bool IsStrategyLeg = false,
 	decimal? InitialAvgPrice = null,
 	decimal? AdjustedAvgPrice = null,
-	string? MatchKey = null
+	string? MatchKey = null,
+	int? OpenQty = null
 );
 
 /// <summary>
