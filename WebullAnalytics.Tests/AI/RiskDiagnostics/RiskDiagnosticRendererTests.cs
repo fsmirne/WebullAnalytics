@@ -24,6 +24,48 @@ public class RiskDiagnosticRendererTests
 	}
 
 	[Fact]
+	public void PremiumLineShowsMidAndTheoreticalValuesWhenAvailable()
+	{
+		var diagnostic = new RiskDiagnostic(
+			StructureLabel: "calendar",
+			DirectionalBias: "neutral",
+			NetDelta: 0m,
+			NetThetaPerDay: 0m,
+			NetVega: 0m,
+			ShortLegDteMin: 7,
+			LongLegDteMax: 30,
+			DteGapDays: 23,
+			LongPremiumPaid: 1.00m,
+			ShortPremiumReceived: 0.50m,
+			NetCashPerShare: -0.50m,
+			PremiumRatio: 2.0m,
+			SpotAtEvaluation: 25.00m,
+			BreakevenDistancePct: null,
+			ShortLegOtm: true,
+			ShortLegExtrinsic: 0.20m,
+			Trend: null,
+			CostBasisPerShare: null,
+			CurrentValuePerShare: null,
+			UnrealizedPnlPerShare: null,
+			Rules: Array.Empty<RiskRuleHit>(),
+			NetMidPerShare: 0.64m,
+			TheoreticalValuePerShare: 0.67m,
+			MarketLongPremiumPaid: 0.93m,
+			MarketShortPremiumReceived: 0.26m,
+			MarketNetPremiumPerShare: 0.67m,
+			MarketPremiumRatio: 0.93m / 0.26m,
+			TheoreticalLongPremiumPaid: 0.92m,
+			TheoreticalShortPremiumReceived: 0.25m,
+			TheoreticalNetPremiumPerShare: 0.67m,
+			TheoreticalPremiumRatio: 0.92m / 0.25m);
+
+		var text = Render(diagnostic);
+		Assert.Contains("Premium:", text);
+		Assert.Contains("market → long $0.93 / short $0.26 (3.58× ratio), net debit $0.67 | theoretical → long $0.92 / short $0.25 (3.68× ratio), net debit $0.67", text);
+		Assert.DoesNotContain("long $1.00 / short $0.50", text);
+	}
+
+	[Fact]
 	public void QuoteLinesIncludeMidValue()
 	{
 		var diagnostic = new RiskDiagnostic(
