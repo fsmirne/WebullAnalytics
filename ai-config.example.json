@@ -36,6 +36,7 @@
 		"volatilityLookbackDays": 20,
 		"volatilityFitWeight": 0.50,
 		"maxPainWeight": 0.25,
+		"statArbWeight": 0.30,
 		"scenarioGridSigma": 1.0,
 		"structures": {
 			"longCalendar":  { "enabled": true, "shortDteMin": 1, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },

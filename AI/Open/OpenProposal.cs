@@ -51,6 +51,9 @@ public enum OpenStructureKind
 /// <param name="RunwayFactor">Residual long-leg extrinsic/adjustment-runway multiplier applied during ranking when time remains after the target expiry.</param>
 /// <param name="AssignmentRiskFactor">Short-option assignment/near-spot risk multiplier applied during ranking; null when no short-leg penalty applied.</param>
 /// <param name="ThetaPerDayPerContract">Finite-difference net theta per day in dollars per contract. Used as a merit signal during opener ranking.</param>
+/// <param name="MarketNetPremiumPerShare">Aggregate market mid premium per share, signed (long sum − short sum). Positive = net debit, negative = net credit. Null when any leg lacks a two-sided live quote.</param>
+/// <param name="TheoreticalNetPremiumPerShare">Aggregate Black-Scholes theoretical premium per share, signed (long sum − short sum), priced at each leg's quoted IV. Same sign convention as the market value. Null when any leg lacks an IV or price.</param>
+/// <param name="StatArbAdjustmentFactor">Stat-arb multiplier applied during ranking. Edge = theoreticalNet − marketNet; positive edge boosts (favors the entrant — paid less than fair on debit, received more than fair on credit). Null when prerequisite values are unavailable.</param>
 /// <param name="FinalScore">Final opener ranking score. This is the score used for output ordering.</param>
 internal sealed record OpenProposal(
 	string Ticker,
@@ -85,5 +88,8 @@ internal sealed record OpenProposal(
 	decimal? RunwayFactor = null,
 	decimal? AssignmentRiskFactor = null,
 	decimal? ThetaPerDayPerContract = null,
+	decimal? MarketNetPremiumPerShare = null,
+	decimal? TheoreticalNetPremiumPerShare = null,
+	decimal? StatArbAdjustmentFactor = null,
 	decimal? FinalScore = null
 );

@@ -71,6 +71,14 @@ public class OpenerConfigValidationTests
 	}
 
 	[Fact]
+	public void StatArbWeightMustBeNonNegative()
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Opener.StatArbWeight = -0.1m;
+		Assert.Contains("opener.statArbWeight", AIConfigLoader.Validate(cfg) ?? "");
+	}
+
+	[Fact]
 	public void TickerStrikeStepsMustBePositive()
 	{
 		var cfg = MinimalValidConfig();
