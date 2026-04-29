@@ -1,7 +1,8 @@
-using Spectre.Console;
+﻿using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 using WebullAnalytics.AI.Output;
+using WebullAnalytics.IO;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Report;
 using WebullAnalytics.Trading;
@@ -50,7 +51,6 @@ internal abstract class AISubcommandSettings : CommandSettings
 	public override ValidationResult Validate()
 	{
 		if (Output != "console" && Output != "text") return ValidationResult.Error($"--output: must be 'console' or 'text', got '{Output}'");
-		if (Output == "text" && string.IsNullOrWhiteSpace(OutputPath)) return ValidationResult.Error("--output text requires --output-path");
 		if (Api != null && Api != "webull" && Api != "yahoo") return ValidationResult.Error($"--api: must be 'webull' or 'yahoo', got '{Api}'");
 		if (LogLevel != null && !ValidLogLevels.Contains(LogLevel, StringComparer.OrdinalIgnoreCase))
 			return ValidationResult.Error($"--log-level: must be debug|information|error, got '{LogLevel}'");
@@ -61,8 +61,52 @@ internal abstract class AISubcommandSettings : CommandSettings
 		return ValidationResult.Success();
 	}
 
+	internal bool UseTextOutput => string.Equals(Output, "text", StringComparison.OrdinalIgnoreCase);
+
+	internal string ResolveTextOutputPath(string stem, DateTime? now = null)
+	{
+		var dateStr = (now ?? DateTime.Now).ToString("yyyyMMdd");
+		var path = OutputPath ?? $"WebullAnalytics_{stem}_{dateStr}.txt";
+		return Path.GetFullPath(path);
+	}
+
 	internal bool EmitManagementProposals => !string.Equals(Proposals, "open", StringComparison.OrdinalIgnoreCase);
 	internal bool EmitOpenProposals => !string.Equals(Proposals, "management", StringComparison.OrdinalIgnoreCase);
+}
+
+internal static class AITextOutput
+{
+	internal static async Task<int> RunAsync(AISubcommandSettings settings, string stem, Func<Task<int>> action)
+	{
+		if (!settings.UseTextOutput)
+			return await action();
+
+		var originalOut = Console.Out;
+		var originalErr = Console.Error;
+		using var stringWriter = new StringWriter();
+		using var stderrWriter = new StringWriter();
+		var console = TextFileExporter.CreateTextConsole(stringWriter);
+		AnsiConsole.Console = console;
+		Console.SetOut(stringWriter);
+		Console.SetError(stderrWriter);
+		int exitCode;
+		try
+		{
+			exitCode = await action();
+		}
+		finally
+		{
+			Console.SetOut(originalOut);
+			Console.SetError(originalErr);
+			AnsiConsole.Console = AnsiConsole.Create(new AnsiConsoleSettings());
+		}
+
+		if (stderrWriter.GetStringBuilder().Length > 0)
+			originalErr.Write(stderrWriter.ToString());
+		var outputPath = settings.ResolveTextOutputPath(stem);
+		TextFileExporter.WriteConsoleOutputToTextFile(stringWriter, outputPath, "Text AI output exported to");
+		return exitCode;
+	}
 }
 
 internal static class AIContext
@@ -108,11 +152,12 @@ internal static class AIContext
 }
 
 /// <summary>`ai scan` — one evaluation pass, print proposals, exit.</summary>
-internal sealed class AIOnceSettings : AISubcommandSettings;
+internal sealed class AIScanSettings : AISubcommandSettings;
 
-internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
+internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AIOnceSettings settings, CancellationToken cancellation)
+	public override async Task<int> ExecuteAsync(CommandContext context, AIScanSettings settings, CancellationToken cancellation)
+		=> await AITextOutput.RunAsync(settings, "ai_scan", async () =>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
@@ -145,14 +190,14 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 		var managementCount = settings.EmitManagementProposals ? results.Count : 0;
 		if (settings.EmitManagementProposals)
 		{
-			using var sink = new ProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing);
+			using var sink = new ProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
 		}
 
 		var openCount = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			var openSink = new OpenProposalSink(config.Log, mode: "once", suggestPricing: settings.Pricing);
+			var openSink = new OpenProposalSink(config.Log, mode: "once", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			foreach (var p in openResults) openSink.Emit(p);
@@ -161,7 +206,7 @@ internal sealed class AIOnceCommand : AsyncCommand<AIOnceSettings>
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
 		return 0;
-	}
+	});
 }
 
 /// <summary>`ai replay` — historical replay against orders.jsonl with agreement analysis.</summary>

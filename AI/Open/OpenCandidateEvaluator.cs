@@ -1,4 +1,4 @@
-using WebullAnalytics.AI.Output;
+﻿using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.AI.Sources;
@@ -85,7 +85,7 @@ internal sealed class OpenCandidateEvaluator
 				neededSymbols.Add(leg.Symbol);
 			}
 
-		// Keep ctx.Quotes as the primary lookup; overlay fetched symbols only for the new ones.
+        // Keep ctx.Quotes as the primary lookup; overlay fetched symbols only for the new ones.
 		// Do NOT copy ctx.Quotes by enumeration — callers may supply non-enumerable fakes (tests) or large live dictionaries.
 		IReadOnlyDictionary<string, OptionContractQuote> mergedQuotes = bootstrapOptions.Count > 0 ? new OverlayQuoteDictionary(ctx.Quotes, bootstrapOptions) : ctx.Quotes;
 		if (neededSymbols.Count > 0)
@@ -220,7 +220,8 @@ internal sealed class OpenCandidateEvaluator
 				days: p.DaysToTarget,
 				rawScore: p.RawScore,
 				biasScore: p.BiasAdjustedScore,
-				thetaPerDayPerContract: p.ThetaPerDayPerContract);
+				thetaPerDayPerContract: p.ThetaPerDayPerContract,
+				finalScore: p.FinalScore);
 
 			var probe = RiskDiagnosticProbeBuilder.Build(
 				legs: diagLegs,
@@ -243,9 +244,9 @@ internal sealed class OpenCandidateEvaluator
 		if (list.Count <= 1) return list;
 
 		return list
-			.OrderByDescending(RankingScoreForOutput)
-			.ThenByDescending(p => p.ThetaPerDayPerContract ?? decimal.MinValue)
+			.OrderByDescending(p => p.FinalScore ?? CandidateScorer.ComputeFinalScore(p.BiasAdjustedScore, p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract))
 			.ThenByDescending(p => p.BiasAdjustedScore)
+			.ThenByDescending(p => p.ThetaPerDayPerContract ?? decimal.MinValue)
 			.ThenBy(p => IsCalendarLike(p) ? p.DaysToTarget : int.MaxValue)
 			.ToList();
 	}
@@ -281,12 +282,6 @@ internal sealed class OpenCandidateEvaluator
 
 	private static IReadOnlyList<ProposalLeg> ScaleLegs(IReadOnlyList<ProposalLeg> legs, int qty) =>
 		legs.Select(l => l with { Qty = qty }).ToList();
-
-	private static decimal RankingScoreForOutput(OpenProposal proposal)
-	{
-		var thetaPerDay = proposal.ThetaPerDayPerContract ?? 0m;
-		return thetaPerDay > 0m ? proposal.BiasAdjustedScore * thetaPerDay : proposal.BiasAdjustedScore;
-	}
 
 	internal static IReadOnlyList<OpenProposal> ExpandExecutableProposals(OpenProposal proposal, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual, string pricingMode)
 	{

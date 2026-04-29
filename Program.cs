@@ -1,4 +1,4 @@
-using Spectre.Console.Cli;
+﻿using Spectre.Console.Cli;
 using System.Text.Json;
 using WebullAnalytics.Analyze;
 using WebullAnalytics.Fetch;
@@ -13,7 +13,7 @@ namespace WebullAnalytics;
 /// </summary>
 class Program
 {
-	/// <summary>
+    /// <summary>
 	/// Base directory for resolving relative paths — the directory containing the executable.
 	/// For single-file published apps, AppContext.BaseDirectory points to a temp extraction directory,
 	/// so we use the actual executable path from ProcessPath instead.
@@ -71,7 +71,7 @@ class Program
 			});
 			config.AddBranch("ai", ai =>
 			{
-                ai.AddCommand<AI.AIOnceCommand>("scan");
+				ai.AddCommand<AI.AIScanCommand>("scan");
 				ai.AddCommand<AI.AIWatchCommand>("watch");
 				ai.AddCommand<AI.AIReplayCommand>("replay");
 			});

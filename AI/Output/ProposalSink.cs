@@ -1,4 +1,4 @@
-using Spectre.Console;
+﻿using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Globalization;
 using System.Text.Json;
@@ -19,12 +19,16 @@ internal sealed class ProposalSink : IDisposable
 	private readonly LogConfig _log;
 	private readonly string _mode; // "watch" | "once" | "replay"
 	private readonly string _suggestPricing;
+	private readonly bool _ascii;
+	private readonly string _cmdPrefix;
 
-	public ProposalSink(LogConfig log, string mode, string suggestPricing = SuggestionPricing.Mid)
+	public ProposalSink(LogConfig log, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
 	{
 		_log = log;
 		_mode = mode;
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
+		_ascii = ascii;
+		_cmdPrefix = ascii ? "L-" : "↪";
 		var path = Program.ResolvePath(log.Path);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
@@ -112,7 +116,7 @@ internal sealed class ProposalSink : IDisposable
 				foreach (var leg in p.Legs)
 				{
 					var legLimit = SuggestionPricing.PriceFor(leg, _suggestPricing)!.Value.ToString("F2", CultureInfo.InvariantCulture);
-					rows.Add(new Markup($"[dim]↪ wa trade place --trade \"{Markup.Escape($"{leg.Action}:{leg.Symbol}:{leg.Qty}")}\" --limit {legLimit}[/]"));
+					rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape($"{leg.Action}:{leg.Symbol}:{leg.Qty}")}\" --limit {legLimit}[/]"));
 				}
 			}
 			else
@@ -120,14 +124,14 @@ internal sealed class ProposalSink : IDisposable
 				var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 				var limitPerShare = SuggestionPricing.TryGetLimitPerShare(p.Legs, _suggestPricing) ?? Math.Abs(p.NetDebit / 100m);
 				var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
-				rows.Add(new Markup($"[dim]↪ wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
+				rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
 			}
 
-			rows.Add(new Markup($"[dim]↪ wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));
+			rows.Add(new Markup($"[dim]{_cmdPrefix} wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));
 		}
 
 		if (p.Diagnostic is not null)
-			rows.Add(RiskDiagnosticRenderer.Build(p.Diagnostic));
+			rows.Add(RiskDiagnosticRenderer.Build(p.Diagnostic, ascii: _ascii));
 
 		rows.Add(new Markup($"[italic]{Markup.Escape(p.Rationale)}[/]"));
 
@@ -136,6 +140,7 @@ internal sealed class ProposalSink : IDisposable
 		var panel = new Panel(new Rows(rows))
 			.Header(header)
 			.Expand()
+			.Border(_ascii ? BoxBorder.Ascii : BoxBorder.Rounded)
 			.BorderColor(SpectreColor(color));
 		AnsiConsole.Write(panel);
 		AnsiConsole.WriteLine();
@@ -144,7 +149,7 @@ internal sealed class ProposalSink : IDisposable
 	/// <summary>Emits a single combo `wa trade place` line for the given legs. `--limit` is the absolute
 	/// per-share signed net (sell prices add, buy prices subtract); Webull infers side from the legs.
 	/// Callers must ensure every leg has PricePerShare set.</summary>
-	private static void AppendComboLine(List<IRenderable> rows, IEnumerable<ProposalLeg> legs, string suggestPricing, decimal? fallbackLimitPerShare)
+	private void AppendComboLine(List<IRenderable> rows, IEnumerable<ProposalLeg> legs, string suggestPricing, decimal? fallbackLimitPerShare)
 	{
 		var list = legs.ToList();
 		var limitPerShare = SuggestionPricing.TryGetLimitPerShare(list, suggestPricing)
@@ -152,7 +157,7 @@ internal sealed class ProposalSink : IDisposable
 			   ?? 0m;
 		var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
 		var arg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-		rows.Add(new Markup($"[dim]↪ wa trade place --trade \"{Markup.Escape(arg)}\" --limit {limit}[/]"));
+		rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(arg)}\" --limit {limit}[/]"));
 	}
 
 	private static Color SpectreColor(string name) => name switch

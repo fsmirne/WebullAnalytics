@@ -1,4 +1,4 @@
-using Spectre.Console;
+﻿using Spectre.Console;
 using Spectre.Console.Rendering;
 using System.Globalization;
 using System.Text.RegularExpressions;
@@ -121,7 +121,7 @@ public static class TableBuilder
 		return table;
 	}
 
-	public static Panel BuildBreakEvenPanel(BreakEvenResult result, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false, string displayMode = "pnl", bool showLegs = false)
+  public static Panel BuildBreakEvenPanel(BreakEvenResult result, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false, string displayMode = "pnl", bool showLegs = false)
 	{
 		var dteText = result.DaysToExpiry.HasValue ? result.DaysToExpiry.Value.ToString() : (ascii ? "-" : "—");
 		var sep = ascii ? "|" : "│";
@@ -265,11 +265,11 @@ public static class TableBuilder
 		var table = new Table();
 		if (tableBorder != null) table.Border = tableBorder;
 
-		table.AddColumn(new TableColumn("Price").RightAligned());
+		table.AddColumn(new TableColumn("Price").RightAligned().NoWrap());
 		foreach (var date in grid.DateColumns)
 		{
 			var label = date == grid.DateColumns[^1] ? "At Exp" : date.ToString("dd MMM", CultureInfo.InvariantCulture);
-			table.AddColumn(new TableColumn(label).RightAligned());
+			table.AddColumn(new TableColumn(label).RightAligned().NoWrap());
 		}
 
 		// Pre-format all leg/net text and compute per-segment max widths so that slashes line up vertically across rows.
@@ -335,7 +335,7 @@ public static class TableBuilder
 
 	public static Panel BuildAdjustmentPanel(PriceBreakdown b, BoxBorder? panelBorder = null, TableBorder? tableBorder = null, bool ascii = false)
 	{
-		var items = new List<IRenderable>();
+        var items = new List<IRenderable>();
 		var sep = ascii ? "|" : "│";
 
 		if (b.CostSteps != null && b.CostSteps.Count > 0)
@@ -424,15 +424,15 @@ public static class TableBuilder
 				var initDebit = b.InitNetDebit ?? (b.PositionSide == Side.Buy ? 1m : -1m) * b.InitPrice * b.Qty * 100m;
 				var initQty = b.InitNetDebit.HasValue && b.InitPrice != 0 ? (int)Math.Round(Math.Abs(b.InitNetDebit.Value) / (b.InitPrice * 100m)) : b.Qty;
 				var initDebitLabel = initDebit >= 0 ? "Init Net Debit" : "Init Net Credit";
-				var initDebitText = Math.Abs(initDebit).ToString("N2", CultureInfo.InvariantCulture);
+               var initDebitText = Math.Abs(initDebit).ToString("N2", CultureInfo.InvariantCulture);
 				items.Add(new Text($"{initDebitLabel}: ${initDebitText} {(ascii ? "/" : "÷")} ({initQty} x $100) = ${initText}/contract"));
 
-				// Adj Net Debit is derived from current Qty × AdjPrice so numerator, denominator,
+             // Adj Net Debit is derived from current Qty × AdjPrice so numerator, denominator,
 				// and per-contract result are self-consistent. Using the replay's TotalNetDebit
 				// (which is cumulative across the full position history) would mismatch the
 				// denominator when contracts have split off into a sibling group.
 				var adjDebit = (b.PositionSide == Side.Buy ? 1m : -1m) * b.AdjPrice.Value * b.Qty * 100m;
-				var adjLabel = adjDebit >= 0 ? "Adj Net Debit" : "Adj Net Credit";
+              var adjLabel = adjDebit >= 0 ? "Adj Net Debit" : "Adj Net Credit";
 				var debitText = Math.Abs(adjDebit).ToString("N2", CultureInfo.InvariantCulture);
 				items.Add(new Text($"{adjLabel}: ${debitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${adjText}/contract"));
 
@@ -452,7 +452,7 @@ public static class TableBuilder
 
 			if (b.Credits != null && b.Credits.Count > 0)
 			{
-				var totalAdj = (b.InitPrice - b.AdjPrice.Value) * b.Qty;
+                var totalAdj = (b.InitPrice - b.AdjPrice.Value) * b.Qty;
 				var adjAmount = totalAdj.ToString("N2", CultureInfo.InvariantCulture);
 				items.Add(new Text($"Adj = ${initText} - ${adjAmount} {(ascii ? "/" : "÷")} {b.Qty} = ${adjText}"));
 			}
@@ -460,7 +460,7 @@ public static class TableBuilder
 		else if (b.TotalNetDebit.HasValue)
 		{
 			var netDebit = b.TotalNetDebit.Value;
-			var label = netDebit >= 0 ? "Net Debit" : "Net Credit";
+         var label = netDebit >= 0 ? "Net Debit" : "Net Credit";
 			var debitText = Math.Abs(netDebit).ToString("N2", CultureInfo.InvariantCulture);
 			items.Add(new Text($"{label}: ${debitText} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${initText}/contract"));
 		}
@@ -511,7 +511,7 @@ public static class TableBuilder
 	}
 
 	/// <summary>
-	/// Computes unrealized P&L for all open positions. When theoretical mode is active and IV
+  /// Computes unrealized P&L for all open positions. When theoretical mode is active and IV
 	/// is available, uses Black-Scholes pricing; otherwise uses market mid prices from Yahoo quotes.
 	/// Returns null if no pricing source is available, or if the report is pinned to a past
 	/// snapshot date (via --until) — historical positions can't be valued with today's quotes.
@@ -578,7 +578,7 @@ public static class TableBuilder
 	}
 
 	/// <summary>
-	/// Computes the maximum number of date columns that fit in a given total width.
+    /// Computes the maximum number of date columns that fit in a given total width.
 	/// Layout: panel borders (4) + table outer borders (2) + price column (11) + N × date column (15 for pnl, 10 for value).
 	/// Each Spectre table column = content + 2 padding + 1 separator.
 	/// </summary>

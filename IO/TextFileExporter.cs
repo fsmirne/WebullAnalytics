@@ -1,4 +1,4 @@
-using Spectre.Console;
+﻿using Spectre.Console;
 using System.Text.RegularExpressions;
 using WebullAnalytics.Analyze;
 using WebullAnalytics.Report;
@@ -13,20 +13,39 @@ public static partial class TextFileExporter
 	[GeneratedRegex(@"\x1B\[[0-9;]*[a-zA-Z]")]
 	private static partial Regex AnsiEscapeRegex();
 
-	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, Dictionary<string, List<Lot>> lotsByMatchKey, decimal running, decimal initialAmount, string outputPath, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null, bool showLegs = false)
-	{
-		var stringWriter = new StringWriter();
+	[GeneratedRegex(@"^(Webull|Yahoo): .*(\r?\n)?", RegexOptions.Multiline)]
+	private static partial Regex ProviderStatusLineRegex();
 
+	public static IAnsiConsole CreateTextConsole(StringWriter stringWriter, int width = 200)
+	{
 		var settings = new AnsiConsoleSettings
 		{
-			Ansi = AnsiSupport.Yes,
-			ColorSystem = ColorSystemSupport.Standard,
+			Ansi = AnsiSupport.No,
+			ColorSystem = ColorSystemSupport.NoColors,
 			Out = new AnsiConsoleOutput(stringWriter),
 			Interactive = InteractionSupport.No
 		};
 
 		var console = AnsiConsole.Create(settings);
-		console.Profile.Width = 200;
+		console.Profile.Width = width;
+		return console;
+	}
+
+	public static void WriteConsoleOutputToTextFile(StringWriter stringWriter, string outputPath, string exportMessage)
+	{
+		var directory = Path.GetDirectoryName(outputPath);
+		if (!string.IsNullOrEmpty(directory))
+			Directory.CreateDirectory(directory);
+		var output = stringWriter.ToString();
+		var cleanOutput = StripProviderStatusLines(StripAnsiCodes(output));
+		File.WriteAllText(outputPath, cleanOutput);
+		Console.WriteLine($"{exportMessage}: {outputPath}");
+	}
+
+	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, Dictionary<string, List<Lot>> lotsByMatchKey, decimal running, decimal initialAmount, string outputPath, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null, bool showLegs = false)
+	{
+		var stringWriter = new StringWriter();
+		var console = CreateTextConsole(stringWriter);
 
 		if (rows.Count > 0)
 		{
@@ -92,12 +111,9 @@ public static partial class TextFileExporter
 		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(lotsByMatchKey, opts);
 		TableBuilder.RenderSummary(console, rows, running, initialAmount, unrealizedPnL);
 
-		var output = stringWriter.ToString();
-		var cleanOutput = StripAnsiCodes(output);
-
-		File.WriteAllText(outputPath, cleanOutput);
-		Console.WriteLine($"Text report exported to: {outputPath}");
+		WriteConsoleOutputToTextFile(stringWriter, outputPath, "Text report exported to");
 	}
 
 	private static string StripAnsiCodes(string text) => AnsiEscapeRegex().Replace(text, string.Empty);
+	private static string StripProviderStatusLines(string text) => ProviderStatusLineRegex().Replace(text, string.Empty);
 }

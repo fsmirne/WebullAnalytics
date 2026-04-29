@@ -391,7 +391,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		int Qty,
 		int DaysToTarget,                   // days from evaluation date to this scenario's target date; used to rank P&L per day
 		string Rationale,
-	   bool IsRoll = false,
+     bool IsRoll = false,
 		decimal? RankScore = null);         // true iff this scenario closes an existing leg and opens a new one (consulted by BuildReproductionCommands)
 
 	/// <summary>Hypothetical OCC symbols the scenario generators will reference. Pre-enumerated so we can
@@ -552,7 +552,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			list.Add(NewScenarioSpread("Close short only", legs,
 				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortMidNow)}",
 				cashNow: cash, valueAtTarget: longAtExpiry, bpDeltaPerContract: bpDelta, daysToTarget: expiryDte,
-			  rationale: $"buy back short at mid ${shortMidNow:F2}/share; keep long → intrinsic ${longAtExpiry:F2}/share at expiry"));
+              rationale: $"buy back short at mid ${shortMidNow:F2}/share; keep long → intrinsic ${longAtExpiry:F2}/share at expiry"));
 		}
 
 		{
@@ -561,7 +561,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			list.Add(NewScenarioSpread("Close all", legs,
 				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortMidNow)}, SELL {longLeg.Symbol} x{longLeg.Qty} @{FmtPrice(longMidNow)}",
 				cashNow: cash, valueAtTarget: 0m, bpDeltaPerContract: bpDelta, daysToTarget: 1,
-			  rationale: $"close at mid prices → net ${cash:+0.00;-0.00}/share"));
+              rationale: $"close at mid prices → net ${cash:+0.00;-0.00}/share"));
 		}
 
 		foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
@@ -588,7 +588,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				unchangedProjectedPerShare: holdNetPerShare,
 				bpPerContract: sameExpBpDelta,
 				daysToTarget: expiryDte,
-			   rationale: $"shift short to ${newStrike:F2}, keep {expiry:MM-dd} expiry; mid net ${cashPerShareSameExp:+0.00;-0.00}/share; at expiry: ${projSameExpPerShare:F2}",
+                rationale: $"shift short to ${newStrike:F2}, keep {expiry:MM-dd} expiry; mid net ${cashPerShareSameExp:+0.00;-0.00}/share; at expiry: ${projSameExpPerShare:F2}",
 				isRoll: true);
 		}
 
@@ -725,7 +725,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			list.Add(NewScenarioSpread("Close short only", legs,
 				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortMidNow)}",
 				cashNow: cash, valueAtTarget: longAtExpiry, bpDeltaPerContract: bpDelta, daysToTarget: origShortDte,
-			 rationale: $"buy back short at mid ${shortMidNow:F2}/share; keep long → ${longAtExpiry:F2}/share at short exp"));
+              rationale: $"buy back short at mid ${shortMidNow:F2}/share; keep long → ${longAtExpiry:F2}/share at short exp"));
 		}
 
 		// 3. Close all at the default mid basis.
@@ -735,7 +735,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			list.Add(NewScenarioSpread("Close all", legs,
 				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortMidNow)}, SELL {longLeg.Symbol} x{longLeg.Qty} @{FmtPrice(longMidNow)}",
 				cashNow: cash, valueAtTarget: 0m, bpDeltaPerContract: bpDelta, daysToTarget: 1,
-			  rationale: $"close at mid prices → net ${cash:+0.00;-0.00}/share"));
+              rationale: $"close at mid prices → net ${cash:+0.00;-0.00}/share"));
 		}
 
 		var newExp = NextWeekly(shortLeg.Parsed.ExpiryDate);
@@ -1456,7 +1456,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		Func<string, decimal> ivResolver,
 		Func<string, decimal> legPriceResolver,
 		TrendSnapshot? trend,
-	   IAnsiConsole console,
+        IAnsiConsole console,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotesForProbe = null,
 		decimal technicalBiasForProbe = 0m)
 	{
