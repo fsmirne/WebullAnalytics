@@ -122,7 +122,7 @@ public class CandidateScorerRationaleTests
 		var lines = rationale.Split('\n');
 
         Assert.Equal(5, lines.Length);
-       Assert.Equal("max-pain target $24.50 → pain 1.19", lines[2]);
+		Assert.Equal("max-pain target $24.50 → pain 1.19", lines[2]);
 		Assert.DoesNotContain("max pain target", lines[3]);
 		Assert.DoesNotContain("max-pain target", lines[3]);
 	}
