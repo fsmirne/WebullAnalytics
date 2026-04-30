@@ -216,6 +216,63 @@ public class PositionReplayTests
 	}
 
 	[Fact]
+	public void Execute_CalendarAddAfterFanOutTargetsMatchingSubLineage()
+	{
+		// Regression: after a roll splits a calendar into two sub-lineages sharing the short leg,
+		// a calendar-add strategy event whose legs match exactly one sub-lineage must apply only
+		// to that sub-lineage. Otherwise the new fills get averaged across both sub-lineages via
+		// the shared short's carried price, biasing the adjusted basis.
+		var shortExpiry = new DateTime(2026, 5, 1);
+		var midExpiry = new DateTime(2026, 5, 15);
+		var longExpiry = new DateTime(2026, 5, 22);
+		var shortSymbol = MatchKeys.OccSymbol("GME", shortExpiry, 25m, "P");
+		var midSymbol = MatchKeys.OccSymbol("GME", midExpiry, 25m, "P");
+		var longSymbol = MatchKeys.OccSymbol("GME", longExpiry, 25m, "P");
+		var timestamp = new DateTime(2026, 4, 27, 12, 37, 2, DateTimeKind.Utc);
+
+		var trades = new List<Trade>
+		{
+			new(1, timestamp, "GME 22 May 2026", "strategy:Calendar:GME:2026-05-22:P25", Asset.OptionStrategy, "Calendar", Side.Buy, 474, 0.71m, Trade.OptionMultiplier, longExpiry),
+			new(2, timestamp, Formatters.FormatOptionDisplay("GME", shortExpiry, 25m), MatchKeys.Option(shortSymbol), Asset.Option, "Put", Side.Sell, 474, 0.36m, Trade.OptionMultiplier, shortExpiry, 1),
+			new(3, timestamp, Formatters.FormatOptionDisplay("GME", longExpiry, 25m), MatchKeys.Option(longSymbol), Asset.Option, "Put", Side.Buy, 474, 1.07m, Trade.OptionMultiplier, longExpiry, 1),
+			new(4, timestamp.AddDays(2), "GME 22 May 2026", "strategy:Calendar:GME:2026-05-22:P25", Asset.OptionStrategy, "Calendar", Side.Buy, 115, 0.53m, Trade.OptionMultiplier, longExpiry),
+			new(5, timestamp.AddDays(2), Formatters.FormatOptionDisplay("GME", shortExpiry, 25m), MatchKeys.Option(shortSymbol), Asset.Option, "Put", Side.Sell, 115, 0.8942m, Trade.OptionMultiplier, shortExpiry, 4),
+			new(6, timestamp.AddDays(2), Formatters.FormatOptionDisplay("GME", longExpiry, 25m), MatchKeys.Option(longSymbol), Asset.Option, "Put", Side.Buy, 115, 1.42m, Trade.OptionMultiplier, longExpiry, 4),
+			new(7, timestamp.AddDays(2).AddHours(1), "GME 15 May 2026", "strategy:Calendar:GME:2026-05-15:P25", Asset.OptionStrategy, "Calendar", Side.Sell, 300, 0.130134m, Trade.OptionMultiplier, midExpiry),
+			new(8, timestamp.AddDays(2).AddHours(1), Formatters.FormatOptionDisplay("GME", longExpiry, 25m), MatchKeys.Option(longSymbol), Asset.Option, "Put", Side.Sell, 300, 1.36m, Trade.OptionMultiplier, longExpiry, 7),
+			new(9, timestamp.AddDays(2).AddHours(1), Formatters.FormatOptionDisplay("GME", midExpiry, 25m), MatchKeys.Option(midSymbol), Asset.Option, "Put", Side.Buy, 300, 1.23m, Trade.OptionMultiplier, midExpiry, 7),
+			// Day 3: calendar-add of 141 to the May22 sub-lineage. Sell short @0.7396, buy long @1.35 → debit 0.61.
+			// Must average with the existing 289-unit May22 sub-lineage at 0.6748, NOT with the 300-unit May15 sub-lineage.
+			new(10, timestamp.AddDays(3), "GME 22 May 2026", "strategy:Calendar:GME:2026-05-22:P25", Asset.OptionStrategy, "Calendar", Side.Buy, 141, 0.61m, Trade.OptionMultiplier, longExpiry),
+			new(11, timestamp.AddDays(3), Formatters.FormatOptionDisplay("GME", shortExpiry, 25m), MatchKeys.Option(shortSymbol), Asset.Option, "Put", Side.Sell, 141, 0.7396m, Trade.OptionMultiplier, shortExpiry, 10),
+			new(12, timestamp.AddDays(3), Formatters.FormatOptionDisplay("GME", longExpiry, 25m), MatchKeys.Option(longSymbol), Asset.Option, "Put", Side.Buy, 141, 1.35m, Trade.OptionMultiplier, longExpiry, 10),
+		};
+
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var parents = rows.Where(r => r.Asset == Asset.OptionStrategy).OrderBy(r => r.Qty).ToList();
+
+		Assert.Equal(2, parents.Count);
+		var midParent = parents.Single(row => row.Instrument == "GME 15 May 2026");
+		var longParent = parents.Single(row => row.Instrument == "GME 22 May 2026");
+
+		Assert.Equal("Calendar", midParent.OptionKind);
+		Assert.Equal(300, midParent.Qty);
+		Assert.Equal(0.544m, decimal.Round(midParent.AdjustedAvgPrice!.Value, 3));
+
+		Assert.Equal("Calendar", longParent.OptionKind);
+		Assert.Equal(430, longParent.Qty);
+		// (289 × 0.6740 + 141 × 0.6104) / 430 ≈ 0.6531. Pre-fix (no immediate fan-out split) gave ≈ 0.6900.
+		Assert.Equal(0.653m, decimal.Round(longParent.AdjustedAvgPrice!.Value, 3));
+
+		var longShortLeg = rows.Single(r => r.IsStrategyLeg && r.MatchKey == MatchKeys.Option(shortSymbol) && r.Qty == 430);
+		var longLongLeg = rows.Single(r => r.IsStrategyLeg && r.MatchKey == MatchKeys.Option(longSymbol) && r.Qty == 430);
+		// May01 short basis: (289 × 0.4643 + 141 × 0.7396) / 430 = 0.5546.
+		Assert.Equal(0.555m, decimal.Round(longShortLeg.AdjustedAvgPrice!.Value, 3));
+		// May22 long basis: (289 × 1.139 + 141 × 1.35) / 430 = 1.2082.
+		Assert.Equal(1.208m, decimal.Round(longLongLeg.AdjustedAvgPrice!.Value, 3));
+	}
+
+	[Fact]
 	public void BuildAdjustmentReport_FiltersInheritedRollTradesFromUnchangedSiblingPanel()
 	{
 		var shortExpiry = new DateTime(2026, 5, 1);

@@ -198,6 +198,19 @@ internal static class PositionReplay
 		// Deactivate any lineage whose open legs are all zero.
 		active.RemoveAll(lin => lin.OpenLegs.Count == 0);
 
+		// Per design (§"Imbalance invariant"): if an event leaves a 3+leg fan-out lineage imbalanced,
+		// split it now so subsequent events route to the correct sub-lineage rather than averaging
+		// across pairings. End-of-replay SettleImbalances still handles cases TrySplitSharedLegFanOut
+		// rejects (proportional splits, 2-leg residual imbalance from unmatched partial fills).
+		foreach (var lin in active.ToList())
+		{
+			if (lin.OpenLegs.Count < 3) continue;
+			var minQty = lin.OpenLegs.Values.Min(v => v.Qty);
+			var maxQty = lin.OpenLegs.Values.Max(v => v.Qty);
+			if (minQty == maxQty) continue;
+			TrySplitSharedLegFanOut(lin, active, ref lineageIdCounter, minQty);
+		}
+
 		AssertInvariants(active, $"after event at {evt.Timestamp}");
 	}
 
@@ -334,14 +347,26 @@ internal static class PositionReplay
 		}
 		else
 		{
-			// Multiple touched: merge them all into the oldest. This handles the case where earlier
-			// state-machine routing produced overlapping lineages (e.g., cross-expiry same-strike
-			// sequences) that now need to be reconciled when an event spans their shared leg.
-			target = touchedLineages.OrderBy(l => l.FirstEntryTimestamp).First();
-			foreach (var donor in touchedLineages.Where(l => l != target).ToList())
+			// Multiple touched: prefer the lineage whose every open leg is in the event's matchKeys
+			// AND every event leg is in its OpenLegs — the unique sub-lineage this event targets.
+			// Arises after a fan-out split where sibling lineages share a leg's matchKey (e.g., a
+			// shared short across two calendars). Falls back to merge-into-oldest when no unique
+			// best fit exists.
+			var eventKeys = evt.Trades.Select(t => t.MatchKey).ToHashSet(StringComparer.Ordinal);
+			var fullyMatched = touchedLineages.Where(lin => lin.OpenLegs.Keys.All(k => eventKeys.Contains(k)) && evt.Trades.All(t => lin.OpenLegs.ContainsKey(t.MatchKey))).ToList();
+			if (fullyMatched.Count == 1)
 			{
-				MergeLineageInto(target, donor);
-				active.Remove(donor);
+				target = fullyMatched[0];
+			}
+			else
+			{
+				// Handles earlier routing that produced overlapping lineages spanning a shared leg.
+				target = touchedLineages.OrderBy(l => l.FirstEntryTimestamp).First();
+				foreach (var donor in touchedLineages.Where(l => l != target).ToList())
+				{
+					MergeLineageInto(target, donor);
+					active.Remove(donor);
+				}
 			}
 		}
 
