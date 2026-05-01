@@ -1,8 +1,10 @@
 ﻿using Spectre.Console;
 using Spectre.Console.Cli;
+using Spectre.Console.Rendering;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
+using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.Api;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
@@ -41,6 +43,10 @@ internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
 	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, and PRICE is a decimal or BID|MID|ASK (keywords require --api). Comma-separated for multiple. Example: buy:GME260501C00023000:300@MID")]
 	public string Spec { get; set; } = "";
 
+	[CommandOption("--standalone")]
+	[Description("Ignore all existing trades/positions and run the pipeline only on the synthetic legs. Useful for judging a trade in isolation.")]
+	public bool Standalone { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -75,8 +81,19 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
 		}
 
-		var (trades, feeLookup, err) = ReportCommand.LoadTrades(settings);
-		if (err != 0) return err;
+		List<Trade> trades;
+		Dictionary<(DateTime, Side, int), decimal>? feeLookup;
+		if (settings.Standalone)
+		{
+			trades = new List<Trade>();
+			feeLookup = null;
+		}
+		else
+		{
+			int err;
+			(trades, feeLookup, err) = ReportCommand.LoadTrades(settings);
+			if (err != 0) return err;
+		}
 
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		if (AnalyzeCommon.NeedsMarketPrices(settings.Spec))
@@ -203,6 +220,43 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 
 internal static class AnalyzeCommon
 {
+	/// <summary>Wraps the leg list, cost-basis line, per-leg detail, and risk diagnostic into a single
+	/// outer panel — same shape `wa ai scan` uses for proposals, so analyze-position and analyze-risk
+	/// match the rest of the AI surface visually. Pass <paramref name="ascii"/>=true with a file-backed
+	/// <paramref name="console"/> for the --output text path.</summary>
+	internal static void RenderProposalPanel(IReadOnlyList<AnalyzePositionCommand.PositionSnapshot> legs, string strategyLabel, decimal spot, RiskDiagnostic diagnostic, IAnsiConsole? console = null, bool ascii = false)
+	{
+		console ??= AnsiConsole.Console;
+		var ticker = legs[0].Parsed.Root;
+		var qty = legs[0].Qty;
+		var initialDebit = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
+
+		var rows = new List<IRenderable>();
+		var legsText = string.Join(", ", legs.Select(l => $"{(l.Action == LegAction.Buy ? "BUY" : "SELL")} {l.Symbol} x{l.Qty}"));
+		rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/]"));
+		rows.Add(new Markup($"[dim]cost basis ${initialDebit:F2}/contract — spot ${spot:F2}, date {EvaluationDate.Today:yyyy-MM-dd}[/]"));
+		foreach (var l in legs)
+		{
+			var label = l.Action == LegAction.Buy ? "[green]Long [/]" : "[red]Short[/]";
+			rows.Add(new Markup($"  {label}  {Markup.Escape(l.Symbol)} x{l.Qty} @ ${l.CostBasis:F2}  (exp {l.Parsed.ExpiryDate:yyyy-MM-dd}, DTE {(l.Parsed.ExpiryDate.Date - EvaluationDate.Today.Date).Days})"));
+		}
+		rows.Add(RiskDiagnosticRenderer.Build(diagnostic, ascii));
+
+		var header = $"[bold cyan]{Markup.Escape(strategyLabel)}[/] [grey]{Markup.Escape(ticker)}[/] x{qty}";
+		var panel = new Panel(new Rows(rows))
+			.Header(header)
+			.Expand()
+			.Border(ascii ? BoxBorder.Ascii : BoxBorder.Rounded)
+			.BorderColor(Color.Cyan1);
+		console.Write(panel);
+		console.WriteLine();
+	}
+
+	/// <summary>Returns the conventional default filename for an analyze-* text export. Mirrors
+	/// `wa report`'s `WebullAnalytics_{date}.txt` shape so output files cluster predictably.</summary>
+	internal static string DefaultTextOutputName(string commandLabel) =>
+		$"WebullAnalytics_{commandLabel}_{DateTime.Now:yyyyMMdd}.txt";
+
 	/// <summary>Splits a trade spec on ';' into strategy groups, then parses each as a comma-separated leg
 	/// list. Empty groups are skipped. Used wherever we need a flat list of legs irrespective of which
 	/// group they belong to (e.g. quote prefetching, validation).</summary>

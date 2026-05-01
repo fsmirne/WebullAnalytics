@@ -37,7 +37,7 @@ public static partial class TextFileExporter
 		if (!string.IsNullOrEmpty(directory))
 			Directory.CreateDirectory(directory);
 		var output = stringWriter.ToString();
-		var cleanOutput = StripProviderStatusLines(StripAnsiCodes(output));
+		var cleanOutput = NormalizeAsciiSafe(StripProviderStatusLines(StripAnsiCodes(output)));
 		File.WriteAllText(outputPath, cleanOutput);
 		Console.WriteLine($"{exportMessage}: {outputPath}");
 	}
@@ -116,4 +116,51 @@ public static partial class TextFileExporter
 
 	private static string StripAnsiCodes(string text) => AnsiEscapeRegex().Replace(text, string.Empty);
 	private static string StripProviderStatusLines(string text) => ProviderStatusLineRegex().Replace(text, string.Empty);
+
+	/// <summary>Single source of truth for the reproduction-command lead-in glyph. Console output uses
+	/// the unicode hooked-arrow `↪`; text-file output uses `L-` because `↪` (U+21AA) is one of the few
+	/// glyphs that Spectre measures as width 1 but many monospace fonts draw as a 2-column emoji,
+	/// breaking right-border alignment in saved files. Multi-char substitution must happen at render
+	/// time so Spectre measures the longer string — the post-process safety net cannot expand chars
+	/// without shifting content past the already-drawn right border.</summary>
+	public static string ReproductionLeadIn(bool ascii) => ascii ? "L-" : "↪";
+
+	/// <summary>Replaces `↪` with `L-` in a free-form text string for the ascii=true path. Pass-through
+	/// otherwise. Use this when the lead-in is embedded in data (e.g. `Scenario.Rationale`) instead of
+	/// a literal site we control.</summary>
+	public static string NormalizeArrows(bool ascii, string text)
+	{
+		if (!ascii || string.IsNullOrEmpty(text)) return text;
+		return text.Contains('↪', StringComparison.Ordinal)
+			? text.Replace("↪", "L-", StringComparison.Ordinal)
+			: text;
+	}
+
+	/// <summary>Substitutes the Unicode glyphs known to misalign because their rendering width differs
+	/// from Spectre's measurement. Spectre uses East Asian Width tables and assigns width 1 to all of
+	/// these, but the actual rendered width depends on the font/viewer:
+	/// - `★`, `⚠`: emoji-presentation-prone — many fonts (Cascadia, anything with emoji fallback) draw
+	///   them as 2-column glyphs.
+	/// - `│`: box-drawing char used inline as a column separator. EAW=Ambiguous, so terminals/viewers
+	///   under Asian-width rules render it as 2 columns. Easy to hit because we use it 3× per scenario
+	///   row in analyze-position panels — three 1-column slips = 3 cols of right-border drift.
+	/// Other Unicode we emit (Greek letters, `→`, `←`, `—`, `•`) measures and renders as width 1 in
+	/// every common monospace font, so it's preserved. Each substitution is one code point for one,
+	/// so the surrounding panel widths Spectre already laid out stay correct.</summary>
+	private static string NormalizeAsciiSafe(string text)
+	{
+		if (string.IsNullOrEmpty(text)) return text;
+		var sb = new System.Text.StringBuilder(text.Length);
+		foreach (var ch in text)
+		{
+			sb.Append(ch switch
+			{
+				'★' => '*',
+				'⚠' => '!',
+				'│' => '|',
+				_ => ch,
+			});
+		}
+		return sb.ToString();
+	}
 }

@@ -68,6 +68,9 @@ internal sealed class AnalyzePositionSettings : AnalyzeSubcommandSettings
 		if (Cash.HasValue && Cash.Value < 0m)
 			return ValidationResult.Error($"--cash: must be non-negative, got {Cash.Value}");
 
+		if (OutputFormat.Equals("excel", StringComparison.OrdinalIgnoreCase))
+			return ValidationResult.Error("--output excel is not supported for analyze position; use 'console' or 'text'");
+
 		return ValidationResult.Success();
 	}
 }
@@ -157,8 +160,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 		}
 
-		RenderHeader(positionLegs, structure, spot.Value);
-
 		// Risk diagnostic: structured analysis of the current position (greeks, geometry, premium ratio,
 		// trend alignment, rule hits). Logged to data/analyze-position.jsonl for AI consumers.
 		var asOfForDiagnostic = EvaluationDate.Today;
@@ -168,7 +169,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (!string.IsNullOrEmpty(tickerForTrend))
 			trendSnap = await TrendFetcher.FetchAsync(tickerForTrend, asOfForDiagnostic, cancellation);
 
-		BuildAndLogDiagnostic(
+		var diagnostic = BuildAndLogDiagnostic(
 			logPath: Program.ResolvePath("data/analyze-position.jsonl"),
 			ticker: tickerForTrend ?? "UNKNOWN",
 			positionKey: string.Join("|", positionLegs.Select(l => l.Symbol)),
@@ -185,18 +186,40 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				return LiveOrBsMid(quotes, sym, spot.Value, leg.Parsed.Strike, dte, iv, leg.Parsed.CallPut);
 			},
 			trend: trendSnap,
-		  console: AnsiConsole.Console,
 			quotesForProbe: quotes,
 			technicalBiasForProbe: technicalBias);
 
 		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias);
-		if (scenarios.Count == 0)
+
+		var toText = settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase);
+		StringWriter? stringWriter = null;
+		IAnsiConsole renderConsole;
+		if (toText)
 		{
-			AnsiConsole.MarkupLine($"[yellow]No scenarios defined yet for structure type '{structure}'. Phase 1 supports single-long, vertical, and calendar/diagonal.[/]");
-			return 0;
+			stringWriter = new StringWriter();
+			renderConsole = WebullAnalytics.IO.TextFileExporter.CreateTextConsole(stringWriter);
+		}
+		else
+		{
+			renderConsole = AnsiConsole.Console;
 		}
 
-		RenderScenarioTable(scenarios, settings);
+		AnalyzeCommon.RenderProposalPanel(positionLegs, structure.ToString(), spot.Value, diagnostic, renderConsole, ascii: toText);
+
+		if (scenarios.Count == 0)
+		{
+			renderConsole.MarkupLine($"[yellow]No scenarios defined yet for structure type '{structure}'. Phase 1 supports single-long, vertical, and calendar/diagonal.[/]");
+		}
+		else
+		{
+			RenderScenarioTable(scenarios, settings, renderConsole, ascii: toText);
+		}
+
+		if (toText)
+		{
+			var path = settings.OutputPath ?? AnalyzeCommon.DefaultTextOutputName("AnalyzePosition");
+			WebullAnalytics.IO.TextFileExporter.WriteConsoleOutputToTextFile(stringWriter!, path, "Position analysis written to");
+		}
 		return 0;
 	}
 
@@ -1273,21 +1296,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	// ─── Rendering ───────────────────────────────────────────────────────────
 
-	internal static void RenderHeader(IReadOnlyList<PositionSnapshot> legs, StructureKind kind, decimal spot)
-	{
-		var ticker = legs[0].Parsed.Root;
-		var initialDebit = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
-		var qty = legs[0].Qty;
-		AnsiConsole.MarkupLine($"[bold cyan]{kind}[/] [bold]{Markup.Escape(ticker)}[/] x{qty} @ cost basis ${initialDebit:F2}/contract — evaluating at spot [yellow]${spot:F2}[/], date [yellow]{EvaluationDate.Today:yyyy-MM-dd}[/]");
-		foreach (var l in legs)
-		{
-			var label = l.Action == LegAction.Buy ? "[green]Long [/]" : "[red]Short[/]";
-			AnsiConsole.MarkupLine($"  {label}  {Markup.Escape(l.Symbol)} x{l.Qty} @ ${l.CostBasis:F2}  (exp {l.Parsed.ExpiryDate:yyyy-MM-dd}, DTE {(l.Parsed.ExpiryDate.Date - EvaluationDate.Today.Date).Days})");
-		}
-		AnsiConsole.WriteLine();
-	}
-
-	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, AnalyzePositionSettings settings)
+	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, AnalyzePositionSettings settings, IAnsiConsole console, bool ascii)
 	{
 		var availableCash = settings.Cash;
 
@@ -1321,29 +1330,34 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var fundMarker = !fundable ? " [red](not fundable)[/]" : "";
 			var prefix = isRecommended ? "★ " : "";
 
+			var rationaleText = WebullAnalytics.IO.TextFileExporter.NormalizeArrows(ascii, sc.Rationale);
+			var nameText = WebullAnalytics.IO.TextFileExporter.NormalizeArrows(ascii, sc.Name);
+
 			var lines = new List<IRenderable>
 			{
 				new Markup($"[dim]Cash {Markup.Escape(cashStr)}  │  Projected {Markup.Escape(projStr)}  │  P&L {Markup.Escape(totalStr)}  │  {marginMarkup}[/]"),
-				new Markup($"[dim]{Markup.Escape(sc.Rationale)}[/]"),
+				new Markup($"[dim]{Markup.Escape(rationaleText)}[/]"),
 			};
+			var leadIn = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
 			var (tradeCmds, analyzeCmd) = BuildReproductionCommands(sc, settings);
 			if (tradeCmds != null)
 				foreach (var cmd in tradeCmds)
-					lines.Add(new Markup($"[grey50]↪ {Markup.Escape(cmd)}[/]"));
+					lines.Add(new Markup($"[grey50]{leadIn} {Markup.Escape(cmd)}[/]"));
 			if (analyzeCmd != null)
-				lines.Add(new Markup($"[grey50]↪ {Markup.Escape(analyzeCmd)}[/]"));
+				lines.Add(new Markup($"[grey50]{leadIn} {Markup.Escape(analyzeCmd)}[/]"));
 
 			var panel = new Panel(new Rows(lines))
-				.Header($"[{style}]{prefix}{Markup.Escape(sc.Name)}[/]{fundMarker}")
+				.Header($"[{style}]{prefix}{Markup.Escape(nameText)}[/]{fundMarker}")
 				.Expand()
+				.Border(ascii ? BoxBorder.Ascii : BoxBorder.Rounded)
 				.BorderColor(isRecommended ? Color.Green : (fundable ? Color.Grey : Color.Grey35));
-			AnsiConsole.Write(panel);
+			console.Write(panel);
 		}
 
 		if (availableCash.HasValue)
 		{
-			AnsiConsole.WriteLine();
-			AnsiConsole.MarkupLine($"[dim]Fundability check: available cash/BP = ${availableCash.Value:N2}.[/]");
+			console.WriteLine();
+			console.MarkupLine($"[dim]Fundability check: available cash/BP = ${availableCash.Value:N2}.[/]");
 		}
 	}
 
@@ -1443,10 +1457,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return $"wa trade place --trade \"{halfArg}\" --limit {halfLimit}";
 	}
 
-	/// <summary>Builds a RiskDiagnostic for the given position, appends it to the analyze-position JSONL
-	/// log at <paramref name="logPath"/>, and renders it to <paramref name="console"/>. Separated from
-	/// ExecuteAsync for direct unit testing of the JSON shape.</summary>
-	internal static void BuildAndLogDiagnostic(
+	/// <summary>Builds a RiskDiagnostic for the given position and appends it to the analyze-position
+	/// JSONL log at <paramref name="logPath"/>. Returns the diagnostic for the caller to render — kept
+	/// side-effect-free on the console so layout decisions (panel framing, ordering with the leg header)
+	/// stay with ExecuteAsync. Separated from ExecuteAsync for direct unit testing of the JSON shape.</summary>
+	internal static RiskDiagnostic BuildAndLogDiagnostic(
 		string logPath,
 		string ticker,
 		string positionKey,
@@ -1456,7 +1471,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		Func<string, decimal> ivResolver,
 		Func<string, decimal> legPriceResolver,
 		TrendSnapshot? trend,
-		IAnsiConsole console,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotesForProbe = null,
 		decimal technicalBiasForProbe = 0m)
 	{
@@ -1489,7 +1503,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			writer.WriteLine(System.Text.Json.JsonSerializer.Serialize(record));
 		}
 
-		RiskDiagnosticRenderer.WriteConsole(console, diagnostic);
+		return diagnostic;
 	}
 
 	/// <summary>Shapes a RiskDiagnostic into a stable lowerCamel JSON object. Shared between manage and
