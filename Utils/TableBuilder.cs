@@ -604,6 +604,32 @@ public static class TableBuilder
 			priceContentWidth = Math.Max(priceContentWidth, 2 + n.Length);
 		}
 
+		// BuildTimeDecayGridTable pads every cell's leg+net to GLOBAL max widths so the '|' separators
+		// line up vertically across rows. We must mirror that here — computing per-column widths
+		// independently underestimates the rightmost columns whenever negatives appear in earlier
+		// columns (`-0.20` is 5 chars vs `0.20` being 4), which leaves Spectre to compress those
+		// columns and wrap the cell content onto a second row.
+		int globalNetWidth = 0;
+		var globalLegWidths = legCount > 0 ? new int[legCount] : Array.Empty<int>();
+		for (int di = 0; di < grid.DateColumns.Count; di++)
+		{
+			for (int pi = 0; pi < grid.PriceRows.Count; pi++)
+			{
+				var netText = displayMode == "pnl"
+					? FormatNetPnL(grid.PnLs[pi, di])
+					: $"${grid.Values[pi, di].ToString("N2", CultureInfo.InvariantCulture)}";
+				globalNetWidth = Math.Max(globalNetWidth, netText.Length);
+				if (legCount > 0)
+				{
+					for (int li = 0; li < legCount; li++)
+					{
+						var legText = grid.LegValues![li, pi, di].ToString("N2", CultureInfo.InvariantCulture);
+						globalLegWidths[li] = Math.Max(globalLegWidths[li], legText.Length);
+					}
+				}
+			}
+		}
+
 		var dateColContentWidths = new int[grid.DateColumns.Count];
 		for (int di = 0; di < grid.DateColumns.Count; di++)
 		{
@@ -612,31 +638,15 @@ public static class TableBuilder
 				? "At Exp"
 				: date.ToString("dd MMM", CultureInfo.InvariantCulture);
 
-			var maxNetWidth = header.Length;
-			for (int pi = 0; pi < grid.PriceRows.Count; pi++)
-			{
-				var netText = displayMode == "pnl"
-					? FormatNetPnL(grid.PnLs[pi, di])
-				 : $"${grid.Values[pi, di].ToString("N2", CultureInfo.InvariantCulture)}";
-				maxNetWidth = Math.Max(maxNetWidth, netText.Length);
-			}
-
+			var perColMax = Math.Max(header.Length, globalNetWidth);
 			if (legCount > 0)
 			{
-				var legSegWidths = new int[legCount];
-				for (int pi = 0; pi < grid.PriceRows.Count; pi++)
-					for (int li = 0; li < legCount; li++)
-					{
-						var legText = grid.LegValues![li, pi, di].ToString("N2", CultureInfo.InvariantCulture);
-						legSegWidths[li] = Math.Max(legSegWidths[li], legText.Length);
-					}
-
-				// Cell content is "leg1|leg2|...|net" (separators = legCount)
-				dateColContentWidths[di] = legSegWidths.Sum() + maxNetWidth + legCount;
+				// Cell content is "leg1|leg2|...|net" (separators = legCount), each leg padded to global width.
+				dateColContentWidths[di] = Math.Max(header.Length, globalLegWidths.Sum() + globalNetWidth + legCount);
 			}
 			else
 			{
-				dateColContentWidths[di] = maxNetWidth;
+				dateColContentWidths[di] = perColMax;
 			}
 		}
 

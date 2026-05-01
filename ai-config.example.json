@@ -90,6 +90,30 @@
 			"triggerDTE": 2,
 			"maxShortPremium": 0.10,
 			"minRollCredit": 0.05
+		},
+		"closeBeforeShortExpiry": {
+			"enabled": false,
+			"minProfitPct": 30,
+			"emergencyBreakEvenBufferPct": 1.0
+		}
+	},
+	"watch": {
+		"autoExecute": {
+			"enabled": false,
+			"submit": false,
+			"rules": ["CloseBeforeShortExpiryRule"],
+			"scaleOut": {
+				"tz": "America/New_York",
+				"tranche1Start": "10:00",
+				"tranche1End": "10:30",
+				"tranche2Start": "12:30",
+				"tranche2End": "13:00",
+				"tranche3Start": "15:00",
+				"tranche3End": "15:30",
+				"tranche1Fraction": 0.3333,
+				"tranche2Fraction": 0.5,
+				"minQty": 100
+			}
 		}
 	}
 }
