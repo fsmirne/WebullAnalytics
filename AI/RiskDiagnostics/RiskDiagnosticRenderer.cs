@@ -143,7 +143,9 @@ internal static class RiskDiagnosticRenderer
 		if (string.IsNullOrWhiteSpace(s.Structure) || s.Structure.Equals("probe", StringComparison.OrdinalIgnoreCase))
 			return null;
 
-		var perContract = RequiresMargin(s.Structure) ? s.CapitalAtRiskPerContract ?? 0m : 0m;
+		// Prefer the explicit broker-margin figure when the builder supplied it (calendars/diagonals are
+		// $0 unless inverted). Otherwise fall back to capital-at-risk for short verticals / iron spreads.
+		var perContract = s.MarginPerContract ?? (RequiresMargin(s.Structure) ? s.CapitalAtRiskPerContract ?? 0m : 0m);
 		var qty = Math.Max(1, s.Qty);
 		var total = perContract * qty;
 		if (qty <= 1)
@@ -157,9 +159,9 @@ internal static class RiskDiagnosticRenderer
 		|| structure.Equals(nameof(OpenStructureKind.ShortCallVertical), StringComparison.OrdinalIgnoreCase)
 		|| structure.Equals(nameof(OpenStructureKind.IronButterfly), StringComparison.OrdinalIgnoreCase)
 		|| structure.Equals(nameof(OpenStructureKind.IronCondor), StringComparison.OrdinalIgnoreCase)
-		// Diagonals/calendars hold real capital: pure debit when the long fully covers the short, plus the
-		// strike gap on inverted diagonals (long strike past the short for calls, below for puts) where
-		// assignment at short expiry forces realizing the gap. CapitalAtRiskPerContract already encodes both.
+		// Calendars/diagonals require margin only when inverted (long strike past the short for calls,
+		// below for puts). Standard covered structures hold no broker collateral beyond the debit paid.
+		// MarginPerContract on the score record encodes this distinction; the renderer just displays it.
 		|| structure.Equals(nameof(OpenStructureKind.LongDiagonal), StringComparison.OrdinalIgnoreCase)
 		|| structure.Equals(nameof(OpenStructureKind.LongCalendar), StringComparison.OrdinalIgnoreCase)
 		|| structure.Equals(nameof(OpenStructureKind.DoubleDiagonal), StringComparison.OrdinalIgnoreCase)
