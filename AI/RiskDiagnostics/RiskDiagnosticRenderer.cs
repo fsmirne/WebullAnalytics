@@ -156,7 +156,14 @@ internal static class RiskDiagnosticRenderer
 		structure.Equals(nameof(OpenStructureKind.ShortPutVertical), StringComparison.OrdinalIgnoreCase)
 		|| structure.Equals(nameof(OpenStructureKind.ShortCallVertical), StringComparison.OrdinalIgnoreCase)
 		|| structure.Equals(nameof(OpenStructureKind.IronButterfly), StringComparison.OrdinalIgnoreCase)
-		|| structure.Equals(nameof(OpenStructureKind.IronCondor), StringComparison.OrdinalIgnoreCase);
+		|| structure.Equals(nameof(OpenStructureKind.IronCondor), StringComparison.OrdinalIgnoreCase)
+		// Diagonals/calendars hold real capital: pure debit when the long fully covers the short, plus the
+		// strike gap on inverted diagonals (long strike past the short for calls, below for puts) where
+		// assignment at short expiry forces realizing the gap. CapitalAtRiskPerContract already encodes both.
+		|| structure.Equals(nameof(OpenStructureKind.LongDiagonal), StringComparison.OrdinalIgnoreCase)
+		|| structure.Equals(nameof(OpenStructureKind.LongCalendar), StringComparison.OrdinalIgnoreCase)
+		|| structure.Equals(nameof(OpenStructureKind.DoubleDiagonal), StringComparison.OrdinalIgnoreCase)
+		|| structure.Equals(nameof(OpenStructureKind.DoubleCalendar), StringComparison.OrdinalIgnoreCase);
 
 	private static string CapProbeLabel(string label)
 	{

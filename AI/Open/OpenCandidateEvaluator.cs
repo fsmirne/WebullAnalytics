@@ -93,7 +93,24 @@ internal sealed class OpenCandidateEvaluator
 			var extra = await _quotes.GetQuotesAsync(ctx.Now, neededSymbols, tickerSet, cancellation);
 			if (extra.Options.Count > 0)
 			{
-				var overlay = new Dictionary<string, OptionContractQuote>(extra.Options, StringComparer.OrdinalIgnoreCase);
+				// Webull's strategy/list refetch returns the full chain, including symbols that
+				// bootstrapOptions (or position-loaded ctx.Quotes) already priced. If the refetch
+				// arrives with bid/ask stripped — common after-hours and on illiquid expiries — we
+				// must NOT let those nulls overwrite the earlier usable quotes; the candidate scorer
+				// rejects any leg without a real bid/ask, so a stripped overlay silently disqualifies
+				// otherwise-priceable candidates and is the leading cause of "missing leg" reports.
+				var overlay = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+				foreach (var (k, v) in extra.Options)
+				{
+					if (HasUsableQuote(extra.Options, k))
+						overlay[k] = v;
+					else if (HasUsableQuote(bootstrapOptions, k))
+						overlay[k] = bootstrapOptions[k];
+					else if (HasUsableQuote(ctx.Quotes, k))
+						continue;
+					else
+						overlay[k] = v;
+				}
 				foreach (var (k, v) in bootstrapOptions) overlay.TryAdd(k, v);
 				mergedQuotes = new OverlayQuoteDictionary(ctx.Quotes, overlay);
 			}
@@ -163,9 +180,19 @@ internal sealed class OpenCandidateEvaluator
 			for (int i = 0; i < survivors.Count; i++)
 				survivors[i] = ApplyCashSizing(survivors[i], freeCash, cfg, bias);
 
-			// Per-ticker top-N.
-			foreach (var proposal in RankForOutput(survivors).Take(cfg.TopNPerTicker))
-				output.AddRange(ExpandExecutableProposals(proposal, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode));
+			// Per-ticker top-N — count emitted proposals after expansion, since DoubleCalendar/DoubleDiagonal
+			// each expand into a call-side and put-side proposal and would otherwise blow past the cap.
+			var emittedForTicker = 0;
+			foreach (var proposal in RankForOutput(survivors))
+			{
+				if (emittedForTicker >= cfg.TopNPerTicker) break;
+				foreach (var expanded in ExpandExecutableProposals(proposal, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode))
+				{
+					if (emittedForTicker >= cfg.TopNPerTicker) break;
+					output.Add(expanded);
+					emittedForTicker++;
+				}
+			}
 		}
 
 		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker.

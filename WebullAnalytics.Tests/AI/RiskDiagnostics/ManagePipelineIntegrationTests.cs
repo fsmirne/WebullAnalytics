@@ -1,4 +1,3 @@
-using Spectre.Console;
 using System.Text.Json;
 using WebullAnalytics.Analyze;
 using WebullAnalytics.Trading;
@@ -32,8 +31,7 @@ public class ManagePipelineIntegrationTests
 				asOf: new DateTime(2026, 4, 24),
 				ivResolver: _ => 0.40m,
 				legPriceResolver: sym => sym.EndsWith("C00024500") ? 0.71m : 0.07m,
-				trend: null,
-				console: AnsiConsole.Console);
+				trend: null);
 
 			var lines = File.ReadAllLines(tmp);
 			Assert.Single(lines);

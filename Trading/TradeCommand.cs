@@ -123,6 +123,7 @@ internal static class TradeContext
 		{
 			Header = new PanelHeader(title),
 			Expand = true,
+			Border = BoxBorder.Rounded,
 		};
 	}
 
