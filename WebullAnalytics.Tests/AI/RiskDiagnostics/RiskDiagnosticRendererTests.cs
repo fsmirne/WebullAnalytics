@@ -194,7 +194,7 @@ public class RiskDiagnosticRendererTests
 	}
 
 	[Fact]
-	public void LongCalendarShowsCapitalAtRiskAsMargin()
+	public void LongCalendarShowsZeroMargin()
 	{
 		var diagnostic = new RiskDiagnostic(
 			StructureLabel: "calendar",
@@ -236,11 +236,12 @@ public class RiskDiagnosticRendererTests
 					DaysToTarget: 7,
 					RawScore: 0.01m,
 					BiasAdjustedScore: 0.01m,
-					Rationale: "debit $50.00\nraw 0.010000")));
+					Rationale: "debit $50.00\nraw 0.010000",
+					MarginPerContract: 0m)));
 
 		var text = Render(diagnostic);
 		Assert.Contains("Margin:", text);
-		Assert.Contains("$12,500.00 total ($50.00/contract)", text);
+		Assert.Contains("$0 total ($0/contract)", text);
 	}
 
 	[Fact]
