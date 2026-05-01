@@ -67,7 +67,8 @@ internal sealed record RiskDiagnosticOpenerScore(
 	decimal? BiasAdjustedScore,
 	string? Rationale,
 	decimal? ThetaPerDayPerContract = null,
-	decimal? FinalScore = null);
+	decimal? FinalScore = null,
+	decimal? MarginPerContract = null);
 
 internal sealed record RiskRuleHit(
 	string Id,
