@@ -15,6 +15,53 @@ internal sealed class AIConfig
 	[JsonPropertyName("log")] public LogConfig Log { get; set; } = new();
 	[JsonPropertyName("rules")] public RulesConfig Rules { get; set; } = new();
 	[JsonPropertyName("opener")] public OpenerConfig Opener { get; set; } = new();
+	[JsonPropertyName("watch")] public WatchConfig Watch { get; set; } = new();
+}
+
+/// <summary>
+/// Settings that apply only to the long-running <c>wa ai watch</c> loop. Auto-execute lives here
+/// because it requires the loop's tick cadence and persistent in-memory state.
+/// </summary>
+internal sealed class WatchConfig
+{
+	[JsonPropertyName("autoExecute")] public AutoExecuteConfig AutoExecute { get; set; } = new();
+}
+
+/// <summary>
+/// Opt-in execution of selected rule proposals from inside <c>wa ai watch</c>. Off by default.
+/// The <c>rules</c> allow-list lets users enable one rule at a time as they validate behavior.
+/// </summary>
+internal sealed class AutoExecuteConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>If false, the executor logs the action it WOULD take but does not call PlaceOrder.
+	/// Use this to validate schedule and pricing against the live tape before flipping to real submission.</summary>
+	[JsonPropertyName("submit")] public bool Submit { get; set; } = false;
+	/// <summary>Names of rules whose proposals are eligible for auto-execution. Anything not listed
+	/// still surfaces as a suggestion only.</summary>
+	[JsonPropertyName("rules")] public List<string> Rules { get; set; } = new() { "CloseBeforeShortExpiryRule" };
+	[JsonPropertyName("scaleOut")] public ScaleOutConfig ScaleOut { get; set; } = new();
+}
+
+/// <summary>
+/// Tranche schedule for scaled close execution. When a Close proposal's qty is at least <c>minQty</c>,
+/// the executor splits the close into the configured time windows; otherwise it fires a single order
+/// immediately. Final tranche (3) always closes whatever remains, so mid-day partial fills still
+/// converge to a fully-closed position by the last window.
+/// </summary>
+internal sealed class ScaleOutConfig
+{
+	[JsonPropertyName("tz")] public string Tz { get; set; } = "America/New_York";
+	[JsonPropertyName("tranche1Start")] public string Tranche1Start { get; set; } = "10:00";
+	[JsonPropertyName("tranche1End")] public string Tranche1End { get; set; } = "10:30";
+	[JsonPropertyName("tranche2Start")] public string Tranche2Start { get; set; } = "12:30";
+	[JsonPropertyName("tranche2End")] public string Tranche2End { get; set; } = "13:00";
+	[JsonPropertyName("tranche3Start")] public string Tranche3Start { get; set; } = "15:00";
+	[JsonPropertyName("tranche3End")] public string Tranche3End { get; set; } = "15:30";
+	[JsonPropertyName("tranche1Fraction")] public decimal Tranche1Fraction { get; set; } = 0.3333m;
+	[JsonPropertyName("tranche2Fraction")] public decimal Tranche2Fraction { get; set; } = 0.5m;
+	/// <summary>Position quantity at or above which scaling is applied. Smaller closes go in a single order.</summary>
+	[JsonPropertyName("minQty")] public int MinQty { get; set; } = 100;
 }
 
 internal sealed class MarketHoursConfig
@@ -49,6 +96,7 @@ internal sealed class RulesConfig
 	[JsonPropertyName("takeProfit")] public TakeProfitConfig TakeProfit { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("defensiveRoll")] public DefensiveRollConfig DefensiveRoll { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("rollShortOnExpiry")] public RollShortOnExpiryConfig RollShortOnExpiry { get; set; } = new() { Enabled = false };
+	[JsonPropertyName("closeBeforeShortExpiry")] public CloseBeforeShortExpiryConfig CloseBeforeShortExpiry { get; set; } = new() { Enabled = false };
 }
 
 internal sealed class OpportunisticRollConfig
@@ -96,6 +144,19 @@ internal sealed class RollShortOnExpiryConfig
 	[JsonPropertyName("triggerDTE")] public int TriggerDTE { get; set; } = 2;
 	[JsonPropertyName("maxShortPremium")] public decimal MaxShortPremium { get; set; } = 0.10m;
 	[JsonPropertyName("minRollCredit")] public decimal MinRollCredit { get; set; } = 0.05m;
+}
+
+/// <summary>
+/// Decides whether to close a calendar/diagonal on its short-leg expiry day. Decision-only — does
+/// not control execution. Scaled-out tranching lives in <c>WatchAutoExecutor</c>.
+/// </summary>
+internal sealed class CloseBeforeShortExpiryConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>Minimum mark-to-market profit (as % of initial debit) before the rule fires on expiry day.</summary>
+	[JsonPropertyName("minProfitPct")] public decimal MinProfitPct { get; set; } = 30m;
+	/// <summary>How far past the calendar/diagonal break-even band (as % of BE level) before the emergency-close fires regardless of profit threshold.</summary>
+	[JsonPropertyName("emergencyBreakEvenBufferPct")] public decimal EmergencyBreakEvenBufferPct { get; set; } = 1.0m;
 }
 
 internal sealed class TechnicalFilterConfig
@@ -170,6 +231,24 @@ internal static class AIConfigLoader
 		if (rr.TriggerDTE < 0) return $"rules.rollShortOnExpiry.triggerDTE: must be ≥ 0, got {rr.TriggerDTE}";
 		if (rr.MaxShortPremium < 0m) return $"rules.rollShortOnExpiry.maxShortPremium: must be ≥ 0, got {rr.MaxShortPremium}";
 		if (rr.MinRollCredit < 0m) return $"rules.rollShortOnExpiry.minRollCredit: must be ≥ 0, got {rr.MinRollCredit}";
+
+		var ce = c.Rules.CloseBeforeShortExpiry;
+		if (ce.MinProfitPct < 0m) return $"rules.closeBeforeShortExpiry.minProfitPct: must be ≥ 0, got {ce.MinProfitPct}";
+		if (ce.EmergencyBreakEvenBufferPct < 0m) return $"rules.closeBeforeShortExpiry.emergencyBreakEvenBufferPct: must be ≥ 0, got {ce.EmergencyBreakEvenBufferPct}";
+
+		var so = c.Watch.AutoExecute.ScaleOut;
+		foreach (var (label, value) in new[] {
+			("tranche1Start", so.Tranche1Start), ("tranche1End", so.Tranche1End),
+			("tranche2Start", so.Tranche2Start), ("tranche2End", so.Tranche2End),
+			("tranche3Start", so.Tranche3Start), ("tranche3End", so.Tranche3End),
+		})
+		{
+			if (!TimeSpan.TryParseExact(value, "hh\\:mm", CultureInfo.InvariantCulture, out _))
+				return $"watch.autoExecute.scaleOut.{label}: must be HH:MM, got '{value}'";
+		}
+		if (so.Tranche1Fraction <= 0m || so.Tranche1Fraction >= 1m) return $"watch.autoExecute.scaleOut.tranche1Fraction: must be in (0, 1), got {so.Tranche1Fraction}";
+		if (so.Tranche2Fraction <= 0m || so.Tranche2Fraction >= 1m) return $"watch.autoExecute.scaleOut.tranche2Fraction: must be in (0, 1), got {so.Tranche2Fraction}";
+		if (so.MinQty < 1) return $"watch.autoExecute.scaleOut.minQty: must be ≥ 1, got {so.MinQty}";
 
 		var or = c.Rules.OpportunisticRoll;
 		if (or.BaseOtmBufferPct < 0m) return $"rules.opportunisticRoll.baseOtmBufferPct: must be ≥ 0, got {or.BaseOtmBufferPct}";

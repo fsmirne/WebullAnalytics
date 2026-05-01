@@ -141,14 +141,17 @@ internal static class AIContext
 		return config;
 	}
 
-	internal static IPositionSource BuildLivePositionSource(AIConfig config)
-	{
-		var tradeConfig = TradeConfig.Load() ?? throw new InvalidOperationException("trade-config.json required for live ai");
-		var account = TradeConfig.Resolve(tradeConfig, config.PositionSource.Account) ?? throw new InvalidOperationException($"account '{config.PositionSource.Account}' not found");
-		return new LivePositionSource(account);
-	}
+	internal static IPositionSource BuildLivePositionSource(AIConfig config) => new LivePositionSource(ResolveTradeAccount(config));
 
 	internal static IQuoteSource BuildLiveQuoteSource(AIConfig config) => new LiveQuoteSource(config.QuoteSource);
+
+	/// <summary>Resolves the broker account that ai-config points at via positionSource.account.
+	/// Used by the position source AND by the auto-executor for order submission.</summary>
+	internal static TradeAccount ResolveTradeAccount(AIConfig config)
+	{
+		var tradeConfig = TradeConfig.Load() ?? throw new InvalidOperationException("trade-config.json required for live ai");
+		return TradeConfig.Resolve(tradeConfig, config.PositionSource.Account) ?? throw new InvalidOperationException($"account '{config.PositionSource.Account}' not found");
+	}
 }
 
 /// <summary>`ai scan` — one evaluation pass, print proposals, exit.</summary>

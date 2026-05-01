@@ -70,6 +70,17 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
 
+		// Auto-executor: turns rule-emitted Close proposals into real (or dry-run) order submissions
+		// inside the watch loop, including time-windowed scale-out for large positions. Off by default.
+		WatchAutoExecutor? autoExecutor = null;
+		if (config.Watch.AutoExecute.Enabled)
+		{
+			Trading.TradeAccount? account = null;
+			try { account = AIContext.ResolveTradeAccount(config); }
+			catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]auto-execute disabled (account resolution failed): {Markup.Escape(ex.Message)}[/]"); }
+			autoExecutor = new WatchAutoExecutor(config.Watch.AutoExecute, account);
+		}
+
 		using var sink = new ProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 		OpenProposalSink? openSink = null;
 		OpenCandidateEvaluator? openEvaluator = null;
@@ -107,6 +118,9 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				var results = evaluator.Evaluate(ctx);
 				if (settings.EmitManagementProposals)
 					foreach (var r in results) { sink.Emit(r.Proposal, r.IsRepeat); proposalsEmitted++; }
+
+				if (autoExecutor != null)
+					await autoExecutor.HandleAsync(results, ctx, cancellation);
 
 				if (openEvaluator != null && openSink != null)
 				{
