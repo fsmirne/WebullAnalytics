@@ -28,7 +28,7 @@ internal sealed class OpenProposalSink : IDisposable
 		_mode = mode;
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
 		_ascii = ascii;
-		_cmdPrefix = ascii ? "L-" : "↪";
+		_cmdPrefix = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
 		var path = Program.ResolvePath(log.Path);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };

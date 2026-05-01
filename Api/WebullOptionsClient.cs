@@ -103,18 +103,40 @@ public static class WebullOptionsClient
 			}
 		}
 
-		// Batch-fetch quotes for contracts the caller asked about that came back without pricing.
+		// Batch-fetch quotes for contracts the caller asked about that came back without a usable bid/ask.
 		// Restrict to wantedSymbols so we don't hammer the batch endpoint with the thousands of
 		// illiquid strikes the chain returns now that ParseStrategyListResponse keeps them all.
-		var needsBatch = wantedSymbols.Where(s => result.TryGetValue(s, out var q) && q.Bid == null && q.Ask == null && q.ImpliedVolatility == null && derivativeIdMap.ContainsKey(s)).ToList();
+		// Trigger on missing bid OR ask (not just both-null + iv-null): the chain frequently inlines
+		// IV but omits one or both of bid/ask for after-hours / low-liquidity legs, and we still need
+		// queryBatch to fill them in — otherwise the leg silently propagates as un-priceable downstream.
+		var needsBatch = wantedSymbols.Where(s => result.TryGetValue(s, out var q) && (q.Bid == null || q.Ask == null || q.ImpliedVolatility == null) && derivativeIdMap.ContainsKey(s)).ToList();
 		if (needsBatch.Count > 0)
 		{
 			var ids = needsBatch.Select(s => derivativeIdMap[s]).ToList();
 			Console.WriteLine($"Webull: batch-fetching {needsBatch.Count} contract(s) with missing quotes...");
-			var batchQuotes = await FetchQueryBatchAsync(client, config, ids, wantedSymbols, cancellationToken);
-			foreach (var quote in batchQuotes)
-				result[quote.ContractSymbol] = quote;
+			// Chunk the request: each derivativeId is 9-13 digits, and 200+ ids in a single GET URL
+			// pushes past common 2 KB URL limits, after which Webull returns truncated/partial JSON
+			// and many of the ids come back with null bid/ask even though the data exists. Splitting
+			// into ~50-id batches keeps each URL safely under 1 KB.
+			const int batchSize = 50;
+			for (int i = 0; i < ids.Count; i += batchSize)
+			{
+				var chunk = ids.GetRange(i, Math.Min(batchSize, ids.Count - i));
+				var batchQuotes = await FetchQueryBatchAsync(client, config, chunk, cancellationToken);
+				foreach (var quote in batchQuotes)
+					result[quote.ContractSymbol] = quote;
+			}
 		}
+
+		// Surface any wanted symbols that ended up without a usable bid/ask so the user can see them
+		// in the scan output (instead of silently scoring them as un-priceable). This is the diagnostic
+		// the user needs to tell apart "Webull genuinely has no quote" from "our pipeline dropped it".
+		var unresolved = wantedSymbols
+			.Where(s => !result.TryGetValue(s, out var q) || q.Bid == null || q.Ask == null || q.Ask.Value <= 0m)
+			.OrderBy(s => s, StringComparer.Ordinal)
+			.ToList();
+		if (unresolved.Count > 0)
+			Console.WriteLine($"Webull: {unresolved.Count} wanted symbol(s) still missing bid/ask after chain+queryBatch: {string.Join(", ", unresolved.Take(10))}{(unresolved.Count > 10 ? $", +{unresolved.Count - 10} more" : "")}");
 
 		return (result, underlyingPrices);
 	}
@@ -183,7 +205,7 @@ public static class WebullOptionsClient
 		return null;
 	}
 
-	private static async Task<List<OptionContractQuote>> FetchQueryBatchAsync(HttpClient client, ApiConfig config, List<long> derivativeIds, HashSet<string> wantedSymbols, CancellationToken cancellationToken)
+	private static async Task<List<OptionContractQuote>> FetchQueryBatchAsync(HttpClient client, ApiConfig config, List<long> derivativeIds, CancellationToken cancellationToken)
 	{
 		var quotes = new List<OptionContractQuote>();
 		try
@@ -211,7 +233,12 @@ public static class WebullOptionsClient
 				foreach (var contract in doc.RootElement.EnumerateArray())
 				{
 					var symbol = contract.TryGetProperty("symbol", out var s) ? s.GetString() : null;
-					if (string.IsNullOrWhiteSpace(symbol) || !wantedSymbols.Contains(symbol)) continue;
+					if (string.IsNullOrWhiteSpace(symbol)) continue;
+					// queryBatch was called with derivativeIds we explicitly asked for, so any contract in
+					// the response is wanted by definition. The previous wantedSymbols.Contains() guard
+					// silently dropped responses whose symbol formatting drifted from our canonical OCC
+					// (whitespace padding, case), leaving the caller's result dict with the original
+					// null-priced chain entry — exactly the "scan returns null bid/ask" symptom.
 
 					quotes.Add(new OptionContractQuote(
 						ContractSymbol: symbol,

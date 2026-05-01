@@ -1,5 +1,6 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
+using Spectre.Console.Rendering;
 using System.ComponentModel;
 using System.Globalization;
 using WebullAnalytics.AI;
@@ -33,6 +34,9 @@ internal sealed class AnalyzeRiskSettings : AnalyzeSubcommandSettings
 
 		if (IvDefault <= 0m || IvDefault > 500m)
 			return ValidationResult.Error($"--iv-default: must be in (0, 500], got {IvDefault}");
+
+		if (OutputFormat.Equals("excel", StringComparison.OrdinalIgnoreCase))
+			return ValidationResult.Error("--output excel is not supported for analyze risk; use 'console' or 'text'");
 
 		return ValidationResult.Success();
 	}
@@ -145,8 +149,6 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 				distinctStrikes: positionLegs.Select(l => l.Parsed.Strike).Distinct().Count(),
 				distinctCallPut: positionLegs.Select(l => l.Parsed.CallPut).Distinct().Count());
 
-		RenderHeader(positionLegs, strategyLabel, spot.Value);
-
 		var asOf = EvaluationDate.Today;
 		var trend = await TrendFetcher.FetchAsync(ticker, asOf, cancellation);
 
@@ -196,7 +198,18 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			writer.WriteLine(System.Text.Json.JsonSerializer.Serialize(record));
 		}
 
-		RiskDiagnosticRenderer.WriteConsole(AnsiConsole.Console, diagnostic);
+		if (settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase))
+		{
+			var stringWriter = new StringWriter();
+			var fileConsole = WebullAnalytics.IO.TextFileExporter.CreateTextConsole(stringWriter);
+			AnalyzeCommon.RenderProposalPanel(positionLegs, strategyLabel, spot.Value, diagnostic, fileConsole, ascii: true);
+			var path = settings.OutputPath ?? AnalyzeCommon.DefaultTextOutputName("AnalyzeRisk");
+			WebullAnalytics.IO.TextFileExporter.WriteConsoleOutputToTextFile(stringWriter, path, "Risk analysis written to");
+		}
+		else
+		{
+			AnalyzeCommon.RenderProposalPanel(positionLegs, strategyLabel, spot.Value, diagnostic);
+		}
 		return 0;
 	}
 
@@ -226,20 +239,6 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		{
 			return 0m;
 		}
-	}
-
-	private static void RenderHeader(IReadOnlyList<AnalyzePositionCommand.PositionSnapshot> legs, string strategyLabel, decimal spot)
-	{
-		var ticker = legs[0].Parsed.Root;
-		var initialDebit = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
-		var qty = legs[0].Qty;
-		AnsiConsole.MarkupLine($"[bold cyan]{Markup.Escape(strategyLabel)}[/] [bold]{Markup.Escape(ticker)}[/] x{qty} @ cost basis ${initialDebit:F2}/contract — evaluating at spot [yellow]${spot:F2}[/], date [yellow]{EvaluationDate.Today:yyyy-MM-dd}[/]");
-		foreach (var l in legs)
-		{
-			var label = l.Action == LegAction.Buy ? "[green]Long [/]" : "[red]Short[/]";
-			AnsiConsole.MarkupLine($"  {label}  {Markup.Escape(l.Symbol)} x{l.Qty} @ ${l.CostBasis:F2}  (exp {l.Parsed.ExpiryDate:yyyy-MM-dd}, DTE {(l.Parsed.ExpiryDate.Date - EvaluationDate.Today.Date).Days})");
-		}
-		AnsiConsole.WriteLine();
 	}
 
 	private static decimal? ResolveSpot(string ticker, string? tickerPriceOverrides, IReadOnlyDictionary<string, decimal>? underlyingPrices)

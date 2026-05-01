@@ -17,7 +17,7 @@ public static class TableRenderer
 
 		if (rows.Count > 0)
 		{
-			console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, simplified: simplified));
+			console.Write(TableBuilder.BuildReportTable(rows, LegPrefix, initialAmount, TableBorder.Rounded, simplified));
 			console.WriteLine();
 		}
 		else
@@ -27,14 +27,14 @@ public static class TableRenderer
 
 		if (positions.Count > 0)
 		{
-			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, simplified: simplified));
+			console.Write(TableBuilder.BuildPositionsTable(positions, LegPrefix, TableBorder.Rounded, simplified));
 			console.WriteLine();
 
 			if (adjustmentBreakdowns != null && adjustmentBreakdowns.Count > 0)
 			{
 				foreach (var b in adjustmentBreakdowns)
 				{
-					console.Write(TableBuilder.BuildAdjustmentPanel(b));
+					console.Write(TableBuilder.BuildAdjustmentPanel(b, BoxBorder.Rounded, TableBorder.Rounded));
 					console.WriteLine();
 				}
 			}
@@ -58,17 +58,17 @@ public static class TableRenderer
 				var ticker = ExtractTickerFromTitle(result.Title);
 				if (lastTicker != null && ticker != lastTicker && combinedByTicker.TryGetValue(lastTicker, out var prevCombined))
 				{
-					console.Write(TableBuilder.BuildBreakEvenPanel(prevCombined, displayMode: displayMode, showLegs: showLegs));
+					console.Write(TableBuilder.BuildBreakEvenPanel(prevCombined, BoxBorder.Rounded, TableBorder.Rounded, displayMode: displayMode, showLegs: showLegs));
 					console.WriteLine();
 					combinedByTicker.Remove(lastTicker);
 				}
-				console.Write(TableBuilder.BuildBreakEvenPanel(result, displayMode: displayMode, showLegs: showLegs));
+				console.Write(TableBuilder.BuildBreakEvenPanel(result, BoxBorder.Rounded, TableBorder.Rounded, displayMode: displayMode, showLegs: showLegs));
 				console.WriteLine();
 				lastTicker = ticker;
 			}
 			if (lastTicker != null && combinedByTicker.TryGetValue(lastTicker, out var finalCombined))
 			{
-				console.Write(TableBuilder.BuildBreakEvenPanel(finalCombined, displayMode: displayMode, showLegs: showLegs));
+				console.Write(TableBuilder.BuildBreakEvenPanel(finalCombined, BoxBorder.Rounded, TableBorder.Rounded, displayMode: displayMode, showLegs: showLegs));
 				console.WriteLine();
 			}
 		}

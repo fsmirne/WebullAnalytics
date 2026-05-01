@@ -194,7 +194,7 @@ public class RiskDiagnosticRendererTests
 	}
 
 	[Fact]
-	public void NonMarginProposalShowsExplicitZeroMargin()
+	public void LongCalendarShowsCapitalAtRiskAsMargin()
 	{
 		var diagnostic = new RiskDiagnostic(
 			StructureLabel: "calendar",
@@ -240,7 +240,7 @@ public class RiskDiagnosticRendererTests
 
 		var text = Render(diagnostic);
 		Assert.Contains("Margin:", text);
-		Assert.Contains("$0 total ($0/contract)", text);
+		Assert.Contains("$12,500.00 total ($50.00/contract)", text);
 	}
 
 	[Fact]

@@ -157,7 +157,7 @@ internal sealed class AIScanSettings : AISubcommandSettings;
 internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 {
 	public override async Task<int> ExecuteAsync(CommandContext context, AIScanSettings settings, CancellationToken cancellation)
-		=> await AITextOutput.RunAsync(settings, "ai_scan", async () =>
+		=> await AITextOutput.RunAsync(settings, "AIScan", async () =>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;

@@ -55,7 +55,7 @@ internal sealed class AIWatchSettings : AISubcommandSettings
 internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 {
 	public override async Task<int> ExecuteAsync(CommandContext context, AIWatchSettings settings, CancellationToken cancellation)
-		=> await AITextOutput.RunAsync(settings, "ai_watch", async () =>
+		=> await AITextOutput.RunAsync(settings, "AIWatch", async () =>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
