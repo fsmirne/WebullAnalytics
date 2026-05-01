@@ -155,7 +155,20 @@ internal static class AIContext
 }
 
 /// <summary>`ai scan` — one evaluation pass, print proposals, exit.</summary>
-internal sealed class AIScanSettings : AISubcommandSettings;
+internal sealed class AIScanSettings : AISubcommandSettings
+{
+	[CommandOption("--top <N>")]
+	[Description("Override opener.topNPerTicker from ai-config.json.")]
+	public int? Top { get; set; }
+
+	public override ValidationResult Validate()
+	{
+		var baseResult = base.Validate();
+		if (!baseResult.Successful) return baseResult;
+		if (Top.HasValue && Top.Value < 1) return ValidationResult.Error($"--top: must be ≥ 1, got {Top.Value}");
+		return ValidationResult.Success();
+	}
+}
 
 internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 {
@@ -164,6 +177,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
+		if (settings.Top.HasValue) config.Opener.TopNPerTicker = settings.Top.Value;
 
 		if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
 			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' quoteSource='{config.QuoteSource}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals}");
