@@ -179,7 +179,11 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var historicalVolAnnual = await TryComputeHistoricalVolAsync(ticker, asOf, cancellation);
 
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, trend, quotes);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual);
+		// At hypothetical spots (--ticker-price), the leg market mids are stale and back-solving IV
+		// against them produces a nonsense IV. Use broker IV in that case for an internally-consistent
+		// projection.
+		var useMarketImpliedIv = string.IsNullOrEmpty(settings.TickerPrice);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv);
 		diagnostic = diagnostic with { Probe = probe };
 
 		var logPath = Program.ResolvePath("data/analyze-risk.jsonl");
