@@ -458,6 +458,36 @@ internal static class CandidateScorer
 		return defaultPct / 100m;
 	}
 
+	/// <summary>Returns the IV that, when fed to Black-Scholes, reproduces the option's market mid
+	/// `(bid + ask) / 2`. This calibrated IV is essential for EV math on calendars/diagonals where the
+	/// long leg survives to target with time value: scoring against the broker's reported IV would
+	/// produce theoretical exit prices that exceed the market mid (the wider the bid/ask spread, the
+	/// larger the gap), creating phantom alpha for illiquid contracts. Using the market-implied IV
+	/// keeps entry pricing (market mid) and exit pricing (BS at calibrated IV) on the same scale.
+	/// Falls back to <see cref="ResolveIv"/> when bid/ask is missing, mid ≤ intrinsic, or the solver
+	/// fails to converge.</summary>
+	public static decimal MarketImpliedIv(string symbol, OptionParsed parsed, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultPct)
+	{
+		var brokerIv = ResolveIv(symbol, quotes, defaultPct);
+		if (!quotes.TryGetValue(symbol, out var q)) return brokerIv;
+		if (!q.Bid.HasValue || !q.Ask.HasValue) return brokerIv;
+		if (q.Bid.Value < 0m || q.Ask.Value <= 0m) return brokerIv;
+		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+		if (mid <= 0m) return brokerIv;
+
+		var intrinsic = OptionMath.Intrinsic(spot, parsed.Strike, parsed.CallPut);
+		if (mid <= intrinsic) return brokerIv;
+
+		var dte = Math.Max(1, (parsed.ExpiryDate.Date - asOf.Date).Days);
+		try
+		{
+			var iv = OptionMath.ImpliedVol(spot, parsed.Strike, dte / 365.0, OptionMath.RiskFreeRate, mid, parsed.CallPut);
+			if (iv > 0m && iv < 5m) return iv;
+		}
+		catch { }
+		return brokerIv;
+	}
+
 	/// <summary>Looks up bid/ask, returning null if any leg lacks a usable two-sided quote.</summary>
 	public static (decimal bid, decimal ask)? TryLiveBidAsk(string symbol, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
@@ -1174,7 +1204,13 @@ internal static class CandidateScorer
 			var resolved = ResolveLegPrice(leg.Symbol, parsed, spot, asOf, quotes, cfg.IvDefaultPct);
 			if (resolved == null) return null;
 			usedFallback |= resolved.Value.UsedFallback;
-			defs.Add(new MultiLegDefinition(leg, parsed, leg.Action == "buy", ResolveIv(leg.Symbol, quotes, cfg.IvDefaultPct)));
+			// Legs that survive past the target (e.g., long wings of a double calendar/diagonal) need
+			// market-implied IV so the BS exit value matches the entry debit's pricing convention.
+			// Legs that expire at target are intrinsic-only and IV is irrelevant.
+			var legIv = parsed.ExpiryDate.Date > skel.TargetExpiry.Date
+				? MarketImpliedIv(leg.Symbol, parsed, spot, asOf, quotes, cfg.IvDefaultPct)
+				: ResolveIv(leg.Symbol, quotes, cfg.IvDefaultPct);
+			defs.Add(new MultiLegDefinition(leg, parsed, leg.Action == "buy", legIv));
 		}
 		if (!PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity)) return null;
 		var pricingWarning = BuildPricingWarning(usedFallback);
@@ -1288,7 +1324,11 @@ internal static class CandidateScorer
 		var shortYears = Math.Max(1, (shortParsed.ExpiryDate.Date - asOf.Date).Days) / 365.0;
 		var longAtShortYears = Math.Max(1, (longParsed.ExpiryDate.Date - shortParsed.ExpiryDate.Date).Days) / 365.0;
 		var ivShort = ResolveIv(shortLeg.Symbol, quotes, cfg.IvDefaultPct);
-		var ivLong = ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct);
+		// Long-leg IV is back-solved from the market mid so EV/breakeven/maxProfit math uses pricing
+		// consistent with the entry debit. When the long leg has a wide bid/ask, the broker's reported
+		// IV implies a BS price well above mid — using it would inflate residual time value at short
+		// expiry and create phantom alpha for illiquid contracts.
+		var ivLong = MarketImpliedIv(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 
 		// Breakevens are the roots of the position-value-at-short-expiry curve, found numerically because
 		// the curve mixes Black-Scholes (long leg) with piecewise-linear intrinsic (short leg) and has
