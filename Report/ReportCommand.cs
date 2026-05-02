@@ -53,10 +53,10 @@ class ReportSettings : CommandSettings
 	[CommandOption("--api")]
 	public string? Api { get; set; }
 
-	[Description("Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)")]
+	[Description("Grid granularity: rows per strike gap in the time-decay grid. Default 0 = auto (target 20 rows total). Pass a positive value to override (higher = more rows).")]
 	[CommandOption("--range")]
-	[DefaultValue(2.0)]
-	public decimal Range { get; set; } = 2;
+	[DefaultValue(0.0)]
+	public decimal Range { get; set; } = 0;
 
 	[Description("Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)")]
 	[CommandOption("--display")]
@@ -139,8 +139,8 @@ class ReportSettings : CommandSettings
 		if (view is not ("detailed" or "simplified"))
 			return ValidationResult.Error("--view must be 'detailed' or 'simplified'");
 
-		if (Range <= 0)
-			return ValidationResult.Error("--range must be greater than 0");
+		if (Range < 0)
+			return ValidationResult.Error("--range must be 0 (auto) or a positive number");
 
 		var display = DisplayMode.ToLowerInvariant();
 		if (display is not ("value" or "pnl"))

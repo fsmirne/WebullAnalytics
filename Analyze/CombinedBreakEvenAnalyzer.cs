@@ -221,10 +221,10 @@ public static class CombinedBreakEvenAnalyzer
 		TimeDecayGrid? grid = null;
 		if (optionLegs.Count > 0 && nearestExpiry.HasValue && canComputeBsAtNearest)
 		{
-			var gridNotable = new List<decimal>(breakEvens);
-			if (spot.HasValue) gridNotable.Add(spot.Value);
-			gridNotable.AddRange(LookupExtraNotablePrices(ticker, opts));
-			var build = (int maxCols) => TimeDecayGridBuilder.Build(merged, netPremium, normalizingQty, nearestExpiry.Value, opts, padding, centerPrice, gridNotable, maxCols, spot);
+			var gridExtras = new List<decimal>();
+			if (spot.HasValue) gridExtras.Add(spot.Value);
+			gridExtras.AddRange(LookupExtraNotablePrices(ticker, opts));
+			var build = (int maxCols) => TimeDecayGridBuilder.Build(merged, netPremium, normalizingQty, nearestExpiry.Value, opts, padding, centerPrice, breakEvens, maxCols, spot, gridExtras);
 			if (forcedMaxGridColumns.HasValue)
 			{
 				grid = build(forcedMaxGridColumns.Value);
