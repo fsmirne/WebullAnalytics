@@ -137,9 +137,10 @@ public static class BreakEvenAnalyzer
 		{
 			var legsList = new List<(PositionRow row, OptionParsed parsed, string symbol)> { (row, parsed, symbol) };
 			var gridBreakEvens = new List<decimal> { breakEven };
-			if (spot.HasValue) gridBreakEvens.Add(spot.Value);
-			gridBreakEvens.AddRange(LookupExtraNotablePrices(parsed.Root, opts));
-			var build = (int maxCols) => TimeDecayGridBuilder.Build(legsList, qty, row.Side, premium, parsed.ExpiryDate, opts, padding, strike, gridBreakEvens, maxCols, spot);
+			var gridExtras = new List<decimal>();
+			if (spot.HasValue) gridExtras.Add(spot.Value);
+			gridExtras.AddRange(LookupExtraNotablePrices(parsed.Root, opts));
+			var build = (int maxCols) => TimeDecayGridBuilder.Build(legsList, qty, row.Side, premium, parsed.ExpiryDate, opts, padding, strike, gridBreakEvens, maxCols, spot, gridExtras);
 			if (forcedMaxGridColumns.HasValue)
 			{
 				grid = build(forcedMaxGridColumns.Value);
@@ -307,10 +308,10 @@ public static class BreakEvenAnalyzer
 		TimeDecayGrid? grid = null;
 		if (dte >= 0 && HasIvForRemainingTimeLegs(parsedLegs, nearestExpiry, opts))
 		{
-			var gridNotable = new List<decimal>(breakEvens);
-			if (spot.HasValue) gridNotable.Add(spot.Value);
-			gridNotable.AddRange(LookupExtraNotablePrices(root, opts));
-			var build = (int maxCols) => TimeDecayGridBuilder.Build(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, opts, padding, strikes.Average(), gridNotable, maxCols, spot);
+			var gridExtras = new List<decimal>();
+			if (spot.HasValue) gridExtras.Add(spot.Value);
+			gridExtras.AddRange(LookupExtraNotablePrices(root, opts));
+			var build = (int maxCols) => TimeDecayGridBuilder.Build(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, opts, padding, strikes.Average(), breakEvens, maxCols, spot, gridExtras);
 			if (forcedMaxGridColumns.HasValue)
 			{
 				grid = build(forcedMaxGridColumns.Value);

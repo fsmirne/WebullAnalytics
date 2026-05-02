@@ -11,7 +11,7 @@
 		"tickerPrice": "GME:1000,SPY:600",
 		"iv": null,
 		"api": "yahoo",
-		"range": 2,
+		"range": 0,
 		"display": "value",
 		"grid": "simple",
 		"theoretical": false,
