@@ -11,7 +11,7 @@ using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.Analyze;
 
-internal sealed class AnalyzeRiskSettings : AnalyzeSubcommandSettings
+internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 {
 	[CommandArgument(0, "<spec>")]
 	[Description("Leg list to evaluate using current market quotes. Format: ACTION:SYMBOL[:QTY][@PRICE] where ACTION is buy|sell, QTY defaults to 1, and PRICE is an optional cost basis (decimal or BID|MID|ASK). When @PRICE is omitted, MID is used by default. Examples: sell:GME260501C00025500,buy:GME260522C00026000 OR sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12")]
@@ -34,9 +34,6 @@ internal sealed class AnalyzeRiskSettings : AnalyzeSubcommandSettings
 
 		if (IvDefault <= 0m || IvDefault > 500m)
 			return ValidationResult.Error($"--iv-default: must be in (0, 500], got {IvDefault}");
-
-		if (OutputFormat.Equals("excel", StringComparison.OrdinalIgnoreCase))
-			return ValidationResult.Error("--output excel is not supported for analyze risk; use 'console' or 'text'");
 
 		return ValidationResult.Success();
 	}
@@ -91,7 +88,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var parsedLegs = AnalyzeRiskSettings.ParseRiskLegs(settings.Spec);
 		var symbols = parsedLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-		var (quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(settings, symbols, cancellation);
+		var (quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(settings.Api, symbols, cancellation);
 		if (quotes == null) return 1;
 
 		var ticker = parsedLegs[0].Option!.Root;

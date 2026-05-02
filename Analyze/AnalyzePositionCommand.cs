@@ -17,7 +17,7 @@ namespace WebullAnalytics.Analyze;
 
 // ─── `analyze position` ───────────────────────────────────────────────────────
 
-internal sealed class AnalyzePositionSettings : AnalyzeSubcommandSettings
+internal sealed class AnalyzePositionSettings : AnalyzeBaseSettings
 {
 	[CommandArgument(0, "[spec]")]
 	[Description("Open position. Format: ACTION:SYMBOL:QTY@PRICE,... where PRICE is your cost basis per leg. Example: sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499@1.11. Omit to select from open positions interactively.")]
@@ -67,9 +67,6 @@ internal sealed class AnalyzePositionSettings : AnalyzeSubcommandSettings
 
 		if (Cash.HasValue && Cash.Value < 0m)
 			return ValidationResult.Error($"--cash: must be non-negative, got {Cash.Value}");
-
-		if (OutputFormat.Equals("excel", StringComparison.OrdinalIgnoreCase))
-			return ValidationResult.Error("--output excel is not supported for analyze position; use 'console' or 'text'");
 
 		return ValidationResult.Success();
 	}
@@ -128,7 +125,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (!string.IsNullOrEmpty(settings.Api))
 		{
 			var positionSymbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(settings, positionSymbols, cancellation);
+			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(settings.Api, positionSymbols, cancellation);
 		}
 
 		var spot = ResolveSpot(ticker, settings, underlyingPrices);
@@ -150,7 +147,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				.ToList();
 			if (hypotheticalSymbols.Count > 0)
 			{
-				var hypotheticalQuotes = await AnalyzeCommon.FetchQuotesForSymbolList(settings, hypotheticalSymbols, cancellation);
+				var hypotheticalQuotes = await AnalyzeCommon.FetchQuotesForSymbolList(settings.Api, hypotheticalSymbols, cancellation);
 				if (hypotheticalQuotes != null)
 				{
 					var merged = new Dictionary<string, OptionContractQuote>(alreadyFetched, StringComparer.OrdinalIgnoreCase);

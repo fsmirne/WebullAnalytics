@@ -98,7 +98,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		if (AnalyzeCommon.NeedsMarketPrices(settings.Spec))
 		{
-			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings, settings.Spec, cancellation);
+			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings.Api, settings.Spec, cancellation);
 			if (quotes == null) return 1;
 		}
 
@@ -112,7 +112,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 
 // ─── `analyze roll` ───────────────────────────────────────────────────────────
 
-internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
+internal sealed class AnalyzeRollSettings : AnalyzeBaseSettings
 {
 	[CommandArgument(0, "<spec>")]
 	[Description("Roll spec. Format: OLD_SYMBOL>NEW_SYMBOL:QTY. Example: GME260410C00023000>GME260417C00023000:300")]
@@ -129,6 +129,24 @@ internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
 	[CommandOption("--cash")]
 	[Description("Available cash for funding the roll. Format: dollar amount (e.g. 23015 or 23015.50). Prints a funding-check block against the BP delta. Only meaningful with --side short.")]
 	public string? Cash { get; set; }
+
+	// Grid display options carried over from ReportSettings — analyze roll renders its own
+	// price-by-time grid and uses these the same way the report does.
+	[CommandOption("--range")]
+	[DefaultValue(0.0)]
+	[Description("Grid granularity: rows per strike gap in the roll-credit grid. Default 0 = auto. Pass a positive value to override (higher = more rows).")]
+	public decimal Range { get; set; } = 0;
+
+	[CommandOption("--view")]
+	[DefaultValue("detailed")]
+	[Description("Grid width: 'detailed' (default) or 'simplified' (narrower terminal layout)")]
+	public string View { get; set; } = "detailed";
+
+	[CommandOption("--levels")]
+	[Description("Additional reference price levels to show in the roll-credit grid. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30)")]
+	public string? Levels { get; set; }
+
+	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
 
 	public override ValidationResult Validate()
 	{
@@ -193,6 +211,28 @@ internal sealed class AnalyzeRollSettings : AnalyzeSubcommandSettings
 			var isLongSide = string.Equals(Side, "long", StringComparison.OrdinalIgnoreCase);
 			if (isLongSide)
 				return ValidationResult.Error("--cash is only meaningful with --side short (the default). Long-side rolls don't affect Reg-T margin.");
+		}
+
+		if (Range < 0)
+			return ValidationResult.Error("--range must be 0 (auto) or a positive number");
+
+		var view = View.ToLowerInvariant();
+		if (view is not ("detailed" or "simplified"))
+			return ValidationResult.Error("--view must be 'detailed' or 'simplified'");
+
+		if (Levels != null)
+		{
+			foreach (var pair in Levels.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			{
+				var parts = pair.Split(':', 2);
+				if (parts.Length != 2)
+					return ValidationResult.Error($"--levels: invalid entry '{pair}'. Expected format: TICKER:P1/P2/P3 (e.g., GME:20/25/30)");
+				foreach (var priceStr in parts[1].Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+				{
+					if (!decimal.TryParse(priceStr, NumberStyles.Number, CultureInfo.InvariantCulture, out _))
+						return ValidationResult.Error($"--levels: invalid price '{priceStr}' for ticker '{parts[0].Trim()}'. Prices must be numeric.");
+				}
+			}
 		}
 
 		return ValidationResult.Success();
@@ -276,25 +316,25 @@ internal static class AnalyzeCommon
 			: $"{leg.Action.ToString().ToLowerInvariant()}:{leg.Symbol}:{leg.Quantity}@{price}";
 	}
 
-	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(AnalyzeSubcommandSettings settings, string tradesSpec, CancellationToken cancellation)
+	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(string? api, string tradesSpec, CancellationToken cancellation)
 	{
 		var symbols = ParseAllLegs(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(settings, symbols, cancellation);
+		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(api, symbols, cancellation);
 		return quotes;
 	}
 
-	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbolList(AnalyzeSubcommandSettings settings, IReadOnlyCollection<string> symbols, CancellationToken cancellation)
+	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbolList(string? api, IReadOnlyCollection<string> symbols, CancellationToken cancellation)
 	{
-		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(settings, symbols, cancellation);
+		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(api, symbols, cancellation);
 		return quotes;
 	}
 
-	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? UnderlyingPrices)> FetchQuotesAndUnderlyingForSymbolList(AnalyzeSubcommandSettings settings, IReadOnlyCollection<string> symbols, CancellationToken cancellation)
+	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? UnderlyingPrices)> FetchQuotesAndUnderlyingForSymbolList(string? api, IReadOnlyCollection<string> symbols, CancellationToken cancellation)
 	{
 		if (symbols.Count == 0) return (new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase), new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase));
 		var minimalRows = symbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
 
-		var apiSource = settings.Api?.ToLowerInvariant();
+		var apiSource = api?.ToLowerInvariant();
 		if (apiSource == null)
 		{
 			Console.WriteLine("Error: --api (yahoo or webull) is required to fetch quotes");
