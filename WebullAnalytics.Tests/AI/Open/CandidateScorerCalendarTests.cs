@@ -193,10 +193,10 @@ public class CandidateScorerCalendarTests
 		}, TargetExpiry: shortExp);
 		var quotes = new Dictionary<string, OptionContractQuote>
 		{
-			[shortPut] = TestQuote.Q(0.35m, 0.40m, 0.40m, openInterest: 50),
-			[longPut] = TestQuote.Q(0.90m, 1.00m, 0.40m),
-			[shortCall] = TestQuote.Q(0.35m, 0.40m, 0.40m, openInterest: 50),
-			[longCall] = TestQuote.Q(0.90m, 1.00m, 0.40m),
+			[shortPut] = TestQuote.Q(0.35m, 0.40m, 0.40m, openInterest: 100),
+			[longPut] = TestQuote.Q(0.90m, 1.00m, 0.40m, openInterest: 100),
+			[shortCall] = TestQuote.Q(0.35m, 0.40m, 0.40m, openInterest: 100),
+			[longCall] = TestQuote.Q(0.90m, 1.00m, 0.40m, openInterest: 100),
 			[extraOi] = TestQuote.Q(0.55m, 0.60m, 0.40m, openInterest: 300)
 		};
 
@@ -232,10 +232,10 @@ public class CandidateScorerCalendarTests
 		}, TargetExpiry: shortExp);
 		var quotes = new Dictionary<string, OptionContractQuote>
 		{
-			[shortPut] = TestQuote.Q(0.40m, 0.45m, 0.40m, openInterest: 50),
-			[longPut] = TestQuote.Q(0.95m, 1.05m, 0.40m),
-			[shortCall] = TestQuote.Q(0.40m, 0.45m, 0.40m, openInterest: 50),
-			[longCall] = TestQuote.Q(0.95m, 1.05m, 0.40m),
+			[shortPut] = TestQuote.Q(0.40m, 0.45m, 0.40m, openInterest: 100),
+			[longPut] = TestQuote.Q(0.95m, 1.05m, 0.40m, openInterest: 100),
+			[shortCall] = TestQuote.Q(0.40m, 0.45m, 0.40m, openInterest: 100),
+			[longCall] = TestQuote.Q(0.95m, 1.05m, 0.40m, openInterest: 100),
 			[extraOi] = TestQuote.Q(0.55m, 0.60m, 0.40m, openInterest: 300)
 		};
 
