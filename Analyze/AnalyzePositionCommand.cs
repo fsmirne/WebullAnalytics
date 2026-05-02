@@ -122,7 +122,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		// Phase 1: fetch quotes for the position legs. We need spot before we can enumerate
 		// hypothetical strikes for scenarios, and the underlying price comes back as a byproduct
-		// of this same fetch. --ticker-price still wins if supplied.
+		// of this same fetch. --spot still wins if supplied.
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
 		if (!string.IsNullOrEmpty(settings.Api))
@@ -134,7 +134,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var spot = ResolveSpot(ticker, settings, underlyingPrices);
 		if (spot == null)
 		{
-			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --ticker-price {ticker}:<price> or configure --api yahoo|webull.");
+			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or configure --api yahoo|webull.");
 			return 1;
 		}
 
@@ -191,10 +191,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			quotesForProbe: quotes,
 			technicalBiasForProbe: technicalBias,
 			historicalVolAnnual: historicalVolAnnual,
-			// At hypothetical spots (--ticker-price), the leg market mids are stale and back-solving
+			// At hypothetical spots (--spot override), the leg market mids are stale and back-solving
 			// IV against them produces a nonsense IV that collapses calendar/diagonal residual time
 			// value. Use the broker's reported IV instead so the projection is internally consistent.
-			useMarketImpliedIv: string.IsNullOrEmpty(settings.TickerPrice));
+			useMarketImpliedIv: string.IsNullOrEmpty(settings.Spot));
 
 		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias);
 
@@ -1282,9 +1282,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	internal static decimal? ResolveSpot(string ticker, AnalyzePositionSettings settings, IReadOnlyDictionary<string, decimal>? underlyingPrices)
 	{
-		if (!string.IsNullOrEmpty(settings.TickerPrice))
+		if (!string.IsNullOrEmpty(settings.Spot))
 		{
-			foreach (var entry in settings.TickerPrice.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			foreach (var entry in settings.Spot.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 			{
 				var parts = entry.Split(':');
 				if (parts.Length == 2 && parts[0].Equals(ticker, StringComparison.OrdinalIgnoreCase)
@@ -1440,7 +1440,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			analyzeGroups.Add(string.Join(",", analyzeLegs));
 		}
 		var extras = new List<string>();
-		if (!string.IsNullOrEmpty(settings.TickerPrice)) extras.Add($"--ticker-price {settings.TickerPrice}");
+		if (!string.IsNullOrEmpty(settings.Spot)) extras.Add($"--spot {settings.Spot}");
 		if (!string.IsNullOrEmpty(settings.Date)) extras.Add($"--date {settings.Date}");
 		var suffix = extras.Count > 0 ? " " + string.Join(" ", extras) : "";
 		var analyze = $"wa analyze trade \"{string.Join(";", analyzeGroups)}\"{suffix}";
