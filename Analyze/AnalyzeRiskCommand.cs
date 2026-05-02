@@ -14,7 +14,7 @@ namespace WebullAnalytics.Analyze;
 internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 {
 	[CommandArgument(0, "<spec>")]
-	[Description("Leg list to evaluate using current market quotes. Format: ACTION:SYMBOL[:QTY][@PRICE] where ACTION is buy|sell, QTY defaults to 1, and PRICE is an optional cost basis (decimal or BID|MID|ASK). When @PRICE is omitted, MID is used by default. Examples: sell:GME260501C00025500,buy:GME260522C00026000 OR sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12")]
+	[Description("Leg list to evaluate using current market quotes. Format: ACTION:SYMBOL[[:QTY]][[@PRICE]] where ACTION is buy|sell, QTY defaults to 1, and PRICE is an optional cost basis (decimal or BID|MID|ASK). When @PRICE is omitted, MID is used by default. Examples: sell:GME260501C00025500,buy:GME260522C00026000 OR sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12")]
 	public string Spec { get; set; } = "";
 
 	[CommandOption("--iv-default")]
