@@ -4,7 +4,7 @@ using WebullAnalytics.Pricing;
 namespace WebullAnalytics.AI.RiskDiagnostics;
 
 /// <summary>Builds a RiskDiagnostic from normalized legs, current spot, as-of time, and an IV resolver.
-/// Pure function — no I/O. Ten rules run unconditionally; only fired hits attach.</summary>
+/// Pure function — no I/O. All rules run unconditionally; only fired hits attach.</summary>
 internal static class RiskDiagnosticBuilder
 {
 	private static readonly IReadOnlyList<IRiskRule> Rules = new IRiskRule[]
@@ -19,6 +19,8 @@ internal static class RiskDiagnosticBuilder
 		new DirectionalMismatchNearTermRule(),
 		new DirectionalMismatchTodayRule(),
 		new HighRealizedVolRule(),
+		new WideSpreadRule(),
+		new ThinOpenInterestRule(),
 	};
 
 	internal static RiskDiagnostic Build(
@@ -26,7 +28,8 @@ internal static class RiskDiagnosticBuilder
 		decimal spot,
 		DateTime asOf,
 		Func<string, decimal> ivResolver,
-		TrendSnapshot? trend)
+		TrendSnapshot? trend,
+		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
 	{
 		var longLegs = legs.Where(l => l.IsLong).ToList();
 		var shortLegs = legs.Where(l => !l.IsLong).ToList();
@@ -132,6 +135,10 @@ internal static class RiskDiagnosticBuilder
 			unrealizedPnlPerShare = currentValuePerShare - costBasisPerShare;
 		}
 
+		// Liquidity stats: worst-leg bid/ask spread (as fraction of mid) and minimum OI across legs.
+		// Worst-leg gates the exit — if any leg is illiquid the whole structure is hard to close.
+		var (worstLegSpreadPct, minOpenInterest) = ComputeLiquidityStats(legs, quotes);
+
 		var facts = new RiskDiagnosticFacts(
 			StructureLabel: structureLabel,
 			DirectionalBias: directionalBias,
@@ -153,7 +160,9 @@ internal static class RiskDiagnosticBuilder
 			LongLegStrike: longStrike,
 			ShortLegStrike: shortStrike,
 			NetDeltaPostShort: netDeltaPostShort,
-			Trend: trend);
+			Trend: trend,
+			WorstLegBidAskSpreadPct: worstLegSpreadPct,
+			MinOpenInterest: minOpenInterest);
 
 		var hits = Rules
 			.Select(r => r.TryEvaluate(facts))
@@ -267,5 +276,37 @@ internal static class RiskDiagnosticBuilder
 		}
 
 		return ("unknown", "neutral");
+	}
+
+	/// <summary>Per-leg bid/ask spread as a fraction of mid; OI per leg. Returns the worst (largest) spread
+	/// across legs and the minimum OI. Worst-leg gates exit — if any leg is illiquid the whole structure
+	/// is expensive to close. Both values null when quotes are unavailable for any leg.</summary>
+	private static (decimal? worstSpreadPct, long? minOi) ComputeLiquidityStats(
+		IReadOnlyList<DiagnosticLeg> legs,
+		IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	{
+		if (quotes == null || legs.Count == 0) return (null, null);
+
+		decimal? worstSpread = null;
+		long? minOi = null;
+		foreach (var leg in legs)
+		{
+			if (!quotes.TryGetValue(leg.Symbol, out var q)) continue;
+
+			if (q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m)
+			{
+				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				if (mid > 0m)
+				{
+					var spreadPct = (q.Ask.Value - q.Bid.Value) / mid;
+					if (worstSpread == null || spreadPct > worstSpread.Value)
+						worstSpread = spreadPct;
+				}
+			}
+
+			if (q.OpenInterest.HasValue && (minOi == null || q.OpenInterest.Value < minOi.Value))
+				minOi = q.OpenInterest.Value;
+		}
+		return (worstSpread, minOi);
 	}
 }

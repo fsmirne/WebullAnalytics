@@ -126,6 +126,31 @@ internal static class RiskDiagnosticProbeBuilder
 					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual);
 					if (scored != null)
 					{
+						// When cost-basis override is in play, the scorer's view of bid/ask is collapsed
+						// to (px, px) — spread = 0. Liquidity is a forward-looking property of the
+						// current market, not of what you paid, so we recompute it from the original
+						// quotes and rescale BiasAdjustedScore/FinalScore proportionally (the liquidity
+						// factor enters the score chain multiplicatively).
+						if (useCostBasisForOpenerScore && quotes != null)
+						{
+							var (realSpread, realMinOi) = CandidateScorer.ComputeLegLiquidityStats(skel.Legs, quotes);
+							var realLiqFactor = CandidateScorer.ComputeLiquidityFactor(realSpread, realMinOi, ai.Opener.Liquidity.Weight);
+							var oldLiqFactor = scored.LiquidityAdjustmentFactor ?? 1m;
+							var newLiqFactor = realLiqFactor ?? 1m;
+							if (oldLiqFactor > 0m)
+							{
+								var ratio = newLiqFactor / oldLiqFactor;
+								scored = scored with
+								{
+									WorstLegBidAskSpreadPct = realSpread,
+									MinOpenInterest = realMinOi,
+									LiquidityAdjustmentFactor = realLiqFactor,
+									BiasAdjustedScore = scored.BiasAdjustedScore * ratio,
+									FinalScore = scored.FinalScore.HasValue ? scored.FinalScore.Value * ratio : (decimal?)null,
+								};
+							}
+						}
+
 						var rationale = CandidateScorer.BuildRationale(scored, bias, ai.Opener);
 						openerScore = new RiskDiagnosticOpenerScore(
 							Structure: scored.StructureKind.ToString(),

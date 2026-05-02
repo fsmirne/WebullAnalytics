@@ -16,6 +16,7 @@ internal sealed class OpenerConfig
 	[JsonPropertyName("volatilityFitWeight")] public decimal VolatilityFitWeight { get; set; } = 0.50m;
 	[JsonPropertyName("maxPainWeight")] public decimal MaxPainWeight { get; set; } = 0m;
 	[JsonPropertyName("statArbWeight")] public decimal StatArbWeight { get; set; } = 0.30m;
+	[JsonPropertyName("liquidity")] public OpenerLiquidityConfig Liquidity { get; set; } = new();
 
 	/// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at
 	/// ±sigma and ±sigma/2 around spot. Default 1.0 gives a ±1σ / ±0.5σ grid that better matches
@@ -112,4 +113,28 @@ internal sealed class OpenerLongCallPutConfig
 	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 60;
 	[JsonPropertyName("deltaMin")] public decimal DeltaMin { get; set; } = 0.30m;
 	[JsonPropertyName("deltaMax")] public decimal DeltaMax { get; set; } = 0.60m;
+}
+
+/// <summary>
+/// Three-layer liquidity controls for the opener pipeline. The hard filter rejects candidates outright;
+/// the score factor penalizes survivors on a continuous curve; the risk rules surface concerns in the
+/// diagnostic regardless of score. Skipping the hard filter (set thresholds to extreme values) leaves
+/// the score factor and rules in place.
+/// </summary>
+internal sealed class OpenerLiquidityConfig
+{
+	/// <summary>Reject any candidate whose worst leg has a bid/ask spread strictly greater than this
+	/// fraction of mid. Default 0.50 = 50%; extremely wide structural quotes that mid-pricing math
+	/// can never compensate for. Set to 1.0 to effectively disable the spread gate.</summary>
+	[JsonPropertyName("maxBidAskSpreadPct")] public decimal MaxBidAskSpreadPct { get; set; } = 0.50m;
+
+	/// <summary>Reject any candidate whose worst leg has open interest strictly less than this. Default
+	/// 5 contracts; below that, exits routinely walk multiple levels of the book. Set to 0 to disable
+	/// the OI gate.</summary>
+	[JsonPropertyName("minOpenInterest")] public long MinOpenInterest { get; set; } = 5;
+
+	/// <summary>Strength of the multiplicative liquidity factor on the score chain. The factor maps
+	/// worst-leg spread + min-OI to a value in [0.30, 1.00]. Higher weight = sharper penalty for
+	/// borderline-liquidity candidates among those that survived the hard filter. Default 0.50.</summary>
+	[JsonPropertyName("weight")] public decimal Weight { get; set; } = 0.50m;
 }
