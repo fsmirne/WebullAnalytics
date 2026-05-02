@@ -94,5 +94,6 @@ internal sealed record OpenProposal(
 	decimal? FinalScore = null,
 	decimal? WorstLegBidAskSpreadPct = null,
 	long? MinOpenInterest = null,
+	decimal? MinRelativeOpenInterest = null,
 	decimal? LiquidityAdjustmentFactor = null
 );

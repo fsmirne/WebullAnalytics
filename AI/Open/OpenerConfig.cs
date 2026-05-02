@@ -133,6 +133,14 @@ internal sealed class OpenerLiquidityConfig
 	/// the OI gate.</summary>
 	[JsonPropertyName("minOpenInterest")] public long MinOpenInterest { get; set; } = 5;
 
+	/// <summary>Reject any candidate whose worst leg's OI is below this fraction of the maximum OI
+	/// among same-expiry near-spot strikes. Catches "sub-grid" strikes — e.g., the $0.50 strikes on a
+	/// chain whose far-dated expiries cluster volume on $1.00 strikes. Default 0.25 = 25%; a strike
+	/// trading at less than a quarter of its neighbors' interest is structurally illiquid regardless of
+	/// its absolute OI. Set to 0 to disable. Lower this to relax the gate (let through borderline
+	/// strikes); raise it to be stricter (only round-number strikes survive).</summary>
+	[JsonPropertyName("minRelativeOpenInterest")] public decimal MinRelativeOpenInterest { get; set; } = 0.25m;
+
 	/// <summary>Strength of the multiplicative liquidity factor on the score chain. The factor maps
 	/// worst-leg spread + min-OI to a value in [0.30, 1.00]. Higher weight = sharper penalty for
 	/// borderline-liquidity candidates among those that survived the hard filter. Default 0.50.</summary>

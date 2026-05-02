@@ -21,6 +21,7 @@ internal static class RiskDiagnosticBuilder
 		new HighRealizedVolRule(),
 		new WideSpreadRule(),
 		new ThinOpenInterestRule(),
+		new SubGridStrikeRule(),
 	};
 
 	internal static RiskDiagnostic Build(
@@ -135,9 +136,10 @@ internal static class RiskDiagnosticBuilder
 			unrealizedPnlPerShare = currentValuePerShare - costBasisPerShare;
 		}
 
-		// Liquidity stats: worst-leg bid/ask spread (as fraction of mid) and minimum OI across legs.
-		// Worst-leg gates the exit — if any leg is illiquid the whole structure is hard to close.
-		var (worstLegSpreadPct, minOpenInterest) = ComputeLiquidityStats(legs, quotes);
+		// Liquidity stats: worst-leg bid/ask spread (as fraction of mid), absolute minimum OI across
+		// legs, and the worst leg's relative OI vs same-expiry near-spot strikes (catches sub-grid
+		// strikes that have absolute OI > floor but pale next to neighbors). Worst-leg gates the exit.
+		var (worstLegSpreadPct, minOpenInterest, minRelativeOi) = ComputeLiquidityStats(legs, quotes, spot);
 
 		var facts = new RiskDiagnosticFacts(
 			StructureLabel: structureLabel,
@@ -162,7 +164,8 @@ internal static class RiskDiagnosticBuilder
 			NetDeltaPostShort: netDeltaPostShort,
 			Trend: trend,
 			WorstLegBidAskSpreadPct: worstLegSpreadPct,
-			MinOpenInterest: minOpenInterest);
+			MinOpenInterest: minOpenInterest,
+			MinRelativeOpenInterest: minRelativeOi);
 
 		var hits = Rules
 			.Select(r => r.TryEvaluate(facts))
@@ -278,17 +281,21 @@ internal static class RiskDiagnosticBuilder
 		return ("unknown", "neutral");
 	}
 
-	/// <summary>Per-leg bid/ask spread as a fraction of mid; OI per leg. Returns the worst (largest) spread
-	/// across legs and the minimum OI. Worst-leg gates exit — if any leg is illiquid the whole structure
-	/// is expensive to close. Both values null when quotes are unavailable for any leg.</summary>
-	private static (decimal? worstSpreadPct, long? minOi) ComputeLiquidityStats(
+	/// <summary>Per-leg bid/ask spread as a fraction of mid; absolute OI per leg; relative OI per leg
+	/// (leg.OI / max OI among same-expiry strikes within ±10% of spot). Returns the worst spread, the
+	/// minimum absolute OI, and the minimum relative OI across legs. Worst-leg gates exit — if any
+	/// leg is illiquid the whole structure is expensive to close. Values are null when quotes are
+	/// unavailable.</summary>
+	private static (decimal? worstSpreadPct, long? minOi, decimal? minRelOi) ComputeLiquidityStats(
 		IReadOnlyList<DiagnosticLeg> legs,
-		IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+		IReadOnlyDictionary<string, OptionContractQuote>? quotes,
+		decimal spot)
 	{
-		if (quotes == null || legs.Count == 0) return (null, null);
+		if (quotes == null || legs.Count == 0) return (null, null, null);
 
 		decimal? worstSpread = null;
 		long? minOi = null;
+		decimal? minRel = null;
 		foreach (var leg in legs)
 		{
 			if (!quotes.TryGetValue(leg.Symbol, out var q)) continue;
@@ -306,7 +313,37 @@ internal static class RiskDiagnosticBuilder
 
 			if (q.OpenInterest.HasValue && (minOi == null || q.OpenInterest.Value < minOi.Value))
 				minOi = q.OpenInterest.Value;
+
+			if (spot > 0m && q.OpenInterest.HasValue && q.OpenInterest.Value > 0)
+			{
+				var nearbyMaxOi = FindMaxOiNearStrike(leg.Parsed, quotes, spot);
+				if (nearbyMaxOi > 0)
+				{
+					var ratio = (decimal)q.OpenInterest.Value / nearbyMaxOi;
+					if (minRel == null || ratio < minRel.Value)
+						minRel = ratio;
+				}
+			}
 		}
-		return (worstSpread, minOi);
+		return (worstSpread, minOi, minRel);
+	}
+
+	/// <summary>Maximum OI across same-expiry, same-call/put strikes within ±10% of spot. Used by
+	/// liquidity stats to compare a leg's OI to its local maximum (sub-grid detection).</summary>
+	private static long FindMaxOiNearStrike(OptionParsed leg, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot)
+	{
+		long maxOi = 0;
+		foreach (var (sym, q) in quotes)
+		{
+			if (!q.OpenInterest.HasValue || q.OpenInterest.Value <= maxOi) continue;
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p == null) continue;
+			if (!p.Root.Equals(leg.Root, StringComparison.OrdinalIgnoreCase)) continue;
+			if (p.ExpiryDate.Date != leg.ExpiryDate.Date) continue;
+			if (p.CallPut != leg.CallPut) continue;
+			if (Math.Abs(p.Strike - spot) / spot > 0.10m) continue;
+			maxOi = q.OpenInterest.Value;
+		}
+		return maxOi;
 	}
 }

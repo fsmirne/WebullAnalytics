@@ -133,8 +133,8 @@ internal static class RiskDiagnosticProbeBuilder
 						// factor enters the score chain multiplicatively).
 						if (useCostBasisForOpenerScore && quotes != null)
 						{
-							var (realSpread, realMinOi) = CandidateScorer.ComputeLegLiquidityStats(skel.Legs, quotes);
-							var realLiqFactor = CandidateScorer.ComputeLiquidityFactor(realSpread, realMinOi, ai.Opener.Liquidity.Weight);
+							var (realSpread, realMinOi, realMinRelOi) = CandidateScorer.ComputeLegLiquidityStats(skel.Legs, quotes, spot);
+							var realLiqFactor = CandidateScorer.ComputeLiquidityFactor(realSpread, realMinOi, realMinRelOi, ai.Opener.Liquidity.Weight);
 							var oldLiqFactor = scored.LiquidityAdjustmentFactor ?? 1m;
 							var newLiqFactor = realLiqFactor ?? 1m;
 							if (oldLiqFactor > 0m)
@@ -144,6 +144,7 @@ internal static class RiskDiagnosticProbeBuilder
 								{
 									WorstLegBidAskSpreadPct = realSpread,
 									MinOpenInterest = realMinOi,
+									MinRelativeOpenInterest = realMinRelOi,
 									LiquidityAdjustmentFactor = realLiqFactor,
 									BiasAdjustedScore = scored.BiasAdjustedScore * ratio,
 									FinalScore = scored.FinalScore.HasValue ? scored.FinalScore.Value * ratio : (decimal?)null,
