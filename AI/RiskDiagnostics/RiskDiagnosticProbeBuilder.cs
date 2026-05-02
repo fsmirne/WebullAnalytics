@@ -123,7 +123,11 @@ internal static class RiskDiagnosticProbeBuilder
 
 				if (skel != null)
 				{
-					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual);
+					// applyLiquidityGate: false — analyze position/risk evaluates positions you've
+					// already opened (or are explicitly modeling), so the hard liquidity gate must
+					// not silently reject them. The liq factor and rules still surface, so a poorly-
+					// liquid existing position is still flagged in the panel.
+					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false);
 					if (scored != null)
 					{
 						// When cost-basis override is in play, the scorer's view of bid/ask is collapsed
