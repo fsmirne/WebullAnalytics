@@ -609,12 +609,17 @@ internal static class CandidateScorer
 		return Convert.ToHexString(bytes).ToLowerInvariant();
 	}
 
-	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid) => skel.StructureKind switch
+	/// <summary>Score a candidate. <paramref name="applyLiquidityGate"/> controls whether the hard
+	/// liquidity filter (<see cref="PassesLiquidityGate"/>) can return null to reject the candidate
+	/// entirely. The gate is meant for the opener pipeline to skip doomed-exit *new* candidates;
+	/// callers analyzing *existing* positions should pass false so the scorer always returns a
+	/// proposal — the liq factor and rules still surface in the rationale either way.</summary>
+	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true) => skel.StructureKind switch
 	{
-		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode),
-		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode),
-		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode),
-		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode),
+		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
+		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
+		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
+		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
 		_ => null
 	};
 
@@ -807,7 +812,7 @@ internal static class CandidateScorer
 		return (decimal)(dir == Direction.Above ? N_d2 : 1.0 - N_d2);
 	}
 
-	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid)
+	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true)
 	{
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
 		var longLeg = skel.Legs.First(l => l.Action == "buy");
@@ -818,7 +823,7 @@ internal static class CandidateScorer
 		var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		var longQ = ResolveLegPrice(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (shortQ == null || longQ == null) return null;
-		if (!PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot)) return null;
+		if (applyLiquidityGate && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot)) return null;
 		var pricingWarning = BuildPricingWarning(shortQ.Value.UsedFallback || longQ.Value.UsedFallback);
 
 		var shortMid = (shortQ.Value.Bid + shortQ.Value.Ask) / 2m;
@@ -1264,7 +1269,7 @@ internal static class CandidateScorer
 		return (maxProfit, maxLoss);
 	}
 
-	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid)
+	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true)
 	{
 		var defs = new List<MultiLegDefinition>(skel.Legs.Count);
 		var usedFallback = false;
@@ -1283,7 +1288,7 @@ internal static class CandidateScorer
 				: ResolveIv(leg.Symbol, quotes, cfg.IvDefaultPct);
 			defs.Add(new MultiLegDefinition(leg, parsed, leg.Action == "buy", legIv));
 		}
-		if (!PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot)) return null;
+		if (applyLiquidityGate && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot)) return null;
 		var pricingWarning = BuildPricingWarning(usedFallback);
 
 		var netEntryPerContract = NetEntryPerContract(skel.Legs, quotes, pricingMode);
@@ -1364,7 +1369,7 @@ internal static class CandidateScorer
 			LiquidityAdjustmentFactor: liquidityFactor);
 	}
 
-	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid)
+	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true)
 	{
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
 		var longLeg = skel.Legs.First(l => l.Action == "buy");
@@ -1375,7 +1380,7 @@ internal static class CandidateScorer
 		var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		var longQ = ResolveLegPrice(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (shortQ == null || longQ == null) return null;
-		if (!PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot)) return null;
+		if (applyLiquidityGate && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot)) return null;
 		var pricingWarning = BuildPricingWarning(shortQ.Value.UsedFallback || longQ.Value.UsedFallback);
 
 		var shortMid = (shortQ.Value.Bid + shortQ.Value.Ask) / 2m;
@@ -1538,7 +1543,7 @@ internal static class CandidateScorer
 		return netThetaPerShare * 100m;
 	}
 
-	public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid)
+	public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true)
 	{
 		var leg = skel.Legs[0];
 		var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
@@ -1546,7 +1551,7 @@ internal static class CandidateScorer
 
 		var quote = ResolveLegPrice(leg.Symbol, parsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (quote == null) return null;
-		if (!PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot)) return null;
+		if (applyLiquidityGate && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot)) return null;
 		var pricingWarning = BuildPricingWarning(quote.Value.UsedFallback);
 		var bid = quote.Value.Bid;
 		var ask = quote.Value.Ask;
