@@ -91,5 +91,8 @@ internal sealed record OpenProposal(
 	decimal? MarketNetPremiumPerShare = null,
 	decimal? TheoreticalNetPremiumPerShare = null,
 	decimal? StatArbAdjustmentFactor = null,
-	decimal? FinalScore = null
+	decimal? FinalScore = null,
+	decimal? WorstLegBidAskSpreadPct = null,
+	long? MinOpenInterest = null,
+	decimal? LiquidityAdjustmentFactor = null
 );

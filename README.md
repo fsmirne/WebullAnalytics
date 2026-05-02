@@ -904,7 +904,7 @@ These metrics are sourced from the Webull option chain API and are not available
 
 The risk diagnostic is the structured snapshot rendered by `wa analyze risk`, `wa analyze position`, and the AI pipelines (`wa ai scan`, `wa ai watch`, `wa ai replay`) for every management proposal and opening idea. It is a single Spectre panel titled **Risk diagnostic** that combines: a fixed set of structural / pricing / Greek facts, an opener-style score with the multiplicative factor breakdown, optional probe rows (per-leg quotes, delta-band gate, broker margin), and the list of rule hits that fired against the structure.
 
-The diagnostic is built by `RiskDiagnosticBuilder.Build` from the legs, current spot, an IV resolver, and an optional `TrendSnapshot`. Ten rules are evaluated unconditionally — only the ones that match attach as `Rules fired` lines. The same record is appended to `data/analyze-risk.jsonl` (for `analyze risk`) or `data/analyze-position.jsonl` (for `analyze position`) so historical diagnostics can be re-analyzed later.
+The diagnostic is built by `RiskDiagnosticBuilder.Build` from the legs, current spot, an IV resolver, and an optional `TrendSnapshot`. Twelve rules are evaluated unconditionally — only the ones that match attach as `Rules fired` lines. The same record is appended to `data/analyze-risk.jsonl` (for `analyze risk`) or `data/analyze-position.jsonl` (for `analyze position`) so historical diagnostics can be re-analyzed later.
 
 ### Panel rows
 
@@ -1140,8 +1140,28 @@ tech-adjusted = raw × (1 + α · bias · fit)
 | `pain` | Max-pain alignment with the proposed strikes | `clamp(1 + maxPainWeight × signal, ≥ 0.10, …)`. Signal blends *breakeven-band coverage* (45%), *side-of-spot agreement* (35%), and *short-strike pinning* (20%) for neutral structures; for directional structures the signed distance from spot to max-pain × `fit` is used directly. |
 | `assign` | Assignment-risk discount for ITM-leaning short legs | Penalizes structures where the short leg sits dangerously close to or past spot given the strike step and current technical bias. |
 | `arb` | Stat-arb edge: market mid vs Black-Scholes theoretical | `clamp(1 + statArbWeight × clamp(edge / gross, −1, 1), ≥ 0.10, …)`. `edge = theoretical_net − market_net`, `gross = theo_long + theo_short`. Positive edge means the market entry is favorable to whoever opens the structure (paid less than fair on a debit, received more than fair on a credit). Same sign for both directions because the signed-net difference encodes direction inherently. |
+| `liq` | Worst-leg liquidity penalty | `clamp(1 − weight × (1 − spread_component × oi_component), 0.30, 1.00)`. Spread component is `√max(0, 1 − (worst_leg_spread − 0.05) / 0.45)` — full credit at ≤5% bid/ask spread, decays toward 0.30 as the worst leg approaches 50% wide. OI component is `max(√(min_oi / 200), 0.40)` for OI ≥ 5, hard-floor 0.30 below that. Because exit cost is gated by the *worst* leg, both components are computed against the worst-liquidity leg in the structure. The factor reflects forward-looking exit friction; for `analyze position`/`analyze risk` it always uses the *current market* quotes even when the score's pricing math is locked to cost basis. |
 
 The `Factors` line in the panel prints only the factors that fired for this structure — single-leg long calls, for example, will not show `geom` or `setup`.
+
+#### Liquidity hard filter (opener pipeline)
+
+In addition to the `liq` score factor, the opener pipeline applies a *hard reject* before scoring. Any candidate where:
+
+- the worst leg's bid/ask spread exceeds `opener.liquidity.maxBidAskSpreadPct` (default 0.50 = 50%), **or**
+- the worst leg's open interest is below `opener.liquidity.minOpenInterest` (default 5)
+
+is dropped silently. These are doomed-exit structures — even a great fair-value score can't compensate for the liquidity friction at exit.
+
+The `analyze risk` and `analyze position` commands do *not* apply the hard filter (you may already be in a position with poor liquidity and need to evaluate it). They still surface the `wide_spread` and `thin_open_interest` rules, and the `liq` factor continues to penalize the score.
+
+**Config keys** (`opener.liquidity`):
+
+| Field | Default | Description |
+|---|---|---|
+| `maxBidAskSpreadPct` | 0.50 | Hard-reject worst-leg spread threshold, as fraction of mid. Set to 1.0 to effectively disable. |
+| `minOpenInterest` | 5 | Hard-reject worst-leg OI threshold. Set to 0 to disable. |
+| `weight` | 0.50 | Strength of the multiplicative `liq` factor on survivors. Higher = sharper penalty for borderline-liquidity candidates. |
 
 #### 4. `final` — theta carry
 
@@ -1154,7 +1174,7 @@ Adds up to a +25% boost when net theta is positive and large relative to capital
 
 ### Risk rules (the `Rules fired` block)
 
-Ten rules run unconditionally against `RiskDiagnosticFacts`; only those that match attach to the diagnostic. Rules are informational — they do *not* change the score. They surface concerns or geometry observations a human reviewer should know about before acting on the structure.
+Twelve rules run unconditionally against `RiskDiagnosticFacts`; only those that match attach to the diagnostic. Rules are informational — they do *not* change the score. They surface concerns or geometry observations a human reviewer should know about before acting on the structure.
 
 | Rule ID | Triggers when | What it tells you |
 |---|---|---|
@@ -1168,6 +1188,8 @@ Ten rules run unconditionally against `RiskDiagnosticFacts`; only those that mat
 | `directional_mismatch_near_term` | Trend available, bias non-neutral, **and** 5-day move > 3% against the bias | Bias runs against the recent 5-day trend; delta exposure is fighting the tape. |
 | `directional_mismatch_today` | Trend available, intraday non-null, `abs(net_delta) > 0.25`, **and** intraday move > 1% against the delta sign | Entered against today's direction — useful for "should I wait?" decisions before submitting. |
 | `high_realized_vol` | ATR(14) % > 4% of spot | Underlying is moving more than usual — position is exposed to larger-than-typical adverse swings. |
+| `wide_spread` | Worst leg has bid/ask spread > 25% of mid | Exit cost is dominated by liquidity friction, not fair value. Mid quotes are not transactable; closing the structure walks the book against you. |
+| `thin_open_interest` | Worst-leg OI < 50 contracts | Thin OI signals poor market-maker engagement — quotes are wide, fills walk the book, exiting a multi-contract position can move the price against you. |
 
 Each fired rule renders as a colored bullet with its ID and an interpolated message that includes the actual measured values. The same `Inputs` dictionary is serialized to the JSONL log, making historical rule-fires queryable with `jq`.
 

@@ -195,6 +195,83 @@ internal static class CandidateScorer
 		return Math.Clamp(factor, 0.01m, 1.25m);
 	}
 
+	/// <summary>Hard-filter gate: reject any candidate whose worst-leg spread exceeds the config max,
+	/// or whose min-OI falls below the config floor. Returns true when the candidate passes (or when
+	/// liquidity stats can't be computed — defer to downstream scoring rather than discard silently).
+	/// The gate is checked before any scoring math to short-circuit the doomed-exit candidates the
+	/// opener used to surface in past versions.</summary>
+	public static bool PassesLiquidityGate(IEnumerable<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, OpenerLiquidityConfig cfg)
+	{
+		var (worstSpread, minOi) = ComputeLegLiquidityStats(legs, quotes);
+		if (worstSpread.HasValue && worstSpread.Value > cfg.MaxBidAskSpreadPct) return false;
+		if (minOi.HasValue && minOi.Value < cfg.MinOpenInterest) return false;
+		return true;
+	}
+
+	/// <summary>Worst-leg bid/ask spread (as fraction of mid) and minimum OI across the legs of a
+	/// candidate. Returns nulls for missing data; the liquidity factor handles either being null.</summary>
+	public static (decimal? worstSpreadPct, long? minOi) ComputeLegLiquidityStats(IEnumerable<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		decimal? worstSpread = null;
+		long? minOi = null;
+		foreach (var leg in legs)
+		{
+			if (!quotes.TryGetValue(leg.Symbol, out var q)) continue;
+			if (q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m)
+			{
+				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				if (mid > 0m)
+				{
+					var spreadPct = (q.Ask.Value - q.Bid.Value) / mid;
+					if (worstSpread == null || spreadPct > worstSpread.Value)
+						worstSpread = spreadPct;
+				}
+			}
+			if (q.OpenInterest.HasValue && (minOi == null || q.OpenInterest.Value < minOi.Value))
+				minOi = q.OpenInterest.Value;
+		}
+		return (worstSpread, minOi);
+	}
+
+	/// <summary>Worst-leg liquidity penalty. Combines bid/ask spread (as fraction of mid) and min OI
+	/// across legs into a multiplicative factor in [0.30, 1.00]. Returns null when liquidity stats are
+	/// unavailable so callers can skip the factor cleanly. Spread above 5% starts reducing the factor;
+	/// at 50% the factor approaches the floor. OI below 200 starts to bite; below 50 contributes a
+	/// material additional cut. Both penalties compose multiplicatively. Weight scales the total cut —
+	/// weight=0 returns 1.0; weight=1 applies the full curve.</summary>
+	public static decimal? ComputeLiquidityFactor(decimal? worstLegSpreadPct, long? minOpenInterest, decimal weight)
+	{
+		if (weight <= 0m) return null;
+		if (!worstLegSpreadPct.HasValue && !minOpenInterest.HasValue) return null;
+
+		// Spread component: 1.0 when spread ≤ 5%, decays to ~0.30 at 50% spread.
+		// Curve: max(0, 1 − ((spreadPct − 0.05) / 0.45)) clamped, then sqrt-softened so the curve
+		// has a gentle slope near the threshold and steepens for genuinely wide quotes.
+		var spreadComponent = 1m;
+		if (worstLegSpreadPct is decimal s)
+		{
+			var raw = s <= 0.05m ? 1m : Math.Max(0m, 1m - (s - 0.05m) / 0.45m);
+			spreadComponent = (decimal)Math.Sqrt((double)Math.Clamp(raw, 0m, 1m));
+		}
+
+		// OI component: 1.0 when OI ≥ 200, drops to ~0.40 at OI=10. Below 5 returns the floor (0.30).
+		var oiComponent = 1m;
+		if (minOpenInterest is long oi)
+		{
+			if (oi < 5) oiComponent = 0.30m;
+			else
+			{
+				var ratio = (decimal)oi / 200m;
+				oiComponent = (decimal)Math.Sqrt((double)Math.Clamp(ratio, 0m, 1m));
+				oiComponent = Math.Max(oiComponent, 0.40m);
+			}
+		}
+
+		var combined = spreadComponent * oiComponent;
+		var factor = 1m - weight * (1m - combined);
+		return Math.Clamp(factor, 0.30m, 1m);
+	}
+
 	internal static decimal ComputeCapitalScaleFactor(decimal capitalAtRiskPerContract)
 	{
 		if (capitalAtRiskPerContract <= 0m)
@@ -476,8 +553,16 @@ internal static class CandidateScorer
 		if (p.RunwayFactor.HasValue)
 			factorParts.Add($"runway {p.RunwayFactor.Value:F2}");
 		factorParts.Add($"bal {balance:F2}");
+		if (p.LiquidityAdjustmentFactor.HasValue)
+			factorParts.Add($"liq {p.LiquidityAdjustmentFactor.Value:F2}");
 
 		var indicatorParts = new List<string>();
+		if (p.LiquidityAdjustmentFactor.HasValue)
+		{
+			var spreadStr = p.WorstLegBidAskSpreadPct is decimal s ? $"{(s * 100m).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}%" : "n/a";
+			var oiStr = p.MinOpenInterest.HasValue ? p.MinOpenInterest.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "n/a";
+			indicatorParts.Add($"worst-leg spread {spreadStr}, min OI {oiStr} → liq {p.LiquidityAdjustmentFactor.Value:F2}");
+		}
 		string? volDetail = null;
 		if (p.VolatilityAdjustmentFactor.HasValue && p.ImpliedVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.Value > 0m)
 		{
@@ -625,6 +710,7 @@ internal static class CandidateScorer
 		var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		var longQ = ResolveLegPrice(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (shortQ == null || longQ == null) return null;
+		if (!PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity)) return null;
 		var pricingWarning = BuildPricingWarning(shortQ.Value.UsedFallback || longQ.Value.UsedFallback);
 
 		var shortMid = (shortQ.Value.Bid + shortQ.Value.Ask) / 2m;
@@ -683,7 +769,9 @@ internal static class CandidateScorer
 			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
 			spot, asOf, quotes, cfg.IvDefaultPct);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
-		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
+		var (worstSpread, minOi) = ComputeLegLiquidityStats(skel.Legs, quotes);
+		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, cfg.Liquidity.Weight);
+		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -718,7 +806,10 @@ internal static class CandidateScorer
 			MarketNetPremiumPerShare: statArb?.MarketNet,
 			TheoreticalNetPremiumPerShare: statArb?.TheoreticalNet,
 			StatArbAdjustmentFactor: statArbFactor,
-			FinalScore: finalScore
+			FinalScore: finalScore,
+			WorstLegBidAskSpreadPct: worstSpread,
+			MinOpenInterest: minOi,
+			LiquidityAdjustmentFactor: liquidityFactor
 		);
 	}
 
@@ -1077,6 +1168,7 @@ internal static class CandidateScorer
 			usedFallback |= resolved.Value.UsedFallback;
 			defs.Add(new MultiLegDefinition(leg, parsed, leg.Action == "buy", ResolveIv(leg.Symbol, quotes, cfg.IvDefaultPct)));
 		}
+		if (!PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity)) return null;
 		var pricingWarning = BuildPricingWarning(usedFallback);
 
 		var netEntryPerContract = NetEntryPerContract(skel.Legs, quotes, pricingMode);
@@ -1111,7 +1203,9 @@ internal static class CandidateScorer
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(defs.Select(d => (d.Proposal.Symbol, d.Parsed, d.IsLong)), spot, asOf, quotes, cfg.IvDefaultPct);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
-		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
+		var (worstSpread, minOi) = ComputeLegLiquidityStats(skel.Legs, quotes);
+		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, cfg.Liquidity.Weight);
+		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1148,7 +1242,10 @@ internal static class CandidateScorer
 			MarketNetPremiumPerShare: statArb?.MarketNet,
 			TheoreticalNetPremiumPerShare: statArb?.TheoreticalNet,
 			StatArbAdjustmentFactor: statArbFactor,
-			FinalScore: finalScore);
+			FinalScore: finalScore,
+			WorstLegBidAskSpreadPct: worstSpread,
+			MinOpenInterest: minOi,
+			LiquidityAdjustmentFactor: liquidityFactor);
 	}
 
 	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid)
@@ -1162,6 +1259,7 @@ internal static class CandidateScorer
 		var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		var longQ = ResolveLegPrice(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (shortQ == null || longQ == null) return null;
+		if (!PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity)) return null;
 		var pricingWarning = BuildPricingWarning(shortQ.Value.UsedFallback || longQ.Value.UsedFallback);
 
 		var shortMid = (shortQ.Value.Bid + shortQ.Value.Ask) / 2m;
@@ -1248,7 +1346,9 @@ internal static class CandidateScorer
 			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
 			spot, asOf, quotes, cfg.IvDefaultPct);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
-		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance, skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
+		var (worstSpread, minOi) = ComputeLegLiquidityStats(skel.Legs, quotes);
+		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, cfg.Liquidity.Weight);
+		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1285,7 +1385,10 @@ internal static class CandidateScorer
 			MarketNetPremiumPerShare: statArb?.MarketNet,
 			TheoreticalNetPremiumPerShare: statArb?.TheoreticalNet,
 			StatArbAdjustmentFactor: statArbFactor,
-			FinalScore: finalScore
+			FinalScore: finalScore,
+			WorstLegBidAskSpreadPct: worstSpread,
+			MinOpenInterest: minOi,
+			LiquidityAdjustmentFactor: liquidityFactor
 		);
 	}
 
@@ -1322,6 +1425,7 @@ internal static class CandidateScorer
 
 		var quote = ResolveLegPrice(leg.Symbol, parsed, spot, asOf, quotes, cfg.IvDefaultPct);
 		if (quote == null) return null;
+		if (!PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity)) return null;
 		var pricingWarning = BuildPricingWarning(quote.Value.UsedFallback);
 		var bid = quote.Value.Bid;
 		var ask = quote.Value.Ask;
@@ -1366,7 +1470,9 @@ internal static class CandidateScorer
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(new (string, OptionParsed, bool)[] { (leg.Symbol, parsed, true) }, spot, asOf, quotes, cfg.IvDefaultPct);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
-		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance, skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
+		var (worstSpread, minOi) = ComputeLegLiquidityStats(skel.Legs, quotes);
+		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, cfg.Liquidity.Weight);
+		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), assignmentFactor), statArbFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1401,7 +1507,10 @@ internal static class CandidateScorer
 			MarketNetPremiumPerShare: statArb?.MarketNet,
 			TheoreticalNetPremiumPerShare: statArb?.TheoreticalNet,
 			StatArbAdjustmentFactor: statArbFactor,
-			FinalScore: finalScore
+			FinalScore: finalScore,
+			WorstLegBidAskSpreadPct: worstSpread,
+			MinOpenInterest: minOi,
+			LiquidityAdjustmentFactor: liquidityFactor
 		);
 	}
 

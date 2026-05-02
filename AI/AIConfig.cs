@@ -284,6 +284,11 @@ internal static class AIConfigLoader
 		if (op.MaxPainWeight < 0m) return $"opener.maxPainWeight: must be ≥ 0, got {op.MaxPainWeight}";
 		if (op.StatArbWeight < 0m) return $"opener.statArbWeight: must be ≥ 0, got {op.StatArbWeight}";
 
+		var liq = op.Liquidity;
+		if (liq.MaxBidAskSpreadPct <= 0m || liq.MaxBidAskSpreadPct > 1m) return $"opener.liquidity.maxBidAskSpreadPct: must be in (0, 1], got {liq.MaxBidAskSpreadPct}";
+		if (liq.MinOpenInterest < 0) return $"opener.liquidity.minOpenInterest: must be ≥ 0, got {liq.MinOpenInterest}";
+		if (liq.Weight < 0m || liq.Weight > 1m) return $"opener.liquidity.weight: must be in [0, 1], got {liq.Weight}";
+
 		var lc = op.Structures.LongCalendar;
 		if (lc.ShortDteMin < 0) return $"opener.structures.longCalendar.shortDteMin: must be ≥ 0, got {lc.ShortDteMin}";
 		if (lc.ShortDteMax < lc.ShortDteMin) return $"opener.structures.longCalendar.shortDteMax: must be ≥ shortDteMin, got {lc.ShortDteMax}";
