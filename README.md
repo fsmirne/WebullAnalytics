@@ -581,15 +581,16 @@ wa ai scan --proposals open
 
 #### Rules
 
-Rules evaluate per-position in priority order — the first rule to match for a position wins; lower-priority rules are skipped for that position in that tick. All thresholds are configurable in `ai-config.json`.
+Rules evaluate per-position in priority order — the first rule to match for a position wins; lower-priority rules are skipped for that position in that tick. Ties on priority are broken alphabetically by rule name. All thresholds are configurable in `ai-config.json`.
 
 | Rule | Priority | Trigger |
 |---|---|---|
 | `StopLossRule` | 1 | MTM debit ≥ 1.5× initial, or spot beyond break-even by > 3% |
-| `TakeProfitRule` | 2 | MTM ≥ 60% of max projected profit |
+| `CloseBeforeShortExpiryRule` | 2 | Short DTE = 0 and either MTM profit ≥ `minProfitPct` of initial debit, or spot is past the BE band ± `emergencyBreakEvenBufferPct` (emergency close) |
+| `OpportunisticRollRule` | 2 | A roll scenario improves P&L-per-day by at least `minImprovementPerDayPerContract` vs holding, and passes all four safety gates |
+| `TakeProfitRule` | 2 | MTM ≥ `pctOfMaxProfit` of the peak net value in the current-date column of the time-decay grid |
 | `DefensiveRollRule` | 3 | Spot within 1% of short strike and short DTE ≤ 3 |
 | `RollShortOnExpiryRule` | 4 | Short DTE ≤ 2 and short mid ≤ $0.10 |
-| `OpportunisticRollRule` | 5 | A roll scenario improves P&L-per-day by at least `minImprovementPerDayPerContract` vs holding, and passes all four safety gates |
 
 #### OpportunisticRollRule
 
@@ -647,6 +648,9 @@ Shared AI options:
   --proposals <mode>       all | open | management
   --pricing <mode>         mid | bidask
 
+ai scan only:
+  --top <N>                Override opener.topNPerTicker from ai-config.json
+
 ai watch only:
   --tick <seconds>         Override tickIntervalSeconds
   --duration <duration>    Stop after a duration such as 6h, 90m, or 30s
@@ -658,13 +662,19 @@ ai replay only:
   --granularity <level>    daily or hourly. Default: daily
 ```
 
+#### Auto-execution (watch loop)
+
+`wa ai watch` can optionally submit Close proposals automatically when `watch.autoExecute.enabled` is set in `ai-config.json`. Off by default; the executor logs the action it *would* take until `submit: true` is also set. The `rules` allow-list controls which rules can fire executions — by default only `CloseBeforeShortExpiryRule` is permitted.
+
+For Close proposals at or above `scaleOut.minQty` contracts, the executor splits the close into three time-windowed tranches (default 10:00–10:30 / 12:30–13:00 / 15:00–15:30 ET). The final tranche always closes whatever remains, so partial fills earlier in the day still converge to a fully-closed position by the last window. Smaller closes fire as a single order.
+
 #### Cash reserve
 
 Every proposal is funding-checked. Proposals that would leave free cash below the configured reserve get a `⚠ blocked by cash reserve` tag. This is informational in phase 1; no action is blocked since nothing executes.
 
 #### Historical replay: supplying price data
 
-`ai replay` needs daily closes for each ticker to price options via Black-Scholes. The built-in Yahoo fetcher hits `query1.finance.yahoo.com/v7/finance/download` which currently returns 401 without authentication. Until an alternative automated fetcher is wired, you can supply historical closes manually:
+`ai replay` needs daily closes for each ticker to price options via Black-Scholes. The built-in Yahoo fetcher hits `query2.finance.yahoo.com/v8/finance/chart` and transparently retries with a session crumb when Yahoo requires authentication. If the fetch fails for a ticker, the cache is left empty for that ticker and you can supply historical closes manually:
 
 1. Export daily closes for each ticker from any source (Yahoo Finance web UI → "Historical Data" → Download, or a broker export).
 2. Save to `data/history/<TICKER>.csv`. The parser accepts either:
@@ -673,10 +683,6 @@ Every proposal is funding-checked. Proposals that would leave free cash below th
 3. Run `ai replay`. The cache picks up the CSV automatically; no further conversion needed.
 
 The replay output includes an **agreement analysis** — for each day where rules fired and you also traded that position, it shows what the rule proposed alongside what you actually did, and scores each as `match`, `partial`, `miss`, or `divergent`.
-
-#### Phase-1 note
-
-**`TakeProfitRule`** is implemented but its profit-projector bridge currently returns null, so it never fires. The other four rules (StopLoss, DefensiveRoll, RollShortOnExpiry, OpportunisticRoll) work normally.
 
 ## Data Sources
 
@@ -893,6 +899,285 @@ The IV value is color-coded based on the IV/HV ratio (volatility risk premium):
 The IV5 metric provides additional context: if IV5 is rising toward HV, a cheap signal may be closing; if IV5 is falling away from HV, a rich signal may be strengthening.
 
 These metrics are sourced from the Webull option chain API and are not available when using Yahoo Finance (`--api yahoo`).
+
+## Risk Diagnostic Panel
+
+The risk diagnostic is the structured snapshot rendered by `wa analyze risk`, `wa analyze position`, and the AI pipelines (`wa ai scan`, `wa ai watch`, `wa ai replay`) for every management proposal and opening idea. It is a single Spectre panel titled **Risk diagnostic** that combines: a fixed set of structural / pricing / Greek facts, an opener-style score with the multiplicative factor breakdown, optional probe rows (per-leg quotes, delta-band gate, broker margin), and the list of rule hits that fired against the structure.
+
+The diagnostic is built by `RiskDiagnosticBuilder.Build` from the legs, current spot, an IV resolver, and an optional `TrendSnapshot`. Ten rules are evaluated unconditionally — only the ones that match attach as `Rules fired` lines. The same record is appended to `data/analyze-risk.jsonl` (for `analyze risk`) or `data/analyze-position.jsonl` (for `analyze position`) so historical diagnostics can be re-analyzed later.
+
+### Panel rows
+
+Every row is per-contract unless explicitly noted. "Per share" means $1 of underlying movement; multiply by 100 to get the per-contract dollar figure.
+
+| Row | What it shows | How it's computed |
+|---|---|---|
+| `Structure` | Structure label and directional bias (e.g. `calendar (neutral)`, `covered_diagonal (bullish)`, `vertical_credit (bearish)`) | `ClassifyStructure` inspects leg counts, expirations, strikes, and call/put types. The bias is *bullish*, *bearish*, or *neutral* depending on which side of spot the structure profits on. |
+| `Greeks` | Δ, θ/day, ν per IV-point — all per contract | Δ and ν use Black-Scholes closed-form. θ uses a 1-day finite difference (BS today − BS tomorrow) so it correctly captures weekend decay. Each leg's per-share value is signed (long = +, short = −), summed × Qty × 100 for θ/ν, and divided by reference Qty so the result is *per contract*. |
+| `DTE` | Earliest short-leg DTE, latest long-leg DTE, gap days | Calendar-day differences from `asOf.Date` (or the `--date` override). |
+| `Premium` | Market view (long / short / ratio / net) and theoretical view side-by-side when both are available; otherwise the cost-basis or current-mid view alone | **Market** uses each leg's bid/ask midpoint. **Theoretical** prices each leg via Black-Scholes at its quoted IV. **Cost-basis** view uses each leg's entry price (manage pipeline). The `ratio` is `long_paid / short_received`. Net is signed: positive = debit, negative = credit. |
+| `Spot` | Current underlying price, whether the short leg is OTM, and short-leg extrinsic value | Spot comes from `--ticker-price`, the API, or the bootstrap chain quote. **Short OTM** is true when *every* short leg is OTM (call: spot ≤ strike; put: spot ≥ strike). **Short extrinsic** is `min(short_mid − intrinsic)` across short legs. |
+| `Trend` | 5-day %, 20-day %, optional intraday %, ATR(14) % | `TrendFetcher.FetchAsync` pulls daily closes from the historical price cache. ATR(14) is the 14-day average true range as a percentage of spot. The intraday cell is omitted outside market hours. The line is omitted entirely if no historical data is available. |
+| `P&L` | Cost / now / signed pnl/share — **manage pipeline only** | Only emitted when *every* leg has both a `CostBasisPerShare` (entry price) and a current `PricePerShare` (mark). `pnl = current_value − cost_basis`, where each is the signed leg sum. Open candidates have no cost basis and skip this row. |
+
+### Reading the Greeks line
+
+```
+Greeks:    Δ +0.02   θ +$4.83/day   ν +$1.85/IV pt
+```
+
+Every value is **net, per contract** — long legs add, short legs subtract, then the aggregate is divided by the reference contract size. Multiply by your actual position size to get total exposure.
+
+#### Δ (delta) — directional sensitivity
+
+Delta is dimensionless: `Δ = 0.02` means the *option price* moves $0.02 for every $1 the underlying moves. To translate to **dollars per contract**, multiply by the 100-share multiplier:
+
+```
+$/contract per $1 underlying = Δ × 100
+```
+
+So `Δ +0.02` means **+$2 per contract for every $1 the underlying rises**, and `Δ −0.40` means **−$40 per contract** for every $1 it rises (or equivalently +$40 if it falls). The sign tells you the direction: positive delta wants the underlying up, negative wants it down. Calendars and iron condors typically run very small deltas (|Δ| < 0.10); a long call sits around +0.30 to +0.70 depending on moneyness.
+
+The `directional_exposure` rule fires when `|Δ| > 0.25`, which is roughly $25/contract per $1 underlying — material enough that a normal session's price wiggle dominates whatever theta you're earning.
+
+#### θ (theta) — time decay per day
+
+Theta is already in **dollars per contract per day**. It's computed as a 1-day finite difference (`BS_today − BS_tomorrow`) on each leg's Black-Scholes value rather than the closed-form derivative — this means it correctly handles weekend decay (Friday's θ already reflects the value drop you'll see Monday morning).
+
+```
+θ = +$4.83/day  →  position gains $4.83 per contract per calendar day if spot and IV stay flat
+θ = −$12.40/day →  position loses $12.40 per contract per day
+```
+
+A few reference points:
+- **Short calendar / short iron condor**: positive θ — you collect time premium, typically $2–$15/day/contract depending on DTE and how close spot is to the short strike.
+- **Long call / long put**: negative θ — you bleed time, often $5–$25/day/contract for near-the-money front-month longs.
+- **Diagonals**: positive θ when the short's decay outpaces the long's; can flip sign as the short approaches expiry.
+
+Theta accelerates as DTE shrinks for at-the-money options, so a structure that shows θ +$3/day at 30 DTE may show θ +$8/day in the final week. The `final` score's theta factor uses `θ / capital_at_risk` to normalize this — a $5/day theta on $200 risk is a much better return than the same $5/day on $2000 risk.
+
+#### ν (vega) — IV sensitivity
+
+Vega is in **dollars per contract per 1 percentage point of implied volatility**. The raw Black-Scholes vega from the math library is per 1.0 IV change (i.e. 100 percentage points), and the diagnostic divides by 100 so the displayed figure is the more intuitive "1-IV-point" units that match how IV is normally quoted.
+
+```
+ν = +$1.85/IV pt  →  if IV rises from 32% to 33%, position gains $1.85/contract
+ν = −$8.20/IV pt  →  if IV rises from 32% to 33%, position loses $8.20/contract
+ν = +$1.85/IV pt  →  if IV falls from 32% to 27% (5 points), position loses $9.25/contract
+```
+
+Sign by structure type:
+- **Long calendars / long diagonals**: positive ν — the long leg has more time value than the short, so it benefits more from an IV pop. Typical range: +$1 to +$5/IV pt for single-contract calendars.
+- **Long calls / long puts**: positive ν — pure long premium.
+- **Short verticals / iron condors / iron flies**: negative ν — you're net short premium, an IV crush is in your favor and an IV spike hurts.
+- **Inverted diagonals**: usually negative ν — the short leg dominates.
+
+The `vega_adverse` rule fires when `ν < −$5/contract per IV pt` to flag positions that would take a meaningful hit from a typical earnings-style IV pop.
+
+#### Worked example
+
+For a `calendar (neutral)` showing `Δ +0.02   θ +$4.83/day   ν +$1.85/IV pt` held as 10 contracts:
+
+| Scenario | Per-contract impact | Total (10 contracts) |
+|---|---|---|
+| Underlying up $1, IV flat, same day | +$2.00 | +$20 |
+| Underlying flat, IV flat, +1 day | +$4.83 | +$48.30 |
+| Underlying flat, IV +2 points, same day | +$3.70 | +$37 |
+| Underlying down $2, IV +1 pt, +1 day | −$4 + $4.83 + $1.85 = $2.68 | +$26.80 |
+
+The diagnostic doesn't print these scenarios — it gives you the three Greeks and you do the multiplication. The point of having all three on one line is that you can immediately see whether a structure makes sense: if your thesis is "spot drifts up slowly and IV rises into earnings," you want **positive Δ, positive θ, positive ν**. If the panel shows positive Δ but negative ν, the same thesis still makes money on the spot move but loses on the IV pop — a tradeoff the panel is forcing you to confront before you submit.
+
+### Probe rows
+
+These rows appear when `RiskDiagnosticProbe` is attached — which is always for `analyze risk`, `analyze position`, and AI opener candidates.
+
+| Row | When shown | Meaning |
+|---|---|---|
+| `Enum delta` | Two-leg short call/put vertical only | Absolute Black-Scholes delta of the short leg vs the configured `opener.structures.shortVertical.shortDeltaMin/Max` band. PASS = inside the band; FAIL = outside. The opener pipeline uses this gate to filter verticals upstream. |
+| `Long quote / Short quote / Leg N quote` | Always when quotes exist | Per-leg `bid=… ask=… mid=… iv=… hv=… iv5=… oi=… vol=… sym=…`. `iv`/`hv`/`iv5` are populated only by the Webull source; Yahoo leaves them null. |
+| `Margin` | Always when an opener-style score exists | Broker margin per contract and total. Short verticals and iron spreads collateralize full capital-at-risk. Standard calendars and covered diagonals show `$0` (the debit is cash, not collateral). Inverted diagonals charge `(strike_gap + debit) × 100` per contract. |
+| `Rationale` | Always when an opener-style score exists | Single-line trade summary: side ($credit/$debit), max profit / max loss, R/R ratio, premium ratio, break-evens, POP, EV. |
+| `Score` | Always when an opener-style score exists | The four-stage score chain — `raw → tech-adjusted → adjusted → final` — with the bias tag in the middle. See **Score chain** below for what each stage means. |
+| `Indicators` | When max-pain or stat-arb factors fired | Free-text breakdown: representative IV / HV richness, max-pain target, market-vs-theoretical edge per share. These feed the `vol`, `pain`, and `arb` factors below. |
+| `Factors` | Always when an opener-style score exists | The multiplicative chain that turns *tech-adjusted* into *adjusted*: `tech-adjusted × pop X × scale X × setup X × geom X × runway X × bal X × vol X × pain X × assign X × arb X = adjusted`. Only factors that apply to the structure are shown. |
+| `Result` | Always when an opener-style score exists | Final stage: `adjusted × theta factor X (θ/day on $risk) = final`. Theta factor is omitted on structures that don't earn theta. |
+
+### Reading the Rationale line
+
+```
+Rationale: debit $92.00, maxProfit $408.00, maxLoss $92.00, R/R 4.43, prem 1.00x, BE $24.92, POP 38.0%, EV $60.92
+```
+
+Every dollar figure is **per contract** (already multiplied by the 100-share multiplier). Quote conventions in the option chain are usually per share; the diagnostic converts everything to per-contract so it lines up with margin, EV, and ranking math.
+
+#### `debit / credit` — net entry cash flow
+
+The signed cash entry of the structure at the chosen pricing mode (`mid` by default, `bidask` if requested). `debit $92.00` means it costs you $92/contract to open; `credit $135.00` means you collect $135/contract upfront. Sign convention follows broker semantics — debit = cash out, credit = cash in.
+
+#### `maxProfit` / `maxLoss` — payoff envelope
+
+- **Defined-risk structures** (verticals, iron condors, butterflies): hard payoff bounds at expiry. Max profit = the credit (for credit spreads) or `width × 100 − debit` (for debit spreads); max loss = `width × 100 − credit` or the debit.
+- **Long single legs** (long call/put): `maxProfit` is approximated using the upper-σ end of the 5-point scenario grid since theoretical max is unbounded. `maxLoss = debit`.
+- **Calendars / diagonals**: `maxProfit` is the peak P&L found on a wide spot grid evaluated at the short leg's expiry (using BS for the residual long leg); `maxLoss = debit` (covered structures) or `(strike_gap + debit) × 100` (inverted diagonals).
+
+Both numbers are signed-then-displayed-positive — `maxLoss $92.00` means you can lose $92/contract, not −$92.
+
+#### `R/R` — reward-to-risk ratio
+
+```
+R/R = maxProfit / abs(maxLoss)
+```
+
+A unitless multiplier. Higher = more asymmetric payoff in your favor.
+
+| R/R | Meaning |
+|---|---|
+| `0.30` | Risk $1 to make $0.30 — typical for high-POP credit spreads sold near-the-money |
+| `1.00` | Symmetric payoff — risk equals reward |
+| `2.00` | Risk $1 to make $2 — typical for OTM debit spreads or moderate-delta long calls |
+| `4.43` | The example above — risk $92 to make up to $408 |
+
+R/R alone is misleading because high-R/R structures usually carry low POP (lottery tickets). The scoring engine combines R/R with POP and premium efficiency in the `bal` factor, which is why a 4× R/R doesn't automatically beat a 0.5× R/R in the final ranking.
+
+#### `prem` — premium ratio (long paid / short received)
+
+```
+premium_ratio = total_long_paid / total_short_received
+```
+
+How much you're paying out per dollar of short premium taken in. Computed across all legs at the chosen pricing mode.
+
+| Ratio | What it tells you |
+|---|---|
+| `< 1.0` | Net credit structure — you collect more than you pay (short verticals, iron condors). Always < 1 for these. |
+| `≈ 1.0` | Long and short premium roughly cancel — typical for at-the-money calendars and tight diagonals. |
+| `2.0` | You paid $2 for every $1 of short premium — front-month short doesn't fully fund the long. |
+| `3.0+` | Short provides limited cushion. The `premium_ratio_imbalanced` rule fires above 3× on debit structures. |
+| `n/a` | Single-leg structures (long call/put) have no shorts; ratio defaults to 1.0 and the `bal` factor treats it as neutral. |
+
+Lower premium ratio = the short leg is doing more work to defray the cost of the long, which means more downside cushion if the underlying goes the wrong way. The `bal` factor uses `1/√premium_ratio` so a 4× ratio cuts the score by ~50% relative to a 1× ratio.
+
+#### `BE` — break-even price(s) at the target expiry
+
+The underlying price(s) where P&L crosses zero at the target evaluation date.
+
+- **Single-strike directional** (long call, long put): one break-even — `strike + debit/100` for calls, `strike − debit/100` for puts.
+- **Verticals / iron spreads**: one or two break-evens where the payoff line crosses the credit/debit threshold.
+- **Calendars / diagonals**: two break-evens computed by bisection on the short-expiry P&L curve (long leg is BS-priced at residual time, short leg is intrinsic). Shown as `BE $X.XX/$Y.YY` — lower / upper bound of the profitable range.
+
+Compare BE to current spot to read cushion at a glance: if spot is $25.00 and `BE $24.92`, you have $0.08/share of room before the trade enters the loss zone.
+
+#### `POP` — probability of profit
+
+The probability that `S_T` lands in the profitable region at the target expiry under the **risk-neutral log-normal distribution** (`σ` = the IV used for pricing, `T` = years to target). Computed as `N(d2)` for "above" gates, `1 − N(d2)` for "below" gates, or as the integrated tail mass between break-evens for two-sided structures.
+
+`POP 38.0%` means: under the IV-implied distribution, there's a 38% chance the underlying settles in territory that gives this trade a positive P&L. Note the distribution uses risk-neutral drift (no expected return premium), so POP under-estimates real-world probability for bullish structures and over-estimates for bearish ones — useful for relative ranking, not as a literal forecast.
+
+The scoring engine doesn't use POP linearly — it uses `(POP / 0.50)⁴` capped at 1.25 (the `pop` factor) so trades below 50% POP get cut sharply and trades above 50% get a modest boost.
+
+#### `EV` — expected value at the target expiry
+
+```
+EV = Σ weight_i × pnl_at_expiry(S_T_i)
+```
+
+The expected P&L per contract, computed by integrating the structure's piecewise-linear payoff against a 5-point log-normal scenario grid (default `±1σ`, `±0.5σ`, `0σ`) weighted by the standard normal density. **EV is signed and already net of debit/credit** — it's the bottom-line number the model expects you to walk away with.
+
+**Worked example.** Suppose you opened a long call for $0.92/share (= $92/contract debit) and the panel shows `EV $60.92`:
+
+| Field | Value | Meaning |
+|---|---|---|
+| Per-contract debit | −$92.00 | Cash you put in |
+| EV at expiry | +$60.92 | Expected P&L on top of (or in spite of) the debit |
+| Expected exit value | $152.92 | What you'd recoup on average across the IV distribution |
+
+So the model says: across the spread of outcomes the IV implies, the average outcome leaves you up $60.92/contract. Roughly 38% of outcomes (`POP`) finish profitable; the *magnitude* of those wins outweighs the smaller-but-more-probable losing outcomes, which is why EV is positive despite POP being below 50%.
+
+What EV is *not*:
+- It is not your most-likely outcome — it's a probability-weighted average across all five grid points.
+- It is not a guarantee — the log-normal model misses skew, jumps, and earnings effects.
+- It is not directly comparable across structures with different `daysToTarget`. The `raw` score normalizes by dividing EV by both days and capital-at-risk.
+
+The scoring engine uses EV as the numerator of `raw` (`raw = EV / days / capital_at_risk`), which is why a $60.92 EV on $92 risk over 30 days produces a much higher raw score than the same $60.92 EV on $1000 risk over 90 days.
+
+### Score chain
+
+The opener pipeline produces four scores, each derived from the previous one. Higher is better; the final score is what the ranker uses for top-N selection per ticker.
+
+```
+raw  →  tech-adjusted  →  adjusted  →  final
+```
+
+#### 1. `raw` — payoff per dollar of risk per day
+
+```
+raw = EV / max(1, daysToTarget) / capitalAtRisk
+```
+
+`EV` is the expected value at the target expiry, computed by integrating the structure's piecewise-linear payoff against a 5-point log-normal scenario grid centered on spot at the IV-implied volatility. `capitalAtRisk` is the structure's broker margin requirement (covered structures use the debit; verticals/condors use width × 100 − credit). Returns 0 when `capitalAtRisk ≤ 0`.
+
+#### 2. `tech-adjusted` — directional bias from technicals
+
+```
+tech-adjusted = raw × (1 + α · bias · fit)
+```
+
+`bias` is the composite technical score in `[−1, 1]` from the same SMA/RSI/momentum signals used by the OpportunisticRoll filter. `fit` is `+1` for bullish-fit structures (long call, short put vertical), `−1` for bearish-fit (long put, short call vertical), `0` for neutral structures (calendars, condors, butterflies — these get *no* tech adjustment regardless of bias). `α` = `opener.directionalFitWeight`. When `fit = 0`, this stage is a no-op.
+
+#### 3. `adjusted` — multiplicative factor stack
+
+`tech-adjusted` is multiplied by every factor whose precondition is met. Each factor is documented below in the order the rationale prints them.
+
+| Factor | What it measures | How it's computed |
+|---|---|---|
+| `pop` | Probability of profit at target expiry | `clamp((POP / 0.50)⁴, 0.01, 1.25)`. POP = log-normal probability of `S_T` landing inside the profitable region. The 4th-power amplification means a 70% POP boosts ~1.7× over 50%, while 30% POP cuts to ~0.13×. |
+| `scale` | Capital efficiency vs absolute size | `clamp(√(risk / (risk + 100)), 0.35, 1)`. A self-normalizing curve: a $50 risk scores ~0.58, a $200 scores ~0.82, a $1000 scores ~0.95. Penalizes tiny-risk trades whose `raw` score is misleadingly inflated. |
+| `setup` | Spot position inside the breakeven band — *defined-range structures only* | For condors/butterflies/iron flies: combines an *edge factor* (√ of the safer breakeven distance over half-width) and a *center factor* (1 − offset²). Both clamp to `[0.10, 1]`. Returns `null` for directional structures (no penalty). |
+| `geom` | Diagonal "rent coverage" — *long diagonal / double diagonal only* | Per matched leg pair: `rentFactor = 0.55 + 0.45 × clamp(short_credit / long_debit, 0, 1.25)`, then a small `gapPenalty` for unusually wide strike gaps. Product across all pairs, clamped `[0.20, 1]`. Diagonals where the short pays more than the long extracts get the full 1.10 boost. |
+| `runway` | Long-leg adjustment runway after the target — *diagonals/calendars with longer-dated longs* | Average of (extrinsic ratio × residual-days ratio) across long legs, mapped to `clamp(1 + 0.18 × ratio, 1, 1.35)`. Rewards structures where the long leg has both meaningful time premium *and* meaningful days remaining after the short expires. |
+| `bal` | Payoff balance: R/R asymmetry vs premium efficiency | `clamp(√min(R/R, 3) / √max(1, premium_ratio), 0.25, 1.25)`. `R/R = max_profit / abs(max_loss)`; `premium_ratio = long_paid / short_received`. High R/R with thin debit → boost; low R/R with bloated debit → cut. Continuous, no thresholds. |
+| `vol` | IV/HV richness vs structure preference | `clamp(1 + weight × clamp(IV/HV − 1, −1, 1) × fit, ≥ 0.10, …)`. `fit = +1` for short-vol structures (short verticals, iron flies), `−1` for long-vol structures (long calls/puts, calendars, diagonals). Rewards short-premium structures when IV is rich vs realized; rewards long-premium structures when IV is cheap. |
+| `pain` | Max-pain alignment with the proposed strikes | `clamp(1 + maxPainWeight × signal, ≥ 0.10, …)`. Signal blends *breakeven-band coverage* (45%), *side-of-spot agreement* (35%), and *short-strike pinning* (20%) for neutral structures; for directional structures the signed distance from spot to max-pain × `fit` is used directly. |
+| `assign` | Assignment-risk discount for ITM-leaning short legs | Penalizes structures where the short leg sits dangerously close to or past spot given the strike step and current technical bias. |
+| `arb` | Stat-arb edge: market mid vs Black-Scholes theoretical | `clamp(1 + statArbWeight × clamp(edge / gross, −1, 1), ≥ 0.10, …)`. `edge = theoretical_net − market_net`, `gross = theo_long + theo_short`. Positive edge means the market entry is favorable to whoever opens the structure (paid less than fair on a debit, received more than fair on a credit). Same sign for both directions because the signed-net difference encodes direction inherently. |
+
+The `Factors` line in the panel prints only the factors that fired for this structure — single-leg long calls, for example, will not show `geom` or `setup`.
+
+#### 4. `final` — theta carry
+
+```
+final = adjusted × thetaFactor(theta_per_day, capital_at_risk)
+       = adjusted × (1 + clamp(theta / risk × 1.5, 0, 0.25))
+```
+
+Adds up to a +25% boost when net theta is positive and large relative to capital at risk. Long-vol structures (theta ≤ 0) get a flat 1.0 here. The ranker sorts by `final` descending, then `adjusted`, then `theta_per_day`, then prefers earlier-expiry calendars/diagonals.
+
+### Risk rules (the `Rules fired` block)
+
+Ten rules run unconditionally against `RiskDiagnosticFacts`; only those that match attach to the diagnostic. Rules are informational — they do *not* change the score. They surface concerns or geometry observations a human reviewer should know about before acting on the structure.
+
+| Rule ID | Triggers when | What it tells you |
+|---|---|---|
+| `short_leg_low_extrinsic` | Short leg has `DTE ≤ 2` **and** `extrinsic < $0.30` | Little harvestable theta remains — the short can't deliver meaningful decay before expiry. |
+| `directional_exposure` | `abs(net_delta) > 0.25` per contract | Position carries material directional risk; AI consumers correlate with `DirectionalBias` to judge intent fit. The message includes the implied $/contract per $1 underlying move. |
+| `premium_ratio_imbalanced` | Net debit structure **and** `long_paid / short_received > 3×` | Short leg provides limited cushion — most of the cash outlay is on the long side, which decays faster than the short can offset. |
+| `geometry_bullish_covered_diagonal` | Structure is `covered_diagonal` with bullish bias | Informational: gains on rally, loses on drop. Adds `trend_aligned` (1 if 5-day move agrees with the bullish bias, 0 otherwise). |
+| `geometry_bearish_inverted_diagonal` | Structure is `inverted_diagonal` with bearish bias | Informational: gains on drop, loses on rally. Adds `trend_aligned` (1 if 5-day move agrees with the bearish bias, 0 otherwise). |
+| `short_expires_before_long` | At least one short leg expires *strictly before* the latest long leg | After the short expires you hold a naked long with `net_delta_post_short` residual delta (re-evaluated at long_DTE − short_DTE remaining time). |
+| `vega_adverse` | `net_vega < −$5` per contract per IV point | Position loses on IV expansion — typically short calendars / short iron spreads. |
+| `directional_mismatch_near_term` | Trend available, bias non-neutral, **and** 5-day move > 3% against the bias | Bias runs against the recent 5-day trend; delta exposure is fighting the tape. |
+| `directional_mismatch_today` | Trend available, intraday non-null, `abs(net_delta) > 0.25`, **and** intraday move > 1% against the delta sign | Entered against today's direction — useful for "should I wait?" decisions before submitting. |
+| `high_realized_vol` | ATR(14) % > 4% of spot | Underlying is moving more than usual — position is exposed to larger-than-typical adverse swings. |
+
+Each fired rule renders as a colored bullet with its ID and an interpolated message that includes the actual measured values. The same `Inputs` dictionary is serialized to the JSONL log, making historical rule-fires queryable with `jq`.
+
+### How to read the panel
+
+1. **Read `Structure` and `Premium` first** — confirm the classification and net cash match what you intended to enter.
+2. **Check `Greeks`** — does the directional/theta/vega exposure match your thesis?
+3. **Read the `Rules fired` block** — these are concerns the system flagged; address them or accept them consciously.
+4. **Walk the `Score` chain** — `raw` tells you the unbiased payoff/risk/day; the `Factors` line shows which structural properties helped or hurt; `final` is what the ranker uses.
+5. **For execution decisions**, the `Margin` and `Result` lines give you the broker-collateral and theta-carry numbers needed to size the trade against available cash.
 
 ## Position Tracking Details
 

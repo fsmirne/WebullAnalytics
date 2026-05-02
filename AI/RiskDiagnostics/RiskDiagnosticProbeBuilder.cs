@@ -16,7 +16,8 @@ internal static class RiskDiagnosticProbeBuilder
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes,
 		(decimal bias, OpenerConfig cfg, string structure, int qty, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore, decimal? thetaPerDayPerContract, decimal? finalScore)? opener = null,
 		decimal? technicalBiasOverride = null,
-		bool useCostBasisForOpenerScore = false)
+		bool useCostBasisForOpenerScore = false,
+		decimal? historicalVolAnnual = null)
 	{
 		var legQuotes = new List<RiskDiagnosticLegQuote>();
 		if (quotes != null)
@@ -122,7 +123,7 @@ internal static class RiskDiagnosticProbeBuilder
 
 				if (skel != null)
 				{
-					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener);
+					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual);
 					if (scored != null)
 					{
 						var rationale = CandidateScorer.BuildRationale(scored, bias, ai.Opener);

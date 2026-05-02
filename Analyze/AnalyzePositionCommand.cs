@@ -169,6 +169,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (!string.IsNullOrEmpty(tickerForTrend))
 			trendSnap = await TrendFetcher.FetchAsync(tickerForTrend, asOfForDiagnostic, cancellation);
 
+		var historicalVolAnnual = await TryComputeHistoricalVolAsync(tickerForTrend, asOfForDiagnostic, cancellation);
+
 		var diagnostic = BuildAndLogDiagnostic(
 			logPath: Program.ResolvePath("data/analyze-position.jsonl"),
 			ticker: tickerForTrend ?? "UNKNOWN",
@@ -187,7 +189,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			},
 			trend: trendSnap,
 			quotesForProbe: quotes,
-			technicalBiasForProbe: technicalBias);
+			technicalBiasForProbe: technicalBias,
+			historicalVolAnnual: historicalVolAnnual);
 
 		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias);
 
@@ -273,6 +276,32 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		catch
 		{
 			return 0m;
+		}
+	}
+
+	/// <summary>Mirrors OpenCandidateEvaluator's HV pull so analyze position scores get the same vol-fit
+	/// factor as the live opener pipeline. Returns null when the config, lookback, or cache is missing —
+	/// the scorer treats that as "skip the vol factor".</summary>
+	private static async Task<decimal?> TryComputeHistoricalVolAsync(string? ticker, DateTime asOf, CancellationToken cancellation)
+	{
+		if (string.IsNullOrEmpty(ticker)) return null;
+		try
+		{
+			var path = Program.ResolvePath(AIConfigLoader.ConfigPath);
+			if (!File.Exists(path)) return null;
+			var cfg = System.Text.Json.JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(path));
+			if (cfg == null) return null;
+			if (AIConfigLoader.Validate(cfg) != null) return null;
+			if (cfg.Opener.VolatilityFitWeight <= 0m) return null;
+
+			var cache = new HistoricalPriceCache();
+			var closes = await cache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
+			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+			return hv is decimal v && v > 0m ? v : null;
+		}
+		catch
+		{
+			return null;
 		}
 	}
 
@@ -1472,7 +1501,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		Func<string, decimal> legPriceResolver,
 		TrendSnapshot? trend,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotesForProbe = null,
-		decimal technicalBiasForProbe = 0m)
+		decimal technicalBiasForProbe = 0m,
+		decimal? historicalVolAnnual = null)
 	{
 		var diagLegs = legs.Select(l => new DiagnosticLeg(
 			Symbol: l.Symbol,
@@ -1483,7 +1513,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			CostBasisPerShare: l.CostBasis)).ToList();
 
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual);
 		diagnostic = diagnostic with { Probe = probe };
 
 		Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
