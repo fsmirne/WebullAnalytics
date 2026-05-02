@@ -508,8 +508,11 @@ internal static class AnalyzeCommon
 
 		// Build price grid: roll credit at various underlying prices
 		var strike = oldParsed.Strike;
-		// Use fine-grained steps for roll credit analysis (10x finer than break-even grid)
-		var step = OptionMath.GetPriceStep(strike) / settings.Range / 5m;
+		// Use fine-grained steps for roll credit analysis (10x finer than break-even grid).
+		// Range == 0 means "auto" in the break-even grid (post-44adc43); the roll command keeps a fixed
+		// granularity, so treat 0 as the prior default of 2 to avoid a divide-by-zero.
+		var rangeFactor = settings.Range > 0 ? settings.Range : 2m;
+		var step = OptionMath.GetPriceStep(strike) / rangeFactor / 5m;
 		var padding = step * 10;
 		// Center on current price if available, otherwise on strike
 		var center = Math.Abs(spot - strike) < padding ? spot : strike;
