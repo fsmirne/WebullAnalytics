@@ -17,7 +17,8 @@ internal static class RiskDiagnosticProbeBuilder
 		(decimal bias, OpenerConfig cfg, string structure, int qty, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore, decimal? thetaPerDayPerContract, decimal? finalScore)? opener = null,
 		decimal? technicalBiasOverride = null,
 		bool useCostBasisForOpenerScore = false,
-		decimal? historicalVolAnnual = null)
+		decimal? historicalVolAnnual = null,
+		bool useMarketImpliedIv = true)
 	{
 		var legQuotes = new List<RiskDiagnosticLegQuote>();
 		if (quotes != null)
@@ -127,7 +128,7 @@ internal static class RiskDiagnosticProbeBuilder
 					// already opened (or are explicitly modeling), so the hard liquidity gate must
 					// not silently reject them. The liq factor and rules still surface, so a poorly-
 					// liquid existing position is still flagged in the panel.
-					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false);
+					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false, useMarketImpliedIv: useMarketImpliedIv);
 					if (scored != null)
 					{
 						// When cost-basis override is in play, the scorer's view of bid/ask is collapsed
