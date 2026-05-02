@@ -209,12 +209,13 @@ internal static class CandidateScorer
 		return true;
 	}
 
-	/// <summary>Worst-leg bid/ask spread (as fraction of mid), minimum absolute OI across legs, and
-	/// minimum *relative* OI — each leg's OI as a fraction of the maximum OI among same-expiry strikes
-	/// within ±10% of spot. Relative OI auto-detects "sub-grid" strikes (e.g., GME's $0.50 increments
-	/// for far-dated expiries) without ticker-specific config: a strike whose OI is far below its
-	/// neighbors is empirically a thinly-traded slot regardless of the chain's nominal step. Pass
-	/// <paramref name="spot"/> = null to skip the relative-OI computation.</summary>
+	/// <summary>Worst-leg bid/ask spread (as fraction of mid), minimum effective liquidity across legs,
+	/// and minimum *relative* liquidity — each leg's effective liquidity as a fraction of the maximum
+	/// among same-expiry strikes within ±10% of spot. "Effective liquidity" is <c>max(OI, volume)</c>:
+	/// a contract with low OI but high intraday volume is being actively traded, which means market
+	/// makers are engaged and exit liquidity is real even if the standing book is thin. Volume falls
+	/// back to OI alone outside market hours (volume = 0 / null). Pass <paramref name="spot"/> = null
+	/// to skip the relative computation.</summary>
 	public static (decimal? worstSpreadPct, long? minOi, decimal? minRelOi) ComputeLegLiquidityStats(IEnumerable<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot)
 	{
 		decimal? worstSpread = null;
@@ -233,18 +234,19 @@ internal static class CandidateScorer
 						worstSpread = spreadPct;
 				}
 			}
-			if (q.OpenInterest.HasValue && (minOi == null || q.OpenInterest.Value < minOi.Value))
-				minOi = q.OpenInterest.Value;
+			var legLiq = EffectiveLiquidity(q);
+			if (legLiq.HasValue && (minOi == null || legLiq.Value < minOi.Value))
+				minOi = legLiq.Value;
 
-			if (spot.HasValue && spot.Value > 0m && q.OpenInterest.HasValue && q.OpenInterest.Value > 0)
+			if (spot.HasValue && spot.Value > 0m && legLiq.HasValue && legLiq.Value > 0)
 			{
 				var legParsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
 				if (legParsed != null)
 				{
-					var nearbyMaxOi = FindMaxOiNearStrike(legParsed, quotes, spot.Value);
-					if (nearbyMaxOi > 0)
+					var nearbyMax = FindMaxLiquidityNearStrike(legParsed, quotes, spot.Value);
+					if (nearbyMax > 0)
 					{
-						var ratio = (decimal)q.OpenInterest.Value / nearbyMaxOi;
+						var ratio = (decimal)legLiq.Value / nearbyMax;
 						if (minRel == null || ratio < minRel.Value)
 							minRel = ratio;
 					}
@@ -254,23 +256,37 @@ internal static class CandidateScorer
 		return (worstSpread, minOi, minRel);
 	}
 
-	/// <summary>Maximum OI across same-expiry, same-call/put strikes within ±10% of spot. Used to detect
-	/// sub-grid strikes by comparing a leg's OI to the local maximum.</summary>
-	private static long FindMaxOiNearStrike(OptionParsed leg, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot)
+	/// <summary>Combined OI/volume liquidity proxy: <c>max(OI, volume)</c>. Volume captures contracts
+	/// that may have low standing OI but are being actively traded today (market makers engaged,
+	/// real exit demand). OI captures stable holders. The max gives credit to either signal —
+	/// after-hours when volume is null/zero this collapses to OI alone.</summary>
+	private static long? EffectiveLiquidity(OptionContractQuote q)
 	{
-		long maxOi = 0;
+		var oi = q.OpenInterest ?? -1;
+		var vol = q.Volume ?? -1;
+		if (oi < 0 && vol < 0) return null;
+		return Math.Max(Math.Max(oi, 0), Math.Max(vol, 0));
+	}
+
+	/// <summary>Maximum effective liquidity (max OI/volume) across same-expiry, same-call/put strikes
+	/// within ±10% of spot. Used to detect sub-grid strikes by comparing a leg's liquidity to the
+	/// local maximum.</summary>
+	private static long FindMaxLiquidityNearStrike(OptionParsed leg, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot)
+	{
+		long maxLiq = 0;
 		foreach (var (sym, q) in quotes)
 		{
-			if (!q.OpenInterest.HasValue || q.OpenInterest.Value <= maxOi) continue;
+			var liq = EffectiveLiquidity(q);
+			if (!liq.HasValue || liq.Value <= maxLiq) continue;
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null) continue;
 			if (!p.Root.Equals(leg.Root, StringComparison.OrdinalIgnoreCase)) continue;
 			if (p.ExpiryDate.Date != leg.ExpiryDate.Date) continue;
 			if (p.CallPut != leg.CallPut) continue;
 			if (Math.Abs(p.Strike - spot) / spot > 0.10m) continue;
-			maxOi = q.OpenInterest.Value;
+			maxLiq = liq.Value;
 		}
-		return maxOi;
+		return maxLiq;
 	}
 
 	/// <summary>Worst-leg liquidity penalty. Combines three signals into a multiplicative factor in
@@ -643,9 +659,9 @@ internal static class CandidateScorer
 		if (p.LiquidityAdjustmentFactor.HasValue)
 		{
 			var spreadStr = p.WorstLegBidAskSpreadPct is decimal s ? $"{(s * 100m).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}%" : "n/a";
-			var oiStr = p.MinOpenInterest.HasValue ? p.MinOpenInterest.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "n/a";
-			var relOiStr = p.MinRelativeOpenInterest is decimal rel ? $"{(rel * 100m).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}%" : "n/a";
-			indicatorParts.Add($"worst-leg spread {spreadStr}, min OI {oiStr} (rel {relOiStr}) → liq {p.LiquidityAdjustmentFactor.Value:F2}");
+			var liqStr = p.MinOpenInterest.HasValue ? p.MinOpenInterest.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "n/a";
+			var relStr = p.MinRelativeOpenInterest is decimal rel ? $"{(rel * 100m).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}%" : "n/a";
+			indicatorParts.Add($"worst-leg spread {spreadStr}, min OI/vol {liqStr} (rel {relStr}) → liq {p.LiquidityAdjustmentFactor.Value:F2}");
 		}
 		string? volDetail = null;
 		if (p.VolatilityAdjustmentFactor.HasValue && p.ImpliedVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.Value > 0m)
