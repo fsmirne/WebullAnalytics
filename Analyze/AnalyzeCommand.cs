@@ -633,8 +633,8 @@ internal static class AnalyzeCommon
 		// Always include the strike, current price, and notable prices
 		prices.Add(strike);
 		if (spot >= minPrice && spot <= maxPrice) prices.Add(Math.Round(spot, 2));
-		if (settings.NotablePrices != null)
-			foreach (var pair in ReportCommand.ParseNotablePrices(settings.NotablePrices))
+		if (settings.Levels != null)
+			foreach (var pair in ReportCommand.ParseLevels(settings.Levels))
 				if (pair.Key.Equals(oldParsed.Root, StringComparison.OrdinalIgnoreCase))
 					foreach (var np in pair.Value)
 						if (np >= minPrice && np <= maxPrice) prices.Add(np);
