@@ -176,7 +176,7 @@ public static class CombinedBreakEvenAnalyzer
 		var strikes = optionLegs.Select(l => l.Parsed!.Strike).Distinct().OrderBy(x => x).ToList();
 		var notablePrices = new List<decimal>(strikes);
 		if (spot.HasValue) notablePrices.Add(spot.Value);
-		notablePrices.AddRange(LookupExtraNotablePrices(ticker, opts));
+		notablePrices.AddRange(LookupExtraLevels(ticker, opts));
 		if (notablePrices.Count == 0 && stockLeg != null) notablePrices.Add(stockLeg.Price);
 		if (notablePrices.Count == 0) return null;
 
@@ -223,7 +223,7 @@ public static class CombinedBreakEvenAnalyzer
 		{
 			var gridExtras = new List<decimal>();
 			if (spot.HasValue) gridExtras.Add(spot.Value);
-			gridExtras.AddRange(LookupExtraNotablePrices(ticker, opts));
+			gridExtras.AddRange(LookupExtraLevels(ticker, opts));
 			var build = (int maxCols) => TimeDecayGridBuilder.Build(merged, netPremium, normalizingQty, nearestExpiry.Value, opts, padding, centerPrice, breakEvens, maxCols, spot, gridExtras);
 			if (forcedMaxGridColumns.HasValue)
 			{
@@ -374,9 +374,9 @@ public static class CombinedBreakEvenAnalyzer
 		return null;
 	}
 
-	private static List<decimal> LookupExtraNotablePrices(string ticker, AnalysisOptions opts)
+	private static List<decimal> LookupExtraLevels(string ticker, AnalysisOptions opts)
 	{
-		if (opts.ExtraNotablePrices != null && opts.ExtraNotablePrices.TryGetValue(ticker, out var prices))
+		if (opts.ExtraLevels != null && opts.ExtraLevels.TryGetValue(ticker, out var prices))
 			return prices;
 		return [];
 	}

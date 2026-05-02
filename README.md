@@ -148,7 +148,7 @@ wa report --api yahoo --spot GME:24.88,SPY:580.50
 wa report --api yahoo --theoretical
 
 # Add custom notable prices to break-even reports (e.g., support/resistance levels)
-wa report --notable-prices GME:20/25/30
+wa report --levels GME:20/25/30
 
 # Show only specific tickers in the report
 wa report --tickers GME,SPY
@@ -172,7 +172,7 @@ Options:
   --grid <layout>           Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg values '1.23|0.45|$0.78')
   --spot <prices>           Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
   --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
-  --notable-prices <prices> Additional prices to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
+  --levels <prices>         Additional reference price levels (support/resistance, targets) to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
   --tickers <list>          Show only these tickers in the report. Comma-separated (e.g., GME,SPY,AAPL)
   --help, -h                Show help message
 ```
@@ -297,7 +297,7 @@ If you pass `--cash <amount>`, a funding-check block is printed after the margin
 - **Required** = BP delta.
 - **Net** = Available − Required. A positive value means the roll is fundable; a negative value means you're short that amount in free BP to execute.
 
-Notable prices from `--notable-prices` are included as additional rows in the grid.
+Reference levels from `--levels` are included as additional rows in the grid.
 
 #### `analyze risk`
 
@@ -788,7 +788,7 @@ An optional `data/config.json` file provides default values for command-line opt
     "display": "value",
     "grid": "simple",
     "theoretical": false,
-    "notablePrices": null,
+    "levels": null,
     "tickers": null
   },
   "sniff": {
