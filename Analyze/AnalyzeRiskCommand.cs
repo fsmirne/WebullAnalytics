@@ -176,8 +176,10 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			PricePerShare: ResolveLegMark(l.Symbol),
 			CostBasisPerShare: l.CostBasis)).ToList();
 
+		var historicalVolAnnual = await TryComputeHistoricalVolAsync(ticker, asOf, cancellation);
+
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, trend);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: true);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual);
 		diagnostic = diagnostic with { Probe = probe };
 
 		var logPath = Program.ResolvePath("data/analyze-risk.jsonl");
@@ -238,6 +240,31 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		catch
 		{
 			return 0m;
+		}
+	}
+
+	/// <summary>Mirrors OpenCandidateEvaluator's HV pull so analyze risk scores get the same vol-fit
+	/// factor as the live opener pipeline. Returns null when the config, lookback, or cache is missing —
+	/// the scorer treats that as "skip the vol factor".</summary>
+	private static async Task<decimal?> TryComputeHistoricalVolAsync(string ticker, DateTime asOf, CancellationToken cancellation)
+	{
+		try
+		{
+			var path = Program.ResolvePath(AIConfigLoader.ConfigPath);
+			if (!File.Exists(path)) return null;
+			var cfg = System.Text.Json.JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(path));
+			if (cfg == null) return null;
+			if (AIConfigLoader.Validate(cfg) != null) return null;
+			if (cfg.Opener.VolatilityFitWeight <= 0m) return null;
+
+			var cache = new HistoricalPriceCache();
+			var closes = await cache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
+			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+			return hv is decimal v && v > 0m ? v : null;
+		}
+		catch
+		{
+			return null;
 		}
 	}
 
