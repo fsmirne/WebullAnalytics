@@ -142,7 +142,7 @@ wa report --api yahoo --grid verbose
 wa report --api yahoo --range 4
 
 # Override the current underlying price (for "what-if" evaluation)
-wa report --api yahoo --ticker-price GME:24.88,SPY:580.50
+wa report --api yahoo --spot GME:24.88,SPY:580.50
 
 # Use Black-Scholes theoretical prices instead of market mid for today's grid column
 wa report --api yahoo --theoretical
@@ -170,7 +170,7 @@ Options:
   --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --grid <layout>           Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg values '1.23|0.45|$0.78')
-  --ticker-price <prices>   Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
+  --spot <prices>           Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
   --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
   --notable-prices <prices> Additional prices to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
   --tickers <list>          Show only these tickers in the report. Comma-separated (e.g., GME,SPY,AAPL)
@@ -229,7 +229,7 @@ wa analyze trade "sell:GME260501P00022000:455@0.25"
 wa analyze trade "buy:GME260417C00023000:300@0.38" --date 2026-04-11
 
 # Combine with report options (output to text, override underlying price)
-wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --ticker-price GME:23.20
+wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --spot GME:23.20
 ```
 
 When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the configured API source (`--api webull` or `--api yahoo`) before building the hypothetical trades. The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
@@ -304,7 +304,7 @@ Notable prices from `--notable-prices` are included as additional rows in the gr
 Evaluates an option structure with current market quotes and prints the same structured risk diagnostics used by the AI pipeline.
 
 ```
-wa analyze risk "<spec>" [--iv-default <pct>] [--ticker-price <TICKER:PRICE>] [--date <YYYY-MM-DD>] [report options]
+wa analyze risk "<spec>" [--iv-default <pct>] [--spot <TICKER:PRICE>] [--date <YYYY-MM-DD>] [report options]
 ```
 
 The `<spec>` format is:
@@ -328,7 +328,7 @@ wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000" --api yahoo
 wa analyze risk "sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12" --api yahoo
 
 # Supply spot manually instead of fetching an underlying quote
-wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000" --api yahoo --ticker-price GME:24.88
+wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000" --api yahoo --spot GME:24.88
 ```
 
 The command appends a machine-readable record to `data/analyze-risk.jsonl` after each run.
@@ -359,7 +359,7 @@ wa analyze position --api yahoo --account test1
 wa analyze position "sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499@1.11" --api yahoo --cash 23015
 
 # Analyze a single long call with a custom scenario strike step
-wa analyze position "buy:GME260620C00025000:10@1.25" --api yahoo --strike-step 0.50 --ticker-price GME:24.88
+wa analyze position "buy:GME260620C00025000:10@1.25" --api yahoo --strike-step 0.50 --spot GME:24.88
 ```
 
 The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa analyze trade` reproduction commands, and appends a machine-readable record to `data/analyze-position.jsonl`.
@@ -916,7 +916,7 @@ Every row is per-contract unless explicitly noted. "Per share" means $1 of under
 | `Greeks` | Δ, θ/day, ν per IV-point — all per contract | Δ and ν use Black-Scholes closed-form. θ uses a 1-day finite difference (BS today − BS tomorrow) so it correctly captures weekend decay. Each leg's per-share value is signed (long = +, short = −), summed × Qty × 100 for θ/ν, and divided by reference Qty so the result is *per contract*. |
 | `DTE` | Earliest short-leg DTE, latest long-leg DTE, gap days | Calendar-day differences from `asOf.Date` (or the `--date` override). |
 | `Premium` | Market view (long / short / ratio / net) and theoretical view side-by-side when both are available; otherwise the cost-basis or current-mid view alone | **Market** uses each leg's bid/ask midpoint. **Theoretical** prices each leg via Black-Scholes at its quoted IV. **Cost-basis** view uses each leg's entry price (manage pipeline). The `ratio` is `long_paid / short_received`. Net is signed: positive = debit, negative = credit. |
-| `Spot` | Current underlying price, whether the short leg is OTM, and short-leg extrinsic value | Spot comes from `--ticker-price`, the API, or the bootstrap chain quote. **Short OTM** is true when *every* short leg is OTM (call: spot ≤ strike; put: spot ≥ strike). **Short extrinsic** is `min(short_mid − intrinsic)` across short legs. |
+| `Spot` | Current underlying price, whether the short leg is OTM, and short-leg extrinsic value | Spot comes from `--spot`, the API, or the bootstrap chain quote. **Short OTM** is true when *every* short leg is OTM (call: spot ≤ strike; put: spot ≥ strike). **Short extrinsic** is `min(short_mid − intrinsic)` across short legs. |
 | `Trend` | 5-day %, 20-day %, optional intraday %, ATR(14) % | `TrendFetcher.FetchAsync` pulls daily closes from the historical price cache. ATR(14) is the 14-day average true range as a percentage of spot. The intraday cell is omitted outside market hours. The line is omitted entirely if no historical data is available. |
 | `P&L` | Cost / now / signed pnl/share — **manage pipeline only** | Only emitted when *every* leg has both a `CostBasisPerShare` (entry price) and a current `PricePerShare` (mark). `pnl = current_value − cost_basis`, where each is the signed leg sum. Open candidates have no cost basis and skip this row. |
 

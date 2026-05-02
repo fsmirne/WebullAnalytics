@@ -70,9 +70,9 @@ class ReportSettings : CommandSettings
 
 	public bool ShowLegs => Grid.Equals("verbose", StringComparison.OrdinalIgnoreCase);
 
-	[Description("Override underlying price(s). Format: TICKER:PRICE (e.g., GME:24.88). Comma-separated for multiple tickers (e.g., GME:24.88,SPY:580.50)")]
-	[CommandOption("--ticker-price")]
-	public string? TickerPrice { get; set; }
+	[Description("Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88). Comma-separated for multiple tickers (e.g., GME:24.88,SPY:580.50)")]
+	[CommandOption("--spot")]
+	public string? Spot { get; set; }
 
 	[Description("Use Black-Scholes theoretical price instead of market mid for today's option value in the time-decay grid")]
 	[CommandOption("--theoretical")]
@@ -110,7 +110,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("range") && cfg.TryGetDecimal("range", out var range)) Range = range;
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
 		if (!Program.HasCliOption("grid") && cfg.TryGetString("grid", out var grid)) Grid = grid;
-		if (!Program.HasCliOption("ticker-price") && cfg.TryGetString("tickerPrice", out var cup)) TickerPrice = cup;
+		if (!Program.HasCliOption("spot") && cfg.TryGetString("spot", out var cup)) Spot = cup;
 		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
 		if (!Program.HasCliOption("notable-prices") && cfg.TryGetString("notablePrices", out var notablePrices)) NotablePrices = notablePrices;
 		if (!Program.HasCliOption("tickers") && cfg.TryGetString("tickers", out var tickers)) Tickers = tickers;
@@ -153,13 +153,13 @@ class ReportSettings : CommandSettings
 		if (Api != null && Api.ToLowerInvariant() is not ("yahoo" or "webull"))
 			return ValidationResult.Error("--api must be 'yahoo' or 'webull'");
 
-		if (TickerPrice != null)
+		if (Spot != null)
 		{
-			foreach (var pair in TickerPrice.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			foreach (var pair in Spot.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 			{
 				var parts = pair.Split(':', 2);
 				if (parts.Length != 2 || !decimal.TryParse(parts[1].Trim(), NumberStyles.Number, CultureInfo.InvariantCulture, out _))
-					return ValidationResult.Error($"--ticker-price: invalid entry '{pair}'. Expected format: TICKER:PRICE (e.g., GME:24.88)");
+					return ValidationResult.Error($"--spot: invalid entry '{pair}'. Expected format: TICKER:PRICE (e.g., GME:24.88)");
 			}
 		}
 
@@ -314,9 +314,9 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		}
 
 		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null;
-		if (settings.TickerPrice != null)
+		if (settings.Spot != null)
 		{
-			var overrides = ParseUnderlyingPriceOverrides(settings.TickerPrice);
+			var overrides = ParseUnderlyingPriceOverrides(settings.Spot);
 			if (overrides.Count > 0)
 				underlyingPriceOverrides = overrides;
 		}
