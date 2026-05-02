@@ -281,11 +281,12 @@ internal static class RiskDiagnosticBuilder
 		return ("unknown", "neutral");
 	}
 
-	/// <summary>Per-leg bid/ask spread as a fraction of mid; absolute OI per leg; relative OI per leg
-	/// (leg.OI / max OI among same-expiry strikes within ±10% of spot). Returns the worst spread, the
-	/// minimum absolute OI, and the minimum relative OI across legs. Worst-leg gates exit — if any
-	/// leg is illiquid the whole structure is expensive to close. Values are null when quotes are
-	/// unavailable.</summary>
+	/// <summary>Per-leg bid/ask spread as a fraction of mid; minimum effective liquidity per leg
+	/// (max of OI and intraday volume); relative liquidity per leg (leg's effective liquidity / max
+	/// among same-expiry strikes within ±10% of spot). Returns the worst spread, minimum absolute
+	/// effective liquidity, and minimum relative liquidity across legs. "Effective liquidity" credits
+	/// either standing OI or active volume — a low-OI contract trading 500 lots today is more
+	/// exit-friendly than its OI alone suggests. Values null when quotes are unavailable.</summary>
 	private static (decimal? worstSpreadPct, long? minOi, decimal? minRelOi) ComputeLiquidityStats(
 		IReadOnlyList<DiagnosticLeg> legs,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes,
@@ -311,15 +312,16 @@ internal static class RiskDiagnosticBuilder
 				}
 			}
 
-			if (q.OpenInterest.HasValue && (minOi == null || q.OpenInterest.Value < minOi.Value))
-				minOi = q.OpenInterest.Value;
+			var legLiq = EffectiveLiquidity(q);
+			if (legLiq.HasValue && (minOi == null || legLiq.Value < minOi.Value))
+				minOi = legLiq.Value;
 
-			if (spot > 0m && q.OpenInterest.HasValue && q.OpenInterest.Value > 0)
+			if (spot > 0m && legLiq.HasValue && legLiq.Value > 0)
 			{
-				var nearbyMaxOi = FindMaxOiNearStrike(leg.Parsed, quotes, spot);
-				if (nearbyMaxOi > 0)
+				var nearbyMax = FindMaxLiquidityNearStrike(leg.Parsed, quotes, spot);
+				if (nearbyMax > 0)
 				{
-					var ratio = (decimal)q.OpenInterest.Value / nearbyMaxOi;
+					var ratio = (decimal)legLiq.Value / nearbyMax;
 					if (minRel == null || ratio < minRel.Value)
 						minRel = ratio;
 				}
@@ -328,22 +330,34 @@ internal static class RiskDiagnosticBuilder
 		return (worstSpread, minOi, minRel);
 	}
 
-	/// <summary>Maximum OI across same-expiry, same-call/put strikes within ±10% of spot. Used by
-	/// liquidity stats to compare a leg's OI to its local maximum (sub-grid detection).</summary>
-	private static long FindMaxOiNearStrike(OptionParsed leg, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot)
+	/// <summary>Combined OI/volume liquidity proxy: <c>max(OI, volume)</c>. Mirrors
+	/// CandidateScorer.EffectiveLiquidity; kept private here to avoid a public dependency.</summary>
+	private static long? EffectiveLiquidity(OptionContractQuote q)
 	{
-		long maxOi = 0;
+		var oi = q.OpenInterest ?? -1;
+		var vol = q.Volume ?? -1;
+		if (oi < 0 && vol < 0) return null;
+		return Math.Max(Math.Max(oi, 0), Math.Max(vol, 0));
+	}
+
+	/// <summary>Maximum effective liquidity (max OI/volume) across same-expiry, same-call/put strikes
+	/// within ±10% of spot. Used to detect sub-grid strikes by comparing a leg's liquidity to the
+	/// local maximum.</summary>
+	private static long FindMaxLiquidityNearStrike(OptionParsed leg, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot)
+	{
+		long maxLiq = 0;
 		foreach (var (sym, q) in quotes)
 		{
-			if (!q.OpenInterest.HasValue || q.OpenInterest.Value <= maxOi) continue;
+			var liq = EffectiveLiquidity(q);
+			if (!liq.HasValue || liq.Value <= maxLiq) continue;
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null) continue;
 			if (!p.Root.Equals(leg.Root, StringComparison.OrdinalIgnoreCase)) continue;
 			if (p.ExpiryDate.Date != leg.ExpiryDate.Date) continue;
 			if (p.CallPut != leg.CallPut) continue;
 			if (Math.Abs(p.Strike - spot) / spot > 0.10m) continue;
-			maxOi = q.OpenInterest.Value;
+			maxLiq = liq.Value;
 		}
-		return maxOi;
+		return maxLiq;
 	}
 }
