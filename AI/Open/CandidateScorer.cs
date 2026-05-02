@@ -590,13 +590,21 @@ internal static class CandidateScorer
 		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
 		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6} → final {finalScore:F6}";
 		var factorsLine = $"tech-adjusted × {string.Join(" × ", factorParts)} = adjusted {p.BiasAdjustedScore:F6}";
-		var indicatorsLine = string.Join("; ", indicatorParts);
 		var resultLine = p.ThetaPerDayPerContract.HasValue
 			? $"adjusted × theta factor {thetaFactor:F2} ({p.ThetaPerDayPerContract.Value:+0.00;-0.00}/day on ${p.CapitalAtRiskPerContract:F0} risk) = final {finalScore:F6}"
 			: $"adjusted = final {finalScore:F6}";
 
-		if (!string.IsNullOrEmpty(indicatorsLine))
-			return string.Join("\n", new[] { rationaleLine, scoreLine, indicatorsLine, factorsLine, resultLine });
+		// Indicator parts each get their own line so a 4+ indicator panel doesn't wrap. The renderer
+		// labels the first one "Indicators:" and gives subsequent ones an empty label so they align
+		// underneath as continuation rows.
+		if (indicatorParts.Count > 0)
+		{
+			var sections = new List<string> { rationaleLine, scoreLine };
+			sections.AddRange(indicatorParts);
+			sections.Add(factorsLine);
+			sections.Add(resultLine);
+			return string.Join("\n", sections);
+		}
 
 		return string.Join("\n", new[] { rationaleLine, scoreLine, factorsLine, resultLine });
 	}
