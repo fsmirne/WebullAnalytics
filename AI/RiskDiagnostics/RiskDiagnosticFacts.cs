@@ -23,4 +23,6 @@ internal readonly record struct RiskDiagnosticFacts(
 	decimal LongLegStrike,
 	decimal ShortLegStrike,
 	decimal NetDeltaPostShort,
-	TrendSnapshot? Trend);
+	TrendSnapshot? Trend,
+	decimal? WorstLegBidAskSpreadPct = null,
+	long? MinOpenInterest = null);

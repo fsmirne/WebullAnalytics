@@ -230,7 +230,8 @@ internal sealed class OpenCandidateEvaluator
 				ivResolver: sym => mergedQuotes.TryGetValue(sym, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m
 					? q.ImpliedVolatility.Value
 					: 0.40m,
-				trend: trend);
+				trend: trend,
+				quotes: mergedQuotes);
 
 			var openerScore = (
 				bias: ctx.TechnicalSignals.TryGetValue(p.Ticker, out var bs) ? (bs?.Score ?? 0m) : 0m,
