@@ -79,9 +79,9 @@ class ReportSettings : CommandSettings
 	[DefaultValue(false)]
 	public bool Theoretical { get; set; }
 
-	[Description("Additional prices to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)")]
-	[CommandOption("--notable-prices")]
-	public string? NotablePrices { get; set; }
+	[Description("Additional reference price levels (support/resistance, targets) to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)")]
+	[CommandOption("--levels")]
+	public string? Levels { get; set; }
 
 	[Description("Show only these tickers in the report. Comma-separated list (e.g., GME,SPY,AAPL)")]
 	[CommandOption("--tickers")]
@@ -112,7 +112,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("grid") && cfg.TryGetString("grid", out var grid)) Grid = grid;
 		if (!Program.HasCliOption("spot") && cfg.TryGetString("spot", out var cup)) Spot = cup;
 		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
-		if (!Program.HasCliOption("notable-prices") && cfg.TryGetString("notablePrices", out var notablePrices)) NotablePrices = notablePrices;
+		if (!Program.HasCliOption("levels") && cfg.TryGetString("levels", out var levels)) Levels = levels;
 		if (!Program.HasCliOption("tickers") && cfg.TryGetString("tickers", out var tickers)) Tickers = tickers;
 	}
 
@@ -163,17 +163,17 @@ class ReportSettings : CommandSettings
 			}
 		}
 
-		if (NotablePrices != null)
+		if (Levels != null)
 		{
-			foreach (var pair in NotablePrices.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			foreach (var pair in Levels.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 			{
 				var parts = pair.Split(':', 2);
 				if (parts.Length != 2)
-					return ValidationResult.Error($"--notable-prices: invalid entry '{pair}'. Expected format: TICKER:P1/P2/P3 (e.g., GME:20/25/30)");
+					return ValidationResult.Error($"--levels: invalid entry '{pair}'. Expected format: TICKER:P1/P2/P3 (e.g., GME:20/25/30)");
 				foreach (var priceStr in parts[1].Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 				{
 					if (!decimal.TryParse(priceStr, NumberStyles.Number, CultureInfo.InvariantCulture, out _))
-						return ValidationResult.Error($"--notable-prices: invalid price '{priceStr}' for ticker '{parts[0].Trim()}'. Prices must be numeric.");
+						return ValidationResult.Error($"--levels: invalid price '{priceStr}' for ticker '{parts[0].Trim()}'. Prices must be numeric.");
 				}
 			}
 		}
@@ -321,12 +321,12 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				underlyingPriceOverrides = overrides;
 		}
 
-		IReadOnlyDictionary<string, List<decimal>>? extraNotablePrices = null;
-		if (settings.NotablePrices != null)
+		IReadOnlyDictionary<string, List<decimal>>? extraLevels = null;
+		if (settings.Levels != null)
 		{
-			var parsed = ParseNotablePrices(settings.NotablePrices);
+			var parsed = ParseLevels(settings.Levels);
 			if (parsed.Count > 0)
-				extraNotablePrices = parsed;
+				extraLevels = parsed;
 		}
 
 		IReadOnlyDictionary<string, decimal>? ivOverrides = null;
@@ -337,7 +337,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				ivOverrides = parsed;
 		}
 
-		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraNotablePrices, ivOverrides);
+		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides);
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
 		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments, singleLegStandalones);
@@ -389,7 +389,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		return result;
 	}
 
-	internal static Dictionary<string, List<decimal>> ParseNotablePrices(string input)
+	internal static Dictionary<string, List<decimal>> ParseLevels(string input)
 	{
 		var result = new Dictionary<string, List<decimal>>(StringComparer.OrdinalIgnoreCase);
 		foreach (var pair in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))

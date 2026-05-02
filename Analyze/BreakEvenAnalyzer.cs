@@ -71,7 +71,7 @@ public static class BreakEvenAnalyzer
 
 		var step = OptionMath.GetPriceStep(avgPrice);
 		var notablePrices = new List<decimal> { avgPrice };
-		notablePrices.AddRange(LookupExtraNotablePrices(row.Instrument, opts));
+		notablePrices.AddRange(LookupExtraLevels(row.Instrument, opts));
 		Func<decimal, decimal> pnlFunc = s => isLong ? (s - avgPrice) * row.Qty : (avgPrice - s) * row.Qty;
 		var ladder = OptionMath.BuildPriceLadder(notablePrices, step, pnlFunc, (s, pnl) => null);
 		ladder.Reverse();
@@ -114,7 +114,7 @@ public static class BreakEvenAnalyzer
 		var spot = LookupUnderlyingPrice(parsed.Root, opts);
 		var notablePrices = new List<decimal> { strike, breakEven };
 		if (spot.HasValue) notablePrices.Add(spot.Value);
-		notablePrices.AddRange(LookupExtraNotablePrices(parsed.Root, opts));
+		notablePrices.AddRange(LookupExtraLevels(parsed.Root, opts));
 		var step = OptionMath.GetPriceStep(strike);
 		Func<decimal, decimal> pnlFunc = s => OptionMath.OptionPnLAtExpiration(s, strike, parsed.CallPut, row.Side, qty, premium);
 		Func<decimal, decimal, decimal?> valueAt = (s, pnl) => isLong ? (pnl / (qty * 100m)) + premium : premium - (pnl / (qty * 100m));
@@ -139,7 +139,7 @@ public static class BreakEvenAnalyzer
 			var gridBreakEvens = new List<decimal> { breakEven };
 			var gridExtras = new List<decimal>();
 			if (spot.HasValue) gridExtras.Add(spot.Value);
-			gridExtras.AddRange(LookupExtraNotablePrices(parsed.Root, opts));
+			gridExtras.AddRange(LookupExtraLevels(parsed.Root, opts));
 			var build = (int maxCols) => TimeDecayGridBuilder.Build(legsList, qty, row.Side, premium, parsed.ExpiryDate, opts, padding, strike, gridBreakEvens, maxCols, spot, gridExtras);
 			if (forcedMaxGridColumns.HasValue)
 			{
@@ -272,7 +272,7 @@ public static class BreakEvenAnalyzer
 		var notablePrices = new List<decimal>(strikes);
 		notablePrices.AddRange(breakEvens);
 		if (spot.HasValue) notablePrices.Add(spot.Value);
-		notablePrices.AddRange(LookupExtraNotablePrices(root, opts));
+		notablePrices.AddRange(LookupExtraLevels(root, opts));
 		var step = OptionMath.GetPriceStep(strikes.Average());
 
 		Func<decimal, decimal> pnlFunc;
@@ -310,7 +310,7 @@ public static class BreakEvenAnalyzer
 		{
 			var gridExtras = new List<decimal>();
 			if (spot.HasValue) gridExtras.Add(spot.Value);
-			gridExtras.AddRange(LookupExtraNotablePrices(root, opts));
+			gridExtras.AddRange(LookupExtraLevels(root, opts));
 			var build = (int maxCols) => TimeDecayGridBuilder.Build(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, opts, padding, strikes.Average(), breakEvens, maxCols, spot, gridExtras);
 			if (forcedMaxGridColumns.HasValue)
 			{
@@ -514,9 +514,9 @@ public static class BreakEvenAnalyzer
 		return null;
 	}
 
-	private static List<decimal> LookupExtraNotablePrices(string ticker, AnalysisOptions opts)
+	private static List<decimal> LookupExtraLevels(string ticker, AnalysisOptions opts)
 	{
-		if (opts.ExtraNotablePrices != null && opts.ExtraNotablePrices.TryGetValue(ticker, out var prices))
+		if (opts.ExtraLevels != null && opts.ExtraLevels.TryGetValue(ticker, out var prices))
 			return prices;
 		return [];
 	}

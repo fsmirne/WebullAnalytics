@@ -210,7 +210,7 @@ public record AnalysisOptions(
 	IReadOnlyDictionary<string, decimal>? UnderlyingPrices = null,
 	IReadOnlyDictionary<string, decimal>? UnderlyingPriceOverrides = null,
 	bool Theoretical = false,
-	IReadOnlyDictionary<string, List<decimal>>? ExtraNotablePrices = null,
+	IReadOnlyDictionary<string, List<decimal>>? ExtraLevels = null,
 	IReadOnlyDictionary<string, decimal>? IvOverrides = null
 );
 

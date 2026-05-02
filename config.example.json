@@ -15,7 +15,7 @@
 		"display": "value",
 		"grid": "simple",
 		"theoretical": false,
-		"notablePrices": null,
+		"levels": null,
 		"tickers": null
 	},
 	"sniff": {
