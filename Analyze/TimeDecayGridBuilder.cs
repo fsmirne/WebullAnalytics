@@ -11,11 +11,11 @@ internal static class TimeDecayGridBuilder
 	/// <summary>
 	/// Builds a 2D grid of option values across dates and underlying prices.
 	/// </summary>
-	internal static TimeDecayGrid Build(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty, Side parentSide, decimal netPremium, DateTime latestExpiry, AnalysisOptions opts, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns, decimal? underlyingPrice)
+	internal static TimeDecayGrid Build(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty, Side parentSide, decimal netPremium, DateTime latestExpiry, AnalysisOptions opts, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns, decimal? underlyingPrice, IReadOnlyList<decimal>? extraNotables = null)
 	{
 		var dates = BuildDateColumns(latestExpiry, maxColumns);
 		var strikes = legs.Select(l => l.parsed.Strike).Distinct().ToList();
-		var priceRows = BuildPriceRows(centerPrice, padding, breakEvens, strikes);
+		var priceRows = BuildPriceRows(centerPrice, padding, breakEvens, strikes, extraNotables);
 
 		var values = new decimal[priceRows.Count, dates.Count];
 		var pnls = new decimal[priceRows.Count, dates.Count];
@@ -118,14 +118,14 @@ internal static class TimeDecayGridBuilder
 	/// Cell P&L is derived from the rounded display value so that colors stay consistent with
 	/// what the user sees (matches the uniform-qty overload's behavior at rounded break-evens).
 	/// </summary>
-	internal static TimeDecayGrid Build(List<MergedLeg> mergedLegs, decimal netPremium, int normalizingQty, DateTime latestExpiry, AnalysisOptions opts, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns, decimal? underlyingPrice)
+	internal static TimeDecayGrid Build(List<MergedLeg> mergedLegs, decimal netPremium, int normalizingQty, DateTime latestExpiry, AnalysisOptions opts, decimal padding, decimal centerPrice, List<decimal> breakEvens, int maxColumns, decimal? underlyingPrice, IReadOnlyList<decimal>? extraNotables = null)
 	{
 		// Only option legs participate in the grid math; stock is a linear overlay added by the caller.
 		var optionLegs = mergedLegs.Where(l => !l.IsStock).ToList();
 
 		var dates = BuildDateColumns(latestExpiry, maxColumns);
 		var strikes = optionLegs.Select(l => l.Parsed!.Strike).Distinct().ToList();
-		var priceRows = BuildPriceRows(centerPrice, padding, breakEvens, strikes);
+		var priceRows = BuildPriceRows(centerPrice, padding, breakEvens, strikes, extraNotables);
 
 		var values = new decimal[priceRows.Count, dates.Count];
 		var pnls = new decimal[priceRows.Count, dates.Count];
@@ -306,13 +306,59 @@ internal static class TimeDecayGridBuilder
 		return result;
 	}
 
-	/// <summary>
-	/// Generates price rows for the grid, always including 2 padding rows beyond the outermost notable price.
-	/// </summary>
-	private static List<decimal> BuildPriceRows(decimal centerPrice, decimal granularity, List<decimal> breakEvens, List<decimal> strikes)
-	{
-		var notablePrices = breakEvens.Concat(strikes).Where(p => p > 0).Distinct().OrderBy(p => p).ToList();
+	private const int TargetRowsAuto = 20;
+	private const int PaddingRows = 2;
 
+	/// <summary>
+	/// Generates price rows for the grid. When <paramref name="granularity"/> is 0 (auto), the step is sized
+	/// so the total row count lands at <see cref="TargetRowsAuto"/> including <see cref="PaddingRows"/> on each
+	/// side and any extra notables (spot, user-provided highlights). When <paramref name="granularity"/> is
+	/// positive, the legacy referenceGap/granularity step is used. <paramref name="extraNotables"/> participates
+	/// in trim/highlight only — a spot near a strike must not shrink the step toward zero.
+	/// </summary>
+	private static List<decimal> BuildPriceRows(decimal centerPrice, decimal granularity, List<decimal> breakEvens, List<decimal> strikes, IReadOnlyList<decimal>? extraNotables = null)
+	{
+		var stepDriving = breakEvens.Concat(strikes).Where(p => p > 0).Distinct().OrderBy(p => p).ToList();
+		var notablePrices = stepDriving.Concat(extraNotables ?? Array.Empty<decimal>()).Where(p => p > 0).Distinct().OrderBy(p => p).ToList();
+		if (notablePrices.Count == 0)
+			notablePrices = [centerPrice];
+
+		var step = granularity > 0
+			? ComputeLegacyStep(centerPrice, granularity, breakEvens, strikes)
+			: ComputeAutoStep(notablePrices);
+
+		var low = Math.Min(centerPrice - 5 * step, notablePrices[0] - PaddingRows * step);
+		var high = Math.Max(centerPrice + 5 * step, notablePrices[^1] + PaddingRows * step);
+		low = Math.Max(0.01m, low);
+
+		var prices = new SortedSet<decimal>();
+		var numSteps = (int)Math.Round((high - low) / step);
+		for (int i = 0; i <= numSteps; i++)
+			prices.Add(Math.Round(low + i * step, 2));
+
+		foreach (var p in notablePrices)
+			prices.Add(Math.Round(p, 2));
+
+		// Trim to exactly PaddingRows beyond the outermost notable prices.
+		// The evenly-spaced grid may produce more points than intended due to
+		// rounding, causing asymmetric padding above vs below break-evens.
+		var sortedList = prices.ToList();
+		var lowestNotable = Math.Round(notablePrices[0], 2);
+		var highestNotable = Math.Round(notablePrices[^1], 2);
+		int firstNotableIdx = sortedList.IndexOf(lowestNotable);
+		int lastNotableIdx = sortedList.IndexOf(highestNotable);
+		if (firstNotableIdx >= 0 && lastNotableIdx >= 0)
+		{
+			int trimStart = Math.Max(0, firstNotableIdx - PaddingRows);
+			int trimEnd = Math.Min(sortedList.Count - 1, lastNotableIdx + PaddingRows);
+			sortedList = sortedList.GetRange(trimStart, trimEnd - trimStart + 1);
+		}
+		sortedList.Reverse();
+		return sortedList;
+	}
+
+	private static decimal ComputeLegacyStep(decimal centerPrice, decimal granularity, List<decimal> breakEvens, List<decimal> strikes)
+	{
 		var distinctStrikes = strikes.Where(s => s > 0).Distinct().OrderBy(s => s).ToList();
 		decimal referenceGap;
 		if (distinctStrikes.Count >= 2)
@@ -333,38 +379,27 @@ internal static class TimeDecayGridBuilder
 		{
 			referenceGap = centerPrice * 0.01m;
 		}
+		return Math.Max(0.01m, referenceGap / granularity);
+	}
 
-		var step = Math.Max(0.01m, referenceGap / granularity);
+	/// <summary>
+	/// Computes the step that sizes the price grid to <see cref="TargetRowsAuto"/> rows total: 2 padding rows
+	/// on each side, the outermost notable prices, evenly-spaced grid points between them, plus interior
+	/// notables (which in the worst case are all off-grid). Solving for the step that produces exactly
+	/// targetRows when (interiorNotables) interior notables miss the grid:
+	///   targetRows = ((high - low) / step + 1) + 2 * padding + interiorNotables
+	/// </summary>
+	private static decimal ComputeAutoStep(List<decimal> notablePrices)
+	{
+		var low = notablePrices[0];
+		var high = notablePrices[^1];
+		var span = high - low;
+		if (span <= 0)
+			span = Math.Max(0.50m, low * 0.05m);
 
-		const int paddingRows = 2;
-		var low = Math.Min(centerPrice - 5 * step, notablePrices[0] - paddingRows * step);
-		var high = Math.Max(centerPrice + 5 * step, notablePrices[^1] + paddingRows * step);
-		low = Math.Max(0.01m, low);
-
-		var prices = new SortedSet<decimal>();
-		var numSteps = (int)Math.Round((high - low) / step);
-		for (int i = 0; i <= numSteps; i++)
-			prices.Add(Math.Round(low + i * step, 2));
-
-		foreach (var p in notablePrices)
-			prices.Add(Math.Round(p, 2));
-
-		// Trim to exactly paddingRows beyond the outermost notable prices.
-		// The evenly-spaced grid may produce more points than intended due to
-		// rounding, causing asymmetric padding above vs below break-evens.
-		var sortedList = prices.ToList();
-		var lowestNotable = Math.Round(notablePrices[0], 2);
-		var highestNotable = Math.Round(notablePrices[^1], 2);
-		int firstNotableIdx = sortedList.IndexOf(lowestNotable);
-		int lastNotableIdx = sortedList.IndexOf(highestNotable);
-		if (firstNotableIdx >= 0 && lastNotableIdx >= 0)
-		{
-			int trimStart = Math.Max(0, firstNotableIdx - paddingRows);
-			int trimEnd = Math.Min(sortedList.Count - 1, lastNotableIdx + paddingRows);
-			sortedList = sortedList.GetRange(trimStart, trimEnd - trimStart + 1);
-		}
-		sortedList.Reverse();
-		return sortedList;
+		var interiorNotables = Math.Max(0, notablePrices.Count - 2);
+		var evenlySpacedPoints = Math.Max(2, TargetRowsAuto - 2 * PaddingRows - interiorNotables);
+		return Math.Max(0.01m, Math.Round(span / (evenlySpacedPoints - 1), 2));
 	}
 
 	/// <summary>
