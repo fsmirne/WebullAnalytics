@@ -78,19 +78,21 @@ internal static class RiskDiagnosticRenderer
                     if (sections.Length > 1)
 						items.Add(("Score:", Markup.Escape(sections[1])));
 
-                    if (sections.Length > 4)
+					// Layout: rationale, score, [N indicator lines], factors, result. The two trailing
+					// sections are always factors+result when present; everything between score and them
+					// is one indicator per line. The first indicator gets the "Indicators:" label; the
+					// rest carry an empty label so they visually align as continuation rows.
+                    if (sections.Length >= 4)
 					{
-						items.Add(("Indicators:", Markup.Escape(sections[2])));
-						items.Add(("Factors:", Markup.Escape(sections[3])));
-						items.Add(("Result:", Markup.Escape(sections[4])));
+						var indicatorCount = sections.Length - 4;
+						for (var i = 0; i < indicatorCount; i++)
+							items.Add((i == 0 ? "Indicators:" : "", Markup.Escape(sections[2 + i])));
+						items.Add(("Factors:", Markup.Escape(sections[2 + indicatorCount])));
+						items.Add(("Result:", Markup.Escape(sections[3 + indicatorCount])));
 					}
-					else
+					else if (sections.Length > 2)
 					{
-						if (sections.Length > 2)
-							items.Add(("Factors:", Markup.Escape(sections[2])));
-
-						if (sections.Length > 3)
-							items.Add(("Result:", Markup.Escape(sections[3])));
+						items.Add(("Factors:", Markup.Escape(sections[2])));
 					}
 				}
 			}
