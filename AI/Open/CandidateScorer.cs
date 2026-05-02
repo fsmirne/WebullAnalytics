@@ -617,7 +617,7 @@ internal static class CandidateScorer
 	///
 	/// <paramref name="useMarketImpliedIv"/> controls whether the long-leg IV is back-solved from the
 	/// market mid (true, default) or taken straight from the broker's reported IV (false). Callers
-	/// running at a hypothetical spot (e.g., <c>--ticker-price</c> override) should pass false,
+	/// running at a hypothetical spot (e.g., <c>--spot</c> override) should pass false,
 	/// because the market mid was set at a different spot and back-solving against it produces a
 	/// nonsensical IV that collapses calendar/diagonal residual time value.</summary>
 	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true) => skel.StructureKind switch
@@ -1412,7 +1412,7 @@ internal static class CandidateScorer
 		// consistent with the entry debit. When the long leg has a wide bid/ask, the broker's reported
 		// IV implies a BS price well above mid — using it would inflate residual time value at short
 		// expiry and create phantom alpha for illiquid contracts. Skipped at hypothetical spots
-		// (--ticker-price overrides) because the stale market mid no longer reflects the new spot.
+		// (--spot overrides) because the stale market mid no longer reflects the new spot.
 		var ivLong = useMarketImpliedIv
 			? MarketImpliedIv(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct)
 			: ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct);

@@ -95,10 +95,10 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		if (quotes == null) return 1;
 
 		var ticker = parsedLegs[0].Option!.Root;
-		var spot = ResolveSpot(ticker, settings.TickerPrice, underlyingPrices);
+		var spot = ResolveSpot(ticker, settings.Spot, underlyingPrices);
 		if (spot == null || spot.Value <= 0m)
 		{
-			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --ticker-price {ticker}:<price> or configure --api yahoo|webull.");
+			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or configure --api yahoo|webull.");
 			return 1;
 		}
 
@@ -179,10 +179,10 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var historicalVolAnnual = await TryComputeHistoricalVolAsync(ticker, asOf, cancellation);
 
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, trend, quotes);
-		// At hypothetical spots (--ticker-price), the leg market mids are stale and back-solving IV
+		// At hypothetical spots (--spot override), the leg market mids are stale and back-solving IV
 		// against them produces a nonsense IV. Use broker IV in that case for an internally-consistent
 		// projection.
-		var useMarketImpliedIv = string.IsNullOrEmpty(settings.TickerPrice);
+		var useMarketImpliedIv = string.IsNullOrEmpty(settings.Spot);
 		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv);
 		diagnostic = diagnostic with { Probe = probe };
 
@@ -272,11 +272,11 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		}
 	}
 
-	private static decimal? ResolveSpot(string ticker, string? tickerPriceOverrides, IReadOnlyDictionary<string, decimal>? underlyingPrices)
+	private static decimal? ResolveSpot(string ticker, string? spotOverrides, IReadOnlyDictionary<string, decimal>? underlyingPrices)
 	{
-		if (!string.IsNullOrEmpty(tickerPriceOverrides))
+		if (!string.IsNullOrEmpty(spotOverrides))
 		{
-			foreach (var entry in tickerPriceOverrides.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			foreach (var entry in spotOverrides.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 			{
 				var parts = entry.Split(':');
 				if (parts.Length == 2 && parts[0].Equals(ticker, StringComparison.OrdinalIgnoreCase)
