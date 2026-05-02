@@ -190,7 +190,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			trend: trendSnap,
 			quotesForProbe: quotes,
 			technicalBiasForProbe: technicalBias,
-			historicalVolAnnual: historicalVolAnnual);
+			historicalVolAnnual: historicalVolAnnual,
+			// At hypothetical spots (--ticker-price), the leg market mids are stale and back-solving
+			// IV against them produces a nonsense IV that collapses calendar/diagonal residual time
+			// value. Use the broker's reported IV instead so the projection is internally consistent.
+			useMarketImpliedIv: string.IsNullOrEmpty(settings.TickerPrice));
 
 		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias);
 
@@ -1502,7 +1506,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		TrendSnapshot? trend,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotesForProbe = null,
 		decimal technicalBiasForProbe = 0m,
-		decimal? historicalVolAnnual = null)
+		decimal? historicalVolAnnual = null,
+		bool useMarketImpliedIv = true)
 	{
 		var diagLegs = legs.Select(l => new DiagnosticLeg(
 			Symbol: l.Symbol,
@@ -1513,7 +1518,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			CostBasisPerShare: l.CostBasis)).ToList();
 
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend, quotesForProbe);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv);
 		diagnostic = diagnostic with { Probe = probe };
 
 		Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);

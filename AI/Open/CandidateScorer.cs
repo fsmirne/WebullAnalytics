@@ -613,13 +613,19 @@ internal static class CandidateScorer
 	/// liquidity filter (<see cref="PassesLiquidityGate"/>) can return null to reject the candidate
 	/// entirely. The gate is meant for the opener pipeline to skip doomed-exit *new* candidates;
 	/// callers analyzing *existing* positions should pass false so the scorer always returns a
-	/// proposal — the liq factor and rules still surface in the rationale either way.</summary>
-	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true) => skel.StructureKind switch
+	/// proposal — the liq factor and rules still surface in the rationale either way.
+	///
+	/// <paramref name="useMarketImpliedIv"/> controls whether the long-leg IV is back-solved from the
+	/// market mid (true, default) or taken straight from the broker's reported IV (false). Callers
+	/// running at a hypothetical spot (e.g., <c>--ticker-price</c> override) should pass false,
+	/// because the market mid was set at a different spot and back-solving against it produces a
+	/// nonsensical IV that collapses calendar/diagonal residual time value.</summary>
+	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true) => skel.StructureKind switch
 	{
 		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
 		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
-		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
-		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
+		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv),
+		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv),
 		_ => null
 	};
 
@@ -1269,7 +1275,7 @@ internal static class CandidateScorer
 		return (maxProfit, maxLoss);
 	}
 
-	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true)
+	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true)
 	{
 		var defs = new List<MultiLegDefinition>(skel.Legs.Count);
 		var usedFallback = false;
@@ -1282,8 +1288,9 @@ internal static class CandidateScorer
 			usedFallback |= resolved.Value.UsedFallback;
 			// Legs that survive past the target (e.g., long wings of a double calendar/diagonal) need
 			// market-implied IV so the BS exit value matches the entry debit's pricing convention.
-			// Legs that expire at target are intrinsic-only and IV is irrelevant.
-			var legIv = parsed.ExpiryDate.Date > skel.TargetExpiry.Date
+			// Legs that expire at target are intrinsic-only and IV is irrelevant. Calibration is
+			// skipped at hypothetical spots — the market mid is stale w.r.t. the new spot.
+			var legIv = parsed.ExpiryDate.Date > skel.TargetExpiry.Date && useMarketImpliedIv
 				? MarketImpliedIv(leg.Symbol, parsed, spot, asOf, quotes, cfg.IvDefaultPct)
 				: ResolveIv(leg.Symbol, quotes, cfg.IvDefaultPct);
 			defs.Add(new MultiLegDefinition(leg, parsed, leg.Action == "buy", legIv));
@@ -1369,7 +1376,7 @@ internal static class CandidateScorer
 			LiquidityAdjustmentFactor: liquidityFactor);
 	}
 
-	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true)
+	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true)
 	{
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
 		var longLeg = skel.Legs.First(l => l.Action == "buy");
@@ -1404,8 +1411,11 @@ internal static class CandidateScorer
 		// Long-leg IV is back-solved from the market mid so EV/breakeven/maxProfit math uses pricing
 		// consistent with the entry debit. When the long leg has a wide bid/ask, the broker's reported
 		// IV implies a BS price well above mid — using it would inflate residual time value at short
-		// expiry and create phantom alpha for illiquid contracts.
-		var ivLong = MarketImpliedIv(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
+		// expiry and create phantom alpha for illiquid contracts. Skipped at hypothetical spots
+		// (--ticker-price overrides) because the stale market mid no longer reflects the new spot.
+		var ivLong = useMarketImpliedIv
+			? MarketImpliedIv(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct)
+			: ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct);
 
 		// Breakevens are the roots of the position-value-at-short-expiry curve, found numerically because
 		// the curve mixes Black-Scholes (long leg) with piecewise-linear intrinsic (short leg) and has
