@@ -242,7 +242,7 @@ internal static class TimeDecayGridBuilder
 	/// Slots are filled by priority: trading days first, then holidays, then weekends.
 	/// Each tier is shown in full before drawing from the next; within a tier, selection is evenly spaced.
 	/// </summary>
-	private static List<DateTime> BuildDateColumns(DateTime expiry, int maxColumns)
+	internal static List<DateTime> BuildDateColumns(DateTime expiry, int maxColumns)
 	{
 		var today = EvaluationDate.Today;
 		if ((expiry.Date - today).TotalDays <= 0)
@@ -316,7 +316,7 @@ internal static class TimeDecayGridBuilder
 	/// positive, the legacy referenceGap/granularity step is used. <paramref name="extraNotables"/> participates
 	/// in trim/highlight only — a spot near a strike must not shrink the step toward zero.
 	/// </summary>
-	private static List<decimal> BuildPriceRows(decimal centerPrice, decimal granularity, List<decimal> breakEvens, List<decimal> strikes, IReadOnlyList<decimal>? extraNotables = null)
+	internal static List<decimal> BuildPriceRows(decimal centerPrice, decimal granularity, List<decimal> breakEvens, List<decimal> strikes, IReadOnlyList<decimal>? extraNotables = null)
 	{
 		var stepDriving = breakEvens.Concat(strikes).Where(p => p > 0).Distinct().OrderBy(p => p).ToList();
 		var notablePrices = stepDriving.Concat(extraNotables ?? Array.Empty<decimal>()).Where(p => p > 0).Distinct().OrderBy(p => p).ToList();
