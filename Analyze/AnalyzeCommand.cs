@@ -547,17 +547,9 @@ internal static class AnalyzeCommon
 		}
 
 		// Build price grid: roll credit at various underlying prices
-		var strike = oldParsed.Strike;
-		// Use fine-grained steps for roll credit analysis (10x finer than break-even grid).
-		// Range == 0 means "auto" in the break-even grid (post-44adc43); the roll command keeps a fixed
-		// granularity, so treat 0 as the prior default of 2 to avoid a divide-by-zero.
 		var rangeFactor = settings.Range > 0 ? settings.Range : 2m;
-		var step = OptionMath.GetPriceStep(strike) / rangeFactor / 5m;
-		var padding = step * 10;
-		// Center on current price if available, otherwise on strike
-		var center = Math.Abs(spot - strike) < padding ? spot : strike;
-		var minPrice = Math.Min(strike, center) - padding;
-		var maxPrice = Math.Max(strike, center) + padding;
+		var loStrike = Math.Min(oldParsed.Strike, newParsed.Strike);
+		var hiStrike = Math.Max(oldParsed.Strike, newParsed.Strike);
 
 		var today = EvaluationDate.Today;
 		var oldExpiry = oldParsed.ExpiryDate;
@@ -623,7 +615,7 @@ internal static class AnalyzeCommon
 		var terminalWidth = settings.Simplified ? TerminalHelper.SimplifiedMinWidth : TerminalHelper.DetailedMinWidth;
 		try { terminalWidth = Math.Max(terminalWidth, Console.WindowWidth); } catch { /* use default */ }
 		var maxLegValueWidth = Math.Max(oldBid ?? 0m, Math.Max(oldAsk ?? 0m, Math.Max(newBid ?? 0m, newAsk ?? 0m))).ToString("N2", CultureInfo.InvariantCulture).Length;
-		var maxCols = Math.Max(3, TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode: "value", showLegs: true, maxLegCount: 2, maxLegValueWidth: maxLegValueWidth, gridTableOuterBorders: 2) - 2);
+		var maxCols = Math.Max(3, TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode: "value", showLegs: true, maxLegCount: 2, maxLegValueWidth: maxLegValueWidth, gridTableOuterBorders: 2));
 
 		// Build time columns: hourly on expiry day for <=1 DTE, daily otherwise
 		var oldDays = (int)(oldExpiry.Date - today).TotalDays;
@@ -653,37 +645,16 @@ internal static class AnalyzeCommon
 		}
 		else
 		{
-          // Ceiling division: ensures loop produces ≤ (maxCols-1) items so total (with appended expiry) stays within maxCols.
-			var dayStep = Math.Max(1, (oldDays + maxCols - 2) / (maxCols - 1));
-			for (var d = 0; d < oldDays; d += dayStep)
-				evalTimes.Add(today.AddDays(d) + OptionMath.MarketOpen);
-			var expiryOpen = oldExpiry.Date + OptionMath.MarketOpen;
-			if (evalTimes[^1] != expiryOpen)
-				evalTimes.Add(expiryOpen);
+			evalTimes = TimeDecayGridBuilder.BuildDateColumns(oldExpiry, maxCols);
 		}
 
-     // Build 2D grid: prices × times
-		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
-		table.AddColumn(new TableColumn("[bold]Price[/]").RightAligned().NoWrap());
-		foreach (var t in evalTimes)
-			table.AddColumn(new TableColumn($"[bold]{(isIntraday ? t.ToString("h tt") : t.ToString("dd MMM"))}[/]").RightAligned().NoWrap());
-
-		var prices = new SortedSet<decimal>();
-		for (var p = minPrice; p <= maxPrice; p += step) prices.Add(p);
-		// Always include the strike, current price, and notable prices
-		prices.Add(strike);
-		if (spot >= minPrice && spot <= maxPrice) prices.Add(Math.Round(spot, 2));
-		if (settings.Levels != null)
-			foreach (var pair in ReportCommand.ParseLevels(settings.Levels))
-				if (pair.Key.Equals(oldParsed.Root, StringComparison.OrdinalIgnoreCase))
-					foreach (var np in pair.Value)
-						if (np >= minPrice && np <= maxPrice) prices.Add(np);
-
-		// Find the exact optimal price via fine search and insert it
-		var searchStep = step / 10m;
-		var bestPrice = strike;
+		// Find the optimal credit price via fine search over a wide range spanning both strikes.
+		var searchMin = Math.Max(0.01m, loStrike - OptionMath.GetPriceStep(loStrike) * 10m);
+		var searchMax = hiStrike + OptionMath.GetPriceStep(hiStrike) * 10m;
+		var searchStep = OptionMath.GetPriceStep(loStrike) / rangeFactor / 5m / 10m;
+		var bestPrice = loStrike;
 		var bestCredit = decimal.MinValue;
-		for (var p = minPrice; p <= maxPrice; p += searchStep)
+		for (var p = searchMin; p <= searchMax; p += searchStep)
 		{
 			var credit = evalTimes.Max(t =>
 			{
@@ -693,39 +664,48 @@ internal static class AnalyzeCommon
 			});
 			if (credit > bestCredit) { bestCredit = credit; bestPrice = Math.Round(p, 2); }
 		}
-		prices.Add(bestPrice);
 
-		var priceList = prices.Reverse().ToList();
+		// Collect extra notables: spot, bestPrice, user levels.
+		var extraNotables = new List<decimal> { spot, bestPrice };
+		if (settings.Levels != null)
+			foreach (var pair in ReportCommand.ParseLevels(settings.Levels))
+				if (pair.Key.Equals(oldParsed.Root, StringComparison.OrdinalIgnoreCase))
+					extraNotables.AddRange(pair.Value);
 
-		// Precompute all cells: old value, new value, credit
-		var oldGrid = new decimal[priceList.Count, evalTimes.Count];
-		var newGrid = new decimal[priceList.Count, evalTimes.Count];
-		var creditGrid = new decimal[priceList.Count, evalTimes.Count];
-		var maxCredit = decimal.MinValue;
-		var maxCreditPrice = 0m;
-		var maxCreditDate = today;
-		for (int pi = 0; pi < priceList.Count; pi++)
-			for (int di = 0; di < evalTimes.Count; di++)
+		// Build price rows targeting ~20 rows — same auto-step logic as the report grids.
+		var priceList = TimeDecayGridBuilder.BuildPriceRows(spot, settings.Range, [], [oldParsed.Strike, newParsed.Strike], extraNotables);
+
+		// Compute grid data for initial evalTimes.
+		var (oldGrid, newGrid, creditGrid, maxCredit, maxCreditPrice, maxCreditDate, oldWidth, newWidth, creditWidth) =
+			ComputeRollGrid(priceList, evalTimes, oldParsed, newParsed, oldExpiry, newExpiry, isLong, oldIv.Value, newIv.Value, rfr, today);
+
+		// Opportunistically expand date columns using actual cell widths (mirrors BuildFittedGrid in BreakEvenAnalyzer).
+		if (!isIntraday)
+		{
+			var priceColWidth = priceList.Max(p => $"${p:N2}".Length);
+			for (int extra = 1; extra <= 5; extra++)
 			{
-				var oldDte = (oldExpiry.Date + OptionMath.MarketClose - evalTimes[di]).TotalDays / 365.0;
-				var newDte = (newExpiry.Date + OptionMath.MarketClose - evalTimes[di]).TotalDays / 365.0;
-				oldGrid[pi, di] = OptionMath.BlackScholes(priceList[pi], oldParsed.Strike, oldDte, rfr, oldIv.Value, oldParsed.CallPut);
-				newGrid[pi, di] = OptionMath.BlackScholes(priceList[pi], newParsed.Strike, newDte, rfr, newIv.Value, newParsed.CallPut);
-				creditGrid[pi, di] = isLong ? oldGrid[pi, di] - newGrid[pi, di] : newGrid[pi, di] - oldGrid[pi, di];
-				if (creditGrid[pi, di] > maxCredit) { maxCredit = creditGrid[pi, di]; maxCreditPrice = priceList[pi]; maxCreditDate = evalTimes[di]; }
+				var moreTimes = TimeDecayGridBuilder.BuildDateColumns(oldExpiry, maxCols + extra);
+				if (moreTimes.Count <= evalTimes.Count) break;
+				var (og2, ng2, cg2, mc2, mcp2, mcd2, ow2, nw2, cw2) = ComputeRollGrid(priceList, moreTimes, oldParsed, newParsed, oldExpiry, newExpiry, isLong, oldIv.Value, newIv.Value, rfr, today);
+				var cellW = Math.Max(6, ow2 + 1 + nw2 + 1 + cw2);
+				// Rounded Spectre table: 1 (left\u2502) + (priceColWidth+2+1) + N*(cellW+2+1)
+				var tableW = 1 + priceColWidth + 3 + moreTimes.Count * (cellW + 3);
+				if (tableW > terminalWidth) break;
+				(evalTimes, oldGrid, newGrid, creditGrid, maxCredit, maxCreditPrice, maxCreditDate, oldWidth, newWidth, creditWidth) =
+					(moreTimes, og2, ng2, cg2, mc2, mcp2, mcd2, ow2, nw2, cw2);
 			}
+		}
 
-		// Right-pad old, new, and credit text to uniform widths with figure spaces so the '|' separators align vertically.
-		int oldWidth = 0, newWidth = 0, creditWidth = 0;
-		for (int pi = 0; pi < priceList.Count; pi++)
-			for (int di = 0; di < evalTimes.Count; di++)
-			{
-				oldWidth = Math.Max(oldWidth, oldGrid[pi, di].ToString("N2").Length);
-				newWidth = Math.Max(newWidth, newGrid[pi, di].ToString("N2").Length);
-				var c = creditGrid[pi, di];
-				var sign = Math.Round(c, 2) >= 0 ? "+" : "";
-				creditWidth = Math.Max(creditWidth, $"{sign}{c:N2}".Length);
-			}
+		// Build 2D grid table now that evalTimes is finalized.
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
+		table.AddColumn(new TableColumn("[bold]Price[/]").RightAligned().NoWrap());
+		foreach (var t in evalTimes)
+		{
+			var label = isIntraday ? t.ToString("h tt") : (t == evalTimes[^1] ? "At Exp" : t.ToString("dd MMM"));
+			table.AddColumn(new TableColumn($"[bold]{label}[/]").RightAligned().NoWrap());
+		}
+
 		const char pad = '\u2007';
 
 		for (int pi = 0; pi < priceList.Count; pi++)
@@ -860,5 +840,36 @@ internal static class AnalyzeCommon
 			? $"{structureLabel}  {costBreakdown} × {shortQty}"
 			: $"partial cover ({structureLabel}: {coverableOpt} @ ${coveredPer:N2}, {uncoveredOpt} naked @ ${naked:N2})";
 		return new LegMargin(labelOpt, totalOpt);
+	}
+
+	private static (decimal[,] OldGrid, decimal[,] NewGrid, decimal[,] CreditGrid, decimal MaxCredit, decimal MaxCreditPrice, DateTime MaxCreditDate, int OldWidth, int NewWidth, int CreditWidth)
+		ComputeRollGrid(List<decimal> priceList, List<DateTime> evalTimes, OptionParsed oldParsed, OptionParsed newParsed, DateTime oldExpiry, DateTime newExpiry, bool isLong, decimal oldIv, decimal newIv, double rfr, DateTime today)
+	{
+		var og = new decimal[priceList.Count, evalTimes.Count];
+		var ng = new decimal[priceList.Count, evalTimes.Count];
+		var cg = new decimal[priceList.Count, evalTimes.Count];
+		var maxC = decimal.MinValue;
+		var maxCPrice = 0m;
+		var maxCDate = today;
+		for (int pi = 0; pi < priceList.Count; pi++)
+			for (int di = 0; di < evalTimes.Count; di++)
+			{
+				var oldDte = (oldExpiry.Date + OptionMath.MarketClose - evalTimes[di]).TotalDays / 365.0;
+				var newDte = (newExpiry.Date + OptionMath.MarketClose - evalTimes[di]).TotalDays / 365.0;
+				og[pi, di] = OptionMath.BlackScholes(priceList[pi], oldParsed.Strike, oldDte, rfr, oldIv, oldParsed.CallPut);
+				ng[pi, di] = OptionMath.BlackScholes(priceList[pi], newParsed.Strike, newDte, rfr, newIv, newParsed.CallPut);
+				cg[pi, di] = isLong ? og[pi, di] - ng[pi, di] : ng[pi, di] - og[pi, di];
+				if (cg[pi, di] > maxC) { maxC = cg[pi, di]; maxCPrice = priceList[pi]; maxCDate = evalTimes[di]; }
+			}
+		int ow = 0, nw = 0, cw = 0;
+		for (int pi = 0; pi < priceList.Count; pi++)
+			for (int di = 0; di < evalTimes.Count; di++)
+			{
+				ow = Math.Max(ow, og[pi, di].ToString("N2").Length);
+				nw = Math.Max(nw, ng[pi, di].ToString("N2").Length);
+				var c = cg[pi, di];
+				cw = Math.Max(cw, $"{(Math.Round(c, 2) >= 0 ? "+" : "")}{c:N2}".Length);
+			}
+		return (og, ng, cg, maxC, maxCPrice, maxCDate, ow, nw, cw);
 	}
 }
