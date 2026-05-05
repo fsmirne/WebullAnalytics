@@ -128,7 +128,14 @@ internal static class RiskDiagnosticProbeBuilder
 					// already opened (or are explicitly modeling), so the hard liquidity gate must
 					// not silently reject them. The liq factor and rules still surface, so a poorly-
 					// liquid existing position is still flagged in the panel.
-					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false, useMarketImpliedIv: useMarketImpliedIv);
+					// useMarketImpliedIv is suppressed in cost-basis mode: OverrideBidAskWithCostBasis
+					// collapses each leg's bid/ask to the entry price, so MarketImpliedIv would
+					// back-solve from that stale price instead of the current market mid — inflating
+					// ivLong and producing an artificially low breakeven / high POP. ResolveIv (the
+					// false branch) reads the Iv field from the quote, which OverrideBidAskWithCostBasis
+					// does not touch, giving the current broker-reported IV.
+					var effectiveUseMarketImpliedIv = useCostBasisForOpenerScore ? false : useMarketImpliedIv;
+					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false, useMarketImpliedIv: effectiveUseMarketImpliedIv);
 					if (scored != null)
 					{
 						// When cost-basis override is in play, the scorer's view of bid/ask is collapsed
