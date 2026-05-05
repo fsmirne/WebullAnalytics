@@ -54,7 +54,7 @@ public class PositionReplayTests
 			new(5, timestamp.AddSeconds(2), Formatters.FormatOptionDisplay("GME", shortExpiry, 25.5m), MatchKeys.Option(shortDiagonalSymbol), Asset.Option, "Put", Side.Sell, 126, 0.47m, Trade.OptionMultiplier, shortExpiry),
 		};
 
-		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: timestamp.Date);
 		var parents = rows.Where(r => r.Asset == Asset.OptionStrategy).ToList();
 		var diagonalLong = rows.Single(r => r.Asset == Asset.Option && r.IsStrategyLeg && r.MatchKey == MatchKeys.Option(longCalendarSymbol) && r.Qty == 126);
 		var diagonalShort = rows.Single(r => r.Asset == Asset.Option && r.IsStrategyLeg && r.MatchKey == MatchKeys.Option(shortDiagonalSymbol) && r.Qty == 126);
@@ -91,7 +91,7 @@ public class PositionReplayTests
 			new(5, timestamp.AddSeconds(2), Formatters.FormatOptionDisplay("GME", longExpiry, 25.5m), MatchKeys.Option(diagonalLongSymbol), Asset.Option, "Put", Side.Buy, 152, 1.255m, Trade.OptionMultiplier, longExpiry),
 		};
 
-		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: timestamp.Date);
 		var parents = rows.Where(r => r.Asset == Asset.OptionStrategy).ToList();
 		var calendarParent = parents.Single(row => row.OptionKind == "Calendar" && row.Qty == 474);
 		var diagonalParent = parents.Single(row => row.OptionKind == "Diagonal" && row.Qty == 152);
@@ -129,7 +129,7 @@ public class PositionReplayTests
 			new(6, timestamp.AddSeconds(1), Formatters.FormatOptionDisplay("GME", longExpiry, 25.5m), MatchKeys.Option(diagonalLongSymbol), Asset.Option, "Put", Side.Buy, 152, 1.255m, Trade.OptionMultiplier, longExpiry, 4),
 		};
 
-		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: timestamp.Date);
 		var parents = rows.Where(r => r.Asset == Asset.OptionStrategy).ToList();
 		var calendarParent = parents.Single(row => row.OptionKind == "Calendar" && row.Qty == 474);
 		var diagonalParent = parents.Single(row => row.OptionKind == "Diagonal" && row.Qty == 152);
@@ -159,7 +159,7 @@ public class PositionReplayTests
 			new(2, timestamp.AddSeconds(1), Formatters.FormatOptionDisplay("GME", shortExpiry, 25.5m), MatchKeys.Option(shortSymbol), Asset.Option, "Put", Side.Sell, 100, 0.47m, Trade.OptionMultiplier, shortExpiry),
 		};
 
-		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: timestamp.Date);
 
 		Assert.DoesNotContain(rows, row => row.Asset == Asset.OptionStrategy);
 		Assert.Contains(rows, row => row.Asset == Asset.Option && !row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(longSymbol) && row.Qty == 126);
@@ -190,7 +190,7 @@ public class PositionReplayTests
 			new(9, timestamp.AddDays(2).AddHours(1), Formatters.FormatOptionDisplay("GME", midExpiry, 25m), MatchKeys.Option(midSymbol), Asset.Option, "Put", Side.Buy, 300, 1.23m, Trade.OptionMultiplier, midExpiry, 7),
 		};
 
-		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: timestamp.Date);
 		var parents = rows.Where(r => r.Asset == Asset.OptionStrategy).OrderBy(r => r.Qty).ToList();
 
 		Assert.Equal(2, parents.Count);
@@ -248,7 +248,7 @@ public class PositionReplayTests
 			new(12, timestamp.AddDays(3), Formatters.FormatOptionDisplay("GME", longExpiry, 25m), MatchKeys.Option(longSymbol), Asset.Option, "Put", Side.Buy, 141, 1.35m, Trade.OptionMultiplier, longExpiry, 10),
 		};
 
-		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: timestamp.Date);
 		var parents = rows.Where(r => r.Asset == Asset.OptionStrategy).OrderBy(r => r.Qty).ToList();
 
 		Assert.Equal(2, parents.Count);
@@ -296,7 +296,7 @@ public class PositionReplayTests
 			new(9, timestamp.AddDays(2).AddHours(1), Formatters.FormatOptionDisplay("GME", midExpiry, 25m), MatchKeys.Option(midSymbol), Asset.Option, "Put", Side.Buy, 300, 1.23m, Trade.OptionMultiplier, midExpiry, 7),
 		};
 
-		var (rows, adjustments, singleLegStandalones) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var (rows, adjustments, singleLegStandalones) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: timestamp.Date);
 		var breakdowns = AdjustmentReportBuilder.Build(rows, trades, new Dictionary<string, List<Lot>>(), adjustments, singleLegStandalones);
 
 		var unchangedPanel = breakdowns.Single(b => b.Instrument == "GME 22 May 2026");
