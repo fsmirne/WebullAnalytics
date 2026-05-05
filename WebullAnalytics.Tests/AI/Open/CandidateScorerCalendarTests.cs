@@ -212,6 +212,127 @@ public class CandidateScorerCalendarTests
 		Assert.True(p.MaxPainAdjustmentFactor > 1m);
 	}
 
+	// ── Cost-basis / --spot POP correctness ──────────────────────────────────────────────────────
+
+	// When analyze-position re-scores an existing calendar it collapses each leg's bid/ask to the
+	// entry price (OverrideBidAskWithCostBasis).  If useMarketImpliedIv is left TRUE, MarketImpliedIv
+	// back-solves ivLong from the entry price instead of the current market mid, which can inflate it
+	// dramatically (e.g. $1.92 entry → IV≈1.04 vs $0.84 market → IV≈0.628).  That pushes the lower
+	// breakeven well below current spot and inflates POP from ~40% to ~81%.  The fix sets
+	// effectiveUseMarketImpliedIv=false in cost-basis mode so ivLong always comes from the broker's
+	// reported Iv field (unchanged by the bid/ask override).
+	//
+	// Numbers match the GME x400 call calendar reported on 2026-05-04:
+	//   spot=$23.84, short GME260508C00026500 (4 DTE, IV=1.059), long GME260605C00026500 (32 DTE, IV=0.628)
+	//   entry: long@$1.92, short@$1.00 → net debit $0.92.
+
+	[Fact]
+	public void CalendarCostBasisMode_MarketImpliedIvTrue_InflatesPopVsCorrectIv()
+	{
+		var asOf = new DateTime(2026, 5, 4);
+		var shortExp = new DateTime(2026, 5, 8);
+		var longExp = new DateTime(2026, 6, 5);
+		var shortSym = MatchKeys.OccSymbol("GME", shortExp, 26.50m, "C");
+		var longSym = MatchKeys.OccSymbol("GME", longExp, 26.50m, "C");
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.LongCalendar, [new ProposalLeg("sell", shortSym, 1), new ProposalLeg("buy", longSym, 1)], TargetExpiry: shortExp);
+
+		// Simulates OverrideBidAskWithCostBasis: bid=ask=entry price; Iv field is UNCHANGED.
+		var costBasisQuotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(bid: 1.00m, ask: 1.00m, iv: 1.059m),
+			[longSym]  = TestQuote.Q(bid: 1.92m, ask: 1.92m, iv: 0.628m)
+		};
+
+		// BUG path (useMarketImpliedIv=true): MarketImpliedIv back-solves ivLong from mid=$1.92 at spot=$23.84.
+		// The option is OTM so there's no intrinsic guard; the solver returns IV≈1.04 >> broker 0.628.
+		// This inflates residual time value in the breakeven scan and drops the lower BE well below spot.
+		var pBug = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 23.84m, asOf, costBasisQuotes, bias: 0m, Cfg(), useMarketImpliedIv: true)!;
+
+		// FIX path (useMarketImpliedIv=false): ivLong = ResolveIv = broker Iv field = 0.628.
+		// OverrideBidAskWithCostBasis does NOT touch Iv, so this is always the current market IV.
+		var pFix = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 23.84m, asOf, costBasisQuotes, bias: 0m, Cfg(), useMarketImpliedIv: false)!;
+
+		// Both paths compute the same cost-basis debit.
+		Assert.Equal(pBug.DebitOrCreditPerContract, pFix.DebitOrCreditPerContract);
+
+		// Bug path: inflated ivLong → lower BE ≈ $21.49 (well below spot $23.84) → POP ≈ 81%.
+		Assert.True(pBug.ProbabilityOfProfit > 0.70m, $"Bug path POP {pBug.ProbabilityOfProfit:P1} should exceed 70%");
+		Assert.True(pBug.Breakevens.Count == 2 && pBug.Breakevens[0] < 23.84m, $"Bug path lower BE {pBug.Breakevens[0]:F2} should be below spot $23.84");
+
+		// Fix path: correct ivLong → lower BE ≈ $24+ (above spot $23.84) → POP ≈ 40%.
+		Assert.True(pFix.ProbabilityOfProfit < 0.50m, $"Fix path POP {pFix.ProbabilityOfProfit:P1} should be below 50%");
+		Assert.True(pFix.Breakevens.Count == 2 && pFix.Breakevens[0] > 23.84m, $"Fix path lower BE {pFix.Breakevens[0]:F2} should be above spot $23.84 (position below cost-basis breakeven)");
+
+		// The inflation is material — not a rounding difference.
+		Assert.True(pBug.ProbabilityOfProfit > pFix.ProbabilityOfProfit + 0.30m, $"Bug path POP should exceed fix path by >30pp; got {pBug.ProbabilityOfProfit:P1} vs {pFix.ProbabilityOfProfit:P1}");
+	}
+
+	[Fact]
+	public void CalendarCostBasisMode_WhenEntryEqualsCurrentPrice_PopIsUnchangedByIvFlag()
+	{
+		// When the entry price equals the current market mid, back-solving IV from entry price
+		// produces the same IV as ResolveIv (the broker reports IV consistent with its own mid).
+		// Both useMarketImpliedIv paths should give essentially the same POP.
+		var asOf = new DateTime(2026, 5, 4);
+		var shortExp = new DateTime(2026, 5, 8);
+		var longExp = new DateTime(2026, 6, 5);
+		var shortSym = MatchKeys.OccSymbol("GME", shortExp, 26.50m, "C");
+		var longSym = MatchKeys.OccSymbol("GME", longExp, 26.50m, "C");
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.LongCalendar, [new ProposalLeg("sell", shortSym, 1), new ProposalLeg("buy", longSym, 1)], TargetExpiry: shortExp);
+
+		// Entry price == current market price: bid=ask=mid of the current market.
+		var atMarketQuotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(bid: 0.225m, ask: 0.225m, iv: 1.059m),
+			[longSym]  = TestQuote.Q(bid: 0.835m, ask: 0.835m, iv: 0.628m)
+		};
+
+		var pTrue  = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 23.84m, asOf, atMarketQuotes, bias: 0m, Cfg(), useMarketImpliedIv: true)!;
+		var pFalse = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 23.84m, asOf, atMarketQuotes, bias: 0m, Cfg(), useMarketImpliedIv: false)!;
+
+		// When entry == market, back-solving from mid ≈ broker IV, so POP should be very close.
+		Assert.InRange((double)Math.Abs(pTrue.ProbabilityOfProfit - pFalse.ProbabilityOfProfit), 0.0, 0.05);
+	}
+
+	[Fact]
+	public void CalendarCostBasisMode_HypotheticalSpotAboveUpperBreakeven_PopLowerThanAtAtmSpot()
+	{
+		// Simulates "analyze position --spot 30" from the weekend when GME shot up.
+		// With correct IV (useMarketImpliedIv=false, which --spot always uses), the upper breakeven
+		// sits around $29–30.  A hypothetical spot at $30 is at or above the profit zone, so POP
+		// should be lower than at ATM spot ($26.50 = peak profit point for the calendar).
+		var asOf = new DateTime(2026, 5, 4);
+		var shortExp = new DateTime(2026, 5, 8);
+		var longExp = new DateTime(2026, 6, 5);
+		var shortSym = MatchKeys.OccSymbol("GME", shortExp, 26.50m, "C");
+		var longSym = MatchKeys.OccSymbol("GME", longExp, 26.50m, "C");
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.LongCalendar, [new ProposalLeg("sell", shortSym, 1), new ProposalLeg("buy", longSym, 1)], TargetExpiry: shortExp);
+
+		var costBasisQuotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(bid: 1.00m, ask: 1.00m, iv: 1.059m),
+			[longSym]  = TestQuote.Q(bid: 1.92m, ask: 1.92m, iv: 0.628m)
+		};
+
+		// --spot always uses useMarketImpliedIv=false (stale market mids no longer reflect the hypothetical spot).
+		var pAtm     = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 26.50m, asOf, costBasisQuotes, bias: 0m, Cfg(), useMarketImpliedIv: false)!;
+		var pHighSpot = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 30.00m, asOf, costBasisQuotes, bias: 0m, Cfg(), useMarketImpliedIv: false)!;
+
+		// At ATM spot ($26.50 = strike), the calendar is at peak profit — POP should be well above 50%.
+		Assert.True(pAtm.ProbabilityOfProfit > 0.55m, $"ATM POP {pAtm.ProbabilityOfProfit:P1} should exceed 55%");
+
+		// At spot=$30 the position is at or above the upper breakeven — POP should be < 50%.
+		Assert.True(pHighSpot.ProbabilityOfProfit < 0.50m, $"High-spot POP {pHighSpot.ProbabilityOfProfit:P1} should be below 50%");
+
+		// ATM is meaningfully better than the high-spot scenario.
+		Assert.True(pAtm.ProbabilityOfProfit > pHighSpot.ProbabilityOfProfit + 0.10m,
+			$"ATM POP {pAtm.ProbabilityOfProfit:P1} should exceed high-spot POP {pHighSpot.ProbabilityOfProfit:P1} by >10pp");
+
+		// Upper breakeven should exist and be below the hypothetical $30 spot.
+		Assert.True(pAtm.Breakevens.Count == 2);
+		Assert.True(pAtm.Breakevens[1] < 30.00m, $"Upper BE {pAtm.Breakevens[1]:F2} should be below hypothetical spot $30");
+	}
+
 	[Fact]
 	public void DoubleDiagonalScoresAsNeutralDebitStructure()
 	{
