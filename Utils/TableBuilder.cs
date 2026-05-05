@@ -426,13 +426,13 @@ public static class TableBuilder
 		var afterRollNetCost = (b.PositionSide == Side.Buy ? 1m : -1m) * (b.AdjPrice ?? b.AvgPrice) * b.Qty * 100m;
 
 		string FormatSignedCost(decimal amount) => $"{(amount >= 0 ? "+" : "-")}${Math.Abs(amount).ToString("N2", CultureInfo.InvariantCulture)}";
-		IRenderable FormatChangeLine(string label, decimal amount)
+		IRenderable FormatChangeLine(string label, decimal amount, bool? isGood = null)
 		{
 			var valueText = FormatSignedCost(amount);
 			if (ascii)
 				return new Text($"{label}: {valueText}");
 
-			var valueColor = amount < 0m ? "green" : "red";
+			var valueColor = (isGood ?? amount < 0m) ? "green" : "red";
 			return new Markup($"{Markup.Escape(label)}: [{valueColor}]{Markup.Escape(valueText)}[/]");
 		}
 		items.Add(new Text($"Open Net Cost: {FormatSignedCost(openNetCost)} {(ascii ? "/" : "÷")} ({b.OpenQty} x $100) = ${openText}/contract"));
@@ -442,7 +442,10 @@ public static class TableBuilder
 		var averagingChange = avgNetCost - openNetCost;
 		var rollChange = afterRollNetCost - avgNetCost;
 		if (averagingChange != 0m)
-			items.Add(FormatChangeLine("Averaging Change", averagingChange));
+		{
+			var averagingIsGood = b.PositionSide == Side.Buy ? b.AvgPrice <= b.InitPrice : b.AvgPrice >= b.InitPrice;
+			items.Add(FormatChangeLine("Averaging Change", averagingChange, averagingIsGood));
+		}
 		if (rollChange != 0m)
 			items.Add(FormatChangeLine("Roll Change", rollChange));
 
