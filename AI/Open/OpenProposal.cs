@@ -47,6 +47,9 @@ public enum OpenStructureKind
 /// <param name="VolatilityAdjustmentFactor">IV-vs-HV multiplier applied during ranking; null when HV was unavailable.</param>
 /// <param name="TargetExpiryMaxPain">Max-pain price inferred from open interest for the proposal's target expiry.</param>
 /// <param name="MaxPainAdjustmentFactor">Max-pain multiplier applied during ranking; null when disabled or unavailable.</param>
+/// <param name="GexPin">Strike with the highest net dealer gamma (call gamma×OI minus put gamma×OI) for the target expiry. The primary GEX gravity point.</param>
+/// <param name="NetGexFraction">Net dealer gamma exposure normalized to [−1, +1]: positive = call gamma dominates (dealers net long gamma, suppressive regime); negative = put gamma dominates (amplifying regime).</param>
+/// <param name="GexAdjustmentFactor">GEX multiplier applied during ranking; null when disabled (gexWeight=0) or when the chain lacks sufficient IV data to compute gamma.</param>
 /// <param name="GeometryFactor">Diagonal carry-quality multiplier applied during ranking when the front short fails to collect enough rent relative to the long premium/debit.</param>
 /// <param name="RunwayFactor">Residual long-leg extrinsic/adjustment-runway multiplier applied during ranking when time remains after the target expiry.</param>
 /// <param name="AssignmentRiskFactor">Short-option assignment/near-spot risk multiplier applied during ranking; null when no short-leg penalty applied.</param>
@@ -83,6 +86,9 @@ internal sealed record OpenProposal(
 	decimal? VolatilityAdjustmentFactor = null,
 	decimal? TargetExpiryMaxPain = null,
 	decimal? MaxPainAdjustmentFactor = null,
+	decimal? GexPin = null,
+	decimal? NetGexFraction = null,
+	decimal? GexAdjustmentFactor = null,
 	decimal? SetupFactor = null,
 	decimal? GeometryFactor = null,
 	decimal? RunwayFactor = null,

@@ -162,6 +162,27 @@ internal static class RiskDiagnosticProbeBuilder
 									FinalScore = scored.FinalScore.HasValue ? scored.FinalScore.Value * ratio : (decimal?)null,
 								};
 							}
+
+							// OverrideBidAskWithCostBasis collapses each leg's bid/ask to the entry price,
+							// so ComputeMarketTheoreticalAggregate inside Score() treats the cost basis as
+							// "current market mid." Recompute stat-arb from live quotes so the market-net
+							// indicator reflects what the position costs to enter today, not what was paid.
+							var liveStatArb = CandidateScorer.ComputeMarketTheoreticalAggregate(legs.Select(l => (l.Symbol, l.Parsed, l.IsLong)), spot, asOf, quotes, ai.Opener.IvDefaultPct);
+							var newStatArbFactor = CandidateScorer.ComputeStatArbAdjustmentFactor(liveStatArb?.MarketNet, liveStatArb?.TheoreticalNet, liveStatArb?.GrossTheoretical, ai.Opener.StatArbWeight);
+							var oldStatArbFactor = scored.StatArbAdjustmentFactor ?? 1m;
+							var newStatArbFactorVal = newStatArbFactor ?? 1m;
+							if (oldStatArbFactor > 0m)
+							{
+								var statArbRatio = newStatArbFactorVal / oldStatArbFactor;
+								scored = scored with
+								{
+									MarketNetPremiumPerShare = liveStatArb?.MarketNet,
+									TheoreticalNetPremiumPerShare = liveStatArb?.TheoreticalNet,
+									StatArbAdjustmentFactor = newStatArbFactor,
+									BiasAdjustedScore = scored.BiasAdjustedScore * statArbRatio,
+									FinalScore = scored.FinalScore.HasValue ? scored.FinalScore.Value * statArbRatio : (decimal?)null,
+								};
+							}
 						}
 
 						var rationale = CandidateScorer.BuildRationale(scored, bias, ai.Opener);
