@@ -45,13 +45,13 @@ internal static class PositionReplay
 	/// Entry point. Same return shape as PositionTracker.BuildPositionRows so callers are unchanged.
 	/// </summary>
 	public static (List<PositionRow> rows, Dictionary<int, StrategyAdjustment> adjustments, Dictionary<string, List<NetDebitTrade>> singleLegStandalones)
-		Execute(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades)
+		Execute(Dictionary<string, List<Lot>> positions, Dictionary<string, Trade> tradeIndex, List<Trade> allTrades, DateTime? asOf = null)
 	{
 		var eventsPerUnderlying = BuildEventsPerUnderlying(allTrades);
 
 		var allLineages = new List<Lineage>();
 		int lineageIdCounter = 0;
-		var evaluationDate = EvaluationDate.Today;
+		var evaluationDate = asOf ?? EvaluationDate.Today;
 		foreach (var (underlying, events) in eventsPerUnderlying)
 		{
 			var active = new List<Lineage>();
