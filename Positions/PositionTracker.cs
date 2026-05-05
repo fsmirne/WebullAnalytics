@@ -116,10 +116,11 @@ public static class PositionTracker
 		if (trade.Side == Side.Expire && closedQty == 0)
 			return null;
 
+		var tradeValue = Math.Round(trade.Qty * trade.Price, 2) * trade.Multiplier;
 		if (trade.Side == Side.Buy)
-			cash -= trade.Qty * trade.Price * trade.Multiplier;
+			cash -= tradeValue;
 		else if (trade.Side == Side.Sell)
-			cash += trade.Qty * trade.Price * trade.Multiplier;
+			cash += tradeValue;
 
 		realized -= fee;
 		cash -= fee;
