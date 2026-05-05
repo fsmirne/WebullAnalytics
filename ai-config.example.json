@@ -36,7 +36,8 @@
 		"volatilityLookbackDays": 20,
 		"volatilityFitWeight": 0.50,
 		"maxPainWeight": 0.25,
-		"statArbWeight": 0.30,
+		"gexWeight": 0.25,
+		"statArbWeight": 0.15,
 		"liquidity": { "maxBidAskSpreadPct": 0.50, "minOpenInterest": 5, "minRelativeOpenInterest": 0.25, "weight": 0.50 },
 		"scenarioGridSigma": 1.0,
 		"structures": {

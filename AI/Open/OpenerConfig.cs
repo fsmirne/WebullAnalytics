@@ -15,6 +15,7 @@ internal sealed class OpenerConfig
 	[JsonPropertyName("volatilityLookbackDays")] public int VolatilityLookbackDays { get; set; } = 20;
 	[JsonPropertyName("volatilityFitWeight")] public decimal VolatilityFitWeight { get; set; } = 0.50m;
 	[JsonPropertyName("maxPainWeight")] public decimal MaxPainWeight { get; set; } = 0m;
+	[JsonPropertyName("gexWeight")] public decimal GexWeight { get; set; } = 0m;
 	[JsonPropertyName("statArbWeight")] public decimal StatArbWeight { get; set; } = 0.30m;
 	[JsonPropertyName("liquidity")] public OpenerLiquidityConfig Liquidity { get; set; } = new();
 

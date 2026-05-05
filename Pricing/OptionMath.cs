@@ -282,4 +282,14 @@ internal static class OptionMath
 		var pdf = Math.Exp(-0.5 * d1 * d1) / Math.Sqrt(2 * Math.PI);
 		return (decimal)(S * pdf * Math.Sqrt(T));
 	}
+
+	/// <summary>Gamma of a European option under Black-Scholes: second derivative of price w.r.t. spot. Same formula for calls and puts.</summary>
+	internal static decimal Gamma(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv)
+	{
+		if (timeYears <= 0 || iv <= 0m) return 0m;
+		double s = (double)spot, k = (double)strike, sigma = (double)iv, t = timeYears, r = riskFreeRate;
+		var d1 = (Math.Log(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * Math.Sqrt(t));
+		var pdf = Math.Exp(-0.5 * d1 * d1) / Math.Sqrt(2.0 * Math.PI);
+		return (decimal)(pdf / (s * sigma * Math.Sqrt(t)));
+	}
 }
