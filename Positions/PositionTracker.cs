@@ -36,8 +36,8 @@ public static class PositionTracker
 				var legs = Trade.GetLegs(allTrades, trade.Seq);
 				if (legs.Count >= 2)
 				{
-					var parentCash = (trade.Side == Side.Sell ? 1m : -1m) * trade.Qty * trade.Price * trade.Multiplier;
-					var legCash = legs.Sum(leg => (leg.Side == Side.Sell ? 1m : -1m) * leg.Qty * leg.Price * leg.Multiplier);
+					var parentCash = (trade.Side == Side.Sell ? 1m : -1m) * Math.Round(trade.Qty * trade.Price, 2) * trade.Multiplier;
+					var legCash = legs.Sum(leg => (leg.Side == Side.Sell ? 1m : -1m) * Math.Round(leg.Qty * leg.Price, 2) * leg.Multiplier);
 					realized += parentCash - legCash;
 				}
 			}
