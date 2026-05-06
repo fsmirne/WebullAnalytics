@@ -450,7 +450,7 @@ internal static class PositionReplay
 		int eventQty = 0;
 		foreach (var t in evt.Trades)
 		{
-			var signedCash = (t.Side == Side.Buy ? 1m : -1m) * t.Qty * t.Price * t.Multiplier;
+			var signedCash = (t.Side == Side.Buy ? 1m : -1m) * Math.Round(t.Qty * t.Price, 2) * t.Multiplier;
 			eventCash += signedCash;
 			eventQty = Math.Max(eventQty, t.Qty); // for strategy orders, all legs share qty
 			lin.TradeHistory.Add(new NetDebitTrade(t.Timestamp, t.Instrument, t.Side, t.Qty, t.Price, signedCash));
