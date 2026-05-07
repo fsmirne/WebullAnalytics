@@ -119,36 +119,53 @@ internal static class CandidateScorer
 	}
 
 	/// <summary>
-	/// Computes the GEX gravity pin and net-gamma fraction for the target expiry.
-	/// Net dealer GEX per strike = (callGamma × callOI − putGamma × putOI) × 100 × spot.
-	/// GexPin is the strike with the highest net GEX value (strongest positive dealer gamma = dominant pin).
-	/// NetGexFraction = netGex / absGex, normalized to [−1, +1]; positive means call gamma dominates.
+	/// Computes the GEX gravity strike and net-gamma fraction for the target expiry.
+	/// Per-strike gross gamma exposure = (callGamma × callOI + putGamma × putOI) × 100 × spot — the total
+	/// dealer hedging activity at that strike. GexGravity is the strike with the highest gross exposure
+	/// (matches the "gamma concentration" / "pin" definition used by Barchart, MenthorQ, and most public
+	/// GEX tools). The previous net-call-minus-put rule biased toward strikes with calls and few puts and
+	/// did not match what public sources call the gravity point.
+	/// NetGexFraction = (totalCallGex − totalPutGex) / (totalCallGex + totalPutGex), normalized to [−1, +1];
+	/// positive means call gamma dominates the chain.
 	/// </summary>
 	public static GexResult ComputeGex(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
 		var timeYears = Math.Max(1, (expiry.Date - asOf.Date).Days) / 365.0;
-		var strikeGex = new Dictionary<decimal, double>();
+		var callGexByStrike = new Dictionary<decimal, double>();
+		var putGexByStrike = new Dictionary<decimal, double>();
 		foreach (var kv in quotes)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(kv.Key);
 			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase) || parsed.ExpiryDate.Date != expiry.Date) continue;
 			if (!kv.Value.OpenInterest.HasValue || kv.Value.OpenInterest.Value <= 0 || !kv.Value.ImpliedVolatility.HasValue || kv.Value.ImpliedVolatility.Value <= 0m) continue;
 			var gamma = (double)OptionMath.Gamma(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, kv.Value.ImpliedVolatility.Value);
-			var contribution = (parsed.CallPut == "C" ? 1.0 : -1.0) * gamma * (double)kv.Value.OpenInterest.Value * 100.0 * (double)spot;
-			strikeGex.TryGetValue(parsed.Strike, out var existing);
-			strikeGex[parsed.Strike] = existing + contribution;
+			var dollars = gamma * (double)kv.Value.OpenInterest.Value * 100.0 * (double)spot;
+			var bucket = parsed.CallPut == "C" ? callGexByStrike : putGexByStrike;
+			bucket.TryGetValue(parsed.Strike, out var existing);
+			bucket[parsed.Strike] = existing + dollars;
 		}
-		if (strikeGex.Count == 0) return new GexResult(null, 0m);
-		var netGex = strikeGex.Values.Sum();
-		var absGex = strikeGex.Values.Sum(Math.Abs);
-		var netGexFraction = absGex > 0 ? (decimal)(netGex / absGex) : 0m;
-		decimal? gexPin = null;
-		var bestGex = double.MinValue;
-		foreach (var kv in strikeGex)
+
+		var allStrikes = new HashSet<decimal>(callGexByStrike.Keys);
+		allStrikes.UnionWith(putGexByStrike.Keys);
+		if (allStrikes.Count == 0) return new GexResult(null, 0m);
+
+		decimal? gravity = null;
+		var bestGross = double.MinValue;
+		var totalCallGex = 0.0;
+		var totalPutGex = 0.0;
+		foreach (var strike in allStrikes)
 		{
-			if (kv.Value > bestGex) { bestGex = kv.Value; gexPin = kv.Key; }
+			callGexByStrike.TryGetValue(strike, out var c);
+			putGexByStrike.TryGetValue(strike, out var p);
+			var gross = c + p;
+			if (gross > bestGross) { bestGross = gross; gravity = strike; }
+			totalCallGex += c;
+			totalPutGex += p;
 		}
-		return new GexResult(gexPin, netGexFraction);
+
+		var totalAbs = totalCallGex + totalPutGex;
+		var netGexFraction = totalAbs > 0 ? (decimal)((totalCallGex - totalPutGex) / totalAbs) : 0m;
+		return new GexResult(gravity, netGexFraction);
 	}
 
 	public static decimal MaxPainAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
@@ -157,11 +174,12 @@ internal static class CandidateScorer
 	public static decimal StatArbAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
 
 	/// <summary>
-	/// Per-expiry GEX result. GexPin is the strike with the highest net dealer gamma (the dominant gravity point).
+	/// Per-expiry GEX result. GexGravity is the strike with the highest gross gamma×OI (calls + puts) — the
+	/// gravity / pin point where dealer hedging is most concentrated.
 	/// NetGexFraction is total net gamma exposure normalized to [−1, +1]: positive = call gamma dominates (suppressive),
 	/// negative = put gamma dominates (amplifying).
 	/// </summary>
-	internal readonly record struct GexResult(decimal? GexPin, decimal NetGexFraction);
+	internal readonly record struct GexResult(decimal? GexGravity, decimal NetGexFraction);
 
 	internal readonly record struct MarketTheoreticalAggregate(decimal MarketNet, decimal TheoreticalNet, decimal GrossTheoretical);
 
@@ -731,9 +749,9 @@ internal static class CandidateScorer
 		if (p.GexAdjustmentFactor.HasValue)
 		{
 			factorParts.Add($"gex {p.GexAdjustmentFactor.Value:F2}");
-			var pinStr = p.GexPin.HasValue ? $"pin ${p.GexPin.Value:F2}, " : "";
+			var gravityStr = p.GexGravity.HasValue ? $"gravity ${p.GexGravity.Value:F2}, " : "";
 			var envStr = p.NetGexFraction.HasValue ? $"net gamma {p.NetGexFraction.Value:+0.00;-0.00}" : "";
-			indicatorParts.Add($"GEX {pinStr}{envStr} → gex {p.GexAdjustmentFactor.Value:F2}");
+			indicatorParts.Add($"GEX {gravityStr}{envStr} → gex {p.GexAdjustmentFactor.Value:F2}");
 		}
 		if (p.AssignmentRiskFactor.HasValue)
 			factorParts.Add($"assign {p.AssignmentRiskFactor.Value:F2}");
@@ -790,9 +808,9 @@ internal static class CandidateScorer
 		if (cfg.GexWeight <= 0m || spot <= 0m || targetIv <= 0m) return null;
 		var targetYears = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
 		var expectedMove = Math.Max(ResolveStrikeStep(cfg, skel.Ticker), spot * targetIv * (decimal)Math.Sqrt(targetYears));
-		var pinSignal = gex.GexPin.HasValue ? ComputeMaxPainSignal(skel, spot, gex.GexPin.Value, expectedMove, breakevens) : 0m;
+		var pinSignal = gex.GexGravity.HasValue ? ComputeMaxPainSignal(skel, spot, gex.GexGravity.Value, expectedMove, breakevens) : 0m;
 		var envSignal = Math.Clamp(gex.NetGexFraction * VolatilityFitSign(skel.StructureKind), -1m, 1m);
-		var combined = gex.GexPin.HasValue ? 0.60m * pinSignal + 0.40m * envSignal : envSignal;
+		var combined = gex.GexGravity.HasValue ? 0.60m * pinSignal + 0.40m * envSignal : envSignal;
 		return Math.Max(0.10m, 1m + cfg.GexWeight * combined);
 	}
 
@@ -986,7 +1004,7 @@ internal static class CandidateScorer
 			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
 			MaxPainAdjustmentFactor: maxPainFactor,
-			GexPin: gex.GexPin,
+			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
 			GexAdjustmentFactor: gexFactor,
 			SetupFactor: setupFactor,
@@ -1433,7 +1451,7 @@ internal static class CandidateScorer
 			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
 			MaxPainAdjustmentFactor: maxPainFactor,
-			GexPin: gex.GexPin,
+			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
 			GexAdjustmentFactor: gexFactor,
 			SetupFactor: setupFactor,
@@ -1589,7 +1607,7 @@ internal static class CandidateScorer
 			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
 			MaxPainAdjustmentFactor: maxPainFactor,
-			GexPin: gex.GexPin,
+			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
 			GexAdjustmentFactor: gexFactor,
 			SetupFactor: setupFactor,
@@ -1719,7 +1737,7 @@ internal static class CandidateScorer
 			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
 			MaxPainAdjustmentFactor: maxPainFactor,
-			GexPin: gex.GexPin,
+			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
 			GexAdjustmentFactor: gexFactor,
 			SetupFactor: setupFactor,
