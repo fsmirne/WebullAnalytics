@@ -77,8 +77,8 @@ public static class TableRenderer
 			console.WriteLine("No open positions.");
 		}
 
-		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(lotsByMatchKey, opts);
-		TableBuilder.RenderSummary(console, rows, running, initialAmount, unrealizedPnL);
+		var openMarketValue = TableBuilder.ComputeOpenPositionsMarketValue(lotsByMatchKey, opts);
+		TableBuilder.RenderSummary(console, rows, running, initialAmount, openMarketValue);
 	}
 
 	// Max-grid-columns is computed per panel inside the analyzers based on each panel's leg count.
