@@ -458,8 +458,10 @@ public static class TableBuilder
 
 	/// <summary>
 	/// Renders the summary footer (total fees, final P&L, final amount) to the given console.
+	/// "Final amount (unrealized)" is computed as <c>cash + openMarketValue</c> — the same identity
+	/// Webull uses, sidestepping cost-basis rounding drift.
 	/// </summary>
-	public static void RenderSummary(IAnsiConsole console, List<ReportRow> rows, decimal running, decimal initialAmount, decimal? unrealizedPnL = null)
+	public static void RenderSummary(IAnsiConsole console, List<ReportRow> rows, decimal running, decimal initialAmount, decimal? openMarketValue = null)
 	{
 		var totalFees = rows.Where(r => !r.IsStrategyLeg).Sum(r => r.Fees);
 		console.Write("Total fees: ");
@@ -475,9 +477,11 @@ public static class TableBuilder
 		console.Write(Formatters.FormatMoney(initialAmount + running, initialAmount));
 		console.WriteLine();
 
-		if (unrealizedPnL.HasValue)
+		if (openMarketValue.HasValue)
 		{
-			var totalPnL = running + unrealizedPnL.Value;
+			var finalCash = rows.Count > 0 ? rows[^1].Cash : initialAmount;
+			var finalAmount = finalCash + openMarketValue.Value;
+			var totalPnL = finalAmount - initialAmount;
 
 			console.Write("Final P&L (unrealized): ");
 			console.Write(Formatters.FormatPnL(totalPnL));
@@ -485,23 +489,22 @@ public static class TableBuilder
 			console.WriteLine();
 
 			console.Write("Final amount (unrealized): ");
-			console.Write(Formatters.FormatMoney(initialAmount + totalPnL, initialAmount));
+			console.Write(Formatters.FormatMoney(finalAmount, initialAmount));
 			console.WriteLine();
 		}
 	}
 
 	/// <summary>
-	/// Computes unrealized P&L for all open positions. When theoretical mode is active and IV
-	/// is available, uses Black-Scholes pricing; otherwise uses market mid prices from Yahoo quotes.
-	/// Returns null if no pricing source is available, or if the report is pinned to a past
-	/// snapshot date (via --until) — historical positions can't be valued with today's quotes.
+	/// Computes the signed market value of all open positions: Σ_leg sideSign × totalQty × mark × 100.
+	/// When theoretical mode is active and IV is available, uses Black-Scholes pricing; otherwise uses
+	/// market mid prices (bid+ask)/2 from Yahoo/Webull quotes. Returns null if no pricing source is
+	/// available, or if the report is pinned to a past snapshot date (via --until).
 	///
-	/// Iterates raw FIFO lots (not the aggregated PositionRow) so cost basis stays consistent
-	/// with how realized P&L is accounted. Using PositionRow.AvgPrice or AdjustedAvgPrice would
-	/// mix weighted-average basis (or roll-credit-adjusted strategy basis) with FIFO realized,
-	/// double-counting credits that are already captured in the realized total.
+	/// The caller derives "Final amount (unrealized)" as `cash + market_value` — the same identity
+	/// Webull uses on its dashboard. Using market value (rather than market - cost) avoids drift from
+	/// cost-basis rounding decisions accumulated during PositionTracker's cash bookkeeping.
 	/// </summary>
-	public static decimal? ComputeUnrealizedPnL(Dictionary<string, List<Lot>> lotsByMatchKey, AnalysisOptions opts)
+	public static decimal? ComputeOpenPositionsMarketValue(Dictionary<string, List<Lot>> lotsByMatchKey, AnalysisOptions opts)
 	{
 		if (lotsByMatchKey.Count == 0)
 			return null;
@@ -544,13 +547,9 @@ public static class TableBuilder
 				currentValue = (quote.Bid.Value + quote.Ask.Value) / 2m;
 			}
 
-			foreach (var lot in lots)
-			{
-				var unrealized = lot.Side == Side.Buy
-					? (currentValue - lot.Price) * lot.Qty * Trade.OptionMultiplier
-					: (lot.Price - currentValue) * lot.Qty * Trade.OptionMultiplier;
-				total += unrealized;
-			}
+			var totalQty = lots.Sum(l => l.Qty);
+			var sideSign = lots[0].Side == Side.Buy ? 1m : -1m;
+			total += sideSign * currentValue * totalQty * Trade.OptionMultiplier;
 			anyPriced = true;
 		}
 

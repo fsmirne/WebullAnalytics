@@ -22,8 +22,8 @@ public static class ExcelExporter
 		var breakEvenSheet = package.Workbook.Worksheets.Add("Break-Even Analysis");
 
 		// Export transaction report
-		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(lotsByMatchKey, opts);
-		ExportTransactions(transactionSheet, reportRows, finalPnL, initialAmount, unrealizedPnL);
+		var openMarketValue = TableBuilder.ComputeOpenPositionsMarketValue(lotsByMatchKey, opts);
+		ExportTransactions(transactionSheet, reportRows, finalPnL, initialAmount, openMarketValue);
 
 		// Export open positions
 		ExportPositions(positionsSheet, positionRows, opts);
@@ -41,7 +41,7 @@ public static class ExcelExporter
 		Console.WriteLine($"Excel report exported to: {outputPath}");
 	}
 
-	private static void ExportTransactions(ExcelWorksheet sheet, List<ReportRow> rows, decimal finalPnL, decimal initialAmount, decimal? unrealizedPnL)
+	private static void ExportTransactions(ExcelWorksheet sheet, List<ReportRow> rows, decimal finalPnL, decimal initialAmount, decimal? openMarketValue)
 	{
 		// Headers
 		sheet.Cells[1, 1].Value = "Date";
@@ -124,9 +124,11 @@ public static class ExcelExporter
 		sheet.Cells[row, 14].Style.Font.Bold = true;
 
 		// Add unrealized P&L and amount if quotes are available
-		if (unrealizedPnL.HasValue)
+		if (openMarketValue.HasValue)
 		{
-			var totalPnL = finalPnL + unrealizedPnL.Value;
+			var finalCash = rows.Count > 0 ? rows[^1].Cash : initialAmount;
+			var finalAmount = finalCash + openMarketValue.Value;
+			var totalPnL = finalAmount - initialAmount;
 
 			row++;
 			sheet.Cells[row, 10].Value = "Final P&L (unrealized):";
@@ -142,7 +144,7 @@ public static class ExcelExporter
 
 			sheet.Cells[row, 13].Value = "Unrealized:";
 			sheet.Cells[row, 13].Style.Font.Bold = true;
-			sheet.Cells[row, 14].Value = (double)(initialAmount + totalPnL);
+			sheet.Cells[row, 14].Value = (double)finalAmount;
 			sheet.Cells[row, 14].Style.Numberformat.Format = "$#,##0.00";
 			sheet.Cells[row, 14].Style.Font.Bold = true;
 			ColorCodePnL(sheet.Cells[row, 14], totalPnL);
