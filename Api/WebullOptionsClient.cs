@@ -51,10 +51,110 @@ public static class WebullOptionsClient
 		using var client = new HttpClient();
 		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
 
+		// derivativeIdMap is populated as a side effect of FetchChainsAsync so we can run the queryBatch
+		// fallback below for position legs that came back without a usable bid/ask.
+		var derivativeIdMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+		var (chainQuotes, chainUnderlyings) = await FetchChainsInternalAsync(client, config, roots, derivativeIdMap, cancellationToken);
+		var result = new Dictionary<string, OptionContractQuote>(chainQuotes, StringComparer.OrdinalIgnoreCase);
+		var underlyingPrices = new Dictionary<string, decimal>(chainUnderlyings, StringComparer.OrdinalIgnoreCase);
+
+		// Batch-fetch quotes for contracts the caller asked about that came back without a usable bid/ask.
+		// Restrict to wantedSymbols so we don't hammer the batch endpoint with the thousands of
+		// illiquid strikes the chain returns now that ParseStrategyListResponse keeps them all.
+		// Trigger on missing bid OR ask (not just both-null + iv-null): the chain frequently inlines
+		// IV but omits one or both of bid/ask for after-hours / low-liquidity legs, and we still need
+		// queryBatch to fill them in — otherwise the leg silently propagates as un-priceable downstream.
+		var needsBatch = wantedSymbols.Where(s => result.TryGetValue(s, out var q) && (q.Bid == null || q.Ask == null || q.ImpliedVolatility == null) && derivativeIdMap.ContainsKey(s)).ToList();
+		if (needsBatch.Count > 0)
+		{
+			var ids = needsBatch.Select(s => derivativeIdMap[s]).ToList();
+			Console.WriteLine($"Webull: batch-fetching {needsBatch.Count} contract(s) with missing quotes...");
+			// Chunk the request: each derivativeId is 9-13 digits, and 200+ ids in a single GET URL
+			// pushes past common 2 KB URL limits, after which Webull returns truncated/partial JSON
+			// and many of the ids come back with null bid/ask even though the data exists. Splitting
+			// into ~50-id batches keeps each URL safely under 1 KB.
+			const int batchSize = 50;
+			for (int i = 0; i < ids.Count; i += batchSize)
+			{
+				var chunk = ids.GetRange(i, Math.Min(batchSize, ids.Count - i));
+				var batchQuotes = await FetchQueryBatchAsync(client, config, chunk, cancellationToken);
+				foreach (var quote in batchQuotes)
+					result[quote.ContractSymbol] = quote;
+			}
+		}
+
+		// Surface any wanted symbols that ended up without a usable bid/ask so the user can see them
+		// in the scan output (instead of silently scoring them as un-priceable). This is the diagnostic
+		// the user needs to tell apart "Webull genuinely has no quote" from "our pipeline dropped it".
+		var unresolved = wantedSymbols
+			.Where(s => !result.TryGetValue(s, out var q) || q.Bid == null || q.Ask == null || q.Ask.Value <= 0m)
+			.OrderBy(s => s, StringComparer.Ordinal)
+			.ToList();
+		if (unresolved.Count > 0)
+			Console.WriteLine($"Webull: {unresolved.Count} wanted symbol(s) still missing bid/ask after chain+queryBatch: {string.Join(", ", unresolved.Take(10))}{(unresolved.Count > 10 ? $", +{unresolved.Count - 10} more" : "")}");
+
+		return (result, underlyingPrices);
+	}
+
+	/// <summary>Fetches the full option chain (all contracts across all expirations) for a single ticker.
+	/// Returns the raw chain quotes plus the underlying spot price reported by Webull's strategy/list endpoint
+	/// and a symbol→derivativeId map. Webull's strategy/list only inlines full OI/IV for the front-most
+	/// expiration; other expirations come back as stubs. Pass the returned <c>derivativeIds</c> map plus the
+	/// chain dict to <see cref="RefreshContractsAsync"/> to fill in OI/IV for symbols beyond the front month.</summary>
+	public static async Task<(IReadOnlyDictionary<string, OptionContractQuote> OptionQuotes, decimal? UnderlyingPrice, IReadOnlyDictionary<string, long> DerivativeIds)> FetchChainAsync(ApiConfig config, string ticker, CancellationToken cancellationToken)
+	{
+		using var client = new HttpClient();
+		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
+		var derivativeIdMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+		var (quotes, underlyings) = await FetchChainsInternalAsync(client, config, new[] { ticker }, derivativeIdMap, cancellationToken);
+		underlyings.TryGetValue(ticker, out var spot);
+		return (quotes, spot > 0m ? spot : null, derivativeIdMap);
+	}
+
+	/// <summary>Refreshes a subset of an already-fetched chain by re-pulling each contract through Webull's
+	/// queryBatch endpoint. Use this to fill in OI/IV for non-front-month contracts after <see cref="FetchChainAsync"/>.
+	/// Mutates <paramref name="chain"/> in place: each successfully refreshed symbol overwrites its entry.
+	/// Returns the count of contracts that were refreshed.</summary>
+	public static async Task<int> RefreshContractsAsync(
+		ApiConfig config,
+		IDictionary<string, OptionContractQuote> chain,
+		IEnumerable<string> symbols,
+		IReadOnlyDictionary<string, long> derivativeIdMap,
+		CancellationToken cancellationToken)
+	{
+		var ids = new List<long>();
+		foreach (var sym in symbols)
+			if (derivativeIdMap.TryGetValue(sym, out var id))
+				ids.Add(id);
+
+		if (ids.Count == 0) return 0;
+
+		using var client = new HttpClient();
+		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
+
+		var refreshed = 0;
+		const int batchSize = 50;
+		for (int i = 0; i < ids.Count; i += batchSize)
+		{
+			var chunk = ids.GetRange(i, Math.Min(batchSize, ids.Count - i));
+			var batchQuotes = await FetchQueryBatchAsync(client, config, chunk, cancellationToken);
+			foreach (var quote in batchQuotes)
+			{
+				chain[quote.ContractSymbol] = quote;
+				refreshed++;
+			}
+		}
+		return refreshed;
+	}
+
+	/// <summary>Iterates roots, hits strategy/list per root, and accumulates contracts + underlying prices.
+	/// Shared by <see cref="FetchOptionQuotesAsync"/> (which then runs queryBatch for position legs) and
+	/// <see cref="FetchChainAsync"/> (which doesn't need queryBatch).</summary>
+	private static async Task<(Dictionary<string, OptionContractQuote> OptionQuotes, Dictionary<string, decimal> UnderlyingPrices)> FetchChainsInternalAsync(
+		HttpClient client, ApiConfig config, IEnumerable<string> roots, Dictionary<string, long> derivativeIdMap, CancellationToken cancellationToken)
+	{
 		var result = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		var underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-		// OCC symbol → derivative tickerId, for contracts needing a batch refresh.
-		var derivativeIdMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 
 		foreach (var root in roots)
 		{
@@ -102,41 +202,6 @@ public static class WebullOptionsClient
 					result[quote.ContractSymbol] = quote;
 			}
 		}
-
-		// Batch-fetch quotes for contracts the caller asked about that came back without a usable bid/ask.
-		// Restrict to wantedSymbols so we don't hammer the batch endpoint with the thousands of
-		// illiquid strikes the chain returns now that ParseStrategyListResponse keeps them all.
-		// Trigger on missing bid OR ask (not just both-null + iv-null): the chain frequently inlines
-		// IV but omits one or both of bid/ask for after-hours / low-liquidity legs, and we still need
-		// queryBatch to fill them in — otherwise the leg silently propagates as un-priceable downstream.
-		var needsBatch = wantedSymbols.Where(s => result.TryGetValue(s, out var q) && (q.Bid == null || q.Ask == null || q.ImpliedVolatility == null) && derivativeIdMap.ContainsKey(s)).ToList();
-		if (needsBatch.Count > 0)
-		{
-			var ids = needsBatch.Select(s => derivativeIdMap[s]).ToList();
-			Console.WriteLine($"Webull: batch-fetching {needsBatch.Count} contract(s) with missing quotes...");
-			// Chunk the request: each derivativeId is 9-13 digits, and 200+ ids in a single GET URL
-			// pushes past common 2 KB URL limits, after which Webull returns truncated/partial JSON
-			// and many of the ids come back with null bid/ask even though the data exists. Splitting
-			// into ~50-id batches keeps each URL safely under 1 KB.
-			const int batchSize = 50;
-			for (int i = 0; i < ids.Count; i += batchSize)
-			{
-				var chunk = ids.GetRange(i, Math.Min(batchSize, ids.Count - i));
-				var batchQuotes = await FetchQueryBatchAsync(client, config, chunk, cancellationToken);
-				foreach (var quote in batchQuotes)
-					result[quote.ContractSymbol] = quote;
-			}
-		}
-
-		// Surface any wanted symbols that ended up without a usable bid/ask so the user can see them
-		// in the scan output (instead of silently scoring them as un-priceable). This is the diagnostic
-		// the user needs to tell apart "Webull genuinely has no quote" from "our pipeline dropped it".
-		var unresolved = wantedSymbols
-			.Where(s => !result.TryGetValue(s, out var q) || q.Bid == null || q.Ask == null || q.Ask.Value <= 0m)
-			.OrderBy(s => s, StringComparer.Ordinal)
-			.ToList();
-		if (unresolved.Count > 0)
-			Console.WriteLine($"Webull: {unresolved.Count} wanted symbol(s) still missing bid/ask after chain+queryBatch: {string.Join(", ", unresolved.Take(10))}{(unresolved.Count > 10 ? $", +{unresolved.Count - 10} more" : "")}");
 
 		return (result, underlyingPrices);
 	}
