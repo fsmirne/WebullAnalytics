@@ -141,7 +141,21 @@ internal static class AIContext
 		return config;
 	}
 
-	internal static IPositionSource BuildLivePositionSource(AIConfig config) => new LivePositionSource(ResolveTradeAccount(config));
+	internal static IPositionSource BuildLivePositionSource(AIConfig config)
+	{
+		var account = ResolveTradeAccount(config);
+		// Load local trade history so PositionReplay can supply roll-adjusted cost basis to rule
+		// evaluators. Webull's holdings endpoint reports current-leg cost only and ignores roll
+		// credits/debits, so without this enrichment a stop-loss check on a rolled position uses
+		// the wrong break-even (see `wa report` for the authoritative adjusted basis).
+		var (trades, feeLookup, err) = ReportCommand.LoadTrades(new ReportSettings());
+		if (err != 0)
+		{
+			Console.Error.WriteLine("[warn] ai: trade history unavailable; rules will use broker-reported cost basis only (rolls won't be reflected).");
+			return new LivePositionSource(account);
+		}
+		return new LivePositionSource(account, trades, feeLookup);
+	}
 
 	internal static IQuoteSource BuildLiveQuoteSource(AIConfig config) => new LiveQuoteSource(config.QuoteSource);
 
