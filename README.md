@@ -371,7 +371,7 @@ The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa
 Renders a 2D gamma-exposure heatmap over the option chain — rows = strikes (descending), columns = expirations (ascending). Cell hue encodes net polarity (green = call-dominated, red = put-dominated); cell brightness encodes |net GEX| relative to the chain max. Bold + underlined cells mark the per-expiry gravity strike (max gross gamma — call gamma×OI + put gamma×OI). The bold yellow strike row is the at-the-money strike. Below the heatmap, the command prints chain totals (call GEX, put GEX, gross, net, net fraction) and the top call walls (resistance) and put walls (support) ranked across the visible window.
 
 ```
-wa analyze gex <ticker> [--expiry <YYYY-MM-DD>] [--strike-range <pct>] [--max-expiries <n>] [--top-walls <n>] [--spot <TICKER:PRICE>] [--date <YYYY-MM-DD>]
+wa analyze gex <ticker> [--expiry <YYYY-MM-DD>] [--strike-range <pct>] [--max-strikes <n>] [--max-expiries <n>] [--top-walls <n>] [--spot <TICKER:PRICE>] [--date <YYYY-MM-DD>]
 ```
 
 Per-strike call GEX = `gamma(strike, spot, dte, iv) × callOI × 100 × spot`. Put GEX is the same with putOI. Net = call GEX − put GEX (signed); gross = call GEX + put GEX (always non-negative).
@@ -379,7 +379,7 @@ Per-strike call GEX = `gamma(strike, spot, dte, iv) × callOI × 100 × spot`. P
 Examples:
 
 ```bash
-# Whole chain, default ±20% strike window and 12 expirations
+# Whole chain, default ±20% strike window, 25 strikes closest to spot, 12 expirations
 wa analyze gex GME
 
 # Tighten to ±12% of spot and 6 expirations
@@ -387,6 +387,9 @@ wa analyze gex GME --strike-range 12 --max-expiries 6
 
 # Single expiry only
 wa analyze gex GME --expiry 2026-05-15
+
+# Densely-struck underlying — keep more rows
+wa analyze gex SPY --max-strikes 50
 
 # More walls in the ranking, override spot for what-if
 wa analyze gex SPY --top-walls 10 --spot SPY:580.50
@@ -423,6 +426,7 @@ analyze roll only:
 analyze gex only:
   --expiry <date>         Restrict to a single expiration (YYYY-MM-DD). Default: show all expirations in the chain.
   --strike-range <pct>    Strike window as ± percent of spot. Default: 20.
+  --max-strikes <n>       Max strike rows. Picks the N strikes closest to spot within --strike-range. Default: 25.
   --max-expiries <n>      Max expirations to display when --expiry is not set. Default: 12.
   --top-walls <n>         Number of top call/put walls to list in the resistance/support panels. Default: 5.
 ```
