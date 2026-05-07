@@ -36,14 +36,15 @@ internal sealed class StopLossRule : IManagementRule
 		// 3) Trigger on spot beyond break-even.
 		if (ctx.UnderlyingPrices.TryGetValue(position.Ticker, out var spot))
 		{
-			var (beLow, beHigh) = EstimateBreakEvens(position);
+			var (beLow, beHigh, beSource) = PositionBreakEvenEstimator.Estimate(position, ctx);
 			var pctBand = _config.SpotBeyondBreakevenPct / 100m;
+			var sourceTag = beSource == PositionBreakEvenEstimator.BreakEvenSource.Heuristic ? " (heuristic)" : "";
 			if (beLow.HasValue && spot < beLow.Value * (1m - pctBand))
 				return BuildClose(position, currentMarkPerContract.Value,
-					$"spot ${spot:F2} < lower break-even ${beLow.Value:F2} by > {_config.SpotBeyondBreakevenPct}%");
+					$"spot ${spot:F2} < lower break-even ${beLow.Value:F2}{sourceTag} by > {_config.SpotBeyondBreakevenPct}%");
 			if (beHigh.HasValue && spot > beHigh.Value * (1m + pctBand))
 				return BuildClose(position, currentMarkPerContract.Value,
-					$"spot ${spot:F2} > upper break-even ${beHigh.Value:F2} by > {_config.SpotBeyondBreakevenPct}%");
+					$"spot ${spot:F2} > upper break-even ${beHigh.Value:F2}{sourceTag} by > {_config.SpotBeyondBreakevenPct}%");
 		}
 
 		return null;
@@ -86,19 +87,4 @@ internal sealed class StopLossRule : IManagementRule
 		return total;
 	}
 
-	/// <summary>Rough break-even estimate from position legs. Returns (low, high); either may be null.
-	/// For calendars/diagonals the adjusted debit + strike geometry gives approximate break-evens.
-	/// For stop-loss trigger this rough estimate is sufficient; rules that require precise break-evens use BreakEvenAnalyzer.</summary>
-	private static (decimal? low, decimal? high) EstimateBreakEvens(OpenPosition p)
-	{
-		// For a long call calendar/diagonal: approximate break-even at short strike ± adjusted debit.
-		// For puts: mirror. This is intentionally coarse.
-		var shortLeg = p.Legs.FirstOrDefault(l => l.Side == Side.Sell && l.CallPut != null);
-		if (shortLeg == null) return (null, null);
-		var debit = Math.Abs(p.AdjustedNetDebit);
-		if (shortLeg.CallPut == "C")
-			return (shortLeg.Strike - debit * 3m, shortLeg.Strike + debit * 3m);
-		else
-			return (shortLeg.Strike - debit * 3m, shortLeg.Strike + debit * 3m);
-	}
 }

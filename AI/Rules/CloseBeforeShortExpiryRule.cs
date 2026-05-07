@@ -36,7 +36,7 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 		if (dte != 0) return null;
 
 		// Emergency: spot past BE band → close immediately, profit threshold doesn't apply.
-		if (IsSpotPastBreakEven(position, shortLeg, ctx, out var spot, out var beLow, out var beHigh))
+		if (IsSpotPastBreakEven(position, ctx, out var spot, out var beLow, out var beHigh))
 		{
 			return BuildClose(position,
 				$"emergency: spot ${spot:F2} outside BE band [${beLow:F2}, ${beHigh:F2}] on expiry day, close all {position.Quantity}",
@@ -75,15 +75,15 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 		return total;
 	}
 
-	private bool IsSpotPastBreakEven(OpenPosition position, PositionLeg shortLeg, EvaluationContext ctx, out decimal spot, out decimal beLow, out decimal beHigh)
+	private bool IsSpotPastBreakEven(OpenPosition position, EvaluationContext ctx, out decimal spot, out decimal beLow, out decimal beHigh)
 	{
 		spot = 0m; beLow = 0m; beHigh = 0m;
 		if (!ctx.UnderlyingPrices.TryGetValue(position.Ticker, out spot)) return false;
 
-		var debit = Math.Abs(position.AdjustedNetDebit);
-		if (debit <= 0m) return false;
-		beLow = shortLeg.Strike - debit;
-		beHigh = shortLeg.Strike + debit;
+		var (low, high, _) = PositionBreakEvenEstimator.Estimate(position, ctx);
+		if (!low.HasValue || !high.HasValue) return false;
+		beLow = low.Value;
+		beHigh = high.Value;
 
 		var buffer = _config.EmergencyBreakEvenBufferPct / 100m;
 		return spot < beLow * (1m - buffer) || spot > beHigh * (1m + buffer);
