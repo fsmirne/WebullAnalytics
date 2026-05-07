@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Text.Json;
 using WebullAnalytics.Api;
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.Analyze;
 
@@ -66,6 +67,8 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
+
+		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var configPath = Program.ResolvePath(Program.ApiConfigPath);
 		if (!File.Exists(configPath))
