@@ -108,8 +108,8 @@ public static partial class TextFileExporter
 			console.WriteLine("No open positions.");
 		}
 
-		var unrealizedPnL = TableBuilder.ComputeUnrealizedPnL(lotsByMatchKey, opts);
-		TableBuilder.RenderSummary(console, rows, running, initialAmount, unrealizedPnL);
+		var openMarketValue = TableBuilder.ComputeOpenPositionsMarketValue(lotsByMatchKey, opts);
+		TableBuilder.RenderSummary(console, rows, running, initialAmount, openMarketValue);
 
 		WriteConsoleOutputToTextFile(stringWriter, outputPath, "Text report exported to");
 	}
