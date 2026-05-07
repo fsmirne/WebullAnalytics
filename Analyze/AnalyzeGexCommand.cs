@@ -118,7 +118,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		AnsiConsole.WriteLine();
 		RenderHeatmap(matrix, spot.Value);
 		AnsiConsole.WriteLine();
-		RenderTotals(matrix);
+		RenderTotals(matrix, spot.Value);
 		AnsiConsole.WriteLine();
 		RenderWalls(matrix, settings.TopWalls);
 		return 0;
@@ -267,7 +267,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		return content;
 	}
 
-	private static void RenderTotals(GexMatrix matrix)
+	private static void RenderTotals(GexMatrix matrix, decimal spot)
 	{
 		var totalAbs = matrix.TotalCallGex + matrix.TotalPutGex;
 		var net = matrix.TotalCallGex - matrix.TotalPutGex;
@@ -283,7 +283,21 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		table.AddRow("Total absolute (gross)", FormatCompactDollars(totalAbs));
 		table.AddRow("Net (call − put)", $"[bold {netColor}]{netSign}{FormatCompactDollars(Math.Abs(net))}[/]");
 		table.AddRow("Net fraction", $"[bold {netColor}]{netFrac:+0.00;-0.00}[/]  [dim](+1 = pure call, −1 = pure put)[/]");
+		table.AddRow("Gamma flip", FormatGammaFlipDisplay(matrix.FindGammaFlip(spot), spot));
 		AnsiConsole.Write(table);
+	}
+
+	/// <summary>Formats the gamma flip cell: price + % distance from spot + regime label, colored by regime.
+	/// Spot above flip → positive gamma regime (dealers dampen vol); spot below → negative gamma regime (dealers amplify vol).</summary>
+	private static string FormatGammaFlipDisplay(decimal? flip, decimal spot)
+	{
+		if (!flip.HasValue) return "[dim]not in window[/]  [dim](widen --strike-range)[/]";
+		var deltaPct = (flip.Value / spot - 1m) * 100m;
+		var sign = deltaPct >= 0m ? "+" : "−";
+		var positive = spot >= flip.Value;
+		var color = positive ? "green" : "red";
+		var regime = positive ? "positive gamma" : "negative gamma";
+		return $"[bold {color}]${flip.Value:N2}[/]  [dim]({sign}{Math.Abs(deltaPct):F1}% vs spot, {regime} regime)[/]";
 	}
 
 	/// <summary>Renders the top N call walls and top N put walls. A "wall" is a strike with an outsized
@@ -351,6 +365,11 @@ internal sealed record GexCell(decimal CallGex, decimal PutGex)
 	public decimal Net => CallGex - PutGex;
 }
 
+/// <summary>Per-contract ingredients retained on the matrix so we can re-evaluate net dollar gamma at
+/// a hypothetical spot S* (used by <see cref="GexMatrix.FindGammaFlip"/>). One entry per (strike, expiry, side)
+/// that survived the displayed-window filter.</summary>
+internal sealed record GexContributor(decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall);
+
 internal sealed class GexMatrix
 {
 	public List<DateTime> Expiries { get; }
@@ -361,8 +380,9 @@ internal sealed class GexMatrix
 	public decimal TotalCallGex { get; }
 	public decimal TotalPutGex { get; }
 	public Dictionary<DateTime, decimal?> GravityByExpiry { get; }
+	public IReadOnlyList<GexContributor> Contributors { get; }
 
-	private GexMatrix(List<DateTime> expiries, List<decimal> strikes, Dictionary<(DateTime, decimal), GexCell> cells, decimal maxGross, decimal maxAbsNet, decimal totalCallGex, decimal totalPutGex, Dictionary<DateTime, decimal?> gravityByExpiry)
+	private GexMatrix(List<DateTime> expiries, List<decimal> strikes, Dictionary<(DateTime, decimal), GexCell> cells, decimal maxGross, decimal maxAbsNet, decimal totalCallGex, decimal totalPutGex, Dictionary<DateTime, decimal?> gravityByExpiry, IReadOnlyList<GexContributor> contributors)
 	{
 		Expiries = expiries;
 		Strikes = strikes;
@@ -372,6 +392,77 @@ internal sealed class GexMatrix
 		TotalCallGex = totalCallGex;
 		TotalPutGex = totalPutGex;
 		GravityByExpiry = gravityByExpiry;
+		Contributors = contributors;
+	}
+
+	/// <summary>
+	/// Estimates the gamma flip price S* — the underlying level where dealer net dollar-gamma
+	/// (Σ callGEX − Σ putGEX) crosses zero. Net dollar-gamma is monotone-increasing in S in
+	/// typical chains (puts dominate at low S, calls dominate at high S), so we bracket the
+	/// sign change by stepping outward from the current spot at 1% increments out to ±70%, then
+	/// bisect to ~$0.01. Returns null when no sign change is found in the search range —
+	/// usually means the displayed window is entirely call- or entirely put-dominated, so widen
+	/// --strike-range or --max-strikes.
+	/// </summary>
+	public decimal? FindGammaFlip(decimal currentSpot)
+	{
+		if (Contributors.Count == 0 || currentSpot <= 0m) return null;
+
+		decimal Net(decimal s)
+		{
+			decimal sum = 0m;
+			foreach (var c in Contributors)
+			{
+				var g = (decimal)OptionMath.Gamma(s, c.Strike, c.TimeYears, OptionMath.RiskFreeRate, c.Iv);
+				var dollar = g * c.Oi * 100m * s;
+				sum += c.IsCall ? dollar : -dollar;
+			}
+			return sum;
+		}
+
+		var atSpot = Net(currentSpot);
+		if (atSpot == 0m) return Math.Round(currentSpot, 2);
+
+		decimal lo, hi;
+		var step = currentSpot * 0.01m;
+		if (atSpot > 0m)
+		{
+			hi = currentSpot;
+			lo = 0m;
+			var minS = currentSpot * 0.3m;
+			var found = false;
+			for (var s = currentSpot - step; s >= minS; s -= step)
+			{
+				if (Net(s) <= 0m) { lo = s; found = true; break; }
+				hi = s;
+			}
+			if (!found) return null;
+		}
+		else
+		{
+			lo = currentSpot;
+			hi = 0m;
+			var maxS = currentSpot * 1.7m;
+			var found = false;
+			for (var s = currentSpot + step; s <= maxS; s += step)
+			{
+				if (Net(s) >= 0m) { hi = s; found = true; break; }
+				lo = s;
+			}
+			if (!found) return null;
+		}
+
+		// Bisect: invariant Net(lo) ≤ 0, Net(hi) ≥ 0, lo < hi
+		for (int i = 0; i < 50; i++)
+		{
+			if (hi - lo < 0.01m) break;
+			var mid = (lo + hi) / 2m;
+			var nMid = Net(mid);
+			if (nMid == 0m) return Math.Round(mid, 2);
+			if (nMid < 0m) lo = mid;
+			else hi = mid;
+		}
+		return Math.Round((lo + hi) / 2m, 2);
 	}
 
 	/// <summary>
@@ -399,6 +490,7 @@ internal sealed class GexMatrix
 		var raw = new Dictionary<(DateTime, decimal), (decimal CallGex, decimal PutGex)>();
 		var expirySet = new HashSet<DateTime>();
 		var strikeSet = new HashSet<decimal>();
+		var rawContribs = new List<(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall)>();
 
 		foreach (var kv in quotes)
 		{
@@ -416,12 +508,14 @@ internal sealed class GexMatrix
 			var dollarGex = gamma * q.OpenInterest.Value * 100m * spot;
 			if (dollarGex <= 0m) continue;
 
+			var isCall = parsed.CallPut == "C";
 			var key = (parsed.ExpiryDate.Date, parsed.Strike);
 			raw.TryGetValue(key, out var existing);
-			if (parsed.CallPut == "C")
+			if (isCall)
 				raw[key] = (existing.CallGex + dollarGex, existing.PutGex);
 			else
 				raw[key] = (existing.CallGex, existing.PutGex + dollarGex);
+			rawContribs.Add((parsed.ExpiryDate.Date, parsed.Strike, timeYears, q.ImpliedVolatility.Value, q.OpenInterest.Value, isCall));
 			expirySet.Add(parsed.ExpiryDate.Date);
 			strikeSet.Add(parsed.Strike);
 		}
@@ -467,6 +561,11 @@ internal sealed class GexMatrix
 				gravity[exp] = null;
 		}
 
-		return new GexMatrix(expiries, strikes, cells, maxGross, maxAbsNet, totalCall, totalPut, gravity);
+		var contributors = rawContribs
+			.Where(r => keptExpirySet.Contains(r.Expiry) && keptStrikeSet.Contains(r.Strike))
+			.Select(r => new GexContributor(r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall))
+			.ToList();
+
+		return new GexMatrix(expiries, strikes, cells, maxGross, maxAbsNet, totalCall, totalPut, gravity, contributors);
 	}
 }
