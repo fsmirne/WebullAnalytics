@@ -5,6 +5,8 @@ namespace WebullAnalytics.Tests.AI.Replay;
 
 public class HistoricalPriceCacheTests
 {
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
 	[Fact]
 	public async Task ExistingCsvIsRefreshedWhenAsOfIsNewerThanLastCachedDate()
 	{
@@ -25,7 +27,8 @@ public class HistoricalPriceCacheTests
 						[new DateTime(2026, 4, 23)] = 24.55m,
 						[new DateTime(2026, 4, 24)] = 25.10m,
 					});
-				});
+				},
+				utcNow: () => NyMidnight(2026, 4, 25));
 
 			var closes = await cache.GetRecentClosesAsync("GME", 4, new DateTime(2026, 4, 24), CancellationToken.None);
 
@@ -42,5 +45,85 @@ public class HistoricalPriceCacheTests
 		{
 			Directory.Delete(cacheDir, recursive: true);
 		}
+	}
+
+	[Fact]
+	public async Task TodayIsNotFetchedOrPersistedBeforeFivePmNyCutoff()
+	{
+		var cacheDir = Path.Combine(Path.GetTempPath(), $"HistoricalPriceCacheTests_{Guid.NewGuid():N}");
+		Directory.CreateDirectory(cacheDir);
+		try
+		{
+			var path = Path.Combine(cacheDir, "GME.csv");
+			await File.WriteAllTextAsync(path, "date,close\n2026-05-04,23.84\n2026-05-05,24.23\n");
+			var calls = new List<(DateTime from, DateTime to)>();
+			var cache = new HistoricalPriceCache(
+				cacheDir,
+				(ticker, from, to, cancellation) =>
+				{
+					calls.Add((from, to));
+					return Task.FromResult(new Dictionary<DateTime, decimal>
+					{
+						[new DateTime(2026, 5, 6)] = 24.30m,
+					});
+				},
+				utcNow: () => NyDateTimeToUtc(2026, 5, 6, 9, 45));
+
+			var close = await cache.GetCloseAsync("GME", new DateTime(2026, 5, 6), CancellationToken.None);
+
+			Assert.Null(close);
+			Assert.Empty(calls);
+			var persisted = await File.ReadAllTextAsync(path);
+			Assert.DoesNotContain("2026-05-06", persisted);
+		}
+		finally
+		{
+			Directory.Delete(cacheDir, recursive: true);
+		}
+	}
+
+	[Fact]
+	public async Task TodayIsFetchedAndPersistedAtOrAfterFivePmNyCutoff()
+	{
+		var cacheDir = Path.Combine(Path.GetTempPath(), $"HistoricalPriceCacheTests_{Guid.NewGuid():N}");
+		Directory.CreateDirectory(cacheDir);
+		try
+		{
+			var path = Path.Combine(cacheDir, "GME.csv");
+			await File.WriteAllTextAsync(path, "date,close\n2026-05-04,23.84\n2026-05-05,24.23\n");
+			var calls = new List<(DateTime from, DateTime to)>();
+			var cache = new HistoricalPriceCache(
+				cacheDir,
+				(ticker, from, to, cancellation) =>
+				{
+					calls.Add((from, to));
+					return Task.FromResult(new Dictionary<DateTime, decimal>
+					{
+						[new DateTime(2026, 5, 6)] = 25.17m,
+					});
+				},
+				utcNow: () => NyDateTimeToUtc(2026, 5, 6, 17, 0));
+
+			var close = await cache.GetCloseAsync("GME", new DateTime(2026, 5, 6), CancellationToken.None);
+
+			Assert.Equal(25.17m, close);
+			Assert.Single(calls);
+			Assert.Equal(new DateTime(2026, 5, 6), calls[0].from);
+			Assert.Equal(new DateTime(2026, 5, 7), calls[0].to);
+			var persisted = await File.ReadAllTextAsync(path);
+			Assert.Contains("2026-05-06,25.17", persisted);
+		}
+		finally
+		{
+			Directory.Delete(cacheDir, recursive: true);
+		}
+	}
+
+	private static DateTime NyMidnight(int year, int month, int day) => NyDateTimeToUtc(year, month, day, 0, 0);
+
+	private static DateTime NyDateTimeToUtc(int year, int month, int day, int hour, int minute)
+	{
+		var local = new DateTime(year, month, day, hour, minute, 0, DateTimeKind.Unspecified);
+		return TimeZoneInfo.ConvertTimeToUtc(local, NyTz);
 	}
 }

@@ -11,18 +11,23 @@ namespace WebullAnalytics.AI.Replay;
 /// </summary>
 internal sealed class HistoricalPriceCache
 {
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+	private static readonly TimeSpan SettlementCutoff = TimeSpan.FromHours(17);
+
 	private readonly string _cacheDir;
 	private readonly Func<string, DateTime, DateTime, CancellationToken, Task<Dictionary<DateTime, decimal>>> _fetchHistoricalClosesAsync;
+	private readonly Func<DateTime> _utcNow;
 	private readonly Dictionary<string, Dictionary<DateTime, decimal>> _memory = new(StringComparer.OrdinalIgnoreCase);
 
 	public HistoricalPriceCache(string? cacheDir = null) : this(cacheDir, YahooOptionsClient.FetchHistoricalClosesAsync)
 	{
 	}
 
-	internal HistoricalPriceCache(string? cacheDir, Func<string, DateTime, DateTime, CancellationToken, Task<Dictionary<DateTime, decimal>>> fetchHistoricalClosesAsync)
+	internal HistoricalPriceCache(string? cacheDir, Func<string, DateTime, DateTime, CancellationToken, Task<Dictionary<DateTime, decimal>>> fetchHistoricalClosesAsync, Func<DateTime>? utcNow = null)
 	{
 		_cacheDir = cacheDir ?? Program.ResolvePath("data/history");
 		_fetchHistoricalClosesAsync = fetchHistoricalClosesAsync;
+		_utcNow = utcNow ?? (() => DateTime.UtcNow);
 		Directory.CreateDirectory(_cacheDir);
 	}
 
@@ -34,16 +39,20 @@ internal sealed class HistoricalPriceCache
 
 	private async Task<Dictionary<DateTime, decimal>> LoadOrFetchAsync(string ticker, DateTime neededThrough, CancellationToken cancellation)
 	{
-		if (_memory.TryGetValue(ticker, out var cached) && !NeedsRefresh(cached, neededThrough)) return cached;
+		// Yahoo's daily chart endpoint returns the in-progress intraday last as the "close" for the
+		// current trading day. Clamp the request to the most recent settled NY trading date (today if
+		// it is at or past the 5pm NY cutoff, otherwise yesterday) so we never persist a stale value.
+		var effectiveThrough = ClampToSettled(neededThrough);
+		if (_memory.TryGetValue(ticker, out var cached) && !NeedsRefresh(cached, effectiveThrough)) return cached;
 
 		var path = Path.Combine(_cacheDir, $"{ticker.ToUpperInvariant()}.csv");
 		Dictionary<DateTime, decimal> map;
 		if (File.Exists(path))
 		{
 			map = ParseCsv(await File.ReadAllTextAsync(path, cancellation));
-			if (NeedsRefresh(map, neededThrough))
+			if (NeedsRefresh(map, effectiveThrough))
 			{
-				var refreshed = await FetchRangeAsync(ticker, map.Count > 0 ? map.Keys.Max().Date.AddDays(1) : neededThrough.AddYears(-2), neededThrough, cancellation);
+				var refreshed = await FetchRangeAsync(ticker, map.Count > 0 ? map.Keys.Max().Date.AddDays(1) : effectiveThrough.AddYears(-2), effectiveThrough, cancellation);
 				Merge(map, refreshed);
 				if (refreshed.Count > 0)
 					await File.WriteAllTextAsync(path, SerializeCsv(map), cancellation);
@@ -51,13 +60,25 @@ internal sealed class HistoricalPriceCache
 		}
 		else
 		{
-			map = await FetchRangeAsync(ticker, neededThrough.AddYears(-2), neededThrough, cancellation);
+			map = await FetchRangeAsync(ticker, effectiveThrough.AddYears(-2), effectiveThrough, cancellation);
 			if (map.Count > 0)
 				await File.WriteAllTextAsync(path, SerializeCsv(map), cancellation);
 		}
 
 		_memory[ticker] = map;
 		return map;
+	}
+
+	private DateTime ClampToSettled(DateTime neededThrough)
+	{
+		var settled = LatestSettledNyDate();
+		return neededThrough.Date < settled ? neededThrough.Date : settled;
+	}
+
+	private DateTime LatestSettledNyDate()
+	{
+		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(_utcNow(), NyTz);
+		return nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
 	}
 
 	/// <summary>Parses either the two-column native format ("date,close") or Yahoo's seven-column
