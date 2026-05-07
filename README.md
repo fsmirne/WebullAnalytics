@@ -15,6 +15,7 @@ A C# command-line tool for reviewing Webull trading activity end-to-end. It gene
   - Vertical Spreads
 - **Calendar Roll Tracking**: Intelligently groups rolled positions and tracks adjusted cost basis
 - **Scenario Analysis**: Evaluate hypothetical trades, roll grids, scenario-ranked position adjustments, and structured risk diagnostics
+- **GEX Heatmap**: 2D dealer-gamma-exposure heatmap over the option chain (strikes × expirations) with chain totals and call/put walls
 - **Broker Utilities**: Preview/place/cancel orders, inspect status, list app subscriptions, check positions, and manage OpenAPI trade tokens
 - **AI Proposal Engine**: Run one-shot, watch-loop, or historical replay evaluation for management proposals and new-opening ideas
 - **Fee Tracking**: Commissions and fees embedded in the order data
@@ -179,14 +180,15 @@ Options:
 
 ### Analyze Command
 
-The `analyze` command has four subcommands:
+The `analyze` command has five subcommands:
 
 - `analyze trade` — inject hypothetical trades into the report pipeline for what-if analysis.
 - `analyze roll` — show a 2D grid of theoretical roll credit/debit across underlying prices × times using Black-Scholes.
 - `analyze risk` — render a structured risk diagnostic for an option structure using live quotes.
 - `analyze position` — analyze an existing or manually specified option position and rank adjustment scenarios.
+- `analyze gex` — render a 2D dealer-gamma-exposure (GEX) heatmap over the option chain (strikes × expirations) plus chain totals and call/put walls.
 
-All four subcommands accept the `report` command's options plus `--date` for simulating a future evaluation date. Some subcommands add extra flags documented below.
+All subcommands accept the `report` command's options plus `--date` for simulating a future evaluation date. Some subcommands add extra flags documented below.
 
 #### `analyze trade`
 
@@ -364,6 +366,34 @@ wa analyze position "buy:GME260620C00025000:10@1.25" --api yahoo --strike-step 0
 
 The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa analyze trade` reproduction commands, and appends a machine-readable record to `data/analyze-position.jsonl`.
 
+#### `analyze gex`
+
+Renders a 2D gamma-exposure heatmap over the option chain — rows = strikes (descending), columns = expirations (ascending). Cell hue encodes net polarity (green = call-dominated, red = put-dominated); cell brightness encodes |net GEX| relative to the chain max. Bold + underlined cells mark the per-expiry gravity strike (max gross gamma — call gamma×OI + put gamma×OI). The bold yellow strike row is the at-the-money strike. Below the heatmap, the command prints chain totals (call GEX, put GEX, gross, net, net fraction) and the top call walls (resistance) and put walls (support) ranked across the visible window.
+
+```
+wa analyze gex <ticker> [--expiry <YYYY-MM-DD>] [--strike-range <pct>] [--max-expiries <n>] [--top-walls <n>] [--spot <TICKER:PRICE>] [--date <YYYY-MM-DD>]
+```
+
+Per-strike call GEX = `gamma(strike, spot, dte, iv) × callOI × 100 × spot`. Put GEX is the same with putOI. Net = call GEX − put GEX (signed); gross = call GEX + put GEX (always non-negative).
+
+Examples:
+
+```bash
+# Whole chain, default ±20% strike window and 12 expirations
+wa analyze gex GME
+
+# Tighten to ±12% of spot and 6 expirations
+wa analyze gex GME --strike-range 12 --max-expiries 6
+
+# Single expiry only
+wa analyze gex GME --expiry 2026-05-15
+
+# More walls in the ranking, override spot for what-if
+wa analyze gex SPY --top-walls 10 --spot SPY:580.50
+```
+
+Requires Webull API session headers (`data/api-config.json`) — run `wa sniff` first if missing. Yahoo isn't supported because chain-level GEX needs full OI + IV across every expiry, which only Webull's `strategy/list` + `queryBatch` combination reliably returns. Webull's `strategy/list` only inlines OI/IV for the front-most expiration, so the command refreshes in-window non-front-month contracts via `queryBatch` before computing the matrix.
+
 #### Options
 
 All `analyze` subcommands accept all `report` options, plus:
@@ -389,6 +419,12 @@ analyze roll only:
   --cash <amount>         Available cash for funding the roll. Prints a Net surplus/shortfall line that combines
                           cash with the roll's natural-market credit/debit and compares against the BP delta.
                           Only meaningful with --side short.
+
+analyze gex only:
+  --expiry <date>         Restrict to a single expiration (YYYY-MM-DD). Default: show all expirations in the chain.
+  --strike-range <pct>    Strike window as ± percent of spot. Default: 20.
+  --max-expiries <n>      Max expirations to display when --expiry is not set. Default: 12.
+  --top-walls <n>         Number of top call/put walls to list in the resistance/support panels. Default: 5.
 ```
 
 ### Fetch Command
