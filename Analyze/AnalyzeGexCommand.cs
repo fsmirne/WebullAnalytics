@@ -30,6 +30,11 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	[Description("Strike window as ± percent of spot. Default: 20.")]
 	public int StrikeRangePct { get; set; } = 20;
 
+	[CommandOption("--max-strikes <N>")]
+	[DefaultValue(25)]
+	[Description("Max strike rows to display. Picks the N strikes closest to spot within --strike-range. Default: 25.")]
+	public int MaxStrikes { get; set; } = 25;
+
 	[CommandOption("--max-expiries <N>")]
 	[DefaultValue(12)]
 	[Description("Max expirations to display when --expiry is not set. Default: 12.")]
@@ -48,6 +53,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (Expiry != null && !DateTime.TryParseExact(Expiry, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--expiry: expected YYYY-MM-DD, got '{Expiry}'");
 		if (StrikeRangePct <= 0 || StrikeRangePct > 200) return ValidationResult.Error($"--strike-range: must be in (0, 200], got {StrikeRangePct}");
+		if (MaxStrikes < 1 || MaxStrikes > 200) return ValidationResult.Error($"--max-strikes: must be in [1, 200], got {MaxStrikes}");
 		if (MaxExpiries < 1 || MaxExpiries > 50) return ValidationResult.Error($"--max-expiries: must be in [1, 50], got {MaxExpiries}");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
 		return ValidationResult.Success();
@@ -98,10 +104,10 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// we re-pull contracts within the strike window and (when --expiry isn't set) the next maxExpiries
 		// expirations through queryBatch — that endpoint returns OI/IV for any derivativeId we ask for.
 		var quotes = new Dictionary<string, OptionContractQuote>(initialQuotes, StringComparer.OrdinalIgnoreCase);
-		var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.MaxExpiries, cancellation);
+		var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.MaxExpiries, settings.MaxStrikes, cancellation);
 		if (refreshed > 0) AnsiConsole.MarkupLine($"[dim]Refreshed {refreshed} in-window contract(s) via queryBatch.[/]");
 
-		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.MaxExpiries);
+		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.MaxExpiries, settings.MaxStrikes);
 		if (matrix.Strikes.Count == 0 || matrix.Expiries.Count == 0)
 		{
 			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
@@ -132,6 +138,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		DateTime? expiryFilter,
 		decimal strikeRangeFraction,
 		int maxExpiries,
+		int maxStrikes,
 		CancellationToken cancellation)
 	{
 		var minStrike = spot * (1m - strikeRangeFraction);
@@ -140,6 +147,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		// First pass: find which expiries we'll actually keep, so we only refresh contracts in those buckets.
 		var inScopeExpiries = new HashSet<DateTime>();
+		var candidateStrikes = new HashSet<decimal>();
 		foreach (var sym in chain.Keys)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
@@ -147,10 +155,16 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			if (p.ExpiryDate.Date < asOfDate) continue;
 			if (expiryFilter.HasValue && p.ExpiryDate.Date != expiryFilter.Value.Date) continue;
 			inScopeExpiries.Add(p.ExpiryDate.Date);
+			if (p.Strike >= minStrike && p.Strike <= maxStrike) candidateStrikes.Add(p.Strike);
 		}
 		var keptExpiries = expiryFilter.HasValue
 			? inScopeExpiries
 			: inScopeExpiries.OrderBy(d => d).Take(maxExpiries).ToHashSet();
+
+		// Cap rows: pick the maxStrikes strikes closest to spot. High-priced underlyings (e.g. SPY with
+		// $1-wide strikes) otherwise pull hundreds of strikes into the heatmap and refresh thousands of
+		// contracts, which is slow and hard to read.
+		var keptStrikes = candidateStrikes.OrderBy(s => Math.Abs(s - spot)).Take(maxStrikes).ToHashSet();
 
 		var symbolsToRefresh = new List<string>();
 		foreach (var (sym, q) in chain)
@@ -158,7 +172,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
 			if (!keptExpiries.Contains(p.ExpiryDate.Date)) continue;
-			if (p.Strike < minStrike || p.Strike > maxStrike) continue;
+			if (!keptStrikes.Contains(p.Strike)) continue;
 			var hasOi = q.OpenInterest.HasValue && q.OpenInterest.Value > 0;
 			var hasIv = q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m;
 			if (hasOi && hasIv) continue;
@@ -365,6 +379,8 @@ internal sealed class GexMatrix
 	/// CallGex and PutGex, each computed as Black-Scholes gamma × OI × 100 × spot. Filters strikes to
 	/// ±strikeRangeFraction of spot and (when expiryFilter is null) limits to the next maxExpiries
 	/// expirations sorted ascending. When expiryFilter is set, all other expirations are dropped.
+	/// Caps row count to <paramref name="maxStrikes"/> by keeping the strikes closest to spot — high-priced
+	/// underlyings (e.g. SPY) otherwise pull hundreds of strikes into the heatmap.
 	/// </summary>
 	public static GexMatrix Build(
 		IReadOnlyDictionary<string, OptionContractQuote> quotes,
@@ -373,7 +389,8 @@ internal sealed class GexMatrix
 		DateTime asOf,
 		DateTime? expiryFilter,
 		decimal strikeRangeFraction,
-		int maxExpiries)
+		int maxExpiries,
+		int maxStrikes)
 	{
 		var minStrike = spot * (1m - strikeRangeFraction);
 		var maxStrike = spot * (1m + strikeRangeFraction);
@@ -414,12 +431,14 @@ internal sealed class GexMatrix
 			expiries = expiries.Take(maxExpiries).ToList();
 		var keptExpirySet = expiries.ToHashSet();
 
-		// Drop strikes that have no surviving cell after the expiry-window cap.
+		// Drop strikes that have no surviving cell after the expiry-window cap, then cap to maxStrikes
+		// closest to spot so high-priced underlyings don't blow up the row count.
 		var liveStrikes = new HashSet<decimal>();
 		foreach (var ((exp, strike), _) in raw)
 			if (keptExpirySet.Contains(exp))
 				liveStrikes.Add(strike);
-		var strikes = liveStrikes.OrderByDescending(s => s).ToList();
+		var keptStrikeSet = liveStrikes.OrderBy(s => Math.Abs(s - spot)).Take(maxStrikes).ToHashSet();
+		var strikes = keptStrikeSet.OrderByDescending(s => s).ToList();
 
 		var cells = new Dictionary<(DateTime, decimal), GexCell>();
 		decimal maxGross = 0m, maxAbsNet = 0m, totalCall = 0m, totalPut = 0m;
@@ -427,6 +446,7 @@ internal sealed class GexMatrix
 		foreach (var ((exp, strike), v) in raw)
 		{
 			if (!keptExpirySet.Contains(exp)) continue;
+			if (!keptStrikeSet.Contains(strike)) continue;
 			var cell = new GexCell(v.CallGex, v.PutGex);
 			cells[(exp, strike)] = cell;
 			if (cell.Gross > maxGross) maxGross = cell.Gross;
