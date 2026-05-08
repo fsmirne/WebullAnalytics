@@ -111,6 +111,48 @@ public static class WebullOptionsClient
 		return (quotes, spot > 0m ? spot : null, derivativeIdMap);
 	}
 
+	/// <summary>Fetches the full chain for a ticker and refreshes OI/IV for chain symbols at the given
+	/// expiries within ±<paramref name="strikeRangeFraction"/> of spot. Use this when downstream scoring
+	/// (max-pain, GEX) needs comprehensive chain data at the position's target expiries; the standard
+	/// <see cref="FetchOptionQuotesAsync"/> only fills OI/IV for the position's own legs at non-front-month
+	/// expiries, which leaves max-pain/GEX with a single-strike chain that locks onto the position's strike.</summary>
+	public static async Task<(IReadOnlyDictionary<string, OptionContractQuote> Quotes, decimal? Spot, IReadOnlyDictionary<string, long> DerivativeIds)> FetchChainWithExpiryRefreshAsync(
+		ApiConfig config,
+		string ticker,
+		IReadOnlyCollection<DateTime> targetExpiries,
+		decimal strikeRangeFraction,
+		CancellationToken cancellationToken)
+	{
+		var (chain, spot, derivativeIds) = await FetchChainAsync(config, ticker, cancellationToken);
+		if (!spot.HasValue || spot.Value <= 0m || chain.Count == 0 || targetExpiries.Count == 0)
+			return (chain, spot, derivativeIds);
+
+		var minStrike = spot.Value * (1m - strikeRangeFraction);
+		var maxStrike = spot.Value * (1m + strikeRangeFraction);
+		var expirySet = new HashSet<DateTime>(targetExpiries.Select(d => d.Date));
+
+		var symbolsToRefresh = new List<string>();
+		foreach (var (sym, q) in chain)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (!expirySet.Contains(p.ExpiryDate.Date)) continue;
+			if (p.Strike < minStrike || p.Strike > maxStrike) continue;
+			var hasOi = q.OpenInterest.HasValue && q.OpenInterest.Value > 0;
+			var hasIv = q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m;
+			if (hasOi && hasIv) continue;
+			symbolsToRefresh.Add(sym);
+		}
+
+		if (symbolsToRefresh.Count == 0)
+			return (chain, spot, derivativeIds);
+
+		Console.WriteLine($"Webull: refreshing {symbolsToRefresh.Count} non-front-month chain contract(s) for max-pain/GEX accuracy...");
+		var mutableChain = new Dictionary<string, OptionContractQuote>(chain, StringComparer.OrdinalIgnoreCase);
+		await RefreshContractsAsync(config, mutableChain, symbolsToRefresh, derivativeIds, cancellationToken);
+		return (mutableChain, spot, derivativeIds);
+	}
+
 	/// <summary>Refreshes a subset of an already-fetched chain by re-pulling each contract through Webull's
 	/// queryBatch endpoint. Use this to fill in OI/IV for non-front-month contracts after <see cref="FetchChainAsync"/>.
 	/// Mutates <paramref name="chain"/> in place: each successfully refreshed symbol overwrites its entry.
