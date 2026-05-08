@@ -120,12 +120,32 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// Phase 1: fetch quotes for the position legs. We need spot before we can enumerate
 		// hypothetical strikes for scenarios, and the underlying price comes back as a byproduct
 		// of this same fetch. --spot still wins if supplied.
+		// For Webull: also refresh OI/IV for chain strikes near spot at each position expiry, so
+		// max-pain / GEX in the diagnostic see the full chain rather than just the position's strike.
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
 		if (!string.IsNullOrEmpty(settings.Api))
 		{
 			var positionSymbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(settings.Api, positionSymbols, cancellation);
+			if (string.Equals(settings.Api, "webull", StringComparison.OrdinalIgnoreCase))
+			{
+				var apiConfigPath = Program.ResolvePath(Program.ApiConfigPath);
+				if (File.Exists(apiConfigPath))
+				{
+					var apiCfg = System.Text.Json.JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(apiConfigPath));
+					if (apiCfg != null && apiCfg.Headers.Count > 0)
+					{
+						var targetExpiries = positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().ToList();
+						var (chainQuotes, chainSpot, _) = await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(apiCfg, ticker, targetExpiries, strikeRangeFraction: 0.20m, cancellation);
+						quotes = chainQuotes;
+						if (chainSpot.HasValue)
+							underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = chainSpot.Value };
+					}
+				}
+			}
+
+			if (quotes == null)
+				(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(settings.Api, positionSymbols, cancellation);
 		}
 
 		var spot = ResolveSpot(ticker, settings, underlyingPrices);
