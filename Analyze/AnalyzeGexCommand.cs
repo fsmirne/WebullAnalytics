@@ -11,10 +11,10 @@ namespace WebullAnalytics.Analyze;
 
 /// <summary>
 /// `wa analyze gex &lt;TICKER&gt;` — Renders a 2D GEX heatmap over the option chain
-/// (strikes × expirations) plus a totals panel and call/put walls. Pulls the chain from Webull
-/// directly (api-config.json must already be sniffed). Yahoo isn't supported because chain-level
-/// analytics need full OI + IV across every strike/expiry, which Webull's strategy/list payload
-/// returns in one shot.
+/// (strikes × expirations), a per-expiration summary (gravity / gamma flip / max pain), a chain
+/// totals panel, and call/put walls. Pulls the chain from Webull directly (api-config.json must
+/// already be sniffed). Yahoo isn't supported because chain-level analytics need full OI + IV
+/// across every strike/expiry, which Webull's strategy/list payload returns in one shot.
 /// </summary>
 internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 {
@@ -120,6 +120,8 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		RenderHeader(ticker, spot.Value, asOf, expiryFilter, matrix);
 		AnsiConsole.WriteLine();
 		RenderHeatmap(matrix, spot.Value);
+		AnsiConsole.WriteLine();
+		RenderPerExpirySummary(matrix, spot.Value, asOf);
 		AnsiConsole.WriteLine();
 		RenderTotals(matrix, spot.Value);
 		AnsiConsole.WriteLine();
@@ -303,6 +305,55 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		return $"[bold {color}]${flip.Value:N2}[/]  [dim]({sign}{Math.Abs(deltaPct):F1}% vs spot, {regime} regime)[/]";
 	}
 
+	/// <summary>Renders one row per expiration with the strike-anchored signals that aren't visible from the heatmap alone:
+	/// gravity (max gross gamma), top call wall (resistance) and put wall (support), gamma flip (where dealer net dollar-gamma
+	/// crosses zero for that expiry only), and max pain (strike minimizing total ITM payout). Lets the reader compare how the
+	/// per-expiry anchors line up against each other and against spot.</summary>
+	private static void RenderPerExpirySummary(GexMatrix matrix, decimal spot, DateTime asOf)
+	{
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title("[bold]Per-expiration[/]");
+		table.AddColumn(new TableColumn("[bold]Expiry[/]").NoWrap());
+		table.AddColumn(new TableColumn("[bold]DTE[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Gravity[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold green]Call wall[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold red]Put wall[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Gamma flip[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Max pain[/]").RightAligned().NoWrap());
+
+		foreach (var exp in matrix.Expiries)
+		{
+			var dte = Math.Max(0, (exp.Date - asOf.Date).Days);
+			matrix.GravityByExpiry.TryGetValue(exp, out var gravity);
+			var (callWall, putWall) = matrix.FindWalls(exp);
+			var flip = matrix.FindGammaFlip(spot, exp);
+			var maxPain = matrix.FindMaxPain(exp);
+
+			var gravityCell = gravity.HasValue ? $"${gravity.Value:N2}" : "[dim]—[/]";
+			table.AddRow($"{exp:yyyy-MM-dd}", dte.ToString(), gravityCell, FormatWallStrike(callWall, "green"), FormatWallStrike(putWall, "red"), FormatPriceVsSpotCompact(flip, spot, regimeColor: true), FormatPriceVsSpotCompact(maxPain, spot, regimeColor: false));
+		}
+
+		AnsiConsole.Write(table);
+		AnsiConsole.MarkupLine("[dim]Gravity = strike with max gross gamma. [green]Call wall[/] / [red]put wall[/] = strike with the largest call / put GEX for that expiry (resistance / support). Gamma flip = where dealer net dollar-gamma crosses 0 ([green]green[/] = spot in positive-γ regime, [red]red[/] = negative-γ). Max pain = strike minimizing total ITM payout (where most contracts expire worthless).[/]");
+	}
+
+	private static string FormatWallStrike(decimal? strike, string color) => strike.HasValue ? $"[bold {color}]${strike.Value:N2}[/]" : "[dim]—[/]";
+
+	/// <summary>Compact "$price (±x.x%)" cell. When <paramref name="regimeColor"/> is true (gamma flip), the price is
+	/// green if spot ≥ price (positive-γ regime) and red otherwise. When false (max pain), the price is bold but neutral —
+	/// max-pain pinning isn't directionally signed the way gamma regime is.</summary>
+	private static string FormatPriceVsSpotCompact(decimal? price, decimal spot, bool regimeColor)
+	{
+		if (!price.HasValue) return "[dim]—[/]";
+		var deltaPct = (price.Value / spot - 1m) * 100m;
+		var sign = deltaPct >= 0m ? "+" : "−";
+		if (regimeColor)
+		{
+			var color = spot >= price.Value ? "green" : "red";
+			return $"[bold {color}]${price.Value:N2}[/] [dim]({sign}{Math.Abs(deltaPct):F1}%)[/]";
+		}
+		return $"[bold]${price.Value:N2}[/] [dim]({sign}{Math.Abs(deltaPct):F1}%)[/]";
+	}
+
 	/// <summary>Renders the top N call walls and top N put walls. A "wall" is a strike with an outsized
 	/// concentration of dealer-hedging exposure on one side; call walls cap the upside (resistance) and
 	/// put walls cushion drawdowns (support). Ranks across the entire selected window (all strikes × expiries).</summary>
@@ -369,9 +420,11 @@ internal sealed record GexCell(decimal CallGex, decimal PutGex)
 }
 
 /// <summary>Per-contract ingredients retained on the matrix so we can re-evaluate net dollar gamma at
-/// a hypothetical spot S* (used by <see cref="GexMatrix.FindGammaFlip"/>). One entry per (strike, expiry, side)
-/// that survived the displayed-window filter.</summary>
-internal sealed record GexContributor(decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall);
+/// a hypothetical spot S* (used by <see cref="GexMatrix.FindGammaFlip(decimal)"/>) and total ITM payout
+/// at a strike (used by <see cref="GexMatrix.FindMaxPain"/>). One entry per (expiry, strike, side) that
+/// survived the strike-range filter for a kept expiry — NOT capped by --max-strikes, since analytics
+/// shouldn't be skewed by a display-only cap.</summary>
+internal sealed record GexContributor(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall);
 
 internal sealed class GexMatrix
 {
@@ -399,22 +452,36 @@ internal sealed class GexMatrix
 	}
 
 	/// <summary>
-	/// Estimates the gamma flip price S* — the underlying level where dealer net dollar-gamma
-	/// (Σ callGEX − Σ putGEX) crosses zero. Net dollar-gamma is monotone-increasing in S in
-	/// typical chains (puts dominate at low S, calls dominate at high S), so we bracket the
-	/// sign change by stepping outward from the current spot at 1% increments out to ±70%, then
-	/// bisect to ~$0.01. Returns null when no sign change is found in the search range —
-	/// usually means the displayed window is entirely call- or entirely put-dominated, so widen
-	/// --strike-range or --max-strikes.
+	/// Estimates the chain-wide gamma flip price S* — the underlying level where dealer net dollar-gamma
+	/// (Σ callGEX − Σ putGEX) crosses zero, summed across every contributor in the displayed window.
 	/// </summary>
-	public decimal? FindGammaFlip(decimal currentSpot)
+	public decimal? FindGammaFlip(decimal currentSpot) => FindGammaFlipImpl(currentSpot, Contributors);
+
+	/// <summary>
+	/// Per-expiration variant of <see cref="FindGammaFlip(decimal)"/>: the flip price using only
+	/// contributors that expire on <paramref name="expiry"/>. Useful for seeing how the flip migrates
+	/// across maturities (front-month flips usually sit closer to spot than back-month).
+	/// </summary>
+	public decimal? FindGammaFlip(decimal currentSpot, DateTime expiry)
 	{
-		if (Contributors.Count == 0 || currentSpot <= 0m) return null;
+		var perExpiry = Contributors.Where(c => c.Expiry == expiry.Date).ToList();
+		return FindGammaFlipImpl(currentSpot, perExpiry);
+	}
+
+	/// <summary>
+	/// Net dollar-gamma is typically monotone-increasing in S (puts dominate at low S, calls at high S),
+	/// so we bracket the sign change by stepping outward from spot at 1% increments out to ±70%, then
+	/// bisect to ~$0.01. Returns null when no sign change is found in the search range — usually means
+	/// the contributor set is entirely call- or entirely put-dominated.
+	/// </summary>
+	private static decimal? FindGammaFlipImpl(decimal currentSpot, IReadOnlyList<GexContributor> contribs)
+	{
+		if (contribs.Count == 0 || currentSpot <= 0m) return null;
 
 		decimal Net(decimal s)
 		{
 			decimal sum = 0m;
-			foreach (var c in Contributors)
+			foreach (var c in contribs)
 			{
 				var g = (decimal)OptionMath.Gamma(s, c.Strike, c.TimeYears, OptionMath.RiskFreeRate, c.Iv);
 				var dollar = g * c.Oi * 100m * s;
@@ -466,6 +533,56 @@ internal sealed class GexMatrix
 			else hi = mid;
 		}
 		return Math.Round((lo + hi) / 2m, 2);
+	}
+
+	/// <summary>
+	/// Returns (callWall, putWall) for <paramref name="expiry"/>: the strikes carrying the largest CallGex
+	/// and PutGex within that expiry's row of the heatmap. Walls are sourced from the displayed cell set
+	/// (so they reflect the same window as the per-expiry gravity marker), not from the wider analytic set.
+	/// </summary>
+	public (decimal? CallWall, decimal? PutWall) FindWalls(DateTime expiry)
+	{
+		decimal? bestCall = null, bestPut = null;
+		decimal bestCallGex = 0m, bestPutGex = 0m;
+		foreach (var ((exp, strike), cell) in Cells)
+		{
+			if (exp != expiry.Date) continue;
+			if (cell.CallGex > bestCallGex) { bestCallGex = cell.CallGex; bestCall = strike; }
+			if (cell.PutGex > bestPutGex) { bestPutGex = cell.PutGex; bestPut = strike; }
+		}
+		return (bestCall, bestPut);
+	}
+
+	/// <summary>
+	/// Returns the max-pain strike for <paramref name="expiry"/>: the listed strike that minimizes the
+	/// total dollar value of contracts expiring in-the-money (Σ max(S−K,0)·OI for calls + Σ max(K−S,0)·OI
+	/// for puts). This is the "pin" level where holders collectively lose the most. Evaluated only at
+	/// strikes actually present in the contributor set for that expiry — out-of-window strikes are ignored,
+	/// so for narrow --strike-range values the result may miss a true max-pain that sits beyond the window.
+	/// </summary>
+	public decimal? FindMaxPain(DateTime expiry)
+	{
+		var perExpiry = Contributors.Where(c => c.Expiry == expiry.Date).ToList();
+		if (perExpiry.Count == 0) return null;
+
+		var candidateStrikes = perExpiry.Select(c => c.Strike).Distinct().OrderBy(s => s).ToList();
+		decimal? bestStrike = null;
+		decimal bestPayout = decimal.MaxValue;
+		foreach (var s in candidateStrikes)
+		{
+			decimal payout = 0m;
+			foreach (var c in perExpiry)
+			{
+				var itm = c.IsCall ? Math.Max(s - c.Strike, 0m) : Math.Max(c.Strike - s, 0m);
+				payout += itm * c.Oi;
+			}
+			if (payout < bestPayout)
+			{
+				bestPayout = payout;
+				bestStrike = s;
+			}
+		}
+		return bestStrike;
 	}
 
 	/// <summary>
@@ -564,9 +681,11 @@ internal sealed class GexMatrix
 				gravity[exp] = null;
 		}
 
+		// Analytics use the full strike-range × kept-expiries set, NOT the --max-strikes display cap —
+		// per-expiry max pain and gamma flip would be skewed by an arbitrary display-row limit.
 		var contributors = rawContribs
-			.Where(r => keptExpirySet.Contains(r.Expiry) && keptStrikeSet.Contains(r.Strike))
-			.Select(r => new GexContributor(r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall))
+			.Where(r => keptExpirySet.Contains(r.Expiry))
+			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall))
 			.ToList();
 
 		return new GexMatrix(expiries, strikes, cells, maxGross, maxAbsNet, totalCall, totalPut, gravity, contributors);
