@@ -368,6 +368,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var result = new List<(PositionRow, List<PositionRow>)>();
 		PositionRow? currentParent = null;
 		var currentLegs = new List<PositionRow>();
+		var standaloneByKey = new Dictionary<string, List<PositionRow>>(StringComparer.Ordinal);
 
 		foreach (var row in rows)
 		{
@@ -381,11 +382,35 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				result.Add((currentParent, new List<PositionRow>(currentLegs)));
 			currentParent = null;
 			currentLegs = new List<PositionRow>();
-			if (row.Asset == Asset.OptionStrategy) currentParent = row;
+
+			if (row.Asset == Asset.OptionStrategy)
+			{
+				currentParent = row;
+			}
+			else if (row.Asset == Asset.Option && row.MatchKey != null)
+			{
+				if (!standaloneByKey.TryGetValue(row.MatchKey, out var bucket))
+				{
+					bucket = new List<PositionRow>();
+					standaloneByKey[row.MatchKey] = bucket;
+				}
+				bucket.Add(row);
+			}
 		}
 
 		if (currentParent != null && currentLegs.Count > 0)
 			result.Add((currentParent, new List<PositionRow>(currentLegs)));
+
+		// Net opposing same-OCC single-leg orphans. Two lineages on the same contract that net to zero
+		// represent fully-closed exposure (e.g., a strategy's short leg closed via a separate ticket from
+		// its long leg) and should not appear as analyzable positions.
+		foreach (var (_, bucket) in standaloneByKey)
+		{
+			var netQty = bucket.Sum(r => r.Side == Side.Buy ? r.Qty : -r.Qty);
+			if (netQty == 0) continue;
+			var representative = bucket.First(r => (r.Side == Side.Buy) == (netQty > 0));
+			result.Add((representative, new List<PositionRow> { representative }));
+		}
 
 		return result;
 	}
@@ -412,8 +437,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		var strikeStr = shortOpt.Strike == longOpt.Strike ? $"${shortOpt.Strike:F2}" : $"${shortOpt.Strike:F2}→${longOpt.Strike:F2}";
 		var expiryStr = parsedLegs.Count > 1 ? $"{shortOpt.ExpiryDate:MM-dd}/{longOpt.ExpiryDate:MM-dd}" : $"{shortOpt.ExpiryDate:MM-dd}";
+		var kindLabel = parent.Asset == Asset.Option ? (parent.Side == Side.Buy ? "Long" : "Short") : parent.OptionKind;
 
-		return $"{ticker}  {parent.OptionKind}  {callPut}  {strikeStr}  {expiryStr}  x{qty}";
+		return $"{ticker}  {kindLabel}  {callPut}  {strikeStr}  {expiryStr}  x{qty}";
 	}
 
 	private static List<PositionSnapshot> BuildSnapshotsFromLegs(List<PositionRow> legRows)
