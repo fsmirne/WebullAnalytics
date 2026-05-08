@@ -315,6 +315,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		table.AddColumn(new TableColumn("[bold]Expiry[/]").NoWrap());
 		table.AddColumn(new TableColumn("[bold]DTE[/]").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("[bold]Gravity[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Gross γ[/]").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("[bold green]Call wall[/]").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("[bold red]Put wall[/]").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("[bold]Gamma flip[/]").RightAligned().NoWrap());
@@ -329,11 +330,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			var maxPain = matrix.FindMaxPain(exp);
 
 			var gravityCell = gravity.HasValue ? $"${gravity.Value:N2}" : "[dim]—[/]";
-			table.AddRow($"{exp:yyyy-MM-dd}", dte.ToString(), gravityCell, FormatWallStrike(callWall, "green"), FormatWallStrike(putWall, "red"), FormatPriceVsSpotCompact(flip, spot, regimeColor: true), FormatPriceVsSpotCompact(maxPain, spot, regimeColor: false));
+			var grossCell = gravity.HasValue && matrix.Cells.TryGetValue((exp, gravity.Value), out var gc) ? FormatCompactDollars(gc.Gross) : "[dim]—[/]";
+			table.AddRow($"{exp:yyyy-MM-dd}", dte.ToString(), gravityCell, grossCell, FormatWallStrike(callWall, "green"), FormatWallStrike(putWall, "red"), FormatPriceVsSpotCompact(flip, spot, regimeColor: true), FormatPriceVsSpotCompact(maxPain, spot, regimeColor: false));
 		}
 
 		AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Gravity = strike with max gross gamma. [green]Call wall[/] / [red]put wall[/] = strike with the largest call / put GEX for that expiry (resistance / support). Gamma flip = where dealer net dollar-gamma crosses 0 ([green]green[/] = spot in positive-γ regime, [red]red[/] = negative-γ). Max pain = strike minimizing total ITM payout (where most contracts expire worthless).[/]");
+		AnsiConsole.MarkupLine("[dim]Gravity = strike with max gross gamma; Gross γ = the gross GEX ($call γ×OI + $put γ×OI) at that strike (the value underlined in the heatmap above). [green]Call wall[/] / [red]put wall[/] = strike with the largest call / put GEX for that expiry (resistance / support). Gamma flip = where dealer net dollar-gamma crosses 0 ([green]green[/] = spot in positive-γ regime, [red]red[/] = negative-γ). Max pain = strike minimizing total ITM payout (where most contracts expire worthless).[/]");
 	}
 
 	private static string FormatWallStrike(decimal? strike, string color) => strike.HasValue ? $"[bold {color}]${strike.Value:N2}[/]" : "[dim]—[/]";
