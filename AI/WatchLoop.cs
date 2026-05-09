@@ -125,7 +125,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				if (openEvaluator != null && openSink != null)
 				{
 					var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
-					foreach (var p in openResults) { openSink.Emit(p); proposalsEmitted++; }
+					for (var i = 0; i < openResults.Count; i++) { openSink.Emit(openResults[i], rank: i + 1); proposalsEmitted++; }
 				}
 
 				ticksRun++;

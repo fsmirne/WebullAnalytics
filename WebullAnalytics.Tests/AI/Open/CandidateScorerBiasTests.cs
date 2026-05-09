@@ -55,11 +55,13 @@ public class CandidateScorerBiasTests
 	}
 
 	[Fact]
-	public void HighIvRelativeToHvBoostsShortPremiumStructures()
+	public void HighIvRelativeToHvBoostsShortVegaPositions()
 	{
+		// netVega = -3 saturates short-vega side at vegaScaled = -1; richness saturates at +1 with IV at
+		// 2× HV. Factor = 1 - 0.5 × (-1) × 1 = 1.5. Score 0.010 × 1.5 = 0.015.
 		var adjusted = CandidateScorer.VolatilityAdjust(
 			score: 0.010m,
-			kind: OpenStructureKind.ShortPutVertical,
+			netVegaPerContract: -3m,
 			ivAnnual: 0.60m,
 			historicalVolAnnual: 0.30m,
 			weight: 0.50m);
@@ -68,16 +70,33 @@ public class CandidateScorerBiasTests
 	}
 
 	[Fact]
-	public void HighIvRelativeToHvCutsLongPremiumStructures()
+	public void HighIvRelativeToHvCutsLongVegaPositions()
 	{
+		// netVega = +3 saturates long-vega side at vegaScaled = +1; richness +1. Factor = 1 - 0.5 × 1 × 1 = 0.5.
 		var adjusted = CandidateScorer.VolatilityAdjust(
 			score: 0.010m,
-			kind: OpenStructureKind.LongCall,
+			netVegaPerContract: 3m,
 			ivAnnual: 0.60m,
 			historicalVolAnnual: 0.30m,
 			weight: 0.50m);
 
 		Assert.Equal(0.005m, adjusted);
+	}
+
+	[Fact]
+	public void LowVegaPositionGetsSmallerVolFactorSwingThanHighVega()
+	{
+		// Two long-vega positions in a rich-IV environment. The fatter-vega one (DC-like, +$3) gets
+		// cut from 0.010 to 0.005; the thinner-vega one (DD-like, +$1) gets cut to ~0.00833.
+		var rich = 0.60m;
+		var hv = 0.30m;
+		var weight = 0.50m;
+		var heavyVega = CandidateScorer.VolatilityAdjust(0.010m, 3m, rich, hv, weight);
+		var lightVega = CandidateScorer.VolatilityAdjust(0.010m, 1m, rich, hv, weight);
+
+		Assert.True(heavyVega < lightVega, $"expected heavier-vega cut to be sharper; heavy={heavyVega} light={lightVega}");
+		Assert.Equal(0.005m, heavyVega);
+		Assert.Equal(0.0083333333333333333333333333m, lightVega, 12);
 	}
 
 	[Fact]
@@ -158,50 +177,6 @@ public class CandidateScorerBiasTests
 
 		Assert.NotNull(factor);
 		Assert.Equal(1m, factor.Value);
-	}
-
-	[Fact]
-	public void DiagonalGeometryFactorRewardsDiagonalWhenFrontWeekCollectsMeaningfulRent()
-	{
-		var shortExp = new DateTime(2026, 5, 8);
-		var longExp = new DateTime(2026, 5, 29);
-		var skel = new CandidateSkeleton("GME", OpenStructureKind.LongDiagonal, new[]
-		{
-			new ProposalLeg("sell", MatchKeys.OccSymbol("GME", shortExp, 24.5m, "P"), 1),
-			new ProposalLeg("buy", MatchKeys.OccSymbol("GME", longExp, 24m, "P"), 1)
-		}, TargetExpiry: shortExp);
-		var quotes = new Dictionary<string, OptionContractQuote>
-		{
-			[MatchKeys.OccSymbol("GME", shortExp, 24.5m, "P")] = TestQuote.Q(0.34m, 0.40m, 0.38m),
-			[MatchKeys.OccSymbol("GME", longExp, 24m, "P")] = TestQuote.Q(0.50m, 0.64m, 0.41m)
-		};
-
-		var factor = CandidateScorer.ComputeDiagonalGeometryFactor(skel, quotes, "mid");
-
-		Assert.NotNull(factor);
-		Assert.True(factor.Value > 0.80m);
-	}
-
-	[Fact]
-	public void DiagonalGeometryFactorCutsDiagonalWhenFrontWeekRentIsWeak()
-	{
-		var shortExp = new DateTime(2026, 5, 8);
-		var longExp = new DateTime(2026, 5, 29);
-		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongDiagonal, new[]
-		{
-			new ProposalLeg("sell", MatchKeys.OccSymbol("SPY", shortExp, 510m, "C"), 1),
-			new ProposalLeg("buy", MatchKeys.OccSymbol("SPY", longExp, 505m, "C"), 1)
-		}, TargetExpiry: shortExp);
-		var quotes = new Dictionary<string, OptionContractQuote>
-		{
-			[MatchKeys.OccSymbol("SPY", shortExp, 510m, "C")] = TestQuote.Q(0.10m, 0.14m, 0.25m),
-			[MatchKeys.OccSymbol("SPY", longExp, 505m, "C")] = TestQuote.Q(1.35m, 1.45m, 0.27m)
-		};
-
-		var factor = CandidateScorer.ComputeDiagonalGeometryFactor(skel, quotes, "mid");
-
-		Assert.NotNull(factor);
-		Assert.True(factor.Value < 0.65m);
 	}
 
 	[Fact]

@@ -50,10 +50,10 @@ public enum OpenStructureKind
 /// <param name="GexGravity">Strike with the highest gross gamma×OI (calls + puts) at the target expiry — the gravity / pin point where dealer hedging is most concentrated, matching the convention used by Barchart and most public GEX tools.</param>
 /// <param name="NetGexFraction">Net dealer gamma exposure normalized to [−1, +1]: positive = call gamma dominates (dealers net long gamma, suppressive regime); negative = put gamma dominates (amplifying regime).</param>
 /// <param name="GexAdjustmentFactor">GEX multiplier applied during ranking; null when disabled (gexWeight=0) or when the chain lacks sufficient IV data to compute gamma.</param>
-/// <param name="GeometryFactor">Diagonal carry-quality multiplier applied during ranking when the front short fails to collect enough rent relative to the long premium/debit.</param>
 /// <param name="RunwayFactor">Residual long-leg extrinsic/adjustment-runway multiplier applied during ranking when time remains after the target expiry.</param>
 /// <param name="AssignmentRiskFactor">Short-option assignment/near-spot risk multiplier applied during ranking; null when no short-leg penalty applied.</param>
 /// <param name="ThetaPerDayPerContract">Finite-difference net theta per day in dollars per contract. Used as a merit signal during opener ranking.</param>
+/// <param name="NetVegaPerContract">Closed-form Black-Scholes net vega in dollars per contract per 1 percentage-point of IV change. Long legs add, short legs subtract. Drives the vega-aware vol factor — long-vega positions get boosted when IV is cheap vs HV and cut when IV is rich; short-vega positions are mirror-image.</param>
 /// <param name="MarketNetPremiumPerShare">Aggregate market mid premium per share, signed (long sum − short sum). Positive = net debit, negative = net credit. Null when any leg lacks a two-sided live quote.</param>
 /// <param name="TheoreticalNetPremiumPerShare">Aggregate Black-Scholes theoretical premium per share, signed (long sum − short sum), priced at each leg's quoted IV. Same sign convention as the market value. Null when any leg lacks an IV or price.</param>
 /// <param name="StatArbAdjustmentFactor">Stat-arb multiplier applied during ranking. Edge = theoreticalNet − marketNet; positive edge boosts (favors the entrant — paid less than fair on debit, received more than fair on credit). Null when prerequisite values are unavailable.</param>
@@ -90,10 +90,10 @@ internal sealed record OpenProposal(
 	decimal? NetGexFraction = null,
 	decimal? GexAdjustmentFactor = null,
 	decimal? SetupFactor = null,
-	decimal? GeometryFactor = null,
 	decimal? RunwayFactor = null,
 	decimal? AssignmentRiskFactor = null,
 	decimal? ThetaPerDayPerContract = null,
+	decimal? NetVegaPerContract = null,
 	decimal? MarketNetPremiumPerShare = null,
 	decimal? TheoreticalNetPremiumPerShare = null,
 	decimal? StatArbAdjustmentFactor = null,
