@@ -111,10 +111,11 @@ internal static class TimeDecayGridBuilder
 	/// and magnitudes are baked per leg, so no parentSide flip is applied.
 	/// Stock legs are not rendered as grid rows; callers add stock P&L to net cells
 	/// after this method returns.
-	/// <paramref name="normalizingQty"/> scales the per-cell "value" to a per-pair basis
-	/// (Σ signed × (legQty/normalizingQty) × legValue), keeping the grid on the same scale
-	/// as <paramref name="netPremium"/> (per-pair adj basis). Callers pass
-	/// <c>min(longQty, shortQty)</c> when the portfolio is at all balanced, else the total option qty.
+	/// <paramref name="normalizingQty"/> scales the per-cell "value" so it sits on the same scale as
+	/// <paramref name="netPremium"/> (Σ signed × (legQty/normalizingQty) × legValue). Callers pass the
+	/// common leg qty when every leg has the same size (clean multi-leg structure), else
+	/// <c>min(longQty, shortQty)</c> for uneven portfolios, falling back to the total option qty when
+	/// the portfolio is single-sided.
 	/// Cell P&L is derived from the rounded display value so that colors stay consistent with
 	/// what the user sees (matches the uniform-qty overload's behavior at rounded break-evens).
 	/// </summary>
