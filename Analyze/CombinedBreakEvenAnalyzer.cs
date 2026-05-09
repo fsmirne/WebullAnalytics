@@ -103,16 +103,29 @@ public static class CombinedBreakEvenAnalyzer
 		var optionLegs = merged.Where(l => !l.IsStock).ToList();
 		var stockLeg = merged.FirstOrDefault(l => l.IsStock);
 
-		// Normalizing qty keeps the grid "value" column on the same per-pair scale as the adj basis
-		// displayed in the details line: balanced / partly balanced portfolios quote per matched pair;
-		// single-sided portfolios quote per weighted contract.
-		var longQty = optionLegs.Where(l => l.Side == Side.Buy).Sum(l => l.Qty);
-		var shortQty = optionLegs.Where(l => l.Side == Side.Sell).Sum(l => l.Qty);
-		var pairQty = Math.Min(longQty, shortQty);
+		// Quoting unit:
+		//  • If every option leg shares the same contract qty, the portfolio is a clean copy of one multi-leg
+		//    structure (vertical, calendar, condor, double calendar, etc.) and we quote per-structure: each
+		//    leg gets weight 1, so netPremium is the simple sum of signed leg prices.
+		//  • Otherwise leg sizes differ across the portfolio and there is no single natural structure unit;
+		//    fall back to per-matched-pair quoting (legacy behavior) where pairQty = min(totalLong, totalShort).
+		//    Single-sided portfolios fall back further to total option qty (per weighted contract).
 		var totalQty = optionLegs.Sum(l => l.Qty);
+		var distinctQtys = optionLegs.Select(l => l.Qty).Distinct().Count();
+		int pairQty;
+		if (optionLegs.Count > 0 && distinctQtys == 1)
+		{
+			pairQty = optionLegs[0].Qty;
+		}
+		else
+		{
+			var longQty = optionLegs.Where(l => l.Side == Side.Buy).Sum(l => l.Qty);
+			var shortQty = optionLegs.Where(l => l.Side == Side.Sell).Sum(l => l.Qty);
+			pairQty = Math.Min(longQty, shortQty);
+		}
 		var normalizingQty = pairQty > 0 ? pairQty : totalQty;
 
-       // Per-pair net premium: Σ signed × (legQty / normalizingQty) × legPrice.
+		// Net premium on the pairQty scale: Σ signed × (legQty / normalizingQty) × legPrice.
 		// The grid cell uses (displayValue − netPremium) × normalizingQty × 100 to derive pnl,
 		// so colors stay consistent with the rounded display value.
 		decimal netPremium = 0m;
