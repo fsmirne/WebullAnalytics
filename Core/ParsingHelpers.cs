@@ -120,7 +120,13 @@ public static partial class ParsingHelpers
 	/// <param name="distinctCallPut">Number of distinct call/put types (1 or 2)</param>
 	public static string ClassifyStrategyKind(int legCount, int distinctExpiries, int distinctStrikes, int distinctCallPut)
 	{
-		if (legCount >= 4 && distinctCallPut == 2) return distinctStrikes <= 3 ? "IronButterfly" : "IronCondor";
+		if (legCount >= 4 && distinctCallPut == 2)
+		{
+			// Multi-expiry 4-leggers are doubles, not irons. DoubleCalendar shares one strike on each side
+			// (2 distinct strikes total); DoubleDiagonal offsets the long wing on each side (3+ strikes).
+			if (distinctExpiries >= 2) return distinctStrikes <= 2 ? "DoubleCalendar" : "DoubleDiagonal";
+			return distinctStrikes <= 3 ? "IronButterfly" : "IronCondor";
+		}
 		if (legCount >= 4) return distinctStrikes <= 3 ? "Butterfly" : "Condor";
 
 		return (distinctExpiries > 1, distinctStrikes > 1) switch

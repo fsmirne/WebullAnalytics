@@ -98,8 +98,36 @@ internal sealed class OpenProposalSink : IDisposable
 		};
 
 		var rows = new List<IRenderable>();
-		var legsText = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
-		rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/]"));
+		if (p.StructureKind is OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal)
+		{
+			// Both halves of the double share a single panel so the user can place either side
+			// independently or both as one 4-leg order. Group by P/C; print put side first.
+			var grouped = p.Legs
+				.Select(l => (Leg: l, Parsed: ParsingHelpers.ParseOptionSymbol(l.Symbol)))
+				.Where(x => x.Parsed != null)
+				.GroupBy(x => x.Parsed!.CallPut, StringComparer.Ordinal)
+				.OrderBy(g => g.Key == "P" ? 0 : 1)
+				.ToList();
+			if (grouped.Count == 2 && grouped.All(g => g.Count() == 2))
+			{
+				foreach (var group in grouped)
+				{
+					var label = group.Key == "P" ? "Put side: " : "Call side:";
+					var sideText = string.Join(", ", group.Select(x => $"{x.Leg.Action.ToUpperInvariant()} {x.Leg.Symbol} x{x.Leg.Qty}"));
+					rows.Add(new Markup($"[bold]{label}[/] {Markup.Escape(sideText)}"));
+				}
+			}
+			else
+			{
+				var legsTextFallback = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
+				rows.Add(new Markup($"[bold]{Markup.Escape(legsTextFallback)}[/]"));
+			}
+		}
+		else
+		{
+			var legsText = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
+			rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/]"));
+		}
         if (!string.IsNullOrWhiteSpace(p.PricingWarning))
 			rows.Add(new Markup($"[yellow]{Markup.Escape(p.PricingWarning)}[/]"));
 		if (p.CashReserveBlocked && p.CashReserveDetail != null)
@@ -122,13 +150,44 @@ internal sealed class OpenProposalSink : IDisposable
 
 	/// <summary>Appends copy-pasteable `wa trade place` and `wa analyze trade` lines as Markup rows.
 	/// trade place uses the selected price basis (mid by default, bid/ask when explicitly requested).
-	/// analyze trade uses the matching placeholder keywords for the same basis.</summary>
+	/// analyze trade uses the matching placeholder keywords for the same basis. DoubleCalendar/DoubleDiagonal
+	/// emit two trade place lines (Webull rejects 4-leg double-calendar tickets) but a single analyze trade
+	/// covering all four legs since the analyzer scores the whole structure.</summary>
 	private void AppendReproductionCommands(List<IRenderable> rows, OpenProposal p, string suggestPricing)
 	{
-		var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-		var limitPerShare = SuggestionPricing.TryGetLimitPerShare(p.Legs, suggestPricing) ?? Math.Abs(p.DebitOrCreditPerContract / 100m);
-		var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
-		rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
+		if (p.StructureKind is OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal)
+		{
+			var sides = p.Legs
+				.Select(l => (Leg: l, Parsed: ParsingHelpers.ParseOptionSymbol(l.Symbol)))
+				.Where(x => x.Parsed != null)
+				.GroupBy(x => x.Parsed!.CallPut, StringComparer.Ordinal)
+				.OrderBy(g => g.Key == "P" ? 0 : 1)
+				.ToList();
+			if (sides.Count == 2 && sides.All(g => g.Count() == 2))
+			{
+				foreach (var side in sides)
+				{
+					var label = side.Key == "P" ? "put" : "call";
+					var sideLegs = side.Select(x => x.Leg).ToList();
+					var sideTrades = string.Join(",", sideLegs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+					var sideLimit = (SuggestionPricing.TryGetLimitPerShare(sideLegs, suggestPricing) ?? 0m).ToString("F2", CultureInfo.InvariantCulture);
+					rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(sideTrades)}\" --limit {sideLimit}  # {label} side[/]"));
+				}
+			}
+			else
+			{
+				var fallbackTrades = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+				var fallbackLimit = (SuggestionPricing.TryGetLimitPerShare(p.Legs, suggestPricing) ?? Math.Abs(p.DebitOrCreditPerContract / 100m)).ToString("F2", CultureInfo.InvariantCulture);
+				rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(fallbackTrades)}\" --limit {fallbackLimit}[/]"));
+			}
+		}
+		else
+		{
+			var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+			var limitPerShare = SuggestionPricing.TryGetLimitPerShare(p.Legs, suggestPricing) ?? Math.Abs(p.DebitOrCreditPerContract / 100m);
+			var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
+			rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
+		}
 
 		var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{SuggestionPricing.AnalyzeKeywordFor(l, suggestPricing)}"));
 		rows.Add(new Markup($"[dim]{_cmdPrefix} wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));

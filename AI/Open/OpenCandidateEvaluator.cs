@@ -190,19 +190,10 @@ internal sealed class OpenCandidateEvaluator
 			for (int i = 0; i < survivors.Count; i++)
 				survivors[i] = ApplyCashSizing(survivors[i], freeCash, cfg, bias);
 
-			// Per-ticker top-N — count emitted proposals after expansion, since DoubleCalendar/DoubleDiagonal
-			// each expand into a call-side and put-side proposal and would otherwise blow past the cap.
-			var emittedForTicker = 0;
-			foreach (var proposal in RankForOutput(survivors))
-			{
-				if (emittedForTicker >= cfg.TopNPerTicker) break;
-				foreach (var expanded in ExpandExecutableProposals(proposal, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore))
-				{
-					if (emittedForTicker >= cfg.TopNPerTicker) break;
-					output.Add(expanded);
-					emittedForTicker++;
-				}
-			}
+			// Per-ticker top-N. DoubleCalendar/DoubleDiagonal stay as one 4-leg proposal here and render as a
+			// unified two-side panel downstream, so each counts as a single suggestion against the cap.
+			foreach (var proposal in RankForOutput(survivors).Take(cfg.TopNPerTicker))
+				output.Add(proposal);
 		}
 
 		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker; sentiment is
@@ -326,66 +317,6 @@ internal sealed class OpenCandidateEvaluator
 
 	private static IReadOnlyList<ProposalLeg> ScaleLegs(IReadOnlyList<ProposalLeg> legs, int qty) =>
 		legs.Select(l => l with { Qty = qty }).ToList();
-
-	internal static IReadOnlyList<OpenProposal> ExpandExecutableProposals(OpenProposal proposal, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual, string pricingMode, decimal? sentimentScore = null)
-	{
-		if (proposal.StructureKind is not (OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal))
-			return new[] { proposal };
-
-		var parsed = proposal.Legs
-			.Select(l => (Leg: l, Parsed: ParsingHelpers.ParseOptionSymbol(l.Symbol)))
-			.Where(x => x.Parsed != null)
-			.Select(x => (x.Leg, Parsed: x.Parsed!))
-			.ToList();
-		if (parsed.Count != proposal.Legs.Count)
-			return new[] { proposal };
-
-		var groups = parsed
-			.GroupBy(x => x.Parsed.CallPut, StringComparer.Ordinal)
-			.OrderBy(g => g.Key, StringComparer.Ordinal)
-			.ToList();
-		if (groups.Count != 2 || groups.Any(g => g.Count() != 2))
-			return new[] { proposal };
-
-		var expanded = new List<OpenProposal>(2);
-		foreach (var group in groups)
-		{
-			var legs = group.Select(x => new ProposalLeg(x.Leg.Action, x.Leg.Symbol, 1)).ToList();
-			var shortLeg = group.FirstOrDefault(x => x.Leg.Action == "sell");
-			var longLeg = group.FirstOrDefault(x => x.Leg.Action == "buy");
-			if (shortLeg.Parsed == null || longLeg.Parsed == null)
-				return new[] { proposal };
-
-			var kind = shortLeg.Parsed.Strike == longLeg.Parsed.Strike ? OpenStructureKind.LongCalendar : OpenStructureKind.LongDiagonal;
-			var skel = new CandidateSkeleton(proposal.Ticker, kind, legs, shortLeg.Parsed.ExpiryDate);
-			var rescored = CandidateScorer.Score(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, sentimentScore: sentimentScore);
-			if (rescored == null)
-				return new[] { proposal };
-
-			var label = group.Key == "P" ? "put-side" : "call-side";
-			var component = proposal.CashReserveBlocked || proposal.Qty == 0
-				? rescored with
-				{
-					Qty = 0,
-					CashReserveBlocked = true,
-					CashReserveDetail = proposal.CashReserveDetail
-				}
-				: rescored with
-				{
-					Qty = proposal.Qty,
-					Legs = ScaleLegs(rescored.Legs, proposal.Qty)
-				};
-
-			var rationale = CandidateScorer.BuildRationale(component, bias, cfg);
-			expanded.Add(component with
-			{
-				Rationale = $"{label} of {proposal.StructureKind}: {rationale}",
-				Fingerprint = CandidateScorer.ComputeFingerprint(component.Ticker, component.StructureKind, component.Legs, component.Qty)
-			});
-		}
-
-		return expanded;
-	}
 
 	private static bool IsCalendarLike(OpenProposal proposal) => proposal.StructureKind is OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal;
 
