@@ -43,11 +43,11 @@ internal sealed class OpenProposalSink : IDisposable
 		return abs < threshold;
 	}
 
-	public void Emit(OpenProposal p)
+	public void Emit(OpenProposal p, int? rank = null)
 	{
 		var repeat = IsRepeat(p);
 		WriteJsonl(p);
-		if (_log.ConsoleVerbosity != "error" && (!repeat || _log.ConsoleVerbosity == "debug")) WriteConsole(p);
+		if (_log.ConsoleVerbosity != "error" && (!repeat || _log.ConsoleVerbosity == "debug")) WriteConsole(p, rank);
 		_lastScoreByFingerprint[p.Fingerprint] = p.FinalScore ?? p.BiasAdjustedScore;
 	}
 
@@ -87,7 +87,7 @@ internal sealed class OpenProposalSink : IDisposable
 		_file.WriteLine(JsonSerializer.Serialize(record));
 	}
 
-	private void WriteConsole(OpenProposal p)
+	private void WriteConsole(OpenProposal p, int? rank)
 	{
 		var color = p.StructureKind switch
 		{
@@ -138,7 +138,8 @@ internal sealed class OpenProposalSink : IDisposable
 			rows.Add(RiskDiagnosticRenderer.Build(p.Diagnostic, ascii: _ascii));
 
 		var blocked = p.CashReserveBlocked ? " [yellow]⚠ blocked[/]" : "";
-		var header = $"[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}";
+		var rankPrefix = rank is int n ? $"[grey]#{n}[/] " : "";
+		var header = $"{rankPrefix}[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}";
 		var panel = new Panel(new Rows(rows))
 			.Header(header)
 			.Expand()

@@ -231,7 +231,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			var openSink = new OpenProposalSink(config.Log, mode: "once", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
-			foreach (var p in openResults) openSink.Emit(p);
+			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
 		}
 
