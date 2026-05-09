@@ -671,7 +671,7 @@ When a proposal fires, the rationale includes a safety summary showing what was 
 
 Proposals are written to two places:
 
-- **Console**: Spectre-formatted, color-coded by action (close = yellow, roll = cyan, alert-only = grey). Each proposal shows the legs and net credit/debit, followed by ready-to-run `wa trade place` and `wa analyze trade` commands, and the rule rationale.
+- **Console**: Spectre-formatted, color-coded by action (close = yellow, roll = cyan, alert-only = grey). Open-proposal panel headers carry a `#N` prefix matching the ranked output order so you can refer to a candidate by position (e.g. `#3 LongCalendar GME x166`); the counter resets at the start of each `wa ai scan` and at each `wa ai watch` tick. Each proposal shows the legs and net credit/debit, followed by ready-to-run `wa trade place` and `wa analyze trade` commands, and the rule rationale. Double calendars and double diagonals render as a single panel listing both halves under `Put side:` / `Call side:` rows; because Webull cannot place a 4-leg double-calendar ticket, the panel emits two `wa trade place` lines (one per side, each with its own per-share limit) and a single `wa analyze trade` covering all four legs.
 - **JSONL log** at `data/ai-proposals.log`: one proposal per line, machine-parseable with `jq` or similar. Includes `mode` field ("scan" / "watch" / "replay") to distinguish source runs.
 
 AI commands accept `--pricing mid|bidask` to control both displayed command prices and the pricing basis used in proposal math. Default: `mid`.
@@ -952,7 +952,7 @@ Every row is per-contract unless explicitly noted. "Per share" means $1 of under
 
 | Row | What it shows | How it's computed |
 |---|---|---|
-| `Structure` | Structure label and directional bias (e.g. `calendar (neutral)`, `covered_diagonal (bullish)`, `vertical_credit (bearish)`) | `ClassifyStructure` inspects leg counts, expirations, strikes, and call/put types. The bias is *bullish*, *bearish*, or *neutral* depending on which side of spot the structure profits on. |
+| `Structure` | Structure label and directional bias (e.g. `calendar (neutral)`, `covered_diagonal (bullish)`, `vertical_credit (bearish)`, `double_calendar (neutral)`, `double_diagonal (neutral)`) | `ClassifyStructure` inspects leg counts, expirations, strikes, and call/put types. Multi-expiry 4-leg structures with one strike per side resolve to `double_calendar`; offset long wings resolve to `double_diagonal`. The bias is *bullish*, *bearish*, or *neutral* depending on which side of spot the structure profits on. |
 | `Greeks` | Δ, θ/day, ν per IV-point — all per contract | Δ and ν use Black-Scholes closed-form. θ uses a 1-day finite difference (BS today − BS tomorrow) so it correctly captures weekend decay. Each leg's per-share value is signed (long = +, short = −), summed × Qty × 100 for θ/ν, and divided by reference Qty so the result is *per contract*. |
 | `DTE` | Earliest short-leg DTE, latest long-leg DTE, gap days | Calendar-day differences from `asOf.Date` (or the `--date` override). |
 | `Premium` | Market view (long / short / ratio / net) and theoretical view side-by-side when both are available; otherwise the cost-basis or current-mid view alone | **Market** uses each leg's bid/ask midpoint. **Theoretical** prices each leg via Black-Scholes at its quoted IV. **Cost-basis** view uses each leg's entry price (manage pipeline). The `ratio` is `long_paid / short_received`. Net is signed: positive = debit, negative = credit. |
@@ -1037,10 +1037,9 @@ These rows appear when `RiskDiagnosticProbe` is attached — which is always for
 | `Long quote / Short quote / Leg N quote` | Always when quotes exist | Per-leg `bid=… ask=… mid=… iv=… hv=… iv5=… oi=… vol=… sym=…`. `iv`/`hv`/`iv5` are populated only by the Webull source; Yahoo leaves them null. |
 | `Margin` | Always when an opener-style score exists | Broker margin per contract and total. Short verticals and iron spreads collateralize full capital-at-risk. Standard calendars and covered diagonals show `$0` (the debit is cash, not collateral). Inverted diagonals charge `(strike_gap + debit) × 100` per contract. |
 | `Rationale` | Always when an opener-style score exists | Single-line trade summary: side ($credit/$debit), max profit / max loss, R/R ratio, premium ratio, break-evens, POP, EV. |
-| `Score` | Always when an opener-style score exists | The four-stage score chain — `raw → tech-adjusted → adjusted → final` — with the bias tag in the middle. See **Score chain** below for what each stage means. |
-| `Indicators` | When max-pain or stat-arb factors fired | Free-text breakdown: representative IV / HV richness, max-pain target, market-vs-theoretical edge per share. These feed the `vol`, `pain`, and `arb` factors below. |
-| `Factors` | Always when an opener-style score exists | The multiplicative chain that turns *tech-adjusted* into *adjusted*: `tech-adjusted × pop X × scale X × setup X × geom X × runway X × bal X × vol X × pain X × gex X × assign X × arb X = adjusted`. Only factors that apply to the structure are shown. |
-| `Result` | Always when an opener-style score exists | Final stage: `adjusted × theta factor X (θ/day on $risk) = final`. Theta factor is omitted on structures that don't earn theta. |
+| `Indicators` | When max-pain, stat-arb, sentiment, etc. factors fired | Free-text breakdown: representative IV / HV richness with the position's net vega (`ν +X.XX/IV pt`), max-pain target, market-vs-theoretical edge per share, F&G rating. These feed the `vol`, `pain`, `arb`, and `sentiment` factors below. |
+| `Score` | Always when an opener-style score exists | The score chain — `raw → tech-adjusted [bias tag] → final` — collapsed to a single line. See **Score chain** below for what each stage means. |
+| `Factors` | Always when an opener-style score exists | The full multiplicative chain from *tech-adjusted* to *final*: `tech-adjusted × pop X × scale X × setup X × runway X × bal X × liq X × vol X × pain X × gex X × assign X × arb X × sentiment X × theta factor X (θ/day on $risk) = final`. Only factors that apply to the structure are shown; long chains wrap to a second balanced line under the `Factors:` label. |
 
 ### Reading the Rationale line
 
@@ -1142,11 +1141,13 @@ The scoring engine uses EV as the numerator of `raw` (`raw = EV / days / capital
 
 ### Score chain
 
-The opener pipeline produces four scores, each derived from the previous one. Higher is better; the final score is what the ranker uses for top-N selection per ticker.
+The opener pipeline produces three named scores. Higher is better; the final score is what the ranker uses for top-N selection per ticker.
 
 ```
-raw  →  tech-adjusted  →  adjusted  →  final
+raw  →  tech-adjusted  →  final
 ```
+
+`raw` captures the structure's payoff math, `tech-adjusted` overlays the technical bias for directional structures, and `final` is `tech-adjusted` multiplied through the full factor stack (described below) including the theta-carry factor at the tail.
 
 #### 1. `raw` — payoff per dollar of risk per day
 
@@ -1162,28 +1163,33 @@ raw = EV / max(1, daysToTarget) / capitalAtRisk
 tech-adjusted = raw × (1 + α · bias · fit)
 ```
 
-`bias` is the composite technical score in `[−1, 1]` from the same SMA/RSI/momentum signals used by the OpportunisticRoll filter. `fit` is `+1` for bullish-fit structures (long call, short put vertical), `−1` for bearish-fit (long put, short call vertical), `0` for neutral structures (calendars, condors, butterflies — these get *no* tech adjustment regardless of bias). `α` = `opener.directionalFitWeight`. When `fit = 0`, this stage is a no-op.
+`bias` is the composite technical score in `[−1, 1]` from the same SMA/RSI/momentum signals used by the OpportunisticRoll filter. `fit` is the structure's directional sign:
 
-#### 3. `adjusted` — multiplicative factor stack
+- `+1` for bullish structures: long call, short put vertical, long call diagonal where `long_strike < short_strike`, long put diagonal where `long_strike < short_strike` (positive net delta in either case).
+- `−1` for bearish structures: long put, short call vertical, long call diagonal where `long_strike > short_strike`, long put diagonal where `long_strike > short_strike`.
+- `0` for neutral structures: calendars, double calendars, double diagonals, iron condors, iron butterflies, and diagonals with matching strikes (which collapse to calendars).
 
-`tech-adjusted` is multiplied by every factor whose precondition is met. Each factor is documented below in the order the rationale prints them.
+`α` = `opener.directionalFitWeight`. When `fit = 0`, this stage is a no-op. Single-side long diagonals pick up their sign from the strike layout via the strike-aware `DirectionalFit.SignFor(skel)` overload, so a bullish-shaped diagonal aligns with positive bias and a bearish-shaped one aligns with negative bias.
+
+#### 3. Factor stack — `tech-adjusted → final`
+
+`tech-adjusted` is multiplied by every factor whose precondition is met, ending with the theta-carry factor that produces `final`. Each factor is documented below in the order the rationale prints them. The same factor stack applies to every structure; factors not applicable to a structure simply don't fire (e.g., `setup` requires two breakevens, so single-leg longs and verticals skip it).
 
 | Factor | What it measures | How it's computed |
 |---|---|---|
 | `pop` | Probability of profit at target expiry | `clamp((POP / 0.50)⁴, 0.01, 1.25)`. POP = log-normal probability of `S_T` landing inside the profitable region. The 4th-power amplification means a 70% POP boosts ~1.7× over 50%, while 30% POP cuts to ~0.13×. |
 | `scale` | Capital efficiency vs absolute size | `clamp(√(risk / (risk + 100)), 0.35, 1)`. A self-normalizing curve: a $50 risk scores ~0.58, a $200 scores ~0.82, a $1000 scores ~0.95. Penalizes tiny-risk trades whose `raw` score is misleadingly inflated. |
-| `setup` | Spot position inside the breakeven band — *defined-range structures only* | For condors/butterflies/iron flies: combines an *edge factor* (√ of the safer breakeven distance over half-width) and a *center factor* (1 − offset²). Both clamp to `[0.10, 1]`. Returns `null` for directional structures (no penalty). |
-| `geom` | Diagonal "rent coverage" — *long diagonal / double diagonal only* | Per matched leg pair: `rentFactor = 0.55 + 0.45 × clamp(short_credit / long_debit, 0, 1.25)`, then a small `gapPenalty` for unusually wide strike gaps. Product across all pairs, clamped `[0.20, 1]`. Diagonals where the short pays more than the long extracts get the full 1.10 boost. |
-| `runway` | Long-leg adjustment runway after the target — *diagonals/calendars with longer-dated longs* | Average of (extrinsic ratio × residual-days ratio) across long legs, mapped to `clamp(1 + 0.18 × ratio, 1, 1.35)`. Rewards structures where the long leg has both meaningful time premium *and* meaningful days remaining after the short expires. |
+| `setup` | Spot position inside the breakeven band — *structures with two breakevens* | Combines an *edge factor* (√ of the safer breakeven distance over half-width) and a *center factor* (1 − offset²). Both clamp to `[0.10, 1]`. Calendars, diagonals (single and double), iron flies, condors, and butterflies all have two breakevens and earn this factor; single-leg longs and verticals only have one breakeven and skip it. |
+| `runway` | Long-leg adjustment runway after the target — *calendars and diagonals with longer-dated longs* | Average of (extrinsic ratio × residual-days ratio) across long legs, mapped to `clamp(1 + 0.18 × ratio, 1, 1.35)`. Rewards structures where the long leg has both meaningful time premium *and* meaningful days remaining after the short expires. |
 | `bal` | Payoff balance: R/R asymmetry vs premium efficiency | `clamp(√min(R/R, 3) / √max(1, premium_ratio), 0.25, 1.25)`. `R/R = max_profit / abs(max_loss)`; `premium_ratio = long_paid / short_received`. High R/R with thin debit → boost; low R/R with bloated debit → cut. Continuous, no thresholds. |
-| `vol` | IV/HV richness vs structure preference | `clamp(1 + weight × clamp(IV/HV − 1, −1, 1) × fit, ≥ 0.10, …)`. `fit = +1` for short-vol structures (short verticals, iron flies), `−1` for long-vol structures (long calls/puts, calendars, diagonals). Rewards short-premium structures when IV is rich vs realized; rewards long-premium structures when IV is cheap. |
+| `vol` | IV/HV richness × position vega sensitivity | `max(0.10, 1 − weight × clamp(netVega/vegaRef, −1, 1) × clamp(IV/HV − 1, −1, 1))`, with `vegaRef = 3` ($/IV pt). The factor is driven by the candidate's actual net vega (not a structure label): long-vega positions (calendars, DCs, long calls/puts) get boosted when IV is cheap relative to HV and cut when rich; short-vega positions (verticals, iron flies, iron condors) are mirror-image. Magnitude scales with vega depth — a fat-vega DC swings sharper than a thin-vega DD; a wide iron condor swings sharper than a narrow short put vertical. |
 | `pain` | Max-pain alignment with the proposed strikes | `clamp(1 + maxPainWeight × signal, ≥ 0.10, …)`. Signal blends *breakeven-band coverage* (45%), *side-of-spot agreement* (35%), and *short-strike pinning* (20%) for neutral structures; for directional structures the signed distance from spot to max-pain × `fit` is used directly. |
 | `gex` | Gamma Exposure alignment — GEX pin gravity + dealer regime | Two sub-signals combined: **pin signal** (60%) uses the same positional logic as `pain` against the GEX pin strike (the strike with highest net dealer gamma); **environment signal** (40%) is `clamp(NetGexFraction × volFitSign, −1, 1)`, where positive NetGexFraction (call gamma dominates) benefits short-vol structures and hurts long-vol ones. `factor = clamp(1 + gexWeight × (0.60 × pinSignal + 0.40 × envSignal), ≥ 0.10, …)`. Null when `gexWeight = 0` or when insufficient IV data prevents gamma computation for the target expiry chain. GEX is computed via Black-Scholes gamma × open interest per strike, signed (calls positive, puts negative), then summed. |
 | `assign` | Assignment-risk discount for ITM-leaning short legs | Penalizes structures where the short leg sits dangerously close to or past spot given the strike step and current technical bias. |
 | `arb` | Stat-arb edge: market mid vs Black-Scholes theoretical | `clamp(1 + statArbWeight × clamp(edge / gross, −1, 1), ≥ 0.10, …)`. `edge = theoretical_net − market_net`, `gross = theo_long + theo_short`. Positive edge means the market entry is favorable to whoever opens the structure (paid less than fair on a debit, received more than fair on a credit). Same sign for both directions because the signed-net difference encodes direction inherently. |
 | `liq` | Worst-leg liquidity penalty | `clamp(1 − weight × (1 − spread_component × oi_component), 0.30, 1.00)`. Spread component is `√max(0, 1 − (worst_leg_spread − 0.05) / 0.45)` — full credit at ≤5% bid/ask spread, decays toward 0.30 as the worst leg approaches 50% wide. OI component is `max(√(min_oi / 200), 0.40)` for OI ≥ 5, hard-floor 0.30 below that. Because exit cost is gated by the *worst* leg, both components are computed against the worst-liquidity leg in the structure. The factor reflects forward-looking exit friction; for `analyze position`/`analyze risk` it always uses the *current market* quotes even when the score's pricing math is locked to cost basis. |
 
-The `Factors` line in the panel prints only the factors that fired for this structure — single-leg long calls, for example, will not show `geom` or `setup`.
+The `Factors` line in the panel prints only the factors that fired for this structure — single-leg long calls, for example, will not show `setup` (no two-breakeven band) or `runway` (no later-dated long leg). The chain is fair across structures: every kind competes through the same factor stack, and no factor preferentially punishes or rewards a structure based on its label alone.
 
 #### Liquidity hard filter (opener pipeline)
 
@@ -1204,14 +1210,13 @@ The `analyze risk` and `analyze position` commands do *not* apply the hard filte
 | `minOpenInterest` | 5 | Hard-reject worst-leg OI threshold. Set to 0 to disable. |
 | `weight` | 0.50 | Strength of the multiplicative `liq` factor on survivors. Higher = sharper penalty for borderline-liquidity candidates. |
 
-#### 4. `final` — theta carry
+#### Theta carry — the tail of the factor stack
 
 ```
-final = adjusted × thetaFactor(theta_per_day, capital_at_risk)
-       = adjusted × (1 + clamp(theta / risk × 1.5, 0, 0.25))
+theta_factor = 1 + clamp(theta / risk × 1.5, 0, 0.25)
 ```
 
-Adds up to a +25% boost when net theta is positive and large relative to capital at risk. Long-vol structures (theta ≤ 0) get a flat 1.0 here. The ranker sorts by `final` descending, then `adjusted`, then `theta_per_day`, then prefers earlier-expiry calendars/diagonals.
+The theta factor is the last multiplicand in the factor chain. It adds up to a +25% boost when net theta is positive and large relative to capital at risk. Long-vol structures (theta ≤ 0) get a flat 1.0 here. The ranker sorts by `final` descending, then by `tech-adjusted`, then by `theta_per_day`, then prefers earlier-expiry calendars/diagonals.
 
 ### Risk rules (the `Rules fired` block)
 
