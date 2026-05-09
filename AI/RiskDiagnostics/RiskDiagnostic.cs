@@ -32,7 +32,10 @@ internal sealed record RiskDiagnostic(
 	decimal? TheoreticalLongPremiumPaid = null,
 	decimal? TheoreticalShortPremiumReceived = null,
 	decimal? TheoreticalNetPremiumPerShare = null,
-	decimal? TheoreticalPremiumRatio = null);
+	decimal? TheoreticalPremiumRatio = null,
+	decimal? MarketSentimentScore = null,
+	string? MarketSentimentRating = null,
+	decimal? MarketSentimentDelta1Week = null);
 
 internal sealed record RiskDiagnosticProbe(
 	decimal? EnumDelta,

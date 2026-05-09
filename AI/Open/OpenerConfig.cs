@@ -17,6 +17,15 @@ internal sealed class OpenerConfig
 	[JsonPropertyName("maxPainWeight")] public decimal MaxPainWeight { get; set; } = 0m;
 	[JsonPropertyName("gexWeight")] public decimal GexWeight { get; set; } = 0m;
 	[JsonPropertyName("statArbWeight")] public decimal StatArbWeight { get; set; } = 0.30m;
+
+	/// <summary>Weight of the contrarian Fear &amp; Greed regime overlay on the score chain. Factor is
+	/// <c>max(0.10, 1 + weight × ((50 − score) / 50) × directionalFit)</c>: extreme fear (score≈0)
+	/// boosts bullish structures (fit=+1) and dampens bearish ones; extreme greed inverts. Neutral
+	/// directional fits (calendars/diagonals/condors) ignore the signal entirely. Default 0.15 caps the
+	/// max factor swing at ±15% — smaller than per-ticker signals because F&amp;G is a market-wide
+	/// macro overlay. Set to 0 to disable.</summary>
+	[JsonPropertyName("sentimentWeight")] public decimal SentimentWeight { get; set; } = 0.15m;
+
 	[JsonPropertyName("liquidity")] public OpenerLiquidityConfig Liquidity { get; set; } = new();
 
 	/// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at

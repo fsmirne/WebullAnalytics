@@ -1,5 +1,6 @@
 using WebullAnalytics.AI.RiskDiagnostics.Rules;
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Sentiment;
 
 namespace WebullAnalytics.AI.RiskDiagnostics;
 
@@ -22,6 +23,7 @@ internal static class RiskDiagnosticBuilder
 		new WideSpreadRule(),
 		new ThinOpenInterestRule(),
 		new SubGridStrikeRule(),
+		new MarketSentimentExtremeRule(),
 	};
 
 	internal static RiskDiagnostic Build(
@@ -30,7 +32,8 @@ internal static class RiskDiagnosticBuilder
 		DateTime asOf,
 		Func<string, decimal> ivResolver,
 		TrendSnapshot? trend,
-		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
+		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null,
+		SentimentSnapshot? sentiment = null)
 	{
 		var longLegs = legs.Where(l => l.IsLong).ToList();
 		var shortLegs = legs.Where(l => !l.IsLong).ToList();
@@ -165,7 +168,10 @@ internal static class RiskDiagnosticBuilder
 			Trend: trend,
 			WorstLegBidAskSpreadPct: worstLegSpreadPct,
 			MinOpenInterest: minOpenInterest,
-			MinRelativeOpenInterest: minRelativeOi);
+			MinRelativeOpenInterest: minRelativeOi,
+			MarketSentimentScore: sentiment?.Score,
+			MarketSentimentRating: sentiment?.Rating,
+			MarketSentimentDelta1Week: sentiment?.Delta1Week);
 
 		var hits = Rules
 			.Select(r => r.TryEvaluate(facts))
@@ -204,7 +210,10 @@ internal static class RiskDiagnosticBuilder
 			TheoreticalLongPremiumPaid: theoreticalLongPaidPerShare,
 			TheoreticalShortPremiumReceived: theoreticalShortReceivedPerShare,
 			TheoreticalNetPremiumPerShare: theoreticalNetPremiumPerShare,
-			TheoreticalPremiumRatio: theoreticalPremiumRatio);
+			TheoreticalPremiumRatio: theoreticalPremiumRatio,
+			MarketSentimentScore: sentiment?.Score,
+			MarketSentimentRating: sentiment?.Rating,
+			MarketSentimentDelta1Week: sentiment?.Delta1Week);
 	}
 
 	private static (string StructureLabel, string DirectionalBias) ClassifyStructure(

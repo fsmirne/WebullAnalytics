@@ -30,6 +30,15 @@ internal static class RiskDiagnosticRenderer
 			items.Add(("Trend:", $"5d {t.ChangePct5Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  20d {t.ChangePct20Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  {intraday}ATR14 {t.Atr14Pct.ToString("F1", CultureInfo.InvariantCulture)}%"));
 		}
 
+		if (d.MarketSentimentScore is decimal sScore)
+		{
+			var rating = d.MarketSentimentRating ?? "";
+			var deltaPart = d.MarketSentimentDelta1Week is decimal dw
+				? $"  Δ1w {dw.ToString("+0;-0", CultureInfo.InvariantCulture)}"
+				: "";
+			items.Add(("Sentiment:", $"F&G {sScore.ToString("F0", CultureInfo.InvariantCulture)}/100 ({Markup.Escape(rating)}){deltaPart}"));
+		}
+
 		if (d.UnrealizedPnlPerShare is decimal pnl)
 		{
 			var color = pnl >= 0m ? "green" : "red";

@@ -101,5 +101,8 @@ internal sealed record OpenProposal(
 	decimal? WorstLegBidAskSpreadPct = null,
 	long? MinOpenInterest = null,
 	decimal? MinRelativeOpenInterest = null,
-	decimal? LiquidityAdjustmentFactor = null
+	decimal? LiquidityAdjustmentFactor = null,
+	decimal? MarketSentimentScore = null,
+	string? MarketSentimentRating = null,
+	decimal? SentimentAdjustmentFactor = null
 );

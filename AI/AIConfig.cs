@@ -283,6 +283,7 @@ internal static class AIConfigLoader
 		if (op.VolatilityFitWeight < 0m) return $"opener.volatilityFitWeight: must be ≥ 0, got {op.VolatilityFitWeight}";
 		if (op.MaxPainWeight < 0m) return $"opener.maxPainWeight: must be ≥ 0, got {op.MaxPainWeight}";
 		if (op.StatArbWeight < 0m) return $"opener.statArbWeight: must be ≥ 0, got {op.StatArbWeight}";
+		if (op.SentimentWeight < 0m) return $"opener.sentimentWeight: must be ≥ 0, got {op.SentimentWeight}";
 
 		var liq = op.Liquidity;
 		if (liq.MaxBidAskSpreadPct <= 0m || liq.MaxBidAskSpreadPct > 1m) return $"opener.liquidity.maxBidAskSpreadPct: must be in (0, 1], got {liq.MaxBidAskSpreadPct}";

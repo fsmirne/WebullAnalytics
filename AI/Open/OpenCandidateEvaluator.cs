@@ -2,6 +2,7 @@
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Sentiment;
 
 namespace WebullAnalytics.AI;
 
@@ -119,6 +120,15 @@ internal sealed class OpenCandidateEvaluator
 		// Phase C: score per ticker.
 		var reserve = CashReserveHelper.ComputeReserve(_config.CashReserve.Mode, _config.CashReserve.Value, ctx.AccountValue);
 		var freeCash = Math.Max(0m, ctx.AccountCash - reserve);
+		// Fetch the contrarian Fear & Greed regime overlay once per scan. Same value applies to every
+		// ticker — F&G is a market-wide sentiment composite, not per-ticker. Null on outage; the scorer
+		// treats null as "skip the sentiment factor".
+		decimal? sentimentScore = null;
+		if (cfg.SentimentWeight > 0m)
+		{
+			var snapshot = await FearGreedClient.FetchAsync(ctx.Now, cancellation);
+			if (snapshot != null) sentimentScore = snapshot.Score;
+		}
 		var historicalVolByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		if (cfg.VolatilityFitWeight > 0m)
 		{
@@ -148,7 +158,7 @@ internal sealed class OpenCandidateEvaluator
 
 			foreach (var skel in tickerGroup)
 			{
-				var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode);
+				var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore);
 				if (p == null)
 				{
 					if (debug && (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical))
@@ -186,7 +196,7 @@ internal sealed class OpenCandidateEvaluator
 			foreach (var proposal in RankForOutput(survivors))
 			{
 				if (emittedForTicker >= cfg.TopNPerTicker) break;
-				foreach (var expanded in ExpandExecutableProposals(proposal, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode))
+				foreach (var expanded in ExpandExecutableProposals(proposal, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore))
 				{
 					if (emittedForTicker >= cfg.TopNPerTicker) break;
 					output.Add(expanded);
@@ -195,10 +205,14 @@ internal sealed class OpenCandidateEvaluator
 			}
 		}
 
-		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker.
+		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker; sentiment is
+		// market-wide so we reuse the snapshot fetched at the top of Phase C (if any).
 		var trendByTicker = new Dictionary<string, TrendSnapshot?>(StringComparer.OrdinalIgnoreCase);
 		foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
 			trendByTicker[ticker] = await TrendFetcher.FetchAsync(ticker, ctx.Now, cancellation);
+		SentimentSnapshot? diagnosticSentiment = null;
+		if (sentimentScore.HasValue)
+			diagnosticSentiment = await FearGreedClient.FetchAsync(ctx.Now, cancellation);
 
 		var annotated = new List<OpenProposal>(output.Count);
 		foreach (var p in output)
@@ -231,7 +245,8 @@ internal sealed class OpenCandidateEvaluator
 					? q.ImpliedVolatility.Value
 					: 0.40m,
 				trend: trend,
-				quotes: mergedQuotes);
+				quotes: mergedQuotes,
+				sentiment: diagnosticSentiment);
 
 			var openerScore = (
 				bias: ctx.TechnicalSignals.TryGetValue(p.Ticker, out var bs) ? (bs?.Score ?? 0m) : 0m,
@@ -259,7 +274,8 @@ internal sealed class OpenCandidateEvaluator
 					? q.ImpliedVolatility.Value
 					: 0.40m,
 				quotes: mergedQuotes,
-				opener: openerScore);
+				opener: openerScore,
+				sentimentScore: sentimentScore);
 
 			annotated.Add(p with { Diagnostic = diagnostic with { Probe = probe } });
 		}
@@ -311,7 +327,7 @@ internal sealed class OpenCandidateEvaluator
 	private static IReadOnlyList<ProposalLeg> ScaleLegs(IReadOnlyList<ProposalLeg> legs, int qty) =>
 		legs.Select(l => l with { Qty = qty }).ToList();
 
-	internal static IReadOnlyList<OpenProposal> ExpandExecutableProposals(OpenProposal proposal, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual, string pricingMode)
+	internal static IReadOnlyList<OpenProposal> ExpandExecutableProposals(OpenProposal proposal, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual, string pricingMode, decimal? sentimentScore = null)
 	{
 		if (proposal.StructureKind is not (OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal))
 			return new[] { proposal };
@@ -342,7 +358,7 @@ internal sealed class OpenCandidateEvaluator
 
 			var kind = shortLeg.Parsed.Strike == longLeg.Parsed.Strike ? OpenStructureKind.LongCalendar : OpenStructureKind.LongDiagonal;
 			var skel = new CandidateSkeleton(proposal.Ticker, kind, legs, shortLeg.Parsed.ExpiryDate);
-			var rescored = CandidateScorer.Score(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode);
+			var rescored = CandidateScorer.Score(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, sentimentScore: sentimentScore);
 			if (rescored == null)
 				return new[] { proposal };
 
