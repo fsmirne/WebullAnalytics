@@ -1,6 +1,7 @@
 ﻿using WebullAnalytics.AI.Output;
 using WebullAnalytics.Analyze;
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Sentiment;
 
 namespace WebullAnalytics.AI;
 
@@ -172,6 +173,25 @@ internal static class CandidateScorer
 	public static decimal GexAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
 	public static decimal AssignmentRiskAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
 	public static decimal StatArbAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
+	public static decimal SentimentAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
+
+	/// <summary>
+	/// Contrarian Fear &amp; Greed regime overlay. Maps the 0–100 composite to a bias signal in [−1, +1]:
+	/// <c>sentimentBias = (50 − score) / 50</c>. Score=0 (extreme fear) → +1 (max contrarian bullish edge);
+	/// score=100 (extreme greed) → −1 (max bearish edge); score=50 → 0.
+	/// Factor = <c>max(0.10, 1 + weight × sentimentBias × directionalFit)</c>: aligned-with-crowd
+	/// structures get penalized at extremes; contrarian structures get boosted. Neutral fits (fit=0
+	/// for calendars/diagonals/condors) bypass the overlay (factor=1).
+	/// Returns null when weight is 0 or no score is available, signaling the cascade to skip the factor.
+	/// </summary>
+	public static decimal? ComputeSentimentFactor(decimal? sentimentScore, int directionalFit, decimal weight)
+	{
+		if (weight <= 0m || !sentimentScore.HasValue) return null;
+		if (directionalFit == 0) return 1m;
+		var s = Math.Clamp(sentimentScore.Value, 0m, 100m);
+		var bias = (50m - s) / 50m;
+		return Math.Max(0.10m, 1m + weight * bias * directionalFit);
+	}
 
 	/// <summary>
 	/// Per-expiry GEX result. GexGravity is the strike with the highest gross gamma×OI (calls + puts) — the
@@ -679,12 +699,12 @@ internal static class CandidateScorer
 	/// running at a hypothetical spot (e.g., <c>--spot</c> override) should pass false,
 	/// because the market mid was set at a different spot and back-solving against it produces a
 	/// nonsensical IV that collapses calendar/diagonal residual time value.</summary>
-	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true) => skel.StructureKind switch
+	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null) => skel.StructureKind switch
 	{
-		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
-		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate),
-		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv),
-		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv),
+		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore),
+		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore),
+		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore),
+		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore),
 		_ => null
 	};
 
@@ -760,6 +780,12 @@ internal static class CandidateScorer
 			factorParts.Add($"arb {p.StatArbAdjustmentFactor.Value:F2}");
 			var edge = p.TheoreticalNetPremiumPerShare.Value - p.MarketNetPremiumPerShare.Value;
 			indicatorParts.Add($"market net ${p.MarketNetPremiumPerShare.Value:+0.00;-0.00} / theoretical net ${p.TheoreticalNetPremiumPerShare.Value:+0.00;-0.00}, edge ${edge:+0.00;-0.00}/share → arb {p.StatArbAdjustmentFactor.Value:F2}");
+		}
+		if (p.SentimentAdjustmentFactor.HasValue && p.MarketSentimentScore.HasValue)
+		{
+			factorParts.Add($"sentiment {p.SentimentAdjustmentFactor.Value:F2}");
+			var rating = p.MarketSentimentRating ?? SentimentRating.FromScore(p.MarketSentimentScore.Value);
+			indicatorParts.Add($"F&G {p.MarketSentimentScore.Value:F0}/100 ({rating}), fit {p.DirectionalFit:+0;-0} → sentiment {p.SentimentAdjustmentFactor.Value:F2}");
 		}
 		var finalScore = p.FinalScore ?? ComputeFinalScore(p.BiasAdjustedScore, p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
 		var thetaFactor = ComputeThetaFactor(p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
@@ -901,7 +927,7 @@ internal static class CandidateScorer
 		return (decimal)(dir == Direction.Above ? N_d2 : 1.0 - N_d2);
 	}
 
-	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true)
+	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, decimal? sentimentScore = null)
 	{
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
 		var longLeg = skel.Legs.First(l => l.Action == "buy");
@@ -975,7 +1001,8 @@ internal static class CandidateScorer
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
-		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor);
+		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.SentimentWeight);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1017,7 +1044,10 @@ internal static class CandidateScorer
 			WorstLegBidAskSpreadPct: worstSpread,
 			MinOpenInterest: minOi,
 			MinRelativeOpenInterest: minRelOi,
-			LiquidityAdjustmentFactor: liquidityFactor
+			LiquidityAdjustmentFactor: liquidityFactor,
+			MarketSentimentScore: sentimentScore,
+			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
+			SentimentAdjustmentFactor: sentimentFactor
 		);
 	}
 
@@ -1363,7 +1393,7 @@ internal static class CandidateScorer
 		return (maxProfit, maxLoss);
 	}
 
-	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true)
+	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null)
 	{
 		var defs = new List<MultiLegDefinition>(skel.Legs.Count);
 		var usedFallback = false;
@@ -1422,7 +1452,8 @@ internal static class CandidateScorer
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
-		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor);
+		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.SentimentWeight);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1466,10 +1497,13 @@ internal static class CandidateScorer
 			WorstLegBidAskSpreadPct: worstSpread,
 			MinOpenInterest: minOi,
 			MinRelativeOpenInterest: minRelOi,
-			LiquidityAdjustmentFactor: liquidityFactor);
+			LiquidityAdjustmentFactor: liquidityFactor,
+			MarketSentimentScore: sentimentScore,
+			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
+			SentimentAdjustmentFactor: sentimentFactor);
 	}
 
-	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true)
+	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null)
 	{
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
 		var longLeg = skel.Legs.First(l => l.Action == "buy");
@@ -1578,7 +1612,8 @@ internal static class CandidateScorer
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
-		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor);
+		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.SentimentWeight);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (geometryFactor ?? 1m) * (runwayFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1622,7 +1657,10 @@ internal static class CandidateScorer
 			WorstLegBidAskSpreadPct: worstSpread,
 			MinOpenInterest: minOi,
 			MinRelativeOpenInterest: minRelOi,
-			LiquidityAdjustmentFactor: liquidityFactor
+			LiquidityAdjustmentFactor: liquidityFactor,
+			MarketSentimentScore: sentimentScore,
+			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
+			SentimentAdjustmentFactor: sentimentFactor
 		);
 	}
 
@@ -1651,7 +1689,7 @@ internal static class CandidateScorer
 		return netThetaPerShare * 100m;
 	}
 
-	public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true)
+	public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, decimal? sentimentScore = null)
 	{
 		var leg = skel.Legs[0];
 		var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
@@ -1708,7 +1746,8 @@ internal static class CandidateScorer
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
-		var biasAdj = StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor);
+		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.SentimentWeight);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance * (liquidityFactor ?? 1m), skel.StructureKind, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1750,7 +1789,10 @@ internal static class CandidateScorer
 			WorstLegBidAskSpreadPct: worstSpread,
 			MinOpenInterest: minOi,
 			MinRelativeOpenInterest: minRelOi,
-			LiquidityAdjustmentFactor: liquidityFactor
+			LiquidityAdjustmentFactor: liquidityFactor,
+			MarketSentimentScore: sentimentScore,
+			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
+			SentimentAdjustmentFactor: sentimentFactor
 		);
 	}
 
