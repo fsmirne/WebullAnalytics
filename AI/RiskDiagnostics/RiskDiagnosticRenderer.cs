@@ -84,31 +84,35 @@ internal static class RiskDiagnosticRenderer
 					if (sections.Length > 0)
 						items.Add(("Rationale:", Markup.Escape(sections[0])));
 
-                    if (sections.Length > 1)
-						items.Add(("Score:", Markup.Escape(sections[1])));
-
-					// Layout: rationale, score, [N indicator lines], factors, result. The two trailing
-					// sections are always factors+result when present; everything between score and them
-					// is one indicator per line. The first indicator gets the "Indicators:" label; the
-					// rest carry an empty label so they visually align as continuation rows.
-                    if (sections.Length >= 4)
+					// Layout: rationale, [N indicator lines], score, factors. The trailing two sections are
+					// always score+factors when present; everything between rationale and them is one
+					// indicator per line. The first indicator gets the "Indicators:" label; the rest carry
+					// an empty label so they visually align as continuation rows.
+					if (sections.Length >= 3)
 					{
-						var indicatorCount = sections.Length - 4;
+						var indicatorCount = sections.Length - 3;
 						for (var i = 0; i < indicatorCount; i++)
-							items.Add((i == 0 ? "Indicators:" : "", Markup.Escape(sections[2 + i])));
-						items.Add(("Factors:", Markup.Escape(sections[2 + indicatorCount])));
-						items.Add(("Result:", Markup.Escape(sections[3 + indicatorCount])));
+							items.Add((i == 0 ? "Indicators:" : "", Markup.Escape(sections[1 + i])));
+						items.Add(("Score:", Markup.Escape(sections[sections.Length - 2])));
+						items.Add(("Factors:", Markup.Escape(sections[sections.Length - 1])));
 					}
-					else if (sections.Length > 2)
+					else if (sections.Length == 2)
 					{
-						items.Add(("Factors:", Markup.Escape(sections[2])));
+						items.Add(("Score:", Markup.Escape(sections[1])));
 					}
 				}
 			}
 		}
 
 		var labelWidth = items.Max(i => i.Label.Length);
-		var lines = items.Select(i => $"[bold]{Markup.Escape(i.Label.PadRight(labelWidth))}[/] {i.Value}").ToList();
+		// `\v` inside a value is a section-internal soft-break (used by long Factors lines): convert it to
+		// a newline plus enough padding to align continuation rows under the label column.
+		var continuationPad = "\n" + new string(' ', labelWidth + 1);
+		var lines = items.Select(i =>
+		{
+			var value = i.Value.Contains('\v', StringComparison.Ordinal) ? i.Value.Replace("\v", continuationPad, StringComparison.Ordinal) : i.Value;
+			return $"[bold]{Markup.Escape(i.Label.PadRight(labelWidth))}[/] {value}";
+		}).ToList();
 
 		if (d.Rules.Count > 0)
 		{

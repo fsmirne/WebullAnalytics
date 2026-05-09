@@ -261,20 +261,19 @@ internal static class RiskDiagnosticBuilder
 
 		if (longLegs.Count == 2 && shortLegs.Count == 2)
 		{
-			var allLegs = longLegs.Concat(shortLegs).ToList();
-			var expiries = allLegs.Select(l => l.Parsed.ExpiryDate).Distinct().ToList();
-			if (expiries.Count == 1)
+			var longCalls = longLegs.Where(l => l.Parsed.CallPut == "C").ToList();
+			var longPuts = longLegs.Where(l => l.Parsed.CallPut == "P").ToList();
+			var shortCalls = shortLegs.Where(l => l.Parsed.CallPut == "C").ToList();
+			var shortPuts = shortLegs.Where(l => l.Parsed.CallPut == "P").ToList();
+			if (longCalls.Count == 1 && longPuts.Count == 1 && shortCalls.Count == 1 && shortPuts.Count == 1)
 			{
-				var longCalls = longLegs.Where(l => l.Parsed.CallPut == "C").ToList();
-				var longPuts = longLegs.Where(l => l.Parsed.CallPut == "P").ToList();
-				var shortCalls = shortLegs.Where(l => l.Parsed.CallPut == "C").ToList();
-				var shortPuts = shortLegs.Where(l => l.Parsed.CallPut == "P").ToList();
-				if (longCalls.Count == 1 && longPuts.Count == 1 && shortCalls.Count == 1 && shortPuts.Count == 1)
+				var shortCall = shortCalls[0].Parsed;
+				var shortPut = shortPuts[0].Parsed;
+				var longCall = longCalls[0].Parsed;
+				var longPut = longPuts[0].Parsed;
+				var expiries = longLegs.Concat(shortLegs).Select(l => l.Parsed.ExpiryDate).Distinct().ToList();
+				if (expiries.Count == 1)
 				{
-					var shortCall = shortCalls[0].Parsed;
-					var shortPut = shortPuts[0].Parsed;
-					var longCall = longCalls[0].Parsed;
-					var longPut = longPuts[0].Parsed;
 					if (shortCall.Strike == shortPut.Strike
 						&& longPut.Strike < shortPut.Strike
 						&& longCall.Strike > shortCall.Strike)
@@ -283,6 +282,18 @@ internal static class RiskDiagnosticBuilder
 						&& longPut.Strike < shortPut.Strike
 						&& longCall.Strike > shortCall.Strike)
 						return ("iron_condor", "neutral");
+				}
+				else if (expiries.Count == 2
+					&& shortCall.ExpiryDate == shortPut.ExpiryDate
+					&& longCall.ExpiryDate == longPut.ExpiryDate
+					&& longCall.ExpiryDate > shortCall.ExpiryDate
+					&& shortPut.Strike < shortCall.Strike)
+				{
+					// Both halves are diagonals (long strike offset from short) → double diagonal.
+					// Otherwise both halves share their per-side strike → double calendar.
+					if (longPut.Strike != shortPut.Strike || longCall.Strike != shortCall.Strike)
+						return ("double_diagonal", "neutral");
+					return ("double_calendar", "neutral");
 				}
 			}
 		}

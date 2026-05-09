@@ -790,26 +790,42 @@ internal static class CandidateScorer
 		var finalScore = p.FinalScore ?? ComputeFinalScore(p.BiasAdjustedScore, p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
 		var thetaFactor = ComputeThetaFactor(p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
 
+		// Theta factor is the last multiplicand in the factors chain when present, so the line goes
+		// tech-adjusted → … → final in one calculation rather than splitting at "adjusted".
+		if (p.ThetaPerDayPerContract.HasValue)
+			factorParts.Add($"theta factor {thetaFactor:F2} ({p.ThetaPerDayPerContract.Value:+0.00;-0.00}/day on ${p.CapitalAtRiskPerContract:F0} risk)");
+
 		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
-		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → adjusted {p.BiasAdjustedScore:F6} → final {finalScore:F6}";
-		var factorsLine = $"tech-adjusted × {string.Join(" × ", factorParts)} = adjusted {p.BiasAdjustedScore:F6}";
-		var resultLine = p.ThetaPerDayPerContract.HasValue
-			? $"adjusted × theta factor {thetaFactor:F2} ({p.ThetaPerDayPerContract.Value:+0.00;-0.00}/day on ${p.CapitalAtRiskPerContract:F0} risk) = final {finalScore:F6}"
-			: $"adjusted = final {finalScore:F6}";
+		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → final {finalScore:F6}";
+		// Factors can chain 10+ multiplicands; balance into at most two lines so neither wraps mid-token
+		// and we don't waste vertical space with a third nearly-empty row.
+		// `\v` is a section-internal soft-break that the renderer expands to "\n + label-aligned padding"
+		// — the outer `\n` join below splits sections, so we can't reuse it inside the factors string.
+		var factorsPerLine = Math.Max(1, (factorParts.Count + 1) / 2);
+		var factorChunks = factorParts
+			.Select((part, idx) => (part, idx))
+			.GroupBy(x => x.idx / factorsPerLine)
+			.Select(g => string.Join(" × ", g.Select(x => x.part)))
+			.ToList();
+		var factorsBody = factorChunks.Count > 1
+			? string.Join("\v× ", factorChunks)
+			: factorChunks[0];
+		var factorsLine = $"tech-adjusted × {factorsBody} = final {finalScore:F6}";
 
 		// Indicator parts each get their own line so a 4+ indicator panel doesn't wrap. The renderer
 		// labels the first one "Indicators:" and gives subsequent ones an empty label so they align
-		// underneath as continuation rows.
+		// underneath as continuation rows. Section order: rationale → indicators → score → factors,
+		// so Indicators (the explanation) precedes the Score and Factors (the math).
 		if (indicatorParts.Count > 0)
 		{
-			var sections = new List<string> { rationaleLine, scoreLine };
+			var sections = new List<string> { rationaleLine };
 			sections.AddRange(indicatorParts);
+			sections.Add(scoreLine);
 			sections.Add(factorsLine);
-			sections.Add(resultLine);
 			return string.Join("\n", sections);
 		}
 
-		return string.Join("\n", new[] { rationaleLine, scoreLine, factorsLine, resultLine });
+		return string.Join("\n", new[] { rationaleLine, scoreLine, factorsLine });
 	}
 
 	private static decimal? ComputeMaxPainAdjustmentFactor(CandidateSkeleton skel, decimal spot, DateTime asOf, decimal targetIv, decimal? maxPain, OpenerConfig cfg, IReadOnlyList<decimal>? breakevens = null)

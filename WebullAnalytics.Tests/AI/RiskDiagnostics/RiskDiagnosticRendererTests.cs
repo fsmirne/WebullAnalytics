@@ -287,7 +287,7 @@ public class RiskDiagnosticRendererTests
 					DaysToTarget: 7,
 					RawScore: 0.01m,
 					BiasAdjustedScore: 0.01m,
-					Rationale: "debit $50.00\nraw 0.010000 → adjusted 0.020000 → final 0.020492\nrep IV 44.1% / underlying HV 34.6% = 1.27x → vol 0.86; max-pain target $24.50 → pain 1.19\ntech-adjusted × balance 0.16 = adjusted 0.020000\nadjusted × theta factor 1.02 (+1.23/day on $50 risk) = final 0.020492",
+					Rationale: "debit $50.00\nrep IV 44.1% / underlying HV 34.6% = 1.27x → vol 0.86; max-pain target $24.50 → pain 1.19\nraw 0.010000 → tech-adjusted 0.020000 → final 0.020492\ntech-adjusted × balance 0.16 × theta factor 1.02 (+1.23/day on $50 risk) = final 0.020492",
 					ThetaPerDayPerContract: 1.23m,
 					FinalScore: 0.020492m)));
 
@@ -295,12 +295,13 @@ public class RiskDiagnosticRendererTests
 		Assert.Contains("Score:", text);
 		Assert.Contains("Indicators:", text);
 		Assert.Contains("Factors:", text);
-		Assert.Contains("Result:", text);
+		Assert.DoesNotContain("Result:", text);
 		Assert.DoesNotContain("Final:", text);
-        Assert.Contains("max-pain target $24.50 → pain 1.19", text);
+		Assert.Contains("max-pain target $24.50 → pain 1.19", text);
 		Assert.DoesNotContain("Max-pain:", text);
 		Assert.DoesNotContain("Detail:", text);
-		Assert.True(text.IndexOf("Indicators:", StringComparison.Ordinal) < text.IndexOf("Factors:", StringComparison.Ordinal));
+		Assert.True(text.IndexOf("Indicators:", StringComparison.Ordinal) < text.IndexOf("Score:", StringComparison.Ordinal));
+		Assert.True(text.IndexOf("Score:", StringComparison.Ordinal) < text.IndexOf("Factors:", StringComparison.Ordinal));
 		Assert.Contains("+1.23/day on $50 risk", text);
 		Assert.DoesNotContain("Theta/day:", text);
 		Assert.DoesNotContain("Factors: × factors", text);
