@@ -26,4 +26,7 @@ internal readonly record struct RiskDiagnosticFacts(
 	TrendSnapshot? Trend,
 	decimal? WorstLegBidAskSpreadPct = null,
 	long? MinOpenInterest = null,
-	decimal? MinRelativeOpenInterest = null);
+	decimal? MinRelativeOpenInterest = null,
+	decimal? MarketSentimentScore = null,
+	string? MarketSentimentRating = null,
+	decimal? MarketSentimentDelta1Week = null);

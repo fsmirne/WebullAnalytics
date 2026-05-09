@@ -18,7 +18,8 @@ internal static class RiskDiagnosticProbeBuilder
 		decimal? technicalBiasOverride = null,
 		bool useCostBasisForOpenerScore = false,
 		decimal? historicalVolAnnual = null,
-		bool useMarketImpliedIv = true)
+		bool useMarketImpliedIv = true,
+		decimal? sentimentScore = null)
 	{
 		var legQuotes = new List<RiskDiagnosticLegQuote>();
 		if (quotes != null)
@@ -135,7 +136,7 @@ internal static class RiskDiagnosticProbeBuilder
 					// false branch) reads the Iv field from the quote, which OverrideBidAskWithCostBasis
 					// does not touch, giving the current broker-reported IV.
 					var effectiveUseMarketImpliedIv = useCostBasisForOpenerScore ? false : useMarketImpliedIv;
-					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false, useMarketImpliedIv: effectiveUseMarketImpliedIv);
+					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false, useMarketImpliedIv: effectiveUseMarketImpliedIv, sentimentScore: sentimentScore);
 					if (scored != null)
 					{
 						// When cost-basis override is in play, the scorer's view of bid/ask is collapsed

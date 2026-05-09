@@ -53,6 +53,7 @@ class Program
 				analyze.AddCommand<AnalyzeRollCommand>("roll");
 				analyze.AddCommand<AnalyzePositionCommand>("position");
 				analyze.AddCommand<AnalyzeGexCommand>("gex");
+				analyze.AddCommand<AnalyzeSentimentCommand>("sentiment");
 			});
 			config.AddCommand<FetchCommand>("fetch");
 			config.AddCommand<SniffCommand>("sniff");

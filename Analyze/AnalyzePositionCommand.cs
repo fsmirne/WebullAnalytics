@@ -10,6 +10,7 @@ using WebullAnalytics.Api;
 using WebullAnalytics.IO;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Sentiment;
 using WebullAnalytics.Trading;
 using WebullAnalytics.Utils;
 
@@ -187,6 +188,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			trendSnap = await TrendFetcher.FetchAsync(tickerForTrend, asOfForDiagnostic, cancellation);
 
 		var historicalVolAnnual = await TryComputeHistoricalVolAsync(tickerForTrend, asOfForDiagnostic, cancellation);
+		var sentiment = await FearGreedClient.FetchAsync(asOfForDiagnostic, cancellation);
 
 		var diagnostic = BuildAndLogDiagnostic(
 			logPath: Program.ResolvePath("data/analyze-position.jsonl"),
@@ -211,7 +213,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			// At hypothetical spots (--spot override), the leg market mids are stale and back-solving
 			// IV against them produces a nonsense IV that collapses calendar/diagonal residual time
 			// value. Use the broker's reported IV instead so the projection is internally consistent.
-			useMarketImpliedIv: string.IsNullOrEmpty(settings.Spot));
+			useMarketImpliedIv: string.IsNullOrEmpty(settings.Spot),
+			sentiment: sentiment);
 
 		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias);
 
@@ -1550,7 +1553,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		IReadOnlyDictionary<string, OptionContractQuote>? quotesForProbe = null,
 		decimal technicalBiasForProbe = 0m,
 		decimal? historicalVolAnnual = null,
-		bool useMarketImpliedIv = true)
+		bool useMarketImpliedIv = true,
+		SentimentSnapshot? sentiment = null)
 	{
 		var diagLegs = legs.Select(l => new DiagnosticLeg(
 			Symbol: l.Symbol,
@@ -1560,8 +1564,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			PricePerShare: legPriceResolver(l.Symbol),
 			CostBasisPerShare: l.CostBasis)).ToList();
 
-		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend, quotesForProbe);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv);
+		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend, quotesForProbe, sentiment);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score);
 		diagnostic = diagnostic with { Probe = probe };
 
 		Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
@@ -1613,6 +1617,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		theoreticalShortPremiumReceived = d.TheoreticalShortPremiumReceived,
 		theoreticalNetPremiumPerShare = d.TheoreticalNetPremiumPerShare,
 		theoreticalPremiumRatio = d.TheoreticalPremiumRatio,
+		marketSentimentScore = d.MarketSentimentScore,
+		marketSentimentRating = d.MarketSentimentRating,
+		marketSentimentDelta1Week = d.MarketSentimentDelta1Week,
 		probe = d.Probe is null ? null : new
 		{
 			enumDelta = d.Probe.EnumDelta,
