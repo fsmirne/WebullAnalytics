@@ -5,8 +5,10 @@ using Xunit;
 
 namespace WebullAnalytics.Tests.AI.Sources;
 
-public class LivePositionSourceTests
+public class LivePositionSourceTests : IDisposable
 {
+	public void Dispose() => EvaluationDate.Reset();
+
 	[Fact]
 	public void BuildCostBasisLookup_ReturnsEmptyMapWhenNoTrades()
 	{
@@ -24,6 +26,13 @@ public class LivePositionSourceTests
 		//   t0: open calendar (short 05/08 26.50C, long 06/05 26.50C) for net debit $0.92
 		//   t1: roll long leg from 06/05 → 05/29 for $0.19 credit; new basis = $0.73
 		// After replay, the live position has legs (05/08 short + 05/29 long) with adjusted $0.73.
+		//
+		// Pin the evaluation date to a day inside the trade window. The position tracker synthesizes
+		// expiration trades for any leg whose expiry is before EvaluationDate.Today (PositionTracker.cs
+		// ~line 140); without pinning, this test starts failing on 2026-05-08 when the short leg's
+		// expiry slips into the past and gets auto-closed, collapsing the leg-set lookup.
+		EvaluationDate.Set(new DateTime(2026, 4, 30));
+
 		var ticker = "GME";
 		var shortExpiry = new DateTime(2026, 5, 8);
 		var origLongExpiry = new DateTime(2026, 6, 5);
