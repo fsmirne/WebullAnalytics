@@ -462,7 +462,15 @@ internal static class CandidateScorer
 		var centerOffsetRatio = Math.Clamp(Math.Abs(spot - center) / halfWidth, 0m, 1m);
 		var edgeFactor = Math.Clamp((decimal)Math.Sqrt((double)safetyRatio), 0.10m, 1m);
 		var centerFactor = Math.Clamp(1m - centerOffsetRatio * centerOffsetRatio, 0.10m, 1m);
-		return Math.Clamp(edgeFactor * centerFactor, 0.05m, 1m);
+		// Arithmetic mean of the two components rather than the product. The multiplicative form
+		// double-counted "centered + safe" because both terms move together for any well-placed
+		// trade, which structurally over-rewarded wide-band combos (double calendars / diagonals)
+		// where centering and safety come "for free" with the structure, vs single-side calendars
+		// at OTM strikes where spot is *necessarily* off-center relative to its own narrow band.
+		// AM preserves the directional signal (centered + safe > off-center + edgy) while
+		// compressing the range, letting raw EV/cap/day actually win out on equally-good
+		// candidates of different shape.
+		return Math.Clamp((edgeFactor + centerFactor) / 2m, 0.10m, 1m);
 	}
 
 	internal static decimal? ComputeAdjustmentRunwayFactor(CandidateSkeleton skel, DateTime asOf, decimal spot, IReadOnlyDictionary<string, OptionContractQuote> quotes)

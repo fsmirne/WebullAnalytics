@@ -164,10 +164,31 @@ public class CandidateScorerBiasTests
 	[Fact]
 	public void SetupFactorPenalizesNeutralTradeWhenSpotHugsBreakeven()
 	{
+		// Spot 25.09 sits ~12¢ above the lower BE in a ~$2 band — extreme edge case.
+		// With the arithmetic-mean formula, the worst penalty is bounded but the factor still
+		// drops well below a centered trade (which reaches 1.0). Anything below ~0.35 means the
+		// trade is structurally on the wrong side of the band.
 		var factor = CandidateScorer.ComputeSetupFactor(OpenStructureKind.IronCondor, 25.09m, new[] { 24.97m, 27.03m });
 
 		Assert.NotNull(factor);
-		Assert.True(factor.Value < 0.10m);
+		Assert.True(factor.Value < 0.35m, $"expected setup factor < 0.35 for hugging-breakeven case, got {factor.Value}");
+	}
+
+	[Fact]
+	public void SetupFactorDampensRatioBetweenWideCenteredAndNarrowOffCenter()
+	{
+		// Wide centered band (DC-shape): spot dead-center in a $2.51-wide profit zone.
+		var wideCentered = CandidateScorer.ComputeSetupFactor(OpenStructureKind.DoubleCalendar, 24.595m, new[] { 23.34m, 25.85m });
+		// Narrower band offset from spot (single LC at OTM call strike): zone is $2.81 wide but centered at 25.115, ~0.5 above spot.
+		var narrowOffCenter = CandidateScorer.ComputeSetupFactor(OpenStructureKind.LongCalendar, 24.60m, new[] { 23.71m, 26.52m });
+
+		Assert.NotNull(wideCentered);
+		Assert.NotNull(narrowOffCenter);
+		// Wide+centered should still win, but the ratio under the arithmetic-mean formula must be
+		// modest (<1.8x). The previous multiplicative formula made it ~2x, which let setup
+		// reverse meaningful capital-efficiency differences in raw score.
+		var ratio = wideCentered.Value / narrowOffCenter.Value;
+		Assert.True(ratio > 1m && ratio < 1.8m, $"expected setup ratio in (1.0, 1.8), got {ratio:F2}");
 	}
 
 	[Fact]
