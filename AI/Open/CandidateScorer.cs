@@ -756,7 +756,10 @@ internal static class CandidateScorer
 		if (p.ThetaPerDayPerContract.HasValue)
 			factorParts.Add($"theta factor {thetaFactor:F2} ({p.ThetaPerDayPerContract.Value:+0.00;-0.00}/day on ${p.CapitalAtRiskPerContract:F0} risk)");
 
-		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}";
+		var realizedTag = p.RealizedExpectedValuePerContract.HasValue
+			? $" (real ${p.RealizedExpectedValuePerContract.Value:F2}{(p.EstimatedSlippagePerContract is decimal slip && slip > 0m ? $", −${slip:F2} fric" : "")})"
+			: "";
+		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}{realizedTag}";
 		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → final {finalScore:F6}";
 		// Factors can chain 10+ multiplicands; balance into at most two lines so neither wraps mid-token
 		// and we don't waste vertical space with a third nearly-empty row.
@@ -945,15 +948,15 @@ internal static class CandidateScorer
 
 	   // EV via scenario grid — payoff at expiry is piecewise linear.
 		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma);
+		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, creditPerContract, isCall);
 		decimal ev = 0m;
 		foreach (var pt in grid)
-		{
-			var pnl = VerticalPnLAtExpiry(pt.SpotAtExpiry, shortParsed.Strike, longParsed.Strike, creditPerContract, isCall);
-			ev += pt.Weight * pnl;
-		}
+			ev += pt.Weight * PnlAtExpiry(pt.SpotAtExpiry);
 
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
-		var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
+		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
+		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
@@ -1028,7 +1031,11 @@ internal static class CandidateScorer
 			LiquidityAdjustmentFactor: liquidityFactor,
 			MarketSentimentScore: sentimentScore,
 			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
-			SentimentAdjustmentFactor: sentimentFactor
+			SentimentAdjustmentFactor: sentimentFactor,
+			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
+			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
+			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
+			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null
 		);
 	}
 
@@ -1414,7 +1421,9 @@ internal static class CandidateScorer
 		var (maxProfit, maxLoss) = ScanPnlRange(pnl, scanLower, scanUpper);
 		var capitalAtRisk = Math.Abs(Math.Min(0m, maxLoss));
 		if (capitalAtRisk <= 0m) return null;
-		var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
+		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, pnl, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
+		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
@@ -1483,7 +1492,11 @@ internal static class CandidateScorer
 			LiquidityAdjustmentFactor: liquidityFactor,
 			MarketSentimentScore: sentimentScore,
 			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
-			SentimentAdjustmentFactor: sentimentFactor);
+			SentimentAdjustmentFactor: sentimentFactor,
+			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
+			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
+			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
+			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null);
 	}
 
 	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null)
@@ -1552,21 +1565,24 @@ internal static class CandidateScorer
 		// 5-point grid points (e.g. an ATM call diagonal peaks at the short strike, which the ±0.5σ
 		// sampling misses) — using the scenario-grid max would understate R/R by ~30%.
 		var grid = BuildScenarioGrid(spot, ivShort, shortYears, cfg.ScenarioGridSigma);
+		decimal PnlAtTarget(decimal sT)
+		{
+			var longBS = OptionMath.BlackScholes(sT, longParsed.Strike, longAtShortYears, OptionMath.RiskFreeRate, ivLong, longParsed.CallPut);
+			var shortIntrinsic = longParsed.CallPut == "C"
+				? Math.Max(0m, sT - shortParsed.Strike)
+				: Math.Max(0m, shortParsed.Strike - sT);
+			return (longBS - shortIntrinsic) * 100m - debitPerContract;
+		}
 		decimal ev = 0m;
 		foreach (var pt in grid)
-		{
-			var longBS = OptionMath.BlackScholes(pt.SpotAtExpiry, longParsed.Strike, longAtShortYears, OptionMath.RiskFreeRate, ivLong, longParsed.CallPut);
-			var shortIntrinsic = longParsed.CallPut == "C"
-				? Math.Max(0m, pt.SpotAtExpiry - shortParsed.Strike)
-				: Math.Max(0m, shortParsed.Strike - pt.SpotAtExpiry);
-			var positionValue = (longBS - shortIntrinsic) * 100m;
-			ev += pt.Weight * (positionValue - debitPerContract);
-		}
+			ev += pt.Weight * PnlAtTarget(pt.SpotAtExpiry);
 		var maxProfit = FindCalendarOrDiagonalPeakPnl(spot, shortParsed, longParsed, longAtShortYears, ivLong, debitPerContract);
 		var maxLossPoint = -(debitPerContract + strikeLossPerContract);
 
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
-		var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
+		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtTarget, maxProfit, maxLossPoint, friction, cfg.RealizedExpectancy);
+		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		// LongCalendar reads neutral (0); LongDiagonal picks up its sign from the strike layout via the
 		// skeleton overload, so the technical bias factor lifts/cuts a diagonal whose direction matches
 		// or fights the trend. Calendars stay neutral by construction.
@@ -1645,7 +1661,11 @@ internal static class CandidateScorer
 			LiquidityAdjustmentFactor: liquidityFactor,
 			MarketSentimentScore: sentimentScore,
 			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
-			SentimentAdjustmentFactor: sentimentFactor
+			SentimentAdjustmentFactor: sentimentFactor,
+			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
+			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
+			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
+			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLossPoint, cfg.RealizedExpectancy) : null
 		);
 	}
 
@@ -1719,20 +1739,26 @@ internal static class CandidateScorer
 		var pop = LogNormalProbability(parsed.CallPut == "C" ? Direction.Above : Direction.Below, spot, breakeven, years, (double)iv);
 
 		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma);
+		decimal PnlAtExpiry(decimal sT)
+		{
+			var intrinsic = parsed.CallPut == "C" ? Math.Max(0m, sT - parsed.Strike) : Math.Max(0m, parsed.Strike - sT);
+			return intrinsic * 100m - debitPerContract;
+		}
 		decimal ev = 0m;
 		decimal maxProfit = 0m;
 		decimal maxLoss = -debitPerContract;
 		foreach (var pt in grid)
 		{
-			var intrinsic = parsed.CallPut == "C" ? Math.Max(0m, pt.SpotAtExpiry - parsed.Strike) : Math.Max(0m, parsed.Strike - pt.SpotAtExpiry);
-			var pnl = intrinsic * 100m - debitPerContract;
+			var pnl = PnlAtExpiry(pt.SpotAtExpiry);
 			ev += pt.Weight * pnl;
 			if (pnl > maxProfit) maxProfit = pnl;
 		}
 
 		var capitalAtRisk = debitPerContract;
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
-		var rawScore = ComputeRawScore(ev, daysToTarget, capitalAtRisk);
+		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
+		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
@@ -1801,7 +1827,11 @@ internal static class CandidateScorer
 			LiquidityAdjustmentFactor: liquidityFactor,
 			MarketSentimentScore: sentimentScore,
 			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
-			SentimentAdjustmentFactor: sentimentFactor
+			SentimentAdjustmentFactor: sentimentFactor,
+			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
+			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
+			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
+			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null
 		);
 	}
 
