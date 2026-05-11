@@ -104,5 +104,9 @@ internal sealed record OpenProposal(
 	decimal? LiquidityAdjustmentFactor = null,
 	decimal? MarketSentimentScore = null,
 	string? MarketSentimentRating = null,
-	decimal? SentimentAdjustmentFactor = null
+	decimal? SentimentAdjustmentFactor = null,
+	decimal? RealizedExpectedValuePerContract = null,
+	decimal? EstimatedSlippagePerContract = null,
+	decimal? ProfitTargetPerContract = null,
+	decimal? StopLossPerContract = null
 );
