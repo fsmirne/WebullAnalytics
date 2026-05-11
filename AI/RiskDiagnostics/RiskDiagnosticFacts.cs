@@ -29,4 +29,9 @@ internal readonly record struct RiskDiagnosticFacts(
 	decimal? MinRelativeOpenInterest = null,
 	decimal? MarketSentimentScore = null,
 	string? MarketSentimentRating = null,
-	decimal? MarketSentimentDelta1Week = null);
+	decimal? MarketSentimentDelta1Week = null,
+	DateTime? AsOf = null,
+	DateTime? NextEarningsDate = null,
+	string? EarningsTime = null,
+	DateTime? NextExDividendDate = null,
+	bool HasShortCallLeg = false);

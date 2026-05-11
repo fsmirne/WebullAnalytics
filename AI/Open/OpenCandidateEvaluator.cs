@@ -1,4 +1,5 @@
-﻿using WebullAnalytics.AI.Output;
+﻿using WebullAnalytics.AI.Events;
+using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.AI.Sources;
@@ -142,12 +143,19 @@ internal sealed class OpenCandidateEvaluator
 			}
 		}
 
+		// Scheduled-catalyst calendar (earnings + ex-div) per ticker. Built once per scan; resolved
+		// per-ticker inside the per-ticker loop. The loader returns EventCalendar.Empty when the
+		// feature is disabled or when Yahoo is unreachable — the scorer treats null events as
+		// "no veto" so a calendar outage never silences the opener.
+		var eventCalendar = await EventCalendarLoader.LoadAsync(_config.Tickers, cfg.Events, ctx.Now, cancellation);
+
 		foreach (var tickerGroup in allSkeletons.GroupBy(s => s.Ticker))
 		{
 			if (!bootstrapSpots.TryGetValue(tickerGroup.Key, out var spot) || spot <= 0m) continue;
 			ctx.TechnicalSignals.TryGetValue(tickerGroup.Key, out var biasSignal);
 			var bias = biasSignal?.Score ?? 0m;
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
+			var tickerEvents = eventCalendar.Get(tickerGroup.Key);
 
 			var shortVerticalRejects = debug
 				? new Dictionary<CandidateScorer.ShortVerticalRejectReason, int>()
@@ -158,7 +166,7 @@ internal sealed class OpenCandidateEvaluator
 
 			foreach (var skel in tickerGroup)
 			{
-				var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore);
+				var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
 				if (p == null)
 				{
 					if (debug && (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical))
@@ -228,6 +236,7 @@ internal sealed class OpenCandidateEvaluator
 
 			var spotForDiag = bootstrapSpots.TryGetValue(p.Ticker, out var s) ? s : 0m;
 			trendByTicker.TryGetValue(p.Ticker, out var trend);
+			var pTickerEvents = eventCalendar.Get(p.Ticker);
 			var diagnostic = RiskDiagnosticBuilder.Build(
 				legs: diagLegs,
 				spot: spotForDiag,
@@ -237,7 +246,8 @@ internal sealed class OpenCandidateEvaluator
 					: 0.40m,
 				trend: trend,
 				quotes: mergedQuotes,
-				sentiment: diagnosticSentiment);
+				sentiment: diagnosticSentiment,
+				events: pTickerEvents);
 
 			var openerScore = (
 				bias: ctx.TechnicalSignals.TryGetValue(p.Ticker, out var bs) ? (bs?.Score ?? 0m) : 0m,

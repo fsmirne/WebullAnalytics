@@ -28,6 +28,8 @@ internal sealed class OpenerConfig
 
 	[JsonPropertyName("liquidity")] public OpenerLiquidityConfig Liquidity { get; set; } = new();
 
+	[JsonPropertyName("events")] public OpenerEventsConfig Events { get; set; } = new();
+
 	/// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at
 	/// ±sigma and ±sigma/2 around spot. Default 1.0 gives a ±1σ / ±0.5σ grid that better matches
 	/// realized moves on high-IV names and doesn't overweight fat tails. Prior behavior (and stress tests)
@@ -155,4 +157,33 @@ internal sealed class OpenerLiquidityConfig
 	/// worst-leg spread + min-OI to a value in [0.30, 1.00]. Higher weight = sharper penalty for
 	/// borderline-liquidity candidates among those that survived the hard filter. Default 0.50.</summary>
 	[JsonPropertyName("weight")] public decimal Weight { get; set; } = 0.50m;
+}
+
+/// <summary>Scheduled-catalyst gates: earnings and ex-dividend filtering. Defaults reject short-leg
+/// structures whose short-leg expiry spans the next earnings date, and short call legs whose expiry
+/// is after the next ex-dividend (early-assignment risk). Set <see cref="Enabled"/> to false to skip
+/// all event-driven filtering entirely; the data is still surfaced in the risk diagnostic for
+/// transparency.</summary>
+internal sealed class OpenerEventsConfig
+{
+	/// <summary>Master switch. False bypasses both veto rules and the diagnostic rule. Default true.</summary>
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+
+	/// <summary>Veto any short-leg structure whose target expiry falls within
+	/// <c>[asOf, earningsDate + earningsBlackoutDaysAfter]</c>. Long-only structures (long call/put)
+	/// are never vetoed — they typically benefit from earnings vol. Default 0 days = veto only when
+	/// earnings ≤ expiry. Set to a positive value to also reject expiries the day after earnings
+	/// (rarely useful: the position is already closed).</summary>
+	[JsonPropertyName("earningsBlackoutDaysAfter")] public int EarningsBlackoutDaysAfter { get; set; } = 0;
+
+	/// <summary>Veto any structure containing a short call leg whose expiry is on or after the next
+	/// ex-dividend date. Early-exercise to capture the dividend is rational on ITM short calls; even
+	/// near-the-money positions can get assigned over a meaningful div. Default true.</summary>
+	[JsonPropertyName("rejectShortCallsThroughExDiv")] public bool RejectShortCallsThroughExDiv { get; set; } = true;
+
+	/// <summary>Path to a JSON override file that supplements (and overrides) Yahoo-sourced events.
+	/// Format: <c>{"AAPL":{"earnings":"2026-08-01","earningsTime":"AMC","exDividend":"2026-08-09","dividendAmount":0.24}}</c>.
+	/// Useful when Yahoo's calendar lags, for non-US tickers, or for known events Yahoo misses. Relative
+	/// paths resolve against the project root. Null disables the override. Default null.</summary>
+	[JsonPropertyName("overrideFilePath")] public string? OverrideFilePath { get; set; } = null;
 }
