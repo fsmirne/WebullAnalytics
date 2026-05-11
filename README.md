@@ -1044,10 +1044,10 @@ These rows appear when `RiskDiagnosticProbe` is attached — which is always for
 ### Reading the Rationale line
 
 ```
-Rationale: debit $92.00, maxProfit $408.00, maxLoss $92.00, R/R 4.43, prem 1.00x, BE $24.92, POP 38.0%, EV $60.92
+Rationale: debit $92.00, maxProfit $408.00, maxLoss $92.00, R/R 4.43, prem 1.00x, BE $24.92, POP 38.0%, EV $60.92 (real $42.16, −$4.00 fric)
 ```
 
-Every dollar figure is **per contract** (already multiplied by the 100-share multiplier). Quote conventions in the option chain are usually per share; the diagnostic converts everything to per-contract so it lines up with margin, EV, and ranking math.
+Every dollar figure is **per contract** (already multiplied by the 100-share multiplier). Quote conventions in the option chain are usually per share; the diagnostic converts everything to per-contract so it lines up with margin, EV, and ranking math. The trailing `(real $X.XX, −$Y.YY fric)` annotation surfaces the realized-expectancy adjustment — `real` is the EV the scorer actually used (managed-exit clamped + slippage subtracted), `fric` is the friction component alone. See **Realized expectancy** below for how the two pieces compose.
 
 #### `debit / credit` — net entry cash flow
 
@@ -1155,7 +1155,7 @@ raw  →  tech-adjusted  →  final
 raw = EV / max(1, daysToTarget) / capitalAtRisk
 ```
 
-`EV` is the expected value at the target expiry, computed by integrating the structure's piecewise-linear payoff against a 5-point log-normal scenario grid centered on spot at the IV-implied volatility. `capitalAtRisk` is the structure's broker margin requirement (covered structures use the debit; verticals/condors use width × 100 − credit). Returns 0 when `capitalAtRisk ≤ 0`.
+`EV` here is the *realized* expected value — theoretical EV clamped to the managed-exit window and reduced by slippage friction (see **Realized expectancy** below). When `opener.realizedExpectancy.enabled` is false, this collapses to the raw theoretical EV from the 5-point log-normal grid. `capitalAtRisk` is the structure's broker margin requirement (covered structures use the debit; verticals/condors use width × 100 − credit). Returns 0 when `capitalAtRisk ≤ 0`.
 
 #### 2. `tech-adjusted` — directional bias from technicals
 
@@ -1210,6 +1210,76 @@ The `analyze risk` and `analyze position` commands do *not* apply the hard filte
 | `minOpenInterest` | 5 | Hard-reject worst-leg OI threshold. Set to 0 to disable. |
 | `weight` | 0.50 | Strength of the multiplicative `liq` factor on survivors. Higher = sharper penalty for borderline-liquidity candidates. |
 
+#### Event veto (opener pipeline)
+
+Beyond the liquidity gate, the opener applies a *scheduled-catalyst veto* before scoring. Yahoo's `quoteSummary` endpoint feeds an in-memory event calendar at scan start (cached to `data/event-cache/{TICKER}.json` for 12h); two rules then drop candidates:
+
+- **Earnings veto.** Any structure with at least one short leg whose target expiry falls in `[today, earningsDate + opener.events.earningsBlackoutDaysAfter]` is rejected. The IV crush + gap risk through earnings overruns the log-normal scoring assumption for short premium. Long-only structures (long call/put) are *not* vetoed — they often benefit from earnings vol, and the trader may explicitly want the catalyst.
+- **Ex-dividend veto.** Any structure containing a short call leg whose expiry is on or after the next ex-dividend date is rejected. Early exercise to capture the dividend is rational on ITM short calls — assignment risk peaks the day before ex-div.
+
+Both vetoes degrade gracefully: an empty event calendar (Yahoo outage, non-US ticker, etc.) is treated as "no events known" and skips both rules. The `earnings_proximity` risk rule still surfaces catalysts for candidates that *passed* the veto (long-only structures, or runs with the feature disabled) so the trader always sees the calendar.
+
+A JSON override file supplements (and overrides) Yahoo-sourced data for missing or wrong entries:
+
+```json
+{
+  "AAPL": { "earnings": "2026-08-01", "earningsTime": "AMC", "exDividend": "2026-08-09", "dividendAmount": 0.24 }
+}
+```
+
+**Config keys** (`opener.events`):
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Master switch. False bypasses both veto rules; the diagnostic rule still fires. |
+| `earningsBlackoutDaysAfter` | `0` | Extend the veto window past the target expiry by N days. Default 0 = veto only when `earnings ≤ expiry`. |
+| `rejectShortCallsThroughExDiv` | `true` | Set false to skip the ex-div veto on short call legs. |
+| `overrideFilePath` | `null` | Path to a JSON override file (relative paths resolve against the project root). |
+
+#### Realized expectancy
+
+The scorer doesn't rank on the theoretical EV that comes straight from the 5-point log-normal grid — it ranks on a *realized EV* that applies the two corrections every desk PM I've worked with treats as table stakes:
+
+1. **Managed exits.** Each scenario's PnL is clamped to a profit-target / stop-loss window before the EV integral runs:
+
+   ```
+   realized_pnl(S_T) = clamp(theoretical_pnl(S_T),
+                             -stopLossPctOfMaxLoss × |maxLoss|,
+                             +profitTargetPctOfMaxProfit × maxProfit) − friction
+   ```
+
+   Defaults of 50% / 50% approximate the tastytrade convention for credit spreads (close at 50% of max profit / stop at -2× credit ≈ -50% of max loss on typical short-vertical widths). The clamping is *path-conservative* — it credits the managed exit only at terminal scenario points, ignoring the optionality of closing intra-life when the path crosses the target. The error is in the safe direction (under-estimates managed-exit value).
+
+2. **Slippage.** A per-order friction is charged for each broker order required to enter the structure (and again to exit, scaled by `roundTrips`):
+
+   ```
+   friction = slippagePerSharePerOrder × ordersForStructure × 100 × roundTrips
+   ```
+
+   `ordersForStructure` is hardcoded based on what Webull actually supports as a combo: 2 for double calendar and double diagonal (which split into two separate combo trades), 1 for everything else (long calendar, diagonal, vertical, iron condor, iron butterfly, long call/put). This is the *right* shape for combo execution where the broker fills the whole structure at one net price — a per-leg slippage charge would systematically over-penalize multi-leg combos.
+
+`slippagePerSharePerOrder` defaults to `0` (assume mid fills). Set to e.g. `0.02` to model paying 2¢/share above mid on each combo fill — typical for Webull-style net-price execution on liquid names. The clamping always applies when `enabled: true`, even with zero slippage; the friction is the optional part.
+
+Two fields on `OpenProposal` carry the realized numbers for audit:
+- `RealizedExpectedValuePerContract` — what the `raw` score divides by (replaces theoretical EV in the scoring chain when the feature is enabled)
+- `EstimatedSlippagePerContract` — the friction charge alone
+
+The `Rationale` line annotates the inline EV so you can see the gap at a glance:
+
+```
+... POP 64.8%, EV $28.38 (real $9.38, −$8.00 fric)
+```
+
+**Config keys** (`opener.realizedExpectancy`):
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Master switch. False bypasses both clamping and slippage — scoring runs on theoretical EV. |
+| `profitTargetPctOfMaxProfit` | `0.50` | Per-scenario profit cap as a fraction of max profit. Lower for tighter management; higher to let winners run. |
+| `stopLossPctOfMaxLoss` | `0.50` | Per-scenario stop floor as a fraction of \|max loss\|. Lower for tighter stops; higher to absorb more whipsaw. |
+| `slippagePerSharePerOrder` | `0` | Dollars-per-share charged per broker order. `0` = mid fills; `0.02` = pay 2¢/share above mid on each combo fill. |
+| `roundTrips` | `2` | Number of full crossings the friction represents. 2 = open + close. |
+
 #### Theta carry — the tail of the factor stack
 
 ```
@@ -1220,7 +1290,7 @@ The theta factor is the last multiplicand in the factor chain. It adds up to a +
 
 ### Risk rules (the `Rules fired` block)
 
-Twelve rules run unconditionally against `RiskDiagnosticFacts`; only those that match attach to the diagnostic. Rules are informational — they do *not* change the score. They surface concerns or geometry observations a human reviewer should know about before acting on the structure.
+Thirteen rules run unconditionally against `RiskDiagnosticFacts`; only those that match attach to the diagnostic. Rules are informational — they do *not* change the score. They surface concerns or geometry observations a human reviewer should know about before acting on the structure.
 
 | Rule ID | Triggers when | What it tells you |
 |---|---|---|
@@ -1236,6 +1306,7 @@ Twelve rules run unconditionally against `RiskDiagnosticFacts`; only those that 
 | `high_realized_vol` | ATR(14) % > 4% of spot | Underlying is moving more than usual — position is exposed to larger-than-typical adverse swings. |
 | `wide_spread` | Worst leg has bid/ask spread > 25% of mid | Exit cost is dominated by liquidity friction, not fair value. Mid quotes are not transactable; closing the structure walks the book against you. |
 | `thin_open_interest` | Worst-leg OI < 50 contracts | Thin OI signals poor market-maker engagement — quotes are wide, fills walk the book, exiting a multi-contract position can move the price against you. |
+| `earnings_proximity` | Next earnings within 14 days of as-of, or next ex-dividend within 14 days when the structure has a short call leg | Surfaces scheduled catalysts the trader should weigh before submitting. Earnings risk: pre-print IV spike and the post-print gap routinely overrun the model's log-normal assumption. Ex-div risk on short calls: early exercise to capture the dividend is rational on ITM strikes. Pure information — the score isn't changed. The earnings/ex-div *veto* (next section) handles the hard rejection path. |
 
 Each fired rule renders as a colored bullet with its ID and an interpolated message that includes the actual measured values. The same `Inputs` dictionary is serialized to the JSONL log, making historical rule-fires queryable with `jq`.
 
