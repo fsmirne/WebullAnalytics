@@ -40,6 +40,7 @@
 		"statArbWeight": 0.15,
 		"sentimentWeight": 0.15,
 		"liquidity": { "maxBidAskSpreadPct": 0.50, "minOpenInterest": 5, "minRelativeOpenInterest": 0.25, "weight": 0.50 },
+		"events": { "enabled": true, "earningsBlackoutDaysAfter": 0, "rejectShortCallsThroughExDiv": true, "overrideFilePath": null },
 		"scenarioGridSigma": 1.0,
 		"structures": {
 			"longCalendar":  { "enabled": true, "shortDteMin": 1, "shortDteMax": 10, "longDteMin": 21, "longDteMax": 60 },
