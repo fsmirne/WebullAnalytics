@@ -13,4 +13,9 @@ internal static class EvaluationDate
 	internal static DateTime Now => _override.HasValue ? _override.Value + DateTime.Now.TimeOfDay : DateTime.Now;
 
 	internal static void Set(DateTime date) => _override = date.Date;
+
+	/// <summary>Clears any override so subsequent reads return the wall-clock date. Intended for tests
+	/// that pin the evaluation date to keep behavior reproducible across days — pair with a try/finally
+	/// (or IDisposable on the test class) to avoid leaking state to other tests.</summary>
+	internal static void Reset() => _override = null;
 }
