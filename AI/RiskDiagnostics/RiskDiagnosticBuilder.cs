@@ -1,3 +1,4 @@
+using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.RiskDiagnostics.Rules;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Sentiment;
@@ -24,6 +25,7 @@ internal static class RiskDiagnosticBuilder
 		new ThinOpenInterestRule(),
 		new SubGridStrikeRule(),
 		new MarketSentimentExtremeRule(),
+		new EarningsProximityRule(),
 	};
 
 	internal static RiskDiagnostic Build(
@@ -33,7 +35,8 @@ internal static class RiskDiagnosticBuilder
 		Func<string, decimal> ivResolver,
 		TrendSnapshot? trend,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null,
-		SentimentSnapshot? sentiment = null)
+		SentimentSnapshot? sentiment = null,
+		TickerEvents? events = null)
 	{
 		var longLegs = legs.Where(l => l.IsLong).ToList();
 		var shortLegs = legs.Where(l => !l.IsLong).ToList();
@@ -144,6 +147,7 @@ internal static class RiskDiagnosticBuilder
 		// strikes that have absolute OI > floor but pale next to neighbors). Worst-leg gates the exit.
 		var (worstLegSpreadPct, minOpenInterest, minRelativeOi) = ComputeLiquidityStats(legs, quotes, spot);
 
+		var hasShortCallLeg = shortLegs.Any(l => l.Parsed.CallPut == "C");
 		var facts = new RiskDiagnosticFacts(
 			StructureLabel: structureLabel,
 			DirectionalBias: directionalBias,
@@ -171,7 +175,12 @@ internal static class RiskDiagnosticBuilder
 			MinRelativeOpenInterest: minRelativeOi,
 			MarketSentimentScore: sentiment?.Score,
 			MarketSentimentRating: sentiment?.Rating,
-			MarketSentimentDelta1Week: sentiment?.Delta1Week);
+			MarketSentimentDelta1Week: sentiment?.Delta1Week,
+			AsOf: asOf,
+			NextEarningsDate: events?.NextEarningsDate,
+			EarningsTime: events?.EarningsTime,
+			NextExDividendDate: events?.NextExDividendDate,
+			HasShortCallLeg: hasShortCallLeg);
 
 		var hits = Rules
 			.Select(r => r.TryEvaluate(facts))
