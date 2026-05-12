@@ -228,6 +228,9 @@ public static class CombinedBreakEvenAnalyzer
 		decimal? maxProfit = ladder.Max(p => p.PnL);
 		decimal? maxLoss = Math.Abs(ladder.Min(p => p.PnL));
 
+		var maxProfitPrice = OptionMath.FindPriceAtPnL(ladder, ladder.Max(p => p.PnL), spot);
+		var maxLossPrice = OptionMath.FindPriceAtPnL(ladder, ladder.Min(p => p.PnL), spot);
+
 		ladder.Reverse();
 		var chartData = OptionMath.BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
@@ -284,7 +287,9 @@ public static class CombinedBreakEvenAnalyzer
 			Grid: grid,
 			UnderlyingPrice: spot,
 			OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(ticker, opts),
-			Margin: margin
+			Margin: margin,
+			MaxProfitPrice: maxProfitPrice,
+			MaxLossPrice: maxLossPrice
 		);
 	}
 

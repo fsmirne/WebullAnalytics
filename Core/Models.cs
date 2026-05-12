@@ -230,5 +230,7 @@ public record BreakEvenResult(
 	TimeDecayGrid? Grid = null,
 	decimal? UnderlyingPrice = null,
 	decimal? OriginalUnderlyingPrice = null,
-	decimal? Margin = null
+	decimal? Margin = null,
+	decimal? MaxProfitPrice = null,
+	decimal? MaxLossPrice = null
 );
