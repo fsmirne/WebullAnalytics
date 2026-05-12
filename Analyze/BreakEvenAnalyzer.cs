@@ -77,7 +77,7 @@ public static class BreakEvenAnalyzer
 		ladder.Reverse();
 		var chartData = OptionMath.BuildChartData(notablePrices, step, pnlFunc, (s, pnl) => null);
 
-		return new BreakEvenResult(Title: title, Details: details, Qty: row.Qty, BreakEvens: [avgPrice], MaxProfit: isLong ? null : avgPrice * row.Qty, MaxLoss: isLong ? avgPrice * row.Qty : null, DaysToExpiry: null, PriceLadder: ladder, Note: null, ChartData: chartData);
+		return new BreakEvenResult(Title: title, Details: details, Qty: row.Qty, BreakEvens: [avgPrice], MaxProfit: isLong ? null : avgPrice * row.Qty, MaxLoss: isLong ? avgPrice * row.Qty : null, DaysToExpiry: null, PriceLadder: ladder, Note: null, ChartData: chartData, MaxProfitPrice: isLong ? null : 0m, MaxLossPrice: isLong ? 0m : null);
 	}
 
 	private static BreakEvenResult? AnalyzeSingleOption(PositionRow row, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
@@ -97,18 +97,23 @@ public static class BreakEvenAnalyzer
 
 		decimal breakEven;
 		decimal? maxProfit, maxLoss;
+		decimal? maxProfitPrice, maxLossPrice;
 
 		if (isCall)
 		{
 			breakEven = strike + premium;
 			maxProfit = isLong ? null : premium * qty * 100;
 			maxLoss = isLong ? premium * qty * 100 : null;
+			maxProfitPrice = isLong ? null : strike;
+			maxLossPrice = isLong ? strike : null;
 		}
 		else
 		{
 			breakEven = strike - premium;
 			maxProfit = isLong ? (strike - premium) * qty * 100 : premium * qty * 100;
 			maxLoss = isLong ? premium * qty * 100 : (strike - premium) * qty * 100;
+			maxProfitPrice = isLong ? 0m : strike;
+			maxLossPrice = isLong ? strike : 0m;
 		}
 
 		var spot = LookupUnderlyingPrice(parsed.Root, opts);
@@ -163,7 +168,7 @@ public static class BreakEvenAnalyzer
 		if (!isLong && spot.HasValue)
 			margin = AnalyzeCommon.ComputeLegMargin(parsed, qty, spot.Value, premium, null, null, 0, 0m, isExisting: false).Total;
 
-		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, Note: null, Legs: legsDisplay, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(parsed.Root, opts), Margin: margin);
+		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, Note: null, Legs: legsDisplay, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(parsed.Root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice);
 	}
 
 	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
@@ -302,6 +307,9 @@ public static class BreakEvenAnalyzer
 		if (!maxLoss.HasValue)
 			maxLoss = Math.Abs(ladder.Min(p => p.PnL));
 
+		var maxProfitPrice = OptionMath.FindPriceAtPnL(ladder, ladder.Max(p => p.PnL), spot);
+		var maxLossPrice = OptionMath.FindPriceAtPnL(ladder, ladder.Min(p => p.PnL), spot);
+
 		ladder.Reverse();
 		var chartData = OptionMath.BuildChartData(notablePrices, step, pnlFunc, valueAt);
 
@@ -348,7 +356,7 @@ public static class BreakEvenAnalyzer
 			}
 		}
 
-		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts), Margin: margin);
+		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice);
 	}
 
 	private static decimal EstimateTimeSpreadAssignmentStrikeLossPerShare(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, DateTime nearestExpiry)

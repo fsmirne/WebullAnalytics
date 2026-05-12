@@ -157,7 +157,11 @@ public static class TableBuilder
 				spotText = "";
 			var beText = result.BreakEvens.Count > 0 ? string.Join(", ", result.BreakEvens.Select(be => $"${be.ToString("N2", CultureInfo.InvariantCulture)}")) : "N/A";
 			var maxProfitText = result.MaxProfit.HasValue ? (result.MaxProfit.Value >= 0 ? $"[green]${result.MaxProfit.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : $"[red]-${Math.Abs(result.MaxProfit.Value).ToString("N2", CultureInfo.InvariantCulture)}[/]") : "Unlimited";
+			if (result.MaxProfit.HasValue && result.MaxProfitPrice.HasValue)
+				maxProfitText += $" @ {result.MaxProfitPrice.Value.ToString("N2", CultureInfo.InvariantCulture)}";
 			var maxLossText = result.MaxLoss.HasValue ? $"[red]-${result.MaxLoss.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "Unlimited";
+			if (result.MaxLoss.HasValue && result.MaxLossPrice.HasValue)
+				maxLossText += $" @ {result.MaxLossPrice.Value.ToString("N2", CultureInfo.InvariantCulture)}";
 			var marginText = result.Margin.HasValue ? $" {sep} Margin: [yellow]${result.Margin.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "";
 			items.Add(new Markup($"{spotText}Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}{marginText}"));
 
