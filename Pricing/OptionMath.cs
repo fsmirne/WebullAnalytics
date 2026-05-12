@@ -203,6 +203,34 @@ internal static class OptionMath
 	}
 
 	/// <summary>Finds all prices where P&L crosses zero using linear interpolation.</summary>
+	/// <summary>
+	/// Returns the ladder price whose P&L equals <paramref name="targetPnL"/>. When the target is reached
+	/// across a flat plateau (e.g., max profit at every S ≥ strike), prefers boundary points where the
+	/// adjacent ladder price is not at the target, then breaks ties by closeness to <paramref name="spot"/>.
+	/// </summary>
+	internal static decimal? FindPriceAtPnL(List<PricePnL> ladder, decimal targetPnL, decimal? spot)
+	{
+		if (ladder == null || ladder.Count == 0) return null;
+		const decimal tolerance = 0.01m;
+
+		var sorted = ladder.OrderBy(p => p.UnderlyingPrice).ToList();
+		bool IsTarget(int i) => Math.Abs(sorted[i].PnL - targetPnL) <= tolerance;
+
+		var boundaries = new List<decimal>();
+		for (int i = 0; i < sorted.Count; i++)
+		{
+			if (!IsTarget(i)) continue;
+			var leftEdge = i == 0 || !IsTarget(i - 1);
+			var rightEdge = i == sorted.Count - 1 || !IsTarget(i + 1);
+			if (leftEdge || rightEdge) boundaries.Add(sorted[i].UnderlyingPrice);
+		}
+
+		var candidates = boundaries.Count > 0 ? boundaries : sorted.Where((_, i) => IsTarget(i)).Select(p => p.UnderlyingPrice).ToList();
+		if (candidates.Count == 0) return null;
+		if (spot.HasValue) return candidates.OrderBy(p => Math.Abs(p - spot.Value)).First();
+		return candidates.First();
+	}
+
 	internal static List<decimal> FindBreakEvensNumerically(List<PricePnL> ladder, Func<decimal, decimal>? pnlFunc = null)
 	{
 		var results = new List<decimal>();
