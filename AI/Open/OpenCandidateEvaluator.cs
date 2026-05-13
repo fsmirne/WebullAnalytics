@@ -196,7 +196,7 @@ internal sealed class OpenCandidateEvaluator
 
 			// Apply cash sizing.
 			for (int i = 0; i < survivors.Count; i++)
-				survivors[i] = ApplyCashSizing(survivors[i], freeCash, cfg, bias);
+				survivors[i] = ApplyCashSizing(survivors[i], freeCash, ctx.AccountValue, cfg, bias);
 
 			// Per-ticker top-N. DoubleCalendar/DoubleDiagonal stay as one 4-leg proposal here and render as a
 			// unified two-side panel downstream, so each counts as a single suggestion against the cap.
@@ -296,26 +296,37 @@ internal sealed class OpenCandidateEvaluator
 			.ToList();
 	}
 
-	private static OpenProposal ApplyCashSizing(OpenProposal p, decimal freeCash, OpenerConfig cfg, decimal bias)
+	private static OpenProposal ApplyCashSizing(OpenProposal p, decimal freeCash, decimal accountValue, OpenerConfig cfg, decimal bias)
 	{
 		if (p.CapitalAtRiskPerContract <= 0m)
 			return p with { Rationale = CandidateScorer.BuildRationale(p, bias, cfg) };
 
-		var rawMax = Math.Floor(freeCash / p.CapitalAtRiskPerContract);
-		var maxQty = rawMax >= cfg.MaxQtyPerProposal ? cfg.MaxQtyPerProposal : (int)rawMax;
+		// Three caps on qty:
+		//   1) free cash: can't risk more than we have
+		//   2) hard contract count (MaxQtyPerProposal): protects against degenerate ultra-cheap structures
+		//   3) per-trade risk budget (MaxRiskPctPerProposal × accountValue): prevents a single position from
+		//      dominating account drawdown. Without this, a $200/ct loss on a $25k account could fill 50
+		//      contracts (= 40% of equity at risk on one trade).
+		var cashCap = (int)Math.Floor(freeCash / p.CapitalAtRiskPerContract);
+		var riskBudget = accountValue * cfg.MaxRiskPctPerProposal;
+		var riskCap = riskBudget > 0m ? (int)Math.Floor(riskBudget / p.CapitalAtRiskPerContract) : 0;
+		var maxQty = Math.Min(Math.Min(cashCap, riskCap), cfg.MaxQtyPerProposal);
+
 		OpenProposal updated;
 		if (maxQty >= 1)
 		{
-			var qty = Math.Min(maxQty, cfg.MaxQtyPerProposal);
-			updated = p with { Qty = qty, Legs = ScaleLegs(p.Legs, qty) };
+			updated = p with { Qty = maxQty, Legs = ScaleLegs(p.Legs, maxQty) };
 		}
 		else
 		{
+			var binding = cashCap < 1 ? "cash" : (riskCap < 1 ? "risk-budget" : "qty-cap");
 			updated = p with
 			{
 				Qty = 0,
 				CashReserveBlocked = true,
-				CashReserveDetail = $"free ${freeCash:F0}, requires ${p.CapitalAtRiskPerContract:F0} per contract"
+				CashReserveDetail = binding == "risk-budget"
+					? $"risk budget ${riskBudget:F0} ({cfg.MaxRiskPctPerProposal:P0} of ${accountValue:F0}) below ${p.CapitalAtRiskPerContract:F0} per contract"
+					: $"free ${freeCash:F0}, requires ${p.CapitalAtRiskPerContract:F0} per contract"
 			};
 		}
 		return updated with

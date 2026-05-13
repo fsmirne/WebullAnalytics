@@ -8,6 +8,13 @@ internal sealed class OpenerConfig
 	[JsonPropertyName("topNPerTicker")] public int TopNPerTicker { get; set; } = 5;
 	[JsonPropertyName("maxCandidatesPerStructurePerTicker")] public int MaxCandidatesPerStructurePerTicker { get; set; } = 8;
 	[JsonPropertyName("maxQtyPerProposal")] public int MaxQtyPerProposal { get; set; } = 10;
+
+	/// <summary>Hard cap on per-trade risk as a fraction of account value. Enforced alongside
+	/// <see cref="MaxQtyPerProposal"/> in <c>OpenCandidateEvaluator.ApplyCashSizing</c>: the proposed
+	/// qty is reduced so that <c>qty × CapitalAtRiskPerContract ≤ MaxRiskPctPerProposal × AccountValue</c>.
+	/// Default 0.10 (10% of equity per trade) prevents a single position from dominating account
+	/// drawdowns. Set to 1.0 to disable; 0 disables the proposal entirely.</summary>
+	[JsonPropertyName("maxRiskPctPerProposal")] public decimal MaxRiskPctPerProposal { get; set; } = 0.10m;
 	[JsonPropertyName("directionalFitWeight")] public decimal DirectionalFitWeight { get; set; } = 0.5m;
 	[JsonPropertyName("profitBandPct")] public decimal ProfitBandPct { get; set; } = 5.0m;
 	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;

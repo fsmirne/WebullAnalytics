@@ -24,6 +24,7 @@
 		"topNPerTicker": 5,
 		"maxCandidatesPerStructurePerTicker": 8,
 		"maxQtyPerProposal": 10,
+		"maxRiskPctPerProposal": 0.10,
 		"directionalFitWeight": 0.5,
 		"profitBandPct": 5.0,
 		"ivDefaultPct": 40,
@@ -106,7 +107,14 @@
 		"autoExecute": {
 			"enabled": false,
 			"submit": false,
-			"rules": ["CloseBeforeShortExpiryRule"],
+			"rules": [
+				"StopLossRule",
+				"CloseBeforeShortExpiryRule",
+				"TakeProfitRule",
+				"OpportunisticRollRule",
+				"DefensiveRollRule",
+				"RollShortOnExpiryRule"
+			],
 			"scaleOut": {
 				"tz": "America/New_York",
 				"tranche1Start": "10:00",
@@ -119,6 +127,13 @@
 				"tranche2Fraction": 0.5,
 				"minQty": 100
 			}
+		},
+		"openerAutoExecute": {
+			"enabled": false,
+			"submit": false,
+			"maxPerTickerPerTick": 1,
+			"maxOrdersPerTick": 3,
+			"structures": []
 		}
 	}
 }

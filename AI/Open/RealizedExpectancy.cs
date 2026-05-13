@@ -20,11 +20,22 @@ internal static class RealizedExpectancy
 	/// <c>slippagePerSharePerOrder × ordersForStructure × 100 × roundTrips</c>. Right shape for
 	/// combo execution where the broker fills each structure at one net price — multi-leg combos
 	/// pay one cross of the spread, not one per leg. Returns 0 when the feature is disabled or
-	/// the slippage knob is at 0.</summary>
+	/// the slippage knob is at 0. Used by the scorer for whole-lifecycle EV estimation; the
+	/// backtest's per-fill deduction uses <see cref="ComputeFrictionPerOrderPerContract"/>.</summary>
 	public static decimal ComputeFrictionPerContract(OpenerRealizedExpectancyConfig cfg, OpenStructureKind structureKind)
 	{
 		if (!cfg.Enabled || cfg.RoundTrips <= 0 || cfg.SlippagePerSharePerOrder <= 0m) return 0m;
 		return cfg.SlippagePerSharePerOrder * OrdersForStructure(structureKind) * 100m * cfg.RoundTrips;
+	}
+
+	/// <summary>Per-broker-execution friction in dollars per contract: <c>slippagePerSharePerOrder ×
+	/// ordersForStructure × 100</c>. The backtest deducts this on each fill (open / close / roll) so
+	/// realized cash flow matches the friction-aware EV the scorer used to rank the trade.
+	/// Roundtrips is irrelevant here — each fill represents exactly one execution.</summary>
+	public static decimal ComputeFrictionPerOrderPerContract(OpenerRealizedExpectancyConfig cfg, OpenStructureKind structureKind)
+	{
+		if (!cfg.Enabled || cfg.SlippagePerSharePerOrder <= 0m) return 0m;
+		return cfg.SlippagePerSharePerOrder * OrdersForStructure(structureKind) * 100m;
 	}
 
 	/// <summary>Number of independent broker orders required to enter <paramref name="kind"/>.
