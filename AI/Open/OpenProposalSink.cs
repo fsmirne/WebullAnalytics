@@ -138,8 +138,14 @@ internal sealed class OpenProposalSink : IDisposable
 			rows.Add(RiskDiagnosticRenderer.Build(p.Diagnostic, ascii: _ascii));
 
 		var blocked = p.CashReserveBlocked ? " [yellow]⚠ blocked[/]" : "";
+		// Path-aware EV is the model's verdict that includes the StopLossRule firing intra-period.
+		// When it's non-positive the candidate is the "least bad" of what was enumerated, not an
+		// endorsed setup — flag it loudly in the header so it doesn't read as "#1 = best."
+		var negativeEv = p.RealizedExpectedValuePerContract is decimal ev && ev <= 0m
+			? " [red]⚠ negative EV[/]"
+			: "";
 		var rankPrefix = rank is int n ? $"[grey]#{n}[/] " : "";
-		var header = $"{rankPrefix}[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}";
+		var header = $"{rankPrefix}[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}{negativeEv}";
 		var panel = new Panel(new Rows(rows))
 			.Header(header)
 			.Expand()
