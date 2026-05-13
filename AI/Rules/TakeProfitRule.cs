@@ -3,12 +3,22 @@ namespace WebullAnalytics.AI.Rules;
 /// <summary>
 /// Priority 2: close the position when mark-to-market has captured a configured percentage of
 /// max projected profit (estimated via ProfitProjector across the full remaining lifetime grid).
+/// Threshold is read from <see cref="OpenerRealizedExpectancyConfig.ProfitTargetPctOfMaxProfit"/>
+/// (decimal 0–1, default 0.50) so the rule fires at the same exit point the candidate scorer's
+/// EV calc clamps grid scenarios at. Without this alignment the scorer ranks against a managed-exit
+/// policy the runtime doesn't actually implement — the prior split (rule at 60% maxProfit, scorer
+/// clamp at 50% maxProfit) made backtest P&amp;L systematically diverge from scorer EV.
 /// </summary>
 internal sealed class TakeProfitRule : IManagementRule
 {
 	private readonly TakeProfitConfig _config;
+	private readonly OpenerRealizedExpectancyConfig _realizedExpectancy;
 
-	public TakeProfitRule(TakeProfitConfig config) { _config = config; }
+	public TakeProfitRule(TakeProfitConfig config, OpenerRealizedExpectancyConfig realizedExpectancy)
+	{
+		_config = config;
+		_realizedExpectancy = realizedExpectancy;
+	}
 
 	public string Name => "TakeProfitRule";
 	public int Priority => 2;
@@ -16,6 +26,7 @@ internal sealed class TakeProfitRule : IManagementRule
 	public ManagementProposal? Evaluate(OpenPosition position, EvaluationContext ctx)
 	{
 		if (!_config.Enabled) return null;
+		if (!_realizedExpectancy.Enabled) return null;
 
 		var currentMarkPerContract = ComputeMarkPerContract(position, ctx);
 		if (currentMarkPerContract == null) return null;
@@ -28,8 +39,9 @@ internal sealed class TakeProfitRule : IManagementRule
 		var maxProjected = GetMaxProjectedProfitPerContract(position, ctx);
 		if (maxProjected == null || maxProjected.Value <= 0m) return null;
 
-		var pctCaptured = (profitPerContract / maxProjected.Value) * 100m;
-		if (pctCaptured < _config.PctOfMaxProfit) return null;
+		var pctCapturedFraction = profitPerContract / maxProjected.Value;
+		if (pctCapturedFraction < _realizedExpectancy.ProfitTargetPctOfMaxProfit) return null;
+		var pctCaptured = pctCapturedFraction * 100m;
 
 		// Stamp each leg with per-share mid (default limit) and the side-aware bid/ask edge so the
 		// sink emits a realistic limit; otherwise the fallback path mis-scales NetDebit by quantity.
@@ -53,7 +65,7 @@ internal sealed class TakeProfitRule : IManagementRule
 			Kind: ProposalKind.Close,
 			Legs: legs,
 			NetDebit: currentMarkPerContract.Value,
-			Rationale: $"captured {pctCaptured:F0}% of max projected profit ${maxProjected.Value:F2}/contract (threshold {_config.PctOfMaxProfit}%)"
+			Rationale: $"captured {pctCaptured:F0}% of max projected profit ${maxProjected.Value:F2}/contract (threshold {_realizedExpectancy.ProfitTargetPctOfMaxProfit:P0})"
 		);
 	}
 
