@@ -151,7 +151,8 @@ public class CandidateScorerLongCallPutTests
 
 		Assert.Equal(110m, withPain.TargetExpiryMaxPain);
 		Assert.True(withPain.MaxPainAdjustmentFactor > 1m);
-		Assert.Equal(Math.Sign(withoutPain.BiasAdjustedScore), Math.Sign(withPain.BiasAdjustedScore));
-		Assert.True(Math.Abs(withPain.BiasAdjustedScore) > Math.Abs(withoutPain.BiasAdjustedScore));
+		// A bonus factor (>1) moves the score in the positive direction under sign-symmetric
+		// factor application — for any starting sign, withPain ranks higher than withoutPain.
+		Assert.True(withPain.BiasAdjustedScore > withoutPain.BiasAdjustedScore);
 	}
 }
