@@ -1063,8 +1063,17 @@ internal static class CandidateScorer
 		// the loss barrier. For asymmetric short verticals (large width / small credit) this dominates
 		// EV — the terminal POP says 90% win but the path-touch probability over the same horizon can
 		// be 15-25%, and a single stop-out wipes out 5+ winning trades.
+		// Stop-shifted barrier: shift from BE toward the long-leg strike by stopPct (same rationale
+		// as the multi-leg path). For a short put vertical, the wing is the long put (further OTM).
+		var stopPctSv = cfg.RealizedExpectancy.Enabled ? cfg.RealizedExpectancy.StopLossPctOfMaxLoss : 0m;
+		var wingStrike = longParsed.Strike;
+		decimal shiftedBarrier;
+		if (isCall)
+			shiftedBarrier = wingStrike > breakeven ? breakeven + stopPctSv * (wingStrike - breakeven) : breakeven;
+		else
+			shiftedBarrier = wingStrike < breakeven ? breakeven - stopPctSv * (breakeven - wingStrike) : breakeven;
 		var barrierAwareEv = AdjustEvForBarrier(realizedEv, spot, (double)iv, years,
-			isCall ? null : breakeven, isCall ? breakeven : (decimal?)null,
+			isCall ? null : shiftedBarrier, isCall ? shiftedBarrier : (decimal?)null,
 			maxLoss, friction, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(barrierAwareEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
@@ -1542,8 +1551,22 @@ internal static class CandidateScorer
 		if (capitalAtRisk <= 0m) return null;
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
 		var realizedEv = RealizedExpectancy.RealizeEv(grid, pnl, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
-		var barrierLower = breakevens.Count >= 1 ? (decimal?)breakevens.Min() : null;
-		var barrierUpper = breakevens.Count >= 2 ? (decimal?)breakevens.Max() : null;
+		// Stop-shifted barrier: the actual StopLossRule fires when realized loss reaches
+		// `stopPct × maxLoss`, which corresponds to spot sitting between break-even (loss=0) and
+		// the wing (loss=maxLoss). Using raw BE as the barrier was conservative-pessimistic and
+		// drove P_hit to ≥99% on nearly every credit structure. The accurate barrier sits at
+		// `BE + stopPct × (wing − BE)`, derived from the linear P&L slope between BE and wing on
+		// credit structures (IB / IC / credit vertical). Wings = the long-leg strikes.
+		var longStrikes = defs.Where(d => d.IsLong).Select(d => d.Parsed.Strike).ToList();
+		decimal? wingLower = longStrikes.Count > 0 ? longStrikes.Min() : null;
+		decimal? wingUpper = longStrikes.Count > 0 ? longStrikes.Max() : null;
+		var stopPct = cfg.RealizedExpectancy.Enabled ? cfg.RealizedExpectancy.StopLossPctOfMaxLoss : 0m;
+		decimal? barrierLower = breakevens.Count >= 1 ? breakevens.Min() : null;
+		decimal? barrierUpper = breakevens.Count >= 2 ? breakevens.Max() : null;
+		if (barrierLower.HasValue && wingLower.HasValue && wingLower.Value < barrierLower.Value)
+			barrierLower = barrierLower.Value - stopPct * (barrierLower.Value - wingLower.Value);
+		if (barrierUpper.HasValue && wingUpper.HasValue && wingUpper.Value > barrierUpper.Value)
+			barrierUpper = barrierUpper.Value + stopPct * (wingUpper.Value - barrierUpper.Value);
 		var barrierAwareEv = AdjustEvForBarrier(realizedEv, spot, (double)representativeIv, years, barrierLower, barrierUpper, maxLoss, friction, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(barrierAwareEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
