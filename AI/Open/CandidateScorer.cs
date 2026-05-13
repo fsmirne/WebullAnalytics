@@ -11,17 +11,20 @@ internal static class CandidateScorer
    /// <summary>One point in the 5-point log-normal scenario grid used to compute EV at target expiry.</summary>
 	public readonly record struct ScenarioPoint(decimal SpotAtExpiry, decimal Weight);
 
-	/// <summary>Score formula: EV / max(1, days). Returns 0 when daysToTarget ≤ 0. Capital is
-	/// deliberately NOT a divisor — the per-capital normalization rewarded narrow lottery-ticket
-	/// structures (a $5-EV $20-maxLoss trade numerically beat a $50-EV $300-maxLoss trade),
-	/// confusing leverage with quality. Now the raw signal is "expected dollars per day"; the
-	/// factor chain (POP, BE-room, balance, …) carries quality information, and ApplyFactor's
-	/// sign-symmetric form ensures bad attributes amplify badness instead of collapsing to
-	/// zero.</summary>
+	/// <summary>Score formula: EV / max(1, days) / max(1, capitalAtRisk). Capital normalization
+	/// rewards capital efficiency — a $2-EV trade tying up $30 outranks a $2-EV trade tying up
+	/// $190, all else equal, because the cheaper trade lets you make the same EV with less risk
+	/// per dollar. The lottery-ticket failure mode this used to enable (narrow $20-maxLoss
+	/// structures outranking wider ones on per-dollar basis even when they were coin flips) is
+	/// caught by the rest of the chain now: popFactor heavily penalizes low POP, BalanceFactor's
+	/// 0.05 floor lets pathological R/R show real damage, and ApplyFactor's sign-symmetric form
+	/// compounds penalties on bad trades instead of canceling them. With those in place, capital
+	/// efficiency is a useful signal again — without them it was confusing leverage with quality.</summary>
 	public static decimal ComputeRawScore(decimal ev, int daysToTarget, decimal capitalAtRisk)
 	{
 		var days = Math.Max(1, daysToTarget);
-		return ev / days;
+		var capital = Math.Max(1m, capitalAtRisk);
+		return ev / days / capital;
 	}
 
 	/// <summary>Sign-symmetric factor application. For a positive score, multiplying by

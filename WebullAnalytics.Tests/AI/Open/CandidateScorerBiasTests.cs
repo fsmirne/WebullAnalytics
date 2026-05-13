@@ -44,15 +44,14 @@ public class CandidateScorerBiasTests
 	[Fact]
 	public void RawScoreFormulaHonorsZeroDaysClamp()
 	{
-		// EV 100, days 0 → clamped to 1 → 100/1 = 100. Capital is not a divisor; the per-capital
-		// normalization rewarded narrow lottery-ticket structures and was removed.
-		Assert.Equal(100m, CandidateScorer.ComputeRawScore(ev: 100m, daysToTarget: 0, capitalAtRisk: 200m));
+		// EV 100, days 0 → clamped to 1; capital 200 → 100 / 1 / 200 = 0.5.
+		Assert.Equal(0.5m, CandidateScorer.ComputeRawScore(ev: 100m, daysToTarget: 0, capitalAtRisk: 200m));
 	}
 
 	[Fact]
-	public void RawScoreIsEvPerDay()
+	public void RawScoreClampsCapitalAtOne()
 	{
-		// 50 / 5 days = 10. Capital is ignored.
+		// 50 / 5 days / max(1, 0) = 10. Zero capital clamps to 1 to avoid divide-by-zero.
 		Assert.Equal(10m, CandidateScorer.ComputeRawScore(ev: 50m, daysToTarget: 5, capitalAtRisk: 0m));
 	}
 
