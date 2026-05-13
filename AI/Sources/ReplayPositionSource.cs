@@ -83,6 +83,20 @@ internal sealed class ReplayPositionSource : IPositionSource
 			var initialDebit = currentParent.InitialAvgPrice ?? currentParent.AvgPrice;
 			var adjustedDebit = currentParent.AdjustedAvgPrice ?? currentParent.AvgPrice;
 
+			// OpenedAt = earliest trade timestamp on any leg in the lineage. For rolled positions the
+			// long leg typically carries the original open date; we take the global min for safety.
+			DateTime? openedAt = null;
+			foreach (var leg in currentLegs)
+			{
+				if (leg.MatchKey == null) continue;
+				foreach (var t in _allTrades)
+				{
+					if (!string.Equals(t.MatchKey, leg.MatchKey, StringComparison.OrdinalIgnoreCase)) continue;
+					if (t.Timestamp > asOf) continue;
+					if (openedAt == null || t.Timestamp < openedAt.Value) openedAt = t.Timestamp;
+				}
+			}
+
 			result[key] = new OpenPosition(
 				Key: key,
 				Ticker: ticker,
@@ -90,7 +104,8 @@ internal sealed class ReplayPositionSource : IPositionSource
 				Legs: legObjs,
 				InitialNetDebit: initialDebit,
 				AdjustedNetDebit: adjustedDebit,
-				Quantity: currentParent.Qty
+				Quantity: currentParent.Qty,
+				OpenedAt: openedAt
 			);
 
 			currentParent = null;

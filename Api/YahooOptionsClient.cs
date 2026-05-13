@@ -359,6 +359,96 @@ public static class YahooOptionsClient
 		return result;
 	}
 
+	/// <summary>One daily OHLCV bar plus split/dividend-adjusted close. AdjClose is what `BacktestIVProvider`
+	/// uses for realized-vol calc to avoid dividend-date and split-date jumps polluting HV.</summary>
+	public sealed record HistoricalBar(DateTime Date, decimal Open, decimal High, decimal Low, decimal Close, decimal AdjClose, long? Volume);
+
+	public static async Task<Dictionary<DateTime, HistoricalBar>> FetchHistoricalBarsAsync(string ticker, DateTime from, DateTime to, CancellationToken cancellation)
+	{
+		var yahoTicker = ToYahooTicker(ticker);
+		var period1 = ToUnixTimeSecondsUtc(from);
+		var period2 = ToUnixTimeSecondsUtc(to);
+
+		var handler = new HttpClientHandler { CookieContainer = new System.Net.CookieContainer(), AutomaticDecompression = System.Net.DecompressionMethods.All };
+		using var client = new HttpClient(handler);
+		client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebullAnalytics/1.0");
+		client.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/plain, */*");
+		client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+
+		string? crumb = null;
+		var result = await FetchHistoricalBarsAsync(client, yahoTicker, period1, period2, crumb, cancellation);
+		if (result == null)
+		{
+			crumb = await TryGetCrumbAsync(client, cancellation);
+			result = await FetchHistoricalBarsAsync(client, yahoTicker, period1, period2, crumb, cancellation);
+		}
+		if (result == null)
+		{
+			Console.Error.WriteLine($"Warning: Yahoo historical-bars fetch for {ticker} failed. Cache will be empty.");
+			return new Dictionary<DateTime, HistoricalBar>();
+		}
+		return result;
+	}
+
+	private static async Task<Dictionary<DateTime, HistoricalBar>?> FetchHistoricalBarsAsync(HttpClient client, string ticker, long period1, long period2, string? crumb, CancellationToken cancellation)
+	{
+		try
+		{
+			var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(ticker)}?period1={period1}&period2={period2}&interval=1d&events=history";
+			if (!string.IsNullOrWhiteSpace(crumb)) url += $"&crumb={Uri.EscapeDataString(crumb)}";
+			var request = new HttpRequestMessage(HttpMethod.Get, url);
+			request.Headers.Referrer = new Uri($"https://finance.yahoo.com/quote/{Uri.EscapeDataString(ticker)}/history/");
+			using var response = await client.SendAsync(request, cancellation);
+			if (!response.IsSuccessStatusCode) return null;
+
+			var json = await response.Content.ReadAsStringAsync(cancellation);
+			using var doc = JsonDocument.Parse(json);
+			if (!doc.RootElement.TryGetProperty("chart", out var chart)) return null;
+			if (!chart.TryGetProperty("result", out var resultArr) || resultArr.ValueKind != JsonValueKind.Array || resultArr.GetArrayLength() == 0) return null;
+			var series = resultArr[0];
+			if (!series.TryGetProperty("timestamp", out var tsArr)) return null;
+			if (!series.TryGetProperty("indicators", out var indicators)) return null;
+			if (!indicators.TryGetProperty("quote", out var quoteArr) || quoteArr.GetArrayLength() == 0) return null;
+			var q = quoteArr[0];
+			if (!q.TryGetProperty("open", out var openArr) || !q.TryGetProperty("high", out var highArr) || !q.TryGetProperty("low", out var lowArr) || !q.TryGetProperty("close", out var closeArr)) return null;
+
+			JsonElement? adjArr = null;
+			if (indicators.TryGetProperty("adjclose", out var adjArrOuter) && adjArrOuter.GetArrayLength() > 0 && adjArrOuter[0].TryGetProperty("adjclose", out var adjInner))
+				adjArr = adjInner;
+
+			var volArr = q.TryGetProperty("volume", out var volEl) ? (JsonElement?)volEl : null;
+
+			var map = new Dictionary<DateTime, HistoricalBar>();
+			var timestamps = tsArr.EnumerateArray().ToArray();
+			var opens = openArr.EnumerateArray().ToArray();
+			var highs = highArr.EnumerateArray().ToArray();
+			var lows = lowArr.EnumerateArray().ToArray();
+			var closes = closeArr.EnumerateArray().ToArray();
+			var adjs = adjArr?.EnumerateArray().ToArray();
+			var vols = volArr?.EnumerateArray().ToArray();
+			var n = new[] { timestamps.Length, opens.Length, highs.Length, lows.Length, closes.Length }.Min();
+			for (int i = 0; i < n; i++)
+			{
+				if (closes[i].ValueKind == JsonValueKind.Null || opens[i].ValueKind == JsonValueKind.Null || highs[i].ValueKind == JsonValueKind.Null || lows[i].ValueKind == JsonValueKind.Null) continue;
+				if (!closes[i].TryGetDecimal(out var close)) continue;
+				if (!opens[i].TryGetDecimal(out var open)) continue;
+				if (!highs[i].TryGetDecimal(out var high)) continue;
+				if (!lows[i].TryGetDecimal(out var low)) continue;
+				var adj = close;
+				if (adjs != null && i < adjs.Length && adjs[i].ValueKind != JsonValueKind.Null && adjs[i].TryGetDecimal(out var a)) adj = a;
+				long? vol = null;
+				if (vols != null && i < vols.Length && vols[i].ValueKind == JsonValueKind.Number && vols[i].TryGetInt64(out var v)) vol = v;
+				var date = DateTimeOffset.FromUnixTimeSeconds(timestamps[i].GetInt64()).UtcDateTime.Date;
+				map[date] = new HistoricalBar(date, open, high, low, close, adj, vol);
+			}
+			return map;
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			return null;
+		}
+	}
+
 	internal static long ToUnixTimeSecondsUtc(DateTime value)
 	{
 		if (value.Kind == DateTimeKind.Utc)

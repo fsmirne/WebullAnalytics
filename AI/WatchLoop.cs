@@ -7,7 +7,7 @@ using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
 
-internal sealed class AIWatchSettings : AISubcommandSettings
+internal sealed class AIWatchSettings : AIMultiTickerSubcommandSettings
 {
 	[CommandOption("--tick <SECONDS>")]
 	[Description("Override tickIntervalSeconds.")]
@@ -70,16 +70,19 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
 
-		// Auto-executor: turns rule-emitted Close proposals into real (or dry-run) order submissions
-		// inside the watch loop, including time-windowed scale-out for large positions. Off by default.
-		WatchAutoExecutor? autoExecutor = null;
-		if (config.Watch.AutoExecute.Enabled)
+		// Auto-executors: turn proposals into real (or dry-run) order submissions inside the watch loop.
+		// Two independent paths with parallel security gates:
+		//   - WatchAutoExecutor: management Close proposals from the rule engine, with tranche scheduling.
+		//   - WatchOpenerAutoExecutor: opener proposals (new positions), with per-day fingerprint dedup.
+		// Both off by default; both honor --submit/--enabled gates independently.
+		Trading.TradeAccount? account = null;
+		if (config.Watch.AutoExecute.Enabled || config.Watch.OpenerAutoExecute.Enabled)
 		{
-			Trading.TradeAccount? account = null;
 			try { account = AIContext.ResolveTradeAccount(config); }
 			catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]auto-execute disabled (account resolution failed): {Markup.Escape(ex.Message)}[/]"); }
-			autoExecutor = new WatchAutoExecutor(config.Watch.AutoExecute, account);
 		}
+		WatchAutoExecutor? autoExecutor = config.Watch.AutoExecute.Enabled ? new WatchAutoExecutor(config.Watch.AutoExecute, account) : null;
+		WatchOpenerAutoExecutor? openerExecutor = config.Watch.OpenerAutoExecute.Enabled ? new WatchOpenerAutoExecutor(config.Watch.OpenerAutoExecute, account) : null;
 
 		using var sink = new ProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 		OpenProposalSink? openSink = null;
@@ -126,6 +129,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				{
 					var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 					for (var i = 0; i < openResults.Count; i++) { openSink.Emit(openResults[i], rank: i + 1); proposalsEmitted++; }
+					if (openerExecutor != null)
+						await openerExecutor.HandleAsync(openResults, now, cancellation);
 				}
 
 				ticksRun++;

@@ -76,6 +76,8 @@ class Program
 				ai.AddCommand<AI.AIScanCommand>("scan");
 				ai.AddCommand<AI.AIWatchCommand>("watch");
 				ai.AddCommand<AI.AIReplayCommand>("replay");
+				ai.AddCommand<AI.AIBacktestCommand>("backtest");
+				ai.AddCommand<AI.AIHistoryCommand>("history");
 			});
 		});
 		return app.Run(args);

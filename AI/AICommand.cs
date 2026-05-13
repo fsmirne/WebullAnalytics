@@ -20,10 +20,6 @@ internal abstract class AISubcommandSettings : CommandSettings
 	[Description("Path to ai-config.json. Default: data/ai-config.json.")]
 	public string? ConfigPath { get; set; }
 
-	[CommandOption("--tickers <LIST>")]
-	[Description("Override config tickers (comma-separated).")]
-	public string? Tickers { get; set; }
-
 	[CommandOption("--output <FORMAT>")]
 	[Description("Output format: console or text. Default: console.")]
 	public string Output { get; set; } = "console";
@@ -72,6 +68,15 @@ internal abstract class AISubcommandSettings : CommandSettings
 
 	internal bool EmitManagementProposals => !string.Equals(Proposals, "open", StringComparison.OrdinalIgnoreCase);
 	internal bool EmitOpenProposals => !string.Equals(Proposals, "management", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>Base for AI subcommands that operate on a portfolio of tickers (scan, watch, replay).
+/// Backtest does not extend this — it takes a single positional ticker instead.</summary>
+internal abstract class AIMultiTickerSubcommandSettings : AISubcommandSettings
+{
+	[CommandOption("--tickers <LIST>")]
+	[Description("Override config tickers (comma-separated).")]
+	public string? Tickers { get; set; }
 }
 
 internal static class AITextOutput
@@ -129,9 +134,9 @@ internal static class AIContext
 
 		if (config == null) { Console.Error.WriteLine("Error: ai-config.json is empty."); return null; }
 
-		// Apply CLI overrides.
-		if (!string.IsNullOrWhiteSpace(settings.Tickers))
-			config.Tickers = settings.Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+		// Apply CLI overrides. --tickers is only available on multi-ticker subcommands.
+		if (settings is AIMultiTickerSubcommandSettings multi && !string.IsNullOrWhiteSpace(multi.Tickers))
+			config.Tickers = multi.Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 		if (!string.IsNullOrWhiteSpace(settings.Api)) config.QuoteSource = settings.Api;
 		if (!string.IsNullOrWhiteSpace(settings.LogLevel)) config.Log.ConsoleVerbosity = settings.LogLevel;
 
@@ -169,7 +174,7 @@ internal static class AIContext
 }
 
 /// <summary>`ai scan` — one evaluation pass, print proposals, exit.</summary>
-internal sealed class AIScanSettings : AISubcommandSettings
+internal sealed class AIScanSettings : AIMultiTickerSubcommandSettings
 {
 	[CommandOption("--top <N>")]
 	[Description("Override opener.topNPerTicker from ai-config.json.")]
@@ -241,7 +246,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 }
 
 /// <summary>`ai replay` — historical replay against orders.jsonl with agreement analysis.</summary>
-internal sealed class AIReplaySettings : AISubcommandSettings
+internal sealed class AIReplaySettings : AIMultiTickerSubcommandSettings
 {
 	[CommandOption("--since <DATE>")]
 	[Description("Start date YYYY-MM-DD. Default: earliest fill.")]
@@ -310,4 +315,116 @@ internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 		var runner = new Replay.ReplayRunner(config, positions, quotes, trades, priceCache);
 		return await runner.RunAsync(since, until, settings.Granularity, cancellation);
 	}
+}
+
+/// <summary>`ai backtest` — simulate opening/managing positions from scratch over a historical window
+/// using the AI rules + opener. No real fills involved; produces simulated P&amp;L for rule tuning.</summary>
+internal sealed class AIBacktestSettings : AISubcommandSettings
+{
+	[CommandArgument(0, "<ticker>")]
+	[Description("Underlying ticker symbol (e.g., SPY, QQQ, GME).")]
+	public string Ticker { get; set; } = "";
+
+	[CommandOption("--since <DATE>")]
+	[Description("Start date YYYY-MM-DD. Default: Jan 1 of current year.")]
+	public string? Since { get; set; }
+
+	[CommandOption("--until <DATE>")]
+	[Description("End date YYYY-MM-DD. Default: today.")]
+	public string? Until { get; set; }
+
+	[CommandOption("--starting-cash <AMOUNT>")]
+	[Description("Starting cash balance. Default: 25000.")]
+	public decimal StartingCash { get; set; } = 25000m;
+
+	[CommandOption("--fee-per-contract <AMOUNT>")]
+	[Description("Per-leg-contract commission. Default: 0.05 (Webull ETFs/equities). Use 0.65 for true index options (SPX/NDX/RUT).")]
+	public decimal FeePerContract { get; set; } = 0.05m;
+
+	[CommandOption("--iv-hv-premium <RATIO>")]
+	[Description("IV/HV multiplier for non-SPY tickers (SPY uses real VIX). Default: 1.15.")]
+	public decimal IvHvPremium { get; set; } = 1.15m;
+
+	[CommandOption("--smile <MODE>")]
+	[Description("Volatility smile model: 'off' (flat IV across strikes) or 'static' (quadratic skew + curvature, ticker-class defaults). Default: static.")]
+	public string Smile { get; set; } = "static";
+
+	[CommandOption("--top-per-step <N>")]
+	[Description("Maximum new opens per trading day. Default: 1.")]
+	public int TopPerStep { get; set; } = 1;
+
+	[CommandOption("--show-fills")]
+	[Description("Print per-fill ledger in addition to the summary.")]
+	public bool ShowFills { get; set; }
+
+	public override ValidationResult Validate()
+	{
+		var baseResult = base.Validate();
+		if (!baseResult.Successful) return baseResult;
+		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
+			return ValidationResult.Error($"--since: must be YYYY-MM-DD, got '{Since}'");
+		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
+			return ValidationResult.Error($"--until: must be YYYY-MM-DD, got '{Until}'");
+		if (StartingCash <= 0m) return ValidationResult.Error($"--starting-cash: must be > 0, got {StartingCash}");
+		if (FeePerContract < 0m) return ValidationResult.Error($"--fee-per-contract: must be ≥ 0, got {FeePerContract}");
+		if (IvHvPremium <= 0m) return ValidationResult.Error($"--iv-hv-premium: must be > 0, got {IvHvPremium}");
+		if (Smile != "off" && Smile != "static")
+			return ValidationResult.Error($"--smile: must be 'off' or 'static', got '{Smile}'");
+		if (TopPerStep < 1) return ValidationResult.Error($"--top-per-step: must be ≥ 1, got {TopPerStep}");
+		return ValidationResult.Success();
+	}
+}
+
+internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, AIBacktestSettings settings, CancellationToken cancellation)
+		=> await AITextOutput.RunAsync(settings, "AIBacktest", async () =>
+	{
+		var config = AIContext.ResolveConfig(settings);
+		if (config == null) return 1;
+
+		config.Tickers = new List<string> { settings.Ticker.ToUpperInvariant() };
+
+		TerminalHelper.EnsureTerminalWidthFromConfig();
+
+		var since = settings.Since != null
+			? DateTime.ParseExact(settings.Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
+			: new DateTime(DateTime.Today.Year, 1, 1);
+		var until = settings.Until != null
+			? DateTime.ParseExact(settings.Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
+			: DateTime.Today;
+
+		// Backtest is offline — the caches MUST already cover [since, until]. Run `wa ai history <ticker>` first.
+		var bars = new Backtest.HistoricalBarCache(offline: true);
+		var vix = new Backtest.HistoricalVixCache(offline: true);
+
+		foreach (var t in config.Tickers)
+		{
+			if (!await bars.HasCoverageAsync(t, since, until, cancellation))
+			{
+				Console.Error.WriteLine($"Error: missing bar history for {t} in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {t}");
+				return 1;
+			}
+		}
+		if (config.Tickers.Any(t => string.Equals(t, "SPY", StringComparison.OrdinalIgnoreCase)) && !await vix.HasCoverageAsync(since, until, cancellation))
+		{
+			Console.Error.WriteLine($"Error: missing VIX history in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history SPY");
+			return 1;
+		}
+
+		var closes = new Replay.HistoricalPriceCache();
+		var ivProvider = new Backtest.BacktestIVProvider(vix, bars, ivHvPremium: settings.IvHvPremium, smileEnabled: settings.Smile == "static");
+		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036);
+
+		var book = new Backtest.SimulatedBook(settings.StartingCash, settings.FeePerContract, config.Opener.RealizedExpectancy);
+		var positions = new Backtest.BacktestPositionSource(book, quotes);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep);
+
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${settings.FeePerContract}/contract | smile={settings.Smile}");
+		AnsiConsole.WriteLine();
+
+		var result = await runner.RunAsync(since, until, cancellation);
+		Backtest.BacktestSummaryRenderer.Render(result, settings.ShowFills);
+		return 0;
+	});
 }
