@@ -178,13 +178,6 @@ internal sealed class OpenCandidateEvaluator
 					}
 					continue;
 				}
-				// Drop candidates whose barrier-aware EV (already includes friction + intra-period
-				// stop-loss probability) is non-positive. Without this filter the opener would still
-				// surface the least-bad proposal on days when no candidate has positive expected value,
-				// which is exactly the pattern that produced the QQQ short-vertical -99% runs.
-				if (p.RealizedExpectedValuePerContract.HasValue && p.RealizedExpectedValuePerContract.Value <= 0m)
-					continue;
-
 				if (!scoredByStructure.TryGetValue(p.StructureKind, out var list))
 					scoredByStructure[p.StructureKind] = list = new List<OpenProposal>();
 				list.Add(p);
