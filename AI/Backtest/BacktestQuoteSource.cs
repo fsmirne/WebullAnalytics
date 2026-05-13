@@ -6,11 +6,28 @@ namespace WebullAnalytics.AI.Backtest;
 /// <summary>
 /// Black-Scholes-priced option quote source for backtests. Underlying spot comes from each ticker's
 /// daily close (<see cref="HistoricalBarCache"/>); IV comes from <see cref="BacktestIVProvider"/>.
-/// Synthesizes a symmetric ±1% bid/ask around the theoretical mid so the candidate scorer's
-/// liquidity checks pass on every contract.
+/// Synthesizes a symmetric bid/ask around the theoretical mid using a per-ticker spread model so
+/// the candidate scorer's liquidity/realized-EV checks see friction that resembles the live tape:
+/// SPY/QQQ/IWM are penny-pilot tight; everything else gets the wider per-share floor typical of
+/// single-stock options (matching e.g. the GME quotes seen in production — bid 0.30 / ask 0.35 on
+/// a $0.325 mid).
 /// </summary>
 internal sealed class BacktestQuoteSource : IQuoteSource
 {
+	// Penny-pilot index ETFs: minimum half-spread $0.005 ($0.01 total), plus 0.5% of mid.
+	private const decimal IndexHalfSpreadFloor = 0.005m;
+	private const decimal IndexHalfSpreadPct = 0.005m;
+	// Single-stock single-name options: minimum half-spread $0.01 ($0.02 total), plus 5% of mid.
+	// This roughly reproduces real GME-style quotes where mid-priced contracts trade one
+	// nickel-tick wide and very cheap (sub-$0.10) contracts trade one penny-tick wide.
+	private const decimal SingleStockHalfSpreadFloor = 0.01m;
+	private const decimal SingleStockHalfSpreadPct = 0.05m;
+
+	private static readonly HashSet<string> PennyPilotIndexEtfs = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"SPY", "QQQ", "IWM", "DIA"
+	};
+
 	private readonly HistoricalBarCache _bars;
 	private readonly BacktestIVProvider _iv;
 	private readonly double _riskFreeRate;
@@ -59,9 +76,9 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				price = parsed.CallPut == "C" ? Math.Max(0m, spot - parsed.Strike) : Math.Max(0m, parsed.Strike - spot);
 			}
 
-			var spread = Math.Max(0.01m, price * 0.01m);
-			var bid = Math.Max(0m, price - spread);
-			var ask = price + spread;
+			var halfSpread = HalfSpreadFor(parsed.Root, price);
+			var bid = Math.Max(0m, price - halfSpread);
+			var ask = price + halfSpread;
 			options[sym] = new OptionContractQuote(
 				ContractSymbol: sym,
 				LastPrice: price,
@@ -78,5 +95,13 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		}
 
 		return new QuoteSnapshot(options, underlyings);
+	}
+
+	private static decimal HalfSpreadFor(string ticker, decimal mid)
+	{
+		var (floor, pct) = PennyPilotIndexEtfs.Contains(ticker)
+			? (IndexHalfSpreadFloor, IndexHalfSpreadPct)
+			: (SingleStockHalfSpreadFloor, SingleStockHalfSpreadPct);
+		return Math.Max(floor, mid * pct);
 	}
 }
