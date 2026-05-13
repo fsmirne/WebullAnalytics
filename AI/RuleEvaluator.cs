@@ -128,7 +128,7 @@ internal sealed class RuleEvaluator
 		var normalizedPricing = SuggestionPricing.Normalize(pricingMode);
 		return new IManagementRule[]
 		{
-			new StopLossRule(config.Rules.StopLoss),
+			new StopLossRule(config.Rules.StopLoss, config.Opener.RealizedExpectancy),
 			// CloseBeforeShortExpiry runs ahead of OpportunisticRoll/RollShortOnExpiry so a position
 			// scheduled for unwind on expiry day takes the close path instead of getting rolled forward.
 			new CloseBeforeShortExpiryRule(config.Rules.CloseBeforeShortExpiry),

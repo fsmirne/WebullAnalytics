@@ -105,7 +105,8 @@ internal sealed class ReplayPositionSource : IPositionSource
 				InitialNetDebit: initialDebit,
 				AdjustedNetDebit: adjustedDebit,
 				Quantity: currentParent.Qty,
-				OpenedAt: openedAt
+				OpenedAt: openedAt,
+				MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, legObjs)
 			);
 
 			currentParent = null;

@@ -106,7 +106,8 @@ internal sealed class LivePositionSource : IPositionSource
 				Legs: positionLegs,
 				InitialNetDebit: initialDebit,
 				AdjustedNetDebit: adjustedDebit,
-				Quantity: qty
+				Quantity: qty,
+				MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, positionLegs)
 			);
 		}
 

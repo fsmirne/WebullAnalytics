@@ -34,6 +34,10 @@ internal sealed record EvaluationContext(
 /// <param name="Quantity">Number of contracts.</param>
 /// <param name="OpenedAt">Timestamp the position was first opened (null when the source can't determine it).
 /// Used by OpportunisticRollRule's min-hold-days check; null disables that gate.</param>
+/// <param name="MaxLossPerShare">Worst-case loss per share at expiry — wing width minus net credit for
+/// credit structures, net debit for debit structures. Used by StopLossRule (and others) to fire at the
+/// same threshold the opener's scorer assumed. Null when the source can't derive it (e.g., naked single
+/// leg). Always non-negative when set.</param>
 internal sealed record OpenPosition(
 	string Key,
 	string Ticker,
@@ -42,7 +46,8 @@ internal sealed record OpenPosition(
 	decimal InitialNetDebit,
 	decimal AdjustedNetDebit,
 	int Quantity,
-	DateTime? OpenedAt = null
+	DateTime? OpenedAt = null,
+	decimal? MaxLossPerShare = null
 );
 
 /// <summary>
