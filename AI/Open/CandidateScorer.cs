@@ -11,19 +11,37 @@ internal static class CandidateScorer
    /// <summary>One point in the 5-point log-normal scenario grid used to compute EV at target expiry.</summary>
 	public readonly record struct ScenarioPoint(decimal SpotAtExpiry, decimal Weight);
 
-	/// <summary>Score formula: EV / max(1, days) / capitalAtRisk. Returns 0 when capitalAtRisk ≤ 0.</summary>
+	/// <summary>Score formula: EV / max(1, days). Returns 0 when daysToTarget ≤ 0. Capital is
+	/// deliberately NOT a divisor — the per-capital normalization rewarded narrow lottery-ticket
+	/// structures (a $5-EV $20-maxLoss trade numerically beat a $50-EV $300-maxLoss trade),
+	/// confusing leverage with quality. Now the raw signal is "expected dollars per day"; the
+	/// factor chain (POP, BE-room, balance, …) carries quality information, and ApplyFactor's
+	/// sign-symmetric form ensures bad attributes amplify badness instead of collapsing to
+	/// zero.</summary>
 	public static decimal ComputeRawScore(decimal ev, int daysToTarget, decimal capitalAtRisk)
 	{
-		if (capitalAtRisk <= 0m) return 0m;
 		var days = Math.Max(1, daysToTarget);
-		return ev / days / capitalAtRisk;
+		return ev / days;
 	}
 
-	/// <summary>BiasAdjustedScore = raw × (1 + α · bias · fit). fit = 0 yields raw unchanged regardless of bias.</summary>
+	/// <summary>Sign-symmetric factor application. For a positive score, multiplying by
+	/// <paramref name="factor"/> &lt; 1 is a penalty (smaller positive). For a negative score, the
+	/// same factor &lt; 1 used to bring the score TOWARD zero — i.e., make a bad trade look less
+	/// bad — which collapsed obviously-bad candidates into the "least bad" ranking position. The
+	/// fix: when score is negative, apply <c>(2 − factor)</c> so a penalty actually compounds the
+	/// badness. Continuous at <c>factor = 1</c> (no-op for either sign), symmetric around zero.
+	/// </summary>
+	public static decimal ApplyFactor(decimal score, decimal factor)
+	{
+		return score >= 0m ? score * factor : score * (2m - factor);
+	}
+
+	/// <summary>BiasAdjustedScore = raw × (1 + α · bias · fit) using sign-symmetric multiplication.
+	/// fit = 0 yields raw unchanged regardless of bias.</summary>
 	public static decimal BiasAdjust(decimal raw, decimal bias, int fit, decimal alpha)
 	{
 		var factor = 1m + alpha * bias * fit;
-		return raw * factor;
+		return ApplyFactor(raw, factor);
 	}
 
 	public static decimal? ComputeHistoricalVolatilityAnnualized(IReadOnlyList<decimal> closes)
@@ -71,7 +89,7 @@ internal static class CandidateScorer
 	public static decimal VolatilityAdjust(decimal score, decimal netVegaPerContract, decimal ivAnnual, decimal? historicalVolAnnual, decimal weight, decimal vegaRef = 3m)
 	{
 		var factor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, ivAnnual, historicalVolAnnual, weight, vegaRef);
-		return factor.HasValue ? score * factor.Value : score;
+		return factor.HasValue ? ApplyFactor(score, factor.Value) : score;
 	}
 
 	public static decimal? ComputeMaxPainPrice(string ticker, DateTime expiry, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot = null)
@@ -179,11 +197,11 @@ internal static class CandidateScorer
 		return new GexResult(gravity, netGexFraction);
 	}
 
-	public static decimal MaxPainAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
-	public static decimal GexAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
-	public static decimal AssignmentRiskAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
-	public static decimal StatArbAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
-	public static decimal SentimentAdjust(decimal score, decimal? factor) => factor.HasValue ? score * factor.Value : score;
+	public static decimal MaxPainAdjust(decimal score, decimal? factor) => factor.HasValue ? ApplyFactor(score, factor.Value) : score;
+	public static decimal GexAdjust(decimal score, decimal? factor) => factor.HasValue ? ApplyFactor(score, factor.Value) : score;
+	public static decimal AssignmentRiskAdjust(decimal score, decimal? factor) => factor.HasValue ? ApplyFactor(score, factor.Value) : score;
+	public static decimal StatArbAdjust(decimal score, decimal? factor) => factor.HasValue ? ApplyFactor(score, factor.Value) : score;
+	public static decimal SentimentAdjust(decimal score, decimal? factor) => factor.HasValue ? ApplyFactor(score, factor.Value) : score;
 
 	/// <summary>
 	/// Contrarian Fear &amp; Greed regime overlay. Maps the 0–100 composite to a bias signal in [−1, +1]:
@@ -273,7 +291,7 @@ internal static class CandidateScorer
 	}
 
 	public static decimal ComputeFinalScore(decimal adjustedScore, decimal? thetaPerDayPerContract, decimal capitalAtRiskPerContract) =>
-		adjustedScore * ComputeThetaFactor(thetaPerDayPerContract, capitalAtRiskPerContract);
+		ApplyFactor(adjustedScore, ComputeThetaFactor(thetaPerDayPerContract, capitalAtRiskPerContract));
 
 	internal static decimal ComputeProbabilityFactor(decimal probabilityOfProfit)
 	{
@@ -1105,7 +1123,9 @@ internal static class CandidateScorer
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.SentimentWeight);
-		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (breakevenRoomFactor ?? 1m) * balance * (liquidityFactor ?? 1m), netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var biasAdjBase = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+		var afterFactors = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBase, popFactor), scaleFactor), setupFactor ?? 1m), breakevenRoomFactor ?? 1m), balance), liquidityFactor ?? 1m);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(afterFactors, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1591,7 +1611,9 @@ internal static class CandidateScorer
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.SentimentWeight);
-		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (runwayFactor ?? 1m) * (breakevenRoomFactor ?? 1m) * balance * (liquidityFactor ?? 1m), netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var biasAdjBaseMl = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+		var afterFactorsMl = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseMl, popFactor), scaleFactor), setupFactor ?? 1m), runwayFactor ?? 1m), breakevenRoomFactor ?? 1m), balance), liquidityFactor ?? 1m);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(afterFactorsMl, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1766,7 +1788,9 @@ internal static class CandidateScorer
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.SentimentWeight);
-		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * (runwayFactor ?? 1m) * (breakevenRoomFactor ?? 1m) * balance * (liquidityFactor ?? 1m), netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var biasAdjBaseCd = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+		var afterFactorsCd = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseCd, popFactor), scaleFactor), setupFactor ?? 1m), runwayFactor ?? 1m), breakevenRoomFactor ?? 1m), balance), liquidityFactor ?? 1m);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(afterFactorsCd, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1938,7 +1962,9 @@ internal static class CandidateScorer
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.SentimentWeight);
-		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight) * popFactor * scaleFactor * (setupFactor ?? 1m) * balance * (liquidityFactor ?? 1m), netVegaPerContract, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var biasAdjBaseLc = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+		var afterFactorsLc = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseLc, popFactor), scaleFactor), setupFactor ?? 1m), balance), liquidityFactor ?? 1m);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(afterFactorsLc, netVegaPerContract, iv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
