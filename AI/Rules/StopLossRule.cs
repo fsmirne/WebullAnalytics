@@ -29,7 +29,7 @@ internal sealed class StopLossRule : IManagementRule
 		// 2) Trigger on debit multiplier.
 		if (currentDebit >= initialDebit * _config.MaxDebitMultiplier)
 		{
-			return BuildClose(position, currentMarkPerContract.Value,
+			return BuildClose(position, ctx, currentMarkPerContract.Value,
 				$"mark debit ${currentDebit:F2}/contract ≥ {_config.MaxDebitMultiplier}× initial ${initialDebit:F2}");
 		}
 
@@ -40,24 +40,32 @@ internal sealed class StopLossRule : IManagementRule
 			var pctBand = _config.SpotBeyondBreakevenPct / 100m;
 			var sourceTag = beSource == PositionBreakEvenEstimator.BreakEvenSource.Heuristic ? " (heuristic)" : "";
 			if (beLow.HasValue && spot < beLow.Value * (1m - pctBand))
-				return BuildClose(position, currentMarkPerContract.Value,
+				return BuildClose(position, ctx, currentMarkPerContract.Value,
 					$"spot ${spot:F2} < lower break-even ${beLow.Value:F2}{sourceTag} by > {_config.SpotBeyondBreakevenPct}%");
 			if (beHigh.HasValue && spot > beHigh.Value * (1m + pctBand))
-				return BuildClose(position, currentMarkPerContract.Value,
+				return BuildClose(position, ctx, currentMarkPerContract.Value,
 					$"spot ${spot:F2} > upper break-even ${beHigh.Value:F2}{sourceTag} by > {_config.SpotBeyondBreakevenPct}%");
 		}
 
 		return null;
 	}
 
-	private static ManagementProposal BuildClose(OpenPosition p, decimal markPerContract, string rationale)
+	private static ManagementProposal BuildClose(OpenPosition p, EvaluationContext ctx, decimal markPerContract, string rationale)
 	{
-		// Close proposes reversing every leg.
-		var legs = p.Legs.Select(l => new ProposalLeg(
-			Action: l.Side == Side.Buy ? "sell" : "buy",
-			Symbol: l.Symbol,
-			Qty: l.Qty
-		)).ToList();
+		// Close proposes reversing every leg. Stamp each leg with per-share mid (default limit)
+		// and the side-aware bid/ask edge (conservative limit) so the sink emits realistic prices.
+		var legs = p.Legs.Select(l =>
+		{
+			var action = l.Side == Side.Buy ? "sell" : "buy";
+			decimal? mid = null;
+			decimal? edge = null;
+			if (l.CallPut != null && ctx.Quotes.TryGetValue(l.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
+			{
+				mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				edge = action == "sell" ? q.Bid : q.Ask;
+			}
+			return new ProposalLeg(action, l.Symbol, l.Qty, mid, edge);
+		}).ToList();
 
 		return new ManagementProposal(
 			Rule: "StopLossRule",
@@ -65,7 +73,7 @@ internal sealed class StopLossRule : IManagementRule
 			PositionKey: p.Key,
 			Kind: ProposalKind.Close,
 			Legs: legs,
-			NetDebit: markPerContract * p.Quantity,
+			NetDebit: markPerContract,
 			Rationale: rationale
 		);
 	}
