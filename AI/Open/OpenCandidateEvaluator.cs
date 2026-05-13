@@ -178,14 +178,6 @@ internal sealed class OpenCandidateEvaluator
 					}
 					continue;
 				}
-				// Drop candidates whose barrier-aware EV is non-positive — the model says they're
-				// expected losers even before slippage/fees. Without this gate the opener emits the
-				// "least bad" candidate when every option is unfavorable, which is actively
-				// misleading (the user reads #1 as "best" when it's just "least bad"). Returning
-				// zero proposals on days when nothing has edge is the honest answer.
-				if (p.RealizedExpectedValuePerContract.HasValue && p.RealizedExpectedValuePerContract.Value <= 0m)
-					continue;
-
 				if (!scoredByStructure.TryGetValue(p.StructureKind, out var list))
 					scoredByStructure[p.StructureKind] = list = new List<OpenProposal>();
 				list.Add(p);
