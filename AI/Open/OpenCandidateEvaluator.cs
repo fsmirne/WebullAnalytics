@@ -200,7 +200,11 @@ internal sealed class OpenCandidateEvaluator
 
 			// Per-ticker top-N. DoubleCalendar/DoubleDiagonal stay as one 4-leg proposal here and render as a
 			// unified two-side panel downstream, so each counts as a single suggestion against the cap.
-			foreach (var proposal in RankForOutput(survivors).Take(cfg.TopNPerTicker))
+			// Only emit candidates the score itself endorses (FinalScore > 0). The chain produces a
+			// negative final when penalties (low POP, narrow BE, etc.) outweigh the raw EV — that's the
+			// model saying "do not trade this," and labeling it as "#1 suggestion" contradicts the
+			// model's verdict. If everything in the universe scores negative, the honest output is empty.
+			foreach (var proposal in RankForOutput(survivors).Where(p => (p.FinalScore ?? 0m) > 0m).Take(cfg.TopNPerTicker))
 				output.Add(proposal);
 		}
 
