@@ -31,11 +31,20 @@ internal sealed class TakeProfitRule : IManagementRule
 		var pctCaptured = (profitPerContract / maxProjected.Value) * 100m;
 		if (pctCaptured < _config.PctOfMaxProfit) return null;
 
-		var legs = position.Legs.Select(l => new ProposalLeg(
-			Action: l.Side == Side.Buy ? "sell" : "buy",
-			Symbol: l.Symbol,
-			Qty: l.Qty
-		)).ToList();
+		// Stamp each leg with per-share mid (default limit) and the side-aware bid/ask edge so the
+		// sink emits a realistic limit; otherwise the fallback path mis-scales NetDebit by quantity.
+		var legs = position.Legs.Select(l =>
+		{
+			var action = l.Side == Side.Buy ? "sell" : "buy";
+			decimal? mid = null;
+			decimal? edge = null;
+			if (l.CallPut != null && ctx.Quotes.TryGetValue(l.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
+			{
+				mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				edge = action == "sell" ? q.Bid : q.Ask;
+			}
+			return new ProposalLeg(action, l.Symbol, l.Qty, mid, edge);
+		}).ToList();
 
 		return new ManagementProposal(
 			Rule: "TakeProfitRule",
@@ -43,7 +52,7 @@ internal sealed class TakeProfitRule : IManagementRule
 			PositionKey: position.Key,
 			Kind: ProposalKind.Close,
 			Legs: legs,
-			NetDebit: currentMarkPerContract.Value * position.Quantity,
+			NetDebit: currentMarkPerContract.Value,
 			Rationale: $"captured {pctCaptured:F0}% of max projected profit ${maxProjected.Value:F2}/contract (threshold {_config.PctOfMaxProfit}%)"
 		);
 	}
