@@ -35,6 +35,18 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 		var dte = (shortLeg.Expiry.Value.Date - ctx.Now.Date).Days;
 		if (dte != 0) return null;
 
+		// Assignment-risk safety: if ANY short leg is currently ITM on expiry day, close the position
+		// regardless of P&L. A retail account can't cover a SPY short put assignment (100 shares of
+		// underlying per contract) and a real broker would force-close. Modeling this lets us catch
+		// situations where the position is unprofitable but still inside the buffered BE band — the
+		// emergency-BE trigger below misses those.
+		if (ctx.UnderlyingPrices.TryGetValue(position.Ticker, out var spotForITM) && HasItmShortLeg(position, spotForITM, out var itmDetail))
+		{
+			return BuildClose(position,
+				$"assignment-risk: short leg ITM at expiry ({itmDetail}, spot ${spotForITM:F2}), close to avoid assignment",
+				isEmergency: true);
+		}
+
 		// Emergency: spot past BE band → close immediately, profit threshold doesn't apply.
 		if (IsSpotPastBreakEven(position, ctx, out var spot, out var beLow, out var beHigh))
 		{
@@ -73,6 +85,27 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 			total += leg.Side == Side.Buy ? mid : -mid;
 		}
 		return total;
+	}
+
+	/// <summary>Returns true when any short leg of the position is in-the-money at <paramref name="spot"/>.
+	/// <paramref name="detail"/> describes the worst offender for the rationale string.</summary>
+	private static bool HasItmShortLeg(OpenPosition position, decimal spot, out string detail)
+	{
+		detail = "";
+		decimal worstDepth = 0m;
+		foreach (var leg in position.Legs)
+		{
+			if (leg.Side != Side.Sell || leg.CallPut == null) continue;
+			var depth = leg.CallPut == "C"
+				? spot - leg.Strike   // short call: ITM when spot > strike
+				: leg.Strike - spot;  // short put: ITM when spot < strike
+			if (depth > 0m && depth > worstDepth)
+			{
+				worstDepth = depth;
+				detail = $"short {leg.CallPut}@{leg.Strike:F2} ITM by ${depth:F2}";
+			}
+		}
+		return worstDepth > 0m;
 	}
 
 	private bool IsSpotPastBreakEven(OpenPosition position, EvaluationContext ctx, out decimal spot, out decimal beLow, out decimal beHigh)

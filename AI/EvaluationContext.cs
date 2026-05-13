@@ -32,6 +32,8 @@ internal sealed record EvaluationContext(
 /// <param name="InitialNetDebit">The net debit (or credit) when the position was opened, per contract.</param>
 /// <param name="AdjustedNetDebit">Break-even adjusted debit accounting for roll history.</param>
 /// <param name="Quantity">Number of contracts.</param>
+/// <param name="OpenedAt">Timestamp the position was first opened (null when the source can't determine it).
+/// Used by OpportunisticRollRule's min-hold-days check; null disables that gate.</param>
 internal sealed record OpenPosition(
 	string Key,
 	string Ticker,
@@ -39,7 +41,8 @@ internal sealed record OpenPosition(
 	IReadOnlyList<PositionLeg> Legs,
 	decimal InitialNetDebit,
 	decimal AdjustedNetDebit,
-	int Quantity
+	int Quantity,
+	DateTime? OpenedAt = null
 );
 
 /// <summary>

@@ -25,6 +25,29 @@ internal sealed class AIConfig
 internal sealed class WatchConfig
 {
 	[JsonPropertyName("autoExecute")] public AutoExecuteConfig AutoExecute { get; set; } = new();
+	[JsonPropertyName("openerAutoExecute")] public OpenerAutoExecuteConfig OpenerAutoExecute { get; set; } = new();
+}
+
+/// <summary>
+/// Opt-in execution of opener proposals (new positions) from inside <c>wa ai watch</c>. Mirrors the
+/// security model of <see cref="AutoExecuteConfig"/>: <c>enabled</c> turns the executor on,
+/// <c>submit</c> flips dry-run logging to real PlaceOrder calls. Off by default on both flags.
+/// Per-day fingerprint deduplication prevents the same proposal from firing multiple times across
+/// successive ticks.
+/// </summary>
+internal sealed class OpenerAutoExecuteConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>If false, the executor logs the action it WOULD take but does not call PlaceOrder.</summary>
+	[JsonPropertyName("submit")] public bool Submit { get; set; } = false;
+	/// <summary>Max opener proposals to act on per ticker per tick. Caps churn when the opener emits
+	/// multiple high-ranked candidates for the same ticker.</summary>
+	[JsonPropertyName("maxPerTickerPerTick")] public int MaxPerTickerPerTick { get; set; } = 1;
+	/// <summary>Max opener proposals to act on across all tickers per tick. Hard cap to prevent the
+	/// executor from spraying orders on a single evaluation.</summary>
+	[JsonPropertyName("maxOrdersPerTick")] public int MaxOrdersPerTick { get; set; } = 3;
+	/// <summary>Allow-list of <c>OpenStructureKind</c> names to auto-execute. Empty = all structures allowed.</summary>
+	[JsonPropertyName("structures")] public List<string> Structures { get; set; } = new();
 }
 
 /// <summary>
@@ -270,6 +293,7 @@ internal static class AIConfigLoader
 		if (op.TopNPerTicker < 1) return $"opener.topNPerTicker: must be ≥ 1, got {op.TopNPerTicker}";
 		if (op.MaxCandidatesPerStructurePerTicker < 1) return $"opener.maxCandidatesPerStructurePerTicker: must be ≥ 1, got {op.MaxCandidatesPerStructurePerTicker}";
 		if (op.MaxQtyPerProposal < 1) return $"opener.maxQtyPerProposal: must be ≥ 1, got {op.MaxQtyPerProposal}";
+		if (op.MaxRiskPctPerProposal < 0m || op.MaxRiskPctPerProposal > 1m) return $"opener.maxRiskPctPerProposal: must be in [0, 1], got {op.MaxRiskPctPerProposal}";
 		if (op.DirectionalFitWeight < 0m) return $"opener.directionalFitWeight: must be ≥ 0, got {op.DirectionalFitWeight}";
 		if (op.ProfitBandPct <= 0m || op.ProfitBandPct > 50m) return $"opener.profitBandPct: must be in (0, 50], got {op.ProfitBandPct}";
 		if (op.IvDefaultPct <= 0m) return $"opener.ivDefaultPct: must be > 0, got {op.IvDefaultPct}";

@@ -12,12 +12,14 @@ namespace WebullAnalytics.AI.Rules;
 internal sealed class OpportunisticRollRule : IManagementRule
 {
 	private readonly OpportunisticRollConfig _config;
+	private readonly OpenerRealizedExpectancyConfig _frictionConfig;
 	private readonly bool _debug;
 	private readonly string _pricingMode;
 
-	public OpportunisticRollRule(OpportunisticRollConfig config, bool debug = false, string pricingMode = SuggestionPricing.Mid)
+	public OpportunisticRollRule(OpportunisticRollConfig config, OpenerRealizedExpectancyConfig frictionConfig, bool debug = false, string pricingMode = SuggestionPricing.Mid)
 	{
 		_config = config;
+		_frictionConfig = frictionConfig;
 		_debug = debug;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
 	}
@@ -122,25 +124,43 @@ internal sealed class OpportunisticRollRule : IManagementRule
 			return null;
 		}
 
-		// Compare P&L-per-day vs hold. If hold is null (shouldn't normally be), treat hold as 0.
-		var topPerDay = topFundable.TotalPnLPerContract / Math.Max(1m, topFundable.DaysToTarget);
-		var holdPerDay = hold != null ? hold.TotalPnLPerContract / Math.Max(1m, hold.DaysToTarget) : 0m;
+		// Compare TOTAL projected P&L rather than per-day rate. The per-day comparison rewards "fast
+		// capture" of unrealized gain (a 1-day Close action looks like $189/day vs a 4-day Hold at
+		// $50/day) but ignores that after closing we're idle for the rest of the hold horizon.
+		// Over the SAME calendar window the totals are what actually matter: $189 close vs $203 hold
+		// means hold wins, even though close's per-day rate is bigger. ScenarioEngine.TotalPnLPerContract
+		// is the right field — value at target + cash impact − initial debit, signed per contract.
+		var topTotal = topFundable.TotalPnLPerContract;
+		var holdTotal = hold != null ? hold.TotalPnLPerContract : 0m;
+		var holdHorizonDays = hold != null ? Math.Max(1, hold.DaysToTarget) : Math.Max(1, topFundable.DaysToTarget);
 
-		// Require absolute P&L-per-day improvement above the configured threshold, in dollars per contract per day.
-		// (Relative-percent thresholds are unreliable near zero.)
-		var improvementPerDayPerContract = topPerDay - holdPerDay;
-		if (improvementPerDayPerContract < _config.MinImprovementPerDayPerContract)
+		// Swap friction: a close+open pair crosses the spread twice. Subtract from the swap side so
+		// the comparison reflects real execution cost. (ScenarioEngine.TotalPnLPerContract excludes
+		// friction entirely.) Scenario engine only emits single-execution structures here so
+		// ordersForStructure = 1; total = slippage × 100 × 2.
+		var swapFrictionPerContract = _frictionConfig.Enabled && _frictionConfig.SlippagePerSharePerOrder > 0m
+			? _frictionConfig.SlippagePerSharePerOrder * 100m * 2m
+			: 0m;
+
+		// Translate the per-day knob to a total-PnL threshold over the hold horizon. This keeps the
+		// config knob's intuitive meaning ("need at least $0.50/day improvement") while doing the
+		// comparison in total-PnL space.
+		var minImprovementTotal = _config.MinImprovementPerDayPerContract * holdHorizonDays;
+		var requiredImprovementTotal = minImprovementTotal + swapFrictionPerContract;
+
+		var improvementTotal = topTotal - holdTotal;
+		if (improvementTotal < requiredImprovementTotal)
 		{
-			Debug(position, $"skipped: best '{topFundable.Name}' improves ${improvementPerDayPerContract:+0.00;-0.00}/ct/day vs hold ${holdPerDay:+0.00;-0.00}/ct/day; threshold ${_config.MinImprovementPerDayPerContract:F2}/ct/day");
+			Debug(position, $"skipped: best '{topFundable.Name}' improves ${improvementTotal:+0.00;-0.00}/ct (top ${topTotal:+0.00;-0.00} vs hold ${holdTotal:+0.00;-0.00} over {holdHorizonDays}d); threshold ${minImprovementTotal:F2} + friction ${swapFrictionPerContract:F2} = ${requiredImprovementTotal:F2}/ct");
 			return null;
 		}
 
-		Debug(position, $"selected '{topFundable.Name}': hold ${holdPerDay:+0.00;-0.00}/ct/day, candidate ${topPerDay:+0.00;-0.00}/ct/day, Δ ${improvementPerDayPerContract:+0.00;-0.00}/ct/day");
+		Debug(position, $"selected '{topFundable.Name}': hold ${holdTotal:+0.00;-0.00}/ct, candidate ${topTotal:+0.00;-0.00}/ct, Δ ${improvementTotal:+0.00;-0.00}/ct over {holdHorizonDays}d (threshold ${requiredImprovementTotal:F2})");
 
 		// Build the proposal.
 		var netDebitPerContract = topFundable.CashImpactPerContract;
 		var biasNote = ctx.TechnicalSignals.TryGetValue(position.Ticker, out var biasSignal) ? $" [tech score {biasSignal.Score:+0.00;-0.00}]" : "";
-		var rationale = $"optimizer: {topFundable.Name} projects ${topPerDay:+0.00;-0.00}/ct/day vs hold ${holdPerDay:+0.00;-0.00}/ct/day (Δ ${improvementPerDayPerContract:+0.00;-0.00}/ct/day over {topFundable.DaysToTarget}d){biasNote}{rollSafetyNote}. {topFundable.Rationale}";
+		var rationale = $"optimizer: {topFundable.Name} projects ${topTotal:+0.00;-0.00}/ct vs hold ${holdTotal:+0.00;-0.00}/ct (Δ ${improvementTotal:+0.00;-0.00}/ct over {holdHorizonDays}d, friction ${swapFrictionPerContract:F2}){biasNote}{rollSafetyNote}. {topFundable.Rationale}";
 
 		return new ManagementProposal(
 			Rule: "OpportunisticRollRule",

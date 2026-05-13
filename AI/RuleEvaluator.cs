@@ -132,7 +132,7 @@ internal sealed class RuleEvaluator
 			// CloseBeforeShortExpiry runs ahead of OpportunisticRoll/RollShortOnExpiry so a position
 			// scheduled for unwind on expiry day takes the close path instead of getting rolled forward.
 			new CloseBeforeShortExpiryRule(config.Rules.CloseBeforeShortExpiry),
-			new OpportunisticRollRule(config.Rules.OpportunisticRoll, debug, normalizedPricing),
+			new OpportunisticRollRule(config.Rules.OpportunisticRoll, config.Opener.RealizedExpectancy, debug, normalizedPricing),
 			new TakeProfitRule(config.Rules.TakeProfit),
 			new DefensiveRollRule(config.Rules.DefensiveRoll),
 			new RollShortOnExpiryRule(config.Rules.RollShortOnExpiry)
