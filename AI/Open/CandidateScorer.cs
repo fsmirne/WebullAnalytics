@@ -1274,7 +1274,14 @@ internal static class CandidateScorer
 
 		var rrComponent = (decimal)Math.Sqrt((double)Math.Min(rr, 3m));
 		var ratioPenalty = (decimal)Math.Sqrt((double)ratio);
-		return Math.Clamp(rrComponent / ratioPenalty, 0.25m, 1.25m);
+		// Floor at 0.05, not 0.25. The higher floor was clamping out real signal: genuinely
+		// asymmetric structures (R/R 0.14 with premium ratio 12, computing factor 0.108) got
+		// pulled back up to 0.25 and rode the rest of the score chain on the strength of POP
+		// alone — exactly the "POP 80%, R/R 0.14" pattern where a single stop slip or gap
+		// destroys multiple winning trades. 0.05 is enough headroom to keep BalanceFactor from
+		// completely zeroing the score on pathological inputs, but lets the factor actually
+		// reflect proportionate badness on the lower end.
+		return Math.Clamp(rrComponent / ratioPenalty, 0.05m, 1.25m);
 	}
 
 	private static int VolatilityFitSign(OpenStructureKind kind) => kind switch
