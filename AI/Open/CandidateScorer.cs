@@ -939,6 +939,64 @@ internal static class CandidateScorer
 	internal enum Direction { Above, Below }
 
 	/// <summary>
+	/// Folds a path-dependent stop into a terminal-only EV by blending: with probability
+	/// <c>P_hit</c> the stop fires intra-period (P&amp;L = −stopPct × |maxLoss| − friction); with
+	/// probability <c>1 − P_hit</c> the position rides to expiry with the terminal EV the caller
+	/// already computed. Friction is subtracted in both branches so the result is comparable to
+	/// the raw <c>realizedEv</c> input. Returns <paramref name="realizedEv"/> unchanged when
+	/// realizedExpectancy is disabled (no stop modeled). Conservative: barriers chosen by the
+	/// caller (typically break-even levels) sit closer to spot than the actual stop trigger, so
+	/// P_hit slightly overestimates real stop firing.
+	/// </summary>
+	internal static decimal AdjustEvForBarrier(decimal realizedEv, decimal spot, double ivAnnual, double years,
+		decimal? lowerBarrier, decimal? upperBarrier, decimal maxLossSigned, decimal frictionPerContract,
+		OpenerRealizedExpectancyConfig cfg)
+	{
+		if (!cfg.Enabled) return realizedEv;
+		var hitProb = ComputeBarrierHitProbability(spot, ivAnnual, years, lowerBarrier, upperBarrier);
+		if (hitProb <= 0m) return realizedEv;
+		var stopLossAtBarrier = -cfg.StopLossPctOfMaxLoss * Math.Abs(maxLossSigned) - frictionPerContract;
+		return (1m - hitProb) * realizedEv + hitProb * stopLossAtBarrier;
+	}
+
+	/// <summary>
+	/// Probability that <paramref name="spot"/>, evolving as zero-drift GBM with vol
+	/// <paramref name="ivAnnual"/> over <paramref name="years"/>, touches either of two price
+	/// barriers at any point during the interval. Closed-form single-side first-passage formula:
+	/// <c>P(min S_t ≤ B) = 2·N(ln(B/S)/σ√T)</c> for B &lt; S, and the symmetric upper version.
+	/// Combines two barriers via union bound (capped at 0.99) — slightly conservative for tight
+	/// two-sided traps where the bounds overlap, exact for distant one-sided cases.
+	/// Returns 0 when inputs are degenerate; returns 1 when spot has already crossed a barrier.
+	/// </summary>
+	public static decimal ComputeBarrierHitProbability(decimal spot, double ivAnnual, double years, decimal? lowerBarrier, decimal? upperBarrier)
+	{
+		if (spot <= 0m || ivAnnual <= 0 || years <= 0) return 0m;
+		if (!lowerBarrier.HasValue && !upperBarrier.HasValue) return 0m;
+		var sigmaSqrtT = ivAnnual * Math.Sqrt(years);
+
+		double pLower = 0.0, pUpper = 0.0;
+		if (lowerBarrier.HasValue && lowerBarrier.Value > 0m)
+		{
+			if (spot <= lowerBarrier.Value) pLower = 1.0;
+			else
+			{
+				var z = Math.Log((double)lowerBarrier.Value / (double)spot) / sigmaSqrtT;
+				pLower = Math.Min(1.0, 2.0 * OptionMath.NormalCdf(z));
+			}
+		}
+		if (upperBarrier.HasValue && upperBarrier.Value > 0m)
+		{
+			if (spot >= upperBarrier.Value) pUpper = 1.0;
+			else
+			{
+				var z = -Math.Log((double)upperBarrier.Value / (double)spot) / sigmaSqrtT;
+				pUpper = Math.Min(1.0, 2.0 * OptionMath.NormalCdf(z));
+			}
+		}
+		return (decimal)Math.Min(0.99, pLower + pUpper);
+	}
+
+	/// <summary>
 	/// P(S_T &gt; level) or P(S_T &lt; level) under log-normal neutral drift:
 	/// d2 = (ln(S/K) − σ²·T/2) / (σ·√T); P(S_T &gt; K) = N(d2); P(S_T &lt; K) = 1 − N(d2).
 	/// </summary>
@@ -1000,7 +1058,15 @@ internal static class CandidateScorer
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
 		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
-		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
+		// Barrier-aware EV: the realizedEv above assumes the position rides to expiry with terminal
+		// managed exits. In reality, the StopLossRule fires intra-period the first time spot crosses
+		// the loss barrier. For asymmetric short verticals (large width / small credit) this dominates
+		// EV — the terminal POP says 90% win but the path-touch probability over the same horizon can
+		// be 15-25%, and a single stop-out wipes out 5+ winning trades.
+		var barrierAwareEv = AdjustEvForBarrier(realizedEv, spot, (double)iv, years,
+			isCall ? null : breakeven, isCall ? breakeven : (decimal?)null,
+			maxLoss, friction, cfg.RealizedExpectancy);
+		var rawScore = ComputeRawScore(barrierAwareEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
@@ -1077,7 +1143,7 @@ internal static class CandidateScorer
 			MarketSentimentScore: sentimentScore,
 			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
 			SentimentAdjustmentFactor: sentimentFactor,
-			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
+			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? barrierAwareEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
 			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
@@ -1458,7 +1524,14 @@ internal static class CandidateScorer
 		var representativeIv = (targetLegs.Count > 0 ? targetLegs : defs).Average(l => l.Iv);
 		var pnl = (decimal sT) => PositionValueAtTarget(sT, skel.TargetExpiry.Date, defs) + netEntryPerContract;
 		var (scanLower, scanUpper) = GetScanRange(spot, defs, ResolveStrikeStep(cfg, skel.Ticker));
-		var breakevens = FindBreakevens(pnl, scanLower, scanUpper);
+		// FindBreakevens uses fixed-step sampling. At 240 steps over the structure's full scan
+		// range (~$830 on SPY) the step size is ~$3.50 — wider than the profitable zone of
+		// tightly-priced 1-DTE iron butterflies, so the scanner silently steps over the zone and
+		// returns no break-evens. That made the barrier-aware EV bypass kick in for the exact
+		// candidates that path-aware ranking is supposed to penalize. Scaling steps with scan
+		// width preserves sub-$1 resolution for any structure.
+		var scanSteps = Math.Max(240, (int)((scanUpper - scanLower) / 0.5m));
+		var breakevens = FindBreakevens(pnl, scanLower, scanUpper, scanSteps);
 		var pop = ComputeProbabilityOfProfit(pnl, breakevens, spot, years, representativeIv);
 		var grid = BuildScenarioGrid(spot, representativeIv, years, cfg.ScenarioGridSigma);
 		decimal ev = 0m;
@@ -1469,7 +1542,10 @@ internal static class CandidateScorer
 		if (capitalAtRisk <= 0m) return null;
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
 		var realizedEv = RealizedExpectancy.RealizeEv(grid, pnl, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
-		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
+		var barrierLower = breakevens.Count >= 1 ? (decimal?)breakevens.Min() : null;
+		var barrierUpper = breakevens.Count >= 2 ? (decimal?)breakevens.Max() : null;
+		var barrierAwareEv = AdjustEvForBarrier(realizedEv, spot, (double)representativeIv, years, barrierLower, barrierUpper, maxLoss, friction, cfg.RealizedExpectancy);
+		var rawScore = ComputeRawScore(barrierAwareEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
@@ -1540,7 +1616,7 @@ internal static class CandidateScorer
 			MarketSentimentScore: sentimentScore,
 			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
 			SentimentAdjustmentFactor: sentimentFactor,
-			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
+			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? barrierAwareEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
 			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
@@ -1630,7 +1706,9 @@ internal static class CandidateScorer
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
 		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtTarget, maxProfit, maxLossPoint, friction, cfg.RealizedExpectancy);
-		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
+		var representativeIvEarly2 = (ivShort + ivLong) / 2m;
+		var barrierAwareEv = AdjustEvForBarrier(realizedEv, spot, (double)representativeIvEarly2, shortYears, beLower, beUpper, maxLossPoint, friction, cfg.RealizedExpectancy);
+		var rawScore = ComputeRawScore(barrierAwareEv, daysToTarget, capitalAtRisk);
 		// LongCalendar reads neutral (0); LongDiagonal picks up its sign from the strike layout via the
 		// skeleton overload, so the technical bias factor lifts/cuts a diagonal whose direction matches
 		// or fights the trend. Calendars stay neutral by construction.
@@ -1713,7 +1791,7 @@ internal static class CandidateScorer
 			MarketSentimentScore: sentimentScore,
 			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
 			SentimentAdjustmentFactor: sentimentFactor,
-			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
+			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? barrierAwareEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
 			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLossPoint, cfg.RealizedExpectancy) : null,
@@ -1810,7 +1888,11 @@ internal static class CandidateScorer
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
 		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
-		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
+		// Directional long call/put doesn't have a "stop barrier" in the same path-dependent sense
+		// (the StopLossRule fires on spot moves through break-even, but a long-call buyer wants those
+		// moves), so the barrier-aware EV reduces to the terminal EV here.
+		var barrierAwareEv = realizedEv;
+		var rawScore = ComputeRawScore(barrierAwareEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
@@ -1880,7 +1962,7 @@ internal static class CandidateScorer
 			MarketSentimentScore: sentimentScore,
 			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
 			SentimentAdjustmentFactor: sentimentFactor,
-			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
+			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? barrierAwareEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
 			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null
