@@ -178,15 +178,6 @@ internal sealed class OpenCandidateEvaluator
 					}
 					continue;
 				}
-				// POP floor: drop "lottery ticket" candidates. The score-per-dollar metric rewards
-				// narrow high-R/R structures (a $20-maxLoss IB with positive EV outranks a
-				// $300-maxLoss IB with the same absolute EV), so without a POP gate the top of the
-				// ranking fills with POP-25-35% setups whose expected value is dominated by
-				// path-dependent stop-outs the terminal math doesn't see. Default 0.40 lets the
-				// user opt out via config.
-				if (cfg.MinProbabilityOfProfit > 0m && p.ProbabilityOfProfit < cfg.MinProbabilityOfProfit)
-					continue;
-
 				if (!scoredByStructure.TryGetValue(p.StructureKind, out var list))
 					scoredByStructure[p.StructureKind] = list = new List<OpenProposal>();
 				list.Add(p);

@@ -16,15 +16,6 @@ internal sealed class OpenerConfig
 	/// drawdowns. Set to 1.0 to disable; 0 disables the proposal entirely.</summary>
 	[JsonPropertyName("maxRiskPctPerProposal")] public decimal MaxRiskPctPerProposal { get; set; } = 0.10m;
 
-	/// <summary>Hard floor on probability of profit at the target expiry. Candidates whose terminal
-	/// POP falls below this are dropped before ranking. Defaults to 0.40 — catches the
-	/// "lottery ticket" pattern where high R/R + low POP gives a positive expected value on paper
-	/// but loses money in practice once intra-period stops cut winners short. Set to 0 to disable
-	/// (return to ranking-only behavior). Tighter values (0.55+) are sensible if you want only
-	/// high-probability credit spreads; looser values (0.25–0.35) admit asymmetric setups for
-	/// users who actively manage them.</summary>
-	[JsonPropertyName("minProbabilityOfProfit")] public decimal MinProbabilityOfProfit { get; set; } = 0.40m;
-
 	[JsonPropertyName("directionalFitWeight")] public decimal DirectionalFitWeight { get; set; } = 0.5m;
 	[JsonPropertyName("profitBandPct")] public decimal ProfitBandPct { get; set; } = 5.0m;
 	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;
