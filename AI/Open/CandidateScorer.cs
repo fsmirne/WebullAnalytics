@@ -790,8 +790,14 @@ internal static class CandidateScorer
 		// score. Showing them inline lets the reader compare two similarly-scored trades by their shape.
 		var rr = Math.Abs(p.MaxLossPerContract) > 0m ? Math.Max(0m, p.MaxProfitPerContract / Math.Abs(p.MaxLossPerContract)) : 0m;
 		var ratioStr = p.PremiumRatio.HasValue ? $", prem {p.PremiumRatio.Value:F2}x" : "";
+		// Capital efficiency uses the cash actually deployed (debit) when the structure was a debit
+		// trade; for credit structures the deployed capital is the margin held against max-loss,
+		// which equals CapitalAtRiskPerContract. Mirrors the divisor used inside ScoreCalendarOrDiagonal
+		// / ScoreMultiLeg so the rationale's recomputed factors line up with the actual score.
+		var debitPaid = Math.Max(0m, -p.DebitOrCreditPerContract);
+		var efficiencyCapital = debitPaid > 0m ? debitPaid : p.CapitalAtRiskPerContract;
 		var popFactor = ComputeProbabilityFactor(p.ProbabilityOfProfit);
-		var scaleFactor = ComputeCapitalScaleFactor(p.CapitalAtRiskPerContract);
+		var scaleFactor = ComputeCapitalScaleFactor(efficiencyCapital);
 		var setupFactor = p.SetupFactor;
 		var balance = BalanceFactor(p.MaxProfitPerContract, p.MaxLossPerContract, p.PremiumRatio ?? 1m);
 		var factorParts = new List<string>
@@ -854,13 +860,13 @@ internal static class CandidateScorer
 			var rating = p.MarketSentimentRating ?? SentimentRating.FromScore(p.MarketSentimentScore.Value);
 			indicatorParts.Add($"F&G {p.MarketSentimentScore.Value:F0}/100 ({rating}), fit {p.DirectionalFit:+0;-0} → sentiment {p.SentimentAdjustmentFactor.Value:F2}");
 		}
-		var finalScore = p.FinalScore ?? ComputeFinalScore(p.BiasAdjustedScore, p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
-		var thetaFactor = ComputeThetaFactor(p.ThetaPerDayPerContract, p.CapitalAtRiskPerContract);
+		var finalScore = p.FinalScore ?? ComputeFinalScore(p.BiasAdjustedScore, p.ThetaPerDayPerContract, efficiencyCapital);
+		var thetaFactor = ComputeThetaFactor(p.ThetaPerDayPerContract, efficiencyCapital);
 
 		// Theta factor is the last multiplicand in the factors chain when present, so the line goes
 		// tech-adjusted → … → final in one calculation rather than splitting at "adjusted".
 		if (p.ThetaPerDayPerContract.HasValue)
-			factorParts.Add($"theta factor {thetaFactor:F2} ({p.ThetaPerDayPerContract.Value:+0.00;-0.00}/day on ${p.CapitalAtRiskPerContract:F0} risk)");
+			factorParts.Add($"theta factor {thetaFactor:F2} ({p.ThetaPerDayPerContract.Value:+0.00;-0.00}/day on ${efficiencyCapital:F0} deployed)");
 
 		var realizedTag = p.RealizedExpectedValuePerContract.HasValue
 			? $" (real ${p.RealizedExpectedValuePerContract.Value:F2}{(p.EstimatedSlippagePerContract is decimal slip && slip > 0m ? $", −${slip:F2} fric" : "")})"
@@ -1634,16 +1640,21 @@ internal static class CandidateScorer
 		var (maxProfit, maxLoss) = ScanPnlRange(pnl, scanLower, scanUpper);
 		var capitalAtRisk = Math.Abs(Math.Min(0m, maxLoss));
 		if (capitalAtRisk <= 0m) return null;
+		// For debit structures (DC/DD) the score divisor uses cash actually deployed, not worst-case
+		// max-loss — same reasoning as ScoreCalendarOrDiagonal. For credit structures (IB/IC) the
+		// margin held against the trade IS the capital deployed, so capitalAtRisk stays the divisor.
+		var debitPaid = Math.Max(0m, -netEntryPerContract);
+		var efficiencyCapital = debitPaid > 0m ? debitPaid : capitalAtRisk;
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
 		var realizedEv = RealizedExpectancy.RealizeEv(grid, pnl, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
 		// Terminal-EV scoring. See ScoreShortVertical for full rationale on dropping the
 		// barrier-aware adjustment; in short, applying it only to some structure types created an
 		// asymmetric bias that buried calendars/diagonals/IBs in favor of single-leg longs.
 		// BreakevenRoomFactor + sign-symmetric factor chain carries the path-safety signal.
-		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
+		var rawScore = ComputeRawScore(realizedEv, daysToTarget, efficiencyCapital);
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
-		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
+		var scaleFactor = ComputeCapitalScaleFactor(efficiencyCapital);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, breakevens);
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(spot, representativeIv, daysToTarget, breakevens);
@@ -1666,7 +1677,7 @@ internal static class CandidateScorer
 		var biasAdjBaseMl = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
 		var afterFactorsMl = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseMl, popFactor), scaleFactor), setupFactor ?? 1m), runwayFactor ?? 1m), breakevenRoomFactor ?? 1m), balance), liquidityFactor ?? 1m);
 		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(afterFactorsMl, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
-		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
+		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, efficiencyCapital);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
 		return new OpenProposal(
@@ -1749,6 +1760,14 @@ internal static class CandidateScorer
 			: Math.Max(shortParsed.Strike - longParsed.Strike, 0m);
 		var strikeLossPerContract = strikeLossPerShare * 100m;
 		var capitalAtRisk = debitPerContract + strikeLossPerContract;
+		// Capital efficiency is rated against the cash actually deployed (the debit), not the worst-
+		// case assignment loss. The strike gap is a contingent exposure that rarely realizes —
+		// diagonals are normally closed or rolled before short expiry, and even on assignment the
+		// long retains time value. Folding the strike gap into the score divisor systematically
+		// buried diagonals beneath same-strike calendars on capital efficiency. The full
+		// debit+strike-gap number stays in CapitalAtRiskPerContract / MaxLossPerContract for
+		// position sizing and risk reporting.
+		var efficiencyCapital = debitPerContract;
 
 		var shortYears = Math.Max(1, (shortParsed.ExpiryDate.Date - asOf.Date).Days) / 365.0;
 		var longAtShortYears = Math.Max(1, (longParsed.ExpiryDate.Date - shortParsed.ExpiryDate.Date).Days) / 365.0;
@@ -1807,13 +1826,13 @@ internal static class CandidateScorer
 		// For calendars/diagonals the barrier-aware penalty was particularly miscalibrated: BE-as-stop
 		// massively overstated P_hit because theta accumulates favorably over the holding period and
 		// the actual stop fires much deeper than break-even.
-		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
+		var rawScore = ComputeRawScore(realizedEv, daysToTarget, efficiencyCapital);
 		// LongCalendar reads neutral (0); LongDiagonal picks up its sign from the strike layout via the
 		// skeleton overload, so the technical bias factor lifts/cuts a diagonal whose direction matches
 		// or fights the trend. Calendars stay neutral by construction.
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
-		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
+		var scaleFactor = ComputeCapitalScaleFactor(efficiencyCapital);
 		var beList = (beLower.HasValue && beUpper.HasValue) ? new[] { beLower.Value, beUpper.Value } : Array.Empty<decimal>();
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, beList);
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
@@ -1845,7 +1864,7 @@ internal static class CandidateScorer
 		var biasAdjBaseCd = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
 		var afterFactorsCd = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseCd, popFactor), scaleFactor), setupFactor ?? 1m), runwayFactor ?? 1m), breakevenRoomFactor ?? 1m), balance), liquidityFactor ?? 1m);
 		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(afterFactorsCd, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
-		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
+		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, efficiencyCapital);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
 		return new OpenProposal(
