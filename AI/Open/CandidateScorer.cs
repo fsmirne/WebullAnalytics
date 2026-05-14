@@ -305,18 +305,59 @@ internal static class CandidateScorer
 		return Math.Clamp(factor, 0.01m, 1.25m);
 	}
 
-	/// <summary>Hard-filter gate: reject any candidate whose worst-leg spread exceeds the config max,
-	/// or whose min-OI falls below the config floor. Returns true when the candidate passes (or when
-	/// liquidity stats can't be computed — defer to downstream scoring rather than discard silently).
-	/// The gate is checked before any scoring math to short-circuit the doomed-exit candidates the
-	/// opener used to surface in past versions.</summary>
+	/// <summary>Hard-filter gate: reject the candidate when any leg fails the spread or OI checks.
+	/// Each per-leg check has an absolute escape hatch so the relative thresholds don't over-reject
+	/// penny-priced wings (where a 1¢ absolute spread reads as 67% of mid) or actively-traded strikes
+	/// on chains where one dominant strike dwarfs every neighbor (where 6k OI nearby reads as 12% of
+	/// the 50k-OI max). Returns true when no leg fails (or when liquidity stats can't be computed —
+	/// defer to downstream scoring rather than discard silently).</summary>
 	public static bool PassesLiquidityGate(IEnumerable<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, OpenerLiquidityConfig cfg, decimal? spot = null)
 	{
-		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(legs, quotes, spot);
-		if (worstSpread.HasValue && worstSpread.Value > cfg.MaxBidAskSpreadPct) return false;
-		if (minOi.HasValue && minOi.Value < cfg.MinOpenInterest) return false;
-		if (minRelOi.HasValue && cfg.MinRelativeOpenInterest > 0m && minRelOi.Value < cfg.MinRelativeOpenInterest) return false;
-		return true;
+		return GetLiquidityFailures(legs, quotes, cfg, spot).Count == 0;
+	}
+
+	/// <summary>Returns the list of per-leg failure descriptions for the liquidity gate. Empty list
+	/// means the candidate passes. Used by both the gate and the debug diagnostic so the rejection
+	/// reason in the log line matches the actual gating decision.</summary>
+	internal static List<string> GetLiquidityFailures(IEnumerable<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, OpenerLiquidityConfig cfg, decimal? spot)
+	{
+		var failures = new List<string>();
+		foreach (var leg in legs)
+		{
+			if (!quotes.TryGetValue(leg.Symbol, out var q)) continue;
+
+			// Spread check: leg fails only if BOTH relative and absolute thresholds are exceeded.
+			if (q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m)
+			{
+				var absSpread = q.Ask.Value - q.Bid.Value;
+				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				if (mid > 0m)
+				{
+					var relSpread = absSpread / mid;
+					if (relSpread > cfg.MaxBidAskSpreadPct && absSpread > cfg.MaxAbsoluteSpread)
+						failures.Add($"{leg.Symbol} spread {relSpread:P0}>{cfg.MaxBidAskSpreadPct:P0} (abs ${absSpread:F2}>${cfg.MaxAbsoluteSpread:F2})");
+				}
+			}
+
+			var legLiq = EffectiveLiquidity(q);
+			if (legLiq.HasValue && legLiq.Value < cfg.MinOpenInterest)
+				failures.Add($"{leg.Symbol} oi {legLiq.Value}<{cfg.MinOpenInterest}");
+
+			// Relative-OI check: leg fails only if the ratio is below the relative threshold AND its
+			// absolute OI is below the absolute floor. High-absolute-OI strikes always pass.
+			if (cfg.MinRelativeOpenInterest > 0m && spot.HasValue && spot.Value > 0m && legLiq.HasValue && legLiq.Value > 0)
+			{
+				if (legLiq.Value >= cfg.MinAbsoluteOpenInterest) continue;
+				var legParsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
+				if (legParsed == null) continue;
+				var nearbyMax = FindMaxLiquidityNearStrike(legParsed, quotes, spot.Value);
+				if (nearbyMax <= 0) continue;
+				var ratio = (decimal)legLiq.Value / nearbyMax;
+				if (ratio < cfg.MinRelativeOpenInterest)
+					failures.Add($"{leg.Symbol} relOi {ratio:P0}<{cfg.MinRelativeOpenInterest:P0} (abs {legLiq.Value}<{cfg.MinAbsoluteOpenInterest})");
+			}
+		}
+		return failures;
 	}
 
 	/// <summary>Worst-leg bid/ask spread (as fraction of mid), minimum effective liquidity across legs,
@@ -1227,18 +1268,14 @@ internal static class CandidateScorer
 			return ShortVerticalRejectReason.MissingLongQuote;
 		}
 
-		if (cfg != null && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot > 0m ? spot : (decimal?)null))
+		if (cfg != null)
 		{
-			var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot > 0m ? spot : null);
-			var parts = new List<string>();
-			if (worstSpread.HasValue && worstSpread.Value > cfg.Liquidity.MaxBidAskSpreadPct)
-				parts.Add($"spread {worstSpread.Value:P0}>{cfg.Liquidity.MaxBidAskSpreadPct:P0}");
-			if (minOi.HasValue && minOi.Value < cfg.Liquidity.MinOpenInterest)
-				parts.Add($"oi {minOi.Value}<{cfg.Liquidity.MinOpenInterest}");
-			if (minRelOi.HasValue && cfg.Liquidity.MinRelativeOpenInterest > 0m && minRelOi.Value < cfg.Liquidity.MinRelativeOpenInterest)
-				parts.Add($"relOi {minRelOi.Value:P0}<{cfg.Liquidity.MinRelativeOpenInterest:P0}");
-			detail = parts.Count > 0 ? string.Join(", ", parts) : "liquidity_gate";
-			return ShortVerticalRejectReason.LiquidityGated;
+			var failures = GetLiquidityFailures(skel.Legs, quotes, cfg.Liquidity, spot > 0m ? spot : (decimal?)null);
+			if (failures.Count > 0)
+			{
+				detail = string.Join("; ", failures);
+				return ShortVerticalRejectReason.LiquidityGated;
+			}
 		}
 
 		var creditPerShare = shortQ.Value.bid - longQ.Value.ask;
