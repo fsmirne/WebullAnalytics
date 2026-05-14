@@ -132,7 +132,10 @@ internal sealed class OpenProposalSink : IDisposable
 			rows.Add(new Markup($"[yellow]{Markup.Escape(p.PricingWarning)}[/]"));
 		if (p.CashReserveBlocked && p.CashReserveDetail != null)
 			rows.Add(new Markup($"[yellow]{Markup.Escape(p.CashReserveDetail)}[/]"));
-		if (!p.CashReserveBlocked && p.Qty > 0)
+		// Blocked proposals keep qty=1 on their legs (the enumerator's initial sizing) since ApplyCashSizing
+		// only scales legs when sizing succeeds. Emit the commands anyway so the user can review the
+		// structure's parameters even though they can't afford to place it as sized.
+		if (p.Qty > 0 || p.CashReserveBlocked)
 			AppendReproductionCommands(rows, p, _suggestPricing);
 		if (p.Diagnostic is not null)
 			rows.Add(RiskDiagnosticRenderer.Build(p.Diagnostic, ascii: _ascii));
