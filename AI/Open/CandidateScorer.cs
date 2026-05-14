@@ -1180,12 +1180,18 @@ internal static class CandidateScorer
 		MissingLongQuote,
 		NotCreditAtBidAsk,
 		NonPositiveCapitalAtRisk,
+		EventVetoed,
+		LiquidityGated,
 	}
 
 	internal static ShortVerticalRejectReason DiagnoseShortVerticalRejection(
 		CandidateSkeleton skel,
 		IReadOnlyDictionary<string, OptionContractQuote> quotes,
-		out string detail)
+		out string detail,
+		DateTime asOf = default,
+		OpenerConfig? cfg = null,
+		TickerEvents? events = null,
+		decimal spot = 0m)
 	{
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
 		var longLeg = skel.Legs.First(l => l.Action == "buy");
@@ -1196,6 +1202,15 @@ internal static class CandidateScorer
 		{
 			detail = $"parse_failed short={shortLeg.Symbol} long={longLeg.Symbol}";
 			return ShortVerticalRejectReason.ParseFailed;
+		}
+
+		// Mirror ScoreShortVertical's null-return order: event veto first, then quote checks, then
+		// liquidity gate, then credit/risk checks. Without this order Unknown swallows legitimate
+		// reasons that fire before the credit math runs.
+		if (cfg != null && EventVeto.ShouldVeto(skel, asOf, events, cfg.Events, out var vetoReason))
+		{
+			detail = vetoReason ?? "event_vetoed";
+			return ShortVerticalRejectReason.EventVetoed;
 		}
 
 		var shortQ = TryLiveBidAsk(shortLeg.Symbol, quotes);
@@ -1210,6 +1225,20 @@ internal static class CandidateScorer
 		{
 			detail = $"missing_long_quote {longLeg.Symbol} ({DescribeQuote(longLeg.Symbol, quotes)})";
 			return ShortVerticalRejectReason.MissingLongQuote;
+		}
+
+		if (cfg != null && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot > 0m ? spot : (decimal?)null))
+		{
+			var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot > 0m ? spot : null);
+			var parts = new List<string>();
+			if (worstSpread.HasValue && worstSpread.Value > cfg.Liquidity.MaxBidAskSpreadPct)
+				parts.Add($"spread {worstSpread.Value:P0}>{cfg.Liquidity.MaxBidAskSpreadPct:P0}");
+			if (minOi.HasValue && minOi.Value < cfg.Liquidity.MinOpenInterest)
+				parts.Add($"oi {minOi.Value}<{cfg.Liquidity.MinOpenInterest}");
+			if (minRelOi.HasValue && cfg.Liquidity.MinRelativeOpenInterest > 0m && minRelOi.Value < cfg.Liquidity.MinRelativeOpenInterest)
+				parts.Add($"relOi {minRelOi.Value:P0}<{cfg.Liquidity.MinRelativeOpenInterest:P0}");
+			detail = parts.Count > 0 ? string.Join(", ", parts) : "liquidity_gate";
+			return ShortVerticalRejectReason.LiquidityGated;
 		}
 
 		var creditPerShare = shortQ.Value.bid - longQ.Value.ask;
