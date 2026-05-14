@@ -120,10 +120,18 @@ internal sealed class LivePositionSource : IPositionSource
 		try
 		{
 			var balance = await client.FetchAccountBalanceAsync(cancellation);
-			var cash = ParseDecimal(balance.TotalCashBalance);
+			// Deployable capital: prefer option_buying_power / buying_power (what the broker actually
+			// authorizes for new trades). Raw total_cash_balance can be negative on a margin account
+			// (margin debit), which would zero out every cash-cap check even though BP is positive.
+			var availableFunds = balance.TryGetAvailableFunds() ?? 0m;
+			var totalCash = ParseDecimal(balance.TotalCashBalance);
 			var unrealized = ParseDecimal(balance.TotalUnrealizedProfitLoss);
-			var accountValue = cash + unrealized;
-			return (cash, accountValue);
+			// Equity estimate. total_cash_balance + unrealized approximates NLV when cash already
+			// reflects proceeds from short positions; on margin accounts with debit balances it can go
+			// negative. Floor at availableFunds so the risk-budget cap (% of accountValue) never
+			// inverts and blocks trades that are otherwise fundable.
+			var accountValue = Math.Max(availableFunds, totalCash + unrealized);
+			return (availableFunds, accountValue);
 		}
 		catch (WebullOpenApiException ex) when (ex.HttpStatus == 404)
 		{
