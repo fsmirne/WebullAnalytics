@@ -171,7 +171,7 @@ internal sealed class OpenCandidateEvaluator
 				{
 					if (debug && (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical))
 					{
-						var reason = CandidateScorer.DiagnoseShortVerticalRejection(skel, mergedQuotes, out var detail);
+						var reason = CandidateScorer.DiagnoseShortVerticalRejection(skel, mergedQuotes, out var detail, ctx.Now, cfg, tickerEvents, spot);
 						shortVerticalRejects![reason] = shortVerticalRejects.GetValueOrDefault(reason) + 1;
 						if (debugRejectLinesLeft-- > 0)
 							Console.Error.WriteLine($"[debug] {skel.Ticker} {skel.StructureKind} dropped: {reason} ({detail})");
