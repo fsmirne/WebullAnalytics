@@ -145,10 +145,19 @@ internal sealed class OpenerLongCallPutConfig
 /// </summary>
 internal sealed class OpenerLiquidityConfig
 {
-	/// <summary>Reject any candidate whose worst leg has a bid/ask spread strictly greater than this
-	/// fraction of mid. Default 0.50 = 50%; extremely wide structural quotes that mid-pricing math
-	/// can never compensate for. Set to 1.0 to effectively disable the spread gate.</summary>
+	/// <summary>Reject any leg whose bid/ask spread strictly exceeds this fraction of mid AND whose
+	/// absolute spread exceeds <see cref="MaxAbsoluteSpread"/>. Default 0.50 = 50%; extremely wide
+	/// structural quotes that mid-pricing math can never compensate for. Set to 1.0 to effectively
+	/// disable the percentage gate. The absolute escape hatch waives this for penny-priced wings
+	/// (e.g. $0.01/$0.02) where the 50% looks "wide" but the actual friction is 1 cent.</summary>
 	[JsonPropertyName("maxBidAskSpreadPct")] public decimal MaxBidAskSpreadPct { get; set; } = 0.50m;
+
+	/// <summary>Absolute spread floor (in dollars per share) for the spread gate. A leg with bid/ask
+	/// spread no wider than this value passes the spread check even if the relative spread blows past
+	/// <see cref="MaxBidAskSpreadPct"/>. Default $0.05; a 5-cent absolute spread is $5/contract of
+	/// slippage, which is acceptable on cheap credit-spread wings ($0.01–0.10 mid) where 50% of mid
+	/// would over-reject. Set to 0 to disable the escape hatch.</summary>
+	[JsonPropertyName("maxAbsoluteSpread")] public decimal MaxAbsoluteSpread { get; set; } = 0.05m;
 
 	/// <summary>Reject any candidate whose worst leg has open interest strictly less than this. Default
 	/// 5 contracts; below that, exits routinely walk multiple levels of the book. Set to 0 to disable
@@ -156,12 +165,19 @@ internal sealed class OpenerLiquidityConfig
 	[JsonPropertyName("minOpenInterest")] public long MinOpenInterest { get; set; } = 5;
 
 	/// <summary>Reject any candidate whose worst leg's OI is below this fraction of the maximum OI
-	/// among same-expiry near-spot strikes. Catches "sub-grid" strikes — e.g., the $0.50 strikes on a
-	/// chain whose far-dated expiries cluster volume on $1.00 strikes. Default 0.25 = 25%; a strike
-	/// trading at less than a quarter of its neighbors' interest is structurally illiquid regardless of
-	/// its absolute OI. Set to 0 to disable. Lower this to relax the gate (let through borderline
-	/// strikes); raise it to be stricter (only round-number strikes survive).</summary>
+	/// among same-expiry near-spot strikes AND whose absolute OI is below
+	/// <see cref="MinAbsoluteOpenInterest"/>. Catches "sub-grid" strikes — e.g., the $0.50 strikes on a
+	/// chain whose far-dated expiries cluster volume on $1.00 strikes. Default 0.25 = 25%. The
+	/// absolute escape hatch prevents the relative gate from over-rejecting decently-liquid strikes on
+	/// meme-stock chains where one strike dwarfs all others. Set to 0 to disable the relative gate.</summary>
 	[JsonPropertyName("minRelativeOpenInterest")] public decimal MinRelativeOpenInterest { get; set; } = 0.25m;
+
+	/// <summary>Absolute open-interest floor for the relative-OI gate. A leg with OI (or volume) at or
+	/// above this value passes the relative-OI check even if its share of nearby-strike liquidity is
+	/// below <see cref="MinRelativeOpenInterest"/>. Default 500; an OI of 500+ on its own is plenty of
+	/// liquidity in absolute terms regardless of how it compares to a max-OI neighbor. Set to a very
+	/// high number to disable the escape hatch.</summary>
+	[JsonPropertyName("minAbsoluteOpenInterest")] public long MinAbsoluteOpenInterest { get; set; } = 500;
 
 	/// <summary>Strength of the multiplicative liquidity factor on the score chain. The factor maps
 	/// worst-leg spread + min-OI to a value in [0.30, 1.00]. Higher weight = sharper penalty for
