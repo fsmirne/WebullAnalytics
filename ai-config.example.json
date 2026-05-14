@@ -40,7 +40,14 @@
 		"gexWeight": 0.30,
 		"statArbWeight": 0.15,
 		"sentimentWeight": 0.15,
-		"liquidity": { "maxBidAskSpreadPct": 0.50, "minOpenInterest": 5, "minRelativeOpenInterest": 0.25, "weight": 0.50 },
+		"liquidity": {
+			"maxBidAskSpreadPct": 0.50,
+			"maxAbsoluteSpread": 0.05,
+			"minOpenInterest": 5,
+			"minRelativeOpenInterest": 0.25,
+			"minAbsoluteOpenInterest": 100,
+			"weight": 0.50
+		},
 		"events": { "enabled": true, "earningsBlackoutDaysAfter": 0, "rejectShortCallsThroughExDiv": true, "overrideFilePath": null },
 		"realizedExpectancy": { "enabled": true, "profitTargetPctOfMaxProfit": 0.50, "stopLossPctOfMaxLoss": 0.75, "slippagePerSharePerOrder": 0, "roundTrips": 2 },
 		"scenarioGridSigma": 1.0,
