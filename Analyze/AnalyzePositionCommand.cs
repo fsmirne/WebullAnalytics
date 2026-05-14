@@ -171,8 +171,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var hypotheticalQuotes = await AnalyzeCommon.FetchQuotesForSymbolList(settings.Api, hypotheticalSymbols, cancellation);
 				if (hypotheticalQuotes != null)
 				{
+					// Prefer Phase 1's refreshed entries: FetchQuotesForSymbolList re-fetches the entire
+					// chain to look up derivativeIds, so its result contains fresh stub entries (no bid/ask/IV/OI)
+					// for every chain symbol — overwriting Phase 1's queryBatch-refreshed position legs would
+					// surface as "Long quote: bid=null ask=null …" in the diagnostic.
 					var merged = new Dictionary<string, OptionContractQuote>(alreadyFetched, StringComparer.OrdinalIgnoreCase);
-					foreach (var kvp in hypotheticalQuotes) merged[kvp.Key] = kvp.Value;
+					foreach (var kvp in hypotheticalQuotes) merged.TryAdd(kvp.Key, kvp.Value);
 					quotes = merged;
 				}
 			}
