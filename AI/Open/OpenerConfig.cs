@@ -154,10 +154,10 @@ internal sealed class OpenerLiquidityConfig
 
 	/// <summary>Absolute spread floor (in dollars per share) for the spread gate. A leg with bid/ask
 	/// spread no wider than this value passes the spread check even if the relative spread blows past
-	/// <see cref="MaxBidAskSpreadPct"/>. Default $0.05; a 5-cent absolute spread is $5/contract of
-	/// slippage, which is acceptable on cheap credit-spread wings ($0.01–0.10 mid) where 50% of mid
+	/// <see cref="MaxBidAskSpreadPct"/>. Default $0.10; a 10-cent absolute spread is $10/contract of
+	/// slippage, which is acceptable on cheap credit-spread wings ($0.01–0.20 mid) where 50% of mid
 	/// would over-reject. Set to 0 to disable the escape hatch.</summary>
-	[JsonPropertyName("maxAbsoluteSpread")] public decimal MaxAbsoluteSpread { get; set; } = 0.05m;
+	[JsonPropertyName("maxAbsoluteSpread")] public decimal MaxAbsoluteSpread { get; set; } = 0.10m;
 
 	/// <summary>Reject any candidate whose worst leg has open interest strictly less than this. Default
 	/// 5 contracts; below that, exits routinely walk multiple levels of the book. Set to 0 to disable
@@ -174,10 +174,11 @@ internal sealed class OpenerLiquidityConfig
 
 	/// <summary>Absolute open-interest floor for the relative-OI gate. A leg with OI (or volume) at or
 	/// above this value passes the relative-OI check even if its share of nearby-strike liquidity is
-	/// below <see cref="MinRelativeOpenInterest"/>. Default 500; an OI of 500+ on its own is plenty of
-	/// liquidity in absolute terms regardless of how it compares to a max-OI neighbor. Set to a very
-	/// high number to disable the escape hatch.</summary>
-	[JsonPropertyName("minAbsoluteOpenInterest")] public long MinAbsoluteOpenInterest { get; set; } = 500;
+	/// below <see cref="MinRelativeOpenInterest"/>. Default 100; 100+ contracts is plenty of liquidity
+	/// in absolute terms regardless of how it compares to a max-OI neighbor — meme-stock chains
+	/// regularly have one strike with 10k+ OI which makes every other active strike look "relatively
+	/// thin" under the 25% relative gate. Set to a very high number to disable the escape hatch.</summary>
+	[JsonPropertyName("minAbsoluteOpenInterest")] public long MinAbsoluteOpenInterest { get; set; } = 100;
 
 	/// <summary>Strength of the multiplicative liquidity factor on the score chain. The factor maps
 	/// worst-leg spread + min-OI to a value in [0.30, 1.00]. Higher weight = sharper penalty for
