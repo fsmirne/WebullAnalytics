@@ -60,6 +60,8 @@ public enum OpenStructureKind
 /// <param name="FinalScore">Final opener ranking score. This is the score used for output ordering.</param>
 /// <param name="ExpectedMoveCreditFactor">EM-vs-short-strike cushion factor for credit trades only. Measures the spot-to-nearest-short distance in one-sigma EM units (spot × IV × √(trading-days/252)); &lt;1σ is unsafe, &gt;1.5σ is safe. Null for debit trades, structures without shorts, or degenerate inputs.</param>
 /// <param name="IvRealizedPremiumFactor">"Trade vs vol regime" factor based on IV/HV richness, distinct from the vega-aware adjustment. Credit favored when IV &gt; HV; debit favored when IV &lt; HV. Null when HV unavailable or weight = 0.</param>
+/// <param name="ExpectedMoveLower">Lower bound of the one-sigma expected-move price envelope at the target expiry, <c>spot − spot × IV × √(trading-days/252)</c>. Surfaced for display next to <see cref="Breakevens"/>. Null when IV or DTE are unavailable.</param>
+/// <param name="ExpectedMoveUpper">Upper bound of the one-sigma expected-move price envelope at the target expiry, <c>spot + spot × IV × √(trading-days/252)</c>. Surfaced for display next to <see cref="Breakevens"/>. Null when IV or DTE are unavailable.</param>
 internal sealed record OpenProposal(
 	string Ticker,
 	OpenStructureKind StructureKind,
@@ -113,5 +115,7 @@ internal sealed record OpenProposal(
 	decimal? StopLossPerContract = null,
 	decimal? BreakevenRoomFactor = null,
 	decimal? ExpectedMoveCreditFactor = null,
-	decimal? IvRealizedPremiumFactor = null
+	decimal? IvRealizedPremiumFactor = null,
+	decimal? ExpectedMoveLower = null,
+	decimal? ExpectedMoveUpper = null
 );

@@ -553,6 +553,19 @@ internal static class CandidateScorer
 		return Math.Clamp(factor, 0.10m, 1m);
 	}
 
+	/// <summary>One-sigma expected-move price envelope: <c>(spot − EM, spot + EM)</c> where
+	/// <c>EM = spot × IV × √(tradingDays/252)</c>. Trading-day denominator mirrors the EM-based
+	/// scoring factors (BreakevenRoomFactor, ExpectedMoveCreditFactor) so the rendered range lines
+	/// up with what those factors evaluated against. Null when inputs are degenerate.</summary>
+	internal static (decimal Lower, decimal Upper)? ComputeExpectedMoveBounds(decimal spot, decimal iv, int tradingDaysToTarget)
+	{
+		if (spot <= 0m || iv <= 0m || tradingDaysToTarget <= 0) return null;
+		var years = (decimal)tradingDaysToTarget / 252m;
+		var em = spot * iv * (decimal)Math.Sqrt((double)years);
+		if (em <= 0m) return null;
+		return (spot - em, spot + em);
+	}
+
 	/// <summary>EM-vs-short-strike safety factor for credit trades. Measures how many one-sigma
 	/// expected moves of cushion exist between spot and the nearest short strike — the price at
 	/// which assignment risk and the loss zone begin. Distinct from BreakevenRoomFactor: the credit
@@ -862,7 +875,17 @@ internal static class CandidateScorer
 			? $"[tech {bias:+0.00;-0.00}, fit 0 → no tech adjustment]"
 			: $"[tech {bias:+0.00;-0.00}, fit {p.DirectionalFit:+0;-0} → {biasEffectPct:+0;-0}% {(biasEffectPct >= 0 ? "tech boost" : "tech cut")}]";
 
-		var beStr = p.Breakevens.Count > 0 ? $"BE ${string.Join("/", p.Breakevens.Select(b => b.ToString("F2")))}, " : "";
+		var bePart = p.Breakevens.Count > 0 ? $"BE ${string.Join("/", p.Breakevens.Select(b => b.ToString("F2")))}" : "";
+		var emPart = (p.ExpectedMoveLower.HasValue && p.ExpectedMoveUpper.HasValue)
+			? $"EM ${p.ExpectedMoveLower.Value:F2}/{p.ExpectedMoveUpper.Value:F2}"
+			: "";
+		var beStr = (bePart, emPart) switch
+		{
+			("", "") => "",
+			("", _) => $"{emPart}, ",
+			(_, "") => $"{bePart}, ",
+			_ => $"{bePart}, {emPart}, "
+		};
 
 		// R/R and premium_ratio surface the asymmetry/cushion factors that BalanceFactor folds into the
 		// score. Showing them inline lets the reader compare two similarly-scored trades by their shape.
@@ -1221,6 +1244,7 @@ internal static class CandidateScorer
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, [breakeven]);
 		var tradingDaysToTarget = CountTradingDays(asOf, skel.TargetExpiry.Date);
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(spot, iv, tradingDaysToTarget, [breakeven]);
+		var expectedMoveBounds = ComputeExpectedMoveBounds(spot, iv, tradingDaysToTarget);
 		var shortLegStrikes = ExtractShortLegStrikes(skel.Legs);
 		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(spot, iv, tradingDaysToTarget, creditPerContract, shortLegStrikes, cfg.ExpectedMoveCreditWeight);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, creditPerContract, cfg.IvRealizedPremiumWeight);
@@ -1303,7 +1327,9 @@ internal static class CandidateScorer
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
-			IvRealizedPremiumFactor: ivRealizedPremiumFactor
+			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
+			ExpectedMoveLower: expectedMoveBounds?.Lower,
+			ExpectedMoveUpper: expectedMoveBounds?.Upper
 		);
 	}
 
@@ -1747,6 +1773,7 @@ internal static class CandidateScorer
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
 		var tradingDaysToTargetMl = CountTradingDays(asOf, skel.TargetExpiry.Date);
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(spot, representativeIv, tradingDaysToTargetMl, breakevens);
+		var expectedMoveBoundsMl = ComputeExpectedMoveBounds(spot, representativeIv, tradingDaysToTargetMl);
 		var shortLegStrikesMl = ExtractShortLegStrikes(skel.Legs);
 		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(spot, representativeIv, tradingDaysToTargetMl, netEntryPerContract, shortLegStrikesMl, cfg.ExpectedMoveCreditWeight);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(representativeIv, historicalVolAnnual, netEntryPerContract, cfg.IvRealizedPremiumWeight);
@@ -1822,7 +1849,9 @@ internal static class CandidateScorer
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
-			IvRealizedPremiumFactor: ivRealizedPremiumFactor);
+			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
+			ExpectedMoveLower: expectedMoveBoundsMl?.Lower,
+			ExpectedMoveUpper: expectedMoveBoundsMl?.Upper);
 	}
 
 	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null)
@@ -1933,6 +1962,7 @@ internal static class CandidateScorer
 		var representativeIvEarly = (ivShort + ivLong) / 2m;
 		var tradingDaysToTargetCd = CountTradingDays(asOf, skel.TargetExpiry.Date);
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(spot, representativeIvEarly, tradingDaysToTargetCd, beList);
+		var expectedMoveBoundsCd = ComputeExpectedMoveBounds(spot, representativeIvEarly, tradingDaysToTargetCd);
 		var shortLegStrikesCd = ExtractShortLegStrikes(skel.Legs);
 		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(spot, representativeIvEarly, tradingDaysToTargetCd, -debitPerContract, shortLegStrikesCd, cfg.ExpectedMoveCreditWeight);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(representativeIvEarly, historicalVolAnnual, -debitPerContract, cfg.IvRealizedPremiumWeight);
@@ -2015,7 +2045,9 @@ internal static class CandidateScorer
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLossPoint, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
-			IvRealizedPremiumFactor: ivRealizedPremiumFactor
+			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
+			ExpectedMoveLower: expectedMoveBoundsCd?.Lower,
+			ExpectedMoveUpper: expectedMoveBoundsCd?.Upper
 		);
 	}
 
@@ -2113,6 +2145,8 @@ internal static class CandidateScorer
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, [breakeven]);
+		var tradingDaysToTargetLc = CountTradingDays(asOf, skel.TargetExpiry.Date);
+		var expectedMoveBoundsLc = ComputeExpectedMoveBounds(spot, iv, tradingDaysToTargetLc);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.IvRealizedPremiumWeight);
 		var legGreeks = new[] { (Parsed: parsed, Iv: iv, IsLong: true) };
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(legGreeks, asOf, spot);
@@ -2185,7 +2219,9 @@ internal static class CandidateScorer
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
 			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
-			IvRealizedPremiumFactor: ivRealizedPremiumFactor
+			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
+			ExpectedMoveLower: expectedMoveBoundsLc?.Lower,
+			ExpectedMoveUpper: expectedMoveBoundsLc?.Upper
 		);
 	}
 
