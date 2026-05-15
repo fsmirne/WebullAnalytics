@@ -310,7 +310,6 @@ internal static class AIConfigLoader
 		if (op.SentimentWeight < 0m) return $"opener.sentimentWeight: must be ≥ 0, got {op.SentimentWeight}";
 
 		var liq = op.Liquidity;
-		if (liq.MaxBidAskSpreadPct <= 0m || liq.MaxBidAskSpreadPct > 1m) return $"opener.liquidity.maxBidAskSpreadPct: must be in (0, 1], got {liq.MaxBidAskSpreadPct}";
 		if (liq.MinOpenInterest < 0) return $"opener.liquidity.minOpenInterest: must be ≥ 0, got {liq.MinOpenInterest}";
 		if (liq.MinRelativeOpenInterest < 0m || liq.MinRelativeOpenInterest > 1m) return $"opener.liquidity.minRelativeOpenInterest: must be in [0, 1], got {liq.MinRelativeOpenInterest}";
 		if (liq.Weight < 0m || liq.Weight > 1m) return $"opener.liquidity.weight: must be in [0, 1], got {liq.Weight}";

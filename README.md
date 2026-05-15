@@ -1209,10 +1209,10 @@ The `Factors` line in the panel prints only the factors that fired for this stru
 
 In addition to the `liq` score factor, the opener pipeline applies a *hard reject* before scoring. Any candidate where:
 
-- the worst leg's bid/ask spread exceeds `opener.liquidity.maxBidAskSpreadPct` (default 0.50 = 50%), **or**
-- the worst leg's open interest is below `opener.liquidity.minOpenInterest` (default 5)
+- the worst leg's open interest is below `opener.liquidity.minOpenInterest` (default 5), **or**
+- the worst leg's OI is below `opener.liquidity.minRelativeOpenInterest` (default 0.25) of the max OI among same-expiry near-spot strikes AND its absolute OI is below `opener.liquidity.minAbsoluteOpenInterest` (default 100)
 
-is dropped silently. These are doomed-exit structures — even a great fair-value score can't compensate for the liquidity friction at exit.
+is dropped silently. These are doomed-exit structures — even a great fair-value score can't compensate for the liquidity friction at exit. Bid/ask spread is *not* a hard gate (a single dominant wide quote was wiping entire chains on lightly-traded names); it still penalizes survivors through the `liq` score factor.
 
 The `analyze risk` and `analyze position` commands do *not* apply the hard filter (you may already be in a position with poor liquidity and need to evaluate it). They still surface the `wide_spread` and `thin_open_interest` rules, and the `liq` factor continues to penalize the score.
 
@@ -1220,8 +1220,9 @@ The `analyze risk` and `analyze position` commands do *not* apply the hard filte
 
 | Field | Default | Description |
 |---|---|---|
-| `maxBidAskSpreadPct` | 0.50 | Hard-reject worst-leg spread threshold, as fraction of mid. Set to 1.0 to effectively disable. |
 | `minOpenInterest` | 5 | Hard-reject worst-leg OI threshold. Set to 0 to disable. |
+| `minRelativeOpenInterest` | 0.25 | Worst-leg OI as a fraction of the max OI among same-expiry near-spot strikes. Combined with `minAbsoluteOpenInterest`. Set to 0 to disable the relative gate. |
+| `minAbsoluteOpenInterest` | 100 | Absolute-OI escape hatch for the relative-OI gate. Legs with OI ≥ this value always pass regardless of their share of nearby liquidity. |
 | `weight` | 0.50 | Strength of the multiplicative `liq` factor on survivors. Higher = sharper penalty for borderline-liquidity candidates. |
 
 #### Event veto (opener pipeline)

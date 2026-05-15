@@ -43,8 +43,6 @@
 		"expectedMoveCreditWeight": 0.20,
 		"ivRealizedPremiumWeight": 0.15,
 		"liquidity": {
-			"maxBidAskSpreadPct": 0.50,
-			"maxAbsoluteSpread": 0.10,
 			"minOpenInterest": 5,
 			"minRelativeOpenInterest": 0.25,
 			"minAbsoluteOpenInterest": 100,
