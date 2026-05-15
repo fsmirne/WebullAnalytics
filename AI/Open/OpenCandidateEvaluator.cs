@@ -188,6 +188,22 @@ internal sealed class OpenCandidateEvaluator
 				var summary = string.Join(", ", shortVerticalRejects.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key}={kv.Value}"));
 				Console.Error.WriteLine($"[debug] {tickerGroup.Key} short-vertical rejections: {summary}");
 			}
+			// Per-structure scored/positive/negative breakdown surfaces why a scan returned fewer proposals
+			// than expected: the FinalScore > 0 filter at the emit step drops everything ≤ 0, so when
+			// only a handful of candidates clear that line the cause is almost always one or two factor
+			// chains compounding their cuts past zero. This line answers "how close was each structure?"
+			// without needing to instrument the scorer.
+			if (debug)
+			{
+				foreach (var kv in scoredByStructure.OrderBy(k => k.Key.ToString()))
+				{
+					var scores = kv.Value.Select(p => p.FinalScore ?? 0m).ToList();
+					var positive = scores.Count(s => s > 0m);
+					var best = scores.Count > 0 ? scores.Max() : 0m;
+					var worst = scores.Count > 0 ? scores.Min() : 0m;
+					Console.Error.WriteLine($"[debug] {tickerGroup.Key} {kv.Key}: scored={scores.Count} positive={positive} negative={scores.Count - positive} best={best:F6} worst={worst:F6}");
+				}
+			}
 
 			// Per-structure top-N truncation.
 			var survivors = new List<OpenProposal>();
