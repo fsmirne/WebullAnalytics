@@ -58,6 +58,8 @@ public enum OpenStructureKind
 /// <param name="TheoreticalNetPremiumPerShare">Aggregate Black-Scholes theoretical premium per share, signed (long sum − short sum), priced at each leg's quoted IV. Same sign convention as the market value. Null when any leg lacks an IV or price.</param>
 /// <param name="StatArbAdjustmentFactor">Stat-arb multiplier applied during ranking. Edge = theoreticalNet − marketNet; positive edge boosts (favors the entrant — paid less than fair on debit, received more than fair on credit). Null when prerequisite values are unavailable.</param>
 /// <param name="FinalScore">Final opener ranking score. This is the score used for output ordering.</param>
+/// <param name="ExpectedMoveCreditFactor">EM-vs-short-strike cushion factor for credit trades only. Measures the spot-to-nearest-short distance in one-sigma EM units (spot × IV × √(trading-days/252)); &lt;1σ is unsafe, &gt;1.5σ is safe. Null for debit trades, structures without shorts, or degenerate inputs.</param>
+/// <param name="IvRealizedPremiumFactor">"Trade vs vol regime" factor based on IV/HV richness, distinct from the vega-aware adjustment. Credit favored when IV &gt; HV; debit favored when IV &lt; HV. Null when HV unavailable or weight = 0.</param>
 internal sealed record OpenProposal(
 	string Ticker,
 	OpenStructureKind StructureKind,
@@ -109,5 +111,7 @@ internal sealed record OpenProposal(
 	decimal? EstimatedSlippagePerContract = null,
 	decimal? ProfitTargetPerContract = null,
 	decimal? StopLossPerContract = null,
-	decimal? BreakevenRoomFactor = null
+	decimal? BreakevenRoomFactor = null,
+	decimal? ExpectedMoveCreditFactor = null,
+	decimal? IvRealizedPremiumFactor = null
 );

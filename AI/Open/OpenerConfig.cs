@@ -34,6 +34,23 @@ internal sealed class OpenerConfig
 	/// macro overlay. Set to 0 to disable.</summary>
 	[JsonPropertyName("sentimentWeight")] public decimal SentimentWeight { get; set; } = 0.15m;
 
+	/// <summary>Weight of the EM-vs-short-strike credit-trade safety factor. Factor is
+	/// <c>max(0.10, 1 + weight × signal)</c> where signal ramps from −1 (≤0.5σ cushion) to +1
+	/// (≥1.5σ cushion) centered on 1σ. Only fires on credit trades (skipped for debit, where
+	/// the short-strike-as-loss-boundary framing doesn't apply). Default 0.20 caps the swing at
+	/// ±20%, large enough to discriminate borderline-tight credit verticals from properly-spaced
+	/// ones without overwhelming POP/EV signals. Set to 0 to disable.</summary>
+	[JsonPropertyName("expectedMoveCreditWeight")] public decimal ExpectedMoveCreditWeight { get; set; } = 0.20m;
+
+	/// <summary>Weight of the IV-vs-HV regime-alignment factor. Distinct from
+	/// <see cref="VolatilityFitWeight"/>: that one is vega-aware and barely fires on near-zero-vega
+	/// credit verticals; this one fires on trade-type sign alone (credit favored when IV &gt; HV,
+	/// debit favored when IV &lt; HV). Factor: <c>max(0.10, 1 + weight × signal)</c> where signal =
+	/// ±clamp(IV/HV − 1, −1, 1). Default 0.15 caps the swing at ±15% — smaller than the EM-credit
+	/// factor because regime-alignment is a coarser, less-discriminating signal than strike geometry.
+	/// Set to 0 to disable.</summary>
+	[JsonPropertyName("ivRealizedPremiumWeight")] public decimal IvRealizedPremiumWeight { get; set; } = 0.15m;
+
 	[JsonPropertyName("liquidity")] public OpenerLiquidityConfig Liquidity { get; set; } = new();
 
 	[JsonPropertyName("events")] public OpenerEventsConfig Events { get; set; } = new();
