@@ -49,6 +49,42 @@ public class CandidateScorerRationaleTests
 	}
 
 	[Fact]
+	public void BuildRationaleRendersExpectedMoveBoundsNextToBreakevens()
+	{
+		var proposal = new OpenProposal(
+			Ticker: "XYZ",
+			StructureKind: OpenStructureKind.LongCalendar,
+			Legs: new[]
+			{
+				new ProposalLeg("buy", "XYZ   260619C00025000", 1),
+				new ProposalLeg("sell", "XYZ   260515C00025000", 1)
+			},
+			Qty: 1,
+			DebitOrCreditPerContract: -74.00m,
+			MaxProfitPerContract: 36.91m,
+			MaxLossPerContract: -74.00m,
+			CapitalAtRiskPerContract: 74.00m,
+			Breakevens: new[] { 24.66m, 26.49m },
+			ProbabilityOfProfit: 0.511m,
+			ExpectedValuePerContract: 7.62m,
+			DaysToTarget: 4,
+			RawScore: 0.025756m,
+			BiasAdjustedScore: 0.010411m,
+			DirectionalFit: 0,
+			Rationale: "",
+			Fingerprint: "fp",
+			PremiumRatio: 3.06m,
+			ExpectedMoveLower: 23.50m,
+			ExpectedMoveUpper: 26.50m,
+			FinalScore: 0.010723m);
+
+		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
+		var firstLine = rationale.Split('\n')[0];
+
+		Assert.Contains("BE $24.66/26.49, EM $23.50/26.50, POP", firstLine);
+	}
+
+	[Fact]
 	public void BuildRationaleLabelsRepresentativeIvAndUnderlyingHvExplicitly()
 	{
 		var proposal = new OpenProposal(
