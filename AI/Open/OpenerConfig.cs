@@ -162,20 +162,6 @@ internal sealed class OpenerLongCallPutConfig
 /// </summary>
 internal sealed class OpenerLiquidityConfig
 {
-	/// <summary>Reject any leg whose bid/ask spread strictly exceeds this fraction of mid AND whose
-	/// absolute spread exceeds <see cref="MaxAbsoluteSpread"/>. Default 0.50 = 50%; extremely wide
-	/// structural quotes that mid-pricing math can never compensate for. Set to 1.0 to effectively
-	/// disable the percentage gate. The absolute escape hatch waives this for penny-priced wings
-	/// (e.g. $0.01/$0.02) where the 50% looks "wide" but the actual friction is 1 cent.</summary>
-	[JsonPropertyName("maxBidAskSpreadPct")] public decimal MaxBidAskSpreadPct { get; set; } = 0.50m;
-
-	/// <summary>Absolute spread floor (in dollars per share) for the spread gate. A leg with bid/ask
-	/// spread no wider than this value passes the spread check even if the relative spread blows past
-	/// <see cref="MaxBidAskSpreadPct"/>. Default $0.10; a 10-cent absolute spread is $10/contract of
-	/// slippage, which is acceptable on cheap credit-spread wings ($0.01–0.20 mid) where 50% of mid
-	/// would over-reject. Set to 0 to disable the escape hatch.</summary>
-	[JsonPropertyName("maxAbsoluteSpread")] public decimal MaxAbsoluteSpread { get; set; } = 0.10m;
-
 	/// <summary>Reject any candidate whose worst leg has open interest strictly less than this. Default
 	/// 5 contracts; below that, exits routinely walk multiple levels of the book. Set to 0 to disable
 	/// the OI gate.</summary>

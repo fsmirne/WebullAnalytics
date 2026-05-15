@@ -305,10 +305,11 @@ internal static class CandidateScorer
 		return Math.Clamp(factor, 0.01m, 1.25m);
 	}
 
-	/// <summary>Hard-filter gate: reject the candidate when any leg fails the spread or OI checks.
-	/// Each per-leg check has an absolute escape hatch so the relative thresholds don't over-reject
-	/// penny-priced wings (where a 1¢ absolute spread reads as 67% of mid) or actively-traded strikes
-	/// on chains where one dominant strike dwarfs every neighbor (where 6k OI nearby reads as 12% of
+	/// <summary>Hard-filter gate: reject the candidate when any leg fails the OI checks. Spread is
+	/// no longer a hard gate (single dominant wide quote was wiping entire chains on lightly-traded
+	/// names); it still penalizes survivors through the <c>liq</c> score factor. The relative-OI
+	/// check has an absolute escape hatch so it doesn't over-reject actively-traded strikes on
+	/// chains where one dominant strike dwarfs every neighbor (where 6k OI nearby reads as 12% of
 	/// the 50k-OI max). Returns true when no leg fails (or when liquidity stats can't be computed —
 	/// defer to downstream scoring rather than discard silently).</summary>
 	public static bool PassesLiquidityGate(IEnumerable<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, OpenerLiquidityConfig cfg, decimal? spot = null)
@@ -325,19 +326,6 @@ internal static class CandidateScorer
 		foreach (var leg in legs)
 		{
 			if (!quotes.TryGetValue(leg.Symbol, out var q)) continue;
-
-			// Spread check: leg fails only if BOTH relative and absolute thresholds are exceeded.
-			if (q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m)
-			{
-				var absSpread = q.Ask.Value - q.Bid.Value;
-				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-				if (mid > 0m)
-				{
-					var relSpread = absSpread / mid;
-					if (relSpread > cfg.MaxBidAskSpreadPct && absSpread > cfg.MaxAbsoluteSpread)
-						failures.Add($"{leg.Symbol} spread {relSpread:P0}>{cfg.MaxBidAskSpreadPct:P0} (abs ${absSpread:F2}>${cfg.MaxAbsoluteSpread:F2})");
-				}
-			}
 
 			var legLiq = EffectiveLiquidity(q);
 			if (legLiq.HasValue && legLiq.Value < cfg.MinOpenInterest)
