@@ -30,6 +30,7 @@ internal readonly record struct RiskDiagnosticFacts(
 	decimal? MarketSentimentScore = null,
 	string? MarketSentimentRating = null,
 	decimal? MarketSentimentDelta1Week = null,
+	decimal? JunkBondDemandScore = null,
 	DateTime? AsOf = null,
 	DateTime? NextEarningsDate = null,
 	string? EarningsTime = null,
