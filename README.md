@@ -944,7 +944,7 @@ These metrics are sourced from the Webull option chain API and are not available
 
 The risk diagnostic is the structured snapshot rendered by `wa analyze risk`, `wa analyze position`, and the AI pipelines (`wa ai scan`, `wa ai watch`, `wa ai replay`) for every management proposal and opening idea. It is a single Spectre panel titled **Risk diagnostic** that combines: a fixed set of structural / pricing / Greek facts, an opener-style score with the multiplicative factor breakdown, optional probe rows (per-leg quotes, delta-band gate, broker margin), and the list of rule hits that fired against the structure.
 
-The diagnostic is built by `RiskDiagnosticBuilder.Build` from the legs, current spot, an IV resolver, and an optional `TrendSnapshot`. Twelve rules are evaluated unconditionally — only the ones that match attach as `Rules fired` lines. The same record is appended to `data/analyze-risk.jsonl` (for `analyze risk`) or `data/analyze-position.jsonl` (for `analyze position`) so historical diagnostics can be re-analyzed later.
+The diagnostic is built by `RiskDiagnosticBuilder.Build` from the legs, current spot, an IV resolver, and an optional `TrendSnapshot`. Sixteen rules are evaluated unconditionally — only the ones that match attach as `Rules fired` lines. The same record is appended to `data/analyze-risk.jsonl` (for `analyze risk`) or `data/analyze-position.jsonl` (for `analyze position`) so historical diagnostics can be re-analyzed later.
 
 ### Panel rows
 
@@ -1290,7 +1290,7 @@ The theta factor is the last multiplicand in the factor chain. It adds up to a +
 
 ### Risk rules (the `Rules fired` block)
 
-Thirteen rules run unconditionally against `RiskDiagnosticFacts`; only those that match attach to the diagnostic. Rules are informational — they do *not* change the score. They surface concerns or geometry observations a human reviewer should know about before acting on the structure.
+Sixteen rules run unconditionally against `RiskDiagnosticFacts`; only those that match attach to the diagnostic. Rules are informational — they do *not* change the score. They surface concerns or geometry observations a human reviewer should know about before acting on the structure.
 
 | Rule ID | Triggers when | What it tells you |
 |---|---|---|
@@ -1306,7 +1306,10 @@ Thirteen rules run unconditionally against `RiskDiagnosticFacts`; only those tha
 | `high_realized_vol` | ATR(14) % > 4% of spot | Underlying is moving more than usual — position is exposed to larger-than-typical adverse swings. |
 | `wide_spread` | Worst leg has bid/ask spread > 25% of mid | Exit cost is dominated by liquidity friction, not fair value. Mid quotes are not transactable; closing the structure walks the book against you. |
 | `thin_open_interest` | Worst-leg OI < 50 contracts | Thin OI signals poor market-maker engagement — quotes are wide, fills walk the book, exiting a multi-contract position can move the price against you. |
+| `sub_grid_strike` | Worst leg's effective liquidity (`max(OI, intraday volume)`) is below 25% of the max among same-expiry strikes within ±10% of spot | The strike exists in the chain but activity clusters on the round-number neighbors — e.g., a $0.50 slot next to a dominant $1.00 grid. Folding volume in keeps a recently-active sub-grid strike from being punished as harshly as a truly dead one. Different signal from `thin_open_interest`: a sub-grid strike can clear the absolute OI floor yet still be the wrong place to put a leg. |
+| `market_sentiment_extreme` | CNN F&G composite ≥75 (extreme greed) aligned with a bullish position, ≤24 (extreme fear) aligned with a bearish position, **or** the 1-week composite delta is ≥30 points in either direction (regime change) | Flags crowded-side alignment — contrarian mean-reversion risk on a 1–2 week horizon — or a fast macro regime shift that may have invalidated the vol/momentum assumptions baked into the score. Macro overlay; single-name catalysts can dominate. Suppressed for contrarian-aligned positions. |
 | `earnings_proximity` | Next earnings within 14 days of as-of, or next ex-dividend within 14 days when the structure has a short call leg | Surfaces scheduled catalysts the trader should weigh before submitting. Earnings risk: pre-print IV spike and the post-print gap routinely overrun the model's log-normal assumption. Ex-div risk on short calls: early exercise to capture the dividend is rational on ITM strikes. Pure information — the score isn't changed. The earnings/ex-div *veto* (next section) handles the hard rejection path. |
+| `credit_divergence` | F&G composite and its `junk_bond_demand` sub-score sit on opposite sides of neutral with ≥30-pt absolute spread, **and** position bias is on the side facing mean-reversion (greed-composite + fear-credit vs. bullish/neutral, or mirror image vs. bearish/neutral) | Credit markets are pricing tail risk the equity-driven composite is masking (or recovering ahead of equities, mirror case). HY-IG spreads historically lead equity drawdowns / reversals by 1–3 weeks at major turning points (2007, 2018, 2020). Macro overlay — single-name catalysts can dominate. Suppressed for contrarian-aligned positions that already benefit from the resolution. |
 
 Each fired rule renders as a colored bullet with its ID and an interpolated message that includes the actual measured values. The same `Inputs` dictionary is serialized to the JSONL log, making historical rule-fires queryable with `jq`.
 
