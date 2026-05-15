@@ -1036,7 +1036,7 @@ These rows appear when `RiskDiagnosticProbe` is attached — which is always for
 | `Enum delta` | Two-leg short call/put vertical only | Absolute Black-Scholes delta of the short leg vs the configured `opener.structures.shortVertical.shortDeltaMin/Max` band. PASS = inside the band; FAIL = outside. The opener pipeline uses this gate to filter verticals upstream. |
 | `Long quote / Short quote / Leg N quote` | Always when quotes exist | Per-leg `bid=… ask=… mid=… iv=… hv=… iv5=… oi=… vol=… sym=…`. `iv`/`hv`/`iv5` are populated only by the Webull source; Yahoo leaves them null. |
 | `Margin` | Always when an opener-style score exists | Broker margin per contract and total. Short verticals and iron spreads collateralize full capital-at-risk. Standard calendars and covered diagonals show `$0` (the debit is cash, not collateral). Inverted diagonals charge `(strike_gap + debit) × 100` per contract. |
-| `Rationale` | Always when an opener-style score exists | Single-line trade summary: side ($credit/$debit), max profit / max loss, R/R ratio, premium ratio, break-evens, POP, EV. |
+| `Rationale` | Always when an opener-style score exists | Single-line trade summary: side ($credit/$debit), max profit / max loss, R/R ratio, premium ratio, break-evens, one-sigma expected-move bounds, POP, EV. |
 | `Indicators` | When max-pain, stat-arb, sentiment, etc. factors fired | Free-text breakdown: representative IV / HV richness with the position's net vega (`ν +X.XX/IV pt`), max-pain target, market-vs-theoretical edge per share, F&G rating. These feed the `vol`, `pain`, `arb`, and `sentiment` factors below. |
 | `Score` | Always when an opener-style score exists | The score chain — `raw → tech-adjusted [bias tag] → final` — collapsed to a single line. See **Score chain** below for what each stage means. |
 | `Factors` | Always when an opener-style score exists | The full multiplicative chain from *tech-adjusted* to *final*: `tech-adjusted × pop X × scale X × setup X × runway X × be-room X × em-cred X × iv-rv X × bal X × liq X × vol X × pain X × gex X × assign X × arb X × sentiment X × theta factor X (θ/day on $risk) = final`. Only factors that apply to the structure are shown; long chains wrap to a second balanced line under the `Factors:` label. |
@@ -1044,7 +1044,7 @@ These rows appear when `RiskDiagnosticProbe` is attached — which is always for
 ### Reading the Rationale line
 
 ```
-Rationale: debit $92.00, maxProfit $408.00, maxLoss $92.00, R/R 4.43, prem 1.00x, BE $24.92, POP 38.0%, EV $60.92 (real $42.16, −$4.00 fric)
+Rationale: debit $92.00, maxProfit $408.00, maxLoss $92.00, R/R 4.43, prem 1.00x, BE $24.92, EM $21.23/26.77, POP 38.0%, EV $60.92 (real $42.16, −$4.00 fric)
 ```
 
 Every dollar figure is **per contract** (already multiplied by the 100-share multiplier). Quote conventions in the option chain are usually per share; the diagnostic converts everything to per-contract so it lines up with margin, EV, and ranking math. The trailing `(real $X.XX, −$Y.YY fric)` annotation surfaces the realized-expectancy adjustment — `real` is the EV the scorer actually used (managed-exit clamped + slippage subtracted), `fric` is the friction component alone. See **Realized expectancy** below for how the two pieces compose.
@@ -1105,6 +1105,17 @@ The underlying price(s) where P&L crosses zero at the target evaluation date.
 - **Calendars / diagonals**: two break-evens computed by bisection on the short-expiry P&L curve (long leg is BS-priced at residual time, short leg is intrinsic). Shown as `BE $X.XX/$Y.YY` — lower / upper bound of the profitable range.
 
 Compare BE to current spot to read cushion at a glance: if spot is $25.00 and `BE $24.92`, you have $0.08/share of room before the trade enters the loss zone.
+
+#### `EM` — one-sigma expected-move bounds at the target expiry
+
+```
+EM_lower = spot − spot × IV × √(tradingDays/252)
+EM_upper = spot + spot × IV × √(tradingDays/252)
+```
+
+The price envelope the option chain implies for the holding period at one standard deviation. Trading-day denominator (Mon–Fri, no US-holiday adjustment) matches the same convention used by `be-room` and `em-cred` so the rendered range lines up with what those factors evaluated against. Shown as `EM $X.XX/$Y.YY` next to `BE` whenever IV and DTE are available — every structure prints it; for credit trades this is the cushion the `em-cred` factor scores against, for debit trades it's the move you need to clear the break-even.
+
+Read it in combination with `BE`: if `BE $24.92` and `EM $21.23/26.77`, the lower-σ point ($21.23) is well outside the break-even — under the IV-implied distribution the move needed to clear BE is well within one σ. Conversely, if BE sits *outside* the EM band, the trade is asking for more than a one-sigma move to land in the money.
 
 #### `POP` — probability of profit
 
