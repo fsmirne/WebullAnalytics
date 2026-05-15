@@ -40,6 +40,8 @@
 		"gexWeight": 0.30,
 		"statArbWeight": 0.15,
 		"sentimentWeight": 0.15,
+		"expectedMoveCreditWeight": 0.20,
+		"ivRealizedPremiumWeight": 0.15,
 		"liquidity": {
 			"maxBidAskSpreadPct": 0.50,
 			"maxAbsoluteSpread": 0.10,
