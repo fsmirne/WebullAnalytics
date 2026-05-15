@@ -25,6 +25,7 @@ internal static class RiskDiagnosticBuilder
 		new ThinOpenInterestRule(),
 		new SubGridStrikeRule(),
 		new MarketSentimentExtremeRule(),
+		new CreditDivergenceRule(),
 		new EarningsProximityRule(),
 	};
 
@@ -148,6 +149,7 @@ internal static class RiskDiagnosticBuilder
 		var (worstLegSpreadPct, minOpenInterest, minRelativeOi) = ComputeLiquidityStats(legs, quotes, spot);
 
 		var hasShortCallLeg = shortLegs.Any(l => l.Parsed.CallPut == "C");
+		var junkBondDemandScore = sentiment?.Components.FirstOrDefault(c => c.Key == "junk_bond_demand")?.Score;
 		var facts = new RiskDiagnosticFacts(
 			StructureLabel: structureLabel,
 			DirectionalBias: directionalBias,
@@ -176,6 +178,7 @@ internal static class RiskDiagnosticBuilder
 			MarketSentimentScore: sentiment?.Score,
 			MarketSentimentRating: sentiment?.Rating,
 			MarketSentimentDelta1Week: sentiment?.Delta1Week,
+			JunkBondDemandScore: junkBondDemandScore,
 			AsOf: asOf,
 			NextEarningsDate: events?.NextEarningsDate,
 			EarningsTime: events?.EarningsTime,
