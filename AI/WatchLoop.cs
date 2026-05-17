@@ -84,15 +84,16 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		WatchAutoExecutor? autoExecutor = config.Watch.AutoExecute.Enabled ? new WatchAutoExecutor(config.Watch.AutoExecute, account) : null;
 		WatchOpenerAutoExecutor? openerExecutor = config.Watch.OpenerAutoExecute.Enabled ? new WatchOpenerAutoExecutor(config.Watch.OpenerAutoExecute, account) : null;
 
+		var priceCache = new Replay.HistoricalPriceCache();
+
 		using var sink = new ProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 		OpenProposalSink? openSink = null;
 		OpenCandidateEvaluator? openEvaluator = null;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
 			openSink = new OpenProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
-			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing);
+			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache);
 		}
-		var priceCache = new Replay.HistoricalPriceCache();
 
 		AnsiConsole.MarkupLine($"[bold]ai watch[/] tickers={string.Join(",", config.Tickers)} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss}");
 

@@ -55,7 +55,16 @@ internal sealed class BacktestIVProvider
 	public async Task<decimal?> GetIVAsync(string ticker, DateTime asOf, decimal strike, decimal spot, string callPut, CancellationToken cancellation)
 	{
 		var atm = await GetAtmIVAsync(ticker, asOf, cancellation);
-		if (!atm.HasValue || atm.Value <= 0m || spot <= 0m) return atm;
+		if (!atm.HasValue) return null;
+		return ApplySmile(atm.Value, ticker, strike, spot);
+	}
+
+	/// <summary>Synchronous smile application. Splits the async ATM-IV lookup from the per-strike math
+	/// so a single ATM read per (ticker, asOf) can be amortized across thousands of per-strike pricings
+	/// in parallel — see <see cref="BacktestQuoteSource"/>. Pure function; safe to call concurrently.</summary>
+	public decimal? ApplySmile(decimal atm, string ticker, decimal strike, decimal spot)
+	{
+		if (atm <= 0m || spot <= 0m) return atm;
 		if (!_smileEnabled) return atm;
 
 		var (linearSkew, curvature) = GetSmileParams(ticker);
@@ -63,7 +72,7 @@ internal sealed class BacktestIVProvider
 		var absM = m < 0m ? -m : m;
 		var rawSmile = linearSkew * m + curvature * absM;
 		var smile = Math.Clamp(rawSmile, SmileFloor, SmileCeiling);
-		var iv = atm.Value * (1m + smile);
+		var iv = atm * (1m + smile);
 		// Final clamp: IV can't be negative, and don't let extreme strikes blow up past 300%.
 		return Math.Clamp(iv, 0.05m, 3m);
 	}
