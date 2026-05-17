@@ -7,8 +7,9 @@ internal static class BacktestSummaryRenderer
 	public static void Render(BacktestResult result, bool showFills)
 	{
 		AnsiConsole.MarkupLine("[yellow bold]Backtest assumptions:[/]");
-		AnsiConsole.MarkupLine("[dim]  • Quotes are Black-Scholes synthesized: SPY uses VIX as ATM IV; other tickers use 30-day realized HV × premium.[/]");
-		AnsiConsole.MarkupLine("[dim]  • Fills are end-of-day close mids (no intraday triggering, no next-day-open fills yet).[/]");
+		AnsiConsole.MarkupLine("[dim]  • Quotes are Black-Scholes synthesized: SPX-family (SPY/SPX/SPXW/XSP) uses VIX as ATM IV; other tickers use 30-day realized HV × premium.[/]");
+		AnsiConsole.MarkupLine("[dim]  • Opens/closes/rolls price off the day's bar.Open (stamped 09:30 ET); expirations settle at bar.Close intrinsic (stamped 16:00 ET).[/]");
+		AnsiConsole.MarkupLine("[dim]  • No intraday rule triggering: take-profit / stop-loss can't fire between 09:30 and 16:00 of the same day.[/]");
 		AnsiConsole.MarkupLine("[dim]  • Assignment / early exercise not modeled — expiring positions settle at intrinsic.[/]");
 		AnsiConsole.WriteLine();
 
@@ -22,7 +23,7 @@ internal static class BacktestSummaryRenderer
 		if (result.Fills.Count == 0) { AnsiConsole.MarkupLine("[dim]No fills.[/]"); return; }
 
 		var table = new Table().Border(TableBorder.Rounded).Title("[bold]Fill ledger[/]");
-		table.AddColumn("Date");
+		table.AddColumn("When (ET)");
 		table.AddColumn("Ticker");
 		table.AddColumn("Kind");
 		table.AddColumn("Strategy");
@@ -42,7 +43,7 @@ internal static class BacktestSummaryRenderer
 			var cashColor = f.NetCashFlow >= 0m ? "green" : "red";
 
 			table.AddRow(
-				f.Date.ToString("yyyy-MM-dd"),
+				f.Date.ToString("yyyy-MM-dd HH:mm"),
 				Markup.Escape(f.Ticker),
 				f.Kind.ToString(),
 				Markup.Escape(f.StrategyKind),

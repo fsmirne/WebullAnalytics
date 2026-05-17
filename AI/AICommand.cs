@@ -338,8 +338,8 @@ internal sealed class AIBacktestSettings : AISubcommandSettings
 	public decimal StartingCash { get; set; } = 25000m;
 
 	[CommandOption("--fee-per-contract <AMOUNT>")]
-	[Description("Per-leg-contract commission. Default: 0.05 (Webull ETFs/equities). Use 0.65 for true index options (SPX/NDX/RUT).")]
-	public decimal FeePerContract { get; set; } = 0.05m;
+	[Description("Per-leg-contract commission. Defaults from ticker: $1.14 for cash-settled index options (SPX/SPXW/NDX/XSP/RUT), $0.05 for everything else (Webull ETFs/equities).")]
+	public decimal? FeePerContract { get; set; }
 
 	[CommandOption("--iv-hv-premium <RATIO>")]
 	[Description("IV/HV multiplier for non-SPY tickers (SPY uses real VIX). Default: 1.15.")]
@@ -366,7 +366,7 @@ internal sealed class AIBacktestSettings : AISubcommandSettings
 		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--until: must be YYYY-MM-DD, got '{Until}'");
 		if (StartingCash <= 0m) return ValidationResult.Error($"--starting-cash: must be > 0, got {StartingCash}");
-		if (FeePerContract < 0m) return ValidationResult.Error($"--fee-per-contract: must be ≥ 0, got {FeePerContract}");
+		if (FeePerContract.HasValue && FeePerContract.Value < 0m) return ValidationResult.Error($"--fee-per-contract: must be ≥ 0, got {FeePerContract}");
 		if (IvHvPremium <= 0m) return ValidationResult.Error($"--iv-hv-premium: must be > 0, got {IvHvPremium}");
 		if (Smile != "off" && Smile != "static")
 			return ValidationResult.Error($"--smile: must be 'off' or 'static', got '{Smile}'");
@@ -416,11 +416,12 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var ivProvider = new Backtest.BacktestIVProvider(vix, bars, ivHvPremium: settings.IvHvPremium, smileEnabled: settings.Smile == "static");
 		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036);
 
-		var book = new Backtest.SimulatedBook(settings.StartingCash, settings.FeePerContract, config.Opener.RealizedExpectancy);
+		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
+		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
 		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep);
 
-		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${settings.FeePerContract}/contract | smile={settings.Smile}");
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}");
 		AnsiConsole.WriteLine();
 
 		var result = await runner.RunAsync(since, until, cancellation);

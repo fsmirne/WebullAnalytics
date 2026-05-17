@@ -13,7 +13,13 @@ public enum OpenStructureKind
 	ShortPutVertical,
 	ShortCallVertical,
 	LongCall,
-	LongPut
+	LongPut,
+	// Debit (long) verticals: long leg near/ATM, short leg further OTM. Directional bet with both
+	// sides bounded — cheaper than naked long premium, capped upside but capped loss too. Fills the
+	// gap between LongCall/LongPut (uncapped upside, full premium at risk) and ShortVertical
+	// (credit collected, large max loss if breached).
+	LongCallVertical,
+	LongPutVertical
 }
 
 /// <summary>

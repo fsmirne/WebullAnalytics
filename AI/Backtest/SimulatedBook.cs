@@ -35,6 +35,24 @@ internal sealed class SimulatedBook
 {
 	private const decimal Multiplier = 100m;
 
+	// Webull's per-contract commission schedule: cash-settled index options (SPX/SPXW/NDX/XSP/RUT)
+	// carry a $1.14/contract fee that bundles the index-options surcharge with ORF + clearing;
+	// equity and ETF options are effectively $0.05 (regulatory fees only after the $0 base
+	// commission). Default the backtest fee from the ticker so a user running
+	// `wa ai backtest SPXW` doesn't silently get equity pricing.
+	public const decimal IndexOptionFeePerContract = 1.14m;
+	public const decimal EquityOptionFeePerContract = 0.05m;
+
+	private static readonly HashSet<string> IndexOptionTickers = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"SPX", "SPXW", "NDX", "XSP", "RUT", "DJX", "VIX"
+	};
+
+	/// <summary>Per-leg-contract commission default for <paramref name="ticker"/>. Cash-settled index
+	/// options charge the higher $1.14/contract; equity/ETF options charge the lower $0.05/contract.</summary>
+	public static decimal DefaultFeePerContractFor(string ticker) =>
+		IndexOptionTickers.Contains(ticker) ? IndexOptionFeePerContract : EquityOptionFeePerContract;
+
 	private readonly Dictionary<string, OpenPosition> _positions = new(StringComparer.OrdinalIgnoreCase);
 	private readonly Dictionary<string, decimal> _initialDebitPerContract = new(StringComparer.OrdinalIgnoreCase);
 	private readonly Dictionary<string, decimal> _adjustedDebitPerContract = new(StringComparer.OrdinalIgnoreCase);
@@ -208,13 +226,16 @@ internal sealed class SimulatedBook
 			}
 		}
 
+		// Expirations don't incur broker commissions: cash-settled index options (SPX/SPXW/XSP/NDX)
+		// settle automatically with no fee, and OTM equity options simply expire worthless. The
+		// small assignment fee on ITM equity options is broker-specific and a rounding error
+		// relative to the trade P&L — ignore it here to keep the model uniformly fee-free on expiry.
 		var cashFlow = settlementPerContract * Multiplier * pos.Quantity;
-		var fees = Math.Abs(pos.Quantity) * settlementLegs.Count * _feePerContract;
-		Cash += cashFlow - fees;
+		Cash += cashFlow;
 
 		var lineageId = _lineageByKey[positionKey];
 		_fills.Add(new BacktestFill(date, positionKey, pos.Ticker, pos.StrategyKind, pos.Quantity, BacktestFillKind.Expire,
-			LineageId: lineageId, Legs: settlementLegs, NetCashFlow: cashFlow, Fees: fees, RuleName: null));
+			LineageId: lineageId, Legs: settlementLegs, NetCashFlow: cashFlow, Fees: 0m, RuleName: null));
 
 		_positions.Remove(positionKey);
 		_initialDebitPerContract.Remove(positionKey);

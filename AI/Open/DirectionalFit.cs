@@ -9,8 +9,10 @@ internal static class DirectionalFit
 	public static int SignFor(OpenStructureKind kind) => kind switch
 	{
 		OpenStructureKind.LongCall => 1,
+		OpenStructureKind.LongCallVertical => 1,
 		OpenStructureKind.ShortPutVertical => 1,
 		OpenStructureKind.LongPut => -1,
+		OpenStructureKind.LongPutVertical => -1,
 		OpenStructureKind.ShortCallVertical => -1,
 		OpenStructureKind.LongCalendar => 0,
 		OpenStructureKind.DoubleCalendar => 0,

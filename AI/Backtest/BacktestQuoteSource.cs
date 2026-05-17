@@ -23,10 +23,18 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	private const decimal SingleStockHalfSpreadFloor = 0.01m;
 	private const decimal SingleStockHalfSpreadPct = 0.05m;
 
+	// Penny-pilot ETFs + cash-settled index options (SPX/SPXW/XSP/NDX). Index options aren't formally
+	// "penny pilot" but they trade in tight $0.05 ticks under $3 / $0.10 above, which is closer to the
+	// SPY/QQQ regime than to single-stock single-name option spreads.
 	private static readonly HashSet<string> PennyPilotIndexEtfs = new(StringComparer.OrdinalIgnoreCase)
 	{
-		"SPY", "QQQ", "IWM", "DIA"
+		"SPY", "QQQ", "IWM", "DIA", "SPX", "SPXW", "XSP", "NDX"
 	};
+
+	// One trading day = 6.5h. Used to give 0DTE a non-zero time component so the open captures
+	// a full day's theta before the same-step expiry settles at intrinsic. Without this, BlackScholes
+	// returns intrinsic at both ends and the position can never collect time premium.
+	private const double ZeroDteTimeYears = 6.5 / 24.0 / 365.0;
 
 	private readonly HistoricalBarCache _bars;
 	private readonly BacktestIVProvider _iv;
@@ -44,10 +52,15 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 
+		// Use the day's OPEN as the spot price the opener sees: the daily simulator step is
+		// conceptually "morning of day X" — strikes get picked relative to the open, the position
+		// holds across the session, and SettleExpirationsAsync settles 0DTE expiries at bar.Close.
+		// Without this, strike selection and settlement both use Close, so a delta-X% OTM strike
+		// is OTM at picking-time AND at settle-time, producing an unrealistic 100%-win-rate backtest.
 		foreach (var ticker in tickers)
 		{
 			var bar = await _bars.GetBarAsync(ticker, asOf.Date, cancellation);
-			if (bar != null) underlyings[ticker] = bar.Close;
+			if (bar != null) underlyings[ticker] = bar.Open;
 		}
 
 		foreach (var sym in optionSymbols)
@@ -59,7 +72,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			{
 				var bar = await _bars.GetBarAsync(parsed.Root, asOf.Date, cancellation);
 				if (bar == null) continue;
-				spot = bar.Close;
+				spot = bar.Open;
 				underlyings[parsed.Root] = spot;
 			}
 
@@ -67,8 +80,11 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			decimal price;
 			if (iv.HasValue)
 			{
-				var dte = Math.Max(1, (parsed.ExpiryDate.Date - asOf.Date).Days);
-				var timeYears = dte / 365.0;
+				var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
+				// 0DTE: at the daily step we're conceptually at the open of the trading day, not at 15:45 —
+				// price as if a full session of theta remains. Settlement (Expire) uses intrinsic so the
+				// time component is collected, not double-counted.
+				var timeYears = dte <= 0 ? ZeroDteTimeYears : dte / 365.0;
 				price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv.Value, parsed.CallPut);
 			}
 			else
