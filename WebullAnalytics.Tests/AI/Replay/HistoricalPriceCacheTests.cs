@@ -30,7 +30,10 @@ public class HistoricalPriceCacheTests
 				},
 				utcNow: () => NyMidnight(2026, 4, 25));
 
-			var closes = await cache.GetRecentClosesAsync("GME", 4, new DateTime(2026, 4, 24), CancellationToken.None);
+			// asOf 04-25: cache now applies a strict-less-than filter to prevent backtest lookahead,
+			// so callers asking "as of day X" get closes from days strictly before X. To assert that
+			// 04-24's close is returned we must pass 04-25 as the as-of date.
+			var closes = await cache.GetRecentClosesAsync("GME", 4, new DateTime(2026, 4, 25), CancellationToken.None);
 
 			Assert.Equal(new decimal[] { 24.10m, 24.30m, 24.55m, 25.10m }, closes);
 			Assert.Single(calls);
