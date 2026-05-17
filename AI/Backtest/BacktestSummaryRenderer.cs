@@ -127,7 +127,21 @@ internal static class BacktestSummaryRenderer
 		table.AddRow("[bold]Unrealized P&L[/] (open lifecycles)", $"[{(unrealized >= 0 ? "green" : "red")}]${unrealized:N2} ({unrealizedPct:F2}%)[/]");
 		table.AddRow("[bold]Total P&L[/]", $"[{(total >= 0 ? "green" : "red")}]${total:N2} ({totalPct:F2}%)[/]");
 		table.AddRow("Total fees", $"${result.TotalFees:N2}");
-		table.AddRow("Peak equity", $"${result.PeakEquity:N2}");
+
+		// Peak/trough are read off the equity curve so they carry their date; falling back to PeakEquity
+		// from the result keeps the row populated when the curve is empty (zero-step runs).
+		if (result.EquityCurve.Count > 0)
+		{
+			var peak = result.EquityCurve.Aggregate((a, b) => b.Equity > a.Equity ? b : a);
+			var trough = result.EquityCurve.Aggregate((a, b) => b.Equity < a.Equity ? b : a);
+			table.AddRow("Peak equity", $"${peak.Equity:N2} ({peak.Date:yyyy-MM-dd})");
+			var troughColor = trough.Equity < result.StartingCash ? "red" : "green";
+			table.AddRow("Trough equity", $"[{troughColor}]${trough.Equity:N2} ({trough.Date:yyyy-MM-dd})[/]");
+		}
+		else
+		{
+			table.AddRow("Peak equity", $"${result.PeakEquity:N2}");
+		}
 		table.AddRow("Max drawdown", $"[red]${result.MaxDrawdown:N2} ({ddPct:F2}% of peak)[/]");
 		table.AddRow("Opens", result.OpenFills.ToString());
 		table.AddRow("Closes (rules)", result.CloseFills.ToString());
