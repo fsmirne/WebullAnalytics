@@ -32,15 +32,20 @@ internal static class BacktestSummaryRenderer
 		table.AddColumn(new TableColumn("Net/Ct").RightAligned());
 		table.AddColumn(new TableColumn("Total").RightAligned());
 		table.AddColumn(new TableColumn("Fees").RightAligned());
+		table.AddColumn(new TableColumn("Cash").RightAligned());
 		table.AddColumn("Rule");
 
+		var runningCash = result.StartingCash;
 		foreach (var f in result.Fills)
 		{
+			runningCash += f.NetCashFlow - f.Fees;
+
 			// Net per-contract (signed): positive = credit received, negative = debit paid.
 			var perContract = f.Qty != 0 ? f.NetCashFlow / f.Qty : 0m;
 			var perCtLabel = perContract >= 0m ? $"+${perContract:N2}" : $"-${-perContract:N2}";
 			var totalLabel = f.NetCashFlow >= 0m ? $"+${f.NetCashFlow:N2}" : $"-${-f.NetCashFlow:N2}";
 			var cashColor = f.NetCashFlow >= 0m ? "green" : "red";
+			var runningColor = runningCash >= result.StartingCash ? "green" : "red";
 
 			table.AddRow(
 				f.Date.ToString("yyyy-MM-dd HH:mm"),
@@ -52,6 +57,7 @@ internal static class BacktestSummaryRenderer
 				$"[{cashColor}]{perCtLabel}[/]",
 				$"[{cashColor}]{totalLabel}[/]",
 				$"${f.Fees:N2}",
+				$"[{runningColor}]${runningCash:N2}[/]",
 				Markup.Escape(f.RuleName ?? "—"));
 		}
 		AnsiConsole.Write(table);
