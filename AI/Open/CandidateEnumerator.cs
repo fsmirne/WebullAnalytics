@@ -39,16 +39,21 @@ internal static class CandidateEnumerator
 			foreach (var sk in EnumerateShortVerticals(ticker, spot, asOf, cfg, availableExpirations))
 				yield return sk;
 
+		if (cfg.Structures.LongVertical.Enabled)
+			foreach (var sk in EnumerateLongVerticals(ticker, spot, asOf, cfg, availableExpirations))
+				yield return sk;
+
 		if (cfg.Structures.LongCallPut.Enabled)
 			foreach (var sk in EnumerateLongCallPut(ticker, spot, asOf, cfg, availableExpirations))
 				yield return sk;
 	}
 
 	/// <summary>When the chain is known, take its real expirations within the DTE window; otherwise fall
-	/// back to the computed weekly Fridays in the same window.</summary>
-	private static IEnumerable<DateTime> WeeklyExpiriesInRange(IReadOnlySet<DateTime>? available, DateTime asOf, int minDte, int maxDte)
+	/// back to the ticker-aware computed-expiry enumerator (daily for SPX/SPY/QQQ/NDX/XSP/SPXW, Mon-Wed-Fri
+	/// for the mega-cap multi-weekly list, weekly Fridays for everyone else).</summary>
+	private static IEnumerable<DateTime> WeeklyExpiriesInRange(string ticker, IReadOnlySet<DateTime>? available, DateTime asOf, int minDte, int maxDte)
 	{
-		if (available == null) return OpenerExpiryHelpers.NextWeeklyExpiriesInRange(asOf, minDte, maxDte);
+		if (available == null) return OpenerExpiryHelpers.NextExpiriesForTicker(ticker, asOf, minDte, maxDte);
 		var start = asOf.Date.AddDays(minDte);
 		var end = asOf.Date.AddDays(maxDte);
 		return available.Where(d => d >= start && d <= end).OrderBy(d => d);
@@ -67,7 +72,7 @@ internal static class CandidateEnumerator
 
 	private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind, IReadOnlySet<DateTime>? availableExpirations)
 	{
-		var shortExps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
+		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
@@ -135,7 +140,7 @@ internal static class CandidateEnumerator
 	private static IEnumerable<CandidateSkeleton> EnumerateDoubleCalendars(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
 	{
 		var sCfg = cfg.Structures.DoubleCalendar;
-		var shortExps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
+		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
@@ -179,7 +184,7 @@ internal static class CandidateEnumerator
 	private static IEnumerable<CandidateSkeleton> EnumerateDoubleDiagonals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
 	{
 		var sCfg = cfg.Structures.DoubleDiagonal;
-		var shortExps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
+		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
@@ -230,7 +235,7 @@ internal static class CandidateEnumerator
 	private static IEnumerable<CandidateSkeleton> EnumerateIronButterflies(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
 	{
 		var sCfg = cfg.Structures.IronButterfly;
-		var exps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
+		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
 		var step = cfg.StrikeStepFor(ticker);
@@ -265,7 +270,7 @@ internal static class CandidateEnumerator
 	private static IEnumerable<CandidateSkeleton> EnumerateIronCondors(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
 	{
 		var sCfg = cfg.Structures.IronCondor;
-		var exps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
+		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
 		var iv = cfg.IvDefaultPct / 100m;
@@ -273,7 +278,7 @@ internal static class CandidateEnumerator
 
 		foreach (var exp in exps)
 		{
-			var years = Math.Max(1, (exp.Date - asOf.Date).Days) / 365.0;
+			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
 			var putShorts = StrikesBelowSpot(spot, step, count: 8)
 				.Where(shortStrike =>
 				{
@@ -328,7 +333,7 @@ internal static class CandidateEnumerator
 	private static IEnumerable<CandidateSkeleton> EnumerateShortVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
 	{
 		var sCfg = cfg.Structures.ShortVertical;
-		var exps = WeeklyExpiriesInRange(availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
+		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
 		var iv = cfg.IvDefaultPct / 100m;
@@ -336,7 +341,7 @@ internal static class CandidateEnumerator
 
 		foreach (var exp in exps)
 		{
-			var years = Math.Max(1, (exp.Date - asOf.Date).Days) / 365.0;
+			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
 
 			// Put credit side (bullish): short strike below spot.
 			foreach (var shortStrike in StrikesBelowSpot(spot, step, count: 8))
@@ -360,6 +365,54 @@ internal static class CandidateEnumerator
 				{
 					var longStrike = shortStrike + widthSteps * step;
 					yield return BuildVertical(ticker, OpenStructureKind.ShortCallVertical, exp, shortStrike, longStrike, "C");
+				}
+			}
+		}
+	}
+
+	/// <summary>Long (debit) vertical = bull call spread or bear put spread. Long leg sits near/ATM
+	/// (delta filter on the long leg), short leg <c>widthSteps × step</c> further OTM. Cheaper than
+	/// a naked long call/put (the short leg offsets premium) but caps the upside at <c>width − debit</c>.
+	/// Both sides bounded: max loss = debit paid, max profit = width − debit. Directional with
+	/// defined risk both ways.</summary>
+	private static IEnumerable<CandidateSkeleton> EnumerateLongVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	{
+		var sCfg = cfg.Structures.LongVertical;
+		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
+		if (exps.Count == 0) yield break;
+
+		var iv = cfg.IvDefaultPct / 100m;
+		var step = cfg.StrikeStepFor(ticker);
+
+		foreach (var exp in exps)
+		{
+			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
+
+			// Bull call spread (LongCallVertical): buy a near-ATM call, sell a further-OTM call.
+			// Filter long-leg by delta in [longDeltaMin, longDeltaMax]. Iterate strikes both above
+			// and below spot since delta-0.55 can be slightly ITM (strike below spot) and
+			// delta-0.30 can be OTM (strike above).
+			foreach (var longStrike in StrikesAroundSpot(spot, step, count: 8))
+			{
+				var longDelta = Math.Abs(OptionMath.Delta(spot, longStrike, years, OptionMath.RiskFreeRate, iv, "C"));
+				if (longDelta < sCfg.LongDeltaMin || longDelta > sCfg.LongDeltaMax) continue;
+				foreach (var widthSteps in sCfg.WidthSteps)
+				{
+					var shortStrike = longStrike + widthSteps * step;
+					yield return BuildVertical(ticker, OpenStructureKind.LongCallVertical, exp, shortStrike, longStrike, "C");
+				}
+			}
+
+			// Bear put spread (LongPutVertical): buy a near-ATM put, sell a further-OTM put.
+			foreach (var longStrike in StrikesAroundSpot(spot, step, count: 8))
+			{
+				var longDelta = Math.Abs(OptionMath.Delta(spot, longStrike, years, OptionMath.RiskFreeRate, iv, "P"));
+				if (longDelta < sCfg.LongDeltaMin || longDelta > sCfg.LongDeltaMax) continue;
+				foreach (var widthSteps in sCfg.WidthSteps)
+				{
+					var shortStrike = longStrike - widthSteps * step;
+					if (shortStrike <= 0m) continue;
+					yield return BuildVertical(ticker, OpenStructureKind.LongPutVertical, exp, shortStrike, longStrike, "P");
 				}
 			}
 		}
@@ -403,7 +456,10 @@ internal static class CandidateEnumerator
 	private static IEnumerable<CandidateSkeleton> EnumerateLongCallPut(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
 	{
 		var sCfg = cfg.Structures.LongCallPut;
-		var exps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).Take(2).ToList();
+		// Use the ticker-aware dispatch so daily-expiry tickers (SPX/SPXW/QQQ/etc.) can enumerate
+		// 0DTE long calls/puts. Monthly-only enumeration was correct when the structure was constrained
+		// to 21–60 DTE but blocks every shorter-term setup on tickers with daily chains.
+		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).Take(2).ToList();
 		if (exps.Count == 0) yield break;
 
 		var iv = cfg.IvDefaultPct / 100m;
@@ -411,7 +467,7 @@ internal static class CandidateEnumerator
 
 		foreach (var exp in exps)
 		{
-			var years = Math.Max(1, (exp.Date - asOf.Date).Days) / 365.0;
+			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
 
 			foreach (var callPut in new[] { "C", "P" })
 			{
