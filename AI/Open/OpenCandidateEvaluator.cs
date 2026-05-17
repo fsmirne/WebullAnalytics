@@ -423,7 +423,8 @@ internal sealed class OpenCandidateEvaluator
 				trend: trend,
 				quotes: mergedQuotes,
 				sentiment: diagnosticSentiment,
-				events: pTickerEvents);
+				events: pTickerEvents,
+				isTheoretical: _backtestMode);
 
 			var openerScore = (
 				bias: ctx.TechnicalSignals.TryGetValue(p.Ticker, out var bs) ? (bs?.Score ?? 0m) : 0m,

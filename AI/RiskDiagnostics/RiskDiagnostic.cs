@@ -35,7 +35,11 @@ internal sealed record RiskDiagnostic(
 	decimal? TheoreticalPremiumRatio = null,
 	decimal? MarketSentimentScore = null,
 	string? MarketSentimentRating = null,
-	decimal? MarketSentimentDelta1Week = null);
+	decimal? MarketSentimentDelta1Week = null,
+	// True when the quote source is Black-Scholes-synthesized rather than a live chain (backtest or
+	// `ai scan --theoretical`). The "Market*" fields in that case hold BS prices too, so the renderer
+	// shows a single "theoretical →" line instead of the misleading market-vs-theoretical comparison.
+	bool IsTheoretical = false);
 
 internal sealed record RiskDiagnosticProbe(
 	decimal? EnumDelta,
