@@ -26,6 +26,14 @@ internal sealed class BacktestRunner
 	private readonly HistoricalPriceCache _closeCache;
 	private readonly int _topNPerStep;
 
+	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
+	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET. Expirations
+	// settle at the day's close (bar.Close intrinsic), so they're stamped at 16:00 ET. Exposing real
+	// times on each fill makes the ledger directly verifiable against historical OHLC bars — pre-fix,
+	// every fill said 15:45 ET, which matched neither the open mid nor the close intrinsic actually used.
+	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
+	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
+
 	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep)
 	{
 		_config = config;
@@ -109,6 +117,11 @@ internal sealed class BacktestRunner
 				if (legFills == null) continue;
 				if (_book.Open(step, p.Ticker, p.StructureKind, legFills, p.Qty)) opened++;
 			}
+
+			// 0DTE: a position opened this step whose short leg expires today must settle today, not
+			// roll over to tomorrow and pick up the wrong bar. The second pass is a no-op when none
+			// of the opens are 0DTE.
+			await SettleExpirationsAsync(step, cancellation);
 
 			// Track equity curve at end-of-step: cash + MTM of open positions.
 			var mtm = await ComputeOpenMarkAsync(step, cancellation);
@@ -212,12 +225,15 @@ internal sealed class BacktestRunner
 			.Where(p => p.Legs.Any(l => l.Expiry.HasValue && l.Expiry.Value.Date <= step.Date))
 			.Select(p => p.Key)
 			.ToList();
+		// Stamp expirations at 16:00 ET — the bar.Close is what determines intrinsic, so the fill
+		// time should match the price source for ledger verification.
+		var settleTime = step.Date.Add(MarketCloseTime);
 		foreach (var key in expired)
 		{
 			if (!_book.OpenPositions.TryGetValue(key, out var pos)) continue;
 			var bar = await _bars.GetBarAsync(pos.Ticker, step.Date, cancellation);
 			if (bar == null) continue;
-			_book.Expire(step, key, bar.Close);
+			_book.Expire(settleTime, key, bar.Close);
 		}
 	}
 
@@ -268,7 +284,7 @@ internal sealed class BacktestRunner
 			// Skip weekends and NYSE holidays. Pricing the chain on a closed-market day yields zero MTM
 			// for every leg (no bar) which would mis-report drawdown as if positions had imploded.
 			if (MarketCalendar.IsOpen(d))
-				yield return d.AddHours(15).AddMinutes(45);
+				yield return d.Add(MarketOpenTime);
 			d = d.AddDays(1);
 		}
 	}

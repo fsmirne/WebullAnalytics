@@ -33,7 +33,13 @@ internal sealed class BacktestIVProvider
 	private const decimal SmileFloor = -0.30m;
 	private const decimal SmileCeiling = 0.50m;
 
-	private const string SpyTicker = "SPY";
+	// VIX is the 30-day implied vol of SPX options, so any ticker that tracks the S&P 500 — SPY (ETF),
+	// SPX (full-size index), SPXW (PM-settled weeklies), XSP (mini-SPX index) — should read IV from VIX
+	// directly rather than from realized vol.
+	private static readonly HashSet<string> VixDrivenTickers = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"SPY", "SPX", "SPXW", "XSP"
+	};
 	private const int HvLookbackDays = 30;
 
 	/// <param name="ivHvPremium">Multiplier applied to historical vol to approximate IV (non-SPY tickers). Default 1.15.</param>
@@ -64,17 +70,18 @@ internal sealed class BacktestIVProvider
 
 	private static (decimal linearSkew, decimal curvature) GetSmileParams(string ticker)
 	{
-		// SPY, QQQ, IWM track broad indices and exhibit the classic index smile (strong left skew, mild V).
-		if (string.Equals(ticker, SpyTicker, StringComparison.OrdinalIgnoreCase)
+		// SPX-family, plus the broad-index ETFs QQQ/IWM/NDX, exhibit the classic index smile.
+		if (VixDrivenTickers.Contains(ticker)
 			|| string.Equals(ticker, "QQQ", StringComparison.OrdinalIgnoreCase)
-			|| string.Equals(ticker, "IWM", StringComparison.OrdinalIgnoreCase))
+			|| string.Equals(ticker, "IWM", StringComparison.OrdinalIgnoreCase)
+			|| string.Equals(ticker, "NDX", StringComparison.OrdinalIgnoreCase))
 			return (IndexLinearSkew, IndexCurvature);
 		return (EquityLinearSkew, EquityCurvature);
 	}
 
 	internal async Task<decimal?> GetAtmIVAsync(string ticker, DateTime asOf, CancellationToken cancellation)
 	{
-		if (string.Equals(ticker, SpyTicker, StringComparison.OrdinalIgnoreCase))
+		if (VixDrivenTickers.Contains(ticker))
 		{
 			var vix = await _vix.GetVixAsync(asOf, cancellation);
 			if (vix.HasValue) return vix.Value / 100m;

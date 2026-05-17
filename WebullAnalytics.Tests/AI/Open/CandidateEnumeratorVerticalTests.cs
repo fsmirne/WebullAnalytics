@@ -84,6 +84,46 @@ public class CandidateEnumeratorVerticalTests
 	}
 
 	[Fact]
+	public void ZeroDteEnumeratesTodayForDailyExpiryTicker()
+	{
+		// IronButterfly is delta-free (body strikes are picked off the strike grid directly), so it's
+		// the right structure to verify daily-expiry enumeration without entangling the delta filter
+		// with the 0DTE fractional-day time component.
+		var cfg = Cfg();
+		cfg.Structures.ShortVertical.Enabled = false;
+		cfg.Structures.IronButterfly.Enabled = true;
+		cfg.Structures.IronButterfly.DteMin = 0;
+		cfg.Structures.IronButterfly.DteMax = 0;
+		cfg.Structures.IronButterfly.WingSteps = new() { 2 };
+
+		var asOf = new DateTime(2026, 4, 20); // Monday — SPY has a 0DTE expiry today
+		var skeletons = CandidateEnumerator.Enumerate("SPY", spot: 50m, asOf, cfg).ToList();
+		Assert.NotEmpty(skeletons);
+		Assert.All(skeletons, s =>
+		{
+			var leg = ParsingHelpers.ParseOptionSymbol(s.Legs[0].Symbol)!;
+			Assert.Equal(asOf.Date, leg.ExpiryDate.Date);
+		});
+	}
+
+	[Fact]
+	public void ZeroDteSkippedForWeeklyOnlyTicker()
+	{
+		var cfg = Cfg();
+		cfg.StrikeSteps["GME"] = 0.5m;
+		cfg.Structures.ShortVertical.Enabled = false;
+		cfg.Structures.IronButterfly.Enabled = true;
+		cfg.Structures.IronButterfly.DteMin = 0;
+		cfg.Structures.IronButterfly.DteMax = 0;
+		cfg.Structures.IronButterfly.WingSteps = new() { 2 };
+
+		// GME has only Friday weeklies — Monday with DTE=0 yields nothing.
+		var asOf = new DateTime(2026, 4, 20);
+		var skeletons = CandidateEnumerator.Enumerate("GME", spot: 50m, asOf, cfg).ToList();
+		Assert.Empty(skeletons);
+	}
+
+	[Fact]
 	public void IronButterflyUsesSharedBodyAndSymmetricWings()
 	{
 		var cfg = Cfg();
