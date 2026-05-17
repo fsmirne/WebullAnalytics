@@ -141,6 +141,9 @@ internal sealed class HistoricalVixCache
 	{
 		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(_utcNow(), NyTz);
 		var settled = nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
+		// VIX prints only on open NYSE sessions — weekend/holiday settled dates must roll back to
+		// the most recent trading day. Same fix as HistoricalBarCache.ClampToSettled.
+		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
 		return neededThrough.Date < settled ? neededThrough.Date : settled;
 	}
 

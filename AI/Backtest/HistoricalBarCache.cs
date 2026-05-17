@@ -40,13 +40,14 @@ internal sealed class HistoricalBarCache
 		return map.TryGetValue(date.Date, out var bar) ? bar : null;
 	}
 
-	/// <summary>Returns the last <paramref name="count"/> Adj-Close values on or before <paramref name="asOf"/>, oldest-first.
-	/// Used by HV computation in <see cref="BacktestIVProvider"/>.</summary>
+	/// <summary>Returns the last <paramref name="count"/> Adj-Close values strictly before <paramref name="asOf"/>, oldest-first.
+	/// Used by HV computation in <see cref="BacktestIVProvider"/>. Strict-less-than prevents lookahead in
+	/// backtest mode where today's bar is already cached when the model is making its 09:30 decision.</summary>
 	public async Task<IReadOnlyList<decimal>> GetRecentAdjClosesAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
 	{
 		var map = await LoadOrFetchAsync(ticker, asOf.Date, cancellation);
 		return map
-			.Where(kv => kv.Key.Date <= asOf.Date)
+			.Where(kv => kv.Key.Date < asOf.Date)
 			.OrderByDescending(kv => kv.Key)
 			.Take(count)
 			.OrderBy(kv => kv.Key)
@@ -117,6 +118,9 @@ internal sealed class HistoricalBarCache
 	{
 		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(_utcNow(), NyTz);
 		var settled = nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
+		// Yahoo never prints a bar on weekends or NYSE holidays — walk back to the most recent open
+		// trading day so coverage checks on a Saturday don't demand a Saturday bar that will never exist.
+		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
 		return neededThrough.Date < settled ? neededThrough.Date : settled;
 	}
 

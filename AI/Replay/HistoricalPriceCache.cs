@@ -78,7 +78,11 @@ internal sealed class HistoricalPriceCache
 	private DateTime LatestSettledNyDate()
 	{
 		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(_utcNow(), NyTz);
-		return nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
+		var settled = nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
+		// Walk back past weekends + holidays so the settled date always lands on a session Yahoo
+		// will actually have a close for.
+		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
+		return settled;
 	}
 
 	/// <summary>Parses either the two-column native format ("date,close") or Yahoo's seven-column
@@ -108,13 +112,16 @@ internal sealed class HistoricalPriceCache
 		return sb.ToString();
 	}
 
-	/// <summary>Returns the last <paramref name="count"/> daily closes on or before <paramref name="asOf"/>,
-	/// oldest-first. Returns fewer than <paramref name="count"/> entries if the cache has less data.</summary>
+	/// <summary>Returns the last <paramref name="count"/> daily closes strictly before <paramref name="asOf"/>,
+	/// oldest-first. Returns fewer than <paramref name="count"/> entries if the cache has less data.
+	/// The strict-less-than filter prevents backtest lookahead: at a 09:30 step on day X the model
+	/// must not consume day X's close (which the historical cache already knows). In live mode the
+	/// cache only has settled days, so the strict filter is a no-op there.</summary>
 	public async Task<IReadOnlyList<decimal>> GetRecentClosesAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
 	{
 		var map = await LoadOrFetchAsync(ticker, asOf.Date, cancellation);
 		return map
-			.Where(kv => kv.Key.Date <= asOf.Date)
+			.Where(kv => kv.Key.Date < asOf.Date)
 			.OrderByDescending(kv => kv.Key)
 			.Take(count)
 			.OrderBy(kv => kv.Key)
