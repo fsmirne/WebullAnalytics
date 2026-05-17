@@ -43,9 +43,24 @@ internal sealed class OpenCandidateEvaluator
 		var missingTickers = _config.Tickers.Where(t => !bootstrapSpots.ContainsKey(t) || bootstrapSpots[t] <= 0m).ToList();
 		if (missingTickers.Count > 0)
 		{
-			var placeholderExpiry = OpenerExpiryHelpers.NextWeeklyExpiriesInRange(ctx.Now, 1, 14).FirstOrDefault();
-			if (placeholderExpiry == default) placeholderExpiry = ctx.Now.Date.AddDays(7);
-			var placeholders = missingTickers.Select(t => MatchKeys.OccSymbol(t, placeholderExpiry, 1m, "C")).ToHashSet(StringComparer.OrdinalIgnoreCase);
+			// Probe one placeholder OCC symbol per (ticker, candidate-expiry). Webull's live quote source
+			// returns the full chain for any one symbol — but the BacktestQuoteSource only prices what's
+			// asked, so we must enumerate the actual cadence (Mon-Fri for SPX/SPY/QQQ/NDX/XSP, Mon-Wed-Fri
+			// for mega-cap multi-weeklies, Fridays for everything else) up to the widest enabled DTE.
+			var maxDte = MaxDteAcrossStructures(cfg);
+			var placeholders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+			foreach (var t in missingTickers)
+			{
+				foreach (var exp in OpenerExpiryHelpers.NextExpiriesForTicker(t, ctx.Now, 0, maxDte))
+					placeholders.Add(MatchKeys.OccSymbol(t, exp, 1m, "C"));
+				// Calendar/diagonal long legs reach into monthly DTE; probe those 3rd-Fridays too.
+				foreach (var exp in OpenerExpiryHelpers.MonthlyExpiriesInRange(ctx.Now, 0, maxDte))
+					placeholders.Add(MatchKeys.OccSymbol(t, exp, 1m, "C"));
+				// Guard against an empty cadence (e.g. minDte/maxDte yielding no days) — keep at least one
+				// probe so the underlying spot still surfaces.
+				if (placeholders.All(s => !s.StartsWith(t, StringComparison.OrdinalIgnoreCase)))
+					placeholders.Add(MatchKeys.OccSymbol(t, ctx.Now.Date.AddDays(7), 1m, "C"));
+			}
 			var boot = await _quotes.GetQuotesAsync(ctx.Now, placeholders, tickerSet, cancellation);
 			foreach (var (k, v) in boot.Underlyings) bootstrapSpots[k] = v;
 			foreach (var (k, v) in boot.Options) bootstrapOptions[k] = v;
@@ -131,15 +146,70 @@ internal sealed class OpenCandidateEvaluator
 			if (snapshot != null) sentimentScore = snapshot.Score;
 		}
 		var historicalVolByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-		if (cfg.VolatilityFitWeight > 0m)
+		var shortHorizonHvByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		// Bias calibration inputs per ticker: directional move sign over the lookback, plus the
+		// stability score (1 - chop_ratio) derived from sign-flips in daily returns. Both feed the
+		// per-ticker confidence calculation in the structure-scoring loop below.
+		var biasCalibByTicker = new Dictionary<string, (decimal MoveSign, decimal Stability)>(StringComparer.OrdinalIgnoreCase);
+		// Need closes whenever any of:
+		//   - 30-day vol-fit factor (HV vs IV)
+		//   - 3-day whipsaw factor (3d vs 30d realized vol)
+		//   - Bias-calibration factor (recent N-day move vs technical bias direction)
+		// Pulling once and computing all three is cheap.
+		var needCloses = cfg.VolatilityFitWeight > 0m || cfg.WhipsawWeight > 0m || cfg.BiasCalibrationLookbackDays > 0;
+		if (needCloses)
 		{
 			var priceCache = new HistoricalPriceCache();
+			var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, Math.Max(4, cfg.BiasCalibrationLookbackDays + 2));
 			foreach (var ticker in _config.Tickers)
 			{
-				var closes = await priceCache.GetRecentClosesAsync(ticker, cfg.VolatilityLookbackDays + 1, ctx.Now, cancellation);
-				var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
-				if (hv.HasValue && hv.Value > 0m)
-					historicalVolByTicker[ticker] = hv.Value;
+				var closes = await priceCache.GetRecentClosesAsync(ticker, lookback, ctx.Now, cancellation);
+				var hv30 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+				if (hv30.HasValue && hv30.Value > 0m)
+					historicalVolByTicker[ticker] = hv30.Value;
+				if (closes.Count >= 4)
+				{
+					var recent = closes.Skip(closes.Count - 4).ToList();
+					var hv3 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(recent);
+					if (hv3.HasValue && hv3.Value > 0m)
+						shortHorizonHvByTicker[ticker] = hv3.Value;
+				}
+				// Bias calibration: combine three reliability components, derived from closes:
+				//   1. Directional move sign over the lookback window (paired with bias sign in the loop)
+				//   2. Stability — fraction of consecutive same-sign daily returns (1 = monotonic trend,
+				//      0 = fully alternating chop). Stable trends → bias is more trustworthy.
+				// (Vol-regime component is handled per-structure-loop using the already-computed HV ratio.)
+				if (cfg.BiasCalibrationLookbackDays > 0 && closes.Count > cfg.BiasCalibrationLookbackDays)
+				{
+					var n = cfg.BiasCalibrationLookbackDays;
+					var recentClose = closes[^1];
+					var olderClose = closes[closes.Count - 1 - n];
+					if (olderClose > 0m)
+					{
+						var moveSign = recentClose > olderClose ? 1m : (recentClose < olderClose ? -1m : 0m);
+
+						// Sign-flip count over the lookback. Each consecutive same-sign daily return pair
+						// counts toward stability; opposite-sign pairs subtract from it. Zero-return days
+						// are ignored (don't double-penalize sideways days).
+						var dailySigns = new List<int>();
+						for (int i = closes.Count - n; i < closes.Count; i++)
+						{
+							var ret = closes[i] - closes[i - 1];
+							dailySigns.Add(ret > 0m ? 1 : (ret < 0m ? -1 : 0));
+						}
+						int sameSign = 0, oppSign = 0;
+						for (int i = 1; i < dailySigns.Count; i++)
+						{
+							if (dailySigns[i] == 0 || dailySigns[i - 1] == 0) continue;
+							if (dailySigns[i] == dailySigns[i - 1]) sameSign++;
+							else oppSign++;
+						}
+						var totalPairs = sameSign + oppSign;
+						var stability = totalPairs > 0 ? (decimal)sameSign / totalPairs : 0.5m;
+
+						biasCalibByTicker[ticker] = (moveSign, stability);
+					}
+				}
 			}
 		}
 
@@ -155,6 +225,32 @@ internal sealed class OpenCandidateEvaluator
 			ctx.TechnicalSignals.TryGetValue(tickerGroup.Key, out var biasSignal);
 			var bias = biasSignal?.Score ?? 0m;
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
+			shortHorizonHvByTicker.TryGetValue(tickerGroup.Key, out var shortHorizonHv);
+			// Bias-signal calibration via directional agreement: if the bias direction disagreed with
+			// the recent N-day move, the signal is mis-pointing → dampen down to a 0.2× floor; on
+			// agreement, leave at full strength. Scales bias at the source so BOTH the grid-shift
+			// (BiasDriftWeight) and BiasAdjust see the calibrated value at once.
+			//
+			// Tested-and-rejected additions: stability (sign-flip count over the window) and
+			// vol-regime (whipsaw ratio) components. Both fired too often in normal market noise and,
+			// when AND'd / averaged with direction, dampened winners more than losers. Direction
+			// alone proved to be the only component with positive net P&L impact.
+			//
+			// Disabled when biasCalibrationLookbackDays = 0.
+			if (cfg.BiasCalibrationLookbackDays > 0 && bias != 0m
+				&& biasCalibByTicker.TryGetValue(tickerGroup.Key, out var calib)
+				&& calib.MoveSign != 0m)
+			{
+				var biasSign = bias > 0m ? 1m : -1m;
+				var agreement = biasSign * calib.MoveSign;
+				var reliability = Math.Clamp(0.5m + 0.5m * agreement, 0.2m, 1.0m);
+				bias *= reliability;
+			}
+			// Whipsaw penalty: when 3-day realized vol is well above 30-day, both put- and call-credit
+			// spreads get punished by counter-trend reversals (e.g. April 2025 SPX +$492 inside the crash
+			// week wiped every bearish credit). Computed once per ticker; applied per-proposal to credit
+			// structures only.
+			var whipsawFactor = ComputeWhipsawFactor(shortHorizonHv, historicalVolAnnual, cfg.WhipsawWeight);
 			var tickerEvents = eventCalendar.Get(tickerGroup.Key);
 
 			var shortVerticalRejects = debug
@@ -167,6 +263,11 @@ internal sealed class OpenCandidateEvaluator
 			foreach (var skel in tickerGroup)
 			{
 				var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
+				if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
+				{
+					var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
+					p = p with { FinalScore = adjusted };
+				}
 				if (p == null)
 				{
 					if (debug && (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical))
@@ -216,11 +317,13 @@ internal sealed class OpenCandidateEvaluator
 
 			// Per-ticker top-N. DoubleCalendar/DoubleDiagonal stay as one 4-leg proposal here and render as a
 			// unified two-side panel downstream, so each counts as a single suggestion against the cap.
-			// Only emit candidates the score itself endorses (FinalScore > 0). The chain produces a
-			// negative final when penalties (low POP, narrow BE, etc.) outweigh the raw EV — that's the
-			// model saying "do not trade this," and labeling it as "#1 suggestion" contradicts the
-			// model's verdict. If everything in the universe scores negative, the honest output is empty.
-			foreach (var proposal in RankForOutput(survivors).Where(p => (p.FinalScore ?? 0m) > 0m).Take(cfg.TopNPerTicker))
+			// Only emit candidates the score itself endorses (FinalScore > MinScoreToOpen). The chain
+			// produces a low/negative final when penalties (low POP, narrow BE, whipsaw, etc.) outweigh
+			// the raw EV — that's the model saying "do not trade this." The MinScoreToOpen knob raises the
+			// bar above zero for users who want only high-conviction trades; default 0 preserves the
+			// legacy behavior of emitting any positive-EV trade.
+			var minScore = cfg.MinScoreToOpen;
+			foreach (var proposal in RankForOutput(survivors).Where(p => (p.FinalScore ?? 0m) > minScore).Take(cfg.TopNPerTicker))
 				output.Add(proposal);
 		}
 
@@ -328,7 +431,12 @@ internal sealed class OpenCandidateEvaluator
 		//      dominating account drawdown. Without this, a $200/ct loss on a $25k account could fill 50
 		//      contracts (= 40% of equity at risk on one trade).
 		var cashCap = (int)Math.Floor(freeCash / p.CapitalAtRiskPerContract);
-		var riskBudget = accountValue * cfg.MaxRiskPctPerProposal;
+		// Risk budget = the smaller of (account-pct cap) and (absolute dollar cap). The dollar cap
+		// stops compounding from inflating position sizes into seven-figure single-trade bets after
+		// a few good months. Zero on the dollar cap means "no absolute limit" (pct-only).
+		var pctBudget = accountValue * cfg.MaxRiskPctPerProposal;
+		var dollarBudget = cfg.MaxDollarRiskPerProposal > 0m ? cfg.MaxDollarRiskPerProposal : decimal.MaxValue;
+		var riskBudget = Math.Min(pctBudget, dollarBudget);
 		var riskCap = riskBudget > 0m ? (int)Math.Floor(riskBudget / p.CapitalAtRiskPerContract) : 0;
 		var maxQty = Math.Min(Math.Min(cashCap, riskCap), cfg.MaxQtyPerProposal);
 
@@ -340,12 +448,15 @@ internal sealed class OpenCandidateEvaluator
 		else
 		{
 			var binding = cashCap < 1 ? "cash" : (riskCap < 1 ? "risk-budget" : "qty-cap");
+			var budgetSource = riskBudget == dollarBudget && cfg.MaxDollarRiskPerProposal > 0m
+				? $"${cfg.MaxDollarRiskPerProposal:F0} dollar cap"
+				: $"{cfg.MaxRiskPctPerProposal:P0} of ${accountValue:F0}";
 			updated = p with
 			{
 				Qty = 0,
 				CashReserveBlocked = true,
 				CashReserveDetail = binding == "risk-budget"
-					? $"risk budget ${riskBudget:F0} ({cfg.MaxRiskPctPerProposal:P0} of ${accountValue:F0}) below ${p.CapitalAtRiskPerContract:F0} per contract"
+					? $"risk budget ${riskBudget:F0} ({budgetSource}) below ${p.CapitalAtRiskPerContract:F0} per contract"
 					: $"free ${freeCash:F0}, requires ${p.CapitalAtRiskPerContract:F0} per contract"
 			};
 		}
@@ -368,6 +479,42 @@ internal sealed class OpenCandidateEvaluator
 	{
 		if (!quotes.TryGetValue(symbol, out var q)) return false;
 		return q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m;
+	}
+
+	/// <summary>Whipsaw penalty factor: when 3-day realized vol is well above 30-day, both sides of
+	/// credit-spread space get crushed by counter-trend reversals. Returns 1 (no penalty) when weight
+	/// is 0, when either input is missing, or when the ratio is at/below 1.5. Above that, penalty
+	/// scales linearly: factor = max(0, 1 − weight × (ratio − 1.5)).</summary>
+	private static decimal ComputeWhipsawFactor(decimal shortHv, decimal longHv, decimal weight)
+	{
+		if (weight <= 0m || shortHv <= 0m || longHv <= 0m) return 1m;
+		var ratio = shortHv / longHv;
+		if (ratio <= 1.5m) return 1m;
+		var excess = ratio - 1.5m;
+		return Math.Max(0m, 1m - weight * excess);
+	}
+
+	private static bool IsCreditStructure(OpenStructureKind kind) =>
+		kind is OpenStructureKind.ShortPutVertical
+			 or OpenStructureKind.ShortCallVertical
+			 or OpenStructureKind.IronCondor
+			 or OpenStructureKind.IronButterfly;
+
+	/// <summary>Widest DteMax across every enabled structure. Used to size the bootstrap-probe horizon so
+	/// the backtest discovers every expiry the enumerators could legitimately propose.</summary>
+	private static int MaxDteAcrossStructures(OpenerConfig cfg)
+	{
+		var s = cfg.Structures;
+		int max = 7;
+		if (s.LongCalendar.Enabled) max = Math.Max(max, Math.Max(s.LongCalendar.ShortDteMax, s.LongCalendar.LongDteMax));
+		if (s.DoubleCalendar.Enabled) max = Math.Max(max, Math.Max(s.DoubleCalendar.ShortDteMax, s.DoubleCalendar.LongDteMax));
+		if (s.LongDiagonal.Enabled) max = Math.Max(max, Math.Max(s.LongDiagonal.ShortDteMax, s.LongDiagonal.LongDteMax));
+		if (s.DoubleDiagonal.Enabled) max = Math.Max(max, Math.Max(s.DoubleDiagonal.ShortDteMax, s.DoubleDiagonal.LongDteMax));
+		if (s.IronButterfly.Enabled) max = Math.Max(max, s.IronButterfly.DteMax);
+		if (s.IronCondor.Enabled) max = Math.Max(max, s.IronCondor.DteMax);
+		if (s.ShortVertical.Enabled) max = Math.Max(max, s.ShortVertical.DteMax);
+		if (s.LongCallPut.Enabled) max = Math.Max(max, s.LongCallPut.DteMax);
+		return max;
 	}
 
 	/// <summary>Parses each OCC symbol and records its expiration date in the per-ticker bucket. Symbols

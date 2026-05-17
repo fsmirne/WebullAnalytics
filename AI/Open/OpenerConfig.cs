@@ -16,7 +16,45 @@ internal sealed class OpenerConfig
 	/// drawdowns. Set to 1.0 to disable; 0 disables the proposal entirely.</summary>
 	[JsonPropertyName("maxRiskPctPerProposal")] public decimal MaxRiskPctPerProposal { get; set; } = 0.10m;
 
+	/// <summary>Absolute dollar cap on per-trade risk, applied alongside <see cref="MaxRiskPctPerProposal"/>.
+	/// Effective risk budget is <c>min(MaxRiskPctPerProposal × accountValue, MaxDollarRiskPerProposal)</c>.
+	/// Critical for compounding-aggressive strategies: a 30% pct-cap on a $10M paper-gained account
+	/// would size single trades to $3M, far past what any human trader would tolerate. The dollar cap
+	/// clamps absolute position size as equity grows, so the strategy plays the same size at $1M of
+	/// equity as at $1B. Default 0 disables (pct-cap only). Set to a dollar amount you'd be willing
+	/// to lose on one trade.</summary>
+	[JsonPropertyName("maxDollarRiskPerProposal")] public decimal MaxDollarRiskPerProposal { get; set; } = 0m;
+
+	/// <summary>Minimum FinalScore a candidate must clear to actually open. Default 0 preserves legacy
+	/// behavior (any positive-EV trade opens). Raise (e.g. 0.02) to require higher conviction — the
+	/// engine sits out marginal days, fewer trades but fewer whipsaw losses.</summary>
+	[JsonPropertyName("minScoreToOpen")] public decimal MinScoreToOpen { get; set; } = 0m;
+
+	/// <summary>Weight on the whipsaw-vol penalty for credit structures. When 3-day realized vol >>
+	/// 30-day realized vol the regime is whipsawing — both bullish and bearish credit spreads get
+	/// crushed by counter-trend reversals. Factor = <c>1 − weight × max(0, hv3/hv30 − 1.5)</c>, applied
+	/// to ShortVertical / IronCondor / IronButterfly only. Default 0 disables. Set 0.5–1.0 to penalize
+	/// (clamps to 0 in severe whipsaw at weight=1).</summary>
+	[JsonPropertyName("whipsawWeight")] public decimal WhipsawWeight { get; set; } = 0m;
+
 	[JsonPropertyName("directionalFitWeight")] public decimal DirectionalFitWeight { get; set; } = 0.5m;
+
+	/// <summary>Shifts the scenario-grid center by <c>bias × biasDriftWeight × sigma</c> when computing
+	/// realized EV. Bias is the technical signal in [-1, +1]; positive shifts scenarios UP, negative DOWN.
+	/// This lets the scorer's raw EV reflect a directional view instead of only being adjusted post-hoc
+	/// by <see cref="DirectionalFitWeight"/> — critical for long-premium structures (LongCall/LongPut)
+	/// whose negative raw EV can never be flipped positive by sign-symmetric ApplyFactor. Default 0
+	/// disables (legacy behavior); 0.5 shifts by half a sigma at extreme bias; 1.0 by a full sigma.
+	/// Combine with a reduced DirectionalFitWeight to avoid double-counting the directional signal.</summary>
+	[JsonPropertyName("biasDriftWeight")] public decimal BiasDriftWeight { get; set; } = 0m;
+
+	/// <summary>Look-back window (trading days) for grading the bias signal's recent accuracy. If the
+	/// bias direction has disagreed with the underlying's actual N-day move, the live bias gets
+	/// dampened proportionally (down to floor of 0.2× of its raw value); if they've agreed it's left
+	/// unchanged. The calibration affects BOTH the scenario-grid shift (BiasDriftWeight) and the
+	/// BiasAdjust factor at once because it scales <c>bias</c> at the source. Default 0 disables.
+	/// Recommended 5 trading days — short enough to be responsive, long enough to be meaningful.</summary>
+	[JsonPropertyName("biasCalibrationLookbackDays")] public int BiasCalibrationLookbackDays { get; set; } = 0;
 	[JsonPropertyName("profitBandPct")] public decimal ProfitBandPct { get; set; } = 5.0m;
 	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;
 	[JsonPropertyName("strikeSteps")] public Dictionary<string, decimal> StrikeSteps { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -84,6 +122,7 @@ internal sealed class OpenerStructuresConfig
 	[JsonPropertyName("ironCondor")] public OpenerIronCondorConfig IronCondor { get; set; } = new();
 	[JsonPropertyName("shortVertical")] public OpenerShortVerticalConfig ShortVertical { get; set; } = new();
 	[JsonPropertyName("longCallPut")] public OpenerLongCallPutConfig LongCallPut { get; set; } = new();
+	[JsonPropertyName("longVertical")] public OpenerLongVerticalConfig LongVertical { get; set; } = new();
 }
 
 internal sealed class OpenerCalendarLikeConfig
@@ -152,6 +191,21 @@ internal sealed class OpenerLongCallPutConfig
 	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 60;
 	[JsonPropertyName("deltaMin")] public decimal DeltaMin { get; set; } = 0.30m;
 	[JsonPropertyName("deltaMax")] public decimal DeltaMax { get; set; } = 0.60m;
+}
+
+/// <summary>Long (debit) vertical: long leg near/ATM at <c>longDelta∈[longDeltaMin,longDeltaMax]</c>,
+/// short leg <c>width</c> strikes further OTM. Defined-risk directional bet with capped upside and
+/// capped downside — pays less than a naked long, gives up extreme tail upside, but has explicit
+/// max-loss = debit-paid bounds. WidthSteps are in strike-grid increments (so width=2 with $5 step
+/// SPX = $10 wide).</summary>
+internal sealed class OpenerLongVerticalConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	[JsonPropertyName("dteMin")] public int DteMin { get; set; } = 0;
+	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 0;
+	[JsonPropertyName("widthSteps")] public List<int> WidthSteps { get; set; } = new() { 2, 4, 8 };
+	[JsonPropertyName("longDeltaMin")] public decimal LongDeltaMin { get; set; } = 0.30m;
+	[JsonPropertyName("longDeltaMax")] public decimal LongDeltaMax { get; set; } = 0.55m;
 }
 
 /// <summary>

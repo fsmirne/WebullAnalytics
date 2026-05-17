@@ -162,7 +162,7 @@ internal static class CandidateScorer
 	/// </summary>
 	public static GexResult ComputeGex(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
-		var timeYears = Math.Max(1, (expiry.Date - asOf.Date).Days) / 365.0;
+		var timeYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, expiry);
 		var callGexByStrike = new Dictionary<decimal, double>();
 		var putGexByStrike = new Dictionary<decimal, double>();
 		foreach (var kv in quotes)
@@ -716,10 +716,15 @@ internal static class CandidateScorer
 	/// sigmaRange defaults to 1.0 (±1σ and ±0.5σ). Larger values test further-out scenarios and
 	/// overweight fat tails, favoring unbounded-upside structures over pin/theta structures.
 	/// </summary>
-	public static IReadOnlyList<ScenarioPoint> BuildScenarioGrid(decimal spot, decimal ivAnnual, double years, decimal sigmaRange = 1.0m)
+	public static IReadOnlyList<ScenarioPoint> BuildScenarioGrid(decimal spot, decimal ivAnnual, double years, decimal sigmaRange = 1.0m, decimal biasShiftSigmas = 0m)
 	{
 		var sigma = (double)ivAnnual * Math.Sqrt(Math.Max(1e-9, years));
 		var range = (double)sigmaRange;
+		// biasShiftSigmas (typically bias × cfg.BiasDriftWeight) translates the grid center along the
+		// log-spot axis. Positive shifts scenarios up; negative shifts down. Allows long-premium
+		// structures to score positive raw EV under strong directional signals — sign-symmetric
+		// ApplyFactor downstream can't flip a negative score, so the bias must be encoded here.
+		var drift = (double)biasShiftSigmas * sigma;
 		var multipliers = new[] { -range, -range * 0.5, 0.0, range * 0.5, range };
 		var points = new ScenarioPoint[5];
 
@@ -734,7 +739,7 @@ internal static class CandidateScorer
 		}
 		for (int i = 0; i < 5; i++)
 		{
-			var sT = (decimal)((double)spot * Math.Exp(multipliers[i] * sigma));
+			var sT = (decimal)((double)spot * Math.Exp(drift + multipliers[i] * sigma));
 			var w = (decimal)(rawWeights[i] / totalWeight);
 			points[i] = new ScenarioPoint(sT, w);
 		}
@@ -800,7 +805,7 @@ internal static class CandidateScorer
 			return new ResolvedLegPrice(live.Value.bid, live.Value.ask, UsedFallback: false);
 
 		var iv = ResolveIv(symbol, quotes, defaultIv);
-		var years = Math.Max(1, (parsed.ExpiryDate.Date - asOf.Date).Days) / 365.0;
+		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, parsed.ExpiryDate);
 		var theoretical = OptionMath.BlackScholes(spot, parsed.Strike, years, OptionMath.RiskFreeRate, iv, parsed.CallPut);
 		return theoretical > 0m ? new ResolvedLegPrice(theoretical, theoretical, UsedFallback: true) : null;
 	}
@@ -846,6 +851,7 @@ internal static class CandidateScorer
 	{
 		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events),
 		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events),
+		OpenStructureKind.LongCallVertical or OpenStructureKind.LongPutVertical => ScoreLongVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events),
 		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events),
 		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events),
 		_ => null
@@ -1002,7 +1008,7 @@ internal static class CandidateScorer
 		if (cfg.MaxPainWeight <= 0m || !maxPain.HasValue || spot <= 0m || targetIv <= 0m)
 			return null;
 
-		var targetYears = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
+		var targetYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
 		var expectedMove = Math.Max(ResolveStrikeStep(cfg, skel.Ticker), spot * targetIv * (decimal)Math.Sqrt(targetYears));
 		var signal = ComputeMaxPainSignal(skel, spot, maxPain.Value, expectedMove, breakevens);
 		return Math.Max(0.10m, 1m + cfg.MaxPainWeight * signal);
@@ -1017,7 +1023,7 @@ internal static class CandidateScorer
 	private static decimal? ComputeGexAdjustmentFactor(CandidateSkeleton skel, decimal spot, DateTime asOf, decimal targetIv, GexResult gex, OpenerConfig cfg, IReadOnlyList<decimal>? breakevens = null)
 	{
 		if (cfg.GexWeight <= 0m || spot <= 0m || targetIv <= 0m) return null;
-		var targetYears = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
+		var targetYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
 		var expectedMove = Math.Max(ResolveStrikeStep(cfg, skel.Ticker), spot * targetIv * (decimal)Math.Sqrt(targetYears));
 		var pinSignal = gex.GexGravity.HasValue ? ComputeMaxPainSignal(skel, spot, gex.GexGravity.Value, expectedMove, breakevens) : 0m;
 		var envSignal = Math.Clamp(gex.NetGexFraction * VolatilityFitSign(skel.StructureKind), -1m, 1m);
@@ -1203,14 +1209,14 @@ internal static class CandidateScorer
 			? shortParsed.Strike + creditPerShare   // call credit: loses if S_T > short + credit
 		  : shortParsed.Strike - creditPerShare;  // put credit: loses if S_T < short − credit
 
-		var years = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
+		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
 		var iv = ResolveIv(shortLeg.Symbol, quotes, cfg.IvDefaultPct);
 
 		// POP = P(S_T inside profitable side of breakeven).
 		var pop = LogNormalProbability(isCall ? Direction.Below : Direction.Above, spot, breakeven, years, (double)iv);
 
 	   // EV via scenario grid — payoff at expiry is piecewise linear.
-		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma);
+		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma, bias * cfg.BiasDriftWeight);
 		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, creditPerContract, isCall);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -1230,7 +1236,11 @@ internal static class CandidateScorer
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, [breakeven]);
-		var tradingDaysToTarget = CountTradingDays(asOf, skel.TargetExpiry.Date);
+		// CountTradingDays returns 0 for same-day (0DTE) targets, which silently nulls the EM-based
+		// factors (breakevenRoom, expectedMoveBounds, expectedMoveCredit) since their guard rejects
+		// tradingDays <= 0. A 0DTE position at the morning open is exposed to one full session of
+		// vol — that's 1 trading day's worth — so clamp to ≥ 1 to keep those factors firing.
+		var tradingDaysToTarget = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(spot, iv, tradingDaysToTarget, [breakeven]);
 		var expectedMoveBounds = ComputeExpectedMoveBounds(spot, iv, tradingDaysToTarget);
 		var shortLegStrikes = ExtractShortLegStrikes(skel.Legs);
@@ -1315,6 +1325,165 @@ internal static class CandidateScorer
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
+			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
+			ExpectedMoveLower: expectedMoveBounds?.Lower,
+			ExpectedMoveUpper: expectedMoveBounds?.Upper
+		);
+	}
+
+	/// <summary>Score a long (debit) vertical: bull call spread or bear put spread. Mirror of
+	/// <see cref="ScoreShortVertical"/> with the cash-flow direction inverted (we pay debit, not
+	/// receive credit). Capital-at-risk = debit paid; max profit = width − debit; both bounded.
+	/// Like <see cref="ScoreLongCallPut"/> the popFactor penalty is skipped — debit verticals are
+	/// positive-skew bets where a low POP is the trade's structural feature, not a defect, and
+	/// applying ComputeProbabilityFactor would unfairly demote them against credit spreads.</summary>
+	public static OpenProposal? ScoreLongVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, decimal? sentimentScore = null, TickerEvents? events = null)
+	{
+		// Long-only structures aren't event-vetoed (no short leg to take assignment risk on).
+		_ = events;
+		var shortLeg = skel.Legs.First(l => l.Action == "sell");
+		var longLeg = skel.Legs.First(l => l.Action == "buy");
+		var shortParsed = ParsingHelpers.ParseOptionSymbol(shortLeg.Symbol);
+		var longParsed = ParsingHelpers.ParseOptionSymbol(longLeg.Symbol);
+		if (shortParsed == null || longParsed == null) return null;
+
+		var shortQ = ResolveLegPrice(shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg.IvDefaultPct);
+		var longQ = ResolveLegPrice(longLeg.Symbol, longParsed, spot, asOf, quotes, cfg.IvDefaultPct);
+		if (shortQ == null || longQ == null) return null;
+		if (applyLiquidityGate && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot)) return null;
+		var pricingWarning = BuildPricingWarning(shortQ.Value.UsedFallback || longQ.Value.UsedFallback);
+
+		var shortMid = (shortQ.Value.Bid + shortQ.Value.Ask) / 2m;
+		var longMid = (longQ.Value.Bid + longQ.Value.Ask) / 2m;
+		var debitPerShare = PriceForBuy(longMid, longQ.Value.Ask, pricingMode) - PriceForSell(shortMid, shortQ.Value.Bid, pricingMode);
+		if (debitPerShare <= 0m) return null; // not a debit spread at these quotes
+
+		var debitPerContract = debitPerShare * 100m;
+		var width = Math.Abs(shortParsed.Strike - longParsed.Strike);
+		var maxProfitPerContract = width * 100m - debitPerContract;
+		if (maxProfitPerContract <= 0m) return null; // debit larger than width = no upside
+
+		var capitalAtRisk = debitPerContract;
+		var maxProfit = maxProfitPerContract;
+		var maxLoss = -debitPerContract;
+
+		var isCall = skel.StructureKind == OpenStructureKind.LongCallVertical;
+		// Breakeven: long leg's strike adjusted by debit (call: above; put: below). LongCallVertical's
+		// long leg is the LOWER strike (we paid for the call); profit appears when S_T > longStrike + debit.
+		var breakeven = isCall
+			? longParsed.Strike + debitPerShare
+			: longParsed.Strike - debitPerShare;
+
+		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
+		var iv = ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct);
+
+		// POP = P(S_T past breakeven in the profitable direction).
+		var pop = LogNormalProbability(isCall ? Direction.Above : Direction.Below, spot, breakeven, years, (double)iv);
+
+		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma, bias * cfg.BiasDriftWeight);
+		// VerticalPnLAtExpiry uses signed netEntry where credit=positive. For a debit spread we pay,
+		// so pass -debitPerContract as the "credit" parameter.
+		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, -debitPerContract, isCall);
+		decimal ev = 0m;
+		foreach (var pt in grid)
+			ev += pt.Weight * PnlAtExpiry(pt.SpotAtExpiry);
+
+		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
+		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
+		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
+		var fit = DirectionalFit.SignFor(skel);
+		// popFactor skipped — see method-level XML comment.
+		var popFactor = 1m;
+		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
+		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, [breakeven]);
+		// CountTradingDays returns 0 for same-day (0DTE) targets, which silently nulls the EM-based
+		// factors (breakevenRoom, expectedMoveBounds, expectedMoveCredit) since their guard rejects
+		// tradingDays <= 0. A 0DTE position at the morning open is exposed to one full session of
+		// vol — that's 1 trading day's worth — so clamp to ≥ 1 to keep those factors firing.
+		var tradingDaysToTarget = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
+		var breakevenRoomFactor = ComputeBreakevenRoomFactor(spot, iv, tradingDaysToTarget, [breakeven]);
+		var expectedMoveBounds = ComputeExpectedMoveBounds(spot, iv, tradingDaysToTarget);
+		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.IvRealizedPremiumWeight);
+		var longIv = ResolveIv(longLeg.Symbol, quotes, cfg.IvDefaultPct);
+		var legGreeks = new[]
+		{
+			(Parsed: shortParsed, Iv: iv, IsLong: false),
+			(Parsed: longParsed, Iv: longIv, IsLong: true)
+		};
+		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(legGreeks, asOf, spot);
+		var netVegaPerContract = ComputeNetVegaPerContract(legGreeks, asOf, spot);
+		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
+		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
+		var representativeIv = (iv + longIv) / 2m;
+		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight);
+		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
+		var gex = ComputeGex(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
+		var gexFactor = ComputeGexAdjustmentFactor(skel, spot, asOf, iv, gex, cfg);
+		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
+		var statArb = ComputeMarketTheoreticalAggregate(
+			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
+			spot, asOf, quotes, cfg.IvDefaultPct);
+		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.StatArbWeight);
+		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
+		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
+		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.SentimentWeight);
+		var biasAdjBase = BiasAdjust(rawScore, bias, fit, cfg.DirectionalFitWeight);
+		var afterFactors = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBase, popFactor), scaleFactor), setupFactor ?? 1m), breakevenRoomFactor ?? 1m), ivRealizedPremiumFactor ?? 1m), balance), liquidityFactor ?? 1m);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GexAdjust(MaxPainAdjust(VolatilityAdjust(afterFactors, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.VolatilityFitWeight), maxPainFactor), gexFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
+		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
+
+		return new OpenProposal(
+			Ticker: skel.Ticker,
+			StructureKind: skel.StructureKind,
+			Legs: PriceLegs(skel.Legs, quotes),
+			Qty: 1,
+			DebitOrCreditPerContract: -debitPerContract,   // negative = debit paid
+			MaxProfitPerContract: maxProfit,
+			MaxLossPerContract: maxLoss,
+			CapitalAtRiskPerContract: capitalAtRisk,
+			Breakevens: [breakeven],
+			ProbabilityOfProfit: pop,
+			ExpectedValuePerContract: ev,
+			DaysToTarget: daysToTarget,
+			RawScore: rawScore,
+			BiasAdjustedScore: biasAdj,
+			DirectionalFit: fit,
+			Rationale: "",
+			Fingerprint: fp,
+			PricingWarning: pricingWarning,
+			PremiumRatio: premiumRatio,
+			ImpliedVolatilityAnnual: representativeIv,
+			HistoricalVolatilityAnnual: historicalVolAnnual,
+			VolatilityAdjustmentFactor: volFactor,
+			TargetExpiryMaxPain: maxPain,
+			MaxPainAdjustmentFactor: maxPainFactor,
+			GexGravity: gex.GexGravity,
+			NetGexFraction: gex.NetGexFraction,
+			GexAdjustmentFactor: gexFactor,
+			SetupFactor: setupFactor,
+			AssignmentRiskFactor: assignmentFactor,
+			ThetaPerDayPerContract: thetaPerDayPerContract,
+			NetVegaPerContract: netVegaPerContract,
+			MarketNetPremiumPerShare: statArb?.MarketNet,
+			TheoreticalNetPremiumPerShare: statArb?.TheoreticalNet,
+			StatArbAdjustmentFactor: statArbFactor,
+			FinalScore: finalScore,
+			WorstLegBidAskSpreadPct: worstSpread,
+			MinOpenInterest: minOi,
+			MinRelativeOpenInterest: minRelOi,
+			LiquidityAdjustmentFactor: liquidityFactor,
+			MarketSentimentScore: sentimentScore,
+			MarketSentimentRating: sentimentScore.HasValue ? SentimentRating.FromScore(sentimentScore.Value) : null,
+			SentimentAdjustmentFactor: sentimentFactor,
+			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
+			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
+			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
+			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
+			BreakevenRoomFactor: breakevenRoomFactor,
+			ExpectedMoveCreditFactor: null,
 			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
 			ExpectedMoveLower: expectedMoveBounds?.Lower,
 			ExpectedMoveUpper: expectedMoveBounds?.Upper
@@ -1631,6 +1800,37 @@ internal static class CandidateScorer
 		return (lower, upper);
 	}
 
+	/// <summary>Closed-form breakevens for the simple credit structures whose payoff is fully determined by
+	/// strikes + credit. Returns an empty list for structures that don't have a closed form (calendars,
+	/// diagonals) so the caller falls back to numerical scanning. The piecewise-linear payoff of an
+	/// iron condor or iron butterfly crosses zero at <c>short_strike ± credit_per_share</c>.</summary>
+	private static IReadOnlyList<decimal> TryAnalyticalBreakevens(CandidateSkeleton skel, IReadOnlyList<MultiLegDefinition> defs, decimal netEntryPerContract)
+	{
+		// Net credit per share: negative netEntry means we received credit. Per-contract → per-share by /100.
+		var creditPerShare = -netEntryPerContract / 100m;
+		if (creditPerShare <= 0m) return Array.Empty<decimal>(); // not a credit structure
+
+		switch (skel.StructureKind)
+		{
+			case OpenStructureKind.IronCondor:
+			case OpenStructureKind.IronButterfly:
+			{
+				// Identify short strikes. IronCondor has one short put + one short call (different strikes);
+				// IronButterfly has both shorts at the same body strike.
+				var shorts = defs.Where(d => !d.IsLong).ToList();
+				var shortPut = shorts.FirstOrDefault(d => d.Parsed.CallPut == "P");
+				var shortCall = shorts.FirstOrDefault(d => d.Parsed.CallPut == "C");
+				if (shortPut.Parsed == null || shortCall.Parsed == null) return Array.Empty<decimal>();
+				var lowerBe = shortPut.Parsed.Strike - creditPerShare;
+				var upperBe = shortCall.Parsed.Strike + creditPerShare;
+				if (lowerBe <= 0m || upperBe <= lowerBe) return Array.Empty<decimal>();
+				return new[] { lowerBe, upperBe };
+			}
+			default:
+				return Array.Empty<decimal>();
+		}
+	}
+
 	private static IReadOnlyList<decimal> FindBreakevens(Func<decimal, decimal> pnl, decimal lower, decimal upper, int steps = 240)
 	{
 		var roots = new List<decimal>();
@@ -1732,10 +1932,19 @@ internal static class CandidateScorer
 		// returns no break-evens. That made the barrier-aware EV bypass kick in for the exact
 		// candidates that path-aware ranking is supposed to penalize. Scaling steps with scan
 		// width preserves sub-$1 resolution for any structure.
-		var scanSteps = Math.Max(240, (int)((scanUpper - scanLower) / 0.5m));
-		var breakevens = FindBreakevens(pnl, scanLower, scanUpper, scanSteps);
+		// Analytical-first: IronCondor and IronButterfly have closed-form breakevens determined entirely
+		// by the short strikes and the net credit. Skipping the 2000-step numerical scan for these is a
+		// large per-candidate speedup (the scan dominates ScoreMultiLeg cost on SPX-class tickers where
+		// scanRange ≈ $2k). Cross-expiry structures (DoubleCalendar, DoubleDiagonal) still need the scan
+		// because their P&L curve depends on long-leg time value remaining at the short expiry.
+		var breakevens = TryAnalyticalBreakevens(skel, defs, netEntryPerContract);
+		if (breakevens.Count == 0)
+		{
+			var scanSteps = Math.Max(240, (int)((scanUpper - scanLower) / 0.5m));
+			breakevens = FindBreakevens(pnl, scanLower, scanUpper, scanSteps);
+		}
 		var pop = ComputeProbabilityOfProfit(pnl, breakevens, spot, years, representativeIv);
-		var grid = BuildScenarioGrid(spot, representativeIv, years, cfg.ScenarioGridSigma);
+		var grid = BuildScenarioGrid(spot, representativeIv, years, cfg.ScenarioGridSigma, bias * cfg.BiasDriftWeight);
 		decimal ev = 0m;
 		foreach (var pt in grid)
 			ev += pt.Weight * pnl(pt.SpotAtExpiry);
@@ -1759,7 +1968,7 @@ internal static class CandidateScorer
 		var scaleFactor = ComputeCapitalScaleFactor(efficiencyCapital);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, breakevens);
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
-		var tradingDaysToTargetMl = CountTradingDays(asOf, skel.TargetExpiry.Date);
+		var tradingDaysToTargetMl = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(spot, representativeIv, tradingDaysToTargetMl, breakevens);
 		var expectedMoveBoundsMl = ComputeExpectedMoveBounds(spot, representativeIv, tradingDaysToTargetMl);
 		var shortLegStrikesMl = ExtractShortLegStrikes(skel.Legs);
@@ -1880,8 +2089,8 @@ internal static class CandidateScorer
 		// position sizing and risk reporting.
 		var efficiencyCapital = debitPerContract;
 
-		var shortYears = Math.Max(1, (shortParsed.ExpiryDate.Date - asOf.Date).Days) / 365.0;
-		var longAtShortYears = Math.Max(1, (longParsed.ExpiryDate.Date - shortParsed.ExpiryDate.Date).Days) / 365.0;
+		var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortParsed.ExpiryDate);
+		var longAtShortYears = OpenerExpiryHelpers.TimeYearsToExpiry(shortParsed.ExpiryDate, longParsed.ExpiryDate);
 		var ivShort = ResolveIv(shortLeg.Symbol, quotes, cfg.IvDefaultPct);
 		// Long-leg IV is back-solved from the market mid so EV/breakeven/maxProfit math uses pricing
 		// consistent with the entry debit. When the long leg has a wide bid/ask, the broker's reported
@@ -1915,7 +2124,7 @@ internal static class CandidateScorer
 		// max_profit comes from a separate fine-grid scan because the true peak typically falls between
 		// 5-point grid points (e.g. an ATM call diagonal peaks at the short strike, which the ±0.5σ
 		// sampling misses) — using the scenario-grid max would understate R/R by ~30%.
-		var grid = BuildScenarioGrid(spot, ivShort, shortYears, cfg.ScenarioGridSigma);
+		var grid = BuildScenarioGrid(spot, ivShort, shortYears, cfg.ScenarioGridSigma, bias * cfg.BiasDriftWeight);
 		decimal PnlAtTarget(decimal sT)
 		{
 			var longBS = OptionMath.BlackScholes(sT, longParsed.Strike, longAtShortYears, OptionMath.RiskFreeRate, ivLong, longParsed.CallPut);
@@ -1948,7 +2157,7 @@ internal static class CandidateScorer
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, beList);
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
 		var representativeIvEarly = (ivShort + ivLong) / 2m;
-		var tradingDaysToTargetCd = CountTradingDays(asOf, skel.TargetExpiry.Date);
+		var tradingDaysToTargetCd = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(spot, representativeIvEarly, tradingDaysToTargetCd, beList);
 		var expectedMoveBoundsCd = ComputeExpectedMoveBounds(spot, representativeIvEarly, tradingDaysToTargetCd);
 		var shortLegStrikesCd = ExtractShortLegStrikes(skel.Legs);
@@ -2099,7 +2308,7 @@ internal static class CandidateScorer
 		var ask = quote.Value.Ask;
 		var mid = (bid + ask) / 2m;
 
-		var years = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days) / 365.0;
+		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
 		var iv = ResolveIv(leg.Symbol, quotes, cfg.IvDefaultPct);
 
 		var debitPerShare = PriceForBuy(mid, ask, pricingMode);
@@ -2108,7 +2317,7 @@ internal static class CandidateScorer
 
 		var pop = LogNormalProbability(parsed.CallPut == "C" ? Direction.Above : Direction.Below, spot, breakeven, years, (double)iv);
 
-		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma);
+		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma, bias * cfg.BiasDriftWeight);
 		decimal PnlAtExpiry(decimal sT)
 		{
 			var intrinsic = parsed.CallPut == "C" ? Math.Max(0m, sT - parsed.Strike) : Math.Max(0m, parsed.Strike - sT);
@@ -2130,10 +2339,17 @@ internal static class CandidateScorer
 		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
-		var popFactor = ComputeProbabilityFactor(pop);
+		// LongCall/LongPut is a positive-skew lottery trade: low POP is the SHAPE of the trade, not
+		// a defect. ComputeProbabilityFactor was designed for credit structures where high POP is the
+		// goal and low POP signals a coin-flip — applying it to long premium multiplies an explicitly
+		// chosen low-probability bet by a 16× penalty, which makes long calls/puts permanently lose
+		// to credit spreads in a competing-structure scorer (the hybrid-mode failure mode). Skip it.
+		// Other guardrails on this candidate — friction in realizedEv, scaleFactor, balance, theta —
+		// still rank long premium against itself and against the bias-driven raw EV.
+		var popFactor = 1m;
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, [breakeven]);
-		var tradingDaysToTargetLc = CountTradingDays(asOf, skel.TargetExpiry.Date);
+		var tradingDaysToTargetLc = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
 		var expectedMoveBoundsLc = ComputeExpectedMoveBounds(spot, iv, tradingDaysToTargetLc);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.IvRealizedPremiumWeight);
 		var legGreeks = new[] { (Parsed: parsed, Iv: iv, IsLong: true) };
