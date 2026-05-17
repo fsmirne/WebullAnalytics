@@ -39,12 +39,17 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	private readonly HistoricalBarCache _bars;
 	private readonly BacktestIVProvider _iv;
 	private readonly double _riskFreeRate;
+	private readonly IReadOnlyDictionary<string, decimal>? _spotOverrides;
 
-	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double riskFreeRate)
+	/// <param name="spotOverrides">When supplied for a ticker, replaces the bar.open lookup for that
+	/// ticker. Used by <c>ai scan --theoretical</c> to evaluate a hypothetical spot at an asOf for which
+	/// no historical bar exists (next-business-day previews) or a stress scenario at any spot level.</param>
+	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double riskFreeRate, IReadOnlyDictionary<string, decimal>? spotOverrides = null)
 	{
 		_bars = bars;
 		_iv = iv;
 		_riskFreeRate = riskFreeRate;
+		_spotOverrides = spotOverrides;
 	}
 
 	public async Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers, CancellationToken cancellation)
@@ -58,6 +63,11 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		// is OTM at picking-time AND at settle-time, producing an unrealistic 100%-win-rate backtest.
 		foreach (var ticker in tickers)
 		{
+			if (_spotOverrides != null && _spotOverrides.TryGetValue(ticker, out var spotOverride))
+			{
+				underlyings[ticker] = spotOverride;
+				continue;
+			}
 			var bar = await _bars.GetBarAsync(ticker, asOf.Date, cancellation);
 			if (bar != null) underlyings[ticker] = bar.Open;
 		}
@@ -77,6 +87,11 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		foreach (var root in roots)
 		{
 			if (underlyings.ContainsKey(root)) continue;
+			if (_spotOverrides != null && _spotOverrides.TryGetValue(root, out var spotOverride))
+			{
+				underlyings[root] = spotOverride;
+				continue;
+			}
 			var bar = await _bars.GetBarAsync(root, asOf.Date, cancellation);
 			if (bar != null) underlyings[root] = bar.Open;
 		}
