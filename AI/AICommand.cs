@@ -180,12 +180,79 @@ internal sealed class AIScanSettings : AIMultiTickerSubcommandSettings
 	[Description("Override opener.topNPerTicker from ai-config.json.")]
 	public int? Top { get; set; }
 
+	[CommandOption("--theoretical")]
+	[Description("Bypass the live chain and price via Black-Scholes against an explicit spot. Use for pre-market / weekend planning. Requires --spot; --date defaults to the next business day.")]
+	public bool Theoretical { get; set; }
+
+	[CommandOption("--date <DATE>")]
+	[Description("With --theoretical: asOf date (YYYY-MM-DD). Defaults to the next business day.")]
+	public string? Date { get; set; }
+
+	[CommandOption("--spot <SPEC>")]
+	[Description("With --theoretical: underlying spot override(s). Format: TICKER:PRICE (e.g., SPXW:7450). Comma-separated for multiple tickers.")]
+	public string? Spot { get; set; }
+
+	[CommandOption("--starting-cash <AMOUNT>")]
+	[Description("With --theoretical: override account balance for sizing. Default: pulled from your live broker account.")]
+	public decimal? StartingCash { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 		if (Top.HasValue && Top.Value < 1) return ValidationResult.Error($"--top: must be ≥ 1, got {Top.Value}");
+
+		if (Theoretical)
+		{
+			if (string.IsNullOrWhiteSpace(Spot))
+				return ValidationResult.Error("--theoretical requires --spot TICKER:PRICE (no live chain to fall back to).");
+			foreach (var pair in Spot.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+			{
+				var parts = pair.Split(':', 2);
+				if (parts.Length != 2 || !decimal.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var price) || price <= 0m)
+					return ValidationResult.Error($"--spot: invalid entry '{pair}'. Expected TICKER:PRICE with PRICE > 0.");
+			}
+			if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
+				return ValidationResult.Error($"--date: expected YYYY-MM-DD, got '{Date}'");
+			if (StartingCash.HasValue && StartingCash.Value <= 0m)
+				return ValidationResult.Error($"--starting-cash: must be > 0, got {StartingCash.Value}");
+		}
+		else
+		{
+			if (Date != null || Spot != null)
+				return ValidationResult.Error("--date and --spot only apply with --theoretical.");
+		}
+
 		return ValidationResult.Success();
+	}
+
+	internal Dictionary<string, decimal> ParseSpotOverrides()
+	{
+		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		if (string.IsNullOrWhiteSpace(Spot)) return result;
+		foreach (var pair in Spot.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			var parts = pair.Split(':', 2);
+			result[parts[0].Trim()] = decimal.Parse(parts[1].Trim(), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture);
+		}
+		return result;
+	}
+
+	internal DateTime ResolveAsOf()
+	{
+		var date = Date != null
+			? DateTime.ParseExact(Date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture).Date
+			: NextBusinessDay(DateTime.Today);
+		// Stamp at 09:30 ET to match the backtest's per-step convention (HV/VIX lookups only use .Date,
+		// so the time is cosmetic — but the rendered banner reads cleaner with a real market-open time).
+		return date.Add(new TimeSpan(9, 30, 0));
+	}
+
+	private static DateTime NextBusinessDay(DateTime today)
+	{
+		var d = today.AddDays(1);
+		while (!MarketCalendar.IsOpen(d)) d = d.AddDays(1);
+		return d;
 	}
 }
 
@@ -199,10 +266,17 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		if (settings.Top.HasValue) config.Opener.TopNPerTicker = settings.Top.Value;
 
 		if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
-			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' quoteSource='{config.QuoteSource}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals}");
+			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' quoteSource='{config.QuoteSource}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals} theoretical={settings.Theoretical}");
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
+		return settings.Theoretical
+			? await RunTheoreticalAsync(settings, config, cancellation)
+			: await RunLiveAsync(settings, config, cancellation);
+	});
+
+	private static async Task<int> RunLiveAsync(AIScanSettings settings, AIConfig config, CancellationToken cancellation)
+	{
 		var positions = AIContext.BuildLivePositionSource(config);
 		var quotes = AIContext.BuildLiveQuoteSource(config);
 
@@ -242,7 +316,87 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
 		return 0;
-	});
+	}
+
+	/// <summary>Theoretical scan: same opener pipeline as the live path, but the live quote source is
+	/// replaced with the backtest's Black-Scholes pricer fed by an explicit spot override. Used to preview
+	/// what the opener would propose at a given (asOf, spot) without needing a live chain — e.g. Sunday
+	/// evening before a Monday open, or a "what if SPX gaps to 7500" stress check. No live positions or
+	/// account state are pulled; the user supplies <c>--starting-cash</c> for proposal sizing.</summary>
+	private static async Task<int> RunTheoreticalAsync(AIScanSettings settings, AIConfig config, CancellationToken cancellation)
+	{
+		var spotOverrides = settings.ParseSpotOverrides();
+		var missing = config.Tickers.Where(t => !spotOverrides.ContainsKey(t)).ToList();
+		if (missing.Count > 0)
+		{
+			Console.Error.WriteLine($"Error: --spot must cover every configured ticker. Missing: {string.Join(", ", missing)}.");
+			return 1;
+		}
+
+		var asOf = settings.ResolveAsOf();
+		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
+
+		var bars = new Backtest.HistoricalBarCache(offline: true);
+		var vix = new Backtest.HistoricalVixCache(offline: true);
+		var ivProvider = new Backtest.BacktestIVProvider(vix, bars);
+		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, spotOverrides: spotOverrides);
+		var priceCache = new Replay.HistoricalPriceCache();
+
+		// Cash sizing: prefer the live broker balance so proposals reflect what the user could actually
+		// trade tomorrow. --starting-cash is an explicit override (e.g. "what if I had $50k instead?")
+		// or a fallback when the broker is unreachable.
+		decimal cash, accountValue;
+		string cashSource;
+		if (settings.StartingCash.HasValue)
+		{
+			cash = settings.StartingCash.Value;
+			accountValue = settings.StartingCash.Value;
+			cashSource = "override";
+		}
+		else
+		{
+			try
+			{
+				var account = AIContext.ResolveTradeAccount(config);
+				var livePositions = new LivePositionSource(account);
+				(cash, accountValue) = await livePositions.GetAccountStateAsync(asOf, cancellation);
+				cashSource = "live broker";
+			}
+			catch (Exception ex)
+			{
+				Console.Error.WriteLine($"Error: could not fetch live account state ({ex.Message}). Pass --starting-cash <AMOUNT> to bypass the broker.");
+				return 1;
+			}
+		}
+
+		var spotLine = string.Join(", ", spotOverrides.OrderBy(kv => kv.Key).Select(kv => $"{Markup.Escape(kv.Key)} @ ${kv.Value:N2}"));
+		AnsiConsole.MarkupLine($"[bold yellow]Theoretical scan[/]: {spotLine} | asOf {asOf:yyyy-MM-dd HH:mm} ET | cash ${cash:N2} ({cashSource})");
+		AnsiConsole.MarkupLine("[dim]Black-Scholes pricing; VIX/HV from most recent settled data; no live chain. For planning only.[/]");
+		AnsiConsole.WriteLine();
+
+		// No live positions in theoretical mode — we score from a clean book regardless of any real
+		// holdings the broker reports.
+		var openPositions = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase);
+
+		var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, asOf, quotes, config, cancellation);
+		var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(
+			tickerSet, priceCache, config.Rules.OpportunisticRoll.TechnicalFilter, asOf, cancellation);
+
+		var ctx = new EvaluationContext(asOf, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
+
+		var openCount = 0;
+		if (config.Opener.Enabled && settings.EmitOpenProposals)
+		{
+			var openSink = new OpenProposalSink(config.Log, mode: "once", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, backtestMode: true);
+			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
+			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
+			openCount = openResults.Count;
+		}
+
+		AnsiConsole.MarkupLine($"[dim]Theoretical tick complete: {openCount} open proposal(s) emitted[/]");
+		return 0;
+	}
 }
 
 /// <summary>`ai replay` — historical replay against orders.jsonl with agreement analysis.</summary>

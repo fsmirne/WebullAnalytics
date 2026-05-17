@@ -37,7 +37,8 @@ internal static class RiskDiagnosticBuilder
 		TrendSnapshot? trend,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null,
 		SentimentSnapshot? sentiment = null,
-		TickerEvents? events = null)
+		TickerEvents? events = null,
+		bool isTheoretical = false)
 	{
 		var longLegs = legs.Where(l => l.IsLong).ToList();
 		var shortLegs = legs.Where(l => !l.IsLong).ToList();
@@ -225,7 +226,8 @@ internal static class RiskDiagnosticBuilder
 			TheoreticalPremiumRatio: theoreticalPremiumRatio,
 			MarketSentimentScore: sentiment?.Score,
 			MarketSentimentRating: sentiment?.Rating,
-			MarketSentimentDelta1Week: sentiment?.Delta1Week);
+			MarketSentimentDelta1Week: sentiment?.Delta1Week,
+			IsTheoretical: isTheoretical);
 	}
 
 	private static (string StructureLabel, string DirectionalBias) ClassifyStructure(

@@ -144,6 +144,13 @@ internal static class RiskDiagnosticRenderer
 
 	private static string FormatPremium(RiskDiagnostic d)
 	{
+		// In theoretical mode (backtest / ai scan --theoretical) the quote source is Black-Scholes, so the
+		// "Market*" fields are already BS prices. The "Theoretical*" recompute uses a min-1-day DTE floor
+		// (see RiskDiagnosticBuilder.cs) which produces a misleading number for 0DTE setups. Render a
+		// single "theoretical →" line using the BS prices the scorer actually used.
+		if (d.IsTheoretical && d.MarketLongPremiumPaid.HasValue && d.MarketShortPremiumReceived.HasValue && d.MarketNetPremiumPerShare.HasValue)
+			return $"theoretical → long ${d.MarketLongPremiumPaid.Value.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.MarketShortPremiumReceived.Value.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatioDetailed(d.MarketPremiumRatio)}, net {FormatDebitCredit(d.MarketNetPremiumPerShare.Value)}";
+
 		if (d.MarketLongPremiumPaid.HasValue && d.MarketShortPremiumReceived.HasValue && d.MarketNetPremiumPerShare.HasValue && d.TheoreticalLongPremiumPaid.HasValue && d.TheoreticalShortPremiumReceived.HasValue && d.TheoreticalNetPremiumPerShare.HasValue)
 			return $"market → long ${d.MarketLongPremiumPaid.Value.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.MarketShortPremiumReceived.Value.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatioDetailed(d.MarketPremiumRatio)}, net {FormatDebitCredit(d.MarketNetPremiumPerShare.Value)} | theoretical → long ${d.TheoreticalLongPremiumPaid.Value.ToString("F2", CultureInfo.InvariantCulture)} / short ${d.TheoreticalShortPremiumReceived.Value.ToString("F2", CultureInfo.InvariantCulture)}{FormatRatioDetailed(d.TheoreticalPremiumRatio)}, net {FormatDebitCredit(d.TheoreticalNetPremiumPerShare.Value)}";
 
