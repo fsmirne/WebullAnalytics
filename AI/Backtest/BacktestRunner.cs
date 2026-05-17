@@ -49,7 +49,7 @@ internal sealed class BacktestRunner
 	{
 		var tickerSet = new HashSet<string>(_config.Tickers, StringComparer.OrdinalIgnoreCase);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(_config), _config);
-		var openEvaluator = new OpenCandidateEvaluator(_config, _quotes, SuggestionPricing.Mid);
+		var openEvaluator = new OpenCandidateEvaluator(_config, _quotes, SuggestionPricing.Mid, _closeCache, backtestMode: true);
 
 		var equityCurve = new List<(DateTime Date, decimal Equity)>();
 		var startingCash = _book.Cash;

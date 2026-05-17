@@ -50,7 +50,6 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	public async Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers, CancellationToken cancellation)
 	{
 		var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 
 		// Use the day's OPEN as the spot price the opener sees: the daily simulator step is
 		// conceptually "morning of day X" — strikes get picked relative to the open, the position
@@ -63,29 +62,49 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			if (bar != null) underlyings[ticker] = bar.Open;
 		}
 
+		// Parse once, collect all (sym, parsed) pairs, and resolve any root spots not yet in underlyings.
+		// Pre-parsing avoids reparsing inside the parallel loop and lets us load all root spots and ATM
+		// IVs serially up front — both are async + cache-backed, and parallelizing those would compete
+		// for the same in-memory dictionary on first miss.
+		var parsedSymbols = new List<(string Symbol, OptionParsed Parsed)>(optionSymbols.Count);
 		foreach (var sym in optionSymbols)
 		{
-			var parsed = ParsingHelpers.ParseOptionSymbol(sym);
-			if (parsed == null) continue;
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p != null) parsedSymbols.Add((sym, p));
+		}
 
-			if (!underlyings.TryGetValue(parsed.Root, out var spot))
-			{
-				var bar = await _bars.GetBarAsync(parsed.Root, asOf.Date, cancellation);
-				if (bar == null) continue;
-				spot = bar.Open;
-				underlyings[parsed.Root] = spot;
-			}
+		var roots = parsedSymbols.Select(t => t.Parsed.Root).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+		foreach (var root in roots)
+		{
+			if (underlyings.ContainsKey(root)) continue;
+			var bar = await _bars.GetBarAsync(root, asOf.Date, cancellation);
+			if (bar != null) underlyings[root] = bar.Open;
+		}
 
-			var iv = await _iv.GetIVAsync(parsed.Root, asOf, parsed.Strike, spot, parsed.CallPut, cancellation);
+		// One ATM IV lookup per (root, asOf). The smile factor in BacktestIVProvider.ApplySmile is a
+		// pure function of (atm, strike, spot, ticker) so the per-strike work fans out below without
+		// touching the VIX/HV caches again.
+		var atmByRoot = new Dictionary<string, decimal?>(StringComparer.OrdinalIgnoreCase);
+		foreach (var root in roots)
+			atmByRoot[root] = await _iv.GetAtmIVAsync(root, asOf, cancellation);
+
+		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		foreach (var (sym, parsed) in parsedSymbols)
+		{
+			if (!underlyings.TryGetValue(parsed.Root, out var spot)) continue;
+			atmByRoot.TryGetValue(parsed.Root, out var atm);
+
 			decimal price;
-			if (iv.HasValue)
+			decimal? iv = null;
+			if (atm.HasValue)
 			{
+				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot);
 				var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
 				// 0DTE: at the daily step we're conceptually at the open of the trading day, not at 15:45 —
 				// price as if a full session of theta remains. Settlement (Expire) uses intrinsic so the
 				// time component is collected, not double-counted.
 				var timeYears = dte <= 0 ? ZeroDteTimeYears : dte / 365.0;
-				price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv.Value, parsed.CallPut);
+				price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv!.Value, parsed.CallPut);
 			}
 			else
 			{

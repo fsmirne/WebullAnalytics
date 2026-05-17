@@ -16,12 +16,21 @@ internal sealed class OpenCandidateEvaluator
 	private readonly AIConfig _config;
 	private readonly IQuoteSource _quotes;
 	private readonly string _pricingMode;
+	private readonly HistoricalPriceCache _priceCache;
+	private readonly bool _backtestMode;
 
-	public OpenCandidateEvaluator(AIConfig config, IQuoteSource quotes, string pricingMode = SuggestionPricing.Mid)
+	/// <param name="priceCache">Shared close-price cache. Pass the runner-owned instance so the in-memory
+	/// per-ticker dictionary survives across ticks/steps instead of being rebuilt (and the CSV re-read) each call.</param>
+	/// <param name="backtestMode">When true, skips network calls to <see cref="EventCalendarLoader"/> and
+	/// <see cref="RiskDiagnostics.TrendFetcher"/>. Both fetch current Yahoo state regardless of <c>asOf</c>,
+	/// which introduces lookahead bias in backtests and accounts for most of the per-step wall time.</param>
+	public OpenCandidateEvaluator(AIConfig config, IQuoteSource quotes, string pricingMode = SuggestionPricing.Mid, HistoricalPriceCache? priceCache = null, bool backtestMode = false)
 	{
 		_config = config;
 		_quotes = quotes;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
+		_priceCache = priceCache ?? new HistoricalPriceCache();
+		_backtestMode = backtestMode;
 	}
 
 	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation)
@@ -159,11 +168,10 @@ internal sealed class OpenCandidateEvaluator
 		var needCloses = cfg.VolatilityFitWeight > 0m || cfg.WhipsawWeight > 0m || cfg.BiasCalibrationLookbackDays > 0;
 		if (needCloses)
 		{
-			var priceCache = new HistoricalPriceCache();
 			var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, Math.Max(4, cfg.BiasCalibrationLookbackDays + 2));
 			foreach (var ticker in _config.Tickers)
 			{
-				var closes = await priceCache.GetRecentClosesAsync(ticker, lookback, ctx.Now, cancellation);
+				var closes = await _priceCache.GetRecentClosesAsync(ticker, lookback, ctx.Now, cancellation);
 				var hv30 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
 				if (hv30.HasValue && hv30.Value > 0m)
 					historicalVolByTicker[ticker] = hv30.Value;
@@ -216,8 +224,12 @@ internal sealed class OpenCandidateEvaluator
 		// Scheduled-catalyst calendar (earnings + ex-div) per ticker. Built once per scan; resolved
 		// per-ticker inside the per-ticker loop. The loader returns EventCalendar.Empty when the
 		// feature is disabled or when Yahoo is unreachable — the scorer treats null events as
-		// "no veto" so a calendar outage never silences the opener.
-		var eventCalendar = await EventCalendarLoader.LoadAsync(_config.Tickers, cfg.Events, ctx.Now, cancellation);
+		// "no veto" so a calendar outage never silences the opener. In backtest mode we skip the
+		// Yahoo fetch entirely: it returns current state regardless of asOf (lookahead bias) and
+		// adds a sequential HTTP round-trip to every simulated trading day.
+		var eventCalendar = _backtestMode
+			? EventCalendar.Empty
+			: await EventCalendarLoader.LoadAsync(_config.Tickers, cfg.Events, ctx.Now, cancellation);
 
 		foreach (var tickerGroup in allSkeletons.GroupBy(s => s.Ticker))
 		{
@@ -260,28 +272,63 @@ internal sealed class OpenCandidateEvaluator
 
 			var scoredByStructure = new Dictionary<OpenStructureKind, List<OpenProposal>>();
 
-			foreach (var skel in tickerGroup)
+			if (debug)
 			{
-				var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
-				if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
+				// Debug path stays serial: the per-skeleton rejection counters and Console.Error writes
+				// need ordered, single-threaded access. Scoring volume in debug mode is the cost of getting
+				// the diagnostic output, which is the whole point of running with --debug.
+				foreach (var skel in tickerGroup)
 				{
-					var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
-					p = p with { FinalScore = adjusted };
-				}
-				if (p == null)
-				{
-					if (debug && (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical))
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
+					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
-						var reason = CandidateScorer.DiagnoseShortVerticalRejection(skel, mergedQuotes, out var detail, ctx.Now, cfg, tickerEvents, spot);
-						shortVerticalRejects![reason] = shortVerticalRejects.GetValueOrDefault(reason) + 1;
-						if (debugRejectLinesLeft-- > 0)
-							Console.Error.WriteLine($"[debug] {skel.Ticker} {skel.StructureKind} dropped: {reason} ({detail})");
+						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
+						p = p with { FinalScore = adjusted };
 					}
-					continue;
+					if (p == null)
+					{
+						if (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical)
+						{
+							var reason = CandidateScorer.DiagnoseShortVerticalRejection(skel, mergedQuotes, out var detail, ctx.Now, cfg, tickerEvents, spot);
+							shortVerticalRejects![reason] = shortVerticalRejects.GetValueOrDefault(reason) + 1;
+							if (debugRejectLinesLeft-- > 0)
+								Console.Error.WriteLine($"[debug] {skel.Ticker} {skel.StructureKind} dropped: {reason} ({detail})");
+						}
+						continue;
+					}
+					if (!scoredByStructure.TryGetValue(p.StructureKind, out var list))
+						scoredByStructure[p.StructureKind] = list = new List<OpenProposal>();
+					list.Add(p);
 				}
-				if (!scoredByStructure.TryGetValue(p.StructureKind, out var list))
-					scoredByStructure[p.StructureKind] = list = new List<OpenProposal>();
-				list.Add(p);
+			}
+			else
+			{
+				// CandidateScorer.Score dominates per-day wall time once Yahoo I/O is out of the picture
+				// (multiple BS calls, scenario-grid P&L, realized-expectancy with friction per candidate;
+				// ~150–300 candidates per day on SPXW 0DTE). It's a pure function over its inputs, so fan
+				// out across cores. Fixed-size array + Parallel.For preserves original ordering, keeping
+				// scoredByStructure insertion order — and downstream tie-breaking in RankForOutput —
+				// bit-identical to the serial path.
+				var skels = tickerGroup.ToList();
+				var results = new OpenProposal?[skels.Count];
+				Parallel.For(0, skels.Count, new ParallelOptions { CancellationToken = cancellation }, i =>
+				{
+					var skel = skels[i];
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
+					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
+					{
+						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
+						p = p with { FinalScore = adjusted };
+					}
+					results[i] = p;
+				});
+				foreach (var p in results)
+				{
+					if (p == null) continue;
+					if (!scoredByStructure.TryGetValue(p.StructureKind, out var list))
+						scoredByStructure[p.StructureKind] = list = new List<OpenProposal>();
+					list.Add(p);
+				}
 			}
 
 			if (debug && shortVerticalRejects != null && shortVerticalRejects.Count > 0)
@@ -328,10 +375,16 @@ internal sealed class OpenCandidateEvaluator
 		}
 
 		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker; sentiment is
-		// market-wide so we reuse the snapshot fetched at the top of Phase C (if any).
+		// market-wide so we reuse the snapshot fetched at the top of Phase C (if any). Skipped in
+		// backtest for the same reasons as the event calendar above: Yahoo returns current state, and
+		// each call adds an HTTP round-trip to every step. Diagnostic builders treat null trend as
+		// "unknown" so the proposal still scores and renders.
 		var trendByTicker = new Dictionary<string, TrendSnapshot?>(StringComparer.OrdinalIgnoreCase);
-		foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
-			trendByTicker[ticker] = await TrendFetcher.FetchAsync(ticker, ctx.Now, cancellation);
+		if (!_backtestMode)
+		{
+			foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
+				trendByTicker[ticker] = await TrendFetcher.FetchAsync(ticker, ctx.Now, cancellation);
+		}
 		SentimentSnapshot? diagnosticSentiment = null;
 		if (sentimentScore.HasValue)
 			diagnosticSentiment = await FearGreedClient.FetchAsync(ctx.Now, cancellation);
