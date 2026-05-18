@@ -621,12 +621,14 @@ internal sealed class OpenCandidateEvaluator
 		var cache = GetOrCreateIntradayCache();
 		if (cache == null) return null;
 
-		// Explicit config override wins; otherwise fall back to the central UnderlyingResolver
-		// (SPXW → SPX, etc). Lets the user leave the dataSourceTickers map empty for well-known
-		// option roots and only fill it in when they have a non-standard mapping.
+		// Strategy ticker IS the cache key. The fetcher handles any source-mapping internally
+		// (SPXW transparently merges SPX RTH + SPY pre-market in SPX scale, for example) and writes
+		// to data/intraday/<strategyTicker>/ — keeps the on-disk layout aligned with the daily-close
+		// cache at data/history/<strategyTicker>.csv. Config-supplied dataSourceTickers still wins
+		// for non-standard mappings.
 		var chartTicker = tapeCfg.DataSourceTickers.TryGetValue(strategyTicker, out var mapped) && !string.IsNullOrWhiteSpace(mapped)
 			? mapped
-			: UnderlyingResolver.ResolveUnderlying(strategyTicker);
+			: strategyTicker;
 
 		var interval = ParseBarInterval(tapeCfg.BarIntervalCode);
 		var toUtc = DateTimeOffset.UtcNow;
