@@ -1200,8 +1200,8 @@ Composite: `bias_intraday = (gap · gw + o2n · ow + vwap · vw) / (gw + ow + vw
 
 Pipeline mechanics:
 
-- **Bar source.** Webull's `/api/quote/charts/query` endpoint, fetched once per scan tick. Disk-cached at `data/intraday/<TICKER>/<yyyy-mm-dd>.csv` — today's file grows during the session; past days are sealed. The chart endpoint uses a *different* tickerId namespace than the option-chain endpoint for cash indexes (the SPX option-chain id `913354362` is the chart id for the S&P 500; chain-namespace `913324359` is actually SPXC, a $200 NYSE stock). Chart-namespace ids live in `WebullChartsClient.ChartKnownTickerIds`; chain-namespace ids stay in `WebullOptionsClient.KnownTickerIds`.
-- **Underlying resolution.** `Core/UnderlyingResolver` maps option roots to their underlying chart symbol (SPXW → SPX) automatically. Override via `opener.intradayTape.dataSourceTickers` for non-standard mappings.
+- **Bar source.** Webull's `/api/quote/charts/query` endpoint, fetched once per scan tick. Disk-cached at `data/intraday/<TICKER>/<yyyy-mm-dd>.csv` (keyed by the *strategy ticker*, matching `data/history/<TICKER>.csv` for daily closes). Today's file grows during the session; past days are sealed. The chart endpoint uses a *different* tickerId namespace than the option-chain endpoint for cash indexes (chain-namespace `913324359` is actually SPXC stock, not the index). Chart-namespace ids live in `WebullChartsClient.ChartKnownTickerIds`; chain-namespace ids stay in `WebullOptionsClient.KnownTickerIds`.
+- **Transparent SPY pre-market proxy for the SPX family.** SPXW and SPX route through a hybrid path: SPX RTH bars (no extended hours — the cash index doesn't trade pre/post-market) merged with SPY extended-hours bars scaled into SPX dollars via `ratio = SPX_prev_close / SPY_prev_close`. The merged series is in SPX scale throughout — the indicator and cache never see SPY, no separate SPY folder is created, and the resulting bars land in `data/intraday/SPXW/`. On SPY resolution failure or insufficient ratio data, falls back to SPX RTH only.
 - **Backtest gating.** Hard-disabled in backtest mode regardless of `intradayTapeWeight` — minute-bar history isn't available retroactively (Webull's m1 only covers ~5 trading days). The 16-month backtest path is bit-identical to before.
 - **Prev-close source.** Derived from the bar series itself — yesterday's last bar's close in the same intraday source. Necessary because the daily-Yahoo close and the intraday-Webull bars may not be denominated identically (gap math becomes meaningless when scales mismatch).
 - **Shadow logging.** Every per-ticker bias-blend attempt appends one JSONL line to `data/ai-bias-shadow.jsonl` with macro, intraday (and its sub-components), weight, and blended. Use to validate the signal offline before raising `intradayTapeWeight` above a near-zero value.
@@ -1223,8 +1223,8 @@ Pipeline mechanics:
 | `openToNowWeight` | `2.0` | Weight on the open-to-now-drift sub-component. The primary intraday trend signal. |
 | `vwapDeviationWeight` | `1.0` | Weight on the VWAP-deviation sub-component. |
 | `includeExtended` | `false` | Request pre/post-market bars where the symbol supports them. Cash indexes (SPX, NDX) ignore this and return RTH only; ETFs and single names honor it. |
-| `dataSourceTickers` | `{}` | Per-strategy-ticker override of the chart symbol. Falls back to `UnderlyingResolver.ResolveUnderlying`. Example: `{"SPXW": "SPY"}` routes SPXW intraday through SPY (useful for pre-market context, where SPX has none). |
-| `preMarketProxyTickers` | `{}` | Reserved for future use. Currently no auto-switching logic — set `dataSourceTickers` to the proxy directly if you want pre-market coverage. |
+| `dataSourceTickers` | `{}` | Per-strategy-ticker override of the chart symbol. Empty by default — the SPX family auto-merges SPY pre-market without configuration. Set to e.g. `{"SPXW": "QQQ"}` only when you want a non-standard chart source for a strategy ticker. |
+| `preMarketProxyTickers` | `{}` | Reserved for future per-ticker proxy customization. The SPX family is already handled transparently. |
 
 #### 3. Factor stack — `tech-adjusted → final`
 

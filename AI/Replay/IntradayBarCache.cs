@@ -31,6 +31,11 @@ internal sealed class IntradayBarCache
 	private readonly TimeSpan _freshnessThreshold;
 	private readonly Dictionary<(string Ticker, DateTime NyDate), IReadOnlyList<MinuteBar>> _memory = new();
 	private readonly object _memoryLock = new();
+	// Past dates already probed by the fetcher in this process and confirmed to have no data
+	// (weekend, holiday, outside Webull's m1 window). Prevents redundant per-date fetches when
+	// GetBarsAsync enumerates a multi-day window: one fetch's response can populate several dates,
+	// but enumeration would otherwise re-fetch for each date the response didn't cover.
+	private readonly HashSet<(string Ticker, DateTime NyDate)> _knownEmptyPastDates = new();
 
 	public IntradayBarCache(IntradayBarFetcher fetcher, string? cacheDir = null, TimeSpan? freshnessThreshold = null, Func<DateTimeOffset>? utcNow = null)
 	{
@@ -76,11 +81,15 @@ internal sealed class IntradayBarCache
 		//   - today's date: refetch when stale (cached bars older than freshness threshold)
 		//   - past date with no file: best-effort backfill within Webull's ~5-day m1 window
 		//   - past date with file present: sealed, never refetched
+		//   - past date already confirmed empty in this process: skip (avoids re-fetching weekends
+		//     and holidays for every enumerated day in the lookback window)
 		//   - future date: skip (data doesn't exist)
 		var todayNy = TodayNyDate();
+		bool isKnownEmpty;
+		lock (_memoryLock) { isKnownEmpty = _knownEmptyPastDates.Contains(key); }
 		var needFetch =
 			(nyDate == todayNy && !IsFresh(bars, nyDate))
-			|| (nyDate < todayNy && bars.Count == 0 && nyDate >= todayNy.AddDays(-5));
+			|| (nyDate < todayNy && bars.Count == 0 && nyDate >= todayNy.AddDays(-5) && !isKnownEmpty);
 
 		if (needFetch)
 		{
@@ -100,15 +109,34 @@ internal sealed class IntradayBarCache
 			{
 				// Webull returns bars that may span multiple NY dates. Group + write each date so a
 				// single cold-start round trip seals yesterday's file too.
-				var byDate = fetched.GroupBy(b => NyDateOf(b.Timestamp));
+				var byDate = fetched.GroupBy(b => NyDateOf(b.Timestamp)).ToList();
+				var datesWithData = new HashSet<DateTime>();
 				foreach (var group in byDate)
 				{
+					datesWithData.Add(group.Key);
 					var existing = group.Key == nyDate ? bars : (ReadFromMemoryOrDisk(ticker, group.Key));
 					var merged = Merge(existing, group.ToList());
 					WriteDiskFile(ticker, group.Key, merged);
 					lock (_memoryLock) { _memory[(ticker, group.Key)] = merged; }
 					if (group.Key == nyDate) bars = merged;
 				}
+
+				// Mark every past date in the backfill window that wasn't covered by this fetch as
+				// known-empty so the next enumeration of the same lookback skips them.
+				lock (_memoryLock)
+				{
+					for (var d = todayNy.AddDays(-5); d < todayNy; d = d.AddDays(1))
+					{
+						if (!datesWithData.Contains(d) && ReadDiskFile(ticker, d).Count == 0)
+							_knownEmptyPastDates.Add((ticker, d));
+					}
+				}
+			}
+			else if (nyDate < todayNy)
+			{
+				// Fetch returned nothing and we were asking for a past date: confirm it as empty
+				// so subsequent enumeration calls in this process don't keep trying.
+				lock (_memoryLock) { _knownEmptyPastDates.Add(key); }
 			}
 		}
 
