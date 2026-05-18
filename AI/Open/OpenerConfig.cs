@@ -337,16 +337,6 @@ internal sealed class OpenerRealizedExpectancyConfig
 /// shapes how the intraday signal itself is computed from the underlying bar series.</summary>
 internal sealed class OpenerIntradayTapeConfig
 {
-	/// <summary>Maps a strategy ticker (e.g. <c>"SPXW"</c>) to the symbol used to fetch intraday bars
-	/// (e.g. <c>"SPX"</c>). Required for option roots whose underlying differs from the chart symbol.
-	/// When the strategy ticker isn't in the map, it's used as the chart symbol directly. Empty by
-	/// default — explicit per-ticker mapping is required.</summary>
-	[JsonPropertyName("dataSourceTickers")] public Dictionary<string, string> DataSourceTickers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-
-	/// <summary>Per-strategy-ticker fallback symbol for pre-market context. Used when the primary
-	/// chart symbol has no extended-hours data (cash indexes like SPX). Empty by default.</summary>
-	[JsonPropertyName("preMarketProxyTickers")] public Dictionary<string, string> PreMarketProxyTickers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-
 	/// <summary>Bar interval as Webull's chart-endpoint type code (<c>m1</c>, <c>m5</c>, <c>m15</c>,
 	/// <c>m30</c>, <c>h1</c>, <c>d1</c>). Default <c>m1</c> for 0DTE-grade responsiveness; coarser
 	/// intervals are useful for multi-day-horizon strategies.</summary>

@@ -621,14 +621,11 @@ internal sealed class OpenCandidateEvaluator
 		var cache = GetOrCreateIntradayCache();
 		if (cache == null) return null;
 
-		// Strategy ticker IS the cache key. The fetcher handles any source-mapping internally
-		// (SPXW transparently merges SPX RTH + SPY pre-market in SPX scale, for example) and writes
-		// to data/intraday/<strategyTicker>/ — keeps the on-disk layout aligned with the daily-close
-		// cache at data/history/<strategyTicker>.csv. Config-supplied dataSourceTickers still wins
-		// for non-standard mappings.
-		var chartTicker = tapeCfg.DataSourceTickers.TryGetValue(strategyTicker, out var mapped) && !string.IsNullOrWhiteSpace(mapped)
-			? mapped
-			: strategyTicker;
+		// Strategy ticker IS the cache key. The fetcher handles source-mapping internally — SPXW
+		// transparently merges SPX RTH + SPY pre-market in SPX scale, for example — and writes to
+		// data/intraday/<strategyTicker>/, keeping the on-disk layout aligned with the daily-close
+		// cache at data/history/<strategyTicker>.csv.
+		var chartTicker = strategyTicker;
 
 		var interval = ParseBarInterval(tapeCfg.BarIntervalCode);
 		var toUtc = DateTimeOffset.UtcNow;
