@@ -184,12 +184,16 @@ internal sealed class AIScanSettings : AIMultiTickerSubcommandSettings
 	[Description("Bypass the live chain and price via Black-Scholes against an explicit spot. Use for pre-market / weekend planning. Requires --spot; --date defaults to the next business day.")]
 	public bool Theoretical { get; set; }
 
+	[CommandOption("--premarket")]
+	[Description("Live chain but underlying spot is back-solved from put-call parity on the ATM straddle. Use when the chain is active but the underlying quote hasn't ticked yet (e.g., SPXW before 09:30 ET). Per-ticker --spot overrides win.")]
+	public bool Premarket { get; set; }
+
 	[CommandOption("--date <DATE>")]
 	[Description("With --theoretical: asOf date (YYYY-MM-DD). Defaults to the next business day.")]
 	public string? Date { get; set; }
 
 	[CommandOption("--spot <SPEC>")]
-	[Description("With --theoretical: underlying spot override(s). Format: TICKER:PRICE (e.g., SPXW:7450). Comma-separated for multiple tickers.")]
+	[Description("Underlying spot override(s). Format: TICKER:PRICE (e.g., SPXW:7450). Comma-separated for multiple tickers. Required with --theoretical; optional in live mode (overrides the chain's reported spot).")]
 	public string? Spot { get; set; }
 
 	[CommandOption("--starting-cash <AMOUNT>")]
@@ -202,16 +206,21 @@ internal sealed class AIScanSettings : AIMultiTickerSubcommandSettings
 		if (!baseResult.Successful) return baseResult;
 		if (Top.HasValue && Top.Value < 1) return ValidationResult.Error($"--top: must be ≥ 1, got {Top.Value}");
 
-		if (Theoretical)
+		if (Spot != null)
 		{
-			if (string.IsNullOrWhiteSpace(Spot))
-				return ValidationResult.Error("--theoretical requires --spot TICKER:PRICE (no live chain to fall back to).");
 			foreach (var pair in Spot.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 			{
 				var parts = pair.Split(':', 2);
 				if (parts.Length != 2 || !decimal.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var price) || price <= 0m)
 					return ValidationResult.Error($"--spot: invalid entry '{pair}'. Expected TICKER:PRICE with PRICE > 0.");
 			}
+		}
+
+		if (Theoretical)
+		{
+			if (Premarket) return ValidationResult.Error("--premarket and --theoretical are mutually exclusive (theoretical needs no chain; premarket back-solves spot from one).");
+			if (string.IsNullOrWhiteSpace(Spot))
+				return ValidationResult.Error("--theoretical requires --spot TICKER:PRICE (no live chain to fall back to).");
 			if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
 				return ValidationResult.Error($"--date: expected YYYY-MM-DD, got '{Date}'");
 			if (StartingCash.HasValue && StartingCash.Value <= 0m)
@@ -219,8 +228,8 @@ internal sealed class AIScanSettings : AIMultiTickerSubcommandSettings
 		}
 		else
 		{
-			if (Date != null || Spot != null)
-				return ValidationResult.Error("--date and --spot only apply with --theoretical.");
+			if (Date != null) return ValidationResult.Error("--date only applies with --theoretical.");
+			if (StartingCash.HasValue) return ValidationResult.Error("--starting-cash only applies with --theoretical.");
 		}
 
 		return ValidationResult.Success();
@@ -290,6 +299,16 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 		var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
 
+		// Spot overrides: --spot pins explicit values (premarket SPXW etc.); --premarket back-solves from
+		// put-call parity on the ATM straddle for any ticker without an explicit pin. The underlying quote
+		// from the chain is replaced before the EvaluationContext is built so the opener scores against the
+		// caller's intended spot. Note: phase-2 hypothetical strike enumeration in FetchQuotesWithHypotheticals
+		// runs against the broker's reported spot — for managed-position scenarios with a wildly stale
+		// underlying, enumerated strike brackets may be slightly off-target, but proposal pricing/scoring
+		// still uses the overridden spot.
+		quoteSnapshot = await ApplySpotOverridesAsync(settings, config, quoteSnapshot, quotes, now, cancellation);
+		if (quoteSnapshot == null) return 1;
+
 		var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(
 			tickerSet, priceCache, config.Rules.OpportunisticRoll.TechnicalFilter, now, cancellation);
 
@@ -316,6 +335,145 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
 		return 0;
+	}
+
+	/// <summary>Applies --spot and --premarket overrides to the live quote snapshot's Underlyings map.
+	/// --spot wins per ticker; --premarket back-solves remaining tickers via put-call parity on the nearest-expiry
+	/// ATM straddle in the fetched chain. Returns the merged snapshot, or null if --premarket failed to derive
+	/// a spot for a configured ticker (no viable straddle in the chain — usually a chain-fetch problem).
+	/// When --premarket runs and the snapshot has no contracts for a configured ticker (no open positions, so
+	/// FetchQuotesWithHypotheticals short-circuited), this method bootstraps a chain fetch using one placeholder
+	/// OCC symbol per ticker — same trick OpenCandidateEvaluator uses — so parity has data to work with.</summary>
+	private static async Task<QuoteSnapshot?> ApplySpotOverridesAsync(AIScanSettings settings, AIConfig config, QuoteSnapshot snapshot, IQuoteSource quotes, DateTime now, CancellationToken cancellation)
+	{
+		var explicitOverrides = settings.ParseSpotOverrides();
+		if (explicitOverrides.Count == 0 && !settings.Premarket) return snapshot;
+
+		var merged = new Dictionary<string, decimal>(snapshot.Underlyings, StringComparer.OrdinalIgnoreCase);
+		var options = snapshot.Options;
+		var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+		foreach (var (ticker, spot) in explicitOverrides)
+		{
+			merged[ticker] = spot;
+			sources[ticker] = "--spot";
+		}
+
+		if (settings.Premarket)
+		{
+			var debug = string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase);
+			var needsParity = config.Tickers.Where(t => !explicitOverrides.ContainsKey(t)).ToList();
+			if (needsParity.Count > 0)
+			{
+				// Ensure the snapshot has contracts for every ticker we need parity on. Webull's live source
+				// returns the full chain for any single OCC symbol, so one placeholder per ticker suffices.
+				var tickersWithoutContracts = needsParity.Where(t => !options.Any(kv => ParsingHelpers.ParseOptionSymbol(kv.Key) is { } p && string.Equals(p.Root, t, StringComparison.OrdinalIgnoreCase))).ToList();
+				if (tickersWithoutContracts.Count > 0)
+				{
+					var placeholders = new HashSet<string>(tickersWithoutContracts.Select(t => MatchKeys.OccSymbol(t, now.Date.AddDays(7), 1m, "C")), StringComparer.OrdinalIgnoreCase);
+					var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
+					if (debug) Console.Error.WriteLine($"[debug] --premarket: bootstrap-fetching chain for {string.Join(",", tickersWithoutContracts)}.");
+					var boot = await quotes.GetQuotesAsync(now, placeholders, tickerSet, cancellation);
+					if (boot.Options.Count > 0)
+					{
+						var combined = new Dictionary<string, OptionContractQuote>(options, StringComparer.OrdinalIgnoreCase);
+						foreach (var (k, v) in boot.Options) combined[k] = v;
+						options = combined;
+					}
+				}
+			}
+
+			foreach (var ticker in needsParity)
+			{
+				var diagLines = new List<string>();
+				var derived = DeriveSpotFromParity(ticker, options, riskFreeRate: 0.036, now, diag: line => diagLines.Add(line));
+				if (derived == null)
+				{
+					Console.Error.WriteLine($"Error: --premarket: could not back-solve spot for {ticker} (no expiry had a strike with both call+put bid/ask or last-price).");
+					foreach (var l in diagLines) Console.Error.WriteLine(l);
+					Console.Error.WriteLine($"  Pass --spot {ticker}:PRICE to bypass.");
+					return null;
+				}
+				if (debug) foreach (var l in diagLines) Console.Error.WriteLine($"[debug] {l}");
+				merged[ticker] = derived.Value.Spot;
+				sources[ticker] = $"parity K={derived.Value.AtmStrike:N0}, {derived.Value.Dte}d";
+			}
+		}
+
+		var banner = string.Join(", ", sources.Keys
+			.OrderBy(k => k)
+			.Select(k => $"{Markup.Escape(k)} @ ${merged[k]:N2} ({sources[k]})"));
+		if (banner.Length > 0) AnsiConsole.MarkupLine($"[bold yellow]Spot overrides:[/] {banner}");
+
+		return new QuoteSnapshot(options, merged);
+	}
+
+	internal readonly record struct ParityResult(decimal Spot, decimal AtmStrike, int Dte);
+
+	/// <summary>Back-solves the underlying spot from put-call parity on the ATM straddle in the fetched
+	/// option chain. Returns null if no expiry has a strike with both a call and put quote.
+	/// Parity (European, no dividends — exact for cash-settled SPX/SPXW/NDX/XSP/RUT): S = (C - P) + K * exp(-r*T).
+	/// Picks the nearest non-negative DTE expiry, then the strike where |C_mid - P_mid| is minimum (ATM).
+	/// Quote preference per leg: bid+ask mid (bid≥0, ask>0, ask≥bid), else LastPrice if positive. The LastPrice
+	/// fallback handles premarket chains where Webull echoes the prior-session close but omits bid/ask.
+	/// </summary>
+	internal static ParityResult? DeriveSpotFromParity(string ticker, IReadOnlyDictionary<string, OptionContractQuote> quotes, double riskFreeRate, DateTime asOf, Action<string>? diag = null)
+	{
+		// Group by expiry: { expiry → { strike → (call?, put?) } }.
+		var byExpiry = new Dictionary<DateTime, Dictionary<decimal, (OptionContractQuote? call, OptionContractQuote? put)>>();
+		foreach (var (sym, q) in quotes)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (!byExpiry.TryGetValue(p.ExpiryDate, out var byStrike))
+				byExpiry[p.ExpiryDate] = byStrike = new Dictionary<decimal, (OptionContractQuote?, OptionContractQuote?)>();
+			byStrike.TryGetValue(p.Strike, out var pair);
+			byStrike[p.Strike] = p.CallPut == "C" ? (q, pair.put) : (pair.call, q);
+		}
+
+		if (byExpiry.Count == 0)
+		{
+			diag?.Invoke($"  {ticker}: no contracts for this root in the fetched chain.");
+			return null;
+		}
+
+		// Pick the nearest non-negative DTE expiry that has at least one strike with both call+put viable mids.
+		foreach (var expiry in byExpiry.Keys.Where(d => d.Date >= asOf.Date).OrderBy(d => d))
+		{
+			var byStrike = byExpiry[expiry];
+			decimal? bestStrike = null;
+			decimal bestDiff = decimal.MaxValue;
+			decimal bestC = 0m, bestP = 0m;
+			int bothPresent = 0, callOnly = 0, putOnly = 0, neither = 0;
+			foreach (var (k, pair) in byStrike)
+			{
+				var cMid = Mid(pair.call);
+				var pMid = Mid(pair.put);
+				if (cMid != null && pMid != null) bothPresent++;
+				else if (cMid != null) callOnly++;
+				else if (pMid != null) putOnly++;
+				else neither++;
+				if (cMid == null || pMid == null) continue;
+				var diff = Math.Abs(cMid.Value - pMid.Value);
+				if (diff < bestDiff) { bestDiff = diff; bestStrike = k; bestC = cMid.Value; bestP = pMid.Value; }
+			}
+			diag?.Invoke($"  {ticker} {expiry:yyyy-MM-dd}: {byStrike.Count} strikes (both={bothPresent}, callOnly={callOnly}, putOnly={putOnly}, neither={neither}).");
+			if (bestStrike == null) continue;
+
+			var dte = Math.Max(0, (expiry.Date - asOf.Date).Days);
+			var discount = (decimal)Math.Exp(-riskFreeRate * dte / 365.0);
+			var spot = (bestC - bestP) + bestStrike.Value * discount;
+			return new ParityResult(spot, bestStrike.Value, dte);
+		}
+		return null;
+
+		static decimal? Mid(OptionContractQuote? q)
+		{
+			if (q == null) return null;
+			if (q.Bid is decimal b && q.Ask is decimal a && b >= 0m && a > 0m && a >= b) return (b + a) / 2m;
+			if (q.LastPrice is decimal lp && lp > 0m) return lp;
+			return null;
+		}
 	}
 
 	/// <summary>Theoretical scan: same opener pipeline as the live path, but the live quote source is
