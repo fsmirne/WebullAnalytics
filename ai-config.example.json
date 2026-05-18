@@ -42,6 +42,18 @@
 		"sentimentWeight": 0.15,
 		"expectedMoveCreditWeight": 0.20,
 		"ivRealizedPremiumWeight": 0.15,
+		"intradayTapeWeight": 0,
+		"intradayTape": {
+			"barIntervalCode": "m1",
+			"lookbackMinutes": 7200,
+			"minBars": 5,
+			"gapWeight": 1.0,
+			"openToNowWeight": 2.0,
+			"vwapDeviationWeight": 1.0,
+			"includeExtended": false,
+			"dataSourceTickers": {},
+			"preMarketProxyTickers": {}
+		},
 		"liquidity": {
 			"minOpenInterest": 5,
 			"minRelativeOpenInterest": 0.25,
