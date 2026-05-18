@@ -13,9 +13,14 @@ public static class WebullOptionsClient
 	// Index/derivative tickers that the search endpoint can't resolve.
 	// Add entries here as needed — use 'sniff' or browser network tools to find the tickerId
 	// from Webull's option chain requests for the index.
+	//
+	// Note: 913324359 was previously labeled "SPX" but is actually SPXC (SPX Technologies Inc, a
+	// $200 industrial-products stock on NYSE) — Webull's symbol-search abbreviation collision.
+	// The S&P 500 cash index lives at 913354362, which is the SPXW entry below. SPXW is the
+	// canonical entry for both option-chain and chart usage on the index; no separate SPX entry
+	// is needed.
 	private static readonly Dictionary<string, long> KnownTickerIds = new(StringComparer.OrdinalIgnoreCase)
 	{
-		["SPX"] = 913324359,
 		["SPXW"] = 913354362,
 		["NDX"] = 913354088,
 		["DJX"] = 925377883,

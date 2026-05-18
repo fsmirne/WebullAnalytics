@@ -1,8 +1,10 @@
-﻿using WebullAnalytics.AI.Events;
+﻿using System.Text.Json;
+using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Api;
 using WebullAnalytics.Sentiment;
 
 namespace WebullAnalytics.AI;
@@ -18,6 +20,7 @@ internal sealed class OpenCandidateEvaluator
 	private readonly string _pricingMode;
 	private readonly HistoricalPriceCache _priceCache;
 	private readonly bool _backtestMode;
+	private IntradayBarCache? _intradayCache;
 
 	/// <param name="priceCache">Shared close-price cache. Pass the runner-owned instance so the in-memory
 	/// per-ticker dictionary survives across ticks/steps instead of being rebuilt (and the CSV re-read) each call.</param>
@@ -160,18 +163,23 @@ internal sealed class OpenCandidateEvaluator
 		// stability score (1 - chop_ratio) derived from sign-flips in daily returns. Both feed the
 		// per-ticker confidence calculation in the structure-scoring loop below.
 		var biasCalibByTicker = new Dictionary<string, (decimal MoveSign, decimal Stability)>(StringComparer.OrdinalIgnoreCase);
+		// Yesterday's settled close per ticker, captured during the closes prefetch. Consumed by the
+		// intraday tape signal's gap component below — null when intraday is disabled.
+		var prevCloseByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		// Need closes whenever any of:
 		//   - 30-day vol-fit factor (HV vs IV)
 		//   - 3-day whipsaw factor (3d vs 30d realized vol)
 		//   - Bias-calibration factor (recent N-day move vs technical bias direction)
+		//   - Intraday tape signal's gap component (yesterday's close)
 		// Pulling once and computing all three is cheap.
-		var needCloses = cfg.VolatilityFitWeight > 0m || cfg.WhipsawWeight > 0m || cfg.BiasCalibrationLookbackDays > 0;
+		var needCloses = cfg.VolatilityFitWeight > 0m || cfg.WhipsawWeight > 0m || cfg.BiasCalibrationLookbackDays > 0 || (!_backtestMode && cfg.IntradayTapeWeight > 0m);
 		if (needCloses)
 		{
 			var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, Math.Max(4, cfg.BiasCalibrationLookbackDays + 2));
 			foreach (var ticker in _config.Tickers)
 			{
 				var closes = await _priceCache.GetRecentClosesAsync(ticker, lookback, ctx.Now, cancellation);
+				if (closes.Count > 0) prevCloseByTicker[ticker] = closes[^1];
 				var hv30 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
 				if (hv30.HasValue && hv30.Value > 0m)
 					historicalVolByTicker[ticker] = hv30.Value;
@@ -235,7 +243,27 @@ internal sealed class OpenCandidateEvaluator
 		{
 			if (!bootstrapSpots.TryGetValue(tickerGroup.Key, out var spot) || spot <= 0m) continue;
 			ctx.TechnicalSignals.TryGetValue(tickerGroup.Key, out var biasSignal);
-			var bias = biasSignal?.Score ?? 0m;
+			var macroBias = biasSignal?.Score ?? 0m;
+			var bias = macroBias;
+
+			// Intraday tape signal: fetch minute bars, derive open-to-now / gap / VWAP-deviation
+			// composite, blend into bias. Skipped in backtest mode (no minute-bar history) and when
+			// the weight is 0 (existing behavior preserved bit-identically). Per-ticker fetch is
+			// fronted by IntradayBarCache so adjacent scan ticks reuse disk-cached bars. The blend
+			// outcome is shadow-logged for every attempt — set weight to 0.001 to record the would-be
+			// bias without materially affecting scoring.
+			IntradayBias? intradayBias = null;
+			if (!_backtestMode && cfg.IntradayTapeWeight > 0m)
+			{
+				prevCloseByTicker.TryGetValue(tickerGroup.Key, out var prevClose);
+				intradayBias = await ComputeIntradayBiasAsync(tickerGroup.Key, prevClose > 0m ? prevClose : (decimal?)null, cfg.IntradayTape, cancellation);
+				if (intradayBias != null)
+				{
+					var w = Math.Clamp(cfg.IntradayTapeWeight, 0m, 1m);
+					bias = (1m - w) * macroBias + w * intradayBias.Score;
+				}
+				WriteBiasShadowLog(tickerGroup.Key, macroBias, intradayBias, cfg.IntradayTapeWeight, bias);
+			}
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
 			shortHorizonHvByTicker.TryGetValue(tickerGroup.Key, out var shortHorizonHv);
 			// Bias-signal calibration via directional agreement: if the bias direction disagreed with
@@ -580,6 +608,113 @@ internal sealed class OpenCandidateEvaluator
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null) continue;
 			if (byTicker.TryGetValue(p.Root, out var set)) set.Add(p.ExpiryDate.Date);
+		}
+	}
+
+	/// <summary>Fetches the configured-lookback minute bars for the strategy ticker (mapped to its
+	/// chart-source ticker if the config specifies one) and runs the indicator. Returns null on any
+	/// failure path (no bars, fetcher error, insufficient bars) so the caller falls back to
+	/// macro-only bias. Logs warnings rather than throwing — an intraday outage must never silence
+	/// the rest of the scan.</summary>
+	private async Task<IntradayBias?> ComputeIntradayBiasAsync(string strategyTicker, decimal? prevClose, OpenerIntradayTapeConfig tapeCfg, CancellationToken cancellation)
+	{
+		var cache = GetOrCreateIntradayCache();
+		if (cache == null) return null;
+
+		// Explicit config override wins; otherwise fall back to the central UnderlyingResolver
+		// (SPXW → SPX, etc). Lets the user leave the dataSourceTickers map empty for well-known
+		// option roots and only fill it in when they have a non-standard mapping.
+		var chartTicker = tapeCfg.DataSourceTickers.TryGetValue(strategyTicker, out var mapped) && !string.IsNullOrWhiteSpace(mapped)
+			? mapped
+			: UnderlyingResolver.ResolveUnderlying(strategyTicker);
+
+		var interval = ParseBarInterval(tapeCfg.BarIntervalCode);
+		var toUtc = DateTimeOffset.UtcNow;
+		var fromUtc = toUtc.AddMinutes(-Math.Max(60, tapeCfg.LookbackMinutes));
+
+		IReadOnlyList<MinuteBar> bars;
+		try
+		{
+			bars = await cache.GetBarsAsync(chartTicker, fromUtc, toUtc, interval, tapeCfg.IncludeExtended, cancellation);
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			Console.WriteLine($"Intraday tape: bar fetch failed for {chartTicker}: {ex.Message}");
+			return null;
+		}
+
+		if (bars.Count == 0) return null;
+
+		var indicatorCfg = new IntradayTapeConfig
+		{
+			MinBars = tapeCfg.MinBars,
+			GapWeight = tapeCfg.GapWeight,
+			OpenToNowWeight = tapeCfg.OpenToNowWeight,
+			VwapDeviationWeight = tapeCfg.VwapDeviationWeight,
+		};
+		return IntradayTapeIndicators.Compute(bars, prevClose, toUtc, indicatorCfg);
+	}
+
+	private IntradayBarCache? GetOrCreateIntradayCache()
+	{
+		if (_backtestMode) return null;
+		if (_intradayCache != null) return _intradayCache;
+		var apiConfig = TryLoadApiConfig();
+		if (apiConfig == null) return null;
+		_intradayCache = new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig));
+		return _intradayCache;
+	}
+
+	private static ApiConfig? TryLoadApiConfig()
+	{
+		try
+		{
+			var path = Program.ResolvePath(Program.ApiConfigPath);
+			if (!File.Exists(path)) return null;
+			var cfg = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(path));
+			if (cfg == null || cfg.Headers.Count == 0) return null;
+			return cfg;
+		}
+		catch (Exception ex)
+		{
+			Console.WriteLine($"Intraday tape: failed to load api-config.json: {ex.Message}");
+			return null;
+		}
+	}
+
+	private static BarInterval ParseBarInterval(string code) => code?.ToLowerInvariant() switch
+	{
+		"m1" => BarInterval.M1,
+		"m5" => BarInterval.M5,
+		"m15" => BarInterval.M15,
+		"m30" => BarInterval.M30,
+		"h1" => BarInterval.H1,
+		"d1" => BarInterval.D1,
+		_ => BarInterval.M1,
+	};
+
+	/// <summary>Appends one JSONL line per per-ticker bias-blend attempt to
+	/// <c>data/ai-bias-shadow.jsonl</c>. Records both the macro-only and blended biases so the user
+	/// can validate the intraday signal offline before committing to a non-trivial weight. Records
+	/// null intraday entries too — those flag scan ticks where the indicator couldn't fire (cache
+	/// miss, pre-open, too few bars). Failures here are swallowed: a log-write hiccup must never
+	/// silence the rest of the scan.</summary>
+	private static void WriteBiasShadowLog(string ticker, decimal macroBias, IntradayBias? intradayBias, decimal weight, decimal blended)
+	{
+		try
+		{
+			var path = Program.ResolvePath("data/ai-bias-shadow.jsonl");
+			Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+			var ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+			string intradayJson = intradayBias == null
+				? "null"
+				: $"{{\"score\":{intradayBias.Score:F4},\"gap\":{intradayBias.GapScore:F4},\"openToNow\":{intradayBias.OpenToNowScore:F4},\"vwapDev\":{intradayBias.VwapDeviationScore:F4},\"barCount\":{intradayBias.BarCount}}}";
+			var line = $"{{\"ts\":\"{ts}\",\"ticker\":\"{ticker}\",\"macroBias\":{macroBias:F4},\"intraday\":{intradayJson},\"weight\":{weight:F4},\"blended\":{blended:F4}}}\n";
+			File.AppendAllText(path, line);
+		}
+		catch (Exception ex)
+		{
+			Console.WriteLine($"Intraday tape: shadow log write failed: {ex.Message}");
 		}
 	}
 }

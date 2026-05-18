@@ -167,6 +167,19 @@ public record OptionContractQuote(
 	decimal? ImpliedVolatility5Day = null
 );
 
+/// <summary>OHLCV bar at a single point on a fixed interval. Timestamp is the bar's open time in UTC.
+/// Volume is 0 (not null) when the source reports no trades — index bars during extended hours, for
+/// example. Used for intraday tape signals; daily closes still use the dictionary-of-decimal pattern
+/// in <see cref="WebullAnalytics.AI.Replay.HistoricalPriceCache"/>.</summary>
+public record MinuteBar(
+	DateTimeOffset Timestamp,
+	decimal Open,
+	decimal High,
+	decimal Low,
+	decimal Close,
+	long Volume
+);
+
 public record PricePnL(decimal UnderlyingPrice, decimal PnL, decimal? ContractValue = null);
 
 /// <summary>

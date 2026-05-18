@@ -95,6 +95,19 @@ internal sealed class OpenerConfig
 
 	[JsonPropertyName("realizedExpectancy")] public OpenerRealizedExpectancyConfig RealizedExpectancy { get; set; } = new();
 
+	/// <summary>Blend weight for the intraday tape signal on top of the daily-close technical bias.
+	/// The final <c>bias</c> consumed by the scorer is
+	/// <c>(1 − intradayTapeWeight) · macroBias + intradayTapeWeight · intradayBias</c> when an
+	/// intraday signal is available; collapses to macroBias when intraday is unavailable (backtest,
+	/// pre-open, fetcher outage, insufficient bars). Default 0 disables — behavior is bit-identical
+	/// to a config without this field. 0DTE strategies want 0.5–0.8 (intraday dominates the
+	/// time-horizon); swing strategies want 0.0–0.2 (macro dominates).</summary>
+	[JsonPropertyName("intradayTapeWeight")] public decimal IntradayTapeWeight { get; set; } = 0m;
+
+	/// <summary>Per-component configuration for the intraday tape signal. Ignored when
+	/// <see cref="IntradayTapeWeight"/> is 0.</summary>
+	[JsonPropertyName("intradayTape")] public OpenerIntradayTapeConfig IntradayTape { get; set; } = new();
+
 	/// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at
 	/// ±sigma and ±sigma/2 around spot. Default 1.0 gives a ±1σ / ±0.5σ grid that better matches
 	/// realized moves on high-IV names and doesn't overweight fat tails. Prior behavior (and stress tests)
@@ -317,4 +330,46 @@ internal sealed class OpenerRealizedExpectancyConfig
 	/// (the normal case). Set to 1 if you're already scoring against execution prices that bake in
 	/// the entry slippage, leaving only the exit fill. Default 2.</summary>
 	[JsonPropertyName("roundTrips")] public int RoundTrips { get; set; } = 2;
+}
+
+/// <summary>Per-component configuration for the intraday tape signal derived from minute bars.
+/// The overall blend weight lives in <see cref="OpenerConfig.IntradayTapeWeight"/>; this block
+/// shapes how the intraday signal itself is computed from the underlying bar series.</summary>
+internal sealed class OpenerIntradayTapeConfig
+{
+	/// <summary>Maps a strategy ticker (e.g. <c>"SPXW"</c>) to the symbol used to fetch intraday bars
+	/// (e.g. <c>"SPX"</c>). Required for option roots whose underlying differs from the chart symbol.
+	/// When the strategy ticker isn't in the map, it's used as the chart symbol directly. Empty by
+	/// default — explicit per-ticker mapping is required.</summary>
+	[JsonPropertyName("dataSourceTickers")] public Dictionary<string, string> DataSourceTickers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>Per-strategy-ticker fallback symbol for pre-market context. Used when the primary
+	/// chart symbol has no extended-hours data (cash indexes like SPX). Empty by default.</summary>
+	[JsonPropertyName("preMarketProxyTickers")] public Dictionary<string, string> PreMarketProxyTickers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>Bar interval as Webull's chart-endpoint type code (<c>m1</c>, <c>m5</c>, <c>m15</c>,
+	/// <c>m30</c>, <c>h1</c>, <c>d1</c>). Default <c>m1</c> for 0DTE-grade responsiveness; coarser
+	/// intervals are useful for multi-day-horizon strategies.</summary>
+	[JsonPropertyName("barIntervalCode")] public string BarIntervalCode { get; set; } = "m1";
+
+	/// <summary>Lookback in minutes for the bar range request. Must span the prior trading session so
+	/// the indicator can derive prev-close from its own bars (keeps the gap component on the same
+	/// price scale as today's bars). 7200 = 5 calendar days, which always reaches back to the prior
+	/// session even across weekends and short holiday breaks. Below ~4320 (3 days), Monday scans
+	/// can't see Friday's close.</summary>
+	[JsonPropertyName("lookbackMinutes")] public int LookbackMinutes { get; set; } = 7200;
+
+	/// <summary>Minimum bars on today's session before the intraday signal is allowed to contribute.
+	/// Below this threshold the indicator returns null and the bias collapses to macro-only.
+	/// Default 5 maps to ~5 minutes after open on m1, where the opening range starts to stabilize.</summary>
+	[JsonPropertyName("minBars")] public int MinBars { get; set; } = 5;
+
+	[JsonPropertyName("gapWeight")] public decimal GapWeight { get; set; } = 1.0m;
+	[JsonPropertyName("openToNowWeight")] public decimal OpenToNowWeight { get; set; } = 2.0m;
+	[JsonPropertyName("vwapDeviationWeight")] public decimal VwapDeviationWeight { get; set; } = 1.0m;
+
+	/// <summary>Include pre/post-market bars when fetching. Cash indexes (SPX, NDX) ignore this and
+	/// return RTH only regardless; ETFs and single names honor it. Default false keeps the signal
+	/// tightly scoped to the RTH session.</summary>
+	[JsonPropertyName("includeExtended")] public bool IncludeExtended { get; set; } = false;
 }
