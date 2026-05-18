@@ -1222,9 +1222,7 @@ Pipeline mechanics:
 | `gapWeight` | `1.0` | Weight on the overnight-gap sub-component. |
 | `openToNowWeight` | `2.0` | Weight on the open-to-now-drift sub-component. The primary intraday trend signal. |
 | `vwapDeviationWeight` | `1.0` | Weight on the VWAP-deviation sub-component. |
-| `includeExtended` | `false` | Request pre/post-market bars where the symbol supports them. Cash indexes (SPX, NDX) ignore this and return RTH only; ETFs and single names honor it. |
-| `dataSourceTickers` | `{}` | Per-strategy-ticker override of the chart symbol. Empty by default — the SPX family auto-merges SPY pre-market without configuration. Set to e.g. `{"SPXW": "QQQ"}` only when you want a non-standard chart source for a strategy ticker. |
-| `preMarketProxyTickers` | `{}` | Reserved for future per-ticker proxy customization. The SPX family is already handled transparently. |
+| `includeExtended` | `false` | Request pre/post-market bars where the symbol supports them. Cash indexes (SPX, NDX) ignore this and return RTH only; ETFs and single names honor it. The SPX family already merges SPY extended-hours automatically regardless of this setting. |
 
 #### 3. Factor stack — `tech-adjusted → final`
 
