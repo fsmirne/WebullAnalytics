@@ -1182,6 +1182,50 @@ tech-adjusted = raw × (1 + α · bias · fit)
 
 `α` = `opener.directionalFitWeight`. When `fit = 0`, this stage is a no-op. Single-side long diagonals pick up their sign from the strike layout via the strike-aware `DirectionalFit.SignFor(skel)` overload, so a bullish-shaped diagonal aligns with positive bias and a bearish-shaped one aligns with negative bias.
 
+##### Intraday tape blend — making `bias` responsive at the 0DTE horizon
+
+The daily-bar SMA/RSI/momentum composite reflects multi-week price action, which is the wrong time scale for 0DTE: a position that lives 6.5 hours doesn't care that the 5-day SMA is mildly bullish if today's tape is selling off. The opener can blend an *intraday* composite into `bias` to close that horizon mismatch.
+
+```
+bias = (1 − w) · bias_macro + w · bias_intraday
+```
+
+`w` = `opener.intradayTapeWeight` (default `0` — the blend collapses to macro-only and existing behavior is bit-identical). `bias_intraday` is built from the minute-bar series for the underlying with three sub-components:
+
+- **`gap`** — `(today_open − prev_close) / prev_close` clamped to `[−1, 1]` after × 100. Captures overnight news / futures action.
+- **`open-to-now drift`** — `(now_close − today_open) / today_open` clamped to `[−1, 1]` after × 100. The primary intraday trend signal.
+- **`vwap deviation`** — `(now_close − session_vwap) / session_vwap` clamped to `[−1, 1]` after × 100. Catches price stretching away from the volume-weighted mean. Falls back to TWAP (equal-weight typical-price average) when bars carry no volume — cash indexes like SPX always need this fallback.
+
+Composite: `bias_intraday = (gap · gw + o2n · ow + vwap · vw) / (gw + ow + vw)`. Weights configurable via `opener.intradayTape`; defaults emphasize open-to-now (2.0) over gap (1.0) and vwap-deviation (1.0).
+
+Pipeline mechanics:
+
+- **Bar source.** Webull's `/api/quote/charts/query` endpoint, fetched once per scan tick. Disk-cached at `data/intraday/<TICKER>/<yyyy-mm-dd>.csv` — today's file grows during the session; past days are sealed. The chart endpoint uses a *different* tickerId namespace than the option-chain endpoint for cash indexes (the SPX option-chain id `913354362` is the chart id for the S&P 500; chain-namespace `913324359` is actually SPXC, a $200 NYSE stock). Chart-namespace ids live in `WebullChartsClient.ChartKnownTickerIds`; chain-namespace ids stay in `WebullOptionsClient.KnownTickerIds`.
+- **Underlying resolution.** `Core/UnderlyingResolver` maps option roots to their underlying chart symbol (SPXW → SPX) automatically. Override via `opener.intradayTape.dataSourceTickers` for non-standard mappings.
+- **Backtest gating.** Hard-disabled in backtest mode regardless of `intradayTapeWeight` — minute-bar history isn't available retroactively (Webull's m1 only covers ~5 trading days). The 16-month backtest path is bit-identical to before.
+- **Prev-close source.** Derived from the bar series itself — yesterday's last bar's close in the same intraday source. Necessary because the daily-Yahoo close and the intraday-Webull bars may not be denominated identically (gap math becomes meaningless when scales mismatch).
+- **Shadow logging.** Every per-ticker bias-blend attempt appends one JSONL line to `data/ai-bias-shadow.jsonl` with macro, intraday (and its sub-components), weight, and blended. Use to validate the signal offline before raising `intradayTapeWeight` above a near-zero value.
+
+**Config keys** (`opener`):
+
+| Field | Default | Description |
+|---|---|---|
+| `intradayTapeWeight` | `0` | Blend weight in `[0, 1]`. `0` = macro-only (legacy behavior). `0.5` = even split. `0.001` = effectively shadow mode (log without applying). 0DTE strategies typically want `0.5–0.8`; swing strategies `0.0–0.2`. |
+
+**Config keys** (`opener.intradayTape`):
+
+| Field | Default | Description |
+|---|---|---|
+| `barIntervalCode` | `m1` | Bar interval as Webull's chart-endpoint type code (`m1`/`m5`/`m15`/`m30`/`h1`/`d1`). |
+| `lookbackMinutes` | `7200` | Bar range request span. Must reach back to the prior trading session for bar-derived prev-close; default 5 calendar days survives weekends and short holiday breaks. |
+| `minBars` | `5` | Minimum bars on today's session before the indicator is allowed to contribute. Below this returns null and `bias` collapses to macro-only. |
+| `gapWeight` | `1.0` | Weight on the overnight-gap sub-component. |
+| `openToNowWeight` | `2.0` | Weight on the open-to-now-drift sub-component. The primary intraday trend signal. |
+| `vwapDeviationWeight` | `1.0` | Weight on the VWAP-deviation sub-component. |
+| `includeExtended` | `false` | Request pre/post-market bars where the symbol supports them. Cash indexes (SPX, NDX) ignore this and return RTH only; ETFs and single names honor it. |
+| `dataSourceTickers` | `{}` | Per-strategy-ticker override of the chart symbol. Falls back to `UnderlyingResolver.ResolveUnderlying`. Example: `{"SPXW": "SPY"}` routes SPXW intraday through SPY (useful for pre-market context, where SPX has none). |
+| `preMarketProxyTickers` | `{}` | Reserved for future use. Currently no auto-switching logic — set `dataSourceTickers` to the proxy directly if you want pre-market coverage. |
+
 #### 3. Factor stack — `tech-adjusted → final`
 
 `tech-adjusted` is multiplied by every factor whose precondition is met, ending with the theta-carry factor that produces `final`. Each factor is documented below in the order the rationale prints them. The same factor stack applies to every structure; factors not applicable to a structure simply don't fire (e.g., `setup` requires two breakevens, so single-leg longs and verticals skip it).
