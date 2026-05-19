@@ -46,9 +46,13 @@ public class RiskDiagnosticBuilderTests
 		Assert.Equal(0.71m - 0.07m, diag.NetMidPerShare);
 		Assert.Equal(0.71m - 0.07m, diag.MarketNetPremiumPerShare);
 		Assert.Equal(0.71m / 0.07m, diag.MarketPremiumRatio);
-		Assert.Equal(OptionMath.BlackScholes(24.72m, 24.50m, 7 / 365.0, OptionMath.RiskFreeRate, 0.40m, "C") - OptionMath.BlackScholes(24.72m, 25.00m, 1 / 365.0, OptionMath.RiskFreeRate, 0.40m, "C"), diag.TheoreticalValuePerShare);
-		Assert.Equal(OptionMath.BlackScholes(24.72m, 24.50m, 7 / 365.0, OptionMath.RiskFreeRate, 0.40m, "C"), diag.TheoreticalLongPremiumPaid);
-		Assert.Equal(OptionMath.BlackScholes(24.72m, 25.00m, 1 / 365.0, OptionMath.RiskFreeRate, 0.40m, "C"), diag.TheoreticalShortPremiumReceived);
+		var longExpiry = new DateTime(2026, 5, 1).Date + OptionMath.MarketClose;
+		var shortExpiry = new DateTime(2026, 4, 24).Date + OptionMath.MarketClose;
+		var longT = (longExpiry - asOf).TotalDays / 365.0;
+		var shortT = (shortExpiry - asOf).TotalDays / 365.0;
+		Assert.Equal(OptionMath.BlackScholes(24.72m, 24.50m, longT, OptionMath.RiskFreeRate, 0.40m, "C") - OptionMath.BlackScholes(24.72m, 25.00m, shortT, OptionMath.RiskFreeRate, 0.40m, "C"), diag.TheoreticalValuePerShare);
+		Assert.Equal(OptionMath.BlackScholes(24.72m, 24.50m, longT, OptionMath.RiskFreeRate, 0.40m, "C"), diag.TheoreticalLongPremiumPaid);
+		Assert.Equal(OptionMath.BlackScholes(24.72m, 25.00m, shortT, OptionMath.RiskFreeRate, 0.40m, "C"), diag.TheoreticalShortPremiumReceived);
 		Assert.Equal(diag.TheoreticalValuePerShare, diag.TheoreticalNetPremiumPerShare);
 		Assert.NotNull(diag.PremiumRatio);
 		Assert.Equal(24.72m, diag.SpotAtEvaluation);
