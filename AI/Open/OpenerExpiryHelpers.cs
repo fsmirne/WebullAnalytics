@@ -1,19 +1,29 @@
+using WebullAnalytics.Pricing;
+
 namespace WebullAnalytics.AI;
 
 internal static class OpenerExpiryHelpers
 {
-	// Fraction of a year a 0DTE option has remaining at the daily simulator step. Matches the pricer's
-	// open-of-day assumption so the scorer's scenario grid agrees with the price the trade actually fills at.
+	// Fraction of a year a full trading session represents (9:30–16:00 ET = 6.5h). Used as the
+	// upper bound for 0DTE time-to-expiry when asOf is before the opening bell — matches the
+	// backtest's open-of-day stepper.
 	public const double ZeroDteTimeYears = 6.5 / 24.0 / 365.0;
 
-	/// <summary>Years-to-expiry consistent with the 0DTE pricer: returns a fractional trading day for
-	/// expiries on/before <paramref name="asOf"/>, else <c>days/365</c>. Use this anywhere the scorer
-	/// needs a time-in-years; avoids the legacy <c>Math.Max(1, days)</c> 1-day floor that doubled the
-	/// scenario-grid sigma for 0DTE structures and made every candidate score negative.</summary>
+	/// <summary>Years-to-expiry for the scorer. For 0DTE, uses the actual time-of-day between
+	/// <paramref name="asOf"/> and market close (capped at one full session if asOf is before
+	/// the opening bell). For &gt;0DTE, returns <c>days/365</c> — preserves the calendar-day
+	/// approximation used across the scenario grid and breakeven analytics. Returns 0 when
+	/// already past the close on expiry day. Avoids the legacy <c>Math.Max(1, days)</c> 1-day
+	/// floor that priced expiring 0DTE candidates as if they had a full day of vol remaining.</summary>
 	public static double TimeYearsToExpiry(DateTime asOf, DateTime expiry)
 	{
 		var days = (expiry.Date - asOf.Date).Days;
-		return days <= 0 ? ZeroDteTimeYears : days / 365.0;
+		if (days > 0) return days / 365.0;
+		var expirationTime = expiry.Date + OptionMath.MarketClose;
+		if (asOf >= expirationTime) return 0.0;
+		var openTime = expiry.Date + OptionMath.MarketOpen;
+		var effectiveStart = asOf < openTime ? openTime : asOf;
+		return (expirationTime - effectiveStart).TotalDays / 365.0;
 	}
 
 	// Tickers with Mon-Fri daily option expirations.

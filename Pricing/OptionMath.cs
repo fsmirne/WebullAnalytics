@@ -10,7 +10,8 @@ internal static class OptionMath
 {
 	internal static double RiskFreeRate = 0.043; // default; updated at runtime from ^IRX when available
 	internal static readonly TimeSpan MarketOpen = new(9, 30, 0);
-	internal static readonly TimeSpan MarketClose = new(16, 30, 0);
+	// 16:00 ET — equity options cease trading and PM-settled index options settle on the 4:00 close print.
+	internal static readonly TimeSpan MarketClose = new(16, 0, 0);
 
 	// --- Black-Scholes ---
 

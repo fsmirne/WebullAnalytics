@@ -257,8 +257,9 @@ internal static class CandidateScorer
 			if (!quotes.TryGetValue(leg.Symbol, out var q) || !q.ImpliedVolatility.HasValue || q.ImpliedVolatility.Value <= 0m) return null;
 			var iv = q.ImpliedVolatility.Value;
 
-			var dte = Math.Max(1, (leg.Parsed.ExpiryDate.Date - asOf.Date).Days);
-			var theo = OptionMath.BlackScholes(spot, leg.Parsed.Strike, dte / 365.0, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
+			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
+			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
+			var theo = OptionMath.BlackScholes(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 			if (theo <= 0m) return null;
 
 			if (leg.IsLong) { marketLong += mid; theoLong += theo; }
@@ -774,10 +775,12 @@ internal static class CandidateScorer
 		var intrinsic = OptionMath.Intrinsic(spot, parsed.Strike, parsed.CallPut);
 		if (mid <= intrinsic) return brokerIv;
 
-		var dte = Math.Max(1, (parsed.ExpiryDate.Date - asOf.Date).Days);
+		var expirationTime = parsed.ExpiryDate.Date + OptionMath.MarketClose;
+		var t = (expirationTime - asOf).TotalDays / 365.0;
+		if (t <= 0) return brokerIv;
 		try
 		{
-			var iv = OptionMath.ImpliedVol(spot, parsed.Strike, dte / 365.0, OptionMath.RiskFreeRate, mid, parsed.CallPut);
+			var iv = OptionMath.ImpliedVol(spot, parsed.Strike, t, OptionMath.RiskFreeRate, mid, parsed.CallPut);
 			if (iv > 0m && iv < 5m) return iv;
 		}
 		catch { }
@@ -1921,7 +1924,7 @@ internal static class CandidateScorer
 
 		var netEntryPerContract = NetEntryPerContract(skel.Legs, quotes, pricingMode);
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
-		var years = daysToTarget / 365.0;
+		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
 		var targetLegs = defs.Where(l => l.Parsed.ExpiryDate.Date == skel.TargetExpiry.Date).ToList();
 		var representativeIv = (targetLegs.Count > 0 ? targetLegs : defs).Average(l => l.Iv);
 		var pnl = (decimal sT) => PositionValueAtTarget(sT, skel.TargetExpiry.Date, defs) + netEntryPerContract;
@@ -2263,9 +2266,11 @@ internal static class CandidateScorer
 		decimal netThetaPerShare = 0m;
 		foreach (var leg in legs)
 		{
-			var dte = Math.Max(1, (leg.Parsed.ExpiryDate - asOf.Date).Days);
-			var now = OptionMath.BlackScholes(spot, leg.Parsed.Strike, dte / 365.0, OptionMath.RiskFreeRate, leg.Iv, leg.Parsed.CallPut);
-			var tomorrow = OptionMath.BlackScholes(spot, leg.Parsed.Strike, Math.Max(1, dte - 1) / 365.0, OptionMath.RiskFreeRate, leg.Iv, leg.Parsed.CallPut);
+			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
+			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
+			var tTomorrow = Math.Max(0.0, (expirationTime - asOf.AddDays(1)).TotalDays / 365.0);
+			var now = OptionMath.BlackScholes(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, leg.Iv, leg.Parsed.CallPut);
+			var tomorrow = OptionMath.BlackScholes(spot, leg.Parsed.Strike, tTomorrow, OptionMath.RiskFreeRate, leg.Iv, leg.Parsed.CallPut);
 			var thetaPerShare = tomorrow - now;
 			netThetaPerShare += leg.IsLong ? thetaPerShare : -thetaPerShare;
 		}
@@ -2281,9 +2286,10 @@ internal static class CandidateScorer
 		decimal netVegaPerShare = 0m;
 		foreach (var leg in legs)
 		{
-			var dte = Math.Max(1, (leg.Parsed.ExpiryDate - asOf.Date).Days);
+			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
+			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
 			// OptionMath.Vega returns per 1.0 IV change; divide by 100 for per-1-IV-point.
-			var vegaPerShare = OptionMath.Vega(spot, leg.Parsed.Strike, dte / 365.0, OptionMath.RiskFreeRate, leg.Iv) / 100m;
+			var vegaPerShare = OptionMath.Vega(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, leg.Iv) / 100m;
 			netVegaPerShare += leg.IsLong ? vegaPerShare : -vegaPerShare;
 		}
 

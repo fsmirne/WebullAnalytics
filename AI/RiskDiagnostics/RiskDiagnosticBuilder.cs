@@ -51,14 +51,17 @@ internal static class RiskDiagnosticBuilder
 		{
 			var sign = leg.IsLong ? 1m : -1m;
 			var iv = ivResolver(leg.Symbol);
-			var dteRaw = (leg.Parsed.ExpiryDate - asOf.Date).Days;
-			var dte = Math.Max(1, dteRaw);
-			var t = dte / 365.0;
+			// Use fractional time-to-expiry against market close. Integer DTE with a Math.Max(1, …) floor
+			// would price a 0DTE option as if it had a full day left, inflating extrinsic dramatically
+			// (e.g., theoretical $30 vs market $0.13 on a 0DTE OTM SPX put at end of day).
+			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
+			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
+			var tTomorrow = Math.Max(0.0, (expirationTime - asOf.AddDays(1)).TotalDays / 365.0);
 			var delta = OptionMath.Delta(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 
 			// Theta via finite-difference: BS today − BS tomorrow. Negative for long options.
 			var pNow = OptionMath.BlackScholes(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
-			var pTomorrow = OptionMath.BlackScholes(spot, leg.Parsed.Strike, Math.Max(1, dte - 1) / 365.0, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
+			var pTomorrow = OptionMath.BlackScholes(spot, leg.Parsed.Strike, tTomorrow, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 			var thetaPerShare = pTomorrow - pNow;
 
 			// OptionMath.Vega returns per 1.0 IV change (S φ(d1) √T). Divide by 100 for per-1-IV-point.
@@ -118,17 +121,17 @@ internal static class RiskDiagnosticBuilder
 		var longStrike = longLegs.Count > 0 ? longLegs[0].Parsed.Strike : 0m;
 		var shortStrike = shortLegs.Count > 0 ? shortLegs[0].Parsed.Strike : 0m;
 
-		// Residual delta after short expires: re-evaluate long legs at (long_dte − short_dte) days.
+		// Residual delta after short expires: re-evaluate long legs at the time the earliest short expires.
 		decimal netDeltaPostShort = netDelta;
 		if (shortLegs.Count > 0 && longLegs.Count > 0 && shortLegDteMin < longLegDteMax)
 		{
+			var shortExpiryInstant = asOf.Date.AddDays(shortLegDteMin) + OptionMath.MarketClose;
 			decimal residualSum = 0m;
 			foreach (var leg in longLegs)
 			{
 				var iv = ivResolver(leg.Symbol);
-				var dteRaw = (leg.Parsed.ExpiryDate - asOf.Date).Days;
-				var dtePost = Math.Max(1, dteRaw - shortLegDteMin);
-				var tPost = dtePost / 365.0;
+				var longExpiryInstant = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
+				var tPost = Math.Max(0.0, (longExpiryInstant - shortExpiryInstant).TotalDays / 365.0);
 				var delta = OptionMath.Delta(spot, leg.Parsed.Strike, tPost, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 				residualSum += leg.Qty * delta;
 			}
