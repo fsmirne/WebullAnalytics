@@ -120,46 +120,39 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		// Phase 1: fetch quotes for the position legs. We need spot before we can enumerate
 		// hypothetical strikes for scenarios, and the underlying price comes back as a byproduct
-		// of this same fetch. --spot still wins if supplied.
-		// For Webull: also refresh OI/IV for chain strikes near spot at each position expiry, so
-		// max-pain / GEX in the diagnostic see the full chain rather than just the position's strike.
+		// of this same fetch. --spot still wins if supplied. Also refreshes OI/IV for chain strikes
+		// near spot at each position expiry, so max-pain / GEX in the diagnostic see the full chain
+		// rather than just the position's strike.
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
-		if (!string.IsNullOrEmpty(settings.Api))
+		var positionSymbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+		var apiConfigPath = Program.ResolvePath(Program.ApiConfigPath);
+		if (File.Exists(apiConfigPath))
 		{
-			var positionSymbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-			if (string.Equals(settings.Api, "webull", StringComparison.OrdinalIgnoreCase))
+			var apiCfg = System.Text.Json.JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(apiConfigPath));
+			if (apiCfg != null && apiCfg.Headers.Count > 0)
 			{
-				var apiConfigPath = Program.ResolvePath(Program.ApiConfigPath);
-				if (File.Exists(apiConfigPath))
-				{
-					var apiCfg = System.Text.Json.JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(apiConfigPath));
-					if (apiCfg != null && apiCfg.Headers.Count > 0)
-					{
-						var targetExpiries = positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().ToList();
-						var (chainQuotes, chainSpot, _) = await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(apiCfg, ticker, targetExpiries, strikeRangeFraction: 0.20m, cancellation);
-						quotes = chainQuotes;
-						if (chainSpot.HasValue)
-							underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = chainSpot.Value };
-					}
-				}
+				var targetExpiries = positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().ToList();
+				var (chainQuotes, chainSpot, _) = await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(apiCfg, ticker, targetExpiries, strikeRangeFraction: 0.20m, cancellation);
+				quotes = chainQuotes;
+				if (chainSpot.HasValue)
+					underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = chainSpot.Value };
 			}
-
-			if (quotes == null)
-				(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(settings.Api, positionSymbols, cancellation);
 		}
+
+		if (quotes == null)
+			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(positionSymbols, cancellation);
 
 		var spot = ResolveSpot(ticker, settings, underlyingPrices);
 		if (spot == null)
 		{
-			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or configure --api yahoo|webull.");
+			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or run 'wa sniff' to refresh Webull headers.");
 			return 1;
 		}
 
 		var structure = ClassifyStructure(positionLegs);
 
 		// Phase 2: fetch quotes for the hypothetical-scenario symbols we couldn't enumerate without spot.
-		if (!string.IsNullOrEmpty(settings.Api))
 		{
 			var alreadyFetched = quotes ?? new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 			var hypotheticalSymbols = EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot.Value)
@@ -168,7 +161,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				.ToList();
 			if (hypotheticalSymbols.Count > 0)
 			{
-				var hypotheticalQuotes = await AnalyzeCommon.FetchQuotesForSymbolList(settings.Api, hypotheticalSymbols, cancellation);
+				var hypotheticalQuotes = await AnalyzeCommon.FetchQuotesForSymbolList(hypotheticalSymbols, cancellation);
 				if (hypotheticalQuotes != null)
 				{
 					// Prefer Phase 1's refreshed entries: FetchQuotesForSymbolList re-fetches the entire
@@ -289,7 +282,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (cfg == null) return 0m;
 			if (AIConfigLoader.Validate(cfg) != null) return 0m;
 
-			var filter = cfg.Rules.OpportunisticRoll.TechnicalFilter;
+			var filter = cfg.Indicators.TechnicalFilter;
 			if (!filter.Enabled) return 0m;
 
 			var cache = new HistoricalPriceCache();
@@ -320,7 +313,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var cfg = System.Text.Json.JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(path));
 			if (cfg == null) return null;
 			if (AIConfigLoader.Validate(cfg) != null) return null;
-			if (cfg.Opener.VolatilityFitWeight <= 0m) return null;
+			if (cfg.Opener.Weights.VolatilityFit <= 0m) return null;
 
 			var cache = new HistoricalPriceCache();
 			var closes = await cache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);

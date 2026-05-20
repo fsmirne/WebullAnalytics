@@ -12,13 +12,15 @@ namespace WebullAnalytics.AI.Rules;
 internal sealed class OpportunisticRollRule : IManagementRule
 {
 	private readonly OpportunisticRollConfig _config;
+	private readonly IndicatorsConfig _indicators;
 	private readonly OpenerRealizedExpectancyConfig _frictionConfig;
 	private readonly bool _debug;
 	private readonly string _pricingMode;
 
-	public OpportunisticRollRule(OpportunisticRollConfig config, OpenerRealizedExpectancyConfig frictionConfig, bool debug = false, string pricingMode = SuggestionPricing.Mid)
+	public OpportunisticRollRule(OpportunisticRollConfig config, IndicatorsConfig indicators, OpenerRealizedExpectancyConfig frictionConfig, bool debug = false, string pricingMode = SuggestionPricing.Mid)
 	{
 		_config = config;
+		_indicators = indicators;
 		_frictionConfig = frictionConfig;
 		_debug = debug;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
@@ -69,9 +71,9 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		var shortLeg = legInfos.FirstOrDefault(l => !l.IsLong);
 		var callPut = shortLeg?.Parsed.CallPut ?? legInfos[0].Parsed.CallPut;
 
-		if (_config.TechnicalFilter.Enabled
+		if (_indicators.TechnicalFilter.Enabled
 			&& ctx.TechnicalSignals.TryGetValue(position.Ticker, out var bias)
-			&& bias.IsAdverse(callPut, _config.TechnicalFilter.BullishBlockThreshold, _config.TechnicalFilter.BearishBlockThreshold))
+			&& bias.IsAdverse(callPut, _config.BullishBlockThreshold, _config.BearishBlockThreshold))
 		{
 			Debug(position, $"skipped: technical filter adverse for {callPut} short (score {bias.Score:+0.00;-0.00})");
 			return null;
@@ -80,8 +82,8 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		var availableCash = Math.Max(0m, ctx.AccountCash - CashReserveHelper.ComputeReserve("percent", 0m, ctx.AccountValue));
 		var opt = new ScenarioEngine.EvaluateOptions(
 			InitialNetDebitPerShare: position.AdjustedNetDebit,
-			IvDefault: _config.IvDefaultPct,
-			StrikeStep: _config.StrikeStep,
+			IvDefault: _indicators.IvDefaultPct,
+			StrikeStep: _indicators.StrikeStep,
 			AvailableCash: availableCash > 0m ? availableCash : null,
 			IvOverrides: null,
 			PricingMode: _pricingMode);
@@ -108,7 +110,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 				Debug(position, $"candidate '{s.Name}' skipped: margin ${marginTotal:N2} exceeds available ${availableCash:N2}");
 				continue;
 			}
-			if (s.Kind == ProposalKind.Roll && !PassesRollRiskChecks(s, position, spot, ctx, _config, out rollSafetyNote, out var rejectReason))
+			if (s.Kind == ProposalKind.Roll && !PassesRollRiskChecks(s, position, spot, ctx, _config, _indicators, out rollSafetyNote, out var rejectReason))
 			{
 				Debug(position, $"candidate '{s.Name}' skipped: {rejectReason}");
 				continue;
@@ -180,7 +182,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 
 	/// <summary>Runs the four sequential safety gates on a Roll scenario. Returns false to skip, true to accept.
 	/// On true, safetyNote contains a formatted string to embed in the proposal rationale.</summary>
-	private static bool PassesRollRiskChecks(ScenarioEngine.ScenarioResult s, OpenPosition position, decimal spot, EvaluationContext ctx, OpportunisticRollConfig config, out string safetyNote, out string rejectReason)
+	private static bool PassesRollRiskChecks(ScenarioEngine.ScenarioResult s, OpenPosition position, decimal spot, EvaluationContext ctx, OpportunisticRollConfig config, IndicatorsConfig indicators, out string safetyNote, out string rejectReason)
 	{
 		safetyNote = "";
 		rejectReason = "";
@@ -223,7 +225,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 
 		// Gate 3: Break-even at current spot at new short expiry — must be profitable by at least minBreakEvenMarginPct of spot (widened by same technical factor as OTM buffer).
 		var minBeMargin = spot * config.MinBreakEvenMarginPct * technicalFactor / 100m;
-		var beMargin = ComputeBreakEvenMargin(position, newShort, spot, ctx, config);
+		var beMargin = ComputeBreakEvenMargin(position, newShort, spot, ctx, indicators);
 		if (beMargin < minBeMargin)
 		{
 			rejectReason = $"break-even margin failed: +${beMargin:F2}/sh < min ${minBeMargin:F2}/sh";
@@ -231,7 +233,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		}
 
 		// Gate 4: Delta change cap.
-		var ivDefault = config.IvDefaultPct / 100m;
+		var ivDefault = indicators.IvDefaultPct / 100m;
 		var currentDelta = ComputeNetDelta(position.Legs, spot, ctx.Now, ctx.Quotes, ivDefault);
 		var proposedDelta = ComputeProposedDelta(position.Legs, spot, ctx.Now, ctx.Quotes, ivDefault, oldShortProposalLeg?.Symbol, newShort, newShortProposalLeg.Symbol);
 		var maxAllowedAbsDelta = Math.Abs(currentDelta) * (1m + config.MaxDeltaIncreasePct / 100m);
@@ -247,10 +249,10 @@ internal sealed class OpportunisticRollRule : IManagementRule
 
 	/// <summary>Net value per share of the position at new short expiry at current spot.
 	/// Long legs are valued via Black-Scholes with their remaining time; new short is valued at intrinsic (T=0).</summary>
-	private static decimal ComputeBreakEvenMargin(OpenPosition position, OptionParsed newShort, decimal spot, EvaluationContext ctx, OpportunisticRollConfig config)
+	private static decimal ComputeBreakEvenMargin(OpenPosition position, OptionParsed newShort, decimal spot, EvaluationContext ctx, IndicatorsConfig indicators)
 	{
 		var shortExpiry = newShort.ExpiryDate.Date;
-		var ivDefault = config.IvDefaultPct / 100m;
+		var ivDefault = indicators.IvDefaultPct / 100m;
 		var longValue = 0m;
 		foreach (var leg in position.Legs)
 		{

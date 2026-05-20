@@ -5,14 +5,16 @@ namespace WebullAnalytics.Tests.AI.Open;
 
 public class OpenerConfigValidationTests
 {
-	private static AIConfig MinimalValidConfig() => new()
+	private static AIConfig MinimalValidConfig()
 	{
-		Tickers = new() { "GME" },
-		Opener = new OpenerConfig
+		var c = new AIConfig
 		{
-			StrikeSteps = new() { ["GME"] = 0.50m }
-		}
-	};
+			Tickers = new() { "GME" },
+			Indicators = new IndicatorsConfig { IvDefaultPct = 40m, StrikeStep = 0.50m },
+		};
+		c.Opener.Indicators = c.Indicators;
+		return c;
+	}
 
 	[Fact]
 	public void DefaultConfigIsValid()
@@ -33,8 +35,8 @@ public class OpenerConfigValidationTests
 	public void DirectionalFitWeightMustBeNonNegative()
 	{
 		var cfg = MinimalValidConfig();
-		cfg.Opener.DirectionalFitWeight = -0.1m;
-		Assert.Contains("opener.directionalFitWeight", AIConfigLoader.Validate(cfg) ?? "");
+		cfg.Opener.Weights.DirectionalFit = -0.1m;
+		Assert.Contains("opener.weights.directionalFit", AIConfigLoader.Validate(cfg) ?? "");
 	}
 
 	[Fact]
@@ -58,40 +60,32 @@ public class OpenerConfigValidationTests
 	public void VolatilityFitWeightMustBeNonNegative()
 	{
 		var cfg = MinimalValidConfig();
-		cfg.Opener.VolatilityFitWeight = -0.1m;
-		Assert.Contains("opener.volatilityFitWeight", AIConfigLoader.Validate(cfg) ?? "");
+		cfg.Opener.Weights.VolatilityFit = -0.1m;
+		Assert.Contains("opener.weights.volatilityFit", AIConfigLoader.Validate(cfg) ?? "");
 	}
 
 	[Fact]
 	public void MaxPainWeightMustBeNonNegative()
 	{
 		var cfg = MinimalValidConfig();
-		cfg.Opener.MaxPainWeight = -0.1m;
-		Assert.Contains("opener.maxPainWeight", AIConfigLoader.Validate(cfg) ?? "");
+		cfg.Opener.Weights.MaxPain = -0.1m;
+		Assert.Contains("opener.weights.maxPain", AIConfigLoader.Validate(cfg) ?? "");
 	}
 
 	[Fact]
 	public void StatArbWeightMustBeNonNegative()
 	{
 		var cfg = MinimalValidConfig();
-		cfg.Opener.StatArbWeight = -0.1m;
-		Assert.Contains("opener.statArbWeight", AIConfigLoader.Validate(cfg) ?? "");
+		cfg.Opener.Weights.StatArb = -0.1m;
+		Assert.Contains("opener.weights.statArb", AIConfigLoader.Validate(cfg) ?? "");
 	}
 
 	[Fact]
-	public void TickerStrikeStepsMustBePositive()
+	public void StrikeStepMustBePositive()
 	{
 		var cfg = MinimalValidConfig();
-		cfg.Opener.StrikeSteps["GME"] = 0m;
-		Assert.Contains("opener.strikeSteps.GME", AIConfigLoader.Validate(cfg) ?? "");
-	}
-
-	[Fact]
-	public void TickerStrikeStepsMustExistForAllConfiguredTickers()
-	{
-		var cfg = MinimalValidConfig();
-		cfg.Tickers.Add("SPY");
-		Assert.Contains("opener.strikeSteps.SPY", AIConfigLoader.Validate(cfg) ?? "");
+		cfg.Indicators.StrikeStep = 0m;
+		Assert.Contains("indicators.strikeStep", AIConfigLoader.Validate(cfg) ?? "");
 	}
 
 	[Fact]

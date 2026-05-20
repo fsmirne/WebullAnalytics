@@ -51,12 +51,25 @@ internal static class TechnicalIndicators
 		return Math.Clamp(current / prior - 1m, -1m, 1m);
 	}
 
-	/// <summary>Weighted composite of all three indicators. Returns null when no indicator has enough data.</summary>
+	/// <summary>(price / SMA200 − 1) × <paramref name="scale"/> clamped to [−1, +1]. The Faber-style
+	/// trend regime gate: positive when price &gt; 200-day average (uptrend); negative when below
+	/// (downtrend). Scale of 20 maps a 5% dislocation to the clamp floor. Requires ≥ 200 closes.</summary>
+	public static decimal? ComputeSma200Score(IReadOnlyList<decimal> closes, decimal scale = 20m)
+	{
+		if (closes.Count < 200) return null;
+		var sma200 = closes.Skip(closes.Count - 200).Average();
+		if (sma200 == 0m) return null;
+		var current = closes[closes.Count - 1];
+		return Math.Clamp((current / sma200 - 1m) * scale, -1m, 1m);
+	}
+
+	/// <summary>Weighted composite of all sub-indicators. Returns null when no indicator has enough data.</summary>
 	public static TechnicalBias? Compute(IReadOnlyList<decimal> closes, TechnicalFilterConfig config)
 	{
 		var smaScore = ComputeSmaScore(closes);
 		var rsiScore = ComputeRsiScore(closes);
 		var momentumScore = ComputeMomentumScore(closes, config.MomentumDays);
+		var sma200Score = config.Sma200Weight > 0m ? ComputeSma200Score(closes) : null;
 
 		var weightedSum = 0m;
 		var totalWeight = 0m;
@@ -64,6 +77,7 @@ internal static class TechnicalIndicators
 		if (smaScore.HasValue && config.SmaWeight > 0m) { weightedSum += smaScore.Value * config.SmaWeight; totalWeight += config.SmaWeight; }
 		if (rsiScore.HasValue && config.RsiWeight > 0m) { weightedSum += rsiScore.Value * config.RsiWeight; totalWeight += config.RsiWeight; }
 		if (momentumScore.HasValue && config.MomentumWeight > 0m) { weightedSum += momentumScore.Value * config.MomentumWeight; totalWeight += config.MomentumWeight; }
+		if (sma200Score.HasValue && config.Sma200Weight > 0m) { weightedSum += sma200Score.Value * config.Sma200Weight; totalWeight += config.Sma200Weight; }
 
 		if (totalWeight == 0m) return null;
 
@@ -71,6 +85,7 @@ internal static class TechnicalIndicators
 			Score: weightedSum / totalWeight,
 			SmaScore: smaScore ?? 0m,
 			RsiScore: rsiScore ?? 0m,
-			MomentumScore: momentumScore ?? 0m);
+			MomentumScore: momentumScore ?? 0m,
+			Sma200Score: sma200Score ?? 0m);
 	}
 }

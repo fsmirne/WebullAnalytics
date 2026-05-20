@@ -5,7 +5,12 @@ namespace WebullAnalytics.Tests.AI.Open;
 
 public class CandidateScorerCalendarTests
 {
-	private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m };
+	private static OpenerConfig Cfg() => new()
+	{
+		Indicators = new() { IvDefaultPct = 40m, StrikeStep = 1.0m },
+		Weights = new() { DirectionalFit = 0.5m },
+		ProfitBandPct = 5m,
+	};
 
 	[Fact]
 	public void CalendarDebitIsLongAskMinusShortBid()
@@ -136,7 +141,7 @@ public class CandidateScorerCalendarTests
 
 		var baseCfg = Cfg();
 		var painCfg = Cfg();
-		painCfg.MaxPainWeight = 0.50m;
+		painCfg.Weights.MaxPain = 0.50m;
 
 		var withoutPain = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 25m, asOf, quotes, bias: 0m, baseCfg)!;
 		var withPain = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 25m, asOf, quotes, bias: 0m, painCfg)!;
@@ -201,7 +206,7 @@ public class CandidateScorerCalendarTests
 		};
 
 		var cfg = Cfg();
-		cfg.MaxPainWeight = 0.50m;
+		cfg.Weights.MaxPain = 0.50m;
 		var p = CandidateScorer.ScoreMultiLeg(skel, spot: 25m, asOf, quotes, bias: 0m, cfg)!;
 
 		Assert.Equal(OpenStructureKind.DoubleCalendar, p.StructureKind);
@@ -361,7 +366,7 @@ public class CandidateScorerCalendarTests
 		};
 
 		var cfg = Cfg();
-		cfg.MaxPainWeight = 0.50m;
+		cfg.Weights.MaxPain = 0.50m;
 		var p = CandidateScorer.ScoreMultiLeg(skel, spot: 25m, asOf, quotes, bias: 0m, cfg)!;
 
 		Assert.Equal(OpenStructureKind.DoubleDiagonal, p.StructureKind);

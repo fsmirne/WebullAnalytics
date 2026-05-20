@@ -7,8 +7,7 @@ public class CandidateEnumeratorVerticalTests
 {
 	private static OpenerConfig Cfg() => new()
 	{
-		StrikeSteps = new() { ["SPY"] = 1.0m },
-		IvDefaultPct = 40m,
+		Indicators = new() { IvDefaultPct = 40m, StrikeStep = 1.0m },
 		Structures = new OpenerStructuresConfig
 		{
 			LongCalendar = new OpenerCalendarLikeConfig { Enabled = false },
@@ -110,7 +109,7 @@ public class CandidateEnumeratorVerticalTests
 	public void ZeroDteSkippedForWeeklyOnlyTicker()
 	{
 		var cfg = Cfg();
-		cfg.StrikeSteps["GME"] = 0.5m;
+		cfg.Indicators.StrikeStep = 0.5m;
 		cfg.Structures.ShortVertical.Enabled = false;
 		cfg.Structures.IronButterfly.Enabled = true;
 		cfg.Structures.IronButterfly.DteMin = 0;

@@ -10,7 +10,6 @@
 		"view": "detailed",
 		"spot": "GME:1000,SPY:600",
 		"iv": null,
-		"api": "yahoo",
 		"range": 0,
 		"display": "value",
 		"grid": "simple",

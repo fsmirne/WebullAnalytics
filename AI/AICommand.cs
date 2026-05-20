@@ -28,10 +28,6 @@ internal abstract class AISubcommandSettings : CommandSettings
 	[Description("Path for --output text.")]
 	public string? OutputPath { get; set; }
 
-	[CommandOption("--api <SOURCE>")]
-	[Description("Override quoteSource: webull or yahoo.")]
-	public string? Api { get; set; }
-
 	[CommandOption("--log-level <LEVEL>")]
 	[Description("debug | information | error. Overrides config.")]
 	public string? LogLevel { get; set; }
@@ -47,7 +43,6 @@ internal abstract class AISubcommandSettings : CommandSettings
 	public override ValidationResult Validate()
 	{
 		if (Output != "console" && Output != "text") return ValidationResult.Error($"--output: must be 'console' or 'text', got '{Output}'");
-		if (Api != null && Api != "webull" && Api != "yahoo") return ValidationResult.Error($"--api: must be 'webull' or 'yahoo', got '{Api}'");
 		if (LogLevel != null && !ValidLogLevels.Contains(LogLevel, StringComparer.OrdinalIgnoreCase))
 			return ValidationResult.Error($"--log-level: must be debug|information|error, got '{LogLevel}'");
 		if (!ValidProposalModes.Contains(Proposals, StringComparer.OrdinalIgnoreCase))
@@ -70,13 +65,14 @@ internal abstract class AISubcommandSettings : CommandSettings
 	internal bool EmitOpenProposals => !string.Equals(Proposals, "management", StringComparison.OrdinalIgnoreCase);
 }
 
-/// <summary>Base for AI subcommands that operate on a portfolio of tickers (scan, watch, replay).
-/// Backtest does not extend this — it takes a single positional ticker instead.</summary>
-internal abstract class AIMultiTickerSubcommandSettings : AISubcommandSettings
+/// <summary>Base for AI subcommands that operate on a single ticker (scan, watch, replay, backtest).
+/// The ticker is the first positional argument; the loader merges <c>ai-config.json</c> with the
+/// per-ticker override file <c>ai-config.&lt;TICKER&gt;.json</c> if it exists.</summary>
+internal abstract class AISingleTickerSubcommandSettings : AISubcommandSettings
 {
-	[CommandOption("--tickers <LIST>")]
-	[Description("Override config tickers (comma-separated).")]
-	public string? Tickers { get; set; }
+	[CommandArgument(0, "<ticker>")]
+	[Description("Ticker to scan. Loads ai-config.json + ai-config.<TICKER>.json (deep-merged); the per-ticker file holds overrides and may be absent.")]
+	public string Ticker { get; set; } = "";
 }
 
 internal static class AITextOutput
@@ -116,32 +112,50 @@ internal static class AITextOutput
 
 internal static class AIContext
 {
-	/// <summary>Loads and merges config + CLI overrides. Returns null on failure (with stderr messages).</summary>
+	/// <summary>Loads ai-config (base + optional per-ticker override, deep-merged) and applies CLI
+	/// overrides. The per-ticker file is <c>ai-config.&lt;TICKER&gt;.json</c> next to the base. Returns
+	/// null on failure (with stderr messages).</summary>
 	internal static AIConfig? ResolveConfig(AISubcommandSettings settings)
 	{
-		var path = settings.ConfigPath ?? AIConfigLoader.ConfigPath;
-		var abspath = Program.ResolvePath(path);
-		if (!File.Exists(abspath))
+		var basePath = settings.ConfigPath ?? AIConfigLoader.ConfigPath;
+		var absBasePath = Program.ResolvePath(basePath);
+
+		string? overrideTicker = null;
+		if (settings is AISingleTickerSubcommandSettings single && !string.IsNullOrWhiteSpace(single.Ticker))
+			overrideTicker = single.Ticker.Trim().ToUpperInvariant();
+
+		string? absOverridePath = null;
+		if (overrideTicker != null)
 		{
-			Console.Error.WriteLine($"Error: ai config not found at '{path}'.");
+			var baseDir = Path.GetDirectoryName(basePath) ?? string.Empty;
+			var stem = Path.GetFileNameWithoutExtension(basePath);
+			var ext = Path.GetExtension(basePath);
+			var overrideRelative = Path.Combine(baseDir, $"{stem}.{overrideTicker}{ext}");
+			absOverridePath = Program.ResolvePath(overrideRelative);
+		}
+
+		var baseExists = File.Exists(absBasePath);
+		var overrideExists = absOverridePath != null && File.Exists(absOverridePath);
+
+		if (!baseExists && !overrideExists)
+		{
+			Console.Error.WriteLine($"Error: no ai-config found at '{basePath}'" + (overrideTicker != null ? $" or its per-ticker override for '{overrideTicker}'." : "."));
 			Console.Error.WriteLine($"  Run: cp ai-config.example.json {AIConfigLoader.ConfigPath} and edit.");
 			return null;
 		}
 
-		AIConfig? config;
-		try { config = System.Text.Json.JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(abspath)); }
-		catch (System.Text.Json.JsonException ex) { Console.Error.WriteLine($"Error: failed to parse ai-config.json: {ex.Message}"); return null; }
+		var config = AIConfigMerge.LoadMerged(baseExists ? absBasePath : null, overrideExists ? absOverridePath : null);
+		if (config == null) { Console.Error.WriteLine("Error: ai-config is empty or unparseable."); return null; }
 
-		if (config == null) { Console.Error.WriteLine("Error: ai-config.json is empty."); return null; }
-
-		// Apply CLI overrides. --tickers is only available on multi-ticker subcommands.
-		if (settings is AIMultiTickerSubcommandSettings multi && !string.IsNullOrWhiteSpace(multi.Tickers))
-			config.Tickers = multi.Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-		if (!string.IsNullOrWhiteSpace(settings.Api)) config.QuoteSource = settings.Api;
+		// CLI overrides applied after the merge.
+		if (overrideTicker != null) config.Tickers = new List<string> { overrideTicker };
 		if (!string.IsNullOrWhiteSpace(settings.LogLevel)) config.Log.ConsoleVerbosity = settings.LogLevel;
 
+		// Wire the shared indicators block onto OpenerConfig so helpers that only see cfg can reach it.
+		config.Opener.Indicators = config.Indicators;
+
 		var err = AIConfigLoader.Validate(config);
-		if (err != null) { Console.Error.WriteLine($"Error: ai-config.json: {err}"); return null; }
+		if (err != null) { Console.Error.WriteLine($"Error: ai-config: {err}"); return null; }
 
 		return config;
 	}
@@ -162,7 +176,7 @@ internal static class AIContext
 		return new LivePositionSource(account, trades, feeLookup);
 	}
 
-	internal static IQuoteSource BuildLiveQuoteSource(AIConfig config) => new LiveQuoteSource(config.QuoteSource);
+	internal static IQuoteSource BuildLiveQuoteSource(AIConfig config) => new LiveQuoteSource();
 
 	/// <summary>Resolves the broker account that ai-config points at via positionSource.account.
 	/// Used by the position source AND by the auto-executor for order submission.</summary>
@@ -174,7 +188,7 @@ internal static class AIContext
 }
 
 /// <summary>`ai scan` — one evaluation pass, print proposals, exit.</summary>
-internal sealed class AIScanSettings : AIMultiTickerSubcommandSettings
+internal sealed class AIScanSettings : AISingleTickerSubcommandSettings
 {
 	[CommandOption("--top <N>")]
 	[Description("Override opener.topNPerTicker from ai-config.json.")]
@@ -275,7 +289,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		if (settings.Top.HasValue) config.Opener.TopNPerTicker = settings.Top.Value;
 
 		if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
-			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' quoteSource='{config.QuoteSource}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals} theoretical={settings.Theoretical}");
+			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals} theoretical={settings.Theoretical}");
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
@@ -310,7 +324,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		if (quoteSnapshot == null) return 1;
 
 		var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(
-			tickerSet, priceCache, config.Rules.OpportunisticRoll.TechnicalFilter, now, cancellation);
+			tickerSet, priceCache, config.Indicators.TechnicalFilter, now, cancellation);
 
 		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
@@ -538,7 +552,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 		var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, asOf, quotes, config, cancellation);
 		var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(
-			tickerSet, priceCache, config.Rules.OpportunisticRoll.TechnicalFilter, asOf, cancellation);
+			tickerSet, priceCache, config.Indicators.TechnicalFilter, asOf, cancellation);
 
 		var ctx = new EvaluationContext(asOf, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 
@@ -558,7 +572,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 }
 
 /// <summary>`ai replay` — historical replay against orders.jsonl with agreement analysis.</summary>
-internal sealed class AIReplaySettings : AIMultiTickerSubcommandSettings
+internal sealed class AIReplaySettings : AISingleTickerSubcommandSettings
 {
 	[CommandOption("--since <DATE>")]
 	[Description("Start date YYYY-MM-DD. Default: earliest fill.")]

@@ -40,7 +40,7 @@ internal static class AIPipelineHelper
 			if (bail) continue;
 
 			var kind = ScenarioEngine.Classify(legInfos);
-			var strikeStep = config.Rules.OpportunisticRoll.StrikeStep;
+			var strikeStep = config.Indicators.StrikeStep;
 			foreach (var sym in ScenarioEngine.EnumerateHypotheticalSymbols(legInfos, kind, spot, strikeStep, asOf))
 			{
 				if (!phase1.Options.ContainsKey(sym)) phase2Symbols.Add(sym);
@@ -69,9 +69,12 @@ internal static class AIPipelineHelper
 	{
 		var result = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
 		if (!filter.Enabled) return result;
+		// The Sma200 component needs ≥ 200 daily closes; bump the lookback when it's enabled. Otherwise
+		// preserve the configured lookback (legacy behavior — typically 20 days, matching SMA20).
+		var effectiveLookback = filter.Sma200Weight > 0m ? Math.Max(filter.LookbackDays, 200) : filter.LookbackDays;
 		foreach (var ticker in tickers)
 		{
-			var closes = await priceCache.GetRecentClosesAsync(ticker, filter.LookbackDays, asOf, cancellation);
+			var closes = await priceCache.GetRecentClosesAsync(ticker, effectiveLookback, asOf, cancellation);
 			var bias = TechnicalIndicators.Compute(closes, filter);
 			if (bias != null) result[ticker] = bias;
 		}

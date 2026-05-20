@@ -17,13 +17,15 @@ public class OpenCandidateEvaluatorTests
 
 	private static AIConfig BuildConfig(OpenerConfig opener)
 	{
-		opener.StrikeSteps["SPY"] = 1m;
-		return new AIConfig
+		var ai = new AIConfig
 		{
 			Tickers = new() { "SPY" },
+			Indicators = new IndicatorsConfig { IvDefaultPct = 40m, StrikeStep = 1m },
 			Opener = opener,
 			CashReserve = new CashReserveConfig { Mode = "absolute", Value = 0m }
 		};
+		opener.Indicators = ai.Indicators;
+		return ai;
 	}
 
 	private static EvaluationContext BuildContext(decimal cash, decimal spot, IReadOnlyDictionary<string, OptionContractQuote> quotes) => new(

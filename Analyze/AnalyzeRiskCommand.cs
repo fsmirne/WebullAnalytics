@@ -89,14 +89,14 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var parsedLegs = AnalyzeRiskSettings.ParseRiskLegs(settings.Spec);
 		var symbols = parsedLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-		var (quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(settings.Api, symbols, cancellation);
+		var (quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(symbols, cancellation);
 		if (quotes == null) return 1;
 
 		var ticker = parsedLegs[0].Option!.Root;
 		var spot = ResolveSpot(ticker, settings.Spot, underlyingPrices);
 		if (spot == null || spot.Value <= 0m)
 		{
-			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or configure --api yahoo|webull.");
+			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or run 'wa sniff' to refresh Webull headers.");
 			return 1;
 		}
 
@@ -228,7 +228,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			if (cfg == null) return 0m;
 			if (AIConfigLoader.Validate(cfg) != null) return 0m;
 
-			var filter = cfg.Rules.OpportunisticRoll.TechnicalFilter;
+			var filter = cfg.Indicators.TechnicalFilter;
 			if (!filter.Enabled) return 0m;
 
 			var cache = new HistoricalPriceCache();
@@ -258,7 +258,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			var cfg = System.Text.Json.JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(path));
 			if (cfg == null) return null;
 			if (AIConfigLoader.Validate(cfg) != null) return null;
-			if (cfg.Opener.VolatilityFitWeight <= 0m) return null;
+			if (cfg.Opener.Weights.VolatilityFit <= 0m) return null;
 
 			var cache = new HistoricalPriceCache();
 			var closes = await cache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);

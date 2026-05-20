@@ -121,32 +121,25 @@ wa report --initial-amount 10000
 # Combine options
 wa report --since 2026-01-01 --output excel --initial-amount 10000
 
-# Fetch option chain data for break-even analysis with time-decay grids (Yahoo Finance)
-wa report --api yahoo
-
-# Use Webull option chain data (requires sniffed headers via 'sniff' command)
-wa report --api webull
-
-# Override implied volatility for specific option legs (per OCC symbol)
+# Live option-chain data is fetched automatically from Webull (requires sniffed headers via
+# the 'sniff' command). The break-even time-decay grid is populated from the fetched chain.
+# Override implied volatility for specific option legs (per OCC symbol):
 wa report --iv GME260213C00025000:50,GME260516C00025000:45
 
-# Combine API data with manual IV overrides (overrides take priority)
-wa report --api yahoo --iv GME260213C00025000:60
-
 # Show P&L instead of contract value in the grid
-wa report --api yahoo --display pnl
+wa report --display pnl
 
 # Show each leg's contract value alongside the net in every grid cell
-wa report --api yahoo --grid verbose
+wa report --grid verbose
 
 # Increase grid granularity (more rows between strikes, default: 2)
-wa report --api yahoo --range 4
+wa report --range 4
 
 # Override the current underlying price (for "what-if" evaluation)
-wa report --api yahoo --spot GME:24.88,SPY:580.50
+wa report --spot GME:24.88,SPY:580.50
 
 # Use Black-Scholes theoretical prices instead of market mid for today's grid column
-wa report --api yahoo --theoretical
+wa report --theoretical
 
 # Add custom notable prices to break-even reports (e.g., support/resistance levels)
 wa report --levels GME:20/25/30
@@ -167,7 +160,6 @@ Options:
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
   --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
   --iv <overrides>          Override implied volatility per leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple.
-  --api <source>            Option chain data source for break-even analysis: 'yahoo' or 'webull' (webull requires sniffed headers)
   --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --grid <layout>           Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg values '1.23|0.45|$0.78')
@@ -207,7 +199,7 @@ ACTION:SYMBOL:QTY@PRICE,ACTION:SYMBOL:QTY@PRICE,...
 - **ACTION**: `buy` or `sell`.
 - **SYMBOL**: OCC option symbol (e.g., `GME260501C00023000`). `analyze trade` supports option legs only.
 - **QTY**: Positive integer.
-- **PRICE**: Required. A decimal (e.g., `0.50`) or a market-price keyword (`BID`, `MID`, `ASK`, case-insensitive). Keywords require `--api`.
+- **PRICE**: Required. A decimal (e.g., `0.50`) or a market-price keyword (`BID`, `MID`, `ASK`, case-insensitive). Keywords trigger a live Webull quote fetch (requires sniffed headers via the `sniff` command).
 
 Examples:
 
@@ -216,10 +208,10 @@ Examples:
 wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38"
 
 # Same roll but use live market prices (buy at ask, sell at bid)
-wa analyze trade "sell:GME260410C00023000:300@BID,buy:GME260417C00023000:300@ASK" --api yahoo
+wa analyze trade "sell:GME260410C00023000:300@BID,buy:GME260417C00023000:300@ASK"
 
 # Use mid-market prices for both legs
-wa analyze trade "sell:GME260410C00023000:300@MID,buy:GME260417C00023000:300@MID" --api yahoo
+wa analyze trade "sell:GME260410C00023000:300@MID,buy:GME260417C00023000:300@MID"
 
 # What if I close 100 contracts of my long call?
 wa analyze trade "sell:GME260501C00023000:100@0.70"
@@ -234,17 +226,17 @@ wa analyze trade "buy:GME260417C00023000:300@0.38" --date 2026-04-11
 wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --spot GME:23.20
 ```
 
-When using `BID`, `MID`, or `ASK`, the command fetches live quotes from the configured API source (`--api webull` or `--api yahoo`) before building the hypothetical trades. The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
+When using `BID`, `MID`, or `ASK`, the command fetches live quotes from Webull before building the hypothetical trades. The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
 
 #### `analyze roll`
 
 Computes the theoretical roll credit/debit at various underlying prices using Black-Scholes, helping you find the optimal moment to roll a leg.
 
 ```
-wa analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--cash <amount>] [--api <source>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
+wa analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--cash <amount>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
 ```
 
-The `<spec>` is `OLD_SYMBOL>NEW_SYMBOL:QTY`. `--api` is required.
+The `<spec>` is `OLD_SYMBOL>NEW_SYMBOL:QTY`. Live Webull quotes are fetched automatically (requires sniffed headers via the `sniff` command).
 
 `--side` selects the math:
 
@@ -255,25 +247,25 @@ Examples:
 
 ```bash
 # Short-side roll of the $23 short from Apr 10 to Apr 17 (300 contracts)
-wa analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo
+wa analyze roll "GME260410C00023000>GME260417C00023000:300"
 
 # Same roll but I'm long the old position
-wa analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo --side long
+wa analyze roll "GME260410C00023000>GME260417C00023000:300" --side long
 
 # Roll to a different strike
-wa analyze roll "GME260410C00023000>GME260417C00023500:300" --api yahoo
+wa analyze roll "GME260410C00023000>GME260417C00023500:300"
 
 # Override IV for the analysis
-wa analyze roll "GME260410C00023000>GME260417C00023000:300" --api yahoo --iv GME260410C00023000:37,GME260417C00023000:31
+wa analyze roll "GME260410C00023000>GME260417C00023000:300" --iv GME260410C00023000:37,GME260417C00023000:31
 
 # Short-side roll paired with a static long call leg (calendar/diagonal margin)
-wa analyze roll "GME260424C00025000>GME260424C00024500:499" --api yahoo --pair GME260515C00025000:499
+wa analyze roll "GME260424C00025000>GME260424C00024500:499" --pair GME260515C00025000:499
 
 # Short-side roll paired with long stock (covered-call margin)
-wa analyze roll "GME260515C00025000>GME260522C00025000:5" --api yahoo --pair GME:500
+wa analyze roll "GME260515C00025000>GME260522C00025000:5" --pair GME:500
 
 # Check whether your available cash is enough to fund the roll
-wa analyze roll "GME260424C00025000>GME260424C00024500:499" --api yahoo --pair GME260515C00025000:499 --cash 23015
+wa analyze roll "GME260424C00025000>GME260424C00024500:499" --pair GME260515C00025000:499 --cash 23015
 ```
 
 The output is a 2D grid of roll net values across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-net cell (globally) in **bold underline green**, and any row whose max net matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
@@ -324,13 +316,13 @@ Examples:
 
 ```bash
 # Evaluate a 1-lot diagonal at current mid prices
-wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000" --api yahoo
+wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000"
 
 # Evaluate a 10-lot using explicit cost bases
-wa analyze risk "sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12" --api yahoo
+wa analyze risk "sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12"
 
 # Supply spot manually instead of fetching an underlying quote
-wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000" --api yahoo --spot GME:24.88
+wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000" --spot GME:24.88
 ```
 
 The command appends a machine-readable record to `data/analyze-risk.jsonl` after each run.
@@ -355,13 +347,13 @@ Examples:
 
 ```bash
 # Pick an existing open strategy from orders.jsonl and auto-detect available cash/BP from trade-config.json
-wa analyze position --api yahoo --account test1
+wa analyze position --account test1
 
 # Analyze a manually specified calendar position
-wa analyze position "sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499@1.11" --api yahoo --cash 23015
+wa analyze position "sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499@1.11" --cash 23015
 
 # Analyze a single long call with a custom scenario strike step
-wa analyze position "buy:GME260620C00025000:10@1.25" --api yahoo --strike-step 0.50 --spot GME:24.88
+wa analyze position "buy:GME260620C00025000:10@1.25" --strike-step 0.50 --spot GME:24.88
 ```
 
 The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa analyze trade` reproduction commands, and appends a machine-readable record to `data/analyze-position.jsonl`.
@@ -595,29 +587,79 @@ Three subcommands share one evaluation engine:
 
 ```bash
 # Continuous monitoring during market hours (default: until 4 PM ET)
-wa ai watch
+wa ai watch SPXW
 
 # Single evaluation pass, print proposals, exit
-wa ai scan
+wa ai scan GME
 
 # Replay the rules against historical orders.jsonl with agreement analysis
-wa ai replay --since 2026-01-01 --until 2026-04-17
+wa ai replay GME --since 2026-01-01 --until 2026-04-17
 
 # Run the watch loop every 30 seconds for 90 minutes, ignoring market-hours checks
-wa ai watch --tick 30 --duration 90m --ignore-market-hours
+wa ai watch SPXW --tick 30 --duration 90m --ignore-market-hours
 
 # Emit only opening ideas
-wa ai scan --proposals open
+wa ai scan GME --proposals open
 ```
+
+The ticker is a required positional argument — every AI subcommand operates on exactly one ticker per run, and the config layer is selected by that argument.
 
 #### Setup
 
-1. Copy the example config:
+1. Copy the base config:
    ```bash
    cp ai-config.example.json data/ai-config.json
    ```
-2. Edit `data/ai-config.json` and set the `tickers` array to the symbols you want to monitor, and set `positionSource.account` to one of the aliases in your `data/trade-config.json`.
-3. Ensure `data/trade-config.json` exists (same setup as the `trade` command) — the loop reads position state from the Webull OpenAPI.
+2. Edit `data/ai-config.json` — this is the *base* and holds settings that apply to every ticker (rules, watch, log, position source, indicator parameters, default opener weights and structure DTEs). It deliberately does not contain ticker-specific tuning like the bid/ask `strikeStep` increment.
+3. For each ticker you trade, create `data/ai-config.<TICKER>.json` containing only the keys that differ from the base. At minimum it must set `indicators.strikeStep` (the validator rejects 0). Examples:
+   ```bash
+   cp ai-config.GME.example.json  data/ai-config.GME.json   # swing tuning, $0.50 strikes
+   cp ai-config.SPXW.example.json data/ai-config.SPXW.json  # 0DTE tuning, $5 strikes
+   ```
+4. Run `wa ai scan <TICKER>` (or watch / replay). The loader deep-merges `data/ai-config.json` and `data/ai-config.<TICKER>.json`, with the per-ticker file winning on every overlapping key.
+5. Ensure `data/trade-config.json` exists (same setup as the `trade` command) — the loop reads position state from the Webull OpenAPI.
+
+**Config layering rules:**
+- JSON objects merge recursively by key (override wins on overlap).
+- Arrays and scalar values are *replaced* by the override (not concatenated). So `widthSteps: [5]` in the per-ticker file completely supersedes `widthSteps: [1, 2, 3]` in the base.
+- The per-ticker file is required in practice because the base has no default `strikeStep`. If it's missing entirely, the loader falls back to whatever single file is present.
+
+#### Config Sections
+
+The config file has four top-level functional sections plus the usual top-level plumbing (`tickIntervalSeconds`, `positionSource`, `cashReserve`, `log`, `watch`).
+
+**`indicators`** — pipeline-wide inputs read by BOTH the opener and the management rules. Centralized here so duplication is impossible.
+
+| Key | Purpose |
+|---|---|
+| `ivDefaultPct` | Fallback IV when a leg has no live quote. Stored as a percentage. |
+| `strikeStep` | Strike-grid increment in dollars. Ticker-specific — must be set in the per-ticker override. |
+| `technicalFilter` | Composite technical bias (SMA5/20, RSI(14), N-day momentum, optional 200-day trend). Feeds the opener's macroBias AND the opportunistic-roll rule's bullish/bearish block gates. |
+| `intradayTape` | Per-component config for the intraday tape signal (bar interval, lookback, gap/openToNow/VWAP weights). The blend weight that decides how much this matters lives in `opener.weights.intradayTape`. |
+| `events` | Earnings + ex-div veto policy (blackout window, short-call ex-div rejection, override file path). |
+
+**`opener`** — settings specific to opening new positions: which structures to enumerate, the multiplicative-factor weights on the candidate score chain, output limits, and per-trade risk caps.
+
+The 12 scoring weights live under `opener.weights` (formerly flat `*Weight` fields at the opener root):
+
+| Weight | Purpose |
+|---|---|
+| `directionalFit` | Strength of the technical-bias adjustment on the per-structure score (post-hoc tilt for bullish vs bearish setups). |
+| `biasDrift` | Shifts the scenario-grid center by `bias × biasDrift × sigma` when computing realized EV. Critical for long-premium structures (LongCall/LongPut) whose negative raw EV can never be flipped positive by sign-symmetric ApplyFactor. **Aggressive values (≥ 2.0) heavily favor long calls/puts over neutral structures** when bias is strongly directional. |
+| `whipsaw` | Penalty on credit structures when 3-day realized vol >> 30-day. |
+| `volatilityFit` | Vega-aware HV-vs-IV fit factor. |
+| `maxPain` | Pin-strike attraction factor. |
+| `gex` | Dealer-gamma exposure factor (pin + regime). |
+| `statArb` | Market-vs-theoretical mispricing factor. |
+| `sentiment` | Contrarian Fear & Greed regime overlay. |
+| `expectedMoveCredit` | EM-vs-short-strike credit-trade safety factor. |
+| `ivRealizedPremium` | IV-vs-HV regime-alignment factor (credit favored when IV > HV). |
+| `vixTermStructure` | Blend weight for the VIX9D/VIX term-structure regime signal. |
+| `intradayTape` | Blend weight for the intraday tape signal (0DTE wants 0.5–0.8; swing wants 0.0–0.2). |
+
+**`rules`** — management rule triggers and thresholds. Each rule's config holds only the gates specific to that rule (stop-loss multipliers, take-profit percentages, roll-specific thresholds). The `opportunisticRoll` block contains `bullishBlockThreshold` / `bearishBlockThreshold` — composite-bias score boundaries that block call rolls in extended-bullish setups and put rolls in extended-bearish setups.
+
+**`watch`** — long-running `wa ai watch` settings: auto-execute opt-in, tranche schedule for scaled closes, opener auto-execute caps.
 
 #### Rules
 
@@ -679,11 +721,10 @@ AI commands accept `--pricing mid|bidask` to control both displayed command pric
 Shared AI options:
 
 ```
-  --config <path>          Path to ai-config.json. Default: data/ai-config.json
-  --tickers <list>         Override config tickers (comma-separated)
+  <ticker>                 Required positional ticker (e.g. SPXW, GME). Loads ai-config.json + ai-config.<TICKER>.json (deep-merged).
+  --config <path>          Path to the base ai-config.json. Default: data/ai-config.json
   --output <format>        console or text. `text` writes to a default .txt file when --output-path is omitted
   --output-path <path>     Optional path for --output text
-  --api <source>           Override quote source: webull or yahoo
   --log-level <level>      debug | information | error
   --proposals <mode>       all | open | management
   --pricing <mode>         mid | bidask
@@ -901,7 +942,7 @@ This format is useful for sharing reports via email, archiving, or importing int
 
 ## Time-Decay Grid
 
-When implied volatility is available (via `--api` or `--iv` overrides), the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
+When implied volatility is available (from the auto-fetched Webull chain or `--iv` overrides), the break-even panel for each option position includes a 2D time-decay grid showing how the position value changes across underlying prices (rows) and dates (columns).
 
 - **Date columns**: Evenly-spaced dates from today through expiration, evaluated at market open (9:30 AM). The last two columns show expiration day at market open (with remaining intraday time value via Black-Scholes) and "At Exp" at market close (4:30 PM, intrinsic value only). The number of columns adapts to the terminal width — dates are skipped as needed so the grid never overflows horizontally.
 - **Price rows**: Step size is derived from the position's strike spacing (or strike-to-break-even distance for single-strike positions like calendars), so the grid adapts to any stock price. The `--range` parameter controls granularity — it sets how many rows fit per strike gap (default: 2). Break-even prices (marked with `*`) and strike prices are always included, with 2 padding rows beyond the outermost notable price. The current underlying-price row is marked with `>` and rendered in bold yellow.
@@ -914,7 +955,7 @@ Without implied volatility data, the existing 1D price ladder (Price | Value | P
 
 ## Volatility Analysis
 
-When using the Webull data source (`--api webull`), the break-even leg descriptions include volatility metrics for each option contract:
+When the Webull chain fetch succeeds (the default — requires sniffed headers), the break-even leg descriptions include volatility metrics for each option contract:
 
 ```
 └─ ... | IV 32.3% | HV 43.0% | IV5 40.0%
@@ -938,7 +979,7 @@ The IV value is color-coded based on the IV/HV ratio (volatility risk premium):
 
 The IV5 metric provides additional context: if IV5 is rising toward HV, a cheap signal may be closing; if IV5 is falling away from HV, a rich signal may be strengthening.
 
-These metrics are sourced from the Webull option chain API and are not available when using Yahoo Finance (`--api yahoo`).
+These metrics are sourced from the Webull option chain API. Webull is the only option-quote source the tool supports — Yahoo Finance lacks Greeks, HV, and iv5 and runs on a delay, so it was retired from the quote path. Yahoo is still used for daily index closes (historical price cache) and the risk-free rate (`^IRX`).
 
 ## Risk Diagnostic Panel
 
