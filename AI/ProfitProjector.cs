@@ -34,7 +34,12 @@ internal static class ProfitProjector
 
 		var today = ctx.Now.Date;
 		var latestExpiry = position.Legs.Max(l => l.Expiry!.Value.Date);
-		if (latestExpiry <= today) return null;
+		// Same-day expiry (0DTE) is supported: BuildDateSamples produces a single date == today,
+		// the BS loop runs with years=0 yielding intrinsic-only valuation across the spot grid,
+		// and the max of that grid IS the max payoff at expiry — exactly what we want for the
+		// TakeProfitRule's pct-captured ratio. Previously this branch returned null on 0DTE,
+		// which silently disabled TakeProfit for every same-day structure.
+		if (latestExpiry < today) return null;
 
 		var dates = BuildDateSamples(today, latestExpiry);
 		var prices = BuildPriceSamples(spot);
