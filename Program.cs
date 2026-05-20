@@ -14,11 +14,45 @@ namespace WebullAnalytics;
 class Program
 {
     /// <summary>
-	/// Base directory for resolving relative paths — the directory containing the executable.
-	/// For single-file published apps, AppContext.BaseDirectory points to a temp extraction directory,
-	/// so we use the actual executable path from ProcessPath instead.
+	/// Base directory for resolving relative paths. The repository has multiple copies of <c>data/</c>
+	/// (source, bin/Debug, bin/Release, published exe), and only one of them is the user's "production"
+	/// data — the one under <c>%LOCALAPPDATA%/WebullAnalytics</c> on Windows (or the OS equivalent of
+	/// <see cref="Environment.SpecialFolder.LocalApplicationData"/> elsewhere). Reading from any of the
+	/// build-output copies silently picked up stale configs whenever the user edited prod and didn't
+	/// rebuild — most recently surfaced when a disabled-structure edit didn't take effect because the
+	/// debug build was still reading its own copy.
+	///
+	/// Resolution order:
+	///   1. If <c>%LOCALAPPDATA%/WebullAnalytics/data</c> exists, use <c>%LOCALAPPDATA%/WebullAnalytics</c>
+	///      as the base regardless of where the executable lives. This makes the prod data dir the
+	///      single source of truth across every invocation path (published wa.exe, dotnet run from
+	///      source, bin/Debug/wa.exe, etc).
+	///   2. Otherwise fall back to the executable's directory — preserves the prior behavior for
+	///      first-run setups where the user hasn't created an AppData dir yet, and for tests that
+	///      rely on bin/.../data for fixtures.
+	///
+	/// Single-file published apps need <c>Environment.ProcessPath</c> rather than
+	/// <c>AppContext.BaseDirectory</c> — the latter resolves to a temp extraction dir.
 	/// </summary>
-	internal static readonly string BaseDir = Path.GetDirectoryName(Environment.ProcessPath ?? AppContext.BaseDirectory)!;
+	internal static readonly string BaseDir = ResolveBaseDir();
+
+	private static string ResolveBaseDir()
+	{
+		var exeDir = Path.GetDirectoryName(Environment.ProcessPath ?? AppContext.BaseDirectory)!;
+		try
+		{
+			var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+			if (!string.IsNullOrEmpty(appData))
+			{
+				var candidate = Path.Combine(appData, "WebullAnalytics");
+				if (Directory.Exists(Path.Combine(candidate, "data")))
+					return candidate;
+			}
+		}
+		catch (PlatformNotSupportedException) { }
+		catch (IOException) { }
+		return exeDir;
+	}
 
 	internal const string ApiConfigPath = "data/api-config.json";
 	internal const string OrdersPath = "data/orders.jsonl";
