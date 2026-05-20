@@ -44,6 +44,16 @@ internal sealed class HistoricalBarCache
 	/// Used by HV computation in <see cref="BacktestIVProvider"/>. Strict-less-than prevents lookahead in
 	/// backtest mode where today's bar is already cached when the model is making its 09:30 decision.</summary>
 	public async Task<IReadOnlyList<decimal>> GetRecentAdjClosesAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
+		=> await GetRecentValuesAsync(ticker, count, asOf, b => b.AdjClose, cancellation);
+
+	/// <summary>Returns the last <paramref name="count"/> Close values strictly before <paramref name="asOf"/>, oldest-first.
+	/// Same strict-less-than lookahead guard as <see cref="GetRecentAdjClosesAsync"/>; uses raw Close rather
+	/// than AdjClose so callers that care about the actual print on screen (technical-bias EMA/RSI inputs,
+	/// VIX term structure, intraday gap reference) don't see split/dividend-adjusted prices.</summary>
+	public async Task<IReadOnlyList<decimal>> GetRecentClosesAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
+		=> await GetRecentValuesAsync(ticker, count, asOf, b => b.Close, cancellation);
+
+	private async Task<IReadOnlyList<decimal>> GetRecentValuesAsync(string ticker, int count, DateTime asOf, Func<YahooOptionsClient.HistoricalBar, decimal> select, CancellationToken cancellation)
 	{
 		var map = await LoadOrFetchAsync(ticker, asOf.Date, cancellation);
 		return map
@@ -51,7 +61,7 @@ internal sealed class HistoricalBarCache
 			.OrderByDescending(kv => kv.Key)
 			.Take(count)
 			.OrderBy(kv => kv.Key)
-			.Select(kv => kv.Value.AdjClose)
+			.Select(kv => select(kv.Value))
 			.ToList();
 	}
 
