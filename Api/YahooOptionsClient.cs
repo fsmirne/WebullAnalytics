@@ -98,34 +98,6 @@ public static class YahooOptionsClient
 		};
 	}
 
-	public static async Task<Dictionary<DateTime, decimal>> FetchHistoricalClosesAsync(string ticker, DateTime from, DateTime to, CancellationToken cancellation)
-	{
-		var yahoTicker = ToYahooTicker(ticker);
-		var period1 = ToUnixTimeSecondsUtc(from);
-		var period2 = ToUnixTimeSecondsUtc(to);
-
-		var handler = new HttpClientHandler { CookieContainer = new System.Net.CookieContainer(), AutomaticDecompression = System.Net.DecompressionMethods.All };
-		using var client = new HttpClient(handler);
-		client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebullAnalytics/1.0");
-		client.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/plain, */*");
-		client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
-
-		string? crumb = null;
-		var result = await FetchHistoricalClosesAsync(client, yahoTicker, period1, period2, crumb, cancellation);
-		if (result == null)
-		{
-			crumb = await TryGetCrumbAsync(client, cancellation);
-			result = await FetchHistoricalClosesAsync(client, yahoTicker, period1, period2, crumb, cancellation);
-		}
-
-		if (result == null)
-		{
-			Console.Error.WriteLine($"Warning: Yahoo historical fetch for {ticker} failed. Cache will be empty.");
-			return new Dictionary<DateTime, decimal>();
-		}
-		return result;
-	}
-
 	/// <summary>One daily OHLCV bar plus split/dividend-adjusted close. AdjClose is what `BacktestIVProvider`
 	/// uses for realized-vol calc to avoid dividend-date and split-date jumps polluting HV.</summary>
 	public sealed record HistoricalBar(DateTime Date, decimal Open, decimal High, decimal Low, decimal Close, decimal AdjClose, long? Volume);
@@ -224,42 +196,4 @@ public static class YahooOptionsClient
 		return new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc)).ToUnixTimeSeconds();
 	}
 
-	private static async Task<Dictionary<DateTime, decimal>?> FetchHistoricalClosesAsync(HttpClient client, string ticker, long period1, long period2, string? crumb, CancellationToken cancellation)
-	{
-		try
-		{
-			var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(ticker)}?period1={period1}&period2={period2}&interval=1d&events=history";
-			if (!string.IsNullOrWhiteSpace(crumb)) url += $"&crumb={Uri.EscapeDataString(crumb)}";
-			var request = new HttpRequestMessage(HttpMethod.Get, url);
-			request.Headers.Referrer = new Uri($"https://finance.yahoo.com/quote/{Uri.EscapeDataString(ticker)}/history/");
-			using var response = await client.SendAsync(request, cancellation);
-			if (!response.IsSuccessStatusCode) return null;
-
-			var json = await response.Content.ReadAsStringAsync(cancellation);
-			using var doc = JsonDocument.Parse(json);
-			if (!doc.RootElement.TryGetProperty("chart", out var chart)) return null;
-			if (!chart.TryGetProperty("result", out var resultArr) || resultArr.ValueKind != JsonValueKind.Array || resultArr.GetArrayLength() == 0) return null;
-			var series = resultArr[0];
-			if (!series.TryGetProperty("timestamp", out var tsArr)) return null;
-			if (!series.TryGetProperty("indicators", out var indicators)) return null;
-			if (!indicators.TryGetProperty("quote", out var quoteArr) || quoteArr.GetArrayLength() == 0) return null;
-			if (!quoteArr[0].TryGetProperty("close", out var closeArr)) return null;
-
-			var map = new Dictionary<DateTime, decimal>();
-			var timestamps = tsArr.EnumerateArray().ToArray();
-			var closes = closeArr.EnumerateArray().ToArray();
-			for (int i = 0; i < Math.Min(timestamps.Length, closes.Length); i++)
-			{
-				if (closes[i].ValueKind == JsonValueKind.Null) continue;
-				if (!closes[i].TryGetDecimal(out var close)) continue;
-				var date = DateTimeOffset.FromUnixTimeSeconds(timestamps[i].GetInt64()).UtcDateTime.Date;
-				map[date] = close;
-			}
-			return map;
-		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
-		{
-			return null;
-		}
-	}
 }

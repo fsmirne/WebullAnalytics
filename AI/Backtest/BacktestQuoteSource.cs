@@ -35,6 +35,13 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	// a full day's theta before the same-step expiry settles at intrinsic. Without this, BlackScholes
 	// returns intrinsic at both ends and the position can never collect time premium.
 	private const double ZeroDteTimeYears = 6.5 / 24.0 / 365.0;
+	// Half-session TTE — used as the approximation for "current moment is the middle of the session"
+	// when re-pricing positions at the day's High/Low for intraday stop-loss / take-profit checks.
+	// Without minute-bar history we can't know when the extreme actually occurred; mid-session is the
+	// expected midpoint and avoids systematically biasing either toward open (rich extrinsic) or close
+	// (zero extrinsic). Exposed as a constant so the same value is used by the intraday-trigger pass
+	// in <see cref="BacktestRunner"/>.
+	internal const double IntradayHalfSessionTimeYears = 3.25 / 24.0 / 365.0;
 
 	private readonly HistoricalBarCache _bars;
 	private readonly BacktestIVProvider _iv;
@@ -96,24 +103,29 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			if (bar != null) underlyings[root] = bar.Open;
 		}
 
-		// One ATM IV lookup per (root, asOf). The smile factor in BacktestIVProvider.ApplySmile is a
-		// pure function of (atm, strike, spot, ticker) so the per-strike work fans out below without
-		// touching the VIX/HV caches again.
+		// One ATM IV + one smile-scale lookup per (root, asOf). Both are pure functions of (atm, strike,
+		// spot, scale, ticker) once resolved, so the per-strike work fans out below without re-touching
+		// the VIX/HV/SMILE caches.
 		var atmByRoot = new Dictionary<string, decimal?>(StringComparer.OrdinalIgnoreCase);
+		var smileScaleByRoot = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		foreach (var root in roots)
+		{
 			atmByRoot[root] = await _iv.GetAtmIVAsync(root, asOf, cancellation);
+			smileScaleByRoot[root] = await _iv.GetSmileScaleAsync(root, asOf, cancellation);
+		}
 
 		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		foreach (var (sym, parsed) in parsedSymbols)
 		{
 			if (!underlyings.TryGetValue(parsed.Root, out var spot)) continue;
 			atmByRoot.TryGetValue(parsed.Root, out var atm);
+			smileScaleByRoot.TryGetValue(parsed.Root, out var smileScale);
 
 			decimal price;
 			decimal? iv = null;
 			if (atm.HasValue)
 			{
-				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot);
+				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
 				var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
 				// 0DTE: at the daily step we're conceptually at the open of the trading day, not at 15:45 —
 				// price as if a full session of theta remains. Settlement (Expire) uses intrinsic so the
@@ -145,6 +157,59 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		}
 
 		return new QuoteSnapshot(options, underlyings);
+	}
+
+	/// <summary>Convenience for the intraday-trigger pass: looks up ATM IV + smile scale for the
+	/// ticker once, then re-prices every leg at the supplied <paramref name="spot"/> using
+	/// <see cref="PriceAtSpot"/>. Returns an empty map if ATM IV is unavailable for the date.</summary>
+	internal async Task<IReadOnlyDictionary<string, OptionContractQuote>> GetIntradayQuotesAsync(
+		DateTime asOf, string ticker, decimal spot, IEnumerable<string> optionSymbols,
+		double zeroDteTimeYears, CancellationToken cancellation)
+	{
+		var atm = await _iv.GetAtmIVAsync(ticker, asOf, cancellation);
+		if (!atm.HasValue) return new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		var smileScale = await _iv.GetSmileScaleAsync(ticker, asOf, cancellation);
+		return PriceAtSpot(asOf, optionSymbols, spot, atm.Value, smileScale, zeroDteTimeYears);
+	}
+
+	/// <summary>Re-prices a set of option legs at an explicit spot for a single ticker, with an
+	/// override for 0DTE time-to-expiry. Used by the intraday-trigger pass in
+	/// <see cref="BacktestRunner"/> to compute position MTM at the day's bar.High and bar.Low
+	/// without disturbing the cache or refetching ATM IV (passed in by the caller). Non-0DTE legs
+	/// use the standard <c>dte/365</c> TTE — a few hours of intraday adjustment is negligible at
+	/// 7+ DTE.</summary>
+	internal IReadOnlyDictionary<string, OptionContractQuote> PriceAtSpot(
+		DateTime asOf, IEnumerable<string> optionSymbols, decimal spot,
+		decimal atmIv, decimal smileScale, double zeroDteTimeYears)
+	{
+		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		foreach (var sym in optionSymbols)
+		{
+			var parsed = ParsingHelpers.ParseOptionSymbol(sym);
+			if (parsed == null) continue;
+
+			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale) ?? atmIv;
+			var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
+			var timeYears = dte <= 0 ? zeroDteTimeYears : dte / 365.0;
+			var price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv, parsed.CallPut);
+
+			var halfSpread = HalfSpreadFor(parsed.Root, price);
+			var bid = Math.Max(0m, price - halfSpread);
+			var ask = price + halfSpread;
+			options[sym] = new OptionContractQuote(
+				ContractSymbol: sym,
+				LastPrice: price,
+				Bid: bid,
+				Ask: ask,
+				Change: null,
+				PercentChange: null,
+				Volume: null,
+				OpenInterest: null,
+				ImpliedVolatility: iv,
+				HistoricalVolatility: null,
+				ImpliedVolatility5Day: null);
+		}
+		return options;
 	}
 
 	private static decimal HalfSpreadFor(string ticker, decimal mid)
