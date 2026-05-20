@@ -9,7 +9,7 @@ internal static class BacktestSummaryRenderer
 		AnsiConsole.MarkupLine("[yellow bold]Backtest assumptions:[/]");
 		AnsiConsole.MarkupLine("[dim]  • Quotes are Black-Scholes synthesized: SPX-family (SPY/SPX/SPXW/XSP) uses VIX as ATM IV; other tickers use 30-day realized HV × premium.[/]");
 		AnsiConsole.MarkupLine("[dim]  • Opens/closes/rolls price off the day's bar.Open (stamped 09:30 ET); expirations settle at bar.Close intrinsic (stamped 16:00 ET).[/]");
-		AnsiConsole.MarkupLine("[dim]  • No intraday rule triggering: take-profit / stop-loss can't fire between 09:30 and 16:00 of the same day.[/]");
+		AnsiConsole.MarkupLine("[dim]  • Intraday rule triggering: TakeProfit + StopLoss re-price each position at bar.High and bar.Low using mid-session TTE for 0DTE. SL is evaluated before TP (conservative whipsaw assumption — assumes the adverse extreme came first on days where both could fire). Other rules (rolls, closeBeforeShortExpiry) only fire at EOD.[/]");
 		AnsiConsole.MarkupLine("[dim]  • Assignment / early exercise not modeled — expiring positions settle at intrinsic.[/]");
 		AnsiConsole.WriteLine();
 
