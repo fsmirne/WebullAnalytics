@@ -611,11 +611,11 @@ The ticker is a required positional argument — every AI subcommand operates on
    cp ai-config.example.json data/ai-config.json
    ```
 2. Edit `data/ai-config.json` — this is the *base* and holds settings that apply to every ticker (rules, watch, log, position source, indicator parameters, default opener weights and structure DTEs). It deliberately does not contain ticker-specific tuning like the bid/ask `strikeStep` increment.
-3. For each ticker you trade, create `data/ai-config.<TICKER>.json` containing only the keys that differ from the base. At minimum it must set `indicators.strikeStep` (the validator rejects 0). Examples:
-   ```bash
-   cp ai-config.GME.example.json  data/ai-config.GME.json   # swing tuning, $0.50 strikes
-   cp ai-config.SPXW.example.json data/ai-config.SPXW.json  # 0DTE tuning, $5 strikes
+3. For each ticker you trade, create `data/ai-config.<TICKER>.json` containing only the keys that differ from the base. At minimum it must set `indicators.strikeStep` (the validator rejects 0). For example, a minimal GME override is just:
+   ```json
+   { "indicators": { "strikeStep": 0.50 } }
    ```
+   A 0DTE SPXW override would also bump `intradayTape` / `vixTermStructure` weights, swap structure DTEs to 0, and adjust `ivDefaultPct` — keep only what differs from your base.
 4. Run `wa ai scan <TICKER>` (or watch / replay). The loader deep-merges `data/ai-config.json` and `data/ai-config.<TICKER>.json`, with the per-ticker file winning on every overlapping key.
 5. Ensure `data/trade-config.json` exists (same setup as the `trade` command) — the loop reads position state from the Webull OpenAPI.
 
