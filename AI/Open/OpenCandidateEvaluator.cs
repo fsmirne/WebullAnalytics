@@ -150,9 +150,11 @@ internal sealed class OpenCandidateEvaluator
 		var freeCash = Math.Max(0m, ctx.AccountCash - reserve);
 		// Fetch the contrarian Fear & Greed regime overlay once per scan. Same value applies to every
 		// ticker — F&G is a market-wide sentiment composite, not per-ticker. Null on outage; the scorer
-		// treats null as "skip the sentiment factor".
+		// treats null as "skip the sentiment factor". Skipped in backtest for the same reason as the
+		// event calendar / trend fetcher below: CNN's endpoint returns current state regardless of
+		// asOf (lookahead bias) and the per-step file-cache read still adds up across hundreds of days.
 		decimal? sentimentScore = null;
-		if (cfg.Weights.Sentiment > 0m)
+		if (!_backtestMode && cfg.Weights.Sentiment > 0m)
 		{
 			var snapshot = await FearGreedClient.FetchAsync(ctx.Now, cancellation);
 			if (snapshot != null) sentimentScore = snapshot.Score;
@@ -442,8 +444,10 @@ internal sealed class OpenCandidateEvaluator
 			foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
 				trendByTicker[ticker] = await TrendFetcher.FetchAsync(ticker, ctx.Now, cancellation);
 		}
+		// sentimentScore is already gated by !_backtestMode above, but be explicit here for symmetry
+		// with the trend-fetcher gate immediately above.
 		SentimentSnapshot? diagnosticSentiment = null;
-		if (sentimentScore.HasValue)
+		if (!_backtestMode && sentimentScore.HasValue)
 			diagnosticSentiment = await FearGreedClient.FetchAsync(ctx.Now, cancellation);
 
 		var annotated = new List<OpenProposal>(output.Count);

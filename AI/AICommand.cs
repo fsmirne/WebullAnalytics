@@ -509,10 +509,10 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
 
 		var bars = new Backtest.HistoricalBarCache(offline: true);
-		var vix = new Backtest.HistoricalVixCache(offline: true);
-		var ivProvider = new Backtest.BacktestIVProvider(vix, bars);
+		var smile = new Backtest.SmileIndexCache(offline: true);
+		var ivProvider = new Backtest.BacktestIVProvider(bars, smile: smile);
 		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, spotOverrides: spotOverrides);
-		var priceCache = new Replay.HistoricalPriceCache();
+		var priceCache = new Replay.HistoricalPriceCache(bars);
 
 		// Cash sizing: prefer the live broker balance so proposals reflect what the user could actually
 		// trade tomorrow. --starting-cash is an explicit override (e.g. "what if I had $50k instead?")
@@ -645,12 +645,8 @@ internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 
 /// <summary>`ai backtest` — simulate opening/managing positions from scratch over a historical window
 /// using the AI rules + opener. No real fills involved; produces simulated P&amp;L for rule tuning.</summary>
-internal sealed class AIBacktestSettings : AISubcommandSettings
+internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 {
-	[CommandArgument(0, "<ticker>")]
-	[Description("Underlying ticker symbol (e.g., SPY, QQQ, GME).")]
-	public string Ticker { get; set; } = "";
-
 	[CommandOption("--since <DATE>")]
 	[Description("Start date YYYY-MM-DD. Default: Jan 1 of current year.")]
 	public string? Since { get; set; }
@@ -722,7 +718,6 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 
 		// Backtest is offline — the caches MUST already cover [since, until]. Run `wa ai history <ticker>` first.
 		var bars = new Backtest.HistoricalBarCache(offline: true);
-		var vix = new Backtest.HistoricalVixCache(offline: true);
 
 		foreach (var t in config.Tickers)
 		{
@@ -732,14 +727,27 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 				return 1;
 			}
 		}
-		if (config.Tickers.Any(t => string.Equals(t, "SPY", StringComparison.OrdinalIgnoreCase)) && !await vix.HasCoverageAsync(since, until, cancellation))
+		// VIX-driven tickers (SPX family) need a VIX bar history for ATM IV and a CBOE SMILE history
+		// for per-day smile scaling. Both ride along with the strategy ticker's history command
+		// (wa ai history SPXW/SPX/XSP/SPY pulls VIX, VIX9D, and SMILE).
+		var vixDriven = new[] { "SPY", "SPX", "SPXW", "XSP" };
+		var smile = new Backtest.SmileIndexCache(offline: true);
+		if (config.Tickers.Any(t => vixDriven.Contains(t, StringComparer.OrdinalIgnoreCase)))
 		{
-			Console.Error.WriteLine($"Error: missing VIX history in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history SPY");
-			return 1;
+			if (!await bars.HasCoverageAsync("VIX", since, until, cancellation))
+			{
+				Console.Error.WriteLine($"Error: missing VIX history in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
+				return 1;
+			}
+			if (!await smile.HasCoverageAsync(since, until, cancellation))
+			{
+				Console.Error.WriteLine($"Error: missing CBOE SMILE history in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
+				return 1;
+			}
 		}
 
-		var closes = new Replay.HistoricalPriceCache();
-		var ivProvider = new Backtest.BacktestIVProvider(vix, bars, ivHvPremium: settings.IvHvPremium, smileEnabled: settings.Smile == "static");
+		var closes = new Replay.HistoricalPriceCache(bars);
+		var ivProvider = new Backtest.BacktestIVProvider(bars, ivHvPremium: settings.IvHvPremium, smileEnabled: settings.Smile == "static", smile: smile);
 		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036);
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);

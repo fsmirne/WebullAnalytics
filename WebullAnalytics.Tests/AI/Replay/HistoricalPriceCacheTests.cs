@@ -1,4 +1,5 @@
 using WebullAnalytics.AI.Replay;
+using WebullAnalytics.Api;
 using Xunit;
 
 namespace WebullAnalytics.Tests.AI.Replay;
@@ -15,17 +16,20 @@ public class HistoricalPriceCacheTests
 		try
 		{
 			var path = Path.Combine(cacheDir, "GME.csv");
-			await File.WriteAllTextAsync(path, "date,close\n2026-04-21,24.10\n2026-04-22,24.30\n");
+			await File.WriteAllTextAsync(path,
+				"date,open,high,low,close,adj_close,volume\n" +
+				"2026-04-21,24.05,24.20,24.00,24.10,24.10,1000000\n" +
+				"2026-04-22,24.15,24.45,24.05,24.30,24.30,1100000\n");
 			var calls = new List<(DateTime from, DateTime to)>();
 			var cache = new HistoricalPriceCache(
 				cacheDir,
 				(ticker, from, to, cancellation) =>
 				{
 					calls.Add((from, to));
-					return Task.FromResult(new Dictionary<DateTime, decimal>
+					return Task.FromResult(new Dictionary<DateTime, YahooOptionsClient.HistoricalBar>
 					{
-						[new DateTime(2026, 4, 23)] = 24.55m,
-						[new DateTime(2026, 4, 24)] = 25.10m,
+						[new DateTime(2026, 4, 23)] = new(new DateTime(2026, 4, 23), 24.40m, 24.70m, 24.30m, 24.55m, 24.55m, 1200000),
+						[new DateTime(2026, 4, 24)] = new(new DateTime(2026, 4, 24), 24.60m, 25.20m, 24.50m, 25.10m, 25.10m, 1300000),
 					});
 				},
 				utcNow: () => NyMidnight(2026, 4, 25));
@@ -41,8 +45,8 @@ public class HistoricalPriceCacheTests
 			Assert.Equal(new DateTime(2026, 4, 25), calls[0].to);
 
 			var persisted = await File.ReadAllTextAsync(path);
-			Assert.Contains("2026-04-23,24.55", persisted);
-			Assert.Contains("2026-04-24,25.10", persisted);
+			Assert.Contains("2026-04-23,24.40,24.70,24.30,24.55,24.55,1200000", persisted);
+			Assert.Contains("2026-04-24,24.60,25.20,24.50,25.10,25.10,1300000", persisted);
 		}
 		finally
 		{
@@ -58,16 +62,19 @@ public class HistoricalPriceCacheTests
 		try
 		{
 			var path = Path.Combine(cacheDir, "GME.csv");
-			await File.WriteAllTextAsync(path, "date,close\n2026-05-04,23.84\n2026-05-05,24.23\n");
+			await File.WriteAllTextAsync(path,
+				"date,open,high,low,close,adj_close,volume\n" +
+				"2026-05-04,23.50,23.90,23.40,23.84,23.84,1500000\n" +
+				"2026-05-05,23.85,24.40,23.80,24.23,24.23,1600000\n");
 			var calls = new List<(DateTime from, DateTime to)>();
 			var cache = new HistoricalPriceCache(
 				cacheDir,
 				(ticker, from, to, cancellation) =>
 				{
 					calls.Add((from, to));
-					return Task.FromResult(new Dictionary<DateTime, decimal>
+					return Task.FromResult(new Dictionary<DateTime, YahooOptionsClient.HistoricalBar>
 					{
-						[new DateTime(2026, 5, 6)] = 24.30m,
+						[new DateTime(2026, 5, 6)] = new(new DateTime(2026, 5, 6), 24.20m, 24.45m, 24.10m, 24.30m, 24.30m, 1700000),
 					});
 				},
 				utcNow: () => NyDateTimeToUtc(2026, 5, 6, 9, 45));
@@ -93,16 +100,19 @@ public class HistoricalPriceCacheTests
 		try
 		{
 			var path = Path.Combine(cacheDir, "GME.csv");
-			await File.WriteAllTextAsync(path, "date,close\n2026-05-04,23.84\n2026-05-05,24.23\n");
+			await File.WriteAllTextAsync(path,
+				"date,open,high,low,close,adj_close,volume\n" +
+				"2026-05-04,23.50,23.90,23.40,23.84,23.84,1500000\n" +
+				"2026-05-05,23.85,24.40,23.80,24.23,24.23,1600000\n");
 			var calls = new List<(DateTime from, DateTime to)>();
 			var cache = new HistoricalPriceCache(
 				cacheDir,
 				(ticker, from, to, cancellation) =>
 				{
 					calls.Add((from, to));
-					return Task.FromResult(new Dictionary<DateTime, decimal>
+					return Task.FromResult(new Dictionary<DateTime, YahooOptionsClient.HistoricalBar>
 					{
-						[new DateTime(2026, 5, 6)] = 25.17m,
+						[new DateTime(2026, 5, 6)] = new(new DateTime(2026, 5, 6), 24.50m, 25.40m, 24.45m, 25.17m, 25.17m, 1800000),
 					});
 				},
 				utcNow: () => NyDateTimeToUtc(2026, 5, 6, 17, 0));
@@ -114,7 +124,7 @@ public class HistoricalPriceCacheTests
 			Assert.Equal(new DateTime(2026, 5, 6), calls[0].from);
 			Assert.Equal(new DateTime(2026, 5, 7), calls[0].to);
 			var persisted = await File.ReadAllTextAsync(path);
-			Assert.Contains("2026-05-06,25.17", persisted);
+			Assert.Contains("2026-05-06,24.50,25.40,24.45,25.17,25.17,1800000", persisted);
 		}
 		finally
 		{

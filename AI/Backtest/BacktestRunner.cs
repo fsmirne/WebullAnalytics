@@ -118,6 +118,14 @@ internal sealed class BacktestRunner
 				if (_book.Open(step, p.Ticker, p.StructureKind, legFills, p.Qty)) opened++;
 			}
 
+			// Intraday SL/TP simulation: re-price each open position at the day's bar.High and bar.Low
+			// (with mid-session TTE for 0DTE) and fire StopLossRule / TakeProfitRule against both
+			// extremes. Without this, 0DTE positions never see their stops or profit targets because
+			// the daily-step engine jumps straight from open to expiry. Closes here happen BEFORE
+			// settlement so any 0DTE position that would have stopped intraday doesn't double-count
+			// at expiration.
+			await RunIntradayTriggersAsync(step, evaluator, cancellation);
+
 			// 0DTE: a position opened this step whose short leg expires today must settle today, not
 			// roll over to tomorrow and pick up the wrong bar. The second pass is a no-op when none
 			// of the opens are 0DTE.
@@ -217,6 +225,73 @@ internal sealed class BacktestRunner
 			fills.Add(new BacktestLegFill(l.Symbol, side, qty, l.PricePerShare.Value));
 		}
 		return fills;
+	}
+
+	/// <summary>Intraday SL/TP simulation. For each ticker with open positions, re-prices each leg
+	/// at bar.Low and bar.High using mid-session TTE for 0DTE (3.25h) and the standard <c>dte/365</c>
+	/// for longer positions. Runs the existing StopLossRule and TakeProfitRule (only — roll rules
+	/// are excluded as they're EOD-style) against both extremes. On whipsaw days when SL would have
+	/// fired at one extreme AND TP at the other, the conservative convention is to honour the SL
+	/// first (the rule engine's priority order does this naturally because StopLossRule has Priority=1
+	/// and TakeProfitRule Priority=2). Without minute-bar history we can't know which extreme came
+	/// first; assuming SL wins is the bear-case approximation.</summary>
+	private async Task RunIntradayTriggersAsync(DateTime step, RuleEvaluator evaluator, CancellationToken cancellation)
+	{
+		if (_book.OpenPositions.Count == 0) return;
+
+		// Take a snapshot — the book gets mutated as we close inside the loop.
+		var byTicker = _book.OpenPositions.Values
+			.GroupBy(p => p.Ticker, StringComparer.OrdinalIgnoreCase)
+			.ToList();
+		var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
+
+		foreach (var grp in byTicker)
+		{
+			var ticker = grp.Key;
+			var bar = await _bars.GetBarAsync(ticker, step.Date, cancellation);
+			if (bar == null) continue;
+
+			// Two extremes per ticker. Evaluate Low first (StopLoss bear case), then High (TakeProfit
+			// bull case) — positions closed at Low don't get a second look at High.
+			await EvaluateIntradayExtremeAsync(step, ticker, bar.Low, evaluator, cash, accountValue, cancellation);
+			await EvaluateIntradayExtremeAsync(step, ticker, bar.High, evaluator, cash, accountValue, cancellation);
+		}
+	}
+
+	private async Task EvaluateIntradayExtremeAsync(
+		DateTime step, string ticker, decimal spot, RuleEvaluator evaluator,
+		decimal cash, decimal accountValue, CancellationToken cancellation)
+	{
+		var stillOpen = _book.OpenPositions.Values
+			.Where(p => string.Equals(p.Ticker, ticker, StringComparison.OrdinalIgnoreCase))
+			.ToDictionary(p => p.Key, p => p, StringComparer.OrdinalIgnoreCase);
+		if (stillOpen.Count == 0) return;
+
+		var symbols = stillOpen.Values
+			.SelectMany(p => p.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol))
+			.Distinct(StringComparer.OrdinalIgnoreCase)
+			.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+		var quotes = await _quotes.GetIntradayQuotesAsync(
+			step, ticker, spot, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+		if (quotes.Count == 0) return;
+
+		var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot };
+		var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
+		var ctx = new EvaluationContext(step, stillOpen, underlyings, quotes, cash, accountValue, emptySignals);
+
+		var results = evaluator.Evaluate(ctx);
+		foreach (var r in results)
+		{
+			var p = r.Proposal;
+			if (p.Kind != ProposalKind.Close) continue;
+			// Only SL/TP can legitimately fire intraday. Roll rules read multi-day state (DTE buckets,
+			// short-strike proximity over a window) and belong in the EOD management pass.
+			if (p.Rule != "StopLossRule" && p.Rule != "TakeProfitRule") continue;
+			if (!_book.OpenPositions.TryGetValue(p.PositionKey, out var pos)) continue;
+			var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
+			if (legFills != null) _book.Close(step, p.PositionKey, legFills, p.Rule);
+		}
 	}
 
 	private async Task SettleExpirationsAsync(DateTime step, CancellationToken cancellation)
