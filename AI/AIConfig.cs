@@ -6,16 +6,40 @@ namespace WebullAnalytics.AI;
 
 internal sealed class AIConfig
 {
-	[JsonPropertyName("tickers")] public List<string> Tickers { get; set; } = new();
+	/// <summary>Active tickers for this run. Populated programmatically from the positional CLI argument
+	/// (one ticker per scan/watch/replay/backtest) — not bound to a JSON field. Downstream consumers
+	/// continue to iterate this list; it just always contains exactly one element.</summary>
+	[JsonIgnore] public List<string> Tickers { get; set; } = new();
+
 	[JsonPropertyName("tickIntervalSeconds")] public int TickIntervalSeconds { get; set; } = 60;
-	[JsonPropertyName("marketHours")] public MarketHoursConfig MarketHours { get; set; } = new();
-	[JsonPropertyName("quoteSource")] public string QuoteSource { get; set; } = "webull";
 	[JsonPropertyName("positionSource")] public PositionSourceConfig PositionSource { get; set; } = new();
 	[JsonPropertyName("cashReserve")] public CashReserveConfig CashReserve { get; set; } = new();
 	[JsonPropertyName("log")] public LogConfig Log { get; set; } = new();
+	[JsonPropertyName("indicators")] public IndicatorsConfig Indicators { get; set; } = new();
 	[JsonPropertyName("rules")] public RulesConfig Rules { get; set; } = new();
 	[JsonPropertyName("opener")] public OpenerConfig Opener { get; set; } = new();
 	[JsonPropertyName("watch")] public WatchConfig Watch { get; set; } = new();
+}
+
+/// <summary>Pipeline-wide inputs / measurement knobs. Read by both the opener (for macro bias and
+/// candidate scoring) and the management rules (for opportunistic-roll guards and roll-strike snapping).
+/// Centralized here so duplication is impossible and per-ticker overrides apply uniformly.</summary>
+internal sealed class IndicatorsConfig
+{
+	/// <summary>Fallback implied volatility used when a leg has no live IV. Applies to opener scoring
+	/// and rule evaluation alike. Stored as a percentage (e.g. 40 = 40%).</summary>
+	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;
+
+	/// <summary>Strike-grid increment for the active ticker, in dollars. Ticker-specific (SPXW=5,
+	/// SPY=1, GME=0.5, …). Used by the opener candidate enumerator and the roll-rule strike snappers.
+	/// Validator rejects 0 — must be set in the per-ticker config (e.g. ai-config.SPXW.json).</summary>
+	[JsonPropertyName("strikeStep")] public decimal StrikeStep { get; set; } = 0m;
+
+	[JsonPropertyName("technicalFilter")] public TechnicalFilterConfig TechnicalFilter { get; set; } = new();
+
+	[JsonPropertyName("intradayTape")] public OpenerIntradayTapeConfig IntradayTape { get; set; } = new();
+
+	[JsonPropertyName("events")] public OpenerEventsConfig Events { get; set; } = new();
 }
 
 /// <summary>
@@ -87,13 +111,6 @@ internal sealed class ScaleOutConfig
 	[JsonPropertyName("minQty")] public int MinQty { get; set; } = 100;
 }
 
-internal sealed class MarketHoursConfig
-{
-	[JsonPropertyName("start")] public string Start { get; set; } = "09:30";
-	[JsonPropertyName("end")] public string End { get; set; } = "16:00";
-	[JsonPropertyName("tz")] public string Tz { get; set; } = "America/New_York";
-}
-
 internal sealed class PositionSourceConfig
 {
 	[JsonPropertyName("type")] public string Type { get; set; } = "openapi";
@@ -127,8 +144,6 @@ internal sealed class OpportunisticRollConfig
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	/// <summary>Minimum P&L-per-day-per-contract improvement (dollars) vs hold required to fire a proposal.</summary>
 	[JsonPropertyName("minImprovementPerDayPerContract")] public decimal MinImprovementPerDayPerContract { get; set; } = 0.50m;
-	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;
-	[JsonPropertyName("strikeStep")] public decimal StrikeStep { get; set; } = 0.50m;
 	/// <summary>Minimum OTM distance required for the new short leg, as a percentage of spot, at neutral technicals.</summary>
 	[JsonPropertyName("baseOtmBufferPct")] public decimal BaseOtmBufferPct { get; set; } = 2.0m;
 	/// <summary>Scales the OTM buffer by (1 + |compositeScore| × multiplier) when technicals are extended.</summary>
@@ -137,7 +152,12 @@ internal sealed class OpportunisticRollConfig
 	[JsonPropertyName("maxDeltaIncreasePct")] public decimal MaxDeltaIncreasePct { get; set; } = 25.0m;
 	/// <summary>Minimum required profit at current spot as a percentage of spot, at neutral technicals. Widens with technical extension using the same multiplier as baseOtmBufferPct.</summary>
 	[JsonPropertyName("minBreakEvenMarginPct")] public decimal MinBreakEvenMarginPct { get; set; } = 0.5m;
-	[JsonPropertyName("technicalFilter")] public TechnicalFilterConfig TechnicalFilter { get; set; } = new();
+	/// <summary>Composite technical-bias score above which call positions are blocked from rolling
+	/// (extended bullish setup → don't reach further into the move). Reads the same bias the opener uses.</summary>
+	[JsonPropertyName("bullishBlockThreshold")] public decimal BullishBlockThreshold { get; set; } = 0.25m;
+	/// <summary>Composite technical-bias score below which put positions are blocked from rolling
+	/// (extended bearish setup).</summary>
+	[JsonPropertyName("bearishBlockThreshold")] public decimal BearishBlockThreshold { get; set; } = -0.25m;
 }
 
 internal sealed class StopLossConfig
@@ -158,7 +178,6 @@ internal sealed class DefensiveRollConfig
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("spotWithinPctOfShortStrike")] public decimal SpotWithinPctOfShortStrike { get; set; } = 1.0m;
 	[JsonPropertyName("triggerDTE")] public int TriggerDTE { get; set; } = 3;
-	[JsonPropertyName("strikeStep")] public decimal StrikeStep { get; set; } = 0.50m;
 }
 
 internal sealed class RollShortOnExpiryConfig
@@ -182,6 +201,10 @@ internal sealed class CloseBeforeShortExpiryConfig
 	[JsonPropertyName("emergencyBreakEvenBufferPct")] public decimal EmergencyBreakEvenBufferPct { get; set; } = 1.0m;
 }
 
+/// <summary>Composite technical-bias indicator config (SMA5/20, RSI(14), N-day momentum, 200-day
+/// trend gate). Lives at <see cref="IndicatorsConfig.TechnicalFilter"/>; consumed by the opener
+/// (as macro bias for proposal scoring) and the opportunistic-roll rule (as a block gate via
+/// <see cref="OpportunisticRollConfig.BullishBlockThreshold"/> / <see cref="OpportunisticRollConfig.BearishBlockThreshold"/>).</summary>
 internal sealed class TechnicalFilterConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
@@ -191,10 +214,10 @@ internal sealed class TechnicalFilterConfig
 	[JsonPropertyName("rsiWeight")] public decimal RsiWeight { get; set; } = 1.0m;
 	[JsonPropertyName("momentumWeight")] public decimal MomentumWeight { get; set; } = 1.0m;
 	[JsonPropertyName("momentumDays")] public int MomentumDays { get; set; } = 5;
-	/// <summary>Composite score threshold above which call positions are blocked from rolling.</summary>
-	[JsonPropertyName("bullishBlockThreshold")] public decimal BullishBlockThreshold { get; set; } = 0.25m;
-	/// <summary>Composite score threshold below which put positions are blocked from rolling.</summary>
-	[JsonPropertyName("bearishBlockThreshold")] public decimal BearishBlockThreshold { get; set; } = -0.25m;
+	/// <summary>Weight of the 200-day trend gate (<c>price / SMA200 − 1</c>, clamped) in the composite
+	/// technical bias. Default 0 disables (no extra cache pull). When &gt; 0, the pipeline fetches
+	/// ≥ 200 daily closes per ticker on first read.</summary>
+	[JsonPropertyName("sma200Weight")] public decimal Sma200Weight { get; set; } = 0m;
 }
 
 internal static class AIConfigLoader
@@ -227,11 +250,7 @@ internal static class AIConfigLoader
 	/// <summary>Returns null when valid; otherwise a human-readable error string naming the field and bound.</summary>
 	internal static string? Validate(AIConfig c)
 	{
-		if (c.Tickers.Count == 0) return "tickers: must contain at least one symbol";
 		if (c.TickIntervalSeconds < 1 || c.TickIntervalSeconds > 3600) return $"tickIntervalSeconds: must be in [1, 3600], got {c.TickIntervalSeconds}";
-		if (!TimeSpan.TryParseExact(c.MarketHours.Start, "hh\\:mm", CultureInfo.InvariantCulture, out _)) return $"marketHours.start: must be HH:MM, got '{c.MarketHours.Start}'";
-		if (!TimeSpan.TryParseExact(c.MarketHours.End, "hh\\:mm", CultureInfo.InvariantCulture, out _)) return $"marketHours.end: must be HH:MM, got '{c.MarketHours.End}'";
-		if (c.QuoteSource is not ("webull" or "yahoo")) return $"quoteSource: must be 'webull' or 'yahoo', got '{c.QuoteSource}'";
 		if (c.PositionSource.Type is not ("openapi" or "jsonl")) return $"positionSource.type: must be 'openapi' or 'jsonl', got '{c.PositionSource.Type}'";
 		if (c.CashReserve.Mode is not ("percent" or "absolute")) return $"cashReserve.mode: must be 'percent' or 'absolute', got '{c.CashReserve.Mode}'";
 		if (c.CashReserve.Value < 0m) return $"cashReserve.value: must be non-negative, got {c.CashReserve.Value}";
@@ -248,7 +267,6 @@ internal static class AIConfigLoader
 		var dr = c.Rules.DefensiveRoll;
 		if (dr.SpotWithinPctOfShortStrike < 0m) return $"rules.defensiveRoll.spotWithinPctOfShortStrike: must be ≥ 0, got {dr.SpotWithinPctOfShortStrike}";
 		if (dr.TriggerDTE < 0) return $"rules.defensiveRoll.triggerDTE: must be ≥ 0, got {dr.TriggerDTE}";
-		if (dr.StrikeStep <= 0m) return $"rules.defensiveRoll.strikeStep: must be > 0, got {dr.StrikeStep}";
 
 		var rr = c.Rules.RollShortOnExpiry;
 		if (rr.TriggerDTE < 0) return $"rules.rollShortOnExpiry.triggerDTE: must be ≥ 0, got {rr.TriggerDTE}";
@@ -279,14 +297,19 @@ internal static class AIConfigLoader
 		if (or.MaxDeltaIncreasePct < 0m) return $"rules.opportunisticRoll.maxDeltaIncreasePct: must be ≥ 0, got {or.MaxDeltaIncreasePct}";
 		if (or.MinBreakEvenMarginPct < 0m) return $"rules.opportunisticRoll.minBreakEvenMarginPct: must be ≥ 0, got {or.MinBreakEvenMarginPct}";
 
-		var tf = or.TechnicalFilter;
+		var ind = c.Indicators;
+		if (ind.IvDefaultPct <= 0m) return $"indicators.ivDefaultPct: must be > 0, got {ind.IvDefaultPct}";
+		if (ind.StrikeStep <= 0m) return $"indicators.strikeStep: must be > 0, got {ind.StrikeStep}. Set this in the per-ticker config (e.g. ai-config.SPXW.json) — it has no sensible default.";
+
+		var tf = ind.TechnicalFilter;
 		if (tf.Enabled)
 		{
-			if (tf.LookbackDays < 20) return $"rules.opportunisticRoll.technicalFilter.lookbackDays: must be ≥ 20, got {tf.LookbackDays}";
-			if (tf.SmaWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.smaWeight: must be ≥ 0, got {tf.SmaWeight}";
-			if (tf.RsiWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.rsiWeight: must be ≥ 0, got {tf.RsiWeight}";
-			if (tf.MomentumWeight < 0m) return $"rules.opportunisticRoll.technicalFilter.momentumWeight: must be ≥ 0, got {tf.MomentumWeight}";
-			if (tf.MomentumDays < 1) return $"rules.opportunisticRoll.technicalFilter.momentumDays: must be ≥ 1, got {tf.MomentumDays}";
+			if (tf.LookbackDays < 20) return $"indicators.technicalFilter.lookbackDays: must be ≥ 20, got {tf.LookbackDays}";
+			if (tf.SmaWeight < 0m) return $"indicators.technicalFilter.smaWeight: must be ≥ 0, got {tf.SmaWeight}";
+			if (tf.RsiWeight < 0m) return $"indicators.technicalFilter.rsiWeight: must be ≥ 0, got {tf.RsiWeight}";
+			if (tf.MomentumWeight < 0m) return $"indicators.technicalFilter.momentumWeight: must be ≥ 0, got {tf.MomentumWeight}";
+			if (tf.MomentumDays < 1) return $"indicators.technicalFilter.momentumDays: must be ≥ 1, got {tf.MomentumDays}";
+			if (tf.Sma200Weight < 0m) return $"indicators.technicalFilter.sma200Weight: must be ≥ 0, got {tf.Sma200Weight}";
 		}
 
 		var op = c.Opener;
@@ -294,20 +317,22 @@ internal static class AIConfigLoader
 		if (op.MaxCandidatesPerStructurePerTicker < 1) return $"opener.maxCandidatesPerStructurePerTicker: must be ≥ 1, got {op.MaxCandidatesPerStructurePerTicker}";
 		if (op.MaxQtyPerProposal < 1) return $"opener.maxQtyPerProposal: must be ≥ 1, got {op.MaxQtyPerProposal}";
 		if (op.MaxRiskPctPerProposal < 0m || op.MaxRiskPctPerProposal > 1m) return $"opener.maxRiskPctPerProposal: must be in [0, 1], got {op.MaxRiskPctPerProposal}";
-		if (op.DirectionalFitWeight < 0m) return $"opener.directionalFitWeight: must be ≥ 0, got {op.DirectionalFitWeight}";
 		if (op.ProfitBandPct <= 0m || op.ProfitBandPct > 50m) return $"opener.profitBandPct: must be in (0, 50], got {op.ProfitBandPct}";
-		if (op.IvDefaultPct <= 0m) return $"opener.ivDefaultPct: must be > 0, got {op.IvDefaultPct}";
-		foreach (var ticker in c.Tickers)
-			if (!op.StrikeSteps.TryGetValue(ticker, out var step)) return $"opener.strikeSteps.{ticker}: missing ticker-specific strike step";
-			else if (step <= 0m) return $"opener.strikeSteps.{ticker}: must be > 0, got {step}";
-
-		foreach (var kv in op.StrikeSteps)
-			if (kv.Value <= 0m) return $"opener.strikeSteps.{kv.Key}: must be > 0, got {kv.Value}";
 		if (op.VolatilityLookbackDays < 5) return $"opener.volatilityLookbackDays: must be ≥ 5, got {op.VolatilityLookbackDays}";
-		if (op.VolatilityFitWeight < 0m) return $"opener.volatilityFitWeight: must be ≥ 0, got {op.VolatilityFitWeight}";
-		if (op.MaxPainWeight < 0m) return $"opener.maxPainWeight: must be ≥ 0, got {op.MaxPainWeight}";
-		if (op.StatArbWeight < 0m) return $"opener.statArbWeight: must be ≥ 0, got {op.StatArbWeight}";
-		if (op.SentimentWeight < 0m) return $"opener.sentimentWeight: must be ≥ 0, got {op.SentimentWeight}";
+
+		var wgt = op.Weights;
+		if (wgt.DirectionalFit < 0m) return $"opener.weights.directionalFit: must be ≥ 0, got {wgt.DirectionalFit}";
+		if (wgt.BiasDrift < 0m) return $"opener.weights.biasDrift: must be ≥ 0, got {wgt.BiasDrift}";
+		if (wgt.Whipsaw < 0m) return $"opener.weights.whipsaw: must be ≥ 0, got {wgt.Whipsaw}";
+		if (wgt.VolatilityFit < 0m) return $"opener.weights.volatilityFit: must be ≥ 0, got {wgt.VolatilityFit}";
+		if (wgt.MaxPain < 0m) return $"opener.weights.maxPain: must be ≥ 0, got {wgt.MaxPain}";
+		if (wgt.Gex < 0m) return $"opener.weights.gex: must be ≥ 0, got {wgt.Gex}";
+		if (wgt.StatArb < 0m) return $"opener.weights.statArb: must be ≥ 0, got {wgt.StatArb}";
+		if (wgt.Sentiment < 0m) return $"opener.weights.sentiment: must be ≥ 0, got {wgt.Sentiment}";
+		if (wgt.ExpectedMoveCredit < 0m) return $"opener.weights.expectedMoveCredit: must be ≥ 0, got {wgt.ExpectedMoveCredit}";
+		if (wgt.IvRealizedPremium < 0m) return $"opener.weights.ivRealizedPremium: must be ≥ 0, got {wgt.IvRealizedPremium}";
+		if (wgt.VixTermStructure < 0m || wgt.VixTermStructure > 1m) return $"opener.weights.vixTermStructure: must be in [0, 1], got {wgt.VixTermStructure}";
+		if (wgt.IntradayTape < 0m || wgt.IntradayTape > 1m) return $"opener.weights.intradayTape: must be in [0, 1], got {wgt.IntradayTape}";
 
 		var liq = op.Liquidity;
 		if (liq.MinOpenInterest < 0) return $"opener.liquidity.minOpenInterest: must be ≥ 0, got {liq.MinOpenInterest}";

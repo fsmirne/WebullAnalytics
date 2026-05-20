@@ -28,10 +28,6 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	[Description("Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88). Comma-separated for multiple tickers (e.g., GME:24.88,SPY:580.50)")]
 	public string? Spot { get; set; }
 
-	[CommandOption("--api")]
-	[Description("Option chain data source: 'yahoo' or 'webull' (webull requires sniffed headers via the 'sniff' command)")]
-	public string? Api { get; set; }
-
 	[CommandOption("--iv")]
 	[Description("Override implied volatility per option leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple legs.")]
 	public string? IvOverrides { get; set; }
@@ -54,7 +50,6 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	/// — they belong to the report renderer, which these subcommands don't invoke.</summary>
 	internal void ApplyConfig(Dictionary<string, JsonElement> cfg)
 	{
-		if (!Program.HasCliOption("api") && cfg.TryGetString("api", out var api)) Api = api;
 		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) OutputFormat = output;
 		if (!Program.HasCliOption("output-path") && cfg.TryGetString("outputPath", out var outputPath)) OutputPath = outputPath;
 		if (!Program.HasCliOption("iv") && cfg.TryGetString("iv", out var iv)) IvOverrides = iv;
@@ -69,9 +64,6 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 		var format = OutputFormat.ToLowerInvariant();
 		if (format is not ("console" or "text"))
 			return ValidationResult.Error("--output must be 'console' or 'text'");
-
-		if (Api != null && Api.ToLowerInvariant() is not ("yahoo" or "webull"))
-			return ValidationResult.Error("--api must be 'yahoo' or 'webull'");
 
 		if (Spot != null)
 		{

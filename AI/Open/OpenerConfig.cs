@@ -4,6 +4,12 @@ namespace WebullAnalytics.AI;
 
 internal sealed class OpenerConfig
 {
+	/// <summary>Back-reference to <see cref="AIConfig.Indicators"/>, wired up at load time by
+	/// <see cref="AIContext.ResolveConfig"/>. Lets helper methods that only receive <c>OpenerConfig</c>
+	/// reach into the shared indicators block (ivDefaultPct, strikeStep, technicalFilter, intradayTape,
+	/// events) without threading <see cref="IndicatorsConfig"/> through every signature. Not serialized.</summary>
+	[JsonIgnore] public IndicatorsConfig Indicators { get; set; } = new();
+
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("topNPerTicker")] public int TopNPerTicker { get; set; } = 5;
 	[JsonPropertyName("maxCandidatesPerStructurePerTicker")] public int MaxCandidatesPerStructurePerTicker { get; set; } = 8;
@@ -30,83 +36,25 @@ internal sealed class OpenerConfig
 	/// engine sits out marginal days, fewer trades but fewer whipsaw losses.</summary>
 	[JsonPropertyName("minScoreToOpen")] public decimal MinScoreToOpen { get; set; } = 0m;
 
-	/// <summary>Weight on the whipsaw-vol penalty for credit structures. When 3-day realized vol >>
-	/// 30-day realized vol the regime is whipsawing — both bullish and bearish credit spreads get
-	/// crushed by counter-trend reversals. Factor = <c>1 − weight × max(0, hv3/hv30 − 1.5)</c>, applied
-	/// to ShortVertical / IronCondor / IronButterfly only. Default 0 disables. Set 0.5–1.0 to penalize
-	/// (clamps to 0 in severe whipsaw at weight=1).</summary>
-	[JsonPropertyName("whipsawWeight")] public decimal WhipsawWeight { get; set; } = 0m;
-
-	[JsonPropertyName("directionalFitWeight")] public decimal DirectionalFitWeight { get; set; } = 0.5m;
-
-	/// <summary>Shifts the scenario-grid center by <c>bias × biasDriftWeight × sigma</c> when computing
-	/// realized EV. Bias is the technical signal in [-1, +1]; positive shifts scenarios UP, negative DOWN.
-	/// This lets the scorer's raw EV reflect a directional view instead of only being adjusted post-hoc
-	/// by <see cref="DirectionalFitWeight"/> — critical for long-premium structures (LongCall/LongPut)
-	/// whose negative raw EV can never be flipped positive by sign-symmetric ApplyFactor. Default 0
-	/// disables (legacy behavior); 0.5 shifts by half a sigma at extreme bias; 1.0 by a full sigma.
-	/// Combine with a reduced DirectionalFitWeight to avoid double-counting the directional signal.</summary>
-	[JsonPropertyName("biasDriftWeight")] public decimal BiasDriftWeight { get; set; } = 0m;
+	/// <summary>Multiplicative-factor weights applied to the candidate score chain. All twelve signals
+	/// live here in one sub-block so the user can see the full set of scoring knobs at a glance.</summary>
+	[JsonPropertyName("weights")] public OpenerWeightsConfig Weights { get; set; } = new();
 
 	/// <summary>Look-back window (trading days) for grading the bias signal's recent accuracy. If the
 	/// bias direction has disagreed with the underlying's actual N-day move, the live bias gets
 	/// dampened proportionally (down to floor of 0.2× of its raw value); if they've agreed it's left
-	/// unchanged. The calibration affects BOTH the scenario-grid shift (BiasDriftWeight) and the
-	/// BiasAdjust factor at once because it scales <c>bias</c> at the source. Default 0 disables.
-	/// Recommended 5 trading days — short enough to be responsive, long enough to be meaningful.</summary>
+	/// unchanged. The calibration affects BOTH the scenario-grid shift (biasDrift) and the BiasAdjust
+	/// factor at once because it scales <c>bias</c> at the source. Default 0 disables. Recommended
+	/// 5 trading days — short enough to be responsive, long enough to be meaningful.</summary>
 	[JsonPropertyName("biasCalibrationLookbackDays")] public int BiasCalibrationLookbackDays { get; set; } = 0;
+
 	[JsonPropertyName("profitBandPct")] public decimal ProfitBandPct { get; set; } = 5.0m;
-	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;
-	[JsonPropertyName("strikeSteps")] public Dictionary<string, decimal> StrikeSteps { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
 	[JsonPropertyName("volatilityLookbackDays")] public int VolatilityLookbackDays { get; set; } = 20;
-	[JsonPropertyName("volatilityFitWeight")] public decimal VolatilityFitWeight { get; set; } = 0.50m;
-	[JsonPropertyName("maxPainWeight")] public decimal MaxPainWeight { get; set; } = 0m;
-	[JsonPropertyName("gexWeight")] public decimal GexWeight { get; set; } = 0m;
-	[JsonPropertyName("statArbWeight")] public decimal StatArbWeight { get; set; } = 0.30m;
-
-	/// <summary>Weight of the contrarian Fear &amp; Greed regime overlay on the score chain. Factor is
-	/// <c>max(0.10, 1 + weight × ((50 − score) / 50) × directionalFit)</c>: extreme fear (score≈0)
-	/// boosts bullish structures (fit=+1) and dampens bearish ones; extreme greed inverts. Neutral
-	/// directional fits (calendars/diagonals/condors) ignore the signal entirely. Default 0.15 caps the
-	/// max factor swing at ±15% — smaller than per-ticker signals because F&amp;G is a market-wide
-	/// macro overlay. Set to 0 to disable.</summary>
-	[JsonPropertyName("sentimentWeight")] public decimal SentimentWeight { get; set; } = 0.15m;
-
-	/// <summary>Weight of the EM-vs-short-strike credit-trade safety factor. Factor is
-	/// <c>max(0.10, 1 + weight × signal)</c> where signal ramps from −1 (≤0.5σ cushion) to +1
-	/// (≥1.5σ cushion) centered on 1σ. Only fires on credit trades (skipped for debit, where
-	/// the short-strike-as-loss-boundary framing doesn't apply). Default 0.20 caps the swing at
-	/// ±20%, large enough to discriminate borderline-tight credit verticals from properly-spaced
-	/// ones without overwhelming POP/EV signals. Set to 0 to disable.</summary>
-	[JsonPropertyName("expectedMoveCreditWeight")] public decimal ExpectedMoveCreditWeight { get; set; } = 0.20m;
-
-	/// <summary>Weight of the IV-vs-HV regime-alignment factor. Distinct from
-	/// <see cref="VolatilityFitWeight"/>: that one is vega-aware and barely fires on near-zero-vega
-	/// credit verticals; this one fires on trade-type sign alone (credit favored when IV &gt; HV,
-	/// debit favored when IV &lt; HV). Factor: <c>max(0.10, 1 + weight × signal)</c> where signal =
-	/// ±clamp(IV/HV − 1, −1, 1). Default 0.15 caps the swing at ±15% — smaller than the EM-credit
-	/// factor because regime-alignment is a coarser, less-discriminating signal than strike geometry.
-	/// Set to 0 to disable.</summary>
-	[JsonPropertyName("ivRealizedPremiumWeight")] public decimal IvRealizedPremiumWeight { get; set; } = 0.15m;
 
 	[JsonPropertyName("liquidity")] public OpenerLiquidityConfig Liquidity { get; set; } = new();
 
-	[JsonPropertyName("events")] public OpenerEventsConfig Events { get; set; } = new();
-
 	[JsonPropertyName("realizedExpectancy")] public OpenerRealizedExpectancyConfig RealizedExpectancy { get; set; } = new();
-
-	/// <summary>Blend weight for the intraday tape signal on top of the daily-close technical bias.
-	/// The final <c>bias</c> consumed by the scorer is
-	/// <c>(1 − intradayTapeWeight) · macroBias + intradayTapeWeight · intradayBias</c> when an
-	/// intraday signal is available; collapses to macroBias when intraday is unavailable (backtest,
-	/// pre-open, fetcher outage, insufficient bars). Default 0 disables — behavior is bit-identical
-	/// to a config without this field. 0DTE strategies want 0.5–0.8 (intraday dominates the
-	/// time-horizon); swing strategies want 0.0–0.2 (macro dominates).</summary>
-	[JsonPropertyName("intradayTapeWeight")] public decimal IntradayTapeWeight { get; set; } = 0m;
-
-	/// <summary>Per-component configuration for the intraday tape signal. Ignored when
-	/// <see cref="IntradayTapeWeight"/> is 0.</summary>
-	[JsonPropertyName("intradayTape")] public OpenerIntradayTapeConfig IntradayTape { get; set; } = new();
 
 	/// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at
 	/// ±sigma and ±sigma/2 around spot. Default 1.0 gives a ±1σ / ±0.5σ grid that better matches
@@ -116,13 +64,58 @@ internal sealed class OpenerConfig
 
 	[JsonPropertyName("structures")] public OpenerStructuresConfig Structures { get; set; } = new();
 
-	public decimal StrikeStepFor(string ticker)
-	{
-		if (!string.IsNullOrWhiteSpace(ticker) && StrikeSteps.TryGetValue(ticker, out var step) && step > 0m)
-			return step;
+}
 
-		throw new KeyNotFoundException($"Missing opener strike step for ticker '{ticker}'.");
-	}
+/// <summary>Multiplicative-factor weights applied to the opener candidate score chain. Each field is
+/// a dimensionless weight that controls how much one signal contributes to the final score; 0 disables
+/// the signal cleanly. Defaults preserve the legacy per-weight defaults from the previous flat layout.</summary>
+internal sealed class OpenerWeightsConfig
+{
+	/// <summary>Strength of the technical-bias adjustment on the per-structure score (the post-hoc tilt
+	/// for bullish vs bearish setups). Combine with <see cref="BiasDrift"/> to also shift the scenario grid.</summary>
+	[JsonPropertyName("directionalFit")] public decimal DirectionalFit { get; set; } = 0.5m;
+
+	/// <summary>Shifts the scenario-grid center by <c>bias × biasDrift × sigma</c> when computing realized
+	/// EV. Critical for long-premium structures whose negative raw EV can never be flipped positive by
+	/// the sign-symmetric DirectionalFit factor. 0 disables; 1.0 shifts by a full sigma at extreme bias.</summary>
+	[JsonPropertyName("biasDrift")] public decimal BiasDrift { get; set; } = 0m;
+
+	/// <summary>Whipsaw-vol penalty on credit structures (ShortVertical / IronCondor / IronButterfly).
+	/// Factor = <c>1 − weight × max(0, hv3/hv30 − 1.5)</c>. 0 disables; 0.5–1.0 penalizes meaningfully.</summary>
+	[JsonPropertyName("whipsaw")] public decimal Whipsaw { get; set; } = 0m;
+
+	/// <summary>Strength of the vega-aware HV-vs-IV fit factor. Distinct from <see cref="IvRealizedPremium"/>:
+	/// that one fires on trade-type sign alone; this one weighs the structure's vega exposure.</summary>
+	[JsonPropertyName("volatilityFit")] public decimal VolatilityFit { get; set; } = 0.50m;
+
+	[JsonPropertyName("maxPain")] public decimal MaxPain { get; set; } = 0m;
+
+	/// <summary>Dealer-gamma exposure factor. Pin signal + regime signal blended (60/40).</summary>
+	[JsonPropertyName("gex")] public decimal Gex { get; set; } = 0m;
+
+	[JsonPropertyName("statArb")] public decimal StatArb { get; set; } = 0.30m;
+
+	/// <summary>Contrarian Fear &amp; Greed regime overlay. Factor is <c>max(0.10, 1 + weight × ((50 − score) / 50) × directionalFit)</c>:
+	/// extreme fear boosts bullish structures; extreme greed inverts. Neutral fits (calendars / condors)
+	/// ignore the signal entirely. Default 0.15 caps the swing at ±15%.</summary>
+	[JsonPropertyName("sentiment")] public decimal Sentiment { get; set; } = 0.15m;
+
+	/// <summary>EM-vs-short-strike credit-trade safety factor. Ramps from −1 (≤0.5σ cushion) to +1
+	/// (≥1.5σ cushion). Credit trades only.</summary>
+	[JsonPropertyName("expectedMoveCredit")] public decimal ExpectedMoveCredit { get; set; } = 0.20m;
+
+	/// <summary>IV-vs-HV regime-alignment factor. Credit favored when IV &gt; HV; debit favored when
+	/// IV &lt; HV. Fires on trade-type sign alone (vega-agnostic).</summary>
+	[JsonPropertyName("ivRealizedPremium")] public decimal IvRealizedPremium { get; set; } = 0.15m;
+
+	/// <summary>Blend weight for the VIX term-structure regime signal on top of the daily-close technical
+	/// bias. Layered between macroBias and intradayBias. Default 0 disables. Recommended 0.15–0.30.</summary>
+	[JsonPropertyName("vixTermStructure")] public decimal VixTermStructure { get; set; } = 0m;
+
+	/// <summary>Blend weight for the intraday tape signal. Final bias is
+	/// <c>(1 − intradayTape) · macroBias + intradayTape · intradayBias</c>. 0DTE wants 0.5–0.8;
+	/// swing wants 0.0–0.2.</summary>
+	[JsonPropertyName("intradayTape")] public decimal IntradayTape { get; set; } = 0m;
 }
 
 internal sealed class OpenerStructuresConfig

@@ -49,10 +49,6 @@ class ReportSettings : CommandSettings
 	[CommandOption("--iv")]
 	public string? IvOverrides { get; set; }
 
-	[Description("Option chain data source for break-even analysis: 'yahoo' or 'webull' (requires sniffed headers via 'sniff' command)")]
-	[CommandOption("--api")]
-	public string? Api { get; set; }
-
 	[Description("Grid granularity: rows per strike gap in the time-decay grid. Default 0 = auto (target 20 rows total). Pass a positive value to override (higher = more rows).")]
 	[CommandOption("--range")]
 	[DefaultValue(0.0)]
@@ -106,7 +102,6 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("initial-amount") && cfg.TryGetDecimal("initialAmount", out var initialAmount)) InitialAmount = initialAmount;
 		if (!Program.HasCliOption("view") && cfg.TryGetString("view", out var view)) View = view;
 		if (!Program.HasCliOption("iv") && cfg.TryGetString("iv", out var iv)) IvOverrides = iv;
-		if (!Program.HasCliOption("api") && cfg.TryGetString("api", out var api)) Api = api;
 		if (!Program.HasCliOption("range") && cfg.TryGetDecimal("range", out var range)) Range = range;
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
 		if (!Program.HasCliOption("grid") && cfg.TryGetString("grid", out var grid)) Grid = grid;
@@ -149,9 +144,6 @@ class ReportSettings : CommandSettings
 		var grid = Grid.ToLowerInvariant();
 		if (grid is not ("simple" or "verbose"))
 			return ValidationResult.Error("--grid must be 'simple' or 'verbose'");
-
-		if (Api != null && Api.ToLowerInvariant() is not ("yahoo" or "webull"))
-			return ValidationResult.Error("--api must be 'yahoo' or 'webull'");
 
 		if (Spot != null)
 		{
@@ -257,45 +249,37 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var (positionRows, strategyAdjustments, singleLegStandalones) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
+		// Fetch live option chain + risk-free rate so break-even panels show the time-decay grid with
+		// current IV / spot / theta. Failures (no api-config.json, expired headers, network blip) degrade
+		// gracefully: the report falls through to the 1D price ladder. Skipped when there are no positions
+		// to enrich.
 		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
-		var apiSource = settings.Api?.ToLowerInvariant();
-		if (apiSource != null && positionRows.Count > 0)
+		if (positionRows.Count > 0)
 		{
 			try
 			{
 				var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
 
-				if (apiSource == "yahoo")
+				var configPath = Program.ResolvePath(Program.ApiConfigPath);
+				if (!File.Exists(configPath))
 				{
-					Console.WriteLine("Yahoo Finance: fetching option chain data...");
-					var yahooData = await YahooOptionsClient.FetchOptionQuotesAsync(positionRows, cancellation);
-					optionQuotesBySymbol = yahooData.OptionQuotes;
-					underlyingPrices = yahooData.UnderlyingPrices;
-					Console.WriteLine($"Yahoo Finance: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
+					Console.WriteLine("Note: api-config.json not found — skipping live chain fetch. Run 'sniff' first to enable the time-decay grid.");
 				}
-				else if (apiSource == "webull")
+				else
 				{
-					var configPath = Program.ResolvePath(Program.ApiConfigPath);
-					if (!File.Exists(configPath))
+					var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+					if (config == null || config.Headers.Count == 0)
 					{
-						Console.WriteLine("Error: api-config.json not found. Run 'sniff' first to capture Webull headers.");
+						Console.WriteLine("Note: api-config.json has no headers — skipping live chain fetch. Run 'sniff' to capture them.");
 					}
 					else
 					{
-						var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-						if (config == null || config.Headers.Count == 0)
-						{
-							Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' to capture them.");
-						}
-						else
-						{
-							Console.WriteLine("Webull: fetching option chain data...");
-							var webullData = await WebullOptionsClient.FetchOptionQuotesAsync(config, positionRows, cancellation);
-							optionQuotesBySymbol = webullData.OptionQuotes;
-							underlyingPrices = webullData.UnderlyingPrices;
-							Console.WriteLine($"Webull: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
-						}
+						Console.WriteLine("Webull: fetching option chain data...");
+						var webullData = await WebullOptionsClient.FetchOptionQuotesAsync(config, positionRows, cancellation);
+						optionQuotesBySymbol = webullData.OptionQuotes;
+						underlyingPrices = webullData.UnderlyingPrices;
+						Console.WriteLine($"Webull: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
 					}
 				}
 

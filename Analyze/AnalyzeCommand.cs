@@ -98,7 +98,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		if (AnalyzeCommon.NeedsMarketPrices(settings.Spec))
 		{
-			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings.Api, settings.Spec, cancellation);
+			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings.Spec, cancellation);
 			if (quotes == null) return 1;
 		}
 
@@ -316,49 +316,33 @@ internal static class AnalyzeCommon
 			: $"{leg.Action.ToString().ToLowerInvariant()}:{leg.Symbol}:{leg.Quantity}@{price}";
 	}
 
-	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(string? api, string tradesSpec, CancellationToken cancellation)
+	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(string tradesSpec, CancellationToken cancellation)
 	{
 		var symbols = ParseAllLegs(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(api, symbols, cancellation);
+		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(symbols, cancellation);
 		return quotes;
 	}
 
-	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbolList(string? api, IReadOnlyCollection<string> symbols, CancellationToken cancellation)
+	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbolList(IReadOnlyCollection<string> symbols, CancellationToken cancellation)
 	{
-		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(api, symbols, cancellation);
+		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(symbols, cancellation);
 		return quotes;
 	}
 
-	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? UnderlyingPrices)> FetchQuotesAndUnderlyingForSymbolList(string? api, IReadOnlyCollection<string> symbols, CancellationToken cancellation)
+	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? UnderlyingPrices)> FetchQuotesAndUnderlyingForSymbolList(IReadOnlyCollection<string> symbols, CancellationToken cancellation)
 	{
 		if (symbols.Count == 0) return (new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase), new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase));
 		var minimalRows = symbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
 
-		var apiSource = api?.ToLowerInvariant();
-		if (apiSource == null)
-		{
-			Console.WriteLine("Error: --api (yahoo or webull) is required to fetch quotes");
-			return (null, null);
-		}
-
 		try
 		{
-			if (apiSource == "webull")
-			{
-				var configPath = Program.ResolvePath(Program.ApiConfigPath);
-				if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return (null, null); }
-				var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-				if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return (null, null); }
-				Console.WriteLine($"Webull: fetching quotes for {symbols.Count} symbol(s)...");
-				var (quotes, underlying) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
-				return (quotes, underlying);
-			}
-			else
-			{
-				Console.WriteLine($"Yahoo Finance: fetching quotes for {symbols.Count} symbol(s)...");
-				var (quotes, underlying) = await YahooOptionsClient.FetchOptionQuotesAsync(minimalRows, cancellation);
-				return (quotes, underlying);
-			}
+			var configPath = Program.ResolvePath(Program.ApiConfigPath);
+			if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return (null, null); }
+			var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+			if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return (null, null); }
+			Console.WriteLine($"Webull: fetching quotes for {symbols.Count} symbol(s)...");
+			var (quotes, underlying) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
+			return (quotes, underlying);
 		}
 		catch (Exception ex)
 		{
@@ -479,27 +463,16 @@ internal static class AnalyzeCommon
 			: new[] { oldSymbol, newSymbol };
 		var minimalRows = allSymbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
 
-		var apiSource = settings.Api?.ToLowerInvariant();
-		if (apiSource == null) { Console.WriteLine("Error: --api (yahoo or webull) is required for --roll analysis"); return 1; }
-
 		IReadOnlyDictionary<string, OptionContractQuote> quotes;
 		IReadOnlyDictionary<string, decimal> underlyingPrices;
 		try
 		{
-			if (apiSource == "webull")
-			{
-				var configPath = Program.ResolvePath(Program.ApiConfigPath);
-				if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found."); return 1; }
-				var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-				if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers."); return 1; }
-				Console.WriteLine("Webull: fetching option chain data for roll analysis...");
-				(quotes, underlyingPrices) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
-			}
-			else
-			{
-				Console.WriteLine("Yahoo Finance: fetching option chain data for roll analysis...");
-				(quotes, underlyingPrices) = await YahooOptionsClient.FetchOptionQuotesAsync(minimalRows, cancellation);
-			}
+			var configPath = Program.ResolvePath(Program.ApiConfigPath);
+			if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return 1; }
+			var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+			if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return 1; }
+			Console.WriteLine("Webull: fetching option chain data for roll analysis...");
+			(quotes, underlyingPrices) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
 
 			var riskFreeRate = await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
 			if (riskFreeRate.HasValue)

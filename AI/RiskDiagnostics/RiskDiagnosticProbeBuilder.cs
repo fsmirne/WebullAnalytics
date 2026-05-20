@@ -81,7 +81,7 @@ internal static class RiskDiagnosticProbeBuilder
 					{
 						var dte = Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
 						var t = dte / 365.0;
-						var iv = opener.HasValue ? opener.Value.cfg.IvDefaultPct / 100m : ivResolver(shortLeg.Symbol);
+						var iv = opener.HasValue ? opener.Value.cfg.Indicators.IvDefaultPct / 100m : ivResolver(shortLeg.Symbol);
 						enumDelta = Math.Abs(OptionMath.Delta(spot, shortLeg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, shortLeg.Parsed.CallPut));
 						enumPass = enumDelta >= enumMin && enumDelta <= enumMax;
 					}
@@ -168,8 +168,8 @@ internal static class RiskDiagnosticProbeBuilder
 							// so ComputeMarketTheoreticalAggregate inside Score() treats the cost basis as
 							// "current market mid." Recompute stat-arb from live quotes so the market-net
 							// indicator reflects what the position costs to enter today, not what was paid.
-							var liveStatArb = CandidateScorer.ComputeMarketTheoreticalAggregate(legs.Select(l => (l.Symbol, l.Parsed, l.IsLong)), spot, asOf, quotes, ai.Opener.IvDefaultPct);
-							var newStatArbFactor = CandidateScorer.ComputeStatArbAdjustmentFactor(liveStatArb?.MarketNet, liveStatArb?.TheoreticalNet, liveStatArb?.GrossTheoretical, ai.Opener.StatArbWeight);
+							var liveStatArb = CandidateScorer.ComputeMarketTheoreticalAggregate(legs.Select(l => (l.Symbol, l.Parsed, l.IsLong)), spot, asOf, quotes, ai.Indicators.IvDefaultPct);
+							var newStatArbFactor = CandidateScorer.ComputeStatArbAdjustmentFactor(liveStatArb?.MarketNet, liveStatArb?.TheoreticalNet, liveStatArb?.GrossTheoretical, ai.Opener.Weights.StatArb);
 							var oldStatArbFactor = scored.StatArbAdjustmentFactor ?? 1m;
 							var newStatArbFactorVal = newStatArbFactor ?? 1m;
 							if (oldStatArbFactor > 0m)

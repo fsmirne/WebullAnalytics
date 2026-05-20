@@ -152,10 +152,30 @@ internal sealed class OpenCandidateEvaluator
 		// ticker — F&G is a market-wide sentiment composite, not per-ticker. Null on outage; the scorer
 		// treats null as "skip the sentiment factor".
 		decimal? sentimentScore = null;
-		if (cfg.SentimentWeight > 0m)
+		if (cfg.Weights.Sentiment > 0m)
 		{
 			var snapshot = await FearGreedClient.FetchAsync(ctx.Now, cancellation);
 			if (snapshot != null) sentimentScore = snapshot.Score;
+		}
+
+		// VIX term structure (VIX vs VIX9D): a market-wide regime signal shared across all tickers.
+		// Pulled once per scan from the daily-close cache. Both legs use the most-recent settled close
+		// strictly before ctx.Now, which keeps backtests lookahead-safe (same filter the technical-bias
+		// pipeline uses). Null on missing data — the blend collapses to macroBias.
+		decimal? vixTermScore = null;
+		if (cfg.Weights.VixTermStructure > 0m)
+		{
+			try
+			{
+				var vixCloses = await _priceCache.GetRecentClosesAsync("VIX", 1, ctx.Now, cancellation);
+				var vix9dCloses = await _priceCache.GetRecentClosesAsync("VIX9D", 1, ctx.Now, cancellation);
+				if (vixCloses.Count > 0 && vix9dCloses.Count > 0)
+					vixTermScore = VixTermStructureIndicator.Compute(vixCloses[^1], vix9dCloses[^1]);
+			}
+			catch (Exception ex) when (ex is not OperationCanceledException)
+			{
+				Console.WriteLine($"VIX term structure: fetch failed: {ex.Message}");
+			}
 		}
 		var historicalVolByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		var shortHorizonHvByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
@@ -172,7 +192,7 @@ internal sealed class OpenCandidateEvaluator
 		//   - Bias-calibration factor (recent N-day move vs technical bias direction)
 		//   - Intraday tape signal's gap component (yesterday's close)
 		// Pulling once and computing all three is cheap.
-		var needCloses = cfg.VolatilityFitWeight > 0m || cfg.WhipsawWeight > 0m || cfg.BiasCalibrationLookbackDays > 0 || (!_backtestMode && cfg.IntradayTapeWeight > 0m);
+		var needCloses = cfg.Weights.VolatilityFit > 0m || cfg.Weights.Whipsaw > 0m || cfg.BiasCalibrationLookbackDays > 0 || (!_backtestMode && cfg.Weights.IntradayTape > 0m);
 		if (needCloses)
 		{
 			var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, Math.Max(4, cfg.BiasCalibrationLookbackDays + 2));
@@ -237,14 +257,23 @@ internal sealed class OpenCandidateEvaluator
 		// adds a sequential HTTP round-trip to every simulated trading day.
 		var eventCalendar = _backtestMode
 			? EventCalendar.Empty
-			: await EventCalendarLoader.LoadAsync(_config.Tickers, cfg.Events, ctx.Now, cancellation);
+			: await EventCalendarLoader.LoadAsync(_config.Tickers, cfg.Indicators.Events, ctx.Now, cancellation);
 
 		foreach (var tickerGroup in allSkeletons.GroupBy(s => s.Ticker))
 		{
 			if (!bootstrapSpots.TryGetValue(tickerGroup.Key, out var spot) || spot <= 0m) continue;
 			ctx.TechnicalSignals.TryGetValue(tickerGroup.Key, out var biasSignal);
 			var macroBias = biasSignal?.Score ?? 0m;
-			var bias = macroBias;
+
+			// VIX term-structure blend: layered on top of macroBias before the intraday blend.
+			// Collapses to macroBias when vixTermScore is null (Yahoo outage, pre-coverage backtest dates).
+			var biasedMacro = macroBias;
+			if (vixTermScore.HasValue && cfg.Weights.VixTermStructure > 0m)
+			{
+				var wVix = Math.Clamp(cfg.Weights.VixTermStructure, 0m, 1m);
+				biasedMacro = (1m - wVix) * macroBias + wVix * vixTermScore.Value;
+			}
+			var bias = biasedMacro;
 
 			// Intraday tape signal: fetch minute bars, derive open-to-now / gap / VWAP-deviation
 			// composite, blend into bias. Skipped in backtest mode (no minute-bar history) and when
@@ -253,16 +282,16 @@ internal sealed class OpenCandidateEvaluator
 			// outcome is shadow-logged for every attempt — set weight to 0.001 to record the would-be
 			// bias without materially affecting scoring.
 			IntradayBias? intradayBias = null;
-			if (!_backtestMode && cfg.IntradayTapeWeight > 0m)
+			if (!_backtestMode && cfg.Weights.IntradayTape > 0m)
 			{
 				prevCloseByTicker.TryGetValue(tickerGroup.Key, out var prevClose);
-				intradayBias = await ComputeIntradayBiasAsync(tickerGroup.Key, prevClose > 0m ? prevClose : (decimal?)null, cfg.IntradayTape, cancellation);
+				intradayBias = await ComputeIntradayBiasAsync(tickerGroup.Key, prevClose > 0m ? prevClose : (decimal?)null, cfg.Indicators.IntradayTape, cancellation);
 				if (intradayBias != null)
 				{
-					var w = Math.Clamp(cfg.IntradayTapeWeight, 0m, 1m);
-					bias = (1m - w) * macroBias + w * intradayBias.Score;
+					var w = Math.Clamp(cfg.Weights.IntradayTape, 0m, 1m);
+					bias = (1m - w) * biasedMacro + w * intradayBias.Score;
 				}
-				WriteBiasShadowLog(tickerGroup.Key, macroBias, intradayBias, cfg.IntradayTapeWeight, bias);
+				WriteBiasShadowLog(tickerGroup.Key, macroBias, intradayBias, cfg.Weights.IntradayTape, bias, vixTermScore, cfg.Weights.VixTermStructure);
 			}
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
 			shortHorizonHvByTicker.TryGetValue(tickerGroup.Key, out var shortHorizonHv);
@@ -290,7 +319,7 @@ internal sealed class OpenCandidateEvaluator
 			// spreads get punished by counter-trend reversals (e.g. April 2025 SPX +$492 inside the crash
 			// week wiped every bearish credit). Computed once per ticker; applied per-proposal to credit
 			// structures only.
-			var whipsawFactor = ComputeWhipsawFactor(shortHorizonHv, historicalVolAnnual, cfg.WhipsawWeight);
+			var whipsawFactor = ComputeWhipsawFactor(shortHorizonHv, historicalVolAnnual, cfg.Weights.Whipsaw);
 			var tickerEvents = eventCalendar.Get(tickerGroup.Key);
 
 			var shortVerticalRejects = debug
@@ -698,7 +727,7 @@ internal sealed class OpenCandidateEvaluator
 	/// null intraday entries too — those flag scan ticks where the indicator couldn't fire (cache
 	/// miss, pre-open, too few bars). Failures here are swallowed: a log-write hiccup must never
 	/// silence the rest of the scan.</summary>
-	private static void WriteBiasShadowLog(string ticker, decimal macroBias, IntradayBias? intradayBias, decimal weight, decimal blended)
+	private static void WriteBiasShadowLog(string ticker, decimal macroBias, IntradayBias? intradayBias, decimal weight, decimal blended, decimal? vixTermScore, decimal vixTermWeight)
 	{
 		try
 		{
@@ -708,7 +737,10 @@ internal sealed class OpenCandidateEvaluator
 			string intradayJson = intradayBias == null
 				? "null"
 				: $"{{\"score\":{intradayBias.Score:F4},\"gap\":{intradayBias.GapScore:F4},\"openToNow\":{intradayBias.OpenToNowScore:F4},\"vwapDev\":{intradayBias.VwapDeviationScore:F4},\"barCount\":{intradayBias.BarCount}}}";
-			var line = $"{{\"ts\":\"{ts}\",\"ticker\":\"{ticker}\",\"macroBias\":{macroBias:F4},\"intraday\":{intradayJson},\"weight\":{weight:F4},\"blended\":{blended:F4}}}\n";
+			string vixJson = vixTermScore.HasValue
+				? $"{{\"score\":{vixTermScore.Value:F4},\"weight\":{vixTermWeight:F4}}}"
+				: "null";
+			var line = $"{{\"ts\":\"{ts}\",\"ticker\":\"{ticker}\",\"macroBias\":{macroBias:F4},\"vixTerm\":{vixJson},\"intraday\":{intradayJson},\"weight\":{weight:F4},\"blended\":{blended:F4}}}\n";
 			File.AppendAllText(path, line);
 		}
 		catch (Exception ex)

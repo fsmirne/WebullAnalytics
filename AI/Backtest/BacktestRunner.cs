@@ -69,7 +69,7 @@ internal sealed class BacktestRunner
 			{
 				var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
 				var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, step, _quotes, _config, cancellation);
-				var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Rules.OpportunisticRoll.TechnicalFilter, step, cancellation);
+				var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Indicators.TechnicalFilter, step, cancellation);
 				var ctx = new EvaluationContext(step, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 				var results = evaluator.Evaluate(ctx);
 
@@ -100,7 +100,7 @@ internal sealed class BacktestRunner
 			var postMgmt = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
 			var (postCash, postAccount) = await _positions.GetAccountStateAsync(step, cancellation);
 			var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, step, _quotes, _config, cancellation);
-			var postSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Rules.OpportunisticRoll.TechnicalFilter, step, cancellation);
+			var postSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Indicators.TechnicalFilter, step, cancellation);
 			var postCtx = new EvaluationContext(step, postMgmt, postQuotes.Underlyings, postQuotes.Options, postCash, postAccount, postSignals);
 			var openProposals = await openEvaluator.EvaluateAsync(postCtx, cancellation);
 

@@ -1,12 +1,5 @@
 {
-	"tickers": ["GME", "SPY", "QQQ", "IWM"],
 	"tickIntervalSeconds": 60,
-	"marketHours": {
-		"start": "09:30",
-		"end": "16:00",
-		"tz": "America/New_York"
-	},
-	"quoteSource": "webull",
 	"positionSource": {
 		"type": "openapi",
 		"account": "test1"
@@ -19,30 +12,18 @@
 		"path": "data/ai-proposals.log",
 		"level": "information"
 	},
-	"opener": {
-		"enabled": true,
-		"topNPerTicker": 5,
-		"maxCandidatesPerStructurePerTicker": 8,
-		"maxQtyPerProposal": 10,
-		"maxRiskPctPerProposal": 0.10,
-		"directionalFitWeight": 0.5,
-		"profitBandPct": 5.0,
-		"ivDefaultPct": 40,
-		"strikeSteps": {
-			"GME": 0.50,
-			"SPY": 1.00,
-			"QQQ": 1.00,
-			"IWM": 1.00
+	"indicators": {
+		"strikeStep": 1.0,
+		"ivDefaultPct": 18,
+		"technicalFilter": {
+			"enabled": true,
+			"lookbackDays": 20,
+			"smaWeight": 1.0,
+			"rsiWeight": 1.0,
+			"momentumWeight": 1.0,
+			"momentumDays": 5,
+			"sma200Weight": 0.5
 		},
-		"volatilityLookbackDays": 20,
-		"volatilityFitWeight": 0.50,
-		"maxPainWeight": 0.25,
-		"gexWeight": 0.30,
-		"statArbWeight": 0.15,
-		"sentimentWeight": 0.15,
-		"expectedMoveCreditWeight": 0.20,
-		"ivRealizedPremiumWeight": 0.15,
-		"intradayTapeWeight": 0,
 		"intradayTape": {
 			"barIntervalCode": "m1",
 			"lookbackMinutes": 7200,
@@ -50,7 +31,35 @@
 			"gapWeight": 1.0,
 			"openToNowWeight": 2.0,
 			"vwapDeviationWeight": 1.0,
-			"includeExtended": false
+			"includeExtended": true
+		},
+		"events": { "enabled": true, "earningsBlackoutDaysAfter": 0, "rejectShortCallsThroughExDiv": true, "overrideFilePath": null }
+	},
+	"opener": {
+		"enabled": true,
+		"topNPerTicker": 5,
+		"maxCandidatesPerStructurePerTicker": 8,
+		"maxQtyPerProposal": 10,
+		"maxRiskPctPerProposal": 0.10,
+		"maxDollarRiskPerProposal": 10000,
+		"minScoreToOpen": 0.0,
+		"profitBandPct": 5.0,
+		"volatilityLookbackDays": 20,
+		"biasCalibrationLookbackDays": 0,
+		"scenarioGridSigma": 1.0,
+		"weights": {
+			"directionalFit": 0.5,
+			"biasDrift": 1.5,
+			"whipsaw": 3.0,
+			"volatilityFit": 0.50,
+			"maxPain": 0.25,
+			"gex": 0.30,
+			"statArb": 0.15,
+			"sentiment": 0.15,
+			"expectedMoveCredit": 0.20,
+			"ivRealizedPremium": 0.15,
+			"vixTermStructure": 0,
+			"intradayTape": 0
 		},
 		"liquidity": {
 			"minOpenInterest": 5,
@@ -58,9 +67,7 @@
 			"minAbsoluteOpenInterest": 100,
 			"weight": 0.50
 		},
-		"events": { "enabled": true, "earningsBlackoutDaysAfter": 0, "rejectShortCallsThroughExDiv": true, "overrideFilePath": null },
 		"realizedExpectancy": { "enabled": true, "profitTargetPctOfMaxProfit": 0.50, "stopLossPctOfMaxLoss": 0.75, "slippagePerSharePerOrder": 0, "roundTrips": 2 },
-		"scenarioGridSigma": 1.0,
 		"structures": {
 			"longCalendar":  { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60 },
 			"doubleCalendar": { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60, "widthSteps": [2, 4] },
@@ -69,7 +76,8 @@
 			"ironButterfly": { "enabled": true, "dteMin": 5, "dteMax": 21, "wingSteps": [4, 6, 10] },
 			"ironCondor": { "enabled": true, "dteMin": 5, "dteMax": 21, "widthSteps": [4, 6, 10], "bodyWidthSteps": [2, 4], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
 			"shortVertical": { "enabled": true, "dteMin": 5, "dteMax": 21, "widthSteps": [4, 6, 10], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
-			"longCallPut":   { "enabled": true, "dteMin": 21, "dteMax": 60, "deltaMin": 0.30, "deltaMax": 0.60 }
+			"longCallPut":   { "enabled": true, "dteMin": 21, "dteMax": 60, "deltaMin": 0.30, "deltaMax": 0.60 },
+			"longVertical":  { "enabled": false, "dteMin": 21, "dteMax": 60, "widthSteps": [2, 4, 8], "longDeltaMin": 0.30, "longDeltaMax": 0.55 }
 		}
 	},
 	"rules": {
@@ -81,22 +89,12 @@
 		"opportunisticRoll": {
 			"enabled": true,
 			"minImprovementPerDayPerContract": 0.50,
-			"ivDefaultPct": 40,
-			"strikeStep": 0.50,
 			"baseOtmBufferPct": 2.0,
 			"technicalBufferMultiplier": 1.5,
 			"maxDeltaIncreasePct": 25.0,
 			"minBreakEvenMarginPct": 0.5,
-			"technicalFilter": {
-				"enabled": true,
-				"lookbackDays": 20,
-				"smaWeight": 1.0,
-				"rsiWeight": 1.0,
-				"momentumWeight": 1.0,
-				"momentumDays": 5,
-				"bullishBlockThreshold": 0.25,
-				"bearishBlockThreshold": -0.25
-			}
+			"bullishBlockThreshold": 0.25,
+			"bearishBlockThreshold": -0.25
 		},
 		"takeProfit": {
 			"enabled": true,
@@ -105,8 +103,7 @@
 		"defensiveRoll": {
 			"enabled": true,
 			"spotWithinPctOfShortStrike": 1.0,
-			"triggerDTE": 3,
-			"strikeStep": 0.50
+			"triggerDTE": 3
 		},
 		"rollShortOnExpiry": {
 			"enabled": true,
