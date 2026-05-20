@@ -11,8 +11,9 @@ namespace WebullAnalytics.AI.Rules;
 internal sealed class DefensiveRollRule : IManagementRule
 {
 	private readonly DefensiveRollConfig _config;
+	private readonly IndicatorsConfig _indicators;
 
-	public DefensiveRollRule(DefensiveRollConfig config) { _config = config; }
+	public DefensiveRollRule(DefensiveRollConfig config, IndicatorsConfig indicators) { _config = config; _indicators = indicators; }
 
 	public string Name => "DefensiveRollRule";
 	public int Priority => 3;
@@ -42,8 +43,8 @@ internal sealed class DefensiveRollRule : IManagementRule
 
 		// Propose roll: step strike away from spot by StrikeStep; step expiry to next weekly (+7 calendar days).
 		var newStrike = shortLeg.CallPut == "C"
-			? shortLeg.Strike + _config.StrikeStep
-			: shortLeg.Strike - _config.StrikeStep;
+			? shortLeg.Strike + _indicators.StrikeStep
+			: shortLeg.Strike - _indicators.StrikeStep;
 		var newExpiry = NextWeekly(shortLeg.Expiry.Value);
 		var newSymbol = MatchKeys.OccSymbol(position.Ticker, newExpiry, newStrike, shortLeg.CallPut!);
 

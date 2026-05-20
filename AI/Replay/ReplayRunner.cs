@@ -46,7 +46,7 @@ internal sealed class ReplayRunner
 			var optionSymbols = openPositions.Values.SelectMany(p => p.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol)).ToHashSet();
 			var quoteSnapshot = await _quotes.GetQuotesAsync(step, optionSymbols, tickerSet, cancellation);
 
-			var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _priceCache, _config.Rules.OpportunisticRoll.TechnicalFilter, step, cancellation);
+			var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _priceCache, _config.Indicators.TechnicalFilter, step, cancellation);
 			var ctx = new EvaluationContext(step, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 			var results = evaluator.Evaluate(ctx);
 

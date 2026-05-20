@@ -76,7 +76,7 @@ internal static class CandidateEnumerator
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
-		var step = cfg.StrikeStepFor(ticker);
+		var step = cfg.Indicators.StrikeStep;
 		foreach (var shortStrike in StrikeGrid(spot, step))
 		{
 			// Skip strikes that are ITM by more than one step on either side (bad entry for a debit calendar).
@@ -144,7 +144,7 @@ internal static class CandidateEnumerator
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
-		var step = cfg.StrikeStepFor(ticker);
+		var step = cfg.Indicators.StrikeStep;
 		var strikes = StrikeGrid(spot, step);
 		foreach (var shortExp in shortExps)
 			foreach (var longExp in longExps)
@@ -188,7 +188,7 @@ internal static class CandidateEnumerator
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
-		var step = cfg.StrikeStepFor(ticker);
+		var step = cfg.Indicators.StrikeStep;
 		var strikes = StrikeGrid(spot, step);
 		foreach (var shortExp in shortExps)
 			foreach (var longExp in longExps)
@@ -238,7 +238,7 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var step = cfg.StrikeStepFor(ticker);
+		var step = cfg.Indicators.StrikeStep;
 		var bodyStrikes = StrikeGrid(spot, step);
 		foreach (var exp in exps)
 			foreach (var bodyStrike in bodyStrikes)
@@ -273,8 +273,8 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var iv = cfg.IvDefaultPct / 100m;
-		var step = cfg.StrikeStepFor(ticker);
+		var iv = cfg.Indicators.IvDefaultPct / 100m;
+		var step = cfg.Indicators.StrikeStep;
 
 		foreach (var exp in exps)
 		{
@@ -336,8 +336,8 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var iv = cfg.IvDefaultPct / 100m;
-		var step = cfg.StrikeStepFor(ticker);
+		var iv = cfg.Indicators.IvDefaultPct / 100m;
+		var step = cfg.Indicators.StrikeStep;
 
 		foreach (var exp in exps)
 		{
@@ -381,8 +381,8 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var iv = cfg.IvDefaultPct / 100m;
-		var step = cfg.StrikeStepFor(ticker);
+		var iv = cfg.Indicators.IvDefaultPct / 100m;
+		var step = cfg.Indicators.StrikeStep;
 
 		foreach (var exp in exps)
 		{
@@ -462,8 +462,8 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).Take(2).ToList();
 		if (exps.Count == 0) yield break;
 
-		var iv = cfg.IvDefaultPct / 100m;
-		var step = cfg.StrikeStepFor(ticker);
+		var iv = cfg.Indicators.IvDefaultPct / 100m;
+		var step = cfg.Indicators.StrikeStep;
 
 		foreach (var exp in exps)
 		{

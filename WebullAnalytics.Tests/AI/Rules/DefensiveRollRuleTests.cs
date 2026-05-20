@@ -9,13 +9,14 @@ public class DefensiveRollRuleTests
 	[Fact]
 	public void Evaluate_DoesNotFire_WhenSpotIsStillInsideCalendarBreakEvenBand()
 	{
-		var rule = new DefensiveRollRule(new DefensiveRollConfig
-		{
-			Enabled = true,
-			TriggerDTE = 3,
-			SpotWithinPctOfShortStrike = 1.0m,
-			StrikeStep = 0.50m,
-		});
+		var rule = new DefensiveRollRule(
+			new DefensiveRollConfig
+			{
+				Enabled = true,
+				TriggerDTE = 3,
+				SpotWithinPctOfShortStrike = 1.0m,
+			},
+			new IndicatorsConfig { IvDefaultPct = 40m, StrikeStep = 0.50m });
 
 		var position = new OpenPosition(
 			Key: "GME_CALENDAR_25.00_20260501",

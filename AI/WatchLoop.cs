@@ -7,7 +7,7 @@ using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
 
-internal sealed class AIWatchSettings : AIMultiTickerSubcommandSettings
+internal sealed class AIWatchSettings : AISingleTickerSubcommandSettings
 {
 	[CommandOption("--tick <SECONDS>")]
 	[Description("Override tickIntervalSeconds.")]
@@ -63,7 +63,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var tickSeconds = settings.Tick ?? config.TickIntervalSeconds;
-		var stopAt = ComputeStopTime(settings, config);
+		var stopAt = ComputeStopTime(settings);
 
 		var positions = AIContext.BuildLivePositionSource(config);
 		var quotes = AIContext.BuildLiveQuoteSource(config);
@@ -103,7 +103,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 		while (!cancellation.IsCancellationRequested && DateTime.Now < stopAt)
 		{
-			if (!settings.IgnoreMarketHours && !IsMarketOpen(config.MarketHours))
+			if (!settings.IgnoreMarketHours && !IsMarketOpen())
 			{
 				var sleep = TimeSpan.FromSeconds(Math.Min(tickSeconds * 5, 300));
 				try { await Task.Delay(sleep, cancellation); } catch (OperationCanceledException) { break; }
@@ -116,7 +116,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
 				var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
 				var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
-				var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, priceCache, config.Rules.OpportunisticRoll.TechnicalFilter, now, cancellation);
+				var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, priceCache, config.Indicators.TechnicalFilter, now, cancellation);
 
 				var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 				var results = evaluator.Evaluate(ctx);
@@ -162,26 +162,28 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		return 0;
 	});
 
-	private static DateTime ComputeStopTime(AIWatchSettings s, AIConfig config)
+	// NYSE regular session, hardcoded. The watch loop is the only consumer; every other code path
+	// reuses MarketCalendar.IsOpen for day-of-week / holiday handling. If we ever need to support a
+	// different exchange, lift these constants — but the rest of the app assumes US equity/options too.
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+	private static readonly TimeSpan MarketOpenEt = new(9, 30, 0);
+	private static readonly TimeSpan MarketCloseEt = new(16, 0, 0);
+
+	private static DateTime ComputeStopTime(AIWatchSettings s)
 	{
 		if (s.Duration != null && AIWatchSettings.TryParseDuration(s.Duration, out var span))
 			return DateTime.Now + span;
-		// Default: today's market close in the configured timezone.
-		var tz = TimeZoneInfo.FindSystemTimeZoneById(config.MarketHours.Tz);
-		var nowLocal = TimeZoneInfo.ConvertTime(DateTime.Now, tz);
-		var endParts = config.MarketHours.End.Split(':');
-		var closeLocal = new DateTime(nowLocal.Year, nowLocal.Month, nowLocal.Day, int.Parse(endParts[0]), int.Parse(endParts[1]), 0, DateTimeKind.Unspecified);
-		return TimeZoneInfo.ConvertTimeToUtc(closeLocal, tz).ToLocalTime();
+		// Default: today's market close in ET.
+		var nowLocal = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var closeLocal = new DateTime(nowLocal.Year, nowLocal.Month, nowLocal.Day, MarketCloseEt.Hours, MarketCloseEt.Minutes, 0, DateTimeKind.Unspecified);
+		return TimeZoneInfo.ConvertTimeToUtc(closeLocal, NyTz).ToLocalTime();
 	}
 
-	private static bool IsMarketOpen(MarketHoursConfig mh)
+	private static bool IsMarketOpen()
 	{
-		var tz = TimeZoneInfo.FindSystemTimeZoneById(mh.Tz);
-		var nowLocal = TimeZoneInfo.ConvertTime(DateTime.Now, tz);
-		if (nowLocal.DayOfWeek == DayOfWeek.Saturday || nowLocal.DayOfWeek == DayOfWeek.Sunday) return false;
-		var start = TimeSpan.Parse(mh.Start);
-		var end = TimeSpan.Parse(mh.End);
+		var nowLocal = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		if (!MarketCalendar.IsOpen(nowLocal.Date)) return false;
 		var t = nowLocal.TimeOfDay;
-		return t >= start && t <= end;
+		return t >= MarketOpenEt && t <= MarketCloseEt;
 	}
 }

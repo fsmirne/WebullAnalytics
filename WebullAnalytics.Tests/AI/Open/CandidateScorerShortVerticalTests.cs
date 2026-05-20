@@ -5,7 +5,12 @@ namespace WebullAnalytics.Tests.AI.Open;
 
 public class CandidateScorerShortVerticalTests
 {
-	private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = 0.5m, ProfitBandPct = 5m, StrikeSteps = new() { ["SPY"] = 1.0m } };
+	private static OpenerConfig Cfg() => new()
+	{
+		Indicators = new() { IvDefaultPct = 40m, StrikeStep = 1.0m },
+		Weights = new() { DirectionalFit = 0.5m },
+		ProfitBandPct = 5m,
+	};
 
 	private static (CandidateSkeleton skel, Dictionary<string, OptionContractQuote> quotes) PutCreditSpread()
 	{

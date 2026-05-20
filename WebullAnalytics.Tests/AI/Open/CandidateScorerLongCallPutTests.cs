@@ -7,7 +7,12 @@ public class CandidateScorerLongCallPutTests
 {
 	private const decimal Alpha = 0.5m;
 
-	private static OpenerConfig Cfg() => new() { IvDefaultPct = 40m, DirectionalFitWeight = Alpha, ProfitBandPct = 5m };
+	private static OpenerConfig Cfg() => new()
+	{
+		Indicators = new() { IvDefaultPct = 40m, StrikeStep = 1.0m },
+		Weights = new() { DirectionalFit = Alpha },
+		ProfitBandPct = 5m,
+	};
 
 	[Fact]
 	public void LongCallBreakevenIsStrikePlusDebit()
@@ -144,7 +149,7 @@ public class CandidateScorerLongCallPutTests
 
 		var baseCfg = Cfg();
 		var painCfg = Cfg();
-		painCfg.MaxPainWeight = 0.50m;
+		painCfg.Weights.MaxPain = 0.50m;
 
 		var withoutPain = CandidateScorer.ScoreLongCallPut(skel, spot: 100m, asOf, quotes, bias: 0m, baseCfg)!;
 		var withPain = CandidateScorer.ScoreLongCallPut(skel, spot: 100m, asOf, quotes, bias: 0m, painCfg)!;

@@ -2,7 +2,7 @@ namespace WebullAnalytics.AI.Sources;
 
 /// <summary>
 /// Provides option quotes and underlying spot prices.
-/// Implementations: LiveQuoteSource (Yahoo / Webull) and ReplayQuoteSource (Black-Scholes + IV back-solve).
+/// Implementations: LiveQuoteSource (Webull) and ReplayQuoteSource (Black-Scholes + IV back-solve).
 /// </summary>
 internal interface IQuoteSource
 {
