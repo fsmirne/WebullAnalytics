@@ -1,22 +1,33 @@
 @echo off
 REM Install wa (Webull Analytics)
-REM Builds the project and copies the executable to the install directory.
-REM Adds the install directory to the user's PATH if not already present.
+REM Builds the project, copies the executable to the install directory, and seeds
+REM the data directory at the canonical location the binary looks for at startup.
+REM
+REM Layout:
+REM   %LOCALAPPDATA%\WebullAnalytics\wa.exe       - executable (default install location)
+REM   %LOCALAPPDATA%\WebullAnalytics\data\        - configs, history, intraday, etc.
+REM
+REM Program.BaseDir resolves to %LOCALAPPDATA%\WebullAnalytics when its data\ subdir
+REM exists, so any wa.exe invocation (this one, a dev build, a published release)
+REM reads the same config. The data dir always lives at the canonical location even
+REM when the user overrides the exe install path.
 REM
 REM Usage:
-REM   install.bat              - installs to %LOCALAPPDATA%\WebullAnalytics
-REM   install.bat "C:\mydir"   - installs to the specified directory
+REM   install.bat                 - installs exe to %LOCALAPPDATA%\WebullAnalytics
+REM   install.bat "C:\mydir"      - installs exe to C:\mydir, data still at %LOCALAPPDATA%\WebullAnalytics\data
 
 setlocal enabledelayedexpansion
 
 set "INSTALL_DIR=%~1"
 if "%INSTALL_DIR%"=="" set "INSTALL_DIR=%LOCALAPPDATA%\WebullAnalytics"
+set "DATA_DIR=%LOCALAPPDATA%\WebullAnalytics\data"
 
 echo ============================================
 echo  wa (Webull Analytics) Installer
 echo ============================================
 echo.
-echo Install directory: %INSTALL_DIR%
+echo Executable: %INSTALL_DIR%\wa.exe
+echo Data dir:   %DATA_DIR%
 echo.
 
 REM Check if dotnet is installed
@@ -64,10 +75,12 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
-REM Create data directory if it doesn't exist
-if not exist "%INSTALL_DIR%\data" (
-    echo Creating data directory...
-    mkdir "%INSTALL_DIR%\data"
+REM Create the canonical data dir that Program.BaseDir resolves to at startup.
+REM This is the same path whether the user accepted the default INSTALL_DIR or
+REM overrode it — the binary always reads config from here when it exists.
+if not exist "%DATA_DIR%" (
+    echo Creating data directory at %DATA_DIR%...
+    mkdir "%DATA_DIR%"
 )
 
 REM Add install directory to user PATH if not already present
