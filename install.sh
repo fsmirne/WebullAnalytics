@@ -1,21 +1,31 @@
 #!/usr/bin/env bash
 # Install wa (Webull Analytics)
-# Builds the project and copies the executable to the install directory.
-# Adds the install directory to the user's PATH if not already present.
+# Builds the project, copies the executable to a directory on PATH, and seeds
+# the data directory at the XDG location the binary looks for at startup.
+#
+# Layout (XDG-compliant):
+#   ~/.local/bin/wa                            - executable (on PATH)
+#   ~/.local/share/WebullAnalytics/data/       - configs, history, intraday, etc.
+#
+# Program.BaseDir resolves to ~/.local/share/WebullAnalytics when its data/
+# subdir exists, so this layout makes the binary read the right config
+# regardless of which copy of wa the user happens to invoke.
 #
 # Usage:
-#   ./install.sh              - installs to ~/.local/bin
-#   ./install.sh /custom/dir  - installs to the specified directory
+#   ./install.sh                  - installs exe to ~/.local/bin
+#   ./install.sh /custom/bindir   - installs exe to /custom/bindir, data still at ~/.local/share/...
 
 set -euo pipefail
 
 INSTALL_DIR="${1:-$HOME/.local/bin}"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/WebullAnalytics/data"
 
 echo "============================================"
 echo " wa (Webull Analytics) Installer (Linux)"
 echo "============================================"
 echo
-echo "Install directory: $INSTALL_DIR"
+echo "Executable:  $INSTALL_DIR/wa"
+echo "Data dir:    $DATA_DIR"
 echo
 
 # Check if dotnet is installed
@@ -43,8 +53,9 @@ echo "Copying wa to $INSTALL_DIR..."
 cp -f "bin/Release/net10.0/linux-x64/publish/wa" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/wa"
 
-# Create data directory if it doesn't exist
-mkdir -p "$INSTALL_DIR/data"
+# Create the data dir at the XDG location the binary looks for at startup.
+echo "Creating data directory at $DATA_DIR..."
+mkdir -p "$DATA_DIR"
 
 # Add install directory to PATH if not already present
 if echo ":$PATH:" | grep -q ":$INSTALL_DIR:"; then

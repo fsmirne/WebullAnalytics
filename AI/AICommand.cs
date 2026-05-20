@@ -679,6 +679,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Print per-fill ledger in addition to the summary.")]
 	public bool ShowFills { get; set; }
 
+	[CommandOption("--fills-jsonl <PATH>")]
+	[Description("Also write each fill as a JSON line to the given path. Useful for parameter-sweep scripts that need structure mix / per-trade P&L without scraping the Spectre table (which wraps under piped stdout). Independent of --show-fills.")]
+	public string? FillsJsonlPath { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -760,6 +764,17 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 
 		var result = await runner.RunAsync(since, until, cancellation);
 		Backtest.BacktestSummaryRenderer.Render(result, settings.ShowFills);
+
+		if (!string.IsNullOrWhiteSpace(settings.FillsJsonlPath))
+		{
+			var path = Path.IsPathRooted(settings.FillsJsonlPath) ? settings.FillsJsonlPath : Path.GetFullPath(settings.FillsJsonlPath);
+			using var w = new StreamWriter(path);
+			foreach (var f in result.Fills)
+			{
+				var legs = string.Join(",", f.Legs.Select(l => $"{{\"sym\":\"{l.Symbol}\",\"side\":\"{l.Side}\",\"qty\":{l.Qty},\"price\":{l.PricePerShare.ToString(System.Globalization.CultureInfo.InvariantCulture)}}}"));
+				w.WriteLine($"{{\"ts\":\"{f.Date:yyyy-MM-ddTHH:mm:ss}\",\"ticker\":\"{f.Ticker}\",\"key\":\"{f.PositionKey}\",\"kind\":\"{f.Kind}\",\"strategy\":\"{f.StrategyKind}\",\"qty\":{f.Qty},\"net\":{f.NetCashFlow.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"fees\":{f.Fees.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"rule\":{(f.RuleName == null ? "null" : $"\"{f.RuleName}\"")},\"lineage\":{f.LineageId},\"legs\":[{legs}]}}");
+			}
+		}
 		return 0;
 	});
 }
