@@ -56,7 +56,17 @@ internal sealed class StopLossRule : IManagementRule
 
 		// Spot-beyond-BE: separate path-risk gate. The scorer evaluates terminal P&L only and won't
 		// catch positions whose spot has run past break-even but whose mark hasn't yet caught up.
-		if (ctx.UnderlyingPrices.TryGetValue(position.Ticker, out var spot))
+		//
+		// CRITICAL: this trigger must only fire when the position is actually underwater. The
+		// PositionBreakEvenEstimator heuristic returns a SYMMETRIC band centered on the short
+		// strike (shortStrike ± debit), which is the right shape for credit spreads (profitable
+		// inside the band, losing outside) but is WRONG for debit spreads — a LongPutVertical or
+		// LongCallVertical is most profitable when spot moves PAST the heuristic band in the
+		// favorable direction. Without the realizedLoss > 0 gate, this rule fired StopLoss closes
+		// on deep-ITM winners (e.g. a LongPutVertical opened for $24k debit closed at +$112k credit
+		// during an SPX crash). Gating on realized loss ensures spot-based SL only fires when the
+		// position has actually lost money — TakeProfitRule handles the profitable-spot-move case.
+		if (realizedLoss > 0m && ctx.UnderlyingPrices.TryGetValue(position.Ticker, out var spot))
 		{
 			var (beLow, beHigh, beSource) = PositionBreakEvenEstimator.Estimate(position, ctx);
 			var pctBand = _config.SpotBeyondBreakevenPct / 100m;
