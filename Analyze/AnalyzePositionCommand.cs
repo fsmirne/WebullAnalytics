@@ -232,7 +232,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		if (scenarios.Count == 0)
 		{
-			renderConsole.MarkupLine($"[yellow]No scenarios defined yet for structure type '{structure}'. Phase 1 supports single-long, vertical, and calendar/diagonal.[/]");
+			renderConsole.MarkupLine($"[yellow]No scenarios defined yet for structure type '{structure}'. Supported: single-long, vertical, calendar, diagonal, iron butterfly, iron condor.[/]");
 		}
 		else
 		{
