@@ -90,13 +90,20 @@ internal sealed class OpenCandidateEvaluator
 		IndexExpirations(bootstrapOptions.Keys, availableByTicker);
 		IndexExpirations(ctx.Quotes.Keys, availableByTicker);
 
-		// Phase A: enumerate across all tickers.
+		// Phase A: enumerate across all tickers. Feed the enumerator the merged chain quotes so the
+		// delta-band filter on strike picks uses each strike's live IV rather than the static
+		// cfg.Indicators.IvDefaultPct fallback. The chain ImpliedVolatility carries the actual smile
+		// the market is pricing — for SPXW in particular, 0DTE wing IV runs 50–80% above ATM and the
+		// static default (typically 18%) lands strike picks well outside the configured delta band.
+		IReadOnlyDictionary<string, OptionContractQuote> ivLookupQuotes = bootstrapOptions.Count > 0
+			? new OverlayQuoteDictionary(ctx.Quotes, bootstrapOptions)
+			: ctx.Quotes;
 		var allSkeletons = new List<CandidateSkeleton>();
 		foreach (var ticker in _config.Tickers)
 		{
 			if (!bootstrapSpots.TryGetValue(ticker, out var spot) || spot <= 0m) continue;
 			var available = availableByTicker[ticker];
-			allSkeletons.AddRange(CandidateEnumerator.Enumerate(ticker, spot, ctx.Now, cfg, available.Count > 0 ? available : null));
+			allSkeletons.AddRange(CandidateEnumerator.Enumerate(ticker, spot, ctx.Now, cfg, available.Count > 0 ? available : null, ivLookupQuotes));
 		}
 		if (allSkeletons.Count == 0) return Array.Empty<OpenProposal>();
 
