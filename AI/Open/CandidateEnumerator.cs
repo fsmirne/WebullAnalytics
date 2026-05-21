@@ -8,8 +8,16 @@ internal static class CandidateEnumerator
 	/// non-null, is the set of real expirations from the chain — using these (rather than computed
 	/// 3rd-Friday/Friday helpers) is what makes holiday-shifted monthlies (e.g. Juneteenth pushes June
 	/// monthly to Thursday) match the OCC symbols Webull actually returns. Pass null to fall back to the
-	/// computed Friday helpers, used by tests that don't model a chain.</summary>
-	public static IEnumerable<CandidateSkeleton> Enumerate(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations = null)
+	/// computed Friday helpers, used by tests that don't model a chain.
+	///
+	/// <paramref name="quotes"/>, when non-null, provides the live chain quotes. The delta-band
+	/// filters that select short / long strikes pull each strike's actual <c>ImpliedVolatility</c> from
+	/// the matching <see cref="OptionContractQuote"/> instead of using the static
+	/// <c>cfg.Indicators.IvDefaultPct</c>. In regimes where the smile lifts wing IV materially above
+	/// the static default (e.g. SPXW today: default 18%, live 28% at delta-0.15 strikes), strike
+	/// picks using the static IV land in deltas the live market reads outside the band. Live IV
+	/// closes that gap. Strikes without a quote fall back to the static default.</summary>
+	public static IEnumerable<CandidateSkeleton> Enumerate(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations = null, IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
 	{
 		if (cfg.Structures.LongCalendar.Enabled)
 			foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongCalendar, OpenStructureKind.LongCalendar, availableExpirations))
@@ -32,20 +40,34 @@ internal static class CandidateEnumerator
 				yield return sk;
 
 		if (cfg.Structures.IronCondor.Enabled)
-			foreach (var sk in EnumerateIronCondors(ticker, spot, asOf, cfg, availableExpirations))
+			foreach (var sk in EnumerateIronCondors(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
 
 		if (cfg.Structures.ShortVertical.Enabled)
-			foreach (var sk in EnumerateShortVerticals(ticker, spot, asOf, cfg, availableExpirations))
+			foreach (var sk in EnumerateShortVerticals(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
 
 		if (cfg.Structures.LongVertical.Enabled)
-			foreach (var sk in EnumerateLongVerticals(ticker, spot, asOf, cfg, availableExpirations))
+			foreach (var sk in EnumerateLongVerticals(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
 
 		if (cfg.Structures.LongCallPut.Enabled)
-			foreach (var sk in EnumerateLongCallPut(ticker, spot, asOf, cfg, availableExpirations))
+			foreach (var sk in EnumerateLongCallPut(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
+	}
+
+	/// <summary>Resolves the implied volatility to use for delta-band filtering on a specific strike.
+	/// Prefers the live chain's per-strike IV; falls back to the configured static default if no
+	/// quote is available or the quote lacks an IV. Returns a fraction (e.g. 0.18 for 18%).</summary>
+	private static decimal ResolveIv(string ticker, DateTime expiry, decimal strike, string callPut, IReadOnlyDictionary<string, OptionContractQuote>? quotes, decimal defaultIv)
+	{
+		if (quotes != null)
+		{
+			var symbol = MatchKeys.OccSymbol(ticker, expiry, strike, callPut);
+			if (quotes.TryGetValue(symbol, out var q) && q.ImpliedVolatility is decimal liveIv && liveIv > 0m)
+				return liveIv;
+		}
+		return defaultIv;
 	}
 
 	/// <summary>When the chain is known, take its real expirations within the DTE window; otherwise fall
@@ -267,13 +289,13 @@ internal static class CandidateEnumerator
 		return new CandidateSkeleton(ticker, OpenStructureKind.IronButterfly, legs, TargetExpiry: exp);
 	}
 
-	private static IEnumerable<CandidateSkeleton> EnumerateIronCondors(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	private static IEnumerable<CandidateSkeleton> EnumerateIronCondors(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.IronCondor;
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var iv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
 		var step = cfg.Indicators.StrikeStep;
 
 		foreach (var exp in exps)
@@ -282,6 +304,7 @@ internal static class CandidateEnumerator
 			var putShorts = StrikesBelowSpot(spot, step, count: 8)
 				.Where(shortStrike =>
 				{
+					var iv = ResolveIv(ticker, exp, shortStrike, "P", quotes, defaultIv);
 					var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "P"));
 					return delta >= sCfg.ShortDeltaMin && delta <= sCfg.ShortDeltaMax;
 				})
@@ -289,6 +312,7 @@ internal static class CandidateEnumerator
 			var callShorts = StrikesAboveSpot(spot, step, count: 8)
 				.Where(shortStrike =>
 				{
+					var iv = ResolveIv(ticker, exp, shortStrike, "C", quotes, defaultIv);
 					var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "C"));
 					return delta >= sCfg.ShortDeltaMin && delta <= sCfg.ShortDeltaMax;
 				})
@@ -330,13 +354,13 @@ internal static class CandidateEnumerator
 		return new CandidateSkeleton(ticker, OpenStructureKind.IronCondor, legs, TargetExpiry: exp);
 	}
 
-	private static IEnumerable<CandidateSkeleton> EnumerateShortVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	private static IEnumerable<CandidateSkeleton> EnumerateShortVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.ShortVertical;
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var iv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
 		var step = cfg.Indicators.StrikeStep;
 
 		foreach (var exp in exps)
@@ -346,6 +370,7 @@ internal static class CandidateEnumerator
 			// Put credit side (bullish): short strike below spot.
 			foreach (var shortStrike in StrikesBelowSpot(spot, step, count: 8))
 			{
+				var iv = ResolveIv(ticker, exp, shortStrike, "P", quotes, defaultIv);
 				var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "P"));
 				if (delta < sCfg.ShortDeltaMin || delta > sCfg.ShortDeltaMax) continue;
 				foreach (var widthSteps in sCfg.WidthSteps)
@@ -359,6 +384,7 @@ internal static class CandidateEnumerator
 			// Call credit side (bearish): short strike above spot.
 			foreach (var shortStrike in StrikesAboveSpot(spot, step, count: 8))
 			{
+				var iv = ResolveIv(ticker, exp, shortStrike, "C", quotes, defaultIv);
 				var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "C"));
 				if (delta < sCfg.ShortDeltaMin || delta > sCfg.ShortDeltaMax) continue;
 				foreach (var widthSteps in sCfg.WidthSteps)
@@ -375,13 +401,13 @@ internal static class CandidateEnumerator
 	/// a naked long call/put (the short leg offsets premium) but caps the upside at <c>width − debit</c>.
 	/// Both sides bounded: max loss = debit paid, max profit = width − debit. Directional with
 	/// defined risk both ways.</summary>
-	private static IEnumerable<CandidateSkeleton> EnumerateLongVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	private static IEnumerable<CandidateSkeleton> EnumerateLongVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.LongVertical;
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var iv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
 		var step = cfg.Indicators.StrikeStep;
 
 		foreach (var exp in exps)
@@ -394,6 +420,7 @@ internal static class CandidateEnumerator
 			// delta-0.30 can be OTM (strike above).
 			foreach (var longStrike in StrikesAroundSpot(spot, step, count: 8))
 			{
+				var iv = ResolveIv(ticker, exp, longStrike, "C", quotes, defaultIv);
 				var longDelta = Math.Abs(OptionMath.Delta(spot, longStrike, years, OptionMath.RiskFreeRate, iv, "C"));
 				if (longDelta < sCfg.LongDeltaMin || longDelta > sCfg.LongDeltaMax) continue;
 				foreach (var widthSteps in sCfg.WidthSteps)
@@ -406,6 +433,7 @@ internal static class CandidateEnumerator
 			// Bear put spread (LongPutVertical): buy a near-ATM put, sell a further-OTM put.
 			foreach (var longStrike in StrikesAroundSpot(spot, step, count: 8))
 			{
+				var iv = ResolveIv(ticker, exp, longStrike, "P", quotes, defaultIv);
 				var longDelta = Math.Abs(OptionMath.Delta(spot, longStrike, years, OptionMath.RiskFreeRate, iv, "P"));
 				if (longDelta < sCfg.LongDeltaMin || longDelta > sCfg.LongDeltaMax) continue;
 				foreach (var widthSteps in sCfg.WidthSteps)
@@ -453,7 +481,7 @@ internal static class CandidateEnumerator
 		return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: exp);
 	}
 
-	private static IEnumerable<CandidateSkeleton> EnumerateLongCallPut(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	private static IEnumerable<CandidateSkeleton> EnumerateLongCallPut(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.LongCallPut;
 		// Use the ticker-aware dispatch so daily-expiry tickers (SPX/SPXW/QQQ/etc.) can enumerate
@@ -462,7 +490,7 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).Take(2).ToList();
 		if (exps.Count == 0) yield break;
 
-		var iv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
 		var step = cfg.Indicators.StrikeStep;
 
 		foreach (var exp in exps)
@@ -473,6 +501,7 @@ internal static class CandidateEnumerator
 			{
 				foreach (var strike in StrikesAroundSpot(spot, step, count: 10))
 				{
+					var iv = ResolveIv(ticker, exp, strike, callPut, quotes, defaultIv);
 					var delta = Math.Abs(OptionMath.Delta(spot, strike, years, OptionMath.RiskFreeRate, iv, callPut));
 					if (delta < sCfg.DeltaMin || delta > sCfg.DeltaMax) continue;
 
