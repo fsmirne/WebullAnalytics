@@ -87,7 +87,15 @@ internal static class RiskDiagnosticProbeBuilder
 						// enumerator actually computed, so the "FAIL" tag mis-fired on
 						// every 0DTE short vertical the engine picked.
 						var t = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortLeg.Parsed.ExpiryDate);
-						var iv = opener.HasValue ? opener.Value.cfg.Indicators.IvDefaultPct / 100m : ivResolver(shortLeg.Symbol);
+						// Prefer the chain's live IV (same source the enumerator now reads via
+						// ResolveIv). Fall back to ivResolver / IvDefaultPct only when no live
+						// quote is available for this strike — that's also the fallback chain
+						// the enumerator uses, so the diagnostic and the enumerator stay in
+						// lockstep.
+						var liveIv = ivResolver(shortLeg.Symbol);
+						var iv = liveIv > 0m
+							? liveIv
+							: (opener.HasValue ? opener.Value.cfg.Indicators.IvDefaultPct / 100m : liveIv);
 						enumDelta = Math.Abs(OptionMath.Delta(spot, shortLeg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, shortLeg.Parsed.CallPut));
 						enumPass = enumDelta >= enumMin && enumDelta <= enumMax;
 					}
