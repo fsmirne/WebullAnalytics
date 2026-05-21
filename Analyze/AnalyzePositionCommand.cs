@@ -232,7 +232,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		if (scenarios.Count == 0)
 		{
-			renderConsole.MarkupLine($"[yellow]No scenarios defined yet for structure type '{structure}'. Supported: single-long, vertical, calendar, diagonal, iron butterfly, iron condor.[/]");
+			renderConsole.MarkupLine($"[yellow]No scenarios defined yet for structure type '{structure}'. Supported: single-long, vertical, calendar, diagonal, iron butterfly, iron condor, double calendar, double diagonal.[/]");
 		}
 		else
 		{
@@ -330,7 +330,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	internal sealed record PositionSnapshot(string Symbol, LegAction Action, int Qty, decimal CostBasis, OptionParsed Parsed);
 
-	internal enum StructureKind { SingleLong, SingleShort, Calendar, Diagonal, Vertical, IronButterfly, IronCondor, Unsupported }
+	internal enum StructureKind { SingleLong, SingleShort, Calendar, Diagonal, Vertical, IronButterfly, IronCondor, DoubleCalendar, DoubleDiagonal, Unsupported }
 
 	// ─── Load from trade log ──────────────────────────────────────────────────
 
@@ -477,26 +477,48 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		if (legs.Count == 4)
 		{
-			// Iron butterfly / iron condor: 2 puts + 2 calls, same root + expiry,
-			// one short of each kind, one long of each kind. The short put and
-			// short call share a strike → butterfly; different strikes → condor.
+			// Every 4-leg structure we recognize has the same component breakdown:
+			// one short put, one long put, one short call, one long call, all on the
+			// same underlying. What differs is the expiry / strike geometry.
 			var root = legs[0].Parsed.Root;
-			var expiry = legs[0].Parsed.ExpiryDate;
-			if (legs.All(l => l.Parsed.Root == root && l.Parsed.ExpiryDate == expiry))
+			if (!legs.All(l => l.Parsed.Root == root)) return StructureKind.Unsupported;
+
+			var shortPut = legs.FirstOrDefault(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "P");
+			var longPut = legs.FirstOrDefault(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "P");
+			var shortCall = legs.FirstOrDefault(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "C");
+			var longCall = legs.FirstOrDefault(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "C");
+			if (shortPut == null || longPut == null || shortCall == null || longCall == null) return StructureKind.Unsupported;
+
+			// Iron butterfly / iron condor: all four legs share an expiry, longs sandwich
+			// the shorts. Body strike(s) at the shorts; wings further OTM. Short put strike
+			// == short call strike → butterfly; different → condor.
+			bool allSameExpiry = shortPut.Parsed.ExpiryDate == longPut.Parsed.ExpiryDate
+				&& shortPut.Parsed.ExpiryDate == shortCall.Parsed.ExpiryDate
+				&& shortPut.Parsed.ExpiryDate == longCall.Parsed.ExpiryDate;
+			if (allSameExpiry
+				&& longPut.Parsed.Strike < shortPut.Parsed.Strike
+				&& shortCall.Parsed.Strike < longCall.Parsed.Strike
+				&& shortPut.Parsed.Strike <= shortCall.Parsed.Strike)
 			{
-				var shortPut = legs.FirstOrDefault(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "P");
-				var longPut = legs.FirstOrDefault(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "P");
-				var shortCall = legs.FirstOrDefault(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "C");
-				var longCall = legs.FirstOrDefault(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "C");
-				if (shortPut != null && longPut != null && shortCall != null && longCall != null
-					&& longPut.Parsed.Strike < shortPut.Parsed.Strike
-					&& shortCall.Parsed.Strike < longCall.Parsed.Strike
-					&& shortPut.Parsed.Strike <= shortCall.Parsed.Strike)
-				{
-					return shortPut.Parsed.Strike == shortCall.Parsed.Strike
-						? StructureKind.IronButterfly
-						: StructureKind.IronCondor;
-				}
+				return shortPut.Parsed.Strike == shortCall.Parsed.Strike
+					? StructureKind.IronButterfly
+					: StructureKind.IronCondor;
+			}
+
+			// Time-spread 4-legs: each side is its own calendar (same strike across expiries)
+			// or diagonal (different strike). Shorts share a near expiry; longs share a further
+			// expiry; short expiry strictly before long expiry. If BOTH sides are calendars
+			// (same-strike on each side) → double calendar; otherwise → double diagonal.
+			bool shortsShareExpiry = shortPut.Parsed.ExpiryDate == shortCall.Parsed.ExpiryDate;
+			bool longsShareExpiry = longPut.Parsed.ExpiryDate == longCall.Parsed.ExpiryDate;
+			bool shortBeforeLong = shortPut.Parsed.ExpiryDate < longPut.Parsed.ExpiryDate;
+			if (shortsShareExpiry && longsShareExpiry && shortBeforeLong)
+			{
+				bool putSameStrike = shortPut.Parsed.Strike == longPut.Parsed.Strike;
+				bool callSameStrike = shortCall.Parsed.Strike == longCall.Parsed.Strike;
+				return (putSameStrike && callSameStrike)
+					? StructureKind.DoubleCalendar
+					: StructureKind.DoubleDiagonal;
 			}
 		}
 
@@ -597,8 +619,106 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			StructureKind.Vertical => GenerateVerticalScenarios(legs, settings, spot, asOf, quotes, technicalBias),
 			StructureKind.Calendar or StructureKind.Diagonal => GenerateSpreadScenarios(legs, settings, spot, asOf, kind, quotes),
 			StructureKind.IronButterfly or StructureKind.IronCondor => GenerateIronScenarios(legs, settings, spot, asOf, quotes),
+			StructureKind.DoubleCalendar or StructureKind.DoubleDiagonal => GenerateDoubleSpreadScenarios(legs, settings, spot, asOf, kind, quotes),
 			_ => new List<Scenario>()
 		};
+
+	/// <summary>Scenarios for double calendars and double diagonals. Both have the same shape:
+	/// two time-spreads (one put, one call) sharing a near and far expiry. A "calendar" side
+	/// has identical strikes; a "diagonal" side has different strikes. The hold-to-short-expiry
+	/// math mirrors single-spread GenerateSpreadScenarios — long legs get BS-priced at the short
+	/// expiry, short legs settle at intrinsic at that point. Scenarios:
+	///   • Hold to short expiry at current spot
+	///   • Hold to short expiry with spot at the put short strike (max-pin on put side)
+	///   • Hold to short expiry with spot at the call short strike (max-pin on call side)
+	///   • Close all at mid
+	///   • Close one side (whichever short is closer to spot) and run the other to short expiry</summary>
+	private static List<Scenario> GenerateDoubleSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	{
+		var list = new List<Scenario>();
+		var shortPut = legs.First(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "P");
+		var longPut = legs.First(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "P");
+		var shortCall = legs.First(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "C");
+		var longCall = legs.First(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "C");
+		var shortExpiry = shortPut.Parsed.ExpiryDate;
+		var longExpiry = longPut.Parsed.ExpiryDate;
+		var shortDte = Math.Max(1, (shortExpiry.Date - asOf.Date).Days);
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
+
+		var ivShortPut = ResolveIV(shortPut.Symbol, settings, quotes);
+		var ivLongPut = ResolveIV(longPut.Symbol, settings, quotes);
+		var ivShortCall = ResolveIV(shortCall.Symbol, settings, quotes);
+		var ivLongCall = ResolveIV(longCall.Symbol, settings, quotes);
+
+		var shortPutMid = LiveOrBsMid(quotesForPricing, shortPut.Symbol, spot, shortPut.Parsed.Strike, shortDte, ivShortPut, "P");
+		var longPutMid = LiveOrBsMid(quotesForPricing, longPut.Symbol, spot, longPut.Parsed.Strike, Math.Max(1, (longExpiry.Date - asOf.Date).Days), ivLongPut, "P");
+		var shortCallMid = LiveOrBsMid(quotesForPricing, shortCall.Symbol, spot, shortCall.Parsed.Strike, shortDte, ivShortCall, "C");
+		var longCallMid = LiveOrBsMid(quotesForPricing, longCall.Symbol, spot, longCall.Parsed.Strike, Math.Max(1, (longExpiry.Date - asOf.Date).Days), ivLongCall, "C");
+
+		// Long-leg value at the short expiry: BS with the residual time until the long's own expiry.
+		double tLongAtShortExp = Math.Max(1, (longExpiry.Date - shortExpiry.Date).Days) / 365.0;
+		decimal LongPutAtShortExp(decimal s) => OptionMath.BlackScholes(s, longPut.Parsed.Strike, tLongAtShortExp, 0.036, ivLongPut, "P");
+		decimal LongCallAtShortExp(decimal s) => OptionMath.BlackScholes(s, longCall.Parsed.Strike, tLongAtShortExp, 0.036, ivLongCall, "C");
+		// Per-share value of the whole 4-leg position at the short expiry, evaluated at a given spot.
+		decimal ValueAtShortExpiry(decimal s) =>
+			LongPutAtShortExp(s) - Intrinsic(s, shortPut.Parsed.Strike, "P")
+			+ LongCallAtShortExp(s) - Intrinsic(s, shortCall.Parsed.Strike, "C");
+
+		// 1. Hold to short expiry at current spot.
+		var holdAtNow = ValueAtShortExpiry(spot);
+		list.Add(NewScenarioSpread("Hold to short expiry (current spot)", legs, "—",
+			cashNow: 0m, valueAtTarget: holdAtNow, marginDeltaPerContract: 0m, daysToTarget: shortDte,
+			rationale: $"at {shortExpiry:yyyy-MM-dd} with spot held at ${spot:F2}: long puts + long calls residual + shorts intrinsic = ${holdAtNow:F2}/share"));
+
+		// 2. Hold to short expiry with spot pinned at put short strike — typical max-profit case for the
+		// put side (short put expires worthless; long put still carries residual extrinsic).
+		var holdAtPutShort = ValueAtShortExpiry(shortPut.Parsed.Strike);
+		list.Add(NewScenarioSpread($"Hold to short expiry (spot @ put short ${shortPut.Parsed.Strike:F2})", legs, "—",
+			cashNow: 0m, valueAtTarget: holdAtPutShort, marginDeltaPerContract: 0m, daysToTarget: shortDte,
+			rationale: $"at {shortExpiry:yyyy-MM-dd} with spot @ put-short strike: position value ${holdAtPutShort:F2}/share"));
+
+		// 3. Hold to short expiry with spot pinned at call short strike — put-side and call-side both
+		// peak as spot approaches their respective short strikes for time spreads.
+		if (shortCall.Parsed.Strike != shortPut.Parsed.Strike)
+		{
+			var holdAtCallShort = ValueAtShortExpiry(shortCall.Parsed.Strike);
+			list.Add(NewScenarioSpread($"Hold to short expiry (spot @ call short ${shortCall.Parsed.Strike:F2})", legs, "—",
+				cashNow: 0m, valueAtTarget: holdAtCallShort, marginDeltaPerContract: 0m, daysToTarget: shortDte,
+				rationale: $"at {shortExpiry:yyyy-MM-dd} with spot @ call-short strike: position value ${holdAtCallShort:F2}/share"));
+		}
+
+		// 4. Close everything at mid.
+		var closeAllCash = -shortPutMid + longPutMid - shortCallMid + longCallMid;
+		list.Add(NewScenarioSpread("Close all", legs,
+			$"BUY {shortPut.Symbol} x{shortPut.Qty} @{FmtPrice(shortPutMid)}, SELL {longPut.Symbol} x{longPut.Qty} @{FmtPrice(longPutMid)}, BUY {shortCall.Symbol} x{shortCall.Qty} @{FmtPrice(shortCallMid)}, SELL {longCall.Symbol} x{longCall.Qty} @{FmtPrice(longCallMid)}",
+			cashNow: closeAllCash, valueAtTarget: 0m, marginDeltaPerContract: 0m, daysToTarget: 1,
+			rationale: $"flatten at mid: net cash ${closeAllCash:+0.00;-0.00}/share to close all four legs"));
+
+		// 5. Close the threatened side; let the other side run to short expiry.
+		var distanceToPut = spot - shortPut.Parsed.Strike;   // positive when spot above short put
+		var distanceToCall = shortCall.Parsed.Strike - spot; // positive when spot below short call
+		bool putSideThreatened = distanceToPut < distanceToCall;
+		if (putSideThreatened)
+		{
+			var sideCash = -shortPutMid + longPutMid;
+			var residualAtShortExp = LongCallAtShortExp(spot) - Intrinsic(spot, shortCall.Parsed.Strike, "C");
+			list.Add(NewScenarioSpread("Close put side (defensive)", legs,
+				$"BUY {shortPut.Symbol} x{shortPut.Qty} @{FmtPrice(shortPutMid)}, SELL {longPut.Symbol} x{longPut.Qty} @{FmtPrice(longPutMid)}",
+				cashNow: sideCash, valueAtTarget: residualAtShortExp, marginDeltaPerContract: 0m, daysToTarget: shortDte,
+				rationale: $"put-side closer to short strike (${distanceToPut:F2} from short) — cut the put spread for ${sideCash:+0.00;-0.00}/share; remaining call spread runs to short exp → ${residualAtShortExp:F2}/share"));
+		}
+		else
+		{
+			var sideCash = -shortCallMid + longCallMid;
+			var residualAtShortExp = LongPutAtShortExp(spot) - Intrinsic(spot, shortPut.Parsed.Strike, "P");
+			list.Add(NewScenarioSpread("Close call side (defensive)", legs,
+				$"BUY {shortCall.Symbol} x{shortCall.Qty} @{FmtPrice(shortCallMid)}, SELL {longCall.Symbol} x{longCall.Qty} @{FmtPrice(longCallMid)}",
+				cashNow: sideCash, valueAtTarget: residualAtShortExp, marginDeltaPerContract: 0m, daysToTarget: shortDte,
+				rationale: $"call-side closer to short strike (${distanceToCall:F2} from short) — cut the call spread for ${sideCash:+0.00;-0.00}/share; remaining put spread runs to short exp → ${residualAtShortExp:F2}/share"));
+		}
+
+		return OrderScenariosForDisplay(list, settings.Cash);
+	}
 
 	/// <summary>Scenario set for iron butterflies and iron condors. Same payoff structure (two
 	/// vertical spreads sandwiched together — one credit put spread below body, one credit call
