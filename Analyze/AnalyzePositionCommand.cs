@@ -330,7 +330,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	internal sealed record PositionSnapshot(string Symbol, LegAction Action, int Qty, decimal CostBasis, OptionParsed Parsed);
 
-	internal enum StructureKind { SingleLong, SingleShort, Calendar, Diagonal, Vertical, Unsupported }
+	internal enum StructureKind { SingleLong, SingleShort, Calendar, Diagonal, Vertical, IronButterfly, IronCondor, Unsupported }
 
 	// ─── Load from trade log ──────────────────────────────────────────────────
 
@@ -473,6 +473,31 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (sl.Parsed.ExpiryDate == ll.Parsed.ExpiryDate) return StructureKind.Vertical;
 			if (sl.Parsed.ExpiryDate < ll.Parsed.ExpiryDate)
 				return sl.Parsed.Strike == ll.Parsed.Strike ? StructureKind.Calendar : StructureKind.Diagonal;
+		}
+
+		if (legs.Count == 4)
+		{
+			// Iron butterfly / iron condor: 2 puts + 2 calls, same root + expiry,
+			// one short of each kind, one long of each kind. The short put and
+			// short call share a strike → butterfly; different strikes → condor.
+			var root = legs[0].Parsed.Root;
+			var expiry = legs[0].Parsed.ExpiryDate;
+			if (legs.All(l => l.Parsed.Root == root && l.Parsed.ExpiryDate == expiry))
+			{
+				var shortPut = legs.FirstOrDefault(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "P");
+				var longPut = legs.FirstOrDefault(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "P");
+				var shortCall = legs.FirstOrDefault(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "C");
+				var longCall = legs.FirstOrDefault(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "C");
+				if (shortPut != null && longPut != null && shortCall != null && longCall != null
+					&& longPut.Parsed.Strike < shortPut.Parsed.Strike
+					&& shortCall.Parsed.Strike < longCall.Parsed.Strike
+					&& shortPut.Parsed.Strike <= shortCall.Parsed.Strike)
+				{
+					return shortPut.Parsed.Strike == shortCall.Parsed.Strike
+						? StructureKind.IronButterfly
+						: StructureKind.IronCondor;
+				}
+			}
 		}
 
 		return StructureKind.Unsupported;
