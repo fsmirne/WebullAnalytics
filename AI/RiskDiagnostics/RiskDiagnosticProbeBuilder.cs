@@ -79,8 +79,14 @@ internal static class RiskDiagnosticProbeBuilder
 					enumMax = band.Item2;
 					if (enumMin.HasValue && enumMax.HasValue)
 					{
-						var dte = Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
-						var t = dte / 365.0;
+						// Use the same time-to-expiry formula the enumerator uses
+						// (OpenerExpiryHelpers.TimeYearsToExpiry — fractional for 0DTE,
+						// dte/365 otherwise). The earlier `Math.Max(1, dte)/365` was a
+						// stale pre-651eaa2 convention that floored 0DTE TTE at one full
+						// day; it produced delta values 3-4× larger than what the
+						// enumerator actually computed, so the "FAIL" tag mis-fired on
+						// every 0DTE short vertical the engine picked.
+						var t = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortLeg.Parsed.ExpiryDate);
 						var iv = opener.HasValue ? opener.Value.cfg.Indicators.IvDefaultPct / 100m : ivResolver(shortLeg.Symbol);
 						enumDelta = Math.Abs(OptionMath.Delta(spot, shortLeg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, shortLeg.Parsed.CallPut));
 						enumPass = enumDelta >= enumMin && enumDelta <= enumMax;
