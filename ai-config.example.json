@@ -40,7 +40,7 @@
 		"topNPerTicker": 5,
 		"maxCandidatesPerStructurePerTicker": 8,
 		"maxQtyPerProposal": 10,
-		"maxRiskPctPerProposal": 0.10,
+		"maxRiskPctPerProposal": 0.05,
 		"maxDollarRiskPerProposal": 10000,
 		"minScoreToOpen": 0.0,
 		"profitBandPct": 5.0,
@@ -48,7 +48,7 @@
 		"biasCalibrationLookbackDays": 0,
 		"scenarioGridSigma": 1.0,
 		"weights": {
-			"directionalFit": 0.5,
+			"directionalFit": 0.3,
 			"biasDrift": 1.5,
 			"whipsaw": 3.0,
 			"volatilityFit": 0.50,
@@ -56,8 +56,8 @@
 			"gex": 0.30,
 			"statArb": 0.15,
 			"sentiment": 0.15,
-			"expectedMoveCredit": 0.20,
-			"ivRealizedPremium": 0.15,
+			"expectedMoveCredit": 0.50,
+			"ivRealizedPremium": 0.30,
 			"vixTermStructure": 0,
 			"intradayTape": 0
 		},
