@@ -9,12 +9,13 @@ namespace WebullAnalytics.AI;
 /// <summary>`wa ai history &lt;ticker&gt;` — populate the historical OHLC caches used by `wa ai backtest`.
 /// Separation of concerns: the fetch step hits the network here (where transient Yahoo failures are
 /// loud and re-runnable), while the backtest runs purely offline against the cache. Mirrors the
-/// `wa fetch` / `wa report` split. SPX-family tickers (SPY, SPX, SPXW, XSP) also pull VIX and VIX9D,
-/// since the backtest reads ATM IV from VIX and the opener reads the VIX term-structure regime score.</summary>
+/// `wa fetch` / `wa report` split. SPX-family tickers (SPY, SPX, SPXW, XSP) also pull VIX, VIX1D, and
+/// VIX9D, since the backtest reads ATM IV from the appropriate term (VIX1D for 0–1 DTE, VIX9D for
+/// 2–9 DTE, VIX for longer) and the opener reads the VIX term-structure regime score.</summary>
 internal sealed class AIHistorySettings : CommandSettings
 {
 	[CommandArgument(0, "<ticker>")]
-	[Description("Underlying ticker symbol (e.g., SPY, QQQ, GME). SPX family also refreshes VIX + VIX9D.")]
+	[Description("Underlying ticker symbol (e.g., SPY, QQQ, GME). SPX family also refreshes VIX + VIX1D + VIX9D.")]
 	public string Ticker { get; set; } = "";
 
 	[CommandOption("--lookback-years <N>")]
@@ -50,14 +51,17 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		if (!await FetchAndReportAsync(bars, ticker, earliest, asOf, cancellation))
 			return 1;
 
-		// VIX-family rides along with SPX-family fetches. VIX is the ATM-IV source for the backtest;
-		// VIX9D feeds the VIX term-structure signal in the opener. CBOE SMILE drives per-day smile
-		// steepness scaling in BacktestIVProvider so backtest fills track the actual regime (calm vs
-		// stressed days) instead of using a single anchor calibration. SMILE comes from CBOE directly
-		// (its own daily CSV); VIX and VIX9D come from Yahoo as OHLC.
+		// VIX-family rides along with SPX-family fetches. VIX1D / VIX9D / VIX anchor backtest ATM IV at
+		// the appropriate term (0–1 DTE, 2–9 DTE, 10+ DTE respectively); VIX9D + VIX also feed the VIX
+		// term-structure signal in the opener. CBOE SMILE drives per-day smile steepness scaling in
+		// BacktestIVProvider so backtest fills track the actual regime (calm vs stressed days) instead
+		// of using a single anchor calibration. SMILE comes from CBOE directly (its own daily CSV);
+		// VIX / VIX1D / VIX9D come from Yahoo as OHLC. VIX1D was launched 2023-04-24; pre-launch dates
+		// fall back to VIX9D in the IV provider, so historical backtests beyond that point still work.
 		if (VixDrivenTickers.Contains(ticker))
 		{
 			if (!await FetchAndReportAsync(bars, "VIX", earliest, asOf, cancellation)) return 1;
+			if (!await FetchAndReportAsync(bars, "VIX1D", earliest, asOf, cancellation)) return 1;
 			if (!await FetchAndReportAsync(bars, "VIX9D", earliest, asOf, cancellation)) return 1;
 			if (!await FetchSmileAsync(earliest, asOf, cancellation)) return 1;
 		}

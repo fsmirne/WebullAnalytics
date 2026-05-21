@@ -732,8 +732,9 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			}
 		}
 		// VIX-driven tickers (SPX family) need a VIX bar history for ATM IV and a CBOE SMILE history
-		// for per-day smile scaling. Both ride along with the strategy ticker's history command
-		// (wa ai history SPXW/SPX/XSP/SPY pulls VIX, VIX9D, and SMILE).
+		// for per-day smile scaling. VIX1D (≤1 DTE) and VIX9D (≤9 DTE) anchor short-dated ATM IV at
+		// the appropriate term. All ride along with the strategy ticker's history command
+		// (wa ai history SPXW/SPX/XSP/SPY pulls VIX, VIX1D, VIX9D, and SMILE).
 		var vixDriven = new[] { "SPY", "SPX", "SPXW", "XSP" };
 		var smile = new Backtest.SmileIndexCache(offline: true);
 		if (config.Tickers.Any(t => vixDriven.Contains(t, StringComparer.OrdinalIgnoreCase)))
@@ -742,6 +743,21 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			{
 				Console.Error.WriteLine($"Error: missing VIX history in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
 				return 1;
+			}
+			if (!await bars.HasCoverageAsync("VIX9D", since, until, cancellation))
+			{
+				Console.Error.WriteLine($"Error: missing VIX9D history in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
+				return 1;
+			}
+			// VIX1D launched 2023-04-24. For windows that start before that date, partial coverage is
+			// expected — the IV provider falls back to VIX9D / VIX for missing dates. Warn loudly so
+			// the user knows their pre-launch backtest is using a longer-term anchor than ideal, but
+			// don't fail the run. Inside the launch window, treat missing data as a cache problem.
+			var vix1DLaunch = new DateTime(2023, 4, 24);
+			var vix1DWindowStart = since < vix1DLaunch ? vix1DLaunch : since;
+			if (vix1DWindowStart <= until && !await bars.HasCoverageAsync("VIX1D", vix1DWindowStart, until, cancellation))
+			{
+				Console.Error.WriteLine($"Warning: missing VIX1D history in [{vix1DWindowStart:yyyy-MM-dd} → {until:yyyy-MM-dd}]. 0DTE pricing will fall back to VIX9D. Run: wa ai history {settings.Ticker}");
 			}
 			if (!await smile.HasCoverageAsync(since, until, cancellation))
 			{
