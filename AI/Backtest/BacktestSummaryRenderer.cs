@@ -29,6 +29,7 @@ internal static class BacktestSummaryRenderer
 		table.AddColumn("Strategy");
 		table.AddColumn("Strikes / Exp");
 		table.AddColumn(new TableColumn("Qty").RightAligned());
+		table.AddColumn(new TableColumn("Price").RightAligned());
 		table.AddColumn(new TableColumn("Net/Ct").RightAligned());
 		table.AddColumn(new TableColumn("Total").RightAligned());
 		table.AddColumn(new TableColumn("Fees").RightAligned());
@@ -42,6 +43,9 @@ internal static class BacktestSummaryRenderer
 
 			// Net per-contract (signed): positive = credit received, negative = debit paid.
 			var perContract = f.Qty != 0 ? f.NetCashFlow / f.Qty : 0m;
+			// Per-share price = per-contract / 100 (option multiplier); matches the limit price on a broker ticket.
+			var perShare = perContract / 100m;
+			var perShareLabel = perShare >= 0m ? $"+${perShare:N2}" : $"-${-perShare:N2}";
 			var perCtLabel = perContract >= 0m ? $"+${perContract:N2}" : $"-${-perContract:N2}";
 			var totalLabel = f.NetCashFlow >= 0m ? $"+${f.NetCashFlow:N2}" : $"-${-f.NetCashFlow:N2}";
 			var cashColor = f.NetCashFlow >= 0m ? "green" : "red";
@@ -54,6 +58,7 @@ internal static class BacktestSummaryRenderer
 				Markup.Escape(f.StrategyKind),
 				Markup.Escape(FormatLegDetail(f.Legs)),
 				f.Qty.ToString(),
+				$"[{cashColor}]{perShareLabel}[/]",
 				$"[{cashColor}]{perCtLabel}[/]",
 				$"[{cashColor}]{totalLabel}[/]",
 				$"${f.Fees:N2}",
