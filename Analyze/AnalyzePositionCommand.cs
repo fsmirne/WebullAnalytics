@@ -596,8 +596,109 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			StructureKind.SingleLong => GenerateSingleLongScenarios(legs[0], settings, spot, asOf, quotes),
 			StructureKind.Vertical => GenerateVerticalScenarios(legs, settings, spot, asOf, quotes, technicalBias),
 			StructureKind.Calendar or StructureKind.Diagonal => GenerateSpreadScenarios(legs, settings, spot, asOf, kind, quotes),
+			StructureKind.IronButterfly or StructureKind.IronCondor => GenerateIronScenarios(legs, settings, spot, asOf, quotes),
 			_ => new List<Scenario>()
 		};
+
+	/// <summary>Scenario set for iron butterflies and iron condors. Same payoff structure (two
+	/// vertical spreads sandwiched together — one credit put spread below body, one credit call
+	/// spread above body) so the scenarios are shared:
+	///   • Hold to expiry at current spot — intrinsic payoff right now.
+	///   • Hold to expiry at the body strikes — max profit case (short legs expire worthless).
+	///   • Hold to expiry at the wings — max loss case (one spread fully assigned).
+	///   • Close all at mid — flatten now.
+	///   • Close one side (the threatened spread) — common defensive move when spot has moved
+	///     toward one wing; cuts the side that's bleeding while keeping the credit on the other.
+	/// </summary>
+	private static List<Scenario> GenerateIronScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	{
+		var list = new List<Scenario>();
+		var shortPut = legs.First(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "P");
+		var longPut = legs.First(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "P");
+		var shortCall = legs.First(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "C");
+		var longCall = legs.First(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "C");
+		var expiry = shortPut.Parsed.ExpiryDate;
+		var expiryDte = Math.Max(1, (expiry.Date - asOf.Date).Days);
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
+
+		// Helper: intrinsic value of the whole 4-leg position at a given expiration spot. Per-share,
+		// signed so a positive number is what we'd receive if we closed at that intrinsic.
+		decimal IntrinsicAtSpot(decimal s) =>
+			Intrinsic(s, longPut.Parsed.Strike, "P") - Intrinsic(s, shortPut.Parsed.Strike, "P")
+			+ Intrinsic(s, longCall.Parsed.Strike, "C") - Intrinsic(s, shortCall.Parsed.Strike, "C");
+
+		// 1. Hold to expiry at current spot.
+		var holdAtNow = IntrinsicAtSpot(spot);
+		list.Add(NewScenarioSpread("Hold to expiry (current spot)", legs, "—",
+			cashNow: 0m, valueAtTarget: holdAtNow, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
+			rationale: $"at {expiry:yyyy-MM-dd} with spot held at ${spot:F2}: intrinsic ${holdAtNow:F2}/share"));
+
+		// 2. Hold to expiry at the body strike(s) — max profit for the structure. For an iron condor
+		// the body is a range, so we use the put-side body (between the shorts is the max-profit zone).
+		var bodyTarget = shortPut.Parsed.Strike == shortCall.Parsed.Strike
+			? shortPut.Parsed.Strike
+			: (shortPut.Parsed.Strike + shortCall.Parsed.Strike) / 2m;
+		var holdAtBody = IntrinsicAtSpot(bodyTarget);
+		list.Add(NewScenarioSpread($"Hold to expiry (spot @ body ${bodyTarget:F2})", legs, "—",
+			cashNow: 0m, valueAtTarget: holdAtBody, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
+			rationale: $"max-profit case: at {expiry:yyyy-MM-dd} with spot @ ${bodyTarget:F2} (between/at short strikes): all shorts expire worthless, intrinsic ${holdAtBody:F2}/share"));
+
+		// 3. Hold to expiry at the lower wing — max loss on put side.
+		var holdAtLowerWing = IntrinsicAtSpot(longPut.Parsed.Strike);
+		list.Add(NewScenarioSpread($"Hold to expiry (spot @ lower wing ${longPut.Parsed.Strike:F2})", legs, "—",
+			cashNow: 0m, valueAtTarget: holdAtLowerWing, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
+			rationale: $"put-side wipeout: at {expiry:yyyy-MM-dd} with spot @ long-put strike ${longPut.Parsed.Strike:F2}: intrinsic ${holdAtLowerWing:F2}/share"));
+
+		// 4. Hold to expiry at the upper wing — max loss on call side.
+		var holdAtUpperWing = IntrinsicAtSpot(longCall.Parsed.Strike);
+		list.Add(NewScenarioSpread($"Hold to expiry (spot @ upper wing ${longCall.Parsed.Strike:F2})", legs, "—",
+			cashNow: 0m, valueAtTarget: holdAtUpperWing, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
+			rationale: $"call-side wipeout: at {expiry:yyyy-MM-dd} with spot @ long-call strike ${longCall.Parsed.Strike:F2}: intrinsic ${holdAtUpperWing:F2}/share"));
+
+		// 5. Close everything at mid right now.
+		var ivShortPut = ResolveIV(shortPut.Symbol, settings, quotes);
+		var ivLongPut = ResolveIV(longPut.Symbol, settings, quotes);
+		var ivShortCall = ResolveIV(shortCall.Symbol, settings, quotes);
+		var ivLongCall = ResolveIV(longCall.Symbol, settings, quotes);
+		var shortPutMid = LiveOrBsMid(quotesForPricing, shortPut.Symbol, spot, shortPut.Parsed.Strike, expiryDte, ivShortPut, "P");
+		var longPutMid = LiveOrBsMid(quotesForPricing, longPut.Symbol, spot, longPut.Parsed.Strike, expiryDte, ivLongPut, "P");
+		var shortCallMid = LiveOrBsMid(quotesForPricing, shortCall.Symbol, spot, shortCall.Parsed.Strike, expiryDte, ivShortCall, "C");
+		var longCallMid = LiveOrBsMid(quotesForPricing, longCall.Symbol, spot, longCall.Parsed.Strike, expiryDte, ivLongCall, "C");
+		// Buy back shorts, sell longs.
+		var closeAllCash = -shortPutMid + longPutMid - shortCallMid + longCallMid;
+		list.Add(NewScenarioSpread("Close all", legs,
+			$"BUY {shortPut.Symbol} x{shortPut.Qty} @{FmtPrice(shortPutMid)}, SELL {longPut.Symbol} x{longPut.Qty} @{FmtPrice(longPutMid)}, BUY {shortCall.Symbol} x{shortCall.Qty} @{FmtPrice(shortCallMid)}, SELL {longCall.Symbol} x{longCall.Qty} @{FmtPrice(longCallMid)}",
+			cashNow: closeAllCash, valueAtTarget: 0m, marginDeltaPerContract: 0m, daysToTarget: 1,
+			rationale: $"flatten at mid: net cash ${closeAllCash:+0.00;-0.00}/share to close all four legs"));
+
+		// 6. Close the threatened side — whichever spread is closer to being breached. The "threatened
+		// side" is the credit spread whose short strike is nearest spot (or already breached).
+		var distanceToShortPut = spot - shortPut.Parsed.Strike;   // positive when spot > shortPut (safe)
+		var distanceToShortCall = shortCall.Parsed.Strike - spot; // positive when spot < shortCall (safe)
+		bool putSideThreatened = distanceToShortPut < distanceToShortCall;
+		if (putSideThreatened)
+		{
+			// Close the put spread: buy back short put, sell back long put.
+			var sideCash = -shortPutMid + longPutMid;
+			var residualAtExpiry = Intrinsic(spot, longCall.Parsed.Strike, "C") - Intrinsic(spot, shortCall.Parsed.Strike, "C");
+			list.Add(NewScenarioSpread("Close put side (defensive)", legs,
+				$"BUY {shortPut.Symbol} x{shortPut.Qty} @{FmtPrice(shortPutMid)}, SELL {longPut.Symbol} x{longPut.Qty} @{FmtPrice(longPutMid)}",
+				cashNow: sideCash, valueAtTarget: residualAtExpiry, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
+				rationale: $"put-side closer to short strike (${distanceToShortPut:F2} below) — cut the put spread for ${sideCash:+0.00;-0.00}/share; remaining call spread settles to ${residualAtExpiry:F2}/share at current spot"));
+		}
+		else
+		{
+			// Close the call spread: buy back short call, sell back long call.
+			var sideCash = -shortCallMid + longCallMid;
+			var residualAtExpiry = Intrinsic(spot, longPut.Parsed.Strike, "P") - Intrinsic(spot, shortPut.Parsed.Strike, "P");
+			list.Add(NewScenarioSpread("Close call side (defensive)", legs,
+				$"BUY {shortCall.Symbol} x{shortCall.Qty} @{FmtPrice(shortCallMid)}, SELL {longCall.Symbol} x{longCall.Qty} @{FmtPrice(longCallMid)}",
+				cashNow: sideCash, valueAtTarget: residualAtExpiry, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
+				rationale: $"call-side closer to short strike (${distanceToShortCall:F2} above) — cut the call spread for ${sideCash:+0.00;-0.00}/share; remaining put spread settles to ${residualAtExpiry:F2}/share at current spot"));
+		}
+
+		return OrderScenariosForDisplay(list, settings.Cash);
+	}
 
 	private static List<Scenario> GenerateSingleLongScenarios(PositionSnapshot longLeg, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
