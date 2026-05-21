@@ -103,22 +103,30 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			if (bar != null) underlyings[root] = bar.Open;
 		}
 
-		// One ATM IV + one smile-scale lookup per (root, asOf). Both are pure functions of (atm, strike,
-		// spot, scale, ticker) once resolved, so the per-strike work fans out below without re-touching
-		// the VIX/HV/SMILE caches.
-		var atmByRoot = new Dictionary<string, decimal?>(StringComparer.OrdinalIgnoreCase);
+		// One smile-scale lookup per (root, asOf), and one ATM IV lookup per (root, dte). ATM IV is now
+		// DTE-aware (VIX1D / VIX9D / VIX per term), so a chain that mixes 0DTE and 7DTE legs resolves
+		// to different ATM anchors. Pre-collect unique (root, dte) pairs so the per-strike fan-out
+		// below doesn't re-hit the VIX/HV caches.
 		var smileScaleByRoot = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		foreach (var root in roots)
 		{
-			atmByRoot[root] = await _iv.GetAtmIVAsync(root, asOf, cancellation);
 			smileScaleByRoot[root] = await _iv.GetSmileScaleAsync(root, asOf, cancellation);
+		}
+		var atmByRootDte = new Dictionary<(string Root, int Dte), decimal?>();
+		foreach (var (_, parsed) in parsedSymbols)
+		{
+			var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
+			var key = (parsed.Root, dte);
+			if (atmByRootDte.ContainsKey(key)) continue;
+			atmByRootDte[key] = await _iv.GetAtmIVAsync(parsed.Root, asOf, dte, cancellation);
 		}
 
 		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		foreach (var (sym, parsed) in parsedSymbols)
 		{
 			if (!underlyings.TryGetValue(parsed.Root, out var spot)) continue;
-			atmByRoot.TryGetValue(parsed.Root, out var atm);
+			var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
+			atmByRootDte.TryGetValue((parsed.Root, dte), out var atm);
 			smileScaleByRoot.TryGetValue(parsed.Root, out var smileScale);
 
 			decimal price;
@@ -126,7 +134,6 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			if (atm.HasValue)
 			{
 				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
-				var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
 				// 0DTE: at the daily step we're conceptually at the open of the trading day, not at 15:45 —
 				// price as if a full session of theta remains. Settlement (Expire) uses intrinsic so the
 				// time component is collected, not double-counted.
@@ -159,17 +166,30 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		return new QuoteSnapshot(options, underlyings);
 	}
 
-	/// <summary>Convenience for the intraday-trigger pass: looks up ATM IV + smile scale for the
-	/// ticker once, then re-prices every leg at the supplied <paramref name="spot"/> using
-	/// <see cref="PriceAtSpot"/>. Returns an empty map if ATM IV is unavailable for the date.</summary>
+	/// <summary>Convenience for the intraday-trigger pass: pre-resolves the smile scale + a per-DTE
+	/// map of ATM IV for the legs being re-priced, then calls <see cref="PriceAtSpot"/>. Returns an
+	/// empty map if no leg's ATM IV is available for the date.</summary>
 	internal async Task<IReadOnlyDictionary<string, OptionContractQuote>> GetIntradayQuotesAsync(
 		DateTime asOf, string ticker, decimal spot, IEnumerable<string> optionSymbols,
 		double zeroDteTimeYears, CancellationToken cancellation)
 	{
-		var atm = await _iv.GetAtmIVAsync(ticker, asOf, cancellation);
-		if (!atm.HasValue) return new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		var parsed = new List<(string Symbol, OptionParsed Parsed)>();
+		foreach (var sym in optionSymbols)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p != null) parsed.Add((sym, p));
+		}
+		var atmByDte = new Dictionary<int, decimal>();
+		foreach (var (_, p) in parsed)
+		{
+			var dte = (p.ExpiryDate.Date - asOf.Date).Days;
+			if (atmByDte.ContainsKey(dte)) continue;
+			var atm = await _iv.GetAtmIVAsync(ticker, asOf, dte, cancellation);
+			if (atm.HasValue) atmByDte[dte] = atm.Value;
+		}
+		if (atmByDte.Count == 0) return new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		var smileScale = await _iv.GetSmileScaleAsync(ticker, asOf, cancellation);
-		return PriceAtSpot(asOf, optionSymbols, spot, atm.Value, smileScale, zeroDteTimeYears);
+		return PriceAtSpot(asOf, optionSymbols, spot, atmByDte, smileScale, zeroDteTimeYears);
 	}
 
 	/// <summary>Re-prices a set of option legs at an explicit spot for a single ticker, with an
@@ -177,19 +197,24 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	/// <see cref="BacktestRunner"/> to compute position MTM at the day's bar.High and bar.Low
 	/// without disturbing the cache or refetching ATM IV (passed in by the caller). Non-0DTE legs
 	/// use the standard <c>dte/365</c> TTE — a few hours of intraday adjustment is negligible at
-	/// 7+ DTE.</summary>
+	/// 7+ DTE. <paramref name="atmByDte"/> maps each leg's DTE to the ATM IV at that term; missing
+	/// keys fall back to the longest-DTE entry (defensive — caller should pre-populate).</summary>
 	internal IReadOnlyDictionary<string, OptionContractQuote> PriceAtSpot(
 		DateTime asOf, IEnumerable<string> optionSymbols, decimal spot,
-		decimal atmIv, decimal smileScale, double zeroDteTimeYears)
+		IReadOnlyDictionary<int, decimal> atmByDte, decimal smileScale, double zeroDteTimeYears)
 	{
+		if (atmByDte.Count == 0) return new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		var fallbackAtm = atmByDte.OrderByDescending(kv => kv.Key).First().Value;
+
 		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		foreach (var sym in optionSymbols)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(sym);
 			if (parsed == null) continue;
 
-			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale) ?? atmIv;
 			var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
+			var atmIv = atmByDte.TryGetValue(dte, out var hit) ? hit : fallbackAtm;
+			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale) ?? atmIv;
 			var timeYears = dte <= 0 ? zeroDteTimeYears : dte / 365.0;
 			var price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv, parsed.CallPut);
 

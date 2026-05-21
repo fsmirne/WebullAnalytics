@@ -12,7 +12,7 @@ public static class YahooOptionsClient
 	// Webull root symbols that differ from Yahoo Finance ticker symbols. Used by the historical
 	// daily-close fetch; Yahoo is no longer wired up as an option-quote source (it lacks Greeks,
 	// HV, and iv5 — all of which Webull provides — and is on a 15-minute delay).
-	private static readonly Dictionary<string, string> YahooTickerMap = new(StringComparer.OrdinalIgnoreCase) { { "SPXW", "^SPX" }, { "SPX", "^SPX" }, { "NDX", "^NDX" }, { "RUT", "^RUT" }, { "DJX", "^DJI" }, { "VIX", "^VIX" }, { "VIX9D", "^VIX9D" }, { "VIX3M", "^VIX3M" } };
+	private static readonly Dictionary<string, string> YahooTickerMap = new(StringComparer.OrdinalIgnoreCase) { { "SPXW", "^SPX" }, { "SPX", "^SPX" }, { "NDX", "^NDX" }, { "RUT", "^RUT" }, { "DJX", "^DJI" }, { "VIX", "^VIX" }, { "VIX1D", "^VIX1D" }, { "VIX9D", "^VIX9D" }, { "VIX3M", "^VIX3M" } };
 
 	private static string ToYahooTicker(string root) => YahooTickerMap.TryGetValue(root, out var mapped) ? mapped : root;
 
