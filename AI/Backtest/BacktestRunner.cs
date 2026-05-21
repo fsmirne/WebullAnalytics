@@ -227,71 +227,184 @@ internal sealed class BacktestRunner
 		return fills;
 	}
 
-	/// <summary>Intraday SL/TP simulation. For each ticker with open positions, re-prices each leg
-	/// at bar.Low and bar.High using mid-session TTE for 0DTE (3.25h) and the standard <c>dte/365</c>
-	/// for longer positions. Runs the existing StopLossRule and TakeProfitRule (only — roll rules
-	/// are excluded as they're EOD-style) against both extremes. On whipsaw days when SL would have
-	/// fired at one extreme AND TP at the other, the conservative convention is to honour the SL
-	/// first (the rule engine's priority order does this naturally because StopLossRule has Priority=1
-	/// and TakeProfitRule Priority=2). Without minute-bar history we can't know which extreme came
-	/// first; assuming SL wins is the bear-case approximation.</summary>
+	/// <summary>Intraday SL/TP simulation. Per-position: re-price each leg at bar.Low and bar.High,
+	/// determine whether the position's mark crosses the SL or TP threshold *anywhere* in that range,
+	/// and if so close at the *threshold mark* itself (found via bisection over spot) rather than at
+	/// the day's extreme.
+	///
+	/// This is the key behavioural change from the prior implementation, which closed at the
+	/// bar.High / bar.Low BS mark whenever the rule fired. For a 0DTE put credit spread that ended
+	/// the day deep OTM, bar.High would price the spread at ~$0.003/share — 99% of max profit
+	/// captured — far past the 50% threshold the user actually wanted to exit at. Real intraday
+	/// execution closes near 50%, not at the day's extreme. Bisecting for the threshold spot makes
+	/// the fill price honest: if you set tp = 0.5, you close at $0.30/share (50% captured), not
+	/// $0.003/share (99% captured).
+	///
+	/// Whipsaw convention: SL fires before TP. If both thresholds are crossed in [Low, High] the
+	/// adverse move is assumed to have come first (bear-case path).</summary>
 	private async Task RunIntradayTriggersAsync(DateTime step, RuleEvaluator evaluator, CancellationToken cancellation)
 	{
 		if (_book.OpenPositions.Count == 0) return;
+		var realizedExpectancy = _config.Opener.RealizedExpectancy;
+		if (!realizedExpectancy.Enabled) return;
 
-		// Take a snapshot — the book gets mutated as we close inside the loop.
-		var byTicker = _book.OpenPositions.Values
-			.GroupBy(p => p.Ticker, StringComparer.OrdinalIgnoreCase)
-			.ToList();
 		var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
+		// Snapshot positions — the book mutates as we close.
+		var positions = _book.OpenPositions.Values.ToList();
 
-		foreach (var grp in byTicker)
+		foreach (var pos in positions)
 		{
-			var ticker = grp.Key;
-			var bar = await _bars.GetBarAsync(ticker, step.Date, cancellation);
+			cancellation.ThrowIfCancellationRequested();
+			if (!_book.OpenPositions.ContainsKey(pos.Key)) continue;
+			var bar = await _bars.GetBarAsync(pos.Ticker, step.Date, cancellation);
 			if (bar == null) continue;
-
-			// Two extremes per ticker. Evaluate Low first (StopLoss bear case), then High (TakeProfit
-			// bull case) — positions closed at Low don't get a second look at High.
-			await EvaluateIntradayExtremeAsync(step, ticker, bar.Low, evaluator, cash, accountValue, cancellation);
-			await EvaluateIntradayExtremeAsync(step, ticker, bar.High, evaluator, cash, accountValue, cancellation);
+			await TryIntradayTriggerAsync(step, pos, bar.Low, bar.High, cash, accountValue, realizedExpectancy, cancellation);
 		}
 	}
 
-	private async Task EvaluateIntradayExtremeAsync(
-		DateTime step, string ticker, decimal spot, RuleEvaluator evaluator,
-		decimal cash, decimal accountValue, CancellationToken cancellation)
+	private async Task TryIntradayTriggerAsync(
+		DateTime step, OpenPosition pos, decimal barLow, decimal barHigh,
+		decimal cash, decimal accountValue,
+		OpenerRealizedExpectancyConfig realizedExpectancy, CancellationToken cancellation)
 	{
-		var stillOpen = _book.OpenPositions.Values
-			.Where(p => string.Equals(p.Ticker, ticker, StringComparison.OrdinalIgnoreCase))
-			.ToDictionary(p => p.Key, p => p, StringComparer.OrdinalIgnoreCase);
-		if (stillOpen.Count == 0) return;
-
-		var symbols = stillOpen.Values
-			.SelectMany(p => p.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol))
-			.Distinct(StringComparer.OrdinalIgnoreCase)
+		var symbols = pos.Legs
+			.Where(l => l.CallPut != null)
+			.Select(l => l.Symbol)
 			.ToHashSet(StringComparer.OrdinalIgnoreCase);
+		if (symbols.Count == 0) return;
 
-		var quotes = await _quotes.GetIntradayQuotesAsync(
-			step, ticker, spot, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
-		if (quotes.Count == 0) return;
+		// Mark at the two extremes — these bracket the day's range of possible MTM values.
+		var quotesLow = await _quotes.GetIntradayQuotesAsync(
+			step, pos.Ticker, barLow, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+		var quotesHigh = await _quotes.GetIntradayQuotesAsync(
+			step, pos.Ticker, barHigh, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+		var markLow = ComputeMarkFromQuotes(pos.Legs, quotesLow);
+		var markHigh = ComputeMarkFromQuotes(pos.Legs, quotesHigh);
+		if (!markLow.HasValue || !markHigh.HasValue) return;
 
-		var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot };
-		var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
-		var ctx = new EvaluationContext(step, stillOpen, underlyings, quotes, cash, accountValue, emptySignals);
+		// SL threshold (mark at or below this = stop-loss triggered).
+		// realizedLoss = InitialNetDebit - mark; SL fires when realizedLoss ≥ slPct × maxLoss,
+		// i.e. when mark ≤ InitialNetDebit - slPct × maxLoss.
+		decimal? slTarget = null;
+		if (_config.Rules.StopLoss.Enabled && pos.MaxLossPerShare.HasValue && pos.MaxLossPerShare.Value > 0m)
+			slTarget = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxLoss * pos.MaxLossPerShare.Value;
 
-		var results = evaluator.Evaluate(ctx);
-		foreach (var r in results)
+		// TP threshold (mark at or above this = take-profit triggered).
+		// pctCaptured = (mark - InitialNetDebit) / maxProjected; TP fires when pctCaptured ≥ tpPct,
+		// i.e. when mark ≥ InitialNetDebit + tpPct × maxProjected. maxProjected uses the projector
+		// against the bar.High quotes — for 0DTE the projector iterates over future spots so current
+		// spot doesn't materially affect the result.
+		decimal? tpTarget = null;
+		if (_config.Rules.TakeProfit.Enabled)
 		{
-			var p = r.Proposal;
-			if (p.Kind != ProposalKind.Close) continue;
-			// Only SL/TP can legitimately fire intraday. Roll rules read multi-day state (DTE buckets,
-			// short-strike proximity over a window) and belong in the EOD management pass.
-			if (p.Rule != "StopLossRule" && p.Rule != "TakeProfitRule") continue;
-			if (!_book.OpenPositions.TryGetValue(p.PositionKey, out var pos)) continue;
-			var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
-			if (legFills != null) _book.Close(step, p.PositionKey, legFills, p.Rule);
+			var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
+			var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = barHigh };
+			var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
+			var projectorCtx = new EvaluationContext(step, stillOpen, underlyings, quotesHigh, cash, accountValue, emptySignals);
+			var maxProjected = ProfitProjector.MaxForCurrentColumn(pos, projectorCtx);
+			if (maxProjected.HasValue && maxProjected.Value > 0m)
+				tpTarget = pos.AdjustedNetDebit + realizedExpectancy.ProfitTargetPctOfMaxProfit * maxProjected.Value;
 		}
+
+		// Does either threshold sit in [markLow, markHigh]? The mark is monotonic in spot for every
+		// structure currently enumerated (verticals, naked longs, iron condors). If the threshold
+		// lies between the two extreme marks, there's a spot in [barLow, barHigh] where mark equals
+		// the threshold.
+		decimal markMin = Math.Min(markLow.Value, markHigh.Value);
+		decimal markMax = Math.Max(markLow.Value, markHigh.Value);
+		bool slFires = slTarget.HasValue && slTarget.Value >= markMin && slTarget.Value <= markMax;
+		bool tpFires = tpTarget.HasValue && tpTarget.Value >= markMin && tpTarget.Value <= markMax;
+
+		// Also catch the case where the position was ALREADY past the threshold at bar.Open. We don't
+		// have bar.Open here, but if BOTH extreme marks are past the threshold the day opened past it.
+		// Trigger and close at the threshold price (conservative — gives back any deeper capture).
+		if (slTarget.HasValue && markLow.Value <= slTarget.Value && markHigh.Value <= slTarget.Value) slFires = true;
+		if (tpTarget.HasValue && markLow.Value >= tpTarget.Value && markHigh.Value >= tpTarget.Value) tpFires = true;
+
+		if (!slFires && !tpFires) return;
+
+		// Conservative: SL fires before TP on whipsaw days.
+		string ruleName;
+		decimal targetMark;
+		if (slFires)
+		{
+			ruleName = "StopLossRule";
+			targetMark = slTarget!.Value;
+		}
+		else
+		{
+			ruleName = "TakeProfitRule";
+			targetMark = tpTarget!.Value;
+		}
+
+		// Find the spot in [barLow, barHigh] where the position mark equals targetMark.
+		var thresholdSpot = await FindSpotForMarkAsync(
+			step, pos, symbols, barLow, markLow.Value, barHigh, markHigh.Value, targetMark, cancellation);
+		var quotesAtThreshold = await _quotes.GetIntradayQuotesAsync(
+			step, pos.Ticker, thresholdSpot, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+
+		// Reverse each leg's side to close. Use quote mids — same convention as the rule engine.
+		var legFills = new List<BacktestLegFill>(pos.Legs.Count);
+		foreach (var leg in pos.Legs)
+		{
+			if (leg.CallPut == null) continue;
+			if (!quotesAtThreshold.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) return;
+			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+			var closeSide = leg.Side == Side.Buy ? Side.Sell : Side.Buy;
+			legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, mid));
+		}
+
+		_book.Close(step, pos.Key, legFills, ruleName);
+	}
+
+	/// <summary>Bisects spot in <c>[spotLow, spotHigh]</c> to find where the position's mark equals
+	/// <paramref name="targetMark"/>. Mark monotonicity in spot is assumed (true for every structure
+	/// the opener currently enumerates). Caller is responsible for verifying that <paramref name="targetMark"/>
+	/// lies between <paramref name="markAtLow"/> and <paramref name="markAtHigh"/> — otherwise this
+	/// returns the boundary spot closest to the target. 16 iterations gives <c>(spotHigh - spotLow) / 65536</c>
+	/// spot precision — fractions of a penny for any realistic intraday range.</summary>
+	private async Task<decimal> FindSpotForMarkAsync(
+		DateTime step, OpenPosition pos, HashSet<string> symbols,
+		decimal spotLow, decimal markAtLow, decimal spotHigh, decimal markAtHigh,
+		decimal targetMark, CancellationToken cancellation)
+	{
+		if (spotHigh - spotLow < 0.01m) return (spotLow + spotHigh) / 2m;
+		bool markIncreases = markAtHigh > markAtLow;
+		decimal lo = spotLow, hi = spotHigh;
+
+		for (int i = 0; i < 16 && hi - lo > 0.01m; i++)
+		{
+			cancellation.ThrowIfCancellationRequested();
+			var mid = (lo + hi) / 2m;
+			var quotes = await _quotes.GetIntradayQuotesAsync(
+				step, pos.Ticker, mid, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+			var mark = ComputeMarkFromQuotes(pos.Legs, quotes);
+			if (!mark.HasValue) break;
+
+			if (markIncreases ? mark.Value < targetMark : mark.Value > targetMark)
+				lo = mid;
+			else
+				hi = mid;
+		}
+		return (lo + hi) / 2m;
+	}
+
+	/// <summary>Per-share mark = sum of leg mids signed by side. Returns null if any leg is missing
+	/// a usable bid/ask. Matches <see cref="StopLossRule.ComputeMarkPerShare"/> and
+	/// <see cref="TakeProfitRule.ComputeMarkPerContract"/> exactly (per-share, not per-contract —
+	/// the two rule names are misleadingly different but the units are the same: per-share dollars).</summary>
+	private static decimal? ComputeMarkFromQuotes(IReadOnlyList<PositionLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		decimal total = 0m;
+		foreach (var leg in legs)
+		{
+			if (leg.CallPut == null) continue;
+			if (!quotes.TryGetValue(leg.Symbol, out var q)) return null;
+			if (!q.Bid.HasValue || !q.Ask.HasValue) return null;
+			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+			total += leg.Side == Side.Buy ? mid : -mid;
+		}
+		return total;
 	}
 
 	private async Task SettleExpirationsAsync(DateTime step, CancellationToken cancellation)
