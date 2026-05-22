@@ -8,9 +8,11 @@ using WebullAnalytics.Analyze;
 namespace WebullAnalytics.AI.Output;
 
 /// <summary>
-/// Writes open proposals to JSONL and console. Keeps per-fingerprint score history for console dedup.
-/// JSONL always gets the entry; console suppresses repeats unless the bias-adjusted score has moved
-/// by ≥ 10% since last emission.
+/// Writes open proposals to JSONL and console. Every Emit writes both — the score-delta-based
+/// console suppression that used to live here hid the top-ranked panel whenever its fingerprint
+/// re-appeared with a similar score, which left the auto-executor's "opener auto-execute"
+/// line referring to a proposal the user couldn't see on the same tick. Watch-mode dedup is
+/// now exclusively the auto-executor's job (and only for live submits).
 /// </summary>
 internal sealed class OpenProposalSink : IDisposable
 {
@@ -20,7 +22,6 @@ internal sealed class OpenProposalSink : IDisposable
 	private readonly string _suggestPricing;
 	private readonly bool _ascii;
 	private readonly string _cmdPrefix;
-	private readonly Dictionary<string, decimal> _lastScoreByFingerprint = new();
 
 	public OpenProposalSink(LogConfig log, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
 	{
@@ -34,21 +35,10 @@ internal sealed class OpenProposalSink : IDisposable
 		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
 	}
 
-	public bool IsRepeat(OpenProposal p)
-	{
-		if (!_lastScoreByFingerprint.TryGetValue(p.Fingerprint, out var last)) return false;
-		var current = p.FinalScore ?? p.BiasAdjustedScore;
-		var abs = Math.Abs(current - last);
-		var threshold = Math.Abs(last) * 0.10m;
-		return abs < threshold;
-	}
-
 	public void Emit(OpenProposal p, int? rank = null)
 	{
-		var repeat = IsRepeat(p);
 		WriteJsonl(p);
-		if (_log.ConsoleVerbosity != "error" && (!repeat || _log.ConsoleVerbosity == "debug")) WriteConsole(p, rank);
-		_lastScoreByFingerprint[p.Fingerprint] = p.FinalScore ?? p.BiasAdjustedScore;
+		if (_log.ConsoleVerbosity != "error") WriteConsole(p, rank);
 	}
 
 	public void Flush() => _file.Flush();
