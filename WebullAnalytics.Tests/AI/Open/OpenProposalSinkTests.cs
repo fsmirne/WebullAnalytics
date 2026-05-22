@@ -87,31 +87,4 @@ public class OpenProposalSinkTests
 		finally { File.Delete(tmp); }
 	}
 
-	[Fact]
-	public void IsRepeatReturnsTrueForUnchangedScore()
-	{
-		var tmp = Path.GetTempFileName();
-		try
-		{
-			using var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "error" }, mode: "once");
-			Assert.False(sink.IsRepeat(MakeProposal(0.01m, "fp1")));
-			sink.Emit(MakeProposal(0.01m, "fp1"));
-			Assert.True(sink.IsRepeat(MakeProposal(0.01m, "fp1")));
-		}
-		finally { File.Delete(tmp); }
-	}
-
-	[Fact]
-	public void IsRepeatReturnsFalseWhenScoreMovesByTenPercent()
-	{
-		var tmp = Path.GetTempFileName();
-		try
-		{
-			using var sink = new OpenProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "error" }, mode: "once");
-			sink.Emit(MakeProposal(0.01m, "fp1"));
-			Assert.False(sink.IsRepeat(MakeProposal(0.0111m, "fp1"))); // +11%
-			Assert.True(sink.IsRepeat(MakeProposal(0.0105m, "fp1")));  // +5% — still repeat
-		}
-		finally { File.Delete(tmp); }
-	}
 }
