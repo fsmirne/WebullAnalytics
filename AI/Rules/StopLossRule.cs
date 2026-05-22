@@ -44,7 +44,12 @@ internal sealed class StopLossRule : IManagementRule
 		var maxLossPerShare = position.MaxLossPerShare
 			?? PositionRiskEstimator.MaxLossPerShare(position);
 
-		if (maxLossPerShare.HasValue && maxLossPerShare.Value > 0m && _realizedExpectancy.Enabled)
+		// slPct ≥ 1.0 disables the realized-loss trigger: the threshold equals the position's
+		// theoretical max loss, which mirrors the scorer's terminal-PnL clamp at -1.0×maxLoss
+		// (no effective stop). Closing at the max-loss floor produces the same economic outcome as
+		// letting the position expire, while removing the optionality of intraday recovery.
+		if (maxLossPerShare.HasValue && maxLossPerShare.Value > 0m && _realizedExpectancy.Enabled
+			&& _realizedExpectancy.StopLossPctOfMaxLoss < 1m)
 		{
 			var threshold = maxLossPerShare.Value * _realizedExpectancy.StopLossPctOfMaxLoss;
 			if (realizedLoss >= threshold)

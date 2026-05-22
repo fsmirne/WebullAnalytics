@@ -285,8 +285,16 @@ internal sealed class BacktestRunner
 		// SL threshold (mark at or below this = stop-loss triggered).
 		// realizedLoss = InitialNetDebit - mark; SL fires when realizedLoss ≥ slPct × maxLoss,
 		// i.e. when mark ≤ InitialNetDebit - slPct × maxLoss.
+		//
+		// slPct ≥ 1.0 disables the stop: the threshold would equal (or fall below) the position's
+		// theoretical max-loss mark, which mirrors the scorer's terminal-PnL clamp at -1.0×maxLoss
+		// (no effective stop). For debit structures this matters concretely — slTarget would equal 0
+		// and the BS-priced mark of a deep-OTM 0DTE leg can round to exactly 0, firing SL the same
+		// morning the position opens and foreclosing intraday recovery. Letting it run hits the same
+		// economic outcome via expiration if the day actually ends at the floor.
 		decimal? slTarget = null;
-		if (_config.Rules.StopLoss.Enabled && pos.MaxLossPerShare.HasValue && pos.MaxLossPerShare.Value > 0m)
+		if (_config.Rules.StopLoss.Enabled && pos.MaxLossPerShare.HasValue && pos.MaxLossPerShare.Value > 0m
+			&& realizedExpectancy.StopLossPctOfMaxLoss < 1m)
 			slTarget = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxLoss * pos.MaxLossPerShare.Value;
 
 		// TP threshold (mark at or above this = take-profit triggered).
