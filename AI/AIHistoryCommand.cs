@@ -7,6 +7,7 @@ using System.Text.Json;
 using WebullAnalytics.AI.Backtest;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
+using WebullAnalytics.Sentiment;
 using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
@@ -108,6 +109,12 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// the whole command, since the daily caches (the main thing backtests need) are already on disk.
 		await BackfillIntradayAsync(ticker, earliest, asOf, cancellation);
 
+		// CNN Fear & Greed sentiment cache fill — ticker-agnostic daily series. Without this, the cache
+		// only grows when something else calls `FearGreedClient.FetchAsync` AFTER 5pm ET (settlement
+		// cutoff), and `wa ai watch` always exits before 5pm. So if the user doesn't run an `analyze`
+		// command in the evening, the cache stalls.
+		await RefreshSentimentCacheAsync(earliest, asOf, cancellation);
+
 		AnsiConsole.MarkupLine("[dim]Done. Run `wa ai backtest " + Markup.Escape(ticker) + "` to use this data.[/]");
 		return 0;
 	}
@@ -141,6 +148,60 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			? $"  SMILE: [green]ok[/] (covers {earliest:yyyy-MM-dd} → {asOf:yyyy-MM-dd})"
 			: $"  SMILE: [yellow]partial[/] (CBOE history shorter than requested)");
 		return true;
+	}
+
+	/// <summary>Fills <c>data/sentiment-cache/&lt;date&gt;.json</c> for every trading day in
+	/// [earliest, asOf-1] whose cache file is missing. Uses <see cref="FearGreedClient.FetchAsync"/>
+	/// which handles the "settled" check internally (CNN settles a date's score at 17:00 ET; pre-settlement
+	/// fetches don't write to disk). Throttled at 400ms per call to be polite to CNN's public endpoint.
+	/// Best-effort — failures don't fail the command, since the sentiment factor is opt-in scoring.</summary>
+	private static async Task RefreshSentimentCacheAsync(DateTime earliest, DateTime asOf, CancellationToken cancellation)
+	{
+		var earliestNy = TimeZoneInfo.ConvertTime(earliest, NyTz).Date;
+		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
+		var cacheDir = Program.ResolvePath("data/sentiment-cache");
+
+		var needed = new List<DateTime>();
+		for (var d = earliestNy; d <= todayNy; d = d.AddDays(1))
+		{
+			if (!MarketCalendar.IsOpen(d)) continue;
+			var path = Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json");
+			if (File.Exists(path)) continue;
+			needed.Add(d);
+		}
+
+		if (needed.Count == 0)
+		{
+			AnsiConsole.MarkupLine($"  sentiment: [green]ok[/] (cache complete through {todayNy:yyyy-MM-dd})");
+			return;
+		}
+
+		AnsiConsole.MarkupLine($"  sentiment: pulling {needed.Count} missing day(s) from CNN F&G");
+		var written = 0;
+		var skipped = 0;
+		var index = 0;
+		foreach (var d in needed)
+		{
+			cancellation.ThrowIfCancellationRequested();
+			if (index > 0) await Task.Delay(TimeSpan.FromMilliseconds(400), cancellation);
+			index++;
+
+			var snapshot = await FearGreedClient.FetchAsync(d, cancellation);
+			if (snapshot == null) { skipped++; continue; }
+			// FearGreedClient writes the cache file only when the date is "settled" (past 17:00 ET).
+			// Today before settlement returns a snapshot but doesn't persist — that's expected; tomorrow's
+			// run will pick it up.
+			var path = Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json");
+			if (File.Exists(path)) written++; else skipped++;
+
+			if (index % 50 == 0)
+				AnsiConsole.MarkupLine($"    progress: {index}/{needed.Count}");
+		}
+
+		if (skipped > 0)
+			AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/], [yellow]skipped {skipped}[/] (not yet settled or CNN unreachable)");
+		else
+			AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/] day(s)");
 	}
 
 	/// <summary>Fills <c>data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv</c> for every missing trading day in
