@@ -63,6 +63,10 @@ internal sealed class SimulatedBook
 	private readonly decimal _feePerContract;
 	private readonly OpenerRealizedExpectancyConfig _slippageConfig;
 
+	/// <summary>Per-leg-contract commission. Exposed so research paths (oracle EOD P&L estimator)
+	/// can include the same fee model the simulator uses on real Open fills.</summary>
+	public decimal FeePerContract => _feePerContract;
+
 	public SimulatedBook(decimal startingCash, decimal feePerContract, OpenerRealizedExpectancyConfig slippageConfig)
 	{
 		Cash = startingCash;

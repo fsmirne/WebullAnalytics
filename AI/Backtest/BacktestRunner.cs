@@ -2,6 +2,7 @@ using Spectre.Console;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Api;
 
 namespace WebullAnalytics.AI.Backtest;
 
@@ -18,6 +19,8 @@ namespace WebullAnalytics.AI.Backtest;
 /// </summary>
 internal sealed class BacktestRunner
 {
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
 	private readonly AIConfig _config;
 	private readonly SimulatedBook _book;
 	private readonly BacktestPositionSource _positions;
@@ -25,6 +28,8 @@ internal sealed class BacktestRunner
 	private readonly HistoricalBarCache _bars;
 	private readonly HistoricalPriceCache _closeCache;
 	private readonly int _topNPerStep;
+	private readonly IntradayBarCache _intradayBars;
+	private readonly bool _oracle;
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
 	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET. Expirations
@@ -34,7 +39,7 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false)
 	{
 		_config = config;
 		_book = book;
@@ -43,7 +48,15 @@ internal sealed class BacktestRunner
 		_bars = bars;
 		_closeCache = closeCache;
 		_topNPerStep = topNPerStep;
+		_oracle = oracle;
+		// Disk-only cache for backtest: the fetcher returns empty so any missing minute file fails
+		// closed (we fall back to the single 09:30 fill path). The on-disk read path serves the
+		// backfilled data/intraday/<TICKER>/<date>.csv files that the Polygon-mirror import created.
+		_intradayBars = new IntradayBarCache(NoopIntradayFetcher);
 	}
+
+	private static Task<IReadOnlyList<MinuteBar>> NoopIntradayFetcher(string ticker, BarInterval interval, int count, bool includeExtended, CancellationToken cancellation)
+		=> Task.FromResult<IReadOnlyList<MinuteBar>>(Array.Empty<MinuteBar>());
 
 	public async Task<BacktestResult> RunAsync(DateTime since, DateTime until, CancellationToken cancellation)
 	{
@@ -96,26 +109,31 @@ internal sealed class BacktestRunner
 			// position has only-OTM short legs and is harmless to let expire worthless.
 			await SettleExpirationsAsync(step, cancellation);
 
-			// Step 3: opener.
-			var postMgmt = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
-			var (postCash, postAccount) = await _positions.GetAccountStateAsync(step, cancellation);
-			var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, step, _quotes, _config, cancellation);
-			var postSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Indicators.TechnicalFilter, step, cancellation);
-			var postCtx = new EvaluationContext(step, postMgmt, postQuotes.Underlyings, postQuotes.Options, postCash, postAccount, postSignals);
-			var openProposals = await openEvaluator.EvaluateAsync(postCtx, cancellation);
-
-			var opened = 0;
-			foreach (var p in openProposals)
+			// Step 3: opener — scan intraday minute by minute. Previously fired once at 09:30 ET
+			// because there was no minute data to anchor any other moment; with backfilled
+			// data/intraday/<TICKER>/<date>.csv we can now re-evaluate at each minute and let the
+			// existing score gate (cfg.MinScoreToOpen) decide when conditions warrant a fill. Top-N
+			// per step caps the number of opens (typically 1 for SPXW); first proposal that passes
+			// score + cash + qty wins the day. If no minute crosses, the day skips.
+			var openedAtMinute = await TryOpenAcrossDayAsync(step, tickerSet, openEvaluator, cancellation);
+			// Fallback: if there is no intraday data for this day (pre-2025 dates outside the
+			// Polygon backfill, or any future hole), use the legacy 09:30 single-call path.
+			if (!openedAtMinute.HasIntraday)
 			{
-				if (opened >= _topNPerStep) break;
-				if (p.CashReserveBlocked) continue;
-				if (p.Qty < 1) continue;
-				var requiredCash = p.CapitalAtRiskPerContract * p.Qty;
-				if (requiredCash > _book.Cash) continue;
+				var openProposals = openedAtMinute.LegacyProposals;
+				var opened = 0;
+				foreach (var p in openProposals)
+				{
+					if (opened >= _topNPerStep) break;
+					if (p.CashReserveBlocked) continue;
+					if (p.Qty < 1) continue;
+					var requiredCash = p.CapitalAtRiskPerContract * p.Qty;
+					if (requiredCash > _book.Cash) continue;
 
-				var legFills = BuildLegFillsFromProposal(p.Legs, p.Qty);
-				if (legFills == null) continue;
-				if (_book.Open(step, p.Ticker, p.StructureKind, legFills, p.Qty)) opened++;
+					var legFills = BuildLegFillsFromProposal(p.Legs, p.Qty);
+					if (legFills == null) continue;
+					if (_book.Open(step, p.Ticker, p.StructureKind, legFills, p.Qty)) opened++;
+				}
 			}
 
 			// Intraday SL/TP simulation: re-price each open position at the day's bar.High and bar.Low
@@ -395,6 +413,193 @@ internal sealed class BacktestRunner
 				hi = mid;
 		}
 		return (lo + hi) / 2m;
+	}
+
+	/// <summary>Result of <see cref="TryOpenAcrossDayAsync"/>. <c>HasIntraday</c> indicates whether
+	/// per-minute scan ran (we found minute data for every configured ticker); when false the caller
+	/// must execute the legacy 09:30 single-call path using <c>LegacyProposals</c>.</summary>
+	private readonly record struct DailyOpenScanResult(bool HasIntraday, IReadOnlyList<OpenProposal> LegacyProposals);
+
+	/// <summary>Scans each minute of the trading day (09:30 → 16:00 ET) and opens the first proposal
+	/// that clears the score + cash gates. Spot is taken from the per-minute close of the configured
+	/// ticker's intraday CSV; 0DTE TTE shrinks linearly to 16:00. One open per day max (early-exit on
+	/// first fill). Returns <c>HasIntraday=false</c> when minute data is missing for any ticker —
+	/// caller falls back to the legacy once-per-day fill.</summary>
+	private async Task<DailyOpenScanResult> TryOpenAcrossDayAsync(DateTime step, HashSet<string> tickerSet, OpenCandidateEvaluator openEvaluator, CancellationToken cancellation)
+	{
+		// Shared per-day inputs — these depend only on the date, not the minute.
+		var postMgmt = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
+		var (postCash, postAccount) = await _positions.GetAccountStateAsync(step, cancellation);
+		var postSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Indicators.TechnicalFilter, step, cancellation);
+
+		// Load each ticker's minute bars for the RTH window. Convert step.Date + (09:30 ET, 16:00 ET)
+		// to UTC for the cache call — the cache returns bars in UTC, but the on-disk grouping is by
+		// NY date, so any ET-correct window spans the right file.
+		var openEt = new DateTime(step.Date.Year, step.Date.Month, step.Date.Day, 9, 30, 0, DateTimeKind.Unspecified);
+		var closeEt = new DateTime(step.Date.Year, step.Date.Month, step.Date.Day, 16, 0, 0, DateTimeKind.Unspecified);
+		var openUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(openEt, NyTz), TimeSpan.Zero);
+		var closeUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(closeEt, NyTz), TimeSpan.Zero);
+
+		var barsByTicker = new Dictionary<string, IReadOnlyList<MinuteBar>>(StringComparer.OrdinalIgnoreCase);
+		foreach (var t in tickerSet)
+		{
+			var bars = await _intradayBars.GetBarsAsync(t, openUtc, closeUtc, BarInterval.M1, includeExtended: false, cancellation);
+			if (bars.Count == 0)
+			{
+				// Fall back to legacy path: caller runs the once-per-day opener at 09:30.
+				var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, step, _quotes, _config, cancellation);
+				var postCtx = new EvaluationContext(step, postMgmt, postQuotes.Underlyings, postQuotes.Options, postCash, postAccount, postSignals);
+				var legacy = await openEvaluator.EvaluateAsync(postCtx, cancellation);
+				return new DailyOpenScanResult(HasIntraday: false, LegacyProposals: legacy);
+			}
+			barsByTicker[t] = bars;
+		}
+
+		// Index per ticker by UTC timestamp for O(1) per-minute lookup.
+		var barIndexByTicker = new Dictionary<string, Dictionary<DateTimeOffset, MinuteBar>>(StringComparer.OrdinalIgnoreCase);
+		foreach (var (t, bars) in barsByTicker)
+		{
+			var idx = new Dictionary<DateTimeOffset, MinuteBar>(bars.Count);
+			foreach (var b in bars) idx[b.Timestamp] = b;
+			barIndexByTicker[t] = idx;
+		}
+
+		// Loop driver: union of timestamps across tickers, sorted. With aligned SPY/SPXW CSVs the
+		// union equals either ticker's bars; the loop generalizes if other tickers get added.
+		var allTimestamps = new SortedSet<DateTimeOffset>();
+		foreach (var bars in barsByTicker.Values)
+			foreach (var b in bars) allTimestamps.Add(b.Timestamp);
+
+		// Oracle mode: scan every minute, forward-simulate every proposal to expiry using the day's
+		// known bar.Close intrinsic, and open the single (minute, proposal) pair with the highest
+		// realized P&L. By design lookahead — research / upper-bound tool, not realistic.
+		(DateTime MinuteEt, OpenProposal Proposal, IReadOnlyList<BacktestLegFill> LegFills, decimal Pnl)? bestOracle = null;
+
+		var opened = 0;
+		foreach (var minuteUtc in allTimestamps)
+		{
+			if (!_oracle && opened >= _topNPerStep) break;
+			cancellation.ThrowIfCancellationRequested();
+
+			// Build per-minute spot dict. Skip minutes where any required ticker has no bar — the
+			// opener's bootstrap would have no spot for it and produce no candidates anyway. Use
+			// bar.Open (the price at the START of the minute) rather than bar.Close: ctx.Now is
+			// stamped at the start of the minute and the backfill's intraday SPXW curve is anchored
+			// so that bar.Open @ 09:30 exactly equals ^GSPC.Open from the daily history — switching
+			// to bar.Close here would introduce a 1-minute lookahead and break the anchor invariant.
+			var minuteSpots = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+			var missing = false;
+			foreach (var t in tickerSet)
+			{
+				if (!barIndexByTicker[t].TryGetValue(minuteUtc, out var bar)) { missing = true; break; }
+				minuteSpots[t] = bar.Open;
+			}
+			if (missing) continue;
+
+			// TTE for 0DTE legs: remaining minutes from this bar to 16:00 ET, converted to years.
+			// Floor at one minute (≈ 1.9e-6 years) so deep-OTM 0DTE doesn't price exactly intrinsic
+			// before the actual close — the existing settlement path handles the at-close cash flow.
+			var minutesToClose = Math.Max(1.0, (closeUtc - minuteUtc).TotalMinutes);
+			var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
+
+			// Convert the bar's UTC timestamp back to ET-naive (DateTimeKind.Unspecified) so it matches
+			// the rest of the simulator's convention — the existing engine treats step / ctx.Now as
+			// ET-wall-clock without tz markers, and downstream lookups like ctx.Now.Date must resolve
+			// to the trading date in ET.
+			var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+
+			// Stamp the evaluator's quote source with the minute's spot + TTE. The opener calls
+			// _quotes.GetQuotesAsync(...) internally, which now returns minute-anchored quotes.
+			_quotes.MinuteScanSpotOverrides = minuteSpots;
+			_quotes.MinuteScanZeroDteTimeYears = minuteZeroDteTimeYears;
+			IReadOnlyList<OpenProposal> openProposals;
+			try
+			{
+				var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, minuteEt, _quotes, _config, cancellation);
+				var postCtx = new EvaluationContext(minuteEt, postMgmt, postQuotes.Underlyings, postQuotes.Options, postCash, postAccount, postSignals);
+				openProposals = await openEvaluator.EvaluateAsync(postCtx, cancellation);
+			}
+			finally
+			{
+				_quotes.MinuteScanSpotOverrides = null;
+				_quotes.MinuteScanZeroDteTimeYears = null;
+			}
+
+			foreach (var p in openProposals)
+			{
+				if (!_oracle && opened >= _topNPerStep) break;
+				if (p.CashReserveBlocked) continue;
+				if (p.Qty < 1) continue;
+				var requiredCash = p.CapitalAtRiskPerContract * p.Qty;
+				if (requiredCash > _book.Cash) continue;
+
+				var legFills = BuildLegFillsFromProposal(p.Legs, p.Qty);
+				if (legFills == null) continue;
+
+				if (_oracle)
+				{
+					var eodPnl = await ComputeOracleEodPnlAsync(p, step.Date, cancellation);
+					if (eodPnl == null) continue;  // non-0DTE or missing data
+					if (bestOracle == null || eodPnl.Value > bestOracle.Value.Pnl)
+						bestOracle = (minuteEt, p, legFills, eodPnl.Value);
+				}
+				else
+				{
+					if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, p.Qty)) opened++;
+				}
+			}
+		}
+
+		// Oracle: open the single best proposal across all minutes.
+		if (_oracle && bestOracle != null)
+		{
+			var b = bestOracle.Value;
+			_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, b.LegFills, b.Proposal.Qty);
+		}
+
+		return new DailyOpenScanResult(HasIntraday: true, LegacyProposals: Array.Empty<OpenProposal>());
+	}
+
+	/// <summary>Oracle forward-simulator: returns the realized P&L (in dollars) of <paramref name="p"/>
+	/// if held from open to expiry, using the day's bar.Close as the at-expiry spot. Returns null when
+	/// any leg expires on a date other than <paramref name="stepDate"/> (multi-day positions need a
+	/// chained forward sim we don't do here — out of scope for the SPXW 0DTE strategy this is built
+	/// for) or when the close-bar / leg metadata can't be resolved.</summary>
+	private async Task<decimal?> ComputeOracleEodPnlAsync(OpenProposal p, DateTime stepDate, CancellationToken cancellation)
+	{
+		var bar = await _bars.GetBarAsync(p.Ticker, stepDate, cancellation);
+		if (bar == null) return null;
+		var closeSpot = bar.Close;
+
+		decimal netOpenCashPerContract = 0m;
+		decimal netExpireCashPerContract = 0m;
+		foreach (var leg in p.Legs)
+		{
+			if (!leg.PricePerShare.HasValue) return null;
+			var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
+			if (parsed == null || parsed.CallPut == null) return null;
+			var isBuy = string.Equals(leg.Action, "buy", StringComparison.OrdinalIgnoreCase);
+
+			// Open cash flow per share per contract: buys are debits (negative), sells are credits (+).
+			netOpenCashPerContract += (isBuy ? -1m : 1m) * leg.PricePerShare.Value;
+
+			// Multi-day expiry: can't oracle without a chained forward sim. Skip.
+			if (parsed.ExpiryDate.Date != stepDate.Date) return null;
+
+			var intrinsic = parsed.CallPut == "C"
+				? Math.Max(0m, closeSpot - parsed.Strike)
+				: Math.Max(0m, parsed.Strike - closeSpot);
+			// Settlement: long legs collect intrinsic (+), short legs pay (-). Matches
+			// SimulatedBook.Expire's signing convention.
+			netExpireCashPerContract += (isBuy ? 1m : -1m) * intrinsic;
+		}
+
+		const decimal multiplier = 100m;
+		var netPnlPerContract = (netOpenCashPerContract + netExpireCashPerContract) * multiplier;
+		var grossPnl = netPnlPerContract * p.Qty;
+		// Fees on Open only; expirations are fee-free in the simulator. Matches SimulatedBook.
+		var openFees = p.Legs.Count * p.Qty * _book.FeePerContract;
+		return grossPnl - openFees;
 	}
 
 	/// <summary>Per-share mark = sum of leg mids signed by side. Returns null if any leg is missing
