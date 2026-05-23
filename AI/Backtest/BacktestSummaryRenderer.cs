@@ -50,9 +50,19 @@ internal static class BacktestSummaryRenderer
 			.ToDictionary(g => g.Key, g => g.OrderBy(f => f.Date).ToList());
 
 		var runningCash = result.StartingCash;
+		// Cumulative realized P&L mirrors BacktestResult.RealizedPnL semantics — it only changes
+		// when a lineage finalizes via Close or Expire. Open fills don't move it (the debit is
+		// paid but no P&L is realized yet; equity dips on Open and recovers on Expire, but realized
+		// return is unchanged until the lineage finalizes).
+		decimal cumulativeRealized = 0m;
 		foreach (var f in result.Fills)
 		{
 			runningCash += f.NetCashFlow - f.Fees;
+			if (f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire)
+			{
+				if (fillsByLineage.TryGetValue(f.LineageId, out var lineageFillsForRealized))
+					cumulativeRealized += lineageFillsForRealized.Where(x => x.Date <= f.Date).Sum(x => x.NetCashFlow - x.Fees);
+			}
 
 			// Net per-contract (signed): positive = credit received, negative = debit paid.
 			var perContract = f.Qty != 0 ? f.NetCashFlow / f.Qty : 0m;
@@ -85,12 +95,18 @@ internal static class BacktestSummaryRenderer
 				}
 			}
 
-			// Cumulative return relative to the starting cash. Updates on every fill (Open shrinks
-			// cash by the debit; Expire restores it plus intrinsic). Gives a per-row view of the
-			// equity curve in % terms so the user can see compounding without doing the math.
-			var cumPct = result.StartingCash > 0m ? (runningCash - result.StartingCash) / result.StartingCash * 100m : 0m;
-			var cumPctLabel = cumPct >= 0m ? $"+{cumPct:F1}%" : $"{cumPct:F1}%";
-			var cumPctColor = cumPct >= 0m ? "green" : "red";
+			// Cumulative realized return vs starting cash. Only displayed on Close/Expire rows
+			// — Open rows show "—" because no P&L is realized until the position finalizes.
+			// (Showing the running-cash delta on Open was misleading: cash dips by the debit but
+			// the position will likely recover that on Expire; the user reads the dip as a loss.)
+			string returnLabel = "—";
+			string returnColor = "dim";
+			if ((f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire) && result.StartingCash > 0m)
+			{
+				var pct = cumulativeRealized / result.StartingCash * 100m;
+				returnLabel = pct >= 0m ? $"+{pct:F1}%" : $"{pct:F1}%";
+				returnColor = pct >= 0m ? "green" : "red";
+			}
 
 			table.AddRow(
 				f.Date.ToString("yyyy-MM-dd HH:mm"),
@@ -105,7 +121,7 @@ internal static class BacktestSummaryRenderer
 				$"[{pnlPctColor}]{pnlPctLabel}[/]",
 				$"${f.Fees:N2}",
 				$"[{runningColor}]${runningCash:N2}[/]",
-				$"[{cumPctColor}]{cumPctLabel}[/]",
+				$"[{returnColor}]{returnLabel}[/]",
 				Markup.Escape(f.RuleName ?? "—"));
 		}
 		AnsiConsole.Write(table);
