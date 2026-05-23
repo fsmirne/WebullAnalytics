@@ -14,7 +14,13 @@ namespace WebullAnalytics.Sentiment;
 /// on that date or later. Settled dates are cached forever (the published score is immutable).
 /// Today's intra-day reading is never written to disk because the score moves throughout the session
 /// and we don't want a stale mid-day snapshot to masquerade as the day's final value on the next run.
-/// Each call before settlement re-fetches from CNN.</summary>
+/// Each call before settlement re-fetches from CNN.
+///
+/// Cache writes are also gated on the date being a trading day (<see cref="MarketCalendar.IsOpen"/>):
+/// CNN serves a snapshot for any calendar date, but on a weekend/holiday the payload's internal
+/// timestamp points at the prior trading day. Persisting a weekend file with the prior Friday's
+/// data inside silently duplicates Friday and confuses anything that joins on the filename date.
+/// Non-trading-day fetches still return a snapshot in-memory; they just don't persist.</summary>
 internal static class FearGreedClient
 {
 	private const string Endpoint = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata";
@@ -64,7 +70,7 @@ internal static class FearGreedClient
 		catch (HttpRequestException) { return null; }
 		catch (TaskCanceledException) when (!cancellation.IsCancellationRequested) { return null; }
 
-		if (settled)
+		if (settled && MarketCalendar.IsOpen(asOf.Date))
 		{
 			try
 			{
