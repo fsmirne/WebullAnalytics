@@ -630,55 +630,20 @@ internal sealed class BacktestRunner
 		// realized P&L. By design lookahead — research / upper-bound tool, not realistic.
 		(DateTime MinuteEt, OpenProposal Proposal, IReadOnlyList<BacktestLegFill> LegFills, decimal Pnl)? bestOracle = null;
 
+		// Sequential minute loop. Per-minute work (~1.5 ms) is small enough that the .NET thread
+		// pool's per-task overhead exceeds the parallel gain even on a 32-core box. The QuoteOverrides
+		// refactor that removed BacktestQuoteSource's mutable state would allow a parallel pass if
+		// future per-minute work grows (e.g. forward-simulating each proposal for oracle), but for
+		// the current workload sequential wins on wall time.
 		var opened = 0;
 		foreach (var minuteUtc in allTimestamps)
 		{
 			if (!_oracle && opened >= _topNPerStep) break;
 			cancellation.ThrowIfCancellationRequested();
 
-			// Build per-minute spot dict. Skip minutes where any required ticker has no bar — the
-			// opener's bootstrap would have no spot for it and produce no candidates anyway. Use
-			// bar.Open (the price at the START of the minute) rather than bar.Close: ctx.Now is
-			// stamped at the start of the minute and the backfill's intraday SPXW curve is anchored
-			// so that bar.Open @ 09:30 exactly equals ^GSPC.Open from the daily history — switching
-			// to bar.Close here would introduce a 1-minute lookahead and break the anchor invariant.
-			var minuteSpots = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-			var missing = false;
-			foreach (var t in tickerSet)
-			{
-				if (!barIndexByTicker[t].TryGetValue(minuteUtc, out var bar)) { missing = true; break; }
-				minuteSpots[t] = bar.Open;
-			}
-			if (missing) continue;
-
-			// TTE for 0DTE legs: remaining minutes from this bar to 16:00 ET, converted to years.
-			// Floor at one minute (≈ 1.9e-6 years) so deep-OTM 0DTE doesn't price exactly intrinsic
-			// before the actual close — the existing settlement path handles the at-close cash flow.
-			var minutesToClose = Math.Max(1.0, (closeUtc - minuteUtc).TotalMinutes);
-			var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
-
-			// Convert the bar's UTC timestamp back to ET-naive (DateTimeKind.Unspecified) so it matches
-			// the rest of the simulator's convention — the existing engine treats step / ctx.Now as
-			// ET-wall-clock without tz markers, and downstream lookups like ctx.Now.Date must resolve
-			// to the trading date in ET.
-			var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
-
-			// Stamp the evaluator's quote source with the minute's spot + TTE. The opener calls
-			// _quotes.GetQuotesAsync(...) internally, which now returns minute-anchored quotes.
-			_quotes.MinuteScanSpotOverrides = minuteSpots;
-			_quotes.MinuteScanZeroDteTimeYears = minuteZeroDteTimeYears;
-			IReadOnlyList<OpenProposal> openProposals;
-			try
-			{
-				var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, minuteEt, _quotes, _config, cancellation);
-				var postCtx = new EvaluationContext(minuteEt, postMgmt, postQuotes.Underlyings, postQuotes.Options, postCash, postAccount, postSignals);
-				openProposals = await openEvaluator.EvaluateAsync(postCtx, cancellation);
-			}
-			finally
-			{
-				_quotes.MinuteScanSpotOverrides = null;
-				_quotes.MinuteScanZeroDteTimeYears = null;
-			}
+			var result = await EvaluateMinuteAsync(minuteUtc, closeUtc, tickerSet, barIndexByTicker, postMgmt, postCash, postAccount, postSignals, openEvaluator, cancellation);
+			if (result == null) continue;
+			var (minuteEt, openProposals) = result.Value;
 
 			foreach (var p in openProposals)
 			{
@@ -694,7 +659,7 @@ internal sealed class BacktestRunner
 				if (_oracle)
 				{
 					var eodPnl = await ComputeOracleEodPnlAsync(p, step.Date, cancellation);
-					if (eodPnl == null) continue;  // non-0DTE or missing data
+					if (eodPnl == null) continue;
 					if (bestOracle == null || eodPnl.Value > bestOracle.Value.Pnl)
 						bestOracle = (minuteEt, p, legFills, eodPnl.Value);
 				}
@@ -713,6 +678,51 @@ internal sealed class BacktestRunner
 		}
 
 		return new DailyOpenScanResult(HasIntraday: true, LegacyProposals: Array.Empty<OpenProposal>());
+	}
+
+	/// <summary>Evaluates the opener at a single minute. Pure function over the inputs — no shared
+	/// mutable state — so concurrent calls are safe. Returns null when any configured ticker has no
+	/// bar at this minute (the opener would have no spot to work with).</summary>
+	private async Task<(DateTime MinuteEt, IReadOnlyList<OpenProposal> Proposals)?> EvaluateMinuteAsync(
+		DateTimeOffset minuteUtc,
+		DateTimeOffset closeUtc,
+		HashSet<string> tickerSet,
+		Dictionary<string, Dictionary<DateTimeOffset, MinuteBar>> barIndexByTicker,
+		IReadOnlyDictionary<string, OpenPosition> postMgmt,
+		decimal postCash,
+		decimal postAccount,
+		IReadOnlyDictionary<string, TechnicalBias> postSignals,
+		OpenCandidateEvaluator openEvaluator,
+		CancellationToken cancellation)
+	{
+		// Build per-minute spot dict. Skip when any required ticker has no bar at this minute — the
+		// opener's bootstrap would have no spot to work with. Use bar.Open (the price at the START
+		// of the minute) rather than bar.Close: ctx.Now is stamped at the start of the minute and
+		// the backfill's intraday SPXW curve is anchored so bar.Open @ 09:30 exactly equals
+		// ^GSPC.Open from the daily history — switching to bar.Close would introduce a 1-minute
+		// lookahead and break the anchor invariant.
+		var minuteSpots = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		foreach (var t in tickerSet)
+		{
+			if (!barIndexByTicker[t].TryGetValue(minuteUtc, out var bar)) return null;
+			minuteSpots[t] = bar.Open;
+		}
+
+		// TTE for 0DTE legs: remaining minutes from this bar to 16:00 ET, in years. Floored at 1
+		// minute so deep-OTM 0DTE doesn't price exactly intrinsic before the actual close — the
+		// existing settlement path handles the at-close cash flow.
+		var minutesToClose = Math.Max(1.0, (closeUtc - minuteUtc).TotalMinutes);
+		var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
+
+		// Convert the bar's UTC timestamp back to ET-naive (DateTimeKind.Unspecified) so it matches
+		// the simulator's ET-wall-clock convention.
+		var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+
+		var minuteOverrides = new QuoteOverrides(Spots: minuteSpots, ZeroDteTimeYears: minuteZeroDteTimeYears);
+		var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, minuteEt, _quotes, _config, cancellation, minuteOverrides);
+		var postCtx = new EvaluationContext(minuteEt, postMgmt, postQuotes.Underlyings, postQuotes.Options, postCash, postAccount, postSignals);
+		var proposals = await openEvaluator.EvaluateAsync(postCtx, cancellation, minuteOverrides);
+		return (minuteEt, proposals);
 	}
 
 	/// <summary>Oracle forward-simulator: returns the realized P&L (in dollars) of <paramref name="p"/>

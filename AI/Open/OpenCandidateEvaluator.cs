@@ -38,7 +38,7 @@ internal sealed class OpenCandidateEvaluator
 		_backtestMode = backtestMode;
 	}
 
-	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation)
+	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation, QuoteOverrides quoteOverrides = default)
 	{
 		var cfg = _config.Opener;
 		if (!cfg.Enabled) return Array.Empty<OpenProposal>();
@@ -75,7 +75,7 @@ internal sealed class OpenCandidateEvaluator
 				if (placeholders.All(s => !s.StartsWith(t, StringComparison.OrdinalIgnoreCase)))
 					placeholders.Add(MatchKeys.OccSymbol(t, ctx.Now.Date.AddDays(7), 1m, "C"));
 			}
-			var boot = await _quotes.GetQuotesAsync(ctx.Now, placeholders, tickerSet, cancellation);
+			var boot = await _quotes.GetQuotesAsync(ctx.Now, placeholders, tickerSet, cancellation, quoteOverrides);
 			foreach (var (k, v) in boot.Underlyings) bootstrapSpots[k] = v;
 			foreach (var (k, v) in boot.Options) bootstrapOptions[k] = v;
 		}
@@ -128,7 +128,7 @@ internal sealed class OpenCandidateEvaluator
 		IReadOnlyDictionary<string, OptionContractQuote> mergedQuotes = bootstrapOptions.Count > 0 ? new OverlayQuoteDictionary(ctx.Quotes, bootstrapOptions) : ctx.Quotes;
 		if (neededSymbols.Count > 0)
 		{
-			var extra = await _quotes.GetQuotesAsync(ctx.Now, neededSymbols, tickerSet, cancellation);
+			var extra = await _quotes.GetQuotesAsync(ctx.Now, neededSymbols, tickerSet, cancellation, quoteOverrides);
 			if (extra.Options.Count > 0)
 			{
 				// Webull's strategy/list refetch returns the full chain, including symbols that
