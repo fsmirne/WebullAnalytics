@@ -338,8 +338,11 @@ internal sealed class BacktestRunner
 		// TP threshold (mark at or above fires TP). Use the day's bar.High as the projector spot
 		// to mirror legacy behavior — the projector iterates over future spots so the choice has
 		// minimal effect for 0DTE, but staying consistent makes side-by-side comparisons cleaner.
+		// Symmetric with the SL gate: skip when ProfitTargetPctOfMaxProfit ≥ 1.0 (the threshold
+		// equals theoretical max profit, which no intraday mark realistically reaches — walking
+		// every minute to verify that costs ~390 iterations per open position per day for no gain).
 		decimal? tpTarget = null;
-		if (_config.Rules.TakeProfit.Enabled)
+		if (_config.Rules.TakeProfit.Enabled && realizedExpectancy.ProfitTargetPctOfMaxProfit < 1m)
 		{
 			var bar = await _bars.GetBarAsync(pos.Ticker, step.Date, cancellation);
 			if (bar != null)
@@ -441,7 +444,7 @@ internal sealed class BacktestRunner
 		// against the bar.High quotes — for 0DTE the projector iterates over future spots so current
 		// spot doesn't materially affect the result.
 		decimal? tpTarget = null;
-		if (_config.Rules.TakeProfit.Enabled)
+		if (_config.Rules.TakeProfit.Enabled && realizedExpectancy.ProfitTargetPctOfMaxProfit < 1m)
 		{
 			var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
 			var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = barHigh };
