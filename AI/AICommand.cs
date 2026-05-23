@@ -340,7 +340,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var openCount = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			var openSink = new OpenProposalSink(config.Log, mode: "once", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			var openSink = new OpenProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
@@ -559,7 +559,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var openCount = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			var openSink = new OpenProposalSink(config.Log, mode: "once", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			var openSink = new OpenProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, backtestMode: true);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
