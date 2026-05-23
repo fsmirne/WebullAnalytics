@@ -290,8 +290,7 @@ internal sealed class OpenCandidateEvaluator
 			// composite, blend into bias. Active in both live and backtest now that the BacktestRunner
 			// minute loop populates ctx.Now to the simulated minute (the backtest CSV cache reads
 			// data/intraday/<TICKER>/<date>.csv with no HTTP, so each scan tick reuses disk-cached
-			// bars). Skipped only when the weight is 0. The shadow log records every attempt — set
-			// weight to 0.001 to record the would-be bias without materially affecting scoring.
+			// bars). Skipped only when the weight is 0.
 			IntradayBias? intradayBias = null;
 			if (cfg.Weights.IntradayTape > 0m)
 			{
@@ -302,7 +301,6 @@ internal sealed class OpenCandidateEvaluator
 					var w = Math.Clamp(cfg.Weights.IntradayTape, 0m, 1m);
 					bias = (1m - w) * biasedMacro + w * intradayBias.Score;
 				}
-				WriteBiasShadowLog(tickerGroup.Key, macroBias, intradayBias, cfg.Weights.IntradayTape, bias, vixTermScore, cfg.Weights.VixTermStructure);
 			}
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
 			shortHorizonHvByTicker.TryGetValue(tickerGroup.Key, out var shortHorizonHv);
@@ -751,33 +749,6 @@ internal sealed class OpenCandidateEvaluator
 		_ => BarInterval.M1,
 	};
 
-	/// <summary>Appends one JSONL line per per-ticker bias-blend attempt to
-	/// <c>data/ai-bias-shadow.jsonl</c>. Records both the macro-only and blended biases so the user
-	/// can validate the intraday signal offline before committing to a non-trivial weight. Records
-	/// null intraday entries too — those flag scan ticks where the indicator couldn't fire (cache
-	/// miss, pre-open, too few bars). Failures here are swallowed: a log-write hiccup must never
-	/// silence the rest of the scan.</summary>
-	private static void WriteBiasShadowLog(string ticker, decimal macroBias, IntradayBias? intradayBias, decimal weight, decimal blended, decimal? vixTermScore, decimal vixTermWeight)
-	{
-		try
-		{
-			var path = Program.ResolvePath("data/ai-bias-shadow.jsonl");
-			Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-			var ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
-			string intradayJson = intradayBias == null
-				? "null"
-				: $"{{\"score\":{intradayBias.Score:F4},\"gap\":{intradayBias.GapScore:F4},\"openToNow\":{intradayBias.OpenToNowScore:F4},\"vwapDev\":{intradayBias.VwapDeviationScore:F4},\"barCount\":{intradayBias.BarCount}}}";
-			string vixJson = vixTermScore.HasValue
-				? $"{{\"score\":{vixTermScore.Value:F4},\"weight\":{vixTermWeight:F4}}}"
-				: "null";
-			var line = $"{{\"ts\":\"{ts}\",\"ticker\":\"{ticker}\",\"macroBias\":{macroBias:F4},\"vixTerm\":{vixJson},\"intraday\":{intradayJson},\"weight\":{weight:F4},\"blended\":{blended:F4}}}\n";
-			File.AppendAllText(path, line);
-		}
-		catch (Exception ex)
-		{
-			Console.WriteLine($"Intraday tape: shadow log write failed: {ex.Message}");
-		}
-	}
 }
 
 /// <summary>Read-only dictionary that layers a small overlay (phase-3 fetched quotes) over a base dictionary (ctx.Quotes).
