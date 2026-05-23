@@ -16,11 +16,12 @@ internal static class AIPipelineHelper
 		DateTime asOf,
 		IQuoteSource quotes,
 		AIConfig config,
-		CancellationToken cancellation)
+		CancellationToken cancellation,
+		QuoteOverrides overrides = default)
 	{
 		// Phase 1: current-leg symbols only.
 		var phase1Symbols = openPositions.Values.SelectMany(p => p.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol)).ToHashSet();
-		var phase1 = await quotes.GetQuotesAsync(asOf, phase1Symbols, tickerSet, cancellation);
+		var phase1 = await quotes.GetQuotesAsync(asOf, phase1Symbols, tickerSet, cancellation, overrides);
 
 		// Phase 2: enumerate hypotheticals using each position's spot.
 		var phase2Symbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -49,7 +50,7 @@ internal static class AIPipelineHelper
 
 		if (phase2Symbols.Count == 0) return phase1;
 
-		var phase2 = await quotes.GetQuotesAsync(asOf, phase2Symbols, tickerSet, cancellation);
+		var phase2 = await quotes.GetQuotesAsync(asOf, phase2Symbols, tickerSet, cancellation, overrides);
 
 		// Merge phase2 option quotes into phase1. Underlyings already correct from phase1.
 		var merged = new Dictionary<string, OptionContractQuote>(phase1.Options, StringComparer.OrdinalIgnoreCase);

@@ -22,7 +22,7 @@ internal sealed class ReplayQuoteSource : IQuoteSource
 
 	public async Task<QuoteSnapshot> GetQuotesAsync(
 		DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers,
-		CancellationToken cancellation)
+		CancellationToken cancellation, QuoteOverrides overrides = default)
 	{
 		var options = new Dictionary<string, OptionContractQuote>();
 		var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
