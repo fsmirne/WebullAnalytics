@@ -11,7 +11,7 @@ public class OpenCandidateEvaluatorTests
 	{
 		private readonly QuoteSnapshot _snapshot;
 		public StaticQuoteSource(QuoteSnapshot s) { _snapshot = s; }
-		public Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> symbols, IReadOnlySet<string> tickers, CancellationToken ct)
+		public Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> symbols, IReadOnlySet<string> tickers, CancellationToken ct, QuoteOverrides overrides = default)
 			=> Task.FromResult(_snapshot);
 	}
 

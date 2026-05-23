@@ -1,9 +1,10 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using WebullAnalytics.Trading;
 
 namespace WebullAnalytics.Api;
 
-public static class ApiClient
+internal static class ApiClient
 {
 	private const string OrderListUrl = "https://ustrade.webullfinance.com/api/trading/v1/webull/profitloss/ticker/orderList/v2";
 
@@ -18,7 +19,7 @@ public static class ApiClient
 		["platform"] = "web",
 	};
 
-	public static async Task FetchOrdersToJsonl(ApiConfig config, IReadOnlyCollection<long> tickerIds, string outputPath)
+	internal static async Task FetchOrdersToJsonl(ApiConfig config, IReadOnlyCollection<long> tickerIds, string outputPath)
 	{
 		using var client = new HttpClient();
 		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
@@ -75,7 +76,7 @@ public static class ApiClient
 	}
 }
 
-public sealed class ApiConfig
+internal sealed class ApiConfig
 {
 	[JsonPropertyName("secAccountId")]
 	public string SecAccountId { get; set; } = "";
@@ -97,4 +98,13 @@ public sealed class ApiConfig
 
 	[JsonPropertyName("headers")]
 	public Dictionary<string, string> Headers { get; set; } = new();
+
+	[JsonPropertyName("massiveApiKey")]
+	public string MassiveApiKey { get; set; } = "";
+
+	[JsonPropertyName("defaultAccount")]
+	public string? DefaultAccount { get; set; }
+
+	[JsonPropertyName("accounts")]
+	public List<TradeAccount> Accounts { get; set; } = new();
 }

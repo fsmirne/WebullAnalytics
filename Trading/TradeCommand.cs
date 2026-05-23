@@ -13,7 +13,7 @@ namespace WebullAnalytics.Trading;
 internal abstract class TradeSubcommandSettings : CommandSettings
 {
 	[CommandOption("--account <VALUE>")]
-	[Description("Account alias or ID from trade-config.json (defaults to defaultAccount).")]
+	[Description("Account alias or ID from api-config.json (defaults to defaultAccount).")]
 	public string? Account { get; set; }
 }
 
@@ -707,7 +707,7 @@ internal sealed class TradeAccountsCommand : AsyncCommand<TradeAccountsSettings>
 		if (subs.Count == 0) { AnsiConsole.MarkupLine("[dim]No account subscriptions.[/]"); return 0; }
 
 		AnsiConsole.MarkupLine($"[bold]{subs.Count} account subscription(s):[/]");
-		AnsiConsole.MarkupLine("  [dim]Copy [bold]account_id[/] (not account_number) into your trade-config.json as 'accountId'.[/]");
+		AnsiConsole.MarkupLine("  [dim]Copy [bold]account_id[/] (not account_number) into your api-config.json as 'accountId'.[/]");
 		AnsiConsole.WriteLine();
 		foreach (var sub in subs)
 		{

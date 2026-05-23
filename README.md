@@ -346,7 +346,7 @@ ACTION:SYMBOL:QTY@PRICE,ACTION:SYMBOL:QTY@PRICE,...
 Examples:
 
 ```bash
-# Pick an existing open strategy from orders.jsonl and auto-detect available cash/BP from trade-config.json
+# Pick an existing open strategy from orders.jsonl and auto-detect available cash/BP from api-config.json
 wa analyze position --account test1
 
 # Analyze a manually specified calendar position
@@ -404,7 +404,7 @@ analyze position only:
   --iv-default <pct>      Fallback implied volatility used when live IV is unavailable.
   --strike-step <step>    Strike increment used for near-spot scenario generation.
   --cash <amount>         Available cash/BP used to flag scenarios as fundable or not fundable.
-  --account <alias>       Account alias or ID from trade-config.json used to auto-detect available cash/BP
+  --account <alias>       Account alias or ID from api-config.json used to auto-detect available cash/BP
                           when you select an existing open position.
 
 analyze roll only:
@@ -464,11 +464,7 @@ Every `trade place` invocation runs a preview against the broker by default. The
 
 #### Setup
 
-Copy the example config and fill in your own account(s):
-
-```bash
-cp trade-config.example.json data/trade-config.json
-```
+The `trade` command reads accounts from `data/api-config.json` (same file used by `fetch` / `sniff` / `ai`). Add an `accounts` array and a `defaultAccount` alias — see `api-config.example.json` for the full shape.
 
 The example ships with the three sandbox test accounts Webull publishes in its OpenAPI documentation. For a production account, add a new entry with `sandbox: false` and edit `defaultAccount` to point at it.
 
@@ -546,7 +542,7 @@ Options (place):
   --strategy <name>         Override auto-detected strategy. Values: single, stock, vertical, calendar,
                             diagonal, iron_condor, iron_butterfly, butterfly, condor, straddle, strangle,
                             covered_call, protective_put, collar.
-  --account <id-or-alias>   Pick an account from trade-config.json. Defaults to defaultAccount.
+  --account <id-or-alias>   Pick an account from api-config.json. Defaults to defaultAccount.
   --submit                  Actually place the order. Without this, runs preview only.
   --debug                   Print the raw JSON payload that will be sent to the Webull API.
 
@@ -568,14 +564,14 @@ Options (accounts / positions / token create / token check):
 
 #### Account and token utilities
 
-- `trade accounts` lists the account subscriptions returned by the OpenAPI app and highlights the `account_id` value you should copy into `trade-config.json`.
+- `trade accounts` lists the account subscriptions returned by the OpenAPI app and highlights the `account_id` value you should copy into `api-config.json`.
 - `trade positions` prints a readable account-positions summary; add `--debug` to dump the raw payload.
 - `trade token create` starts the OpenAPI trade-token approval flow and caches the token locally.
 - `trade token check` re-checks the cached token status and updates the local cache.
 
 #### Sandbox vs production
 
-Each account in `trade-config.json` has a `sandbox: true|false` flag. Sandbox accounts hit `https://us-openapi-alb.uat.webullbroker.com`; production accounts hit `https://api.webull.com`. A colored banner (green `[SANDBOX]` / red `[PRODUCTION]`) is printed at the top of every `trade` invocation so you always know which environment you are in.
+Each account in `api-config.json` has a `sandbox: true|false` flag. Sandbox accounts hit `https://us-openapi-alb.uat.webullbroker.com`; production accounts hit `https://api.webull.com`. A colored banner (green `[SANDBOX]` / red `[PRODUCTION]`) is printed at the top of every `trade` invocation so you always know which environment you are in.
 
 There is no `--yes` flag — every place, cancel, and cancel-all prompts interactively. Piped empty input aborts.
 
@@ -623,7 +619,7 @@ The ticker is a required positional argument — every AI subcommand operates on
    ```
    A 0DTE SPXW override would also bump `intradayTape` / `vixTermStructure` weights, swap structure DTEs to 0, and adjust `ivDefaultPct` — keep only what differs from your base.
 4. Run `wa ai scan <TICKER>` (or watch / replay). The loader deep-merges `data/ai-config.json` and `data/ai-config.<TICKER>.json`, with the per-ticker file winning on every overlapping key.
-5. Ensure `data/trade-config.json` exists (same setup as the `trade` command) — the loop reads position state from the Webull OpenAPI.
+5. Ensure `data/api-config.json` has populated `accounts[]` and `defaultAccount` — the loop reads position state from the Webull OpenAPI.
 
 **Config layering rules:**
 - JSON objects merge recursively by key (override wins on overlap).
@@ -791,8 +787,8 @@ The replay output includes an **agreement analysis** — for each day where rule
 
 Prerequisites:
 
-1. Run `wa ai history <TICKER>` once per session. This populates `data/history/<TICKER>.csv` (daily closes from Yahoo) and the VIX / VIX1D / VIX9D / SMILE caches the backtest engine reads.
-2. Backfill `data/intraday/<TICKER>/<date>.csv` for the date range you want to test. Without minute bars, the opener falls back to a single 09:30 ET fill per day; with them, the minute-loop scans every minute looking for the first signal that crosses `opener.minScoreToOpen`. For SPY, real Polygon-mirror data; for SPXW, the included `scripts/backfill_intraday_polygon.py` synthesizes from SPY × today's `^GSPC.Open` anchor (see the script's docstring).
+1. Run `wa ai history <TICKER>` once per session. This populates `data/history/<TICKER>.csv` (daily closes from Yahoo), the VIX / VIX1D / VIX9D / SMILE caches the backtest engine reads, and — if `api-config.json` has a `massiveApiKey` set — `data/intraday/<TICKER>/<date>.csv` minute bars for every trading day in the lookback window. Today's intraday file is never touched (live `wa ai watch` / `wa ai scan` owns it); past-day files are re-pulled only when missing or partial. For SPX-family tickers the SPY bars are scaled by `today_SPX_open / today_SPY_open_at_0930` per session — same anchor as `scripts/backfill_intraday_polygon.py`.
+2. Without `massiveApiKey` or for older bulk backfills, the included `scripts/backfill_intraday_polygon.py` runs against a one-shot SPY 1-min JSON dump. Without minute bars, the opener falls back to a single 09:30 ET fill per day.
 
 Mechanics:
 

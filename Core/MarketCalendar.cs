@@ -14,8 +14,17 @@ internal static class MarketCalendar
 		return !IsHoliday(date);
 	}
 
+	// Ad-hoc US market closures outside the recurring NYSE holiday calendar. Add new entries as they
+	// happen — the backtest's 2-year lookback only sees recent dates, so the historical 9/11, Hurricane
+	// Sandy, and Bush 41 closures aren't tracked here.
+	private static readonly HashSet<DateTime> AdHocClosures = new()
+	{
+		new DateTime(2025, 1, 9), // National Day of Mourning for President Jimmy Carter
+	};
+
 	private static bool IsHoliday(DateTime date)
 	{
+		if (AdHocClosures.Contains(date.Date)) return true;
 		int y = date.Year;
 		return date.Date == Observed(new DateTime(y, 1, 1))                         // New Year's Day
 			|| date.Date == NthWeekday(y, 1, DayOfWeek.Monday, 3)                  // Martin Luther King Jr. Day
