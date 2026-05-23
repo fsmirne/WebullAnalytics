@@ -32,9 +32,21 @@ internal static class BacktestSummaryRenderer
 		table.AddColumn(new TableColumn("Price").RightAligned());
 		table.AddColumn(new TableColumn("Net/Ct").RightAligned());
 		table.AddColumn(new TableColumn("Total").RightAligned());
+		table.AddColumn(new TableColumn("P&L %").RightAligned());
 		table.AddColumn(new TableColumn("Fees").RightAligned());
 		table.AddColumn(new TableColumn("Cash").RightAligned());
 		table.AddColumn("Rule");
+
+		// Pre-index by lineage so we can compute cumulative realized P&L at any closing fill.
+		// Each lineage's "basis" is the absolute opening cash flow (debit paid or credit received);
+		// the P&L % shown on Close/Expire/Roll rows is cumulative-lineage-P&L / basis.
+		var openCashByLineage = result.Fills
+			.Where(f => f.Kind == BacktestFillKind.Open)
+			.GroupBy(f => f.LineageId)
+			.ToDictionary(g => g.Key, g => g.First().NetCashFlow);
+		var fillsByLineage = result.Fills
+			.GroupBy(f => f.LineageId)
+			.ToDictionary(g => g.Key, g => g.OrderBy(f => f.Date).ToList());
 
 		var runningCash = result.StartingCash;
 		foreach (var f in result.Fills)
@@ -51,6 +63,27 @@ internal static class BacktestSummaryRenderer
 			var cashColor = f.NetCashFlow >= 0m ? "green" : "red";
 			var runningColor = runningCash >= result.StartingCash ? "green" : "red";
 
+			// Lineage P&L %: realized P&L through this fill divided by the absolute opening cash
+			// flow. Long-debit positions: a winner shows positive (e.g. +124% means realized P&L =
+			// 1.24× the debit paid). Short-credit positions: 100% is the cap (kept the full credit),
+			// negative values can exceed -100% when realized loss is larger than the credit. Shown
+			// only on rows that close a position (Close, Expire, Roll); Open rows show "—".
+			string pnlPctLabel = "—";
+			string pnlPctColor = "dim";
+			if (f.Kind != BacktestFillKind.Open
+				&& openCashByLineage.TryGetValue(f.LineageId, out var openCash)
+				&& fillsByLineage.TryGetValue(f.LineageId, out var lineageFills))
+			{
+				var basis = Math.Abs(openCash);
+				if (basis > 0m)
+				{
+					var cumPnl = lineageFills.Where(x => x.Date <= f.Date).Sum(x => x.NetCashFlow - x.Fees);
+					var pct = cumPnl / basis * 100m;
+					pnlPctLabel = pct >= 0m ? $"+{pct:F1}%" : $"{pct:F1}%";
+					pnlPctColor = pct >= 0m ? "green" : "red";
+				}
+			}
+
 			table.AddRow(
 				f.Date.ToString("yyyy-MM-dd HH:mm"),
 				Markup.Escape(f.Ticker),
@@ -61,6 +94,7 @@ internal static class BacktestSummaryRenderer
 				$"[{cashColor}]{perShareLabel}[/]",
 				$"[{cashColor}]{perCtLabel}[/]",
 				$"[{cashColor}]{totalLabel}[/]",
+				$"[{pnlPctColor}]{pnlPctLabel}[/]",
 				$"${f.Fees:N2}",
 				$"[{runningColor}]${runningCash:N2}[/]",
 				Markup.Escape(f.RuleName ?? "—"));
