@@ -594,8 +594,11 @@ wa ai replay GME --since 2026-01-01 --until 2026-04-17
 # Simulate the full strategy (opener + rules + intraday SL/TP) from scratch over a historical window
 wa ai backtest SPXW --since 2025-01-01 --starting-cash 10000 --show-fills
 
-# Refresh the daily bar / VIX / SMILE caches that the backtest needs (run once per session)
+# Refresh the daily bar / VIX / SMILE caches + intraday minute bars that the backtest needs
 wa ai history SPXW
+
+# Audit the intraday cache — reports missing/partial days without making network calls
+wa ai history SPXW --audit
 
 # Run the watch loop every 30 seconds for 90 minutes, ignoring market-hours checks
 wa ai watch SPXW --tick 30 --duration 90m --ignore-market-hours
@@ -787,8 +790,11 @@ The replay output includes an **agreement analysis** — for each day where rule
 
 Prerequisites:
 
-1. Run `wa ai history <TICKER>` once per session. This populates `data/history/<TICKER>.csv` (daily closes from Yahoo), the VIX / VIX1D / VIX9D / SMILE caches the backtest engine reads, and — if `api-config.json` has a `massiveApiKey` set — `data/intraday/<TICKER>/<date>.csv` minute bars for every trading day in the lookback window. Today's intraday file is never touched (live `wa ai watch` / `wa ai scan` owns it); past-day files are re-pulled only when missing or partial. For SPX-family tickers the SPY bars are scaled by `today_SPX_open / today_SPY_open_at_0930` per session — same anchor as `scripts/backfill_intraday_polygon.py`.
-2. Without `massiveApiKey` or for older bulk backfills, the included `scripts/backfill_intraday_polygon.py` runs against a one-shot SPY 1-min JSON dump. Without minute bars, the opener falls back to a single 09:30 ET fill per day.
+1. Run `wa ai history <TICKER>` once per session. This populates `data/history/<TICKER>.csv` (daily closes from Yahoo), the VIX / VIX1D / VIX9D / SMILE caches the backtest engine reads, and `data/intraday/<TICKER>/<date>.csv` minute bars for every missing trading day in the lookback window. Existing CSVs are never overwritten (preserves data from live `wa ai watch` captures); today is owned by live capture and never touched. Source routing:
+   - **Non-SPX tickers (SPY, AAPL, QQQ, …)**: pulled from massive.com (Polygon mirror — SIP-consolidated NMS data). One range query covers the whole window; rate limits (5 req/min basic tier) and pagination are handled internally. Requires `massiveApiKey` in `api-config.json`.
+   - **SPX-family (SPX/SPXW)**: SPX RTH from Webull's `query-mini` chart endpoint (the index isn't on massive.com), SPY ext-hours from massive scaled by the session's SPX/SPY ratio for pre/post-market filler.
+2. **One-time SPX deep-history bootstrap** (`wa ai history SPXW --import-webull-spx <file>`): Webull's `query-mini` SPX endpoint requires per-URL `x-s` signatures we can't forge programmatically for deep historical anchors. To populate the 2-year historical SPXW window, run the browser console sniffer snippet (in `docs/` or paste in DevTools) on Webull's web SPX 1-min chart, scroll back ~2 years, and dump the captured bars to a text file. Then `--import-webull-spx <file>` parses those bars, pulls SPY ext-hours from massive in a single range query, and writes per-day CSVs. After bootstrap, the live capture and per-day Webull pagination keep the cache current.
+3. `wa ai history <TICKER> --audit` reports per-day completeness (complete / partial / missing) over the on-disk window without making any network calls. Reconciles `sealed.json` (the manifest that tracks early-close days and other LooksComplete-passing files) so re-running the audit auto-seals any newly-validated CSV. Exit code 0 if everything is complete, 2 if there are gaps.
 
 Mechanics:
 
@@ -1292,7 +1298,7 @@ Composite: `bias_intraday = (gap · gw + o2n · ow + vwap · vw) / (gw + ow + vw
 Pipeline mechanics:
 
 - **Bar source.** Webull's `/api/quote/charts/query` endpoint, fetched once per scan tick. Disk-cached at `data/intraday/<TICKER>/<yyyy-mm-dd>.csv` (keyed by the *strategy ticker*, matching `data/history/<TICKER>.csv` for daily closes). Today's file grows during the session; past days are sealed. The chart endpoint uses a *different* tickerId namespace than the option-chain endpoint for cash indexes (chain-namespace `913324359` is actually SPXC stock, not the index). Chart-namespace ids live in `WebullChartsClient.ChartKnownTickerIds`; chain-namespace ids stay in `WebullOptionsClient.KnownTickerIds`.
-- **Transparent SPY pre-market proxy for the SPX family.** SPXW and SPX route through a hybrid path: SPX RTH bars (no extended hours — the cash index doesn't trade pre/post-market) merged with SPY extended-hours bars scaled into SPX dollars via `ratio = SPX_prev_close / SPY_prev_close`. The merged series is in SPX scale throughout — the indicator and cache never see SPY, no separate SPY folder is created, and the resulting bars land in `data/intraday/SPXW/`. On SPY resolution failure or insufficient ratio data, falls back to SPX RTH only.
+- **Transparent SPY pre-market proxy for the SPX family.** SPXW and SPX route through a hybrid path: SPX RTH bars (no extended hours — the cash index doesn't trade pre/post-market) merged with SPY extended-hours bars scaled into SPX dollars. Ratio derivation uses the most-recent minute that exists in both series (an in-session overlap), not the prior session's close — this tracks intraday SPX/SPY basis drift more accurately. The merged series is in SPX scale throughout — the indicator and cache never see SPY, no separate SPY folder is created, and the resulting bars land in `data/intraday/SPXW/`. On SPY resolution failure or insufficient ratio data, falls back to SPX RTH only. Note: `wa ai history` historical backfill uses the same SPX-plus-SPY-scaled architecture but sources SPY from massive.com (SIP-consolidated) rather than Webull intraday — see the AI section above for routing.
 - **Backtest support.** Active in backtest with a no-op (disk-only) fetcher so the same `IntradayBarCache` reads the backfilled `data/intraday/<TICKER>/<date>.csv` files without any HTTP. Backtest's `ctx.Now` is the simulated minute, so the tape signal computes minute-by-minute against the same in-process bars the opener consumes. Falls back to macro-only when minute data is absent for a date (pre-backfill window).
 - **Prev-close source.** Derived from the bar series itself — yesterday's last bar's close in the same intraday source. Necessary because the daily-Yahoo close and the intraday-Webull bars may not be denominated identically (gap math becomes meaningless when scales mismatch).
 
