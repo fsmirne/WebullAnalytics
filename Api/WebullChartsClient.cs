@@ -13,6 +13,21 @@ namespace WebullAnalytics.Api;
 internal static class WebullChartsClient
 {
 	private const string ChartsQueryUrl = "https://quotes-gw.webullfintech.com/api/quote/charts/query";
+	private const string ChartsQueryMiniUrl = "https://quotes-gw.webullfintech.com/api/quote/charts/query-mini";
+
+	// Shared HttpClient. Creating one HttpClient per call (the `using var client = new HttpClient()`
+	// pattern) churns through TCP sockets and ports — under sustained bulk pulls Webull's edge starts
+	// dropping connections at the TLS handshake, which surfaces as "The SSL connection could not be
+	// established" mid-loop. A single long-lived client with HTTP/2 connection pooling avoids it.
+	private static readonly HttpClient SharedClient = new();
+
+	static WebullChartsClient()
+	{
+		SharedClient.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
+		SharedClient.DefaultRequestHeaders.Accept.ParseAdd("*/*");
+		SharedClient.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+		SharedClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0");
+	}
 
 	private static readonly Dictionary<string, string> DefaultHeaders = new()
 	{
@@ -92,6 +107,199 @@ internal static class WebullChartsClient
 			var json = await response.Content.ReadAsStringAsync(cancellationToken);
 			return ParseChartsResponse(json, tickerId);
 		}
+	}
+
+	/// <summary>Fetches up to <paramref name="count"/> minute bars at-or-before <paramref name="anchorUnixSec"/>
+	/// (oldest-first). Hits Webull's <c>query-mini</c> endpoint, which — unlike the live <c>query</c>
+	/// endpoint — accepts a <c>timestamp</c> anchor and serves arbitrary historical sessions. Required for
+	/// <c>wa ai history</c> backfill: <c>query</c> only returns the most recent N bars, while
+	/// <c>query-mini</c> + timestamp lets us pull any past session.
+	///
+	/// URL params (cargo-culted from Webull's web app DevTools to match what the chart UI sends so the
+	/// endpoint doesn't degrade us into a truncated response): <c>overnight=1&amp;loadFactor=1&amp;restorationType=1</c>
+	/// plus optional <c>extendTrading=1</c> for tickers with pre/post-market coverage. Empirically, the
+	/// previous URL (only <c>restorationType=0</c>, no other params) silently truncated to a single bar
+	/// despite valid auth — even though equivalent curl calls succeeded — likely a different code path
+	/// triggered by the missing params combined with HttpClient's default Accept absence.
+	///
+	/// Header quirks discovered during the 2026-05-23 backfill investigation: (1) <c>t_time</c> is
+	/// freshness-checked; stale values silently truncate to 1 bar. (2) <c>x-s</c>/<c>x-sv</c> are per-URL
+	/// signatures from `wa sniff`; reusing them against a different URL also triggers truncation. We
+	/// override <c>t_time</c> per-request and drop the signatures entirely. (3) HttpClient does not send
+	/// <c>Accept</c>/<c>User-Agent</c> by default — the endpoint needs at least <c>Accept: */*</c> to
+	/// route the request like a browser fetch; we set both explicitly.</summary>
+	public static async Task<IReadOnlyList<MinuteBar>> FetchHistoricalMinuteBarsAsync(
+		ApiConfig config,
+		long tickerId,
+		long anchorUnixSec,
+		int count,
+		bool includeExtended,
+		CancellationToken cancellationToken)
+	{
+		if (count <= 0) return Array.Empty<MinuteBar>();
+
+		// `loadFactor=1` is a "live mode" flag: when present, the endpoint silently ignores the
+		// `timestamp` anchor for deep history (>3 days back) and returns the most-recent window
+		// instead. Webull's web app sends `loadFactor=1` on live chart fetches but DROPS it when
+		// paginating backward. We're always paginating here so we never send it.
+		var ext = includeExtended ? 1 : 0;
+		var url = $"{ChartsQueryMiniUrl}?overnight=1&type=m1&count={count}&timestamp={anchorUnixSec}&restorationType=1&extendTrading={ext}&tickerId={tickerId}";
+
+		var request = new HttpRequestMessage(HttpMethod.Get, url);
+		foreach (var (key, value) in DefaultHeaders) request.Headers.TryAddWithoutValidation(key, value);
+		foreach (var (key, value) in config.Headers)
+		{
+			// Suppress the per-URL signature headers — they were computed for whatever request `wa sniff`
+			// captured and don't match the historical URL we're about to send.
+			if (string.Equals(key, "x-s", StringComparison.OrdinalIgnoreCase)) continue;
+			if (string.Equals(key, "x-sv", StringComparison.OrdinalIgnoreCase)) continue;
+			// t_time is overridden below.
+			if (string.Equals(key, "t_time", StringComparison.OrdinalIgnoreCase)) continue;
+			request.Headers.TryAddWithoutValidation(key, value);
+		}
+		request.Headers.TryAddWithoutValidation("t_time", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture));
+
+		HttpResponseMessage response;
+		try
+		{
+			response = await SharedClient.SendAsync(request, cancellationToken);
+		}
+		catch (Exception ex)
+		{
+			if (ex is OperationCanceledException) throw;
+			Console.WriteLine($"Webull charts (mini): request failed for tickerId {tickerId}: {ex.Message}");
+			return Array.Empty<MinuteBar>();
+		}
+
+		using (response)
+		{
+			if (!response.IsSuccessStatusCode)
+			{
+				Console.WriteLine($"Webull charts (mini): received {(int)response.StatusCode} for tickerId {tickerId}. Session may have expired — run 'sniff' to refresh.");
+				return Array.Empty<MinuteBar>();
+			}
+
+			var json = await response.Content.ReadAsStringAsync(cancellationToken);
+			return ParseChartsMiniResponse(json, tickerId);
+		}
+	}
+
+	/// <summary>Backward-walking pagination over <see cref="FetchHistoricalMinuteBarsAsync"/>. Single-shot
+	/// historical fetches anchored at deep past dates (>6 months back) silently truncate to a single
+	/// bar in Webull's <c>query-mini</c> endpoint — empirically observed during the 2026-05-23 backfill,
+	/// roughly 34% of days affected with no consistent pattern by date. The web app sidesteps this by
+	/// paginating: starts anchored at "now", reads 800 bars, then re-anchors at the oldest bar's
+	/// timestamp and reads the next 800. We do the same here. Each page round-trips ~1 sec at default
+	/// pacing, and 800 SPX RTH minutes = ~2 trading days, so a 2-year SPX pull is ~250 pages.
+	///
+	/// Stops when (a) the oldest bar of a page falls at or below <paramref name="startUnixSec"/>,
+	/// (b) the page returns no bars, or (c) the page doesn't advance (oldest_sec stays at or above the
+	/// current anchor — defends against an endpoint loop). Returns bars sorted oldest-first, de-duplicated
+	/// by timestamp.</summary>
+	public static async Task<IReadOnlyList<MinuteBar>> FetchPaginatedHistoricalMinuteBarsAsync(
+		ApiConfig config,
+		long tickerId,
+		long startUnixSec,
+		long endUnixSec,
+		bool includeExtended,
+		int countPerPage,
+		TimeSpan delayBetweenPages,
+		Action<int, long, int>? onPageProgress,
+		CancellationToken cancellation)
+	{
+		var allBars = new Dictionary<long, MinuteBar>();
+		var anchor = endUnixSec;
+		var pageCount = 0;
+		while (anchor > startUnixSec)
+		{
+			cancellation.ThrowIfCancellationRequested();
+			if (pageCount > 0) await Task.Delay(delayBetweenPages, cancellation);
+
+			var bars = await FetchHistoricalMinuteBarsAsync(config, tickerId, anchor, countPerPage, includeExtended, cancellation);
+			pageCount++;
+
+			if (bars.Count == 0) break;
+
+			var oldestSec = long.MaxValue;
+			var newThisPage = 0;
+			foreach (var b in bars)
+			{
+				var sec = b.Timestamp.ToUnixTimeSeconds();
+				if (allBars.TryAdd(sec, b)) newThisPage++;
+				if (sec < oldestSec) oldestSec = sec;
+			}
+
+			onPageProgress?.Invoke(pageCount, oldestSec, allBars.Count);
+
+			if (oldestSec >= anchor) break;          // didn't advance — bail to avoid loop
+			if (newThisPage == 0) break;             // all duplicates — endpoint exhausted at this anchor
+			anchor = oldestSec;
+		}
+
+		var sorted = new List<MinuteBar>(allBars.Count);
+		foreach (var b in allBars.Values) sorted.Add(b);
+		sorted.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+		return sorted;
+	}
+
+	/// <summary>Parses <c>query-mini</c>'s 8-column row schema: <c>ts,open,close,high,low,prevClose,volume,vwap</c>.
+	/// Distinct from <see cref="ParseChartsResponse"/> which handles the live <c>query</c> endpoint's
+	/// 6/7-column schema without the <c>prevClose</c> field. Rows that fail OHLC sanity (high &lt;
+	/// max(open,close) or low &gt; min(open,close)) are dropped silently rather than mis-parsed.</summary>
+	internal static IReadOnlyList<MinuteBar> ParseChartsMiniResponse(string json, long tickerId)
+	{
+		List<MinuteBar> bars;
+		try
+		{
+			using var doc = JsonDocument.Parse(json);
+			var root = doc.RootElement;
+			if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+				return Array.Empty<MinuteBar>();
+
+			var envelope = root[0];
+			if (!envelope.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+				return Array.Empty<MinuteBar>();
+
+			bars = new List<MinuteBar>(data.GetArrayLength());
+			foreach (var row in data.EnumerateArray())
+			{
+				if (row.ValueKind != JsonValueKind.String) continue;
+				var s = row.GetString();
+				if (string.IsNullOrEmpty(s)) continue;
+				var parsed = ParseMiniBarRow(s);
+				if (parsed != null) bars.Add(parsed);
+			}
+		}
+		catch (JsonException ex)
+		{
+			Console.WriteLine($"Webull charts (mini): failed to parse response for tickerId {tickerId}: {ex.Message}");
+			return Array.Empty<MinuteBar>();
+		}
+
+		bars.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+		return bars;
+	}
+
+	internal static MinuteBar? ParseMiniBarRow(string row)
+	{
+		var parts = row.Split(',');
+		if (parts.Length < 7) return null;
+
+		if (!long.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var unixSec)) return null;
+		if (!TryParseDec(parts[1], out var open)) return null;
+		if (!TryParseDec(parts[2], out var close)) return null;
+		if (!TryParseDec(parts[3], out var high)) return null;
+		if (!TryParseDec(parts[4], out var low)) return null;
+		// parts[5] is prevClose — skipped.
+		// parts[6] is volume; SPX index always returns the literal "null" string here.
+		long volume = 0;
+		if (!string.Equals(parts[6], "null", StringComparison.OrdinalIgnoreCase))
+			long.TryParse(parts[6], NumberStyles.Integer | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out volume);
+
+		if (high < Math.Max(open, close) || low > Math.Min(open, close)) return null;
+
+		var timestamp = DateTimeOffset.FromUnixTimeSeconds(unixSec);
+		return new MinuteBar(timestamp, open, high, low, close, Math.Max(0, volume));
 	}
 
 	internal static IReadOnlyList<MinuteBar> ParseChartsResponse(string json, long tickerId)

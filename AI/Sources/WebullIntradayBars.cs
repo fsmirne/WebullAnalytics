@@ -21,7 +21,7 @@ internal static class WebullIntradayBars
 	// SPX family — tickers whose underlying is the S&P 500 cash index, which Webull serves with no
 	// extended-hours coverage. These transparently merge SPY pre/post-market bars (converted to SPX
 	// scale) with SPX RTH bars.
-	private static readonly HashSet<string> SpxFamilyTickers = new(StringComparer.OrdinalIgnoreCase) { "SPXW", "SPX" };
+	internal static readonly HashSet<string> SpxFamilyTickers = new(StringComparer.OrdinalIgnoreCase) { "SPXW", "SPX" };
 
 	// SPX cash-index chart tickerId (verified via Webull's getQuote endpoint — the option-chain
 	// namespace value 913324359 is actually SPXC stock, not the S&P 500 index).
@@ -134,6 +134,242 @@ internal static class WebullIntradayBars
 		}
 		merged.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
 		return merged;
+	}
+
+	/// <summary>Range-based historical fetch that paginates Webull's <c>query-mini</c> from
+	/// <paramref name="endNyDate"/> backward through <paramref name="startNyDate"/> rather than
+	/// anchoring one call per day. Per-day anchoring silently truncates to 1 bar on ~34% of deep
+	/// past dates; paginating from "now" backward — the way Webull's web app does it — sidesteps
+	/// that. For SPX-family input we paginate SPX RTH and SPY ext-hours separately, then merge
+	/// per NY date using the same SPX-wins/SPY-scaled logic the live capture uses. Returns one
+	/// list of bars per NY date in the range that had at least one usable bar; days with neither
+	/// SPX nor SPY coverage are absent from the dictionary.</summary>
+	public static async Task<Dictionary<DateTime, List<MinuteBar>>> FetchHistoricalRangeAsync(
+		ApiConfig apiConfig,
+		string ticker,
+		DateTime startNyDate,
+		DateTime endNyDate,
+		TimeSpan delayBetweenPages,
+		Action<string>? log,
+		CancellationToken cancellation)
+	{
+		// Cover full ext-hours envelope on both sides. SPY pre-market starts 04:00 ET; SPY post-market
+		// runs to 20:00 ET. The pagination anchor is end-side; we walk backward to the start-side.
+		var startEt = new DateTime(startNyDate.Year, startNyDate.Month, startNyDate.Day, 4, 0, 0, DateTimeKind.Unspecified);
+		var endEt = new DateTime(endNyDate.Year, endNyDate.Month, endNyDate.Day, 20, 0, 0, DateTimeKind.Unspecified);
+		var startUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(startEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+		var endUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+
+		IReadOnlyList<MinuteBar> primaryBars;
+		IReadOnlyList<MinuteBar> spyBars = Array.Empty<MinuteBar>();
+
+		if (SpxFamilyTickers.Contains(ticker))
+		{
+			log?.Invoke("paginating SPX RTH bars…");
+			primaryBars = await WebullChartsClient.FetchPaginatedHistoricalMinuteBarsAsync(
+				apiConfig, SpxChartTickerId, startUnix, endUnix, includeExtended: false,
+				countPerPage: 800, delayBetweenPages,
+				onPageProgress: (page, oldestSec, totalBars) =>
+					log?.Invoke($"  SPX page {page}: back to {DateTimeOffset.FromUnixTimeSeconds(oldestSec).UtcDateTime:yyyy-MM-dd HH:mm} UTC, {totalBars} unique bars so far"),
+				cancellation);
+
+			var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(new[] { "SPY" }, cancellation);
+			if (!resolved.TryGetValue("SPY", out var spyId))
+			{
+				log?.Invoke("SPY tickerId unresolved; using SPX RTH only (no pre/post-market in output)");
+			}
+			else
+			{
+				log?.Invoke("paginating SPY ext-hours bars…");
+				spyBars = await WebullChartsClient.FetchPaginatedHistoricalMinuteBarsAsync(
+					apiConfig, spyId, startUnix, endUnix, includeExtended: true,
+					countPerPage: 800, delayBetweenPages,
+					onPageProgress: (page, oldestSec, totalBars) =>
+						log?.Invoke($"  SPY page {page}: back to {DateTimeOffset.FromUnixTimeSeconds(oldestSec).UtcDateTime:yyyy-MM-dd HH:mm} UTC, {totalBars} unique bars so far"),
+					cancellation);
+			}
+		}
+		else
+		{
+			if (!WebullChartsClient.TryResolveKnownChartTickerId(ticker, out var tickerId))
+			{
+				var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(new[] { ticker }, cancellation);
+				if (!resolved.TryGetValue(ticker, out tickerId))
+				{
+					log?.Invoke($"could not resolve tickerId for '{ticker}'");
+					return new Dictionary<DateTime, List<MinuteBar>>();
+				}
+			}
+			log?.Invoke($"paginating {ticker} bars (incl. ext-hours)…");
+			primaryBars = await WebullChartsClient.FetchPaginatedHistoricalMinuteBarsAsync(
+				apiConfig, tickerId, startUnix, endUnix, includeExtended: true,
+				countPerPage: 800, delayBetweenPages,
+				onPageProgress: (page, oldestSec, totalBars) =>
+					log?.Invoke($"  {ticker} page {page}: back to {DateTimeOffset.FromUnixTimeSeconds(oldestSec).UtcDateTime:yyyy-MM-dd HH:mm} UTC, {totalBars} unique bars so far"),
+				cancellation);
+		}
+
+		// Group both series by NY date, then merge per date.
+		var primaryByDate = GroupByNyDate(primaryBars);
+		var spyByDate = GroupByNyDate(spyBars);
+		var result = new Dictionary<DateTime, List<MinuteBar>>();
+		var allDates = new SortedSet<DateTime>(primaryByDate.Keys);
+		foreach (var d in spyByDate.Keys) allDates.Add(d);
+		foreach (var d in allDates)
+		{
+			primaryByDate.TryGetValue(d, out var primary);
+			spyByDate.TryGetValue(d, out var spy);
+			var merged = MergeSpxAndSpyForDate(primary ?? new List<MinuteBar>(), spy ?? new List<MinuteBar>());
+			if (merged.Count > 0) result[d] = merged;
+		}
+		return result;
+	}
+
+	private static Dictionary<DateTime, List<MinuteBar>> GroupByNyDate(IReadOnlyList<MinuteBar> bars)
+	{
+		var byDate = new Dictionary<DateTime, List<MinuteBar>>();
+		foreach (var b in bars)
+		{
+			var d = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).Date;
+			if (!byDate.TryGetValue(d, out var list)) byDate[d] = list = new List<MinuteBar>();
+			list.Add(b);
+		}
+		foreach (var list in byDate.Values) list.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+		return byDate;
+	}
+
+	private static List<MinuteBar> MergeSpxAndSpyForDate(List<MinuteBar> primary, List<MinuteBar> spy)
+	{
+		if (primary.Count == 0 && spy.Count == 0) return new List<MinuteBar>();
+		// Non-SPX-family path: primary already includes ext-hours, no SPY to merge.
+		if (spy.Count == 0) return new List<MinuteBar>(primary);
+		// SPX-family with no SPX (truncated day): no fallback — we'd be emitting SPY values without
+		// a meaningful overlap to compute the ratio at. Caller decides what to do; we return empty.
+		if (primary.Count == 0) return new List<MinuteBar>();
+
+		var ratio = TryDeriveRatioFromOverlap(primary, spy);
+		if (!ratio.HasValue || ratio.Value <= 0m) return new List<MinuteBar>(primary);
+
+		var primaryTimestamps = new HashSet<long>(primary.Count);
+		foreach (var b in primary) primaryTimestamps.Add(b.Timestamp.ToUnixTimeSeconds());
+
+		var ratioValue = ratio.Value;
+		var merged = new List<MinuteBar>(primary.Count + spy.Count);
+		merged.AddRange(primary);
+		foreach (var b in spy)
+		{
+			if (primaryTimestamps.Contains(b.Timestamp.ToUnixTimeSeconds())) continue;
+			merged.Add(new MinuteBar(
+				b.Timestamp,
+				Math.Round(b.Open * ratioValue, 2),
+				Math.Round(b.High * ratioValue, 2),
+				Math.Round(b.Low * ratioValue, 2),
+				Math.Round(b.Close * ratioValue, 2),
+				b.Volume));
+		}
+		merged.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+		return merged;
+	}
+
+	/// <summary>Historical analog of <see cref="FetchSpxWithSpyExtendedAsync"/> used by `wa ai history`
+	/// backfill. Anchors at <paramref name="nyDate"/>'s 16:00 ET and pulls one session of SPX RTH bars
+	/// plus enough SPY bars to cover full pre/post-market via the same SPX/SPY ratio merge the live
+	/// capture uses. Each backfilled CSV therefore comes from the same source the bot actually sees
+	/// during live trading — no Yahoo/Polygon synth, no vendor disagreement on the 09:31 open.
+	///
+	/// For non-SPX-family tickers, delegates to a direct <see cref="WebullChartsClient.FetchHistoricalMinuteBarsAsync"/>
+	/// call on the ticker's own chart id.</summary>
+	public static async Task<IReadOnlyList<MinuteBar>> FetchHistoricalSessionAsync(
+		ApiConfig apiConfig,
+		string ticker,
+		DateTime nyDate,
+		CancellationToken cancellation)
+	{
+		var sessionEndEt = new DateTime(nyDate.Year, nyDate.Month, nyDate.Day, 16, 0, 0, DateTimeKind.Unspecified);
+		var anchorUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(sessionEndEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+
+		if (SpxFamilyTickers.Contains(ticker))
+			return await FetchHistoricalSpxSessionAsync(apiConfig, nyDate, anchorUnix, cancellation);
+
+		long tickerId;
+		if (!WebullChartsClient.TryResolveKnownChartTickerId(ticker, out tickerId))
+		{
+			var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(new[] { ticker }, cancellation);
+			if (!resolved.TryGetValue(ticker, out tickerId))
+			{
+				Console.WriteLine($"Webull historical: could not resolve tickerId for '{ticker}'.");
+				return Array.Empty<MinuteBar>();
+			}
+		}
+
+		// Generic tickers: 800 bars covers pre-market (04:00) + RTH (09:30) + after-hours (20:00) of one
+		// session with plenty of room. Filter to the target NY date — the response includes some bars
+		// from the previous session because we anchor at session end and walk backward.
+		var bars = await WebullChartsClient.FetchHistoricalMinuteBarsAsync(apiConfig, tickerId, anchorUnix, count: 800, includeExtended: true, cancellation);
+		return FilterToNyDate(bars, nyDate);
+	}
+
+	private static async Task<IReadOnlyList<MinuteBar>> FetchHistoricalSpxSessionAsync(
+		ApiConfig apiConfig,
+		DateTime nyDate,
+		long anchorUnix,
+		CancellationToken cancellation)
+	{
+		// SPX RTH alone is 390 minutes; 500 gives margin for the day-boundary overlap we filter out below.
+		// SPX has no extended-hours coverage so includeExtended doesn't matter here.
+		var spxBars = FilterToNyDate(
+			await WebullChartsClient.FetchHistoricalMinuteBarsAsync(apiConfig, SpxChartTickerId, anchorUnix, count: 500, includeExtended: false, cancellation),
+			nyDate);
+		if (spxBars.Count == 0) return Array.Empty<MinuteBar>();
+
+		var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(new[] { "SPY" }, cancellation);
+		if (!resolved.TryGetValue("SPY", out var spyId))
+		{
+			Console.WriteLine("Webull historical: could not resolve SPY tickerId for pre/post-market proxy; using SPX RTH only.");
+			return spxBars;
+		}
+
+		// SPY: pre-market (04:00–09:30 = 330 mins) + RTH (09:30–16:00 = 390 mins) + post (16:00–20:00 =
+		// 240 mins) = 960 minutes. Pull 1000 to cover a full ext-hours session with overlap margin.
+		// includeExtended must be true to get pre/post-market bars at all — the default response is
+		// RTH-only.
+		var spyBars = FilterToNyDate(
+			await WebullChartsClient.FetchHistoricalMinuteBarsAsync(apiConfig, spyId, anchorUnix, count: 1000, includeExtended: true, cancellation),
+			nyDate);
+		if (spyBars.Count == 0) return spxBars;
+
+		var ratio = TryDeriveRatioFromOverlap(spxBars, spyBars);
+		if (!ratio.HasValue || ratio.Value <= 0m) return spxBars;
+
+		var spxTimestamps = new HashSet<long>(spxBars.Count);
+		foreach (var b in spxBars) spxTimestamps.Add(b.Timestamp.ToUnixTimeSeconds());
+
+		var ratioValue = ratio.Value;
+		var merged = new List<MinuteBar>(spxBars.Count + spyBars.Count);
+		merged.AddRange(spxBars);
+		foreach (var b in spyBars)
+		{
+			if (spxTimestamps.Contains(b.Timestamp.ToUnixTimeSeconds())) continue;
+			merged.Add(new MinuteBar(
+				b.Timestamp,
+				Math.Round(b.Open * ratioValue, 2),
+				Math.Round(b.High * ratioValue, 2),
+				Math.Round(b.Low * ratioValue, 2),
+				Math.Round(b.Close * ratioValue, 2),
+				b.Volume));
+		}
+		merged.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+		return merged;
+	}
+
+	private static IReadOnlyList<MinuteBar> FilterToNyDate(IReadOnlyList<MinuteBar> bars, DateTime nyDate)
+	{
+		var filtered = new List<MinuteBar>(bars.Count);
+		foreach (var b in bars)
+		{
+			if (TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).Date == nyDate) filtered.Add(b);
+		}
+		return filtered;
 	}
 
 	/// <summary>Returns SPX/SPY ratio computed from the most-recent bar that exists in both series at
