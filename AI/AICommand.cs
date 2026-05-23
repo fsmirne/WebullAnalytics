@@ -687,6 +687,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Research mode (by-design lookahead): the minute loop evaluates every minute of the trading day, forward-simulates each proposal to expiry using known daily close intrinsic, and opens the minute whose proposal yields the highest realized P&L. Produces an upper bound on strategy performance with perfect timing. Not realistic — use to size the gap between the current realistic scan and a theoretical ceiling.")]
 	public bool Oracle { get; set; }
 
+	[CommandOption("--profile")]
+	[Description("Print a per-step timing breakdown (rules, settle, opener minute loop, intraday triggers, MTM) at the end of the run. Useful when a recent change made the backtest noticeably slower.")]
+	public bool Profile { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -777,7 +781,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile);
 
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}");
 		AnsiConsole.WriteLine();
