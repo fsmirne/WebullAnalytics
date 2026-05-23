@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using WebullAnalytics.AI.Backtest;
+using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
 using WebullAnalytics.Utils;
 
@@ -35,12 +36,20 @@ internal sealed class AIHistorySettings : CommandSettings
 	[Description("Report intraday CSV completeness over the full on-disk history (earliest CSV through yesterday). Audit's window is determined from on-disk CSVs, so it is mutually exclusive with --lookback-years. No network fetches. Reconciles sealed.json with any LooksComplete file not yet listed. Exit code 0 if every trading day is complete, 2 otherwise.")]
 	public bool Audit { get; set; }
 
+	[CommandOption("--import-webull-spx <file>")]
+	[Description("One-time bootstrap: import a text file of SPX query-mini rows (one per line, `ts,o,c,h,l,prevClose,vol,vwap` format) sniffed from Webull's web app and merge with SPY ext-hours pulled per-day from the API. Used to load 2 years of historical SPX intraday — Webull's chart endpoint requires per-URL x-s signatures we can't forge, so deep history is captured via a browser console sniffer that records the chart's own signed requests. SPY ext-hours doesn't need signatures and is fetched here.")]
+	public string? ImportWebullSpxFile { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("ticker is required");
 		if (LookbackYears < 1) return ValidationResult.Error($"--lookback-years: must be ≥ 1, got {LookbackYears}");
 		if (Audit && Program.RawArgs.Any(a => a.Equals("--lookback-years", StringComparison.OrdinalIgnoreCase) || a.StartsWith("--lookback-years=", StringComparison.OrdinalIgnoreCase)))
 			return ValidationResult.Error("--audit and --lookback-years are mutually exclusive: audit derives its window from on-disk CSVs, so a lookback override would silently be ignored.");
+		if (Audit && !string.IsNullOrEmpty(ImportWebullSpxFile))
+			return ValidationResult.Error("--audit and --import-webull-spx are mutually exclusive.");
+		if (!string.IsNullOrEmpty(ImportWebullSpxFile) && !File.Exists(ImportWebullSpxFile))
+			return ValidationResult.Error($"--import-webull-spx: file not found at '{ImportWebullSpxFile}'");
 		return ValidationResult.Success();
 	}
 }
@@ -54,14 +63,6 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		"SPY", "SPX", "SPXW", "XSP"
 	};
 
-	// Tickers whose intraday is synthesized from SPY × (today_SPX_open / today_SPY_open_at_0930). SPX cash
-	// index isn't on massive.com's basic tier, so the historical SPXW/SPX/XSP intraday must be derived
-	// from SPY exactly the way scripts/backfill_intraday_polygon.py does it.
-	private static readonly HashSet<string> SpxSynthesizedTickers = new(StringComparer.OrdinalIgnoreCase)
-	{
-		"SPX", "SPXW", "XSP"
-	};
-
 	public override async Task<int> ExecuteAsync(CommandContext context, AIHistorySettings settings, CancellationToken cancellation)
 	{
 		TerminalHelper.EnsureTerminalWidthFromConfig();
@@ -73,6 +74,12 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		{
 			AnsiConsole.MarkupLine($"[bold]Auditing intraday cache for {Markup.Escape(ticker)}[/]");
 			return RunAudit(ticker, asOf);
+		}
+
+		if (!string.IsNullOrEmpty(settings.ImportWebullSpxFile))
+		{
+			AnsiConsole.MarkupLine($"[bold]Importing Webull SPX bootstrap into {Markup.Escape(ticker)}[/]");
+			return await ImportSniffedSpxAsync(ticker, settings.ImportWebullSpxFile, cancellation);
 		}
 
 		AnsiConsole.MarkupLine($"[bold]Fetching history for {Markup.Escape(ticker)}[/]");
@@ -97,9 +104,9 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			if (!await FetchSmileAsync(earliest, asOf, cancellation)) return 1;
 		}
 
-		// Intraday gap-fill from massive.com. Best-effort: failures here log a warning but don't fail
+		// Intraday gap-fill from Webull. Best-effort: failures here log a warning but don't fail
 		// the whole command, since the daily caches (the main thing backtests need) are already on disk.
-		await BackfillIntradayAsync(ticker, bars, earliest, asOf, cancellation);
+		await BackfillIntradayAsync(ticker, earliest, asOf, cancellation);
 
 		AnsiConsole.MarkupLine("[dim]Done. Run `wa ai backtest " + Markup.Escape(ticker) + "` to use this data.[/]");
 		return 0;
@@ -136,17 +143,23 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		return true;
 	}
 
-	/// <summary>Fills <c>data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv</c> for every trading day in the
-	/// lookback window whose existing file is missing or partial. Pulls 1-min bars from massive.com for
-	/// the source ticker (SPY when input is SPX-family; the input itself otherwise) over a single
-	/// [minNeed, maxNeed] range — Polygon's 50k-bars-per-page cap covers ~4 months of 1-min in one
-	/// request, paginated automatically by <see cref="MassivePolygonClient"/>. For SPX-family inputs
-	/// the SPY bars are scaled by <c>today_SPX_open / today_SPY_open_at_0930</c> per session so the
-	/// 09:30 minute exactly equals the daily ^SPX open — same anchor as scripts/backfill_intraday_polygon.py.
-	/// Existing-and-complete files are left alone; today is never touched (live Webull owns it). The
-	/// sealed manifest is rewritten after every successful CSV write so a crash mid-loop never leaves
-	/// the on-disk CSV out of sync with sealed.json.</summary>
-	private static async Task BackfillIntradayAsync(string inputTicker, HistoricalBarCache dailyBars, DateTime earliest, DateTime asOf, CancellationToken cancellation)
+	/// <summary>Fills <c>data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv</c> for every missing trading day in
+	/// the lookback window. Source-of-truth routing:
+	/// <list type="bullet">
+	///   <item><b>Non-SPX tickers</b> (SPY, AAPL, QQQ, …) — pulled from massive.com (SIP-consolidated
+	///     NMS data via Polygon's mirror endpoint). One range query covers the whole window;
+	///     <see cref="MassivePolygonClient"/> handles pagination + the basic-tier 5-req/min rate
+	///     window internally. No per-day calls.</item>
+	///   <item><b>SPX-family tickers</b> (SPX/SPXW) — SPX RTH bars come from Webull's <c>query-mini</c>
+	///     chart endpoint (massive doesn't serve the cash index), paginated backward from "now". SPY
+	///     ext-hours bars used to scale into pre/post-market come from massive too — Webull SPY is
+	///     subject to the same rate-limit dropouts SPX is, and massive's SIP feed is the higher-
+	///     fidelity choice anyway.</item>
+	/// </list>
+	/// Partial files are never overwritten (preserves live `wa ai watch` data). Today is never
+	/// touched (live Webull owns the current session). The sealed manifest is rewritten after every
+	/// successful CSV write so a crash mid-loop can't desync the on-disk CSV from sealed.json.</summary>
+	private static async Task BackfillIntradayAsync(string inputTicker, DateTime earliest, DateTime asOf, CancellationToken cancellation)
 	{
 		var apiConfig = TryLoadApiConfig();
 		if (apiConfig == null)
@@ -154,44 +167,44 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			AnsiConsole.MarkupLine("  intraday: [yellow]skipped[/] (api-config.json not found — run `wa sniff` to bootstrap it)");
 			return;
 		}
-		if (string.IsNullOrWhiteSpace(apiConfig.MassiveApiKey))
-		{
-			AnsiConsole.MarkupLine("  intraday: [yellow]skipped[/] ([italic]massiveApiKey[/] not set in api-config.json)");
-			return;
-		}
 
 		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
 		var earliestNy = TimeZoneInfo.ConvertTime(earliest, NyTz).Date;
 		var audit = AuditIntraday(inputTicker, earliestNy, todayNy);
 		var totalDays = audit.Complete.Count + audit.Partial.Count + audit.Missing.Count;
-		var needBackfill = audit.Partial.Concat(audit.Missing).OrderBy(d => d).ToList();
+		// Only backfill MISSING files. Partial files exist because `wa ai watch` wrote them live from
+		// Webull and were truncated (e.g., shutdown before 16:00). Overwriting them with a fresh pull
+		// would risk losing live-source fidelity. `--audit` reports partial dates so the user can
+		// manually wipe + re-pull if they want.
+		var needBackfill = audit.Missing.OrderBy(d => d).ToList();
 
 		if (needBackfill.Count == 0)
 		{
-			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]ok[/] (all {totalDays} trading days complete)");
+			var partialNote = audit.Partial.Count > 0
+				? $" ([yellow]{audit.Partial.Count} partial left untouched[/] — run `wa ai history {Markup.Escape(inputTicker)} --audit` to list)"
+				: "";
+			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]ok[/] (all {audit.Complete.Count} complete days; nothing to backfill){partialNote}");
 			return;
 		}
 
-		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: {audit.Complete.Count}/{totalDays} complete; pulling {needBackfill.Count} from massive.com");
+		var isSpxFamily = WebullIntradayBars.SpxFamilyTickers.Contains(inputTicker);
+		var partialSkipNote = audit.Partial.Count > 0 ? $" ([yellow]{audit.Partial.Count} partial files preserved[/])" : "";
+		var sourceLabel = isSpxFamily ? "Webull (SPX) + massive (SPY)" : "massive";
+		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: {audit.Complete.Count}/{totalDays} complete; pulling {needBackfill.Count} missing day(s) from {sourceLabel}{partialSkipNote}");
 		AnsiConsole.MarkupLine($"    needed: {Markup.Escape(FormatDateList(needBackfill, maxInline: 12))}");
 
-		var isSpxSynth = SpxSynthesizedTickers.Contains(inputTicker);
-		var sourceTicker = isSpxSynth ? "SPY" : inputTicker;
-		var minNeed = DateOnly.FromDateTime(needBackfill[0]);
-		var maxNeed = DateOnly.FromDateTime(needBackfill[^1]);
-		var fetched = await MassivePolygonClient.FetchMinuteAggregatesAsync(apiConfig.MassiveApiKey, sourceTicker, minNeed, maxNeed, cancellation);
-		if (fetched.Count == 0)
-		{
-			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [red]failed[/] (no bars returned from massive.com)");
-			return;
-		}
+		var earliestMissing = needBackfill[0];
+		var latestMissing = needBackfill[^1];
 
-		var byDate = new Dictionary<DateTime, List<MinuteBar>>();
-		foreach (var b in fetched)
+		Dictionary<DateTime, List<MinuteBar>> barsByDate;
+		try
 		{
-			var d = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).Date;
-			if (!byDate.TryGetValue(d, out var list)) byDate[d] = list = new List<MinuteBar>();
-			list.Add(b);
+			barsByDate = await FetchRangeAsync(apiConfig, inputTicker, isSpxFamily, earliestMissing, latestMissing, cancellation);
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [red]failed[/] ({Markup.Escape(ex.Message)})");
+			return;
 		}
 
 		var sealedDates = audit.SealedDates;
@@ -199,26 +212,13 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		var skipped = new List<(DateTime Date, string Reason)>();
 		foreach (var d in needBackfill)
 		{
-			if (!byDate.TryGetValue(d, out var dayBars) || dayBars.Count == 0)
+			if (!barsByDate.TryGetValue(d, out var bars) || bars.Count == 0)
 			{
-				skipped.Add((d, "no source bars from massive.com"));
+				skipped.Add((d, "no bars returned from Webull pagination"));
 				continue;
 			}
-
-			IReadOnlyList<MinuteBar> output = dayBars;
-			if (isSpxSynth)
-			{
-				var synth = await SynthesizeSpxAsync(d, dayBars, dailyBars, inputTicker, cancellation);
-				if (synth == null)
-				{
-					skipped.Add((d, "no daily open for SPX synthesis"));
-					continue;
-				}
-				output = synth;
-			}
-
 			var path = Path.Combine(audit.IntradayDir, $"{d:yyyy-MM-dd}.csv");
-			WriteIntradayCsv(path, output);
+			WriteIntradayCsv(path, bars);
 			sealedDates.Add(d);
 			SaveSealedManifest(audit.SealedPath, sealedDates);
 			written.Add(d);
@@ -228,6 +228,317 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]wrote {written.Count}[/] file(s){skipNote}");
 		foreach (var (d, reason) in skipped)
 			AnsiConsole.MarkupLine($"    [yellow]{d:yyyy-MM-dd}[/]: skipped ({Markup.Escape(reason)})");
+	}
+
+	/// <summary>One-time bootstrap importer for the 2-year historical pull. Reads a text file of SPX
+	/// <c>query-mini</c> rows captured from Webull's web app (via the browser console sniffer), parses
+	/// them, then pulls matching SPY ext-hours bars per-day from the API (which doesn't need x-s).
+	/// Merges SPX + SPY scaled by per-day ratio and writes per-day CSVs in <c>data/intraday/&lt;ticker&gt;/</c>.
+	/// Existing CSVs are NOT overwritten (same no-overwrite invariant as <see cref="BackfillIntradayAsync"/>).
+	/// Throttle: 1 sec between per-day SPY pulls.</summary>
+	private static async Task<int> ImportSniffedSpxAsync(string ticker, string sniffedSpxPath, CancellationToken cancellation)
+	{
+		var apiConfig = TryLoadApiConfig();
+		if (apiConfig == null)
+		{
+			AnsiConsole.MarkupLine("  [red]api-config.json not found[/] — run `wa sniff` to bootstrap it");
+			return 1;
+		}
+
+		var spxBars = ParseSniffedRows(sniffedSpxPath);
+		if (spxBars.Count == 0)
+		{
+			AnsiConsole.MarkupLine($"  [red]no parseable rows in {Markup.Escape(sniffedSpxPath)}[/]");
+			return 1;
+		}
+
+		var spxByDate = GroupBarsByNyDate(spxBars);
+		var earliestSpxDate = spxByDate.Keys.Min();
+		var latestSpxDate = spxByDate.Keys.Max();
+		AnsiConsole.MarkupLine($"  loaded {spxBars.Count} SPX bars covering {spxByDate.Count} trading day(s): {earliestSpxDate:yyyy-MM-dd} → {latestSpxDate:yyyy-MM-dd}");
+
+		var intradayDir = Path.Combine(Program.ResolvePath("data/intraday"), ticker);
+		Directory.CreateDirectory(intradayDir);
+		var sealedPath = Path.Combine(intradayDir, "sealed.json");
+		var sealedDates = LoadSealedManifest(sealedPath);
+
+		if (string.IsNullOrWhiteSpace(apiConfig.MassiveApiKey))
+		{
+			AnsiConsole.MarkupLine("  [red]MassiveApiKey not set in api-config.json[/] — required for the SPY ext-hours half of the merge.");
+			return 1;
+		}
+
+		var written = new List<DateTime>();
+		var skipped = new List<(DateTime Date, string Reason)>();
+		var todayNy = TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz).Date;
+
+		// Classify each date: "needs-new" (no CSV), "needs-repair" (CSV exists but lacks pre-market
+		// = previous SPY fetch failed), or "complete" (CSV exists with pre-market). Re-running the
+		// import after a flaky bulk run automatically repairs incomplete files.
+		var needsWork = new List<DateTime>();
+		var alreadyComplete = 0;
+		foreach (var d in spxByDate.Keys.Where(d => d < todayNy).OrderBy(d => d))
+		{
+			var csvPath = Path.Combine(intradayDir, $"{d:yyyy-MM-dd}.csv");
+			if (File.Exists(csvPath) && CsvHasPreMarketBars(csvPath)) alreadyComplete++;
+			else needsWork.Add(d);
+		}
+
+		if (needsWork.Count == 0)
+		{
+			AnsiConsole.MarkupLine($"  [green]all {alreadyComplete} day(s) already complete[/]; nothing to import");
+			return 0;
+		}
+
+		AnsiConsole.MarkupLine(alreadyComplete > 0
+			? $"  {alreadyComplete} day(s) already complete; need SPY for {needsWork.Count} day(s)"
+			: $"  pulling SPY ext-hours for {needsWork.Count} session(s)");
+
+		// Single bulk SPY pull from massive.com — one range query (auto-paginated internally) covering
+		// the full needed window. Massive returns ~50k bars/page so even 2 years of SPY 1-min fits
+		// in ~4 pages = ~1 minute. Far faster and more reliable than per-day Webull calls.
+		var spyStart = needsWork.Min();
+		var spyEnd = needsWork.Max();
+		AnsiConsole.MarkupLine($"    pulling SPY from massive.com ({spyStart:yyyy-MM-dd} → {spyEnd:yyyy-MM-dd})");
+		IReadOnlyList<MinuteBar> spyAllBars;
+		try
+		{
+			spyAllBars = await MassivePolygonClient.FetchMinuteAggregatesAsync(
+				apiConfig.MassiveApiKey, "SPY",
+				DateOnly.FromDateTime(spyStart), DateOnly.FromDateTime(spyEnd), cancellation);
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			AnsiConsole.MarkupLine($"  [red]massive SPY pull failed[/]: {Markup.Escape(ex.Message)}");
+			return 1;
+		}
+		AnsiConsole.MarkupLine($"    massive returned {spyAllBars.Count} SPY bars across the range");
+		var spyByDate = GroupBarsByNyDate(spyAllBars);
+
+		var index = 0;
+		foreach (var d in needsWork)
+		{
+			cancellation.ThrowIfCancellationRequested();
+			var csvPath = Path.Combine(intradayDir, $"{d:yyyy-MM-dd}.csv");
+			index++;
+
+			spyByDate.TryGetValue(d, out var spyOnDay);
+			var spxOnDay = spxByDate[d];
+			var merged = MergeSpxAndSpy(spxOnDay, spyOnDay ?? new List<MinuteBar>());
+			if (merged.Count == 0)
+			{
+				skipped.Add((d, "no usable bars after merge"));
+				continue;
+			}
+
+			WriteIntradayCsv(csvPath, merged);
+			sealedDates.Add(d);
+			SaveSealedManifest(sealedPath, sealedDates);
+			written.Add(d);
+
+			if (index % 50 == 0)
+				AnsiConsole.MarkupLine($"    progress: {index}/{needsWork.Count} (latest: {d:yyyy-MM-dd}, {merged.Count} bars)");
+		}
+
+		AnsiConsole.MarkupLine($"  [green]wrote {written.Count}[/] file(s), [yellow]skipped {skipped.Count}[/]");
+		var skipShow = skipped.Take(10).ToList();
+		foreach (var (d, reason) in skipShow)
+			AnsiConsole.MarkupLine($"    [yellow]{d:yyyy-MM-dd}[/]: {Markup.Escape(reason)}");
+		if (skipped.Count > skipShow.Count)
+			AnsiConsole.MarkupLine($"    …and {skipped.Count - skipShow.Count} more");
+		return 0;
+	}
+
+	/// <summary>Parses a text file of <c>query-mini</c> response rows (one per line). Each row's
+	/// 8-column format matches what Webull's chart endpoint returns: <c>ts,open,close,high,low,prevClose,volume,vwap</c>.
+	/// Reuses <see cref="WebullChartsClient.ParseMiniBarRow"/> so the schema stays in one place.</summary>
+	private static List<MinuteBar> ParseSniffedRows(string path)
+	{
+		var bars = new List<MinuteBar>();
+		var seen = new HashSet<long>();
+		foreach (var raw in File.ReadAllLines(path))
+		{
+			var line = raw.Trim();
+			if (line.Length == 0 || line.StartsWith("#")) continue;
+			var parsed = WebullChartsClient.ParseMiniBarRow(line);
+			if (parsed == null) continue;
+			var sec = parsed.Timestamp.ToUnixTimeSeconds();
+			if (!seen.Add(sec)) continue;
+			bars.Add(parsed);
+		}
+		bars.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+		return bars;
+	}
+
+	/// <summary>True if the CSV at <paramref name="path"/> contains at least one bar timestamped
+	/// before 09:30 ET (NY) — used by the import to distinguish "fully merged" CSVs (SPX RTH + SPY
+	/// ext-hours) from "SPX-only" CSVs left behind by a SPY fetch failure. Re-running the import
+	/// repairs the latter without overwriting the former.</summary>
+	private static bool CsvHasPreMarketBars(string path)
+	{
+		if (!File.Exists(path)) return false;
+		foreach (var line in File.ReadLines(path).Skip(1))
+		{
+			if (string.IsNullOrWhiteSpace(line)) continue;
+			var firstComma = line.IndexOf(',');
+			if (firstComma <= 0) continue;
+			if (!DateTimeOffset.TryParse(line.AsSpan(0, firstComma), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var ts)) continue;
+			var et = TimeZoneInfo.ConvertTime(ts, NyTz);
+			if (et.Hour * 60 + et.Minute < 9 * 60 + 30) return true;
+		}
+		return false;
+	}
+
+	/// <summary>Single entry point for historical-range fetches used by <see cref="BackfillIntradayAsync"/>.
+	/// Routes to massive.com for non-SPX-family tickers (SIP-consolidated NMS, no rate-limit issues at
+	/// the basic tier for a single range query) and to a Webull-SPX + massive-SPY combo for SPX-family
+	/// (massive doesn't serve the cash index). Returns one bar list per NY date covering bars
+	/// timestamped within that date in NY tz; days with no usable bars are absent from the dictionary.</summary>
+	private static async Task<Dictionary<DateTime, List<MinuteBar>>> FetchRangeAsync(
+		ApiConfig apiConfig,
+		string ticker,
+		bool isSpxFamily,
+		DateTime startNyDate,
+		DateTime endNyDate,
+		CancellationToken cancellation)
+	{
+		if (isSpxFamily)
+		{
+			var spxBars = await FetchSpxRthFromWebullAsync(apiConfig, startNyDate, endNyDate, cancellation);
+			var spyBars = await FetchFromMassiveAsync(apiConfig, "SPY", startNyDate, endNyDate, cancellation);
+			return MergeSpxAndSpyByDate(spxBars, spyBars);
+		}
+		else
+		{
+			var bars = await FetchFromMassiveAsync(apiConfig, ticker, startNyDate, endNyDate, cancellation);
+			var byDate = GroupBarsByNyDate(bars);
+			return byDate;
+		}
+	}
+
+	private static async Task<IReadOnlyList<MinuteBar>> FetchFromMassiveAsync(
+		ApiConfig apiConfig,
+		string ticker,
+		DateTime startNyDate,
+		DateTime endNyDate,
+		CancellationToken cancellation)
+	{
+		if (string.IsNullOrWhiteSpace(apiConfig.MassiveApiKey))
+		{
+			AnsiConsole.MarkupLine($"    [yellow]MassiveApiKey not set[/] — cannot pull {Markup.Escape(ticker)} from massive.com");
+			return Array.Empty<MinuteBar>();
+		}
+		AnsiConsole.MarkupLine($"    pulling {Markup.Escape(ticker)} from massive.com ({startNyDate:yyyy-MM-dd} → {endNyDate:yyyy-MM-dd})");
+		var bars = await MassivePolygonClient.FetchMinuteAggregatesAsync(
+			apiConfig.MassiveApiKey, ticker,
+			DateOnly.FromDateTime(startNyDate), DateOnly.FromDateTime(endNyDate),
+			cancellation);
+		AnsiConsole.MarkupLine($"    massive returned {bars.Count} {Markup.Escape(ticker)} bars");
+		return bars;
+	}
+
+	private static async Task<IReadOnlyList<MinuteBar>> FetchSpxRthFromWebullAsync(
+		ApiConfig apiConfig,
+		DateTime startNyDate,
+		DateTime endNyDate,
+		CancellationToken cancellation)
+	{
+		// Webull's query-mini SPX endpoint truncates deep-history requests to 1 bar without per-URL
+		// x-s signatures — pagination backward from "now" only walks reliably ~3 RTH days before the
+		// API stops advancing. For SPX deep history users run `--import-webull-spx <file>`; this
+		// path is for the small recent gap (yesterday's missing CSV after a late `wa ai watch` shutdown).
+		var endEt = new DateTime(endNyDate.Year, endNyDate.Month, endNyDate.Day, 20, 0, 0, DateTimeKind.Unspecified);
+		var startEt = new DateTime(startNyDate.Year, startNyDate.Month, startNyDate.Day, 4, 0, 0, DateTimeKind.Unspecified);
+		var endUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+		var startUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(startEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+		AnsiConsole.MarkupLine($"    paginating SPX RTH from Webull ({startNyDate:yyyy-MM-dd} → {endNyDate:yyyy-MM-dd})");
+		const long SpxChartTickerId = 913354362L;
+		var bars = await WebullChartsClient.FetchPaginatedHistoricalMinuteBarsAsync(
+			apiConfig, SpxChartTickerId, startUnix, endUnix,
+			includeExtended: false, countPerPage: 800,
+			delayBetweenPages: TimeSpan.FromSeconds(1),
+			onPageProgress: null, cancellation);
+		AnsiConsole.MarkupLine($"    Webull returned {bars.Count} SPX bars");
+		return bars;
+	}
+
+	/// <summary>Groups SPX RTH bars and SPY ext-hours bars by NY date, then merges per-date with the
+	/// same SPX-wins-on-overlap-plus-SPY-scaled logic used by <see cref="ImportSniffedSpxAsync"/>.
+	/// Days where SPX has zero bars on that date are dropped (we'd be emitting pure SPY-scaled
+	/// without an anchor for the ratio).</summary>
+	private static Dictionary<DateTime, List<MinuteBar>> MergeSpxAndSpyByDate(IReadOnlyList<MinuteBar> spxBars, IReadOnlyList<MinuteBar> spyBars)
+	{
+		var spxByDate = GroupBarsByNyDate(spxBars);
+		var spyByDate = GroupBarsByNyDate(spyBars);
+		var result = new Dictionary<DateTime, List<MinuteBar>>();
+		var allDates = new SortedSet<DateTime>(spxByDate.Keys);
+		foreach (var d in spyByDate.Keys) allDates.Add(d);
+		foreach (var d in allDates)
+		{
+			spxByDate.TryGetValue(d, out var spx);
+			spyByDate.TryGetValue(d, out var spy);
+			var merged = MergeSpxAndSpy(spx ?? new List<MinuteBar>(), spy ?? new List<MinuteBar>());
+			if (merged.Count > 0) result[d] = merged;
+		}
+		return result;
+	}
+
+	private static Dictionary<DateTime, List<MinuteBar>> GroupBarsByNyDate(IReadOnlyList<MinuteBar> bars)
+	{
+		var by = new Dictionary<DateTime, List<MinuteBar>>();
+		foreach (var b in bars)
+		{
+			var d = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).Date;
+			if (!by.TryGetValue(d, out var list)) by[d] = list = new List<MinuteBar>();
+			list.Add(b);
+		}
+		foreach (var list in by.Values) list.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+		return by;
+	}
+
+	/// <summary>Combines SPX RTH bars (authoritative) with SPY ext-hours bars (proxy for SPX
+	/// pre/post-market, which the cash index doesn't have). SPX wins on minute overlap; SPY is scaled
+	/// by the most-recent SPX/SPY ratio observed in that day's overlap. Mirrors the live-capture path
+	/// in <see cref="WebullIntradayBars"/>.</summary>
+	private static List<MinuteBar> MergeSpxAndSpy(List<MinuteBar> spx, List<MinuteBar> spy)
+	{
+		if (spx.Count == 0 && spy.Count == 0) return new List<MinuteBar>();
+		if (spy.Count == 0) return new List<MinuteBar>(spx);
+		if (spx.Count == 0) return new List<MinuteBar>();
+
+		decimal? ratio = null;
+		var spyByTs = new Dictionary<long, decimal>(spy.Count);
+		foreach (var b in spy) if (b.Close > 0m) spyByTs[b.Timestamp.ToUnixTimeSeconds()] = b.Close;
+		for (var i = spx.Count - 1; i >= 0; i--)
+		{
+			if (spx[i].Close <= 0m) continue;
+			if (spyByTs.TryGetValue(spx[i].Timestamp.ToUnixTimeSeconds(), out var spyClose) && spyClose > 0m)
+			{
+				ratio = spx[i].Close / spyClose;
+				break;
+			}
+		}
+		if (!ratio.HasValue || ratio.Value <= 0m) return new List<MinuteBar>(spx);
+
+		var spxTimestamps = new HashSet<long>(spx.Count);
+		foreach (var b in spx) spxTimestamps.Add(b.Timestamp.ToUnixTimeSeconds());
+
+		var ratioValue = ratio.Value;
+		var merged = new List<MinuteBar>(spx.Count + spy.Count);
+		merged.AddRange(spx);
+		foreach (var b in spy)
+		{
+			if (spxTimestamps.Contains(b.Timestamp.ToUnixTimeSeconds())) continue;
+			merged.Add(new MinuteBar(
+				b.Timestamp,
+				Math.Round(b.Open * ratioValue, 2),
+				Math.Round(b.High * ratioValue, 2),
+				Math.Round(b.Low * ratioValue, 2),
+				Math.Round(b.Close * ratioValue, 2),
+				b.Volume));
+		}
+		merged.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+		return merged;
 	}
 
 	/// <summary>Validates every on-disk intraday CSV from the earliest filename through yesterday (NY tz).
@@ -394,21 +705,26 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		}
 	}
 
-	/// <summary>"Complete" = file exists with at least 380 RTH-window bars, the 09:30 ET opening bar
-	/// present, and the 15:59 ET closing bar present. The strict close requirement catches partial
-	/// live captures that stopped a few minutes before 16:00 (the common case after `wa ai watch` is
-	/// shut down before the bell). Early-close days will fail this check on first run and be
-	/// re-pulled from massive.com, then sealed via <c>.sealed.json</c> so they don't reseed on
-	/// subsequent runs.</summary>
+	/// <summary>"Complete" = file exists, has the 09:30 ET opening bar, and ends at one of the two
+	/// expected NYSE session closes:
+	/// <list type="bullet">
+	///   <item>Regular full session: ≥380 RTH bars with the 15:59 ET bar present (closes 16:00).</item>
+	///   <item>Early-close session: ≥200 RTH bars with the last bar between 12:59 and 13:00 ET
+	///     (closes 13:00 — July 3, day after Thanksgiving, Christmas Eve).</item>
+	/// </list>
+	/// Without the early-close branch, half-days never pass this check, never auto-seal in the audit,
+	/// and stay flagged as "partial" forever — see the SPY audit on 2026-05-23 which reported
+	/// 2025-07-03, 2025-11-28, 2025-12-24 as partial when they were actually complete given the close.</summary>
 	private static bool LooksComplete(string path)
 	{
 		if (!File.Exists(path)) return false;
 		var bars = ReadIntradayCsv(path);
 
-		const int rthCloseMinute = 15 * 60 + 59;  // 15:59 ET bar — opens the 15:59-16:00 final RTH minute
+		const int regularCloseMinute = 15 * 60 + 59;   // 15:59 ET — last full minute before 16:00 close
+		const int earlyCloseMinute = 12 * 60 + 59;     // 12:59 ET — last full minute before 13:00 close
 		int rthCount = 0;
 		bool has0930 = false;
-		bool has1559 = false;
+		int lastRthMinute = -1;
 		foreach (var b in bars)
 		{
 			var et = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz);
@@ -416,9 +732,20 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			if (minuteOfDay < 9 * 60 + 30 || minuteOfDay >= 16 * 60) continue;
 			rthCount++;
 			if (et.Hour == 9 && et.Minute == 30) has0930 = true;
-			if (minuteOfDay == rthCloseMinute) has1559 = true;
+			if (minuteOfDay > lastRthMinute) lastRthMinute = minuteOfDay;
 		}
-		return rthCount >= 380 && has0930 && has1559;
+
+		if (!has0930) return false;
+
+		// Regular session: last bar at 15:59 ET (some files may have a 16:00 print stamped as the close).
+		if (lastRthMinute >= regularCloseMinute && rthCount >= 380) return true;
+
+		// Early-close session: last bar at 12:59 (closing minute of a half-day). Accept exactly 12:59 or
+		// 13:00 (some feeds emit a 13:00 bar as the close); reject 13:01+ because that range overlaps with
+		// truncated regular days (e.g., a normal day where `wa ai watch` was killed early afternoon).
+		if (lastRthMinute >= earlyCloseMinute && lastRthMinute <= 13 * 60 && rthCount >= 200) return true;
+
+		return false;
 	}
 
 	private static List<MinuteBar> ReadIntradayCsv(string path)
@@ -438,38 +765,6 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			bars.Add(new MinuteBar(ts, o, h, l, c, v));
 		}
 		return bars;
-	}
-
-	private static async Task<List<MinuteBar>?> SynthesizeSpxAsync(DateTime nyDate, IReadOnlyList<MinuteBar> spyBars, HistoricalBarCache dailyBars, string inputTicker, CancellationToken cancellation)
-	{
-		var dailyBar = await dailyBars.GetBarAsync(inputTicker, nyDate, cancellation);
-		if (dailyBar == null || dailyBar.Open <= 0m) return null;
-
-		decimal? spy0930Open = null;
-		foreach (var b in spyBars)
-		{
-			var et = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz);
-			if (et.Date == nyDate && et.Hour == 9 && et.Minute == 30)
-			{
-				spy0930Open = b.Open;
-				break;
-			}
-		}
-		if (!spy0930Open.HasValue || spy0930Open.Value <= 0m) return null;
-
-		var ratio = dailyBar.Open / spy0930Open.Value;
-		var output = new List<MinuteBar>(spyBars.Count);
-		foreach (var b in spyBars)
-		{
-			output.Add(new MinuteBar(
-				b.Timestamp,
-				Math.Round(b.Open * ratio, 4),
-				Math.Round(b.High * ratio, 4),
-				Math.Round(b.Low * ratio, 4),
-				Math.Round(b.Close * ratio, 4),
-				0));
-		}
-		return output;
 	}
 
 	private static void WriteIntradayCsv(string path, IReadOnlyList<MinuteBar> bars)
