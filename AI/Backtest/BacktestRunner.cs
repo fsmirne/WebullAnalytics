@@ -30,6 +30,7 @@ internal sealed class BacktestRunner
 	private readonly int _topNPerStep;
 	private readonly IntradayBarCache _intradayBars;
 	private readonly bool _oracle;
+	private readonly bool _profile;
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
 	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET. Expirations
@@ -39,7 +40,7 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false)
 	{
 		_config = config;
 		_book = book;
@@ -49,6 +50,7 @@ internal sealed class BacktestRunner
 		_closeCache = closeCache;
 		_topNPerStep = topNPerStep;
 		_oracle = oracle;
+		_profile = profile;
 		// Disk-only cache for backtest: the fetcher returns empty so any missing minute file fails
 		// closed (we fall back to the single 09:30 fill path). The on-disk read path serves the
 		// backfilled data/intraday/<TICKER>/<date>.csv files that the Polygon-mirror import created.
@@ -70,9 +72,17 @@ internal sealed class BacktestRunner
 		var maxDrawdown = 0m;
 		var steps = EnumerateTradingDays(since, until).ToList();
 
+		// Per-step timing diagnostic. Enabled via --profile on `wa ai backtest`; off otherwise (zero
+		// overhead in normal runs). Surfaces where wall time is going across the simulator's loop —
+		// useful when a recent change makes the backtest noticeably slower than before.
+		var profile = _profile;
+		var swTotal = profile ? System.Diagnostics.Stopwatch.StartNew() : null;
+		long msStep1 = 0, msStep2 = 0, msStep3 = 0, msTriggers = 0, msMtm = 0;
+
 		foreach (var step in steps)
 		{
 			cancellation.ThrowIfCancellationRequested();
+			var swSection = profile ? System.Diagnostics.Stopwatch.StartNew() : null;
 
 			// Step 1: management rules. Run BEFORE settlement so CloseBeforeShortExpiryRule (and
 			// any rule that checks DTE==0) can fire on the actual expiry day. Otherwise the position
@@ -104,10 +114,14 @@ internal sealed class BacktestRunner
 				}
 			}
 
+			if (profile) { msStep1 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
+
 			// Step 2: settle anything that's still in the book and has reached expiry. Anything still
 			// here at this point is either (a) the rule engine didn't decide to close it, or (b) the
 			// position has only-OTM short legs and is harmless to let expire worthless.
 			await SettleExpirationsAsync(step, cancellation);
+
+			if (profile) { msStep2 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
 
 			// Step 3: opener — scan intraday minute by minute. Previously fired once at 09:30 ET
 			// because there was no minute data to anchor any other moment; with backfilled
@@ -136,6 +150,8 @@ internal sealed class BacktestRunner
 				}
 			}
 
+			if (profile) { msStep3 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
+
 			// Intraday SL/TP simulation: re-price each open position at the day's bar.High and bar.Low
 			// (with mid-session TTE for 0DTE) and fire StopLossRule / TakeProfitRule against both
 			// extremes. Without this, 0DTE positions never see their stops or profit targets because
@@ -149,6 +165,8 @@ internal sealed class BacktestRunner
 			// of the opens are 0DTE.
 			await SettleExpirationsAsync(step, cancellation);
 
+			if (profile) { msTriggers += swSection!.ElapsedMilliseconds; swSection.Restart(); }
+
 			// Track equity curve at end-of-step: cash + MTM of open positions.
 			var mtm = await ComputeOpenMarkAsync(step, cancellation);
 			var equity = _book.Cash + mtm;
@@ -159,6 +177,20 @@ internal sealed class BacktestRunner
 				var dd = peakEquity - equity;
 				if (dd > maxDrawdown) maxDrawdown = dd;
 			}
+
+			if (profile) msMtm += swSection!.ElapsedMilliseconds;
+		}
+
+		if (profile)
+		{
+			var total = swTotal!.ElapsedMilliseconds;
+			Console.WriteLine();
+			Console.WriteLine($"[profile] backtest wall time: {total:N0} ms ({steps.Count} trading days, {(double)total / Math.Max(1, steps.Count):F1} ms/day avg)");
+			Console.WriteLine($"[profile]   step 1 (rules):              {msStep1:N0} ms ({(double)msStep1 * 100 / Math.Max(1, total):F1}%)");
+			Console.WriteLine($"[profile]   step 2 (settle pre-open):    {msStep2:N0} ms ({(double)msStep2 * 100 / Math.Max(1, total):F1}%)");
+			Console.WriteLine($"[profile]   step 3 (opener minute loop): {msStep3:N0} ms ({(double)msStep3 * 100 / Math.Max(1, total):F1}%)");
+			Console.WriteLine($"[profile]   intraday triggers + settle:  {msTriggers:N0} ms ({(double)msTriggers * 100 / Math.Max(1, total):F1}%)");
+			Console.WriteLine($"[profile]   end-of-step MTM:             {msMtm:N0} ms ({(double)msMtm * 100 / Math.Max(1, total):F1}%)");
 		}
 
 		// Final per-lineage MTM for still-open positions so the renderer can compute unrealized P&L.
