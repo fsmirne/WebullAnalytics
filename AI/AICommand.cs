@@ -683,6 +683,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Also write each fill as a JSON line to the given path. Useful for parameter-sweep scripts that need structure mix / per-trade P&L without scraping the Spectre table (which wraps under piped stdout). Independent of --show-fills.")]
 	public string? FillsJsonlPath { get; set; }
 
+	[CommandOption("--oracle")]
+	[Description("Research mode (by-design lookahead): the minute loop evaluates every minute of the trading day, forward-simulates each proposal to expiry using known daily close intrinsic, and opens the minute whose proposal yields the highest realized P&L. Produces an upper bound on strategy performance with perfect timing. Not realistic — use to size the gap between the current realistic scan and a theoretical ceiling.")]
+	public bool Oracle { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -773,9 +777,9 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle);
 
-		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}");
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}");
 		AnsiConsole.WriteLine();
 
 		var result = await runner.RunAsync(since, until, cancellation);

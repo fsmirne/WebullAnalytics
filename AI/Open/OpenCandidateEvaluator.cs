@@ -15,6 +15,8 @@ namespace WebullAnalytics.AI;
 /// </summary>
 internal sealed class OpenCandidateEvaluator
 {
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
 	private readonly AIConfig _config;
 	private readonly IQuoteSource _quotes;
 	private readonly string _pricingMode;
@@ -201,7 +203,7 @@ internal sealed class OpenCandidateEvaluator
 		//   - Bias-calibration factor (recent N-day move vs technical bias direction)
 		//   - Intraday tape signal's gap component (yesterday's close)
 		// Pulling once and computing all three is cheap.
-		var needCloses = cfg.Weights.VolatilityFit > 0m || cfg.Weights.Whipsaw > 0m || cfg.BiasCalibrationLookbackDays > 0 || (!_backtestMode && cfg.Weights.IntradayTape > 0m);
+		var needCloses = cfg.Weights.VolatilityFit > 0m || cfg.Weights.Whipsaw > 0m || cfg.BiasCalibrationLookbackDays > 0 || cfg.Weights.IntradayTape > 0m;
 		if (needCloses)
 		{
 			var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, Math.Max(4, cfg.BiasCalibrationLookbackDays + 2));
@@ -285,16 +287,16 @@ internal sealed class OpenCandidateEvaluator
 			var bias = biasedMacro;
 
 			// Intraday tape signal: fetch minute bars, derive open-to-now / gap / VWAP-deviation
-			// composite, blend into bias. Skipped in backtest mode (no minute-bar history) and when
-			// the weight is 0 (existing behavior preserved bit-identically). Per-ticker fetch is
-			// fronted by IntradayBarCache so adjacent scan ticks reuse disk-cached bars. The blend
-			// outcome is shadow-logged for every attempt — set weight to 0.001 to record the would-be
-			// bias without materially affecting scoring.
+			// composite, blend into bias. Active in both live and backtest now that the BacktestRunner
+			// minute loop populates ctx.Now to the simulated minute (the backtest CSV cache reads
+			// data/intraday/<TICKER>/<date>.csv with no HTTP, so each scan tick reuses disk-cached
+			// bars). Skipped only when the weight is 0. The shadow log records every attempt — set
+			// weight to 0.001 to record the would-be bias without materially affecting scoring.
 			IntradayBias? intradayBias = null;
-			if (!_backtestMode && cfg.Weights.IntradayTape > 0m)
+			if (cfg.Weights.IntradayTape > 0m)
 			{
 				prevCloseByTicker.TryGetValue(tickerGroup.Key, out var prevClose);
-				intradayBias = await ComputeIntradayBiasAsync(tickerGroup.Key, prevClose > 0m ? prevClose : (decimal?)null, cfg.Indicators.IntradayTape, cancellation);
+				intradayBias = await ComputeIntradayBiasAsync(tickerGroup.Key, prevClose > 0m ? prevClose : (decimal?)null, cfg.Indicators.IntradayTape, ctx.Now, cancellation);
 				if (intradayBias != null)
 				{
 					var w = Math.Clamp(cfg.Weights.IntradayTape, 0m, 1m);
@@ -656,7 +658,7 @@ internal sealed class OpenCandidateEvaluator
 	/// failure path (no bars, fetcher error, insufficient bars) so the caller falls back to
 	/// macro-only bias. Logs warnings rather than throwing — an intraday outage must never silence
 	/// the rest of the scan.</summary>
-	private async Task<IntradayBias?> ComputeIntradayBiasAsync(string strategyTicker, decimal? prevClose, OpenerIntradayTapeConfig tapeCfg, CancellationToken cancellation)
+	private async Task<IntradayBias?> ComputeIntradayBiasAsync(string strategyTicker, decimal? prevClose, OpenerIntradayTapeConfig tapeCfg, DateTime asOf, CancellationToken cancellation)
 	{
 		var cache = GetOrCreateIntradayCache();
 		if (cache == null) return null;
@@ -668,7 +670,13 @@ internal sealed class OpenCandidateEvaluator
 		var chartTicker = strategyTicker;
 
 		var interval = ParseBarInterval(tapeCfg.BarIntervalCode);
-		var toUtc = DateTimeOffset.UtcNow;
+		// asOf is the simulator's ctx.Now in live or backtest — ET-naive (Kind=Unspecified), so
+		// convert to UTC explicitly. Live callers can pass DateTime.UtcNow with Kind=Utc and the
+		// conversion is a no-op.
+		var asOfUtc = asOf.Kind == DateTimeKind.Utc
+			? new DateTimeOffset(asOf, TimeSpan.Zero)
+			: new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(asOf, DateTimeKind.Unspecified), NyTz), TimeSpan.Zero);
+		var toUtc = asOfUtc;
 		var fromUtc = toUtc.AddMinutes(-Math.Max(60, tapeCfg.LookbackMinutes));
 
 		IReadOnlyList<MinuteBar> bars;
@@ -696,13 +704,24 @@ internal sealed class OpenCandidateEvaluator
 
 	private IntradayBarCache? GetOrCreateIntradayCache()
 	{
-		if (_backtestMode) return null;
 		if (_intradayCache != null) return _intradayCache;
+		if (_backtestMode)
+		{
+			// Disk-only path: the cache reads data/intraday/<TICKER>/<date>.csv when present. The
+			// fetcher is invoked only when the file is missing; in backtest we have no Webull HTTP
+			// transport, so return empty so the cache treats the date as "no intraday available"
+			// and the opener degrades gracefully (skips intraday-tape signal, keeps macro bias).
+			_intradayCache = new IntradayBarCache(BacktestNoopIntradayFetcher);
+			return _intradayCache;
+		}
 		var apiConfig = TryLoadApiConfig();
 		if (apiConfig == null) return null;
 		_intradayCache = new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig));
 		return _intradayCache;
 	}
+
+	private static Task<IReadOnlyList<MinuteBar>> BacktestNoopIntradayFetcher(string ticker, BarInterval interval, int count, bool includeExtended, CancellationToken cancellation)
+		=> Task.FromResult<IReadOnlyList<MinuteBar>>(Array.Empty<MinuteBar>());
 
 	private static ApiConfig? TryLoadApiConfig()
 	{
