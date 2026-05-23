@@ -583,7 +583,7 @@ There is no `--yes` flag — every place, cancel, and cancel-all prompts interac
 
 The `ai` command evaluates live or replayed positions and emits structured proposal logs. It can emit both management proposals (roll / take-profit / stop-loss / defensive-roll) and opening candidates for new positions. It is **read-only in phase 1**: the command never places orders.
 
-Three subcommands share one evaluation engine:
+Five subcommands share one evaluation engine:
 
 ```bash
 # Continuous monitoring during market hours (default: until 4 PM ET)
@@ -594,6 +594,12 @@ wa ai scan GME
 
 # Replay the rules against historical orders.jsonl with agreement analysis
 wa ai replay GME --since 2026-01-01 --until 2026-04-17
+
+# Simulate the full strategy (opener + rules + intraday SL/TP) from scratch over a historical window
+wa ai backtest SPXW --since 2025-01-01 --starting-cash 10000 --show-fills
+
+# Refresh the daily bar / VIX / SMILE caches that the backtest needs (run once per session)
+wa ai history SPXW
 
 # Run the watch loop every 30 seconds for 90 minutes, ignoring market-hours checks
 wa ai watch SPXW --tick 30 --duration 90m --ignore-market-hours
@@ -741,6 +747,20 @@ ai replay only:
   --since <date>           Start date YYYY-MM-DD. Default: earliest fill
   --until <date>           End date YYYY-MM-DD. Default: latest fill
   --granularity <level>    daily or hourly. Default: daily
+
+ai backtest only:
+  --since <date>           Start date YYYY-MM-DD. Default: Jan 1 of current year.
+  --until <date>           End date YYYY-MM-DD. Default: today.
+  --starting-cash <amt>    Starting cash balance. Default: 25000.
+  --fee-per-contract <amt> Per-leg-contract commission. Defaults from ticker (SPX-family $1.14; equity/ETF $0.05).
+  --iv-hv-premium <ratio>  IV/HV multiplier for non-SPY tickers (SPY uses real VIX). Default: 1.15.
+  --smile <mode>           Volatility smile model: 'off' (flat IV) or 'static' (quadratic skew). Default: static.
+  --top-per-step <n>       Maximum new opens per trading day. Default: 1.
+  --show-fills             Print per-fill ledger in addition to the summary.
+  --fills-jsonl <path>     Also write each fill as a JSON line. Useful for parameter-sweep scripts.
+  --oracle                 Research mode (by-design lookahead): forward-simulate each minute's proposal to expiry
+                           and open the (minute, proposal) pair with the highest realized P&L. Upper bound only.
+  --profile                Print a per-step wall-time breakdown at the end of the run.
 ```
 
 #### Auto-execution (watch loop)
@@ -764,6 +784,40 @@ Every proposal is funding-checked. Proposals that would leave free cash below th
 3. Run `ai replay`. The cache picks up the CSV automatically; no further conversion needed.
 
 The replay output includes an **agreement analysis** — for each day where rules fired and you also traded that position, it shows what the rule proposed alongside what you actually did, and scores each as `match`, `partial`, `miss`, or `divergent`.
+
+#### Historical backtest
+
+`wa ai backtest` runs the full strategy end-to-end against a historical window: opener picks new positions, rules manage them, intraday SL/TP triggers fire on the minute, expirations settle at intrinsic. Reports a P&L summary plus an optional fill ledger.
+
+Prerequisites:
+
+1. Run `wa ai history <TICKER>` once per session. This populates `data/history/<TICKER>.csv` (daily closes from Yahoo) and the VIX / VIX1D / VIX9D / SMILE caches the backtest engine reads.
+2. Backfill `data/intraday/<TICKER>/<date>.csv` for the date range you want to test. Without minute bars, the opener falls back to a single 09:30 ET fill per day; with them, the minute-loop scans every minute looking for the first signal that crosses `opener.minScoreToOpen`. For SPY, real Polygon-mirror data; for SPXW, the included `scripts/backfill_intraday_polygon.py` synthesizes from SPY × today's `^GSPC.Open` anchor (see the script's docstring).
+
+Mechanics:
+
+- **Opener minute loop.** For each trading day, the runner walks `data/intraday/<TICKER>/<date>.csv` minute by minute. At each minute it re-prices the chain at the minute's `bar.Open` spot with a remaining-session TTE, evaluates the opener, and opens the first proposal that clears `opener.minScoreToOpen` + cash + qty gates. If no minute crosses, no fill for the day. Falls back to a single 09:30 fill when no minute data exists.
+- **Intraday SL/TP.** Replaces the legacy bar.High/bar.Low 2-point sampling with a chronological minute walk: re-prices each open position at every minute's spot and fires SL or TP at the first real crossing. Skips the walk entirely when both thresholds are at 1.0 (effectively off), so the existing TP-off / SL-off SPXW config carries zero added overhead.
+- **Pricing.** Synthetic BS+SMILE (no real bid/ask in backtest mode). Verticals price within ~3% of market mid; single-leg longs within ~5%. Engine is biased ~1-2% high on average — backtest qty sizing is conservative vs. real fills.
+- **Oracle mode (`--oracle`).** Forward-simulates each minute's proposal to expiry intrinsic and opens the (minute, proposal) pair with the highest realized P&L for that day. Lookahead by design; use to size the gap between the realistic scan and a perfectly-timed entry.
+
+Example invocations:
+
+```bash
+# Full-year SPXW backtest with the fill ledger and a starting account of $10k
+wa ai backtest SPXW --since 2025-01-01 --starting-cash 10000 --show-fills
+
+# YTD only, oracle ceiling (research)
+wa ai backtest SPXW --since 2026-01-01 --starting-cash 10000 --oracle
+
+# Profile where wall time goes (useful when a recent change makes a backtest slower)
+wa ai backtest SPXW --since 2025-01-01 --starting-cash 10000 --profile
+
+# Stream each fill as JSON for parameter-sweep tooling
+wa ai backtest SPXW --since 2026-01-01 --starting-cash 10000 --fills-jsonl /tmp/sweep.jsonl
+```
+
+The fill ledger (`--show-fills`) carries per-trade and account-level return columns: `P&L %` (this trade's realized return as % of the opening debit/credit basis) and `Return` (cumulative realized return through the account, vs starting cash). Both blank on `Open` rows — nothing is realized until the lineage finalizes.
 
 ## Data Sources
 
@@ -1243,15 +1297,14 @@ Pipeline mechanics:
 
 - **Bar source.** Webull's `/api/quote/charts/query` endpoint, fetched once per scan tick. Disk-cached at `data/intraday/<TICKER>/<yyyy-mm-dd>.csv` (keyed by the *strategy ticker*, matching `data/history/<TICKER>.csv` for daily closes). Today's file grows during the session; past days are sealed. The chart endpoint uses a *different* tickerId namespace than the option-chain endpoint for cash indexes (chain-namespace `913324359` is actually SPXC stock, not the index). Chart-namespace ids live in `WebullChartsClient.ChartKnownTickerIds`; chain-namespace ids stay in `WebullOptionsClient.KnownTickerIds`.
 - **Transparent SPY pre-market proxy for the SPX family.** SPXW and SPX route through a hybrid path: SPX RTH bars (no extended hours — the cash index doesn't trade pre/post-market) merged with SPY extended-hours bars scaled into SPX dollars via `ratio = SPX_prev_close / SPY_prev_close`. The merged series is in SPX scale throughout — the indicator and cache never see SPY, no separate SPY folder is created, and the resulting bars land in `data/intraday/SPXW/`. On SPY resolution failure or insufficient ratio data, falls back to SPX RTH only.
-- **Backtest gating.** Hard-disabled in backtest mode regardless of `intradayTapeWeight` — minute-bar history isn't available retroactively (Webull's m1 only covers ~5 trading days). The 16-month backtest path is bit-identical to before.
+- **Backtest support.** Active in backtest with a no-op (disk-only) fetcher so the same `IntradayBarCache` reads the backfilled `data/intraday/<TICKER>/<date>.csv` files without any HTTP. Backtest's `ctx.Now` is the simulated minute, so the tape signal computes minute-by-minute against the same in-process bars the opener consumes. Falls back to macro-only when minute data is absent for a date (pre-backfill window).
 - **Prev-close source.** Derived from the bar series itself — yesterday's last bar's close in the same intraday source. Necessary because the daily-Yahoo close and the intraday-Webull bars may not be denominated identically (gap math becomes meaningless when scales mismatch).
-- **Shadow logging.** Every per-ticker bias-blend attempt appends one JSONL line to `data/ai-bias-shadow.jsonl` with macro, intraday (and its sub-components), weight, and blended. Use to validate the signal offline before raising `intradayTapeWeight` above a near-zero value.
 
 **Config keys** (`opener`):
 
 | Field | Default | Description |
 |---|---|---|
-| `intradayTapeWeight` | `0` | Blend weight in `[0, 1]`. `0` = macro-only (legacy behavior). `0.5` = even split. `0.001` = effectively shadow mode (log without applying). 0DTE strategies typically want `0.5–0.8`; swing strategies `0.0–0.2`. |
+| `intradayTapeWeight` | `0` | Blend weight in `[0, 1]`. `0` = macro-only. `0.5` = even split. 0DTE strategies typically want `0.5–0.8` (the SPXW config in this repo runs `0.65`); swing strategies `0.0–0.2`. |
 
 **Config keys** (`opener.intradayTape`):
 
