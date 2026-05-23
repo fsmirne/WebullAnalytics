@@ -274,10 +274,130 @@ internal sealed class BacktestRunner
 		{
 			cancellation.ThrowIfCancellationRequested();
 			if (!_book.OpenPositions.ContainsKey(pos.Key)) continue;
+
+			// Prefer the minute-walk: walks minute bars chronologically and triggers at the first
+			// minute the position mark crosses SL or TP. Removes the bar.Low / bar.High pessimism
+			// of the 2-point sampling (which fires SL on intraday spikes that never realized as
+			// actual fills, especially for 0DTE near-the-money positions). Falls back to the
+			// legacy 2-point logic when no minute data exists for this date.
+			var triggered = await TryMinuteWalkTriggerAsync(step, pos, cash, accountValue, realizedExpectancy, cancellation);
+			if (triggered) continue;
+
 			var bar = await _bars.GetBarAsync(pos.Ticker, step.Date, cancellation);
 			if (bar == null) continue;
 			await TryIntradayTriggerAsync(step, pos, bar.Low, bar.High, cash, accountValue, realizedExpectancy, cancellation);
 		}
+	}
+
+	/// <summary>Walks minute bars chronologically for <paramref name="pos"/> and closes the position
+	/// at the first minute its mark crosses the SL or TP threshold. Returns true when a trigger
+	/// fired (caller skips the legacy fallback) and false when no minute data exists or no
+	/// threshold was crossed (caller falls back to bar.Low / bar.High sampling).
+	///
+	/// Mechanics match <see cref="TryIntradayTriggerAsync"/> for threshold computation (SL via
+	/// pos.MaxLossPerShare, TP via ProfitProjector.MaxForCurrentColumn) and conservative whipsaw
+	/// (SL fires before TP). The substantive difference: instead of bracketing the day with
+	/// [bar.Low, bar.High] and bisecting to find a threshold spot, we step through real minute
+	/// closes from the position's open time (or 09:30 ET for carry-over positions) to 16:00 ET,
+	/// price the chain at each minute's spot with a remaining-session TTE, and fire on the first
+	/// real crossing. Closes at that minute's mark — no bisection needed.</summary>
+	private async Task<bool> TryMinuteWalkTriggerAsync(DateTime step, OpenPosition pos, decimal cash, decimal accountValue, OpenerRealizedExpectancyConfig realizedExpectancy, CancellationToken cancellation)
+	{
+		var symbols = pos.Legs
+			.Where(l => l.CallPut != null)
+			.Select(l => l.Symbol)
+			.ToHashSet(StringComparer.OrdinalIgnoreCase);
+		if (symbols.Count == 0) return false;
+
+		// Determine when to start walking. For positions opened earlier today, start one minute
+		// after the open fill so we don't trigger on the same minute we opened (mark == debit,
+		// neither threshold crossed yet anyway). For carry-over positions, start at 09:30 ET.
+		var openFill = _book.Fills
+			.Where(f => string.Equals(f.PositionKey, pos.Key, StringComparison.OrdinalIgnoreCase) && f.Kind == BacktestFillKind.Open)
+			.OrderByDescending(f => f.Date)
+			.FirstOrDefault();
+		DateTime walkStartEt;
+		if (openFill != null && openFill.Date.Date == step.Date)
+			walkStartEt = openFill.Date.AddMinutes(1);
+		else
+			walkStartEt = step.Date.Add(MarketOpenTime);
+		var walkEndEt = step.Date.Add(MarketCloseTime);
+		if (walkStartEt >= walkEndEt) return false;
+
+		var startUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(walkStartEt, NyTz), TimeSpan.Zero);
+		var endUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(walkEndEt, NyTz), TimeSpan.Zero);
+		var minuteBars = await _intradayBars.GetBarsAsync(pos.Ticker, startUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
+		if (minuteBars.Count == 0) return false;
+
+		// SL threshold (mark at or below this fires SL). Matches legacy logic exactly.
+		decimal? slTarget = null;
+		if (_config.Rules.StopLoss.Enabled && pos.MaxLossPerShare.HasValue && pos.MaxLossPerShare.Value > 0m
+			&& realizedExpectancy.StopLossPctOfMaxLoss < 1m)
+			slTarget = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxLoss * pos.MaxLossPerShare.Value;
+
+		// TP threshold (mark at or above fires TP). Use the day's bar.High as the projector spot
+		// to mirror legacy behavior — the projector iterates over future spots so the choice has
+		// minimal effect for 0DTE, but staying consistent makes side-by-side comparisons cleaner.
+		decimal? tpTarget = null;
+		if (_config.Rules.TakeProfit.Enabled)
+		{
+			var bar = await _bars.GetBarAsync(pos.Ticker, step.Date, cancellation);
+			if (bar != null)
+			{
+				var quotesHighForProjector = await _quotes.GetIntradayQuotesAsync(
+					step, pos.Ticker, bar.High, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+				var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
+				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = bar.High };
+				var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
+				var projectorCtx = new EvaluationContext(step, stillOpen, underlyings, quotesHighForProjector, cash, accountValue, emptySignals);
+				var maxProjected = ProfitProjector.MaxForCurrentColumn(pos, projectorCtx);
+				if (maxProjected.HasValue && maxProjected.Value > 0m)
+					tpTarget = pos.AdjustedNetDebit + realizedExpectancy.ProfitTargetPctOfMaxProfit * maxProjected.Value;
+			}
+		}
+
+		if (!slTarget.HasValue && !tpTarget.HasValue) return false;
+
+		// Walk minute bars. At each minute, re-price the position at that minute's bar.Open spot
+		// (start-of-minute price; consistent with ctx.Now semantics elsewhere in the simulator)
+		// using a remaining-session TTE. Trigger on first SL/TP crossing.
+		foreach (var minuteBar in minuteBars)
+		{
+			cancellation.ThrowIfCancellationRequested();
+			var minuteUtc = minuteBar.Timestamp;
+			var spot = minuteBar.Open;
+			var minutesToClose = Math.Max(1.0, (endUtc - minuteUtc).TotalMinutes);
+			var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
+
+			var quotes = await _quotes.GetIntradayQuotesAsync(step, pos.Ticker, spot, symbols, minuteZeroDteTimeYears, cancellation);
+			var mark = ComputeMarkFromQuotes(pos.Legs, quotes);
+			if (!mark.HasValue) continue;
+
+			bool slFires = slTarget.HasValue && mark.Value <= slTarget.Value;
+			bool tpFires = tpTarget.HasValue && mark.Value >= tpTarget.Value;
+			if (!slFires && !tpFires) continue;
+
+			// SL before TP if both crossed at the same minute — conservative whipsaw assumption.
+			var ruleName = slFires ? "StopLossRule" : "TakeProfitRule";
+
+			var legFills = new List<BacktestLegFill>(pos.Legs.Count);
+			bool allLegsPriced = true;
+			foreach (var leg in pos.Legs)
+			{
+				if (leg.CallPut == null) continue;
+				if (!quotes.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) { allLegsPriced = false; break; }
+				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				var closeSide = leg.Side == Side.Buy ? Side.Sell : Side.Buy;
+				legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, mid));
+			}
+			if (!allLegsPriced) continue;
+
+			var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+			_book.Close(minuteEt, pos.Key, legFills, ruleName);
+			return true;
+		}
+
+		return false;
 	}
 
 	private async Task TryIntradayTriggerAsync(
