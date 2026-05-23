@@ -10,7 +10,7 @@ internal sealed class LiveQuoteSource : IQuoteSource
 {
 	public async Task<QuoteSnapshot> GetQuotesAsync(
 		DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers,
-		CancellationToken cancellation)
+		CancellationToken cancellation, QuoteOverrides overrides = default)
 	{
 		// Build minimal PositionRow stubs for each option symbol so the fetcher can be reused.
 		var rows = optionSymbols.Select(sym => new PositionRow(

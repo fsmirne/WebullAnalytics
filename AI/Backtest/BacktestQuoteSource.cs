@@ -48,13 +48,6 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	private readonly double _riskFreeRate;
 	private readonly IReadOnlyDictionary<string, decimal>? _spotOverrides;
 
-	/// <summary>Per-call minute spot anchor, settable by <see cref="BacktestRunner"/>'s intraday opener loop.
-	/// When set, <see cref="GetQuotesAsync"/> uses this spot per ticker instead of <c>bar.Open</c>, and
-	/// 0DTE pricing uses <see cref="MinuteScanZeroDteTimeYears"/> for the remaining time-to-expiry.
-	/// Always single-threaded (backtest is serial), so no synchronization required.</summary>
-	internal IReadOnlyDictionary<string, decimal>? MinuteScanSpotOverrides { get; set; }
-	internal double? MinuteScanZeroDteTimeYears { get; set; }
-
 	/// <param name="spotOverrides">When supplied for a ticker, replaces the bar.open lookup for that
 	/// ticker. Used by <c>ai scan --theoretical</c> to evaluate a hypothetical spot at an asOf for which
 	/// no historical bar exists (next-business-day previews) or a stress scenario at any spot level.</param>
@@ -66,7 +59,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		_spotOverrides = spotOverrides;
 	}
 
-	public async Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers, CancellationToken cancellation)
+	public async Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers, CancellationToken cancellation, QuoteOverrides overrides = default)
 	{
 		var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
@@ -77,9 +70,9 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		// is OTM at picking-time AND at settle-time, producing an unrealistic 100%-win-rate backtest.
 		foreach (var ticker in tickers)
 		{
-			// Precedence: minute-scan override (set by BacktestRunner's intraday opener loop) wins
-			// over the construction-time spotOverrides (--theoretical), which wins over bar.Open.
-			if (MinuteScanSpotOverrides != null && MinuteScanSpotOverrides.TryGetValue(ticker, out var minuteSpot))
+			// Precedence: per-call overrides.Spots (set by BacktestRunner's intraday opener loop)
+			// wins over the construction-time _spotOverrides (--theoretical), which wins over bar.Open.
+			if (overrides.Spots != null && overrides.Spots.TryGetValue(ticker, out var minuteSpot))
 			{
 				underlyings[ticker] = minuteSpot;
 				continue;
@@ -108,7 +101,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		foreach (var root in roots)
 		{
 			if (underlyings.ContainsKey(root)) continue;
-			if (MinuteScanSpotOverrides != null && MinuteScanSpotOverrides.TryGetValue(root, out var minuteSpot))
+			if (overrides.Spots != null && overrides.Spots.TryGetValue(root, out var minuteSpot))
 			{
 				underlyings[root] = minuteSpot;
 				continue;
@@ -153,12 +146,12 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			if (atm.HasValue)
 			{
 				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
-				// 0DTE TTE: when the intraday opener loop has set MinuteScanZeroDteTimeYears, use it
-				// (remaining session from the current minute to 16:00 ET). Otherwise use the day-step
-				// constant — conceptually "morning of day X", a full session of theta remains.
+				// 0DTE TTE: when the intraday opener loop passes a per-call overrides.ZeroDteTimeYears,
+				// use it (remaining session from the current minute to 16:00 ET). Otherwise use the
+				// day-step constant — conceptually "morning of day X", a full session of theta remains.
 				// Settlement (Expire) uses intrinsic so the time component is collected, not double-counted.
 				var timeYears = dte <= 0
-					? (MinuteScanZeroDteTimeYears ?? ZeroDteTimeYears)
+					? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears)
 					: dte / 365.0;
 				price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv!.Value, parsed.CallPut);
 			}
