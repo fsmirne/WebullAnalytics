@@ -10,7 +10,7 @@ namespace WebullAnalytics.Api;
 /// Endpoint coverage: m1 typically goes back ~5 trading days; m5/m15 several weeks; m30/h1 months;
 /// d1 multi-year. SPX has no pre-market (cash index); pass SPY's tickerId when pre-market context
 /// is needed. <see cref="WebullOptionsClient.KnownTickerIds"/> already has SPX/NDX/DJX/VIX.</summary>
-public static class WebullChartsClient
+internal static class WebullChartsClient
 {
 	private const string ChartsQueryUrl = "https://quotes-gw.webullfintech.com/api/quote/charts/query";
 
@@ -196,4 +196,4 @@ public static class WebullChartsClient
 	};
 }
 
-public enum BarInterval { M1, M5, M15, M30, H1, D1 }
+internal enum BarInterval { M1, M5, M15, M30, H1, D1 }

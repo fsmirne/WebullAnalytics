@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace WebullAnalytics.Api;
 
-public static class YahooOptionsClient
+internal static class YahooOptionsClient
 {
 	private const string CrumbUrl = "https://query1.finance.yahoo.com/v1/test/getcrumb";
 	private const string CookieBootstrapUrl = "https://fc.yahoo.com";

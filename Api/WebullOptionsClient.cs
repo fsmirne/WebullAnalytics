@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace WebullAnalytics.Api;
 
-public static class WebullOptionsClient
+internal static class WebullOptionsClient
 {
 	private const string TickerSearchUrl = "https://quotes-gw.webullfintech.com/api/search/pc/tickers";
 	private const string StrategyListUrl = "https://quotes-gw.webullfintech.com/api/quote/option/strategy/list";

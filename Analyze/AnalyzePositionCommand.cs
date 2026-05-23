@@ -37,7 +37,7 @@ internal sealed class AnalyzePositionSettings : AnalyzeBaseSettings
 	public decimal? Cash { get; set; }
 
 	[CommandOption("--account <VALUE>")]
-	[Description("Account alias or ID from trade-config.json used to auto-detect cash/BP when selecting an existing open position.")]
+	[Description("Account alias or ID from api-config.json used to auto-detect cash/BP when selecting an existing open position.")]
 	public string? Account { get; set; }
 
 	public override ValidationResult Validate()
