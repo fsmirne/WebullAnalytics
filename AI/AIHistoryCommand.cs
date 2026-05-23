@@ -31,10 +31,16 @@ internal sealed class AIHistorySettings : CommandSettings
 	[Description("How far back to ensure the cache covers when starting fresh. Default: 2.")]
 	public int LookbackYears { get; set; } = 2;
 
+	[CommandOption("--audit")]
+	[Description("Report intraday CSV completeness over the full on-disk history (earliest CSV through yesterday). Audit's window is determined from on-disk CSVs, so it is mutually exclusive with --lookback-years. No network fetches. Reconciles sealed.json with any LooksComplete file not yet listed. Exit code 0 if every trading day is complete, 2 otherwise.")]
+	public bool Audit { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("ticker is required");
 		if (LookbackYears < 1) return ValidationResult.Error($"--lookback-years: must be ≥ 1, got {LookbackYears}");
+		if (Audit && Program.RawArgs.Any(a => a.Equals("--lookback-years", StringComparison.OrdinalIgnoreCase) || a.StartsWith("--lookback-years=", StringComparison.OrdinalIgnoreCase)))
+			return ValidationResult.Error("--audit and --lookback-years are mutually exclusive: audit derives its window from on-disk CSVs, so a lookback override would silently be ignored.");
 		return ValidationResult.Success();
 	}
 }
@@ -60,12 +66,18 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	{
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 		var ticker = settings.Ticker.ToUpperInvariant();
+		var asOf = DateTime.UtcNow;
+		var earliest = asOf.AddYears(-settings.LookbackYears);
+
+		if (settings.Audit)
+		{
+			AnsiConsole.MarkupLine($"[bold]Auditing intraday cache for {Markup.Escape(ticker)}[/]");
+			return RunAudit(ticker, asOf);
+		}
 
 		AnsiConsole.MarkupLine($"[bold]Fetching history for {Markup.Escape(ticker)}[/]");
 
 		var bars = new HistoricalBarCache();
-		var asOf = DateTime.UtcNow;
-		var earliest = asOf.AddYears(-settings.LookbackYears);
 
 		if (!await FetchAndReportAsync(bars, ticker, earliest, asOf, cancellation))
 			return 1;
@@ -131,7 +143,9 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	/// request, paginated automatically by <see cref="MassivePolygonClient"/>. For SPX-family inputs
 	/// the SPY bars are scaled by <c>today_SPX_open / today_SPY_open_at_0930</c> per session so the
 	/// 09:30 minute exactly equals the daily ^SPX open — same anchor as scripts/backfill_intraday_polygon.py.
-	/// Existing-and-complete files are left alone; today is never touched (live Webull owns it).</summary>
+	/// Existing-and-complete files are left alone; today is never touched (live Webull owns it). The
+	/// sealed manifest is rewritten after every successful CSV write so a crash mid-loop never leaves
+	/// the on-disk CSV out of sync with sealed.json.</summary>
 	private static async Task BackfillIntradayAsync(string inputTicker, HistoricalBarCache dailyBars, DateTime earliest, DateTime asOf, CancellationToken cancellation)
 	{
 		var apiConfig = TryLoadApiConfig();
@@ -146,43 +160,29 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			return;
 		}
 
-		var isSpxSynth = SpxSynthesizedTickers.Contains(inputTicker);
-		var sourceTicker = isSpxSynth ? "SPY" : inputTicker;
-		var intradayDir = Path.Combine(Program.ResolvePath("data/intraday"), inputTicker);
-		Directory.CreateDirectory(intradayDir);
-
-		var sealedPath = Path.Combine(intradayDir, "sealed.json");
-		var sealedDates = LoadSealedManifest(sealedPath);
-
 		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
 		var earliestNy = TimeZoneInfo.ConvertTime(earliest, NyTz).Date;
-
-		var allDates = new List<DateTime>();
-		var needBackfill = new List<DateTime>();
-		for (var d = earliestNy; d < todayNy; d = d.AddDays(1))
-		{
-			if (!MarketCalendar.IsOpen(d)) continue;
-			allDates.Add(d);
-			if (sealedDates.Contains(d)) continue;
-			var path = Path.Combine(intradayDir, $"{d:yyyy-MM-dd}.csv");
-			if (LooksComplete(path)) continue;
-			needBackfill.Add(d);
-		}
+		var audit = AuditIntraday(inputTicker, earliestNy, todayNy);
+		var totalDays = audit.Complete.Count + audit.Partial.Count + audit.Missing.Count;
+		var needBackfill = audit.Partial.Concat(audit.Missing).OrderBy(d => d).ToList();
 
 		if (needBackfill.Count == 0)
 		{
-			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]ok[/] (all {allDates.Count} trading days complete)");
+			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]ok[/] (all {totalDays} trading days complete)");
 			return;
 		}
 
+		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: {audit.Complete.Count}/{totalDays} complete; pulling {needBackfill.Count} from massive.com");
+		AnsiConsole.MarkupLine($"    needed: {Markup.Escape(FormatDateList(needBackfill, maxInline: 12))}");
+
+		var isSpxSynth = SpxSynthesizedTickers.Contains(inputTicker);
+		var sourceTicker = isSpxSynth ? "SPY" : inputTicker;
 		var minNeed = DateOnly.FromDateTime(needBackfill[0]);
 		var maxNeed = DateOnly.FromDateTime(needBackfill[^1]);
-		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: pulling {needBackfill.Count}/{allDates.Count} day(s) from massive.com ({minNeed:yyyy-MM-dd} → {maxNeed:yyyy-MM-dd})");
-
 		var fetched = await MassivePolygonClient.FetchMinuteAggregatesAsync(apiConfig.MassiveApiKey, sourceTicker, minNeed, maxNeed, cancellation);
 		if (fetched.Count == 0)
 		{
-			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [red]failed[/] (no bars returned)");
+			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [red]failed[/] (no bars returned from massive.com)");
 			return;
 		}
 
@@ -194,30 +194,149 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			list.Add(b);
 		}
 
-		int written = 0, skipped = 0;
+		var sealedDates = audit.SealedDates;
+		var written = new List<DateTime>();
+		var skipped = new List<(DateTime Date, string Reason)>();
 		foreach (var d in needBackfill)
 		{
-			if (!byDate.TryGetValue(d, out var dayBars) || dayBars.Count == 0) { skipped++; continue; }
+			if (!byDate.TryGetValue(d, out var dayBars) || dayBars.Count == 0)
+			{
+				skipped.Add((d, "no source bars from massive.com"));
+				continue;
+			}
 
 			IReadOnlyList<MinuteBar> output = dayBars;
 			if (isSpxSynth)
 			{
 				var synth = await SynthesizeSpxAsync(d, dayBars, dailyBars, inputTicker, cancellation);
-				if (synth == null) { skipped++; continue; }
+				if (synth == null)
+				{
+					skipped.Add((d, "no daily open for SPX synthesis"));
+					continue;
+				}
 				output = synth;
 			}
 
-			var path = Path.Combine(intradayDir, $"{d:yyyy-MM-dd}.csv");
+			var path = Path.Combine(audit.IntradayDir, $"{d:yyyy-MM-dd}.csv");
 			WriteIntradayCsv(path, output);
 			sealedDates.Add(d);
-			written++;
+			SaveSealedManifest(audit.SealedPath, sealedDates);
+			written.Add(d);
 		}
 
-		SaveSealedManifest(sealedPath, sealedDates);
-
-		var skipNote = skipped > 0 ? $", [yellow]skipped {skipped}[/] (no source bars for that date)" : "";
-		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]wrote {written}[/] file(s){skipNote}");
+		var skipNote = skipped.Count > 0 ? $", [yellow]skipped {skipped.Count}[/]" : "";
+		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]wrote {written.Count}[/] file(s){skipNote}");
+		foreach (var (d, reason) in skipped)
+			AnsiConsole.MarkupLine($"    [yellow]{d:yyyy-MM-dd}[/]: skipped ({Markup.Escape(reason)})");
 	}
+
+	/// <summary>Validates every on-disk intraday CSV from the earliest filename through yesterday (NY tz).
+	/// Independent of <c>--lookback-years</c>: audit's job is "what we have is correct", not "we have N
+	/// years of history". For each trading day in that span, classifies the CSV as complete, partial, or
+	/// missing. Returns 0 if every day is complete, 2 otherwise — distinct from the regular fetch's 0/1
+	/// so scripts can distinguish "data gap" from "fetch error".</summary>
+	private static int RunAudit(string ticker, DateTime asOf)
+	{
+		var intradayDir = Path.Combine(Program.ResolvePath("data/intraday"), ticker);
+		var earliestOnDisk = FindEarliestIntradayDate(intradayDir);
+		if (earliestOnDisk == null)
+		{
+			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(ticker)}: [yellow]no CSVs on disk[/] (nothing to audit — run `wa ai history {Markup.Escape(ticker)}` first)");
+			return 2;
+		}
+
+		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
+		var audit = AuditIntraday(ticker, earliestOnDisk.Value, todayNy);
+		var totalDays = audit.Complete.Count + audit.Partial.Count + audit.Missing.Count;
+		var latestNy = todayNy.AddDays(-1);
+		AnsiConsole.MarkupLine($"  window: {earliestOnDisk.Value:yyyy-MM-dd} → {latestNy:yyyy-MM-dd} ({totalDays} trading days)");
+		AnsiConsole.MarkupLine($"  sealed.json: {audit.SealedDates.Count} entries");
+		AnsiConsole.MarkupLine($"  [green]complete: {audit.Complete.Count}[/], [yellow]partial: {audit.Partial.Count}[/], [red]missing: {audit.Missing.Count}[/]");
+
+		if (audit.Partial.Count > 0)
+			AnsiConsole.MarkupLine($"  [yellow]partial dates[/]: {Markup.Escape(FormatDateList(audit.Partial, maxInline: 30))}");
+		if (audit.Missing.Count > 0)
+			AnsiConsole.MarkupLine($"  [red]missing dates[/]: {Markup.Escape(FormatDateList(audit.Missing, maxInline: 30))}");
+
+		var staleSealed = audit.Missing.Where(audit.SealedDates.Contains).ToList();
+		if (staleSealed.Count > 0)
+			AnsiConsole.MarkupLine($"  [yellow]stale sealed entries[/] (sealed.json claims complete but CSV missing): {Markup.Escape(FormatDateList(staleSealed, maxInline: 30))}");
+
+		return audit.Partial.Count + audit.Missing.Count == 0 ? 0 : 2;
+	}
+
+	/// <summary>Earliest <c>YYYY-MM-DD.csv</c> filename in the ticker's intraday dir, or null if the dir
+	/// is empty or missing. Used by <c>--audit</c> to anchor the validation window to actual on-disk
+	/// data instead of the lookback config.</summary>
+	private static DateTime? FindEarliestIntradayDate(string intradayDir)
+	{
+		if (!Directory.Exists(intradayDir)) return null;
+		DateTime? earliest = null;
+		foreach (var path in Directory.EnumerateFiles(intradayDir, "*.csv"))
+		{
+			var name = Path.GetFileNameWithoutExtension(path);
+			if (!DateTime.TryParseExact(name, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
+			if (earliest == null || d < earliest.Value) earliest = d;
+		}
+		return earliest;
+	}
+
+	/// <summary>Walks every trading day in [earliestNy, todayNy) (today exclusive — live capture owns
+	/// the current session) and classifies the on-disk CSV as complete, partial, or missing. As a side
+	/// effect, any LooksComplete=true CSV not yet in sealed.json is added and the manifest rewritten —
+	/// so sealed.json grows into an authoritative ledger of all known-good dates rather than only the
+	/// subset this command happens to write via massive.com. This auto-heals gaps left by older builds
+	/// (and by the live capture, which writes CSVs but never touches sealed.json) without needing a
+	/// separate reconcile command.</summary>
+	private static IntradayAuditResult AuditIntraday(string inputTicker, DateTime earliestNy, DateTime todayNy)
+	{
+		var intradayDir = Path.Combine(Program.ResolvePath("data/intraday"), inputTicker);
+		var sealedPath = Path.Combine(intradayDir, "sealed.json");
+		var sealedDates = LoadSealedManifest(sealedPath);
+
+		var complete = new List<DateTime>();
+		var partial = new List<DateTime>();
+		var missing = new List<DateTime>();
+		var sealedDirty = false;
+		for (var d = earliestNy; d < todayNy; d = d.AddDays(1))
+		{
+			if (!MarketCalendar.IsOpen(d)) continue;
+			var path = Path.Combine(intradayDir, $"{d:yyyy-MM-dd}.csv");
+			if (!File.Exists(path)) { missing.Add(d); continue; }
+			if (sealedDates.Contains(d)) { complete.Add(d); continue; }
+			if (LooksComplete(path))
+			{
+				complete.Add(d);
+				sealedDates.Add(d);
+				sealedDirty = true;
+				continue;
+			}
+			partial.Add(d);
+		}
+
+		if (sealedDirty)
+			SaveSealedManifest(sealedPath, sealedDates);
+
+		return new IntradayAuditResult(intradayDir, sealedPath, sealedDates, complete, partial, missing);
+	}
+
+	private static string FormatDateList(IReadOnlyList<DateTime> dates, int maxInline)
+	{
+		if (dates.Count == 0) return "(none)";
+		if (dates.Count <= maxInline) return string.Join(", ", dates.Select(d => d.ToString("yyyy-MM-dd")));
+		var half = maxInline / 2;
+		var head = string.Join(", ", dates.Take(half).Select(d => d.ToString("yyyy-MM-dd")));
+		var tail = string.Join(", ", dates.Skip(dates.Count - half).Select(d => d.ToString("yyyy-MM-dd")));
+		return $"{head}, … ({dates.Count - maxInline} more) …, {tail}";
+	}
+
+	private sealed record IntradayAuditResult(
+		string IntradayDir,
+		string SealedPath,
+		HashSet<DateTime> SealedDates,
+		List<DateTime> Complete,
+		List<DateTime> Partial,
+		List<DateTime> Missing);
 
 	/// <summary>Reads the per-ticker sealed manifest at <c>data/intraday/&lt;TICKER&gt;/sealed.json</c>.
 	/// Records every date this command has successfully pulled from massive.com so subsequent runs
