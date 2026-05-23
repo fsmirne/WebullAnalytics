@@ -35,6 +35,7 @@ internal static class BacktestSummaryRenderer
 		table.AddColumn(new TableColumn("P&L %").RightAligned());
 		table.AddColumn(new TableColumn("Fees").RightAligned());
 		table.AddColumn(new TableColumn("Cash").RightAligned());
+		table.AddColumn(new TableColumn("Return").RightAligned());
 		table.AddColumn("Rule");
 
 		// Pre-index by lineage so we can compute cumulative realized P&L at any closing fill.
@@ -84,6 +85,13 @@ internal static class BacktestSummaryRenderer
 				}
 			}
 
+			// Cumulative return relative to the starting cash. Updates on every fill (Open shrinks
+			// cash by the debit; Expire restores it plus intrinsic). Gives a per-row view of the
+			// equity curve in % terms so the user can see compounding without doing the math.
+			var cumPct = result.StartingCash > 0m ? (runningCash - result.StartingCash) / result.StartingCash * 100m : 0m;
+			var cumPctLabel = cumPct >= 0m ? $"+{cumPct:F1}%" : $"{cumPct:F1}%";
+			var cumPctColor = cumPct >= 0m ? "green" : "red";
+
 			table.AddRow(
 				f.Date.ToString("yyyy-MM-dd HH:mm"),
 				Markup.Escape(f.Ticker),
@@ -97,6 +105,7 @@ internal static class BacktestSummaryRenderer
 				$"[{pnlPctColor}]{pnlPctLabel}[/]",
 				$"${f.Fees:N2}",
 				$"[{runningColor}]${runningCash:N2}[/]",
+				$"[{cumPctColor}]{cumPctLabel}[/]",
 				Markup.Escape(f.RuleName ?? "—"));
 		}
 		AnsiConsole.Write(table);

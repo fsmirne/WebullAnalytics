@@ -17,7 +17,7 @@ internal sealed class ProposalSink : IDisposable
 {
 	private readonly StreamWriter _file;
 	private readonly LogConfig _log;
-	private readonly string _mode; // "watch" | "once" | "replay"
+	private readonly string _mode; // "watch" | "scan" | "replay"
 	private readonly string _suggestPricing;
 	private readonly bool _ascii;
 	private readonly string _cmdPrefix;
