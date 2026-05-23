@@ -148,7 +148,9 @@ internal static class BacktestSummaryRenderer
 			table.AddRow("Peak equity", $"${result.PeakEquity:N2}");
 		}
 		table.AddRow("Max drawdown", $"[red]${result.MaxDrawdown:N2} ({ddPct:F2}% of peak)[/]");
-		table.AddRow("Opens", result.OpenFills.ToString());
+		table.AddRow("Trading days", result.EquityCurve.Count.ToString());
+		var openPctOfDays = result.EquityCurve.Count > 0 ? result.OpenFills * 100m / result.EquityCurve.Count : 0m;
+		table.AddRow("Opens", result.EquityCurve.Count > 0 ? $"{result.OpenFills} ({openPctOfDays:F1}% of days)" : result.OpenFills.ToString());
 		table.AddRow("Closes (rules)", result.CloseFills.ToString());
 		table.AddRow("Rolls", result.RollFills.ToString());
 		table.AddRow("Expirations", result.ExpireFills.ToString());
