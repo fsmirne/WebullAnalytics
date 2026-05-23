@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using WebullAnalytics.Api;
 
 namespace WebullAnalytics.Trading;
 
@@ -17,36 +18,29 @@ internal sealed class TradeAccount
 		: "https://api.webull.com";
 }
 
-internal sealed class TradeConfigFile
-{
-	[JsonPropertyName("defaultAccount")] public string? DefaultAccount { get; set; }
-	[JsonPropertyName("accounts")] public List<TradeAccount> Accounts { get; set; } = new();
-}
-
 internal static class TradeConfig
 {
-	internal const string ConfigPath = "data/trade-config.json";
-
-	/// <summary>Loads and parses the trade-config.json file. Returns null (with stderr message) if the file is missing or malformed.</summary>
-	internal static TradeConfigFile? Load(bool quiet = false)
+	/// <summary>Loads api-config.json and returns it for callers that need account lookup. Returns null
+	/// (with stderr message) if the file is missing, malformed, or has no accounts configured.</summary>
+	internal static ApiConfig? Load(bool quiet = false)
 	{
-		var path = Program.ResolvePath(ConfigPath);
+		var path = Program.ResolvePath(Program.ApiConfigPath);
 		if (!File.Exists(path))
 		{
 			if (!quiet)
 			{
-				Console.Error.WriteLine($"Error: trade config not found at '{ConfigPath}'.");
-				Console.Error.WriteLine($"  Run: cp trade-config.example.json {ConfigPath} and edit.");
+				Console.Error.WriteLine($"Error: api config not found at '{Program.ApiConfigPath}'.");
+				Console.Error.WriteLine($"  Run: cp api-config.example.json {Program.ApiConfigPath} and edit.");
 			}
 			return null;
 		}
 		try
 		{
-			var config = JsonSerializer.Deserialize<TradeConfigFile>(File.ReadAllText(path));
+			var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(path));
 			if (config == null || config.Accounts.Count == 0)
 			{
 				if (!quiet)
-					Console.Error.WriteLine("Error: trade-config.json must contain at least one account.");
+					Console.Error.WriteLine("Error: api-config.json must contain at least one entry under 'accounts'.");
 				return null;
 			}
 			return config;
@@ -54,20 +48,20 @@ internal static class TradeConfig
 		catch (JsonException ex)
 		{
 			if (!quiet)
-				Console.Error.WriteLine($"Error: failed to parse trade-config.json: {ex.Message}");
+				Console.Error.WriteLine($"Error: failed to parse api-config.json: {ex.Message}");
 			return null;
 		}
 	}
 
 	/// <summary>Resolves the account to use given the --account flag (which may be null/empty).
 	/// Returns null (with stderr message) if resolution fails.</summary>
-	internal static TradeAccount? Resolve(TradeConfigFile config, string? accountFlag, bool quiet = false)
+	internal static TradeAccount? Resolve(ApiConfig config, string? accountFlag, bool quiet = false)
 	{
 		var key = string.IsNullOrWhiteSpace(accountFlag) ? config.DefaultAccount : accountFlag;
 		if (string.IsNullOrWhiteSpace(key))
 		{
 			if (!quiet)
-				Console.Error.WriteLine("Error: no --account flag and no 'defaultAccount' in trade-config.json.");
+				Console.Error.WriteLine("Error: no --account flag and no 'defaultAccount' in api-config.json.");
 			return null;
 		}
 		var match = config.Accounts.FirstOrDefault(a =>

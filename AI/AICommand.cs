@@ -182,7 +182,7 @@ internal static class AIContext
 	/// Used by the position source AND by the auto-executor for order submission.</summary>
 	internal static TradeAccount ResolveTradeAccount(AIConfig config)
 	{
-		var tradeConfig = TradeConfig.Load() ?? throw new InvalidOperationException("trade-config.json required for live ai");
+		var tradeConfig = TradeConfig.Load() ?? throw new InvalidOperationException("api-config.json with accounts[] required for live ai");
 		return TradeConfig.Resolve(tradeConfig, config.PositionSource.Account) ?? throw new InvalidOperationException($"account '{config.PositionSource.Account}' not found");
 	}
 }
