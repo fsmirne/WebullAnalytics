@@ -11,6 +11,12 @@ namespace WebullAnalytics.AI;
 /// <param name="AccountCash">Free cash available (before applying reserve).</param>
 /// <param name="AccountValue">Total account value (cash + positions marked to market).</param>
 /// <param name="TechnicalSignals">Composite technical bias per ticker. Missing entry = neutral (no block).</param>
+/// <param name="Vix">VIX index level at this tick (daily close for end-of-day eval, latest available for intraday).
+/// Null when the source can't supply it. Used by regime-gated rules (e.g. LegInShortRule) to skip firing during
+/// high-vol environments where the rule's tail-risk profile turns hostile.</param>
+/// <param name="IntradaySpotRangePct">Today's running (high − low) / open as a percent of open, measured up to
+/// <see cref="Now"/>. Null outside of intraday rule evaluation. Used as a "trend-day" proxy — large early-day
+/// ranges correlate with continued large moves, which is exactly when capping the long is destructive.</param>
 internal sealed record EvaluationContext(
 	DateTime Now,
 	IReadOnlyDictionary<string, OpenPosition> OpenPositions,
@@ -18,7 +24,9 @@ internal sealed record EvaluationContext(
 	IReadOnlyDictionary<string, OptionContractQuote> Quotes,
 	decimal AccountCash,
 	decimal AccountValue,
-	IReadOnlyDictionary<string, TechnicalBias> TechnicalSignals
+	IReadOnlyDictionary<string, TechnicalBias> TechnicalSignals,
+	decimal? Vix = null,
+	decimal? IntradaySpotRangePct = null
 );
 
 /// <summary>
