@@ -8,10 +8,10 @@ namespace WebullAnalytics.AI;
 
 /// <summary>
 /// In-process scheduler that turns rule-emitted Close proposals into actual order placements during
-/// a <c>wa ai watch</c> run. Holds tranche state across ticks so a 730-contract close can be split
-/// into three time-windowed pieces (default 10:00, 12:30, 15:00 ET) instead of one all-at-once order.
-/// Designed to grow: the rule allow-list lets future rules opt in to auto-execution without changing
-/// this class.
+/// a <c>wa ai watch</c> tick or a <c>wa ai scan</c> evaluation. Holds tranche state across calls so a
+/// 730-contract close can be split into three time-windowed pieces (default 10:00, 12:30, 15:00 ET)
+/// instead of one all-at-once order. Designed to grow: the rule allow-list lets future rules opt in to
+/// auto-execution without changing this class.
 ///
 /// Behavior summary:
 /// - Per (rule, position) target: tracks which tranche numbers fired today and the qty submitted.
@@ -26,12 +26,13 @@ namespace WebullAnalytics.AI;
 ///   single immediate order.
 ///
 /// Submission uses <see cref="OrderRequestBuilder"/> + <see cref="WebullOpenApiClient.PlaceOrderAsync"/>
-/// directly (no preview, no interactive confirm) when <c>autoExecute.submit</c> is true. Otherwise
-/// the executor logs the planned action — useful for validating schedule and pricing before going live.
+/// directly (no preview, no interactive confirm) when <c>autoExecute.management.submit</c> is true.
+/// Otherwise the executor logs the planned action — useful for validating schedule and pricing before
+/// going live.
 /// </summary>
-internal sealed class WatchAutoExecutor
+internal sealed class ManagementAutoExecutor
 {
-	private readonly AutoExecuteConfig _config;
+	private readonly ManagementAutoExecuteConfig _config;
 	private readonly TimeZoneInfo _marketTz;
 	private readonly TradeAccount? _account;
 	private readonly HashSet<string> _allowedRules;
@@ -40,7 +41,7 @@ internal sealed class WatchAutoExecutor
 	private readonly Dictionary<(string Rule, string PositionKey), HashSet<int>> _firedTranches = new();
 	private DateOnly _trackingDate;
 
-	public WatchAutoExecutor(AutoExecuteConfig config, TradeAccount? account)
+	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account)
 	{
 		_config = config;
 		_account = account;
@@ -154,8 +155,8 @@ internal sealed class WatchAutoExecutor
 	}
 
 	/// <summary>Builds a close order at current net mid for the given quantity and either submits it
-	/// (when <c>autoExecute.submit</c> is true) or logs the planned action. Returns true if the
-	/// tranche was acted on; false if pricing or account info was unavailable.</summary>
+	/// (when <c>autoExecute.management.submit</c> is true) or logs the planned action. Returns true if
+	/// the tranche was acted on; false if pricing or account info was unavailable.</summary>
 	private async Task<bool> SubmitClose(ManagementProposal proposal, OpenPosition position, int qty, string label, EvaluationContext ctx, CancellationToken cancellation)
 	{
 		var legSpecs = position.Legs
