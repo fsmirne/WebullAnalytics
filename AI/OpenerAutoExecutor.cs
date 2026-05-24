@@ -42,10 +42,9 @@ internal sealed class OpenerAutoExecutor
 	/// <summary>Walks the opener's ranked proposal list and dispatches eligible new-position opens
 	/// through the dry-run/submit path. Returns the count of orders submitted (or planned, in dry-run).
 	/// Caller is expected to invoke this AFTER <see cref="OpenCandidateEvaluator"/> emits its results.
-	/// <paramref name="openedTodayCount"/> is the number of existing positions whose <c>OpenedAt</c>
-	/// falls on today's date — caller pre-computes from the position source. Used together with
-	/// broker pending orders to enforce <c>maxOrdersPerDay</c>.</summary>
-	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, DateTime now, int openedTodayCount, CancellationToken cancellation)
+	/// Daily cap is enforced from the broker's count of today's active orders (filled + pending), so
+	/// it survives across fills, restarts, and concurrent processes on the same machine.</summary>
+	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, DateTime now, CancellationToken cancellation)
 	{
 		if (!_config.Enabled) return 0;
 		if (proposals.Count == 0) return 0;
@@ -56,6 +55,8 @@ internal sealed class OpenerAutoExecutor
 		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation))
 			return 0;
 
+		var brokerActiveCount = _config.Submit && _brokerState != null && _brokerState.IsReady ? _brokerState.TodaysActiveOrderCount : 0;
+
 		var ordersThisTick = 0;
 		foreach (var p in proposals)
 		{
@@ -63,18 +64,20 @@ internal sealed class OpenerAutoExecutor
 			if (p.Qty < 1) continue;
 			if (_allowedStructures.Count > 0 && !_allowedStructures.Contains(p.StructureKind.ToString())) continue;
 
-			// Broker-truth dedup: if the same leg set is already pending at the broker, skip.
+			// Broker-truth dedup: if the same leg set is already active (pending or filled today),
+			// skip. This catches same-proposal-across-ticks, cross-process, cross-restart, and the
+			// "limit placed and filled, now we'd otherwise re-fire" case.
 			if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(p.Legs.Select(l => (l.Symbol, l.Action))))
 			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (broker pending):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} — matching order already at broker.");
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (broker already has matching order):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty}.");
 				continue;
 			}
 
-			// Per-day live-submission cap: counts opens that already happened today (filled →
-			// position with OpenedAt today) PLUS pending opens we'd issue this tick.
-			if (_config.Submit && openedTodayCount + ordersThisTick >= _config.MaxOrdersPerDay)
+			// Per-day live-submission cap. Counts active broker orders today (filled + pending,
+			// excluding canceled/rejected) PLUS submissions issued in this tick.
+			if (_config.Submit && brokerActiveCount + ordersThisTick >= _config.MaxOrdersPerDay)
 			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (daily cap):[/] {_config.MaxOrdersPerDay} orders already placed/queued today.");
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (daily cap):[/] {_config.MaxOrdersPerDay} order(s) already active at broker today (filled + pending).");
 				break;
 			}
 

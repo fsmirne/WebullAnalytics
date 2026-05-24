@@ -26,58 +26,108 @@ namespace WebullAnalytics.AI;
 internal sealed class BrokerStateService
 {
 	private readonly TradeAccount _account;
-	private HashSet<string>? _pendingLegSetFingerprints;
-	private Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>? _pendingByFingerprint;
+	// Union of pending + today's filled/partial orders, keyed by leg-set fingerprint. Canceled and
+	// rejected orders are excluded — they represent attempted-but-not-resting state and shouldn't
+	// gate fresh submissions of the same shape.
+	private HashSet<string>? _activeLegSetFingerprints;
+	private Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>? _activeByFingerprint;
+	private int _todaysActiveOrderCount;
+
+	// Order statuses that should DEDUP a new submission: working (still pending) or successfully
+	// filled (already executed today). Canceled/rejected don't count — we're free to try again.
+	// Webull status string conventions vary slightly across endpoints, so we match by prefix.
+	private static readonly string[] ActiveStatusPrefixes =
+	{
+		"FILLED", "PARTIALLY_FILLED", "PARTIAL_FILLED", "PARTIAL",
+		"WORKING", "PENDING", "NEW", "QUEUED", "ACCEPTED", "SUBMITTED",
+	};
+
+	private static bool IsActiveStatus(string? status)
+	{
+		if (string.IsNullOrEmpty(status)) return true; // missing status — assume active, fail-closed
+		var s = status.ToUpperInvariant();
+		foreach (var p in ActiveStatusPrefixes)
+			if (s.StartsWith(p, StringComparison.Ordinal)) return true;
+		return false;
+	}
 
 	public BrokerStateService(TradeAccount account) { _account = account; }
 
 	/// <summary>True once <see cref="RefreshAsync"/> has succeeded at least once. When false,
 	/// callers should skip live submission this tick.</summary>
-	public bool IsReady => _pendingLegSetFingerprints != null;
+	public bool IsReady => _activeLegSetFingerprints != null;
 
-	/// <summary>Pull pending orders from Webull. Throws on API/network failure — caller
-	/// catches and decides whether to skip the tick. Successive calls overwrite the
-	/// previous snapshot atomically.</summary>
+	/// <summary>Count of distinct ACTIVE orders today (filled or pending, excluding canceled/rejected).
+	/// Used by daily-cap enforcement so the cap holds across pending → filled transitions and
+	/// across process restarts (the broker remembers; we re-query each tick).</summary>
+	public int TodaysActiveOrderCount => _todaysActiveOrderCount;
+
+	/// <summary>Pull both today's order history (any status) and the currently-open orders from
+	/// Webull, then build a unified leg-set index covering anything in an "active" state — filled,
+	/// partially filled, working, queued, etc. Canceled / rejected entries are dropped: we should
+	/// be free to retry their leg shape. Throws on API/network failure; caller catches and decides
+	/// whether to skip the tick. Successive calls overwrite the previous snapshot atomically.</summary>
 	public async Task RefreshAsync(CancellationToken cancellation)
 	{
 		using var client = new WebullOpenApiClient(_account);
+
+		// Pull both endpoints. Today's-orders catches everything (working + filled); /open is a
+		// safety net in case today's-orders is missing carried-over orders for some reason. We
+		// union them and dedup by client_order_id (within the orders list).
+		var todayOrders = await client.ListTodayOrdersAsync(cancellation);
 		var openOrders = await client.ListOpenOrdersAsync(cancellation);
+
+		var seenClientIds = new HashSet<string>(StringComparer.Ordinal);
 		var fingerprints = new HashSet<string>(StringComparer.Ordinal);
 		var byFingerprint = new Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>(StringComparer.Ordinal);
-		foreach (var combo in openOrders)
+		var activeCount = 0;
+
+		void Ingest(IEnumerable<WebullOpenApiClient.OpenOrder> combos)
 		{
-			if (combo.Orders == null) continue;
-			foreach (var order in combo.Orders)
+			foreach (var combo in combos)
 			{
-				var fp = FingerprintLegs(order.Legs);
-				if (string.IsNullOrEmpty(fp)) continue;
-				fingerprints.Add(fp);
-				if (!byFingerprint.TryGetValue(fp, out var list)) byFingerprint[fp] = list = new List<WebullOpenApiClient.OrderDetailOrder>();
-				list.Add(order);
+				if (combo.Orders == null) continue;
+				foreach (var order in combo.Orders)
+				{
+					if (!IsActiveStatus(order.Status)) continue;
+					if (!string.IsNullOrEmpty(order.ClientOrderId) && !seenClientIds.Add(order.ClientOrderId)) continue;
+					var fp = FingerprintLegs(order.Legs);
+					if (string.IsNullOrEmpty(fp)) continue;
+					fingerprints.Add(fp);
+					if (!byFingerprint.TryGetValue(fp, out var list)) byFingerprint[fp] = list = new List<WebullOpenApiClient.OrderDetailOrder>();
+					list.Add(order);
+					activeCount++;
+				}
 			}
 		}
-		_pendingLegSetFingerprints = fingerprints;
-		_pendingByFingerprint = byFingerprint;
+
+		Ingest(todayOrders);
+		Ingest(openOrders);
+
+		_activeLegSetFingerprints = fingerprints;
+		_activeByFingerprint = byFingerprint;
+		_todaysActiveOrderCount = activeCount;
 	}
 
-	/// <summary>Returns true when the proposal's leg set matches a pending order at the broker.
-	/// Returns false when <see cref="IsReady"/> is false — callers should have already
-	/// short-circuited in that case rather than relying on this return.</summary>
+	/// <summary>Returns true when the proposal's leg set matches an ACTIVE order at the broker —
+	/// pending OR already filled/partial today (i.e. anything that should block a duplicate). Returns
+	/// false when <see cref="IsReady"/> is false; callers should have short-circuited beforehand.</summary>
 	public bool HasPendingMatching(IEnumerable<(string Symbol, string Action)> proposalLegs)
 	{
-		if (_pendingLegSetFingerprints == null) return false;
+		if (_activeLegSetFingerprints == null) return false;
 		var fp = FingerprintProposal(proposalLegs);
-		return _pendingLegSetFingerprints.Contains(fp);
+		return _activeLegSetFingerprints.Contains(fp);
 	}
 
-	/// <summary>Returns the pending orders at the broker that match the proposal's leg set, or an
+	/// <summary>Returns the active orders at the broker that match the proposal's leg set, or an
 	/// empty list when there are none / <see cref="IsReady"/> is false. Used by `wa trade place` to
-	/// surface details of the existing duplicates in the warning line (client_order_id, qty, limit).</summary>
+	/// surface details of the existing duplicates in the warning line (client_order_id, qty, limit,
+	/// status). Includes both pending and filled-today orders.</summary>
 	public IReadOnlyList<WebullOpenApiClient.OrderDetailOrder> FindPendingMatching(IEnumerable<(string Symbol, string Action)> proposalLegs)
 	{
-		if (_pendingByFingerprint == null) return Array.Empty<WebullOpenApiClient.OrderDetailOrder>();
+		if (_activeByFingerprint == null) return Array.Empty<WebullOpenApiClient.OrderDetailOrder>();
 		var fp = FingerprintProposal(proposalLegs);
-		return _pendingByFingerprint.TryGetValue(fp, out var list) ? list : Array.Empty<WebullOpenApiClient.OrderDetailOrder>();
+		return _activeByFingerprint.TryGetValue(fp, out var list) ? list : Array.Empty<WebullOpenApiClient.OrderDetailOrder>();
 	}
 
 	/// <summary>Canonical fingerprint of a Webull pending order's leg set. Webull returns each leg
@@ -133,7 +183,9 @@ internal sealed class BrokerStateService
 		catch (Exception ex)
 		{
 			AnsiConsole.MarkupLine($"[yellow]broker state refresh failed:[/] {Markup.Escape(ex.Message)} — auto-execute skipped this tick (fail-closed).");
-			_pendingLegSetFingerprints = null;
+			_activeLegSetFingerprints = null;
+			_activeByFingerprint = null;
+			_todaysActiveOrderCount = 0;
 			return false;
 		}
 	}

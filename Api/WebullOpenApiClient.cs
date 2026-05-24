@@ -230,6 +230,41 @@ internal sealed class WebullOpenApiClient : IDisposable
 		return all;
 	}
 
+	// ─── List today's orders (all statuses) ─────────────────────────────────
+	// Distinct from ListOpenOrdersAsync which only returns currently-working orders. This pulls every
+	// order the account has placed today (FILLED, PARTIALLY_FILLED, WORKING, CANCELLED, REJECTED).
+	// Used by auto-executors to enforce maxOrdersPerDay across both pending and completed orders —
+	// the /open endpoint alone goes blind the moment an order fills.
+	//
+	// Endpoint path confirmed via the official webull-inc/openapi-python-sdk
+	// (webull-python-sdk-trade/webullsdktrade/request/get_today_orders_request.py). The broader
+	// /openapi/trade/order/history endpoint (7 days, rate-limited 2 req/2s) is a fallback if this
+	// per-day endpoint isn't supported on a given region; not currently used.
+
+	/// <summary>Iterates pages of today's orders (any status) and returns the flat list.</summary>
+	internal async Task<List<OpenOrder>> ListTodayOrdersAsync(CancellationToken ct = default)
+	{
+		const int pageSize = 100;
+		var all = new List<OpenOrder>();
+		string? cursor = null;
+		while (true)
+		{
+			var query = new SortedDictionary<string, string>(StringComparer.Ordinal)
+			{
+				["account_id"] = _account.AccountId,
+				["page_size"] = pageSize.ToString(),
+			};
+			if (cursor != null) query["last_client_order_id"] = cursor;
+			var page = await GetAsync<List<OpenOrder>>("/openapi/trade/orders/list-today", query, ct);
+			if (page.Count == 0) break;
+			all.AddRange(page);
+			if (page.Count < pageSize) break;
+			cursor = page[^1].ClientOrderId;
+			if (string.IsNullOrEmpty(cursor)) break;
+		}
+		return all;
+	}
+
 	// ─── Order detail ─────────────────────────────────────────────────────────
 
 	internal sealed record OrderDetailLeg(

@@ -394,10 +394,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
 			if (openerExecutor != null)
-			{
-				var openedTodayCount = openPositions.Values.Count(p => p.OpenedAt?.Date == now.Date);
-				await openerExecutor.HandleAsync(openResults, now, openedTodayCount, cancellation);
-			}
+				await openerExecutor.HandleAsync(openResults, now, cancellation);
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
@@ -622,9 +619,8 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// Theoretical mode bypasses the management executor — no live positions in scope, so the
 			// rule engine had nothing to react to. Opener executor still fires so the user can validate
 			// open-order placement off-hours against a sandbox account.
-			// openedTodayCount=0: in theoretical mode openPositions is empty, no opens have happened today.
 			if (openerExecutor != null)
-				openerOrdersThisRun = await openerExecutor.HandleAsync(openResults, asOf, openedTodayCount: 0, cancellation);
+				openerOrdersThisRun = await openerExecutor.HandleAsync(openResults, asOf, cancellation);
 		}
 
 		var execSuffix = openerExecutor != null ? $" | opener auto-execute: {openerOrdersThisRun} order(s) acted on" : "";
