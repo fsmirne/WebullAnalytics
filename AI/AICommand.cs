@@ -209,8 +209,9 @@ internal static class AIContext
 			try { account = ResolveTradeAccount(config, accountOverride); }
 			catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]auto-execute disabled (account resolution failed): {Markup.Escape(ex.Message)}[/]"); }
 		}
-		var mgmt = config.AutoExecute.Management.Enabled ? new ManagementAutoExecutor(config.AutoExecute.Management, account) : null;
-		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account) : null;
+		var brokerState = account != null ? new BrokerStateService(account) : null;
+		var mgmt = config.AutoExecute.Management.Enabled ? new ManagementAutoExecutor(config.AutoExecute.Management, account, brokerState) : null;
+		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account, brokerState) : null;
 		return (mgmt, opener);
 	}
 }
@@ -393,7 +394,10 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
 			if (openerExecutor != null)
-				await openerExecutor.HandleAsync(openResults, now, cancellation);
+			{
+				var openedTodayCount = openPositions.Values.Count(p => p.OpenedAt?.Date == now.Date);
+				await openerExecutor.HandleAsync(openResults, now, openedTodayCount, cancellation);
+			}
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
@@ -617,8 +621,9 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// Theoretical mode bypasses the management executor — no live positions in scope, so the
 			// rule engine had nothing to react to. Opener executor still fires so the user can validate
 			// open-order placement off-hours against a sandbox account.
+			// openedTodayCount=0: in theoretical mode openPositions is empty, no opens have happened today.
 			if (openerExecutor != null)
-				await openerExecutor.HandleAsync(openResults, asOf, cancellation);
+				await openerExecutor.HandleAsync(openResults, asOf, openedTodayCount: 0, cancellation);
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Theoretical tick complete: {openCount} open proposal(s) emitted[/]");
