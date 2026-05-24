@@ -158,7 +158,10 @@ internal sealed class ManagementAutoExecutor
 		// Broker-truth dedup: if the same sell-to-open order is already pending at the broker,
 		// skip. Catches the "limit placed but unfilled" case the in-memory dedup used to cover.
 		if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(p.Legs.Select(l => (l.Symbol, l.Action))))
+		{
+			AnsiConsole.MarkupLine($"[yellow]auto-execute skipped (broker pending):[/] [dim]{Markup.Escape(p.Rule)}[/] {Markup.Escape(position.Ticker)} leg-in — matching order already at broker.");
 			return false;
+		}
 
 		var shortLeg = p.Legs[0];
 		if (!shortLeg.PricePerShare.HasValue) return false;
