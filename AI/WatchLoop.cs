@@ -21,6 +21,10 @@ internal sealed class AIWatchSettings : AISingleTickerSubcommandSettings
 	[Description("Run regardless of clock (for testing).")]
 	public bool IgnoreMarketHours { get; set; }
 
+	[CommandOption("--account <ALIAS>")]
+	[Description("Account alias or ID from api-config.json. Mirrors `wa trade place --account`: overrides defaultAccount for this run. Affects both the live-position read and any auto-executed orders.")]
+	public string? Account { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -65,24 +69,14 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var tickSeconds = settings.Tick ?? config.TickIntervalSeconds;
 		var stopAt = ComputeStopTime(settings);
 
-		var positions = AIContext.BuildLivePositionSource(config);
+		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
 		var quotes = AIContext.BuildLiveQuoteSource(config);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
 
-		// Auto-executors: turn proposals into real (or dry-run) order submissions inside the watch loop.
-		// Two independent paths with parallel security gates:
-		//   - WatchAutoExecutor: management Close proposals from the rule engine, with tranche scheduling.
-		//   - WatchOpenerAutoExecutor: opener proposals (new positions), with per-day fingerprint dedup.
-		// Both off by default; both honor --submit/--enabled gates independently.
-		Trading.TradeAccount? account = null;
-		if (config.Watch.AutoExecute.Enabled || config.Watch.OpenerAutoExecute.Enabled)
-		{
-			try { account = AIContext.ResolveTradeAccount(config); }
-			catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]auto-execute disabled (account resolution failed): {Markup.Escape(ex.Message)}[/]"); }
-		}
-		WatchAutoExecutor? autoExecutor = config.Watch.AutoExecute.Enabled ? new WatchAutoExecutor(config.Watch.AutoExecute, account) : null;
-		WatchOpenerAutoExecutor? openerExecutor = config.Watch.OpenerAutoExecute.Enabled ? new WatchOpenerAutoExecutor(config.Watch.OpenerAutoExecute, account) : null;
+		// Auto-executors: turn proposals into real (or dry-run) order submissions. Both off by default;
+		// both honor enabled/submit gates independently. Shared with `wa ai scan` via AIContext.BuildAutoExecutors.
+		var (autoExecutor, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
 
 		var priceCache = new Replay.HistoricalPriceCache();
 

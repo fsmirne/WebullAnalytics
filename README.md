@@ -762,11 +762,11 @@ ai backtest only:
   --profile                Print a per-step wall-time breakdown at the end of the run.
 ```
 
-#### Auto-execution (watch loop)
+#### Auto-execution (scan + watch)
 
-`wa ai watch` can optionally submit Close proposals automatically when `watch.autoExecute.enabled` is set in `ai-config.json`. Off by default; the executor logs the action it *would* take until `submit: true` is also set. The `rules` allow-list controls which rules can fire executions — by default only `CloseBeforeShortExpiryRule` is permitted.
+`wa ai scan` and `wa ai watch` can both optionally submit Close proposals (rule-driven) and Open proposals (opener-driven) automatically when `autoExecute.management.enabled` / `autoExecute.opener.enabled` are set in `ai-config.json`. Off by default; the executors log the action they *would* take until `submit: true` is also set. The `management.rules` allow-list controls which rules can fire executions — by default only `CloseBeforeShortExpiryRule` is permitted. Scan triggers each executor once per invocation; watch triggers them on every tick.
 
-For Close proposals at or above `scaleOut.minQty` contracts, the executor splits the close into three time-windowed tranches (default 10:00–10:30 / 12:30–13:00 / 15:00–15:30 ET). The final tranche always closes whatever remains, so partial fills earlier in the day still converge to a fully-closed position by the last window. Smaller closes fire as a single order.
+For Close proposals at or above `management.scaleOut.minQty` contracts, the executor splits the close into three time-windowed tranches (default 10:00–10:30 / 12:30–13:00 / 15:00–15:30 ET). The final tranche always closes whatever remains, so partial fills earlier in the day still converge to a fully-closed position by the last window. Smaller closes fire as a single order.
 
 #### Cash reserve
 

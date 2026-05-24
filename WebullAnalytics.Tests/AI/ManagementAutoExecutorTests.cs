@@ -4,9 +4,9 @@ using Xunit;
 
 namespace WebullAnalytics.Tests.AI;
 
-public class WatchAutoExecutorTests
+public class ManagementAutoExecutorTests
 {
-	private static AutoExecuteConfig DefaultConfig() => new()
+	private static ManagementAutoExecuteConfig DefaultConfig() => new()
 	{
 		Enabled = true,
 		Submit = false, // dry-run keeps tests deterministic and broker-free
@@ -72,7 +72,7 @@ public class WatchAutoExecutorTests
 	{
 		var cfg = DefaultConfig();
 		cfg.Enabled = false;
-		var exec = new WatchAutoExecutor(cfg, account: null);
+		var exec = new ManagementAutoExecutor(cfg, account: null);
 		var pos = GmePutCalendar(300);
 		var count = await exec.HandleAsync(Results(CloseProposal(pos)), CtxAtEt(10, 5, pos), CancellationToken.None);
 		Assert.Equal(0, count);
@@ -81,7 +81,7 @@ public class WatchAutoExecutorTests
 	[Fact]
 	public async Task IgnoresProposalsNotInAllowList()
 	{
-		var exec = new WatchAutoExecutor(DefaultConfig(), account: null);
+		var exec = new ManagementAutoExecutor(DefaultConfig(), account: null);
 		var pos = GmePutCalendar(300);
 		var stopLossProposal = CloseProposal(pos) with { Rule = "StopLossRule" };
 		var count = await exec.HandleAsync(Results(stopLossProposal), CtxAtEt(10, 5, pos), CancellationToken.None);
@@ -91,7 +91,7 @@ public class WatchAutoExecutorTests
 	[Fact]
 	public async Task Tranche1_FiresOnceInWindow()
 	{
-		var exec = new WatchAutoExecutor(DefaultConfig(), account: null);
+		var exec = new ManagementAutoExecutor(DefaultConfig(), account: null);
 		var pos = GmePutCalendar(300);
 
 		// Tick 1 inside T1 window — fires.
@@ -103,7 +103,7 @@ public class WatchAutoExecutorTests
 	[Fact]
 	public async Task OutsideAllWindows_DoesNothing()
 	{
-		var exec = new WatchAutoExecutor(DefaultConfig(), account: null);
+		var exec = new ManagementAutoExecutor(DefaultConfig(), account: null);
 		var pos = GmePutCalendar(300);
 		Assert.Equal(0, await exec.HandleAsync(Results(CloseProposal(pos)), CtxAtEt(11, 0, pos), CancellationToken.None));
 	}
@@ -111,7 +111,7 @@ public class WatchAutoExecutorTests
 	[Fact]
 	public async Task EmergencyProposal_BypassesScheduleAndFiresOutsideAnyWindow()
 	{
-		var exec = new WatchAutoExecutor(DefaultConfig(), account: null);
+		var exec = new ManagementAutoExecutor(DefaultConfig(), account: null);
 		var pos = GmePutCalendar(300);
 		var emergency = CloseProposal(pos, emergency: true);
 		// 11:00 ET is between T1 and T2 — emergency still fires.
@@ -125,7 +125,7 @@ public class WatchAutoExecutorTests
 	{
 		var cfg = DefaultConfig();
 		cfg.ScaleOut.MinQty = 100;
-		var exec = new WatchAutoExecutor(cfg, account: null);
+		var exec = new ManagementAutoExecutor(cfg, account: null);
 		var pos = GmePutCalendar(50); // below minQty
 		// 11:00 ET is outside any tranche window, but small position fires immediately.
 		Assert.Equal(1, await exec.HandleAsync(Results(CloseProposal(pos)), CtxAtEt(11, 0, pos), CancellationToken.None));
@@ -136,7 +136,7 @@ public class WatchAutoExecutorTests
 	[Fact]
 	public async Task ResetsBookkeepingOnDateChange()
 	{
-		var exec = new WatchAutoExecutor(DefaultConfig(), account: null);
+		var exec = new ManagementAutoExecutor(DefaultConfig(), account: null);
 		var pos = GmePutCalendar(300);
 
 		// Day 1 emergency fires.
