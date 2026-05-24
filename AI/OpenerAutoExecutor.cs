@@ -31,6 +31,10 @@ internal sealed class OpenerAutoExecutor
 	// Per-day fingerprints already LIVE-submitted. Dry-runs don't populate this set — they re-emit
 	// every tick. Cleared at the first tick of each new market day.
 	private readonly HashSet<string> _firedFingerprints = new(StringComparer.Ordinal);
+	// Per-day LIVE submission counter. Caps total opens placed against the broker per trading day,
+	// independent of how many distinct proposal fingerprints the opener emits as spot drifts. Same
+	// reset cadence as _firedFingerprints.
+	private int _liveSubmittedToday = 0;
 	private DateOnly _trackingDate;
 
 	public OpenerAutoExecutor(OpenerAutoExecuteConfig config, TradeAccount? account)
@@ -54,6 +58,7 @@ internal sealed class OpenerAutoExecutor
 		if (today != _trackingDate)
 		{
 			_firedFingerprints.Clear();
+			_liveSubmittedToday = 0;
 			_trackingDate = today;
 		}
 
@@ -72,13 +77,22 @@ internal sealed class OpenerAutoExecutor
 			var tickerCount = perTickerCount.TryGetValue(p.Ticker, out var n) ? n : 0;
 			if (tickerCount >= _config.MaxPerTickerPerTick) continue;
 
+			// Per-day live-submission cap. Only blocks live PlaceOrder calls; dry-runs continue to emit
+			// (informational, no actual orders to count). Without this gate, a single watch session can
+			// fire as many live opens as the opener produces distinct fingerprints across the day.
+			if (_config.Submit && _liveSubmittedToday >= _config.MaxOrdersPerDay)
+				break;
+
 			var outcome = await SubmitOpen(p, cancellation);
 			if (outcome == SubmitOutcome.NotActed) continue;
 
 			// Only dedup live submissions. Dry-runs are diagnostic output the user expects to see
 			// repeat each tick so they can copy the `wa trade place` command at any moment.
-			if (outcome == SubmitOutcome.Submitted && !string.IsNullOrEmpty(p.Fingerprint))
-				_firedFingerprints.Add(p.Fingerprint);
+			if (outcome == SubmitOutcome.Submitted)
+			{
+				if (!string.IsNullOrEmpty(p.Fingerprint)) _firedFingerprints.Add(p.Fingerprint);
+				_liveSubmittedToday++;
+			}
 			perTickerCount[p.Ticker] = tickerCount + 1;
 			ordersThisTick++;
 		}

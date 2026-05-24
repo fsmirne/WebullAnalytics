@@ -158,6 +158,7 @@
 			"timeInForce": "GTC",
 			"maxPerTickerPerTick": 1,
 			"maxOrdersPerTick": 3,
+			"maxOrdersPerDay": 1,
 			"structures": []
 		}
 	}
