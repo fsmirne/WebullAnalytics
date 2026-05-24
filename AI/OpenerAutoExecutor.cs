@@ -63,19 +63,13 @@ internal sealed class OpenerAutoExecutor
 		}
 
 		var ordersThisTick = 0;
-		var perTickerCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
 		foreach (var p in proposals)
 		{
-			if (ordersThisTick >= _config.MaxOrdersPerTick) break;
-
 			if (p.CashReserveBlocked) continue;
 			if (p.Qty < 1) continue;
 			if (_allowedStructures.Count > 0 && !_allowedStructures.Contains(p.StructureKind.ToString())) continue;
 			if (!string.IsNullOrEmpty(p.Fingerprint) && _firedFingerprints.Contains(p.Fingerprint)) continue;
-
-			var tickerCount = perTickerCount.TryGetValue(p.Ticker, out var n) ? n : 0;
-			if (tickerCount >= _config.MaxPerTickerPerTick) continue;
 
 			// Per-day live-submission cap. Only blocks live PlaceOrder calls; dry-runs continue to emit
 			// (informational, no actual orders to count). Without this gate, a single watch session can
@@ -93,7 +87,6 @@ internal sealed class OpenerAutoExecutor
 				if (!string.IsNullOrEmpty(p.Fingerprint)) _firedFingerprints.Add(p.Fingerprint);
 				_liveSubmittedToday++;
 			}
-			perTickerCount[p.Ticker] = tickerCount + 1;
 			ordersThisTick++;
 		}
 
