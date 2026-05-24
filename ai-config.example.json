@@ -120,7 +120,10 @@
 			"minDTE": 5,
 			"targetShortDelta": 0.30,
 			"shortDeltaTolerance": 0.05,
-			"minShortCreditPerShare": 0.30
+			"minShortCreditPerShare": 0.30,
+			"creditSpread": false,
+			"maxVix": 999.0,
+			"maxIntradayRangePct": 999.0
 		}
 	},
 	"autoExecute": {
