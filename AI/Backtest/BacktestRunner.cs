@@ -110,6 +110,19 @@ internal sealed class BacktestRunner
 						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
 						if (legFills != null) _book.Roll(step, p.PositionKey, legFills, p.Rule);
 					}
+					else if (p.Kind == ProposalKind.LegIn)
+					{
+						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
+						// Rule emits the new structure name via convention: LongCall→LongCallVertical, LongPut→LongPutVertical.
+						// Derive from the existing strategy + the fact that the new leg is opposite-side.
+						if (legFills != null)
+						{
+							var newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical
+								: string.Equals(pos.StrategyKind, "LongPut", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongPutVertical
+								: (OpenStructureKind?)null;
+							if (newStructure != null) _book.LegIn(step, p.PositionKey, legFills, p.Rule, newStructure.Value);
+						}
+					}
 					// AlertOnly: noop in backtest.
 				}
 			}
@@ -203,6 +216,7 @@ internal sealed class BacktestRunner
 			OpenFills: _book.Fills.Count(f => f.Kind == BacktestFillKind.Open),
 			CloseFills: _book.Fills.Count(f => f.Kind == BacktestFillKind.Close),
 			RollFills: _book.Fills.Count(f => f.Kind == BacktestFillKind.Roll),
+			LegInFills: _book.Fills.Count(f => f.Kind == BacktestFillKind.LegIn),
 			ExpireFills: _book.Fills.Count(f => f.Kind == BacktestFillKind.Expire),
 			MaxDrawdown: maxDrawdown,
 			PeakEquity: peakEquity,
@@ -391,7 +405,19 @@ internal sealed class BacktestRunner
 			}
 		}
 
-		if (!slTarget.HasValue && !tpTarget.HasValue) return false;
+		// LegInShort: only meaningful on single-leg long calls/puts and only fires intraday for 0DTE
+		// strategies (multi-day positions get evaluated at start-of-day in the main rule loop).
+		// Instantiated outside the minute loop so we don't re-allocate per minute. Must be declared
+		// BEFORE the early-return check so the carve-out can see it.
+		var legInRule = _config.Rules.LegInShort.Enabled
+			&& (string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) || string.Equals(pos.StrategyKind, "LongPut", StringComparison.OrdinalIgnoreCase))
+			? new Rules.LegInShortRule(_config.Rules.LegInShort, _config.Indicators)
+			: null;
+
+		// LegInShort needs the minute walk even when SL/TP are both disabled (e.g. SPXW's
+		// profit/stop pcts pinned at 1.0 to defer all closes to expiration). Without this carve-out,
+		// the rule would silently never fire on 0DTE strategies that disable both gates.
+		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null) return false;
 
 		// Walk minute bars. At each minute, re-price the position at that minute's bar.Open spot
 		// (start-of-minute price; consistent with ctx.Now semantics elsewhere in the simulator)
@@ -404,9 +430,54 @@ internal sealed class BacktestRunner
 			var minutesToClose = Math.Max(1.0, (endUtc - minuteUtc).TotalMinutes);
 			var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
 
-			var quotes = await _quotes.GetIntradayQuotesAsync(step, pos.Ticker, spot, symbols, minuteZeroDteTimeYears, cancellation);
+			// For LegInShort: pre-generate candidate strikes around spot at the long's expiry so the
+			// rule has multiple strikes to pick from. Only done when the rule is applicable to this
+			// position's structure; otherwise we fetch just the position's leg symbols.
+			IEnumerable<string> quoteSymbols = symbols;
+			if (legInRule != null)
+			{
+				var longLeg = pos.Legs[0];
+				var step5 = _config.Indicators.StrikeStep > 0m ? _config.Indicators.StrikeStep : 5m;
+				var candidateSymbols = new HashSet<string>(symbols, StringComparer.OrdinalIgnoreCase);
+				// ±100 points (at $5 step → 40 strikes) covers the 0.05–0.95 delta range for SPXW even
+				// at short DTE with elevated IV. Cheap enough at minute resolution.
+				for (decimal k = Math.Floor(spot / step5) * step5 - 100m; k <= Math.Ceiling(spot / step5) * step5 + 100m; k += step5)
+				{
+					if (k <= 0m) continue;
+					candidateSymbols.Add(MatchKeys.OccSymbol(pos.Ticker, longLeg.Expiry!.Value, k, longLeg.CallPut!));
+				}
+				quoteSymbols = candidateSymbols;
+			}
+			var quotes = await _quotes.GetIntradayQuotesAsync(step, pos.Ticker, spot, quoteSymbols, minuteZeroDteTimeYears, cancellation);
 			var mark = ComputeMarkFromQuotes(pos.Legs, quotes);
 			if (!mark.HasValue) continue;
+
+			// Try LegInShort first at this minute. If it fires, execute the leg-in and stop the
+			// minute walk for this position — the now-vertical settles at expire. We forgo intraday
+			// SL/TP on the post-leg-in vertical (simplest pass; vertical's tighter risk profile
+			// makes this a benign approximation for 0DTE).
+			if (legInRule != null)
+			{
+				var legInMinuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+				var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
+				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot };
+				var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
+				var minuteCtx = new EvaluationContext(legInMinuteEt, stillOpen, underlyings, quotes, cash, accountValue, emptySignals);
+				var legInProposal = legInRule.Evaluate(pos, minuteCtx);
+				if (legInProposal != null)
+				{
+					// Single sell-to-open leg from the proposal. Price the fill at the bid for conservatism
+					// (we're selling — we receive at most the bid).
+					var shortLeg = legInProposal.Legs[0];
+					if (quotes.TryGetValue(shortLeg.Symbol, out var sq) && sq.Bid is decimal sBid)
+					{
+						var newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical : OpenStructureKind.LongPutVertical;
+						var legInFills = new[] { new BacktestLegFill(shortLeg.Symbol, Side.Sell, pos.Quantity, sBid) };
+						_book.LegIn(legInMinuteEt, pos.Key, legInFills, "LegInShortRule", newStructure);
+						return true; // mirror SL/TP semantics: a fired rule consumes the position for the day.
+					}
+				}
+			}
 
 			bool slFires = slTarget.HasValue && mark.Value <= slTarget.Value;
 			bool tpFires = tpTarget.HasValue && mark.Value >= tpTarget.Value;
@@ -863,6 +934,7 @@ internal sealed record BacktestResult(
 	int OpenFills,
 	int CloseFills,
 	int RollFills,
+	int LegInFills,
 	int ExpireFills,
 	decimal MaxDrawdown,
 	decimal PeakEquity,

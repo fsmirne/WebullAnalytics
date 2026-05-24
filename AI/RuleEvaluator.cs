@@ -132,6 +132,9 @@ internal sealed class RuleEvaluator
 			// CloseBeforeShortExpiry runs ahead of OpportunisticRoll/RollShortOnExpiry so a position
 			// scheduled for unwind on expiry day takes the close path instead of getting rolled forward.
 			new CloseBeforeShortExpiryRule(config.Rules.CloseBeforeShortExpiry),
+			// LegInShort runs ahead of TakeProfit (alphabetical L < T at priority 2) so a saturated
+			// long-call/put gets converted to a vertical instead of flat-closed when both gates trip.
+			new LegInShortRule(config.Rules.LegInShort, config.Indicators),
 			new OpportunisticRollRule(config.Rules.OpportunisticRoll, config.Indicators, config.Opener.RealizedExpectancy, debug, normalizedPricing),
 			new TakeProfitRule(config.Rules.TakeProfit, config.Opener.RealizedExpectancy),
 			new DefensiveRollRule(config.Rules.DefensiveRoll, config.Indicators),

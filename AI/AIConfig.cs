@@ -140,6 +140,36 @@ internal sealed class RulesConfig
 	[JsonPropertyName("defensiveRoll")] public DefensiveRollConfig DefensiveRoll { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("rollShortOnExpiry")] public RollShortOnExpiryConfig RollShortOnExpiry { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("closeBeforeShortExpiry")] public CloseBeforeShortExpiryConfig CloseBeforeShortExpiry { get; set; } = new() { Enabled = false };
+	[JsonPropertyName("legInShort")] public LegInShortConfig LegInShort { get; set; } = new();
+}
+
+/// <summary>
+/// Converts an ITM long single-leg (LongCall / LongPut) into a vertical by selling a higher-strike
+/// call (for calls) or lower-strike put (for puts) at the same expiry. Locks in profit while keeping
+/// some delta. Fires only when the long is gamma-saturated (delta high), profit is meaningful but
+/// not yet at take-profit threshold, and there's enough DTE for the short to carry premium.
+/// </summary>
+internal sealed class LegInShortConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>Spot must be at least this percent in-the-money relative to the long strike. Default 1.0%.</summary>
+	[JsonPropertyName("minSpotPctITM")] public decimal MinSpotPctITM { get; set; } = 1.0m;
+	/// <summary>Absolute delta of the long leg must be at least this. Default 0.65 — gamma-saturated;
+	/// additional underlying moves give diminishing premium pickup so capping upside is fair trade.</summary>
+	[JsonPropertyName("minLongDelta")] public decimal MinLongDelta { get; set; } = 0.65m;
+	/// <summary>Profit-to-date as fraction of initial debit; must be at least this. Default 0.50 (50%).
+	/// Below this, the position hasn't earned a hedge yet — let it run.</summary>
+	[JsonPropertyName("triggerProfitPct")] public decimal TriggerProfitPct { get; set; } = 0.50m;
+	/// <summary>Minimum days-to-expiry on the long. Default 5. Below this, the short carries little
+	/// premium and isn't worth the transaction friction.</summary>
+	[JsonPropertyName("minDTE")] public int MinDTE { get; set; } = 5;
+	/// <summary>Target absolute delta for the short leg. Default 0.30 (one-sigma OTM).</summary>
+	[JsonPropertyName("targetShortDelta")] public decimal TargetShortDelta { get; set; } = 0.30m;
+	/// <summary>Tolerance band around <c>targetShortDelta</c> when picking the short strike. Default 0.05.</summary>
+	[JsonPropertyName("shortDeltaTolerance")] public decimal ShortDeltaTolerance { get; set; } = 0.05m;
+	/// <summary>Minimum per-share credit from selling the short. Default $0.30 — below this, the
+	/// round-trip cost (slippage + commissions) eats the structural benefit.</summary>
+	[JsonPropertyName("minShortCreditPerShare")] public decimal MinShortCreditPerShare { get; set; } = 0.30m;
 }
 
 internal sealed class OpportunisticRollConfig
@@ -278,6 +308,15 @@ internal static class AIConfigLoader
 		var ce = c.Rules.CloseBeforeShortExpiry;
 		if (ce.MinProfitPct < 0m) return $"rules.closeBeforeShortExpiry.minProfitPct: must be ≥ 0, got {ce.MinProfitPct}";
 		if (ce.EmergencyBreakEvenBufferPct < 0m) return $"rules.closeBeforeShortExpiry.emergencyBreakEvenBufferPct: must be ≥ 0, got {ce.EmergencyBreakEvenBufferPct}";
+
+		var li = c.Rules.LegInShort;
+		if (li.MinSpotPctITM < 0m) return $"rules.legInShort.minSpotPctITM: must be ≥ 0, got {li.MinSpotPctITM}";
+		if (li.MinLongDelta <= 0m || li.MinLongDelta >= 1m) return $"rules.legInShort.minLongDelta: must be in (0, 1), got {li.MinLongDelta}";
+		if (li.TriggerProfitPct < 0m) return $"rules.legInShort.triggerProfitPct: must be ≥ 0, got {li.TriggerProfitPct}";
+		if (li.MinDTE < 0) return $"rules.legInShort.minDTE: must be ≥ 0, got {li.MinDTE}";
+		if (li.TargetShortDelta <= 0m || li.TargetShortDelta >= 1m) return $"rules.legInShort.targetShortDelta: must be in (0, 1), got {li.TargetShortDelta}";
+		if (li.ShortDeltaTolerance <= 0m || li.ShortDeltaTolerance >= 1m) return $"rules.legInShort.shortDeltaTolerance: must be in (0, 1), got {li.ShortDeltaTolerance}";
+		if (li.MinShortCreditPerShare < 0m) return $"rules.legInShort.minShortCreditPerShare: must be ≥ 0, got {li.MinShortCreditPerShare}";
 
 		foreach (var (label, value) in new[] { ("management", c.AutoExecute.Management.TimeInForce), ("opener", c.AutoExecute.Opener.TimeInForce) })
 		{
