@@ -329,6 +329,32 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		if (s.Debug)
 			AnsiConsole.MarkupLine($"[dim]Payload:[/] {Markup.Escape(OrderRequestBuilder.Serialize(body))}");
 
+		// Pre-flight broker-truth check: warn (don't block) when a matching order is already pending.
+		// Trade place is the manual path — the user invoked it explicitly, so we trust intent and
+		// just surface the duplicate's details (client_order_id, side, qty, limit) so they can
+		// abort at the Y/N prompt (no --submit) or knowingly proceed with --submit.
+		try
+		{
+			var brokerState = new AI.BrokerStateService(account);
+			await brokerState.RefreshAsync(cancellationToken);
+			var legsForFp = legs.Select(l => (l.Symbol, l.Action == LegAction.Buy ? "buy" : "sell"));
+			var matches = brokerState.FindPendingMatching(legsForFp);
+			if (matches.Count > 0)
+			{
+				AnsiConsole.MarkupLine($"[yellow]warning:[/] {matches.Count} matching pending order(s) already at broker:");
+				foreach (var m in matches)
+				{
+					var qty = m.TotalQuantity ?? "?";
+					var price = m.LimitPrice ?? "MKT";
+					AnsiConsole.MarkupLine($"  [yellow]•[/] client_order_id={Markup.Escape(m.ClientOrderId ?? "-")}  side={Markup.Escape(m.Side ?? "?")}  qty={Markup.Escape(qty)}  limit=${Markup.Escape(price)}  status={Markup.Escape(m.Status ?? "?")}");
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			AnsiConsole.MarkupLine($"[dim](could not check broker pending orders: {Markup.Escape(ex.Message)})[/]");
+		}
+
 		// 7. Preview.
 		using var client = new WebullOpenApiClient(account);
 		WebullOpenApiClient.PreviewResponse previewResponse;
