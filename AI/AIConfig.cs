@@ -12,13 +12,12 @@ internal sealed class AIConfig
 	[JsonIgnore] public List<string> Tickers { get; set; } = new();
 
 	[JsonPropertyName("tickIntervalSeconds")] public int TickIntervalSeconds { get; set; } = 60;
-	[JsonPropertyName("positionSource")] public PositionSourceConfig PositionSource { get; set; } = new();
 	[JsonPropertyName("cashReserve")] public CashReserveConfig CashReserve { get; set; } = new();
 	[JsonPropertyName("log")] public LogConfig Log { get; set; } = new();
 	[JsonPropertyName("indicators")] public IndicatorsConfig Indicators { get; set; } = new();
 	[JsonPropertyName("rules")] public RulesConfig Rules { get; set; } = new();
 	[JsonPropertyName("opener")] public OpenerConfig Opener { get; set; } = new();
-	[JsonPropertyName("watch")] public WatchConfig Watch { get; set; } = new();
+	[JsonPropertyName("autoExecute")] public AutoExecuteConfig AutoExecute { get; set; } = new();
 }
 
 /// <summary>Pipeline-wide inputs / measurement knobs. Read by both the opener (for macro bias and
@@ -43,21 +42,22 @@ internal sealed class IndicatorsConfig
 }
 
 /// <summary>
-/// Settings that apply only to the long-running <c>wa ai watch</c> loop. Auto-execute lives here
-/// because it requires the loop's tick cadence and persistent in-memory state.
+/// Root container for auto-execution settings, consumed by both <c>wa ai watch</c> (every tick) and
+/// <c>wa ai scan</c> (one-shot). Two independent paths with parallel security gates:
+///   - <c>management</c>: closes/rolls emitted by the rule engine, with tranche scheduling.
+///   - <c>opener</c>: new-position opens emitted by the opener, with per-day fingerprint dedup.
 /// </summary>
-internal sealed class WatchConfig
+internal sealed class AutoExecuteConfig
 {
-	[JsonPropertyName("autoExecute")] public AutoExecuteConfig AutoExecute { get; set; } = new();
-	[JsonPropertyName("openerAutoExecute")] public OpenerAutoExecuteConfig OpenerAutoExecute { get; set; } = new();
+	[JsonPropertyName("management")] public ManagementAutoExecuteConfig Management { get; set; } = new();
+	[JsonPropertyName("opener")] public OpenerAutoExecuteConfig Opener { get; set; } = new();
 }
 
 /// <summary>
-/// Opt-in execution of opener proposals (new positions) from inside <c>wa ai watch</c>. Mirrors the
-/// security model of <see cref="AutoExecuteConfig"/>: <c>enabled</c> turns the executor on,
-/// <c>submit</c> flips dry-run logging to real PlaceOrder calls. Off by default on both flags.
-/// Per-day fingerprint deduplication prevents the same proposal from firing multiple times across
-/// successive ticks.
+/// Opt-in execution of opener proposals (new positions). Mirrors the security model of
+/// <see cref="ManagementAutoExecuteConfig"/>: <c>enabled</c> turns the executor on, <c>submit</c>
+/// flips dry-run logging to real PlaceOrder calls. Off by default on both flags. Per-day fingerprint
+/// deduplication prevents the same proposal from firing multiple times across successive ticks.
 /// </summary>
 internal sealed class OpenerAutoExecuteConfig
 {
@@ -75,10 +75,10 @@ internal sealed class OpenerAutoExecuteConfig
 }
 
 /// <summary>
-/// Opt-in execution of selected rule proposals from inside <c>wa ai watch</c>. Off by default.
+/// Opt-in execution of selected management-rule proposals (closes/rolls). Off by default.
 /// The <c>rules</c> allow-list lets users enable one rule at a time as they validate behavior.
 /// </summary>
-internal sealed class AutoExecuteConfig
+internal sealed class ManagementAutoExecuteConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
 	/// <summary>If false, the executor logs the action it WOULD take but does not call PlaceOrder.
@@ -92,9 +92,9 @@ internal sealed class AutoExecuteConfig
 
 /// <summary>
 /// Tranche schedule for scaled close execution. When a Close proposal's qty is at least <c>minQty</c>,
-/// the executor splits the close into the configured time windows; otherwise it fires a single order
-/// immediately. Final tranche (3) always closes whatever remains, so mid-day partial fills still
-/// converge to a fully-closed position by the last window.
+/// the <see cref="ManagementAutoExecutor"/> splits the close into the configured time windows;
+/// otherwise it fires a single order immediately. Final tranche (3) always closes whatever remains,
+/// so mid-day partial fills still converge to a fully-closed position by the last window.
 /// </summary>
 internal sealed class ScaleOutConfig
 {
@@ -109,12 +109,6 @@ internal sealed class ScaleOutConfig
 	[JsonPropertyName("tranche2Fraction")] public decimal Tranche2Fraction { get; set; } = 0.5m;
 	/// <summary>Position quantity at or above which scaling is applied. Smaller closes go in a single order.</summary>
 	[JsonPropertyName("minQty")] public int MinQty { get; set; } = 100;
-}
-
-internal sealed class PositionSourceConfig
-{
-	[JsonPropertyName("type")] public string Type { get; set; } = "openapi";
-	[JsonPropertyName("account")] public string Account { get; set; } = "default";
 }
 
 internal sealed class CashReserveConfig
@@ -190,7 +184,7 @@ internal sealed class RollShortOnExpiryConfig
 
 /// <summary>
 /// Decides whether to close a calendar/diagonal on its short-leg expiry day. Decision-only — does
-/// not control execution. Scaled-out tranching lives in <c>WatchAutoExecutor</c>.
+/// not control execution. Scaled-out tranching lives in <c>ManagementAutoExecutor</c>.
 /// </summary>
 internal sealed class CloseBeforeShortExpiryConfig
 {
@@ -251,7 +245,6 @@ internal static class AIConfigLoader
 	internal static string? Validate(AIConfig c)
 	{
 		if (c.TickIntervalSeconds < 1 || c.TickIntervalSeconds > 3600) return $"tickIntervalSeconds: must be in [1, 3600], got {c.TickIntervalSeconds}";
-		if (c.PositionSource.Type is not ("openapi" or "jsonl")) return $"positionSource.type: must be 'openapi' or 'jsonl', got '{c.PositionSource.Type}'";
 		if (c.CashReserve.Mode is not ("percent" or "absolute")) return $"cashReserve.mode: must be 'percent' or 'absolute', got '{c.CashReserve.Mode}'";
 		if (c.CashReserve.Value < 0m) return $"cashReserve.value: must be non-negative, got {c.CashReserve.Value}";
 		if (c.CashReserve.Mode == "percent" && c.CashReserve.Value > 100m) return $"cashReserve.value: must be ≤ 100 for mode 'percent', got {c.CashReserve.Value}";
@@ -277,7 +270,7 @@ internal static class AIConfigLoader
 		if (ce.MinProfitPct < 0m) return $"rules.closeBeforeShortExpiry.minProfitPct: must be ≥ 0, got {ce.MinProfitPct}";
 		if (ce.EmergencyBreakEvenBufferPct < 0m) return $"rules.closeBeforeShortExpiry.emergencyBreakEvenBufferPct: must be ≥ 0, got {ce.EmergencyBreakEvenBufferPct}";
 
-		var so = c.Watch.AutoExecute.ScaleOut;
+		var so = c.AutoExecute.Management.ScaleOut;
 		foreach (var (label, value) in new[] {
 			("tranche1Start", so.Tranche1Start), ("tranche1End", so.Tranche1End),
 			("tranche2Start", so.Tranche2Start), ("tranche2End", so.Tranche2End),
@@ -285,11 +278,11 @@ internal static class AIConfigLoader
 		})
 		{
 			if (!TimeSpan.TryParseExact(value, "hh\\:mm", CultureInfo.InvariantCulture, out _))
-				return $"watch.autoExecute.scaleOut.{label}: must be HH:MM, got '{value}'";
+				return $"autoExecute.management.scaleOut.{label}: must be HH:MM, got '{value}'";
 		}
-		if (so.Tranche1Fraction <= 0m || so.Tranche1Fraction >= 1m) return $"watch.autoExecute.scaleOut.tranche1Fraction: must be in (0, 1), got {so.Tranche1Fraction}";
-		if (so.Tranche2Fraction <= 0m || so.Tranche2Fraction >= 1m) return $"watch.autoExecute.scaleOut.tranche2Fraction: must be in (0, 1), got {so.Tranche2Fraction}";
-		if (so.MinQty < 1) return $"watch.autoExecute.scaleOut.minQty: must be ≥ 1, got {so.MinQty}";
+		if (so.Tranche1Fraction <= 0m || so.Tranche1Fraction >= 1m) return $"autoExecute.management.scaleOut.tranche1Fraction: must be in (0, 1), got {so.Tranche1Fraction}";
+		if (so.Tranche2Fraction <= 0m || so.Tranche2Fraction >= 1m) return $"autoExecute.management.scaleOut.tranche2Fraction: must be in (0, 1), got {so.Tranche2Fraction}";
+		if (so.MinQty < 1) return $"autoExecute.management.scaleOut.minQty: must be ≥ 1, got {so.MinQty}";
 
 		var or = c.Rules.OpportunisticRoll;
 		if (or.BaseOtmBufferPct < 0m) return $"rules.opportunisticRoll.baseOtmBufferPct: must be ≥ 0, got {or.BaseOtmBufferPct}";

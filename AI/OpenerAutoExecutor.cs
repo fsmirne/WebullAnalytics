@@ -6,19 +6,19 @@ using WebullAnalytics.Trading;
 namespace WebullAnalytics.AI;
 
 /// <summary>
-/// Companion to <see cref="WatchAutoExecutor"/> that handles OPENER proposals (new positions). Same
-/// double-flag safety model: <c>enabled</c> instantiates the executor at all; <c>submit</c> flips
-/// dry-run logging to live PlaceOrder calls. Per-day fingerprint deduplication prevents the same
-/// proposal from re-firing across successive ticks — but ONLY after a real live submit. Dry-run
+/// Companion to <see cref="ManagementAutoExecutor"/> that handles OPENER proposals (new positions).
+/// Same double-flag safety model: <c>enabled</c> instantiates the executor at all; <c>submit</c>
+/// flips dry-run logging to live PlaceOrder calls. Per-day fingerprint deduplication prevents the
+/// same proposal from re-firing across successive ticks — but ONLY after a real live submit. Dry-run
 /// emissions are intentionally NOT deduped, so the user keeps seeing the proposed `wa trade place`
 /// command on every tick the proposal stays at the top (otherwise the line goes silent after tick 1
 /// even though the proposal is still live).
 ///
-/// Why a separate class from <see cref="WatchAutoExecutor"/>: management closes track tranche state
-/// keyed by (rule, position); opener fires track fingerprints keyed by (ticker, fingerprint). Different
-/// shapes, different schedules. Sharing one class would mean awkward union state.
+/// Why a separate class from <see cref="ManagementAutoExecutor"/>: management closes track tranche
+/// state keyed by (rule, position); opener fires track fingerprints keyed by (ticker, fingerprint).
+/// Different shapes, different schedules. Sharing one class would mean awkward union state.
 /// </summary>
-internal sealed class WatchOpenerAutoExecutor
+internal sealed class OpenerAutoExecutor
 {
 	private enum SubmitOutcome { NotActed, DryRun, Submitted }
 
@@ -31,7 +31,7 @@ internal sealed class WatchOpenerAutoExecutor
 	private readonly HashSet<string> _firedFingerprints = new(StringComparer.Ordinal);
 	private DateOnly _trackingDate;
 
-	public WatchOpenerAutoExecutor(OpenerAutoExecuteConfig config, TradeAccount? account)
+	public OpenerAutoExecutor(OpenerAutoExecuteConfig config, TradeAccount? account)
 	{
 		_config = config;
 		_account = account;

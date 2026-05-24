@@ -160,9 +160,9 @@ internal static class AIContext
 		return config;
 	}
 
-	internal static IPositionSource BuildLivePositionSource(AIConfig config)
+	internal static IPositionSource BuildLivePositionSource(AIConfig config, string? accountOverride = null)
 	{
-		var account = ResolveTradeAccount(config);
+		var account = ResolveTradeAccount(config, accountOverride);
 		// Load local trade history so PositionReplay can supply roll-adjusted cost basis to rule
 		// evaluators. Webull's holdings endpoint reports current-leg cost only and ignores roll
 		// credits/debits, so without this enrichment a stop-loss check on a rolled position uses
@@ -178,12 +178,40 @@ internal static class AIContext
 
 	internal static IQuoteSource BuildLiveQuoteSource(AIConfig config) => new LiveQuoteSource();
 
-	/// <summary>Resolves the broker account that ai-config points at via positionSource.account.
-	/// Used by the position source AND by the auto-executor for order submission.</summary>
-	internal static TradeAccount ResolveTradeAccount(AIConfig config)
+	/// <summary>Resolves the broker account from api-config.json. <paramref name="accountOverride"/>
+	/// mirrors `wa trade place --account`: when non-null, it wins; when null, falls back to
+	/// `api-config.defaultAccount`. Single source of truth for the AI pipeline — used by both the
+	/// live position source (read) and the auto-executors (write), so the account that the AI evaluates
+	/// against is always the same account it trades into.</summary>
+	internal static TradeAccount ResolveTradeAccount(AIConfig config, string? accountOverride = null)
 	{
 		var tradeConfig = TradeConfig.Load() ?? throw new InvalidOperationException("api-config.json with accounts[] required for live ai");
-		return TradeConfig.Resolve(tradeConfig, config.PositionSource.Account) ?? throw new InvalidOperationException($"account '{config.PositionSource.Account}' not found");
+		var resolved = TradeConfig.Resolve(tradeConfig, accountOverride);
+		if (resolved == null)
+		{
+			var key = accountOverride ?? tradeConfig.DefaultAccount ?? "<unset>";
+			throw new InvalidOperationException($"account '{key}' not found in api-config.json");
+		}
+		return resolved;
+	}
+
+	/// <summary>Resolves the trade account once and constructs the two auto-executors gated by
+	/// <c>autoExecute.management.enabled</c> / <c>autoExecute.opener.enabled</c>. Used by both the
+	/// <c>wa ai watch</c> loop (every tick) and the <c>wa ai scan</c> one-shot. Either executor may
+	/// be null when its <c>enabled</c> flag is off; when account resolution fails (e.g. api-config
+	/// missing) both executors are still instantiated but with a null account, so they degrade to
+	/// dry-run logging — same fallback the watch loop has always used.</summary>
+	internal static (ManagementAutoExecutor? Management, OpenerAutoExecutor? Opener) BuildAutoExecutors(AIConfig config, string? accountOverride = null)
+	{
+		TradeAccount? account = null;
+		if (config.AutoExecute.Management.Enabled || config.AutoExecute.Opener.Enabled)
+		{
+			try { account = ResolveTradeAccount(config, accountOverride); }
+			catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]auto-execute disabled (account resolution failed): {Markup.Escape(ex.Message)}[/]"); }
+		}
+		var mgmt = config.AutoExecute.Management.Enabled ? new ManagementAutoExecutor(config.AutoExecute.Management, account) : null;
+		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account) : null;
+		return (mgmt, opener);
 	}
 }
 
@@ -213,6 +241,10 @@ internal sealed class AIScanSettings : AISingleTickerSubcommandSettings
 	[CommandOption("--starting-cash <AMOUNT>")]
 	[Description("With --theoretical: override account balance for sizing. Default: pulled from your live broker account.")]
 	public decimal? StartingCash { get; set; }
+
+	[CommandOption("--account <ALIAS>")]
+	[Description("Account alias or ID from api-config.json. Mirrors `wa trade place --account`: overrides defaultAccount for this run. Affects both the live-position read and any auto-executed orders.")]
+	public string? Account { get; set; }
 
 	public override ValidationResult Validate()
 	{
@@ -300,7 +332,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 	private static async Task<int> RunLiveAsync(AIScanSettings settings, AIConfig config, CancellationToken cancellation)
 	{
-		var positions = AIContext.BuildLivePositionSource(config);
+		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
 		var quotes = AIContext.BuildLiveQuoteSource(config);
 
 		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
@@ -328,6 +360,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
+		var (mgmtExecutor, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
 
 		var results = evaluator.Evaluate(ctx);
 		var managementCount = settings.EmitManagementProposals ? results.Count : 0;
@@ -336,6 +369,8 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			using var sink = new ProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
 		}
+		if (mgmtExecutor != null)
+			await mgmtExecutor.HandleAsync(results, ctx, cancellation);
 
 		var openCount = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
@@ -345,6 +380,8 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
+			if (openerExecutor != null)
+				await openerExecutor.HandleAsync(openResults, now, cancellation);
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
@@ -529,7 +566,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		{
 			try
 			{
-				var account = AIContext.ResolveTradeAccount(config);
+				var account = AIContext.ResolveTradeAccount(config, settings.Account);
 				var livePositions = new LivePositionSource(account);
 				(cash, accountValue) = await livePositions.GetAccountStateAsync(asOf, cancellation);
 				cashSource = "live broker";
@@ -555,6 +592,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			tickerSet, priceCache, config.Indicators.TechnicalFilter, asOf, cancellation);
 
 		var ctx = new EvaluationContext(asOf, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
+		var (_, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
 
 		var openCount = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
@@ -564,6 +602,11 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
+			// Theoretical mode bypasses the management executor — no live positions in scope, so the
+			// rule engine had nothing to react to. Opener executor still fires so the user can validate
+			// open-order placement off-hours against a sandbox account.
+			if (openerExecutor != null)
+				await openerExecutor.HandleAsync(openResults, asOf, cancellation);
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Theoretical tick complete: {openCount} open proposal(s) emitted[/]");

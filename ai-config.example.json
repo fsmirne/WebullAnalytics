@@ -1,9 +1,5 @@
 {
 	"tickIntervalSeconds": 60,
-	"positionSource": {
-		"type": "openapi",
-		"account": "test1"
-	},
 	"cashReserve": {
 		"mode": "percent",
 		"value": 25
@@ -117,8 +113,8 @@
 			"emergencyBreakEvenBufferPct": 1.0
 		}
 	},
-	"watch": {
-		"autoExecute": {
+	"autoExecute": {
+		"management": {
 			"enabled": false,
 			"submit": false,
 			"rules": [
@@ -142,7 +138,7 @@
 				"minQty": 100
 			}
 		},
-		"openerAutoExecute": {
+		"opener": {
 			"enabled": false,
 			"submit": false,
 			"maxPerTickerPerTick": 1,
