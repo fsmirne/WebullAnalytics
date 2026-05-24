@@ -809,6 +809,8 @@ ai backtest only:
 
 `wa ai scan` and `wa ai watch` can both optionally submit Close proposals (rule-driven) and Open proposals (opener-driven) automatically when `autoExecute.management.enabled` / `autoExecute.opener.enabled` are set in `ai-config.json`. Off by default; the executors log the action they *would* take until `submit: true` is also set. The `management.rules` allow-list controls which rules can fire executions — by default only `CloseBeforeShortExpiryRule` is permitted. Scan triggers each executor once per invocation; watch triggers them on every tick.
 
+**Opener per-day cap:** `autoExecute.opener.maxOrdersPerDay` (default 1, matching the backtest's `--top-per-step 1`) caps total LIVE opens placed per trading day. Without it, a watch session that ticks every minute can fire as many opens as the opener emits distinct proposal fingerprints (e.g. when strikes drift with spot). Dry-runs are NOT capped — they continue to emit so you can monitor what would be placed. Caveat: the counter is in-memory; restarting watch mid-day resets it.
+
 For Close proposals at or above `management.scaleOut.minQty` contracts, the executor splits the close into three time-windowed tranches (default 10:00–10:30 / 12:30–13:00 / 15:00–15:30 ET). The final tranche always closes whatever remains, so partial fills earlier in the day still converge to a fully-closed position by the last window. Smaller closes fire as a single order.
 
 #### Cash reserve

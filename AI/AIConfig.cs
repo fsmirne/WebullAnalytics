@@ -75,6 +75,14 @@ internal sealed class OpenerAutoExecuteConfig
 	/// <summary>Max opener proposals to act on across all tickers per tick. Hard cap to prevent the
 	/// executor from spraying orders on a single evaluation.</summary>
 	[JsonPropertyName("maxOrdersPerTick")] public int MaxOrdersPerTick { get; set; } = 3;
+	/// <summary>Max LIVE opener submissions across all tickers per trading day. Default 1, matching
+	/// the backtest's <c>--top-per-step 1</c> convention. Without this cap a watch session that ticks
+	/// every minute can fire the same number of opens as there are distinct proposal fingerprints
+	/// the opener emits during the day (e.g. when strike drifts with spot). Dry-run emissions are
+	/// NOT capped — only live PlaceOrder calls are counted.
+	/// CAVEAT: the counter is in-memory. Restarting <c>wa ai watch</c> mid-day resets the count to 0,
+	/// allowing additional submissions. Persistent per-day tracking is a future improvement.</summary>
+	[JsonPropertyName("maxOrdersPerDay")] public int MaxOrdersPerDay { get; set; } = 1;
 	/// <summary>Allow-list of <c>OpenStructureKind</c> names to auto-execute. Empty = all structures allowed.</summary>
 	[JsonPropertyName("structures")] public List<string> Structures { get; set; } = new();
 }
@@ -342,6 +350,10 @@ internal static class AIConfigLoader
 			if (!string.Equals(value, "DAY", StringComparison.OrdinalIgnoreCase) && !string.Equals(value, "GTC", StringComparison.OrdinalIgnoreCase))
 				return $"autoExecute.{label}.timeInForce: must be 'DAY' or 'GTC', got '{value}'";
 		}
+		var openerAuto = c.AutoExecute.Opener;
+		if (openerAuto.MaxPerTickerPerTick < 1) return $"autoExecute.opener.maxPerTickerPerTick: must be ≥ 1, got {openerAuto.MaxPerTickerPerTick}";
+		if (openerAuto.MaxOrdersPerTick < 1) return $"autoExecute.opener.maxOrdersPerTick: must be ≥ 1, got {openerAuto.MaxOrdersPerTick}";
+		if (openerAuto.MaxOrdersPerDay < 1) return $"autoExecute.opener.maxOrdersPerDay: must be ≥ 1, got {openerAuto.MaxOrdersPerDay}";
 
 		var so = c.AutoExecute.Management.ScaleOut;
 		foreach (var (label, value) in new[] {
