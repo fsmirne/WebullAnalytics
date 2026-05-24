@@ -813,7 +813,10 @@ ai backtest only:
 
 The cap is enforced cross-process on the same machine via a persisted ledger at `data/opener-submissions.jsonl` and an OS-level file lock at `data/opener-submissions.lock`. Multiple concurrent `wa ai scan` / `wa ai watch` invocations (and restarts of either) all share the same per-day count. Different machines submitting against the same broker account do NOT coordinate — accept that as a deliberate limit.
 
-**Scope of the cap:** OPEN proposals only. Management rules (`LegInShortRule`, `StopLossRule`, `TakeProfitRule`, rolls, etc.) flow through a separate `ManagementAutoExecutor` and are NOT throttled by `maxOrdersPerDay` — closing or managing existing positions should never be blocked by a daily-open limit.
+**Scope of the cap:** OPEN proposals only. Closing or managing existing positions is never throttled by `maxOrdersPerDay`. Management rules flow through `ManagementAutoExecutor`, which has its own logic:
+
+- `Close` proposals (StopLoss, TakeProfit, CloseBeforeShortExpiry, rolls): no daily cap — every position hitting its trigger gets actioned.
+- `LegIn` proposals (LegInShortRule): per-position fingerprint dedup persisted to the same shared ledger (kind = `LegIn`). Once a leg-in has been submitted for a given position today, the rule won't re-fire even if the original limit order didn't fill (broker still sees a single-leg long; without dedup the bot would resubmit). Add `LegInShortRule` to `autoExecute.management.rules` to enable live execution.
 
 For Close proposals at or above `management.scaleOut.minQty` contracts, the executor splits the close into three time-windowed tranches (default 10:00–10:30 / 12:30–13:00 / 15:00–15:30 ET). The final tranche always closes whatever remains, so partial fills earlier in the day still converge to a fully-closed position by the last window. Smaller closes fire as a single order.
 

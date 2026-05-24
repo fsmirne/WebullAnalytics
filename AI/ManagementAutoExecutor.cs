@@ -2,6 +2,7 @@ using Spectre.Console;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using WebullAnalytics.AI.Rules;
 using WebullAnalytics.Api;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Trading;
@@ -41,6 +42,12 @@ internal sealed class ManagementAutoExecutor
 
 	// Per-day per-position tranche bookkeeping. Key: (rule, positionKey). Value: tranches submitted today.
 	private readonly Dictionary<(string Rule, string PositionKey), HashSet<int>> _firedTranches = new();
+	// Per-day LegIn fingerprints already LIVE-submitted. Seeded from the cross-process ledger when
+	// running with submit=true, so the dedup survives restarts and concurrent processes. The
+	// rule's own structural guard (LongCall→LongCallVertical → rule rejects) prevents re-firing
+	// once a leg-in fills, but a UNFILLED limit order leaves the broker-side position as a single-leg
+	// long, which would let the rule fire again — fingerprint dedup catches that case.
+	private readonly HashSet<string> _legInFingerprints = new(StringComparer.Ordinal);
 	private DateOnly _trackingDate;
 
 	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account)
@@ -64,15 +71,37 @@ internal sealed class ManagementAutoExecutor
 		if (today != _trackingDate)
 		{
 			_firedTranches.Clear();
+			_legInFingerprints.Clear();
 			_trackingDate = today;
 		}
 
+		// Cross-process LegIn dedup: when running with submit=true, hold the file lock across the
+		// entire HandleAsync cycle and seed _legInFingerprints from the persisted ledger. This way
+		// a LegIn that was submitted but didn't fill (limit not reached) still blocks re-submission
+		// from this OR a parallel process.
+		IDisposable? lockHandle = null;
+		if (_config.Submit)
+		{
+			lockHandle = SubmissionLog.AcquireLock();
+			foreach (var fp in SubmissionLog.FingerprintsForDate(today, SubmissionLog.Kind.LegIn))
+				_legInFingerprints.Add(fp);
+		}
+
+		try {
 		var orders = 0;
 		foreach (var r in results)
 		{
 			var p = r.Proposal;
-			if (p.Kind != ProposalKind.Close) continue;
+			// Allow-list applies to every proposal kind. Adding a rule name here is the explicit opt-in.
 			if (!_allowedRules.Contains(p.Rule)) continue;
+
+			if (p.Kind == ProposalKind.LegIn)
+			{
+				if (await TryFireLegInAsync(p, ctx, today, cancellation)) orders++;
+				continue;
+			}
+
+			if (p.Kind != ProposalKind.Close) continue;
 			if (!ctx.OpenPositions.TryGetValue(p.PositionKey, out var position)) continue;
 			if (position.Quantity <= 0) continue;
 
@@ -126,6 +155,83 @@ internal sealed class ManagementAutoExecutor
 		foreach (var k in stale) _firedTranches.Remove(k);
 
 		return orders;
+		} finally { lockHandle?.Dispose(); }
+	}
+
+	/// <summary>Fires a single sell-to-open order for a LegIn proposal. Dedup is fingerprint-based and
+	/// cross-process via <see cref="SubmissionLog"/>: once a proposal's fingerprint has been logged for
+	/// today, this method skips it on subsequent ticks even if the original limit order never filled
+	/// and the position still looks like a single-leg long. Returns true when an order was acted on
+	/// (live submitted or dry-run logged).</summary>
+	private async Task<bool> TryFireLegInAsync(ManagementProposal p, EvaluationContext ctx, DateOnly today, CancellationToken cancellation)
+	{
+		if (p.Legs.Count != 1) return false; // LegIn always emits exactly one sell-to-open leg
+		var fp = ProposalFingerprint.From(p);
+		var fpKey = $"{fp.Rule}|{fp.PositionKey}|{fp.StructuralParams}";
+		if (_legInFingerprints.Contains(fpKey)) return false;
+		if (!ctx.OpenPositions.TryGetValue(p.PositionKey, out var position) || position.Quantity <= 0) return false;
+
+		var shortLeg = p.Legs[0];
+		if (!shortLeg.PricePerShare.HasValue) return false;
+
+		// Single sell-to-open. Round the limit price to the exchange's accepted tick to avoid
+		// OAUTH_OPENAPI_OPTION_PRICE_STEP_GTE rejections (single-leg non-penny-pilot scheme).
+		var rawLimit = shortLeg.PricePerShare.Value;
+		var limit = OptionPriceRounding.RoundToTick(rawLimit, legCount: 1, position.Ticker);
+		var argLegs = $"sell:{shortLeg.Symbol}:{shortLeg.Qty}";
+		var summary = $"leg-in sell {shortLeg.Symbol} x{shortLeg.Qty} @ ${limit:F2} ({position.Ticker}: {position.StrategyKind} → vertical)";
+
+		if (!_config.Submit || _account == null)
+		{
+			var reason = _account == null ? "no account configured" : "submit=false";
+			AnsiConsole.MarkupLine($"[cyan]auto-execute (dry-run, {Markup.Escape(reason)}):[/] [dim]{Markup.Escape(p.Rule)}[/] {Markup.Escape(summary)}");
+			AnsiConsole.MarkupLine($"  [grey50]wa trade place --trade \"{Markup.Escape(argLegs)}\" --side sell --limit {limit:F2} --submit[/]");
+			return true;
+		}
+
+		var legs = TradeLegParser.Parse(argLegs);
+		string strategy;
+		try { strategy = StrategyClassifier.Classify(legs) ?? "Single"; }
+		catch (Exception) { strategy = "Single"; }
+
+		var body = OrderRequestBuilder.Build(new OrderRequestBuilder.BuildParams(
+			AccountId: _account.AccountId,
+			Legs: legs,
+			Strategy: strategy,
+			Side: "SELL",
+			OrderType: "LIMIT",
+			LimitPrice: limit,
+			TimeInForce: "DAY"));
+
+		try
+		{
+			using var client = new WebullOpenApiClient(_account);
+			var placed = await client.PlaceOrderAsync(body);
+			AnsiConsole.MarkupLine($"[green]auto-execute placed:[/] [dim]{Markup.Escape(p.Rule)}[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
+			_legInFingerprints.Add(fpKey);
+			SubmissionLog.Append(new SubmissionLog.Entry(
+				Date: today.ToString("yyyy-MM-dd"),
+				Ts: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+				Kind: SubmissionLog.Kind.LegIn,
+				Ticker: position.Ticker,
+				Rule: p.Rule,
+				Fingerprint: fpKey,
+				ClientOrderId: placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId,
+				OrderId: placed.OrderId));
+			return true;
+		}
+		catch (WebullOpenApiException ex)
+		{
+			AnsiConsole.MarkupLine($"[red]auto-execute failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]:[/] {Markup.Escape(p.Rule)} {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
+			PrintFailureDiagnostics(body, ex);
+			return false;
+		}
+		catch (HttpRequestException ex)
+		{
+			AnsiConsole.MarkupLine($"[red]auto-execute network error:[/] {Markup.Escape(p.Rule)} {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
+			PrintFailureDiagnostics(body, ex);
+			return false;
+		}
 	}
 
 	private int? ResolveTranche(TimeOnly now)

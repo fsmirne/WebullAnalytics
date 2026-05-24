@@ -70,11 +70,11 @@ internal sealed class OpenerAutoExecutor
 		IDisposable? lockHandle = null;
 		if (_config.Submit)
 		{
-			lockHandle = OpenerSubmissionLog.AcquireLock();
+			lockHandle = SubmissionLog.AcquireLock();
 			// Seed in-memory state from the persisted log so the cap holds across process restarts
 			// (the in-memory counter alone would reset to 0 on every launch).
-			_liveSubmittedToday = OpenerSubmissionLog.CountForDate(today);
-			foreach (var fp in OpenerSubmissionLog.FingerprintsForDate(today))
+			_liveSubmittedToday = SubmissionLog.CountForDate(today, SubmissionLog.Kind.Open);
+			foreach (var fp in SubmissionLog.FingerprintsForDate(today, SubmissionLog.Kind.Open))
 				_firedFingerprints.Add(fp);
 		}
 
@@ -103,10 +103,12 @@ internal sealed class OpenerAutoExecutor
 					if (!string.IsNullOrEmpty(p.Fingerprint)) _firedFingerprints.Add(p.Fingerprint);
 					_liveSubmittedToday++;
 					// Persist immediately so the next process to acquire the lock sees this submission.
-					OpenerSubmissionLog.Append(new OpenerSubmissionLog.Entry(
+					SubmissionLog.Append(new SubmissionLog.Entry(
 						Date: today.ToString("yyyy-MM-dd"),
 						Ts: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+						Kind: SubmissionLog.Kind.Open,
 						Ticker: p.Ticker,
+						Rule: null,
 						Fingerprint: p.Fingerprint,
 						ClientOrderId: result.ClientOrderId,
 						OrderId: result.OrderId));
