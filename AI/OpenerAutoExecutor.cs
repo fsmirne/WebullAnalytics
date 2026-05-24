@@ -65,12 +65,18 @@ internal sealed class OpenerAutoExecutor
 
 			// Broker-truth dedup: if the same leg set is already pending at the broker, skip.
 			if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(p.Legs.Select(l => (l.Symbol, l.Action))))
+			{
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (broker pending):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} — matching order already at broker.");
 				continue;
+			}
 
 			// Per-day live-submission cap: counts opens that already happened today (filled →
 			// position with OpenedAt today) PLUS pending opens we'd issue this tick.
 			if (_config.Submit && openedTodayCount + ordersThisTick >= _config.MaxOrdersPerDay)
+			{
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (daily cap):[/] {_config.MaxOrdersPerDay} orders already placed/queued today.");
 				break;
+			}
 
 			var result = await SubmitOpen(p, cancellation);
 			if (result.Outcome == SubmitOutcome.NotActed) continue;

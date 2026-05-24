@@ -611,6 +611,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var (_, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
 
 		var openCount = 0;
+		var openerOrdersThisRun = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
 			var openSink = new OpenProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
@@ -623,10 +624,11 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// open-order placement off-hours against a sandbox account.
 			// openedTodayCount=0: in theoretical mode openPositions is empty, no opens have happened today.
 			if (openerExecutor != null)
-				await openerExecutor.HandleAsync(openResults, asOf, openedTodayCount: 0, cancellation);
+				openerOrdersThisRun = await openerExecutor.HandleAsync(openResults, asOf, openedTodayCount: 0, cancellation);
 		}
 
-		AnsiConsole.MarkupLine($"[dim]Theoretical tick complete: {openCount} open proposal(s) emitted[/]");
+		var execSuffix = openerExecutor != null ? $" | opener auto-execute: {openerOrdersThisRun} order(s) acted on" : "";
+		AnsiConsole.MarkupLine($"[dim]Theoretical tick complete: {openCount} open proposal(s) emitted{execSuffix}[/]");
 		return 0;
 	}
 }
