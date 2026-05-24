@@ -141,6 +141,42 @@ public class LegInShortRuleTests
 	}
 
 	[Fact]
+	public void Fires_InCreditSpreadMode_PicksDeeperItmShort()
+	{
+		// Credit-spread variant: short is BELOW long strike (deeper ITM for calls).
+		// Spot 7400, long call at 7300 (1.4% ITM), profit 100%.
+		// At 18% IV, 14 DTE, a 7250 call has delta ≈ 0.70 (deep ITM).
+		var cfg = DefaultConfig();
+		cfg.CreditSpread = true;
+		cfg.TargetShortDelta = 0.70m;
+		cfg.ShortDeltaTolerance = 0.05m;
+		cfg.MinShortCreditPerShare = 50m; // credit-mode shorts have rich premium; raise floor accordingly
+		var rule = new LegInShortRule(cfg, DefaultIndicators());
+
+		var pos = LongSpxwCall(strike: 7300m, initialDebit: 30m, adjDebit: 30m);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			["SPXW260612C07300000"] = new("SPXW260612C07300000", null, 60m - 0.2m, 60m + 0.2m, null, null, 100, 1000, 0.18m),
+			// 7250 call: 150 ITM, delta ≈ 0.71 at these params
+			["SPXW260612C07250000"] = new("SPXW260612C07250000", null, 152m, 152.4m, null, null, 100, 1000, 0.18m),
+		};
+		var ctx = new EvaluationContext(
+			Now: new DateTime(2026, 5, 29, 11, 0, 0),
+			OpenPositions: new Dictionary<string, OpenPosition> { [pos.Key] = pos },
+			UnderlyingPrices: new Dictionary<string, decimal> { ["SPXW"] = 7400m },
+			Quotes: quotes,
+			AccountCash: 0m, AccountValue: 0m,
+			TechnicalSignals: new Dictionary<string, TechnicalBias>());
+
+		var proposal = rule.Evaluate(pos, ctx);
+		Assert.NotNull(proposal);
+		Assert.Equal(ProposalKind.LegIn, proposal!.Kind);
+		Assert.Equal("SPXW260612C07250000", proposal.Legs[0].Symbol); // deeper-ITM strike picked
+		Assert.Contains("ShortVertical", proposal.Rationale);
+		Assert.Contains("credit spread", proposal.Rationale);
+	}
+
+	[Fact]
 	public void Fires_OnLongPut_PicksLowerStrikeShort()
 	{
 		var rule = new LegInShortRule(DefaultConfig(), DefaultIndicators());

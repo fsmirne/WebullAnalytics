@@ -48,6 +48,12 @@ internal sealed class LegInShortRule : IManagementRule
 
 		if (!ctx.UnderlyingPrices.TryGetValue(position.Ticker, out var spot) || spot <= 0m) return null;
 
+		// Regime gates — skip on high-VIX days or trend days. Both are off when the threshold is
+		// at its sentinel (999); when the source can't supply the indicator (ctx field null) the
+		// gate is treated as non-binding so the rule still fires in environments without VIX data.
+		if (_config.MaxVix < 999m && ctx.Vix is decimal vix && vix >= _config.MaxVix) return null;
+		if (_config.MaxIntradayRangePct < 999m && ctx.IntradaySpotRangePct is decimal r && r >= _config.MaxIntradayRangePct) return null;
+
 		// ITM check: spot ≥ K × (1 + minSpotPctITM%) for calls; spot ≤ K × (1 − minSpotPctITM%) for puts.
 		var pctITM = _config.MinSpotPctITM / 100m;
 		var itm = isLongCall
@@ -85,14 +91,15 @@ internal sealed class LegInShortRule : IManagementRule
 		if (shortCredit < _config.MinShortCreditPerShare) return null;
 		var shortMid = shortQuote.Ask is decimal sa ? (shortQuote.Bid.Value + sa) / 2m : shortQuote.Bid.Value;
 
-		var newStructure = isLongCall ? "LongCallVertical" : "LongPutVertical";
+		var newStructure = _config.CreditSpread ? "ShortVertical" : (isLongCall ? "LongCallVertical" : "LongPutVertical");
 		var legs = new[]
 		{
 			// Single sell-to-open leg. The existing long is preserved by SimulatedBook.LegIn / ManagementAutoExecutor.
 			new ProposalLeg("sell", shortSymbol, longLeg.Qty, shortMid, shortQuote.Bid)
 		};
 
-		var rationale = $"long {(isLongCall ? "call" : "put")} ITM {(isLongCall ? "" : "−")}{Math.Abs((spot - longLeg.Strike) / longLeg.Strike) * 100m:F1}% (Δ {Math.Abs(longDelta):F2}, profit {profitPct:P0}); sell short@{shortQuote.Bid.Value:F2} (Δ {Math.Abs(shortDelta):F2}) → {newStructure}";
+		var modeLabel = _config.CreditSpread ? "credit spread" : "debit spread";
+		var rationale = $"long {(isLongCall ? "call" : "put")} ITM {(isLongCall ? "" : "−")}{Math.Abs((spot - longLeg.Strike) / longLeg.Strike) * 100m:F1}% (Δ {Math.Abs(longDelta):F2}, profit {profitPct:P0}); sell short@{shortQuote.Bid.Value:F2} (Δ {Math.Abs(shortDelta):F2}) → {newStructure} ({modeLabel})";
 
 		return new ManagementProposal(
 			Rule: "LegInShortRule",
@@ -124,12 +131,23 @@ internal sealed class LegInShortRule : IManagementRule
 			if (p.ExpiryDate != longLeg.Expiry!.Value) continue;
 			if (p.CallPut != longLeg.CallPut) continue;
 
-			// OTM-relative-to-long-direction filter: for a long call, the short strike must be ABOVE
-			// the long strike (cap upside, not below it). For a long put, the short strike must be
-			// BELOW the long strike. Same-strike short would be a synthetic stock — not what we want.
+			// Strike-direction filter depends on mode.
+			// Debit-spread mode (default): cap upside — short is OTM relative to spot/long.
+			//   Long call → short K > K_long. Long put → short K < K_long.
+			// Credit-spread mode: monetize current ITM-ness — short is DEEPER ITM than the long.
+			//   Long call → short K < K_long. Long put → short K > K_long.
+			// Same-strike short would be a synthetic equity — excluded in both modes.
 			var isCall = longLeg.CallPut == "C";
-			if (isCall && p.Strike <= longLeg.Strike) continue;
-			if (!isCall && p.Strike >= longLeg.Strike) continue;
+			if (_config.CreditSpread)
+			{
+				if (isCall && p.Strike >= longLeg.Strike) continue;
+				if (!isCall && p.Strike <= longLeg.Strike) continue;
+			}
+			else
+			{
+				if (isCall && p.Strike <= longLeg.Strike) continue;
+				if (!isCall && p.Strike >= longLeg.Strike) continue;
+			}
 
 			if (q.Bid == null || q.Ask == null) continue;
 

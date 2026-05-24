@@ -414,10 +414,26 @@ internal sealed class BacktestRunner
 			? new Rules.LegInShortRule(_config.Rules.LegInShort, _config.Indicators)
 			: null;
 
+		// Regime indicators for LegInShort: VIX (per-day constant, fetched once) and intraday range
+		// (tracked across the minute loop). Both null when not needed — keep the lookup cost off the
+		// hot path when the rule's enabled flag is off.
+		decimal? dayVix = null;
+		if (legInRule != null)
+		{
+			var vixBar = await _bars.GetBarAsync("VIX", step.Date, cancellation);
+			if (vixBar != null) dayVix = vixBar.Close;
+		}
+
 		// LegInShort needs the minute walk even when SL/TP are both disabled (e.g. SPXW's
 		// profit/stop pcts pinned at 1.0 to defer all closes to expiration). Without this carve-out,
 		// the rule would silently never fire on 0DTE strategies that disable both gates.
 		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null) return false;
+
+		// Track intraday range running from session start to the current minute. Used by LegInShort's
+		// trend-day filter. We use the first minute bar's open as the day's open reference (close to
+		// 09:30 ET when the data covers the full session).
+		var dayOpenSpot = minuteBars.Count > 0 ? minuteBars[0].Open : 0m;
+		decimal dayHigh = dayOpenSpot, dayLow = dayOpenSpot;
 
 		// Walk minute bars. At each minute, re-price the position at that minute's bar.Open spot
 		// (start-of-minute price; consistent with ctx.Now semantics elsewhere in the simulator)
@@ -429,6 +445,10 @@ internal sealed class BacktestRunner
 			var spot = minuteBar.Open;
 			var minutesToClose = Math.Max(1.0, (endUtc - minuteUtc).TotalMinutes);
 			var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
+
+			// Update intraday range with this minute's H/L.
+			if (minuteBar.High > dayHigh) dayHigh = minuteBar.High;
+			if (minuteBar.Low < dayLow) dayLow = minuteBar.Low;
 
 			// For LegInShort: pre-generate candidate strikes around spot at the long's expiry so the
 			// rule has multiple strikes to pick from. Only done when the rule is applicable to this
@@ -462,7 +482,8 @@ internal sealed class BacktestRunner
 				var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
 				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot };
 				var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
-				var minuteCtx = new EvaluationContext(legInMinuteEt, stillOpen, underlyings, quotes, cash, accountValue, emptySignals);
+				decimal? rangePct = dayOpenSpot > 0m ? (dayHigh - dayLow) / dayOpenSpot * 100m : null;
+				var minuteCtx = new EvaluationContext(legInMinuteEt, stillOpen, underlyings, quotes, cash, accountValue, emptySignals, dayVix, rangePct);
 				var legInProposal = legInRule.Evaluate(pos, minuteCtx);
 				if (legInProposal != null)
 				{
@@ -471,7 +492,14 @@ internal sealed class BacktestRunner
 					var shortLeg = legInProposal.Legs[0];
 					if (quotes.TryGetValue(shortLeg.Symbol, out var sq) && sq.Bid is decimal sBid)
 					{
-						var newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical : OpenStructureKind.LongPutVertical;
+						// Map to OpenStructureKind. Credit-spread mode → ShortVertical (single kind covers
+						// both bear-call and bull-put credit spreads); debit-spread → LongCallVertical or
+						// LongPutVertical depending on original long direction.
+						OpenStructureKind newStructure;
+						if (_config.Rules.LegInShort.CreditSpread)
+							newStructure = (string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.ShortCallVertical : OpenStructureKind.ShortPutVertical);
+						else
+							newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical : OpenStructureKind.LongPutVertical;
 						var legInFills = new[] { new BacktestLegFill(shortLeg.Symbol, Side.Sell, pos.Quantity, sBid) };
 						_book.LegIn(legInMinuteEt, pos.Key, legInFills, "LegInShortRule", newStructure);
 						return true; // mirror SL/TP semantics: a fired rule consumes the position for the day.
