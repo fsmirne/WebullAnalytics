@@ -163,13 +163,30 @@ internal sealed class LegInShortConfig
 	/// <summary>Minimum days-to-expiry on the long. Default 5. Below this, the short carries little
 	/// premium and isn't worth the transaction friction.</summary>
 	[JsonPropertyName("minDTE")] public int MinDTE { get; set; } = 5;
-	/// <summary>Target absolute delta for the short leg. Default 0.30 (one-sigma OTM).</summary>
+	/// <summary>Target absolute delta for the short leg. Default 0.30 (one-sigma OTM) for debit-spread
+	/// mode. In credit-spread mode (<see cref="CreditSpread"/>) you want a deeper-ITM short — set this
+	/// to e.g. 0.70.</summary>
 	[JsonPropertyName("targetShortDelta")] public decimal TargetShortDelta { get; set; } = 0.30m;
 	/// <summary>Tolerance band around <c>targetShortDelta</c> when picking the short strike. Default 0.05.</summary>
 	[JsonPropertyName("shortDeltaTolerance")] public decimal ShortDeltaTolerance { get; set; } = 0.05m;
 	/// <summary>Minimum per-share credit from selling the short. Default $0.30 — below this, the
-	/// round-trip cost (slippage + commissions) eats the structural benefit.</summary>
+	/// round-trip cost (slippage + commissions) eats the structural benefit. Credit-spread mode
+	/// typically needs a higher floor (e.g. $5.00) since deeper-ITM shorts have much richer premium.</summary>
 	[JsonPropertyName("minShortCreditPerShare")] public decimal MinShortCreditPerShare { get; set; } = 0.30m;
+	/// <summary>When true, picks the short on the SAME side of the long strike (sell deeper-ITM call
+	/// against a less-ITM long call → bear-call credit spread; mirror for puts). The resulting position
+	/// is a short vertical with a guaranteed-loss-floor structure: credit collected often exceeds the
+	/// strike-width loss, monetizing the long's current ITM-ness immediately. Default false (debit
+	/// spread: short OTM strike, capping upside while preserving directional bet).</summary>
+	[JsonPropertyName("creditSpread")] public bool CreditSpread { get; set; } = false;
+	/// <summary>Skip leg-in when VIX is at or above this level. Hypothesis: high-vol regimes have
+	/// fat-tail moves and the rule's cap-the-winner action gives up massive upside. Default 999
+	/// (disabled). Sensible test value: 20-25.</summary>
+	[JsonPropertyName("maxVix")] public decimal MaxVix { get; set; } = 999m;
+	/// <summary>Skip leg-in when today's running range (high − low / open, in percent) is at or above
+	/// this level by the time the rule evaluates. "Trend day" filter — early big ranges correlate with
+	/// continued big moves. Default 999 (disabled). Sensible test value: 0.8 - 1.5%.</summary>
+	[JsonPropertyName("maxIntradayRangePct")] public decimal MaxIntradayRangePct { get; set; } = 999m;
 }
 
 internal sealed class OpportunisticRollConfig
@@ -317,6 +334,8 @@ internal static class AIConfigLoader
 		if (li.TargetShortDelta <= 0m || li.TargetShortDelta >= 1m) return $"rules.legInShort.targetShortDelta: must be in (0, 1), got {li.TargetShortDelta}";
 		if (li.ShortDeltaTolerance <= 0m || li.ShortDeltaTolerance >= 1m) return $"rules.legInShort.shortDeltaTolerance: must be in (0, 1), got {li.ShortDeltaTolerance}";
 		if (li.MinShortCreditPerShare < 0m) return $"rules.legInShort.minShortCreditPerShare: must be ≥ 0, got {li.MinShortCreditPerShare}";
+		if (li.MaxVix <= 0m) return $"rules.legInShort.maxVix: must be > 0, got {li.MaxVix}";
+		if (li.MaxIntradayRangePct <= 0m) return $"rules.legInShort.maxIntradayRangePct: must be > 0, got {li.MaxIntradayRangePct}";
 
 		foreach (var (label, value) in new[] { ("management", c.AutoExecute.Management.TimeInForce), ("opener", c.AutoExecute.Opener.TimeInForce) })
 		{
