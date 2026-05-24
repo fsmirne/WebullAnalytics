@@ -25,6 +25,14 @@ internal sealed class AIWatchSettings : AISingleTickerSubcommandSettings
 	[Description("Account alias or ID from api-config.json. Mirrors `wa trade place --account`: overrides defaultAccount for this run. Affects both the live-position read and any auto-executed orders.")]
 	public string? Account { get; set; }
 
+	[CommandOption("--submit")]
+	[Description("Override autoExecute.{management,opener}.submit=true for this run. Mirrors `wa trade place --submit`: keep config safe at dry-run, flip live from the CLI when ready.")]
+	public bool Submit { get; set; }
+
+	[CommandOption("--tif <VALUE>")]
+	[Description("Override autoExecute.{management,opener}.timeInForce for this run. Mirrors `wa trade place --tif`: DAY (in-session only) or GTC (queues across sessions, accepted off-hours). Default: whatever config says, which itself defaults to DAY.")]
+	public string? Tif { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -34,6 +42,8 @@ internal sealed class AIWatchSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--tick: must be in [1, 3600], got {Tick.Value}");
 		if (Duration != null && !TryParseDuration(Duration, out _))
 			return ValidationResult.Error($"--duration: must be like '6h' or '90m', got '{Duration}'");
+		if (Tif != null && !string.Equals(Tif, "day", StringComparison.OrdinalIgnoreCase) && !string.Equals(Tif, "gtc", StringComparison.OrdinalIgnoreCase))
+			return ValidationResult.Error($"--tif: must be 'day' or 'gtc', got '{Tif}'");
 
 		return ValidationResult.Success();
 	}
@@ -63,6 +73,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
+		if (settings.Submit) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; }
+		if (settings.Tif != null) { config.AutoExecute.Management.TimeInForce = settings.Tif.ToUpperInvariant(); config.AutoExecute.Opener.TimeInForce = settings.Tif.ToUpperInvariant(); }
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 

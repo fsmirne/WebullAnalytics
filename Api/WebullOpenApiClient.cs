@@ -11,10 +11,15 @@ internal sealed class WebullOpenApiException : Exception
 {
 	internal string? ErrorCode { get; }
 	internal int HttpStatus { get; }
-	internal WebullOpenApiException(string? errorCode, string message, int httpStatus) : base(message)
+	/// <summary>Truncated raw response body from Webull. Carries any extra error detail beyond the
+	/// terse top-level `message` field (e.g. nested `error_data`, request_id) for diagnostic logging.
+	/// Null when the body couldn't be captured.</summary>
+	internal string? RawBody { get; }
+	internal WebullOpenApiException(string? errorCode, string message, int httpStatus, string? rawBody = null) : base(message)
 	{
 		ErrorCode = errorCode;
 		HttpStatus = httpStatus;
+		RawBody = rawBody;
 	}
 }
 
@@ -502,8 +507,9 @@ internal sealed class WebullOpenApiClient : IDisposable
 	private static async Task<(T Result, string RawJson)> ReadWithRaw<T>(HttpResponseMessage resp)
 	{
 		var body = await resp.Content.ReadAsStringAsync();
+		var truncated = Truncate(body, 1000); // capacious enough to keep nested error_data / request_id for diagnostic logs
 		if ((int)resp.StatusCode >= 500)
-			throw new WebullOpenApiException(null, $"Webull API unavailable (HTTP {(int)resp.StatusCode}): {Truncate(body, 200)}", (int)resp.StatusCode);
+			throw new WebullOpenApiException(null, $"Webull API unavailable (HTTP {(int)resp.StatusCode}): {Truncate(body, 200)}", (int)resp.StatusCode, truncated);
 		if ((int)resp.StatusCode >= 400)
 		{
 			try
@@ -511,15 +517,15 @@ internal sealed class WebullOpenApiClient : IDisposable
 				using var doc = JsonDocument.Parse(body);
 				var code = doc.RootElement.TryGetProperty("error_code", out var c) ? c.GetString() : null;
 				var msg = doc.RootElement.TryGetProperty("message", out var m) ? m.GetString() ?? body : body;
-				throw new WebullOpenApiException(code, msg, (int)resp.StatusCode);
+				throw new WebullOpenApiException(code, msg, (int)resp.StatusCode, truncated);
 			}
 			catch (JsonException)
 			{
-				throw new WebullOpenApiException(null, $"HTTP {(int)resp.StatusCode}: {Truncate(body, 200)}", (int)resp.StatusCode);
+				throw new WebullOpenApiException(null, $"HTTP {(int)resp.StatusCode}: {Truncate(body, 200)}", (int)resp.StatusCode, truncated);
 			}
 		}
 		var result = JsonSerializer.Deserialize<T>(body, JsonOptions);
-		if (result == null) throw new WebullOpenApiException(null, "Empty response body", (int)resp.StatusCode);
+		if (result == null) throw new WebullOpenApiException(null, "Empty response body", (int)resp.StatusCode, truncated);
 		return (result, body);
 	}
 
