@@ -1,4 +1,5 @@
 using Spectre.Console;
+using System.Globalization;
 using WebullAnalytics.Api;
 using WebullAnalytics.Trading;
 
@@ -63,20 +64,45 @@ internal sealed class BrokerStateService
 		return _pendingLegSetFingerprints.Contains(fp);
 	}
 
-	/// <summary>Canonical fingerprint of an order's leg set. Sorts by side+symbol so leg order
-	/// doesn't matter (Webull may return legs in a different order than we submitted).</summary>
+	/// <summary>Canonical fingerprint of a Webull pending order's leg set. Webull returns each leg
+	/// with the UNDERLYING root in <c>symbol</c> (not the OCC) plus separate <c>strike_price</c>,
+	/// <c>option_expire_date</c>, and <c>option_type</c> fields. We reconstruct the OCC-equivalent
+	/// key (Side, Root, Expiry, Strike, CallPut) and sort so leg order doesn't matter. Stock legs
+	/// (no expiry/strike) fingerprint as Side:Root:STOCK.</summary>
 	private static string FingerprintLegs(IEnumerable<WebullOpenApiClient.OrderDetailLeg>? legs)
 	{
 		if (legs == null) return "";
 		return string.Join("|", legs
 			.Where(l => !string.IsNullOrEmpty(l.Symbol) && !string.IsNullOrEmpty(l.Side))
-			.Select(l => $"{l.Side!.ToUpperInvariant()}:{l.Symbol!.ToUpperInvariant()}")
-			.OrderBy(s => s, StringComparer.Ordinal));
+			.Select(LegKey)
+			.Where(k => k != null)
+			.OrderBy(s => s, StringComparer.Ordinal)!);
 	}
 
+	private static string? LegKey(WebullOpenApiClient.OrderDetailLeg l)
+	{
+		var side = l.Side!.ToUpperInvariant();
+		var root = l.Symbol!.ToUpperInvariant();
+		if (string.IsNullOrEmpty(l.OptionExpireDate) || string.IsNullOrEmpty(l.OptionType) || string.IsNullOrEmpty(l.StrikePrice))
+			return $"{side}:{root}:STOCK";
+		if (!decimal.TryParse(l.StrikePrice, NumberStyles.Any, CultureInfo.InvariantCulture, out var strike)) return null;
+		var cp = l.OptionType!.StartsWith("C", StringComparison.OrdinalIgnoreCase) ? "C" : "P";
+		return $"{side}:{root}:{l.OptionExpireDate}:{strike.ToString("F2", CultureInfo.InvariantCulture)}:{cp}";
+	}
+
+	/// <summary>Canonical fingerprint of a proposal's leg set. The proposal carries OCC symbols
+	/// (e.g. <c>SPXW260526C07375000</c>); we parse each to extract (Root, Expiry, Strike, CallPut)
+	/// so the fingerprint shape matches what <see cref="FingerprintLegs"/> produces from the broker
+	/// representation. Non-OCC symbols fall through to a stock-leg key.</summary>
 	private static string FingerprintProposal(IEnumerable<(string Symbol, string Action)> legs) =>
-		string.Join("|", legs.Select(l => $"{l.Action.ToUpperInvariant()}:{l.Symbol.ToUpperInvariant()}")
-			.OrderBy(s => s, StringComparer.Ordinal));
+		string.Join("|", legs.Select(l =>
+		{
+			var side = l.Action.ToUpperInvariant();
+			var parsed = ParsingHelpers.ParseOptionSymbol(l.Symbol);
+			if (parsed == null) return $"{side}:{l.Symbol.ToUpperInvariant()}:STOCK";
+			var cp = parsed.CallPut.StartsWith("C", StringComparison.OrdinalIgnoreCase) ? "C" : "P";
+			return $"{side}:{parsed.Root.ToUpperInvariant()}:{parsed.ExpiryDate:yyyy-MM-dd}:{parsed.Strike.ToString("F2", CultureInfo.InvariantCulture)}:{cp}";
+		}).OrderBy(s => s, StringComparer.Ordinal));
 
 	/// <summary>Convenience: refresh-or-skip pattern. Wraps <see cref="RefreshAsync"/> in
 	/// try/catch, logs the failure, and returns false on any error. Callers use the
