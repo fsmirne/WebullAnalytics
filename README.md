@@ -674,6 +674,7 @@ Rules evaluate per-position in priority order — the first rule to match for a 
 |---|---|---|
 | `StopLossRule` | 1 | MTM debit ≥ 1.5× initial, or spot beyond break-even by > 3% |
 | `CloseBeforeShortExpiryRule` | 2 | Short DTE = 0 and either MTM profit ≥ `minProfitPct` of initial debit, or spot is past the BE band ± `emergencyBreakEvenBufferPct` (emergency close) |
+| `LegInShortRule` | 2 | Single-leg long call/put goes ITM (≥ `minSpotPctITM`%), long delta ≥ `minLongDelta`, profit ≥ `triggerProfitPct` of debit, DTE ≥ `minDTE`, and a short at `targetShortDelta ± shortDeltaTolerance` exists with credit ≥ `minShortCreditPerShare`. Optional VIX / intraday-range regime gates |
 | `OpportunisticRollRule` | 2 | A roll scenario improves P&L-per-day by at least `minImprovementPerDayPerContract` vs holding, and passes all four safety gates |
 | `TakeProfitRule` | 2 | MTM ≥ `pctOfMaxProfit` of the peak net value in the current-date column of the time-decay grid |
 | `DefensiveRollRule` | 3 | Spot within 1% of short strike and short DTE ≤ 3 |
@@ -713,6 +714,48 @@ When a proposal fires, the rationale includes a safety summary showing what was 
 | `technicalFilter.lookbackDays` | 20 | Lookback window for SMA and momentum signals |
 | `technicalFilter.bullishBlockThreshold` | 0.25 | Composite score above this blocks the rule (extended bullish) |
 | `technicalFilter.bearishBlockThreshold` | −0.25 | Composite score below this blocks the rule (extended bearish) |
+
+#### LegInShortRule
+
+Converts a single-leg long call/put into a vertical by selling a higher-strike short (debit-spread mode) or a deeper-ITM short (credit-spread mode). The intent is to lock in some profit on a winner that's gone gamma-saturated — the long keeps part of its delta, but capping upside is fair when each additional dollar of move is worth less in premium than the day's theta.
+
+Emits `ProposalKind.LegIn` — distinct from `Close` and `Roll` because no existing leg is touched; the rule strictly *adds* a short leg. The backtest's `SimulatedBook.LegIn` preserves the long leg and basis, charges a single combo fee + slippage cross.
+
+For 0DTE strategies the rule fires intraday: the backtest's minute-walk evaluates each open position at every minute and triggers the leg-in at the first qualifying minute. Multi-day positions get evaluated at start-of-day in the main rule loop.
+
+**Modes:**
+
+- **Debit-spread** (`creditSpread: false`, default) — sells an OTM short above the long strike (calls) / below (puts). Resulting structure: `LongCallVertical` / `LongPutVertical`. Net cash flow is a credit (collected on the short) reducing the original debit. Caps upside at the short strike.
+- **Credit-spread** (`creditSpread: true`) — sells a deeper-ITM short below the long strike (calls) / above (puts). Resulting structure: `ShortCallVertical` (bear-call) / `ShortPutVertical` (bull-put). Monetizes the long's current ITM-ness immediately; credit collected typically exceeds the original debit. Caps upside at the long strike (since spot is already past the new short).
+
+**Regime gates** (both default to `999` = disabled):
+
+- **`maxVix`** — skip leg-in when VIX is at or above this level. High-VIX regimes have fat-tail moves; capping a winner during those moves gives up massive upside. Backtest tuning on SPXW 0DTE finds **18** is the sweet spot; sensitivity range [15, 20] all positive, ≥22 turns negative.
+- **`maxIntradayRangePct`** — skip leg-in when today's running `(high − low) / open` (as percent) is at or above this. "Trend-day" filter; weaker than the VIX filter alone in our backtests.
+
+**Config fields** (`rules.legInShort`):
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | false | Master gate |
+| `minSpotPctITM` | 1.0 | Spot must be at least this % ITM relative to the long strike |
+| `minLongDelta` | 0.65 | Long-leg absolute delta floor (gamma-saturation gate) |
+| `triggerProfitPct` | 0.50 | Profit-to-date as fraction of initial debit; must meet or exceed |
+| `minDTE` | 5 | Min days to expiry on the long; below this the short carries too little premium |
+| `targetShortDelta` | 0.30 | Target |Δ| for the short. In credit-spread mode set to ~0.70 |
+| `shortDeltaTolerance` | 0.05 | Tolerance band around `targetShortDelta` |
+| `minShortCreditPerShare` | 0.30 | Minimum per-share credit from the short. Credit-spread mode wants ~$5+ |
+| `creditSpread` | false | Mode flag (see above) |
+| `maxVix` | 999.0 | Skip when VIX ≥ this. Sentinel 999 disables |
+| `maxIntradayRangePct` | 999.0 | Skip when today's range ≥ this percent. Sentinel 999 disables |
+
+**Tuned SPXW 0DTE example** (per-ticker override):
+
+```json
+"legInShort": { "enabled": true, "minSpotPctITM": 0.5, "minDTE": 0, "maxVix": 18.0 }
+```
+
+Backtest result on `2025-01-01 → 2026-05-22` (SPXW 0DTE, $10K start): +$210K (+7.4% over baseline), DD 4.16% vs 4.46% baseline. Robust across years — both 2025 and 2026 individually positive. See `data/ai-config.SPXW.tuning.md` for the full sweep.
 
 #### Output
 
