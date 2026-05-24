@@ -212,6 +212,7 @@ internal static class BacktestSummaryRenderer
 		table.AddRow("Opens", result.EquityCurve.Count > 0 ? $"{result.OpenFills} ({openPctOfDays:F1}% of days)" : result.OpenFills.ToString());
 		table.AddRow("Closes (rules)", result.CloseFills.ToString());
 		table.AddRow("Rolls", result.RollFills.ToString());
+		table.AddRow("Leg-ins", result.LegInFills.ToString());
 		table.AddRow("Expirations", result.ExpireFills.ToString());
 		table.AddRow("Win rate (closed lifecycles)", totalClosedLifecycles > 0 ? $"{winRate:F1}% ({wins} W / {losses} L)" : "—");
 
