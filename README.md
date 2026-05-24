@@ -809,14 +809,23 @@ ai backtest only:
 
 `wa ai scan` and `wa ai watch` can both optionally submit Close proposals (rule-driven) and Open proposals (opener-driven) automatically when `autoExecute.management.enabled` / `autoExecute.opener.enabled` are set in `ai-config.json`. Off by default; the executors log the action they *would* take until `submit: true` is also set. The `management.rules` allow-list controls which rules can fire executions — by default only `CloseBeforeShortExpiryRule` is permitted. Scan triggers each executor once per invocation; watch triggers them on every tick.
 
-**Opener per-day cap:** `autoExecute.opener.maxOrdersPerDay` (default 1, matching the backtest's `--top-per-step 1`) caps total LIVE opens placed per trading day. Without it, a watch session that ticks every minute can fire as many opens as the opener emits distinct proposal fingerprints (e.g. when strikes drift with spot). Dry-runs are NOT capped — they continue to emit so you can monitor what would be placed.
+**Broker-truth dedup:** before any live submission the auto-executors call Webull's `ListOpenOrders` endpoint (`BrokerStateService.RefreshAsync`) and fingerprint each pending order by its leg-set + side. Any proposal whose leg set matches a pending order is skipped. This covers:
 
-The cap is enforced cross-process on the same machine via a persisted ledger at `data/opener-submissions.jsonl` and an OS-level file lock at `data/opener-submissions.lock`. Multiple concurrent `wa ai scan` / `wa ai watch` invocations (and restarts of either) all share the same per-day count. Different machines submitting against the same broker account do NOT coordinate — accept that as a deliberate limit.
+- The same proposal across ticks (current proposal still pending)
+- Across process restarts (other process's pending orders show up too)
+- Manually-placed orders (user's `wa trade place` or Webull-app orders also block bot duplicates)
+- The "limit placed but never filled" case (position still looks single-leg but a working order exists)
+
+**Fail-closed on API errors.** If the broker query fails, the executor returns 0 and does nothing this tick — an order not placed is reversible, an over-placed order is not. There is no local-cache fallback by design.
+
+**Opener per-day cap:** `autoExecute.opener.maxOrdersPerDay` (default 1, matching the backtest's `--top-per-step 1`) caps total LIVE opens per trading day. The count is `today's-opened positions` (from the position source's `OpenedAt` field) + opens issued in this tick. Dry-runs are NOT capped — they continue to emit so you can monitor what would be placed.
 
 **Scope of the cap:** OPEN proposals only. Closing or managing existing positions is never throttled by `maxOrdersPerDay`. Management rules flow through `ManagementAutoExecutor`, which has its own logic:
 
-- `Close` proposals (StopLoss, TakeProfit, CloseBeforeShortExpiry, rolls): no daily cap — every position hitting its trigger gets actioned.
-- `LegIn` proposals (LegInShortRule): per-position fingerprint dedup persisted to the same shared ledger (kind = `LegIn`). Once a leg-in has been submitted for a given position today, the rule won't re-fire even if the original limit order didn't fill (broker still sees a single-leg long; without dedup the bot would resubmit). Add `LegInShortRule` to `autoExecute.management.rules` to enable live execution.
+- `Close` proposals (StopLoss, TakeProfit, CloseBeforeShortExpiry, rolls): no daily cap — every position hitting its trigger gets actioned. Tranche bookkeeping is still in-memory (a tranche order that didn't fill will appear in the broker pending list, so the leg-set match catches duplicates cross-process).
+- `LegIn` proposals (LegInShortRule): broker-truth dedup only. Add `LegInShortRule` to `autoExecute.management.rules` to enable live execution. The rule's own structural guard prevents re-firing once a leg-in fills (position becomes a vertical, rule rejects); the broker-pending check covers the unfilled case.
+
+**Edge case:** if you place an order manually via the Webull app, the bot's broker-state view picks it up. If that manual order looks like a bot-style open (same leg shape), the bot will skip its own open. Acceptable trade-off given Webull doesn't differentiate bot orders from manual ones (a future improvement could prefix `client_order_id` with a bot marker).
 
 For Close proposals at or above `management.scaleOut.minQty` contracts, the executor splits the close into three time-windowed tranches (default 10:00–10:30 / 12:30–13:00 / 15:00–15:30 ET). The final tranche always closes whatever remains, so partial fills earlier in the day still converge to a fully-closed position by the last window. Smaller closes fire as a single order.
 

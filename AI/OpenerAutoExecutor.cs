@@ -10,15 +10,14 @@ namespace WebullAnalytics.AI;
 /// <summary>
 /// Companion to <see cref="ManagementAutoExecutor"/> that handles OPENER proposals (new positions).
 /// Same double-flag safety model: <c>enabled</c> instantiates the executor at all; <c>submit</c>
-/// flips dry-run logging to live PlaceOrder calls. Per-day fingerprint deduplication prevents the
-/// same proposal from re-firing across successive ticks — but ONLY after a real live submit. Dry-run
-/// emissions are intentionally NOT deduped, so the user keeps seeing the proposed `wa trade place`
-/// command on every tick the proposal stays at the top (otherwise the line goes silent after tick 1
-/// even though the proposal is still live).
+/// flips dry-run logging to live PlaceOrder calls.
 ///
-/// Why a separate class from <see cref="ManagementAutoExecutor"/>: management closes track tranche
-/// state keyed by (rule, position); opener fires track fingerprints keyed by (ticker, fingerprint).
-/// Different shapes, different schedules. Sharing one class would mean awkward union state.
+/// Broker-truth model: when live submission is enabled, the executor consults
+/// <see cref="BrokerStateService"/> to fetch the account's pending orders and skips any proposal
+/// whose leg-set already matches a pending order. This covers the cases the in-memory dedup used
+/// to handle (same proposal across ticks, across processes, across restarts) plus cases it didn't
+/// (manually-placed orders, orders that never filled). On any broker API failure, the executor
+/// returns 0 without submitting — fail-closed.
 /// </summary>
 internal sealed class OpenerAutoExecutor
 {
@@ -27,21 +26,14 @@ internal sealed class OpenerAutoExecutor
 
 	private readonly OpenerAutoExecuteConfig _config;
 	private readonly TradeAccount? _account;
+	private readonly BrokerStateService? _brokerState;
 	private readonly HashSet<string> _allowedStructures;
 
-	// Per-day fingerprints already LIVE-submitted. Dry-runs don't populate this set — they re-emit
-	// every tick. Cleared at the first tick of each new market day.
-	private readonly HashSet<string> _firedFingerprints = new(StringComparer.Ordinal);
-	// Per-day LIVE submission counter. Caps total opens placed against the broker per trading day,
-	// independent of how many distinct proposal fingerprints the opener emits as spot drifts. Same
-	// reset cadence as _firedFingerprints.
-	private int _liveSubmittedToday = 0;
-	private DateOnly _trackingDate;
-
-	public OpenerAutoExecutor(OpenerAutoExecuteConfig config, TradeAccount? account)
+	public OpenerAutoExecutor(OpenerAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null)
 	{
 		_config = config;
 		_account = account;
+		_brokerState = brokerState;
 		_allowedStructures = new HashSet<string>(config.Structures, StringComparer.OrdinalIgnoreCase);
 	}
 
@@ -49,75 +41,43 @@ internal sealed class OpenerAutoExecutor
 
 	/// <summary>Walks the opener's ranked proposal list and dispatches eligible new-position opens
 	/// through the dry-run/submit path. Returns the count of orders submitted (or planned, in dry-run).
-	/// Caller is expected to invoke this AFTER <see cref="OpenCandidateEvaluator"/> emits its results.</summary>
-	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, DateTime now, CancellationToken cancellation)
+	/// Caller is expected to invoke this AFTER <see cref="OpenCandidateEvaluator"/> emits its results.
+	/// <paramref name="openedTodayCount"/> is the number of existing positions whose <c>OpenedAt</c>
+	/// falls on today's date — caller pre-computes from the position source. Used together with
+	/// broker pending orders to enforce <c>maxOrdersPerDay</c>.</summary>
+	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, DateTime now, int openedTodayCount, CancellationToken cancellation)
 	{
 		if (!_config.Enabled) return 0;
 		if (proposals.Count == 0) return 0;
 
-		var today = DateOnly.FromDateTime(now);
-		if (today != _trackingDate)
+		// Broker-truth refresh. If submit is on but the API call fails, do nothing this tick.
+		// Dry-runs proceed without the refresh (informational; users still see "would submit" lines
+		// even if a matching order already exists at the broker).
+		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation))
+			return 0;
+
+		var ordersThisTick = 0;
+		foreach (var p in proposals)
 		{
-			_firedFingerprints.Clear();
-			_liveSubmittedToday = 0;
-			_trackingDate = today;
+			if (p.CashReserveBlocked) continue;
+			if (p.Qty < 1) continue;
+			if (_allowedStructures.Count > 0 && !_allowedStructures.Contains(p.StructureKind.ToString())) continue;
+
+			// Broker-truth dedup: if the same leg set is already pending at the broker, skip.
+			if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(p.Legs.Select(l => (l.Symbol, l.Action))))
+				continue;
+
+			// Per-day live-submission cap: counts opens that already happened today (filled →
+			// position with OpenedAt today) PLUS pending opens we'd issue this tick.
+			if (_config.Submit && openedTodayCount + ordersThisTick >= _config.MaxOrdersPerDay)
+				break;
+
+			var result = await SubmitOpen(p, cancellation);
+			if (result.Outcome == SubmitOutcome.NotActed) continue;
+			if (result.Outcome == SubmitOutcome.Submitted) ordersThisTick++;
+			else if (result.Outcome == SubmitOutcome.DryRun) ordersThisTick++;
 		}
-
-		// Cross-process cap enforcement: when live submission is enabled, hold an OS-level file lock
-		// across the entire read-decide-submit-append cycle so concurrent `wa ai scan` / `wa ai watch`
-		// instances on the same machine never both observe a pre-submit count below the cap and
-		// double-fire. Dry-runs skip the lock — there's nothing to coordinate.
-		IDisposable? lockHandle = null;
-		if (_config.Submit)
-		{
-			lockHandle = SubmissionLog.AcquireLock();
-			// Seed in-memory state from the persisted log so the cap holds across process restarts
-			// (the in-memory counter alone would reset to 0 on every launch).
-			_liveSubmittedToday = SubmissionLog.CountForDate(today, SubmissionLog.Kind.Open);
-			foreach (var fp in SubmissionLog.FingerprintsForDate(today, SubmissionLog.Kind.Open))
-				_firedFingerprints.Add(fp);
-		}
-
-		try
-		{
-			var ordersThisTick = 0;
-			foreach (var p in proposals)
-			{
-				if (p.CashReserveBlocked) continue;
-				if (p.Qty < 1) continue;
-				if (_allowedStructures.Count > 0 && !_allowedStructures.Contains(p.StructureKind.ToString())) continue;
-				if (!string.IsNullOrEmpty(p.Fingerprint) && _firedFingerprints.Contains(p.Fingerprint)) continue;
-
-				// Per-day live-submission cap. Only blocks live PlaceOrder calls; dry-runs continue to emit
-				// (informational, no actual orders to count).
-				if (_config.Submit && _liveSubmittedToday >= _config.MaxOrdersPerDay)
-					break;
-
-				var result = await SubmitOpen(p, cancellation);
-				if (result.Outcome == SubmitOutcome.NotActed) continue;
-
-				// Only dedup live submissions. Dry-runs are diagnostic output the user expects to see
-				// repeat each tick so they can copy the `wa trade place` command at any moment.
-				if (result.Outcome == SubmitOutcome.Submitted)
-				{
-					if (!string.IsNullOrEmpty(p.Fingerprint)) _firedFingerprints.Add(p.Fingerprint);
-					_liveSubmittedToday++;
-					// Persist immediately so the next process to acquire the lock sees this submission.
-					SubmissionLog.Append(new SubmissionLog.Entry(
-						Date: today.ToString("yyyy-MM-dd"),
-						Ts: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-						Kind: SubmissionLog.Kind.Open,
-						Ticker: p.Ticker,
-						Rule: null,
-						Fingerprint: p.Fingerprint,
-						ClientOrderId: result.ClientOrderId,
-						OrderId: result.OrderId));
-				}
-				ordersThisTick++;
-			}
-			return ordersThisTick;
-		}
-		finally { lockHandle?.Dispose(); }
+		return ordersThisTick;
 	}
 
 	/// <summary>Builds the order from the proposal's leg set and either submits (live) or logs (dry-run).

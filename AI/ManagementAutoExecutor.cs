@@ -2,7 +2,6 @@ using Spectre.Console;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using WebullAnalytics.AI.Rules;
 using WebullAnalytics.Api;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Trading;
@@ -38,22 +37,20 @@ internal sealed class ManagementAutoExecutor
 	private readonly ManagementAutoExecuteConfig _config;
 	private readonly TimeZoneInfo _marketTz;
 	private readonly TradeAccount? _account;
+	private readonly BrokerStateService? _brokerState;
 	private readonly HashSet<string> _allowedRules;
 
 	// Per-day per-position tranche bookkeeping. Key: (rule, positionKey). Value: tranches submitted today.
+	// Still in-memory: tranches are a within-day schedule mechanic, and a tranche that didn't fill
+	// will show up in the broker's pending orders so the leg-set match catches it cross-process.
 	private readonly Dictionary<(string Rule, string PositionKey), HashSet<int>> _firedTranches = new();
-	// Per-day LegIn fingerprints already LIVE-submitted. Seeded from the cross-process ledger when
-	// running with submit=true, so the dedup survives restarts and concurrent processes. The
-	// rule's own structural guard (LongCall→LongCallVertical → rule rejects) prevents re-firing
-	// once a leg-in fills, but a UNFILLED limit order leaves the broker-side position as a single-leg
-	// long, which would let the rule fire again — fingerprint dedup catches that case.
-	private readonly HashSet<string> _legInFingerprints = new(StringComparer.Ordinal);
 	private DateOnly _trackingDate;
 
-	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account)
+	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null)
 	{
 		_config = config;
 		_account = account;
+		_brokerState = brokerState;
 		_marketTz = TimeZoneInfo.FindSystemTimeZoneById(config.ScaleOut.Tz);
 		_allowedRules = new HashSet<string>(config.Rules, StringComparer.Ordinal);
 	}
@@ -71,23 +68,13 @@ internal sealed class ManagementAutoExecutor
 		if (today != _trackingDate)
 		{
 			_firedTranches.Clear();
-			_legInFingerprints.Clear();
 			_trackingDate = today;
 		}
 
-		// Cross-process LegIn dedup: when running with submit=true, hold the file lock across the
-		// entire HandleAsync cycle and seed _legInFingerprints from the persisted ledger. This way
-		// a LegIn that was submitted but didn't fill (limit not reached) still blocks re-submission
-		// from this OR a parallel process.
-		IDisposable? lockHandle = null;
-		if (_config.Submit)
-		{
-			lockHandle = SubmissionLog.AcquireLock();
-			foreach (var fp in SubmissionLog.FingerprintsForDate(today, SubmissionLog.Kind.LegIn))
-				_legInFingerprints.Add(fp);
-		}
+		// Broker-truth refresh. If submit is on but the API call fails, do nothing this tick.
+		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation))
+			return 0;
 
-		try {
 		var orders = 0;
 		foreach (var r in results)
 		{
@@ -97,7 +84,7 @@ internal sealed class ManagementAutoExecutor
 
 			if (p.Kind == ProposalKind.LegIn)
 			{
-				if (await TryFireLegInAsync(p, ctx, today, cancellation)) orders++;
+				if (await TryFireLegInAsync(p, ctx, cancellation)) orders++;
 				continue;
 			}
 
@@ -155,21 +142,23 @@ internal sealed class ManagementAutoExecutor
 		foreach (var k in stale) _firedTranches.Remove(k);
 
 		return orders;
-		} finally { lockHandle?.Dispose(); }
 	}
 
-	/// <summary>Fires a single sell-to-open order for a LegIn proposal. Dedup is fingerprint-based and
-	/// cross-process via <see cref="SubmissionLog"/>: once a proposal's fingerprint has been logged for
-	/// today, this method skips it on subsequent ticks even if the original limit order never filled
-	/// and the position still looks like a single-leg long. Returns true when an order was acted on
-	/// (live submitted or dry-run logged).</summary>
-	private async Task<bool> TryFireLegInAsync(ManagementProposal p, EvaluationContext ctx, DateOnly today, CancellationToken cancellation)
+	/// <summary>Fires a single sell-to-open order for a LegIn proposal. Dedup is broker-truth: the
+	/// caller refreshes pending orders before the loop, and this method skips the proposal if the
+	/// same leg set already shows up as a pending order. That handles "limit placed but unfilled"
+	/// (position still looks like a single-leg long, but a working order exists) and survives
+	/// process restarts / concurrent processes. Returns true when an order was acted on (live
+	/// submitted or dry-run logged).</summary>
+	private async Task<bool> TryFireLegInAsync(ManagementProposal p, EvaluationContext ctx, CancellationToken cancellation)
 	{
 		if (p.Legs.Count != 1) return false; // LegIn always emits exactly one sell-to-open leg
-		var fp = ProposalFingerprint.From(p);
-		var fpKey = $"{fp.Rule}|{fp.PositionKey}|{fp.StructuralParams}";
-		if (_legInFingerprints.Contains(fpKey)) return false;
 		if (!ctx.OpenPositions.TryGetValue(p.PositionKey, out var position) || position.Quantity <= 0) return false;
+
+		// Broker-truth dedup: if the same sell-to-open order is already pending at the broker,
+		// skip. Catches the "limit placed but unfilled" case the in-memory dedup used to cover.
+		if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(p.Legs.Select(l => (l.Symbol, l.Action))))
+			return false;
 
 		var shortLeg = p.Legs[0];
 		if (!shortLeg.PricePerShare.HasValue) return false;
@@ -208,16 +197,6 @@ internal sealed class ManagementAutoExecutor
 			using var client = new WebullOpenApiClient(_account);
 			var placed = await client.PlaceOrderAsync(body);
 			AnsiConsole.MarkupLine($"[green]auto-execute placed:[/] [dim]{Markup.Escape(p.Rule)}[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
-			_legInFingerprints.Add(fpKey);
-			SubmissionLog.Append(new SubmissionLog.Entry(
-				Date: today.ToString("yyyy-MM-dd"),
-				Ts: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-				Kind: SubmissionLog.Kind.LegIn,
-				Ticker: position.Ticker,
-				Rule: p.Rule,
-				Fingerprint: fpKey,
-				ClientOrderId: placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId,
-				OrderId: placed.OrderId));
 			return true;
 		}
 		catch (WebullOpenApiException ex)
