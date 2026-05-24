@@ -347,10 +347,13 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		if (s.Debug)
 			AnsiConsole.MarkupLine($"[dim]Preview response:[/] {Markup.Escape(previewResponse.RawJson)}");
 
-		if (!s.Submit) { AnsiConsole.MarkupLine("[dim]Preview only (no --submit). Exiting.[/]"); return 0; }
-
-		// 8. Confirm and place.
-		if (!TradeContext.Confirm("Place this order?")) { AnsiConsole.MarkupLine("[dim]Aborted.[/]"); return 0; }
+		// Two paths to placement:
+		//   - --submit present: explicit "I mean it" gate — auto-place, no Y/N prompt. Matches
+		//     `wa ai scan --submit` / `wa ai watch --submit` so all three commands share one opt-in.
+		//   - --submit absent: preview-only by default, but offer an interactive Y/N (default N) as
+		//     a recovery path for "I previewed, looks good, place it" without re-running the command.
+		//     Defaulting N prevents accidental submission from a stray Enter.
+		if (!s.Submit && !TradeContext.Confirm("Submit anyway?")) { AnsiConsole.MarkupLine("[dim]Preview only. Exiting.[/]"); return 0; }
 
 		try
 		{

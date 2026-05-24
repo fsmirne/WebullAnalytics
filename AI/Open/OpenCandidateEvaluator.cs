@@ -552,14 +552,17 @@ internal sealed class OpenCandidateEvaluator
 		//   3) per-trade risk budget (MaxRiskPctPerProposal × accountValue): prevents a single position from
 		//      dominating account drawdown. Without this, a $200/ct loss on a $25k account could fill 50
 		//      contracts (= 40% of equity at risk on one trade).
-		var cashCap = (int)Math.Floor(freeCash / p.CapitalAtRiskPerContract);
+		// Sandbox accounts report cash balances in the quadrillions, so the unbounded floor can exceed
+		// Int32.MaxValue before MaxQtyPerProposal clamps it. Saturate at int.MaxValue to keep the cast
+		// safe — the downstream Math.Min(..., MaxQtyPerProposal) drives the final qty either way.
+		var cashCap = SaturatingFloorToInt(freeCash / p.CapitalAtRiskPerContract);
 		// Risk budget = the smaller of (account-pct cap) and (absolute dollar cap). The dollar cap
 		// stops compounding from inflating position sizes into seven-figure single-trade bets after
 		// a few good months. Zero on the dollar cap means "no absolute limit" (pct-only).
 		var pctBudget = accountValue * cfg.MaxRiskPctPerProposal;
 		var dollarBudget = cfg.MaxDollarRiskPerProposal > 0m ? cfg.MaxDollarRiskPerProposal : decimal.MaxValue;
 		var riskBudget = Math.Min(pctBudget, dollarBudget);
-		var riskCap = riskBudget > 0m ? (int)Math.Floor(riskBudget / p.CapitalAtRiskPerContract) : 0;
+		var riskCap = riskBudget > 0m ? SaturatingFloorToInt(riskBudget / p.CapitalAtRiskPerContract) : 0;
 		var maxQty = Math.Min(Math.Min(cashCap, riskCap), cfg.MaxQtyPerProposal);
 
 		OpenProposal updated;
@@ -591,6 +594,16 @@ internal sealed class OpenCandidateEvaluator
 
 	private static IReadOnlyList<ProposalLeg> ScaleLegs(IReadOnlyList<ProposalLeg> legs, int qty) =>
 		legs.Select(l => l with { Qty = qty }).ToList();
+
+	/// <summary>Floor a non-negative decimal to int, saturating at int.MaxValue on overflow.
+	/// Used by qty-cap math where a sandbox-sized cash balance can produce an intermediate
+	/// floor value larger than Int32 before the MaxQtyPerProposal Math.Min clamps it.</summary>
+	private static int SaturatingFloorToInt(decimal value)
+	{
+		if (value <= 0m) return 0;
+		var floored = Math.Floor(value);
+		return floored >= int.MaxValue ? int.MaxValue : (int)floored;
+	}
 
 	private static bool IsCalendarLike(OpenProposal proposal) => proposal.StructureKind is OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal;
 

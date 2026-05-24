@@ -64,6 +64,11 @@ internal sealed class OpenerAutoExecuteConfig
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
 	/// <summary>If false, the executor logs the action it WOULD take but does not call PlaceOrder.</summary>
 	[JsonPropertyName("submit")] public bool Submit { get; set; } = false;
+	/// <summary>Order time-in-force: "DAY" (in-force for the current session only) or "GTC" (queues
+	/// across sessions). Default DAY matches normal in-session operation. Use GTC for off-hours
+	/// submission — Webull rejects DAY orders outside 08:00–16:00 ET on trading days with
+	/// OAUTH_OPENAPI_OPTION_CAN_NOT_TRADING_FOR_NON_TRADING_HOURS, but accepts GTC.</summary>
+	[JsonPropertyName("timeInForce")] public string TimeInForce { get; set; } = "DAY";
 	/// <summary>Max opener proposals to act on per ticker per tick. Caps churn when the opener emits
 	/// multiple high-ranked candidates for the same ticker.</summary>
 	[JsonPropertyName("maxPerTickerPerTick")] public int MaxPerTickerPerTick { get; set; } = 1;
@@ -84,6 +89,10 @@ internal sealed class ManagementAutoExecuteConfig
 	/// <summary>If false, the executor logs the action it WOULD take but does not call PlaceOrder.
 	/// Use this to validate schedule and pricing against the live tape before flipping to real submission.</summary>
 	[JsonPropertyName("submit")] public bool Submit { get; set; } = false;
+	/// <summary>Order time-in-force: "DAY" (in-force for the current session only) or "GTC" (queues
+	/// across sessions). Default DAY matches normal in-session operation. Use GTC for off-hours
+	/// submission — Webull rejects DAY orders outside 08:00–16:00 ET on trading days but accepts GTC.</summary>
+	[JsonPropertyName("timeInForce")] public string TimeInForce { get; set; } = "DAY";
 	/// <summary>Names of rules whose proposals are eligible for auto-execution. Anything not listed
 	/// still surfaces as a suggestion only.</summary>
 	[JsonPropertyName("rules")] public List<string> Rules { get; set; } = new() { "CloseBeforeShortExpiryRule" };
@@ -119,7 +128,7 @@ internal sealed class CashReserveConfig
 
 internal sealed class LogConfig
 {
-	[JsonPropertyName("path")] public string Path { get; set; } = "data/ai-proposals.log";
+	[JsonPropertyName("path")] public string Path { get; set; } = "data/ai-proposals.jsonl";
 	[JsonPropertyName("level")] public string ConsoleVerbosity { get; set; } = "information"; // error | information | debug
 }
 
@@ -269,6 +278,12 @@ internal static class AIConfigLoader
 		var ce = c.Rules.CloseBeforeShortExpiry;
 		if (ce.MinProfitPct < 0m) return $"rules.closeBeforeShortExpiry.minProfitPct: must be ≥ 0, got {ce.MinProfitPct}";
 		if (ce.EmergencyBreakEvenBufferPct < 0m) return $"rules.closeBeforeShortExpiry.emergencyBreakEvenBufferPct: must be ≥ 0, got {ce.EmergencyBreakEvenBufferPct}";
+
+		foreach (var (label, value) in new[] { ("management", c.AutoExecute.Management.TimeInForce), ("opener", c.AutoExecute.Opener.TimeInForce) })
+		{
+			if (!string.Equals(value, "DAY", StringComparison.OrdinalIgnoreCase) && !string.Equals(value, "GTC", StringComparison.OrdinalIgnoreCase))
+				return $"autoExecute.{label}.timeInForce: must be 'DAY' or 'GTC', got '{value}'";
+		}
 
 		var so = c.AutoExecute.Management.ScaleOut;
 		foreach (var (label, value) in new[] {

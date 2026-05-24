@@ -1,5 +1,7 @@
 using Spectre.Console;
 using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using WebullAnalytics.Api;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Trading;
@@ -182,8 +184,11 @@ internal sealed class ManagementAutoExecutor
 			netMid += ls.Action == "sell" ? mid : -mid;
 		}
 
+		// Round to the exchange-required tick (single-leg vs SPX-complex vs penny-complex) so Webull
+		// doesn't reject with OAUTH_OPENAPI_OPTION_PRICE_STEP_GTE. Dry-run output uses the rounded
+		// value too so the printed `wa trade place` hint matches what live submission would send.
 		var side = netMid >= 0m ? "SELL" : "BUY";
-		var limitAbs = Math.Abs(netMid);
+		var limitAbs = OptionPriceRounding.RoundToTick(Math.Abs(netMid), position.Legs.Count, position.Ticker);
 
 		var argLegs = string.Join(",", legSpecs.Select(l => $"{l.Action}:{l.Symbol}:{l.LegQty}"));
 		var summary = $"close {qty}/{position.Quantity} {position.Ticker} @ ${limitAbs:F2} ({side.ToLowerInvariant()})";
@@ -208,7 +213,7 @@ internal sealed class ManagementAutoExecutor
 			Side: side,
 			OrderType: "LIMIT",
 			LimitPrice: limitAbs,
-			TimeInForce: "DAY"));
+			TimeInForce: _config.TimeInForce.ToUpperInvariant()));
 
 		try
 		{
@@ -220,12 +225,33 @@ internal sealed class ManagementAutoExecutor
 		catch (WebullOpenApiException ex)
 		{
 			AnsiConsole.MarkupLine($"[red]auto-execute failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]:[/] {Markup.Escape(label)} {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
+			PrintFailureDiagnostics(body, ex);
 			return false;
 		}
 		catch (HttpRequestException ex)
 		{
 			AnsiConsole.MarkupLine($"[red]auto-execute network error:[/] {Markup.Escape(label)} {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
+			PrintFailureDiagnostics(body, ex);
 			return false;
 		}
+	}
+
+	private static readonly JsonSerializerOptions DiagnosticJsonOptions = new() { WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+
+	/// <summary>Dump the request payload and (when present) Webull's raw response body so the user
+	/// has enough signal to diagnose vague rejections like OAUTH_OPENAPI_SYSTEM_ERROR — the top-level
+	/// `message` field is often just "System error." while the response body carries nested error_data
+	/// or a request_id that Webull support can trace.</summary>
+	private static void PrintFailureDiagnostics(OrderRequestBody body, Exception ex)
+	{
+		try
+		{
+			var requestJson = JsonSerializer.Serialize(body, DiagnosticJsonOptions);
+			AnsiConsole.MarkupLine($"  [grey50]request:[/]\n[grey50]{Markup.Escape(requestJson)}[/]");
+		}
+		catch (Exception serEx) { AnsiConsole.MarkupLine($"  [grey50](could not serialize request body: {Markup.Escape(serEx.Message)})[/]"); }
+
+		if (ex is WebullOpenApiException wex && !string.IsNullOrWhiteSpace(wex.RawBody))
+			AnsiConsole.MarkupLine($"  [grey50]response:[/]\n[grey50]{Markup.Escape(wex.RawBody)}[/]");
 	}
 }

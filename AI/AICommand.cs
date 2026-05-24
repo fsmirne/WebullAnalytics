@@ -246,11 +246,21 @@ internal sealed class AIScanSettings : AISingleTickerSubcommandSettings
 	[Description("Account alias or ID from api-config.json. Mirrors `wa trade place --account`: overrides defaultAccount for this run. Affects both the live-position read and any auto-executed orders.")]
 	public string? Account { get; set; }
 
+	[CommandOption("--submit")]
+	[Description("Override autoExecute.{management,opener}.submit=true for this run. Mirrors `wa trade place --submit`: keep config safe at dry-run, flip live from the CLI when ready.")]
+	public bool Submit { get; set; }
+
+	[CommandOption("--tif <VALUE>")]
+	[Description("Override autoExecute.{management,opener}.timeInForce for this run. Mirrors `wa trade place --tif`: DAY (in-session only) or GTC (queues across sessions, accepted off-hours). Default: whatever config says, which itself defaults to DAY.")]
+	public string? Tif { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 		if (Top.HasValue && Top.Value < 1) return ValidationResult.Error($"--top: must be ≥ 1, got {Top.Value}");
+		if (Tif != null && !string.Equals(Tif, "day", StringComparison.OrdinalIgnoreCase) && !string.Equals(Tif, "gtc", StringComparison.OrdinalIgnoreCase))
+			return ValidationResult.Error($"--tif: must be 'day' or 'gtc', got '{Tif}'");
 
 		if (Spot != null)
 		{
@@ -319,9 +329,11 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
 		if (settings.Top.HasValue) config.Opener.TopNPerTicker = settings.Top.Value;
+		if (settings.Submit) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; }
+		if (settings.Tif != null) { config.AutoExecute.Management.TimeInForce = settings.Tif.ToUpperInvariant(); config.AutoExecute.Opener.TimeInForce = settings.Tif.ToUpperInvariant(); }
 
 		if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
-			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals} theoretical={settings.Theoretical}");
+			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals} theoretical={settings.Theoretical} submit={settings.Submit}");
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 

@@ -719,7 +719,7 @@ When a proposal fires, the rationale includes a safety summary showing what was 
 Proposals are written to two places:
 
 - **Console**: Spectre-formatted, color-coded by action (close = yellow, roll = cyan, alert-only = grey). Open-proposal panel headers carry a `#N` prefix matching the ranked output order so you can refer to a candidate by position (e.g. `#3 LongCalendar GME x166`); the counter resets at the start of each `wa ai scan` and at each `wa ai watch` tick. Each proposal shows the legs and net credit/debit, followed by ready-to-run `wa trade place` and `wa analyze trade` commands, and the rule rationale. Double calendars and double diagonals render as a single panel listing both halves under `Put side:` / `Call side:` rows; because Webull cannot place a 4-leg double-calendar ticket, the panel emits two `wa trade place` lines (one per side, each with its own per-share limit) and a single `wa analyze trade` covering all four legs.
-- **JSONL log** at `data/ai-proposals.log`: one proposal per line, machine-parseable with `jq` or similar. Includes `mode` field ("scan" / "watch" / "replay") to distinguish source runs.
+- **JSONL log** at `data/ai-proposals.jsonl`: one proposal per line, machine-parseable with `jq` or similar. Includes `mode` field ("scan" / "watch" / "replay") to distinguish source runs.
 
 AI commands accept `--pricing mid|bidask` to control both displayed command prices and the pricing basis used in proposal math. Default: `mid`.
 
