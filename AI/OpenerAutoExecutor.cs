@@ -23,6 +23,7 @@ namespace WebullAnalytics.AI;
 internal sealed class OpenerAutoExecutor
 {
 	private enum SubmitOutcome { NotActed, DryRun, Submitted }
+	private readonly record struct SubmitResult(SubmitOutcome Outcome, string? OrderId = null, string? ClientOrderId = null);
 
 	private readonly OpenerAutoExecuteConfig _config;
 	private readonly TradeAccount? _account;
@@ -62,43 +63,68 @@ internal sealed class OpenerAutoExecutor
 			_trackingDate = today;
 		}
 
-		var ordersThisTick = 0;
-
-		foreach (var p in proposals)
+		// Cross-process cap enforcement: when live submission is enabled, hold an OS-level file lock
+		// across the entire read-decide-submit-append cycle so concurrent `wa ai scan` / `wa ai watch`
+		// instances on the same machine never both observe a pre-submit count below the cap and
+		// double-fire. Dry-runs skip the lock — there's nothing to coordinate.
+		IDisposable? lockHandle = null;
+		if (_config.Submit)
 		{
-			if (p.CashReserveBlocked) continue;
-			if (p.Qty < 1) continue;
-			if (_allowedStructures.Count > 0 && !_allowedStructures.Contains(p.StructureKind.ToString())) continue;
-			if (!string.IsNullOrEmpty(p.Fingerprint) && _firedFingerprints.Contains(p.Fingerprint)) continue;
-
-			// Per-day live-submission cap. Only blocks live PlaceOrder calls; dry-runs continue to emit
-			// (informational, no actual orders to count). Without this gate, a single watch session can
-			// fire as many live opens as the opener produces distinct fingerprints across the day.
-			if (_config.Submit && _liveSubmittedToday >= _config.MaxOrdersPerDay)
-				break;
-
-			var outcome = await SubmitOpen(p, cancellation);
-			if (outcome == SubmitOutcome.NotActed) continue;
-
-			// Only dedup live submissions. Dry-runs are diagnostic output the user expects to see
-			// repeat each tick so they can copy the `wa trade place` command at any moment.
-			if (outcome == SubmitOutcome.Submitted)
-			{
-				if (!string.IsNullOrEmpty(p.Fingerprint)) _firedFingerprints.Add(p.Fingerprint);
-				_liveSubmittedToday++;
-			}
-			ordersThisTick++;
+			lockHandle = OpenerSubmissionLog.AcquireLock();
+			// Seed in-memory state from the persisted log so the cap holds across process restarts
+			// (the in-memory counter alone would reset to 0 on every launch).
+			_liveSubmittedToday = OpenerSubmissionLog.CountForDate(today);
+			foreach (var fp in OpenerSubmissionLog.FingerprintsForDate(today))
+				_firedFingerprints.Add(fp);
 		}
 
-		return ordersThisTick;
+		try
+		{
+			var ordersThisTick = 0;
+			foreach (var p in proposals)
+			{
+				if (p.CashReserveBlocked) continue;
+				if (p.Qty < 1) continue;
+				if (_allowedStructures.Count > 0 && !_allowedStructures.Contains(p.StructureKind.ToString())) continue;
+				if (!string.IsNullOrEmpty(p.Fingerprint) && _firedFingerprints.Contains(p.Fingerprint)) continue;
+
+				// Per-day live-submission cap. Only blocks live PlaceOrder calls; dry-runs continue to emit
+				// (informational, no actual orders to count).
+				if (_config.Submit && _liveSubmittedToday >= _config.MaxOrdersPerDay)
+					break;
+
+				var result = await SubmitOpen(p, cancellation);
+				if (result.Outcome == SubmitOutcome.NotActed) continue;
+
+				// Only dedup live submissions. Dry-runs are diagnostic output the user expects to see
+				// repeat each tick so they can copy the `wa trade place` command at any moment.
+				if (result.Outcome == SubmitOutcome.Submitted)
+				{
+					if (!string.IsNullOrEmpty(p.Fingerprint)) _firedFingerprints.Add(p.Fingerprint);
+					_liveSubmittedToday++;
+					// Persist immediately so the next process to acquire the lock sees this submission.
+					OpenerSubmissionLog.Append(new OpenerSubmissionLog.Entry(
+						Date: today.ToString("yyyy-MM-dd"),
+						Ts: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+						Ticker: p.Ticker,
+						Fingerprint: p.Fingerprint,
+						ClientOrderId: result.ClientOrderId,
+						OrderId: result.OrderId));
+				}
+				ordersThisTick++;
+			}
+			return ordersThisTick;
+		}
+		finally { lockHandle?.Dispose(); }
 	}
 
 	/// <summary>Builds the order from the proposal's leg set and either submits (live) or logs (dry-run).
-	/// Returns <see cref="SubmitOutcome.Submitted"/> only on a successful live PlaceOrder; the live
-	/// outcome is the gate for per-day fingerprint dedup. Dry-run paths return <see cref="SubmitOutcome.DryRun"/>
-	/// (logged, but caller still re-emits next tick). <see cref="SubmitOutcome.NotActed"/> means the
-	/// proposal was skipped (missing price, submit error) so the caller doesn't count it.</summary>
-	private async Task<SubmitOutcome> SubmitOpen(OpenProposal p, CancellationToken cancellation)
+	/// Returns <see cref="SubmitOutcome.Submitted"/> with the broker-assigned ids only on a successful
+	/// live PlaceOrder; the live outcome is the gate for per-day fingerprint dedup and persisted-log
+	/// append. Dry-run paths return <see cref="SubmitOutcome.DryRun"/> (logged, but caller still
+	/// re-emits next tick). <see cref="SubmitOutcome.NotActed"/> means the proposal was skipped
+	/// (missing price, submit error) so the caller doesn't count it.</summary>
+	private async Task<SubmitResult> SubmitOpen(OpenProposal p, CancellationToken cancellation)
 	{
 		// Each leg's PricePerShare is already set by CandidateScorer at evaluation time; signed by the
 		// leg's Action ("buy" pays, "sell" collects). Net per-share = sum.
@@ -109,7 +135,7 @@ internal sealed class OpenerAutoExecutor
 			if (!leg.PricePerShare.HasValue)
 			{
 				AnsiConsole.MarkupLine($"[yellow]opener auto-execute:[/] {Markup.Escape(p.Ticker)} {p.StructureKind} skipped — missing price on leg {Markup.Escape(leg.Symbol)}");
-				return SubmitOutcome.NotActed;
+				return new SubmitResult(SubmitOutcome.NotActed);
 			}
 			var price = leg.PricePerShare.Value;
 			legSpecs.Add((leg.Action, leg.Symbol, leg.Qty, price));
@@ -132,7 +158,7 @@ internal sealed class OpenerAutoExecutor
 			var reason = _account == null ? "no account configured" : "submit=false";
 			AnsiConsole.MarkupLine($"[cyan]opener auto-execute (dry-run, {Markup.Escape(reason)}):[/] {Markup.Escape(summary)}");
 			AnsiConsole.MarkupLine($"  [grey50]wa trade place --trade \"{Markup.Escape(argLegs)}\" --side {side.ToLowerInvariant()} --limit {limitAbs:F2} --submit[/]");
-			return SubmitOutcome.DryRun;
+			return new SubmitResult(SubmitOutcome.DryRun);
 		}
 
 		var legs = TradeLegParser.Parse(argLegs);
@@ -154,19 +180,19 @@ internal sealed class OpenerAutoExecutor
 			using var client = new WebullOpenApiClient(_account);
 			var placed = await client.PlaceOrderAsync(body);
 			AnsiConsole.MarkupLine($"[green]opener auto-execute placed:[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
-			return SubmitOutcome.Submitted;
+			return new SubmitResult(SubmitOutcome.Submitted, placed.OrderId, placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId);
 		}
 		catch (WebullOpenApiException ex)
 		{
 			AnsiConsole.MarkupLine($"[red]opener auto-execute failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]:[/] {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
 			PrintFailureDiagnostics(body, ex);
-			return SubmitOutcome.NotActed;
+			return new SubmitResult(SubmitOutcome.NotActed);
 		}
 		catch (HttpRequestException ex)
 		{
 			AnsiConsole.MarkupLine($"[red]opener auto-execute network error:[/] {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
 			PrintFailureDiagnostics(body, ex);
-			return SubmitOutcome.NotActed;
+			return new SubmitResult(SubmitOutcome.NotActed);
 		}
 	}
 
