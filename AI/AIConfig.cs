@@ -74,8 +74,13 @@ internal sealed class OpenerAutoExecuteConfig
 	/// every minute can fire the same number of opens as there are distinct proposal fingerprints
 	/// the opener emits during the day (e.g. when strike drifts with spot). Dry-run emissions are
 	/// NOT capped — only live PlaceOrder calls are counted.
-	/// CAVEAT: the counter is in-memory. Restarting <c>wa ai watch</c> mid-day resets the count to 0,
-	/// allowing additional submissions. Persistent per-day tracking is a future improvement.</summary>
+	/// Scope: OPEN proposals only. Management rules (LegInShortRule, StopLoss, TakeProfit, rolls,
+	/// etc.) flow through <see cref="ManagementAutoExecutor"/> and are NOT subject to this cap —
+	/// closing/managing existing positions should never be throttled by a daily-open limit.
+	/// Cross-process enforcement: each successful submit is appended to
+	/// <c>data/opener-submissions.jsonl</c> under an OS-level file lock, so concurrent
+	/// <c>wa ai scan</c> / <c>wa ai watch</c> invocations on the same machine share the count.
+	/// Different machines do not coordinate.</summary>
 	[JsonPropertyName("maxOrdersPerDay")] public int MaxOrdersPerDay { get; set; } = 1;
 	/// <summary>Allow-list of <c>OpenStructureKind</c> names to auto-execute. Empty = all structures allowed.</summary>
 	[JsonPropertyName("structures")] public List<string> Structures { get; set; } = new();
