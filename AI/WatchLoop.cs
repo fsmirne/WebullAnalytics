@@ -137,10 +137,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 					var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 					for (var i = 0; i < openResults.Count; i++) { openSink.Emit(openResults[i], rank: i + 1); proposalsEmitted++; }
 					if (openerExecutor != null)
-					{
-						var openedTodayCount = openPositions.Values.Count(p => p.OpenedAt?.Date == now.Date);
-						await openerExecutor.HandleAsync(openResults, now, openedTodayCount, cancellation);
-					}
+						await openerExecutor.HandleAsync(openResults, now, cancellation);
 				}
 
 				ticksRun++;
