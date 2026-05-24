@@ -69,12 +69,6 @@ internal sealed class OpenerAutoExecuteConfig
 	/// submission — Webull rejects DAY orders outside 08:00–16:00 ET on trading days with
 	/// OAUTH_OPENAPI_OPTION_CAN_NOT_TRADING_FOR_NON_TRADING_HOURS, but accepts GTC.</summary>
 	[JsonPropertyName("timeInForce")] public string TimeInForce { get; set; } = "DAY";
-	/// <summary>Max opener proposals to act on per ticker per tick. Caps churn when the opener emits
-	/// multiple high-ranked candidates for the same ticker.</summary>
-	[JsonPropertyName("maxPerTickerPerTick")] public int MaxPerTickerPerTick { get; set; } = 1;
-	/// <summary>Max opener proposals to act on across all tickers per tick. Hard cap to prevent the
-	/// executor from spraying orders on a single evaluation.</summary>
-	[JsonPropertyName("maxOrdersPerTick")] public int MaxOrdersPerTick { get; set; } = 3;
 	/// <summary>Max LIVE opener submissions across all tickers per trading day. Default 1, matching
 	/// the backtest's <c>--top-per-step 1</c> convention. Without this cap a watch session that ticks
 	/// every minute can fire the same number of opens as there are distinct proposal fingerprints
@@ -350,10 +344,7 @@ internal static class AIConfigLoader
 			if (!string.Equals(value, "DAY", StringComparison.OrdinalIgnoreCase) && !string.Equals(value, "GTC", StringComparison.OrdinalIgnoreCase))
 				return $"autoExecute.{label}.timeInForce: must be 'DAY' or 'GTC', got '{value}'";
 		}
-		var openerAuto = c.AutoExecute.Opener;
-		if (openerAuto.MaxPerTickerPerTick < 1) return $"autoExecute.opener.maxPerTickerPerTick: must be ≥ 1, got {openerAuto.MaxPerTickerPerTick}";
-		if (openerAuto.MaxOrdersPerTick < 1) return $"autoExecute.opener.maxOrdersPerTick: must be ≥ 1, got {openerAuto.MaxOrdersPerTick}";
-		if (openerAuto.MaxOrdersPerDay < 1) return $"autoExecute.opener.maxOrdersPerDay: must be ≥ 1, got {openerAuto.MaxOrdersPerDay}";
+		if (c.AutoExecute.Opener.MaxOrdersPerDay < 1) return $"autoExecute.opener.maxOrdersPerDay: must be ≥ 1, got {c.AutoExecute.Opener.MaxOrdersPerDay}";
 
 		var so = c.AutoExecute.Management.ScaleOut;
 		foreach (var (label, value) in new[] {
