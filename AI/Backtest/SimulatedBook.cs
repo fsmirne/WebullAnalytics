@@ -23,7 +23,7 @@ internal sealed record BacktestLegFill(
 	decimal PricePerShare
 );
 
-internal enum BacktestFillKind { Open, Close, Roll, Expire }
+internal enum BacktestFillKind { Open, Close, Roll, Expire, LegIn }
 
 /// <summary>
 /// In-memory simulated book + cash ledger driven by the backtest runner. The runner re-prices
@@ -201,6 +201,72 @@ internal sealed class SimulatedBook
 		_lineageByKey[newKey] = lineageId;
 
 		_fills.Add(new BacktestFill(date, newKey, oldPos.Ticker, strategyKind, oldPos.Quantity, BacktestFillKind.Roll, lineageId, legFills, cashFlow, fees, ruleName));
+		return true;
+	}
+
+	/// <summary>Append one or more new legs to an existing position (sell-to-open or buy-to-open),
+	/// without closing any existing legs. Used by <c>LegInShortRule</c> to convert a single-leg long
+	/// (LongCall/LongPut) into a vertical by adding a higher/lower-strike short. Cash flow comes
+	/// from the new legs only; the existing legs and their basis are preserved. Resulting strategy
+	/// kind is supplied by the caller (e.g., LongCallVertical) and the position key recomputes off
+	/// the new short leg.</summary>
+	public bool LegIn(DateTime date, string oldPositionKey, IReadOnlyList<BacktestLegFill> newLegs, string ruleName, OpenStructureKind newStructureKind)
+	{
+		if (!_positions.TryGetValue(oldPositionKey, out var oldPos)) return false;
+		if (newLegs.Count == 0) return false;
+
+		// One combo execution = one slippage cross. Fee scales with new-leg count only — existing
+		// legs aren't re-executed.
+		var cashFlow = ComputeCashFlow(newLegs) - ComputeSlippage(newStructureKind, oldPos.Quantity);
+		var fees = Math.Abs(oldPos.Quantity) * newLegs.Count * _feePerContract;
+		Cash += cashFlow - fees;
+
+		// Build merged leg list: existing legs unchanged, new legs appended.
+		var mergedLegs = new List<PositionLeg>(oldPos.Legs);
+		foreach (var f in newLegs)
+		{
+			var parsed = ParsingHelpers.ParseOptionSymbol(f.Symbol);
+			if (parsed == null) continue;
+			mergedLegs.Add(new PositionLeg(
+				Symbol: f.Symbol,
+				Side: f.Side,
+				Strike: parsed.Strike,
+				Expiry: parsed.ExpiryDate,
+				CallPut: parsed.CallPut,
+				Qty: oldPos.Quantity));
+		}
+		if (mergedLegs.Count == oldPos.Legs.Count) return false; // nothing parsed
+
+		var strategyKind = newStructureKind.ToString();
+		var newKey = ComputeKey(oldPos.Ticker, strategyKind, mergedLegs);
+
+		// Basis adjustment: incoming credit (negative cashFlow sign convention from ComputeCashFlow:
+		// sell-to-open is positive cashFlow → debit reduces). Same per-share normalization as Roll.
+		var initialDebit = _initialDebitPerContract[oldPositionKey];
+		var perShareDelta = oldPos.Quantity != 0 ? -cashFlow / (oldPos.Quantity * Multiplier) : 0m;
+		var adjustedDebit = _adjustedDebitPerContract[oldPositionKey] + perShareDelta;
+
+		var lineageId = _lineageByKey[oldPositionKey];
+		_positions.Remove(oldPositionKey);
+		_initialDebitPerContract.Remove(oldPositionKey);
+		_adjustedDebitPerContract.Remove(oldPositionKey);
+		_lineageByKey.Remove(oldPositionKey);
+
+		_positions[newKey] = new OpenPosition(
+			Key: newKey,
+			Ticker: oldPos.Ticker,
+			StrategyKind: strategyKind,
+			Legs: mergedLegs,
+			InitialNetDebit: initialDebit,
+			AdjustedNetDebit: adjustedDebit,
+			Quantity: oldPos.Quantity,
+			OpenedAt: oldPos.OpenedAt,
+			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, mergedLegs));
+		_initialDebitPerContract[newKey] = initialDebit;
+		_adjustedDebitPerContract[newKey] = adjustedDebit;
+		_lineageByKey[newKey] = lineageId;
+
+		_fills.Add(new BacktestFill(date, newKey, oldPos.Ticker, strategyKind, oldPos.Quantity, BacktestFillKind.LegIn, lineageId, newLegs, cashFlow, fees, ruleName));
 		return true;
 	}
 

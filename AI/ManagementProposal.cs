@@ -9,6 +9,7 @@ internal enum ProposalKind
 {
 	Close,       // flat-close the position at current mid
 	Roll,        // roll the short leg (same strike or up-and-out)
+	LegIn,       // add a new leg (sell-to-open) to an existing position; e.g., LongCall → LongCallVertical
 	AlertOnly    // rule matched but no actionable improvement; surface for awareness
 }
 

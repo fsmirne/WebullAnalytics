@@ -111,6 +111,16 @@
 			"enabled": false,
 			"minProfitPct": 30,
 			"emergencyBreakEvenBufferPct": 1.0
+		},
+		"legInShort": {
+			"enabled": false,
+			"minSpotPctITM": 1.0,
+			"minLongDelta": 0.65,
+			"triggerProfitPct": 0.50,
+			"minDTE": 5,
+			"targetShortDelta": 0.30,
+			"shortDeltaTolerance": 0.05,
+			"minShortCreditPerShare": 0.30
 		}
 	},
 	"autoExecute": {
