@@ -27,6 +27,7 @@ internal sealed class BrokerStateService
 {
 	private readonly TradeAccount _account;
 	private HashSet<string>? _pendingLegSetFingerprints;
+	private Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>? _pendingByFingerprint;
 
 	public BrokerStateService(TradeAccount account) { _account = account; }
 
@@ -42,16 +43,21 @@ internal sealed class BrokerStateService
 		using var client = new WebullOpenApiClient(_account);
 		var openOrders = await client.ListOpenOrdersAsync(cancellation);
 		var fingerprints = new HashSet<string>(StringComparer.Ordinal);
+		var byFingerprint = new Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>(StringComparer.Ordinal);
 		foreach (var combo in openOrders)
 		{
 			if (combo.Orders == null) continue;
 			foreach (var order in combo.Orders)
 			{
 				var fp = FingerprintLegs(order.Legs);
-				if (!string.IsNullOrEmpty(fp)) fingerprints.Add(fp);
+				if (string.IsNullOrEmpty(fp)) continue;
+				fingerprints.Add(fp);
+				if (!byFingerprint.TryGetValue(fp, out var list)) byFingerprint[fp] = list = new List<WebullOpenApiClient.OrderDetailOrder>();
+				list.Add(order);
 			}
 		}
 		_pendingLegSetFingerprints = fingerprints;
+		_pendingByFingerprint = byFingerprint;
 	}
 
 	/// <summary>Returns true when the proposal's leg set matches a pending order at the broker.
@@ -62,6 +68,16 @@ internal sealed class BrokerStateService
 		if (_pendingLegSetFingerprints == null) return false;
 		var fp = FingerprintProposal(proposalLegs);
 		return _pendingLegSetFingerprints.Contains(fp);
+	}
+
+	/// <summary>Returns the pending orders at the broker that match the proposal's leg set, or an
+	/// empty list when there are none / <see cref="IsReady"/> is false. Used by `wa trade place` to
+	/// surface details of the existing duplicates in the warning line (client_order_id, qty, limit).</summary>
+	public IReadOnlyList<WebullOpenApiClient.OrderDetailOrder> FindPendingMatching(IEnumerable<(string Symbol, string Action)> proposalLegs)
+	{
+		if (_pendingByFingerprint == null) return Array.Empty<WebullOpenApiClient.OrderDetailOrder>();
+		var fp = FingerprintProposal(proposalLegs);
+		return _pendingByFingerprint.TryGetValue(fp, out var list) ? list : Array.Empty<WebullOpenApiClient.OrderDetailOrder>();
 	}
 
 	/// <summary>Canonical fingerprint of a Webull pending order's leg set. Webull returns each leg
