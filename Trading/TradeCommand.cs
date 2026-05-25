@@ -703,7 +703,14 @@ internal sealed class TradeTokenCheckCommand : AsyncCommand<TradeTokenCheckSetti
 		if (account == null) return 2;
 
 		var cached = TokenStore.Load(account.Alias);
-		if (cached == null) { AnsiConsole.MarkupLine($"[red]No cached token for '{Markup.Escape(account.Alias)}'. Run 'trade token create --account {Markup.Escape(account.Alias)}' first.[/]"); return 3; }
+		if (cached == null)
+		{
+			AnsiConsole.MarkupLine($"[yellow]No cached token for '{Markup.Escape(account.Alias)}'.[/]");
+			AnsiConsole.MarkupLine($"  [dim]Tokens are only required for API keys created with 2FA enabled. If your key was created without 2FA,[/]");
+			AnsiConsole.MarkupLine($"  [dim]request signing alone authenticates every call and you can ignore this. To create a token anyway:[/]");
+			AnsiConsole.MarkupLine($"  [dim]  wa trade token create --account {Markup.Escape(account.Alias)}[/]");
+			return 0;
+		}
 
 		using var client = new WebullOpenApiClient(account);
 		WebullOpenApiClient.TokenCheckResult result;
