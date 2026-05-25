@@ -369,7 +369,12 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		var preview = previewResponse.Result;
 		var marginSummary = preview.TryGetMarginSummary();
 		var marginText = string.IsNullOrEmpty(marginSummary) ? "" : $"  {Markup.Escape(marginSummary)}";
-		AnsiConsole.MarkupLine($"[bold]Preview:[/] cost={TradeContext.FormatCurrency(preview.EstimatedCost)}  fees={TradeContext.FormatCurrency(preview.EstimatedTransactionFee)}{marginText}");
+		// Webull's preview returns `estimated_cost` as an unsigned notional (qty * 100 * net price). Disambiguate by side:
+		// BUY = debit (you pay), SELL = credit (you receive). Fees are returned for some previews (BUY) but omitted for
+		// others (SELL credits); when absent, say so explicitly so the reader doesn't read silence as "$0 fees".
+		var costLabel = side == "BUY" ? "debit" : "credit";
+		var feesText = string.IsNullOrEmpty(preview.EstimatedTransactionFee) ? "(not provided)" : TradeContext.FormatCurrency(preview.EstimatedTransactionFee);
+		AnsiConsole.MarkupLine($"[bold]Preview:[/] {costLabel}={TradeContext.FormatCurrency(preview.EstimatedCost)}  fees={Markup.Escape(feesText)}{marginText}");
 		if (s.Debug)
 			AnsiConsole.MarkupLine($"[dim]Preview response:[/] {Markup.Escape(previewResponse.RawJson)}");
 
