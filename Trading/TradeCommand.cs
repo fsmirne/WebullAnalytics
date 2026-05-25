@@ -563,6 +563,10 @@ internal sealed class TradeListSettings : TradeSubcommandSettings
 	[CommandOption("--debug")]
 	[Description("Print the raw JSON response from Webull instead of the formatted table.")]
 	public bool Debug { get; set; }
+
+	[CommandOption("--today")]
+	[Description("List ALL of today's orders (any status: FILLED, WORKING, CANCELLED, etc.) instead of just open/working ones. Uses /openapi/trade/orders/list-today.")]
+	public bool Today { get; set; }
 }
 
 internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
@@ -574,25 +578,26 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 
 		using var client = new WebullOpenApiClient(account);
 
-		if (s.Debug)
-		{
-			try
-			{
-				var raw = await client.ListOpenOrdersRawAsync(cancellation);
-				AnsiConsole.WriteLine(raw);
-				return 0;
-			}
-			catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
-		}
-
 		List<WebullOpenApiClient.OpenOrder> orders;
-		try { orders = await client.ListOpenOrdersAsync(cancellation); }
+		try
+		{
+			orders = s.Today
+				? await client.ListTodayOrdersAsync(cancellation)
+				: await client.ListOpenOrdersAsync(cancellation);
+		}
 		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]List failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
 		catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
 
-		if (orders.Count == 0) { AnsiConsole.MarkupLine("[dim]No open orders.[/]"); return 0; }
+		if (s.Debug)
+		{
+			AnsiConsole.WriteLine(System.Text.Json.JsonSerializer.Serialize(orders, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+			return 0;
+		}
 
-		AnsiConsole.MarkupLine($"[bold]{orders.Count} open order(s):[/]");
+		var label = s.Today ? "today's order(s)" : "open order(s)";
+		if (orders.Count == 0) { AnsiConsole.MarkupLine($"[dim]No {label}.[/]"); return 0; }
+
+		AnsiConsole.MarkupLine($"[bold]{orders.Count} {label}:[/]");
 		foreach (var o in orders)
 		{
 			var inner = o.Orders?.FirstOrDefault();

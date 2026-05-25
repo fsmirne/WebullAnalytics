@@ -241,10 +241,16 @@ internal sealed class WebullOpenApiClient : IDisposable
 	// /openapi/trade/order/history endpoint (7 days, rate-limited 2 req/2s) is a fallback if this
 	// per-day endpoint isn't supported on a given region; not currently used.
 
-	/// <summary>Iterates pages of today's orders (any status) and returns the flat list.</summary>
+	/// <summary>Returns today's orders (any status) from the broker. Pulls the /openapi/trade/order/
+	/// history endpoint (returns up to 7 days) and filters to today (ET) client-side. The endpoint
+	/// documents start_date/end_date params but they reject the yyyy-MM-dd format from our environment
+	/// with OAUTH_OPENAPI_PARAM_ERR — possibly account-tier or region-specific. Over-fetching 7 days
+	/// once per tick is fine; the daily order volume is small.</summary>
 	internal async Task<List<OpenOrder>> ListTodayOrdersAsync(CancellationToken ct = default)
 	{
 		const int pageSize = 100;
+		var etTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+		var todayEt = TimeZoneInfo.ConvertTime(DateTime.UtcNow, etTz).Date;
 		var all = new List<OpenOrder>();
 		string? cursor = null;
 		while (true)
@@ -255,14 +261,32 @@ internal sealed class WebullOpenApiClient : IDisposable
 				["page_size"] = pageSize.ToString(),
 			};
 			if (cursor != null) query["last_client_order_id"] = cursor;
-			var page = await GetAsync<List<OpenOrder>>("/openapi/trade/orders/list-today", query, ct);
+			var page = await GetAsync<List<OpenOrder>>("/openapi/trade/order/history", query, ct);
 			if (page.Count == 0) break;
 			all.AddRange(page);
 			if (page.Count < pageSize) break;
 			cursor = page[^1].ClientOrderId;
 			if (string.IsNullOrEmpty(cursor)) break;
 		}
-		return all;
+		return all.Where(co => IsToday(co, todayEt, etTz)).ToList();
+	}
+
+	/// <summary>Determines if an order from the broker's history list was placed today (ET). The
+	/// inner order has two timestamp fields: <c>place_time</c> is epoch milliseconds as a string,
+	/// <c>place_time_at</c> is ISO 8601 UTC. We prefer ISO when available because it's easier to
+	/// parse confidently; epoch is the fallback.</summary>
+	private static bool IsToday(OpenOrder combo, DateTime todayEtDate, TimeZoneInfo etTz)
+	{
+		var inner = combo.Orders?.FirstOrDefault();
+		if (inner == null) return false;
+		if (!string.IsNullOrEmpty(inner.PlaceTimeAt) && DateTime.TryParse(inner.PlaceTimeAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var iso))
+			return TimeZoneInfo.ConvertTime(iso, etTz).Date == todayEtDate;
+		if (!string.IsNullOrEmpty(inner.PlaceTime) && long.TryParse(inner.PlaceTime, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var ms))
+		{
+			var dt = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
+			return TimeZoneInfo.ConvertTime(dt, etTz).Date == todayEtDate;
+		}
+		return false;
 	}
 
 	// ─── Order detail ─────────────────────────────────────────────────────────
