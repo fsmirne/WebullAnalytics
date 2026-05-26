@@ -57,6 +57,7 @@ class Program
 	internal const string ApiConfigPath = "data/api-config.json";
 	internal const string OrdersPath = "data/orders.jsonl";
 	internal const string AppConfigPath = "data/config.json";
+	internal const string DerivativeIdsPath = "data/derivative-ids.json";
 
 	/// <summary>
 	/// Resolves a path relative to the executable's directory. Absolute paths are returned as-is.
