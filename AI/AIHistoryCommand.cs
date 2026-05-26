@@ -41,6 +41,18 @@ internal sealed class AIHistorySettings : CommandSettings
 	[Description("One-time bootstrap: import a text file of SPX query-mini rows (one per line, `ts,o,c,h,l,prevClose,vol,vwap` format) sniffed from Webull's web app and merge with SPY ext-hours pulled per-day from the API. Used to load 2 years of historical SPX intraday — Webull's chart endpoint requires per-URL x-s signatures we can't forge, so deep history is captured via a browser console sniffer that records the chart's own signed requests. SPY ext-hours doesn't need signatures and is fetched here.")]
 	public string? ImportWebullSpxFile { get; set; }
 
+	[CommandOption("--options")]
+	[Description("Backfill per-contract option minute bars (with IV) instead of the daily/intraday underlying caches. Iterates `data/derivative-ids.json` (populated by every live chain fetch), filters to the given ticker's root, and writes one CSV per contract to `data/options/<root>/<expiry>/<occ>.csv`. Skips contracts that already have a CSV on disk. Mutually exclusive with --audit and --import-webull-spx.")]
+	public bool Options { get; set; }
+
+	[CommandOption("--force")]
+	[Description("With --options: drop any existing CSV and refetch from scratch. Default (without --force) is to merge by timestamp — re-runs pick up new minutes without losing existing ones. Without --options: no effect.")]
+	public bool Force { get; set; }
+
+	[CommandOption("--all")]
+	[Description("With --options: backfill every registry entry matching the ticker (full chain — typically tens of thousands of strikes including illiquid ones the bot never touched). Without this flag, the backfill defaults to contracts that appear in `ai-proposals.jsonl` or `orders.jsonl` — i.e. legs the bot actually picked or that you manually traded. Without --options: no effect.")]
+	public bool All { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("ticker is required");
@@ -49,6 +61,10 @@ internal sealed class AIHistorySettings : CommandSettings
 			return ValidationResult.Error("--audit and --lookback-years are mutually exclusive: audit derives its window from on-disk CSVs, so a lookback override would silently be ignored.");
 		if (Audit && !string.IsNullOrEmpty(ImportWebullSpxFile))
 			return ValidationResult.Error("--audit and --import-webull-spx are mutually exclusive.");
+		if (Options && Audit)
+			return ValidationResult.Error("--options and --audit are mutually exclusive.");
+		if (Options && !string.IsNullOrEmpty(ImportWebullSpxFile))
+			return ValidationResult.Error("--options and --import-webull-spx are mutually exclusive.");
 		if (!string.IsNullOrEmpty(ImportWebullSpxFile) && !File.Exists(ImportWebullSpxFile))
 			return ValidationResult.Error($"--import-webull-spx: file not found at '{ImportWebullSpxFile}'");
 		return ValidationResult.Success();
@@ -83,6 +99,11 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			return await ImportSniffedSpxAsync(ticker, settings.ImportWebullSpxFile, cancellation);
 		}
 
+		if (settings.Options)
+		{
+			return await AIHistoryOptionsBackfill.RunAsync(ticker, settings.Force, settings.All, cancellation);
+		}
+
 		AnsiConsole.MarkupLine($"[bold]Fetching history for {Markup.Escape(ticker)}[/]");
 
 		var bars = new HistoricalBarCache();
@@ -114,6 +135,13 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// cutoff), and `wa ai watch` always exits before 5pm. So if the user doesn't run an `analyze`
 		// command in the evening, the cache stalls.
 		await RefreshSentimentCacheAsync(earliest, asOf, cancellation);
+
+		// Per-contract option backfill is opt-in via --options (it's a different lifecycle — driven by
+		// the live-grown derivative-id registry, not by a lookback window). Surface a hint so the user
+		// discovers it once they have contracts queued up.
+		var pendingOptions = AIHistoryOptionsBackfill.CountUnbackfilledContracts(ticker);
+		if (pendingOptions > 0)
+			AnsiConsole.MarkupLine($"  options: [yellow]{pendingOptions} contract(s) in registry not yet backfilled[/] — run `wa ai history {Markup.Escape(ticker)} --options` to pull per-contract minute bars");
 
 		AnsiConsole.MarkupLine("[dim]Done. Run `wa ai backtest " + Markup.Escape(ticker) + "` to use this data.[/]");
 		return 0;
