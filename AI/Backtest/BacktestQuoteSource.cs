@@ -14,6 +14,22 @@ namespace WebullAnalytics.AI.Backtest;
 /// </summary>
 internal sealed class BacktestQuoteSource : IQuoteSource
 {
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
+	/// <summary>Converts an ET wall-clock <see cref="DateTime"/> to the UTC instant for cache lookup,
+	/// preserving the time-of-day. The historical option bars are keyed by UTC minute, and callers
+	/// pass <paramref name="asOf"/> at the minute they're evaluating — 09:30 ET for the daily-step
+	/// open pass, but any minute (e.g. 10:32 ET) for the intraday opener's per-minute walk. Both
+	/// paths must end up looking up the bar at the SAME wall-clock minute, not always the day's
+	/// open. The previous implementation forced 09:30 regardless of <paramref name="asOf"/>'s time
+	/// component, which meant the intraday opener was repeatedly fetching the 09:30 bar at every
+	/// minute it evaluated — a silent miss that always fell through to synthetic.</summary>
+	private static DateTimeOffset ToUtcMinute(DateTime asOf)
+	{
+		var et = DateTime.SpecifyKind(asOf, DateTimeKind.Unspecified);
+		return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(et, NyTz), TimeSpan.Zero);
+	}
+
 	// Penny-pilot index ETFs: minimum half-spread $0.005 ($0.01 total), plus 0.5% of mid.
 	private const decimal IndexHalfSpreadFloor = 0.005m;
 	private const decimal IndexHalfSpreadPct = 0.005m;
@@ -47,16 +63,24 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	private readonly BacktestIVProvider _iv;
 	private readonly double _riskFreeRate;
 	private readonly IReadOnlyDictionary<string, decimal>? _spotOverrides;
+	private readonly HistoricalOptionBarCache? _optionBars;
 
 	/// <param name="spotOverrides">When supplied for a ticker, replaces the bar.open lookup for that
 	/// ticker. Used by <c>ai scan --theoretical</c> to evaluate a hypothetical spot at an asOf for which
 	/// no historical bar exists (next-business-day previews) or a stress scenario at any spot level.</param>
-	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double riskFreeRate, IReadOnlyDictionary<string, decimal>? spotOverrides = null)
+	/// <param name="optionBars">Optional cache of captured per-contract minute bars from
+	/// <c>data/options/&lt;root&gt;/&lt;expiry&gt;/&lt;occ&gt;.csv</c>. When supplied and a bar exists for the
+	/// leg's minute, the bar's close is used as the theoretical mid and the bar's IV (when present)
+	/// replaces the VIX-anchored synthetic IV. Bid/ask is still derived from the half-spread model
+	/// — the option chart endpoint reports trade prints, not NBBO. Legs without a captured bar fall
+	/// through to the Black-Scholes path unchanged, so partial coverage is fine.</param>
+	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double riskFreeRate, IReadOnlyDictionary<string, decimal>? spotOverrides = null, HistoricalOptionBarCache? optionBars = null)
 	{
 		_bars = bars;
 		_iv = iv;
 		_riskFreeRate = riskFreeRate;
 		_spotOverrides = spotOverrides;
+		_optionBars = optionBars;
 	}
 
 	public async Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers, CancellationToken cancellation, QuoteOverrides overrides = default)
@@ -134,6 +158,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		}
 
 		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		var asOfUtc = ToUtcMinute(asOf);
 		foreach (var (sym, parsed) in parsedSymbols)
 		{
 			if (!underlyings.TryGetValue(parsed.Root, out var spot)) continue;
@@ -141,9 +166,29 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			atmByRootDte.TryGetValue((parsed.Root, dte), out var atm);
 			smileScaleByRoot.TryGetValue(parsed.Root, out var smileScale);
 
+			// Prefer captured per-minute bar when available: bar close is the most accurate mid we have
+			// for the leg at this exact minute, and the bar's reported IV is the exchange-published
+			// per-strike skew rather than our parametric smile approximation. Volume comes for free.
+			var capturedBar = _optionBars?.GetBar(sym, asOfUtc);
 			decimal price;
 			decimal? iv = null;
-			if (atm.HasValue)
+			long? volume = null;
+			if (capturedBar != null && capturedBar.Close > 0m)
+			{
+				price = capturedBar.Close;
+				if (capturedBar.ImpliedVolatility.HasValue && capturedBar.ImpliedVolatility.Value > 0m)
+				{
+					// CSV stores IV as percentage (e.g. 15.74 = 15.74%); internal representation is the
+					// decimal fraction (0.1574). Mirror the conversion BacktestIVProvider does for VIX.
+					iv = capturedBar.ImpliedVolatility.Value / 100m;
+				}
+				else if (atm.HasValue)
+				{
+					iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
+				}
+				if (capturedBar.Volume > 0) volume = capturedBar.Volume;
+			}
+			else if (atm.HasValue)
 			{
 				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
 				// 0DTE TTE: when the intraday opener loop passes a per-call overrides.ZeroDteTimeYears,
@@ -170,7 +215,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				Ask: ask,
 				Change: null,
 				PercentChange: null,
-				Volume: null,
+				Volume: volume,
 				OpenInterest: null,
 				ImpliedVolatility: iv,
 				HistoricalVolatility: null,
@@ -213,7 +258,13 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	/// without disturbing the cache or refetching ATM IV (passed in by the caller). Non-0DTE legs
 	/// use the standard <c>dte/365</c> TTE — a few hours of intraday adjustment is negligible at
 	/// 7+ DTE. <paramref name="atmByDte"/> maps each leg's DTE to the ATM IV at that term; missing
-	/// keys fall back to the longest-DTE entry (defensive — caller should pre-populate).</summary>
+	/// keys fall back to the longest-DTE entry (defensive — caller should pre-populate).
+	///
+	/// <para>Does not consult <see cref="_optionBars"/>: the intraday-trigger pass evaluates at the
+	/// day's bar.High / bar.Low extremes, and the daily-step simulator doesn't track which minute
+	/// those extremes occurred at. Without a minute timestamp we can't pick the right captured bar,
+	/// so this path stays on the parametric (Black-Scholes + smile) model. The open-pass in
+	/// <see cref="GetQuotesAsync"/> does use captured bars where available.</para></summary>
 	internal IReadOnlyDictionary<string, OptionContractQuote> PriceAtSpot(
 		DateTime asOf, IEnumerable<string> optionSymbols, decimal spot,
 		IReadOnlyDictionary<int, decimal> atmByDte, decimal smileScale, double zeroDteTimeYears)

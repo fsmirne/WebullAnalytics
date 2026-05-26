@@ -794,8 +794,8 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		}
 	}
 
-	/// <summary>"Complete" = file exists, has the 09:30 ET opening bar, and ends at one of the two
-	/// expected NYSE session closes:
+	/// <summary>"Complete" = file exists, has an opening bar within the first 5 minutes of RTH
+	/// (09:30–09:34 ET), and ends at one of the two expected NYSE session closes:
 	/// <list type="bullet">
 	///   <item>Regular full session: ≥380 RTH bars with the 15:59 ET bar present (closes 16:00).</item>
 	///   <item>Early-close session: ≥200 RTH bars with the last bar between 12:59 and 13:00 ET
@@ -803,7 +803,14 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	/// </list>
 	/// Without the early-close branch, half-days never pass this check, never auto-seal in the audit,
 	/// and stay flagged as "partial" forever — see the SPY audit on 2026-05-23 which reported
-	/// 2025-07-03, 2025-11-28, 2025-12-24 as partial when they were actually complete given the close.</summary>
+	/// 2025-07-03, 2025-11-28, 2025-12-24 as partial when they were actually complete given the close.
+	///
+	/// <para>The "first 5 minutes of RTH" tolerance (instead of strict 09:30) generalizes the check
+	/// to feeds where the first print isn't at exactly the bell — per memory
+	/// <c>webull-first-bar-of-day-is-0931</c>, Webull's option chart endpoint stamps the first bar
+	/// at 09:31 ET. Underlying intraday CSVs currently always have a 09:30 print (cash index ticks
+	/// continuously), so this doesn't change current behavior; it just makes the audit safe to point
+	/// at option CSVs later without false-negatives.</para></summary>
 	private static bool LooksComplete(string path)
 	{
 		if (!File.Exists(path)) return false;
@@ -811,8 +818,9 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 		const int regularCloseMinute = 15 * 60 + 59;   // 15:59 ET — last full minute before 16:00 close
 		const int earlyCloseMinute = 12 * 60 + 59;     // 12:59 ET — last full minute before 13:00 close
+		const int openWindowEndMinute = 9 * 60 + 34;   // 09:34 ET — last minute that still counts as "open"
 		int rthCount = 0;
-		bool has0930 = false;
+		bool hasOpening = false;
 		int lastRthMinute = -1;
 		foreach (var b in bars)
 		{
@@ -820,11 +828,11 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			var minuteOfDay = et.Hour * 60 + et.Minute;
 			if (minuteOfDay < 9 * 60 + 30 || minuteOfDay >= 16 * 60) continue;
 			rthCount++;
-			if (et.Hour == 9 && et.Minute == 30) has0930 = true;
+			if (minuteOfDay <= openWindowEndMinute) hasOpening = true;
 			if (minuteOfDay > lastRthMinute) lastRthMinute = minuteOfDay;
 		}
 
-		if (!has0930) return false;
+		if (!hasOpening) return false;
 
 		// Regular session: last bar at 15:59 ET (some files may have a 16:00 print stamped as the close).
 		if (lastRthMinute >= regularCloseMinute && rthCount >= 380) return true;
