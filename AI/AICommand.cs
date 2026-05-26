@@ -752,16 +752,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Print a per-step timing breakdown (rules, settle, opener minute loop, intraday triggers, MTM) at the end of the run. Useful when a recent change made the backtest noticeably slower.")]
 	public bool Profile { get; set; }
 
-	[CommandOption("--discover")]
-	[Description("Write every opened position's OCC symbols to `data/options-discovery/<ticker>.jsonl` as a side effect. Used by `wa ai history <ticker> --options` to learn which historical contracts to backfill from massive.com (Polygon mirror); without --discover the backfill only sees contracts in the live derivative-id registry. The backtest itself still runs and produces normal output — the discovery log is purely additive.")]
-	public bool Discover { get; set; }
-
-	[CommandOption("--discover-top-k <N>")]
-	[Description("With --discover: capture the top-K candidates the evaluator considered each day (by FinalScore), not just the one that opened. Lets a single --discover pass cover OCCs that alternative parameter settings would pick. Set to 1 for the legacy 1/day behavior. Default: 20.")]
-	public int DiscoverTopK { get; set; } = 20;
-
 	[CommandOption("--bias-drift <VALUE>")]
-	[Description("Override opener.weights.biasDrift for this run (after the per-ticker config merge). Useful for sweeping directional-bias regimes via --discover without maintaining separate config files. Range typically 1.0–1.5 for SPXW.")]
+	[Description("Override opener.weights.biasDrift for this run (after the per-ticker config merge). Useful for ad-hoc parameter exploration without copying the config file. Range typically 1.0–1.5 for SPXW.")]
 	public decimal? BiasDriftOverride { get; set; }
 
 	[CommandOption("--min-score-to-open <VALUE>")]
@@ -790,7 +782,6 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 		if (Smile != "off" && Smile != "static")
 			return ValidationResult.Error($"--smile: must be 'off' or 'static', got '{Smile}'");
 		if (TopPerStep < 1) return ValidationResult.Error($"--top-per-step: must be ≥ 1, got {TopPerStep}");
-		if (DiscoverTopK < 1) return ValidationResult.Error($"--discover-top-k: must be ≥ 1, got {DiscoverTopK}");
 		if (BiasDriftOverride.HasValue && BiasDriftOverride.Value < 0m)
 			return ValidationResult.Error($"--bias-drift: must be ≥ 0, got {BiasDriftOverride}");
 		if (IntradayTapeWeightOverride.HasValue && (IntradayTapeWeightOverride.Value < 0m || IntradayTapeWeightOverride.Value > 1m))
@@ -902,7 +893,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, discover: settings.Discover, discoverTopKPerDay: settings.DiscoverTopK);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile);
 
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}");
 		AnsiConsole.WriteLine();
