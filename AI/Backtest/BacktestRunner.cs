@@ -34,12 +34,14 @@ internal sealed class BacktestRunner
 	private readonly bool _discover;
 	private readonly HashSet<string> _discoveredOccs = new(StringComparer.OrdinalIgnoreCase);
 
-	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
-	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET. Expirations
-	// settle at the day's close (bar.Close intrinsic), so they're stamped at 16:00 ET. Exposing real
-	// times on each fill makes the ledger directly verifiable against historical OHLC bars — pre-fix,
-	// every fill said 15:45 ET, which matched neither the open mid nor the close intrinsic actually used.
-	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
+	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open of
+	// the first RTH minute (BacktestQuoteSource uses the day's open as spot), so they're stamped at
+	// 09:31 ET — Webull stamps the first RTH bar at 09:31 (the 09:30:00 minute is the last pre-market
+	// print; the 09:30:00→09:31:00 bar that contains the auction-open price is timestamped 09:31:00).
+	// On gap days the difference is material: e.g. 2026-05-22 had pre-market close 7479.08 at 09:30
+	// vs auction-cleared open 7468.82 at 09:31, a $10 swing. Expirations settle at the day's close
+	// (bar.Close intrinsic), stamped at 16:00 ET. See memory `webull-first-bar-of-day-is-0931`.
+	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(31);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
 	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false)
@@ -686,7 +688,7 @@ internal sealed class BacktestRunner
 	/// must execute the legacy 09:30 single-call path using <c>LegacyProposals</c>.</summary>
 	private readonly record struct DailyOpenScanResult(bool HasIntraday, IReadOnlyList<OpenProposal> LegacyProposals);
 
-	/// <summary>Scans each minute of the trading day (09:30 → 16:00 ET) and opens the first proposal
+	/// <summary>Scans each minute of the trading day (09:31 → 16:00 ET — see <see cref="MarketOpenTime"/>) and opens the first proposal
 	/// that clears the score + cash gates. Spot is taken from the per-minute close of the configured
 	/// ticker's intraday CSV; 0DTE TTE shrinks linearly to 16:00. One open per day max (early-exit on
 	/// first fill). Returns <c>HasIntraday=false</c> when minute data is missing for any ticker —
@@ -698,10 +700,11 @@ internal sealed class BacktestRunner
 		var (postCash, postAccount) = await _positions.GetAccountStateAsync(step, cancellation);
 		var postSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Indicators.TechnicalFilter, step, cancellation);
 
-		// Load each ticker's minute bars for the RTH window. Convert step.Date + (09:30 ET, 16:00 ET)
+		// Load each ticker's minute bars for the RTH window. Convert step.Date + (09:31 ET, 16:00 ET)
 		// to UTC for the cache call — the cache returns bars in UTC, but the on-disk grouping is by
-		// NY date, so any ET-correct window spans the right file.
-		var openEt = new DateTime(step.Date.Year, step.Date.Month, step.Date.Day, 9, 30, 0, DateTimeKind.Unspecified);
+		// NY date, so any ET-correct window spans the right file. Window starts at 09:31 (first RTH
+		// minute) to exclude the 09:30 last-pre-market bar; see `MarketOpenTime`.
+		var openEt = new DateTime(step.Date.Year, step.Date.Month, step.Date.Day, 9, 31, 0, DateTimeKind.Unspecified);
 		var closeEt = new DateTime(step.Date.Year, step.Date.Month, step.Date.Day, 16, 0, 0, DateTimeKind.Unspecified);
 		var openUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(openEt, NyTz), TimeSpan.Zero);
 		var closeUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(closeEt, NyTz), TimeSpan.Zero);
