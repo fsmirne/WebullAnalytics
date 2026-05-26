@@ -62,9 +62,9 @@ public class AIHistoryOptionsBackfillTests : IDisposable
 	}
 
 	[Fact]
-	public void LoadTouchedSymbolsFromPaths_ExtractsFromProposalsAndOrders()
+	public void LoadTouchedSymbolsFromPaths_ExtractsFromProposalsOrdersAndDiscovery()
 	{
-		// One proposal (SPXW LongCall) and one order (GME call). Should yield exactly those two.
+		// Proposals contribute 2 OCCs (SPXW + GME), orders contributes 1 (GME), discovery 1 (SPXW).
 		var proposalsPath = Path.Combine(_tmpDir, "ai-proposals.jsonl");
 		File.WriteAllText(proposalsPath, """
 			{"type":"open","ticker":"SPXW","legs":[{"action":"buy","symbol":"SPXW260526C07530000","qty":2}]}
@@ -74,12 +74,17 @@ public class AIHistoryOptionsBackfillTests : IDisposable
 		File.WriteAllText(ordersPath, """
 			{"orderList":[{"tickerType":"OPTION","symbol":"GME $26.50","subSymbol":"29 May 26 Call 100"}]}
 			""");
+		var discoveryPath = Path.Combine(_tmpDir, "SPXW.jsonl");
+		File.WriteAllText(discoveryPath, """
+			{"occ":"SPXW260522C07500000","ticker":"SPXW"}
+			""");
 
-		var spxw = AIHistoryOptionsBackfill.LoadTouchedSymbolsFromPaths(proposalsPath, ordersPath, "SPXW");
-		Assert.Single(spxw);
+		var spxw = AIHistoryOptionsBackfill.LoadTouchedSymbolsFromPaths(proposalsPath, ordersPath, discoveryPath, "SPXW");
+		Assert.Equal(2, spxw.Count); // one from proposals, one from discovery
 		Assert.Contains("SPXW260526C07530000", spxw);
+		Assert.Contains("SPXW260522C07500000", spxw);
 
-		var gme = AIHistoryOptionsBackfill.LoadTouchedSymbolsFromPaths(proposalsPath, ordersPath, "GME");
+		var gme = AIHistoryOptionsBackfill.LoadTouchedSymbolsFromPaths(proposalsPath, ordersPath, discoveryPath, "GME");
 		Assert.Equal(2, gme.Count); // one from proposals, one from orders
 		Assert.Contains("GME260529C00027500", gme);
 		Assert.Contains("GME260529C00026500", gme);
@@ -95,8 +100,9 @@ public class AIHistoryOptionsBackfillTests : IDisposable
 			{"type":"open","ticker":"SPXW","legs":[{"action":"buy","symbol":"SPXW260526P07400000","qty":1}]}
 			""");
 		var ordersPath = Path.Combine(_tmpDir, "orders.jsonl");
+		var discoveryPath = Path.Combine(_tmpDir, "missing-discovery.jsonl");
 
-		var symbols = AIHistoryOptionsBackfill.LoadTouchedSymbolsFromPaths(proposalsPath, ordersPath, "SPXW");
+		var symbols = AIHistoryOptionsBackfill.LoadTouchedSymbolsFromPaths(proposalsPath, ordersPath, discoveryPath, "SPXW");
 		Assert.Single(symbols);
 		Assert.Contains("SPXW260526P07400000", symbols);
 	}

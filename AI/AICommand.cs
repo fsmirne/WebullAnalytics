@@ -749,6 +749,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Print a per-step timing breakdown (rules, settle, opener minute loop, intraday triggers, MTM) at the end of the run. Useful when a recent change made the backtest noticeably slower.")]
 	public bool Profile { get; set; }
 
+	[CommandOption("--discover")]
+	[Description("Write every opened position's OCC symbols to `data/options-discovery/<ticker>.jsonl` as a side effect. Used by `wa ai history <ticker> --options` to learn which historical contracts to backfill from massive.com (Polygon mirror); without --discover the backfill only sees contracts in the live derivative-id registry. The backtest itself still runs and produces normal output — the discovery log is purely additive.")]
+	public bool Discover { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -843,7 +847,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, discover: settings.Discover);
 
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}");
 		AnsiConsole.WriteLine();
