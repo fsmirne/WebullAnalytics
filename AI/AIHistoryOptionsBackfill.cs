@@ -20,6 +20,13 @@ namespace WebullAnalytics.AI;
 /// <para>Idempotent: skips contracts whose CSV already exists unless <c>--force</c> is set. So
 /// re-running the command after a partial backfill picks up where it left off without re-fetching
 /// completed contracts.</para></summary>
+/// <summary>Which upstream serves a given contract's per-minute bars. Webull is fast and unrestricted
+/// but only works while the contract is live (<see cref="DerivativeIdRegistry"/> resolves OCC → id
+/// at chain-fetch time and the resolution is lost after expiry). Massive (Polygon mirror) serves
+/// expired contracts but is rate-limited to 5 req/min at the basic tier and ships no IV. Each
+/// contract picks one source for its lifetime in the cache.</summary>
+internal enum OptionDataSource { Webull, Massive }
+
 internal static class AIHistoryOptionsBackfill
 {
 	private static readonly TimeSpan DefaultPace = TimeSpan.FromMilliseconds(200);
@@ -51,68 +58,82 @@ internal static class AIHistoryOptionsBackfill
 		}
 
 		var registry = DerivativeIdRegistry.Snapshot();
-		if (registry.Count == 0)
-		{
-			AnsiConsole.MarkupLine($"  [yellow]derivative-id registry is empty[/] — run `wa ai watch` or `wa analyze` first to populate it from a live chain fetch");
-			return 0;
-		}
 
-		// Filter registry to contracts whose root matches the requested ticker. The registry is keyed
-		// by OCC symbol, so we parse each one and compare roots case-insensitively.
-		var matches = new List<(string Occ, long DerivativeId, OptionParsed Parsed)>();
-		foreach (var (occ, id) in registry)
+		// Default mode collects touched OCCs from proposals/orders/discovery, then routes each one
+		// to Webull (live, in registry) or massive (expired, not in registry). --all keeps the legacy
+		// behavior of pulling every Webull-registry entry for this ticker — useful for ingesting the
+		// full live chain, but most strikes are illiquid wings the strategy never picks.
+		List<(string Occ, long? DerivativeId, OptionParsed Parsed)> matches;
+		if (all)
 		{
-			var parsed = ParsingHelpers.ParseOptionSymbol(occ);
-			if (parsed == null) continue;
-			if (!string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
-			matches.Add((occ, id, parsed));
+			matches = new();
+			foreach (var (occ, id) in registry)
+			{
+				var parsed = ParsingHelpers.ParseOptionSymbol(occ);
+				if (parsed == null) continue;
+				if (!string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+				matches.Add((occ, id, parsed));
+			}
+			AnsiConsole.MarkupLine($"  --all: keeping {matches.Count} contract(s) from full registry");
+		}
+		else
+		{
+			var touched = LoadTouchedSymbols(ticker);
+			matches = new(touched.Count);
+			foreach (var occ in touched)
+			{
+				var parsed = ParsingHelpers.ParseOptionSymbol(occ);
+				if (parsed == null) continue;
+				if (!string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+				registry.TryGetValue(occ, out var id);
+				matches.Add((occ, id > 0 ? id : null, parsed));
+			}
+			AnsiConsole.MarkupLine($"  filter: keeping {matches.Count} contract(s) from proposals/orders/discovery (use --all to backfill the full live chain)");
 		}
 
 		if (matches.Count == 0)
 		{
-			AnsiConsole.MarkupLine($"  [yellow]no {Markup.Escape(ticker)} contracts in derivative-id registry[/] ({registry.Count} total entries, none with root '{Markup.Escape(ticker)}')");
+			AnsiConsole.MarkupLine($"  [yellow]nothing to backfill for {Markup.Escape(ticker)}[/]");
 			return 0;
-		}
-
-		// Default: filter down to contracts the bot has actually proposed or that were traded. This is
-		// usually <100 symbols for a few weeks of live runs, compared to ~20K for the full chain. The
-		// non-touched strikes are mostly illiquid wings the live bot would never pick, so backfilling
-		// them is bandwidth + time we'd never use. Override with --all to ingest the full chain.
-		if (!all)
-		{
-			var touched = LoadTouchedSymbols(ticker);
-			var before = matches.Count;
-			matches = matches.Where(m => touched.Contains(m.Occ)).ToList();
-			AnsiConsole.MarkupLine($"  filter: keeping {matches.Count}/{before} contract(s) that appear in ai-proposals.jsonl / orders.jsonl (use --all to backfill the full chain)");
-			if (matches.Count == 0)
-			{
-				AnsiConsole.MarkupLine($"  [yellow]no touched contracts to backfill[/] — either nothing in proposals/orders for {Markup.Escape(ticker)}, or none of those symbols are in the registry yet");
-				return 0;
-			}
 		}
 
 		var optionsRoot = Path.Combine(Program.ResolvePath("data/options"), ticker.ToUpperInvariant());
 
-		// Every match is fetched — merge-on-rerun is the default so re-running picks up new minutes
-		// without losing existing ones. Pre-classify into "fresh" (no CSV on disk) vs "merge" (CSV
-		// exists and --force not set) so the progress output can report each category accurately;
-		// merge contracts whose fetch returns nothing-new get reported as "unchanged" rather than
-		// "written" so users can see the run was actually idempotent on a no-change pass.
-		var work = new List<(string Occ, long DerivativeId, OptionParsed Parsed, string CsvPath, bool MergeExisting)>();
+		// Classify each match: Webull (has derivativeId) vs Massive (needs OCC fallback). Massive requires
+		// an apiKey — when missing we skip those contracts with a note instead of failing the run, so a
+		// user without a massive subscription still gets the Webull half. Merge semantics: if the CSV
+		// exists and --force isn't set, the fetched bars merge with what's on disk (preserves any captured
+		// IV the existing file has, which Webull-source CSVs carry and massive-source CSVs don't).
+		var work = new List<(string Occ, long? DerivativeId, OptionParsed Parsed, string CsvPath, bool MergeExisting, OptionDataSource Source)>();
+		var skippedNoMassive = 0;
+		var hasMassiveKey = !string.IsNullOrWhiteSpace(apiConfig!.MassiveApiKey);
 		foreach (var (occ, id, parsed) in matches)
 		{
 			var csvPath = BuildCsvPath(optionsRoot, parsed, occ);
 			var mergeExisting = !force && File.Exists(csvPath);
-			work.Add((occ, id, parsed, csvPath, mergeExisting));
+			if (id.HasValue)
+			{
+				work.Add((occ, id, parsed, csvPath, mergeExisting, OptionDataSource.Webull));
+			}
+			else if (hasMassiveKey)
+			{
+				work.Add((occ, null, parsed, csvPath, mergeExisting, OptionDataSource.Massive));
+			}
+			else
+			{
+				skippedNoMassive++;
+			}
 		}
-		var freshCount = work.Count(w => !w.MergeExisting);
-		var mergeCount = work.Count(w => w.MergeExisting);
-		AnsiConsole.MarkupLine($"  registry matches: {matches.Count} ({freshCount} fresh, {mergeCount} merge with existing{(force ? "; --force overrides merge" : "")})");
+		var webullCount = work.Count(w => w.Source == OptionDataSource.Webull);
+		var massiveCount = work.Count(w => w.Source == OptionDataSource.Massive);
+		AnsiConsole.MarkupLine($"  routing: {webullCount} via Webull (live), {massiveCount} via massive.com (expired)" + (skippedNoMassive > 0 ? $", [yellow]{skippedNoMassive} skipped[/] (no MassiveApiKey)" : ""));
 
-		// Order by expiry then strike for predictable progress output — the user can tell at a glance
-		// which expiration window the backfill is currently chewing through.
+		// Order by source then expiry+strike. Webull-first means the fast path completes before the
+		// rate-limited massive path begins — user gets feedback sooner on what's working.
 		work.Sort((a, b) =>
 		{
+			var s = a.Source.CompareTo(b.Source);
+			if (s != 0) return s;
 			var c = a.Parsed.ExpiryDate.CompareTo(b.Parsed.ExpiryDate);
 			return c != 0 ? c : a.Parsed.Strike.CompareTo(b.Parsed.Strike);
 		});
@@ -123,20 +144,30 @@ internal static class AIHistoryOptionsBackfill
 		var emptyResponses = new List<string>();
 		var failures = new List<(string Occ, string Reason)>();
 		var index = 0;
-		foreach (var (occ, id, parsed, csvPath, mergeExisting) in work)
+		foreach (var (occ, id, parsed, csvPath, mergeExisting, source) in work)
 		{
 			cancellation.ThrowIfCancellationRequested();
-			if (index > 0) await Task.Delay(DefaultPace, cancellation);
+			// Webull path uses a small client-side pace; Massive has its own rolling-window throttle.
+			if (index > 0 && source == OptionDataSource.Webull) await Task.Delay(DefaultPace, cancellation);
 			index++;
 
 			IReadOnlyList<OptionMinuteBar> bars;
 			try
 			{
-				// No anchor → endpoint returns the most-recent 800 bars for this contract. For 0DTE
-				// SPXW that's plenty (a full RTH day = 390 minutes). For longer-dated contracts it
-				// covers ~2 trading days; we can extend with a paginated walk later if we ever need
-				// long-DTE backtests with full intraday history per contract.
-				bars = await WebullChartsClient.FetchOptionContractMinuteBarsAsync(apiConfig!, id, 800, anchorUnixSec: null, cancellation);
+				if (source == OptionDataSource.Webull)
+				{
+					bars = await WebullChartsClient.FetchOptionContractMinuteBarsAsync(apiConfig!, id!.Value, 800, anchorUnixSec: null, cancellation);
+				}
+				else
+				{
+					// Polygon coverage window: from 30 days before expiry through expiry. SPXW weeklies
+					// list ~T-1 week so 30d is generous headroom; SPX monthlies list weeks earlier,
+					// also fine. Keeping the window tight bounds the response size to ~1-2 pages of
+					// 50k-row aggregates for typical SPXW intraday density.
+					var listFrom = DateOnly.FromDateTime(parsed.ExpiryDate.AddDays(-30));
+					var expireTo = DateOnly.FromDateTime(parsed.ExpiryDate);
+					bars = await MassivePolygonClient.FetchOptionMinuteAggregatesAsync(apiConfig!.MassiveApiKey, occ, listFrom, expireTo, cancellation);
+				}
 			}
 			catch (Exception ex) when (ex is not OperationCanceledException)
 			{
@@ -243,17 +274,44 @@ internal static class AIHistoryOptionsBackfill
 		LoadTouchedSymbolsFromPaths(
 			Program.ResolvePath("data/ai-proposals.jsonl"),
 			Program.ResolvePath(Program.OrdersPath),
+			Path.Combine(Program.ResolvePath("data/options-discovery"), ticker.ToUpperInvariant() + ".jsonl"),
 			ticker);
 
 	/// <summary>Path-injectable variant of <see cref="LoadTouchedSymbols(string)"/>. Production code goes
 	/// through the no-args overload; tests pass their own tmp paths so they don't read the user's
 	/// prod data and don't race against a running watch loop.</summary>
-	internal static HashSet<string> LoadTouchedSymbolsFromPaths(string proposalsPath, string ordersPath, string ticker)
+	internal static HashSet<string> LoadTouchedSymbolsFromPaths(string proposalsPath, string ordersPath, string discoveryPath, string ticker)
 	{
 		var touched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		CollectFromProposals(proposalsPath, ticker, touched);
 		CollectFromOrders(ordersPath, ticker, touched);
+		CollectFromDiscovery(discoveryPath, ticker, touched);
 		return touched;
+	}
+
+	/// <summary>Walks the per-ticker discovery log written by <c>wa ai backtest --discover</c> and adds
+	/// any OCC whose root matches. The log holds the union of OCCs picked across all past backtest
+	/// runs — a strategy-footprint catalog that grows as the user explores different windows.</summary>
+	private static void CollectFromDiscovery(string path, string ticker, HashSet<string> touched)
+	{
+		if (!File.Exists(path)) return;
+		foreach (var line in ReadLinesShared(path))
+		{
+			if (string.IsNullOrWhiteSpace(line)) continue;
+			JsonDocument? doc = null;
+			try { doc = JsonDocument.Parse(line); }
+			catch (JsonException) { continue; }
+			using (doc)
+			{
+				if (!doc.RootElement.TryGetProperty("occ", out var el)) continue;
+				var occ = el.GetString();
+				if (string.IsNullOrWhiteSpace(occ)) continue;
+				var parsed = ParsingHelpers.ParseOptionSymbol(occ!);
+				if (parsed == null) continue;
+				if (!string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+				touched.Add(occ!);
+			}
+		}
 	}
 
 	/// <summary>Reads a file line-by-line tolerating concurrent writers. <c>File.ReadLines</c> opens with

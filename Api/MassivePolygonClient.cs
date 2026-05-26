@@ -178,6 +178,34 @@ internal static class MassivePolygonClient
 		return picked;
 	}
 
+	/// <summary>Fetches per-minute option-contract bars from Polygon's aggregates endpoint, using the
+	/// <c>O:&lt;OCC&gt;</c> ticker form (e.g. <c>O:SPXW260522C07500000</c>). Same auth, pagination, and
+	/// rate-limiting as <see cref="FetchMinuteAggregatesAsync"/> — option aggregates and stock aggregates
+	/// share the endpoint URL pattern. Returns <see cref="OptionMinuteBar"/> with <c>ImpliedVolatility</c>
+	/// always null: Polygon's aggregates response carries OHLCV but no per-bar IV. Callers that want IV
+	/// must layer on a separate model (e.g. the backtest falls back to VIX-anchored when bar.IV is null).
+	///
+	/// <para>Use cases: backfilling <em>expired</em> option contracts. Webull's chart endpoint requires
+	/// a <c>derivativeId</c> which is only available while a contract is live; once the contract expires
+	/// Webull no longer resolves its OCC. Polygon stores expired contracts (per memory <c>reference_massive_api</c>:
+	/// "SPXW lives under underlying_ticker=SPX with expired=true"), so this path covers everything from
+	/// the start of Polygon's history through to when the live <see cref="DerivativeIdRegistry"/> first
+	/// observed the contract.</para></summary>
+	internal static async Task<IReadOnlyList<OptionMinuteBar>> FetchOptionMinuteAggregatesAsync(
+		string apiKey,
+		string occSymbol,
+		DateOnly from,
+		DateOnly to,
+		CancellationToken cancellation)
+	{
+		var bars = await FetchMinuteAggregatesAsync(apiKey, "O:" + occSymbol, from, to, cancellation);
+		if (bars.Count == 0) return Array.Empty<OptionMinuteBar>();
+		var result = new List<OptionMinuteBar>(bars.Count);
+		foreach (var b in bars)
+			result.Add(new OptionMinuteBar(b.Timestamp, b.Open, b.High, b.Low, b.Close, b.Volume, ImpliedVolatility: null));
+		return result;
+	}
+
 	internal static (IReadOnlyList<MinuteBar> Bars, string? NextUrl) ParseAggregatesResponse(string json)
 	{
 		try
