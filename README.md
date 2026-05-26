@@ -631,7 +631,7 @@ The ticker is a required positional argument — every AI subcommand operates on
 
 #### Config Sections
 
-The config file has four top-level functional sections plus the usual top-level plumbing (`tickIntervalSeconds`, `positionSource`, `cashReserve`, `log`, `watch`).
+The config file has four top-level functional sections plus the usual top-level plumbing (`watch`, `positionSource`, `cashReserve`, `log`).
 
 **`indicators`** — pipeline-wide inputs read by BOTH the opener and the management rules. Centralized here so duplication is impossible.
 
@@ -664,7 +664,7 @@ The 12 scoring weights live under `opener.weights` (formerly flat `*Weight` fiel
 
 **`rules`** — management rule triggers and thresholds. Each rule's config holds only the gates specific to that rule (stop-loss multipliers, take-profit percentages, roll-specific thresholds). The `opportunisticRoll` block contains `bullishBlockThreshold` / `bearishBlockThreshold` — composite-bias score boundaries that block call rolls in extended-bullish setups and put rolls in extended-bearish setups.
 
-**`watch`** — long-running `wa ai watch` settings: auto-execute opt-in, tranche schedule for scaled closes, opener auto-execute caps.
+**`watch`** — long-running `wa ai watch` loop knobs. `tickIntervalSeconds` sets the poll cadence (also the off-hours sleep when waiting for the bell). `startTime` (optional, format `HH:mm` or `HH:mm:ss` ET) schedules the first tick — useful when you want orders placed a few seconds after 09:30 rather than at the exact bell; CLI `--start` overrides.
 
 #### Rules
 
@@ -781,7 +781,8 @@ ai scan only:
   --top <N>                Override opener.topNPerTicker from ai-config.json
 
 ai watch only:
-  --tick <seconds>         Override tickIntervalSeconds
+  --tick <seconds>         Override watch.tickIntervalSeconds
+  --start <HH:mm[:ss]>     Wait until this ET time before first tick. Overrides watch.startTime.
   --duration <duration>    Stop after a duration such as 6h, 90m, or 30s
   --ignore-market-hours    Run regardless of market-hours checks
 

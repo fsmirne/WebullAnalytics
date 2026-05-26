@@ -1,5 +1,8 @@
 {
-	"tickIntervalSeconds": 60,
+	"watch": {
+		"tickIntervalSeconds": 60,
+		"startTime": "09:30:00"
+	},
 	"cashReserve": {
 		"mode": "percent",
 		"value": 25
