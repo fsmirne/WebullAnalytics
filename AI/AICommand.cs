@@ -717,8 +717,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public string? Until { get; set; }
 
 	[CommandOption("--starting-cash <AMOUNT>")]
-	[Description("Starting cash balance. Default: 25000.")]
-	public decimal StartingCash { get; set; } = 25000m;
+	[Description("Starting cash balance. Default: 10000.")]
+	public decimal StartingCash { get; set; } = 10000m;
 
 	[CommandOption("--fee-per-contract <AMOUNT>")]
 	[Description("Per-leg-contract commission. Defaults from ticker: $1.14 for cash-settled index options (SPX/SPXW/NDX/XSP/RUT), $0.05 for everything else (Webull ETFs/equities).")]
