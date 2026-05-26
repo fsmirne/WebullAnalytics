@@ -129,7 +129,16 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 	private static async Task<bool> FetchAndReportAsync(HistoricalBarCache bars, string ticker, DateTime earliest, DateTime asOf, CancellationToken cancellation)
 	{
-		var bar = await bars.GetBarAsync(ticker, asOf.Date.AddDays(-1), cancellation);
+		// Probe the most recent SETTLED trading day, not literally asOf-1. After a holiday weekend,
+		// asOf-1 can be a non-trading day (e.g. Memorial Day) which never has a bar — the old probe
+		// then reported "Yahoo unreachable" even though Yahoo was fine and the requested calendar day
+		// simply isn't a session. Mirror HistoricalBarCache.ClampToSettled: a day's bar publishes
+		// ~17:00 ET, so before then the latest settled session is the prior trading day; walk back
+		// over weekends/holidays either way.
+		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(asOf.Kind == DateTimeKind.Utc ? asOf : asOf.ToUniversalTime(), NyTz);
+		var settled = nowNy.TimeOfDay >= TimeSpan.FromHours(17) ? nowNy.Date : nowNy.Date.AddDays(-1);
+		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
+		var bar = await bars.GetBarAsync(ticker, settled, cancellation);
 		if (bar == null)
 		{
 			AnsiConsole.MarkupLine($"  {Markup.Escape(ticker)}: [red]failed[/] (Yahoo unreachable or unknown ticker)");
