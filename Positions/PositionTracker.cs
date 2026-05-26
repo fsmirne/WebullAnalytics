@@ -16,8 +16,13 @@ public static class PositionTracker
 	/// <summary>
 	/// Computes the realized P&L report by processing all trades chronologically.
 	/// Generates synthetic expiration trades for options that have expired.
+	///
+	/// <paramref name="underlyingCloseLookup"/> resolves the underlying's settle/close price for a
+	/// (ticker, expiryDate) pair so ITM expirations can be settled at intrinsic value. When null,
+	/// or when the lookup returns null, all expirations are treated as worthless (the legacy
+	/// behavior, which over-credits realized P&L and under-debits cash for ITM expirations).
 	/// </summary>
-	public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(List<Trade> trades, decimal initialAmount = 0m, Dictionary<(DateTime timestamp, Side side, int qty), decimal>? feeLookup = null)
+	public static (List<ReportRow> rows, Dictionary<string, List<Lot>> positions, decimal running) ComputeReport(List<Trade> trades, decimal initialAmount = 0m, Dictionary<(DateTime timestamp, Side side, int qty), decimal>? feeLookup = null, Func<string, DateTime, decimal?>? underlyingCloseLookup = null)
 	{
 		var allTrades = trades.Concat(BuildExpirationTrades(trades)).OrderBy(t => t.Timestamp).ThenBy(t => t.Seq).ToList();
 
@@ -29,7 +34,7 @@ public static class PositionTracker
 
 		foreach (var trade in allTrades)
 		{
-			var (realized, closedQty) = ProcessTrade(trade, positions, allTrades);
+			var (realized, cashFlow, closedQty) = ProcessTrade(trade, positions, allTrades, underlyingCloseLookup);
 
 			if (IsStrategyParent(trade) && trade.Side is Side.Buy or Side.Sell)
 			{
@@ -43,7 +48,7 @@ public static class PositionTracker
 			}
 
 			var fee = LookupFee(trade, allTrades, feeLookup);
-			var row = BuildReportRow(trade, realized, closedQty, fee, ref running, ref cash, initialAmount);
+			var row = BuildReportRow(trade, realized, cashFlow, closedQty, fee, ref running, ref cash, initialAmount);
 
 			if (row == null && IsStrategyParent(trade))
 				skippedParentSeqs.Add(trade.Seq);
@@ -56,6 +61,20 @@ public static class PositionTracker
 		}
 
 		return (rows, positions, running);
+	}
+
+	/// <summary>Intrinsic value per share at expiry: max(0, S-K) for calls, max(0, K-S) for puts.
+	/// Returns 0 if the option metadata can't be parsed or the lookup returns no close.</summary>
+	private static decimal ComputeIntrinsicPerShare(Trade trade, Func<string, DateTime, decimal?>? underlyingCloseLookup)
+	{
+		if (underlyingCloseLookup == null || trade.Expiry == null || trade.Asset != Asset.Option) return 0m;
+		var parsed = MatchKeys.ParseOption(trade.MatchKey);
+		if (parsed == null) return 0m;
+		var close = underlyingCloseLookup(parsed.Value.parsed.Root, trade.Expiry.Value.Date);
+		if (close == null) return 0m;
+		return parsed.Value.parsed.CallPut == "C"
+			? Math.Max(0m, close.Value - parsed.Value.parsed.Strike)
+			: Math.Max(0m, parsed.Value.parsed.Strike - close.Value);
 	}
 
 	/// <summary>Looks up the fee for a trade. For strategy parents, sums up fees from all child legs.</summary>
@@ -74,10 +93,10 @@ public static class PositionTracker
 	/// fold leg-level P&L; for expiry, they also eagerly consume leg positions (so the legs' own
 	/// expiry trades become no-ops); for buy/sell, leg trades (processed separately) do the mutation.
 	/// </summary>
-	private static (decimal realized, int closedQty) ProcessTrade(Trade trade, Dictionary<string, List<Lot>> positions, List<Trade> allTrades)
+	private static (decimal realized, decimal cashFlow, int closedQty) ProcessTrade(Trade trade, Dictionary<string, List<Lot>> positions, List<Trade> allTrades, Func<string, DateTime, decimal?>? underlyingCloseLookup)
 	{
 		if (!IsStrategyParent(trade))
-			return ApplyTrade(positions, trade);
+			return ApplyTrade(positions, trade, underlyingCloseLookup);
 
 		var legs = Trade.GetLegs(allTrades, trade.Seq);
 		var isExpiry = trade.Side == Side.Expire;
@@ -85,27 +104,39 @@ public static class PositionTracker
 		if (isExpiry && legs.Count < 2)
 		{
 			positions.Remove(trade.MatchKey);
-			return (0m, 0);
+			return (0m, 0m, 0);
 		}
 
 		var realized = 0m;
+		var cashFlow = 0m;
 		var maxClosed = 0;
 		foreach (var leg in legs)
 		{
 			var legLots = positions.GetValueOrDefault(leg.MatchKey, []);
-			var (_, legRealized, legClosed) = isExpiry
-				? ApplyExpiration(legLots, leg.Multiplier)
-				: ApplyToLots(legLots, leg.Side, leg.Qty, leg.Price, leg.Multiplier);
+			decimal legRealized;
+			decimal legCashFlow;
+			int legClosed;
+			if (isExpiry)
+			{
+				var intrinsic = ComputeIntrinsicPerShare(leg, underlyingCloseLookup);
+				(_, legRealized, legCashFlow, legClosed) = ApplyExpiration(legLots, leg.Multiplier, intrinsic);
+			}
+			else
+			{
+				(_, legRealized, legClosed) = ApplyToLots(legLots, leg.Side, leg.Qty, leg.Price, leg.Multiplier);
+				legCashFlow = 0m;
+			}
 			realized += legRealized;
+			cashFlow += legCashFlow;
 			maxClosed = Math.Max(maxClosed, legClosed);
 			if (isExpiry) positions.Remove(leg.MatchKey);
 		}
 		if (isExpiry) positions.Remove(trade.MatchKey);
-		return (realized, maxClosed);
+		return (realized, cashFlow, maxClosed);
 	}
 
 	/// <summary>Builds a report row for the given trade. Returns null if the row should be skipped.</summary>
-	private static ReportRow? BuildReportRow(Trade trade, decimal realized, int closedQty, decimal fee, ref decimal running, ref decimal cash, decimal initialAmount)
+	private static ReportRow? BuildReportRow(Trade trade, decimal realized, decimal cashFlow, int closedQty, decimal fee, ref decimal running, ref decimal cash, decimal initialAmount)
 	{
 		var optionKind = string.IsNullOrEmpty(trade.OptionKind) ? "-" : trade.OptionKind;
 		var isLeg = IsStrategyLeg(trade);
@@ -121,6 +152,8 @@ public static class PositionTracker
 			cash -= tradeValue;
 		else if (trade.Side == Side.Sell)
 			cash += tradeValue;
+		else if (trade.Side == Side.Expire)
+			cash += cashFlow;
 
 		realized -= fee;
 		cash -= fee;
@@ -185,29 +218,59 @@ public static class PositionTracker
 	}
 
 	/// <summary>Applies a trade to the current positions using FIFO accounting.</summary>
-	private static (decimal realized, int closedQty) ApplyTrade(Dictionary<string, List<Lot>> positions, Trade trade)
+	private static (decimal realized, decimal cashFlow, int closedQty) ApplyTrade(Dictionary<string, List<Lot>> positions, Trade trade, Func<string, DateTime, decimal?>? underlyingCloseLookup)
 	{
 		var lots = positions.GetValueOrDefault(trade.MatchKey, []);
 
-		var (updatedLots, realized, closedQty) = trade.Side == Side.Expire ? ApplyExpiration(lots, trade.Multiplier) : ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier, trade.ParentStrategySeq);
+		List<Lot> updatedLots;
+		decimal realized;
+		decimal cashFlow;
+		int closedQty;
+		if (trade.Side == Side.Expire)
+		{
+			var intrinsic = ComputeIntrinsicPerShare(trade, underlyingCloseLookup);
+			(updatedLots, realized, cashFlow, closedQty) = ApplyExpiration(lots, trade.Multiplier, intrinsic);
+		}
+		else
+		{
+			(updatedLots, realized, closedQty) = ApplyToLots(lots, trade.Side, trade.Qty, trade.Price, trade.Multiplier, trade.ParentStrategySeq);
+			cashFlow = 0m;
+		}
 
 		if (updatedLots.Count > 0)
 			positions[trade.MatchKey] = updatedLots;
 		else
 			positions.Remove(trade.MatchKey);
 
-		return (realized, closedQty);
+		return (realized, cashFlow, closedQty);
 	}
 
-	/// <summary>Closes all lots at expiration (price = $0).</summary>
-	private static (List<Lot>, decimal realized, int closedQty) ApplyExpiration(List<Lot> lots, decimal multiplier)
+	/// <summary>Closes all lots at expiration. ITM legs settle at intrinsic value (cash settled):
+	/// long lots receive intrinsic, short lots pay it. OTM legs (intrinsic = 0) settle worthless.</summary>
+	private static (List<Lot>, decimal realized, decimal cashFlow, int closedQty) ApplyExpiration(List<Lot> lots, decimal multiplier, decimal intrinsicPerShare)
 	{
 		if (lots.Count == 0)
-			return (new List<Lot>(), 0m, 0);
+			return (new List<Lot>(), 0m, 0m, 0);
 
-		var realized = lots.Sum(lot => lot.Side == Side.Buy ? -lot.Price * lot.Qty * multiplier : lot.Price * lot.Qty * multiplier);
-		var closedQty = lots.Sum(lot => lot.Qty);
-		return (new List<Lot>(), realized, closedQty);
+		var realized = 0m;
+		var cashFlow = 0m;
+		var closedQty = 0;
+		foreach (var lot in lots)
+		{
+			var notional = intrinsicPerShare * lot.Qty * multiplier;
+			if (lot.Side == Side.Buy)
+			{
+				realized += (intrinsicPerShare - lot.Price) * lot.Qty * multiplier;
+				cashFlow += notional;
+			}
+			else
+			{
+				realized += (lot.Price - intrinsicPerShare) * lot.Qty * multiplier;
+				cashFlow -= notional;
+			}
+			closedQty += lot.Qty;
+		}
+		return (new List<Lot>(), realized, cashFlow, closedQty);
 	}
 
 	/// <summary>Applies a buy/sell trade to existing lots using FIFO matching.</summary>
