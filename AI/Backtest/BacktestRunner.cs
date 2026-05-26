@@ -32,6 +32,7 @@ internal sealed class BacktestRunner
 	private readonly bool _oracle;
 	private readonly bool _profile;
 	private readonly bool _discover;
+	private readonly int _discoverTopKPerDay;
 	private readonly HashSet<string> _discoveredOccs = new(StringComparer.OrdinalIgnoreCase);
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
@@ -43,7 +44,7 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20)
 	{
 		_config = config;
 		_book = book;
@@ -55,6 +56,7 @@ internal sealed class BacktestRunner
 		_oracle = oracle;
 		_profile = profile;
 		_discover = discover;
+		_discoverTopKPerDay = Math.Max(1, discoverTopKPerDay);
 		// Disk-only cache for backtest: the fetcher returns empty so any missing minute file fails
 		// closed (we fall back to the single 09:30 fill path). The on-disk read path serves the
 		// backfilled data/intraday/<TICKER>/<date>.csv files that the Polygon-mirror import created.
@@ -153,6 +155,9 @@ internal sealed class BacktestRunner
 			{
 				var openProposals = openedAtMinute.LegacyProposals;
 				var opened = 0;
+				// Discovery: legacy path evaluates once at 09:30; top-K is "top-K by FinalScore from
+				// this single evaluation". Same semantic as intraday-path top-K but no per-minute loop.
+				if (_discover) RecordTopKDiscovery(openProposals);
 				foreach (var p in openProposals)
 				{
 					if (opened >= _topNPerStep) break;
@@ -166,7 +171,6 @@ internal sealed class BacktestRunner
 					if (_book.Open(step, p.Ticker, p.StructureKind, legFills, p.Qty))
 					{
 						opened++;
-						RecordDiscoveredLegs(p.Legs);
 					}
 				}
 			}
@@ -743,6 +747,12 @@ internal sealed class BacktestRunner
 		// realized P&L. By design lookahead — research / upper-bound tool, not realistic.
 		(DateTime MinuteEt, OpenProposal Proposal, IReadOnlyList<BacktestLegFill> LegFills, decimal Pnl)? bestOracle = null;
 
+		// Per-day discovery collector. Keyed by proposal fingerprint so a strike-set considered at
+		// many minutes only contributes once with its best score. At end of day we take top-K by
+		// score and call RecordDiscoveredLegs — this gives sweeps a broader OCC catalog than just
+		// the one proposal that happened to open.
+		var dayProposalsByFingerprint = _discover ? new Dictionary<string, OpenProposal>(StringComparer.Ordinal) : null;
+
 		// Sequential minute loop. Per-minute work (~1.5 ms) is small enough that the .NET thread
 		// pool's per-task overhead exceeds the parallel gain even on a 32-core box. The QuoteOverrides
 		// refactor that removed BacktestQuoteSource's mutable state would allow a parallel pass if
@@ -757,6 +767,21 @@ internal sealed class BacktestRunner
 			var result = await EvaluateMinuteAsync(minuteUtc, closeUtc, tickerSet, barIndexByTicker, postMgmt, postCash, postAccount, postSignals, openEvaluator, cancellation);
 			if (result == null) continue;
 			var (minuteEt, openProposals) = result.Value;
+
+			// Discovery: aggregate every proposal the evaluator saw across the day, deduped by
+			// fingerprint (so a strike re-proposed at adjacent minutes contributes once with its
+			// best score). End-of-day flush takes top-K. Important: collect BEFORE any cash /
+			// reserve / open filters — the discovery catalog should reflect what the evaluator
+			// considered, not what the simulator was able to open under one specific sizing config.
+			if (dayProposalsByFingerprint != null)
+			{
+				foreach (var p in openProposals)
+				{
+					if (string.IsNullOrWhiteSpace(p.Fingerprint)) continue;
+					if (!dayProposalsByFingerprint.TryGetValue(p.Fingerprint, out var existing) || (p.FinalScore ?? 0m) > (existing.FinalScore ?? 0m))
+						dayProposalsByFingerprint[p.Fingerprint] = p;
+				}
+			}
 
 			foreach (var p in openProposals)
 			{
@@ -781,7 +806,6 @@ internal sealed class BacktestRunner
 					if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, p.Qty))
 					{
 						opened++;
-						RecordDiscoveredLegs(p.Legs);
 					}
 				}
 			}
@@ -792,8 +816,11 @@ internal sealed class BacktestRunner
 		{
 			var b = bestOracle.Value;
 			_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, b.LegFills, b.Proposal.Qty);
-			RecordDiscoveredLegs(b.Proposal.Legs);
 		}
+
+		// Discovery: flush top-K proposals (by FinalScore) seen across the day to the OCC catalog.
+		if (dayProposalsByFingerprint != null && dayProposalsByFingerprint.Count > 0)
+			RecordTopKDiscovery(dayProposalsByFingerprint.Values);
 
 		return new DailyOpenScanResult(HasIntraday: true, LegacyProposals: Array.Empty<OpenProposal>());
 	}
@@ -960,10 +987,10 @@ internal sealed class BacktestRunner
 		return total;
 	}
 
-	/// <summary>Adds each option leg's OCC symbol to the discovery set. Called from every <c>_book.Open</c>
-	/// site (daily-step opener, intraday opener, oracle finalizer). Cheap — just a hashset add — so it's
-	/// safe to invoke whether or not <c>_discover</c> is set; <see cref="FlushDiscoveryLog"/> is the
-	/// guarded write path.</summary>
+	/// <summary>Adds each option leg's OCC symbol to the discovery set. Called for fall-through paths
+	/// (daily-step rule fires, management opens) that don't use the top-K aggregator. Cheap — just
+	/// a hashset add — so it's safe to invoke whether or not <c>_discover</c> is set; <see cref="FlushDiscoveryLog"/>
+	/// is the guarded write path.</summary>
 	private void RecordDiscoveredLegs(IEnumerable<ProposalLeg> legs)
 	{
 		foreach (var leg in legs)
@@ -971,6 +998,21 @@ internal sealed class BacktestRunner
 			if (string.IsNullOrWhiteSpace(leg.Symbol)) continue;
 			_discoveredOccs.Add(leg.Symbol);
 		}
+	}
+
+	/// <summary>Records the top-<c>_discoverTopKPerDay</c> proposals by FinalScore from a day's
+	/// candidate pool. Replaces the legacy "only record what opened" semantic so that a single
+	/// <c>--discover</c> pass produces an OCC catalog broad enough to support sweeps over knobs
+	/// that change which contract gets picked (biasDrift, minScoreToOpen, structure enable
+	/// flags, etc.). Without this, a sweep cell that prefers a slightly different strike than the
+	/// discover-pass baseline would silently fall back to synthetic pricing for those days.</summary>
+	private void RecordTopKDiscovery(IEnumerable<OpenProposal> proposals)
+	{
+		var topK = proposals
+			.Where(p => p.FinalScore.HasValue)
+			.OrderByDescending(p => p.FinalScore!.Value)
+			.Take(_discoverTopKPerDay);
+		foreach (var p in topK) RecordDiscoveredLegs(p.Legs);
 	}
 
 	/// <summary>Writes the union of discovered OCCs to <c>data/options-discovery/&lt;ticker&gt;.jsonl</c>.
