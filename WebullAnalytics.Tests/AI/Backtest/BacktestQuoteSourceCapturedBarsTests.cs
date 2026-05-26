@@ -31,7 +31,7 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 		// SPXW 0DTE, spot $7400, captured bar reports close $50 and IV 15.5% — far from any
 		// reasonable Black-Scholes value. If the test passes, we know the captured path won.
 		var occ = "SPXW260526C07400000";
-		var asOf = new DateTime(2026, 5, 26, 9, 31, 0, DateTimeKind.Unspecified);
+		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
 		var asOfUtc = ToUtcOpen(asOf);
 		SeedCsv(occ, new List<OptionMinuteBar>
 		{
@@ -64,7 +64,7 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 	{
 		// No CSV seeded → cache returns null → synthetic path runs.
 		var occ = "SPXW260526C07400000";
-		var asOf = new DateTime(2026, 5, 26, 9, 31, 0, DateTimeKind.Unspecified);
+		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
 		var (bars, iv) = BuildDailyCaches(spxwOpen: 7400m, vix1d: 25m, vix9d: 22m, vix: 20m, asOf: asOf);
 		var optionBars = new HistoricalOptionBarCache(_tmpDir);
 		var quotes = new BacktestQuoteSource(bars, iv, riskFreeRate: 0.036, optionBars: optionBars);
@@ -88,7 +88,7 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 		// A bar with close=0 is treated as "no trade print" and shouldn't be used as a mid;
 		// otherwise the backtest would mark a position to $0 from one bad data point.
 		var occ = "SPXW260526C07400000";
-		var asOf = new DateTime(2026, 5, 26, 9, 31, 0, DateTimeKind.Unspecified);
+		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
 		var asOfUtc = ToUtcOpen(asOf);
 		SeedCsv(occ, new List<OptionMinuteBar>
 		{
@@ -143,7 +143,7 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 		// Some bars have no IV column (the contract was illiquid that minute). We still use bar.Close
 		// for the mid, but the IV falls back to the VIX-anchored value.
 		var occ = "SPXW260526C07400000";
-		var asOf = new DateTime(2026, 5, 26, 9, 31, 0, DateTimeKind.Unspecified);
+		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
 		var asOfUtc = ToUtcOpen(asOf);
 		SeedCsv(occ, new List<OptionMinuteBar>
 		{
@@ -178,7 +178,7 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 
 	private static DateTimeOffset ToUtcOpen(DateTime asOfEt) =>
 		new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(
-			DateTime.SpecifyKind(asOfEt.Date.AddHours(9).AddMinutes(31), DateTimeKind.Unspecified),
+			DateTime.SpecifyKind(asOfEt.Date.AddHours(9).AddMinutes(30), DateTimeKind.Unspecified),
 			TimeZoneInfo.FindSystemTimeZoneById("America/New_York")), TimeSpan.Zero);
 
 	private static DateTimeOffset ToUtcExact(DateTime etWallClock) =>

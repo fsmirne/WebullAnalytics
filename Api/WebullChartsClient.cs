@@ -16,6 +16,15 @@ internal static class WebullChartsClient
 	private const string ChartsQueryMiniUrl = "https://quotes-gw.webullfintech.com/api/quote/charts/query-mini";
 	private const string OptionChartKdataUrl = "https://quotes-gw.webullfintech.com/api/quote/option/chart/kdata";
 
+	// Webull stamps each minute bar with the END of its aggregate window (the 09:31:00 bar covers
+	// the 09:30→09:31 ET minute, containing the auction-cleared open). Polygon, ThinkOrSwim, and
+	// TradingView all use the opposite convention — bar timestamp = START of the window — so a
+	// 09:30:00 bar in those systems contains the same auction-open price. To make Webull's data
+	// agree with the rest of the world, every parser in this file subtracts 60 seconds from the
+	// raw timestamp before returning. Downstream code (cache lookups, intraday window bounds,
+	// freshness checks) therefore always sees start-of-bar timestamps regardless of source.
+	private static readonly TimeSpan WebullBarShift = TimeSpan.FromSeconds(-60);
+
 	// Shared HttpClient. Creating one HttpClient per call (the `using var client = new HttpClient()`
 	// pattern) churns through TCP sockets and ports — under sustained bulk pulls Webull's edge starts
 	// dropping connections at the TLS handshake, which surfaces as "The SSL connection could not be
@@ -305,7 +314,7 @@ internal static class WebullChartsClient
 
 		if (high < Math.Max(open, close) || low > Math.Min(open, close)) return null;
 
-		var timestamp = DateTimeOffset.FromUnixTimeSeconds(unixSec);
+		var timestamp = DateTimeOffset.FromUnixTimeSeconds(unixSec).Add(WebullBarShift);
 		return new OptionMinuteBar(timestamp, open, high, low, close, Math.Max(0, volume), iv);
 	}
 
@@ -423,7 +432,7 @@ internal static class WebullChartsClient
 
 		if (high < Math.Max(open, close) || low > Math.Min(open, close)) return null;
 
-		var timestamp = DateTimeOffset.FromUnixTimeSeconds(unixSec);
+		var timestamp = DateTimeOffset.FromUnixTimeSeconds(unixSec).Add(WebullBarShift);
 		return new MinuteBar(timestamp, open, high, low, close, Math.Max(0, volume));
 	}
 
@@ -510,7 +519,7 @@ internal static class WebullChartsClient
 			close = altClose; high = altHigh; low = altLow;
 		}
 
-		var timestamp = DateTimeOffset.FromUnixTimeSeconds(unixSec);
+		var timestamp = DateTimeOffset.FromUnixTimeSeconds(unixSec).Add(WebullBarShift);
 		return new MinuteBar(timestamp, open, high, low, close, Math.Max(0, volume));
 	}
 
