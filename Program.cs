@@ -115,6 +115,11 @@ class Program
 				ai.AddCommand<AI.AIBacktestCommand>("backtest");
 				ai.AddCommand<AI.AIHistoryCommand>("history");
 			});
+			config.AddBranch("options", options =>
+			{
+				options.AddCommand<Options.OptionsDiscoverCommand>("discover");
+				options.AddCommand<Options.OptionsBackfillCommand>("backfill");
+			});
 		});
 		return app.Run(args);
 	}
