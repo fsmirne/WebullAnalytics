@@ -756,6 +756,26 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Write every opened position's OCC symbols to `data/options-discovery/<ticker>.jsonl` as a side effect. Used by `wa ai history <ticker> --options` to learn which historical contracts to backfill from massive.com (Polygon mirror); without --discover the backfill only sees contracts in the live derivative-id registry. The backtest itself still runs and produces normal output — the discovery log is purely additive.")]
 	public bool Discover { get; set; }
 
+	[CommandOption("--discover-top-k <N>")]
+	[Description("With --discover: capture the top-K candidates the evaluator considered each day (by FinalScore), not just the one that opened. Lets a single --discover pass cover OCCs that alternative parameter settings would pick. Set to 1 for the legacy 1/day behavior. Default: 20.")]
+	public int DiscoverTopK { get; set; } = 20;
+
+	[CommandOption("--bias-drift <VALUE>")]
+	[Description("Override opener.weights.biasDrift for this run (after the per-ticker config merge). Useful for sweeping directional-bias regimes via --discover without maintaining separate config files. Range typically 1.0–1.5 for SPXW.")]
+	public decimal? BiasDriftOverride { get; set; }
+
+	[CommandOption("--min-score-to-open <VALUE>")]
+	[Description("Override opener.minScoreToOpen for this run (after the per-ticker config merge). Lowering opens more days; raising fires only on high-conviction setups. Range typically 0.0–0.20.")]
+	public decimal? MinScoreToOpenOverride { get; set; }
+
+	[CommandOption("--intraday-tape-weight <VALUE>")]
+	[Description("Override opener.weights.intradayTape for this run. 0.0 = pure macro bias; 1.0 = pure intraday tape. Must be between 0 and 1 inclusive.")]
+	public decimal? IntradayTapeWeightOverride { get; set; }
+
+	[CommandOption("--enable-structure <NAME>")]
+	[Description("Force-enable a structure for this run (repeatable). Names: longCalendar, doubleCalendar, longDiagonal, doubleDiagonal, ironButterfly, ironCondor, shortVertical, longCallPut, longVertical. Sets the structure's Enabled=true on top of the merged config; doesn't disable other enabled structures.")]
+	public string[] EnableStructures { get; set; } = Array.Empty<string>();
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -770,6 +790,11 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 		if (Smile != "off" && Smile != "static")
 			return ValidationResult.Error($"--smile: must be 'off' or 'static', got '{Smile}'");
 		if (TopPerStep < 1) return ValidationResult.Error($"--top-per-step: must be ≥ 1, got {TopPerStep}");
+		if (DiscoverTopK < 1) return ValidationResult.Error($"--discover-top-k: must be ≥ 1, got {DiscoverTopK}");
+		if (BiasDriftOverride.HasValue && BiasDriftOverride.Value < 0m)
+			return ValidationResult.Error($"--bias-drift: must be ≥ 0, got {BiasDriftOverride}");
+		if (IntradayTapeWeightOverride.HasValue && (IntradayTapeWeightOverride.Value < 0m || IntradayTapeWeightOverride.Value > 1m))
+			return ValidationResult.Error($"--intraday-tape-weight: must be in [0, 1], got {IntradayTapeWeightOverride}");
 		return ValidationResult.Success();
 	}
 }
@@ -783,6 +808,33 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (config == null) return 1;
 
 		config.Tickers = new List<string> { settings.Ticker.ToUpperInvariant() };
+
+		// Apply per-run CLI overrides on top of the merged config. Used by --discover sweeps
+		// to vary one knob at a time without maintaining N config-file copies (the per-ticker
+		// override file only contains diffs, so a copy-and-tweak approach loses the base config's
+		// scoring weights at load time — these flags sidestep that by mutating the already-merged
+		// in-memory config).
+		if (settings.BiasDriftOverride.HasValue) config.Opener.Weights.BiasDrift = settings.BiasDriftOverride.Value;
+		if (settings.MinScoreToOpenOverride.HasValue) config.Opener.MinScoreToOpen = settings.MinScoreToOpenOverride.Value;
+		if (settings.IntradayTapeWeightOverride.HasValue) config.Opener.Weights.IntradayTape = settings.IntradayTapeWeightOverride.Value;
+		foreach (var name in settings.EnableStructures)
+		{
+			switch (name.ToLowerInvariant())
+			{
+				case "longcalendar": config.Opener.Structures.LongCalendar.Enabled = true; break;
+				case "doublecalendar": config.Opener.Structures.DoubleCalendar.Enabled = true; break;
+				case "longdiagonal": config.Opener.Structures.LongDiagonal.Enabled = true; break;
+				case "doublediagonal": config.Opener.Structures.DoubleDiagonal.Enabled = true; break;
+				case "ironbutterfly": config.Opener.Structures.IronButterfly.Enabled = true; break;
+				case "ironcondor": config.Opener.Structures.IronCondor.Enabled = true; break;
+				case "shortvertical": config.Opener.Structures.ShortVertical.Enabled = true; break;
+				case "longcallput": config.Opener.Structures.LongCallPut.Enabled = true; break;
+				case "longvertical": config.Opener.Structures.LongVertical.Enabled = true; break;
+				default:
+					Console.Error.WriteLine($"Warning: --enable-structure '{name}' is not a recognized structure name; ignoring.");
+					break;
+			}
+		}
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
@@ -850,7 +902,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, discover: settings.Discover);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, discover: settings.Discover, discoverTopKPerDay: settings.DiscoverTopK);
 
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}");
 		AnsiConsole.WriteLine();
