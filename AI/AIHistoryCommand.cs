@@ -779,13 +779,12 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		public List<string> Sealed { get; set; } = new();
 	}
 
-	/// <summary>Captures today's incomplete intraday tape (09:30 ET → the minute this runs) from
-	/// Webull's live chart endpoint and writes <c>data/intraday/&lt;ticker&gt;/&lt;today&gt;.csv</c>.
-	/// Reuses the exact live-capture fetcher (<see cref="WebullIntradayBars.CreateFetcher"/>) wrapped
-	/// in an <see cref="IntradayBarCache"/>, which persists the CSV as a side effect of the fetch —
-	/// so the file lands in the same format and (start-of-bar) convention as the live `wa ai watch`
-	/// capture. The session isn't done, so we don't touch sealed.json; tomorrow's `wa ai history`
-	/// will re-pull the now-complete day and seal it.</summary>
+	/// <summary>Captures today's incomplete intraday tape (full pre-market from 04:00 ET → the minute
+	/// this runs) and writes <c>data/intraday/&lt;ticker&gt;/&lt;today&gt;.csv</c>. Uses the range-based
+	/// <see cref="WebullIntradayBars.FetchHistoricalRangeAsync"/> — the same path the daily backfill
+	/// uses — so it produces identical format, start-of-bar convention, and complete pre-market
+	/// coverage (SPX RTH + SPY-scaled pre/post for SPX-family). The session isn't done, so we don't
+	/// touch sealed.json; tomorrow's `wa ai history` re-pulls the now-complete day and seals it.</summary>
 	private static async Task<int> CapturePartialTodayAsync(string ticker, DateTime asOf, CancellationToken cancellation)
 	{
 		var apiConfig = TryLoadApiConfig();
@@ -800,28 +799,52 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			return 1;
 		}
 
-		var nowNy = TimeZoneInfo.ConvertTime(asOf, NyTz);
-		var todayNy = nowNy.Date;
-		var openEt = DateTime.SpecifyKind(todayNy.AddHours(9).AddMinutes(30), DateTimeKind.Unspecified);
-		var closeEt = DateTime.SpecifyKind(todayNy.AddHours(16), DateTimeKind.Unspecified);
-		// Cap the window at the current minute when the session is still open; after close, take the
-		// full RTH window. Either way the fetcher returns whatever Webull has so far.
-		var endEt = nowNy.TimeOfDay < closeEt.TimeOfDay ? DateTime.SpecifyKind(nowNy, DateTimeKind.Unspecified) : closeEt;
-		var openUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(openEt, NyTz), TimeSpan.Zero);
-		var endUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endEt, NyTz), TimeSpan.Zero);
+		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
+		AnsiConsole.MarkupLine($"[bold]Capturing partial intraday for {Markup.Escape(ticker)}[/] {todayNy:yyyy-MM-dd} (full pre-market 04:00 ET → now, not sealed)");
 
-		AnsiConsole.MarkupLine($"[bold]Capturing partial intraday for {Markup.Escape(ticker)}[/] {todayNy:yyyy-MM-dd} (09:30 ET → {endEt:HH:mm} ET, not sealed)");
+		// Use the range-based fetch (same path the backfill uses), not the count-capped live fetcher.
+		// FetchHistoricalRangeAsync paginates [04:00 ET, 20:00 ET] so the pre-market is complete from
+		// the 04:00 open regardless of when this runs. The count-based live fetcher caps at ~800 bars
+		// from "now", which after a late run slides the window forward and drops early pre-market —
+		// exactly the 06:11-start artifact this replaces. Bars beyond the current minute simply don't
+		// exist yet, so Webull returns up to now.
+		Dictionary<DateTime, List<MinuteBar>> byDate;
+		try
+		{
+			byDate = await WebullIntradayBars.FetchHistoricalRangeAsync(
+				apiConfig, ticker, todayNy, todayNy,
+				delayBetweenPages: TimeSpan.FromMilliseconds(500),
+				log: msg => AnsiConsole.MarkupLine($"  [dim]{Markup.Escape(msg)}[/]"),
+				cancellation);
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			AnsiConsole.MarkupLine($"  [red]capture failed[/]: {Markup.Escape(ex.Message)}");
+			return 1;
+		}
 
-		var cache = new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig));
-		var fetched = await cache.GetBarsAsync(ticker, openUtc, endUtc, BarInterval.M1, includeExtended: true, cancellation);
-
-		if (fetched.Count == 0)
+		if (!byDate.TryGetValue(todayNy, out var bars) || bars.Count == 0)
 		{
 			AnsiConsole.MarkupLine("  [yellow]no bars returned[/] — session may not have opened yet, or the Webull session expired (run `wa sniff`)");
 			return 1;
 		}
 
-		AnsiConsole.MarkupLine($"  [green]captured {fetched.Count} bar(s)[/] → data/intraday/{Markup.Escape(ticker)}/{todayNy:yyyy-MM-dd}.csv");
+		// Clamp to the 04:00 ET pre-market open. Webull's query-mini returns overnight-session bars
+		// (overnight=1) starting at 00:00 ET, but the canonical backfill files use massive's SPY which
+		// has no overnight — so keeping overnight here would make this day's pre-market window wider
+		// than every other day's and skew the tape signal's pre-market-open anchor. Drop < 04:00 ET so
+		// the file matches the rest of the dataset.
+		var premarketOpen = new TimeSpan(4, 0, 0);
+		var clamped = bars.Where(b => TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).TimeOfDay >= premarketOpen).ToList();
+		if (clamped.Count == 0)
+		{
+			AnsiConsole.MarkupLine("  [yellow]no bars at or after 04:00 ET[/] — nothing to write");
+			return 1;
+		}
+
+		var path = Path.Combine(Program.ResolvePath("data/intraday"), ticker.ToUpperInvariant(), $"{todayNy:yyyy-MM-dd}.csv");
+		WriteIntradayCsv(path, clamped);
+		AnsiConsole.MarkupLine($"  [green]captured {clamped.Count} bar(s)[/] (04:00 ET → now) → data/intraday/{Markup.Escape(ticker)}/{todayNy:yyyy-MM-dd}.csv");
 		AnsiConsole.MarkupLine($"  [dim]not added to sealed.json (session incomplete); run `wa ai history {Markup.Escape(ticker)}` tomorrow to finalize + seal[/]");
 		return 0;
 	}
