@@ -41,7 +41,12 @@ internal sealed class IntradayBarCache
 	{
 		_fetcher = fetcher;
 		_cacheDir = cacheDir ?? Program.ResolvePath("data/intraday");
-		_freshnessThreshold = freshnessThreshold ?? TimeSpan.FromSeconds(70);
+		// Default 130s instead of 70s: under the start-of-bar convention the latest bar's timestamp
+		// is one minute behind the wall clock by definition (the bar at T covers T → T+60s, so when
+		// the minute ends at wall-clock T+60s the freshly-written bar reads stamp T). 70s was sized
+		// for Webull's native end-of-bar convention where stamp ≈ wall-clock. We shift Webull -60s
+		// at parse, so add 60s to the freshness allowance to preserve the same staleness semantic.
+		_freshnessThreshold = freshnessThreshold ?? TimeSpan.FromSeconds(130);
 		_utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
 		Directory.CreateDirectory(_cacheDir);
 	}
