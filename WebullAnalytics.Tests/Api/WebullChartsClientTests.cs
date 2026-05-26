@@ -8,7 +8,9 @@ public class WebullChartsClientTests
 	[Fact]
 	public void ParseBarRow_PrimaryOrdering_ReturnsBar()
 	{
-		// time,open,close,high,low,volume,vwap
+		// time,open,close,high,low,volume,vwap. The raw timestamp is shifted -60s by the parser to
+		// normalize Webull's end-of-bar convention onto the start-of-bar convention used by Polygon,
+		// ToS, and TradingView (see `WebullBarShift` in WebullChartsClient).
 		var bar = WebullChartsClient.ParseBarRow("1747837800,5125.50,5128.25,5131.00,5123.75,12345,5127.10");
 
 		Assert.NotNull(bar);
@@ -17,7 +19,7 @@ public class WebullChartsClientTests
 		Assert.Equal(5131.00m, bar.High);
 		Assert.Equal(5123.75m, bar.Low);
 		Assert.Equal(12345, bar.Volume);
-		Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1747837800), bar.Timestamp);
+		Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1747837800 - 60), bar.Timestamp);
 	}
 
 	[Fact]
@@ -38,6 +40,7 @@ public class WebullChartsClientTests
 	public void ParseOptionBarRow_FullRowWithIv_ReturnsBar()
 	{
 		// time,open,close,high,low,prevClose,volume,iv  (observed in /api/quote/option/chart/kdata)
+		// Parser applies the same -60s start-of-bar normalization here as in ParseBarRow.
 		var bar = WebullChartsClient.ParseOptionBarRow("1779806220,22.70,22.80,23.91,22.60,22.60,76,15.75");
 
 		Assert.NotNull(bar);
@@ -47,7 +50,7 @@ public class WebullChartsClientTests
 		Assert.Equal(22.60m, bar.Low);
 		Assert.Equal(76, bar.Volume);
 		Assert.Equal(15.75m, bar.ImpliedVolatility);
-		Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1779806220), bar.Timestamp);
+		Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1779806220 - 60), bar.Timestamp);
 	}
 
 	[Fact]

@@ -53,6 +53,10 @@ internal sealed class AIHistorySettings : CommandSettings
 	[Description("With --options: backfill every registry entry matching the ticker (full chain — typically tens of thousands of strikes including illiquid ones the bot never touched). Without this flag, the backfill defaults to contracts that appear in `ai-proposals.jsonl` or `orders.jsonl` — i.e. legs the bot actually picked or that you manually traded. Without --options: no effect.")]
 	public bool All { get; set; }
 
+	[CommandOption("--migrate-webull-timestamps")]
+	[Description("One-shot migration: subtract 60 seconds from every bar timestamp in Webull-sourced CSVs on disk so the existing data matches the new start-of-bar convention (`data/intraday/<ticker>/*.csv` RTH bars, plus Webull-sourced contract CSVs under `data/options/<ticker>/`). Massive-sourced contract CSVs are left alone (already start-of-bar). Idempotent: writes a sentinel at `data/.webull-ts-convention` after success, future runs skip migrated files. Mutually exclusive with all other modes — runs and exits.")]
+	public bool MigrateWebullTimestamps { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("ticker is required");
@@ -65,6 +69,8 @@ internal sealed class AIHistorySettings : CommandSettings
 			return ValidationResult.Error("--options and --audit are mutually exclusive.");
 		if (Options && !string.IsNullOrEmpty(ImportWebullSpxFile))
 			return ValidationResult.Error("--options and --import-webull-spx are mutually exclusive.");
+		if (MigrateWebullTimestamps && (Options || Audit || !string.IsNullOrEmpty(ImportWebullSpxFile)))
+			return ValidationResult.Error("--migrate-webull-timestamps is mutually exclusive with all other modes.");
 		if (!string.IsNullOrEmpty(ImportWebullSpxFile) && !File.Exists(ImportWebullSpxFile))
 			return ValidationResult.Error($"--import-webull-spx: file not found at '{ImportWebullSpxFile}'");
 		return ValidationResult.Success();
@@ -102,6 +108,11 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		if (settings.Options)
 		{
 			return await AIHistoryOptionsBackfill.RunAsync(ticker, settings.Force, settings.All, cancellation);
+		}
+
+		if (settings.MigrateWebullTimestamps)
+		{
+			return MigrateWebullTimestamps(ticker);
 		}
 
 		AnsiConsole.MarkupLine($"[bold]Fetching history for {Markup.Escape(ticker)}[/]");
@@ -777,6 +788,119 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	{
 		[System.Text.Json.Serialization.JsonPropertyName("sealed")]
 		public List<string> Sealed { get; set; } = new();
+	}
+
+	/// <summary>One-shot migration that shifts Webull-sourced bar timestamps by -60 seconds so
+	/// existing option CSVs match the new start-of-bar convention (see
+	/// `WebullChartsClient.WebullBarShift`). Scope is option contract CSVs only — Webull-sourced
+	/// option CSVs are uniform-source (every bar came from Webull's option chart endpoint), so a
+	/// blanket -60s shift is unambiguous. Massive-sourced option CSVs (identified by an empty IV
+	/// column on every row) are left alone.
+	///
+	/// <para>Intraday underlying CSVs are intentionally NOT migrated here. Those files mix two
+	/// sources (SPY-massive for pre-market, Webull-SPX for RTH) and the source attribution can't
+	/// be reliably re-derived from the file alone — early attempts to shift "RTH bars" by
+	/// ET-window heuristics over-shifted SPY-massive bars at 09:30 ET (which were already
+	/// start-of-bar) and corrupted historical days. The safe migration for intraday CSVs is to
+	/// delete them and let `wa ai history &lt;ticker&gt;` refetch from sources, where the new
+	/// `WebullBarShift` in the parser produces correct start-of-bar timestamps on Webull bars
+	/// while leaving massive bars (already start-of-bar) untouched.</para>
+	///
+	/// <para>Writes <c>data/.webull-ts-convention</c> on success so re-running is a no-op. Atomic
+	/// per-file: each CSV is rewritten via tmp+rename.</para></summary>
+	private static int MigrateWebullTimestamps(string ticker)
+	{
+		var sentinel = Program.ResolvePath("data/.webull-ts-convention");
+		if (File.Exists(sentinel))
+		{
+			AnsiConsole.MarkupLine($"  [green]migration already applied[/] (sentinel exists: {Markup.Escape(sentinel)})");
+			AnsiConsole.MarkupLine("  delete the sentinel and re-run if you need to force re-migration");
+			return 0;
+		}
+
+		AnsiConsole.MarkupLine($"[bold]Webull timestamp migration[/] (option CSVs only, -60s shift)");
+
+		var optionsDir = Path.Combine(Program.ResolvePath("data/options"), ticker.ToUpperInvariant());
+		var (optWebull, optMassiveSkipped) = MigrateOptionsDir(optionsDir);
+
+		AnsiConsole.MarkupLine($"  options:  shifted {optWebull} Webull CSV(s); skipped {optMassiveSkipped} massive CSV(s) (already start-of-bar)");
+		AnsiConsole.MarkupLine($"  [yellow]intraday CSVs not migrated[/] — delete `data/intraday/{Markup.Escape(ticker.ToUpperInvariant())}/` and re-run `wa ai history {Markup.Escape(ticker)}` to refetch under the new convention");
+
+		Directory.CreateDirectory(Path.GetDirectoryName(sentinel)!);
+		File.WriteAllText(sentinel, $"applied={DateTime.UtcNow:O}\nticker={ticker.ToUpperInvariant()}\nwebull_options_shifted={optWebull}\nmassive_options_unchanged={optMassiveSkipped}\n");
+		AnsiConsole.MarkupLine($"  [green]sentinel written:[/] {Markup.Escape(sentinel)}");
+		return 0;
+	}
+
+	private static (int WebullShifted, int MassiveSkipped) MigrateOptionsDir(string dir)
+	{
+		if (!Directory.Exists(dir)) return (0, 0);
+		var webull = 0;
+		var massive = 0;
+		foreach (var expiryDir in Directory.EnumerateDirectories(dir))
+		{
+			foreach (var path in Directory.EnumerateFiles(expiryDir, "*.csv"))
+			{
+				var sourceWebull = IsWebullSourcedOptionCsv(path);
+				if (sourceWebull)
+				{
+					if (ShiftOptionCsvAllBars(path)) webull++;
+				}
+				else
+				{
+					massive++;
+				}
+			}
+		}
+		return (webull, massive);
+	}
+
+	/// <summary>An option CSV is Webull-sourced if at least one row has a non-empty IV column (the
+	/// 7th comma-separated field). Massive-sourced CSVs leave IV blank on every row. We don't require
+	/// EVERY row to have IV — illiquid Webull contracts can have null IV on some minutes — one
+	/// non-empty IV is enough to classify the file as Webull-sourced.</summary>
+	private static bool IsWebullSourcedOptionCsv(string path)
+	{
+		foreach (var line in File.ReadLines(path).Skip(1))
+		{
+			if (string.IsNullOrWhiteSpace(line)) continue;
+			var parts = line.Split(',');
+			if (parts.Length < 7) continue;
+			if (!string.IsNullOrWhiteSpace(parts[6])) return true;
+		}
+		return false;
+	}
+
+	private static bool ShiftOptionCsvAllBars(string path)
+	{
+		var lines = File.ReadAllLines(path);
+		if (lines.Length < 2) return false;
+		var sb = new StringBuilder();
+		sb.Append(lines[0]).Append('\n');
+		var shifted = false;
+		for (var i = 1; i < lines.Length; i++)
+		{
+			var line = lines[i];
+			if (string.IsNullOrWhiteSpace(line)) { sb.Append('\n'); continue; }
+			var firstComma = line.IndexOf(',');
+			if (firstComma <= 0) { sb.Append(line).Append('\n'); continue; }
+			var tsSpan = line.AsSpan(0, firstComma);
+			if (!DateTimeOffset.TryParse(tsSpan, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var ts))
+			{
+				sb.Append(line).Append('\n');
+				continue;
+			}
+			var newTs = ts.AddSeconds(-60);
+			sb.Append(newTs.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture));
+			sb.Append(line, firstComma, line.Length - firstComma);
+			sb.Append('\n');
+			shifted = true;
+		}
+		if (!shifted) return false;
+		var tmp = path + ".tmp";
+		File.WriteAllText(tmp, sb.ToString());
+		File.Move(tmp, path, overwrite: true);
+		return true;
 	}
 
 	private static ApiConfig? TryLoadApiConfig()
