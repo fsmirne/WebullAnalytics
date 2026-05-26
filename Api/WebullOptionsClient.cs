@@ -257,6 +257,10 @@ internal static class WebullOptionsClient
 					underlyingPrices[root] = parsed.UnderlyingPrice.Value;
 				foreach (var quote in parsed.Quotes)
 					result[quote.ContractSymbol] = quote;
+				// Persist the symbol → derivativeId map so backfill / replay can later resolve OCC
+				// symbols to the per-contract chart endpoint. Webull only serves ids for currently-live
+				// expirations; once a contract expires, this registry is the only path back to its id.
+				DerivativeIdRegistry.Register(derivativeIdMap);
 			}
 		}
 

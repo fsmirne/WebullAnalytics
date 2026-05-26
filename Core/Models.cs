@@ -180,6 +180,19 @@ public record MinuteBar(
 	long Volume
 );
 
+/// <summary>Option-contract OHLCV bar. Same shape as <see cref="MinuteBar"/> plus the implied volatility
+/// the option exchange reported for that bar — Webull's option chart endpoint inlines it as the trailing
+/// column on each row, expressed as a percentage (e.g. <c>15.74</c> means 15.74% IV).</summary>
+public record OptionMinuteBar(
+	DateTimeOffset Timestamp,
+	decimal Open,
+	decimal High,
+	decimal Low,
+	decimal Close,
+	long Volume,
+	decimal? ImpliedVolatility
+);
+
 public record PricePnL(decimal UnderlyingPrice, decimal PnL, decimal? ContractValue = null);
 
 /// <summary>

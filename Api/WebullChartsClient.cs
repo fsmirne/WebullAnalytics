@@ -14,6 +14,7 @@ internal static class WebullChartsClient
 {
 	private const string ChartsQueryUrl = "https://quotes-gw.webullfintech.com/api/quote/charts/query";
 	private const string ChartsQueryMiniUrl = "https://quotes-gw.webullfintech.com/api/quote/charts/query-mini";
+	private const string OptionChartKdataUrl = "https://quotes-gw.webullfintech.com/api/quote/option/chart/kdata";
 
 	// Shared HttpClient. Creating one HttpClient per call (the `using var client = new HttpClient()`
 	// pattern) churns through TCP sockets and ports — under sustained bulk pulls Webull's edge starts
@@ -182,6 +183,130 @@ internal static class WebullChartsClient
 			var json = await response.Content.ReadAsStringAsync(cancellationToken);
 			return ParseChartsMiniResponse(json, tickerId);
 		}
+	}
+
+	/// <summary>Fetches up to <paramref name="count"/> minute bars for a single option contract identified by its
+	/// Webull <paramref name="derivativeId"/>. When <paramref name="anchorUnixSec"/> is null, returns the most-recent
+	/// window (live mode); otherwise anchors at-or-before the given second-precision Unix timestamp for historical
+	/// pulls. Returns oldest-first, sorted by timestamp. Each bar carries the contract's implied volatility (the
+	/// trailing column Webull inlines in its option chart rows).
+	///
+	/// <paramref name="derivativeId"/> is Webull's per-contract integer ID — distinct from the underlying's
+	/// <c>tickerId</c>. It comes from <see cref="WebullOptionsClient.FetchChainAsync"/>'s <c>DerivativeIds</c>
+	/// dictionary or from the <c>tickerId</c> field on a strategy/list contract entry.
+	///
+	/// Header handling mirrors <see cref="FetchHistoricalMinuteBarsAsync"/>: drops the per-URL <c>x-s</c>/<c>x-sv</c>
+	/// signatures from a sniffed config (they were computed for a different URL and would otherwise truncate the
+	/// response) and overrides <c>t_time</c> with the current wall clock.</summary>
+	public static async Task<IReadOnlyList<OptionMinuteBar>> FetchOptionContractMinuteBarsAsync(
+		ApiConfig config,
+		long derivativeId,
+		int count,
+		long? anchorUnixSec,
+		CancellationToken cancellationToken)
+	{
+		if (count <= 0) return Array.Empty<OptionMinuteBar>();
+
+		var url = anchorUnixSec.HasValue
+			? $"{OptionChartKdataUrl}?derivativeId={derivativeId}&type=1m&count={count}&timestamp={anchorUnixSec.Value}"
+			: $"{OptionChartKdataUrl}?derivativeId={derivativeId}&type=1m&count={count}";
+
+		var request = new HttpRequestMessage(HttpMethod.Get, url);
+		foreach (var (key, value) in DefaultHeaders) request.Headers.TryAddWithoutValidation(key, value);
+		foreach (var (key, value) in config.Headers)
+		{
+			if (string.Equals(key, "x-s", StringComparison.OrdinalIgnoreCase)) continue;
+			if (string.Equals(key, "x-sv", StringComparison.OrdinalIgnoreCase)) continue;
+			if (string.Equals(key, "t_time", StringComparison.OrdinalIgnoreCase)) continue;
+			request.Headers.TryAddWithoutValidation(key, value);
+		}
+		request.Headers.TryAddWithoutValidation("t_time", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture));
+
+		HttpResponseMessage response;
+		try
+		{
+			response = await SharedClient.SendAsync(request, cancellationToken);
+		}
+		catch (Exception ex)
+		{
+			if (ex is OperationCanceledException) throw;
+			Console.WriteLine($"Webull option chart: request failed for derivativeId {derivativeId}: {ex.Message}");
+			return Array.Empty<OptionMinuteBar>();
+		}
+
+		using (response)
+		{
+			if (!response.IsSuccessStatusCode)
+			{
+				Console.WriteLine($"Webull option chart: received {(int)response.StatusCode} for derivativeId {derivativeId}. Session may have expired — run 'sniff' to refresh.");
+				return Array.Empty<OptionMinuteBar>();
+			}
+
+			var json = await response.Content.ReadAsStringAsync(cancellationToken);
+			return ParseOptionChartResponse(json, derivativeId);
+		}
+	}
+
+	/// <summary>Parses Webull's option-chart row schema: <c>ts,open,close,high,low,prevClose,volume,iv</c>. Same
+	/// 8-column shape as <see cref="ParseChartsMiniResponse"/>'s underlying schema except the trailing column is
+	/// implied volatility (percentage units) instead of VWAP. Rows that fail OHLC sanity are dropped silently.</summary>
+	internal static IReadOnlyList<OptionMinuteBar> ParseOptionChartResponse(string json, long derivativeId)
+	{
+		List<OptionMinuteBar> bars;
+		try
+		{
+			using var doc = JsonDocument.Parse(json);
+			var root = doc.RootElement;
+			if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+				return Array.Empty<OptionMinuteBar>();
+
+			var envelope = root[0];
+			if (!envelope.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+				return Array.Empty<OptionMinuteBar>();
+
+			bars = new List<OptionMinuteBar>(data.GetArrayLength());
+			foreach (var row in data.EnumerateArray())
+			{
+				if (row.ValueKind != JsonValueKind.String) continue;
+				var s = row.GetString();
+				if (string.IsNullOrEmpty(s)) continue;
+				var parsed = ParseOptionBarRow(s);
+				if (parsed != null) bars.Add(parsed);
+			}
+		}
+		catch (JsonException ex)
+		{
+			Console.WriteLine($"Webull option chart: failed to parse response for derivativeId {derivativeId}: {ex.Message}");
+			return Array.Empty<OptionMinuteBar>();
+		}
+
+		bars.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+		return bars;
+	}
+
+	internal static OptionMinuteBar? ParseOptionBarRow(string row)
+	{
+		var parts = row.Split(',');
+		if (parts.Length < 7) return null;
+
+		if (!long.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var unixSec)) return null;
+		if (!TryParseDec(parts[1], out var open)) return null;
+		if (!TryParseDec(parts[2], out var close)) return null;
+		if (!TryParseDec(parts[3], out var high)) return null;
+		if (!TryParseDec(parts[4], out var low)) return null;
+		// parts[5] is prevClose — skipped.
+		long volume = 0;
+		if (!string.Equals(parts[6], "null", StringComparison.OrdinalIgnoreCase))
+			long.TryParse(parts[6], NumberStyles.Integer | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out volume);
+
+		decimal? iv = null;
+		if (parts.Length >= 8 && !string.Equals(parts[7], "null", StringComparison.OrdinalIgnoreCase) && TryParseDec(parts[7], out var ivParsed))
+			iv = ivParsed;
+
+		if (high < Math.Max(open, close) || low > Math.Min(open, close)) return null;
+
+		var timestamp = DateTimeOffset.FromUnixTimeSeconds(unixSec);
+		return new OptionMinuteBar(timestamp, open, high, low, close, Math.Max(0, volume), iv);
 	}
 
 	/// <summary>Backward-walking pagination over <see cref="FetchHistoricalMinuteBarsAsync"/>. Single-shot
