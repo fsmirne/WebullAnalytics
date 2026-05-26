@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using WebullAnalytics.AI.Backtest;
+using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
 using WebullAnalytics.Sentiment;
@@ -41,6 +42,10 @@ internal sealed class AIHistorySettings : CommandSettings
 	[Description("One-time bootstrap: import a text file of SPX query-mini rows (one per line, `ts,o,c,h,l,prevClose,vol,vwap` format) sniffed from Webull's web app and merge with SPY ext-hours pulled per-day from the API. Used to load 2 years of historical SPX intraday — Webull's chart endpoint requires per-URL x-s signatures we can't forge, so deep history is captured via a browser console sniffer that records the chart's own signed requests. SPY ext-hours doesn't need signatures and is fetched here.")]
 	public string? ImportWebullSpxFile { get; set; }
 
+	[CommandOption("--partial")]
+	[Description("Capture today's incomplete intraday tape (up to the minute it's run) from Webull's live chart endpoint and write data/intraday/<ticker>/<today>.csv. Use when the live `wa ai watch` session was missed (outage, late start) — the normal backfill skips today (it expects live capture to own it). RTH only for SPX-family; the file is NOT sealed (the session isn't done). Mutually exclusive with --audit and --import-webull-spx.")]
+	public bool Partial { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("ticker is required");
@@ -49,6 +54,8 @@ internal sealed class AIHistorySettings : CommandSettings
 			return ValidationResult.Error("--audit and --lookback-years are mutually exclusive: audit derives its window from on-disk CSVs, so a lookback override would silently be ignored.");
 		if (Audit && !string.IsNullOrEmpty(ImportWebullSpxFile))
 			return ValidationResult.Error("--audit and --import-webull-spx are mutually exclusive.");
+		if (Partial && (Audit || !string.IsNullOrEmpty(ImportWebullSpxFile)))
+			return ValidationResult.Error("--partial is mutually exclusive with --audit and --import-webull-spx.");
 		if (!string.IsNullOrEmpty(ImportWebullSpxFile) && !File.Exists(ImportWebullSpxFile))
 			return ValidationResult.Error($"--import-webull-spx: file not found at '{ImportWebullSpxFile}'");
 		return ValidationResult.Success();
@@ -83,6 +90,10 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			return await ImportSniffedSpxAsync(ticker, settings.ImportWebullSpxFile, cancellation);
 		}
 
+		if (settings.Partial)
+		{
+			return await CapturePartialTodayAsync(ticker, asOf, cancellation);
+		}
 
 		AnsiConsole.MarkupLine($"[bold]Fetching history for {Markup.Escape(ticker)}[/]");
 
@@ -766,6 +777,53 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	{
 		[System.Text.Json.Serialization.JsonPropertyName("sealed")]
 		public List<string> Sealed { get; set; } = new();
+	}
+
+	/// <summary>Captures today's incomplete intraday tape (09:30 ET → the minute this runs) from
+	/// Webull's live chart endpoint and writes <c>data/intraday/&lt;ticker&gt;/&lt;today&gt;.csv</c>.
+	/// Reuses the exact live-capture fetcher (<see cref="WebullIntradayBars.CreateFetcher"/>) wrapped
+	/// in an <see cref="IntradayBarCache"/>, which persists the CSV as a side effect of the fetch —
+	/// so the file lands in the same format and (start-of-bar) convention as the live `wa ai watch`
+	/// capture. The session isn't done, so we don't touch sealed.json; tomorrow's `wa ai history`
+	/// will re-pull the now-complete day and seal it.</summary>
+	private static async Task<int> CapturePartialTodayAsync(string ticker, DateTime asOf, CancellationToken cancellation)
+	{
+		var apiConfig = TryLoadApiConfig();
+		if (apiConfig == null)
+		{
+			AnsiConsole.MarkupLine("  [red]api-config.json not found[/] — run `wa sniff` to bootstrap it");
+			return 1;
+		}
+		if (apiConfig.Headers.Count == 0)
+		{
+			AnsiConsole.MarkupLine("  [red]api-config.json has no headers[/] — run `wa sniff` to refresh");
+			return 1;
+		}
+
+		var nowNy = TimeZoneInfo.ConvertTime(asOf, NyTz);
+		var todayNy = nowNy.Date;
+		var openEt = DateTime.SpecifyKind(todayNy.AddHours(9).AddMinutes(30), DateTimeKind.Unspecified);
+		var closeEt = DateTime.SpecifyKind(todayNy.AddHours(16), DateTimeKind.Unspecified);
+		// Cap the window at the current minute when the session is still open; after close, take the
+		// full RTH window. Either way the fetcher returns whatever Webull has so far.
+		var endEt = nowNy.TimeOfDay < closeEt.TimeOfDay ? DateTime.SpecifyKind(nowNy, DateTimeKind.Unspecified) : closeEt;
+		var openUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(openEt, NyTz), TimeSpan.Zero);
+		var endUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endEt, NyTz), TimeSpan.Zero);
+
+		AnsiConsole.MarkupLine($"[bold]Capturing partial intraday for {Markup.Escape(ticker)}[/] {todayNy:yyyy-MM-dd} (09:30 ET → {endEt:HH:mm} ET, not sealed)");
+
+		var cache = new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig));
+		var fetched = await cache.GetBarsAsync(ticker, openUtc, endUtc, BarInterval.M1, includeExtended: true, cancellation);
+
+		if (fetched.Count == 0)
+		{
+			AnsiConsole.MarkupLine("  [yellow]no bars returned[/] — session may not have opened yet, or the Webull session expired (run `wa sniff`)");
+			return 1;
+		}
+
+		AnsiConsole.MarkupLine($"  [green]captured {fetched.Count} bar(s)[/] → data/intraday/{Markup.Escape(ticker)}/{todayNy:yyyy-MM-dd}.csv");
+		AnsiConsole.MarkupLine($"  [dim]not added to sealed.json (session incomplete); run `wa ai history {Markup.Escape(ticker)}` tomorrow to finalize + seal[/]");
+		return 0;
 	}
 
 	private static ApiConfig? TryLoadApiConfig()
