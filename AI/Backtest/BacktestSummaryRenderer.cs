@@ -8,7 +8,7 @@ internal static class BacktestSummaryRenderer
 	{
 		AnsiConsole.MarkupLine("[yellow bold]Backtest assumptions:[/]");
 		AnsiConsole.MarkupLine("[dim]  • Quotes prefer captured per-minute option bars when available (from `wa ai history <ticker> --options`); legs without captured data fall back to Black-Scholes synthesized — SPX-family uses VIX as ATM IV, other tickers use 30-day realized HV × premium. Bid/ask is always synthesized with a per-ticker half-spread (the captured endpoint reports trade prints, not NBBO).[/]");
-		AnsiConsole.MarkupLine("[dim]  • Opens/closes/rolls price off the day's bar.Open (stamped 09:30 ET); expirations settle at bar.Close intrinsic (stamped 16:00 ET).[/]");
+		AnsiConsole.MarkupLine("[dim]  • Opens/closes/rolls price off the day's bar.Open at the first RTH minute (stamped 09:31 ET — Webull labels the 09:30 minute as the last pre-market bar); expirations settle at bar.Close intrinsic (stamped 16:00 ET).[/]");
 		AnsiConsole.MarkupLine("[dim]  • Intraday rule triggering: StopLoss / TakeProfit / LegInShort walk the day's minute bars chronologically, re-pricing the position at each minute's spot (remaining-session TTE for 0DTE) and firing on the first qualifying minute. SL is evaluated before TP when both cross at the same minute (conservative whipsaw assumption). LegInShort runs before SL/TP per minute; when it fires the position converts to a vertical and intraday SL/TP stops for the day. Other rules (rolls, closeBeforeShortExpiry) only fire at EOD.[/]");
 		AnsiConsole.MarkupLine("[dim]  • Assignment / early exercise not modeled — expiring positions settle at intrinsic.[/]");
 		AnsiConsole.WriteLine();
