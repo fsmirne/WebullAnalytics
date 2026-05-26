@@ -11,13 +11,26 @@ internal sealed class AIConfig
 	/// continue to iterate this list; it just always contains exactly one element.</summary>
 	[JsonIgnore] public List<string> Tickers { get; set; } = new();
 
-	[JsonPropertyName("tickIntervalSeconds")] public int TickIntervalSeconds { get; set; } = 60;
+	[JsonPropertyName("watch")] public WatchConfig Watch { get; set; } = new();
 	[JsonPropertyName("cashReserve")] public CashReserveConfig CashReserve { get; set; } = new();
 	[JsonPropertyName("log")] public LogConfig Log { get; set; } = new();
 	[JsonPropertyName("indicators")] public IndicatorsConfig Indicators { get; set; } = new();
 	[JsonPropertyName("rules")] public RulesConfig Rules { get; set; } = new();
 	[JsonPropertyName("opener")] public OpenerConfig Opener { get; set; } = new();
 	[JsonPropertyName("autoExecute")] public AutoExecuteConfig AutoExecute { get; set; } = new();
+}
+
+/// <summary>Settings specific to the long-running <c>wa ai watch</c> loop: poll cadence and the
+/// optional scheduled first-tick time. Kept separate from <c>autoExecute</c> (which both
+/// <c>wa ai scan</c> and <c>wa ai watch</c> consume) so loop-only knobs are easy to find.</summary>
+internal sealed class WatchConfig
+{
+	[JsonPropertyName("tickIntervalSeconds")] public int TickIntervalSeconds { get; set; } = 60;
+	/// <summary>Optional scheduled first-tick time (ET, format "HH:mm" or "HH:mm:ss"). When set, the
+	/// watch loop sleeps until this time before evaluating its first tick. Null/empty disables — the
+	/// loop ticks immediately if market is open, else polls every <see cref="TickIntervalSeconds"/>
+	/// until open. CLI <c>--start</c> overrides.</summary>
+	[JsonPropertyName("startTime")] public string? StartTime { get; set; }
 }
 
 /// <summary>Pipeline-wide inputs / measurement knobs. Read by both the opener (for macro bias and
@@ -307,7 +320,9 @@ internal static class AIConfigLoader
 	/// <summary>Returns null when valid; otherwise a human-readable error string naming the field and bound.</summary>
 	internal static string? Validate(AIConfig c)
 	{
-		if (c.TickIntervalSeconds < 1 || c.TickIntervalSeconds > 3600) return $"tickIntervalSeconds: must be in [1, 3600], got {c.TickIntervalSeconds}";
+		if (c.Watch.TickIntervalSeconds < 1 || c.Watch.TickIntervalSeconds > 3600) return $"watch.tickIntervalSeconds: must be in [1, 3600], got {c.Watch.TickIntervalSeconds}";
+		if (!string.IsNullOrWhiteSpace(c.Watch.StartTime) && !TimeOnly.TryParse(c.Watch.StartTime, CultureInfo.InvariantCulture, out _))
+			return $"watch.startTime: must be HH:mm or HH:mm:ss (ET), got '{c.Watch.StartTime}'";
 		if (c.CashReserve.Mode is not ("percent" or "absolute")) return $"cashReserve.mode: must be 'percent' or 'absolute', got '{c.CashReserve.Mode}'";
 		if (c.CashReserve.Value < 0m) return $"cashReserve.value: must be non-negative, got {c.CashReserve.Value}";
 		if (c.CashReserve.Mode == "percent" && c.CashReserve.Value > 100m) return $"cashReserve.value: must be ≤ 100 for mode 'percent', got {c.CashReserve.Value}";

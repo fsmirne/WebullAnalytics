@@ -10,7 +10,7 @@ namespace WebullAnalytics.AI;
 internal sealed class AIWatchSettings : AISingleTickerSubcommandSettings
 {
 	[CommandOption("--tick <SECONDS>")]
-	[Description("Override tickIntervalSeconds.")]
+	[Description("Override watch.tickIntervalSeconds.")]
 	public int? Tick { get; set; }
 
 	[CommandOption("--duration <DURATION>")]
@@ -33,6 +33,10 @@ internal sealed class AIWatchSettings : AISingleTickerSubcommandSettings
 	[Description("Override autoExecute.{management,opener}.timeInForce for this run. Mirrors `wa trade place --tif`: DAY (in-session only) or GTC (queues across sessions, accepted off-hours). Default: whatever config says, which itself defaults to DAY.")]
 	public string? Tif { get; set; }
 
+	[CommandOption("--start <TIME>")]
+	[Description("Wait until this time (ET, HH:mm or HH:mm:ss) before the first tick. Overrides config startTime. Example: --start 09:30:30.")]
+	public string? Start { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -44,6 +48,8 @@ internal sealed class AIWatchSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--duration: must be like '6h' or '90m', got '{Duration}'");
 		if (Tif != null && !string.Equals(Tif, "day", StringComparison.OrdinalIgnoreCase) && !string.Equals(Tif, "gtc", StringComparison.OrdinalIgnoreCase))
 			return ValidationResult.Error($"--tif: must be 'day' or 'gtc', got '{Tif}'");
+		if (Start != null && !TimeOnly.TryParse(Start, CultureInfo.InvariantCulture, out _))
+			return ValidationResult.Error($"--start: must be HH:mm or HH:mm:ss, got '{Start}'");
 
 		return ValidationResult.Success();
 	}
@@ -75,10 +81,36 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		if (config == null) return 1;
 		if (settings.Submit) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; }
 		if (settings.Tif != null) { config.AutoExecute.Management.TimeInForce = settings.Tif.ToUpperInvariant(); config.AutoExecute.Opener.TimeInForce = settings.Tif.ToUpperInvariant(); }
+		if (settings.Start != null) config.Watch.StartTime = settings.Start;
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
-		var tickSeconds = settings.Tick ?? config.TickIntervalSeconds;
+		var tickSeconds = settings.Tick ?? config.Watch.TickIntervalSeconds;
+
+		// Optional scheduled first-tick: wait until config.Watch.StartTime (ET) before entering the loop.
+		// stopAt is computed AFTER the wait so --duration is relative to the start time, not launch time.
+		// Past-time policy: explicit --start in the past is a user error; a config-only startTime in the
+		// past means the user simply launched late, so we skip the wait and start immediately.
+		if (!string.IsNullOrWhiteSpace(config.Watch.StartTime))
+		{
+			var target = ComputeStartTime(config.Watch.StartTime);
+			var wait = target - DateTime.Now;
+			if (wait <= TimeSpan.Zero)
+			{
+				if (settings.Start != null)
+				{
+					Console.Error.WriteLine($"Error: --start '{settings.Start}' is in the past (target {target:HH:mm:ss}). Aborting.");
+					return 4;
+				}
+				AnsiConsole.MarkupLine($"[dim]watch.startTime {target:HH:mm:ss} already passed; starting immediately.[/]");
+			}
+			else
+			{
+				AnsiConsole.MarkupLine($"[dim]Waiting until {target:HH:mm:ss} ({wait.TotalMinutes:F1} min) before first tick...[/]");
+				try { await Task.Delay(wait, cancellation); } catch (OperationCanceledException) { return 0; }
+			}
+		}
+
 		var stopAt = ComputeStopTime(settings);
 
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
@@ -111,8 +143,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		{
 			if (!settings.IgnoreMarketHours && !IsMarketOpen())
 			{
-				var sleep = TimeSpan.FromSeconds(Math.Min(tickSeconds * 5, 300));
-				try { await Task.Delay(sleep, cancellation); } catch (OperationCanceledException) { break; }
+				try { await Task.Delay(TimeSpan.FromSeconds(tickSeconds), cancellation); } catch (OperationCanceledException) { break; }
 				continue;
 			}
 
@@ -183,6 +214,15 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var nowLocal = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
 		var closeLocal = new DateTime(nowLocal.Year, nowLocal.Month, nowLocal.Day, MarketCloseEt.Hours, MarketCloseEt.Minutes, 0, DateTimeKind.Unspecified);
 		return TimeZoneInfo.ConvertTimeToUtc(closeLocal, NyTz).ToLocalTime();
+	}
+
+	/// <summary>Parses HH:mm or HH:mm:ss as today's ET time-of-day and returns the equivalent local DateTime.</summary>
+	private static DateTime ComputeStartTime(string hhmm)
+	{
+		var t = TimeOnly.Parse(hhmm, CultureInfo.InvariantCulture);
+		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var targetEt = new DateTime(nowEt.Year, nowEt.Month, nowEt.Day, t.Hour, t.Minute, t.Second, DateTimeKind.Unspecified);
+		return TimeZoneInfo.ConvertTimeToUtc(targetEt, NyTz).ToLocalTime();
 	}
 
 	private static bool IsMarketOpen()
