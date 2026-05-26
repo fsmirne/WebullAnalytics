@@ -17,9 +17,10 @@ namespace WebullAnalytics.AI;
 /// politeness, and the option chart endpoint has not shown signs of stricter rate-limiting in probes —
 /// but 5 req/sec gives plenty of headroom and the user can tune via <c>--pace-ms</c> if needed.</para>
 ///
-/// <para>Idempotent: skips contracts whose CSV already exists unless <c>--force</c> is set. So
-/// re-running the command after a partial backfill picks up where it left off without re-fetching
-/// completed contracts.</para></summary>
+/// <para>Idempotent re-runs: Webull (live) contracts merge by timestamp so a re-run picks up new
+/// minutes. Massive (expired) contracts that already have a CSV and whose expiry is in the past are
+/// skipped entirely — their minute history is final, so re-fetching wastes the rate-limited budget.
+/// <c>--force</c> overrides both: drop and refetch from scratch.</para></summary>
 /// <summary>Which upstream serves a given contract's per-minute bars. Webull is fast and unrestricted
 /// but only works while the contract is live (<see cref="DerivativeIdRegistry"/> resolves OCC → id
 /// at chain-fetch time and the resolution is lost after expiry). Massive (Polygon mirror) serves
@@ -30,6 +31,7 @@ internal enum OptionDataSource { Webull, Massive }
 internal static class AIHistoryOptionsBackfill
 {
 	private static readonly TimeSpan DefaultPace = TimeSpan.FromMilliseconds(200);
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	public static async Task<int> RunAsync(string ticker, bool force, bool all, CancellationToken cancellation)
 	{
@@ -106,17 +108,31 @@ internal static class AIHistoryOptionsBackfill
 		// IV the existing file has, which Webull-source CSVs carry and massive-source CSVs don't).
 		var work = new List<(string Occ, long? DerivativeId, OptionParsed Parsed, string CsvPath, bool MergeExisting, OptionDataSource Source)>();
 		var skippedNoMassive = 0;
+		var skippedComplete = 0;
 		var hasMassiveKey = !string.IsNullOrWhiteSpace(apiConfig!.MassiveApiKey);
+		var todayEt = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, NyTz).Date;
 		foreach (var (occ, id, parsed) in matches)
 		{
 			var csvPath = BuildCsvPath(optionsRoot, parsed, occ);
-			var mergeExisting = !force && File.Exists(csvPath);
+			var csvExists = File.Exists(csvPath);
+			var mergeExisting = !force && csvExists;
 			if (id.HasValue)
 			{
+				// Webull (live): always merge — today's contract can still print new minutes.
 				work.Add((occ, id, parsed, csvPath, mergeExisting, OptionDataSource.Webull));
 			}
 			else if (hasMassiveKey)
 			{
+				// Massive (expired): once a contract's expiry is in the past, its minute history is
+				// final — re-fetching produces identical bytes. Skip if a CSV already exists, the
+				// expiry has passed, and the user didn't ask for --force. This turns repeat backfills
+				// of the historical set from hours into seconds; only genuinely-new (or future-expiry,
+				// or --force) contracts hit the rate-limited endpoint.
+				if (!force && csvExists && parsed.ExpiryDate.Date < todayEt)
+				{
+					skippedComplete++;
+					continue;
+				}
 				work.Add((occ, null, parsed, csvPath, mergeExisting, OptionDataSource.Massive));
 			}
 			else
@@ -126,7 +142,9 @@ internal static class AIHistoryOptionsBackfill
 		}
 		var webullCount = work.Count(w => w.Source == OptionDataSource.Webull);
 		var massiveCount = work.Count(w => w.Source == OptionDataSource.Massive);
-		AnsiConsole.MarkupLine($"  routing: {webullCount} via Webull (live), {massiveCount} via massive.com (expired)" + (skippedNoMassive > 0 ? $", [yellow]{skippedNoMassive} skipped[/] (no MassiveApiKey)" : ""));
+		AnsiConsole.MarkupLine($"  routing: {webullCount} via Webull (live), {massiveCount} via massive.com (expired)"
+			+ (skippedComplete > 0 ? $", [green]{skippedComplete} already complete[/] (expired + on disk)" : "")
+			+ (skippedNoMassive > 0 ? $", [yellow]{skippedNoMassive} skipped[/] (no MassiveApiKey)" : ""));
 
 		// Order by source then expiry+strike. Webull-first means the fast path completes before the
 		// rate-limited massive path begins — user gets feedback sooner on what's working.
