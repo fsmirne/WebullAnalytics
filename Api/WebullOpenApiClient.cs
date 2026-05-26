@@ -241,16 +241,12 @@ internal sealed class WebullOpenApiClient : IDisposable
 	// /openapi/trade/order/history endpoint (7 days, rate-limited 2 req/2s) is a fallback if this
 	// per-day endpoint isn't supported on a given region; not currently used.
 
-	/// <summary>Returns today's orders (any status) from the broker. Pulls the /openapi/trade/order/
-	/// history endpoint (returns up to 7 days) and filters to today (ET) client-side. The endpoint
-	/// documents start_date/end_date params but they reject the yyyy-MM-dd format from our environment
-	/// with OAUTH_OPENAPI_PARAM_ERR — possibly account-tier or region-specific. Over-fetching 7 days
-	/// once per tick is fine; the daily order volume is small.</summary>
-	internal async Task<List<OpenOrder>> ListTodayOrdersAsync(CancellationToken ct = default)
+	/// <summary>Returns historical orders from /openapi/trade/order/history, paginated. Default window
+	/// is the last 7 days; pass start_date/end_date (yyyy-MM-dd) for a custom range up to 2 years back.
+	/// Both date params must be supplied together — passing start_date alone returns OAUTH_OPENAPI_PARAM_ERR.</summary>
+	internal async Task<List<OpenOrder>> ListOrderHistoryAsync(string? startDate = null, string? endDate = null, CancellationToken ct = default)
 	{
 		const int pageSize = 100;
-		var etTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-		var todayEt = TimeZoneInfo.ConvertTime(DateTime.UtcNow, etTz).Date;
 		var all = new List<OpenOrder>();
 		string? cursor = null;
 		while (true)
@@ -260,6 +256,8 @@ internal sealed class WebullOpenApiClient : IDisposable
 				["account_id"] = _account.AccountId,
 				["page_size"] = pageSize.ToString(),
 			};
+			if (!string.IsNullOrEmpty(startDate)) query["start_date"] = startDate;
+			if (!string.IsNullOrEmpty(endDate)) query["end_date"] = endDate;
 			if (cursor != null) query["last_client_order_id"] = cursor;
 			var page = await GetAsync<List<OpenOrder>>("/openapi/trade/order/history", query, ct);
 			if (page.Count == 0) break;
@@ -268,7 +266,38 @@ internal sealed class WebullOpenApiClient : IDisposable
 			cursor = page[^1].ClientOrderId;
 			if (string.IsNullOrEmpty(cursor)) break;
 		}
+		return all;
+	}
+
+	/// <summary>Returns today's orders (any status) by pulling the 7-day history and filtering to today (ET).</summary>
+	internal async Task<List<OpenOrder>> ListTodayOrdersAsync(CancellationToken ct = default)
+	{
+		var etTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+		var todayEt = TimeZoneInfo.ConvertTime(DateTime.UtcNow, etTz).Date;
+		var all = await ListOrderHistoryAsync(ct: ct);
 		return all.Where(co => IsToday(co, todayEt, etTz)).ToList();
+	}
+
+	/// <summary>Diagnostic: GETs /openapi/trade/order/history with optional start_date/end_date (yyyy-MM-dd)
+	/// and returns the raw response body. Used to inspect fields (fees, commissions, amounts) that the
+	/// typed deserializer would otherwise drop. Documented look-back is up to 2 years from start_date.</summary>
+	internal async Task<string> ListOrderHistoryRawAsync(string? startDate, string? endDate, CancellationToken ct = default)
+	{
+		var query = new SortedDictionary<string, string>(StringComparer.Ordinal)
+		{
+			["account_id"] = _account.AccountId,
+			["page_size"] = "100",
+		};
+		if (!string.IsNullOrEmpty(startDate)) query["start_date"] = startDate;
+		if (!string.IsNullOrEmpty(endDate)) query["end_date"] = endDate;
+		const string path = "/openapi/trade/order/history";
+		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null, _account.AppId);
+		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+		using var req = new HttpRequestMessage(HttpMethod.Get, $"{path}?{qs}");
+		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
+		ApplyAccessTokenHeader(req, path);
+		using var resp = await _http.SendAsync(req, ct);
+		return await resp.Content.ReadAsStringAsync(ct);
 	}
 
 	/// <summary>Determines if an order from the broker's history list was placed today (ET). The
@@ -314,6 +343,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		[property: JsonPropertyName("filled_time")] string? FilledTime,
 		[property: JsonPropertyName("filled_time_at")] string? FilledTimeAt,
 		[property: JsonPropertyName("position_intent")] string? PositionIntent,
+		[property: JsonPropertyName("option_strategy")] string? OptionStrategy,
 		[property: JsonPropertyName("legs")] List<OrderDetailLeg>? Legs);
 
 	internal sealed record OrderDetail(

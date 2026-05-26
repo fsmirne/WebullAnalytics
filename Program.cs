@@ -97,6 +97,7 @@ class Program
 				trade.AddCommand<TradeCancelCommand>("cancel");
 				trade.AddCommand<TradeStatusCommand>("status");
 				trade.AddCommand<TradeListCommand>("list");
+				trade.AddCommand<TradeHistoryCommand>("history");
 				trade.AddCommand<TradeAccountsCommand>("accounts");
 				trade.AddCommand<TradePositionsCommand>("positions");
 				trade.AddBranch("token", token =>
