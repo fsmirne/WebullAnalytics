@@ -31,6 +31,8 @@ internal sealed class BacktestRunner
 	private readonly IntradayBarCache _intradayBars;
 	private readonly bool _oracle;
 	private readonly bool _profile;
+	private readonly bool _discover;
+	private readonly HashSet<string> _discoveredOccs = new(StringComparer.OrdinalIgnoreCase);
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
 	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET. Expirations
@@ -40,7 +42,7 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false)
 	{
 		_config = config;
 		_book = book;
@@ -51,6 +53,7 @@ internal sealed class BacktestRunner
 		_topNPerStep = topNPerStep;
 		_oracle = oracle;
 		_profile = profile;
+		_discover = discover;
 		// Disk-only cache for backtest: the fetcher returns empty so any missing minute file fails
 		// closed (we fall back to the single 09:30 fill path). The on-disk read path serves the
 		// backfilled data/intraday/<TICKER>/<date>.csv files that the Polygon-mirror import created.
@@ -159,7 +162,11 @@ internal sealed class BacktestRunner
 
 					var legFills = BuildLegFillsFromProposal(p.Legs, p.Qty);
 					if (legFills == null) continue;
-					if (_book.Open(step, p.Ticker, p.StructureKind, legFills, p.Qty)) opened++;
+					if (_book.Open(step, p.Ticker, p.StructureKind, legFills, p.Qty))
+					{
+						opened++;
+						RecordDiscoveredLegs(p.Legs);
+					}
 				}
 			}
 
@@ -208,6 +215,11 @@ internal sealed class BacktestRunner
 
 		// Final per-lineage MTM for still-open positions so the renderer can compute unrealized P&L.
 		var endMtmByLineage = await ComputeOpenMarkPerLineageAsync(steps.Count > 0 ? steps[^1] : until, cancellation);
+
+		// Discovery: flush every OCC the run picked to disk so `wa ai history <ticker> --options`
+		// can fetch them from massive.com next. The file persists across runs (union semantics) so
+		// repeated backtests with different windows accumulate the full strategy footprint.
+		if (_discover) FlushDiscoveryLog();
 
 		return new BacktestResult(
 			StartingCash: startingCash,
@@ -764,7 +776,11 @@ internal sealed class BacktestRunner
 				}
 				else
 				{
-					if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, p.Qty)) opened++;
+					if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, p.Qty))
+					{
+						opened++;
+						RecordDiscoveredLegs(p.Legs);
+					}
 				}
 			}
 		}
@@ -774,6 +790,7 @@ internal sealed class BacktestRunner
 		{
 			var b = bestOracle.Value;
 			_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, b.LegFills, b.Proposal.Qty);
+			RecordDiscoveredLegs(b.Proposal.Legs);
 		}
 
 		return new DailyOpenScanResult(HasIntraday: true, LegacyProposals: Array.Empty<OpenProposal>());
@@ -939,6 +956,65 @@ internal sealed class BacktestRunner
 			total += perContract * 100m * pos.Quantity;
 		}
 		return total;
+	}
+
+	/// <summary>Adds each option leg's OCC symbol to the discovery set. Called from every <c>_book.Open</c>
+	/// site (daily-step opener, intraday opener, oracle finalizer). Cheap — just a hashset add — so it's
+	/// safe to invoke whether or not <c>_discover</c> is set; <see cref="FlushDiscoveryLog"/> is the
+	/// guarded write path.</summary>
+	private void RecordDiscoveredLegs(IEnumerable<ProposalLeg> legs)
+	{
+		foreach (var leg in legs)
+		{
+			if (string.IsNullOrWhiteSpace(leg.Symbol)) continue;
+			_discoveredOccs.Add(leg.Symbol);
+		}
+	}
+
+	/// <summary>Writes the union of discovered OCCs to <c>data/options-discovery/&lt;ticker&gt;.jsonl</c>.
+	/// One JSON line per OCC: <c>{"occ":"SPXW260526C07530000","ticker":"SPXW"}</c>. Re-reads the existing
+	/// file first so the union accumulates across multiple backtest runs — a user who runs three different
+	/// date ranges over time builds up a comprehensive catalog of contracts the strategy would ever pick.
+	///
+	/// <para>Per-ticker file split keeps the catalog readable when the user backtests multiple tickers;
+	/// the file's ticker matches the first ticker in the config (typically the only one for SPXW-focused
+	/// runs). Atomic write via tmp+rename so a crash mid-write can't truncate the catalog.</para></summary>
+	private void FlushDiscoveryLog()
+	{
+		if (_discoveredOccs.Count == 0) return;
+		var ticker = _config.Tickers.FirstOrDefault();
+		if (string.IsNullOrWhiteSpace(ticker)) return;
+
+		var dir = Program.ResolvePath("data/options-discovery");
+		Directory.CreateDirectory(dir);
+		var path = Path.Combine(dir, ticker.ToUpperInvariant() + ".jsonl");
+
+		// Read existing entries (if any) into a set, merge with newly-discovered, write back.
+		var union = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		if (File.Exists(path))
+		{
+			foreach (var line in File.ReadAllLines(path))
+			{
+				if (string.IsNullOrWhiteSpace(line)) continue;
+				try
+				{
+					using var doc = System.Text.Json.JsonDocument.Parse(line);
+					if (doc.RootElement.TryGetProperty("occ", out var el) && el.GetString() is { } occ)
+						union.Add(occ);
+				}
+				catch (System.Text.Json.JsonException) { /* skip malformed line */ }
+			}
+		}
+		foreach (var o in _discoveredOccs) union.Add(o);
+
+		var sorted = union.OrderBy(o => o, StringComparer.Ordinal).ToList();
+		var sb = new System.Text.StringBuilder();
+		foreach (var occ in sorted)
+			sb.Append("{\"occ\":\"").Append(occ).Append("\",\"ticker\":\"").Append(ticker.ToUpperInvariant()).Append("\"}\n");
+		var tmp = path + ".tmp";
+		File.WriteAllText(tmp, sb.ToString());
+		File.Move(tmp, path, overwrite: true);
+		Console.WriteLine($"discovery: {_discoveredOccs.Count} new + {union.Count - _discoveredOccs.Count} prior = {union.Count} OCC(s) cataloged at {path}");
 	}
 
 	private static IEnumerable<DateTime> EnumerateTradingDays(DateTime since, DateTime until)
