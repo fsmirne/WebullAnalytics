@@ -3,6 +3,7 @@ using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
+using WebullAnalytics.AI.Replay;
 using WebullAnalytics.Api;
 using WebullAnalytics.IO;
 using WebullAnalytics.Positions;
@@ -244,7 +245,8 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		}
 
 		var initialAmount = settings.InitialAmount;
-		var (rows, positions, running) = PositionTracker.ComputeReport(trades, initialAmount, feeLookup);
+		var closeLookup = await BuildUnderlyingCloseLookup(trades, cancellation);
+		var (rows, positions, running) = PositionTracker.ComputeReport(trades, initialAmount, feeLookup, closeLookup);
 		var tradeIndex = PositionTracker.BuildTradeIndex(trades);
 		var (positionRows, strategyAdjustments, singleLegStandalones) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
@@ -343,6 +345,45 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		}
 
 		return 0;
+	}
+
+	/// <summary>
+	/// Pre-loads underlying daily closes for every (ticker, expiryDate) pair referenced by an
+	/// already-expired option leg, then returns a synchronous lookup the position tracker can use
+	/// to settle ITM legs at intrinsic value. Unknown pairs map to null, falling back to the
+	/// legacy "expire worthless" behavior — so this is safe to call even when history is missing.
+	/// </summary>
+	private static async Task<Func<string, DateTime, decimal?>> BuildUnderlyingCloseLookup(List<Trade> trades, CancellationToken cancellation)
+	{
+		var today = EvaluationDate.Today;
+		var pairs = trades
+			.Where(t => t.Asset == Asset.Option && t.Expiry.HasValue && t.Expiry.Value.Date < today)
+			.Select(t => (Ticker: MatchKeys.GetTicker(t.MatchKey), Date: t.Expiry!.Value.Date))
+			.Where(p => !string.IsNullOrEmpty(p.Ticker))
+			.Distinct()
+			.ToList();
+
+		var dict = new Dictionary<(string ticker, DateTime date), decimal>();
+		if (pairs.Count > 0)
+		{
+			var cache = new HistoricalPriceCache();
+			foreach (var (ticker, date) in pairs)
+			{
+				try
+				{
+					var close = await cache.GetCloseAsync(ticker!, date, cancellation);
+					if (close.HasValue)
+						dict[(ticker!, date)] = close.Value;
+				}
+				catch (OperationCanceledException) { throw; }
+				catch
+				{
+					// Missing/unreadable history: leave the pair absent so the leg settles worthless.
+				}
+			}
+		}
+
+		return (ticker, date) => dict.TryGetValue((ticker, date.Date), out var v) ? v : (decimal?)null;
 	}
 
 	internal static Dictionary<string, decimal> ParseUnderlyingPriceOverrides(string input)
