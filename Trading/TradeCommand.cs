@@ -179,6 +179,18 @@ internal static class TradeContext
 	}
 
 	/// <summary>Synthesizes an OCC option symbol from leg fields. Returns null if any required field is missing/malformed.</summary>
+	/// <summary>Extracts the order's placement epoch (ms) for sorting. Prefers numeric place_time;
+	/// falls back to parsing ISO place_time_at; returns 0 when both are absent.</summary>
+	internal static long GetPlaceEpochMs(WebullOpenApiClient.OpenOrder co)
+	{
+		var o = co.Orders?.FirstOrDefault();
+		if (o == null) return 0;
+		if (!string.IsNullOrEmpty(o.PlaceTime) && long.TryParse(o.PlaceTime, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var ms)) return ms;
+		if (!string.IsNullOrEmpty(o.PlaceTimeAt) && System.DateTime.TryParse(o.PlaceTimeAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var dt))
+			return new System.DateTimeOffset(dt, System.TimeSpan.Zero).ToUnixTimeMilliseconds();
+		return 0;
+	}
+
 	internal static string? BuildOccSymbol(WebullOpenApiClient.OrderDetailLeg leg)
 	{
 		if (string.IsNullOrEmpty(leg.Symbol) || string.IsNullOrEmpty(leg.OptionType) || string.IsNullOrEmpty(leg.OptionExpireDate) || string.IsNullOrEmpty(leg.StrikePrice))
@@ -566,14 +578,14 @@ internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
 internal sealed class TradeListSettings : TradeSubcommandSettings
 {
 	[CommandOption("--debug")]
-	[Description("Print the raw JSON response from Webull instead of the formatted table.")]
+	[Description("Print the raw JSON response from /openapi/trade/order/open instead of the formatted table.")]
 	public bool Debug { get; set; }
-
-	[CommandOption("--today")]
-	[Description("List ALL of today's orders (any status: FILLED, WORKING, CANCELLED, etc.) instead of just open/working ones. Uses /openapi/trade/orders/list-today.")]
-	public bool Today { get; set; }
 }
 
+/// <summary>Lists currently-open (working) orders. Used both interactively and as the data source
+/// shape behind the dedup logic in `wa ai watch/scan --submit` (which calls the same underlying
+/// <see cref="WebullOpenApiClient.ListOpenOrdersAsync"/> via <see cref="AI.BrokerStateService"/>).
+/// For FILLED order history, see `wa trade history`.</summary>
 internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 {
 	public override async Task<int> ExecuteAsync(CommandContext context, TradeListSettings s, CancellationToken cancellation)
@@ -583,26 +595,29 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 
 		using var client = new WebullOpenApiClient(account);
 
-		List<WebullOpenApiClient.OpenOrder> orders;
-		try
+		if (s.Debug)
 		{
-			orders = s.Today
-				? await client.ListTodayOrdersAsync(cancellation)
-				: await client.ListOpenOrdersAsync(cancellation);
+			try
+			{
+				var raw = await client.ListOpenOrdersRawAsync(cancellation);
+				try { using var doc = System.Text.Json.JsonDocument.Parse(raw); AnsiConsole.WriteLine(System.Text.Json.JsonSerializer.Serialize(doc.RootElement, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })); }
+				catch { AnsiConsole.WriteLine(raw); }
+				return 0;
+			}
+			catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]List failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+			catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
 		}
+
+		List<WebullOpenApiClient.OpenOrder> orders;
+		try { orders = await client.ListOpenOrdersAsync(cancellation); }
 		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]List failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
 		catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
 
-		if (s.Debug)
-		{
-			AnsiConsole.WriteLine(System.Text.Json.JsonSerializer.Serialize(orders, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
-			return 0;
-		}
+		if (orders.Count == 0) { AnsiConsole.MarkupLine("[dim]No open order(s).[/]"); return 0; }
 
-		var label = s.Today ? "today's order(s)" : "open order(s)";
-		if (orders.Count == 0) { AnsiConsole.MarkupLine($"[dim]No {label}.[/]"); return 0; }
+		orders = orders.OrderBy(TradeContext.GetPlaceEpochMs).ToList();
 
-		AnsiConsole.MarkupLine($"[bold]{orders.Count} {label}:[/]");
+		AnsiConsole.MarkupLine($"[bold]{orders.Count} open order(s):[/]");
 		foreach (var o in orders)
 		{
 			var inner = o.Orders?.FirstOrDefault();
@@ -610,6 +625,164 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 		}
 		return 0;
 	}
+}
+
+// ─── `trade history` ──────────────────────────────────────────────────────────
+
+internal sealed class TradeHistorySettings : TradeSubcommandSettings
+{
+	[CommandOption("--debug")]
+	[Description("Print the raw JSON response from /openapi/trade/order/history instead of the formatted table. Bypasses the FILLED filter.")]
+	public bool Debug { get; set; }
+
+	[CommandOption("--start-date <YYYY-MM-DD>")]
+	[Description("Start date (yyyy-MM-dd). Defaults to today (ET). Max 2-year look-back.")]
+	public string? StartDate { get; set; }
+
+	[CommandOption("--end-date <YYYY-MM-DD>")]
+	[Description("End date (yyyy-MM-dd). Defaults to start-date + 1 (the API requires end > start, so 'today' means [today, tomorrow)).")]
+	public string? EndDate { get; set; }
+
+	[CommandOption("--all")]
+	[Description("Include CANCELLED/REJECTED/WORKING orders. Default is FILLED-only.")]
+	public bool All { get; set; }
+}
+
+/// <summary>Lists historical FILLED orders for a given period via /openapi/trade/order/history.
+/// Defaults to today (ET) when no dates are provided. Use --all-statuses to see cancellations etc.
+/// This is a read-only diagnostic; it does NOT feed the daily-cap or dedup logic in `wa ai watch/scan`
+/// (those use <see cref="WebullOpenApiClient.ListTodayOrdersAsync"/> directly).</summary>
+internal sealed class TradeHistoryCommand : AsyncCommand<TradeHistorySettings>
+{
+	public override async Task<int> ExecuteAsync(CommandContext context, TradeHistorySettings s, CancellationToken cancellation)
+	{
+		var account = TradeContext.ResolveOrExit(s.Account);
+		if (account == null) return 2;
+
+		using var client = new WebullOpenApiClient(account);
+
+		// The endpoint requires end_date > start_date (rejects same-day). Defaults:
+		//   neither flag → [today, today+1)
+		//   only --start-date X → [X, X+1)? no — extend through today+1 so "from X to now" works
+		//   only --end-date Y → [Y-1, Y) — single-day window ending at Y
+		var etTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+		var todayEt = TimeZoneInfo.ConvertTime(DateTime.UtcNow, etTz).Date;
+		var dateFmt = "yyyy-MM-dd";
+		var ci = System.Globalization.CultureInfo.InvariantCulture;
+		string startDate, endDate;
+		if (!string.IsNullOrEmpty(s.StartDate) && !string.IsNullOrEmpty(s.EndDate))
+		{
+			startDate = s.StartDate;
+			endDate = s.EndDate;
+		}
+		else if (!string.IsNullOrEmpty(s.StartDate))
+		{
+			startDate = s.StartDate;
+			var parsed = DateTime.ParseExact(s.StartDate, dateFmt, ci);
+			endDate = (todayEt > parsed ? todayEt : parsed).AddDays(1).ToString(dateFmt, ci);
+		}
+		else if (!string.IsNullOrEmpty(s.EndDate))
+		{
+			endDate = s.EndDate;
+			startDate = DateTime.ParseExact(s.EndDate, dateFmt, ci).AddDays(-1).ToString(dateFmt, ci);
+		}
+		else
+		{
+			startDate = todayEt.ToString(dateFmt, ci);
+			endDate = todayEt.AddDays(1).ToString(dateFmt, ci);
+		}
+
+		if (s.Debug)
+		{
+			try
+			{
+				var raw = await client.ListOrderHistoryRawAsync(startDate, endDate, cancellation);
+				try { using var doc = System.Text.Json.JsonDocument.Parse(raw); AnsiConsole.WriteLine(System.Text.Json.JsonSerializer.Serialize(doc.RootElement, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })); }
+				catch { AnsiConsole.WriteLine(raw); }
+				return 0;
+			}
+			catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]History failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+			catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
+		}
+
+		List<WebullOpenApiClient.OpenOrder> orders;
+		try { orders = await client.ListOrderHistoryAsync(startDate, endDate, cancellation); }
+		catch (WebullOpenApiException ex) { AnsiConsole.MarkupLine($"[red]History failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]"); return 3; }
+		catch (System.Net.Http.HttpRequestException ex) { AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}"); return 3; }
+
+		if (!s.All)
+			orders = orders.Where(co => co.Orders != null && co.Orders.Any(o => string.Equals(o.Status, "FILLED", StringComparison.OrdinalIgnoreCase))).ToList();
+
+		var label = $"{(s.All ? "" : "filled ")}order(s) {startDate}…{endDate}";
+		if (orders.Count == 0) { AnsiConsole.MarkupLine($"[dim]No {label}.[/]"); return 0; }
+
+		orders = orders.OrderBy(TradeContext.GetPlaceEpochMs).ToList();
+
+		AnsiConsole.MarkupLine($"[bold]{orders.Count} {label}:[/]");
+		foreach (var combo in orders)
+		{
+			var o = combo.Orders?.FirstOrDefault();
+			if (o == null) continue;
+			RenderHistoryOrder(combo, o, etTz);
+		}
+		return 0;
+	}
+
+	private static void RenderHistoryOrder(WebullOpenApiClient.OpenOrder combo, WebullOpenApiClient.OrderDetailOrder o, TimeZoneInfo etTz)
+	{
+		var when = FormatEtTimestamp(o.FilledTimeAt ?? o.PlaceTimeAt, etTz);
+		var intent = AbbrevPositionIntent(o.PositionIntent) ?? (o.Side ?? "?");
+		var priceSuffix = !string.IsNullOrEmpty(o.FilledPrice) ? $" @ {Markup.Escape(o.FilledPrice!)}" : "";
+		var qty = $"{Markup.Escape(o.FilledQuantity ?? "0")}/{Markup.Escape(o.TotalQuantity ?? "?")}";
+		var shortId = ShortenOrderId(combo.ClientOrderId);
+		var legCount = o.Legs?.Count ?? 0;
+
+		string contract;
+		if (legCount == 1)
+		{
+			contract = FormatLegInline(o.Legs![0]) ?? Markup.Escape(o.Symbol ?? "?");
+		}
+		else if (legCount > 1)
+		{
+			contract = $"{Markup.Escape(o.Symbol ?? "?")} [dim]({legCount}-leg {Markup.Escape(o.OptionStrategy ?? "?")})[/]";
+		}
+		else
+		{
+			contract = Markup.Escape(o.Symbol ?? "?");
+		}
+
+		AnsiConsole.MarkupLine($"  [dim]{Markup.Escape(when)}[/]  {contract}  [bold]{Markup.Escape(intent)}[/] {qty}{priceSuffix}  [dim]{Markup.Escape(o.Status ?? "?")}[/]  [dim]{Markup.Escape(shortId)}[/]");
+
+		if (legCount > 1 && o.Legs != null)
+			foreach (var leg in o.Legs)
+				AnsiConsole.MarkupLine($"    [dim]└─[/] {Markup.Escape(leg.Side ?? "?"),-4} {Markup.Escape(TradeContext.FormatQty(leg.Quantity))}× {FormatLegInline(leg) ?? Markup.Escape(leg.Symbol ?? "?")}");
+	}
+
+	private static string? FormatLegInline(WebullOpenApiClient.OrderDetailLeg leg)
+	{
+		if (string.IsNullOrEmpty(leg.Symbol) || string.IsNullOrEmpty(leg.OptionType) || string.IsNullOrEmpty(leg.StrikePrice) || string.IsNullOrEmpty(leg.OptionExpireDate)) return null;
+		var cp = leg.OptionType.Equals("CALL", StringComparison.OrdinalIgnoreCase) ? "C" : leg.OptionType.Equals("PUT", StringComparison.OrdinalIgnoreCase) ? "P" : "?";
+		var strike = decimal.TryParse(leg.StrikePrice, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var sd) ? sd.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) : leg.StrikePrice;
+		return $"{Markup.Escape(leg.Symbol)} {Markup.Escape(strike)}{cp} [dim]{Markup.Escape(leg.OptionExpireDate)}[/]";
+	}
+
+	private static string? AbbrevPositionIntent(string? intent) => intent switch
+	{
+		"BUY_TO_OPEN" => "BTO",
+		"SELL_TO_OPEN" => "STO",
+		"BUY_TO_CLOSE" => "BTC",
+		"SELL_TO_CLOSE" => "STC",
+		_ => null
+	};
+
+	private static string FormatEtTimestamp(string? iso, TimeZoneInfo etTz)
+	{
+		if (string.IsNullOrEmpty(iso)) return "-";
+		if (!DateTime.TryParse(iso, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var utc)) return iso;
+		return TimeZoneInfo.ConvertTimeFromUtc(utc, etTz).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + " ET";
+	}
+
+	private static string ShortenOrderId(string? id) => string.IsNullOrEmpty(id) ? "?" : id.Length <= 10 ? id : id[..8];
 }
 
 // ─── `trade positions` (diagnostic) ───────────────────────────────────────────
