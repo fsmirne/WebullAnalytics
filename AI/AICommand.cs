@@ -309,9 +309,11 @@ internal sealed class AIScanSettings : AISingleTickerSubcommandSettings
 		var date = Date != null
 			? DateTime.ParseExact(Date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture).Date
 			: NextBusinessDay(DateTime.Today);
-		// Stamp at 09:30 ET to match the backtest's per-step convention (HV/VIX lookups only use .Date,
-		// so the time is cosmetic — but the rendered banner reads cleaner with a real market-open time).
-		return date.Add(new TimeSpan(9, 30, 0));
+		// Stamp at 09:31 ET to match the backtest's per-step convention (the first RTH minute; the
+		// 09:30 bar is pre-market — see BacktestRunner.MarketOpenTime). HV/VIX lookups only use .Date
+		// so the time component is cosmetic for those, but option-chart cache lookups walk forward
+		// from this minute, and starting at 09:31 picks up the auction-cleared open print directly.
+		return date.Add(new TimeSpan(9, 31, 0));
 	}
 
 	private static DateTime NextBusinessDay(DateTime today)
