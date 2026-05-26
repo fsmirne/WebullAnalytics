@@ -35,6 +35,63 @@ public class WebullChartsClientTests
 	}
 
 	[Fact]
+	public void ParseOptionBarRow_FullRowWithIv_ReturnsBar()
+	{
+		// time,open,close,high,low,prevClose,volume,iv  (observed in /api/quote/option/chart/kdata)
+		var bar = WebullChartsClient.ParseOptionBarRow("1779806220,22.70,22.80,23.91,22.60,22.60,76,15.75");
+
+		Assert.NotNull(bar);
+		Assert.Equal(22.70m, bar!.Open);
+		Assert.Equal(22.80m, bar.Close);
+		Assert.Equal(23.91m, bar.High);
+		Assert.Equal(22.60m, bar.Low);
+		Assert.Equal(76, bar.Volume);
+		Assert.Equal(15.75m, bar.ImpliedVolatility);
+		Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1779806220), bar.Timestamp);
+	}
+
+	[Fact]
+	public void ParseOptionBarRow_MissingIv_ReturnsBarWithNullIv()
+	{
+		// 7-column row (no IV column) — still a valid bar; just no IV.
+		var bar = WebullChartsClient.ParseOptionBarRow("1779806220,22.70,22.80,23.91,22.60,22.60,76");
+		Assert.NotNull(bar);
+		Assert.Null(bar!.ImpliedVolatility);
+		Assert.Equal(22.80m, bar.Close);
+	}
+
+	[Fact]
+	public void ParseOptionBarRow_IvLiteralNull_TreatedAsMissing()
+	{
+		var bar = WebullChartsClient.ParseOptionBarRow("1779806220,22.70,22.80,23.91,22.60,22.60,76,null");
+		Assert.NotNull(bar);
+		Assert.Null(bar!.ImpliedVolatility);
+	}
+
+	[Fact]
+	public void ParseOptionBarRow_VolumeLiteralNull_BecomesZero()
+	{
+		// SPX index bars come back with volume="null"; check the option parser also handles that.
+		var bar = WebullChartsClient.ParseOptionBarRow("1779806220,22.70,22.80,23.91,22.60,22.60,null,15.75");
+		Assert.NotNull(bar);
+		Assert.Equal(0, bar!.Volume);
+		Assert.Equal(15.75m, bar.ImpliedVolatility);
+	}
+
+	[Fact]
+	public void ParseOptionBarRow_FailsOhlcSanity_ReturnsNull()
+	{
+		// high < max(open, close) — invalid bar.
+		Assert.Null(WebullChartsClient.ParseOptionBarRow("1779806220,22.70,22.80,22.50,22.60,22.60,76,15.75"));
+	}
+
+	[Fact]
+	public void ParseOptionBarRow_TruncatedRow_ReturnsNull()
+	{
+		Assert.Null(WebullChartsClient.ParseOptionBarRow("1779806220,22.70,22.80"));
+	}
+
+	[Fact]
 	public void ParseBarRow_TruncatedRow_ReturnsNull()
 	{
 		Assert.Null(WebullChartsClient.ParseBarRow("1747837800,5125.50,5128.25"));
