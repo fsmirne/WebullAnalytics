@@ -40,6 +40,17 @@ internal static class MassivePolygonClient
 	private static readonly TimeSpan MinRetryAfter = TimeSpan.FromSeconds(5);
 	private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromSeconds(90);
 
+	// Shared, long-lived client. Creating one HttpClient per call (the `using var client = new HttpClient()`
+	// pattern) churns through TCP sockets/ports — under a sustained bulk pull (e.g. 1000+ option contracts
+	// back-to-back) massive's edge starts dropping connections at the TLS handshake, surfacing as
+	// "The SSL connection could not be established" mid-loop. A single pooled client (HTTP/2 keep-alive)
+	// avoids the churn. Same fix already applied to WebullChartsClient for the identical symptom.
+	private static readonly HttpClient SharedClient = new();
+	// Backoff for transient transport errors (SSL handshake drops, connection resets). Distinct from the
+	// 429 path: those are rate-limit signals with Retry-After; these are connection-level hiccups that
+	// usually clear on an immediate retry once the socket pool recovers.
+	private static readonly TimeSpan TransportRetryDelay = TimeSpan.FromSeconds(2);
+
 	internal static async Task<IReadOnlyList<MinuteBar>> FetchMinuteAggregatesAsync(
 		string apiKey,
 		string ticker,
@@ -54,7 +65,7 @@ internal static class MassivePolygonClient
 		}
 		if (from > to) return Array.Empty<MinuteBar>();
 
-		using var client = new HttpClient();
+		var client = SharedClient;
 		var encodedTicker = Uri.EscapeDataString(ticker);
 		var encodedKey = Uri.EscapeDataString(apiKey);
 		var url = $"{BaseUrl}/v2/aggs/ticker/{encodedTicker}/range/1/minute/{from:yyyy-MM-dd}/{to:yyyy-MM-dd}?adjusted=true&sort=asc&limit=50000&apiKey={encodedKey}";
@@ -76,7 +87,18 @@ internal static class MassivePolygonClient
 				}
 				catch (Exception ex) when (ex is not OperationCanceledException)
 				{
-					Console.WriteLine($"Massive: request failed for {ticker} page {page}: {ex.Message}");
+					// Transient transport error (TLS handshake drop, connection reset). Retry a couple
+					// of times with a short backoff before giving up — the shared pooled client usually
+					// recovers the socket immediately. The throttle still applies on the retry.
+					if (retries < MaxRetriesPerUrl)
+					{
+						Console.WriteLine($"Massive: transport error on {ticker} page {page} ({ex.Message}); retry {retries + 1}/{MaxRetriesPerUrl} in {TransportRetryDelay.TotalSeconds:F0}s.");
+						try { await Task.Delay(TransportRetryDelay, cancellation); }
+						catch (OperationCanceledException) { return all; }
+						retries++;
+						continue;
+					}
+					Console.WriteLine($"Massive: request failed for {ticker} page {page} after {MaxRetriesPerUrl} retries: {ex.Message}");
 					return all;
 				}
 
