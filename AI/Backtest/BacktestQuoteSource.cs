@@ -30,6 +30,50 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(et, NyTz), TimeSpan.Zero);
 	}
 
+	/// <summary>Builds a real-IV value for <paramref name="targetStrike"/> from the captured strikes of
+	/// the same root+expiry+right at the minute, then interpolates/extrapolates to the target. For each
+	/// captured strike: use its reported IV if present (Webull-sourced), else back-solve IV from its
+	/// real open price via Black-Scholes inverse (massive-sourced contracts ship no IV). Linear
+	/// interpolation between bracketing strikes; flat extrapolation (nearest endpoint) beyond the
+	/// captured range — so a leg the opener reaches *outside* the band still prices on the real implied
+	/// vol rather than the ~10-points-too-low VIX1D anchor. Returns null when no captured strikes exist
+	/// for this expiry+right at the minute (caller falls back to the VIX1D-anchored synthetic).</summary>
+	private decimal? BuildSurfaceIv(string root, DateTime expiry, string callPut, decimal targetStrike, decimal spot, double timeYears, DateTimeOffset asOfUtc)
+	{
+		if (_optionBars == null) return null;
+		var points = _optionBars.GetCapturedQuotePoints(root, expiry, callPut, asOfUtc);
+		if (points.Count == 0) return null;
+
+		var ivByStrike = new List<(decimal Strike, decimal Iv)>(points.Count);
+		foreach (var p in points)
+		{
+			var iv = p.IvFraction;
+			if (!iv.HasValue || iv.Value <= 0m)
+			{
+				// Back-solve from the real open price. ImpliedVol clamps to [0.01, 5.0]; treat a result
+				// pinned at the floor as a failed solve (deep-OTM near-zero price) and skip it.
+				var solved = OptionMath.ImpliedVol(spot, p.Strike, timeYears, _riskFreeRate, p.Open, callPut);
+				if (solved > 0.011m && solved < 5m) iv = solved;
+			}
+			if (iv.HasValue && iv.Value > 0m) ivByStrike.Add((p.Strike, iv.Value));
+		}
+		if (ivByStrike.Count == 0) return null;
+		ivByStrike.Sort((a, b) => a.Strike.CompareTo(b.Strike));
+
+		if (ivByStrike.Count == 1 || targetStrike <= ivByStrike[0].Strike) return ivByStrike[0].Iv;
+		if (targetStrike >= ivByStrike[^1].Strike) return ivByStrike[^1].Iv;
+		for (var i = 1; i < ivByStrike.Count; i++)
+		{
+			if (targetStrike > ivByStrike[i].Strike) continue;
+			var (s0, iv0) = ivByStrike[i - 1];
+			var (s1, iv1) = ivByStrike[i];
+			if (s1 == s0) return iv0;
+			var w = (targetStrike - s0) / (s1 - s0);
+			return iv0 + w * (iv1 - iv0);
+		}
+		return ivByStrike[^1].Iv;
+	}
+
 	// Penny-pilot index ETFs: minimum half-spread $0.005 ($0.01 total), plus 0.5% of mid.
 	private const decimal IndexHalfSpreadFloor = 0.005m;
 	private const decimal IndexHalfSpreadPct = 0.005m;
@@ -166,16 +210,20 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			atmByRootDte.TryGetValue((parsed.Root, dte), out var atm);
 			smileScaleByRoot.TryGetValue(parsed.Root, out var smileScale);
 
-			// Prefer captured per-minute bar when available: bar close is the most accurate mid we have
-			// for the leg at this exact minute, and the bar's reported IV is the exchange-published
-			// per-strike skew rather than our parametric smile approximation. Volume comes for free.
+			// Prefer captured per-minute bar when available. Use the bar's OPEN, not its close: under the
+			// start-of-bar convention the bar at minute T spans T→T+1, so bar.Open is the price at the
+			// decision moment (T) while bar.Close is the price one minute later (T+1). The opener decides
+			// at minute T and takes the underlying spot from bar.Open (see BacktestRunner.EvaluateMinuteAsync),
+			// so the option must price off bar.Open too — using bar.Close leaks one minute of lookahead at
+			// every step of the intraday walk, which on 0DTE gamma compounds into wildly inflated win rates
+			// and returns. The bar's reported IV is the exchange-published per-strike skew; volume is free.
 			var capturedBar = _optionBars?.GetBar(sym, asOfUtc);
 			decimal price;
 			decimal? iv = null;
 			long? volume = null;
-			if (capturedBar != null && capturedBar.Close > 0m)
+			if (capturedBar != null && capturedBar.Open > 0m)
 			{
-				price = capturedBar.Close;
+				price = capturedBar.Open;
 				if (capturedBar.ImpliedVolatility.HasValue && capturedBar.ImpliedVolatility.Value > 0m)
 				{
 					// CSV stores IV as percentage (e.g. 15.74 = 15.74%); internal representation is the
@@ -188,21 +236,34 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				}
 				if (capturedBar.Volume > 0) volume = capturedBar.Volume;
 			}
-			else if (atm.HasValue)
+			else
 			{
-				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
-				// 0DTE TTE: when the intraday opener loop passes a per-call overrides.ZeroDteTimeYears,
-				// use it (remaining session from the current minute to 16:00 ET). Otherwise use the
-				// day-step constant — conceptually "morning of day X", a full session of theta remains.
-				// Settlement (Expire) uses intrinsic so the time component is collected, not double-counted.
+				// No captured bar for this leg. 0DTE TTE: per-call override (remaining session) for the
+				// intraday loop, else the day-step constant. Used for both the missing-leg BS price AND
+				// the back-solve of captured neighbors so the surface and the leg share one TTE.
 				var timeYears = dte <= 0
 					? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears)
 					: dte / 365.0;
-				price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv!.Value, parsed.CallPut);
-			}
-			else
-			{
-				price = parsed.CallPut == "C" ? Math.Max(0m, spot - parsed.Strike) : Math.Max(0m, parsed.Strike - spot);
+
+				// Prefer an IV from the captured strikes of the SAME expiry+right (the real-IV surface)
+				// over the VIX1D-anchored synthetic. Captured contracts from massive carry no IV, so we
+				// back-solve it from their real open price (Black-Scholes inverse) — this is what keeps a
+				// spread's missing/out-of-band leg on the same real-IV basis as its captured legs. Pricing
+				// the missing leg with VIX1D (~10 IV points below the real 0DTE surface) is what fabricated
+				// spread credit and inflated the backtest. Falls back to VIX1D-anchored ATM+smile only when
+				// no captured strikes exist for this expiry+right at this minute.
+				var surfaceIv = parsed.CallPut != null
+					? BuildSurfaceIv(parsed.Root, parsed.ExpiryDate, parsed.CallPut, parsed.Strike, spot, timeYears, asOfUtc)
+					: null;
+				if (surfaceIv.HasValue && surfaceIv.Value > 0m)
+					iv = surfaceIv.Value;
+				else if (atm.HasValue)
+					iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
+
+				if (iv.HasValue)
+					price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv.Value, parsed.CallPut);
+				else
+					price = parsed.CallPut == "C" ? Math.Max(0m, spot - parsed.Strike) : Math.Max(0m, parsed.Strike - spot);
 			}
 
 			var halfSpread = HalfSpreadFor(parsed.Root, price);
