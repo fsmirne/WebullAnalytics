@@ -34,6 +34,7 @@ internal sealed class BacktestRunner
 	private readonly bool _discover;
 	private readonly int _discoverTopKPerDay;
 	private readonly int _discoverPadStrikes;
+	private readonly int? _fixedContracts;
 	private readonly HashSet<string> _discoveredOccs = new(StringComparer.OrdinalIgnoreCase);
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
@@ -45,7 +46,7 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null)
 	{
 		_config = config;
 		_book = book;
@@ -59,6 +60,7 @@ internal sealed class BacktestRunner
 		_discover = discover;
 		_discoverTopKPerDay = Math.Max(1, discoverTopKPerDay);
 		_discoverPadStrikes = Math.Max(0, discoverPadStrikes);
+		_fixedContracts = fixedContracts;
 		// Disk-only cache for backtest: the fetcher returns empty so any missing minute file fails
 		// closed (we fall back to the single 09:30 fill path). The on-disk read path serves the
 		// backfilled data/intraday/<TICKER>/<date>.csv files that the Polygon-mirror import created.
@@ -163,14 +165,12 @@ internal sealed class BacktestRunner
 				foreach (var p in openProposals)
 				{
 					if (opened >= _topNPerStep) break;
-					if (p.CashReserveBlocked) continue;
-					if (p.Qty < 1) continue;
-					var requiredCash = p.CapitalAtRiskPerContract * p.Qty;
-					if (requiredCash > _book.Cash) continue;
+					var qty = ResolveOpenQty(p);
+					if (qty < 1) continue;
 
-					var legFills = BuildLegFillsFromProposal(p.Legs, p.Qty);
+					var legFills = BuildLegFillsFromProposal(p.Legs, qty);
 					if (legFills == null) continue;
-					if (_book.Open(step, p.Ticker, p.StructureKind, legFills, p.Qty))
+					if (_book.Open(step, p.Ticker, p.StructureKind, legFills, qty))
 					{
 						opened++;
 					}
@@ -294,6 +294,22 @@ internal sealed class BacktestRunner
 			fills.Add(new BacktestLegFill(l.Symbol, side, qty, mid));
 		}
 		return fills;
+	}
+
+	/// <summary>Resolves the contract quantity for an open. Normal mode uses the evaluator's
+	/// cash/risk-scaled <c>Qty</c> and honors the cash-reserve and free-cash gates (returns 0 to skip).
+	/// Fixed-lots mode (<c>--lots N</c>) overrides to a flat N every trade and ignores cash entirely:
+	/// terminal P&amp;L becomes the additive sum of per-trade results instead of a compounding curve, and
+	/// every endorsed signal trades regardless of bankroll — so a sweep measures per-trade edge, not the
+	/// position-sizing feedback loop (which otherwise compounds a small base until it dwarfs the signal,
+	/// or overflows).</summary>
+	private int ResolveOpenQty(OpenProposal p)
+	{
+		if (_fixedContracts.HasValue) return _fixedContracts.Value;
+		if (p.CashReserveBlocked) return 0;
+		if (p.Qty < 1) return 0;
+		if (p.CapitalAtRiskPerContract * p.Qty > _book.Cash) return 0;
+		return p.Qty;
 	}
 
 	/// <summary>For opener proposals, the leg's <c>PricePerShare</c> is already set by the candidate scorer
@@ -788,12 +804,10 @@ internal sealed class BacktestRunner
 			foreach (var p in openProposals)
 			{
 				if (!_oracle && opened >= _topNPerStep) break;
-				if (p.CashReserveBlocked) continue;
-				if (p.Qty < 1) continue;
-				var requiredCash = p.CapitalAtRiskPerContract * p.Qty;
-				if (requiredCash > _book.Cash) continue;
+				var qty = ResolveOpenQty(p);
+				if (qty < 1) continue;
 
-				var legFills = BuildLegFillsFromProposal(p.Legs, p.Qty);
+				var legFills = BuildLegFillsFromProposal(p.Legs, qty);
 				if (legFills == null) continue;
 
 				if (_oracle)
@@ -805,7 +819,7 @@ internal sealed class BacktestRunner
 				}
 				else
 				{
-					if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, p.Qty))
+					if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, qty))
 					{
 						opened++;
 					}
@@ -1161,13 +1175,18 @@ internal sealed record BacktestResult(
 	public decimal EndingEquity => StartingCash + TotalPnL;
 
 	/// <summary>Per-lifecycle wins/losses (closed lineages only).</summary>
+	/// <summary>Per-closed-lifecycle realized P&amp;L — one entry per lineage that ended in Close/Expire.
+	/// The building block for per-trade edge stats (expectancy, win/loss averages, profit factor) which,
+	/// unlike compounded terminal equity, don't depend on position sizing.</summary>
+	public IReadOnlyList<decimal> LifecyclePnLs() => Fills
+		.GroupBy(f => f.LineageId)
+		.Where(g => g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire))
+		.Select(g => g.Sum(f => f.NetCashFlow - f.Fees))
+		.ToList();
+
 	public (int wins, int losses) LifecycleWinLoss()
 	{
-		var closed = Fills
-			.GroupBy(f => f.LineageId)
-			.Where(g => g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire))
-			.Select(g => g.Sum(f => f.NetCashFlow - f.Fees))
-			.ToList();
+		var closed = LifecyclePnLs();
 		return (closed.Count(p => p > 0m), closed.Count(p => p <= 0m));
 	}
 }

@@ -772,12 +772,18 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Override opener.realizedExpectancy.profitTargetPctOfMaxProfit for this run. 1.0 = no profit cap (ride to expiry); 0.5 = close at half max profit. Range 0..1.")]
 	public decimal? TpOverride { get; set; }
 
+	[CommandOption("--lots <N>")]
+	[Description("Fixed contracts per trade (sizing-neutral). Every open trades exactly N contracts and the cash/reserve gates are bypassed, so terminal P&L is the additive sum of per-trade results instead of a compounding curve — use this to measure per-trade edge (expectancy, profit factor) without the position-sizing feedback loop. Omit for normal equity-scaled sizing.")]
+	public int? Lots { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 		if (TpOverride.HasValue && (TpOverride.Value <= 0m || TpOverride.Value > 1m))
 			return ValidationResult.Error($"--tp: must be in (0, 1], got {TpOverride}");
+		if (Lots.HasValue && Lots.Value < 1)
+			return ValidationResult.Error($"--lots: must be ≥ 1, got {Lots}");
 		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--since: must be YYYY-MM-DD, got '{Since}'");
 		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
@@ -900,9 +906,9 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots);
 
-		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}");
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
 
 		var result = await runner.RunAsync(since, until, cancellation);
