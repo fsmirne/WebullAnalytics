@@ -287,7 +287,11 @@ internal static class OptionMath
 		{
 			var price = BlackScholes(spot, strike, timeYears, riskFreeRate, vol, callPut);
 			var vega = Vega(spot, strike, timeYears, riskFreeRate, vol);
-			if (vega == 0m) break;
+			// Vega is non-negative; for a deep OTM/ITM leg it's tiny-but-nonzero, where the price is
+			// effectively vol-insensitive and Newton can't converge. An exact `== 0` guard misses that
+			// case and `diff / vega` then divides by ~1e-30, overflowing the decimal range (throws
+			// "Value too large for a Decimal"). Treat any negligible vega as non-convergent and stop.
+			if (vega <= 1e-8m) break;
 			var diff = price - marketPrice;
 			if (Math.Abs(diff) < 0.005m) break;
 			vol -= diff / vega;
