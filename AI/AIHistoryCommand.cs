@@ -23,7 +23,13 @@ namespace WebullAnalytics.AI;
 /// Intraday backfill: if api-config.json has a populated <c>massiveApiKey</c>, also fills
 /// <c>data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv</c> for every trading day in the lookback window
 /// whose file is missing or partial. Closes the gap when the live bot was offline (holidays, outages,
-/// late starts). Today's date is never touched — the live Webull capture owns it.</summary>
+/// late starts). Today's date is never touched — the live Webull capture owns it.
+///
+/// Option contracts: every run also fetches the live option chain and registers each contract's Webull
+/// derivativeId. Ids are perishable — they drop off the chain at expiry, and the id is the only key back
+/// to a contract's minute/IV history via the chart endpoint — so banking them here lets `wa options
+/// discover`/`backfill` pull that data any time later. Run during market hours to capture same-day 0DTE
+/// ids. `--partial` does NOT change this: both plain and `--partial` runs register the full chain.</summary>
 internal sealed class AIHistorySettings : CommandSettings
 {
 	[CommandArgument(0, "<ticker>")]
@@ -92,6 +98,10 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 		if (settings.Partial)
 		{
+			// --partial only changes the UNDERLYING tape (capture today's incomplete bars vs. the normal
+			// backfill that skips today). Option-contract id capture is identical to a normal run — the
+			// full live chain gets registered either way.
+			await CaptureContractIdsAsync(ticker, cancellation);
 			return await CapturePartialTodayAsync(ticker, asOf, cancellation);
 		}
 
@@ -127,9 +137,13 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// command in the evening, the cache stalls.
 		await RefreshSentimentCacheAsync(earliest, asOf, cancellation);
 
-		// Per-contract option backfill is opt-in via --options (it's a different lifecycle — driven by
-		// the live-grown derivative-id registry, not by a lookback window). Surface a hint so the user
-		// discovers it once they have contracts queued up.
+		// Register every currently-live contract's Webull derivativeId. Ids are perishable (gone from the
+		// chain at expiry) and are the only key back to a contract's minute/IV history, so we bank them on
+		// every history run; run during market hours to catch same-day 0DTE. `wa options discover` then
+		// decides which contracts matter and `wa options backfill` pulls their per-contract minute bars.
+		await CaptureContractIdsAsync(ticker, cancellation);
+
+		// Surface a hint for contracts whose ids are banked but whose minute data isn't on disk yet.
 		var pendingOptions = AIHistoryOptionsBackfill.CountUnbackfilledContracts(ticker);
 		if (pendingOptions > 0)
 			AnsiConsole.MarkupLine($"  options: [yellow]{pendingOptions} contract(s) in registry not yet backfilled[/] — run `wa options backfill {Markup.Escape(ticker)}` to pull per-contract minute bars");
@@ -847,6 +861,35 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		AnsiConsole.MarkupLine($"  [green]captured {clamped.Count} bar(s)[/] (04:00 ET → now) → data/intraday/{Markup.Escape(ticker)}/{todayNy:yyyy-MM-dd}.csv");
 		AnsiConsole.MarkupLine($"  [dim]not added to sealed.json (session incomplete); run `wa ai history {Markup.Escape(ticker)}` tomorrow to finalize + seal[/]");
 		return 0;
+	}
+
+	/// <summary>Fetches the full live option chain for <paramref name="ticker"/> solely to register every
+	/// contract's Webull derivativeId. The chain only lists non-expired contracts, and once a contract
+	/// expires its id — the sole key to its minute/IV history via the chart endpoint — is no longer
+	/// discoverable. The DATA can be pulled any time afterward (`wa options backfill`), but only if the id
+	/// was banked while the contract was live, which is why this runs on every history pass and must run
+	/// during market hours to catch same-day 0DTE. Best-effort: a missing api-config or a failed fetch
+	/// warns and returns without failing the command — the underlying caches are the primary deliverable.</summary>
+	private static async Task CaptureContractIdsAsync(string ticker, CancellationToken cancellation)
+	{
+		var apiConfig = TryLoadApiConfig();
+		if (apiConfig == null || apiConfig.Headers.Count == 0)
+		{
+			AnsiConsole.MarkupLine("  contract ids: [yellow]skipped[/] (api-config.json missing/empty — run `wa sniff`)");
+			return;
+		}
+		try
+		{
+			var before = DerivativeIdRegistry.Snapshot().Count;
+			var (_, _, ids) = await WebullOptionsClient.FetchChainAsync(apiConfig, ticker, cancellation);
+			var added = DerivativeIdRegistry.Snapshot().Count - before;
+			AnsiConsole.MarkupLine($"  contract ids: [green]{ids.Count}[/] live contract(s) on the chain ([green]+{added}[/] new in registry)");
+		}
+		catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { throw; }
+		catch (Exception ex)
+		{
+			AnsiConsole.MarkupLine($"  contract ids: [yellow]skipped[/] ({Markup.Escape(ex.Message)})");
+		}
 	}
 
 	private static ApiConfig? TryLoadApiConfig()
