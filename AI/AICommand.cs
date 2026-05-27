@@ -768,10 +768,16 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Force-enable a structure for this run (repeatable). Names: longCalendar, doubleCalendar, longDiagonal, doubleDiagonal, ironButterfly, ironCondor, shortVertical, longCallPut, longVertical. Sets the structure's Enabled=true on top of the merged config; doesn't disable other enabled structures.")]
 	public string[] EnableStructures { get; set; } = Array.Empty<string>();
 
+	[CommandOption("--tp <VALUE>")]
+	[Description("Override opener.realizedExpectancy.profitTargetPctOfMaxProfit for this run. 1.0 = no profit cap (ride to expiry); 0.5 = close at half max profit. Range 0..1.")]
+	public decimal? TpOverride { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
+		if (TpOverride.HasValue && (TpOverride.Value <= 0m || TpOverride.Value > 1m))
+			return ValidationResult.Error($"--tp: must be in (0, 1], got {TpOverride}");
 		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--since: must be YYYY-MM-DD, got '{Since}'");
 		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
@@ -808,6 +814,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (settings.BiasDriftOverride.HasValue) config.Opener.Weights.BiasDrift = settings.BiasDriftOverride.Value;
 		if (settings.MinScoreToOpenOverride.HasValue) config.Opener.MinScoreToOpen = settings.MinScoreToOpenOverride.Value;
 		if (settings.IntradayTapeWeightOverride.HasValue) config.Opener.Weights.IntradayTape = settings.IntradayTapeWeightOverride.Value;
+		if (settings.TpOverride.HasValue) config.Opener.RealizedExpectancy.ProfitTargetPctOfMaxProfit = settings.TpOverride.Value;
 		foreach (var name in settings.EnableStructures)
 		{
 			switch (name.ToLowerInvariant())
