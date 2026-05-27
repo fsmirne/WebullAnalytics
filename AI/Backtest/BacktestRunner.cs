@@ -33,6 +33,7 @@ internal sealed class BacktestRunner
 	private readonly bool _profile;
 	private readonly bool _discover;
 	private readonly int _discoverTopKPerDay;
+	private readonly int _discoverPadStrikes;
 	private readonly HashSet<string> _discoveredOccs = new(StringComparer.OrdinalIgnoreCase);
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
@@ -44,7 +45,7 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2)
 	{
 		_config = config;
 		_book = book;
@@ -57,6 +58,7 @@ internal sealed class BacktestRunner
 		_profile = profile;
 		_discover = discover;
 		_discoverTopKPerDay = Math.Max(1, discoverTopKPerDay);
+		_discoverPadStrikes = Math.Max(0, discoverPadStrikes);
 		// Disk-only cache for backtest: the fetcher returns empty so any missing minute file fails
 		// closed (we fall back to the single 09:30 fill path). The on-disk read path serves the
 		// backfilled data/intraday/<TICKER>/<date>.csv files that the Polygon-mirror import created.
@@ -1015,26 +1017,34 @@ internal sealed class BacktestRunner
 		foreach (var p in topK) RecordDiscoveredLegs(p.Legs);
 	}
 
-	/// <summary>Writes the union of discovered OCCs to <c>data/options-discovery/&lt;ticker&gt;.jsonl</c>.
-	/// One JSON line per OCC: <c>{"occ":"SPXW260526C07530000","ticker":"SPXW"}</c>. Re-reads the existing
-	/// file first so the union accumulates across multiple backtest runs — a user who runs three different
-	/// date ranges over time builds up a comprehensive catalog of contracts the strategy would ever pick.
+	/// <summary>Writes the discovery catalog to <c>data/options-discovery/&lt;ticker&gt;.jsonl</c>. Two kinds
+	/// of line: a <em>picked</em> OCC the evaluator actually chose (<c>{"occ":"…","ticker":"SPXW"}</c>),
+	/// and a <em>padded</em> OCC derived from the picked set to widen each (expiry,right) strike range
+	/// (<c>{"occ":"…","ticker":"SPXW","pad":true}</c>). Picked entries accumulate across runs (re-reads
+	/// and unions the existing file) so a user sweeping multiple windows builds up a comprehensive
+	/// strategy footprint. Padding is recomputed fresh every run from the picked set only — pad entries
+	/// are excluded on re-read so the band can't creep outward run over run.
 	///
-	/// <para>Per-ticker file split keeps the catalog readable when the user backtests multiple tickers;
-	/// the file's ticker matches the first ticker in the config (typically the only one for SPXW-focused
-	/// runs). Atomic write via tmp+rename so a crash mid-write can't truncate the catalog.</para></summary>
+	/// <para>The padding lives here, in discovery, on purpose: discovery is the single source of truth
+	/// for "what contracts the strategy needs," and a sweep that nudges the chosen strike by a notch
+	/// should still land on a captured bar. <c>wa options backfill</c> stays a dumb fetcher that pulls
+	/// every <c>occ</c> in this file. Off-grid padded strikes that don't exist on the real chain come
+	/// back empty from the source and are harmlessly skipped at fetch time.</para>
+	///
+	/// <para>Atomic write via tmp+rename so a crash mid-write can't truncate the catalog.</para></summary>
 	private void FlushDiscoveryLog()
 	{
 		if (_discoveredOccs.Count == 0) return;
 		var ticker = _config.Tickers.FirstOrDefault();
 		if (string.IsNullOrWhiteSpace(ticker)) return;
+		var tk = ticker.ToUpperInvariant();
 
 		var dir = Program.ResolvePath("data/options-discovery");
 		Directory.CreateDirectory(dir);
-		var path = Path.Combine(dir, ticker.ToUpperInvariant() + ".jsonl");
+		var path = Path.Combine(dir, tk + ".jsonl");
 
-		// Read existing entries (if any) into a set, merge with newly-discovered, write back.
-		var union = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		// Accumulate PICKED entries across runs; skip pad:true entries so padding recomputes fresh.
+		var picked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		if (File.Exists(path))
 		{
 			foreach (var line in File.ReadAllLines(path))
@@ -1043,22 +1053,65 @@ internal sealed class BacktestRunner
 				try
 				{
 					using var doc = System.Text.Json.JsonDocument.Parse(line);
-					if (doc.RootElement.TryGetProperty("occ", out var el) && el.GetString() is { } occ)
-						union.Add(occ);
+					var root = doc.RootElement;
+					if (root.TryGetProperty("pad", out var padEl) && padEl.ValueKind == System.Text.Json.JsonValueKind.True) continue;
+					if (root.TryGetProperty("occ", out var el) && el.GetString() is { } occ)
+						picked.Add(occ);
 				}
 				catch (System.Text.Json.JsonException) { /* skip malformed line */ }
 			}
 		}
-		foreach (var o in _discoveredOccs) union.Add(o);
+		var newPicked = _discoveredOccs.Count(o => picked.Add(o));
 
-		var sorted = union.OrderBy(o => o, StringComparer.Ordinal).ToList();
+		var padded = ComputePaddedGrid(picked, _discoverPadStrikes);
+		padded.ExceptWith(picked); // a strike that's both picked and on the padded grid stays a picked line
+
 		var sb = new System.Text.StringBuilder();
-		foreach (var occ in sorted)
-			sb.Append("{\"occ\":\"").Append(occ).Append("\",\"ticker\":\"").Append(ticker.ToUpperInvariant()).Append("\"}\n");
+		foreach (var occ in picked.OrderBy(o => o, StringComparer.Ordinal))
+			sb.Append("{\"occ\":\"").Append(occ).Append("\",\"ticker\":\"").Append(tk).Append("\"}\n");
+		foreach (var occ in padded.OrderBy(o => o, StringComparer.Ordinal))
+			sb.Append("{\"occ\":\"").Append(occ).Append("\",\"ticker\":\"").Append(tk).Append("\",\"pad\":true}\n");
 		var tmp = path + ".tmp";
 		File.WriteAllText(tmp, sb.ToString());
 		File.Move(tmp, path, overwrite: true);
-		Console.WriteLine($"discovery: {_discoveredOccs.Count} new + {union.Count - _discoveredOccs.Count} prior = {union.Count} OCC(s) cataloged at {path}");
+		Console.WriteLine($"discovery: {newPicked} new + {picked.Count - newPicked} prior = {picked.Count} picked OCC(s); +{padded.Count} padded (±{_discoverPadStrikes}) = {picked.Count + padded.Count} cataloged at {path}");
+	}
+
+	/// <summary>Expands the picked OCCs into a full per-strike grid for each (root, expiry, right): infers
+	/// the grid step from the smallest gap between picked strikes, then walks from <c>min - pad*step</c>
+	/// to <c>max + pad*step</c> filling every grid strike (so interior gaps are completed and the range
+	/// is widened by <paramref name="pad"/> strikes on each side). Groups with fewer than two picked
+	/// strikes are skipped — there's no way to infer the step from a single strike.</summary>
+	private static HashSet<string> ComputePaddedGrid(IEnumerable<string> occs, int pad)
+	{
+		var groups = new Dictionary<(string Root, DateTime Expiry, string Right), List<decimal>>();
+		foreach (var occ in occs)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(occ);
+			if (p?.CallPut == null) continue;
+			var key = (p.Root.ToUpperInvariant(), p.ExpiryDate.Date, p.CallPut);
+			if (!groups.TryGetValue(key, out var list)) groups[key] = list = new();
+			list.Add(p.Strike);
+		}
+
+		var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		foreach (var (key, strikes) in groups)
+		{
+			if (strikes.Count < 2) continue;
+			strikes.Sort();
+			var step = decimal.MaxValue;
+			for (var i = 1; i < strikes.Count; i++) step = Math.Min(step, strikes[i] - strikes[i - 1]);
+			if (step <= 0m || step == decimal.MaxValue) continue;
+
+			var lo = strikes[0] - pad * step;
+			var hi = strikes[^1] + pad * step;
+			for (var s = lo; s <= hi; s += step)
+			{
+				if (s <= 0m) continue;
+				result.Add(MatchKeys.OccSymbol(key.Root, key.Expiry, s, key.Right));
+			}
+		}
+		return result;
 	}
 
 	private static IEnumerable<DateTime> EnumerateTradingDays(DateTime since, DateTime until)

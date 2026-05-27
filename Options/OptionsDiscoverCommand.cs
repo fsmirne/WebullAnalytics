@@ -29,6 +29,10 @@ internal sealed class OptionsDiscoverSettings : AISingleTickerSubcommandSettings
 	[Description("Capture the top-K candidates the evaluator considered each day (by FinalScore), deduped by proposal fingerprint across the day's minutes. Larger K = broader sweep coverage at the cost of more contracts to backfill. Set to 1 for legacy 1-OCC-per-day behavior. Default: 20.")]
 	public int TopK { get; set; } = 20;
 
+	[CommandOption("--pad <N>")]
+	[Description("Widen each (expiry,right) strike range by N grid steps on both sides (and fill interior gaps) in the discovery catalog, so a sweep that nudges the chosen strike still lands on a captured bar instead of a back-solved one. 0 = picked strikes + interior gaps only. Larger N = more contracts to backfill. Default: 2.")]
+	public int Pad { get; set; } = 2;
+
 	[CommandOption("--bias-drift <VALUE>")]
 	[Description("Override opener.weights.biasDrift for this run. Used to sweep directional-bias regimes (each variant contributes new picks to the same discovery file).")]
 	public decimal? BiasDriftOverride { get; set; }
@@ -55,6 +59,7 @@ internal sealed class OptionsDiscoverSettings : AISingleTickerSubcommandSettings
 		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--until: must be YYYY-MM-DD, got '{Until}'");
 		if (TopK < 1) return ValidationResult.Error($"--top-k: must be >= 1, got {TopK}");
+		if (Pad < 0) return ValidationResult.Error($"--pad: must be >= 0, got {Pad}");
 		if (BiasDriftOverride.HasValue && BiasDriftOverride.Value < 0m)
 			return ValidationResult.Error($"--bias-drift: must be >= 0, got {BiasDriftOverride}");
 		if (IntradayTapeWeightOverride.HasValue && (IntradayTapeWeightOverride.Value < 0m || IntradayTapeWeightOverride.Value > 1m))
@@ -118,7 +123,7 @@ internal sealed class OptionsDiscoverCommand : AsyncCommand<OptionsDiscoverSetti
 		var book = new SimulatedBook(10000m, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new BacktestPositionSource(book, quotes);
 		var runner = new BacktestRunner(config, book, positions, quotes, bars, closes,
-			topNPerStep: 1, oracle: false, profile: false, discover: true, discoverTopKPerDay: settings.TopK);
+			topNPerStep: 1, oracle: false, profile: false, discover: true, discoverTopKPerDay: settings.TopK, discoverPadStrikes: settings.Pad);
 
 		_ = await runner.RunAsync(since, until, cancellation);
 		// FlushDiscoveryLog inside the runner prints the "N new + M prior" summary — that's the only
