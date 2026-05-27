@@ -776,12 +776,18 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Fixed contracts per trade (sizing-neutral). Every open trades exactly N contracts and the cash/reserve gates are bypassed, so terminal P&L is the additive sum of per-trade results instead of a compounding curve — use this to measure per-trade edge (expectancy, profit factor) without the position-sizing feedback loop. Omit for normal equity-scaled sizing.")]
 	public int? Lots { get; set; }
 
+	[CommandOption("--sl <VALUE>")]
+	[Description("Override opener.realizedExpectancy.stopLossPctOfMaxLoss for this run. 1.0 = SL effectively off (ride to expiry/settlement); 0.5 = cut at half of max loss. Range (0,1].")]
+	public decimal? SlOverride { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 		if (TpOverride.HasValue && (TpOverride.Value <= 0m || TpOverride.Value > 1m))
 			return ValidationResult.Error($"--tp: must be in (0, 1], got {TpOverride}");
+		if (SlOverride.HasValue && (SlOverride.Value <= 0m || SlOverride.Value > 1m))
+			return ValidationResult.Error($"--sl: must be in (0, 1], got {SlOverride}");
 		if (Lots.HasValue && Lots.Value < 1)
 			return ValidationResult.Error($"--lots: must be ≥ 1, got {Lots}");
 		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
@@ -821,6 +827,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (settings.MinScoreToOpenOverride.HasValue) config.Opener.MinScoreToOpen = settings.MinScoreToOpenOverride.Value;
 		if (settings.IntradayTapeWeightOverride.HasValue) config.Opener.Weights.IntradayTape = settings.IntradayTapeWeightOverride.Value;
 		if (settings.TpOverride.HasValue) config.Opener.RealizedExpectancy.ProfitTargetPctOfMaxProfit = settings.TpOverride.Value;
+		if (settings.SlOverride.HasValue) config.Opener.RealizedExpectancy.StopLossPctOfMaxLoss = settings.SlOverride.Value;
 		foreach (var name in settings.EnableStructures)
 		{
 			switch (name.ToLowerInvariant())
