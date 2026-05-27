@@ -216,6 +216,26 @@ internal static class BacktestSummaryRenderer
 		table.AddRow("Expirations", result.ExpireFills.ToString());
 		table.AddRow("Win rate (closed lifecycles)", totalClosedLifecycles > 0 ? $"{winRate:F1}% ({wins} W / {losses} L)" : "—");
 
+		// Per-trade edge stats. Unlike terminal P&L (which compounds with position sizing), these are
+		// the sizing-robust read on whether the strategy has an edge: expectancy is the average $ per
+		// trade, and profit factor (gross win / gross loss) is dimensionless — both meaningful even when
+		// terminal equity is dominated by the compounding feedback loop. Under `--lots N` they are the
+		// primary metric, since terminal P&L is then just their additive sum.
+		var pnls = result.LifecyclePnLs();
+		if (pnls.Count > 0)
+		{
+			var winPnls = pnls.Where(p => p > 0m).ToList();
+			var lossPnls = pnls.Where(p => p <= 0m).ToList();
+			var avgWin = winPnls.Count > 0 ? winPnls.Average() : 0m;
+			var avgLoss = lossPnls.Count > 0 ? lossPnls.Average() : 0m;
+			var expectancy = pnls.Average();
+			var grossLoss = Math.Abs(lossPnls.Sum());
+			var profitFactor = grossLoss > 0m ? winPnls.Sum() / grossLoss : 0m;
+			table.AddRow("Avg win / loss (per trade)", $"[green]${avgWin:N2}[/] / [red]${avgLoss:N2}[/]");
+			table.AddRow("Expectancy (per trade)", $"[{(expectancy >= 0 ? "green" : "red")}]${expectancy:N2}[/]");
+			table.AddRow("Profit factor", profitFactor > 0m ? $"{profitFactor:F2}" : "—");
+		}
+
 		AnsiConsole.Write(table);
 		AnsiConsole.WriteLine();
 	}
