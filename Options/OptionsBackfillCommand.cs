@@ -25,9 +25,15 @@ internal sealed class OptionsBackfillSettings : CommandSettings
 	[Description("Backfill every registry entry matching the ticker (full chain — typically tens of thousands of strikes including illiquid wings the bot never touched). Without this flag, the backfill defaults to contracts that appear in `ai-proposals.jsonl`, `orders.jsonl`, or `data/options-discovery/<TICKER>.jsonl`.")]
 	public bool All { get; set; }
 
+	[CommandOption("--since <DATE>")]
+	[Description("Only backfill contracts whose expiry is on or after this date (YYYY-MM-DD). Bounds the work to a window of interest — e.g. --since 2026-01-01 to focus on the YTD sweep window instead of the full multi-year catalog.")]
+	public string? Since { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("ticker is required");
+		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
+			return ValidationResult.Error($"--since: must be YYYY-MM-DD, got '{Since}'");
 		return ValidationResult.Success();
 	}
 }
@@ -37,6 +43,9 @@ internal sealed class OptionsBackfillCommand : AsyncCommand<OptionsBackfillSetti
 	public override async Task<int> ExecuteAsync(CommandContext context, OptionsBackfillSettings settings, CancellationToken cancellation)
 	{
 		var ticker = settings.Ticker.ToUpperInvariant();
-		return await AIHistoryOptionsBackfill.RunAsync(ticker, settings.Force, settings.All, cancellation);
+		DateTime? since = settings.Since != null
+			? DateTime.ParseExact(settings.Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
+			: null;
+		return await AIHistoryOptionsBackfill.RunAsync(ticker, settings.Force, settings.All, since, cancellation);
 	}
 }
