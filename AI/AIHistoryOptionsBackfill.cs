@@ -33,9 +33,9 @@ internal static class AIHistoryOptionsBackfill
 	private static readonly TimeSpan DefaultPace = TimeSpan.FromMilliseconds(200);
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-	public static async Task<int> RunAsync(string ticker, bool force, bool all, CancellationToken cancellation)
+	public static async Task<int> RunAsync(string ticker, bool force, bool all, DateTime? since, CancellationToken cancellation)
 	{
-		AnsiConsole.MarkupLine($"[bold]Option backfill for {Markup.Escape(ticker)}[/]");
+		AnsiConsole.MarkupLine($"[bold]Option backfill for {Markup.Escape(ticker)}[/]" + (since.HasValue ? $" (expiry ≥ {since.Value:yyyy-MM-dd})" : ""));
 
 		var apiConfigPath = Program.ResolvePath(Program.ApiConfigPath);
 		if (!File.Exists(apiConfigPath))
@@ -91,6 +91,15 @@ internal static class AIHistoryOptionsBackfill
 				matches.Add((occ, id > 0 ? id : null, parsed));
 			}
 			AnsiConsole.MarkupLine($"  filter: keeping {matches.Count} contract(s) from proposals/orders/discovery (use --all to backfill the full live chain)");
+		}
+
+		// Bound to the requested expiry window (skips the rest of the catalog — e.g. validate 2026 YTD
+		// fast, then run 2025 overnight). Applies to every mode.
+		if (since.HasValue)
+		{
+			var before = matches.Count;
+			matches = matches.Where(m => m.Parsed.ExpiryDate.Date >= since.Value.Date).ToList();
+			AnsiConsole.MarkupLine($"  --since {since.Value:yyyy-MM-dd}: {matches.Count}/{before} contract(s) in window");
 		}
 
 		if (matches.Count == 0)
@@ -288,6 +297,7 @@ internal static class AIHistoryOptionsBackfill
 	/// for backfill — these are the contracts the bot has actually picked (or the user has manually
 	/// traded), which is the data the backtest will replay. Returns an empty set if neither file
 	/// exists yet (fresh install with no live runs).</summary>
+
 	internal static HashSet<string> LoadTouchedSymbols(string ticker) =>
 		LoadTouchedSymbolsFromPaths(
 			Program.ResolvePath("data/ai-proposals.jsonl"),
