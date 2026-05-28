@@ -913,9 +913,9 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing);
 
-		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
 
 		var result = await runner.RunAsync(since, until, cancellation);
