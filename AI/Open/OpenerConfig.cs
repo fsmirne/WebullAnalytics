@@ -95,7 +95,7 @@ internal sealed class OpenerWeightsConfig
 
 	[JsonPropertyName("statArb")] public decimal StatArb { get; set; } = 0.30m;
 
-	/// <summary>Contrarian Fear &amp; Greed regime overlay. Factor is <c>max(0.10, 1 + weight × ((50 − score) / 50) × directionalFit)</c>:
+	/// <summary>Contrarian Fear & Greed regime overlay. Factor is <c>max(0.10, 1 + weight × ((50 − score) / 50) × directionalFit)</c>:
 	/// extreme fear boosts bullish structures; extreme greed inverts. Neutral fits (calendars / condors)
 	/// ignore the signal entirely. Default 0.15 caps the swing at ±15%.</summary>
 	[JsonPropertyName("sentiment")] public decimal Sentiment { get; set; } = 0.15m;

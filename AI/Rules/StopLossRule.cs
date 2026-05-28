@@ -4,7 +4,7 @@ namespace WebullAnalytics.AI.Rules;
 /// Priority 1: close the position when realized loss reaches a configured fraction of the position's
 /// max possible loss, or when spot moves beyond break-even by more than a configured percentage.
 ///
-/// The P&amp;L trigger mirrors the candidate scorer's terminal-PnL stop (<c>stopLossPctOfMaxLoss</c> on
+/// The P&L trigger mirrors the candidate scorer's terminal-PnL stop (<c>stopLossPctOfMaxLoss</c> on
 /// <see cref="OpenerRealizedExpectancyConfig"/>) so realized exits track the EV the opener ranked
 /// the trade against. <c>MaxLossPerShare</c> is read from the position (set at open time by the
 /// source) or, when missing, derived on the fly from leg geometry via

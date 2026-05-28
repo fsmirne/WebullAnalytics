@@ -207,7 +207,7 @@ internal static class CandidateScorer
 	public static decimal SentimentAdjust(decimal score, decimal? factor) => factor.HasValue ? ApplyFactor(score, factor.Value) : score;
 
 	/// <summary>
-	/// Contrarian Fear &amp; Greed regime overlay. Maps the 0–100 composite to a bias signal in [−1, +1]:
+	/// Contrarian Fear & Greed regime overlay. Maps the 0–100 composite to a bias signal in [−1, +1]:
 	/// <c>sentimentBias = (50 − score) / 50</c>. Score=0 (extreme fear) → +1 (max contrarian bullish edge);
 	/// score=100 (extreme greed) → −1 (max bearish edge); score=50 → 0.
 	/// Factor = <c>max(0.10, 1 + weight × sentimentBias × directionalFit)</c>: aligned-with-crowd
@@ -1101,7 +1101,7 @@ internal static class CandidateScorer
 
 	/// <summary>
 	/// Folds a path-dependent stop into a terminal-only EV by blending: with probability
-	/// <c>P_hit</c> the stop fires intra-period (P&amp;L = −stopPct × |maxLoss| − friction); with
+	/// <c>P_hit</c> the stop fires intra-period (P&L = −stopPct × |maxLoss| − friction); with
 	/// probability <c>1 − P_hit</c> the position rides to expiry with the terminal EV the caller
 	/// already computed. Friction is subtracted in both branches so the result is comparable to
 	/// the raw <c>realizedEv</c> input. Returns <paramref name="realizedEv"/> unchanged when

@@ -126,7 +126,7 @@ internal static class WebullChartsClient
 	/// <c>query-mini</c> + timestamp lets us pull any past session.
 	///
 	/// URL params (cargo-culted from Webull's web app DevTools to match what the chart UI sends so the
-	/// endpoint doesn't degrade us into a truncated response): <c>overnight=1&amp;loadFactor=1&amp;restorationType=1</c>
+	/// endpoint doesn't degrade us into a truncated response): <c>overnight=1&loadFactor=1&restorationType=1</c>
 	/// plus optional <c>extendTrading=1</c> for tickers with pre/post-market coverage. Empirically, the
 	/// previous URL (only <c>restorationType=0</c>, no other params) silently truncated to a single bar
 	/// despite valid auth — even though equivalent curl calls succeeded — likely a different code path

@@ -705,7 +705,7 @@ internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 }
 
 /// <summary>`ai backtest` — simulate opening/managing positions from scratch over a historical window
-/// using the AI rules + opener. No real fills involved; produces simulated P&amp;L for rule tuning.</summary>
+/// using the AI rules + opener. No real fills involved; produces simulated P&L for rule tuning.</summary>
 internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 {
 	[CommandOption("--since <DATE>")]

@@ -3,10 +3,10 @@ using WebullAnalytics.Sentiment;
 
 namespace WebullAnalytics.AI.RiskDiagnostics.Rules;
 
-/// <summary>Surfaces a contrarian-regime warning when CNN's Fear &amp; Greed Index is in extreme
+/// <summary>Surfaces a contrarian-regime warning when CNN's Fear & Greed Index is in extreme
 /// territory and the position's directional bias is aligned with the crowd, OR when the index has
 /// shifted ≥30 points over the past week (regime change). Macro overlay only — single-name
-/// catalyst-driven moves can dominate the F&amp;G signal on a given ticker.</summary>
+/// catalyst-driven moves can dominate the F&G signal on a given ticker.</summary>
 internal sealed class MarketSentimentExtremeRule : IRiskRule
 {
 	public string Id => "market_sentiment_extreme";

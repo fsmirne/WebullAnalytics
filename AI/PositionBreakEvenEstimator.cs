@@ -6,7 +6,7 @@ namespace WebullAnalytics.AI;
 /// Estimates the break-even spot prices of a multi-leg open position. For time spreads
 /// (calendar/diagonal) it numerically locates the spots where, at the short leg's expiry, the
 /// long leg's Black-Scholes value equals the short leg's intrinsic value plus the strategy's
-/// adjusted net debit — i.e. where the position has zero P&amp;L. Uses the long leg's live IV from
+/// adjusted net debit — i.e. where the position has zero P&L. Uses the long leg's live IV from
 /// <see cref="EvaluationContext.Quotes"/>.
 ///
 /// Falls back to a coarse <c>shortStrike ± debit</c> heuristic when IV or spot is unavailable.

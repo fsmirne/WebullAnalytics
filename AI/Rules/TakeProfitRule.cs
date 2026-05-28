@@ -7,7 +7,7 @@ namespace WebullAnalytics.AI.Rules;
 /// (decimal 0–1, default 0.50) so the rule fires at the same exit point the candidate scorer's
 /// EV calc clamps grid scenarios at. Without this alignment the scorer ranks against a managed-exit
 /// policy the runtime doesn't actually implement — the prior split (rule at 60% maxProfit, scorer
-/// clamp at 50% maxProfit) made backtest P&amp;L systematically diverge from scorer EV.
+/// clamp at 50% maxProfit) made backtest P&L systematically diverge from scorer EV.
 /// </summary>
 internal sealed class TakeProfitRule : IManagementRule
 {

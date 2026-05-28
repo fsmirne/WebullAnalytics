@@ -1,6 +1,6 @@
 namespace WebullAnalytics.Sentiment;
 
-/// <summary>Composite Fear &amp; Greed reading plus the seven sub-components CNN publishes. Score is the
+/// <summary>Composite Fear & Greed reading plus the seven sub-components CNN publishes. Score is the
 /// 0–100 contrarian index (low = fear / contrarian-bullish, high = greed / contrarian-bearish).
 /// Previous-period scores let downstream consumers compute deltas without a second fetch.</summary>
 internal sealed record SentimentSnapshot(

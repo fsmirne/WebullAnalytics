@@ -7,7 +7,7 @@ using WebullAnalytics.Utils;
 namespace WebullAnalytics.Analyze;
 
 /// <summary>
-/// <c>wa analyze sentiment</c> — Renders CNN's Fear &amp; Greed Index for the most recent (or specified)
+/// <c>wa analyze sentiment</c> — Renders CNN's Fear & Greed Index for the most recent (or specified)
 /// trading day. Shows the composite gauge, the seven sub-components with their raw market readings,
 /// historical context (previous close / 1 week / 1 month / 1 year), and a contrarian interpretation
 /// block that ties the regime to favored/dampened trade structures.

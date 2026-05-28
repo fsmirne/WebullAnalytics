@@ -46,7 +46,7 @@ internal static class OptionMath
 
 	/// <summary>
 	/// Cumulative distribution function of the standard normal distribution.
-	/// Uses the Abramowitz &amp; Stegun approximation (accuracy ~1.5e-7).
+	/// Uses the Abramowitz & Stegun approximation (accuracy ~1.5e-7).
 	/// </summary>
 	internal static double NormalCdf(double x)
 	{

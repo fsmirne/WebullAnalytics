@@ -5,7 +5,7 @@ using System.Text;
 namespace WebullAnalytics.AI.Backtest;
 
 /// <summary>
-/// Disk-cached daily CBOE S&amp;P 500 SMILE Index — a single-number summary of how steep the SPX
+/// Disk-cached daily CBOE S&P 500 SMILE Index — a single-number summary of how steep the SPX
 /// put smile is on any given trading day. Used by <see cref="BacktestIVProvider"/> to scale the
 /// index-profile smile coefficients per asOf so backtest fills reproduce the regime-dependent
 /// wing premium that a constant smile model misses (e.g., 2025-04 tariff-shock days had SMILE
