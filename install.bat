@@ -43,7 +43,7 @@ if %errorLevel% neq 0 (
 echo Building self-contained executable...
 echo.
 
-dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
+dotnet publish WebullAnalytics.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
 if %errorLevel% neq 0 (
     echo.
     echo ERROR: Build failed!
