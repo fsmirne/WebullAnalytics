@@ -411,13 +411,23 @@ internal sealed class OpenCandidateEvaluator
 			// without needing to instrument the scorer.
 			if (debug)
 			{
+				var asOfEt = TimeZoneInfo.ConvertTime(ctx.Now, NyTz);
 				foreach (var kv in scoredByStructure.OrderBy(k => k.Key.ToString()))
 				{
 					var scores = kv.Value.Select(p => p.FinalScore ?? 0m).ToList();
 					var positive = scores.Count(s => s > 0m);
 					var best = scores.Count > 0 ? scores.Max() : 0m;
 					var worst = scores.Count > 0 ? scores.Min() : 0m;
-					Console.Error.WriteLine($"[debug] {tickerGroup.Key} {kv.Key}: scored={scores.Count} positive={positive} negative={scores.Count - positive} best={best:F6} worst={worst:F6}");
+					// Show the best-scoring candidate's legs+prices so a divergent best (vs live or vs a
+					// prior run) can be traced to the exact contract and the price the scorer saw —
+					// without this you'd have to re-instrument the scorer or grep ai-proposals.jsonl.
+					var bestCandidate = kv.Value.Count > 0
+						? kv.Value.Aggregate((a, b) => (a.FinalScore ?? decimal.MinValue) >= (b.FinalScore ?? decimal.MinValue) ? a : b)
+						: null;
+					var legsDesc = bestCandidate == null
+						? ""
+						: " [" + string.Join(", ", bestCandidate.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol}@{(l.PricePerShare?.ToString("F2") ?? "?")}")) + "]";
+					Console.Error.WriteLine($"[debug] {asOfEt:yyyy-MM-dd HH:mm:ss} ET {tickerGroup.Key} {kv.Key}: scored={scores.Count} positive={positive} negative={scores.Count - positive} best={best:F6} worst={worst:F6}{legsDesc}");
 				}
 			}
 
