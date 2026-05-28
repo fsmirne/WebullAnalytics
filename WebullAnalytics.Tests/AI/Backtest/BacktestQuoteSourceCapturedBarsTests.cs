@@ -26,16 +26,20 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 	}
 
 	[Fact]
-	public async Task GetQuotesAsync_BarPresent_UsesCapturedCloseAndIv()
+	public async Task GetQuotesAsync_BarPresent_UsesTimeMidpoint_BackSolvesIv()
 	{
-		// SPXW 0DTE, spot $7400, captured bar reports close $50 and IV 15.5% — far from any
-		// reasonable Black-Scholes value. If the test passes, we know the captured path won.
+		// SPXW 0DTE ATM, spot $7400. Captured bar: open $10 → close $20 (price climbed through
+		// the minute, range 8–20). Leg should be priced at the *time-midpoint* (Open+Close)/2 = $15,
+		// not bar.Open's $10 — the live tick that decides at :30 sees roughly the time-midpoint
+		// price, not the start-of-bar price. IV is back-solved fresh from this midpoint; the
+		// captured iv column (15.5%) is ignored because it was Webull-side back-solved from
+		// bar.Open and carries the wrong moment-in-minute anchor.
 		var occ = "SPXW260526C07400000";
 		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
 		var asOfUtc = ToUtcOpen(asOf);
 		SeedCsv(occ, new List<OptionMinuteBar>
 		{
-			new(asOfUtc, 50m, 51m, 49m, 50m, 100, 15.5m),
+			new(asOfUtc, 10m, 20m, 8m, 20m, 100, 15.5m),
 		});
 
 		var (bars, iv) = BuildDailyCaches(spxwOpen: 7400m, vix1d: 25m, vix9d: 22m, vix: 20m, asOf: asOf);
@@ -48,13 +52,17 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 			CancellationToken.None);
 
 		Assert.True(snap.Options.TryGetValue(occ, out var q));
-		Assert.Equal(50m, q!.LastPrice);
-		// CSV stored 15.5 (percentage); internal IV is the fraction 0.155.
-		Assert.Equal(0.155m, q.ImpliedVolatility);
-		// Bid/ask still synthetic: half-spread around the captured mid. SPXW is index-class → tight.
+		Assert.Equal(15m, q!.LastPrice);
+		// Captured iv (0.155) is intentionally NOT used directly — back-solving from $15 mid gives
+		// a different IV than 0.155 (which would correspond to $10 bar.Open). Verify the back-solve
+		// produced a sane IV in the expected band and not the captured value.
+		Assert.NotNull(q.ImpliedVolatility);
+		Assert.NotEqual(0.155m, q.ImpliedVolatility!.Value);
+		Assert.InRange(q.ImpliedVolatility!.Value, 0.05m, 1.5m);
+		// Bid/ask synthetic half-spread around the midpoint. SPXW is index-class → tight.
 		Assert.NotNull(q.Bid);
 		Assert.NotNull(q.Ask);
-		Assert.True(q.Bid!.Value < 50m && q.Ask!.Value > 50m);
+		Assert.True(q.Bid!.Value < 15m && q.Ask!.Value > 15m);
 		// Volume comes through from the bar.
 		Assert.Equal(100, q.Volume);
 	}
@@ -114,7 +122,8 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 	{
 		// Regression for the slice-3 bug where ToUtcMinute forced 09:30 ET regardless of asOf's
 		// time-of-day. The intraday opener evaluates at non-open minutes (10:00, 10:32, …); each
-		// must find its own bar, not the day's open bar.
+		// must find its own bar, not the day's open bar. Bar is flat (open=close=25), so the
+		// time-midpoint pricing returns the same $25 regardless of the (open+close)/2 averaging.
 		var occ = "SPXW260526C07400000";
 		var asOf1032 = new DateTime(2026, 5, 26, 10, 32, 0, DateTimeKind.Unspecified);
 		var asOf1032Utc = ToUtcExact(asOf1032);
@@ -134,14 +143,19 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 
 		Assert.True(snap.Options.TryGetValue(occ, out var q));
 		Assert.Equal(25m, q!.LastPrice);
-		Assert.Equal(0.125m, q.ImpliedVolatility);
+		// Back-solved IV from $25 mid (not the captured 0.125 column). Both are valid-range; assert
+		// finiteness rather than the literal captured value, since the back-solve will differ.
+		Assert.NotNull(q.ImpliedVolatility);
+		Assert.InRange(q.ImpliedVolatility!.Value, 0.05m, 1.5m);
 	}
 
 	[Fact]
-	public async Task GetQuotesAsync_BarPresentNullIv_KeepsSyntheticIv()
+	public async Task GetQuotesAsync_BarPresentNullIv_BackSolvesFromMid()
 	{
-		// Some bars have no IV column (the contract was illiquid that minute). We still use bar.Close
-		// for the mid, but the IV falls back to the VIX-anchored value.
+		// Some bars have no IV column (massive-sourced or otherwise unreported). With the new
+		// midpoint-pricing model the captured iv column is *never* trusted directly anyway — we
+		// always back-solve from (Open+Close)/2. So this case just verifies that a null iv column
+		// doesn't blow up the path: we still produce a usable IV from the back-solver.
 		var occ = "SPXW260526C07400000";
 		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
 		var asOfUtc = ToUtcOpen(asOf);
@@ -160,10 +174,9 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 			CancellationToken.None);
 
 		Assert.True(snap.Options.TryGetValue(occ, out var q));
-		Assert.Equal(50m, q!.LastPrice);   // captured close used
-		// IV from VIX1D fallback, not from the (null) bar IV.
+		Assert.Equal(50m, q!.LastPrice);   // captured midpoint (open=close=50)
 		Assert.NotNull(q.ImpliedVolatility);
-		Assert.InRange(q.ImpliedVolatility!.Value, 0.20m, 0.30m);
+		Assert.InRange(q.ImpliedVolatility!.Value, 0.05m, 1.5m);
 	}
 
 	private string SeedCsv(string occ, List<OptionMinuteBar> bars)

@@ -62,13 +62,14 @@ internal sealed class HistoricalOptionBarCache
 	/// synthetic fallback is the right answer.</summary>
 	internal const int LookupWindowMinutes = 5;
 
-	/// <summary>Captured quote points (strike, open price, IV-fraction-if-present) for all contracts of
-	/// root+expiry+right with a bar at-or-after the minute, sorted by strike. IV in the CSV is a
-	/// percentage (15.74 → 0.1574 here); it's null for massive-sourced (expired) contracts, which is
-	/// why the caller back-solves IV from the open price. Used to build the real-IV surface that keeps
-	/// a spread's missing/out-of-band legs on the same basis as its captured legs — pricing them with
-	/// VIX1D instead opens a ~10-point IV gap that fabricates spread edge.</summary>
-	public IReadOnlyList<(decimal Strike, decimal Open, decimal? IvFraction)> GetCapturedQuotePoints(string root, DateTime expiry, string callPut, DateTimeOffset minuteUtc)
+	/// <summary>Captured quote points (strike, time-midpoint price, IV-fraction-if-present) for all
+	/// contracts of root+expiry+right with a bar at-or-after the minute, sorted by strike. Price is
+	/// the bar's time-midpoint (Open+Close)/2 so the surface IV reads the same moment-in-minute the
+	/// direct captured-leg path does — both back-solve from the same price point, otherwise the
+	/// surface would carry an Open-anchored bias the leg-pricing path no longer has. IV in the CSV is
+	/// a percentage (15.74 → 0.1574 here); it's null for massive-sourced (expired) contracts, which
+	/// is why the caller back-solves IV from the price.</summary>
+	public IReadOnlyList<(decimal Strike, decimal Price, decimal? IvFraction)> GetCapturedQuotePoints(string root, DateTime expiry, string callPut, DateTimeOffset minuteUtc)
 	{
 		var dir = Path.Combine(_dataDir, root.ToUpperInvariant(), expiry.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture));
 		IReadOnlyList<string> occs;
@@ -89,9 +90,10 @@ internal sealed class HistoricalOptionBarCache
 			var parsed = ParsingHelpers.ParseOptionSymbol(occ);
 			if (parsed?.CallPut == null || !string.Equals(parsed.CallPut, callPut, StringComparison.OrdinalIgnoreCase)) continue;
 			var bar = GetBar(occ, minuteUtc);
-			if (bar == null || bar.Open <= 0m) continue;
+			if (bar == null || bar.Open <= 0m || bar.Close <= 0m) continue;
+			var mid = (bar.Open + bar.Close) / 2m;
 			decimal? ivFrac = bar.ImpliedVolatility is { } ivPct && ivPct > 0m ? ivPct / 100m : null;
-			points.Add((parsed.Strike, bar.Open, ivFrac));
+			points.Add((parsed.Strike, mid, ivFrac));
 		}
 		points.Sort((a, b) => a.Item1.CompareTo(b.Item1));
 		return points;
