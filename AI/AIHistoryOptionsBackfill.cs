@@ -33,7 +33,7 @@ internal static class AIHistoryOptionsBackfill
 	private static readonly TimeSpan DefaultPace = TimeSpan.FromMilliseconds(200);
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-	public static async Task<int> RunAsync(string ticker, bool force, bool all, DateTime? since, CancellationToken cancellation)
+	public static async Task<int> RunAsync(string ticker, bool force, bool all, DateTime? since, int webullPad, CancellationToken cancellation)
 	{
 		AnsiConsole.MarkupLine($"[bold]Option backfill for {Markup.Escape(ticker)}[/]" + (since.HasValue ? $" (expiry ≥ {since.Value:yyyy-MM-dd})" : ""));
 
@@ -91,6 +91,94 @@ internal static class AIHistoryOptionsBackfill
 				matches.Add((occ, id > 0 ? id : null, parsed));
 			}
 			AnsiConsole.MarkupLine($"  filter: keeping {matches.Count} contract(s) from proposals/orders/discovery (use --all to backfill the full live chain)");
+		}
+
+		// Webull-side pad: widen each Webull-routable (expiry, right) by N strikes beyond the touched
+		// range. Webull's chart endpoint is unrestricted (5 req/sec) so this is essentially free, and
+		// it lets future strategy variants (wider delta bands, deeper wings) replay against real data
+		// instead of synthetic — historical bars become inaccessible once the contract drops out of
+		// the live chain. Massive-routable contracts (expired, not in registry) are intentionally
+		// excluded so we don't bloat the rate-limited (5 req/min) path with strikes the strategy
+		// never picked. Skipped under --all (already pulls everything) and when webullPad == 0.
+		if (!all && webullPad > 0 && matches.Count > 0)
+		{
+			// Step 1: collect touched ranges per (expiry, right), considering only Webull-routable
+			// anchors. A touched OCC without a derivativeId is a Massive contract — padding around it
+			// via Webull is impossible (the contract isn't in the live chain), so it can't anchor.
+			var touchedRanges = new Dictionary<(DateTime Expiry, string Right), (decimal Min, decimal Max)>();
+			foreach (var (_, id, p) in matches)
+			{
+				if (!id.HasValue || id.Value <= 0) continue;
+				var key = (p.ExpiryDate.Date, p.CallPut);
+				if (!touchedRanges.TryGetValue(key, out var range))
+					touchedRanges[key] = (p.Strike, p.Strike);
+				else if (p.Strike < range.Min || p.Strike > range.Max)
+					touchedRanges[key] = (Math.Min(range.Min, p.Strike), Math.Max(range.Max, p.Strike));
+			}
+
+			// Step 2: mirror-side fallback. If an expiry has touched picks in C but none in P (or vice
+			// versa), copy the touched side's range to the opposite right — a strategy variant that
+			// trades puts at this expiry would almost certainly use similar strike distances as calls.
+			// Skips expiries with zero touched picks on either side (per the agreed (a) policy:
+			// strategy-variant headroom for enabled DTEs only).
+			var toMirror = new List<(DateTime Expiry, string Right, decimal Min, decimal Max)>();
+			foreach (var kv in touchedRanges)
+			{
+				var oppositeRight = kv.Key.Right == "C" ? "P" : "C";
+				var oppositeKey = (kv.Key.Expiry, oppositeRight);
+				if (!touchedRanges.ContainsKey(oppositeKey))
+					toMirror.Add((kv.Key.Expiry, oppositeRight, kv.Value.Min, kv.Value.Max));
+			}
+			foreach (var (exp, right, min, max) in toMirror)
+				touchedRanges[(exp, right)] = (min, max);
+
+			// Step 3: pre-index the registry by (expiry, right) → strike-sorted list. Built once so
+			// the per-(expiry, right) lookup below is O(log N) bisect + O(pad) slice instead of an
+			// O(registry) scan per anchor group.
+			var registryByExpiryRight = new Dictionary<(DateTime Expiry, string Right), List<(decimal Strike, string Occ, long Id)>>();
+			foreach (var (occ, id) in registry)
+			{
+				if (id <= 0) continue;
+				var p = ParsingHelpers.ParseOptionSymbol(occ);
+				if (p == null) continue;
+				if (!string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+				var key = (p.ExpiryDate.Date, p.CallPut);
+				if (!registryByExpiryRight.TryGetValue(key, out var list))
+					registryByExpiryRight[key] = list = new List<(decimal, string, long)>();
+				list.Add((p.Strike, occ, id));
+			}
+			foreach (var list in registryByExpiryRight.Values)
+				list.Sort((a, b) => a.Strike.CompareTo(b.Strike));
+
+			// Step 4: for each anchor (expiry, right), slice the registry to include every strike from
+			// the touched min..max (interior gap fill) plus N strikes outside each end. Already-matched
+			// OCCs are deduped via alreadyMatched so the inner padding doesn't re-add touched picks.
+			var alreadyMatched = new HashSet<string>(matches.Select(m => m.Occ), StringComparer.OrdinalIgnoreCase);
+			var added = 0;
+			foreach (var kv in touchedRanges)
+			{
+				if (!registryByExpiryRight.TryGetValue(kv.Key, out var registryStrikes)) continue;
+				var min = kv.Value.Min;
+				var max = kv.Value.Max;
+				// Find the slice bounds: first registry index with strike >= min, last index with
+				// strike <= max. Then widen by webullPad strikes on each side, clamped to the list.
+				var first = registryStrikes.FindIndex(e => e.Strike >= min);
+				var last = registryStrikes.FindLastIndex(e => e.Strike <= max);
+				if (first < 0 || last < 0) continue;
+				var lo = Math.Max(0, first - webullPad);
+				var hi = Math.Min(registryStrikes.Count - 1, last + webullPad);
+				for (int i = lo; i <= hi; i++)
+				{
+					var entry = registryStrikes[i];
+					if (!alreadyMatched.Add(entry.Occ)) continue;
+					var parsed = ParsingHelpers.ParseOptionSymbol(entry.Occ);
+					if (parsed == null) continue;
+					matches.Add((entry.Occ, entry.Id, parsed));
+					added++;
+				}
+			}
+
+			AnsiConsole.MarkupLine($"  --webull-pad {webullPad}: added {added} Webull-routable contract(s) around the touched range" + (toMirror.Count > 0 ? $" (mirrored {toMirror.Count} (expiry, right) from the opposite side)" : ""));
 		}
 
 		// Bound to the requested expiry window (skips the rest of the catalog — e.g. validate 2026 YTD
