@@ -687,7 +687,13 @@ internal sealed class OpenCandidateEvaluator
 		var asOfUtc = asOf.Kind == DateTimeKind.Utc
 			? new DateTimeOffset(asOf, TimeSpan.Zero)
 			: new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(asOf, DateTimeKind.Unspecified), NyTz), TimeSpan.Zero);
-		var toUtc = asOfUtc;
+		// Live: include the boundary bar so the scanner sees the partial current minute (its open plus
+		// the price so far) — the most data available at decision time, and fillable at the live mark.
+		// Backtest: exclude it. A bar stamped at minute M (start-of-bar convention) covers M→M+1, which
+		// is still in the future at the M:00 decision, and the simulator fills at that bar's OPEN — so
+		// feeding its CLOSE into openToNow/VWAP here would be a one-minute look-ahead. Drop back to the
+		// last completed bar (M-1, whose close ≈ M's open, i.e. the price actually transactable at fill).
+		var toUtc = _backtestMode ? asOfUtc.AddTicks(-1) : asOfUtc;
 		var fromUtc = toUtc.AddMinutes(-Math.Max(60, tapeCfg.LookbackMinutes));
 
 		IReadOnlyList<MinuteBar> bars;
