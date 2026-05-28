@@ -13,7 +13,9 @@ namespace WebullAnalytics.AI.Backtest;
 ///      applies to the simulated book at the day's mark.
 ///   3. Run <see cref="OpenCandidateEvaluator"/>; the top-N proposals that fit free cash get opened
 ///      at the day's mark.
-/// All fills use the BS-priced mid from <see cref="BacktestQuoteSource"/>. Fees are debited per leg-contract.
+/// Fills price off <see cref="BacktestQuoteSource"/> under the active <c>--pricing</c> mode: <c>mid</c> at the
+/// spread midpoint, <c>bidask</c> crossing the spread (worst-case marketable fills). Marks always use mid.
+/// Fees are debited per leg-contract; <c>slippagePerSharePerOrder</c> applies additively on top.
 /// Phase-1 limitations (noted for follow-up work): no intraday triggering on stop-loss / take-profit,
 /// and opens fill same-day instead of at next-day open.
 /// </summary>
@@ -35,6 +37,7 @@ internal sealed class BacktestRunner
 	private readonly int _discoverTopKPerDay;
 	private readonly int _discoverPadStrikes;
 	private readonly int? _fixedContracts;
+	private readonly string _pricingMode;
 	private readonly HashSet<string> _discoveredOccs = new(StringComparer.OrdinalIgnoreCase);
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
@@ -46,9 +49,10 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid)
 	{
 		_config = config;
+		_pricingMode = SuggestionPricing.Normalize(pricingMode);
 		_book = book;
 		_positions = positions;
 		_quotes = quotes;
@@ -281,17 +285,24 @@ internal sealed class BacktestRunner
 		return byLineage;
 	}
 
-	/// <summary>For management proposals (close/roll), re-price each leg at the current quote mid.
+	/// <summary>Execution price for a single leg under the active <c>--pricing</c> mode. <c>mid</c> fills at
+	/// the spread midpoint; <c>bidask</c> crosses the spread (a buy lifts the ask, a sell hits the bid),
+	/// modelling worst-case marketable fills. Slippage (<c>slippagePerSharePerOrder</c>) applies additively
+	/// on top in <see cref="SimulatedBook"/>, independent of this. Marks (MTM / threshold detection) always
+	/// use mid — only realized fills cross the spread.</summary>
+	private decimal ExecPrice(Side side, decimal bid, decimal ask)
+		=> _pricingMode == SuggestionPricing.BidAsk ? (side == Side.Buy ? ask : bid) : (bid + ask) / 2m;
+
+	/// <summary>For management proposals (close/roll), re-price each leg under the active pricing mode.
 	/// Returns null if any leg lacks a usable quote.</summary>
-	private static IReadOnlyList<BacktestLegFill>? BuildLegFillsFromQuotes(IReadOnlyList<ProposalLeg> legs, int qty, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	private IReadOnlyList<BacktestLegFill>? BuildLegFillsFromQuotes(IReadOnlyList<ProposalLeg> legs, int qty, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
 		var fills = new List<BacktestLegFill>(legs.Count);
 		foreach (var l in legs)
 		{
 			if (!quotes.TryGetValue(l.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) return null;
-			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
 			var side = string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase) ? Side.Buy : Side.Sell;
-			fills.Add(new BacktestLegFill(l.Symbol, side, qty, mid));
+			fills.Add(new BacktestLegFill(l.Symbol, side, qty, ExecPrice(side, q.Bid.Value, q.Ask.Value)));
 		}
 		return fills;
 	}
@@ -312,16 +323,19 @@ internal sealed class BacktestRunner
 		return p.Qty;
 	}
 
-	/// <summary>For opener proposals, the leg's <c>PricePerShare</c> is already set by the candidate scorer
-	/// using the same quote source. Trust it.</summary>
-	private static IReadOnlyList<BacktestLegFill>? BuildLegFillsFromProposal(IReadOnlyList<ProposalLeg> legs, int qty)
+	/// <summary>For opener proposals, the candidate scorer has already priced each leg from the same quote
+	/// source: <c>PricePerShare</c> is the mid, <c>ExecutionPricePerShare</c> the conservative cross-the-spread
+	/// fill (ask on buys, bid on sells). Under <c>--pricing bidask</c> we fill at the latter; under <c>mid</c>
+	/// at the former. Candidate selection/scoring is unaffected — only the fill price changes.</summary>
+	private IReadOnlyList<BacktestLegFill>? BuildLegFillsFromProposal(IReadOnlyList<ProposalLeg> legs, int qty)
 	{
 		var fills = new List<BacktestLegFill>(legs.Count);
 		foreach (var l in legs)
 		{
 			if (!l.PricePerShare.HasValue) return null;
+			var price = (_pricingMode == SuggestionPricing.BidAsk ? l.ExecutionPricePerShare : l.PricePerShare) ?? l.PricePerShare.Value;
 			var side = string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase) ? Side.Buy : Side.Sell;
-			fills.Add(new BacktestLegFill(l.Symbol, side, qty, l.PricePerShare.Value));
+			fills.Add(new BacktestLegFill(l.Symbol, side, qty, price));
 		}
 		return fills;
 	}
@@ -522,10 +536,10 @@ internal sealed class BacktestRunner
 				var legInProposal = legInRule.Evaluate(pos, minuteCtx);
 				if (legInProposal != null)
 				{
-					// Single sell-to-open leg from the proposal. Price the fill at the bid for conservatism
-					// (we're selling — we receive at most the bid).
+					// Single sell-to-open leg from the proposal. Fill under the active pricing mode: bidask
+					// hits the bid (we're selling), mid takes the spread midpoint.
 					var shortLeg = legInProposal.Legs[0];
-					if (quotes.TryGetValue(shortLeg.Symbol, out var sq) && sq.Bid is decimal sBid)
+					if (quotes.TryGetValue(shortLeg.Symbol, out var sq) && sq.Bid is decimal sBid && sq.Ask is decimal sAsk)
 					{
 						// Map to OpenStructureKind. Credit-spread mode → ShortVertical (single kind covers
 						// both bear-call and bull-put credit spreads); debit-spread → LongCallVertical or
@@ -535,7 +549,7 @@ internal sealed class BacktestRunner
 							newStructure = (string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.ShortCallVertical : OpenStructureKind.ShortPutVertical);
 						else
 							newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical : OpenStructureKind.LongPutVertical;
-						var legInFills = new[] { new BacktestLegFill(shortLeg.Symbol, Side.Sell, pos.Quantity, sBid) };
+						var legInFills = new[] { new BacktestLegFill(shortLeg.Symbol, Side.Sell, pos.Quantity, ExecPrice(Side.Sell, sBid, sAsk)) };
 						_book.LegIn(legInMinuteEt, pos.Key, legInFills, "LegInShortRule", newStructure);
 						return true; // mirror SL/TP semantics: a fired rule consumes the position for the day.
 					}
@@ -555,9 +569,8 @@ internal sealed class BacktestRunner
 			{
 				if (leg.CallPut == null) continue;
 				if (!quotes.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) { allLegsPriced = false; break; }
-				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
 				var closeSide = leg.Side == Side.Buy ? Side.Sell : Side.Buy;
-				legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, mid));
+				legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
 			}
 			if (!allLegsPriced) continue;
 
@@ -658,15 +671,14 @@ internal sealed class BacktestRunner
 		var quotesAtThreshold = await _quotes.GetIntradayQuotesAsync(
 			step, pos.Ticker, thresholdSpot, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
 
-		// Reverse each leg's side to close. Use quote mids — same convention as the rule engine.
+		// Reverse each leg's side to close. Fill price follows the active pricing mode (mid or cross-spread).
 		var legFills = new List<BacktestLegFill>(pos.Legs.Count);
 		foreach (var leg in pos.Legs)
 		{
 			if (leg.CallPut == null) continue;
 			if (!quotesAtThreshold.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) return;
-			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
 			var closeSide = leg.Side == Side.Buy ? Side.Sell : Side.Buy;
-			legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, mid));
+			legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
 		}
 
 		_book.Close(step, pos.Key, legFills, ruleName);
