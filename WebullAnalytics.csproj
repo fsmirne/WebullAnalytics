@@ -17,10 +17,6 @@
 	</ItemGroup>
 
 		<ItemGroup>
-	<Content Include="data\**\*" CopyToOutputDirectory="PreserveNewest" />
-	</ItemGroup>
-
-		<ItemGroup>
 	<InternalsVisibleTo Include="WebullAnalytics.Tests" />
 	</ItemGroup>
 
