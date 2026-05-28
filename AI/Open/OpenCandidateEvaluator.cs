@@ -159,13 +159,15 @@ internal sealed class OpenCandidateEvaluator
 		var freeCash = Math.Max(0m, ctx.AccountCash - reserve);
 		// Fetch the contrarian Fear & Greed regime overlay once per scan. Same value applies to every
 		// ticker — F&G is a market-wide sentiment composite, not per-ticker. Null on outage; the scorer
-		// treats null as "skip the sentiment factor". Skipped in backtest for the same reason as the
-		// event calendar / trend fetcher below: CNN's endpoint returns current state regardless of
-		// asOf (lookahead bias) and the per-step file-cache read still adds up across hundreds of days.
+		// treats null as "skip the sentiment factor". In backtest we pass cacheOnly=true so the network
+		// branch is bypassed — CNN's endpoint reads the current score, which would be lookahead in a
+		// historical replay. The on-disk cache (data/sentiment-cache/<date>.json) is date-keyed and
+		// only written for settled dates, so reading it in backtest is lookahead-safe by construction
+		// and gives T+1 replays access to the same value live saw the day before.
 		decimal? sentimentScore = null;
-		if (!_backtestMode && cfg.Weights.Sentiment > 0m)
+		if (cfg.Weights.Sentiment > 0m)
 		{
-			var snapshot = await FearGreedClient.FetchAsync(ctx.Now, cancellation);
+			var snapshot = await FearGreedClient.FetchAsync(ctx.Now, cancellation, cacheOnly: _backtestMode);
 			if (snapshot != null) sentimentScore = snapshot.Score;
 		}
 
@@ -263,12 +265,12 @@ internal sealed class OpenCandidateEvaluator
 		// Scheduled-catalyst calendar (earnings + ex-div) per ticker. Built once per scan; resolved
 		// per-ticker inside the per-ticker loop. The loader returns EventCalendar.Empty when the
 		// feature is disabled or when Yahoo is unreachable — the scorer treats null events as
-		// "no veto" so a calendar outage never silences the opener. In backtest mode we skip the
-		// Yahoo fetch entirely: it returns current state regardless of asOf (lookahead bias) and
-		// adds a sequential HTTP round-trip to every simulated trading day.
-		var eventCalendar = _backtestMode
-			? EventCalendar.Empty
-			: await EventCalendarLoader.LoadAsync(_config.Tickers, cfg.Indicators.Events, ctx.Now, cancellation);
+		// "no veto" so a calendar outage never silences the opener. In backtest we pass cacheOnly=true
+		// so the Yahoo branch is bypassed (quoteSummary returns current-state events regardless of
+		// asOf; calling it would leak future earnings/ex-div into a historical replay). The cache's
+		// symmetric TTL check in TryReadCache rejects entries fetched too far from asOf in either
+		// direction, so the on-disk cache stays lookahead-safe for distant historical asOfs too.
+		var eventCalendar = await EventCalendarLoader.LoadAsync(_config.Tickers, cfg.Indicators.Events, ctx.Now, cancellation, cacheOnly: _backtestMode);
 
 		foreach (var tickerGroup in allSkeletons.GroupBy(s => s.Ticker))
 		{
@@ -441,21 +443,24 @@ internal sealed class OpenCandidateEvaluator
 		}
 
 		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker; sentiment is
-		// market-wide so we reuse the snapshot fetched at the top of Phase C (if any). Skipped in
-		// backtest for the same reasons as the event calendar above: Yahoo returns current state, and
-		// each call adds an HTTP round-trip to every step. Diagnostic builders treat null trend as
-		// "unknown" so the proposal still scores and renders.
+		// market-wide so we reuse the snapshot fetched at the top of Phase C (if any). Still hard-skipped
+		// in backtest — unlike sentiment and events, the trend fetcher has no on-disk cache and pulls
+		// current Yahoo chart state regardless of asOf. There's nothing safe to read, so cacheOnly mode
+		// would just return null on every call. The diagnostic builder treats null trend as "unknown"
+		// so proposals still score and render; the panel just shows fewer fields in backtest output.
 		var trendByTicker = new Dictionary<string, TrendSnapshot?>(StringComparer.OrdinalIgnoreCase);
 		if (!_backtestMode)
 		{
 			foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
 				trendByTicker[ticker] = await TrendFetcher.FetchAsync(ticker, ctx.Now, cancellation);
 		}
-		// sentimentScore is already gated by !_backtestMode above, but be explicit here for symmetry
-		// with the trend-fetcher gate immediately above.
+		// Diagnostic re-fetch: the snapshot above gave us just the score; the diagnostic panel wants
+		// the full SentimentSnapshot. Same cacheOnly handling as the scoring fetch — backtest reads
+		// the cache when present, never hits the network. Gated on sentimentScore.HasValue so we
+		// don't bother re-fetching when the scoring read returned null.
 		SentimentSnapshot? diagnosticSentiment = null;
-		if (!_backtestMode && sentimentScore.HasValue)
-			diagnosticSentiment = await FearGreedClient.FetchAsync(ctx.Now, cancellation);
+		if (sentimentScore.HasValue)
+			diagnosticSentiment = await FearGreedClient.FetchAsync(ctx.Now, cancellation, cacheOnly: _backtestMode);
 
 		var annotated = new List<OpenProposal>(output.Count);
 		foreach (var p in output)

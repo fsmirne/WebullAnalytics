@@ -41,8 +41,12 @@ internal static class FearGreedClient
 	}
 
 	/// <summary>Returns the sentiment snapshot for <paramref name="asOf"/>, using the on-disk cache when
-	/// the date is settled. Intra-day calls always hit the network. Returns null on any failure.</summary>
-	public static async Task<SentimentSnapshot?> FetchAsync(DateTime asOf, CancellationToken cancellation)
+	/// the date is settled. Intra-day calls always hit the network. Returns null on any failure.
+	/// When <paramref name="cacheOnly"/> is true, the network branch is skipped — returns the cached
+	/// value if present, otherwise null. Used by the backtest path so a replay never hits CNN (the
+	/// endpoint's current-day reading would otherwise leak as-of-now data into historical decisions)
+	/// while still picking up T+1 caches once they exist for the asOf date.</summary>
+	public static async Task<SentimentSnapshot?> FetchAsync(DateTime asOf, CancellationToken cancellation, bool cacheOnly = false)
 	{
 		var dateStr = asOf.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 		var cachePath = Program.ResolvePath(Path.Combine(CacheDir, $"{dateStr}.json"));
@@ -59,6 +63,8 @@ internal static class FearGreedClient
 			catch (IOException) { }
 			catch (JsonException) { }
 		}
+
+		if (cacheOnly) return null;
 
 		string body;
 		try
