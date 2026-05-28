@@ -160,7 +160,7 @@ internal static class BacktestSummaryRenderer
 	}
 
 	/// <summary>Longest runs of consecutive <em>trade</em> days with positive ("win") and negative ("loss")
-	/// daily P&amp;L, read off the equity curve as the day-over-day equity change (the first day is measured
+	/// daily P&L, read off the equity curve as the day-over-day equity change (the first day is measured
 	/// against starting cash). A flat day — no equity change, i.e. a day we didn't trade — is ignored: it
 	/// neither extends nor breaks a run, so only days that actually won or lost money count. Each streak
 	/// carries the date range of its first and last trade day; counts are 0 when the curve is empty.</summary>

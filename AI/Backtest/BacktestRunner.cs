@@ -249,7 +249,7 @@ internal sealed class BacktestRunner
 	}
 
 	/// <summary>Per-lineage MTM of still-open positions at the final step. Used by the renderer to split
-	/// realized from unrealized P&amp;L. Returns the same numbers <see cref="ComputeOpenMarkAsync"/> would
+	/// realized from unrealized P&L. Returns the same numbers <see cref="ComputeOpenMarkAsync"/> would
 	/// have summed, but bucketed by lineage so we can attribute each to a lifecycle.</summary>
 	private async Task<IReadOnlyDictionary<long, decimal>> ComputeOpenMarkPerLineageAsync(DateTime step, CancellationToken cancellation)
 	{
@@ -310,7 +310,7 @@ internal sealed class BacktestRunner
 	/// <summary>Resolves the contract quantity for an open. Normal mode uses the evaluator's
 	/// cash/risk-scaled <c>Qty</c> and honors the cash-reserve and free-cash gates (returns 0 to skip).
 	/// Fixed-lots mode (<c>--lots N</c>) overrides to a flat N every trade and ignores cash entirely:
-	/// terminal P&amp;L becomes the additive sum of per-trade results instead of a compounding curve, and
+	/// terminal P&L becomes the additive sum of per-trade results instead of a compounding curve, and
 	/// every endorsed signal trades regardless of bankroll — so a sweep measures per-trade edge, not the
 	/// position-sizing feedback loop (which otherwise compounds a small base until it dwarfs the signal,
 	/// or overflows).</summary>
@@ -1169,14 +1169,14 @@ internal sealed record BacktestResult(
 	IReadOnlyList<BacktestFill> Fills,
 	IReadOnlyDictionary<long, decimal> EndMtmByLineage)
 {
-	/// <summary>P&amp;L on closed lifecycles only (lineages that ended in Close or Expire). Each lifecycle's
-	/// P&amp;L = sum of (NetCashFlow - Fees) across all fills sharing its LineageId.</summary>
+	/// <summary>P&L on closed lifecycles only (lineages that ended in Close or Expire). Each lifecycle's
+	/// P&L = sum of (NetCashFlow - Fees) across all fills sharing its LineageId.</summary>
 	public decimal RealizedPnL => Fills
 		.GroupBy(f => f.LineageId)
 		.Where(g => g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire))
 		.Sum(g => g.Sum(f => f.NetCashFlow - f.Fees));
 
-	/// <summary>Unrealized P&amp;L = per-lineage net cash + per-lineage final MTM, summed across still-open lifecycles.</summary>
+	/// <summary>Unrealized P&L = per-lineage net cash + per-lineage final MTM, summed across still-open lifecycles.</summary>
 	public decimal UnrealizedPnL => Fills
 		.GroupBy(f => f.LineageId)
 		.Where(g => !g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire))
@@ -1187,7 +1187,7 @@ internal sealed record BacktestResult(
 	public decimal EndingEquity => StartingCash + TotalPnL;
 
 	/// <summary>Per-lifecycle wins/losses (closed lineages only).</summary>
-	/// <summary>Per-closed-lifecycle realized P&amp;L — one entry per lineage that ended in Close/Expire.
+	/// <summary>Per-closed-lifecycle realized P&L — one entry per lineage that ended in Close/Expire.
 	/// The building block for per-trade edge stats (expectancy, win/loss averages, profit factor) which,
 	/// unlike compounded terminal equity, don't depend on position sizing.</summary>
 	public IReadOnlyList<decimal> LifecyclePnLs() => Fills

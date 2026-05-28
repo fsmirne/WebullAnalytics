@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace WebullAnalytics.Sentiment;
 
-/// <summary>Fetches CNN's Fear &amp; Greed Index from the public dataviz endpoint, parses the response
+/// <summary>Fetches CNN's Fear & Greed Index from the public dataviz endpoint, parses the response
 /// into a <see cref="SentimentSnapshot"/>, and caches the raw JSON to <c>data/sentiment-cache/{date}.json</c>.
 /// The endpoint requires a browser-shaped User-Agent + Origin/Referer pair; without them it returns 418.
 /// Failures (network, 4xx/5xx, malformed JSON) return null so callers can degrade gracefully — the

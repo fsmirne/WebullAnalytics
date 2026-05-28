@@ -3,11 +3,11 @@ using WebullAnalytics.Sentiment;
 
 namespace WebullAnalytics.AI.RiskDiagnostics.Rules;
 
-/// <summary>Fires when CNN's headline Fear &amp; Greed composite materially diverges from its
+/// <summary>Fires when CNN's headline Fear & Greed composite materially diverges from its
 /// <c>junk_bond_demand</c> sub-component — i.e., the equity-driven composite and the credit-driven
 /// component are on opposite sides of neutral by at least <see cref="DivergenceThreshold"/> points.
 /// Credit spreads have a documented 1–3 week lead over equities at major turning points (2007, 2018,
-/// 2020), so this is the part of F&amp;G that carries information the composite alone hides. Fires
+/// 2020), so this is the part of F&G that carries information the composite alone hides. Fires
 /// only when the position is on the side at risk of mean-reversion (greed-composite + fear-credit
 /// against a bullish or neutral book; mirror image against a bearish or neutral book) — a contrarian-
 /// aligned position is already positioned for the resolution.</summary>
