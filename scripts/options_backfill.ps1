@@ -64,6 +64,9 @@ foreach ($bd in '1.3', '1.5') {
 
 # 2. Estimate the incremental fetch BEFORE the slow part, so the log records the
 #    expected duration. Nearly all 2025-2026 contracts are expired -> massive.
+#    Note: this counts only the discovery catalog; --webull-pad below adds more
+#    Webull-routable contracts (live + future expiries) that aren't in the file,
+#    but those run at 5 req/sec so they don't move the wall-clock meaningfully.
 Log "Estimating incremental fetch..."
 $rxOcc = [regex]'"occ":"([^"]+)"'
 $rxSym = [regex]'^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$'
@@ -82,8 +85,13 @@ Log ("  catalog={0}  on-disk={1}  to-fetch={2}  ~{3}h at 5 req/min" -f $total, $
 
 # 3. Backfill - the long, rate-limited part. Partial failure (a few massive
 #    SSL/empty contracts) is expected and not fatal; just log the exit code.
+#    --webull-pad 30 widens each Webull-routable (expiry, right) by 30 strikes
+#    beyond the touched range. Webull is unrestricted so this is cheap, and it
+#    pre-captures strikes future strategy variants (wider delta bands, deeper
+#    wings) might want — historical bars become inaccessible once a contract
+#    drops out of the live chain. Massive (expired) contracts are unaffected.
 Log "Backfill starting (long; rate-limited). Tail the log to watch progress."
-& $Wa options backfill SPXW --since $Since *>> $Log
+& $Wa options backfill SPXW --since $Since --webull-pad 30 *>> $Log
 Log "Backfill exited rc=$LASTEXITCODE"
 
 Log "=== Done ==="
