@@ -120,6 +120,11 @@ class Program
 				options.AddCommand<Options.OptionsDiscoverCommand>("discover");
 				options.AddCommand<Options.OptionsBackfillCommand>("backfill");
 			});
+			config.AddBranch("data", data =>
+			{
+				data.AddCommand<Data.DataBackupCommand>("backup");
+				data.AddCommand<Data.DataRestoreCommand>("restore");
+			});
 		});
 		return app.Run(args);
 	}
