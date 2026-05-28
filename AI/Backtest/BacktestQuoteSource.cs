@@ -47,14 +47,15 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		var ivByStrike = new List<(decimal Strike, decimal Iv)>(points.Count);
 		foreach (var p in points)
 		{
-			var iv = p.IvFraction;
-			if (!iv.HasValue || iv.Value <= 0m)
-			{
-				// Back-solve from the real open price. ImpliedVol clamps to [0.01, 5.0]; treat a result
-				// pinned at the floor as a failed solve (deep-OTM near-zero price) and skip it.
-				var solved = OptionMath.ImpliedVol(spot, p.Strike, timeYears, _riskFreeRate, p.Open, callPut);
-				if (solved > 0.011m && solved < 5m) iv = solved;
-			}
+			// Back-solve IV from the bar's time-midpoint price (returned as p.Price by the cache).
+			// Always solve fresh rather than trusting the captured iv column: the column is
+			// back-solved from bar.Open by Webull's chart endpoint, and using it here would carry a
+			// moment-in-minute mismatch into the surface (Open-anchored IV interpolated between
+			// Mid-anchored leg pricing). ImpliedVol clamps to [0.01, 5.0]; pinned bounds indicate
+			// vega-flat regimes (deep ITM/OTM or near-zero time) — skip those.
+			decimal? iv = null;
+			var solved = OptionMath.ImpliedVol(spot, p.Strike, timeYears, _riskFreeRate, p.Price, callPut);
+			if (solved > 0.011m && solved < 4.99m) iv = solved;
 			if (iv.HasValue && iv.Value > 0m) ivByStrike.Add((p.Strike, iv.Value));
 		}
 		if (ivByStrike.Count == 0) return null;
@@ -210,30 +211,40 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			atmByRootDte.TryGetValue((parsed.Root, dte), out var atm);
 			smileScaleByRoot.TryGetValue(parsed.Root, out var smileScale);
 
-			// Prefer captured per-minute bar when available. Use the bar's OPEN, not its close: under the
-			// start-of-bar convention the bar at minute T spans T→T+1, so bar.Open is the price at the
-			// decision moment (T) while bar.Close is the price one minute later (T+1). The opener decides
-			// at minute T and takes the underlying spot from bar.Open (see BacktestRunner.EvaluateMinuteAsync),
-			// so the option must price off bar.Open too — using bar.Close leaks one minute of lookahead at
-			// every step of the intraday walk, which on 0DTE gamma compounds into wildly inflated win rates
-			// and returns. The bar's reported IV is the exchange-published per-strike skew; volume is free.
+			// Prefer captured per-minute bar when available. Price the leg at the bar's TIME-MIDPOINT
+			// (Open+Close)/2 — that's the price a live tick fired anywhere in the middle of the minute
+			// would see under linear price evolution, which is approximately where live's tick-interval
+			// scheduler (e.g. wa ai watch at :30 each minute) actually samples. Using bar.Open
+			// systematically under-samples by ~30 seconds on trending minutes — empirically the
+			// difference between backtest scoring LongCall at -0.082 and live's +0.067 at the same
+			// minute (verified against an ai-proposals.jsonl record on 2026-05-28). The IV is
+			// back-solved from this midpoint price; the captured IV column is *not* used because it
+			// was solved from bar.Open and is anchored to the wrong moment-in-minute. Vega-too-small
+			// (deep ITM/OTM 0DTE) falls back to the parametric surface so the leg still gets a
+			// usable IV. This is the same flavor of within-minute lookahead the tape boundary bar
+			// discussion already accepted — bounded to "what live would have seen 30s into the bar."
 			var capturedBar = _optionBars?.GetBar(sym, asOfUtc);
 			decimal price;
 			decimal? iv = null;
 			long? volume = null;
-			if (capturedBar != null && capturedBar.Open > 0m)
+			if (capturedBar != null && capturedBar.Open > 0m && capturedBar.Close > 0m)
 			{
-				price = capturedBar.Open;
-				if (capturedBar.ImpliedVolatility.HasValue && capturedBar.ImpliedVolatility.Value > 0m)
+				price = (capturedBar.Open + capturedBar.Close) / 2m;
+				var timeYears = dte <= 0
+					? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears)
+					: dte / 365.0;
+				if (parsed.CallPut != null && timeYears > 0)
 				{
-					// CSV stores IV as percentage (e.g. 15.74 = 15.74%); internal representation is the
-					// decimal fraction (0.1574). Mirror the conversion BacktestIVProvider does for VIX.
-					iv = capturedBar.ImpliedVolatility.Value / 100m;
+					var solved = OptionMath.ImpliedVol(spot, parsed.Strike, timeYears, _riskFreeRate, price, parsed.CallPut);
+					// Reject the bounds (0.01 / 5.0) — those indicate non-convergent vega-flat regimes
+					// (deep ITM/OTM or zero-time). Fall through to the parametric surface instead so
+					// the leg's IV still tracks the smile rather than getting pinned to the back-solver
+					// bound.
+					if (solved > 0.011m && solved < 4.99m)
+						iv = solved;
 				}
-				else if (atm.HasValue)
-				{
+				if (!iv.HasValue && atm.HasValue)
 					iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
-				}
 				if (capturedBar.Volume > 0) volume = capturedBar.Volume;
 			}
 			else
