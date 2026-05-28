@@ -159,6 +159,38 @@ internal static class BacktestSummaryRenderer
 		return strike.ToString("0.##");
 	}
 
+	/// <summary>Longest runs of consecutive <em>trade</em> days with positive ("win") and negative ("loss")
+	/// daily P&amp;L, read off the equity curve as the day-over-day equity change (the first day is measured
+	/// against starting cash). A flat day — no equity change, i.e. a day we didn't trade — is ignored: it
+	/// neither extends nor breaks a run, so only days that actually won or lost money count. Each streak
+	/// carries the date range of its first and last trade day; counts are 0 when the curve is empty.</summary>
+	private static (int WinDays, DateTime WinStart, DateTime WinEnd, int LossDays, DateTime LossStart, DateTime LossEnd) ComputeDailyStreaks(BacktestResult result)
+	{
+		int bestWin = 0, bestLoss = 0, curWin = 0, curLoss = 0;
+		DateTime winStart = default, winEnd = default, lossStart = default, lossEnd = default, curWinStart = default, curLossStart = default;
+		var prev = result.StartingCash;
+		foreach (var (date, equity) in result.EquityCurve)
+		{
+			var delta = equity - prev;
+			prev = equity;
+			if (delta > 0m)
+			{
+				if (curWin == 0) curWinStart = date;
+				curWin++; curLoss = 0;
+				if (curWin > bestWin) { bestWin = curWin; winStart = curWinStart; winEnd = date; }
+			}
+			else if (delta < 0m)
+			{
+				if (curLoss == 0) curLossStart = date;
+				curLoss++; curWin = 0;
+				if (curLoss > bestLoss) { bestLoss = curLoss; lossStart = curLossStart; lossEnd = date; }
+			}
+			// Flat day (no equity change — a no-trade day): ignored. It neither extends nor breaks a
+			// streak, so runs span only the days we actually traded.
+		}
+		return (bestWin, winStart, winEnd, bestLoss, lossStart, lossEnd);
+	}
+
 	private static void RenderSummaryPanel(BacktestResult result)
 	{
 		var realized = result.RealizedPnL;
@@ -208,6 +240,9 @@ internal static class BacktestSummaryRenderer
 		}
 		table.AddRow("Max drawdown", $"[red]${result.MaxDrawdown:N2} ({ddPct:F2}% of peak)[/]");
 		table.AddRow("Trading days", result.EquityCurve.Count.ToString());
+		var streaks = ComputeDailyStreaks(result);
+		table.AddRow("Longest win streak", streaks.WinDays > 0 ? $"[green]{streaks.WinDays} day{(streaks.WinDays == 1 ? "" : "s")} ({streaks.WinStart:yyyy-MM-dd} → {streaks.WinEnd:yyyy-MM-dd})[/]" : "—");
+		table.AddRow("Longest loss streak", streaks.LossDays > 0 ? $"[red]{streaks.LossDays} day{(streaks.LossDays == 1 ? "" : "s")} ({streaks.LossStart:yyyy-MM-dd} → {streaks.LossEnd:yyyy-MM-dd})[/]" : "—");
 		var openPctOfDays = result.EquityCurve.Count > 0 ? result.OpenFills * 100m / result.EquityCurve.Count : 0m;
 		table.AddRow("Opens", result.EquityCurve.Count > 0 ? $"{result.OpenFills} ({openPctOfDays:F1}% of days)" : result.OpenFills.ToString());
 		table.AddRow("Closes (rules)", result.CloseFills.ToString());
