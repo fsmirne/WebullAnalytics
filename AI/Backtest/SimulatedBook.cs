@@ -83,7 +83,7 @@ internal sealed class SimulatedBook
 	public IReadOnlyDictionary<string, OpenPosition> OpenPositions => _positions;
 	public IReadOnlyList<BacktestFill> Fills => _fills;
 
-	/// <summary>Realized P&amp;L = cash flow on closed/expired positions only. Open positions' mark-to-market is excluded.</summary>
+	/// <summary>Realized P&L = cash flow on closed/expired positions only. Open positions' mark-to-market is excluded.</summary>
 	public decimal RealizedPnL => _fills.Sum(f => f.NetCashFlow - f.Fees);
 
 	public decimal TotalFees => _fills.Sum(f => f.Fees);

@@ -3,7 +3,7 @@ namespace WebullAnalytics.AI;
 /// <summary>
 /// Derives the worst-case-loss-per-share for a position from its leg geometry. Used by management
 /// rules (StopLossRule) to fire at the same threshold the opener's candidate scorer assumed when
-/// it ranked the trade, so realized P&amp;L tracks the EV the scorer ranked.
+/// it ranked the trade, so realized P&L tracks the EV the scorer ranked.
 ///
 /// For debit-paying structures (calendars, diagonals, long verticals, double calendars/diagonals)
 /// max loss = the debit paid — you can't lose more than what you put in. For credit-receiving
