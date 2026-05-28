@@ -7,6 +7,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "WebullAnalytics", "WebullAn
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "WebullAnalytics.Tests", "WebullAnalytics.Tests\WebullAnalytics.Tests.csproj", "{87654321-4321-4321-4321-210987654321}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "WebullAnalytics.Scraper", "WebullAnalytics.Scraper\WebullAnalytics.Scraper.csproj", "{ABCDEF12-3456-7890-ABCD-EF1234567890}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,5 +23,9 @@ Global
 		{87654321-4321-4321-4321-210987654321}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{87654321-4321-4321-4321-210987654321}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{87654321-4321-4321-4321-210987654321}.Release|Any CPU.Build.0 = Release|Any CPU
+		{ABCDEF12-3456-7890-ABCD-EF1234567890}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{ABCDEF12-3456-7890-ABCD-EF1234567890}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{ABCDEF12-3456-7890-ABCD-EF1234567890}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{ABCDEF12-3456-7890-ABCD-EF1234567890}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
