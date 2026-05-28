@@ -777,7 +777,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public int? Lots { get; set; }
 
 	[CommandOption("--sl <VALUE>")]
-	[Description("Override opener.realizedExpectancy.stopLossPctOfMaxLoss for this run. 1.0 = SL effectively off (ride to expiry/settlement); 0.5 = cut at half of max loss. Range (0,1].")]
+	[Description("Override opener.realizedExpectancy.stopLossPctOfMaxLoss for this run. 1.0 = SL effectively off (ride to expiry/settlement); 0.5 = cut at half of max loss. Range 0..1.")]
 	public decimal? SlOverride { get; set; }
 
 	public override ValidationResult Validate()
