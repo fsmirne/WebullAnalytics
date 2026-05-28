@@ -490,9 +490,6 @@ CLAUDE.md
 # app config (contains user defaults)
 config.json
 
-# data files
-data/
-
 # local-only superpowers specs/plans/followups
 docs/
 
