@@ -12,12 +12,12 @@ namespace WebullAnalytics.AI.Events;
 /// <see cref="EventVeto"/>.</summary>
 internal static class EventCalendarLoader
 {
-	public static async Task<EventCalendar> LoadAsync(IReadOnlyCollection<string> tickers, OpenerEventsConfig cfg, DateTime asOf, CancellationToken cancellation)
+	public static async Task<EventCalendar> LoadAsync(IReadOnlyCollection<string> tickers, OpenerEventsConfig cfg, DateTime asOf, CancellationToken cancellation, bool cacheOnly = false)
 	{
 		if (!cfg.Enabled || tickers.Count == 0)
 			return EventCalendar.Empty;
 
-		var fromYahoo = await YahooCalendarClient.FetchEventsAsync(tickers, asOf, cancellation);
+		var fromYahoo = await YahooCalendarClient.FetchEventsAsync(tickers, asOf, cancellation, cacheOnly);
 
 		var merged = new Dictionary<string, TickerEvents>(StringComparer.OrdinalIgnoreCase);
 		foreach (var (k, v) in fromYahoo) merged[k] = v;
