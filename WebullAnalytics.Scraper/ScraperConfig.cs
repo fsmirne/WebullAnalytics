@@ -32,6 +32,17 @@ internal sealed class ScraperConfig
 	/// honor StartTime/EndTime literally and let the user decide what window to capture.</summary>
 	[JsonPropertyName("marketHoursOnly")]
 	public bool MarketHoursOnly { get; set; } = false;
+
+	/// <summary>How many times to re-fetch the chain when Webull returns no contracts for the minute
+	/// before giving up. A missing minute forces the backtest to interpolate, so a brief retry within
+	/// the interval is preferable to persisting an empty line (or nothing). Set 0 to disable retries.</summary>
+	[JsonPropertyName("emptyRetryCount")]
+	public int EmptyRetryCount { get; set; } = 3;
+
+	/// <summary>Seconds to wait between empty-chain retries. Keep small so all retries finish inside one
+	/// interval (default 3 × 3s = 9s, comfortably within the 60s tick).</summary>
+	[JsonPropertyName("emptyRetryDelaySeconds")]
+	public int EmptyRetryDelaySeconds { get; set; } = 3;
 }
 
 internal static class ScraperConfigLoader
