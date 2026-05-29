@@ -7,8 +7,12 @@ to a CSV ranked by total P&L. The fills .jsonl per combination is kept on
 disk under data/sweeps/<run-id>/ so you can drill into any row.
 
 Sweep grid is the three arrays at the top — edit those to change the search
-space. The defaults (3x3x3 = 27 combinations) are tractable on a 4-month
-window: ~1-3 min per backtest, ~30-90 min total.
+space. The current defaults (2x4x3 = 24 combinations) are a second-pass
+sweep around the optimum found in the first 3x3x3 run on 2026-01-01..today:
+the first sweep put the winning cell at the GRID EDGE (tw=0.50 lowest tested,
+ms=0.07 highest), which usually means the real optimum sits outside what was
+tested — so this grid extends the tape weight DOWN (0.25-0.45) and the min
+score UP (to 0.10), while pruning biasDrift to the two values that mattered.
 
 Sizing-neutral by default (--lots 1) — every trade is exactly one contract,
 so the totals measure per-trade edge rather than compounding-curve P&L. The
@@ -18,6 +22,10 @@ Run (leave the window open):
   powershell -ExecutionPolicy Bypass -File .\scripts\backtest_sweep.ps1
 Watch progress in another window:
   Get-Content "$env:LOCALAPPDATA\WebullAnalytics\sweeps\sweep-*\sweep.log" -Wait -Tail 20
+
+Multi-regime validation — re-run with the longer window to make sure the
+optimum holds across 2025 H1 / H2 regimes, not just the recent 2026 stretch:
+  powershell -ExecutionPolicy Bypass -File .\scripts\backtest_sweep.ps1 -Since 2025-01-01
 
 Customize:
   -Since      Start date (YYYY-MM-DD). Default: 2026-01-01.
@@ -41,13 +49,16 @@ param(
 $ErrorActionPreference = 'Continue'
 
 # ---- SWEEP GRID --------------------------------------------------------------
-# Each axis is independent; cartesian product = total runs. Keep counts modest
-# the first time you run after a scoring change — three values per axis (27
-# total) is enough to see the response surface; widen what looks promising on
-# the second pass.
-$BiasDrifts   = @(1.0, 1.3, 1.5)            # SPXW config default = 1.3
-$MinScores    = @(0.03, 0.05, 0.07)         # SPXW config default = 0.05
-$TapeWeights  = @(0.50, 0.65, 0.80)         # SPXW config default = 0.65
+# Second-pass grid extending the first sweep's edges. The first sweep on
+# 2026-01-01..today (3x3x3, bd={1.0,1.3,1.5} × ms={0.03,0.05,0.07} × tw=
+# {0.5,0.65,0.8}) showed: tape weight 0.5 dominated everything (0.65 was
+# break-even, 0.8 was decisively negative); bias drift was statistical noise
+# at this resolution; min score 0.07 paired with low tape weight gave the
+# highest avg P&L. Optimum cell (bd=1.3, ms=0.07, tw=0.5) sat at the edges,
+# so widen on both sides. Pruning bd=1.5 since it didn't outperform 1.0/1.3.
+$BiasDrifts   = @(1.0, 1.3)                       # SPXW config default = 1.3
+$MinScores    = @(0.03, 0.05, 0.07, 0.10)         # SPXW config default = 0.05
+$TapeWeights  = @(0.25, 0.35, 0.45)               # SPXW config default = 0.65 (and ALL the prior sweep's negative cells were at tw>=0.65)
 # ------------------------------------------------------------------------------
 
 # Resolve installed wa: PATH first, then AppData fallback. Same pattern as
