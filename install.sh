@@ -5,6 +5,7 @@
 #
 # Layout (XDG-compliant):
 #   ~/.local/bin/wa                            - executable (on PATH)
+#   ~/.local/bin/wa-scraper                    - chain-snapshot scraper (on PATH)
 #   ~/.local/share/WebullAnalytics/data/       - configs, history, intraday, etc.
 #
 # Program.BaseDir resolves to ~/.local/share/WebullAnalytics when its data/
@@ -25,6 +26,7 @@ echo " wa (Webull Analytics) Installer (Linux)"
 echo "============================================"
 echo
 echo "Executable:  $INSTALL_DIR/wa"
+echo "Scraper:     $INSTALL_DIR/wa-scraper"
 echo "Data dir:    $DATA_DIR"
 echo
 
@@ -36,10 +38,11 @@ if ! command -v dotnet &>/dev/null; then
     exit 1
 fi
 
-echo "Building self-contained executable..."
+echo "Building self-contained executables..."
 echo
 
-dotnet publish -c Release -r linux-x64 --self-contained true /p:PublishSingleFile=true
+dotnet publish WebullAnalytics.csproj -c Release -r linux-x64 --self-contained true /p:PublishSingleFile=true
+dotnet publish WebullAnalytics.Scraper/WebullAnalytics.Scraper.csproj -c Release -r linux-x64 --self-contained true /p:PublishSingleFile=true
 
 echo
 echo "Build succeeded."
@@ -48,10 +51,14 @@ echo
 # Create install directory if it doesn't exist
 mkdir -p "$INSTALL_DIR"
 
-# Copy the executable
+# Copy the executables
 echo "Copying wa to $INSTALL_DIR..."
 cp -f "bin/Release/net10.0/linux-x64/publish/wa" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/wa"
+
+echo "Copying wa-scraper to $INSTALL_DIR..."
+cp -f "WebullAnalytics.Scraper/bin/Release/net10.0/linux-x64/publish/wa-scraper" "$INSTALL_DIR/"
+chmod +x "$INSTALL_DIR/wa-scraper"
 
 # Create the data dir at the XDG location the binary looks for at startup.
 echo "Creating data directory at $DATA_DIR..."
@@ -86,4 +93,5 @@ echo " Installation complete!"
 echo "============================================"
 echo
 echo "You can now run: wa"
+echo "Capture a day's chain snapshots with: wa-scraper SPXW"
 echo

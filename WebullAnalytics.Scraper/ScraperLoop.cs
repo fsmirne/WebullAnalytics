@@ -85,9 +85,13 @@ internal sealed class ScraperLoop
 		return 0;
 	}
 
-	/// <summary>Pulls the full SPXW chain via Webull and appends one JSON line to today's JSONL file.
-	/// One file per (ticker, NY date). The fire-time is stamped in both UTC and ET so downstream
-	/// consumers can re-derive the minute bucket without re-parsing the timestamp string.</summary>
+	/// <summary>Pulls the SPXW chain via Webull and appends one JSON line to today's JSONL file,
+	/// keeping only the contracts that expire today (0DTE). Webull's strategy/list returns the full
+	/// chain across every listed expiration (~30k contracts for SPXW), which balloons each per-minute
+	/// line to ~4 MB; the scraper exists to capture the same-day expiry the bot trades, so everything
+	/// past today's expiry is dropped before persisting. One file per (ticker, NY date). The fire-time
+	/// is stamped in both UTC and ET so downstream consumers can re-derive the minute bucket without
+	/// re-parsing the timestamp string.</summary>
 	private async Task<(int Count, decimal? Spot)> TickOnceAsync(DateTime fireWallClock, CancellationToken cancellation)
 	{
 		var fireEt = TimeZoneInfo.ConvertTime(fireWallClock, NyTz);
@@ -98,13 +102,17 @@ internal sealed class ScraperLoop
 		var dateStr = fireEt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 		var path = Path.Combine(_outputDir, $"{dateStr}.jsonl");
 
+		var todayContracts = quotes.Values
+			.Where(q => WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)?.ExpiryDate.Date == fireEt.Date)
+			.ToList();
+
 		var record = new
 		{
 			tsUtc = fireUtc.ToString("o", CultureInfo.InvariantCulture),
 			tsEt = fireEt.ToString("yyyy-MM-ddTHH:mm:ssK", CultureInfo.InvariantCulture),
 			ticker = _ticker,
 			underlyingPrice = spot,
-			options = quotes.Values.Select(q => new
+			options = todayContracts.Select(q => new
 			{
 				symbol = q.ContractSymbol,
 				bid = q.Bid,
@@ -122,7 +130,7 @@ internal sealed class ScraperLoop
 		using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
 		using var writer = new StreamWriter(stream);
 		await writer.WriteLineAsync(line);
-		return (quotes.Count, spot);
+		return (todayContracts.Count, spot);
 	}
 
 	/// <summary>First-fire target: the smallest interval-aligned ET time >= <paramref name="startEt"/>

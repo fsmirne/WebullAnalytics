@@ -4,8 +4,9 @@ REM Builds the project, copies the executable to the install directory, and seed
 REM the data directory at the canonical location the binary looks for at startup.
 REM
 REM Layout:
-REM   %LOCALAPPDATA%\WebullAnalytics\wa.exe       - executable (default install location)
-REM   %LOCALAPPDATA%\WebullAnalytics\data\        - configs, history, intraday, etc.
+REM   %LOCALAPPDATA%\WebullAnalytics\wa.exe          - executable (default install location)
+REM   %LOCALAPPDATA%\WebullAnalytics\wa-scraper.exe  - chain-snapshot scraper
+REM   %LOCALAPPDATA%\WebullAnalytics\data\           - configs, history, intraday, etc.
 REM
 REM Program.BaseDir resolves to %LOCALAPPDATA%\WebullAnalytics when its data\ subdir
 REM exists, so any wa.exe invocation (this one, a dev build, a published release)
@@ -26,8 +27,9 @@ echo ============================================
 echo  wa (Webull Analytics) Installer
 echo ============================================
 echo.
-echo Executable: %INSTALL_DIR%\wa.exe
-echo Data dir:   %DATA_DIR%
+echo Executable:  %INSTALL_DIR%\wa.exe
+echo Scraper:     %INSTALL_DIR%\wa-scraper.exe
+echo Data dir:    %DATA_DIR%
 echo.
 
 REM Check if dotnet is installed
@@ -40,13 +42,21 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
-echo Building self-contained executable...
+echo Building self-contained executables...
 echo.
 
 dotnet publish WebullAnalytics.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
 if %errorLevel% neq 0 (
     echo.
     echo ERROR: Build failed!
+    pause
+    exit /b 1
+)
+
+dotnet publish WebullAnalytics.Scraper\WebullAnalytics.Scraper.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
+if %errorLevel% neq 0 (
+    echo.
+    echo ERROR: Scraper build failed!
     pause
     exit /b 1
 )
@@ -66,11 +76,19 @@ if not exist "%INSTALL_DIR%" (
     )
 )
 
-REM Copy the executable
+REM Copy the executables
 echo Copying wa.exe to %INSTALL_DIR%...
 copy /y "bin\Release\net10.0\win-x64\publish\wa.exe" "%INSTALL_DIR%\" >nul
 if %errorLevel% neq 0 (
     echo ERROR: Failed to copy executable.
+    pause
+    exit /b 1
+)
+
+echo Copying wa-scraper.exe to %INSTALL_DIR%...
+copy /y "WebullAnalytics.Scraper\bin\Release\net10.0\win-x64\publish\wa-scraper.exe" "%INSTALL_DIR%\" >nul
+if %errorLevel% neq 0 (
+    echo ERROR: Failed to copy scraper executable.
     pause
     exit /b 1
 )
@@ -114,5 +132,6 @@ echo  Installation complete!
 echo ============================================
 echo.
 echo You can now run: wa
+echo Capture a day's chain snapshots with: wa-scraper SPXW
 echo.
 pause
