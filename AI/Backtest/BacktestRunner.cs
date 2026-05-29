@@ -162,22 +162,19 @@ internal sealed class BacktestRunner
 			if (!openedAtMinute.HasIntraday)
 			{
 				var openProposals = openedAtMinute.LegacyProposals;
-				var opened = 0;
 				// Discovery: legacy path evaluates once at 09:30; top-K is "top-K by FinalScore from
 				// this single evaluation". Same semantic as intraday-path top-K but no per-minute loop.
 				if (_discover) RecordTopKDiscovery(openProposals);
-				foreach (var p in openProposals)
+				// Selection must not be dictated by affordability: consider only the top-N by score and
+				// skip any we can't afford — never fall through to a cheaper, lower-ranked substitute.
+				foreach (var p in openProposals.Take(_topNPerStep))
 				{
-					if (opened >= _topNPerStep) break;
 					var qty = ResolveOpenQty(p);
 					if (qty < 1) continue;
 
 					var legFills = BuildLegFillsFromProposal(p.Legs, qty);
 					if (legFills == null) continue;
-					if (_book.Open(step, p.Ticker, p.StructureKind, legFills, qty))
-					{
-						opened++;
-					}
+					_book.Open(step, p.Ticker, p.StructureKind, legFills, qty);
 				}
 			}
 
@@ -789,9 +786,18 @@ internal sealed class BacktestRunner
 		// future per-minute work grows (e.g. forward-simulating each proposal for oracle), but for
 		// the current workload sequential wins on wall time.
 		var opened = 0;
+		// Non-oracle: the FIRST minute that surfaces a score-endorsed proposal is the entry decision
+		// for the day. Affordability decides whether we take that entry or skip — it must NOT push the
+		// scan to a later minute hunting for a cheaper trade. Without this, a small per-trade budget
+		// makes the engine pass over the genuine signal (unaffordable) and open a cheaper, lower-quality
+		// strike hours later, letting the bankroll pick the trade.
+		var entryDecided = false;
 		foreach (var minuteUtc in allTimestamps)
 		{
 			if (!_oracle && opened >= _topNPerStep) break;
+			// Once the entry decision is made there's nothing left to open today; keep scanning only
+			// when collecting the discovery catalog (which wants every minute the evaluator saw).
+			if (!_oracle && entryDecided && dayProposalsByFingerprint == null) break;
 			cancellation.ThrowIfCancellationRequested();
 
 			var result = await EvaluateMinuteAsync(minuteUtc, closeUtc, tickerSet, barIndexByTicker, postMgmt, postCash, postAccount, postSignals, openEvaluator, cancellation);
@@ -813,28 +819,37 @@ internal sealed class BacktestRunner
 				}
 			}
 
-			foreach (var p in openProposals)
+			if (_oracle)
 			{
-				if (!_oracle && opened >= _topNPerStep) break;
-				var qty = ResolveOpenQty(p);
-				if (qty < 1) continue;
-
-				var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-				if (legFills == null) continue;
-
-				if (_oracle)
+				// Oracle forward-sims every proposal at every minute to find the realized-best entry.
+				foreach (var p in openProposals)
 				{
+					var qty = ResolveOpenQty(p);
+					if (qty < 1) continue;
+					var legFills = BuildLegFillsFromProposal(p.Legs, qty);
+					if (legFills == null) continue;
 					var eodPnl = await ComputeOracleEodPnlAsync(p, step.Date, cancellation);
 					if (eodPnl == null) continue;
 					if (bestOracle == null || eodPnl.Value > bestOracle.Value.Pnl)
 						bestOracle = (minuteEt, p, legFills, eodPnl.Value);
 				}
-				else
+				continue;
+			}
+
+			// First score-endorsed minute = the day's entry decision. Take the top-N BY SCORE and open
+			// the affordable ones; if the top picks can't be afforded, the day is skipped — we do not
+			// fall through to a cheaper substitute, nor scan later minutes for one.
+			if (!entryDecided && openProposals.Count > 0)
+			{
+				entryDecided = true;
+				foreach (var p in openProposals.Take(_topNPerStep - opened))
 				{
+					var qty = ResolveOpenQty(p);
+					if (qty < 1) continue;
+					var legFills = BuildLegFillsFromProposal(p.Legs, qty);
+					if (legFills == null) continue;
 					if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, qty))
-					{
 						opened++;
-					}
 				}
 			}
 		}
