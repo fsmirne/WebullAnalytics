@@ -58,11 +58,18 @@ internal sealed class OpenerAutoExecutor
 		var brokerActiveCount = _config.Submit && _brokerState != null && _brokerState.IsReady ? _brokerState.TodaysActiveOrderCount : 0;
 
 		var ordersThisTick = 0;
-		foreach (var p in proposals)
+		// Apply the structure allow-list as a SELECTION filter first — a disabled structure must never
+		// trade, so fall through to the best allowed pick. Then consider only the top-N by score (the
+		// day's order cap) and skip any we can't afford: affordability must not pick the trade by
+		// substituting a cheaper, lower-ranked proposal. Dedup below still advances past picks already
+		// at the broker.
+		var eligible = _allowedStructures.Count > 0
+			? proposals.Where(p => _allowedStructures.Contains(p.StructureKind.ToString()))
+			: proposals;
+		foreach (var p in eligible.Take(_config.MaxOrdersPerDay))
 		{
 			if (p.CashReserveBlocked) continue;
 			if (p.Qty < 1) continue;
-			if (_allowedStructures.Count > 0 && !_allowedStructures.Contains(p.StructureKind.ToString())) continue;
 
 			// Broker-truth dedup: if the same leg set is already active (pending or filled today),
 			// skip. This catches same-proposal-across-ticks, cross-process, cross-restart, and the
