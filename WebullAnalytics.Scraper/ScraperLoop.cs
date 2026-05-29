@@ -61,9 +61,25 @@ internal sealed class ScraperLoop
 			try
 			{
 				var (count, spot) = await TickOnceAsync(fireWallClock, cancellation);
-				ticksRun++;
-				failures = 0;
-				AnsiConsole.MarkupLine($"[dim]{fireWallClock:HH:mm:ss} fired: {count} contracts, spot={spot?.ToString("F2") ?? "?"}[/]");
+				if (count > 0)
+				{
+					ticksRun++;
+					failures = 0;
+					AnsiConsole.MarkupLine($"[dim]{fireWallClock:HH:mm:ss} fired: {count} contracts, spot={spot?.ToString("F2") ?? "?"}[/]");
+				}
+				else
+				{
+					// Empty even after in-tick retries. A persistent dataless stretch (e.g. an expired
+					// session) would otherwise burn the whole day silently, so it counts toward the same
+					// circuit breaker as a hard failure.
+					failures++;
+					AnsiConsole.MarkupLine($"[yellow]{fireWallClock:HH:mm:ss} no data after {_config.EmptyRetryCount} retries — nothing written ({failures}/5)[/]");
+					if (failures >= 5)
+					{
+						Console.Error.WriteLine("Circuit breaker: 5 consecutive dataless/failed ticks. Exiting.");
+						return 3;
+					}
+				}
 			}
 			catch (OperationCanceledException) { break; }
 			catch (Exception ex)
@@ -72,7 +88,7 @@ internal sealed class ScraperLoop
 				AnsiConsole.MarkupLine($"[red]{fireWallClock:HH:mm:ss} tick failed ({failures}/5): {Markup.Escape(ex.Message)}[/]");
 				if (failures >= 5)
 				{
-					Console.Error.WriteLine("Circuit breaker: 5 consecutive tick failures. Exiting.");
+					Console.Error.WriteLine("Circuit breaker: 5 consecutive dataless/failed ticks. Exiting.");
 					return 3;
 				}
 			}
@@ -97,14 +113,33 @@ internal sealed class ScraperLoop
 		var fireEt = TimeZoneInfo.ConvertTime(fireWallClock, NyTz);
 		var fireUtc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(fireEt, DateTimeKind.Unspecified), NyTz);
 
-		var (quotes, spot, _) = await WebullOptionsClient.FetchChainAsync(_apiConfig, _ticker, cancellation);
+		// Retry the chain fetch when Webull returns no contracts for this minute (throttle, dropped
+		// session, transient empty response). A missing minute is worse than a marginally delayed one:
+		// the backtest replays this file minute-by-minute, so a gap forces interpolation. Retry a few
+		// times within the interval; only persist once we actually have contracts, never an empty line.
+		List<OptionContractQuote> todayContracts = new();
+		decimal? spot = null;
+		for (var attempt = 0; attempt <= _config.EmptyRetryCount; attempt++)
+		{
+			var (quotes, fetchedSpot, _) = await WebullOptionsClient.FetchChainAsync(_apiConfig, _ticker, cancellation);
+			spot = fetchedSpot;
+			todayContracts = quotes.Values
+				.Where(q => WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)?.ExpiryDate.Date == fireEt.Date)
+				.ToList();
+			if (todayContracts.Count > 0) break;
+			if (attempt < _config.EmptyRetryCount)
+			{
+				AnsiConsole.MarkupLine($"[yellow]{fireEt:HH:mm:ss} empty chain — retry {attempt + 1}/{_config.EmptyRetryCount} in {_config.EmptyRetryDelaySeconds}s[/]");
+				await Task.Delay(TimeSpan.FromSeconds(_config.EmptyRetryDelaySeconds), cancellation);
+			}
+		}
+
+		// Still nothing after retries: skip the write so a dataless minute is simply absent rather than
+		// a confusing empty record. The caller treats a zero count as a soft miss.
+		if (todayContracts.Count == 0) return (0, spot);
 
 		var dateStr = fireEt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 		var path = Path.Combine(_outputDir, $"{dateStr}.jsonl");
-
-		var todayContracts = quotes.Values
-			.Where(q => WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)?.ExpiryDate.Date == fireEt.Date)
-			.ToList();
 
 		var record = new
 		{
