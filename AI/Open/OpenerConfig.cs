@@ -36,6 +36,14 @@ internal sealed class OpenerConfig
 	/// engine sits out marginal days, fewer trades but fewer whipsaw losses.</summary>
 	[JsonPropertyName("minScoreToOpen")] public decimal MinScoreToOpen { get; set; } = 0m;
 
+	/// <summary>Earliest wall-clock time (ET, "HH:mm") at which an open may fire. Null/empty = no delay
+	/// (the 09:30 RTH open). Delaying entry lets the intraday tape form and blend into the bias (via
+	/// <see cref="OpenerWeightsConfig.IntradayTape"/>) before the directional read is committed, instead
+	/// of trading on the stale overnight macro bias at 09:30 — the dominant long-premium misfire. The
+	/// backtest skips minutes before this time and decides at the first qualifying minute at/after it;
+	/// the live opener should likewise withhold opens until this time.</summary>
+	[JsonPropertyName("earliestEntryTimeEt")] public string? EarliestEntryTimeEt { get; set; } = null;
+
 	/// <summary>Multiplicative-factor weights applied to the candidate score chain. All twelve signals
 	/// live here in one sub-block so the user can see the full set of scoring knobs at a glance.</summary>
 	[JsonPropertyName("weights")] public OpenerWeightsConfig Weights { get; set; } = new();

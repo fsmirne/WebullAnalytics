@@ -758,6 +758,7 @@ internal sealed class OpenCandidateEvaluator
 			GapWeight = tapeCfg.GapWeight,
 			OpenToNowWeight = tapeCfg.OpenToNowWeight,
 			VwapDeviationWeight = tapeCfg.VwapDeviationWeight,
+			IncludeExtended = tapeCfg.IncludeExtended,
 		};
 		return IntradayTapeIndicators.Compute(bars, prevClose, toUtc, indicatorCfg);
 	}
