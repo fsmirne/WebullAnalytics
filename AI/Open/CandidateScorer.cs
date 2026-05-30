@@ -688,6 +688,13 @@ internal static class CandidateScorer
 
 	public static decimal? ComputeAssignmentRiskFactor(CandidateSkeleton skel, decimal spot, DateTime asOf, decimal strikeStep, decimal technicalBias)
 	{
+		// Cash-settled index options (SPX/SPXW/NDX/XSP/RUT/DJX/VIX) are European: they cannot be
+		// exercised early, so early-assignment risk is structurally zero. Applying the penalty here was
+		// incorrect — it docked credit/neutral structures (short verticals, iron condors/butterflies)
+		// ~0.10–0.21× on exactly these roots for a risk that cannot occur, burying flat-day premium
+		// trades far below minScoreToOpen. No penalty for these roots.
+		if (OptionSettlement.IsCashSettledIndex(skel.Ticker)) return null;
+
 		var shortLegs = skel.Legs
 			.Where(l => l.Action == "sell")
 			.Select(l => ParsingHelpers.ParseOptionSymbol(l.Symbol))
