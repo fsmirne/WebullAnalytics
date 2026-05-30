@@ -5,7 +5,7 @@
   "indicators": {
     "strikeStep": 5.0,
     "intradayTape": {
-      "includeExtended": false
+      "includeExtended": true
     }
   },
   "opener": {
@@ -49,7 +49,7 @@
         "enabled": false
       },
       "ironCondor": {
-        "enabled": true,
+        "enabled": false,
         "dteMin": 0,
         "dteMax": 0,
         "widthSteps": [
