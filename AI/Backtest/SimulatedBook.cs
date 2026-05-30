@@ -48,10 +48,22 @@ internal sealed class SimulatedBook
 		"SPX", "SPXW", "NDX", "XSP", "RUT", "DJX", "VIX"
 	};
 
-	/// <summary>Per-leg-contract commission default for <paramref name="ticker"/>. Cash-settled index
-	/// options charge the higher $1.14/contract; equity/ETF options charge the lower $0.05/contract.</summary>
+	// Per-ticker fee overrides where the broker rate differs from the $1.14 index default, verified
+	// against live Webull fills: XSP (Mini-SPX) is $0.55, NDX is $1.30. SPX/SPXW stay at $1.14;
+	// RUT/DJX/VIX are unverified and fall back to the $1.14 index default.
+	private static readonly Dictionary<string, decimal> FeePerContractOverrides = new(StringComparer.OrdinalIgnoreCase)
+	{
+		["XSP"] = 0.55m,
+		["NDX"] = 1.30m,
+	};
+
+	/// <summary>Per-leg-contract commission default for <paramref name="ticker"/>. Per-ticker overrides
+	/// (XSP $0.55, NDX $1.30) win; other cash-settled index options charge $1.14; equity/ETF options
+	/// (incl. IWM) charge $0.05.</summary>
 	public static decimal DefaultFeePerContractFor(string ticker) =>
-		IndexOptionTickers.Contains(ticker) ? IndexOptionFeePerContract : EquityOptionFeePerContract;
+		FeePerContractOverrides.TryGetValue(ticker, out var fee) ? fee
+		: IndexOptionTickers.Contains(ticker) ? IndexOptionFeePerContract
+		: EquityOptionFeePerContract;
 
 	private readonly Dictionary<string, OpenPosition> _positions = new(StringComparer.OrdinalIgnoreCase);
 	private readonly Dictionary<string, decimal> _initialDebitPerContract = new(StringComparer.OrdinalIgnoreCase);
