@@ -72,6 +72,14 @@ internal sealed class OpenerConfig
 	/// "DTE-weighted mix in the consumer" documented on <see cref="IntradayBias"/>.</summary>
 	[JsonPropertyName("intradayTapeDteCurve")] public OpenerIntradayTapeDteCurveConfig IntradayTapeDteCurve { get; set; } = new();
 
+	/// <summary>Directional-conviction gate on long-premium structures (long call/put, debit verticals).
+	/// Long premium only pays when the underlying actually follows through directionally; on flat/choppy
+	/// days it bleeds theta — the dominant loss source in 0DTE backtests (long calls/puts are ~69% of
+	/// gross losses). This de-rates long-premium scores when the directional conviction (aligned bias) is
+	/// weak, so credit/neutral structures cover the marginal days, while strong-conviction longs keep
+	/// full strength. Disabled by default (<c>weight = 0</c>), leaving long scoring bit-identical.</summary>
+	[JsonPropertyName("longConvictionGate")] public OpenerLongConvictionGateConfig LongConvictionGate { get; set; } = new();
+
 }
 
 /// <summary>Multiplicative-factor weights applied to the opener candidate score chain. Each field is
@@ -158,6 +166,32 @@ internal sealed class OpenerIntradayTapeDteCurveConfig
 		var t = (decimal)dte / FarDte;
 		var w = WeightAt0Dte + (WeightAtFarDte - WeightAt0Dte) * t;
 		return Math.Clamp(w, 0m, 1m);
+	}
+}
+
+/// <summary>Directional-conviction gate for long-premium structures. The score is multiplied by a
+/// factor that is 1.0 when the trade-aligned bias is at or above <see cref="Reference"/> (strong
+/// conviction — keep the trade at full strength) and falls to <c>1 − Weight</c> as aligned conviction
+/// goes to zero or turns against the trade (weak/contrary signal — de-rate the coin-flip). Disabled
+/// when <see cref="Weight"/> = 0 (factor always 1.0).</summary>
+internal sealed class OpenerLongConvictionGateConfig
+{
+	/// <summary>Penalty depth for a zero-conviction long. 0 disables the gate; 0.8 means a long with no
+	/// directional edge is scored at 0.2× (and so rarely clears <c>minScoreToOpen</c>). Range [0, 1].</summary>
+	[JsonPropertyName("weight")] public decimal Weight { get; set; } = 0m;
+
+	/// <summary>Aligned-bias level at which a long is considered full-conviction (factor = 1.0). Below
+	/// this the factor ramps linearly down to <c>1 − Weight</c>. Default 0.35.</summary>
+	[JsonPropertyName("reference")] public decimal Reference { get; set; } = 0.35m;
+
+	/// <summary>Multiplicative score factor for a long-premium candidate whose trade-aligned bias is
+	/// <paramref name="alignedBias"/> (= bias × directionalFit; positive means the bias points the trade's
+	/// way). 1.0 when disabled or at/above full conviction; floored at <c>1 − Weight</c>.</summary>
+	public decimal Factor(decimal alignedBias)
+	{
+		if (Weight <= 0m || Reference <= 0m) return 1m;
+		var conviction = Math.Clamp(alignedBias / Reference, 0m, 1m);
+		return 1m - Weight * (1m - conviction);
 	}
 }
 
