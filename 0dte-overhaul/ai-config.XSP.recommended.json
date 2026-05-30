@@ -3,7 +3,10 @@
     "value": 0
   },
   "indicators": {
-    "strikeStep": 1.0
+    "strikeStep": 1.0,
+    "intradayTape": {
+      "includeExtended": false
+    }
   },
   "opener": {
     "topNPerTicker": 1,

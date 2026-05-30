@@ -785,6 +785,15 @@ internal sealed class BacktestRunner
 		// refactor that removed BacktestQuoteSource's mutable state would allow a parallel pass if
 		// future per-minute work grows (e.g. forward-simulating each proposal for oracle), but for
 		// the current workload sequential wins on wall time.
+		// Earliest-entry gate: withhold opens until a configured ET wall-clock time so the intraday tape
+		// can form and blend into the bias before the directional read is committed (vs trading the stale
+		// 09:30 overnight macro). Parsed once per day; null/empty = no delay. Discovery still collects all
+		// minutes (it should reflect everything the evaluator saw), so the gate only blocks the open.
+		TimeSpan? earliestEntry = null;
+		if (!string.IsNullOrWhiteSpace(_config.Opener.EarliestEntryTimeEt)
+			&& TimeSpan.TryParse(_config.Opener.EarliestEntryTimeEt, System.Globalization.CultureInfo.InvariantCulture, out var ee))
+			earliestEntry = ee;
+
 		var opened = 0;
 		// Non-oracle: the FIRST minute that surfaces a score-endorsed proposal is the entry decision
 		// for the day. Affordability decides whether we take that entry or skip — it must NOT push the
@@ -839,6 +848,10 @@ internal sealed class BacktestRunner
 			// First score-endorsed minute = the day's entry decision. Take the top-N BY SCORE and open
 			// the affordable ones; if the top picks can't be afforded, the day is skipped — we do not
 			// fall through to a cheaper substitute, nor scan later minutes for one.
+			// Earliest-entry gate: ignore qualifying minutes before the configured ET time so the day's
+			// decision waits for the tape to form (entryDecided stays false → loop keeps scanning).
+			var minuteTimeEt = TimeZoneInfo.ConvertTime(minuteUtc, NyTz).TimeOfDay;
+			if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
 			if (!entryDecided && openProposals.Count > 0)
 			{
 				entryDecided = true;
