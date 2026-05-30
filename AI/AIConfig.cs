@@ -428,6 +428,10 @@ internal static class AIConfigLoader
 		if (dteCurve.WeightAtFarDte < 0m || dteCurve.WeightAtFarDte > 1m) return $"opener.intradayTapeDteCurve.weightAtFarDte: must be in [0, 1], got {dteCurve.WeightAtFarDte}";
 		if (dteCurve.FarDte < 0) return $"opener.intradayTapeDteCurve.farDte: must be ≥ 0, got {dteCurve.FarDte}";
 
+		var lcg = op.LongConvictionGate;
+		if (lcg.Weight < 0m || lcg.Weight > 1m) return $"opener.longConvictionGate.weight: must be in [0, 1], got {lcg.Weight}";
+		if (lcg.Reference < 0m) return $"opener.longConvictionGate.reference: must be ≥ 0, got {lcg.Reference}";
+
 		var liq = op.Liquidity;
 		if (liq.MinOpenInterest < 0) return $"opener.liquidity.minOpenInterest: must be ≥ 0, got {liq.MinOpenInterest}";
 		if (liq.MinRelativeOpenInterest < 0m || liq.MinRelativeOpenInterest > 1m) return $"opener.liquidity.minRelativeOpenInterest: must be in [0, 1], got {liq.MinRelativeOpenInterest}";

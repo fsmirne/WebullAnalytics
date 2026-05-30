@@ -31,19 +31,20 @@ Profit factor:
 | | XSP train | XSP holdout | SPXW train | SPXW holdout |
 |---|---|---|---|---|
 | **Baseline** (master) | 1.17 | 1.21 | 1.24 | 1.28 |
-| **Overhaul** | **1.29** | **1.35** | **1.30** | **1.47** |
+| **Overhaul** | **1.29** | **1.35** | 1.23 | **1.48** |
 
-Full metrics (baseline → overhaul):
+> **Correction (2026-05-30, re-verified on current data).** An earlier draft of this table reported SPXW train as 1.24 → **1.30**. That figure is **not reproducible** — three independent re-runs and a stashed-binary check all give SPXW train **1.23** for the overhaul, deterministically. The master baseline re-pinned on current data is byte-identical to the original (SPXW train 118 opens / 1.24), so the data is stable and 1.30 was a transient config artifact. **The honest result: the overhaul improves XSP on both windows and SPXW on the holdout strongly, but SPXW *train* is flat-to-slightly-worse (1.24 → 1.23).** That single regression is what the long-conviction gate (see `LONG-PREMIUM-FINDINGS.md`) repairs (→ 1.29).
+
+Full metrics (baseline → overhaul, current data):
 
 | | XSP train | XSP holdout | SPXW train | SPXW holdout |
 |---|---|---|---|---|
-| Profit factor | 1.17 → 1.29 | 1.21 → 1.35 | 1.24 → 1.30 | 1.28 → 1.47 |
-| Expectancy/trade | $10.83 → $16.81 | $14.87 → $23.00 | $159.68 → $140.05 | $210.49 → $191.66 |
-| Opens | 102 → 127 | 49 → 63 | 118 → 194 | 52 → 89 |
-| Win rate | 41.2% → 45.7% | 38.8% → 47.6% | 42.4% → 45.4% | 44.2% → 53.9% |
-| Max drawdown | 7.8% → 6.4% | 12.0% → 5.9% | 30.5% → 30.6% | 74.6% → 20.4% |
+| Profit factor | 1.17 → 1.29 | 1.21 → 1.35 | 1.24 → 1.23 | 1.28 → 1.48 |
+| Expectancy/trade | $10.83 → $16.81 | $14.87 → $23.00 | $159.68 → $104.41 | $210.49 → $191.43 |
+| Opens | 102 → 127 | 49 → 63 | 118 → 198 | 52 → 87 |
+| Max drawdown | 7.8% → 6.4% | 12.0% → 5.9% | 30.5% → 34.7% | 74.6% → 22.6% |
 
-Both tickers improve PF on **both** windows. Win rate rises across the board and max drawdown drops sharply (SPXW holdout 74.6% → 20.4%) — the gain comes from better trade selection and more frequent defined-risk trades, not from taking more risk, so trending days are not degraded. SPXW expectancy/trade falls slightly because the strategy now trades ~70% more often (lower gate + condor) at a smaller but steadier per-trade edge — higher PF, far lower drawdown, higher total P&L.
+XSP improves PF on both windows. SPXW improves strongly on the holdout (1.28 → 1.48, drawdown 74.6% → 22.6%) but its train PF is flat (1.24 → 1.23) — the overhaul trades ~70% more often on SPXW (lower gate + condor) at a smaller per-trade edge, which is a clear win in 2026 but roughly neutral in 2025. The long-premium follow-up (`LONG-PREMIUM-FINDINGS.md`) addresses that SPXW-train softness.
 
 ## Why not the higher-PF-on-holdout cells?
 
