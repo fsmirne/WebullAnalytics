@@ -60,9 +60,10 @@ if (-not $Wa) { Log "FATAL: 'wa' not found on PATH or in %LOCALAPPDATA%\WebullAn
 Log "using wa: $Wa"
 
 # 1. Discovery passes - catalog-only, no network, seconds each. --min-score-to-open 0
-#    emits the full candidate pool (so sweeps at any gate have coverage); bd=1.5 unions
-#    onto bd=1.3's picks; padding is recomputed over the union.
-foreach ($bd in '1.3', '1.5') {
+#    emits the full candidate pool (so sweeps at any gate have coverage). 1.0 is the live/
+#    backtest default (the strikes the real run actually touches); 1.3/1.5 add sweep headroom
+#    above it. Each pass unions onto the prior picks; padding is recomputed over the union.
+foreach ($bd in '1.0', '1.3', '1.5') {
   Log "discover bd=$bd  (min-score-to-open=0, top-k=40, pad=3)"
   & $Wa options discover $Ticker --since $Since --until $Until --min-score-to-open 0 --bias-drift $bd --top-k 40 --pad 3 *>> $Log
   if ($LASTEXITCODE -ne 0) { Log "FATAL: discover bd=$bd failed (stale wa, or missing bar coverage for $Since?) - inspect $Log"; exit 1 }
