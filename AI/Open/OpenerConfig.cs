@@ -36,6 +36,14 @@ internal sealed class OpenerConfig
 	/// engine sits out marginal days, fewer trades but fewer whipsaw losses.</summary>
 	[JsonPropertyName("minScoreToOpen")] public decimal MinScoreToOpen { get; set; } = 0m;
 
+	/// <summary>Earliest wall-clock time (ET, "HH:mm") at which an open may fire. Null/empty = no delay
+	/// (the 09:30 RTH open). Delaying entry lets the intraday tape form and blend into the bias (via
+	/// <see cref="OpenerWeightsConfig.IntradayTape"/>) before the directional read is committed, instead
+	/// of trading on the stale overnight macro bias at 09:30 — the dominant long-premium misfire. The
+	/// backtest skips minutes before this time and decides at the first qualifying minute at/after it;
+	/// the live opener should likewise withhold opens until this time.</summary>
+	[JsonPropertyName("earliestEntryTimeEt")] public string? EarliestEntryTimeEt { get; set; } = null;
+
 	/// <summary>Multiplicative-factor weights applied to the candidate score chain. All twelve signals
 	/// live here in one sub-block so the user can see the full set of scoring knobs at a glance.</summary>
 	[JsonPropertyName("weights")] public OpenerWeightsConfig Weights { get; set; } = new();
@@ -63,6 +71,22 @@ internal sealed class OpenerConfig
 	[JsonPropertyName("scenarioGridSigma")] public decimal ScenarioGridSigma { get; set; } = 1.0m;
 
 	[JsonPropertyName("structures")] public OpenerStructuresConfig Structures { get; set; } = new();
+
+	/// <summary>DTE-aware shaping of the intraday-tape blend weight. When disabled (default) the blend
+	/// uses the flat <see cref="OpenerWeightsConfig.IntradayTape"/> at every DTE — exactly the legacy
+	/// behavior. When enabled, the effective intraday weight ramps from <c>weightAt0Dte</c> at same-day
+	/// expiry down to <c>weightAtFarDte</c> at <c>farDte</c> and beyond, so a 0DTE trade can lean fully
+	/// on the tape while a swing trade stays anchored to the multi-day macro bias. This implements the
+	/// "DTE-weighted mix in the consumer" documented on <see cref="IntradayBias"/>.</summary>
+	[JsonPropertyName("intradayTapeDteCurve")] public OpenerIntradayTapeDteCurveConfig IntradayTapeDteCurve { get; set; } = new();
+
+	/// <summary>Directional-conviction gate on long-premium structures (long call/put, debit verticals).
+	/// Long premium only pays when the underlying actually follows through directionally; on flat/choppy
+	/// days it bleeds theta — the dominant loss source in 0DTE backtests (long calls/puts are ~69% of
+	/// gross losses). This de-rates long-premium scores when the directional conviction (aligned bias) is
+	/// weak, so credit/neutral structures cover the marginal days, while strong-conviction longs keep
+	/// full strength. Disabled by default (<c>weight = 0</c>), leaving long scoring bit-identical.</summary>
+	[JsonPropertyName("longConvictionGate")] public OpenerLongConvictionGateConfig LongConvictionGate { get; set; } = new();
 
 }
 
@@ -116,6 +140,67 @@ internal sealed class OpenerWeightsConfig
 	/// <c>(1 − intradayTape) · macroBias + intradayTape · intradayBias</c>. 0DTE wants 0.5–0.8;
 	/// swing wants 0.0–0.2.</summary>
 	[JsonPropertyName("intradayTape")] public decimal IntradayTape { get; set; } = 0m;
+}
+
+/// <summary>DTE-aware curve for the intraday-tape blend weight. Linearly interpolates the effective
+/// intraday weight from <see cref="WeightAt0Dte"/> at 0 DTE to <see cref="WeightAtFarDte"/> at
+/// <see cref="FarDte"/> (and flat beyond). Disabled by default, in which case the consumer uses the
+/// flat <see cref="OpenerWeightsConfig.IntradayTape"/> at every DTE (legacy behavior).</summary>
+internal sealed class OpenerIntradayTapeDteCurveConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+
+	/// <summary>Effective intraday-tape blend weight at same-day (0 DTE) expiry. A 0DTE trade's
+	/// directional read should come almost entirely from the live tape, so this defaults to 1.0
+	/// (full intraday lean) when the curve is enabled.</summary>
+	[JsonPropertyName("weightAt0Dte")] public decimal WeightAt0Dte { get; set; } = 1.0m;
+
+	/// <summary>Effective intraday-tape blend weight at/beyond <see cref="FarDte"/>. A multi-day swing
+	/// trade should lean on the macro bias, so this defaults to 0.0 (pure macro at the far end).</summary>
+	[JsonPropertyName("weightAtFarDte")] public decimal WeightAtFarDte { get; set; } = 0.0m;
+
+	/// <summary>DTE at/above which the weight is pinned to <see cref="WeightAtFarDte"/>. Between 0 and
+	/// this the weight interpolates linearly. Default 21 (≈ one expiry cycle).</summary>
+	[JsonPropertyName("farDte")] public int FarDte { get; set; } = 21;
+
+	/// <summary>Effective intraday-tape blend weight for a candidate at <paramref name="dte"/> calendar
+	/// days to its target expiry. When the curve is disabled this returns <paramref name="staticWeight"/>
+	/// unchanged so the blend is bit-identical to the legacy flat-weight path.</summary>
+	public decimal WeightForDte(int dte, decimal staticWeight)
+	{
+		if (!Enabled) return Math.Clamp(staticWeight, 0m, 1m);
+		if (dte <= 0) return Math.Clamp(WeightAt0Dte, 0m, 1m);
+		if (FarDte <= 0 || dte >= FarDte) return Math.Clamp(WeightAtFarDte, 0m, 1m);
+		var t = (decimal)dte / FarDte;
+		var w = WeightAt0Dte + (WeightAtFarDte - WeightAt0Dte) * t;
+		return Math.Clamp(w, 0m, 1m);
+	}
+}
+
+/// <summary>Directional-conviction gate for long-premium structures. The score is multiplied by a
+/// factor that is 1.0 when the trade-aligned bias is at or above <see cref="Reference"/> (strong
+/// conviction — keep the trade at full strength) and falls to <c>1 − Weight</c> as aligned conviction
+/// goes to zero or turns against the trade (weak/contrary signal — de-rate the coin-flip). Disabled
+/// when <see cref="Weight"/> = 0 (factor always 1.0).</summary>
+internal sealed class OpenerLongConvictionGateConfig
+{
+	/// <summary>Penalty depth for a zero-conviction long. 0 disables the gate; 0.8 means a long with no
+	/// directional edge is scored at 0.2× (and so rarely clears <c>minScoreToOpen</c>). Range [0, 1].</summary>
+	[JsonPropertyName("weight")] public decimal Weight { get; set; } = 0m;
+
+	/// <summary>Aligned-bias level at which a long is considered full-conviction (factor = 1.0). Below
+	/// this the factor ramps linearly down to <c>1 − Weight</c>. Default 0.35.</summary>
+	[JsonPropertyName("reference")] public decimal Reference { get; set; } = 0.35m;
+
+	/// <summary>Multiplicative score factor for a long-premium candidate whose trade-aligned bias is
+	/// <paramref name="alignedBias"/> (= bias × directionalFit; positive means the bias points the trade's
+	/// way). 1.0 when disabled or at/above full conviction; floored at <c>1 − Weight</c>.</summary>
+	public decimal Factor(decimal alignedBias)
+	{
+		if (Weight <= 0m || Reference <= 0m) return 1m;
+		var conviction = Math.Clamp(alignedBias / Reference, 0m, 1m);
+		return 1m - Weight * (1m - conviction);
+	}
 }
 
 internal sealed class OpenerStructuresConfig
