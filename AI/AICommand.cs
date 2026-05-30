@@ -721,7 +721,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public decimal StartingCash { get; set; } = 10000m;
 
 	[CommandOption("--fee-per-contract <AMOUNT>")]
-	[Description("Per-leg-contract commission. Defaults from ticker: $1.14 for cash-settled index options (SPX/SPXW/NDX/XSP/RUT), $0.05 for everything else (Webull ETFs/equities).")]
+	[Description("Per-leg-contract commission. Defaults from ticker: $1.14 for SPX/SPXW (and other cash-settled indexes), $0.55 for XSP, $1.30 for NDX, $0.05 for everything else (Webull ETFs/equities incl. IWM).")]
 	public decimal? FeePerContract { get; set; }
 
 	[CommandOption("--iv-hv-premium <RATIO>")]
