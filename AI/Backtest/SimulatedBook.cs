@@ -43,10 +43,9 @@ internal sealed class SimulatedBook
 	public const decimal IndexOptionFeePerContract = 1.14m;
 	public const decimal EquityOptionFeePerContract = 0.05m;
 
-	private static readonly HashSet<string> IndexOptionTickers = new(StringComparer.OrdinalIgnoreCase)
-	{
-		"SPX", "SPXW", "NDX", "XSP", "RUT", "DJX", "VIX"
-	};
+	// Cash-settled index roots share the engine's single source of truth (these are exactly the
+	// European, cash-settled indexes — the same set that carries no early-assignment risk in scoring).
+	private static readonly IReadOnlySet<string> IndexOptionTickers = OptionSettlement.CashSettledIndexRoots;
 
 	// Per-ticker fee overrides where the broker rate differs from the $1.14 index default, verified
 	// against live Webull fills: XSP (Mini-SPX) is $0.55, NDX is $1.30. SPX/SPXW stay at $1.14;
