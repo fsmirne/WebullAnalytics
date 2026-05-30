@@ -18,14 +18,22 @@ internal static class WebullIntradayBars
 {
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-	// SPX family — tickers whose underlying is the S&P 500 cash index, which Webull serves with no
-	// extended-hours coverage. These transparently merge SPY pre/post-market bars (converted to SPX
-	// scale) with SPX RTH bars.
-	internal static readonly HashSet<string> SpxFamilyTickers = new(StringComparer.OrdinalIgnoreCase) { "SPXW", "SPX" };
+	// SPX family — tickers whose underlying is the S&P 500 cash index (or a fixed fraction of it),
+	// which Webull serves with no extended-hours coverage. These transparently merge SPY pre/post-
+	// market bars (converted to the family ticker's price scale via the RTH overlap ratio) with the
+	// ticker's RTH bars. XSP is the Mini-SPX index (= SPX/10), same cash-settled, no-ext-hours profile.
+	internal static readonly HashSet<string> SpxFamilyTickers = new(StringComparer.OrdinalIgnoreCase) { "SPXW", "SPX", "XSP" };
 
 	// SPX cash-index chart tickerId (verified via Webull's getQuote endpoint — the option-chain
-	// namespace value 913324359 is actually SPXC stock, not the S&P 500 index).
+	// namespace value 913324359 is actually SPXC stock, not the S&P 500 index). Fallback only; the
+	// RTH chart id is resolved per-ticker via ResolveRthChartTickerId so XSP fetches its own ~758 tape.
 	private const long SpxChartTickerId = 913354362L;
+
+	// Resolves the RTH chart tickerId for an SPX-family symbol: SPX/SPXW → S&P 500 cash index
+	// (913354362), XSP → Mini-SPX index (925377660). The SPY ext-hours merge then scales to this
+	// ticker's price level via the RTH overlap ratio, so XSP lands at ~1/10 SPX scale automatically.
+	private static long ResolveRthChartTickerId(string ticker) =>
+		WebullChartsClient.TryResolveKnownChartTickerId(ticker, out var id) ? id : SpxChartTickerId;
 
 	// Hard-coded internal fetch counts for the hybrid path. Webull's chart endpoint has an
 	// undocumented max-count cap somewhere above ~600 — requests with very large counts silently
@@ -43,7 +51,7 @@ internal static class WebullIntradayBars
 		{
 			if (SpxFamilyTickers.Contains(ticker))
 			{
-				return await FetchSpxWithSpyExtendedAsync(apiConfig, tickerIds, interval, cancellation);
+				return await FetchSpxWithSpyExtendedAsync(apiConfig, ticker, tickerIds, interval, cancellation);
 			}
 
 			if (!tickerIds.TryGetValue(ticker, out var tickerId))
@@ -79,11 +87,12 @@ internal static class WebullIntradayBars
 	/// back to SPX-only on SPY resolution failure or insufficient data to compute the ratio.</summary>
 	private static async Task<IReadOnlyList<MinuteBar>> FetchSpxWithSpyExtendedAsync(
 		ApiConfig apiConfig,
+		string ticker,
 		ConcurrentDictionary<string, long> tickerIds,
 		BarInterval interval,
 		CancellationToken cancellation)
 	{
-		var spxTask = WebullChartsClient.FetchIntradayBarsAsync(apiConfig, SpxChartTickerId, interval, SpxRthFetchCount, includeExtended: false, cancellation);
+		var spxTask = WebullChartsClient.FetchIntradayBarsAsync(apiConfig, ResolveRthChartTickerId(ticker), interval, SpxRthFetchCount, includeExtended: false, cancellation);
 
 		long spyId;
 		if (!tickerIds.TryGetValue("SPY", out spyId))
@@ -165,12 +174,12 @@ internal static class WebullIntradayBars
 
 		if (SpxFamilyTickers.Contains(ticker))
 		{
-			log?.Invoke("paginating SPX RTH bars…");
+			log?.Invoke($"paginating {ticker} RTH bars…");
 			primaryBars = await WebullChartsClient.FetchPaginatedHistoricalMinuteBarsAsync(
-				apiConfig, SpxChartTickerId, startUnix, endUnix, includeExtended: false,
+				apiConfig, ResolveRthChartTickerId(ticker), startUnix, endUnix, includeExtended: false,
 				countPerPage: 800, delayBetweenPages,
 				onPageProgress: (page, oldestSec, totalBars) =>
-					log?.Invoke($"  SPX page {page}: back to {DateTimeOffset.FromUnixTimeSeconds(oldestSec).UtcDateTime:yyyy-MM-dd HH:mm} UTC, {totalBars} unique bars so far"),
+					log?.Invoke($"  {ticker} page {page}: back to {DateTimeOffset.FromUnixTimeSeconds(oldestSec).UtcDateTime:yyyy-MM-dd HH:mm} UTC, {totalBars} unique bars so far"),
 				cancellation);
 
 			var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(new[] { "SPY" }, cancellation);
