@@ -286,46 +286,53 @@ internal sealed class OpenCandidateEvaluator
 				var wVix = Math.Clamp(cfg.Weights.VixTermStructure, 0m, 1m);
 				biasedMacro = (1m - wVix) * macroBias + wVix * vixTermScore.Value;
 			}
-			var bias = biasedMacro;
-
 			// Intraday tape signal: fetch minute bars, derive open-to-now / gap / VWAP-deviation
-			// composite, blend into bias. Active in both live and backtest now that the BacktestRunner
-			// minute loop populates ctx.Now to the simulated minute (the backtest CSV cache reads
+			// composite. Active in both live and backtest now that the BacktestRunner minute loop
+			// populates ctx.Now to the simulated minute (the backtest CSV cache reads
 			// data/intraday/<TICKER>/<date>.csv with no HTTP, so each scan tick reuses disk-cached
-			// bars). Skipped only when the weight is 0.
+			// bars). Skipped only when the weight is 0. The blend into bias happens PER CANDIDATE below
+			// (DTE-aware), not here, because the intraday tape's weight depends on each candidate's DTE.
 			IntradayBias? intradayBias = null;
 			if (cfg.Weights.IntradayTape > 0m)
 			{
 				prevCloseByTicker.TryGetValue(tickerGroup.Key, out var prevClose);
 				intradayBias = await ComputeIntradayBiasAsync(tickerGroup.Key, prevClose > 0m ? prevClose : (decimal?)null, cfg.Indicators.IntradayTape, ctx.Now, cancellation);
-				if (intradayBias != null)
-				{
-					var w = Math.Clamp(cfg.Weights.IntradayTape, 0m, 1m);
-					bias = (1m - w) * biasedMacro + w * intradayBias.Score;
-				}
 			}
+
+			// Per-candidate bias: blend macro (+VIX) with the intraday tape at a DTE-aware weight, then
+			// apply the directional-agreement calibration to the blended value. Folding both steps into
+			// one closure keeps the result bit-identical to the legacy single-scalar path when the DTE
+			// curve is disabled (the weight is constant across DTEs) while letting a 0DTE candidate lean
+			// fully on the tape and a swing candidate stay anchored to macro. Pure over its inputs, so
+			// it's safe to call from the Parallel.For scoring loop below.
+			biasCalibByTicker.TryGetValue(tickerGroup.Key, out var tickerCalib);
+			decimal BiasForDte(int dteCalendar)
+			{
+				var b = biasedMacro;
+				if (intradayBias != null && cfg.Weights.IntradayTape > 0m)
+				{
+					var w = cfg.IntradayTapeDteCurve.WeightForDte(dteCalendar, cfg.Weights.IntradayTape);
+					b = (1m - w) * biasedMacro + w * intradayBias.Score;
+				}
+				// Bias-signal calibration via directional agreement: if the bias direction disagreed with
+				// the recent N-day move, the signal is mis-pointing → dampen down to a 0.2× floor; on
+				// agreement, leave at full strength. Scales bias at the source so BOTH the grid-shift
+				// (BiasDriftWeight) and BiasAdjust see the calibrated value at once. Disabled when
+				// biasCalibrationLookbackDays = 0. (Tested-and-rejected additions: stability and
+				// vol-regime components — both fired too often in normal noise and dampened winners more
+				// than losers. Direction alone proved the only component with positive net P&L impact.)
+				if (cfg.BiasCalibrationLookbackDays > 0 && b != 0m && tickerCalib.MoveSign != 0m)
+				{
+					var biasSign = b > 0m ? 1m : -1m;
+					var agreement = biasSign * tickerCalib.MoveSign;
+					var reliability = Math.Clamp(0.5m + 0.5m * agreement, 0.2m, 1.0m);
+					b *= reliability;
+				}
+				return b;
+			}
+
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
 			shortHorizonHvByTicker.TryGetValue(tickerGroup.Key, out var shortHorizonHv);
-			// Bias-signal calibration via directional agreement: if the bias direction disagreed with
-			// the recent N-day move, the signal is mis-pointing → dampen down to a 0.2× floor; on
-			// agreement, leave at full strength. Scales bias at the source so BOTH the grid-shift
-			// (BiasDriftWeight) and BiasAdjust see the calibrated value at once.
-			//
-			// Tested-and-rejected additions: stability (sign-flip count over the window) and
-			// vol-regime (whipsaw ratio) components. Both fired too often in normal market noise and,
-			// when AND'd / averaged with direction, dampened winners more than losers. Direction
-			// alone proved to be the only component with positive net P&L impact.
-			//
-			// Disabled when biasCalibrationLookbackDays = 0.
-			if (cfg.BiasCalibrationLookbackDays > 0 && bias != 0m
-				&& biasCalibByTicker.TryGetValue(tickerGroup.Key, out var calib)
-				&& calib.MoveSign != 0m)
-			{
-				var biasSign = bias > 0m ? 1m : -1m;
-				var agreement = biasSign * calib.MoveSign;
-				var reliability = Math.Clamp(0.5m + 0.5m * agreement, 0.2m, 1.0m);
-				bias *= reliability;
-			}
 			// Whipsaw penalty: when 3-day realized vol is well above 30-day, both put- and call-credit
 			// spreads get punished by counter-trend reversals (e.g. April 2025 SPX +$492 inside the crash
 			// week wiped every bearish credit). Computed once per ticker; applied per-proposal to credit
@@ -347,7 +354,8 @@ internal sealed class OpenCandidateEvaluator
 				// the diagnostic output, which is the whole point of running with --debug.
 				foreach (var skel in tickerGroup)
 				{
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
+					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
@@ -382,7 +390,8 @@ internal sealed class OpenCandidateEvaluator
 				Parallel.For(0, skels.Count, new ParallelOptions { CancellationToken = cancellation }, i =>
 				{
 					var skel = skels[i];
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, bias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
+					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
@@ -436,9 +445,12 @@ internal sealed class OpenCandidateEvaluator
 			foreach (var list in scoredByStructure.Values)
 				survivors.AddRange(RankForOutput(list).Take(cfg.MaxCandidatesPerStructurePerTicker));
 
-			// Apply cash sizing.
+			// Apply cash sizing. The rationale's displayed tech tilt must use the same per-candidate
+			// (DTE-aware) bias the scorer saw, so recompute it from each proposal's target DTE — the
+			// nearest leg expiry, which is the structure's scoring target (short-leg expiry for
+			// calendars/diagonals, the shared expiry for everything else).
 			for (int i = 0; i < survivors.Count; i++)
-				survivors[i] = ApplyCashSizing(survivors[i], freeCash, ctx.AccountValue, cfg, bias);
+				survivors[i] = ApplyCashSizing(survivors[i], freeCash, ctx.AccountValue, cfg, BiasForDte(CalendarDteToTarget(survivors[i], ctx.Now)));
 
 			// Per-ticker top-N. DoubleCalendar/DoubleDiagonal stay as one 4-leg proposal here and render as a
 			// unified two-side panel downstream, so each counts as a single suggestion against the cap.
@@ -610,6 +622,22 @@ internal sealed class OpenCandidateEvaluator
 	private static IReadOnlyList<ProposalLeg> ScaleLegs(IReadOnlyList<ProposalLeg> legs, int qty) =>
 		legs.Select(l => l with { Qty = qty }).ToList();
 
+	/// <summary>Calendar days from <paramref name="asOf"/> to a proposal's scoring target expiry — the
+	/// nearest (min) leg expiry, which matches <c>CandidateSkeleton.TargetExpiry</c> for every structure
+	/// (short-leg expiry on calendars/diagonals, the shared expiry otherwise). Used to recover the
+	/// DTE-aware bias for a scored proposal. Falls back to 0 if no leg expiry parses.</summary>
+	private static int CalendarDteToTarget(OpenProposal p, DateTime asOf)
+	{
+		var minExpiry = (DateTime?)null;
+		foreach (var leg in p.Legs)
+		{
+			var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
+			if (parsed == null) continue;
+			if (minExpiry == null || parsed.ExpiryDate.Date < minExpiry.Value) minExpiry = parsed.ExpiryDate.Date;
+		}
+		return minExpiry == null ? 0 : (minExpiry.Value - asOf.Date).Days;
+	}
+
 	/// <summary>Floor a non-negative decimal to int, saturating at int.MaxValue on overflow.
 	/// Used by qty-cap math where a sandbox-sized cash balance can produce an intermediate
 	/// floor value larger than Int32 before the MaxQtyPerProposal Math.Min clamps it.</summary>
@@ -730,6 +758,7 @@ internal sealed class OpenCandidateEvaluator
 			GapWeight = tapeCfg.GapWeight,
 			OpenToNowWeight = tapeCfg.OpenToNowWeight,
 			VwapDeviationWeight = tapeCfg.VwapDeviationWeight,
+			IncludeExtended = tapeCfg.IncludeExtended,
 		};
 		return IntradayTapeIndicators.Compute(bars, prevClose, toUtc, indicatorCfg);
 	}

@@ -1,0 +1,134 @@
+{
+  "cashReserve": {
+    "value": 0
+  },
+  "indicators": {
+    "strikeStep": 1.0,
+    "intradayTape": {
+      "includeExtended": true
+    }
+  },
+  "opener": {
+    "topNPerTicker": 1,
+    "maxCandidatesPerStructurePerTicker": 12,
+    "maxQtyPerProposal": 3,
+    "maxRiskPctPerProposal": 0.15,
+    "maxDollarRiskPerProposal": 25000,
+    "minScoreToOpen": 0.05,
+    "biasCalibrationLookbackDays": 3,
+    "weights": {
+      "directionalFit": 0.3,
+      "biasDrift": 1.0,
+      "whipsaw": 3.0,
+      "expectedMoveCredit": 0.5,
+      "ivRealizedPremium": 0.3,
+      "vixTermStructure": 0.25,
+      "intradayTape": 0.45
+    },
+    "realizedExpectancy": {
+      "enabled": true,
+      "profitTargetPctOfMaxProfit": 1.0,
+      "stopLossPctOfMaxLoss": 1.0,
+      "slippagePerSharePerOrder": 0,
+      "roundTrips": 1
+    },
+    "structures": {
+      "longCalendar": {
+        "enabled": false
+      },
+      "doubleCalendar": {
+        "enabled": false
+      },
+      "longDiagonal": {
+        "enabled": false
+      },
+      "doubleDiagonal": {
+        "enabled": false
+      },
+      "ironButterfly": {
+        "enabled": false
+      },
+      "ironCondor": {
+        "enabled": true,
+        "dteMin": 0,
+        "dteMax": 0,
+        "widthSteps": [
+          2,
+          4
+        ],
+        "bodyWidthSteps": [
+          2,
+          4,
+          8
+        ],
+        "shortDeltaMin": 0.1,
+        "shortDeltaMax": 0.25
+      },
+      "shortVertical": {
+        "enabled": true,
+        "dteMin": 0,
+        "dteMax": 0,
+        "widthSteps": [
+          1,
+          2
+        ],
+        "shortDeltaMin": 0.1,
+        "shortDeltaMax": 0.2
+      },
+      "longCallPut": {
+        "enabled": true,
+        "dteMin": 0,
+        "dteMax": 0,
+        "deltaMin": 0.08,
+        "deltaMax": 0.55
+      },
+      "longVertical": {
+        "enabled": true,
+        "dteMin": 0,
+        "dteMax": 0,
+        "widthSteps": [
+          2,
+          4,
+          8
+        ],
+        "longDeltaMin": 0.3,
+        "longDeltaMax": 0.55
+      }
+    }
+  },
+  "rules": {
+    "stopLoss": {
+      "enabled": true
+    },
+    "opportunisticRoll": {
+      "enabled": false
+    },
+    "takeProfit": {
+      "enabled": true
+    },
+    "defensiveRoll": {
+      "enabled": false
+    },
+    "rollShortOnExpiry": {
+      "enabled": false
+    },
+    "closeBeforeShortExpiry": {
+      "enabled": false
+    },
+    "legInShort": {
+      "enabled": true,
+      "minSpotPctITM": 0.5,
+      "minDTE": 0,
+      "maxVix": 18.0
+    }
+  },
+  "autoExecute": {
+    "management": {
+      "rules": [
+        "StopLossRule",
+        "LegInShortRule",
+        "TakeProfitRule"
+      ]
+    }
+  }
+}
