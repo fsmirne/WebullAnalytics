@@ -431,6 +431,8 @@ internal static class AIConfigLoader
 		var lcg = op.LongConvictionGate;
 		if (lcg.Weight < 0m || lcg.Weight > 1m) return $"opener.longConvictionGate.weight: must be in [0, 1], got {lcg.Weight}";
 		if (lcg.Reference < 0m) return $"opener.longConvictionGate.reference: must be ≥ 0, got {lcg.Reference}";
+		if (!string.IsNullOrWhiteSpace(op.EarliestEntryTimeEt) && !TimeSpan.TryParse(op.EarliestEntryTimeEt, CultureInfo.InvariantCulture, out _))
+			return $"opener.earliestEntryTimeEt: must be HH:mm, got '{op.EarliestEntryTimeEt}'";
 
 		var liq = op.Liquidity;
 		if (liq.MinOpenInterest < 0) return $"opener.liquidity.minOpenInterest: must be ≥ 0, got {liq.MinOpenInterest}";

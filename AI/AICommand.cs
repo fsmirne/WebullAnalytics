@@ -772,6 +772,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Set opener.longConvictionGate.weight: penalty depth for low-conviction long-premium trades (long call/put, debit verticals). 0 = off (no de-rating); 0.8 = a zero-conviction long scores 0.2x. De-rates flat-day directional coin-flips. Must be in [0, 1].")]
 	public decimal? LongConvictionOverride { get; set; }
 
+	[CommandOption("--open-after <HHMM>")]
+	[Description("Set opener.earliestEntryTimeEt: withhold opens until this ET time (\"HH:mm\", e.g. 10:00) so the intraday tape forms and blends into the bias before the directional read commits. Empty/omitted = 09:30 open. Sweep knob for delayed-entry research.")]
+	public string? OpenAfterOverride { get; set; }
+
 	[CommandOption("--enable-structure <NAME>")]
 	[Description("Force-enable a structure for this run (repeatable). Names: longCalendar, doubleCalendar, longDiagonal, doubleDiagonal, ironButterfly, ironCondor, shortVertical, longCallPut, longVertical. Sets the structure's Enabled=true on top of the merged config; doesn't disable other enabled structures.")]
 	public string[] EnableStructures { get; set; } = Array.Empty<string>();
@@ -816,6 +820,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--intraday-w0: must be in [0, 1], got {IntradayW0Override}");
 		if (LongConvictionOverride.HasValue && (LongConvictionOverride.Value < 0m || LongConvictionOverride.Value > 1m))
 			return ValidationResult.Error($"--long-conviction: must be in [0, 1], got {LongConvictionOverride}");
+		if (!string.IsNullOrWhiteSpace(OpenAfterOverride) && !TimeSpan.TryParse(OpenAfterOverride, System.Globalization.CultureInfo.InvariantCulture, out _))
+			return ValidationResult.Error($"--open-after: must be HH:mm, got '{OpenAfterOverride}'");
 		return ValidationResult.Success();
 	}
 }
@@ -844,6 +850,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			config.Opener.IntradayTapeDteCurve.WeightAt0Dte = settings.IntradayW0Override.Value;
 		}
 		if (settings.LongConvictionOverride.HasValue) config.Opener.LongConvictionGate.Weight = settings.LongConvictionOverride.Value;
+		if (!string.IsNullOrWhiteSpace(settings.OpenAfterOverride)) config.Opener.EarliestEntryTimeEt = settings.OpenAfterOverride;
 		if (settings.TpOverride.HasValue) config.Opener.RealizedExpectancy.ProfitTargetPctOfMaxProfit = settings.TpOverride.Value;
 		if (settings.SlOverride.HasValue) config.Opener.RealizedExpectancy.StopLossPctOfMaxLoss = settings.SlOverride.Value;
 		foreach (var name in settings.EnableStructures)
