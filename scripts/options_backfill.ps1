@@ -1,5 +1,5 @@
 <#
-options_backfill.ps1 - refresh the SPXW real-option dataset.
+options_backfill.ps1 - refresh a ticker's real-option dataset.
 
 Two discovery passes (bd=1.3, bd=1.5) widen the contract catalog, then one
 backfill pulls every cataloged OCC from Webull (live) / massive.com (expired,
@@ -12,15 +12,22 @@ Runs the INSTALLED production `wa` (on PATH, or %LOCALAPPDATA%\WebullAnalytics\w
 stale: re-run install to update it, then re-run this script.
 
 Run (leave the window open if it's a long pull):
-  powershell -ExecutionPolicy Bypass -File .\scripts\options_backfill.ps1
+  powershell -ExecutionPolicy Bypass -File .\scripts\options_backfill.ps1 -Ticker SPXW
+  powershell -ExecutionPolicy Bypass -File .\scripts\options_backfill.ps1 -Ticker XSP -Since 2025-01-01
 Watch progress in another window:
-  Get-Content "$env:LOCALAPPDATA\WebullAnalytics\logs\options_backfill-*.log" -Wait -Tail 20
+  Get-Content "$env:LOCALAPPDATA\WebullAnalytics\logs\options_backfill_<TICKER>-*.log" -Wait -Tail 20
 
 Reads/writes PROD data (%LOCALAPPDATA%\WebullAnalytics\data) - the binary resolves
 its base dir there automatically.
 #>
 
+param(
+  [Parameter(Mandatory = $true)][string]$Ticker,
+  [string]$Since = '2025-01-01'
+)
+
 $ErrorActionPreference = 'Continue'
+$Ticker = $Ticker.ToUpperInvariant()
 
 # Resolve the production wa: prefer PATH, fall back to the AppData install location.
 $Wa = $null
@@ -32,14 +39,13 @@ if (-not $Wa) {
 }
 
 $Data    = Join-Path $env:LOCALAPPDATA 'WebullAnalytics\data'
-$Catalog = Join-Path $Data 'options-discovery\SPXW.jsonl'
-$OptDir  = Join-Path $Data 'options\SPXW'
-$Since   = '2025-01-01'
+$Catalog = Join-Path $Data ("options-discovery\{0}.jsonl" -f $Ticker)
+$OptDir  = Join-Path $Data ("options\{0}" -f $Ticker)
 $Until   = (Get-Date -Format 'yyyy-MM-dd')
 
 $LogDir = Join-Path $env:LOCALAPPDATA 'WebullAnalytics\logs'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$Log = Join-Path $LogDir ("options_backfill-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$Log = Join-Path $LogDir ("options_backfill_{0}-{1}.log" -f $Ticker, (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 function Log($msg) {
   $line = "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
@@ -47,7 +53,7 @@ function Log($msg) {
   Add-Content -Path $Log -Value $line
 }
 
-Log "=== SPXW options backfill ==="
+Log "=== $Ticker options backfill ==="
 Log "log file: $Log"
 
 if (-not $Wa) { Log "FATAL: 'wa' not found on PATH or in %LOCALAPPDATA%\WebullAnalytics. Install it first."; exit 1 }
@@ -58,7 +64,7 @@ Log "using wa: $Wa"
 #    onto bd=1.3's picks; padding is recomputed over the union.
 foreach ($bd in '1.3', '1.5') {
   Log "discover bd=$bd  (min-score-to-open=0, top-k=40, pad=3)"
-  & $Wa options discover SPXW --since $Since --until $Until --min-score-to-open 0 --bias-drift $bd --top-k 40 --pad 3 *>> $Log
+  & $Wa options discover $Ticker --since $Since --until $Until --min-score-to-open 0 --bias-drift $bd --top-k 40 --pad 3 *>> $Log
   if ($LASTEXITCODE -ne 0) { Log "FATAL: discover bd=$bd failed (stale wa, or missing bar coverage for $Since?) - inspect $Log"; exit 1 }
 }
 
@@ -88,12 +94,12 @@ Log ("  catalog={0}  on-disk={1}  to-fetch={2}  ~{3}h at 5 req/min" -f $total, $
 #    --webull-pad 30 widens each Webull-routable (expiry, right) by 30 strikes
 #    beyond the touched range. Webull is unrestricted so this is cheap, and it
 #    pre-captures strikes future strategy variants (wider delta bands, deeper
-#    wings) might want — historical bars become inaccessible once a contract
+#    wings) might want - historical bars become inaccessible once a contract
 #    drops out of the live chain. Massive (expired) contracts are unaffected.
 Log "Backfill starting (long; rate-limited). Tail the log to watch progress."
-& $Wa options backfill SPXW --since $Since --webull-pad 30 *>> $Log
+& $Wa options backfill $Ticker --since $Since --webull-pad 30 *>> $Log
 Log "Backfill exited rc=$LASTEXITCODE"
 
 Log "=== Done ==="
 Log "Next (sizing-neutral edge check on real prices):"
-Log "  wa ai backtest SPXW --since 2025-01-01 --until $Until --lots 1"
+Log "  wa ai backtest $Ticker --since $Since --until $Until --lots 1"

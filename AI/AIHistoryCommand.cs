@@ -507,7 +507,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	{
 		if (isSpxFamily)
 		{
-			var spxBars = await FetchSpxRthFromWebullAsync(apiConfig, startNyDate, endNyDate, cancellation);
+			var spxBars = await FetchSpxFamilyRthFromWebullAsync(apiConfig, ticker, startNyDate, endNyDate, cancellation);
 			var spyBars = await FetchFromMassiveAsync(apiConfig, "SPY", startNyDate, endNyDate, cancellation);
 			return MergeSpxAndSpyByDate(spxBars, spyBars);
 		}
@@ -540,28 +540,31 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		return bars;
 	}
 
-	private static async Task<IReadOnlyList<MinuteBar>> FetchSpxRthFromWebullAsync(
+	private static async Task<IReadOnlyList<MinuteBar>> FetchSpxFamilyRthFromWebullAsync(
 		ApiConfig apiConfig,
+		string ticker,
 		DateTime startNyDate,
 		DateTime endNyDate,
 		CancellationToken cancellation)
 	{
-		// Webull's query-mini SPX endpoint truncates deep-history requests to 1 bar without per-URL
+		// Webull's query-mini index endpoint truncates deep-history requests to 1 bar without per-URL
 		// x-s signatures — pagination backward from "now" only walks reliably ~3 RTH days before the
-		// API stops advancing. For SPX deep history users run `--import-webull-spx <file>`; this
+		// API stops advancing. For deep history users run `--import-webull-spx <file>`; this
 		// path is for the small recent gap (yesterday's missing CSV after a late `wa ai watch` shutdown).
 		var endEt = new DateTime(endNyDate.Year, endNyDate.Month, endNyDate.Day, 20, 0, 0, DateTimeKind.Unspecified);
 		var startEt = new DateTime(startNyDate.Year, startNyDate.Month, startNyDate.Day, 4, 0, 0, DateTimeKind.Unspecified);
 		var endUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
 		var startUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(startEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
-		AnsiConsole.MarkupLine($"    paginating SPX RTH from Webull ({startNyDate:yyyy-MM-dd} → {endNyDate:yyyy-MM-dd})");
-		const long SpxChartTickerId = 913354362L;
+		// Resolve the RTH chart id from the ticker: SPX/SPXW → 913354362 (S&P 500 cash index),
+		// XSP → 925377660 (Mini-SPX index, ~SPX/10). The SPY ext-hours merge scales to this level.
+		var rthTickerId = WebullChartsClient.TryResolveKnownChartTickerId(ticker, out var resolvedId) ? resolvedId : 913354362L;
+		AnsiConsole.MarkupLine($"    paginating {ticker} RTH from Webull ({startNyDate:yyyy-MM-dd} → {endNyDate:yyyy-MM-dd})");
 		var bars = await WebullChartsClient.FetchPaginatedHistoricalMinuteBarsAsync(
-			apiConfig, SpxChartTickerId, startUnix, endUnix,
+			apiConfig, rthTickerId, startUnix, endUnix,
 			includeExtended: false, countPerPage: 800,
 			delayBetweenPages: TimeSpan.FromSeconds(1),
 			onPageProgress: null, cancellation);
-		AnsiConsole.MarkupLine($"    Webull returned {bars.Count} SPX bars");
+		AnsiConsole.MarkupLine($"    Webull returned {bars.Count} {ticker} bars");
 		return bars;
 	}
 
