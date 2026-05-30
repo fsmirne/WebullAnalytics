@@ -64,6 +64,14 @@ internal sealed class OpenerConfig
 
 	[JsonPropertyName("structures")] public OpenerStructuresConfig Structures { get; set; } = new();
 
+	/// <summary>DTE-aware shaping of the intraday-tape blend weight. When disabled (default) the blend
+	/// uses the flat <see cref="OpenerWeightsConfig.IntradayTape"/> at every DTE — exactly the legacy
+	/// behavior. When enabled, the effective intraday weight ramps from <c>weightAt0Dte</c> at same-day
+	/// expiry down to <c>weightAtFarDte</c> at <c>farDte</c> and beyond, so a 0DTE trade can lean fully
+	/// on the tape while a swing trade stays anchored to the multi-day macro bias. This implements the
+	/// "DTE-weighted mix in the consumer" documented on <see cref="IntradayBias"/>.</summary>
+	[JsonPropertyName("intradayTapeDteCurve")] public OpenerIntradayTapeDteCurveConfig IntradayTapeDteCurve { get; set; } = new();
+
 }
 
 /// <summary>Multiplicative-factor weights applied to the opener candidate score chain. Each field is
@@ -116,6 +124,41 @@ internal sealed class OpenerWeightsConfig
 	/// <c>(1 − intradayTape) · macroBias + intradayTape · intradayBias</c>. 0DTE wants 0.5–0.8;
 	/// swing wants 0.0–0.2.</summary>
 	[JsonPropertyName("intradayTape")] public decimal IntradayTape { get; set; } = 0m;
+}
+
+/// <summary>DTE-aware curve for the intraday-tape blend weight. Linearly interpolates the effective
+/// intraday weight from <see cref="WeightAt0Dte"/> at 0 DTE to <see cref="WeightAtFarDte"/> at
+/// <see cref="FarDte"/> (and flat beyond). Disabled by default, in which case the consumer uses the
+/// flat <see cref="OpenerWeightsConfig.IntradayTape"/> at every DTE (legacy behavior).</summary>
+internal sealed class OpenerIntradayTapeDteCurveConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+
+	/// <summary>Effective intraday-tape blend weight at same-day (0 DTE) expiry. A 0DTE trade's
+	/// directional read should come almost entirely from the live tape, so this defaults to 1.0
+	/// (full intraday lean) when the curve is enabled.</summary>
+	[JsonPropertyName("weightAt0Dte")] public decimal WeightAt0Dte { get; set; } = 1.0m;
+
+	/// <summary>Effective intraday-tape blend weight at/beyond <see cref="FarDte"/>. A multi-day swing
+	/// trade should lean on the macro bias, so this defaults to 0.0 (pure macro at the far end).</summary>
+	[JsonPropertyName("weightAtFarDte")] public decimal WeightAtFarDte { get; set; } = 0.0m;
+
+	/// <summary>DTE at/above which the weight is pinned to <see cref="WeightAtFarDte"/>. Between 0 and
+	/// this the weight interpolates linearly. Default 21 (≈ one expiry cycle).</summary>
+	[JsonPropertyName("farDte")] public int FarDte { get; set; } = 21;
+
+	/// <summary>Effective intraday-tape blend weight for a candidate at <paramref name="dte"/> calendar
+	/// days to its target expiry. When the curve is disabled this returns <paramref name="staticWeight"/>
+	/// unchanged so the blend is bit-identical to the legacy flat-weight path.</summary>
+	public decimal WeightForDte(int dte, decimal staticWeight)
+	{
+		if (!Enabled) return Math.Clamp(staticWeight, 0m, 1m);
+		if (dte <= 0) return Math.Clamp(WeightAt0Dte, 0m, 1m);
+		if (FarDte <= 0 || dte >= FarDte) return Math.Clamp(WeightAtFarDte, 0m, 1m);
+		var t = (decimal)dte / FarDte;
+		var w = WeightAt0Dte + (WeightAtFarDte - WeightAt0Dte) * t;
+		return Math.Clamp(w, 0m, 1m);
+	}
 }
 
 internal sealed class OpenerStructuresConfig

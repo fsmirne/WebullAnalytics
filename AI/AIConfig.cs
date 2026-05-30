@@ -423,6 +423,11 @@ internal static class AIConfigLoader
 		if (wgt.VixTermStructure < 0m || wgt.VixTermStructure > 1m) return $"opener.weights.vixTermStructure: must be in [0, 1], got {wgt.VixTermStructure}";
 		if (wgt.IntradayTape < 0m || wgt.IntradayTape > 1m) return $"opener.weights.intradayTape: must be in [0, 1], got {wgt.IntradayTape}";
 
+		var dteCurve = op.IntradayTapeDteCurve;
+		if (dteCurve.WeightAt0Dte < 0m || dteCurve.WeightAt0Dte > 1m) return $"opener.intradayTapeDteCurve.weightAt0Dte: must be in [0, 1], got {dteCurve.WeightAt0Dte}";
+		if (dteCurve.WeightAtFarDte < 0m || dteCurve.WeightAtFarDte > 1m) return $"opener.intradayTapeDteCurve.weightAtFarDte: must be in [0, 1], got {dteCurve.WeightAtFarDte}";
+		if (dteCurve.FarDte < 0) return $"opener.intradayTapeDteCurve.farDte: must be ≥ 0, got {dteCurve.FarDte}";
+
 		var liq = op.Liquidity;
 		if (liq.MinOpenInterest < 0) return $"opener.liquidity.minOpenInterest: must be ≥ 0, got {liq.MinOpenInterest}";
 		if (liq.MinRelativeOpenInterest < 0m || liq.MinRelativeOpenInterest > 1m) return $"opener.liquidity.minRelativeOpenInterest: must be in [0, 1], got {liq.MinRelativeOpenInterest}";

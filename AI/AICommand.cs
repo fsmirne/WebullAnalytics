@@ -764,6 +764,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Override opener.weights.intradayTape for this run. 0.0 = pure macro bias; 1.0 = pure intraday tape. Must be between 0 and 1 inclusive.")]
 	public decimal? IntradayTapeWeightOverride { get; set; }
 
+	[CommandOption("--intraday-w0 <VALUE>")]
+	[Description("Enable the DTE-aware intraday-tape curve and set its 0DTE blend weight (opener.intradayTapeDteCurve.weightAt0Dte). 1.0 = a 0DTE trade reads direction purely from the live tape; 0.0 = pure macro. Must be in [0, 1]. Sweep knob for the 0DTE flat-day fix.")]
+	public decimal? IntradayW0Override { get; set; }
+
 	[CommandOption("--enable-structure <NAME>")]
 	[Description("Force-enable a structure for this run (repeatable). Names: longCalendar, doubleCalendar, longDiagonal, doubleDiagonal, ironButterfly, ironCondor, shortVertical, longCallPut, longVertical. Sets the structure's Enabled=true on top of the merged config; doesn't disable other enabled structures.")]
 	public string[] EnableStructures { get; set; } = Array.Empty<string>();
@@ -804,6 +808,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--bias-drift: must be ≥ 0, got {BiasDriftOverride}");
 		if (IntradayTapeWeightOverride.HasValue && (IntradayTapeWeightOverride.Value < 0m || IntradayTapeWeightOverride.Value > 1m))
 			return ValidationResult.Error($"--intraday-tape-weight: must be in [0, 1], got {IntradayTapeWeightOverride}");
+		if (IntradayW0Override.HasValue && (IntradayW0Override.Value < 0m || IntradayW0Override.Value > 1m))
+			return ValidationResult.Error($"--intraday-w0: must be in [0, 1], got {IntradayW0Override}");
 		return ValidationResult.Success();
 	}
 }
@@ -826,6 +832,11 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (settings.BiasDriftOverride.HasValue) config.Opener.Weights.BiasDrift = settings.BiasDriftOverride.Value;
 		if (settings.MinScoreToOpenOverride.HasValue) config.Opener.MinScoreToOpen = settings.MinScoreToOpenOverride.Value;
 		if (settings.IntradayTapeWeightOverride.HasValue) config.Opener.Weights.IntradayTape = settings.IntradayTapeWeightOverride.Value;
+		if (settings.IntradayW0Override.HasValue)
+		{
+			config.Opener.IntradayTapeDteCurve.Enabled = true;
+			config.Opener.IntradayTapeDteCurve.WeightAt0Dte = settings.IntradayW0Override.Value;
+		}
 		if (settings.TpOverride.HasValue) config.Opener.RealizedExpectancy.ProfitTargetPctOfMaxProfit = settings.TpOverride.Value;
 		if (settings.SlOverride.HasValue) config.Opener.RealizedExpectancy.StopLossPctOfMaxLoss = settings.SlOverride.Value;
 		foreach (var name in settings.EnableStructures)
