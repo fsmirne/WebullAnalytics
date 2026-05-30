@@ -5,7 +5,7 @@
   "indicators": {
     "strikeStep": 1.0,
     "intradayTape": {
-      "includeExtended": false
+      "includeExtended": true
     }
   },
   "opener": {
