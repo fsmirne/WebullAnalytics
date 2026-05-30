@@ -765,11 +765,11 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public decimal? IntradayTapeWeightOverride { get; set; }
 
 	[CommandOption("--intraday-w0 <VALUE>")]
-	[Description("Enable the DTE-aware intraday-tape curve and set its 0DTE blend weight (opener.intradayTapeDteCurve.weightAt0Dte). 1.0 = a 0DTE trade reads direction purely from the live tape; 0.0 = pure macro. Must be in [0, 1]. Sweep knob for the 0DTE flat-day fix.")]
+	[Description("Enable the DTE-aware intraday-tape curve and set its 0DTE blend weight (opener.intradayTapeDteCurve.weightAt0Dte). 1.0 = a 0DTE trade reads direction purely from the live tape; 0.0 = pure macro. Must be 0 to 1 inclusive. Sweep knob for the 0DTE flat-day fix.")]
 	public decimal? IntradayW0Override { get; set; }
 
 	[CommandOption("--long-conviction <VALUE>")]
-	[Description("Set opener.longConvictionGate.weight: penalty depth for low-conviction long-premium trades (long call/put, debit verticals). 0 = off (no de-rating); 0.8 = a zero-conviction long scores 0.2x. De-rates flat-day directional coin-flips. Must be in [0, 1].")]
+	[Description("Set opener.longConvictionGate.weight: penalty depth for low-conviction long-premium trades (long call/put, debit verticals). 0 = off (no de-rating); 0.8 = a zero-conviction long scores 0.2x. De-rates flat-day directional coin-flips. Must be 0 to 1 inclusive.")]
 	public decimal? LongConvictionOverride { get; set; }
 
 	[CommandOption("--open-after <HHMM>")]
