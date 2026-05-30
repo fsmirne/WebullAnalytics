@@ -215,7 +215,16 @@ internal static class AIHistoryOptionsBackfill
 			var mergeExisting = !force && csvExists;
 			if (id.HasValue)
 			{
-				// Webull (live): always merge — today's contract can still print new minutes.
+				// Webull: a past-expiry contract's minute history is final once captured — re-fetching
+				// returns identical bytes (the "unchanged" churn the 599-contract re-pull was). Skip when
+				// already on disk AND the expiry has passed, mirroring the massive skip. Still fetch
+				// today's/future expiries (live minutes keep printing) and any not yet on disk (the
+				// --webull-pad pre-capture before a contract drops off the live chain). --force overrides.
+				if (!force && csvExists && parsed.ExpiryDate.Date < todayEt)
+				{
+					skippedComplete++;
+					continue;
+				}
 				work.Add((occ, id, parsed, csvPath, mergeExisting, OptionDataSource.Webull));
 			}
 			else if (hasMassiveKey)
