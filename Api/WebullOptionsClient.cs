@@ -22,6 +22,7 @@ internal static class WebullOptionsClient
 	private static readonly Dictionary<string, long> KnownTickerIds = new(StringComparer.OrdinalIgnoreCase)
 	{
 		["SPXW"] = 913354362,
+		["XSP"] = 925377660,
 		["NDX"] = 913354088,
 		["DJX"] = 925377883,
 		["VIX"] = 925323875,
