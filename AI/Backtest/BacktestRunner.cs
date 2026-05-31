@@ -780,11 +780,9 @@ internal sealed class BacktestRunner
 		// the one proposal that happened to open.
 		var dayProposalsByFingerprint = _discover ? new Dictionary<string, OpenProposal>(StringComparer.Ordinal) : null;
 
-		// Sequential minute loop. Per-minute work (~1.5 ms) is small enough that the .NET thread
-		// pool's per-task overhead exceeds the parallel gain even on a 32-core box. The QuoteOverrides
-		// refactor that removed BacktestQuoteSource's mutable state would allow a parallel pass if
-		// future per-minute work grows (e.g. forward-simulating each proposal for oracle), but for
-		// the current workload sequential wins on wall time.
+		// Parallel minute evaluation. EvaluateMinuteAsync is a pure function over its inputs (no
+		// shared mutable state) so all minutes can be evaluated concurrently. The results are then
+		// processed in chronological order for entry-decision / oracle / discovery logic.
 		// Earliest-entry gate: withhold opens until a configured ET wall-clock time so the intraday tape
 		// can form and blend into the bias before the directional read is committed (vs trading the stale
 		// 09:30 overnight macro). Parsed once per day; null/empty = no delay. Discovery still collects all
@@ -794,75 +792,122 @@ internal sealed class BacktestRunner
 			&& TimeSpan.TryParse(_config.Opener.EarliestEntryTimeEt, System.Globalization.CultureInfo.InvariantCulture, out var ee))
 			earliestEntry = ee;
 
+		var timestampList = allTimestamps.ToList();
+
+		// In non-oracle, non-discovery mode we only need the first qualifying minute. Evaluate in
+		// parallel batches of ProcessorCount and stop as soon as any minute in the batch yields a
+		// qualifying entry. This gives ~Nx speedup while preserving chronological entry semantics.
+		// Oracle/discovery modes need every minute evaluated, so they run the full parallel pass.
+		var needAllMinutes = _oracle || _discover;
+		var batchSize = Math.Max(1, Environment.ProcessorCount);
+		var parallelOpts = new ParallelOptions { MaxDegreeOfParallelism = batchSize, CancellationToken = cancellation };
+
 		var opened = 0;
-		// Non-oracle: the FIRST minute that surfaces a score-endorsed proposal is the entry decision
-		// for the day. Affordability decides whether we take that entry or skip — it must NOT push the
-		// scan to a later minute hunting for a cheaper trade. Without this, a small per-trade budget
-		// makes the engine pass over the genuine signal (unaffordable) and open a cheaper, lower-quality
-		// strike hours later, letting the bankroll pick the trade.
 		var entryDecided = false;
-		foreach (var minuteUtc in allTimestamps)
+
+		if (needAllMinutes)
 		{
-			if (!_oracle && opened >= _topNPerStep) break;
-			// Once the entry decision is made there's nothing left to open today; keep scanning only
-			// when collecting the discovery catalog (which wants every minute the evaluator saw).
-			if (!_oracle && entryDecided && dayProposalsByFingerprint == null) break;
-			cancellation.ThrowIfCancellationRequested();
-
-			var result = await EvaluateMinuteAsync(minuteUtc, closeUtc, tickerSet, barIndexByTicker, postMgmt, postCash, postAccount, postSignals, openEvaluator, cancellation);
-			if (result == null) continue;
-			var (minuteEt, openProposals) = result.Value;
-
-			// Discovery: aggregate every proposal the evaluator saw across the day, deduped by
-			// fingerprint (so a strike re-proposed at adjacent minutes contributes once with its
-			// best score). End-of-day flush takes top-K. Important: collect BEFORE any cash /
-			// reserve / open filters — the discovery catalog should reflect what the evaluator
-			// considered, not what the simulator was able to open under one specific sizing config.
-			if (dayProposalsByFingerprint != null)
+			// Full parallel pass: evaluate all minutes, then process sequentially.
+			var minuteResults = new (DateTimeOffset MinuteUtc, DateTime MinuteEt, IReadOnlyList<OpenProposal> Proposals)?[timestampList.Count];
+			await Parallel.ForEachAsync(Enumerable.Range(0, timestampList.Count), parallelOpts, async (idx, ct) =>
 			{
-				foreach (var p in openProposals)
+				var result = await EvaluateMinuteAsync(timestampList[idx], closeUtc, tickerSet, barIndexByTicker, postMgmt, postCash, postAccount, postSignals, openEvaluator, ct);
+				if (result != null)
+					minuteResults[idx] = (timestampList[idx], result.Value.MinuteEt, result.Value.Proposals);
+			});
+
+			for (int i = 0; i < minuteResults.Length; i++)
+			{
+				var mr = minuteResults[i];
+				if (mr == null) continue;
+				var (minuteUtc2, minuteEt, openProposals) = mr.Value;
+
+				if (dayProposalsByFingerprint != null)
 				{
-					if (string.IsNullOrWhiteSpace(p.Fingerprint)) continue;
-					if (!dayProposalsByFingerprint.TryGetValue(p.Fingerprint, out var existing) || (p.FinalScore ?? 0m) > (existing.FinalScore ?? 0m))
-						dayProposalsByFingerprint[p.Fingerprint] = p;
+					foreach (var p in openProposals)
+					{
+						if (string.IsNullOrWhiteSpace(p.Fingerprint)) continue;
+						if (!dayProposalsByFingerprint.TryGetValue(p.Fingerprint, out var existing) || (p.FinalScore ?? 0m) > (existing.FinalScore ?? 0m))
+							dayProposalsByFingerprint[p.Fingerprint] = p;
+					}
+				}
+
+				if (_oracle)
+				{
+					foreach (var p in openProposals)
+					{
+						var qty = ResolveOpenQty(p);
+						if (qty < 1) continue;
+						var legFills = BuildLegFillsFromProposal(p.Legs, qty);
+						if (legFills == null) continue;
+						var eodPnl = await ComputeOracleEodPnlAsync(p, step.Date, cancellation);
+						if (eodPnl == null) continue;
+						if (bestOracle == null || eodPnl.Value > bestOracle.Value.Pnl)
+							bestOracle = (minuteEt, p, legFills, eodPnl.Value);
+					}
+					continue;
+				}
+
+				if (opened >= _topNPerStep) break;
+				if (entryDecided) break;
+				var minuteTimeEt = TimeZoneInfo.ConvertTime(minuteUtc2, NyTz).TimeOfDay;
+				if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
+				if (openProposals.Count > 0)
+				{
+					entryDecided = true;
+					foreach (var p in openProposals.Take(_topNPerStep - opened))
+					{
+						var qty = ResolveOpenQty(p);
+						if (qty < 1) continue;
+						var legFills = BuildLegFillsFromProposal(p.Legs, qty);
+						if (legFills == null) continue;
+						if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, qty))
+							opened++;
+					}
 				}
 			}
-
-			if (_oracle)
+		}
+		else
+		{
+			// Batched parallel with early exit: process batchSize minutes concurrently, stop once
+			// entry is decided. Preserves chronological "first qualifying minute" semantics while
+			// utilizing all cores within each batch window.
+			for (int batchStart = 0; batchStart < timestampList.Count && !entryDecided && opened < _topNPerStep; batchStart += batchSize)
 			{
-				// Oracle forward-sims every proposal at every minute to find the realized-best entry.
-				foreach (var p in openProposals)
-				{
-					var qty = ResolveOpenQty(p);
-					if (qty < 1) continue;
-					var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-					if (legFills == null) continue;
-					var eodPnl = await ComputeOracleEodPnlAsync(p, step.Date, cancellation);
-					if (eodPnl == null) continue;
-					if (bestOracle == null || eodPnl.Value > bestOracle.Value.Pnl)
-						bestOracle = (minuteEt, p, legFills, eodPnl.Value);
-				}
-				continue;
-			}
+				cancellation.ThrowIfCancellationRequested();
+				var batchEnd = Math.Min(batchStart + batchSize, timestampList.Count);
+				var batchCount = batchEnd - batchStart;
+				var batchResults = new (DateTimeOffset MinuteUtc, DateTime MinuteEt, IReadOnlyList<OpenProposal> Proposals)?[batchCount];
 
-			// First score-endorsed minute = the day's entry decision. Take the top-N BY SCORE and open
-			// the affordable ones; if the top picks can't be afforded, the day is skipped — we do not
-			// fall through to a cheaper substitute, nor scan later minutes for one.
-			// Earliest-entry gate: ignore qualifying minutes before the configured ET time so the day's
-			// decision waits for the tape to form (entryDecided stays false → loop keeps scanning).
-			var minuteTimeEt = TimeZoneInfo.ConvertTime(minuteUtc, NyTz).TimeOfDay;
-			if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
-			if (!entryDecided && openProposals.Count > 0)
-			{
-				entryDecided = true;
-				foreach (var p in openProposals.Take(_topNPerStep - opened))
+				await Parallel.ForEachAsync(Enumerable.Range(0, batchCount), parallelOpts, async (idx, ct) =>
 				{
-					var qty = ResolveOpenQty(p);
-					if (qty < 1) continue;
-					var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-					if (legFills == null) continue;
-					if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, qty))
-						opened++;
+					var result = await EvaluateMinuteAsync(timestampList[batchStart + idx], closeUtc, tickerSet, barIndexByTicker, postMgmt, postCash, postAccount, postSignals, openEvaluator, ct);
+					if (result != null)
+						batchResults[idx] = (timestampList[batchStart + idx], result.Value.MinuteEt, result.Value.Proposals);
+				});
+
+				// Process batch results in chronological order.
+				for (int i = 0; i < batchCount && !entryDecided && opened < _topNPerStep; i++)
+				{
+					var mr = batchResults[i];
+					if (mr == null) continue;
+					var (minuteUtc2, minuteEt, openProposals) = mr.Value;
+
+					var minuteTimeEt = TimeZoneInfo.ConvertTime(minuteUtc2, NyTz).TimeOfDay;
+					if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
+					if (openProposals.Count > 0)
+					{
+						entryDecided = true;
+						foreach (var p in openProposals.Take(_topNPerStep - opened))
+						{
+							var qty = ResolveOpenQty(p);
+							if (qty < 1) continue;
+							var legFills = BuildLegFillsFromProposal(p.Legs, qty);
+							if (legFills == null) continue;
+							if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, qty))
+								opened++;
+						}
+					}
 				}
 			}
 		}
