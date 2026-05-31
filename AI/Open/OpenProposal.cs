@@ -19,7 +19,13 @@ public enum OpenStructureKind
 	// gap between LongCall/LongPut (uncapped upside, full premium at risk) and ShortVertical
 	// (credit collected, large max loss if breached).
 	LongCallVertical,
-	LongPutVertical
+	LongPutVertical,
+	// Diagonal built from two defined-risk verticals on one side (all calls or all puts): a near-dated
+	// SHORT vertical (credit) + a far-dated LONG vertical (debit). Approximates a calendar/diagonal's
+	// theta+vega profile but every leg is bounded, so nothing is ever naked — the tradeable form on
+	// venues that reject true calendars/diagonals (e.g. Webull SPXW/XSP). Multi-expiry: the near short
+	// vertical expires first (partial settle), the far long vertical is closed same-day.
+	DiagonalVertical
 }
 
 /// <summary>
