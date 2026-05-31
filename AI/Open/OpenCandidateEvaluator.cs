@@ -648,7 +648,7 @@ internal sealed class OpenCandidateEvaluator
 		return floored >= int.MaxValue ? int.MaxValue : (int)floored;
 	}
 
-	private static bool IsCalendarLike(OpenProposal proposal) => proposal.StructureKind is OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal;
+	private static bool IsCalendarLike(OpenProposal proposal) => proposal.StructureKind is OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal or OpenStructureKind.DiagonalVertical;
 
 	/// <summary>Returns true when the symbol exists and has both a non-null bid and a positive ask.
 	/// Mirrors <c>CandidateScorer.TryLiveBidAsk</c>'s acceptance criteria so Phase B's "needs refresh"

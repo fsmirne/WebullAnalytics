@@ -30,7 +30,10 @@ internal static class DirectionalFit
 	/// fall through to the kind-only overload.</summary>
 	public static int SignFor(CandidateSkeleton skel)
 	{
-		if (skel.StructureKind != OpenStructureKind.LongDiagonal) return SignFor(skel.StructureKind);
+		// LongDiagonal and DiagonalVertical both lean directional via their long leg vs the next-OTM strike:
+		// for the diagonal-vertical the first buy is the long-vertical anchor and the first sell its wing, so
+		// the same "long below short → bullish" rule reads the debit vertical's direction correctly.
+		if (skel.StructureKind is not (OpenStructureKind.LongDiagonal or OpenStructureKind.DiagonalVertical)) return SignFor(skel.StructureKind);
 
 		var longLeg = skel.Legs.FirstOrDefault(l => l.Action == "buy");
 		var shortLeg = skel.Legs.FirstOrDefault(l => l.Action == "sell");
