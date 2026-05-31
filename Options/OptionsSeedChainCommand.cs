@@ -28,6 +28,10 @@ internal sealed class OptionsSeedChainSettings : CommandSettings
 	[System.ComponentModel.Description("Highest strike to include. Omit to include all strikes.")]
 	public decimal? MaxStrike { get; set; }
 
+	[CommandOption("--underlying <SYM>")]
+	[System.ComponentModel.Description("Underlying_ticker to query at massive when it differs from the OCC root. SPXW options are filed under SPX (per reference_massive_api). Default: SPXW→SPX, else the ticker itself.")]
+	public string? Underlying { get; set; }
+
 	[CommandOption("--atm-band <N>")]
 	[System.ComponentModel.Description("ATM-tracking mode: keep only strikes within ±N of where the underlying actually traded during each expiry's relevant window (the days it serves as a 0-3 DTE short or 14-30 DTE long leg). Tracks a trending underlying so we seed the contracts the strategy can actually pick, not the full static box. Reads data/history/<TICKER>.csv. Recommended for dense chains (e.g. SPY).")]
 	public decimal? AtmBand { get; set; }
@@ -65,14 +69,26 @@ internal sealed class OptionsSeedChainCommand : AsyncCommand<OptionsSeedChainSet
 			+ (settings.MinStrike.HasValue || settings.MaxStrike.HasValue ? $", strikes {settings.MinStrike?.ToString() ?? "·"}–{settings.MaxStrike?.ToString() ?? "·"}" : "")
 			+ " via massive reference endpoint…");
 
+		// massive files some roots under a different underlying_ticker (SPXW → SPX). Use the override,
+		// else the known SPXW mapping, else the ticker itself. The returned OCCs keep their real root.
+		var underlying = settings.Underlying ?? (string.Equals(ticker, "SPXW", StringComparison.OrdinalIgnoreCase) ? "SPX" : ticker);
+		if (!string.Equals(underlying, ticker, StringComparison.OrdinalIgnoreCase))
+			AnsiConsole.MarkupLine($"  querying underlying_ticker={underlying} (root {ticker})");
+
 		// Query both expired and still-live contracts (Polygon returns only one side per call).
 		var all = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		foreach (var expired in new[] { true, false })
 		{
 			var batch = await MassivePolygonClient.FetchOptionContractsAsync(
-				apiConfig.MassiveApiKey, ticker, expired, since, until, settings.MinStrike, settings.MaxStrike, cancellation);
-			foreach (var occ in batch) all.Add(occ);
-			AnsiConsole.MarkupLine($"  expired={expired}: {batch.Count} contract(s)");
+				apiConfig.MassiveApiKey, underlying, expired, since, until, settings.MinStrike, settings.MaxStrike, cancellation);
+			// Querying SPX returns both SPXW (weekly, PM-settled) and SPX (monthly, AM-settled) roots —
+			// keep only the requested root so we don't catalog/backfill the wrong settlement family.
+			foreach (var occ in batch)
+			{
+				var p = ParsingHelpers.ParseOptionSymbol(occ);
+				if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) all.Add(occ);
+			}
+			AnsiConsole.MarkupLine($"  expired={expired}: {batch.Count} returned");
 		}
 
 		if (all.Count == 0) { AnsiConsole.MarkupLine("  [yellow]no contracts returned[/] — check ticker / date range / tier entitlement"); return 0; }
