@@ -291,9 +291,12 @@ internal sealed class SimulatedBook
 	/// <para>Settling the whole structure at intrinsic on the short leg's expiry day — the prior behavior — was
 	/// wrong for calendars/diagonals: it discarded the long leg's remaining extrinsic value, one-directionally
 	/// penalizing the strategy exactly on the good outcome where the short expires worthless.</para></summary>
-	public bool Expire(DateTime date, string positionKey, decimal spotAtExpiry)
+	/// <returns>The re-keyed survivor's key when a partial expiry leaves future-dated legs open (so the
+	/// caller can close them at the same day's close instead of carrying them overnight); otherwise null
+	/// (position not found, nothing expired, or full expiry that terminated the lineage).</returns>
+	public string? Expire(DateTime date, string positionKey, decimal spotAtExpiry)
 	{
-		if (!_positions.TryGetValue(positionKey, out var pos)) return false;
+		if (!_positions.TryGetValue(positionKey, out var pos)) return null;
 
 		var expiredLegs = new List<PositionLeg>();
 		var survivingLegs = new List<PositionLeg>();
@@ -302,7 +305,7 @@ internal sealed class SimulatedBook
 			if (leg.Expiry.HasValue && leg.Expiry.Value.Date <= date.Date) expiredLegs.Add(leg);
 			else survivingLegs.Add(leg);
 		}
-		if (expiredLegs.Count == 0) return false;
+		if (expiredLegs.Count == 0) return null;
 
 		// Settle the expired legs at intrinsic: long legs collect it, short legs pay it.
 		var settlementPerContract = 0m;
@@ -341,7 +344,7 @@ internal sealed class SimulatedBook
 			_initialDebitPerContract.Remove(positionKey);
 			_adjustedDebitPerContract.Remove(positionKey);
 			_lineageByKey.Remove(positionKey);
-			return true;
+			return null;
 		}
 
 		// Partial expiry: carry the surviving legs forward as a re-keyed open position. Basis adjustment
@@ -359,7 +362,7 @@ internal sealed class SimulatedBook
 
 		// Defensive: a surviving leg set that collides with another open position's key is vanishingly
 		// unlikely, but if it happens, drop the survivor rather than clobber the existing lineage.
-		if (_positions.ContainsKey(newKey)) return true;
+		if (_positions.ContainsKey(newKey)) return null;
 
 		_positions[newKey] = new OpenPosition(
 			Key: newKey,
@@ -374,7 +377,7 @@ internal sealed class SimulatedBook
 		_initialDebitPerContract[newKey] = initialDebit;
 		_adjustedDebitPerContract[newKey] = adjustedDebit;
 		_lineageByKey[newKey] = lineageId;
-		return true;
+		return newKey;
 	}
 
 	/// <summary>Strategy-kind for a partially-settled position's surviving legs. A single surviving long option
