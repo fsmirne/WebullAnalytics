@@ -316,8 +316,27 @@ internal sealed class BacktestRunner
 		if (_fixedContracts.HasValue) return _fixedContracts.Value;
 		if (p.CashReserveBlocked) return 0;
 		if (p.Qty < 1) return 0;
-		if (p.CapitalAtRiskPerContract * p.Qty > _book.Cash) return 0;
-		return p.Qty;
+		// Margin requirement per contract: for credit structures the broker holds the full spread
+		// width as collateral (CapitalAtRisk + credit received); for debit structures the cost is
+		// already out of cash so margin = CapitalAtRisk alone.
+		var marginPerContract = p.CapitalAtRiskPerContract + Math.Max(0m, p.DebitOrCreditPerContract);
+		if (marginPerContract <= 0m) return 0;
+		// Buying power = cash minus margin held by existing credit positions whose collateral isn't
+		// reflected in the cash balance (their credit inflated cash, but the broker locks the full
+		// spread width). Debit positions already reduced cash on open — no additional hold needed.
+		var marginHeld = 0m;
+		foreach (var pos in _book.OpenPositions.Values)
+		{
+			if (pos.InitialNetDebit >= 0m) continue; // debit — already paid from cash
+			var maxLoss = pos.MaxLossPerShare ?? 0m;
+			// spreadWidth per share = maxLoss - InitialNetDebit (InitialNetDebit < 0 → subtracting adds)
+			var spreadWidthPerShare = maxLoss - pos.InitialNetDebit;
+			marginHeld += spreadWidthPerShare * 100m * pos.Quantity;
+		}
+		var buyingPower = _book.Cash - marginHeld;
+		var affordableQty = (int)Math.Floor(buyingPower / marginPerContract);
+		var qty = Math.Min(p.Qty, affordableQty);
+		return qty < 1 ? 0 : qty;
 	}
 
 	/// <summary>For opener proposals, the candidate scorer has already priced each leg from the same quote
