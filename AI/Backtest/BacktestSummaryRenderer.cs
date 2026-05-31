@@ -251,6 +251,19 @@ internal static class BacktestSummaryRenderer
 		table.AddRow("Expirations", result.ExpireFills.ToString());
 		table.AddRow("Win rate (closed lifecycles)", totalClosedLifecycles > 0 ? $"{winRate:F1}% ({wins} W / {losses} L)" : "—");
 
+		// Pricing provenance: what fraction of fill-leg prices were backed by a real captured bar vs the
+		// synthetic Black-Scholes fallback. 0DTE legs are densely captured; multi-DTE long legs are often
+		// sparse, so a low multi-DTE captured % means calendar/diagonal P&L rests on modeled prices.
+		var prov = result.Provenance;
+		if (prov.ZeroDteTotal > 0)
+			table.AddRow("Real-bar pricing (0DTE legs)", $"{prov.ZeroDteCapturedPct * 100:F1}% ({prov.ZeroDteCaptured}/{prov.ZeroDteTotal})");
+		if (prov.MultiDteTotal > 0)
+		{
+			var pct = prov.MultiDteCapturedPct * 100;
+			var color = pct >= 80 ? "green" : pct >= 50 ? "yellow" : "red";
+			table.AddRow("Real-bar pricing (>0DTE legs)", $"[{color}]{pct:F1}% ({prov.MultiDteCaptured}/{prov.MultiDteTotal}){(pct < 80 ? " — synthetic-priced, low confidence" : "")}[/]");
+		}
+
 		// Per-trade edge stats. Unlike terminal P&L (which compounds with position sizing), these are
 		// the sizing-robust read on whether the strategy has an edge: expectancy is the average $ per
 		// trade, and profit factor (gross win / gross loss) is dimensionless — both meaningful even when
