@@ -281,20 +281,36 @@ internal sealed class SimulatedBook
 		return true;
 	}
 
-	/// <summary>Settle a position whose short leg has expired. Fills both legs at intrinsic value: short pays out
-	/// max(0, intrinsic), long collects max(0, intrinsic) at its own strike (only meaningful for diagonals where
-	/// the long is still alive — but for symmetry we settle the whole structure at the expiry-day spot).</summary>
+	/// <summary>Settle only the legs of a position that have expired on or before <paramref name="date"/>, at
+	/// intrinsic against <paramref name="spotAtExpiry"/>. If every leg has expired the lineage terminates (the
+	/// common case — a 0DTE structure or a calendar closed past its long expiry). If future-dated legs survive
+	/// (a calendar/diagonal whose short leg expired while the long leg lives on), the position stays OPEN on the
+	/// survivors: it is re-keyed (the key is leg-derived) with the lineage carried forward, and the per-share
+	/// basis is reduced by the settled legs' cash so rule thresholds on the survivor stay correct.
+	///
+	/// <para>Settling the whole structure at intrinsic on the short leg's expiry day — the prior behavior — was
+	/// wrong for calendars/diagonals: it discarded the long leg's remaining extrinsic value, one-directionally
+	/// penalizing the strategy exactly on the good outcome where the short expires worthless.</para></summary>
 	public bool Expire(DateTime date, string positionKey, decimal spotAtExpiry)
 	{
 		if (!_positions.TryGetValue(positionKey, out var pos)) return false;
 
-		var settlementPerContract = 0m;
-		var settlementLegs = new List<BacktestLegFill>();
+		var expiredLegs = new List<PositionLeg>();
+		var survivingLegs = new List<PositionLeg>();
 		foreach (var leg in pos.Legs)
 		{
-			if (leg.Expiry == null || leg.CallPut == null) continue;
+			if (leg.Expiry.HasValue && leg.Expiry.Value.Date <= date.Date) expiredLegs.Add(leg);
+			else survivingLegs.Add(leg);
+		}
+		if (expiredLegs.Count == 0) return false;
+
+		// Settle the expired legs at intrinsic: long legs collect it, short legs pay it.
+		var settlementPerContract = 0m;
+		var settlementLegs = new List<BacktestLegFill>();
+		foreach (var leg in expiredLegs)
+		{
+			if (leg.CallPut == null) continue;
 			var intrinsic = leg.CallPut == "C" ? Math.Max(0m, spotAtExpiry - leg.Strike) : Math.Max(0m, leg.Strike - spotAtExpiry);
-			// Long legs collect intrinsic on the way out; short legs pay it.
 			if (leg.Side == Side.Buy)
 			{
 				settlementPerContract += intrinsic;
@@ -318,11 +334,58 @@ internal sealed class SimulatedBook
 		_fills.Add(new BacktestFill(date, positionKey, pos.Ticker, pos.StrategyKind, pos.Quantity, BacktestFillKind.Expire,
 			LineageId: lineageId, Legs: settlementLegs, NetCashFlow: cashFlow, Fees: 0m, RuleName: null));
 
+		// Full expiry: nothing survives → terminate the lineage.
+		if (survivingLegs.Count == 0)
+		{
+			_positions.Remove(positionKey);
+			_initialDebitPerContract.Remove(positionKey);
+			_adjustedDebitPerContract.Remove(positionKey);
+			_lineageByKey.Remove(positionKey);
+			return true;
+		}
+
+		// Partial expiry: carry the surviving legs forward as a re-keyed open position. Basis adjustment
+		// mirrors Roll/LegIn — new basis = old basis − settled-leg cash per share (settling a worthless short
+		// adds 0; settling an ITM short you must pay for raises the basis you have to recover from the long).
+		var newStrategyKind = DeriveSurvivingStrategyKind(survivingLegs, pos.StrategyKind);
+		var newKey = ComputeKey(pos.Ticker, newStrategyKind, survivingLegs);
+		var initialDebit = _initialDebitPerContract[positionKey] - settlementPerContract;
+		var adjustedDebit = _adjustedDebitPerContract[positionKey] - settlementPerContract;
+
 		_positions.Remove(positionKey);
 		_initialDebitPerContract.Remove(positionKey);
 		_adjustedDebitPerContract.Remove(positionKey);
 		_lineageByKey.Remove(positionKey);
+
+		// Defensive: a surviving leg set that collides with another open position's key is vanishingly
+		// unlikely, but if it happens, drop the survivor rather than clobber the existing lineage.
+		if (_positions.ContainsKey(newKey)) return true;
+
+		_positions[newKey] = new OpenPosition(
+			Key: newKey,
+			Ticker: pos.Ticker,
+			StrategyKind: newStrategyKind,
+			Legs: survivingLegs,
+			InitialNetDebit: initialDebit,
+			AdjustedNetDebit: adjustedDebit,
+			Quantity: pos.Quantity,
+			OpenedAt: pos.OpenedAt,
+			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, survivingLegs));
+		_initialDebitPerContract[newKey] = initialDebit;
+		_adjustedDebitPerContract[newKey] = adjustedDebit;
+		_lineageByKey[newKey] = lineageId;
 		return true;
+	}
+
+	/// <summary>Strategy-kind for a partially-settled position's surviving legs. A single surviving long option
+	/// (the calendar/diagonal case once the short expires) becomes LongCall/LongPut — accurate for rule logic and
+	/// for the OpenStructureKind parse in <see cref="Close"/>. Anything else keeps the original kind (functional:
+	/// the leg set, not the label, drives rule evaluation).</summary>
+	private static string DeriveSurvivingStrategyKind(IReadOnlyList<PositionLeg> survivors, string fallback)
+	{
+		if (survivors.Count == 1 && survivors[0].Side == Side.Buy && survivors[0].CallPut != null)
+			return survivors[0].CallPut == "C" ? nameof(OpenStructureKind.LongCall) : nameof(OpenStructureKind.LongPut);
+		return fallback;
 	}
 
 	/// <summary>Per-leg fill → total dollar cash flow. Sell legs add credit; buy legs subtract debit.
