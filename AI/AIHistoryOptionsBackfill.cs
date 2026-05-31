@@ -256,79 +256,81 @@ internal static class AIHistoryOptionsBackfill
 			+ (skippedComplete > 0 ? $", [green]{skippedComplete} already complete[/] (expired + on disk)" : "")
 			+ (skippedNoMassive > 0 ? $", [yellow]{skippedNoMassive} skipped[/] (no MassiveApiKey)" : ""));
 
-		// Order by source then expiry+strike. Webull-first means the fast path completes before the
-		// rate-limited massive path begins — user gets feedback sooner on what's working.
-		work.Sort((a, b) =>
-		{
-			var s = a.Source.CompareTo(b.Source);
-			if (s != 0) return s;
-			var c = a.Parsed.ExpiryDate.CompareTo(b.Parsed.ExpiryDate);
-			return c != 0 ? c : a.Parsed.Strike.CompareTo(b.Parsed.Strike);
-		});
+		// Split by route and run them CONCURRENTLY. Webull is rate-paced (sequential, DefaultPace between
+		// calls) and was previously sorted first, which made the whole slow Webull pass complete before the
+		// massive pass even started. Now the two routes overlap: Webull walks its list sequentially while
+		// massive pulls in parallel (its own rolling-window throttle caps the rate — a no-op at the unlimited
+		// tier, so the bounded parallelism actually applies). Each contract writes its own CSV, so concurrent
+		// writes never touch the same file.
+		var webullWork = work.Where(w => w.Source == OptionDataSource.Webull).OrderBy(w => w.Parsed.ExpiryDate).ThenBy(w => w.Parsed.Strike).ToList();
+		var massiveWork = work.Where(w => w.Source == OptionDataSource.Massive).OrderBy(w => w.Parsed.ExpiryDate).ThenBy(w => w.Parsed.Strike).ToList();
 
 		var written = 0;
 		var merged = 0;
 		var unchanged = 0;
-		var emptyResponses = new List<string>();
-		var failures = new List<(string Occ, string Reason)>();
-		var index = 0;
-		foreach (var (occ, id, parsed, csvPath, mergeExisting, source) in work)
-		{
-			cancellation.ThrowIfCancellationRequested();
-			// Webull path uses a small client-side pace; Massive has its own rolling-window throttle.
-			if (index > 0 && source == OptionDataSource.Webull) await Task.Delay(DefaultPace, cancellation);
-			index++;
+		var processed = 0;
+		var total = work.Count;
+		var emptyResponses = new System.Collections.Concurrent.ConcurrentBag<string>();
+		var failures = new System.Collections.Concurrent.ConcurrentBag<(string Occ, string Reason)>();
+		var progressLock = new object();
 
+		async Task ProcessOneAsync((string Occ, long? DerivativeId, OptionParsed Parsed, string CsvPath, bool MergeExisting, OptionDataSource Source) item, CancellationToken ct)
+		{
 			IReadOnlyList<OptionMinuteBar> bars;
 			try
 			{
-				if (source == OptionDataSource.Webull)
+				if (item.Source == OptionDataSource.Webull)
 				{
-					bars = await WebullChartsClient.FetchOptionContractMinuteBarsAsync(apiConfig!, id!.Value, 800, anchorUnixSec: null, cancellation);
+					bars = await WebullChartsClient.FetchOptionContractMinuteBarsAsync(apiConfig!, item.DerivativeId!.Value, 800, anchorUnixSec: null, ct);
 				}
 				else
 				{
 					// Polygon coverage window: from 30 days before expiry through expiry. SPXW weeklies
-					// list ~T-1 week so 30d is generous headroom; SPX monthlies list weeks earlier,
-					// also fine. Keeping the window tight bounds the response size to ~1-2 pages of
-					// 50k-row aggregates for typical SPXW intraday density.
-					var listFrom = DateOnly.FromDateTime(parsed.ExpiryDate.AddDays(-30));
-					var expireTo = DateOnly.FromDateTime(parsed.ExpiryDate);
-					bars = await MassivePolygonClient.FetchOptionMinuteAggregatesAsync(apiConfig!.MassiveApiKey, occ, listFrom, expireTo, cancellation);
+					// list ~T-1 week so 30d is generous headroom; SPX monthlies list weeks earlier, also fine.
+					var listFrom = DateOnly.FromDateTime(item.Parsed.ExpiryDate.AddDays(-30));
+					var expireTo = DateOnly.FromDateTime(item.Parsed.ExpiryDate);
+					bars = await MassivePolygonClient.FetchOptionMinuteAggregatesAsync(apiConfig!.MassiveApiKey, item.Occ, listFrom, expireTo, ct);
 				}
 			}
 			catch (Exception ex) when (ex is not OperationCanceledException)
 			{
-				failures.Add((occ, ex.Message));
-				continue;
+				failures.Add((item.Occ, ex.Message));
+				return;
 			}
 
-			if (bars.Count == 0)
+			if (bars.Count == 0) emptyResponses.Add(item.Occ);
+			else if (item.MergeExisting)
 			{
-				emptyResponses.Add(occ);
-				continue;
-			}
-
-			if (mergeExisting)
-			{
-				var existing = ReadOptionCsv(csvPath);
+				var existing = ReadOptionCsv(item.CsvPath);
 				var (mergedBars, newMinutes) = MergeByTimestamp(existing, bars);
-				if (newMinutes == 0) { unchanged++; }
-				else
-				{
-					WriteOptionCsv(csvPath, mergedBars);
-					merged++;
-				}
+				if (newMinutes == 0) Interlocked.Increment(ref unchanged);
+				else { WriteOptionCsv(item.CsvPath, mergedBars); Interlocked.Increment(ref merged); }
 			}
-			else
-			{
-				WriteOptionCsv(csvPath, bars);
-				written++;
-			}
+			else { WriteOptionCsv(item.CsvPath, bars); Interlocked.Increment(ref written); }
 
-			if (index % 25 == 0 || index == work.Count)
-				AnsiConsole.MarkupLine($"    progress: {index}/{work.Count} (wrote {written}, merged {merged}, unchanged {unchanged}, empty {emptyResponses.Count}, failed {failures.Count})");
+			var done = Interlocked.Increment(ref processed);
+			if (done % 25 == 0 || done == total)
+				lock (progressLock)
+					AnsiConsole.MarkupLine($"    progress: {done}/{total} (wrote {written}, merged {merged}, unchanged {unchanged}, empty {emptyResponses.Count}, failed {failures.Count})");
 		}
+
+		// Webull route: sequential with the client-side pace (the chart endpoint tolerates this rate reliably).
+		var webullTask = Task.Run(async () =>
+		{
+			for (var i = 0; i < webullWork.Count; i++)
+			{
+				cancellation.ThrowIfCancellationRequested();
+				if (i > 0) await Task.Delay(DefaultPace, cancellation);
+				await ProcessOneAsync(webullWork[i], cancellation);
+			}
+		}, cancellation);
+
+		// Massive route: bounded parallelism (its throttle enforces any tier cap; unlimited → true concurrency).
+		var massiveTask = Parallel.ForEachAsync(massiveWork,
+			new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = cancellation },
+			async (item, ct) => await ProcessOneAsync(item, ct));
+
+		await Task.WhenAll(webullTask, massiveTask);
 
 		AnsiConsole.MarkupLine($"  [green]wrote {written}[/] new + [green]merged {merged}[/] existing CSV(s) under {Markup.Escape(optionsRoot)}{(unchanged > 0 ? $" ({unchanged} unchanged)" : "")}");
 		if (emptyResponses.Count > 0)
