@@ -242,7 +242,8 @@ internal sealed class BacktestRunner
 			PeakEquity: peakEquity,
 			EquityCurve: equityCurve,
 			Fills: _book.Fills,
-			EndMtmByLineage: endMtmByLineage);
+			EndMtmByLineage: endMtmByLineage,
+			Provenance: ComputeProvenance());
 	}
 
 	/// <summary>Per-lineage MTM of still-open positions at the final step. Used by the renderer to split
@@ -371,6 +372,22 @@ internal sealed class BacktestRunner
 	///
 	/// Whipsaw convention: SL fires before TP. If both thresholds are crossed in [Low, High] the
 	/// adverse move is assumed to have come first (bear-case path).</summary>
+	/// <summary>True when every expiring leg of <paramref name="pos"/> expires on or before
+	/// <paramref name="step"/> (DTE ≤ 0) — i.e. the position carries no leg that lives past today.
+	/// Only such positions are eligible for the intraday-trigger minute-walk, whose parametric leg
+	/// pricing (<see cref="BacktestQuoteSource.PriceAtSpot"/>) is consistent with the captured-bar
+	/// entry pricing only for short-TTE near-intrinsic 0DTE legs. A position with any future-dated leg
+	/// (calendar / diagonal long leg) must be managed by the daily rule loop instead, which prices on
+	/// the same captured-bar basis as entry.</summary>
+	private static bool IsAllZeroDte(OpenPosition pos, DateTime step)
+	{
+		foreach (var leg in pos.Legs)
+		{
+			if (leg.Expiry is { } exp && (exp.Date - step.Date).Days > 0) return false;
+		}
+		return true;
+	}
+
 	private async Task RunIntradayTriggersAsync(DateTime step, RuleEvaluator evaluator, CancellationToken cancellation)
 	{
 		if (_book.OpenPositions.Count == 0) return;
@@ -385,6 +402,18 @@ internal sealed class BacktestRunner
 		{
 			cancellation.ThrowIfCancellationRequested();
 			if (!_book.OpenPositions.ContainsKey(pos.Key)) continue;
+
+			// Intraday SL/TP/LegIn triggering is a 0DTE-only construct. A same-day-expiry position opens
+			// and settles within the session, so the daily rule loop (which runs at the next step's open)
+			// would never see it before expiry — hence the intraday minute-walk. But that walk prices each
+			// leg with the parametric Black-Scholes model (BacktestQuoteSource.PriceAtSpot / GetIntradayQuotesAsync),
+			// which deliberately ignores captured bars. For a multi-DTE structure (calendar / diagonal) the
+			// entry debit is set from the captured-bar path while this pass re-marks the long leg parametrically;
+			// the two models diverge and manufacture an instant same-day paper profit that TakeProfit harvests
+			// (observed: +44.8% in 19 minutes, 99.4% win rate). Multi-DTE positions are instead managed by the
+			// daily rule loop (Step 1), which prices via GetQuotesAsync — the same captured-bar basis as entry,
+			// so entry and management never disagree. Gate the intraday pass to all-0DTE positions only.
+			if (!IsAllZeroDte(pos, step)) continue;
 
 			// Prefer the minute-walk: walks minute bars chronologically and triggers at the first
 			// minute the position mark crosses SL or TP. Removes the bar.Low / bar.High pessimism
@@ -1107,6 +1136,31 @@ internal sealed class BacktestRunner
 		return total;
 	}
 
+	/// <summary>Pricing-provenance diagnostic: across all Open/Close/Roll/LegIn fills (Expire excluded —
+	/// those settle at real bar.Close intrinsic, not a model price), count how many leg prices were backed
+	/// by a real captured bar on the fill day vs fell through to the synthetic Black-Scholes model. Bucketed
+	/// by leg DTE-at-fill: 0DTE legs are densely captured, but multi-DTE long legs (calendar/diagonal) are
+	/// often sparse, so a high multi-DTE synthetic fraction means the result rests on modeled prices, not
+	/// real fills — read it before trusting any calendar/diagonal P&L.</summary>
+	private PricingProvenance ComputeProvenance()
+	{
+		int zCap = 0, zTot = 0, mCap = 0, mTot = 0;
+		foreach (var fill in _book.Fills)
+		{
+			if (fill.Kind == BacktestFillKind.Expire) continue;
+			foreach (var leg in fill.Legs)
+			{
+				var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
+				if (parsed?.CallPut == null) continue;
+				var dte = (parsed.ExpiryDate.Date - fill.Date.Date).Days;
+				var captured = _quotes.HasCapturedBarOnDate(leg.Symbol, fill.Date);
+				if (dte <= 0) { zTot++; if (captured) zCap++; }
+				else { mTot++; if (captured) mCap++; }
+			}
+		}
+		return new PricingProvenance(zCap, zTot, mCap, mTot);
+	}
+
 	/// <summary>Adds each option leg's OCC symbol to the discovery set. Called for fall-through paths
 	/// (daily-step rule fires, management opens) that don't use the top-K aggregator. Cheap — just
 	/// a hashset add — so it's safe to invoke whether or not <c>_discover</c> is set; <see cref="FlushDiscoveryLog"/>
@@ -1246,6 +1300,15 @@ internal sealed class BacktestRunner
 	}
 }
 
+/// <summary>How much of the backtest's realized fills were priced from real captured option bars vs the
+/// synthetic Black-Scholes fallback, split by leg DTE-at-fill. A high multi-DTE synthetic fraction is a
+/// red flag that calendar/diagonal P&L rests on modeled prices rather than real prints.</summary>
+internal readonly record struct PricingProvenance(int ZeroDteCaptured, int ZeroDteTotal, int MultiDteCaptured, int MultiDteTotal)
+{
+	public double ZeroDteCapturedPct => ZeroDteTotal == 0 ? 1.0 : (double)ZeroDteCaptured / ZeroDteTotal;
+	public double MultiDteCapturedPct => MultiDteTotal == 0 ? 1.0 : (double)MultiDteCaptured / MultiDteTotal;
+}
+
 internal sealed record BacktestResult(
 	decimal StartingCash,
 	decimal EndingCash,
@@ -1259,7 +1322,8 @@ internal sealed record BacktestResult(
 	decimal PeakEquity,
 	IReadOnlyList<(DateTime Date, decimal Equity)> EquityCurve,
 	IReadOnlyList<BacktestFill> Fills,
-	IReadOnlyDictionary<long, decimal> EndMtmByLineage)
+	IReadOnlyDictionary<long, decimal> EndMtmByLineage,
+	PricingProvenance Provenance)
 {
 	/// <summary>P&L on closed lifecycles only (lineages that ended in Close or Expire). Each lifecycle's
 	/// P&L = sum of (NetCashFlow - Fees) across all fills sharing its LineageId.</summary>
