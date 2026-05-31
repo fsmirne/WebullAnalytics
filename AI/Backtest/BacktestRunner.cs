@@ -1093,8 +1093,40 @@ internal sealed class BacktestRunner
 			if (!_book.OpenPositions.TryGetValue(key, out var pos)) continue;
 			var bar = await _bars.GetBarAsync(pos.Ticker, step.Date, cancellation);
 			if (bar == null) continue;
-			_book.Expire(settleTime, key, bar.Close);
+			var survivorKey = _book.Expire(settleTime, key, bar.Close);
+
+			// Partial expiry left a surviving leg (a calendar/diagonal's long after the short expired). Close
+			// it at THIS day's close at market value rather than carrying it overnight. The daily management
+			// pass already ran at the open, so an unclosed survivor would otherwise sit until the next day —
+			// bleeding a day of theta and an overnight gap as an unintended naked directional leg. Closing at
+			// market (not intrinsic) preserves the remaining extrinsic, which was the point of the partial settle.
+			if (survivorKey != null)
+				await CloseSurvivorAtCloseAsync(survivorKey, pos.Ticker, settleTime, bar.Close, cancellation);
 		}
+	}
+
+	/// <summary>Closes a partial-expiry survivor at the short-expiry day's close, priced at market under the
+	/// active pricing mode (mid/bidask) with the day's close as spot. Leaves it open only if a leg can't be
+	/// priced — next day's management then handles it (the prior fallback behavior).</summary>
+	private async Task CloseSurvivorAtCloseAsync(string survivorKey, string ticker, DateTime settleTime, decimal spotAtClose, CancellationToken cancellation)
+	{
+		if (!_book.OpenPositions.TryGetValue(survivorKey, out var pos)) return;
+		var symbols = pos.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
+		if (symbols.Count == 0) return;
+
+		var overrides = new QuoteOverrides(Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spotAtClose });
+		var snap = await _quotes.GetQuotesAsync(settleTime, symbols, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker }, cancellation, overrides);
+
+		var fills = new List<BacktestLegFill>(pos.Legs.Count);
+		foreach (var leg in pos.Legs)
+		{
+			if (leg.CallPut == null) continue;
+			if (!snap.Options.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) return; // can't price → leave open for next-day management
+			var closeSide = leg.Side == Side.Buy ? Side.Sell : Side.Buy;
+			fills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
+		}
+		if (fills.Count > 0)
+			_book.Close(settleTime, survivorKey, fills, "CloseSurvivorOnShortExpiry");
 	}
 
 	private async Task<decimal> ComputeOpenMarkAsync(DateTime step, CancellationToken cancellation)
