@@ -219,12 +219,12 @@ internal static class AIHistoryOptionsBackfill
 			var mergeExisting = !force && csvExists;
 			if (id.HasValue)
 			{
-				// Webull: a past-expiry contract's minute history is final once captured — re-fetching
-				// returns identical bytes (the "unchanged" churn the 599-contract re-pull was). Skip when
-				// already on disk AND the expiry has passed, mirroring the massive skip. Still fetch
-				// today's/future expiries (live minutes keep printing) and any not yet on disk (the
-				// --webull-pad pre-capture before a contract drops off the live chain). --force overrides.
-				if (!force && csvExists && parsed.ExpiryDate.Date < todayEt)
+				// Once a contract is on disk we never need to re-pull it for backfill: every past trading
+				// day's minute history is final, and a backtest only needs bars through its window end.
+				// The sole exception is TODAY's expiry, whose intraday is still forming. Future-expiry
+				// on-disk contracts are skipped too — their already-captured bars are what the backtest
+				// uses; new bars print on future trading days outside any historical window. --force overrides.
+				if (!force && csvExists && parsed.ExpiryDate.Date != todayEt)
 				{
 					skippedComplete++;
 					continue;
@@ -233,12 +233,10 @@ internal static class AIHistoryOptionsBackfill
 			}
 			else if (hasMassiveKey)
 			{
-				// Massive (expired): once a contract's expiry is in the past, its minute history is
-				// final — re-fetching produces identical bytes. Skip if a CSV already exists, the
-				// expiry has passed, and the user didn't ask for --force. This turns repeat backfills
-				// of the historical set from hours into seconds; only genuinely-new (or future-expiry,
-				// or --force) contracts hit the rate-limited endpoint.
-				if (!force && csvExists && parsed.ExpiryDate.Date < todayEt)
+				// Same rule as the Webull route: if it's on disk, skip — except today's expiry (still
+				// forming intraday). Past and future on-disk contracts are both final for backtest
+				// purposes, so only genuinely-new (not-yet-on-disk) or today's contracts hit the endpoint.
+				if (!force && csvExists && parsed.ExpiryDate.Date != todayEt)
 				{
 					skippedComplete++;
 					continue;
