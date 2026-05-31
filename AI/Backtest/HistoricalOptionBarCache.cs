@@ -18,6 +18,7 @@ namespace WebullAnalytics.AI.Backtest;
 /// which may price thousands of legs in a single tight loop.</para></summary>
 internal sealed class HistoricalOptionBarCache
 {
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private readonly string _dataDir;
 	private readonly Dictionary<string, IReadOnlyDictionary<long, OptionMinuteBar>?> _byOcc =
 		new(StringComparer.OrdinalIgnoreCase);
@@ -97,6 +98,23 @@ internal sealed class HistoricalOptionBarCache
 		}
 		points.Sort((a, b) => a.Item1.CompareTo(b.Item1));
 		return points;
+	}
+
+	/// <summary>Diagnostic: true when <paramref name="occ"/> has at least one captured bar on the
+	/// ET trading day <paramref name="dateEt"/>. Used by the pricing-provenance report to separate fills
+	/// backed by a real captured print from those that fell through to the synthetic Black-Scholes model.
+	/// Read-only and off the hot path — called once per fill leg in the post-run summary, not during the
+	/// per-minute simulation.</summary>
+	public bool HasBarOnDate(string occ, DateTime dateEt)
+	{
+		var byTs = GetOrLoad(occ);
+		if (byTs == null) return false;
+		foreach (var sec in byTs.Keys)
+		{
+			var et = TimeZoneInfo.ConvertTimeFromUtc(DateTimeOffset.FromUnixTimeSeconds(sec).UtcDateTime, NyTz);
+			if (et.Date == dateEt.Date) return true;
+		}
+		return false;
 	}
 
 	private IReadOnlyDictionary<long, OptionMinuteBar>? GetOrLoad(string occ)
