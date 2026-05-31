@@ -128,6 +128,11 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		_optionBars = optionBars;
 	}
 
+	/// <summary>Diagnostic: did <paramref name="occ"/> have a real captured bar on the ET trading day of
+	/// <paramref name="dateEt"/>? When false, any backtest price for that contract on that day came from
+	/// the synthetic Black-Scholes fallback. Used by the post-run pricing-provenance report.</summary>
+	internal bool HasCapturedBarOnDate(string occ, DateTime dateEt) => _optionBars?.HasBarOnDate(occ, dateEt) ?? false;
+
 	public async Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers, CancellationToken cancellation, QuoteOverrides overrides = default)
 	{
 		var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
