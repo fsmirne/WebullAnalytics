@@ -53,6 +53,10 @@ internal static class AIHistoryOptionsBackfill
 			AnsiConsole.MarkupLine($"  [red]failed to parse api-config.json[/]: {Markup.Escape(ex.Message)}");
 			return 1;
 		}
+		// Pace the massive (expired-contract) path to the configured tier. Basic = 5/min; Options Starter+
+		// is unlimited (set massiveMaxRequestsPerMinute to a large value or 0 to run at full speed).
+		MassivePolygonClient.MaxRequestsPerWindow = apiConfig?.MassiveMaxRequestsPerMinute ?? 5;
+
 		if (apiConfig == null || apiConfig.Headers.Count == 0)
 		{
 			AnsiConsole.MarkupLine("  [red]api-config.json has no headers[/] — run `wa sniff` to refresh");

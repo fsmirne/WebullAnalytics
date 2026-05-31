@@ -20,12 +20,16 @@ internal static class MassivePolygonClient
 {
 	private const string BaseUrl = "https://api.massive.com";
 
-	// Basic tier caps at 5 req/min. Track the timestamps of the most recent up-to-MaxRequestsPerWindow
-	// requests; when a 6th is about to fire, wait just long enough for the oldest of those to age past
-	// the 60s window. Burst-then-wait is materially faster than evenly-spacing requests at 12s apart —
-	// 5 paginated pages complete in ~5s instead of ~52s — without exceeding the cap. Static across the
-	// process so pagination loops and any back-to-back call sites observe the same rolling window.
-	private const int MaxRequestsPerWindow = 5;
+	// Requests-per-60s cap. Track the timestamps of the most recent up-to-MaxRequestsPerWindow requests;
+	// when the next is about to exceed it, wait just long enough for the oldest of those to age past the
+	// 60s window. Burst-then-wait is materially faster than evenly-spacing requests — 5 paginated pages
+	// complete in ~5s instead of ~52s — without exceeding the cap. Static across the process so pagination
+	// loops and any back-to-back call sites observe the same rolling window.
+	//
+	// Defaults to the basic (free) tier's 5 req/min. Set from api-config.json's massiveMaxRequestsPerMinute
+	// to match a paid tier (Options Starter+ is "Unlimited API Calls"); 0 disables pacing entirely. The
+	// backfill entry point assigns it once at startup before any fetch fires.
+	internal static int MaxRequestsPerWindow { get; set; } = 5;
 	private static readonly TimeSpan RateWindow = TimeSpan.FromSeconds(60);
 	private static readonly TimeSpan RateWindowSlack = TimeSpan.FromMilliseconds(500);
 	private static readonly SemaphoreSlim PaceLock = new(1, 1);
@@ -152,6 +156,7 @@ internal static class MassivePolygonClient
 	/// retry.</summary>
 	private static async Task ThrottleAsync(CancellationToken cancellation)
 	{
+		if (MaxRequestsPerWindow <= 0) return; // unlimited tier — no self-throttle
 		await PaceLock.WaitAsync(cancellation);
 		try
 		{

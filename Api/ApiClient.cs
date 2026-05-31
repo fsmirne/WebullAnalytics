@@ -102,6 +102,13 @@ internal sealed class ApiConfig
 	[JsonPropertyName("massiveApiKey")]
 	public string MassiveApiKey { get; set; } = "";
 
+	/// <summary>massive.com requests-per-minute cap. The basic (free) tier hard-caps at 5 req/min (6th → HTTP 429);
+	/// paid tiers (Options Starter+) are "Unlimited API Calls". Set this to match your tier so the client paces
+	/// to the real limit instead of self-throttling to 5. Use 0 (or any large value) to disable pacing entirely
+	/// on an unlimited plan. Default 5 keeps the free tier safe out of the box.</summary>
+	[JsonPropertyName("massiveMaxRequestsPerMinute")]
+	public int MassiveMaxRequestsPerMinute { get; set; } = 5;
+
 	[JsonPropertyName("defaultAccount")]
 	public string? DefaultAccount { get; set; }
 
