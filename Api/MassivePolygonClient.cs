@@ -233,6 +233,92 @@ internal static class MassivePolygonClient
 		return result;
 	}
 
+	/// <summary>Lists option-contract OCC symbols for <paramref name="underlying"/> from massive's reference
+	/// endpoint (<c>/v3/reference/options/contracts</c>), paginated. Returns bare OCCs (the <c>O:</c> prefix
+	/// stripped) matching the optional expiration-date / strike-price filters. Bootstraps an underlying with
+	/// no on-disk chain (e.g. SPY): the discover→backfill loop can't enumerate a chain it has no bars for, but
+	/// this reference endpoint lists every historical contract directly. Same throttle/retry/pagination
+	/// machinery as the aggregates path. Query both <paramref name="expired"/>=true and =false to get the
+	/// full set (Polygon returns only one side per call).</summary>
+	internal static async Task<IReadOnlyList<string>> FetchOptionContractsAsync(
+		string apiKey, string underlying, bool expired,
+		DateOnly? expirationFrom, DateOnly? expirationTo,
+		decimal? strikeMin, decimal? strikeMax, CancellationToken cancellation)
+	{
+		if (string.IsNullOrWhiteSpace(apiKey)) { Console.WriteLine("Massive: apiKey is empty; skipping contracts fetch."); return Array.Empty<string>(); }
+		var client = SharedClient;
+		var encodedKey = Uri.EscapeDataString(apiKey);
+		var qs = new List<string>
+		{
+			$"underlying_ticker={Uri.EscapeDataString(underlying)}",
+			$"expired={(expired ? "true" : "false")}",
+			"limit=1000",
+		};
+		if (expirationFrom.HasValue) qs.Add($"expiration_date.gte={expirationFrom.Value:yyyy-MM-dd}");
+		if (expirationTo.HasValue) qs.Add($"expiration_date.lte={expirationTo.Value:yyyy-MM-dd}");
+		if (strikeMin.HasValue) qs.Add($"strike_price.gte={strikeMin.Value.ToString(CultureInfo.InvariantCulture)}");
+		if (strikeMax.HasValue) qs.Add($"strike_price.lte={strikeMax.Value.ToString(CultureInfo.InvariantCulture)}");
+		var url = $"{BaseUrl}/v3/reference/options/contracts?{string.Join("&", qs)}&apiKey={encodedKey}";
+
+		var occs = new List<string>();
+		var page = 0;
+		while (!string.IsNullOrEmpty(url))
+		{
+			page++;
+			var retries = 0;
+			while (true)
+			{
+				await ThrottleAsync(cancellation);
+				HttpResponseMessage response;
+				try { response = await client.GetAsync(url, cancellation); }
+				catch (Exception ex) when (ex is not OperationCanceledException)
+				{
+					if (retries < MaxRetriesPerUrl) { Console.WriteLine($"Massive: transport error on contracts page {page} ({ex.Message}); retry {retries + 1}/{MaxRetriesPerUrl} in {TransportRetryDelay.TotalSeconds:F0}s."); try { await Task.Delay(TransportRetryDelay, cancellation); } catch (OperationCanceledException) { return occs; } retries++; continue; }
+					Console.WriteLine($"Massive: contracts request failed page {page} after {MaxRetriesPerUrl} retries: {ex.Message}"); return occs;
+				}
+				using (response)
+				{
+					if (response.StatusCode == HttpStatusCode.TooManyRequests && retries < MaxRetriesPerUrl)
+					{ var wait = ResolveRetryAfter(response); Console.WriteLine($"Massive: HTTP 429 on contracts page {page}; pausing {wait.TotalSeconds:F0}s before retry ({retries + 1}/{MaxRetriesPerUrl})."); try { await Task.Delay(wait, cancellation); } catch (OperationCanceledException) { return occs; } retries++; continue; }
+					if (!response.IsSuccessStatusCode)
+					{ var status = (int)response.StatusCode; var hint = status is 401 or 403 ? " (auth failure; check apiKey)" : ""; Console.WriteLine($"Massive: HTTP {status} on contracts page {page}{hint}."); return occs; }
+					var json = await response.Content.ReadAsStringAsync(cancellation);
+					var (batch, nextUrl) = ParseContractsResponse(json);
+					occs.AddRange(batch);
+					if (string.IsNullOrEmpty(nextUrl)) url = null;
+					else { var sep = nextUrl.Contains('?') ? '&' : '?'; url = $"{nextUrl}{sep}apiKey={encodedKey}"; }
+					break;
+				}
+			}
+		}
+		return occs;
+	}
+
+	private static (IReadOnlyList<string> Occs, string? NextUrl) ParseContractsResponse(string json)
+	{
+		var occs = new List<string>();
+		string? nextUrl = null;
+		try
+		{
+			using var doc = JsonDocument.Parse(json);
+			var root = doc.RootElement;
+			if (root.TryGetProperty("next_url", out var nu) && nu.ValueKind == JsonValueKind.String)
+				nextUrl = nu.GetString();
+			if (root.TryGetProperty("results", out var results) && results.ValueKind == JsonValueKind.Array)
+			{
+				foreach (var r in results.EnumerateArray())
+				{
+					if (!r.TryGetProperty("ticker", out var tEl)) continue;
+					var t = tEl.GetString();
+					if (string.IsNullOrEmpty(t)) continue;
+					occs.Add(t.StartsWith("O:", StringComparison.OrdinalIgnoreCase) ? t[2..] : t);
+				}
+			}
+		}
+		catch { /* malformed page — return what parsed, drop the rest */ }
+		return (occs, nextUrl);
+	}
+
 	internal static (IReadOnlyList<MinuteBar> Bars, string? NextUrl) ParseAggregatesResponse(string json)
 	{
 		try
