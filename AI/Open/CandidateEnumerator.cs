@@ -54,6 +54,10 @@ internal static class CandidateEnumerator
 		if (cfg.Structures.LongCallPut.Enabled)
 			foreach (var sk in EnumerateLongCallPut(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
+
+		if (cfg.Structures.DiagonalVertical.Enabled)
+			foreach (var sk in EnumerateDiagonalVerticals(ticker, spot, asOf, cfg, availableExpirations, quotes))
+				yield return sk;
 	}
 
 	/// <summary>Resolves the implied volatility to use for delta-band filtering on a specific strike.
@@ -252,6 +256,81 @@ internal static class CandidateEnumerator
 			new ProposalLeg("buy", longCall, 1)
 		};
 		return new CandidateSkeleton(ticker, OpenStructureKind.DoubleDiagonal, legs, TargetExpiry: shortExp);
+	}
+
+	/// <summary>Diagonal-from-verticals: a far-dated LONG vertical (debit, long leg in the LongDelta band —
+	/// the directional anchor) + a near-dated SHORT vertical (credit, short leg in the ShortDelta band,
+	/// further OTM — theta financing), all on one side. Enumerated for both calls (bullish) and puts
+	/// (bearish). Every leg is bounded, so nothing is naked. TargetExpiry is the near (short) expiry — the
+	/// structure's first decision point, where the short vertical settles and the long vertical carries on.</summary>
+	private static IEnumerable<CandidateSkeleton> EnumerateDiagonalVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	{
+		var sCfg = cfg.Structures.DiagonalVertical;
+		// Bound the expiry cross-product: a diagonal uses the nearest short expiry and a small set of long
+		// expiries, not every pair. Without this the candidate count explodes on daily-expiry chains (SPXW)
+		// and the per-minute scoring grinds. Nearest 2 short × nearest 3 long keeps it tractable.
+		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
+		var longExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
+		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
+
+		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var step = cfg.Indicators.StrikeStep;
+		var grid = StrikeGrid(spot, step);
+
+		foreach (var side in new[] { "C", "P" })
+			foreach (var shortExp in shortExps)
+				foreach (var longExp in longExps)
+				{
+					if (longExp <= shortExp) continue;
+					var longYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, longExp);
+					var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortExp);
+
+					// Far long-vertical anchor: the long leg, directional, in the LongDelta band at the far expiry.
+					// Cap to the 2 strikes nearest the band centre (delta-filtered strikes are few, but cap defensively).
+					var longMid = (sCfg.LongDeltaMin + sCfg.LongDeltaMax) / 2m;
+					var longAnchors = grid
+						.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, longYears, OptionMath.RiskFreeRate, ResolveIv(ticker, longExp, k, side, quotes, defaultIv), side))))
+						.Where(x => x.d >= sCfg.LongDeltaMin && x.d <= sCfg.LongDeltaMax)
+						.OrderBy(x => Math.Abs(x.d - longMid)).Take(2).Select(x => x.k).ToList();
+					// Near short-vertical anchor: the short leg, further OTM, in the ShortDelta band at the near expiry.
+					var shortMid = (sCfg.ShortDeltaMin + sCfg.ShortDeltaMax) / 2m;
+					var shortAnchors = grid
+						.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, shortYears, OptionMath.RiskFreeRate, ResolveIv(ticker, shortExp, k, side, quotes, defaultIv), side))))
+						.Where(x => x.d >= sCfg.ShortDeltaMin && x.d <= sCfg.ShortDeltaMax)
+						.OrderBy(x => Math.Abs(x.d - shortMid)).Take(2).Select(x => x.k).ToList();
+
+					foreach (var longStrike in longAnchors)
+						foreach (var shortStrike in shortAnchors)
+						{
+							// Directional consistency: short leg further OTM than the long anchor (calls: higher; puts: lower).
+							if (side == "C" && shortStrike <= longStrike) continue;
+							if (side == "P" && shortStrike >= longStrike) continue;
+
+							foreach (var w in sCfg.WidthSteps.Distinct().OrderBy(x => x))
+							{
+								var width = w * step;
+								var dir = side == "C" ? 1m : -1m;
+								var longWing = longStrike + dir * width;
+								var shortWing = shortStrike + dir * width;
+								if (longWing <= 0m || shortWing <= 0m) continue;
+								yield return BuildDiagonalVertical(ticker, side, shortExp, longExp, shortStrike, shortWing, longStrike, longWing);
+							}
+						}
+				}
+	}
+
+	private static CandidateSkeleton BuildDiagonalVertical(string ticker, string side, DateTime shortExp, DateTime longExp, decimal shortStrike, decimal shortWingStrike, decimal longStrike, decimal longWingStrike)
+	{
+		var legs = new[]
+		{
+			// Far long vertical (debit): buy the anchor, sell the wing further OTM.
+			new ProposalLeg("buy", MatchKeys.OccSymbol(ticker, longExp, longStrike, side), 1),
+			new ProposalLeg("sell", MatchKeys.OccSymbol(ticker, longExp, longWingStrike, side), 1),
+			// Near short vertical (credit): sell the anchor, buy the wing further OTM.
+			new ProposalLeg("sell", MatchKeys.OccSymbol(ticker, shortExp, shortStrike, side), 1),
+			new ProposalLeg("buy", MatchKeys.OccSymbol(ticker, shortExp, shortWingStrike, side), 1)
+		};
+		return new CandidateSkeleton(ticker, OpenStructureKind.DiagonalVertical, legs, TargetExpiry: shortExp);
 	}
 
 	private static IEnumerable<CandidateSkeleton> EnumerateIronButterflies(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)

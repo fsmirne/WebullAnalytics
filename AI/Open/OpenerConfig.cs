@@ -214,6 +214,25 @@ internal sealed class OpenerStructuresConfig
 	[JsonPropertyName("shortVertical")] public OpenerShortVerticalConfig ShortVertical { get; set; } = new();
 	[JsonPropertyName("longCallPut")] public OpenerLongCallPutConfig LongCallPut { get; set; } = new();
 	[JsonPropertyName("longVertical")] public OpenerLongVerticalConfig LongVertical { get; set; } = new();
+	[JsonPropertyName("diagonalVertical")] public OpenerDiagonalVerticalConfig DiagonalVertical { get; set; } = new();
+}
+
+/// <summary>Diagonal-from-verticals: a near-dated SHORT vertical (credit) + a far-dated LONG vertical
+/// (debit) on one side. The long-vertical's long leg sits in <see cref="LongDeltaMin"/>–<see cref="LongDeltaMax"/>
+/// (the directional anchor); the short-vertical's short leg sits in <see cref="ShortDeltaMin"/>–<see cref="ShortDeltaMax"/>
+/// (further OTM, theta financing). Each vertical's width = WidthSteps × strike step. Disabled by default.</summary>
+internal sealed class OpenerDiagonalVerticalConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	[JsonPropertyName("shortDteMin")] public int ShortDteMin { get; set; } = 3;
+	[JsonPropertyName("shortDteMax")] public int ShortDteMax { get; set; } = 10;
+	[JsonPropertyName("longDteMin")] public int LongDteMin { get; set; } = 21;
+	[JsonPropertyName("longDteMax")] public int LongDteMax { get; set; } = 45;
+	[JsonPropertyName("longDeltaMin")] public decimal LongDeltaMin { get; set; } = 0.40m;
+	[JsonPropertyName("longDeltaMax")] public decimal LongDeltaMax { get; set; } = 0.55m;
+	[JsonPropertyName("shortDeltaMin")] public decimal ShortDeltaMin { get; set; } = 0.20m;
+	[JsonPropertyName("shortDeltaMax")] public decimal ShortDeltaMax { get; set; } = 0.35m;
+	[JsonPropertyName("widthSteps")] public List<int> WidthSteps { get; set; } = new() { 2, 4 };
 }
 
 internal sealed class OpenerCalendarLikeConfig

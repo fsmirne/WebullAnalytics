@@ -39,11 +39,12 @@ internal static class RealizedExpectancy
 	}
 
 	/// <summary>Number of independent broker orders required to enter <paramref name="kind"/>.
-	/// Only double calendar and double diagonal need 2 orders on Webull (the broker doesn't combo
-	/// them as a single net-price trade); every other supported structure fills in 1.</summary>
+	/// Double calendar/diagonal and the diagonal-from-verticals need 2 orders on Webull (the broker
+	/// doesn't combo them as a single net-price trade — and the diagonal-vertical is two separate
+	/// verticals by construction); every other supported structure fills in 1.</summary>
 	internal static int OrdersForStructure(OpenStructureKind kind) => kind switch
 	{
-		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal => 2,
+		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.DiagonalVertical => 2,
 		_ => 1,
 	};
 
