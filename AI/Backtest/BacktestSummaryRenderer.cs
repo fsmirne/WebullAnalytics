@@ -112,7 +112,7 @@ internal static class BacktestSummaryRenderer
 				f.Date.ToString("yyyy-MM-dd HH:mm"),
 				Markup.Escape(f.Ticker),
 				f.Kind.ToString(),
-				Markup.Escape(ShortStrategy(f.StrategyKind)),
+				Markup.Escape(f.StrategyKind),
 				Markup.Escape(FormatLegDetail(f.Legs)),
 				f.Qty.ToString(),
 				$"[{cashColor}]{perShareLabel}[/]",
@@ -127,25 +127,6 @@ internal static class BacktestSummaryRenderer
 		AnsiConsole.Write(table);
 		AnsiConsole.WriteLine();
 	}
-
-	/// <summary>Short strategy-kind label for the fill ledger so the table doesn't wrap.</summary>
-	private static string ShortStrategy(string kind) => kind switch
-	{
-		"LongCalendar" => "LCal",
-		"DoubleCalendar" => "DCal",
-		"LongDiagonal" => "LDiag",
-		"DoubleDiagonal" => "DDiag",
-		"IronButterfly" => "IB",
-		"IronCondor" => "IC",
-		"ShortPutVertical" => "SPV",
-		"ShortCallVertical" => "SCV",
-		"LongCall" => "LC",
-		"LongPut" => "LP",
-		"LongCallVertical" => "LCV",
-		"LongPutVertical" => "LPV",
-		"DiagonalVertical" => "DV",
-		_ => kind,
-	};
 
 	/// <summary>Short rule label for the fill ledger: drops the "Rule" suffix and abbreviates the long ones.</summary>
 	private static string ShortRule(string? rule) => rule switch
