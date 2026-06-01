@@ -71,10 +71,14 @@ internal sealed class OpenerAutoExecutor
 			if (p.CashReserveBlocked) continue;
 			if (p.Qty < 1) continue;
 
-			// Broker-truth dedup: if the same leg set is already active (pending or filled today),
-			// skip. This catches same-proposal-across-ticks, cross-process, cross-restart, and the
-			// "limit placed and filled, now we'd otherwise re-fire" case.
-			if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(p.Legs.Select(l => (l.Symbol, l.Action))))
+			// Broker-truth dedup: if the structure is already active (pending or filled today), skip.
+			// This catches same-proposal-across-ticks, cross-process, cross-restart, and the "limit
+			// placed and filled, now we'd otherwise re-fire" case. Split structures (DiagonalVertical /
+			// DoubleCalendar / DoubleDiagonal) place as two combo orders, so they're "already active"
+			// only when BOTH sub-orders are present — a partial (one leg-set placed, the other not) must
+			// fall through so SubmitOpen can finish the structure.
+			if (_config.Submit && _brokerState != null
+				&& StructureOrderSplit.Split(p.StructureKind, p.Legs).All(g => _brokerState.HasPendingMatching(g.Legs.Select(l => (l.Symbol, l.Action)))))
 			{
 				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (broker already has matching order):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty}.");
 				continue;
@@ -104,75 +108,121 @@ internal sealed class OpenerAutoExecutor
 	/// (missing price, submit error) so the caller doesn't count it.</summary>
 	private async Task<SubmitResult> SubmitOpen(OpenProposal p, CancellationToken cancellation)
 	{
-		// Each leg's PricePerShare is already set by CandidateScorer at evaluation time; signed by the
-		// leg's Action ("buy" pays, "sell" collects). Net per-share = sum.
-		decimal netPerShare = 0m;
-		var legSpecs = new List<(string Action, string Symbol, int Qty, decimal Price)>(p.Legs.Count);
-		foreach (var leg in p.Legs)
+		// Never place a partial structure because of a missing leg price — validate the whole set first.
+		var missing = p.Legs.FirstOrDefault(l => !l.PricePerShare.HasValue);
+		if (missing != null)
 		{
-			if (!leg.PricePerShare.HasValue)
-			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute:[/] {Markup.Escape(p.Ticker)} {p.StructureKind} skipped — missing price on leg {Markup.Escape(leg.Symbol)}");
-				return new SubmitResult(SubmitOutcome.NotActed);
-			}
-			var price = leg.PricePerShare.Value;
-			legSpecs.Add((leg.Action, leg.Symbol, leg.Qty, price));
-			netPerShare += string.Equals(leg.Action, "buy", StringComparison.OrdinalIgnoreCase) ? -price : price;
+			AnsiConsole.MarkupLine($"[yellow]opener auto-execute:[/] {Markup.Escape(p.Ticker)} {p.StructureKind} skipped — missing price on leg {Markup.Escape(missing.Symbol)}");
+			return new SubmitResult(SubmitOutcome.NotActed);
 		}
 
-		// Positive netPerShare = net credit (we're receiving) → SELL combo at the absolute price.
-		// Negative netPerShare = net debit (we're paying) → BUY combo at the absolute price.
-		// Round to the exchange-required tick (single-leg vs SPX-complex vs penny-complex) so Webull
-		// doesn't reject with OAUTH_OPENAPI_OPTION_PRICE_STEP_GTE. Dry-run output also shows the
-		// rounded value so the printed `wa trade place` hint matches what live submission would send.
-		var side = netPerShare >= 0m ? "SELL" : "BUY";
-		var limitAbs = OptionPriceRounding.RoundToTick(Math.Abs(netPerShare), p.Legs.Count, p.Ticker);
-
-		var argLegs = string.Join(",", legSpecs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-		var summary = $"open {p.StructureKind} {p.Ticker} x{p.Qty} @ ${limitAbs:F2} ({side.ToLowerInvariant()})";
+		// Webull rejects a single 4-leg cross-expiry ticket, so DiagonalVertical / DoubleCalendar /
+		// DoubleDiagonal go out as two combo orders (see StructureOrderSplit). They count as ONE trade
+		// against the daily cap: the cap is gated once before this call, and BOTH orders are placed here
+		// within it — so the cap can never let the first fill and then strand the second.
+		var groups = StructureOrderSplit.Split(p.StructureKind, p.Legs);
 
 		if (!_config.Submit || _account == null)
 		{
 			var reason = _account == null ? "no account configured" : "submit=false";
-			AnsiConsole.MarkupLine($"[cyan]opener auto-execute (dry-run, {Markup.Escape(reason)}):[/] {Markup.Escape(summary)}");
-			AnsiConsole.MarkupLine($"  [grey50]wa trade place --trade \"{Markup.Escape(argLegs)}\" --side {side.ToLowerInvariant()} --limit {limitAbs:F2} --submit[/]");
+			var orderWord = groups.Count == 1 ? "1 order" : $"{groups.Count} orders";
+			AnsiConsole.MarkupLine($"[cyan]opener auto-execute (dry-run, {Markup.Escape(reason)}):[/] open {p.StructureKind} {Markup.Escape(p.Ticker)} x{p.Qty} ({orderWord})");
+			foreach (var g in groups)
+			{
+				var spec = BuildOrderSpec(g.Legs, p.Ticker);
+				var suffix = string.IsNullOrEmpty(g.Label) ? "" : $"  # {g.Label}";
+				AnsiConsole.MarkupLine($"  [grey50]wa trade place --trade \"{Markup.Escape(spec.ArgLegs)}\" --side {spec.Side.ToLowerInvariant()} --limit {spec.LimitAbs:F2} --submit{suffix}[/]");
+			}
 			return new SubmitResult(SubmitOutcome.DryRun);
 		}
 
-		var legs = TradeLegParser.Parse(argLegs);
-		string strategy;
-		try { strategy = StrategyClassifier.Classify(legs) ?? p.StructureKind.ToString(); }
-		catch (Exception) { strategy = p.StructureKind.ToString(); }
+		// Live: place each group. Per-group broker dedup keeps this idempotent — if a prior tick already
+		// placed one leg-set (e.g. the process died between the two orders), we place only what's missing
+		// rather than duplicating. A failure after the first order leaves a partial structure: warn loudly.
+		string? firstOrderId = null, firstClientId = null;
+		var placedCount = 0;
+		for (var i = 0; i < groups.Count; i++)
+		{
+			var g = groups[i];
+			if (_brokerState != null && _brokerState.HasPendingMatching(g.Legs.Select(l => (l.Symbol, l.Action))))
+			{
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute:[/] {Markup.Escape(p.Ticker)} {p.StructureKind}{LabelSuffix(g.Label)} already active at broker — skipping this leg-set.");
+				continue;
+			}
 
-		var body = OrderRequestBuilder.Build(new OrderRequestBuilder.BuildParams(
-			AccountId: _account.AccountId,
-			Legs: legs,
-			Strategy: strategy,
-			Side: side,
-			OrderType: "LIMIT",
-			LimitPrice: limitAbs,
-			TimeInForce: _config.TimeInForce.ToUpperInvariant()));
+			var spec = BuildOrderSpec(g.Legs, p.Ticker);
+			var legs = TradeLegParser.Parse(spec.ArgLegs);
+			// Per-ORDER strategy only — NEVER the composite (DiagonalVertical/DoubleCalendar/DoubleDiagonal),
+			// which the Webull API doesn't accept. The split yields 2-leg verticals/calendars/diagonals that
+			// classify to Webull-known names. If a group can't be classified, skip the whole structure rather
+			// than fall back to the composite kind (which OrderRequestBuilder would reject) — never send the API
+			// a strategy it doesn't understand.
+			string? strategy;
+			try { strategy = StrategyClassifier.Classify(legs); }
+			catch (Exception) { strategy = null; }
+			if (strategy == null)
+			{
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute:[/] {Markup.Escape(p.Ticker)} {p.StructureKind}{LabelSuffix(g.Label)} skipped — could not classify the leg-set to a Webull strategy.");
+				if (placedCount > 0)
+					AnsiConsole.MarkupLine($"[red bold]WARNING:[/] {Markup.Escape(p.Ticker)} {p.StructureKind} is PARTIALLY open — {placedCount} of {groups.Count} order(s) placed. Complete or cancel the open leg-set manually.");
+				break;
+			}
 
-		try
-		{
-			using var client = new WebullOpenApiClient(_account);
-			var placed = await client.PlaceOrderAsync(body);
-			AnsiConsole.MarkupLine($"[green]opener auto-execute placed:[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
-			return new SubmitResult(SubmitOutcome.Submitted, placed.OrderId, placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId);
+			var summary = $"open {p.StructureKind}{LabelSuffix(g.Label)} {p.Ticker} x{p.Qty} @ ${spec.LimitAbs:F2} ({spec.Side.ToLowerInvariant()})";
+			OrderRequestBody? body = null;
+			try
+			{
+				// Build inside the try: an unmapped strategy throws InvalidOperationException, which must
+				// degrade to a skip — not crash the watch loop.
+				body = OrderRequestBuilder.Build(new OrderRequestBuilder.BuildParams(
+					AccountId: _account.AccountId,
+					Legs: legs,
+					Strategy: strategy,
+					Side: spec.Side,
+					OrderType: "LIMIT",
+					LimitPrice: spec.LimitAbs,
+					TimeInForce: _config.TimeInForce.ToUpperInvariant()));
+
+				using var client = new WebullOpenApiClient(_account);
+				var placed = await client.PlaceOrderAsync(body);
+				AnsiConsole.MarkupLine($"[green]opener auto-execute placed:[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
+				placedCount++;
+				firstOrderId ??= placed.OrderId;
+				firstClientId ??= placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
+			}
+			catch (Exception ex) when (ex is WebullOpenApiException or HttpRequestException or InvalidOperationException)
+			{
+				var tag = ex is WebullOpenApiException w ? $"[[{Markup.Escape(w.ErrorCode ?? "?")}]]" : ex is HttpRequestException ? "network error" : "order-build error";
+				AnsiConsole.MarkupLine($"[red]opener auto-execute failed {tag}:[/] {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
+				if (body != null) PrintFailureDiagnostics(body, ex);
+				if (placedCount > 0)
+					AnsiConsole.MarkupLine($"[red bold]WARNING:[/] {Markup.Escape(p.Ticker)} {p.StructureKind} is PARTIALLY open — {placedCount} of {groups.Count} order(s) placed; the rest failed. Complete or cancel the open leg-set manually.");
+				break;
+			}
 		}
-		catch (WebullOpenApiException ex)
-		{
-			AnsiConsole.MarkupLine($"[red]opener auto-execute failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]:[/] {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
-			PrintFailureDiagnostics(body, ex);
-			return new SubmitResult(SubmitOutcome.NotActed);
-		}
-		catch (HttpRequestException ex)
-		{
-			AnsiConsole.MarkupLine($"[red]opener auto-execute network error:[/] {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
-			PrintFailureDiagnostics(body, ex);
-			return new SubmitResult(SubmitOutcome.NotActed);
-		}
+
+		return placedCount > 0
+			? new SubmitResult(SubmitOutcome.Submitted, firstOrderId, firstClientId)
+			: new SubmitResult(SubmitOutcome.NotActed);
 	}
+
+	/// <summary>Per-order limit/side/leg-arg from the leg set. PricePerShare is signed by action ("buy"
+	/// pays, "sell" collects); positive net = credit → SELL the combo at the absolute price, negative =
+	/// debit → BUY. Rounds to the exchange tick for this order's leg count (single-leg vs complex) so
+	/// Webull doesn't reject with OAUTH_OPENAPI_OPTION_PRICE_STEP_GTE. Every leg's PricePerShare is
+	/// guaranteed non-null by the caller's up-front validation.</summary>
+	private static (string Side, decimal LimitAbs, string ArgLegs) BuildOrderSpec(IReadOnlyList<ProposalLeg> legs, string ticker)
+	{
+		decimal netPerShare = 0m;
+		foreach (var leg in legs)
+			netPerShare += string.Equals(leg.Action, "buy", StringComparison.OrdinalIgnoreCase) ? -leg.PricePerShare!.Value : leg.PricePerShare!.Value;
+		var side = netPerShare >= 0m ? "SELL" : "BUY";
+		var limitAbs = OptionPriceRounding.RoundToTick(Math.Abs(netPerShare), legs.Count, ticker);
+		var argLegs = string.Join(",", legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+		return (side, limitAbs, argLegs);
+	}
+
+	private static string LabelSuffix(string label) => string.IsNullOrEmpty(label) ? "" : $" ({label})";
 
 	private static readonly JsonSerializerOptions DiagnosticJsonOptions = new() { WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
