@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI;
@@ -34,40 +35,26 @@ internal sealed class StrikeLadder
 	/// captured chain never recorded.</summary>
 	public bool ChainPresent { get; }
 
-	/// <summary>Builds the ladder for one (ticker, expiry, callPut) from the chain quote keys (OCC symbols).
-	/// A strike is "listed" if the chain returned a contract for it — existence, not live bid/ask, because
-	/// the opener's Phase-B pass fetches bid/ask for the legs it actually selects afterward (a far-DTE strike
-	/// often comes back symbol-only from the chain probe and only gets priced once chosen).</summary>
+	private static readonly StrikeLadder EmptyChainPresent = new(Array.Empty<decimal>(), chainPresent: true);
+
+	// One parsed chain index per quotes object (i.e. per evaluation tick): the O(chain) parse happens ONCE
+	// and is shared across the dozens of (expiry, side) ladders the opener builds per evaluation. Re-parsing
+	// thousands of quote keys on every Build call was the dominant backtest cost once the captured chain grew
+	// large. Auto-evicted when the quotes object is collected (next tick brings a fresh dictionary).
+	private static readonly ConditionalWeakTable<object, ChainIndex> _indexCache = new();
+
+	/// <summary>Builds the ladder for one (ticker, expiry, callPut) from the chain. The preference is strikes
+	/// that QUOTE (bid & ask) → strikes with open interest / volume; SPX-family chains list illiquid strikes
+	/// (e.g. XSP $1 strikes) that never quote or trade, and picking those is the live/backtest failure. With
+	/// neither signal the ladder is empty-but-chain-present, so the enumerator emits nothing rather than
+	/// inventing a uniform grid of phantom strikes. <paramref name="callPut"/> = null builds a combined
+	/// both-sides ladder (iron-condor body width). The chain is parsed once per quotes object; this is an
+	/// O(1) lookup thereafter.</summary>
 	public static StrikeLadder Build(string ticker, DateTime expiry, string? callPut, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		if (quotes == null || quotes.Count == 0) return Empty;
-		var quoted = new SortedSet<decimal>();
-		var tradeable = new SortedSet<decimal>();
-		var listed = new SortedSet<decimal>();
-		foreach (var kv in quotes)
-		{
-			var p = ParsingHelpers.ParseOptionSymbol(kv.Key);
-			if (p == null) continue;
-			if (!string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
-			if (p.ExpiryDate.Date != expiry.Date) continue;
-			// callPut == null builds a combined both-sides ladder (used to count strikes across spot, e.g.
-			// the iron-condor body width); otherwise restrict to the given side.
-			if (callPut != null && !string.Equals(p.CallPut, callPut, StringComparison.OrdinalIgnoreCase)) continue;
-			var q = kv.Value;
-			listed.Add(p.Strike);
-			if (q.Bid is > 0m && q.Ask is > 0m) quoted.Add(p.Strike);
-			if (q.OpenInterest is > 0 || q.Volume is > 0) tradeable.Add(p.Strike);
-		}
-		// Preference: strikes that QUOTE right now (bid & ask) → strikes with open interest / volume. SPX-
-		// family chains list illiquid near-the-money strikes (e.g. XSP $1 strikes) that never carry a bid/ask
-		// AND never trade; picking those is the live failure — the leg can't be priced and the candidate
-		// drops. When the chain reveals NEITHER a quote NOR open interest for an expiry (XSP future expiries
-		// come back fully symbol-only — no bid/ask, no OI), there is no liquidity signal to build a ladder
-		// from. The ladder is still chain-present (so the enumerator emits nothing for this expiry rather than
-		// inventing a uniform grid of phantom strikes) — we do NOT fall back to bare existence, which would
-		// reselect the dead $1 strikes and reproduce the live failure (and the backtest's phantom fills).
-		var chosen = quoted.Count > 0 ? quoted : tradeable;
-		return new StrikeLadder(chosen.ToArray(), chainPresent: true);
+		var index = _indexCache.GetValue(quotes, static q => ChainIndex.Build((IReadOnlyDictionary<string, OptionContractQuote>)q));
+		return index.GetLadder(ticker, expiry, callPut);
 	}
 
 	/// <summary>Listed strikes strictly below <paramref name="spot"/>, nearest-first, up to <paramref name="count"/>.</summary>
@@ -122,5 +109,82 @@ internal sealed class StrikeLadder
 			if (d < bestDist) { bestDist = d; idx = i; }
 		}
 		return idx;
+	}
+
+	/// <summary>The whole chain parsed once into per-(root, expiry, side) sorted strike arrays — the quoted
+	/// set (bid&ask) and the tradeable set (open interest/volume). One instance per quotes object; ladder
+	/// lookups are an O(1) dictionary hit plus a shared-array wrap.</summary>
+	private sealed class ChainIndex
+	{
+		private readonly Dictionary<(string Root, DateTime Expiry, string Side), decimal[]> _quoted;
+		private readonly Dictionary<(string Root, DateTime Expiry, string Side), decimal[]> _tradeable;
+
+		private ChainIndex(Dictionary<(string, DateTime, string), decimal[]> quoted, Dictionary<(string, DateTime, string), decimal[]> tradeable)
+		{
+			_quoted = quoted;
+			_tradeable = tradeable;
+		}
+
+		public static ChainIndex Build(IReadOnlyDictionary<string, OptionContractQuote> quotes)
+		{
+			var quoted = new Dictionary<(string, DateTime, string), SortedSet<decimal>>();
+			var tradeable = new Dictionary<(string, DateTime, string), SortedSet<decimal>>();
+			foreach (var kv in quotes)
+			{
+				var p = ParsingHelpers.ParseOptionSymbol(kv.Key);
+				if (p?.CallPut == null) continue;
+				var key = (p.Root.ToUpperInvariant(), p.ExpiryDate.Date, p.CallPut.ToUpperInvariant());
+				var q = kv.Value;
+				if (q.Bid is > 0m && q.Ask is > 0m) Add(quoted, key, p.Strike);
+				if (q.OpenInterest is > 0 || q.Volume is > 0) Add(tradeable, key, p.Strike);
+			}
+			return new ChainIndex(Freeze(quoted), Freeze(tradeable));
+		}
+
+		private static void Add(Dictionary<(string, DateTime, string), SortedSet<decimal>> map, (string, DateTime, string) key, decimal strike)
+		{
+			if (!map.TryGetValue(key, out var set)) map[key] = set = new SortedSet<decimal>();
+			set.Add(strike);
+		}
+
+		private static Dictionary<(string, DateTime, string), decimal[]> Freeze(Dictionary<(string, DateTime, string), SortedSet<decimal>> map)
+		{
+			var result = new Dictionary<(string, DateTime, string), decimal[]>(map.Count);
+			foreach (var (k, v) in map) result[k] = v.ToArray();
+			return result;
+		}
+
+		public StrikeLadder GetLadder(string ticker, DateTime expiry, string? callPut)
+		{
+			var root = ticker.ToUpperInvariant();
+			var exp = expiry.Date;
+			decimal[] chosen;
+			if (callPut != null)
+			{
+				var side = callPut.ToUpperInvariant();
+				chosen = Lookup(_quoted, root, exp, side);
+				if (chosen.Length == 0) chosen = Lookup(_tradeable, root, exp, side);
+			}
+			else
+			{
+				// Combined both-sides ladder (iron-condor body width): union of C+P quoted, else of C+P
+				// tradeable — mirrors the per-side quoted→tradeable preference across both rights.
+				chosen = Union(Lookup(_quoted, root, exp, "C"), Lookup(_quoted, root, exp, "P"));
+				if (chosen.Length == 0) chosen = Union(Lookup(_tradeable, root, exp, "C"), Lookup(_tradeable, root, exp, "P"));
+			}
+			return chosen.Length == 0 ? EmptyChainPresent : new StrikeLadder(chosen, chainPresent: true);
+		}
+
+		private static decimal[] Lookup(Dictionary<(string, DateTime, string), decimal[]> map, string root, DateTime exp, string side)
+			=> map.TryGetValue((root, exp, side), out var arr) ? arr : Array.Empty<decimal>();
+
+		private static decimal[] Union(decimal[] a, decimal[] b)
+		{
+			if (a.Length == 0) return b;
+			if (b.Length == 0) return a;
+			var set = new SortedSet<decimal>(a);
+			foreach (var x in b) set.Add(x);
+			return set.ToArray();
+		}
 	}
 }
