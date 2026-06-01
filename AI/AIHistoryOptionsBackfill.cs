@@ -212,6 +212,12 @@ internal static class AIHistoryOptionsBackfill
 		var skippedComplete = 0;
 		var hasMassiveKey = !string.IsNullOrWhiteSpace(apiConfig!.MassiveApiKey);
 		var todayEt = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, NyTz).Date;
+		// Most recent settled (closed) trading day. An on-disk contract is "complete" when its last bar
+		// reaches its completion target — expiry for an already-expired contract, this last settled day for
+		// a still-live one. Anything short of that was left incomplete (interrupted capture, or a live
+		// contract captured mid-life) and gets re-pulled; everything complete is skipped.
+		var lastSettledEt = todayEt.AddDays(-1);
+		while (!MarketCalendar.IsOpen(lastSettledEt)) lastSettledEt = lastSettledEt.AddDays(-1);
 		foreach (var (occ, id, parsed) in matches)
 		{
 			var csvPath = BuildCsvPath(optionsRoot, parsed, occ);
@@ -219,12 +225,11 @@ internal static class AIHistoryOptionsBackfill
 			var mergeExisting = !force && csvExists;
 			if (id.HasValue)
 			{
-				// Once a contract is on disk we never need to re-pull it for backfill: every past trading
-				// day's minute history is final, and a backtest only needs bars through its window end.
-				// The sole exception is TODAY's expiry, whose intraday is still forming. Future-expiry
-				// on-disk contracts are skipped too — their already-captured bars are what the backtest
-				// uses; new bars print on future trading days outside any historical window. --force overrides.
-				if (!force && csvExists && parsed.ExpiryDate.Date != todayEt)
+				// Skip an on-disk contract only when its capture is COMPLETE — last bar at/after its target
+				// (expiry if expired, else the last settled trading day). Today's expiry always re-pulls
+				// (intraday still forming); an incomplete on-disk contract (interrupted capture, or a live
+				// contract captured before later sessions) re-pulls to fill the gap. --force overrides.
+				if (!force && csvExists && parsed.ExpiryDate.Date != todayEt && IsCaptureComplete(csvPath, parsed.ExpiryDate.Date, todayEt, lastSettledEt))
 				{
 					skippedComplete++;
 					continue;
@@ -233,10 +238,9 @@ internal static class AIHistoryOptionsBackfill
 			}
 			else if (hasMassiveKey)
 			{
-				// Same rule as the Webull route: if it's on disk, skip — except today's expiry (still
-				// forming intraday). Past and future on-disk contracts are both final for backtest
-				// purposes, so only genuinely-new (not-yet-on-disk) or today's contracts hit the endpoint.
-				if (!force && csvExists && parsed.ExpiryDate.Date != todayEt)
+				// Same completeness rule as the Webull route: skip only when the on-disk capture reaches its
+				// target; re-pull incomplete or today's-expiry contracts.
+				if (!force && csvExists && parsed.ExpiryDate.Date != todayEt && IsCaptureComplete(csvPath, parsed.ExpiryDate.Date, todayEt, lastSettledEt))
 				{
 					skippedComplete++;
 					continue;
@@ -367,6 +371,44 @@ internal static class AIHistoryOptionsBackfill
 	/// <summary>Reads a previously-written option CSV. Lines that don't parse cleanly are dropped
 	/// silently — same tolerance as <see cref="WebullChartsClient.ParseOptionBarRow"/>. Returns an
 	/// empty list when the file doesn't exist; the caller can then treat the merge as a fresh write.</summary>
+	/// <summary>True when the on-disk capture reaches its completion target: last bar's ET date at/after the
+	/// contract's expiry (expired) or the last settled trading day (still-live). False if unreadable, empty,
+	/// or short of target — the caller then re-pulls. Today's-expiry handling is the caller's.</summary>
+	private static bool IsCaptureComplete(string csvPath, DateTime expiryDate, DateTime todayEt, DateTime lastSettledEt)
+	{
+		var target = expiryDate < todayEt ? expiryDate : lastSettledEt;
+		var lastBar = LastBarDateEt(csvPath);
+		return lastBar.HasValue && lastBar.Value >= target;
+	}
+
+	/// <summary>Last bar's ET date, read from the file tail (bars are timestamp-ascending, so the final data
+	/// line is the latest). Null when empty or unparseable.</summary>
+	private static DateTime? LastBarDateEt(string csvPath)
+	{
+		try
+		{
+			using var fs = new FileStream(csvPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+			if (fs.Length == 0) return null;
+			var toRead = (int)Math.Min(512L, fs.Length);
+			fs.Seek(-toRead, SeekOrigin.End);
+			var buf = new byte[toRead];
+			var read = fs.Read(buf, 0, toRead);
+			var text = Encoding.ASCII.GetString(buf, 0, read);
+			foreach (var raw in text.Split('\n').Reverse())
+			{
+				var line = raw.Trim();
+				if (line.Length == 0) continue;
+				var comma = line.IndexOf(',');
+				var ts = comma > 0 ? line[..comma] : line;
+				if (ts == "timestamp_utc") return null; // only the header sat in the tail
+				if (DateTimeOffset.TryParse(ts, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var dto))
+					return TimeZoneInfo.ConvertTime(dto, NyTz).Date;
+			}
+			return null;
+		}
+		catch { return null; }
+	}
+
 	internal static List<OptionMinuteBar> ReadOptionCsv(string path)
 	{
 		var bars = new List<OptionMinuteBar>();
