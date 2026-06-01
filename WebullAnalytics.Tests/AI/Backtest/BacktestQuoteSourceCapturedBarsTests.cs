@@ -2,6 +2,7 @@ using WebullAnalytics;
 using WebullAnalytics.AI;
 using WebullAnalytics.AI.Backtest;
 using WebullAnalytics.Api;
+using WebullAnalytics.Pricing;
 using Xunit;
 
 namespace WebullAnalytics.Tests.AI.Backtest;
@@ -177,6 +178,68 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 		Assert.Equal(50m, q!.LastPrice);   // captured midpoint (open=close=50)
 		Assert.NotNull(q.ImpliedVolatility);
 		Assert.InRange(q.ImpliedVolatility!.Value, 0.05m, 1.5m);
+	}
+
+	[Fact]
+	public async Task GetQuotesAsync_TargetExpiryEmpty_BracketingNeighbors_InterpolatesTotalVariance()
+	{
+		// Target expiry (06-05, 10 DTE) has NO captured bar → same-expiry surface is null. Two neighbor
+		// expiries bracket it: 06-01 (6 DTE) and 06-09 (14 DTE), each with one captured ATM strike at the
+		// minute. Cross-expiry pricing should back-solve each neighbor's IV and interpolate in total-variance
+		// (w = σ²·T) to the target's TTE — NOT fall through to the VIX1D (0.25) parametric anchor.
+		const decimal spot = 7400m, strike = 7400m;
+		const double r = 0.036;
+		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
+		var asOfUtc = ToUtcOpen(asOf);
+
+		SeedCsv("SPXW260601C07400000", new List<OptionMinuteBar> { new(asOfUtc, 70m, 70m, 70m, 70m, 100, null) });  // 6 DTE
+		SeedCsv("SPXW260609C07400000", new List<OptionMinuteBar> { new(asOfUtc, 110m, 110m, 110m, 110m, 100, null) }); // 14 DTE
+		var target = "SPXW260605C07400000"; // 10 DTE, not seeded
+
+		var (bars, iv) = BuildDailyCaches(spxwOpen: spot, vix1d: 25m, vix9d: 22m, vix: 20m, asOf: asOf);
+		var quotes = new BacktestQuoteSource(bars, iv, riskFreeRate: r, optionBars: new HistoricalOptionBarCache(_tmpDir));
+
+		var snap = await quotes.GetQuotesAsync(asOf, new HashSet<string>(new[] { target }),
+			new HashSet<string>(new[] { "SPXW" }, StringComparer.OrdinalIgnoreCase), CancellationToken.None);
+
+		Assert.True(snap.Options.TryGetValue(target, out var q));
+		Assert.NotNull(q!.ImpliedVolatility);
+
+		// Independently reconstruct the expected interpolated IV: back-solve each neighbor's IV at its own
+		// TTE, take total variance, interpolate linearly in T to the target TTE, back out σ.
+		double T1 = 6.0 / 365.0, T = 10.0 / 365.0, T2 = 14.0 / 365.0;
+		var iv1 = (double)OptionMath.ImpliedVol(spot, strike, T1, r, 70m, "C");
+		var iv2 = (double)OptionMath.ImpliedVol(spot, strike, T2, r, 110m, "C");
+		double w1 = iv1 * iv1 * T1, w2 = iv2 * iv2 * T2;
+		var expected = Math.Sqrt((w1 + (w2 - w1) * (T - T1) / (T2 - T1)) / T);
+
+		Assert.Equal(expected, (double)q.ImpliedVolatility!.Value, 3);          // matches the total-variance interp
+		Assert.False(System.Math.Abs((double)q.ImpliedVolatility!.Value - 0.25) < 1e-6); // NOT the VIX1D parametric anchor
+	}
+
+	[Fact]
+	public async Task GetQuotesAsync_TargetExpiryEmpty_OneSidedNeighbor_ExtrapolatesFlat()
+	{
+		// Only a single neighbor expiry (06-01, below the 06-05 target) has a captured strike. With no anchor
+		// on the far side, cross-expiry flat-extrapolates that neighbor's IV rather than interpolating.
+		const decimal spot = 7400m, strike = 7400m;
+		const double r = 0.036;
+		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
+		var asOfUtc = ToUtcOpen(asOf);
+
+		SeedCsv("SPXW260601C07400000", new List<OptionMinuteBar> { new(asOfUtc, 70m, 70m, 70m, 70m, 100, null) }); // 6 DTE only
+		var target = "SPXW260605C07400000"; // 10 DTE, not seeded; nothing above it within window
+
+		var (bars, iv) = BuildDailyCaches(spxwOpen: spot, vix1d: 25m, vix9d: 22m, vix: 20m, asOf: asOf);
+		var quotes = new BacktestQuoteSource(bars, iv, riskFreeRate: r, optionBars: new HistoricalOptionBarCache(_tmpDir));
+
+		var snap = await quotes.GetQuotesAsync(asOf, new HashSet<string>(new[] { target }),
+			new HashSet<string>(new[] { "SPXW" }, StringComparer.OrdinalIgnoreCase), CancellationToken.None);
+
+		Assert.True(snap.Options.TryGetValue(target, out var q));
+		Assert.NotNull(q!.ImpliedVolatility);
+		var iv1 = (double)OptionMath.ImpliedVol(spot, strike, 6.0 / 365.0, r, 70m, "C");
+		Assert.Equal(iv1, (double)q.ImpliedVolatility!.Value, 3); // flat-extrapolated from the single neighbor
 	}
 
 	private string SeedCsv(string occ, List<OptionMinuteBar> bars)

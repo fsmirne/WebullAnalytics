@@ -1191,8 +1191,8 @@ internal sealed class BacktestRunner
 	private PricingProvenance ComputeProvenance()
 	{
 		int zCap = 0, zTot = 0, mCap = 0, mTot = 0;
-		int mSurf = 0, mVix = 0, mIntr = 0; // synthetic >0DTE breakdown by pricing branch
-		int mVixBracketed = 0, mVixOneSided = 0; // of the VIX-fallback legs: neighbor-expiry anchor on both sides / one side
+		int mSurf = 0, mCross = 0, mVix = 0, mIntr = 0; // synthetic >0DTE breakdown by pricing branch
+		int mVixBracketed = 0, mVixOneSided = 0; // of the (remaining) VIX-fallback legs: neighbor-expiry anchor on both sides / one side
 		foreach (var fill in _book.Fills)
 		{
 			if (fill.Kind == BacktestFillKind.Expire) continue;
@@ -1215,6 +1215,7 @@ internal sealed class BacktestRunner
 						switch (_quotes.GetSyntheticSource(leg.Symbol, fill.Date))
 						{
 							case SyntheticPricingSource.SurfaceIv: mSurf++; break;
+							case SyntheticPricingSource.CrossExpiry: mCross++; break;
 							case SyntheticPricingSource.VixSmile:
 								mVix++;
 								// Only the VIX-fallback legs are candidates for cross-expiry rescue (surface-IV
@@ -1232,7 +1233,7 @@ internal sealed class BacktestRunner
 				}
 			}
 		}
-		return new PricingProvenance(zCap, zTot, mCap, mTot, mSurf, mVix, mIntr, mVixBracketed, mVixOneSided);
+		return new PricingProvenance(zCap, zTot, mCap, mTot, mSurf, mCross, mVix, mIntr, mVixBracketed, mVixOneSided);
 	}
 
 	/// <summary>Per-trade cleanliness split: a finalized lineage is "clean" only if EVERY market-priced fill
@@ -1426,7 +1427,7 @@ internal sealed class BacktestRunner
 // total-variance interpolation) vs only ONE side (extrapolation across the gap, far less reliable). The
 // remainder (MultiDteVixSmile - bracketed - oneSided) is the irreducible floor: minutes where the whole
 // local term structure was untraded, which no interpolation scheme can recover.
-internal readonly record struct PricingProvenance(int ZeroDteCaptured, int ZeroDteTotal, int MultiDteCaptured, int MultiDteTotal, int MultiDteSurfaceIv, int MultiDteVixSmile, int MultiDteIntrinsic, int MultiDteVixBracketed, int MultiDteVixOneSided)
+internal readonly record struct PricingProvenance(int ZeroDteCaptured, int ZeroDteTotal, int MultiDteCaptured, int MultiDteTotal, int MultiDteSurfaceIv, int MultiDteCrossExpiry, int MultiDteVixSmile, int MultiDteIntrinsic, int MultiDteVixBracketed, int MultiDteVixOneSided)
 {
 	public double ZeroDteCapturedPct => ZeroDteTotal == 0 ? 1.0 : (double)ZeroDteCaptured / ZeroDteTotal;
 	public double MultiDteCapturedPct => MultiDteTotal == 0 ? 1.0 : (double)MultiDteCaptured / MultiDteTotal;

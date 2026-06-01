@@ -293,17 +293,18 @@ internal static class BacktestSummaryRenderer
 			var synth = prov.MultiDteSynthetic;
 			if (synth > 0)
 				table.AddRow("  ↳ synthetic >0DTE source",
-					$"[dim]surface-IV {prov.MultiDteSurfaceIv} ({100.0 * prov.MultiDteSurfaceIv / synth:F0}%), VIX-smile {prov.MultiDteVixSmile} ({100.0 * prov.MultiDteVixSmile / synth:F0}%), intrinsic {prov.MultiDteIntrinsic} ({100.0 * prov.MultiDteIntrinsic / synth:F0}%)[/]");
+					$"[dim]surface-IV {prov.MultiDteSurfaceIv} ({100.0 * prov.MultiDteSurfaceIv / synth:F0}%), cross-expiry {prov.MultiDteCrossExpiry} ({100.0 * prov.MultiDteCrossExpiry / synth:F0}%), VIX-smile {prov.MultiDteVixSmile} ({100.0 * prov.MultiDteVixSmile / synth:F0}%), intrinsic {prov.MultiDteIntrinsic} ({100.0 * prov.MultiDteIntrinsic / synth:F0}%)[/]");
 
-			// Cross-expiry recoverability: of the VIX-smile (parametric-fallback) legs, how many cross-expiry
-			// IV interpolation could rescue — split into bracketed (anchors both sides → real interpolation)
-			// vs one-sided (extrapolation across the gap). The remainder is the irreducible floor (whole
-			// local term structure untraded that minute). Bracketed is the honest target for the build.
+			// Residual VIX-smile diagnostic: cross-expiry interpolation already rescued every fallback leg with
+			// a usable neighbor-expiry surface, so the legs STILL on the parametric fallback are those where a
+			// neighbor expiry existed (bracketed/one-sided) but its strikes weren't usable for a back-solved IV,
+			// or none existed (irreducible). A non-trivial bracketed/one-sided count here flags neighbor surfaces
+			// that exist but are too thin to anchor — the gap between "anchor exists" and "anchor usable".
 			if (prov.MultiDteVixSmile > 0)
 			{
 				var v = prov.MultiDteVixSmile;
 				var floorN = v - prov.MultiDteVixBracketed - prov.MultiDteVixOneSided;
-				table.AddRow("  ↳ cross-expiry recoverable",
+				table.AddRow("  ↳ residual VIX-smile anchors",
 					$"[dim]bracketed {prov.MultiDteVixBracketed} ({100.0 * prov.MultiDteVixBracketed / v:F0}%), one-sided {prov.MultiDteVixOneSided} ({100.0 * prov.MultiDteVixOneSided / v:F0}%), irreducible {floorN} ({100.0 * floorN / v:F0}%)[/]");
 			}
 		}

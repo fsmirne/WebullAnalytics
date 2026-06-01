@@ -9,7 +9,7 @@ namespace WebullAnalytics.AI.Backtest;
 /// smile of captured neighbors (<see cref="SurfaceIv"/>) or fell through to the parametric fallback
 /// (<see cref="VixSmile"/>) / raw intrinsic (<see cref="Intrinsic"/>). The split decides whether building
 /// cross-expiry interpolation is worth it: lots of VixSmile → neighbors are missing → worth it.</summary>
-internal enum SyntheticPricingSource { SurfaceIv, VixSmile, Intrinsic }
+internal enum SyntheticPricingSource { SurfaceIv, CrossExpiry, VixSmile, Intrinsic }
 
 /// <summary>Cross-expiry anchor available to a VIX-fallback leg: <see cref="Bracketed"/> = captured
 /// neighbor expiries on both sides (genuine total-variance interpolation), <see cref="OneSided"/> = only
@@ -86,6 +86,52 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			return iv0 + w * (iv1 - iv0);
 		}
 		return ivByStrike[^1].Iv;
+	}
+
+	/// <summary>IV for <paramref name="targetStrike"/> when the leg's OWN expiry has no captured strikes at
+	/// the minute, derived from NEARBY captured expiries (same root+right, within ±<see cref="NeighborExpiryDayGap"/>
+	/// days). For each neighbor expiry, take its own smile's IV at the target strike (via <see cref="BuildSurfaceIv"/>
+	/// at that expiry's TTE), then interpolate across expiry in TOTAL-VARIANCE space (w = σ²·T, linear in T) —
+	/// the standard term-structure interpolation that keeps the forward variance non-negative and matches how
+	/// the vol surface actually evolves with maturity. With anchors on both sides this is true interpolation;
+	/// with only one side it flat-extrapolates that neighbor's IV across the gap (less reliable, but still real
+	/// same-day vol rather than the ~10-points-too-low VIX1D parametric guess). Returns null when no neighbor
+	/// expiry yields a usable back-solved IV at the target strike — the caller then falls through to the
+	/// VIX-anchored synthetic. Only meaningful for >0DTE legs (0DTE has its own regime); the caller gates on that.</summary>
+	private decimal? BuildCrossExpiryIv(string root, DateTime targetExpiry, string callPut, decimal targetStrike, decimal spot, double targetTimeYears, DateTime asOf, DateTimeOffset asOfUtc)
+	{
+		if (_optionBars == null || targetTimeYears <= 0) return null;
+
+		// Collect every neighbor expiry that yields a usable IV at the target strike, tagged by signed
+		// calendar gap (negative = earlier) and its own time-to-expiry.
+		var below = new List<(int Gap, double T, decimal Iv)>();
+		var above = new List<(int Gap, double T, decimal Iv)>();
+		foreach (var exp in _optionBars.NeighborExpiriesWithin(root, targetExpiry, NeighborExpiryDayGap))
+		{
+			var gap = (exp.Date - targetExpiry.Date).Days;
+			var tE = (exp.Date - asOf.Date).Days / 365.0;
+			if (tE <= 0) continue;
+			var ivE = BuildSurfaceIv(root, exp, callPut, targetStrike, spot, tE, asOfUtc);
+			if (!ivE.HasValue || ivE.Value <= 0m) continue;
+			(gap < 0 ? below : above).Add((gap, tE, ivE.Value));
+		}
+
+		// Nearest anchor on each side (gap closest to 0).
+		var lo = below.Count > 0 ? below.OrderByDescending(a => a.Gap).First() : ((int, double, decimal)?)null;
+		var hi = above.Count > 0 ? above.OrderBy(a => a.Gap).First() : ((int, double, decimal)?)null;
+
+		if (lo.HasValue && hi.HasValue && hi.Value.Item2 > lo.Value.Item2)
+		{
+			// Linear total variance in time between the bracketing expiries, then back out σ at target TTE.
+			var wLo = (double)lo.Value.Item3 * (double)lo.Value.Item3 * lo.Value.Item2;
+			var wHi = (double)hi.Value.Item3 * (double)hi.Value.Item3 * hi.Value.Item2;
+			var w = wLo + (wHi - wLo) * (targetTimeYears - lo.Value.Item2) / (hi.Value.Item2 - lo.Value.Item2);
+			return w > 0 ? (decimal)Math.Sqrt(w / targetTimeYears) : (decimal?)null;
+		}
+		// One-sided: flat-σ extrapolation from the single nearest neighbor.
+		if (lo.HasValue) return lo.Value.Item3;
+		if (hi.HasValue) return hi.Value.Item3;
+		return null;
 	}
 
 	// Penny-pilot index ETFs: minimum half-spread $0.005 ($0.01 total), plus 0.5% of mid.
@@ -323,13 +369,27 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 					iv = surfaceIv.Value;
 					src = SyntheticPricingSource.SurfaceIv;
 				}
-				else if (atm.HasValue)
-				{
-					iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
-					src = SyntheticPricingSource.VixSmile;
-				}
 				else
-					src = SyntheticPricingSource.Intrinsic;
+				{
+					// No same-expiry surface: try interpolating real IV across NEARBY expiries before
+					// falling back to the parametric VIX-anchored guess. >0DTE only — 0DTE vol regime
+					// doesn't interpolate from weekly/monthly neighbors, and 0DTE is densely captured anyway.
+					var crossIv = (parsed.CallPut != null && dte > 0)
+						? BuildCrossExpiryIv(parsed.Root, parsed.ExpiryDate, parsed.CallPut, parsed.Strike, spot, timeYears, asOf, asOfUtc)
+						: null;
+					if (crossIv.HasValue && crossIv.Value > 0m)
+					{
+						iv = crossIv.Value;
+						src = SyntheticPricingSource.CrossExpiry;
+					}
+					else if (atm.HasValue)
+					{
+						iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
+						src = SyntheticPricingSource.VixSmile;
+					}
+					else
+						src = SyntheticPricingSource.Intrinsic;
+				}
 
 				if (iv.HasValue)
 					price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv.Value, parsed.CallPut!);

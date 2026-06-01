@@ -126,6 +126,21 @@ internal sealed class HistoricalOptionBarCache
 		return (below, above);
 	}
 
+	/// <summary>Captured expiry dates within ±<paramref name="maxGapDays"/> calendar days of
+	/// <paramref name="targetExpiry"/> (excluding the target itself), sorted ascending. Used by the
+	/// cross-expiry IV interpolation to find the bracketing neighbor expiries.</summary>
+	public IReadOnlyList<DateTime> NeighborExpiriesWithin(string root, DateTime targetExpiry, int maxGapDays)
+	{
+		var result = new List<DateTime>();
+		foreach (var exp in ExpiriesForRoot(root))
+		{
+			var gap = (exp - targetExpiry.Date).Days;
+			if (gap == 0 || Math.Abs(gap) > maxGapDays) continue;
+			result.Add(exp);
+		}
+		return result;
+	}
+
 	/// <summary>Sorted list of expiry dates with a captured-contract directory on disk for <paramref name="root"/>.
 	/// One <c>data/options/&lt;root&gt;/</c> directory scan per root, then memoized. Non-date entries (e.g.
 	/// <c>sealed.json</c>) are skipped.</summary>
