@@ -287,6 +287,20 @@ internal static class BacktestSummaryRenderer
 			table.AddRow("Real-bar pricing (>0DTE legs)", $"[{color}]{pct:F1}% ({prov.MultiDteCaptured}/{prov.MultiDteTotal}){(pct < 80 ? " — synthetic-priced, low confidence" : "")}[/]");
 		}
 
+		// Clean vs contaminated trades: a trade is "clean" only if every market-priced leg had a real bar.
+		// Contaminated trades can carry mispriced synthetic legs (fake-cheap entries → phantom gains) AND are
+		// the illiquid contracts the LIVE liquidity filter would reject — so the clean row is the honest,
+		// live-tradeable read on the strategy.
+		var cl = result.Cleanliness;
+		if (cl.CleanCount + cl.ContamCount > 0)
+		{
+			table.AddRow("[bold]Clean trades[/] (all legs real-priced)",
+				$"[{(cl.CleanPnl >= 0 ? "green" : "red")}]{cl.CleanCount} trades, ${cl.CleanPnl:N0} ({cl.CleanWinRate:F0}% win, PF {cl.CleanProfitFactor:F2}, exp ${cl.CleanExpectancy:N0}/trade)[/]");
+			if (cl.ContamCount > 0)
+				table.AddRow("Synthetic-contaminated trades",
+					$"[yellow]{cl.ContamCount} trades, ${cl.ContamPnl:N0} ({cl.ContamWinRate:F0}% win) — excluded from a live-liquidity read[/]");
+		}
+
 		// Per-trade edge stats. Unlike terminal P&L (which compounds with position sizing), these are
 		// the sizing-robust read on whether the strategy has an edge: expectancy is the average $ per
 		// trade, and profit factor (gross win / gross loss) is dimensionless — both meaningful even when
