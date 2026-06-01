@@ -440,10 +440,13 @@ internal sealed class OpenCandidateEvaluator
 					var bestCandidate = kv.Value.Count > 0
 						? kv.Value.Aggregate((a, b) => (a.FinalScore ?? decimal.MinValue) >= (b.FinalScore ?? decimal.MinValue) ? a : b)
 						: null;
-					var legsDesc = bestCandidate == null
-						? ""
-						: $" wa analyze trade \"{string.Join(",", bestCandidate.Legs.Select(l => $"{l.Action.ToLowerInvariant()}:{l.Symbol}:{l.Qty}@{(l.PricePerShare?.ToString("F2") ?? "?")}"))}\"";
-					Console.Error.WriteLine($"[debug] {asOfEt:yyyy-MM-dd HH:mm:ss} ET {tickerGroup.Key} {kv.Key}: scored={scores.Count} positive={positive} negative={scores.Count - positive} best={best:F6} worst={worst:F6}{legsDesc}");
+					Console.Error.WriteLine($"[debug] {asOfEt:yyyy-MM-dd HH:mm:ss} ET {tickerGroup.Key} {kv.Key}: scored={scores.Count} positive={positive} negative={scores.Count - positive} best={best:F6} worst={worst:F6}");
+					// Reproduction commands for the best candidate, one per ↪ line (split structures emit two
+					// trade-place lines), mirroring the proposal panel. Explicit per-share prices so the analyze
+					// line replays exactly what the scorer saw, offline, without re-fetching the live market.
+					if (bestCandidate != null)
+						foreach (var line in Output.ReproductionCommands.Build(bestCandidate, _pricingMode, explicitAnalyzePrices: true))
+							Console.Error.WriteLine($"          ↪ {line}");
 				}
 			}
 
