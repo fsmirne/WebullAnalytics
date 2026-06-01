@@ -724,6 +724,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Per-leg-contract commission. Defaults from ticker: $1.14 for SPX/SPXW (and other cash-settled indexes), $0.55 for XSP, $1.30 for NDX, $0.05 for everything else (Webull ETFs/equities incl. IWM).")]
 	public decimal? FeePerContract { get; set; }
 
+	[CommandOption("--scan-stride <N>")]
+	[Description("Open-scan minute stride: evaluate every Nth minute for entries instead of all 390. Caps the per-day candidate-enumeration cost ~Nx (decisive for multi-leg structures over long windows) at the price of N-minute entry granularity. Default 1 (exhaustive). Try 5–10 for fast multi-leg full-year runs.")]
+	public int ScanStride { get; set; } = 1;
+
 	[CommandOption("--iv-hv-premium <RATIO>")]
 	[Description("IV/HV multiplier for non-SPY tickers (SPY uses real VIX). Default: 1.15.")]
 	public decimal IvHvPremium { get; set; } = 1.15m;
@@ -938,7 +942,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, scanStride: settings.ScanStride);
 
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
