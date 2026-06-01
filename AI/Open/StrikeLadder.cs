@@ -14,11 +14,25 @@ internal sealed class StrikeLadder
 {
 	private readonly decimal[] _strikes; // sorted ascending, distinct
 
-	private StrikeLadder(decimal[] strikes) => _strikes = strikes;
+	private StrikeLadder(decimal[] strikes, bool chainPresent)
+	{
+		_strikes = strikes;
+		ChainPresent = chainPresent;
+	}
 
-	public static readonly StrikeLadder Empty = new(Array.Empty<decimal>());
+	/// <summary>No chain was supplied at all (tests / <c>--theoretical</c>). Distinct from a chain that WAS
+	/// supplied but listed no tradeable strikes for this (expiry, side) — see <see cref="ChainPresent"/>.</summary>
+	public static readonly StrikeLadder Empty = new(Array.Empty<decimal>(), chainPresent: false);
 
 	public bool IsEmpty => _strikes.Length == 0;
+
+	/// <summary>True when a chain WAS supplied to <see cref="Build"/> (even if it listed no tradeable strikes
+	/// for this expiry/side). When a chain is present the ladder is AUTHORITATIVE: callers emit only its
+	/// strikes and never fall back to the uniform strikeStep grid — an empty-but-chain-present ladder means
+	/// "nothing tradeable here," not "guess a grid." Only when no chain is present at all do callers fall
+	/// back to the uniform grid. This is what keeps the backtest from filling phantom strikes that the
+	/// captured chain never recorded.</summary>
+	public bool ChainPresent { get; }
 
 	/// <summary>Builds the ladder for one (ticker, expiry, callPut) from the chain quote keys (OCC symbols).
 	/// A strike is "listed" if the chain returned a contract for it — existence, not live bid/ask, because
@@ -49,10 +63,11 @@ internal sealed class StrikeLadder
 		// AND never trade; picking those is the live failure — the leg can't be priced and the candidate
 		// drops. When the chain reveals NEITHER a quote NOR open interest for an expiry (XSP future expiries
 		// come back fully symbol-only — no bid/ask, no OI), there is no liquidity signal to build a ladder
-		// from, so we return Empty and the enumerator falls back to the uniform strikeStep grid. We do NOT
-		// fall back to bare existence: that reselects the dead $1 strikes and reproduces the failure.
+		// from. The ladder is still chain-present (so the enumerator emits nothing for this expiry rather than
+		// inventing a uniform grid of phantom strikes) — we do NOT fall back to bare existence, which would
+		// reselect the dead $1 strikes and reproduce the live failure (and the backtest's phantom fills).
 		var chosen = quoted.Count > 0 ? quoted : tradeable;
-		return chosen.Count == 0 ? Empty : new StrikeLadder(chosen.ToArray());
+		return new StrikeLadder(chosen.ToArray(), chainPresent: true);
 	}
 
 	/// <summary>Listed strikes strictly below <paramref name="spot"/>, nearest-first, up to <paramref name="count"/>.</summary>
