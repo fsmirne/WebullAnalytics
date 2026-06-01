@@ -130,7 +130,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
 			openSink = new OpenProposalSink(config.LogLevel, config.Ticker, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
-			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache);
+			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
 		}
 
 		AnsiConsole.MarkupLine($"[bold]ai watch[/] ticker={config.Ticker} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss}");
