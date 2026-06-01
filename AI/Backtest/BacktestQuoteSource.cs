@@ -225,6 +225,11 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	/// the synthetic Black-Scholes fallback. Used by the post-run pricing-provenance report.</summary>
 	internal bool HasCapturedBarOnDate(string occ, DateTime dateEt) => _optionBars?.HasBarOnDate(occ, dateEt) ?? false;
 
+	/// <summary>True when the contract was captured (has ≥1 real bar) on ANY day — it really traded at some
+	/// point. A synthetic-priced leg whose contract was NEVER captured is a likely phantom strike (a grid the
+	/// enumerator invented that the chain never listed); the provenance report flags these separately.</summary>
+	internal bool HasAnyCapturedBar(string occ) => _optionBars?.HasAnyBar(occ) ?? false;
+
 	public async Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers, CancellationToken cancellation, QuoteOverrides overrides = default)
 	{
 		var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);

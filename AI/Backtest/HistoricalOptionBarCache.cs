@@ -180,6 +180,12 @@ internal sealed class HistoricalOptionBarCache
 		return false;
 	}
 
+	/// <summary>True when <paramref name="occ"/> has a captured CSV with at least one bar on ANY day — i.e.
+	/// the contract really existed and traded at some point. Distinguishes a real strike that merely had no
+	/// bar on a given day (illiquid) from a phantom strike that was never captured at all (e.g. a $1 grid
+	/// strike a uniform-grid enumerator invented). Off the hot path — used only by the provenance report.</summary>
+	public bool HasAnyBar(string occ) => GetOrLoad(occ) is { Count: > 0 };
+
 	private IReadOnlyDictionary<long, OptionMinuteBar>? GetOrLoad(string occ)
 	{
 		lock (_lock)

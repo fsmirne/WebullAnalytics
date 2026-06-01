@@ -295,6 +295,17 @@ internal static class BacktestSummaryRenderer
 				table.AddRow("  ↳ synthetic >0DTE source",
 					$"[dim]surface-IV {prov.MultiDteSurfaceIv} ({100.0 * prov.MultiDteSurfaceIv / synth:F0}%), cross-expiry {prov.MultiDteCrossExpiry} ({100.0 * prov.MultiDteCrossExpiry / synth:F0}%), VIX-smile {prov.MultiDteVixSmile} ({100.0 * prov.MultiDteVixSmile / synth:F0}%), intrinsic {prov.MultiDteIntrinsic} ({100.0 * prov.MultiDteIntrinsic / synth:F0}%)[/]");
 
+			// Phantom guard: synthetic >0DTE legs whose contract was NEVER captured on any day — strikes that
+			// don't exist on the real chain (a uniform-grid invention). With the ladder authoritative this is
+			// the bucket that should be zero; a non-zero count means the backtest is still filling phantom
+			// strikes and the headline P&L is partly fabricated.
+			if (synth > 0)
+			{
+				var phantomColor = prov.MultiDtePhantom == 0 ? "green" : "red";
+				table.AddRow("  ↳ phantom (never-captured strike)",
+					$"[{phantomColor}]{prov.MultiDtePhantom} ({100.0 * prov.MultiDtePhantom / synth:F0}% of synthetic){(prov.MultiDtePhantom == 0 ? " — none; all synthetic legs are real contracts" : " — strikes not on the real chain; fabricated fills")}[/]");
+			}
+
 			// Residual VIX-smile diagnostic: cross-expiry interpolation already rescued every fallback leg with
 			// a usable neighbor-expiry surface, so the legs STILL on the parametric fallback are those where a
 			// neighbor expiry existed (bracketed/one-sided) but its strikes weren't usable for a back-solved IV,

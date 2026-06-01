@@ -1193,6 +1193,7 @@ internal sealed class BacktestRunner
 		int zCap = 0, zTot = 0, mCap = 0, mTot = 0;
 		int mSurf = 0, mCross = 0, mVix = 0, mIntr = 0; // synthetic >0DTE breakdown by pricing branch
 		int mVixBracketed = 0, mVixOneSided = 0; // of the (remaining) VIX-fallback legs: neighbor-expiry anchor on both sides / one side
+		int mPhantom = 0; // synthetic >0DTE legs whose contract was NEVER captured on any day — likely a strike that doesn't exist on the real chain (uniform-grid invention). Should be ~0 once the ladder is authoritative.
 		foreach (var fill in _book.Fills)
 		{
 			if (fill.Kind == BacktestFillKind.Expire) continue;
@@ -1209,9 +1210,13 @@ internal sealed class BacktestRunner
 					if (captured) mCap++;
 					else
 					{
-						// Synthetic >0DTE leg: attribute it to the branch that priced it. A null source
-						// (path that didn't record, e.g. legacy non-intraday) folds into intrinsic so the
-						// three buckets always sum to MultiDteSynthetic.
+						// Synthetic >0DTE leg. If the contract was never captured on ANY day, it's a likely
+						// phantom strike — one the chain never listed (a uniform-grid invention). With the
+						// ladder authoritative this should be ~0; a non-zero count means the backtest is still
+						// filling strikes that don't exist in reality.
+						if (!_quotes.HasAnyCapturedBar(leg.Symbol)) mPhantom++;
+						// Attribute it to the branch that priced it. A null source (path that didn't record,
+						// e.g. legacy non-intraday) folds into intrinsic so the buckets sum to MultiDteSynthetic.
 						switch (_quotes.GetSyntheticSource(leg.Symbol, fill.Date))
 						{
 							case SyntheticPricingSource.SurfaceIv: mSurf++; break;
@@ -1233,7 +1238,7 @@ internal sealed class BacktestRunner
 				}
 			}
 		}
-		return new PricingProvenance(zCap, zTot, mCap, mTot, mSurf, mCross, mVix, mIntr, mVixBracketed, mVixOneSided);
+		return new PricingProvenance(zCap, zTot, mCap, mTot, mSurf, mCross, mVix, mIntr, mVixBracketed, mVixOneSided, mPhantom);
 	}
 
 	/// <summary>Per-trade cleanliness split: a finalized lineage is "clean" only if EVERY market-priced fill
@@ -1427,7 +1432,7 @@ internal sealed class BacktestRunner
 // total-variance interpolation) vs only ONE side (extrapolation across the gap, far less reliable). The
 // remainder (MultiDteVixSmile - bracketed - oneSided) is the irreducible floor: minutes where the whole
 // local term structure was untraded, which no interpolation scheme can recover.
-internal readonly record struct PricingProvenance(int ZeroDteCaptured, int ZeroDteTotal, int MultiDteCaptured, int MultiDteTotal, int MultiDteSurfaceIv, int MultiDteCrossExpiry, int MultiDteVixSmile, int MultiDteIntrinsic, int MultiDteVixBracketed, int MultiDteVixOneSided)
+internal readonly record struct PricingProvenance(int ZeroDteCaptured, int ZeroDteTotal, int MultiDteCaptured, int MultiDteTotal, int MultiDteSurfaceIv, int MultiDteCrossExpiry, int MultiDteVixSmile, int MultiDteIntrinsic, int MultiDteVixBracketed, int MultiDteVixOneSided, int MultiDtePhantom)
 {
 	public double ZeroDteCapturedPct => ZeroDteTotal == 0 ? 1.0 : (double)ZeroDteCaptured / ZeroDteTotal;
 	public double MultiDteCapturedPct => MultiDteTotal == 0 ? 1.0 : (double)MultiDteCaptured / MultiDteTotal;
