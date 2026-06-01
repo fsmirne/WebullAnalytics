@@ -1,6 +1,5 @@
 ﻿using Spectre.Console;
 using Spectre.Console.Rendering;
-using System.Globalization;
 using System.Text.Json;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.Analyze;
@@ -159,29 +158,11 @@ internal sealed class OpenProposalSink : IDisposable
 	/// covering all four legs since the analyzer scores the whole structure.</summary>
 	private void AppendReproductionCommands(List<IRenderable> rows, OpenProposal p, string suggestPricing)
 	{
-		// Webull rejects a single 4-leg cross-expiry ticket, so DiagonalVertical / DoubleCalendar /
-		// DoubleDiagonal split into two combo tickets (see StructureOrderSplit). Everything else is a
-		// single combo — and a split that comes back degenerate also lands here as one group.
-		var groups = StructureOrderSplit.Split(p.StructureKind, p.Legs);
-		if (groups.Count > 1)
-		{
-			foreach (var g in groups)
-			{
-				var sideTrades = string.Join(",", g.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-				var sideLimit = (SuggestionPricing.TryGetLimitPerShare(g.Legs, suggestPricing) ?? 0m).ToString("F2", CultureInfo.InvariantCulture);
-				rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(sideTrades)}\" --limit {sideLimit}  # {g.Label}[/]"));
-			}
-		}
-		else
-		{
-			var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-			var limitPerShare = SuggestionPricing.TryGetLimitPerShare(p.Legs, suggestPricing) ?? Math.Abs(p.DebitOrCreditPerContract / 100m);
-			var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
-			rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
-		}
-
-		var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{SuggestionPricing.AnalyzeKeywordFor(l, suggestPricing)}"));
-		rows.Add(new Markup($"[dim]{_cmdPrefix} wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));
+		// Split-aware `wa trade place` line(s) + a single `wa analyze trade` line, shared with the opener's
+		// debug best-candidate trace via ReproductionCommands so the two can't drift. The panel uses the
+		// live MID/BID/ASK keyword pricing (re-fetched on run); the ↪ lead-in matches the rest of the report.
+		foreach (var line in ReproductionCommands.Build(p, suggestPricing))
+			rows.Add(new Markup($"[dim]{_cmdPrefix} {Markup.Escape(line)}[/]"));
 	}
 
 	private static Color SpectreColor(string name) => name switch
