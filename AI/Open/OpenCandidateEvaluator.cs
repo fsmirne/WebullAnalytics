@@ -213,6 +213,14 @@ internal sealed class OpenCandidateEvaluator
 			}
 		}
 
+		// Snapshot-tradeable strikes (live only): the daily chain snapshot is the authoritative liquidity
+		// signal. A leg the snapshot confirmed tradeable (real bid/ask) bypasses the scorer's open-interest
+		// gate — thin index roots like XSP quote far-dated strikes with little/no open interest, and the
+		// snapshot already vetted them. The liquidity *factor* still uses real OI, so they score honestly.
+		var snapshotTradeable = _enableChainSnapshot
+			? new HashSet<string>(DerivativeIdRegistry.TradeableOccs(_config.Ticker, SnapshotDate(ctx.Now)), StringComparer.OrdinalIgnoreCase)
+			: null;
+
 		// Phase C: score per ticker.
 		var reserve = CashReserveHelper.ComputeReserve(_config.CashReserve.Mode, _config.CashReserve.Value, ctx.AccountValue);
 		var freeCash = Math.Max(0m, ctx.AccountCash - reserve);
@@ -419,7 +427,7 @@ internal sealed class OpenCandidateEvaluator
 				foreach (var skel in tickerGroup)
 				{
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
@@ -428,6 +436,15 @@ internal sealed class OpenCandidateEvaluator
 					if (p == null)
 					{
 						rejectedByStructure![skel.StructureKind] = rejectedByStructure.GetValueOrDefault(skel.StructureKind) + 1;
+						if (debugRejectLinesLeft-- > 0)
+						{
+							var legDump = string.Join(" ", skel.Legs.Select(l =>
+								mergedQuotes.TryGetValue(l.Symbol, out var lq) && lq.Bid is > 0m && lq.Ask is > 0m
+									? $"{l.Symbol}={lq.Bid}/{lq.Ask}@oi{lq.OpenInterest?.ToString() ?? "null"}/vol{lq.Volume?.ToString() ?? "null"}"
+									: $"{l.Symbol}=NOQUOTE"));
+							var liqFails = CandidateScorer.GetLiquidityFailures(skel.Legs, mergedQuotes, cfg.Liquidity, spot, snapshotTradeable);
+							Console.Error.WriteLine($"[debug] {skel.Ticker} {skel.StructureKind} dropped legs: {legDump} | liq-gate: {(liqFails.Count > 0 ? string.Join(", ", liqFails) : "pass")}");
+						}
 						if (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical)
 						{
 							var reason = CandidateScorer.DiagnoseShortVerticalRejection(skel, mergedQuotes, out var detail, ctx.Now, cfg, tickerEvents, spot);
@@ -456,7 +473,7 @@ internal sealed class OpenCandidateEvaluator
 				{
 					var skel = skels[i];
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents);
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
@@ -780,14 +797,40 @@ internal sealed class OpenCandidateEvaluator
 		return max;
 	}
 
-	// Daily snapshot sweep bounds: how many candidate expiries to probe and how wide a moneyness window
-	// around spot. ±8% reaches the ~delta-0.20 short anchors at 30–45 DTE; 8 expiries covers the nearest
-	// short + long expiries the diagonals/calendars actually pick, with headroom. Kept modest so the
-	// once-per-day sweep stays a few hundred symbols (batched) rather than thousands.
-	private const int SnapshotMaxExpiries = 8;
+	/// <summary>The DTE windows the enabled structures actually price into — one range per single-expiry
+	/// structure, two (short + long) per calendar/diagonal. The snapshot sweep covers the nearest few
+	/// expiries in each so both legs of a multi-expiry structure get real strikes.</summary>
+	private static List<(int Min, int Max)> DteRangesForStructures(OpenerConfig cfg)
+	{
+		var s = cfg.Structures;
+		var r = new List<(int, int)>();
+		if (s.LongCalendar.Enabled) { r.Add((s.LongCalendar.ShortDteMin, s.LongCalendar.ShortDteMax)); r.Add((s.LongCalendar.LongDteMin, s.LongCalendar.LongDteMax)); }
+		if (s.DoubleCalendar.Enabled) { r.Add((s.DoubleCalendar.ShortDteMin, s.DoubleCalendar.ShortDteMax)); r.Add((s.DoubleCalendar.LongDteMin, s.DoubleCalendar.LongDteMax)); }
+		if (s.LongDiagonal.Enabled) { r.Add((s.LongDiagonal.ShortDteMin, s.LongDiagonal.ShortDteMax)); r.Add((s.LongDiagonal.LongDteMin, s.LongDiagonal.LongDteMax)); }
+		if (s.DoubleDiagonal.Enabled) { r.Add((s.DoubleDiagonal.ShortDteMin, s.DoubleDiagonal.ShortDteMax)); r.Add((s.DoubleDiagonal.LongDteMin, s.DoubleDiagonal.LongDteMax)); }
+		if (s.DiagonalVertical.Enabled) { r.Add((s.DiagonalVertical.ShortDteMin, s.DiagonalVertical.ShortDteMax)); r.Add((s.DiagonalVertical.LongDteMin, s.DiagonalVertical.LongDteMax)); }
+		if (s.CalendarVertical.Enabled) { r.Add((s.CalendarVertical.ShortDteMin, s.CalendarVertical.ShortDteMax)); r.Add((s.CalendarVertical.LongDteMin, s.CalendarVertical.LongDteMax)); }
+		if (s.IronButterfly.Enabled) r.Add((s.IronButterfly.DteMin, s.IronButterfly.DteMax));
+		if (s.IronCondor.Enabled) r.Add((s.IronCondor.DteMin, s.IronCondor.DteMax));
+		if (s.ShortVertical.Enabled) r.Add((s.ShortVertical.DteMin, s.ShortVertical.DteMax));
+		if (s.LongCallPut.Enabled) r.Add((s.LongCallPut.DteMin, s.LongCallPut.DteMax));
+		if (s.LongVertical.Enabled) r.Add((s.LongVertical.DteMin, s.LongVertical.DteMax));
+		return r;
+	}
+
+	// Daily snapshot sweep bounds. ±8% reaches the ~delta-0.20 short anchors at 30–45 DTE. Expiries are
+	// selected PER DTE BAND (the nearest few in each enabled structure's short and long window) rather than
+	// "nearest N overall" — diagonals/calendars need a long leg at 21–45 DTE, and on a daily chain the
+	// nearest-N are all short-dated, so the long-leg expiries would never be swept and those legs drop.
+	private const int SnapshotExpiriesPerBand = 4;
 	private const decimal SnapshotWindowPct = 0.08m;
 
-	private static string SnapshotDate(DateTime now) => now.Date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+	// Version prefix on the snapshot's as-of key: bump it whenever the tradeable criterion or sweep coverage
+	// changes so any snapshot written by an older build is treated as absent and re-swept (rather than
+	// silently reused). v2 = tradeable means a real bid/ask (v1 wrongly counted open-interest-only strikes);
+	// v3 = sweep covers each DTE band (so long legs at 21–45 DTE are included, not just the nearest expiries).
+	private const string SnapshotSchemaVersion = "v3";
+	private static string SnapshotDate(DateTime now) => $"{SnapshotSchemaVersion}:{now.Date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)}";
 
 	/// <summary>Once per ET day per ticker, learn which listed strikes actually trade. The chain inlines
 	/// bid/ask only for the front expiry, so for the future expiries diagonals/calendars use we must fetch
@@ -802,10 +845,14 @@ internal sealed class OpenCandidateEvaluator
 		if (!spots.TryGetValue(ticker, out var spot) || spot <= 0m) return;
 		if (!availableByTicker.TryGetValue(ticker, out var expiries) || expiries.Count == 0) return;
 
-		var maxDte = MaxDteAcrossStructures(cfg);
-		var candidateExps = expiries
-			.Where(e => { var d = (e.Date - ctx.Now.Date).Days; return d >= 0 && d <= maxDte; })
-			.OrderBy(e => e).Take(SnapshotMaxExpiries).ToHashSet();
+		// Cover every enabled structure's DTE band(s): the nearest few expiries within each band, so both
+		// the short (3–10 DTE) and long (21–45 DTE) legs of diagonals/calendars get swept.
+		var candidateExps = new HashSet<DateTime>();
+		foreach (var (min, max) in DteRangesForStructures(cfg))
+			foreach (var e in expiries
+				.Where(e => { var d = (e.Date - ctx.Now.Date).Days; return d >= min && d <= max; })
+				.OrderBy(e => e).Take(SnapshotExpiriesPerBand))
+				candidateExps.Add(e);
 		if (candidateExps.Count == 0) return;
 
 		var lo = spot * (1m - SnapshotWindowPct);
@@ -823,16 +870,20 @@ internal sealed class OpenCandidateEvaluator
 
 		var fetched = await _quotes.GetQuotesAsync(ctx.Now, symbols, _config.TickerSet(), cancellation, quoteOverrides);
 		var liquidity = new Dictionary<string, (bool Tradeable, long? OpenInterest)>(StringComparer.OrdinalIgnoreCase);
+		var withOiButNoQuote = 0;
 		foreach (var sym in symbols)
 		{
 			fetched.Options.TryGetValue(sym, out var q);
+			// "Tradeable" must mean PRICEABLE: the candidate scorer needs a real bid/ask, so a strike is
+			// usable only if the sweep's queryBatch returned one. Open interest alone is NOT enough — XSP
+			// lists $1 strikes that carry OI but never quote, and selecting those is the live scored=0
+			// failure. We still record OI for diagnostics, but it does not make a strike tradeable.
 			var quoted = q is { Bid: > 0m, Ask: > 0m };
-			var oi = q?.OpenInterest;
-			var tradeable = quoted || oi is > 0 || q?.Volume is > 0;
-			liquidity[sym] = (tradeable, oi);
+			if (!quoted && q?.OpenInterest is > 0) withOiButNoQuote++;
+			liquidity[sym] = (quoted, q?.OpenInterest);
 		}
 		DerivativeIdRegistry.RecordSnapshot(asOf, liquidity);
-		if (debug) Console.Error.WriteLine($"[debug] {ticker} daily chain snapshot {asOf}: probed {symbols.Count} near-money strikes across {candidateExps.Count} expiries, {liquidity.Count(kv => kv.Value.Tradeable)} tradeable.");
+		if (debug) Console.Error.WriteLine($"[debug] {ticker} daily chain snapshot {asOf}: probed {symbols.Count} near-money strikes across {candidateExps.Count} expiries, {liquidity.Count(kv => kv.Value.Tradeable)} quoted/tradeable ({withOiButNoQuote} had OI but no bid/ask — excluded).");
 	}
 
 	/// <summary>Turns today's snapshot of tradeable strikes into chain-overlay markers (open-interest = 1,
