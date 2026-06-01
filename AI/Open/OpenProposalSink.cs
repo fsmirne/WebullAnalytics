@@ -155,30 +155,17 @@ internal sealed class OpenProposalSink : IDisposable
 	/// covering all four legs since the analyzer scores the whole structure.</summary>
 	private void AppendReproductionCommands(List<IRenderable> rows, OpenProposal p, string suggestPricing)
 	{
-		if (p.StructureKind is OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal)
+		// Webull rejects a single 4-leg cross-expiry ticket, so DiagonalVertical / DoubleCalendar /
+		// DoubleDiagonal split into two combo tickets (see StructureOrderSplit). Everything else is a
+		// single combo — and a split that comes back degenerate also lands here as one group.
+		var groups = StructureOrderSplit.Split(p.StructureKind, p.Legs);
+		if (groups.Count > 1)
 		{
-			var sides = p.Legs
-				.Select(l => (Leg: l, Parsed: ParsingHelpers.ParseOptionSymbol(l.Symbol)))
-				.Where(x => x.Parsed != null)
-				.GroupBy(x => x.Parsed!.CallPut, StringComparer.Ordinal)
-				.OrderBy(g => g.Key == "P" ? 0 : 1)
-				.ToList();
-			if (sides.Count == 2 && sides.All(g => g.Count() == 2))
+			foreach (var g in groups)
 			{
-				foreach (var side in sides)
-				{
-					var label = side.Key == "P" ? "put" : "call";
-					var sideLegs = side.Select(x => x.Leg).ToList();
-					var sideTrades = string.Join(",", sideLegs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-					var sideLimit = (SuggestionPricing.TryGetLimitPerShare(sideLegs, suggestPricing) ?? 0m).ToString("F2", CultureInfo.InvariantCulture);
-					rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(sideTrades)}\" --limit {sideLimit}  # {label} side[/]"));
-				}
-			}
-			else
-			{
-				var fallbackTrades = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-				var fallbackLimit = (SuggestionPricing.TryGetLimitPerShare(p.Legs, suggestPricing) ?? Math.Abs(p.DebitOrCreditPerContract / 100m)).ToString("F2", CultureInfo.InvariantCulture);
-				rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(fallbackTrades)}\" --limit {fallbackLimit}[/]"));
+				var sideTrades = string.Join(",", g.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
+				var sideLimit = (SuggestionPricing.TryGetLimitPerShare(g.Legs, suggestPricing) ?? 0m).ToString("F2", CultureInfo.InvariantCulture);
+				rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(sideTrades)}\" --limit {sideLimit}  # {g.Label}[/]"));
 			}
 		}
 		else

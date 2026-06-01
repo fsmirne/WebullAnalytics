@@ -315,6 +315,17 @@ internal static class RiskDiagnosticBuilder
 			}
 		}
 
+		// Single-sided 2 long + 2 short across two expiries (all same call/put), each expiry forming a
+		// vertical (one long + one short) -> diagonal vertical. Net exposure is calendar-like -> neutral.
+		if (longLegs.Count == 2 && shortLegs.Count == 2
+			&& longLegs.Concat(shortLegs).Select(l => l.Parsed.CallPut).Distinct().Count() == 1)
+		{
+			var dvExpiries = longLegs.Concat(shortLegs).Select(l => l.Parsed.ExpiryDate).Distinct().ToList();
+			if (dvExpiries.Count == 2
+				&& dvExpiries.All(e => longLegs.Count(l => l.Parsed.ExpiryDate == e) == 1 && shortLegs.Count(l => l.Parsed.ExpiryDate == e) == 1))
+				return ("diagonal_vertical", "neutral");
+		}
+
 		return ("unknown", "neutral");
 	}
 
