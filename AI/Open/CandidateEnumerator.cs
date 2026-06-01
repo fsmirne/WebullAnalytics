@@ -275,7 +275,10 @@ internal static class CandidateEnumerator
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
 		var step = cfg.Indicators.StrikeStep;
-		var grid = StrikeGrid(spot, step);
+		// Wide both-sided band: the delta filter must reach the OTM short anchor (delta ~0.20–0.35), which
+		// sits well outside ATM. StrikeGrid is only ±2 strikes around ATM — fine for the near-ATM long
+		// anchor but far too narrow for the short leg, which is why a delta-0.20–0.35 short found nothing.
+		var grid = StrikesBelowSpot(spot, step, count: 24).Concat(StrikesAboveSpot(spot, step, count: 24)).Distinct().OrderBy(s => s).ToList();
 
 		foreach (var side in new[] { "C", "P" })
 			foreach (var shortExp in shortExps)
