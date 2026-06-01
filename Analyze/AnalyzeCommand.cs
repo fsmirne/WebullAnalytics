@@ -103,7 +103,12 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		}
 
 		var maxSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
-		var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : trades.Count > 0 ? trades.Max(t => t.Timestamp) : DateTime.Now;
+		// The synthetic legs represent a trade evaluated "now" (or at --until). Stamp them at that moment,
+		// NOT at the latest existing trade's timestamp: when a Since/Until window (often config-driven)
+		// excludes older trades, a synthetic stamped in the past gets culled by RunReportPipeline's window
+		// filter and the hypothetical silently vanishes — visible only with --standalone. maxSeq+1 already
+		// orders the synthetic after existing trades, so the timestamp only needs to land inside the window.
+		var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : DateTime.Now;
 		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(settings.Spec, maxSeq, baseTime, quotes));
 
 		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation);
