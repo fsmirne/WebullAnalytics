@@ -1,7 +1,20 @@
+using System.Collections.Concurrent;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.Backtest;
+
+/// <summary>How a leg with no captured bar of its own got its synthetic price. Diagnostic only — used by
+/// the post-run provenance breakdown to show whether synthetic legs were anchored to the real same-day
+/// smile of captured neighbors (<see cref="SurfaceIv"/>) or fell through to the parametric fallback
+/// (<see cref="VixSmile"/>) / raw intrinsic (<see cref="Intrinsic"/>). The split decides whether building
+/// cross-expiry interpolation is worth it: lots of VixSmile → neighbors are missing → worth it.</summary>
+internal enum SyntheticPricingSource { SurfaceIv, VixSmile, Intrinsic }
+
+/// <summary>Cross-expiry anchor available to a VIX-fallback leg: <see cref="Bracketed"/> = captured
+/// neighbor expiries on both sides (genuine total-variance interpolation), <see cref="OneSided"/> = only
+/// one side (extrapolation across the gap), <see cref="None"/> = no neighbor anchor (irreducible).</summary>
+internal enum NeighborAnchor { None, OneSided, Bracketed }
 
 /// <summary>
 /// Black-Scholes-priced option quote source for backtests. Underlying spot comes from each ticker's
@@ -109,6 +122,39 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	private readonly double _riskFreeRate;
 	private readonly IReadOnlyDictionary<string, decimal>? _spotOverrides;
 	private readonly HistoricalOptionBarCache? _optionBars;
+
+	// Diagnostic: records which synthetic branch priced each (contract, ET date) the last time it was
+	// synthesized (no captured bar of its own). Keyed at day granularity to match the day-level provenance
+	// metric (HasBarOnDate); the source for a given contract on a given day is stable enough that the
+	// last-write across the day's minutes is representative. ConcurrentDictionary because the intraday
+	// opener prices minutes in parallel batches. Read post-run by BacktestRunner.ComputeProvenance.
+	private readonly ConcurrentDictionary<(string Occ, DateTime DateEt), SyntheticPricingSource> _syntheticSource = new();
+
+	/// <summary>The synthetic-pricing branch taken for <paramref name="occ"/> on the ET trading day of
+	/// <paramref name="dateEt"/>, or null if it was never synthesized (e.g. always captured). Diagnostic
+	/// only — see <see cref="SyntheticPricingSource"/>.</summary>
+	internal SyntheticPricingSource? GetSyntheticSource(string occ, DateTime dateEt)
+		=> _syntheticSource.TryGetValue((occ, dateEt.Date), out var s) ? s : null;
+
+	// Expiry-day window for the cross-expiry recoverability probe: how far (calendar days) a neighboring
+	// expiry can be from the target and still serve as an interpolation anchor. ±14d spans the 1-2 adjacent
+	// weekly/monthly expiries on each side that a total-variance interpolation would bracket between.
+	private const int NeighborExpiryDayGap = 14;
+
+	/// <summary>Diagnostic: for a leg that fell through to the parametric (VIX-smile) synthetic — its own
+	/// expiry had no captured strikes at the minute — classify the cross-expiry anchor available within
+	/// ±<see cref="NeighborExpiryDayGap"/> days (same root+right): <see cref="NeighborAnchor.Bracketed"/>
+	/// (both sides → genuine interpolation), <see cref="NeighborAnchor.OneSided"/> (extrapolation only), or
+	/// <see cref="NeighborAnchor.None"/> (irreducible). <paramref name="asOfEtMinute"/> is the fill's ET
+	/// timestamp (minute-precise for opens).</summary>
+	internal NeighborAnchor ClassifyNeighborExpiry(string occ, DateTime asOfEtMinute)
+	{
+		if (_optionBars == null) return NeighborAnchor.None;
+		var parsed = ParsingHelpers.ParseOptionSymbol(occ);
+		if (parsed?.CallPut == null) return NeighborAnchor.None;
+		var (below, above) = _optionBars.NeighborExpiryAnchors(parsed.Root, parsed.ExpiryDate, parsed.CallPut, ToUtcMinute(asOfEtMinute), NeighborExpiryDayGap);
+		return below && above ? NeighborAnchor.Bracketed : (below || above ? NeighborAnchor.OneSided : NeighborAnchor.None);
+	}
 
 	/// <param name="spotOverrides">When supplied for a ticker, replaces the bar.open lookup for that
 	/// ticker. Used by <c>ai scan --theoretical</c> to evaluate a hypothetical spot at an asOf for which
@@ -271,15 +317,28 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				var surfaceIv = parsed.CallPut != null
 					? BuildSurfaceIv(parsed.Root, parsed.ExpiryDate, parsed.CallPut, parsed.Strike, spot, timeYears, asOfUtc)
 					: null;
+				SyntheticPricingSource src;
 				if (surfaceIv.HasValue && surfaceIv.Value > 0m)
+				{
 					iv = surfaceIv.Value;
+					src = SyntheticPricingSource.SurfaceIv;
+				}
 				else if (atm.HasValue)
+				{
 					iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
+					src = SyntheticPricingSource.VixSmile;
+				}
+				else
+					src = SyntheticPricingSource.Intrinsic;
 
 				if (iv.HasValue)
 					price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv.Value, parsed.CallPut!);
 				else
+				{
 					price = parsed.CallPut == "C" ? Math.Max(0m, spot - parsed.Strike) : Math.Max(0m, parsed.Strike - spot);
+					src = SyntheticPricingSource.Intrinsic; // ApplySmile returned null → no usable IV, priced at intrinsic
+				}
+				_syntheticSource[(sym, asOf.Date)] = src;
 			}
 
 			var halfSpread = HalfSpreadFor(parsed.Root, price);

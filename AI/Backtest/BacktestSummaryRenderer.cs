@@ -285,6 +285,27 @@ internal static class BacktestSummaryRenderer
 			var pct = prov.MultiDteCapturedPct * 100;
 			var color = pct >= 80 ? "green" : pct >= 50 ? "yellow" : "red";
 			table.AddRow("Real-bar pricing (>0DTE legs)", $"[{color}]{pct:F1}% ({prov.MultiDteCaptured}/{prov.MultiDteTotal}){(pct < 80 ? " — synthetic-priced, low confidence" : "")}[/]");
+
+			// Synthetic-source breakdown: of the >0DTE legs WITHOUT a captured bar of their own, how many
+			// were still anchored to the real same-day smile of captured neighbors (surface-IV) vs fell
+			// through to the parametric VIX-anchored fallback or raw intrinsic. A high VIX/intrinsic share
+			// is the signal that cross-expiry IV interpolation would meaningfully improve synthetic pricing.
+			var synth = prov.MultiDteSynthetic;
+			if (synth > 0)
+				table.AddRow("  ↳ synthetic >0DTE source",
+					$"[dim]surface-IV {prov.MultiDteSurfaceIv} ({100.0 * prov.MultiDteSurfaceIv / synth:F0}%), VIX-smile {prov.MultiDteVixSmile} ({100.0 * prov.MultiDteVixSmile / synth:F0}%), intrinsic {prov.MultiDteIntrinsic} ({100.0 * prov.MultiDteIntrinsic / synth:F0}%)[/]");
+
+			// Cross-expiry recoverability: of the VIX-smile (parametric-fallback) legs, how many cross-expiry
+			// IV interpolation could rescue — split into bracketed (anchors both sides → real interpolation)
+			// vs one-sided (extrapolation across the gap). The remainder is the irreducible floor (whole
+			// local term structure untraded that minute). Bracketed is the honest target for the build.
+			if (prov.MultiDteVixSmile > 0)
+			{
+				var v = prov.MultiDteVixSmile;
+				var floorN = v - prov.MultiDteVixBracketed - prov.MultiDteVixOneSided;
+				table.AddRow("  ↳ cross-expiry recoverable",
+					$"[dim]bracketed {prov.MultiDteVixBracketed} ({100.0 * prov.MultiDteVixBracketed / v:F0}%), one-sided {prov.MultiDteVixOneSided} ({100.0 * prov.MultiDteVixOneSided / v:F0}%), irreducible {floorN} ({100.0 * floorN / v:F0}%)[/]");
+			}
 		}
 
 		// Clean vs contaminated trades: a trade is "clean" only if every market-priced leg had a real bar.
