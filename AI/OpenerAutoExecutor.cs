@@ -55,7 +55,10 @@ internal sealed class OpenerAutoExecutor
 		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation))
 			return 0;
 
-		var brokerActiveCount = _config.Submit && _brokerState != null && _brokerState.IsReady ? _brokerState.TodaysActiveOrderCount : 0;
+		// Daily cap is scoped to this run's ticker (one ticker per process — proposals share it), so a
+		// concurrent watch on another ticker enforces its own cap rather than contending on a shared one.
+		var ticker = proposals[0].Ticker;
+		var brokerActiveCount = _config.Submit && _brokerState != null && _brokerState.IsReady ? _brokerState.TodaysActiveOrderCount(ticker) : 0;
 
 		var ordersThisTick = 0;
 		// Apply the structure allow-list as a SELECTION filter first — a disabled structure must never

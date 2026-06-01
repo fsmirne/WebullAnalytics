@@ -82,7 +82,7 @@ internal sealed class OptionsDiscoverCommand : AsyncCommand<OptionsDiscoverSetti
 
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
-		config.Tickers = new List<string> { ticker };
+		config.Ticker = ticker;
 
 		// Apply CLI overrides on the in-memory merged config (same pattern as `wa ai backtest`).
 		if (settings.BiasDriftOverride.HasValue) config.Opener.Weights.BiasDrift = settings.BiasDriftOverride.Value;

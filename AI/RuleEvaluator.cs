@@ -124,7 +124,7 @@ internal sealed class RuleEvaluator
 	/// <summary>Constructs the default rule set from config.</summary>
 	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config, string pricingMode = SuggestionPricing.Mid)
 	{
-		var debug = string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase);
+		var debug = string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
 		var normalizedPricing = SuggestionPricing.Normalize(pricingMode);
 		return new IManagementRule[]
 		{

@@ -127,9 +127,11 @@ public static partial class ParsingHelpers
 			if (distinctExpiries >= 2) return distinctStrikes <= 2 ? "DoubleCalendar" : "DoubleDiagonal";
 			return distinctStrikes <= 3 ? "IronButterfly" : "IronCondor";
 		}
-		// Single-sided 4-leggers across two expiries are diagonal-verticals (a near short vertical + a far
-		// long vertical on the same side); single-expiry 4-leggers are butterflies/condors by strike spread.
-		if (legCount >= 4 && distinctExpiries >= 2) return "DiagonalVertical";
+		// Single-sided 4-leggers across two expiries are calendar/diagonal-verticals (a near short vertical +
+		// a far long vertical on the same side). Same anchor+wing on both expiries (2 distinct strikes) = a
+		// CalendarVertical; offset anchors (3-4 strikes) = a DiagonalVertical — the same split as
+		// DoubleCalendar vs DoubleDiagonal above. Single-expiry 4-leggers are butterflies/condors by spread.
+		if (legCount >= 4 && distinctExpiries >= 2) return distinctStrikes <= 2 ? "CalendarVertical" : "DiagonalVertical";
 		if (legCount >= 4) return distinctStrikes <= 3 ? "Butterfly" : "Condor";
 
 		return (distinctExpiries > 1, distinctStrikes > 1) switch

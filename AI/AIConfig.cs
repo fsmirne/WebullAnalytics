@@ -6,14 +6,16 @@ namespace WebullAnalytics.AI;
 
 internal sealed class AIConfig
 {
-	/// <summary>Active tickers for this run. Populated programmatically from the positional CLI argument
-	/// (one ticker per scan/watch/replay/backtest) — not bound to a JSON field. Downstream consumers
-	/// continue to iterate this list; it just always contains exactly one element.</summary>
-	[JsonIgnore] public List<string> Tickers { get; set; } = new();
+	/// <summary>Active ticker for this run. Populated programmatically from the single positional CLI
+	/// argument (one ticker per scan/watch/replay/backtest) — not bound to a JSON field.</summary>
+	[JsonIgnore] public string Ticker { get; set; } = "";
+
+	/// <summary>Single-element set for the position/quote APIs that still take a ticker set.</summary>
+	public HashSet<string> TickerSet() => new(StringComparer.OrdinalIgnoreCase) { Ticker };
 
 	[JsonPropertyName("watch")] public WatchConfig Watch { get; set; } = new();
 	[JsonPropertyName("cashReserve")] public CashReserveConfig CashReserve { get; set; } = new();
-	[JsonPropertyName("log")] public LogConfig Log { get; set; } = new();
+	[JsonPropertyName("log-level")] public string LogLevel { get; set; } = "information"; // error | information | debug
 	[JsonPropertyName("indicators")] public IndicatorsConfig Indicators { get; set; } = new();
 	[JsonPropertyName("rules")] public RulesConfig Rules { get; set; } = new();
 	[JsonPropertyName("opener")] public OpenerConfig Opener { get; set; } = new();
@@ -146,10 +148,13 @@ internal sealed class CashReserveConfig
 	[JsonPropertyName("value")] public decimal Value { get; set; } = 25m;      // percent of account value, or absolute $
 }
 
-internal sealed class LogConfig
+/// <summary>Resolves the proposal JSONL path. The file is always <c>data/ai-proposals.&lt;TICKER&gt;.jsonl</c>,
+/// derived from the single required ticker argument — the path is not configurable. Per-ticker scoping lets
+/// concurrent single-ticker <c>wa ai watch</c> / <c>wa ai scan</c> runs write without sharing a file.</summary>
+internal static class ProposalLog
 {
-	[JsonPropertyName("path")] public string Path { get; set; } = "data/ai-proposals.jsonl";
-	[JsonPropertyName("level")] public string ConsoleVerbosity { get; set; } = "information"; // error | information | debug
+	public static string RelativePath(string ticker) => $"data/ai-proposals.{ticker.ToUpperInvariant()}.jsonl";
+	public static string ResolvedPath(string ticker) => Program.ResolvePath(RelativePath(ticker));
 }
 
 internal sealed class RulesConfig
@@ -326,7 +331,7 @@ internal static class AIConfigLoader
 		if (c.CashReserve.Mode is not ("percent" or "absolute")) return $"cashReserve.mode: must be 'percent' or 'absolute', got '{c.CashReserve.Mode}'";
 		if (c.CashReserve.Value < 0m) return $"cashReserve.value: must be non-negative, got {c.CashReserve.Value}";
 		if (c.CashReserve.Mode == "percent" && c.CashReserve.Value > 100m) return $"cashReserve.value: must be ≤ 100 for mode 'percent', got {c.CashReserve.Value}";
-		if (c.Log.ConsoleVerbosity is not ("error" or "information" or "debug")) return $"log.level: must be error|information|debug, got '{c.Log.ConsoleVerbosity}'";
+		if (c.LogLevel is not ("error" or "information" or "debug")) return $"log-level: must be error|information|debug, got '{c.LogLevel}'";
 
 		var sl = c.Rules.StopLoss;
 		if (sl.MaxDebitMultiplier <= 0m) return $"rules.stopLoss.maxDebitMultiplier: must be > 0, got {sl.MaxDebitMultiplier}";

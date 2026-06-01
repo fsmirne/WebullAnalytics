@@ -17,20 +17,20 @@ namespace WebullAnalytics.AI.Output;
 internal sealed class OpenProposalSink : IDisposable
 {
 	private readonly StreamWriter _file;
-	private readonly LogConfig _log;
+	private readonly string _consoleVerbosity;
 	private readonly string _mode;
 	private readonly string _suggestPricing;
 	private readonly bool _ascii;
 	private readonly string _cmdPrefix;
 
-	public OpenProposalSink(LogConfig log, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
+	public OpenProposalSink(string consoleVerbosity, string ticker, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
 	{
-		_log = log;
+		_consoleVerbosity = consoleVerbosity;
 		_mode = mode;
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
 		_ascii = ascii;
 		_cmdPrefix = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
-		var path = Program.ResolvePath(log.Path);
+		var path = ProposalLog.ResolvedPath(ticker);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
 	}
@@ -38,18 +38,22 @@ internal sealed class OpenProposalSink : IDisposable
 	public void Emit(OpenProposal p, int? rank = null)
 	{
 		WriteJsonl(p);
-		if (_log.ConsoleVerbosity != "error") WriteConsole(p, rank);
+		if (_consoleVerbosity != "error") WriteConsole(p, rank);
 	}
 
 	public void Flush() => _file.Flush();
 
-	private void WriteJsonl(OpenProposal p)
+	private void WriteJsonl(OpenProposal p) => _file.WriteLine(SerializeRecord(p, _mode));
+
+	/// <summary>Serializes one open proposal to its JSONL line. Pure (no I/O) so it's unit-testable
+	/// without touching the filesystem; the sink wraps it with the append writer.</summary>
+	internal static string SerializeRecord(OpenProposal p, string mode)
 	{
 		var record = new
 		{
 			type = "open",
 			ts = DateTime.Now.ToString("o"),
-			mode = _mode,
+			mode = mode,
 			ticker = p.Ticker,
 			structure = p.StructureKind.ToString(),
 			legs = p.Legs.Select(l => new { action = l.Action, symbol = l.Symbol, qty = l.Qty }),
@@ -74,7 +78,7 @@ internal sealed class OpenProposalSink : IDisposable
 			thetaPerDayPerContract = p.ThetaPerDayPerContract,
 			diagnostic = p.Diagnostic is null ? null : AnalyzePositionCommand.SerializeDiagnostic(p.Diagnostic),
 		};
-		_file.WriteLine(JsonSerializer.Serialize(record));
+		return JsonSerializer.Serialize(record);
 	}
 
 	private void WriteConsole(OpenProposal p, int? rank)

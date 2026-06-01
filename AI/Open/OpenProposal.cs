@@ -25,7 +25,13 @@ public enum OpenStructureKind
 	// theta+vega profile but every leg is bounded, so nothing is ever naked — the tradeable form on
 	// venues that reject true calendars/diagonals (e.g. Webull SPXW/XSP). Multi-expiry: the near short
 	// vertical expires first (partial settle), the far long vertical is closed same-day.
-	DiagonalVertical
+	DiagonalVertical,
+	// Calendar built from two defined-risk verticals on one side: identical to DiagonalVertical EXCEPT both
+	// verticals share the SAME anchor strike across the two expiries (a calendar, not a diagonal). Net = a
+	// long calendar at the anchor capped by a short calendar at the wing — long theta+vega, every leg
+	// bounded, places as two Webull-valid verticals. Distinguished from DiagonalVertical by geometry: 2
+	// distinct strikes (calendar) vs 3-4 (diagonal), the same way DoubleCalendar splits from DoubleDiagonal.
+	CalendarVertical
 }
 
 /// <summary>
