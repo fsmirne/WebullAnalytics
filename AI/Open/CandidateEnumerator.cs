@@ -106,7 +106,7 @@ internal static class CandidateEnumerator
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 		foreach (var callPut in new[] { "C", "P" })
 			foreach (var shortExp in shortExps)
 				foreach (var longExp in longExps)
@@ -156,6 +156,18 @@ internal static class CandidateEnumerator
 		};
 		return set.Where(s => s > 0m).OrderBy(s => s).ToList();
 	}
+
+	/// <summary>Fallback strike increment for the NO-CHAIN path only (<c>--theoretical</c> / unit tests, where
+	/// the ladder is empty). When a chain is present the ladder is authoritative and this is unused. A spot-
+	/// magnitude heuristic so the opener needs no <c>indicators.strikeStep</c> config — that knob now governs
+	/// only roll/scenario/assignment stepping, not opener strike selection.</summary>
+	private static decimal FallbackStep(decimal spot) => spot switch
+	{
+		< 25m => 0.5m,
+		< 250m => 1m,
+		< 2500m => 5m,
+		_ => 25m,
+	};
 
 	// ── Ladder-aware strike sourcing ──────────────────────────────────────────────────────────────────
 	// SPX-family chains list strikes on a non-uniform grid that varies by moneyness and expiry, so a single
@@ -211,7 +223,7 @@ internal static class CandidateEnumerator
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 		foreach (var shortExp in shortExps)
 			foreach (var longExp in longExps)
 			{
@@ -253,7 +265,7 @@ internal static class CandidateEnumerator
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 		foreach (var shortExp in shortExps)
 			foreach (var longExp in longExps)
 			{
@@ -307,7 +319,7 @@ internal static class CandidateEnumerator
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 
 		foreach (var side in new[] { "C", "P" })
 			foreach (var shortExp in shortExps)
@@ -392,7 +404,7 @@ internal static class CandidateEnumerator
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 		var deltaMid = (sCfg.DeltaMin + sCfg.DeltaMax) / 2m;
 
 		foreach (var side in new[] { "C", "P" })
@@ -435,7 +447,7 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 		foreach (var exp in exps)
 		{
 			// Body straddle sits on a strike listed for both sides; wings are wingSteps strikes along each
@@ -476,7 +488,7 @@ internal static class CandidateEnumerator
 		if (exps.Count == 0) yield break;
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 
 		foreach (var exp in exps)
 		{
@@ -546,7 +558,7 @@ internal static class CandidateEnumerator
 		if (exps.Count == 0) yield break;
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 
 		foreach (var exp in exps)
 		{
@@ -594,7 +606,7 @@ internal static class CandidateEnumerator
 		if (exps.Count == 0) yield break;
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 
 		foreach (var exp in exps)
 		{
@@ -678,7 +690,7 @@ internal static class CandidateEnumerator
 		if (exps.Count == 0) yield break;
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
-		var step = cfg.Indicators.StrikeStep;
+		var step = FallbackStep(spot);
 
 		foreach (var exp in exps)
 		{
