@@ -20,19 +20,19 @@ internal static class CandidateEnumerator
 	public static IEnumerable<CandidateSkeleton> Enumerate(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations = null, IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
 	{
 		if (cfg.Structures.LongCalendar.Enabled)
-			foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongCalendar, OpenStructureKind.LongCalendar, availableExpirations))
+			foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongCalendar, OpenStructureKind.LongCalendar, availableExpirations, quotes))
 				yield return sk;
 
 		if (cfg.Structures.DoubleCalendar.Enabled)
-			foreach (var sk in EnumerateDoubleCalendars(ticker, spot, asOf, cfg, availableExpirations))
+			foreach (var sk in EnumerateDoubleCalendars(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
 
 		if (cfg.Structures.LongDiagonal.Enabled)
-			foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongDiagonal, OpenStructureKind.LongDiagonal, availableExpirations))
+			foreach (var sk in EnumerateCalendarLike(ticker, spot, asOf, cfg, cfg.Structures.LongDiagonal, OpenStructureKind.LongDiagonal, availableExpirations, quotes))
 				yield return sk;
 
 		if (cfg.Structures.DoubleDiagonal.Enabled)
-			foreach (var sk in EnumerateDoubleDiagonals(ticker, spot, asOf, cfg, availableExpirations))
+			foreach (var sk in EnumerateDoubleDiagonals(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
 
 		if (cfg.Structures.IronButterfly.Enabled)
@@ -100,43 +100,45 @@ internal static class CandidateEnumerator
 		return available.Where(d => d >= start && d <= end).OrderBy(d => d);
 	}
 
-	private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind, IReadOnlySet<DateTime>? availableExpirations)
+	private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
 		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = cfg.Indicators.StrikeStep;
-		foreach (var shortStrike in StrikeGrid(spot, step))
-		{
-			// Skip strikes that are ITM by more than one step on either side (bad entry for a debit calendar).
-			foreach (var callPut in new[] { "C", "P" })
-			{
-				if (callPut == "C" && shortStrike < spot - step) continue;
-				if (callPut == "P" && shortStrike > spot + step) continue;
-
-				foreach (var shortExp in shortExps)
-					foreach (var longExp in longExps)
+		foreach (var callPut in new[] { "C", "P" })
+			foreach (var shortExp in shortExps)
+				foreach (var longExp in longExps)
+				{
+					if (longExp <= shortExp) continue;
+					// Per-expiry ladders: the short strike comes from the short expiry's listed strikes; the long
+					// leg shares it (calendar) or sits one strike away (diagonal) in the LONG expiry's ladder.
+					var shortLadder = StrikeLadder.Build(ticker, shortExp, callPut, quotes);
+					var longLadder = StrikeLadder.Build(ticker, longExp, callPut, quotes);
+					foreach (var shortStrike in StrikeGrid(spot, step, shortLadder))
 					{
-						if (longExp <= shortExp) continue;
+						// Skip strikes that are ITM by more than one step on either side (bad debit-calendar entry).
+						if (callPut == "C" && shortStrike < spot - step) continue;
+						if (callPut == "P" && shortStrike > spot + step) continue;
 
 						if (kind == OpenStructureKind.LongCalendar)
 						{
-							var longStrike = shortStrike;
-							yield return BuildSpread(ticker, kind, shortExp, longExp, shortStrike, longStrike, callPut);
+							// Calendar shares one strike across expiries — require it listed at the long expiry too.
+							if (!longLadder.IsEmpty && WingStrike(shortStrike, 0, 1, step, longLadder) != shortStrike) continue;
+							yield return BuildSpread(ticker, kind, shortExp, longExp, shortStrike, shortStrike, callPut);
 						}
 						else
 						{
-							// Diagonal: long strike one step above or below short strike.
-							foreach (var longStrike in new[] { shortStrike - step, shortStrike + step })
+							// Diagonal: long strike one strike above or below the short strike, along the long ladder.
+							foreach (var dir in new[] { -1, 1 })
 							{
-								if (longStrike <= 0m) continue;
+								if (WingStrike(shortStrike, 1, dir, step, longLadder) is not { } longStrike || longStrike <= 0m) continue;
 								yield return BuildSpread(ticker, kind, shortExp, longExp, shortStrike, longStrike, callPut);
 							}
 						}
 					}
-			}
-		}
+				}
 	}
 
 	/// <summary>Five distinct strikes centered on spot: floor(spot/step)*step, ceil(spot/step)*step, and ±1 step around each.</summary>
@@ -198,7 +200,7 @@ internal static class CandidateEnumerator
 		return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: shortExp);
 	}
 
-	private static IEnumerable<CandidateSkeleton> EnumerateDoubleCalendars(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	private static IEnumerable<CandidateSkeleton> EnumerateDoubleCalendars(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.DoubleCalendar;
 		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
@@ -206,23 +208,21 @@ internal static class CandidateEnumerator
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = cfg.Indicators.StrikeStep;
-		var strikes = StrikeGrid(spot, step);
 		foreach (var shortExp in shortExps)
 			foreach (var longExp in longExps)
 			{
 				if (longExp <= shortExp) continue;
-
+				// Strangle across spot (put lower / call upper). Width = strikes apart along the combined
+				// both-sides ladder; the legs reference these strikes at both expiries (calendar) and the
+				// scorer/Phase-B drops any leg not listed at one of them.
+				var combined = StrikeLadder.Build(ticker, shortExp, null, quotes);
 				foreach (var widthSteps in sCfg.WidthSteps.Distinct().OrderBy(w => w))
-				{
-					var width = widthSteps * step;
-					foreach (var lowerStrike in strikes)
+					foreach (var lowerStrike in StrikeGrid(spot, step, combined))
 					{
-						var upperStrike = lowerStrike + width;
-						if (upperStrike <= lowerStrike) continue;
+						if (WingStrike(lowerStrike, widthSteps, 1, step, combined) is not { } upperStrike || upperStrike <= lowerStrike) continue;
 						if (spot < lowerStrike || spot > upperStrike) continue;
 						yield return BuildDoubleCalendar(ticker, shortExp, longExp, lowerStrike, upperStrike);
 					}
-				}
 			}
 	}
 
@@ -242,7 +242,7 @@ internal static class CandidateEnumerator
 		return new CandidateSkeleton(ticker, OpenStructureKind.DoubleCalendar, legs, TargetExpiry: shortExp);
 	}
 
-	private static IEnumerable<CandidateSkeleton> EnumerateDoubleDiagonals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	private static IEnumerable<CandidateSkeleton> EnumerateDoubleDiagonals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.DoubleDiagonal;
 		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
@@ -250,30 +250,24 @@ internal static class CandidateEnumerator
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = cfg.Indicators.StrikeStep;
-		var strikes = StrikeGrid(spot, step);
 		foreach (var shortExp in shortExps)
 			foreach (var longExp in longExps)
 			{
 				if (longExp <= shortExp) continue;
-
+				// Strangle across spot with long wings further out. Body width and wing offsets are counts of
+				// strikes along the combined both-sides ladder; the put long is below the call structure and
+				// the call long above. Unlisted legs at either expiry are dropped downstream.
+				var combined = StrikeLadder.Build(ticker, shortExp, null, quotes);
 				foreach (var widthSteps in sCfg.WidthSteps.Distinct().OrderBy(w => w))
 					foreach (var longWingSteps in sCfg.LongWingSteps.Distinct().OrderBy(w => w))
-					{
-						var width = widthSteps * step;
-						var wing = longWingSteps * step;
-						foreach (var lowerShortStrike in strikes)
+						foreach (var lowerShortStrike in StrikeGrid(spot, step, combined))
 						{
-							var upperShortStrike = lowerShortStrike + width;
-							if (upperShortStrike <= lowerShortStrike) continue;
+							if (WingStrike(lowerShortStrike, widthSteps, 1, step, combined) is not { } upperShortStrike || upperShortStrike <= lowerShortStrike) continue;
 							if (spot < lowerShortStrike || spot > upperShortStrike) continue;
-
-							var lowerLongStrike = lowerShortStrike - wing;
-							var upperLongStrike = upperShortStrike + wing;
-							if (lowerLongStrike <= 0m) continue;
-
+							if (WingStrike(lowerShortStrike, longWingSteps, -1, step, combined) is not { } lowerLongStrike || lowerLongStrike <= 0m) continue;
+							if (WingStrike(upperShortStrike, longWingSteps, 1, step, combined) is not { } upperLongStrike) continue;
 							yield return BuildDoubleDiagonal(ticker, shortExp, longExp, lowerShortStrike, lowerLongStrike, upperShortStrike, upperLongStrike);
 						}
-					}
 			}
 	}
 
