@@ -218,39 +218,37 @@ internal static class AIHistoryOptionsBackfill
 		// contract captured mid-life) and gets re-pulled; everything complete is skipped.
 		var lastSettledEt = todayEt.AddDays(-1);
 		while (!MarketCalendar.IsOpen(lastSettledEt)) lastSettledEt = lastSettledEt.AddDays(-1);
+
+		// Sealed manifest (mirrors the intraday data/intraday/<T>/sealed.json idea): OCCs of fully-captured,
+		// EXPIRED contracts whose bars are final. A sealed contract is skipped instantly with no disk read.
+		// Expired contracts get sealed once captured (here on sight if already complete, or in the worker after
+		// a re-pull) so they never churn again. Live contracts are never sealed — they keep printing.
+		var sealedPath = Path.Combine(optionsRoot, "sealed.json");
+		var sealedOccs = LoadSealedOccs(sealedPath);
+		var newSeals = new System.Collections.Concurrent.ConcurrentBag<string>();
+
 		foreach (var (occ, id, parsed) in matches)
 		{
 			var csvPath = BuildCsvPath(optionsRoot, parsed, occ);
 			var csvExists = File.Exists(csvPath);
 			var mergeExisting = !force && csvExists;
-			if (id.HasValue)
+
+			// Sealed → final, skip with no I/O.
+			if (!force && sealedOccs.Contains(occ)) { skippedComplete++; continue; }
+
+			// On disk and complete → skip. If it's also expired (final), seal it now so future runs skip it
+			// without even a tail-read. Today's expiry always re-pulls (intraday still forming); an incomplete
+			// capture (interrupted, or a live contract captured before later sessions) falls through to re-pull.
+			if (!force && csvExists && parsed.ExpiryDate.Date != todayEt && IsCaptureComplete(csvPath, parsed.ExpiryDate.Date, todayEt, lastSettledEt))
 			{
-				// Skip an on-disk contract only when its capture is COMPLETE — last bar at/after its target
-				// (expiry if expired, else the last settled trading day). Today's expiry always re-pulls
-				// (intraday still forming); an incomplete on-disk contract (interrupted capture, or a live
-				// contract captured before later sessions) re-pulls to fill the gap. --force overrides.
-				if (!force && csvExists && parsed.ExpiryDate.Date != todayEt && IsCaptureComplete(csvPath, parsed.ExpiryDate.Date, todayEt, lastSettledEt))
-				{
-					skippedComplete++;
-					continue;
-				}
-				work.Add((occ, id, parsed, csvPath, mergeExisting, OptionDataSource.Webull));
+				if (parsed.ExpiryDate.Date < todayEt) newSeals.Add(occ);
+				skippedComplete++;
+				continue;
 			}
-			else if (hasMassiveKey)
-			{
-				// Same completeness rule as the Webull route: skip only when the on-disk capture reaches its
-				// target; re-pull incomplete or today's-expiry contracts.
-				if (!force && csvExists && parsed.ExpiryDate.Date != todayEt && IsCaptureComplete(csvPath, parsed.ExpiryDate.Date, todayEt, lastSettledEt))
-				{
-					skippedComplete++;
-					continue;
-				}
-				work.Add((occ, null, parsed, csvPath, mergeExisting, OptionDataSource.Massive));
-			}
-			else
-			{
-				skippedNoMassive++;
-			}
+
+			if (id.HasValue) work.Add((occ, id, parsed, csvPath, mergeExisting, OptionDataSource.Webull));
+			else if (hasMassiveKey) work.Add((occ, null, parsed, csvPath, mergeExisting, OptionDataSource.Massive));
+			else skippedNoMassive++;
 		}
 		var webullCount = work.Count(w => w.Source == OptionDataSource.Webull);
 		var massiveCount = work.Count(w => w.Source == OptionDataSource.Massive);
@@ -310,6 +308,10 @@ internal static class AIHistoryOptionsBackfill
 			}
 			else { WriteOptionCsv(item.CsvPath, bars); Interlocked.Increment(ref written); }
 
+			// An expired contract is final once we've attempted a post-expiry pull — seal it so it's skipped
+			// on every future run (even an empty illiquid one: there's no more data to get). Live: never seal.
+			if (item.Parsed.ExpiryDate.Date < todayEt) newSeals.Add(item.Occ);
+
 			var done = Interlocked.Increment(ref processed);
 			if (done % 25 == 0 || done == total)
 				lock (progressLock)
@@ -333,6 +335,13 @@ internal static class AIHistoryOptionsBackfill
 			async (item, ct) => await ProcessOneAsync(item, ct));
 
 		await Task.WhenAll(webullTask, massiveTask);
+
+		// Persist newly-sealed (now-final, expired) contracts so subsequent runs skip them with no I/O.
+		if (!newSeals.IsEmpty)
+		{
+			foreach (var s in newSeals) sealedOccs.Add(s);
+			SaveSealedOccs(sealedPath, sealedOccs);
+		}
 
 		AnsiConsole.MarkupLine($"  [green]wrote {written}[/] new + [green]merged {merged}[/] existing CSV(s) under {Markup.Escape(optionsRoot)}{(unchanged > 0 ? $" ({unchanged} unchanged)" : "")}");
 		if (emptyResponses.Count > 0)
@@ -374,11 +383,52 @@ internal static class AIHistoryOptionsBackfill
 	/// <summary>True when the on-disk capture reaches its completion target: last bar's ET date at/after the
 	/// contract's expiry (expired) or the last settled trading day (still-live). False if unreadable, empty,
 	/// or short of target — the caller then re-pulls. Today's-expiry handling is the caller's.</summary>
+	// An illiquid contract can stop trading a few days before expiry; its last bar then sits short of expiry
+	// even though the capture is complete. Allow this tolerance so such contracts count complete (and get
+	// sealed) instead of re-pulling forever. A genuinely-interrupted capture stops far earlier and re-pulls.
+	private const int ExpiredCompletionToleranceDays = 7;
+
 	private static bool IsCaptureComplete(string csvPath, DateTime expiryDate, DateTime todayEt, DateTime lastSettledEt)
 	{
-		var target = expiryDate < todayEt ? expiryDate : lastSettledEt;
 		var lastBar = LastBarDateEt(csvPath);
-		return lastBar.HasValue && lastBar.Value >= target;
+		if (!lastBar.HasValue) return false;
+		// Expired = final (with the illiquidity tolerance). Live = complete only if current through the last
+		// settled trading day.
+		return expiryDate < todayEt
+			? lastBar.Value >= expiryDate.AddDays(-ExpiredCompletionToleranceDays)
+			: lastBar.Value >= lastSettledEt;
+	}
+
+	private sealed class SealedOccManifest
+	{
+		[System.Text.Json.Serialization.JsonPropertyName("sealed")]
+		public List<string> Sealed { get; set; } = new();
+	}
+
+	/// <summary>Loads the set of sealed (final, expired, fully-captured) OCCs from the per-ticker manifest.
+	/// Mirrors the intraday sealed.json format. Returns empty on missing/unreadable.</summary>
+	private static HashSet<string> LoadSealedOccs(string path)
+	{
+		var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		if (!File.Exists(path)) return set;
+		try
+		{
+			var doc = JsonSerializer.Deserialize<SealedOccManifest>(File.ReadAllText(path));
+			if (doc?.Sealed != null) foreach (var s in doc.Sealed) set.Add(s);
+		}
+		catch { /* treat as unsealed */ }
+		return set;
+	}
+
+	/// <summary>Atomically rewrites the per-ticker sealed manifest (tmp + move), like the intraday one.</summary>
+	private static void SaveSealedOccs(string path, HashSet<string> occs)
+	{
+		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+		var doc = new SealedOccManifest { Sealed = occs.OrderBy(s => s, StringComparer.Ordinal).ToList() };
+		var json = JsonSerializer.Serialize(doc, new JsonSerializerOptions { WriteIndented = true });
+		var tmp = path + ".tmp";
+		File.WriteAllText(tmp, json);
+		File.Move(tmp, path, overwrite: true);
 	}
 
 	/// <summary>Last bar's ET date, read from the file tail (bars are timestamp-ascending, so the final data
