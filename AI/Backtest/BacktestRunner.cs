@@ -38,6 +38,7 @@ internal sealed class BacktestRunner
 	private readonly int _discoverPadStrikes;
 	private readonly int? _fixedContracts;
 	private readonly string _pricingMode;
+	private readonly int _scanStride;
 	private readonly HashSet<string> _discoveredOccs = new(StringComparer.OrdinalIgnoreCase);
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
@@ -49,10 +50,11 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1)
 	{
 		_config = config;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
+		_scanStride = Math.Max(1, scanStride);
 		_book = book;
 		_positions = positions;
 		_quotes = quotes;
@@ -841,6 +843,17 @@ internal sealed class BacktestRunner
 			earliestEntry = ee;
 
 		var timestampList = allTimestamps.ToList();
+		// Open-scan stride: evaluate every Nth minute instead of all 390. On days that never open, the
+		// scan would otherwise re-run the (heavy, for multi-leg structures) candidate enumeration every
+		// minute. A stride caps that cost ~N× at the price of N-minute entry granularity — negligible for
+		// a backtest, decisive for a multi-leg full-year run. Stride 1 (default) = exhaustive, unchanged.
+		// Oracle/discovery always scan every minute (they need the full surface), so the stride is open-scan only.
+		if (_scanStride > 1 && !_oracle && !_discover && timestampList.Count > 0)
+		{
+			var strided = new List<DateTimeOffset>(timestampList.Count / _scanStride + 1);
+			for (var i = 0; i < timestampList.Count; i += _scanStride) strided.Add(timestampList[i]);
+			timestampList = strided;
+		}
 
 		// In non-oracle, non-discovery mode we only need the first qualifying minute. Evaluate in
 		// parallel batches of ProcessorCount and stop as soon as any minute in the batch yields a
