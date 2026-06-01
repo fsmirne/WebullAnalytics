@@ -135,6 +135,12 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 		AnsiConsole.MarkupLine($"[bold]ai watch[/] ticker={config.Ticker} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss}");
 
+		// Mirror `wa ai scan`'s debug banner so watch is never silent in debug mode: when the opener
+		// finds nothing the only other debug output (the per-structure breakdown) doesn't fire, leaving
+		// no signal that debug is even on. This line plus the per-tick summary below close that gap.
+		var debug = string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
+		if (debug) Console.Error.WriteLine($"[debug] wa ai watch: log-level=debug ticker={config.Ticker} opener.enabled={config.Opener.Enabled} emitOpen={settings.EmitOpenProposals} emitMgmt={settings.EmitManagementProposals} ignoreMktHours={settings.IgnoreMarketHours}");
+
 		var failures = 0;
 		var ticksRun = 0;
 		var proposalsEmitted = 0;
@@ -163,12 +169,20 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				if (autoExecutor != null)
 					await autoExecutor.HandleAsync(results, ctx, cancellation);
 
+				var openResultCount = 0;
 				if (openEvaluator != null && openSink != null)
 				{
 					var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
+					openResultCount = openResults.Count;
 					for (var i = 0; i < openResults.Count; i++) { openSink.Emit(openResults[i], rank: i + 1); proposalsEmitted++; }
 					if (openerExecutor != null)
 						await openerExecutor.HandleAsync(openResults, now, cancellation);
+				}
+
+				if (debug)
+				{
+					quoteSnapshot.Underlyings.TryGetValue(config.Ticker, out var dbgSpot);
+					Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={dbgSpot} positions={openPositions.Count} mgmtResults={results.Count} openProposals={openResultCount}");
 				}
 
 				ticksRun++;

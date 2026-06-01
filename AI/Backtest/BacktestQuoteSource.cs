@@ -256,8 +256,36 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		// Pre-parsing avoids reparsing inside the parallel loop and lets us load all root spots and ATM
 		// IVs serially up front — both are async + cache-backed, and parallelizing those would compete
 		// for the same in-memory dictionary on first miss.
-		var parsedSymbols = new List<(string Symbol, OptionParsed Parsed)>(optionSymbols.Count);
-		foreach (var sym in optionSymbols)
+		// Mirror the live chain probe so the opener's StrikeLadder sees the real (non-uniform) captured strike
+		// grid. The opener bootstraps a chain by requesting ONE placeholder per (root, expiry) at strike $1;
+		// the live quote source answers with the entire listed chain. The backtest must do the same — without
+		// it, live snaps candidate strikes to listed strikes while the backtest enumerates a uniform
+		// strikeStep grid, and the two diverge. Detect the $1 placeholder and expand it to every captured
+		// strike for that (root, expiry); real candidate strikes for SPX-family tickers are never $1, so this
+		// only fires for the bootstrap probe, not for Phase-B leg refetches or position pricing.
+		var effectiveSymbols = optionSymbols;
+		if (_optionBars != null)
+		{
+			var probeExpiries = optionSymbols
+				.Select(ParsingHelpers.ParseOptionSymbol)
+				.Where(p => p != null && p.Strike == 1m)
+				.Select(p => (p!.Root, Expiry: p.ExpiryDate.Date))
+				.Distinct()
+				.ToList();
+			if (probeExpiries.Count > 0)
+			{
+				var probeUtc = ToUtcMinute(asOf);
+				var expanded = new HashSet<string>(optionSymbols, StringComparer.OrdinalIgnoreCase);
+				foreach (var (root, expiry) in probeExpiries)
+					foreach (var cp in new[] { "C", "P" })
+						foreach (var pt in _optionBars.GetCapturedQuotePoints(root, expiry, cp, probeUtc))
+							expanded.Add(MatchKeys.OccSymbol(root, expiry, pt.Strike, cp));
+				effectiveSymbols = expanded;
+			}
+		}
+
+		var parsedSymbols = new List<(string Symbol, OptionParsed Parsed)>(effectiveSymbols.Count);
+		foreach (var sym in effectiveSymbols)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p != null) parsedSymbols.Add((sym, p));

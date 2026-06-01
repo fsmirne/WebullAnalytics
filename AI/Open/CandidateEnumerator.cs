@@ -155,6 +155,37 @@ internal static class CandidateEnumerator
 		return set.Where(s => s > 0m).OrderBy(s => s).ToList();
 	}
 
+	// ── Ladder-aware strike sourcing ──────────────────────────────────────────────────────────────────
+	// SPX-family chains list strikes on a non-uniform grid that varies by moneyness and expiry, so a single
+	// uniform `strikeStep` generates strikes the venue never lists (their legs come back unpriced and the
+	// candidate is dropped). When the chain is known (live, or backtest once it exposes captured strikes) we
+	// source strikes from the per-expiry ladder and express widths as a count of strikes along it. When no
+	// chain is supplied (tests / --theoretical), the ladder is empty and we fall back to the uniform grid so
+	// behaviour is byte-for-byte unchanged.
+
+	/// <summary>~ATM strike band: the chain's listed strikes bracketing spot when known, else the uniform grid.</summary>
+	private static IReadOnlyList<decimal> StrikeGrid(decimal spot, decimal step, StrikeLadder ladder)
+		=> ladder.IsEmpty ? StrikeGrid(spot, step) : ladder.Around(spot, 3).ToList();
+
+	/// <summary>Listed strikes below spot when the chain is known, else the uniform step grid.</summary>
+	private static IReadOnlyList<decimal> StrikesBelow(decimal spot, decimal step, int count, StrikeLadder ladder)
+		=> ladder.IsEmpty ? StrikesBelowSpot(spot, step, count).ToList() : ladder.Below(spot, count).ToList();
+
+	/// <summary>Listed strikes above spot when the chain is known, else the uniform step grid.</summary>
+	private static IReadOnlyList<decimal> StrikesAbove(decimal spot, decimal step, int count, StrikeLadder ladder)
+		=> ladder.IsEmpty ? StrikesAboveSpot(spot, step, count).ToList() : ladder.Above(spot, count).ToList();
+
+	/// <summary>Listed strikes bracketing spot when the chain is known, else the uniform step grid.</summary>
+	private static IReadOnlyList<decimal> StrikesAround(decimal spot, decimal step, int count, StrikeLadder ladder)
+		=> ladder.IsEmpty ? StrikesAroundSpot(spot, step, count).ToList() : ladder.Around(spot, count).ToList();
+
+	/// <summary>Wing strike <paramref name="w"/> positions from <paramref name="anchor"/> in direction
+	/// <paramref name="dir"/> (+1 up / -1 down): a count of strikes along the real ladder when known, else a
+	/// uniform <c>w × step</c> dollar offset. Null when the offset runs off the ladder — the caller drops that
+	/// candidate, exactly as it would live when the wing strike isn't listed.</summary>
+	private static decimal? WingStrike(decimal anchor, int w, int dir, decimal step, StrikeLadder ladder)
+		=> ladder.IsEmpty ? anchor + dir * w * step : ladder.Offset(anchor, dir * w);
+
 	private static CandidateSkeleton BuildSpread(string ticker, OpenStructureKind kind, DateTime shortExp, DateTime longExp, decimal shortStrike, decimal longStrike, string callPut)
 	{
 		var shortSym = MatchKeys.OccSymbol(ticker, shortExp, shortStrike, callPut);
@@ -279,10 +310,6 @@ internal static class CandidateEnumerator
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
 		var step = cfg.Indicators.StrikeStep;
-		// Wide both-sided band: the delta filter must reach the OTM short anchor (delta ~0.20–0.35), which
-		// sits well outside ATM. StrikeGrid is only ±2 strikes around ATM — fine for the near-ATM long
-		// anchor but far too narrow for the short leg, which is why a delta-0.20–0.35 short found nothing.
-		var grid = StrikesBelowSpot(spot, step, count: 24).Concat(StrikesAboveSpot(spot, step, count: 24)).Distinct().OrderBy(s => s).ToList();
 
 		foreach (var side in new[] { "C", "P" })
 			foreach (var shortExp in shortExps)
@@ -292,20 +319,30 @@ internal static class CandidateEnumerator
 					var longYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, longExp);
 					var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortExp);
 
+					// Per-expiry ladders: the back-month grid is coarser than the front week on SPX-family
+					// chains, so the long and short legs each snap to their own expiry's listed strikes and
+					// widths count strikes along that ladder. Wide both-sided band (±24): the delta filter must
+					// reach the OTM short anchor (delta ~0.20–0.35), well outside ATM.
+					var longLadder = StrikeLadder.Build(ticker, longExp, side, quotes);
+					var shortLadder = StrikeLadder.Build(ticker, shortExp, side, quotes);
+					var longGrid = StrikesAround(spot, step, 24, longLadder);
+					var shortGrid = StrikesAround(spot, step, 24, shortLadder);
+
 					// Far long-vertical anchor: the long leg, directional, in the LongDelta band at the far expiry.
 					// Cap to the 2 strikes nearest the band centre (delta-filtered strikes are few, but cap defensively).
 					var longMid = (sCfg.LongDeltaMin + sCfg.LongDeltaMax) / 2m;
-					var longAnchors = grid
+					var longAnchors = longGrid
 						.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, longYears, OptionMath.RiskFreeRate, ResolveIv(ticker, longExp, k, side, quotes, defaultIv), side))))
 						.Where(x => x.d >= sCfg.LongDeltaMin && x.d <= sCfg.LongDeltaMax)
 						.OrderBy(x => Math.Abs(x.d - longMid)).Take(2).Select(x => x.k).ToList();
 					// Near short-vertical anchor: the short leg, further OTM, in the ShortDelta band at the near expiry.
 					var shortMid = (sCfg.ShortDeltaMin + sCfg.ShortDeltaMax) / 2m;
-					var shortAnchors = grid
+					var shortAnchors = shortGrid
 						.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, shortYears, OptionMath.RiskFreeRate, ResolveIv(ticker, shortExp, k, side, quotes, defaultIv), side))))
 						.Where(x => x.d >= sCfg.ShortDeltaMin && x.d <= sCfg.ShortDeltaMax)
 						.OrderBy(x => Math.Abs(x.d - shortMid)).Take(2).Select(x => x.k).ToList();
 
+					var dir = side == "C" ? 1 : -1;
 					foreach (var longStrike in longAnchors)
 						foreach (var shortStrike in shortAnchors)
 						{
@@ -315,11 +352,8 @@ internal static class CandidateEnumerator
 
 							foreach (var w in sCfg.WidthSteps.Distinct().OrderBy(x => x))
 							{
-								var width = w * step;
-								var dir = side == "C" ? 1m : -1m;
-								var longWing = longStrike + dir * width;
-								var shortWing = shortStrike + dir * width;
-								if (longWing <= 0m || shortWing <= 0m) continue;
+								if (WingStrike(longStrike, w, dir, step, longLadder) is not { } longWing || longWing <= 0m) continue;
+								if (WingStrike(shortStrike, w, dir, step, shortLadder) is not { } shortWing || shortWing <= 0m) continue;
 								yield return BuildDiagonalVertical(ticker, side, shortExp, longExp, shortStrike, shortWing, longStrike, longWing);
 							}
 						}
@@ -361,7 +395,6 @@ internal static class CandidateEnumerator
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
 		var step = cfg.Indicators.StrikeStep;
-		var grid = StrikesBelowSpot(spot, step, count: 24).Concat(StrikesAboveSpot(spot, step, count: 24)).Distinct().OrderBy(s => s).ToList();
 		var deltaMid = (sCfg.DeltaMin + sCfg.DeltaMax) / 2m;
 
 		foreach (var side in new[] { "C", "P" })
@@ -370,20 +403,28 @@ internal static class CandidateEnumerator
 				{
 					if (longExp <= shortExp) continue;
 					var longYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, longExp);
+					// A calendar shares one anchor strike AND one wing across both expiries, so both must be
+					// listed in BOTH expiries' ladders. Anchor candidates come from the long ladder ∩ short
+					// ladder (intersection); the wing is offset along the long ladder and re-checked on the
+					// short ladder. Empty ladders → uniform step grid (tests / --theoretical).
+					var longLadder = StrikeLadder.Build(ticker, longExp, side, quotes);
+					var shortLadder = StrikeLadder.Build(ticker, shortExp, side, quotes);
+					var longGrid = StrikesAround(spot, step, 24, longLadder);
 					// Single shared anchor: the calendar strike, picked in the delta band on the far (long) leg —
 					// the directional anchor, same convention as the diagonal-vertical's long anchor.
-					var anchors = grid
+					var anchors = longGrid
 						.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, longYears, OptionMath.RiskFreeRate, ResolveIv(ticker, longExp, k, side, quotes, defaultIv), side))))
 						.Where(x => x.d >= sCfg.DeltaMin && x.d <= sCfg.DeltaMax)
 						.OrderBy(x => Math.Abs(x.d - deltaMid)).Take(2).Select(x => x.k).ToList();
 
+					var dir = side == "C" ? 1 : -1;
 					foreach (var anchor in anchors)
 						foreach (var w in sCfg.WidthSteps.Distinct().OrderBy(x => x))
 						{
-							var width = w * step;
-							var dir = side == "C" ? 1m : -1m;
-							var wing = anchor + dir * width;
-							if (wing <= 0m) continue;
+							// Wing must be the SAME listed strike on both expiries. Offset along the long ladder,
+							// then confirm that exact strike is also listed in the short ladder (snap-and-verify).
+							if (WingStrike(anchor, w, dir, step, longLadder) is not { } wing || wing <= 0m) continue;
+							if (!shortLadder.IsEmpty && WingStrike(anchor, w, dir, step, shortLadder) != wing) continue;
 							// Same anchor + wing on both expiries → a calendar pair, not a diagonal.
 							yield return BuildTwoVerticalStructure(ticker, OpenStructureKind.CalendarVertical, side, shortExp, longExp, anchor, wing, anchor, wing);
 						}

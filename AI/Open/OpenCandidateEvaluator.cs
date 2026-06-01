@@ -41,9 +41,12 @@ internal sealed class OpenCandidateEvaluator
 	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation, QuoteOverrides quoteOverrides = default)
 	{
 		var cfg = _config.Opener;
-		if (!cfg.Enabled) return Array.Empty<OpenProposal>();
-
 		var debug = string.Equals(_config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
+		if (!cfg.Enabled)
+		{
+			if (debug) Console.Error.WriteLine($"[debug] {_config.Ticker} opener disabled (opener.enabled=false); no candidates enumerated.");
+			return Array.Empty<OpenProposal>();
+		}
 
 		var tickerSet = _config.TickerSet();
 		var output = new List<OpenProposal>();
@@ -110,11 +113,39 @@ internal sealed class OpenCandidateEvaluator
 		var allSkeletons = new List<CandidateSkeleton>();
 		foreach (var ticker in new[] { _config.Ticker })
 		{
-			if (!bootstrapSpots.TryGetValue(ticker, out var spot) || spot <= 0m) continue;
+			if (!bootstrapSpots.TryGetValue(ticker, out var spot) || spot <= 0m)
+			{
+				if (debug) Console.Error.WriteLine($"[debug] {ticker} no live spot resolved (Webull returned no underlying price/chain); 0 candidates enumerated.");
+				continue;
+			}
 			var available = availableByTicker[ticker];
+			if (debug)
+			{
+				// Dump the chain the enumerator actually sees per expiry: how many call strikes are listed, how
+				// many carry a usable bid/ask, and the near-ATM strikes (reveals the real grid spacing). A
+				// scored=0 run is then unambiguous: listed=0 → chain didn't reach Phase A; quoted=0 with
+				// listed>0 → strikes exist but don't quote; near-ATM spacing shows whether strikeStep matters.
+				var byExp = new SortedDictionary<DateTime, (int listed, int quoted, int oi, SortedSet<decimal> nearTradeable)>();
+				foreach (var kv in ivLookupQuotes)
+				{
+					var p = ParsingHelpers.ParseOptionSymbol(kv.Key);
+					if (p == null || p.CallPut != "C" || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+					if (!byExp.TryGetValue(p.ExpiryDate.Date, out var agg)) byExp[p.ExpiryDate.Date] = agg = (0, 0, 0, new SortedSet<decimal>());
+					var quoted = kv.Value.Bid is > 0m && kv.Value.Ask is > 0m;
+					var tradeable = quoted || kv.Value.OpenInterest is > 0 || kv.Value.Volume is > 0;
+					if (tradeable && Math.Abs(p.Strike - spot) <= 12m) agg.nearTradeable.Add(p.Strike);
+					byExp[p.ExpiryDate.Date] = (agg.listed + 1, agg.quoted + (quoted ? 1 : 0), agg.oi + (kv.Value.OpenInterest is > 0 || kv.Value.Volume is > 0 ? 1 : 0), agg.nearTradeable);
+				}
+				foreach (var kv in byExp.Where(e => available.Contains(e.Key)).Take(6))
+					Console.Error.WriteLine($"[debug] {ticker} chain {kv.Key:yyyy-MM-dd} calls: spot={spot:F2} listed={kv.Value.listed} quoted={kv.Value.quoted} tradeable(oi/vol)={kv.Value.oi} nearATM-tradeable=[{string.Join(",", kv.Value.nearTradeable)}]");
+			}
 			allSkeletons.AddRange(CandidateEnumerator.Enumerate(ticker, spot, ctx.Now, cfg, available.Count > 0 ? available : null, ivLookupQuotes));
 		}
-		if (allSkeletons.Count == 0) return Array.Empty<OpenProposal>();
+		if (allSkeletons.Count == 0)
+		{
+			if (debug) Console.Error.WriteLine($"[debug] {_config.Ticker} enumerator produced 0 candidate skeletons (available expiries={(availableByTicker.TryGetValue(_config.Ticker, out var av) ? av.Count : 0)}); check live chain availability and the structures' DTE bands.");
+			return Array.Empty<OpenProposal>();
+		}
 
 		// Phase B (phase-3 quote fetch): pull any leg whose quote is missing OR whose bid/ask is null.
 		// The latter happens routinely after-hours and on weekends — Webull's strategy/list inlines pricing
@@ -350,6 +381,11 @@ internal sealed class OpenCandidateEvaluator
 			var shortVerticalRejects = debug
 				? new Dictionary<CandidateScorer.ShortVerticalRejectReason, int>()
 				: null;
+			// Every skeleton that Score rejects (null) — counted per structure so debug mode is never silent.
+			// Without this, a ticker whose strikeStep grid doesn't line up with the live chain (so every leg
+			// comes back unpriced and every candidate scores null) produces an empty scoredByStructure and
+			// thus zero debug lines, which reads as "debug isn't working" when the opener actually ran.
+			var rejectedByStructure = debug ? new Dictionary<OpenStructureKind, int>() : null;
 			var debugRejectLinesLeft = 25;
 
 			var scoredByStructure = new Dictionary<OpenStructureKind, List<OpenProposal>>();
@@ -370,6 +406,7 @@ internal sealed class OpenCandidateEvaluator
 					}
 					if (p == null)
 					{
+						rejectedByStructure![skel.StructureKind] = rejectedByStructure.GetValueOrDefault(skel.StructureKind) + 1;
 						if (skel.StructureKind == OpenStructureKind.ShortPutVertical || skel.StructureKind == OpenStructureKind.ShortCallVertical)
 						{
 							var reason = CandidateScorer.DiagnoseShortVerticalRejection(skel, mergedQuotes, out var detail, ctx.Now, cfg, tickerEvents, spot);
@@ -415,6 +452,12 @@ internal sealed class OpenCandidateEvaluator
 				}
 			}
 
+			if (debug && rejectedByStructure != null && rejectedByStructure.Count > 0)
+			{
+				var scoredCount = scoredByStructure.Values.Sum(l => l.Count);
+				var summary = string.Join(", ", rejectedByStructure.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key}={kv.Value}"));
+				Console.Error.WriteLine($"[debug] {tickerGroup.Key} candidates dropped before scoring (unpriced legs / filtered out): {summary} — scored={scoredCount}. If scored=0, check that indicators.strikeStep matches the live chain's strike grid.");
+			}
 			if (debug && shortVerticalRejects != null && shortVerticalRejects.Count > 0)
 			{
 				var summary = string.Join(", ", shortVerticalRejects.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key}={kv.Value}"));
