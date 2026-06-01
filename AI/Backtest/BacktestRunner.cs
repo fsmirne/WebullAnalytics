@@ -1191,6 +1191,8 @@ internal sealed class BacktestRunner
 	private PricingProvenance ComputeProvenance()
 	{
 		int zCap = 0, zTot = 0, mCap = 0, mTot = 0;
+		int mSurf = 0, mVix = 0, mIntr = 0; // synthetic >0DTE breakdown by pricing branch
+		int mVixBracketed = 0, mVixOneSided = 0; // of the VIX-fallback legs: neighbor-expiry anchor on both sides / one side
 		foreach (var fill in _book.Fills)
 		{
 			if (fill.Kind == BacktestFillKind.Expire) continue;
@@ -1201,10 +1203,36 @@ internal sealed class BacktestRunner
 				var dte = (parsed.ExpiryDate.Date - fill.Date.Date).Days;
 				var captured = _quotes.HasCapturedBarOnDate(leg.Symbol, fill.Date);
 				if (dte <= 0) { zTot++; if (captured) zCap++; }
-				else { mTot++; if (captured) mCap++; }
+				else
+				{
+					mTot++;
+					if (captured) mCap++;
+					else
+					{
+						// Synthetic >0DTE leg: attribute it to the branch that priced it. A null source
+						// (path that didn't record, e.g. legacy non-intraday) folds into intrinsic so the
+						// three buckets always sum to MultiDteSynthetic.
+						switch (_quotes.GetSyntheticSource(leg.Symbol, fill.Date))
+						{
+							case SyntheticPricingSource.SurfaceIv: mSurf++; break;
+							case SyntheticPricingSource.VixSmile:
+								mVix++;
+								// Only the VIX-fallback legs are candidates for cross-expiry rescue (surface-IV
+								// legs already had a same-expiry anchor). Classify the neighbor anchor at the
+								// fill's minute: bracketed (interpolation) vs one-sided (extrapolation).
+								switch (_quotes.ClassifyNeighborExpiry(leg.Symbol, fill.Date))
+								{
+									case NeighborAnchor.Bracketed: mVixBracketed++; break;
+									case NeighborAnchor.OneSided: mVixOneSided++; break;
+								}
+								break;
+							default: mIntr++; break;
+						}
+					}
+				}
 			}
 		}
-		return new PricingProvenance(zCap, zTot, mCap, mTot);
+		return new PricingProvenance(zCap, zTot, mCap, mTot, mSurf, mVix, mIntr, mVixBracketed, mVixOneSided);
 	}
 
 	/// <summary>Per-trade cleanliness split: a finalized lineage is "clean" only if EVERY market-priced fill
@@ -1388,10 +1416,21 @@ internal sealed class BacktestRunner
 /// <summary>How much of the backtest's realized fills were priced from real captured option bars vs the
 /// synthetic Black-Scholes fallback, split by leg DTE-at-fill. A high multi-DTE synthetic fraction is a
 /// red flag that calendar/diagonal P&L rests on modeled prices rather than real prints.</summary>
-internal readonly record struct PricingProvenance(int ZeroDteCaptured, int ZeroDteTotal, int MultiDteCaptured, int MultiDteTotal)
+// MultiDteSurfaceIv/VixSmile/Intrinsic break down the SYNTHETIC (non-captured) >0DTE legs by how they were
+// priced: SurfaceIv = interpolated off the real same-day smile of captured neighbors (high fidelity);
+// VixSmile = parametric VIX1D-anchored ATM+smile (no neighbors found); Intrinsic = no usable IV at all.
+// They sum to (MultiDteTotal - MultiDteCaptured). A high VixSmile share is the signal that cross-expiry
+// interpolation would add value; a high SurfaceIv share means the synthetic legs are already neighbor-anchored.
+// MultiDteVixBracketed/OneSided: of the MultiDteVixSmile (parametric-fallback) legs, how many had a nearby
+// captured expiry (same root+right, within the probe's day-window) on BOTH sides of the target (genuine
+// total-variance interpolation) vs only ONE side (extrapolation across the gap, far less reliable). The
+// remainder (MultiDteVixSmile - bracketed - oneSided) is the irreducible floor: minutes where the whole
+// local term structure was untraded, which no interpolation scheme can recover.
+internal readonly record struct PricingProvenance(int ZeroDteCaptured, int ZeroDteTotal, int MultiDteCaptured, int MultiDteTotal, int MultiDteSurfaceIv, int MultiDteVixSmile, int MultiDteIntrinsic, int MultiDteVixBracketed, int MultiDteVixOneSided)
 {
 	public double ZeroDteCapturedPct => ZeroDteTotal == 0 ? 1.0 : (double)ZeroDteCaptured / ZeroDteTotal;
 	public double MultiDteCapturedPct => MultiDteTotal == 0 ? 1.0 : (double)MultiDteCaptured / MultiDteTotal;
+	public int MultiDteSynthetic => MultiDteTotal - MultiDteCaptured;
 }
 
 /// <summary>Per-trade split by pricing cleanliness: "clean" = every market-priced fill of the trade used real
