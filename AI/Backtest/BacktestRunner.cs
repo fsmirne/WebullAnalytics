@@ -1213,8 +1213,14 @@ internal sealed class BacktestRunner
 						// Synthetic >0DTE leg. If the contract was never captured on ANY day, it's a likely
 						// phantom strike — one the chain never listed (a uniform-grid invention). With the
 						// ladder authoritative this should be ~0; a non-zero count means the backtest is still
-						// filling strikes that don't exist in reality.
-						if (!_quotes.HasAnyCapturedBar(leg.Symbol)) mPhantom++;
+						// filling strikes that don't exist in reality. Log each (capped) so the offending
+						// strike/structure/date can be traced to the path that invented it.
+						if (!_quotes.HasAnyCapturedBar(leg.Symbol))
+						{
+							mPhantom++;
+							if (mPhantom <= 25)
+								Console.Error.WriteLine($"[phantom] {leg.Symbol} dte={dte} date={fill.Date:yyyy-MM-dd} kind={fill.Kind} lineage={fill.LineageId} — synthetic leg on a never-captured strike");
+						}
 						// Attribute it to the branch that priced it. A null source (path that didn't record,
 						// e.g. legacy non-intraday) folds into intrinsic so the buckets sum to MultiDteSynthetic.
 						switch (_quotes.GetSyntheticSource(leg.Symbol, fill.Date))

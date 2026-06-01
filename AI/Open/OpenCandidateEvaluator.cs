@@ -63,7 +63,14 @@ internal sealed class OpenCandidateEvaluator
 		// no spot in ctx and we enumerate nothing.
 		var bootstrapSpots = new Dictionary<string, decimal>(ctx.UnderlyingPrices, StringComparer.OrdinalIgnoreCase);
 		var bootstrapOptions = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
-		var missingTickers = (!bootstrapSpots.TryGetValue(_config.Ticker, out var bootSpot) || bootSpot <= 0m) ? new List<string> { _config.Ticker } : new List<string>();
+		// Probe when the ticker is missing EITHER its spot OR its option chain. The chain check matters in the
+		// backtest: the spot is always present (bar.Open), so a spot-only gate skipped the probe — and with it
+		// the captured-chain expansion — leaving the enumerator on the uniform strikeStep grid (the source of
+		// phantom $1 strikes). Live is unchanged: no-position ticks miss the spot (probe as before), and
+		// with-position ticks already carry the chain via the position legs (no extra probe).
+		var spotMissing = !bootstrapSpots.TryGetValue(_config.Ticker, out var bootSpot) || bootSpot <= 0m;
+		var chainMissing = !HasChainFor(_config.Ticker, ctx.Quotes);
+		var missingTickers = (spotMissing || chainMissing) ? new List<string> { _config.Ticker } : new List<string>();
 		if (missingTickers.Count > 0)
 		{
 			// Probe one placeholder OCC symbol per (ticker, candidate-expiry). Webull's live quote source
@@ -900,6 +907,20 @@ internal sealed class OpenCandidateEvaluator
 			overlay[occ] = new OptionContractQuote(occ, null, null, null, null, null, Volume: null, OpenInterest: 1, ImpliedVolatility: null);
 		}
 		return overlay;
+	}
+
+	/// <summary>True when <paramref name="quotes"/> already carries at least one option contract for
+	/// <paramref name="ticker"/> — i.e. the chain is present and the bootstrap probe (and, in the backtest,
+	/// its captured-chain expansion) doesn't need to run for the grid. Enumerating Keys mirrors
+	/// <see cref="IndexExpirations"/>; test fakes that expose empty Keys simply report "no chain" and probe.</summary>
+	private static bool HasChainFor(string ticker, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		foreach (var k in quotes.Keys)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(k);
+			if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) return true;
+		}
+		return false;
 	}
 
 	/// <summary>Parses each OCC symbol and records its expiration date in the per-ticker bucket. Symbols
