@@ -15,8 +15,12 @@ public class CandidateEnumeratorCalendarTests
 			LongDiagonal = new OpenerCalendarLikeConfig { Enabled = false },
 			DoubleDiagonal = new OpenerDoubleDiagonalConfig { Enabled = false },
 			IronButterfly = new OpenerIronButterflyConfig { Enabled = false },
+			IronCondor = new OpenerIronCondorConfig { Enabled = false },
 			ShortVertical = new OpenerShortVerticalConfig { Enabled = false },
-			LongCallPut = new OpenerLongCallPutConfig { Enabled = false }
+			LongVertical = new OpenerLongVerticalConfig { Enabled = false },
+			LongCallPut = new OpenerLongCallPutConfig { Enabled = false },
+			DiagonalVertical = new OpenerDiagonalVerticalConfig { Enabled = false },
+			CalendarVertical = new OpenerCalendarVerticalConfig { Enabled = false }
 		}
 	};
 
@@ -64,7 +68,9 @@ public class CandidateEnumeratorCalendarTests
 			var longLeg = s.Legs.First(l => l.Action == "buy");
 			var ps = ParsingHelpers.ParseOptionSymbol(shortLeg.Symbol)!;
 			var pl = ParsingHelpers.ParseOptionSymbol(longLeg.Symbol)!;
-			Assert.Equal(1.0m, Math.Abs(ps.Strike - pl.Strike));
+			// No chain supplied → opener uses the spot-magnitude FallbackStep ($0.50 at spot $15), not the
+			// config strikeStep. The diagonal long leg is one step from the short leg.
+			Assert.Equal(0.5m, Math.Abs(ps.Strike - pl.Strike));
 		}
 	}
 
@@ -126,9 +132,10 @@ public class CandidateEnumeratorCalendarTests
 			var longPut = parsed.Single(x => x.Leg.Action == "buy" && x.Parsed.CallPut == "P").Parsed;
 			var shortCall = parsed.Single(x => x.Leg.Action == "sell" && x.Parsed.CallPut == "C").Parsed;
 			var longCall = parsed.Single(x => x.Leg.Action == "buy" && x.Parsed.CallPut == "C").Parsed;
-			Assert.Equal(1.0m, shortPut.Strike - longPut.Strike);
-			Assert.Equal(1.0m, longCall.Strike - shortCall.Strike);
-			Assert.Equal(2.0m, shortCall.Strike - shortPut.Strike);
+			// No chain → FallbackStep $0.50 at spot $15: longWingSteps=1 → $0.50 wings, widthSteps=2 → $1.00 body.
+			Assert.Equal(0.5m, shortPut.Strike - longPut.Strike);
+			Assert.Equal(0.5m, longCall.Strike - shortCall.Strike);
+			Assert.Equal(1.0m, shortCall.Strike - shortPut.Strike);
 		}
 	}
 }
