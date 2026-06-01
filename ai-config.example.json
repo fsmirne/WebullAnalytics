@@ -7,10 +7,7 @@
 		"mode": "percent",
 		"value": 25
 	},
-	"log": {
-		"path": "data/ai-proposals.jsonl",
-		"level": "information"
-	},
+	"log-level": "information",
 	"indicators": {
 		"strikeStep": 1.0,
 		"ivDefaultPct": 18,

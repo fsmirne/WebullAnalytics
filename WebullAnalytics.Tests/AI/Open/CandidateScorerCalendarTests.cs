@@ -375,4 +375,40 @@ public class CandidateScorerCalendarTests
 		Assert.Equal(25m, p.TargetExpiryMaxPain);
 		Assert.True(p.MaxPainAdjustmentFactor > 1m);
 	}
+
+	[Fact]
+	public void CalendarVerticalIsRoutedThroughScoreDispatchAsNeutralDebit()
+	{
+		// Calls Score (the dispatch), not ScoreMultiLeg directly — this is the regression guard for the
+		// dispatch gap: if CalendarVertical isn't routed to ScoreMultiLeg, Score returns null and the
+		// structure is enumerated but never produces a proposal.
+		var asOf = new DateTime(2026, 4, 20);
+		var shortExp = new DateTime(2026, 4, 24);
+		var longExp = new DateTime(2026, 5, 15);
+		// Single-sided calls, same anchor (25) + wing (26) on both expiries — a calendar vertical.
+		var farAnchor = MatchKeys.OccSymbol("GME", longExp, 25m, "C");
+		var farWing = MatchKeys.OccSymbol("GME", longExp, 26m, "C");
+		var nearAnchor = MatchKeys.OccSymbol("GME", shortExp, 25m, "C");
+		var nearWing = MatchKeys.OccSymbol("GME", shortExp, 26m, "C");
+		var skel = new CandidateSkeleton("GME", OpenStructureKind.CalendarVertical, new[]
+		{
+			new ProposalLeg("buy", farAnchor, 1),
+			new ProposalLeg("sell", farWing, 1),
+			new ProposalLeg("sell", nearAnchor, 1),
+			new ProposalLeg("buy", nearWing, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[farAnchor] = TestQuote.Q(1.80m, 1.90m, 0.40m, openInterest: 100),
+			[farWing] = TestQuote.Q(1.30m, 1.40m, 0.40m, openInterest: 100),
+			[nearAnchor] = TestQuote.Q(1.50m, 1.55m, 0.40m, openInterest: 100),
+			[nearWing] = TestQuote.Q(1.05m, 1.15m, 0.40m, openInterest: 100)
+		};
+
+		var p = CandidateScorer.Score(skel, spot: 25m, asOf, quotes, bias: 0m, Cfg());
+
+		Assert.NotNull(p);
+		Assert.Equal(OpenStructureKind.CalendarVertical, p!.StructureKind);
+		Assert.Equal(0, p.DirectionalFit);
+	}
 }

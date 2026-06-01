@@ -6,22 +6,7 @@ internal static class DirectionalFit
 	/// Calendars and the typical (symmetric) DD stay at 0; verticals and long calls/puts get signs by
 	/// construction. LongDiagonal returns 0 here because its sign depends on the strike layout — use the
 	/// skeleton overload for the strike-aware classification.</summary>
-	public static int SignFor(OpenStructureKind kind) => kind switch
-	{
-		OpenStructureKind.LongCall => 1,
-		OpenStructureKind.LongCallVertical => 1,
-		OpenStructureKind.ShortPutVertical => 1,
-		OpenStructureKind.LongPut => -1,
-		OpenStructureKind.LongPutVertical => -1,
-		OpenStructureKind.ShortCallVertical => -1,
-		OpenStructureKind.LongCalendar => 0,
-		OpenStructureKind.DoubleCalendar => 0,
-		OpenStructureKind.LongDiagonal => 0,
-		OpenStructureKind.DoubleDiagonal => 0,
-		OpenStructureKind.IronButterfly => 0,
-		OpenStructureKind.IronCondor => 0,
-		_ => 0
-	};
+	public static int SignFor(OpenStructureKind kind) => StructureKindInfo.DirectionalSign(kind);
 
 	/// <summary>Strike-aware fit. For LongDiagonal, the sign is determined by the long/short strike
 	/// layout: long.strike &lt; short.strike → bullish (+1), long.strike &gt; short.strike → bearish (−1),

@@ -43,9 +43,9 @@ internal sealed class OpenCandidateEvaluator
 		var cfg = _config.Opener;
 		if (!cfg.Enabled) return Array.Empty<OpenProposal>();
 
-		var debug = string.Equals(_config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase);
+		var debug = string.Equals(_config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
 
-		var tickerSet = new HashSet<string>(_config.Tickers, StringComparer.OrdinalIgnoreCase);
+		var tickerSet = _config.TickerSet();
 		var output = new List<OpenProposal>();
 
 		// Phase A0: bootstrap spots + chains for tickers missing from ctx.UnderlyingPrices.
@@ -54,7 +54,7 @@ internal sealed class OpenCandidateEvaluator
 		// no spot in ctx and we enumerate nothing.
 		var bootstrapSpots = new Dictionary<string, decimal>(ctx.UnderlyingPrices, StringComparer.OrdinalIgnoreCase);
 		var bootstrapOptions = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
-		var missingTickers = _config.Tickers.Where(t => !bootstrapSpots.ContainsKey(t) || bootstrapSpots[t] <= 0m).ToList();
+		var missingTickers = (!bootstrapSpots.TryGetValue(_config.Ticker, out var bootSpot) || bootSpot <= 0m) ? new List<string> { _config.Ticker } : new List<string>();
 		if (missingTickers.Count > 0)
 		{
 			// Probe one placeholder OCC symbol per (ticker, candidate-expiry). Webull's live quote source
@@ -87,8 +87,7 @@ internal sealed class OpenCandidateEvaluator
 		// Only walk Keys when the dictionary actually enumerates — some test fakes (e.g. always-true
 		// ContainsKey) expose empty Keys; those callers fall through to the OpenerExpiryHelpers path.
 		var availableByTicker = new Dictionary<string, HashSet<DateTime>>(StringComparer.OrdinalIgnoreCase);
-		foreach (var ticker in _config.Tickers)
-			availableByTicker[ticker] = new HashSet<DateTime>();
+		availableByTicker[_config.Ticker] = new HashSet<DateTime>();
 		IndexExpirations(bootstrapOptions.Keys, availableByTicker);
 		IndexExpirations(ctx.Quotes.Keys, availableByTicker);
 
@@ -109,7 +108,7 @@ internal sealed class OpenCandidateEvaluator
 			? new OverlayQuoteDictionary(ctx.Quotes, bootstrapOptions)
 			: ctx.Quotes;
 		var allSkeletons = new List<CandidateSkeleton>();
-		foreach (var ticker in _config.Tickers)
+		foreach (var ticker in new[] { _config.Ticker })
 		{
 			if (!bootstrapSpots.TryGetValue(ticker, out var spot) || spot <= 0m) continue;
 			var available = availableByTicker[ticker];
@@ -217,7 +216,7 @@ internal sealed class OpenCandidateEvaluator
 		if (needCloses)
 		{
 			var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, Math.Max(4, cfg.BiasCalibrationLookbackDays + 2));
-			foreach (var ticker in _config.Tickers)
+			foreach (var ticker in new[] { _config.Ticker })
 			{
 				var closes = await _priceCache.GetRecentClosesAsync(ticker, lookback, ctx.Now, cancellation);
 				if (closes.Count > 0) prevCloseByTicker[ticker] = closes[^1];
@@ -278,7 +277,7 @@ internal sealed class OpenCandidateEvaluator
 		// asOf; calling it would leak future earnings/ex-div into a historical replay). The cache's
 		// symmetric TTL check in TryReadCache rejects entries fetched too far from asOf in either
 		// direction, so the on-disk cache stays lookahead-safe for distant historical asOfs too.
-		var eventCalendar = await EventCalendarLoader.LoadAsync(_config.Tickers, cfg.Indicators.Events, ctx.Now, cancellation, cacheOnly: _backtestMode);
+		var eventCalendar = await EventCalendarLoader.LoadAsync(new[] { _config.Ticker }, cfg.Indicators.Events, ctx.Now, cancellation, cacheOnly: _backtestMode);
 
 		foreach (var tickerGroup in allSkeletons.GroupBy(s => s.Ticker))
 		{
@@ -668,7 +667,7 @@ internal sealed class OpenCandidateEvaluator
 		return true;
 	}
 
-	private static bool IsCalendarLike(OpenProposal proposal) => proposal.StructureKind is OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal or OpenStructureKind.DiagonalVertical;
+	private static bool IsCalendarLike(OpenProposal proposal) => StructureKindInfo.IsCalendarLike(proposal.StructureKind);
 
 	/// <summary>Returns true when the symbol exists and has both a non-null bid and a positive ask.
 	/// Mirrors <c>CandidateScorer.TryLiveBidAsk</c>'s acceptance criteria so Phase B's "needs refresh"
@@ -692,11 +691,7 @@ internal sealed class OpenCandidateEvaluator
 		return Math.Max(0m, 1m - weight * excess);
 	}
 
-	private static bool IsCreditStructure(OpenStructureKind kind) =>
-		kind is OpenStructureKind.ShortPutVertical
-			 or OpenStructureKind.ShortCallVertical
-			 or OpenStructureKind.IronCondor
-			 or OpenStructureKind.IronButterfly;
+	private static bool IsCreditStructure(OpenStructureKind kind) => StructureKindInfo.IsCreditStructure(kind);
 
 	/// <summary>Widest DteMax across every enabled structure. Used to size the bootstrap-probe horizon so
 	/// the backtest discovers every expiry the enumerators could legitimately propose.</summary>

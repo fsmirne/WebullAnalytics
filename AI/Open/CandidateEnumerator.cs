@@ -58,6 +58,10 @@ internal static class CandidateEnumerator
 		if (cfg.Structures.DiagonalVertical.Enabled)
 			foreach (var sk in EnumerateDiagonalVerticals(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
+
+		if (cfg.Structures.CalendarVertical.Enabled)
+			foreach (var sk in EnumerateCalendarVerticals(ticker, spot, asOf, cfg, availableExpirations, quotes))
+				yield return sk;
 	}
 
 	/// <summary>Resolves the implied volatility to use for delta-band filtering on a specific strike.
@@ -323,6 +327,14 @@ internal static class CandidateEnumerator
 	}
 
 	private static CandidateSkeleton BuildDiagonalVertical(string ticker, string side, DateTime shortExp, DateTime longExp, decimal shortStrike, decimal shortWingStrike, decimal longStrike, decimal longWingStrike)
+		=> BuildTwoVerticalStructure(ticker, OpenStructureKind.DiagonalVertical, side, shortExp, longExp, shortStrike, shortWingStrike, longStrike, longWingStrike);
+
+	/// <summary>Builds the shared "two defined-risk verticals on one side" leg set used by both
+	/// DiagonalVertical (different anchor strikes per expiry) and CalendarVertical (same anchor strike
+	/// across expiries). Far long vertical (debit) + near short vertical (credit); TargetExpiry is the near
+	/// (short) expiry — the structure's first decision point. The geometry distinction is the caller's: the
+	/// kind is passed in, and classifiers recover it from the strike count.</summary>
+	private static CandidateSkeleton BuildTwoVerticalStructure(string ticker, OpenStructureKind kind, string side, DateTime shortExp, DateTime longExp, decimal shortStrike, decimal shortWingStrike, decimal longStrike, decimal longWingStrike)
 	{
 		var legs = new[]
 		{
@@ -333,7 +345,49 @@ internal static class CandidateEnumerator
 			new ProposalLeg("sell", MatchKeys.OccSymbol(ticker, shortExp, shortStrike, side), 1),
 			new ProposalLeg("buy", MatchKeys.OccSymbol(ticker, shortExp, shortWingStrike, side), 1)
 		};
-		return new CandidateSkeleton(ticker, OpenStructureKind.DiagonalVertical, legs, TargetExpiry: shortExp);
+		return new CandidateSkeleton(ticker, kind, legs, TargetExpiry: shortExp);
+	}
+
+	/// <summary>Calendar-from-verticals: a far-dated LONG vertical (debit) + a near-dated SHORT vertical
+	/// (credit) on one side that SHARE one anchor strike (and one wing) across both expiries. Identical to
+	/// <see cref="EnumerateDiagonalVerticals"/> except the near and far verticals use the SAME strikes — a
+	/// calendar rather than a diagonal. Enumerated for both calls and puts. Every leg is bounded.</summary>
+	private static IEnumerable<CandidateSkeleton> EnumerateCalendarVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	{
+		var sCfg = cfg.Structures.CalendarVertical;
+		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
+		var longExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
+		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
+
+		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var step = cfg.Indicators.StrikeStep;
+		var grid = StrikesBelowSpot(spot, step, count: 24).Concat(StrikesAboveSpot(spot, step, count: 24)).Distinct().OrderBy(s => s).ToList();
+		var deltaMid = (sCfg.DeltaMin + sCfg.DeltaMax) / 2m;
+
+		foreach (var side in new[] { "C", "P" })
+			foreach (var shortExp in shortExps)
+				foreach (var longExp in longExps)
+				{
+					if (longExp <= shortExp) continue;
+					var longYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, longExp);
+					// Single shared anchor: the calendar strike, picked in the delta band on the far (long) leg —
+					// the directional anchor, same convention as the diagonal-vertical's long anchor.
+					var anchors = grid
+						.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, longYears, OptionMath.RiskFreeRate, ResolveIv(ticker, longExp, k, side, quotes, defaultIv), side))))
+						.Where(x => x.d >= sCfg.DeltaMin && x.d <= sCfg.DeltaMax)
+						.OrderBy(x => Math.Abs(x.d - deltaMid)).Take(2).Select(x => x.k).ToList();
+
+					foreach (var anchor in anchors)
+						foreach (var w in sCfg.WidthSteps.Distinct().OrderBy(x => x))
+						{
+							var width = w * step;
+							var dir = side == "C" ? 1m : -1m;
+							var wing = anchor + dir * width;
+							if (wing <= 0m) continue;
+							// Same anchor + wing on both expiries → a calendar pair, not a diagonal.
+							yield return BuildTwoVerticalStructure(ticker, OpenStructureKind.CalendarVertical, side, shortExp, longExp, anchor, wing, anchor, wing);
+						}
+				}
 	}
 
 	private static IEnumerable<CandidateSkeleton> EnumerateIronButterflies(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)

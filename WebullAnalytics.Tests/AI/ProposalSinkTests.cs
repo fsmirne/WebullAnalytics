@@ -10,11 +10,8 @@ public class ProposalSinkTests
 	[Fact]
 	public void Emit_WritesDiagnosticToJsonl_WhenManagementProposalIncludesOne()
 	{
-		var tmp = Path.GetTempFileName();
-		try
-		{
-			var diagnostic = new RiskDiagnostic(
-				StructureLabel: "calendar",
+		var diagnostic = new RiskDiagnostic(
+			StructureLabel: "calendar",
 				DirectionalBias: "neutral",
 				NetDelta: 0.01m,
 				NetThetaPerDay: 1.23m,
@@ -50,19 +47,9 @@ public class ProposalSinkTests
 				Rationale: "test rationale",
 				Diagnostic: diagnostic);
 
-			using (var sink = new ProposalSink(new LogConfig { Path = tmp, ConsoleVerbosity = "error" }, mode: "once"))
-			{
-				sink.Emit(proposal, isRepeat: false);
-			}
-
-			var contents = File.ReadAllText(tmp);
-			Assert.Contains("\"type\":\"management\"", contents);
-			Assert.Contains("\"diagnostic\":{", contents);
-			Assert.Contains("\"structureLabel\":\"calendar\"", contents);
-		}
-		finally
-		{
-			File.Delete(tmp);
-		}
+		var json = ProposalSink.SerializeRecord(proposal, mode: "once");
+		Assert.Contains("\"type\":\"management\"", json);
+		Assert.Contains("\"diagnostic\":{", json);
+		Assert.Contains("\"structureLabel\":\"calendar\"", json);
 	}
 }

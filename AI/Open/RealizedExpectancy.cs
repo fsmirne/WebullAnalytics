@@ -42,11 +42,7 @@ internal static class RealizedExpectancy
 	/// Double calendar/diagonal and the diagonal-from-verticals need 2 orders on Webull (the broker
 	/// doesn't combo them as a single net-price trade — and the diagonal-vertical is two separate
 	/// verticals by construction); every other supported structure fills in 1.</summary>
-	internal static int OrdersForStructure(OpenStructureKind kind) => kind switch
-	{
-		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.DiagonalVertical => 2,
-		_ => 1,
-	};
+	internal static int OrdersForStructure(OpenStructureKind kind) => StructureKindInfo.OrderCount(kind);
 
 	/// <summary>Profit-target dollar cap (≥ 0). Returns the raw <paramref name="maxProfit"/> when
 	/// the feature is disabled so callers can blindly clamp without branching.</summary>
