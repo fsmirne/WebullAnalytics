@@ -92,6 +92,14 @@ internal sealed class OpenCandidateEvaluator
 		IndexExpirations(bootstrapOptions.Keys, availableByTicker);
 		IndexExpirations(ctx.Quotes.Keys, availableByTicker);
 
+		// Optionally restrict to the liquid Friday expiries (weeklies + the monthly 3rd-Friday). SPX/SPXW
+		// Mon–Thu dailies are thin — they're disproportionately the no-trade legs that come back synthetic in
+		// the backtest and that the live liquidity filter would reject. Trading only Fridays improves
+		// real-bar coverage, aligns the backtest with what's live-tradeable, and shrinks the candidate space.
+		if (cfg.WeeklyMonthlyExpiriesOnly)
+			foreach (var set in availableByTicker.Values)
+				set.RemoveWhere(d => d.DayOfWeek != DayOfWeek.Friday);
+
 		// Phase A: enumerate across all tickers. Feed the enumerator the merged chain quotes so the
 		// delta-band filter on strike picks uses each strike's live IV rather than the static
 		// cfg.Indicators.IvDefaultPct fallback. The chain ImpliedVolatility carries the actual smile
