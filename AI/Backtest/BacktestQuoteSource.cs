@@ -274,6 +274,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		// strike for that (root, expiry); real candidate strikes for SPX-family tickers are never $1, so this
 		// only fires for the bootstrap probe, not for Phase-B leg refetches or position pricing.
 		var effectiveSymbols = optionSymbols;
+		var ladderMarkers = new List<string>(); // listed-but-no-bar strikes → cheap OI markers (NOT synthetic-priced)
 		if (_optionBars != null)
 		{
 			var probeExpiries = optionSymbols
@@ -289,18 +290,23 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				foreach (var (root, expiry) in probeExpiries)
 				{
 					// Build the candidate ladder from the day's LISTED strikes (CSV filenames, no per-bar load)
-					// within ±15% of spot. Two reasons: (1) speed — GetCapturedQuotePoints would GetBar every
-					// captured contract in the dir per tick (the crawl on dense roots like SPXW); ListStrikes is
-					// a memoized filename scan. (2) coverage — requiring a bar at the exact scan minute excluded
-					// the far-dated legs that rarely print at any given minute, collapsing the backtest to a
-					// handful of trades. The window keeps it to the strikes the enumerator can actually reach;
-					// each selected leg's real-vs-synthetic pricing is resolved (and flagged) downstream.
+					// within ±15% of spot. Classify each with ONE cheap memoized GetBar: a strike with a bar at
+					// the scan minute is priced normally (added to the request); a strike WITHOUT one becomes a
+					// cheap "listed" OI marker so the ladder still sees it WITHOUT triggering the expensive
+					// synthetic surface-IV pricing (which scans the whole expiry dir per symbol) for the entire
+					// chain every tick. Far-dated legs that rarely print at any minute thus still participate, and
+					// only the few legs the opener actually selects get synthetic-priced later (Phase-B refetch).
 					underlyings.TryGetValue(root, out var probeSpot);
 					var window = probeSpot > 0m ? probeSpot * ExpansionWindowPct : decimal.MaxValue;
 					foreach (var cp in new[] { "C", "P" })
 						foreach (var strike in _optionBars.ListStrikes(root, expiry, cp))
-							if (probeSpot <= 0m || Math.Abs(strike - probeSpot) <= window)
-								expanded.Add(MatchKeys.OccSymbol(root, expiry, strike, cp));
+						{
+							if (probeSpot > 0m && Math.Abs(strike - probeSpot) > window) continue;
+							var occ = MatchKeys.OccSymbol(root, expiry, strike, cp);
+							if (expanded.Contains(occ)) continue;
+							if (_optionBars.GetBar(occ, probeUtc) != null) expanded.Add(occ);
+							else ladderMarkers.Add(occ);
+						}
 				}
 				effectiveSymbols = expanded;
 			}
@@ -468,6 +474,14 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				ImpliedVolatility5Day: null
 			);
 		}
+
+		// Inject the cheap "listed" markers for chain strikes that had no bar at the scan minute: open-interest
+		// only, no bid/ask, no IV. The StrikeLadder treats them as tradeable (so the opener enumerates these
+		// strikes), but they're never synthetic-priced here — the few legs the opener actually selects get
+		// real pricing on the Phase-B refetch. Never overwrite a real priced quote.
+		foreach (var occ in ladderMarkers)
+			if (!options.ContainsKey(occ))
+				options[occ] = new OptionContractQuote(occ, null, null, null, null, null, Volume: null, OpenInterest: 1, ImpliedVolatility: null);
 
 		return new QuoteSnapshot(options, underlyings);
 	}
