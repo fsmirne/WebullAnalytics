@@ -288,17 +288,19 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				var expanded = new HashSet<string>(optionSymbols, StringComparer.OrdinalIgnoreCase);
 				foreach (var (root, expiry) in probeExpiries)
 				{
-					// Only expand near-money strikes. The opener's enumerator never reaches beyond a few
-					// percent of spot (delta bands + ±24-strike grid), so expanding the entire captured chain
-					// — which for densely-backfilled roots like SPXW is thousands of strikes per expiry —
-					// priced thousands of unused legs per tick and made the backtest crawl. ±15% covers every
-					// delta band at the widest DTE with headroom.
+					// Build the candidate ladder from the day's LISTED strikes (CSV filenames, no per-bar load)
+					// within ±15% of spot. Two reasons: (1) speed — GetCapturedQuotePoints would GetBar every
+					// captured contract in the dir per tick (the crawl on dense roots like SPXW); ListStrikes is
+					// a memoized filename scan. (2) coverage — requiring a bar at the exact scan minute excluded
+					// the far-dated legs that rarely print at any given minute, collapsing the backtest to a
+					// handful of trades. The window keeps it to the strikes the enumerator can actually reach;
+					// each selected leg's real-vs-synthetic pricing is resolved (and flagged) downstream.
 					underlyings.TryGetValue(root, out var probeSpot);
 					var window = probeSpot > 0m ? probeSpot * ExpansionWindowPct : decimal.MaxValue;
 					foreach (var cp in new[] { "C", "P" })
-						foreach (var pt in _optionBars.GetCapturedQuotePoints(root, expiry, cp, probeUtc))
-							if (probeSpot <= 0m || Math.Abs(pt.Strike - probeSpot) <= window)
-								expanded.Add(MatchKeys.OccSymbol(root, expiry, pt.Strike, cp));
+						foreach (var strike in _optionBars.ListStrikes(root, expiry, cp))
+							if (probeSpot <= 0m || Math.Abs(strike - probeSpot) <= window)
+								expanded.Add(MatchKeys.OccSymbol(root, expiry, strike, cp));
 				}
 				effectiveSymbols = expanded;
 			}

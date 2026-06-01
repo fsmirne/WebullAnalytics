@@ -103,6 +103,42 @@ internal sealed class HistoricalOptionBarCache
 		return points;
 	}
 
+	// dir → parsed (strike, callPut) per captured OCC filename. Built once per dir (filenames only, no bar load).
+	private readonly Dictionary<string, IReadOnlyList<(decimal Strike, string CallPut)>> _strikesByDir = new(StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>Strikes of <paramref name="callPut"/> captured for (root, expiry), parsed from CSV filenames —
+	/// NO per-contract bar load. The backtest builds the opener's candidate strike ladder from this: a contract
+	/// with a CSV is a real strike that traded that day. Using the day's listed strikes (rather than only those
+	/// with a bar at the exact scan minute, as <see cref="GetCapturedQuotePoints"/> requires) is what lets the
+	/// strategy's far-dated legs — which rarely print at any given minute — participate, instead of collapsing
+	/// the backtest to a handful of trades; whether a leg printed at the scan minute is a pricing detail
+	/// resolved when it's actually priced (and flagged in the provenance breakdown). Phantom-safe: only strikes
+	/// that have a CSV are returned, never invented. Memoized per dir (one filesystem scan for the whole run).</summary>
+	public IReadOnlyList<decimal> ListStrikes(string root, DateTime expiry, string callPut)
+	{
+		var dir = Path.Combine(_dataDir, root.ToUpperInvariant(), expiry.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture));
+		IReadOnlyList<(decimal Strike, string CallPut)> parsed;
+		lock (_lock)
+		{
+			if (!_strikesByDir.TryGetValue(dir, out parsed!))
+			{
+				var list = new List<(decimal, string)>();
+				if (Directory.Exists(dir))
+					foreach (var f in Directory.EnumerateFiles(dir, "*.csv"))
+					{
+						var p = ParsingHelpers.ParseOptionSymbol(Path.GetFileNameWithoutExtension(f));
+						if (p?.CallPut != null) list.Add((p.Strike, p.CallPut));
+					}
+				parsed = list;
+				_strikesByDir[dir] = parsed;
+			}
+		}
+		var result = new List<decimal>();
+		foreach (var (strike, cp) in parsed)
+			if (string.Equals(cp, callPut, StringComparison.OrdinalIgnoreCase)) result.Add(strike);
+		return result;
+	}
+
 	/// <summary>Diagnostic probe for cross-expiry recoverability: when a leg's OWN expiry has no captured
 	/// strikes at the minute (the parametric VIX-smile fallback fired), which side(s) of the target expiry
 	/// have a NEARBY expiry (same root+right, within ±<paramref name="maxExpiryDayGap"/> days) carrying at
