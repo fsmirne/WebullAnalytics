@@ -36,7 +36,7 @@ internal static class CandidateEnumerator
 				yield return sk;
 
 		if (cfg.Structures.IronButterfly.Enabled)
-			foreach (var sk in EnumerateIronButterflies(ticker, spot, asOf, cfg, availableExpirations))
+			foreach (var sk in EnumerateIronButterflies(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
 
 		if (cfg.Structures.IronCondor.Enabled)
@@ -431,23 +431,28 @@ internal static class CandidateEnumerator
 				}
 	}
 
-	private static IEnumerable<CandidateSkeleton> EnumerateIronButterflies(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations)
+	private static IEnumerable<CandidateSkeleton> EnumerateIronButterflies(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.IronButterfly;
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
 		var step = cfg.Indicators.StrikeStep;
-		var bodyStrikes = StrikeGrid(spot, step);
 		foreach (var exp in exps)
+		{
+			// Body straddle sits on a strike listed for both sides; wings are wingSteps strikes along each
+			// side's own ladder. Combined ladder picks the ATM body strikes; per-side ladders place the wings.
+			var putLadder = StrikeLadder.Build(ticker, exp, "P", quotes);
+			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
+			var bodyStrikes = StrikeGrid(spot, step, StrikeLadder.Build(ticker, exp, null, quotes));
 			foreach (var bodyStrike in bodyStrikes)
 				foreach (var wingSteps in sCfg.WingSteps.Distinct().OrderBy(w => w))
 				{
-					var putWing = bodyStrike - wingSteps * step;
-					var callWing = bodyStrike + wingSteps * step;
-					if (putWing <= 0m) continue;
+					if (WingStrike(bodyStrike, wingSteps, -1, step, putLadder) is not { } putWing || putWing <= 0m) continue;
+					if (WingStrike(bodyStrike, wingSteps, 1, step, callLadder) is not { } callWing || callWing <= 0m) continue;
 					yield return BuildIronButterfly(ticker, exp, putWing, bodyStrike, callWing);
 				}
+		}
 	}
 
 	private static CandidateSkeleton BuildIronButterfly(string ticker, DateTime exp, decimal putWingStrike, decimal bodyStrike, decimal callWingStrike)
@@ -478,7 +483,11 @@ internal static class CandidateEnumerator
 		foreach (var exp in exps)
 		{
 			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
-			var putShorts = StrikesBelowSpot(spot, step, count: 8)
+			var putLadder = StrikeLadder.Build(ticker, exp, "P", quotes);
+			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
+			// Combined both-sides ladder to measure the body width as a count of listed strikes across spot.
+			var bodyLadder = StrikeLadder.Build(ticker, exp, null, quotes);
+			var putShorts = StrikesBelow(spot, step, 8, putLadder)
 				.Where(shortStrike =>
 				{
 					var iv = ResolveIv(ticker, exp, shortStrike, "P", quotes, defaultIv);
@@ -486,7 +495,7 @@ internal static class CandidateEnumerator
 					return delta >= sCfg.ShortDeltaMin && delta <= sCfg.ShortDeltaMax;
 				})
 				.ToList();
-			var callShorts = StrikesAboveSpot(spot, step, count: 8)
+			var callShorts = StrikesAbove(spot, step, 8, callLadder)
 				.Where(shortStrike =>
 				{
 					var iv = ResolveIv(ticker, exp, shortStrike, "C", quotes, defaultIv);
@@ -498,17 +507,18 @@ internal static class CandidateEnumerator
 			foreach (var putShortStrike in putShorts)
 				foreach (var callShortStrike in callShorts)
 				{
-					var bodyWidth = callShortStrike - putShortStrike;
-					var bodyWidthSteps = bodyWidth / step;
 					if (callShortStrike <= putShortStrike) continue;
-					if (bodyWidthSteps != decimal.Truncate(bodyWidthSteps)) continue;
-					if (!sCfg.BodyWidthSteps.Contains((int)bodyWidthSteps)) continue;
+					// Body width = number of listed strikes between the two shorts along the real ladder
+					// (when a chain is known); falls back to the uniform step count for tests/--theoretical.
+					var bodyWidthSteps = bodyLadder.IsEmpty
+						? (int?)((callShortStrike - putShortStrike) / step is var bw && bw == decimal.Truncate(bw) ? (int)bw : -1)
+						: bodyLadder.StepsBetween(putShortStrike, callShortStrike);
+					if (bodyWidthSteps is not int bws || !sCfg.BodyWidthSteps.Contains(bws)) continue;
 
 					foreach (var widthSteps in sCfg.WidthSteps.Distinct().OrderBy(w => w))
 					{
-						var putLongStrike = putShortStrike - widthSteps * step;
-						var callLongStrike = callShortStrike + widthSteps * step;
-						if (putLongStrike <= 0m) continue;
+						if (WingStrike(putShortStrike, widthSteps, -1, step, putLadder) is not { } putLongStrike || putLongStrike <= 0m) continue;
+						if (WingStrike(callShortStrike, widthSteps, 1, step, callLadder) is not { } callLongStrike || callLongStrike <= 0m) continue;
 						yield return BuildIronCondor(ticker, exp, putLongStrike, putShortStrike, callShortStrike, callLongStrike);
 					}
 				}
