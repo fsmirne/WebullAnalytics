@@ -44,6 +44,12 @@ internal sealed class OpenerConfig
 	/// the live opener should likewise withhold opens until this time.</summary>
 	[JsonPropertyName("earliestEntryTimeEt")] public string? EarliestEntryTimeEt { get; set; } = null;
 
+	/// <summary>When true, restrict candidate expiries to the liquid Friday expiries (weeklies + the monthly).
+	/// SPX/SPXW Mon–Thu dailies are thin: they're disproportionately the no-trade legs that price synthetically
+	/// in the backtest and that the live liquidity filter rejects. Trading only Fridays raises real-bar coverage,
+	/// keeps the backtest aligned with what's actually live-tradeable, and shrinks the candidate space. Default false.</summary>
+	[JsonPropertyName("weeklyMonthlyExpiriesOnly")] public bool WeeklyMonthlyExpiriesOnly { get; set; } = false;
+
 	/// <summary>Multiplicative-factor weights applied to the candidate score chain. All twelve signals
 	/// live here in one sub-block so the user can see the full set of scoring knobs at a glance.</summary>
 	[JsonPropertyName("weights")] public OpenerWeightsConfig Weights { get; set; } = new();
