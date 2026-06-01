@@ -112,7 +112,7 @@ internal static class BacktestSummaryRenderer
 				f.Date.ToString("yyyy-MM-dd HH:mm"),
 				Markup.Escape(f.Ticker),
 				f.Kind.ToString(),
-				Markup.Escape(f.StrategyKind),
+				Markup.Escape(ShortStrategy(f.StrategyKind)),
 				Markup.Escape(FormatLegDetail(f.Legs)),
 				f.Qty.ToString(),
 				$"[{cashColor}]{perShareLabel}[/]",
@@ -122,11 +122,43 @@ internal static class BacktestSummaryRenderer
 				$"${f.Fees:N2}",
 				$"[{runningColor}]${runningCash:N2}[/]",
 				$"[{returnColor}]{returnLabel}[/]",
-				Markup.Escape(f.RuleName ?? "—"));
+				Markup.Escape(ShortRule(f.RuleName)));
 		}
 		AnsiConsole.Write(table);
 		AnsiConsole.WriteLine();
 	}
+
+	/// <summary>Short strategy-kind label for the fill ledger so the table doesn't wrap.</summary>
+	private static string ShortStrategy(string kind) => kind switch
+	{
+		"LongCalendar" => "LCal",
+		"DoubleCalendar" => "DCal",
+		"LongDiagonal" => "LDiag",
+		"DoubleDiagonal" => "DDiag",
+		"IronButterfly" => "IB",
+		"IronCondor" => "IC",
+		"ShortPutVertical" => "SPV",
+		"ShortCallVertical" => "SCV",
+		"LongCall" => "LC",
+		"LongPut" => "LP",
+		"LongCallVertical" => "LCV",
+		"LongPutVertical" => "LPV",
+		"DiagonalVertical" => "DV",
+		_ => kind,
+	};
+
+	/// <summary>Short rule label for the fill ledger: drops the "Rule" suffix and abbreviates the long ones.</summary>
+	private static string ShortRule(string? rule) => rule switch
+	{
+		null or "" => "—",
+		"CloseBeforeShortExpiryRule" => "CloseB4Exp",
+		"CloseSurvivorOnShortExpiry" => "SurvivorClose",
+		"RollShortOnExpiryRule" => "RollShort",
+		"OpportunisticRollRule" => "OppRoll",
+		"DefensiveRollRule" => "DefRoll",
+		"LegInShortRule" => "LegIn",
+		_ => rule.EndsWith("Rule", StringComparison.Ordinal) ? rule[..^4] : rule,
+	};
 
 	/// <summary>Compact summary of the leg set: unique sorted strikes, then earliest/latest expiry.
 	/// Single-expiry structures (iron condors, butterflies, verticals) show one date; multi-expiry
@@ -166,27 +198,37 @@ internal static class BacktestSummaryRenderer
 	/// carries the date range of its first and last trade day; counts are 0 when the curve is empty.</summary>
 	private static (int WinDays, DateTime WinStart, DateTime WinEnd, int LossDays, DateTime LossStart, DateTime LossEnd) ComputeDailyStreaks(BacktestResult result)
 	{
+		// Streaks count REALIZED win/loss days: each finalized lineage's total P&L attributed to the day it
+		// closed/expired. Opening a position dips equity (debit paid) but realizes nothing — the old
+		// equity-delta version wrongly flagged open days as losses. Days with no close are flat (ignored).
+		var realizedByDay = new SortedDictionary<DateTime, decimal>();
+		foreach (var g in result.Fills.GroupBy(f => f.LineageId))
+		{
+			var terminal = g.Where(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire)
+				.OrderBy(f => f.Date).LastOrDefault();
+			if (terminal == null) continue; // still open — nothing realized
+			var pnl = g.Sum(f => f.NetCashFlow - f.Fees);
+			var d = terminal.Date.Date;
+			realizedByDay[d] = realizedByDay.TryGetValue(d, out var v) ? v + pnl : pnl;
+		}
+
 		int bestWin = 0, bestLoss = 0, curWin = 0, curLoss = 0;
 		DateTime winStart = default, winEnd = default, lossStart = default, lossEnd = default, curWinStart = default, curLossStart = default;
-		var prev = result.StartingCash;
-		foreach (var (date, equity) in result.EquityCurve)
+		foreach (var (date, pnl) in realizedByDay)
 		{
-			var delta = equity - prev;
-			prev = equity;
-			if (delta > 0m)
+			if (pnl > 0m)
 			{
 				if (curWin == 0) curWinStart = date;
 				curWin++; curLoss = 0;
 				if (curWin > bestWin) { bestWin = curWin; winStart = curWinStart; winEnd = date; }
 			}
-			else if (delta < 0m)
+			else if (pnl < 0m)
 			{
 				if (curLoss == 0) curLossStart = date;
 				curLoss++; curWin = 0;
 				if (curLoss > bestLoss) { bestLoss = curLoss; lossStart = curLossStart; lossEnd = date; }
 			}
-			// Flat day (no equity change — a no-trade day): ignored. It neither extends nor breaks a
-			// streak, so runs span only the days we actually traded.
+			// pnl == 0 (scratch) → flat, ignored.
 		}
 		return (bestWin, winStart, winEnd, bestLoss, lossStart, lossEnd);
 	}
