@@ -148,8 +148,8 @@ internal static class AIContext
 		if (config == null) { Console.Error.WriteLine("Error: ai-config is empty or unparseable."); return null; }
 
 		// CLI overrides applied after the merge.
-		if (overrideTicker != null) config.Tickers = new List<string> { overrideTicker };
-		if (!string.IsNullOrWhiteSpace(settings.LogLevel)) config.Log.ConsoleVerbosity = settings.LogLevel;
+		if (overrideTicker != null) config.Ticker = overrideTicker;
+		if (!string.IsNullOrWhiteSpace(settings.LogLevel)) config.LogLevel = settings.LogLevel;
 
 		// Wire the shared indicators block onto OpenerConfig so helpers that only see cfg can reach it.
 		config.Opener.Indicators = config.Indicators;
@@ -336,8 +336,8 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		if (settings.Submit) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; }
 		if (settings.Tif != null) { config.AutoExecute.Management.TimeInForce = settings.Tif.ToUpperInvariant(); config.AutoExecute.Opener.TimeInForce = settings.Tif.ToUpperInvariant(); }
 
-		if (string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase))
-			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' tickers=[{string.Join(",", config.Tickers)}] proposals={settings.Proposals} theoretical={settings.Theoretical} submit={settings.Submit}");
+		if (string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase))
+			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' ticker={config.Ticker} proposals={settings.Proposals} theoretical={settings.Theoretical} submit={settings.Submit}");
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
@@ -351,7 +351,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
 		var quotes = AIContext.BuildLiveQuoteSource(config);
 
-		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
+		var tickerSet = config.TickerSet();
 		var now = DateTime.Now;
 
 		var priceCache = new Replay.HistoricalPriceCache();
@@ -382,7 +382,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var managementCount = settings.EmitManagementProposals ? results.Count : 0;
 		if (settings.EmitManagementProposals)
 		{
-			using var sink = new ProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			using var sink = new ProposalSink(config.LogLevel, config.Ticker, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
 		}
 		if (mgmtExecutor != null)
@@ -391,7 +391,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var openCount = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			var openSink = new OpenProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			var openSink = new OpenProposalSink(config.LogLevel, config.Ticker, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
@@ -428,8 +428,8 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 		if (settings.Premarket)
 		{
-			var debug = string.Equals(config.Log.ConsoleVerbosity, "debug", StringComparison.OrdinalIgnoreCase);
-			var needsParity = config.Tickers.Where(t => !explicitOverrides.ContainsKey(t)).ToList();
+			var debug = string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
+			var needsParity = explicitOverrides.ContainsKey(config.Ticker) ? new List<string>() : new List<string> { config.Ticker };
 			if (needsParity.Count > 0)
 			{
 				// Ensure the snapshot has contracts for every ticker we need parity on. Webull's live source
@@ -438,7 +438,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 				if (tickersWithoutContracts.Count > 0)
 				{
 					var placeholders = new HashSet<string>(tickersWithoutContracts.Select(t => MatchKeys.OccSymbol(t, now.Date.AddDays(7), 1m, "C")), StringComparer.OrdinalIgnoreCase);
-					var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
+					var tickerSet = config.TickerSet();
 					if (debug) Console.Error.WriteLine($"[debug] --premarket: bootstrap-fetching chain for {string.Join(",", tickersWithoutContracts)}.");
 					var boot = await quotes.GetQuotesAsync(now, placeholders, tickerSet, cancellation);
 					if (boot.Options.Count > 0)
@@ -551,7 +551,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 	private static async Task<int> RunTheoreticalAsync(AIScanSettings settings, AIConfig config, CancellationToken cancellation)
 	{
 		var spotOverrides = settings.ParseSpotOverrides();
-		var missing = config.Tickers.Where(t => !spotOverrides.ContainsKey(t)).ToList();
+		var missing = spotOverrides.ContainsKey(config.Ticker) ? new List<string>() : new List<string> { config.Ticker };
 		if (missing.Count > 0)
 		{
 			Console.Error.WriteLine($"Error: --spot must cover every configured ticker. Missing: {string.Join(", ", missing)}.");
@@ -559,7 +559,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		}
 
 		var asOf = settings.ResolveAsOf();
-		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
+		var tickerSet = config.TickerSet();
 
 		var bars = new Backtest.HistoricalBarCache(offline: true);
 		var smile = new Backtest.SmileIndexCache(offline: true);
@@ -614,7 +614,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var openerOrdersThisRun = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			var openSink = new OpenProposalSink(config.Log, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			var openSink = new OpenProposalSink(config.LogLevel, config.Ticker, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, backtestMode: true);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
@@ -838,7 +838,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
 
-		config.Tickers = new List<string> { settings.Ticker.ToUpperInvariant() };
+		config.Ticker = settings.Ticker.ToUpperInvariant();
 
 		// Apply per-run CLI overrides on top of the merged config. Used by --discover sweeps
 		// to vary one knob at a time without maintaining N config-file copies (the per-ticker
@@ -888,13 +888,10 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// Backtest is offline — the caches MUST already cover [since, until]. Run `wa ai history <ticker>` first.
 		var bars = new Backtest.HistoricalBarCache(offline: true);
 
-		foreach (var t in config.Tickers)
+		if (!await bars.HasCoverageAsync(config.Ticker, since, until, cancellation))
 		{
-			if (!await bars.HasCoverageAsync(t, since, until, cancellation))
-			{
-				Console.Error.WriteLine($"Error: missing bar history for {t} in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {t}");
-				return 1;
-			}
+			Console.Error.WriteLine($"Error: missing bar history for {config.Ticker} in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {config.Ticker}");
+			return 1;
 		}
 		// VIX-driven tickers (SPX family) need a VIX bar history for ATM IV and a CBOE SMILE history
 		// for per-day smile scaling. VIX1D (≤1 DTE) and VIX9D (≤9 DTE) anchor short-dated ATM IV at
@@ -902,7 +899,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// (wa ai history SPXW/SPX/XSP/SPY pulls VIX, VIX1D, VIX9D, and SMILE).
 		var vixDriven = new[] { "SPY", "SPX", "SPXW", "XSP" };
 		var smile = new Backtest.SmileIndexCache(offline: true);
-		if (config.Tickers.Any(t => vixDriven.Contains(t, StringComparer.OrdinalIgnoreCase)))
+		if (vixDriven.Contains(config.Ticker, StringComparer.OrdinalIgnoreCase))
 		{
 			if (!await bars.HasCoverageAsync("VIX", since, until, cancellation))
 			{
@@ -944,7 +941,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
 		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, scanStride: settings.ScanStride);
 
-		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape($"[{string.Join(",", config.Tickers)}]")} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
 
 		var result = await runner.RunAsync(since, until, cancellation);

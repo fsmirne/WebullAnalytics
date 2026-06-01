@@ -854,7 +854,7 @@ internal static class CandidateScorer
 		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events),
 		OpenStructureKind.LongCallVertical or OpenStructureKind.LongPutVertical => ScoreLongVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events),
 		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events),
-		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor or OpenStructureKind.DiagonalVertical => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events),
+		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor or OpenStructureKind.DiagonalVertical or OpenStructureKind.CalendarVertical => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events),
 		_ => null
 	};
 
@@ -1634,12 +1634,7 @@ internal static class CandidateScorer
 		return Math.Clamp(rrComponent / ratioPenalty, 0.05m, 1.25m);
 	}
 
-	private static int VolatilityFitSign(OpenStructureKind kind) => kind switch
-	{
-		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => 1,
-		OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal or OpenStructureKind.LongCall or OpenStructureKind.LongPut or OpenStructureKind.DiagonalVertical => -1,
-		_ => 0,
-	};
+	private static int VolatilityFitSign(OpenStructureKind kind) => StructureKindInfo.VolatilityFitSign(kind);
 	private readonly record struct MultiLegDefinition(ProposalLeg Proposal, OptionParsed Parsed, bool IsLong, decimal Iv);
 
 	/// <summary>Returns a copy of <paramref name="legs"/> with PricePerShare set to the midpoint
