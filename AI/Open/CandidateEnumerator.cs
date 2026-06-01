@@ -125,7 +125,7 @@ internal static class CandidateEnumerator
 						if (kind == OpenStructureKind.LongCalendar)
 						{
 							// Calendar shares one strike across expiries — require it listed at the long expiry too.
-							if (!longLadder.IsEmpty && WingStrike(shortStrike, 0, 1, step, longLadder) != shortStrike) continue;
+							if (longLadder.ChainPresent && WingStrike(shortStrike, 0, 1, step, longLadder) != shortStrike) continue;
 							yield return BuildSpread(ticker, kind, shortExp, longExp, shortStrike, shortStrike, callPut);
 						}
 						else
@@ -165,28 +165,32 @@ internal static class CandidateEnumerator
 	// chain is supplied (tests / --theoretical), the ladder is empty and we fall back to the uniform grid so
 	// behaviour is byte-for-byte unchanged.
 
-	/// <summary>~ATM strike band: the chain's listed strikes bracketing spot when known, else the uniform grid.</summary>
+	// Each helper is AUTHORITATIVE when the chain is present (live snapshot or backtest captured): it returns
+	// only real listed strikes, and an empty chain-present ladder yields nothing (no phantom strikes). Only
+	// when no chain was supplied at all (tests / --theoretical) do they fall back to the uniform step grid.
+
+	/// <summary>~ATM strike band: the chain's listed strikes bracketing spot when a chain is present, else the uniform grid.</summary>
 	private static IReadOnlyList<decimal> StrikeGrid(decimal spot, decimal step, StrikeLadder ladder)
-		=> ladder.IsEmpty ? StrikeGrid(spot, step) : ladder.Around(spot, 3).ToList();
+		=> ladder.ChainPresent ? ladder.Around(spot, 3).ToList() : StrikeGrid(spot, step);
 
-	/// <summary>Listed strikes below spot when the chain is known, else the uniform step grid.</summary>
+	/// <summary>Listed strikes below spot when a chain is present, else the uniform step grid.</summary>
 	private static IReadOnlyList<decimal> StrikesBelow(decimal spot, decimal step, int count, StrikeLadder ladder)
-		=> ladder.IsEmpty ? StrikesBelowSpot(spot, step, count).ToList() : ladder.Below(spot, count).ToList();
+		=> ladder.ChainPresent ? ladder.Below(spot, count).ToList() : StrikesBelowSpot(spot, step, count).ToList();
 
-	/// <summary>Listed strikes above spot when the chain is known, else the uniform step grid.</summary>
+	/// <summary>Listed strikes above spot when a chain is present, else the uniform step grid.</summary>
 	private static IReadOnlyList<decimal> StrikesAbove(decimal spot, decimal step, int count, StrikeLadder ladder)
-		=> ladder.IsEmpty ? StrikesAboveSpot(spot, step, count).ToList() : ladder.Above(spot, count).ToList();
+		=> ladder.ChainPresent ? ladder.Above(spot, count).ToList() : StrikesAboveSpot(spot, step, count).ToList();
 
-	/// <summary>Listed strikes bracketing spot when the chain is known, else the uniform step grid.</summary>
+	/// <summary>Listed strikes bracketing spot when a chain is present, else the uniform step grid.</summary>
 	private static IReadOnlyList<decimal> StrikesAround(decimal spot, decimal step, int count, StrikeLadder ladder)
-		=> ladder.IsEmpty ? StrikesAroundSpot(spot, step, count).ToList() : ladder.Around(spot, count).ToList();
+		=> ladder.ChainPresent ? ladder.Around(spot, count).ToList() : StrikesAroundSpot(spot, step, count).ToList();
 
 	/// <summary>Wing strike <paramref name="w"/> positions from <paramref name="anchor"/> in direction
-	/// <paramref name="dir"/> (+1 up / -1 down): a count of strikes along the real ladder when known, else a
-	/// uniform <c>w × step</c> dollar offset. Null when the offset runs off the ladder — the caller drops that
-	/// candidate, exactly as it would live when the wing strike isn't listed.</summary>
+	/// <paramref name="dir"/> (+1 up / -1 down): a count of strikes along the real ladder when a chain is
+	/// present (null when it runs off the ladder OR no strike is there — the caller drops that candidate), else
+	/// a uniform <c>w × step</c> dollar offset.</summary>
 	private static decimal? WingStrike(decimal anchor, int w, int dir, decimal step, StrikeLadder ladder)
-		=> ladder.IsEmpty ? anchor + dir * w * step : ladder.Offset(anchor, dir * w);
+		=> ladder.ChainPresent ? ladder.Offset(anchor, dir * w) : anchor + dir * w * step;
 
 	private static CandidateSkeleton BuildSpread(string ticker, OpenStructureKind kind, DateTime shortExp, DateTime longExp, decimal shortStrike, decimal longStrike, string callPut)
 	{
@@ -418,7 +422,7 @@ internal static class CandidateEnumerator
 							// Wing must be the SAME listed strike on both expiries. Offset along the long ladder,
 							// then confirm that exact strike is also listed in the short ladder (snap-and-verify).
 							if (WingStrike(anchor, w, dir, step, longLadder) is not { } wing || wing <= 0m) continue;
-							if (!shortLadder.IsEmpty && WingStrike(anchor, w, dir, step, shortLadder) != wing) continue;
+							if (shortLadder.ChainPresent && WingStrike(anchor, w, dir, step, shortLadder) != wing) continue;
 							// Same anchor + wing on both expiries → a calendar pair, not a diagonal.
 							yield return BuildTwoVerticalStructure(ticker, OpenStructureKind.CalendarVertical, side, shortExp, longExp, anchor, wing, anchor, wing);
 						}
@@ -504,7 +508,7 @@ internal static class CandidateEnumerator
 					if (callShortStrike <= putShortStrike) continue;
 					// Body width = number of listed strikes between the two shorts along the real ladder
 					// (when a chain is known); falls back to the uniform step count for tests/--theoretical.
-					var bodyWidthSteps = bodyLadder.IsEmpty
+					var bodyWidthSteps = !bodyLadder.ChainPresent
 						? (int?)((callShortStrike - putShortStrike) / step is var bw && bw == decimal.Truncate(bw) ? (int)bw : -1)
 						: bodyLadder.StepsBetween(putShortStrike, callShortStrike);
 					if (bodyWidthSteps is not int bws || !sCfg.BodyWidthSteps.Contains(bws)) continue;
