@@ -29,6 +29,11 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 {
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
+	/// <summary>Moneyness half-width for the bootstrap chain expansion: only captured strikes within ±15% of
+	/// spot are surfaced to the opener's ladder. The enumerator never reaches further (delta bands + a
+	/// ±24-strike grid), so expanding the whole captured chain just priced thousands of unused legs per tick.</summary>
+	private const decimal ExpansionWindowPct = 0.15m;
+
 	/// <summary>Converts an ET wall-clock <see cref="DateTime"/> to the UTC instant for cache lookup,
 	/// preserving the time-of-day. The historical option bars are keyed by UTC minute, and callers
 	/// pass <paramref name="asOf"/> at the minute they're evaluating — 09:30 ET for the daily-step
@@ -282,9 +287,19 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				var probeUtc = ToUtcMinute(asOf);
 				var expanded = new HashSet<string>(optionSymbols, StringComparer.OrdinalIgnoreCase);
 				foreach (var (root, expiry) in probeExpiries)
+				{
+					// Only expand near-money strikes. The opener's enumerator never reaches beyond a few
+					// percent of spot (delta bands + ±24-strike grid), so expanding the entire captured chain
+					// — which for densely-backfilled roots like SPXW is thousands of strikes per expiry —
+					// priced thousands of unused legs per tick and made the backtest crawl. ±15% covers every
+					// delta band at the widest DTE with headroom.
+					underlyings.TryGetValue(root, out var probeSpot);
+					var window = probeSpot > 0m ? probeSpot * ExpansionWindowPct : decimal.MaxValue;
 					foreach (var cp in new[] { "C", "P" })
 						foreach (var pt in _optionBars.GetCapturedQuotePoints(root, expiry, cp, probeUtc))
-							expanded.Add(MatchKeys.OccSymbol(root, expiry, pt.Strike, cp));
+							if (probeSpot <= 0m || Math.Abs(pt.Strike - probeSpot) <= window)
+								expanded.Add(MatchKeys.OccSymbol(root, expiry, pt.Strike, cp));
+				}
 				effectiveSymbols = expanded;
 			}
 		}

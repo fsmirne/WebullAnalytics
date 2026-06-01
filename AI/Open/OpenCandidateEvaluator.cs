@@ -75,16 +75,25 @@ internal sealed class OpenCandidateEvaluator
 		{
 			// Probe one placeholder OCC symbol per (ticker, candidate-expiry). Webull's live quote source
 			// returns the full chain for any one symbol — but the BacktestQuoteSource only prices what's
-			// asked, so we must enumerate the actual cadence (Mon-Fri for SPX/SPY/QQQ/NDX/XSP, Mon-Wed-Fri
-			// for mega-cap multi-weeklies, Fridays for everything else) up to the widest enabled DTE.
+			// asked AND expands each $1 probe into that expiry's captured chain, so we restrict the probe to
+			// expiries that fall in an enabled structure's DTE band. Probing every day 0..maxDte made the
+			// backtest expand (and price) the full captured chain for ~40 expiries per tick on dense roots
+			// like SPXW — most of them outside any band and never enumerated. Live is unaffected: one
+			// placeholder still returns the whole chain.
 			var maxDte = MaxDteAcrossStructures(cfg);
+			var dteRanges = DteRangesForStructures(cfg);
+			bool InAnyBand(DateTime exp)
+			{
+				var d = (exp.Date - ctx.Now.Date).Days;
+				return d >= 0 && dteRanges.Any(r => d >= r.Min && d <= r.Max);
+			}
 			var placeholders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 			foreach (var t in missingTickers)
 			{
-				foreach (var exp in OpenerExpiryHelpers.NextExpiriesForTicker(t, ctx.Now, 0, maxDte))
+				foreach (var exp in OpenerExpiryHelpers.NextExpiriesForTicker(t, ctx.Now, 0, maxDte).Where(InAnyBand))
 					placeholders.Add(MatchKeys.OccSymbol(t, exp, 1m, "C"));
 				// Calendar/diagonal long legs reach into monthly DTE; probe those 3rd-Fridays too.
-				foreach (var exp in OpenerExpiryHelpers.MonthlyExpiriesInRange(ctx.Now, 0, maxDte))
+				foreach (var exp in OpenerExpiryHelpers.MonthlyExpiriesInRange(ctx.Now, 0, maxDte).Where(InAnyBand))
 					placeholders.Add(MatchKeys.OccSymbol(t, exp, 1m, "C"));
 				// Guard against an empty cadence (e.g. minDte/maxDte yielding no days) — keep at least one
 				// probe so the underlying spot still surfaces.
