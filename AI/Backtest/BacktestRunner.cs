@@ -245,7 +245,8 @@ internal sealed class BacktestRunner
 			EquityCurve: equityCurve,
 			Fills: _book.Fills,
 			EndMtmByLineage: endMtmByLineage,
-			Provenance: ComputeProvenance());
+			Provenance: ComputeProvenance(),
+			Cleanliness: ComputeCleanliness());
 	}
 
 	/// <summary>Per-lineage MTM of still-open positions at the final step. Used by the renderer to split
@@ -1206,6 +1207,45 @@ internal sealed class BacktestRunner
 		return new PricingProvenance(zCap, zTot, mCap, mTot);
 	}
 
+	/// <summary>Per-trade cleanliness split: a finalized lineage is "clean" only if EVERY market-priced fill
+	/// (Open/Close/Roll/LegIn — Expire settles at real bar.Close intrinsic, always real) had a real captured
+	/// bar for all its option legs. Trades with any synthetic-priced leg are "contaminated" — their entry/exit
+	/// can be mispriced (e.g. a no-bar long leg producing a fake-cheap entry and a huge phantom gain). Breaking
+	/// out the P&L this way separates real signal from synthetic artifacts, which the aggregate provenance %
+	/// (bar existence across all legs) can't.</summary>
+	private CleanlinessBreakdown ComputeCleanliness()
+	{
+		int cleanN = 0, contamN = 0, cleanW = 0, cleanL = 0, contamW = 0, contamL = 0;
+		decimal cleanPnl = 0m, contamPnl = 0m, cleanGrossWin = 0m, cleanGrossLoss = 0m;
+		foreach (var g in _book.Fills.GroupBy(f => f.LineageId))
+		{
+			if (!g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire)) continue; // only finalized trades
+			var clean = true;
+			foreach (var f in g)
+			{
+				if (f.Kind == BacktestFillKind.Expire) continue; // intrinsic settlement is real
+				foreach (var leg in f.Legs)
+				{
+					if (ParsingHelpers.ParseOptionSymbol(leg.Symbol)?.CallPut == null) continue;
+					if (!_quotes.HasCapturedBarOnDate(leg.Symbol, f.Date)) { clean = false; break; }
+				}
+				if (!clean) break;
+			}
+			var pnl = g.Sum(f => f.NetCashFlow - f.Fees);
+			if (clean)
+			{
+				cleanN++; cleanPnl += pnl;
+				if (pnl > 0m) { cleanW++; cleanGrossWin += pnl; } else { cleanL++; cleanGrossLoss += Math.Abs(pnl); }
+			}
+			else
+			{
+				contamN++; contamPnl += pnl;
+				if (pnl > 0m) contamW++; else contamL++;
+			}
+		}
+		return new CleanlinessBreakdown(cleanN, cleanPnl, cleanW, cleanL, cleanGrossWin, cleanGrossLoss, contamN, contamPnl, contamW, contamL);
+	}
+
 	/// <summary>Adds each option leg's OCC symbol to the discovery set. Called for fall-through paths
 	/// (daily-step rule fires, management opens) that don't use the top-K aggregator. Cheap — just
 	/// a hashset add — so it's safe to invoke whether or not <c>_discover</c> is set; <see cref="FlushDiscoveryLog"/>
@@ -1354,6 +1394,19 @@ internal readonly record struct PricingProvenance(int ZeroDteCaptured, int ZeroD
 	public double MultiDteCapturedPct => MultiDteTotal == 0 ? 1.0 : (double)MultiDteCaptured / MultiDteTotal;
 }
 
+/// <summary>Per-trade split by pricing cleanliness: "clean" = every market-priced fill of the trade used real
+/// captured bars; "contaminated" = at least one leg was synthetic (entry/exit can be mispriced). Lets the
+/// summary show whether the edge lives in the real-priced trades or the synthetic artifacts.</summary>
+internal readonly record struct CleanlinessBreakdown(
+	int CleanCount, decimal CleanPnl, int CleanWins, int CleanLosses, decimal CleanGrossWin, decimal CleanGrossLoss,
+	int ContamCount, decimal ContamPnl, int ContamWins, int ContamLosses)
+{
+	public decimal CleanProfitFactor => CleanGrossLoss > 0m ? CleanGrossWin / CleanGrossLoss : 0m;
+	public decimal CleanExpectancy => CleanCount > 0 ? CleanPnl / CleanCount : 0m;
+	public decimal CleanWinRate => CleanCount > 0 ? CleanWins * 100m / CleanCount : 0m;
+	public decimal ContamWinRate => ContamCount > 0 ? ContamWins * 100m / ContamCount : 0m;
+}
+
 internal sealed record BacktestResult(
 	decimal StartingCash,
 	decimal EndingCash,
@@ -1368,7 +1421,8 @@ internal sealed record BacktestResult(
 	IReadOnlyList<(DateTime Date, decimal Equity)> EquityCurve,
 	IReadOnlyList<BacktestFill> Fills,
 	IReadOnlyDictionary<long, decimal> EndMtmByLineage,
-	PricingProvenance Provenance)
+	PricingProvenance Provenance,
+	CleanlinessBreakdown Cleanliness)
 {
 	/// <summary>P&L on closed lifecycles only (lineages that ended in Close or Expire). Each lifecycle's
 	/// P&L = sum of (NetCashFlow - Fees) across all fills sharing its LineageId.</summary>
