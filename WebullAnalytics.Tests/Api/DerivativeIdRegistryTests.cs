@@ -120,4 +120,83 @@ public class DerivativeIdRegistryTests : IDisposable
 		DerivativeIdRegistry.Register(new Dictionary<string, long> { ["A"] = 1 });
 		Assert.Single(DerivativeIdRegistry.Snapshot());
 	}
+
+	[Fact]
+	public void RecordSnapshot_MarksTradeableStrikes_AndQueriesByTicker()
+	{
+		DerivativeIdRegistry.Register(new Dictionary<string, long>
+		{
+			["XSP260605C00760000"] = 111, // $760, tradeable
+			["XSP260605C00761000"] = 112, // $761, dead
+			["XSP260605C00765000"] = 113, // $765, tradeable
+		});
+		DerivativeIdRegistry.RecordSnapshot("2026-06-01", new Dictionary<string, (bool, long?)>
+		{
+			["XSP260605C00760000"] = (true, 1200),
+			["XSP260605C00761000"] = (false, null),
+			["XSP260605C00765000"] = (true, 800),
+		});
+
+		Assert.True(DerivativeIdRegistry.HasSnapshot("XSP", "2026-06-01"));
+		Assert.False(DerivativeIdRegistry.HasSnapshot("XSP", "2026-06-02")); // wrong date
+		Assert.False(DerivativeIdRegistry.HasSnapshot("SPXW", "2026-06-01")); // wrong ticker
+
+		var tradeable = DerivativeIdRegistry.TradeableOccs("XSP", "2026-06-01");
+		Assert.Equal(2, tradeable.Count);
+		Assert.Contains("XSP260605C00760000", tradeable);
+		Assert.Contains("XSP260605C00765000", tradeable);
+		Assert.DoesNotContain("XSP260605C00761000", tradeable); // dead strike excluded
+	}
+
+	[Fact]
+	public void RecordSnapshot_SkipsContractsNotYetHarvested()
+	{
+		DerivativeIdRegistry.RecordSnapshot("2026-06-01", new Dictionary<string, (bool, long?)>
+		{
+			["XSP260605C00760000"] = (true, 1200), // never Register'd → must be ignored
+		});
+		Assert.Empty(DerivativeIdRegistry.TradeableOccs("XSP", "2026-06-01"));
+	}
+
+	[Fact]
+	public void Register_PreservesExistingLiquiditySnapshot()
+	{
+		DerivativeIdRegistry.Register(new Dictionary<string, long> { ["XSP260605C00760000"] = 111 });
+		DerivativeIdRegistry.RecordSnapshot("2026-06-01", new Dictionary<string, (bool, long?)> { ["XSP260605C00760000"] = (true, 1200) });
+		// Re-harvesting the same id must not wipe the snapshot.
+		DerivativeIdRegistry.Register(new Dictionary<string, long> { ["XSP260605C00760000"] = 111 });
+		Assert.Contains("XSP260605C00760000", DerivativeIdRegistry.TradeableOccs("XSP", "2026-06-01"));
+	}
+
+	[Fact]
+	public void EnrichedEntries_RoundTripThroughDisk_AndIdsStillReadable()
+	{
+		DerivativeIdRegistry.Register(new Dictionary<string, long> { ["XSP260605C00760000"] = 111, ["XSP260605C00761000"] = 112 });
+		DerivativeIdRegistry.RecordSnapshot("2026-06-01", new Dictionary<string, (bool, long?)> { ["XSP260605C00760000"] = (true, 1200) });
+
+		// Reload from disk: enriched + id-only entries must both survive.
+		DerivativeIdRegistry.ResetForTests(_path);
+		Assert.Contains("XSP260605C00760000", DerivativeIdRegistry.TradeableOccs("XSP", "2026-06-01"));
+		var ids = DerivativeIdRegistry.Snapshot();
+		Assert.Equal(111, ids["XSP260605C00760000"]); // enriched entry's id still readable
+		Assert.Equal(112, ids["XSP260605C00761000"]); // bare-number entry still readable
+	}
+
+	[Fact]
+	public void LoadFromDisk_MixedLegacyAndEnrichedForm()
+	{
+		Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
+		File.WriteAllText(_path, """
+		{
+		  "XSP260605C00761000": 112,
+		  "XSP260605C00760000": { "id": 111, "asof": "2026-06-01", "tradeable": true, "oi": 1200 }
+		}
+		""");
+		DerivativeIdRegistry.ResetForTests(_path);
+
+		var ids = DerivativeIdRegistry.Snapshot();
+		Assert.Equal(112, ids["XSP260605C00761000"]);
+		Assert.Equal(111, ids["XSP260605C00760000"]);
+		Assert.Equal(new[] { "XSP260605C00760000" }, DerivativeIdRegistry.TradeableOccs("XSP", "2026-06-01"));
+	}
 }
