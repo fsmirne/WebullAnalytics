@@ -543,30 +543,31 @@ internal static class CandidateEnumerator
 		foreach (var exp in exps)
 		{
 			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
+			var putLadder = StrikeLadder.Build(ticker, exp, "P", quotes);
+			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
 
 			// Put credit side (bullish): short strike below spot.
-			foreach (var shortStrike in StrikesBelowSpot(spot, step, count: 8))
+			foreach (var shortStrike in StrikesBelow(spot, step, 8, putLadder))
 			{
 				var iv = ResolveIv(ticker, exp, shortStrike, "P", quotes, defaultIv);
 				var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "P"));
 				if (delta < sCfg.ShortDeltaMin || delta > sCfg.ShortDeltaMax) continue;
 				foreach (var widthSteps in sCfg.WidthSteps)
 				{
-					var longStrike = shortStrike - widthSteps * step;
-					if (longStrike <= 0m) continue;
+					if (WingStrike(shortStrike, widthSteps, -1, step, putLadder) is not { } longStrike || longStrike <= 0m) continue;
 					yield return BuildVertical(ticker, OpenStructureKind.ShortPutVertical, exp, shortStrike, longStrike, "P");
 				}
 			}
 
 			// Call credit side (bearish): short strike above spot.
-			foreach (var shortStrike in StrikesAboveSpot(spot, step, count: 8))
+			foreach (var shortStrike in StrikesAbove(spot, step, 8, callLadder))
 			{
 				var iv = ResolveIv(ticker, exp, shortStrike, "C", quotes, defaultIv);
 				var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "C"));
 				if (delta < sCfg.ShortDeltaMin || delta > sCfg.ShortDeltaMax) continue;
 				foreach (var widthSteps in sCfg.WidthSteps)
 				{
-					var longStrike = shortStrike + widthSteps * step;
+					if (WingStrike(shortStrike, widthSteps, 1, step, callLadder) is not { } longStrike || longStrike <= 0m) continue;
 					yield return BuildVertical(ticker, OpenStructureKind.ShortCallVertical, exp, shortStrike, longStrike, "C");
 				}
 			}
@@ -590,33 +591,34 @@ internal static class CandidateEnumerator
 		foreach (var exp in exps)
 		{
 			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
+			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
+			var putLadder = StrikeLadder.Build(ticker, exp, "P", quotes);
 
 			// Bull call spread (LongCallVertical): buy a near-ATM call, sell a further-OTM call.
 			// Filter long-leg by delta in [longDeltaMin, longDeltaMax]. Iterate strikes both above
 			// and below spot since delta-0.55 can be slightly ITM (strike below spot) and
 			// delta-0.30 can be OTM (strike above).
-			foreach (var longStrike in StrikesAroundSpot(spot, step, count: 8))
+			foreach (var longStrike in StrikesAround(spot, step, 8, callLadder))
 			{
 				var iv = ResolveIv(ticker, exp, longStrike, "C", quotes, defaultIv);
 				var longDelta = Math.Abs(OptionMath.Delta(spot, longStrike, years, OptionMath.RiskFreeRate, iv, "C"));
 				if (longDelta < sCfg.LongDeltaMin || longDelta > sCfg.LongDeltaMax) continue;
 				foreach (var widthSteps in sCfg.WidthSteps)
 				{
-					var shortStrike = longStrike + widthSteps * step;
+					if (WingStrike(longStrike, widthSteps, 1, step, callLadder) is not { } shortStrike || shortStrike <= 0m) continue;
 					yield return BuildVertical(ticker, OpenStructureKind.LongCallVertical, exp, shortStrike, longStrike, "C");
 				}
 			}
 
 			// Bear put spread (LongPutVertical): buy a near-ATM put, sell a further-OTM put.
-			foreach (var longStrike in StrikesAroundSpot(spot, step, count: 8))
+			foreach (var longStrike in StrikesAround(spot, step, 8, putLadder))
 			{
 				var iv = ResolveIv(ticker, exp, longStrike, "P", quotes, defaultIv);
 				var longDelta = Math.Abs(OptionMath.Delta(spot, longStrike, years, OptionMath.RiskFreeRate, iv, "P"));
 				if (longDelta < sCfg.LongDeltaMin || longDelta > sCfg.LongDeltaMax) continue;
 				foreach (var widthSteps in sCfg.WidthSteps)
 				{
-					var shortStrike = longStrike - widthSteps * step;
-					if (shortStrike <= 0m) continue;
+					if (WingStrike(longStrike, widthSteps, -1, step, putLadder) is not { } shortStrike || shortStrike <= 0m) continue;
 					yield return BuildVertical(ticker, OpenStructureKind.LongPutVertical, exp, shortStrike, longStrike, "P");
 				}
 			}
@@ -676,7 +678,8 @@ internal static class CandidateEnumerator
 
 			foreach (var callPut in new[] { "C", "P" })
 			{
-				foreach (var strike in StrikesAroundSpot(spot, step, count: 10))
+				var ladder = StrikeLadder.Build(ticker, exp, callPut, quotes);
+				foreach (var strike in StrikesAround(spot, step, 10, ladder))
 				{
 					var iv = ResolveIv(ticker, exp, strike, callPut, quotes, defaultIv);
 					var delta = Math.Abs(OptionMath.Delta(spot, strike, years, OptionMath.RiskFreeRate, iv, callPut));
