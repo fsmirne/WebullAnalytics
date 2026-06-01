@@ -707,6 +707,9 @@ internal sealed class OpenCandidateEvaluator
 		if (s.IronCondor.Enabled) max = Math.Max(max, s.IronCondor.DteMax);
 		if (s.ShortVertical.Enabled) max = Math.Max(max, s.ShortVertical.DteMax);
 		if (s.LongCallPut.Enabled) max = Math.Max(max, s.LongCallPut.DteMax);
+		if (s.LongVertical.Enabled) max = Math.Max(max, s.LongVertical.DteMax);
+		if (s.DiagonalVertical.Enabled) max = Math.Max(max, Math.Max(s.DiagonalVertical.ShortDteMax, s.DiagonalVertical.LongDteMax));
+		if (s.CalendarVertical.Enabled) max = Math.Max(max, Math.Max(s.CalendarVertical.ShortDteMax, s.CalendarVertical.LongDteMax));
 		return max;
 	}
 
