@@ -24,7 +24,7 @@ internal sealed class StrikeLadder
 	/// A strike is "listed" if the chain returned a contract for it — existence, not live bid/ask, because
 	/// the opener's Phase-B pass fetches bid/ask for the legs it actually selects afterward (a far-DTE strike
 	/// often comes back symbol-only from the chain probe and only gets priced once chosen).</summary>
-	public static StrikeLadder Build(string ticker, DateTime expiry, string callPut, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	public static StrikeLadder Build(string ticker, DateTime expiry, string? callPut, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		if (quotes == null || quotes.Count == 0) return Empty;
 		var quoted = new SortedSet<decimal>();
@@ -36,7 +36,9 @@ internal sealed class StrikeLadder
 			if (p == null) continue;
 			if (!string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
 			if (p.ExpiryDate.Date != expiry.Date) continue;
-			if (!string.Equals(p.CallPut, callPut, StringComparison.OrdinalIgnoreCase)) continue;
+			// callPut == null builds a combined both-sides ladder (used to count strikes across spot, e.g.
+			// the iron-condor body width); otherwise restrict to the given side.
+			if (callPut != null && !string.Equals(p.CallPut, callPut, StringComparison.OrdinalIgnoreCase)) continue;
 			var q = kv.Value;
 			listed.Add(p.Strike);
 			if (q.Bid is > 0m && q.Ask is > 0m) quoted.Add(p.Strike);
@@ -84,6 +86,15 @@ internal sealed class StrikeLadder
 		var target = idx + steps;
 		if (target < 0 || target >= _strikes.Length) return null;
 		return _strikes[target];
+	}
+
+	/// <summary>Count of listed strikes between <paramref name="a"/> and <paramref name="b"/> — the absolute
+	/// index difference after snapping each to the nearest listed strike. Null when the ladder is empty. Used
+	/// for iron-condor body width expressed as a count of strikes along the real ladder.</summary>
+	public int? StepsBetween(decimal a, decimal b)
+	{
+		if (_strikes.Length == 0) return null;
+		return Math.Abs(NearestIndex(a) - NearestIndex(b));
 	}
 
 	private int NearestIndex(decimal target)
