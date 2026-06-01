@@ -98,7 +98,7 @@ internal sealed class OpenCandidateEvaluator
 		// real-bar coverage, aligns the backtest with what's live-tradeable, and shrinks the candidate space.
 		if (cfg.WeeklyMonthlyExpiriesOnly)
 			foreach (var set in availableByTicker.Values)
-				set.RemoveWhere(d => d.DayOfWeek != DayOfWeek.Friday);
+				set.RemoveWhere(d => !IsWeekEndingExpiry(d));
 
 		// Phase A: enumerate across all tickers. Feed the enumerator the merged chain quotes so the
 		// delta-band filter on strike picks uses each strike's live IV rather than the static
@@ -654,6 +654,18 @@ internal sealed class OpenCandidateEvaluator
 		if (value <= 0m) return 0;
 		var floored = Math.Floor(value);
 		return floored >= int.MaxValue ? int.MaxValue : (int)floored;
+	}
+
+	/// <summary>True when <paramref name="expiry"/> is the last open trading day of its Mon–Sun week — the
+	/// weekly/monthly expiry, not a Mon–Thu daily. Normally that's Friday, but it correctly keeps a
+	/// holiday-shifted expiry (e.g. the June monthly on Thursday 2026-06-18 when Friday 06-19 is Juneteenth)
+	/// instead of dropping it like a naive DayOfWeek==Friday check would. Excludes mid-week dailies because a
+	/// later open day exists in their week.</summary>
+	private static bool IsWeekEndingExpiry(DateTime expiry)
+	{
+		for (var d = expiry.AddDays(1); d.DayOfWeek != DayOfWeek.Monday; d = d.AddDays(1))
+			if (MarketCalendar.IsOpen(d)) return false;
+		return true;
 	}
 
 	private static bool IsCalendarLike(OpenProposal proposal) => proposal.StructureKind is OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal or OpenStructureKind.DiagonalVertical;
