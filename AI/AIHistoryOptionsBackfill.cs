@@ -353,7 +353,7 @@ internal static class AIHistoryOptionsBackfill
 		{
 			var preview = string.Join(", ", emptyResponses.Take(8));
 			var more = emptyResponses.Count > 8 ? $", +{emptyResponses.Count - 8} more" : "";
-			AnsiConsole.MarkupLine($"  [yellow]{emptyResponses.Count} empty[/] (Webull returned no bars — contract likely expired before chart history starts): {Markup.Escape(preview)}{Markup.Escape(more)}");
+			AnsiConsole.MarkupLine($"  [yellow]{emptyResponses.Count} empty[/] (source returned no bars — off-grid strike, or the contract never traded): {Markup.Escape(preview)}{Markup.Escape(more)}");
 		}
 		if (failures.Count > 0)
 		{
