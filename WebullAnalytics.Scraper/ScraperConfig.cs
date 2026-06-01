@@ -43,6 +43,14 @@ internal sealed class ScraperConfig
 	/// interval (default 3 × 3s = 9s, comfortably within the 60s tick).</summary>
 	[JsonPropertyName("emptyRetryDelaySeconds")]
 	public int EmptyRetryDelaySeconds { get; set; } = 3;
+
+	/// <summary>How many calendar days of expiries to capture, measured from the scrape date. 0 (default)
+	/// keeps only today's expiry (0DTE) — the original behavior and smallest files. Raise it to also capture
+	/// the further-dated expiries the diagonal/calendar long legs use (e.g. 45 covers the 21–45 DTE band), so
+	/// `wa options reprice` can validate the far-leg synthetic pricing against real quotes. Webull's chain
+	/// spans ~30k contracts across all expirations; the DTE cap bounds how much of that is persisted per minute.</summary>
+	[JsonPropertyName("maxDte")]
+	public int MaxDte { get; set; } = 0;
 }
 
 internal static class ScraperConfigLoader

@@ -50,9 +50,14 @@ internal sealed class ScrapeSettings : CommandSettings
 	[Description("Override config intervalSeconds. Must divide 60 evenly for clean minute boundaries (1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60).")]
 	public int? Interval { get; set; }
 
+	[CommandOption("--max-dte <N>")]
+	[Description("Capture expiries from today out to N calendar days. Default 0 = today/0DTE only (original behavior). Use e.g. 45 to also capture the diagonal/calendar long legs for pricing validation — larger per-minute files.")]
+	public int? MaxDte { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("ticker is required");
+		if (MaxDte.HasValue && MaxDte.Value < 0) return ValidationResult.Error($"--max-dte: must be >= 0, got {MaxDte.Value}");
 		if (Start != null && !TimeOnly.TryParse(Start, CultureInfo.InvariantCulture, out _))
 			return ValidationResult.Error($"--start: must be HH:mm or HH:mm:ss, got '{Start}'");
 		if (End != null && !TimeOnly.TryParse(End, CultureInfo.InvariantCulture, out _))
@@ -73,6 +78,7 @@ internal sealed class ScrapeCommand : AsyncCommand<ScrapeSettings>
 		if (settings.Interval.HasValue) config.IntervalSeconds = settings.Interval.Value;
 		if (settings.Start != null) config.StartTime = settings.Start;
 		if (settings.End != null) config.EndTime = settings.End;
+		if (settings.MaxDte.HasValue) config.MaxDte = settings.MaxDte.Value;
 
 		var apiConfigPath = WebullAnalytics.Program.ResolvePath(WebullAnalytics.Program.ApiConfigPath);
 		if (!File.Exists(apiConfigPath))
