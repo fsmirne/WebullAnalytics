@@ -25,6 +25,9 @@ internal sealed class HistoricalOptionBarCache
 	// expiry-dir → captured OCC filenames (one filesystem scan per expiry dir, then memoized).
 	private readonly Dictionary<string, IReadOnlyList<string>> _occsByExpiryDir =
 		new(StringComparer.OrdinalIgnoreCase);
+	// root (upper) → sorted captured expiry dates on disk (one root-dir scan per root, then memoized).
+	private readonly Dictionary<string, IReadOnlyList<DateTime>> _expiriesByRoot =
+		new(StringComparer.OrdinalIgnoreCase);
 	private readonly object _lock = new();
 
 	public HistoricalOptionBarCache(string? dataDir = null)
@@ -98,6 +101,51 @@ internal sealed class HistoricalOptionBarCache
 		}
 		points.Sort((a, b) => a.Item1.CompareTo(b.Item1));
 		return points;
+	}
+
+	/// <summary>Diagnostic probe for cross-expiry recoverability: when a leg's OWN expiry has no captured
+	/// strikes at the minute (the parametric VIX-smile fallback fired), which side(s) of the target expiry
+	/// have a NEARBY expiry (same root+right, within ±<paramref name="maxExpiryDayGap"/> days) carrying at
+	/// least one captured strike at that minute? Anchors on BOTH sides → genuine total-variance
+	/// interpolation; one side only → extrapolation across the gap (far less reliable); neither → the whole
+	/// local term structure was untraded that minute and no interpolation scheme can recover it. Off the
+	/// hot path — called once per VIX-fallback leg in the post-run provenance pass.</summary>
+	public (bool Below, bool Above) NeighborExpiryAnchors(string root, DateTime targetExpiry, string callPut, DateTimeOffset minuteUtc, int maxExpiryDayGap)
+	{
+		bool below = false, above = false;
+		foreach (var exp in ExpiriesForRoot(root))
+		{
+			var gap = (exp - targetExpiry.Date).Days;
+			if (gap == 0 || Math.Abs(gap) > maxExpiryDayGap) continue;
+			if (below && gap < 0) continue; // already found a closer/earlier anchor on this side
+			if (above && gap > 0) continue;
+			if (GetCapturedQuotePoints(root, exp, callPut, minuteUtc).Count == 0) continue;
+			if (gap < 0) below = true; else above = true;
+			if (below && above) break;
+		}
+		return (below, above);
+	}
+
+	/// <summary>Sorted list of expiry dates with a captured-contract directory on disk for <paramref name="root"/>.
+	/// One <c>data/options/&lt;root&gt;/</c> directory scan per root, then memoized. Non-date entries (e.g.
+	/// <c>sealed.json</c>) are skipped.</summary>
+	private IReadOnlyList<DateTime> ExpiriesForRoot(string root)
+	{
+		lock (_lock)
+		{
+			if (_expiriesByRoot.TryGetValue(root, out var cached)) return cached;
+			var rootDir = Path.Combine(_dataDir, root.ToUpperInvariant());
+			var list = new List<DateTime>();
+			if (Directory.Exists(rootDir))
+				foreach (var dir in Directory.EnumerateDirectories(rootDir))
+				{
+					if (DateTime.TryParseExact(Path.GetFileName(dir), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d))
+						list.Add(d.Date);
+				}
+			list.Sort();
+			_expiriesByRoot[root] = list;
+			return list;
+		}
 	}
 
 	/// <summary>Diagnostic: true when <paramref name="occ"/> has at least one captured bar on the
