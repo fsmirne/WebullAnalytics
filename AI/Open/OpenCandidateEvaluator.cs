@@ -442,7 +442,7 @@ internal sealed class OpenCandidateEvaluator
 						: null;
 					var legsDesc = bestCandidate == null
 						? ""
-						: " [" + string.Join(", ", bestCandidate.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol}@{(l.PricePerShare?.ToString("F2") ?? "?")}")) + "]";
+						: " " + string.Join(",", bestCandidate.Legs.Select(l => $"{l.Action.ToLowerInvariant()}:{l.Symbol}:{l.Qty}@{(l.PricePerShare?.ToString("F2") ?? "?")}"));
 					Console.Error.WriteLine($"[debug] {asOfEt:yyyy-MM-dd HH:mm:ss} ET {tickerGroup.Key} {kv.Key}: scored={scores.Count} positive={positive} negative={scores.Count - positive} best={best:F6} worst={worst:F6}{legsDesc}");
 				}
 			}
