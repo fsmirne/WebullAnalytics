@@ -289,45 +289,55 @@ internal static class RiskDiagnosticBuilder
 				var longCall = longCalls[0].Parsed;
 				var longPut = longPuts[0].Parsed;
 				var expiries = longLegs.Concat(shortLegs).Select(l => l.Parsed.ExpiryDate).Distinct().ToList();
-				if (expiries.Count == 1)
-				{
-					if (shortCall.Strike == shortPut.Strike
-						&& longPut.Strike < shortPut.Strike
-						&& longCall.Strike > shortCall.Strike)
-						return ("iron_butterfly", "neutral");
-					if (shortPut.Strike < shortCall.Strike
-						&& longPut.Strike < shortPut.Strike
-						&& longCall.Strike > shortCall.Strike)
-						return ("iron_condor", "neutral");
-				}
-				else if (expiries.Count == 2
+				// Validate the iron / double geometry here; the NAME (iron_butterfly vs iron_condor,
+				// double_calendar vs double_diagonal) is then derived from the shared count-based taxonomy in
+				// ParsingHelpers so the structure vocabulary lives in one place. The geometry guards stay so a
+				// malformed 2L2S set still falls through to "unknown" rather than being force-named.
+				var ironValid = expiries.Count == 1
+					&& ((shortCall.Strike == shortPut.Strike && longPut.Strike < shortPut.Strike && longCall.Strike > shortCall.Strike)
+						|| (shortPut.Strike < shortCall.Strike && longPut.Strike < shortPut.Strike && longCall.Strike > shortCall.Strike));
+				var doubleValid = expiries.Count == 2
 					&& shortCall.ExpiryDate == shortPut.ExpiryDate
 					&& longCall.ExpiryDate == longPut.ExpiryDate
 					&& longCall.ExpiryDate > shortCall.ExpiryDate
-					&& shortPut.Strike < shortCall.Strike)
-				{
-					// Both halves are diagonals (long strike offset from short) → double diagonal.
-					// Otherwise both halves share their per-side strike → double calendar.
-					if (longPut.Strike != shortPut.Strike || longCall.Strike != shortCall.Strike)
-						return ("double_diagonal", "neutral");
-					return ("double_calendar", "neutral");
-				}
+					&& shortPut.Strike < shortCall.Strike;
+				if (ironValid || doubleValid)
+					return (NameFromCounts(longLegs, shortLegs), "neutral");
 			}
 		}
 
 		// Single-sided 2 long + 2 short across two expiries (all same call/put), each expiry forming a
-		// vertical (one long + one short) -> diagonal vertical. Net exposure is calendar-like -> neutral.
+		// vertical (one long + one short). Validate the shape here; the name (calendar_vertical with one
+		// shared anchor, diagonal_vertical with offset anchors) again comes from the shared taxonomy.
 		if (longLegs.Count == 2 && shortLegs.Count == 2
 			&& longLegs.Concat(shortLegs).Select(l => l.Parsed.CallPut).Distinct().Count() == 1)
 		{
 			var dvExpiries = longLegs.Concat(shortLegs).Select(l => l.Parsed.ExpiryDate).Distinct().ToList();
 			if (dvExpiries.Count == 2
 				&& dvExpiries.All(e => longLegs.Count(l => l.Parsed.ExpiryDate == e) == 1 && shortLegs.Count(l => l.Parsed.ExpiryDate == e) == 1))
-				return ("diagonal_vertical", "neutral");
+				return (NameFromCounts(longLegs, shortLegs), "neutral");
 		}
 
 		return ("unknown", "neutral");
 	}
+
+	/// <summary>Derives the multi-leg structure label from the shared count-based taxonomy
+	/// (<see cref="ParsingHelpers.ClassifyStrategyKind"/>), lower-cased to snake_case to match the risk
+	/// vocabulary. Only called once the caller's geometry guards have confirmed a valid shape, so the
+	/// count-based kind and the geometry agree by construction — this keeps structure NAMES in one place
+	/// while the geometry validation (valid vs unknown) and bias stay in the classifier.</summary>
+	private static string NameFromCounts(IReadOnlyList<DiagnosticLeg> longLegs, IReadOnlyList<DiagnosticLeg> shortLegs)
+	{
+		var all = longLegs.Concat(shortLegs).ToList();
+		var distinctExpiries = all.Select(l => l.Parsed.ExpiryDate).Distinct().Count();
+		var distinctStrikes = all.Select(l => l.Parsed.Strike).Distinct().Count();
+		var distinctCallPut = all.Select(l => l.Parsed.CallPut).Distinct().Count();
+		return PascalToSnake(ParsingHelpers.ClassifyStrategyKind(all.Count, distinctExpiries, distinctStrikes, distinctCallPut));
+	}
+
+	/// <summary>"IronButterfly" → "iron_butterfly", "CalendarVertical" → "calendar_vertical".</summary>
+	private static string PascalToSnake(string s) =>
+		string.Concat(s.Select((c, i) => i > 0 && char.IsUpper(c) ? "_" + char.ToLowerInvariant(c) : char.ToLowerInvariant(c).ToString()));
 
 	/// <summary>Per-leg bid/ask spread as a fraction of mid; minimum effective liquidity per leg
 	/// (max of OI and intraday volume); relative liquidity per leg (leg's effective liquidity / max

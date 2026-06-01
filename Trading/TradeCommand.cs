@@ -288,6 +288,13 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		if (strategy == null)
 		{ AnsiConsole.MarkupLine("[red]Error:[/] could not classify legs; pass --strategy explicitly."); return 2; }
 
+		// 3a. Cross-expiry 4-leg structures aren't a single Webull combo ticket — the opener splits each into
+		// two separate vertical orders (DiagonalVertical/CalendarVertical by expiry; DoubleCalendar/
+		// DoubleDiagonal by call/put side). Placing all four legs as one order can't infer a single side and
+		// would fail-closed later; instruct the user to place the two split orders instead.
+		if (strategy is "DiagonalVertical" or "CalendarVertical" or "DoubleCalendar" or "DoubleDiagonal")
+		{ AnsiConsole.MarkupLine($"[red]Error:[/] '{strategy}' must be placed as two separate orders — Webull rejects it as one 4-leg ticket. Use the two `wa trade place` lines from the proposal; each is a single vertical."); return 2; }
+
 		// 3b. Validate leg count matches the declared/inferred strategy.
 		var stockCount = legs.Count(l => l.Option == null);
 		var optionCount = legs.Count(l => l.Option != null);

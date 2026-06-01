@@ -116,7 +116,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
 		var quotes = AIContext.BuildLiveQuoteSource(config);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
-		var tickerSet = new HashSet<string>(config.Tickers, StringComparer.OrdinalIgnoreCase);
+		var tickerSet = config.TickerSet();
 
 		// Auto-executors: turn proposals into real (or dry-run) order submissions. Both off by default;
 		// both honor enabled/submit gates independently. Shared with `wa ai scan` via AIContext.BuildAutoExecutors.
@@ -124,16 +124,16 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 		var priceCache = new Replay.HistoricalPriceCache();
 
-		using var sink = new ProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+		using var sink = new ProposalSink(config.LogLevel, config.Ticker, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 		OpenProposalSink? openSink = null;
 		OpenCandidateEvaluator? openEvaluator = null;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			openSink = new OpenProposalSink(config.Log, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			openSink = new OpenProposalSink(config.LogLevel, config.Ticker, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache);
 		}
 
-		AnsiConsole.MarkupLine($"[bold]ai watch[/] tickers={string.Join(",", config.Tickers)} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss}");
+		AnsiConsole.MarkupLine($"[bold]ai watch[/] ticker={config.Ticker} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss}");
 
 		var failures = 0;
 		var ticksRun = 0;

@@ -19,7 +19,7 @@ public class OpenCandidateEvaluatorTests
 	{
 		var ai = new AIConfig
 		{
-			Tickers = new() { "SPY" },
+			Ticker = "SPY",
 			Indicators = new IndicatorsConfig { IvDefaultPct = 40m, StrikeStep = 1m },
 			Opener = opener,
 			CashReserve = new CashReserveConfig { Mode = "absolute", Value = 0m }

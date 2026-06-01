@@ -16,20 +16,20 @@ namespace WebullAnalytics.AI.Output;
 internal sealed class ProposalSink : IDisposable
 {
 	private readonly StreamWriter _file;
-	private readonly LogConfig _log;
+	private readonly string _consoleVerbosity;
 	private readonly string _mode; // "watch" | "scan" | "replay"
 	private readonly string _suggestPricing;
 	private readonly bool _ascii;
 	private readonly string _cmdPrefix;
 
-	public ProposalSink(LogConfig log, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
+	public ProposalSink(string consoleVerbosity, string ticker, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
 	{
-		_log = log;
+		_consoleVerbosity = consoleVerbosity;
 		_mode = mode;
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
 		_ascii = ascii;
 		_cmdPrefix = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
-		var path = Program.ResolvePath(log.Path);
+		var path = ProposalLog.ResolvedPath(ticker);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
 	}
@@ -40,7 +40,11 @@ internal sealed class ProposalSink : IDisposable
 		WriteConsole(p, isRepeat);
 	}
 
-	private void WriteJsonl(ManagementProposal p)
+	private void WriteJsonl(ManagementProposal p) => _file.WriteLine(SerializeRecord(p, _mode));
+
+	/// <summary>Serializes one management proposal to its JSONL line. Pure (no I/O) so it's unit-testable
+	/// without touching the filesystem; the sink wraps it with the append writer.</summary>
+	internal static string SerializeRecord(ManagementProposal p, string mode)
 	{
 		var record = new
 		{
@@ -59,15 +63,15 @@ internal sealed class ProposalSink : IDisposable
 			diagnostic = p.Diagnostic is null ? null : AnalyzePositionCommand.SerializeDiagnostic(p.Diagnostic),
 			cashReserveBlocked = p.CashReserveBlocked,
 			cashReserveDetail = p.CashReserveDetail,
-			mode = _mode
+			mode = mode
 		};
-		_file.WriteLine(JsonSerializer.Serialize(record));
+		return JsonSerializer.Serialize(record);
 	}
 
 	private void WriteConsole(ManagementProposal p, bool isRepeat)
 	{
-		if (_log.ConsoleVerbosity == "error") return;
-		if (isRepeat && _log.ConsoleVerbosity == "information") return;
+		if (_consoleVerbosity == "error") return;
+		if (isRepeat && _consoleVerbosity == "information") return;
 
 		var color = p.Kind switch
 		{

@@ -221,6 +221,7 @@ internal sealed class OpenerStructuresConfig
 	[JsonPropertyName("longCallPut")] public OpenerLongCallPutConfig LongCallPut { get; set; } = new();
 	[JsonPropertyName("longVertical")] public OpenerLongVerticalConfig LongVertical { get; set; } = new();
 	[JsonPropertyName("diagonalVertical")] public OpenerDiagonalVerticalConfig DiagonalVertical { get; set; } = new();
+	[JsonPropertyName("calendarVertical")] public OpenerCalendarVerticalConfig CalendarVertical { get; set; } = new();
 }
 
 /// <summary>Diagonal-from-verticals: a near-dated SHORT vertical (credit) + a far-dated LONG vertical
@@ -238,6 +239,23 @@ internal sealed class OpenerDiagonalVerticalConfig
 	[JsonPropertyName("longDeltaMax")] public decimal LongDeltaMax { get; set; } = 0.55m;
 	[JsonPropertyName("shortDeltaMin")] public decimal ShortDeltaMin { get; set; } = 0.20m;
 	[JsonPropertyName("shortDeltaMax")] public decimal ShortDeltaMax { get; set; } = 0.35m;
+	[JsonPropertyName("widthSteps")] public List<int> WidthSteps { get; set; } = new() { 2, 4 };
+}
+
+/// <summary>Calendar-from-verticals: a near-dated SHORT vertical (credit) + a far-dated LONG vertical
+/// (debit) on one side that SHARE one anchor strike across both expiries (the calendar leg). The anchor
+/// sits in <see cref="DeltaMin"/>–<see cref="DeltaMax"/> (typically near-ATM, where calendar theta/vega is
+/// richest); each vertical's wing is <see cref="WidthSteps"/> × strike step further OTM, the same on both
+/// expiries. Net = long calendar at the anchor capped by a short calendar at the wing. Disabled by default.</summary>
+internal sealed class OpenerCalendarVerticalConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	[JsonPropertyName("shortDteMin")] public int ShortDteMin { get; set; } = 3;
+	[JsonPropertyName("shortDteMax")] public int ShortDteMax { get; set; } = 10;
+	[JsonPropertyName("longDteMin")] public int LongDteMin { get; set; } = 21;
+	[JsonPropertyName("longDteMax")] public int LongDteMax { get; set; } = 45;
+	[JsonPropertyName("deltaMin")] public decimal DeltaMin { get; set; } = 0.40m;
+	[JsonPropertyName("deltaMax")] public decimal DeltaMax { get; set; } = 0.55m;
 	[JsonPropertyName("widthSteps")] public List<int> WidthSteps { get; set; } = new() { 2, 4 };
 }
 

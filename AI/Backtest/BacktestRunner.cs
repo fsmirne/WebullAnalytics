@@ -78,7 +78,7 @@ internal sealed class BacktestRunner
 
 	public async Task<BacktestResult> RunAsync(DateTime since, DateTime until, CancellationToken cancellation)
 	{
-		var tickerSet = new HashSet<string>(_config.Tickers, StringComparer.OrdinalIgnoreCase);
+		var tickerSet = _config.TickerSet();
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(_config), _config);
 		var openEvaluator = new OpenCandidateEvaluator(_config, _quotes, SuggestionPricing.Mid, _closeCache, backtestMode: true);
 
@@ -1292,7 +1292,7 @@ internal sealed class BacktestRunner
 	private void FlushDiscoveryLog()
 	{
 		if (_discoveredOccs.Count == 0) return;
-		var ticker = _config.Tickers.FirstOrDefault();
+		var ticker = _config.Ticker;
 		if (string.IsNullOrWhiteSpace(ticker)) return;
 		var tk = ticker.ToUpperInvariant();
 

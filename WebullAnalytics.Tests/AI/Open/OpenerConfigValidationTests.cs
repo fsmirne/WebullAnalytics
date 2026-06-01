@@ -9,7 +9,7 @@ public class OpenerConfigValidationTests
 	{
 		var c = new AIConfig
 		{
-			Tickers = new() { "GME" },
+			Ticker = "GME",
 			Indicators = new IndicatorsConfig { IvDefaultPct = 40m, StrikeStep = 0.50m },
 		};
 		c.Opener.Indicators = c.Indicators;

@@ -31,7 +31,8 @@ internal sealed class BrokerStateService
 	// gate fresh submissions of the same shape.
 	private HashSet<string>? _activeLegSetFingerprints;
 	private Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>? _activeByFingerprint;
-	private int _todaysActiveOrderCount;
+	// Active-order count keyed by underlying root, so the daily cap can be scoped to the running ticker.
+	private Dictionary<string, int>? _activeOrderCountByRoot;
 
 	// Order statuses that should DEDUP a new submission: working (still pending) or successfully
 	// filled (already executed today). Canceled/rejected don't count — we're free to try again.
@@ -57,10 +58,13 @@ internal sealed class BrokerStateService
 	/// callers should skip live submission this tick.</summary>
 	public bool IsReady => _activeLegSetFingerprints != null;
 
-	/// <summary>Count of distinct ACTIVE orders today (filled or pending, excluding canceled/rejected).
-	/// Used by daily-cap enforcement so the cap holds across pending → filled transitions and
-	/// across process restarts (the broker remembers; we re-query each tick).</summary>
-	public int TodaysActiveOrderCount => _todaysActiveOrderCount;
+	/// <summary>Count of distinct ACTIVE orders today (filled or pending, excluding canceled/rejected) for
+	/// <paramref name="ticker"/>. The daily cap is scoped per ticker, so concurrent single-ticker watch/scan
+	/// processes on the same account enforce independent caps. Counts broker ORDERS: a split structure
+	/// (diagonal/calendar vertical, double calendar/diagonal) places two orders and counts as two. Holds
+	/// across pending → filled transitions and process restarts (the broker remembers; re-queried each tick).</summary>
+	public int TodaysActiveOrderCount(string ticker) =>
+		_activeOrderCountByRoot != null && _activeOrderCountByRoot.TryGetValue(ticker.ToUpperInvariant(), out var n) ? n : 0;
 
 	/// <summary>Pull both today's order history (any status) and the currently-open orders from
 	/// Webull, then build a unified leg-set index covering anything in an "active" state — filled,
@@ -80,7 +84,7 @@ internal sealed class BrokerStateService
 		var seenClientIds = new HashSet<string>(StringComparer.Ordinal);
 		var fingerprints = new HashSet<string>(StringComparer.Ordinal);
 		var byFingerprint = new Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>(StringComparer.Ordinal);
-		var activeCount = 0;
+		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
 		void Ingest(IEnumerable<WebullOpenApiClient.OpenOrder> combos)
 		{
@@ -96,7 +100,8 @@ internal sealed class BrokerStateService
 					fingerprints.Add(fp);
 					if (!byFingerprint.TryGetValue(fp, out var list)) byFingerprint[fp] = list = new List<WebullOpenApiClient.OrderDetailOrder>();
 					list.Add(order);
-					activeCount++;
+					var root = RootOf(order.Legs);
+					if (root != null) rootCount[root] = rootCount.TryGetValue(root, out var c) ? c + 1 : 1;
 				}
 			}
 		}
@@ -106,7 +111,17 @@ internal sealed class BrokerStateService
 
 		_activeLegSetFingerprints = fingerprints;
 		_activeByFingerprint = byFingerprint;
-		_todaysActiveOrderCount = activeCount;
+		_activeOrderCountByRoot = rootCount;
+	}
+
+	/// <summary>Underlying root of an order's leg set (all legs of one combo share it). Used to scope the
+	/// daily-cap count per ticker. Returns the first non-empty leg symbol, uppercased, or null.</summary>
+	private static string? RootOf(IEnumerable<WebullOpenApiClient.OrderDetailLeg>? legs)
+	{
+		if (legs == null) return null;
+		foreach (var l in legs)
+			if (!string.IsNullOrEmpty(l.Symbol)) return l.Symbol!.ToUpperInvariant();
+		return null;
 	}
 
 	/// <summary>Returns true when the proposal's leg set matches an ACTIVE order at the broker —
@@ -185,7 +200,7 @@ internal sealed class BrokerStateService
 			AnsiConsole.MarkupLine($"[yellow]broker state refresh failed:[/] {Markup.Escape(ex.Message)} — auto-execute skipped this tick (fail-closed).");
 			_activeLegSetFingerprints = null;
 			_activeByFingerprint = null;
-			_todaysActiveOrderCount = 0;
+			_activeOrderCountByRoot = null;
 			return false;
 		}
 	}

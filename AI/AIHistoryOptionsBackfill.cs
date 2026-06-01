@@ -498,7 +498,7 @@ internal static class AIHistoryOptionsBackfill
 
 	internal static HashSet<string> LoadTouchedSymbols(string ticker) =>
 		LoadTouchedSymbolsFromPaths(
-			Program.ResolvePath("data/ai-proposals.jsonl"),
+			ProposalLog.ResolvedPath(ticker),
 			Program.ResolvePath(Program.OrdersPath),
 			Path.Combine(Program.ResolvePath("data/options-discovery"), ticker.ToUpperInvariant() + ".jsonl"),
 			ticker);
