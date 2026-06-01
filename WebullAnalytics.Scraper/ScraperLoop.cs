@@ -101,13 +101,14 @@ internal sealed class ScraperLoop
 		return 0;
 	}
 
-	/// <summary>Pulls the SPXW chain via Webull and appends one JSON line to today's JSONL file,
-	/// keeping only the contracts that expire today (0DTE). Webull's strategy/list returns the full
-	/// chain across every listed expiration (~30k contracts for SPXW), which balloons each per-minute
-	/// line to ~4 MB; the scraper exists to capture the same-day expiry the bot trades, so everything
-	/// past today's expiry is dropped before persisting. One file per (ticker, NY date). The fire-time
-	/// is stamped in both UTC and ET so downstream consumers can re-derive the minute bucket without
-	/// re-parsing the timestamp string.</summary>
+	/// <summary>Pulls the chain via Webull and appends one JSON line to today's JSONL file, keeping the
+	/// contracts that expire from today out to <c>config.MaxDte</c> calendar days. Webull's strategy/list
+	/// returns the full chain across every listed expiration (~30k contracts for SPXW), which balloons each
+	/// per-minute line; MaxDte=0 (default) keeps only the same-day 0DTE expiry the bot trades, while a larger
+	/// MaxDte also captures the further-dated legs the diagonal/calendar structures use — so the synthetic
+	/// far-leg pricing can be validated against real quotes via `wa options reprice`. One file per
+	/// (ticker, NY date). The fire-time is stamped in both UTC and ET so downstream consumers can re-derive
+	/// the minute bucket without re-parsing the timestamp string.</summary>
 	private async Task<(int Count, decimal? Spot)> TickOnceAsync(DateTime fireWallClock, CancellationToken cancellation)
 	{
 		var fireEt = TimeZoneInfo.ConvertTime(fireWallClock, NyTz);
@@ -124,7 +125,13 @@ internal sealed class ScraperLoop
 			var (quotes, fetchedSpot, _) = await WebullOptionsClient.FetchChainAsync(_apiConfig, _ticker, cancellation);
 			spot = fetchedSpot;
 			todayContracts = quotes.Values
-				.Where(q => WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)?.ExpiryDate.Date == fireEt.Date)
+				.Where(q =>
+				{
+					var exp = WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)?.ExpiryDate.Date;
+					if (exp == null) return false;
+					var dte = (exp.Value - fireEt.Date).Days;
+					return dte >= 0 && dte <= _config.MaxDte;
+				})
 				.ToList();
 			if (todayContracts.Count > 0) break;
 			if (attempt < _config.EmptyRetryCount)
