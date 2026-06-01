@@ -33,7 +33,7 @@ internal static class AIHistoryOptionsBackfill
 	private static readonly TimeSpan DefaultPace = TimeSpan.FromMilliseconds(200);
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-	public static async Task<int> RunAsync(string ticker, bool force, bool all, DateTime? since, int webullPad, CancellationToken cancellation)
+	public static async Task<int> RunAsync(string ticker, bool force, bool all, DateTime? since, int webullPad, string source, CancellationToken cancellation)
 	{
 		AnsiConsole.MarkupLine($"[bold]Option backfill for {Markup.Escape(ticker)}[/]" + (since.HasValue ? $" (expiry ≥ {since.Value:yyyy-MM-dd})" : ""));
 
@@ -246,8 +246,13 @@ internal static class AIHistoryOptionsBackfill
 				continue;
 			}
 
-			if (id.HasValue) work.Add((occ, id, parsed, csvPath, mergeExisting, OptionDataSource.Webull));
-			else if (hasMassiveKey) work.Add((occ, null, parsed, csvPath, mergeExisting, OptionDataSource.Massive));
+			// Route per --source. 'massive' sends everything (live + expired) through massive — fast parallel
+			// pull, no slow rate-paced Webull route; ideal for historical backfill. 'webull' only takes
+			// Webull-routable (id-bearing live) contracts. 'all' (default) splits live→Webull, expired→massive.
+			var wantWebull = source != "massive" && id.HasValue;
+			var wantMassive = !wantWebull && source != "webull" && hasMassiveKey;
+			if (wantWebull) work.Add((occ, id, parsed, csvPath, mergeExisting, OptionDataSource.Webull));
+			else if (wantMassive) work.Add((occ, null, parsed, csvPath, mergeExisting, OptionDataSource.Massive));
 			else skippedNoMassive++;
 		}
 		var webullCount = work.Count(w => w.Source == OptionDataSource.Webull);

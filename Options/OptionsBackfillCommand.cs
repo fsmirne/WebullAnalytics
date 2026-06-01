@@ -29,6 +29,10 @@ internal sealed class OptionsBackfillSettings : CommandSettings
 	[Description("Only backfill contracts whose expiry is on or after this date (YYYY-MM-DD). Bounds the work to a window of interest — e.g. --since 2026-01-01 to focus on the YTD sweep window instead of the full multi-year catalog.")]
 	public string? Since { get; set; }
 
+	[CommandOption("--source <SOURCE>")]
+	[Description("Which data source to route contracts to: 'all' (default — live contracts via Webull, expired via massive), 'massive' (everything via massive.com — fast parallel pull, serves live + expired; best for historical backfill since it skips the slow rate-paced Webull route), or 'webull' (only Webull-routable live contracts). massive needs a MassiveApiKey.")]
+	public string Source { get; set; } = "all";
+
 	[CommandOption("--webull-pad <N>")]
 	[Description("Widen each Webull-routable (expiry, right) by N additional strikes beyond the touched range (filling any interior gaps too). Mirrors the touched side's range to the opposite right when one has picks and the other doesn't. Massive-routable contracts are unaffected — they stay at the strict touched filter so the rate-limited path isn't bloated. Captures headroom for future strategy variations (wider delta bands, deeper wings) while Webull still serves the chart data — historical bars become inaccessible once the contract drops out of the live chain. Default: 30 (≈±150 pts on SPXW; covers ~delta 0.02–0.98 at 0DTE). Set to 0 to disable.")]
 	public int WebullPad { get; set; } = 30;
@@ -39,6 +43,7 @@ internal sealed class OptionsBackfillSettings : CommandSettings
 		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--since: must be YYYY-MM-DD, got '{Since}'");
 		if (WebullPad < 0) return ValidationResult.Error($"--webull-pad: must be >= 0, got {WebullPad}");
+		if (Source is not ("all" or "massive" or "webull")) return ValidationResult.Error($"--source: must be all|massive|webull, got '{Source}'");
 		return ValidationResult.Success();
 	}
 }
@@ -51,6 +56,6 @@ internal sealed class OptionsBackfillCommand : AsyncCommand<OptionsBackfillSetti
 		DateTime? since = settings.Since != null
 			? DateTime.ParseExact(settings.Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
 			: null;
-		return await AIHistoryOptionsBackfill.RunAsync(ticker, settings.Force, settings.All, since, settings.WebullPad, cancellation);
+		return await AIHistoryOptionsBackfill.RunAsync(ticker, settings.Force, settings.All, since, settings.WebullPad, settings.Source, cancellation);
 	}
 }
