@@ -227,7 +227,9 @@ internal sealed class OpenerStructuresConfig
 /// <summary>Diagonal-from-verticals: a near-dated SHORT vertical (credit) + a far-dated LONG vertical
 /// (debit) on one side. The long-vertical's long leg sits in <see cref="LongDeltaMin"/>–<see cref="LongDeltaMax"/>
 /// (the directional anchor); the short-vertical's short leg sits in <see cref="ShortDeltaMin"/>–<see cref="ShortDeltaMax"/>
-/// (further OTM, theta financing). Each vertical's width = WidthSteps × strike step. Disabled by default.</summary>
+/// (further OTM, theta financing). WidthSteps × strike step sizes the near short vertical; the far long
+/// vertical's protective wing is pinned to the near vertical's protective wing so the far leg hedges the near
+/// vertical's whole loss zone (a diagonal tent, not a zigzag with an unhedged downside cliff). Disabled by default.</summary>
 internal sealed class OpenerDiagonalVerticalConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;

@@ -35,4 +35,8 @@ internal readonly record struct RiskDiagnosticFacts(
 	DateTime? NextEarningsDate = null,
 	string? EarningsTime = null,
 	DateTime? NextExDividendDate = null,
-	bool HasShortCallLeg = false);
+	bool HasShortCallLeg = false,
+	// True when a SHORT leg still lives after the earliest short expiry — i.e. what you hold post-expiry is a
+	// defined-risk spread (e.g. a DiagonalVertical's far vertical), not a naked long. Drives the wording and
+	// the residual-delta calc in ShortExpiresBeforeLongRule.
+	bool ShortLegSurvivesPostShort = false);
