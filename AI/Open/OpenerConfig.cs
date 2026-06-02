@@ -261,6 +261,11 @@ internal sealed class OpenerCalendarVerticalConfig
 	[JsonPropertyName("widthSteps")] public List<int> WidthSteps { get; set; } = new() { 2, 4 };
 }
 
+/// <summary>LongCalendar / LongDiagonal config. Strike placement: when <see cref="DeltaMax"/> &gt; 0 strikes
+/// are picked by delta band (the anchor / long-leg lands in <see cref="DeltaMin"/>–<see cref="DeltaMax"/>;
+/// for a diagonal the near short leg lands in <see cref="ShortDeltaMin"/>–<see cref="ShortDeltaMax"/>, further
+/// OTM — mirrors DiagonalVertical / CalendarVertical). When DeltaMax is 0 (default) it falls back to the legacy
+/// ATM-centered strike grid (diagonal long leg one strike off the short), preserving prior behavior.</summary>
 internal sealed class OpenerCalendarLikeConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
@@ -268,6 +273,12 @@ internal sealed class OpenerCalendarLikeConfig
 	[JsonPropertyName("shortDteMax")] public int ShortDteMax { get; set; } = 10;
 	[JsonPropertyName("longDteMin")] public int LongDteMin { get; set; } = 21;
 	[JsonPropertyName("longDteMax")] public int LongDteMax { get; set; } = 60;
+	// Delta-band strike placement (0 = legacy ATM grid). Anchor = calendar's shared strike / diagonal's long leg.
+	[JsonPropertyName("deltaMin")] public decimal DeltaMin { get; set; } = 0m;
+	[JsonPropertyName("deltaMax")] public decimal DeltaMax { get; set; } = 0m;
+	// Diagonal-only: the near short leg's delta band (further OTM than the long anchor). Defaults span if unset.
+	[JsonPropertyName("shortDeltaMin")] public decimal ShortDeltaMin { get; set; } = 0.20m;
+	[JsonPropertyName("shortDeltaMax")] public decimal ShortDeltaMax { get; set; } = 0.35m;
 }
 
 internal sealed class OpenerDoubleCalendarConfig
