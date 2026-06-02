@@ -27,7 +27,8 @@ internal static class RuleTestFacts
 		decimal longLegStrike = 25m,
 		decimal shortLegStrike = 25m,
 		decimal netDeltaPostShort = 0m,
-		TrendSnapshot? trend = null) =>
+		TrendSnapshot? trend = null,
+		bool shortLegSurvivesPostShort = false) =>
 		new(
 			structureLabel, directionalBias,
 			netDelta, netThetaPerDay, netVega,
@@ -35,5 +36,6 @@ internal static class RuleTestFacts
 			hasShortLeg, hasLongLeg,
 			longPremiumPaid, shortPremiumReceived, netCashPerShare, premiumRatio,
 			spot, shortLegOtm, shortLegExtrinsic,
-			longLegStrike, shortLegStrike, netDeltaPostShort, trend);
+			longLegStrike, shortLegStrike, netDeltaPostShort, trend,
+			ShortLegSurvivesPostShort: shortLegSurvivesPostShort);
 }

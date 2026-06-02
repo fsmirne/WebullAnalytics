@@ -102,8 +102,12 @@ internal static class CandidateEnumerator
 
 	private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
-		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
-		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
+		// Bound the expiry cross-product (same cap as DiagonalVertical): on daily-expiry chains (SPXW) the
+		// short window holds ~7 expiries and the long window ~20, and the full product × strikes × sides feeds
+		// thousands of candidates per tick into the numerical breakeven scan — the per-minute scoring grinds.
+		// Nearest 2 short × nearest 3 long keeps it tractable and matches the DiagonalVertical breadth.
+		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
+		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = FallbackStep(spot);
@@ -219,8 +223,12 @@ internal static class CandidateEnumerator
 	private static IEnumerable<CandidateSkeleton> EnumerateDoubleCalendars(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.DoubleCalendar;
-		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
-		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
+		// Bound the expiry cross-product (same cap as DiagonalVertical): on daily-expiry chains (SPXW) the
+		// short window holds ~7 expiries and the long window ~20, and the full product × strikes × sides feeds
+		// thousands of candidates per tick into the numerical breakeven scan — the per-minute scoring grinds.
+		// Nearest 2 short × nearest 3 long keeps it tractable and matches the DiagonalVertical breadth.
+		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
+		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = FallbackStep(spot);
@@ -261,8 +269,12 @@ internal static class CandidateEnumerator
 	private static IEnumerable<CandidateSkeleton> EnumerateDoubleDiagonals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.DoubleDiagonal;
-		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).ToList();
-		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).ToList();
+		// Bound the expiry cross-product (same cap as DiagonalVertical): on daily-expiry chains (SPXW) the
+		// short window holds ~7 expiries and the long window ~20, and the full product × strikes × sides feeds
+		// thousands of candidates per tick into the numerical breakeven scan — the per-minute scoring grinds.
+		// Nearest 2 short × nearest 3 long keeps it tractable and matches the DiagonalVertical breadth.
+		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
+		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = FallbackStep(spot);
@@ -307,7 +319,10 @@ internal static class CandidateEnumerator
 	/// the directional anchor) + a near-dated SHORT vertical (credit, short leg in the ShortDelta band,
 	/// further OTM — theta financing), all on one side. Enumerated for both calls (bullish) and puts
 	/// (bearish). Every leg is bounded, so nothing is naked. TargetExpiry is the near (short) expiry — the
-	/// structure's first decision point, where the short vertical settles and the long vertical carries on.</summary>
+	/// structure's first decision point, where the short vertical settles and the long vertical carries on.
+	/// WidthSteps sizes the near short vertical; the far long vertical's protective wing is pinned to the near
+	/// vertical's protective wing (<see cref="SharedProtectiveWing"/>) so the far leg hedges the near vertical's
+	/// entire loss zone and the payoff is a diagonal tent, not a zigzag with an unhedged downside cliff.</summary>
 	private static IEnumerable<CandidateSkeleton> EnumerateDiagonalVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.DiagonalVertical;
@@ -362,8 +377,17 @@ internal static class CandidateEnumerator
 
 							foreach (var w in sCfg.WidthSteps.Distinct().OrderBy(x => x))
 							{
-								if (WingStrike(longStrike, w, dir, step, longLadder) is not { } longWing || longWing <= 0m) continue;
+								// Near short vertical (theta financing): WidthSteps strikes further OTM from the short anchor.
 								if (WingStrike(shortStrike, w, dir, step, shortLadder) is not { } shortWing || shortWing <= 0m) continue;
+								// Far long vertical's protective wing is PINNED to the near vertical's protective wing (snapped
+								// onto the far ladder), not sized independently by WidthSteps. This keeps the far long leg
+								// gaining through the near short vertical's whole loss zone: with an independent narrow far wing
+								// the far vertical caps out ABOVE the near short strikes, leaving that max-loss zone unhedged and
+								// producing a sharp downside cliff / max-loss valley (a third breakeven, a zigzag P&L) instead of
+								// a true diagonal's tent. Sharing the protective strike makes the downside monotonic.
+								if (SharedProtectiveWing(shortWing, dir, longLadder) is not { } longWing || longWing <= 0m) continue;
+								// Far wing must stay strictly OTM of the far anchor, else it isn't a valid long vertical.
+								if (dir * longWing <= dir * longStrike) continue;
 								yield return BuildDiagonalVertical(ticker, side, shortExp, longExp, shortStrike, shortWing, longStrike, longWing);
 							}
 						}
@@ -372,6 +396,21 @@ internal static class CandidateEnumerator
 
 	private static CandidateSkeleton BuildDiagonalVertical(string ticker, string side, DateTime shortExp, DateTime longExp, decimal shortStrike, decimal shortWingStrike, decimal longStrike, decimal longWingStrike)
 		=> BuildTwoVerticalStructure(ticker, OpenStructureKind.DiagonalVertical, side, shortExp, longExp, shortStrike, shortWingStrike, longStrike, longWingStrike);
+
+	/// <summary>The far long vertical's protective wing for a diagonal-vertical: the near vertical's protective
+	/// wing <paramref name="nearWing"/> snapped onto the far expiry's ladder, nudged one strike further OTM if the
+	/// snap landed short of it. Pinning the far wing to the near wing (rather than offsetting it independently by
+	/// WidthSteps) makes the far long leg's gaining range cover the near short vertical's whole loss zone, so the
+	/// payoff is a diagonal tent rather than a zigzag with an unhedged downside cliff. On a uniform grid (no
+	/// chain) the two ladders coincide, so the near wing strike is used directly.</summary>
+	private static decimal? SharedProtectiveWing(decimal nearWing, int dir, StrikeLadder longLadder)
+	{
+		if (!longLadder.ChainPresent) return nearWing;
+		if (longLadder.Offset(nearWing, 0) is not { } snapped || snapped <= 0m) return null;
+		// snapped at/beyond (OTM of) the near wing already covers the loss zone; if the coarser far ladder
+		// snapped it to the in-side of the near wing, step one strike further OTM so coverage isn't lost.
+		return dir * snapped >= dir * nearWing ? snapped : longLadder.Offset(snapped, dir);
+	}
 
 	/// <summary>Builds the shared "two defined-risk verticals on one side" leg set used by both
 	/// DiagonalVertical (different anchor strikes per expiry) and CalendarVertical (same anchor strike

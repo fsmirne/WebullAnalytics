@@ -1807,6 +1807,27 @@ internal static class CandidateScorer
 		return (lower, upper);
 	}
 
+	/// <summary>The narrow price window FindBreakevens needs to search — distinct from <see cref="GetScanRange"/>,
+	/// which stays wide for the max-profit/loss scan. Breakevens of these structures can't sit arbitrarily far
+	/// from the strikes: when EVERY leg expires at the target the payoff is flat outside [minStrike, maxStrike],
+	/// so a few strikes of margin is provably complete. When a leg SURVIVES past the target (calendar / diagonal /
+	/// DV long leg) the payoff still slopes beyond the outer strikes, so the margin widens to six standard
+	/// deviations of the survivor's residual move — comfortably past any realistic crossing. This replaces
+	/// scanning the old spot×0.40–1.60 window, which on SPX-class tickers ran ~18k steps at $0.50, almost all in
+	/// deep wings that never hold a breakeven. Max profit/loss are unaffected (they still use the wide range), so
+	/// only the breakeven SEARCH narrows — POP depends solely on the breakevens, which are unchanged in practice.</summary>
+	private static (decimal lower, decimal upper) BreakevenScanRange(decimal spot, IReadOnlyList<MultiLegDefinition> legs, decimal step, DateTime targetExpiry, decimal representativeIv)
+	{
+		var minStrike = legs.Min(l => l.Parsed.Strike);
+		var maxStrike = legs.Max(l => l.Parsed.Strike);
+		var longestExpiry = legs.Max(l => l.Parsed.ExpiryDate.Date);
+		var residualYears = Math.Max(0.0, (longestExpiry - targetExpiry.Date).TotalDays / 365.0);
+		var margin = residualYears > 0.0
+			? Math.Max(4m * step, 6m * spot * representativeIv * (decimal)Math.Sqrt(residualYears))
+			: 4m * step;
+		return (Math.Max(0.01m, minStrike - margin), maxStrike + margin);
+	}
+
 	/// <summary>Closed-form breakevens for the simple credit structures whose payoff is fully determined by
 	/// strikes + credit. Returns an empty list for structures that don't have a closed form (calendars,
 	/// diagonals) so the caller falls back to numerical scanning. The piecewise-linear payoff of an
@@ -1947,8 +1968,13 @@ internal static class CandidateScorer
 		var breakevens = TryAnalyticalBreakevens(skel, defs, netEntryPerContract);
 		if (breakevens.Count == 0)
 		{
-			var scanSteps = Math.Max(240, (int)((scanUpper - scanLower) / 0.5m));
-			breakevens = FindBreakevens(pnl, scanLower, scanUpper, scanSteps);
+			// Search for breakevens on the NARROW strike-relative window, not the wide max-P/L range: on
+			// SPX-class tickers the wide range scanned ~18k points at $0.50, almost all in deep wings with no
+			// crossing. The narrow window preserves the same $0.50 resolution (so tight iron-butterfly zones
+			// are still resolved) over far fewer points. Max profit/loss below stay on the wide range.
+			var (beLower, beUpper) = BreakevenScanRange(spot, defs, ResolveStrikeStep(cfg, skel.Ticker), skel.TargetExpiry, representativeIv);
+			var scanSteps = Math.Max(240, (int)((beUpper - beLower) / 0.5m));
+			breakevens = FindBreakevens(pnl, beLower, beUpper, scanSteps);
 		}
 		var pop = ComputeProbabilityOfProfit(pnl, breakevens, spot, years, representativeIv);
 		var grid = BuildScenarioGrid(spot, representativeIv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift);

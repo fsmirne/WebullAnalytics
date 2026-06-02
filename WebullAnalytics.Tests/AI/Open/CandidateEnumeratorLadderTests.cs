@@ -83,6 +83,36 @@ public class CandidateEnumeratorLadderTests
 	}
 
 	[Fact]
+	public void DiagonalVerticalFarWingCoversNearVerticalLossZone()
+	{
+		// The fix: the far long vertical's protective (sold) wing must sit at or beyond (OTM of) the near short
+		// vertical's protective (bought) wing, so the far long leg keeps gaining through the near vertical's whole
+		// loss zone. Otherwise the far vertical caps out above the near short strikes, leaving that max-loss zone
+		// unhedged → the sharp downside cliff / max-loss valley (third breakeven) that made the payoff a zigzag.
+		var avail = new HashSet<DateTime> { ShortExp, LongExp };
+		var skels = CandidateEnumerator.Enumerate("SPY", spot: 600m, AsOf, DiagVertCfg(), avail, Chain())
+			.Where(s => s.StructureKind == OpenStructureKind.DiagonalVertical)
+			.ToList();
+		Assert.NotEmpty(skels);
+
+		foreach (var s in skels)
+		{
+			var legs = s.Legs.Select(l => (l.Action, P: ParsingHelpers.ParseOptionSymbol(l.Symbol)!)).ToList();
+			var side = legs[0].P.CallPut;
+			Assert.All(legs, l => Assert.Equal(side, l.P.CallPut)); // single-sided
+			var dir = side == "C" ? 1 : -1;
+
+			var farExp = legs.Max(l => l.P.ExpiryDate);
+			var nearExp = legs.Min(l => l.P.ExpiryDate);
+			Assert.NotEqual(farExp, nearExp);
+
+			var farSell = legs.Single(l => l.P.ExpiryDate == farExp && l.Action == "sell").P.Strike;
+			var nearBuy = legs.Single(l => l.P.ExpiryDate == nearExp && l.Action == "buy").P.Strike;
+			Assert.True(dir * farSell >= dir * nearBuy, $"far protective wing {farSell} fails to cover near protective wing {nearBuy} (side {side})");
+		}
+	}
+
+	[Fact]
 	public void EmptyChainFallsBackToUniformGrid()
 	{
 		// No quotes → ladder empty → uniform strikeStep grid; still enumerates (preserves test/--theoretical path).

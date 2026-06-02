@@ -121,19 +121,27 @@ internal static class RiskDiagnosticBuilder
 		var longStrike = longLegs.Count > 0 ? longLegs[0].Parsed.Strike : 0m;
 		var shortStrike = shortLegs.Count > 0 ? shortLegs[0].Parsed.Strike : 0m;
 
-		// Residual delta after short expires: re-evaluate long legs at the time the earliest short expires.
+		// Residual delta after the earliest short expires: re-evaluate every leg that survives that expiry,
+		// signed by long/short. Summing only long legs (the old behavior) overstated the residual whenever a
+		// SHORT leg also survives — e.g. a DiagonalVertical's far leg is a defined-risk vertical (long + short),
+		// not a naked long, so its true post-short delta nets the short. A surviving short also flips the
+		// rule's wording from "naked long" to "defined-risk spread".
 		decimal netDeltaPostShort = netDelta;
+		var shortLegSurvivesPostShort = false;
 		if (shortLegs.Count > 0 && longLegs.Count > 0 && shortLegDteMin < longLegDteMax)
 		{
-			var shortExpiryInstant = asOf.Date.AddDays(shortLegDteMin) + OptionMath.MarketClose;
+			var earliestShortExpiry = shortLegs.Min(l => l.Parsed.ExpiryDate.Date);
+			var shortExpiryInstant = earliestShortExpiry + OptionMath.MarketClose;
 			decimal residualSum = 0m;
-			foreach (var leg in longLegs)
+			foreach (var leg in longLegs.Concat(shortLegs))
 			{
+				if (leg.Parsed.ExpiryDate.Date <= earliestShortExpiry) continue; // expired with (or before) the short
 				var iv = ivResolver(leg.Symbol);
-				var longExpiryInstant = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
-				var tPost = Math.Max(0.0, (longExpiryInstant - shortExpiryInstant).TotalDays / 365.0);
+				var legExpiryInstant = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
+				var tPost = Math.Max(0.0, (legExpiryInstant - shortExpiryInstant).TotalDays / 365.0);
 				var delta = OptionMath.Delta(spot, leg.Parsed.Strike, tPost, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
-				residualSum += leg.Qty * delta;
+				residualSum += (leg.IsLong ? 1m : -1m) * leg.Qty * delta;
+				if (!leg.IsLong) shortLegSurvivesPostShort = true;
 			}
 			netDeltaPostShort = qtyRef > 0 ? residualSum / qtyRef : 0m;
 		}
@@ -187,7 +195,8 @@ internal static class RiskDiagnosticBuilder
 			NextEarningsDate: events?.NextEarningsDate,
 			EarningsTime: events?.EarningsTime,
 			NextExDividendDate: events?.NextExDividendDate,
-			HasShortCallLeg: hasShortCallLeg);
+			HasShortCallLeg: hasShortCallLeg,
+			ShortLegSurvivesPostShort: shortLegSurvivesPostShort);
 
 		var hits = Rules
 			.Select(r => r.TryEvaluate(facts))
