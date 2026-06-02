@@ -120,4 +120,79 @@ public class CandidateEnumeratorLadderTests
 		var skels = CandidateEnumerator.Enumerate("SPY", spot: 600m, AsOf, DiagVertCfg(), avail, quotes: null).ToList();
 		Assert.NotEmpty(skels);
 	}
+
+	private static OpenerConfig DeltaCalDiagCfg()
+	{
+		var cfg = new OpenerConfig { Indicators = new() { IvDefaultPct = 20m, StrikeStep = 1.0m } };
+		cfg.Structures.DoubleCalendar.Enabled = false;
+		cfg.Structures.DoubleDiagonal.Enabled = false;
+		cfg.Structures.IronButterfly.Enabled = false;
+		cfg.Structures.IronCondor.Enabled = false;
+		cfg.Structures.ShortVertical.Enabled = false;
+		cfg.Structures.LongCallPut.Enabled = false;
+		cfg.Structures.LongVertical.Enabled = false;
+		cfg.Structures.DiagonalVertical.Enabled = false;
+		cfg.Structures.CalendarVertical.Enabled = false;
+		cfg.Structures.LongCalendar = new OpenerCalendarLikeConfig { Enabled = true, ShortDteMin = 1, ShortDteMax = 10, LongDteMin = 20, LongDteMax = 40, DeltaMin = 0.40m, DeltaMax = 0.55m };
+		cfg.Structures.LongDiagonal = new OpenerCalendarLikeConfig { Enabled = true, ShortDteMin = 1, ShortDteMax = 10, LongDteMin = 20, LongDteMax = 40, DeltaMin = 0.40m, DeltaMax = 0.55m, ShortDeltaMin = 0.20m, ShortDeltaMax = 0.35m };
+		return cfg;
+	}
+
+	[Fact]
+	public void CalendarLike_DeltaBands_PlaceStrikesByDelta()
+	{
+		// Delta-band placement (deltaMax>0): calendar shares one strike across expiries; diagonal puts the long
+		// leg on the far expiry and the short leg further OTM on the near expiry. All legs are listed strikes.
+		var avail = new HashSet<DateTime> { ShortExp, LongExp };
+		var skels = CandidateEnumerator.Enumerate("SPY", spot: 600m, AsOf, DeltaCalDiagCfg(), avail, Chain()).ToList();
+
+		var calendars = skels.Where(s => s.StructureKind == OpenStructureKind.LongCalendar).ToList();
+		var diagonals = skels.Where(s => s.StructureKind == OpenStructureKind.LongDiagonal).ToList();
+		Assert.NotEmpty(calendars);
+		Assert.NotEmpty(diagonals);
+
+		foreach (var c in calendars)
+		{
+			var legs = c.Legs.Select(l => ParsingHelpers.ParseOptionSymbol(l.Symbol)!).ToList();
+			Assert.Equal(2, legs.Count);
+			Assert.Single(legs.Select(l => l.Strike).Distinct());               // shared strike
+			Assert.Equal(2, legs.Select(l => l.ExpiryDate).Distinct().Count()); // two expiries
+		}
+
+		foreach (var d in diagonals)
+		{
+			var buy = ParsingHelpers.ParseOptionSymbol(d.Legs.Single(l => l.Action == "buy").Symbol)!;
+			var sell = ParsingHelpers.ParseOptionSymbol(d.Legs.Single(l => l.Action == "sell").Symbol)!;
+			Assert.True(buy.ExpiryDate > sell.ExpiryDate, "long leg is the far expiry");
+			var dir = buy.CallPut == "C" ? 1 : -1;
+			Assert.True(dir * sell.Strike > dir * buy.Strike, "short leg further OTM than long anchor");
+			Assert.Contains(buy.Strike, ListedStrikes);
+			Assert.Contains(sell.Strike, ListedStrikes);
+		}
+	}
+
+	[Fact]
+	public void Calendar_DeltaBand_SkipsAnchorNotListedAtShortExpiry()
+	{
+		// Short expiry lists a $10 grid, long lists $5 (as on real SPXW where weekly/back-month ladders differ).
+		// A delta anchor picked off the long ladder that isn't a short-expiry strike must be skipped — else the
+		// calendar's near leg is unpriceable. This is the bug that produced zero calendar opens in the backtest.
+		var chain = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		void Add(DateTime exp, decimal k) { var s = MatchKeys.OccSymbol("SPY", exp, k, "C"); chain[s] = new OptionContractQuote(s, 2m, 1.8m, 2.2m, null, null, 500, 500, 0.20m); }
+		for (decimal k = 560m; k <= 640m; k += 10m) Add(ShortExp, k); // short: $10 grid
+		for (decimal k = 560m; k <= 640m; k += 5m) Add(LongExp, k);   // long:  $5 grid
+		var shortStrikes = new HashSet<decimal>();
+		for (decimal k = 560m; k <= 640m; k += 10m) shortStrikes.Add(k);
+
+		var cfg = DeltaCalDiagCfg();
+		cfg.Structures.LongDiagonal.Enabled = false; // calendars only
+
+		var calendars = CandidateEnumerator.Enumerate("SPY", 600m, AsOf, cfg, new HashSet<DateTime> { ShortExp, LongExp }, chain)
+			.Where(s => s.StructureKind == OpenStructureKind.LongCalendar).ToList();
+
+		Assert.NotEmpty(calendars);
+		foreach (var c in calendars)
+			foreach (var leg in c.Legs)
+				Assert.Contains(ParsingHelpers.ParseOptionSymbol(leg.Symbol)!.Strike, shortStrikes); // anchor listed at the short expiry
+	}
 }
