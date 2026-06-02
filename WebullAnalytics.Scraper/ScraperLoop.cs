@@ -122,7 +122,12 @@ internal sealed class ScraperLoop
 		decimal? spot = null;
 		for (var attempt = 0; attempt <= _config.EmptyRetryCount; attempt++)
 		{
-			var (quotes, fetchedSpot, _) = await WebullOptionsClient.FetchChainAsync(_apiConfig, _ticker, cancellation);
+			// The chain/list endpoint only quotes the front (0DTE) expiry — the further-dated contracts come
+			// back as symbols with null bid/ask/IV. When MaxDte>0 we must queryBatch-refresh those near-the-money
+			// far-dated strikes, or the persisted far legs are unpriceable placeholders (the bug this fixes).
+			var (quotes, fetchedSpot, _) = _config.MaxDte > 0
+				? await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(_apiConfig, _ticker, Enumerable.Range(0, _config.MaxDte + 1).Select(d => fireEt.Date.AddDays(d)).ToList(), _config.FarStrikeRangeFraction, cancellation)
+				: await WebullOptionsClient.FetchChainAsync(_apiConfig, _ticker, cancellation);
 			spot = fetchedSpot;
 			todayContracts = quotes.Values
 				.Where(q =>
