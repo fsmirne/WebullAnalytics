@@ -20,6 +20,33 @@ public class ShortExpiresBeforeLongRuleTests
 	}
 
 	[Fact]
+	public void NakedWordingWhenNoShortSurvives()
+	{
+		var hit = new ShortExpiresBeforeLongRule().TryEvaluate(RuleTestFacts.Default(
+			shortLegDteMin: 3, longLegDteMax: 30, dteGapDays: 27,
+			hasShortLeg: true, hasLongLeg: true, netDeltaPostShort: -0.46m,
+			shortLegSurvivesPostShort: false));
+		Assert.NotNull(hit);
+		Assert.Contains("naked long leg", hit!.Message);
+		Assert.Equal(0m, hit.Inputs["short_survives_post_short"]);
+	}
+
+	[Fact]
+	public void DefinedRiskWordingWhenShortSurvives()
+	{
+		// DiagonalVertical: after the near short vertical expires, the far vertical (long + short) survives —
+		// a defined-risk spread, not a naked long.
+		var hit = new ShortExpiresBeforeLongRule().TryEvaluate(RuleTestFacts.Default(
+			shortLegDteMin: 3, longLegDteMax: 30, dteGapDays: 27,
+			hasShortLeg: true, hasLongLeg: true, netDeltaPostShort: -0.20m,
+			shortLegSurvivesPostShort: true));
+		Assert.NotNull(hit);
+		Assert.Contains("defined-risk spread", hit!.Message);
+		Assert.DoesNotContain("naked", hit.Message);
+		Assert.Equal(1m, hit.Inputs["short_survives_post_short"]);
+	}
+
+	[Fact]
 	public void DoesNotFireWhenDtesEqual()
 	{
 		Assert.Null(new ShortExpiresBeforeLongRule().TryEvaluate(RuleTestFacts.Default(
