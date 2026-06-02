@@ -51,6 +51,16 @@ internal sealed class ScraperConfig
 	/// spans ~30k contracts across all expirations; the DTE cap bounds how much of that is persisted per minute.</summary>
 	[JsonPropertyName("maxDte")]
 	public int MaxDte { get; set; } = 0;
+
+	/// <summary>When <see cref="MaxDte"/> &gt; 0, the further-dated expiries come back from the chain/list endpoint
+	/// as symbols WITHOUT bid/ask/IV (only the front 0DTE expiry is quoted there). Those contracts are then
+	/// refreshed via Webull's queryBatch endpoint — but only within ±this fraction of spot, to bound the number
+	/// of round-trips (the full far chain is ~thousands of strikes). 0.06 (±6%) comfortably covers the
+	/// 0.15–0.55 delta strikes the diagonal/calendar legs use at 21–45 DTE. Each refreshed strike is one
+	/// queryBatch slot (batched 50/call), so a wider range or larger MaxDte means more round-trips per tick —
+	/// raise <see cref="IntervalSeconds"/> accordingly (e.g. 300s) when capturing the far-dated chain.</summary>
+	[JsonPropertyName("farStrikeRangeFraction")]
+	public decimal FarStrikeRangeFraction { get; set; } = 0.06m;
 }
 
 internal static class ScraperConfigLoader
