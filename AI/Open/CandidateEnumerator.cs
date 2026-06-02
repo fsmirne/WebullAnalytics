@@ -111,18 +111,64 @@ internal static class CandidateEnumerator
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = FallbackStep(spot);
+		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var useDelta = sCfg.DeltaMax > 0m; // delta-band placement vs legacy ATM grid
+		var deltaMid = (sCfg.DeltaMin + sCfg.DeltaMax) / 2m;
+		var shortMid = (sCfg.ShortDeltaMin + sCfg.ShortDeltaMax) / 2m;
 		foreach (var callPut in new[] { "C", "P" })
 			foreach (var shortExp in shortExps)
 				foreach (var longExp in longExps)
 				{
 					if (longExp <= shortExp) continue;
 					// Per-expiry ladders: the short strike comes from the short expiry's listed strikes; the long
-					// leg shares it (calendar) or sits one strike away (diagonal) in the LONG expiry's ladder.
+					// leg shares it (calendar) or sits at its own strike (diagonal) in the LONG expiry's ladder.
 					var shortLadder = StrikeLadder.Build(ticker, shortExp, callPut, quotes);
 					var longLadder = StrikeLadder.Build(ticker, longExp, callPut, quotes);
+
+					if (useDelta)
+					{
+						// Anchor (calendar shared strike / diagonal long leg) in the delta band on the FAR leg —
+						// the directional anchor, same convention as DiagonalVertical / CalendarVertical.
+						var longYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, longExp);
+						var dir = callPut == "C" ? 1 : -1;
+						var anchors = StrikesAround(spot, step, 24, longLadder)
+							.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, longYears, OptionMath.RiskFreeRate, ResolveIv(ticker, longExp, k, callPut, quotes, defaultIv), callPut))))
+							.Where(x => x.d >= sCfg.DeltaMin && x.d <= sCfg.DeltaMax)
+							.OrderBy(x => Math.Abs(x.d - deltaMid)).Take(2).Select(x => x.k).ToList();
+
+						foreach (var anchor in anchors)
+						{
+							if (kind == OpenStructureKind.LongCalendar)
+							{
+								// The anchor is picked from the LONG ladder; a calendar shares the strike across expiries,
+								// so it must ALSO be listed at the SHORT expiry, else the near leg is unpriceable. (Short
+								// and long ladders differ on real SPXW chains — this is what produced zero calendar opens.)
+								if (shortLadder.ChainPresent && WingStrike(anchor, 0, 1, step, shortLadder) != anchor) continue;
+								yield return BuildSpread(ticker, kind, shortExp, longExp, anchor, anchor, callPut);
+							}
+							else
+							{
+								// Diagonal: near short leg in the ShortDelta band, further OTM than the long anchor.
+								var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortExp);
+								var shortStrikes = StrikesAround(spot, step, 24, shortLadder)
+									.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, shortYears, OptionMath.RiskFreeRate, ResolveIv(ticker, shortExp, k, callPut, quotes, defaultIv), callPut))))
+									.Where(x => x.d >= sCfg.ShortDeltaMin && x.d <= sCfg.ShortDeltaMax)
+									.OrderBy(x => Math.Abs(x.d - shortMid)).Take(2).Select(x => x.k).ToList();
+								foreach (var shortStrike in shortStrikes)
+								{
+									// Directional consistency: short leg further OTM than the long anchor (calls higher, puts lower).
+									if (callPut == "C" && shortStrike <= anchor) continue;
+									if (callPut == "P" && shortStrike >= anchor) continue;
+									yield return BuildSpread(ticker, kind, shortExp, longExp, shortStrike, anchor, callPut);
+								}
+							}
+						}
+						continue;
+					}
+
 					foreach (var shortStrike in StrikeGrid(spot, step, shortLadder))
 					{
-						// Skip strikes that are ITM by more than one step on either side (bad debit-calendar entry).
+						// Legacy ATM grid. Skip strikes that are ITM by more than one step on either side (bad debit-calendar entry).
 						if (callPut == "C" && shortStrike < spot - step) continue;
 						if (callPut == "P" && shortStrike > spot + step) continue;
 

@@ -3,6 +3,8 @@ using WebullAnalytics.AI.Output;
 using WebullAnalytics.Analyze;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Sentiment;
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 
 namespace WebullAnalytics.AI;
 
@@ -93,6 +95,32 @@ internal static class CandidateScorer
 	{
 		var factor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, ivAnnual, historicalVolAnnual, weight, vegaRef);
 		return factor.HasValue ? ApplyFactor(score, factor.Value) : score;
+	}
+
+	// Max-pain and GEX depend only on (ticker, expiry, spot, chain), all constant across every candidate scored
+	// in one evaluation tick, yet each was recomputed (full chain scan) per candidate. Memoize per (root, expiry)
+	// keyed on the quotes object — the quotes dictionary is replaced each tick, so the cache auto-evicts and is
+	// implicitly per-tick (same pattern as StrikeLadder's ChainIndex). Scoring is byte-identical, just cached.
+	private static readonly ConditionalWeakTable<object, ChainScalarCache> _chainScalarCache = new();
+
+	private sealed class ChainScalarCache
+	{
+		public readonly ConcurrentDictionary<(string, DateTime), decimal?> MaxPain = new();
+		public readonly ConcurrentDictionary<(string, DateTime), GexResult> Gex = new();
+	}
+
+	private static decimal? MaxPainCached(string ticker, DateTime expiry, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot)
+	{
+		if (quotes == null) return ComputeMaxPainPrice(ticker, expiry, quotes!, spot);
+		return _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache())
+			.MaxPain.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => ComputeMaxPainPrice(ticker, expiry, quotes, spot));
+	}
+
+	private static GexResult GexCached(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		if (quotes == null) return ComputeGex(ticker, expiry, spot, asOf, quotes!);
+		return _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache())
+			.Gex.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => ComputeGex(ticker, expiry, spot, asOf, quotes));
 	}
 
 	public static decimal? ComputeMaxPainPrice(string ticker, DateTime expiry, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot = null)
@@ -1267,9 +1295,9 @@ internal static class CandidateScorer
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
 		var representativeIv = (iv + longIv) / 2m;
 		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit);
-		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
-		var gex = ComputeGex(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
+		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gexFactor = ComputeGexAdjustmentFactor(skel, spot, asOf, iv, gex, cfg);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(
@@ -1426,9 +1454,9 @@ internal static class CandidateScorer
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
 		var representativeIv = (iv + longIv) / 2m;
 		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit);
-		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
-		var gex = ComputeGex(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
+		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gexFactor = ComputeGexAdjustmentFactor(skel, spot, asOf, iv, gex, cfg);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(
@@ -2013,9 +2041,9 @@ internal static class CandidateScorer
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
 		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit);
-		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, representativeIv, maxPain, cfg, breakevens);
-		var gex = ComputeGex(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
+		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gexFactor = ComputeGexAdjustmentFactor(skel, spot, asOf, representativeIv, gex, cfg, breakevens);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(defs.Select(d => (d.Proposal.Symbol, d.Parsed, d.IsLong)), spot, asOf, quotes, cfg.Indicators.IvDefaultPct);
@@ -2207,9 +2235,9 @@ internal static class CandidateScorer
 		var balance = BalanceFactor(maxProfit, maxLossPoint, premiumRatio);
 		var representativeIv = representativeIvEarly;
 		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit);
-		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, ivShort, maxPain, cfg);
-		var gex = ComputeGex(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
+		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gexFactor = ComputeGexAdjustmentFactor(skel, spot, asOf, ivShort, gex, cfg);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(
@@ -2396,9 +2424,9 @@ internal static class CandidateScorer
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
 		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, iv, historicalVolAnnual, cfg.Weights.VolatilityFit);
-		var maxPain = ComputeMaxPainPrice(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
+		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var maxPainFactor = ComputeMaxPainAdjustmentFactor(skel, spot, asOf, iv, maxPain, cfg);
-		var gex = ComputeGex(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
+		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gexFactor = ComputeGexAdjustmentFactor(skel, spot, asOf, iv, gex, cfg);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(new (string, OptionParsed, bool)[] { (leg.Symbol, parsed, true) }, spot, asOf, quotes, cfg.Indicators.IvDefaultPct);
