@@ -114,6 +114,7 @@ class Program
 				ai.AddCommand<AI.AIReplayCommand>("replay");
 				ai.AddCommand<AI.AIBacktestCommand>("backtest");
 				ai.AddCommand<AI.AIHistoryCommand>("history");
+				ai.AddCommand<AI.Analysis.DipAnalysisCommand>("dip");
 			});
 			config.AddBranch("options", options =>
 			{
