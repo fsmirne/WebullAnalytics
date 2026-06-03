@@ -14,6 +14,17 @@ internal static class MarketCalendar
 		return !IsHoliday(date);
 	}
 
+	/// <summary>The given date if it's a trading day, else the nearest open day before it. Used to map a
+	/// nominal Friday expiry that lands on a holiday (e.g. Good Friday) to the day the contract actually
+	/// expires (the preceding Thursday) — both the computed expiry helpers and the chain-date filter rely
+	/// on this so we never enumerate a contract on a closed session.</summary>
+	internal static DateTime PreviousOpenOnOrBefore(DateTime date)
+	{
+		var d = date.Date;
+		while (!IsOpen(d)) d = d.AddDays(-1);
+		return d;
+	}
+
 	// Ad-hoc US market closures outside the recurring NYSE holiday calendar. Add new entries as they
 	// happen — the backtest's 2-year lookback only sees recent dates, so the historical 9/11, Hurricane
 	// Sandy, and Bush 41 closures aren't tracked here.
