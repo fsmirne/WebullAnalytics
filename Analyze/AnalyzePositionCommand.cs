@@ -192,6 +192,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// refreshes the 12h event cache — without this, held tickers the opener never scans (e.g. SPY)
 		// never populate data/event-cache, leaving the theoretical price un-dividend-adjusted.
 		var positionEvents = (await EventCalendarLoader.LoadAsync(new[] { ticker }, new OpenerEventsConfig(), asOfForDiagnostic, cancellation, cacheOnly: false)).Get(ticker);
+		var dividends = DividendScheduleBuilder.BuildForTicker(positionEvents, spot.Value, null);
 
 		var diagnostic = BuildAndLogDiagnostic(
 			logPath: Program.ResolvePath("data/analyze-position.jsonl"),
@@ -207,7 +208,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				if (leg == null) return 0m;
 				var iv = ResolveIV(sym, settings, quotes);
 				var dte = Math.Max(1, (leg.Parsed.ExpiryDate - asOfForDiagnostic.Date).Days);
-				return LiveOrBsMid(quotes, sym, spot.Value, leg.Parsed.Strike, dte, iv, leg.Parsed.CallPut);
+				return LiveOrBsMid(quotes, sym, spot.Value, leg.Parsed.Strike, dte, iv, leg.Parsed.CallPut, dividends);
 			},
 			trend: trendSnap,
 			quotesForProbe: quotes,
@@ -220,7 +221,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			sentiment: sentiment,
 			events: positionEvents);
 
-		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias);
+		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias, dividends);
 
 		var toText = settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase);
 		StringWriter? stringWriter = null;
@@ -620,14 +621,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		List<PositionSnapshot> legs, StructureKind kind,
 		AnalyzePositionSettings settings, decimal spot, DateTime asOf,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes,
-		decimal technicalBias = 0m) =>
+		decimal technicalBias = 0m, IReadOnlyList<DividendEvent>? dividends = null) =>
 		kind switch
 		{
-			StructureKind.SingleLong => GenerateSingleLongScenarios(legs[0], settings, spot, asOf, quotes),
-			StructureKind.Vertical => GenerateVerticalScenarios(legs, settings, spot, asOf, quotes, technicalBias),
-			StructureKind.Calendar or StructureKind.Diagonal => GenerateSpreadScenarios(legs, settings, spot, asOf, kind, quotes),
-			StructureKind.IronButterfly or StructureKind.IronCondor => GenerateIronScenarios(legs, settings, spot, asOf, quotes),
-			StructureKind.DoubleCalendar or StructureKind.DoubleDiagonal => GenerateDoubleSpreadScenarios(legs, settings, spot, asOf, kind, quotes),
+			StructureKind.SingleLong => GenerateSingleLongScenarios(legs[0], settings, spot, asOf, quotes, dividends),
+			StructureKind.Vertical => GenerateVerticalScenarios(legs, settings, spot, asOf, quotes, technicalBias, dividends),
+			StructureKind.Calendar or StructureKind.Diagonal => GenerateSpreadScenarios(legs, settings, spot, asOf, kind, quotes, dividends),
+			StructureKind.IronButterfly or StructureKind.IronCondor => GenerateIronScenarios(legs, settings, spot, asOf, quotes, dividends),
+			StructureKind.DoubleCalendar or StructureKind.DoubleDiagonal => GenerateDoubleSpreadScenarios(legs, settings, spot, asOf, kind, quotes, dividends),
 			_ => new List<Scenario>()
 		};
 
@@ -641,7 +642,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	///   • Hold to short expiry with spot at the call short strike (max-pin on call side)
 	///   • Close all at mid
 	///   • Close one side (whichever short is closer to spot) and run the other to short expiry</summary>
-	private static List<Scenario> GenerateDoubleSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	private static List<Scenario> GenerateDoubleSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? dividends = null)
 	{
 		var list = new List<Scenario>();
 		var shortPut = legs.First(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "P");
@@ -658,15 +659,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var ivShortCall = ResolveIV(shortCall.Symbol, settings, quotes);
 		var ivLongCall = ResolveIV(longCall.Symbol, settings, quotes);
 
-		var shortPutMid = LiveOrBsMid(quotesForPricing, shortPut.Symbol, spot, shortPut.Parsed.Strike, shortDte, ivShortPut, "P");
-		var longPutMid = LiveOrBsMid(quotesForPricing, longPut.Symbol, spot, longPut.Parsed.Strike, Math.Max(1, (longExpiry.Date - asOf.Date).Days), ivLongPut, "P");
-		var shortCallMid = LiveOrBsMid(quotesForPricing, shortCall.Symbol, spot, shortCall.Parsed.Strike, shortDte, ivShortCall, "C");
-		var longCallMid = LiveOrBsMid(quotesForPricing, longCall.Symbol, spot, longCall.Parsed.Strike, Math.Max(1, (longExpiry.Date - asOf.Date).Days), ivLongCall, "C");
+		var shortPutMid = LiveOrBsMid(quotesForPricing, shortPut.Symbol, spot, shortPut.Parsed.Strike, shortDte, ivShortPut, "P", dividends);
+		var longPutMid = LiveOrBsMid(quotesForPricing, longPut.Symbol, spot, longPut.Parsed.Strike, Math.Max(1, (longExpiry.Date - asOf.Date).Days), ivLongPut, "P", dividends);
+		var shortCallMid = LiveOrBsMid(quotesForPricing, shortCall.Symbol, spot, shortCall.Parsed.Strike, shortDte, ivShortCall, "C", dividends);
+		var longCallMid = LiveOrBsMid(quotesForPricing, longCall.Symbol, spot, longCall.Parsed.Strike, Math.Max(1, (longExpiry.Date - asOf.Date).Days), ivLongCall, "C", dividends);
 
 		// Long-leg value at the short expiry: BS with the residual time until the long's own expiry.
 		double tLongAtShortExp = Math.Max(1, (longExpiry.Date - shortExpiry.Date).Days) / 365.0;
-		decimal LongPutAtShortExp(decimal s) => OptionMath.BlackScholes(s, longPut.Parsed.Strike, tLongAtShortExp, 0.036, ivLongPut, "P");
-		decimal LongCallAtShortExp(decimal s) => OptionMath.BlackScholes(s, longCall.Parsed.Strike, tLongAtShortExp, 0.036, ivLongCall, "C");
+		decimal LongPutAtShortExp(decimal s) => OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(s, dividends, shortExpiry.Date + OptionMath.MarketClose, longExpiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longPut.Parsed.Strike, tLongAtShortExp, OptionMath.RiskFreeRate, ivLongPut, "P");
+		decimal LongCallAtShortExp(decimal s) => OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(s, dividends, shortExpiry.Date + OptionMath.MarketClose, longExpiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longCall.Parsed.Strike, tLongAtShortExp, OptionMath.RiskFreeRate, ivLongCall, "C");
 		// Per-share value of the whole 4-leg position at the short expiry, evaluated at a given spot.
 		decimal ValueAtShortExpiry(decimal s) =>
 			LongPutAtShortExp(s) - Intrinsic(s, shortPut.Parsed.Strike, "P")
@@ -738,7 +739,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	///   • Close one side (the threatened spread) — common defensive move when spot has moved
 	///     toward one wing; cuts the side that's bleeding while keeping the credit on the other.
 	/// </summary>
-	private static List<Scenario> GenerateIronScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	private static List<Scenario> GenerateIronScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? dividends = null)
 	{
 		var list = new List<Scenario>();
 		var shortPut = legs.First(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "P");
@@ -788,10 +789,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var ivLongPut = ResolveIV(longPut.Symbol, settings, quotes);
 		var ivShortCall = ResolveIV(shortCall.Symbol, settings, quotes);
 		var ivLongCall = ResolveIV(longCall.Symbol, settings, quotes);
-		var shortPutMid = LiveOrBsMid(quotesForPricing, shortPut.Symbol, spot, shortPut.Parsed.Strike, expiryDte, ivShortPut, "P");
-		var longPutMid = LiveOrBsMid(quotesForPricing, longPut.Symbol, spot, longPut.Parsed.Strike, expiryDte, ivLongPut, "P");
-		var shortCallMid = LiveOrBsMid(quotesForPricing, shortCall.Symbol, spot, shortCall.Parsed.Strike, expiryDte, ivShortCall, "C");
-		var longCallMid = LiveOrBsMid(quotesForPricing, longCall.Symbol, spot, longCall.Parsed.Strike, expiryDte, ivLongCall, "C");
+		var shortPutMid = LiveOrBsMid(quotesForPricing, shortPut.Symbol, spot, shortPut.Parsed.Strike, expiryDte, ivShortPut, "P", dividends);
+		var longPutMid = LiveOrBsMid(quotesForPricing, longPut.Symbol, spot, longPut.Parsed.Strike, expiryDte, ivLongPut, "P", dividends);
+		var shortCallMid = LiveOrBsMid(quotesForPricing, shortCall.Symbol, spot, shortCall.Parsed.Strike, expiryDte, ivShortCall, "C", dividends);
+		var longCallMid = LiveOrBsMid(quotesForPricing, longCall.Symbol, spot, longCall.Parsed.Strike, expiryDte, ivLongCall, "C", dividends);
 		// Buy back shorts, sell longs.
 		var closeAllCash = -shortPutMid + longPutMid - shortCallMid + longCallMid;
 		list.Add(NewScenarioSpread("Close all", legs,
@@ -828,7 +829,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return OrderScenariosForDisplay(list, settings.Cash);
 	}
 
-	private static List<Scenario> GenerateSingleLongScenarios(PositionSnapshot longLeg, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	private static List<Scenario> GenerateSingleLongScenarios(PositionSnapshot longLeg, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? dividends = null)
 	{
 		var list = new List<Scenario>();
 		var iv = ResolveIV(longLeg.Symbol, settings, quotes);
@@ -844,7 +845,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		// 2. Close now at theoretical mid (or live mid if available).
 		var dteNow = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
-		var midNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, dteNow, iv, callPut);
+		var midNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, dteNow, iv, callPut, dividends);
 		list.Add(NewScenario("Close now", longLeg, $"SELL {longLeg.Symbol} x{longLeg.Qty} @{FmtPrice(midNow)}",
 			cashNow: midNow, valueAtTarget: 0m, marginDeltaPerContract: 0m, daysToTarget: 1,
 			rationale: $"sell at mid ${midNow:F2}/share → close position"));
@@ -856,10 +857,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var newShortSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, shortExpiry, longLeg.Parsed.Strike, callPut);
 			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
 			var dteShort = Math.Max(1, (shortExpiry - asOf).Days);
-			var shortMid = LiveOrBsMid(quotesForPricing, newShortSym, spot, longLeg.Parsed.Strike, dteShort, ivNewShort, callPut);
+			var shortMid = LiveOrBsMid(quotesForPricing, newShortSym, spot, longLeg.Parsed.Strike, dteShort, ivNewShort, callPut, dividends);
 			// Project value at short expiry: long BS value, short intrinsic.
 			var dteLongAtShortExp = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days);
-			var longAtShortExp = (decimal)OptionMath.BlackScholes(spot, longLeg.Parsed.Strike, dteLongAtShortExp / 365.0, 0.036, iv, callPut);
+			var longAtShortExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, shortExpiry.Date + OptionMath.MarketClose, longLeg.Parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longLeg.Parsed.Strike, dteLongAtShortExp / 365.0, OptionMath.RiskFreeRate, iv, callPut);
 			var shortAtShortExp = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
 			var net = longAtShortExp - shortAtShortExp;
 			// margin delta: becomes a calendar (strike_loss = 0). Current is single long (no margin). Delta = 0.
@@ -872,7 +873,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return OrderScenariosForDisplay(list, settings.Cash);
 	}
 
-	private static List<Scenario> GenerateVerticalScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, decimal technicalBias)
+	private static List<Scenario> GenerateVerticalScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, decimal technicalBias, IReadOnlyList<DividendEvent>? dividends = null)
 	{
 		var list = new List<Scenario>();
 		var shortLeg = legs.First(l => l.Action == LegAction.Sell);
@@ -884,8 +885,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		var expiry = shortLeg.Parsed.ExpiryDate;
 		var expiryDte = Math.Max(1, (expiry.Date - asOf.Date).Days);
-		var shortMidNow = LiveOrBsMid(quotesForPricing, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, expiryDte, ivShort, callPut);
-		var longMidNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, expiryDte, ivLong, callPut);
+		var shortMidNow = LiveOrBsMid(quotesForPricing, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, expiryDte, ivShort, callPut, dividends);
+		var longMidNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, expiryDte, ivLong, callPut, dividends);
 		var (_, shortAskNow) = LiveBidAsk(quotesForPricing, shortLeg.Symbol, shortMidNow);
 		var (longBidNow, _) = LiveBidAsk(quotesForPricing, longLeg.Symbol, longMidNow);
 
@@ -925,7 +926,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (quotesForPricing != null && !HasLiveQuote(quotesForPricing, sameExpSym)) continue;
 
 			var ivSameExp = ResolveIV(sameExpSym, settings, quotes);
-			var newShortMidSameExp = LiveOrBsMid(quotesForPricing, sameExpSym, spot, newStrike, expiryDte, ivSameExp, callPut);
+			var newShortMidSameExp = LiveOrBsMid(quotesForPricing, sameExpSym, spot, newStrike, expiryDte, ivSameExp, callPut, dividends);
 			var (newShortBidSameExp, _) = LiveBidAsk(quotesForPricing, sameExpSym, newShortMidSameExp);
 			var cashPerShareSameExp = newShortMidSameExp - shortMidNow;
 			var projSameExpPerShare = longAtExpiry - Intrinsic(spot, newStrike, callPut);
@@ -960,8 +961,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
 			var ivNewLong = ResolveIV(newLongSym, settings, quotes);
-			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newShortStrike, expiryDte, ivNewShort, oppositeCp);
-			var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newLongStrike, expiryDte, ivNewLong, oppositeCp);
+			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newShortStrike, expiryDte, ivNewShort, oppositeCp, dividends);
+			var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newLongStrike, expiryDte, ivNewLong, oppositeCp, dividends);
 			var (newShortBid, _) = LiveBidAsk(quotesForPricing, newShortSym, newShortMidExec);
 			var (_, newLongAsk) = LiveBidAsk(quotesForPricing, newLongSym, newLongMidExec);
 			var cashPerShare = newShortMidExec - newLongMidExec;
@@ -1002,8 +1003,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
 			var ivNewLong = ResolveIV(newLongSym, settings, quotes);
 			var dteNew = Math.Max(1, (newExpiry - asOf).Days);
-			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newStrike, dteNew, ivNewShort, callPut);
-			var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newLongStrike, dteNew, ivNewLong, callPut);
+			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newStrike, dteNew, ivNewShort, callPut, dividends);
+			var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newLongStrike, dteNew, ivNewLong, callPut, dividends);
 			var (newShortBid, _) = LiveBidAsk(quotesForPricing, newShortSym, newShortMidExec);
 			var (_, newLongAsk) = LiveBidAsk(quotesForPricing, newLongSym, newLongMidExec);
 			var closeNet = longMidNow - shortMidNow;
@@ -1032,7 +1033,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			.ToList(), settings.Cash);
 	}
 
-	private static List<Scenario> GenerateSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	private static List<Scenario> GenerateSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? dividends = null)
 	{
 		var list = new List<Scenario>();
 		var shortLeg = legs.First(l => l.Action == LegAction.Sell);
@@ -1046,8 +1047,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// Black-Scholes with the correct DTE from asOf. IV is still sourced from live quotes above.
 		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
 
-		var shortMidNow = LiveOrBsMid(quotesForPricing, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivShort, callPut);
-		var longMidNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivLong, callPut);
+		var shortMidNow = LiveOrBsMid(quotesForPricing, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivShort, callPut, dividends);
+		var longMidNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivLong, callPut, dividends);
 		var (shortBidNow, shortAskNow) = LiveBidAsk(quotesForPricing, shortLeg.Symbol, shortMidNow);
 		var (longBidNow, longAskNow) = LiveBidAsk(quotesForPricing, longLeg.Symbol, longMidNow);
 
@@ -1055,7 +1056,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var currentMargin = AnalyzeCommon.ComputeLegMargin(shortLeg.Parsed, 1, spot, shortMidNow, longLeg.Parsed, null, 1, longMidNow, isExisting: true).Total;
 
 		decimal LongValueAtShortExpiry(decimal longStrike, DateTime shortExpiry) =>
-			(decimal)OptionMath.BlackScholes(spot, longStrike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days) / 365.0, 0.036, ivLong, callPut);
+			(decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, shortExpiry.Date + OptionMath.MarketClose, longLeg.Parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longStrike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivLong, callPut);
 
 		// Compute the "hold" per-share value once — used as the unchanged-portion projection for partial variants.
 		var longAtOriginalExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate);
@@ -1073,7 +1074,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut),
 			(shortLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate, ivShort, false, callPut),
 		};
-		var holdEvPerShare = ExpectedPositionValuePerShare(existingLegsForEv, shortLeg.Parsed.ExpiryDate, asOf, spot, ivShort);
+		var holdEvPerShare = ExpectedPositionValuePerShare(existingLegsForEv, shortLeg.Parsed.ExpiryDate, asOf, spot, ivShort, dividends);
 
 		// 1. Hold to short expiry.
 		list.Add(NewScenarioSpread("Hold to short expiry", legs, "—",
@@ -1113,7 +1114,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				{
 					var ivNewShort = ResolveIV(newSym, settings, quotes);
 					var dteNewShort = Math.Max(1, (newExp - asOf).Days);
-					var newShortMidExec = LiveOrBsMid(quotesForPricing, newSym, spot, shortLeg.Parsed.Strike, dteNewShort, ivNewShort, callPut);
+					var newShortMidExec = LiveOrBsMid(quotesForPricing, newSym, spot, shortLeg.Parsed.Strike, dteNewShort, ivNewShort, callPut, dividends);
 					var (newShortBid, _) = LiveBidAsk(quotesForPricing, newSym, newShortMidExec);
 					var cashPerShare = newShortMidExec - shortMidNow;
 					var longAtNewShortExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, newExp);
@@ -1146,7 +1147,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 				var ivSameExp = ResolveIV(sameExpSym, settings, quotes);
 				var dteSameExp = Math.Max(1, (shortLeg.Parsed.ExpiryDate - asOf).Days);
-				var newShortMidSameExp = LiveOrBsMid(quotesForPricing, sameExpSym, spot, newStrike, dteSameExp, ivSameExp, callPut);
+				var newShortMidSameExp = LiveOrBsMid(quotesForPricing, sameExpSym, spot, newStrike, dteSameExp, ivSameExp, callPut, dividends);
 				var (newShortBidSameExp, _) = LiveBidAsk(quotesForPricing, sameExpSym, newShortMidSameExp);
 				var cashPerShareSameExp = newShortMidSameExp - shortMidNow;
 				// At original short expiry: long has full remaining DTE to long expiry; new short at intrinsic.
@@ -1181,7 +1182,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				if (quotesForPricing != null && !HasLiveQuote(quotesForPricing, newSym)) continue; // skip if contract not listed
 				var ivNewShort = ResolveIV(newSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newExp - asOf).Days);
-				var newShortMidExec = LiveOrBsMid(quotesForPricing, newSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
+				var newShortMidExec = LiveOrBsMid(quotesForPricing, newSym, spot, newStrike, dteNewShort, ivNewShort, callPut, dividends);
 				var (newShortBid, _) = LiveBidAsk(quotesForPricing, newSym, newShortMidExec);
 				var cashPerShare = newShortMidExec - shortMidNow;
 				var longAtNewShortExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, newExp);
@@ -1222,14 +1223,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var ivNewLong = ResolveIV(newLongSym, settings, quotes);
 				var dteNewShort = Math.Max(1, (newShortExp - asOf).Days);
 				var dteNewLong = Math.Max(1, (newLongExp - asOf).Days);
-				var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
-				var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newStrike, dteNewLong, ivNewLong, callPut);
+				var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newStrike, dteNewShort, ivNewShort, callPut, dividends);
+				var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newStrike, dteNewLong, ivNewLong, callPut, dividends);
 				var (newShortBid, _) = LiveBidAsk(quotesForPricing, newShortSym, newShortMidExec);
 				var (_, newLongAsk) = LiveBidAsk(quotesForPricing, newLongSym, newLongMidExec);
 				var closeNet = longMidNow - shortMidNow;
 				var openNet = newShortMidExec - newLongMidExec;
 				var cashPerShare = closeNet + openNet;
-				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(spot, newStrike, Math.Max(1, (newLongExp.Date - newShortExp.Date).Days) / 365.0, 0.036, ivNewLong, callPut);
+				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, newShortExp.Date + OptionMath.MarketClose, newLongExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), newStrike, Math.Max(1, (newLongExp.Date - newShortExp.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivNewLong, callPut);
 				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newShortExp, callPut, newStrike);
@@ -1297,8 +1298,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 			var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, addShortExp, oppShortStrike, oppCp);
 			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
-			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, oppShortStrike, dteNewShort, ivNewShort, oppCp);
-			var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(spot, oppShortStrike, Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0, 0.036, ivNewShort, oppCp);
+			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, oppShortStrike, dteNewShort, ivNewShort, oppCp, dividends);
+			var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, origShortExp.Date + OptionMath.MarketClose, addShortExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), oppShortStrike, Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivNewShort, oppCp);
 
 			// Build both add geometries, then flag the one with the best incremental EV per added margin.
 			var pending = new List<(string variant, decimal longStrike, string newLongSym, decimal newLongMidExec, decimal cashPerShare, decimal newPositionValuePerShare, decimal evNewPerShare, decimal newMargin, bool estimated, decimal efficiency)>();
@@ -1314,9 +1315,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				// long leg's existence is inferred from the front grid; it's BS-priced when not live-quoted.
 				if (quotes != null && !Listed(newShortSym)) continue;
 				var ivNewLong = ResolveIV(newLongSym, settings, quotes);
-				var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, longStrike, dteNewLong, ivNewLong, oppCp);
+				var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, longStrike, dteNewLong, ivNewLong, oppCp, dividends);
 				var cashPerShare = newShortMidExec - newLongMidExec; // debit (negative) to open the new spread
-				var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, longStrike, Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0, 0.036, ivNewLong, oppCp);
+				var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, origShortExp.Date + OptionMath.MarketClose, addLongExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longStrike, Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivNewLong, oppCp);
 				var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp; // pinned (at current spot)
 				// Probability-weighted EV of the NEW spread at the existing short expiry — the honest figure the
 				// "incremental return" should be judged on, not the spot-pinned peak.
@@ -1325,7 +1326,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					(longStrike, addLongExp, ivNewLong, true, oppCp),
 					(oppShortStrike, addShortExp, ivNewShort, false, oppCp),
 				};
-				var evNewPerShare = ExpectedPositionValuePerShare(newLegsForEv, origShortExp, asOf, spot, ivNewShort);
+				var evNewPerShare = ExpectedPositionValuePerShare(newLegsForEv, origShortExp, asOf, spot, ivNewShort, dividends);
 				var newMargin = Math.Max(-cashPerShare, 0m) * 100m;           // long debit spread: margin = debit paid
 				var estimated = !Quoted(newShortSym) || !Quoted(newLongSym);
 				var efficiency = newMargin > 0m ? evNewPerShare * 100m / newMargin : 0m; // EV return per added $ of risk
@@ -1636,11 +1637,13 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		quotes.TryGetValue(symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m;
 
 	/// <summary>Returns live mid from quotes if both bid and ask are populated; otherwise a BS theoretical mid.</summary>
-	internal static decimal LiveOrBsMid(IReadOnlyDictionary<string, OptionContractQuote>? quotes, string symbol, decimal spot, decimal strike, int dte, decimal iv, string callPut)
+	internal static decimal LiveOrBsMid(IReadOnlyDictionary<string, OptionContractQuote>? quotes, string symbol, decimal spot, decimal strike, int dte, decimal iv, string callPut, IReadOnlyList<DividendEvent>? dividends = null)
 	{
 		if (quotes != null && quotes.TryGetValue(symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue && q.Bid.Value >= 0m && q.Ask.Value > 0m)
 			return (q.Bid.Value + q.Ask.Value) / 2m;
-		return (decimal)OptionMath.BlackScholes(spot, strike, dte / 365.0, 0.036, iv, callPut);
+		var expiryInstant = EvaluationDate.Today.Date.AddDays(dte) + OptionMath.MarketClose;
+		var adjSpot = OptionMath.DividendAdjustedSpot(spot, dividends, EvaluationDate.Today, expiryInstant, OptionMath.RiskFreeRate);
+		return (decimal)OptionMath.BlackScholes(adjSpot, strike, dte / 365.0, OptionMath.RiskFreeRate, iv, callPut);
 	}
 
 	/// <summary>Returns (bid, ask) from live quote when available; otherwise a ±1% synthetic spread around the given mid.</summary>
@@ -1714,7 +1717,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	/// is the vol used for the spot distribution over [asOf, target] (the near-leg IV is the right horizon).</summary>
 	private static decimal ExpectedPositionValuePerShare(
 		IReadOnlyList<(decimal strike, DateTime expiry, decimal iv, bool isLong, string cp)> legs,
-		DateTime target, DateTime asOf, decimal spot, decimal gridIv)
+		DateTime target, DateTime asOf, decimal spot, decimal gridIv, IReadOnlyList<DividendEvent>? dividends = null)
 	{
 		var yearsToTarget = Math.Max(1, (target.Date - asOf.Date).Days) / 365.0;
 		var grid = WebullAnalytics.AI.CandidateScorer.BuildScenarioGrid(spot, gridIv, yearsToTarget);
@@ -1726,7 +1729,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			{
 				var legValue = expiry.Date <= target.Date
 					? Intrinsic(pt.SpotAtExpiry, strike, cp)
-					: (decimal)OptionMath.BlackScholes(pt.SpotAtExpiry, strike, Math.Max(1, (expiry.Date - target.Date).Days) / 365.0, 0.036, iv, cp);
+					: (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(pt.SpotAtExpiry, dividends, target.Date + OptionMath.MarketClose, expiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), strike, Math.Max(1, (expiry.Date - target.Date).Days) / 365.0, OptionMath.RiskFreeRate, iv, cp);
 				value += (isLong ? 1m : -1m) * legValue;
 			}
 			ev += pt.Weight * value;
