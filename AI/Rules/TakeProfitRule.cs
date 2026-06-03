@@ -26,7 +26,6 @@ internal sealed class TakeProfitRule : IManagementRule
 	public ManagementProposal? Evaluate(OpenPosition position, EvaluationContext ctx)
 	{
 		if (!_config.Enabled) return null;
-		if (!_realizedExpectancy.Enabled) return null;
 
 		var currentMarkPerContract = ComputeMarkPerContract(position, ctx);
 		if (currentMarkPerContract == null) return null;
@@ -35,13 +34,33 @@ internal sealed class TakeProfitRule : IManagementRule
 		var profitPerContract = currentMarkPerContract.Value - position.AdjustedNetDebit;
 		if (profitPerContract <= 0m) return null;
 
-		// Max projected profit from grid: use the peak net value in the current-date column.
-		var maxProjected = GetMaxProjectedProfitPerContract(position, ctx);
-		if (maxProjected == null || maxProjected.Value <= 0m) return null;
+		string? rationale = null;
 
-		var pctCapturedFraction = profitPerContract / maxProjected.Value;
-		if (pctCapturedFraction < _realizedExpectancy.ProfitTargetPctOfMaxProfit) return null;
-		var pctCaptured = pctCapturedFraction * 100m;
+		// Target A — fixed % of net debit, fires ANY day. The discretionary "grab +X% and recycle the
+		// capital" exit; triggers far earlier than the % -of-max-projected target, so check it first.
+		// Independent of realizedExpectancy (it's a flat return threshold, not a grid-relative one).
+		if (_config.ProfitTargetPctOfDebit > 0m && position.AdjustedNetDebit > 0m)
+		{
+			var pctOfDebit = profitPerContract / position.AdjustedNetDebit * 100m;
+			if (pctOfDebit >= _config.ProfitTargetPctOfDebit)
+				rationale = $"captured {pctOfDebit:F0}% of net debit ${position.AdjustedNetDebit:F2}/contract (target {_config.ProfitTargetPctOfDebit:F0}%)";
+		}
+
+		// Target B — % of max projected profit (aligns with the scorer's EV clamp). Needs the realized-
+		// expectancy model for the threshold and the grid for the projection.
+		if (rationale == null && _realizedExpectancy.Enabled)
+		{
+			// Max projected profit from grid: use the peak net value in the current-date column.
+			var maxProjected = GetMaxProjectedProfitPerContract(position, ctx);
+			if (maxProjected != null && maxProjected.Value > 0m)
+			{
+				var pctCapturedFraction = profitPerContract / maxProjected.Value;
+				if (pctCapturedFraction >= _realizedExpectancy.ProfitTargetPctOfMaxProfit)
+					rationale = $"captured {pctCapturedFraction * 100m:F0}% of max projected profit ${maxProjected.Value:F2}/contract (threshold {_realizedExpectancy.ProfitTargetPctOfMaxProfit:P0})";
+			}
+		}
+
+		if (rationale == null) return null;
 
 		// Stamp each leg with per-share mid (default limit) and the side-aware bid/ask edge so the
 		// sink emits a realistic limit; otherwise the fallback path mis-scales NetDebit by quantity.
@@ -65,7 +84,7 @@ internal sealed class TakeProfitRule : IManagementRule
 			Kind: ProposalKind.Close,
 			Legs: legs,
 			NetDebit: currentMarkPerContract.Value,
-			Rationale: $"captured {pctCaptured:F0}% of max projected profit ${maxProjected.Value:F2}/contract (threshold {_realizedExpectancy.ProfitTargetPctOfMaxProfit:P0})"
+			Rationale: rationale
 		);
 	}
 

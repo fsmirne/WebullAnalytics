@@ -246,6 +246,11 @@ internal sealed class TakeProfitConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("pctOfMaxProfit")] public decimal PctOfMaxProfit { get; set; } = 60m;
+	/// <summary>Fixed take-profit: close on ANY day once mark-to-market profit reaches this % of the
+	/// initial net debit (e.g. 25 = exit at +25% on debit). Models the discretionary "grab the win and
+	/// recycle capital" policy, which fires far earlier than the % -of-max-projected-profit target.
+	/// Default 0 = off (only the max-projected target applies). Fires first when both are configured.</summary>
+	[JsonPropertyName("profitTargetPctOfDebit")] public decimal ProfitTargetPctOfDebit { get; set; } = 0m;
 }
 
 internal sealed class DefensiveRollConfig
@@ -339,6 +344,7 @@ internal static class AIConfigLoader
 
 		var tp = c.Rules.TakeProfit;
 		if (tp.PctOfMaxProfit <= 0m || tp.PctOfMaxProfit > 100m) return $"rules.takeProfit.pctOfMaxProfit: must be in (0, 100], got {tp.PctOfMaxProfit}";
+		if (tp.ProfitTargetPctOfDebit < 0m) return $"rules.takeProfit.profitTargetPctOfDebit: must be ≥ 0, got {tp.ProfitTargetPctOfDebit}";
 
 		var dr = c.Rules.DefensiveRoll;
 		if (dr.SpotWithinPctOfShortStrike < 0m) return $"rules.defensiveRoll.spotWithinPctOfShortStrike: must be ≥ 0, got {dr.SpotWithinPctOfShortStrike}";
