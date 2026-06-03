@@ -725,8 +725,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public decimal? FeePerContract { get; set; }
 
 	[CommandOption("--scan-stride <N>")]
-	[Description("Open-scan minute stride: evaluate every Nth minute for entries instead of all 390. Caps the per-day candidate-enumeration cost ~Nx (decisive for multi-leg structures over long windows) at the price of N-minute entry granularity. Default 1 (exhaustive). Try 5–10 for fast multi-leg full-year runs.")]
-	public int ScanStride { get; set; } = 1;
+	[Description("Open-scan minute stride: evaluate every Nth minute for entries instead of all 390. Caps the per-day candidate-enumeration cost ~Nx at the price of N-minute entry granularity — negligible for multi-day-hold structures (calendars/diagonals) and arguably more live-aligned (live enters near the open, not the best intraday minute). Default 30. Set 1 for an exhaustive minute walk.")]
+	public int ScanStride { get; set; } = 30;
 
 	[CommandOption("--iv-hv-premium <RATIO>")]
 	[Description("IV/HV multiplier for non-SPY tickers (SPY uses real VIX). Default: 1.15.")]
