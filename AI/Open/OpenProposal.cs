@@ -135,5 +135,11 @@ internal sealed record OpenProposal(
 	decimal? ExpectedMoveCreditFactor = null,
 	decimal? IvRealizedPremiumFactor = null,
 	decimal? ExpectedMoveLower = null,
-	decimal? ExpectedMoveUpper = null
+	decimal? ExpectedMoveUpper = null,
+	// True when this proposal is surfaced only for visibility — the best candidate of an enabled
+	// structure that didn't clear the global top-N / MinScoreToOpen bar. Shown in the scan output so the
+	// user can see what each enabled structure would propose, but NEVER auto-executed (the auto-executor
+	// filters these out). Used to surface DoubleCalendar/DoubleDiagonal, which are genuinely less
+	// capital-efficient than single calendars/diagonals and so rank below them.
+	bool Informational = false
 );
