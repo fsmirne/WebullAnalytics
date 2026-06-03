@@ -66,9 +66,12 @@ internal sealed class OpenerAutoExecutor
 		// day's order cap) and skip any we can't afford: affordability must not pick the trade by
 		// substituting a cheaper, lower-ranked proposal. Dedup below still advances past picks already
 		// at the broker.
+		// Informational proposals are surfaced for display only (the best candidate of an enabled structure
+		// that didn't clear the top-N / MinScoreToOpen bar). They must never be traded.
+		var tradeable = proposals.Where(p => !p.Informational);
 		var eligible = _allowedStructures.Count > 0
-			? proposals.Where(p => _allowedStructures.Contains(p.StructureKind.ToString()))
-			: proposals;
+			? tradeable.Where(p => _allowedStructures.Contains(p.StructureKind.ToString()))
+			: tradeable;
 		foreach (var p in eligible.Take(_config.MaxOrdersPerDay))
 		{
 			if (p.CashReserveBlocked) continue;

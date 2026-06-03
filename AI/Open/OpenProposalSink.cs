@@ -140,8 +140,12 @@ internal sealed class OpenProposalSink : IDisposable
 		var negativeEv = p.RealizedExpectedValuePerContract is decimal ev && ev <= 0m
 			? " [red]⚠ negative EV[/]"
 			: "";
-		var rankPrefix = rank is int n ? $"[grey]#{n}[/] " : "";
-		var header = $"{rankPrefix}[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}{negativeEv}";
+		// Informational proposals are the best candidate of an enabled structure that didn't clear the
+		// top-N / MinScoreToOpen bar — surfaced for visibility, never auto-executed. Flag them so they
+		// don't read as actionable ranked picks.
+		var informational = p.Informational ? " [grey]ⓘ below threshold — informational, not auto-executed[/]" : "";
+		var rankPrefix = p.Informational ? "[grey]·[/] " : (rank is int n ? $"[grey]#{n}[/] " : "");
+		var header = $"{rankPrefix}[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}{negativeEv}{informational}";
 		var panel = new Panel(new Rows(rows))
 			.Header(header)
 			.Expand()

@@ -567,8 +567,29 @@ internal sealed class OpenCandidateEvaluator
 			// bar above zero for users who want only high-conviction trades; default 0 preserves the
 			// legacy behavior of emitting any positive-EV trade.
 			var minScore = cfg.MinScoreToOpen;
-			foreach (var proposal in RankForOutput(survivors).Where(p => (p.FinalScore ?? 0m) > minScore).Take(cfg.TopNPerTicker))
+			var ranked = RankForOutput(survivors).ToList();
+			foreach (var proposal in ranked.Where(p => (p.FinalScore ?? 0m) > minScore).Take(cfg.TopNPerTicker))
 				output.Add(proposal);
+
+			// Structure-coverage floor (DEBUG/exploration only): an enabled structure whose best candidate
+			// ranks below the global top-N (or below MinScoreToOpen) is otherwise invisible — the user
+			// enabled it but never sees what it would propose. DoubleCalendar/DoubleDiagonal hit this
+			// routinely: they tie up ~2x the capital and pay ~2x the friction of a single calendar/diagonal
+			// for a wider-but-flatter tent, so they score well below the singles and never crack the top-N.
+			// Under --log-level debug, surface the best positive-EV candidate of each enabled structure not
+			// already represented, flagged Informational so it renders for visibility but is NEVER
+			// auto-executed (OpenerAutoExecutor filters Informational out). In prod (info/error log levels) a
+			// candidate that doesn't clear MinScoreToOpen does not show — exploration is opt-in via debug.
+			if (debug)
+			{
+				var representedKinds = output.Select(p => p.StructureKind).ToHashSet();
+				foreach (var kind in scoredByStructure.Keys)
+				{
+					if (representedKinds.Contains(kind)) continue;
+					var best = ranked.FirstOrDefault(p => p.StructureKind == kind && (p.FinalScore ?? 0m) > 0m);
+					if (best != null) output.Add(best with { Informational = true });
+				}
+			}
 		}
 
 		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker; sentiment is
