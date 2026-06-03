@@ -28,6 +28,13 @@ internal static class RuleTestFacts
 		decimal shortLegStrike = 25m,
 		decimal netDeltaPostShort = 0m,
 		TrendSnapshot? trend = null,
+		DateTime? asOf = null,
+		DateTime? nextEarningsDate = null,
+		string? earningsTime = null,
+		DateTime? nextExDividendDate = null,
+		decimal? nextDividendAmount = null,
+		string? ticker = null,
+		bool hasShortCallLeg = false,
 		bool shortLegSurvivesPostShort = false) =>
 		new(
 			structureLabel, directionalBias,
@@ -37,5 +44,12 @@ internal static class RuleTestFacts
 			longPremiumPaid, shortPremiumReceived, netCashPerShare, premiumRatio,
 			spot, shortLegOtm, shortLegExtrinsic,
 			longLegStrike, shortLegStrike, netDeltaPostShort, trend,
+			AsOf: asOf,
+			NextEarningsDate: nextEarningsDate,
+			EarningsTime: earningsTime,
+			NextExDividendDate: nextExDividendDate,
+			NextDividendAmount: nextDividendAmount,
+			Ticker: ticker,
+			HasShortCallLeg: hasShortCallLeg,
 			ShortLegSurvivesPostShort: shortLegSurvivesPostShort);
 }

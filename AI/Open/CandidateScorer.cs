@@ -295,8 +295,14 @@ internal static class CandidateScorer
 		decimal spot,
 		DateTime asOf,
 		IReadOnlyDictionary<string, OptionContractQuote> quotes,
-		decimal defaultIvPct)
+		decimal defaultIvPct,
+		TickerEvents? events = null,
+		OpenerEventsConfig? eventsCfg = null)
 	{
+		// Lower the Black-Scholes forward for legs trading through an upcoming ex-dividend. Without this,
+		// the long leg of a calendar/diagonal straddling an ex-date prices high, manufacturing a phantom
+		// theoretical-vs-market edge that has nothing to do with mispricing.
+		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, eventsCfg);
 		decimal marketLong = 0m, marketShort = 0m, theoLong = 0m, theoShort = 0m;
 		foreach (var leg in legs)
 		{
@@ -309,7 +315,8 @@ internal static class CandidateScorer
 
 			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
 			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
-			var theo = OptionMath.BlackScholes(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
+			var adjSpot = OptionMath.DividendAdjustedSpot(spot, dividends, asOf, expirationTime, OptionMath.RiskFreeRate);
+			var theo = OptionMath.BlackScholes(adjSpot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 			if (theo <= 0m) return null;
 
 			if (leg.IsLong) { marketLong += mid; theoLong += theo; }
@@ -1324,7 +1331,7 @@ internal static class CandidateScorer
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(
 			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
-			spot, asOf, quotes, cfg.Indicators.IvDefaultPct);
+			spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
@@ -1483,7 +1490,7 @@ internal static class CandidateScorer
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(
 			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
-			spot, asOf, quotes, cfg.Indicators.IvDefaultPct);
+			spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
@@ -2068,7 +2075,7 @@ internal static class CandidateScorer
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gexFactor = ComputeGexAdjustmentFactor(skel, spot, asOf, representativeIv, gex, cfg, breakevens);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
-		var statArb = ComputeMarketTheoreticalAggregate(defs.Select(d => (d.Proposal.Symbol, d.Parsed, d.IsLong)), spot, asOf, quotes, cfg.Indicators.IvDefaultPct);
+		var statArb = ComputeMarketTheoreticalAggregate(defs.Select(d => (d.Proposal.Symbol, d.Parsed, d.IsLong)), spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
@@ -2283,7 +2290,7 @@ internal static class CandidateScorer
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(
 			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
-			spot, asOf, quotes, cfg.Indicators.IvDefaultPct);
+			spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
@@ -2470,7 +2477,7 @@ internal static class CandidateScorer
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gexFactor = ComputeGexAdjustmentFactor(skel, spot, asOf, iv, gex, cfg);
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
-		var statArb = ComputeMarketTheoreticalAggregate(new (string, OptionParsed, bool)[] { (leg.Symbol, parsed, true) }, spot, asOf, quotes, cfg.Indicators.IvDefaultPct);
+		var statArb = ComputeMarketTheoreticalAggregate(new (string, OptionParsed, bool)[] { (leg.Symbol, parsed, true) }, spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
 		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);

@@ -4,6 +4,7 @@ using Spectre.Console.Rendering;
 using System.ComponentModel;
 using System.Globalization;
 using WebullAnalytics.AI;
+using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.Api;
@@ -187,6 +188,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var historicalVolAnnual = await TryComputeHistoricalVolAsync(tickerForTrend, asOfForDiagnostic, cancellation);
 		var sentiment = await FearGreedClient.FetchAsync(asOfForDiagnostic, cancellation);
 
+		// Scheduled-catalyst events (earnings + ex-dividend) for the position's ticker. cacheOnly:false
+		// refreshes the 12h event cache — without this, held tickers the opener never scans (e.g. SPY)
+		// never populate data/event-cache, leaving the theoretical price un-dividend-adjusted.
+		var positionEvents = (await EventCalendarLoader.LoadAsync(new[] { ticker }, new OpenerEventsConfig(), asOfForDiagnostic, cancellation, cacheOnly: false)).Get(ticker);
+
 		var diagnostic = BuildAndLogDiagnostic(
 			logPath: Program.ResolvePath("data/analyze-position.jsonl"),
 			ticker: tickerForTrend ?? "UNKNOWN",
@@ -211,7 +217,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			// IV against them produces a nonsense IV that collapses calendar/diagonal residual time
 			// value. Use the broker's reported IV instead so the projection is internally consistent.
 			useMarketImpliedIv: string.IsNullOrEmpty(settings.Spot),
-			sentiment: sentiment);
+			sentiment: sentiment,
+			events: positionEvents);
 
 		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias);
 
@@ -1926,7 +1933,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal technicalBiasForProbe = 0m,
 		decimal? historicalVolAnnual = null,
 		bool useMarketImpliedIv = true,
-		SentimentSnapshot? sentiment = null)
+		SentimentSnapshot? sentiment = null,
+		TickerEvents? events = null)
 	{
 		var diagLegs = legs.Select(l => new DiagnosticLeg(
 			Symbol: l.Symbol,
@@ -1936,8 +1944,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			PricePerShare: legPriceResolver(l.Symbol),
 			CostBasisPerShare: l.CostBasis)).ToList();
 
-		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend, quotesForProbe, sentiment);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score);
+		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend, quotesForProbe, sentiment, events);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score, events: events);
 		diagnostic = diagnostic with { Probe = probe };
 
 		Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);

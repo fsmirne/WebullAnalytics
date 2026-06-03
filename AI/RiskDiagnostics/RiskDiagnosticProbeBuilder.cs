@@ -1,4 +1,5 @@
 ﻿using System.Text.Json;
+using WebullAnalytics.AI.Events;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.RiskDiagnostics;
@@ -19,7 +20,8 @@ internal static class RiskDiagnosticProbeBuilder
 		bool useCostBasisForOpenerScore = false,
 		decimal? historicalVolAnnual = null,
 		bool useMarketImpliedIv = true,
-		decimal? sentimentScore = null)
+		decimal? sentimentScore = null,
+		TickerEvents? events = null)
 	{
 		var legQuotes = new List<RiskDiagnosticLegQuote>();
 		if (quotes != null)
@@ -150,7 +152,7 @@ internal static class RiskDiagnosticProbeBuilder
 					// false branch) reads the Iv field from the quote, which OverrideBidAskWithCostBasis
 					// does not touch, giving the current broker-reported IV.
 					var effectiveUseMarketImpliedIv = useCostBasisForOpenerScore ? false : useMarketImpliedIv;
-					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false, useMarketImpliedIv: effectiveUseMarketImpliedIv, sentimentScore: sentimentScore);
+					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false, useMarketImpliedIv: effectiveUseMarketImpliedIv, sentimentScore: sentimentScore, events: events);
 					if (scored != null)
 					{
 						// When cost-basis override is in play, the scorer's view of bid/ask is collapsed
@@ -182,7 +184,7 @@ internal static class RiskDiagnosticProbeBuilder
 							// so ComputeMarketTheoreticalAggregate inside Score() treats the cost basis as
 							// "current market mid." Recompute stat-arb from live quotes so the market-net
 							// indicator reflects what the position costs to enter today, not what was paid.
-							var liveStatArb = CandidateScorer.ComputeMarketTheoreticalAggregate(legs.Select(l => (l.Symbol, l.Parsed, l.IsLong)), spot, asOf, quotes, ai.Indicators.IvDefaultPct);
+							var liveStatArb = CandidateScorer.ComputeMarketTheoreticalAggregate(legs.Select(l => (l.Symbol, l.Parsed, l.IsLong)), spot, asOf, quotes, ai.Indicators.IvDefaultPct, events, ai.Opener.Indicators.Events);
 							var newStatArbFactor = CandidateScorer.ComputeStatArbAdjustmentFactor(liveStatArb?.MarketNet, liveStatArb?.TheoreticalNet, liveStatArb?.GrossTheoretical, ai.Opener.Weights.StatArb);
 							var oldStatArbFactor = scored.StatArbAdjustmentFactor ?? 1m;
 							var newStatArbFactorVal = newStatArbFactor ?? 1m;
