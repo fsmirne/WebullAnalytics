@@ -41,10 +41,21 @@ internal sealed class AnalyzePositionSettings : AnalyzeBaseSettings
 	[Description("Account alias or ID from api-config.json used to auto-detect cash/BP when selecting an existing open position.")]
 	public string? Account { get; set; }
 
+	[CommandOption("--log-level <LEVEL>")]
+	[Description("Verbosity: error | information (default) | debug. 'debug' adds the put-call-parity implied-dividend diagnostic.")]
+	public string? LogLevel { get; set; }
+
+	/// <summary>True when --log-level debug — surfaces extra diagnostics (e.g. implied dividend) that
+	/// would otherwise clutter the proposal output.</summary>
+	public bool IsDebug => string.Equals(LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
+
+		if (LogLevel != null && LogLevel.ToLowerInvariant() is not ("error" or "information" or "debug"))
+			return ValidationResult.Error($"--log-level: must be error|information|debug, got '{LogLevel}'");
 
 		if (!string.IsNullOrEmpty(Spec))
 		{
@@ -156,9 +167,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// Phase 2: fetch quotes for the hypothetical-scenario symbols we couldn't enumerate without spot.
 		{
 			var alreadyFetched = quotes ?? new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
-			// Also pull the same-strike PUT at each position expiry so the put-call-parity implied-dividend
-			// diagnostic has both sides (the chain often quotes only calls / front-month, leaving far puts as stubs).
-			var pcpPutSymbols = positionLegs.Select(l => $"{l.Parsed.Root}{l.Parsed.ExpiryDate:yyMMdd}P{(int)Math.Round(l.Parsed.Strike * 1000m):00000000}");
+			// Under --log-level debug, also pull the same-strike PUT at each position expiry so the
+			// put-call-parity implied-dividend diagnostic has both sides (the chain often quotes only
+			// calls / front-month, leaving far puts as stubs). Skipped by default to avoid extra fetches.
+			var pcpPutSymbols = settings.IsDebug
+				? positionLegs.Select(l => $"{l.Parsed.Root}{l.Parsed.ExpiryDate:yyMMdd}P{(int)Math.Round(l.Parsed.Strike * 1000m):00000000}")
+				: Enumerable.Empty<string>();
 			var hypotheticalSymbols = EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot.Value)
 				.Concat(pcpPutSymbols)
 				.Where(s => !alreadyFetched.ContainsKey(s))
@@ -242,7 +256,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		AnalyzeCommon.RenderProposalPanel(positionLegs, structure.ToString(), spot.Value, diagnostic, renderConsole, ascii: toText);
 
-		RenderImpliedDividendDiagnostic(positionLegs, spot.Value, quotes, dividends, asOfForDiagnostic, renderConsole);
+		if (settings.IsDebug)
+			RenderImpliedDividendDiagnostic(positionLegs, spot.Value, quotes, dividends, asOfForDiagnostic, renderConsole);
 
 		if (scenarios.Count == 0)
 		{
