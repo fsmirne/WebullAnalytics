@@ -34,6 +34,33 @@ internal static class OptionMath
 		return (decimal)Math.Max(0, price);
 	}
 
+	/// <summary>
+	/// Escrowed-dividend adjustment to spot for pricing a leg that may trade through an ex-dividend date.
+	/// Subtracts the present value of every cash dividend whose ex-date falls in (<paramref name="evalDate"/>,
+	/// <paramref name="expiry"/>] from <paramref name="spot"/>. Pricing the leg on this adjusted spot lowers
+	/// the Black-Scholes forward by FV(divs) — the correct treatment for, e.g., the long leg of a calendar
+	/// straddling an ex-date (the short leg, expiring before the ex-date, has nothing in its window and is
+	/// unchanged). Returns <paramref name="spot"/> unchanged when no dividends fall in the window, so
+	/// non-payers and missing data behave exactly as before. A future ex-date already drops out of the
+	/// window once <paramref name="evalDate"/> passes it, so the same call is correct for both current-spot
+	/// and future-dated scenario pricing.
+	/// </summary>
+	internal static decimal DividendAdjustedSpot(decimal spot, IReadOnlyList<DividendEvent>? dividends, DateTime evalDate, DateTime expiry, double riskFreeRate)
+	{
+		if (dividends == null || dividends.Count == 0) return spot;
+		decimal pv = 0m;
+		foreach (var d in dividends)
+		{
+			if (d.Amount <= 0m || d.ExDate <= evalDate || d.ExDate > expiry) continue;
+			var years = (d.ExDate - evalDate).TotalDays / 365.0;
+			pv += d.Amount * (decimal)Math.Exp(-riskFreeRate * years);
+		}
+		var adjusted = spot - pv;
+		// Guard against pathological over-subtraction (divs ≥ spot): a non-positive spot would blow up
+		// log(S/K) in Black-Scholes. Such inputs are non-physical, so fall back to the unadjusted spot.
+		return adjusted > 0m ? adjusted : spot;
+	}
+
 	/// <summary>Computes the Black-Scholes delta for a European option. Returns signed delta: positive for calls, negative for puts.</summary>
 	internal static decimal Delta(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv, string callPut)
 	{
@@ -94,7 +121,8 @@ internal static class OptionMath
 		if (iv.HasValue && evaluationDate < expirationTime)
 		{
 			var timeYears = (expirationTime - evaluationDate).TotalDays / 365.0;
-			return BlackScholes(underlyingPrice, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
+			var adjustedSpot = DividendAdjustedSpot(underlyingPrice, GetLegDividends(parsed.Root, opts), evaluationDate, expirationTime, RiskFreeRate);
+			return BlackScholes(adjustedSpot, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
 		}
 		return Intrinsic(underlyingPrice, parsed.Strike, parsed.CallPut);
 	}
@@ -133,6 +161,10 @@ internal static class OptionMath
 			return quote.ImpliedVolatility.Value;
 		return null;
 	}
+
+	/// <summary>Dividend schedule for a leg's underlying root, or null when none is known (no adjustment).</summary>
+	internal static IReadOnlyList<DividendEvent>? GetLegDividends(string root, AnalysisOptions opts) =>
+		opts.Dividends != null && opts.Dividends.TryGetValue(root, out var divs) ? divs : null;
 
 	// --- Shared helpers ---
 

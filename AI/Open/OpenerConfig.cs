@@ -425,6 +425,16 @@ internal sealed class OpenerEventsConfig
 	/// Useful when Yahoo's calendar lags, for non-US tickers, or for known events Yahoo misses. Relative
 	/// paths resolve against the project root. Null disables the override. Default null.</summary>
 	[JsonPropertyName("overrideFilePath")] public string? OverrideFilePath { get; set; } = null;
+
+	/// <summary>Per-ticker annual dividend yield (e.g. 0.012 = 1.2%/yr) used to size a per-payment cash
+	/// dividend for the Black-Scholes forward adjustment ONLY when a Yahoo/override ex-dividend date is
+	/// known but its cash amount is not. Amount ≈ <c>spot × dividendYield / dividendFrequency</c>. 0
+	/// disables the fallback (the leg prices with no dividend). Default 0.</summary>
+	[JsonPropertyName("dividendYield")] public decimal DividendYield { get; set; } = 0m;
+
+	/// <summary>Dividend payments per year, used with <see cref="DividendYield"/> to derive the
+	/// per-payment cash amount. Default 4 (quarterly), the norm for liquid US optionable payers.</summary>
+	[JsonPropertyName("dividendFrequency")] public int DividendFrequency { get; set; } = 4;
 }
 
 /// <summary>Realized-expectancy scoring: replaces the theoretical "hold to expiry, collect max"
