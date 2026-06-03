@@ -164,8 +164,7 @@ public class CandidateEnumeratorLadderTests
 			var buy = ParsingHelpers.ParseOptionSymbol(d.Legs.Single(l => l.Action == "buy").Symbol)!;
 			var sell = ParsingHelpers.ParseOptionSymbol(d.Legs.Single(l => l.Action == "sell").Symbol)!;
 			Assert.True(buy.ExpiryDate > sell.ExpiryDate, "long leg is the far expiry");
-			var dir = buy.CallPut == "C" ? 1 : -1;
-			Assert.True(dir * sell.Strike > dir * buy.Strike, "short leg further OTM than long anchor");
+			Assert.NotEqual(buy.Strike, sell.Strike); // diagonal (not calendar): strikes differ; covered OR reverse geometry both allowed
 			Assert.Contains(buy.Strike, ListedStrikes);
 			Assert.Contains(sell.Strike, ListedStrikes);
 		}

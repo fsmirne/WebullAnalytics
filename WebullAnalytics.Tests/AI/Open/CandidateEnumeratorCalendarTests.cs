@@ -105,6 +105,34 @@ public class CandidateEnumeratorCalendarTests
 	}
 
 	[Fact]
+	public void DiagonalDeltaBandEnumeratesBothCoveredAndReverse()
+	{
+		// "All diagonals" means both geometries: covered (long strike < short, bullish) AND reverse
+		// (long strike > short). The delta path used to keep only covered; it must now enumerate both,
+		// matching the legacy ATM-grid path. (The scorer's debit>0 gate later drops net-credit reverse
+		// spreads, but enumeration shouldn't pre-exclude them.)
+		var cfg = DefaultCfg();
+		cfg.Structures.LongCalendar.Enabled = false;
+		cfg.Structures.LongDiagonal = new OpenerCalendarLikeConfig
+		{
+			Enabled = true, ShortDteMin = 3, ShortDteMax = 10, LongDteMin = 21, LongDteMax = 60,
+			DeltaMin = 0.40m, DeltaMax = 0.70m, ShortDeltaMin = 0.30m, ShortDeltaMax = 0.55m
+		};
+		var asOf = new DateTime(2026, 4, 20);
+		var pairs = CandidateEnumerator.Enumerate("SPY", spot: 100m, asOf, cfg)
+			.Where(s => s.StructureKind == OpenStructureKind.LongDiagonal)
+			.Select(s =>
+			{
+				var longLeg = ParsingHelpers.ParseOptionSymbol(s.Legs.First(l => l.Action == "buy").Symbol)!;
+				var shortLeg = ParsingHelpers.ParseOptionSymbol(s.Legs.First(l => l.Action == "sell").Symbol)!;
+				return longLeg.CallPut == "C" ? (longLeg.Strike, shortLeg.Strike) : ((decimal, decimal)?)null;
+			})
+			.Where(x => x.HasValue).Select(x => x!.Value).ToList();
+		Assert.Contains(pairs, p => p.Item1 < p.Item2);   // covered: long strike < short strike
+		Assert.Contains(pairs, p => p.Item1 > p.Item2);   // reverse: long strike > short strike
+	}
+
+	[Fact]
 	public void DiagonalDeltaBandEnumeratesTightOneStrikeGap()
 	{
 		// The delta grid alone pairs a near-ATM short only with longs several strikes away. The tight-gap
