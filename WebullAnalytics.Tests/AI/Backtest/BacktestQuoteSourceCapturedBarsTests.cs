@@ -242,6 +242,54 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 		Assert.Equal(iv1, (double)q.ImpliedVolatility!.Value, 3); // flat-extrapolated from the single neighbor
 	}
 
+	[Fact]
+	public async Task GetQuotesAsync_Spy_UsesCalibratedSpreadCurve()
+	{
+		// SPY leg priced at a known mid ($4.00) via a flat captured bar (open=close). The bid/ask must
+		// come from the empirically-calibrated SPY mid→spread curve, NOT the old flat 1%-of-mid index
+		// band. At mid $4.00 the curve interpolates between knots (3.991, 0.0578) and (6.232, 0.0953):
+		//   full = 0.0578 + (0.0953-0.0578)·(4.00-3.991)/(6.232-3.991) ≈ 0.05795  →  half ≈ 0.02897.
+		// The old index band would give half = max(0.005, 0.005·4) = 0.02 (total $0.04) — materially tighter.
+		var occ = "SPY260116C00410000";  // SPY $410 call (OTM at spot 405), expiry 2026-01-16
+		var asOf = new DateTime(2025, 12, 15, 9, 30, 0, DateTimeKind.Unspecified);
+		var asOfUtc = ToUtcOpen(asOf);
+		SeedCsv(occ, new List<OptionMinuteBar> { new(asOfUtc, 4m, 4m, 4m, 4m, 100, null) });
+
+		var (bars, iv) = BuildSpyCaches(spyOpen: 405m, asOf: asOf);
+		var quotes = new BacktestQuoteSource(bars, iv, riskFreeRate: 0.036, optionBars: new HistoricalOptionBarCache(_tmpDir));
+
+		var snap = await quotes.GetQuotesAsync(asOf, new HashSet<string>(new[] { occ }),
+			new HashSet<string>(new[] { "SPY" }, StringComparer.OrdinalIgnoreCase), CancellationToken.None);
+
+		Assert.True(snap.Options.TryGetValue(occ, out var q));
+		Assert.Equal(4m, q!.LastPrice);
+		var fullSpread = q.Ask!.Value - q.Bid!.Value;
+		Assert.Equal(0.05795m, fullSpread, 3);     // calibrated curve value (3-decimal tolerance)
+		Assert.True(fullSpread > 0.04m);           // strictly wider than the old flat-1% index band
+	}
+
+	/// <summary>Minimal caches for a SPY option test: today's SPY open set to <paramref name="spyOpen"/>
+	/// (so the quote source resolves the underlying) plus a flat VIX-family seed for the IV provider.</summary>
+	private (HistoricalBarCache Bars, BacktestIVProvider Iv) BuildSpyCaches(decimal spyOpen, DateTime asOf)
+	{
+		var prior = asOf.Date.AddDays(-1);
+		var data = new Dictionary<string, Dictionary<DateTime, YahooOptionsClient.HistoricalBar>>(StringComparer.OrdinalIgnoreCase)
+		{
+			["SPY"] = new() { [asOf.Date] = MakeBar(asOf.Date, spyOpen) },
+			["VIX"] = new() { [prior] = MakeBar(prior, 18m) },
+			["VIX1D"] = new() { [prior] = MakeBar(prior, 18m) },
+			["VIX9D"] = new() { [prior] = MakeBar(prior, 18m) },
+		};
+		var cacheDir = Path.Combine(_tmpDir, "bars-spy");
+		Directory.CreateDirectory(cacheDir);
+		var bars = new HistoricalBarCache(
+			cacheDir,
+			(ticker, from, to, ct) => Task.FromResult(data.TryGetValue(ticker, out var map) ? map : new Dictionary<DateTime, YahooOptionsClient.HistoricalBar>()),
+			utcNow: () => new DateTimeOffset(asOf.Date.AddDays(1).AddHours(18), TimeSpan.Zero).UtcDateTime);
+		var iv = new BacktestIVProvider(bars, smileEnabled: false);
+		return (bars, iv);
+	}
+
 	private string SeedCsv(string occ, List<OptionMinuteBar> bars)
 	{
 		var parsed = ParsingHelpers.ParseOptionSymbol(occ);
