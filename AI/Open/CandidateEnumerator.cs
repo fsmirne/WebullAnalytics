@@ -87,7 +87,13 @@ internal static class CandidateEnumerator
 		if (available == null) return OpenerExpiryHelpers.NextExpiriesForTicker(ticker, asOf, minDte, maxDte);
 		var start = asOf.Date.AddDays(minDte);
 		var end = asOf.Date.AddDays(maxDte);
-		return available.Where(d => d >= start && d <= end).OrderBy(d => d);
+		// Snap market-closed dates to the day the contract actually expires (e.g. a Good Friday weekly →
+		// the preceding Thursday). Data providers list the holiday-Friday symbol but it never trades, so
+		// using it verbatim makes the backtest fabricate a fill (phantom strike) and would propose a
+		// non-tradeable contract live. Snapping (vs dropping) keeps the real expiry: if its strikes are in
+		// the chain the candidate prices off real bars, else the per-expiry ladder is empty and it drops
+		// naturally. Distinct collapses a snap that collides with an already-listed prior-day expiry.
+		return available.Select(MarketCalendar.PreviousOpenOnOrBefore).Where(d => d >= start && d <= end).Distinct().OrderBy(d => d);
 	}
 
 	/// <summary>Same as <see cref="WeeklyExpiriesInRange"/> for chain-known expirations — the chain's real
@@ -98,7 +104,9 @@ internal static class CandidateEnumerator
 		if (available == null) return OpenerExpiryHelpers.MonthlyExpiriesInRange(asOf, minDte, maxDte);
 		var start = asOf.Date.AddDays(minDte);
 		var end = asOf.Date.AddDays(maxDte);
-		return available.Where(d => d >= start && d <= end).OrderBy(d => d);
+		// Snap market-closed dates to the real expiry — see WeeklyExpiriesInRange. The April monthly third
+		// Friday is Good Friday in some years (2025-04-18, 2026-04-03), which settles the preceding Thursday.
+		return available.Select(MarketCalendar.PreviousOpenOnOrBefore).Where(d => d >= start && d <= end).Distinct().OrderBy(d => d);
 	}
 
 	private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)

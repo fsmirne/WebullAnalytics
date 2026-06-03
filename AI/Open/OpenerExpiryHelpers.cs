@@ -39,13 +39,7 @@ internal static class OpenerExpiryHelpers
 		"GOOG", "GOOGL", "AMZN", "AAPL", "META", "MSFT", "NVDA", "TSLA", "AVGO"
 	};
 
-	private static DateTime AdjustToPreviousOpen(DateTime date)
-	{
-		var d = date.Date;
-		while (!MarketCalendar.IsOpen(d))
-			d = d.AddDays(-1);
-		return d;
-	}
+	private static DateTime AdjustToPreviousOpen(DateTime date) => MarketCalendar.PreviousOpenOnOrBefore(date);
 
 	/// <summary>Dispatches to the right enumerator based on the ticker's listed expiry cadence:
 	/// daily (Mon-Fri) for index ETFs/indices in <see cref="DailyExpiryTickers"/>; Mon/Wed/Fri for mega-caps
