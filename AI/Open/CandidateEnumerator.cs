@@ -4,6 +4,11 @@ namespace WebullAnalytics.AI;
 
 internal static class CandidateEnumerator
 {
+	/// <summary>Max long-leg anchors enumerated across a calendar/diagonal's delta band per (short, long)
+	/// expiry pair. Spanning the band (vs the old 2-nearest-midpoint) lets OTM→ITM long legs coexist as
+	/// candidates so the scorer can pick by regime; capped so a wide band stays tractable in the per-minute scan.</summary>
+	private const int MaxLongAnchors = 5;
+
 	/// <summary>Enumerates candidate skeletons for a ticker. <paramref name="availableExpirations"/>, when
 	/// non-null, is the set of real expirations from the chain — using these (rather than computed
 	/// 3rd-Friday/Friday helpers) is what makes holiday-shifted monthlies (e.g. Juneteenth pushes June
@@ -113,7 +118,6 @@ internal static class CandidateEnumerator
 		var step = FallbackStep(spot);
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
 		var useDelta = sCfg.DeltaMax > 0m; // delta-band placement vs legacy ATM grid
-		var deltaMid = (sCfg.DeltaMin + sCfg.DeltaMax) / 2m;
 		var shortMid = (sCfg.ShortDeltaMin + sCfg.ShortDeltaMax) / 2m;
 		foreach (var callPut in new[] { "C", "P" })
 			foreach (var shortExp in shortExps)
@@ -131,10 +135,15 @@ internal static class CandidateEnumerator
 						// the directional anchor, same convention as DiagonalVertical / CalendarVertical.
 						var longYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, longExp);
 						var dir = callPut == "C" ? 1 : -1;
-						var anchors = StrikesAround(spot, step, 24, longLadder)
+						// Anchors SPAN the whole [DeltaMin, DeltaMax] band (sorted OTM→ITM), not just the midpoint —
+						// so a band like 0.40–0.70 yields OTM, ATM, and ITM long legs as distinct candidates and the
+						// scorer picks per regime (e.g. ITM call diagonals in a bull tape). The band is the user's
+						// delta control; MaxLongAnchors caps the per-minute scan by downsampling a wide band evenly.
+						var bandStrikes = StrikesAround(spot, step, 24, longLadder)
 							.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, longYears, OptionMath.RiskFreeRate, ResolveIv(ticker, longExp, k, callPut, quotes, defaultIv), callPut))))
 							.Where(x => x.d >= sCfg.DeltaMin && x.d <= sCfg.DeltaMax)
-							.OrderBy(x => Math.Abs(x.d - deltaMid)).Take(2).Select(x => x.k).ToList();
+							.OrderBy(x => x.d).Select(x => x.k).ToList();
+						var anchors = SpanEvenly(bandStrikes, MaxLongAnchors);
 
 						foreach (var anchor in anchors)
 						{
@@ -246,6 +255,18 @@ internal static class CandidateEnumerator
 	/// <summary>Listed strikes bracketing spot when a chain is present, else the uniform step grid.</summary>
 	private static IReadOnlyList<decimal> StrikesAround(decimal spot, decimal step, int count, StrikeLadder ladder)
 		=> ladder.ChainPresent ? ladder.Around(spot, count).ToList() : StrikesAroundSpot(spot, step, count).ToList();
+
+	/// <summary>Up to <paramref name="max"/> items evenly spaced across <paramref name="sorted"/> (a
+	/// delta-sorted strike list), always including both ends, so anchors span the configured band instead
+	/// of clustering. Returns the whole list unchanged when it already fits within <paramref name="max"/>.</summary>
+	private static List<decimal> SpanEvenly(IReadOnlyList<decimal> sorted, int max)
+	{
+		if (max <= 1 || sorted.Count <= max) return sorted.ToList();
+		var result = new List<decimal>(max);
+		for (var i = 0; i < max; i++)
+			result.Add(sorted[(int)Math.Round((double)i * (sorted.Count - 1) / (max - 1))]);
+		return result.Distinct().ToList();
+	}
 
 	/// <summary>Wing strike <paramref name="w"/> positions from <paramref name="anchor"/> in direction
 	/// <paramref name="dir"/> (+1 up / -1 down): a count of strikes along the real ladder when a chain is
