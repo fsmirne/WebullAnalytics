@@ -3,6 +3,8 @@ using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
+using WebullAnalytics.AI;
+using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.Api;
 using WebullAnalytics.IO;
@@ -257,6 +259,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		// to enrich.
 		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
+		IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends = null;
 		if (positionRows.Count > 0)
 		{
 			try
@@ -282,6 +285,17 @@ class ReportCommand : AsyncCommand<ReportSettings>
 						optionQuotesBySymbol = webullData.OptionQuotes;
 						underlyingPrices = webullData.UnderlyingPrices;
 						Console.WriteLine($"Webull: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
+
+						// Dividend schedule for the held tickers, so the theoretical time-decay grid prices
+						// legs on the ex-dividend-adjusted forward (a long calendar leg trading through an
+						// ex-date is otherwise overpriced). cacheOnly:false refreshes the 12h event cache —
+						// this is also what keeps data/event-cache warm for tickers the opener never scans.
+						if (underlyingPrices.Count > 0)
+						{
+							var eventsCfg = new OpenerEventsConfig();
+							var calendar = await EventCalendarLoader.LoadAsync(underlyingPrices.Keys.ToList(), eventsCfg, EvaluationDate.Today, cancellation, cacheOnly: false);
+							dividends = DividendScheduleBuilder.Build(calendar, underlyingPrices, eventsCfg);
+						}
 					}
 				}
 
@@ -323,7 +337,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				ivOverrides = parsed;
 		}
 
-		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides);
+		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends);
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
 		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments, singleLegStandalones);

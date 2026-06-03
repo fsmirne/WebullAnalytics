@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using WebullAnalytics.AI.Backtest;
+using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
@@ -137,6 +138,12 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// command in the evening, the cache stalls.
 		await RefreshSentimentCacheAsync(earliest, asOf, cancellation);
 
+		// Scheduled-catalyst cache fill (earnings + ex-dividend) for this ticker. Previously only the
+		// opener fetched events, and only for the ticker being scanned — so held tickers (e.g. SPY) never
+		// populated data/event-cache, leaving `report`/`analyze position` theoretical pricing
+		// un-dividend-adjusted. Riding along here keeps the cache warm for every ticker the user touches.
+		await RefreshEventCalendarAsync(ticker, asOf, cancellation);
+
 		// Register every currently-live contract's Webull derivativeId. Ids are perishable (gone from the
 		// chain at expiry) and are the only key back to a contract's minute/IV history, so we bank them on
 		// every history run; run during market hours to catch same-day 0DTE. `wa options discover` then
@@ -244,6 +251,33 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/], [yellow]skipped {skipped}[/] (not yet settled or CNN unreachable)");
 		else
 			AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/] day(s)");
+	}
+
+	/// <summary>Refreshes <c>data/event-cache/&lt;TICKER&gt;.json</c> (next earnings + ex-dividend) from
+	/// Yahoo. Best-effort — a failure logs a warning and never fails the command, since the daily caches
+	/// are the primary deliverable. cacheOnly:false forces a network refresh (subject to the 12h TTL).</summary>
+	private static async Task RefreshEventCalendarAsync(string ticker, DateTime asOf, CancellationToken cancellation)
+	{
+		try
+		{
+			var calendar = await EventCalendarLoader.LoadAsync(new[] { ticker }, new OpenerEventsConfig(), asOf, cancellation, cacheOnly: false);
+			var ev = calendar.Get(ticker);
+			if (ev == null)
+			{
+				AnsiConsole.MarkupLine($"  events: [yellow]none[/] (Yahoo returned no earnings/ex-dividend for {Markup.Escape(ticker)})");
+				return;
+			}
+			var exDiv = ev.NextExDividendDate.HasValue
+				? $"ex-div {ev.NextExDividendDate.Value:yyyy-MM-dd}{(ev.DividendAmount.HasValue ? $" (${ev.DividendAmount.Value.ToString("0.##", CultureInfo.InvariantCulture)})" : "")}"
+				: "no ex-div";
+			var earnings = ev.NextEarningsDate.HasValue ? $"earnings {ev.NextEarningsDate.Value:yyyy-MM-dd}" : "no earnings";
+			AnsiConsole.MarkupLine($"  events: [green]ok[/] ({Markup.Escape(earnings)}; {Markup.Escape(exDiv)})");
+		}
+		catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { throw; }
+		catch (Exception ex)
+		{
+			AnsiConsole.MarkupLine($"  events: [yellow]skipped[/] ({Markup.Escape(ex.Message)})");
+		}
 	}
 
 	/// <summary>Fills <c>data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv</c> for every missing trading day in
