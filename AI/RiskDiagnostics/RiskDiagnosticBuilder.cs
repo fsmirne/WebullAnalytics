@@ -43,6 +43,11 @@ internal static class RiskDiagnosticBuilder
 		var longLegs = legs.Where(l => l.IsLong).ToList();
 		var shortLegs = legs.Where(l => !l.IsLong).ToList();
 
+		// Dividend schedule for the position's underlying, used to lower the Black-Scholes forward for
+		// legs that trade through an upcoming ex-date. Single ticker per diagnostic, so one schedule
+		// covers every leg. Null when no ex-dividend is known → DividendAdjustedSpot is then a no-op.
+		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, null);
+
        // Greeks (per-contract). For each leg: signed × qty × per-share greek; then divide aggregate
 		// by reference qty to express as per-contract. Reference qty is the first leg's qty — pipelines
 		// always pass legs at the same contract multiple.
@@ -57,15 +62,20 @@ internal static class RiskDiagnosticBuilder
 			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
 			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
 			var tTomorrow = Math.Max(0.0, (expirationTime - asOf.AddDays(1)).TotalDays / 365.0);
-			var delta = OptionMath.Delta(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
+			// Ex-dividend-adjusted spot per eval date: a leg trading through an ex-date prices on the
+			// lowered forward. Recomputed for tomorrow so theta captures the real ex-date price drop when
+			// the dividend goes ex between today and tomorrow.
+			var spotNow = OptionMath.DividendAdjustedSpot(spot, dividends, asOf, expirationTime, OptionMath.RiskFreeRate);
+			var spotTomorrow = OptionMath.DividendAdjustedSpot(spot, dividends, asOf.AddDays(1), expirationTime, OptionMath.RiskFreeRate);
+			var delta = OptionMath.Delta(spotNow, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 
 			// Theta via finite-difference: BS today − BS tomorrow. Negative for long options.
-			var pNow = OptionMath.BlackScholes(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
-			var pTomorrow = OptionMath.BlackScholes(spot, leg.Parsed.Strike, tTomorrow, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
+			var pNow = OptionMath.BlackScholes(spotNow, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
+			var pTomorrow = OptionMath.BlackScholes(spotTomorrow, leg.Parsed.Strike, tTomorrow, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 			var thetaPerShare = pTomorrow - pNow;
 
 			// OptionMath.Vega returns per 1.0 IV change (S φ(d1) √T). Divide by 100 for per-1-IV-point.
-			var vegaPerShare = OptionMath.Vega(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv) / 100m;
+			var vegaPerShare = OptionMath.Vega(spotNow, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv) / 100m;
 
 			netDeltaSum += sign * leg.Qty * delta;
 			netThetaSum += sign * leg.Qty * 100m * thetaPerShare;
@@ -139,7 +149,8 @@ internal static class RiskDiagnosticBuilder
 				var iv = ivResolver(leg.Symbol);
 				var legExpiryInstant = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
 				var tPost = Math.Max(0.0, (legExpiryInstant - shortExpiryInstant).TotalDays / 365.0);
-				var delta = OptionMath.Delta(spot, leg.Parsed.Strike, tPost, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
+				var spotPost = OptionMath.DividendAdjustedSpot(spot, dividends, shortExpiryInstant, legExpiryInstant, OptionMath.RiskFreeRate);
+				var delta = OptionMath.Delta(spotPost, leg.Parsed.Strike, tPost, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 				residualSum += (leg.IsLong ? 1m : -1m) * leg.Qty * delta;
 				if (!leg.IsLong) shortLegSurvivesPostShort = true;
 			}
@@ -195,6 +206,8 @@ internal static class RiskDiagnosticBuilder
 			NextEarningsDate: events?.NextEarningsDate,
 			EarningsTime: events?.EarningsTime,
 			NextExDividendDate: events?.NextExDividendDate,
+			NextDividendAmount: events?.DividendAmount,
+			Ticker: legs.Count > 0 ? legs[0].Parsed.Root : null,
 			HasShortCallLeg: hasShortCallLeg,
 			ShortLegSurvivesPostShort: shortLegSurvivesPostShort);
 

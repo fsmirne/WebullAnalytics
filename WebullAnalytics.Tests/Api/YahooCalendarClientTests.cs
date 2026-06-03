@@ -101,4 +101,50 @@ public class YahooCalendarClientTests
 		Assert.Null(ev!.NextEarningsDate);
 		Assert.NotNull(ev.NextExDividendDate);
 	}
+
+	[Fact]
+	public void ParsesPerPaymentDividendAmountFromSummaryDetail()
+	{
+		// summaryDetail.dividendRate is the forward ANNUAL rate; we surface a quarterly per-payment estimate.
+		var json = """{"quoteSummary":{"result":[{"calendarEvents":{"exDividendDate":{"raw":1762732800}},"summaryDetail":{"dividendRate":{"raw":7.0}}}],"error":null}}""";
+		var ev = YahooCalendarClient.ParseResponse("SPY", json);
+		Assert.NotNull(ev);
+		Assert.Equal(1.75m, ev!.DividendAmount); // 7.0 / 4
+	}
+
+	[Fact]
+	public void DividendAmountNullWhenSummaryDetailAbsent()
+	{
+		var ev = YahooCalendarClient.ParseResponse("AAPL", SampleResponse);
+		Assert.Null(ev!.DividendAmount);
+	}
+
+	// Real SPY chart events=div shape: four quarterly ex-dates (2025-06-20 … 2026-03-17), ~91d apart.
+	private const string ChartDivResponse = """
+	{"chart":{"result":[{"meta":{},"events":{"dividends":{
+	  "1750426200":{"amount":1.761,"date":1750426200},
+	  "1758288600":{"amount":1.831,"date":1758288600},
+	  "1766154600":{"amount":1.993,"date":1766154600},
+	  "1774013400":{"amount":1.797,"date":1774013400}
+	}}}],"error":null}}
+	""";
+
+	[Fact]
+	public void ProjectsNextExDateForwardFromHistory()
+	{
+		// asOf 2026-06-03: most recent ex-date is ~2026-03-17; projecting one ~91d quarter lands in June,
+		// between a June-12 short and a June-26 long. Amount is the most recent actual dividend.
+		var next = YahooCalendarClient.ParseNextDividendFromChart(ChartDivResponse, new DateTime(2026, 6, 3));
+		Assert.NotNull(next);
+		Assert.Equal(1.797m, next!.Value.Amount);
+		Assert.True(next.Value.ExDate >= new DateTime(2026, 6, 3), "projected ex-date must be on/after asOf");
+		Assert.True(next.Value.ExDate < new DateTime(2026, 7, 1), "projected ex-date should land in the next quarterly window");
+	}
+
+	[Fact]
+	public void ParseNextDividendFromChart_NoDividends_ReturnsNull()
+	{
+		Assert.Null(YahooCalendarClient.ParseNextDividendFromChart("""{"chart":{"result":[{"meta":{}}],"error":null}}""", DateTime.Today));
+		Assert.Null(YahooCalendarClient.ParseNextDividendFromChart("not json", DateTime.Today));
+	}
 }

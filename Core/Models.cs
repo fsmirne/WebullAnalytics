@@ -153,6 +153,11 @@ public record OptionParsed(
 	decimal Strike
 );
 
+/// <summary>A scheduled cash dividend: ex-dividend date (NY-local calendar date, Kind=Unspecified) and
+/// per-share cash amount. Used to lower the Black-Scholes forward for legs that trade through an ex-date
+/// (see <see cref="WebullAnalytics.Pricing.OptionMath.DividendAdjustedSpot"/>).</summary>
+public sealed record DividendEvent(DateTime ExDate, decimal Amount);
+
 public record OptionContractQuote(
 	string ContractSymbol,
 	decimal? LastPrice,
@@ -237,7 +242,8 @@ public record AnalysisOptions(
 	IReadOnlyDictionary<string, decimal>? UnderlyingPriceOverrides = null,
 	bool Theoretical = false,
 	IReadOnlyDictionary<string, List<decimal>>? ExtraLevels = null,
-	IReadOnlyDictionary<string, decimal>? IvOverrides = null
+	IReadOnlyDictionary<string, decimal>? IvOverrides = null,
+	IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? Dividends = null
 );
 
 public record BreakEvenResult(
