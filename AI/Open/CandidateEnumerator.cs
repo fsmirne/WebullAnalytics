@@ -162,7 +162,8 @@ internal static class CandidateEnumerator
 							}
 							else
 							{
-								// Diagonal: near short leg in the ShortDelta band, further OTM than the long anchor.
+								// Diagonal: short leg from the ShortDelta band OR a tight gap off the long anchor, on
+								// either side of the long (covered + reverse).
 								var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortExp);
 								// Span the short delta band too (sorted, downsampled) — not the 2 nearest its midpoint.
 								// Clustering at shortMid pinned the short near delta 0.40 and never reached the ATM
@@ -176,14 +177,15 @@ internal static class CandidateEnumerator
 								// adjacent-strike pairing (a near-ATM short one strike above a near-ATM long), so without
 								// these the balanced tight covered diagonals the scorer rates highest are never built.
 								var tightShorts = new[] { 1, 2, 3 }
-									.Select(w => WingStrike(anchor, w, dir, step, shortLadder))
+									.SelectMany(w => new[] { WingStrike(anchor, w, dir, step, shortLadder), WingStrike(anchor, w, -dir, step, shortLadder) })
 									.Where(s => s is > 0m).Select(s => s!.Value);
 								var shortStrikes = SpanEvenly(shortInBand, MaxShortAnchors).Concat(tightShorts).Distinct();
 								foreach (var shortStrike in shortStrikes)
 								{
-									// Directional consistency: short leg further OTM than the long anchor (calls higher, puts lower).
-									if (callPut == "C" && shortStrike <= anchor) continue;
-									if (callPut == "P" && shortStrike >= anchor) continue;
+									// Same strike = calendar, not a diagonal. Either side of the long is allowed: short
+									// OTM-of-long = covered (bullish) diagonal, short ITM-of-long = reverse diagonal. The
+									// scorer's debit>0 gate drops net-credit (reverse) spreads that don't make sense.
+									if (shortStrike == anchor) continue;
 									yield return BuildSpread(ticker, kind, shortExp, longExp, shortStrike, anchor, callPut);
 								}
 							}
