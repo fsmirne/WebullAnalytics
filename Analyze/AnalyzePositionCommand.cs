@@ -1230,64 +1230,100 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 		}
 
-		// 7. Add new position alongside existing (hedging / diversification).
-		// Same-side: second calendar/diagonal at a different strike.
-		// Opposite-side: creates a double calendar or double diagonal.
-		// Existing position untouched; new position projected at existing short's expiry.
+		// 7. Add an OPPOSITE-side time-spread alongside the existing one to form a DOUBLE. A real double
+		// calendar/diagonal shares the SAME near + far expiries across both sides, so the added legs use the
+		// existing short's and long's expiries (not a fresh weekly) — this is what makes the combined 4-leg
+		// position a genuine double rather than two unrelated spreads. The existing side already occupies one
+		// side of spot, so the added side goes on the other (puts below spot when existing is calls, calls
+		// above when existing is puts). Two geometries:
+		//   • double calendar  — new short and long at the same strike
+		//   • double diagonal  — new long one strike further OTM than the new short
+		// Legs are priced live where the chain has a quote, Black-Scholes otherwise (flagged "estimated").
+		// IMPORTANT: this is NOT free return for the same risk — the added side is its own debit, so it
+		// roughly doubles capital at risk and adds two more legs of slippage. What it buys is a wider, more
+		// neutral profit tent. Each add reports its incremental return per added-margin so the trade-off is
+		// explicit, and the most capital-efficient add is flagged ★.
 		{
-			var addShortExp = newExp;
-			var addLongExp = longLeg.Parsed.ExpiryDate > addShortExp ? longLeg.Parsed.ExpiryDate : addShortExp.AddDays(21);
-			foreach (var addCp in new[] { callPut, callPut == "C" ? "P" : "C" })
+			var oppCp = callPut == "C" ? "P" : "C";
+			var addShortExp = shortLeg.Parsed.ExpiryDate;
+			var addLongExp = longLeg.Parsed.ExpiryDate;
+			var dteNewShort = Math.Max(1, (addShortExp - asOf).Days);
+			var dteNewLong = Math.Max(1, (addLongExp - asOf).Days);
+			var origShortExp = shortLeg.Parsed.ExpiryDate;
+			var sideLabel = oppCp == "C" ? "call" : "put";
+
+			bool Listed(string sym) => quotes != null && quotes.ContainsKey(sym);
+			bool Quoted(string sym) => quotes != null && HasLiveQuote(quotes, sym);
+			// Strikes the chain actually lists for (root, expiry, side), ascending. Snapping to these instead
+			// of a fixed StrikeStep grid keeps the add on real contracts (SPY lists $1 near spot, not $0.50).
+			List<decimal> ListedStrikes(DateTime exp, string cp) => quotes == null ? new List<decimal>()
+				: quotes.Keys.Select(ParsingHelpers.ParseOptionSymbol)
+					.Where(p => p != null && string.Equals(p.Root, shortLeg.Parsed.Root, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date == exp.Date && p.CallPut == cp)
+					.Select(p => p!.Strike).Distinct().OrderBy(s => s).ToList();
+
+			// Strike grid comes from the FRONT (short) expiry, which the chain fetch populates fully. The far
+			// expiry's snapshot holds only the existing position's own leg (the chain endpoint returns the
+			// front expiry in full and far expiries only on explicit request), so we can't read its ladder —
+			// but SPY lists the same near-spot $1 strikes across expiries (the existing far long proves it),
+			// so the front grid is a sound proxy. Far legs are BS-priced and the add is flagged "estimated".
+			var grid = ListedStrikes(addShortExp, oppCp);
+			var oppShortStrike = oppCp == "P"
+				? grid.Where(s => s <= spot).DefaultIfEmpty(0m).Max()
+				: grid.Where(s => s >= spot).DefaultIfEmpty(0m).Min();
+			// Diagonal long = next grid strike further OTM than the short.
+			var diagLongStrike = oppCp == "P"
+				? grid.Where(s => s < oppShortStrike).DefaultIfEmpty(0m).Max()
+				: grid.Where(s => s > oppShortStrike).DefaultIfEmpty(0m).Min();
+
+			var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, addShortExp, oppShortStrike, oppCp);
+			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
+			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, oppShortStrike, dteNewShort, ivNewShort, oppCp);
+			var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(spot, oppShortStrike, Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0, 0.036, ivNewShort, oppCp);
+
+			// Build both add geometries, then flag the one with the best incremental return per added margin.
+			var pending = new List<(string variant, decimal longStrike, string newLongSym, decimal newLongMidExec, decimal cashPerShare, decimal newPositionValuePerShare, decimal newMargin, bool estimated, decimal efficiency)>();
+			foreach (var (variant, longStrike) in new[]
 			{
-				var isOppositeSide = addCp != callPut;
-				foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
-				{
-					if (newStrike <= 0m) continue;
-					if (!isOppositeSide && newStrike == shortLeg.Parsed.Strike) continue; // avoid doubling same-CP same-strike
+				("double calendar", oppShortStrike),
+				("double diagonal", diagLongStrike)
+			})
+			{
+				if (oppShortStrike <= 0m || longStrike <= 0m) continue;
+				var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, addLongExp, longStrike, oppCp);
+				// Require the SHORT leg to be a listed front-expiry strike (avoids phantom near legs). The far
+				// long leg's existence is inferred from the front grid; it's BS-priced when not live-quoted.
+				if (quotes != null && !Listed(newShortSym)) continue;
+				var ivNewLong = ResolveIV(newLongSym, settings, quotes);
+				var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, longStrike, dteNewLong, ivNewLong, oppCp);
+				var cashPerShare = newShortMidExec - newLongMidExec; // debit (negative) to open the new spread
+				var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, longStrike, Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0, 0.036, ivNewLong, oppCp);
+				var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp;
+				var newMargin = Math.Max(-cashPerShare, 0m) * 100m;           // long debit spread: margin = debit paid
+				var estimated = !Quoted(newShortSym) || !Quoted(newLongSym);
+				var efficiency = newMargin > 0m ? newPositionValuePerShare * 100m / newMargin : 0m; // return per added $ of risk
+				pending.Add((variant, longStrike, newLongSym, newLongMidExec, cashPerShare, newPositionValuePerShare, newMargin, estimated, efficiency));
+			}
 
-					var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, addShortExp, newStrike, addCp);
-					var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, addLongExp, newStrike, addCp);
-					if (quotesForPricing != null && (!HasLiveQuote(quotesForPricing, newShortSym) || !HasLiveQuote(quotesForPricing, newLongSym))) continue;
-
-					var ivNewShort = ResolveIV(newShortSym, settings, quotes);
-					var ivNewLong = ResolveIV(newLongSym, settings, quotes);
-					var dteNewShort = Math.Max(1, (addShortExp - asOf).Days);
-					var dteNewLong = Math.Max(1, (addLongExp - asOf).Days);
-					var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, newStrike, dteNewShort, ivNewShort, addCp);
-					var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, newStrike, dteNewLong, ivNewLong, addCp);
-					var (newShortBid, _) = LiveBidAsk(quotesForPricing, newShortSym, newShortMidExec);
-					var (_, newLongAsk) = LiveBidAsk(quotesForPricing, newLongSym, newLongMidExec);
-					var cashPerShare = newShortMidExec - newLongMidExec; // debit (negative) to open new calendar
-
-					// Project the NEW position at existing short's expiry (first milestone).
-					var origShortExp = shortLeg.Parsed.ExpiryDate;
-					var tRemainNewShort = Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0;
-					var tRemainNewLong = Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0;
-					var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewShort, 0.036, ivNewShort, addCp);
-					var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewLong, 0.036, ivNewLong, addCp);
-					var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp;
-
-					// Opening a long calendar/diagonal is pure-debit: margin required = the default mid debit paid.
-					var newMargin = Math.Max(-cashPerShare, 0m) * 100m;
-
-					var sideLabel = addCp == "C" ? "call" : "put";
-					// The added trade has both legs at `newStrike` with different expiries — always a calendar.
-					// Same-side adds a second calendar at a different strike; opposite-side creates a double calendar.
-					var structureType = isOppositeSide ? "double calendar" : "second-strike calendar";
-
-					EmitAdd(list, legs, settings.Cash,
-						name: $"Add ${newStrike:F2} {sideLabel} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({structureType}, keep existing)",
-						newShortSym: newShortSym,
-						newLongSym: newLongSym,
-						newShortPrice: newShortMidExec,
-						newLongPrice: newLongMidExec,
-						cashPerShareOfChange: cashPerShare,
-						newProjectedPerShare: newPositionValuePerShare,
-						unchangedProjectedPerShare: holdNetPerShare,
-						marginPerContract: newMargin,
-						daysToTarget: origShortDte,
-						rationale: $"open new {sideLabel} calendar at ${newStrike:F2} (debit ${-cashPerShare:F2}/share); existing untouched → at {origShortExp:MM-dd}: existing ${holdNetPerShare:F2} + new ${newPositionValuePerShare:F2} = ${holdNetPerShare + newPositionValuePerShare:F2}/share");
-				}
+			var bestEfficiency = pending.Count > 0 ? pending.Max(x => x.efficiency) : 0m;
+			foreach (var a in pending)
+			{
+				var isBest = pending.Count > 1 && a.efficiency == bestEfficiency && a.efficiency > 0m;
+				var est = a.estimated ? " [estimated]" : "";
+				var strikeDesc = a.variant == "double calendar" ? $"${oppShortStrike:F2}" : $"${oppShortStrike:F2}/${a.longStrike:F2}";
+				var effPct = a.newMargin > 0m ? $"{a.efficiency * 100m:F0}% on added ${a.newMargin:N0}" : "n/a";
+				var bestNote = isBest ? " — best add (highest return on added capital)" : "";
+				EmitAdd(list, legs, settings.Cash,
+					name: $"Add {sideLabel} {strikeDesc} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({a.variant}, keep existing){est}",
+					newShortSym: newShortSym,
+					newLongSym: a.newLongSym,
+					newShortPrice: newShortMidExec,
+					newLongPrice: a.newLongMidExec,
+					cashPerShareOfChange: a.cashPerShare,
+					newProjectedPerShare: a.newPositionValuePerShare,
+					unchangedProjectedPerShare: holdNetPerShare,
+					marginPerContract: a.newMargin,
+					daysToTarget: origShortDte,
+					rationale: $"add a {sideLabel} {a.variant.Split(' ')[1]} at {strikeDesc} (debit ${-a.cashPerShare:F2}/share, +2 legs of slippage){(a.estimated ? ", BS-estimated (leg not live-quoted)" : "")}; existing untouched → at {origShortExp:MM-dd}: existing ${holdNetPerShare:F2} + new ${a.newPositionValuePerShare:F2} = ${holdNetPerShare + a.newPositionValuePerShare:F2}/share; incremental return {effPct}{bestNote}");
 			}
 		}
 
