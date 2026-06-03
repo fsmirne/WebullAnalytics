@@ -33,7 +33,7 @@ internal static class AIHistoryOptionsBackfill
 	private static readonly TimeSpan DefaultPace = TimeSpan.FromMilliseconds(200);
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-	public static async Task<int> RunAsync(string ticker, bool force, bool all, DateTime? since, int webullPad, string source, CancellationToken cancellation)
+	public static async Task<int> RunAsync(string ticker, bool force, bool all, DateTime? since, int webullPad, string source, int lookbackDays, CancellationToken cancellation)
 	{
 		AnsiConsole.MarkupLine($"[bold]Option backfill for {Markup.Escape(ticker)}[/]" + (since.HasValue ? $" (expiry ≥ {since.Value:yyyy-MM-dd})" : ""));
 
@@ -290,9 +290,11 @@ internal static class AIHistoryOptionsBackfill
 				}
 				else
 				{
-					// Polygon coverage window: from 30 days before expiry through expiry. SPXW weeklies
-					// list ~T-1 week so 30d is generous headroom; SPX monthlies list weeks earlier, also fine.
-					var listFrom = DateOnly.FromDateTime(item.Parsed.ExpiryDate.AddDays(-30));
+					// Coverage window: pull from lookbackDays before expiry through expiry. lookbackDays is
+					// derived from the config's deepest leg-entry DTE (+ buffer) so a leg the strategy opens at,
+					// e.g., 45 DTE has real bars at entry — a hardcoded 30 silently under-pulled deeper legs and
+					// forced them onto synthetic pricing, contaminating provenance. See OptionsBackfillCommand.
+					var listFrom = DateOnly.FromDateTime(item.Parsed.ExpiryDate.AddDays(-lookbackDays));
 					var expireTo = DateOnly.FromDateTime(item.Parsed.ExpiryDate);
 					bars = await MassivePolygonClient.FetchOptionMinuteAggregatesAsync(apiConfig!.MassiveApiKey, item.Occ, listFrom, expireTo, ct);
 				}
