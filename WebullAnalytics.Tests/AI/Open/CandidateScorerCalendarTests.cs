@@ -37,6 +37,33 @@ public class CandidateScorerCalendarTests
 	}
 
 	[Fact]
+	public void CoveredDiagonalOpenEndedUpside_HasNonZeroPop()
+	{
+		// Wide covered call diagonal: long $748 < short $768 (gap $20 > debit ~$15) stays profitable past
+		// the short strike all the way to +∞ → only a LOWER breakeven exists. The old closed-band POP
+		// returned 0 (no upper BE) and dropped the breakeven; the fix must give a real one-sided POP and
+		// keep the breakeven.
+		var asOf = new DateTime(2026, 4, 20);
+		var shortExp = new DateTime(2026, 4, 29); // 9 DTE
+		var longExp = new DateTime(2026, 5, 15);   // 25 DTE
+		var shortSym = MatchKeys.OccSymbol("SPY", shortExp, 768m, "C");
+		var longSym = MatchKeys.OccSymbol("SPY", longExp, 748m, "C");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongDiagonal, new[]
+		{
+			new ProposalLeg("sell", shortSym, 1),
+			new ProposalLeg("buy", longSym, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(3.60m, 3.80m, 0.13m),
+			[longSym] = TestQuote.Q(18.90m, 19.10m, 0.13m)
+		};
+		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 760m, asOf, quotes, bias: 0m, Cfg(), useMarketImpliedIv: false)!;
+		Assert.True(p.ProbabilityOfProfit > 0m, $"open-ended covered diagonal POP should be > 0, got {p.ProbabilityOfProfit}");
+		Assert.NotEmpty(p.Breakevens);
+	}
+
+	[Fact]
 	public void CalendarDirectionalFitIsZero()
 	{
 		var asOf = new DateTime(2026, 4, 20);

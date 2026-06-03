@@ -2175,9 +2175,20 @@ internal static class CandidateScorer
 			pop = pAboveLower - pAboveUpper;
 			if (pop < 0m) pop = 0m;
 		}
+		else if (beLower.HasValue)
+		{
+			// One breakeven → the profit zone is OPEN-ENDED on one side. A "covered" diagonal whose strike
+			// gap exceeds the debit stays profitable past the short strike all the way to +∞ (calls) / 0
+			// (puts), so there's no second crossing and the closed-band P(lower<S<upper) above wrongly read
+			// 0. Probe the payoff just past the breakeven to find the winning side; take the one-sided POP.
+			var profitableAbove = CalendarOrDiagonalPnLAtShortExpiry(beLower.Value * 1.02m, shortParsed, longParsed, longAtShortYears, ivLong, debitPerContract) > 0m;
+			pop = profitableAbove
+				? LogNormalProbability(Direction.Above, spot, beLower.Value, shortYears, (double)ivShort)
+				: LogNormalProbability(Direction.Below, spot, beLower.Value, shortYears, (double)ivShort);
+		}
 		else
 		{
-		   // Fallback: payoff-positive nowhere (or bisection couldn't find both roots) — POP = 0.
+			// No breakeven anywhere — payoff never crosses zero (profitable nowhere). POP = 0.
 			pop = 0m;
 		}
 
@@ -2214,7 +2225,11 @@ internal static class CandidateScorer
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(efficiencyCapital);
-		var beList = (beLower.HasValue && beUpper.HasValue) ? new[] { beLower.Value, beUpper.Value } : Array.Empty<decimal>();
+		// Include a lone breakeven (open-ended profit zone) so be-room sees it and the rationale prints it;
+		// setup-centeredness still needs both edges and no-ops on one. Empty only when there's no BE at all.
+		var beList = beUpper.HasValue ? new[] { beLower!.Value, beUpper.Value }
+			: beLower.HasValue ? new[] { beLower.Value }
+			: Array.Empty<decimal>();
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, spot, beList);
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
 		var representativeIvEarly = (ivShort + ivLong) / 2m;
@@ -2262,7 +2277,7 @@ internal static class CandidateScorer
 			MaxProfitPerContract: maxProfit,
 			MaxLossPerContract: maxLossPoint,
 			CapitalAtRiskPerContract: capitalAtRisk,
-			Breakevens: (beLower.HasValue && beUpper.HasValue) ? new[] { beLower.Value, beUpper.Value } : Array.Empty<decimal>(),
+			Breakevens: beList,
 			ProbabilityOfProfit: pop,
 			ExpectedValuePerContract: ev,
 			DaysToTarget: daysToTarget,
