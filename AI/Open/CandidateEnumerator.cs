@@ -9,6 +9,12 @@ internal static class CandidateEnumerator
 	/// candidates so the scorer can pick by regime; capped so a wide band stays tractable in the per-minute scan.</summary>
 	private const int MaxLongAnchors = 5;
 
+	/// <summary>Max short-leg strikes enumerated across a calendar/diagonal's short delta band per (short,
+	/// long) expiry pair. Spanning the band (vs the old 2-nearest-midpoint) lets the short reach the ATM
+	/// end — the tight, richly-financed near-ATM covered diagonals — instead of pinning it mid-band; capped
+	/// for the per-minute scan. Smaller than <see cref="MaxLongAnchors"/> since the short band is narrower.</summary>
+	private const int MaxShortAnchors = 3;
+
 	/// <summary>Enumerates candidate skeletons for a ticker. <paramref name="availableExpirations"/>, when
 	/// non-null, is the set of real expirations from the chain — using these (rather than computed
 	/// 3rd-Friday/Friday helpers) is what makes holiday-shifted monthlies (e.g. Juneteenth pushes June
@@ -118,7 +124,6 @@ internal static class CandidateEnumerator
 		var step = FallbackStep(spot);
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
 		var useDelta = sCfg.DeltaMax > 0m; // delta-band placement vs legacy ATM grid
-		var shortMid = (sCfg.ShortDeltaMin + sCfg.ShortDeltaMax) / 2m;
 		foreach (var callPut in new[] { "C", "P" })
 			foreach (var shortExp in shortExps)
 				foreach (var longExp in longExps)
@@ -159,10 +164,15 @@ internal static class CandidateEnumerator
 							{
 								// Diagonal: near short leg in the ShortDelta band, further OTM than the long anchor.
 								var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortExp);
-								var shortStrikes = StrikesAround(spot, step, 24, shortLadder)
+								// Span the short delta band too (sorted, downsampled) — not the 2 nearest its midpoint.
+								// Clustering at shortMid pinned the short near delta 0.40 and never reached the ATM
+								// (~0.50) end, so the tight near-ATM covered diagonals (rich short premium, balanced BE)
+								// were never enumerated. Now the scorer can choose them.
+								var shortInBand = StrikesAround(spot, step, 24, shortLadder)
 									.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, shortYears, OptionMath.RiskFreeRate, ResolveIv(ticker, shortExp, k, callPut, quotes, defaultIv), callPut))))
 									.Where(x => x.d >= sCfg.ShortDeltaMin && x.d <= sCfg.ShortDeltaMax)
-									.OrderBy(x => Math.Abs(x.d - shortMid)).Take(2).Select(x => x.k).ToList();
+									.OrderBy(x => x.d).Select(x => x.k).ToList();
+								var shortStrikes = SpanEvenly(shortInBand, MaxShortAnchors);
 								foreach (var shortStrike in shortStrikes)
 								{
 									// Directional consistency: short leg further OTM than the long anchor (calls higher, puts lower).
