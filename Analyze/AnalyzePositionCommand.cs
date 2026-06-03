@@ -538,7 +538,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		int DaysToTarget,					// days from evaluation date to this scenario's target date; used to rank P&L per day
 		string Rationale,
 		bool IsRoll = false,
-		decimal? RankScore = null);			// true iff this scenario closes an existing leg and opens a new one (consulted by BuildReproductionCommands)
+		decimal? RankScore = null,			// true iff this scenario closes an existing leg and opens a new one (consulted by BuildReproductionCommands)
+		decimal? ExpectedPnLPerContract = null);	// probability-weighted EV at target (lognormal spot grid), vs the spot-pinned ProjectedValue. Null when not computed for this scenario type.
 
 	/// <summary>Hypothetical OCC symbols the scenario generators will reference. Pre-enumerated so we can
 	/// include them in a single up-front quote fetch.</summary>
@@ -1056,10 +1057,22 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		var origShortDte = Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
 
+		// Probability-weighted EV of holding the existing spread to short expiry (vs the spot-pinned
+		// holdNetPerShare, which sits near the calendar's peak). The near-leg IV sets the spot distribution
+		// over [asOf, short expiry]; the surviving long is BS-valued on its residual, the short settles to
+		// intrinsic. Used both for the Hold scenario's EV and as the "unchanged" leg of every add.
+		var existingLegsForEv = new List<(decimal, DateTime, decimal, bool, string)>
+		{
+			(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut),
+			(shortLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate, ivShort, false, callPut),
+		};
+		var holdEvPerShare = ExpectedPositionValuePerShare(existingLegsForEv, shortLeg.Parsed.ExpiryDate, asOf, spot, ivShort);
+
 		// 1. Hold to short expiry.
 		list.Add(NewScenarioSpread("Hold to short expiry", legs, "—",
 			cashNow: 0m, valueAtTarget: holdNetPerShare, marginDeltaPerContract: 0m, daysToTarget: origShortDte,
-			rationale: $"at {shortLeg.Parsed.ExpiryDate:yyyy-MM-dd}: long ${longAtOriginalExp:F2} - short ${shortAtOriginalExp:F2} intrinsic = ${holdNetPerShare:F2}"));
+			rationale: $"at {shortLeg.Parsed.ExpiryDate:yyyy-MM-dd}: long ${longAtOriginalExp:F2} - short ${shortAtOriginalExp:F2} intrinsic = ${holdNetPerShare:F2} (pinned); EV ${holdEvPerShare:F2}/share across the spot distribution",
+			expectedValueAtTarget: holdEvPerShare));
 
 		// 2. Close short only (realistic: pay short ask).
 		{
@@ -1280,8 +1293,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, oppShortStrike, dteNewShort, ivNewShort, oppCp);
 			var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(spot, oppShortStrike, Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0, 0.036, ivNewShort, oppCp);
 
-			// Build both add geometries, then flag the one with the best incremental return per added margin.
-			var pending = new List<(string variant, decimal longStrike, string newLongSym, decimal newLongMidExec, decimal cashPerShare, decimal newPositionValuePerShare, decimal newMargin, bool estimated, decimal efficiency)>();
+			// Build both add geometries, then flag the one with the best incremental EV per added margin.
+			var pending = new List<(string variant, decimal longStrike, string newLongSym, decimal newLongMidExec, decimal cashPerShare, decimal newPositionValuePerShare, decimal evNewPerShare, decimal newMargin, bool estimated, decimal efficiency)>();
 			foreach (var (variant, longStrike) in new[]
 			{
 				("double calendar", oppShortStrike),
@@ -1297,11 +1310,19 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, longStrike, dteNewLong, ivNewLong, oppCp);
 				var cashPerShare = newShortMidExec - newLongMidExec; // debit (negative) to open the new spread
 				var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, longStrike, Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0, 0.036, ivNewLong, oppCp);
-				var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp;
+				var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp; // pinned (at current spot)
+				// Probability-weighted EV of the NEW spread at the existing short expiry — the honest figure the
+				// "incremental return" should be judged on, not the spot-pinned peak.
+				var newLegsForEv = new List<(decimal, DateTime, decimal, bool, string)>
+				{
+					(longStrike, addLongExp, ivNewLong, true, oppCp),
+					(oppShortStrike, addShortExp, ivNewShort, false, oppCp),
+				};
+				var evNewPerShare = ExpectedPositionValuePerShare(newLegsForEv, origShortExp, asOf, spot, ivNewShort);
 				var newMargin = Math.Max(-cashPerShare, 0m) * 100m;           // long debit spread: margin = debit paid
 				var estimated = !Quoted(newShortSym) || !Quoted(newLongSym);
-				var efficiency = newMargin > 0m ? newPositionValuePerShare * 100m / newMargin : 0m; // return per added $ of risk
-				pending.Add((variant, longStrike, newLongSym, newLongMidExec, cashPerShare, newPositionValuePerShare, newMargin, estimated, efficiency));
+				var efficiency = newMargin > 0m ? evNewPerShare * 100m / newMargin : 0m; // EV return per added $ of risk
+				pending.Add((variant, longStrike, newLongSym, newLongMidExec, cashPerShare, newPositionValuePerShare, evNewPerShare, newMargin, estimated, efficiency));
 			}
 
 			var bestEfficiency = pending.Count > 0 ? pending.Max(x => x.efficiency) : 0m;
@@ -1311,7 +1332,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var est = a.estimated ? " [estimated]" : "";
 				var strikeDesc = a.variant == "double calendar" ? $"${oppShortStrike:F2}" : $"${oppShortStrike:F2}/${a.longStrike:F2}";
 				var effPct = a.newMargin > 0m ? $"{a.efficiency * 100m:F0}% on added ${a.newMargin:N0}" : "n/a";
-				var bestNote = isBest ? " — best add (highest return on added capital)" : "";
+				var bestNote = isBest ? " — best add (highest EV return on added capital)" : "";
 				EmitAdd(list, legs, settings.Cash,
 					name: $"Add {sideLabel} {strikeDesc} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({a.variant}, keep existing){est}",
 					newShortSym: newShortSym,
@@ -1323,7 +1344,33 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					marginPerContract: a.newMargin,
 					daysToTarget: origShortDte,
-					rationale: $"add a {sideLabel} {a.variant.Split(' ')[1]} at {strikeDesc} (debit ${-a.cashPerShare:F2}/share, +2 legs of slippage){(a.estimated ? ", BS-estimated (leg not live-quoted)" : "")}; existing untouched → at {origShortExp:MM-dd}: existing ${holdNetPerShare:F2} + new ${a.newPositionValuePerShare:F2} = ${holdNetPerShare + a.newPositionValuePerShare:F2}/share; incremental return {effPct}{bestNote}");
+					rationale: $"add a {sideLabel} {a.variant.Split(' ')[1]} at {strikeDesc} (debit ${-a.cashPerShare:F2}/share, +2 legs of slippage){(a.estimated ? ", BS-estimated (leg not live-quoted)" : "")}; new spread EV ${a.evNewPerShare:F2}/share (pinned ${a.newPositionValuePerShare:F2}); incremental EV return {effPct}{bestNote}",
+					expectedUnchangedPerShare: holdEvPerShare,
+					expectedNewPerShare: a.evNewPerShare);
+			}
+
+			// Comparator: scale up the EXISTING structure instead of adding an opposite side. Same payoff shape,
+			// so per-contract EV equals the hold's — this is the "just add more contracts" baseline the doubles
+			// must beat on EV-per-added-dollar. Opening another copy costs the current net debit as margin.
+			var scaleUpDebit = longMidNow - shortMidNow;   // >0 = debit to open one more existing calendar/diagonal
+			if (scaleUpDebit > 0m)
+			{
+				var scaleUpMargin = scaleUpDebit * 100m;
+				var scaleUpEff = scaleUpMargin > 0m ? holdEvPerShare * 100m / scaleUpMargin : 0m;
+				EmitAdd(list, legs, settings.Cash,
+					name: $"Add 1x more of existing {(callPut == "C" ? "call" : "put")} {(shortLeg.Parsed.Strike == longLeg.Parsed.Strike ? "calendar" : "diagonal")} (scale up, keep existing)",
+					newShortSym: shortLeg.Symbol,
+					newLongSym: longLeg.Symbol,
+					newShortPrice: shortMidNow,
+					newLongPrice: longMidNow,
+					cashPerShareOfChange: -scaleUpDebit,
+					newProjectedPerShare: holdNetPerShare,
+					unchangedProjectedPerShare: holdNetPerShare,
+					marginPerContract: scaleUpMargin,
+					daysToTarget: origShortDte,
+					rationale: $"open one more of the SAME structure at current mid (debit ${scaleUpDebit:F2}/share); same payoff → new spread EV ${holdEvPerShare:F2}/share; incremental EV return {(scaleUpMargin > 0m ? $"{scaleUpEff * 100m:F0}% on added ${scaleUpMargin:N0}" : "n/a")} — baseline the doubles must beat",
+					expectedUnchangedPerShare: holdEvPerShare,
+					expectedNewPerShare: holdEvPerShare);
 			}
 		}
 
@@ -1347,7 +1394,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal unchangedProjectedPerShare,
 		decimal marginPerContract,
 		int daysToTarget,
-		string rationale)
+		string rationale,
+		decimal? expectedUnchangedPerShare = null,
+		decimal? expectedNewPerShare = null)
 	{
 		var fullQty = legs[0].Qty;
 		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
@@ -1358,12 +1407,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			: (int)Math.Floor(availableCash.Value / marginPerContract);
 		var fullFundable = !availableCash.HasValue || fullMarginTotal <= availableCash.Value;
 		var hasFundablePartial = maxPartial > 0 && maxPartial < fullQty;
+		var hasEv = expectedUnchangedPerShare.HasValue && expectedNewPerShare.HasValue;
 
 		if (fullFundable || !hasFundablePartial)
 		{
 			var fullCashPerContract = cashPerShareOfChange * 100m;
 			var fullCombinedValuePerContract = (unchangedProjectedPerShare + newProjectedPerShare) * 100m;
 			var fullTotalPerContract = fullCombinedValuePerContract + fullCashPerContract - initialDebitPerContract;
+			decimal? fullEvPnL = hasEv ? (expectedUnchangedPerShare!.Value + expectedNewPerShare!.Value) * 100m + fullCashPerContract - initialDebitPerContract : null;
 			list.Add(new Scenario(
 				name,
 				$"BUY {newLongSym} x{fullQty} @{FmtPrice(newLongPrice)}, SELL {newShortSym} x{fullQty} @{FmtPrice(newShortPrice)}",
@@ -1373,7 +1424,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				MarginDeltaPerContract: marginPerContract,
 				Qty: fullQty,
 				DaysToTarget: daysToTarget,
-				Rationale: rationale));
+				Rationale: rationale,
+				ExpectedPnLPerContract: fullEvPnL));
 		}
 
 		if (!availableCash.HasValue || marginPerContract <= 0m) return;
@@ -1385,6 +1437,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var partialExistingValue = unchangedProjectedPerShare * 100m * fullQty;
 		var partialCombinedValue = partialNewValue + partialExistingValue;
 		var partialTotalPnL = partialCashTotal + partialCombinedValue - initialDebitPerContract * fullQty;
+		decimal? partialEvPnL = hasEv
+			? (partialCashTotal + (expectedNewPerShare!.Value * 100m * maxPartial + expectedUnchangedPerShare!.Value * 100m * fullQty) - initialDebitPerContract * fullQty) / fullQty
+			: null;
 
 		list.Add(new Scenario(
 			$"{name} · partial {maxPartial}",
@@ -1395,7 +1450,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			MarginDeltaPerContract: marginPerContract * maxPartial / fullQty,
 			Qty: fullQty,
 			DaysToTarget: daysToTarget,
-			Rationale: $"add {maxPartial} new contract(s) (${marginPerContract * maxPartial:N0} margin; full size would need ${fullMarginTotal:N0}); keep all {fullQty} existing"));
+			Rationale: $"add {maxPartial} new contract(s) (${marginPerContract * maxPartial:N0} margin; full size would need ${fullMarginTotal:N0}); keep all {fullQty} existing",
+			ExpectedPnLPerContract: partialEvPnL));
 	}
 
 	/// <summary>Appends a full-quantity scenario to the list. If the full margin delta exceeds available
@@ -1476,17 +1532,21 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, marginDeltaPerContract, longLeg.Qty, daysToTarget, rationale, isRoll, RankScore: totalPerContract / Math.Max(1m, daysToTarget));
 	}
 
-	private static Scenario NewScenarioSpread(string name, IReadOnlyList<PositionSnapshot> legs, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal marginDeltaPerContract, int daysToTarget, string rationale, bool isRoll = false)
+	private static Scenario NewScenarioSpread(string name, IReadOnlyList<PositionSnapshot> legs, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal marginDeltaPerContract, int daysToTarget, string rationale, bool isRoll = false, decimal? expectedValueAtTarget = null)
 	{
 		var initialDebit = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
 		var qty = legs[0].Qty;
 		var cashPerContract = cashNow * 100m;
 		var valuePerContract = valueAtTarget * 100m;
 		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
-		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, marginDeltaPerContract, qty, daysToTarget, rationale, isRoll, RankScore: totalPerContract / Math.Max(1m, daysToTarget));
+		decimal? evPnL = expectedValueAtTarget.HasValue ? expectedValueAtTarget.Value * 100m + cashPerContract - initialDebit * 100m : null;
+		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, marginDeltaPerContract, qty, daysToTarget, rationale, isRoll, RankScore: (evPnL ?? totalPerContract) / Math.Max(1m, daysToTarget), ExpectedPnLPerContract: evPnL);
 	}
 
-	private static decimal DefaultRankScore(Scenario sc) => sc.TotalPnLPerContract / Math.Max(1m, sc.DaysToTarget);
+	// Rank on probability-weighted EV when we have it (the honest figure), falling back to the spot-pinned
+	// P&L only for scenario types where EV isn't computed. Without this, capital-deploying scenarios (adds)
+	// rank highest purely because the pinned best-case P&L scales with contracts.
+	private static decimal DefaultRankScore(Scenario sc) => (sc.ExpectedPnLPerContract ?? sc.TotalPnLPerContract) / Math.Max(1m, sc.DaysToTarget);
 
 	private static List<Scenario> OrderScenariosForDisplay(IEnumerable<Scenario> scenarios, decimal? availableCash) => scenarios
 		.OrderByDescending(s => IsScenarioFundable(s, availableCash))
@@ -1639,6 +1699,34 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	private static decimal Intrinsic(decimal spot, decimal strike, string callPut) =>
 		callPut == "C" ? Math.Max(0m, spot - strike) : Math.Max(0m, strike - spot);
 
+	/// <summary>Probability-weighted expected per-share value of a multi-leg position at <paramref name="target"/>,
+	/// integrated over a log-normal spot distribution (same 5-point grid the opener's scorer uses). Legs that
+	/// expire at or before the target settle to intrinsic; legs that survive are Black-Scholes-valued on their
+	/// residual time. This is the honest counterpart to the spot-pinned projection shown elsewhere — at the pin
+	/// a near-ATM calendar shows its peak, but most of the lognormal mass lands off-peak. <paramref name="gridIv"/>
+	/// is the vol used for the spot distribution over [asOf, target] (the near-leg IV is the right horizon).</summary>
+	private static decimal ExpectedPositionValuePerShare(
+		IReadOnlyList<(decimal strike, DateTime expiry, decimal iv, bool isLong, string cp)> legs,
+		DateTime target, DateTime asOf, decimal spot, decimal gridIv)
+	{
+		var yearsToTarget = Math.Max(1, (target.Date - asOf.Date).Days) / 365.0;
+		var grid = WebullAnalytics.AI.CandidateScorer.BuildScenarioGrid(spot, gridIv, yearsToTarget);
+		decimal ev = 0m;
+		foreach (var pt in grid)
+		{
+			decimal value = 0m;
+			foreach (var (strike, expiry, iv, isLong, cp) in legs)
+			{
+				var legValue = expiry.Date <= target.Date
+					? Intrinsic(pt.SpotAtExpiry, strike, cp)
+					: (decimal)OptionMath.BlackScholes(pt.SpotAtExpiry, strike, Math.Max(1, (expiry.Date - target.Date).Days) / 365.0, 0.036, iv, cp);
+				value += (isLong ? 1m : -1m) * legValue;
+			}
+			ev += pt.Weight * value;
+		}
+		return ev;
+	}
+
 	private static decimal NearestStrike(decimal spot, decimal step) =>
 		Math.Round(spot / step) * step;
 
@@ -1678,6 +1766,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var totalStr = $"${sc.TotalPnLPerContract:F2}/contract → {(totalTotal >= 0 ? "+" : "-")}${Math.Abs(totalTotal):N2} total";
 			var cashStr = $"${sc.CashImpactPerContract:+0.00;-0.00}/contract";
 			var projStr = $"${sc.ProjectedValuePerContract:F2}/contract";
+			// EV = probability-weighted P&L (lognormal spot grid); the honest counterpart to the spot-pinned
+			// P&L above. Shown only for scenarios where it's computed (hold / adds / scale-up).
+			var evStr = sc.ExpectedPnLPerContract.HasValue
+				? $"  │  EV ${sc.ExpectedPnLPerContract.Value:F2}/contract → {(sc.ExpectedPnLPerContract.Value * sc.Qty >= 0 ? "+" : "-")}${Math.Abs(sc.ExpectedPnLPerContract.Value * sc.Qty):N2} total"
+				: "";
 			var marginMarkup = marginTotal == 0m
 				? "[dim]no margin change[/]"
 				: marginTotal < 0m
@@ -1693,7 +1786,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 			var lines = new List<IRenderable>
 			{
-				new Markup($"[dim]Cash {Markup.Escape(cashStr)}  │  Projected {Markup.Escape(projStr)}  │  P&L {Markup.Escape(totalStr)}  │  {marginMarkup}[/]"),
+				new Markup($"[dim]Cash {Markup.Escape(cashStr)}  │  Projected {Markup.Escape(projStr)}{Markup.Escape(evStr)}  │  P&L {Markup.Escape(totalStr)}  │  {marginMarkup}[/]"),
 				new Markup($"[dim]{Markup.Escape(rationaleText)}[/]"),
 			};
 			var leadIn = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);

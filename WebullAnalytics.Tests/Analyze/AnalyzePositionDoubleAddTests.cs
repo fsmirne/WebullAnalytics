@@ -70,26 +70,53 @@ public class AnalyzePositionDoubleAddTests
 	}
 
 	[Fact]
-	public void GenerateScenarios_FlagsExactlyOneBestAddAndReportsIncrementalReturn()
+	public void GenerateScenarios_FlagsExactlyOneBestDoubleAddAndReportsIncrementalEvReturn()
 	{
 		var settings = new AnalyzePositionSettings { IvDefault = 40m, StrikeStep = 0.50m };
 		var scenarios = AnalyzePositionCommand.GenerateScenarios(
 			CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, AsOf, Chain());
 
-		var adds = scenarios.Where(s => s.Name.Contains("keep existing", StringComparison.Ordinal)).ToList();
-		Assert.Equal(2, adds.Count);
-		Assert.All(adds, a => Assert.Contains("incremental return", a.Rationale, StringComparison.Ordinal));
-		Assert.Single(adds, a => a.Rationale.Contains("best add", StringComparison.Ordinal));
+		var doubleAdds = scenarios.Where(s => s.Name.Contains("double ", StringComparison.Ordinal)).ToList();
+		Assert.Equal(2, doubleAdds.Count);
+		Assert.All(doubleAdds, a => Assert.Contains("incremental EV return", a.Rationale, StringComparison.Ordinal));
+		Assert.Single(doubleAdds, a => a.Rationale.Contains("best add", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void GenerateScenarios_PopulatesEvOnHoldAndAdds()
+	{
+		var settings = new AnalyzePositionSettings { IvDefault = 40m, StrikeStep = 0.50m };
+		var scenarios = AnalyzePositionCommand.GenerateScenarios(
+			CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, AsOf, Chain());
+
+		// EV is the probability-weighted P&L; it must differ from the spot-pinned TotalPnL (the whole point).
+		var hold = Assert.Single(scenarios, s => s.Name == "Hold to short expiry");
+		Assert.NotNull(hold.ExpectedPnLPerContract);
+		Assert.NotEqual(hold.ExpectedPnLPerContract!.Value, hold.TotalPnLPerContract);
+		Assert.All(scenarios.Where(s => s.Name.Contains("double ", StringComparison.Ordinal)), a => Assert.NotNull(a.ExpectedPnLPerContract));
+	}
+
+	[Fact]
+	public void GenerateScenarios_OffersScaleUpComparatorWithEv()
+	{
+		var settings = new AnalyzePositionSettings { IvDefault = 40m, StrikeStep = 0.50m };
+		var scenarios = AnalyzePositionCommand.GenerateScenarios(
+			CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, AsOf, Chain());
+
+		var scaleUp = Assert.Single(scenarios, s => s.Name.Contains("scale up", StringComparison.Ordinal));
+		Assert.NotNull(scaleUp.ExpectedPnLPerContract);
+		Assert.Contains("baseline the doubles must beat", scaleUp.Rationale, StringComparison.Ordinal);
 	}
 
 	[Fact]
 	public void GenerateScenarios_WithoutChain_OmitsDoubleAdds()
 	{
-		// No chain → no listed-strike grid → no phantom add proposals.
+		// No chain → no listed-strike grid → no phantom OPPOSITE-side double proposals. (The scale-up
+		// comparator doesn't need the chain — it re-prices the existing legs — so it may still appear.)
 		var settings = new AnalyzePositionSettings { IvDefault = 40m, StrikeStep = 0.50m };
 		var scenarios = AnalyzePositionCommand.GenerateScenarios(
 			CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, AsOf, quotes: null);
 
-		Assert.DoesNotContain(scenarios, s => s.Name.Contains("keep existing", StringComparison.Ordinal));
+		Assert.DoesNotContain(scenarios, s => s.Name.Contains("double ", StringComparison.Ordinal));
 	}
 }
