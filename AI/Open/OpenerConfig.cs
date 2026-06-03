@@ -13,6 +13,14 @@ internal sealed class OpenerConfig
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("topNPerTicker")] public int TopNPerTicker { get; set; } = 5;
 	[JsonPropertyName("maxCandidatesPerStructurePerTicker")] public int MaxCandidatesPerStructurePerTicker { get; set; } = 8;
+
+	// Calendar/diagonal enumeration density (per short×long expiry pair). Defaults are effectively
+	// exhaustive over the delta band — right for the one-tick live scan. For backtests (per-minute × many
+	// days), a lighter setting (e.g. 10 / 5 / 3) is ~3-4× faster and validated near-equivalent; set it in
+	// a backtest --config to keep the live scan exhaustive.
+	[JsonPropertyName("maxLongAnchors")] public int MaxLongAnchors { get; set; } = 40;
+	[JsonPropertyName("maxShortAnchors")] public int MaxShortAnchors { get; set; } = 30;
+	[JsonPropertyName("maxTightGapStrikes")] public int MaxTightGapStrikes { get; set; } = 6;
 	[JsonPropertyName("maxQtyPerProposal")] public int MaxQtyPerProposal { get; set; } = 10;
 
 	/// <summary>Hard cap on per-trade risk as a fraction of account value. Enforced alongside
