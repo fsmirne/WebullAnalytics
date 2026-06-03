@@ -20,10 +20,11 @@ internal enum NeighborAnchor { None, OneSided, Bracketed }
 /// Black-Scholes-priced option quote source for backtests. Underlying spot comes from each ticker's
 /// daily close (<see cref="HistoricalBarCache"/>); IV comes from <see cref="BacktestIVProvider"/>.
 /// Synthesizes a symmetric bid/ask around the theoretical mid using a per-ticker spread model so
-/// the candidate scorer's liquidity/realized-EV checks see friction that resembles the live tape:
-/// SPY/QQQ/IWM are penny-pilot tight; everything else gets the wider per-share floor typical of
-/// single-stock options (matching e.g. the GME quotes seen in production — bid 0.30 / ask 0.35 on
-/// a $0.325 mid).
+/// the candidate scorer's liquidity/realized-EV checks see friction that resembles the live tape.
+/// SPY uses a mid→spread curve empirically calibrated to real EOD NBBO (see <see cref="SpySpreadKnots"/>);
+/// other penny-pilot ETFs + cash-settled index roots get the tight parametric band; everything else gets
+/// the wider per-share floor typical of single-stock options (matching e.g. the GME quotes seen in
+/// production — bid 0.30 / ask 0.35 on a $0.325 mid).
 /// </summary>
 internal sealed class BacktestQuoteSource : IQuoteSource
 {
@@ -565,9 +566,53 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 
 	private static decimal HalfSpreadFor(string ticker, decimal mid)
 	{
+		// SPY has its own empirically-calibrated curve; everything else uses the parametric band.
+		if (string.Equals(ticker, "SPY", StringComparison.OrdinalIgnoreCase))
+			return SpyHalfSpread(mid);
 		var (floor, pct) = PennyPilotIndexEtfs.Contains(ticker)
 			? (IndexHalfSpreadFloor, IndexHalfSpreadPct)
 			: (SingleStockHalfSpreadFloor, SingleStockHalfSpreadPct);
 		return Math.Max(floor, mid * pct);
+	}
+
+	// Empirically-calibrated SPY mid→full-spread curve. Each knot is the MEAN bid-ask spread of real EOD
+	// NBBO from the 2020–2022 SPY option chain (Kaggle/OptionsDX), restricted to near-the-money (≤5% from
+	// spot), actually-traded (volume>0), DTE≥1 contracts. MEAN (not median) because a fill crosses the
+	// realized spread on every trade and the distribution is right-skewed. The curve is mid-driven:
+	// moneyness, DTE, and vol regime all act through mid (verified — they collapse once conditioned on
+	// mid), so no extra inputs are needed. %-of-mid is U-shaped — ~8% at the penny floor, dipping to ~1.4%
+	// around $2–10, then widening again on expensive far-dated/high-IV legs. EOD-calibrated, so this is a
+	// mild floor for 09:30-open realism (open spreads run wider; no intraday NBBO exists to capture that).
+	private static readonly (decimal Mid, decimal Spread)[] SpySpreadKnots =
+	{
+		(0.134m, 0.0113m), (0.368m, 0.0142m), (0.620m, 0.0179m), (0.872m, 0.0217m),
+		(1.245m, 0.0265m), (1.746m, 0.0318m), (2.494m, 0.0394m), (3.991m, 0.0578m),
+		(6.232m, 0.0953m), (8.729m, 0.1523m), (12.429m, 0.2551m), (19.396m, 0.5032m),
+		(32.363m, 1.3841m),
+	};
+
+	/// <summary>Half of the calibrated SPY full-spread at <paramref name="mid"/>: piecewise-linear
+	/// interpolation between <see cref="SpySpreadKnots"/> (sorted ascending by mid), flat-extrapolated
+	/// beyond either end, and never tighter than half a penny so the total spread is at least one $0.01
+	/// tick. Returns the HALF-spread — the model brackets the theoretical mid symmetrically.</summary>
+	private static decimal SpyHalfSpread(decimal mid)
+	{
+		var knots = SpySpreadKnots;
+		decimal full;
+		if (mid <= knots[0].Mid) full = knots[0].Spread;
+		else if (mid >= knots[^1].Mid) full = knots[^1].Spread;
+		else
+		{
+			full = knots[^1].Spread;
+			for (var i = 1; i < knots.Length; i++)
+			{
+				if (mid > knots[i].Mid) continue;
+				var (m0, s0) = knots[i - 1];
+				var (m1, s1) = knots[i];
+				full = s0 + (s1 - s0) * (mid - m0) / (m1 - m0);
+				break;
+			}
+		}
+		return Math.Max(0.005m, full / 2m);
 	}
 }
