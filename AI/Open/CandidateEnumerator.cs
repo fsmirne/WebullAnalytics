@@ -7,13 +7,13 @@ internal static class CandidateEnumerator
 	/// <summary>Max long-leg anchors enumerated across a calendar/diagonal's delta band per (short, long)
 	/// expiry pair. Spanning the band (vs the old 2-nearest-midpoint) lets OTM→ITM long legs coexist as
 	/// candidates so the scorer can pick by regime; capped so a wide band stays tractable in the per-minute scan.</summary>
-	private const int MaxLongAnchors = 5;
+	private const int MaxLongAnchors = 10;
 
 	/// <summary>Max short-leg strikes enumerated across a calendar/diagonal's short delta band per (short,
 	/// long) expiry pair. Spanning the band (vs the old 2-nearest-midpoint) lets the short reach the ATM
 	/// end — the tight, richly-financed near-ATM covered diagonals — instead of pinning it mid-band; capped
 	/// for the per-minute scan. Smaller than <see cref="MaxLongAnchors"/> since the short band is narrower.</summary>
-	private const int MaxShortAnchors = 3;
+	private const int MaxShortAnchors = 5;
 
 	/// <summary>Enumerates candidate skeletons for a ticker. <paramref name="availableExpirations"/>, when
 	/// non-null, is the set of real expirations from the chain — using these (rather than computed
@@ -175,7 +175,7 @@ internal static class CandidateEnumerator
 								// Plus TIGHT 1–2 strike gaps off the long anchor. The delta grid is too coarse to land an
 								// adjacent-strike pairing (a near-ATM short one strike above a near-ATM long), so without
 								// these the balanced tight covered diagonals the scorer rates highest are never built.
-								var tightShorts = new[] { 1, 2 }
+								var tightShorts = new[] { 1, 2, 3 }
 									.Select(w => WingStrike(anchor, w, dir, step, shortLadder))
 									.Where(s => s is > 0m).Select(s => s!.Value);
 								var shortStrikes = SpanEvenly(shortInBand, MaxShortAnchors).Concat(tightShorts).Distinct();
