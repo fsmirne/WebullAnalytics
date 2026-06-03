@@ -66,6 +66,23 @@ internal sealed class HistoricalOptionBarCache
 	/// synthetic fallback is the right answer.</summary>
 	internal const int LookupWindowMinutes = 5;
 
+	/// <summary>The most recent bar at-or-before <paramref name="minuteUtc"/> (exclusive of the minute
+	/// itself, which <see cref="GetBar"/> already covers), walking BACKWARD up to <paramref name="maxMinutesBack"/>
+	/// minutes. Returns null if the contract has no CSV or never printed in that backward window. Strictly
+	/// backward → never look-ahead. Used to price thinly-traded (far-dated) legs from their last real print
+	/// instead of falling to synthetic, since such legs print only every ~20–50 min intraday. The window
+	/// bounds the staleness (and thus the spot-drift error, which is small for low-gamma far-dated legs).</summary>
+	public OptionMinuteBar? GetRecentBarBefore(string occ, DateTimeOffset minuteUtc, int maxMinutesBack)
+	{
+		var byTs = GetOrLoad(occ);
+		if (byTs == null) return null;
+		var sec = minuteUtc.ToUnixTimeSeconds();
+		sec -= sec % 60;
+		for (var step = 1; step <= maxMinutesBack; step++)
+			if (byTs.TryGetValue(sec - step * 60, out var bar)) return bar;
+		return null;
+	}
+
 	/// <summary>Captured quote points (strike, time-midpoint price, IV-fraction-if-present) for all
 	/// contracts of root+expiry+right with a bar at-or-after the minute, sorted by strike. Price is
 	/// the bar's time-midpoint (Open+Close)/2 so the surface IV reads the same moment-in-minute the
