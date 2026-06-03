@@ -132,9 +132,14 @@ internal sealed class ScraperLoop
 			todayContracts = quotes.Values
 				.Where(q =>
 				{
-					var exp = WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)?.ExpiryDate.Date;
-					if (exp == null) return false;
-					var dte = (exp.Value - fireEt.Date).Days;
+					var parsed = WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol);
+					if (parsed == null) return false;
+					// Querying SPXW's underlying (SPX) returns BOTH roots — SPX (AM-settled monthly) and
+					// SPXW (PM weekly). On monthly-expiry dates the SPX series comes back unquoted and
+					// shadows the real SPXW strikes (a consumer keying on expiry/strike/right could grab
+					// the empty SPX entry). Keep only the requested root.
+					if (!string.Equals(parsed.Root, _ticker, StringComparison.OrdinalIgnoreCase)) return false;
+					var dte = (parsed.ExpiryDate.Date - fireEt.Date).Days;
 					return dte >= 0 && dte <= _config.MaxDte;
 				})
 				.ToList();
