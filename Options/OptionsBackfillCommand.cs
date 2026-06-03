@@ -56,6 +56,38 @@ internal sealed class OptionsBackfillCommand : AsyncCommand<OptionsBackfillSetti
 		DateTime? since = settings.Since != null
 			? DateTime.ParseExact(settings.Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
 			: null;
-		return await AIHistoryOptionsBackfill.RunAsync(ticker, settings.Force, settings.All, since, settings.WebullPad, settings.Source, cancellation);
+
+		// Window = deepest leg-entry DTE the strategy could open + buffer, read straight from the ticker's config.
+		var lookback = DeriveLookbackDays(ticker);
+		AnsiConsole.MarkupLine($"  lookback window: {lookback} days before each expiry (from config)");
+
+		return await AIHistoryOptionsBackfill.RunAsync(ticker, settings.Force, settings.All, since, settings.WebullPad, settings.Source, lookback, cancellation);
+	}
+
+	// Buffer beyond the deepest leg-entry DTE so the entry day sits comfortably inside the pulled window
+	// (covers the at-or-after open-bar lookup and a few thin pre-entry sessions).
+	private const int LookbackBufferDays = 10;
+	private const int LookbackFallbackDays = 60;
+
+	/// <summary>Days-before-expiry to pull, derived from the deepest DTE any structure in the ticker's merged
+	/// config could open a leg at (+ <see cref="LookbackBufferDays"/>). Falls back to <see cref="LookbackFallbackDays"/>
+	/// if no config is found. Uses LongDteMax for calendar/diagonal structures (the far leg) and DteMax for
+	/// single-expiry structures.</summary>
+	private static int DeriveLookbackDays(string ticker)
+	{
+		var basePath = Program.ResolvePath(AIConfigLoader.ConfigPath);
+		var overridePath = Program.ResolvePath($"data/ai-config.{ticker}.json");
+		var config = AIConfigMerge.LoadMerged(File.Exists(basePath) ? basePath : null, File.Exists(overridePath) ? overridePath : null);
+		if (config == null) return LookbackFallbackDays;
+
+		var s = config.Opener.Structures;
+		var maxDte = new[]
+		{
+			s.LongCalendar.LongDteMax, s.DoubleCalendar.LongDteMax, s.LongDiagonal.LongDteMax,
+			s.DoubleDiagonal.LongDteMax, s.DiagonalVertical.LongDteMax, s.CalendarVertical.LongDteMax,
+			s.IronButterfly.DteMax, s.IronCondor.DteMax, s.ShortVertical.DteMax,
+			s.LongCallPut.DteMax, s.LongVertical.DteMax,
+		}.Max();
+		return maxDte + LookbackBufferDays;
 	}
 }
