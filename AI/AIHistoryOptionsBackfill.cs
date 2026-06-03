@@ -12,10 +12,10 @@ namespace WebullAnalytics.AI;
 /// — the registry only contains contracts we've observed live in a chain fetch, so this command
 /// can't conjure data for contracts that expired before we started persisting ids.
 ///
-/// <para>Pacing: 200 ms between contract fetches (5 req/sec). Empirically Webull's chart endpoint
-/// handles bursts well above this — the underlying SPX query-mini pagination runs at 1 req/sec for
-/// politeness, and the option chart endpoint has not shown signs of stricter rate-limiting in probes —
-/// but 5 req/sec gives plenty of headroom and the user can tune via <c>--pace-ms</c> if needed.</para>
+/// <para>Pacing: the Webull route runs at bounded parallelism (<see cref="WebullParallelism"/>),
+/// overlapping per-fetch network latency rather than serializing it behind a fixed delay. Empirically
+/// the chart endpoint handles concurrent bursts well above the old 5 req/sec sequential pace; degree 4
+/// is deliberately conservative for a broker endpoint (vs the massive route's 8).</para>
 ///
 /// <para>Idempotent re-runs: Webull (live) contracts merge by timestamp so a re-run picks up new
 /// minutes. Massive (expired) contracts that already have a CSV and whose expiry is in the past are
@@ -30,7 +30,9 @@ internal enum OptionDataSource { Webull, Massive }
 
 internal static class AIHistoryOptionsBackfill
 {
-	private static readonly TimeSpan DefaultPace = TimeSpan.FromMilliseconds(200);
+	// Concurrent Webull chart fetches. Overlaps per-request latency (the endpoint tolerates well above the
+	// old 5 req/sec sequential pace); kept conservative for a broker endpoint vs the massive route's 8.
+	private const int WebullParallelism = 4;
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	public static async Task<int> RunAsync(string ticker, bool force, bool all, DateTime? since, int webullPad, string source, int lookbackDays, CancellationToken cancellation)
@@ -325,16 +327,11 @@ internal static class AIHistoryOptionsBackfill
 					AnsiConsole.MarkupLine($"    progress: {done}/{total} (wrote {written}, merged {merged}, unchanged {unchanged}, empty {emptyResponses.Count}, failed {failures.Count})");
 		}
 
-		// Webull route: sequential with the client-side pace (the chart endpoint tolerates this rate reliably).
-		var webullTask = Task.Run(async () =>
-		{
-			for (var i = 0; i < webullWork.Count; i++)
-			{
-				cancellation.ThrowIfCancellationRequested();
-				if (i > 0) await Task.Delay(DefaultPace, cancellation);
-				await ProcessOneAsync(webullWork[i], cancellation);
-			}
-		}, cancellation);
+		// Webull route: bounded parallelism overlaps per-fetch latency (was sequential at a fixed 200ms pace —
+		// serializing the network round-trip, the real cost). Degree kept conservative for a broker endpoint.
+		var webullTask = Parallel.ForEachAsync(webullWork,
+			new ParallelOptions { MaxDegreeOfParallelism = WebullParallelism, CancellationToken = cancellation },
+			async (item, ct) => await ProcessOneAsync(item, ct));
 
 		// Massive route: bounded parallelism (its throttle enforces any tier cap; unlimited → true concurrency).
 		var massiveTask = Parallel.ForEachAsync(massiveWork,
