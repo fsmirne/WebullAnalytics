@@ -243,6 +243,55 @@ public class BacktestQuoteSourceCapturedBarsTests : IDisposable
 	}
 
 	[Fact]
+	public async Task GetQuotesAsync_NoExactBar_FarDatedLeg_UsesRecentPriorPrint()
+	{
+		// A >0DTE leg with NO print at the scan minute but a real print 8 minutes earlier (same session).
+		// The exact-minute lookup (at-or-after, 5 min) misses; the backward look should recover the 09:22
+		// print and price the leg from it — REAL, not synthetic (would be ~VIX1D 0.25 IV / BS price).
+		var occ = "SPXW260531C07400000"; // expiry 5 days after asOf → dte 5
+		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
+		SeedCsv(occ, new List<OptionMinuteBar>
+		{
+			new(ToUtcExact(new DateTime(2026, 5, 26, 9, 22, 0, DateTimeKind.Unspecified)), 30m, 30m, 30m, 30m, 7, 12m),
+		});
+
+		var (bars, iv) = BuildDailyCaches(spxwOpen: 7400m, vix1d: 25m, vix9d: 22m, vix: 20m, asOf: asOf);
+		var quotes = new BacktestQuoteSource(bars, iv, riskFreeRate: 0.036, optionBars: new HistoricalOptionBarCache(_tmpDir));
+
+		var snap = await quotes.GetQuotesAsync(asOf, new HashSet<string>(new[] { occ }),
+			new HashSet<string>(new[] { "SPXW" }, StringComparer.OrdinalIgnoreCase), CancellationToken.None);
+
+		Assert.True(snap.Options.TryGetValue(occ, out var q));
+		Assert.Equal(30m, q!.LastPrice);                          // the recent prior print's midpoint, not a synthetic BS price
+		Assert.Equal(7, q.Volume);                                // volume carried through from the recovered bar
+		Assert.NotNull(q.ImpliedVolatility);
+		Assert.False(System.Math.Abs((double)q.ImpliedVolatility!.Value - 0.25) < 1e-6); // NOT the VIX1D synthetic anchor
+	}
+
+	[Fact]
+	public async Task GetQuotesAsync_NoExactBar_ZeroDteLeg_DoesNotUseStalePrint()
+	{
+		// A 0DTE leg with a print 8 minutes before the scan minute must NOT use it — 0DTE gamma makes a
+		// stale price dangerous, so 0DTE stays on the exact-minute path and falls to synthetic here.
+		var occ = "SPXW260526C07400000"; // expiry == asOf date → dte 0
+		var asOf = new DateTime(2026, 5, 26, 9, 30, 0, DateTimeKind.Unspecified);
+		SeedCsv(occ, new List<OptionMinuteBar>
+		{
+			new(ToUtcExact(new DateTime(2026, 5, 26, 9, 22, 0, DateTimeKind.Unspecified)), 30m, 30m, 30m, 30m, 7, 12m),
+		});
+
+		var (bars, iv) = BuildDailyCaches(spxwOpen: 7400m, vix1d: 25m, vix9d: 22m, vix: 20m, asOf: asOf);
+		var quotes = new BacktestQuoteSource(bars, iv, riskFreeRate: 0.036, optionBars: new HistoricalOptionBarCache(_tmpDir));
+
+		var snap = await quotes.GetQuotesAsync(asOf, new HashSet<string>(new[] { occ }),
+			new HashSet<string>(new[] { "SPXW" }, StringComparer.OrdinalIgnoreCase), CancellationToken.None);
+
+		Assert.True(snap.Options.TryGetValue(occ, out var q));
+		Assert.NotEqual(30m, q!.LastPrice);   // did NOT use the stale 0DTE print
+		Assert.Null(q.Volume);                // synthetic path → no captured volume
+	}
+
+	[Fact]
 	public async Task GetQuotesAsync_Spy_UsesCalibratedSpreadCurve()
 	{
 		// SPY leg priced at a known mid ($4.00) via a flat captured bar (open=close). The bid/ask must
