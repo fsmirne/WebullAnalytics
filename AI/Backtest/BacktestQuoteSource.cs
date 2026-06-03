@@ -169,6 +169,14 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	// in <see cref="BacktestRunner"/>.
 	internal const double IntradayHalfSessionTimeYears = 3.25 / 24.0 / 365.0;
 
+	/// <summary>How far back (minutes) to accept a leg's most recent real print when it has no bar at the
+	/// exact scan minute. Far-dated legs trade thinly (often only every 20–50 min), so requiring an
+	/// exact-minute print forced them onto synthetic pricing. A bounded backward look gives them a real
+	/// (slightly stale) price; 30 min balances coverage against spot-drift staleness, and far-dated legs'
+	/// low gamma keeps that drift error small. 0DTE legs never use this — they print densely and their high
+	/// gamma makes any staleness dangerous.</summary>
+	private const int RecentBarWindowMinutes = 30;
+
 	private readonly HistoricalBarCache _bars;
 	private readonly BacktestIVProvider _iv;
 	private readonly double _riskFreeRate;
@@ -377,7 +385,15 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			// (deep ITM/OTM 0DTE) falls back to the parametric surface so the leg still gets a
 			// usable IV. This is the same flavor of within-minute lookahead the tape boundary bar
 			// discussion already accepted — bounded to "what live would have seen 30s into the bar."
-			var capturedBar = _optionBars?.GetBar(sym, asOfUtc);
+			// Prefer the exact-minute print (at-or-after within 5 min — the open-bar semantic). If the leg
+			// has none, for >0DTE legs fall back to its most recent print within RecentBarWindowMinutes
+			// (strictly backward → no look-ahead) before resorting to synthetic pricing. Far-dated legs
+			// trade thinly intraday, so this recovers a REAL price for the common case where the leg printed
+			// minutes ago but not this exact minute — what was driving the cross-expiry synthetic share up.
+			// The recovered bar flows through the SAME captured-bar path below (midpoint price, back-solved
+			// IV, real-volume), so it counts as real-priced in provenance, not synthetic.
+			var capturedBar = _optionBars?.GetBar(sym, asOfUtc)
+				?? (dte > 0 ? _optionBars?.GetRecentBarBefore(sym, asOfUtc, RecentBarWindowMinutes) : null);
 			decimal price;
 			decimal? iv = null;
 			long? volume = null;
