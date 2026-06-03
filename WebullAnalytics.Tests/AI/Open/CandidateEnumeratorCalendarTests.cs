@@ -105,6 +105,32 @@ public class CandidateEnumeratorCalendarTests
 	}
 
 	[Fact]
+	public void DiagonalDeltaBandEnumeratesTightOneStrikeGap()
+	{
+		// The delta grid alone pairs a near-ATM short only with longs several strikes away. The tight-gap
+		// addition must also produce an adjacent-strike (1-step) covered diagonal — the balanced near-ATM
+		// structure the scorer rates highest, which the coarse delta spanning otherwise never builds.
+		var cfg = DefaultCfg();
+		cfg.Structures.LongCalendar.Enabled = false;
+		cfg.Structures.LongDiagonal = new OpenerCalendarLikeConfig
+		{
+			Enabled = true, ShortDteMin = 3, ShortDteMax = 10, LongDteMin = 21, LongDteMax = 60,
+			DeltaMin = 0.40m, DeltaMax = 0.70m, ShortDeltaMin = 0.30m, ShortDeltaMax = 0.55m
+		};
+		var asOf = new DateTime(2026, 4, 20);
+		var gaps = CandidateEnumerator.Enumerate("SPY", spot: 100m, asOf, cfg)
+			.Where(s => s.StructureKind == OpenStructureKind.LongDiagonal)
+			.Select(s =>
+			{
+				var calls = s.Legs.Select(l => ParsingHelpers.ParseOptionSymbol(l.Symbol)!).Where(p => p.CallPut == "C").ToList();
+				return calls.Count == 2 ? Math.Abs(calls[0].Strike - calls[1].Strike) : (decimal?)null;
+			})
+			.Where(g => g.HasValue).Select(g => g!.Value).ToList();
+		Assert.NotEmpty(gaps);
+		Assert.Equal(1.0m, gaps.Min());   // step at spot 100 = $1 → an adjacent-strike tight diagonal exists
+	}
+
+	[Fact]
 	public void DisabledStructureProducesNothing()
 	{
 		var cfg = DefaultCfg();

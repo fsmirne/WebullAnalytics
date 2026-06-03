@@ -172,7 +172,13 @@ internal static class CandidateEnumerator
 									.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, shortYears, OptionMath.RiskFreeRate, ResolveIv(ticker, shortExp, k, callPut, quotes, defaultIv), callPut))))
 									.Where(x => x.d >= sCfg.ShortDeltaMin && x.d <= sCfg.ShortDeltaMax)
 									.OrderBy(x => x.d).Select(x => x.k).ToList();
-								var shortStrikes = SpanEvenly(shortInBand, MaxShortAnchors);
+								// Plus TIGHT 1–2 strike gaps off the long anchor. The delta grid is too coarse to land an
+								// adjacent-strike pairing (a near-ATM short one strike above a near-ATM long), so without
+								// these the balanced tight covered diagonals the scorer rates highest are never built.
+								var tightShorts = new[] { 1, 2 }
+									.Select(w => WingStrike(anchor, w, dir, step, shortLadder))
+									.Where(s => s is > 0m).Select(s => s!.Value);
+								var shortStrikes = SpanEvenly(shortInBand, MaxShortAnchors).Concat(tightShorts).Distinct();
 								foreach (var shortStrike in shortStrikes)
 								{
 									// Directional consistency: short leg further OTM than the long anchor (calls higher, puts lower).
