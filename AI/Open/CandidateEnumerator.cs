@@ -5,15 +5,17 @@ namespace WebullAnalytics.AI;
 internal static class CandidateEnumerator
 {
 	/// <summary>Max long-leg anchors enumerated across a calendar/diagonal's delta band per (short, long)
-	/// expiry pair. Spanning the band (vs the old 2-nearest-midpoint) lets OTM→ITM long legs coexist as
-	/// candidates so the scorer can pick by regime; capped so a wide band stays tractable in the per-minute scan.</summary>
-	private const int MaxLongAnchors = 10;
+	/// expiry pair. Set high enough to take EVERY listed strike in the band (SpanEvenly returns the whole
+	/// list when it's ≤ this) — i.e. effectively exhaustive over the band, so the scorer sees the full
+	/// opportunity set rather than a sample. Costs ~3-4× candidates/tick vs a sparse sample; the live scan
+	/// is one tick (cheap), backtests manage it with --scan-stride.</summary>
+	private const int MaxLongAnchors = 40;
 
 	/// <summary>Max short-leg strikes enumerated across a calendar/diagonal's short delta band per (short,
-	/// long) expiry pair. Spanning the band (vs the old 2-nearest-midpoint) lets the short reach the ATM
-	/// end — the tight, richly-financed near-ATM covered diagonals — instead of pinning it mid-band; capped
-	/// for the per-minute scan. Smaller than <see cref="MaxLongAnchors"/> since the short band is narrower.</summary>
-	private const int MaxShortAnchors = 5;
+	/// long) expiry pair. Like <see cref="MaxLongAnchors"/>, set high enough to take every in-band strike
+	/// (effectively exhaustive). Combined with the both-sided tight gaps, this covers covered AND reverse
+	/// geometries densely; the scorer's debit>0 gate prunes the net-credit reverse spreads.</summary>
+	private const int MaxShortAnchors = 30;
 
 	/// <summary>Enumerates candidate skeletons for a ticker. <paramref name="availableExpirations"/>, when
 	/// non-null, is the set of real expirations from the chain — using these (rather than computed
@@ -176,7 +178,7 @@ internal static class CandidateEnumerator
 								// Plus TIGHT 1–2 strike gaps off the long anchor. The delta grid is too coarse to land an
 								// adjacent-strike pairing (a near-ATM short one strike above a near-ATM long), so without
 								// these the balanced tight covered diagonals the scorer rates highest are never built.
-								var tightShorts = new[] { 1, 2, 3 }
+								var tightShorts = new[] { 1, 2, 3, 4, 5, 6 }
 									.SelectMany(w => new[] { WingStrike(anchor, w, dir, step, shortLadder), WingStrike(anchor, w, -dir, step, shortLadder) })
 									.Where(s => s is > 0m).Select(s => s!.Value);
 								var shortStrikes = SpanEvenly(shortInBand, MaxShortAnchors).Concat(tightShorts).Distinct();
