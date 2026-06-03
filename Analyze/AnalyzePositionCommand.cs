@@ -156,7 +156,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// Phase 2: fetch quotes for the hypothetical-scenario symbols we couldn't enumerate without spot.
 		{
 			var alreadyFetched = quotes ?? new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+			// Also pull the same-strike PUT at each position expiry so the put-call-parity implied-dividend
+			// diagnostic has both sides (the chain often quotes only calls / front-month, leaving far puts as stubs).
+			var pcpPutSymbols = positionLegs.Select(l => $"{l.Parsed.Root}{l.Parsed.ExpiryDate:yyMMdd}P{(int)Math.Round(l.Parsed.Strike * 1000m):00000000}");
 			var hypotheticalSymbols = EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot.Value)
+				.Concat(pcpPutSymbols)
 				.Where(s => !alreadyFetched.ContainsKey(s))
 				.Distinct(StringComparer.OrdinalIgnoreCase)
 				.ToList();
@@ -237,6 +241,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 
 		AnalyzeCommon.RenderProposalPanel(positionLegs, structure.ToString(), spot.Value, diagnostic, renderConsole, ascii: toText);
+
+		RenderImpliedDividendDiagnostic(positionLegs, spot.Value, quotes, dividends, asOfForDiagnostic, renderConsole);
 
 		if (scenarios.Count == 0)
 		{
@@ -1751,6 +1757,54 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	}
 
 	// ─── Rendering ───────────────────────────────────────────────────────────
+
+	/// <summary>One-shot put-call-parity diagnostic: backs the market-implied dividend out of the call/put
+	/// mids at each position strike+expiry with no model assumption — implied PV(div) = S − (C−P) − K·e^(−rT).
+	/// An expiry BEFORE any ex-date should read ~0 (a built-in control); a later expiry reads the market's
+	/// implied dividend, to compare against our assumed schedule and explain any theoretical-vs-mid gap.
+	/// PCP is exact for European options; SPY/equity options are American, so near-the-money reads carry a
+	/// small early-exercise bias. Silent when the put side isn't quoted.</summary>
+	private static void RenderImpliedDividendDiagnostic(IReadOnlyList<PositionSnapshot> legs, decimal spot, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? assumedDivs, DateTime asOf, IAnsiConsole console)
+	{
+		if (quotes == null || quotes.Count == 0) return;
+
+		var pairs = legs.Select(l => (Strike: l.Parsed.Strike, Expiry: l.Parsed.ExpiryDate.Date, Root: l.Parsed.Root))
+			.Distinct().OrderBy(p => p.Expiry).ToList();
+		if (pairs.Count == 0) return;
+
+		decimal? MidAt(string root, decimal strike, DateTime expiry, string cp)
+		{
+			foreach (var kv in quotes)
+			{
+				var p = ParsingHelpers.ParseOptionSymbol(kv.Key);
+				if (p == null || p.CallPut != cp || p.Strike != strike || p.ExpiryDate.Date != expiry || !string.Equals(p.Root, root, StringComparison.OrdinalIgnoreCase)) continue;
+				if (!kv.Value.Bid.HasValue || !kv.Value.Ask.HasValue || kv.Value.Ask.Value <= 0m) return null;
+				return (kv.Value.Bid.Value + kv.Value.Ask.Value) / 2m;
+			}
+			return null;
+		}
+
+		var assumed = assumedDivs == null || assumedDivs.Count == 0
+			? "none"
+			: string.Join(", ", assumedDivs.Select(d => $"${d.Amount.ToString("0.###", CultureInfo.InvariantCulture)} ex {d.ExDate:MM-dd}"));
+		console.MarkupLine($"[dim]Implied dividend — put-call parity (assumed: {Markup.Escape(assumed)}; American ⇒ approximate):[/]");
+
+		foreach (var (strike, expiry, root) in pairs)
+		{
+			var c = MidAt(root, strike, expiry, "C");
+			var p = MidAt(root, strike, expiry, "P");
+			var label = $"{expiry:MM-dd} ${strike.ToString("0.##", CultureInfo.InvariantCulture)}";
+			if (c == null || p == null)
+			{
+				console.MarkupLine($"[dim]  {Markup.Escape(label)}: need both call & put mids ({(c == null ? "call" : "put")} missing)[/]");
+				continue;
+			}
+			var t = Math.Max(0.0, ((expiry + OptionMath.MarketClose) - asOf).TotalDays / 365.0);
+			var dfK = strike * (decimal)Math.Exp(-OptionMath.RiskFreeRate * t);
+			var impliedPvDiv = spot - ((c.Value - p.Value) + dfK);
+			console.MarkupLine($"[dim]  {Markup.Escape(label)}: C {c.Value.ToString("0.00", CultureInfo.InvariantCulture)} / P {p.Value.ToString("0.00", CultureInfo.InvariantCulture)} → implied PV(div) ${impliedPvDiv.ToString("0.000", CultureInfo.InvariantCulture)}[/]");
+		}
+	}
 
 	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, AnalyzePositionSettings settings, IAnsiConsole console, bool ascii)
 	{
