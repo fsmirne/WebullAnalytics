@@ -2141,14 +2141,14 @@ internal static class CandidateScorer
 			: Math.Max(shortParsed.Strike - longParsed.Strike, 0m);
 		var strikeLossPerContract = strikeLossPerShare * 100m;
 		var capitalAtRisk = debitPerContract + strikeLossPerContract;
-		// Capital efficiency is rated against the cash actually deployed (the debit), not the worst-
-		// case assignment loss. The strike gap is a contingent exposure that rarely realizes —
-		// diagonals are normally closed or rolled before short expiry, and even on assignment the
-		// long retains time value. Folding the strike gap into the score divisor systematically
-		// buried diagonals beneath same-strike calendars on capital efficiency. The full
-		// debit+strike-gap number stays in CapitalAtRiskPerContract / MaxLossPerContract for
-		// position sizing and risk reporting.
-		var efficiencyCapital = debitPerContract;
+		// Capital-efficiency divisor = the real capital at risk. For calendars and COVERED diagonals the
+		// strike gap is 0 (the legs sit on the non-loss side), so this equals the debit — unchanged from
+		// the prior debit-only behavior. For INVERTED / reverse diagonals the strike gap IS the dominant
+		// risk (margin-secured), so it MUST be in the divisor: otherwise a near-zero-debit inverted
+		// diagonal divides EV by ~$0 and scores absurdly high (e.g. a $1,003-risk / $270-reward trade
+		// rocketing to #1 on a $3 debit). This aligns the score divisor with the max-loss the risk
+		// reporting (CapitalAtRiskPerContract / MaxLossPerContract) already shows.
+		var efficiencyCapital = capitalAtRisk;
 
 		var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortParsed.ExpiryDate);
 		var longAtShortYears = OpenerExpiryHelpers.TimeYearsToExpiry(shortParsed.ExpiryDate, longParsed.ExpiryDate);
