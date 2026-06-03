@@ -75,6 +75,36 @@ public class CandidateEnumeratorCalendarTests
 	}
 
 	[Fact]
+	public void DiagonalDeltaBandSpansOtmToItmLongAnchors()
+	{
+		// Wide long-leg band 0.30–0.75 should enumerate call diagonals whose LONG (buy) leg spans from
+		// OTM (delta < 0.5 → strike above spot) to ITM (delta > 0.5 → strike below spot) — not just the
+		// 2 strikes nearest the band midpoint. This is what lets the scorer pick ITM call diagonals in a
+		// bull regime while OTM stays available in neutral tape.
+		var cfg = DefaultCfg();
+		cfg.Structures.LongCalendar.Enabled = false;
+		cfg.Structures.LongDiagonal = new OpenerCalendarLikeConfig
+		{
+			Enabled = true, ShortDteMin = 3, ShortDteMax = 10, LongDteMin = 21, LongDteMax = 60,
+			DeltaMin = 0.30m, DeltaMax = 0.75m, ShortDeltaMin = 0.15m, ShortDeltaMax = 0.30m
+		};
+
+		var asOf = new DateTime(2026, 4, 20);
+		const decimal spot = 100m;
+		var longCallStrikes = CandidateEnumerator.Enumerate("SPY", spot, asOf, cfg)
+			.Where(s => s.StructureKind == OpenStructureKind.LongDiagonal)
+			.Select(s => s.Legs.First(l => l.Action == "buy"))
+			.Select(l => ParsingHelpers.ParseOptionSymbol(l.Symbol)!)
+			.Where(p => p.CallPut == "C")
+			.Select(p => p.Strike)
+			.Distinct().ToList();
+
+		Assert.NotEmpty(longCallStrikes);
+		Assert.Contains(longCallStrikes, k => k < spot);   // an ITM long call (delta > 0.5)
+		Assert.Contains(longCallStrikes, k => k > spot);   // an OTM long call (delta < 0.5)
+	}
+
+	[Fact]
 	public void DisabledStructureProducesNothing()
 	{
 		var cfg = DefaultCfg();
