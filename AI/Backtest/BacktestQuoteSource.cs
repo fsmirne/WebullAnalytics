@@ -57,12 +57,15 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	/// captured range — so a leg the opener reaches *outside* the band still prices on the real implied
 	/// vol rather than the ~10-points-too-low VIX1D anchor. Returns null when no captured strikes exist
 	/// for this expiry+right at the minute (caller falls back to the VIX1D-anchored synthetic).</summary>
-	private decimal? BuildSurfaceIv(string root, DateTime expiry, string callPut, decimal targetStrike, decimal spot, double timeYears, DateTimeOffset asOfUtc)
+	private decimal? BuildSurfaceIv(string root, DateTime expiry, string callPut, decimal targetStrike, decimal spot, double timeYears, DateTime asOf, DateTimeOffset asOfUtc)
 	{
 		if (_optionBars == null) return null;
 		var points = _optionBars.GetCapturedQuotePoints(root, expiry, callPut, asOfUtc);
 		if (points.Count == 0) return null;
 
+		// Back-solve on the dividend-adjusted forward so the recovered IV is a CLEAN surface vol (the
+		// dividend lives in the spot reduction, not smeared into σ) — see AdjSpot. No-op for index roots.
+		var ivSpot = AdjSpot(root, spot, asOf, expiry);
 		var ivByStrike = new List<(decimal Strike, decimal Iv)>(points.Count);
 		foreach (var p in points)
 		{
@@ -73,7 +76,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			// Mid-anchored leg pricing). ImpliedVol clamps to [0.01, 5.0]; pinned bounds indicate
 			// vega-flat regimes (deep ITM/OTM or near-zero time) — skip those.
 			decimal? iv = null;
-			var solved = OptionMath.ImpliedVol(spot, p.Strike, timeYears, _riskFreeRate, p.Price, callPut);
+			var solved = OptionMath.ImpliedVol(ivSpot, p.Strike, timeYears, _riskFreeRate, p.Price, callPut);
 			if (solved > 0.011m && solved < 4.99m) iv = solved;
 			if (iv.HasValue && iv.Value > 0m) ivByStrike.Add((p.Strike, iv.Value));
 		}
@@ -117,7 +120,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			var gap = (exp.Date - targetExpiry.Date).Days;
 			var tE = (exp.Date - asOf.Date).Days / 365.0;
 			if (tE <= 0) continue;
-			var ivE = BuildSurfaceIv(root, exp, callPut, targetStrike, spot, tE, asOfUtc);
+			var ivE = BuildSurfaceIv(root, exp, callPut, targetStrike, spot, tE, asOf, asOfUtc);
 			if (!ivE.HasValue || ivE.Value <= 0m) continue;
 			(gap < 0 ? below : above).Add((gap, tE, ivE.Value));
 		}
@@ -182,6 +185,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	private readonly double _riskFreeRate;
 	private readonly IReadOnlyDictionary<string, decimal>? _spotOverrides;
 	private readonly HistoricalOptionBarCache? _optionBars;
+	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
 
 	// Diagnostic: records which synthetic branch priced each (contract, ET date) the last time it was
 	// synthesized (no captured bar of its own). Keyed at day granularity to match the day-level provenance
@@ -225,13 +229,34 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	/// replaces the VIX-anchored synthetic IV. Bid/ask is still derived from the half-spread model
 	/// — the option chart endpoint reports trade prints, not NBBO. Legs without a captured bar fall
 	/// through to the Black-Scholes path unchanged, so partial coverage is fine.</param>
-	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double riskFreeRate, IReadOnlyDictionary<string, decimal>? spotOverrides = null, HistoricalOptionBarCache? optionBars = null)
+	/// <param name="dividendsByRoot">Optional per-root historical dividend schedules (from
+	/// <see cref="HistoricalDividendCache"/>). When supplied, every Black-Scholes forward AND inverse below
+	/// prices on the dividend-adjusted spot for the leg's expiry window — matching the live dividend-aware
+	/// path. This (a) turns IVs back-solved from real captured prices into CLEAN surface vols (the analog of
+	/// Webull's quoted IV), so cross-expiry interpolation no longer smears a discrete dividend across a
+	/// calendar's legs, and (b) prices synthetic legs on the correct reduced forward. A captured bar's own
+	/// price is never adjusted — it's a real market print that already embeds the dividend; only the IV we
+	/// extract from it does. Null (or a root with no schedule) leaves that root unadjusted (q=0), unchanged
+	/// behaviour — correct for cash-settled index roots (SPX/SPXW/XSP).</param>
+	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double riskFreeRate, IReadOnlyDictionary<string, decimal>? spotOverrides = null, HistoricalOptionBarCache? optionBars = null, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
 	{
 		_bars = bars;
 		_iv = iv;
 		_riskFreeRate = riskFreeRate;
 		_spotOverrides = spotOverrides;
 		_optionBars = optionBars;
+		_dividendsByRoot = dividendsByRoot;
+	}
+
+	/// <summary>Spot reduced by the present value of every known dividend going ex within
+	/// (<paramref name="asOf"/>, <paramref name="expiryDate"/> close] for <paramref name="root"/>. Returns
+	/// <paramref name="spot"/> unchanged when no schedule is known or none falls in the window — so the
+	/// no-dividend path is bit-for-bit the old behaviour. Used for BOTH the BS price and the IV back-solve so
+	/// the surface and the legs it prices share one consistent forward.</summary>
+	private decimal AdjSpot(string root, decimal spot, DateTime asOf, DateTime expiryDate)
+	{
+		if (_dividendsByRoot == null || !_dividendsByRoot.TryGetValue(root, out var divs) || divs.Count == 0) return spot;
+		return OptionMath.DividendAdjustedSpot(spot, divs, asOf, expiryDate.Date + OptionMath.MarketClose, _riskFreeRate);
 	}
 
 	/// <summary>Diagnostic: did <paramref name="occ"/> have a real captured bar on the ET trading day of
@@ -405,7 +430,9 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 					: dte / 365.0;
 				if (parsed.CallPut != null && timeYears > 0)
 				{
-					var solved = OptionMath.ImpliedVol(spot, parsed.Strike, timeYears, _riskFreeRate, price, parsed.CallPut);
+					// Real print → keep `price` as-is, but back-solve IV on the dividend-adjusted forward so the
+					// extracted vol is clean (the analog of Webull's quoted IV in the live path).
+					var solved = OptionMath.ImpliedVol(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, _riskFreeRate, price, parsed.CallPut);
 					// Reject the bounds (0.01 / 5.0) — those indicate non-convergent vega-flat regimes
 					// (deep ITM/OTM or zero-time). Fall through to the parametric surface instead so
 					// the leg's IV still tracks the smile rather than getting pinned to the back-solver
@@ -434,7 +461,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				// spread credit and inflated the backtest. Falls back to VIX1D-anchored ATM+smile only when
 				// no captured strikes exist for this expiry+right at this minute.
 				var surfaceIv = parsed.CallPut != null
-					? BuildSurfaceIv(parsed.Root, parsed.ExpiryDate, parsed.CallPut, parsed.Strike, spot, timeYears, asOfUtc)
+					? BuildSurfaceIv(parsed.Root, parsed.ExpiryDate, parsed.CallPut, parsed.Strike, spot, timeYears, asOf, asOfUtc)
 					: null;
 				SyntheticPricingSource src;
 				if (surfaceIv.HasValue && surfaceIv.Value > 0m)
@@ -465,7 +492,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				}
 
 				if (iv.HasValue)
-					price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv.Value, parsed.CallPut!);
+					price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, _riskFreeRate, iv.Value, parsed.CallPut!);
 				else
 				{
 					price = parsed.CallPut == "C" ? Math.Max(0m, spot - parsed.Strike) : Math.Max(0m, parsed.Strike - spot);
@@ -559,7 +586,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			var atmIv = atmByDte.TryGetValue(dte, out var hit) ? hit : fallbackAtm;
 			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale) ?? atmIv;
 			var timeYears = dte <= 0 ? zeroDteTimeYears : dte / 365.0;
-			var price = OptionMath.BlackScholes(spot, parsed.Strike, timeYears, _riskFreeRate, iv, parsed.CallPut);
+			var price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, _riskFreeRate, iv, parsed.CallPut);
 
 			var halfSpread = HalfSpreadFor(parsed.Root, price);
 			var bid = Math.Max(0m, price - halfSpread);
