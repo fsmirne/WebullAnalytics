@@ -17,7 +17,8 @@ A C# command-line tool for reviewing Webull trading activity end-to-end. It gene
 - **Scenario Analysis**: Evaluate hypothetical trades, roll grids, scenario-ranked position adjustments, and structured risk diagnostics
 - **GEX Heatmap**: 2D dealer-gamma-exposure heatmap over the option chain (strikes × expirations) with chain totals and call/put walls
 - **Broker Utilities**: Preview/place/cancel orders, inspect status, list app subscriptions, check positions, and manage OpenAPI trade tokens
-- **AI Proposal Engine**: Run one-shot, watch-loop, or historical replay evaluation for management proposals and new-opening ideas
+- **AI Proposal Engine**: Run one-shot, watch-loop, historical-replay, or full historical-backtest evaluation for management proposals and new-opening ideas
+- **Historical Option-Bar Catalog**: Discover, backfill (Webull + massive.com), and reprice real option bars so the backtester runs on real prices, not synthetic mids
 - **Fee Tracking**: Commissions and fees embedded in the order data
 - **Cash Tracking**: Tracks current cash in hand starting from an optional initial amount
 - **Multiple Output Modes**:
@@ -85,7 +86,7 @@ By default this installs to `~/.local/bin`. You can specify a custom directory:
 
 ### Commands
 
-`wa` has six top-level commands:
+`wa` has eight top-level commands:
 
 - `report` — generate realized P&L reports and open-position break-even analysis
 - `analyze` — run hypothetical trade, roll, position, and risk analysis
@@ -93,6 +94,8 @@ By default this installs to `~/.local/bin`. You can specify a custom directory:
 - `sniff` — capture fresh Webull session headers for the web API
 - `trade` — preview/place/cancel orders and inspect OpenAPI account state
 - `ai` — emit management and opening proposals from live or replayed data
+- `options` — discover, backfill, and reprice the historical option-bar catalog the backtester reads
+- `data` — back up and restore the local data directory
 
 ### Report Command
 
@@ -141,6 +144,10 @@ wa report --spot GME:24.88,SPY:580.50
 # Use Black-Scholes theoretical prices instead of market mid for today's grid column
 wa report --theoretical
 
+# Back-solve each leg's IV from its live bid/ask mid so the grid's future columns decay on the
+# market-consistent surface instead of Webull's reported IV (today's column already shows mid)
+wa report --calibrated
+
 # Add custom notable prices to break-even reports (e.g., support/resistance levels)
 wa report --levels GME:20/25/30
 
@@ -165,6 +172,7 @@ Options:
   --grid <layout>           Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg values '1.23|0.45|$0.78')
   --spot <prices>           Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
   --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
+  --calibrated              Back-solve each leg's IV from its live bid/ask mid so the today column reproduces market mid and future columns decay on the mid-consistent surface (instead of Webull's reported IV)
   --levels <prices>         Additional reference price levels (support/resistance, targets) to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
   --tickers <list>          Show only these tickers in the report. Comma-separated (e.g., GME,SPY,AAPL)
   --help, -h                Show help message
@@ -172,13 +180,14 @@ Options:
 
 ### Analyze Command
 
-The `analyze` command has five subcommands:
+The `analyze` command has six subcommands:
 
 - `analyze trade` — inject hypothetical trades into the report pipeline for what-if analysis.
 - `analyze roll` — show a 2D grid of theoretical roll credit/debit across underlying prices × times using Black-Scholes.
 - `analyze risk` — render a structured risk diagnostic for an option structure using live quotes.
 - `analyze position` — analyze an existing or manually specified option position and rank adjustment scenarios.
 - `analyze gex` — render a 2D dealer-gamma-exposure (GEX) heatmap over the option chain (strikes × expirations) plus chain totals and call/put walls.
+- `analyze sentiment` — render the current CNN Fear & Greed Index (score, rating, historical comparison, and component breakdown).
 
 All subcommands accept the `report` command's options plus `--date` for simulating a future evaluation date. Some subcommands add extra flags documented below.
 
@@ -332,10 +341,12 @@ The command appends a machine-readable record to `data/analyze-risk.jsonl` after
 Loads an existing open option strategy from `data/orders.jsonl` or accepts a manual position spec, then ranks hold/roll/reset scenarios with projected P&L and buying-power impact.
 
 ```
-wa analyze position ["<spec>"] [--iv-default <pct>] [--strike-step <step>] [--cash <amount>] [--account <alias>] [--date <YYYY-MM-DD>] [report options]
+wa analyze position ["<spec>"] [--iv-default <pct>] [--strike-step <step>] [--cash <amount>] [--account <alias>] [--date <YYYY-MM-DD>] [--log-level <level>] [report options]
 ```
 
 If `<spec>` is omitted, the command scans open strategy positions from the trade log and lets you pick one interactively.
+
+`--log-level` is `error | information` (default) `| debug`. Under `debug` the scenario output adds a put-call-parity implied-dividend diagnostic (`PV(div) = S − (C − P) − K·e^(−rT)`) and surfaces the otherwise-hidden opposite-side double-structure add candidates.
 
 Manual `<spec>` format:
 
@@ -356,7 +367,7 @@ wa analyze position "sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499
 wa analyze position "buy:GME260620C00025000:10@1.25" --strike-step 0.50 --spot GME:24.88
 ```
 
-The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa analyze trade` reproduction commands, and appends a machine-readable record to `data/analyze-position.jsonl`.
+The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa analyze trade` reproduction commands, and appends a machine-readable record to `data/analyze-position.jsonl`. The scenario table shows a probability-weighted **EV** P&L alongside the spot-pinned **Projected** value and ranks scenarios by EV-P&L-per-day; it also includes a "scale up existing" comparator that any proposed add must beat. For a held calendar/diagonal, the add block proposes the opposite-side double (calendar = same strike, diagonal = one strike further OTM), Black-Scholes-pricing the unquoted far leg (marked `[estimated]`), and flags the best add by incremental return per added margin.
 
 #### `analyze gex`
 
@@ -388,6 +399,20 @@ wa analyze gex SPY --top-walls 10 --spot SPY:580.50
 ```
 
 Requires Webull API session headers (`data/api-config.json`) — run `wa sniff` first if missing. Yahoo isn't supported because chain-level GEX needs full OI + IV across every expiry, which only Webull's `strategy/list` + `queryBatch` combination reliably returns. Webull's `strategy/list` only inlines OI/IV for the front-most expiration, so the command refreshes in-window non-front-month contracts via `queryBatch` before computing the matrix.
+
+#### `analyze sentiment`
+
+Fetches and renders the CNN Fear & Greed Index: the headline score (0–100) and rating, a historical comparison (previous close, 1 week / 1 month / 1 year ago), the seven component sub-indicators, and a short interpretation. This is the same sentiment signal the opener blends in via `opener.weights.sentiment` (contrarian regime overlay), exposed standalone for inspection.
+
+```bash
+# Current reading
+wa analyze sentiment
+
+# Reading as of a past date (for backtest cross-checks)
+wa analyze sentiment --date 2026-04-07
+```
+
+> Macro overlay only — single-name catalysts (earnings, FDA, M&A) routinely override the index on a given ticker.
 
 #### Options
 
@@ -579,7 +604,7 @@ There is no `--yes` flag — every place, cancel, and cancel-all prompts interac
 
 The `ai` command evaluates live or replayed positions and emits structured proposal logs. It can emit both management proposals (roll / take-profit / stop-loss / defensive-roll) and opening candidates for new positions. It is **read-only in phase 1**: the command never places orders.
 
-Five subcommands share one evaluation engine:
+Six subcommands — `scan` / `watch` / `replay` / `backtest` share one evaluation engine, `history` manages the caches they read, and `dip` is a standalone dip-signal research tool (see below):
 
 ```bash
 # Continuous monitoring during market hours (default: until 4 PM ET)
@@ -605,6 +630,9 @@ wa ai watch SPXW --tick 30 --duration 90m --ignore-market-hours
 
 # Emit only opening ideas
 wa ai scan GME --proposals open
+
+# Study the intraday dip signal (RSI + Bollinger + MACD-sign) over a history of 1-min CSVs
+wa ai dip SPXW --since 2025-01-01 --interval 5
 ```
 
 The ticker is a required positional argument — every AI subcommand operates on exactly one ticker per run, and the config layer is selected by that argument.
@@ -676,7 +704,7 @@ Rules evaluate per-position in priority order — the first rule to match for a 
 | `CloseBeforeShortExpiryRule` | 2 | Short DTE = 0 and either MTM profit ≥ `minProfitPct` of initial debit, or spot is past the BE band ± `emergencyBreakEvenBufferPct` (emergency close) |
 | `LegInShortRule` | 2 | Single-leg long call/put goes ITM (≥ `minSpotPctITM`%), long delta ≥ `minLongDelta`, profit ≥ `triggerProfitPct` of debit, DTE ≥ `minDTE`, and a short at `targetShortDelta ± shortDeltaTolerance` exists with credit ≥ `minShortCreditPerShare`. Optional VIX / intraday-range regime gates |
 | `OpportunisticRollRule` | 2 | A roll scenario improves P&L-per-day by at least `minImprovementPerDayPerContract` vs holding, and passes all four safety gates |
-| `TakeProfitRule` | 2 | MTM ≥ `pctOfMaxProfit` of the peak net value in the current-date column of the time-decay grid |
+| `TakeProfitRule` | 2 | MTM ≥ `pctOfMaxProfit` of the peak net value in the current-date column of the time-decay grid, **or** MTM profit ≥ `profitTargetPctOfDebit` of the initial net debit (fires any day; default 0 = off) |
 | `DefensiveRollRule` | 3 | Spot within 1% of short strike and short DTE ≤ 3 |
 | `RollShortOnExpiryRule` | 4 | Short DTE ≤ 2 and short mid ≤ $0.10 |
 
@@ -764,6 +792,8 @@ Proposals are written to two places:
 - **Console**: Spectre-formatted, color-coded by action (close = yellow, roll = cyan, alert-only = grey). Open-proposal panel headers carry a `#N` prefix matching the ranked output order so you can refer to a candidate by position (e.g. `#3 LongCalendar GME x166`); the counter resets at the start of each `wa ai scan` and at each `wa ai watch` tick. Each proposal shows the legs and net credit/debit, followed by ready-to-run `wa trade place` and `wa analyze trade` commands, and the rule rationale. Double calendars and double diagonals render as a single panel listing both halves under `Put side:` / `Call side:` rows; because Webull cannot place a 4-leg double-calendar ticket, the panel emits two `wa trade place` lines (one per side, each with its own per-share limit) and a single `wa analyze trade` covering all four legs.
 - **JSONL log** at `data/ai-proposals.jsonl`: one proposal per line, machine-parseable with `jq` or similar. Includes `mode` field ("scan" / "watch" / "replay") to distinguish source runs.
 
+Under `--log-level debug`, `wa ai scan` additionally lists the best positive-EV candidate of each enabled-but-unselected structure (typically the double calendar / double diagonal, which score ~25× below the singles) as non-executable **Informational** rows — a visibility aid that never auto-executes and is suppressed at `information` / `error`.
+
 AI commands accept `--pricing mid|bidask` to control both displayed command prices and the pricing basis used in proposal math. Default: `mid`.
 
 Shared AI options:
@@ -799,6 +829,7 @@ ai backtest only:
   --iv-hv-premium <ratio>  IV/HV multiplier for non-SPY tickers (SPY uses real VIX). Default: 1.15.
   --smile <mode>           Volatility smile model: 'off' (flat IV) or 'static' (quadratic skew). Default: static.
   --top-per-step <n>       Maximum new opens per trading day. Default: 1.
+  --scan-stride <n>        Evaluate every Nth minute for entries instead of all 390. Default: 30; set 1 for an exhaustive minute walk.
   --show-fills             Print per-fill ledger in addition to the summary.
   --fills-jsonl <path>     Also write each fill as a JSON line. Useful for parameter-sweep scripts.
   --oracle                 Research mode (by-design lookahead): forward-simulate each minute's proposal to expiry
@@ -882,6 +913,68 @@ wa ai backtest SPXW --since 2026-01-01 --starting-cash 10000 --fills-jsonl /tmp/
 ```
 
 The fill ledger (`--show-fills`) carries per-trade and account-level return columns: `P&L %` (this trade's realized return as % of the opening debit/credit basis) and `Return` (cumulative realized return through the account, vs starting cash). Both blank on `Open` rows — nothing is realized until the lineage finalizes.
+
+#### `ai dip`
+
+A standalone research tool (not part of the live evaluation engine) that studies an intraday "dip" signal — MACD histogram negative ∧ RSI(14) oversold ∧ close below the lower Bollinger band — over a history of 1-minute CSVs, aggregated to a chosen bar interval. It reports signal frequency and forward statistics, and can overlay several hypothetical trade structures (all model estimates — no real option quotes unless `--real-chain` is used).
+
+```bash
+# Signal study over the year, 5-min bars, also list the first 20 signals
+wa ai dip SPXW --since 2025-01-01 --interval 5 --list 20
+
+# Swing round-trip mode: enter after a dip clears, exit after a top clears (RSI > --rsi-high)
+wa ai dip SPXW --exit-on-top
+
+# Round-trips bucketed by VIX regime, or filtered to VIX-gap-up days only
+wa ai dip SPXW --exit-on-top --by-vix
+wa ai dip SPXW --exit-on-top --vix-gap-up
+
+# Price the round-trips off the real scraped 0DTE chain (naked-call / call-vert / put-credit)
+wa ai dip SPXW --exit-on-top --real-chain --delta 0.25 --width 2
+```
+
+Key flags: `--rsi-low` / `--rsi-high` / `--bb-k` / `--interval` shape the signal; `--first-only` collapses a multi-bar dip to its first trigger; `--exit-on-top` switches from a frequency study to a one-at-a-time intraday swing (and is required by `--by-vix`, `--vix-gap-up`, and `--real-chain`); `--call-dte` / `--call-spread` and `--put-spread` / `--put-width` / `--put-friction` / `--put-stop` / `--put-skew` add BS-modeled call and 0DTE-credit-spread overlays; `--real-chain` (`--delta` / `--width` / `--legs`) replaces the model with the real scraped chain on days a snapshot exists.
+
+### Options Command
+
+`wa options` builds and maintains the historical option-bar catalog that `wa ai backtest` reads. Real bars are pulled from Webull (live contracts) and massive.com (expired contracts).
+
+```bash
+# 1. Discover the contracts the opener actually considered each day, and seed the backfill catalog
+wa options discover SPXW --since 2025-01-01 --top-k 20
+
+# 1b. Bootstrap an underlying with no on-disk chain by enumerating massive's contract reference
+wa options chain SPY --since 2025-01-01 --atm-band 30
+
+# 2. Pull the bars for the discovered contracts (merges by timestamp; --force refetches from scratch)
+wa options backfill SPXW --since 2025-01-01 --source massive
+
+# 3. Audit pricing-model accuracy against a captured chain snapshot
+wa options reprice SPXW --date 2026-04-07 --worst 15
+```
+
+- `options discover <ticker>` — replays the opener over a date range and logs the top-K candidates per day to `data/options-discovery/<TICKER>.jsonl`, padded by `--pad` strikes so a swept strike still lands on a captured bar. Accepts opener overrides (`--bias-drift`, `--min-score-to-open`, `--intraday-tape-weight`, repeatable `--enable-structure`) so multiple regime sweeps union into one catalog.
+- `options chain <ticker>` — enumerates an underlying's historical contracts from massive's reference endpoint (use `--underlying` when the OCC root differs, e.g. SPXW→SPX) and seeds the discovery catalog. `--atm-band` tracks a trending underlying so only realistically-tradable strikes are seeded; `--count` reports the contract/strike distribution without writing.
+- `options backfill <ticker>` — pulls bars for the catalog (or the full registry with `--all`). `--source` routes contracts (`all` default, `massive` for fast historical pulls, `webull` for live-only); `--webull-pad` widens the Webull-routable range to capture chart-data headroom before contracts drop out of the live chain.
+- `options reprice <ticker> --date <YYYY-MM-DD>` — reprices a captured chain snapshot with the model and reports the N worst-mispriced contracts (by absolute mid error), to validate the spread/IV model.
+
+### Data Command
+
+`wa data` snapshots and restores the local data directory (orders, caches, configs, discovery catalogs, snapshots).
+
+```bash
+# Back up the data directory to a timestamped tar.gz under <BaseDir>/backups/
+wa data backup
+
+# Back up to a specific path
+wa data backup -o /mnt/d/wa-backups/before-sweep.tar.gz
+
+# Restore the most recent backup (refuses to overwrite an existing data/ without --force)
+wa data restore
+wa data restore -i /mnt/d/wa-backups/before-sweep.tar.gz --force
+```
+
+With `--force`, `data restore` renames any existing `data/` to `data.bak.<timestamp>/` before restoring over it.
 
 ## Data Sources
 
@@ -1068,6 +1161,8 @@ When implied volatility is available (from the auto-fetched Webull chain or `--i
 - **Cell layout**: `--grid simple` (default) shows one value per cell (the net). `--grid verbose` prefixes each cell with the per-share Black-Scholes contract value of every leg, separated by `|` — e.g. `1.23|0.45|$0.78` for a two-leg spread. Leg order matches the leg descriptions shown above the grid, and a legend below repeats the order (e.g. `LC23|SC23.5|Net`).
 - **Cell colors**: Green for profit, red for loss. Legs in verbose mode render in grey.
 - **Calendar/diagonal spreads**: The grid ends at the short leg's expiration. The long leg's remaining time value is reflected via Black-Scholes pricing at each date, including the "At Exp" column.
+- **Dividend adjustment**: Legs that trade through an ex-dividend date are priced on a discrete-dividend-adjusted (escrowed) forward — the present value of each cash dividend in the leg's window is subtracted from spot. This stops the grid from overstating a calendar/diagonal long leg that straddles an ex-date (the short leg, expiring before it, is unaffected). The ex-dividend schedule comes from the event calendar, with `opener.events.dividendYield` / `dividendFrequency` as the fallback when only an ex-date (no amount) is known.
+- **IV calibration (`--calibrated`)**: By default each leg prices on Webull's reported IV, so the today column is anchored to market mid but the future columns can drift from where the market would mark them. With `--calibrated`, each leg's IV is back-solved from its live bid/ask mid (on the same dividend-adjusted spot), so the future columns decay on a mid-consistent surface. A user `--iv` override still wins; legs without a usable two-sided quote fall back to the reported IV. The leg's volatility line shows the reported IV struck through next to the calibrated value, tagged `cal`.
 
 Without implied volatility data, the existing 1D price ladder (Price | Value | P&L at expiration) is shown instead.
 
