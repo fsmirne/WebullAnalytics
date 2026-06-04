@@ -352,8 +352,8 @@ public static class CombinedBreakEvenAnalyzer
 			var cpDisplay = ParsingHelpers.CallPutDisplayName(leg.Parsed!.CallPut);
          var desc = $"{longShort} {leg.Qty}× {cpDisplay} ${Formatters.FormatQty(leg.Parsed.Strike)} @ ${Formatters.FormatPrice(leg.Price, Asset.Option)}, Exp {Formatters.FormatOptionDate(leg.Parsed.ExpiryDate)}";
 
-			var yahooInfo = TryFormatYahooQuote(leg.Symbol, opts);
-			if (yahooInfo != null) desc += $" | {yahooInfo}";
+			var quoteInfo = TryFormatQuote(leg.Symbol, opts);
+			if (quoteInfo != null) desc += $" | {quoteInfo}";
 
 			if (leg.SourcePositionCount > 1)
 				desc += $" (merged from {leg.SourcePositionCount} positions)";
@@ -399,7 +399,7 @@ public static class CombinedBreakEvenAnalyzer
 		return [];
 	}
 
-	private static string? TryFormatYahooQuote(string symbol, AnalysisOptions opts)
+	private static string? TryFormatQuote(string symbol, AnalysisOptions opts)
 	{
 		if (opts.OptionQuotes == null) return null;
 		if (!opts.OptionQuotes.TryGetValue(symbol, out var quote)) return null;
@@ -408,10 +408,24 @@ public static class CombinedBreakEvenAnalyzer
 		if (quote.LastPrice.HasValue) parts.Add($"Last ${Formatters.FormatPrice(quote.LastPrice.Value, Asset.Option)}");
 		if (quote.Bid.HasValue) parts.Add($"Bid ${Formatters.FormatPrice(quote.Bid.Value, Asset.Option)}");
 		if (quote.Ask.HasValue) parts.Add($"Ask ${Formatters.FormatPrice(quote.Ask.Value, Asset.Option)}");
-		if (quote.ImpliedVolatility.HasValue)
-			parts.Add($"IV {(quote.ImpliedVolatility.Value * 100m).ToString("N1", CultureInfo.InvariantCulture)}%");
+
+		// IV the grid actually prices on: a user --iv override wins, else a calibrated (mid-implied) IV,
+		// else Webull's reported IV. Mirror the per-position view: show the broker IV struck through next to
+		// the value in force, tagging the calibrated case as an automatic override.
+		var brokerIv = quote.ImpliedVolatility;
+		var manualIv = opts.IvOverrides != null && opts.IvOverrides.TryGetValue(symbol, out var mov) ? mov : (decimal?)null;
+		var calibratedIv = manualIv == null && opts.CalibratedIv != null && opts.CalibratedIv.TryGetValue(symbol, out var cov) ? cov : (decimal?)null;
+		var overrideIv = manualIv ?? calibratedIv;
+		var calTag = calibratedIv.HasValue ? " cal" : "";
+		static string Pct(decimal iv) => $"{(iv * 100m).ToString("N1", CultureInfo.InvariantCulture)}%";
+		if (brokerIv.HasValue && overrideIv.HasValue)
+			parts.Add($"IV ~{Pct(brokerIv.Value)}~ {Pct(overrideIv.Value)}{calTag}");
+		else if (overrideIv.HasValue)
+			parts.Add($"IV {Pct(overrideIv.Value)}{calTag}");
+		else if (brokerIv.HasValue)
+			parts.Add($"IV {Pct(brokerIv.Value)}");
 		if (quote.HistoricalVolatility.HasValue)
-			parts.Add($"HV {(quote.HistoricalVolatility.Value * 100m).ToString("N1", CultureInfo.InvariantCulture)}%");
+			parts.Add($"HV {Pct(quote.HistoricalVolatility.Value)}");
 		return parts.Count == 0 ? null : string.Join(" | ", parts);
 	}
 }
