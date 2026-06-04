@@ -564,7 +564,8 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var bars = new Backtest.HistoricalBarCache(offline: true);
 		var smile = new Backtest.SmileIndexCache(offline: true);
 		var ivProvider = new Backtest.BacktestIVProvider(bars, smile: smile);
-		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, spotOverrides: spotOverrides);
+		var dividendsByRoot = await new Backtest.HistoricalDividendCache(offline: true).BuildScheduleMapAsync(tickerSet, cancellation);
+		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, spotOverrides: spotOverrides, dividendsByRoot: dividendsByRoot);
 		var priceCache = new Replay.HistoricalPriceCache(bars);
 
 		// Cash sizing: prefer the live broker balance so proposals reflect what the user could actually
@@ -934,7 +935,13 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// for any leg+minute we have on disk. Missing contracts silently fall through to the synthetic
 		// path, so partial coverage works fine — there's no penalty for legs we never captured.
 		var optionBars = new Backtest.HistoricalOptionBarCache();
-		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, optionBars: optionBars);
+		// Historical dividend schedules (data/dividends/<TICKER>.csv, populated by `wa ai history`) make the
+		// backtest's Black-Scholes pricing dividend-aware, matching the live feed. Offline read; absent files
+		// (non-payers, index roots) leave that root unadjusted. Built over the full ticker set so any
+		// hypothetical/secondary root the opener touches is covered.
+		var dividends = new Backtest.HistoricalDividendCache(offline: true);
+		var dividendsByRoot = await dividends.BuildScheduleMapAsync(config.TickerSet(), cancellation);
+		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, optionBars: optionBars, dividendsByRoot: dividendsByRoot);
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);

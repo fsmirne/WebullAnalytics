@@ -147,4 +147,28 @@ public class YahooCalendarClientTests
 		Assert.Null(YahooCalendarClient.ParseNextDividendFromChart("""{"chart":{"result":[{"meta":{}}],"error":null}}""", DateTime.Today));
 		Assert.Null(YahooCalendarClient.ParseNextDividendFromChart("not json", DateTime.Today));
 	}
+
+	[Fact]
+	public void ParseDividendHistoryFromChart_ReturnsFullActualSchedule_OldestFirst()
+	{
+		// Unlike ParseNextDividendFromChart (keeps only the latest + projects forward), the backtest source
+		// keeps every ACTUAL payment, oldest-first, with the real ex-date and amount.
+		var history = YahooCalendarClient.ParseDividendHistoryFromChart(ChartDivResponse);
+		Assert.Equal(4, history.Count);
+		Assert.Equal(new DateTime(2025, 6, 20), history[0].ExDate);
+		Assert.Equal(1.761m, history[0].Amount);
+		Assert.Equal(new DateTime(2026, 3, 20), history[^1].ExDate);
+		Assert.Equal(1.797m, history[^1].Amount);
+		// Strictly ascending by ex-date.
+		for (var i = 1; i < history.Count; i++)
+			Assert.True(history[i].ExDate > history[i - 1].ExDate);
+	}
+
+	[Fact]
+	public void ParseDividendHistoryFromChart_NonPayerOrMalformed_ReturnsEmpty()
+	{
+		Assert.Empty(YahooCalendarClient.ParseDividendHistoryFromChart("""{"chart":{"result":[{"meta":{}}],"error":null}}"""));
+		Assert.Empty(YahooCalendarClient.ParseDividendHistoryFromChart("not json"));
+		Assert.Empty(YahooCalendarClient.ParseDividendHistoryFromChart(""));
+	}
 }

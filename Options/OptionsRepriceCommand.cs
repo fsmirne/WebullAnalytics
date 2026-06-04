@@ -66,7 +66,8 @@ internal sealed class OptionsRepriceCommand : AsyncCommand<OptionsRepriceSetting
 		var smile = new SmileIndexCache(offline: true);
 		var ivProvider = new BacktestIVProvider(bars, smile: smile);
 		var optionBars = new HistoricalOptionBarCache();
-		var quotes = new BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, optionBars: optionBars);
+		var dividendsByRoot = await new HistoricalDividendCache().BuildScheduleMapAsync(new[] { ticker }, cancellation);
+		var quotes = new BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, optionBars: optionBars, dividendsByRoot: dividendsByRoot);
 		var tickerSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker };
 		var closeUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(date.Date.AddHours(16), NyTz), TimeSpan.Zero);
 
