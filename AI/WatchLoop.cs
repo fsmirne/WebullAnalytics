@@ -176,7 +176,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 					openResultCount = openResults.Count;
 					for (var i = 0; i < openResults.Count; i++) { openSink.Emit(openResults[i], rank: i + 1); proposalsEmitted++; }
 					if (openerExecutor != null)
-						await openerExecutor.HandleAsync(openResults, now, cancellation);
+						await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation);
 				}
 
 				if (debug)

@@ -43,11 +43,26 @@ internal sealed class OpenerAutoExecutor
 	/// through the dry-run/submit path. Returns the count of orders submitted (or planned, in dry-run).
 	/// Caller is expected to invoke this AFTER <see cref="OpenCandidateEvaluator"/> emits its results.
 	/// Daily cap is enforced from the broker's count of today's active orders (filled + pending), so
-	/// it survives across fills, restarts, and concurrent processes on the same machine.</summary>
-	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, DateTime now, CancellationToken cancellation)
+	/// it survives across fills, restarts, and concurrent processes on the same machine.
+	///
+	/// Held-position dedup: <paramref name="openPositions"/> (the same set the management executor sees)
+	/// is fingerprinted per combo and any proposal whose structure already exists as an open position is
+	/// skipped — so the opener never stacks an identical structure onto a position carried over from a
+	/// PRIOR day. The broker-order dedup below can't catch this: a prior-day open is a filled order that
+	/// is neither in today's orders nor a working order. This guard is submit-independent (no broker call)
+	/// so watch's dry-run reports the skip too.</summary>
+	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, IReadOnlyDictionary<string, OpenPosition> openPositions, DateTime now, CancellationToken cancellation)
 	{
 		if (!_config.Enabled) return 0;
 		if (proposals.Count == 0) return 0;
+
+		// Fingerprint every open position's leg set at the combo grain (positions are grouped one-per-combo,
+		// matching StructureOrderSplit). A proposal is "already held" when ALL its combo groups are present —
+		// so a partially-held double still completes, consistent with the broker-order dedup.
+		var heldFingerprints = new HashSet<string>(StringComparer.Ordinal);
+		foreach (var pos in openPositions.Values)
+			if (pos.Quantity > 0)
+				heldFingerprints.Add(FingerprintLegSet(pos.Legs.Select(l => (l.Side == Side.Buy ? "buy" : "sell", l.Symbol))));
 
 		// Broker-truth refresh. If submit is on but the API call fails, do nothing this tick.
 		// Dry-runs proceed without the refresh (informational; users still see "would submit" lines
@@ -76,6 +91,19 @@ internal sealed class OpenerAutoExecutor
 		{
 			if (p.CashReserveBlocked) continue;
 			if (p.Qty < 1) continue;
+
+			// Held-position guard: when the proposed structure already exists as an open position (every
+			// combo group is held), the opener must NOT auto-open a duplicate — adding to an existing
+			// position is `wa analyze position`'s job, not the opener's. Warn and skip, same as the
+			// broker-order dedup below; the proposal itself is still emitted by the sink (with its
+			// `wa trade place` hint) so the user can add to it manually if they choose. Catches the
+			// prior-day carryover the broker-order dedup misses; submit-independent (no broker call).
+			if (heldFingerprints.Count > 0
+				&& StructureOrderSplit.Split(p.StructureKind, p.Legs).All(g => heldFingerprints.Contains(FingerprintLegSet(g.Legs.Select(l => (l.Action, l.Symbol))))))
+			{
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (already hold matching position):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty}.");
+				continue;
+			}
 
 			// Broker-truth dedup: if the structure is already active (pending or filled today), skip.
 			// This catches same-proposal-across-ticks, cross-process, cross-restart, and the "limit
@@ -227,6 +255,15 @@ internal sealed class OpenerAutoExecutor
 		var argLegs = string.Join(",", legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 		return (side, limitAbs, argLegs);
 	}
+
+	/// <summary>Canonical leg-set fingerprint: sorted "ACTION:OCC" joined. Both proposal legs and position
+	/// legs carry the OCC symbol directly, so no per-field reconstruction is needed (unlike the broker path,
+	/// where Webull returns root/strike/expiry separately). Quantity is intentionally excluded — a 3-lot
+	/// proposal matches a held 6-lot of the same structure.</summary>
+	private static string FingerprintLegSet(IEnumerable<(string Action, string Symbol)> legs) =>
+		string.Join("|", legs
+			.Select(l => $"{l.Action.ToUpperInvariant()}:{l.Symbol.ToUpperInvariant()}")
+			.OrderBy(s => s, StringComparer.Ordinal));
 
 	private static string LabelSuffix(string label) => string.IsNullOrEmpty(label) ? "" : $" ({label})";
 
