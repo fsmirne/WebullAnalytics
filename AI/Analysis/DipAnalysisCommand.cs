@@ -67,6 +67,22 @@ internal sealed class DipAnalysisSettings : CommandSettings
 	[CommandOption("--put-skew <PTS>")]
 	[Description("Linear put skew: IV rises this many vol points per 1% the strike is below spot. 0 = flat (VIX1D for both legs). Try 3-6 for SPX. Default: 0.")]
 	public decimal PutSkew { get; set; }
+
+	[CommandOption("--first-only")]
+	[Description("Keep only the FIRST signal of each session (collapses a multi-bar dip into one event). All stats and overlays then run on that subset. Default: off (every trigger).")]
+	public bool FirstOnly { get; set; }
+
+	[CommandOption("--exit-on-top")]
+	[Description("Round-trip swing mode: ENTER on the first bar after a dip run clears, EXIT on the first bar after a top run clears (else session close). One at a time, intraday. Reports realized P&L vs an EOD-hold baseline.")]
+	public bool ExitOnTop { get; set; }
+
+	[CommandOption("--rsi-high <N>")]
+	[Description("Overbought threshold for the top/exit signal: needs RSI(14) above this. Default: 70.")]
+	public decimal RsiHigh { get; set; } = 70m;
+
+	[CommandOption("--by-vix")]
+	[Description("With --exit-on-top: bucket the round-trips by VIX1D features known at the open (prior-day close level in terciles, and open-gap sign) to test whether the edge is VIX-conditioned. Uses data/history/VIX1D.csv.")]
+	public bool ByVix { get; set; }
 }
 
 /// <summary>`ai dip` — historical study of the strict MACD+RSI+Bollinger "buy the dip" signal on 5-minute RTH
@@ -93,8 +109,30 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 
 		if (!string.IsNullOrWhiteSpace(settings.Dump)) { Dump(bars, settings.Dump); return Task.FromResult(0); }
 
-		var p = new DipParams(RsiLow: settings.RsiLow, BbK: settings.BbK);
+		var p = new DipParams(RsiLow: settings.RsiLow, RsiHigh: settings.RsiHigh, BbK: settings.BbK);
+
+		if (settings.ExitOnTop)
+		{
+			var swings = DipSignalAnalyzer.SimulateSwing(bars, p);
+			RenderSwing(settings, since, until, swings);
+			if (settings.ByVix) RenderSwingByVix(swings);
+			return Task.FromResult(0);
+		}
+
 		var result = DipSignalAnalyzer.Analyze(bars, p, settings.Interval);
+
+		// --first-only: collapse each session's run of triggers (a single dip often fires several
+		// consecutive bars) to just the first. Filtering result.Signals flows through every renderer
+		// and overlay. Grouped by the entry bar's session date; earliest entry per day wins.
+		if (settings.FirstOnly)
+			result = result with
+			{
+				Signals = result.Signals
+					.GroupBy(s => s.EntryEt.Date)
+					.Select(g => g.OrderBy(x => x.EntryEt).First())
+					.OrderBy(s => s.EntryEt)
+					.ToList()
+			};
 
 		Render(settings, since, until, result);
 		if (settings.List > 0) RenderList(result, settings.List);
@@ -135,7 +173,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 
 	private static void Render(DipAnalysisSettings s, DateTime since, DateTime until, DipAnalysisResult r)
 	{
-		AnsiConsole.MarkupLine($"[bold]{s.Ticker.ToUpperInvariant()} dip signal[/]  {since:yyyy-MM-dd} → {until:yyyy-MM-dd}  ({s.Interval}-min RTH, continuous indicators)");
+		AnsiConsole.MarkupLine($"[bold]{s.Ticker.ToUpperInvariant()} dip signal[/]  {since:yyyy-MM-dd} → {until:yyyy-MM-dd}  ({s.Interval}-min RTH, continuous indicators{(s.FirstOnly ? ", first signal/session" : "")})");
 		AnsiConsole.MarkupLine($"Rule (source indicator's black/selling-climax): MACD(12,26,9) hist < 0 AND RSI(14) < {s.RsiLow} AND close < lower BB(20,{s.BbK}σ, EMA basis). Entry = next bar open.");
 		var perSession = r.SessionCount > 0 ? (double)r.Signals.Count / r.SessionCount : 0;
 		AnsiConsole.MarkupLine($"{r.BarCount:N0} bars · {r.SessionCount} sessions · [bold]{r.Signals.Count} signals[/] ({perSession:F2}/session)\n");
@@ -288,6 +326,109 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		if (v.Count == 0) { t.AddRow(label, "0", "—", "—", "—", "—", "—"); return; }
 		var win = (double)v.Count(x => x > 0m) / v.Count;
 		t.AddRow(label, v.Count.ToString(), Pct(win), Signed(v.Average()), Signed(v[v.Count / 2]), Signed(v[^1]), Signed(v[0]));
+	}
+
+	private static void RenderSwing(DipAnalysisSettings s, DateTime since, DateTime until, List<SwingTrade> trades)
+	{
+		AnsiConsole.MarkupLine($"[bold]{s.Ticker.ToUpperInvariant()} dip→top swing[/]  {since:yyyy-MM-dd} → {until:yyyy-MM-dd}  ({s.Interval}-min RTH, continuous indicators)");
+		AnsiConsole.MarkupLine($"Enter = first bar after a dip run clears (RSI<{s.RsiLow} & close<lowerBB & hist<0). Exit = first bar after a top run clears (RSI>{s.RsiHigh} & close>upperBB & hist>=0), else session close. One at a time, intraday, fills at bar open.");
+		if (trades.Count == 0) { AnsiConsole.MarkupLine("[yellow]No round-trips in range.[/]"); return; }
+
+		var rets = trades.Select(t => (decimal?)t.Ret).ToList();
+		var baseRets = trades.Select(t => (decimal?)t.EodBaselineRet).ToList();
+		var onTop = trades.Count(t => t.ExitedOnTop);
+		var avgHoldMin = trades.Average(t => t.HoldBars) * s.Interval;
+
+		var table = new Table().Border(TableBorder.Rounded).Title("[bold]Swing round-trips (underlying)[/]");
+		foreach (var col in new[] { "Strategy", "N", "Win %", "Avg %", "Median %", "Best %", "Worst %" }) table.AddColumn(col);
+		table.AddRow("dip->top/EOD", trades.Count.ToString(), Pct(WinRate(rets)), Signed(Avg(rets)), Signed(Median(rets)), Signed(rets.Max(x => x!.Value)), Signed(rets.Min(x => x!.Value)));
+		table.AddRow("[dim]EOD-hold baseline[/]", trades.Count.ToString(), Pct(WinRate(baseRets)), Signed(Avg(baseRets)), Signed(Median(baseRets)), Signed(baseRets.Max(x => x!.Value)), Signed(baseRets.Min(x => x!.Value)));
+		AnsiConsole.Write(table);
+		AnsiConsole.MarkupLine($"[dim]Exited on top signal: {onTop}/{trades.Count} ({100.0 * onTop / trades.Count:F0}%); rest at session close. Avg hold {avgHoldMin:F0} min. Edge vs EOD-hold baseline: {Signed(Avg(rets) - Avg(baseRets))}/trade.[/]");
+
+		if (s.List > 0)
+		{
+			var t = new Table().Border(TableBorder.Rounded).Title($"[bold]First {Math.Min(s.List, trades.Count)} round-trips[/]");
+			foreach (var col in new[] { "Entry (ET)", "Exit (ET)", "Exit", "Hold", "Ret %", "EOD-base %" }) t.AddColumn(col);
+			foreach (var tr in trades.Take(s.List))
+				t.AddRow($"{tr.EntryEt:MM-dd HH:mm}", $"{tr.ExitEt:MM-dd HH:mm}", tr.ExitedOnTop ? "top" : "EOD", $"{tr.HoldBars * s.Interval}m", Signed(tr.Ret), Signed(tr.EodBaselineRet));
+			AnsiConsole.Write(t);
+		}
+	}
+
+	private static Dictionary<DateTime, (decimal Open, decimal Close)> LoadVix1dOhlc()
+	{
+		var map = new Dictionary<DateTime, (decimal, decimal)>();
+		var path = Program.ResolvePath("data/history/VIX1D.csv");
+		if (!File.Exists(path)) return map;
+		foreach (var line in File.ReadLines(path))
+		{
+			if (line.Length == 0 || line[0] == 'd') continue;
+			var c = line.Split(',');
+			if (c.Length < 5) continue;
+			if (DateTime.TryParseExact(c[0], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)
+				&& decimal.TryParse(c[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var o)
+				&& decimal.TryParse(c[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var cl))
+				map[d.Date] = (o, cl);
+		}
+		return map;
+	}
+
+	/// <summary>Conditions the swing round-trips on VIX1D features KNOWN AT THE OPEN — prior-day close level
+	/// (terciles) and open-gap sign — never the circular intraday VIX move. Keeps the EOD-hold baseline per
+	/// bucket so a "good" VIX bin still has to beat just-hold-to-close, not merely look positive.</summary>
+	private static void RenderSwingByVix(List<SwingTrade> trades)
+	{
+		var vix = LoadVix1dOhlc();
+		if (vix.Count == 0) { AnsiConsole.MarkupLine("[yellow]No VIX1D data to condition on.[/]"); return; }
+		var dates = vix.Keys.OrderBy(d => d).ToList();
+
+		decimal? PriorClose(DateTime d)
+		{
+			decimal? r = null;
+			foreach (var k in dates) { if (k >= d.Date) break; r = vix[k].Close; }
+			return r;
+		}
+
+		var feats = trades.Select(t =>
+		{
+			var d = t.EntryEt.Date;
+			var pc = PriorClose(d);
+			decimal? open = vix.TryGetValue(d, out var v) ? v.Open : null;
+			return (Trade: t, PriorClose: pc, Gap: pc.HasValue && open.HasValue ? open - pc : null);
+		}).Where(x => x.PriorClose.HasValue).ToList();
+		if (feats.Count == 0) { AnsiConsole.MarkupLine("[yellow]No round-trips matched VIX1D dates.[/]"); return; }
+
+		var sorted = feats.Select(f => f.PriorClose!.Value).OrderBy(x => x).ToList();
+		decimal q1 = sorted[sorted.Count / 3], q2 = sorted[2 * sorted.Count / 3];
+		string Band(decimal v) => v <= q1 ? "low" : v <= q2 ? "mid" : "high";
+
+		var t1 = new Table().Border(TableBorder.Rounded).Title($"[bold]Swing by VIX1D prior-close level (terciles <={q1:F1} / <={q2:F1})[/]");
+		foreach (var c in new[] { "VIX1D band", "N", "Swing win%", "Swing avg%", "EOD-base avg%", "edge/trade" }) t1.AddColumn(c);
+		foreach (var g in feats.GroupBy(f => Band(f.PriorClose!.Value)).OrderBy(g => g.Key == "low" ? 0 : g.Key == "mid" ? 1 : 2))
+		{
+			var rs = g.Select(x => (decimal?)x.Trade.Ret).ToList();
+			var bs = g.Select(x => (decimal?)x.Trade.EodBaselineRet).ToList();
+			t1.AddRow(g.Key, g.Count().ToString(), Pct(WinRate(rs)), Signed(Avg(rs)), Signed(Avg(bs)), Signed(Avg(rs) - Avg(bs)));
+		}
+		AnsiConsole.Write(t1);
+
+		var t2 = new Table().Border(TableBorder.Rounded).Title("[bold]Swing by VIX1D open-gap (open - prior close)[/]");
+		foreach (var c in new[] { "VIX1D gap", "N", "Swing win%", "Swing avg%", "EOD-base avg%" }) t2.AddColumn(c);
+		foreach (var g in feats.Where(f => f.Gap.HasValue).GroupBy(f => f.Gap!.Value > 0m ? "gap up" : "gap down/flat").OrderBy(g => g.Key))
+		{
+			var rs = g.Select(x => (decimal?)x.Trade.Ret).ToList();
+			var bs = g.Select(x => (decimal?)x.Trade.EodBaselineRet).ToList();
+			t2.AddRow(g.Key, g.Count().ToString(), Pct(WinRate(rs)), Signed(Avg(rs)), Signed(Avg(bs)));
+		}
+		AnsiConsole.Write(t2);
+	}
+
+	private static decimal Median(IEnumerable<decimal?> r)
+	{
+		var v = r.Where(x => x.HasValue).Select(x => x!.Value).OrderBy(x => x).ToList();
+		if (v.Count == 0) return 0m;
+		return v.Count % 2 == 1 ? v[v.Count / 2] : (v[v.Count / 2 - 1] + v[v.Count / 2]) / 2m;
 	}
 
 	private static double WinRate(IEnumerable<decimal?> r) { var v = r.Where(x => x.HasValue).Select(x => x!.Value).ToList(); return v.Count == 0 ? 0 : (double)v.Count(x => x > 0m) / v.Count; }
