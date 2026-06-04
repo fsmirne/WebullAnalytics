@@ -159,10 +159,9 @@ public static class BreakEvenAnalyzer
 		}
 
 		List<string>? legsDisplay = null;
-		var ivOverride = opts.IvOverrides != null && opts.IvOverrides.TryGetValue(symbol, out var ov) ? ov : (decimal?)null;
-		var yahooInfo = TryFormatYahooQuote(symbol, opts, ivOverride);
-		if (yahooInfo != null)
-			legsDisplay = [$"Market: {yahooInfo}"];
+		var quoteInfo = TryFormatQuote(symbol, opts);
+		if (quoteInfo != null)
+			legsDisplay = [$"Market: {quoteInfo}"];
 
 		decimal? margin = null;
 		if (!isLong && spot.HasValue)
@@ -220,10 +219,9 @@ public static class BreakEvenAnalyzer
 			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
 
 			var legIv = OptionMath.GetLegIv(l.row.Side, l.symbol, opts);
-			var legIvOverride = opts.IvOverrides != null && opts.IvOverrides.TryGetValue(l.symbol, out var legOv) ? legOv : (decimal?)null;
-			var yahooInfo = TryFormatYahooQuote(l.symbol, opts, legIvOverride);
-			if (yahooInfo != null)
-				desc += $" | {yahooInfo}";
+			var quoteInfo = TryFormatQuote(l.symbol, opts);
+			if (quoteInfo != null)
+				desc += $" | {quoteInfo}";
 
 			if (l.row.Side == Side.Buy && legIv.HasValue)
 			{
@@ -458,7 +456,7 @@ public static class BreakEvenAnalyzer
 		return grid;
 	}
 
-	private static string? TryFormatYahooQuote(string symbol, AnalysisOptions opts, decimal? ivOverride = null)
+	private static string? TryFormatQuote(string symbol, AnalysisOptions opts)
 	{
 		if (opts.OptionQuotes == null) return null;
 		if (!opts.OptionQuotes.TryGetValue(symbol, out var quote)) return null;
@@ -475,22 +473,31 @@ public static class BreakEvenAnalyzer
 		}
 		if (quote.Volume.HasValue) parts.Add($"Vol {quote.Volume.Value.ToString("N0", CultureInfo.InvariantCulture)}");
 		if (quote.OpenInterest.HasValue) parts.Add($"OI {quote.OpenInterest.Value.ToString("N0", CultureInfo.InvariantCulture)}");
-		var yahooIv = quote.ImpliedVolatility;
+
+		var brokerIv = quote.ImpliedVolatility;
+		// IV the grid actually prices on: a user --iv override wins, else a calibrated (mid-implied) IV,
+		// else Webull's reported IV. Show the broker IV struck through next to the value in force, matching
+		// how --iv is surfaced; tag the calibrated case so it reads as an automatic, not manual, override.
+		var manualIv = opts.IvOverrides != null && opts.IvOverrides.TryGetValue(symbol, out var mov) ? mov : (decimal?)null;
+		var calibratedIv = manualIv == null && opts.CalibratedIv != null && opts.CalibratedIv.TryGetValue(symbol, out var cov) ? cov : (decimal?)null;
+		var overrideIv = manualIv ?? calibratedIv;
+		var calTag = calibratedIv.HasValue ? " cal" : "";
+
 		var volParts = new List<string>();
 		string? ivColor = null;
-		var effectiveIv = ivOverride ?? yahooIv;
+		var effectiveIv = overrideIv ?? brokerIv;
 		if (effectiveIv.HasValue && quote.HistoricalVolatility.HasValue && quote.HistoricalVolatility.Value != 0)
 		{
 			var vrp = effectiveIv.Value / quote.HistoricalVolatility.Value;
 			if (vrp < 0.90m) ivColor = "cheap";
 			else if (vrp > 1.10m) ivColor = "rich";
 		}
-		if (yahooIv.HasValue && ivOverride.HasValue)
-			volParts.Add($"~{FormatIvPct(yahooIv.Value)}~ {FormatIvVal(ivOverride.Value, ivColor)}");
-		else if (yahooIv.HasValue)
-			volParts.Add(FormatIvVal(yahooIv.Value, ivColor));
-		else if (ivOverride.HasValue)
-			volParts.Add(FormatIvVal(ivOverride.Value, ivColor));
+		if (brokerIv.HasValue && overrideIv.HasValue)
+			volParts.Add($"~{FormatIvPct(brokerIv.Value)}~ {FormatIvVal(overrideIv.Value, ivColor)}{calTag}");
+		else if (brokerIv.HasValue)
+			volParts.Add(FormatIvVal(brokerIv.Value, ivColor));
+		else if (overrideIv.HasValue)
+			volParts.Add($"{FormatIvVal(overrideIv.Value, ivColor)}{calTag}");
 		if (quote.HistoricalVolatility.HasValue)
 			volParts.Add($"HV {FormatIvPct(quote.HistoricalVolatility.Value)}");
 		if (quote.ImpliedVolatility5Day.HasValue)

@@ -835,29 +835,8 @@ internal static class CandidateScorer
 	/// keeps entry pricing (market mid) and exit pricing (BS at calibrated IV) on the same scale.
 	/// Falls back to <see cref="ResolveIv"/> when bid/ask is missing, mid ≤ intrinsic, or the solver
 	/// fails to converge.</summary>
-	public static decimal MarketImpliedIv(string symbol, OptionParsed parsed, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultPct)
-	{
-		var brokerIv = ResolveIv(symbol, quotes, defaultPct);
-		if (!quotes.TryGetValue(symbol, out var q)) return brokerIv;
-		if (!q.Bid.HasValue || !q.Ask.HasValue) return brokerIv;
-		if (q.Bid.Value < 0m || q.Ask.Value <= 0m) return brokerIv;
-		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-		if (mid <= 0m) return brokerIv;
-
-		var intrinsic = OptionMath.Intrinsic(spot, parsed.Strike, parsed.CallPut);
-		if (mid <= intrinsic) return brokerIv;
-
-		var expirationTime = parsed.ExpiryDate.Date + OptionMath.MarketClose;
-		var t = (expirationTime - asOf).TotalDays / 365.0;
-		if (t <= 0) return brokerIv;
-		try
-		{
-			var iv = OptionMath.ImpliedVol(spot, parsed.Strike, t, OptionMath.RiskFreeRate, mid, parsed.CallPut);
-			if (iv > 0m && iv < 5m) return iv;
-		}
-		catch { }
-		return brokerIv;
-	}
+	public static decimal MarketImpliedIv(string symbol, OptionParsed parsed, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultPct) =>
+		OptionMath.TryMarketImpliedIv(symbol, parsed, spot, asOf, quotes) ?? ResolveIv(symbol, quotes, defaultPct);
 
 	/// <summary>Looks up bid/ask, returning null if any leg lacks a usable two-sided quote.</summary>
 	public static (decimal bid, decimal ask)? TryLiveBidAsk(string symbol, IReadOnlyDictionary<string, OptionContractQuote> quotes)
