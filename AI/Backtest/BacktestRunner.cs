@@ -39,6 +39,7 @@ internal sealed class BacktestRunner
 	private readonly int? _fixedContracts;
 	private readonly string _pricingMode;
 	private readonly int _scanStride;
+	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
 	private readonly HashSet<string> _discoveredOccs = new(StringComparer.OrdinalIgnoreCase);
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
@@ -50,11 +51,12 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
 	{
 		_config = config;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
 		_scanStride = Math.Max(1, scanStride);
+		_dividendsByRoot = dividendsByRoot;
 		_book = book;
 		_positions = positions;
 		_quotes = quotes;
@@ -80,7 +82,7 @@ internal sealed class BacktestRunner
 	{
 		var tickerSet = _config.TickerSet();
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(_config), _config);
-		var openEvaluator = new OpenCandidateEvaluator(_config, _quotes, SuggestionPricing.Mid, _closeCache, backtestMode: true);
+		var openEvaluator = new OpenCandidateEvaluator(_config, _quotes, SuggestionPricing.Mid, _closeCache, backtestMode: true, dividendsByRoot: _dividendsByRoot);
 
 		var equityCurve = new List<(DateTime Date, decimal Equity)>();
 		var startingCash = _book.Cash;

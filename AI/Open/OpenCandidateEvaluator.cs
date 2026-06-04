@@ -23,6 +23,7 @@ internal sealed class OpenCandidateEvaluator
 	private readonly HistoricalPriceCache _priceCache;
 	private readonly bool _backtestMode;
 	private readonly bool _enableChainSnapshot;
+	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
 	private IntradayBarCache? _intradayCache;
 
 	/// <param name="priceCache">Shared close-price cache. Pass the runner-owned instance so the in-memory
@@ -34,7 +35,13 @@ internal sealed class OpenCandidateEvaluator
 	/// snapshot (a once-per-day near-money bid/ask sweep persisted in the derivative registry) to build the
 	/// real strike ladder. Off for the backtest (which sources real strikes from captured bars) and for unit
 	/// tests (so they neither hit the network nor touch the shared registry). Set by the live watch/scan paths.</param>
-	public OpenCandidateEvaluator(AIConfig config, IQuoteSource quotes, string pricingMode = SuggestionPricing.Mid, HistoricalPriceCache? priceCache = null, bool backtestMode = false, bool enableChainSnapshot = false)
+	/// <param name="dividendsByRoot">Backtest-only per-root historical dividend schedules (from
+	/// <see cref="WebullAnalytics.AI.Backtest.HistoricalDividendCache"/>). When supplied, the scorer's
+	/// dividend adjustment uses the TRUE next ex-date as-of each eval date (drawn from this history)
+	/// instead of the event-cache's single stale forward-projected date — so backtest candidate scoring,
+	/// and therefore selection/fills, matches the dividend-aware live path and the quote source. Null in
+	/// live mode (the event-cache's next ex-date IS the real upcoming one there).</param>
+	public OpenCandidateEvaluator(AIConfig config, IQuoteSource quotes, string pricingMode = SuggestionPricing.Mid, HistoricalPriceCache? priceCache = null, bool backtestMode = false, bool enableChainSnapshot = false, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
 	{
 		_config = config;
 		_quotes = quotes;
@@ -42,6 +49,26 @@ internal sealed class OpenCandidateEvaluator
 		_priceCache = priceCache ?? new HistoricalPriceCache();
 		_backtestMode = backtestMode;
 		_enableChainSnapshot = enableChainSnapshot && !backtestMode;
+		_dividendsByRoot = dividendsByRoot;
+	}
+
+	/// <summary>Replaces a ticker's event-cache dividend fields with the TRUE next ex-dividend as-of
+	/// <paramref name="asOf"/>, taken from the supplied historical schedule (<see cref="_dividendsByRoot"/>).
+	/// For the ≤45-DTE structures the opener enumerates, the only ex-date that can fall inside any leg's
+	/// life is the first one strictly after the eval date — so a single corrected (date, amount) reproduces
+	/// the exact dividend the quote source windows per leg, while reusing the existing single-dividend
+	/// scorer plumbing. No-op (returns <paramref name="ev"/> unchanged) when no schedule is supplied for the
+	/// ticker — i.e. always in live mode, and for index roots in backtest. Earnings fields are preserved.</summary>
+	private TickerEvents? ApplyHistoricalDividend(TickerEvents? ev, string ticker, DateTime asOf)
+	{
+		if (_dividendsByRoot == null || !_dividendsByRoot.TryGetValue(ticker, out var schedule) || schedule.Count == 0)
+			return ev;
+		var next = schedule.Where(d => d.ExDate.Date > asOf.Date).OrderBy(d => d.ExDate).FirstOrDefault();
+		DateTime? exDate = next != null ? next.ExDate : null;
+		decimal? amount = next?.Amount;
+		return ev != null
+			? ev with { NextExDividendDate = exDate, DividendAmount = amount }
+			: (exDate != null ? new TickerEvents(ticker.ToUpperInvariant(), null, null, exDate, amount) : null);
 	}
 
 	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation, QuoteOverrides quoteOverrides = default)
@@ -421,7 +448,7 @@ internal sealed class OpenCandidateEvaluator
 			// week wiped every bearish credit). Computed once per ticker; applied per-proposal to credit
 			// structures only.
 			var whipsawFactor = ComputeWhipsawFactor(shortHorizonHv, historicalVolAnnual, cfg.Weights.Whipsaw);
-			var tickerEvents = eventCalendar.Get(tickerGroup.Key);
+			var tickerEvents = ApplyHistoricalDividend(eventCalendar.Get(tickerGroup.Key), tickerGroup.Key, ctx.Now);
 
 			var shortVerticalRejects = debug
 				? new Dictionary<CandidateScorer.ShortVerticalRejectReason, int>()
@@ -635,7 +662,7 @@ internal sealed class OpenCandidateEvaluator
 
 			var spotForDiag = bootstrapSpots.TryGetValue(p.Ticker, out var s) ? s : 0m;
 			trendByTicker.TryGetValue(p.Ticker, out var trend);
-			var pTickerEvents = eventCalendar.Get(p.Ticker);
+			var pTickerEvents = ApplyHistoricalDividend(eventCalendar.Get(p.Ticker), p.Ticker, ctx.Now);
 			var diagnostic = RiskDiagnosticBuilder.Build(
 				legs: diagLegs,
 				spot: spotForDiag,
