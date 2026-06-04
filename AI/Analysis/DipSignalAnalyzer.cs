@@ -12,7 +12,12 @@ internal readonly record struct IntradayBar(DateTime EtStart, decimal Open, deci
 /// RSI is below <see cref="RsiLow"/>, AND the close is below the lower Bollinger band. The band uses an EMA
 /// basis (the indicator's "Basis MA Type" = EMA) with σ around the SMA. MACD/BB/RSI lengths mirror the
 /// indicator defaults. (The symmetric top branch is hist≥0 ∧ RSI&gt;RsiHigh ∧ close&gt;upper band.)</summary>
-internal sealed record DipParams(int RsiPeriod = 14, decimal RsiLow = 30m, int BbPeriod = 20, decimal BbK = 2m, int MacdFast = 12, int MacdSlow = 26, int MacdSignal = 9);
+internal sealed record DipParams(int RsiPeriod = 14, decimal RsiLow = 30m, decimal RsiHigh = 70m, int BbPeriod = 20, decimal BbK = 2m, int MacdFast = 12, int MacdSlow = 26, int MacdSignal = 9);
+
+/// <summary>One dip→top round-trip from <see cref="DipSignalAnalyzer.SimulateSwing"/>. <see cref="Ret"/> is the
+/// realized fraction; <see cref="EodBaselineRet"/> is the same entry held unconditionally to the session close
+/// (the drift baseline). <see cref="ExitedOnTop"/> false = exited at EOD (no top run fired).</summary>
+internal readonly record struct SwingTrade(DateTime EntryEt, decimal EntryPrice, DateTime ExitEt, decimal ExitPrice, bool ExitedOnTop, decimal Ret, decimal EodBaselineRet, int HoldBars);
 
 /// <summary>A fired dip signal and the underlying's forward returns from the entry (next bar's open). Returns
 /// are fractions (0.012 = +1.2%); null when the horizon runs past the session close. Positive = price rose
@@ -111,5 +116,61 @@ internal static class DipSignalAnalyzer
 		var close = bars[entryIdx].Close;
 		for (var j = entryIdx; j < bars.Count && bars[j].Day == day; j++) close = bars[j].Close;
 		return close;
+	}
+
+	/// <summary>Round-trip swing sim. ENTER on the first bar after a dip-signal run clears (wait for the
+	/// selling climax to exhaust — don't catch the knife mid-cluster); EXIT on the first bar after a top-signal
+	/// run clears, else at the session close (EOD fallback). One position at a time; intraday only (every trade
+	/// opens and closes within one session). Each trade also carries the unconditional EOD return for its entry
+	/// (<see cref="SwingTrade.EodBaselineRet"/>) so the caller can test whether the top-exit beats just holding
+	/// to the close. Entry/exit fill at the bar's open.</summary>
+	public static List<SwingTrade> SimulateSwing(IReadOnlyList<IntradayBar> bars, DipParams p)
+	{
+		var trades = new List<SwingTrade>();
+		if (bars.Count < 2) return trades;
+
+		var closes = bars.Select(b => b.Close).ToArray();
+		var rsi = SeriesIndicators.Rsi(closes, p.RsiPeriod);
+		var (lower, _, upper) = SeriesIndicators.Bollinger(closes, p.BbPeriod, p.BbK, emaBasis: true);
+		var (_, _, hist) = SeriesIndicators.Macd(closes, p.MacdFast, p.MacdSlow, p.MacdSignal);
+
+		bool Dip(int i) => rsi[i] is { } r && lower[i] is { } lb && hist[i] is { } h && h < 0m && r < p.RsiLow && closes[i] < lb;
+		bool Top(int i) => rsi[i] is { } r && upper[i] is { } ub && hist[i] is { } h && h >= 0m && r > p.RsiHigh && closes[i] > ub;
+
+		var i = 1;
+		while (i < bars.Count)
+		{
+			// ENTER = first non-dip bar immediately after a dip run, same session.
+			if (bars[i].Day == bars[i - 1].Day && !Dip(i) && Dip(i - 1) && bars[i].Open > 0m)
+			{
+				var day = bars[i].Day;
+				var entry = bars[i].Open;
+
+				// Last bar of this session (for EOD fallback + baseline).
+				var lastOfDay = i;
+				while (lastOfDay + 1 < bars.Count && bars[lastOfDay + 1].Day == day) lastOfDay++;
+
+				// EXIT = first non-top bar after a top run, same session; else EOD close.
+				var exitIdx = -1;
+				for (var j = i + 1; j <= lastOfDay; j++)
+					if (!Top(j) && Top(j - 1)) { exitIdx = j; break; }
+
+				var onTop = exitIdx >= 0;
+				var fillIdx = onTop ? exitIdx : lastOfDay;
+				var exitPrice = onTop ? bars[fillIdx].Open : bars[fillIdx].Close;
+
+				trades.Add(new SwingTrade(
+					EntryEt: bars[i].EtStart, EntryPrice: entry,
+					ExitEt: bars[fillIdx].EtStart, ExitPrice: exitPrice, ExitedOnTop: onTop,
+					Ret: (exitPrice - entry) / entry,
+					EodBaselineRet: (bars[lastOfDay].Close - entry) / entry,
+					HoldBars: fillIdx - i));
+
+				i = fillIdx + 1; // one-at-a-time: resume after the exit bar
+				continue;
+			}
+			i++;
+		}
+		return trades;
 	}
 }
