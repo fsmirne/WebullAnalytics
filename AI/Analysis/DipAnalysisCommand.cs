@@ -356,10 +356,10 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		}
 	}
 
-	private static Dictionary<DateTime, (decimal Open, decimal Close)> LoadVix1dOhlc()
+	private static Dictionary<DateTime, (decimal Open, decimal Close)> LoadVixOhlc(string file)
 	{
 		var map = new Dictionary<DateTime, (decimal, decimal)>();
-		var path = Program.ResolvePath("data/history/VIX1D.csv");
+		var path = Program.ResolvePath($"data/history/{file}");
 		if (!File.Exists(path)) return map;
 		foreach (var line in File.ReadLines(path))
 		{
@@ -379,8 +379,11 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 	/// bucket so a "good" VIX bin still has to beat just-hold-to-close, not merely look positive.</summary>
 	private static void RenderSwingByVix(List<SwingTrade> trades)
 	{
-		var vix = LoadVix1dOhlc();
-		if (vix.Count == 0) { AnsiConsole.MarkupLine("[yellow]No VIX1D data to condition on.[/]"); return; }
+		// Standard VIX (VIX.csv): VIX1D's daily OPEN field is broken (prints ~7-10 regardless → fake gap-down
+		// every day), so any open-gap conditioning MUST use standard VIX, whose opens are sane. Level (prior
+		// close) is fine on either; we use standard VIX throughout for consistency with what the chart shows.
+		var vix = LoadVixOhlc("VIX.csv");
+		if (vix.Count == 0) { AnsiConsole.MarkupLine("[yellow]No VIX data to condition on.[/]"); return; }
 		var dates = vix.Keys.OrderBy(d => d).ToList();
 
 		decimal? PriorClose(DateTime d)
@@ -403,8 +406,8 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		decimal q1 = sorted[sorted.Count / 3], q2 = sorted[2 * sorted.Count / 3];
 		string Band(decimal v) => v <= q1 ? "low" : v <= q2 ? "mid" : "high";
 
-		var t1 = new Table().Border(TableBorder.Rounded).Title($"[bold]Swing by VIX1D prior-close level (terciles <={q1:F1} / <={q2:F1})[/]");
-		foreach (var c in new[] { "VIX1D band", "N", "Swing win%", "Swing avg%", "EOD-base avg%", "edge/trade" }) t1.AddColumn(c);
+		var t1 = new Table().Border(TableBorder.Rounded).Title($"[bold]Swing by VIX prior-close level (terciles <={q1:F1} / <={q2:F1})[/]");
+		foreach (var c in new[] { "VIX band", "N", "Swing win%", "Swing avg%", "EOD-base avg%", "edge/trade" }) t1.AddColumn(c);
 		foreach (var g in feats.GroupBy(f => Band(f.PriorClose!.Value)).OrderBy(g => g.Key == "low" ? 0 : g.Key == "mid" ? 1 : 2))
 		{
 			var rs = g.Select(x => (decimal?)x.Trade.Ret).ToList();
@@ -413,15 +416,24 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		}
 		AnsiConsole.Write(t1);
 
-		var t2 = new Table().Border(TableBorder.Rounded).Title("[bold]Swing by VIX1D open-gap (open - prior close)[/]");
-		foreach (var c in new[] { "VIX1D gap", "N", "Swing win%", "Swing avg%", "EOD-base avg%" }) t2.AddColumn(c);
-		foreach (var g in feats.Where(f => f.Gap.HasValue).GroupBy(f => f.Gap!.Value > 0m ? "gap up" : "gap down/flat").OrderBy(g => g.Key))
+		// Gap MAGNITUDE terciles (open − prior close). Gaps are mostly positive, so the sign alone doesn't
+		// separate days — the question is whether a BIG VIX gap-up at the open predicts a stronger dip→close move.
+		var gapFeats = feats.Where(f => f.Gap.HasValue).ToList();
+		if (gapFeats.Count >= 3)
 		{
-			var rs = g.Select(x => (decimal?)x.Trade.Ret).ToList();
-			var bs = g.Select(x => (decimal?)x.Trade.EodBaselineRet).ToList();
-			t2.AddRow(g.Key, g.Count().ToString(), Pct(WinRate(rs)), Signed(Avg(rs)), Signed(Avg(bs)));
+			var gs = gapFeats.Select(f => f.Gap!.Value).OrderBy(x => x).ToList();
+			decimal g1 = gs[gs.Count / 3], g2 = gs[2 * gs.Count / 3];
+			string GapBand(decimal v) => v <= g1 ? $"small/down (<={g1:+0.00;-0.00})" : v <= g2 ? "mid" : $"big up (>{g2:+0.00;-0.00})";
+			var t2 = new Table().Border(TableBorder.Rounded).Title("[bold]Swing by VIX open-gap magnitude (open - prior close, terciles)[/]");
+			foreach (var c in new[] { "VIX gap", "N", "Swing win%", "Swing avg%", "EOD-base avg%", "edge/trade" }) t2.AddColumn(c);
+			foreach (var g in gapFeats.GroupBy(f => GapBand(f.Gap!.Value)).OrderBy(g => g.First().Gap!.Value))
+			{
+				var rs = g.Select(x => (decimal?)x.Trade.Ret).ToList();
+				var bs = g.Select(x => (decimal?)x.Trade.EodBaselineRet).ToList();
+				t2.AddRow(g.Key, g.Count().ToString(), Pct(WinRate(rs)), Signed(Avg(rs)), Signed(Avg(bs)), Signed(Avg(rs) - Avg(bs)));
+			}
+			AnsiConsole.Write(t2);
 		}
-		AnsiConsole.Write(t2);
 	}
 
 	private static decimal Median(IEnumerable<decimal?> r)
