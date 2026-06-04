@@ -270,46 +270,90 @@ internal static class YahooCalendarClient
 	/// amount is the most recent actual dividend.</summary>
 	internal static (DateTime ExDate, decimal Amount)? ParseNextDividendFromChart(string json, DateTime asOf)
 	{
-		if (string.IsNullOrWhiteSpace(json)) return null;
+		var history = ParseDividendHistory(json);
+		if (history.Count == 0) return null;
+
+		var lastEx = history[^1].Date;
+		var amount = history[^1].Amount;
+
+		// Median spacing between consecutive ex-dates (days); default to a quarter when only one is known.
+		var interval = 91;
+		if (history.Count >= 2)
+		{
+			var gaps = new List<int>();
+			for (int i = 1; i < history.Count; i++) gaps.Add((int)(history[i].Date - history[i - 1].Date).TotalDays);
+			gaps.Sort();
+			interval = Math.Max(1, gaps[gaps.Count / 2]);
+		}
+
+		// Project forward to the first ex-date on/after asOf. Guard bounds the loop if interval is tiny.
+		var next = lastEx;
+		for (var guard = 0; next < asOf.Date && guard < 40; guard++) next = next.AddDays(interval);
+		return (next, amount);
+	}
+
+	/// <summary>Parses a Yahoo chart <c>events=div</c> body into the full historical schedule of ACTUAL
+	/// (ex-date, amount) payments, oldest-first. Unlike <see cref="ParseNextDividendFromChart"/> — which
+	/// keeps only the most recent payment and projects the NEXT date forward — this returns ground truth:
+	/// every dividend that actually went ex within the chart's range. The backtest consumes this so that
+	/// historical option pricing sees the real ex-date and cash amount that fell inside a leg's life,
+	/// matching what the live dividend-aware Black-Scholes computes. Empty for non-payers / malformed /
+	/// missing payloads (→ caller applies no adjustment, the correct behaviour for index roots).</summary>
+	internal static IReadOnlyList<DividendEvent> ParseDividendHistoryFromChart(string json) =>
+		ParseDividendHistory(json).Select(h => new DividendEvent(h.Date, h.Amount)).ToList();
+
+	/// <summary>Shared extraction of the chart endpoint's <c>events.dividends</c> map into a date-sorted
+	/// list. Never throws — malformed JSON or a non-payer yields an empty list.</summary>
+	private static List<(DateTime Date, decimal Amount)> ParseDividendHistory(string json)
+	{
+		var history = new List<(DateTime Date, decimal Amount)>();
+		if (string.IsNullOrWhiteSpace(json)) return history;
 		try
 		{
 			using var doc = JsonDocument.Parse(json);
-			if (!doc.RootElement.TryGetProperty("chart", out var chart)) return null;
-			if (!chart.TryGetProperty("result", out var arr) || arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0) return null;
-			if (!arr[0].TryGetProperty("events", out var events) || !events.TryGetProperty("dividends", out var divs) || divs.ValueKind != JsonValueKind.Object) return null;
+			if (!doc.RootElement.TryGetProperty("chart", out var chart)) return history;
+			if (!chart.TryGetProperty("result", out var arr) || arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0) return history;
+			if (!arr[0].TryGetProperty("events", out var events) || !events.TryGetProperty("dividends", out var divs) || divs.ValueKind != JsonValueKind.Object) return history;
 
-			var history = new List<(DateTime Date, decimal Amount)>();
 			foreach (var prop in divs.EnumerateObject())
 			{
 				var d = prop.Value;
 				if (!d.TryGetProperty("date", out var dateEl) || dateEl.ValueKind != JsonValueKind.Number) continue;
 				if (!d.TryGetProperty("amount", out var amtEl) || amtEl.ValueKind != JsonValueKind.Number) continue;
-				history.Add((UnixToCalendarDate(dateEl.GetInt64()), amtEl.GetDecimal()));
+				var amt = amtEl.GetDecimal();
+				if (amt <= 0m) continue;
+				history.Add((UnixToCalendarDate(dateEl.GetInt64()), amt));
 			}
-			if (history.Count == 0) return null;
 			history.Sort((a, b) => a.Date.CompareTo(b.Date));
-
-			var lastEx = history[^1].Date;
-			var amount = history[^1].Amount;
-
-			// Median spacing between consecutive ex-dates (days); default to a quarter when only one is known.
-			var interval = 91;
-			if (history.Count >= 2)
-			{
-				var gaps = new List<int>();
-				for (int i = 1; i < history.Count; i++) gaps.Add((int)(history[i].Date - history[i - 1].Date).TotalDays);
-				gaps.Sort();
-				interval = Math.Max(1, gaps[gaps.Count / 2]);
-			}
-
-			// Project forward to the first ex-date on/after asOf. Guard bounds the loop if interval is tiny.
-			var next = lastEx;
-			for (var guard = 0; next < asOf.Date && guard < 40; guard++) next = next.AddDays(interval);
-			return (next, amount);
 		}
 		catch (JsonException)
 		{
-			return null;
+			return new List<(DateTime, decimal)>();
+		}
+		return history;
+	}
+
+	/// <summary>Fetches the full historical dividend schedule for <paramref name="ticker"/> from the
+	/// crumb-free chart endpoint (<c>events=div</c>) over <paramref name="range"/> (e.g. <c>5y</c>).
+	/// Best-effort: returns an empty list on any network/parse failure or for a non-payer. Constructs its
+	/// own short-lived <see cref="HttpClient"/> — this is a one-shot per-ticker call used by
+	/// <c>wa ai history</c>, not the batched event fetch.</summary>
+	internal static async Task<IReadOnlyList<DividendEvent>> FetchDividendHistoryAsync(string ticker, string range, CancellationToken cancellation)
+	{
+		try
+		{
+			using var handler = new HttpClientHandler { AutomaticDecompression = DecompressionMethods.All };
+			using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
+			client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebullAnalytics/1.0");
+			client.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/plain, */*");
+			var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(ticker)}?range={Uri.EscapeDataString(range)}&interval=1d&events=div";
+			using var resp = await client.GetAsync(url, cancellation);
+			if (!resp.IsSuccessStatusCode) return Array.Empty<DividendEvent>();
+			return ParseDividendHistoryFromChart(await resp.Content.ReadAsStringAsync(cancellation));
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			return Array.Empty<DividendEvent>();
 		}
 	}
 
