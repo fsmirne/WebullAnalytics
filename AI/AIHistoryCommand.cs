@@ -144,6 +144,13 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// un-dividend-adjusted. Riding along here keeps the cache warm for every ticker the user touches.
 		await RefreshEventCalendarAsync(ticker, asOf, cancellation);
 
+		// Full historical dividend schedule (data/dividends/<TICKER>.csv) for the backtest's dividend-aware
+		// pricing. Unlike the event-cache above (which holds only the single NEXT ex-dividend), this banks
+		// every ACTUAL past payment so backtested option pricing across the window sees the real ex-date and
+		// amount that fell inside each leg's life — the same discrete dividend the live Black-Scholes path
+		// subtracts. Non-payers / index roots (SPX/SPXW/XSP) simply write nothing → no adjustment.
+		await RefreshDividendHistoryAsync(ticker, cancellation);
+
 		// Register every currently-live contract's Webull derivativeId. Ids are perishable (gone from the
 		// chain at expiry) and are the only key back to a contract's minute/IV history, so we bank them on
 		// every history run; run during market hours to catch same-day 0DTE. `wa options discover` then
@@ -277,6 +284,31 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		catch (Exception ex)
 		{
 			AnsiConsole.MarkupLine($"  events: [yellow]skipped[/] ({Markup.Escape(ex.Message)})");
+		}
+	}
+
+	/// <summary>Refreshes <c>data/dividends/&lt;TICKER&gt;.csv</c> (full historical ex-date + amount schedule)
+	/// from Yahoo's crumb-free chart endpoint. Best-effort — a failure logs a warning and never fails the
+	/// command. A non-payer (or an index root that isn't a Yahoo dividend ticker) yields an empty schedule,
+	/// which is the correct "no adjustment" signal for the backtest.</summary>
+	private static async Task RefreshDividendHistoryAsync(string ticker, CancellationToken cancellation)
+	{
+		try
+		{
+			var cache = new HistoricalDividendCache();
+			var divs = await cache.GetAsync(ticker, cancellation);
+			if (divs.Count == 0)
+			{
+				AnsiConsole.MarkupLine($"  dividends: [yellow]none[/] (no payments in Yahoo's history for {Markup.Escape(ticker)} — pricing stays q=0)");
+				return;
+			}
+			var last = divs[^1];
+			AnsiConsole.MarkupLine($"  dividends: [green]ok[/] ({divs.Count} payment(s) cached; latest ex {last.ExDate:yyyy-MM-dd} ${last.Amount.ToString("0.####", CultureInfo.InvariantCulture)})");
+		}
+		catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { throw; }
+		catch (Exception ex)
+		{
+			AnsiConsole.MarkupLine($"  dividends: [yellow]skipped[/] ({Markup.Escape(ex.Message)})");
 		}
 	}
 
