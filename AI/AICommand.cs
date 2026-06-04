@@ -397,7 +397,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
 			if (openerExecutor != null)
-				await openerExecutor.HandleAsync(openResults, now, cancellation);
+				await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation);
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
@@ -624,7 +624,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// rule engine had nothing to react to. Opener executor still fires so the user can validate
 			// open-order placement off-hours against a sandbox account.
 			if (openerExecutor != null)
-				openerOrdersThisRun = await openerExecutor.HandleAsync(openResults, asOf, cancellation);
+				openerOrdersThisRun = await openerExecutor.HandleAsync(openResults, openPositions, asOf, cancellation);
 		}
 
 		var execSuffix = openerExecutor != null ? $" | opener auto-execute: {openerOrdersThisRun} order(s) acted on" : "";
