@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using WebullAnalytics.Pricing;
@@ -87,6 +89,22 @@ internal sealed class DipAnalysisSettings : CommandSettings
 	[CommandOption("--vix-gap-up")]
 	[Description("With --exit-on-top: keep only entries on days where standard VIX gapped UP at the open (open > prior close). Filters the round-trip set to the VIX-gap-up regime. Uses data/history/VIX.csv.")]
 	public bool VixGapUp { get; set; }
+
+	[CommandOption("--real-chain")]
+	[Description("With --exit-on-top: price each round-trip off the REAL scraped option chain (data/chain-snapshots/<TICKER>/<date>.jsonl) on days a chain exists. 0DTE, strikes by --delta, bid/ask crossed both ways. Skips days with no chain. SPXW is cash-settled (cleaner for the naked-call lottery).")]
+	public bool RealChain { get; set; }
+
+	[CommandOption("--delta <D>")]
+	[Description("Target |delta| for real-chain strike selection (long call / short put), BS-computed from each contract's IV. Default 0.25.")]
+	public decimal Delta { get; set; } = 0.25m;
+
+	[CommandOption("--width <W>")]
+	[Description("Spread width in strike dollars for the call-vertical / put-credit protective leg (snapped to the nearest listed strike). Default 2.")]
+	public decimal Width { get; set; } = 2m;
+
+	[CommandOption("--legs <LIST>")]
+	[Description("Comma-separated real-chain structures to price: naked-call, call-vert, put-credit. Default all three.")]
+	public string Legs { get; set; } = "naked-call,call-vert,put-credit";
 }
 
 /// <summary>`ai dip` — historical study of the strict MACD+RSI+Bollinger "buy the dip" signal on 5-minute RTH
@@ -121,6 +139,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 			if (settings.VixGapUp) swings = FilterVixGapUp(swings);
 			RenderSwing(settings, since, until, swings);
 			if (settings.ByVix) RenderSwingByVix(swings);
+			if (settings.RealChain) RenderRealChain(settings, swings);
 			return Task.FromResult(0);
 		}
 
@@ -466,6 +485,153 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		var v = r.Where(x => x.HasValue).Select(x => x!.Value).OrderBy(x => x).ToList();
 		if (v.Count == 0) return 0m;
 		return v.Count % 2 == 1 ? v[v.Count / 2] : (v[v.Count / 2 - 1] + v[v.Count / 2]) / 2m;
+	}
+
+	// ---- Real-chain spread pricing (off scraped data/chain-snapshots/<TICKER>/<date>.jsonl) ----
+
+	private sealed record ChainSnap(DateTime Et, decimal Spot, Dictionary<string, (decimal? Bid, decimal? Ask, decimal? Iv)> Q);
+
+	private static readonly Regex OccRe = new(@"^([A-Z]+)(\d{6})([CP])(\d{8})$", RegexOptions.Compiled);
+
+	/// <summary>Prices each swing round-trip off the real scraped chain when one exists for the entry day.
+	/// 0DTE; long-call/short-put strikes picked by BS delta (from each contract's IV); spread protective leg
+	/// snapped to the next listed strike past --width. Entry crosses (buy ask / sell bid), exit crosses back.
+	/// Days without a chain are skipped. n is tiny until the daily scrape accumulates history.</summary>
+	private static void RenderRealChain(DipAnalysisSettings s, List<SwingTrade> trades)
+	{
+		var legs = new HashSet<string>(s.Legs.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(x => x.ToLowerInvariant()));
+		var ticker = s.Ticker.ToUpperInvariant();
+		var rows = new List<(DateTime Day, decimal Move, decimal? Naked, decimal? Vert, decimal? Put, string Note)>();
+		int priced = 0, skipped = 0;
+
+		static decimal? Px(ChainSnap snap, string sym, bool buy) => snap.Q.TryGetValue(sym, out var q) ? (buy ? q.Ask : q.Bid) : null;
+
+		foreach (var t in trades)
+		{
+			var day = t.EntryEt.Date;
+			var path = Program.ResolvePath($"data/chain-snapshots/{ticker}/{day:yyyy-MM-dd}.jsonl");
+			if (!File.Exists(path)) { skipped++; continue; }
+			var (eS, xS) = ReadChainSnaps(path, t.EntryEt, t.ExitEt);
+			if (eS == null || xS == null) { skipped++; continue; }
+
+			var tYr = Math.Max(1.0 / 24 / 365, (new DateTime(day.Year, day.Month, day.Day, 16, 0, 0) - eS.Et).TotalHours / 24 / 365);
+			var calls = new List<(decimal K, double D, string Sym)>();
+			var puts = new List<(decimal K, double D, string Sym)>();
+			foreach (var kv in eS.Q)
+			{
+				var occ = ParseOcc(kv.Key);
+				if (occ is null || occ.Value.Exp.Date != day) continue;           // 0DTE only
+				if (kv.Value.Iv is not decimal iv || iv <= 0m) continue;
+				var dl = OptDelta(occ.Value.Cp, (double)eS.Spot, (double)occ.Value.Strike, tYr, (double)iv);
+				if (dl is null) continue;
+				if (occ.Value.Cp == 'C') calls.Add((occ.Value.Strike, dl.Value, kv.Key));
+				else puts.Add((occ.Value.Strike, dl.Value, kv.Key));
+			}
+			if (calls.Count == 0) { skipped++; continue; }
+
+			var move = (xS.Spot - eS.Spot) / eS.Spot;
+			var lc = calls.OrderBy(c => Math.Abs(c.D - (double)s.Delta)).First();
+			decimal? naked = null, vert = null, put = null;
+
+			if (legs.Contains("naked-call"))
+			{
+				var inP = Px(eS, lc.Sym, true); var outP = Px(xS, lc.Sym, false);
+				if (inP.HasValue && outP.HasValue) naked = (outP.Value - inP.Value) * 100m;
+			}
+			if (legs.Contains("call-vert"))
+			{
+				var sc = calls.Where(c => c.K > lc.K).OrderBy(c => Math.Abs(c.K - (lc.K + s.Width))).FirstOrDefault();
+				if (sc.Sym != null)
+				{
+					var ein = Px(eS, lc.Sym, true) - Px(eS, sc.Sym, false);
+					var exo = Px(xS, lc.Sym, false) - Px(xS, sc.Sym, true);
+					if (ein.HasValue && exo.HasValue) vert = (exo.Value - ein.Value) * 100m;
+				}
+			}
+			if (legs.Contains("put-credit") && puts.Count > 0)
+			{
+				var sp = puts.OrderBy(c => Math.Abs(Math.Abs(c.D) - (double)s.Delta)).First();
+				var lp = puts.Where(c => c.K < sp.K).OrderBy(c => Math.Abs(c.K - (sp.K - s.Width))).FirstOrDefault();
+				if (lp.Sym != null)
+				{
+					var cred = Px(eS, sp.Sym, false) - Px(eS, lp.Sym, true);
+					var pay = Px(xS, sp.Sym, true) - Px(xS, lp.Sym, false);
+					if (cred.HasValue && pay.HasValue) put = (cred.Value - pay.Value) * 100m;
+				}
+			}
+			rows.Add((day, move, naked, vert, put, $"{eS.Et:HH:mm}->{xS.Et:HH:mm} {lc.K:F0}C Δ{lc.D:F2}"));
+			priced++;
+		}
+
+		AnsiConsole.MarkupLine($"\n[bold]{ticker} real-chain P&L[/]  Δ{s.Delta} width ${s.Width} 0DTE — priced {priced}, skipped {skipped} (no chain)");
+		if (priced == 0) { AnsiConsole.MarkupLine("[yellow]No scraped chains matched these round-trips. Run the scraper to accumulate days.[/]"); return; }
+		var tbl = new Table().Border(TableBorder.Rounded);
+		foreach (var c in new[] { "Day", "Move%", "Naked $", "Vert $", "PutCr $", "entry->exit" }) tbl.AddColumn(c);
+		static string D0(decimal? v) => v.HasValue ? v.Value.ToString("+0;-0", CultureInfo.InvariantCulture) : "—";
+		foreach (var r in rows.OrderBy(r => r.Day)) tbl.AddRow($"{r.Day:MM-dd}", Signed(r.Move), D0(r.Naked), D0(r.Vert), D0(r.Put), r.Note);
+		AnsiConsole.Write(tbl);
+
+		void Agg(string name, IEnumerable<decimal?> v)
+		{
+			var l = v.Where(x => x.HasValue).Select(x => x!.Value).ToList();
+			if (l.Count == 0) return;
+			AnsiConsole.MarkupLine($"[dim]{name}: N={l.Count}  total ${l.Sum():+0;-0}  avg ${l.Average():+0;-0}  win {100.0 * l.Count(x => x > 0m) / l.Count:F0}%[/]");
+		}
+		Agg("naked-call", rows.Select(r => r.Naked));
+		Agg("call-vert", rows.Select(r => r.Vert));
+		Agg("put-credit", rows.Select(r => r.Put));
+	}
+
+	private static (ChainSnap? Entry, ChainSnap? Exit) ReadChainSnaps(string path, DateTime entryEt, DateTime exitEt)
+	{
+		string? bestE = null, bestX = null; long dE = long.MaxValue, dX = long.MaxValue;
+		foreach (var line in File.ReadLines(path))
+		{
+			var i = line.IndexOf("\"tsEt\":\"", StringComparison.Ordinal);
+			if (i < 0 || i + 8 + 19 > line.Length) continue;
+			if (!DateTime.TryParseExact(line.Substring(i + 8, 19), "yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var t)) continue;
+			var de = Math.Abs((t - entryEt).Ticks); if (de < dE) { dE = de; bestE = line; }
+			var dx = Math.Abs((t - exitEt).Ticks); if (dx < dX) { dX = dx; bestX = line; }
+		}
+		return (bestE != null ? ParseSnap(bestE) : null, bestX != null ? ParseSnap(bestX) : null);
+	}
+
+	private static ChainSnap ParseSnap(string line)
+	{
+		using var doc = JsonDocument.Parse(line);
+		var root = doc.RootElement;
+		var et = DateTime.ParseExact(root.GetProperty("tsEt").GetString()![..19], "yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture);
+		var spot = root.GetProperty("underlyingPrice").GetDecimal();
+		var q = new Dictionary<string, (decimal?, decimal?, decimal?)>(StringComparer.Ordinal);
+		foreach (var o in root.GetProperty("options").EnumerateArray())
+		{
+			static decimal? Num(JsonElement e, string p) => e.TryGetProperty(p, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDecimal() : null;
+			q[o.GetProperty("symbol").GetString()!] = (Num(o, "bid"), Num(o, "ask"), Num(o, "iv"));
+		}
+		return new ChainSnap(et, spot, q);
+	}
+
+	private static (string Root, DateTime Exp, char Cp, decimal Strike)? ParseOcc(string s)
+	{
+		var m = OccRe.Match(s);
+		if (!m.Success || !DateTime.TryParseExact(m.Groups[2].Value, "yyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var exp)) return null;
+		return (m.Groups[1].Value, exp, m.Groups[3].Value[0], int.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture) / 1000m);
+	}
+
+	private static double NormCdf(double x)
+	{
+		var t = 1 / (1 + 0.2316419 * Math.Abs(x));
+		var d = 0.3989423 * Math.Exp(-x * x / 2);
+		var p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+		return x > 0 ? 1 - p : p;
+	}
+
+	private static double? OptDelta(char cp, double s, double k, double tYr, double iv)
+	{
+		if (iv <= 0 || tYr <= 0 || s <= 0 || k <= 0) return null;
+		var d1 = (Math.Log(s / k) + (0.036 + iv * iv / 2) * tYr) / (iv * Math.Sqrt(tYr));
+		var cd = NormCdf(d1);
+		return cp == 'C' ? cd : cd - 1;
 	}
 
 	private static double WinRate(IEnumerable<decimal?> r) { var v = r.Where(x => x.HasValue).Select(x => x!.Value).ToList(); return v.Count == 0 ? 0 : (double)v.Count(x => x > 0m) / v.Count; }
