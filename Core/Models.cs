@@ -243,7 +243,8 @@ public record AnalysisOptions(
 	bool Theoretical = false,
 	IReadOnlyDictionary<string, List<decimal>>? ExtraLevels = null,
 	IReadOnlyDictionary<string, decimal>? IvOverrides = null,
-	IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? Dividends = null
+	IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? Dividends = null,
+	IReadOnlyDictionary<string, decimal>? CalibratedIv = null
 );
 
 public record BreakEvenResult(

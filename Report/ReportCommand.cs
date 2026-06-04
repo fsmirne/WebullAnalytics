@@ -78,6 +78,11 @@ class ReportSettings : CommandSettings
 	[DefaultValue(false)]
 	public bool Theoretical { get; set; }
 
+	[Description("Back-solve each leg's IV from its live bid/ask mid so the grid's today column reproduces market mid and future columns decay on the mid-consistent surface (instead of Webull's reported IV)")]
+	[CommandOption("--calibrated")]
+	[DefaultValue(false)]
+	public bool Calibrated { get; set; }
+
 	[Description("Additional reference price levels (support/resistance, targets) to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)")]
 	[CommandOption("--levels")]
 	public string? Levels { get; set; }
@@ -110,6 +115,7 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("grid") && cfg.TryGetString("grid", out var grid)) Grid = grid;
 		if (!Program.HasCliOption("spot") && cfg.TryGetString("spot", out var cup)) Spot = cup;
 		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
+		if (!Program.HasCliOption("calibrated") && cfg.TryGetBool("calibrated", out var calibrated)) Calibrated = calibrated;
 		if (!Program.HasCliOption("levels") && cfg.TryGetString("levels", out var levels)) Levels = levels;
 		if (!Program.HasCliOption("tickers") && cfg.TryGetString("tickers", out var tickers)) Tickers = tickers;
 	}
@@ -337,7 +343,15 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				ivOverrides = parsed;
 		}
 
-		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends);
+		IReadOnlyDictionary<string, decimal>? calibratedIv = null;
+		if (settings.Calibrated && optionQuotesBySymbol != null && underlyingPrices != null)
+		{
+			calibratedIv = BuildCalibratedIv(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, ivOverrides, dividends);
+			if (calibratedIv != null)
+				Console.WriteLine($"Calibration: solved mid-implied IV for {calibratedIv.Count} contract(s); future grid values anchored to the live mid surface.");
+		}
+
+		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends, calibratedIv);
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
 		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments, singleLegStandalones);
@@ -412,6 +426,39 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				Console.WriteLine($"Warning: Ignoring invalid underlying price override '{pair}'. Expected format: TICKER:PRICE");
 		}
 		return result;
+	}
+
+	/// <summary>
+	/// Back-solves a per-contract IV from each leg's live bid/ask mid so the time-decay grid prices on a
+	/// mid-consistent vol surface instead of the broker's reported IV. Calibration solves on the
+	/// dividend-adjusted spot at today's open (matching <see cref="OptionMath.LegContractValueWithBs"/>), so
+	/// the dividend is not double-counted. Legs already pinned by a user --iv override are skipped (the
+	/// override wins regardless), as are legs whose mid cannot be inverted (no two-sided quote, mid ≤
+	/// intrinsic, expired, or non-convergent) — those fall through to the broker IV unchanged.
+	/// </summary>
+	private static IReadOnlyDictionary<string, decimal>? BuildCalibratedIv(IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> underlyingPrices, IReadOnlyDictionary<string, decimal>? spotOverrides, IReadOnlyDictionary<string, decimal>? ivOverrides, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends)
+	{
+		var asOf = EvaluationDate.Today + OptionMath.MarketOpen; // matches the grid's today column (date + market open)
+		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		foreach (var symbol in quotes.Keys)
+		{
+			if (ivOverrides != null && ivOverrides.ContainsKey(symbol)) continue;
+			var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
+			if (parsed == null) continue;
+
+			decimal spot;
+			if (spotOverrides != null && spotOverrides.TryGetValue(parsed.Root, out var ov)) spot = ov;
+			else if (!underlyingPrices.TryGetValue(parsed.Root, out spot)) continue;
+
+			IReadOnlyList<DividendEvent>? divs = null;
+			dividends?.TryGetValue(parsed.Root, out divs);
+			var expirationTime = parsed.ExpiryDate.Date + OptionMath.MarketClose;
+			var adjustedSpot = OptionMath.DividendAdjustedSpot(spot, divs, asOf, expirationTime, OptionMath.RiskFreeRate);
+
+			var iv = OptionMath.TryMarketImpliedIv(symbol, parsed, adjustedSpot, asOf, quotes);
+			if (iv.HasValue) result[symbol] = iv.Value;
+		}
+		return result.Count > 0 ? result : null;
 	}
 
 	internal static Dictionary<string, decimal> ParseIvOverrides(string input)

@@ -157,8 +157,37 @@ internal static class OptionMath
 	{
 		if (opts.IvOverrides != null && opts.IvOverrides.TryGetValue(symbol, out var perLegIv))
 			return perLegIv;
+		// Calibrated IV (back-solved from the leg's live mid) takes precedence over the broker's reported
+		// IV so the today column reproduces market mid and future columns decay on the same, mid-consistent
+		// surface. A user --iv override still wins; legs that couldn't be calibrated fall through to broker IV.
+		if (opts.CalibratedIv != null && opts.CalibratedIv.TryGetValue(symbol, out var calibrated))
+			return calibrated;
 		if (opts.OptionQuotes != null && opts.OptionQuotes.TryGetValue(symbol, out var quote) && quote.ImpliedVolatility.HasValue && quote.ImpliedVolatility.Value > 0)
 			return quote.ImpliedVolatility.Value;
+		return null;
+	}
+
+	/// <summary>Back-solves the IV that reproduces a leg's market mid `(bid + ask) / 2` at the given
+	/// <paramref name="spot"/> (pass the dividend-adjusted spot to keep calibration consistent with how
+	/// <see cref="LegContractValueWithBs"/> prices and avoid double-counting the dividend). Returns null —
+	/// rather than a fallback IV — when the leg has no two-sided quote, mid ≤ intrinsic, the option has
+	/// expired, or the solver fails to converge, so callers can cleanly fall back to broker IV / intrinsic.</summary>
+	internal static decimal? TryMarketImpliedIv(string symbol, OptionParsed parsed, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		if (!quotes.TryGetValue(symbol, out var q)) return null;
+		if (!q.Bid.HasValue || !q.Ask.HasValue) return null;
+		if (q.Bid.Value < 0m || q.Ask.Value <= 0m) return null;
+		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+		if (mid <= 0m) return null;
+		if (mid <= Intrinsic(spot, parsed.Strike, parsed.CallPut)) return null;
+		var t = (parsed.ExpiryDate.Date + MarketClose - asOf).TotalDays / 365.0;
+		if (t <= 0) return null;
+		try
+		{
+			var iv = ImpliedVol(spot, parsed.Strike, t, RiskFreeRate, mid, parsed.CallPut);
+			if (iv > 0m && iv < 5m) return iv;
+		}
+		catch { }
 		return null;
 	}
 
