@@ -258,6 +258,18 @@ internal sealed class ManagementAutoExecutor
 			})
 			.ToList();
 
+		// Broker-truth dedup: if the same closing combo is already working (or filled today) at the
+		// broker, skip — don't stack a second close. The in-memory _firedTranches bookkeeping can't see
+		// orders placed before a restart or by a concurrent watch/scan process; this leg-set match (the
+		// same mechanism the leg-in path uses) covers the "limit placed but unfilled, then relaunched"
+		// case. Return false so we DON'T mark the tranche fired: broker truth keeps gating each tick while
+		// the order rests, and we legitimately re-fire only if it's canceled (fingerprint disappears).
+		if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(legSpecs.Select(l => (l.Symbol, l.Action))))
+		{
+			AnsiConsole.MarkupLine($"[yellow]auto-execute skipped (broker pending):[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(position.Key)} close — matching order already at broker.");
+			return false;
+		}
+
 		// Compute net mid for the closing combo. When we close a long leg we sell at mid (receive),
 		// when we close a short leg we buy at mid (pay). Net = sum of leg mids signed by the close direction.
 		decimal netMid = 0m;
