@@ -81,8 +81,12 @@ internal sealed class DipAnalysisSettings : CommandSettings
 	public decimal RsiHigh { get; set; } = 70m;
 
 	[CommandOption("--by-vix")]
-	[Description("With --exit-on-top: bucket the round-trips by VIX1D features known at the open (prior-day close level in terciles, and open-gap sign) to test whether the edge is VIX-conditioned. Uses data/history/VIX1D.csv.")]
+	[Description("With --exit-on-top: bucket the round-trips by standard-VIX features known at the open (prior-close level terciles, open-gap magnitude terciles). Uses data/history/VIX.csv.")]
 	public bool ByVix { get; set; }
+
+	[CommandOption("--vix-gap-up")]
+	[Description("With --exit-on-top: keep only entries on days where standard VIX gapped UP at the open (open > prior close). Filters the round-trip set to the VIX-gap-up regime. Uses data/history/VIX.csv.")]
+	public bool VixGapUp { get; set; }
 }
 
 /// <summary>`ai dip` — historical study of the strict MACD+RSI+Bollinger "buy the dip" signal on 5-minute RTH
@@ -114,6 +118,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		if (settings.ExitOnTop)
 		{
 			var swings = DipSignalAnalyzer.SimulateSwing(bars, p);
+			if (settings.VixGapUp) swings = FilterVixGapUp(swings);
 			RenderSwing(settings, since, until, swings);
 			if (settings.ByVix) RenderSwingByVix(swings);
 			return Task.FromResult(0);
@@ -354,6 +359,26 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 				t.AddRow($"{tr.EntryEt:MM-dd HH:mm}", $"{tr.ExitEt:MM-dd HH:mm}", tr.ExitedOnTop ? "top" : "EOD", $"{tr.HoldBars * s.Interval}m", Signed(tr.Ret), Signed(tr.EodBaselineRet));
 			AnsiConsole.Write(t);
 		}
+	}
+
+	/// <summary>Keeps only round-trips whose entry day had standard VIX gap UP at the open (open > prior
+	/// close). No VIX data → no filter (returns all). Today may be absent from VIX.csv (daily, EOD) → dropped.</summary>
+	private static List<SwingTrade> FilterVixGapUp(List<SwingTrade> trades)
+	{
+		var vix = LoadVixOhlc("VIX.csv");
+		if (vix.Count == 0) { AnsiConsole.MarkupLine("[yellow]No VIX.csv — --vix-gap-up filter skipped.[/]"); return trades; }
+		var dates = vix.Keys.OrderBy(d => d).ToList();
+		decimal? PriorClose(DateTime d)
+		{
+			decimal? r = null;
+			foreach (var k in dates) { if (k >= d.Date) break; r = vix[k].Close; }
+			return r;
+		}
+		return trades.Where(t =>
+		{
+			var pc = PriorClose(t.EntryEt.Date);
+			return vix.TryGetValue(t.EntryEt.Date, out var v) && pc.HasValue && v.Open > pc.Value;
+		}).ToList();
 	}
 
 	private static Dictionary<DateTime, (decimal Open, decimal Close)> LoadVixOhlc(string file)
