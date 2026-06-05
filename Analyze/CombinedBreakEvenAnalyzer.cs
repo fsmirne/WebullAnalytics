@@ -240,7 +240,9 @@ public static class CombinedBreakEvenAnalyzer
 			var gridExtras = new List<decimal>();
 			if (spot.HasValue) gridExtras.Add(spot.Value);
 			gridExtras.AddRange(LookupExtraLevels(ticker, opts));
-			var build = (int maxCols) => TimeDecayGridBuilder.Build(merged, netPremium, normalizingQty, nearestExpiry.Value, opts, padding, centerPrice, breakEvens, maxCols, spot, gridExtras);
+			// Anchor at the real market spot (see BreakEvenAnalyzer); --spot only reprices/re-centers.
+			var anchorSpot = LookupOriginalUnderlyingPrice(ticker, opts) ?? spot;
+			var build = (int maxCols) => TimeDecayGridBuilder.Build(merged, netPremium, normalizingQty, nearestExpiry.Value, opts, padding, centerPrice, breakEvens, maxCols, anchorSpot, gridExtras);
 			if (forcedMaxGridColumns.HasValue)
 			{
 				grid = build(forcedMaxGridColumns.Value);
