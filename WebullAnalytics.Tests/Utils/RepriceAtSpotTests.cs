@@ -77,4 +77,40 @@ public class RepriceAtSpotTests : IDisposable
 		// A long put gains value as spot falls.
 		Assert.True(repriced > baseVal, $"expected reprice above {baseVal}, got {repriced}");
 	}
+
+	[Fact]
+	public void Theoretical_UsesGridDividendAwarePath()
+	{
+		var (lots, quotes, occ, parsed) = BuildLeg("C", Side.Buy);
+		// A dividend inside the option's life makes the dividend-aware path diverge from plain BS — so this
+		// asserts the theoretical total goes through LegContractValueWithBs, not a hand-rolled BlackScholes.
+		var divs = new Dictionary<string, IReadOnlyList<DividendEvent>> { ["SPY"] = new[] { new DividendEvent(DateTime.Today.AddDays(15), 1.50m) } };
+		var opts = new AnalysisOptions(
+			OptionQuotes: quotes,
+			UnderlyingPrices: new Dictionary<string, decimal> { ["SPY"] = MarketSpot },
+			Theoretical: true,
+			Dividends: divs);
+
+		var value = TableBuilder.ComputeOpenPositionsMarketValue(lots, opts);
+
+		var expected = OptionMath.LegContractValueWithBs(MarketSpot, parsed, occ, Side.Buy, EvaluationDate.Now, opts) * 100m;
+		Assert.NotNull(value);
+		Assert.Equal(expected, value!.Value, 2);
+	}
+
+	[Fact]
+	public void Theoretical_NoIv_FallsBackToIntrinsicInsteadOfSkipping()
+	{
+		// No quotes, no --iv, no calibration → GetLegIv returns null. Previously the leg was dropped from the
+		// total (→ null); now it falls back to intrinsic like the grid does. ITM call: intrinsic = spot − strike.
+		var (lots, _, _, _) = BuildLeg("C", Side.Buy);
+		var opts = new AnalysisOptions(
+			UnderlyingPrices: new Dictionary<string, decimal> { ["SPY"] = MarketSpot },
+			Theoretical: true);
+
+		var value = TableBuilder.ComputeOpenPositionsMarketValue(lots, opts);
+
+		Assert.NotNull(value);
+		Assert.Equal((MarketSpot - 750m) * 100m, value!.Value, 2);
+	}
 }
