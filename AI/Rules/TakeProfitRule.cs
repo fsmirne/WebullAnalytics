@@ -94,8 +94,15 @@ internal sealed class TakeProfitRule : IManagementRule
 		foreach (var leg in p.Legs)
 		{
 			if (leg.CallPut == null) continue;
-			if (!ctx.Quotes.TryGetValue(leg.Symbol, out var q)) return null;
-			if (q.Bid == null || q.Ask == null) return null;
+			var hasQuote = ctx.Quotes.TryGetValue(leg.Symbol, out var q);
+			if (!hasQuote || q!.Bid == null || q.Ask == null)
+			{
+				// A single un-priceable leg nulls the whole mark, which silently disables the exit for an
+				// otherwise-profitable position. Surface it: the usual culprit is a far-dated leg the chain
+				// omitted (see WebullOptionsClient queryBatch fallback). Never let this fail without a trace.
+				Console.Error.WriteLine($"[TakeProfitRule] {p.Key}: no two-sided quote for leg {leg.Symbol} (bid={q?.Bid?.ToString() ?? "-"} ask={q?.Ask?.ToString() ?? "-"}); take-profit not evaluated this tick.");
+				return null;
+			}
 			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
 			total += leg.Side == Side.Buy ? mid : -mid;
 		}
