@@ -931,7 +931,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 
 		var closes = new Replay.HistoricalPriceCache(bars);
 		var ivProvider = new Backtest.BacktestIVProvider(bars, ivHvPremium: settings.IvHvPremium, smileEnabled: settings.Smile == "static", smile: smile);
-		// Captured per-contract bars (from `wa ai history --options`) replace Black-Scholes pricing
+		// Captured per-contract bars (from `wa options backfill <ticker>`) replace Black-Scholes pricing
 		// for any leg+minute we have on disk. Missing contracts silently fall through to the synthetic
 		// path, so partial coverage works fine — there's no penalty for legs we never captured.
 		var optionBars = new Backtest.HistoricalOptionBarCache();

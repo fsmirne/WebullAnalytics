@@ -120,6 +120,7 @@ class Program
 			{
 				options.AddCommand<Options.OptionsDiscoverCommand>("discover");
 				options.AddCommand<Options.OptionsBackfillCommand>("backfill");
+				options.AddCommand<Options.OptionsAuditCommand>("audit");
 				options.AddCommand<Options.OptionsSeedChainCommand>("chain");
 				options.AddCommand<Options.OptionsRepriceCommand>("reprice");
 			});
