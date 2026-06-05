@@ -294,8 +294,16 @@ internal static class AIHistoryOptionsBackfill
 					// derived from the config's deepest leg-entry DTE (+ buffer) so a leg the strategy opens at,
 					// e.g., 45 DTE has real bars at entry — a hardcoded 30 silently under-pulled deeper legs and
 					// forced them onto synthetic pricing, contaminating provenance. See OptionsBackfillCommand.
+					// Skip when the window STARTS in the future. massive's delayed plan returns 403
+					// NOT_AUTHORIZED ("data timeframe") when the requested range *begins* beyond the entitled
+					// (past/present) timeframe — and there's no data there yet anyway. A window that starts in
+					// the past is fine even when its end (a live contract's expiry) is in the future: the
+					// endpoint just returns bars through the delayed "now", so today's session is captured and
+					// the merge picks up later minutes on the next run. Empirically it's the start date, not
+					// the end, that trips the 403.
 					var listFrom = DateOnly.FromDateTime(item.Parsed.ExpiryDate.AddDays(-lookbackDays));
 					var expireTo = DateOnly.FromDateTime(item.Parsed.ExpiryDate);
+					if (listFrom > DateOnly.FromDateTime(todayEt)) { emptyResponses.Add(item.Occ); return; }
 					bars = await MassivePolygonClient.FetchOptionMinuteAggregatesAsync(apiConfig!.MassiveApiKey, item.Occ, listFrom, expireTo, ct);
 				}
 			}

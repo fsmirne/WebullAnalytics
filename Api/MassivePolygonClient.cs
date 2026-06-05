@@ -121,13 +121,15 @@ internal static class MassivePolygonClient
 					if (!response.IsSuccessStatusCode)
 					{
 						var status = (int)response.StatusCode;
+						var detail = ExtractErrorDetail(await response.Content.ReadAsStringAsync(cancellation));
 						var hint = status switch
 						{
 							429 => " (rate limit; retries exhausted — basic tier caps at 5 req/min)",
-							401 or 403 => " (auth failure; check apiKey)",
+							401 => " (auth failure; check apiKey)",
+							403 => " (not authorized — plan entitlement, e.g. data timeframe)",
 							_ => "",
 						};
-						Console.WriteLine($"Massive: HTTP {status} for {ticker} page {page}{hint}.");
+						Console.WriteLine($"Massive: HTTP {status} for {ticker} page {page}{hint}{(detail is null ? "" : $": {detail}")}.");
 						return all;
 					}
 
@@ -281,7 +283,7 @@ internal static class MassivePolygonClient
 					if (response.StatusCode == HttpStatusCode.TooManyRequests && retries < MaxRetriesPerUrl)
 					{ var wait = ResolveRetryAfter(response); Console.WriteLine($"Massive: HTTP 429 on contracts page {page}; pausing {wait.TotalSeconds:F0}s before retry ({retries + 1}/{MaxRetriesPerUrl})."); try { await Task.Delay(wait, cancellation); } catch (OperationCanceledException) { return occs; } retries++; continue; }
 					if (!response.IsSuccessStatusCode)
-					{ var status = (int)response.StatusCode; var hint = status is 401 or 403 ? " (auth failure; check apiKey)" : ""; Console.WriteLine($"Massive: HTTP {status} on contracts page {page}{hint}."); return occs; }
+					{ var status = (int)response.StatusCode; var detail = ExtractErrorDetail(await response.Content.ReadAsStringAsync(cancellation)); var hint = status switch { 401 => " (auth failure; check apiKey)", 403 => " (not authorized — plan entitlement, e.g. data timeframe)", _ => "" }; Console.WriteLine($"Massive: HTTP {status} on contracts page {page}{hint}{(detail is null ? "" : $": {detail}")}."); return occs; }
 					var json = await response.Content.ReadAsStringAsync(cancellation);
 					var (batch, nextUrl) = ParseContractsResponse(json);
 					occs.AddRange(batch);
@@ -292,6 +294,25 @@ internal static class MassivePolygonClient
 			}
 		}
 		return occs;
+	}
+
+	/// <summary>Pulls the human-readable error string from a Polygon/massive error body — <c>message</c>
+	/// (NOT_AUTHORIZED responses, e.g. "Your plan doesn't include this data timeframe") or <c>error</c>
+	/// (e.g. "API Key was not provided"). Null when the body isn't JSON or carries neither field, so the
+	/// caller can omit the suffix. Surfacing this turns an opaque "403 (check apiKey)" into the upstream's
+	/// actual reason — the hint alone misdiagnoses entitlement failures as auth failures.</summary>
+	private static string? ExtractErrorDetail(string body)
+	{
+		if (string.IsNullOrWhiteSpace(body)) return null;
+		try
+		{
+			using var doc = JsonDocument.Parse(body);
+			var root = doc.RootElement;
+			if (root.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String) return m.GetString();
+			if (root.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String) return e.GetString();
+		}
+		catch { /* non-JSON body — nothing to surface */ }
+		return null;
 	}
 
 	private static (IReadOnlyList<string> Occs, string? NextUrl) ParseContractsResponse(string json)
