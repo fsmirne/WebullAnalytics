@@ -346,7 +346,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		IReadOnlyDictionary<string, decimal>? calibratedIv = null;
 		if (settings.Calibrated && optionQuotesBySymbol != null && underlyingPrices != null)
 		{
-			calibratedIv = BuildCalibratedIv(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, ivOverrides, dividends);
+			calibratedIv = BuildCalibratedIv(optionQuotesBySymbol, underlyingPrices, ivOverrides, dividends);
 			if (calibratedIv != null)
 				Console.WriteLine($"Calibration: solved mid-implied IV for {calibratedIv.Count} contract(s); future grid values anchored to the live mid surface.");
 		}
@@ -436,7 +436,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 	/// override wins regardless), as are legs whose mid cannot be inverted (no two-sided quote, mid ≤
 	/// intrinsic, expired, or non-convergent) — those fall through to the broker IV unchanged.
 	/// </summary>
-	private static IReadOnlyDictionary<string, decimal>? BuildCalibratedIv(IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> underlyingPrices, IReadOnlyDictionary<string, decimal>? spotOverrides, IReadOnlyDictionary<string, decimal>? ivOverrides, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends)
+	private static IReadOnlyDictionary<string, decimal>? BuildCalibratedIv(IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> underlyingPrices, IReadOnlyDictionary<string, decimal>? ivOverrides, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends)
 	{
 		var asOf = EvaluationDate.Today + OptionMath.MarketOpen; // matches the grid's today column (date + market open)
 		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
@@ -446,9 +446,11 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
 			if (parsed == null) continue;
 
-			decimal spot;
-			if (spotOverrides != null && spotOverrides.TryGetValue(parsed.Root, out var ov)) spot = ov;
-			else if (!underlyingPrices.TryGetValue(parsed.Root, out spot)) continue;
+			// Always calibrate at the real market spot — the leg's live mid was struck there, so that's the
+			// spot the mid→IV inversion must use. A --spot override only reprices/re-centers the grid; folding
+			// it into the IV solve would absorb the spot move into vol and defeat the repricing. Want a
+			// different vol at the new spot? Pass --iv (which wins over calibration in GetLegIv).
+			if (!underlyingPrices.TryGetValue(parsed.Root, out var spot)) continue;
 
 			IReadOnlyList<DividendEvent>? divs = null;
 			dividends?.TryGetValue(parsed.Root, out divs);
