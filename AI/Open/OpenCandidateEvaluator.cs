@@ -510,9 +510,15 @@ internal sealed class OpenCandidateEvaluator
 				// out across cores. Fixed-size array + Parallel.For preserves original ordering, keeping
 				// scoredByStructure insertion order — and downstream tie-breaking in RankForOutput —
 				// bit-identical to the serial path.
+				//
+				// In backtest mode the caller (BacktestRunner) already runs ~ProcessorCount MINUTES in
+				// parallel, so fanning scoring out here too is nested parallelism — it oversubscribes the
+				// pool and the contention dominates. Cap to 1 (serial) under backtest; the minute-level
+				// parallelism is what keeps all cores busy. Live (single evaluation at a time) still fans out.
 				var skels = tickerGroup.ToList();
 				var results = new OpenProposal?[skels.Count];
-				Parallel.For(0, skels.Count, new ParallelOptions { CancellationToken = cancellation }, i =>
+				var scoreOpts = new ParallelOptions { CancellationToken = cancellation, MaxDegreeOfParallelism = _backtestMode ? 1 : -1 };
+				Parallel.For(0, skels.Count, scoreOpts, i =>
 				{
 					var skel = skels[i];
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);

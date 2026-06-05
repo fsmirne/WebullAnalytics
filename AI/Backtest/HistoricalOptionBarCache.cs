@@ -25,6 +25,12 @@ internal sealed class HistoricalOptionBarCache
 	// expiry-dir → captured OCC filenames (one filesystem scan per expiry dir, then memoized).
 	private readonly Dictionary<string, IReadOnlyList<string>> _occsByExpiryDir =
 		new(StringComparer.OrdinalIgnoreCase);
+	// (dir|callPut|alignedMinuteSec) → captured quote points. The CSVs are immutable for the run, so the
+	// surface points for a given minute never change; the opener prices many candidate legs sharing the
+	// same (root, expiry, right) every minute, so this dedups the full expiry-dir scan + per-OCC GetBar
+	// walk to once per (expiry, right, minute) instead of once per candidate leg.
+	private readonly Dictionary<string, IReadOnlyList<(decimal Strike, decimal Price, decimal? IvFraction)>> _quotePointsByKey =
+		new(StringComparer.Ordinal);
 	// root (upper) → sorted captured expiry dates on disk (one root-dir scan per root, then memoized).
 	private readonly Dictionary<string, IReadOnlyList<DateTime>> _expiriesByRoot =
 		new(StringComparer.OrdinalIgnoreCase);
@@ -93,6 +99,14 @@ internal sealed class HistoricalOptionBarCache
 	public IReadOnlyList<(decimal Strike, decimal Price, decimal? IvFraction)> GetCapturedQuotePoints(string root, DateTime expiry, string callPut, DateTimeOffset minuteUtc)
 	{
 		var dir = Path.Combine(_dataDir, root.ToUpperInvariant(), expiry.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture));
+		var alignedSec = minuteUtc.ToUnixTimeSeconds();
+		alignedSec -= alignedSec % 60;
+		var memoKey = string.Concat(dir, "|", callPut, "|", alignedSec.ToString(System.Globalization.CultureInfo.InvariantCulture));
+		lock (_lock)
+		{
+			if (_quotePointsByKey.TryGetValue(memoKey, out var cached)) return cached;
+		}
+
 		IReadOnlyList<string> occs;
 		lock (_lock)
 		{
@@ -117,6 +131,7 @@ internal sealed class HistoricalOptionBarCache
 			points.Add((parsed.Strike, mid, ivFrac));
 		}
 		points.Sort((a, b) => a.Item1.CompareTo(b.Item1));
+		lock (_lock) { _quotePointsByKey[memoKey] = points; }
 		return points;
 	}
 
