@@ -1006,16 +1006,20 @@ internal sealed class BacktestRunner
 		CancellationToken cancellation)
 	{
 		// Build per-minute spot dict. Skip when any required ticker has no bar at this minute — the
-		// opener's bootstrap would have no spot to work with. Use bar.Open (the price at the START
-		// of the minute) rather than bar.Close: ctx.Now is stamped at the start of the minute and
-		// the backfill's intraday SPXW curve is anchored so bar.Open @ 09:30 exactly equals
-		// ^GSPC.Open from the daily history — switching to bar.Close would introduce a 1-minute
-		// lookahead and break the anchor invariant.
+		// opener's bootstrap would have no spot to work with. Anchor the strike-selection spot on the
+		// bar's TIME-MIDPOINT (Open+Close)/2, NOT bar.Open: live's tick scheduler (wa ai watch at :30
+		// each minute) samples ~30s into the bar, and the leg-pricing path already prices on this same
+		// midpoint (see BacktestQuoteSource: "Using bar.Open systematically under-samples by ~30 seconds
+		// on trending minutes"). Anchoring strikes on bar.Open while pricing legs on the midpoint made
+		// the backtest pick systematically lower strikes than live on up-drifting minutes. The midpoint
+		// keeps the same within-minute semantic as pricing and does NOT introduce the full 1-minute
+		// lookahead that bar.Close would — the 09:30==^GSPC.Open anchor invariant governs the SPXW
+		// curve/leg pricing, not the opener's spot.
 		var minuteSpots = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		foreach (var t in tickerSet)
 		{
 			if (!barIndexByTicker[t].TryGetValue(minuteUtc, out var bar)) return null;
-			minuteSpots[t] = bar.Open;
+			minuteSpots[t] = (bar.Open + bar.Close) / 2m;
 		}
 
 		// TTE for 0DTE legs: remaining minutes from this bar to 16:00 ET, in years. Floored at 1
