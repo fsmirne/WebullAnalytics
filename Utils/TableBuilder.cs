@@ -549,6 +549,20 @@ public static class TableBuilder
 				if (opts.OptionQuotes == null || !opts.OptionQuotes.TryGetValue(symbol, out var quote) || !quote.Bid.HasValue || !quote.Ask.HasValue)
 					continue;
 				currentValue = (quote.Bid.Value + quote.Ask.Value) / 2m;
+
+				// A --spot override reprices open positions at the hypothetical spot, consistent with the grid's
+				// today column. Reuse the grid's own pricing path (LegContractValueWithBs → DividendAdjustedSpot
+				// + GetLegIv, so calibrated/broker/--iv precedence and dividends are handled identically) and
+				// shift the observed mid by the model's value change from the real market spot to the override.
+				// The mid stays the basis — it was struck at the market spot — so only the model delta applies.
+				if (opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var ovSpot)
+					&& opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var mktSpot))
+				{
+					var side = lots[0].Side;
+					var vMarket = OptionMath.LegContractValueWithBs(mktSpot, parsed, symbol, side, now, opts);
+					var vOverride = OptionMath.LegContractValueWithBs(ovSpot, parsed, symbol, side, now, opts);
+					currentValue += vOverride - vMarket;
+				}
 			}
 
 			var totalQty = lots.Sum(l => l.Qty);

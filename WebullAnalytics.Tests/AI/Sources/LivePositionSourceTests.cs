@@ -5,6 +5,9 @@ using Xunit;
 
 namespace WebullAnalytics.Tests.AI.Sources;
 
+// Shares the EvaluationDate static override; grouped so it never runs in parallel with other
+// tests that read/pin EvaluationDate (xUnit runs same-named collections serially).
+[Collection("EvaluationDate")]
 public class LivePositionSourceTests : IDisposable
 {
 	public void Dispose() => EvaluationDate.Reset();
