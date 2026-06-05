@@ -535,14 +535,15 @@ public static class TableBuilder
 			decimal currentValue;
 			if (opts.Theoretical)
 			{
-				var sideForIv = lots[0].Side;
-				var iv = OptionMath.GetLegIv(sideForIv, symbol, opts);
+				// Theoretical mode prices each leg purely from the model at the (override-or-market) spot — the
+				// override IS the reprice here, since there's no observed mid to anchor. Route through the grid's
+				// own LegContractValueWithBs so dividends (DividendAdjustedSpot) and IV precedence (--iv →
+				// calibrated → broker) match the grid exactly. A leg with no resolvable IV now falls back to
+				// intrinsic (as the grid does) instead of being dropped from the total.
 				var spot = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var op) ? op : opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var up) ? up : (decimal?)null;
-				if (!iv.HasValue || !spot.HasValue)
+				if (!spot.HasValue)
 					continue;
-				var expirationTime = parsed.ExpiryDate.Date + OptionMath.MarketClose;
-				var timeYears = Math.Max(0, (expirationTime - now).TotalDays / 365.0);
-				currentValue = OptionMath.BlackScholes(spot.Value, parsed.Strike, timeYears, OptionMath.RiskFreeRate, iv.Value, parsed.CallPut);
+				currentValue = OptionMath.LegContractValueWithBs(spot.Value, parsed, symbol, lots[0].Side, now, opts);
 			}
 			else
 			{
