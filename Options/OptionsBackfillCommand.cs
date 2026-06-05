@@ -73,7 +73,7 @@ internal sealed class OptionsBackfillCommand : AsyncCommand<OptionsBackfillSetti
 	/// config could open a leg at (+ <see cref="LookbackBufferDays"/>). Falls back to <see cref="LookbackFallbackDays"/>
 	/// if no config is found. Uses LongDteMax for calendar/diagonal structures (the far leg) and DteMax for
 	/// single-expiry structures.</summary>
-	private static int DeriveLookbackDays(string ticker)
+	internal static int DeriveLookbackDays(string ticker)
 	{
 		var basePath = Program.ResolvePath(AIConfigLoader.ConfigPath);
 		var overridePath = Program.ResolvePath($"data/ai-config.{ticker}.json");
