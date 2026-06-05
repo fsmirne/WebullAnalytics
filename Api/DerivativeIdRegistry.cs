@@ -112,6 +112,21 @@ internal static class DerivativeIdRegistry
 		}
 	}
 
+	/// <summary>Resolves a single OCC symbol to its persisted derivativeId. Lets a quote fetch price a
+	/// contract the live chain omitted (far-dated expiries outside the strategy/list cycle) by reusing an
+	/// id harvested in an earlier session, instead of letting the leg propagate as un-priceable.</summary>
+	public static bool TryGetId(string symbol, out long id)
+	{
+		id = 0;
+		if (string.IsNullOrWhiteSpace(symbol)) return false;
+		lock (_lock)
+		{
+			EnsureLoaded();
+			if (_cache!.TryGetValue(symbol, out var e) && e.Id > 0) { id = e.Id; return true; }
+			return false;
+		}
+	}
+
 	/// <summary>Returns a copy of the OCC → derivativeId map (liquidity dropped) for callers like the
 	/// backfill command that only need ids. Stable snapshot, iterable without the registry lock.</summary>
 	public static IReadOnlyDictionary<string, long> Snapshot()
