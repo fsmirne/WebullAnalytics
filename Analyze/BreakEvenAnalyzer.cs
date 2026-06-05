@@ -145,7 +145,11 @@ public static class BreakEvenAnalyzer
 			var gridExtras = new List<decimal>();
 			if (spot.HasValue) gridExtras.Add(spot.Value);
 			gridExtras.AddRange(LookupExtraLevels(parsed.Root, opts));
-			var build = (int maxCols) => TimeDecayGridBuilder.Build(legsList, qty, row.Side, premium, parsed.ExpiryDate, opts, padding, strike, gridBreakEvens, maxCols, spot, gridExtras);
+			// Anchor the today column to the mid at the REAL market spot, not the --spot override:
+			// --spot reprices/re-centers the grid (its row is in gridExtras), but the observed mid was
+			// struck at the fetched spot, so that's where the model→market basis is measured.
+			var anchorSpot = LookupOriginalUnderlyingPrice(parsed.Root, opts) ?? spot;
+			var build = (int maxCols) => TimeDecayGridBuilder.Build(legsList, qty, row.Side, premium, parsed.ExpiryDate, opts, padding, strike, gridBreakEvens, maxCols, anchorSpot, gridExtras);
 			if (forcedMaxGridColumns.HasValue)
 			{
 				grid = build(forcedMaxGridColumns.Value);
@@ -317,7 +321,9 @@ public static class BreakEvenAnalyzer
 			var gridExtras = new List<decimal>();
 			if (spot.HasValue) gridExtras.Add(spot.Value);
 			gridExtras.AddRange(LookupExtraLevels(root, opts));
-			var build = (int maxCols) => TimeDecayGridBuilder.Build(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, opts, padding, strikes.Average(), breakEvens, maxCols, spot, gridExtras);
+			// Anchor at the real market spot (see single-leg path); --spot only reprices/re-centers.
+			var anchorSpot = LookupOriginalUnderlyingPrice(root, opts) ?? spot;
+			var build = (int maxCols) => TimeDecayGridBuilder.Build(parsedLegs, qty, parent.Side, netPremium, nearestExpiry, opts, padding, strikes.Average(), breakEvens, maxCols, anchorSpot, gridExtras);
 			if (forcedMaxGridColumns.HasValue)
 			{
 				grid = build(forcedMaxGridColumns.Value);
