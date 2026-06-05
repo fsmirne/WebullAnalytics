@@ -212,12 +212,6 @@ internal static class AIHistoryOptionsBackfill
 		var skippedComplete = 0;
 		var hasMassiveKey = !string.IsNullOrWhiteSpace(apiConfig!.MassiveApiKey);
 		var todayEt = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, NyTz).Date;
-		// Most recent settled (closed) trading day. An on-disk contract is "complete" when its last bar
-		// reaches its completion target — expiry for an already-expired contract, this last settled day for
-		// a still-live one. Anything short of that was left incomplete (interrupted capture, or a live
-		// contract captured mid-life) and gets re-pulled; everything complete is skipped.
-		var lastSettledEt = todayEt.AddDays(-1);
-		while (!MarketCalendar.IsOpen(lastSettledEt)) lastSettledEt = lastSettledEt.AddDays(-1);
 
 		// Sealed manifest (mirrors the intraday data/intraday/<T>/sealed.json idea): OCCs of fully-captured,
 		// EXPIRED contracts whose bars are final. A sealed contract is skipped instantly with no disk read.
@@ -236,12 +230,14 @@ internal static class AIHistoryOptionsBackfill
 			// Sealed → final, skip with no I/O.
 			if (!force && sealedOccs.Contains(occ)) { skippedComplete++; continue; }
 
-			// On disk and complete → skip. If it's also expired (final), seal it now so future runs skip it
-			// without even a tail-read. Today's expiry always re-pulls (intraday still forming); an incomplete
-			// capture (interrupted, or a live contract captured before later sessions) falls through to re-pull.
-			if (!force && csvExists && parsed.ExpiryDate.Date != todayEt && IsCaptureComplete(csvPath, parsed.ExpiryDate.Date, todayEt, lastSettledEt))
+			// EXPIRED + on disk + complete → final, skip and seal so future runs skip it with no I/O.
+			// LIVE contracts (expiry today or later) are never skipped here: their frontier keeps moving,
+			// so we always re-pull and merge (cheap, timestamp-idempotent) to top up the latest session.
+			// Skipping a live contract that merely reached yesterday would strand today's just-closed
+			// session until the next day's run — the frontier-lag bug this replaces.
+			if (!force && csvExists && parsed.ExpiryDate.Date < todayEt && IsCaptureComplete(csvPath, parsed.ExpiryDate.Date))
 			{
-				if (parsed.ExpiryDate.Date < todayEt) newSeals.Add(occ);
+				newSeals.Add(occ);
 				skippedComplete++;
 				continue;
 			}
@@ -395,23 +391,22 @@ internal static class AIHistoryOptionsBackfill
 	/// <summary>Reads a previously-written option CSV. Lines that don't parse cleanly are dropped
 	/// silently — same tolerance as <see cref="WebullChartsClient.ParseOptionBarRow"/>. Returns an
 	/// empty list when the file doesn't exist; the caller can then treat the merge as a fresh write.</summary>
-	/// <summary>True when the on-disk capture reaches its completion target: last bar's ET date at/after the
-	/// contract's expiry (expired) or the last settled trading day (still-live). False if unreadable, empty,
-	/// or short of target — the caller then re-pulls. Today's-expiry handling is the caller's.</summary>
+	/// <summary>True when an EXPIRED contract's on-disk capture reaches its completion target: last bar's ET
+	/// date at/after expiry (minus the illiquidity tolerance). False if unreadable, empty, or short of target —
+	/// the caller then re-pulls. Only ever called for expired contracts; live contracts are always re-pulled
+	/// (their frontier keeps moving), so there is no "still-live" completion target.</summary>
 	// An illiquid contract can stop trading a few days before expiry; its last bar then sits short of expiry
 	// even though the capture is complete. Allow this tolerance so such contracts count complete (and get
 	// sealed) instead of re-pulling forever. A genuinely-interrupted capture stops far earlier and re-pulls.
 	private const int ExpiredCompletionToleranceDays = 7;
 
-	private static bool IsCaptureComplete(string csvPath, DateTime expiryDate, DateTime todayEt, DateTime lastSettledEt)
+	private static bool IsCaptureComplete(string csvPath, DateTime expiryDate)
 	{
 		var lastBar = LastBarDateEt(csvPath);
 		if (!lastBar.HasValue) return false;
-		// Expired = final (with the illiquidity tolerance). Live = complete only if current through the last
-		// settled trading day.
-		return expiryDate < todayEt
-			? lastBar.Value >= expiryDate.AddDays(-ExpiredCompletionToleranceDays)
-			: lastBar.Value >= lastSettledEt;
+		// Expired = final (with the illiquidity tolerance). Only called for expired contracts now —
+		// live contracts are always re-pulled, so there is no "still-live" completion target.
+		return lastBar.Value >= expiryDate.AddDays(-ExpiredCompletionToleranceDays);
 	}
 
 	private sealed class SealedOccManifest
