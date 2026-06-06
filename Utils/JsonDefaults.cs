@@ -8,15 +8,16 @@ namespace WebullAnalytics;
 /// indented serializer is consistent — change the indent style here, not at each call site.</summary>
 internal static class JsonDefaults
 {
-	/// <summary>Pretty-printed, tab-indented.</summary>
-	public static readonly JsonSerializerOptions Indented = new() { WriteIndented = true, IndentCharacter = '\t', IndentSize = 1 };
+	/// <summary>Pretty-printed, tab-indented, LF line endings.</summary>
+	public static readonly JsonSerializerOptions Indented = new() { WriteIndented = true, IndentCharacter = '\t', IndentSize = 1, NewLine = "\n" };
 
-	/// <summary>Pretty-printed, tab-indented, omitting null-valued properties (for diagnostic dumps).</summary>
+	/// <summary>Pretty-printed, tab-indented, LF line endings, omitting null-valued properties (for diagnostic dumps).</summary>
 	public static readonly JsonSerializerOptions IndentedSkipNulls = new()
 	{
 		WriteIndented = true,
 		IndentCharacter = '\t',
 		IndentSize = 1,
+		NewLine = "\n",
 		DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
 	};
 }
