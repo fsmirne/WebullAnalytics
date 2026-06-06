@@ -267,7 +267,7 @@ internal sealed class OpenerAutoExecutor
 
 	private static string LabelSuffix(string label) => string.IsNullOrEmpty(label) ? "" : $" ({label})";
 
-	private static readonly JsonSerializerOptions DiagnosticJsonOptions = new() { WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+	private static readonly JsonSerializerOptions DiagnosticJsonOptions = JsonDefaults.IndentedSkipNulls;
 
 	/// <summary>Dump the request payload and (when present) Webull's raw response body so the user
 	/// has enough signal to diagnose vague rejections like OAUTH_OPENAPI_SYSTEM_ERROR — the top-level

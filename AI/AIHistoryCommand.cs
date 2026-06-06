@@ -850,7 +850,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	{
 		var sorted = sealedDates.OrderBy(d => d).Select(d => d.ToString("yyyy-MM-dd")).ToList();
 		var doc = new SealedManifest { Sealed = sorted };
-		var json = JsonSerializer.Serialize(doc, new JsonSerializerOptions { WriteIndented = true });
+		var json = JsonSerializer.Serialize(doc, JsonDefaults.Indented);
 		var tmp = path + ".tmp";
 		File.WriteAllText(tmp, json);
 		File.Move(tmp, path, overwrite: true);

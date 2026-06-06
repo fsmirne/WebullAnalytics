@@ -210,7 +210,7 @@ internal static class DerivativeIdRegistry
 					? e.Id
 					: new Dictionary<string, object?> { ["id"] = e.Id, ["asof"] = e.AsOf, ["tradeable"] = e.Tradeable, ["oi"] = e.OpenInterest };
 			var tmp = path + ".tmp";
-			File.WriteAllText(tmp, JsonSerializer.Serialize(ordered, new JsonSerializerOptions { WriteIndented = true }));
+			File.WriteAllText(tmp, JsonSerializer.Serialize(ordered, JsonDefaults.Indented));
 			File.Move(tmp, path, overwrite: true);
 		}
 		catch (IOException ex)
