@@ -8,8 +8,8 @@ using WebullAnalytics.AI.Sources;
 
 namespace WebullAnalytics.Options;
 
-/// <summary>`wa options reprice &lt;ticker&gt; --date &lt;yyyy-MM-dd&gt;` — validates the backtest's synthetic
-/// pricing model against a real captured chain snapshot (<c>data/chain-snapshots/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>,
+/// <summary>`wa options reprice <ticker> --date <yyyy-MM-dd>` — validates the backtest's synthetic
+/// pricing model against a real captured chain snapshot (<c>data/chain-snapshots/<TICKER>/<date>.jsonl</c>,
 /// written by the scraper with real bid/ask/iv per contract per minute). For every (contract, minute) it
 /// reprices the contract through the SAME <see cref="BacktestQuoteSource"/> the backtest uses — fed the
 /// snapshot's own underlying price so the comparison isolates the pricing model from spot error — then

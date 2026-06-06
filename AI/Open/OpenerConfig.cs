@@ -142,8 +142,8 @@ internal sealed class OpenerWeightsConfig
 	/// (≥1.5σ cushion). Credit trades only.</summary>
 	[JsonPropertyName("expectedMoveCredit")] public decimal ExpectedMoveCredit { get; set; } = 0.20m;
 
-	/// <summary>IV-vs-HV regime-alignment factor. Credit favored when IV &gt; HV; debit favored when
-	/// IV &lt; HV. Fires on trade-type sign alone (vega-agnostic).</summary>
+	/// <summary>IV-vs-HV regime-alignment factor. Credit favored when IV > HV; debit favored when
+	/// IV < HV. Fires on trade-type sign alone (vega-agnostic).</summary>
 	[JsonPropertyName("ivRealizedPremium")] public decimal IvRealizedPremium { get; set; } = 0.15m;
 
 	/// <summary>Blend weight for the VIX term-structure regime signal on top of the daily-close technical
@@ -269,7 +269,7 @@ internal sealed class OpenerCalendarVerticalConfig
 	[JsonPropertyName("widthSteps")] public List<int> WidthSteps { get; set; } = new() { 2, 4 };
 }
 
-/// <summary>LongCalendar / LongDiagonal config. Strike placement: when <see cref="DeltaMax"/> &gt; 0 strikes
+/// <summary>LongCalendar / LongDiagonal config. Strike placement: when <see cref="DeltaMax"/> > 0 strikes
 /// are picked by delta band (the anchor / long-leg lands in <see cref="DeltaMin"/>–<see cref="DeltaMax"/>;
 /// for a diagonal the near short leg lands in <see cref="ShortDeltaMin"/>–<see cref="ShortDeltaMax"/>, further
 /// OTM — mirrors DiagonalVertical / CalendarVertical). When DeltaMax is 0 (default) it falls back to the legacy

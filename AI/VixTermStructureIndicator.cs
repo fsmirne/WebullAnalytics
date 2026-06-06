@@ -6,11 +6,11 @@ namespace WebullAnalytics.AI;
 ///
 /// Mechanics: <c>score = clamp((VIX / VIX9D − 1) × scale, −1, +1)</c>.
 /// <list type="bullet">
-///   <item><description><b>Contango</b> (VIX &gt; VIX9D, the normal regime) → positive score.
+///   <item><description><b>Contango</b> (VIX > VIX9D, the normal regime) → positive score.
 ///     Near-term realized vol expectations sit below the 30-day expectation; markets are calm.
 ///     Modest positive drift edge.</description></item>
-///   <item><description><b>Backwardation</b> (VIX9D &gt; VIX, the stress regime) → negative score.
-///     Near-term vol &gt; 30-day vol = "something bad is happening now." Historically associated
+///   <item><description><b>Backwardation</b> (VIX9D > VIX, the stress regime) → negative score.
+///     Near-term vol > 30-day vol = "something bad is happening now." Historically associated
 ///     with continued downside and mean-reversion edge against rallies.</description></item>
 /// </list>
 ///

@@ -2,7 +2,7 @@ using System.Globalization;
 
 namespace WebullAnalytics.AI.RiskDiagnostics.Rules;
 
-/// <summary>Fires for a bullish-biased covered diagonal (long strike &lt; short strike for calls; opposite for puts).
+/// <summary>Fires for a bullish-biased covered diagonal (long strike < short strike for calls; opposite for puts).
 /// Informational: notes that the structure gains on a rally and loses on a drop. When trend is available,
 /// adds `trend_aligned` to inputs (1 = bias agrees with 5d move, 0 = misaligned).</summary>
 internal sealed class GeometryBullishCoveredDiagonalRule : IRiskRule

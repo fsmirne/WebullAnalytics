@@ -52,7 +52,7 @@ internal static class TechnicalIndicators
 	}
 
 	/// <summary>(price / SMA200 − 1) × <paramref name="scale"/> clamped to [−1, +1]. The Faber-style
-	/// trend regime gate: positive when price &gt; 200-day average (uptrend); negative when below
+	/// trend regime gate: positive when price > 200-day average (uptrend); negative when below
 	/// (downtrend). Scale of 20 maps a 5% dislocation to the clamp floor. Requires ≥ 200 closes.</summary>
 	public static decimal? ComputeSma200Score(IReadOnlyList<decimal> closes, decimal scale = 20m)
 	{

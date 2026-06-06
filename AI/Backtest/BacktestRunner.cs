@@ -1320,7 +1320,7 @@ internal sealed class BacktestRunner
 		foreach (var p in topK) RecordDiscoveredLegs(p.Legs);
 	}
 
-	/// <summary>Writes the discovery catalog to <c>data/options-discovery/&lt;ticker&gt;.jsonl</c>. Two kinds
+	/// <summary>Writes the discovery catalog to <c>data/options-discovery/<ticker>.jsonl</c>. Two kinds
 	/// of line: a <em>picked</em> OCC the evaluator actually chose (<c>{"occ":"…","ticker":"SPXW"}</c>),
 	/// and a <em>padded</em> OCC derived from the picked set to widen each (expiry,right) strike range
 	/// (<c>{"occ":"…","ticker":"SPXW","pad":true}</c>). Picked entries accumulate across runs (re-reads

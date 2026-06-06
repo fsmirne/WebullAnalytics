@@ -14,7 +14,7 @@ namespace WebullAnalytics.AI.Backtest;
 /// Both paths layer a volatility smile on top:
 ///   <c>iv(K) = atm * (1 + linear*m + curvature*|m|)</c>, clamped to ±50% / −30% of ATM,
 ///   where <c>m = (K-S)/S</c>.
-///   - <c>linear</c> &lt; 0 + <c>curvature</c> &gt; 0 on the put wing (m &lt; 0) produces the steep
+///   - <c>linear</c> < 0 + <c>curvature</c> > 0 on the put wing (m < 0) produces the steep
 ///     OTM-put lift typical of SPX (crash insurance premium).
 ///   - Index tickers go flat on the call wing (m ≥ 0): linear = curvature = 0. This matches the
 ///     observed SPX "reverse skew" / smirk where OTM call IV sits at or just below ATM.
@@ -123,8 +123,8 @@ internal sealed class BacktestIVProvider
 		|| string.Equals(ticker, "NDX", StringComparison.OrdinalIgnoreCase);
 
 	/// <summary>Picks the smile coefficients for <paramref name="ticker"/> on the side of the chain
-	/// being priced. Index tickers use an asymmetric profile: steep V-shape on the put wing (m &lt; 0,
-	/// <paramref name="isCallSide"/>=false), flat on the call wing (m &gt;= 0). Single-stock tickers
+	/// being priced. Index tickers use an asymmetric profile: steep V-shape on the put wing (m < 0,
+	/// <paramref name="isCallSide"/>=false), flat on the call wing (m >= 0). Single-stock tickers
 	/// use the symmetric V-shape for both sides — single-name smiles don't show the same SPX-style
 	/// reverse skew, and equity-class flow is symmetric enough that one profile fits both wings.</summary>
 	private static (decimal linearSkew, decimal curvature) GetSmileParams(string ticker, bool isCallSide)
