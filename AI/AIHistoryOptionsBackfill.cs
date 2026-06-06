@@ -8,7 +8,7 @@ namespace WebullAnalytics.AI;
 
 /// <summary>Backfills per-contract option minute bars from Webull's <c>/api/quote/option/chart/kdata</c>
 /// endpoint. Each contract's bars (with implied volatility) are written to
-/// <c>data/options/&lt;root&gt;/&lt;expiry&gt;/&lt;occ&gt;.csv</c>. Driven by <see cref="DerivativeIdRegistry"/>
+/// <c>data/options/<root>/<expiry>/<occ>.csv</c>. Driven by <see cref="DerivativeIdRegistry"/>
 /// — the registry only contains contracts we've observed live in a chain fetch, so this command
 /// can't conjure data for contracts that expired before we started persisting ids.
 ///
@@ -501,12 +501,17 @@ internal static class AIHistoryOptionsBackfill
 	/// traded), which is the data the backtest will replay. Returns an empty set if neither file
 	/// exists yet (fresh install with no live runs).</summary>
 
-	internal static HashSet<string> LoadTouchedSymbols(string ticker) =>
-		LoadTouchedSymbolsFromPaths(
-			ProposalLog.ResolvedPath(ticker),
-			Program.ResolvePath(Program.OrdersPath),
-			Path.Combine(Program.ResolvePath("data/options-discovery"), ticker.ToUpperInvariant() + ".jsonl"),
-			ticker);
+	internal static HashSet<string> LoadTouchedSymbols(string ticker)
+	{
+		// Aggregate across all of the ticker's per-strategy proposal logs (+ legacy), since backfill wants
+		// every contract the bot has touched regardless of which strategy picked it.
+		var touched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		foreach (var proposalsPath in ProposalLog.AllResolvedPathsForTicker(ticker))
+			CollectFromProposals(proposalsPath, ticker, touched);
+		CollectFromOrders(Program.ResolvePath(Program.OrdersPath), ticker, touched);
+		CollectFromDiscovery(Path.Combine(Program.ResolvePath("data/options-discovery"), ticker.ToUpperInvariant() + ".jsonl"), ticker, touched);
+		return touched;
+	}
 
 	/// <summary>Path-injectable variant of <see cref="LoadTouchedSymbols(string)"/>. Production code goes
 	/// through the no-args overload; tests pass their own tmp paths so they don't read the user's
@@ -653,7 +658,7 @@ internal static class AIHistoryOptionsBackfill
 		return $"{rootCandidate.ToUpperInvariant()}{expiry:yyMMdd}{cp}{strikeInt:D8}";
 	}
 
-	/// <summary>Builds the canonical CSV path for a contract: <c>data/options/&lt;ROOT&gt;/&lt;yyyy-MM-dd&gt;/&lt;OCC&gt;.csv</c>.
+	/// <summary>Builds the canonical CSV path for a contract: <c>data/options/<ROOT>/<yyyy-MM-dd>/<OCC>.csv</c>.
 	/// Per-expiry grouping is a deliberate convention so a single <c>rm -rf data/options/SPXW/2026-05-26</c>
 	/// cleanly drops one expiration's data without touching others — useful when re-running a backfill
 	/// after a Webull schema change for example.</summary>
@@ -691,7 +696,7 @@ internal static class AIHistoryOptionsBackfill
 	/// traded) that don't yet have a CSV on disk. Mirrors the default filter in <see cref="RunAsync"/>
 	/// so the hint count matches what <c>--options</c> would actually backfill — without this, the
 	/// hint would say "20114 pending" forever even after backfilling every contract the bot has ever
-	/// picked. Called at the end of the regular `wa ai history &lt;ticker&gt;` flow.</summary>
+	/// picked. Called at the end of the regular `wa ai history <ticker>` flow.</summary>
 	public static int CountUnbackfilledContracts(string ticker)
 	{
 		var registry = DerivativeIdRegistry.Snapshot();

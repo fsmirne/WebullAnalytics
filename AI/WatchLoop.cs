@@ -124,12 +124,12 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 		var priceCache = new Replay.HistoricalPriceCache();
 
-		using var sink = new ProposalSink(config.LogLevel, config.Ticker, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+		using var sink = new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 		OpenProposalSink? openSink = null;
 		OpenCandidateEvaluator? openEvaluator = null;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			openSink = new OpenProposalSink(config.LogLevel, config.Ticker, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			openSink = new OpenProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
 		}
 

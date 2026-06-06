@@ -21,15 +21,17 @@ internal sealed class ProposalSink : IDisposable
 	private readonly string _suggestPricing;
 	private readonly bool _ascii;
 	private readonly string _cmdPrefix;
+	private readonly string _strategy;
 
-	public ProposalSink(string consoleVerbosity, string ticker, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
+	public ProposalSink(string consoleVerbosity, string ticker, string strategy, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
 	{
 		_consoleVerbosity = consoleVerbosity;
 		_mode = mode;
+		_strategy = strategy;
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
 		_ascii = ascii;
 		_cmdPrefix = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
-		var path = ProposalLog.ResolvedPath(ticker);
+		var path = ProposalLog.ResolvedPath(ticker, strategy);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
 	}
@@ -40,11 +42,11 @@ internal sealed class ProposalSink : IDisposable
 		WriteConsole(p, isRepeat);
 	}
 
-	private void WriteJsonl(ManagementProposal p) => _file.WriteLine(SerializeRecord(p, _mode));
+	private void WriteJsonl(ManagementProposal p) => _file.WriteLine(SerializeRecord(p, _mode, _strategy));
 
 	/// <summary>Serializes one management proposal to its JSONL line. Pure (no I/O) so it's unit-testable
 	/// without touching the filesystem; the sink wraps it with the append writer.</summary>
-	internal static string SerializeRecord(ManagementProposal p, string mode)
+	internal static string SerializeRecord(ManagementProposal p, string mode, string strategy = "")
 	{
 		var record = new
 		{
@@ -52,6 +54,7 @@ internal sealed class ProposalSink : IDisposable
 			ts = DateTime.Now.ToString("o"),
 			rule = p.Rule,
 			ticker = p.Ticker,
+			strategy = strategy,
 			positionKey = p.PositionKey,
 			proposal = new
 			{
