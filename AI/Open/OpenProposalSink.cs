@@ -21,15 +21,17 @@ internal sealed class OpenProposalSink : IDisposable
 	private readonly string _suggestPricing;
 	private readonly bool _ascii;
 	private readonly string _cmdPrefix;
+	private readonly string _strategy;
 
-	public OpenProposalSink(string consoleVerbosity, string ticker, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
+	public OpenProposalSink(string consoleVerbosity, string ticker, string strategy, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
 	{
 		_consoleVerbosity = consoleVerbosity;
 		_mode = mode;
+		_strategy = strategy;
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
 		_ascii = ascii;
 		_cmdPrefix = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
-		var path = ProposalLog.ResolvedPath(ticker);
+		var path = ProposalLog.ResolvedPath(ticker, strategy);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
 	}
@@ -42,11 +44,11 @@ internal sealed class OpenProposalSink : IDisposable
 
 	public void Flush() => _file.Flush();
 
-	private void WriteJsonl(OpenProposal p) => _file.WriteLine(SerializeRecord(p, _mode));
+	private void WriteJsonl(OpenProposal p) => _file.WriteLine(SerializeRecord(p, _mode, _strategy));
 
 	/// <summary>Serializes one open proposal to its JSONL line. Pure (no I/O) so it's unit-testable
 	/// without touching the filesystem; the sink wraps it with the append writer.</summary>
-	internal static string SerializeRecord(OpenProposal p, string mode)
+	internal static string SerializeRecord(OpenProposal p, string mode, string strategy = "")
 	{
 		var record = new
 		{
@@ -54,6 +56,7 @@ internal sealed class OpenProposalSink : IDisposable
 			ts = DateTime.Now.ToString("o"),
 			mode = mode,
 			ticker = p.Ticker,
+			strategy = strategy,
 			structure = p.StructureKind.ToString(),
 			legs = p.Legs.Select(l => new { action = l.Action, symbol = l.Symbol, qty = l.Qty }),
 			qty = p.Qty,

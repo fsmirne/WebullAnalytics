@@ -5,7 +5,7 @@ namespace WebullAnalytics.AI;
 
 /// <summary>
 /// Layered ai-config loading: base <c>ai-config.json</c> plus optional ticker-scoped overrides
-/// at <c>ai-config.&lt;TICKER&gt;.json</c>. The override file is merged on top of the base via a
+/// at <c>ai-config.<TICKER>.json</c>. The override file is merged on top of the base via a
 /// deep merge — JSON objects merge key-by-key (recursively); arrays and scalar leaves are
 /// replaced wholesale by the override. This matches user expectations for tuning knobs
 /// (override the value, don't accumulate) while still letting the base provide structure.
@@ -33,6 +33,32 @@ internal static class AIConfigMerge
 		try
 		{
 			return JsonSerializer.Deserialize<AIConfig>(merged.ToJsonString());
+		}
+		catch (JsonException ex)
+		{
+			Console.Error.WriteLine($"Error: failed to deserialize merged ai-config: {ex.Message}");
+			return null;
+		}
+	}
+
+	/// <summary>Folds an ordered list of config layers (base → ticker → strategy), deep-merging each
+	/// onto the accumulated result so the last (most specific) layer wins. Null/non-existent paths are
+	/// skipped; returns null only when none of the layers exist or the merged JSON is unparseable.</summary>
+	public static AIConfig? LoadMerged(params string?[] paths)
+	{
+		JsonNode? acc = null;
+		var any = false;
+		foreach (var path in paths)
+		{
+			var node = TryReadJsonNode(path);
+			if (node == null) continue;
+			acc = DeepMerge(acc, node);
+			any = true;
+		}
+		if (!any || acc == null) return null;
+		try
+		{
+			return JsonSerializer.Deserialize<AIConfig>(acc.ToJsonString());
 		}
 		catch (JsonException ex)
 		{

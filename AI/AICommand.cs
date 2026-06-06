@@ -16,9 +16,9 @@ internal abstract class AISubcommandSettings : CommandSettings
 	private static readonly string[] ValidProposalModes = ["all", "open", "management"];
 	private static readonly string[] ValidPricingModes = [SuggestionPricing.Mid, SuggestionPricing.BidAsk];
 
-	[CommandOption("--config <PATH>")]
-	[Description("Path to ai-config.json. Default: data/ai-config.json.")]
-	public string? ConfigPath { get; set; }
+	[CommandOption("--strategy <TOKEN>")]
+	[Description("Strategy layer to load: ai-config.<TICKER>.<STRATEGY>.json. Overrides the config's defaultStrategy. Required when no defaultStrategy is set.")]
+	public string? Strategy { get; set; }
 
 	[CommandOption("--output <FORMAT>")]
 	[Description("Output format: console or text. Default: console.")]
@@ -67,7 +67,7 @@ internal abstract class AISubcommandSettings : CommandSettings
 
 /// <summary>Base for AI subcommands that operate on a single ticker (scan, watch, replay, backtest).
 /// The ticker is the first positional argument; the loader merges <c>ai-config.json</c> with the
-/// per-ticker override file <c>ai-config.&lt;TICKER&gt;.json</c> if it exists.</summary>
+/// per-ticker override file <c>ai-config.<TICKER>.json</c> if it exists.</summary>
 internal abstract class AISingleTickerSubcommandSettings : AISubcommandSettings
 {
 	[CommandArgument(0, "<ticker>")]
@@ -112,52 +112,85 @@ internal static class AITextOutput
 
 internal static class AIContext
 {
-	/// <summary>Loads ai-config (base + optional per-ticker override, deep-merged) and applies CLI
-	/// overrides. The per-ticker file is <c>ai-config.&lt;TICKER&gt;.json</c> next to the base. Returns
-	/// null on failure (with stderr messages).</summary>
+	/// <summary>Loads the merged ai-config for a run: base <c>ai-config.json</c> ⊕ per-ticker
+	/// <c>ai-config.<TICKER>.json</c> ⊕ per-strategy <c>ai-config.<TICKER>.<STRATEGY>.json</c>,
+	/// deep-merged most-specific-wins. Strategy is <c>--strategy</c>, else the base+ticker
+	/// <c>defaultStrategy</c>; with neither set this is an error (no fallback). Returns null on failure.</summary>
 	internal static AIConfig? ResolveConfig(AISubcommandSettings settings)
 	{
-		var basePath = settings.ConfigPath ?? AIConfigLoader.ConfigPath;
-		var absBasePath = Program.ResolvePath(basePath);
+		var layers = ResolveLayers(settings, out var ticker, out var strategy);
+		if (layers == null) return null;
 
-		string? overrideTicker = null;
-		if (settings is AISingleTickerSubcommandSettings single && !string.IsNullOrWhiteSpace(single.Ticker))
-			overrideTicker = single.Ticker.Trim().ToUpperInvariant();
-
-		string? absOverridePath = null;
-		if (overrideTicker != null)
-		{
-			var baseDir = Path.GetDirectoryName(basePath) ?? string.Empty;
-			var stem = Path.GetFileNameWithoutExtension(basePath);
-			var ext = Path.GetExtension(basePath);
-			var overrideRelative = Path.Combine(baseDir, $"{stem}.{overrideTicker}{ext}");
-			absOverridePath = Program.ResolvePath(overrideRelative);
-		}
-
-		var baseExists = File.Exists(absBasePath);
-		var overrideExists = absOverridePath != null && File.Exists(absOverridePath);
-
-		if (!baseExists && !overrideExists)
-		{
-			Console.Error.WriteLine($"Error: no ai-config found at '{basePath}'" + (overrideTicker != null ? $" or its per-ticker override for '{overrideTicker}'." : "."));
-			Console.Error.WriteLine($"  Run: cp ai-config.example.json {AIConfigLoader.ConfigPath} and edit.");
-			return null;
-		}
-
-		var config = AIConfigMerge.LoadMerged(baseExists ? absBasePath : null, overrideExists ? absOverridePath : null);
+		var config = AIConfigMerge.LoadMerged(layers.Select(l => l.AbsPath).ToArray());
 		if (config == null) { Console.Error.WriteLine("Error: ai-config is empty or unparseable."); return null; }
 
-		// CLI overrides applied after the merge.
-		if (overrideTicker != null) config.Ticker = overrideTicker;
+		config.Ticker = ticker;
+		config.Strategy = strategy;
 		if (!string.IsNullOrWhiteSpace(settings.LogLevel)) config.LogLevel = settings.LogLevel;
-
-		// Wire the shared indicators block onto OpenerConfig so helpers that only see cfg can reach it.
-		config.Opener.Indicators = config.Indicators;
+		config.Opener.Indicators = config.Indicators;        // shared indicators reachable from cfg-only helpers
 
 		var err = AIConfigLoader.Validate(config);
 		if (err != null) { Console.Error.WriteLine($"Error: ai-config: {err}"); return null; }
 
 		return config;
+	}
+
+	/// <summary>One labeled config layer: the human label ("base", "SPY", "SPY.DC") and its absolute path.</summary>
+	internal readonly record struct ConfigLayer(string Label, string AbsPath);
+
+	/// <summary>Resolves the ordered list of existing config-layer files for a run (base → ticker → strategy),
+	/// the same way <see cref="ResolveConfig"/> loads them — so the inspector reflects exactly what runs.
+	/// Returns null (with a stderr message) when the ticker, a base/ticker file, or the strategy is missing.</summary>
+	internal static List<ConfigLayer>? ResolveLayers(AISubcommandSettings settings, out string ticker, out string strategy)
+	{
+		ticker = ""; strategy = "";
+		var baseRel = AIConfigLoader.ConfigPath;                  // data/ai-config.json
+		var dir = Path.GetDirectoryName(baseRel) ?? string.Empty;
+		var stem = Path.GetFileNameWithoutExtension(baseRel);     // ai-config
+		var ext = Path.GetExtension(baseRel);                     // .json
+
+		if (settings is not AISingleTickerSubcommandSettings single || string.IsNullOrWhiteSpace(single.Ticker))
+		{
+			Console.Error.WriteLine("Error: a ticker is required.");
+			return null;
+		}
+		ticker = single.Ticker.Trim().ToUpperInvariant();
+
+		var absBase = Program.ResolvePath(baseRel);
+		var tickerRel = Path.Combine(dir, $"{stem}.{ticker}{ext}");
+		var absTicker = Program.ResolvePath(tickerRel);
+		if (!File.Exists(absBase) && !File.Exists(absTicker))
+		{
+			Console.Error.WriteLine($"Error: no ai-config found at '{baseRel}' or '{tickerRel}'.");
+			Console.Error.WriteLine($"  Run: cp ai-config.example.json {baseRel} and edit.");
+			return null;
+		}
+
+		// Layers base ⊕ ticker resolve the strategy via defaultStrategy.
+		var core = AIConfigMerge.LoadMerged(File.Exists(absBase) ? absBase : null, File.Exists(absTicker) ? absTicker : null);
+		if (core == null) { Console.Error.WriteLine("Error: ai-config is empty or unparseable."); return null; }
+
+		strategy = (!string.IsNullOrWhiteSpace(settings.Strategy) ? settings.Strategy! : core.DefaultStrategy).Trim();
+		if (string.IsNullOrWhiteSpace(strategy))
+		{
+			Console.Error.WriteLine($"Error: no strategy selected for {ticker}. Pass --strategy <TOKEN> or set \"defaultStrategy\" in {tickerRel} (or {baseRel}).");
+			return null;
+		}
+
+		// Layer 3 (per-strategy) must exist — no fallback.
+		var stratRel = Path.Combine(dir, $"{stem}.{ticker}.{strategy}{ext}");
+		var absStrat = Program.ResolvePath(stratRel);
+		if (!File.Exists(absStrat))
+		{
+			Console.Error.WriteLine($"Error: strategy '{strategy}' for {ticker} not found at '{stratRel}'.");
+			return null;
+		}
+
+		var layers = new List<ConfigLayer>();
+		if (File.Exists(absBase)) layers.Add(new ConfigLayer("base", absBase));
+		if (File.Exists(absTicker)) layers.Add(new ConfigLayer(ticker, absTicker));
+		layers.Add(new ConfigLayer($"{ticker}.{strategy}", absStrat));
+		return layers;
 	}
 
 	internal static IPositionSource BuildLivePositionSource(AIConfig config, string? accountOverride = null)
@@ -382,7 +415,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var managementCount = settings.EmitManagementProposals ? results.Count : 0;
 		if (settings.EmitManagementProposals)
 		{
-			using var sink = new ProposalSink(config.LogLevel, config.Ticker, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			using var sink = new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
 		}
 		if (mgmtExecutor != null)
@@ -391,7 +424,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var openCount = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			var openSink = new OpenProposalSink(config.LogLevel, config.Ticker, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			var openSink = new OpenProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
@@ -615,7 +648,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var openerOrdersThisRun = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
-			var openSink = new OpenProposalSink(config.LogLevel, config.Ticker, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+			var openSink = new OpenProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, backtestMode: true, dividendsByRoot: dividendsByRoot);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);

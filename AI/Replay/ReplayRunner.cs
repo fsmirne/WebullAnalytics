@@ -27,7 +27,7 @@ internal sealed class ReplayRunner
 
 		var tickerSet = _config.TickerSet();
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(_config), _config);
-		using var sink = new ProposalSink(_config.LogLevel, _config.Ticker, mode: "replay");
+		using var sink = new ProposalSink(_config.LogLevel, _config.Ticker, _config.Strategy, mode: "replay");
 
 		var steps = EnumerateSteps(since, until, granularity).ToList();
 		var ruleFireCounts = new Dictionary<string, int>();
