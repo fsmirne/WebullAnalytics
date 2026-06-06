@@ -55,9 +55,9 @@ internal static class AIHistoryOptionsBackfill
 		}
 		// Pace the massive (expired-contract) path to the configured tier. Basic = 5/min; Options Starter+
 		// is unlimited (set massiveMaxRequestsPerMinute to a large value or 0 to run at full speed).
-		MassivePolygonClient.MaxRequestsPerWindow = apiConfig?.MassiveMaxRequestsPerMinute ?? 5;
+		MassivePolygonClient.MaxRequestsPerWindow = apiConfig?.Massive.MaxRequestsPerMinute ?? 5;
 
-		if (apiConfig == null || apiConfig.Headers.Count == 0)
+		if (apiConfig == null || apiConfig.Webull.Headers.Count == 0)
 		{
 			AnsiConsole.MarkupLine("  [red]api-config.json has no headers[/] — run `wa sniff` to refresh");
 			return 1;
@@ -210,7 +210,7 @@ internal static class AIHistoryOptionsBackfill
 		var work = new List<(string Occ, long? DerivativeId, OptionParsed Parsed, string CsvPath, bool MergeExisting, OptionDataSource Source)>();
 		var skippedNoMassive = 0;
 		var skippedComplete = 0;
-		var hasMassiveKey = !string.IsNullOrWhiteSpace(apiConfig!.MassiveApiKey);
+		var hasMassiveKey = !string.IsNullOrWhiteSpace(apiConfig!.Massive.ApiKey);
 		var todayEt = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, NyTz).Date;
 
 		// Sealed manifest (mirrors the intraday data/intraday/<T>/sealed.json idea): OCCs of fully-captured,
@@ -300,7 +300,7 @@ internal static class AIHistoryOptionsBackfill
 					var listFrom = DateOnly.FromDateTime(item.Parsed.ExpiryDate.AddDays(-lookbackDays));
 					var expireTo = DateOnly.FromDateTime(item.Parsed.ExpiryDate);
 					if (listFrom > DateOnly.FromDateTime(todayEt)) { emptyResponses.Add(item.Occ); return; }
-					bars = await MassivePolygonClient.FetchOptionMinuteAggregatesAsync(apiConfig!.MassiveApiKey, item.Occ, listFrom, expireTo, ct);
+					bars = await MassivePolygonClient.FetchOptionMinuteAggregatesAsync(apiConfig!.Massive.ApiKey, item.Occ, listFrom, expireTo, ct);
 				}
 			}
 			catch (Exception ex) when (ex is not OperationCanceledException)

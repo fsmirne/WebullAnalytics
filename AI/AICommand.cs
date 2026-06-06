@@ -222,7 +222,7 @@ internal static class AIContext
 		var resolved = TradeConfig.Resolve(tradeConfig, accountOverride);
 		if (resolved == null)
 		{
-			var key = accountOverride ?? tradeConfig.DefaultAccount ?? "<unset>";
+			var key = accountOverride ?? tradeConfig.Webull.DefaultAccount ?? "<unset>";
 			throw new InvalidOperationException($"account '{key}' not found in api-config.json");
 		}
 		return resolved;

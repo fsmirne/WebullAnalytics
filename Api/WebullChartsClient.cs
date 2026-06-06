@@ -93,7 +93,7 @@ internal static class WebullChartsClient
 
 		var request = new HttpRequestMessage(HttpMethod.Get, url);
 		foreach (var (key, value) in DefaultHeaders) request.Headers.TryAddWithoutValidation(key, value);
-		foreach (var (key, value) in config.Headers) request.Headers.TryAddWithoutValidation(key, value);
+		foreach (var (key, value) in config.Webull.Headers) request.Headers.TryAddWithoutValidation(key, value);
 
 		HttpResponseMessage response;
 		try
@@ -158,7 +158,7 @@ internal static class WebullChartsClient
 
 		var request = new HttpRequestMessage(HttpMethod.Get, url);
 		foreach (var (key, value) in DefaultHeaders) request.Headers.TryAddWithoutValidation(key, value);
-		foreach (var (key, value) in config.Headers)
+		foreach (var (key, value) in config.Webull.Headers)
 		{
 			// Suppress the per-URL signature headers — they were computed for whatever request `wa sniff`
 			// captured and don't match the historical URL we're about to send.
@@ -223,7 +223,7 @@ internal static class WebullChartsClient
 
 		var request = new HttpRequestMessage(HttpMethod.Get, url);
 		foreach (var (key, value) in DefaultHeaders) request.Headers.TryAddWithoutValidation(key, value);
-		foreach (var (key, value) in config.Headers)
+		foreach (var (key, value) in config.Webull.Headers)
 		{
 			if (string.Equals(key, "x-s", StringComparison.OrdinalIgnoreCase)) continue;
 			if (string.Equals(key, "x-sv", StringComparison.OrdinalIgnoreCase)) continue;

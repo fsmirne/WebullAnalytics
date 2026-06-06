@@ -146,7 +146,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (File.Exists(apiConfigPath))
 		{
 			var apiCfg = System.Text.Json.JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(apiConfigPath));
-			if (apiCfg != null && apiCfg.Headers.Count > 0)
+			if (apiCfg != null && apiCfg.Webull.Headers.Count > 0)
 			{
 				var targetExpiries = positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().ToList();
 				var (chainQuotes, chainSpot, _) = await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(apiCfg, ticker, targetExpiries, strikeRangeFraction: 0.20m, cancellation);

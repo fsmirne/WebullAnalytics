@@ -280,7 +280,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				else
 				{
 					var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-					if (config == null || config.Headers.Count == 0)
+					if (config == null || config.Webull.Headers.Count == 0)
 					{
 						Console.WriteLine("Note: api-config.json has no headers — skipping live chain fetch. Run 'sniff' to capture them.");
 					}

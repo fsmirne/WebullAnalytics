@@ -232,7 +232,7 @@ internal static class WebullOptionsClient
 
 			var request = new HttpRequestMessage(HttpMethod.Post, StrategyListUrl);
 			foreach (var (key, value) in DefaultHeaders) request.Headers.TryAddWithoutValidation(key, value);
-			foreach (var (key, value) in config.Headers) request.Headers.TryAddWithoutValidation(key, value);
+			foreach (var (key, value) in config.Webull.Headers) request.Headers.TryAddWithoutValidation(key, value);
 
 			var body = JsonSerializer.Serialize(new { expireCycle = new[] { 3, 2, 4 }, type = 0, quoteMultiplier = 100, count = -1, direction = "all", tickerId = tickerId.Value });
 			request.Content = new StringContent(body, Encoding.UTF8, "application/json");
@@ -349,7 +349,7 @@ internal static class WebullOptionsClient
 			var url = $"{QueryBatchUrl}?derivativeIds={idsParam}";
 			var request = new HttpRequestMessage(HttpMethod.Get, url);
 			foreach (var (key, value) in DefaultHeaders) request.Headers.TryAddWithoutValidation(key, value);
-			foreach (var (key, value) in config.Headers) request.Headers.TryAddWithoutValidation(key, value);
+			foreach (var (key, value) in config.Webull.Headers) request.Headers.TryAddWithoutValidation(key, value);
 
 			var response = await client.SendAsync(request, cancellationToken);
 			using (response)

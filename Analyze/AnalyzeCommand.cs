@@ -344,7 +344,7 @@ internal static class AnalyzeCommon
 			var configPath = Program.ResolvePath(Program.ApiConfigPath);
 			if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return (null, null); }
 			var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-			if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return (null, null); }
+			if (config == null || config.Webull.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return (null, null); }
 			Console.WriteLine($"Webull: fetching quotes for {symbols.Count} symbol(s)...");
 			var (quotes, underlying) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
 			return (quotes, underlying);
@@ -475,7 +475,7 @@ internal static class AnalyzeCommon
 			var configPath = Program.ResolvePath(Program.ApiConfigPath);
 			if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return 1; }
 			var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-			if (config == null || config.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return 1; }
+			if (config == null || config.Webull.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return 1; }
 			Console.WriteLine("Webull: fetching option chain data for roll analysis...");
 			(quotes, underlyingPrices) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
 

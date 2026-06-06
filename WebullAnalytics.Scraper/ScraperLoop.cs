@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
 using Spectre.Console;
-using WebullAnalytics.Api;
 
 namespace WebullAnalytics.Scraper;
 
@@ -19,14 +18,14 @@ internal sealed class ScraperLoop
 
 	private readonly string _ticker;
 	private readonly ScraperConfig _config;
-	private readonly ApiConfig _apiConfig;
+	private readonly IChainSource _chainSource;
 	private readonly string _outputDir;
 
-	public ScraperLoop(string ticker, ScraperConfig config, ApiConfig apiConfig)
+	public ScraperLoop(string ticker, ScraperConfig config, IChainSource chainSource)
 	{
 		_ticker = ticker.ToUpperInvariant();
 		_config = config;
-		_apiConfig = apiConfig;
+		_chainSource = chainSource;
 		var outputRoot = Path.IsPathRooted(config.OutputPath)
 			? config.OutputPath
 			: WebullAnalytics.Program.ResolvePath(config.OutputPath);
@@ -82,6 +81,12 @@ internal sealed class ScraperLoop
 				}
 			}
 			catch (OperationCanceledException) { break; }
+			catch (WebullAnalytics.Api.SchwabAuthException ex)
+			{
+				// Expired/invalid token won't fix itself by retrying — stop now with an actionable message.
+				Console.Error.WriteLine($"Schwab auth: {ex.Message}");
+				return 4;
+			}
 			catch (Exception ex)
 			{
 				failures++;
@@ -120,16 +125,15 @@ internal sealed class ScraperLoop
 		// times within the interval; only persist once we actually have contracts, never an empty line.
 		List<OptionContractQuote> todayContracts = new();
 		decimal? spot = null;
+		var fromExpiry = DateOnly.FromDateTime(fireEt.Date);
+		var toExpiry = DateOnly.FromDateTime(fireEt.Date.AddDays(_config.MaxDte));
 		for (var attempt = 0; attempt <= _config.EmptyRetryCount; attempt++)
 		{
-			// The chain/list endpoint only quotes the front (0DTE) expiry — the further-dated contracts come
-			// back as symbols with null bid/ask/IV. When MaxDte>0 we must queryBatch-refresh those near-the-money
-			// far-dated strikes, or the persisted far legs are unpriceable placeholders (the bug this fixes).
-			var (quotes, fetchedSpot, _) = _config.MaxDte > 0
-				? await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(_apiConfig, _ticker, Enumerable.Range(0, _config.MaxDte + 1).Select(d => fireEt.Date.AddDays(d)).ToList(), _config.FarStrikeRangeFraction, cancellation)
-				: await WebullOptionsClient.FetchChainAsync(_apiConfig, _ticker, cancellation);
+			// The source returns the full window already quoted (Schwab inlines NBBO+OI for every expiry;
+			// the Webull source does the queryBatch refresh internally when the window spans >1 day).
+			var (fetchedSpot, fetched) = await _chainSource.FetchChainAsync(_ticker, fromExpiry, toExpiry, _config.FarStrikeRangeFraction, cancellation);
 			spot = fetchedSpot;
-			todayContracts = quotes.Values
+			todayContracts = fetched
 				.Where(q =>
 				{
 					var parsed = WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol);

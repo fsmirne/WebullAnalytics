@@ -26,7 +26,7 @@ class SniffCommand : AsyncCommand<SniffSettings>
 			Console.WriteLine("Error: Failed to parse api-config.json.");
 			return 1;
 		}
-		if (string.IsNullOrWhiteSpace(config.Pin))
+		if (string.IsNullOrWhiteSpace(config.Webull.Pin))
 		{
 			Console.WriteLine("Error: 'pin' is required in api-config.json for header sniffing.");
 			return 1;
@@ -37,7 +37,7 @@ class SniffCommand : AsyncCommand<SniffSettings>
 
 		try
 		{
-			var headers = await HeaderSniffer.CaptureAsync(config.Pin, autoCloseBrowser, cancellation);
+			var headers = await HeaderSniffer.CaptureAsync(config.Webull.Pin, autoCloseBrowser, cancellation);
 			Console.WriteLine($"Captured {headers.Count} header(s).");
 
 			var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(configPath))!.AsObject();

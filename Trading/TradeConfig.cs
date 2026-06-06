@@ -37,7 +37,7 @@ internal static class TradeConfig
 		try
 		{
 			var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(path));
-			if (config == null || config.Accounts.Count == 0)
+			if (config == null || config.Webull.Accounts.Count == 0)
 			{
 				if (!quiet)
 					Console.Error.WriteLine("Error: api-config.json must contain at least one entry under 'accounts'.");
@@ -57,21 +57,21 @@ internal static class TradeConfig
 	/// Returns null (with stderr message) if resolution fails.</summary>
 	internal static TradeAccount? Resolve(ApiConfig config, string? accountFlag, bool quiet = false)
 	{
-		var key = string.IsNullOrWhiteSpace(accountFlag) ? config.DefaultAccount : accountFlag;
+		var key = string.IsNullOrWhiteSpace(accountFlag) ? config.Webull.DefaultAccount : accountFlag;
 		if (string.IsNullOrWhiteSpace(key))
 		{
 			if (!quiet)
 				Console.Error.WriteLine("Error: no --account flag and no 'defaultAccount' in api-config.json.");
 			return null;
 		}
-		var match = config.Accounts.FirstOrDefault(a =>
+		var match = config.Webull.Accounts.FirstOrDefault(a =>
 			string.Equals(a.Alias, key, StringComparison.OrdinalIgnoreCase) ||
 			string.Equals(a.AccountId, key, StringComparison.OrdinalIgnoreCase));
 		if (match == null)
 		{
 			if (!quiet)
 			{
-				var aliases = string.Join(", ", config.Accounts.Select(a => a.Alias));
+				var aliases = string.Join(", ", config.Webull.Accounts.Select(a => a.Alias));
 				Console.Error.WriteLine($"Error: account '{key}' not found. Valid aliases: {aliases}");
 			}
 			return null;

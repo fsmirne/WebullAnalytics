@@ -28,7 +28,7 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		if (!File.Exists(configPath)) throw new InvalidOperationException("api-config.json not found. Run 'sniff' first.");
 		var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath))
 			?? throw new InvalidOperationException("api-config.json is empty.");
-		if (config.Headers.Count == 0) throw new InvalidOperationException("api-config.json has no headers. Run 'sniff' first.");
+		if (config.Webull.Headers.Count == 0) throw new InvalidOperationException("api-config.json has no headers. Run 'sniff' first.");
 
 		var (options, spots) = await WebullOptionsClient.FetchOptionQuotesAsync(config, rows, cancellation);
 
