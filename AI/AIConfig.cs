@@ -166,8 +166,8 @@ internal static class ProposalLog
 	public static string RelativePath(string ticker, string strategy) => $"data/ai-proposals.{ticker.ToUpperInvariant()}.{strategy}.jsonl";
 	public static string ResolvedPath(string ticker, string strategy) => Program.ResolvePath(RelativePath(ticker, strategy));
 
-	/// <summary>All proposal logs for a ticker across strategies — <c>data/ai-proposals.&lt;TICKER&gt;.*.jsonl</c>
-	/// plus the legacy pre-strategy <c>ai-proposals.&lt;TICKER&gt;.jsonl</c> if present. For readers that need a
+	/// <summary>All proposal logs for a ticker across strategies — <c>data/ai-proposals.<TICKER>.*.jsonl</c>
+	/// plus the legacy pre-strategy <c>ai-proposals.<TICKER>.jsonl</c> if present. For readers that need a
 	/// ticker's full footprint regardless of strategy (e.g. the options backfill's touched-symbol scan).</summary>
 	public static IReadOnlyList<string> AllResolvedPathsForTicker(string ticker)
 	{
