@@ -126,9 +126,9 @@ internal sealed class ManagementAutoExecuteConfig
 	/// across sessions). Default DAY matches normal in-session operation. Use GTC for off-hours
 	/// submission — Webull rejects DAY orders outside 08:00–16:00 ET on trading days but accepts GTC.</summary>
 	[JsonPropertyName("timeInForce")] public string TimeInForce { get; set; } = "DAY";
-	/// <summary>Names of rules whose proposals are eligible for auto-execution. Anything not listed
-	/// still surfaces as a suggestion only.</summary>
-	[JsonPropertyName("rules")] public List<string> Rules { get; set; } = new() { "CloseBeforeShortExpiryRule" };
+	/// <summary>Names of rules whose proposals are eligible for auto-execution. Empty by default — nothing
+	/// auto-executes until explicitly allow-listed. Anything not listed still surfaces as a suggestion only.</summary>
+	[JsonPropertyName("rules")] public List<string> Rules { get; set; } = new();
 	[JsonPropertyName("scaleOut")] public ScaleOutConfig ScaleOut { get; set; } = new();
 }
 
