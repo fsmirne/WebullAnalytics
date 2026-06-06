@@ -151,17 +151,15 @@ public class CandidateScorerRationaleTests
 			Rationale: "",
 			Fingerprint: "fp",
 			PremiumRatio: 3.06m,
-			MaxPainAdjustmentFactor: 1.19m,
 			TargetExpiryMaxPain: 24.50m,
 			FinalScore: 0.010000m);
 
 		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
-		var lines = rationale.Split('\n');
 
-		Assert.Equal(4, lines.Length);
-		Assert.Equal("max-pain target $24.50 → pain 1.19", lines[1]);
-		Assert.DoesNotContain("max pain target", lines[3]);
-		Assert.DoesNotContain("max-pain target", lines[3]);
+		// Max-pain is now display-only (the directional pull moved to the maxPainBiasPull grid magnet), so the
+		// indicators line shows the target price with no "→ pain" multiplier.
+		Assert.Contains("max-pain target $24.50", rationale);
+		Assert.DoesNotContain("→ pain", rationale);
 	}
 
 	[Fact]

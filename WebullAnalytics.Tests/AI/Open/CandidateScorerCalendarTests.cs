@@ -146,40 +146,6 @@ public class CandidateScorerCalendarTests
 	}
 
 	[Fact]
-	public void CalendarGetsBoostWhenShortStrikeMatchesMaxPain()
-	{
-		var asOf = new DateTime(2026, 4, 20);
-		var shortExp = new DateTime(2026, 4, 24);
-		var longExp = new DateTime(2026, 5, 15);
-		var shortSym = MatchKeys.OccSymbol("GME", shortExp, 25m, "C");
-		var longSym = MatchKeys.OccSymbol("GME", longExp, 25m, "C");
-		var extraCall = MatchKeys.OccSymbol("GME", shortExp, 30m, "C");
-		var skel = new CandidateSkeleton("GME", OpenStructureKind.LongCalendar, new[]
-		{
-			new ProposalLeg("sell", shortSym, 1),
-			new ProposalLeg("buy", longSym, 1)
-		}, TargetExpiry: shortExp);
-		var quotes = new Dictionary<string, OptionContractQuote>
-		{
-			[shortSym] = TestQuote.Q(1.50m, 1.55m, 0.40m, openInterest: 100),
-			[longSym] = TestQuote.Q(1.80m, 1.90m, 0.40m),
-			[extraCall] = TestQuote.Q(0.20m, 0.25m, 0.40m, openInterest: 40)
-		};
-
-		var baseCfg = Cfg();
-		var painCfg = Cfg();
-		painCfg.Weights.MaxPain = 0.50m;
-
-		var withoutPain = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 25m, asOf, quotes, bias: 0m, baseCfg)!;
-		var withPain = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 25m, asOf, quotes, bias: 0m, painCfg)!;
-
-		Assert.Equal(25m, withPain.TargetExpiryMaxPain);
-		Assert.Equal(1.50m, withPain.MaxPainAdjustmentFactor);
-		Assert.Equal(Math.Sign(withoutPain.BiasAdjustedScore), Math.Sign(withPain.BiasAdjustedScore));
-		Assert.True(Math.Abs(withPain.BiasAdjustedScore) > Math.Abs(withoutPain.BiasAdjustedScore));
-	}
-
-	[Fact]
 	public void CalendarFallsBackToBlackScholesPricingWithWarningWhenBidAskMissing()
 	{
 		var asOf = new DateTime(2026, 4, 20);
@@ -233,7 +199,6 @@ public class CandidateScorerCalendarTests
 		};
 
 		var cfg = Cfg();
-		cfg.Weights.MaxPain = 0.50m;
 		var p = CandidateScorer.ScoreMultiLeg(skel, spot: 25m, asOf, quotes, bias: 0m, cfg)!;
 
 		Assert.Equal(OpenStructureKind.DoubleCalendar, p.StructureKind);
@@ -241,7 +206,6 @@ public class CandidateScorerCalendarTests
 		Assert.Equal(0, p.DirectionalFit);
 		Assert.True(p.Breakevens.Count >= 2);
 		Assert.Equal(25m, p.TargetExpiryMaxPain);
-		Assert.True(p.MaxPainAdjustmentFactor > 1m);
 	}
 
 	// ── Cost-basis / --spot POP correctness ──────────────────────────────────────────────────────
@@ -393,14 +357,12 @@ public class CandidateScorerCalendarTests
 		};
 
 		var cfg = Cfg();
-		cfg.Weights.MaxPain = 0.50m;
 		var p = CandidateScorer.ScoreMultiLeg(skel, spot: 25m, asOf, quotes, bias: 0m, cfg)!;
 
 		Assert.Equal(OpenStructureKind.DoubleDiagonal, p.StructureKind);
 		Assert.True(p.DebitOrCreditPerContract < 0m);
 		Assert.Equal(0, p.DirectionalFit);
 		Assert.Equal(25m, p.TargetExpiryMaxPain);
-		Assert.True(p.MaxPainAdjustmentFactor > 1m);
 	}
 
 	[Fact]
