@@ -119,6 +119,7 @@ class Program
 				{
 					cfg.AddCommand<AI.AIConfigShowCommand>("show");
 					cfg.AddCommand<AI.AIConfigInitCommand>("init");
+					cfg.AddCommand<AI.AIConfigFormatCommand>("format");
 				});
 			});
 			config.AddBranch("options", options =>
