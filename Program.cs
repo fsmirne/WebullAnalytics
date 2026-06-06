@@ -115,7 +115,11 @@ class Program
 				ai.AddCommand<AI.AIBacktestCommand>("backtest");
 				ai.AddCommand<AI.AIHistoryCommand>("history");
 				ai.AddCommand<AI.Analysis.DipAnalysisCommand>("dip");
-				ai.AddBranch("config", cfg => cfg.AddCommand<AI.AIConfigShowCommand>("show"));
+				ai.AddBranch("config", cfg =>
+				{
+					cfg.AddCommand<AI.AIConfigShowCommand>("show");
+					cfg.AddCommand<AI.AIConfigInitCommand>("init");
+				});
 			});
 			config.AddBranch("options", options =>
 			{
