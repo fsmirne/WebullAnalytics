@@ -58,6 +58,13 @@ internal sealed class OpenerConfig
 	/// keeps the backtest aligned with what's actually live-tradeable, and shrinks the candidate space. Default false.</summary>
 	[JsonPropertyName("weeklyMonthlyExpiriesOnly")] public bool WeeklyMonthlyExpiriesOnly { get; set; } = false;
 
+	/// <summary>How the Fear & Greed sentiment overlay reads the score: <c>"contrarian"</c> (default — extreme
+	/// fear favors bullish structures, greed favors bearish; the legacy hardcoded behaviour) or <c>"momentum"</c>
+	/// (fear favors bearish, greed bullish — trade WITH the crowd). Momentum suits intraday trend/0DTE plays where
+	/// a fear regime confirms a down move rather than signalling a contrarian bounce. Anything other than
+	/// "momentum" is treated as contrarian.</summary>
+	[JsonPropertyName("sentimentMode")] public string SentimentMode { get; set; } = "contrarian";
+
 	/// <summary>Multiplicative-factor weights applied to the candidate score chain. All twelve signals
 	/// live here in one sub-block so the user can see the full set of scoring knobs at a glance.</summary>
 	[JsonPropertyName("weights")] public OpenerWeightsConfig Weights { get; set; } = new();
@@ -126,10 +133,28 @@ internal sealed class OpenerWeightsConfig
 	/// that one fires on trade-type sign alone; this one weighs the structure's vega exposure.</summary>
 	[JsonPropertyName("volatilityFit")] public decimal VolatilityFit { get; set; } = 0.50m;
 
-	[JsonPropertyName("maxPain")] public decimal MaxPain { get; set; } = 0m;
+	/// <summary>Net dealer-gamma REGIME tilt (the volatility, not directional, half of the old GEX factor):
+	/// <c>max(0.10, 1 + weight × clamp(NetGexFraction × volFitSign, −1, 1))</c>. Negative net gamma (put-gamma
+	/// dominant, amplifying regime) favors long-vol/long-premium structures; positive net gamma (suppressive)
+	/// favors short-vol. This is purely a structure-shape tilt — the DIRECTIONAL gravity pin that used to be
+	/// blended in here now lives entirely in <see cref="GexBiasPull"/> (the magnet). 0 disables.</summary>
+	[JsonPropertyName("gammaRegime")] public decimal GammaRegime { get; set; } = 0m;
 
-	/// <summary>Dealer-gamma exposure factor. Pin signal + regime signal blended (60/40).</summary>
-	[JsonPropertyName("gex")] public decimal Gex { get; set; } = 0m;
+	/// <summary>GEX gravity as a true MAGNET: shifts the scenario-grid center toward the gravity strike by
+	/// <c>weight × clamp((gravity − spot) / expectedMove, −1, 1) × sigma</c>, exactly like <see cref="BiasDrift"/>
+	/// does for the technical bias. This is the directional half of dealer-gamma positioning. Unlike a
+	/// multiplicative factor — which can re-rank near-zero-base structures but can never flip a
+	/// structurally-negative long-premium score positive (the sign-symmetric ApplyFactor caps a boost at "bring
+	/// to zero", and beyond that produces a sign-flip artifact) — this moves the expected-price distribution
+	/// itself, so a gravity below spot raises a long put's realized EV honestly and picks a sensible strike.
+	/// 0 disables (live unchanged).</summary>
+	[JsonPropertyName("gexBiasPull")] public decimal GexBiasPull { get; set; } = 0m;
+
+	/// <summary>Max-pain as a true MAGNET — identical channel to <see cref="GexBiasPull"/> but pulling the
+	/// scenario-grid center toward the max-pain strike instead of GEX gravity. Replaces the old multiplicative
+	/// max-pain factor (removed: it was the same directional pin signal applied the strictly-worse way).
+	/// 0 disables (live unchanged).</summary>
+	[JsonPropertyName("maxPainBiasPull")] public decimal MaxPainBiasPull { get; set; } = 0m;
 
 	[JsonPropertyName("statArb")] public decimal StatArb { get; set; } = 0.30m;
 

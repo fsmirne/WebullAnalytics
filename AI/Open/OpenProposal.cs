@@ -63,11 +63,10 @@ public enum OpenStructureKind
 /// <param name="ImpliedVolatilityAnnual">Representative annualized IV used for ranking, as a fraction (0.40 = 40%).</param>
 /// <param name="HistoricalVolatilityAnnual">Annualized realized volatility over the configured lookback, as a fraction.</param>
 /// <param name="VolatilityAdjustmentFactor">IV-vs-HV multiplier applied during ranking; null when HV was unavailable.</param>
-/// <param name="TargetExpiryMaxPain">Max-pain price inferred from open interest for the proposal's target expiry.</param>
-/// <param name="MaxPainAdjustmentFactor">Max-pain multiplier applied during ranking; null when disabled or unavailable.</param>
-/// <param name="GexGravity">Strike with the highest gross gamma×OI (calls + puts) at the target expiry — the gravity / pin point where dealer hedging is most concentrated, matching the convention used by Barchart and most public GEX tools.</param>
+/// <param name="TargetExpiryMaxPain">Max-pain price inferred from open interest for the proposal's target expiry (display only; the directional max-pain pull lives in the maxPainBiasPull grid magnet).</param>
+/// <param name="GexGravity">Strike with the highest gross gamma×OI (calls + puts) at the target expiry — the gravity / pin point where dealer hedging is most concentrated, matching the convention used by Barchart and most public GEX tools. Drives the gexBiasPull grid magnet.</param>
 /// <param name="NetGexFraction">Net dealer gamma exposure normalized to [−1, +1]: positive = call gamma dominates (dealers net long gamma, suppressive regime); negative = put gamma dominates (amplifying regime).</param>
-/// <param name="GexAdjustmentFactor">GEX multiplier applied during ranking; null when disabled (gexWeight=0) or when the chain lacks sufficient IV data to compute gamma.</param>
+/// <param name="GammaRegimeFactor">Net dealer-gamma REGIME multiplier (the volatility tilt: NetGexFraction × structure vol-fit sign) applied during ranking; null when the gammaRegime weight is 0.</param>
 /// <param name="RunwayFactor">Residual long-leg extrinsic/adjustment-runway multiplier applied during ranking when time remains after the target expiry.</param>
 /// <param name="AssignmentRiskFactor">Short-option assignment/near-spot risk multiplier applied during ranking; null when no short-leg penalty applied.</param>
 /// <param name="ThetaPerDayPerContract">Finite-difference net theta per day in dollars per contract. Used as a merit signal during opener ranking.</param>
@@ -107,10 +106,9 @@ internal sealed record OpenProposal(
 	decimal? HistoricalVolatilityAnnual = null,
 	decimal? VolatilityAdjustmentFactor = null,
 	decimal? TargetExpiryMaxPain = null,
-	decimal? MaxPainAdjustmentFactor = null,
 	decimal? GexGravity = null,
 	decimal? NetGexFraction = null,
-	decimal? GexAdjustmentFactor = null,
+	decimal? GammaRegimeFactor = null,
 	decimal? SetupFactor = null,
 	decimal? RunwayFactor = null,
 	decimal? AssignmentRiskFactor = null,
