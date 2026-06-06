@@ -9,6 +9,10 @@ namespace WebullAnalytics;
 /// per-structure knob sets are easy to scan at a glance. Everything else is one key per line.</summary>
 internal static class ConfigJsonWriter
 {
+	/// <summary>Object-valued keys whose contents are collapsed onto a single line (small knob bags that
+	/// read better inline). <c>structures</c> is handled separately (container multi-line, each entry inline).</summary>
+	private static readonly HashSet<string> InlineObjectKeys = new(StringComparer.Ordinal) { "events" };
+
 	public static string Serialize(JsonNode root)
 	{
 		var sb = new StringBuilder();
@@ -56,6 +60,8 @@ internal static class ConfigJsonWriter
 			// opener.structures: container stays one-entry-per-line, but each structure's knobs go inline.
 			if (kv.Key == "structures" && kv.Value is JsonObject structures)
 				WriteStructuresContainer(sb, structures, depth + 1);
+			else if (InlineObjectKeys.Contains(kv.Key) && kv.Value is JsonObject)
+				WriteValue(sb, kv.Value, depth + 1, compact: true);
 			else
 				WriteValue(sb, kv.Value, depth + 1, compact: false);
 			if (i < items.Count - 1) sb.Append(',');
