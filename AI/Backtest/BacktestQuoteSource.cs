@@ -186,6 +186,11 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	private readonly IReadOnlyDictionary<string, decimal>? _spotOverrides;
 	private readonly HistoricalOptionBarCache? _optionBars;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
+	// Per-day per-contract open interest (+ IV) from the scraped chain snapshots. The captured option BARS
+	// carry no OI, so the GEX / max-pain factors are inert in the backtest without this. When present, every
+	// quote we return for a contract that exists in the day's snapshot gets its real OI (and a snapshot IV for
+	// the OI-only ladder markers, which ComputeGex needs to weight gamma). Null → unchanged (OI stays absent).
+	private readonly ChainSnapshotOiCache? _oiCache;
 
 	// Diagnostic: records which synthetic branch priced each (contract, ET date) the last time it was
 	// synthesized (no captured bar of its own). Keyed at day granularity to match the day-level provenance
@@ -238,7 +243,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	/// price is never adjusted — it's a real market print that already embeds the dividend; only the IV we
 	/// extract from it does. Null (or a root with no schedule) leaves that root unadjusted (q=0), unchanged
 	/// behaviour — correct for cash-settled index roots (SPX/SPXW/XSP).</param>
-	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double riskFreeRate, IReadOnlyDictionary<string, decimal>? spotOverrides = null, HistoricalOptionBarCache? optionBars = null, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
+	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double riskFreeRate, IReadOnlyDictionary<string, decimal>? spotOverrides = null, HistoricalOptionBarCache? optionBars = null, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, ChainSnapshotOiCache? oiCache = null)
 	{
 		_bars = bars;
 		_iv = iv;
@@ -246,6 +251,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		_spotOverrides = spotOverrides;
 		_optionBars = optionBars;
 		_dividendsByRoot = dividendsByRoot;
+		_oiCache = oiCache;
 	}
 
 	/// <summary>Spot reduced by the present value of every known dividend going ex within
@@ -504,6 +510,12 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 			var halfSpread = HalfSpreadFor(parsed.Root, price);
 			var bid = Math.Max(0m, price - halfSpread);
 			var ask = price + halfSpread;
+			// Attach the contract's real open interest from the day's chain snapshot (static intraday) when
+			// available — this is what lets the GEX / max-pain factors see a real chain in the backtest. The
+			// captured-bar IV stays as priced (back-solved from the bar midpoint — a fresher gamma input than
+			// the snapshot's representative-minute IV).
+			long? oi = null;
+			if (_oiCache != null && _oiCache.ForDay(parsed.Root, asOf.Date).TryGetValue(sym, out var snap)) oi = snap.Oi;
 			options[sym] = new OptionContractQuote(
 				ContractSymbol: sym,
 				LastPrice: price,
@@ -512,7 +524,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				Change: null,
 				PercentChange: null,
 				Volume: volume,
-				OpenInterest: null,
+				OpenInterest: oi,
 				ImpliedVolatility: iv,
 				HistoricalVolatility: null,
 				ImpliedVolatility5Day: null
@@ -525,7 +537,21 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 		// real pricing on the Phase-B refetch. Never overwrite a real priced quote.
 		foreach (var occ in ladderMarkers)
 			if (!options.ContainsKey(occ))
-				options[occ] = new OptionContractQuote(occ, null, null, null, null, null, Volume: null, OpenInterest: 1, ImpliedVolatility: null);
+			{
+				// Carry the chain snapshot's real OI + IV onto the marker when available, so the full near-money
+				// chain (not just the priced candidate legs) contributes to the GEX / max-pain sums. Without the
+				// IV, ComputeGex can't weight the strike's gamma and would skip it. Falls back to the bare OI=1
+				// ladder marker (StrikeLadder visibility only) when the day has no snapshot.
+				long markerOi = 1;
+				decimal? markerIv = null;
+				var mp = ParsingHelpers.ParseOptionSymbol(occ);
+				if (_oiCache != null && mp != null && _oiCache.ForDay(mp.Root, asOf.Date).TryGetValue(occ, out var snap))
+				{
+					markerOi = snap.Oi;
+					markerIv = snap.Iv;
+				}
+				options[occ] = new OptionContractQuote(occ, null, null, null, null, null, Volume: null, OpenInterest: markerOi, ImpliedVolatility: markerIv);
+			}
 
 		return new QuoteSnapshot(options, underlyings);
 	}
