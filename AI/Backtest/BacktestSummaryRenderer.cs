@@ -328,7 +328,7 @@ internal static class BacktestSummaryRenderer
 		if (cl.CleanCount + cl.ContamCount > 0)
 		{
 			table.AddRow("[bold]Clean trades[/] (all legs real-priced)",
-				$"[{(cl.CleanPnl >= 0 ? "green" : "red")}]{cl.CleanCount} trades, ${cl.CleanPnl:N0} ({cl.CleanWinRate:F0}% win, PF {cl.CleanProfitFactor:F2}, exp ${cl.CleanExpectancy:N0}/trade)[/]");
+				$"[{(cl.CleanPnl >= 0 ? "green" : "red")}]{cl.CleanCount} trades, ${cl.CleanPnl:N0} ({cl.CleanWinRate:F0}% win, PF {cl.CleanProfitFactorDisplay}, exp ${cl.CleanExpectancy:N0}/trade)[/]");
 			if (cl.ContamCount > 0)
 				table.AddRow("Synthetic-contaminated trades",
 					$"[yellow]{cl.ContamCount} trades, ${cl.ContamPnl:N0} ({cl.ContamWinRate:F0}% win) — excluded from a live-liquidity read[/]");
@@ -348,10 +348,12 @@ internal static class BacktestSummaryRenderer
 			var avgLoss = lossPnls.Count > 0 ? lossPnls.Average() : 0m;
 			var expectancy = pnls.Average();
 			var grossLoss = Math.Abs(lossPnls.Sum());
-			var profitFactor = grossLoss > 0m ? winPnls.Sum() / grossLoss : 0m;
+			var grossWin = winPnls.Sum();
 			table.AddRow("Avg win / loss (per trade)", $"[green]${avgWin:N2}[/] / [red]${avgLoss:N2}[/]");
 			table.AddRow("Expectancy (per trade)", $"[{(expectancy >= 0 ? "green" : "red")}]${expectancy:N2}[/]");
-			table.AddRow("Profit factor", profitFactor > 0m ? $"{profitFactor:F2}" : "—");
+			// PF is gross win / gross loss. With no losing trades it's undefined (not zero) — show "∞" when
+			// there were wins, "—" only when there were no winners either.
+			table.AddRow("Profit factor", grossLoss > 0m ? $"{grossWin / grossLoss:F2}" : (grossWin > 0m ? "∞" : "—"));
 		}
 
 		AnsiConsole.Write(table);

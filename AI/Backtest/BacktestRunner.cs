@@ -567,7 +567,16 @@ internal sealed class BacktestRunner
 				}
 				quoteSymbols = candidateSymbols;
 			}
-			var quotes = await _quotes.GetIntradayQuotesAsync(step, pos.Ticker, spot, quoteSymbols, minuteZeroDteTimeYears, cancellation);
+			// Price the position at this minute through the SAME captured-bar-preferred path the entry used
+			// (GetQuotesAsync with a minute-ET asOf + spot/TTE overrides), NOT the parametric-only intraday
+			// path — otherwise the SL/TP mark and the close fill diverge from the entry's captured-bar pricing,
+			// producing phantom early exits (e.g. a $1-wide credit spread opened at a captured $0.12 credit but
+			// marked at a Black-Scholes $0.01 → fake ~90% TakeProfit). BS stays the fallback for legs with no bar.
+			var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+			var minuteOverrides = new QuoteOverrides(
+				Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot },
+				ZeroDteTimeYears: minuteZeroDteTimeYears);
+			var quotes = (await _quotes.GetQuotesAsync(minuteEt, quoteSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase), new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pos.Ticker }, cancellation, minuteOverrides)).Options;
 			var mark = ComputeMarkFromQuotes(pos.Legs, quotes);
 			if (!mark.HasValue) continue;
 
@@ -624,7 +633,6 @@ internal sealed class BacktestRunner
 			}
 			if (!allLegsPriced) continue;
 
-			var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
 			_book.Close(minuteEt, pos.Key, legFills, ruleName);
 			return true;
 		}
@@ -802,7 +810,9 @@ internal sealed class BacktestRunner
 				var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, step, _quotes, _config, cancellation);
 				var postCtx = new EvaluationContext(step, postMgmt, postQuotes.Underlyings, postQuotes.Options, postCash, postAccount, postSignals);
 				var legacy = await openEvaluator.EvaluateAsync(postCtx, cancellation);
-				return new DailyOpenScanResult(HasIntraday: false, LegacyProposals: legacy);
+				// Drop Informational (display-only, below-gate) proposals so log level can't change fills — see
+				// the equivalent filter in EvaluateMinuteAsync and OpenerAutoExecutor.
+				return new DailyOpenScanResult(HasIntraday: false, LegacyProposals: legacy.Where(p => !p.Informational).ToList());
 			}
 			barsByTicker[t] = bars;
 		}
@@ -1036,7 +1046,11 @@ internal sealed class BacktestRunner
 		var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, minuteEt, _quotes, _config, cancellation, minuteOverrides);
 		var postCtx = new EvaluationContext(minuteEt, postMgmt, postQuotes.Underlyings, postQuotes.Options, postCash, postAccount, postSignals);
 		var proposals = await openEvaluator.EvaluateAsync(postCtx, cancellation, minuteOverrides);
-		return (minuteEt, proposals);
+		// Mirror OpenerAutoExecutor: Informational proposals (the structure-coverage floor's best-of-each-
+		// enabled-structure, surfaced under --log-level debug for visibility) are display-only and below the
+		// open gate. Live filters them before executing; the backtest must too, or log level changes which
+		// trades open (a debug-only candidate that doesn't clear MinScoreToOpen would otherwise fill here).
+		return (minuteEt, proposals.Where(p => !p.Informational).ToList());
 	}
 
 	/// <summary>Oracle forward-simulator: returns the realized P&L (in dollars) of <paramref name="p"/>
@@ -1459,6 +1473,10 @@ internal readonly record struct CleanlinessBreakdown(
 	int ContamCount, decimal ContamPnl, int ContamWins, int ContamLosses)
 {
 	public decimal CleanProfitFactor => CleanGrossLoss > 0m ? CleanGrossWin / CleanGrossLoss : 0m;
+	/// <summary>Profit factor for display: gross win / gross loss, but "∞" when there were no losing trades
+	/// (PF is undefined, not zero) and "—" when there were no clean trades at all.</summary>
+	public string CleanProfitFactorDisplay =>
+		CleanGrossLoss > 0m ? (CleanGrossWin / CleanGrossLoss).ToString("F2") : (CleanGrossWin > 0m ? "∞" : "—");
 	public decimal CleanExpectancy => CleanCount > 0 ? CleanPnl / CleanCount : 0m;
 	public decimal CleanWinRate => CleanCount > 0 ? CleanWins * 100m / CleanCount : 0m;
 	public decimal ContamWinRate => ContamCount > 0 ? ContamWins * 100m / ContamCount : 0m;

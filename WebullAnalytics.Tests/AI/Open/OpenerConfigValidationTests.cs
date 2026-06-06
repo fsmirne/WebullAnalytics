@@ -65,11 +65,11 @@ public class OpenerConfigValidationTests
 	}
 
 	[Fact]
-	public void MaxPainWeightMustBeNonNegative()
+	public void GammaRegimeWeightMustBeNonNegative()
 	{
 		var cfg = MinimalValidConfig();
-		cfg.Opener.Weights.MaxPain = -0.1m;
-		Assert.Contains("opener.weights.maxPain", AIConfigLoader.Validate(cfg) ?? "");
+		cfg.Opener.Weights.GammaRegime = -0.1m;
+		Assert.Contains("opener.weights.gammaRegime", AIConfigLoader.Validate(cfg) ?? "");
 	}
 
 	[Fact]

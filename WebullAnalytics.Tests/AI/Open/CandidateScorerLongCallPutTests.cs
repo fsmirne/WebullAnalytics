@@ -132,7 +132,7 @@ public class CandidateScorerLongCallPutTests
 	}
 
 	[Fact]
-	public void LongCallGetsBoostWhenMaxPainIsAboveSpot()
+	public void LongCallGetsBoostWhenMaxPainMagnetIsAboveSpot()
 	{
 		var asOf = new DateTime(2026, 4, 1);
 		var exp = new DateTime(2026, 5, 1);
@@ -149,15 +149,14 @@ public class CandidateScorerLongCallPutTests
 
 		var baseCfg = Cfg();
 		var painCfg = Cfg();
-		painCfg.Weights.MaxPain = 0.50m;
+		painCfg.Weights.MaxPainBiasPull = 1.0m;
 
 		var withoutPain = CandidateScorer.ScoreLongCallPut(skel, spot: 100m, asOf, quotes, bias: 0m, baseCfg)!;
 		var withPain = CandidateScorer.ScoreLongCallPut(skel, spot: 100m, asOf, quotes, bias: 0m, painCfg)!;
 
 		Assert.Equal(110m, withPain.TargetExpiryMaxPain);
-		Assert.True(withPain.MaxPainAdjustmentFactor > 1m);
-		// A bonus factor (>1) moves the score in the positive direction under sign-symmetric
-		// factor application — for any starting sign, withPain ranks higher than withoutPain.
+		// The max-pain magnet shifts the scenario-grid center toward 110 (above spot), raising a long
+		// call's realized EV — so withPain ranks higher than withoutPain.
 		Assert.True(withPain.BiasAdjustedScore > withoutPain.BiasAdjustedScore);
 	}
 }

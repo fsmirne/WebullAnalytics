@@ -450,8 +450,9 @@ internal static class AIConfigLoader
 		if (wgt.BiasDrift < 0m) return $"opener.weights.biasDrift: must be ≥ 0, got {wgt.BiasDrift}";
 		if (wgt.Whipsaw < 0m) return $"opener.weights.whipsaw: must be ≥ 0, got {wgt.Whipsaw}";
 		if (wgt.VolatilityFit < 0m) return $"opener.weights.volatilityFit: must be ≥ 0, got {wgt.VolatilityFit}";
-		if (wgt.MaxPain < 0m) return $"opener.weights.maxPain: must be ≥ 0, got {wgt.MaxPain}";
-		if (wgt.Gex < 0m) return $"opener.weights.gex: must be ≥ 0, got {wgt.Gex}";
+		if (wgt.GammaRegime < 0m) return $"opener.weights.gammaRegime: must be ≥ 0, got {wgt.GammaRegime}";
+		if (wgt.GexBiasPull < 0m) return $"opener.weights.gexBiasPull: must be ≥ 0, got {wgt.GexBiasPull}";
+		if (wgt.MaxPainBiasPull < 0m) return $"opener.weights.maxPainBiasPull: must be ≥ 0, got {wgt.MaxPainBiasPull}";
 		if (wgt.StatArb < 0m) return $"opener.weights.statArb: must be ≥ 0, got {wgt.StatArb}";
 		if (wgt.Sentiment < 0m) return $"opener.weights.sentiment: must be ≥ 0, got {wgt.Sentiment}";
 		if (wgt.ExpectedMoveCredit < 0m) return $"opener.weights.expectedMoveCredit: must be ≥ 0, got {wgt.ExpectedMoveCredit}";

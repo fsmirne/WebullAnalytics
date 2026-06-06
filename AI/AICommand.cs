@@ -974,7 +974,10 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// hypothetical/secondary root the opener touches is covered.
 		var dividends = new Backtest.HistoricalDividendCache(offline: true);
 		var dividendsByRoot = await dividends.BuildScheduleMapAsync(config.TickerSet(), cancellation);
-		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, optionBars: optionBars, dividendsByRoot: dividendsByRoot);
+		// Per-day per-contract OI from scraped chain snapshots — makes the GEX / max-pain factors computable
+		// in the backtest (the captured option bars have no OI). Days without a snapshot leave them inert.
+		var oiCache = new Backtest.ChainSnapshotOiCache();
+		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, optionBars: optionBars, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
