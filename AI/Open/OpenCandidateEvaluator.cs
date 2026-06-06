@@ -1082,7 +1082,7 @@ internal sealed class OpenCandidateEvaluator
 			var path = Program.ResolvePath(Program.ApiConfigPath);
 			if (!File.Exists(path)) return null;
 			var cfg = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(path));
-			if (cfg == null || cfg.Headers.Count == 0) return null;
+			if (cfg == null || cfg.Webull.Headers.Count == 0) return null;
 			return cfg;
 		}
 		catch (Exception ex)

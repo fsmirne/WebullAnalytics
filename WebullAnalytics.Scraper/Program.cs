@@ -54,9 +54,14 @@ internal sealed class ScrapeSettings : CommandSettings
 	[Description("Capture expiries from today out to N calendar days. Default 0 = today/0DTE only (original behavior). Use e.g. 45 to also capture the diagonal/calendar long legs for pricing validation — larger per-minute files.")]
 	public int? MaxDte { get; set; }
 
+	[CommandOption("--source <SOURCE>")]
+	[Description("Chain source: schwab (default, real NBBO+OI, needs `wa schwab login`) or webull. Overrides scraper-config.json 'source'.")]
+	public string? Source { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("ticker is required");
+		if (Source != null && Source.ToLowerInvariant() is not ("schwab" or "webull")) return ValidationResult.Error($"--source: must be 'schwab' or 'webull', got '{Source}'");
 		if (MaxDte.HasValue && MaxDte.Value < 0) return ValidationResult.Error($"--max-dte: must be >= 0, got {MaxDte.Value}");
 		if (Start != null && !TimeOnly.TryParse(Start, CultureInfo.InvariantCulture, out _))
 			return ValidationResult.Error($"--start: must be HH:mm or HH:mm:ss, got '{Start}'");
@@ -79,6 +84,7 @@ internal sealed class ScrapeCommand : AsyncCommand<ScrapeSettings>
 		if (settings.Start != null) config.StartTime = settings.Start;
 		if (settings.End != null) config.EndTime = settings.End;
 		if (settings.MaxDte.HasValue) config.MaxDte = settings.MaxDte.Value;
+		if (settings.Source != null) config.Source = settings.Source;
 
 		var apiConfigPath = WebullAnalytics.Program.ResolvePath(WebullAnalytics.Program.ApiConfigPath);
 		if (!File.Exists(apiConfigPath))
@@ -93,11 +99,37 @@ internal sealed class ScrapeCommand : AsyncCommand<ScrapeSettings>
 			AnsiConsole.MarkupLine($"[red]failed to parse api-config.json[/]: {Markup.Escape(ex.Message)}");
 			return 1;
 		}
-		if (apiConfig == null || apiConfig.Headers.Count == 0)
+		if (apiConfig == null)
 		{
-			AnsiConsole.MarkupLine("[red]api-config.json has no headers[/] — run `wa sniff` to refresh.");
+			AnsiConsole.MarkupLine("[red]api-config.json is empty or invalid[/].");
 			return 1;
 		}
+
+		var sourceName = config.Source.Trim().ToLowerInvariant();
+		IChainSource chainSource;
+		switch (sourceName)
+		{
+			case "schwab":
+				if (apiConfig.Schwab == null || string.IsNullOrEmpty(apiConfig.Schwab.RefreshToken))
+				{
+					AnsiConsole.MarkupLine("[red]Schwab not authorized[/] — run `wa schwab login` first (or set source=webull).");
+					return 1;
+				}
+				chainSource = new SchwabChainSource(apiConfig, apiConfigPath);
+				break;
+			case "webull":
+				if (apiConfig.Webull.Headers.Count == 0)
+				{
+					AnsiConsole.MarkupLine("[red]api-config.json has no headers[/] — run `wa sniff` to refresh (needed for source=webull).");
+					return 1;
+				}
+				chainSource = new WebullChainSource(apiConfig);
+				break;
+			default:
+				AnsiConsole.MarkupLine($"[red]unknown source '{Markup.Escape(sourceName)}'[/] — use 'schwab' or 'webull'.");
+				return 1;
+		}
+		AnsiConsole.MarkupLine($"[dim]chain source = {sourceName}[/]");
 
 		var todayEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz).Date;
 		var startEt = ParseEtTimeToday(config.StartTime, todayEt);
@@ -111,7 +143,7 @@ internal sealed class ScrapeCommand : AsyncCommand<ScrapeSettings>
 		using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
 		Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-		var loop = new ScraperLoop(settings.Ticker, config, apiConfig);
+		var loop = new ScraperLoop(settings.Ticker, config, chainSource);
 		return await loop.RunAsync(startEt, endEt, cts.Token);
 	}
 
