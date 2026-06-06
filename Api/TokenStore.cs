@@ -32,7 +32,7 @@ internal static class TokenStore
 		all[accountAlias] = new TokenEntry { Token = token, Expires = expires, Status = status };
 		var path = Program.ResolvePath(StorePath);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-		File.WriteAllText(path, JsonSerializer.Serialize(all, new JsonSerializerOptions { WriteIndented = true }));
+		File.WriteAllText(path, JsonSerializer.Serialize(all, JsonDefaults.Indented));
 	}
 
 	private static Dictionary<string, TokenEntry> LoadAll()

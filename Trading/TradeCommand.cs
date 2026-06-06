@@ -607,7 +607,7 @@ internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 			try
 			{
 				var raw = await client.ListOpenOrdersRawAsync(cancellation);
-				try { using var doc = System.Text.Json.JsonDocument.Parse(raw); AnsiConsole.WriteLine(System.Text.Json.JsonSerializer.Serialize(doc.RootElement, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })); }
+				try { using var doc = System.Text.Json.JsonDocument.Parse(raw); AnsiConsole.WriteLine(System.Text.Json.JsonSerializer.Serialize(doc.RootElement, JsonDefaults.Indented)); }
 				catch { AnsiConsole.WriteLine(raw); }
 				return 0;
 			}
@@ -704,7 +704,7 @@ internal sealed class TradeHistoryCommand : AsyncCommand<TradeHistorySettings>
 			try
 			{
 				var raw = await client.ListOrderHistoryRawAsync(startDate, endDate, cancellation);
-				try { using var doc = System.Text.Json.JsonDocument.Parse(raw); AnsiConsole.WriteLine(System.Text.Json.JsonSerializer.Serialize(doc.RootElement, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })); }
+				try { using var doc = System.Text.Json.JsonDocument.Parse(raw); AnsiConsole.WriteLine(System.Text.Json.JsonSerializer.Serialize(doc.RootElement, JsonDefaults.Indented)); }
 				catch { AnsiConsole.WriteLine(raw); }
 				return 0;
 			}
