@@ -224,7 +224,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	/// ticker. Used by <c>ai scan --theoretical</c> to evaluate a hypothetical spot at an asOf for which
 	/// no historical bar exists (next-business-day previews) or a stress scenario at any spot level.</param>
 	/// <param name="optionBars">Optional cache of captured per-contract minute bars from
-	/// <c>data/options/&lt;root&gt;/&lt;expiry&gt;/&lt;occ&gt;.csv</c>. When supplied and a bar exists for the
+	/// <c>data/options/<root>/<expiry>/<occ>.csv</c>. When supplied and a bar exists for the
 	/// leg's minute, the bar's close is used as the theoretical mid and the bar's IV (when present)
 	/// replaces the VIX-anchored synthetic IV. Bid/ask is still derived from the half-spread model
 	/// — the option chart endpoint reports trade prints, not NBBO. Legs without a captured bar fall

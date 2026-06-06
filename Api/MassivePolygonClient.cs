@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace WebullAnalytics.Api;
 
 /// <summary>Fetches 1-minute aggregate bars from massive.com (Polygon-mirror endpoint shape). Used by
-/// <c>wa ai history</c> to backfill <c>data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv</c> for dates the
+/// <c>wa ai history</c> to backfill <c>data/intraday/<TICKER>/<date>.csv</c> for dates the
 /// live Webull session missed (holidays, outages, late starts). Same auth/response shape as Polygon.
 ///
 /// Auth: <c>apiKey</c> query param. Returns oldest-first <see cref="MinuteBar"/> across [from, to]
@@ -208,7 +208,7 @@ internal static class MassivePolygonClient
 	}
 
 	/// <summary>Fetches per-minute option-contract bars from Polygon's aggregates endpoint, using the
-	/// <c>O:&lt;OCC&gt;</c> ticker form (e.g. <c>O:SPXW260522C07500000</c>). Same auth, pagination, and
+	/// <c>O:<OCC></c> ticker form (e.g. <c>O:SPXW260522C07500000</c>). Same auth, pagination, and
 	/// rate-limiting as <see cref="FetchMinuteAggregatesAsync"/> — option aggregates and stock aggregates
 	/// share the endpoint URL pattern. Returns <see cref="OptionMinuteBar"/> with <c>ImpliedVolatility</c>
 	/// always null: Polygon's aggregates response carries OHLCV but no per-bar IV. Callers that want IV

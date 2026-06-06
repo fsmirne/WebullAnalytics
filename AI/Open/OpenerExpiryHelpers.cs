@@ -11,7 +11,7 @@ internal static class OpenerExpiryHelpers
 
 	/// <summary>Years-to-expiry for the scorer. For 0DTE, uses the actual time-of-day between
 	/// <paramref name="asOf"/> and market close (capped at one full session if asOf is before
-	/// the opening bell). For &gt;0DTE, returns <c>days/365</c> — preserves the calendar-day
+	/// the opening bell). For >0DTE, returns <c>days/365</c> — preserves the calendar-day
 	/// approximation used across the scenario grid and breakeven analytics. Returns 0 when
 	/// already past the close on expiry day. Avoids the legacy <c>Math.Max(1, days)</c> 1-day
 	/// floor that priced expiring 0DTE candidates as if they had a full day of vol remaining.</summary>

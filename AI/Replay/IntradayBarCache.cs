@@ -9,7 +9,7 @@ namespace WebullAnalytics.AI.Replay;
 /// substitute an in-memory fake.</summary>
 internal delegate Task<IReadOnlyList<MinuteBar>> IntradayBarFetcher(string ticker, BarInterval interval, int count, bool includeExtended, CancellationToken cancellation);
 
-/// <summary>Disk-backed cache of intraday OHLCV bars at <c>data/intraday/&lt;TICKER&gt;/&lt;yyyy-mm-dd&gt;.csv</c>.
+/// <summary>Disk-backed cache of intraday OHLCV bars at <c>data/intraday/<TICKER>/<yyyy-mm-dd>.csv</c>.
 /// One file per NY-local session date. Today's file grows during the session; past-day files are
 /// sealed (never refetched once on disk). The fetcher is called only when the in-memory snapshot for
 /// the requested date is stale (current bar older than <see cref="_freshnessThreshold"/>) or absent

@@ -9,7 +9,7 @@ internal static class DirectionalFit
 	public static int SignFor(OpenStructureKind kind) => StructureKindInfo.DirectionalSign(kind);
 
 	/// <summary>Strike-aware fit. For LongDiagonal, the sign is determined by the long/short strike
-	/// layout: long.strike &lt; short.strike → bullish (+1), long.strike &gt; short.strike → bearish (−1),
+	/// layout: long.strike < short.strike → bullish (+1), long.strike > short.strike → bearish (−1),
 	/// equal strikes → neutral (the structure is really a calendar). The same rule holds for both calls
 	/// and puts because in either case "long below short" produces positive net delta. All other kinds
 	/// fall through to the kind-only overload.</summary>

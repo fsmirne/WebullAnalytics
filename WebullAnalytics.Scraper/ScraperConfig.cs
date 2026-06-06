@@ -21,7 +21,7 @@ internal sealed class ScraperConfig
 	public string EndTime { get; set; } = "16:05";
 
 	/// <summary>Output root for per-day JSONL snapshots. Each day's file lives at
-	/// <c>{outputPath}/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>. Relative paths are resolved against
+	/// <c>{outputPath}/<TICKER>/<date>.jsonl</c>. Relative paths are resolved against
 	/// <see cref="WebullAnalytics.Program.BaseDir"/>.</summary>
 	[JsonPropertyName("outputPath")]
 	public string OutputPath { get; set; } = "data/chain-snapshots";
@@ -52,7 +52,7 @@ internal sealed class ScraperConfig
 	[JsonPropertyName("maxDte")]
 	public int MaxDte { get; set; } = 0;
 
-	/// <summary>When <see cref="MaxDte"/> &gt; 0, the further-dated expiries come back from the chain/list endpoint
+	/// <summary>When <see cref="MaxDte"/> > 0, the further-dated expiries come back from the chain/list endpoint
 	/// as symbols WITHOUT bid/ask/IV (only the front 0DTE expiry is quoted there). Those contracts are then
 	/// refreshed via Webull's queryBatch endpoint — but only within ±this fraction of spot, to bound the number
 	/// of round-trips (the full far chain is ~thousands of strikes). 0.06 (±6%) comfortably covers the

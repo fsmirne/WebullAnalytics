@@ -379,8 +379,8 @@ internal static class WebullChartsClient
 
 	/// <summary>Parses <c>query-mini</c>'s 8-column row schema: <c>ts,open,close,high,low,prevClose,volume,vwap</c>.
 	/// Distinct from <see cref="ParseChartsResponse"/> which handles the live <c>query</c> endpoint's
-	/// 6/7-column schema without the <c>prevClose</c> field. Rows that fail OHLC sanity (high &lt;
-	/// max(open,close) or low &gt; min(open,close)) are dropped silently rather than mis-parsed.</summary>
+	/// 6/7-column schema without the <c>prevClose</c> field. Rows that fail OHLC sanity (high <
+	/// max(open,close) or low > min(open,close)) are dropped silently rather than mis-parsed.</summary>
 	internal static IReadOnlyList<MinuteBar> ParseChartsMiniResponse(string json, long tickerId)
 	{
 		List<MinuteBar> bars;

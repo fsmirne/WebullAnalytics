@@ -10,7 +10,7 @@ using WebullAnalytics.Utils;
 namespace WebullAnalytics.Analyze;
 
 /// <summary>
-/// `wa analyze gex &lt;TICKER&gt;` — Renders a 2D GEX heatmap over the option chain
+/// `wa analyze gex <TICKER>` — Renders a 2D GEX heatmap over the option chain
 /// (strikes × expirations), a per-expiration summary (gravity / gamma flip / max pain), a chain
 /// totals panel, and call/put walls. Pulls the chain from Webull directly (api-config.json must
 /// already be sniffed). Yahoo isn't supported because chain-level analytics need full OI + IV
