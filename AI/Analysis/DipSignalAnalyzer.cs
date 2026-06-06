@@ -8,10 +8,10 @@ internal readonly record struct IntradayBar(DateTime EtStart, decimal Open, deci
 }
 
 /// <summary>The "buy the dip" branch of the source TradingView "MACD+RSI+BB" indicator's black trigger:
-/// on the same 5-minute bar the MACD histogram is negative (<c>hist &lt; 0</c>, the down-branch gate),
+/// on the same 5-minute bar the MACD histogram is negative (<c>hist < 0</c>, the down-branch gate),
 /// RSI is below <see cref="RsiLow"/>, AND the close is below the lower Bollinger band. The band uses an EMA
 /// basis (the indicator's "Basis MA Type" = EMA) with σ around the SMA. MACD/BB/RSI lengths mirror the
-/// indicator defaults. (The symmetric top branch is hist≥0 ∧ RSI&gt;RsiHigh ∧ close&gt;upper band.)</summary>
+/// indicator defaults. (The symmetric top branch is hist≥0 ∧ RSI>RsiHigh ∧ close>upper band.)</summary>
 internal sealed record DipParams(int RsiPeriod = 14, decimal RsiLow = 30m, decimal RsiHigh = 70m, int BbPeriod = 20, decimal BbK = 2m, int MacdFast = 12, int MacdSlow = 26, int MacdSignal = 9);
 
 /// <summary>One dip→top round-trip from <see cref="DipSignalAnalyzer.SimulateSwing"/>. <see cref="Ret"/> is the
@@ -25,7 +25,7 @@ internal readonly record struct SwingTrade(DateTime EntryEt, decimal EntryPrice,
 internal sealed record DipSignal(DateTime EntryEt, decimal EntryPrice, decimal Rsi, decimal Close, decimal LowerBand, decimal MacdHist, decimal? Ret30, decimal? Ret60, decimal RetEod);
 
 /// <summary>How often each leg of the conjunction (and all) holds across evaluable bars — makes a rare signal
-/// count interpretable and shows that the <c>hist&lt;0</c> gate is near-always satisfied inside a dip.</summary>
+/// count interpretable and shows that the <c>hist<0</c> gate is near-always satisfied inside a dip.</summary>
 internal sealed record ConditionCounts(int Evaluable, int HistNeg, int Rsi, int Band, int All);
 
 internal sealed record DipAnalysisResult(int BarCount, int SessionCount, IReadOnlyList<DipSignal> Signals, ConditionCounts Counts);

@@ -94,7 +94,7 @@ public static class TableRenderer
 	}
 
 	/// <summary>
-	/// Extracts the ticker from a combined-panel title: "&lt;TICKER&gt; Combined — ...".
+	/// Extracts the ticker from a combined-panel title: "<TICKER> Combined — ...".
 	/// </summary>
 	private static string? ExtractTickerFromCombinedTitle(string title)
 	{

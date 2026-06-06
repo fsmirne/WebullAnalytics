@@ -7,8 +7,8 @@ using WebullAnalytics.AI.Replay;
 
 namespace WebullAnalytics.Options;
 
-/// <summary>`wa options discover &lt;ticker&gt;` — walks a backtest window and writes every reasonably-
-/// scored OCC to <c>data/options-discovery/&lt;ticker&gt;.jsonl</c>. The discovery catalog is the union of
+/// <summary>`wa options discover <ticker>` — walks a backtest window and writes every reasonably-
+/// scored OCC to <c>data/options-discovery/<ticker>.jsonl</c>. The discovery catalog is the union of
 /// what the bot's evaluator considered (not just what it opened); `wa options backfill` then pulls real
 /// per-minute bars for the catalog from Webull (live) and massive.com (expired).
 ///

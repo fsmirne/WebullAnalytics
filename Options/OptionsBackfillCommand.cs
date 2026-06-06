@@ -5,10 +5,10 @@ using WebullAnalytics.AI;
 
 namespace WebullAnalytics.Options;
 
-/// <summary>`wa options backfill &lt;ticker&gt;` — pulls per-minute bars for OCCs that appear in the
+/// <summary>`wa options backfill <ticker>` — pulls per-minute bars for OCCs that appear in the
 /// discovery log (default) or the full Webull registry (--all). Routes each OCC to Webull (live
 /// contracts; fast, unrestricted) or massive.com (expired contracts; rate-limited to 5 req/min).
-/// Writes one CSV per contract under <c>data/options/&lt;root&gt;/&lt;expiry&gt;/&lt;OCC&gt;.csv</c>.
+/// Writes one CSV per contract under <c>data/options/<root>/<expiry>/<OCC>.csv</c>.
 /// Merge-by-timestamp on re-runs picks up new minutes without losing existing ones; --force re-
 /// fetches from scratch.</summary>
 internal sealed class OptionsBackfillSettings : CommandSettings

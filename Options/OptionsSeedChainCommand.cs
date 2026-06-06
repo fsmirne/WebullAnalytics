@@ -41,7 +41,7 @@ internal sealed class OptionsSeedChainSettings : CommandSettings
 	public bool CountOnly { get; set; }
 }
 
-/// <summary>`wa options chain &lt;ticker&gt;` — enumerates an underlying's historical option contracts from
+/// <summary>`wa options chain <ticker>` — enumerates an underlying's historical option contracts from
 /// massive's reference endpoint and seeds the discovery catalog so the existing backfill can pull the bars.
 /// Needed for underlyings the bot never traded (no Webull registry, no discovery, no on-disk chain) where the
 /// usual discover→backfill loop can't bootstrap because it has no bars to read a chain from.</summary>
@@ -148,7 +148,7 @@ internal sealed class OptionsSeedChainCommand : AsyncCommand<OptionsSeedChainSet
 		return 0;
 	}
 
-	/// <summary>Loads date→close from data/history/&lt;TICKER&gt;.csv (header: date,open,high,low,close,...).
+	/// <summary>Loads date→close from data/history/<TICKER>.csv (header: date,open,high,low,close,...).
 	/// Returns an ordered list so AtmRange can window by date. Empty if the file is missing/unreadable.</summary>
 	private static IReadOnlyList<(DateTime Date, decimal Close)> LoadDailyCloses(string ticker)
 	{

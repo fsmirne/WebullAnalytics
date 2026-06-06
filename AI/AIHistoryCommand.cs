@@ -14,7 +14,7 @@ using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
 
-/// <summary>`wa ai history &lt;ticker&gt;` — populate the historical OHLC caches used by `wa ai backtest`.
+/// <summary>`wa ai history <ticker>` — populate the historical OHLC caches used by `wa ai backtest`.
 /// Separation of concerns: the fetch step hits the network here (where transient Yahoo failures are
 /// loud and re-runnable), while the backtest runs purely offline against the cache. Mirrors the
 /// `wa fetch` / `wa report` split. SPX-family tickers (SPY, SPX, SPXW, XSP) also pull VIX, VIX1D, and
@@ -22,7 +22,7 @@ namespace WebullAnalytics.AI;
 /// 2–9 DTE, VIX for longer) and the opener reads the VIX term-structure regime score.
 ///
 /// Intraday backfill: if api-config.json has a populated <c>massiveApiKey</c>, also fills
-/// <c>data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv</c> for every trading day in the lookback window
+/// <c>data/intraday/<TICKER>/<date>.csv</c> for every trading day in the lookback window
 /// whose file is missing or partial. Closes the gap when the live bot was offline (holidays, outages,
 /// late starts). Today's date is never touched — the live Webull capture owns it.
 ///
@@ -206,7 +206,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		return true;
 	}
 
-	/// <summary>Fills <c>data/sentiment-cache/&lt;date&gt;.json</c> for every trading day in
+	/// <summary>Fills <c>data/sentiment-cache/<date>.json</c> for every trading day in
 	/// [earliest, asOf-1] whose cache file is missing. Uses <see cref="FearGreedClient.FetchAsync"/>
 	/// which handles the "settled" check internally (CNN settles a date's score at 17:00 ET; pre-settlement
 	/// fetches don't write to disk). Throttled at 400ms per call to be polite to CNN's public endpoint.
@@ -260,7 +260,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/] day(s)");
 	}
 
-	/// <summary>Refreshes <c>data/event-cache/&lt;TICKER&gt;.json</c> (next earnings + ex-dividend) from
+	/// <summary>Refreshes <c>data/event-cache/<TICKER>.json</c> (next earnings + ex-dividend) from
 	/// Yahoo. Best-effort — a failure logs a warning and never fails the command, since the daily caches
 	/// are the primary deliverable. cacheOnly:false forces a network refresh (subject to the 12h TTL).</summary>
 	private static async Task RefreshEventCalendarAsync(string ticker, DateTime asOf, CancellationToken cancellation)
@@ -287,7 +287,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		}
 	}
 
-	/// <summary>Refreshes <c>data/dividends/&lt;TICKER&gt;.csv</c> (full historical ex-date + amount schedule)
+	/// <summary>Refreshes <c>data/dividends/<TICKER>.csv</c> (full historical ex-date + amount schedule)
 	/// from Yahoo's crumb-free chart endpoint. Best-effort — a failure logs a warning and never fails the
 	/// command. A non-payer (or an index root that isn't a Yahoo dividend ticker) yields an empty schedule,
 	/// which is the correct "no adjustment" signal for the backtest.</summary>
@@ -312,7 +312,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		}
 	}
 
-	/// <summary>Fills <c>data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv</c> for every missing trading day in
+	/// <summary>Fills <c>data/intraday/<TICKER>/<date>.csv</c> for every missing trading day in
 	/// the lookback window. Source-of-truth routing:
 	/// <list type="bullet">
 	///   <item><b>Non-SPX tickers</b> (SPY, AAPL, QQQ, …) — pulled from massive.com (SIP-consolidated
@@ -402,7 +402,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	/// <summary>One-time bootstrap importer for the 2-year historical pull. Reads a text file of SPX
 	/// <c>query-mini</c> rows captured from Webull's web app (via the browser console sniffer), parses
 	/// them, then pulls matching SPY ext-hours bars per-day from the API (which doesn't need x-s).
-	/// Merges SPX + SPY scaled by per-day ratio and writes per-day CSVs in <c>data/intraday/&lt;ticker&gt;/</c>.
+	/// Merges SPX + SPY scaled by per-day ratio and writes per-day CSVs in <c>data/intraday/<ticker>/</c>.
 	/// Existing CSVs are NOT overwritten (same no-overwrite invariant as <see cref="BackfillIntradayAsync"/>).
 	/// Throttle: 1 sec between per-day SPY pulls.</summary>
 	private static async Task<int> ImportSniffedSpxAsync(string ticker, string sniffedSpxPath, CancellationToken cancellation)
@@ -821,7 +821,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		List<DateTime> Partial,
 		List<DateTime> Missing);
 
-	/// <summary>Reads the per-ticker sealed manifest at <c>data/intraday/&lt;TICKER&gt;/sealed.json</c>.
+	/// <summary>Reads the per-ticker sealed manifest at <c>data/intraday/<TICKER>/sealed.json</c>.
 	/// Records every date this command has successfully pulled from massive.com so subsequent runs
 	/// trust those files unconditionally — needed for early-close days, which would otherwise fail the
 	/// 15:59-ET completeness check on every invocation and get redundantly reseeded.</summary>
@@ -863,7 +863,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	}
 
 	/// <summary>Captures today's incomplete intraday tape (full pre-market from 04:00 ET → the minute
-	/// this runs) and writes <c>data/intraday/&lt;ticker&gt;/&lt;today&gt;.csv</c>. Uses the range-based
+	/// this runs) and writes <c>data/intraday/<ticker>/<today>.csv</c>. Uses the range-based
 	/// <see cref="WebullIntradayBars.FetchHistoricalRangeAsync"/> — the same path the daily backfill
 	/// uses — so it produces identical format, start-of-bar convention, and complete pre-market
 	/// coverage (SPX RTH + SPY-scaled pre/post for SPX-family). The session isn't done, so we don't

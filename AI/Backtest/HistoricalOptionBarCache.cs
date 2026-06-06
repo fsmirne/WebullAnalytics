@@ -3,7 +3,7 @@ using WebullAnalytics.AI;
 namespace WebullAnalytics.AI.Backtest;
 
 /// <summary>Read-only cache over the per-contract option CSVs that <c>wa ai history --options</c>
-/// writes to <c>data/options/&lt;root&gt;/&lt;expiry&gt;/&lt;occ&gt;.csv</c>. The backtest consults this
+/// writes to <c>data/options/<root>/<expiry>/<occ>.csv</c>. The backtest consults this
 /// cache before falling back to Black-Scholes pricing — when a real bar exists for the leg's minute,
 /// it's the most accurate source of mid + IV we have.
 ///
@@ -210,7 +210,7 @@ internal sealed class HistoricalOptionBarCache
 	}
 
 	/// <summary>Sorted list of expiry dates with a captured-contract directory on disk for <paramref name="root"/>.
-	/// One <c>data/options/&lt;root&gt;/</c> directory scan per root, then memoized. Non-date entries (e.g.
+	/// One <c>data/options/<root>/</c> directory scan per root, then memoized. Non-date entries (e.g.
 	/// <c>sealed.json</c>) are skipped.</summary>
 	private IReadOnlyList<DateTime> ExpiriesForRoot(string root)
 	{

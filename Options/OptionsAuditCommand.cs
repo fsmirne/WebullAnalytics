@@ -5,9 +5,9 @@ using System.Globalization;
 
 namespace WebullAnalytics.Options;
 
-/// <summary>`wa options audit &lt;ticker&gt;` — reports per-contract option-bar coverage completeness over the
-/// on-disk history under <c>data/options/&lt;ticker&gt;/&lt;expiry&gt;/</c>. The options analog of
-/// <c>wa ai history &lt;ticker&gt; --audit</c> (which covers the intraday tape). No network fetches; reads the
+/// <summary>`wa options audit <ticker>` — reports per-contract option-bar coverage completeness over the
+/// on-disk history under <c>data/options/<ticker>/<expiry>/</c>. The options analog of
+/// <c>wa ai history <ticker> --audit</c> (which covers the intraday tape). No network fetches; reads the
 /// captured CSVs directly. Exit code 0 when coverage is clean, 2 when any gap is found.
 ///
 /// <para>Checks are at the EXPIRY level so illiquid single strikes (which legitimately skip sessions) don't
