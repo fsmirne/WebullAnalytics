@@ -10,8 +10,18 @@ internal sealed class AIConfig
 	/// argument (one ticker per scan/watch/replay/backtest) — not bound to a JSON field.</summary>
 	[JsonIgnore] public string Ticker { get; set; } = "";
 
+	/// <summary>Active strategy token for this run (e.g. "DC", "0DTE", "generic"). Populated from the
+	/// <c>--strategy</c> CLI option, else from <see cref="DefaultStrategy"/>. Selects the
+	/// <c>ai-config.<TICKER>.<STRATEGY>.json</c> layer and segments output files. Not a JSON field.</summary>
+	[JsonIgnore] public string Strategy { get; set; } = "";
+
 	/// <summary>Single-element set for the position/quote APIs that still take a ticker set.</summary>
 	public HashSet<string> TickerSet() => new(StringComparer.OrdinalIgnoreCase) { Ticker };
+
+	/// <summary>Strategy used when <c>--strategy</c> is omitted. Cascades through the merge: set a global
+	/// default in the base config, override per-ticker in <c>ai-config.<TICKER>.json</c>. Empty means
+	/// a strategy must be passed explicitly.</summary>
+	[JsonPropertyName("defaultStrategy")] public string DefaultStrategy { get; set; } = "";
 
 	[JsonPropertyName("watch")] public WatchConfig Watch { get; set; } = new();
 	[JsonPropertyName("cashReserve")] public CashReserveConfig CashReserve { get; set; } = new();
@@ -148,13 +158,27 @@ internal sealed class CashReserveConfig
 	[JsonPropertyName("value")] public decimal Value { get; set; } = 25m;      // percent of account value, or absolute $
 }
 
-/// <summary>Resolves the proposal JSONL path. The file is always <c>data/ai-proposals.&lt;TICKER&gt;.jsonl</c>,
+/// <summary>Resolves the proposal JSONL path. The file is always <c>data/ai-proposals.<TICKER>.jsonl</c>,
 /// derived from the single required ticker argument — the path is not configurable. Per-ticker scoping lets
 /// concurrent single-ticker <c>wa ai watch</c> / <c>wa ai scan</c> runs write without sharing a file.</summary>
 internal static class ProposalLog
 {
-	public static string RelativePath(string ticker) => $"data/ai-proposals.{ticker.ToUpperInvariant()}.jsonl";
-	public static string ResolvedPath(string ticker) => Program.ResolvePath(RelativePath(ticker));
+	public static string RelativePath(string ticker, string strategy) => $"data/ai-proposals.{ticker.ToUpperInvariant()}.{strategy}.jsonl";
+	public static string ResolvedPath(string ticker, string strategy) => Program.ResolvePath(RelativePath(ticker, strategy));
+
+	/// <summary>All proposal logs for a ticker across strategies — <c>data/ai-proposals.&lt;TICKER&gt;.*.jsonl</c>
+	/// plus the legacy pre-strategy <c>ai-proposals.&lt;TICKER&gt;.jsonl</c> if present. For readers that need a
+	/// ticker's full footprint regardless of strategy (e.g. the options backfill's touched-symbol scan).</summary>
+	public static IReadOnlyList<string> AllResolvedPathsForTicker(string ticker)
+	{
+		var dir = Program.ResolvePath("data");
+		var t = ticker.ToUpperInvariant();
+		var paths = new List<string>();
+		if (Directory.Exists(dir)) paths.AddRange(Directory.GetFiles(dir, $"ai-proposals.{t}.*.jsonl"));
+		var legacy = Program.ResolvePath($"data/ai-proposals.{t}.jsonl");
+		if (File.Exists(legacy) && !paths.Contains(legacy)) paths.Add(legacy);
+		return paths;
+	}
 }
 
 internal sealed class RulesConfig
@@ -295,7 +319,7 @@ internal sealed class TechnicalFilterConfig
 	[JsonPropertyName("momentumWeight")] public decimal MomentumWeight { get; set; } = 1.0m;
 	[JsonPropertyName("momentumDays")] public int MomentumDays { get; set; } = 5;
 	/// <summary>Weight of the 200-day trend gate (<c>price / SMA200 − 1</c>, clamped) in the composite
-	/// technical bias. Default 0 disables (no extra cache pull). When &gt; 0, the pipeline fetches
+	/// technical bias. Default 0 disables (no extra cache pull). When > 0, the pipeline fetches
 	/// ≥ 200 daily closes per ticker on first read.</summary>
 	[JsonPropertyName("sma200Weight")] public decimal Sma200Weight { get; set; } = 0m;
 }
