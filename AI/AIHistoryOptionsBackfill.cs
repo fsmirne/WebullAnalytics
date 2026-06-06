@@ -435,7 +435,7 @@ internal static class AIHistoryOptionsBackfill
 	{
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		var doc = new SealedOccManifest { Sealed = occs.OrderBy(s => s, StringComparer.Ordinal).ToList() };
-		var json = JsonSerializer.Serialize(doc, new JsonSerializerOptions { WriteIndented = true });
+		var json = JsonSerializer.Serialize(doc, JsonDefaults.Indented);
 		var tmp = path + ".tmp";
 		File.WriteAllText(tmp, json);
 		File.Move(tmp, path, overwrite: true);

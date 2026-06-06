@@ -395,6 +395,8 @@ internal static class YahooCalendarClient
 		Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
 		PropertyNameCaseInsensitive = true,
 		WriteIndented = true,
+		IndentCharacter = '\t',
+		IndentSize = 1,
 	};
 
 	private static string SerializeCache(DateTime asOf, TickerEvents events) =>

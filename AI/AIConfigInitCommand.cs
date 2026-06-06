@@ -23,7 +23,7 @@ internal sealed class AIConfigInitCommand : AsyncCommand<AIConfigInitSettings>
 		DisableEnabledFlags(cfg.Rules);                 // all management rules off in the base
 		DisableEnabledFlags(cfg.Opener.Structures);     // all opener structures off in the base
 
-		var json = JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true });
+		var json = JsonSerializer.Serialize(cfg, JsonDefaults.Indented);
 
 		if (!string.IsNullOrWhiteSpace(settings.Out))
 		{
