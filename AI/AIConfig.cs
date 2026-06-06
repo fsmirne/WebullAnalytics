@@ -38,11 +38,11 @@ internal sealed class AIConfig
 internal sealed class WatchConfig
 {
 	[JsonPropertyName("tickIntervalSeconds")] public int TickIntervalSeconds { get; set; } = 60;
-	/// <summary>Optional scheduled first-tick time (ET, format "HH:mm" or "HH:mm:ss"). When set, the
-	/// watch loop sleeps until this time before evaluating its first tick. Null/empty disables — the
-	/// loop ticks immediately if market is open, else polls every <see cref="TickIntervalSeconds"/>
-	/// until open. CLI <c>--start</c> overrides.</summary>
-	[JsonPropertyName("startTime")] public string? StartTime { get; set; }
+	/// <summary>Scheduled first-tick time (ET, format "HH:mm" or "HH:mm:ss"). The watch loop sleeps until
+	/// this time before evaluating its first tick. Defaults to just after the open (09:30:30) — a global
+	/// setting, kept in the base config rather than per-ticker. Set null/empty to tick immediately when
+	/// market is open. CLI <c>--start</c> overrides.</summary>
+	[JsonPropertyName("startTime")] public string? StartTime { get; set; } = "09:30:30";
 }
 
 /// <summary>Pipeline-wide inputs / measurement knobs. Read by both the opener (for macro bias and
