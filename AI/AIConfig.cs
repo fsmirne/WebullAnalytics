@@ -51,8 +51,9 @@ internal sealed class WatchConfig
 internal sealed class IndicatorsConfig
 {
 	/// <summary>Fallback implied volatility used when a leg has no live IV. Applies to opener scoring
-	/// and rule evaluation alike. Stored as a percentage (e.g. 40 = 40%).</summary>
-	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 40m;
+	/// and rule evaluation alike. Stored as a percentage (e.g. 18 = 18%); sane for index/ETF underlyings,
+	/// override per-ticker for higher-vol names.</summary>
+	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 18m;
 
 	/// <summary>Strike-grid increment for the active ticker, in dollars. Ticker-specific (SPXW=5,
 	/// SPY=1, GME=0.5, …). Used by the opener candidate enumerator and the roll-rule strike snappers.
