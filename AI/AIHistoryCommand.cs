@@ -431,7 +431,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		var sealedPath = Path.Combine(intradayDir, "sealed.json");
 		var sealedDates = LoadSealedManifest(sealedPath);
 
-		if (string.IsNullOrWhiteSpace(apiConfig.MassiveApiKey))
+		if (string.IsNullOrWhiteSpace(apiConfig.Massive.ApiKey))
 		{
 			AnsiConsole.MarkupLine("  [red]MassiveApiKey not set in api-config.json[/] — required for the SPY ext-hours half of the merge.");
 			return 1;
@@ -473,7 +473,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		try
 		{
 			spyAllBars = await MassivePolygonClient.FetchMinuteAggregatesAsync(
-				apiConfig.MassiveApiKey, "SPY",
+				apiConfig.Massive.ApiKey, "SPY",
 				DateOnly.FromDateTime(spyStart), DateOnly.FromDateTime(spyEnd), cancellation);
 		}
 		catch (Exception ex) when (ex is not OperationCanceledException)
@@ -592,14 +592,14 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		DateTime endNyDate,
 		CancellationToken cancellation)
 	{
-		if (string.IsNullOrWhiteSpace(apiConfig.MassiveApiKey))
+		if (string.IsNullOrWhiteSpace(apiConfig.Massive.ApiKey))
 		{
 			AnsiConsole.MarkupLine($"    [yellow]MassiveApiKey not set[/] — cannot pull {Markup.Escape(ticker)} from massive.com");
 			return Array.Empty<MinuteBar>();
 		}
 		AnsiConsole.MarkupLine($"    pulling {Markup.Escape(ticker)} from massive.com ({startNyDate:yyyy-MM-dd} → {endNyDate:yyyy-MM-dd})");
 		var bars = await MassivePolygonClient.FetchMinuteAggregatesAsync(
-			apiConfig.MassiveApiKey, ticker,
+			apiConfig.Massive.ApiKey, ticker,
 			DateOnly.FromDateTime(startNyDate), DateOnly.FromDateTime(endNyDate),
 			cancellation);
 		AnsiConsole.MarkupLine($"    massive returned {bars.Count} {Markup.Escape(ticker)} bars");
@@ -876,7 +876,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			AnsiConsole.MarkupLine("  [red]api-config.json not found[/] — run `wa sniff` to bootstrap it");
 			return 1;
 		}
-		if (apiConfig.Headers.Count == 0)
+		if (apiConfig.Webull.Headers.Count == 0)
 		{
 			AnsiConsole.MarkupLine("  [red]api-config.json has no headers[/] — run `wa sniff` to refresh");
 			return 1;
@@ -942,7 +942,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	private static async Task CaptureContractIdsAsync(string ticker, CancellationToken cancellation)
 	{
 		var apiConfig = TryLoadApiConfig();
-		if (apiConfig == null || apiConfig.Headers.Count == 0)
+		if (apiConfig == null || apiConfig.Webull.Headers.Count == 0)
 		{
 			AnsiConsole.MarkupLine("  contract ids: [yellow]skipped[/] (api-config.json missing/empty — run `wa sniff`)");
 			return;

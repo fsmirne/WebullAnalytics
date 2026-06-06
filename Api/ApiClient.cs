@@ -32,12 +32,12 @@ internal static class ApiClient
 
 			foreach (var tickerId in tickerIds)
 			{
-				var url = $"{OrderListUrl}?tickerId={tickerId}&startDate={config.StartDate}&endDate={config.EndDate}&limit={config.Limit}&secAccountId={config.SecAccountId}";
+				var url = $"{OrderListUrl}?tickerId={tickerId}&startDate={config.Webull.StartDate}&endDate={config.Webull.EndDate}&limit={config.Webull.Limit}&secAccountId={config.Webull.SecAccountId}";
 				var request = new HttpRequestMessage(HttpMethod.Get, url);
 
 				foreach (var (key, value) in DefaultHeaders)
 					request.Headers.TryAddWithoutValidation(key, value);
-				foreach (var (key, value) in config.Headers)
+				foreach (var (key, value) in config.Webull.Headers)
 					request.Headers.TryAddWithoutValidation(key, value);
 
 				var response = await client.SendAsync(request);
@@ -76,7 +76,24 @@ internal static class ApiClient
 	}
 }
 
+/// <summary>Top-level api-config.json. Provider credentials are grouped into per-source sections so the file
+/// stays legible as more data sources are added. <see cref="Webull"/> and <see cref="Massive"/> always exist
+/// (empty if absent); <see cref="Schwab"/> is null until `wa schwab login` populates it.</summary>
 internal sealed class ApiConfig
+{
+	[JsonPropertyName("webull")]
+	public WebullConfig Webull { get; set; } = new();
+
+	[JsonPropertyName("massive")]
+	public MassiveConfig Massive { get; set; } = new();
+
+	[JsonPropertyName("schwab")]
+	public SchwabConfig? Schwab { get; set; }
+}
+
+/// <summary>Webull credentials: scraped session headers + 6-digit unlock pin (for `wa sniff` / option-quote and
+/// chart fetches), order-history lookup params, and the Webull OpenAPI trade accounts used for order placement.</summary>
+internal sealed class WebullConfig
 {
 	[JsonPropertyName("secAccountId")]
 	public string SecAccountId { get; set; } = "";
@@ -99,19 +116,54 @@ internal sealed class ApiConfig
 	[JsonPropertyName("headers")]
 	public Dictionary<string, string> Headers { get; set; } = new();
 
-	[JsonPropertyName("massiveApiKey")]
-	public string MassiveApiKey { get; set; } = "";
-
-	/// <summary>massive.com requests-per-minute cap. The basic (free) tier hard-caps at 5 req/min (6th → HTTP 429);
-	/// paid tiers (Options Starter+) are "Unlimited API Calls". Set this to match your tier so the client paces
-	/// to the real limit instead of self-throttling to 5. Use 0 (or any large value) to disable pacing entirely
-	/// on an unlimited plan. Default 5 keeps the free tier safe out of the box.</summary>
-	[JsonPropertyName("massiveMaxRequestsPerMinute")]
-	public int MassiveMaxRequestsPerMinute { get; set; } = 5;
-
 	[JsonPropertyName("defaultAccount")]
 	public string? DefaultAccount { get; set; }
 
 	[JsonPropertyName("accounts")]
 	public List<TradeAccount> Accounts { get; set; } = new();
+}
+
+/// <summary>massive.com (Polygon mirror) credentials for the option-bar backfill.</summary>
+internal sealed class MassiveConfig
+{
+	[JsonPropertyName("apiKey")]
+	public string ApiKey { get; set; } = "";
+
+	/// <summary>massive.com requests-per-minute cap. The basic (free) tier hard-caps at 5 req/min (6th → HTTP 429);
+	/// paid tiers (Options Starter+) are "Unlimited API Calls". Set this to match your tier so the client paces
+	/// to the real limit instead of self-throttling to 5. Use 0 (or any large value) to disable pacing entirely
+	/// on an unlimited plan. Default 5 keeps the free tier safe out of the box.</summary>
+	[JsonPropertyName("maxRequestsPerMinute")]
+	public int MaxRequestsPerMinute { get; set; } = 5;
+}
+
+/// <summary>Schwab Trader API OAuth credentials + token cache. <c>ClientId</c>/<c>ClientSecret</c>/<c>RedirectUri</c>
+/// come from the registered app at developer.schwab.com and are set by hand. The token fields are populated by
+/// <c>wa schwab login</c> (refresh token) and refreshed automatically during capture (access token). The refresh
+/// token has a hard 7-day expiry that cannot be extended — re-run <c>wa schwab login</c> weekly.</summary>
+internal sealed class SchwabConfig
+{
+	[JsonPropertyName("clientId")]
+	public string ClientId { get; set; } = "";
+
+	[JsonPropertyName("clientSecret")]
+	public string ClientSecret { get; set; } = "";
+
+	[JsonPropertyName("redirectUri")]
+	public string RedirectUri { get; set; } = "";
+
+	[JsonPropertyName("refreshToken")]
+	public string? RefreshToken { get; set; }
+
+	[JsonPropertyName("accessToken")]
+	public string? AccessToken { get; set; }
+
+	/// <summary>UTC instant the cached access token stops being valid (issued-at + expires_in, ~30 min).</summary>
+	[JsonPropertyName("accessTokenExpiresUtc")]
+	public DateTime? AccessTokenExpiresUtc { get; set; }
+
+	/// <summary>UTC instant the refresh token was issued by the last <c>wa schwab login</c>. Schwab forces a hard
+	/// 7-day expiry, so this drives the "re-login soon" warning.</summary>
+	[JsonPropertyName("refreshTokenIssuedUtc")]
+	public DateTime? RefreshTokenIssuedUtc { get; set; }
 }

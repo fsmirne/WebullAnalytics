@@ -135,6 +135,11 @@ class Program
 				data.AddCommand<Data.DataBackupCommand>("backup");
 				data.AddCommand<Data.DataRestoreCommand>("restore");
 			});
+			config.AddBranch("schwab", schwab =>
+			{
+				schwab.AddCommand<Schwab.SchwabLoginCommand>("login");
+				schwab.AddCommand<Schwab.SchwabStatusCommand>("status");
+			});
 		});
 		return app.Run(args);
 	}
