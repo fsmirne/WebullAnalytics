@@ -37,6 +37,10 @@ internal sealed class AnalyzePositionSettings : AnalyzeBaseSettings
 	[Description("Available cash/BP for funding. Scenarios whose margin delta exceeds this amount are flagged as not fundable.")]
 	public decimal? Cash { get; set; }
 
+	[CommandOption("--risk <VALUE>")]
+	[Description("Risk-aversion weight for ranking: each $1 of capital put at stake (added margin + net debit deployed) discounts the suggestion's expected $ by this much, so de-risking (close/reduce) ranks higher. 0 = pure projected return (legacy). Default 0.5.")]
+	public decimal Risk { get; set; } = 0.5m;
+
 	[CommandOption("--account <VALUE>")]
 	[Description("Account alias or ID from api-config.json used to auto-detect cash/BP when selecting an existing open position.")]
 	public string? Account { get; set; }
@@ -568,7 +572,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		string Rationale,
 		bool IsRoll = false,
 		decimal? RankScore = null,			// true iff this scenario closes an existing leg and opens a new one (consulted by BuildReproductionCommands)
-		decimal? ExpectedPnLPerContract = null);	// probability-weighted EV at target (lognormal spot grid), vs the spot-pinned ProjectedValue. Null when not computed for this scenario type.
+		decimal? ExpectedPnLPerContract = null,	// probability-weighted EV at target (lognormal spot grid), vs the spot-pinned ProjectedValue. Null when not computed for this scenario type.
+		decimal AssignmentPenaltyPerContract = 0m);	// per-contract assignment-risk charge (verticals only); subtracted in the risk-adjusted rank.
 
 	/// <summary>Hypothetical OCC symbols the scenario generators will reference. Pre-enumerated so we can
 	/// include them in a single up-front quote fetch.</summary>
@@ -747,7 +752,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				rationale: $"call-side closer to short strike (${distanceToCall:F2} from short) — cut the call spread for ${sideCash:+0.00;-0.00}/share; remaining put spread runs to short exp → ${residualAtShortExp:F2}/share"));
 		}
 
-		return OrderScenariosForDisplay(list, settings.Cash);
+		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
 	}
 
 	/// <summary>Scenario set for iron butterflies and iron condors. Same payoff structure (two
@@ -847,7 +852,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				rationale: $"call-side closer to short strike (${distanceToShortCall:F2} above) — cut the call spread for ${sideCash:+0.00;-0.00}/share; remaining put spread settles to ${residualAtExpiry:F2}/share at current spot"));
 		}
 
-		return OrderScenariosForDisplay(list, settings.Cash);
+		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
 	}
 
 	private static List<Scenario> GenerateSingleLongScenarios(PositionSnapshot longLeg, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? dividends = null)
@@ -891,7 +896,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				rationale: $"collect ${shortMid:F2}/share short premium; at short exp: long ${longAtShortExp:F2} - short ${shortAtShortExp:F2} = ${net:F2}"));
 		}
 
-		return OrderScenariosForDisplay(list, settings.Cash);
+		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
 	}
 
 	private static List<Scenario> GenerateVerticalScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, decimal technicalBias, IReadOnlyList<DividendEvent>? dividends = null)
@@ -1050,8 +1055,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 
 		return OrderScenariosForDisplay(list
-			.Select(s => s with { RankScore = ComputeVerticalScenarioRankScore(s, shortLeg, spot, settings.StrikeStep, technicalBias) })
-			.ToList(), settings.Cash);
+			.Select(s => s with { AssignmentPenaltyPerContract = ComputeVerticalAssignmentPenalty(s, shortLeg, spot, settings.StrikeStep, technicalBias) })
+			.ToList(), settings.Cash, settings.Risk);
 	}
 
 	private static List<Scenario> GenerateSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? dividends = null)
@@ -1403,7 +1408,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 		}
 
-		return OrderScenariosForDisplay(list, settings.Cash);
+		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
 	}
 
 	/// <summary>Appends an "add new position alongside existing" scenario. Existing untouched;
@@ -1575,35 +1580,42 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	// Rank on probability-weighted EV when we have it (the honest figure), falling back to the spot-pinned
 	// P&L only for scenario types where EV isn't computed. Without this, capital-deploying scenarios (adds)
 	// rank highest purely because the pinned best-case P&L scales with contracts.
-	private static decimal DefaultRankScore(Scenario sc) => (sc.ExpectedPnLPerContract ?? sc.TotalPnLPerContract) / Math.Max(1m, sc.DaysToTarget);
+	// Risk-adjusted rank: honest EV (or spot-pinned P&L when EV isn't computed) minus a risk charge for the
+	// capital put at stake (added margin + net debit deployed) and any assignment-risk penalty. Ranks on the
+	// TOTAL outcome, not P&L-per-day: the old per-day normalization rewarded long-dated adds and divided a
+	// one-shot close by a single day, which structurally buried "close all". riskAversion=0 → pure return.
+	private static decimal RiskAdjustedRankScore(Scenario sc, decimal riskAversion)
+	{
+		var baseReturn = sc.ExpectedPnLPerContract ?? sc.TotalPnLPerContract;
+		var capitalAtStake = Math.Max(0m, sc.MarginDeltaPerContract) + Math.Max(0m, -sc.CashImpactPerContract);
+		return baseReturn - riskAversion * capitalAtStake - sc.AssignmentPenaltyPerContract;
+	}
 
-	private static List<Scenario> OrderScenariosForDisplay(IEnumerable<Scenario> scenarios, decimal? availableCash) => scenarios
+	private static List<Scenario> OrderScenariosForDisplay(IEnumerable<Scenario> scenarios, decimal? availableCash, decimal riskAversion) => scenarios
 		.OrderByDescending(s => IsScenarioFundable(s, availableCash))
-		.ThenByDescending(s => s.RankScore ?? DefaultRankScore(s))
+		.ThenByDescending(s => RiskAdjustedRankScore(s, riskAversion))
 		.ToList();
 
 	private static bool IsScenarioFundable(Scenario sc, decimal? availableCash) =>
 		!availableCash.HasValue || sc.MarginDeltaPerContract * sc.Qty <= availableCash.Value;
 
-	private static decimal ComputeVerticalScenarioRankScore(Scenario sc, PositionSnapshot currentShortLeg, decimal spot, decimal strikeStep, decimal technicalBias)
+	// Assignment-risk charge for vertical scenarios (per contract, total $); folded into the risk-adjusted rank.
+	private static decimal ComputeVerticalAssignmentPenalty(Scenario sc, PositionSnapshot currentShortLeg, decimal spot, decimal strikeStep, decimal technicalBias)
 	{
-		var baseScore = DefaultRankScore(sc);
 		var shortSymbols = sc.ActionSummary == "—"
 			  ? new List<string> { currentShortLeg.Symbol }
 			  : ExtractShortOptionSymbols(sc.ActionSummary, currentShortLeg.Symbol, sc.Name.StartsWith("Add complementary ", StringComparison.Ordinal)
 				  ? new[] { currentShortLeg.Symbol }
 				  : Array.Empty<string>());
 
-		if (shortSymbols.Count == 0) return baseScore;
+		if (shortSymbols.Count == 0) return 0m;
 
-		var maxPenalty = shortSymbols
+		return shortSymbols
 			.Select(ParsingHelpers.ParseOptionSymbol)
 			.Where(p => p != null)
 			.Select(p => ComputeAssignmentRiskPenaltyPerContract(spot, p!.Strike, p.CallPut, sc.DaysToTarget, strikeStep, technicalBias))
 			.DefaultIfEmpty(0m)
 			.Max();
-
-		return baseScore - maxPenalty / Math.Max(1m, sc.DaysToTarget);
 	}
 
 	private static List<string> ExtractShortOptionSymbols(string actionSummary, string currentLongSymbol, IEnumerable<string>? includeSymbols = null)
