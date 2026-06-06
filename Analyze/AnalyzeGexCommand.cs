@@ -77,7 +77,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return 1;
 		}
 		var apiConfig = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-		if (apiConfig == null || apiConfig.Headers.Count == 0)
+		if (apiConfig == null || apiConfig.Webull.Headers.Count == 0)
 		{
 			AnsiConsole.MarkupLine("[red]Error: api-config.json is empty or missing headers. Run 'sniff' first.[/]");
 			return 1;

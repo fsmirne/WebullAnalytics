@@ -62,8 +62,8 @@ internal sealed class OptionsSeedChainCommand : AsyncCommand<OptionsSeedChainSet
 		ApiConfig? apiConfig;
 		try { apiConfig = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(apiConfigPath)); }
 		catch (Exception ex) { AnsiConsole.MarkupLine($"  [red]failed to parse api-config.json[/]: {Markup.Escape(ex.Message)}"); return 1; }
-		if (apiConfig == null || string.IsNullOrWhiteSpace(apiConfig.MassiveApiKey)) { AnsiConsole.MarkupLine("  [red]MassiveApiKey not set in api-config.json[/]"); return 1; }
-		MassivePolygonClient.MaxRequestsPerWindow = apiConfig.MassiveMaxRequestsPerMinute;
+		if (apiConfig == null || string.IsNullOrWhiteSpace(apiConfig.Massive.ApiKey)) { AnsiConsole.MarkupLine("  [red]MassiveApiKey not set in api-config.json[/]"); return 1; }
+		MassivePolygonClient.MaxRequestsPerWindow = apiConfig.Massive.MaxRequestsPerMinute;
 
 		AnsiConsole.MarkupLine($"[bold]Enumerating {Markup.Escape(ticker)} contracts[/] expiring {since:yyyy-MM-dd} → {until:yyyy-MM-dd}"
 			+ (settings.MinStrike.HasValue || settings.MaxStrike.HasValue ? $", strikes {settings.MinStrike?.ToString() ?? "·"}–{settings.MaxStrike?.ToString() ?? "·"}" : "")
@@ -80,7 +80,7 @@ internal sealed class OptionsSeedChainCommand : AsyncCommand<OptionsSeedChainSet
 		foreach (var expired in new[] { true, false })
 		{
 			var batch = await MassivePolygonClient.FetchOptionContractsAsync(
-				apiConfig.MassiveApiKey, underlying, expired, since, until, settings.MinStrike, settings.MaxStrike, cancellation);
+				apiConfig.Massive.ApiKey, underlying, expired, since, until, settings.MinStrike, settings.MaxStrike, cancellation);
 			// Querying SPX returns both SPXW (weekly, PM-settled) and SPX (monthly, AM-settled) roots —
 			// keep only the requested root so we don't catalog/backfill the wrong settlement family.
 			foreach (var occ in batch)
