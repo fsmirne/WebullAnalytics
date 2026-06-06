@@ -13,6 +13,10 @@ internal static class ConfigJsonWriter
 	/// read better inline). <c>structures</c> is handled separately (container multi-line, each entry inline).</summary>
 	private static readonly HashSet<string> InlineObjectKeys = new(StringComparer.Ordinal) { "events" };
 
+	/// <summary>Canonical top-level key order (matches the AIConfig property order), so base/ticker/strategy
+	/// files all read consistently regardless of how they were built. Unlisted keys keep their order, after.</summary>
+	private static readonly string[] RootKeyOrder = { "defaultStrategy", "watch", "cashReserve", "log-level", "indicators", "rules", "opener", "autoExecute" };
+
 	public static string Serialize(JsonNode root)
 	{
 		var sb = new StringBuilder();
@@ -52,6 +56,8 @@ internal static class ConfigJsonWriter
 
 		sb.Append("{\n");
 		var items = obj.ToList();
+		if (depth == 0)   // normalize top-level key order so all config layers read consistently
+			items = items.OrderBy(kv => { var idx = Array.IndexOf(RootKeyOrder, kv.Key); return idx < 0 ? int.MaxValue : idx; }).ToList();
 		for (var i = 0; i < items.Count; i++)
 		{
 			var kv = items[i];
