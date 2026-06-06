@@ -88,10 +88,10 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 }
 
 /// <summary>`wa data restore` — inverse of `wa data backup`. Defaults to the most-recent
-/// <c>wa-data-*.tar.gz</c> in <c>&lt;BaseDir&gt;/backups/</c>. Restore is atomic: extracts to a staging
+/// <c>wa-data-*.tar.gz</c> in <c><BaseDir>/backups/</c>. Restore is atomic: extracts to a staging
 /// directory first, then swaps in. If <c>data/</c> already exists, the command refuses unless
 /// <c>--force</c> is passed; with <c>--force</c>, the existing dir is renamed to
-/// <c>data.bak.&lt;timestamp&gt;/</c> so the old state is recoverable.</summary>
+/// <c>data.bak.<timestamp>/</c> so the old state is recoverable.</summary>
 internal sealed class DataRestoreSettings : CommandSettings
 {
 	[CommandOption("-i|--input <path>")]

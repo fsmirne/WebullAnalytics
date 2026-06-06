@@ -30,8 +30,8 @@ internal static class CandidateScorer
 	}
 
 	/// <summary>Sign-symmetric factor application. For a positive score, multiplying by
-	/// <paramref name="factor"/> &lt; 1 is a penalty (smaller positive). For a negative score, the
-	/// same factor &lt; 1 used to bring the score TOWARD zero — i.e., make a bad trade look less
+	/// <paramref name="factor"/> < 1 is a penalty (smaller positive). For a negative score, the
+	/// same factor < 1 used to bring the score TOWARD zero — i.e., make a bad trade look less
 	/// bad — which collapsed obviously-bad candidates into the "least bad" ranking position. The
 	/// fix: when score is negative, apply <c>(2 − factor)</c> so a penalty actually compounds the
 	/// badness. Continuous at <c>factor = 1</c> (no-op for either sign), symmetric around zero.
@@ -655,7 +655,7 @@ internal static class CandidateScorer
 	/// VolatilityAdjustmentFactor: that one scales by net-vega magnitude (small for plain credit
 	/// verticals, large for calendars/diagonals); this one fires on trade-type sign alone, so even
 	/// near-zero-vega credit/debit structures still get a regime read. Credit trades favored when
-	/// IV &gt; HV (rich premium to collect); debit trades favored when IV &lt; HV (cheap premium
+	/// IV > HV (rich premium to collect); debit trades favored when IV < HV (cheap premium
 	/// to pay). Premium clamped to ±100% so a 3× IV/HV blowout doesn't dominate the chain. Null
 	/// when HV unavailable or weight = 0.</summary>
 	internal static decimal? ComputeIvRealizedPremiumFactor(decimal iv, decimal? historicalVolAnnual, decimal debitOrCreditPerContract, decimal weight)
@@ -1175,7 +1175,7 @@ internal static class CandidateScorer
 	/// Probability that <paramref name="spot"/>, evolving as zero-drift GBM with vol
 	/// <paramref name="ivAnnual"/> over <paramref name="years"/>, touches either of two price
 	/// barriers at any point during the interval. Closed-form single-side first-passage formula:
-	/// <c>P(min S_t ≤ B) = 2·N(ln(B/S)/σ√T)</c> for B &lt; S, and the symmetric upper version.
+	/// <c>P(min S_t ≤ B) = 2·N(ln(B/S)/σ√T)</c> for B < S, and the symmetric upper version.
 	/// Combines two barriers via union bound (capped at 0.99) — slightly conservative for tight
 	/// two-sided traps where the bounds overlap, exact for distant one-sided cases.
 	/// Returns 0 when inputs are degenerate; returns 1 when spot has already crossed a barrier.
@@ -1209,8 +1209,8 @@ internal static class CandidateScorer
 	}
 
 	/// <summary>
-	/// P(S_T &gt; level) or P(S_T &lt; level) under log-normal neutral drift:
-	/// d2 = (ln(S/K) − σ²·T/2) / (σ·√T); P(S_T &gt; K) = N(d2); P(S_T &lt; K) = 1 − N(d2).
+	/// P(S_T > level) or P(S_T < level) under log-normal neutral drift:
+	/// d2 = (ln(S/K) − σ²·T/2) / (σ·√T); P(S_T > K) = N(d2); P(S_T < K) = 1 − N(d2).
 	/// </summary>
 	public static decimal LogNormalProbability(Direction dir, decimal spot, decimal level, double years, double ivAnnual)
 	{
@@ -1635,7 +1635,7 @@ internal static class CandidateScorer
 	/// <summary>Total long-leg premium paid divided by total short-leg premium received, summed across
 	/// all legs (qty-weighted). Generalizes naturally to any multi-leg structure: 2-leg debits
 	/// (calendar/diagonal) get long_ask/short_bid; 2-leg credits (vertical) get the same expression
-	/// which lands &lt;1 because short_bid &gt; long_ask; 4-leg double diagonals / iron butterflies /
+	/// which lands <1 because short_bid > long_ask; 4-leg double diagonals / iron butterflies /
 	/// broken-wing butterflies sum across both call- and put-side legs. Single-leg structures (long
 	/// call/put) have no shorts so we return 1 — premium_ratio adjustment is a no-op for them.</summary>
 	private static decimal ComputePremiumRatio(IReadOnlyList<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, string pricingMode)
