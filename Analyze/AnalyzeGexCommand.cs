@@ -36,15 +36,19 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	[Description("Max strike rows to display. Picks the N strikes closest to spot within --strike-range. Default: 25.")]
 	public int MaxStrikes { get; set; } = 25;
 
-	[CommandOption("--max-expiries <N>")]
-	[DefaultValue(12)]
-	[Description("Max expirations to display when --expiry is not set. Default: 12.")]
-	public int MaxExpiries { get; set; } = 12;
+	[CommandOption("--dte <N>")]
+	[DefaultValue(0)]
+	[Description("Days-to-expiry to view: 0 = today's 0DTE, 1 = next expiry, etc. Selects the single expiry whose days-to-expiry from the as-of date is the smallest value >= N. Ignored when --expiry is set.")]
+	public int Dte { get; set; }
 
 	[CommandOption("--top-walls <N>")]
 	[DefaultValue(5)]
 	[Description("Number of top call/put walls to list. Default: 5.")]
 	public int TopWalls { get; set; } = 5;
+
+	[CommandOption("--intraday")]
+	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH hours, recomputing per-strike GEX at each hour's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Offline-only — requires a past --date with a data/oi snapshot. Skips the walls/totals/per-expiry tables.")]
+	public bool Intraday { get; set; }
 
 	public override ValidationResult Validate()
 	{
@@ -55,7 +59,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 			return ValidationResult.Error($"--expiry: expected YYYY-MM-DD, got '{Expiry}'");
 		if (StrikeRangePct <= 0 || StrikeRangePct > 200) return ValidationResult.Error($"--strike-range: must be in (0, 200], got {StrikeRangePct}");
 		if (MaxStrikes < 1 || MaxStrikes > 200) return ValidationResult.Error($"--max-strikes: must be in [1, 200], got {MaxStrikes}");
-		if (MaxExpiries < 1 || MaxExpiries > 50) return ValidationResult.Error($"--max-expiries: must be in [1, 50], got {MaxExpiries}");
+		if (Dte < 0 || Dte > 60) return ValidationResult.Error($"--dte: must be in [0, 60], got {Dte}");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
 		return ValidationResult.Success();
 	}
@@ -78,6 +82,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		Dictionary<string, OptionContractQuote> quotes;
 		decimal? spot;
+		var isOfflineHistorical = false;
 
 		// Historical/offline: for a PAST --date with a captured chain in data/oi (ThetaData backfill or the live
 		// scraper), read that day's snapshot — OI + IV + spot are inlined for the full chain — instead of the
@@ -94,6 +99,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			quotes = snapQuotes;
 			spot = ResolveSpotOverride(settings.Spot, ticker) ?? snapSpot;
 			AnsiConsole.MarkupLine($"[dim]Historical GEX from {Markup.Escape(oiPath)} ({quotes.Count} contracts; offline — no live fetch).[/]");
+			isOfflineHistorical = true;
 		}
 		else
 		{
@@ -117,11 +123,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			}
 			spot = ResolveSpotOverride(settings.Spot, ticker) ?? fetchedSpot;
 			quotes = new Dictionary<string, OptionContractQuote>(initialQuotes, StringComparer.OrdinalIgnoreCase);
+			// Resolve the --dte single-expiry target now (from the parsed chain symbols) so the queryBatch refresh
+			// below scopes to exactly that expiry. An explicit --expiry already pinned expiryFilter above.
+			expiryFilter ??= ResolveDteExpiry(quotes, ticker, asOf.Date, settings.Dte);
 			// Webull's strategy/list only inlines OI/IV for the front-most expiration; re-pull in-window contracts
 			// via queryBatch to populate the heatmap. (Offline data/oi snapshots already carry the full chain.)
 			if (spot.HasValue && spot.Value > 0m)
 			{
-				var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.MaxExpiries, settings.MaxStrikes, cancellation);
+				var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, 1, settings.MaxStrikes, cancellation);
 				if (refreshed > 0) AnsiConsole.MarkupLine($"[dim]Refreshed {refreshed} in-window contract(s) via queryBatch.[/]");
 			}
 		}
@@ -132,7 +141,23 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return 1;
 		}
 
-		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.MaxExpiries, settings.MaxStrikes);
+		// --dte picks a single expiry (offline path / when not already resolved above). An explicit --expiry wins.
+		expiryFilter ??= ResolveDteExpiry(quotes, ticker, asOf.Date, settings.Dte);
+
+		// --intraday: 0DTE strikes × RTH-hours gravity-migration heatmap. Offline-historical only (needs a past
+		// --date with both a data/oi snapshot and a data/intraday spot file). Replaces the normal tables.
+		if (settings.Intraday)
+		{
+			if (!isOfflineHistorical)
+			{
+				AnsiConsole.MarkupLine("[red]--intraday requires a past --date with a data/oi snapshot (offline-historical mode); none was loaded.[/]");
+				return 1;
+			}
+			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes);
+			return 0;
+		}
+
+		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, 1, settings.MaxStrikes);
 		if (matrix.Strikes.Count == 0 || matrix.Expiries.Count == 0)
 		{
 			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
@@ -245,6 +270,23 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		if (symbolsToRefresh.Count == 0) return 0;
 		AnsiConsole.MarkupLine($"[dim]Refreshing {symbolsToRefresh.Count} non-front-month contract(s) via queryBatch...[/]");
 		return await WebullOptionsClient.RefreshContractsAsync(apiConfig, chain, symbolsToRefresh, derivativeIds, cancellation);
+	}
+
+	/// <summary>Resolves the single expiry implied by --dte: the nearest distinct chain expiry (for <paramref name="ticker"/>)
+	/// on or after <paramref name="asOfDate"/> whose days-to-expiry is the smallest value >= <paramref name="dte"/>
+	/// (0 = today's 0DTE, 1 = next expiry, etc.). Returns null when the chain has no expiry that far out.</summary>
+	private static DateTime? ResolveDteExpiry(IReadOnlyDictionary<string, OptionContractQuote> quotes, string ticker, DateTime asOfDate, int dte)
+	{
+		DateTime? best = null;
+		foreach (var sym in quotes.Keys)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			var exp = p.ExpiryDate.Date;
+			if (exp < asOfDate || (exp - asOfDate).Days < dte) continue;
+			if (best == null || exp < best.Value) best = exp;
+		}
+		return best;
 	}
 
 	private static decimal? ResolveSpotOverride(string? spotSpec, string ticker)
@@ -449,6 +491,111 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		grid.AddColumn();
 		grid.AddRow(callTable, new Markup(""), putTable);
 		AnsiConsole.Write(grid);
+	}
+
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
+	/// <summary>Reads data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv (header timestamp_utc,open,high,low,close,volume; UTC ISO
+	/// timestamps), converts each row to ET, keeps the RTH window (09:30–16:00 ET), and returns ET-time-of-day → close.
+	/// Returns empty when the file is absent.</summary>
+	private static SortedDictionary<TimeSpan, decimal> LoadIntradaySpots(string ticker, DateTime date)
+	{
+		var spots = new SortedDictionary<TimeSpan, decimal>();
+		var path = Program.ResolvePath($"data/intraday/{ticker}/{date:yyyy-MM-dd}.csv");
+		if (!File.Exists(path)) return spots;
+
+		var rthOpen = new TimeSpan(9, 30, 0);
+		var rthClose = new TimeSpan(16, 0, 0);
+		var first = true;
+		foreach (var line in File.ReadLines(path))
+		{
+			if (first) { first = false; continue; } // header
+			if (string.IsNullOrWhiteSpace(line)) continue;
+			var parts = line.Split(',');
+			if (parts.Length < 5) continue;
+			if (!DateTimeOffset.TryParse(parts[0], CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var utc)) continue;
+			if (!decimal.TryParse(parts[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var close)) continue;
+			var et = TimeZoneInfo.ConvertTimeFromUtc(utc.UtcDateTime, NyTz);
+			var tod = et.TimeOfDay;
+			if (tod < rthOpen || tod > rthClose) continue;
+			spots[tod] = close;
+		}
+		return spots;
+	}
+
+	/// <summary>Renders the 0DTE intraday GEX gravity-migration heatmap: rows = strikes (descending), columns = RTH
+	/// hour marks. At each hour the per-strike GEX is recomputed at that hour's intraday spot against the day's fixed
+	/// OI, so the gravity strike (bold-underlined) is seen migrating as price moves. Brightness ∝ |net| across all
+	/// hours; green = call-dominated, red = put-dominated.</summary>
+	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes)
+	{
+		var expiry = date.Date;
+		var intradaySpots = LoadIntradaySpots(ticker, date);
+		if (intradaySpots.Count == 0)
+		{
+			AnsiConsole.MarkupLine($"[red]No intraday spots in data/intraday/{ticker}/{date:yyyy-MM-dd}.csv (file absent or no RTH rows).[/]");
+			return;
+		}
+
+		var hourMarks = new[]
+		{
+			new TimeSpan(9, 30, 0), new TimeSpan(10, 30, 0), new TimeSpan(11, 30, 0), new TimeSpan(12, 30, 0),
+			new TimeSpan(13, 30, 0), new TimeSpan(14, 30, 0), new TimeSpan(15, 30, 0), new TimeSpan(16, 0, 0),
+		};
+		var tolerance = TimeSpan.FromMinutes(10);
+
+		// Per kept hour: the spot, the per-strike GexCells for the 0DTE, and that hour's gravity strike.
+		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity)>();
+		foreach (var mark in hourMarks)
+		{
+			decimal? spot = null;
+			var bestDiff = tolerance;
+			foreach (var kv in intradaySpots)
+			{
+				var diff = kv.Key >= mark ? kv.Key - mark : mark - kv.Key;
+				if (diff <= bestDiff) { bestDiff = diff; spot = kv.Value; }
+			}
+			if (!spot.HasValue || spot.Value <= 0m) continue;
+
+			var m = GexMatrix.Build(quotes, ticker, spot.Value, expiry + mark, expiryFilter: expiry, strikeRangeFraction, maxExpiries: 1, maxStrikes);
+			var cells = new Dictionary<decimal, GexCell>();
+			foreach (var strike in m.Strikes)
+				if (m.Cells.TryGetValue((expiry, strike), out var c)) cells[strike] = c;
+			if (cells.Count == 0) continue;
+			m.GravityByExpiry.TryGetValue(expiry, out var grav);
+			hours.Add((mark, spot.Value, cells, grav));
+		}
+
+		if (hours.Count == 0)
+		{
+			AnsiConsole.MarkupLine($"[yellow]No 0DTE GEX cells at any hour for {ticker} {date:yyyy-MM-dd} (±{strikeRangeFraction * 100m:F0}% window).[/]");
+			return;
+		}
+
+		var maxAbsNet = Math.Max(1m, hours.SelectMany(h => h.Cells.Values).Select(c => Math.Abs(c.Net)).DefaultIfEmpty(0m).Max());
+		var allStrikes = hours.SelectMany(h => h.Cells.Keys).Distinct().OrderByDescending(s => s).ToList();
+
+		AnsiConsole.MarkupLine($"[bold]{ticker}[/] 0DTE {date:yyyy-MM-dd} — intraday GEX gravity migration");
+
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
+		table.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
+		foreach (var h in hours)
+			table.AddColumn(new TableColumn($"[bold]{h.Mark:hh\\:mm}[/]\n[dim]${h.Spot:F2}[/]").Centered().NoWrap());
+
+		foreach (var strike in allStrikes)
+		{
+			var cells = new List<string> { $"${strike:N2}" };
+			foreach (var h in hours)
+			{
+				h.Cells.TryGetValue(strike, out var cell);
+				var isGravity = h.Gravity.HasValue && h.Gravity.Value == strike;
+				cells.Add(BuildHeatmapCellMarkup(cell, maxAbsNet, isGravity));
+			}
+			table.AddRow(cells.ToArray());
+		}
+
+		AnsiConsole.Write(table);
+		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each hour's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that hour's gravity strike (max gross gamma).[/]");
 	}
 
 	private static string FormatCompact(decimal v)
@@ -681,10 +828,28 @@ internal sealed class GexMatrix
 			if (parsed.Strike < minStrike || parsed.Strike > maxStrike) continue;
 			var q = kv.Value;
 			if (!q.OpenInterest.HasValue || q.OpenInterest.Value <= 0) continue;
-			if (!q.ImpliedVolatility.HasValue || q.ImpliedVolatility.Value <= 0m) continue;
 
 			var timeYears = Math.Max(1, (parsed.ExpiryDate.Date - asOfDate).Days) / 365.0;
-			var gamma = (decimal)OptionMath.Gamma(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, q.ImpliedVolatility.Value);
+
+			// The data/oi EOD snapshot stores iv = null for every contract on its OWN expiry day: the Python
+			// back-solve degenerates at T≈0 against the 16:00 stamp, so the entire 0DTE expiry would otherwise
+			// vanish (and `analyze gex` falls through to the next day). Back-solve the IV from the captured mid
+			// at the (already day-floored) timeYears so the 0DTE — which still carries real OI + bid/ask — survives.
+			var iv = q.ImpliedVolatility ?? 0m;
+			if (iv <= 0m && !string.IsNullOrEmpty(parsed.CallPut))
+			{
+				var mid = q.Bid.HasValue && q.Ask.HasValue && q.Bid.Value > 0m && q.Ask.Value > 0m
+					? (q.Bid.Value + q.Ask.Value) / 2m
+					: q.LastPrice ?? 0m;
+				if (mid > 0m)
+				{
+					var solved = OptionMath.ImpliedVol(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, mid, parsed.CallPut);
+					if (solved > 0.011m && solved < 4.99m) iv = solved;
+				}
+			}
+			if (iv <= 0m) continue;
+
+			var gamma = (decimal)OptionMath.Gamma(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, iv);
 			var dollarGex = gamma * q.OpenInterest.Value * 100m * spot;
 			if (dollarGex <= 0m) continue;
 
@@ -695,7 +860,7 @@ internal sealed class GexMatrix
 				raw[key] = (existing.CallGex + dollarGex, existing.PutGex);
 			else
 				raw[key] = (existing.CallGex, existing.PutGex + dollarGex);
-			rawContribs.Add((parsed.ExpiryDate.Date, parsed.Strike, timeYears, q.ImpliedVolatility.Value, q.OpenInterest.Value, isCall));
+			rawContribs.Add((parsed.ExpiryDate.Date, parsed.Strike, timeYears, iv, q.OpenInterest.Value, isCall));
 			expirySet.Add(parsed.ExpiryDate.Date);
 			strikeSet.Add(parsed.Strike);
 		}
