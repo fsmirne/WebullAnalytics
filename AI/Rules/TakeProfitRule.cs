@@ -13,11 +13,13 @@ internal sealed class TakeProfitRule : IManagementRule
 {
 	private readonly TakeProfitConfig _config;
 	private readonly OpenerRealizedExpectancyConfig _realizedExpectancy;
+	private readonly bool _debug;
 
-	public TakeProfitRule(TakeProfitConfig config, OpenerRealizedExpectancyConfig realizedExpectancy)
+	public TakeProfitRule(TakeProfitConfig config, OpenerRealizedExpectancyConfig realizedExpectancy, bool debug = false)
 	{
 		_config = config;
 		_realizedExpectancy = realizedExpectancy;
+		_debug = debug;
 	}
 
 	public string Name => "TakeProfitRule";
@@ -88,7 +90,7 @@ internal sealed class TakeProfitRule : IManagementRule
 		);
 	}
 
-	private static decimal? ComputeMarkPerContract(OpenPosition p, EvaluationContext ctx)
+	private decimal? ComputeMarkPerContract(OpenPosition p, EvaluationContext ctx)
 	{
 		decimal total = 0m;
 		foreach (var leg in p.Legs)
@@ -98,9 +100,12 @@ internal sealed class TakeProfitRule : IManagementRule
 			if (!hasQuote || q!.Bid == null || q.Ask == null)
 			{
 				// A single un-priceable leg nulls the whole mark, which silently disables the exit for an
-				// otherwise-profitable position. Surface it: the usual culprit is a far-dated leg the chain
-				// omitted (see WebullOptionsClient queryBatch fallback). Never let this fail without a trace.
-				Console.Error.WriteLine($"[TakeProfitRule] {p.Key}: no two-sided quote for leg {leg.Symbol} (bid={q?.Bid?.ToString() ?? "-"} ask={q?.Ask?.ToString() ?? "-"}); take-profit not evaluated this tick.");
+				// otherwise-profitable position. Surface it under --log-level debug only: in the per-minute
+				// backtest this fires on every tick a leg lacks a two-sided quote (e.g. a thin far-dated leg
+				// in quotes-only mode) and would flood stdout / corrupt the progress bar. The usual culprit
+				// is a far-dated leg the chain omitted (see WebullOptionsClient queryBatch fallback).
+				if (_debug)
+					Console.Error.WriteLine($"[TakeProfitRule] {p.Key}: no two-sided quote for leg {leg.Symbol} (bid={q?.Bid?.ToString() ?? "-"} ask={q?.Ask?.ToString() ?? "-"}); take-profit not evaluated this tick.");
 				return null;
 			}
 			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
