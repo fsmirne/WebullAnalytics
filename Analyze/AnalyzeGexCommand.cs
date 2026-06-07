@@ -37,9 +37,9 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public int MaxStrikes { get; set; } = 25;
 
 	[CommandOption("--dte <N>")]
-	[DefaultValue(0)]
-	[Description("Days-to-expiry to view: 0 = today's 0DTE, 1 = next expiry, etc. Selects the single expiry whose days-to-expiry from the as-of date is the smallest value >= N. Ignored when --expiry is set.")]
-	public int Dte { get; set; }
+	[DefaultValue(14)]
+	[Description("Days-to-expiry cap: include every expiry from 0DTE through N days out (the daily grid). 0 = today's 0DTE only, 14 (default) = the next two weeks. Ignored when --expiry pins a single expiry.")]
+	public int Dte { get; set; } = 14;
 
 	[CommandOption("--top-walls <N>")]
 	[DefaultValue(5)]
@@ -47,8 +47,13 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public int TopWalls { get; set; } = 5;
 
 	[CommandOption("--intraday")]
-	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH hours, recomputing per-strike GEX at each hour's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Offline-only — requires a past --date with a data/oi snapshot. Skips the walls/totals/per-expiry tables.")]
+	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Offline-only — requires a past --date with a data/oi snapshot. Skips the walls/totals/per-expiry tables.")]
 	public bool Intraday { get; set; }
+
+	[CommandOption("--interval <MIN>")]
+	[DefaultValue(30)]
+	[Description("--intraday time-bucket size in minutes (default 30): the RTH column spacing from 09:30 to 16:00.")]
+	public int IntervalMin { get; set; } = 30;
 
 	public override ValidationResult Validate()
 	{
@@ -60,6 +65,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (StrikeRangePct <= 0 || StrikeRangePct > 200) return ValidationResult.Error($"--strike-range: must be in (0, 200], got {StrikeRangePct}");
 		if (MaxStrikes < 1 || MaxStrikes > 200) return ValidationResult.Error($"--max-strikes: must be in [1, 200], got {MaxStrikes}");
 		if (Dte < 0 || Dte > 60) return ValidationResult.Error($"--dte: must be in [0, 60], got {Dte}");
+		if (IntervalMin < 5 || IntervalMin > 120) return ValidationResult.Error($"--interval: must be in [5, 120] minutes, got {IntervalMin}");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
 		return ValidationResult.Success();
 	}
@@ -123,14 +129,11 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			}
 			spot = ResolveSpotOverride(settings.Spot, ticker) ?? fetchedSpot;
 			quotes = new Dictionary<string, OptionContractQuote>(initialQuotes, StringComparer.OrdinalIgnoreCase);
-			// Resolve the --dte single-expiry target now (from the parsed chain symbols) so the queryBatch refresh
-			// below scopes to exactly that expiry. An explicit --expiry already pinned expiryFilter above.
-			expiryFilter ??= ResolveDteExpiry(quotes, ticker, asOf.Date, settings.Dte);
 			// Webull's strategy/list only inlines OI/IV for the front-most expiration; re-pull in-window contracts
 			// via queryBatch to populate the heatmap. (Offline data/oi snapshots already carry the full chain.)
 			if (spot.HasValue && spot.Value > 0m)
 			{
-				var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, 1, settings.MaxStrikes, cancellation);
+				var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, cancellation);
 				if (refreshed > 0) AnsiConsole.MarkupLine($"[dim]Refreshed {refreshed} in-window contract(s) via queryBatch.[/]");
 			}
 		}
@@ -141,9 +144,6 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return 1;
 		}
 
-		// --dte picks a single expiry (offline path / when not already resolved above). An explicit --expiry wins.
-		expiryFilter ??= ResolveDteExpiry(quotes, ticker, asOf.Date, settings.Dte);
-
 		// --intraday: 0DTE strikes × RTH-hours gravity-migration heatmap. Offline-historical only (needs a past
 		// --date with both a data/oi snapshot and a data/intraday spot file). Replaces the normal tables.
 		if (settings.Intraday)
@@ -153,11 +153,11 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				AnsiConsole.MarkupLine("[red]--intraday requires a past --date with a data/oi snapshot (offline-historical mode); none was loaded.[/]");
 				return 1;
 			}
-			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes);
+			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin);
 			return 0;
 		}
 
-		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, 1, settings.MaxStrikes);
+		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes);
 		if (matrix.Strikes.Count == 0 || matrix.Expiries.Count == 0)
 		{
 			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
@@ -214,8 +214,8 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 	/// <summary>Identifies chain symbols within the heatmap window (strike range × selected expiries) that
 	/// came back from strategy/list with missing OI or IV, then refreshes them via Webull's queryBatch.
-	/// Pre-filters expiries to <paramref name="maxExpiries"/> when no explicit --expiry is set so we don't
-	/// waste batches on far-dated stub contracts the user won't see.</summary>
+	/// Pre-filters expiries to those within <paramref name="maxDteDays"/> days-to-expiry when no explicit
+	/// --expiry is set so we don't waste batches on far-dated stub contracts the user won't see.</summary>
 	private static async Task<int> RefreshInWindowContractsAsync(
 		ApiConfig apiConfig,
 		IDictionary<string, OptionContractQuote> chain,
@@ -225,7 +225,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		DateTime asOf,
 		DateTime? expiryFilter,
 		decimal strikeRangeFraction,
-		int maxExpiries,
+		int maxDteDays,
 		int maxStrikes,
 		CancellationToken cancellation)
 	{
@@ -247,7 +247,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 		var keptExpiries = expiryFilter.HasValue
 			? inScopeExpiries
-			: inScopeExpiries.OrderBy(d => d).Take(maxExpiries).ToHashSet();
+			: inScopeExpiries.Where(e => (e - asOfDate).Days <= maxDteDays).ToHashSet();
 
 		// Cap rows: pick the maxStrikes strikes closest to spot. High-priced underlyings (e.g. SPY with
 		// $1-wide strikes) otherwise pull hundreds of strikes into the heatmap and refresh thousands of
@@ -272,22 +272,6 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		return await WebullOptionsClient.RefreshContractsAsync(apiConfig, chain, symbolsToRefresh, derivativeIds, cancellation);
 	}
 
-	/// <summary>Resolves the single expiry implied by --dte: the nearest distinct chain expiry (for <paramref name="ticker"/>)
-	/// on or after <paramref name="asOfDate"/> whose days-to-expiry is the smallest value >= <paramref name="dte"/>
-	/// (0 = today's 0DTE, 1 = next expiry, etc.). Returns null when the chain has no expiry that far out.</summary>
-	private static DateTime? ResolveDteExpiry(IReadOnlyDictionary<string, OptionContractQuote> quotes, string ticker, DateTime asOfDate, int dte)
-	{
-		DateTime? best = null;
-		foreach (var sym in quotes.Keys)
-		{
-			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
-			var exp = p.ExpiryDate.Date;
-			if (exp < asOfDate || (exp - asOfDate).Days < dte) continue;
-			if (best == null || exp < best.Value) best = exp;
-		}
-		return best;
-	}
 
 	private static decimal? ResolveSpotOverride(string? spotSpec, string ticker)
 	{
@@ -527,7 +511,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// hour marks. At each hour the per-strike GEX is recomputed at that hour's intraday spot against the day's fixed
 	/// OI, so the gravity strike (bold-underlined) is seen migrating as price moves. Brightness ∝ |net| across all
 	/// hours; green = call-dominated, red = put-dominated.</summary>
-	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes)
+	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int intervalMin)
 	{
 		var expiry = date.Date;
 		var intradaySpots = LoadIntradaySpots(ticker, date);
@@ -537,12 +521,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return;
 		}
 
-		var hourMarks = new[]
-		{
-			new TimeSpan(9, 30, 0), new TimeSpan(10, 30, 0), new TimeSpan(11, 30, 0), new TimeSpan(12, 30, 0),
-			new TimeSpan(13, 30, 0), new TimeSpan(14, 30, 0), new TimeSpan(15, 30, 0), new TimeSpan(16, 0, 0),
-		};
-		var tolerance = TimeSpan.FromMinutes(10);
+		// Column marks: 09:30 stepping by --interval to 16:00 (always include the 16:00 close).
+		var open = new TimeSpan(9, 30, 0);
+		var close = new TimeSpan(16, 0, 0);
+		var hourMarks = new List<TimeSpan>();
+		for (var t = open; t < close; t += TimeSpan.FromMinutes(intervalMin)) hourMarks.Add(t);
+		hourMarks.Add(close);
+		// Match the nearest intraday minute within half a bucket so adjacent columns never share a spot.
+		var tolerance = TimeSpan.FromMinutes(Math.Max(1, intervalMin / 2));
 
 		// Per kept hour: the spot, the per-strike GexCells for the 0DTE, and that hour's gravity strike.
 		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity)>();
@@ -557,7 +543,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			}
 			if (!spot.HasValue || spot.Value <= 0m) continue;
 
-			var m = GexMatrix.Build(quotes, ticker, spot.Value, expiry + mark, expiryFilter: expiry, strikeRangeFraction, maxExpiries: 1, maxStrikes);
+			var m = GexMatrix.Build(quotes, ticker, spot.Value, expiry + mark, expiryFilter: expiry, strikeRangeFraction, maxDteDays: 0, maxStrikes);
 			var cells = new Dictionary<decimal, GexCell>();
 			foreach (var strike in m.Strikes)
 				if (m.Cells.TryGetValue((expiry, strike), out var c)) cells[strike] = c;
@@ -595,7 +581,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 
 		AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each hour's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that hour's gravity strike (max gross gamma).[/]");
+		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma).[/]");
 	}
 
 	private static string FormatCompact(decimal v)
@@ -795,8 +781,8 @@ internal sealed class GexMatrix
 	/// <summary>
 	/// Builds the (expiry × strike) GEX matrix from a raw chain. Per-cell exposure is split between
 	/// CallGex and PutGex, each computed as Black-Scholes gamma × OI × 100 × spot. Filters strikes to
-	/// ±strikeRangeFraction of spot and (when expiryFilter is null) limits to the next maxExpiries
-	/// expirations sorted ascending. When expiryFilter is set, all other expirations are dropped.
+	/// ±strikeRangeFraction of spot and (when expiryFilter is null) keeps every expiration within
+	/// maxDteDays days-to-expiry. When expiryFilter is set, all other expirations are dropped.
 	/// Caps row count to <paramref name="maxStrikes"/> by keeping the strikes closest to spot — high-priced
 	/// underlyings (e.g. SPY) otherwise pull hundreds of strikes into the heatmap.
 	/// </summary>
@@ -807,7 +793,7 @@ internal sealed class GexMatrix
 		DateTime asOf,
 		DateTime? expiryFilter,
 		decimal strikeRangeFraction,
-		int maxExpiries,
+		int maxDteDays,
 		int maxStrikes)
 	{
 		var minStrike = spot * (1m - strikeRangeFraction);
@@ -866,8 +852,8 @@ internal sealed class GexMatrix
 		}
 
 		var expiries = expirySet.OrderBy(d => d).ToList();
-		if (!expiryFilter.HasValue && expiries.Count > maxExpiries)
-			expiries = expiries.Take(maxExpiries).ToList();
+		if (!expiryFilter.HasValue)
+			expiries = expiries.Where(e => (e - asOfDate).Days <= maxDteDays).ToList();
 		var keptExpirySet = expiries.ToHashSet();
 
 		// Drop strikes that have no surviving cell after the expiry-window cap, then cap to maxStrikes
