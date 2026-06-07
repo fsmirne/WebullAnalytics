@@ -70,45 +70,67 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
-		var configPath = Program.ResolvePath(Program.ApiConfigPath);
-		if (!File.Exists(configPath))
-		{
-			AnsiConsole.MarkupLine("[red]Error: api-config.json not found. Run 'sniff' first.[/]");
-			return 1;
-		}
-		var apiConfig = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-		if (apiConfig == null || apiConfig.Webull.Headers.Count == 0)
-		{
-			AnsiConsole.MarkupLine("[red]Error: api-config.json is empty or missing headers. Run 'sniff' first.[/]");
-			return 1;
-		}
-
 		var ticker = settings.Ticker.ToUpperInvariant();
-		var (initialQuotes, fetchedSpot, derivativeIds) = await WebullOptionsClient.FetchChainAsync(apiConfig, ticker, cancellation);
-		if (initialQuotes.Count == 0)
-		{
-			AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker}.[/]");
-			return 1;
-		}
-
-		var spot = ResolveSpotOverride(settings.Spot, ticker) ?? fetchedSpot;
-		if (!spot.HasValue || spot.Value <= 0m)
-		{
-			AnsiConsole.MarkupLine($"[red]No spot price available for {ticker}. Pass --spot {ticker}:PRICE to override.[/]");
-			return 1;
-		}
-
 		var asOf = settings.EvaluationDateOverride ?? DateTime.Now;
 		DateTime? expiryFilter = settings.Expiry != null
 			? DateTime.ParseExact(settings.Expiry, "yyyy-MM-dd", CultureInfo.InvariantCulture)
 			: null;
 
-		// Webull's strategy/list only inlines OI/IV for the front-most expiration. To populate the heatmap
-		// we re-pull contracts within the strike window and (when --expiry isn't set) the next maxExpiries
-		// expirations through queryBatch — that endpoint returns OI/IV for any derivativeId we ask for.
-		var quotes = new Dictionary<string, OptionContractQuote>(initialQuotes, StringComparer.OrdinalIgnoreCase);
-		var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.MaxExpiries, settings.MaxStrikes, cancellation);
-		if (refreshed > 0) AnsiConsole.MarkupLine($"[dim]Refreshed {refreshed} in-window contract(s) via queryBatch.[/]");
+		Dictionary<string, OptionContractQuote> quotes;
+		decimal? spot;
+
+		// Historical/offline: for a PAST --date with a captured chain in data/oi (ThetaData backfill or the live
+		// scraper), read that day's snapshot — OI + IV + spot are inlined for the full chain — instead of the
+		// live Webull fetch. Lets `analyze gex SPY --date 2026-06-03` show THAT day's real magnet, not today's.
+		var oiPath = Program.ResolvePath($"data/oi/{ticker}/{asOf:yyyy-MM-dd}.jsonl");
+		if (settings.EvaluationDateOverride.HasValue && asOf.Date < DateTime.Today && File.Exists(oiPath))
+		{
+			var (snapSpot, snapQuotes) = LoadOiSnapshot(oiPath);
+			if (snapQuotes.Count == 0)
+			{
+				AnsiConsole.MarkupLine($"[red]Empty data/oi snapshot for {ticker} {asOf:yyyy-MM-dd}.[/]");
+				return 1;
+			}
+			quotes = snapQuotes;
+			spot = ResolveSpotOverride(settings.Spot, ticker) ?? snapSpot;
+			AnsiConsole.MarkupLine($"[dim]Historical GEX from {Markup.Escape(oiPath)} ({quotes.Count} contracts; offline — no live fetch).[/]");
+		}
+		else
+		{
+			var configPath = Program.ResolvePath(Program.ApiConfigPath);
+			if (!File.Exists(configPath))
+			{
+				AnsiConsole.MarkupLine("[red]Error: api-config.json not found. Run 'sniff' first (or pass a past --date with a data/oi snapshot).[/]");
+				return 1;
+			}
+			var apiConfig = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+			if (apiConfig == null || apiConfig.Webull.Headers.Count == 0)
+			{
+				AnsiConsole.MarkupLine("[red]Error: api-config.json is empty or missing headers. Run 'sniff' first.[/]");
+				return 1;
+			}
+			var (initialQuotes, fetchedSpot, derivativeIds) = await WebullOptionsClient.FetchChainAsync(apiConfig, ticker, cancellation);
+			if (initialQuotes.Count == 0)
+			{
+				AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker}.[/]");
+				return 1;
+			}
+			spot = ResolveSpotOverride(settings.Spot, ticker) ?? fetchedSpot;
+			quotes = new Dictionary<string, OptionContractQuote>(initialQuotes, StringComparer.OrdinalIgnoreCase);
+			// Webull's strategy/list only inlines OI/IV for the front-most expiration; re-pull in-window contracts
+			// via queryBatch to populate the heatmap. (Offline data/oi snapshots already carry the full chain.)
+			if (spot.HasValue && spot.Value > 0m)
+			{
+				var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.MaxExpiries, settings.MaxStrikes, cancellation);
+				if (refreshed > 0) AnsiConsole.MarkupLine($"[dim]Refreshed {refreshed} in-window contract(s) via queryBatch.[/]");
+			}
+		}
+
+		if (!spot.HasValue || spot.Value <= 0m)
+		{
+			AnsiConsole.MarkupLine($"[red]No spot price available for {ticker}. Pass --spot {ticker}:PRICE to override.[/]");
+			return 1;
+		}
 
 		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.MaxExpiries, settings.MaxStrikes);
 		if (matrix.Strikes.Count == 0 || matrix.Expiries.Count == 0)
@@ -127,6 +149,42 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		AnsiConsole.WriteLine();
 		RenderWalls(matrix, settings.TopWalls);
 		return 0;
+	}
+
+	/// <summary>Loads a historical day's chain from a data/oi snapshot (the per-day full-chain JSONL written by
+	/// the ThetaData backfill / live scraper) into (spot, quotes) — OI + IV inlined for every contract, so the
+	/// GEX heatmap computes off real captured data with no live fetch. Picks the first RTH (≥09:30 ET) record,
+	/// else the first line.</summary>
+	private static (decimal? Spot, Dictionary<string, OptionContractQuote> Quotes) LoadOiSnapshot(string path)
+	{
+		var quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		string? chosen = null, firstAny = null;
+		foreach (var line in File.ReadLines(path))
+		{
+			if (string.IsNullOrWhiteSpace(line)) continue;
+			firstAny ??= line;
+			using var probe = JsonDocument.Parse(line);
+			if (probe.RootElement.TryGetProperty("tsEt", out var ts) && DateTime.TryParse(ts.GetString(), out var et)
+				&& et.TimeOfDay >= new TimeSpan(9, 30, 0)) { chosen = line; break; }
+		}
+		chosen ??= firstAny;
+		if (chosen == null) return (null, quotes);
+
+		using var doc = JsonDocument.Parse(chosen);
+		var root = doc.RootElement;
+		decimal? spot = root.TryGetProperty("underlyingPrice", out var sp) && sp.ValueKind == JsonValueKind.Number ? sp.GetDecimal() : null;
+		if (root.TryGetProperty("options", out var opts) && opts.ValueKind == JsonValueKind.Array)
+			foreach (var o in opts.EnumerateArray())
+			{
+				if (!o.TryGetProperty("symbol", out var symEl) || symEl.GetString() is not string sym || sym.Length == 0) continue;
+				decimal? Dec(string k) => o.TryGetProperty(k, out var e) && e.ValueKind == JsonValueKind.Number ? e.GetDecimal() : null;
+				long? Lng(string k) => o.TryGetProperty(k, out var e) && e.ValueKind == JsonValueKind.Number && e.TryGetInt64(out var v) ? v : null;
+				quotes[sym] = new OptionContractQuote(
+					ContractSymbol: sym, LastPrice: Dec("last"), Bid: Dec("bid"), Ask: Dec("ask"),
+					Change: null, PercentChange: null, Volume: Lng("volume"), OpenInterest: Lng("openInterest"),
+					ImpliedVolatility: Dec("iv"), HistoricalVolatility: Dec("hv"), ImpliedVolatility5Day: Dec("iv5"));
+			}
+		return (spot, quotes);
 	}
 
 	/// <summary>Identifies chain symbols within the heatmap window (strike range × selected expiries) that
