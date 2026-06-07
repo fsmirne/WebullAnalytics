@@ -62,7 +62,12 @@ internal sealed class ChainSnapshotOiCache
 			if (!o.TryGetProperty("symbol", out var symEl) || symEl.GetString() is not string sym || sym.Length == 0) continue;
 			var oi = o.TryGetProperty("openInterest", out var oiEl) && oiEl.ValueKind == JsonValueKind.Number && oiEl.TryGetInt64(out var oiv) ? oiv : 0L;
 			var iv = o.TryGetProperty("iv", out var ivEl) && ivEl.ValueKind == JsonValueKind.Number ? ivEl.GetDecimal() : 0m;
-			if (oi > 0 && iv > 0m) map[sym] = (oi, iv);
+			// Keep the contract for its OI even when IV is absent/degenerate. OI is all the priced near-money
+			// legs need from this cache (their IV comes from the bar back-solve) and all max-pain needs at any
+			// strike; requiring iv>0 here silently withheld OI from every contract whose snapshot IV was null
+			// (e.g. the ThetaData EOD backfill's plain-BS iv), making GEX/max-pain inert. IV (0 when unusable)
+			// is still carried for the no-bar marker strikes that fall back to it for gamma weighting.
+			if (oi > 0) map[sym] = (oi, iv > 0m ? iv : 0m);
 		}
 		return map;
 	}

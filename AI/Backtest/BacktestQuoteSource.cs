@@ -26,7 +26,7 @@ internal enum NeighborAnchor { None, OneSided, Bracketed }
 /// the wider per-share floor typical of single-stock options (matching e.g. the GME quotes seen in
 /// production — bid 0.30 / ask 0.35 on a $0.325 mid).
 /// </summary>
-internal sealed class BacktestQuoteSource : IQuoteSource
+internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 {
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
@@ -548,7 +548,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 				if (_oiCache != null && mp != null && _oiCache.ForDay(mp.Root, asOf.Date).TryGetValue(occ, out var snap))
 				{
 					markerOi = snap.Oi;
-					markerIv = snap.Iv;
+					markerIv = snap.Iv > 0m ? snap.Iv : (decimal?)null;   // 0 = no usable snapshot IV → leave null (ComputeGex skips its gamma; OI still counts for max-pain)
 				}
 				options[occ] = new OptionContractQuote(occ, null, null, null, null, null, Volume: null, OpenInterest: markerOi, ImpliedVolatility: markerIv);
 			}
@@ -559,7 +559,7 @@ internal sealed class BacktestQuoteSource : IQuoteSource
 	/// <summary>Convenience for the intraday-trigger pass: pre-resolves the smile scale + a per-DTE
 	/// map of ATM IV for the legs being re-priced, then calls <see cref="PriceAtSpot"/>. Returns an
 	/// empty map if no leg's ATM IV is available for the date.</summary>
-	internal async Task<IReadOnlyDictionary<string, OptionContractQuote>> GetIntradayQuotesAsync(
+	public async Task<IReadOnlyDictionary<string, OptionContractQuote>> GetIntradayQuotesAsync(
 		DateTime asOf, string ticker, decimal spot, IEnumerable<string> optionSymbols,
 		double zeroDteTimeYears, CancellationToken cancellation)
 	{

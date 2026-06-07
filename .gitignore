@@ -495,3 +495,9 @@ docs/
 
 # github copilot
 .github
+# ThetaData credentials (email/password) — never commit
+creds.txt
+
+# backtest fills exports + ad-hoc analysis artifacts (not source)
+/*.jsonl
+.gex_analysis/
