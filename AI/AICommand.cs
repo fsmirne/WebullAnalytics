@@ -762,6 +762,14 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Open-scan minute stride: evaluate every Nth minute for entries. Default 1 (every minute), matching live watch's per-tick cadence — coarser strides alias past the minutes where a marginal score crosses minScoreToOpen and silently under-count opens vs reality. Raise N to speed up multi-year sweeps (~Nx fewer candidate enumerations) at the cost of missing single-minute threshold crossings.")]
 	public int ScanStride { get; set; } = 1;
 
+	[CommandOption("--source <MODE>")]
+	[Description("Option price foundation: 'bars' (massive trade-bars + synthetic spread model, default) or 'quotes' (real minute NBBO from the ThetaData quote store, data/chain-quotes-thetadata). 'quotes' marks and fills off the real two-sided market; counterfactual reprices (intraday SL/TP brackets, profit projector) stay parametric. Use with --pricing mid.")]
+	public string Source { get; set; } = "bars";
+
+	[CommandOption("--oi-dir <PATH>")]
+	[Description("Directory of per-day chain snapshots supplying real open interest for the GEX / max-pain factors (default: data/chain-snapshots, the live captures). Point at data/chain-snapshots-thetadata to use the historical OI backfill for a GEX backtest. Relative paths resolve under the data dir.")]
+	public string? OiDir { get; set; }
+
 	[CommandOption("--iv-hv-premium <RATIO>")]
 	[Description("IV/HV multiplier for non-SPY tickers (SPY uses real VIX). Default: 1.15.")]
 	public decimal IvHvPremium { get; set; } = 1.15m;
@@ -976,8 +984,20 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var dividendsByRoot = await dividends.BuildScheduleMapAsync(config.TickerSet(), cancellation);
 		// Per-day per-contract OI from scraped chain snapshots — makes the GEX / max-pain factors computable
 		// in the backtest (the captured option bars have no OI). Days without a snapshot leave them inert.
-		var oiCache = new Backtest.ChainSnapshotOiCache();
-		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, optionBars: optionBars, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+		// OI source for GEX / max-pain. Default = live captures (data/chain-snapshots); --oi-dir points at the
+		// historical backfill (data/chain-snapshots-thetadata) for a GEX backtest. Relative paths resolve under the data dir.
+		var oiDir = string.IsNullOrWhiteSpace(settings.OiDir) ? null : Program.ResolvePath(settings.OiDir);
+		var oiCache = new Backtest.ChainSnapshotOiCache(oiDir);
+		var barSource = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, optionBars: optionBars, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+		// --source quotes: price marks/fills from the real minute NBBO store; the parametric barSource is
+		// retained only to answer counterfactual reprices (intraday SL/TP brackets, profit projector).
+		Backtest.IBacktestQuoteSource quotes = barSource;
+		if (string.Equals(settings.Source, "quotes", StringComparison.OrdinalIgnoreCase))
+		{
+			if (SuggestionPricing.Normalize(settings.Pricing) == SuggestionPricing.BidAsk)
+				AnsiConsole.MarkupLine("[yellow]warning:[/] --source quotes with --pricing bidask crosses the full REAL spread AND adds slippagePerSharePerOrder — double-counting the spread. Use --pricing mid (the calibrated mid+slippage already models the crossing).");
+			quotes = new Backtest.QuotesQuoteSource(bars, new Backtest.QuoteStoreCache(), barSource, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+		}
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
@@ -987,7 +1007,32 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
 
-		var result = await runner.RunAsync(since, until, cancellation);
+		Backtest.BacktestResult result;
+		if (settings.Profile)
+		{
+			// --profile prints its own per-section timing inside the run; skip the bar so it isn't clobbered.
+			result = await runner.RunAsync(since, until, cancellation);
+		}
+		else
+		{
+			Backtest.BacktestResult? captured = null;
+			await AnsiConsole.Progress()
+				.AutoClear(true)            // remove the bar once done; the summary table prints below
+				.HideCompleted(true)
+				.Columns(new SpinnerColumn(), new TaskDescriptionColumn(), new ProgressBarColumn(),
+						 new PercentageColumn(), new ElapsedTimeColumn())
+				.StartAsync(async ctx =>
+				{
+					var task = ctx.AddTask($"[green]Backtesting {Markup.Escape(config.Ticker)}[/]");
+					captured = await runner.RunAsync(since, until, cancellation, (doneDays, totalDays, day) =>
+					{
+						task.MaxValue = totalDays;
+						task.Value = doneDays;
+						task.Description = $"[green]Backtesting {Markup.Escape(config.Ticker)}[/] [grey]{day:yyyy-MM-dd}[/]";
+					});
+				});
+			result = captured!;
+		}
 		Backtest.BacktestSummaryRenderer.Render(result, settings.ShowFills);
 
 		if (!string.IsNullOrWhiteSpace(settings.FillsJsonlPath))

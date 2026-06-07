@@ -26,7 +26,8 @@ internal sealed class BacktestRunner
 	private readonly AIConfig _config;
 	private readonly SimulatedBook _book;
 	private readonly BacktestPositionSource _positions;
-	private readonly BacktestQuoteSource _quotes;
+	private readonly IBacktestQuoteSource _quotes;
+	private readonly BacktestQuoteSource? _barProvenance;   // non-null only on the trade-bar path (captured-bar provenance)
 	private readonly HistoricalBarCache _bars;
 	private readonly HistoricalPriceCache _closeCache;
 	private readonly int _topNPerStep;
@@ -51,7 +52,7 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, BacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
 	{
 		_config = config;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
@@ -60,6 +61,11 @@ internal sealed class BacktestRunner
 		_book = book;
 		_positions = positions;
 		_quotes = quotes;
+		// Captured-bar provenance is a trade-bar concept; only BacktestQuoteSource can answer it. Under
+		// quotes-only (_barProvenance == null) every market-priced fill came from a real NBBO quote by
+		// construction — a leg with no quote is omitted, so the candidate never fills — so provenance reads
+		// as 100% real / all-clean (no synthetic fallback exists on that path).
+		_barProvenance = quotes as BacktestQuoteSource;
 		_bars = bars;
 		_closeCache = closeCache;
 		_topNPerStep = topNPerStep;
@@ -78,7 +84,9 @@ internal sealed class BacktestRunner
 	private static Task<IReadOnlyList<MinuteBar>> NoopIntradayFetcher(string ticker, BarInterval interval, int count, bool includeExtended, CancellationToken cancellation)
 		=> Task.FromResult<IReadOnlyList<MinuteBar>>(Array.Empty<MinuteBar>());
 
-	public async Task<BacktestResult> RunAsync(DateTime since, DateTime until, CancellationToken cancellation)
+	/// <param name="onStep">Optional progress callback invoked after each trading day completes, with
+	/// (daysDone, totalDays, day). The command wires it to an inline Spectre progress bar.</param>
+	public async Task<BacktestResult> RunAsync(DateTime since, DateTime until, CancellationToken cancellation, Action<int, int, DateTime>? onStep = null)
 	{
 		var tickerSet = _config.TickerSet();
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(_config), _config);
@@ -96,6 +104,7 @@ internal sealed class BacktestRunner
 		var profile = _profile;
 		var swTotal = profile ? System.Diagnostics.Stopwatch.StartNew() : null;
 		long msStep1 = 0, msStep2 = 0, msStep3 = 0, msTriggers = 0, msMtm = 0;
+		var done = 0;
 
 		foreach (var step in steps)
 		{
@@ -211,6 +220,7 @@ internal sealed class BacktestRunner
 			}
 
 			if (profile) msMtm += swSection!.ElapsedMilliseconds;
+			onStep?.Invoke(++done, steps.Count, step);
 		}
 
 		if (profile)
@@ -1222,7 +1232,7 @@ internal sealed class BacktestRunner
 				var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
 				if (parsed?.CallPut == null) continue;
 				var dte = (parsed.ExpiryDate.Date - fill.Date.Date).Days;
-				var captured = _quotes.HasCapturedBarOnDate(leg.Symbol, fill.Date);
+				var captured = _barProvenance?.HasCapturedBarOnDate(leg.Symbol, fill.Date) ?? true;  // quotes-only: real by construction
 				if (dte <= 0) { zTot++; if (captured) zCap++; }
 				else
 				{
@@ -1235,7 +1245,7 @@ internal sealed class BacktestRunner
 						// ladder authoritative this should be ~0; a non-zero count means the backtest is still
 						// filling strikes that don't exist in reality. Log each (capped) so the offending
 						// strike/structure/date can be traced to the path that invented it.
-						if (!_quotes.HasAnyCapturedBar(leg.Symbol))
+						if (!_barProvenance!.HasAnyCapturedBar(leg.Symbol))   // reached only when !captured ⇒ _barProvenance non-null
 						{
 							mPhantom++;
 							if (mPhantom <= 25)
@@ -1243,7 +1253,7 @@ internal sealed class BacktestRunner
 						}
 						// Attribute it to the branch that priced it. A null source (path that didn't record,
 						// e.g. legacy non-intraday) folds into intrinsic so the buckets sum to MultiDteSynthetic.
-						switch (_quotes.GetSyntheticSource(leg.Symbol, fill.Date))
+						switch (_barProvenance!.GetSyntheticSource(leg.Symbol, fill.Date))
 						{
 							case SyntheticPricingSource.SurfaceIv: mSurf++; break;
 							case SyntheticPricingSource.CrossExpiry: mCross++; break;
@@ -1252,7 +1262,7 @@ internal sealed class BacktestRunner
 								// Only the VIX-fallback legs are candidates for cross-expiry rescue (surface-IV
 								// legs already had a same-expiry anchor). Classify the neighbor anchor at the
 								// fill's minute: bracketed (interpolation) vs one-sided (extrapolation).
-								switch (_quotes.ClassifyNeighborExpiry(leg.Symbol, fill.Date))
+								switch (_barProvenance!.ClassifyNeighborExpiry(leg.Symbol, fill.Date))
 								{
 									case NeighborAnchor.Bracketed: mVixBracketed++; break;
 									case NeighborAnchor.OneSided: mVixOneSided++; break;
@@ -1287,7 +1297,7 @@ internal sealed class BacktestRunner
 				foreach (var leg in f.Legs)
 				{
 					if (ParsingHelpers.ParseOptionSymbol(leg.Symbol)?.CallPut == null) continue;
-					if (!_quotes.HasCapturedBarOnDate(leg.Symbol, f.Date)) { clean = false; break; }
+					if (!(_barProvenance?.HasCapturedBarOnDate(leg.Symbol, f.Date) ?? true)) { clean = false; break; }
 				}
 				if (!clean) break;
 			}
