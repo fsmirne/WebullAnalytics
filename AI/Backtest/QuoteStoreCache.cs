@@ -25,10 +25,19 @@ internal sealed class QuoteStoreCache
 	/// <param name="maxStaleMinutes">How far back to accept the most recent quote when the exact minute has
 	/// none. Minute NBBO is dense for liquid near-money contracts, so a small window (default 5 min) keeps
 	/// staleness honest; raise it for thin far-dated legs.</param>
-	public QuoteStoreCache(string? dir = null, int maxStaleMinutes = 5)
+	private readonly DateTime _since;
+	private readonly DateTime _until;
+
+	/// <param name="since">/<param name="until">When set to the backtest window, each per-expiration file
+	/// only parses rows whose date is inside [since, until] — a 45-day file that a short tuning run barely
+	/// touches skips the out-of-window rows before parsing them (a big cold-load win for short windows; a
+	/// no-op for a full-period run). Defaults to all-dates.</param>
+	public QuoteStoreCache(string? dir = null, int maxStaleMinutes = 5, DateTime? since = null, DateTime? until = null)
 	{
 		_dir = dir ?? Program.ResolvePath("data/quotes");
 		_maxStaleMinutes = maxStaleMinutes;
+		_since = (since ?? DateTime.MinValue).Date;
+		_until = (until ?? DateTime.MaxValue).Date;
 	}
 
 	/// <summary>Latest real two-sided NBBO at or before <paramref name="asOfEt"/> (ET wall-clock) for the
@@ -38,7 +47,7 @@ internal sealed class QuoteStoreCache
 		var p = ParsingHelpers.ParseOptionSymbol(occ);
 		if (p?.CallPut == null) return null;
 		var eq = _cache.GetOrAdd((p.Root.ToUpperInvariant(), p.ExpiryDate.Date),
-			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp));
+			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until));
 		return eq.Lookup(asOfEt.Date, (long)Math.Round(p.Strike * 1000m), p.CallPut[0],
 			(int)asOfEt.TimeOfDay.TotalSeconds, _maxStaleMinutes);
 	}
@@ -55,7 +64,7 @@ internal sealed class QuoteStoreCache
 		private ExpiryQuotes(Dictionary<(DateTime Date, long StrikeMilli, char Cp),
 			List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>> rows) => _rows = rows;
 
-		public static ExpiryQuotes Load(string dir, string root, DateTime exp)
+		public static ExpiryQuotes Load(string dir, string root, DateTime exp, DateTime since, DateTime until)
 		{
 			var rows = new Dictionary<(DateTime Date, long StrikeMilli, char Cp),
 				List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>>();
@@ -67,9 +76,15 @@ internal sealed class QuoteStoreCache
 			{
 				if (first) { first = false; continue; }            // header
 				if (line.Length == 0) continue;
+				// Early window-skip: parse only the date field first; rows outside the backtest's [since,until]
+				// are never queried, so drop them before splitting/parsing the rest of the line. For a short
+				// tuning window this skips most of a 45-day expiration file's rows; no-op for a full-period run.
+				var firstComma = line.IndexOf(',');
+				if (firstComma < 0) continue;
+				if (!DateTime.TryParse(line.AsSpan(0, firstComma), CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
+				if (d.Date < since || d.Date > until) continue;
 				var f = line.Split(',');
 				if (f.Length < 6) continue;
-				if (!DateTime.TryParse(f[0], CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
 				var sec = ParseTimeSec(f[1]);
 				if (sec < 0) continue;
 				// Times are already START-of-bar (09:30 = first RTH minute): the ThetaData pull normalizes

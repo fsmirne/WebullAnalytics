@@ -978,7 +978,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// brackets and the profit projector price legs at a hypothetical spot. It is never a price foundation.
 		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 		Backtest.IBacktestQuoteSource quotes = new Backtest.QuotesQuoteSource(
-			bars, new Backtest.QuoteStoreCache(), parametric, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+			bars, new Backtest.QuoteStoreCache(since: since, until: until), parametric, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
