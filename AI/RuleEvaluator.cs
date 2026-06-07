@@ -136,7 +136,7 @@ internal sealed class RuleEvaluator
 			// long-call/put gets converted to a vertical instead of flat-closed when both gates trip.
 			new LegInShortRule(config.Rules.LegInShort, config.Indicators),
 			new OpportunisticRollRule(config.Rules.OpportunisticRoll, config.Indicators, config.Opener.RealizedExpectancy, debug, normalizedPricing),
-			new TakeProfitRule(config.Rules.TakeProfit, config.Opener.RealizedExpectancy),
+			new TakeProfitRule(config.Rules.TakeProfit, config.Opener.RealizedExpectancy, debug),
 			new DefensiveRollRule(config.Rules.DefensiveRoll, config.Indicators),
 			new RollShortOnExpiryRule(config.Rules.RollShortOnExpiry)
 		};
