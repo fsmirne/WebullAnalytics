@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Backfill daily option-chain snapshots (real OI + NBBO) from ThetaData into the
-same chain-snapshots/{TICKER}/{date}.jsonl format the C# backtest / GEX pipeline
-already reads. This is the historical counterpart to the live Schwab/Webull
-capture — one record per trading day per ticker.
+Backfill option data (real OI + NBBO) from ThetaData into the canonical, source-
+independent stores the C# backtest reads: data/oi/{TICKER}/{date}.jsonl (per-day chain
++ OI) and data/quotes/{TICKER}/{expiry}.csv (minute NBBO). Historical counterpart to the
+live Schwab/Webull capture, which writes the SAME stores going forward — sources are
+interchangeable (same format regardless of vendor).
 
 Why this exists: massive.com gives option OHLCV but NO open interest and NO NBBO;
 Schwab serves OI for equities but not for index options. ThetaData Value ($40/mo)
@@ -29,8 +30,9 @@ USAGE — probe first to confirm the real DataFrame schema, then run:
     python3 scripts/backfill_thetadata.py --run --tickers <TICKER> [<TICKER> ...]
     python3 scripts/backfill_thetadata.py --validate --ticker <TICKER> --date YYYY-MM-DD
 
-Output goes to a STAGING dir (chain-snapshots-thetadata) by default so it can NOT
-clobber live captures; merge into chain-snapshots only after validating.
+Writes the canonical data/oi (EOD --run) and data/quotes (--quotes) stores — the same
+format the live capture and the backtest use, so a ThetaData backfill and a forward
+Schwab/Webull capture are interchangeable in the same directory.
 """
 import argparse
 import json
@@ -586,7 +588,7 @@ def _quote_expiry_worker(result_q, creds, ticker, exp, dte, rate, out_root_str, 
 
 
 # ----- sealed-expiration manifest (mirrors wa-history's intraday sealed.json) --------------------------
-# data/chain-quotes-thetadata/{ticker}/sealed.json = {"sealed": ["YYYY-MM-DD", ...]} lists expirations
+# data/quotes/{ticker}/sealed.json = {"sealed": ["YYYY-MM-DD", ...]} lists expirations
 # whose quote file is FINAL: the expiration has ELAPSED (exp < today, so no more live quotes can accrue)
 # AND its whole window was in range (exp <= end, so the file wasn't truncated by `end`). Sealed
 # expirations are trusted unconditionally and skipped on every later run; an UNSEALED file — a
@@ -961,7 +963,7 @@ def main():
     ap.add_argument("--max-dte", type=int, default=None,
                     help="cap captured expiries to N days out. EOD --run default 60. For --quotes this is the "
                          "DTE fallback for any ticker passed without an explicit NAME:DTE.")
-    ap.add_argument("--quote-out", help="output root for --quotes (default: <data>/chain-quotes-thetadata)")
+    ap.add_argument("--quote-out", help="output root for --quotes (default: <data>/quotes)")
     ap.add_argument("--log", help="log file path for --run/--quotes (default: <data>/logs/backfill_<mode>_<ts>.log). Output is timestamped and tee'd to console + file.")
     ap.add_argument("--verbose", action="store_true", help="also show third-party library logs (thetadata auth, grpc, urllib3). Default: only our messages.")
     ap.add_argument("--concurrency", type=int, default=1,
@@ -978,7 +980,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="per-chunk watchdog timeout in seconds (default 600); a hung gRPC call is killed and retried")
     ap.add_argument("--retries", type=int, default=3, help="retries per chunk after a timeout/error (default 3)")
     ap.add_argument("--creds", help="path to creds.txt (else creds.txt / THETADATA_CREDENTIALS_FILE)")
-    ap.add_argument("--out", help="output root (default: <data>/chain-snapshots-thetadata staging dir)")
+    ap.add_argument("--out", help="output root (default: <data>/oi staging dir)")
     args = ap.parse_args()
     # A single --ticker overrides the list for any mode. Tokens are NAME or NAME:DTE.
     raw = [args.ticker] if args.ticker else (args.tickers or [])
@@ -991,7 +993,7 @@ def main():
         _setup_logging()
 
     data_dir = resolve_data_dir()
-    out_root = Path(args.out) if args.out else data_dir / "chain-snapshots-thetadata"
+    out_root = Path(args.out) if args.out else data_dir / "oi"
 
     # File logging (timestamped, tee'd to console) for the long runs so they're auditable. Set
     # BF_LOG_FILE so spawned worker children inherit it and log to the SAME file. (Only the parent
@@ -1011,12 +1013,12 @@ def main():
         return
 
     if args.verify_quotes:
-        qout = Path(args.quote_out) if args.quote_out else data_dir / "chain-quotes-thetadata"
+        qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"
         verify_quotes(qout, tickers, args.end)
         return
 
     if args.shift_times:
-        qout = Path(args.quote_out) if args.quote_out else data_dir / "chain-quotes-thetadata"
+        qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"
         shift_quote_times(qout, tickers)
         return
 
@@ -1035,7 +1037,7 @@ def main():
         missing = [t for t in tickers if t not in dte_map]
         if missing:
             sys.exit(f"--quotes needs a DTE for {missing}: pass {missing[0]}:DTE (e.g. {missing[0]}:45) or --max-dte")
-        qout = Path(args.quote_out) if args.quote_out else data_dir / "chain-quotes-thetadata"
+        qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"
         qout.mkdir(parents=True, exist_ok=True)
         log.info(f"data dir = {data_dir}\nquote out = {qout}  (minute NBBO ±10%, per-ticker DTE)")
         run_quotes(tickers, args.start, args.end, qout, dte_map, args.rate,

@@ -4,7 +4,7 @@ using System.Globalization;
 namespace WebullAnalytics.AI.Backtest;
 
 /// <summary>Reads the ThetaData minute-NBBO quote store —
-/// <c>data/chain-quotes-thetadata/&lt;root&gt;/&lt;expiry&gt;.csv</c> with columns
+/// <c>data/quotes/&lt;root&gt;/&lt;expiry&gt;.csv</c> with columns
 /// <c>date,time,strike,right,bid,ask,bid_size,ask_size</c> — and answers "real NBBO for this contract at
 /// this ET minute" with a bounded stale-quote lookback. This is the quotes-only price foundation that
 /// replaces massive trade-bars + the synthetic spread model (see <see cref="BacktestQuoteSource"/>).
@@ -27,7 +27,7 @@ internal sealed class QuoteStoreCache
 	/// staleness honest; raise it for thin far-dated legs.</param>
 	public QuoteStoreCache(string? dir = null, int maxStaleMinutes = 5)
 	{
-		_dir = dir ?? Program.ResolvePath("data/chain-quotes-thetadata");
+		_dir = dir ?? Program.ResolvePath("data/quotes");
 		_maxStaleMinutes = maxStaleMinutes;
 	}
 
