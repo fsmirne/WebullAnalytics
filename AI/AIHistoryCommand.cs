@@ -151,16 +151,12 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// subtracts. Non-payers / index roots (SPX/SPXW/XSP) simply write nothing → no adjustment.
 		await RefreshDividendHistoryAsync(ticker, cancellation);
 
-		// Register every currently-live contract's Webull derivativeId. Ids are perishable (gone from the
-		// chain at expiry) and are the only key back to a contract's minute/IV history, so we bank them on
-		// every history run; run during market hours to catch same-day 0DTE. `wa options discover` then
-		// decides which contracts matter and `wa options backfill` pulls their per-contract minute bars.
+		// Register every currently-live contract's Webull derivativeId + tradeable-OCC/liquidity snapshot in
+		// the derivative registry. Ids are perishable (gone from the chain at expiry); the opener reads this
+		// registry (DerivativeIdRegistry.TradeableOccs) for its strike ladder + liquidity gating, and the
+		// live chain refresh resolves the ids for Webull queryBatch OI/quote pulls. Run during market hours
+		// to catch same-day 0DTE.
 		await CaptureContractIdsAsync(ticker, cancellation);
-
-		// Surface a hint for contracts whose ids are banked but whose minute data isn't on disk yet.
-		var pendingOptions = AIHistoryOptionsBackfill.CountUnbackfilledContracts(ticker);
-		if (pendingOptions > 0)
-			AnsiConsole.MarkupLine($"  options: [yellow]{pendingOptions} contract(s) in registry not yet backfilled[/] — run `wa options backfill {Markup.Escape(ticker)}` to pull per-contract minute bars");
 
 		AnsiConsole.MarkupLine("[dim]Done. Run `wa ai backtest " + Markup.Escape(ticker) + "` to use this data.[/]");
 		return 0;

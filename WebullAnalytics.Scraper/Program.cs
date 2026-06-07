@@ -7,10 +7,12 @@ using WebullAnalytics.Api;
 
 namespace WebullAnalytics.Scraper;
 
-/// <summary>Entry point for <c>wa-scraper.exe</c>. Long-running per-minute chain-snapshot capture
-/// for one ticker, mirroring <c>wa ai watch</c>'s start-time / end-time scheduling but with
-/// minute-aligned firing (no drift) and no proposal evaluation — purely persists the raw chain
-/// the backtest then replays against.</summary>
+/// <summary>Entry point for <c>wa-scraper.exe</c>. Long-running per-minute chain capture for one ticker,
+/// mirroring <c>wa ai watch</c>'s start-time / end-time scheduling but with minute-aligned firing (no drift)
+/// and no proposal evaluation — purely persists the chain the backtest then replays against. Output goes to
+/// two canonical stores (the same shape the ThetaData backfill writes): minute NBBO to
+/// <c>data/quotes/&lt;TICKER&gt;/&lt;expiry&gt;.csv</c> and one daily full-chain OI snapshot to
+/// <c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>.</summary>
 internal sealed class Program
 {
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
@@ -31,7 +33,7 @@ internal sealed class Program
 internal sealed class ScrapeSettings : CommandSettings
 {
 	[CommandArgument(0, "<ticker>")]
-	[Description("Ticker root to scrape (e.g. SPXW). Snapshots are written to data/chain-snapshots/<TICKER>/<date>.jsonl.")]
+	[Description("Ticker root to scrape (e.g. SPXW). Minute NBBO is written to data/quotes/<TICKER>/<expiry>.csv and one daily full-chain OI snapshot to data/oi/<TICKER>/<date>.jsonl.")]
 	public string Ticker { get; set; } = "";
 
 	[CommandOption("--config <PATH>")]

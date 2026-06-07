@@ -762,13 +762,6 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Open-scan minute stride: evaluate every Nth minute for entries. Default 1 (every minute), matching live watch's per-tick cadence — coarser strides alias past the minutes where a marginal score crosses minScoreToOpen and silently under-count opens vs reality. Raise N to speed up multi-year sweeps (~Nx fewer candidate enumerations) at the cost of missing single-minute threshold crossings.")]
 	public int ScanStride { get; set; } = 1;
 
-	[CommandOption("--source <MODE>")]
-	[Description("Option price foundation: 'bars' (massive trade-bars + synthetic spread model, default) or 'quotes' (real minute NBBO from the ThetaData quote store, data/chain-quotes-thetadata). 'quotes' marks and fills off the real two-sided market; counterfactual reprices (intraday SL/TP brackets, profit projector) stay parametric. Use with --pricing mid.")]
-	public string Source { get; set; } = "bars";
-
-	[CommandOption("--oi-dir <PATH>")]
-	[Description("Directory of per-day chain snapshots supplying real open interest for the GEX / max-pain factors (default: data/chain-snapshots, the live captures). Point at data/chain-snapshots-thetadata to use the historical OI backfill for a GEX backtest. Relative paths resolve under the data dir.")]
-	public string? OiDir { get; set; }
 
 	[CommandOption("--iv-hv-premium <RATIO>")]
 	[Description("IV/HV multiplier for non-SPY tickers (SPY uses real VIX). Default: 1.15.")]
@@ -882,7 +875,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 
 		config.Ticker = settings.Ticker.ToUpperInvariant();
 
-		// Apply per-run CLI overrides on top of the merged config. Used by --discover sweeps
+		// Apply per-run CLI overrides on top of the merged config. Used by parameter sweeps
 		// to vary one knob at a time without maintaining N config-file copies (the per-ticker
 		// override file only contains diffs, so a copy-and-tweak approach loses the base config's
 		// scoring weights at load time — these flags sidestep that by mutating the already-merged
@@ -972,32 +965,20 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 
 		var closes = new Replay.HistoricalPriceCache(bars);
 		var ivProvider = new Backtest.BacktestIVProvider(bars, ivHvPremium: settings.IvHvPremium, smileEnabled: settings.Smile == "static", smile: smile);
-		// Captured per-contract bars (from `wa options backfill <ticker>`) replace Black-Scholes pricing
-		// for any leg+minute we have on disk. Missing contracts silently fall through to the synthetic
-		// path, so partial coverage works fine — there's no penalty for legs we never captured.
-		var optionBars = new Backtest.HistoricalOptionBarCache();
 		// Historical dividend schedules (data/dividends/<TICKER>.csv, populated by `wa ai history`) make the
-		// backtest's Black-Scholes pricing dividend-aware, matching the live feed. Offline read; absent files
+		// parametric reprice dividend-aware, matching the live feed. Offline read; absent files
 		// (non-payers, index roots) leave that root unadjusted. Built over the full ticker set so any
 		// hypothetical/secondary root the opener touches is covered.
 		var dividends = new Backtest.HistoricalDividendCache(offline: true);
 		var dividendsByRoot = await dividends.BuildScheduleMapAsync(config.TickerSet(), cancellation);
-		// Per-day per-contract OI from scraped chain snapshots — makes the GEX / max-pain factors computable
-		// in the backtest (the captured option bars have no OI). Days without a snapshot leave them inert.
-		// OI source for GEX / max-pain. Default = live captures (data/chain-snapshots); --oi-dir points at the
-		// historical backfill (data/chain-snapshots-thetadata) for a GEX backtest. Relative paths resolve under the data dir.
-		var oiDir = string.IsNullOrWhiteSpace(settings.OiDir) ? null : Program.ResolvePath(settings.OiDir);
-		var oiCache = new Backtest.ChainSnapshotOiCache(oiDir);
-		var barSource = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, optionBars: optionBars, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
-		// --source quotes: price marks/fills from the real minute NBBO store; the parametric barSource is
-		// retained only to answer counterfactual reprices (intraday SL/TP brackets, profit projector).
-		Backtest.IBacktestQuoteSource quotes = barSource;
-		if (string.Equals(settings.Source, "quotes", StringComparison.OrdinalIgnoreCase))
-		{
-			if (SuggestionPricing.Normalize(settings.Pricing) == SuggestionPricing.BidAsk)
-				AnsiConsole.MarkupLine("[yellow]warning:[/] --source quotes with --pricing bidask crosses the full REAL spread AND adds slippagePerSharePerOrder — double-counting the spread. Use --pricing mid (the calibrated mid+slippage already models the crossing).");
-			quotes = new Backtest.QuotesQuoteSource(bars, new Backtest.QuoteStoreCache(), barSource, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
-		}
+		// Per-day full-chain OI (data/oi) — makes the GEX / max-pain factors computable in the backtest.
+		var oiCache = new Backtest.ChainSnapshotOiCache();
+		// Price foundation = real minute NBBO (data/quotes). The parametric source (BS + IV + smile, NO
+		// captured-bar overlay) answers ONLY the counterfactual reprices real NBBO can't — intraday SL/TP
+		// brackets and the profit projector price legs at a hypothetical spot. It is never a price foundation.
+		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+		Backtest.IBacktestQuoteSource quotes = new Backtest.QuotesQuoteSource(
+			bars, new Backtest.QuoteStoreCache(), parametric, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);

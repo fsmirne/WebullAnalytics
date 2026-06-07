@@ -27,21 +27,16 @@ internal sealed class BacktestRunner
 	private readonly SimulatedBook _book;
 	private readonly BacktestPositionSource _positions;
 	private readonly IBacktestQuoteSource _quotes;
-	private readonly BacktestQuoteSource? _barProvenance;   // non-null only on the trade-bar path (captured-bar provenance)
 	private readonly HistoricalBarCache _bars;
 	private readonly HistoricalPriceCache _closeCache;
 	private readonly int _topNPerStep;
 	private readonly IntradayBarCache _intradayBars;
 	private readonly bool _oracle;
 	private readonly bool _profile;
-	private readonly bool _discover;
-	private readonly int _discoverTopKPerDay;
-	private readonly int _discoverPadStrikes;
 	private readonly int? _fixedContracts;
 	private readonly string _pricingMode;
 	private readonly int _scanStride;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
-	private readonly HashSet<string> _discoveredOccs = new(StringComparer.OrdinalIgnoreCase);
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
 	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET — the
@@ -52,7 +47,7 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, bool discover = false, int discoverTopKPerDay = 20, int discoverPadStrikes = 2, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
 	{
 		_config = config;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
@@ -61,19 +56,11 @@ internal sealed class BacktestRunner
 		_book = book;
 		_positions = positions;
 		_quotes = quotes;
-		// Captured-bar provenance is a trade-bar concept; only BacktestQuoteSource can answer it. Under
-		// quotes-only (_barProvenance == null) every market-priced fill came from a real NBBO quote by
-		// construction — a leg with no quote is omitted, so the candidate never fills — so provenance reads
-		// as 100% real / all-clean (no synthetic fallback exists on that path).
-		_barProvenance = quotes as BacktestQuoteSource;
 		_bars = bars;
 		_closeCache = closeCache;
 		_topNPerStep = topNPerStep;
 		_oracle = oracle;
 		_profile = profile;
-		_discover = discover;
-		_discoverTopKPerDay = Math.Max(1, discoverTopKPerDay);
-		_discoverPadStrikes = Math.Max(0, discoverPadStrikes);
 		_fixedContracts = fixedContracts;
 		// Disk-only cache for backtest: the fetcher returns empty so any missing minute file fails
 		// closed (we fall back to the single 09:30 fill path). The on-disk read path serves the
@@ -175,9 +162,6 @@ internal sealed class BacktestRunner
 			if (!openedAtMinute.HasIntraday)
 			{
 				var openProposals = openedAtMinute.LegacyProposals;
-				// Discovery: legacy path evaluates once at 09:30; top-K is "top-K by FinalScore from
-				// this single evaluation". Same semantic as intraday-path top-K but no per-minute loop.
-				if (_discover) RecordTopKDiscovery(openProposals);
 				// Selection must not be dictated by affordability: consider only the top-N by score and
 				// skip any we can't afford — never fall through to a cheaper, lower-ranked substitute.
 				foreach (var p in openProposals.Take(_topNPerStep))
@@ -237,11 +221,6 @@ internal sealed class BacktestRunner
 
 		// Final per-lineage MTM for still-open positions so the renderer can compute unrealized P&L.
 		var endMtmByLineage = await ComputeOpenMarkPerLineageAsync(steps.Count > 0 ? steps[^1] : until, cancellation);
-
-		// Discovery: flush every OCC the run picked to disk so `wa ai history <ticker> --options`
-		// can fetch them from massive.com next. The file persists across runs (union semantics) so
-		// repeated backtests with different windows accumulate the full strategy footprint.
-		if (_discover) FlushDiscoveryLog();
 
 		return new BacktestResult(
 			StartingCash: startingCash,
@@ -847,19 +826,12 @@ internal sealed class BacktestRunner
 		// realized P&L. By design lookahead — research / upper-bound tool, not realistic.
 		(DateTime MinuteEt, OpenProposal Proposal, IReadOnlyList<BacktestLegFill> LegFills, decimal Pnl)? bestOracle = null;
 
-		// Per-day discovery collector. Keyed by proposal fingerprint so a strike-set considered at
-		// many minutes only contributes once with its best score. At end of day we take top-K by
-		// score and call RecordDiscoveredLegs — this gives sweeps a broader OCC catalog than just
-		// the one proposal that happened to open.
-		var dayProposalsByFingerprint = _discover ? new Dictionary<string, OpenProposal>(StringComparer.Ordinal) : null;
-
 		// Parallel minute evaluation. EvaluateMinuteAsync is a pure function over its inputs (no
 		// shared mutable state) so all minutes can be evaluated concurrently. The results are then
-		// processed in chronological order for entry-decision / oracle / discovery logic.
+		// processed in chronological order for entry-decision / oracle logic.
 		// Earliest-entry gate: withhold opens until a configured ET wall-clock time so the intraday tape
 		// can form and blend into the bias before the directional read is committed (vs trading the stale
-		// 09:30 overnight macro). Parsed once per day; null/empty = no delay. Discovery still collects all
-		// minutes (it should reflect everything the evaluator saw), so the gate only blocks the open.
+		// 09:30 overnight macro). Parsed once per day; null/empty = no delay.
 		TimeSpan? earliestEntry = null;
 		if (!string.IsNullOrWhiteSpace(_config.Opener.EarliestEntryTimeEt)
 			&& TimeSpan.TryParse(_config.Opener.EarliestEntryTimeEt, System.Globalization.CultureInfo.InvariantCulture, out var ee))
@@ -870,19 +842,19 @@ internal sealed class BacktestRunner
 		// scan would otherwise re-run the (heavy, for multi-leg structures) candidate enumeration every
 		// minute. A stride caps that cost ~N× at the price of N-minute entry granularity — negligible for
 		// a backtest, decisive for a multi-leg full-year run. Stride 1 (default) = exhaustive, unchanged.
-		// Oracle/discovery always scan every minute (they need the full surface), so the stride is open-scan only.
-		if (_scanStride > 1 && !_oracle && !_discover && timestampList.Count > 0)
+		// Oracle always scans every minute (it needs the full surface), so the stride is open-scan only.
+		if (_scanStride > 1 && !_oracle && timestampList.Count > 0)
 		{
 			var strided = new List<DateTimeOffset>(timestampList.Count / _scanStride + 1);
 			for (var i = 0; i < timestampList.Count; i += _scanStride) strided.Add(timestampList[i]);
 			timestampList = strided;
 		}
 
-		// In non-oracle, non-discovery mode we only need the first qualifying minute. Evaluate in
-		// parallel batches of ProcessorCount and stop as soon as any minute in the batch yields a
-		// qualifying entry. This gives ~Nx speedup while preserving chronological entry semantics.
-		// Oracle/discovery modes need every minute evaluated, so they run the full parallel pass.
-		var needAllMinutes = _oracle || _discover;
+		// In non-oracle mode we only need the first qualifying minute. Evaluate in parallel batches of
+		// ProcessorCount and stop as soon as any minute in the batch yields a qualifying entry. This gives
+		// ~Nx speedup while preserving chronological entry semantics. Oracle mode needs every minute
+		// evaluated, so it runs the full parallel pass.
+		var needAllMinutes = _oracle;
 		var batchSize = Math.Max(1, Environment.ProcessorCount);
 		var parallelOpts = new ParallelOptions { MaxDegreeOfParallelism = batchSize, CancellationToken = cancellation };
 
@@ -905,16 +877,6 @@ internal sealed class BacktestRunner
 				var mr = minuteResults[i];
 				if (mr == null) continue;
 				var (minuteUtc2, minuteEt, openProposals) = mr.Value;
-
-				if (dayProposalsByFingerprint != null)
-				{
-					foreach (var p in openProposals)
-					{
-						if (string.IsNullOrWhiteSpace(p.Fingerprint)) continue;
-						if (!dayProposalsByFingerprint.TryGetValue(p.Fingerprint, out var existing) || (p.FinalScore ?? 0m) > (existing.FinalScore ?? 0m))
-							dayProposalsByFingerprint[p.Fingerprint] = p;
-					}
-				}
 
 				if (_oracle)
 				{
@@ -1002,10 +964,6 @@ internal sealed class BacktestRunner
 			var b = bestOracle.Value;
 			_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, b.LegFills, b.Proposal.Qty);
 		}
-
-		// Discovery: flush top-K proposals (by FinalScore) seen across the day to the OCC catalog.
-		if (dayProposalsByFingerprint != null && dayProposalsByFingerprint.Count > 0)
-			RecordTopKDiscovery(dayProposalsByFingerprint.Values);
 
 		return new DailyOpenScanResult(HasIntraday: true, LegacyProposals: Array.Empty<OpenProposal>());
 	}
@@ -1212,18 +1170,14 @@ internal sealed class BacktestRunner
 		return total;
 	}
 
-	/// <summary>Pricing-provenance diagnostic: across all Open/Close/Roll/LegIn fills (Expire excluded —
-	/// those settle at real bar.Close intrinsic, not a model price), count how many leg prices were backed
-	/// by a real captured bar on the fill day vs fell through to the synthetic Black-Scholes model. Bucketed
-	/// by leg DTE-at-fill: 0DTE legs are densely captured, but multi-DTE long legs (calendar/diagonal) are
-	/// often sparse, so a high multi-DTE synthetic fraction means the result rests on modeled prices, not
-	/// real fills — read it before trusting any calendar/diagonal P&L.</summary>
+	/// <summary>Pricing-provenance diagnostic. Under the quotes-only path every market-priced fill is backed
+	/// by a real NBBO quote by construction — a leg with no quote is omitted from the snapshot, so the candidate
+	/// never fills — so provenance is 100% real (captured == total) with no synthetic breakdown. Bucketed by leg
+	/// DTE-at-fill (0DTE vs >0DTE) for the renderer; Expire fills are excluded (they settle at real bar.Close
+	/// intrinsic, not a model price).</summary>
 	private PricingProvenance ComputeProvenance()
 	{
-		int zCap = 0, zTot = 0, mCap = 0, mTot = 0;
-		int mSurf = 0, mCross = 0, mVix = 0, mIntr = 0; // synthetic >0DTE breakdown by pricing branch
-		int mVixBracketed = 0, mVixOneSided = 0; // of the (remaining) VIX-fallback legs: neighbor-expiry anchor on both sides / one side
-		int mPhantom = 0; // synthetic >0DTE legs whose contract was NEVER captured on any day — likely a strike that doesn't exist on the real chain (uniform-grid invention). Should be ~0 once the ladder is authoritative.
+		int zTot = 0, mTot = 0;
 		foreach (var fill in _book.Fills)
 		{
 			if (fill.Kind == BacktestFillKind.Expire) continue;
@@ -1232,213 +1186,29 @@ internal sealed class BacktestRunner
 				var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
 				if (parsed?.CallPut == null) continue;
 				var dte = (parsed.ExpiryDate.Date - fill.Date.Date).Days;
-				var captured = _barProvenance?.HasCapturedBarOnDate(leg.Symbol, fill.Date) ?? true;  // quotes-only: real by construction
-				if (dte <= 0) { zTot++; if (captured) zCap++; }
-				else
-				{
-					mTot++;
-					if (captured) mCap++;
-					else
-					{
-						// Synthetic >0DTE leg. If the contract was never captured on ANY day, it's a likely
-						// phantom strike — one the chain never listed (a uniform-grid invention). With the
-						// ladder authoritative this should be ~0; a non-zero count means the backtest is still
-						// filling strikes that don't exist in reality. Log each (capped) so the offending
-						// strike/structure/date can be traced to the path that invented it.
-						if (!_barProvenance!.HasAnyCapturedBar(leg.Symbol))   // reached only when !captured ⇒ _barProvenance non-null
-						{
-							mPhantom++;
-							if (mPhantom <= 25)
-								Console.Error.WriteLine($"[phantom] {leg.Symbol} dte={dte} date={fill.Date:yyyy-MM-dd} kind={fill.Kind} lineage={fill.LineageId} — synthetic leg on a never-captured strike");
-						}
-						// Attribute it to the branch that priced it. A null source (path that didn't record,
-						// e.g. legacy non-intraday) folds into intrinsic so the buckets sum to MultiDteSynthetic.
-						switch (_barProvenance!.GetSyntheticSource(leg.Symbol, fill.Date))
-						{
-							case SyntheticPricingSource.SurfaceIv: mSurf++; break;
-							case SyntheticPricingSource.CrossExpiry: mCross++; break;
-							case SyntheticPricingSource.VixSmile:
-								mVix++;
-								// Only the VIX-fallback legs are candidates for cross-expiry rescue (surface-IV
-								// legs already had a same-expiry anchor). Classify the neighbor anchor at the
-								// fill's minute: bracketed (interpolation) vs one-sided (extrapolation).
-								switch (_barProvenance!.ClassifyNeighborExpiry(leg.Symbol, fill.Date))
-								{
-									case NeighborAnchor.Bracketed: mVixBracketed++; break;
-									case NeighborAnchor.OneSided: mVixOneSided++; break;
-								}
-								break;
-							default: mIntr++; break;
-						}
-					}
-				}
+				if (dte <= 0) zTot++;
+				else mTot++;
 			}
 		}
-		return new PricingProvenance(zCap, zTot, mCap, mTot, mSurf, mCross, mVix, mIntr, mVixBracketed, mVixOneSided, mPhantom);
+		// captured == total (all real), no synthetic legs → all the breakdown buckets are zero.
+		return new PricingProvenance(zTot, zTot, mTot, mTot, 0, 0, 0, 0, 0, 0, 0);
 	}
 
-	/// <summary>Per-trade cleanliness split: a finalized lineage is "clean" only if EVERY market-priced fill
-	/// (Open/Close/Roll/LegIn — Expire settles at real bar.Close intrinsic, always real) had a real captured
-	/// bar for all its option legs. Trades with any synthetic-priced leg are "contaminated" — their entry/exit
-	/// can be mispriced (e.g. a no-bar long leg producing a fake-cheap entry and a huge phantom gain). Breaking
-	/// out the P&L this way separates real signal from synthetic artifacts, which the aggregate provenance %
-	/// (bar existence across all legs) can't.</summary>
+	/// <summary>Per-trade cleanliness split. Under the quotes-only path every market-priced fill used real NBBO
+	/// by construction, so every finalized lineage is "clean" (none contaminated). Kept so the renderer can
+	/// print the clean-trade P&L row.</summary>
 	private CleanlinessBreakdown ComputeCleanliness()
 	{
-		int cleanN = 0, contamN = 0, cleanW = 0, cleanL = 0, contamW = 0, contamL = 0;
-		decimal cleanPnl = 0m, contamPnl = 0m, cleanGrossWin = 0m, cleanGrossLoss = 0m;
+		int cleanN = 0, cleanW = 0, cleanL = 0;
+		decimal cleanPnl = 0m, cleanGrossWin = 0m, cleanGrossLoss = 0m;
 		foreach (var g in _book.Fills.GroupBy(f => f.LineageId))
 		{
 			if (!g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire)) continue; // only finalized trades
-			var clean = true;
-			foreach (var f in g)
-			{
-				if (f.Kind == BacktestFillKind.Expire) continue; // intrinsic settlement is real
-				foreach (var leg in f.Legs)
-				{
-					if (ParsingHelpers.ParseOptionSymbol(leg.Symbol)?.CallPut == null) continue;
-					if (!(_barProvenance?.HasCapturedBarOnDate(leg.Symbol, f.Date) ?? true)) { clean = false; break; }
-				}
-				if (!clean) break;
-			}
 			var pnl = g.Sum(f => f.NetCashFlow - f.Fees);
-			if (clean)
-			{
-				cleanN++; cleanPnl += pnl;
-				if (pnl > 0m) { cleanW++; cleanGrossWin += pnl; } else { cleanL++; cleanGrossLoss += Math.Abs(pnl); }
-			}
-			else
-			{
-				contamN++; contamPnl += pnl;
-				if (pnl > 0m) contamW++; else contamL++;
-			}
+			cleanN++; cleanPnl += pnl;
+			if (pnl > 0m) { cleanW++; cleanGrossWin += pnl; } else { cleanL++; cleanGrossLoss += Math.Abs(pnl); }
 		}
-		return new CleanlinessBreakdown(cleanN, cleanPnl, cleanW, cleanL, cleanGrossWin, cleanGrossLoss, contamN, contamPnl, contamW, contamL);
-	}
-
-	/// <summary>Adds each option leg's OCC symbol to the discovery set. Called for fall-through paths
-	/// (daily-step rule fires, management opens) that don't use the top-K aggregator. Cheap — just
-	/// a hashset add — so it's safe to invoke whether or not <c>_discover</c> is set; <see cref="FlushDiscoveryLog"/>
-	/// is the guarded write path.</summary>
-	private void RecordDiscoveredLegs(IEnumerable<ProposalLeg> legs)
-	{
-		foreach (var leg in legs)
-		{
-			if (string.IsNullOrWhiteSpace(leg.Symbol)) continue;
-			_discoveredOccs.Add(leg.Symbol);
-		}
-	}
-
-	/// <summary>Records the top-<c>_discoverTopKPerDay</c> proposals by FinalScore from a day's
-	/// candidate pool. Replaces the legacy "only record what opened" semantic so that a single
-	/// <c>--discover</c> pass produces an OCC catalog broad enough to support sweeps over knobs
-	/// that change which contract gets picked (biasDrift, minScoreToOpen, structure enable
-	/// flags, etc.). Without this, a sweep cell that prefers a slightly different strike than the
-	/// discover-pass baseline would silently fall back to synthetic pricing for those days.</summary>
-	private void RecordTopKDiscovery(IEnumerable<OpenProposal> proposals)
-	{
-		var topK = proposals
-			.Where(p => p.FinalScore.HasValue)
-			.OrderByDescending(p => p.FinalScore!.Value)
-			.Take(_discoverTopKPerDay);
-		foreach (var p in topK) RecordDiscoveredLegs(p.Legs);
-	}
-
-	/// <summary>Writes the discovery catalog to <c>data/options-discovery/<ticker>.jsonl</c>. Two kinds
-	/// of line: a <em>picked</em> OCC the evaluator actually chose (<c>{"occ":"…","ticker":"SPXW"}</c>),
-	/// and a <em>padded</em> OCC derived from the picked set to widen each (expiry,right) strike range
-	/// (<c>{"occ":"…","ticker":"SPXW","pad":true}</c>). Picked entries accumulate across runs (re-reads
-	/// and unions the existing file) so a user sweeping multiple windows builds up a comprehensive
-	/// strategy footprint. Padding is recomputed fresh every run from the picked set only — pad entries
-	/// are excluded on re-read so the band can't creep outward run over run.
-	///
-	/// <para>The padding lives here, in discovery, on purpose: discovery is the single source of truth
-	/// for "what contracts the strategy needs," and a sweep that nudges the chosen strike by a notch
-	/// should still land on a captured bar. <c>wa options backfill</c> stays a dumb fetcher that pulls
-	/// every <c>occ</c> in this file. Off-grid padded strikes that don't exist on the real chain come
-	/// back empty from the source and are harmlessly skipped at fetch time.</para>
-	///
-	/// <para>Atomic write via tmp+rename so a crash mid-write can't truncate the catalog.</para></summary>
-	private void FlushDiscoveryLog()
-	{
-		if (_discoveredOccs.Count == 0) return;
-		var ticker = _config.Ticker;
-		if (string.IsNullOrWhiteSpace(ticker)) return;
-		var tk = ticker.ToUpperInvariant();
-
-		var dir = Program.ResolvePath("data/options-discovery");
-		Directory.CreateDirectory(dir);
-		var path = Path.Combine(dir, tk + ".jsonl");
-
-		// Accumulate PICKED entries across runs; skip pad:true entries so padding recomputes fresh.
-		var picked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-		if (File.Exists(path))
-		{
-			foreach (var line in File.ReadAllLines(path))
-			{
-				if (string.IsNullOrWhiteSpace(line)) continue;
-				try
-				{
-					using var doc = System.Text.Json.JsonDocument.Parse(line);
-					var root = doc.RootElement;
-					if (root.TryGetProperty("pad", out var padEl) && padEl.ValueKind == System.Text.Json.JsonValueKind.True) continue;
-					if (root.TryGetProperty("occ", out var el) && el.GetString() is { } occ)
-						picked.Add(occ);
-				}
-				catch (System.Text.Json.JsonException) { /* skip malformed line */ }
-			}
-		}
-		var newPicked = _discoveredOccs.Count(o => picked.Add(o));
-
-		var padded = ComputePaddedGrid(picked, _discoverPadStrikes);
-		padded.ExceptWith(picked); // a strike that's both picked and on the padded grid stays a picked line
-
-		var sb = new System.Text.StringBuilder();
-		foreach (var occ in picked.OrderBy(o => o, StringComparer.Ordinal))
-			sb.Append("{\"occ\":\"").Append(occ).Append("\",\"ticker\":\"").Append(tk).Append("\"}\n");
-		foreach (var occ in padded.OrderBy(o => o, StringComparer.Ordinal))
-			sb.Append("{\"occ\":\"").Append(occ).Append("\",\"ticker\":\"").Append(tk).Append("\",\"pad\":true}\n");
-		var tmp = path + ".tmp";
-		File.WriteAllText(tmp, sb.ToString());
-		File.Move(tmp, path, overwrite: true);
-		Console.WriteLine($"discovery: {newPicked} new + {picked.Count - newPicked} prior = {picked.Count} picked OCC(s); +{padded.Count} padded (±{_discoverPadStrikes}) = {picked.Count + padded.Count} cataloged at {path}");
-	}
-
-	/// <summary>Expands the picked OCCs into a full per-strike grid for each (root, expiry, right): infers
-	/// the grid step from the smallest gap between picked strikes, then walks from <c>min - pad*step</c>
-	/// to <c>max + pad*step</c> filling every grid strike (so interior gaps are completed and the range
-	/// is widened by <paramref name="pad"/> strikes on each side). Groups with fewer than two picked
-	/// strikes are skipped — there's no way to infer the step from a single strike.</summary>
-	private static HashSet<string> ComputePaddedGrid(IEnumerable<string> occs, int pad)
-	{
-		var groups = new Dictionary<(string Root, DateTime Expiry, string Right), List<decimal>>();
-		foreach (var occ in occs)
-		{
-			var p = ParsingHelpers.ParseOptionSymbol(occ);
-			if (p?.CallPut == null) continue;
-			var key = (p.Root.ToUpperInvariant(), p.ExpiryDate.Date, p.CallPut);
-			if (!groups.TryGetValue(key, out var list)) groups[key] = list = new();
-			list.Add(p.Strike);
-		}
-
-		var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-		foreach (var (key, strikes) in groups)
-		{
-			if (strikes.Count < 2) continue;
-			strikes.Sort();
-			var step = decimal.MaxValue;
-			for (var i = 1; i < strikes.Count; i++) step = Math.Min(step, strikes[i] - strikes[i - 1]);
-			if (step <= 0m || step == decimal.MaxValue) continue;
-
-			var lo = strikes[0] - pad * step;
-			var hi = strikes[^1] + pad * step;
-			for (var s = lo; s <= hi; s += step)
-			{
-				if (s <= 0m) continue;
-				result.Add(MatchKeys.OccSymbol(key.Root, key.Expiry, s, key.Right));
-			}
-		}
-		return result;
+		return new CleanlinessBreakdown(cleanN, cleanPnl, cleanW, cleanL, cleanGrossWin, cleanGrossLoss, 0, 0m, 0, 0);
 	}
 
 	private static IEnumerable<DateTime> EnumerateTradingDays(DateTime since, DateTime until)
