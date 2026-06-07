@@ -18,7 +18,7 @@ A C# command-line tool for reviewing Webull trading activity end-to-end. It gene
 - **GEX Heatmap**: 2D dealer-gamma-exposure heatmap over the option chain (strikes × expirations) with chain totals and call/put walls
 - **Broker Utilities**: Preview/place/cancel orders, inspect status, list app subscriptions, check positions, and manage OpenAPI trade tokens
 - **AI Proposal Engine**: Run one-shot, watch-loop, historical-replay, or full historical-backtest evaluation for management proposals and new-opening ideas
-- **Historical Option-Bar Catalog**: Discover, backfill (Webull + massive.com), and reprice real option bars so the backtester runs on real prices, not synthetic mids
+- **Real-NBBO Option Data**: The backtester prices every leg off real minute NBBO (`data/quotes`) with real open interest (`data/oi`) — vendor-independent stores filled by a ThetaData historical backfill and live Schwab/Webull capture (no synthetic-spread/trade-bar pricing)
 - **Fee Tracking**: Commissions and fees embedded in the order data
 - **Cash Tracking**: Tracks current cash in hand starting from an optional initial amount
 - **Multiple Output Modes**:
@@ -94,7 +94,6 @@ By default this installs to `~/.local/bin`. You can specify a custom directory:
 - `sniff` — capture fresh Webull session headers for the web API
 - `trade` — preview/place/cancel orders and inspect OpenAPI account state
 - `ai` — emit management and opening proposals from live or replayed data
-- `options` — discover, backfill, and reprice the historical option-bar catalog the backtester reads
 - `data` — back up and restore the local data directory
 
 ### Report Command
@@ -935,28 +934,19 @@ wa ai dip SPXW --exit-on-top --real-chain --delta 0.25 --width 2
 
 Key flags: `--rsi-low` / `--rsi-high` / `--bb-k` / `--interval` shape the signal; `--first-only` collapses a multi-bar dip to its first trigger; `--exit-on-top` switches from a frequency study to a one-at-a-time intraday swing (and is required by `--by-vix`, `--vix-gap-up`, and `--real-chain`); `--call-dte` / `--call-spread` and `--put-spread` / `--put-width` / `--put-friction` / `--put-stop` / `--put-skew` add BS-modeled call and 0DTE-credit-spread overlays; `--real-chain` (`--delta` / `--width` / `--legs`) replaces the model with the real scraped chain on days a snapshot exists.
 
-### Options Command
+### Option Data (quotes + OI)
 
-`wa options` builds and maintains the historical option-bar catalog that `wa ai backtest` reads. Real bars are pulled from Webull (live contracts) and massive.com (expired contracts).
+`wa ai backtest` prices every leg off **real minute NBBO** — there is no synthetic-spread / trade-bar pricing path. Two canonical, vendor-independent stores back it (same format regardless of source, so a historical backfill and a live capture are interchangeable in the same directory):
 
-```bash
-# 1. Discover the contracts the opener actually considered each day, and seed the backfill catalog
-wa options discover SPXW --since 2025-01-01 --top-k 20
+- **`data/quotes/<TICKER>/<EXPIRY>.csv`** — minute NBBO time-series (`date,time,strike,right,bid,ask,bid_size,ask_size`). The price/fill foundation: marks at mid, fills cross the real spread.
+- **`data/oi/<TICKER>/<DATE>.jsonl`** — one daily full-chain snapshot (`underlyingPrice` + `options[]` with `openInterest` and `iv`). OI is constant intraday, so one record/day feeds the GEX / max-pain factors.
 
-# 1b. Bootstrap an underlying with no on-disk chain by enumerating massive's contract reference
-wa options chain SPY --since 2025-01-01 --atm-band 30
+How they're filled:
 
-# 2. Pull the bars for the discovered contracts (merges by timestamp; --force refetches from scratch)
-wa options backfill SPXW --since 2025-01-01 --source massive
+- **Historical backfill** — `scripts/backfill_thetadata.py` pulls minute NBBO (`--quotes` → `data/quotes`) and EOD open interest (`--run` → `data/oi`) from ThetaData. Tickers/DTE are passed at runtime (`--tickers NAME:DTE`); end-of-bar stamps are normalized to start-of-bar (−60s) at ingest. One-time / on-demand (ThetaData Value ≈ $40/mo, cancellable — re-subscribe to fill any gap).
+- **Forward capture** — the `wa-scraper` (Schwab primary, Webull backup) writes the same two stores live, ±10% strike-banded.
 
-# 3. Audit pricing-model accuracy against a captured chain snapshot
-wa options reprice SPXW --date 2026-04-07 --worst 15
-```
-
-- `options discover <ticker>` — replays the opener over a date range and logs the top-K candidates per day to `data/options-discovery/<TICKER>.jsonl`, padded by `--pad` strikes so a swept strike still lands on a captured bar. Accepts opener overrides (`--bias-drift`, `--min-score-to-open`, `--intraday-tape-weight`, repeatable `--enable-structure`) so multiple regime sweeps union into one catalog.
-- `options chain <ticker>` — enumerates an underlying's historical contracts from massive's reference endpoint (use `--underlying` when the OCC root differs, e.g. SPXW→SPX) and seeds the discovery catalog. `--atm-band` tracks a trending underlying so only realistically-tradable strikes are seeded; `--count` reports the contract/strike distribution without writing.
-- `options backfill <ticker>` — pulls bars for the catalog (or the full registry with `--all`). `--source` routes contracts (`all` default, `massive` for fast historical pulls, `webull` for live-only); `--webull-pad` widens the Webull-routable range to capture chart-data headroom before contracts drop out of the live chain.
-- `options reprice <ticker> --date <YYYY-MM-DD>` — reprices a captured chain snapshot with the model and reports the N worst-mispriced contracts (by absolute mid error), to validate the spread/IV model.
+> The old `wa options` subsystem (discover / backfill / audit / chain / reprice) and the massive.com option-bar catalog were retired with the move to real NBBO. massive remains only as an underlying intraday-tape source (see the AI history section).
 
 ### Data Command
 

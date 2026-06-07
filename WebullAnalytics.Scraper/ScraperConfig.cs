@@ -3,8 +3,10 @@ using System.Text.Json.Serialization;
 
 namespace WebullAnalytics.Scraper;
 
-/// <summary>Configuration for the chain-snapshot scraper. Loaded from
-/// <c>data/scraper-config.json</c>; CLI flags override individual fields per-run.</summary>
+/// <summary>Configuration for the chain scraper. Loaded from <c>data/scraper-config.json</c>; CLI flags
+/// override individual fields per-run. Output goes to the two canonical stores the backtest reads —
+/// <c>data/quotes/&lt;TICKER&gt;/&lt;expiry&gt;.csv</c> (minute NBBO) and <c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>
+/// (one full-chain OI snapshot per day) — both rooted under <see cref="WebullAnalytics.Program.BaseDir"/>.</summary>
 internal sealed class ScraperConfig
 {
 	/// <summary>Chain data source: <c>"schwab"</c> (default — real NBBO + OI via the Schwab Trader API, requires
@@ -26,11 +28,12 @@ internal sealed class ScraperConfig
 	[JsonPropertyName("endTime")]
 	public string EndTime { get; set; } = "16:05";
 
-	/// <summary>Output root for per-day JSONL snapshots. Each day's file lives at
-	/// <c>{outputPath}/<TICKER>/<date>.jsonl</c>. Relative paths are resolved against
-	/// <see cref="WebullAnalytics.Program.BaseDir"/>.</summary>
-	[JsonPropertyName("outputPath")]
-	public string OutputPath { get; set; } = "data/chain-snapshots";
+	/// <summary>Half-width of the post-fetch moneyness band, as a fraction of spot: a contract is kept only when
+	/// <c>|strike/spot - 1| &lt;= StrikeBandFraction</c>. Schwab returns range=ALL, so the band is enforced
+	/// scraper-side here (matches the ThetaData backfill's ±10% band). If spot is unknown for a tick the band
+	/// can't be applied and all contracts are kept. Default 0.10 (±10%).</summary>
+	[JsonPropertyName("strikeBandFraction")]
+	public decimal StrikeBandFraction { get; set; } = 0.10m;
 
 	/// <summary>If true, skip ticks when the ET clock is outside <see cref="StartTime"/>..<see cref="EndTime"/>
 	/// AND outside US market hours (09:30..16:00 ET). The boundary handling is forgiving — pre-market
