@@ -803,6 +803,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Override opener.weights.intradayTape for this run. 0.0 = pure macro bias; 1.0 = pure intraday tape. Must be between 0 and 1 inclusive.")]
 	public decimal? IntradayTapeWeightOverride { get; set; }
 
+	[CommandOption("--gex-bias-pull <VALUE>")]
+	[Description("Override opener.weights.gexBiasPull for this run (the GEX magnet's grid-shift strength; 0 disables). Sweep knob for validating the GEX signal: e.g. 0, 0.25, 0.5, 1.0. Must be ≥ 0.")]
+	public decimal? GexBiasPullOverride { get; set; }
+
 	[CommandOption("--intraday-w0 <VALUE>")]
 	[Description("Enable the DTE-aware intraday-tape curve and set its 0DTE blend weight (opener.intradayTapeDteCurve.weightAt0Dte). 1.0 = a 0DTE trade reads direction purely from the live tape; 0.0 = pure macro. Must be 0 to 1 inclusive. Sweep knob for the 0DTE flat-day fix.")]
 	public decimal? IntradayW0Override { get; set; }
@@ -855,6 +859,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--bias-drift: must be ≥ 0, got {BiasDriftOverride}");
 		if (IntradayTapeWeightOverride.HasValue && (IntradayTapeWeightOverride.Value < 0m || IntradayTapeWeightOverride.Value > 1m))
 			return ValidationResult.Error($"--intraday-tape-weight: must be in [0, 1], got {IntradayTapeWeightOverride}");
+		if (GexBiasPullOverride.HasValue && GexBiasPullOverride.Value < 0m)
+			return ValidationResult.Error($"--gex-bias-pull: must be ≥ 0, got {GexBiasPullOverride}");
 		if (IntradayW0Override.HasValue && (IntradayW0Override.Value < 0m || IntradayW0Override.Value > 1m))
 			return ValidationResult.Error($"--intraday-w0: must be in [0, 1], got {IntradayW0Override}");
 		if (LongConvictionOverride.HasValue && (LongConvictionOverride.Value < 0m || LongConvictionOverride.Value > 1m))
@@ -883,6 +889,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (settings.BiasDriftOverride.HasValue) config.Opener.Weights.BiasDrift = settings.BiasDriftOverride.Value;
 		if (settings.MinScoreToOpenOverride.HasValue) config.Opener.MinScoreToOpen = settings.MinScoreToOpenOverride.Value;
 		if (settings.IntradayTapeWeightOverride.HasValue) config.Opener.Weights.IntradayTape = settings.IntradayTapeWeightOverride.Value;
+		if (settings.GexBiasPullOverride.HasValue) config.Opener.Weights.GexBiasPull = settings.GexBiasPullOverride.Value;
 		if (settings.IntradayW0Override.HasValue)
 		{
 			config.Opener.IntradayTapeDteCurve.Enabled = true;
