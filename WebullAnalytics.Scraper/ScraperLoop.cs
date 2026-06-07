@@ -19,23 +19,25 @@ internal sealed class ScraperLoop
 	private readonly string _ticker;
 	private readonly ScraperConfig _config;
 	private readonly IChainSource _chainSource;
-	private readonly string _outputDir;
+	private readonly string _quotesDir;   // data/quotes/<TICKER> — minute NBBO time-series (one CSV per expiry)
+	private readonly string _oiDir;       // data/oi/<TICKER>     — one full-chain OI snapshot per day
 
 	public ScraperLoop(string ticker, ScraperConfig config, IChainSource chainSource)
 	{
 		_ticker = ticker.ToUpperInvariant();
 		_config = config;
 		_chainSource = chainSource;
-		var outputRoot = Path.IsPathRooted(config.OutputPath)
-			? config.OutputPath
-			: WebullAnalytics.Program.ResolvePath(config.OutputPath);
-		_outputDir = Path.Combine(outputRoot, _ticker);
-		Directory.CreateDirectory(_outputDir);
+		// The two canonical stores share the same on-disk format as the ThetaData backfill, so a live scrape
+		// and a historical pull are interchangeable in the same directory tree.
+		_quotesDir = Path.Combine(WebullAnalytics.Program.ResolvePath("data/quotes"), _ticker);
+		_oiDir = Path.Combine(WebullAnalytics.Program.ResolvePath("data/oi"), _ticker);
+		Directory.CreateDirectory(_quotesDir);
+		Directory.CreateDirectory(_oiDir);
 	}
 
 	public async Task<int> RunAsync(DateTime startEt, DateTime endEt, CancellationToken cancellation)
 	{
-		AnsiConsole.MarkupLine($"[bold]wa-scraper[/] ticker={_ticker} interval={_config.IntervalSeconds}s startEt={startEt:HH:mm:ss} endEt={endEt:HH:mm:ss} out={Markup.Escape(_outputDir)}");
+		AnsiConsole.MarkupLine($"[bold]wa-scraper[/] ticker={_ticker} interval={_config.IntervalSeconds}s startEt={startEt:HH:mm:ss} endEt={endEt:HH:mm:ss} quotes={Markup.Escape(_quotesDir)} oi={Markup.Escape(_oiDir)}");
 
 		// Sleep until first fire. If startEt is in the past, we begin immediately at the next
 		// minute-boundary so the first persisted line has a clean ET wall-clock minute stamp.
@@ -106,14 +108,20 @@ internal sealed class ScraperLoop
 		return 0;
 	}
 
-	/// <summary>Pulls the chain via Webull and appends one JSON line to today's JSONL file, keeping the
-	/// contracts that expire from today out to <c>config.MaxDte</c> calendar days. Webull's strategy/list
-	/// returns the full chain across every listed expiration (~30k contracts for SPXW), which balloons each
-	/// per-minute line; MaxDte=0 (default) keeps only the same-day 0DTE expiry the bot trades, while a larger
-	/// MaxDte also captures the further-dated legs the diagonal/calendar structures use — so the synthetic
-	/// far-leg pricing can be validated against real quotes via `wa options reprice`. One file per
-	/// (ticker, NY date). The fire-time is stamped in both UTC and ET so downstream consumers can re-derive
-	/// the minute bucket without re-parsing the timestamp string.</summary>
+	/// <summary>Pulls the chain and writes it to the two canonical stores that the backtest reads (the same
+	/// on-disk shape the ThetaData backfill produces, so live + historical are interchangeable):
+	/// <list type="bullet">
+	/// <item><c>data/quotes/&lt;TICKER&gt;/&lt;expiry&gt;.csv</c> — one row per kept contract this tick, appended,
+	/// grouped into one CSV per expiration. Columns <c>date,time,strike,right,bid,ask,bid_size,ask_size</c>.</item>
+	/// <item><c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c> — exactly ONE full-chain snapshot per ET date (OI is
+	/// constant intraday), written on the first successful tick of the day and skipped thereafter.</item>
+	/// </list>
+	/// Keeps contracts expiring from today out to <c>config.MaxDte</c> calendar days, then applies a
+	/// <c>±config.StrikeBandFraction</c> moneyness band around the fetched spot (Schwab returns range=ALL, so the
+	/// band is enforced here). MaxDte=0 (default) keeps only the same-day 0DTE expiry; a larger MaxDte also
+	/// captures the further-dated legs the diagonal/calendar structures use. The live scraper fires at the real
+	/// ET wall-clock minute, which is ALREADY start-of-bar (09:30:00 = the 09:30 minute), so it writes the time
+	/// as-is — do NOT apply any -60s end-of-bar shift (that shift only exists for ThetaData's end-of-bar stamps).</summary>
 	private async Task<(int Count, decimal? Spot)> TickOnceAsync(DateTime fireWallClock, CancellationToken cancellation)
 	{
 		var fireEt = TimeZoneInfo.ConvertTime(fireWallClock, NyTz);
@@ -144,7 +152,11 @@ internal sealed class ScraperLoop
 					// the empty SPX entry). Keep only the requested root.
 					if (!string.Equals(parsed.Root, _ticker, StringComparison.OrdinalIgnoreCase)) return false;
 					var dte = (parsed.ExpiryDate.Date - fireEt.Date).Days;
-					return dte >= 0 && dte <= _config.MaxDte;
+					if (dte < 0 || dte > _config.MaxDte) return false;
+					// ±band moneyness filter. Schwab returns range=ALL, so the band is enforced post-fetch here.
+					// If spot is unknown we can't band — keep the contract.
+					if (spot is decimal sp && sp > 0m && Math.Abs(parsed.Strike / sp - 1m) > _config.StrikeBandFraction) return false;
+					return true;
 				})
 				.ToList();
 			if (todayContracts.Count > 0) break;
@@ -160,7 +172,53 @@ internal sealed class ScraperLoop
 		if (todayContracts.Count == 0) return (0, spot);
 
 		var dateStr = fireEt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-		var path = Path.Combine(_outputDir, $"{dateStr}.jsonl");
+		// The fire-time is the real ET wall-clock minute, which is ALREADY start-of-bar (09:30:00 = the 09:30
+		// minute) — write it as-is. Do NOT apply the -60s shift the ThetaData pull uses to normalize its
+		// end-of-bar stamps (that shift only exists for ThetaData's end-of-bar minute stamps).
+		var timeStr = fireEt.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+
+		// --- data/quotes/<TICKER>/<expiry>.csv : minute NBBO time-series, one CSV per expiration ---
+		await AppendQuotesAsync(todayContracts, dateStr, timeStr, cancellation);
+
+		// --- data/oi/<TICKER>/<date>.jsonl : ONE full-chain snapshot per day (OI is constant intraday) ---
+		WriteOiSnapshotIfFirstOfDay(todayContracts, dateStr, fireUtc, fireEt, spot);
+
+		return (todayContracts.Count, spot);
+	}
+
+	/// <summary>Appends one row per contract to its expiration's CSV (one file per expiration), creating the
+	/// file with the header line on first write and appending (FileShare.ReadWrite) thereafter. Columns:
+	/// <c>date,time,strike,right,bid,ask,bid_size,ask_size</c>. <c>OptionContractQuote</c> carries no NBBO size
+	/// fields, so bid_size/ask_size are written empty (the reader tolerates empty/missing sizes).</summary>
+	private async Task AppendQuotesAsync(List<OptionContractQuote> contracts, string dateStr, string timeStr, CancellationToken cancellation)
+	{
+		const string header = "date,time,strike,right,bid,ask,bid_size,ask_size";
+		foreach (var byExpiry in contracts.GroupBy(q => WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)!.ExpiryDate.Date))
+		{
+			var path = Path.Combine(_quotesDir, $"{byExpiry.Key:yyyy-MM-dd}.csv");
+			var needHeader = !File.Exists(path);
+			using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+			using var writer = new StreamWriter(stream);
+			if (needHeader) await writer.WriteLineAsync(header);
+			foreach (var q in byExpiry)
+			{
+				var parsed = WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)!;
+				var strike = parsed.Strike.ToString(CultureInfo.InvariantCulture);
+				var bid = q.Bid?.ToString(CultureInfo.InvariantCulture) ?? "";
+				var ask = q.Ask?.ToString(CultureInfo.InvariantCulture) ?? "";
+				// bid_size/ask_size: OptionContractQuote has no size fields → empty (reader treats empty as 0).
+				await writer.WriteLineAsync($"{dateStr},{timeStr},{strike},{parsed.CallPut},{bid},{ask},,");
+			}
+		}
+	}
+
+	/// <summary>Writes exactly ONE full-chain snapshot for the ET date to <c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>
+	/// on the first successful tick of that date; OI is constant intraday, so subsequent ticks skip if the file
+	/// already exists. Record shape matches the ThetaData pull: <c>{tsUtc, tsEt, ticker, underlyingPrice, options:[...]}</c>.</summary>
+	private void WriteOiSnapshotIfFirstOfDay(List<OptionContractQuote> contracts, string dateStr, DateTime fireUtc, DateTime fireEt, decimal? spot)
+	{
+		var path = Path.Combine(_oiDir, $"{dateStr}.jsonl");
+		if (File.Exists(path)) return;
 
 		var record = new
 		{
@@ -168,7 +226,7 @@ internal sealed class ScraperLoop
 			tsEt = fireEt.ToString("yyyy-MM-ddTHH:mm:ssK", CultureInfo.InvariantCulture),
 			ticker = _ticker,
 			underlyingPrice = spot,
-			options = todayContracts.Select(q => new
+			options = contracts.Select(q => new
 			{
 				symbol = q.ContractSymbol,
 				bid = q.Bid,
@@ -183,10 +241,15 @@ internal sealed class ScraperLoop
 		};
 
 		var line = JsonSerializer.Serialize(record);
-		using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-		using var writer = new StreamWriter(stream);
-		await writer.WriteLineAsync(line);
-		return (todayContracts.Count, spot);
+		// CreateNew so a race between near-simultaneous "first ticks" can't double-write; if it lost the race
+		// (file appeared between the Exists check and here) just skip — the existing snapshot is authoritative.
+		try
+		{
+			using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite);
+			using var writer = new StreamWriter(stream);
+			writer.WriteLine(line);
+		}
+		catch (IOException) { /* already created by a concurrent tick — OI is constant intraday, skip */ }
 	}
 
 	/// <summary>First-fire target: the smallest interval-aligned ET time >= <paramref name="startEt"/>

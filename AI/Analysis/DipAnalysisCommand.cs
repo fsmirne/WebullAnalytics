@@ -91,7 +91,7 @@ internal sealed class DipAnalysisSettings : CommandSettings
 	public bool VixGapUp { get; set; }
 
 	[CommandOption("--real-chain")]
-	[Description("With --exit-on-top: price each round-trip off the REAL scraped option chain (data/chain-snapshots/<TICKER>/<date>.jsonl) on days a chain exists. 0DTE, strikes by --delta, bid/ask crossed both ways. Skips days with no chain. SPXW is cash-settled (cleaner for the naked-call lottery).")]
+	[Description("With --exit-on-top: price each round-trip off the REAL scraped option chain (data/oi/<TICKER>/<date>.jsonl daily snapshot) on days a chain exists. 0DTE, strikes by --delta, bid/ask crossed both ways. Skips days with no chain. SPXW is cash-settled (cleaner for the naked-call lottery).")]
 	public bool RealChain { get; set; }
 
 	[CommandOption("--delta <D>")]
@@ -487,7 +487,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		return v.Count % 2 == 1 ? v[v.Count / 2] : (v[v.Count / 2 - 1] + v[v.Count / 2]) / 2m;
 	}
 
-	// ---- Real-chain spread pricing (off scraped data/chain-snapshots/<TICKER>/<date>.jsonl) ----
+	// ---- Real-chain spread pricing (off the scraped data/oi/<TICKER>/<date>.jsonl daily snapshot) ----
 
 	private sealed record ChainSnap(DateTime Et, decimal Spot, Dictionary<string, (decimal? Bid, decimal? Ask, decimal? Iv)> Q);
 
@@ -509,7 +509,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		foreach (var t in trades)
 		{
 			var day = t.EntryEt.Date;
-			var path = Program.ResolvePath($"data/chain-snapshots/{ticker}/{day:yyyy-MM-dd}.jsonl");
+			var path = Program.ResolvePath($"data/oi/{ticker}/{day:yyyy-MM-dd}.jsonl");
 			if (!File.Exists(path)) { skipped++; continue; }
 			var (eS, xS) = ReadChainSnaps(path, t.EntryEt, t.ExitEt);
 			if (eS == null || xS == null) { skipped++; continue; }
