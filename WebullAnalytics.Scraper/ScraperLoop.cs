@@ -188,8 +188,10 @@ internal sealed class ScraperLoop
 
 	/// <summary>Appends one row per contract to its expiration's CSV (one file per expiration), creating the
 	/// file with the header line on first write and appending (FileShare.ReadWrite) thereafter. Columns:
-	/// <c>date,time,strike,right,bid,ask,bid_size,ask_size</c>. <c>OptionContractQuote</c> carries no NBBO size
-	/// fields, so bid_size/ask_size are written empty (the reader tolerates empty/missing sizes).</summary>
+	/// <c>date,time,strike,right,bid,ask,bid_size,ask_size</c>. Format matches the ThetaData backfill exactly
+	/// (LF line endings, decimal strike text like <c>719.0</c>, NBBO sizes) so live and historical rows in a
+	/// per-expiry file are byte-compatible — this is the canonical writer once ThetaData is decommissioned.
+	/// bid_size/ask_size are written empty only when the source omits them (the reader treats empty as 0).</summary>
 	private async Task AppendQuotesAsync(List<OptionContractQuote> contracts, string dateStr, string timeStr, CancellationToken cancellation)
 	{
 		const string header = "date,time,strike,right,bid,ask,bid_size,ask_size";
@@ -198,25 +200,36 @@ internal sealed class ScraperLoop
 			var path = Path.Combine(_quotesDir, $"{byExpiry.Key:yyyy-MM-dd}.csv");
 			var needHeader = !File.Exists(path);
 			using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-			using var writer = new StreamWriter(stream);
+			using var writer = new StreamWriter(stream) { NewLine = "\n" };   // LF to match the ThetaData backfill (pandas to_csv); avoids mixed CRLF/LF in an appended file
 			if (needHeader) await writer.WriteLineAsync(header);
 			foreach (var q in byExpiry)
 			{
 				var parsed = WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)!;
-				var strike = parsed.Strike.ToString(CultureInfo.InvariantCulture);
+				var strike = FormatStrike(parsed.Strike);
 				var bid = q.Bid?.ToString(CultureInfo.InvariantCulture) ?? "";
 				var ask = q.Ask?.ToString(CultureInfo.InvariantCulture) ?? "";
-				// bid_size/ask_size: OptionContractQuote has no size fields → empty (reader treats empty as 0).
-				await writer.WriteLineAsync($"{dateStr},{timeStr},{strike},{parsed.CallPut},{bid},{ask},,");
+				var bidSize = q.BidSize?.ToString(CultureInfo.InvariantCulture) ?? "";
+				var askSize = q.AskSize?.ToString(CultureInfo.InvariantCulture) ?? "";
+				await writer.WriteLineAsync($"{dateStr},{timeStr},{strike},{parsed.CallPut},{bid},{ask},{bidSize},{askSize}");
 			}
 		}
 	}
 
+	/// <summary>Strike text that matches the ThetaData backfill's pandas-float column (719 → <c>719.0</c>,
+	/// 719.5 → <c>719.5</c>) so live and historical rows in one per-expiry file share a single representation.
+	/// <c>0.0##</c> keeps at least one decimal place and drops superfluous trailing zeros.</summary>
+	private static string FormatStrike(decimal strike) => strike.ToString("0.0##", CultureInfo.InvariantCulture);
+
 	/// <summary>Writes exactly ONE full-chain snapshot for the ET date to <c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>
-	/// on the first successful tick of that date; OI is constant intraday, so subsequent ticks skip if the file
-	/// already exists. Record shape matches the ThetaData pull: <c>{tsUtc, tsEt, ticker, underlyingPrice, options:[...]}</c>.</summary>
+	/// on the first RTH tick (≥09:30 ET) of that date; OI is constant intraday, so subsequent ticks skip if the
+	/// file already exists. Gating to RTH (rather than the first tick, which may be pre-market) means the recorded
+	/// <c>underlyingPrice</c> and per-contract bid/ask/iv are regular-hours values, not a thin pre-market print —
+	/// the IV in particular feeds the gravity gamma-weighting via <c>ChainSnapshotOiCache</c>. A pre-market-only
+	/// run therefore writes no snapshot, which is fine: OI doesn't change before the open.
+	/// Record shape matches the ThetaData pull: <c>{tsUtc, tsEt, ticker, underlyingPrice, options:[...]}</c>.</summary>
 	private void WriteOiSnapshotIfFirstOfDay(List<OptionContractQuote> contracts, string dateStr, DateTime fireUtc, DateTime fireEt, decimal? spot)
 	{
+		if (fireEt.TimeOfDay < MarketOpenEt) return;   // wait for the first regular-hours tick so spot/IV aren't pre-market
 		var path = Path.Combine(_oiDir, $"{dateStr}.jsonl");
 		if (File.Exists(path)) return;
 
@@ -246,7 +259,7 @@ internal sealed class ScraperLoop
 		try
 		{
 			using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite);
-			using var writer = new StreamWriter(stream);
+			using var writer = new StreamWriter(stream) { NewLine = "\n" };   // LF to match the ThetaData backfill OI writer
 			writer.WriteLine(line);
 		}
 		catch (IOException) { /* already created by a concurrent tick — OI is constant intraday, skip */ }
