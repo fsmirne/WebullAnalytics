@@ -96,7 +96,9 @@ internal static class SchwabOptionsClient
 					OpenInterest: GetLong(contract, "openInterest"),
 					// Schwab quotes volatility as an annualized percent (e.g. 23.45); the model stores a fraction.
 					// -999.0 is Schwab's "no value" sentinel.
-					ImpliedVolatility: ToFraction(GetDecimal(contract, "volatility"))
+					ImpliedVolatility: ToFraction(GetDecimal(contract, "volatility")),
+					BidSize: GetLong(contract, "bidSize"),
+					AskSize: GetLong(contract, "askSize")
 				));
 			}
 		}

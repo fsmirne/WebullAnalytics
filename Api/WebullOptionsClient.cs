@@ -386,7 +386,9 @@ internal static class WebullOptionsClient
 						OpenInterest: GetLong(contract, "openInterest"),
 						ImpliedVolatility: GetDecimal(contract, "impVol"),
 						HistoricalVolatility: GetDecimal(contract, "hiv"),
-						ImpliedVolatility5Day: GetDecimal(contract, "iv5")
+						ImpliedVolatility5Day: GetDecimal(contract, "iv5"),
+						BidSize: GetBestSize(contract, "bidList"),
+						AskSize: GetBestSize(contract, "askList")
 					));
 				}
 			}
@@ -438,7 +440,9 @@ internal static class WebullOptionsClient
 					OpenInterest: GetLong(contract, "openInterest"),
 					ImpliedVolatility: GetDecimal(contract, "impVol"),
 					HistoricalVolatility: GetDecimal(contract, "hiv"),
-					ImpliedVolatility5Day: GetDecimal(contract, "iv5")
+					ImpliedVolatility5Day: GetDecimal(contract, "iv5"),
+					BidSize: GetBestSize(contract, "bidList"),
+					AskSize: GetBestSize(contract, "askList")
 				));
 			}
 		}
@@ -451,6 +455,15 @@ internal static class WebullOptionsClient
 		if (!contract.TryGetProperty(listProp, out var list) || list.ValueKind != JsonValueKind.Array || list.GetArrayLength() == 0)
 			return null;
 		return GetDecimal(list[0], "price");
+	}
+
+	// bidList/askList entries are {"price":"740.93","volume":"90"} — "volume" is the NBBO size at that price
+	// level (verified against a live chain response). Returns the best (level-0) size, or null on an empty list.
+	private static long? GetBestSize(JsonElement contract, string listProp)
+	{
+		if (!contract.TryGetProperty(listProp, out var list) || list.ValueKind != JsonValueKind.Array || list.GetArrayLength() == 0)
+			return null;
+		return GetLong(list[0], "volume");
 	}
 
 	private static decimal? GetDecimal(JsonElement item, string prop)
