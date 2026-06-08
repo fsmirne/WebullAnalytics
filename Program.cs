@@ -75,6 +75,13 @@ class Program
 		Console.OutputEncoding = System.Text.Encoding.UTF8;
 
 		RawArgs = args;
+
+		// Application-wide console verbosity. The optional top-level "log-level" in config.json sets it for
+		// every command (report, fetch, analyze, …) so low-level progress chatter (e.g. the Webull client)
+		// routes through Utils.Log and stays hidden below debug. AI commands further refine this from
+		// ai-config in AIContext.ResolveConfig (ai-config wins for those runs). Default: information.
+		Utils.Log.Level = Utils.Log.Parse(AppConfigLogLevel());
+
 		var app = new CommandApp();
 		app.Configure(config =>
 		{
@@ -162,4 +169,14 @@ class Program
 
 	/// <summary>Returns true if the given CLI option name (e.g. "source", "yahoo") was explicitly passed on the command line.</summary>
 	internal static bool HasCliOption(string optionName) => RawArgs.Any(a => a.Equals($"--{optionName}", StringComparison.OrdinalIgnoreCase));
+
+	/// <summary>App-wide verbosity from the optional top-level "log-level" in config.json (error|information|debug),
+	/// or null when unset (Utils.Log then keeps its information default). AI commands layer ai-config on top.</summary>
+	private static string? AppConfigLogLevel()
+	{
+		var root = LoadAppConfigRoot();
+		return root != null && root.TryGetValue("log-level", out var el) && el.ValueKind == JsonValueKind.String
+			? el.GetString()
+			: null;
+	}
 }
