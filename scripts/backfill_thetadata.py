@@ -858,18 +858,41 @@ def shift_quote_times(out_root: Path, tickers):
     Webull. Date is unchanged (-60s never crosses a day for RTH times).
 
     Streaming text rewrite (only field 1 changes; every other byte is copied verbatim) so it's fast and
-    constant-memory on the multi-million-row files. Idempotent + safe to re-run: while rewriting we detect
-    whether the input was ALREADY start-of-bar (a real two-sided 09:30 row, or no end-of-bar 16:00 row) and
-    if so discard the temp instead of committing -- so a re-run, or a ticker pulled after the ingest fix
-    (e.g. a later GME pull), is never double-shifted. Atomic per file (os.replace)."""
+    constant-memory on the multi-million-row files. Idempotent + safe to re-run: we commit the rewrite only
+    when the input still has an end-of-bar 16:00 RTH row (the un-shifted marker; canonical/shifted files top
+    out at 15:59). After a shift 16:00->15:59, so a re-run -- or a ticker pulled after the ingest fix (e.g. a
+    later GME pull) -- has no 16:00 and is skipped, never double-shifted. Atomic per file (os.replace).
+
+    NOTE: an earlier version ALSO skipped on a two-sided 09:30 row, assuming that meant already-shifted. But
+    an un-shifted file's 09:30 is the opening AUCTION, which for liquid SPY/SPX strikes IS two-sided -- so that
+    heuristic mis-classified exactly those files as already start-of-bar and left 87 of them un-normalized.
+    has_1600 alone is the reliable, idempotent signal."""
     for ticker in tickers:
         tdir = out_root / ticker
         files = sorted(tdir.glob("*.csv")) if tdir.exists() else []
         shifted = skipped = 0
         log.info(f"\n=== {ticker}: {len(files)} files ===")
         for f in files:
+            # Cheap read-only pre-scan (early-exit on first 16:00): only files that still carry an end-of-bar
+            # 16:00 RTH row need shifting. Skipping the full rewrite+discard for the already-shifted majority
+            # avoids writing tens of GB of temp files that would only be deleted (and the I/O thrash that comes
+            # with it). Files that need it fall through to the atomic rewrite below.
+            needs_shift = False
+            with open(f) as r:
+                r.readline()
+                for line in r:
+                    c1 = line.find(",")
+                    if c1 < 0:
+                        continue
+                    c2 = line.find(",", c1 + 1)
+                    if c2 > 0 and line[c1 + 1:c2] == "16:00:00":
+                        needs_shift = True
+                        break
+            if not needs_shift:
+                skipped += 1
+                continue
             tmp = tdir / (f.name + ".tmp")
-            saw_0930_real = has_1600 = False
+            has_1600 = False
             nrows = 0
             try:
                 with open(f) as r, open(tmp, "w", newline="") as w:
@@ -886,12 +909,6 @@ def shift_quote_times(out_root: Path, tickers):
                         t = p[1]
                         if t == "16:00:00":
                             has_1600 = True
-                        elif t == "09:30:00":
-                            try:
-                                if float(p[4] or 0) > 0 and float(p[5] or 0) > 0:
-                                    saw_0930_real = True
-                            except ValueError:
-                                pass
                         p[1] = _shift_hms(t)
                         w.write(",".join(p))
                         nrows += 1
@@ -899,8 +916,9 @@ def shift_quote_times(out_root: Path, tickers):
                 log.info(f"  [skip] {f.name}: {e}")
                 if tmp.exists(): tmp.unlink()
                 skipped += 1; continue
-            # Already start-of-bar (real 09:30 / no 16:00) or empty -> discard the rewrite, leave the file.
-            if nrows == 0 or saw_0930_real or not has_1600:
+            # Commit iff the file still has an end-of-bar 16:00 RTH row (the reliable un-shifted marker).
+            # Empty or already-shifted (no 16:00) -> discard the rewrite, leave the file untouched.
+            if nrows == 0 or not has_1600:
                 tmp.unlink(); skipped += 1
             else:
                 os.replace(tmp, f); shifted += 1
