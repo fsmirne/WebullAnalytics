@@ -156,15 +156,18 @@ foreach ($gbp in $GexBiasPulls) {
     $fillsPath = Join-Path $RunDir ("fills_" + $tag + '.jsonl')
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
+    $cellLog = Join-Path $RunDir ("run_" + $tag + '.log')
     Log ("[{0}/{1}] {2} -> running" -f $idx, $total, $tag)
     & $Wa ai backtest $Ticker --since $Since --until $Until --lots $Lots --scan-stride $ScanStride `
       --gex-bias-pull $gbp --gamma-regime $gr `
-      --fills-jsonl $fillsPath 2>&1 | Out-Null
+      --fills-jsonl $fillsPath *>&1 | Tee-Object -FilePath $cellLog | Out-Null
 
     $rc = $LASTEXITCODE
     $sw.Stop()
     if ($rc -ne 0) {
-      Log ("  -> rc={0} (skipping stats)" -f $rc)
+      # Surface why instead of swallowing it: echo the last few lines of the cell log.
+      $tailLines = (Get-Content $cellLog -Tail 6 -ErrorAction SilentlyContinue) -join ' | '
+      Log ("  -> rc={0} (skipping stats). last output: {1}" -f $rc, $tailLines)
       continue
     }
 
