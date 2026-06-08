@@ -88,7 +88,7 @@ internal sealed class ProposalSink : IDisposable
 
 		if (p.Legs.Count > 0)
 		{
-			var legsText = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
+			var legsText = p.Legs.Describe();
 			var netLabel = p.NetDebit >= 0m ? $"net credit ${p.NetDebit:F2}" : $"net debit ${-p.NetDebit:F2}";
 			rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/] [dim]→ {Markup.Escape(netLabel)}[/]"));
 		}
