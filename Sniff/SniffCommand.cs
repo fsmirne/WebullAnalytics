@@ -41,10 +41,16 @@ class SniffCommand : AsyncCommand<SniffSettings>
 			Console.WriteLine($"Captured {headers.Count} header(s).");
 
 			var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(configPath))!.AsObject();
-			root["headers"] = JsonSerializer.SerializeToNode(headers);
+			var webull = root["webull"]?.AsObject();
+			if (webull == null)
+			{
+				webull = new System.Text.Json.Nodes.JsonObject();
+				root["webull"] = webull;
+			}
+			webull["headers"] = JsonSerializer.SerializeToNode(headers);
 			File.WriteAllText(configPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true, IndentCharacter = '\t', IndentSize = 1 }));
 
-			Console.WriteLine($"Updated headers in {configPath}");
+			Console.WriteLine($"Updated webull.headers in {configPath}");
 			return 0;
 		}
 		catch (Exception ex) when (ex is InvalidOperationException or TimeoutException)
