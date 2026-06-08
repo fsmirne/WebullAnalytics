@@ -115,13 +115,13 @@ internal sealed class OpenProposalSink : IDisposable
 			}
 			else
 			{
-				var legsTextFallback = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
+				var legsTextFallback = p.Legs.Describe();
 				rows.Add(new Markup($"[bold]{Markup.Escape(legsTextFallback)}[/]"));
 			}
 		}
 		else
 		{
-			var legsText = string.Join(", ", p.Legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
+			var legsText = p.Legs.Describe();
 			rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/]"));
 		}
         if (!string.IsNullOrWhiteSpace(p.PricingWarning))

@@ -25,6 +25,15 @@ internal enum ProposalKind
 /// <param name="ExecutionPricePerShare">Optional bid/ask execution price per share for conservative suggestions.</param>
 internal record ProposalLeg(string Action, string Symbol, int Qty, decimal? PricePerShare = null, decimal? ExecutionPricePerShare = null);
 
+internal static class ProposalLegExtensions
+{
+	/// <summary>Readable leg list — e.g. "BUY SPY260626C00750000 x4, SELL SPY260615C00750000 x4" — shared by
+	/// the proposal sinks and the opener's dedup-skip messages so a structure is identifiable by its actual
+	/// contracts (strikes/expiries) rather than just "TICKER Structure xN".</summary>
+	internal static string Describe(this IEnumerable<ProposalLeg> legs) =>
+		string.Join(", ", legs.Select(l => $"{l.Action.ToUpperInvariant()} {l.Symbol} x{l.Qty}"));
+}
+
 /// <summary>
 /// Output of a single rule evaluation.
 /// </summary>
