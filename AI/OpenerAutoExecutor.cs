@@ -101,7 +101,7 @@ internal sealed class OpenerAutoExecutor
 			if (heldFingerprints.Count > 0
 				&& StructureOrderSplit.Split(p.StructureKind, p.Legs).All(g => heldFingerprints.Contains(FingerprintLegSet(g.Legs.Select(l => (l.Action, l.Symbol))))))
 			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (already hold matching position):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty}.");
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (already hold matching position):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
 				continue;
 			}
 
@@ -114,7 +114,7 @@ internal sealed class OpenerAutoExecutor
 			if (_config.Submit && _brokerState != null
 				&& StructureOrderSplit.Split(p.StructureKind, p.Legs).All(g => _brokerState.HasPendingMatching(g.Legs.Select(l => (l.Symbol, l.Action)))))
 			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (broker already has matching order):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty}.");
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (broker already has matching order):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
 				continue;
 			}
 
