@@ -1,69 +1,72 @@
 <#
-backtest_sweep.ps1 - Grid sweep over backtest tuning parameters.
+backtest_sweep.ps1 - 2D grid sweep over the GEX signal weights.
 
-Runs `wa ai backtest` across a parameter grid, captures fills per run, computes
-summary stats (trades, win rate, total P&L, avg P&L), and writes the matrix
-to a CSV ranked by total P&L. The fills .jsonl per combination is kept on
-disk under data/sweeps/<run-id>/ so you can drill into any row.
+Validates the two GEX scoring signals that steer (and are currently de-risked
+OFF of) live SPY capital, now that data/oi/SPY carries real OI+IV for the whole
+backtest window so the signals are no longer inert in the backtest:
 
-Sweep grid is the three arrays at the top — edit those to change the search
-space. The current defaults (2x4x3 = 24 combinations) are a second-pass
-sweep around the optimum found in the first 3x3x3 run on 2026-01-01..today:
-the first sweep put the winning cell at the GRID EDGE (tw=0.50 lowest tested,
-ms=0.07 highest), which usually means the real optimum sits outside what was
-tested — so this grid extends the tape weight DOWN (0.25-0.45) and the min
-score UP (to 0.10), while pruning biasDrift to the two values that mattered.
+  --gex-bias-pull : the directional magnet. Pulls the strike grid toward the
+                    gravity strike (max gross gamma x OI). gravity-below-spot =>
+                    bias toward downside structures. This is the DIRECTION signal.
+  --gamma-regime  : the regime tilt. Boosts long-vol structures when net gamma is
+                    negative (amplifying/trending), short-vol when positive
+                    (suppressive/pinning). This is the CHARACTER signal, not direction.
 
-Sizing-neutral by default (--lots 1) — every trade is exactly one contract,
-so the totals measure per-trade edge rather than compounding-curve P&L. The
-sweep is about ranking parameter sets, not projecting account growth.
+The grid is the two arrays at the top. Cell (0,0) is the control = both signals
+OFF, i.e. today's de-risked live config. Every other cell turns one or both on,
+so the sweep answers: do these signals earn money (PF, total, avg) on real NBBO
+fills across the OI window, or are they flat / a single-trade lottery?
+
+Sizing-neutral by default (--lots 1): every trade is one contract, so totals
+measure per-trade edge, not a compounding curve. The sweep ranks parameter sets.
 
 Run (leave the window open):
   powershell -ExecutionPolicy Bypass -File .\scripts\backtest_sweep.ps1
 Watch progress in another window:
   Get-Content "$env:LOCALAPPDATA\WebullAnalytics\sweeps\sweep-*\sweep.log" -Wait -Tail 20
 
-Multi-regime validation — re-run with the longer window to make sure the
-optimum holds across 2025 H1 / H2 regimes, not just the recent 2026 stretch:
-  powershell -ExecutionPolicy Bypass -File .\scripts\backtest_sweep.ps1 -Since 2025-01-01
+RUNTIME WARNING: full-window stride-1 is ~80-90 min PER CELL. A 3x3 grid at
+stride 1 over 2025-01-01..today is ~12h. For a fast first read use a coarser
+stride (same on every cell => fair relative ranking) or a shorter window, then
+confirm the winning cell on the full window at stride 1:
+  # fast first pass (~minutes/cell):
+  .\scripts\backtest_sweep.ps1 -ScanStride 15
+  # full-window confirm of the winner:
+  .\scripts\backtest_sweep.ps1 -Since 2025-01-01
 
 Customize:
-  -Since      Start date (YYYY-MM-DD). Default: 2026-01-01.
-  -Until      End date (YYYY-MM-DD). Default: today.
-  -Ticker     Underlying. Default: SPXW.
-  -Lots       Contracts per trade. Default: 1 (sizing-neutral).
-  -RunId      Override the auto-generated run folder name.
+  -Since       Start date (YYYY-MM-DD). Default: 2025-01-01 (start of OI coverage).
+  -Until       End date (YYYY-MM-DD). Default: today.
+  -Ticker      Underlying. Default: SPY (the only ticker with validated OI).
+  -Lots        Contracts per trade. Default: 1 (sizing-neutral).
+  -ScanStride  Open-scan minute stride. Default: 1 (faithful). Raise to speed up.
+  -RunId       Override the auto-generated run folder name.
 
 Reads/writes PROD data (%LOCALAPPDATA%\WebullAnalytics). Each run creates a
 fresh sweep folder so reruns don't overwrite each other.
 #>
 
 param(
-  [string]$Since = '2026-01-01',
+  [string]$Since = '2025-01-01',
   [string]$Until = (Get-Date -Format 'yyyy-MM-dd'),
-  [string]$Ticker = 'SPXW',
+  [string]$Ticker = 'SPY',
   [int]$Lots = 1,
+  [int]$ScanStride = 1,
   [string]$RunId = ('sweep-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 )
 
 $ErrorActionPreference = 'Continue'
 
 # ---- SWEEP GRID --------------------------------------------------------------
-# Second-pass grid extending the first sweep's edges. The first sweep on
-# 2026-01-01..today (3x3x3, bd={1.0,1.3,1.5} × ms={0.03,0.05,0.07} × tw=
-# {0.5,0.65,0.8}) showed: tape weight 0.5 dominated everything (0.65 was
-# break-even, 0.8 was decisively negative); bias drift was statistical noise
-# at this resolution; min score 0.07 paired with low tape weight gave the
-# highest avg P&L. Optimum cell (bd=1.3, ms=0.07, tw=0.5) sat at the edges,
-# so widen on both sides. Pruning bd=1.5 since it didn't outperform 1.0/1.3.
-$BiasDrifts   = @(1.0, 1.3)                       # SPXW config default = 1.3
-$MinScores    = @(0.03, 0.05, 0.07, 0.10)         # SPXW config default = 0.05
-$TapeWeights  = @(0.25, 0.35, 0.45)               # SPXW config default = 0.65 (and ALL the prior sweep's negative cells were at tw>=0.65)
+# 2D over the two GEX signal weights. (0,0) is the both-OFF control = current
+# de-risked live config; compare every other cell against it. Keep it small —
+# each cell is a full backtest. Edit these to widen/refine the search.
+$GexBiasPulls = @(0.0, 0.5, 1.0)    # directional magnet strength (0 = off)
+$GammaRegimes = @(0.0, 0.5, 1.0)    # net-gamma regime tilt strength (0 = off)
 # ------------------------------------------------------------------------------
 
-# Resolve installed wa: PATH first, then AppData fallback. Same pattern as
-# options_backfill.ps1 — uses the production binary so the sweep is against
-# whatever the user has actually deployed, not a stale dev build.
+# Resolve installed wa: PATH first, then AppData fallback — runs against the
+# deployed production binary, not a stale dev build.
 $Wa = $null
 $cmd = Get-Command wa -ErrorAction SilentlyContinue
 if ($cmd) { $Wa = $cmd.Source }
@@ -89,12 +92,13 @@ function Log($msg) {
 
 # Parse a fills.jsonl produced by `wa ai backtest --fills-jsonl`. Each line is
 # one fill (open / expire / rule-close / roll). Per-lineage P&L = sum(net) -
-# sum(fees) over all fills with that lineageId. Total P&L = sum across all
-# lineages. Win rate = fraction of lineages with positive P&L.
+# sum(fees) over all fills with that lineageId. Total P&L = sum across lineages.
+# Win rate = fraction of lineages with positive P&L. Profit factor = gross
+# wins / gross losses (the key cost-aware edge metric).
 function Get-FillsStats {
   param([string]$Path)
 
-  $empty = [ordered]@{ Trades = 0; Wins = 0; Losses = 0; WinRate = 0.0; TotalPnl = 0.0; AvgPnl = 0.0; BestPnl = 0.0; WorstPnl = 0.0; TotalFees = 0.0 }
+  $empty = [ordered]@{ Trades = 0; Wins = 0; Losses = 0; WinRate = 0.0; ProfitFactor = 0.0; TotalPnl = 0.0; AvgPnl = 0.0; BestPnl = 0.0; WorstPnl = 0.0; TotalFees = 0.0 }
   if (-not (Test-Path $Path)) { return $empty }
 
   $lineagePnl = @{}
@@ -117,12 +121,16 @@ function Get-FillsStats {
   $total  = ($lineagePnl.Values | Measure-Object -Sum).Sum
   $best   = ($lineagePnl.Values | Measure-Object -Maximum).Maximum
   $worst  = ($lineagePnl.Values | Measure-Object -Minimum).Minimum
+  $grossWin  = (($lineagePnl.Values | Where-Object { $_ -gt 0 }) | Measure-Object -Sum).Sum
+  $grossLoss = (($lineagePnl.Values | Where-Object { $_ -le 0 }) | Measure-Object -Sum).Sum
+  $pf = if ($grossLoss -ne 0) { [math]::Round($grossWin / [math]::Abs($grossLoss), 2) } else { [double]::PositiveInfinity }
 
   return [ordered]@{
     Trades   = $trades
     Wins     = $wins
     Losses   = $losses
     WinRate  = [math]::Round($wins / $trades, 3)
+    ProfitFactor = $pf
     TotalPnl = [math]::Round($total, 2)
     AvgPnl   = [math]::Round($total / $trades, 2)
     BestPnl  = [math]::Round($best, 2)
@@ -131,69 +139,72 @@ function Get-FillsStats {
   }
 }
 
-Log "=== Backtest sweep ==="
+Log "=== GEX-signal backtest sweep ==="
 Log "wa: $Wa"
-Log "ticker=$Ticker since=$Since until=$Until lots=$Lots"
-Log "grid: biasDrifts=[$($BiasDrifts -join ', ')] minScores=[$($MinScores -join ', ')] tapeWeights=[$($TapeWeights -join ', ')]"
+Log "ticker=$Ticker since=$Since until=$Until lots=$Lots scanStride=$ScanStride"
+Log "grid: gexBiasPull=[$($GexBiasPulls -join ', ')] gammaRegime=[$($GammaRegimes -join ', ')]"
 Log "run dir: $RunDir"
 
-$total = $BiasDrifts.Count * $MinScores.Count * $TapeWeights.Count
+$total = $GexBiasPulls.Count * $GammaRegimes.Count
 $idx = 0
 $results = New-Object System.Collections.ArrayList
 
-foreach ($bd in $BiasDrifts) {
-  foreach ($ms in $MinScores) {
-    foreach ($tw in $TapeWeights) {
-      $idx++
-      $tag = "bd${bd}_ms${ms}_tw${tw}"
-      $fillsPath = Join-Path $RunDir ("fills_" + $tag + '.jsonl')
-      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+foreach ($gbp in $GexBiasPulls) {
+  foreach ($gr in $GammaRegimes) {
+    $idx++
+    $tag = "gbp${gbp}_gr${gr}"
+    $fillsPath = Join-Path $RunDir ("fills_" + $tag + '.jsonl')
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-      Log ("[{0}/{1}] {2} -> running" -f $idx, $total, $tag)
-      & $Wa ai backtest $Ticker --since $Since --until $Until --lots $Lots `
-        --bias-drift $bd --min-score-to-open $ms --intraday-tape-weight $tw `
-        --fills-jsonl $fillsPath 2>&1 | Out-Null
+    Log ("[{0}/{1}] {2} -> running" -f $idx, $total, $tag)
+    & $Wa ai backtest $Ticker --since $Since --until $Until --lots $Lots --scan-stride $ScanStride `
+      --gex-bias-pull $gbp --gamma-regime $gr `
+      --fills-jsonl $fillsPath 2>&1 | Out-Null
 
-      $rc = $LASTEXITCODE
-      $sw.Stop()
-      if ($rc -ne 0) {
-        Log ("  -> rc={0} (skipping stats)" -f $rc)
-        continue
-      }
-
-      $stats = Get-FillsStats -Path $fillsPath
-      $row = [PSCustomObject]@{
-        BiasDrift  = $bd
-        MinScore   = $ms
-        TapeWeight = $tw
-        Trades     = $stats.Trades
-        Wins       = $stats.Wins
-        Losses     = $stats.Losses
-        WinRate    = $stats.WinRate
-        TotalPnl   = $stats.TotalPnl
-        AvgPnl     = $stats.AvgPnl
-        BestPnl    = $stats.BestPnl
-        WorstPnl   = $stats.WorstPnl
-        TotalFees  = $stats.TotalFees
-        Elapsed    = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-      }
-      [void]$results.Add($row)
-      Log ("  -> trades={0} wr={1:P0} totalP&L={2:N2} avgP&L={3:N2} took={4}s" -f $row.Trades, $row.WinRate, $row.TotalPnl, $row.AvgPnl, $row.Elapsed)
-
-      # Write results incrementally so the CSV is usable mid-sweep if you Ctrl-C.
-      $results | Export-Csv -Path $ResultsCsv -NoTypeInformation -Force
+    $rc = $LASTEXITCODE
+    $sw.Stop()
+    if ($rc -ne 0) {
+      Log ("  -> rc={0} (skipping stats)" -f $rc)
+      continue
     }
+
+    $stats = Get-FillsStats -Path $fillsPath
+    $row = [PSCustomObject]@{
+      GexBiasPull  = $gbp
+      GammaRegime  = $gr
+      Trades       = $stats.Trades
+      Wins         = $stats.Wins
+      Losses       = $stats.Losses
+      WinRate      = $stats.WinRate
+      ProfitFactor = $stats.ProfitFactor
+      TotalPnl     = $stats.TotalPnl
+      AvgPnl       = $stats.AvgPnl
+      BestPnl      = $stats.BestPnl
+      WorstPnl     = $stats.WorstPnl
+      TotalFees    = $stats.TotalFees
+      Elapsed      = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    }
+    [void]$results.Add($row)
+    Log ("  -> trades={0} wr={1:P0} PF={2} totalP&L={3:N2} avgP&L={4:N2} took={5}s" -f $row.Trades, $row.WinRate, $row.ProfitFactor, $row.TotalPnl, $row.AvgPnl, $row.Elapsed)
+
+    # Write results incrementally so the CSV is usable mid-sweep if you Ctrl-C.
+    $results | Export-Csv -Path $ResultsCsv -NoTypeInformation -Force
   }
 }
 
 Log "=== Sweep complete ==="
 Log "results: $ResultsCsv"
 
-# Print top 5 by total P&L, then top 5 by avg P&L (per-trade edge — more stable
-# than total when trade counts vary a lot across cells).
+# Baseline = the both-OFF control cell; everything is measured against it.
+$baseline = $results | Where-Object { $_.GexBiasPull -eq 0.0 -and $_.GammaRegime -eq 0.0 } | Select-Object -First 1
+if ($baseline) {
+  Write-Host ""
+  Write-Host ("--- Control (gexBiasPull=0, gammaRegime=0): PF={0} total={1:N2} avg={2:N2} trades={3} wr={4:P0} ---" -f $baseline.ProfitFactor, $baseline.TotalPnl, $baseline.AvgPnl, $baseline.Trades, $baseline.WinRate)
+}
+
 Write-Host ""
-Write-Host "--- Top 5 by total P&L ---"
-$results | Sort-Object -Property TotalPnl -Descending | Select-Object -First 5 | Format-Table BiasDrift, MinScore, TapeWeight, Trades, WinRate, TotalPnl, AvgPnl -AutoSize
+Write-Host "--- All cells by total P&L ---"
+$results | Sort-Object -Property TotalPnl -Descending | Format-Table GexBiasPull, GammaRegime, Trades, WinRate, ProfitFactor, TotalPnl, AvgPnl, WorstPnl -AutoSize
 Write-Host ""
-Write-Host "--- Top 5 by avg P&L per trade ---"
-$results | Sort-Object -Property AvgPnl -Descending | Select-Object -First 5 | Format-Table BiasDrift, MinScore, TapeWeight, Trades, WinRate, TotalPnl, AvgPnl -AutoSize
+Write-Host "--- All cells by profit factor ---"
+$results | Sort-Object -Property ProfitFactor -Descending | Format-Table GexBiasPull, GammaRegime, Trades, WinRate, ProfitFactor, TotalPnl, AvgPnl, WorstPnl -AutoSize

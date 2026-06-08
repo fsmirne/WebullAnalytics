@@ -807,6 +807,14 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Override opener.weights.gexBiasPull for this run (the GEX magnet's grid-shift strength; 0 disables). Sweep knob for validating the GEX signal: e.g. 0, 0.25, 0.5, 1.0. Must be ≥ 0.")]
 	public decimal? GexBiasPullOverride { get; set; }
 
+	[CommandOption("--gamma-regime <VALUE>")]
+	[Description("Override opener.weights.gammaRegime for this run (net-gamma regime tilt: boosts long-vol structures in negative gamma, short-vol in positive; 0 disables). Sweep knob for the GEX regime signal alongside --gex-bias-pull.")]
+	public decimal? GammaRegimeOverride { get; set; }
+
+	[CommandOption("--max-pain <VALUE>")]
+	[Description("Override opener.weights.maxPainBiasPull for this run (max-pain magnet grid-shift strength, sibling of --gex-bias-pull; 0 disables).")]
+	public decimal? MaxPainBiasPullOverride { get; set; }
+
 	[CommandOption("--intraday-w0 <VALUE>")]
 	[Description("Enable the DTE-aware intraday-tape curve and set its 0DTE blend weight (opener.intradayTapeDteCurve.weightAt0Dte). 1.0 = a 0DTE trade reads direction purely from the live tape; 0.0 = pure macro. Must be 0 to 1 inclusive. Sweep knob for the 0DTE flat-day fix.")]
 	public decimal? IntradayW0Override { get; set; }
@@ -861,6 +869,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--intraday-tape-weight: must be in [0, 1], got {IntradayTapeWeightOverride}");
 		if (GexBiasPullOverride.HasValue && GexBiasPullOverride.Value < 0m)
 			return ValidationResult.Error($"--gex-bias-pull: must be ≥ 0, got {GexBiasPullOverride}");
+		if (GammaRegimeOverride.HasValue && GammaRegimeOverride.Value < 0m)
+			return ValidationResult.Error($"--gamma-regime: must be ≥ 0, got {GammaRegimeOverride}");
+		if (MaxPainBiasPullOverride.HasValue && MaxPainBiasPullOverride.Value < 0m)
+			return ValidationResult.Error($"--max-pain: must be ≥ 0, got {MaxPainBiasPullOverride}");
 		if (IntradayW0Override.HasValue && (IntradayW0Override.Value < 0m || IntradayW0Override.Value > 1m))
 			return ValidationResult.Error($"--intraday-w0: must be in [0, 1], got {IntradayW0Override}");
 		if (LongConvictionOverride.HasValue && (LongConvictionOverride.Value < 0m || LongConvictionOverride.Value > 1m))
@@ -890,6 +902,8 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (settings.MinScoreToOpenOverride.HasValue) config.Opener.MinScoreToOpen = settings.MinScoreToOpenOverride.Value;
 		if (settings.IntradayTapeWeightOverride.HasValue) config.Opener.Weights.IntradayTape = settings.IntradayTapeWeightOverride.Value;
 		if (settings.GexBiasPullOverride.HasValue) config.Opener.Weights.GexBiasPull = settings.GexBiasPullOverride.Value;
+		if (settings.GammaRegimeOverride.HasValue) config.Opener.Weights.GammaRegime = settings.GammaRegimeOverride.Value;
+		if (settings.MaxPainBiasPullOverride.HasValue) config.Opener.Weights.MaxPainBiasPull = settings.MaxPainBiasPullOverride.Value;
 		if (settings.IntradayW0Override.HasValue)
 		{
 			config.Opener.IntradayTapeDteCurve.Enabled = true;
