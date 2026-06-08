@@ -1,5 +1,6 @@
 {
 	"autoExpandTerminal": false,
+	"log-level": "information",
 	"report": {
 		"source": "api",
 		"since": null,

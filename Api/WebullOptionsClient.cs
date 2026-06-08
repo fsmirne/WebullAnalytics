@@ -91,7 +91,7 @@ internal static class WebullOptionsClient
 		}
 		if (needsBatch.Count > 0)
 		{
-			Console.WriteLine($"Webull: batch-fetching {needsBatch.Count} contract(s) with missing quotes...");
+			WebullAnalytics.Utils.Log.Debug($"Webull: batch-fetching {needsBatch.Count} contract(s) with missing quotes...");
 			// Chunk the request: each derivativeId is 9-13 digits, and 200+ ids in a single GET URL
 			// pushes past common 2 KB URL limits, after which Webull returns truncated/partial JSON
 			// and many of the ids come back with null bid/ask even though the data exists. Splitting
@@ -114,7 +114,7 @@ internal static class WebullOptionsClient
 			.OrderBy(s => s, StringComparer.Ordinal)
 			.ToList();
 		if (unresolved.Count > 0)
-			Console.WriteLine($"Webull: {unresolved.Count} wanted symbol(s) still missing bid/ask after chain+queryBatch: {string.Join(", ", unresolved.Take(10))}{(unresolved.Count > 10 ? $", +{unresolved.Count - 10} more" : "")}");
+			WebullAnalytics.Utils.Log.Debug($"Webull: {unresolved.Count} wanted symbol(s) still missing bid/ask after chain+queryBatch: {string.Join(", ", unresolved.Take(10))}{(unresolved.Count > 10 ? $", +{unresolved.Count - 10} more" : "")}");
 
 		return (result, underlyingPrices);
 	}
@@ -228,7 +228,7 @@ internal static class WebullOptionsClient
 				continue;
 			}
 
-			Console.WriteLine($"Webull: requesting option chain for {root} (tickerId {tickerId})...");
+			WebullAnalytics.Utils.Log.Debug($"Webull: requesting option chain for {root} (tickerId {tickerId})...");
 
 			var request = new HttpRequestMessage(HttpMethod.Post, StrategyListUrl);
 			foreach (var (key, value) in DefaultHeaders) request.Headers.TryAddWithoutValidation(key, value);
@@ -286,7 +286,7 @@ internal static class WebullOptionsClient
 			if (id.HasValue)
 			{
 				result[symbol] = id.Value;
-				Console.WriteLine($"  {symbol} → {id.Value}");
+				WebullAnalytics.Utils.Log.Debug($"  {symbol} → {id.Value}");
 			}
 			else
 			{

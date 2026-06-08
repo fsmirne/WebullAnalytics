@@ -132,6 +132,11 @@ internal static class AIContext
 		var err = AIConfigLoader.Validate(config);
 		if (err != null) { Console.Error.WriteLine($"Error: ai-config: {err}"); return null; }
 
+		// Drive the process-wide console verbosity gate from the resolved log level so low-level progress
+		// chatter (e.g. the Webull client) is suppressed below debug. ai-config (incl. the --log-level flag,
+		// already merged into config.LogLevel above) wins over the app-wide default set in Program.Main.
+		WebullAnalytics.Utils.Log.Level = WebullAnalytics.Utils.Log.Parse(config.LogLevel);
+
 		return config;
 	}
 
