@@ -169,7 +169,9 @@ public record OptionContractQuote(
 	long? OpenInterest,
 	decimal? ImpliedVolatility,
 	decimal? HistoricalVolatility = null,
-	decimal? ImpliedVolatility5Day = null
+	decimal? ImpliedVolatility5Day = null,
+	long? BidSize = null,
+	long? AskSize = null
 );
 
 /// <summary>OHLCV bar at a single point on a fixed interval. Timestamp is the bar's open time in UTC.
