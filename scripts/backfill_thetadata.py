@@ -844,87 +844,6 @@ def verify_quotes(out_root: Path, tickers, end: date):
             log.info(f"  stray .tmp (interrupted writes — safe to delete): {[t.name for t in tmps]}")
 
 
-def _shift_hms(t: str) -> str:
-    """'HH:MM:SS' minus 60 seconds (RTH times stay >= 00:01:00, so no day wrap)."""
-    h, m, s = t.split(":")
-    sec = int(h) * 3600 + int(m) * 60 + int(s) - 60
-    return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
-
-
-def shift_quote_times(out_root: Path, tickers):
-    """One-time migration: normalize already-pulled quote CSVs from ThetaData's END-of-bar stamps to our
-    START-of-bar 09:30 convention by subtracting 60s from the `time` column (09:31->09:30, 16:00->15:59,
-    09:30 auction->09:29) -- matching what the pull now does at ingest and what WebullChartsClient does for
-    Webull. Date is unchanged (-60s never crosses a day for RTH times).
-
-    Streaming text rewrite (only field 1 changes; every other byte is copied verbatim) so it's fast and
-    constant-memory on the multi-million-row files. Idempotent + safe to re-run: we commit the rewrite only
-    when the input still has an end-of-bar 16:00 RTH row (the un-shifted marker; canonical/shifted files top
-    out at 15:59). After a shift 16:00->15:59, so a re-run -- or a ticker pulled after the ingest fix (e.g. a
-    later GME pull) -- has no 16:00 and is skipped, never double-shifted. Atomic per file (os.replace).
-
-    NOTE: an earlier version ALSO skipped on a two-sided 09:30 row, assuming that meant already-shifted. But
-    an un-shifted file's 09:30 is the opening AUCTION, which for liquid SPY/SPX strikes IS two-sided -- so that
-    heuristic mis-classified exactly those files as already start-of-bar and left 87 of them un-normalized.
-    has_1600 alone is the reliable, idempotent signal."""
-    for ticker in tickers:
-        tdir = out_root / ticker
-        files = sorted(tdir.glob("*.csv")) if tdir.exists() else []
-        shifted = skipped = 0
-        log.info(f"\n=== {ticker}: {len(files)} files ===")
-        for f in files:
-            # Cheap read-only pre-scan (early-exit on first 16:00): only files that still carry an end-of-bar
-            # 16:00 RTH row need shifting. Skipping the full rewrite+discard for the already-shifted majority
-            # avoids writing tens of GB of temp files that would only be deleted (and the I/O thrash that comes
-            # with it). Files that need it fall through to the atomic rewrite below.
-            needs_shift = False
-            with open(f) as r:
-                r.readline()
-                for line in r:
-                    c1 = line.find(",")
-                    if c1 < 0:
-                        continue
-                    c2 = line.find(",", c1 + 1)
-                    if c2 > 0 and line[c1 + 1:c2] == "16:00:00":
-                        needs_shift = True
-                        break
-            if not needs_shift:
-                skipped += 1
-                continue
-            tmp = tdir / (f.name + ".tmp")
-            has_1600 = False
-            nrows = 0
-            try:
-                with open(f) as r, open(tmp, "w", newline="") as w:
-                    header = r.readline()
-                    if not header:
-                        tmp.unlink(); skipped += 1; continue
-                    w.write(header)
-                    for line in r:
-                        if not line.strip():
-                            continue
-                        p = line.split(",", 6)   # date,time,strike,right,bid,ask,rest(+newline)
-                        if len(p) < 6:
-                            w.write(line); continue
-                        t = p[1]
-                        if t == "16:00:00":
-                            has_1600 = True
-                        p[1] = _shift_hms(t)
-                        w.write(",".join(p))
-                        nrows += 1
-            except Exception as e:
-                log.info(f"  [skip] {f.name}: {e}")
-                if tmp.exists(): tmp.unlink()
-                skipped += 1; continue
-            # Commit iff the file still has an end-of-bar 16:00 RTH row (the reliable un-shifted marker).
-            # Empty or already-shifted (no 16:00) -> discard the rewrite, leave the file untouched.
-            if nrows == 0 or not has_1600:
-                tmp.unlink(); skipped += 1
-            else:
-                os.replace(tmp, f); shifted += 1
-        log.info(f"  shifted {shifted}, skipped {skipped} (already start-of-bar / empty)")
-
-
 def validate(ticker: str, d: str, out_root: Path, data_dir: Path):
     """Compare backfilled OI vs an existing Webull/Schwab live snapshot for the same
     date, on contracts present in both. Reports match rate and worst diffs."""
@@ -972,7 +891,6 @@ def main():
     ap.add_argument("--quotes-probe", action="store_true", help="print minute-quote schema for one ticker")
     ap.add_argument("--validate", action="store_true", help="compare a backfilled date vs the live snapshot")
     ap.add_argument("--verify-quotes", action="store_true", help="integrity-scan the quote store for empty/truncated files + stray .tmp")
-    ap.add_argument("--shift-times", action="store_true", help="one-time migration: -60s the quote store's time column (ThetaData end-of-bar -> our start-of-bar 09:30); idempotent, atomic")
     ap.add_argument("--ticker", help="single ticker (NAME or NAME:DTE); overrides --tickers for ALL modes")
     ap.add_argument("--tickers", nargs="*", help="tickers as NAME or NAME:DTE (e.g. ABC:45 XYZ:0); required for --run/--quotes/--verify-quotes. No default — no ticker preference is committed.")
     ap.add_argument("--start", type=lambda s: date.fromisoformat(s), default=DEFAULT_START)
@@ -1003,7 +921,7 @@ def main():
     # A single --ticker overrides the list for any mode. Tokens are NAME or NAME:DTE.
     raw = [args.ticker] if args.ticker else (args.tickers or [])
     tickers, dte_map = parse_ticker_specs(raw, args.max_dte)
-    if not tickers and (args.run or args.quotes or args.verify_quotes or args.shift_times or args.probe or args.quotes_probe or args.validate):
+    if not tickers and (args.run or args.quotes or args.verify_quotes or args.probe or args.quotes_probe or args.validate):
         sys.exit("specify tickers, e.g. --tickers ABC:45 XYZ:0  (or a single --ticker ABC:45)")
 
     if args.verbose:
@@ -1033,11 +951,6 @@ def main():
     if args.verify_quotes:
         qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"
         verify_quotes(qout, tickers, args.end)
-        return
-
-    if args.shift_times:
-        qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"
-        shift_quote_times(qout, tickers)
         return
 
     if args.probe:
