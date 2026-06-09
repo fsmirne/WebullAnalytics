@@ -7,6 +7,12 @@
 	<ImplicitUsings>enable</ImplicitUsings>
 	<Nullable>enable</Nullable>
 	<DefaultItemExcludes>$(DefaultItemExcludes);WebullAnalytics.Tests\**\*;WebullAnalytics.Scraper\**\*</DefaultItemExcludes>
+		<!-- Server GC: the backtest open-scan fans candidate scoring across all 32 cores and allocates heavily
+		     per minute. Workstation GC stop-the-world collections serialize those threads (~5-6x effective
+		     parallelism measured on a 32-core box). Server GC gives per-core heaps + background collection,
+		     restoring parallelism; the higher baseline memory is fine on a 64 GB box. -->
+		<ServerGarbageCollection>true</ServerGarbageCollection>
+		<ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
 	</PropertyGroup>
 
 		<ItemGroup>
