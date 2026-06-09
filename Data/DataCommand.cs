@@ -7,6 +7,9 @@ using System.IO.Compression;
 namespace WebullAnalytics.Data;
 
 /// <summary>`wa data backup` — snapshot the AppData <c>data/</c> directory into a single <c>.tar.gz</c>.
+/// By default only the top-level files are archived (configs, proposals, orders — the irreplaceable
+/// state, ~MBs); <c>--full</c> includes the subdirectories too (quotes/, oi/, ... — many GB of market
+/// data that can be re-pulled from its providers, far too much to duplicate in a daily backup).
 /// Designed for portability: the archive is self-contained and re-hydrates the prod data dir on any
 /// machine via <c>wa data restore</c>. tar.gz is used (not zip) because the dataset is dominated by many
 /// small text files (CSV/JSON/JSONL) and solid compression typically halves the archive size vs. per-entry
@@ -15,8 +18,12 @@ namespace WebullAnalytics.Data;
 internal sealed class DataBackupSettings : CommandSettings
 {
 	[CommandOption("-o|--output <path>")]
-	[Description("Output archive path. Default: <BaseDir>/backups/wa-data-<yyyy-MM-dd_HHmmss>.tar.gz")]
+	[Description("Output archive path. Default: <BaseDir>/backups/wa-data[-settings]-<yyyy-MM-dd_HHmmss>.tar.gz")]
 	public string? Output { get; set; }
+
+	[CommandOption("--full")]
+	[Description("Also back up the data subdirectories (quotes/, oi/, intraday/, ... — many GB of re-pullable market data). Default: settings only — the top-level data/ files (configs, proposals, orders).")]
+	public bool Full { get; set; }
 }
 
 internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
@@ -30,10 +37,10 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 			return 1;
 		}
 
-		var outputPath = settings.Output ?? DefaultOutputPath();
+		var outputPath = settings.Output ?? DefaultOutputPath(settings.Full);
 		Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
 
-		AnsiConsole.MarkupLine($"[bold]Backing up[/] {Markup.Escape(dataDir)}");
+		AnsiConsole.MarkupLine($"[bold]Backing up[/] {Markup.Escape(dataDir)} {(settings.Full ? "[grey](full)[/]" : "[grey](settings only — pass --full to include subdirectories)[/]")}");
 		AnsiConsole.MarkupLine($"  → {Markup.Escape(outputPath)}");
 
 		// Write to a sibling .tmp first and atomic-rename on success. A killed/crashed backup never
@@ -47,7 +54,7 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 			await using (var gzipStream = new GZipStream(fileStream, CompressionLevel.Optimal))
 			await using (var tarWriter = new TarWriter(gzipStream, leaveOpen: false))
 			{
-				foreach (var path in Directory.EnumerateFiles(dataDir, "*", SearchOption.AllDirectories))
+				foreach (var path in Directory.EnumerateFiles(dataDir, "*", settings.Full ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
 				{
 					cancellation.ThrowIfCancellationRequested();
 					// Use forward slashes in the archive regardless of OS — tar's portable convention.
@@ -71,11 +78,13 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 		return 0;
 	}
 
-	private static string DefaultOutputPath()
+	private static string DefaultOutputPath(bool full)
 	{
 		var backupsDir = Path.Combine(Program.BaseDir, "backups");
 		var stamp = DateTime.Now.ToString("yyyy-MM-dd_HHmmss");
-		return Path.Combine(backupsDir, $"wa-data-{stamp}.tar.gz");
+		// Settings-only archives carry "-settings" in the name so a daily backup is never mistaken for a
+		// full snapshot; both shapes still match restore's wa-data-*.tar.gz default-discovery glob.
+		return Path.Combine(backupsDir, $"wa-data{(full ? "" : "-settings")}-{stamp}.tar.gz");
 	}
 
 	internal static string FormatBytes(long b)
@@ -89,9 +98,12 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 
 /// <summary>`wa data restore` — inverse of `wa data backup`. Defaults to the most-recent
 /// <c>wa-data-*.tar.gz</c> in <c><BaseDir>/backups/</c>. Restore is atomic: extracts to a staging
-/// directory first, then swaps in. If <c>data/</c> already exists, the command refuses unless
-/// <c>--force</c> is passed; with <c>--force</c>, the existing dir is renamed to
-/// <c>data.bak.<timestamp>/</c> so the old state is recoverable.</summary>
+/// directory first, then applies. A full archive swaps the whole <c>data/</c> dir in (the existing dir
+/// is renamed to <c>data.bak.<timestamp>/</c>); a settings-only payload — a settings backup, or any
+/// archive restored with <c>--settings</c> — is OVERLAID instead: only the top-level files are replaced
+/// (originals copied to <c>data.bak.<timestamp>/</c>) and the data subdirectories are never touched, so
+/// restoring a daily settings backup can't displace many GB of market data. If <c>data/</c> already
+/// exists, either path refuses unless <c>--force</c> is passed.</summary>
 internal sealed class DataRestoreSettings : CommandSettings
 {
 	[CommandOption("-i|--input <path>")]
@@ -99,8 +111,12 @@ internal sealed class DataRestoreSettings : CommandSettings
 	public string? Input { get; set; }
 
 	[CommandOption("--force")]
-	[Description("If data/ already exists, rename it to data.bak.<timestamp>/ and restore over it. Without --force, restore refuses to overwrite existing data.")]
+	[Description("Allow restoring over an existing data/: a full archive moves it to data.bak.<timestamp>/ and swaps in; a settings payload overlays the top-level files (originals backed up there). Without --force, restore refuses to touch existing data.")]
 	public bool Force { get; set; }
+
+	[CommandOption("--settings")]
+	[Description("Restore only the top-level setting files from the archive, leaving the data subdirectories untouched. Implied when the archive itself is settings-only.")]
+	public bool SettingsOnly { get; set; }
 }
 
 internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
@@ -140,25 +156,74 @@ internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 		Directory.CreateDirectory(stagingDir);
 		try
 		{
+			var stagedDataDir = Path.Combine(stagingDir, "data");
 			await using (var fileStream = File.OpenRead(inputPath))
 			await using (var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress))
 			{
-				// TarFile.ExtractToDirectoryAsync (BCL) refuses entries whose paths escape the destination,
-				// so we get zip-slip / tar-slip protection for free.
-				await TarFile.ExtractToDirectoryAsync(gzipStream, stagingDir, overwriteFiles: true, cancellation);
+				if (settings.SettingsOnly)
+				{
+					// Extract only the top-level data/ files: a full archive carries many GB of subdirectory
+					// market data that --settings must neither stage to disk nor restore. Targets are built
+					// from the entry's file NAME only, so hostile paths can't escape the staging dir.
+					Directory.CreateDirectory(stagedDataDir);
+					await using var tarReader = new TarReader(gzipStream, leaveOpen: false);
+					while (await tarReader.GetNextEntryAsync(false, cancellation) is { } entry)
+					{
+						if (entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile)) continue;
+						var name = entry.Name.Replace('\\', '/');
+						if (!name.StartsWith("data/")) continue;
+						var rel = name["data/".Length..];
+						if (rel.Length == 0 || rel.Contains('/')) continue; // subdirectory content — out of scope by design
+						await entry.ExtractToFileAsync(Path.Combine(stagedDataDir, rel), overwrite: true, cancellation);
+					}
+				}
+				else
+				{
+					// TarFile.ExtractToDirectoryAsync (BCL) refuses entries whose paths escape the destination,
+					// so we get zip-slip / tar-slip protection for free.
+					await TarFile.ExtractToDirectoryAsync(gzipStream, stagingDir, overwriteFiles: true, cancellation);
+				}
 			}
 
-			var stagedDataDir = Path.Combine(stagingDir, "data");
 			if (!Directory.Exists(stagedDataDir))
 			{
 				AnsiConsole.MarkupLine($"[red]archive does not contain a data/ root[/] — wrong file?");
 				return 1;
 			}
 
+			var stamp = DateTime.Now.ToString("yyyy-MM-dd_HHmmss");
+			var bakDir = dataDir + $".bak.{stamp}";
+
+			// A payload with no subdirectories is a settings restore (a settings-only backup, or --settings
+			// on a full archive): overlay the top-level files into the existing data/ and leave the
+			// subdirectories alone. Swapping the whole dir for a settings archive would displace many GB
+			// of market data with a few MB of configs.
+			if (!Directory.EnumerateDirectories(stagedDataDir).Any())
+			{
+				Directory.CreateDirectory(dataDir);
+				var replaced = 0;
+				var restored = 0;
+				foreach (var staged in Directory.EnumerateFiles(stagedDataDir))
+				{
+					cancellation.ThrowIfCancellationRequested();
+					var target = Path.Combine(dataDir, Path.GetFileName(staged));
+					if (File.Exists(target))
+					{
+						Directory.CreateDirectory(bakDir);
+						File.Copy(target, Path.Combine(bakDir, Path.GetFileName(staged)), overwrite: true);
+						replaced++;
+					}
+					File.Move(staged, target, overwrite: true);
+					restored++;
+				}
+				AnsiConsole.MarkupLine($"  [green]restored {restored} setting file(s)[/] into data/ — subdirectories untouched");
+				if (replaced > 0)
+					AnsiConsole.MarkupLine($"  [yellow]{replaced} overwritten file(s) backed up →[/] {Markup.Escape(Path.GetFileName(bakDir))}");
+				return 0;
+			}
+
 			if (Directory.Exists(dataDir))
 			{
-				var stamp = DateTime.Now.ToString("yyyy-MM-dd_HHmmss");
-				var bakDir = dataDir + $".bak.{stamp}";
 				Directory.Move(dataDir, bakDir);
 				AnsiConsole.MarkupLine($"  [yellow]moved existing data/ →[/] {Markup.Escape(Path.GetFileName(bakDir))}");
 			}
