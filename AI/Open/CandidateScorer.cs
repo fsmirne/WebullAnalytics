@@ -422,6 +422,30 @@ internal static class CandidateScorer
 		return failures;
 	}
 
+	/// <summary>Hard noise gate: |net entry per share| must clear <paramref name="minRatio"/> × the per-leg
+	/// half-spreads combined in quadrature (root-sum-square) from the REAL quote book. Below that, the
+	/// mid-priced entry is quote noise, not economics — the candidate's "value" can swing by more than
+	/// itself on spread wobble alone (the deep-ITM calendar mirage: $0.02 debit, ~$1.19 of combined
+	/// half-spread noise, +1690% "profit" overnight). RSS rather than a linear sum because per-leg mid
+	/// wobble is roughly independent — a linear sum over-penalizes honest 4-leg structures whose debit is
+	/// genuinely small relative to the arithmetic total of four narrow spreads. Legs without a real
+	/// two-sided quote contribute zero width, so fully synthetic-priced candidates (no NBBO store, legacy
+	/// bar backtests) pass unchanged. Disabled when <paramref name="minRatio"/> ≤ 0.</summary>
+	internal static bool PassesEntryNoiseGate(IReadOnlyList<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal netEntryPerShare, decimal minRatio)
+	{
+		if (minRatio <= 0m) return true;
+		var sumSq = 0m;
+		foreach (var leg in legs)
+		{
+			if (!quotes.TryGetValue(leg.Symbol, out var q) || q.Bid is not > 0m || q.Ask is not > 0m) continue;
+			var half = Math.Max(0m, (q.Ask.Value - q.Bid.Value) / 2m);
+			sumSq += half * half;
+		}
+		if (sumSq <= 0m) return true;
+		var noise = (decimal)Math.Sqrt((double)sumSq);
+		return Math.Abs(netEntryPerShare) >= minRatio * noise;
+	}
+
 	/// <summary>Worst-leg bid/ask spread (as fraction of mid), minimum effective liquidity across legs,
 	/// and minimum *relative* liquidity — each leg's effective liquidity as a fraction of the maximum
 	/// among same-expiry strikes within ±10% of spot. "Effective liquidity" is <c>max(OI, volume)</c>:
@@ -1259,6 +1283,7 @@ internal static class CandidateScorer
 		var longMid = (longQ.Value.Bid + longQ.Value.Ask) / 2m;
 		var creditPerShare = PriceForSell(shortMid, shortQ.Value.Bid, pricingMode) - PriceForBuy(longMid, longQ.Value.Ask, pricingMode);
 		if (creditPerShare <= 0m) return null; // not a credit spread at these quotes
+		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, creditPerShare, cfg.MinEntryToNoiseRatio)) return null;
 
 		var creditPerContract = creditPerShare * 100m;
 		var width = Math.Abs(shortParsed.Strike - longParsed.Strike);
@@ -1419,6 +1444,7 @@ internal static class CandidateScorer
 		var longMid = (longQ.Value.Bid + longQ.Value.Ask) / 2m;
 		var debitPerShare = PriceForBuy(longMid, longQ.Value.Ask, pricingMode) - PriceForSell(shortMid, shortQ.Value.Bid, pricingMode);
 		if (debitPerShare <= 0m) return null; // not a debit spread at these quotes
+		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, debitPerShare, cfg.MinEntryToNoiseRatio)) return null;
 
 		var debitPerContract = debitPerShare * 100m;
 		var width = Math.Abs(shortParsed.Strike - longParsed.Strike);
@@ -2006,6 +2032,7 @@ internal static class CandidateScorer
 		var pricingWarning = BuildPricingWarning(usedFallback);
 
 		var netEntryPerContract = NetEntryPerContract(skel.Legs, quotes, pricingMode);
+		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, netEntryPerContract / 100m, cfg.MinEntryToNoiseRatio)) return null;
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
 		var targetLegs = defs.Where(l => l.Parsed.ExpiryDate.Date == skel.TargetExpiry.Date).ToList();
@@ -2159,6 +2186,20 @@ internal static class CandidateScorer
 		var longMid = (longQ.Value.Bid + longQ.Value.Ask) / 2m;
 		var debitPerShare = PriceForBuy(longMid, longQ.Value.Ask, pricingMode) - PriceForSell(shortMid, shortQ.Value.Bid, pricingMode);
 		if (debitPerShare <= 0m) return null;
+		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, debitPerShare, cfg.MinEntryToNoiseRatio)) return null;
+		// Short-leg time-value gate: the calendar/diagonal thesis is selling the short leg's extrinsic.
+		// A deep-ITM short (e.g. SPY 713P with spot ~694: mid $18.79, intrinsic ~$18.7, quote $2.34 wide)
+		// has nothing to sell — its delta back-solved from a garbage wide quote lands INSIDE the anchor
+		// band, so the enumerator builds it and only this gate can reject it. Gauged against the leg's
+		// own half-spread from the real book; synthetic-priced legs (no real quote) pass unchanged.
+		// Skipped when useMarketImpliedIv is false (analyze --spot hypotheticals): the stale cost-basis
+		// quotes no longer reflect the overridden spot, so mid − intrinsic(spot) is meaningless there.
+		if (applyLiquidityGate && useMarketImpliedIv && cfg.MinShortExtrinsicToNoiseRatio > 0m && quotes.TryGetValue(shortLeg.Symbol, out var shortBook) && shortBook.Bid is > 0m && shortBook.Ask is > 0m)
+		{
+			var shortIntrinsic = shortParsed.CallPut == "C" ? Math.Max(0m, spot - shortParsed.Strike) : Math.Max(0m, shortParsed.Strike - spot);
+			var shortExtrinsic = (shortBook.Bid.Value + shortBook.Ask.Value) / 2m - shortIntrinsic;
+			if (shortExtrinsic < cfg.MinShortExtrinsicToNoiseRatio * (shortBook.Ask.Value - shortBook.Bid.Value) / 2m) return null;
+		}
 
 		var debitPerContract = debitPerShare * 100m;
 		// For calendars and "covered" diagonals, max loss is typically the debit.
@@ -2421,6 +2462,7 @@ internal static class CandidateScorer
 		var iv = ResolveIv(leg.Symbol, quotes, cfg.Indicators.IvDefaultPct);
 
 		var debitPerShare = PriceForBuy(mid, ask, pricingMode);
+		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, debitPerShare, cfg.MinEntryToNoiseRatio)) return null;
 		var debitPerContract = debitPerShare * 100m;
 		var breakeven = parsed.CallPut == "C" ? parsed.Strike + debitPerShare : parsed.Strike - debitPerShare;
 
