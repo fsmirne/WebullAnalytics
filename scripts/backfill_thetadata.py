@@ -28,7 +28,6 @@ falls back to --max-dte.
 USAGE — probe first to confirm the real DataFrame schema, then run:
     python3 scripts/backfill_thetadata.py --probe --ticker <TICKER>
     python3 scripts/backfill_thetadata.py --run --tickers <TICKER> [<TICKER> ...]
-    python3 scripts/backfill_thetadata.py --validate --ticker <TICKER> --date YYYY-MM-DD
 
 Writes the canonical data/oi (EOD --run) and data/quotes (--quotes) stores — the same
 format the live capture and the backtest use, so a ThetaData backfill and a forward
@@ -322,10 +321,32 @@ def fetch_underlying_closes(client, ticker: str, start: date, end: date) -> dict
     return {}
 
 
-def existing_max_date(tdir: Path) -> str | None:
-    """Latest YYYY-MM-DD day-file already written for a ticker (ISO strings sort lexically)."""
-    days = [p.stem for p in tdir.glob("*.jsonl")]
-    return max(days) if days else None
+def _is_settled_eod_file(p: Path) -> bool:
+    """True if a day-file is a settled EOD snapshot — et_timestamps stamps it 16:00 ET WITH a tz offset
+    ("T16:00:00-05:00") — and not an intraday live-capture snapshot (e.g. "T09:25:00", no offset), which
+    the EOD pull must overwrite. Cheap: reads only the record head. Used to seed seals on the first run."""
+    try:
+        with p.open() as f:
+            head = f.read(120)
+    except OSError:
+        return False
+    return '"tsEt"' in head and ("T16:00:00-" in head or "T16:00:00+" in head)
+
+
+def oi_pull_start(tdir: Path, sealed: set, start: date, end: date) -> date:
+    """Earliest day in [start, end] that still needs pulling — the first UNSEALED day. A past day's
+    settled OI never changes, so once sealed it's skipped forever (like a sealed quote expiration).
+    Resume is gap-safe: if a day-file on disk isn't sealed (a failed/partial day, e.g. an intraday live
+    snapshot the EOD pull must overwrite), we back up to it; otherwise we pull only days after the last
+    one on disk. With nothing on disk we pull the whole range."""
+    lo, hi = start.isoformat(), end.isoformat()
+    on_disk = sorted(p.stem for p in tdir.glob("*.jsonl") if lo <= p.stem <= hi)
+    unsealed = [d for d in on_disk if d not in sealed]
+    if unsealed:
+        return max(start, date.fromisoformat(unsealed[0]))      # re-pull from the first stale/partial day
+    if on_disk:
+        return max(start, date.fromisoformat(on_disk[-1]) + timedelta(days=1))  # only days newer than the last sealed one
+    return start
 
 
 def process_one_chunk(client, ticker, cs, ce, max_dte, rate, out_root):
@@ -341,7 +362,7 @@ def process_one_chunk(client, ticker, cs, ce, max_dte, rate, out_root):
                                              start_date=cs, end_date=ce, max_dte=max_dte)
     if eod is None or len(eod) == 0:
         log.info("    (no EOD rows)")
-        return 0
+        return []
 
     e_date, e_exp, e_strike, e_right = (pick_col(eod, EOD_DATE), pick_col(eod, EOD_EXP),
                                         pick_col(eod, EOD_STRIKE), pick_col(eod, EOD_RIGHT))
@@ -397,11 +418,13 @@ def process_one_chunk(client, ticker, cs, ce, max_dte, rate, out_root):
         with (tdir / f"{d}.jsonl").open("w") as f:  # one EOD record/day; overwrite (idempotent)
             f.write(json.dumps(record) + "\n")
     log.info(f"    wrote {len(by_day)} day file(s)")
-    return len(by_day)
+    return sorted(by_day)  # the day-strings (YYYY-MM-DD) written, for the caller's per-day seal
 
 
 def _eod_chunk_worker(result_q, creds, ticker, cs, ce, max_dte, rate, out_root_str):
     """Child-process entry: build own client, pull+write one chunk, report via the queue."""
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_DFL)  # Ctrl+C hard-kills this child (gRPC threads ignore Python signals)
     try:
         client = make_client(creds)
         n = process_one_chunk(client, ticker, cs, ce, max_dte, rate, Path(out_root_str))
@@ -412,14 +435,19 @@ def _eod_chunk_worker(result_q, creds, ticker, cs, ce, max_dte, rate, out_root_s
 
 def run_resilient(target, args, label, timeout_s, retries):
     """Run target(result_q, *args) in a spawned child with a timeout; kill+retry on hang/error.
-    Returns the worker payload on success, else None (rerun with --resume to retry the unit)."""
+    Returns the worker payload on success, else None (the unit isn't sealed, so a re-run retries it)."""
     import multiprocessing as mp
     ctx = mp.get_context("spawn")
     for attempt in range(1, retries + 2):
         q = ctx.Queue()
         p = ctx.Process(target=target, args=(q,) + tuple(args))
         p.start()
-        p.join(timeout_s)
+        try:
+            p.join(timeout_s)
+        except KeyboardInterrupt:  # don't orphan the child on Ctrl+C
+            if p.is_alive():
+                p.terminate(); p.join()
+            raise
         if p.is_alive():
             p.terminate()
             p.join()
@@ -432,26 +460,47 @@ def run_resilient(target, args, label, timeout_s, retries):
         if status == "ok":
             return payload
         log.info(f"    [error] {label} attempt {attempt}/{retries + 1}: {payload} — retrying")
-    log.info(f"    [GIVE UP] {label} after {retries + 1} attempts — rerun with --resume to retry")
+    log.info(f"    [GIVE UP] {label} after {retries + 1} attempts — not sealed; re-run to retry")
     return None
 
 
-def run(tickers, start: date, end: date, out_root: Path, max_dte, rate, resume, creds, timeout_s, retries):
+def run(tickers, start: date, end: date, out_root: Path, max_dte, rate, creds, timeout_s, retries):
     # Each (ticker, month) chunk runs in a watchdog child process: a hung gRPC call is killed
     # and retried instead of stalling forever. max_dte=None = full chain (huge); a finite cap
     # bounds it to the near-dated chain the strategy + GEX/max-pain use.
+    #
+    # Sealing mirrors --quotes (data/oi/<ticker>/sealed.json = {"sealed": ["YYYY-MM-DD", ...]}), but
+    # per DAY: a past trading day's settled OI never changes (T+1 final), so once pulled it's sealed and
+    # skipped on every later run — only genuinely NEW days are fetched. We pull from the first unsealed
+    # day forward (still month-chunked to bound request size) and seal each written day < today. Today's
+    # forming day is never sealed; a day that fails (e.g. a DNS drop) isn't sealed, so a re-run retries
+    # it. Delete sealed.json to force a full re-pull.
+    today = date.today()
+    today_iso = today.isoformat()
     for ticker in tickers:
         tdir = out_root / ticker
         tdir.mkdir(parents=True, exist_ok=True)
-        done_through = existing_max_date(tdir) if resume else None
-        log.info(f"\n=== {ticker} -> {tdir}  (max_dte={max_dte}{', resume>' + done_through if done_through else ''}) ===")
-        for cs, ce in month_chunks(start, end):
-            if done_through and ce.isoformat() <= done_through:
-                log.info(f"  chunk {cs} .. {ce}  [skip — already have through {done_through}]")
-                continue
+        sealed = load_sealed(tdir)
+        if not sealed:  # first run on an existing store: seed seals from settled day-files (no history re-pull)
+            seed = {p.stem for p in tdir.glob("*.jsonl") if p.stem < today_iso and _is_settled_eod_file(p)}
+            if seed:
+                sealed = seed
+                save_sealed(tdir, sealed)
+                log.info(f"  [seed] sealed {len(seed)} existing settled day-file(s) — skipping history re-pull")
+        eff_start = oi_pull_start(tdir, sealed, start, end)
+        if eff_start > end:
+            log.info(f"\n=== {ticker} -> {tdir}  ({len(sealed)} day(s) sealed, nothing new through {end}) ===")
+            continue
+        chunks = list(month_chunks(eff_start, end))
+        log.info(f"\n=== {ticker} -> {tdir}  (max_dte={max_dte}, {len(sealed)} day(s) sealed, pulling {eff_start}..{end}) ===")
+        for cs, ce in chunks:
             log.info(f"  chunk {cs} .. {ce}  [{datetime.now():%H:%M:%S}]")
-            run_resilient(_eod_chunk_worker, (creds, ticker, cs, ce, max_dte, rate, str(out_root)),
-                          f"{ticker} {cs}..{ce}", timeout_s, retries)
+            written = run_resilient(_eod_chunk_worker, (creds, ticker, cs, ce, max_dte, rate, str(out_root)),
+                                    f"{ticker} {cs}..{ce}", timeout_s, retries)
+            newly = [d for d in (written or []) if d < today_iso]  # seal settled (past) days only
+            if newly:
+                sealed.update(newly)
+                save_sealed(tdir, sealed)  # checkpoint after each chunk so a later failure can't lose it
 
 
 # ===== minute NBBO quote pull (option_history_quote) ==========================
@@ -665,7 +714,9 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
     expirations; the supervisor restarts us if a hung gRPC call wedges the process."""
     import concurrent.futures as cf
     import queue
+    import signal
     from thetadata import ThetaClient
+    signal.signal(signal.SIGINT, signal.SIG_DFL)  # Ctrl+C hard-kills this child + its gRPC worker threads at once
     out_root = Path(out_root_str)
     start, end = date.fromisoformat(start_iso), date.fromisoformat(end_iso)
     base = make_client(creds)
@@ -699,45 +750,59 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
 
 
 def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, chunk_days, concurrency, stall_secs):
-    """Supervisor: runs the threaded worker in a child process and restarts it if it STALLS (a hung
-    gRPC call wedges a thread, holding a server slot until the process dies — restart clears it). The
-    supervisor makes NO ThetaData calls (no second session). Stops after 3 cycles with no new files
-    (remaining expirations have no data, or ThetaData is down → re-run --resume later)."""
+    """Supervisor: runs the threaded worker in a child process. The worker makes ONE pass over the
+    unsealed expirations and exits cleanly — that ends the pull. We only RESTART it if it STALLS (a hung
+    gRPC call wedges a thread, holding a server slot until the process dies) or crashes; after 3 restarts
+    with no further progress we give up (ThetaData wedged/unavailable → re-run later). Progress is the
+    NEWEST .csv write-time, not the file COUNT: re-pulling an existing frontier expiration overwrites its
+    file (count unchanged), so a count-based signal would mistake a working worker for a stalled one and
+    kill it — the false-stall/re-pull loop. mtime rises on every write, incl. overwrites."""
     import multiprocessing as mp
     import time
     ctx = mp.get_context("spawn")
 
-    def count_csv():
-        return sum(1 for t in tickers if (out_root / t).exists() for _ in (out_root / t).glob("*.csv"))
+    def newest_write():
+        return max((p.stat().st_mtime for t in tickers if (out_root / t).exists()
+                    for p in (out_root / t).glob("*.csv")), default=0.0)
 
-    no_progress = 0
-    while True:
-        before = count_csv()
-        p = ctx.Process(target=_threaded_quote_worker,
-                        args=(creds, list(tickers), start.isoformat(), end.isoformat(),
-                              dte_map, rate, str(out_root), chunk_days, concurrency))
-        p.start()
-        last_count, last_t = before, time.time()
-        while p.is_alive():
-            time.sleep(10)
-            c = count_csv()
-            if c > last_count:
-                last_count, last_t = c, time.time()
-            elif time.time() - last_t > stall_secs:
-                log.info(f"[stall] no new file in {stall_secs}s — restarting worker (clears the wedged session)")
-                p.terminate(); p.join(); break
-        else:
-            p.join()
-        after = count_csv()
-        if after > before:
-            no_progress = 0
-            log.info(f"[supervisor] cycle done, {after} files total — checking for remaining work")
-        else:
-            no_progress += 1
-            if no_progress >= 3:
-                log.info("[stop] 3 cycles with no new files — remaining expirations have no data, or ThetaData "
-                         "is unavailable. Re-run --quotes (resume is implicit) later to retry.")
+    restarts = 0
+    p = None
+    try:
+        while True:
+            before = newest_write()
+            p = ctx.Process(target=_threaded_quote_worker,
+                            args=(creds, list(tickers), start.isoformat(), end.isoformat(),
+                                  dte_map, rate, str(out_root), chunk_days, concurrency))
+            p.start()
+            last_progress, last_t, stalled = before, time.time(), False
+            while p.is_alive():
+                time.sleep(10)
+                w = newest_write()
+                if w > last_progress:
+                    last_progress, last_t = w, time.time()
+                elif time.time() - last_t > stall_secs:
+                    log.info(f"[stall] no write in {stall_secs}s — restarting worker (clears the wedged session)")
+                    p.terminate(); p.join(); stalled = True; break
+            else:
+                p.join()
+            if not stalled and p.exitcode == 0:
+                log.info("[supervisor] worker finished its pass cleanly — quote pull complete")
                 return
+            if newest_write() > before:  # made progress before wedging/crashing → keep going, reset the counter
+                restarts = 0
+            else:
+                restarts += 1
+                if restarts >= 3:
+                    log.info("[stop] 3 restarts with no progress — ThetaData wedged/unavailable. "
+                             "Re-run --quotes (resume is implicit) later to retry.")
+                    return
+            log.info(f"[supervisor] restarting after wedge/crash (exit={p.exitcode}, stalled={stalled})")
+    finally:
+        # Always reap the current child on exit/interrupt — without this a Ctrl+C leaves the worker
+        # process (and its wedged gRPC threads) orphaned. terminate() (SIGTERM) kills it regardless.
+        if p is not None and p.is_alive():
+            log.info("[abort] terminating quote worker")
+            p.terminate(); p.join()
 
 
 def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency):
@@ -844,30 +909,6 @@ def verify_quotes(out_root: Path, tickers, end: date):
             log.info(f"  stray .tmp (interrupted writes — safe to delete): {[t.name for t in tmps]}")
 
 
-def validate(ticker: str, d: str, out_root: Path, data_dir: Path):
-    """Compare backfilled OI vs an existing Webull/Schwab live snapshot for the same
-    date, on contracts present in both. Reports match rate and worst diffs."""
-    bf = out_root / ticker / f"{d}.jsonl"
-    live = data_dir / "chain-snapshots" / ticker / f"{d}.jsonl"
-    if not bf.exists():
-        sys.exit(f"no backfill file {bf}")
-    if not live.exists():
-        sys.exit(f"no live snapshot {live} to compare against")
-    bf_oi = {o["symbol"]: o["openInterest"] for o in json.loads(bf.read_text().splitlines()[0])["options"]}
-    # live file is intraday (many lines); take the first snapshot of the day
-    live_rec = json.loads(live.read_text().splitlines()[0])
-    live_oi = {o["symbol"]: o.get("openInterest") for o in live_rec["options"]}
-    common = [s for s in bf_oi if s in live_oi and bf_oi[s] is not None and live_oi[s] is not None]
-    if not common:
-        log.info("no overlapping contracts with non-null OI"); return
-    exact = sum(1 for s in common if bf_oi[s] == live_oi[s])
-    diffs = sorted(((abs((bf_oi[s] or 0) - (live_oi[s] or 0)), s, live_oi[s], bf_oi[s]) for s in common), reverse=True)
-    log.info(f"{ticker} {d}: matched={len(common)} exact={exact} ({100*exact/len(common):.1f}%)")
-    log.info("worst diffs (live vs backfill):")
-    for delta, s, lv, bv in diffs[:8]:
-        log.info(f"  {s}: live={lv} backfill={bv} Δ={bv-lv:+}")
-
-
 def parse_ticker_specs(tokens, global_max_dte):
     """Parse CLI ticker tokens 'NAME' or 'NAME:DTE' into (names, dte_map). A token's ':DTE' wins; else the
     --max-dte fallback (if given). Tickers needing a DTE (--quotes) with neither are rejected by the caller."""
@@ -884,18 +925,16 @@ def parse_ticker_specs(tokens, global_max_dte):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="ThetaData -> chain-snapshots backfill")
+    ap = argparse.ArgumentParser(description="ThetaData -> data/quotes + data/oi backfill")
     ap.add_argument("--probe", action="store_true", help="print EOD/OI DataFrame schema for one ticker")
     ap.add_argument("--run", action="store_true", help="run the daily EOD backfill")
     ap.add_argument("--quotes", action="store_true", help="run the minute-NBBO quote pull (+-10pct band, per-ticker DTE)")
     ap.add_argument("--quotes-probe", action="store_true", help="print minute-quote schema for one ticker")
-    ap.add_argument("--validate", action="store_true", help="compare a backfilled date vs the live snapshot")
     ap.add_argument("--verify-quotes", action="store_true", help="integrity-scan the quote store for empty/truncated files + stray .tmp")
     ap.add_argument("--ticker", help="single ticker (NAME or NAME:DTE); overrides --tickers for ALL modes")
     ap.add_argument("--tickers", nargs="*", help="tickers as NAME or NAME:DTE (e.g. ABC:45 XYZ:0); required for --run/--quotes/--verify-quotes. No default — no ticker preference is committed.")
     ap.add_argument("--start", type=lambda s: date.fromisoformat(s), default=DEFAULT_START)
     ap.add_argument("--end", type=lambda s: date.fromisoformat(s), default=DEFAULT_END)
-    ap.add_argument("--date", help="date (YYYY-MM-DD) for --validate")
     ap.add_argument("--max-dte", type=int, default=None,
                     help="cap captured expiries to N days out. EOD --run default 60. For --quotes this is the "
                          "DTE fallback for any ticker passed without an explicit NAME:DTE.")
@@ -910,8 +949,8 @@ def main():
                     help="--quotes sub-window size in calendar days (default 7). Smaller = fewer ThetaData "
                          "stalls on large minute requests (each request is small); larger = fewer requests.")
     ap.add_argument("--resume", action="store_true",
-                    help="--run (EOD): skip months already fully written. (--quotes resumes automatically via "
-                         "the per-ticker sealed.json — sealed expirations are always skipped, unsealed re-pulled.)")
+                    help="deprecated/no-op: --run now skips sealed (fully-elapsed) months automatically via the "
+                         "per-ticker oi/<ticker>/sealed.json, like --quotes. Delete that file to force a full re-pull.")
     ap.add_argument("--rate", type=float, default=0.045, help="risk-free rate for IV back-solve (default 0.045)")
     ap.add_argument("--timeout", type=int, default=600, help="per-chunk watchdog timeout in seconds (default 600); a hung gRPC call is killed and retried")
     ap.add_argument("--retries", type=int, default=3, help="retries per chunk after a timeout/error (default 3)")
@@ -921,7 +960,7 @@ def main():
     # A single --ticker overrides the list for any mode. Tokens are NAME or NAME:DTE.
     raw = [args.ticker] if args.ticker else (args.tickers or [])
     tickers, dte_map = parse_ticker_specs(raw, args.max_dte)
-    if not tickers and (args.run or args.quotes or args.verify_quotes or args.probe or args.quotes_probe or args.validate):
+    if not tickers and (args.run or args.quotes or args.verify_quotes or args.probe or args.quotes_probe):
         sys.exit("specify tickers, e.g. --tickers ABC:45 XYZ:0  (or a single --ticker ABC:45)")
 
     if args.verbose:
@@ -942,12 +981,6 @@ def main():
         _setup_logging()
         log.info(f"logging to {os.environ['BF_LOG_FILE']}")
 
-    if args.validate:
-        if not args.date:
-            sys.exit("--validate needs --ticker and --date")
-        validate(tickers[0], args.date, out_root, data_dir)
-        return
-
     if args.verify_quotes:
         qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"
         verify_quotes(qout, tickers, args.end)
@@ -959,11 +992,11 @@ def main():
         quote_probe(make_client(args.creds), tickers[0])
     elif args.run:
         out_root.mkdir(parents=True, exist_ok=True)
-        log.info(f"data dir = {data_dir}\noutput   = {out_root}  (staging; merge into chain-snapshots after validating)")
+        log.info(f"data dir = {data_dir}\noutput   = {out_root}  (canonical data/oi OI store)")
         # No shared client: each chunk's watchdog child builds its own (a gRPC channel
         # doesn't survive being inherited/killed cleanly).
         run(tickers, args.start, args.end, out_root, args.max_dte if args.max_dte is not None else 60,
-            args.rate, args.resume, args.creds, args.timeout, args.retries)
+            args.rate, args.creds, args.timeout, args.retries)
     elif args.quotes:
         missing = [t for t in tickers if t not in dte_map]
         if missing:
@@ -974,7 +1007,7 @@ def main():
         run_quotes(tickers, args.start, args.end, qout, dte_map, args.rate,
                    args.creds, args.timeout, args.retries, args.quote_chunk_days, args.concurrency)
     else:
-        sys.exit("specify one of --probe / --quotes-probe / --run / --quotes / --validate")
+        sys.exit("specify one of --probe / --quotes-probe / --run / --quotes / --verify-quotes")
 
 
 if __name__ == "__main__":
