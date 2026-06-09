@@ -137,6 +137,10 @@ internal static class AIContext
 		// already merged into config.LogLevel above) wins over the app-wide default set in Program.Main.
 		WebullAnalytics.Utils.Log.Level = WebullAnalytics.Utils.Log.Parse(config.LogLevel);
 
+		// Scorer R/R-weighting knob (opener.balanceRrExponent), applied process-wide for this run so the merged
+		// ticker/strategy value governs both live scoring and the backtest.
+		CandidateScorer.RrExponent = config.Opener.BalanceRrExponent;
+
 		return config;
 	}
 
