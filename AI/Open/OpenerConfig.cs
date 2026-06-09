@@ -83,6 +83,21 @@ internal sealed class OpenerConfig
 
 	[JsonPropertyName("liquidity")] public OpenerLiquidityConfig Liquidity { get; set; } = new();
 
+	/// <summary>Entry noise gate: the structure's |net entry per share| (at mid) must be at least this
+	/// multiple of the summed per-leg half-spreads, else the candidate is rejected before scoring. When a
+	/// structure's value is small relative to its legs' quote widths, the mid-priced "debit" is dominated
+	/// by quote noise rather than economics — e.g. a deep-ITM put calendar quoted $0.02 at mid-of-mids whose
+	/// front leg alone is $2.34 wide marks ±$0.30 overnight on nothing but spread wobble. Legs without a
+	/// real two-sided quote contribute zero width (synthetic-priced legs are not penalized). 0 disables.</summary>
+	[JsonPropertyName("minEntryToNoiseRatio")] public decimal MinEntryToNoiseRatio { get; set; } = 0.5m;
+
+	/// <summary>Calendar/diagonal short-leg time-value gate: the short leg's extrinsic value (mid −
+	/// intrinsic) must be at least this multiple of the leg's own half-spread. The structure's thesis is
+	/// harvesting the short leg's time decay; a deep-ITM short with ~zero extrinsic has no theta to sell —
+	/// any apparent edge is quote noise. A moneyness cap can't draw this line (a legitimate delta-0.7 ITM
+	/// call anchor sits at the same %-distance as a junk deep-ITM put), extrinsic-vs-noise can. 0 disables.</summary>
+	[JsonPropertyName("minShortExtrinsicToNoiseRatio")] public decimal MinShortExtrinsicToNoiseRatio { get; set; } = 1.0m;
+
 	[JsonPropertyName("realizedExpectancy")] public OpenerRealizedExpectancyConfig RealizedExpectancy { get; set; } = new();
 
 	/// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at

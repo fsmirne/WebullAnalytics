@@ -400,4 +400,81 @@ public class CandidateScorerCalendarTests
 		Assert.Equal(OpenStructureKind.CalendarVertical, p!.StructureKind);
 		Assert.Equal(0, p.DirectionalFit);
 	}
+
+	[Fact]
+	public void DeepItmCalendarWithNoiseDominatedDebitIsRejected()
+	{
+		// Regression: the real 2026-01-15 SPY phantom. Spot ~694, 713P calendar 01/23→02/06 priced
+		// $0.02 at mid-of-mids while the front leg's book was $2.34 wide — the "debit" was quote noise,
+		// and the backtest booked +1690% overnight on first-minute spread wobble. Both new gates must
+		// reject it: entry-to-noise ($0.02 vs ~$1.19 RSS) and short-leg extrinsic (~$0.1 vs $1.17 half-spread).
+		var asOf = new DateTime(2026, 1, 15);
+		var shortExp = new DateTime(2026, 1, 23);
+		var longExp = new DateTime(2026, 2, 6);
+		var shortSym = MatchKeys.OccSymbol("SPY", shortExp, 713m, "P");
+		var longSym = MatchKeys.OccSymbol("SPY", longExp, 713m, "P");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongCalendar, new[]
+		{
+			new ProposalLeg("sell", shortSym, 1),
+			new ProposalLeg("buy", longSym, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(17.62m, 19.96m, 0.30m),
+			[longSym] = TestQuote.Q(18.60m, 19.02m, 0.30m)
+		};
+
+		Assert.Null(CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 694.3m, asOf, quotes, bias: 0m, Cfg()));
+
+		// Same candidate with the gates disabled scores — proving the rejection came from the gates.
+		var cfgOff = Cfg();
+		cfgOff.MinEntryToNoiseRatio = 0m;
+		cfgOff.MinShortExtrinsicToNoiseRatio = 0m;
+		Assert.NotNull(CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 694.3m, asOf, quotes, bias: 0m, cfgOff));
+	}
+
+	[Fact]
+	public void NearAtmCalendarWithHonestDebitPassesNoiseGates()
+	{
+		// The live SPY DC shape: near-ATM calendar, tight book, debit ~50× the combined half-spreads.
+		// The gates must be far from interfering with what the live scorer actually trades.
+		var asOf = new DateTime(2026, 1, 15);
+		var shortExp = new DateTime(2026, 1, 23);
+		var longExp = new DateTime(2026, 2, 6);
+		var shortSym = MatchKeys.OccSymbol("SPY", shortExp, 694m, "P");
+		var longSym = MatchKeys.OccSymbol("SPY", longExp, 694m, "P");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongCalendar, new[]
+		{
+			new ProposalLeg("sell", shortSym, 1),
+			new ProposalLeg("buy", longSym, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(3.10m, 3.16m, 0.13m),
+			[longSym] = TestQuote.Q(4.55m, 4.63m, 0.13m)
+		};
+
+		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 694.3m, asOf, quotes, bias: 0m, Cfg());
+		Assert.NotNull(p);
+		Assert.Equal(-146m, p!.DebitOrCreditPerContract); // mid 4.59 − 3.13 = 1.46/share — untouched by the gates
+	}
+
+	[Fact]
+	public void EntryNoiseGateCombinesLegSpreadsInQuadrature()
+	{
+		var legs = new[] { new ProposalLeg("buy", "A", 1), new ProposalLeg("sell", "B", 1), new ProposalLeg("buy", "C", 1), new ProposalLeg("sell", "D", 1) };
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			["A"] = TestQuote.Q(1.80m, 1.90m), // half-spread 0.05
+			["B"] = TestQuote.Q(1.30m, 1.40m), // 0.05
+			["C"] = TestQuote.Q(1.50m, 1.55m), // 0.025
+			["D"] = TestQuote.Q(1.05m, 1.15m)  // 0.05
+		};
+		// RSS noise = sqrt(0.05² + 0.05² + 0.025² + 0.05²) ≈ 0.0901; linear sum would be 0.175.
+		Assert.True(CandidateScorer.PassesEntryNoiseGate(legs, quotes, netEntryPerShare: 0.075m, minRatio: 0.5m));  // 0.075 ≥ 0.0451 — passes RSS, would fail a linear sum
+		Assert.False(CandidateScorer.PassesEntryNoiseGate(legs, quotes, netEntryPerShare: 0.04m, minRatio: 0.5m));  // 0.04 < 0.0451
+		Assert.True(CandidateScorer.PassesEntryNoiseGate(legs, quotes, netEntryPerShare: 0.01m, minRatio: 0m));     // ratio 0 disables
+		// Legs without a real book contribute no noise: an all-synthetic candidate always passes.
+		Assert.True(CandidateScorer.PassesEntryNoiseGate(legs, new Dictionary<string, OptionContractQuote>(), netEntryPerShare: 0.001m, minRatio: 0.5m));
+	}
 }
