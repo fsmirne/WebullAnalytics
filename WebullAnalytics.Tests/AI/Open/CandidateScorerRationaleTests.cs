@@ -44,7 +44,7 @@ public class CandidateScorerRationaleTests
 		Assert.Contains("[tech +0.13, fit 0 → no tech adjustment]", lines[1]);
 		Assert.Contains("→ final 0.010723", lines[1]);
 		Assert.DoesNotContain("adjusted 0.010411", lines[1]);
-		Assert.Equal("tech-adjusted × pop 1.09 × scale 0.65 × runway 1.14\v× bal 0.40 × theta factor 1.03 (+1.50/day on $74 deployed) = final 0.010723", lines[2]);
+		Assert.Equal("tech-adjusted × pop 1.09 × scale 0.65 × runway 1.14\v× bal 0.29 × theta factor 1.03 (+1.50/day on $74 deployed) = final 0.010723", lines[2]);
 		Assert.DoesNotContain("geom", rationale);
 	}
 

@@ -105,7 +105,8 @@ public class CandidateScorerBiasTests
 	{
 		var factor = CandidateScorer.BalanceFactor(maxProfit: 100m, maxLoss: -50m, premiumRatio: 4m);
 
-		Assert.Equal(0.7071067811865475244008443621m, factor, 12);
+		// R/R 2 (linear at the default RrExponent 1.0) ÷ sqrt(premiumRatio 4) = 2 / 2 = 1.0
+		Assert.Equal(1.0m, factor, 12);
 	}
 
 	[Fact]
@@ -113,7 +114,9 @@ public class CandidateScorerBiasTests
 	{
 		var factor = CandidateScorer.BalanceFactor(maxProfit: 50m, maxLoss: -100m, premiumRatio: 0.25m);
 
-		Assert.Equal(0.7071067811865475244008443621m, factor, 12);
+		// R/R 0.5 (linear at the default RrExponent 1.0) ÷ sqrt(max(1, premiumRatio 0.25)) = 0.5 / 1 = 0.5
+		// — a sub-1 premium ratio is floored to 1, so the credit structure takes no debit penalty.
+		Assert.Equal(0.5m, factor, 12);
 	}
 
 	[Fact]
