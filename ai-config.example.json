@@ -43,6 +43,7 @@
 		"volatilityLookbackDays": 20,
 		"biasCalibrationLookbackDays": 0,
 		"scenarioGridSigma": 1.0,
+		"balanceRrExponent": 3.0,
 		"weights": {
 			"directionalFit": 0.3,
 			"biasDrift": 1.5,
