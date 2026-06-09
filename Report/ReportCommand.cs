@@ -286,11 +286,11 @@ class ReportCommand : AsyncCommand<ReportSettings>
 					}
 					else
 					{
-						Console.WriteLine("Webull: fetching option chain data...");
+						WebullAnalytics.Utils.Log.Debug("Webull: fetching option chain data...");
 						var webullData = await WebullOptionsClient.FetchOptionQuotesAsync(config, positionRows, cancellation);
 						optionQuotesBySymbol = webullData.OptionQuotes;
 						underlyingPrices = webullData.UnderlyingPrices;
-						Console.WriteLine($"Webull: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
+						WebullAnalytics.Utils.Log.Debug($"Webull: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
 
 						// Dividend schedule for the held tickers, so the theoretical time-decay grid prices
 						// legs on the ex-dividend-adjusted forward (a long calendar leg trading through an
@@ -309,7 +309,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				if (riskFreeRate.HasValue)
 				{
 					OptionMath.RiskFreeRate = riskFreeRate.Value;
-					Console.WriteLine($"Risk-free rate (13-week T-bill): {riskFreeRate.Value:P2}");
+					WebullAnalytics.Utils.Log.Debug($"Risk-free rate (13-week T-bill): {riskFreeRate.Value:P2}");
 				}
 			}
 			catch (Exception ex)
@@ -348,7 +348,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		{
 			calibratedIv = BuildCalibratedIv(optionQuotesBySymbol, underlyingPrices, ivOverrides, dividends);
 			if (calibratedIv != null)
-				Console.WriteLine($"Calibration: solved mid-implied IV for {calibratedIv.Count} contract(s); future grid values anchored to the live mid surface.");
+				WebullAnalytics.Utils.Log.Debug($"Calibration: solved mid-implied IV for {calibratedIv.Count} contract(s); future grid values anchored to the live mid surface.");
 		}
 
 		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends, calibratedIv);
