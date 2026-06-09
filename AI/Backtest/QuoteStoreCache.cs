@@ -56,13 +56,42 @@ internal sealed class QuoteStoreCache
 	public bool HasExpiry(string root, DateTime exp)
 		=> File.Exists(Path.Combine(_dir, root.ToUpperInvariant(), $"{exp.Date:yyyy-MM-dd}.csv"));
 
+	/// <summary>OCC symbols for <paramref name="root"/> at <paramref name="expiry"/> that carry a real quote on
+	/// <paramref name="date"/> with strike in [<paramref name="loStrike"/>, <paramref name="hiStrike"/>]. Lets a
+	/// single probe expand into that expiry's real near-money chain: the live broker returns the whole chain for
+	/// any one symbol, but this store returns only exact matches, so the backtest opener (which probes a
+	/// placeholder strike per band-expiry) would otherwise see no contracts and enumerate nothing.</summary>
+	public IEnumerable<string> ContractsOn(string root, DateTime expiry, DateTime date, decimal loStrike, decimal hiStrike)
+	{
+		var eq = _cache.GetOrAdd((root.ToUpperInvariant(), expiry.Date),
+			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until));
+		var loMilli = (long)Math.Round(loStrike * 1000m);
+		var hiMilli = (long)Math.Round(hiStrike * 1000m);
+		var yy = expiry.ToString("yyMMdd", CultureInfo.InvariantCulture);
+		var rootUp = root.ToUpperInvariant();
+		foreach (var (strikeMilli, cp) in eq.ContractsOn(date.Date, loMilli, hiMilli))
+			yield return $"{rootUp}{yy}{cp}{strikeMilli:D8}";
+	}
+
 	private sealed class ExpiryQuotes
 	{
 		private readonly Dictionary<(DateTime Date, long StrikeMilli, char Cp),
 			List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>> _rows;
+		// Per-date index of the (strike, call/put) contracts present, so ContractsOn is O(contracts-on-that-day)
+		// instead of re-scanning every key each minute (the chain-expansion hot path queries this per tick).
+		private readonly Dictionary<DateTime, List<(long StrikeMilli, char Cp)>> _byDate;
 
 		private ExpiryQuotes(Dictionary<(DateTime Date, long StrikeMilli, char Cp),
-			List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>> rows) => _rows = rows;
+			List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>> rows)
+		{
+			_rows = rows;
+			_byDate = new Dictionary<DateTime, List<(long, char)>>();
+			foreach (var key in rows.Keys)
+			{
+				if (!_byDate.TryGetValue(key.Date, out var list)) { list = new(); _byDate[key.Date] = list; }
+				list.Add((key.StrikeMilli, key.Cp));
+			}
+		}
 
 		public static ExpiryQuotes Load(string dir, string root, DateTime exp, DateTime since, DateTime until)
 		{
@@ -120,6 +149,16 @@ internal sealed class QuoteStoreCache
 			var r = list[idx];
 			var age = (asOfSec - r.Sec) / 60;
 			return age <= maxStaleMinutes ? new QuoteAt(r.Bid, r.Ask, r.BidSz, r.AskSz, age) : null;
+		}
+
+		/// <summary>Distinct (strikeMilli, call/put) contracts that have at least one row on <paramref name="date"/>
+		/// with strike in [<paramref name="loMilli"/>, <paramref name="hiMilli"/>] (strike×1000).</summary>
+		public IEnumerable<(long StrikeMilli, char Cp)> ContractsOn(DateTime date, long loMilli, long hiMilli)
+		{
+			if (!_byDate.TryGetValue(date, out var list)) yield break;
+			foreach (var (strikeMilli, cp) in list)
+				if (strikeMilli >= loMilli && strikeMilli <= hiMilli)
+					yield return (strikeMilli, cp);
 		}
 
 		private static int ParseTimeSec(string hms)   // "HH:MM:SS"

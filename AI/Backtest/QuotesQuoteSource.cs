@@ -94,14 +94,16 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 			await ResolveSpotAsync(root);
 
 		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
-		foreach (var (sym, p) in parsed)
+
+		// Price one OCC symbol off the real NBBO store (mid + back-solved IV + snapshot OI). Null when the
+		// store has no two-sided quote within staleness for that contract at this minute.
+		OptionContractQuote? BuildQuote(string sym, OptionParsed p)
 		{
-			if (!underlyings.TryGetValue(p.Root, out var spot)) continue;
+			if (!underlyings.TryGetValue(p.Root, out var spot)) return null;
 			var q = _store.NbboAt(sym, asOf);
-			if (q == null) continue;                       // no real quote within staleness → omit (missing-quote policy)
+			if (q == null) return null;
 			var nbbo = q.Value;
 			var mid = nbbo.Mid;
-
 			var dte = (p.ExpiryDate.Date - asOf.Date).Days;
 			var timeYears = dte <= 0 ? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears) : dte / 365.0;
 			decimal? iv = null;
@@ -110,24 +112,41 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 				var solved = OptionMath.ImpliedVol(AdjSpot(p.Root, spot, asOf, p.ExpiryDate), p.Strike, timeYears, _riskFreeRate, mid, p.CallPut);
 				if (solved > 0.011m && solved < 4.99m) iv = solved;   // reject vega-flat back-solver bounds
 			}
-
 			long? oi = null;
 			if (_oiCache != null && _oiCache.ForDay(p.Root, asOf.Date).TryGetValue(sym, out var snap)) oi = snap.Oi;
+			return new OptionContractQuote(sym, mid, nbbo.Bid, nbbo.Ask, null, null, Volume: null, OpenInterest: oi, ImpliedVolatility: iv);
+		}
 
-			options[sym] = new OptionContractQuote(
-				ContractSymbol: sym,
-				LastPrice: mid,
-				Bid: nbbo.Bid,
-				Ask: nbbo.Ask,
-				Change: null,
-				PercentChange: null,
-				Volume: null,                              // quotes carry sizes, not executed volume
-				OpenInterest: oi,
-				ImpliedVolatility: iv,
-				HistoricalVolatility: null,
-				ImpliedVolatility5Day: null);
+		foreach (var (sym, p) in parsed)
+			if (BuildQuote(sym, p) is { } qo) options[sym] = qo;
+
+		// Chain expansion: the live broker returns the whole chain for any one symbol, but this store returns
+		// only exact matches — so the opener's per-band-expiry placeholder probe would surface no contracts and
+		// enumerate nothing. Expand each requested expiry into the store's real near-money chain (±15% strikes)
+		// so the opener sees a full chain to build calendars/diagonals from, exactly like live.
+		foreach (var grp in parsed.GroupBy(x => (x.P.Root, Exp: x.P.ExpiryDate.Date)))
+		{
+			if (!underlyings.TryGetValue(grp.Key.Root, out var spot) || spot <= 0m) continue;
+			var oiDay = _oiCache?.ForDay(grp.Key.Root, asOf.Date);   // one memoized lookup per (root, day), reused across strikes
+			foreach (var occ in _store.ContractsOn(grp.Key.Root, grp.Key.Exp, asOf.Date, spot * (1m - ChainExpandPct), spot * (1m + ChainExpandPct)))
+			{
+				if (options.ContainsKey(occ)) continue;
+				var q = _store.NbboAt(occ, asOf);
+				if (q == null) continue;
+				// Cheap surface: real bid/ask (binary search) + snapshot OI/IV. Deliberately NOT back-solving IV
+				// for the whole chain — that Newton solve per strike per minute was the slowdown. The scorer
+				// re-solves market-implied IV for the few legs it actually selects; snapshot IV here is enough
+				// for the enumerator's delta-band strike picking (mirrors the old OI-marker chain expansion).
+				long? oi = null; decimal? iv = null;
+				if (oiDay != null && oiDay.TryGetValue(occ, out var snap)) { oi = snap.Oi; if (snap.Iv > 0m) iv = snap.Iv; }
+				options[occ] = new OptionContractQuote(occ, q.Value.Mid, q.Value.Bid, q.Value.Ask, null, null, Volume: null, OpenInterest: oi, ImpliedVolatility: iv);
+			}
 		}
 
 		return new QuoteSnapshot(options, underlyings);
 	}
+
+	/// <summary>Strike half-window for the probe→chain expansion above, as a fraction of spot. Wide enough to
+	/// cover calendar/diagonal long legs (which can sit a few % OTM) without pricing the whole deep-wing tail.</summary>
+	private const decimal ChainExpandPct = 0.15m;
 }
