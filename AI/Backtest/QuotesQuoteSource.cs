@@ -148,5 +148,5 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 
 	/// <summary>Strike half-window for the probe→chain expansion above, as a fraction of spot. Wide enough to
 	/// cover calendar/diagonal long legs (which can sit a few % OTM) without pricing the whole deep-wing tail.</summary>
-	private const decimal ChainExpandPct = 0.15m;
+	private const decimal ChainExpandPct = 0.06m;
 }
