@@ -27,6 +27,14 @@ internal sealed class QuoteStoreCache
 	/// staleness honest; raise it for thin far-dated legs.</param>
 	private readonly DateTime _since;
 	private readonly DateTime _until;
+	// Expiry-eviction watermark: the backtest queries the store only at the current sim minute and never
+	// looks back at an expired contract (settlement prices from the underlying bar, not the option NBBO —
+	// see BacktestRunner.SettleExpirationsAsync), so once the sim date passes an expiry its parsed rows are
+	// dead weight. Without this a full-year run accumulates every expiry it ever touched (~tens of GB in the
+	// in-memory decimal form, several× the on-disk CSV) and GC-thrashes mid-year. We drop them as the sim
+	// date advances, bounding the cache to the live DTE band. Invariant: asOf advances monotonically forward.
+	private long _lastSweepDateTicks;
+	private readonly object _evictLock = new();
 
 	/// <param name="since">/<param name="until">When set to the backtest window, each per-expiration file
 	/// only parses rows whose date is inside [since, until] — a 45-day file that a short tuning run barely
@@ -44,12 +52,30 @@ internal sealed class QuoteStoreCache
 	/// contract, within the staleness window; null if none → the caller's missing-quote policy decides.</summary>
 	public QuoteAt? NbboAt(string occ, DateTime asOfEt)
 	{
+		EvictExpiredBefore(asOfEt.Date);
 		var p = ParsingHelpers.ParseOptionSymbol(occ);
 		if (p?.CallPut == null) return null;
 		var eq = _cache.GetOrAdd((p.Root.ToUpperInvariant(), p.ExpiryDate.Date),
 			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until));
 		return eq.Lookup(asOfEt.Date, (long)Math.Round(p.Strike * 1000m), p.CallPut[0],
 			(int)asOfEt.TimeOfDay.TotalSeconds, _maxStaleMinutes);
+	}
+
+	/// <summary>Drops every cached expiration that has already expired before <paramref name="asOfDate"/> —
+	/// the backtest never queries them again, so their parsed rows are pure memory pressure. Runs at most once
+	/// per sim day: the fast path is a lock-free atomic read of the watermark; only the first call of a new day
+	/// takes the lock and sweeps. ConcurrentDictionary.Keys is a snapshot, so removing during enumeration (and
+	/// concurrent reads from the still-active minute scan) is safe.</summary>
+	private void EvictExpiredBefore(DateTime asOfDate)
+	{
+		if (asOfDate.Ticks <= Volatile.Read(ref _lastSweepDateTicks)) return;
+		lock (_evictLock)
+		{
+			if (asOfDate.Ticks <= _lastSweepDateTicks) return;
+			foreach (var key in _cache.Keys)
+				if (key.Exp.Date < asOfDate) _cache.TryRemove(key, out _);
+			Volatile.Write(ref _lastSweepDateTicks, asOfDate.Ticks);
+		}
 	}
 
 	/// <summary>True if a quote file exists for this expiration (cheap coverage check, no load).</summary>
@@ -63,6 +89,7 @@ internal sealed class QuoteStoreCache
 	/// placeholder strike per band-expiry) would otherwise see no contracts and enumerate nothing.</summary>
 	public IEnumerable<string> ContractsOn(string root, DateTime expiry, DateTime date, decimal loStrike, decimal hiStrike)
 	{
+		EvictExpiredBefore(date.Date);
 		var eq = _cache.GetOrAdd((root.ToUpperInvariant(), expiry.Date),
 			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until));
 		var loMilli = (long)Math.Round(loStrike * 1000m);
