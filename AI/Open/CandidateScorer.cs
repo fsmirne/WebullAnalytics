@@ -1675,10 +1675,10 @@ internal static class CandidateScorer
 	/// structures: high-R/R high-cushion trades get boosted, low-R/R thin-cushion trades get reduced.</summary>
 	/// <summary>Exponent on the R/R component of <see cref="BalanceFactor"/>, from the config knob
 	/// <c>opener.balanceRrExponent</c> (set once in <c>AIContext.ResolveConfig</c>; per-ticker/strategy
-	/// layers can override it). 0.5 = the original sqrt softening; 1.0 = linear; &gt;1 penalizes sub-1 R/R
+	/// layers can override it). 0.5 = the original sqrt softening; 1.0 (default) = linear; >1 penalizes sub-1 R/R
 	/// progressively harder. A process-wide static (like the verbosity gate) so the hot scoring path needn't
 	/// thread it through every call.</summary>
-	internal static double RrExponent { get; set; } = 0.5;
+	internal static double RrExponent { get; set; } = 1.0;
 
 	internal static decimal BalanceFactor(decimal maxProfit, decimal maxLoss, decimal premiumRatio)
 	{

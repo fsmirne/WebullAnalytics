@@ -91,10 +91,11 @@ internal sealed class OpenerConfig
 	/// used 2.0 which pumps long-call EV at the expense of pin/theta structures.</summary>
 	[JsonPropertyName("scenarioGridSigma")] public decimal ScenarioGridSigma { get; set; } = 1.0m;
 
-	/// <summary>Exponent on the risk/reward component of the scorer's BalanceFactor. 0.5 (default) = the original
-	/// sqrt softening; 1.0 = linear; &gt;1 penalizes sub-1 R/R progressively harder (de-ranks poor-R/R shapes
-	/// like inverted diagonals). Tunable per ticker/strategy; applied process-wide via CandidateScorer.RrExponent.</summary>
-	[JsonPropertyName("balanceRrExponent")] public double BalanceRrExponent { get; set; } = 0.5;
+	/// <summary>Exponent on the risk/reward component of the scorer's BalanceFactor. 0.5 = the original sqrt
+	/// softening; 1.0 (default) = linear; >1 penalizes sub-1 R/R progressively harder (de-ranks poor-R/R shapes
+	/// like inverted diagonals). Default 1.0 is the peak of the SPY combined-window R/R sweep (PF 1.93 / +71.8%
+	/// over 2025-01..2026-06). Tunable per ticker/strategy; applied process-wide via CandidateScorer.RrExponent.</summary>
+	[JsonPropertyName("balanceRrExponent")] public double BalanceRrExponent { get; set; } = 1.0;
 
 	[JsonPropertyName("structures")] public OpenerStructuresConfig Structures { get; set; } = new();
 
