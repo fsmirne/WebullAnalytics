@@ -91,6 +91,11 @@ internal sealed class OpenerConfig
 	/// used 2.0 which pumps long-call EV at the expense of pin/theta structures.</summary>
 	[JsonPropertyName("scenarioGridSigma")] public decimal ScenarioGridSigma { get; set; } = 1.0m;
 
+	/// <summary>Exponent on the risk/reward component of the scorer's BalanceFactor. 0.5 (default) = the original
+	/// sqrt softening; 1.0 = linear; &gt;1 penalizes sub-1 R/R progressively harder (de-ranks poor-R/R shapes
+	/// like inverted diagonals). Tunable per ticker/strategy; applied process-wide via CandidateScorer.RrExponent.</summary>
+	[JsonPropertyName("balanceRrExponent")] public double BalanceRrExponent { get; set; } = 0.5;
+
 	[JsonPropertyName("structures")] public OpenerStructuresConfig Structures { get; set; } = new();
 
 	/// <summary>DTE-aware shaping of the intraday-tape blend weight. When disabled (default) the blend
