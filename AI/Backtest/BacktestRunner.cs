@@ -915,14 +915,17 @@ internal sealed class BacktestRunner
 		}
 		else
 		{
-			// Batched parallel with early exit: process batchSize minutes concurrently, stop once
-			// entry is decided. Preserves chronological "first qualifying minute" semantics while
-			// utilizing all cores within each batch window.
-			for (int batchStart = 0; batchStart < timestampList.Count && !entryDecided && opened < _topNPerStep; batchStart += batchSize)
+			// Adaptive batch with early exit. A fixed ProcessorCount-wide batch evaluated ~32 minutes just to
+			// use minute 1 — and since the chain-seeding fix every minute carries a full chain, the FIRST
+			// scanned minute almost always qualifies, so those other 31 minutes (each scoring ~6k skeletons)
+			// were pure waste and dominated the runtime. Start with a 1-minute probe and double the batch only
+			// when early minutes don't qualify: the common case scores 1 minute, while rare late/no-open days
+			// still grow to full parallel width. Chronological "first qualifying minute" semantics preserved.
+			var scanBatch = 1;
+			for (int batchStart = 0; batchStart < timestampList.Count && !entryDecided && opened < _topNPerStep; )
 			{
 				cancellation.ThrowIfCancellationRequested();
-				var batchEnd = Math.Min(batchStart + batchSize, timestampList.Count);
-				var batchCount = batchEnd - batchStart;
+				var batchCount = Math.Min(scanBatch, timestampList.Count - batchStart);
 				var batchResults = new (DateTimeOffset MinuteUtc, DateTime MinuteEt, IReadOnlyList<OpenProposal> Proposals)?[batchCount];
 
 				await Parallel.ForEachAsync(Enumerable.Range(0, batchCount), parallelOpts, async (idx, ct) =>
@@ -955,6 +958,8 @@ internal sealed class BacktestRunner
 						}
 					}
 				}
+				batchStart += batchCount;
+				scanBatch = Math.Min(scanBatch * 2, batchSize);
 			}
 		}
 
