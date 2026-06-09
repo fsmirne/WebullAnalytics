@@ -970,7 +970,7 @@ internal static class CandidateScorer
 		// which equals CapitalAtRiskPerContract. Mirrors the divisor used inside ScoreCalendarOrDiagonal
 		// / ScoreMultiLeg so the rationale's recomputed factors line up with the actual score.
 		var debitPaid = Math.Max(0m, -p.DebitOrCreditPerContract);
-		var efficiencyCapital = debitPaid > 0m ? debitPaid : p.CapitalAtRiskPerContract;
+		var efficiencyCapital = Math.Max(debitPaid, p.CapitalAtRiskPerContract);
 		var popFactor = ComputeProbabilityFactor(p.ProbabilityOfProfit);
 		var scaleFactor = ComputeCapitalScaleFactor(efficiencyCapital);
 		var setupFactor = p.SetupFactor;
@@ -1673,6 +1673,13 @@ internal static class CandidateScorer
 	/// and premium efficiency (1/premium_ratio) in one continuous expression. Both pieces are
 	/// observable trade properties — no thresholds, no magic numbers. Works uniformly across
 	/// structures: high-R/R high-cushion trades get boosted, low-R/R thin-cushion trades get reduced.</summary>
+	/// <summary>Exponent on the R/R component of <see cref="BalanceFactor"/>, from the config knob
+	/// <c>opener.balanceRrExponent</c> (set once in <c>AIContext.ResolveConfig</c>; per-ticker/strategy
+	/// layers can override it). 0.5 = the original sqrt softening; 1.0 = linear; &gt;1 penalizes sub-1 R/R
+	/// progressively harder. A process-wide static (like the verbosity gate) so the hot scoring path needn't
+	/// thread it through every call.</summary>
+	internal static double RrExponent { get; set; } = 0.5;
+
 	internal static decimal BalanceFactor(decimal maxProfit, decimal maxLoss, decimal premiumRatio)
 	{
 		var lossAbs = Math.Abs(maxLoss);
@@ -1681,7 +1688,7 @@ internal static class CandidateScorer
 		if (rr <= 0m)
 			return 0m;
 
-		var rrComponent = (decimal)Math.Sqrt((double)Math.Min(rr, 3m));
+		var rrComponent = (decimal)Math.Pow((double)Math.Min(rr, 3m), RrExponent);
 		var ratioPenalty = (decimal)Math.Sqrt((double)ratio);
 		// Floor at 0.05, not 0.25. The higher floor was clamping out real signal: genuinely
 		// asymmetric structures (R/R 0.14 with premium ratio 12, computing factor 0.108) got
