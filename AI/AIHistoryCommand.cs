@@ -321,9 +321,14 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	///     subject to the same rate-limit dropouts SPX is, and massive's SIP feed is the higher-
 	///     fidelity choice anyway.</item>
 	/// </list>
-	/// Partial files are never overwritten (preserves live `wa ai watch` data). Today is never
+	/// Past PARTIAL files (a truncated live `wa ai watch` session, or an intraday `--partial` capture)
+	/// are COMPLETED when the fresh pull strictly supersedes them — covers every bar timestamp the file
+	/// already has and adds more. If the re-pull is missing anything the live capture had, the live file
+	/// is kept untouched (the original fidelity concern). The old never-overwrite policy left every
+	/// `--partial` day incomplete forever, nagging "run --audit" on every subsequent run. Today is never
 	/// touched (live Webull owns the current session). The sealed manifest is rewritten after every
-	/// successful CSV write so a crash mid-loop can't desync the on-disk CSV from sealed.json.</summary>
+	/// successful CSV write so a crash mid-loop can't desync the on-disk CSV from sealed.json; a written
+	/// day is only sealed when it actually LooksComplete, so a short pull stays visibly partial.</summary>
 	private static async Task BackfillIntradayAsync(string inputTicker, DateTime earliest, DateTime asOf, CancellationToken cancellation)
 	{
 		var apiConfig = TryLoadApiConfig();
@@ -337,25 +342,23 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		var earliestNy = TimeZoneInfo.ConvertTime(earliest, NyTz).Date;
 		var audit = AuditIntraday(inputTicker, earliestNy, todayNy);
 		var totalDays = audit.Complete.Count + audit.Partial.Count + audit.Missing.Count;
-		// Only backfill MISSING files. Partial files exist because `wa ai watch` wrote them live from
-		// Webull and were truncated (e.g., shutdown before 16:00). Overwriting them with a fresh pull
-		// would risk losing live-source fidelity. `--audit` reports partial dates so the user can
-		// manually wipe + re-pull if they want.
-		var needBackfill = audit.Missing.OrderBy(d => d).ToList();
+		// Backfill MISSING days, and COMPLETE partial days (all in the past — the audit window excludes
+		// today). A partial file comes from a truncated live `wa ai watch` session or an intraday
+		// `--partial` capture; the write loop only replaces it when the fresh pull strictly supersedes
+		// the file (see below), so live-source fidelity is never lost to a worse re-pull.
+		var partialSet = new HashSet<DateTime>(audit.Partial);
+		var needBackfill = audit.Missing.Concat(audit.Partial).OrderBy(d => d).ToList();
 
 		if (needBackfill.Count == 0)
 		{
-			var partialNote = audit.Partial.Count > 0
-				? $" ([yellow]{audit.Partial.Count} partial left untouched[/] — run `wa ai history {Markup.Escape(inputTicker)} --audit` to list)"
-				: "";
-			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]ok[/] (all {audit.Complete.Count} complete days; nothing to backfill){partialNote}");
+			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]ok[/] (all {audit.Complete.Count} complete days; nothing to backfill)");
 			return;
 		}
 
 		var isSpxFamily = WebullIntradayBars.SpxFamilyTickers.Contains(inputTicker);
-		var partialSkipNote = audit.Partial.Count > 0 ? $" ([yellow]{audit.Partial.Count} partial files preserved[/])" : "";
+		var completeNote = audit.Partial.Count > 0 ? $" (completing [yellow]{audit.Partial.Count} partial day(s)[/])" : "";
 		var sourceLabel = isSpxFamily ? "Webull (SPX) + massive (SPY)" : "massive";
-		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: {audit.Complete.Count}/{totalDays} complete; pulling {needBackfill.Count} missing day(s) from {sourceLabel}{partialSkipNote}");
+		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: {audit.Complete.Count}/{totalDays} complete; pulling {needBackfill.Count} day(s) from {sourceLabel}{completeNote}");
 		AnsiConsole.MarkupLine($"    needed: {Markup.Escape(FormatDateList(needBackfill, maxInline: 12))}");
 
 		var earliestMissing = needBackfill[0];
@@ -383,9 +386,26 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 				continue;
 			}
 			var path = Path.Combine(audit.IntradayDir, $"{d:yyyy-MM-dd}.csv");
+			if (partialSet.Contains(d) && File.Exists(path))
+			{
+				// Supersede guard: replace a partial live-captured file only when the re-pull covers every
+				// bar timestamp the file already has AND adds more. Anything less keeps the live file.
+				var existingTs = ReadIntradayCsv(path).Select(b => b.Timestamp.UtcDateTime).ToHashSet();
+				var pulledTs = bars.Select(b => b.Timestamp.UtcDateTime).ToHashSet();
+				if (!existingTs.IsSubsetOf(pulledTs) || pulledTs.Count <= existingTs.Count)
+				{
+					skipped.Add((d, $"re-pull ({pulledTs.Count} bars) does not supersede the partial file ({existingTs.Count} bars) — kept"));
+					continue;
+				}
+			}
 			WriteIntradayCsv(path, bars);
-			sealedDates.Add(d);
-			SaveSealedManifest(audit.SealedPath, sealedDates);
+			// Seal only what actually reads as a complete session — a short pull stays visibly partial
+			// instead of being stamped complete forever.
+			if (LooksComplete(path))
+			{
+				sealedDates.Add(d);
+				SaveSealedManifest(audit.SealedPath, sealedDates);
+			}
 			written.Add(d);
 		}
 
