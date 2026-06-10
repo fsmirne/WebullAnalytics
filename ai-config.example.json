@@ -43,7 +43,7 @@
 		"volatilityLookbackDays": 20,
 		"biasCalibrationLookbackDays": 0,
 		"scenarioGridSigma": 1.0,
-		"balanceRrExponent": 1.0,
+		"balanceRrExponent": 0.0,
 		"weights": {
 			"directionalFit": 0.3,
 			"biasDrift": 1.5,
@@ -68,7 +68,7 @@
 		"structures": {
 			"longCalendar":  { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60 },
 			"doubleCalendar": { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60, "widthSteps": [2, 4] },
-			"longDiagonal":  { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60 },
+			"longDiagonal":  { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60, "allowInverted": false },
 			"doubleDiagonal": { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60, "widthSteps": [2, 4], "longWingSteps": [1] },
 			"ironButterfly": { "enabled": true, "dteMin": 5, "dteMax": 21, "wingSteps": [4, 6, 10] },
 			"ironCondor": { "enabled": true, "dteMin": 5, "dteMax": 21, "widthSteps": [4, 6, 10], "bodyWidthSteps": [2, 4], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
