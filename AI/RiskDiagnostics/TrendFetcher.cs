@@ -8,6 +8,7 @@ namespace WebullAnalytics.AI.RiskDiagnostics;
 internal static class TrendFetcher
 {
 	private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	internal static async Task<TrendSnapshot?> FetchAsync(string ticker, DateTime asOf, CancellationToken ct)
 	{
@@ -45,12 +46,34 @@ internal static class TrendFetcher
 
 			if (closes.Count < 21) return null;
 
-			// Yesterday's close = second-to-last bar. Do NOT use meta.chartPreviousClose — that's the
-			// close BEFORE the first bar in the requested range, which for a 50-day window is ~51
-			// trading days ago, not yesterday. Verified against real Yahoo responses.
-			decimal? prevClose = closes.Count >= 2 && closes[closes.Count - 2] > 0m
-				? closes[closes.Count - 2]
-				: (decimal?)null;
+			// Prior completed session = the last bar dated strictly BEFORE asOf (NY date). Positional
+			// count−2 is only correct while the market is open (last bar = today's forming bar); run
+			// pre-market or after hours, the last bar is already the most recent COMPLETED session and
+			// count−2 lands one session stale — Monday's pivots showing on Wednesday pre-market. Do NOT
+			// use meta.chartPreviousClose either — that's the close before the FIRST bar in the range,
+			// ~51 trading days ago. Falls back to count−2 when timestamps are absent or misaligned.
+			var prior = closes.Count - 2;
+			DateTime? priorNyDate = null;
+			if (root.TryGetProperty("timestamp", out var tsArr) && tsArr.ValueKind == JsonValueKind.Array && tsArr.GetArrayLength() == closes.Count)
+			{
+				for (var i = closes.Count - 1; i >= 0; i--)
+				{
+					var nyDate = TimeZoneInfo.ConvertTime(DateTimeOffset.FromUnixTimeSeconds(tsArr[i].GetInt64()), NyTz).Date;
+					if (nyDate < asOf.Date) { prior = i; priorNyDate = nyDate; break; }
+				}
+			}
+
+			// Overnight, Yahoo's quote.close (and adjclose) for the just-finished session is null until
+			// some later refresh — only meta.regularMarketPrice carries the close, stamped 16:00 of that
+			// session via regularMarketTime. When the date-selected prior bar is missing its close and
+			// the meta stamp is the SAME session date, regularMarketPrice IS that session's close.
+			var priorCloseVal = prior >= 0 ? closes[prior] : 0m;
+			if (priorCloseVal <= 0m && priorNyDate is DateTime pd
+				&& meta.TryGetProperty("regularMarketTime", out var rmt) && rmt.ValueKind == JsonValueKind.Number
+				&& TimeZoneInfo.ConvertTime(DateTimeOffset.FromUnixTimeSeconds(rmt.GetInt64()), NyTz).Date == pd)
+				priorCloseVal = spot;
+
+			decimal? prevClose = priorCloseVal > 0m ? priorCloseVal : (decimal?)null;
 
 			var idx5 = closes.Count - 1 - 5;
 			var idx20 = closes.Count - 1 - 20;
@@ -81,12 +104,19 @@ internal static class TrendFetcher
 			if (prevClose is decimal pc2 && pc2 > 0m)
 				intraday = 100m * (spot - pc2) / pc2;
 
+			// Prior session H/L/C from the same date-selected bar as prevClose (close may have come from
+			// the meta fallback above; H/L are populated in the quote arrays even overnight).
+			var hasPrior = prior >= 0 && highs[prior] > 0m && lows[prior] > 0m && priorCloseVal > 0m;
+
 			return new TrendSnapshot(
 				ChangePctIntraday: intraday,
 				ChangePct5Day: change5,
 				ChangePct20Day: change20,
 				Atr14Pct: atrPct,
-				AsOf: asOf);
+				AsOf: asOf,
+				PriorHigh: hasPrior ? highs[prior] : null,
+				PriorLow: hasPrior ? lows[prior] : null,
+				PriorClose: hasPrior ? priorCloseVal : null);
 		}
 		catch
 		{
