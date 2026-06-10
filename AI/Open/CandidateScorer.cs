@@ -2065,11 +2065,11 @@ internal static class CandidateScorer
 		var (maxProfit, maxLoss) = ScanPnlRange(pnl, scanLower, scanUpper);
 		var capitalAtRisk = Math.Abs(Math.Min(0m, maxLoss));
 		if (capitalAtRisk <= 0m) return null;
-		// For debit structures (DC/DD) the score divisor uses cash actually deployed, not worst-case
-		// max-loss — same reasoning as ScoreCalendarOrDiagonal. For credit structures (IB/IC) the
-		// margin held against the trade IS the capital deployed, so capitalAtRisk stays the divisor.
+		// Score divisor = the larger of cash deployed and worst-case loss. Covered debit structures (DC) scan to maxLoss ≤ debit, so this stays the debit; credit structures (IB/IC) have debit 0, so the margin held against max-loss stays the divisor. Gap-bearing debit structures
+		// (DD, whose long wings sit a strike outside the shorts) scan to maxLoss > debit by the assignment-exposed strike gap, which must be charged: dividing by debit alone scores wider wings higher purely for paying less cash against more risk — the same exploit
+		// ScoreCalendarOrDiagonal closes by charging debit+gap on inverted diagonals. BuildRationale recomputes this same max(debit, CAR), so the rendered factors line up with the score.
 		var debitPaid = Math.Max(0m, -netEntryPerContract);
-		var efficiencyCapital = debitPaid > 0m ? debitPaid : capitalAtRisk;
+		var efficiencyCapital = Math.Max(debitPaid, capitalAtRisk);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
 		var realizedEv = RealizedExpectancy.RealizeEv(grid, pnl, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
 		// Terminal-EV scoring. See ScoreShortVertical for full rationale on dropping the
