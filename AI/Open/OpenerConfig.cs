@@ -106,11 +106,16 @@ internal sealed class OpenerConfig
 	/// used 2.0 which pumps long-call EV at the expense of pin/theta structures.</summary>
 	[JsonPropertyName("scenarioGridSigma")] public decimal ScenarioGridSigma { get; set; } = 1.0m;
 
-	/// <summary>Exponent on the risk/reward component of the scorer's BalanceFactor. 0.5 = the original sqrt
-	/// softening; 1.0 (default) = linear; >1 penalizes sub-1 R/R progressively harder (de-ranks poor-R/R shapes
-	/// like inverted diagonals). Default 1.0 is the peak of the SPY combined-window R/R sweep (PF 1.93 / +71.8%
-	/// over 2025-01..2026-06). Tunable per ticker/strategy; applied process-wide via CandidateScorer.RrExponent.</summary>
-	[JsonPropertyName("balanceRrExponent")] public double BalanceRrExponent { get; set; } = 1.0;
+	/// <summary>Exponent on the risk/reward component of the scorer's BalanceFactor. 0.0 (default) neutralizes
+	/// the R/R term entirely (the premium-ratio cushion penalty remains); 0.5 = sqrt softening; 1.0 = linear;
+	/// >1 penalizes sub-1 R/R progressively harder. The exponent's historical job — de-ranking inverted
+	/// diagonals — is now done directly by <see cref="OpenerCalendarLikeConfig.AllowInverted"/> (default
+	/// false), and the gated covered-only re-sweep (2025-01..2026-06, noise gates on, fills audited) peaks
+	/// at 0.0: PF 2.45 / 16.6% DD vs PF 1.19 / 65% DD at 1.0 — with inverted shapes excluded, an R/R
+	/// penalty mostly suppresses good covered diagonals and pushes the opener into losing calendars. The
+	/// prior 1.0 default came from a pre-gate sweep contaminated by quote-noise phantom trades. Tunable per
+	/// ticker/strategy; applied process-wide via CandidateScorer.RrExponent.</summary>
+	[JsonPropertyName("balanceRrExponent")] public double BalanceRrExponent { get; set; } = 0.0;
 
 	[JsonPropertyName("structures")] public OpenerStructuresConfig Structures { get; set; } = new();
 
@@ -333,6 +338,17 @@ internal sealed class OpenerCalendarLikeConfig
 	// Diagonal-only: the near short leg's delta band (further OTM than the long anchor). Defaults span if unset.
 	[JsonPropertyName("shortDeltaMin")] public decimal ShortDeltaMin { get; set; } = 0.20m;
 	[JsonPropertyName("shortDeltaMax")] public decimal ShortDeltaMax { get; set; } = 0.35m;
+
+	/// <summary>Diagonal-only: permit inverted-strike (reverse) diagonals — short ITM-of-long, i.e. the
+	/// strike gap sits on the loss side. Their max loss is priced (debit + gap) and they size accordingly,
+	/// but the ITM American short carries early-assignment risk the backtest does not model ("Assignment /
+	/// early exercise not modeled"), so backtested reverse-diagonal P&amp;L is structurally optimistic.
+	/// Default false = covered-only (the scorer rejects any diagonal with a positive strike-side loss):
+	/// the covered-only re-sweep beat inverted-allowed at every R/R exponent except 1.0, so exclusion
+	/// costs no edge while removing the unmodeled risk. If re-enabled, pair with an assignment-aware
+	/// simulator before trusting backtest results. Couples with <see cref="OpenerConfig.BalanceRrExponent"/>:
+	/// covered-only with exponent 1.0 was the worst cell of the grid (PF 1.19 / 65% DD) — keep 0.0.</summary>
+	[JsonPropertyName("allowInverted")] public bool AllowInverted { get; set; } = false;
 }
 
 internal sealed class OpenerDoubleCalendarConfig

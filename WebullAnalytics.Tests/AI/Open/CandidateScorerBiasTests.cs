@@ -105,8 +105,8 @@ public class CandidateScorerBiasTests
 	{
 		var factor = CandidateScorer.BalanceFactor(maxProfit: 100m, maxLoss: -50m, premiumRatio: 4m);
 
-		// R/R 2 (linear at the default RrExponent 1.0) ÷ sqrt(premiumRatio 4) = 2 / 2 = 1.0
-		Assert.Equal(1.0m, factor, 12);
+		// R/R term neutralized at the default RrExponent 0.0 (2^0 = 1) ÷ sqrt(premiumRatio 4) = 1 / 2 = 0.5
+		Assert.Equal(0.5m, factor, 12);
 	}
 
 	[Fact]
@@ -114,9 +114,9 @@ public class CandidateScorerBiasTests
 	{
 		var factor = CandidateScorer.BalanceFactor(maxProfit: 50m, maxLoss: -100m, premiumRatio: 0.25m);
 
-		// R/R 0.5 (linear at the default RrExponent 1.0) ÷ sqrt(max(1, premiumRatio 0.25)) = 0.5 / 1 = 0.5
+		// R/R term neutralized at the default RrExponent 0.0 (0.5^0 = 1) ÷ sqrt(max(1, premiumRatio 0.25)) = 1
 		// — a sub-1 premium ratio is floored to 1, so the credit structure takes no debit penalty.
-		Assert.Equal(0.5m, factor, 12);
+		Assert.Equal(1.0m, factor, 12);
 	}
 
 	[Fact]
@@ -149,9 +149,11 @@ public class CandidateScorerBiasTests
 	[Fact]
 	public void BalanceFactorCapsExtremeRiskReward()
 	{
+		// At the default RrExponent 0.0 an extreme R/R (100, capped to 3 internally) contributes nothing:
+		// the factor is 1.0, not the 1.25 ceiling — extreme asymmetry no longer inflates the score at all.
 		var factor = CandidateScorer.BalanceFactor(maxProfit: 1000m, maxLoss: -10m, premiumRatio: 0.25m);
 
-		Assert.Equal(1.25m, factor);
+		Assert.Equal(1.0m, factor);
 	}
 
 	[Fact]
