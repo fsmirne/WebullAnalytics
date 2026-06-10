@@ -197,6 +197,13 @@ internal sealed class ScraperLoop
 	/// only skipped them by the accident of TryParse failing.</summary>
 	private async Task AppendQuotesAsync(List<OptionContractQuote> contracts, string dateStr, string timeStr, CancellationToken cancellation)
 	{
+		// No quote rows before the 09:30 ET open: Schwab serves a FROZEN indicative pre-open book
+		// (verified 2026-06-10: ATM SPY rows 09:25–09:29 identical at 17.03×17.10 with 0×0 sizes, then
+		// the real auction quote at 09:30 was 15.73×15.81 — $1.30 away). Those rows pass the store's
+		// bid>0/ask>0 validity check and the 5-minute staleness lookback could serve them AT the open,
+		// silently marking positions to a stale book. ThetaData writes pre-open rows as 0.0 (rejected by
+		// the reader), so skipping keeps the two sources behaviorally identical at the open.
+		if (string.CompareOrdinal(timeStr, "09:30:00") < 0) return;
 		const string header = "date,time,strike,right,bid,ask,bid_size,ask_size";
 		foreach (var byExpiry in contracts.GroupBy(q => WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)!.ExpiryDate.Date))
 		{
