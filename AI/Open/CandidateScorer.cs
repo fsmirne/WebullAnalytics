@@ -1847,20 +1847,6 @@ internal static class CandidateScorer
 		}
 	}
 
-	private static decimal NetEntryPerContract(IReadOnlyList<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, string pricingMode)
-	{
-		decimal netPerShare = 0m;
-		foreach (var leg in legs)
-		{
-			var q = TryLiveBidAsk(leg.Symbol, quotes);
-			if (q == null) return 0m;
-			var mid = (q.Value.bid + q.Value.ask) / 2m;
-			var price = leg.Action == "buy" ? PriceForBuy(mid, q.Value.ask, pricingMode) : PriceForSell(mid, q.Value.bid, pricingMode);
-			netPerShare += leg.Action == "buy" ? -price * leg.Qty : price * leg.Qty;
-		}
-		return netPerShare * 100m;
-	}
-
 	private static decimal OptionValueAtTarget(decimal spotAtTarget, DateTime targetExpiry, OptionParsed parsed, decimal iv)
 	{
 		if (parsed.ExpiryDate.Date <= targetExpiry.Date)
@@ -2012,6 +1998,13 @@ internal static class CandidateScorer
 		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _)) return null;
 		var defs = new List<MultiLegDefinition>(skel.Legs.Count);
 		var usedFallback = false;
+		// Net entry accumulates from the RESOLVED leg prices (live book, or Black-Scholes when the book
+		// is null) — the same convention as every 2-leg Score* path. Reading raw quotes here with a
+		// $0 default made every 4-leg structure look FREE whenever any leg lacked a live bid/ask (e.g.
+		// off-hours scans), which paired a zero entry cost with a fully-valued BS payoff curve and put
+		// degenerate doubles at the top of the board. With live quotes the resolved prices ARE the raw
+		// book, so on-hours and backtest entries are unchanged.
+		var netEntryPerShare = 0m;
 		foreach (var leg in skel.Legs)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
@@ -2019,6 +2012,9 @@ internal static class CandidateScorer
 			var resolved = ResolveLegPrice(leg.Symbol, parsed, spot, asOf, quotes, cfg.Indicators.IvDefaultPct);
 			if (resolved == null) return null;
 			usedFallback |= resolved.Value.UsedFallback;
+			var legMid = (resolved.Value.Bid + resolved.Value.Ask) / 2m;
+			var legPrice = leg.Action == "buy" ? PriceForBuy(legMid, resolved.Value.Ask, pricingMode) : PriceForSell(legMid, resolved.Value.Bid, pricingMode);
+			netEntryPerShare += leg.Action == "buy" ? -legPrice * leg.Qty : legPrice * leg.Qty;
 			// Legs that survive past the target (e.g., long wings of a double calendar/diagonal) need
 			// market-implied IV so the BS exit value matches the entry debit's pricing convention.
 			// Legs that expire at target are intrinsic-only and IV is irrelevant. Calibration is
@@ -2031,7 +2027,7 @@ internal static class CandidateScorer
 		if (applyLiquidityGate && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot, snapshotTradeable)) return null;
 		var pricingWarning = BuildPricingWarning(usedFallback);
 
-		var netEntryPerContract = NetEntryPerContract(skel.Legs, quotes, pricingMode);
+		var netEntryPerContract = netEntryPerShare * 100m;
 		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, netEntryPerContract / 100m, cfg.MinEntryToNoiseRatio)) return null;
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);

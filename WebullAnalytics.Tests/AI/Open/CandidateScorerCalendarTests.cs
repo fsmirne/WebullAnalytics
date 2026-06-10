@@ -494,6 +494,36 @@ public class CandidateScorerCalendarTests
 	}
 
 	[Fact]
+	public void MultiLegFallbackPricingChargesTheoreticalEntryNotZero()
+	{
+		// The off-hours scan bug: snapshot quotes carry IV/OI but a null book (market closed). ScoreMultiLeg
+		// priced the payoff curve from BS-resolved legs but read the ENTRY from raw quotes with a $0
+		// default — every 4-leg structure looked free (credit $0.00, huge maxProfit, POP ~1) and degenerate
+		// double calendars topped the board. The entry must now come from the same BS-resolved prices.
+		var asOf = new DateTime(2026, 6, 10);
+		var shortExp = new DateTime(2026, 6, 15);
+		var longExp = new DateTime(2026, 7, 2);
+		static OptionContractQuote NullBook(decimal iv) => new(ContractSymbol: "", LastPrice: null, Bid: null, Ask: null, Change: null, PercentChange: null, Volume: 0, OpenInterest: 1000, ImpliedVolatility: iv);
+		var legs = new (string Action, string Sym, decimal Iv)[]
+		{
+			("sell", MatchKeys.OccSymbol("SPY", shortExp, 735m, "P"), 0.179m),
+			("buy",  MatchKeys.OccSymbol("SPY", longExp, 735m, "P"), 0.166m),
+			("sell", MatchKeys.OccSymbol("SPY", shortExp, 743m, "C"), 0.161m),
+			("buy",  MatchKeys.OccSymbol("SPY", longExp, 743m, "C"), 0.155m)
+		};
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.DoubleCalendar, legs.Select(l => new ProposalLeg(l.Action, l.Sym, 1)).ToArray(), TargetExpiry: shortExp);
+		var quotes = legs.ToDictionary(l => l.Sym, l => NullBook(l.Iv));
+
+		var p = CandidateScorer.ScoreMultiLeg(skel, spot: 737.05m, asOf, quotes, bias: 0m, Cfg());
+
+		Assert.NotNull(p);
+		Assert.NotNull(p!.PricingWarning); // fallback pricing is flagged
+		// A double calendar's far legs are worth more than its near legs at any IV — the BS entry is a
+		// real debit, not the $0 "free structure" the raw-quote read produced.
+		Assert.True(p.DebitOrCreditPerContract < -10m, $"expected a material BS debit, got {p.DebitOrCreditPerContract}");
+	}
+
+	[Fact]
 	public void EntryNoiseGateCombinesLegSpreadsInQuadrature()
 	{
 		var legs = new[] { new ProposalLeg("buy", "A", 1), new ProposalLeg("sell", "B", 1), new ProposalLeg("buy", "C", 1), new ProposalLeg("sell", "D", 1) };
