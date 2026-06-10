@@ -1704,7 +1704,7 @@ internal static class CandidateScorer
 	/// layers can override it). 0.5 = the original sqrt softening; 1.0 (default) = linear; >1 penalizes sub-1 R/R
 	/// progressively harder. A process-wide static (like the verbosity gate) so the hot scoring path needn't
 	/// thread it through every call.</summary>
-	internal static double RrExponent { get; set; } = 1.0;
+	internal static double RrExponent { get; set; } = 0.0;
 
 	internal static decimal BalanceFactor(decimal maxProfit, decimal maxLoss, decimal premiumRatio)
 	{
@@ -2209,6 +2209,11 @@ internal static class CandidateScorer
 			? Math.Max(longParsed.Strike - shortParsed.Strike, 0m)
 			: Math.Max(shortParsed.Strike - longParsed.Strike, 0m);
 		var strikeLossPerContract = strikeLossPerShare * 100m;
+		// Inverted-strike (reverse) diagonals — strike gap on the loss side — are excludable by config:
+		// their ITM American short is early-assignment-exposed, which the backtest does not simulate, so
+		// their backtested edge can't be trusted until assignment is modeled. Covered shapes (gap = 0)
+		// are unaffected; calendars share a strike and never have a gap.
+		if (applyLiquidityGate && strikeLossPerShare > 0m && skel.StructureKind == OpenStructureKind.LongDiagonal && !cfg.Structures.LongDiagonal.AllowInverted) return null;
 		var capitalAtRisk = debitPerContract + strikeLossPerContract;
 		// Capital-efficiency divisor = the real capital at risk. For calendars and COVERED diagonals the
 		// strike gap is 0 (the legs sit on the non-loss side), so this equals the debit — unchanged from
