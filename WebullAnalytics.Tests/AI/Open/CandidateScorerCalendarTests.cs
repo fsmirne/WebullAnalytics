@@ -110,7 +110,10 @@ public class CandidateScorerCalendarTests
 			[shortSym] = TestQuote.Q(bid: 0.36m, ask: 0.39m, iv: 0.40m),
 			[longSym] = TestQuote.Q(bid: 0.81m, ask: 0.95m, iv: 0.40m)
 		};
-		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 24.95m, asOf, quotes, bias: 0m, Cfg())!;
+		// Inverted shapes are rejected by the covered-only default; this test pins the risk math, so opt in.
+		var cfg = Cfg();
+		cfg.Structures.LongDiagonal.AllowInverted = true;
+		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 24.95m, asOf, quotes, bias: 0m, cfg)!;
 		// Default pricing uses mid, so debit = 0.88 − 0.375 = 0.505/share ($50.50/contract).
 		Assert.Equal(-50.500m, p.DebitOrCreditPerContract);
 		Assert.Equal(-100.500m, p.MaxLossPerContract);
@@ -457,6 +460,37 @@ public class CandidateScorerCalendarTests
 		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 694.3m, asOf, quotes, bias: 0m, Cfg());
 		Assert.NotNull(p);
 		Assert.Equal(-146m, p!.DebitOrCreditPerContract); // mid 4.59 − 3.13 = 1.46/share — untouched by the gates
+	}
+
+	[Fact]
+	public void InvertedDiagonalIsRejectedWhenAllowInvertedIsFalse()
+	{
+		// Reverse call diagonal: short 500C ITM-of-long 505C — the $5 strike gap sits on the loss side.
+		// The default (covered-only) must reject it; allowInverted=true must still score it, and a
+		// covered diagonal (short 505 / long 500) must score under the covered-only default.
+		var asOf = new DateTime(2026, 4, 20);
+		var shortExp = new DateTime(2026, 4, 24);
+		var longExp = new DateTime(2026, 5, 15);
+		var lo = MatchKeys.OccSymbol("SPY", shortExp, 500m, "C");
+		var hiLong = MatchKeys.OccSymbol("SPY", longExp, 505m, "C");
+		var hiShort = MatchKeys.OccSymbol("SPY", shortExp, 505m, "C");
+		var loLong = MatchKeys.OccSymbol("SPY", longExp, 500m, "C");
+		var reverse = new CandidateSkeleton("SPY", OpenStructureKind.LongDiagonal, new[] { new ProposalLeg("sell", lo, 1), new ProposalLeg("buy", hiLong, 1) }, TargetExpiry: shortExp);
+		var covered = new CandidateSkeleton("SPY", OpenStructureKind.LongDiagonal, new[] { new ProposalLeg("sell", hiShort, 1), new ProposalLeg("buy", loLong, 1) }, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[lo] = TestQuote.Q(3.95m, 4.05m, 0.40m),
+			[hiLong] = TestQuote.Q(4.40m, 4.50m, 0.40m),
+			[hiShort] = TestQuote.Q(1.95m, 2.05m, 0.40m),
+			[loLong] = TestQuote.Q(6.40m, 6.50m, 0.40m)
+		};
+
+		var allowing = Cfg();
+		allowing.Structures.LongDiagonal.AllowInverted = true;
+
+		Assert.Null(CandidateScorer.ScoreCalendarOrDiagonal(reverse, spot: 502m, asOf, quotes, bias: 0m, Cfg()));        // covered-only default rejects
+		Assert.NotNull(CandidateScorer.ScoreCalendarOrDiagonal(reverse, spot: 502m, asOf, quotes, bias: 0m, allowing));  // opt-in allows
+		Assert.NotNull(CandidateScorer.ScoreCalendarOrDiagonal(covered, spot: 502m, asOf, quotes, bias: 0m, Cfg()));     // covered unaffected by default
 	}
 
 	[Fact]
