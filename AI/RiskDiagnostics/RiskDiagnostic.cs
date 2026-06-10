@@ -87,7 +87,14 @@ internal sealed record TrendSnapshot(
 	decimal ChangePct5Day,
 	decimal ChangePct20Day,
 	decimal Atr14Pct,
-	DateTime AsOf);
+	DateTime AsOf,
+	// Prior completed session's OHLC (second-to-last daily bar, same convention as the intraday
+	// change's "yesterday's close"). Feeds the display-only floor-pivot Levels row in the risk
+	// diagnostic panel — reference prices many traders watch, NOT a scoring input: a 512-session
+	// study found pivot bounce/pinning indistinguishable from density-matched control levels.
+	decimal? PriorHigh = null,
+	decimal? PriorLow = null,
+	decimal? PriorClose = null);
 
 internal sealed record DiagnosticLeg(
 	string Symbol,
