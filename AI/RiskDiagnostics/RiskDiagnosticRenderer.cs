@@ -30,6 +30,9 @@ internal static class RiskDiagnosticRenderer
 			items.Add(("Trend:", $"5d {t.ChangePct5Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  20d {t.ChangePct20Day.ToString("+0.0;-0.0", CultureInfo.InvariantCulture)}%  {intraday}ATR14 {t.Atr14Pct.ToString("F1", CultureInfo.InvariantCulture)}%"));
 		}
 
+		if (d.Trend is { PriorHigh: decimal ph, PriorLow: decimal pl, PriorClose: decimal pc })
+			items.Add(("Levels:", FormatFloorPivots(ph, pl, pc, d.SpotAtEvaluation, ascii)));
+
 		if (d.MarketSentimentScore is decimal sScore)
 		{
 			var rating = d.MarketSentimentRating ?? "";
@@ -126,6 +129,27 @@ internal static class RiskDiagnosticRenderer
 			.Expand()
 			.Border(ascii ? BoxBorder.Ascii : BoxBorder.Rounded)
 			.BorderColor(Color.Grey);
+	}
+
+	/// <summary>Display-only floor-trader pivot row: classic PP/R1/R2/S1/S2 off the prior session's
+	/// H/L/C, in ascending price order with a marker showing where spot sits. Reference prices only —
+	/// a 512-session SPY study found no bounce or pinning edge vs density-matched controls, so these
+	/// deliberately feed NO scoring factor; they exist so the panel shows the levels other traders watch
+	/// (the prior session's raw H/L/C are the inputs and appear via R1/S1/PP arithmetic).</summary>
+	internal static string FormatFloorPivots(decimal h, decimal l, decimal c, decimal spot, bool ascii = false)
+	{
+		var pp = (h + l + c) / 3m;
+		var lv = new (string Tag, decimal Px)[] { ("S2", pp - (h - l)), ("S1", 2m * pp - h), ("PP", pp), ("R1", 2m * pp - l), ("R2", pp + (h - l)) };
+		var parts = new List<string>(6);
+		var marker = ascii ? "<spot>" : "◆spot";
+		var placed = false;
+		foreach (var (tag, px) in lv.OrderBy(x => x.Px))
+		{
+			if (!placed && spot < px) { parts.Add(marker); placed = true; }
+			parts.Add($"{tag} {px.ToString("F2", CultureInfo.InvariantCulture)}");
+		}
+		if (!placed) parts.Add(marker);
+		return string.Join("  ", parts) + "  [dim](floor pivots, prior session)[/]";
 	}
 
 	private static string FormatDelta(decimal d)
