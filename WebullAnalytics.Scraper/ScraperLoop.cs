@@ -191,7 +191,10 @@ internal sealed class ScraperLoop
 	/// <c>date,time,strike,right,bid,ask,bid_size,ask_size</c>. Format matches the ThetaData backfill exactly
 	/// (LF line endings, decimal strike text like <c>719.0</c>, NBBO sizes) so live and historical rows in a
 	/// per-expiry file are byte-compatible — this is the canonical writer once ThetaData is decommissioned.
-	/// bid_size/ask_size are written empty only when the source omits them (the reader treats empty as 0).</summary>
+	/// That includes missing sides: a null bid/ask is written as <c>0.0</c> and a null size as <c>0</c>
+	/// (the ThetaData "no quote on that side" encoding), never as an empty field — one canonical encoding
+	/// so consumers can't tell the sources apart. Blank fields broke ad-hoc scripts, and QuoteStoreCache
+	/// only skipped them by the accident of TryParse failing.</summary>
 	private async Task AppendQuotesAsync(List<OptionContractQuote> contracts, string dateStr, string timeStr, CancellationToken cancellation)
 	{
 		const string header = "date,time,strike,right,bid,ask,bid_size,ask_size";
@@ -206,10 +209,10 @@ internal sealed class ScraperLoop
 			{
 				var parsed = WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)!;
 				var strike = FormatStrike(parsed.Strike);
-				var bid = q.Bid?.ToString(CultureInfo.InvariantCulture) ?? "";
-				var ask = q.Ask?.ToString(CultureInfo.InvariantCulture) ?? "";
-				var bidSize = q.BidSize?.ToString(CultureInfo.InvariantCulture) ?? "";
-				var askSize = q.AskSize?.ToString(CultureInfo.InvariantCulture) ?? "";
+				var bid = q.Bid?.ToString(CultureInfo.InvariantCulture) ?? "0.0";
+				var ask = q.Ask?.ToString(CultureInfo.InvariantCulture) ?? "0.0";
+				var bidSize = q.BidSize?.ToString(CultureInfo.InvariantCulture) ?? "0";
+				var askSize = q.AskSize?.ToString(CultureInfo.InvariantCulture) ?? "0";
 				await writer.WriteLineAsync($"{dateStr},{timeStr},{strike},{parsed.CallPut},{bid},{ask},{bidSize},{askSize}");
 			}
 		}
