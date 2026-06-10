@@ -134,7 +134,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			if (spot.HasValue && spot.Value > 0m)
 			{
 				var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, cancellation);
-				if (refreshed > 0) AnsiConsole.MarkupLine($"[dim]Refreshed {refreshed} in-window contract(s) via queryBatch.[/]");
+				if (refreshed > 0) Log.Debug($"Refreshed {refreshed} in-window contract(s) via queryBatch.");
 			}
 		}
 
@@ -268,7 +268,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 
 		if (symbolsToRefresh.Count == 0) return 0;
-		AnsiConsole.MarkupLine($"[dim]Refreshing {symbolsToRefresh.Count} non-front-month contract(s) via queryBatch...[/]");
+		Log.Debug($"Refreshing {symbolsToRefresh.Count} non-front-month contract(s) via queryBatch...");
 		return await WebullOptionsClient.RefreshContractsAsync(apiConfig, chain, symbolsToRefresh, derivativeIds, cancellation);
 	}
 
