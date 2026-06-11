@@ -6,8 +6,7 @@ namespace WebullAnalytics.AI.RiskDiagnostics;
 
 internal static class RiskDiagnosticProbeBuilder
 {
-	private static AIConfig? _cachedAiConfig;
-	private static bool _loaded;
+	private static readonly Dictionary<string, AIConfig?> _cachedConfigsByTicker = new(StringComparer.OrdinalIgnoreCase);
 
 	internal static RiskDiagnosticProbe Build(
 		IReadOnlyList<DiagnosticLeg> legs,
@@ -73,7 +72,7 @@ internal static class RiskDiagnosticProbeBuilder
 				{
 					var band = opener.HasValue
 						? (opener.Value.cfg.Structures.ShortVertical.ShortDeltaMin, opener.Value.cfg.Structures.ShortVertical.ShortDeltaMax)
-						: TryLoadAiConfigQuiet() is AIConfig ai
+						: TryLoadAiConfigQuiet(shortLeg.Parsed.Root) is AIConfig ai
 							? (ai.Opener.Structures.ShortVertical.ShortDeltaMin, ai.Opener.Structures.ShortVertical.ShortDeltaMax)
 							: ((decimal?)null, (decimal?)null);
 
@@ -129,7 +128,7 @@ internal static class RiskDiagnosticProbeBuilder
 		{
 			// For non-opener callers (analyze position/risk): try to compute opener-style score/rationale
 			// using the same CandidateScorer used by `wa ai once`.
-			var ai = TryLoadAiConfigQuiet();
+			var ai = TryLoadAiConfigQuiet(legs.Count > 0 ? legs[0].Parsed.Root : null);
 			if (ai != null && quotes != null)
 			{
 				var scoringQuotes = useCostBasisForOpenerScore
@@ -417,24 +416,39 @@ internal static class RiskDiagnosticProbeBuilder
 		return map;
 	}
 
-	private static AIConfig? TryLoadAiConfigQuiet()
+	/// <summary>Loads the opener config for scoring the probe, merging base → ai-config.<TICKER>.json the
+	/// same way AIContext.ResolveConfig does for the live pipeline. Validating the bare base layer is wrong:
+	/// it is intentionally incomplete (e.g. indicators.strikeStep lives only in the per-ticker layer), so the
+	/// unmerged config fails validation and the probe silently degrades to the generic no-score rationale.</summary>
+	private static AIConfig? TryLoadAiConfigQuiet(string? ticker)
 	{
-		if (_loaded) return _cachedAiConfig;
-		_loaded = true;
+		var key = ticker?.ToUpperInvariant() ?? "";
+		if (_cachedConfigsByTicker.TryGetValue(key, out var cached)) return cached;
+		AIConfig? result = null;
 		try
 		{
-			var path = Program.ResolvePath(AIConfigLoader.ConfigPath);
-			if (!File.Exists(path)) return null;
-			var config = JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(path));
-			if (config == null) return null;
-			var err = AIConfigLoader.Validate(config);
-			if (err != null) return null;
-			_cachedAiConfig = config;
-			return config;
+			var basePath = Program.ResolvePath(AIConfigLoader.ConfigPath);
+			if (File.Exists(basePath))
+			{
+				var paths = new List<string?> { basePath };
+				if (key.Length > 0)
+				{
+					var tickerPath = Path.Combine(Path.GetDirectoryName(basePath) ?? string.Empty, $"ai-config.{key}.json");
+					if (File.Exists(tickerPath)) paths.Add(tickerPath);
+				}
+				var config = AIConfigMerge.LoadMerged(paths.ToArray());
+				if (config != null)
+				{
+					config.Opener.Indicators = config.Indicators; // same wiring as ResolveConfig — cfg-only helpers reach indicators through Opener
+					if (AIConfigLoader.Validate(config) == null) result = config;
+				}
+			}
 		}
 		catch
 		{
-			return null;
+			result = null;
 		}
+		_cachedConfigsByTicker[key] = result;
+		return result;
 	}
 }
