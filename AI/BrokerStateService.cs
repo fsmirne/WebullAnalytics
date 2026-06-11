@@ -25,7 +25,13 @@ namespace WebullAnalytics.AI;
 /// </summary>
 internal sealed class BrokerStateService
 {
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
 	private readonly TradeAccount _account;
+	// Same-day ledger of orders this machine placed. Webull's today-orders endpoint lags fills by 10+
+	// minutes and instantly-filled orders leave /open at once, so without the ledger the snapshot is
+	// blind to our own submissions for that window (live double-open 2026-06-11). Null in tests.
+	private readonly LocalOrderLedger? _ledger;
 	// Union of pending + today's filled/partial orders, keyed by leg-set fingerprint. Canceled and
 	// rejected orders are excluded — they represent attempted-but-not-resting state and shouldn't
 	// gate fresh submissions of the same shape.
@@ -52,17 +58,23 @@ internal sealed class BrokerStateService
 		return false;
 	}
 
-	public BrokerStateService(TradeAccount account) { _account = account; }
+	// Closing orders (BUY_TO_CLOSE / SELL_TO_CLOSE) don't consume the daily opening cap — de-risking an
+	// existing position must never block the day's open. Missing/unknown intent counts (fail-closed).
+	private static bool IsCloseIntent(string? positionIntent) =>
+		positionIntent != null && positionIntent.ToUpperInvariant().EndsWith("_TO_CLOSE", StringComparison.Ordinal);
+
+	public BrokerStateService(TradeAccount account, LocalOrderLedger? ledger = null) { _account = account; _ledger = ledger; }
 
 	/// <summary>True once <see cref="RefreshAsync"/> has succeeded at least once. When false,
 	/// callers should skip live submission this tick.</summary>
 	public bool IsReady => _activeLegSetFingerprints != null;
 
-	/// <summary>Count of distinct ACTIVE orders today (filled or pending, excluding canceled/rejected) for
-	/// <paramref name="ticker"/>. The daily cap is scoped per ticker, so concurrent single-ticker watch/scan
-	/// processes on the same account enforce independent caps. Counts broker ORDERS: a split structure
-	/// (diagonal/calendar vertical, double calendar/diagonal) places two orders and counts as two. Holds
-	/// across pending → filled transitions and process restarts (the broker remembers; re-queried each tick).</summary>
+	/// <summary>Count of distinct ACTIVE OPENING orders today (filled or pending, excluding canceled/rejected
+	/// and excluding *_TO_CLOSE intents) for <paramref name="ticker"/>. The daily cap is scoped per ticker, so
+	/// concurrent single-ticker watch/scan processes on the same account enforce independent caps. Counts broker
+	/// ORDERS: a split structure (diagonal/calendar vertical, double calendar/diagonal) places two orders and
+	/// counts as two. Holds across pending → filled transitions and process restarts (the broker remembers;
+	/// re-queried each tick).</summary>
 	public int TodaysActiveOrderCount(string ticker) =>
 		_activeOrderCountByRoot != null && _activeOrderCountByRoot.TryGetValue(ticker.ToUpperInvariant(), out var n) ? n : 0;
 
@@ -85,6 +97,10 @@ internal sealed class BrokerStateService
 		var fingerprints = new HashSet<string>(StringComparer.Ordinal);
 		var byFingerprint = new Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+		// Every client_order_id the broker reported, ANY status (unlike seenClientIds, which is
+		// active-only). A local-ledger entry whose id appears here has been caught up by the broker —
+		// its status logic (including canceled/rejected = free to retry) governs from then on.
+		var reportedClientIds = new HashSet<string>(StringComparer.Ordinal);
 
 		void Ingest(IEnumerable<WebullOpenApiClient.OpenOrder> combos)
 		{
@@ -93,6 +109,7 @@ internal sealed class BrokerStateService
 				if (combo.Orders == null) continue;
 				foreach (var order in combo.Orders)
 				{
+					if (!string.IsNullOrEmpty(order.ClientOrderId)) reportedClientIds.Add(order.ClientOrderId);
 					if (!IsActiveStatus(order.Status)) continue;
 					if (!string.IsNullOrEmpty(order.ClientOrderId) && !seenClientIds.Add(order.ClientOrderId)) continue;
 					var fp = FingerprintLegs(order.Legs);
@@ -101,7 +118,7 @@ internal sealed class BrokerStateService
 					if (!byFingerprint.TryGetValue(fp, out var list)) byFingerprint[fp] = list = new List<WebullOpenApiClient.OrderDetailOrder>();
 					list.Add(order);
 					var root = RootOf(order.Legs);
-					if (root != null) rootCount[root] = rootCount.TryGetValue(root, out var c) ? c + 1 : 1;
+					if (root != null && !IsCloseIntent(order.PositionIntent)) rootCount[root] = rootCount.TryGetValue(root, out var c) ? c + 1 : 1;
 				}
 			}
 		}
@@ -109,9 +126,43 @@ internal sealed class BrokerStateService
 		Ingest(todayOrders);
 		Ingest(openOrders);
 
+		if (_ledger != null)
+		{
+			var etToday = TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz).Date;
+			MergeLedgerEntries(_ledger.ReadFor(etToday), reportedClientIds, fingerprints, rootCount);
+		}
+
 		_activeLegSetFingerprints = fingerprints;
 		_activeByFingerprint = byFingerprint;
 		_activeOrderCountByRoot = rootCount;
+	}
+
+	/// <summary>Folds today's locally-placed orders into the broker snapshot. An entry is skipped once the
+	/// broker reports its client_order_id (any status — broker truth, including canceled/rejected = retryable,
+	/// governs from then on) or when an active broker order already carries the same leg-set fingerprint.
+	/// Surviving entries dedup by fingerprint, and opening entries count toward the per-root daily cap.</summary>
+	internal static void MergeLedgerEntries(IReadOnlyList<LocalOrderLedger.Entry> entries, HashSet<string> reportedClientIds, HashSet<string> fingerprints, Dictionary<string, int> rootCount)
+	{
+		foreach (var e in entries)
+		{
+			if (!string.IsNullOrEmpty(e.ClientOrderId) && reportedClientIds.Contains(e.ClientOrderId)) continue;
+			if (!fingerprints.Add(e.Fingerprint)) continue;
+			if (e.Open) rootCount[e.Root] = rootCount.TryGetValue(e.Root, out var c) ? c + 1 : 1;
+		}
+	}
+
+	/// <summary>Records a successful PlaceOrder issued by this process, so the snapshot sees it immediately
+	/// instead of waiting out the broker's history lag: appends to the persisted ledger (cross-restart,
+	/// cross-process) and patches the in-memory snapshot in place for the rest of this tick. Opening orders
+	/// (<paramref name="isOpen"/>) count toward the daily cap; closes participate in leg-set dedup only.</summary>
+	public void RecordLocalPlacement(string ticker, IEnumerable<(string Symbol, string Action)> legs, string? clientOrderId, bool isOpen)
+	{
+		var fp = FingerprintProposal(legs);
+		var root = ticker.ToUpperInvariant();
+		try { _ledger?.Append(root, isOpen, fp, clientOrderId, TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz)); }
+		catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]local order ledger append failed:[/] {Markup.Escape(ex.Message)} — dedup holds in-memory for this run only."); }
+		if (_activeLegSetFingerprints != null && _activeLegSetFingerprints.Add(fp) && isOpen && _activeOrderCountByRoot != null)
+			_activeOrderCountByRoot[root] = _activeOrderCountByRoot.TryGetValue(root, out var c) ? c + 1 : 1;
 	}
 
 	/// <summary>Underlying root of an order's leg set (all legs of one combo share it). Used to scope the
