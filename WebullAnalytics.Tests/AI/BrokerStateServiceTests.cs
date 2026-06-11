@@ -120,6 +120,51 @@ public class BrokerStateServiceTests
 		Assert.False(IsCloseIntent("SOMETHING_ELSE"));
 	}
 
+	private static BrokerStateService SeededService(Dictionary<string, int> fingerprintCounts)
+	{
+		var svc = (BrokerStateService)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(BrokerStateService));
+		typeof(BrokerStateService).GetField("_activeFingerprintCounts", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(svc, fingerprintCounts);
+		return svc;
+	}
+
+	private static readonly (string Symbol, string Action)[] OpenLegs = { ("SPY260616C00730000", "sell"), ("SPY260630C00734000", "buy") };
+	private static readonly (string Symbol, string Action)[] CloseLegs = { ("SPY260616C00730000", "buy"), ("SPY260630C00734000", "sell") };
+
+	[Fact]
+	public void NetOpenMatching_OpenedAndClosedToday_AllowsReopen()
+	{
+		// Live 2026-06-11: the morning's DD was opened and closed before noon; the afternoon's
+		// deliberate `scan --submit-override` re-entry must not be blocked by the filled open order.
+		var counts = new Dictionary<string, int>(StringComparer.Ordinal)
+		{
+			[FingerprintProposal(OpenLegs)] = 1,
+			[FingerprintProposal(CloseLegs)] = 1,
+		};
+		var svc = SeededService(counts);
+		Assert.False(svc.HasNetOpenMatching(OpenLegs));
+		// The close-side dedup must stay presence-based: a resting close still blocks a second close.
+		Assert.True(svc.HasPendingMatching(CloseLegs));
+	}
+
+	[Fact]
+	public void NetOpenMatching_OpenNotYetClosed_StillBlocks()
+	{
+		var svc = SeededService(new Dictionary<string, int>(StringComparer.Ordinal) { [FingerprintProposal(OpenLegs)] = 1 });
+		Assert.True(svc.HasNetOpenMatching(OpenLegs));
+	}
+
+	[Fact]
+	public void NetOpenMatching_ReopenedAfterClose_BlocksThirdOpen()
+	{
+		// open, close, re-open (override) → 2 opens vs 1 close: a further identical open must block.
+		var counts = new Dictionary<string, int>(StringComparer.Ordinal)
+		{
+			[FingerprintProposal(OpenLegs)] = 2,
+			[FingerprintProposal(CloseLegs)] = 1,
+		};
+		Assert.True(SeededService(counts).HasNetOpenMatching(OpenLegs));
+	}
+
 	[Fact]
 	public void StrikeFormatVariations_StillMatch()
 	{

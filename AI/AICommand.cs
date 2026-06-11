@@ -297,11 +297,16 @@ internal sealed class AIScanSettings : AISingleTickerSubcommandSettings
 	[Description("Override autoExecute.{management,opener}.timeInForce for this run. Mirrors `wa trade place --tif`: DAY (in-session only) or GTC (queues across sessions, accepted off-hours). Default: whatever config says, which itself defaults to DAY.")]
 	public string? Tif { get; set; }
 
+	[CommandOption("--submit-override")]
+	[Description("Like --submit, but additionally ignores the per-day opening cap (today's broker order count) for this ONE run — the deliberate \"place one more trade today\" escape hatch. The run itself is still bounded to maxOrdersPerDay submission(s), and every other guard (held-position dedup, broker dedup, cash gating) stays active. Deliberately scan-only — watch re-evaluates every tick, so an uncapped watch would re-fire all day.")]
+	public bool SubmitOverride { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 		if (Top.HasValue && Top.Value < 1) return ValidationResult.Error($"--top: must be ≥ 1, got {Top.Value}");
+		if (SubmitOverride && Submit) return ValidationResult.Error("--submit and --submit-override are mutually exclusive (--submit-override already submits).");
 		if (Tif != null && !string.Equals(Tif, "day", StringComparison.OrdinalIgnoreCase) && !string.Equals(Tif, "gtc", StringComparison.OrdinalIgnoreCase))
 			return ValidationResult.Error($"--tif: must be 'day' or 'gtc', got '{Tif}'");
 
@@ -375,11 +380,11 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
 		if (settings.Top.HasValue) config.Opener.TopNPerTicker = settings.Top.Value;
-		if (settings.Submit) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; }
+		if (settings.Submit || settings.SubmitOverride) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; }
 		if (settings.Tif != null) { config.AutoExecute.Management.TimeInForce = settings.Tif.ToUpperInvariant(); config.AutoExecute.Opener.TimeInForce = settings.Tif.ToUpperInvariant(); }
 
 		if (string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase))
-			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' ticker={config.Ticker} proposals={settings.Proposals} theoretical={settings.Theoretical} submit={settings.Submit}");
+			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' ticker={config.Ticker} proposals={settings.Proposals} theoretical={settings.Theoretical} submit={settings.Submit} submitOverride={settings.SubmitOverride}");
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
@@ -439,7 +444,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
 			if (openerExecutor != null)
-				await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation);
+				await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation, bypassDailyCap: settings.SubmitOverride);
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
@@ -666,7 +671,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// rule engine had nothing to react to. Opener executor still fires so the user can validate
 			// open-order placement off-hours against a sandbox account.
 			if (openerExecutor != null)
-				openerOrdersThisRun = await openerExecutor.HandleAsync(openResults, openPositions, asOf, cancellation);
+				openerOrdersThisRun = await openerExecutor.HandleAsync(openResults, openPositions, asOf, cancellation, bypassDailyCap: settings.SubmitOverride);
 		}
 
 		var execSuffix = openerExecutor != null ? $" | opener auto-execute: {openerOrdersThisRun} order(s) acted on" : "";
