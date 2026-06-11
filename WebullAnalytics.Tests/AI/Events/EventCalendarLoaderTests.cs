@@ -10,7 +10,7 @@ public class EventCalendarLoaderTests
 	{
 		var json = """
 		{
-		  "AAPL": { "earnings": "2026-08-01", "earningsTime": "AMC", "exDividend": "2026-08-09", "dividendAmount": 0.24 },
+		  "AAPL": { "earnings": "2026-08-01", "earningsTime": "AMC", "exDividend": "2026-08-10", "dividendAmount": 0.24 },
 		  "msft": { "earnings": "2026-07-23" }
 		}
 		""";
@@ -22,7 +22,7 @@ public class EventCalendarLoaderTests
 		var aapl = map["AAPL"];
 		Assert.Equal(new DateTime(2026, 8, 1), aapl.NextEarningsDate);
 		Assert.Equal("AMC", aapl.EarningsTime);
-		Assert.Equal(new DateTime(2026, 8, 9), aapl.NextExDividendDate);
+		Assert.Equal(new DateTime(2026, 8, 10), aapl.NextExDividendDate);
 		Assert.Equal(0.24m, aapl.DividendAmount);
 
 		var msft = map["MSFT"];
