@@ -4,6 +4,9 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Spectre.Console;
 using Spectre.Console.Cli;
+using WebullAnalytics.AI.Replay;
+using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Api;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.Analysis;
@@ -116,20 +119,50 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 	private static readonly TimeSpan RthOpen = new(9, 30, 0);
 	private static readonly TimeSpan RthClose = new(16, 0, 0);
 
-	public override Task<int> ExecuteAsync(CommandContext context, DipAnalysisSettings settings, CancellationToken cancellation)
+	public override async Task<int> ExecuteAsync(CommandContext context, DipAnalysisSettings settings, CancellationToken cancellation)
 	{
+		var nyNow = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, NyTz);
 		var since = DateTime.ParseExact(settings.Since, "yyyy-MM-dd", CultureInfo.InvariantCulture);
-		var until = string.IsNullOrWhiteSpace(settings.Until) ? DateTime.UtcNow.Date : DateTime.ParseExact(settings.Until, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+		var until = string.IsNullOrWhiteSpace(settings.Until) ? nyNow.Date : DateTime.ParseExact(settings.Until, "yyyy-MM-dd", CultureInfo.InvariantCulture);
 
 		var dir = Program.ResolvePath($"data/intraday/{settings.Ticker.ToUpperInvariant()}");
-		if (!Directory.Exists(dir)) { AnsiConsole.MarkupLine($"[red]No intraday data at {dir}[/]"); return Task.FromResult(1); }
+		if (!Directory.Exists(dir)) { AnsiConsole.MarkupLine($"[red]No intraday data at {dir}[/]"); return 1; }
 
 		var rthBars = LoadRthBars(dir, since, until, cancellation);
-		if (rthBars.Count == 0) { AnsiConsole.MarkupLine("[yellow]No RTH bars in range.[/]"); return Task.FromResult(1); }
+
+		// The data/intraday CSVs are materialized by batch `ai history` pulls, so a mid-session run would
+		// otherwise analyze a missing or stale today. Route today through IntradayBarCache — same disk files,
+		// live Webull top-up, today's file grows during the session — and splice its bars in. Offline runs
+		// (no api-config, fetch failure) keep whatever the CSVs already had.
+		if (until >= nyNow.Date && nyNow.TimeOfDay > RthOpen)
+		{
+			var configPath = Program.ResolvePath(Program.ApiConfigPath);
+			if (File.Exists(configPath) && JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath)) is { } apiConfig && apiConfig.Webull.Headers.Count > 0)
+			{
+				try
+				{
+					var cache = new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig));
+					var openEt = nyNow.Date + RthOpen;
+					var fromUtc = new DateTimeOffset(openEt, NyTz.GetUtcOffset(openEt)).ToUniversalTime();
+					var todays = await cache.GetBarsAsync(settings.Ticker.ToUpperInvariant(), fromUtc, DateTimeOffset.UtcNow, BarInterval.M1, includeExtended: false, cancellation);
+					var fetched = todays.Where(b => { var et = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz); return et.Date == nyNow.Date && et.TimeOfDay >= RthOpen && et.TimeOfDay < RthClose; }).ToList();
+					if (fetched.Count > 0)
+					{
+						var replaced = rthBars.RemoveAll(b => TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).Date == nyNow.Date);
+						rthBars.AddRange(fetched);
+						rthBars.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+						if (fetched.Count > replaced) AnsiConsole.MarkupLine($"[dim]Today topped up live via Webull ({fetched.Count} RTH bars, {fetched.Count - replaced} new).[/]");
+					}
+				}
+				catch (Exception ex) { AnsiConsole.MarkupLine($"[dim]Live top-up for today failed ({Markup.Escape(ex.Message)}); using captured bars only.[/]"); }
+			}
+		}
+
+		if (rthBars.Count == 0) { AnsiConsole.MarkupLine("[yellow]No RTH bars in range.[/]"); return 1; }
 
 		var bars = DipSignalAnalyzer.AggregateToMinutes(rthBars, ts => TimeZoneInfo.ConvertTime(ts, NyTz).DateTime, settings.Interval);
 
-		if (!string.IsNullOrWhiteSpace(settings.Dump)) { Dump(bars, settings.Dump); return Task.FromResult(0); }
+		if (!string.IsNullOrWhiteSpace(settings.Dump)) { Dump(bars, settings.Dump); return 0; }
 
 		var p = new DipParams(RsiLow: settings.RsiLow, RsiHigh: settings.RsiHigh, BbK: settings.BbK);
 
@@ -140,7 +173,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 			RenderSwing(settings, since, until, swings);
 			if (settings.ByVix) RenderSwingByVix(swings);
 			if (settings.RealChain) RenderRealChain(settings, swings);
-			return Task.FromResult(0);
+			return 0;
 		}
 
 		var result = DipSignalAnalyzer.Analyze(bars, p, settings.Interval);
@@ -162,7 +195,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		if (settings.List > 0) RenderList(result, settings.List);
 		if (settings.CallDte > 0) RenderCallOverlay(settings, result);
 		if (settings.PutSpread) RenderPutOverlay(settings, bars, result);
-		return Task.FromResult(0);
+		return 0;
 	}
 
 	private static List<MinuteBar> LoadRthBars(string dir, DateTime since, DateTime until, CancellationToken cancellation)
