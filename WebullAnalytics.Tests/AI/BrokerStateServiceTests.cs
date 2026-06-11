@@ -95,6 +95,31 @@ public class BrokerStateServiceTests
 		Assert.NotEqual(FingerprintLegs(broker), FingerprintProposal(proposal));
 	}
 
+	private static bool IsCloseIntent(string? positionIntent)
+	{
+		var m = typeof(BrokerStateService).GetMethod("IsCloseIntent", BindingFlags.NonPublic | BindingFlags.Static)!;
+		return (bool)m.Invoke(null, new object?[] { positionIntent })!;
+	}
+
+	[Fact]
+	public void CloseIntents_DoNotCountTowardDailyCap()
+	{
+		// User's reported case: closing the SPY 740P calendar (SELL_TO_CLOSE combo) consumed the day's
+		// single opening slot and blocked `wa ai watch SPY --submit` from opening anything.
+		Assert.True(IsCloseIntent("SELL_TO_CLOSE"));
+		Assert.True(IsCloseIntent("BUY_TO_CLOSE"));
+		Assert.True(IsCloseIntent("sell_to_close")); // case-insensitive
+	}
+
+	[Fact]
+	public void OpenAndUnknownIntents_CountTowardDailyCap()
+	{
+		Assert.False(IsCloseIntent("BUY_TO_OPEN"));
+		Assert.False(IsCloseIntent("SELL_TO_OPEN"));
+		Assert.False(IsCloseIntent(null));          // missing intent — fail-closed, counts
+		Assert.False(IsCloseIntent("SOMETHING_ELSE"));
+	}
+
 	[Fact]
 	public void StrikeFormatVariations_StillMatch()
 	{
