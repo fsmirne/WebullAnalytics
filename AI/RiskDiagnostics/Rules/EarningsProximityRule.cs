@@ -77,7 +77,7 @@ internal sealed class EarningsProximityRule : IRiskRule
 			}
 			else
 			{
-				parts.Add(on + " — long leg trades through it (priced on the ex-dividend forward; no assignment risk)");
+				parts.Add(on + " — long leg trades through it (priced on the ex-dividend forward; the long itself can't be assigned — a short leg expiring ITM still assigns at expiry)");
 			}
 		}
 
