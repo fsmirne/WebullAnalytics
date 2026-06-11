@@ -48,7 +48,7 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	/// but only applies keys whose corresponding options live on this lean base. Unrecognized
 	/// report-only keys (e.g., <c>source</c>, <c>since</c>, <c>view</c>) are ignored without warning
 	/// — they belong to the report renderer, which these subcommands don't invoke.</summary>
-	internal void ApplyConfig(Dictionary<string, JsonElement> cfg)
+	internal virtual void ApplyConfig(Dictionary<string, JsonElement> cfg)
 	{
 		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) OutputFormat = output;
 		if (!Program.HasCliOption("output-path") && cfg.TryGetString("outputPath", out var outputPath)) OutputPath = outputPath;
