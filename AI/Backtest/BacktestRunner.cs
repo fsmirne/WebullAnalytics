@@ -36,6 +36,9 @@ internal sealed class BacktestRunner
 	private readonly int? _fixedContracts;
 	private readonly string _pricingMode;
 	private readonly int _scanStride;
+	// Book each split structure as its two combo orders (live-broker representation) instead of one
+	// composite position. See OpenProposalIntoBook.
+	private readonly bool _splitStructures;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
@@ -47,11 +50,12 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false)
 	{
 		_config = config;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
 		_scanStride = Math.Max(1, scanStride);
+		_splitStructures = splitStructures;
 		_dividendsByRoot = dividendsByRoot;
 		_book = book;
 		_positions = positions;
@@ -168,10 +172,7 @@ internal sealed class BacktestRunner
 				{
 					var qty = ResolveOpenQty(p);
 					if (qty < 1) continue;
-
-					var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-					if (legFills == null) continue;
-					_book.Open(step, p.Ticker, p.StructureKind, legFills, qty);
+					OpenProposalIntoBook(step, p, qty);
 				}
 			}
 
@@ -338,6 +339,52 @@ internal sealed class BacktestRunner
 	/// source: <c>PricePerShare</c> is the mid, <c>ExecutionPricePerShare</c> the conservative cross-the-spread
 	/// fill (ask on buys, bid on sells). Under <c>--pricing bidask</c> we fill at the latter; under <c>mid</c>
 	/// at the former. Candidate selection/scoring is unaffected — only the fill price changes.</summary>
+	/// <summary>Books a proposal into the simulated book the way the broker would hold it. Whole mode
+	/// (default) keeps all legs as ONE position — the historical simulator behavior, where management
+	/// rules see the structure's combined mark and debit. Split mode (--split) mirrors live execution:
+	/// the two combo orders from <see cref="StructureOrderSplit"/> become two independent positions
+	/// (Webull has no composite position concept), so each half is managed against its OWN debit and
+	/// take-profit/stop-loss fire per half. Friction and fees are identical across modes — OrdersForStructure
+	/// already charges 2-order structures per order, and per-leg fees sum the same — so an A/B isolates the
+	/// exit-policy granularity. All halves must price or nothing books (live validates the whole leg set the
+	/// same way). Returns true when at least one position was opened.</summary>
+	private bool OpenProposalIntoBook(DateTime when, OpenProposal p, int qty)
+	{
+		var groups = _splitStructures ? StructureOrderSplit.Split(p.StructureKind, p.Legs) : null;
+		if (groups == null || groups.Count == 1)
+		{
+			var legFills = BuildLegFillsFromProposal(p.Legs, qty);
+			return legFills != null && _book.Open(when, p.Ticker, p.StructureKind, legFills, qty);
+		}
+
+		var groupFills = new List<(OpenStructureKind Kind, IReadOnlyList<BacktestLegFill> Fills)>(groups.Count);
+		foreach (var g in groups)
+		{
+			var fills = BuildLegFillsFromProposal(g.Legs, qty);
+			if (fills == null) return false;
+			groupFills.Add((HalfStructureKind(p.StructureKind, fills), fills));
+		}
+		var opened = false;
+		foreach (var (kind, fills) in groupFills)
+			opened |= _book.Open(when, p.Ticker, kind, fills, qty);
+		return opened;
+	}
+
+	/// <summary>Structure kind of ONE combo order of a split structure. Side-split doubles yield the
+	/// single-sided analog (each half is a 2-leg cross-expiry pair). Expiry-split structures
+	/// (DiagonalVertical / CalendarVertical) yield same-expiry verticals whose direction follows the
+	/// half's net fill: net debit = long vertical, net credit = short vertical.</summary>
+	private static OpenStructureKind HalfStructureKind(OpenStructureKind parent, IReadOnlyList<BacktestLegFill> halfFills)
+	{
+		if (parent == OpenStructureKind.DoubleDiagonal) return OpenStructureKind.LongDiagonal;
+		if (parent == OpenStructureKind.DoubleCalendar) return OpenStructureKind.LongCalendar;
+		var isCall = halfFills.Any(f => ParsingHelpers.ParseOptionSymbol(f.Symbol)?.CallPut == "C");
+		var netPerShare = halfFills.Sum(f => f.Side == Side.Buy ? -f.PricePerShare : f.PricePerShare);
+		return netPerShare < 0m
+			? (isCall ? OpenStructureKind.LongCallVertical : OpenStructureKind.LongPutVertical)
+			: (isCall ? OpenStructureKind.ShortCallVertical : OpenStructureKind.ShortPutVertical);
+	}
+
 	private IReadOnlyList<BacktestLegFill>? BuildLegFillsFromProposal(IReadOnlyList<ProposalLeg> legs, int qty)
 	{
 		var fills = new List<BacktestLegFill>(legs.Count);
@@ -905,9 +952,7 @@ internal sealed class BacktestRunner
 					{
 						var qty = ResolveOpenQty(p);
 						if (qty < 1) continue;
-						var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-						if (legFills == null) continue;
-						if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, qty))
+						if (OpenProposalIntoBook(minuteEt, p, qty))
 							opened++;
 					}
 				}
@@ -951,9 +996,7 @@ internal sealed class BacktestRunner
 						{
 							var qty = ResolveOpenQty(p);
 							if (qty < 1) continue;
-							var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-							if (legFills == null) continue;
-							if (_book.Open(minuteEt, p.Ticker, p.StructureKind, legFills, qty))
+							if (OpenProposalIntoBook(minuteEt, p, qty))
 								opened++;
 						}
 					}
