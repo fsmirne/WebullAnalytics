@@ -220,6 +220,7 @@ internal sealed class OpenerAutoExecutor
 				using var client = new WebullOpenApiClient(_account);
 				var placed = await client.PlaceOrderAsync(body);
 				AnsiConsole.MarkupLine($"[green]opener auto-execute placed:[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
+				_brokerState?.RecordLocalPlacement(p.Ticker, g.Legs.Select(l => (l.Symbol, l.Action)), placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: true);
 				placedCount++;
 				firstOrderId ??= placed.OrderId;
 				firstClientId ??= placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
