@@ -32,9 +32,9 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public int StrikeRangePct { get; set; } = 20;
 
 	[CommandOption("--max-strikes <N>")]
-	[DefaultValue(25)]
-	[Description("Max strike rows to display. Picks the N strikes closest to spot within --strike-range. Default: 25.")]
-	public int MaxStrikes { get; set; } = 25;
+	[DefaultValue(50)]
+	[Description("Max strike rows to display. Picks the N strikes closest to spot within --strike-range. Default: 50.")]
+	public int MaxStrikes { get; set; } = 50;
 
 	[CommandOption("--dte <N>")]
 	[DefaultValue(14)]
@@ -47,13 +47,17 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public int TopWalls { get; set; } = 5;
 
 	[CommandOption("--intraday")]
-	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Offline-only — requires a past --date with a data/oi snapshot. Skips the walls/totals/per-expiry tables.")]
+	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Offline-only — requires an explicit --date (today included) with a data/oi snapshot. Skips the walls/totals/per-expiry tables.")]
 	public bool Intraday { get; set; }
 
 	[CommandOption("--interval <MIN>")]
 	[DefaultValue(30)]
 	[Description("--intraday time-bucket size in minutes (default 30): the RTH column spacing from 09:30 to 16:00.")]
 	public int IntervalMin { get; set; } = 30;
+
+	[CommandOption("--exante")]
+	[Description("--intraday only: price the 0DTE gamma with the PRIOR trading day's snapshot IVs (falling back to a back-solve from the prior day's mids at the prior day's spot) instead of back-solving from this day's EOD mids. The default solve leaks the session's outcome into every column — a put that finished ITM has a fat EOD mid, back-solves to an inflated IV, and its strike re-brightens/dims by where the day CLOSED; ex-ante IVs show what was actually hedgeable at each bucket. 0DTE contracts absent from the prior snapshot are dropped.")]
+	public bool Exante { get; set; }
 
 	public override ValidationResult Validate()
 	{
@@ -66,6 +70,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (MaxStrikes < 1 || MaxStrikes > 200) return ValidationResult.Error($"--max-strikes: must be in [1, 200], got {MaxStrikes}");
 		if (Dte < 0 || Dte > 60) return ValidationResult.Error($"--dte: must be in [0, 60], got {Dte}");
 		if (IntervalMin < 5 || IntervalMin > 120) return ValidationResult.Error($"--interval: must be in [5, 120] minutes, got {IntervalMin}");
+		if (Exante && !Intraday) return ValidationResult.Error("--exante only applies to the --intraday heatmap");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
 		return ValidationResult.Success();
 	}
@@ -90,11 +95,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		decimal? spot;
 		var isOfflineHistorical = false;
 
-		// Historical/offline: for a PAST --date with a captured chain in data/oi (ThetaData backfill or the live
-		// scraper), read that day's snapshot — OI + IV + spot are inlined for the full chain — instead of the
-		// live Webull fetch. Lets `analyze gex SPY --date 2026-06-03` show THAT day's real magnet, not today's.
+		// Historical/offline: for an explicit --date (today included) with a captured chain in data/oi (ThetaData
+		// backfill or the live scraper), read that day's snapshot — OI + IV + spot are inlined for the full chain —
+		// instead of the live Webull fetch. Lets `analyze gex SPY --date 2026-06-03` show THAT day's real magnet,
+		// not today's. With --date <today> this trades the live fetch for the morning snapshot's IV/spot.
 		var oiPath = Program.ResolvePath($"data/oi/{ticker}/{asOf:yyyy-MM-dd}.jsonl");
-		if (settings.EvaluationDateOverride.HasValue && asOf.Date < DateTime.Today && File.Exists(oiPath))
+		if (settings.EvaluationDateOverride.HasValue && asOf.Date <= DateTime.Today && File.Exists(oiPath))
 		{
 			var (snapSpot, snapQuotes) = LoadOiSnapshot(oiPath);
 			if (snapQuotes.Count == 0)
@@ -144,15 +150,17 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return 1;
 		}
 
-		// --intraday: 0DTE strikes × RTH-hours gravity-migration heatmap. Offline-historical only (needs a past
+		// --intraday: 0DTE strikes × RTH-hours gravity-migration heatmap. Offline-historical only (needs an explicit
 		// --date with both a data/oi snapshot and a data/intraday spot file). Replaces the normal tables.
 		if (settings.Intraday)
 		{
 			if (!isOfflineHistorical)
 			{
-				AnsiConsole.MarkupLine("[red]--intraday requires a past --date with a data/oi snapshot (offline-historical mode); none was loaded.[/]");
+				AnsiConsole.MarkupLine("[red]--intraday requires an explicit --date with a data/oi snapshot (offline-historical mode); none was loaded.[/]");
 				return 1;
 			}
+			if (settings.Exante && !ApplyExanteIvs(ticker, asOf.Date, quotes))
+				return 1;
 			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin);
 			return 0;
 		}
@@ -210,6 +218,68 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 					ImpliedVolatility: Dec("iv"), HistoricalVolatility: Dec("hv"), ImpliedVolatility5Day: Dec("iv5"));
 			}
 		return (spot, quotes);
+	}
+
+	/// <summary>--exante: replaces every 0DTE contract's IV with the prior trading day's snapshot value (falling back
+	/// to a back-solve from the prior day's captured mid at the prior day's spot). The data/oi EOD snapshot stores
+	/// iv = null for the own-day expiry, so GexMatrix.Build otherwise back-solves 0DTE IVs from POST-session mids at
+	/// each bucket's historical spot — which leaks the day's outcome into every column (a put that finished ITM has a
+	/// fat EOD mid, back-solves to an inflated IV, and its gamma re-shapes by where the day closed). Contracts with no
+	/// usable prior-day IV or mid are removed so Build cannot fall back to the leaky same-day solve.</summary>
+	private static bool ApplyExanteIvs(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes)
+	{
+		var dir = Program.ResolvePath($"data/oi/{ticker}");
+		DateTime? priorDate = null;
+		if (Directory.Exists(dir))
+			foreach (var file in Directory.GetFiles(dir, "*.jsonl"))
+				if (DateTime.TryParseExact(Path.GetFileNameWithoutExtension(file), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) && d.Date < date && (date - d.Date).Days <= 5 && (priorDate == null || d.Date > priorDate.Value))
+					priorDate = d.Date;
+		if (priorDate == null)
+		{
+			AnsiConsole.MarkupLine($"[red]--exante: no prior data/oi snapshot for {ticker} within 5 days before {date:yyyy-MM-dd}.[/]");
+			return false;
+		}
+
+		var priorPath = Program.ResolvePath($"data/oi/{ticker}/{priorDate:yyyy-MM-dd}.jsonl");
+		var (priorSpot, priorQuotes) = LoadOiSnapshot(priorPath);
+		if (priorQuotes.Count == 0)
+		{
+			AnsiConsole.MarkupLine($"[red]--exante: empty prior data/oi snapshot {Markup.Escape(priorPath)}.[/]");
+			return false;
+		}
+
+		const double timeYears = 1.0 / 365.0; // same 0DTE day-floor as GexMatrix.Build
+		int applied = 0, solved = 0, dropped = 0;
+		foreach (var sym in quotes.Keys.ToList())
+		{
+			var parsed = ParsingHelpers.ParseOptionSymbol(sym);
+			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase) || parsed.ExpiryDate.Date != date) continue; // only the 0DTE expiry is rendered
+			var iv = 0m;
+			if (priorQuotes.TryGetValue(sym, out var prior))
+			{
+				iv = prior.ImpliedVolatility ?? 0m;
+				if (iv > 0m)
+					applied++;
+				else if (priorSpot.HasValue && priorSpot.Value > 0m && !string.IsNullOrEmpty(parsed.CallPut))
+				{
+					var mid = prior.Bid.HasValue && prior.Ask.HasValue && prior.Bid.Value > 0m && prior.Ask.Value > 0m ? (prior.Bid.Value + prior.Ask.Value) / 2m : prior.LastPrice ?? 0m;
+					if (mid > 0m)
+					{
+						var s = OptionMath.ImpliedVol(priorSpot.Value, parsed.Strike, timeYears, OptionMath.RiskFreeRate, mid, parsed.CallPut);
+						if (s > 0.011m && s < 4.99m) { iv = s; solved++; }
+					}
+				}
+			}
+			if (iv > 0m)
+				quotes[sym] = quotes[sym] with { ImpliedVolatility = iv };
+			else
+			{
+				quotes.Remove(sym);
+				dropped++;
+			}
+		}
+		AnsiConsole.MarkupLine($"[dim]--exante: 0DTE IVs from {Markup.Escape(priorPath)} ({applied} snapshot IVs, {solved} back-solved from prior-day mids, {dropped} contract(s) dropped).[/]");
+		return true;
 	}
 
 	/// <summary>Identifies chain symbols within the heatmap window (strike range × selected expiries) that
