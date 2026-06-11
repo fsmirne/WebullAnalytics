@@ -37,6 +37,16 @@ public class DividendScheduleBuilderTests
 	}
 
 	[Fact]
+	public void TickerEvents_NormalizesExDateAtConstruction()
+	{
+		// The snap lives on the record itself so EVERY consumer — rule messages, the diagnostic panel,
+		// event vetoes, the dividend schedule — sees the trading-day date, not just the pricing path.
+		Assert.Equal(new DateTime(2026, 6, 18), Events(new DateTime(2026, 6, 19), 1.797m).NextExDividendDate);
+		Assert.Equal(new DateTime(2026, 6, 12), Events(new DateTime(2026, 6, 12), 1.797m).NextExDividendDate); // open day untouched
+		Assert.Null(Events(null, 1.797m).NextExDividendDate);
+	}
+
+	[Fact]
 	public void FallsBackToConfigYieldWhenAmountMissing()
 	{
 		var cfg = new OpenerEventsConfig { DividendYield = 0.012m, DividendFrequency = 4 };

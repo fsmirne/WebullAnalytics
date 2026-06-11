@@ -120,7 +120,9 @@ public class EventVetoTests
 	[Fact]
 	public void Does_not_veto_short_call_when_exdiv_after_expiry()
 	{
-		var events = new TickerEvents(Ticker, null, null, NextExDividendDate: TargetExpiry.AddDays(1), null);
+		// The day after the Friday expiry is a Saturday, which TickerEvents normalizes BACK onto the
+		// expiry — use the following Monday so the ex-div stays strictly after expiry as intended.
+		var events = new TickerEvents(Ticker, null, null, NextExDividendDate: TargetExpiry.AddDays(3), null);
 		Assert.False(EventVeto.ShouldVeto(ShortCallVertical(TargetExpiry), AsOf, events, Cfg(), out _));
 	}
 
