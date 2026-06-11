@@ -7,7 +7,7 @@ namespace WebullAnalytics.Tests.Pricing;
 
 public class DividendScheduleBuilderTests
 {
-	private static readonly DateTime ExDate = new(2026, 6, 19);
+	private static readonly DateTime ExDate = new(2026, 6, 12); // a plain open Friday
 
 	private static TickerEvents Events(DateTime? exDate, decimal? amount) =>
 		new("SPY", NextEarningsDate: null, EarningsTime: null, NextExDividendDate: exDate, DividendAmount: amount);
@@ -20,6 +20,20 @@ public class DividendScheduleBuilderTests
 		Assert.Single(schedule!);
 		Assert.Equal(ExDate.Date, schedule[0].ExDate);
 		Assert.Equal(1.75m, schedule[0].Amount);
+	}
+
+	[Fact]
+	public void HolidayExDate_SnapsToPreviousOpenDay()
+	{
+		// Provider ex-dates are pattern-projected and ignore market holidays: SPY's nominal third-Friday
+		// 2026-06-19 is Juneteenth (market closed); the actual ex-date is Thursday 06-18. An ex-date can
+		// never fall on a closed session.
+		var schedule = DividendScheduleBuilder.BuildForTicker(Events(new DateTime(2026, 6, 19), 1.797m), spot: 725m, cfg: null);
+		Assert.Equal(new DateTime(2026, 6, 18), schedule![0].ExDate);
+
+		// Weekend dates snap to the preceding Friday.
+		var weekend = DividendScheduleBuilder.BuildForTicker(Events(new DateTime(2026, 6, 13), 1.797m), spot: 725m, cfg: null);
+		Assert.Equal(new DateTime(2026, 6, 12), weekend![0].ExDate);
 	}
 
 	[Fact]

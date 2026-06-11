@@ -1,3 +1,4 @@
+using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI;
 using Xunit;
 
@@ -540,5 +541,40 @@ public class CandidateScorerCalendarTests
 		Assert.True(CandidateScorer.PassesEntryNoiseGate(legs, quotes, netEntryPerShare: 0.01m, minRatio: 0m));     // ratio 0 disables
 		// Legs without a real book contribute no noise: an all-synthetic candidate always passes.
 		Assert.True(CandidateScorer.PassesEntryNoiseGate(legs, new Dictionary<string, OptionContractQuote>(), netEntryPerShare: 0.001m, minRatio: 0.5m));
+	}
+
+	[Fact]
+	public void ExDivBetweenExpiries_WidensPutCalendarBreakevens()
+	{
+		// Put calendar straddling an ex-dividend: short expires 06-18, ex-div 06-22 (Monday, open), long
+		// expires 07-02. The surviving long must price the coming drop — its put is worth MORE at the short
+		// expiry, so both breakevens widen vs the no-dividend model. An ex-div on/before the short expiry
+		// is absorbed by the spot path (both legs cross it) and must be a no-op.
+		var asOf = new DateTime(2026, 6, 10);
+		var shortExp = new DateTime(2026, 6, 18);
+		var longExp = new DateTime(2026, 7, 2);
+		var shortSym = MatchKeys.OccSymbol("SPY", shortExp, 740m, "P");
+		var longSym = MatchKeys.OccSymbol("SPY", longExp, 740m, "P");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongCalendar, new[]
+		{
+			new ProposalLeg("sell", shortSym, 1),
+			new ProposalLeg("buy", longSym, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(18.50m, 18.70m, 0.17m),
+			[longSym] = TestQuote.Q(21.30m, 21.50m, 0.17m)
+		};
+		TickerEvents Ev(DateTime exDate) => new("SPY", NextEarningsDate: null, EarningsTime: null, NextExDividendDate: exDate, DividendAmount: 1.80m);
+
+		var noDiv = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 725m, asOf, quotes, bias: 0m, Cfg(), useMarketImpliedIv: false)!;
+		var straddled = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 725m, asOf, quotes, bias: 0m, Cfg(), useMarketImpliedIv: false, events: Ev(new DateTime(2026, 6, 22)))!;
+		var absorbed = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 725m, asOf, quotes, bias: 0m, Cfg(), useMarketImpliedIv: false, events: Ev(new DateTime(2026, 6, 18)))!;
+
+		Assert.Equal(2, noDiv.Breakevens.Count);
+		Assert.Equal(2, straddled.Breakevens.Count);
+		Assert.True(straddled.Breakevens[0] < noDiv.Breakevens[0], $"lower BE should widen down: {straddled.Breakevens[0]} vs {noDiv.Breakevens[0]}");
+		Assert.True(straddled.Breakevens[1] > noDiv.Breakevens[1], $"upper BE should widen up: {straddled.Breakevens[1]} vs {noDiv.Breakevens[1]}");
+		Assert.Equal(noDiv.Breakevens, absorbed.Breakevens); // ex-div on the short expiry: no surviving dividend, no adjustment
 	}
 }
