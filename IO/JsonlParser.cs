@@ -52,11 +52,13 @@ public static partial class JsonlParser
 
 		foreach (var group in groups)
 		{
-			var orders = group.ToList();
-			if (orders.Count >= 2)
-				BuildStrategyTrades(orders, trades, fees, ref seq);
-			else
-				BuildStandaloneTrade(orders[0], trades, fees, ref seq);
+			foreach (var combo in PartitionIntoCombos(group.ToList()))
+			{
+				if (combo.Count >= 2)
+					BuildStrategyTrades(combo, trades, fees, ref seq);
+				else
+					BuildStandaloneTrade(combo[0], trades, fees, ref seq);
+			}
 		}
 
 		return (trades, fees);
@@ -102,12 +104,75 @@ public static partial class JsonlParser
 		return new ParsedOrder { Root = root, Strike = strike, ExpiryDate = expiryDate, CallPut = callPut, OccSymbol = occSymbol, FilledTime = filledTime, TransactTime = transactTime, Side = side, Qty = qty, Price = price, TotalFee = fee + commission, };
 	}
 
+	/// <summary>Splits a same-transactTime order group into the combo tickets it plausibly came from.
+	/// Webull's web export carries no combo id — transactTime (second resolution) is the only grouping
+	/// signal — so two combos filling in the same second collide (observed live 2026-06-11: two separate
+	/// diagonal closes merged into a phantom 4-leg DoubleDiagonal in the report). Webull itself rejects a
+	/// 4-leg multi-expiry ticket (the reason StructureOrderSplit places doubles/diagonal-verticals as two
+	/// orders), so any such group is provably at least two combos. The partition mirrors how those orders
+	/// are placed: mixed calls+puts split by side (the double-calendar/diagonal shape, recursing per side);
+	/// a single side splits by expiry when that yields buy/sell pairs (the near+far vertical shape);
+	/// otherwise the k-th buy pairs with the k-th sell by strike rank (two same-side diagonals in one
+	/// second — strike-adjacent pairing is the best available signal). Groups Webull could have filled as
+	/// one ticket (fewer than 4 legs, or a single expiry, e.g. an iron condor) are never split, and a
+	/// group nothing matches is kept whole rather than invent pairings.</summary>
+	private static List<List<ParsedOrder>> PartitionIntoCombos(List<ParsedOrder> orders)
+	{
+		var result = new List<List<ParsedOrder>>();
+		if (orders.Count < 4 || orders.Select(o => o.ExpiryDate).Distinct().Count() == 1)
+		{
+			result.Add(orders);
+			return result;
+		}
+
+		var calls = orders.Where(o => o.CallPut == "C").ToList();
+		var puts = orders.Where(o => o.CallPut == "P").ToList();
+		if (calls.Count > 0 && puts.Count > 0)
+		{
+			result.AddRange(PartitionIntoCombos(calls));
+			result.AddRange(PartitionIntoCombos(puts));
+			return result;
+		}
+
+		// Same-strike cross-expiry pairs first: per-leg ROLL tickets (buy back one expiry, sell the
+		// other at the SAME strike) that fill in the same second. Live example 2026-03-20: a 5-lot SPXW
+		// put vertical rolled 20Mar→23Mar as two roll combos (6525 short roll + 6520 long roll) — the
+		// by-expiry reading would mis-pair those as two verticals. Checked before the by-expiry branch
+		// because when both apply (calendar-vertical shapes), the decompositions are economically
+		// equivalent, while for rolls only the strike pairing is right.
+		var byStrike = orders.GroupBy(o => o.Strike).Select(g => g.ToList()).ToList();
+		if (byStrike.All(g => g.Count == 2 && g[0].ExpiryDate != g[1].ExpiryDate && g[0].Side != g[1].Side))
+		{
+			result.AddRange(byStrike);
+			return result;
+		}
+
+		var byExpiry = orders.GroupBy(o => o.ExpiryDate).Select(g => g.ToList()).ToList();
+		if (byExpiry.All(g => g.Count == 2 && g[0].Side != g[1].Side))
+		{
+			result.AddRange(byExpiry);
+			return result;
+		}
+
+		var buys = orders.Where(o => o.Side == Side.Buy).OrderBy(o => o.Strike).ToList();
+		var sells = orders.Where(o => o.Side == Side.Sell).OrderBy(o => o.Strike).ToList();
+		if (buys.Count == sells.Count && buys.Count > 0)
+		{
+			for (var i = 0; i < buys.Count; i++)
+				result.Add(new List<ParsedOrder> { buys[i], sells[i] });
+			return result;
+		}
+
+		result.Add(orders);
+		return result;
+	}
+
 	private static void BuildStandaloneTrade(ParsedOrder order, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal> fees, ref int seq)
 	{
 		var instrument = Formatters.FormatOptionDisplay(order.Root, order.ExpiryDate, order.Strike);
 		var optionKind = ParsingHelpers.CallPutDisplayName(order.CallPut);
 
-		trades.Add(new Trade(Seq: seq++, Timestamp: order.FilledTime, Instrument: instrument, MatchKey: MatchKeys.Option(order.OccSymbol), Asset: Asset.Option, OptionKind: optionKind, Side: order.Side, Qty: order.Qty, Price: RoundPrice(order.Price), Multiplier: OptionMultiplier, Expiry: order.ExpiryDate));
+		trades.Add(new Trade(Seq: seq++, Timestamp: order.FilledTime, Instrument: instrument, MatchKey: MatchKeys.Option(order.OccSymbol), Asset: Asset.Option, OptionKind: optionKind, Side: order.Side, Qty: order.Qty, Price: RoundPrice(order.Price), Multiplier: OptionMultiplier, Expiry: order.ExpiryDate, Fee: order.TotalFee));
 		AddFee(fees, order.FilledTime, order.Side, order.Qty, order.TotalFee);
 	}
 
@@ -137,7 +202,7 @@ public static partial class JsonlParser
 			var legInstrument = Formatters.FormatOptionDisplay(leg.Root, leg.ExpiryDate, leg.Strike);
 			var legOptionKind = ParsingHelpers.CallPutDisplayName(leg.CallPut);
 
-			trades.Add(new Trade(Seq: seq++, Timestamp: leg.FilledTime, Instrument: legInstrument, MatchKey: MatchKeys.Option(leg.OccSymbol), Asset: Asset.Option, OptionKind: legOptionKind, Side: leg.Side, Qty: leg.Qty, Price: RoundPrice(leg.Price), Multiplier: OptionMultiplier, Expiry: leg.ExpiryDate, ParentStrategySeq: parentSeq));
+			trades.Add(new Trade(Seq: seq++, Timestamp: leg.FilledTime, Instrument: legInstrument, MatchKey: MatchKeys.Option(leg.OccSymbol), Asset: Asset.Option, OptionKind: legOptionKind, Side: leg.Side, Qty: leg.Qty, Price: RoundPrice(leg.Price), Multiplier: OptionMultiplier, Expiry: leg.ExpiryDate, ParentStrategySeq: parentSeq, Fee: leg.TotalFee));
 			AddFee(fees, leg.FilledTime, leg.Side, leg.Qty, leg.TotalFee);
 		}
 	}

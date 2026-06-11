@@ -63,7 +63,11 @@ public record Trade
 	decimal Price,
 	decimal Multiplier,
 	DateTime? Expiry = null,
-	int? ParentStrategySeq = null
+	int? ParentStrategySeq = null,
+	// Exact fee+commission for THIS fill, when the source carries it per row (the jsonl order export
+	// does; the CSV export keeps fees in a separate file and leaves this null). Preferred over the
+	// (timestamp, side, qty) fee dictionary, whose key collides when two combos fill in the same second.
+	decimal? Fee = null
 )
 {
 	public const decimal OptionMultiplier = 100m;

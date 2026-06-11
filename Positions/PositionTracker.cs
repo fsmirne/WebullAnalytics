@@ -80,12 +80,21 @@ public static class PositionTracker
 	/// <summary>Looks up the fee for a trade. For strategy parents, sums up fees from all child legs.</summary>
 	private static decimal LookupFee(Trade trade, List<Trade> allTrades, Dictionary<(DateTime timestamp, Side side, int qty), decimal>? feeLookup)
 	{
-		if (feeLookup == null) return 0m;
-
+		// Exact per-fill fees (jsonl-sourced trades carry them) beat the (timestamp, side, qty)
+		// dictionary, whose key collides when two combos fill in the same second — each parent then
+		// picks up the UNION of both combos' fees (observed live 2026-06-11, $0.27 over-count).
+		// CSV-sourced trades have no per-row fee and keep the dictionary path.
 		if (trade.Asset == Asset.OptionStrategy)
-			return Trade.GetLegs(allTrades, trade.Seq).Select(leg => (leg.Timestamp, leg.Side, leg.Qty)).Distinct().Sum(key => feeLookup.GetValueOrDefault(key, 0m));
+		{
+			var legs = Trade.GetLegs(allTrades, trade.Seq);
+			if (legs.Count > 0 && legs.All(l => l.Fee.HasValue))
+				return legs.Sum(l => l.Fee!.Value);
+			if (feeLookup == null) return 0m;
+			return legs.Select(leg => (leg.Timestamp, leg.Side, leg.Qty)).Distinct().Sum(key => feeLookup.GetValueOrDefault(key, 0m));
+		}
 
-		return feeLookup.GetValueOrDefault((trade.Timestamp, trade.Side, trade.Qty), 0m);
+		if (trade.Fee.HasValue) return trade.Fee.Value;
+		return feeLookup?.GetValueOrDefault((trade.Timestamp, trade.Side, trade.Qty), 0m) ?? 0m;
 	}
 
 	/// <summary>
