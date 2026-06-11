@@ -49,9 +49,28 @@ internal sealed class AnalyzePositionSettings : AnalyzeBaseSettings
 	[Description("Verbosity: error | information (default) | debug. 'debug' adds the put-call-parity implied-dividend diagnostic.")]
 	public string? LogLevel { get; set; }
 
+	[CommandOption("--calibrated")]
+	[Description("Back-solve each leg's IV from its live bid/ask mid at the dividend-adjusted spot — the same mid-consistent surface 'wa report --calibrated' prices on — before the risk diagnostic, probe score and scenario tables run. Defaults from the report config's 'calibrated' key; pass --calibrated false to override it off.")]
+	[DefaultValue(false)]
+	public bool Calibrated { get; set; }
+
+	[CommandOption("--theoretical")]
+	[Description("Price legs at their Black-Scholes theoretical value instead of the live market mid (the same pricing the command already falls back to for past --date runs). Composes with --calibrated (theoretical at mid-implied IVs). Defaults from the report config's 'theoretical' key; pass --theoretical false to override it off.")]
+	[DefaultValue(false)]
+	public bool Theoretical { get; set; }
+
 	/// <summary>True when --log-level debug — surfaces extra diagnostics (e.g. implied dividend) that
 	/// would otherwise clutter the proposal output.</summary>
 	public bool IsDebug => string.Equals(LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
+
+	/// <summary>Applies the shared report-config keys from the base, then the pricing-surface knobs this
+	/// command shares with 'wa report' (calibrated, theoretical) so both tools price identically by default.</summary>
+	internal override void ApplyConfig(Dictionary<string, System.Text.Json.JsonElement> cfg)
+	{
+		base.ApplyConfig(cfg);
+		if (!Program.HasCliOption("calibrated") && cfg.TryGetBool("calibrated", out var calibrated)) Calibrated = calibrated;
+		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
+	}
 
 	public override ValidationResult Validate()
 	{
@@ -216,6 +235,31 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var positionEvents = (await EventCalendarLoader.LoadAsync(new[] { ticker }, new OpenerEventsConfig(), asOfForDiagnostic, cancellation, cacheOnly: false)).Get(ticker);
 		var dividends = DividendScheduleBuilder.BuildForTicker(positionEvents, spot.Value, null);
 
+		// --calibrated (defaults from the report config's 'calibrated' key): re-anchor every chain quote's IV
+		// to its live bid/ask mid at the dividend-adjusted spot — the same mid-consistent surface the report
+		// grid prices on — BEFORE the diagnostic, probe score and scenario tables read it. ResolveIV serves
+		// the quote's iv field everywhere downstream, so one pass here aligns the whole command with
+		// 'wa report --calibrated'. Legs whose mid can't back-solve keep the broker IV; explicit --iv
+		// overrides still win (ResolveIV checks them first). Skipped at hypothetical spots (--spot): the
+		// stale mids no longer reflect the overridden spot, so the inversion would fold the spot move into vol.
+		if (settings.Calibrated && quotes != null && string.IsNullOrEmpty(settings.Spot))
+		{
+			var asOfCal = EvaluationDate.Today + OptionMath.MarketOpen; // same anchor as the report's BuildCalibratedIv
+			var recalibratedQuotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+			var recalibrated = 0;
+			foreach (var (sym, q) in quotes)
+			{
+				var parsed = ParsingHelpers.ParseOptionSymbol(sym);
+				if (parsed == null) { recalibratedQuotes[sym] = q; continue; }
+				var adjustedSpot = OptionMath.DividendAdjustedSpot(spot.Value, dividends, asOfCal, parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate);
+				var iv = OptionMath.TryMarketImpliedIv(sym, parsed, adjustedSpot, asOfCal, quotes);
+				recalibratedQuotes[sym] = iv.HasValue ? q with { ImpliedVolatility = iv.Value } : q;
+				if (iv.HasValue) recalibrated++;
+			}
+			quotes = recalibratedQuotes;
+			if (recalibrated > 0) Log.Debug($"Calibration: re-anchored {recalibrated} contract IV(s) to the live mid surface (report parity).");
+		}
+
 		var diagnostic = BuildAndLogDiagnostic(
 			logPath: Program.ResolvePath("data/analyze-position.jsonl"),
 			ticker: tickerForTrend ?? "UNKNOWN",
@@ -230,7 +274,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				if (leg == null) return 0m;
 				var iv = ResolveIV(sym, settings, quotes);
 				var dte = Math.Max(1, (leg.Parsed.ExpiryDate - asOfForDiagnostic.Date).Days);
-				return LiveOrBsMid(quotes, sym, spot.Value, leg.Parsed.Strike, dte, iv, leg.Parsed.CallPut, dividends);
+				return LiveOrBsMid(settings.Theoretical ? null : quotes, sym, spot.Value, leg.Parsed.Strike, dte, iv, leg.Parsed.CallPut, dividends);
 			},
 			trend: trendSnap,
 			quotesForProbe: quotes,
@@ -573,7 +617,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		bool IsRoll = false,
 		decimal? RankScore = null,			// true iff this scenario closes an existing leg and opens a new one (consulted by BuildReproductionCommands)
 		decimal? ExpectedPnLPerContract = null,	// probability-weighted EV at target (lognormal spot grid), vs the spot-pinned ProjectedValue. Null when not computed for this scenario type.
-		decimal AssignmentPenaltyPerContract = 0m);	// per-contract assignment-risk charge (verticals only); subtracted in the risk-adjusted rank.
+		decimal AssignmentPenaltyPerContract = 0m,	// per-contract assignment-risk charge (verticals only); subtracted in the risk-adjusted rank.
+		decimal PeakCashPerContract = 0m)	// up-front cash of the FIRST order when the scenario executes as sequential single-leg orders (non-calendar rolls: the buy-to-close cost) — the sell credit isn't available until that order fills. 0 when one net-priced combo covers the whole change.
+	{
+		/// <summary>Per-contract buying power the scenario actually consumes. Margin delta alone is wrong for
+		/// rolls: a roll can be margin-neutral yet cost a large cash debit, and a split (two-order) roll must
+		/// fund its buy-to-close leg in full before the sell credit lands.</summary>
+		public decimal FundingPerContract => Math.Max(Math.Max(Math.Max(MarginDeltaPerContract, 0m), Math.Max(-CashImpactPerContract, 0m)), PeakCashPerContract);
+	}
 
 	/// <summary>Hypothetical OCC symbols the scenario generators will reference. Pre-enumerated so we can
 	/// include them in a single up-front quote fetch.</summary>
@@ -678,7 +729,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var shortExpiry = shortPut.Parsed.ExpiryDate;
 		var longExpiry = longPut.Parsed.ExpiryDate;
 		var shortDte = Math.Max(1, (shortExpiry.Date - asOf.Date).Days);
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		var ivShortPut = ResolveIV(shortPut.Symbol, settings, quotes);
 		var ivLongPut = ResolveIV(longPut.Symbol, settings, quotes);
@@ -774,7 +825,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var longCall = legs.First(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "C");
 		var expiry = shortPut.Parsed.ExpiryDate;
 		var expiryDte = Math.Max(1, (expiry.Date - asOf.Date).Days);
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		// Helper: intrinsic value of the whole 4-leg position at a given expiration spot. Per-share,
 		// signed so a positive number is what we'd receive if we closed at that intrinsic.
@@ -860,7 +911,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var list = new List<Scenario>();
 		var iv = ResolveIV(longLeg.Symbol, settings, quotes);
 		var callPut = longLeg.Parsed.CallPut;
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		// 1. Hold (do nothing) — value at expiry = intrinsic.
 		var valueAtExpiry = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
@@ -907,7 +958,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var callPut = shortLeg.Parsed.CallPut;
 		var ivShort = ResolveIV(shortLeg.Symbol, settings, quotes);
 		var ivLong = ResolveIV(longLeg.Symbol, settings, quotes);
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		var expiry = shortLeg.Parsed.ExpiryDate;
 		var expiryDte = Math.Max(1, (expiry.Date - asOf.Date).Days);
@@ -1071,7 +1122,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// When a date override is active, live bid/ask reflects today's market prices, not the
 		// evaluation date's. Null out quotes for pricing so LiveOrBsMid/LiveBidAsk always use
 		// Black-Scholes with the correct DTE from asOf. IV is still sourced from live quotes above.
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue ? null : quotes;
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		var shortMidNow = LiveOrBsMid(quotesForPricing, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivShort, callPut, dividends);
 		var longMidNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivLong, callPut, dividends);
@@ -1196,7 +1247,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					marginPerContract: sameExpMarginDelta,
 					daysToTarget: dteSameExp,
 					rationale: $"shift to ${newStrike:F2} strike, keep {shortLeg.Parsed.ExpiryDate:MM-dd} expiry — collect theta this week; mid net ${cashPerShareSameExp:+0.00;-0.00}/share; at exp: ${projSameExpPerShare:F2}",
-					isRoll: true);
+					isRoll: true,
+					peakCashPerContract: shortMidNow * 100m); // strike changes → splits into two orders; the buy-to-close funds alone before the sell credit lands
 			}
 
 			// 5. Roll short to bracket strikes near spot (one per strike).
@@ -1230,7 +1282,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					marginPerContract: marginDelta,
 					daysToTarget: dteNewShort,
 					rationale: $"step short to ${newStrike:F2} (spot ${spot:F2}); mid net ${cashPerShare:+0.00;-0.00}/share; at new exp: ${newProjectedPerShare:F2}",
-					isRoll: true);
+					isRoll: true,
+					peakCashPerContract: shortMidNow * 100m); // strike changes → splits into two orders; the buy-to-close funds alone before the sell credit lands
 			}
 		}
 
@@ -1435,11 +1488,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var fullQty = legs[0].Qty;
 		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
 		var initialDebitPerContract = initialDebitPerShare * 100m;
+		// Same funding model as EmitFullAndPartial (adds open as one net-priced combo, so no peak term):
+		// BP consumed = max(margin, net cash debit). For the doubles margin already equals the debit.
+		var fundingPerContract = Math.Max(Math.Max(marginPerContract, 0m), Math.Max(-cashPerShareOfChange * 100m, 0m));
 		var fullMarginTotal = marginPerContract * fullQty;
-		var maxPartial = !availableCash.HasValue || marginPerContract <= 0m
+		var maxPartial = !availableCash.HasValue || fundingPerContract <= 0m
 			? 0
-			: (int)Math.Floor(availableCash.Value / marginPerContract);
-		var fullFundable = !availableCash.HasValue || fullMarginTotal <= availableCash.Value;
+			: (int)Math.Floor(availableCash.Value / fundingPerContract);
+		var fullFundable = !availableCash.HasValue || fundingPerContract * fullQty <= availableCash.Value;
 		var hasFundablePartial = maxPartial > 0 && maxPartial < fullQty;
 		var hasEv = expectedUnchangedPerShare.HasValue && expectedNewPerShare.HasValue;
 
@@ -1506,14 +1562,18 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal marginPerContract,
 		int daysToTarget,
 		string rationale,
-		bool isRoll = false)
+		bool isRoll = false,
+		decimal peakCashPerContract = 0m)
 	{
 		var fullQty = legs[0].Qty;
 		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
 		var initialDebitPerContract = initialDebitPerShare * 100m;
-		var fullMarginTotal = marginPerContract * fullQty;
-		var maxPartial = !availableCash.HasValue || marginPerContract <= 0m ? 0 : (int)Math.Floor(availableCash.Value / marginPerContract);
-		var fullFundable = !availableCash.HasValue || fullMarginTotal <= availableCash.Value;
+		// Fundability gates on the BP the change actually consumes — max of margin delta, net cash debit, and
+		// the peak first-order cost for split rolls — not margin alone (a margin-neutral roll still spends cash).
+		var fundingPerContract = Math.Max(Math.Max(Math.Max(marginPerContract, 0m), Math.Max(-cashPerShareOfChange * 100m, 0m)), peakCashPerContract);
+		var fullFundingTotal = fundingPerContract * fullQty;
+		var maxPartial = !availableCash.HasValue || fundingPerContract <= 0m ? 0 : (int)Math.Floor(availableCash.Value / fundingPerContract);
+		var fullFundable = !availableCash.HasValue || fullFundingTotal <= availableCash.Value;
 		var hasFundablePartial = maxPartial > 0 && maxPartial < fullQty;
 
 		if (fullFundable || !hasFundablePartial)
@@ -1531,11 +1591,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				Qty: fullQty,
 				DaysToTarget: daysToTarget,
 				Rationale: rationale,
-				IsRoll: isRoll));
+				IsRoll: isRoll,
+				PeakCashPerContract: peakCashPerContract));
 		}
 
-		// Partial variant: only emit if margin is positive and cash is constrained below full.
-		if (!availableCash.HasValue || marginPerContract <= 0m) return;
+		// Partial variant: only emit if the change consumes BP and cash is constrained below full.
+		if (!availableCash.HasValue || fundingPerContract <= 0m) return;
 		if (maxPartial <= 0 || maxPartial >= fullQty) return;
 
 		// Per-contract-of-total values for the partial mix.
@@ -1551,8 +1612,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			MarginDeltaPerContract: marginPerContract * maxPartial / fullQty,
 			Qty: fullQty,
 			DaysToTarget: daysToTarget,
-			Rationale: $"execute on {maxPartial} contracts (${marginPerContract * maxPartial:N0} margin; full size would need ${fullMarginTotal:N0}); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp",
-			IsRoll: isRoll));
+			Rationale: $"execute on {maxPartial} contracts (${fundingPerContract * maxPartial:N0} BP; full size would need ${fullFundingTotal:N0}); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp",
+			IsRoll: isRoll,
+			PeakCashPerContract: peakCashPerContract * maxPartial / fullQty));
 	}
 
 	// ─── Helpers ─────────────────────────────────────────────────────────────
@@ -1597,7 +1659,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		.ToList();
 
 	private static bool IsScenarioFundable(Scenario sc, decimal? availableCash) =>
-		!availableCash.HasValue || sc.MarginDeltaPerContract * sc.Qty <= availableCash.Value;
+		!availableCash.HasValue || sc.FundingPerContract * sc.Qty <= availableCash.Value;
 
 	// Assignment-risk charge for vertical scenarios (per contract, total $); folded into the risk-adjusted rank.
 	private static decimal ComputeVerticalAssignmentPenalty(Scenario sc, PositionSnapshot currentShortLeg, decimal spot, decimal strikeStep, decimal technicalBias)
@@ -1842,14 +1904,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		Scenario? topFundable = null;
 		foreach (var sc in scenarios)
 		{
-			var delta = sc.MarginDeltaPerContract * sc.Qty;
-			if (!availableCash.HasValue || delta <= availableCash.Value) { topFundable = sc; break; }
+			if (IsScenarioFundable(sc, availableCash)) { topFundable = sc; break; }
 		}
 
 		foreach (var sc in scenarios)
 		{
 			var marginTotal = sc.MarginDeltaPerContract * sc.Qty;
-			var fundable = !availableCash.HasValue || marginTotal <= availableCash.Value;
+			var fundingTotal = sc.FundingPerContract * sc.Qty;
+			var fundable = !availableCash.HasValue || fundingTotal <= availableCash.Value;
 			var isRecommended = topFundable != null && ReferenceEquals(sc, topFundable);
 			var style = isRecommended ? "bold green" : (fundable ? "white" : "dim");
 
@@ -1869,7 +1931,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					: (availableCash.HasValue && marginTotal > availableCash.Value
 						? $"[red]margin +${marginTotal:N2} (NEEDS ${marginTotal - availableCash.Value:N2} MORE)[/]"
 						: $"[yellow]margin +${marginTotal:N2}[/]");
-			var fundMarker = !fundable ? " [red](not fundable)[/]" : "";
+			var fundMarker = !fundable ? $" [red](not fundable — needs ~${fundingTotal:N0} BP, have ${availableCash!.Value:N0})[/]" : "";
 			var prefix = isRecommended ? "★ " : "";
 
 			var rationaleText = WebullAnalytics.IO.TextFileExporter.NormalizeArrows(ascii, sc.Rationale);
@@ -1976,11 +2038,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			return (trades, analyze);
 		}
 
-		// Combo line: legs without per-leg prices, net limit from CashImpactPerContract.
-		var tradeLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}");
-		var limit = Math.Abs(sc.CashImpactPerContract / 100m).ToString("F2", CultureInfo.InvariantCulture);
-		var combo = $"wa trade place --trade \"{string.Join(",", tradeLegs)}\" --limit {limit}";
-		return (new[] { combo }, analyze);
+		// Combo line: net --limit from the LEG PRICES, never CashImpactPerContract — partial variants
+		// pro-rate that field per ORIGINAL contract for the table (× maxPartial/fullQty), which diluted
+		// the emitted limit (e.g. a $3.625 net debit rendered as --limit 1.51 on a 10-of-24 partial).
+		return (new[] { BuildComboFromLegs(legs) }, analyze);
 	}
 
 	/// <summary>Builds a single combo `wa trade place` line from parsed legs. `--limit` is the absolute
