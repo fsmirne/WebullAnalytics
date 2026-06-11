@@ -51,14 +51,21 @@ echo
 # Create install directory if it doesn't exist
 mkdir -p "$INSTALL_DIR"
 
-# Copy the executables
+# Copy the executables. cp -f directly onto a RUNNING binary fails with ETXTBSY (a watch or the
+# scraper capturing until 16:05 holds the text segment), so copy to a temp name and rename over the
+# target instead: rename is atomic, always succeeds, and the running process keeps executing its
+# (now-unlinked) old inode untouched. Same idea as install.bat's move-aside on Windows, minus the
+# .old leftovers — the unlinked inode is reclaimed when the old process exits. Running processes
+# still execute the OLD code until restarted; the install just stops being blocked by them.
 echo "Copying wa to $INSTALL_DIR..."
-cp -f "bin/Release/net10.0/linux-x64/publish/wa" "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/wa"
+cp -f "bin/Release/net10.0/linux-x64/publish/wa" "$INSTALL_DIR/wa.new"
+chmod +x "$INSTALL_DIR/wa.new"
+mv -f "$INSTALL_DIR/wa.new" "$INSTALL_DIR/wa"
 
 echo "Copying wa-scraper to $INSTALL_DIR..."
-cp -f "WebullAnalytics.Scraper/bin/Release/net10.0/linux-x64/publish/wa-scraper" "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/wa-scraper"
+cp -f "WebullAnalytics.Scraper/bin/Release/net10.0/linux-x64/publish/wa-scraper" "$INSTALL_DIR/wa-scraper.new"
+chmod +x "$INSTALL_DIR/wa-scraper.new"
+mv -f "$INSTALL_DIR/wa-scraper.new" "$INSTALL_DIR/wa-scraper"
 
 # Create the data dir at the XDG location the binary looks for at startup.
 echo "Creating data directory at $DATA_DIR..."
