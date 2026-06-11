@@ -71,6 +71,12 @@ internal sealed class OpenCandidateEvaluator
 			: (exDate != null ? new TickerEvents(ticker.ToUpperInvariant(), null, null, exDate, amount) : null);
 	}
 
+	/// <summary>Per-ticker underlying spots seen by the most recent <see cref="EvaluateAsync"/> call — the
+	/// context's spots merged with the phase-A0 bootstrap probe. Lets the live watch heartbeat print a spot on
+	/// flat ticks, where the management-side quote fetch has no position legs and therefore no underlying price.
+	/// Empty until the first call completes phase A0; stale (last tick's value) if the opener is disabled.</summary>
+	public IReadOnlyDictionary<string, decimal> LastUnderlyings { get; private set; } = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
 	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation, QuoteOverrides quoteOverrides = default)
 	{
 		var cfg = _config.Opener;
@@ -131,6 +137,7 @@ internal sealed class OpenCandidateEvaluator
 			foreach (var (k, v) in boot.Underlyings) bootstrapSpots[k] = v;
 			foreach (var (k, v) in boot.Options) bootstrapOptions[k] = v;
 		}
+		LastUnderlyings = bootstrapSpots;
 
 		// Index the chain expirations available per ticker so the enumerator can use real chain dates
 		// (which carry holiday adjustments — e.g. Juneteenth shifts the June monthly to Thursday) instead

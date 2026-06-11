@@ -184,17 +184,19 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				// and how many; when none, it's the "nothing met the bar" heartbeat. Suppressed at debug, where
 				// the per-tick [debug] summary below already carries the timestamp and counts.
 				var tickEmitted = (settings.EmitManagementProposals ? results.Count : 0) + openResultCount;
+				// On flat ticks the management-side snapshot has no position legs and therefore no underlying
+				// price — fall back to the spot the opener's bootstrap probe resolved this tick.
+				var haveSpot = quoteSnapshot.Underlyings.TryGetValue(config.Ticker, out var hbSpot) || (openEvaluator?.LastUnderlyings.TryGetValue(config.Ticker, out hbSpot) ?? false);
 				if (!debug)
 				{
-					var spotStr = quoteSnapshot.Underlyings.TryGetValue(config.Ticker, out var hbSpot) ? hbSpot.ToString("0.00") : "?";
+					var spotStr = haveSpot ? hbSpot.ToString("0.00") : "?";
 					var summary = tickEmitted == 0 ? "no proposals emitted" : $"{tickEmitted} proposal(s) emitted";
 					AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} — {summary}[/]");
 				}
 
 				if (debug)
 				{
-					quoteSnapshot.Underlyings.TryGetValue(config.Ticker, out var dbgSpot);
-					Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={dbgSpot} positions={openPositions.Count} mgmtResults={results.Count} openProposals={openResultCount}");
+					Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={(haveSpot ? hbSpot : null)} positions={openPositions.Count} mgmtResults={results.Count} openProposals={openResultCount}");
 				}
 
 				ticksRun++;
