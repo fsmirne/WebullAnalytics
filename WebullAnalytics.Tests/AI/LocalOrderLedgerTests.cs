@@ -44,12 +44,12 @@ public class LocalOrderLedgerTests : IDisposable
 	{
 		// The live failure: order placed and filled, broker history hasn't caught up yet.
 		var entries = new[] { new LocalOrderLedger.Entry("2026-06-11", "SPY", true, "fp-dd-call", "cid-1") };
-		var fingerprints = new HashSet<string>(StringComparer.Ordinal);
+		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
 		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, rootCount);
 
-		Assert.Contains("fp-dd-call", fingerprints);
+		Assert.Equal(1, fingerprints["fp-dd-call"]);
 		Assert.Equal(1, rootCount["SPY"]);
 	}
 
@@ -60,7 +60,7 @@ public class LocalOrderLedgerTests : IDisposable
 		// free the slot), the ledger entry must stop contributing.
 		var entries = new[] { new LocalOrderLedger.Entry("2026-06-11", "SPY", true, "fp-dd-call", "cid-1") };
 		var reported = new HashSet<string>(StringComparer.Ordinal) { "cid-1" };
-		var fingerprints = new HashSet<string>(StringComparer.Ordinal);
+		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
 		BrokerStateService.MergeLedgerEntries(entries, reported, fingerprints, rootCount);
@@ -70,27 +70,31 @@ public class LocalOrderLedgerTests : IDisposable
 	}
 
 	[Fact]
-	public void Merge_FingerprintAlreadyActiveAtBroker_DoesNotDoubleCount()
+	public void Merge_UnreportedEntryWithBrokerSameShape_CountsAsSecondOrder()
 	{
+		// An unreported ledger entry whose leg-shape matches an existing broker order is a REAL second
+		// order (e.g. a deliberate --submit-override re-entry the broker hasn't echoed yet) — the
+		// fingerprint multiset and cap must both grow.
 		var entries = new[] { new LocalOrderLedger.Entry("2026-06-11", "SPY", true, "fp-dd-call", null) };
-		var fingerprints = new HashSet<string>(StringComparer.Ordinal) { "fp-dd-call" };
+		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal) { ["fp-dd-call"] = 1 };
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase) { ["SPY"] = 1 };
 
 		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, rootCount);
 
-		Assert.Equal(1, rootCount["SPY"]);
+		Assert.Equal(2, fingerprints["fp-dd-call"]);
+		Assert.Equal(2, rootCount["SPY"]);
 	}
 
 	[Fact]
 	public void Merge_CloseEntry_DedupsButDoesNotConsumeCap()
 	{
 		var entries = new[] { new LocalOrderLedger.Entry("2026-06-11", "SPY", false, "fp-close", "cid-9") };
-		var fingerprints = new HashSet<string>(StringComparer.Ordinal);
+		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
 		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, rootCount);
 
-		Assert.Contains("fp-close", fingerprints);
+		Assert.Equal(1, fingerprints["fp-close"]);
 		Assert.False(rootCount.ContainsKey("SPY"));
 	}
 }

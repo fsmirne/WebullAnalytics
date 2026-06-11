@@ -51,7 +51,12 @@ internal sealed class OpenerAutoExecutor
 	/// PRIOR day. The broker-order dedup below can't catch this: a prior-day open is a filled order that
 	/// is neither in today's orders nor a working order. This guard is submit-independent (no broker call)
 	/// so watch's dry-run reports the skip too.</summary>
-	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, IReadOnlyDictionary<string, OpenPosition> openPositions, DateTime now, CancellationToken cancellation)
+	/// <param name="bypassDailyCap">Skip the today's-broker-order-count gate for this ONE call — the
+	/// `wa ai scan --submit --uncapped` escape hatch for a deliberate extra trade after the cap is
+	/// spent. The run stays bounded to MaxOrdersPerDay submissions and all other guards (held-position
+	/// dedup, broker dedup, affordability) remain active. The watch loop must never set this: it would
+	/// re-fire on every tick, which is exactly what the cap exists to prevent.</param>
+	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, IReadOnlyDictionary<string, OpenPosition> openPositions, DateTime now, CancellationToken cancellation, bool bypassDailyCap = false)
 	{
 		if (!_config.Enabled) return 0;
 		if (proposals.Count == 0) return 0;
@@ -105,14 +110,16 @@ internal sealed class OpenerAutoExecutor
 				continue;
 			}
 
-			// Broker-truth dedup: if the structure is already active (pending or filled today), skip.
-			// This catches same-proposal-across-ticks, cross-process, cross-restart, and the "limit
-			// placed and filled, now we'd otherwise re-fire" case. Split structures (DiagonalVertical /
-			// DoubleCalendar / DoubleDiagonal) place as two combo orders, so they're "already active"
-			// only when BOTH sub-orders are present — a partial (one leg-set placed, the other not) must
-			// fall through so SubmitOpen can finish the structure.
+			// Broker-truth dedup: if the structure is already active (pending or filled today) and not
+			// closed since, skip. This catches same-proposal-across-ticks, cross-process, cross-restart,
+			// and the "limit placed and filled, now we'd otherwise re-fire" case — while NETTING opens
+			// against same-day closes, so a structure opened and closed today can be deliberately
+			// re-opened (see HasNetOpenMatching). Split structures (DiagonalVertical / DoubleCalendar /
+			// DoubleDiagonal) place as two combo orders, so they're "already active" only when BOTH
+			// sub-orders are present — a partial (one leg-set placed, the other not) must fall through
+			// so SubmitOpen can finish the structure.
 			if (_config.Submit && _brokerState != null
-				&& StructureOrderSplit.Split(p.StructureKind, p.Legs).All(g => _brokerState.HasPendingMatching(g.Legs.Select(l => (l.Symbol, l.Action)))))
+				&& StructureOrderSplit.Split(p.StructureKind, p.Legs).All(g => _brokerState.HasNetOpenMatching(g.Legs.Select(l => (l.Symbol, l.Action)))))
 			{
 				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (broker already has matching order):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
 				continue;
@@ -122,8 +129,13 @@ internal sealed class OpenerAutoExecutor
 			// excluding canceled/rejected) PLUS submissions issued in this tick.
 			if (_config.Submit && brokerActiveCount + ordersThisTick >= _config.MaxOrdersPerDay)
 			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (daily cap):[/] {_config.MaxOrdersPerDay} order(s) already active at broker today (filled + pending).");
-				break;
+				if (!bypassDailyCap)
+				{
+					AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (daily cap):[/] {_config.MaxOrdersPerDay} order(s) already active at broker today (filled + pending).");
+					break;
+				}
+				if (ordersThisTick >= _config.MaxOrdersPerDay) break; // --uncapped lifts the broker count, not this run's bound
+				AnsiConsole.MarkupLine($"[yellow]daily cap BYPASSED (--uncapped):[/] {brokerActiveCount} opening order(s) already active at broker today; submitting anyway.");
 			}
 
 			var result = await SubmitOpen(p, cancellation);
@@ -178,7 +190,7 @@ internal sealed class OpenerAutoExecutor
 		for (var i = 0; i < groups.Count; i++)
 		{
 			var g = groups[i];
-			if (_brokerState != null && _brokerState.HasPendingMatching(g.Legs.Select(l => (l.Symbol, l.Action))))
+			if (_brokerState != null && _brokerState.HasNetOpenMatching(g.Legs.Select(l => (l.Symbol, l.Action))))
 			{
 				AnsiConsole.MarkupLine($"[yellow]opener auto-execute:[/] {Markup.Escape(p.Ticker)} {p.StructureKind}{LabelSuffix(g.Label)} already active at broker — skipping this leg-set.");
 				continue;
