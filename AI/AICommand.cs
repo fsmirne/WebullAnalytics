@@ -251,7 +251,7 @@ internal static class AIContext
 			try { account = ResolveTradeAccount(config, accountOverride); }
 			catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]auto-execute disabled (account resolution failed): {Markup.Escape(ex.Message)}[/]"); }
 		}
-		var brokerState = account != null ? new BrokerStateService(account) : null;
+		var brokerState = account != null ? new BrokerStateService(account, new LocalOrderLedger(Program.ResolvePath("data/local-orders.jsonl"))) : null;
 		var mgmt = config.AutoExecute.Management.Enabled ? new ManagementAutoExecutor(config.AutoExecute.Management, account, brokerState) : null;
 		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account, brokerState) : null;
 		return (mgmt, opener);

@@ -200,6 +200,7 @@ internal sealed class ManagementAutoExecutor
 			using var client = new WebullOpenApiClient(_account);
 			var placed = await client.PlaceOrderAsync(body);
 			AnsiConsole.MarkupLine($"[green]auto-execute placed:[/] [dim]{Markup.Escape(p.Rule)}[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
+			_brokerState?.RecordLocalPlacement(position.Ticker, p.Legs.Select(l => (l.Symbol, l.Action)), placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: true);
 			return true;
 		}
 		catch (WebullOpenApiException ex)
@@ -320,6 +321,7 @@ internal sealed class ManagementAutoExecutor
 			using var client = new WebullOpenApiClient(_account);
 			var placed = await client.PlaceOrderAsync(body);
 			AnsiConsole.MarkupLine($"[green]auto-execute placed:[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
+			_brokerState?.RecordLocalPlacement(position.Ticker, legSpecs.Select(l => (l.Symbol, l.Action)), placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: false);
 			return true;
 		}
 		catch (WebullOpenApiException ex)
