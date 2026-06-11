@@ -102,6 +102,7 @@ class Program
 			config.AddBranch("trade", trade =>
 			{
 				trade.AddCommand<TradePlaceCommand>("place");
+				trade.AddCommand<TradeCloseCommand>("close");
 				trade.AddCommand<TradeCancelCommand>("cancel");
 				trade.AddCommand<TradeStatusCommand>("status");
 				trade.AddCommand<TradeListCommand>("list");
