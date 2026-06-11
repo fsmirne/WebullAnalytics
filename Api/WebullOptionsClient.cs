@@ -169,7 +169,7 @@ internal static class WebullOptionsClient
 		if (symbolsToRefresh.Count == 0)
 			return (chain, spot, derivativeIds);
 
-		Console.WriteLine($"Webull: refreshing {symbolsToRefresh.Count} non-front-month chain contract(s) for max-pain/GEX accuracy...");
+		WebullAnalytics.Utils.Log.Debug($"Webull: refreshing {symbolsToRefresh.Count} non-front-month chain contract(s) for max-pain/GEX accuracy...");
 		var mutableChain = new Dictionary<string, OptionContractQuote>(chain, StringComparer.OrdinalIgnoreCase);
 		await RefreshContractsAsync(config, mutableChain, symbolsToRefresh, derivativeIds, cancellationToken);
 		return (mutableChain, spot, derivativeIds);
