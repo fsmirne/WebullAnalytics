@@ -28,7 +28,12 @@ internal static class DividendScheduleBuilder
 		else
 			return null; // ex-date known but no amount and no config yield → can't size the dividend
 
-		return new[] { new DividendEvent(exDate.Date, amount) };
+		// Provider ex-dates are often pattern-projected estimates that ignore market holidays (e.g. SPY's
+		// nominal third-Friday 2026-06-19 is Juneteenth; the actual ex-date is Thursday 06-18). An ex-date
+		// can't fall on a closed session, so snap to the previous open day — the same convention the chain
+		// uses for holiday-Friday expiries. Getting this wrong flips WHICH leg of a calendar straddling the
+		// short expiry carries the dividend, shifting modeled break-evens by several points.
+		return new[] { new DividendEvent(MarketCalendar.PreviousOpenOnOrBefore(exDate.Date), amount) };
 	}
 
 	/// <summary>Assembles the ticker → schedule map used by <see cref="AnalysisOptions.Dividends"/> from a
