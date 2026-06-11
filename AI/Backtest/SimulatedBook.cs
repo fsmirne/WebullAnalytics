@@ -428,6 +428,8 @@ internal sealed class SimulatedBook
 	{
 		var shortLeg = legs.FirstOrDefault(l => l.Side == Side.Sell) ?? legs[0];
 		var expiry = shortLeg.Expiry ?? DateTime.MinValue;
-		return $"{ticker}_{strategyKind}_{shortLeg.Strike:F2}_{expiry:yyyyMMdd}";
+		// CallPut disambiguates the two same-strike halves of a side-split double (--split): both book as
+		// e.g. LongCalendar at the same short strike/expiry and would otherwise collide, silently dropping one.
+		return $"{ticker}_{strategyKind}_{shortLeg.Strike:F2}{shortLeg.CallPut}_{expiry:yyyyMMdd}";
 	}
 }
