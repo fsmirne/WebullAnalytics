@@ -119,9 +119,14 @@ internal sealed class ScraperLoop
 	/// Keeps contracts expiring from today out to <c>config.MaxDte</c> calendar days, then applies a
 	/// <c>±config.StrikeBandFraction</c> moneyness band around the fetched spot (Schwab returns range=ALL, so the
 	/// band is enforced here). MaxDte=0 (default) keeps only the same-day 0DTE expiry; a larger MaxDte also
-	/// captures the further-dated legs the diagonal/calendar structures use. The live scraper fires at the real
-	/// ET wall-clock minute, which is ALREADY start-of-bar (09:30:00 = the 09:30 minute), so it writes the time
-	/// as-is — do NOT apply any -60s end-of-bar shift (that shift only exists for ThetaData's end-of-bar stamps).</summary>
+	/// captures the further-dated legs the diagonal/calendar structures use.
+	///
+	/// Row label = fire minute MINUS ONE: validated 2026-06-11 (1.4M-row Schwab-vs-ThetaData join), the
+	/// store's ThetaData row labeled T is the NBBO at the (T+1):00 boundary — its raw end-of-bar stamps are
+	/// relabeled -60s at ingest. The scraper firing at T:00+ε samples that same boundary, so writing label
+	/// T-1 makes live and historical rows mean the same instant (same-label join: median $0.00; fire-minute
+	/// labels disagreed by the full intra-minute drift, ~$0.07 median on SPY). The first capture of the day
+	/// is the 09:30 fire labeled 09:29 — the auction-boundary row, exactly like ThetaData's.</summary>
 	private async Task<(int Count, decimal? Spot)> TickOnceAsync(DateTime fireWallClock, CancellationToken cancellation)
 	{
 		var fireEt = TimeZoneInfo.ConvertTime(fireWallClock, NyTz);
@@ -171,17 +176,23 @@ internal sealed class ScraperLoop
 		// a confusing empty record. The caller treats a zero count as a soft miss.
 		if (todayContracts.Count == 0) return (0, spot);
 
-		var dateStr = fireEt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-		// The fire-time is the real ET wall-clock minute, which is ALREADY start-of-bar (09:30:00 = the 09:30
-		// minute) — write it as-is. Do NOT apply the -60s shift the ThetaData pull uses to normalize its
-		// end-of-bar stamps (that shift only exists for ThetaData's end-of-bar minute stamps).
-		var timeStr = fireEt.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+		// Label = fire minute - 1 (see the method doc): the T:00+ε fetch IS the end-of-bar sample for
+		// minute T-1, which is what a store row labeled T-1 means under the ThetaData ingest convention.
+		// Floor to the minute first so a retry-delayed fire within the minute can't smear the label.
+		var labelEt = new DateTime(fireEt.Year, fireEt.Month, fireEt.Day, fireEt.Hour, fireEt.Minute, 0).AddMinutes(-1);
+		var dateStr = labelEt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+		var timeStr = labelEt.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
 
-		// --- data/quotes/<TICKER>/<expiry>.csv : minute NBBO time-series, one CSV per expiration ---
-		await AppendQuotesAsync(todayContracts, dateStr, timeStr, cancellation);
+		// Pre-open gate on FIRE time (not the label): Schwab serves a frozen indicative book before 09:30
+		// (verified 2026-06-10), so fires before the open are skipped; the 09:30:00 fire is the first real
+		// sample and lands as the 09:29-labeled auction-boundary row.
+		if (fireEt.TimeOfDay >= MarketOpenEt)
+			await AppendQuotesAsync(todayContracts, dateStr, timeStr, cancellation);
 
-		// --- data/oi/<TICKER>/<date>.jsonl : ONE full-chain snapshot per day (OI is constant intraday) ---
-		WriteOiSnapshotIfFirstOfDay(todayContracts, dateStr, fireUtc, fireEt, spot);
+		// --- data/oi/<TICKER>/<date>.jsonl : ONE full-chain snapshot per day (OI is constant intraday).
+		// OI is keyed by the calendar session, not a bar boundary — stamp the FIRE date (the label date
+		// would be the prior day for a hypothetical midnight fire; for the 09:30 fire they coincide).
+		WriteOiSnapshotIfFirstOfDay(todayContracts, fireEt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), fireUtc, fireEt, spot);
 
 		return (todayContracts.Count, spot);
 	}
@@ -197,13 +208,11 @@ internal sealed class ScraperLoop
 	/// only skipped them by the accident of TryParse failing.</summary>
 	private async Task AppendQuotesAsync(List<OptionContractQuote> contracts, string dateStr, string timeStr, CancellationToken cancellation)
 	{
-		// No quote rows before the 09:30 ET open: Schwab serves a FROZEN indicative pre-open book
-		// (verified 2026-06-10: ATM SPY rows 09:25–09:29 identical at 17.03×17.10 with 0×0 sizes, then
-		// the real auction quote at 09:30 was 15.73×15.81 — $1.30 away). Those rows pass the store's
-		// bid>0/ask>0 validity check and the 5-minute staleness lookback could serve them AT the open,
-		// silently marking positions to a stale book. ThetaData writes pre-open rows as 0.0 (rejected by
-		// the reader), so skipping keeps the two sources behaviorally identical at the open.
-		if (string.CompareOrdinal(timeStr, "09:30:00") < 0) return;
+		// Pre-open gating (Schwab serves a FROZEN indicative book before 09:30, verified 2026-06-10:
+		// ATM SPY rows 09:25–09:29 identical at 17.03×17.10 with 0×0 sizes, then the real auction quote
+		// at 09:30 was 15.73×15.81 — $1.30 away) is the CALLER's job, on FIRE time — the timeStr here is
+		// the end-of-bar label (fire minute - 1), so a time check against it would also drop the
+		// legitimate 09:29-labeled auction-boundary row.
 		const string header = "date,time,strike,right,bid,ask,bid_size,ask_size";
 		foreach (var byExpiry in contracts.GroupBy(q => WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)!.ExpiryDate.Date))
 		{
