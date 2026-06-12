@@ -3,6 +3,7 @@ using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using WebullAnalytics.Api;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Utils;
@@ -47,7 +48,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public int TopWalls { get; set; } = 5;
 
 	[CommandOption("--intraday")]
-	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Offline-only — requires an explicit --date (today included) with a data/oi snapshot. Skips the walls/totals/per-expiry tables.")]
+	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Per-bucket IVs are back-solved from the minute-quote store (data/quotes) when it covers the day, else frozen from the snapshot. Offline-only — requires an explicit --date (today included) with a data/oi snapshot. Skips the walls/totals/per-expiry tables.")]
 	public bool Intraday { get; set; }
 
 	[CommandOption("--interval <MIN>")]
@@ -161,7 +162,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			}
 			if (settings.Exante && !ApplyExanteIvs(ticker, asOf.Date, quotes))
 				return 1;
-			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin);
+			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante);
 			return 0;
 		}
 
@@ -171,6 +172,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
 			return 1;
 		}
+
+		// Live runs log what THIS computation showed (gravity/walls/flip/max-pain per expiry) to data/gex —
+		// the vendor-reported IVs these values are built on are never persisted intraday, so the displayed
+		// numbers are otherwise irreproducible; the --intraday heatmap reads this log back as its "Live" row.
+		if (!settings.EvaluationDateOverride.HasValue)
+			AppendGexLog(ticker, spot.Value, matrix, settings);
 
 		RenderHeader(ticker, spot.Value, asOf, expiryFilter, matrix);
 		AnsiConsole.WriteLine();
@@ -580,8 +587,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// <summary>Renders the 0DTE intraday GEX gravity-migration heatmap: rows = strikes (descending), columns = RTH
 	/// hour marks. At each hour the per-strike GEX is recomputed at that hour's intraday spot against the day's fixed
 	/// OI, so the gravity strike (bold-underlined) is seen migrating as price moves. Brightness ∝ |net| across all
-	/// hours; green = call-dominated, red = put-dominated.</summary>
-	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int intervalMin)
+	/// hours; green = call-dominated, red = put-dominated. When the minute-quote store (data/quotes, written by the
+	/// wa-scraper / ThetaData sync) covers this day, each bucket's IVs are back-solved from THAT minute's NBBO mids
+	/// instead of the morning snapshot's frozen values — the snapshot IVs age badly through a 0DTE session (IV
+	/// collapses intraday, sharpening gamma toward ATM), which is why a frozen-IV replay disagrees with what the
+	/// live command showed. A data/gex live log (when present) is rendered as a "Live" footer row for comparison.</summary>
+	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int intervalMin, bool exante)
 	{
 		var expiry = date.Date;
 		var intradaySpots = LoadIntradaySpots(ticker, date);
@@ -590,6 +601,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			AnsiConsole.MarkupLine($"[red]No intraday spots in data/intraday/{ticker}/{date:yyyy-MM-dd}.csv (file absent or no RTH rows).[/]");
 			return;
 		}
+
+		// --exante deliberately pins prior-day IVs, so the time-matched minute quotes would defeat its purpose.
+		var minuteQuotes = exante ? new SortedDictionary<TimeSpan, Dictionary<string, OptionContractQuote>>() : LoadMinuteQuoteSets(ticker, date, quotes);
 
 		// Column marks: 09:30 stepping by --interval to 16:00 (always include the 16:00 close).
 		var open = new TimeSpan(9, 30, 0);
@@ -602,6 +616,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		// Per kept hour: the spot, the per-strike GexCells for the 0DTE, and that hour's gravity strike.
 		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity)>();
+		var skipped = new List<TimeSpan>();
 		foreach (var mark in hourMarks)
 		{
 			decimal? spot = null;
@@ -611,9 +626,23 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				var diff = kv.Key >= mark ? kv.Key - mark : mark - kv.Key;
 				if (diff <= bestDiff) { bestDiff = diff; spot = kv.Value; }
 			}
-			if (!spot.HasValue || spot.Value <= 0m) continue;
+			if (!spot.HasValue || spot.Value <= 0m) { skipped.Add(mark); continue; }
 
-			var m = GexMatrix.Build(quotes, ticker, spot.Value, expiry + mark, expiryFilter: expiry, strikeRangeFraction, maxDteDays: 0, maxStrikes);
+			var bucketQuotes = quotes;
+			if (minuteQuotes.Count > 0)
+			{
+				Dictionary<string, OptionContractQuote>? nearest = null;
+				var bestQuoteDiff = tolerance;
+				foreach (var kv in minuteQuotes)
+				{
+					var diff = kv.Key >= mark ? kv.Key - mark : mark - kv.Key;
+					if (diff <= bestQuoteDiff) { bestQuoteDiff = diff; nearest = kv.Value; }
+				}
+				if (nearest == null) { skipped.Add(mark); continue; }   // store covers the day but not this bucket — a frozen-IV cell among time-matched ones would mislead
+				bucketQuotes = nearest;
+			}
+
+			var m = GexMatrix.Build(bucketQuotes, ticker, spot.Value, expiry + mark, expiryFilter: expiry, strikeRangeFraction, maxDteDays: 0, maxStrikes);
 			var cells = new Dictionary<decimal, GexCell>();
 			foreach (var strike in m.Strikes)
 				if (m.Cells.TryGetValue((expiry, strike), out var c)) cells[strike] = c;
@@ -632,6 +661,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var allStrikes = hours.SelectMany(h => h.Cells.Keys).Distinct().OrderByDescending(s => s).ToList();
 
 		AnsiConsole.MarkupLine($"[bold]{ticker}[/] 0DTE {date:yyyy-MM-dd} — intraday GEX gravity migration");
+		AnsiConsole.MarkupLine(minuteQuotes.Count > 0
+			? $"[dim]IVs: back-solved per bucket from minute NBBO mids (data/quotes/{ticker}/{date:yyyy-MM-dd}.csv); OI fixed from the day's snapshot.[/]"
+			: $"[dim]IVs: frozen from the day's {(exante ? "prior-day --exante" : "OI-snapshot")} values (no minute-quote coverage for this day{(exante ? "" : " in data/quotes")}).[/]");
 
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
 		table.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
@@ -650,8 +682,139 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			table.AddRow(cells.ToArray());
 		}
 
+		// "Live" footer row: per bucket, the gravity the live `analyze gex` runs actually displayed (data/gex log)
+		// nearest the mark. The live values come from vendor-reported IVs that are never persisted, so this row is
+		// the only ground truth a replay can be compared against.
+		var liveGravity = LoadLiveGravityLog(ticker, date);
+		if (liveGravity.Count > 0)
+		{
+			var liveCells = new List<string> { "[bold cyan]Live[/]" };
+			foreach (var h in hours)
+			{
+				decimal? g = null;
+				var bestDiff = tolerance;
+				foreach (var kv in liveGravity)
+				{
+					var diff = kv.Key >= h.Mark ? kv.Key - h.Mark : h.Mark - kv.Key;
+					if (diff <= bestDiff) { bestDiff = diff; g = kv.Value; }
+				}
+				liveCells.Add(g.HasValue ? $"[bold cyan]${g.Value:N2}[/]" : "[dim]·[/]");
+			}
+			table.AddRow(liveCells.ToArray());
+		}
+
 		AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma).[/]");
+		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma)." + (liveGravity.Count > 0 ? " [cyan]Live[/] row = gravity logged by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
+		if (skipped.Count > 0)
+			AnsiConsole.MarkupLine($"[yellow]Dropped {skipped.Count} bucket(s) with no spot/quote within {tolerance.TotalMinutes:F0} min: {string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))} — the spot tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET{(date.Date == DateTime.Today ? $". Refresh today's tape with `wa ai history {ticker} --partial`" : "")}.[/]");
+	}
+
+	/// <summary>Reads the day's minute NBBO from <c>data/quotes/&lt;TICKER&gt;/&lt;date&gt;.csv</c> (the per-expiry store the
+	/// wa-scraper and the ThetaData evening sync both write) into one quote-set per RTH minute: every 0DTE contract that
+	/// had a two-sided book that minute, carrying the snapshot's OI but THAT minute's bid/ask with the IV nulled — so
+	/// <see cref="GexMatrix.Build"/> back-solves each bucket's IVs from the time-matched mids instead of reusing the
+	/// morning snapshot's frozen values. Store rows are end-of-bar labeled (row T = the book at instant T+1, the
+	/// convention validated 2026-06-11), so labels are shifted +1 minute here to mean wall-clock instants. One-sided or
+	/// empty books (bid/ask 0.0) are skipped; contracts absent from the snapshot have no OI and are skipped too.</summary>
+	private static SortedDictionary<TimeSpan, Dictionary<string, OptionContractQuote>> LoadMinuteQuoteSets(string ticker, DateTime date, Dictionary<string, OptionContractQuote> snapshot)
+	{
+		var result = new SortedDictionary<TimeSpan, Dictionary<string, OptionContractQuote>>();
+		var path = Program.ResolvePath($"data/quotes/{ticker}/{date:yyyy-MM-dd}.csv");
+		if (!File.Exists(path)) return result;
+
+		var bySide = new Dictionary<(decimal Strike, string Right), OptionContractQuote>();
+		foreach (var (sym, q) in snapshot)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p == null || p.ExpiryDate.Date != date.Date || string.IsNullOrEmpty(p.CallPut)) continue;
+			bySide[(p.Strike, p.CallPut)] = q;
+		}
+		if (bySide.Count == 0) return result;
+
+		var dateStr = date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+		var first = true;
+		foreach (var line in File.ReadLines(path))
+		{
+			if (first) { first = false; continue; } // header: date,time,strike,right,bid,ask,bid_size,ask_size
+			if (!line.StartsWith(dateStr, StringComparison.Ordinal)) continue;
+			var parts = line.Split(',');
+			if (parts.Length < 6) continue;
+			if (!TimeSpan.TryParse(parts[1], CultureInfo.InvariantCulture, out var tod)) continue;
+			if (!decimal.TryParse(parts[2], NumberStyles.Any, CultureInfo.InvariantCulture, out var strike)) continue;
+			if (!decimal.TryParse(parts[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var bid) || !decimal.TryParse(parts[5], NumberStyles.Any, CultureInfo.InvariantCulture, out var ask)) continue;
+			if (bid <= 0m || ask <= 0m) continue;
+			if (!bySide.TryGetValue((strike, parts[3]), out var snap)) continue;
+			var instant = tod + TimeSpan.FromMinutes(1);
+			if (!result.TryGetValue(instant, out var set)) { set = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase); result[instant] = set; }
+			set[snap.ContractSymbol] = snap with { Bid = bid, Ask = ask, ImpliedVolatility = null };
+		}
+		return result;
+	}
+
+	/// <summary>Reads the live `analyze gex` log at <c>data/gex/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c> and returns
+	/// ET time-of-day → the gravity strike that run displayed for the <paramref name="date"/> (0DTE) expiry.
+	/// Corrupt lines are skipped — a torn concurrent append must not take down the heatmap.</summary>
+	private static SortedDictionary<TimeSpan, decimal> LoadLiveGravityLog(string ticker, DateTime date)
+	{
+		var result = new SortedDictionary<TimeSpan, decimal>();
+		var path = Program.ResolvePath($"data/gex/{ticker}/{date:yyyy-MM-dd}.jsonl");
+		if (!File.Exists(path)) return result;
+		var expiryStr = date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+		foreach (var line in File.ReadLines(path))
+		{
+			if (string.IsNullOrWhiteSpace(line)) continue;
+			try
+			{
+				using var doc = JsonDocument.Parse(line);
+				var root = doc.RootElement;
+				if (!root.TryGetProperty("tsEt", out var tsEl) || !DateTime.TryParse(tsEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var ts)) continue;
+				if (!root.TryGetProperty("expiries", out var exps) || exps.ValueKind != JsonValueKind.Array) continue;
+				foreach (var e in exps.EnumerateArray())
+					if (e.TryGetProperty("expiry", out var ex) && ex.GetString() == expiryStr && e.TryGetProperty("gravity", out var g) && g.ValueKind == JsonValueKind.Number)
+						result[ts.TimeOfDay] = g.GetDecimal();
+			}
+			catch (JsonException) { }
+		}
+		return result;
+	}
+
+	private sealed record GexLogExpiry(
+		[property: JsonPropertyName("expiry")] string Expiry,
+		[property: JsonPropertyName("gravity")] decimal? Gravity,
+		[property: JsonPropertyName("gross")] decimal? Gross,
+		[property: JsonPropertyName("callWall")] decimal? CallWall,
+		[property: JsonPropertyName("putWall")] decimal? PutWall,
+		[property: JsonPropertyName("gammaFlip")] decimal? GammaFlip,
+		[property: JsonPropertyName("maxPain")] decimal? MaxPain);
+
+	private sealed record GexLogRecord(
+		[property: JsonPropertyName("tsEt")] string TsEt,
+		[property: JsonPropertyName("spot")] decimal Spot,
+		[property: JsonPropertyName("strikeRangePct")] int StrikeRangePct,
+		[property: JsonPropertyName("maxStrikes")] int MaxStrikes,
+		[property: JsonPropertyName("dte")] int Dte,
+		[property: JsonPropertyName("expiries")] List<GexLogExpiry> Expiries);
+
+	/// <summary>Appends one record per LIVE run to <c>data/gex/&lt;TICKER&gt;/&lt;ET date&gt;.jsonl</c>: timestamp, spot,
+	/// the window parameters the values depend on, and the per-expiry signals exactly as displayed (gravity + its gross,
+	/// walls, gamma flip, max pain). The live numbers are built on Webull's vendor-reported IVs, which exist nowhere on
+	/// disk after the fact — without this log a historical replay has nothing to be validated against.</summary>
+	private static void AppendGexLog(string ticker, decimal spot, GexMatrix matrix, AnalyzeGexSettings settings)
+	{
+		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var rows = new List<GexLogExpiry>();
+		foreach (var exp in matrix.Expiries)
+		{
+			matrix.GravityByExpiry.TryGetValue(exp, out var gravity);
+			decimal? gross = gravity.HasValue && matrix.Cells.TryGetValue((exp, gravity.Value), out var gc) ? Math.Round(gc.Gross) : null;
+			var (callWall, putWall) = matrix.FindWalls(exp);
+			rows.Add(new GexLogExpiry(exp.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), gravity, gross, callWall, putWall, matrix.FindGammaFlip(spot, exp), matrix.FindMaxPain(exp)));
+		}
+		var record = new GexLogRecord(nowEt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture), spot, settings.StrikeRangePct, settings.MaxStrikes, settings.Dte, rows);
+		var path = Program.ResolvePath($"data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl");
+		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+		File.AppendAllText(path, JsonSerializer.Serialize(record) + "\n");
+		AnsiConsole.MarkupLine($"[dim]Logged to data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl (the --intraday heatmap reads this back as its \"Live\" row).[/]");
 	}
 
 	private static string FormatCompact(decimal v)
