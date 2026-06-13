@@ -13,9 +13,10 @@ namespace WebullAnalytics.Analyze;
 /// <summary>
 /// `wa analyze gex <TICKER>` — Renders a 2D GEX heatmap over the option chain
 /// (strikes × expirations), a per-expiration summary (gravity / gamma flip / max pain), a chain
-/// totals panel, and call/put walls. Pulls the chain from Webull directly (api-config.json must
-/// already be sniffed). Yahoo isn't supported because chain-level analytics need full OI + IV
-/// across every strike/expiry, which Webull's strategy/list payload returns in one shot.
+/// totals panel, and call/put walls. Pulls the chain live from Webull (default; api-config.json must
+/// already be sniffed) or Schwab (--source schwab; `wa schwab login`) — the two vendors' chain IVs
+/// disagree materially on gravity, so the source is logged with every data/gex record. Yahoo isn't
+/// supported because chain-level analytics need full OI + IV across every strike/expiry.
 /// </summary>
 internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 {
@@ -47,6 +48,15 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	[Description("Number of top call/put walls to list. Default: 5.")]
 	public int TopWalls { get; set; } = 5;
 
+	[CommandOption("--source <SOURCE>")]
+	[DefaultValue("webull")]
+	[Description("Chain vendor for the live fetch: webull (sniffed-session chain IV/OI, default) or schwab (chains API with Schwab's model IVs; needs `wa schwab login`). Each data/gex record carries its source, and --intraday's Live row shows only matching-source records. Offline --date snapshot runs ignore it.")]
+	public string Source { get; set; } = "webull";
+
+	[CommandOption("--dump")]
+	[Description("Also append every in-window contract from this live fetch (expiry, strike, right, bid/ask, vendor IV, OI, spot) to data/iv/<TICKER>/<ET-date>.csv, source-tagged. The raw per-strike inputs behind the displayed gex values — capture them from both --source vendors to measure cross-vendor IV gaps. Live fetch only.")]
+	public bool Dump { get; set; }
+
 	[CommandOption("--intraday")]
 	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Per-bucket IVs are back-solved from the minute-quote store (data/quotes) when it covers the day, else frozen from the snapshot. Offline-only — requires an explicit --date (today included) with a data/oi snapshot. Skips the walls/totals/per-expiry tables.")]
 	public bool Intraday { get; set; }
@@ -73,6 +83,9 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (IntervalMin < 5 || IntervalMin > 120) return ValidationResult.Error($"--interval: must be in [5, 120] minutes, got {IntervalMin}");
 		if (Exante && !Intraday) return ValidationResult.Error("--exante only applies to the --intraday heatmap");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
+		if (!string.Equals(Source, "webull", StringComparison.OrdinalIgnoreCase) && !string.Equals(Source, "schwab", StringComparison.OrdinalIgnoreCase))
+			return ValidationResult.Error($"--source: expected webull or schwab, got '{Source}'");
+		if (Dump && EvaluationDateOverride.HasValue) return ValidationResult.Error("--dump applies to live fetches only (no --date)");
 		return ValidationResult.Success();
 	}
 }
@@ -123,25 +136,61 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				return 1;
 			}
 			var apiConfig = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-			if (apiConfig == null || apiConfig.Webull.Headers.Count == 0)
+			if (string.Equals(settings.Source, "schwab", StringComparison.OrdinalIgnoreCase))
 			{
-				AnsiConsole.MarkupLine("[red]Error: api-config.json is empty or missing headers. Run 'sniff' first.[/]");
-				return 1;
+				if (apiConfig?.Schwab == null)
+				{
+					AnsiConsole.MarkupLine("[red]Error: --source schwab needs Schwab credentials in api-config.json. Run 'wa schwab login' first.[/]");
+					return 1;
+				}
+				IReadOnlyList<OptionContractQuote> schwabQuotes;
+				decimal? schwabSpot;
+				try
+				{
+					var token = await SchwabAuthClient.GetAccessTokenAsync(apiConfig.Schwab, configPath, cancellation);
+					var fromExpiry = expiryFilter.HasValue ? DateOnly.FromDateTime(expiryFilter.Value) : DateOnly.FromDateTime(asOf.Date);
+					var toExpiry = expiryFilter.HasValue ? DateOnly.FromDateTime(expiryFilter.Value) : DateOnly.FromDateTime(asOf.Date).AddDays(settings.Dte);
+					(schwabSpot, schwabQuotes) = await SchwabOptionsClient.FetchChainAsync(token, ticker, fromExpiry, toExpiry, cancellation);
+				}
+				catch (SchwabAuthException ex)
+				{
+					AnsiConsole.MarkupLine($"[red]Schwab auth failed: {Markup.Escape(ex.Message)} Re-run 'wa schwab login'.[/]");
+					return 1;
+				}
+				// A $SPX chains request returns BOTH the SPX and SPXW roots — keep only the requested one.
+				quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+				foreach (var q in schwabQuotes)
+					if (string.Equals(ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)?.Root, ticker, StringComparison.OrdinalIgnoreCase))
+						quotes[q.ContractSymbol] = q;
+				if (quotes.Count == 0)
+				{
+					AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker} from Schwab.[/]");
+					return 1;
+				}
+				spot = ResolveSpotOverride(settings.Spot, ticker) ?? schwabSpot;
 			}
-			var (initialQuotes, fetchedSpot, derivativeIds) = await WebullOptionsClient.FetchChainAsync(apiConfig, ticker, cancellation);
-			if (initialQuotes.Count == 0)
+			else
 			{
-				AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker}.[/]");
-				return 1;
-			}
-			spot = ResolveSpotOverride(settings.Spot, ticker) ?? fetchedSpot;
-			quotes = new Dictionary<string, OptionContractQuote>(initialQuotes, StringComparer.OrdinalIgnoreCase);
-			// Webull's strategy/list only inlines OI/IV for the front-most expiration; re-pull in-window contracts
-			// via queryBatch to populate the heatmap. (Offline data/oi snapshots already carry the full chain.)
-			if (spot.HasValue && spot.Value > 0m)
-			{
-				var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, cancellation);
-				if (refreshed > 0) Log.Debug($"Refreshed {refreshed} in-window contract(s) via queryBatch.");
+				if (apiConfig == null || apiConfig.Webull.Headers.Count == 0)
+				{
+					AnsiConsole.MarkupLine("[red]Error: api-config.json is empty or missing headers. Run 'sniff' first.[/]");
+					return 1;
+				}
+				var (initialQuotes, fetchedSpot, derivativeIds) = await WebullOptionsClient.FetchChainAsync(apiConfig, ticker, cancellation);
+				if (initialQuotes.Count == 0)
+				{
+					AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker}.[/]");
+					return 1;
+				}
+				spot = ResolveSpotOverride(settings.Spot, ticker) ?? fetchedSpot;
+				quotes = new Dictionary<string, OptionContractQuote>(initialQuotes, StringComparer.OrdinalIgnoreCase);
+				// Webull's strategy/list only inlines OI/IV for the front-most expiration; re-pull in-window contracts
+				// via queryBatch to populate the heatmap. (Offline data/oi snapshots already carry the full chain.)
+				if (spot.HasValue && spot.Value > 0m)
+				{
+					var refreshed = await RefreshInWindowContractsAsync(apiConfig, quotes, derivativeIds, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, cancellation);
+					if (refreshed > 0) Log.Debug($"Refreshed {refreshed} in-window contract(s) via queryBatch.");
+				}
 			}
 		}
 
@@ -162,7 +211,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			}
 			if (settings.Exante && !ApplyExanteIvs(ticker, asOf.Date, quotes))
 				return 1;
-			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante);
+			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.Source.ToLowerInvariant());
 			return 0;
 		}
 
@@ -177,7 +226,10 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// the vendor-reported IVs these values are built on are never persisted intraday, so the displayed
 		// numbers are otherwise irreproducible; the --intraday heatmap reads this log back as its "Live" row.
 		if (!settings.EvaluationDateOverride.HasValue)
+		{
 			AppendGexLog(ticker, spot.Value, matrix, settings);
+			if (settings.Dump) AppendIvDump(ticker, spot.Value, quotes, settings, asOf, expiryFilter);
+		}
 
 		RenderHeader(ticker, spot.Value, asOf, expiryFilter, matrix);
 		AnsiConsole.WriteLine();
@@ -592,7 +644,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// instead of the morning snapshot's frozen values — the snapshot IVs age badly through a 0DTE session (IV
 	/// collapses intraday, sharpening gamma toward ATM), which is why a frozen-IV replay disagrees with what the
 	/// live command showed. A data/gex live log (when present) is rendered as a "Live" footer row for comparison.</summary>
-	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int intervalMin, bool exante)
+	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int intervalMin, bool exante, string source)
 	{
 		var expiry = date.Date;
 		var intradaySpots = LoadIntradaySpots(ticker, date);
@@ -685,7 +737,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// "Live" footer row: per bucket, the gravity the live `analyze gex` runs actually displayed (data/gex log)
 		// nearest the mark. The live values come from vendor-reported IVs that are never persisted, so this row is
 		// the only ground truth a replay can be compared against.
-		var liveGravity = LoadLiveGravityLog(ticker, date);
+		var liveGravity = LoadLiveGravityLog(ticker, date, source);
 		if (liveGravity.Count > 0)
 		{
 			var liveCells = new List<string> { "[bold cyan]Live[/]" };
@@ -753,8 +805,10 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 	/// <summary>Reads the live `analyze gex` log at <c>data/gex/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c> and returns
 	/// ET time-of-day → the gravity strike that run displayed for the <paramref name="date"/> (0DTE) expiry.
-	/// Corrupt lines are skipped — a torn concurrent append must not take down the heatmap.</summary>
-	private static SortedDictionary<TimeSpan, decimal> LoadLiveGravityLog(string ticker, DateTime date)
+	/// Only records from <paramref name="source"/> are kept (records without a source field predate the
+	/// --source option and count as webull). Corrupt lines are skipped — a torn concurrent append must not
+	/// take down the heatmap.</summary>
+	private static SortedDictionary<TimeSpan, decimal> LoadLiveGravityLog(string ticker, DateTime date, string source)
 	{
 		var result = new SortedDictionary<TimeSpan, decimal>();
 		var path = Program.ResolvePath($"data/gex/{ticker}/{date:yyyy-MM-dd}.jsonl");
@@ -767,6 +821,8 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			{
 				using var doc = JsonDocument.Parse(line);
 				var root = doc.RootElement;
+				var recSource = root.TryGetProperty("source", out var srcEl) && srcEl.ValueKind == JsonValueKind.String ? srcEl.GetString() : "webull";
+				if (!string.Equals(recSource, source, StringComparison.OrdinalIgnoreCase)) continue;
 				if (!root.TryGetProperty("tsEt", out var tsEl) || !DateTime.TryParse(tsEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var ts)) continue;
 				if (!root.TryGetProperty("expiries", out var exps) || exps.ValueKind != JsonValueKind.Array) continue;
 				foreach (var e in exps.EnumerateArray())
@@ -789,16 +845,18 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 	private sealed record GexLogRecord(
 		[property: JsonPropertyName("tsEt")] string TsEt,
+		[property: JsonPropertyName("source")] string Source,
 		[property: JsonPropertyName("spot")] decimal Spot,
 		[property: JsonPropertyName("strikeRangePct")] int StrikeRangePct,
 		[property: JsonPropertyName("maxStrikes")] int MaxStrikes,
 		[property: JsonPropertyName("dte")] int Dte,
 		[property: JsonPropertyName("expiries")] List<GexLogExpiry> Expiries);
 
-	/// <summary>Appends one record per LIVE run to <c>data/gex/&lt;TICKER&gt;/&lt;ET date&gt;.jsonl</c>: timestamp, spot,
-	/// the window parameters the values depend on, and the per-expiry signals exactly as displayed (gravity + its gross,
-	/// walls, gamma flip, max pain). The live numbers are built on Webull's vendor-reported IVs, which exist nowhere on
-	/// disk after the fact — without this log a historical replay has nothing to be validated against.</summary>
+	/// <summary>Appends one record per LIVE run to <c>data/gex/&lt;TICKER&gt;/&lt;ET date&gt;.jsonl</c>: timestamp, source,
+	/// spot, the window parameters the values depend on, and the per-expiry signals exactly as displayed (gravity + its
+	/// gross, walls, gamma flip, max pain). The live numbers are built on the chain vendor's reported IVs, which exist
+	/// nowhere on disk after the fact — without this log a historical replay has nothing to be validated against. The
+	/// source field keeps interleaved webull/schwab runs separable in the same day file.</summary>
 	private static void AppendGexLog(string ticker, decimal spot, GexMatrix matrix, AnalyzeGexSettings settings)
 	{
 		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
@@ -810,11 +868,48 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			var (callWall, putWall) = matrix.FindWalls(exp);
 			rows.Add(new GexLogExpiry(exp.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), gravity, gross, callWall, putWall, matrix.FindGammaFlip(spot, exp), matrix.FindMaxPain(exp)));
 		}
-		var record = new GexLogRecord(nowEt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture), spot, settings.StrikeRangePct, settings.MaxStrikes, settings.Dte, rows);
+		var record = new GexLogRecord(nowEt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture), settings.Source.ToLowerInvariant(), spot, settings.StrikeRangePct, settings.MaxStrikes, settings.Dte, rows);
 		var path = Program.ResolvePath($"data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl");
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		File.AppendAllText(path, JsonSerializer.Serialize(record) + "\n");
 		AnsiConsole.MarkupLine($"[dim]Logged to data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl (the --intraday heatmap reads this back as its \"Live\" row).[/]");
+	}
+
+	/// <summary>--dump: appends one CSV row per in-window contract of this LIVE fetch to
+	/// <c>data/iv/&lt;TICKER&gt;/&lt;ET date&gt;.csv</c> — the per-strike vendor inputs (bid/ask, vendor IV, OI)
+	/// behind the displayed gex values, which are otherwise discarded after the run. Source-tagged so
+	/// interleaved webull/schwab dumps land in one day file and join on (time, expiry, strike, right).
+	/// Window = the same expiry/strike filters the heatmap uses; null bid/ask/IV/OI dump as empty fields
+	/// (a vendor null is itself data). The time column is the actual ET fetch time, not a bar label.</summary>
+	private static void AppendIvDump(string ticker, decimal spot, Dictionary<string, OptionContractQuote> quotes, AnalyzeGexSettings settings, DateTime asOf, DateTime? expiryFilter)
+	{
+		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var source = settings.Source.ToLowerInvariant();
+		var band = settings.StrikeRangePct / 100m;
+		var sb = new System.Text.StringBuilder();
+		var rows = 0;
+		foreach (var kv in quotes.OrderBy(k => k.Key, StringComparer.Ordinal))
+		{
+			var parsed = ParsingHelpers.ParseOptionSymbol(kv.Key);
+			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			var exp = parsed.ExpiryDate.Date;
+			if (expiryFilter.HasValue ? exp != expiryFilter.Value.Date : exp < asOf.Date || exp > asOf.Date.AddDays(settings.Dte)) continue;
+			if (Math.Abs(parsed.Strike - spot) / spot > band) continue;
+			var q = kv.Value;
+			string D(decimal? v) => v?.ToString(CultureInfo.InvariantCulture) ?? "";
+			sb.Append(nowEt.ToString("yyyy-MM-dd,HH:mm:ss", CultureInfo.InvariantCulture)).Append(',').Append(source).Append(',')
+				.Append(exp.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).Append(',')
+				.Append(parsed.Strike.ToString(CultureInfo.InvariantCulture)).Append(',').Append(parsed.CallPut).Append(',')
+				.Append(D(q.Bid)).Append(',').Append(D(q.Ask)).Append(',').Append(D(q.ImpliedVolatility)).Append(',')
+				.Append(q.OpenInterest?.ToString(CultureInfo.InvariantCulture) ?? "").Append(',')
+				.Append(spot.ToString(CultureInfo.InvariantCulture)).Append('\n');
+			rows++;
+		}
+		var path = Program.ResolvePath($"data/iv/{ticker}/{nowEt:yyyy-MM-dd}.csv");
+		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+		if (!File.Exists(path)) File.WriteAllText(path, "date,time,source,expiry,strike,right,bid,ask,iv,oi,spot\n");
+		File.AppendAllText(path, sb.ToString());
+		AnsiConsole.MarkupLine($"[dim]Dumped {rows} {source} contract row(s) to data/iv/{ticker}/{nowEt:yyyy-MM-dd}.csv.[/]");
 	}
 
 	private static string FormatCompact(decimal v)
