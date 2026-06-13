@@ -386,19 +386,20 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 				continue;
 			}
 			var path = Path.Combine(audit.IntradayDir, $"{d:yyyy-MM-dd}.csv");
+			var toWrite = (IReadOnlyList<MinuteBar>)bars;
 			if (partialSet.Contains(d) && File.Exists(path))
 			{
-				// Supersede guard: replace a partial live-captured file only when the re-pull covers every
-				// bar timestamp the file already has AND adds more. Anything less keeps the live file.
-				var existingTs = ReadIntradayCsv(path).Select(b => b.Timestamp.UtcDateTime).ToHashSet();
-				var pulledTs = bars.Select(b => b.Timestamp.UtcDateTime).ToHashSet();
-				if (!existingTs.IsSubsetOf(pulledTs) || pulledTs.Count <= existingTs.Count)
-				{
-					skipped.Add((d, $"re-pull ({pulledTs.Count} bars) does not supersede the partial file ({existingTs.Count} bars) — kept"));
-					continue;
-				}
+				// Merge, don't choose: union the partial live capture with the re-pull so the day becomes a
+				// strict superset of both. The re-pull (authoritative SIP) wins on overlapping minutes;
+				// live-only bars — thin pre/post-market minutes massive's trade-aggregates never produced, or
+				// RTH bars captured during a massive dropout — are preserved. This always supersedes the
+				// partial, fixing the old guard that kept a partial forever whenever the live file held any one
+				// minute the re-pull lacked, even when the re-pull was more complete through the close.
+				var merged = ReadIntradayCsv(path).ToDictionary(b => b.Timestamp.UtcDateTime);
+				foreach (var b in bars) merged[b.Timestamp.UtcDateTime] = b;
+				toWrite = merged.Values.OrderBy(b => b.Timestamp.UtcDateTime).ToList();
 			}
-			WriteIntradayCsv(path, bars);
+			WriteIntradayCsv(path, toWrite);
 			// Seal only what actually reads as a complete session — a short pull stays visibly partial
 			// instead of being stamped complete forever.
 			if (LooksComplete(path))
