@@ -28,6 +28,7 @@ internal static class BacktestSummaryRenderer
 		table.AddColumn("Kind");
 		table.AddColumn("Strategy");
 		table.AddColumn("Strikes / Exp");
+		table.AddColumn(new TableColumn("Spot").RightAligned());
 		table.AddColumn(new TableColumn("Qty").RightAligned());
 		table.AddColumn(new TableColumn("Price").RightAligned());
 		table.AddColumn(new TableColumn("Net/Ct").RightAligned());
@@ -114,6 +115,7 @@ internal static class BacktestSummaryRenderer
 				f.Kind.ToString(),
 				Markup.Escape(f.StrategyKind),
 				Markup.Escape(FormatLegDetail(f.Legs)),
+				f.Spot > 0m ? $"{f.Spot:N2}" : "—",
 				f.Qty.ToString(),
 				$"[{cashColor}]{perShareLabel}[/]",
 				$"[{cashColor}]{perCtLabel}[/]",

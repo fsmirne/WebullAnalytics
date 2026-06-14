@@ -139,5 +139,8 @@ internal sealed record OpenProposal(
 	// user can see what each enabled structure would propose, but NEVER auto-executed (the auto-executor
 	// filters these out). Used to surface DoubleCalendar/DoubleDiagonal, which are genuinely less
 	// capital-efficient than single calendars/diagonals and so rank below them.
-	bool Informational = false
+	bool Informational = false,
+	// Underlying spot at the minute this proposal was scored — carried onto the backtest fill ledger so
+	// strikes can be compared against spot at entry. 0 when unset (non-backtest callers don't populate it).
+	decimal Spot = 0m
 );
