@@ -139,6 +139,22 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 				// for the enumerator's delta-band strike picking (mirrors the old OI-marker chain expansion).
 				long? oi = null; decimal? iv = null;
 				if (oiDay != null && oiDay.TryGetValue(occ, out var snap)) { oi = snap.Oi; if (snap.Iv > 0m) iv = snap.Iv; }
+				// When the snapshot carries no usable IV — always the case for 0DTE, whose same-day-expiry contracts
+				// have null IV in the EOD chain snapshot — back-solve it from the real NBBO mid just fetched. Without
+				// this the whole expanded near-money chain is IV-less on 0DTE, so ComputeGex skips every strike's
+				// gamma and GEX gravity / NetGexFraction (and the gammaRegime + gexBiasPull factors) go silently
+				// inert, even though they are live in production. Gated on iv==null so the non-0DTE fast path
+				// (snapshot IV present) keeps its no-Newton-per-strike behaviour.
+				if (iv == null && q.Value.Mid > 0m && ParsingHelpers.ParseOptionSymbol(occ) is OptionParsed pe && pe.CallPut != null)
+				{
+					var dte = (grp.Key.Exp - asOf.Date).Days;
+					var timeYears = dte <= 0 ? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears) : dte / 365.0;
+					if (timeYears > 0)
+					{
+						var solved = OptionMath.ImpliedVol(AdjSpot(pe.Root, spot, asOf, pe.ExpiryDate), pe.Strike, timeYears, _riskFreeRate, q.Value.Mid, pe.CallPut);
+						if (solved > 0.011m && solved < 4.99m) iv = solved;   // reject vega-flat back-solver bounds
+					}
+				}
 				options[occ] = new OptionContractQuote(occ, q.Value.Mid, q.Value.Bid, q.Value.Ask, null, null, Volume: null, OpenInterest: oi, ImpliedVolatility: iv);
 			}
 		}
