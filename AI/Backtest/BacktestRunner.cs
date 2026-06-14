@@ -121,12 +121,12 @@ internal sealed class BacktestRunner
 					if (p.Kind == ProposalKind.Close)
 					{
 						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
-						if (legFills != null) _book.Close(step, p.PositionKey, legFills, p.Rule);
+						if (legFills != null) _book.Close(step, p.PositionKey, legFills, p.Rule, quoteSnapshot.Underlyings.GetValueOrDefault(pos.Ticker));
 					}
 					else if (p.Kind == ProposalKind.Roll)
 					{
 						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
-						if (legFills != null) _book.Roll(step, p.PositionKey, legFills, p.Rule);
+						if (legFills != null) _book.Roll(step, p.PositionKey, legFills, p.Rule, quoteSnapshot.Underlyings.GetValueOrDefault(pos.Ticker));
 					}
 					else if (p.Kind == ProposalKind.LegIn)
 					{
@@ -138,7 +138,7 @@ internal sealed class BacktestRunner
 							var newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical
 								: string.Equals(pos.StrategyKind, "LongPut", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongPutVertical
 								: (OpenStructureKind?)null;
-							if (newStructure != null) _book.LegIn(step, p.PositionKey, legFills, p.Rule, newStructure.Value);
+							if (newStructure != null) _book.LegIn(step, p.PositionKey, legFills, p.Rule, newStructure.Value, quoteSnapshot.Underlyings.GetValueOrDefault(pos.Ticker));
 						}
 					}
 					// AlertOnly: noop in backtest.
@@ -354,7 +354,7 @@ internal sealed class BacktestRunner
 		if (groups == null || groups.Count == 1)
 		{
 			var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-			return legFills != null && _book.Open(when, p.Ticker, p.StructureKind, legFills, qty);
+			return legFills != null && _book.Open(when, p.Ticker, p.StructureKind, legFills, qty, p.Spot);
 		}
 
 		var groupFills = new List<(OpenStructureKind Kind, IReadOnlyList<BacktestLegFill> Fills)>(groups.Count);
@@ -366,7 +366,7 @@ internal sealed class BacktestRunner
 		}
 		var opened = false;
 		foreach (var (kind, fills) in groupFills)
-			opened |= _book.Open(when, p.Ticker, kind, fills, qty);
+			opened |= _book.Open(when, p.Ticker, kind, fills, qty, p.Spot);
 		return opened;
 	}
 
@@ -645,7 +645,7 @@ internal sealed class BacktestRunner
 						else
 							newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical : OpenStructureKind.LongPutVertical;
 						var legInFills = new[] { new BacktestLegFill(shortLeg.Symbol, Side.Sell, pos.Quantity, ExecPrice(Side.Sell, sBid, sAsk)) };
-						_book.LegIn(legInMinuteEt, pos.Key, legInFills, "LegInShortRule", newStructure);
+						_book.LegIn(legInMinuteEt, pos.Key, legInFills, "LegInShortRule", newStructure, spot);
 						return true; // mirror SL/TP semantics: a fired rule consumes the position for the day.
 					}
 				}
@@ -669,7 +669,7 @@ internal sealed class BacktestRunner
 			}
 			if (!allLegsPriced) continue;
 
-			_book.Close(minuteEt, pos.Key, legFills, ruleName);
+			_book.Close(minuteEt, pos.Key, legFills, ruleName, spot);
 			return true;
 		}
 
@@ -775,7 +775,7 @@ internal sealed class BacktestRunner
 			legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
 		}
 
-		_book.Close(step, pos.Key, legFills, ruleName);
+		_book.Close(step, pos.Key, legFills, ruleName, thresholdSpot);
 	}
 
 	/// <summary>Bisects spot in <c>[spotLow, spotHigh]</c> to find where the position's mark equals
@@ -1010,7 +1010,7 @@ internal sealed class BacktestRunner
 		if (_oracle && bestOracle != null)
 		{
 			var b = bestOracle.Value;
-			_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, b.LegFills, b.Proposal.Qty);
+			_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, b.LegFills, b.Proposal.Qty, b.Proposal.Spot);
 		}
 
 		return new DailyOpenScanResult(HasIntraday: true, LegacyProposals: Array.Empty<OpenProposal>());
@@ -1176,7 +1176,7 @@ internal sealed class BacktestRunner
 			fills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
 		}
 		if (fills.Count > 0)
-			_book.Close(settleTime, survivorKey, fills, "CloseSurvivorOnShortExpiry");
+			_book.Close(settleTime, survivorKey, fills, "CloseSurvivorOnShortExpiry", spotAtClose);
 	}
 
 	private async Task<decimal> ComputeOpenMarkAsync(DateTime step, CancellationToken cancellation)
