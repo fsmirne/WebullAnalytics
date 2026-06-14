@@ -13,7 +13,8 @@ internal sealed record BacktestFill(
 	IReadOnlyList<BacktestLegFill> Legs,
 	decimal NetCashFlow,   // signed: +credit, -debit. Excludes fees.
 	decimal Fees,
-	string? RuleName       // null for Open, else the management rule that fired
+	string? RuleName,      // null for Open, else the management rule that fired
+	decimal Spot           // underlying price at the fill — lets the ledger compare strikes vs spot
 );
 
 internal sealed record BacktestLegFill(
@@ -102,7 +103,7 @@ internal sealed class SimulatedBook
 	public int OpenCount => _positions.Count;
 
 	/// <param name="legFills">Per-leg fills. <c>PricePerShare</c> must be set; <c>Side</c> is the executed direction.</param>
-	public bool Open(DateTime date, string ticker, OpenStructureKind structureKind, IReadOnlyList<BacktestLegFill> legFills, int qty)
+	public bool Open(DateTime date, string ticker, OpenStructureKind structureKind, IReadOnlyList<BacktestLegFill> legFills, int qty, decimal spot)
 	{
 		var positionLegs = BuildLegsFromFills(legFills, qty, out var strategyKind, structureKind);
 		if (positionLegs.Count == 0) return false;
@@ -137,11 +138,11 @@ internal sealed class SimulatedBook
 		var lineageId = _nextLineageId++;
 		_lineageByKey[key] = lineageId;
 
-		_fills.Add(new BacktestFill(date, key, ticker, strategyKind, qty, BacktestFillKind.Open, lineageId, legFills, cashFlow, fees, null));
+		_fills.Add(new BacktestFill(date, key, ticker, strategyKind, qty, BacktestFillKind.Open, lineageId, legFills, cashFlow, fees, null, spot));
 		return true;
 	}
 
-	public bool Close(DateTime date, string positionKey, IReadOnlyList<BacktestLegFill> legFills, string ruleName)
+	public bool Close(DateTime date, string positionKey, IReadOnlyList<BacktestLegFill> legFills, string ruleName, decimal spot)
 	{
 		if (!_positions.TryGetValue(positionKey, out var pos)) return false;
 
@@ -151,7 +152,7 @@ internal sealed class SimulatedBook
 		Cash += cashFlow - fees;
 
 		var lineageId = _lineageByKey[positionKey];
-		_fills.Add(new BacktestFill(date, positionKey, pos.Ticker, pos.StrategyKind, pos.Quantity, BacktestFillKind.Close, lineageId, legFills, cashFlow, fees, ruleName));
+		_fills.Add(new BacktestFill(date, positionKey, pos.Ticker, pos.StrategyKind, pos.Quantity, BacktestFillKind.Close, lineageId, legFills, cashFlow, fees, ruleName, spot));
 
 		_positions.Remove(positionKey);
 		_initialDebitPerContract.Remove(positionKey);
@@ -160,7 +161,7 @@ internal sealed class SimulatedBook
 		return true;
 	}
 
-	public bool Roll(DateTime date, string oldPositionKey, IReadOnlyList<BacktestLegFill> legFills, string ruleName, OpenStructureKind? newStructureKind = null)
+	public bool Roll(DateTime date, string oldPositionKey, IReadOnlyList<BacktestLegFill> legFills, string ruleName, decimal spot, OpenStructureKind? newStructureKind = null)
 	{
 		if (!_positions.TryGetValue(oldPositionKey, out var oldPos)) return false;
 
@@ -211,7 +212,7 @@ internal sealed class SimulatedBook
 		_adjustedDebitPerContract[newKey] = adjustedDebit;
 		_lineageByKey[newKey] = lineageId;
 
-		_fills.Add(new BacktestFill(date, newKey, oldPos.Ticker, strategyKind, oldPos.Quantity, BacktestFillKind.Roll, lineageId, legFills, cashFlow, fees, ruleName));
+		_fills.Add(new BacktestFill(date, newKey, oldPos.Ticker, strategyKind, oldPos.Quantity, BacktestFillKind.Roll, lineageId, legFills, cashFlow, fees, ruleName, spot));
 		return true;
 	}
 
@@ -221,7 +222,7 @@ internal sealed class SimulatedBook
 	/// from the new legs only; the existing legs and their basis are preserved. Resulting strategy
 	/// kind is supplied by the caller (e.g., LongCallVertical) and the position key recomputes off
 	/// the new short leg.</summary>
-	public bool LegIn(DateTime date, string oldPositionKey, IReadOnlyList<BacktestLegFill> newLegs, string ruleName, OpenStructureKind newStructureKind)
+	public bool LegIn(DateTime date, string oldPositionKey, IReadOnlyList<BacktestLegFill> newLegs, string ruleName, OpenStructureKind newStructureKind, decimal spot)
 	{
 		if (!_positions.TryGetValue(oldPositionKey, out var oldPos)) return false;
 		if (newLegs.Count == 0) return false;
@@ -277,7 +278,7 @@ internal sealed class SimulatedBook
 		_adjustedDebitPerContract[newKey] = adjustedDebit;
 		_lineageByKey[newKey] = lineageId;
 
-		_fills.Add(new BacktestFill(date, newKey, oldPos.Ticker, strategyKind, oldPos.Quantity, BacktestFillKind.LegIn, lineageId, newLegs, cashFlow, fees, ruleName));
+		_fills.Add(new BacktestFill(date, newKey, oldPos.Ticker, strategyKind, oldPos.Quantity, BacktestFillKind.LegIn, lineageId, newLegs, cashFlow, fees, ruleName, spot));
 		return true;
 	}
 
@@ -335,7 +336,7 @@ internal sealed class SimulatedBook
 
 		var lineageId = _lineageByKey[positionKey];
 		_fills.Add(new BacktestFill(date, positionKey, pos.Ticker, pos.StrategyKind, pos.Quantity, BacktestFillKind.Expire,
-			LineageId: lineageId, Legs: settlementLegs, NetCashFlow: cashFlow, Fees: 0m, RuleName: null));
+			LineageId: lineageId, Legs: settlementLegs, NetCashFlow: cashFlow, Fees: 0m, RuleName: null, Spot: spotAtExpiry));
 
 		// Full expiry: nothing survives → terminate the lineage.
 		if (survivingLegs.Count == 0)

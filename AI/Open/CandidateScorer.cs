@@ -1366,6 +1366,7 @@ internal static class CandidateScorer
 
 		return new OpenProposal(
 			Ticker: skel.Ticker,
+			Spot: spot,
 			StructureKind: skel.StructureKind,
 			Legs: PriceLegs(skel.Legs, quotes),
 			Qty: 1,
@@ -1527,6 +1528,7 @@ internal static class CandidateScorer
 
 		return new OpenProposal(
 			Ticker: skel.Ticker,
+			Spot: spot,
 			StructureKind: skel.StructureKind,
 			Legs: PriceLegs(skel.Legs, quotes),
 			Qty: 1,
@@ -2113,6 +2115,7 @@ internal static class CandidateScorer
 
 		return new OpenProposal(
 			Ticker: skel.Ticker,
+			Spot: spot,
 			StructureKind: skel.StructureKind,
 			Legs: PriceLegs(skel.Legs, quotes),
 			Qty: 1,
@@ -2350,6 +2353,7 @@ internal static class CandidateScorer
 
 		return new OpenProposal(
 			Ticker: skel.Ticker,
+			Spot: spot,
 			StructureKind: skel.StructureKind,
 			Legs: PriceLegs(skel.Legs, quotes),
 			Qty: 1,
@@ -2544,6 +2548,7 @@ internal static class CandidateScorer
 
 		return new OpenProposal(
 			Ticker: skel.Ticker,
+			Spot: spot,
 			StructureKind: skel.StructureKind,
 			Legs: PriceLegs(skel.Legs, quotes),
 			Qty: 1,
