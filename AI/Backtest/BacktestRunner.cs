@@ -464,6 +464,16 @@ internal sealed class BacktestRunner
 			var triggered = await TryMinuteWalkTriggerAsync(step, pos, cash, accountValue, realizedExpectancy, cancellation);
 			if (triggered) continue;
 
+			// The 2-point fallback below evaluates the WHOLE day's bar Low/High — including minutes BEFORE
+			// the position opened — and stamps the close at `step` (~09:30) with a bisected threshold-spot.
+			// That is non-causal for any position opened intraday: it fabricates an exit (e.g. a TakeProfit
+			// timestamped 09:30 with a 09:30 spot) for a position that opened at, say, 10:00, that the causal
+			// minute-walk above correctly did NOT trigger. This pass only handles same-day-opened 0DTE
+			// positions (IsAllZeroDte gate), so the minute-walk is the ONLY causal path — never fall back to
+			// the 2-point for a position opened today. No minute data → ride to EOD settlement rather than
+			// invent a pre-open intraday trigger. The 2-point remains for genuine carry-over positions only.
+			if (pos.OpenedAt is null || pos.OpenedAt.Value.Date == step.Date) continue;
+
 			var bar = await _bars.GetBarAsync(pos.Ticker, step.Date, cancellation);
 			if (bar == null) continue;
 			await TryIntradayTriggerAsync(step, pos, bar.Low, bar.High, cash, accountValue, realizedExpectancy, cancellation);
