@@ -128,4 +128,44 @@ public class CandidateScorerDispatchTests
 		Assert.NotNull(p);
 		Assert.Equal(OpenStructureKind.IronCondor, p!.StructureKind);
 	}
+
+	[Fact]
+	public void ScoreDispatchesCondor_PopulatesExpectedMoveAndBreakevens()
+	{
+		// All-put long condor: long wings (80, 110), short body (90, 100). The opener never builds this
+		// skeleton; this exercises the analyze-position path that scores an already-open condor.
+		var exp = new DateTime(2026, 7, 17);
+		var longLowWing = MatchKeys.OccSymbol("USO", exp, 80m, "P");
+		var shortLowBody = MatchKeys.OccSymbol("USO", exp, 90m, "P");
+		var shortHighBody = MatchKeys.OccSymbol("USO", exp, 100m, "P");
+		var longHighWing = MatchKeys.OccSymbol("USO", exp, 110m, "P");
+		var skel = new CandidateSkeleton("USO", OpenStructureKind.Condor, new[]
+		{
+			new ProposalLeg("buy", longLowWing, 1),
+			new ProposalLeg("sell", shortLowBody, 1),
+			new ProposalLeg("sell", shortHighBody, 1),
+			new ProposalLeg("buy", longHighWing, 1)
+		}, TargetExpiry: exp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[longLowWing] = TestQuote.Q(0.65m, 0.75m, 0.45m),
+			[shortLowBody] = TestQuote.Q(2.40m, 2.60m, 0.45m),
+			[shortHighBody] = TestQuote.Q(6.90m, 7.10m, 0.45m),
+			[longHighWing] = TestQuote.Q(15.40m, 15.60m, 0.45m)
+		};
+
+		var p = CandidateScorer.Score(skel, spot: 95m, asOf: new DateTime(2026, 6, 15), quotes, bias: 0m, Cfg());
+		Assert.NotNull(p);
+		Assert.Equal(OpenStructureKind.Condor, p!.StructureKind);
+		// The reported gap: EM must be populated so the risk diagnostic can show it.
+		Assert.True(p.ExpectedMoveLower.HasValue && p.ExpectedMoveUpper.HasValue);
+		Assert.True(p.ExpectedMoveLower!.Value < 95m && p.ExpectedMoveUpper!.Value > 95m);
+		Assert.Equal(2, p.Breakevens.Count); // a long condor has two breakevens bounding the profit plateau
+		Assert.InRange(p.ProbabilityOfProfit, 0m, 1m);
+
+		var rationale = CandidateScorer.BuildRationale(p, bias: 0m, cfg: Cfg());
+		Assert.Contains("EM ", rationale);
+		Assert.Contains("BE ", rationale);
+		Assert.Contains("POP", rationale);
+	}
 }
