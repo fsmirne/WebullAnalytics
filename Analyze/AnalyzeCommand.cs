@@ -287,6 +287,12 @@ internal static class AnalyzeCommon
 		}
 		rows.Add(RiskDiagnosticRenderer.Build(diagnostic, ascii));
 
+		// Tooling notice (not a position-risk finding, so kept out of the diagnostic's "Rules fired"):
+		// the opener score — EM / PoP / breakevens — needs a per-ticker opener config, which this ticker
+		// lacks. Surface what to create above the panel rather than silently omitting the block.
+		if (diagnostic.Probe?.ScoreUnavailableReason is { } scoreUnavailableReason)
+			console.MarkupLine($"[yellow]{(ascii ? "!" : "⚠")} EM / PoP / breakevens unavailable — {Markup.Escape(scoreUnavailableReason)}[/]");
+
 		var header = $"[bold cyan]{Markup.Escape(strategyLabel)}[/] [grey]{Markup.Escape(ticker)}[/] x{qty}";
 		var panel = new Panel(new Rows(rows))
 			.Header(header)
