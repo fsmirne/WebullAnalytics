@@ -913,21 +913,27 @@ internal sealed class OpenCandidateEvaluator
 	/// bid/ask only for the front expiry, so for the future expiries diagonals/calendars use we must fetch
 	/// bid/ask for the near-money strikes to separate the tradeable grid from the dead-but-listed strikes.
 	/// Persists the result in the derivative registry (<see cref="DerivativeIdRegistry.RecordSnapshot"/>);
-	/// no-op once today's snapshot exists, so the per-tick cost is one <see cref="DerivativeIdRegistry.HasSnapshot"/>.</summary>
+	/// the sweep is incremental per expiry, so a re-run with the same DTE bands is a no-op (those expiries
+	/// are already covered today) while a wider-DTE strategy still fills in the bands an earlier run left out.</summary>
 	private async Task EnsureDailySnapshotAsync(EvaluationContext ctx, IReadOnlyDictionary<string, decimal> spots, IReadOnlyDictionary<string, HashSet<DateTime>> availableByTicker, IEnumerable<string> chainOccs, OpenerConfig cfg, bool debug, CancellationToken cancellation, QuoteOverrides quoteOverrides)
 	{
 		var ticker = _config.Ticker;
 		var asOf = SnapshotDate(ctx.Now);
-		if (DerivativeIdRegistry.HasSnapshot(ticker, asOf)) return;
 		if (!spots.TryGetValue(ticker, out var spot) || spot <= 0m) return;
 		if (!availableByTicker.TryGetValue(ticker, out var expiries) || expiries.Count == 0) return;
 
 		// Cover every enabled structure's DTE band(s): the nearest few expiries within each band, so both
-		// the short (3–10 DTE) and long (21–45 DTE) legs of diagonals/calendars get swept.
+		// the short (3–10 DTE) and long (21–45 DTE) legs of diagonals/calendars get swept. Skip expiries
+		// today's snapshot already covers — the snapshot is shared across strategies via (ticker, ET-date),
+		// and gating the whole sweep on that key let a narrow-DTE run (a 0DTE config sweeps only the front
+		// expiry) mark the ticker done and starve a later calendar/diagonal (QuickDC) run of its far legs.
+		// Filtering per band before the Take keeps each band's quota of FRESH expiries.
+		var covered = DerivativeIdRegistry.CoveredExpiries(ticker, asOf);
 		var candidateExps = new HashSet<DateTime>();
 		foreach (var (min, max) in DteRangesForStructures(cfg))
 			foreach (var e in expiries
 				.Where(e => { var d = (e.Date - ctx.Now.Date).Days; return d >= min && d <= max; })
+				.Where(e => !covered.Contains(e.Date))
 				.OrderBy(e => e).Take(SnapshotExpiriesPerBand))
 				candidateExps.Add(e);
 		if (candidateExps.Count == 0) return;
