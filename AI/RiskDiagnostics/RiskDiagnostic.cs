@@ -47,7 +47,12 @@ internal sealed record RiskDiagnosticProbe(
 	decimal? EnumDeltaMax,
 	bool? EnumDeltaPass,
 	IReadOnlyList<RiskDiagnosticLegQuote> LegQuotes,
-	RiskDiagnosticOpenerScore? OpenerScore);
+	RiskDiagnosticOpenerScore? OpenerScore,
+	// Non-null when the opener score (EM / PoP / breakevens) could not be computed because no usable
+	// per-ticker opener config exists for the position's ticker — carries the human-readable reason
+	// (e.g. "no per-ticker config ai-config.USO.json — indicators.strikeStep …") so the display can warn
+	// the user what to create instead of silently omitting the block.
+	string? ScoreUnavailableReason = null);
 
 internal sealed record RiskDiagnosticLegQuote(
 	string Label,

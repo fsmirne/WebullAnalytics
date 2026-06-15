@@ -158,4 +158,25 @@ public class RiskDiagnosticProbeBuilderTests
 		Assert.Equal(Math.Round(defaultIvDelta, 12), Math.Round(probe.EnumDelta!.Value, 12));
 		Assert.True(probe.EnumDeltaPass);
 	}
+
+	[Fact]
+	public void ProbeReportsScoreUnavailableWhenTickerHasNoOpenerConfig()
+	{
+		// A ticker with no ai-config.<TICKER>.json can't be scored (the opener config — chiefly
+		// indicators.strikeStep — has no default), so the opener-score block is unavailable. The probe
+		// surfaces WHY, so the display can warn the user what to create instead of silently omitting EM.
+		var expiry = new DateTime(2026, 7, 17);
+		var legs = new[]
+		{
+			new DiagnosticLeg(MatchKeys.OccSymbol("ZZZ", expiry, 80m, "P"), new OptionParsed("ZZZ", expiry, "P", 80m), IsLong: true, Qty: 1, PricePerShare: 0.11m, CostBasisPerShare: 0.11m),
+			new DiagnosticLeg(MatchKeys.OccSymbol("ZZZ", expiry, 90m, "P"), new OptionParsed("ZZZ", expiry, "P", 90m), IsLong: false, Qty: 1, PricePerShare: 0.20m, CostBasisPerShare: 0.20m),
+			new DiagnosticLeg(MatchKeys.OccSymbol("ZZZ", expiry, 100m, "P"), new OptionParsed("ZZZ", expiry, "P", 100m), IsLong: false, Qty: 1, PricePerShare: 0.60m, CostBasisPerShare: 0.60m),
+			new DiagnosticLeg(MatchKeys.OccSymbol("ZZZ", expiry, 110m, "P"), new OptionParsed("ZZZ", expiry, "P", 110m), IsLong: true, Qty: 1, PricePerShare: 1.95m, CostBasisPerShare: 1.95m),
+		};
+
+		var probe = RiskDiagnosticProbeBuilder.Build(legs, spot: 95m, asOf: new DateTime(2026, 6, 15), ivResolver: _ => 0.45m, quotes: null);
+
+		Assert.NotNull(probe.ScoreUnavailableReason);
+		Assert.Contains("config", probe.ScoreUnavailableReason!, StringComparison.OrdinalIgnoreCase);
+	}
 }
