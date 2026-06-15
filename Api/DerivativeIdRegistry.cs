@@ -1,5 +1,4 @@
 using System.Text.Json;
-using WebullAnalytics.AI;
 
 namespace WebullAnalytics.Api;
 
@@ -94,6 +93,29 @@ internal static class DerivativeIdRegistry
 				if (e.AsOf == asOf && OccRoot(occ) is { } root && string.Equals(root, ticker, StringComparison.OrdinalIgnoreCase))
 					return true;
 			return false;
+		}
+	}
+
+	/// <summary>Expiry dates of <paramref name="ticker"/> that already carry a snapshot dated
+	/// <paramref name="asOf"/> — i.e. today's daily liquidity sweep covered them (tradeable or not).
+	/// Lets the opener sweep only the expiries a wider-DTE strategy needs that an earlier narrower run
+	/// didn't cover, instead of treating the whole ticker as "done for the day": gating the sweep on
+	/// (ticker, date) alone let a 0DTE config — which sweeps only the front expiry — mark SPY done and
+	/// starve a later calendar/diagonal (QuickDC) run of its 2-7d / 2-4w legs.</summary>
+	public static IReadOnlySet<DateTime> CoveredExpiries(string ticker, string asOf)
+	{
+		lock (_lock)
+		{
+			EnsureLoaded();
+			var result = new HashSet<DateTime>();
+			foreach (var (occ, e) in _cache!)
+			{
+				if (e.AsOf != asOf) continue;
+				var p = ParsingHelpers.ParseOptionSymbol(occ);
+				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+				result.Add(p.ExpiryDate.Date);
+			}
+			return result;
 		}
 	}
 
