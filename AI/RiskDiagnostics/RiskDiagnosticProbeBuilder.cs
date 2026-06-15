@@ -241,12 +241,6 @@ internal static class RiskDiagnosticProbeBuilder
 				? $"net credit ${netPerContract:F2}/contract"
 				: $"net debit ${Math.Abs(netPerContract):F2}/contract";
 			var legsStr = legParts.Count > 0 ? $" ({string.Join(", ", legParts)})" : "";
-			// When scoring was skipped because no usable opener config exists for this ticker, say so and
-			// what to create — the EM/PoP/breakeven block needs a per-ticker ai-config.<TICKER>.json (chiefly
-			// indicators.strikeStep, which has no default). Surfacing it beats silently showing only net debit.
-			var unavailableStr = configUnavailableReason != null
-				? $" — EM/PoP/breakevens unavailable: {configUnavailableReason}"
-				: "";
 			openerScore = new RiskDiagnosticOpenerScore(
 				Structure: "probe",
 				Qty: legs.Count > 0 ? legs[0].Qty : 1,
@@ -259,7 +253,7 @@ internal static class RiskDiagnosticProbeBuilder
 				DaysToTarget: null,
 				RawScore: null,
 				BiasAdjustedScore: null,
-				Rationale: $"{netStr}{legsStr}{unavailableStr}");
+				Rationale: $"{netStr}{legsStr}");
 		}
 
 		return new RiskDiagnosticProbe(
@@ -268,7 +262,8 @@ internal static class RiskDiagnosticProbeBuilder
 			EnumDeltaMax: enumMax,
 			EnumDeltaPass: enumPass,
 			LegQuotes: legQuotes,
-			OpenerScore: openerScore);
+			OpenerScore: openerScore,
+			ScoreUnavailableReason: configUnavailableReason);
 	}
 
 	internal static CandidateSkeleton? TryBuildCandidateSkeleton(IReadOnlyList<DiagnosticLeg> legs)
