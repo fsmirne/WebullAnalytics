@@ -6,7 +6,7 @@ namespace WebullAnalytics.AI.RiskDiagnostics;
 
 internal static class RiskDiagnosticProbeBuilder
 {
-	private static readonly Dictionary<string, AIConfig?> _cachedConfigsByTicker = new(StringComparer.OrdinalIgnoreCase);
+	private static readonly Dictionary<string, (AIConfig? Config, string? Reason)> _cachedConfigsByTicker = new(StringComparer.OrdinalIgnoreCase);
 
 	internal static RiskDiagnosticProbe Build(
 		IReadOnlyList<DiagnosticLeg> legs,
@@ -72,7 +72,7 @@ internal static class RiskDiagnosticProbeBuilder
 				{
 					var band = opener.HasValue
 						? (opener.Value.cfg.Structures.ShortVertical.ShortDeltaMin, opener.Value.cfg.Structures.ShortVertical.ShortDeltaMax)
-						: TryLoadAiConfigQuiet(shortLeg.Parsed.Root) is AIConfig ai
+						: TryLoadAiConfigQuiet(shortLeg.Parsed.Root, out _) is AIConfig ai
 							? (ai.Opener.Structures.ShortVertical.ShortDeltaMin, ai.Opener.Structures.ShortVertical.ShortDeltaMax)
 							: ((decimal?)null, (decimal?)null);
 
@@ -105,6 +105,7 @@ internal static class RiskDiagnosticProbeBuilder
 		}
 
 		RiskDiagnosticOpenerScore? openerScore = null;
+		string? configUnavailableReason = null;
 		if (opener.HasValue)
 		{
 			var o = opener.Value;
@@ -128,7 +129,7 @@ internal static class RiskDiagnosticProbeBuilder
 		{
 			// For non-opener callers (analyze position/risk): try to compute opener-style score/rationale
 			// using the same CandidateScorer used by `wa ai once`.
-			var ai = TryLoadAiConfigQuiet(legs.Count > 0 ? legs[0].Parsed.Root : null);
+			var ai = TryLoadAiConfigQuiet(legs.Count > 0 ? legs[0].Parsed.Root : null, out configUnavailableReason);
 			if (ai != null && quotes != null)
 			{
 				var scoringQuotes = useCostBasisForOpenerScore
@@ -240,6 +241,12 @@ internal static class RiskDiagnosticProbeBuilder
 				? $"net credit ${netPerContract:F2}/contract"
 				: $"net debit ${Math.Abs(netPerContract):F2}/contract";
 			var legsStr = legParts.Count > 0 ? $" ({string.Join(", ", legParts)})" : "";
+			// When scoring was skipped because no usable opener config exists for this ticker, say so and
+			// what to create — the EM/PoP/breakeven block needs a per-ticker ai-config.<TICKER>.json (chiefly
+			// indicators.strikeStep, which has no default). Surfacing it beats silently showing only net debit.
+			var unavailableStr = configUnavailableReason != null
+				? $" — EM/PoP/breakevens unavailable: {configUnavailableReason}"
+				: "";
 			openerScore = new RiskDiagnosticOpenerScore(
 				Structure: "probe",
 				Qty: legs.Count > 0 ? legs[0].Qty : 1,
@@ -252,7 +259,7 @@ internal static class RiskDiagnosticProbeBuilder
 				DaysToTarget: null,
 				RawScore: null,
 				BiasAdjustedScore: null,
-				Rationale: $"{netStr}{legsStr}");
+				Rationale: $"{netStr}{legsStr}{unavailableStr}");
 		}
 
 		return new RiskDiagnosticProbe(
@@ -320,6 +327,22 @@ internal static class RiskDiagnosticProbeBuilder
 			var distinctExpiries = legs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().Count();
 			var distinctStrikes = legs.Select(l => l.Parsed.Strike).Distinct().Count();
 			var distinctCallPut = legs.Select(l => l.Parsed.CallPut).Distinct().Count();
+
+			// Single-sided condor: one expiry, all puts OR all calls, four distinct strikes, longs at the
+			// wings + shorts in the body (long condor) or the reverse (short condor). Maps to the Condor
+			// kind so ScoreMultiLeg can price it (EM / breakevens / PoP / EV) for an already-open position;
+			// the opener never builds this skeleton, so it's still never proposed.
+			if (distinctExpiries == 1 && distinctCallPut == 1 && distinctStrikes == 4)
+			{
+				var byStrike = legs.OrderBy(l => l.Parsed.Strike).ToList();
+				var longWings = byStrike[0].IsLong && !byStrike[1].IsLong && !byStrike[2].IsLong && byStrike[3].IsLong;
+				var shortWings = !byStrike[0].IsLong && byStrike[1].IsLong && byStrike[2].IsLong && !byStrike[3].IsLong;
+				if (longWings || shortWings)
+				{
+					var orderedLegs = byStrike.Select(l => new ProposalLeg(l.IsLong ? "buy" : "sell", l.Symbol, 1)).ToList();
+					return new CandidateSkeleton(legs[0].Parsed.Root, OpenStructureKind.Condor, orderedLegs, legs[0].Parsed.ExpiryDate);
+				}
+			}
 
 			if (distinctExpiries == 1 && distinctCallPut == 2)
 			{
@@ -420,35 +443,52 @@ internal static class RiskDiagnosticProbeBuilder
 	/// same way AIContext.ResolveConfig does for the live pipeline. Validating the bare base layer is wrong:
 	/// it is intentionally incomplete (e.g. indicators.strikeStep lives only in the per-ticker layer), so the
 	/// unmerged config fails validation and the probe silently degrades to the generic no-score rationale.</summary>
-	private static AIConfig? TryLoadAiConfigQuiet(string? ticker)
+	/// <summary>Loads the opener config for scoring the probe (base → ai-config.&lt;TICKER&gt;.json, same as
+	/// AIContext.ResolveConfig). Returns null when no usable config exists, with <paramref name="unavailableReason"/>
+	/// set to a human-readable explanation — surfaced in the diagnostic so the user knows exactly what to create
+	/// (e.g. a missing per-ticker ai-config.&lt;TICKER&gt;.json supplying indicators.strikeStep) rather than the probe
+	/// silently degrading to a no-score rationale.</summary>
+	private static AIConfig? TryLoadAiConfigQuiet(string? ticker, out string? unavailableReason)
 	{
 		var key = ticker?.ToUpperInvariant() ?? "";
-		if (_cachedConfigsByTicker.TryGetValue(key, out var cached)) return cached;
+		if (_cachedConfigsByTicker.TryGetValue(key, out var cached)) { unavailableReason = cached.Reason; return cached.Config; }
 		AIConfig? result = null;
+		string? reason = null;
 		try
 		{
 			var basePath = Program.ResolvePath(AIConfigLoader.ConfigPath);
-			if (File.Exists(basePath))
+			if (!File.Exists(basePath))
+				reason = $"no base config at {basePath}";
+			else
 			{
 				var paths = new List<string?> { basePath };
+				var hasTickerConfig = false;
 				if (key.Length > 0)
 				{
 					var tickerPath = Path.Combine(Path.GetDirectoryName(basePath) ?? string.Empty, $"ai-config.{key}.json");
-					if (File.Exists(tickerPath)) paths.Add(tickerPath);
+					if (File.Exists(tickerPath)) { paths.Add(tickerPath); hasTickerConfig = true; }
 				}
 				var config = AIConfigMerge.LoadMerged(paths.ToArray());
-				if (config != null)
+				if (config == null)
+					reason = "config failed to load";
+				else
 				{
 					config.Opener.Indicators = config.Indicators; // same wiring as ResolveConfig — cfg-only helpers reach indicators through Opener
-					if (AIConfigLoader.Validate(config) == null) result = config;
+					var err = AIConfigLoader.Validate(config);
+					if (err == null) result = config;
+					else reason = hasTickerConfig
+						? $"ai-config.{key}.json is invalid: {err}"
+						: $"no per-ticker config ai-config.{key}.json — {err}";
 				}
 			}
 		}
-		catch
+		catch (Exception ex)
 		{
 			result = null;
+			reason = ex.Message;
 		}
-		_cachedConfigsByTicker[key] = result;
+		_cachedConfigsByTicker[key] = (result, reason);
+		unavailableReason = reason;
 		return result;
 	}
 }
