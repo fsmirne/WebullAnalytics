@@ -149,6 +149,33 @@ public class DerivativeIdRegistryTests : IDisposable
 	}
 
 	[Fact]
+	public void CoveredExpiries_ReturnsSweptExpiries_RegardlessOfTradeable_FilteredByTickerAndDate()
+	{
+		DerivativeIdRegistry.Register(new Dictionary<string, long>
+		{
+			["XSP260605C00760000"] = 111, // expiry 2026-06-05, tradeable
+			["XSP260605C00761000"] = 112, // expiry 2026-06-05, dead — still a covered expiry
+			["XSP260619C00760000"] = 113, // expiry 2026-06-19, tradeable
+			["SPXW260605C04000000"] = 114, // different ticker, same date
+		});
+		DerivativeIdRegistry.RecordSnapshot("2026-06-01", new Dictionary<string, (bool, long?)>
+		{
+			["XSP260605C00760000"] = (true, 1200),
+			["XSP260605C00761000"] = (false, null),
+			["XSP260619C00760000"] = (true, 50),
+			["SPXW260605C04000000"] = (true, 999),
+		});
+
+		var covered = DerivativeIdRegistry.CoveredExpiries("XSP", "2026-06-01");
+		Assert.Equal(2, covered.Count);
+		Assert.Contains(new DateTime(2026, 6, 5), covered);   // included even though one strike was dead
+		Assert.Contains(new DateTime(2026, 6, 19), covered);
+
+		Assert.Empty(DerivativeIdRegistry.CoveredExpiries("XSP", "2026-06-02")); // wrong date
+		Assert.Single(DerivativeIdRegistry.CoveredExpiries("SPXW", "2026-06-01")); // ticker-scoped
+	}
+
+	[Fact]
 	public void RecordSnapshot_SkipsContractsNotYetHarvested()
 	{
 		DerivativeIdRegistry.RecordSnapshot("2026-06-01", new Dictionary<string, (bool, long?)>
