@@ -34,12 +34,60 @@ internal static class SchwabOptionsClient
 	/// <summary>Fetches the full chain for <paramref name="root"/> between the given expiry dates (inclusive).
 	/// Returns the underlying spot and every quoted contract. An empty result (e.g. an unsupported index symbol)
 	/// comes back as <c>(null, empty)</c> rather than throwing, so the capture loop treats it as a soft miss.</summary>
+	/// <param name="strikeCount">When &gt; 0, asks Schwab to return only this many strikes around the
+	/// at-the-money price (per expiration) instead of the full <c>range=ALL</c> ladder. A caller that only
+	/// needs near-money strikes (e.g. <c>analyze gex</c>) sets this so the common case is a single small
+	/// request; 0 keeps the full ladder (what the scraper's backtest snapshot wants). Either way the body
+	/// cap is enforced by the adaptive date-range split below, so no caller can 502.</param>
 	public static async Task<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)> FetchChainAsync(
-		string accessToken, string root, DateOnly fromExpiry, DateOnly toExpiry, CancellationToken ct)
+		string accessToken, string root, DateOnly fromExpiry, DateOnly toExpiry, CancellationToken ct, int strikeCount = 0)
 	{
 		var symbol = ToSchwabUnderlying(root);
+		return await FetchChainRangeAsync(accessToken, symbol, fromExpiry, toExpiry, strikeCount, ct);
+	}
+
+	/// <summary>Fetches [<paramref name="from"/>, <paramref name="to"/>] in one request and, when Schwab
+	/// rejects the response body as too large (HTTP 502 <c>protocol.http.TooBigBody</c> — dense index roots
+	/// like $SPX over a multi-day window with <c>range=ALL</c>), recursively halves the expiry window and
+	/// merges the halves. Self-tunes to chain density: sparse equities resolve in one call, a 45-DTE $SPX
+	/// request splits until each chunk fits — full strike coverage preserved, no per-ticker tuning, and no
+	/// caller (analyze gex or the scraper, at any <c>--max-dte</c>) can overflow.</summary>
+	private static async Task<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)> FetchChainRangeAsync(
+		string accessToken, string symbol, DateOnly from, DateOnly to, int strikeCount, CancellationToken ct)
+	{
+		var (spot, quotes, tooBig) = await FetchChainOnceAsync(accessToken, symbol, from, to, strikeCount, ct);
+		if (!tooBig) return (spot, quotes);
+
+		if (from >= to)
+		{
+			// A single expiry day still overflows at range=ALL — last resort: bound strikes around ATM so we
+			// return the near-money chain rather than nothing. (Not expected in practice: 0DTE range=ALL fits.)
+			if (strikeCount is 0 or > 250)
+			{
+				var (s, q, stillTooBig) = await FetchChainOnceAsync(accessToken, symbol, from, to, 250, ct);
+				if (!stillTooBig) return (s, q);
+			}
+			Console.WriteLine($"Schwab: chain for {symbol} on {from:yyyy-MM-dd} exceeds the body cap even bounded; skipping that day.");
+			return (null, Array.Empty<OptionContractQuote>());
+		}
+
+		var mid = from.AddDays((to.DayNumber - from.DayNumber) / 2);
+		var lower = await FetchChainRangeAsync(accessToken, symbol, from, mid, strikeCount, ct);
+		var upper = await FetchChainRangeAsync(accessToken, symbol, mid.AddDays(1), to, strikeCount, ct);
+		var merged = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		foreach (var q in lower.Quotes) merged[q.ContractSymbol] = q;
+		foreach (var q in upper.Quotes) merged[q.ContractSymbol] = q;
+		return (lower.Spot ?? upper.Spot, merged.Values.ToList());
+	}
+
+	/// <summary>One chains GET. Returns <c>TooBig=true</c> (with empty quotes) on the 502 body-overflow so the
+	/// caller can split the window; other non-success statuses are logged and returned as a soft miss.</summary>
+	private static async Task<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes, bool TooBig)> FetchChainOnceAsync(
+		string accessToken, string symbol, DateOnly from, DateOnly to, int strikeCount, CancellationToken ct)
+	{
 		var url = $"{ChainsUrl}?symbol={Uri.EscapeDataString(symbol)}&contractType=ALL&strategy=SINGLE&range=ALL"
-			+ $"&includeUnderlyingQuote=true&fromDate={fromExpiry:yyyy-MM-dd}&toDate={toExpiry:yyyy-MM-dd}";
+			+ $"&includeUnderlyingQuote=true&fromDate={from:yyyy-MM-dd}&toDate={to:yyyy-MM-dd}"
+			+ (strikeCount > 0 ? $"&strikeCount={strikeCount}" : "");
 
 		using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 		using var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -52,11 +100,14 @@ internal static class SchwabOptionsClient
 			throw new SchwabAuthException($"chains request unauthorized (HTTP {(int)response.StatusCode}) — token rejected.");
 		if (!response.IsSuccessStatusCode)
 		{
-			Console.WriteLine($"Schwab: chains returned {(int)response.StatusCode} for {symbol}: {Truncate(body, 200)}");
-			return (null, Array.Empty<OptionContractQuote>());
+			var tooBig = (int)response.StatusCode == 502 && body.Contains("TooBigBody", StringComparison.OrdinalIgnoreCase);
+			if (!tooBig)
+				Console.WriteLine($"Schwab: chains returned {(int)response.StatusCode} for {symbol}: {Truncate(body, 200)}");
+			return (null, Array.Empty<OptionContractQuote>(), tooBig);
 		}
 
-		return ParseChain(body, symbol);
+		var (spot, quotes) = ParseChain(body, symbol);
+		return (spot, quotes, false);
 	}
 
 	private static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes) ParseChain(string json, string symbol)
