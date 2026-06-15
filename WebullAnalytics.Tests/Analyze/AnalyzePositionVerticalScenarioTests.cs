@@ -96,4 +96,56 @@ public class AnalyzePositionVerticalScenarioTests
 		Assert.True(partialRoll.MarginDeltaPerContract * partialRoll.Qty <= settings.Cash);
 		Assert.Contains("full size would need", partialRoll.Rationale, StringComparison.Ordinal);
 	}
+
+	[Fact]
+	public void ClassifyAndGenerate_PutCondorIsSupported()
+	{
+		var expiry = new DateTime(2026, 7, 17);
+		// The reported USO long put condor: long wings (80, 110), short body (90, 100).
+		var legs = new List<AnalyzePositionCommand.PositionSnapshot>
+		{
+			new("USO260717P00110000", LegAction.Buy, 20, 1.95m, new OptionParsed("USO", expiry, "P", 110m)),
+			new("USO260717P00100000", LegAction.Sell, 20, 0.60m, new OptionParsed("USO", expiry, "P", 100m)),
+			new("USO260717P00090000", LegAction.Sell, 20, 0.20m, new OptionParsed("USO", expiry, "P", 90m)),
+			new("USO260717P00080000", LegAction.Buy, 20, 0.11m, new OptionParsed("USO", expiry, "P", 80m)),
+		};
+
+		Assert.Equal(AnalyzePositionCommand.StructureKind.Condor, AnalyzePositionCommand.ClassifyStructure(legs));
+
+		var settings = new AnalyzePositionSettings { IvDefault = 45m, StrikeStep = 1m };
+		var scenarios = AnalyzePositionCommand.GenerateScenarios(
+			legs, AnalyzePositionCommand.StructureKind.Condor, settings,
+			spot: 95m, asOf: new DateTime(2026, 6, 15), quotes: null);
+
+		Assert.NotEmpty(scenarios);
+		Assert.Contains(scenarios, s => s.Name == "Close all");
+		Assert.Contains(scenarios, s => s.Name.StartsWith("Hold to expiry (plateau mid", StringComparison.Ordinal));
+		Assert.Contains(scenarios, s => s.Name.StartsWith("Hold to expiry (lower wing", StringComparison.Ordinal));
+		Assert.Contains(scenarios, s => s.Name.StartsWith("Hold to expiry (upper wing", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void Classify_CallCondorSupported_StackedVerticalsAreNot()
+	{
+		var exp = new DateTime(2026, 7, 17);
+		// Long call condor: buy wings, sell body -> Condor.
+		var condor = new List<AnalyzePositionCommand.PositionSnapshot>
+		{
+			new("USO260717C00080000", LegAction.Buy, 1, 1m, new OptionParsed("USO", exp, "C", 80m)),
+			new("USO260717C00090000", LegAction.Sell, 1, 1m, new OptionParsed("USO", exp, "C", 90m)),
+			new("USO260717C00100000", LegAction.Sell, 1, 1m, new OptionParsed("USO", exp, "C", 100m)),
+			new("USO260717C00110000", LegAction.Buy, 1, 1m, new OptionParsed("USO", exp, "C", 110m)),
+		};
+		Assert.Equal(AnalyzePositionCommand.StructureKind.Condor, AnalyzePositionCommand.ClassifyStructure(condor));
+
+		// Long/short alternating by strike (not wings/body) is two stacked verticals, not a condor.
+		var stacked = new List<AnalyzePositionCommand.PositionSnapshot>
+		{
+			new("USO260717C00080000", LegAction.Buy, 1, 1m, new OptionParsed("USO", exp, "C", 80m)),
+			new("USO260717C00090000", LegAction.Sell, 1, 1m, new OptionParsed("USO", exp, "C", 90m)),
+			new("USO260717C00100000", LegAction.Buy, 1, 1m, new OptionParsed("USO", exp, "C", 100m)),
+			new("USO260717C00110000", LegAction.Sell, 1, 1m, new OptionParsed("USO", exp, "C", 110m)),
+		};
+		Assert.NotEqual(AnalyzePositionCommand.StructureKind.Condor, AnalyzePositionCommand.ClassifyStructure(stacked));
+	}
 }
