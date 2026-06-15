@@ -10,6 +10,12 @@ public enum OpenStructureKind
 	DoubleDiagonal,
 	IronButterfly,
 	IronCondor,
+	// Single-sided 4-leg condor (all puts OR all calls): long wings + short body (long/debit condor) or
+	// the reverse (short/credit condor). Same neutral, two-breakeven payoff family as an iron condor. The
+	// opener does NOT enumerate or propose these — there is no Condor entry in OpenerConfig.Structures and
+	// CandidateEnumerator never builds one — but Score()/ScoreMultiLeg handles a Condor skeleton so an
+	// already-open condor can be scored (EM / breakevens / PoP / EV) in `analyze position`'s risk diagnostic.
+	Condor,
 	ShortPutVertical,
 	ShortCallVertical,
 	LongCall,

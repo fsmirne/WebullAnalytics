@@ -168,7 +168,24 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (apiCfg != null && apiCfg.Webull.Headers.Count > 0)
 			{
 				var targetExpiries = positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().ToList();
-				var (chainQuotes, chainSpot, _) = await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(apiCfg, ticker, targetExpiries, strikeRangeFraction: 0.20m, cancellation);
+				var (chainQuotes, chainSpot, derivativeIds) = await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(apiCfg, ticker, targetExpiries, strikeRangeFraction: 0.20m, cancellation);
+
+				// The near-ATM refresh above gives max-pain/GEX their chain breadth, but it leaves the
+				// position's OWN legs unpriced when they sit outside ±20% of spot (e.g. the deep-OTM wings of
+				// a wide condor). Those legs are the whole point of `analyze position`, so refresh any that
+				// came back without a usable bid/ask directly from queryBatch — resolving the derivativeId
+				// from this fetch's map first, then the persisted registry so a leg the chain dropped entirely
+				// (far-dated expiries outside the strategy/list cycle) can still be priced.
+				var legsMissingQuote = positionSymbols.Where(s => !chainQuotes.TryGetValue(s, out var q) || q.Bid == null || q.Ask == null).ToList();
+				if (legsMissingQuote.Count > 0)
+				{
+					var ids = new Dictionary<string, long>(derivativeIds, StringComparer.OrdinalIgnoreCase);
+					foreach (var s in legsMissingQuote)
+						if (!ids.ContainsKey(s) && DerivativeIdRegistry.TryGetId(s, out var rid)) ids[s] = rid;
+					var mutableChain = new Dictionary<string, OptionContractQuote>(chainQuotes, StringComparer.OrdinalIgnoreCase);
+					await WebullOptionsClient.RefreshContractsAsync(apiCfg, mutableChain, legsMissingQuote, ids, cancellation);
+					chainQuotes = mutableChain;
+				}
 				quotes = chainQuotes;
 				if (chainSpot.HasValue)
 					underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = chainSpot.Value };
@@ -407,7 +424,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	internal sealed record PositionSnapshot(string Symbol, LegAction Action, int Qty, decimal CostBasis, OptionParsed Parsed);
 
-	internal enum StructureKind { SingleLong, SingleShort, Calendar, Diagonal, Vertical, IronButterfly, IronCondor, DoubleCalendar, DoubleDiagonal, Unsupported }
+	internal enum StructureKind { SingleLong, SingleShort, Calendar, Diagonal, Vertical, IronButterfly, IronCondor, Condor, DoubleCalendar, DoubleDiagonal, Unsupported }
 
 	// ─── Load from trade log ──────────────────────────────────────────────────
 
@@ -560,6 +577,22 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var root = legs[0].Parsed.Root;
 			if (!legs.All(l => l.Parsed.Root == root)) return StructureKind.Unsupported;
 
+			// All-same-right condor: one expiry, one side (all puts or all calls), 2 long + 2 short, four
+			// distinct strikes, with the longs at the wings and shorts in the body (long condor) or the
+			// reverse (short condor). Same neutral payoff shape as an iron condor, built from a single side.
+			// Checked before the iron extraction below, which requires both a call and a put and would
+			// otherwise reject an all-put / all-call condor as Unsupported.
+			if (legs.All(l => l.Parsed.CallPut == legs[0].Parsed.CallPut)
+				&& legs.All(l => l.Parsed.ExpiryDate == legs[0].Parsed.ExpiryDate)
+				&& legs.Count(l => l.Action == LegAction.Buy) == 2
+				&& legs.Select(l => l.Parsed.Strike).Distinct().Count() == 4)
+			{
+				var byStrike = legs.OrderBy(l => l.Parsed.Strike).ToList();
+				bool longWings = byStrike[0].Action == LegAction.Buy && byStrike[1].Action == LegAction.Sell && byStrike[2].Action == LegAction.Sell && byStrike[3].Action == LegAction.Buy;
+				bool shortWings = byStrike[0].Action == LegAction.Sell && byStrike[1].Action == LegAction.Buy && byStrike[2].Action == LegAction.Buy && byStrike[3].Action == LegAction.Sell;
+				if (longWings || shortWings) return StructureKind.Condor;
+			}
+
 			var shortPut = legs.FirstOrDefault(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "P");
 			var longPut = legs.FirstOrDefault(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "P");
 			var shortCall = legs.FirstOrDefault(l => l.Action == LegAction.Sell && l.Parsed.CallPut == "C");
@@ -705,6 +738,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			StructureKind.Vertical => GenerateVerticalScenarios(legs, settings, spot, asOf, quotes, technicalBias, dividends),
 			StructureKind.Calendar or StructureKind.Diagonal => GenerateSpreadScenarios(legs, settings, spot, asOf, kind, quotes, dividends),
 			StructureKind.IronButterfly or StructureKind.IronCondor => GenerateIronScenarios(legs, settings, spot, asOf, quotes, dividends),
+			StructureKind.Condor => GenerateCondorScenarios(legs, settings, spot, asOf, quotes, dividends),
 			StructureKind.DoubleCalendar or StructureKind.DoubleDiagonal => GenerateDoubleSpreadScenarios(legs, settings, spot, asOf, kind, quotes, dividends),
 			_ => new List<Scenario>()
 		};
@@ -902,6 +936,51 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				cashNow: sideCash, valueAtTarget: residualAtExpiry, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
 				rationale: $"call-side closer to short strike (${distanceToShortCall:F2} above) — cut the call spread for ${sideCash:+0.00;-0.00}/share; remaining put spread settles to ${residualAtExpiry:F2}/share at current spot"));
 		}
+
+		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
+	}
+
+	/// <summary>Scenarios for an all-same-right condor (put or call). Same neutral payoff shape as an iron
+	/// condor — a plateau between the two inner strikes, capped losses at the wings — but built from a
+	/// single side, so the pricing is right-agnostic: the position's intrinsic at any expiration spot is
+	/// just the signed sum of each leg's intrinsic (long adds, short subtracts). Probes hold-to-expiry at
+	/// current spot, the inner-strike plateau midpoint, and each wing, plus a close-all-at-mid; ranking then
+	/// surfaces the best/worst outcomes whether it's a long condor (wings long) or short condor (wings short).</summary>
+	private static List<Scenario> GenerateCondorScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? dividends = null)
+	{
+		var list = new List<Scenario>();
+		var ordered = legs.OrderBy(l => l.Parsed.Strike).ToList(); // K1 < K2 < K3 < K4
+		var expiry = ordered[0].Parsed.ExpiryDate;
+		var expiryDte = Math.Max(1, (expiry.Date - asOf.Date).Days);
+		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
+
+		// Signed intrinsic of the whole position held to expiry at spot s (per share): longs add their
+		// intrinsic, shorts subtract it. Right-agnostic, so it covers both put and call condors.
+		decimal IntrinsicAtSpot(decimal s) => ordered.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * Intrinsic(s, l.Parsed.Strike, l.Parsed.CallPut));
+
+		var innerMid = (ordered[1].Parsed.Strike + ordered[2].Parsed.Strike) / 2m;
+		var targets = new (string Label, decimal Spot)[]
+		{
+			("current spot", spot),
+			($"plateau mid ${innerMid:F2}", innerMid),
+			($"lower wing ${ordered[0].Parsed.Strike:F2}", ordered[0].Parsed.Strike),
+			($"upper wing ${ordered[3].Parsed.Strike:F2}", ordered[3].Parsed.Strike),
+		};
+		foreach (var (label, targetSpot) in targets)
+		{
+			var v = IntrinsicAtSpot(targetSpot);
+			list.Add(NewScenarioSpread($"Hold to expiry ({label})", legs, "—",
+				cashNow: 0m, valueAtTarget: v, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
+				rationale: $"at {expiry:yyyy-MM-dd} with spot @ ${targetSpot:F2}: intrinsic ${v:F2}/share"));
+		}
+
+		// Close all at mid now: sell the longs, buy back the shorts. Price each leg once.
+		var mids = ordered.ToDictionary(l => l.Symbol, l => LiveOrBsMid(quotesForPricing, l.Symbol, spot, l.Parsed.Strike, expiryDte, ResolveIV(l.Symbol, settings, quotes), l.Parsed.CallPut, dividends), StringComparer.OrdinalIgnoreCase);
+		var closeCash = ordered.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * mids[l.Symbol]);
+		var closeAction = string.Join(", ", ordered.Select(l => $"{(l.Action == LegAction.Buy ? "SELL" : "BUY")} {l.Symbol} x{l.Qty} @{FmtPrice(mids[l.Symbol])}"));
+		list.Add(NewScenarioSpread("Close all", legs, closeAction,
+			cashNow: closeCash, valueAtTarget: 0m, marginDeltaPerContract: 0m, daysToTarget: 1,
+			rationale: $"flatten at mid: net cash ${closeCash:+0.00;-0.00}/share to close all four legs"));
 
 		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
 	}

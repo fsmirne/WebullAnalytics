@@ -28,6 +28,35 @@ public class RiskDiagnosticProbeBuilderTests
 	}
 
 	[Fact]
+	public void TryBuildCandidateSkeletonRecognizesSingleSidedCondor()
+	{
+		// All-put long condor: long wings (80, 110), short body (90, 100). Maps to Condor so ScoreMultiLeg
+		// can price EM/breakevens/PoP for the already-open position (the opener never builds this).
+		var expiry = new DateTime(2026, 7, 17);
+		var legs = new[]
+		{
+			new DiagnosticLeg(MatchKeys.OccSymbol("USO", expiry, 80m, "P"), new OptionParsed("USO", expiry, "P", 80m), IsLong: true, Qty: 20, PricePerShare: 0.11m, CostBasisPerShare: 0.11m),
+			new DiagnosticLeg(MatchKeys.OccSymbol("USO", expiry, 90m, "P"), new OptionParsed("USO", expiry, "P", 90m), IsLong: false, Qty: 20, PricePerShare: 0.20m, CostBasisPerShare: 0.20m),
+			new DiagnosticLeg(MatchKeys.OccSymbol("USO", expiry, 100m, "P"), new OptionParsed("USO", expiry, "P", 100m), IsLong: false, Qty: 20, PricePerShare: 0.60m, CostBasisPerShare: 0.60m),
+			new DiagnosticLeg(MatchKeys.OccSymbol("USO", expiry, 110m, "P"), new OptionParsed("USO", expiry, "P", 110m), IsLong: true, Qty: 20, PricePerShare: 1.95m, CostBasisPerShare: 1.95m),
+		};
+		var skel = RiskDiagnosticProbeBuilder.TryBuildCandidateSkeleton(legs);
+		Assert.NotNull(skel);
+		Assert.Equal(OpenStructureKind.Condor, skel!.StructureKind);
+		Assert.Equal(4, skel.Legs.Count);
+
+		// Long/short alternating by strike (two stacked verticals) is not a condor.
+		var stacked = new[]
+		{
+			new DiagnosticLeg(MatchKeys.OccSymbol("USO", expiry, 80m, "P"), new OptionParsed("USO", expiry, "P", 80m), IsLong: true, Qty: 1, PricePerShare: 1m, CostBasisPerShare: 1m),
+			new DiagnosticLeg(MatchKeys.OccSymbol("USO", expiry, 90m, "P"), new OptionParsed("USO", expiry, "P", 90m), IsLong: false, Qty: 1, PricePerShare: 1m, CostBasisPerShare: 1m),
+			new DiagnosticLeg(MatchKeys.OccSymbol("USO", expiry, 100m, "P"), new OptionParsed("USO", expiry, "P", 100m), IsLong: true, Qty: 1, PricePerShare: 1m, CostBasisPerShare: 1m),
+			new DiagnosticLeg(MatchKeys.OccSymbol("USO", expiry, 110m, "P"), new OptionParsed("USO", expiry, "P", 110m), IsLong: false, Qty: 1, PricePerShare: 1m, CostBasisPerShare: 1m),
+		};
+		Assert.Null(RiskDiagnosticProbeBuilder.TryBuildCandidateSkeleton(stacked));
+	}
+
+	[Fact]
 	public void OpenerEnumDeltaPrefersLiveQuoteIvWhenAvailable()
 	{
 		// The enumerator now reads each strike's live IV from the chain (commit replacing the static

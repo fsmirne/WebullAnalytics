@@ -328,16 +328,29 @@ internal static class RiskDiagnosticBuilder
 			}
 		}
 
-		// Single-sided 2 long + 2 short across two expiries (all same call/put), each expiry forming a
-		// vertical (one long + one short). Validate the shape here; the name (calendar_vertical with one
-		// shared anchor, diagonal_vertical with offset anchors) again comes from the shared taxonomy.
+		// Single-sided 2 long + 2 short, all same call/put. Two distinct shapes by expiry:
+		//   • Two expiries, each forming a vertical (one long + one short) → calendar_vertical (shared
+		//     anchor) or diagonal_vertical (offset anchors) — the name comes from the shared taxonomy.
+		//   • One expiry, four distinct strikes, longs at the wings and shorts in the body (or the reverse)
+		//     → condor: same neutral payoff shape as an iron condor, built from a single side.
 		if (longLegs.Count == 2 && shortLegs.Count == 2
 			&& longLegs.Concat(shortLegs).Select(l => l.Parsed.CallPut).Distinct().Count() == 1)
 		{
-			var dvExpiries = longLegs.Concat(shortLegs).Select(l => l.Parsed.ExpiryDate).Distinct().ToList();
+			var all = longLegs.Concat(shortLegs).ToList();
+			var dvExpiries = all.Select(l => l.Parsed.ExpiryDate).Distinct().ToList();
 			if (dvExpiries.Count == 2
 				&& dvExpiries.All(e => longLegs.Count(l => l.Parsed.ExpiryDate == e) == 1 && shortLegs.Count(l => l.Parsed.ExpiryDate == e) == 1))
 				return (NameFromCounts(longLegs, shortLegs), "neutral");
+
+			if (dvExpiries.Count == 1 && all.Select(l => l.Parsed.Strike).Distinct().Count() == 4)
+			{
+				var sorted = all.Select(l => l.Parsed.Strike).OrderBy(s => s).ToList();
+				var longSet = longLegs.Select(l => l.Parsed.Strike).ToHashSet();
+				bool longWings = longSet.Contains(sorted[0]) && longSet.Contains(sorted[3]);
+				bool shortWings = !longSet.Contains(sorted[0]) && !longSet.Contains(sorted[3]);
+				if (longWings || shortWings)
+					return (NameFromCounts(longLegs, shortLegs), "neutral");
+			}
 		}
 
 		return ("unknown", "neutral");
