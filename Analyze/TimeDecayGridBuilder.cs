@@ -249,47 +249,54 @@ internal static class TimeDecayGridBuilder
 		if ((expiry.Date - today).TotalDays <= 0)
 			return [OptionMath.ObservationInstant(), expiry.Date + OptionMath.MarketClose];
 
-		// Classify every calendar day from today up to (not including) expiry by priority tier.
+		// Today's columns are always present and never subject to the even-spacing trim: the observation-instant
+		// anchor (live now / last close off-hours), plus — pre-open on a trading day — today's 09:30 open, so a
+		// market-open day always shows the projected open even when the expiry is far enough to trim future days.
+		var anchor = OptionMath.ObservationInstant();
+		var todayColumns = new List<DateTime> { anchor };
+		if (MarketCalendar.IsOpen(today) && anchor.Date < today.Date) todayColumns.Add(today.Date + OptionMath.MarketOpen);
+
+		// Classify every future calendar day (after today, before expiry) by priority tier.
 		var tradingDays = new List<DateTime>();
 		var holidays = new List<DateTime>();
 		var weekends = new List<DateTime>();
-		for (var d = today; d.Date < expiry.Date; d = d.AddDays(1))
+		for (var d = today.AddDays(1); d.Date < expiry.Date; d = d.AddDays(1))
 		{
-			// Leftmost (today) column = the observation instant (now live / last close off-hours) so it shows
-			// the true current value; later columns stay at each future session's open.
-			var dt = d.Date == today.Date ? OptionMath.ObservationInstant() : d.Date + OptionMath.MarketOpen;
+			var dt = d.Date + OptionMath.MarketOpen;
 			if (MarketCalendar.IsOpen(d)) tradingDays.Add(dt);
 			else if (d.DayOfWeek != DayOfWeek.Saturday && d.DayOfWeek != DayOfWeek.Sunday) holidays.Add(dt);
 			else weekends.Add(dt);
 		}
 
-		var interiorSlots = Math.Max(1, maxColumns - 2);
-		List<DateTime> selected;
+		// Reserve slots for the always-present today columns and the two expiry columns.
+		var interiorSlots = Math.Max(1, maxColumns - 2 - todayColumns.Count);
+		List<DateTime> interior;
 
 		var allCount = tradingDays.Count + holidays.Count + weekends.Count;
 		if (allCount <= interiorSlots)
 		{
-			// Every calendar day fits — show them all.
-			selected = tradingDays.Concat(holidays).Concat(weekends).OrderBy(d => d).ToList();
+			// Every future calendar day fits — show them all.
+			interior = [.. tradingDays, .. holidays, .. weekends];
 		}
 		else if (tradingDays.Count + holidays.Count <= interiorSlots)
 		{
 			// All trading days and holidays fit; fill remaining slots with evenly-spaced weekends.
 			var remaining = interiorSlots - tradingDays.Count - holidays.Count;
-			selected = tradingDays.Concat(holidays).Concat(EvenlySpaced(weekends, remaining)).OrderBy(d => d).ToList();
+			interior = [.. tradingDays, .. holidays, .. EvenlySpaced(weekends, remaining)];
 		}
 		else if (tradingDays.Count <= interiorSlots)
 		{
 			// All trading days fit; fill remaining slots with evenly-spaced holidays.
 			var remaining = interiorSlots - tradingDays.Count;
-			selected = tradingDays.Concat(EvenlySpaced(holidays, remaining)).OrderBy(d => d).ToList();
+			interior = [.. tradingDays, .. EvenlySpaced(holidays, remaining)];
 		}
 		else
 		{
 			// Too many trading days — select evenly-spaced trading days only.
-			selected = EvenlySpaced(tradingDays, interiorSlots);
+			interior = EvenlySpaced(tradingDays, interiorSlots);
 		}
 
+		var selected = todayColumns.Concat(interior).OrderBy(d => d).ToList();
 		selected.Add(expiry.Date + OptionMath.MarketOpen);
 		selected.Add(expiry.Date + OptionMath.MarketClose);
 		return selected;
