@@ -13,6 +13,27 @@ internal static class OptionMath
 	// 16:00 ET — equity options cease trading and PM-settled index options settle on the 4:00 close print.
 	internal static readonly TimeSpan MarketClose = new(16, 0, 0);
 
+	/// <summary>The instant a mid→IV back-solve (and the time-decay grid's leftmost "current value" column)
+	/// should anchor on: the moment the loaded quotes were actually struck. Inverting Black-Scholes at this
+	/// instant recovers the IV consistent with how the mid was priced.
+	/// <list type="bullet">
+	/// <item>Live during RTH → wall-clock now.</item>
+	/// <item>Live after today's close → today's 16:00 (the day's last quotes; no further decay was priced).</item>
+	/// <item>Live pre-open / weekend / holiday → the most recent trading session's 16:00 close (the last real
+	/// quotes — e.g. Friday's close when run on a Saturday), so an off-hours report shows the position's value
+	/// as of the last close rather than a phantom value decayed against a dead clock.</item>
+	/// <item>Historical --date run → that date's session open (wall-clock "now" is meaningless).</item>
+	/// </list></summary>
+	internal static DateTime ObservationInstant()
+	{
+		if (EvaluationDate.IsOverridden) return EvaluationDate.Today + MarketOpen;
+		var now = DateTime.Now;
+		var todayTrades = MarketCalendar.IsOpen(now.Date);
+		if (todayTrades && now >= now.Date + MarketOpen && now <= now.Date + MarketClose) return now;   // live RTH
+		if (todayTrades && now > now.Date + MarketClose) return now.Date + MarketClose;                  // after today's close
+		return MarketCalendar.PreviousOpenOnOrBefore(now.Date.AddDays(-1)) + MarketClose;                // pre-open / weekend / holiday
+	}
+
 	// --- Black-Scholes ---
 
 	/// <summary>

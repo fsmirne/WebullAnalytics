@@ -6,6 +6,7 @@ using System.Globalization;
 using WebullAnalytics.AI;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.RiskDiagnostics;
+using WebullAnalytics.Pricing;
 using WebullAnalytics.Sentiment;
 using WebullAnalytics.Trading;
 using WebullAnalytics.Utils;
@@ -21,6 +22,11 @@ internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 	[CommandOption("--iv-default")]
 	[Description("Fallback implied volatility for theoretical pricing when no live IV exists. Percent, default 40.")]
 	public decimal IvDefault { get; set; } = 40m;
+
+	[CommandOption("--calibrated")]
+	[Description("ON by default: back-solve each leg's IV from its live bid/ask mid (the mid-consistent surface the engine prices on). Pass --calibrated false to instead trust Webull's reported IV field — a debugging view only; the vendor field is 10–50 vol pts off at 0DTE.")]
+	[DefaultValue(true)]
+	public bool Calibrated { get; set; } = true;
 
 	public override ValidationResult Validate()
 	{
@@ -100,6 +106,11 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			return 1;
 		}
 
+		// Re-base IV to the live mid surface (default; --calibrated false shows raw vendor IV for debugging).
+		// A --spot override makes the leg mids stale, so the back-solve would be nonsense — skip it then.
+		if (settings.Calibrated && string.IsNullOrEmpty(settings.Spot))
+			quotes = AnalyzeCommon.RecalibrateQuotesToMid(quotes, underlyingPrices!, dividends: null);
+
 		var positionLegs = new List<AnalyzePositionCommand.PositionSnapshot>(parsedLegs.Count);
 		foreach (var l in parsedLegs)
 		{
@@ -147,7 +158,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 				distinctStrikes: positionLegs.Select(l => l.Parsed.Strike).Distinct().Count(),
 				distinctCallPut: positionLegs.Select(l => l.Parsed.CallPut).Distinct().Count());
 
-		var asOf = EvaluationDate.Today;
+		var asOf = OptionMath.ObservationInstant(); // when the loaded quotes were struck — correct T for the diagnostic's greeks/EM
 		var trend = await TrendFetcher.FetchAsync(ticker, asOf, cancellation);
 
 		var technicalBias = await TryComputeTechnicalBiasAsync(ticker, asOf, cancellation);

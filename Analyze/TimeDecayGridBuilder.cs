@@ -247,7 +247,7 @@ internal static class TimeDecayGridBuilder
 	{
 		var today = EvaluationDate.Today;
 		if ((expiry.Date - today).TotalDays <= 0)
-			return [today + OptionMath.MarketOpen, expiry.Date + OptionMath.MarketClose];
+			return [OptionMath.ObservationInstant(), expiry.Date + OptionMath.MarketClose];
 
 		// Classify every calendar day from today up to (not including) expiry by priority tier.
 		var tradingDays = new List<DateTime>();
@@ -255,7 +255,9 @@ internal static class TimeDecayGridBuilder
 		var weekends = new List<DateTime>();
 		for (var d = today; d.Date < expiry.Date; d = d.AddDays(1))
 		{
-			var dt = d.Date + OptionMath.MarketOpen;
+			// Leftmost (today) column = the observation instant (now live / last close off-hours) so it shows
+			// the true current value; later columns stay at each future session's open.
+			var dt = d.Date == today.Date ? OptionMath.ObservationInstant() : d.Date + OptionMath.MarketOpen;
 			if (MarketCalendar.IsOpen(d)) tradingDays.Add(dt);
 			else if (d.DayOfWeek != DayOfWeek.Saturday && d.DayOfWeek != DayOfWeek.Sunday) holidays.Add(dt);
 			else weekends.Add(dt);
