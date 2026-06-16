@@ -363,6 +363,31 @@ internal static class AnalyzeCommon
 		}
 	}
 
+	/// <summary>Re-bases every quote's ImpliedVolatility to the mid-implied value — back-solved from the
+	/// bid/ask mid at the dividend-adjusted spot, anchored at <see cref="OptionMath.ObservationInstant"/>
+	/// (now live / last close off-hours). This is the mid-consistent surface the engine prices on; the
+	/// vendor's reported IV field is 10–50 vol pts off at 0DTE. Quotes with no usable mid keep their existing
+	/// (vendor) IV as the fallback. Shared by analyze position and analyze risk so the two can't drift.</summary>
+	internal static IReadOnlyDictionary<string, OptionContractQuote> RecalibrateQuotesToMid(
+		IReadOnlyDictionary<string, OptionContractQuote> quotes,
+		IReadOnlyDictionary<string, decimal> underlyingPrices,
+		IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends)
+	{
+		var asOf = OptionMath.ObservationInstant();
+		var result = new Dictionary<string, OptionContractQuote>(quotes.Count, StringComparer.OrdinalIgnoreCase);
+		foreach (var (sym, q) in quotes)
+		{
+			var parsed = ParsingHelpers.ParseOptionSymbol(sym);
+			if (parsed == null || !underlyingPrices.TryGetValue(parsed.Root, out var spot)) { result[sym] = q; continue; }
+			IReadOnlyList<DividendEvent>? divs = null;
+			dividends?.TryGetValue(parsed.Root, out divs);
+			var adjSpot = OptionMath.DividendAdjustedSpot(spot, divs, asOf, parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate);
+			var iv = OptionMath.TryMarketImpliedIv(sym, parsed, adjSpot, asOf, quotes);
+			result[sym] = iv.HasValue ? q with { ImpliedVolatility = iv.Value } : q;
+		}
+		return result;
+	}
+
 	internal static decimal ResolvePrice(ParsedLeg leg, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		if (leg.Price.HasValue) return leg.Price.Value;

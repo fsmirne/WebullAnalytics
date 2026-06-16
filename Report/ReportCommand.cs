@@ -78,10 +78,10 @@ class ReportSettings : CommandSettings
 	[DefaultValue(false)]
 	public bool Theoretical { get; set; }
 
-	[Description("Back-solve each leg's IV from its live bid/ask mid so the grid's today column reproduces market mid and future columns decay on the mid-consistent surface (instead of Webull's reported IV)")]
+	[Description("ON by default: back-solve each leg's IV from its live bid/ask mid so the grid's today column reproduces market mid and future columns decay on the mid-consistent surface. Pass --calibrated false to instead trust Webull's reported IV field — a debugging view only; the vendor field is 10–50 vol pts off at 0DTE.")]
 	[CommandOption("--calibrated")]
-	[DefaultValue(false)]
-	public bool Calibrated { get; set; }
+	[DefaultValue(true)]
+	public bool Calibrated { get; set; } = true;
 
 	[Description("Additional reference price levels (support/resistance, targets) to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)")]
 	[CommandOption("--levels")]
@@ -438,7 +438,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 	/// </summary>
 	private static IReadOnlyDictionary<string, decimal>? BuildCalibratedIv(IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> underlyingPrices, IReadOnlyDictionary<string, decimal>? ivOverrides, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends)
 	{
-		var asOf = EvaluationDate.Today + OptionMath.MarketOpen; // matches the grid's today column (date + market open)
+		var asOf = OptionMath.ObservationInstant(); // when the loaded quotes were struck (now live / last close off-hours); matches the grid's leftmost column
 		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		foreach (var symbol in quotes.Keys)
 		{
