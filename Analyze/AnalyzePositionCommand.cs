@@ -50,9 +50,9 @@ internal sealed class AnalyzePositionSettings : AnalyzeBaseSettings
 	public string? LogLevel { get; set; }
 
 	[CommandOption("--calibrated")]
-	[Description("Back-solve each leg's IV from its live bid/ask mid at the dividend-adjusted spot — the same mid-consistent surface 'wa report --calibrated' prices on — before the risk diagnostic, probe score and scenario tables run. Defaults from the report config's 'calibrated' key; pass --calibrated false to override it off.")]
-	[DefaultValue(false)]
-	public bool Calibrated { get; set; }
+	[Description("ON by default: back-solve each leg's IV from its live bid/ask mid at the dividend-adjusted spot, anchored at the observation instant (now live / last close off-hours), before the risk diagnostic, probe score and scenario tables run. Pass --calibrated false to instead trust Webull's reported IV field — a debugging view only; the vendor field is 10–50 vol pts off at 0DTE.")]
+	[DefaultValue(true)]
+	public bool Calibrated { get; set; } = true;
 
 	[CommandOption("--theoretical")]
 	[Description("Price legs at their Black-Scholes theoretical value instead of the live market mid (the same pricing the command already falls back to for past --date runs). Composes with --calibrated (theoretical at mid-implied IVs). Defaults from the report config's 'theoretical' key; pass --theoretical false to override it off.")]
@@ -261,7 +261,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// stale mids no longer reflect the overridden spot, so the inversion would fold the spot move into vol.
 		if (settings.Calibrated && quotes != null && string.IsNullOrEmpty(settings.Spot))
 		{
-			var asOfCal = EvaluationDate.Today + OptionMath.MarketOpen; // same anchor as the report's BuildCalibratedIv
+			var asOfCal = OptionMath.ObservationInstant(); // when the loaded quotes were struck (now live / last close off-hours); same anchor as report
 			var recalibratedQuotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 			var recalibrated = 0;
 			foreach (var (sym, q) in quotes)
