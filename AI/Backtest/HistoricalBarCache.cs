@@ -90,7 +90,13 @@ internal sealed class HistoricalBarCache
 			map = ParseCsv(await File.ReadAllTextAsync(path, cancellation));
 			if (!_offline && NeedsRefresh(map, effectiveThrough))
 			{
+				// Yahoo's chart endpoint returns a meta-only response (no daily series) for very short ranges, so a
+				// one-or-two-day incremental window comes back empty and the cache would never advance past its last
+				// bar. Always request at least a two-week trailing window; the merge below is keyed by date, so
+				// re-fetching the days we already hold is idempotent.
 				var from = map.Count > 0 ? map.Keys.Max().AddDays(1) : effectiveThrough.AddYears(-2);
+				var minFrom = effectiveThrough.AddDays(-14);
+				if (from > minFrom) from = minFrom;
 				var refreshed = await _fetch(ticker, from, effectiveThrough.AddDays(1), cancellation);
 				foreach (var (d, b) in refreshed) map[d.Date] = b;
 				if (refreshed.Count > 0) await File.WriteAllTextAsync(path, SerializeCsv(map), cancellation);

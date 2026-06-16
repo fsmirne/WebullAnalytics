@@ -173,7 +173,16 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(asOf.Kind == DateTimeKind.Utc ? asOf : asOf.ToUniversalTime(), NyTz);
 		var settled = nowNy.TimeOfDay >= TimeSpan.FromHours(17) ? nowNy.Date : nowNy.Date.AddDays(-1);
 		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
-		var bar = await bars.GetBarAsync(ticker, settled, cancellation);
+
+		// A single session can be absent from a vendor's series even when the fetch fully succeeded — e.g.
+		// ^VIX1D / ^VIX9D occasionally publish a null print for one day while neighbouring days are fine. Probing
+		// only the exact settled session then misreports "Yahoo unreachable". Walk back several trading days:
+		// the fetch genuinely failed (unreachable / unknown ticker) only when the whole recent window is empty.
+		YahooOptionsClient.HistoricalBar? bar = null;
+		for (var probe = settled; bar == null && (settled - probe).TotalDays < 10; probe = probe.AddDays(-1))
+		{
+			if (MarketCalendar.IsOpen(probe)) bar = await bars.GetBarAsync(ticker, probe, cancellation);
+		}
 		if (bar == null)
 		{
 			AnsiConsole.MarkupLine($"  {Markup.Escape(ticker)}: [red]failed[/] (Yahoo unreachable or unknown ticker)");

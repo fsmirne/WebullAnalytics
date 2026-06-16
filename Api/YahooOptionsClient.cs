@@ -145,11 +145,16 @@ internal static class YahooOptionsClient
 			if (!doc.RootElement.TryGetProperty("chart", out var chart)) return null;
 			if (!chart.TryGetProperty("result", out var resultArr) || resultArr.ValueKind != JsonValueKind.Array || resultArr.GetArrayLength() == 0) return null;
 			var series = resultArr[0];
-			if (!series.TryGetProperty("timestamp", out var tsArr)) return null;
-			if (!series.TryGetProperty("indicators", out var indicators)) return null;
-			if (!indicators.TryGetProperty("quote", out var quoteArr) || quoteArr.GetArrayLength() == 0) return null;
+			// A valid result with no timestamp/quote arrays means the requested window simply contains no published
+			// daily bars (Yahoo returns a meta-only chart for very short ranges) — that is "no new data", not a fetch
+			// failure. Return an empty map so the caller keeps any cached bars and does not emit a failure warning.
+			if (!series.TryGetProperty("timestamp", out var tsArr)
+				|| !series.TryGetProperty("indicators", out var indicators)
+				|| !indicators.TryGetProperty("quote", out var quoteArr) || quoteArr.GetArrayLength() == 0)
+				return new Dictionary<DateTime, HistoricalBar>();
 			var q = quoteArr[0];
-			if (!q.TryGetProperty("open", out var openArr) || !q.TryGetProperty("high", out var highArr) || !q.TryGetProperty("low", out var lowArr) || !q.TryGetProperty("close", out var closeArr)) return null;
+			if (!q.TryGetProperty("open", out var openArr) || !q.TryGetProperty("high", out var highArr) || !q.TryGetProperty("low", out var lowArr) || !q.TryGetProperty("close", out var closeArr))
+				return new Dictionary<DateTime, HistoricalBar>();
 
 			JsonElement? adjArr = null;
 			if (indicators.TryGetProperty("adjclose", out var adjArrOuter) && adjArrOuter.GetArrayLength() > 0 && adjArrOuter[0].TryGetProperty("adjclose", out var adjInner))
