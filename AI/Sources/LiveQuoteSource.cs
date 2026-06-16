@@ -1,5 +1,6 @@
 using System.Text.Json;
 using WebullAnalytics.Api;
+using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.Sources;
 
@@ -32,10 +33,41 @@ internal sealed class LiveQuoteSource : IQuoteSource
 
 		var (options, spots) = await WebullOptionsClient.FetchOptionQuotesAsync(config, rows, cancellation);
 
+		// Back-solve IV from the NBBO mid for every two-sided book — the SAME basis the backtest's
+		// QuotesQuoteSource uses (OptionMath.ImpliedVol on the mid). Live previously trusted the vendor's
+		// reported ImpliedVolatility field, which the 2026-06-15 cross-vendor audit showed diverges from the
+		// mid-implied IV by 10–50 vol points at 0DTE (a vendor IV convention, not a Webull-specific bug). That
+		// made the live 0DTE scorer — and EM / PoP / the exit projectors, which all read q.ImpliedVolatility —
+		// select different strikes/structures than the NBBO-back-solved backtest the 0DTE settings were tuned
+		// on. Re-basing here (the single seam both the opener and WatchLoop fetch through) makes live IV ≡
+		// backtest IV. Vendor IV is kept as the fallback when the book is one-sided (no mid to solve from).
+		// Dividend adjustment is intentionally omitted: at 0DTE (T≈hours, no in-window ex-div) it is a no-op;
+		// at longer DTE the residual is sub-vol-point and the calendar/diagonal long leg already prices on the
+		// dividend-aware MarketImpliedIv path.
+		var rebased = new Dictionary<string, OptionContractQuote>(options.Count, StringComparer.OrdinalIgnoreCase);
+		foreach (var (sym, q) in options)
+			rebased[sym] = BackSolveIvFromMid(sym, q, spots, asOf);
+
 		// Filter spots to the tickers requested.
 		var filteredSpots = spots.Where(kv => tickers.Contains(kv.Key))
 			.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
 
-		return new QuoteSnapshot(options, filteredSpots);
+		return new QuoteSnapshot(rebased, filteredSpots);
+	}
+
+	/// <summary>Returns <paramref name="q"/> with ImpliedVolatility re-solved from the NBBO mid (matching the
+	/// backtest), or unchanged when the book is one-sided / inputs are degenerate (keeps the vendor IV).</summary>
+	private static OptionContractQuote BackSolveIvFromMid(string sym, OptionContractQuote q, IReadOnlyDictionary<string, decimal> spots, DateTime asOf)
+	{
+		if (q.Bid is not (> 0m) || q.Ask is not (> 0m)) return q;        // one-sided / missing book → no mid to solve from
+		var p = ParsingHelpers.ParseOptionSymbol(sym);
+		if (p is null || p.CallPut is not ("C" or "P")) return q;
+		if (!spots.TryGetValue(p.Root, out var spot) || spot <= 0m) return q;
+		var t = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, p.ExpiryDate);
+		if (t <= 0) return q;
+		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+		if (mid <= 0m) return q;
+		var iv = OptionMath.ImpliedVol(spot, p.Strike, t, OptionMath.RiskFreeRate, mid, p.CallPut);
+		return q with { ImpliedVolatility = iv };
 	}
 }
