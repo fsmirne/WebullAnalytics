@@ -859,24 +859,35 @@ internal static class CandidateScorer
 	/// zero"). Structure-independent: it's a market view on where price gravitates, so every structure's grid
 	/// shifts the same way. Gravity/max-pain come from per-quotes-object memoized caches, so recomputing here is
 	/// cheap. Returns 0 when both pulls are disabled (default) so the grid is bit-identical to before.</summary>
-	private static decimal MagnetBiasSigmas(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal iv, double years, OpenerConfig cfg)
+	private static MagnetBias MagnetBiasSigmas(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal iv, double years, OpenerConfig cfg)
 	{
-		if ((cfg.Weights.GexBiasPull <= 0m && cfg.Weights.MaxPainBiasPull <= 0m) || spot <= 0m || iv <= 0m) return 0m;
+		if ((cfg.Weights.GexBiasPull <= 0m && cfg.Weights.MaxPainBiasPull <= 0m) || spot <= 0m || iv <= 0m) return new MagnetBias(0m, null);
 		var expectedMove = Math.Max(ResolveStrikeStep(cfg, skel.Ticker), spot * iv * (decimal)Math.Sqrt(Math.Max(1e-9, years)));
-		if (expectedMove <= 0m) return 0m;
+		if (expectedMove <= 0m) return new MagnetBias(0m, null);
 		var pull = 0m;
+		decimal? gexSigmas = null;
 		if (cfg.Weights.GexBiasPull > 0m)
 		{
 			var gravity = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes).GexGravity;
-			if (gravity.HasValue) pull += cfg.Weights.GexBiasPull * Math.Clamp((gravity.Value - spot) / expectedMove, -1m, 1m);
+			if (gravity.HasValue)
+			{
+				gexSigmas = cfg.Weights.GexBiasPull * Math.Clamp((gravity.Value - spot) / expectedMove, -1m, 1m);
+				pull += gexSigmas.Value;
+			}
 		}
 		if (cfg.Weights.MaxPainBiasPull > 0m)
 		{
 			var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 			if (maxPain.HasValue) pull += cfg.Weights.MaxPainBiasPull * Math.Clamp((maxPain.Value - spot) / expectedMove, -1m, 1m);
 		}
-		return pull;
+		return new MagnetBias(pull, gexSigmas);
 	}
+
+	/// <summary>Decomposed scenario-grid magnet shift (sigma units). <c>Total</c> is the combined gex + max-pain
+	/// pull fed to <see cref="BuildScenarioGrid"/>. <c>GexSigmas</c> is the gexBiasPull component alone (surfaced
+	/// on the proposal for the informational GEX line); null when the gexBiasPull weight is 0 or gravity is
+	/// unavailable, signaling "off".</summary>
+	private readonly record struct MagnetBias(decimal Total, decimal? GexSigmas);
 
    /// <summary>Resolves IV from live quote → config default, as a decimal fraction (e.g. 0.40).</summary>
 	public static decimal ResolveIv(string symbol, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultPct)
@@ -1039,12 +1050,18 @@ internal static class CandidateScorer
 		}
 		if (p.TargetExpiryMaxPain.HasValue)
 			indicatorParts.Add($"max-pain target ${p.TargetExpiryMaxPain.Value:F2}");
+		// γ-regime is a SCORE multiplier — it only enters the factors line when its weight is active.
 		if (p.GammaRegimeFactor.HasValue)
-		{
 			factorParts.Add($"γ-regime {p.GammaRegimeFactor.Value:F2}");
-			var gravityStr = p.GexGravity.HasValue ? $"gravity ${p.GexGravity.Value:F2}, " : "";
-			var envStr = p.NetGexFraction.HasValue ? $"net gamma {p.NetGexFraction.Value:+0.00;-0.00}" : "";
-			indicatorParts.Add($"GEX {gravityStr}{envStr} → γ-regime {p.GammaRegimeFactor.Value:F2}");
+		// The GEX line is INFORMATIONAL: show it whenever gravity/net-gamma data exists (gravity is null only
+		// when there is no OI/IV data), regardless of whether any GEX weight is active. Each channel renders its
+		// effect, or "off" when its weight is 0, so the signal stays visible without influencing the score.
+		if (p.GexGravity.HasValue)
+		{
+			var envStr = p.NetGexFraction.HasValue ? $", net gamma {p.NetGexFraction.Value:+0.00;-0.00}" : "";
+			var regimeStr = p.GammaRegimeFactor.HasValue ? $"γ-regime {p.GammaRegimeFactor.Value:F2}" : "γ-regime off";
+			var pullStr = p.GexBiasPullSigmas.HasValue ? $"bias-pull {p.GexBiasPullSigmas.Value:+0.00;-0.00}σ" : "bias-pull off";
+			indicatorParts.Add($"GEX gravity ${p.GexGravity.Value:F2}{envStr} → {regimeStr}, {pullStr}");
 		}
 		if (p.AssignmentRiskFactor.HasValue)
 			factorParts.Add($"assign {p.AssignmentRiskFactor.Value:F2}");
@@ -1305,7 +1322,8 @@ internal static class CandidateScorer
 		var pop = LogNormalProbability(isCall ? Direction.Below : Direction.Above, spot, breakeven, years, (double)iv);
 
 	   // EV via scenario grid — payoff at expiry is piecewise linear.
-		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg));
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg);
+		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, creditPerContract, isCall);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -1392,6 +1410,7 @@ internal static class CandidateScorer
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
 			GammaRegimeFactor: gammaRegimeFactor,
+			GexBiasPullSigmas: magnet.GexSigmas,
 			SetupFactor: setupFactor,
 			AssignmentRiskFactor: assignmentFactor,
 			ThetaPerDayPerContract: thetaPerDayPerContract,
@@ -1469,7 +1488,8 @@ internal static class CandidateScorer
 		// POP = P(S_T past breakeven in the profitable direction).
 		var pop = LogNormalProbability(isCall ? Direction.Above : Direction.Below, spot, breakeven, years, (double)iv);
 
-		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg));
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg);
+		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
 		// VerticalPnLAtExpiry uses signed netEntry where credit=positive. For a debit spread we pay,
 		// so pass -debitPerContract as the "credit" parameter.
 		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, -debitPerContract, isCall);
@@ -1554,6 +1574,7 @@ internal static class CandidateScorer
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
 			GammaRegimeFactor: gammaRegimeFactor,
+			GexBiasPullSigmas: magnet.GexSigmas,
 			SetupFactor: setupFactor,
 			AssignmentRiskFactor: assignmentFactor,
 			ThetaPerDayPerContract: thetaPerDayPerContract,
@@ -2047,7 +2068,8 @@ internal static class CandidateScorer
 			breakevens = FindBreakevens(pnl, beLower, beUpper, scanSteps);
 		}
 		var pop = ComputeProbabilityOfProfit(pnl, breakevens, spot, years, representativeIv);
-		var grid = BuildScenarioGrid(spot, representativeIv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + MagnetBiasSigmas(skel, spot, asOf, quotes, representativeIv, years, cfg));
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, representativeIv, years, cfg);
+		var grid = BuildScenarioGrid(spot, representativeIv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal ev = 0m;
 		foreach (var pt in grid)
 			ev += pt.Weight * pnl(pt.SpotAtExpiry);
@@ -2126,6 +2148,7 @@ internal static class CandidateScorer
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
 			GammaRegimeFactor: gammaRegimeFactor,
+			GexBiasPullSigmas: magnet.GexSigmas,
 			SetupFactor: setupFactor,
 			RunwayFactor: runwayFactor,
 			AssignmentRiskFactor: assignmentFactor,
@@ -2274,7 +2297,8 @@ internal static class CandidateScorer
 		// max_profit comes from a separate fine-grid scan because the true peak typically falls between
 		// 5-point grid points (e.g. an ATM call diagonal peaks at the short strike, which the ±0.5σ
 		// sampling misses) — using the scenario-grid max would understate R/R by ~30%.
-		var grid = BuildScenarioGrid(spot, ivShort, shortYears, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + MagnetBiasSigmas(skel, spot, asOf, quotes, ivShort, shortYears, cfg));
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, ivShort, shortYears, cfg);
+		var grid = BuildScenarioGrid(spot, ivShort, shortYears, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal PnlAtTarget(decimal sT) => CalendarOrDiagonalPnLAtShortExpiry(sT, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -2366,6 +2390,7 @@ internal static class CandidateScorer
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
 			GammaRegimeFactor: gammaRegimeFactor,
+			GexBiasPullSigmas: magnet.GexSigmas,
 			SetupFactor: setupFactor,
 			RunwayFactor: runwayFactor,
 			AssignmentRiskFactor: assignmentFactor,
@@ -2472,7 +2497,8 @@ internal static class CandidateScorer
 		// realized EV becomes genuinely positive (and a sensible strike is picked), which the multiplicative
 		// factor structurally cannot do. Gated by gexBiasPull / maxPainBiasPull (default 0 → live unchanged).
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
-		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg));
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg);
+		var grid = BuildScenarioGrid(spot, iv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal PnlAtExpiry(decimal sT)
 		{
 			var intrinsic = parsed.CallPut == "C" ? Math.Max(0m, sT - parsed.Strike) : Math.Max(0m, parsed.Strike - sT);
@@ -2561,6 +2587,7 @@ internal static class CandidateScorer
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
 			GammaRegimeFactor: gammaRegimeFactor,
+			GexBiasPullSigmas: magnet.GexSigmas,
 			SetupFactor: setupFactor,
 			AssignmentRiskFactor: assignmentFactor,
 			ThetaPerDayPerContract: thetaPerDayPerContract,
