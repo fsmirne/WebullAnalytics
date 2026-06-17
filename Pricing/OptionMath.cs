@@ -381,8 +381,10 @@ internal static class OptionMath
 
 	// --- Implied Volatility ---
 
-	/// <summary>Back-solves implied volatility via Newton-Raphson on the BlackScholes pricing function.
-	/// Returns a vol in [0.01, 5.0]. Converges to within $0.005 of marketPrice or returns the bound.</summary>
+	/// <summary>Back-solves implied volatility on the BlackScholes pricing function. Returns a vol in
+	/// [0.01, 5.0]. Newton-Raphson is the fast path; for deep OTM/ITM legs where Newton overshoots or
+	/// stalls (tiny vega), falls back to bisection on the monotone price→vol curve. Converges to within
+	/// $0.005 of marketPrice or returns the nearest bound when the price is outside the [0.01, 5.0] range.</summary>
 	internal static decimal ImpliedVol(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal marketPrice, string callPut)
 	{
 		decimal vol = 0.3m;
@@ -390,18 +392,24 @@ internal static class OptionMath
 		{
 			var price = BlackScholes(spot, strike, timeYears, riskFreeRate, vol, callPut);
 			var vega = Vega(spot, strike, timeYears, riskFreeRate, vol);
-			// Vega is non-negative; for a deep OTM/ITM leg it's tiny-but-nonzero, where the price is
-			// effectively vol-insensitive and Newton can't converge. An exact `== 0` guard misses that
-			// case and `diff / vega` then divides by ~1e-30, overflowing the decimal range (throws
-			// "Value too large for a Decimal"). Treat any negligible vega as non-convergent and stop.
-			if (vega <= 1e-8m) break;
 			var diff = price - marketPrice;
-			if (Math.Abs(diff) < 0.005m) break;
+			if (Math.Abs(diff) < 0.005m) return vol;
+			// Vega is non-negative; for a deep OTM/ITM leg it's tiny-but-nonzero, where the price is
+			// effectively vol-insensitive and Newton overshoots (a single `diff / vega` step jumps the
+			// vol past the [0.01, 5.0] range) or divides by ~1e-30 and overflows the decimal range. In
+			// either case Newton can't be trusted here — hand off to bisection, which is robust because
+			// the BlackScholes price is monotone increasing in vol.
+			if (vega <= 1e-8m) break;
 			vol -= diff / vega;
-			if (vol <= 0.01m) { vol = 0.01m; break; }
-			if (vol >= 5m) { vol = 5m; break; }
+			if (vol <= 0.01m || vol >= 5m) break;
 		}
-		return vol;
+
+		// Bisection fallback. The price is monotone in vol, so f(vol) = price(vol) - marketPrice has at
+		// most one sign change in [0.01, 5.0]; clamp to the bound when the market price sits outside it.
+		decimal Excess(decimal v) => BlackScholes(spot, strike, timeYears, riskFreeRate, v, callPut) - marketPrice;
+		if (Excess(0.01m) >= 0m) return 0.01m;
+		if (Excess(5m) <= 0m) return 5m;
+		return BisectBreakEven(Excess, 0.01m, 5m);
 	}
 
 	/// <summary>Vega of a European option under Black-Scholes: partial derivative of price w.r.t. vol.</summary>
