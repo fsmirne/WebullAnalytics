@@ -383,7 +383,7 @@ internal static class AnalyzeCommon
 			dividends?.TryGetValue(parsed.Root, out divs);
 			var adjSpot = OptionMath.DividendAdjustedSpot(spot, divs, asOf, parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate);
 			var iv = OptionMath.TryMarketImpliedIv(sym, parsed, adjSpot, asOf, quotes);
-			result[sym] = iv.HasValue ? q with { ImpliedVolatility = iv.Value } : q;
+			result[sym] = iv.HasValue ? q with { ImpliedVolatility = iv.Value, VendorImpliedVolatility = q.VendorImpliedVolatility ?? q.ImpliedVolatility } : q;
 		}
 		return result;
 	}

@@ -112,6 +112,36 @@ public class RiskDiagnosticRendererTests
 	}
 
 	[Fact]
+	public void QuoteLineShowsVendorIvStruckThroughWhenCalibrated()
+	{
+		// A leg whose IV was recalibrated to the NBBO mid carries the vendor value in VendorImpliedVolatility.
+		// The quote line must show the vendor struck through next to the calibrated value + a "cal" tag (parity
+		// with `wa report`). A leg without a vendor IV (not recalibrated) shows its IV plain — no "cal".
+		var diagnostic = new RiskDiagnostic(
+			StructureLabel: "calendar", DirectionalBias: "neutral", NetDelta: 0m, NetThetaPerDay: 0m, NetVega: 0m,
+			ShortLegDteMin: 7, LongLegDteMax: 30, DteGapDays: 23, LongPremiumPaid: 1.00m, ShortPremiumReceived: 0.50m,
+			NetCashPerShare: -0.50m, PremiumRatio: 2.0m, SpotAtEvaluation: 25.00m, BreakevenDistancePct: null,
+			ShortLegOtm: true, ShortLegExtrinsic: 0.20m, Trend: null, CostBasisPerShare: null, CurrentValuePerShare: null,
+			UnrealizedPnlPerShare: null, Rules: Array.Empty<RiskRuleHit>(),
+			Probe: new RiskDiagnosticProbe(
+				EnumDelta: null, EnumDeltaMin: null, EnumDeltaMax: null, EnumDeltaPass: null,
+				LegQuotes: new[]
+				{
+					// short: calibrated 0.350, vendor 0.400 → struck vendor + cal tag.
+					new RiskDiagnosticLegQuote("short", "GME260501C00025000", 0.10m, 0.14m, 0.350m, 0.350m, 0.380m, 100, 10, VendorImpliedVolatility: 0.400m),
+					// long: no recalibration → plain IV, no tag.
+					new RiskDiagnosticLegQuote("long", "GME260522C00025000", 0.80m, 0.90m, 0.420m, 0.360m, 0.410m, 200, 20),
+				},
+				OpenerScore: null));
+
+		var text = Render(diagnostic);
+		// Strikethrough markup renders as plain text under NoColors, leaving the vendor value before the calibrated.
+		Assert.Contains("iv=0.400 0.350 cal", text);
+		Assert.Contains("iv=0.420 hv=0.360", text); // long leg: plain, untagged
+		Assert.DoesNotContain("iv=0.420 0", text);
+	}
+
+	[Fact]
 	public void GreeksLineShowsSmallNonZeroDeltaWithoutRoundingToZero()
 	{
 		var diagnostic = new RiskDiagnostic(

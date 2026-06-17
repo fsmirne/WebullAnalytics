@@ -45,7 +45,8 @@ internal static class RiskDiagnosticProbeBuilder
 					HistoricalVolatility: q.HistoricalVolatility,
 					ImpliedVolatility5Day: q.ImpliedVolatility5Day,
 					OpenInterest: q.OpenInterest,
-					Volume: q.Volume));
+					Volume: q.Volume,
+					VendorImpliedVolatility: q.VendorImpliedVolatility));
 			}
 		}
 

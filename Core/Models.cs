@@ -175,7 +175,11 @@ public record OptionContractQuote(
 	decimal? HistoricalVolatility = null,
 	decimal? ImpliedVolatility5Day = null,
 	long? BidSize = null,
-	long? AskSize = null
+	long? AskSize = null,
+	// The vendor's originally-reported IV, preserved when ImpliedVolatility is recalibrated to the NBBO-mid
+	// surface (mid back-solve). Null means ImpliedVolatility is still the vendor value (no recalibration).
+	// Display-only: lets the report/diagnostic show the vendor IV struck through next to the calibrated one.
+	decimal? VendorImpliedVolatility = null
 );
 
 /// <summary>OHLCV bar at a single point on a fixed interval. Timestamp is the bar's open time in UTC.

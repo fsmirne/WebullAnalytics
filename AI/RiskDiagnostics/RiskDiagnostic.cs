@@ -63,7 +63,11 @@ internal sealed record RiskDiagnosticLegQuote(
 	decimal? HistoricalVolatility,
 	decimal? ImpliedVolatility5Day,
 	long? OpenInterest,
-	long? Volume);
+	long? Volume,
+	// The vendor's originally-reported IV when ImpliedVolatility above was recalibrated to the NBBO-mid
+	// surface; null when ImpliedVolatility is still the vendor value. Display-only — the renderer strikes
+	// the vendor through next to the calibrated value, matching `wa report`'s quote line.
+	decimal? VendorImpliedVolatility = null);
 
 internal sealed record RiskDiagnosticOpenerScore(
 	string Structure,
