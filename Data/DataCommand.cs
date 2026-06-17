@@ -18,7 +18,7 @@ namespace WebullAnalytics.Data;
 internal sealed class DataBackupSettings : CommandSettings
 {
 	[CommandOption("-o|--output <path>")]
-	[Description("Output archive path. Default: <BaseDir>/backups/wa-data[-settings]-<yyyy-MM-dd_HHmmss>.tar.gz")]
+	[Description("Output archive path. Default: <BaseDir>/backups/wa-data[[-settings]]-<yyyy-MM-dd_HHmmss>.tar.gz")]
 	public string? Output { get; set; }
 
 	[CommandOption("--full")]
