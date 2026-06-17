@@ -73,6 +73,7 @@ public enum OpenStructureKind
 /// <param name="GexGravity">Strike with the highest gross gamma×OI (calls + puts) at the target expiry — the gravity / pin point where dealer hedging is most concentrated, matching the convention used by Barchart and most public GEX tools. Drives the gexBiasPull grid magnet.</param>
 /// <param name="NetGexFraction">Net dealer gamma exposure normalized to [−1, +1]: positive = call gamma dominates (dealers net long gamma, suppressive regime); negative = put gamma dominates (amplifying regime).</param>
 /// <param name="GammaRegimeFactor">Net dealer-gamma REGIME multiplier (the volatility tilt: NetGexFraction × structure vol-fit sign) applied during ranking; null when the gammaRegime weight is 0.</param>
+/// <param name="GexBiasPullSigmas">The gexBiasPull component of the scenario-grid magnet shift, in sigma units (signed: negative pulls the EV distribution below spot toward gravity). Display only — surfaced for the informational GEX line; null when the gexBiasPull weight is 0 or gravity was unavailable ("off").</param>
 /// <param name="RunwayFactor">Residual long-leg extrinsic/adjustment-runway multiplier applied during ranking when time remains after the target expiry.</param>
 /// <param name="AssignmentRiskFactor">Short-option assignment/near-spot risk multiplier applied during ranking; null when no short-leg penalty applied.</param>
 /// <param name="ThetaPerDayPerContract">Finite-difference net theta per day in dollars per contract. Used as a merit signal during opener ranking.</param>
@@ -115,6 +116,7 @@ internal sealed record OpenProposal(
 	decimal? GexGravity = null,
 	decimal? NetGexFraction = null,
 	decimal? GammaRegimeFactor = null,
+	decimal? GexBiasPullSigmas = null,
 	decimal? SetupFactor = null,
 	decimal? RunwayFactor = null,
 	decimal? AssignmentRiskFactor = null,
