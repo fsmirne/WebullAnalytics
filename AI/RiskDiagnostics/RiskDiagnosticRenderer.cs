@@ -64,7 +64,7 @@ internal static class RiskDiagnosticRenderer
 				var mid = q.Bid.HasValue && q.Ask.HasValue
 					? ((q.Bid.Value + q.Ask.Value) / 2m).ToString("F2", CultureInfo.InvariantCulture)
 					: "null";
-				var iv = q.ImpliedVolatility.HasValue ? q.ImpliedVolatility.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
+				var iv = FormatLegIv(q);
 				var hv = q.HistoricalVolatility.HasValue ? q.HistoricalVolatility.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
 				var iv5 = q.ImpliedVolatility5Day.HasValue ? q.ImpliedVolatility5Day.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
 				var oi = q.OpenInterest.HasValue ? q.OpenInterest.Value.ToString(CultureInfo.InvariantCulture) : "null";
@@ -161,6 +161,18 @@ internal static class RiskDiagnosticRenderer
 		return d.ToString(format, CultureInfo.InvariantCulture);
 	}
 	private static string FormatDollars(decimal d) => (d >= 0m ? "+$" : "-$") + Math.Abs(d).ToString("F2", CultureInfo.InvariantCulture);
+
+	/// <summary>Formats a leg's IV for the diagnostic quote line. When the quote carries a vendor IV distinct
+	/// from the (recalibrated) ImpliedVolatility, shows the vendor struck through next to the calibrated value
+	/// with a " cal" tag — matching the IV cell in `wa report`'s quote line so the two views read the same.</summary>
+	private static string FormatLegIv(RiskDiagnosticLegQuote q)
+	{
+		if (!q.ImpliedVolatility.HasValue) return "null";
+		var calibrated = q.ImpliedVolatility.Value.ToString("F3", CultureInfo.InvariantCulture);
+		if (q.VendorImpliedVolatility is decimal vendor && vendor != q.ImpliedVolatility.Value)
+			return $"[strikethrough]{vendor.ToString("F3", CultureInfo.InvariantCulture)}[/] {calibrated} cal";
+		return calibrated;
+	}
 	private static string FormatRatio(decimal? r) => r is decimal v ? $" ({v.ToString("F1", CultureInfo.InvariantCulture)}× ratio)" : "";
 	private static string FormatRatioDetailed(decimal? r) => r is decimal v ? $" ({v.ToString("F2", CultureInfo.InvariantCulture)}× ratio)" : "";
 	private static string FormatNet(decimal n) => n >= 0m ? $"credit ${n.ToString("F2", CultureInfo.InvariantCulture)}" : $"debit ${Math.Abs(n).ToString("F2", CultureInfo.InvariantCulture)}";

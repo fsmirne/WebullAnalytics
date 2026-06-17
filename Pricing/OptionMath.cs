@@ -130,23 +130,41 @@ internal static class OptionMath
 		return pnlPerContract * qty * 100;
 	}
 
+	/// <summary>Black-Scholes call signature with the (constant) risk-free rate omitted, so an implementation
+	/// can memoize on just the varying inputs. Used by <see cref="LegValueAt"/> to let the opener scorer
+	/// inject its per-tick long-leg cache without changing the shared pricing math.</summary>
+	internal delegate decimal BlackScholesEvaluator(decimal spot, decimal strike, double timeYears, decimal iv, string callPut);
+
 	/// <summary>
-	/// Computes the per-share contract value for a single leg at a given underlying price and date,
-	/// using Black-Scholes when the leg has remaining time and IV is available, intrinsic otherwise.
+	/// Canonical per-leg contract value at underlying <paramref name="spot"/> and <paramref name="evalDate"/>:
+	/// Black-Scholes when the leg still has time past the eval date and an IV is known, intrinsic otherwise.
+	/// Dividend-adjusts the spot for any ex-dates the leg trades through (see <see cref="DividendAdjustedSpot"/>).
+	/// This is the SINGLE per-leg pricer shared by the position analyzer (report / analyze break-evens and the
+	/// time-decay grid) and the opener scorer (calendar/diagonal long-leg value, multi-leg terminal value), so
+	/// both engines price an identical leg to the same number.
+	/// <paramref name="blackScholes"/> optionally injects a memoized Black-Scholes (the scorer's per-tick
+	/// long-leg cache); null uses the direct <see cref="BlackScholes"/>. The evaluator omits the constant
+	/// risk-free rate so its cache key matches the inputs that actually vary.
 	/// </summary>
-	internal static decimal LegContractValueWithBs(decimal underlyingPrice, OptionParsed parsed, string symbol, Side side, DateTime evaluationDate, AnalysisOptions opts)
+	internal static decimal LegValueAt(decimal spot, DateTime evalDate, OptionParsed parsed, decimal? iv, IReadOnlyList<DividendEvent>? dividends, BlackScholesEvaluator? blackScholes = null)
 	{
 		var expirationTime = parsed.ExpiryDate.Date + MarketClose;
-		var iv = GetLegIv(side, symbol, opts);
+		if (!iv.HasValue || evalDate >= expirationTime)
+			return Intrinsic(spot, parsed.Strike, parsed.CallPut);
 
-		if (iv.HasValue && evaluationDate < expirationTime)
-		{
-			var timeYears = (expirationTime - evaluationDate).TotalDays / 365.0;
-			var adjustedSpot = DividendAdjustedSpot(underlyingPrice, GetLegDividends(parsed.Root, opts), evaluationDate, expirationTime, RiskFreeRate);
-			return BlackScholes(adjustedSpot, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
-		}
-		return Intrinsic(underlyingPrice, parsed.Strike, parsed.CallPut);
+		var timeYears = (expirationTime - evalDate).TotalDays / 365.0;
+		var adjustedSpot = DividendAdjustedSpot(spot, dividends, evalDate, expirationTime, RiskFreeRate);
+		return blackScholes is null
+			? BlackScholes(adjustedSpot, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut)
+			: blackScholes(adjustedSpot, parsed.Strike, timeYears, iv.Value, parsed.CallPut);
 	}
+
+	/// <summary>
+	/// Per-share contract value for a position leg, resolving IV (override / calibrated / broker) and the
+	/// leg's dividend schedule from <paramref name="opts"/>, then delegating to <see cref="LegValueAt"/>.
+	/// </summary>
+	internal static decimal LegContractValueWithBs(decimal underlyingPrice, OptionParsed parsed, string symbol, Side side, DateTime evaluationDate, AnalysisOptions opts)
+		=> LegValueAt(underlyingPrice, evaluationDate, parsed, GetLegIv(side, symbol, opts), GetLegDividends(parsed.Root, opts));
 
 	/// <summary>Computes total P&L at expiration for all legs (intrinsic value only).</summary>
 	internal static decimal StrategyPnLAtExpiration(decimal underlyingPrice, List<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty) =>
@@ -329,7 +347,7 @@ internal static class OptionMath
 			if ((curr.PnL > 0 && next.PnL < 0) || (curr.PnL < 0 && next.PnL > 0))
 			{
 				if (pnlFunc != null)
-					results.Add(BisectBreakEven(pnlFunc, curr.UnderlyingPrice, curr.PnL, next.UnderlyingPrice, next.PnL));
+					results.Add(BisectBreakEven(pnlFunc, curr.UnderlyingPrice, next.UnderlyingPrice));
 				else
 				{
 					var fraction = Math.Abs(curr.PnL) / (Math.Abs(curr.PnL) + Math.Abs(next.PnL));
@@ -342,20 +360,23 @@ internal static class OptionMath
 		return results;
 	}
 
-	/// <summary>Refines a breakeven price using bisection between two points with opposite P&L signs.</summary>
-	internal static decimal BisectBreakEven(Func<decimal, decimal> pnlFunc, decimal lo, decimal loVal, decimal hi, decimal hiVal)
+	/// <summary>Canonical breakeven bisection on a continuous P&L curve known to have a single sign change in
+	/// [<paramref name="a"/>, <paramref name="b"/>] (with <paramref name="a"/> &lt; <paramref name="b"/>). Stops when
+	/// the interval is ≤ 0.005 (sub-cent on a $25 underlying), capped at 60 iterations. Returns the unrounded
+	/// midpoint — callers round only at display time. Shared by the opener scorer's breakeven search and the
+	/// analyzer/rule numerical break-even finders so both engines agree to the same precision.</summary>
+	internal static decimal BisectBreakEven(Func<decimal, decimal> pnl, decimal a, decimal b)
 	{
-		if (loVal > 0) { (lo, hi) = (hi, lo); (loVal, hiVal) = (hiVal, loVal); }
-		for (int i = 0; i < 50; i++)
+		var fa = pnl(a);
+		for (var i = 0; i < 60; i++)
 		{
-			var mid = Math.Round((lo + hi) / 2, 4);
-			if (mid == lo || mid == hi) break;
-			var midVal = Math.Round(pnlFunc(mid), 2);
-			if (midVal == 0) { lo = hi = mid; break; }
-			if (midVal < 0) lo = mid;
-			else hi = mid;
+			var mid = (a + b) / 2m;
+			if (b - a <= 0.005m) return mid;
+			var fm = pnl(mid);
+			if ((fa < 0m && fm < 0m) || (fa >= 0m && fm >= 0m)) { a = mid; fa = fm; }
+			else { b = mid; }
 		}
-		return Math.Round((lo + hi) / 2, 2);
+		return (a + b) / 2m;
 	}
 
 	// --- Implied Volatility ---

@@ -270,7 +270,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				if (parsed == null) { recalibratedQuotes[sym] = q; continue; }
 				var adjustedSpot = OptionMath.DividendAdjustedSpot(spot.Value, dividends, asOfCal, parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate);
 				var iv = OptionMath.TryMarketImpliedIv(sym, parsed, adjustedSpot, asOfCal, quotes);
-				recalibratedQuotes[sym] = iv.HasValue ? q with { ImpliedVolatility = iv.Value } : q;
+				recalibratedQuotes[sym] = iv.HasValue ? q with { ImpliedVolatility = iv.Value, VendorImpliedVolatility = q.VendorImpliedVolatility ?? q.ImpliedVolatility } : q;
 				if (iv.HasValue) recalibrated++;
 			}
 			quotes = recalibratedQuotes;

@@ -68,6 +68,6 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
 		if (mid <= 0m) return q;
 		var iv = OptionMath.ImpliedVol(spot, p.Strike, t, OptionMath.RiskFreeRate, mid, p.CallPut);
-		return q with { ImpliedVolatility = iv };
+		return q with { ImpliedVolatility = iv, VendorImpliedVolatility = q.VendorImpliedVolatility ?? q.ImpliedVolatility };
 	}
 }
