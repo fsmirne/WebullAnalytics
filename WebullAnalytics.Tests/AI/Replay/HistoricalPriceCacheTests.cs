@@ -41,7 +41,12 @@ public class HistoricalPriceCacheTests
 
 			Assert.Equal(new decimal[] { 24.10m, 24.30m, 24.55m, 25.10m }, closes);
 			Assert.Single(calls);
-			Assert.Equal(new DateTime(2026, 4, 23), calls[0].from);
+			// The refresh always requests at least a two-week trailing window (Yahoo returns a meta-only,
+			// seriesless response for one-or-two-day ranges, which would leave the cache stuck at its last
+			// bar). effectiveThrough is the last settled day 04-24 (as-of 04-25 at NY-midnight is pre-cutoff),
+			// so from = 04-24 − 14d = 04-10 rather than last-cached+1 (04-23). The merge is date-keyed, so
+			// re-fetching the days already held is idempotent and the returned/persisted closes are unchanged.
+			Assert.Equal(new DateTime(2026, 4, 10), calls[0].from);
 			Assert.Equal(new DateTime(2026, 4, 25), calls[0].to);
 
 			var persisted = await File.ReadAllTextAsync(path);
@@ -121,7 +126,10 @@ public class HistoricalPriceCacheTests
 
 			Assert.Equal(25.17m, close);
 			Assert.Single(calls);
-			Assert.Equal(new DateTime(2026, 5, 6), calls[0].from);
+			// Two-week-minimum trailing window (see ExistingCsvIsRefreshed... for why): effectiveThrough is
+			// 05-06 (at/after the 17:00 NY cutoff today settles), so from = 05-06 − 14d = 04-22, not
+			// last-cached+1 (05-06). The stub fetcher still returns 05-06, so close/persistence are unchanged.
+			Assert.Equal(new DateTime(2026, 4, 22), calls[0].from);
 			Assert.Equal(new DateTime(2026, 5, 7), calls[0].to);
 			var persisted = await File.ReadAllTextAsync(path);
 			Assert.Contains("2026-05-06,24.50,25.40,24.45,25.17,25.17,1800000", persisted);
