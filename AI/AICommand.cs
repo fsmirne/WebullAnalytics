@@ -1016,8 +1016,15 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// captured-bar overlay) answers ONLY the counterfactual reprices real NBBO can't — intraday SL/TP
 		// brackets and the profit projector price legs at a hypothetical spot. It is never a price foundation.
 		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+		var quoteStore = new Backtest.QuoteStoreCache(since: since, until: until);
+		// Real minute NBBO is the only fill foundation (parametric covers counterfactuals only), so an empty
+		// window prices nothing and silently reports no fills — indistinguishable from "the strategy declined
+		// to trade". Warn explicitly: the usual cause is running --since <today> before the evening backfill
+		// (scripts/daily_backfill.sh, ~19:00 ET) has landed the day's quotes.
+		if (!quoteStore.HasAnyQuoteInWindow(config.Ticker, since, until))
+			Console.Error.WriteLine($"Warning: no real NBBO quotes for {config.Ticker} in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}] (data/quotes) — the backtest will price nothing and report no fills. The evening backfill (scripts/daily_backfill.sh) lands the current day's quotes after ~19:00 ET; re-run once it has completed.");
 		Backtest.IBacktestQuoteSource quotes = new Backtest.QuotesQuoteSource(
-			bars, new Backtest.QuoteStoreCache(since: since, until: until), parametric, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+			bars, quoteStore, parametric, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
