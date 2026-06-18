@@ -191,6 +191,7 @@ internal sealed class RulesConfig
 	[JsonPropertyName("rollShortOnExpiry")] public RollShortOnExpiryConfig RollShortOnExpiry { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("closeBeforeShortExpiry")] public CloseBeforeShortExpiryConfig CloseBeforeShortExpiry { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("legInShort")] public LegInShortConfig LegInShort { get; set; } = new();
+	[JsonPropertyName("completeCondor")] public CompleteCondorConfig CompleteCondor { get; set; } = new();
 }
 
 /// <summary>
@@ -236,6 +237,32 @@ internal sealed class LegInShortConfig
 	/// <summary>Skip leg-in when today's running range (high − low / open, in percent) is at or above
 	/// this level by the time the rule evaluates. "Trend day" filter — early big ranges correlate with
 	/// continued big moves. Default 999 (disabled). Sensible test value: 0.8 - 1.5%.</summary>
+	[JsonPropertyName("maxIntradayRangePct")] public decimal MaxIntradayRangePct { get; set; } = 999m;
+}
+
+/// <summary>Config for <c>CompleteCondorRule</c> — converts a held single-sided short vertical into an
+/// iron condor by selling the opposite-side vertical once the held side has cushion. Default disabled.</summary>
+internal sealed class CompleteCondorConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>The held short strike must be at least this percent OTM (spot has moved away from it)
+	/// before the opposite side is added. The "held side is winning" gate that makes this a range bet
+	/// rather than a blind premium grab. Default 1.0%.</summary>
+	[JsonPropertyName("minHeldSidePctOtm")] public decimal MinHeldSidePctOtm { get; set; } = 1.0m;
+	/// <summary>Absolute-delta band for the opposite-side short leg. Mirror of the opener's shortVertical
+	/// band; default 0.10–0.30 (far enough OTM that completing doesn't immediately re-arm a near-money loss).</summary>
+	[JsonPropertyName("shortDeltaMin")] public decimal ShortDeltaMin { get; set; } = 0.10m;
+	[JsonPropertyName("shortDeltaMax")] public decimal ShortDeltaMax { get; set; } = 0.30m;
+	/// <summary>Minimum net credit per share for the completing vertical (short bid − long ask). Default
+	/// $0.10 — 0DTE opposite-side credit is thin, and below this the round-trip cost (slippage +
+	/// commissions) eats the structural benefit. Raise it to demand the added side actually pays.</summary>
+	[JsonPropertyName("minCreditPerShare")] public decimal MinCreditPerShare { get; set; } = 0.10m;
+	/// <summary>Skip when VIX is at or above this level — fat-tail regimes are exactly where capping the
+	/// held winner and re-arming the opposite side turns hostile. Default 999 (disabled).</summary>
+	[JsonPropertyName("maxVix")] public decimal MaxVix { get; set; } = 999m;
+	/// <summary>Skip when today's running range (high − low / open, percent) is at or above this by the
+	/// time the rule evaluates. Trend-day filter — completing into a trend is how you get run over.
+	/// Default 999 (disabled). Sensible test value: 0.8 - 1.5%.</summary>
 	[JsonPropertyName("maxIntradayRangePct")] public decimal MaxIntradayRangePct { get; set; } = 999m;
 }
 
@@ -394,6 +421,14 @@ internal static class AIConfigLoader
 		if (li.MinShortCreditPerShare < 0m) return $"rules.legInShort.minShortCreditPerShare: must be ≥ 0, got {li.MinShortCreditPerShare}";
 		if (li.MaxVix <= 0m) return $"rules.legInShort.maxVix: must be > 0, got {li.MaxVix}";
 		if (li.MaxIntradayRangePct <= 0m) return $"rules.legInShort.maxIntradayRangePct: must be > 0, got {li.MaxIntradayRangePct}";
+
+		var cc = c.Rules.CompleteCondor;
+		if (cc.MinHeldSidePctOtm < 0m) return $"rules.completeCondor.minHeldSidePctOtm: must be ≥ 0, got {cc.MinHeldSidePctOtm}";
+		if (cc.ShortDeltaMin <= 0m || cc.ShortDeltaMin >= 1m) return $"rules.completeCondor.shortDeltaMin: must be in (0, 1), got {cc.ShortDeltaMin}";
+		if (cc.ShortDeltaMax <= cc.ShortDeltaMin || cc.ShortDeltaMax >= 1m) return $"rules.completeCondor.shortDeltaMax: must be in (shortDeltaMin, 1), got {cc.ShortDeltaMax}";
+		if (cc.MinCreditPerShare < 0m) return $"rules.completeCondor.minCreditPerShare: must be ≥ 0, got {cc.MinCreditPerShare}";
+		if (cc.MaxVix <= 0m) return $"rules.completeCondor.maxVix: must be > 0, got {cc.MaxVix}";
+		if (cc.MaxIntradayRangePct <= 0m) return $"rules.completeCondor.maxIntradayRangePct: must be > 0, got {cc.MaxIntradayRangePct}";
 
 		foreach (var (label, value) in new[] { ("management", c.AutoExecute.Management.TimeInForce), ("opener", c.AutoExecute.Opener.TimeInForce) })
 		{
