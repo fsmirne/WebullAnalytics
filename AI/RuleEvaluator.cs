@@ -135,6 +135,10 @@ internal sealed class RuleEvaluator
 			// LegInShort runs ahead of TakeProfit (alphabetical L < T at priority 2) so a saturated
 			// long-call/put gets converted to a vertical instead of flat-closed when both gates trip.
 			new LegInShortRule(config.Rules.LegInShort, config.Indicators),
+			// CompleteCondor (priority 3) runs after exits so a position being stopped out / unwound takes
+			// that path rather than gaining a second side. Disjoint from LegInShort (single-leg longs) — it
+			// only fires on held 2-leg short verticals.
+			new CompleteCondorRule(config.Rules.CompleteCondor),
 			new OpportunisticRollRule(config.Rules.OpportunisticRoll, config.Indicators, config.Opener.RealizedExpectancy, debug, normalizedPricing),
 			new TakeProfitRule(config.Rules.TakeProfit, config.Opener.RealizedExpectancy, debug),
 			new DefensiveRollRule(config.Rules.DefensiveRoll, config.Indicators),

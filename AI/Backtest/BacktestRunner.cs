@@ -137,6 +137,9 @@ internal sealed class BacktestRunner
 						{
 							var newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical
 								: string.Equals(pos.StrategyKind, "LongPut", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongPutVertical
+								// CompleteCondorRule adds the opposite-side vertical to a held short vertical → iron condor.
+								: string.Equals(pos.StrategyKind, "ShortPutVertical", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.IronCondor
+								: string.Equals(pos.StrategyKind, "ShortCallVertical", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.IronCondor
 								: (OpenStructureKind?)null;
 							if (newStructure != null) _book.LegIn(step, p.PositionKey, legFills, p.Rule, newStructure.Value, quoteSnapshot.Underlyings.GetValueOrDefault(pos.Ticker));
 						}
@@ -559,11 +562,20 @@ internal sealed class BacktestRunner
 			? new Rules.LegInShortRule(_config.Rules.LegInShort, _config.Indicators)
 			: null;
 
-		// Regime indicators for LegInShort: VIX (per-day constant, fetched once) and intraday range
-		// (tracked across the minute loop). Both null when not needed — keep the lookup cost off the
-		// hot path when the rule's enabled flag is off.
+		// CompleteCondor: the 0DTE analog of LegInShort but for a held single-sided short vertical — it
+		// sells the opposite-side vertical to form an iron condor once the held side has cushion. Disjoint
+		// from legInRule (which only applies to single-leg longs), so at most one is non-null per position.
+		var completeCondorRule = _config.Rules.CompleteCondor.Enabled
+			&& pos.Legs.Count == 2
+			&& (string.Equals(pos.StrategyKind, "ShortPutVertical", StringComparison.OrdinalIgnoreCase) || string.Equals(pos.StrategyKind, "ShortCallVertical", StringComparison.OrdinalIgnoreCase))
+			? new Rules.CompleteCondorRule(_config.Rules.CompleteCondor)
+			: null;
+
+		// Regime indicators for LegInShort / CompleteCondor: VIX (per-day constant, fetched once) and
+		// intraday range (tracked across the minute loop). Both null when not needed — keep the lookup cost
+		// off the hot path when neither rule's enabled flag is set.
 		decimal? dayVix = null;
-		if (legInRule != null)
+		if (legInRule != null || completeCondorRule != null)
 		{
 			var vixBar = await _bars.GetBarAsync("VIX", step.Date, cancellation);
 			if (vixBar != null) dayVix = vixBar.Close;
@@ -572,7 +584,7 @@ internal sealed class BacktestRunner
 		// LegInShort needs the minute walk even when SL/TP are both disabled (e.g. SPXW's
 		// profit/stop pcts pinned at 1.0 to defer all closes to expiration). Without this carve-out,
 		// the rule would silently never fire on 0DTE strategies that disable both gates.
-		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null) return false;
+		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null && completeCondorRule == null) return false;
 
 		// Track intraday range running from session start to the current minute. Used by LegInShort's
 		// trend-day filter. We use the first minute bar's open as the day's open reference (close to
@@ -599,9 +611,15 @@ internal sealed class BacktestRunner
 			// rule has multiple strikes to pick from. Only done when the rule is applicable to this
 			// position's structure; otherwise we fetch just the position's leg symbols.
 			IEnumerable<string> quoteSymbols = symbols;
-			if (legInRule != null)
+			if (legInRule != null || completeCondorRule != null)
 			{
-				var longLeg = pos.Legs[0];
+				// Side of the strikes to pre-price: LegInShort sells on the long's own side; CompleteCondor
+				// sells the side OPPOSITE the held vertical. Expiry is the position's (both rules act at the
+				// position's single expiry).
+				var anchorLeg = pos.Legs[0];
+				var candidateSide = legInRule != null
+					? anchorLeg.CallPut!
+					: (anchorLeg.CallPut == "P" ? "C" : "P");
 				var step5 = _config.Indicators.StrikeStep > 0m ? _config.Indicators.StrikeStep : 5m;
 				var candidateSymbols = new HashSet<string>(symbols, StringComparer.OrdinalIgnoreCase);
 				// ±100 points (at $5 step → 40 strikes) covers the 0.05–0.95 delta range for SPXW even
@@ -609,7 +627,7 @@ internal sealed class BacktestRunner
 				for (decimal k = Math.Floor(spot / step5) * step5 - 100m; k <= Math.Ceiling(spot / step5) * step5 + 100m; k += step5)
 				{
 					if (k <= 0m) continue;
-					candidateSymbols.Add(MatchKeys.OccSymbol(pos.Ticker, longLeg.Expiry!.Value, k, longLeg.CallPut!));
+					candidateSymbols.Add(MatchKeys.OccSymbol(pos.Ticker, anchorLeg.Expiry!.Value, k, candidateSide));
 				}
 				quoteSymbols = candidateSymbols;
 			}
@@ -657,6 +675,37 @@ internal sealed class BacktestRunner
 						var legInFills = new[] { new BacktestLegFill(shortLeg.Symbol, Side.Sell, pos.Quantity, ExecPrice(Side.Sell, sBid, sAsk)) };
 						_book.LegIn(legInMinuteEt, pos.Key, legInFills, "LegInShortRule", newStructure, spot);
 						return true; // mirror SL/TP semantics: a fired rule consumes the position for the day.
+					}
+				}
+			}
+
+			// CompleteCondor: try converting the held short vertical into an iron condor at this minute.
+			// Fires before SL/TP — but its held-side-cushion gate means it only triggers when the held
+			// short is comfortably OTM, i.e. nowhere near the stop. On fire we add the opposite vertical
+			// and consume the position for the day (the condor rides to expiry, same simplification as the
+			// leg-in path above).
+			if (completeCondorRule != null)
+			{
+				var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
+				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot };
+				var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
+				decimal? rangePct = dayOpenSpot > 0m ? (dayHigh - dayLow) / dayOpenSpot * 100m : null;
+				var condorCtx = new EvaluationContext(minuteEt, stillOpen, underlyings, quotes, cash, accountValue, emptySignals, dayVix, rangePct);
+				var condorProposal = completeCondorRule.Evaluate(pos, condorCtx);
+				if (condorProposal != null)
+				{
+					var sellLeg = condorProposal.Legs.First(l => string.Equals(l.Action, "sell", StringComparison.OrdinalIgnoreCase));
+					var buyLeg = condorProposal.Legs.First(l => string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase));
+					if (quotes.TryGetValue(sellLeg.Symbol, out var csq) && csq.Bid is decimal csBid && csq.Ask is decimal csAsk
+						&& quotes.TryGetValue(buyLeg.Symbol, out var cbq) && cbq.Bid is decimal cbBid && cbq.Ask is decimal cbAsk)
+					{
+						var condorFills = new[]
+						{
+							new BacktestLegFill(sellLeg.Symbol, Side.Sell, pos.Quantity, ExecPrice(Side.Sell, csBid, csAsk)),
+							new BacktestLegFill(buyLeg.Symbol, Side.Buy, pos.Quantity, ExecPrice(Side.Buy, cbBid, cbAsk))
+						};
+						_book.LegIn(minuteEt, pos.Key, condorFills, "CompleteCondorRule", OpenStructureKind.IronCondor, spot);
+						return true;
 					}
 				}
 			}
