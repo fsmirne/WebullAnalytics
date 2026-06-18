@@ -83,6 +83,36 @@ internal sealed class QuoteStoreCache
 	public bool HasExpiry(string root, DateTime exp)
 		=> File.Exists(Path.Combine(_dir, root.ToUpperInvariant(), $"{exp.Date:yyyy-MM-dd}.csv"));
 
+	/// <summary>True if the store holds ANY real quote row dated within [<paramref name="since"/>, <paramref name="until"/>]
+	/// for <paramref name="root"/>. Distinguishes "the strategy declined to trade" from "the quote store has not been
+	/// backfilled for this window yet" (the common trap: running <c>--since &lt;today&gt;</c> before the evening
+	/// backfill has landed the day's quotes). Streams only the date column, skips expiry files that pre-date the
+	/// window start (a contract's rows are dated at or before its expiry, so such files can't hold in-window rows),
+	/// and returns on the first match — so the has-coverage path is near-instant; only a genuinely-empty window
+	/// pays a full scan.</summary>
+	public bool HasAnyQuoteInWindow(string root, DateTime since, DateTime until)
+	{
+		var rootDir = Path.Combine(_dir, root.ToUpperInvariant());
+		if (!Directory.Exists(rootDir)) return false;
+		var lo = since.Date;
+		var hi = until.Date;
+		foreach (var path in Directory.EnumerateFiles(rootDir, "*.csv"))
+		{
+			var name = Path.GetFileNameWithoutExtension(path);
+			if (DateTime.TryParseExact(name, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var exp) && exp.Date < lo) continue;
+			var first = true;
+			foreach (var line in File.ReadLines(path))
+			{
+				if (first) { first = false; continue; }   // header
+				var comma = line.IndexOf(',');
+				if (comma <= 0) continue;
+				if (DateTime.TryParse(line.AsSpan(0, comma), CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) && d.Date >= lo && d.Date <= hi)
+					return true;
+			}
+		}
+		return false;
+	}
+
 	/// <summary>OCC symbols for <paramref name="root"/> at <paramref name="expiry"/> that carry a real quote on
 	/// <paramref name="date"/> with strike in [<paramref name="loStrike"/>, <paramref name="hiStrike"/>]. Lets a
 	/// single probe expand into that expiry's real near-money chain: the live broker returns the whole chain for
