@@ -2,9 +2,9 @@
 """
 Backfill option data (real OI + NBBO) from ThetaData into the canonical, source-
 independent stores the C# backtest reads: data/oi/{TICKER}/{date}.jsonl (per-day chain
-+ OI) and data/quotes/{TICKER}/{expiry}.csv (minute NBBO). Historical counterpart to the
-live Schwab/Webull capture, which writes the SAME stores going forward — sources are
-interchangeable (same format regardless of vendor).
++ OI) and the SQLite minute-NBBO store data/quotes.db (written directly, no CSV staging).
+Historical counterpart to the live Schwab/Webull capture, which writes the SAME stores
+going forward — sources are interchangeable (same format regardless of vendor).
 
 Why this exists: massive.com gives option OHLCV but NO open interest and NO NBBO;
 Schwab serves OI for equities but not for index options. ThetaData Value ($40/mo)
@@ -29,7 +29,7 @@ USAGE — probe first to confirm the real DataFrame schema, then run:
     python3 scripts/backfill_thetadata.py --probe --ticker <TICKER>
     python3 scripts/backfill_thetadata.py --run --tickers <TICKER> [<TICKER> ...]
 
-Writes the canonical data/oi (EOD --run) and data/quotes (--quotes) stores — the same
+Writes the canonical data/oi (EOD --run) and data/quotes.db (--quotes) stores — the same
 format the live capture and the backtest use, so a ThetaData backfill and a forward
 Schwab/Webull capture are interchangeable in the same directory.
 """
@@ -561,7 +561,7 @@ def windows(start: date, end: date, days: int):
 
 def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gend, chunk_days):
     """Pull minute NBBO for one expiration across its DTE window (clamped to [gstart,gend]),
-    keep ±10% strikes, write out_root/<ticker>/<exp>.csv. Returns row count."""
+    keep ±10% strikes, write straight into the canonical SQLite store (data/quotes.db). Returns row count."""
     import numpy as np  # noqa
     import pandas as pd
     exp_d = date.fromisoformat(exp) if isinstance(exp, str) else exp
