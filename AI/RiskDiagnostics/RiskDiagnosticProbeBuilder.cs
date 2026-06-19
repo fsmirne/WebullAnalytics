@@ -470,6 +470,7 @@ internal static class RiskDiagnosticProbeBuilder
 				else
 				{
 					config.Opener.Indicators = config.Indicators; // same wiring as ResolveConfig — cfg-only helpers reach indicators through Opener
+					AIConfigLoader.PopulateRealizedEv(config);    // copy rules.stopLoss/takeProfit + execution into the scorer's EV bundle
 					var err = AIConfigLoader.Validate(config);
 					if (err == null) result = config;
 					else reason = hasTickerConfig
