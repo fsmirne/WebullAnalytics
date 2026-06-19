@@ -98,7 +98,16 @@ internal sealed class OpenerConfig
 	/// call anchor sits at the same %-distance as a junk deep-ITM put), extrinsic-vs-noise can. 0 disables.</summary>
 	[JsonPropertyName("minShortExtrinsicToNoiseRatio")] public decimal MinShortExtrinsicToNoiseRatio { get; set; } = 1.0m;
 
-	[JsonPropertyName("realizedExpectancy")] public OpenerRealizedExpectancyConfig RealizedExpectancy { get; set; } = new();
+	/// <summary>Master switch for realized-expectancy scoring: when true the scorer ranks candidates on
+	/// managed-exit EV + round-trip friction; when false it falls back to theoretical hold-to-expiry EV.
+	/// The exit thresholds and cost model it uses live in their canonical homes (<c>rules.stopLoss</c>,
+	/// <c>rules.takeProfit</c>, top-level <c>execution</c>); this flag only toggles the model. Default true.</summary>
+	[JsonPropertyName("realizedEvScoring")] public bool RealizedEvScoring { get; set; } = true;
+
+	/// <summary>Runtime-only bundle of the resolved realized-EV inputs the scorer reads (it receives only
+	/// <see cref="OpenerConfig"/>). Populated by AIConfigLoader.PopulateRealizedEv at load from the flag
+	/// above plus rules.stopLoss/takeProfit and execution — never deserialized directly, hence [JsonIgnore].</summary>
+	[JsonIgnore] public OpenerRealizedExpectancyConfig RealizedExpectancy { get; set; } = new();
 
 	/// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at
 	/// ±sigma and ±sigma/2 around spot. Default 1.0 gives a ±1σ / ±0.5σ grid that better matches
@@ -526,7 +535,7 @@ internal sealed class OpenerEventsConfig
 ///
 /// Per-scenario realized P&L = clamp(theoretical_pnl, -<see cref="StopLossPctOfMaxLoss"/> × |maxLoss|,
 /// +<see cref="ProfitTargetPctOfMaxProfit"/> × maxProfit) − friction. Friction = sum of per-leg
-/// half-spread × 100 × <see cref="RoundTrips"/> × <see cref="SlippageMultiplier"/>.
+/// (half-spread + <see cref="SlippagePerSharePerOrder"/>) × 100 × <see cref="RoundTrips"/>.
 ///
 /// The clamping is a path-conservative approximation: it credits managed exits only at terminal
 /// scenario points, ignoring the optionality of closing intra-life when the path crosses the
@@ -534,37 +543,29 @@ internal sealed class OpenerEventsConfig
 /// tastytrade-style management: close shorts at 50% of max profit, stop at 50% of max loss
 /// (≈ 2× credit on typical 2× wide IC widths), one round trip's worth of half-spread per leg per
 /// side.</summary>
+/// <summary>The realized-EV parameters the candidate scorer prices against. The scorer receives only
+/// <see cref="OpenerConfig"/>, so this is the load-time aggregation point: <see cref="Enabled"/> is the
+/// only field read from JSON (the EV master switch); the exit thresholds and cost model are sourced from
+/// their real homes — <c>rules.stopLoss.pctOfMaxLoss</c>, <c>rules.takeProfit.pctOfMaxProfit</c>, and the
+/// top-level <c>execution</c> block — and copied in by AIConfigLoader.PopulateRealizedEv at load. Marked
+/// [JsonIgnore] here so they live in one canonical JSON home (not duplicated in the opener block).</summary>
 internal sealed class OpenerRealizedExpectancyConfig
 {
 	/// <summary>Master switch. False bypasses the realized adjustment entirely and the scorer runs
-	/// on theoretical EV. Default true.</summary>
-	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+	/// on theoretical EV. Populated from opener.realizedEvScoring at load. Default true.</summary>
+	[JsonIgnore] public bool Enabled { get; set; } = true;
 
-	/// <summary>Profit-target cap as a fraction of theoretical max profit. tastytrade convention for
-	/// credit spreads is 0.50 (close at half the max credit); long premium positions often run
-	/// further (0.75–1.00). Same value applies to every structure unless you split via a
-	/// per-structure override (not implemented). Default 0.50.</summary>
-	[JsonPropertyName("profitTargetPctOfMaxProfit")] public decimal ProfitTargetPctOfMaxProfit { get; set; } = 0.50m;
+	/// <summary>Profit-target as a fraction of theoretical max profit. Populated from rules.takeProfit.pctOfMaxProfit.</summary>
+	[JsonIgnore] public decimal ProfitTargetPctOfMaxProfit { get; set; } = 0.50m;
 
-	/// <summary>Stop-loss cap as a fraction of theoretical max loss magnitude. Default 0.50 maps to
-	/// "close at half the max loss," which approximates the "2× credit received" rule on typical
-	/// short verticals / iron condors with 4× width-to-credit ratios. Tighter stops (0.25–0.33)
-	/// reduce realized loss but at the cost of more whipsaw exits — backtest before lowering.</summary>
-	[JsonPropertyName("stopLossPctOfMaxLoss")] public decimal StopLossPctOfMaxLoss { get; set; } = 0.50m;
+	/// <summary>Stop-loss as a fraction of theoretical max loss. Populated from rules.stopLoss.pctOfMaxLoss.</summary>
+	[JsonIgnore] public decimal StopLossPctOfMaxLoss { get; set; } = 0.50m;
 
-	/// <summary>Dollars-per-share friction charged for each broker order required to enter the
-	/// structure (and again to exit, scaled by <see cref="RoundTrips"/>). 0 (default) = assume mid
-	/// fills, no friction charged. Set to e.g. <c>0.02</c> to model paying 2¢/share above mid on
-	/// each combo fill, which is typical for Webull-style net-price execution. The opener knows
-	/// which structures need more than one broker order (only double calendar and double diagonal
-	/// require 2; every other supported structure fills as a single combo) so there's no per-
-	/// structure knob — the math is structurally correct without one.</summary>
-	[JsonPropertyName("slippagePerSharePerOrder")] public decimal SlippagePerSharePerOrder { get; set; } = 0m;
+	/// <summary>Per-share friction per broker order (×RoundTrips for exit). Populated from execution.slippagePerSharePerOrder.</summary>
+	[JsonIgnore] public decimal SlippagePerSharePerOrder { get; set; } = 0m;
 
-	/// <summary>Number of full bid/ask crossings the friction charge represents. 2 = open + close
-	/// (the normal case). Set to 1 if you're already scoring against execution prices that bake in
-	/// the entry slippage, leaving only the exit fill. Default 2.</summary>
-	[JsonPropertyName("roundTrips")] public int RoundTrips { get; set; } = 2;
+	/// <summary>Bid/ask crossings the friction represents (2 = open+close). Populated from execution.roundTrips.</summary>
+	[JsonIgnore] public int RoundTrips { get; set; } = 2;
 }
 
 /// <summary>Per-component configuration for the intraday tape signal derived from minute bars.

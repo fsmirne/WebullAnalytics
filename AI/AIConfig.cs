@@ -28,6 +28,7 @@ internal sealed class AIConfig
 	[JsonPropertyName("log-level")] public string LogLevel { get; set; } = "information"; // error | information | debug
 	[JsonPropertyName("indicators")] public IndicatorsConfig Indicators { get; set; } = new();
 	[JsonPropertyName("rules")] public RulesConfig Rules { get; set; } = new();
+	[JsonPropertyName("execution")] public ExecutionConfig Execution { get; set; } = new();
 	[JsonPropertyName("opener")] public OpenerConfig Opener { get; set; } = new();
 	[JsonPropertyName("autoExecute")] public AutoExecuteConfig AutoExecute { get; set; } = new();
 }
@@ -290,19 +291,38 @@ internal sealed class OpportunisticRollConfig
 internal sealed class StopLossConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
-	// Single trigger: close at stopLossPctOfMaxLoss of max loss (the threshold lives in the realized-EV
-	// block so the scorer and the exit share it). The old maxDebitMultiplier (replaced by the realized-loss
-	// trigger) and spotBeyondBreakevenPct (a mark-lag path stop that never fired independently) were removed.
+	/// <summary>Close when realized loss reaches this fraction of theoretical max loss. The scorer prices
+	/// candidates against this same stop (it's copied into the realized-EV bundle at load), so the exit
+	/// tracks the EV the opener ranked. 1.0 disables the stop (= let it ride to the max-loss floor). Default
+	/// 0.50 ≈ the "2× credit" rule on typical 4×-width credit spreads.</summary>
+	[JsonPropertyName("pctOfMaxLoss")] public decimal PctOfMaxLoss { get; set; } = 0.50m;
 }
 
 internal sealed class TakeProfitConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+	/// <summary>Take-profit as a fraction of theoretical max profit (0.50 = close at half the max credit;
+	/// long premium often runs to 1.0). The scorer prices candidates against this same target (copied into
+	/// the realized-EV bundle at load). 1.0 disables (= ride to max profit). Default 0.50.</summary>
+	[JsonPropertyName("pctOfMaxProfit")] public decimal PctOfMaxProfit { get; set; } = 0.50m;
 	/// <summary>Fixed take-profit: close on ANY day once mark-to-market profit reaches this % of the
 	/// initial net debit (e.g. 25 = exit at +25% on debit). Models the discretionary "grab the win and
 	/// recycle capital" policy, which fires far earlier than the % -of-max-projected-profit target.
 	/// Default 0 = off (only the max-projected target applies). Fires first when both are configured.</summary>
 	[JsonPropertyName("profitTargetPctOfDebit")] public decimal ProfitTargetPctOfDebit { get; set; } = 0m;
+}
+
+/// <summary>Fill-cost assumptions shared by the opener's scorer and the backtest simulator. These are
+/// execution facts (what trading actually costs), not strategy knobs, so they live at the top level
+/// rather than under <c>opener</c>. Copied into the realized-EV bundle at load.</summary>
+internal sealed class ExecutionConfig
+{
+	/// <summary>Per-share price concession assumed on every leg of every order (entry and exit), modeling
+	/// the gap between mid and the achievable fill. 0 = fill at mid. Default 0.</summary>
+	[JsonPropertyName("slippagePerSharePerOrder")] public decimal SlippagePerSharePerOrder { get; set; } = 0m;
+	/// <summary>Number of round-trip orders (open + close = 2) the slippage is charged against when the
+	/// scorer prices a candidate's realized expectancy. Default 2.</summary>
+	[JsonPropertyName("roundTrips")] public int RoundTrips { get; set; } = 2;
 }
 
 internal sealed class DefensiveRollConfig
@@ -390,6 +410,21 @@ internal static class AIConfigLoader
 		return config;
 	}
 
+	/// <summary>Copies the realized-EV inputs from their canonical JSON homes (<c>rules.stopLoss</c>,
+	/// <c>rules.takeProfit</c>, top-level <c>execution</c>) into the opener's [JsonIgnore] bundle. The
+	/// candidate scorer receives only <see cref="OpenerConfig"/>, so this load-time copy is how it reaches
+	/// those values. Idempotent — call once per resolved config after layering. Keep
+	/// <see cref="OpenerRealizedExpectancyConfig.Enabled"/> as-is (it deserializes from the opener block).</summary>
+	internal static void PopulateRealizedEv(AIConfig config)
+	{
+		var ev = config.Opener.RealizedExpectancy;
+		ev.Enabled = config.Opener.RealizedEvScoring;
+		ev.StopLossPctOfMaxLoss = config.Rules.StopLoss.PctOfMaxLoss;
+		ev.ProfitTargetPctOfMaxProfit = config.Rules.TakeProfit.PctOfMaxProfit;
+		ev.SlippagePerSharePerOrder = config.Execution.SlippagePerSharePerOrder;
+		ev.RoundTrips = config.Execution.RoundTrips;
+	}
+
 	/// <summary>Returns null when valid; otherwise a human-readable error string naming the field and bound.</summary>
 	internal static string? Validate(AIConfig c)
 	{
@@ -401,8 +436,16 @@ internal static class AIConfigLoader
 		if (c.CashReserve.Mode == "percent" && c.CashReserve.Value > 100m) return $"cashReserve.value: must be ≤ 100 for mode 'percent', got {c.CashReserve.Value}";
 		if (c.LogLevel is not ("error" or "information" or "debug")) return $"log-level: must be error|information|debug, got '{c.LogLevel}'";
 
+		var sl = c.Rules.StopLoss;
+		if (sl.PctOfMaxLoss <= 0m || sl.PctOfMaxLoss > 1m) return $"rules.stopLoss.pctOfMaxLoss: must be in (0, 1], got {sl.PctOfMaxLoss}";
+
 		var tp = c.Rules.TakeProfit;
+		if (tp.PctOfMaxProfit <= 0m || tp.PctOfMaxProfit > 1m) return $"rules.takeProfit.pctOfMaxProfit: must be in (0, 1], got {tp.PctOfMaxProfit}";
 		if (tp.ProfitTargetPctOfDebit < 0m) return $"rules.takeProfit.profitTargetPctOfDebit: must be ≥ 0, got {tp.ProfitTargetPctOfDebit}";
+
+		var ex = c.Execution;
+		if (ex.SlippagePerSharePerOrder < 0m) return $"execution.slippagePerSharePerOrder: must be ≥ 0, got {ex.SlippagePerSharePerOrder}";
+		if (ex.RoundTrips < 1) return $"execution.roundTrips: must be ≥ 1, got {ex.RoundTrips}";
 
 		var dr = c.Rules.DefensiveRoll;
 		if (dr.SpotWithinPctOfShortStrike < 0m) return $"rules.defensiveRoll.spotWithinPctOfShortStrike: must be ≥ 0, got {dr.SpotWithinPctOfShortStrike}";
