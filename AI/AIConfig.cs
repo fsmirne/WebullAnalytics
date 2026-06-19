@@ -331,6 +331,17 @@ internal sealed class CloseBeforeShortExpiryConfig
 	[JsonPropertyName("minProfitPct")] public decimal MinProfitPct { get; set; } = 30m;
 	/// <summary>How far past the calendar/diagonal break-even band (as % of BE level) before the emergency-close fires regardless of profit threshold.</summary>
 	[JsonPropertyName("emergencyBreakEvenBufferPct")] public decimal EmergencyBreakEvenBufferPct { get; set; } = 1.0m;
+	/// <summary>Models the broker's forced liquidation of ITM short options before cash settlement: Webull
+	/// force-closes ITM SPY positions ~30 min before the bell to prevent assignment a retail account can't
+	/// cover. When the rule is enabled, a PHYSICALLY-settled 0DTE position whose short leg is ITM this many
+	/// minutes before the close is closed at the current mark instead of riding to 16:00 intrinsic. Cash-settled
+	/// index roots (XSP/SPXW) are exempt — European cash settlement, no assignment. Default 30 (= 15:30 ET).</summary>
+	[JsonPropertyName("brokerForceCloseMinutesBeforeClose")] public int BrokerForceCloseMinutesBeforeClose { get; set; } = 30;
+	/// <summary>Webull also force-closes shorts merely AT RISK of finishing ITM, not only those already ITM.
+	/// This widens the trigger: a short within this percent of the money (call: spot > strike×(1−buffer);
+	/// put: spot &lt; strike×(1+buffer)) is treated as at-risk and liquidated. Default 0 (ITM only); the true
+	/// Webull threshold is opaque, so sweep this to bound the realistic drag.</summary>
+	[JsonPropertyName("brokerForceCloseMoneynessBufferPct")] public decimal BrokerForceCloseMoneynessBufferPct { get; set; } = 0m;
 }
 
 /// <summary>Composite technical-bias indicator config (SMA5/20, RSI(14), N-day momentum, 200-day
