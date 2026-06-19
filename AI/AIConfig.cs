@@ -290,14 +290,14 @@ internal sealed class OpportunisticRollConfig
 internal sealed class StopLossConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
-	[JsonPropertyName("maxDebitMultiplier")] public decimal MaxDebitMultiplier { get; set; } = 1.5m;
-	[JsonPropertyName("spotBeyondBreakevenPct")] public decimal SpotBeyondBreakevenPct { get; set; } = 3.0m;
+	// Single trigger: close at stopLossPctOfMaxLoss of max loss (the threshold lives in the realized-EV
+	// block so the scorer and the exit share it). The old maxDebitMultiplier (replaced by the realized-loss
+	// trigger) and spotBeyondBreakevenPct (a mark-lag path stop that never fired independently) were removed.
 }
 
 internal sealed class TakeProfitConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
-	[JsonPropertyName("pctOfMaxProfit")] public decimal PctOfMaxProfit { get; set; } = 60m;
 	/// <summary>Fixed take-profit: close on ANY day once mark-to-market profit reaches this % of the
 	/// initial net debit (e.g. 25 = exit at +25% on debit). Models the discretionary "grab the win and
 	/// recycle capital" policy, which fires far earlier than the % -of-max-projected-profit target.
@@ -401,12 +401,7 @@ internal static class AIConfigLoader
 		if (c.CashReserve.Mode == "percent" && c.CashReserve.Value > 100m) return $"cashReserve.value: must be ≤ 100 for mode 'percent', got {c.CashReserve.Value}";
 		if (c.LogLevel is not ("error" or "information" or "debug")) return $"log-level: must be error|information|debug, got '{c.LogLevel}'";
 
-		var sl = c.Rules.StopLoss;
-		if (sl.MaxDebitMultiplier <= 0m) return $"rules.stopLoss.maxDebitMultiplier: must be > 0, got {sl.MaxDebitMultiplier}";
-		if (sl.SpotBeyondBreakevenPct < 0m) return $"rules.stopLoss.spotBeyondBreakevenPct: must be ≥ 0, got {sl.SpotBeyondBreakevenPct}";
-
 		var tp = c.Rules.TakeProfit;
-		if (tp.PctOfMaxProfit <= 0m || tp.PctOfMaxProfit > 100m) return $"rules.takeProfit.pctOfMaxProfit: must be in (0, 100], got {tp.PctOfMaxProfit}";
 		if (tp.ProfitTargetPctOfDebit < 0m) return $"rules.takeProfit.profitTargetPctOfDebit: must be ≥ 0, got {tp.ProfitTargetPctOfDebit}";
 
 		var dr = c.Rules.DefensiveRoll;
