@@ -36,12 +36,17 @@ Schwab/Webull capture are interchangeable in the same directory.
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import threading
 import zoneinfo
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import logging
+
+# Canonical quote store: encoding + DB helpers are single-sourced in import_quotes_sqlite so the backfill,
+# the scraper, and the importer all write byte-identical rows (scripts/ is on sys.path when run as a script).
+from import_quotes_sqlite import encode_quote, connect_wal, upsert_expiry, ymd_int, SEALED_SQL
 
 NY = zoneinfo.ZoneInfo("America/New_York")
 log = logging.getLogger("backfill")  # our own messages go here (not root), so we can quiet libraries
@@ -614,16 +619,23 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
     if not parts:
         return 0
     res = pd.concat(parts, ignore_index=True)
-    tdir = out_root / ticker
-    tdir.mkdir(parents=True, exist_ok=True)
-    # Atomic write: a kill mid-write leaves only the .tmp, never a partial final file that
-    # --resume would mistake for complete (size>0). os.replace is atomic on the same filesystem.
-    final = tdir / f"{exp_d.isoformat()}.csv"
-    tmp = tdir / f"{exp_d.isoformat()}.csv.tmp"
-    res.to_csv(tmp, index=False)
-    os.replace(tmp, final)
-    log.info(f"    exp {exp_d} rows={len(res)} days={res['date'].nunique()} spot_days={len(unders)}")
-    return len(res)
+    # Write straight into the canonical SQLite store (no CSV staging): encode each row via the shared encoder
+    # and replace this expiry's rows atomically (DELETE+INSERT in one transaction). WAL + busy-timeout let the
+    # scraper and backtest touch the DB concurrently. exp_int keys the expiry in both quotes and sealed tables.
+    exp_int = ymd_int(exp_d.isoformat())
+    rows = []
+    for r in res.itertuples(index=False):
+        row = encode_quote(ticker, exp_int, r.date, r.time, r.strike, r.right, r.bid, r.ask, r.bid_size, r.ask_size)
+        if row is not None:
+            rows.append(row)
+    with _DB_WRITE_LOCK:  # serialize writes across the threaded pull's workers (SQLite single-writer)
+        conn = connect_wal(_quotes_db_path(out_root))
+        try:
+            upsert_expiry(conn, ticker, exp_int, rows)
+        finally:
+            conn.close()
+    log.info(f"    exp {exp_d} rows={len(rows)} days={res['date'].nunique()} spot_days={len(unders)}")
+    return len(rows)
 
 
 def _quote_expiry_worker(result_q, creds, ticker, exp, dte, rate, out_root_str, gstart_iso, gend_iso, chunk_days):
@@ -645,6 +657,12 @@ def _quote_expiry_worker(result_q, creds, ticker, exp, dte, rate, out_root_str, 
 # in as days elapse. That is exactly what lets a "backfill near today" keep current contracts: future
 # expirations ARE pulled (we need them for recent days' chains), just never sealed until they expire.
 _SEAL_LOCK = threading.Lock()  # the threaded pull seals from worker threads → serialize manifest writes
+# The threaded pull runs N concurrent NETWORK requests on one session, but SQLite is single-writer: two
+# threads can't write the DB at once. A SPY 60-DTE expiry is millions of rows, so its DELETE+INSERT over
+# drvfs runs longer than the busy-timeout → "database is locked". Serialize the per-expiry write (the pulls
+# still overlap; only the writes queue). Same-process threads only — the non-threaded path writes one
+# expiry at a time, and cross-process writers (scraper) coordinate via WAL + busy-timeout.
+_DB_WRITE_LOCK = threading.Lock()
 
 
 def load_sealed(tdir: Path) -> set:
@@ -672,13 +690,47 @@ def should_seal(exp_iso: str, end_date: date) -> bool:
 
 
 def _seal_if_final(tdir: Path, exp_iso: str, end_date: date, sealed: set):
-    """After a SUCCESSFUL pull of one expiration, add it to the manifest if it's final. Thread-safe."""
+    """After a SUCCESSFUL pull of one expiration, add it to the manifest if it's final. Thread-safe.
+    (OI store only — the quote store seals into the DB `sealed` table; see *_quotes_db below.)"""
     if not should_seal(exp_iso, end_date):
         return
     with _SEAL_LOCK:
         if exp_iso not in sealed:
             sealed.add(exp_iso)
             save_sealed(tdir, sealed)
+
+
+# ----- quote-store sealing: a `sealed (root, expiry)` table inside quotes.db (replaces sealed.json for quotes;
+# the OI store keeps its own data/oi/<ticker>/sealed.json). out_root is data/quotes, so the DB is its sibling.
+def _quotes_db_path(out_root: Path) -> Path:
+    return out_root.parent / "quotes.db"
+
+
+def load_sealed_quotes(out_root: Path, ticker: str) -> set:
+    """Sealed expirations (ISO strings) for a quote ticker, read from the DB `sealed` table."""
+    conn = sqlite3.connect(_quotes_db_path(out_root), timeout=60)
+    try:
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute(SEALED_SQL)
+        rows = conn.execute("SELECT expiry FROM sealed WHERE root=?", (ticker,)).fetchall()
+    finally:
+        conn.close()
+    return {f"{str(e)[:4]}-{str(e)[4:6]}-{str(e)[6:8]}" for (e,) in rows}  # yyyymmdd int -> 'yyyy-MM-dd'
+
+
+def seal_quote_expiry(out_root: Path, ticker: str, exp_iso: str, end_date: date):
+    """Seal a quote expiration into the DB table if it's final. Idempotent; thread-safe."""
+    if not should_seal(exp_iso, end_date):
+        return
+    with _SEAL_LOCK:
+        conn = sqlite3.connect(_quotes_db_path(out_root), timeout=60)
+        try:
+            conn.execute("PRAGMA busy_timeout=60000")
+            conn.execute(SEALED_SQL)
+            conn.execute("INSERT OR IGNORE INTO sealed VALUES (?,?)", (ticker, ymd_int(exp_iso)))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def _build_quote_work_with(client, tickers, start, end, out_root, dte_map):
@@ -691,9 +743,7 @@ def _build_quote_work_with(client, tickers, start, end, out_root, dte_map):
         if dte is None:
             log.info(f"  [error] no DTE for {ticker} (use {ticker}:DTE or --max-dte) — skipping ticker")
             continue
-        tdir = out_root / ticker
-        tdir.mkdir(parents=True, exist_ok=True)
-        sealed = load_sealed(tdir)
+        sealed = load_sealed_quotes(out_root, ticker)
         try:
             exps = _expirations_from(thetacall(client.option_list_expirations, ticker))
         except Exception as e:
@@ -725,7 +775,6 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
     work = _build_quote_work_with(base, tickers, start, end, out_root, dte_map)
     if not work:
         return
-    sealed_by_ticker = {t: load_sealed(out_root / t) for t in tickers}  # seal final expirations as we finish them
     clients = [base] + [ThetaClient(existing_authorized_client=base, dataframe_type="pandas")
                         for _ in range(max(0, concurrency - 1))]
     pool = queue.Queue()
@@ -739,7 +788,7 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
         try:
             log.info(f"  exp {ticker} {e}")
             process_one_expiration(c, ticker, e, dte, rate, out_root, start, end, chunk_days)
-            _seal_if_final(out_root / ticker, e, end, sealed_by_ticker[ticker])
+            seal_quote_expiry(out_root, ticker, e, end)
         except BaseException as ex:  # one failed expiration shouldn't stop the pass; a later run retries it (not sealed)
             log.info(f"  [error] {ticker} exp {e}: {type(ex).__name__}: {ex}")
         finally:
@@ -754,16 +803,17 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
     unsealed expirations and exits cleanly — that ends the pull. We only RESTART it if it STALLS (a hung
     gRPC call wedges a thread, holding a server slot until the process dies) or crashes; after 3 restarts
     with no further progress we give up (ThetaData wedged/unavailable → re-run later). Progress is the
-    NEWEST .csv write-time, not the file COUNT: re-pulling an existing frontier expiration overwrites its
-    file (count unchanged), so a count-based signal would mistake a working worker for a stalled one and
-    kill it — the false-stall/re-pull loop. mtime rises on every write, incl. overwrites."""
+    quotes.db's mtime, which rises on every per-expiry commit (incl. re-pull overwrites). A count/listing
+    signal would mistake a working worker that's overwriting frontier expirations for a stalled one and kill
+    it — the false-stall/re-pull loop."""
     import multiprocessing as mp
     import time
     ctx = mp.get_context("spawn")
+    db_path = _quotes_db_path(out_root)
 
     def newest_write():
-        return max((p.stat().st_mtime for t in tickers if (out_root / t).exists()
-                    for p in (out_root / t).glob("*.csv")), default=0.0)
+        # DB file mtime advances on each expiry commit; the -wal sidecar too. Either rising = progress.
+        return max((p.stat().st_mtime for p in (db_path, db_path.with_suffix(".db-wal")) if p.exists()), default=0.0)
 
     restarts = 0
     p = None
@@ -818,9 +868,7 @@ def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, r
         if dte is None:
             log.info(f"  [error] no DTE for {ticker} (use {ticker}:DTE or --max-dte) — skipping ticker")
             continue
-        tdir = out_root / ticker
-        tdir.mkdir(parents=True, exist_ok=True)
-        sealed = load_sealed(tdir)
+        sealed = load_sealed_quotes(out_root, ticker)
         try:
             exps = _expirations_from(thetacall(listing.option_list_expirations, ticker))
         except Exception as e:
@@ -829,14 +877,14 @@ def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, r
         hi = (end + timedelta(days=dte)).isoformat()
         rel = sorted(e for e in exps if start.isoformat() <= e <= hi)
         todo = [e for e in rel if e not in sealed]
-        log.info(f"=== {ticker} (dte={dte}) -> {tdir}: {len(rel)} expirations, {len(sealed)} sealed, {len(todo)} to pull ===")
+        log.info(f"=== {ticker} (dte={dte}) -> quotes.db: {len(rel)} expirations, {len(sealed)} sealed, {len(todo)} to pull ===")
         for e in todo:
             log.info(f"  exp {e}")
             ok = run_resilient(_quote_expiry_worker,
                                (creds, ticker, e, dte, rate, str(out_root), start.isoformat(), end.isoformat(), chunk_days),
                                f"{ticker} exp {e}", timeout_s, retries)
             if ok is not None:  # success (row count, possibly 0) → seal if final; give-up (None) leaves it unsealed
-                _seal_if_final(tdir, e, end, sealed)
+                seal_quote_expiry(out_root, ticker, e, end)
 
 
 def quote_probe(client, ticker: str):
@@ -1001,9 +1049,8 @@ def main():
         missing = [t for t in tickers if t not in dte_map]
         if missing:
             sys.exit(f"--quotes needs a DTE for {missing}: pass {missing[0]}:DTE (e.g. {missing[0]}:45) or --max-dte")
-        qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"
-        qout.mkdir(parents=True, exist_ok=True)
-        log.info(f"data dir = {data_dir}\nquote out = {qout}  (minute NBBO ±10%, per-ticker DTE)")
+        qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"  # base for the DB sibling, not a CSV dir
+        log.info(f"data dir = {data_dir}\nquote store = {_quotes_db_path(qout)}  (minute NBBO ±10%, per-ticker DTE)")
         run_quotes(tickers, args.start, args.end, qout, dte_map, args.rate,
                    args.creds, args.timeout, args.retries, args.quote_chunk_days, args.concurrency)
     else:
