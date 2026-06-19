@@ -7,11 +7,20 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
+		<!-- install.bat publishes single-file self-contained; without this the embedded native e_sqlite3.dll
+		     isn't extracted at startup and SqliteConnection's type initializer throws. -->
+		<IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
 	</PropertyGroup>
 
 	<ItemGroup>
 		<PackageReference Include="Spectre.Console" Version="0.54.0" />
 		<PackageReference Include="Spectre.Console.Cli" Version="0.53.1" />
+		<!-- Direct ref so the SQLitePCLRaw NATIVE assets (e_sqlite3) land in wa-scraper's output — they don't
+		     flow transitively through the project reference for an Exe, which is why SqliteConnection's type
+		     initializer threw. bundle_e_sqlite3 pinned to the newest 2.1.x (NU1903 still flags the whole 2.1
+		     line; the SQLite advisory needs untrusted SQL/DB input, N/A for this local trusted-data store). -->
+		<PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+		<PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
 	</ItemGroup>
 
 	<ItemGroup>
