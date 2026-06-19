@@ -79,9 +79,7 @@
 	},
 	"rules": {
 		"stopLoss": {
-			"enabled": true,
-			"maxDebitMultiplier": 1.5,
-			"spotBeyondBreakevenPct": 3.0
+			"enabled": true
 		},
 		"opportunisticRoll": {
 			"enabled": true,
@@ -94,8 +92,7 @@
 			"bearishBlockThreshold": -0.25
 		},
 		"takeProfit": {
-			"enabled": true,
-			"pctOfMaxProfit": 60
+			"enabled": true
 		},
 		"defensiveRoll": {
 			"enabled": true,
