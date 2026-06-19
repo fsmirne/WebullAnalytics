@@ -21,10 +21,7 @@
 		<ItemGroup>
 	<PackageReference Include="CsvHelper" Version="33.1.0" />
 	<PackageReference Include="EPPlus" Version="7.6.0" />
-	<PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
-	<!-- Newest 2.1.x SQLitePCLRaw. NU1903 still flags the whole 2.1 line (no clean version yet); the SQLite
-	     advisory requires untrusted SQL / crafted DB files, which doesn't apply to this local trusted-data store. -->
-	<PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
+	<PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
 	<PackageReference Include="Sep" Version="0.14.1" />
 	<PackageReference Include="Spectre.Console" Version="0.54.0" />
 	<PackageReference Include="Spectre.Console.Cli" Version="0.53.1" />
