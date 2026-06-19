@@ -19,7 +19,7 @@ internal sealed class ScraperLoop
 	private readonly string _ticker;
 	private readonly ScraperConfig _config;
 	private readonly IChainSource _chainSource;
-	private readonly string _quotesDir;   // data/quotes/<TICKER> — minute NBBO time-series (one CSV per expiry)
+	private readonly WebullAnalytics.QuoteStoreWriter _quoteWriter;   // canonical minute-NBBO store: data/quotes.db
 	private readonly string _oiDir;       // data/oi/<TICKER>     — one full-chain OI snapshot per day
 
 	public ScraperLoop(string ticker, ScraperConfig config, IChainSource chainSource)
@@ -27,17 +27,16 @@ internal sealed class ScraperLoop
 		_ticker = ticker.ToUpperInvariant();
 		_config = config;
 		_chainSource = chainSource;
-		// The two canonical stores share the same on-disk format as the ThetaData backfill, so a live scrape
-		// and a historical pull are interchangeable in the same directory tree.
-		_quotesDir = Path.Combine(WebullAnalytics.Program.ResolvePath("data/quotes"), _ticker);
+		// Quotes are written straight into the canonical SQLite store (same encoding as the ThetaData backfill,
+		// so a live scrape and a historical pull are interchangeable). OI still snapshots one jsonl per day.
+		_quoteWriter = new WebullAnalytics.QuoteStoreWriter();
 		_oiDir = Path.Combine(WebullAnalytics.Program.ResolvePath("data/oi"), _ticker);
-		Directory.CreateDirectory(_quotesDir);
 		Directory.CreateDirectory(_oiDir);
 	}
 
 	public async Task<int> RunAsync(DateTime startEt, DateTime endEt, CancellationToken cancellation)
 	{
-		AnsiConsole.MarkupLine($"[bold]wa-scraper[/] ticker={_ticker} interval={_config.IntervalSeconds}s startEt={startEt:HH:mm:ss} endEt={endEt:HH:mm:ss} quotes={Markup.Escape(_quotesDir)} oi={Markup.Escape(_oiDir)}");
+		AnsiConsole.MarkupLine($"[bold]wa-scraper[/] ticker={_ticker} interval={_config.IntervalSeconds}s startEt={startEt:HH:mm:ss} endEt={endEt:HH:mm:ss} quotes=data/quotes.db oi={Markup.Escape(_oiDir)}");
 
 		// Sleep until first fire. If startEt is in the past, we begin immediately at the next
 		// minute-boundary so the first persisted line has a clean ET wall-clock minute stamp.
@@ -105,6 +104,7 @@ internal sealed class ScraperLoop
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Loop exited. ticks={ticksRun} failures={failures}[/]");
+		_quoteWriter.Dispose();
 		return 0;
 	}
 
@@ -197,47 +197,23 @@ internal sealed class ScraperLoop
 		return (todayContracts.Count, spot);
 	}
 
-	/// <summary>Appends one row per contract to its expiration's CSV (one file per expiration), creating the
-	/// file with the header line on first write and appending (FileShare.ReadWrite) thereafter. Columns:
-	/// <c>date,time,strike,right,bid,ask,bid_size,ask_size</c>. Format matches the ThetaData backfill exactly
-	/// (LF line endings, decimal strike text like <c>719.0</c>, NBBO sizes) so live and historical rows in a
-	/// per-expiry file are byte-compatible — this is the canonical writer once ThetaData is decommissioned.
-	/// That includes missing sides: a null bid/ask is written as <c>0.0</c> and a null size as <c>0</c>
-	/// (the ThetaData "no quote on that side" encoding), never as an empty field — one canonical encoding
-	/// so consumers can't tell the sources apart. Blank fields broke ad-hoc scripts, and QuoteStoreCache
-	/// only skipped them by the accident of TryParse failing.</summary>
-	private async Task AppendQuotesAsync(List<OptionContractQuote> contracts, string dateStr, string timeStr, CancellationToken cancellation)
+	/// <summary>Writes this tick's two-sided quotes into the canonical SQLite store via <see cref="QuoteStoreWriter"/>
+	/// (idempotent INSERT OR IGNORE on the minute-keyed PK, so re-ticking a minute is a no-op and the scraper
+	/// never clobbers backfilled rows). Encoding (int dates, scaled-int bid/ask) matches the ThetaData backfill
+	/// exactly, so live and historical rows are interchangeable. Contracts without a positive bid AND ask are
+	/// skipped — the same two-sided filter the reader applies (a one-sided/no-quote book contributes no row).
+	///
+	/// Pre-open gating (Schwab serves a FROZEN indicative book before 09:30, verified 2026-06-10: ATM SPY rows
+	/// 09:25–09:29 identical at 17.03×17.10 with 0×0 sizes, then the real auction quote at 09:30 was 15.73×15.81
+	/// — $1.30 away) is the CALLER's job on FIRE time — the timeStr here is the end-of-bar label (fire minute − 1),
+	/// so a time check against it would also drop the legitimate 09:29-labeled auction-boundary row.</summary>
+	private Task AppendQuotesAsync(List<OptionContractQuote> contracts, string dateStr, string timeStr, CancellationToken cancellation)
 	{
-		// Pre-open gating (Schwab serves a FROZEN indicative book before 09:30, verified 2026-06-10:
-		// ATM SPY rows 09:25–09:29 identical at 17.03×17.10 with 0×0 sizes, then the real auction quote
-		// at 09:30 was 15.73×15.81 — $1.30 away) is the CALLER's job, on FIRE time — the timeStr here is
-		// the end-of-bar label (fire minute - 1), so a time check against it would also drop the
-		// legitimate 09:29-labeled auction-boundary row.
-		const string header = "date,time,strike,right,bid,ask,bid_size,ask_size";
-		foreach (var byExpiry in contracts.GroupBy(q => WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)!.ExpiryDate.Date))
-		{
-			var path = Path.Combine(_quotesDir, $"{byExpiry.Key:yyyy-MM-dd}.csv");
-			var needHeader = !File.Exists(path);
-			using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-			using var writer = new StreamWriter(stream) { NewLine = "\n" };   // LF to match the ThetaData backfill (pandas to_csv); avoids mixed CRLF/LF in an appended file
-			if (needHeader) await writer.WriteLineAsync(header);
-			foreach (var q in byExpiry)
-			{
-				var parsed = WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)!;
-				var strike = FormatStrike(parsed.Strike);
-				var bid = q.Bid?.ToString(CultureInfo.InvariantCulture) ?? "0.0";
-				var ask = q.Ask?.ToString(CultureInfo.InvariantCulture) ?? "0.0";
-				var bidSize = q.BidSize?.ToString(CultureInfo.InvariantCulture) ?? "0";
-				var askSize = q.AskSize?.ToString(CultureInfo.InvariantCulture) ?? "0";
-				await writer.WriteLineAsync($"{dateStr},{timeStr},{strike},{parsed.CallPut},{bid},{ask},{bidSize},{askSize}");
-			}
-		}
+		var written = _quoteWriter.WriteTick(_ticker, dateStr, timeStr, contracts);
+		if (written == 0)
+			AnsiConsole.MarkupLine($"[grey]  {timeStr}: no two-sided quotes to write[/]");
+		return Task.CompletedTask;
 	}
-
-	/// <summary>Strike text that matches the ThetaData backfill's pandas-float column (719 → <c>719.0</c>,
-	/// 719.5 → <c>719.5</c>) so live and historical rows in one per-expiry file share a single representation.
-	/// <c>0.0##</c> keeps at least one decimal place and drops superfluous trailing zeros.</summary>
-	private static string FormatStrike(decimal strike) => strike.ToString("0.0##", CultureInfo.InvariantCulture);
 
 	/// <summary>Writes exactly ONE full-chain snapshot for the ET date to <c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>
 	/// on the first RTH tick (≥09:30 ET) of that date; OI is constant intraday, so subsequent ticks skip if the

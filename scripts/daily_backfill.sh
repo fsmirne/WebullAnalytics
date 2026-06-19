@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Daily ThetaData refresh of the canonical data stores:
-#   1. --quotes        -> data/quotes/<TICKER>/<expiry>.csv   (minute NBBO, ±10% strike band)
-#   2. --run           -> data/oi/<TICKER>/<date>.jsonl       (EOD open interest + back-solved IV)
-#   3. --verify-quotes  (local integrity scan of the quote store; no network)
+#   1. --quotes        -> data/quotes.db (SQLite)            (minute NBBO, ±10% strike band — written directly)
+#   2. --run           -> data/oi/<TICKER>/<date>.jsonl      (EOD open interest + back-solved IV)
+#   3. verify          (SQL coverage + crossed-quote scan of quotes.db; no network)
+#
+# Quotes are written straight into the canonical SQLite store (no CSV staging) — per-expiry DELETE+INSERT,
+# WAL so the scraper/backtest can touch it concurrently; quote sealing lives in the DB `sealed` table. The
+# OI store stays as data/oi/<TICKER>/<date>.jsonl with its own sealed.json.
 #
 # Tickers: SPY/GME at 60 DTE (covers the longCalendar/diagonal longDteMax=60 long legs),
 # SPXW/XSP at 0 DTE. ThetaData allows ONE session per account, so the pulls run STRICTLY
@@ -61,9 +65,9 @@ END_OI="${BACKFILL_END:-$(date -d 'yesterday' +%F)}"
 
 echo "[$(ts)] === daily data update: quotes through $END, oi through $END_OI, verify ==="
 
-step "(1/3) minute-NBBO quotes -> data/quotes"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END" --concurrency "$CONC"
-step "(2/3) EOD open interest -> data/oi"        "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" --concurrency "$CONC"
-step "(3/3) quote-store integrity scan"          "$PY" "$SCRIPT" --verify-quotes --tickers $VERIFY --end "$END"
+step "(1/3) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END" --concurrency "$CONC"
+step "(2/3) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" --concurrency "$CONC"
+step "(3/3) quote-store coverage + integrity"      "$PY" scripts/import_quotes_sqlite.py --root SPY --verify
 
 if [ "$rc" -eq 0 ]; then
   echo "[$(ts)] === ALL OK ==="

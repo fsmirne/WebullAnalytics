@@ -768,6 +768,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Starting cash balance. Default: 10000.")]
 	public decimal StartingCash { get; set; } = 10000m;
 
+	[CommandOption("--quote-db <PATH>")]
+	[Description("Override the SQLite quote-store path (default data/quotes.db). For ad-hoc runs against an alternate store; the canonical DB is built/kept current by scripts/import_quotes_sqlite.py + the daily backfill.")]
+	public string? QuoteDb { get; set; }
+
 	[CommandOption("--fee-per-contract <AMOUNT>")]
 	[Description("Per-leg-contract commission. Defaults from ticker: $1.14 for SPX/SPXW (and other cash-settled indexes), $0.55 for XSP, $1.30 for NDX, $0.05 for everything else (Webull ETFs/equities incl. IWM).")]
 	public decimal? FeePerContract { get; set; }
@@ -1024,7 +1028,13 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			&& !config.Rules.OpportunisticRoll.Enabled
 			&& !config.Rules.DefensiveRoll.Enabled
 			&& !config.Rules.RollShortOnExpiry.Enabled;
-		var quoteStore = new Backtest.QuoteStoreCache(since: since, until: until, sameDayExpiryOnly: sameDayExpiryOnly);
+		// SQLite is the canonical quote store: default to data/quotes.db, falling back to the per-expiry CSVs
+		// only if the DB is absent (e.g. before the first import). --quote-db overrides the path.
+		var canonicalDb = Program.ResolvePath("data/quotes.db");
+		var quoteDbPath = settings.QuoteDb ?? (File.Exists(canonicalDb) ? canonicalDb : null);
+		if (quoteDbPath == null)
+			Console.Error.WriteLine("Warning: no SQLite quote store at data/quotes.db — falling back to CSV. Build it with scripts/import_quotes_sqlite.py (the daily backfill keeps it current).");
+		var quoteStore = new Backtest.QuoteStoreCache(since: since, until: until, sameDayExpiryOnly: sameDayExpiryOnly, dbPath: quoteDbPath);
 		// Real minute NBBO is the only fill foundation (parametric covers counterfactuals only), so an empty
 		// window prices nothing and silently reports no fills — indistinguishable from "the strategy declined
 		// to trade". Warn explicitly: the usual cause is running --since <today> before the evening backfill

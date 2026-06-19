@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using Microsoft.Data.Sqlite;
 using nietras.SeparatedValues;
 
 namespace WebullAnalytics.AI.Backtest;
@@ -34,6 +35,11 @@ internal sealed class QuoteStoreCache
 	// longer-dated tail is pure waste. Set by the caller only when it has PROVEN the run is same-day
 	// (every enabled opener structure is 0DTE AND no roll-to-future rule is active).
 	private readonly bool _sameDayExpiryOnly;
+	// PROTOTYPE: when set, rows are read from a SQLite store (one indexed table mirroring the CSVs) instead
+	// of per-expiry CSV files. The index on (root, expiry, date) lets the per-expiry load fetch exactly the
+	// rows it needs — no full-file scan, so the 45DTE tail SPY files carry is never read. The in-memory
+	// ExpiryQuotes structure and all lookups are unchanged, so results are identical to the CSV path.
+	private readonly string? _dbPath;
 	// Expiry-eviction watermark: the backtest queries the store only at the current sim minute and never
 	// looks back at an expired contract (settlement prices from the underlying bar, not the option NBBO —
 	// see BacktestRunner.SettleExpirationsAsync), so once the sim date passes an expiry its parsed rows are
@@ -47,13 +53,14 @@ internal sealed class QuoteStoreCache
 	/// only parses rows whose date is inside [since, until] — a 45-day file that a short tuning run barely
 	/// touches skips the out-of-window rows before parsing them (a big cold-load win for short windows; a
 	/// no-op for a full-period run). Defaults to all-dates.</param>
-	public QuoteStoreCache(string? dir = null, int maxStaleMinutes = 5, DateTime? since = null, DateTime? until = null, bool sameDayExpiryOnly = false)
+	public QuoteStoreCache(string? dir = null, int maxStaleMinutes = 5, DateTime? since = null, DateTime? until = null, bool sameDayExpiryOnly = false, string? dbPath = null)
 	{
 		_dir = dir ?? Program.ResolvePath("data/quotes");
 		_maxStaleMinutes = maxStaleMinutes;
 		_since = (since ?? DateTime.MinValue).Date;
 		_until = (until ?? DateTime.MaxValue).Date;
 		_sameDayExpiryOnly = sameDayExpiryOnly;
+		_dbPath = dbPath;
 	}
 
 	/// <summary>Latest real two-sided NBBO at or before <paramref name="asOfEt"/> (ET wall-clock) for the
@@ -64,7 +71,7 @@ internal sealed class QuoteStoreCache
 		var p = ParsingHelpers.ParseOptionSymbol(occ);
 		if (p?.CallPut == null) return null;
 		var eq = _cache.GetOrAdd((p.Root.ToUpperInvariant(), p.ExpiryDate.Date),
-			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until, _sameDayExpiryOnly));
+			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until, _sameDayExpiryOnly, _dbPath));
 		return eq.Lookup(asOfEt.Date, (long)Math.Round(p.Strike * 1000m), p.CallPut[0],
 			(int)asOfEt.TimeOfDay.TotalSeconds, _maxStaleMinutes);
 	}
@@ -129,7 +136,7 @@ internal sealed class QuoteStoreCache
 	{
 		EvictExpiredBefore(date.Date);
 		var eq = _cache.GetOrAdd((root.ToUpperInvariant(), expiry.Date),
-			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until, _sameDayExpiryOnly));
+			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until, _sameDayExpiryOnly, _dbPath));
 		var loMilli = (long)Math.Round(loStrike * 1000m);
 		var hiMilli = (long)Math.Round(hiStrike * 1000m);
 		var yy = expiry.ToString("yyMMdd", CultureInfo.InvariantCulture);
@@ -158,10 +165,11 @@ internal sealed class QuoteStoreCache
 			}
 		}
 
-		public static ExpiryQuotes Load(string dir, string root, DateTime exp, DateTime since, DateTime until, bool sameDayExpiryOnly)
+		public static ExpiryQuotes Load(string dir, string root, DateTime exp, DateTime since, DateTime until, bool sameDayExpiryOnly, string? dbPath)
 		{
 			var rows = new Dictionary<(DateTime Date, long StrikeMilli, char Cp),
 				List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>>();
+			if (dbPath != null) return LoadFromSqlite(rows, dbPath, root, exp, since, until, sameDayExpiryOnly);
 			var path = Path.Combine(dir, root, $"{exp:yyyy-MM-dd}.csv");
 			if (!File.Exists(path)) return new ExpiryQuotes(rows);
 
@@ -193,6 +201,53 @@ internal sealed class QuoteStoreCache
 				var bsz = row.ColCount > 6 ? ParseIntLoose(row[6].ToString()) : 0;
 				var asz = row.ColCount > 7 ? ParseIntLoose(row[7].ToString()) : 0;
 				var key = (d.Date, (long)Math.Round(strike * 1000m), c);
+				if (!rows.TryGetValue(key, out var list)) { list = new(); rows[key] = list; }
+				list.Add((sec, bid, ask, bsz, asz));
+			}
+			foreach (var list in rows.Values) list.Sort((x, y) => x.Sec.CompareTo(y.Sec));
+			return new ExpiryQuotes(rows);
+		}
+
+		/// <summary>SQLite-backed mirror of <see cref="Load"/>. The DB holds canonical, already-validated rows
+		/// (the import applied the same filters: ≥6 cols, valid time, strike, right C/P, BOTH bid&gt;0 AND ask&gt;0),
+		/// with bid/ask as scaled integers in ten-thousandths (price = value / 10000). That rounds away the
+		/// float noise the source CSVs carry (penny-tick data written as raw floats, e.g. 0.35000000000000003)
+		/// — a lossless cleanup for real ticks, so backtest results match the CSV path to the cent. The index on
+		/// (root, expiry, date) makes this fetch exactly the needed rows; the 45DTE tail is never touched.</summary>
+		// yyyymmdd as a single int — the on-disk date encoding. MinValue→10101, MaxValue→99991231 both fit.
+		private static int YmdInt(DateTime d) => d.Year * 10000 + d.Month * 100 + d.Day;
+
+		private static ExpiryQuotes LoadFromSqlite(
+			Dictionary<(DateTime Date, long StrikeMilli, char Cp), List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>> rows,
+			string dbPath, string root, DateTime exp, DateTime since, DateTime until, bool sameDayExpiryOnly)
+		{
+			using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Shared");
+			conn.Open();
+			using var cmd = conn.CreateCommand();
+			// date/expiry stored as INTEGER yyyymmdd (monotonic, so range comparison is correct).
+			cmd.CommandText = sameDayExpiryOnly
+				? "SELECT date, time_sec, strike_milli, right, bid, ask, bid_size, ask_size FROM quotes WHERE root=$root AND expiry=$exp AND date=$exp"
+				: "SELECT date, time_sec, strike_milli, right, bid, ask, bid_size, ask_size FROM quotes WHERE root=$root AND expiry=$exp AND date>=$since AND date<=$until";
+			cmd.Parameters.AddWithValue("$root", root.ToUpperInvariant());
+			cmd.Parameters.AddWithValue("$exp", YmdInt(exp));
+			if (!sameDayExpiryOnly)
+			{
+				cmd.Parameters.AddWithValue("$since", YmdInt(since));
+				cmd.Parameters.AddWithValue("$until", YmdInt(until));
+			}
+			using var r = cmd.ExecuteReader();
+			while (r.Read())
+			{
+				var di = r.GetInt32(0);
+				var d = new DateTime(di / 10000, di / 100 % 100, di % 100);
+				var sec = r.GetInt32(1);
+				var strikeMilli = r.GetInt64(2);
+				var c = r.GetString(3)[0];
+				var bid = r.GetInt64(4) / 10000m;
+				var ask = r.GetInt64(5) / 10000m;
+				var bsz = r.GetInt32(6);
+				var asz = r.GetInt32(7);
+				var key = (d.Date, strikeMilli, c);
 				if (!rows.TryGetValue(key, out var list)) { list = new(); rows[key] = list; }
 				list.Add((sec, bid, ask, bsz, asz));
 			}
