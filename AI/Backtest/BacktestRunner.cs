@@ -584,7 +584,11 @@ internal sealed class BacktestRunner
 		// LegInShort needs the minute walk even when SL/TP are both disabled (e.g. SPXW's
 		// profit/stop pcts pinned at 1.0 to defer all closes to expiration). Without this carve-out,
 		// the rule would silently never fire on 0DTE strategies that disable both gates.
-		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null && completeCondorRule == null) return false;
+		// Broker forced liquidation applies only to physically-settled (assignable) roots; cash-settled
+		// index options (XSP/SPXW) settle in cash with no assignment, so they're never force-closed.
+		var forceCloseActive = _config.Rules.CloseBeforeShortExpiry.Enabled
+			&& !OptionSettlement.CashSettledIndexRoots.Contains(pos.Ticker);
+		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null && completeCondorRule == null && !forceCloseActive) return false;
 
 		// Track intraday range running from session start to the current minute. Used by LegInShort's
 		// trend-day filter. We use the first minute bar's open as the day's open reference (close to
@@ -710,6 +714,25 @@ internal sealed class BacktestRunner
 				}
 			}
 
+			// Broker forced liquidation: an assignable position whose short is ITM in the final window before
+			// settlement is closed by the broker at the current mark (Webull liquidates ITM SPY ~15:30 ET) to
+			// avoid assignment, rather than riding to 16:00 intrinsic. Fires at the first in-window minute the
+			// short is ITM. (The multi-day EOD path is handled by CloseBeforeShortExpiryRule; this is the 0DTE
+			// intraday analog, scoped to its assignment-risk leg only — no profit/BE gating.)
+			if (forceCloseActive && minutesToClose <= _config.Rules.CloseBeforeShortExpiry.BrokerForceCloseMinutesBeforeClose && HasAtRiskShortLeg(pos.Legs, spot, _config.Rules.CloseBeforeShortExpiry.BrokerForceCloseMoneynessBufferPct))
+			{
+				var fcFills = new List<BacktestLegFill>(pos.Legs.Count);
+				bool fcPriced = true;
+				foreach (var leg in pos.Legs)
+				{
+					if (leg.CallPut == null) continue;
+					if (!quotes.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) { fcPriced = false; break; }
+					var cs = leg.Side == Side.Buy ? Side.Sell : Side.Buy;
+					fcFills.Add(new BacktestLegFill(leg.Symbol, cs, pos.Quantity, ExecPrice(cs, q.Bid.Value, q.Ask.Value)));
+				}
+				if (fcPriced) { _book.Close(minuteEt, pos.Key, fcFills, "CloseBeforeShortExpiryRule", spot); return true; }
+			}
+
 			bool slFires = slTarget.HasValue && mark.Value <= slTarget.Value;
 			bool tpFires = tpTarget.HasValue && mark.Value >= tpTarget.Value;
 			if (!slFires && !tpFires) continue;
@@ -732,6 +755,19 @@ internal sealed class BacktestRunner
 			return true;
 		}
 
+		return false;
+	}
+
+	// True when any short leg is ITM (bufferPct 0) or within bufferPct of the money — "at risk" of finishing
+	// ITM (short call: spot > strike×(1−b); short put: spot < strike×(1+b)).
+	private static bool HasAtRiskShortLeg(IReadOnlyList<PositionLeg> legs, decimal spot, decimal bufferPct)
+	{
+		var b = bufferPct / 100m;
+		foreach (var leg in legs)
+		{
+			if (leg.Side != Side.Sell || leg.CallPut == null) continue;
+			if (leg.CallPut == "C" ? spot > leg.Strike * (1m - b) : spot < leg.Strike * (1m + b)) return true;
+		}
 		return false;
 	}
 
