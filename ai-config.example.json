@@ -64,7 +64,7 @@
 			"minAbsoluteOpenInterest": 100,
 			"weight": 0.50
 		},
-		"realizedExpectancy": { "enabled": true, "profitTargetPctOfMaxProfit": 0.50, "stopLossPctOfMaxLoss": 0.75, "slippagePerSharePerOrder": 0, "roundTrips": 2 },
+		"realizedEvScoring": true,
 		"structures": {
 			"longCalendar":  { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60 },
 			"doubleCalendar": { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60, "widthSteps": [2, 4] },
@@ -79,7 +79,8 @@
 	},
 	"rules": {
 		"stopLoss": {
-			"enabled": true
+			"enabled": true,
+			"pctOfMaxLoss": 0.75
 		},
 		"opportunisticRoll": {
 			"enabled": true,
@@ -92,7 +93,8 @@
 			"bearishBlockThreshold": -0.25
 		},
 		"takeProfit": {
-			"enabled": true
+			"enabled": true,
+			"pctOfMaxProfit": 0.50
 		},
 		"defensiveRoll": {
 			"enabled": true,
@@ -124,6 +126,7 @@
 			"maxIntradayRangePct": 999.0
 		}
 	},
+	"execution": { "slippagePerSharePerOrder": 0, "roundTrips": 2 },
 	"autoExecute": {
 		"management": {
 			"enabled": false,

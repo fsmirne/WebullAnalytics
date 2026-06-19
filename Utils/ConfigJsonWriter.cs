@@ -11,11 +11,11 @@ internal static class ConfigJsonWriter
 {
 	/// <summary>Object-valued keys whose contents are collapsed onto a single line (small knob bags that
 	/// read better inline). <c>structures</c> is handled separately (container multi-line, each entry inline).</summary>
-	private static readonly HashSet<string> InlineObjectKeys = new(StringComparer.Ordinal) { "events" };
+	private static readonly HashSet<string> InlineObjectKeys = new(StringComparer.Ordinal) { "events", "execution" };
 
 	/// <summary>Canonical top-level key order (matches the AIConfig property order), so base/ticker/strategy
 	/// files all read consistently regardless of how they were built. Unlisted keys keep their order, after.</summary>
-	private static readonly string[] RootKeyOrder = { "defaultStrategy", "watch", "cashReserve", "log-level", "indicators", "rules", "opener", "autoExecute" };
+	private static readonly string[] RootKeyOrder = { "defaultStrategy", "watch", "cashReserve", "log-level", "indicators", "rules", "execution", "opener", "autoExecute" };
 
 	public static string Serialize(JsonNode root)
 	{

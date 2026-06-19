@@ -128,6 +128,7 @@ internal static class AIContext
 		config.Strategy = strategy;
 		if (!string.IsNullOrWhiteSpace(settings.LogLevel)) config.LogLevel = settings.LogLevel;
 		config.Opener.Indicators = config.Indicators;        // shared indicators reachable from cfg-only helpers
+		AIConfigLoader.PopulateRealizedEv(config);           // copy rules.stopLoss/takeProfit + execution into the scorer's EV bundle
 
 		var err = AIConfigLoader.Validate(config);
 		if (err != null) { Console.Error.WriteLine($"Error: ai-config: {err}"); return null; }
@@ -854,7 +855,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public string[] EnableStructures { get; set; } = Array.Empty<string>();
 
 	[CommandOption("--tp <VALUE>")]
-	[Description("Override opener.realizedExpectancy.profitTargetPctOfMaxProfit for this run. 1.0 = no profit cap (ride to expiry); 0.5 = close at half max profit. Range 0..1.")]
+	[Description("Override rules.takeProfit.pctOfMaxProfit for this run. 1.0 = no profit cap (ride to expiry); 0.5 = close at half max profit. Range 0..1.")]
 	public decimal? TpOverride { get; set; }
 
 	[CommandOption("--lots <N>")]
@@ -862,7 +863,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public int? Lots { get; set; }
 
 	[CommandOption("--sl <VALUE>")]
-	[Description("Override opener.realizedExpectancy.stopLossPctOfMaxLoss for this run. 1.0 = SL effectively off (ride to expiry/settlement); 0.5 = cut at half of max loss. Range 0..1.")]
+	[Description("Override rules.stopLoss.pctOfMaxLoss for this run. 1.0 = SL effectively off (ride to expiry/settlement); 0.5 = cut at half of max loss. Range 0..1.")]
 	public decimal? SlOverride { get; set; }
 
 	public override ValidationResult Validate()
