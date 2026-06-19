@@ -1016,7 +1016,15 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// captured-bar overlay) answers ONLY the counterfactual reprices real NBBO can't — intraday SL/TP
 		// brackets and the profit projector price legs at a hypothetical spot. It is never a price foundation.
 		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
-		var quoteStore = new Backtest.QuoteStoreCache(since: since, until: until);
+		// A strictly-0DTE strategy only ever queries same-day-expiry quotes, so the store can skip parsing
+		// the 45DTE→1DTE tail that shares each expiry file (a big cold-load win for SPY, whose files carry
+		// the QuickDC/DC chain). Safe only when every enabled structure is 0DTE AND no roll-to-future rule
+		// is active (a roll could otherwise query a later expiry the filter would have dropped).
+		var sameDayExpiryOnly = config.Opener.Structures.MaxDteAcrossEnabled() == 0
+			&& !config.Rules.OpportunisticRoll.Enabled
+			&& !config.Rules.DefensiveRoll.Enabled
+			&& !config.Rules.RollShortOnExpiry.Enabled;
+		var quoteStore = new Backtest.QuoteStoreCache(since: since, until: until, sameDayExpiryOnly: sameDayExpiryOnly);
 		// Real minute NBBO is the only fill foundation (parametric covers counterfactuals only), so an empty
 		// window prices nothing and silently reports no fills — indistinguishable from "the strategy declined
 		// to trade". Warn explicitly: the usual cause is running --since <today> before the evening backfill

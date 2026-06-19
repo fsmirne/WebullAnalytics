@@ -281,6 +281,27 @@ internal sealed class OpenerStructuresConfig
 	[JsonPropertyName("longVertical")] public OpenerLongVerticalConfig LongVertical { get; set; } = new();
 	[JsonPropertyName("diagonalVertical")] public OpenerDiagonalVerticalConfig DiagonalVertical { get; set; } = new();
 	[JsonPropertyName("calendarVertical")] public OpenerCalendarVerticalConfig CalendarVertical { get; set; } = new();
+
+	/// <summary>Furthest DTE any ENABLED structure can reach — the max expiry horizon the opener will
+	/// query. 0 means every enabled structure is same-day (0DTE). Multi-expiry structures report their
+	/// long leg's DteMax; single-expiry ones their DteMax. Used by the backtest quote store to skip
+	/// parsing the longer-dated tail of each expiry file when the whole strategy is 0DTE.</summary>
+	public int MaxDteAcrossEnabled()
+	{
+		var max = 0;
+		if (LongCalendar.Enabled) max = Math.Max(max, LongCalendar.LongDteMax);
+		if (DoubleCalendar.Enabled) max = Math.Max(max, DoubleCalendar.LongDteMax);
+		if (LongDiagonal.Enabled) max = Math.Max(max, LongDiagonal.LongDteMax);
+		if (DoubleDiagonal.Enabled) max = Math.Max(max, DoubleDiagonal.LongDteMax);
+		if (IronButterfly.Enabled) max = Math.Max(max, IronButterfly.DteMax);
+		if (IronCondor.Enabled) max = Math.Max(max, IronCondor.DteMax);
+		if (ShortVertical.Enabled) max = Math.Max(max, ShortVertical.DteMax);
+		if (LongCallPut.Enabled) max = Math.Max(max, LongCallPut.DteMax);
+		if (LongVertical.Enabled) max = Math.Max(max, LongVertical.DteMax);
+		if (DiagonalVertical.Enabled) max = Math.Max(max, DiagonalVertical.LongDteMax);
+		if (CalendarVertical.Enabled) max = Math.Max(max, CalendarVertical.LongDteMax);
+		return max;
+	}
 }
 
 /// <summary>Diagonal-from-verticals: a near-dated SHORT vertical (credit) + a far-dated LONG vertical

@@ -28,6 +28,12 @@ internal sealed class QuoteStoreCache
 	/// staleness honest; raise it for thin far-dated legs.</param>
 	private readonly DateTime _since;
 	private readonly DateTime _until;
+	// When set, only rows whose trade-date equals the file's expiry are parsed — i.e. the 0DTE slice.
+	// A file is named by expiry and (for SPY) carries the whole 45DTE→0DTE life of every contract that
+	// expires that day; a strictly-0DTE strategy only ever queries the same-day rows, so parsing the
+	// longer-dated tail is pure waste. Set by the caller only when it has PROVEN the run is same-day
+	// (every enabled opener structure is 0DTE AND no roll-to-future rule is active).
+	private readonly bool _sameDayExpiryOnly;
 	// Expiry-eviction watermark: the backtest queries the store only at the current sim minute and never
 	// looks back at an expired contract (settlement prices from the underlying bar, not the option NBBO —
 	// see BacktestRunner.SettleExpirationsAsync), so once the sim date passes an expiry its parsed rows are
@@ -41,12 +47,13 @@ internal sealed class QuoteStoreCache
 	/// only parses rows whose date is inside [since, until] — a 45-day file that a short tuning run barely
 	/// touches skips the out-of-window rows before parsing them (a big cold-load win for short windows; a
 	/// no-op for a full-period run). Defaults to all-dates.</param>
-	public QuoteStoreCache(string? dir = null, int maxStaleMinutes = 5, DateTime? since = null, DateTime? until = null)
+	public QuoteStoreCache(string? dir = null, int maxStaleMinutes = 5, DateTime? since = null, DateTime? until = null, bool sameDayExpiryOnly = false)
 	{
 		_dir = dir ?? Program.ResolvePath("data/quotes");
 		_maxStaleMinutes = maxStaleMinutes;
 		_since = (since ?? DateTime.MinValue).Date;
 		_until = (until ?? DateTime.MaxValue).Date;
+		_sameDayExpiryOnly = sameDayExpiryOnly;
 	}
 
 	/// <summary>Latest real two-sided NBBO at or before <paramref name="asOfEt"/> (ET wall-clock) for the
@@ -57,7 +64,7 @@ internal sealed class QuoteStoreCache
 		var p = ParsingHelpers.ParseOptionSymbol(occ);
 		if (p?.CallPut == null) return null;
 		var eq = _cache.GetOrAdd((p.Root.ToUpperInvariant(), p.ExpiryDate.Date),
-			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until));
+			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until, _sameDayExpiryOnly));
 		return eq.Lookup(asOfEt.Date, (long)Math.Round(p.Strike * 1000m), p.CallPut[0],
 			(int)asOfEt.TimeOfDay.TotalSeconds, _maxStaleMinutes);
 	}
@@ -122,7 +129,7 @@ internal sealed class QuoteStoreCache
 	{
 		EvictExpiredBefore(date.Date);
 		var eq = _cache.GetOrAdd((root.ToUpperInvariant(), expiry.Date),
-			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until));
+			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until, _sameDayExpiryOnly));
 		var loMilli = (long)Math.Round(loStrike * 1000m);
 		var hiMilli = (long)Math.Round(hiStrike * 1000m);
 		var yy = expiry.ToString("yyMMdd", CultureInfo.InvariantCulture);
@@ -151,7 +158,7 @@ internal sealed class QuoteStoreCache
 			}
 		}
 
-		public static ExpiryQuotes Load(string dir, string root, DateTime exp, DateTime since, DateTime until)
+		public static ExpiryQuotes Load(string dir, string root, DateTime exp, DateTime since, DateTime until, bool sameDayExpiryOnly)
 		{
 			var rows = new Dictionary<(DateTime Date, long StrikeMilli, char Cp),
 				List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>>();
@@ -169,6 +176,8 @@ internal sealed class QuoteStoreCache
 				if (row.ColCount < 6) continue;
 				if (!DateTime.TryParse(row[0].Span, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
 				if (d.Date < since || d.Date > until) continue;
+				// 0DTE-only runs use just the same-day slice; skip the longer-dated tail without parsing it.
+				if (sameDayExpiryOnly && d.Date != exp.Date) continue;
 				var sec = ParseTimeSec(row[1].ToString());
 				if (sec < 0) continue;
 				// Times are already START-of-bar (09:30 = first RTH minute): the ThetaData pull normalizes
