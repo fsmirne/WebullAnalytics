@@ -1,17 +1,18 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.Data.Sqlite;
-using nietras.SeparatedValues;
 
 namespace WebullAnalytics.AI.Backtest;
 
-/// <summary>Reads the ThetaData minute-NBBO quote store —
-/// <c>data/quotes/&lt;root&gt;/&lt;expiry&gt;.csv</c> with columns
-/// <c>date,time,strike,right,bid,ask,bid_size,ask_size</c> — and answers "real NBBO for this contract at
-/// this ET minute" with a bounded stale-quote lookback. This is the quotes-only price foundation that
-/// replaces massive trade-bars + the synthetic spread model (see <see cref="BacktestQuoteSource"/>).
-/// Per-expiration files are loaded lazily and cached. Quote age (exact vs stale-by-N-min vs missing) is
-/// the new pricing-provenance signal — the analog of "captured bar vs synthetic" on the trade-bar path.</summary>
+/// <summary>Reads the canonical ThetaData minute-NBBO quote store — the SQLite <c>quotes.db</c> table
+/// <c>(root, expiry, date, time_sec, strike_milli, right, bid, ask, bid_size, ask_size)</c> — and answers
+/// "real NBBO for this contract at this ET minute" with a bounded stale-quote lookback. This is the
+/// quotes-only price foundation that replaces massive trade-bars + the synthetic spread model (see
+/// <see cref="BacktestQuoteSource"/>). Per-expiration slices are loaded lazily (the index on
+/// <c>(root, expiry, date)</c> fetches exactly the needed rows) and cached. Quote age (exact vs
+/// stale-by-N-min vs missing) is the pricing-provenance signal — the analog of "captured bar vs
+/// synthetic" on the trade-bar path. The store is built/kept current by scripts/import_quotes_sqlite.py +
+/// the daily backfill; there is no CSV read path.</summary>
 internal sealed class QuoteStoreCache
 {
 	/// <summary>A real two-sided quote, with how stale it is vs the requested minute (0 = exact-minute print).</summary>
@@ -20,7 +21,6 @@ internal sealed class QuoteStoreCache
 		public decimal Mid => (Bid + Ask) / 2m;
 	}
 
-	private readonly string _dir;
 	private readonly int _maxStaleMinutes;
 	private readonly ConcurrentDictionary<(string Root, DateTime Exp), ExpiryQuotes> _cache = new();
 
@@ -35,11 +35,9 @@ internal sealed class QuoteStoreCache
 	// longer-dated tail is pure waste. Set by the caller only when it has PROVEN the run is same-day
 	// (every enabled opener structure is 0DTE AND no roll-to-future rule is active).
 	private readonly bool _sameDayExpiryOnly;
-	// PROTOTYPE: when set, rows are read from a SQLite store (one indexed table mirroring the CSVs) instead
-	// of per-expiry CSV files. The index on (root, expiry, date) lets the per-expiry load fetch exactly the
-	// rows it needs — no full-file scan, so the 45DTE tail SPY files carry is never read. The in-memory
-	// ExpiryQuotes structure and all lookups are unchanged, so results are identical to the CSV path.
-	private readonly string? _dbPath;
+	// Canonical SQLite store. The index on (root, expiry, date) lets the per-expiry load fetch exactly the
+	// rows it needs — no full-file scan, so the 45DTE tail an expiry slice carries is never read.
+	private readonly string _dbPath;
 	// Expiry-eviction watermark: the backtest queries the store only at the current sim minute and never
 	// looks back at an expired contract (settlement prices from the underlying bar, not the option NBBO —
 	// see BacktestRunner.SettleExpirationsAsync), so once the sim date passes an expiry its parsed rows are
@@ -53,15 +51,17 @@ internal sealed class QuoteStoreCache
 	/// only parses rows whose date is inside [since, until] — a 45-day file that a short tuning run barely
 	/// touches skips the out-of-window rows before parsing them (a big cold-load win for short windows; a
 	/// no-op for a full-period run). Defaults to all-dates.</param>
-	public QuoteStoreCache(string? dir = null, int maxStaleMinutes = 5, DateTime? since = null, DateTime? until = null, bool sameDayExpiryOnly = false, string? dbPath = null)
+	public QuoteStoreCache(string dbPath, int maxStaleMinutes = 5, DateTime? since = null, DateTime? until = null, bool sameDayExpiryOnly = false)
 	{
-		_dir = dir ?? Program.ResolvePath("data/quotes");
+		_dbPath = dbPath ?? throw new ArgumentNullException(nameof(dbPath));
 		_maxStaleMinutes = maxStaleMinutes;
 		_since = (since ?? DateTime.MinValue).Date;
 		_until = (until ?? DateTime.MaxValue).Date;
 		_sameDayExpiryOnly = sameDayExpiryOnly;
-		_dbPath = dbPath;
 	}
+
+	// yyyymmdd as a single int — the on-disk date encoding. MinValue→10101, MaxValue→99991231 both fit.
+	private static int YmdInt(DateTime d) => d.Year * 10000 + d.Month * 100 + d.Day;
 
 	/// <summary>Latest real two-sided NBBO at or before <paramref name="asOfEt"/> (ET wall-clock) for the
 	/// contract, within the staleness window; null if none → the caller's missing-quote policy decides.</summary>
@@ -71,7 +71,7 @@ internal sealed class QuoteStoreCache
 		var p = ParsingHelpers.ParseOptionSymbol(occ);
 		if (p?.CallPut == null) return null;
 		var eq = _cache.GetOrAdd((p.Root.ToUpperInvariant(), p.ExpiryDate.Date),
-			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until, _sameDayExpiryOnly, _dbPath));
+			key => ExpiryQuotes.Load(key.Root, key.Exp, _since, _until, _sameDayExpiryOnly, _dbPath));
 		return eq.Lookup(asOfEt.Date, (long)Math.Round(p.Strike * 1000m), p.CallPut[0],
 			(int)asOfEt.TimeOfDay.TotalSeconds, _maxStaleMinutes);
 	}
@@ -93,38 +93,23 @@ internal sealed class QuoteStoreCache
 		}
 	}
 
-	/// <summary>True if a quote file exists for this expiration (cheap coverage check, no load).</summary>
-	public bool HasExpiry(string root, DateTime exp)
-		=> File.Exists(Path.Combine(_dir, root.ToUpperInvariant(), $"{exp.Date:yyyy-MM-dd}.csv"));
-
 	/// <summary>True if the store holds ANY real quote row dated within [<paramref name="since"/>, <paramref name="until"/>]
 	/// for <paramref name="root"/>. Distinguishes "the strategy declined to trade" from "the quote store has not been
 	/// backfilled for this window yet" (the common trap: running <c>--since &lt;today&gt;</c> before the evening
-	/// backfill has landed the day's quotes). Streams only the date column, skips expiry files that pre-date the
-	/// window start (a contract's rows are dated at or before its expiry, so such files can't hold in-window rows),
-	/// and returns on the first match — so the has-coverage path is near-instant; only a genuinely-empty window
-	/// pays a full scan.</summary>
+	/// backfill has landed the day's quotes). A contract's rows are dated at or before its expiry, so the
+	/// <c>expiry &gt;= since</c> bound prunes earlier expiry slices; with the <c>(root, expiry, date)</c> index and
+	/// <c>LIMIT 1</c> the has-coverage path is near-instant.</summary>
 	public bool HasAnyQuoteInWindow(string root, DateTime since, DateTime until)
 	{
-		var rootDir = Path.Combine(_dir, root.ToUpperInvariant());
-		if (!Directory.Exists(rootDir)) return false;
-		var lo = since.Date;
-		var hi = until.Date;
-		foreach (var path in Directory.EnumerateFiles(rootDir, "*.csv"))
-		{
-			var name = Path.GetFileNameWithoutExtension(path);
-			if (DateTime.TryParseExact(name, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var exp) && exp.Date < lo) continue;
-			var first = true;
-			foreach (var line in File.ReadLines(path))
-			{
-				if (first) { first = false; continue; }   // header
-				var comma = line.IndexOf(',');
-				if (comma <= 0) continue;
-				if (DateTime.TryParse(line.AsSpan(0, comma), CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) && d.Date >= lo && d.Date <= hi)
-					return true;
-			}
-		}
-		return false;
+		using var conn = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Cache=Shared");
+		conn.Open();
+		using var cmd = conn.CreateCommand();
+		cmd.CommandText = "SELECT 1 FROM quotes WHERE root=$root AND expiry>=$since AND date>=$since AND date<=$until LIMIT 1";
+		cmd.Parameters.AddWithValue("$root", root.ToUpperInvariant());
+		cmd.Parameters.AddWithValue("$since", YmdInt(since.Date));
+		cmd.Parameters.AddWithValue("$until", YmdInt(until.Date));
+		using var r = cmd.ExecuteReader();
+		return r.Read();
 	}
 
 	/// <summary>OCC symbols for <paramref name="root"/> at <paramref name="expiry"/> that carry a real quote on
@@ -136,7 +121,7 @@ internal sealed class QuoteStoreCache
 	{
 		EvictExpiredBefore(date.Date);
 		var eq = _cache.GetOrAdd((root.ToUpperInvariant(), expiry.Date),
-			key => ExpiryQuotes.Load(_dir, key.Root, key.Exp, _since, _until, _sameDayExpiryOnly, _dbPath));
+			key => ExpiryQuotes.Load(key.Root, key.Exp, _since, _until, _sameDayExpiryOnly, _dbPath));
 		var loMilli = (long)Math.Round(loStrike * 1000m);
 		var hiMilli = (long)Math.Round(hiStrike * 1000m);
 		var yy = expiry.ToString("yyMMdd", CultureInfo.InvariantCulture);
@@ -165,62 +150,15 @@ internal sealed class QuoteStoreCache
 			}
 		}
 
-		public static ExpiryQuotes Load(string dir, string root, DateTime exp, DateTime since, DateTime until, bool sameDayExpiryOnly, string? dbPath)
+		/// <summary>Loads the expiry slice from the canonical SQLite store. The DB holds already-validated rows
+		/// (the import applied the filters: ≥6 cols, valid time, strike, right C/P, BOTH bid&gt;0 AND ask&gt;0),
+		/// with bid/ask as scaled integers in ten-thousandths (price = value / 10000) — penny-tick data with the
+		/// source float noise (e.g. 0.35000000000000003) rounded away. The index on (root, expiry, date) makes
+		/// this fetch exactly the needed rows; the 45DTE tail an expiry slice carries is never touched.</summary>
+		public static ExpiryQuotes Load(string root, DateTime exp, DateTime since, DateTime until, bool sameDayExpiryOnly, string dbPath)
 		{
 			var rows = new Dictionary<(DateTime Date, long StrikeMilli, char Cp),
 				List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>>();
-			if (dbPath != null) return LoadFromSqlite(rows, dbPath, root, exp, since, until, sameDayExpiryOnly);
-			var path = Path.Combine(dir, root, $"{exp:yyyy-MM-dd}.csv");
-			if (!File.Exists(path)) return new ExpiryQuotes(rows);
-
-			// Parsed with Sep (nietras.SeparatedValues): ~7% faster cold-load than File.ReadLines +
-			// string.Split on the multi-year sweeps, results byte-identical (verified against the prior
-			// hand-split parser). Semantics preserved exactly — header consumed by the reader, >=6 cols,
-			// early [since,until] date-window skip, time->sec, strike parse, right->C/P, BOTH bid>0 AND
-			// ask>0 required, optional sizes.
-			using var reader = Sep.Reader().FromFile(path);
-			foreach (var row in reader)
-			{
-				if (row.ColCount < 6) continue;
-				if (!DateTime.TryParse(row[0].Span, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
-				if (d.Date < since || d.Date > until) continue;
-				// 0DTE-only runs use just the same-day slice; skip the longer-dated tail without parsing it.
-				if (sameDayExpiryOnly && d.Date != exp.Date) continue;
-				var sec = ParseTimeSec(row[1].ToString());
-				if (sec < 0) continue;
-				// Times are already START-of-bar (09:30 = first RTH minute): the ThetaData pull normalizes
-				// its end-of-bar stamps -60s at ingest, the same place WebullChartsClient does for Webull
-				// (see WebullChartsClient.WebullBarShift). The store is canonical on disk, so we never shift here.
-				if (!decimal.TryParse(row[2].Span, NumberStyles.Any, CultureInfo.InvariantCulture, out var strike)) continue;
-				var rt = row[3].Span;
-				var c = rt.Length > 0 ? char.ToUpperInvariant(rt[0]) : '?';
-				if (c != 'C' && c != 'P') continue;
-				// Require BOTH sides for a usable two-sided quote (the pull keeps rows with bid OR ask).
-				if (!decimal.TryParse(row[4].Span, NumberStyles.Any, CultureInfo.InvariantCulture, out var bid) || bid <= 0m) continue;
-				if (!decimal.TryParse(row[5].Span, NumberStyles.Any, CultureInfo.InvariantCulture, out var ask) || ask <= 0m) continue;
-				var bsz = row.ColCount > 6 ? ParseIntLoose(row[6].ToString()) : 0;
-				var asz = row.ColCount > 7 ? ParseIntLoose(row[7].ToString()) : 0;
-				var key = (d.Date, (long)Math.Round(strike * 1000m), c);
-				if (!rows.TryGetValue(key, out var list)) { list = new(); rows[key] = list; }
-				list.Add((sec, bid, ask, bsz, asz));
-			}
-			foreach (var list in rows.Values) list.Sort((x, y) => x.Sec.CompareTo(y.Sec));
-			return new ExpiryQuotes(rows);
-		}
-
-		/// <summary>SQLite-backed mirror of <see cref="Load"/>. The DB holds canonical, already-validated rows
-		/// (the import applied the same filters: ≥6 cols, valid time, strike, right C/P, BOTH bid&gt;0 AND ask&gt;0),
-		/// with bid/ask as scaled integers in ten-thousandths (price = value / 10000). That rounds away the
-		/// float noise the source CSVs carry (penny-tick data written as raw floats, e.g. 0.35000000000000003)
-		/// — a lossless cleanup for real ticks, so backtest results match the CSV path to the cent. The index on
-		/// (root, expiry, date) makes this fetch exactly the needed rows; the 45DTE tail is never touched.</summary>
-		// yyyymmdd as a single int — the on-disk date encoding. MinValue→10101, MaxValue→99991231 both fit.
-		private static int YmdInt(DateTime d) => d.Year * 10000 + d.Month * 100 + d.Day;
-
-		private static ExpiryQuotes LoadFromSqlite(
-			Dictionary<(DateTime Date, long StrikeMilli, char Cp), List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>> rows,
-			string dbPath, string root, DateTime exp, DateTime since, DateTime until, bool sameDayExpiryOnly)
-		{
 			using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Shared");
 			conn.Open();
 			using var cmd = conn.CreateCommand();
@@ -279,21 +217,6 @@ internal sealed class QuoteStoreCache
 			foreach (var (strikeMilli, cp) in list)
 				if (strikeMilli >= loMilli && strikeMilli <= hiMilli)
 					yield return (strikeMilli, cp);
-		}
-
-		private static int ParseTimeSec(string hms)   // "HH:MM:SS"
-		{
-			var p = hms.Split(':');
-			if (p.Length < 2 || !int.TryParse(p[0], out var h) || !int.TryParse(p[1], out var mi)) return -1;
-			var s = p.Length > 2 && int.TryParse(p[2], out var ss) ? ss : 0;
-			return h * 3600 + mi * 60 + s;
-		}
-
-		private static int ParseIntLoose(string s)     // tolerate "55", "55.0", ""
-		{
-			var dot = s.IndexOf('.');
-			var t = dot >= 0 ? s[..dot] : s;
-			return int.TryParse(t, out var v) ? v : 0;
 		}
 	}
 }

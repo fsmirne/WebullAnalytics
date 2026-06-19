@@ -1029,13 +1029,14 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			&& !config.Rules.OpportunisticRoll.Enabled
 			&& !config.Rules.DefensiveRoll.Enabled
 			&& !config.Rules.RollShortOnExpiry.Enabled;
-		// SQLite is the canonical quote store: default to data/quotes.db, falling back to the per-expiry CSVs
-		// only if the DB is absent (e.g. before the first import). --quote-db overrides the path.
-		var canonicalDb = Program.ResolvePath("data/quotes.db");
-		var quoteDbPath = settings.QuoteDb ?? (File.Exists(canonicalDb) ? canonicalDb : null);
-		if (quoteDbPath == null)
-			Console.Error.WriteLine("Warning: no SQLite quote store at data/quotes.db — falling back to CSV. Build it with scripts/import_quotes_sqlite.py (the daily backfill keeps it current).");
-		var quoteStore = new Backtest.QuoteStoreCache(since: since, until: until, sameDayExpiryOnly: sameDayExpiryOnly, dbPath: quoteDbPath);
+		// SQLite is the only quote store. --quote-db overrides the path; otherwise the canonical data/quotes.db.
+		var quoteDbPath = settings.QuoteDb ?? Program.ResolvePath("data/quotes.db");
+		if (!File.Exists(quoteDbPath))
+		{
+			Console.Error.WriteLine($"Error: SQLite quote store not found at '{quoteDbPath}'. Build it with scripts/import_quotes_sqlite.py; the daily backfill (scripts/daily_backfill.sh) keeps it current.");
+			return 1;
+		}
+		var quoteStore = new Backtest.QuoteStoreCache(quoteDbPath, since: since, until: until, sameDayExpiryOnly: sameDayExpiryOnly);
 		// Real minute NBBO is the only fill foundation (parametric covers counterfactuals only), so an empty
 		// window prices nothing and silently reports no fills — indistinguishable from "the strategy declined
 		// to trade". Warn explicitly: the usual cause is running --since <today> before the evening backfill
