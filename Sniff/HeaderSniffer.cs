@@ -37,30 +37,44 @@ public static class HeaderSniffer
 			await CdpSend(ws, ++cmdId, "Runtime.enable", null, cancellation);
 			await CdpSend(ws, ++cmdId, "Network.enable", null, cancellation);
 
-			// Poll readyState instead of waiting for Page.loadEventFired, which may have already fired before we connected.
-			Console.WriteLine("Waiting for page to load...");
-			cmdId = await WaitForPageReady(ws, cmdId, TimeSpan.FromSeconds(30), cancellation);
-
-			// Poll for the unlock link — SPAs may render asynchronously after load.
-			Console.WriteLine("Clicking unlock link...");
-			const string pollClickJs = """
-				new Promise(resolve => {
-					let attempts = 0;
-					const iv = setInterval(() => {
-						const a = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim().toLowerCase() === 'unlock');
-						if (a) { clearInterval(iv); a.click(); resolve('clicked'); }
-						else if (++attempts > 50) { clearInterval(iv); resolve('not_found'); }
-					}, 100);
-				})
+			// Drive the unlock dialog with a C# retry loop of short, independent evals — NOT a single long-lived
+			// Promise. On a cold launch the initial new-tab/blank document reports readyState=complete, then the
+			// navigation to the account SPA tears down the execution context; a promise injected before that dies
+			// and evaluate returns an error immediately. Each tick here is independent, so it just retries through
+			// the navigation, then clicks 'unlock' and focuses the PIN field once the SPA has rendered the dialog.
+			// The field is an <input type=number> in a styled-components Dialog/Modal — match on type, never class
+			// name (Webull's classes are capitalized, so [class*=dialog] misses); type=tel/password are kept as
+			// fallbacks. We re-click 'unlock' every tick to cover the race where the anchor renders before React
+			// binds its handler. We never type blind: if the dialog never opens we abort, so the PIN can't leak
+			// into the page's search box.
+			Console.WriteLine("Opening unlock dialog and entering code...");
+			const string unlockTickJs = """
+				(() => {
+					const inp = document.querySelector('input[type=number], input[type=tel], input[type=password]');
+					if (inp && inp.offsetParent) {
+						inp.click(); inp.focus();
+						return document.activeElement === inp ? 'focused' : 'found';
+					}
+					const a = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim().toLowerCase() === 'unlock');
+					if (a) { a.click(); return 'clicked'; }
+					return 'waiting';
+				})()
 				""";
-			await CdpSend(ws, ++cmdId, "Runtime.evaluate", new { expression = pollClickJs, awaitPromise = true }, cancellation);
-			await DrainUntilResult(ws, cmdId, TimeSpan.FromSeconds(10), cancellation);
-			await Task.Delay(1500, cancellation);
-
-			// Focus the first input in the PIN dialog and type the code
-			Console.WriteLine("Entering unlock code...");
-			await CdpSend(ws, ++cmdId, "Runtime.evaluate", new { expression = "document.querySelector('.modal input, [class*=dialog] input, [class*=unlock] input, input[type=password], input[type=tel]')?.focus()" }, cancellation);
-			await DrainUntilResult(ws, cmdId, TimeSpan.FromSeconds(5), cancellation);
+			var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+			bool everClicked = false;
+			string? state = null;
+			while (DateTime.UtcNow < deadline)
+			{
+				// null = context torn down mid-navigation (or eval errored) — just retry on the next tick.
+				state = await EvalForString(ws, ++cmdId, unlockTickJs, awaitPromise: false, TimeSpan.FromSeconds(3), cancellation);
+				if (state is "focused" or "found") break;
+				if (state == "clicked") everClicked = true;
+				await Task.Delay(200, cancellation);
+			}
+			if (state is not ("focused" or "found"))
+				throw new InvalidOperationException(everClicked
+					? "Clicked 'unlock' but the PIN dialog never appeared — the Webull page layout may have changed."
+					: "The 'unlock' link never appeared on the Webull account page — the page may not have loaded, or its layout changed.");
 			await Task.Delay(300, cancellation);
 
 			foreach (var c in pin)
@@ -277,36 +291,6 @@ public static class HeaderSniffer
 		}
 	}
 
-	private static async Task<int> WaitForPageReady(ClientWebSocket ws, int cmdId, TimeSpan timeout, CancellationToken cancellation)
-	{
-		using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-		cts.CancelAfter(timeout);
-		try
-		{
-			while (true)
-			{
-				var id = ++cmdId;
-				await CdpSend(ws, id, "Runtime.evaluate", new { expression = "document.readyState", returnByValue = true }, cts.Token);
-				while (true)
-				{
-					var msg = await CdpReceive(ws, cts.Token);
-					if (msg == null) continue;
-					if (msg.Value.TryGetProperty("id", out var rid) && rid.GetInt32() == id)
-					{
-						if (msg.Value.TryGetProperty("result", out var res) && res.TryGetProperty("result", out var val) && val.TryGetProperty("value", out var v) && v.GetString() == "complete")
-							return cmdId;
-						break;
-					}
-				}
-				await Task.Delay(250, cts.Token);
-			}
-		}
-		catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
-		{
-			throw new TimeoutException("Timed out waiting for page to finish loading.");
-		}
-	}
-
 	private static async Task DrainUntilResult(ClientWebSocket ws, int expectedId, TimeSpan timeout, CancellationToken cancellation)
 	{
 		using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
@@ -321,6 +305,30 @@ public static class HeaderSniffer
 			}
 		}
 		catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { }
+	}
+
+	// Evaluate an expression and return its string result value, draining intervening events until the
+	// matching command id arrives. Returns null on timeout or a non-string/absent result.
+	private static async Task<string?> EvalForString(ClientWebSocket ws, int id, string expression, bool awaitPromise, TimeSpan timeout, CancellationToken cancellation)
+	{
+		await CdpSend(ws, id, "Runtime.evaluate", new { expression, awaitPromise, returnByValue = true }, cancellation);
+		using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+		cts.CancelAfter(timeout);
+		try
+		{
+			while (true)
+			{
+				var msg = await CdpReceive(ws, cts.Token);
+				if (msg == null) continue;
+				if (msg.Value.TryGetProperty("id", out var rid) && rid.GetInt32() == id)
+				{
+					if (msg.Value.TryGetProperty("result", out var res) && res.TryGetProperty("result", out var inner) && inner.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.String)
+						return v.GetString();
+					return null;
+				}
+			}
+		}
+		catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { return null; }
 	}
 
 	private static async Task CdpSend(ClientWebSocket ws, int id, string method, object? parameters, CancellationToken cancellation)
@@ -366,7 +374,10 @@ public static class HeaderSniffer
 					}
 				}
 
-				if (captured.ContainsKey("access_token") && captured.ContainsKey("x-s"))
+				// t_token is the trade token Webull mints only after a successful PIN unlock, and is exactly
+				// what the trading endpoints require. Gating on it (not just access_token/x-s, which the locked
+				// page already sends) prevents capturing a pre-unlock header set and closing the browser early.
+				if (captured.ContainsKey("access_token") && captured.ContainsKey("x-s") && captured.ContainsKey("t_token"))
 					return new Dictionary<string, string>(captured);
 			}
 			catch (JsonException) { }
