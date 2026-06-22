@@ -14,7 +14,10 @@ internal static class YahooOptionsClient
 	// HV, and iv5 — all of which Webull provides — and is on a 15-minute delay).
 	private static readonly Dictionary<string, string> YahooTickerMap = new(StringComparer.OrdinalIgnoreCase) { { "SPXW", "^SPX" }, { "SPX", "^SPX" }, { "XSP", "^XSP" }, { "NDX", "^NDX" }, { "RUT", "^RUT" }, { "DJX", "^DJI" }, { "VIX", "^VIX" }, { "VIX1D", "^VIX1D" }, { "VIX9D", "^VIX9D" }, { "VIX3M", "^VIX3M" } };
 
-	private static string ToYahooTicker(string root) => YahooTickerMap.TryGetValue(root, out var mapped) ? mapped : root;
+	/// <summary>Translates a Webull root symbol to its Yahoo Finance equivalent (e.g. XSP → ^XSP,
+	/// SPX/SPXW → ^SPX). Returns the input unchanged when no mapping exists. Shared by every Yahoo
+	/// chart fetch so index roots resolve to the real index rather than an unrelated OTC quote.</summary>
+	internal static string ToYahooTicker(string root) => YahooTickerMap.TryGetValue(root, out var mapped) ? mapped : root;
 
 	/// <summary>
 	/// Fetches the 13-week T-bill yield (^IRX) from Yahoo Finance as a risk-free rate.
