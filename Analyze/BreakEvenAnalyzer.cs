@@ -222,21 +222,10 @@ public static class BreakEvenAnalyzer
 			var legPremium = OptionMath.GetPremium(l.row);
 			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
 
-			var legIv = OptionMath.GetLegIv(l.row.Side, l.symbol, opts);
 			var quoteInfo = TryFormatQuote(l.symbol, opts);
 			if (quoteInfo != null)
 				desc += $" | {quoteInfo}";
 
-			if (l.row.Side == Side.Buy && legIv.HasValue)
-			{
-				var legDte = (l.parsed.ExpiryDate.Date - EvaluationDate.Today).TotalDays;
-				if (legDte > 0)
-				{
-					var boundary = BjerksundStensland.ComputeExerciseBoundary(l.parsed.Strike, legDte / 365.0, OptionMath.RiskFreeRate, (double)legIv.Value, l.parsed.CallPut);
-					if (boundary != null)
-						desc += $" | Exercise below ${boundary.BoundaryNear.ToString("N2", CultureInfo.InvariantCulture)}";
-				}
-			}
 			return desc;
 		}).ToList();
 
