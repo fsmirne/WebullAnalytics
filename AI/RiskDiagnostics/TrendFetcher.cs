@@ -16,7 +16,10 @@ internal static class TrendFetcher
 		{
 			var period2 = new DateTimeOffset(asOf.Date.AddDays(1)).ToUnixTimeSeconds();
 			var period1 = new DateTimeOffset(asOf.Date.AddDays(-50)).ToUnixTimeSeconds();
-			var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(ticker)}?period1={period1}&period2={period2}&interval=1d&events=history";
+			// Index roots (XSP, SPX, NDX, …) resolve to an unrelated OTC quote on Yahoo unless mapped
+				// to their caret symbol (^XSP, ^SPX, …); without this the parse fails and trend is null.
+				var yahooTicker = Api.YahooOptionsClient.ToYahooTicker(ticker);
+				var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(yahooTicker)}?period1={period1}&period2={period2}&interval=1d&events=history";
 			using var req = new HttpRequestMessage(HttpMethod.Get, url);
 			req.Headers.UserAgent.ParseAdd("Mozilla/5.0 WebullAnalytics/1.0");
 			using var resp = await Http.SendAsync(req, ct);
