@@ -257,6 +257,20 @@ internal static class AIContext
 		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account, brokerState) : null;
 		return (mgmt, opener);
 	}
+
+	/// <summary>Warns when --submit was requested but the matching executor is disabled via
+	/// <c>autoExecute.{opener,management}.enabled=false</c>. In that state the flag is inert:
+	/// <c>enabled</c> gates whether the executor is even constructed (see BuildAutoExecutors), while
+	/// <c>submit</c> only picks live-vs-dry-run for an already-enabled executor. So proposals still
+	/// print but no order — not even a dry-run line — is ever produced. Call after applying --submit.</summary>
+	internal static void WarnIfSubmitInert(AIConfig config)
+	{
+		var inert = new List<string>();
+		if (config.AutoExecute.Opener.Submit && !config.AutoExecute.Opener.Enabled) inert.Add("autoExecute.opener.enabled");
+		if (config.AutoExecute.Management.Submit && !config.AutoExecute.Management.Enabled) inert.Add("autoExecute.management.enabled");
+		if (inert.Count == 0) return;
+		AnsiConsole.MarkupLine($"[yellow]warning:[/] --submit has no effect while {Markup.Escape(string.Join(" and ", inert))}=false — proposals print but no orders are placed (not even dry-run). Set the flag(s) to true to enable auto-execute.");
+	}
 }
 
 /// <summary>`ai scan` — one evaluation pass, print proposals, exit.</summary>
@@ -381,7 +395,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
 		if (settings.Top.HasValue) config.Opener.TopNPerTicker = settings.Top.Value;
-		if (settings.Submit || settings.SubmitOverride) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; }
+		if (settings.Submit || settings.SubmitOverride) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; AIContext.WarnIfSubmitInert(config); }
 		if (settings.Tif != null) { config.AutoExecute.Management.TimeInForce = settings.Tif.ToUpperInvariant(); config.AutoExecute.Opener.TimeInForce = settings.Tif.ToUpperInvariant(); }
 
 		if (string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase))

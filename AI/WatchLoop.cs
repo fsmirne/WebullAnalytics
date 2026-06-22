@@ -79,7 +79,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
-		if (settings.Submit) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; }
+		if (settings.Submit) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; AIContext.WarnIfSubmitInert(config); }
 		if (settings.Tif != null) { config.AutoExecute.Management.TimeInForce = settings.Tif.ToUpperInvariant(); config.AutoExecute.Opener.TimeInForce = settings.Tif.ToUpperInvariant(); }
 		if (settings.Start != null) config.Watch.StartTime = settings.Start;
 
