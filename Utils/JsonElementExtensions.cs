@@ -27,4 +27,11 @@ static class JsonElementExtensions
 		value = el.GetDecimal();
 		return true;
 	}
+
+	internal static bool TryGetInt32(this Dictionary<string, JsonElement> cfg, string key, out int value)
+	{
+		value = 0;
+		if (!cfg.TryGetValue(key, out var el) || el.ValueKind != JsonValueKind.Number) return false;
+		return el.TryGetInt32(out value);
+	}
 }
