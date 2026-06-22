@@ -240,6 +240,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 	{
 		var rootConfig = Program.LoadAppConfigRoot();
 		var autoExpandTerminal = rootConfig != null && rootConfig.TryGetBool("autoExpandTerminal", out var ae) && ae;
+		int? maxTerminalWidth = rootConfig != null && rootConfig.TryGetInt32("terminalWidth", out var tw) ? tw : null;
 
 		var tickerFilter = settings.TickerFilter;
 		if (tickerFilter != null)
@@ -367,7 +368,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				break;
 
 			default:
-				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal);
+				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal, maxTerminalWidth);
 				TableRenderer.RenderReport(rows, positionRows, positions, running, initialAmount, settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns, settings.ShowLegs);
 				break;
 		}

@@ -20,15 +20,20 @@ static class TerminalHelper
 	{
 		var rootConfig = Program.LoadAppConfigRoot();
 		var autoExpand = rootConfig != null && rootConfig.TryGetBool("autoExpandTerminal", out var ae) && ae;
-		EnsureTerminalWidth(simplified, autoExpand);
+		int? maxWidth = rootConfig != null && rootConfig.TryGetInt32("terminalWidth", out var tw) ? tw : null;
+		EnsureTerminalWidth(simplified, autoExpand, maxWidth);
 	}
 
 	/// <summary>
 	/// Ensures the terminal is wide enough for report tables. Prompts the user to resize if not.
+	/// <paramref name="maxWidth"/> (from the 'terminalWidth' config key) caps the target so the app never
+	/// tries to widen the terminal beyond what the user's display can physically show.
 	/// </summary>
-	public static void EnsureTerminalWidth(bool simplified = false, bool autoExpand = false)
+	public static void EnsureTerminalWidth(bool simplified = false, bool autoExpand = false, int? maxWidth = null)
 	{
 		var minimumWidth = simplified ? SimplifiedMinWidth : DetailedMinWidth;
+		if (maxWidth.HasValue)
+			minimumWidth = Math.Min(minimumWidth, maxWidth.Value);
 
 		int currentWidth;
 		try { currentWidth = Console.WindowWidth; }
