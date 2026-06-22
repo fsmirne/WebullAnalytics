@@ -52,7 +52,7 @@ internal sealed class OpenerAutoExecutor
 	/// is neither in today's orders nor a working order. This guard is submit-independent (no broker call)
 	/// so watch's dry-run reports the skip too.</summary>
 	/// <param name="bypassDailyCap">Skip the today's-broker-order-count gate for this ONE call — the
-	/// `wa ai scan --submit --uncapped` escape hatch for a deliberate extra trade after the cap is
+	/// `wa ai scan --submit-override` escape hatch for a deliberate extra trade after the cap is
 	/// spent. The run stays bounded to MaxOrdersPerDay submissions and all other guards (held-position
 	/// dedup, broker dedup, affordability) remain active. The watch loop must never set this: it would
 	/// re-fire on every tick, which is exactly what the cap exists to prevent.</param>
@@ -134,8 +134,8 @@ internal sealed class OpenerAutoExecutor
 					AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (daily cap):[/] {_config.MaxOrdersPerDay} order(s) already active at broker today (filled + pending).");
 					break;
 				}
-				if (ordersThisTick >= _config.MaxOrdersPerDay) break; // --uncapped lifts the broker count, not this run's bound
-				AnsiConsole.MarkupLine($"[yellow]daily cap BYPASSED (--uncapped):[/] {brokerActiveCount} opening order(s) already active at broker today; submitting anyway.");
+				if (ordersThisTick >= _config.MaxOrdersPerDay) break; // --submit-override lifts the broker count, not this run's bound
+				AnsiConsole.MarkupLine($"[yellow]daily cap BYPASSED (--submit-override):[/] {brokerActiveCount} opening order(s) already active at broker today; submitting anyway.");
 			}
 
 			var result = await SubmitOpen(p, cancellation);
