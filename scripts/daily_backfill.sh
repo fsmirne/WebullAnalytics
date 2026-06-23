@@ -21,13 +21,27 @@
 # NOTE: re-pulling an unsealed expiration REWRITES its CSV, replacing any rows the Schwab scraper
 # captured live that day — snapshot them first if needed (scripts/snapshot_schwab_day.py).
 #
-# Creds: set THETADATA_CREDENTIALS_FILE (or have a creds.txt the script finds). Run from anywhere;
-# the repo root is resolved from this script's own location.
+# Creds: set THETADATA_CREDENTIALS_FILE to override, else the script points the pull at creds.txt in
+# the prod data folder (the LocalApplicationData dir Program.cs treats as the single source of truth:
+# $XDG_DATA_HOME/WebullAnalytics/data on Linux, ~/Library/Application Support/... on macOS). Run from
+# anywhere; the repo root is resolved from this script's own location.
 #
 # Exit status: 0 if all three steps succeed, 1 if any failed (the others still run).
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
+
+# Point ThetaData auth at creds.txt in the prod data folder (LocalApplicationData), matching
+# Program.cs's BaseDir resolution, unless THETADATA_CREDENTIALS_FILE is already set to override.
+if [ -z "${THETADATA_CREDENTIALS_FILE:-}" ]; then
+  if [ "$(uname)" = "Darwin" ]; then
+    PROD_DATA="$HOME/Library/Application Support/WebullAnalytics/data"
+  else
+    PROD_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/WebullAnalytics/data"
+  fi
+  export THETADATA_CREDENTIALS_FILE="$PROD_DATA/creds.txt"
+  [ -f "$THETADATA_CREDENTIALS_FILE" ] || echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] creds not found at $THETADATA_CREDENTIALS_FILE"
+fi
 
 PY=python3
 SCRIPT=scripts/backfill_thetadata.py
