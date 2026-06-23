@@ -21,30 +21,40 @@
 # NOTE: re-pulling an unsealed expiration REWRITES its CSV, replacing any rows the Schwab scraper
 # captured live that day — snapshot them first if needed (scripts/snapshot_schwab_day.py).
 #
-# Creds: set THETADATA_CREDENTIALS_FILE to override, else the script points the pull at creds.txt in
-# the prod data folder (the LocalApplicationData dir Program.cs treats as the single source of truth:
-# $XDG_DATA_HOME/WebullAnalytics/data on Linux, ~/Library/Application Support/... on macOS). Run from
-# anywhere; the repo root is resolved from this script's own location.
+# Self-contained: install.sh publishes this script and its two Python helpers (backfill_thetadata.py,
+# import_quotes_sqlite.py) side-by-side into <prod-data>/scripts, so it runs identically from there or
+# from the repo's scripts/ dir. Nothing depends on the working directory — the Python helpers are
+# resolved from this script's own location, and the data store from WA_DATA_DIR (exported below).
+#
+# Data dir: the prod data folder (the LocalApplicationData dir Program.cs treats as the single source
+# of truth: $XDG_DATA_HOME/WebullAnalytics/data on Linux, ~/Library/Application Support/... on macOS).
+# Creds: set THETADATA_CREDENTIALS_FILE to override, else the pull reads creds.txt from that folder.
 #
 # Exit status: 0 if all three steps succeed, 1 if any failed (the others still run).
 
 set -uo pipefail
-cd "$(dirname "$0")/.." || exit 1
 
-# Point ThetaData auth at creds.txt in the prod data folder (LocalApplicationData), matching
-# Program.cs's BaseDir resolution, unless THETADATA_CREDENTIALS_FILE is already set to override.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Prod data folder (LocalApplicationData), matching Program.cs's BaseDir resolution.
+if [ "$(uname)" = "Darwin" ]; then
+  PROD_DATA="$HOME/Library/Application Support/WebullAnalytics/data"
+else
+  PROD_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/WebullAnalytics/data"
+fi
+
+# Point the Python helpers at the canonical store. They resolve it via WA_DATA_DIR; without this they
+# fall back to Windows/WSL-only lookups (LOCALAPPDATA, /mnt/c) and abort on native Linux/macOS.
+export WA_DATA_DIR="${WA_DATA_DIR:-$PROD_DATA}"
+
+# Point ThetaData auth at creds.txt in the data folder unless THETADATA_CREDENTIALS_FILE overrides it.
 if [ -z "${THETADATA_CREDENTIALS_FILE:-}" ]; then
-  if [ "$(uname)" = "Darwin" ]; then
-    PROD_DATA="$HOME/Library/Application Support/WebullAnalytics/data"
-  else
-    PROD_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/WebullAnalytics/data"
-  fi
-  export THETADATA_CREDENTIALS_FILE="$PROD_DATA/creds.txt"
+  export THETADATA_CREDENTIALS_FILE="$WA_DATA_DIR/creds.txt"
   [ -f "$THETADATA_CREDENTIALS_FILE" ] || echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] creds not found at $THETADATA_CREDENTIALS_FILE"
 fi
 
 PY=python3
-SCRIPT=scripts/backfill_thetadata.py
+SCRIPT="$SCRIPT_DIR/backfill_thetadata.py"
 TICKERS="SPY:60 SPXW:0 XSP:0 GME:60"   # quotes + oi (per-ticker DTE)
 VERIFY="SPY SPXW XSP GME"              # verify-quotes (bare names, no DTE)
 CONC=2
@@ -81,7 +91,7 @@ echo "[$(ts)] === daily data update: quotes through $END, oi through $END_OI, ve
 
 step "(1/3) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END" --concurrency "$CONC"
 step "(2/3) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" --concurrency "$CONC"
-step "(3/3) quote-store coverage + integrity"      "$PY" scripts/import_quotes_sqlite.py --root SPY --verify
+step "(3/3) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root SPY --verify
 
 if [ "$rc" -eq 0 ]; then
   echo "[$(ts)] === ALL OK ==="

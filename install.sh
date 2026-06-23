@@ -71,6 +71,15 @@ mv -f "$INSTALL_DIR/wa-scraper.new" "$INSTALL_DIR/wa-scraper"
 echo "Creating data directory at $DATA_DIR..."
 mkdir -p "$DATA_DIR"
 
+# Publish the daily data-refresh script + its Python helpers into the data folder so the scheduled
+# refresh runs self-contained from the prod location (not the repo checkout). daily_backfill.sh
+# resolves these by its own path and the store via WA_DATA_DIR, so it works from $DATA_DIR/scripts.
+SCRIPTS_DIR="$DATA_DIR/scripts"
+echo "Publishing data-refresh scripts to $SCRIPTS_DIR..."
+mkdir -p "$SCRIPTS_DIR"
+cp -f scripts/daily_backfill.sh scripts/backfill_thetadata.py scripts/import_quotes_sqlite.py "$SCRIPTS_DIR/"
+chmod +x "$SCRIPTS_DIR/daily_backfill.sh"
+
 # Add install directory to PATH if not already present
 if echo ":$PATH:" | grep -q ":$INSTALL_DIR:"; then
     echo "Install directory is already in PATH."
