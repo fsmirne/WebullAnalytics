@@ -22,9 +22,10 @@
 # captured live that day — snapshot them first if needed (scripts/snapshot_schwab_day.py).
 #
 # Self-contained: install.sh publishes this script and its two Python helpers (backfill_thetadata.py,
-# import_quotes_sqlite.py) side-by-side into <prod-data>/scripts, so it runs identically from there or
-# from the repo's scripts/ dir. Nothing depends on the working directory — the Python helpers are
-# resolved from this script's own location, and the data store from WA_DATA_DIR (exported below).
+# import_quotes_sqlite.py) side-by-side into the install dir (alongside the wa executable), so it runs
+# identically from there or from the repo's scripts/ dir. Nothing depends on the working directory —
+# the Python helpers are resolved from this script's own location, and the data store from WA_DATA_DIR
+# (exported below).
 #
 # Data dir: the prod data folder (the LocalApplicationData dir Program.cs treats as the single source
 # of truth: $XDG_DATA_HOME/WebullAnalytics/data on Linux, ~/Library/Application Support/... on macOS).
