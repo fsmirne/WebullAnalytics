@@ -112,15 +112,14 @@ if not exist "%DATA_DIR%" (
     mkdir "%DATA_DIR%"
 )
 
-REM Publish the daily data-refresh script + its Python helpers into the data folder so the scheduled
-REM refresh runs self-contained from the prod location (not the repo checkout). daily_backfill.sh
-REM resolves these by its own path and the store via WA_DATA_DIR, so it works from %DATA_DIR%\scripts.
-set "SCRIPTS_DIR=%DATA_DIR%\scripts"
-echo Publishing data-refresh scripts to %SCRIPTS_DIR%...
-if not exist "%SCRIPTS_DIR%" mkdir "%SCRIPTS_DIR%"
-copy /y "scripts\daily_backfill.sh" "%SCRIPTS_DIR%\" >nul
-copy /y "scripts\backfill_thetadata.py" "%SCRIPTS_DIR%\" >nul
-copy /y "scripts\import_quotes_sqlite.py" "%SCRIPTS_DIR%\" >nul
+REM Publish the daily data-refresh script + its Python helpers alongside the wa executable so the
+REM scheduled refresh runs self-contained from the install location (not the repo checkout).
+REM daily_backfill.sh resolves these by its own path and the store via WA_DATA_DIR, so it works
+REM from %INSTALL_DIR%.
+echo Publishing data-refresh scripts to %INSTALL_DIR%...
+copy /y "scripts\daily_backfill.sh" "%INSTALL_DIR%\" >nul
+copy /y "scripts\backfill_thetadata.py" "%INSTALL_DIR%\" >nul
+copy /y "scripts\import_quotes_sqlite.py" "%INSTALL_DIR%\" >nul
 
 REM Add install directory to user PATH if not already present
 echo Checking PATH...
