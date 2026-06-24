@@ -973,16 +973,19 @@ internal static class PositionReplay
 				OptionKind: strategyKind,
 				Side: parentSide,
 				Qty: lin.UnitQty,
-				AvgPrice: Math.Abs(parentAvg),
+				// Cost fields keep their intrinsic sign (negative = net credit) so a position whose basis has
+				// flipped to a credit isn't displayed as a positive debit. Side still conveys current direction;
+				// consumers that need a magnitude (break-even math, AI net-debit) take Math.Abs at the call site.
+				AvgPrice: parentAvg,
 				Expiry: longestExpiry,
 				IsStrategyLeg: false,
-				InitialAvgPrice: Math.Abs(parentOpen),
-				AdjustedAvgPrice: Math.Abs(parentAdj),
+				InitialAvgPrice: parentOpen,
+				AdjustedAvgPrice: parentAdj,
 				OpenQty: lin.OpeningQty
 			));
 
 			var parentRowIndex = rows.Count - 1;
-			var perLegAdjDelta = Math.Abs(parentAdj) * (parentSide == Side.Buy ? 1m : -1m) - carriedAdjSum;
+			var perLegAdjDelta = parentAdj - carriedAdjSum;
 
 			// Allocate the entire delta to a single "target leg" so per-leg signed sum equals parent adj.
 			// Convention: prefer the first Buy leg (matches legacy ReconcileLegPricesToParent); for

@@ -80,8 +80,9 @@ internal sealed class ReplayPositionSource : IPositionSource
 				? $"{ticker}_{currentParent.OptionKind}_{shortLeg.Strike:F2}_{shortLeg.Expiry.Value:yyyyMMdd}"
 				: $"{ticker}_{currentParent.OptionKind}_{parentCounter++}";
 
-			var initialDebit = currentParent.InitialAvgPrice ?? currentParent.AvgPrice;
-			var adjustedDebit = currentParent.AdjustedAvgPrice ?? currentParent.AvgPrice;
+			// Parent cost is signed (negative = net credit); risk/net-debit math wants a magnitude (matches LivePositionSource).
+			var initialDebit = Math.Abs(currentParent.InitialAvgPrice ?? currentParent.AvgPrice);
+			var adjustedDebit = Math.Abs(currentParent.AdjustedAvgPrice ?? currentParent.AvgPrice);
 
 			// OpenedAt = earliest trade timestamp on any leg in the lineage. For rolled positions the
 			// long leg typically carries the original open date; we take the global min for safety.
