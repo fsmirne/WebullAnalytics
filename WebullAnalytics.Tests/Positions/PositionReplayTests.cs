@@ -25,7 +25,7 @@ public class PositionReplayTests
 			new(4, timestamp, Formatters.FormatOptionDisplay("GME", frontExpiry, 25.5m), MatchKeys.Option(diagonalShortSymbol), Asset.Option, "Put", Side.Sell, 122, 0.45m, Trade.OptionMultiplier, frontExpiry, 1),
 		};
 
-		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades);
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: timestamp.Date);
 		var parents = rows.Where(r => r.Asset == Asset.OptionStrategy).ToList();
 
 		Assert.Equal(2, parents.Count);
@@ -101,7 +101,9 @@ public class PositionReplayTests
 		Assert.Equal(2, parents.Count);
 		Assert.Equal(0.71m, decimal.Round(calendarParent.InitialAvgPrice!.Value, 2));
 		Assert.Equal(0.71m, decimal.Round(calendarParent.AdjustedAvgPrice!.Value, 2));
-	  Assert.Equal(0.32m, decimal.Round(diagonalParent.InitialAvgPrice!.Value, 2));
+	  // Opening basis is a net credit (the standalone short was sold first), so the signed open cost is negative;
+	  // the long leg then brings the after-roll basis to a net debit (+0.935).
+	  Assert.Equal(-0.32m, decimal.Round(diagonalParent.InitialAvgPrice!.Value, 2));
 		Assert.Equal(0.935m, decimal.Round(diagonalParent.AdjustedAvgPrice!.Value, 3));
 		Assert.Equal(1.255m, decimal.Round(diagonalLong.InitialAvgPrice!.Value, 3));
 		Assert.Equal(1.255m, decimal.Round(diagonalLong.AdjustedAvgPrice!.Value, 3));
