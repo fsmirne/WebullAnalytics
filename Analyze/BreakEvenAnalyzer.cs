@@ -535,13 +535,16 @@ public static class BreakEvenAnalyzer
 
 	private static string BuildDetailsString(PositionRow row, DateTime? expiryOverride = null)
 	{
-		// Magnitude label; strategy parents carry a signed net cost, direction is implied by the legs below.
-		var premium = Math.Abs(OptionMath.GetPremium(row));
-		var premiumStr = Formatters.FormatPrice(premium, row.Asset);
+		// Strategy parents carry a signed net cost (negative = net credit); single-leg rows store a magnitude
+		// with direction in Side. Show the parent's intrinsic sign so a credit basis isn't displayed as a debit
+		// (the legs below convey per-leg direction, but not whether the net basis is a debit or a credit).
+		var rawPremium = OptionMath.GetPremium(row);
+		var premium = row.Asset == Asset.OptionStrategy ? rawPremium : Math.Abs(rawPremium);
+		var premiumStr = Formatters.FormatSignedPrice(premium, row.Asset);
 		var hasRollAdjustment = row.AdjustedAvgPrice.HasValue && row.AdjustedAvgPrice.Value != row.AvgPrice;
 		var adjSuffix = hasRollAdjustment ? " after-roll" : "";
 		var expiry = expiryOverride ?? row.Expiry;
 		var expiryStr = expiry.HasValue ? Formatters.FormatOptionDate(expiry.Value) : "N/A";
-		return $"{row.Qty}x @ ${premiumStr}{adjSuffix}, Exp {expiryStr}";
+		return $"{row.Qty}x @ {premiumStr}{adjSuffix}, Exp {expiryStr}";
 	}
 }
