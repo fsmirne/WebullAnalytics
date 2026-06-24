@@ -422,14 +422,19 @@ public static class TableBuilder
 
 		// Summary line
 		items.Add(new Text(""));
-		var openText = Formatters.FormatPrice(b.InitPrice, b.Asset);
-		var avgText = Formatters.FormatPrice(b.AvgPrice, b.Asset);
-		var afterRollText = Formatters.FormatPrice(b.AdjPrice ?? b.AvgPrice, b.Asset);
-		var openNetCost = b.InitNetDebit ?? ((b.PositionSide == Side.Buy ? 1m : -1m) * b.InitPrice * b.OpenQty * 100m);
-		var avgNetCost = (b.PositionSide == Side.Buy ? 1m : -1m) * b.AvgPrice * b.Qty * 100m;
-		var afterRollNetCost = (b.PositionSide == Side.Buy ? 1m : -1m) * (b.AdjPrice ?? b.AvgPrice) * b.Qty * 100m;
+		// Strategy parents carry the net cost's sign intrinsically (legInitSum / running cash); single-leg
+		// rows store a magnitude with direction in Side. Resolve both to a signed per-contract net cost.
+		var intrinsicallySigned = b.Asset == Asset.OptionStrategy;
+		decimal SignedCost(decimal price) => intrinsicallySigned ? price : (b.PositionSide == Side.Buy ? 1m : -1m) * price;
+		var openNetCost = b.InitNetDebit ?? (SignedCost(b.InitPrice) * b.OpenQty * 100m);
+		var avgNetCost = SignedCost(b.AvgPrice) * b.Qty * 100m;
+		var afterRollNetCost = SignedCost(b.AdjPrice ?? b.AvgPrice) * b.Qty * 100m;
 
 		string FormatSignedCost(decimal amount) => $"{(amount >= 0 ? "+" : "-")}${Math.Abs(amount).ToString("N2", CultureInfo.InvariantCulture)}";
+		// Per-contract figure carries the sign of its net cost (negative = net credit) so a position whose
+		// cost basis has flipped to a credit reads as negative instead of a positive debit. Sign-before-$
+		// matches FormatSignedCost on the numerator (e.g. -$20.64, not $-20.64).
+		string PerContract(decimal netCost, int qty) => Formatters.FormatSignedPrice(qty > 0 ? netCost / (qty * 100m) : 0m, b.Asset);
 		IRenderable FormatChangeLine(string label, decimal amount, bool? isGood = null)
 		{
 			var valueText = FormatSignedCost(amount);
@@ -439,9 +444,9 @@ public static class TableBuilder
 			var valueColor = (isGood ?? amount < 0m) ? "green" : "red";
 			return new Markup($"{Markup.Escape(label)}: [{valueColor}]{Markup.Escape(valueText)}[/]");
 		}
-		items.Add(new Text($"Open Net Cost: {FormatSignedCost(openNetCost)} {(ascii ? "/" : "÷")} ({b.OpenQty} x $100) = ${openText}/contract"));
-		items.Add(new Text($"Avg Net Cost: {FormatSignedCost(avgNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${avgText}/contract"));
-		items.Add(new Text($"After-Roll Net Cost: {FormatSignedCost(afterRollNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = ${afterRollText}/contract"));
+		items.Add(new Text($"Open Net Cost: {FormatSignedCost(openNetCost)} {(ascii ? "/" : "÷")} ({b.OpenQty} x $100) = {PerContract(openNetCost, b.OpenQty)}/contract"));
+		items.Add(new Text($"Avg Net Cost: {FormatSignedCost(avgNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = {PerContract(avgNetCost, b.Qty)}/contract"));
+		items.Add(new Text($"After-Roll Net Cost: {FormatSignedCost(afterRollNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = {PerContract(afterRollNetCost, b.Qty)}/contract"));
 
 		var averagingChange = avgNetCost - openNetCost;
 		var rollChange = afterRollNetCost - avgNetCost;

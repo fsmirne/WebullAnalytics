@@ -40,6 +40,13 @@ public static class Formatters
 	}
 
 	/// <summary>
+	/// Formats a price with the sign placed before the dollar sign (e.g. -$21.79, $1.26), so a negative
+	/// (net-credit) cost basis reads naturally rather than as "$-21.79".
+	/// </summary>
+	public static string FormatSignedPrice(decimal value, Asset asset) =>
+		(value < 0 ? "-$" : "$") + FormatPrice(Math.Abs(value), asset);
+
+	/// <summary>
 	/// Formats a P&L value with color (green for positive, red for negative).
 	/// </summary>
 	public static Markup FormatPnL(decimal value)

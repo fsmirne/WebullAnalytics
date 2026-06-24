@@ -184,7 +184,9 @@ public static class BreakEvenAnalyzer
 		var callPutDisplay = ParsingHelpers.CallPutDisplayName(callPut);
 		var strategyKind = parent.OptionKind;
 		var qty = parent.Qty;
-		var netPremium = OptionMath.GetPremium(parent);
+		// Strategy parent cost is signed (negative = net credit); the strategy break-even math below pairs a
+		// magnitude with parent.Side for direction, so take the magnitude here.
+		var netPremium = Math.Abs(OptionMath.GetPremium(parent));
 
 		var strikes = parsedLegs.Select(l => l.parsed.Strike).Distinct().OrderBy(x => x).ToList();
 		var expiries = parsedLegs.Select(l => l.parsed.ExpiryDate).Distinct().OrderBy(x => x).ToList();
@@ -220,7 +222,7 @@ public static class BreakEvenAnalyzer
 			var longShort = l.row.Side == Side.Buy ? "Long" : "Short";
 			var cpDisplay = ParsingHelpers.CallPutDisplayName(l.parsed.CallPut);
 			var legPremium = OptionMath.GetPremium(l.row);
-			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ ${Formatters.FormatPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
+			var desc = $"{longShort} {cpDisplay} ${Formatters.FormatQty(l.parsed.Strike)} @ {Formatters.FormatSignedPrice(legPremium, Asset.Option)}, Exp {Formatters.FormatOptionDate(l.parsed.ExpiryDate)}";
 
 			var quoteInfo = TryFormatQuote(l.symbol, opts);
 			if (quoteInfo != null)
@@ -533,7 +535,8 @@ public static class BreakEvenAnalyzer
 
 	private static string BuildDetailsString(PositionRow row, DateTime? expiryOverride = null)
 	{
-		var premium = OptionMath.GetPremium(row);
+		// Magnitude label; strategy parents carry a signed net cost, direction is implied by the legs below.
+		var premium = Math.Abs(OptionMath.GetPremium(row));
 		var premiumStr = Formatters.FormatPrice(premium, row.Asset);
 		var hasRollAdjustment = row.AdjustedAvgPrice.HasValue && row.AdjustedAvgPrice.Value != row.AvgPrice;
 		var adjSuffix = hasRollAdjustment ? " after-roll" : "";
