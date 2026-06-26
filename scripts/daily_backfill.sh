@@ -38,8 +38,17 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Prod data folder (LocalApplicationData), matching Program.cs's BaseDir resolution.
+# On WSL the wa executable is a WINDOWS process, so its LocalApplicationData is the Windows
+# %LOCALAPPDATA% — from WSL that's /mnt/c/Users/<you>/AppData/Local/... — NOT the Linux XDG
+# path. Detect WSL (uname reports Linux there) and scan /mnt/c/Users like resolve_data_dir().
 if [ "$(uname)" = "Darwin" ]; then
   PROD_DATA="$HOME/Library/Application Support/WebullAnalytics/data"
+elif grep -qi microsoft /proc/version 2>/dev/null; then
+  PROD_DATA=""
+  for d in /mnt/c/Users/*/AppData/Local/WebullAnalytics/data; do
+    [ -d "$d" ] && PROD_DATA="$d" && break
+  done
+  [ -n "$PROD_DATA" ] || echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] no WebullAnalytics/data under /mnt/c/Users/*/AppData/Local — set WA_DATA_DIR"
 else
   PROD_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/WebullAnalytics/data"
 fi
