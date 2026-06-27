@@ -10,7 +10,7 @@ internal sealed class AIConfigShowSettings : AISingleTickerSubcommandSettings { 
 /// Uses the same <see cref="AIContext.ResolveLayers"/> the loader uses, so what you see is what runs.</summary>
 internal sealed class AIConfigShowCommand : AsyncCommand<AIConfigShowSettings>
 {
-	public override Task<int> ExecuteAsync(CommandContext context, AIConfigShowSettings settings, CancellationToken cancellationToken)
+	protected override Task<int> ExecuteAsync(CommandContext context, AIConfigShowSettings settings, CancellationToken cancellationToken)
 	{
 		var layers = AIContext.ResolveLayers(settings, out var ticker, out var strategy);
 		if (layers == null) return Task.FromResult(1);

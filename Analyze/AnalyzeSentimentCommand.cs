@@ -18,7 +18,7 @@ internal sealed class AnalyzeSentimentSettings : AnalyzeBaseSettings
 
 internal sealed class AnalyzeSentimentCommand : AsyncCommand<AnalyzeSentimentSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeSentimentSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, AnalyzeSentimentSettings settings, CancellationToken cancellation)
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);

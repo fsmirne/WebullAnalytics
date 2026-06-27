@@ -11,7 +11,7 @@ public static class ExcelExporter
 	public static void ExportToExcel(List<ReportRow> reportRows, List<PositionRow> positionRows, List<Trade> allTrades, Dictionary<string, List<Lot>> lotsByMatchKey, decimal finalPnL, decimal initialAmount, string outputPath, AnalysisOptions opts)
 	{
 		// EPPlus requires a license context
-		ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+		ExcelPackage.License.SetNonCommercialPersonal("WebullAnalytics");
 
 		using var package = new ExcelPackage();
 
