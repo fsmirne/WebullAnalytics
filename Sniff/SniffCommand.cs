@@ -17,7 +17,7 @@ class SniffSettings : CommandSettings
 
 class SniffCommand : AsyncCommand<SniffSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, SniffSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, SniffSettings settings, CancellationToken cancellation)
 	{
 		var configPath = Program.ResolvePath(Program.ApiConfigPath);
 		var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));

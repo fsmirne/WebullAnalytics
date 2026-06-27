@@ -78,7 +78,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		"SPY", "SPX", "SPXW", "XSP"
 	};
 
-	public override async Task<int> ExecuteAsync(CommandContext context, AIHistorySettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, AIHistorySettings settings, CancellationToken cancellation)
 	{
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 		var ticker = settings.Ticker.ToUpperInvariant();

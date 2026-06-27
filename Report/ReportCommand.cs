@@ -192,7 +192,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		"Webull_Orders_Records_Options.csv",
 	];
 
-	public override async Task<int> ExecuteAsync(CommandContext context, ReportSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, ReportSettings settings, CancellationToken cancellation)
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);

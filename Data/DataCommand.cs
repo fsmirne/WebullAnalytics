@@ -28,7 +28,7 @@ internal sealed class DataBackupSettings : CommandSettings
 
 internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, DataBackupSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, DataBackupSettings settings, CancellationToken cancellation)
 	{
 		var dataDir = Program.ResolvePath("data");
 		if (!Directory.Exists(dataDir))
@@ -121,7 +121,7 @@ internal sealed class DataRestoreSettings : CommandSettings
 
 internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, DataRestoreSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, DataRestoreSettings settings, CancellationToken cancellation)
 	{
 		var inputPath = settings.Input ?? FindLatestBackup();
 		if (inputPath == null)

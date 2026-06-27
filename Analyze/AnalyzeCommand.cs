@@ -1,4 +1,4 @@
-﻿using Spectre.Console;
+using Spectre.Console;
 using Spectre.Console.Cli;
 using Spectre.Console.Rendering;
 using System.ComponentModel;
@@ -35,7 +35,7 @@ internal abstract class AnalyzeSubcommandSettings : ReportSettings
 	}
 }
 
-// ─── `analyze trade` ──────────────────────────────────────────────────────────
+// --- `analyze trade` ----------------------------------------------------------
 
 internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
 {
@@ -70,7 +70,7 @@ internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
 
 internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeTradeSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, AnalyzeTradeSettings settings, CancellationToken cancellation)
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
@@ -106,7 +106,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		// The synthetic legs represent a trade evaluated "now" (or at --until). Stamp them at that moment,
 		// NOT at the latest existing trade's timestamp: when a Since/Until window (often config-driven)
 		// excludes older trades, a synthetic stamped in the past gets culled by RunReportPipeline's window
-		// filter and the hypothetical silently vanishes — visible only with --standalone. maxSeq+1 already
+		// filter and the hypothetical silently vanishes � visible only with --standalone. maxSeq+1 already
 		// orders the synthetic after existing trades, so the timestamp only needs to land inside the window.
 		var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : DateTime.Now;
 		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(settings.Spec, maxSeq, baseTime, quotes));
@@ -115,7 +115,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 	}
 }
 
-// ─── `analyze roll` ───────────────────────────────────────────────────────────
+// --- `analyze roll` -----------------------------------------------------------
 
 internal sealed class AnalyzeRollSettings : AnalyzeBaseSettings
 {
@@ -135,7 +135,7 @@ internal sealed class AnalyzeRollSettings : AnalyzeBaseSettings
 	[Description("Available cash for funding the roll. Format: dollar amount (e.g. 23015 or 23015.50). Prints a funding-check block against the BP delta. Only meaningful with --side short.")]
 	public string? Cash { get; set; }
 
-	// Grid display options carried over from ReportSettings — analyze roll renders its own
+	// Grid display options carried over from ReportSettings � analyze roll renders its own
 	// price-by-time grid and uses these the same way the report does.
 	[CommandOption("--range")]
 	[DefaultValue(0.0)]
@@ -246,7 +246,7 @@ internal sealed class AnalyzeRollSettings : AnalyzeBaseSettings
 
 internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeRollSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, AnalyzeRollSettings settings, CancellationToken cancellation)
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
@@ -261,12 +261,12 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 	}
 }
 
-// ─── Shared helpers (ported from old AnalyzeCommand) ─────────────────────────
+// --- Shared helpers (ported from old AnalyzeCommand) -------------------------
 
 internal static class AnalyzeCommon
 {
 	/// <summary>Wraps the leg list, cost-basis line, per-leg detail, and risk diagnostic into a single
-	/// outer panel — same shape `wa ai scan` uses for proposals, so analyze-position and analyze-risk
+	/// outer panel � same shape `wa ai scan` uses for proposals, so analyze-position and analyze-risk
 	/// match the rest of the AI surface visually. Pass <paramref name="ascii"/>=true with a file-backed
 	/// <paramref name="console"/> for the --output text path.</summary>
 	internal static void RenderProposalPanel(IReadOnlyList<AnalyzePositionCommand.PositionSnapshot> legs, string strategyLabel, decimal spot, RiskDiagnostic diagnostic, IAnsiConsole? console = null, bool ascii = false)
@@ -279,7 +279,7 @@ internal static class AnalyzeCommon
 		var rows = new List<IRenderable>();
 		var legsText = string.Join(", ", legs.Select(l => $"{(l.Action == LegAction.Buy ? "BUY" : "SELL")} {l.Symbol} x{l.Qty}"));
 		rows.Add(new Markup($"[bold]{Markup.Escape(legsText)}[/]"));
-		rows.Add(new Markup($"[dim]cost basis ${initialDebit:F2}/contract — spot ${spot:F2}, date {EvaluationDate.Today:yyyy-MM-dd}[/]"));
+		rows.Add(new Markup($"[dim]cost basis ${initialDebit:F2}/contract � spot ${spot:F2}, date {EvaluationDate.Today:yyyy-MM-dd}[/]"));
 		foreach (var l in legs)
 		{
 			var label = l.Action == LegAction.Buy ? "[green]Long [/]" : "[red]Short[/]";
@@ -288,10 +288,10 @@ internal static class AnalyzeCommon
 		rows.Add(RiskDiagnosticRenderer.Build(diagnostic, ascii));
 
 		// Tooling notice (not a position-risk finding, so kept out of the diagnostic's "Rules fired"):
-		// the opener score — EM / PoP / breakevens — needs a per-ticker opener config, which this ticker
+		// the opener score � EM / PoP / breakevens � needs a per-ticker opener config, which this ticker
 		// lacks. Surface what to create above the panel rather than silently omitting the block.
 		if (diagnostic.Probe?.ScoreUnavailableReason is { } scoreUnavailableReason)
-			console.MarkupLine($"[yellow]{(ascii ? "!" : "⚠")} EM / PoP / breakevens unavailable — {Markup.Escape(scoreUnavailableReason)}[/]");
+			console.MarkupLine($"[yellow]{(ascii ? "!" : "?")} EM / PoP / breakevens unavailable � {Markup.Escape(scoreUnavailableReason)}[/]");
 
 		var header = $"[bold cyan]{Markup.Escape(strategyLabel)}[/] [grey]{Markup.Escape(ticker)}[/] x{qty}";
 		var panel = new Panel(new Rows(rows))
@@ -363,10 +363,10 @@ internal static class AnalyzeCommon
 		}
 	}
 
-	/// <summary>Re-bases every quote's ImpliedVolatility to the mid-implied value — back-solved from the
+	/// <summary>Re-bases every quote's ImpliedVolatility to the mid-implied value � back-solved from the
 	/// bid/ask mid at the dividend-adjusted spot, anchored at <see cref="OptionMath.ObservationInstant"/>
 	/// (now live / last close off-hours). This is the mid-consistent surface the engine prices on; the
-	/// vendor's reported IV field is 10–50 vol pts off at 0DTE. Quotes with no usable mid keep their existing
+	/// vendor's reported IV field is 10�50 vol pts off at 0DTE. Quotes with no usable mid keep their existing
 	/// (vendor) IV as the fallback. Shared by analyze position and analyze risk so the two can't drift.</summary>
 	internal static IReadOnlyDictionary<string, OptionContractQuote> RecalibrateQuotesToMid(
 		IReadOnlyDictionary<string, OptionContractQuote> quotes,
@@ -407,14 +407,14 @@ internal static class AnalyzeCommon
 	{
 		// Spec format: legs comma-separated within a strategy group, groups separated by ';'.
       // Each multi-leg group becomes one PositionReplay Event AND emits an Asset.OptionStrategy
-		// parent row — without that parent row, the report-table renderer sees orphan legs (no parent
+		// parent row � without that parent row, the report-table renderer sees orphan legs (no parent
 		// at the synthetic ParentStrategySeq) and visually attaches them to whichever parent row
 		// precedes them in seq order, lumping the synthetic into the last real strategy trade.
 		// Mirrors JsonlParser's parent emission (line 131-141) for real Webull strategy orders.
 		// Examples:
-      //   "sell:A,buy:B"           → one strategy parent + 2 legs
-		//   "sell:A,buy:B;sell:C,buy:D" → two parents + 4 legs
-		//   "buy:A"                  → single standalone leg, no parent
+      //   "sell:A,buy:B"           ? one strategy parent + 2 legs
+		//   "sell:A,buy:B;sell:C,buy:D" ? two parents + 4 legs
+		//   "buy:A"                  ? single standalone leg, no parent
 		var result = new List<Trade>();
 		var seq = startSeq;
 		var groups = tradesSpec.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -567,7 +567,7 @@ internal static class AnalyzeCommon
 
 		// Header
 		Console.WriteLine();
-      Console.WriteLine($"Roll Analysis: {Formatters.FormatOptionDisplay(oldParsed.Root, oldParsed.ExpiryDate, oldParsed.Strike)} {ParsingHelpers.CallPutDisplayName(oldParsed.CallPut)} → {Formatters.FormatOptionDisplay(newParsed.Root, newParsed.ExpiryDate, newParsed.Strike)} {ParsingHelpers.CallPutDisplayName(newParsed.CallPut)}  ({qty}x)");
+      Console.WriteLine($"Roll Analysis: {Formatters.FormatOptionDisplay(oldParsed.Root, oldParsed.ExpiryDate, oldParsed.Strike)} {ParsingHelpers.CallPutDisplayName(oldParsed.CallPut)} ? {Formatters.FormatOptionDisplay(newParsed.Root, newParsed.ExpiryDate, newParsed.Strike)} {ParsingHelpers.CallPutDisplayName(newParsed.CallPut)}  ({qty}x)");
 		Console.WriteLine($"Current: {oldParsed.Root} @ ${spot}  |  Close {oldSymbol}: Bid ${oldBid?.ToString("N2") ?? "?"} / Ask ${oldAsk?.ToString("N2") ?? "?"}  |  Open {newSymbol}: Bid ${newBid?.ToString("N2") ?? "?"} / Ask ${newAsk?.ToString("N2") ?? "?"}");
 		Console.WriteLine($"IV: Close leg {oldIv.Value:P1} | Open leg {newIv.Value:P1}");
 
@@ -606,7 +606,7 @@ internal static class AnalyzeCommon
 					? $"${cash:N2} cash + ${rollNetTotal:N2} roll credit = ${available:N2}"
 					: $"${cash:N2} cash - ${Math.Abs(rollNetTotal):N2} roll debit = ${available:N2}";
 				var netSign = net >= 0m ? "+" : "-";
-              var netLabel = net >= 0m ? "sufficient" : "shortfall — needs additional funds";
+              var netLabel = net >= 0m ? "sufficient" : "shortfall � needs additional funds";
 				Console.WriteLine();
 				Console.WriteLine($"Funding check (--cash ${cash:N2}):");
 				Console.WriteLine($"  Available:  {rollLabel}");
@@ -644,7 +644,7 @@ internal static class AnalyzeCommon
 				evalTimes.AddRange(allHours);
 			else
 			{
-              // Ceiling division: ensures loop produces ≤ (maxCols-1) items so total (with appended last) stays within maxCols.
+              // Ceiling division: ensures loop produces = (maxCols-1) items so total (with appended last) stays within maxCols.
 				var hourStep = Math.Max(1, (allHours.Count - 1 + maxCols - 2) / (maxCols - 1));
 				for (var i = 0; i < allHours.Count - 1; i += hourStep)
 					evalTimes.Add(allHours[i]);
@@ -681,7 +681,7 @@ internal static class AnalyzeCommon
 				if (pair.Key.Equals(oldParsed.Root, StringComparison.OrdinalIgnoreCase))
 					extraNotables.AddRange(pair.Value);
 
-		// Build price rows targeting ~20 rows — same auto-step logic as the report grids.
+		// Build price rows targeting ~20 rows � same auto-step logic as the report grids.
 		var priceList = TimeDecayGridBuilder.BuildPriceRows(spot, settings.Range, [], [oldParsed.Strike, newParsed.Strike], extraNotables);
 
 		// Compute grid data for initial evalTimes.
@@ -775,7 +775,7 @@ internal static class AnalyzeCommon
 
 	/// <summary>
 	/// Computes combined margin for a single short leg paired with an optional static long leg.
-  /// Covered time spreads / debit spreads do not require broker margin here — the debit is cash paid,
+  /// Covered time spreads / debit spreads do not require broker margin here � the debit is cash paid,
 	/// not collateral. We therefore surface only true Reg-T-style collateral requirements:
 	///   - naked shorts => naked margin
 	///   - protected credit spreads / inverted diagonals => strike-width collateral on the covered leg
@@ -789,33 +789,33 @@ internal static class AnalyzeCommon
 	{
 		var naked = EstimateNakedShortMargin(spot, shortLeg.Strike, shortLeg.CallPut, shortPremium);
 
-      // No pair → naked on all contracts.
+      // No pair ? naked on all contracts.
 		if (longOpt == null && string.IsNullOrEmpty(longStockTicker))
-         return new LegMargin($"naked  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+         return new LegMargin($"naked  ${naked:N2}/contract � {shortQty}", naked * shortQty);
 
 		// Long stock.
 		if (longStockTicker != null)
 		{
             if (!string.Equals(longStockTicker, shortLeg.Root, StringComparison.OrdinalIgnoreCase))
-				return new LegMargin($"no cover (stock ticker '{longStockTicker}' ≠ '{shortLeg.Root}')  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+				return new LegMargin($"no cover (stock ticker '{longStockTicker}' ? '{shortLeg.Root}')  ${naked:N2}/contract � {shortQty}", naked * shortQty);
 			if (shortLeg.CallPut != "C")
-             return new LegMargin($"no cover (long stock does not cover short puts)  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+             return new LegMargin($"no cover (long stock does not cover short puts)  ${naked:N2}/contract � {shortQty}", naked * shortQty);
 			var coverable = Math.Min(shortQty, longQty / 100);
 			var uncovered = shortQty - coverable;
 			var total = uncovered * naked;
             var label = uncovered == 0
-				? $"covered by stock (long {longQty} shares)  $0.00/contract × {shortQty}"
+				? $"covered by stock (long {longQty} shares)  $0.00/contract � {shortQty}"
 				: $"partial cover ({coverable} covered by stock, {uncovered} naked @ ${naked:N2})";
 			return new LegMargin(label, total);
 		}
 
-      // Long option — longOpt is guaranteed non-null here.
+      // Long option � longOpt is guaranteed non-null here.
 		var lo = longOpt!;
 		if (shortLeg.CallPut != lo.CallPut)
-         return new LegMargin($"no cover (long {(lo.CallPut == "C" ? "call" : "put")} does not cover short {(shortLeg.CallPut == "C" ? "call" : "put")})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+         return new LegMargin($"no cover (long {(lo.CallPut == "C" ? "call" : "put")} does not cover short {(shortLeg.CallPut == "C" ? "call" : "put")})  ${naked:N2}/contract � {shortQty}", naked * shortQty);
 
 		if (lo.ExpiryDate < shortLeg.ExpiryDate)
-         return new LegMargin($"no cover (long expires {lo.ExpiryDate:yyyy-MM-dd} < short expires {shortLeg.ExpiryDate:yyyy-MM-dd})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
+         return new LegMargin($"no cover (long expires {lo.ExpiryDate:yyyy-MM-dd} < short expires {shortLeg.ExpiryDate:yyyy-MM-dd})  ${naked:N2}/contract � {shortQty}", naked * shortQty);
 
 		// Covered spread / diagonal collateral:
 		// - calendars / covered diagonals / debit verticals => $0
@@ -836,7 +836,7 @@ internal static class AnalyzeCommon
 		var uncoveredOpt = shortQty - coverableOpt;
 		var totalOpt = coverableOpt * coveredPer + uncoveredOpt * naked;
 
-        // Label explains the structure: strike_loss = 0 → no-margin covered structure; positive → margin-capped spread.
+        // Label explains the structure: strike_loss = 0 ? no-margin covered structure; positive ? margin-capped spread.
 		var structureLabel = strikeLoss == 0m
 		  ? (lo.Strike == shortLeg.Strike ? "calendar" : lo.ExpiryDate == shortLeg.ExpiryDate ? "debit vertical" : "covered diagonal")
 			: lo.ExpiryDate == shortLeg.ExpiryDate ? $"credit vertical (width ${strikeLoss * 100m:N2})" : $"inverted diagonal (strike loss ${strikeLoss * 100m:N2})";
@@ -846,7 +846,7 @@ internal static class AnalyzeCommon
 				? $"${strikeLoss * 100m:N2} strike + ${debit * 100m:N2} debit = ${coveredPer:N2} margin/contract"
 			: $"${coveredPer:N2} margin/contract";
         var labelOpt = uncoveredOpt == 0
-			? $"{structureLabel}  {costBreakdown} × {shortQty}"
+			? $"{structureLabel}  {costBreakdown} � {shortQty}"
 			: $"partial cover ({structureLabel}: {coverableOpt} @ ${coveredPer:N2}, {uncoveredOpt} naked @ ${naked:N2})";
 		return new LegMargin(labelOpt, totalOpt);
 	}

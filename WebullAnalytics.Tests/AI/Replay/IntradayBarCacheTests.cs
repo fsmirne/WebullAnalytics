@@ -41,7 +41,7 @@ public class IntradayBarCacheTests
 			Assert.Equal(1, calls);
 			var filePath = Path.Combine(dir, "SPX", "2026-05-18.csv");
 			Assert.True(File.Exists(filePath));
-			var lines = await File.ReadAllLinesAsync(filePath);
+			var lines = await File.ReadAllLinesAsync(filePath, TestContext.Current.CancellationToken);
 			Assert.Equal("timestamp_utc,open,high,low,close,volume", lines[0]);
 			Assert.Equal(4, lines.Length); // header + 3 bars
 		}
@@ -93,7 +93,7 @@ public class IntradayBarCacheTests
 			// Pre-seed yesterday's file.
 			Directory.CreateDirectory(Path.Combine(dir, "SPX"));
 			var yesterdayPath = Path.Combine(dir, "SPX", "2026-05-15.csv");
-			await File.WriteAllTextAsync(yesterdayPath, "timestamp_utc,open,high,low,close,volume\n2026-05-15T13:30:00Z,5125.00,5125.50,5124.50,5125.25,1000\n");
+			await File.WriteAllTextAsync(yesterdayPath, "timestamp_utc,open,high,low,close,volume\n2026-05-15T13:30:00Z,5125.00,5125.50,5124.50,5125.25,1000\n", TestContext.Current.CancellationToken);
 
 			var calls = 0;
 			var fetcher = new IntradayBarFetcher((_, _, _, _, _) => { calls++; return Task.FromResult<IReadOnlyList<MinuteBar>>(Array.Empty<MinuteBar>()); });

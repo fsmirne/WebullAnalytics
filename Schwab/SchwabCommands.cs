@@ -42,7 +42,7 @@ internal sealed class SchwabLoginSettings : CommandSettings { }
 /// exchanges the code for tokens, and stores the refresh token (good for 7 days).</summary>
 internal sealed class SchwabLoginCommand : AsyncCommand<SchwabLoginSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, SchwabLoginSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, SchwabLoginSettings settings, CancellationToken cancellation)
 	{
 		if (!SchwabConfigGate.TryLoad(out _, out var schwab, out var configPath)) return 1;
 
@@ -88,7 +88,7 @@ internal sealed class SchwabStatusSettings : CommandSettings { }
 /// <summary>Reports whether tokens are present and how long until the access/refresh tokens expire.</summary>
 internal sealed class SchwabStatusCommand : AsyncCommand<SchwabStatusSettings>
 {
-	public override Task<int> ExecuteAsync(CommandContext context, SchwabStatusSettings settings, CancellationToken cancellation)
+	protected override Task<int> ExecuteAsync(CommandContext context, SchwabStatusSettings settings, CancellationToken cancellation)
 	{
 		if (!SchwabConfigGate.TryLoad(out _, out var schwab, out _)) return Task.FromResult(1);
 

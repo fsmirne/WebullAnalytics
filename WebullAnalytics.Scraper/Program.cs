@@ -79,7 +79,7 @@ internal sealed class ScrapeCommand : AsyncCommand<ScrapeSettings>
 {
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-	public override async Task<int> ExecuteAsync(CommandContext context, ScrapeSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, ScrapeSettings settings, CancellationToken cancellation)
 	{
 		var config = ScraperConfigLoader.Load(settings.ConfigPath);
 		if (settings.Interval.HasValue) config.IntervalSeconds = settings.Interval.Value;

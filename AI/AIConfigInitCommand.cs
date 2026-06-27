@@ -17,7 +17,7 @@ internal sealed class AIConfigInitSettings : CommandSettings
 /// Intended as the base layer (ai-config.json); per-ticker and per-(ticker,strategy) layers then override.</summary>
 internal sealed class AIConfigInitCommand : AsyncCommand<AIConfigInitSettings>
 {
-	public override Task<int> ExecuteAsync(CommandContext context, AIConfigInitSettings settings, CancellationToken cancellationToken)
+	protected override Task<int> ExecuteAsync(CommandContext context, AIConfigInitSettings settings, CancellationToken cancellationToken)
 	{
 		var cfg = new AIConfig();
 		DisableEnabledFlags(cfg.Rules);                 // all management rules off in the base

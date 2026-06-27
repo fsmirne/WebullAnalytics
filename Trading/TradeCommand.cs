@@ -244,7 +244,7 @@ internal sealed class TradePlaceSettings : TradeSubcommandSettings
 
 internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradePlaceSettings s, CancellationToken cancellationToken)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradePlaceSettings s, CancellationToken cancellationToken)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;
@@ -461,7 +461,7 @@ internal sealed class TradeCancelSettings : TradeSubcommandSettings
 
 internal sealed class TradeCancelCommand : AsyncCommand<TradeCancelSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradeCancelSettings s, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradeCancelSettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;
@@ -548,7 +548,7 @@ internal sealed class TradeStatusSettings : TradeSubcommandSettings
 
 internal sealed class TradeStatusCommand : AsyncCommand<TradeStatusSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradeStatusSettings s, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradeStatusSettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account, quietBanner: false);
 		if (account == null) return 2;
@@ -595,7 +595,7 @@ internal sealed class TradeListSettings : TradeSubcommandSettings
 /// For FILLED order history, see `wa trade history`.</summary>
 internal sealed class TradeListCommand : AsyncCommand<TradeListSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradeListSettings s, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradeListSettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;
@@ -661,7 +661,7 @@ internal sealed class TradeHistorySettings : TradeSubcommandSettings
 /// (those use <see cref="WebullOpenApiClient.ListTodayOrdersAsync"/> directly).</summary>
 internal sealed class TradeHistoryCommand : AsyncCommand<TradeHistorySettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradeHistorySettings s, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradeHistorySettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;
@@ -803,7 +803,7 @@ internal sealed class TradePositionsSettings : TradeSubcommandSettings
 
 internal sealed class TradePositionsCommand : AsyncCommand<TradePositionsSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradePositionsSettings s, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradePositionsSettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;
@@ -846,7 +846,7 @@ internal sealed class TradeTokenCreateSettings : TradeSubcommandSettings { }
 
 internal sealed class TradeTokenCreateCommand : AsyncCommand<TradeTokenCreateSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradeTokenCreateSettings s, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradeTokenCreateSettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;
@@ -882,7 +882,7 @@ internal sealed class TradeTokenCheckSettings : TradeSubcommandSettings { }
 
 internal sealed class TradeTokenCheckCommand : AsyncCommand<TradeTokenCheckSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradeTokenCheckSettings s, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradeTokenCheckSettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;
@@ -919,7 +919,7 @@ internal sealed class TradeAccountsSettings : TradeSubcommandSettings { }
 
 internal sealed class TradeAccountsCommand : AsyncCommand<TradeAccountsSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradeAccountsSettings s, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradeAccountsSettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;

@@ -44,7 +44,7 @@ internal sealed class TradeCloseSettings : TradeSubcommandSettings
 /// closes are recorded in the local order ledger (dedup; they never consume the opener's daily cap).</summary>
 internal sealed class TradeCloseCommand : AsyncCommand<TradeCloseSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, TradeCloseSettings s, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradeCloseSettings s, CancellationToken cancellation)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;

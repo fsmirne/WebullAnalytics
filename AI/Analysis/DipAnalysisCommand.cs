@@ -119,7 +119,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 	private static readonly TimeSpan RthOpen = new(9, 30, 0);
 	private static readonly TimeSpan RthClose = new(16, 0, 0);
 
-	public override async Task<int> ExecuteAsync(CommandContext context, DipAnalysisSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, DipAnalysisSettings settings, CancellationToken cancellation)
 	{
 		var nyNow = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, NyTz);
 		var since = DateTime.ParseExact(settings.Since, "yyyy-MM-dd", CultureInfo.InvariantCulture);
