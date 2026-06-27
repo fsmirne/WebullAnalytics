@@ -134,6 +134,10 @@ class Program
 			{
 				data.AddCommand<Data.DataBackupCommand>("backup");
 				data.AddCommand<Data.DataRestoreCommand>("restore");
+				data.AddCommand<Data.DataVacuumCommand>("vacuum");
+				data.AddCommand<Data.DataOptimizeCommand>("optimize");
+				data.AddCommand<Data.DataCheckCommand>("check");
+				data.AddCommand<Data.DataStatsCommand>("stats");
 			});
 			config.AddBranch("schwab", schwab =>
 			{
