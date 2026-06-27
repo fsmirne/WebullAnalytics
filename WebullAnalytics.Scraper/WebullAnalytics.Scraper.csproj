@@ -13,12 +13,13 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Spectre.Console" Version="0.54.0" />
-		<PackageReference Include="Spectre.Console.Cli" Version="0.53.1" />
+		<PackageReference Include="Spectre.Console" Version="0.57.1" />
+		<PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
 		<!-- Direct ref so the SQLitePCLRaw native assets (e_sqlite3) land in wa-scraper's output — they don't
 		     flow transitively through the project reference for an Exe, which is why SqliteConnection's type
 		     initializer threw. -->
-		<PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
+		<PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+		<PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
 	</ItemGroup>
 
 	<ItemGroup>

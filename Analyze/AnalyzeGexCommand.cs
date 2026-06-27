@@ -92,7 +92,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 
 internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeGexSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, AnalyzeGexSettings settings, CancellationToken cancellation)
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);

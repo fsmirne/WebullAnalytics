@@ -19,7 +19,7 @@ public class HistoricalPriceCacheTests
 			await File.WriteAllTextAsync(path,
 				"date,open,high,low,close,adj_close,volume\n" +
 				"2026-04-21,24.05,24.20,24.00,24.10,24.10,1000000\n" +
-				"2026-04-22,24.15,24.45,24.05,24.30,24.30,1100000\n");
+				"2026-04-22,24.15,24.45,24.05,24.30,24.30,1100000\n", TestContext.Current.CancellationToken);
 			var calls = new List<(DateTime from, DateTime to)>();
 			var cache = new HistoricalPriceCache(
 				cacheDir,
@@ -49,7 +49,7 @@ public class HistoricalPriceCacheTests
 			Assert.Equal(new DateTime(2026, 4, 10), calls[0].from);
 			Assert.Equal(new DateTime(2026, 4, 25), calls[0].to);
 
-			var persisted = await File.ReadAllTextAsync(path);
+			var persisted = await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken);
 			Assert.Contains("2026-04-23,24.40,24.70,24.30,24.55,24.55,1200000", persisted);
 			Assert.Contains("2026-04-24,24.60,25.20,24.50,25.10,25.10,1300000", persisted);
 		}
@@ -70,7 +70,7 @@ public class HistoricalPriceCacheTests
 			await File.WriteAllTextAsync(path,
 				"date,open,high,low,close,adj_close,volume\n" +
 				"2026-05-04,23.50,23.90,23.40,23.84,23.84,1500000\n" +
-				"2026-05-05,23.85,24.40,23.80,24.23,24.23,1600000\n");
+				"2026-05-05,23.85,24.40,23.80,24.23,24.23,1600000\n", TestContext.Current.CancellationToken);
 			var calls = new List<(DateTime from, DateTime to)>();
 			var cache = new HistoricalPriceCache(
 				cacheDir,
@@ -88,7 +88,7 @@ public class HistoricalPriceCacheTests
 
 			Assert.Null(close);
 			Assert.Empty(calls);
-			var persisted = await File.ReadAllTextAsync(path);
+			var persisted = await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken);
 			Assert.DoesNotContain("2026-05-06", persisted);
 		}
 		finally
@@ -108,7 +108,7 @@ public class HistoricalPriceCacheTests
 			await File.WriteAllTextAsync(path,
 				"date,open,high,low,close,adj_close,volume\n" +
 				"2026-05-04,23.50,23.90,23.40,23.84,23.84,1500000\n" +
-				"2026-05-05,23.85,24.40,23.80,24.23,24.23,1600000\n");
+				"2026-05-05,23.85,24.40,23.80,24.23,24.23,1600000\n", TestContext.Current.CancellationToken);
 			var calls = new List<(DateTime from, DateTime to)>();
 			var cache = new HistoricalPriceCache(
 				cacheDir,
@@ -131,7 +131,7 @@ public class HistoricalPriceCacheTests
 			// last-cached+1 (05-06). The stub fetcher still returns 05-06, so close/persistence are unchanged.
 			Assert.Equal(new DateTime(2026, 4, 22), calls[0].from);
 			Assert.Equal(new DateTime(2026, 5, 7), calls[0].to);
-			var persisted = await File.ReadAllTextAsync(path);
+			var persisted = await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken);
 			Assert.Contains("2026-05-06,24.50,25.40,24.45,25.17,25.17,1800000", persisted);
 		}
 		finally
