@@ -16,7 +16,7 @@ internal sealed class AIConfigFormatSettings : CommandSettings
 /// Use it to normalize hand-edited or generated config files.</summary>
 internal sealed class AIConfigFormatCommand : AsyncCommand<AIConfigFormatSettings>
 {
-	public override Task<int> ExecuteAsync(CommandContext context, AIConfigFormatSettings settings, CancellationToken cancellationToken)
+	protected override Task<int> ExecuteAsync(CommandContext context, AIConfigFormatSettings settings, CancellationToken cancellationToken)
 	{
 		var path = Program.ResolvePath(settings.Path);
 		if (!File.Exists(path)) { Console.Error.WriteLine($"Error: file not found: {settings.Path}"); return Task.FromResult(1); }

@@ -80,7 +80,7 @@ internal sealed class DataVacuumCommand : AsyncCommand<DataVacuumSettings>
 	// Below this much reclaimable freelist, a full rewrite of a multi-GB file isn't worth the time/temp-space.
 	private const long ReclaimThresholdBytes = 256L * 1024 * 1024;
 
-	public override async Task<int> ExecuteAsync(CommandContext context, DataVacuumSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, DataVacuumSettings settings, CancellationToken cancellation)
 	{
 		using var conn = DataDb.Open(settings.DbPath);
 		if (conn == null) return 1;
@@ -131,7 +131,7 @@ internal sealed class DataOptimizeSettings : DataDbSettings
 
 internal sealed class DataOptimizeCommand : AsyncCommand<DataOptimizeSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, DataOptimizeSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, DataOptimizeSettings settings, CancellationToken cancellation)
 	{
 		using var conn = DataDb.Open(settings.DbPath);
 		if (conn == null) return 1;
@@ -165,7 +165,7 @@ internal sealed class DataCheckSettings : DataDbSettings
 
 internal sealed class DataCheckCommand : AsyncCommand<DataCheckSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, DataCheckSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, DataCheckSettings settings, CancellationToken cancellation)
 	{
 		using var conn = DataDb.Open(settings.DbPath);
 		if (conn == null) return 1;
@@ -213,7 +213,7 @@ internal sealed class DataStatsSettings : DataDbSettings
 
 internal sealed class DataStatsCommand : AsyncCommand<DataStatsSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, DataStatsSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, DataStatsSettings settings, CancellationToken cancellation)
 	{
 		using var conn = DataDb.Open(settings.DbPath);
 		if (conn == null) return 1;

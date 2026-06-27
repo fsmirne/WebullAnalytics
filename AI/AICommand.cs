@@ -1,4 +1,4 @@
-ï»¿using Spectre.Console;
+using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 using WebullAnalytics.AI.Output;
@@ -112,8 +112,8 @@ internal static class AITextOutput
 
 internal static class AIContext
 {
-	/// <summary>Loads the merged ai-config for a run: base <c>ai-config.json</c> âŠ• per-ticker
-	/// <c>ai-config.<TICKER>.json</c> âŠ• per-strategy <c>ai-config.<TICKER>.<STRATEGY>.json</c>,
+	/// <summary>Loads the merged ai-config for a run: base <c>ai-config.json</c> ? per-ticker
+	/// <c>ai-config.<TICKER>.json</c> ? per-strategy <c>ai-config.<TICKER>.<STRATEGY>.json</c>,
 	/// deep-merged most-specific-wins. Strategy is <c>--strategy</c>, else the base+ticker
 	/// <c>defaultStrategy</c>; with neither set this is an error (no fallback). Returns null on failure.</summary>
 	internal static AIConfig? ResolveConfig(AISubcommandSettings settings)
@@ -148,8 +148,8 @@ internal static class AIContext
 	/// <summary>One labeled config layer: the human label ("base", "SPY", "SPY.DC") and its absolute path.</summary>
 	internal readonly record struct ConfigLayer(string Label, string AbsPath);
 
-	/// <summary>Resolves the ordered list of existing config-layer files for a run (base â†’ ticker â†’ strategy),
-	/// the same way <see cref="ResolveConfig"/> loads them â€” so the inspector reflects exactly what runs.
+	/// <summary>Resolves the ordered list of existing config-layer files for a run (base ? ticker ? strategy),
+	/// the same way <see cref="ResolveConfig"/> loads them — so the inspector reflects exactly what runs.
 	/// Returns null (with a stderr message) when the ticker, a base/ticker file, or the strategy is missing.</summary>
 	internal static List<ConfigLayer>? ResolveLayers(AISubcommandSettings settings, out string ticker, out string strategy)
 	{
@@ -176,7 +176,7 @@ internal static class AIContext
 			return null;
 		}
 
-		// Layers base âŠ• ticker resolve the strategy via defaultStrategy.
+		// Layers base ? ticker resolve the strategy via defaultStrategy.
 		var core = AIConfigMerge.LoadMerged(File.Exists(absBase) ? absBase : null, File.Exists(absTicker) ? absTicker : null);
 		if (core == null) { Console.Error.WriteLine("Error: ai-config is empty or unparseable."); return null; }
 
@@ -187,7 +187,7 @@ internal static class AIContext
 			return null;
 		}
 
-		// Layer 3 (per-strategy) must exist â€” no fallback.
+		// Layer 3 (per-strategy) must exist — no fallback.
 		var stratRel = Path.Combine(dir, $"{stem}.{ticker}.{strategy}{ext}");
 		var absStrat = Program.ResolvePath(stratRel);
 		if (!File.Exists(absStrat))
@@ -223,7 +223,7 @@ internal static class AIContext
 
 	/// <summary>Resolves the broker account from api-config.json. <paramref name="accountOverride"/>
 	/// mirrors `wa trade place --account`: when non-null, it wins; when null, falls back to
-	/// `api-config.defaultAccount`. Single source of truth for the AI pipeline â€” used by both the
+	/// `api-config.defaultAccount`. Single source of truth for the AI pipeline — used by both the
 	/// live position source (read) and the auto-executors (write), so the account that the AI evaluates
 	/// against is always the same account it trades into.</summary>
 	internal static TradeAccount ResolveTradeAccount(AIConfig config, string? accountOverride = null)
@@ -243,7 +243,7 @@ internal static class AIContext
 	/// <c>wa ai watch</c> loop (every tick) and the <c>wa ai scan</c> one-shot. Either executor may
 	/// be null when its <c>enabled</c> flag is off; when account resolution fails (e.g. api-config
 	/// missing) both executors are still instantiated but with a null account, so they degrade to
-	/// dry-run logging â€” same fallback the watch loop has always used.</summary>
+	/// dry-run logging — same fallback the watch loop has always used.</summary>
 	internal static (ManagementAutoExecutor? Management, OpenerAutoExecutor? Opener) BuildAutoExecutors(AIConfig config, string? accountOverride = null)
 	{
 		TradeAccount? account = null;
@@ -262,18 +262,18 @@ internal static class AIContext
 	/// <c>autoExecute.{opener,management}.enabled=false</c>. In that state the flag is inert:
 	/// <c>enabled</c> gates whether the executor is even constructed (see BuildAutoExecutors), while
 	/// <c>submit</c> only picks live-vs-dry-run for an already-enabled executor. So proposals still
-	/// print but no order â€” not even a dry-run line â€” is ever produced. Call after applying --submit.</summary>
+	/// print but no order — not even a dry-run line — is ever produced. Call after applying --submit.</summary>
 	internal static void WarnIfSubmitInert(AIConfig config)
 	{
 		var inert = new List<string>();
 		if (config.AutoExecute.Opener.Submit && !config.AutoExecute.Opener.Enabled) inert.Add("autoExecute.opener.enabled");
 		if (config.AutoExecute.Management.Submit && !config.AutoExecute.Management.Enabled) inert.Add("autoExecute.management.enabled");
 		if (inert.Count == 0) return;
-		AnsiConsole.MarkupLine($"[yellow]warning:[/] --submit has no effect while {Markup.Escape(string.Join(" and ", inert))}=false â€” proposals print but no orders are placed (not even dry-run). Set the flag(s) to true to enable auto-execute.");
+		AnsiConsole.MarkupLine($"[yellow]warning:[/] --submit has no effect while {Markup.Escape(string.Join(" and ", inert))}=false — proposals print but no orders are placed (not even dry-run). Set the flag(s) to true to enable auto-execute.");
 	}
 }
 
-/// <summary>`ai scan` â€” one evaluation pass, print proposals, exit.</summary>
+/// <summary>`ai scan` — one evaluation pass, print proposals, exit.</summary>
 internal sealed class AIScanSettings : AISingleTickerSubcommandSettings
 {
 	[CommandOption("--top <N>")]
@@ -313,14 +313,14 @@ internal sealed class AIScanSettings : AISingleTickerSubcommandSettings
 	public string? Tif { get; set; }
 
 	[CommandOption("--submit-override")]
-	[Description("Like --submit, but additionally ignores the per-day opening cap (today's broker order count) for this ONE run â€” the deliberate \"place one more trade today\" escape hatch. The run itself is still bounded to maxOrdersPerDay submission(s), and every other guard (held-position dedup, broker dedup, cash gating) stays active. Deliberately scan-only â€” watch re-evaluates every tick, so an uncapped watch would re-fire all day.")]
+	[Description("Like --submit, but additionally ignores the per-day opening cap (today's broker order count) for this ONE run — the deliberate \"place one more trade today\" escape hatch. The run itself is still bounded to maxOrdersPerDay submission(s), and every other guard (held-position dedup, broker dedup, cash gating) stays active. Deliberately scan-only — watch re-evaluates every tick, so an uncapped watch would re-fire all day.")]
 	public bool SubmitOverride { get; set; }
 
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
-		if (Top.HasValue && Top.Value < 1) return ValidationResult.Error($"--top: must be â‰¥ 1, got {Top.Value}");
+		if (Top.HasValue && Top.Value < 1) return ValidationResult.Error($"--top: must be = 1, got {Top.Value}");
 		if (SubmitOverride && Submit) return ValidationResult.Error("--submit and --submit-override are mutually exclusive (--submit-override already submits).");
 		if (Tif != null && !string.Equals(Tif, "day", StringComparison.OrdinalIgnoreCase) && !string.Equals(Tif, "gtc", StringComparison.OrdinalIgnoreCase))
 			return ValidationResult.Error($"--tif: must be 'day' or 'gtc', got '{Tif}'");
@@ -389,7 +389,7 @@ internal sealed class AIScanSettings : AISingleTickerSubcommandSettings
 
 internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AIScanSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, AIScanSettings settings, CancellationToken cancellation)
 		=> await AITextOutput.RunAsync(settings, "AIScan", async () =>
 	{
 		var config = AIContext.ResolveConfig(settings);
@@ -427,7 +427,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		// put-call parity on the ATM straddle for any ticker without an explicit pin. The underlying quote
 		// from the chain is replaced before the EvaluationContext is built so the opener scores against the
 		// caller's intended spot. Note: phase-2 hypothetical strike enumeration in FetchQuotesWithHypotheticals
-		// runs against the broker's reported spot â€” for managed-position scenarios with a wildly stale
+		// runs against the broker's reported spot — for managed-position scenarios with a wildly stale
 		// underlying, enumerated strike brackets may be slightly off-target, but proposal pricing/scoring
 		// still uses the overridden spot.
 		quoteSnapshot = await ApplySpotOverridesAsync(settings, config, quoteSnapshot, quotes, now, cancellation);
@@ -469,10 +469,10 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 	/// <summary>Applies --spot and --premarket overrides to the live quote snapshot's Underlyings map.
 	/// --spot wins per ticker; --premarket back-solves remaining tickers via put-call parity on the nearest-expiry
 	/// ATM straddle in the fetched chain. Returns the merged snapshot, or null if --premarket failed to derive
-	/// a spot for a configured ticker (no viable straddle in the chain â€” usually a chain-fetch problem).
+	/// a spot for a configured ticker (no viable straddle in the chain — usually a chain-fetch problem).
 	/// When --premarket runs and the snapshot has no contracts for a configured ticker (no open positions, so
 	/// FetchQuotesWithHypotheticals short-circuited), this method bootstraps a chain fetch using one placeholder
-	/// OCC symbol per ticker â€” same trick OpenCandidateEvaluator uses â€” so parity has data to work with.</summary>
+	/// OCC symbol per ticker — same trick OpenCandidateEvaluator uses — so parity has data to work with.</summary>
 	private static async Task<QuoteSnapshot?> ApplySpotOverridesAsync(AIScanSettings settings, AIConfig config, QuoteSnapshot snapshot, IQuoteSource quotes, DateTime now, CancellationToken cancellation)
 	{
 		var explicitOverrides = settings.ParseSpotOverrides();
@@ -541,14 +541,14 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 	/// <summary>Back-solves the underlying spot from put-call parity on the ATM straddle in the fetched
 	/// option chain. Returns null if no expiry has a strike with both a call and put quote.
-	/// Parity (European, no dividends â€” exact for cash-settled SPX/SPXW/NDX/XSP/RUT): S = (C - P) + K * exp(-r*T).
+	/// Parity (European, no dividends — exact for cash-settled SPX/SPXW/NDX/XSP/RUT): S = (C - P) + K * exp(-r*T).
 	/// Picks the nearest non-negative DTE expiry, then the strike where |C_mid - P_mid| is minimum (ATM).
-	/// Quote preference per leg: bid+ask mid (bidâ‰¥0, ask>0, askâ‰¥bid), else LastPrice if positive. The LastPrice
+	/// Quote preference per leg: bid+ask mid (bid=0, ask>0, ask=bid), else LastPrice if positive. The LastPrice
 	/// fallback handles premarket chains where Webull echoes the prior-session close but omits bid/ask.
 	/// </summary>
 	internal static ParityResult? DeriveSpotFromParity(string ticker, IReadOnlyDictionary<string, OptionContractQuote> quotes, double riskFreeRate, DateTime asOf, Action<string>? diag = null)
 	{
-		// Group by expiry: { expiry â†’ { strike â†’ (call?, put?) } }.
+		// Group by expiry: { expiry ? { strike ? (call?, put?) } }.
 		var byExpiry = new Dictionary<DateTime, Dictionary<decimal, (OptionContractQuote? call, OptionContractQuote? put)>>();
 		foreach (var (sym, q) in quotes)
 		{
@@ -607,7 +607,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 	/// <summary>Theoretical scan: same opener pipeline as the live path, but the live quote source is
 	/// replaced with the backtest's Black-Scholes pricer fed by an explicit spot override. Used to preview
-	/// what the opener would propose at a given (asOf, spot) without needing a live chain â€” e.g. Sunday
+	/// what the opener would propose at a given (asOf, spot) without needing a live chain — e.g. Sunday
 	/// evening before a Monday open, or a "what if SPX gaps to 7500" stress check. No live positions or
 	/// account state are pulled; the user supplies <c>--starting-cash</c> for proposal sizing.</summary>
 	private static async Task<int> RunTheoreticalAsync(AIScanSettings settings, AIConfig config, CancellationToken cancellation)
@@ -662,7 +662,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		AnsiConsole.MarkupLine("[dim]Black-Scholes pricing; VIX/HV from most recent settled data; no live chain. For planning only.[/]");
 		AnsiConsole.WriteLine();
 
-		// No live positions in theoretical mode â€” we score from a clean book regardless of any real
+		// No live positions in theoretical mode — we score from a clean book regardless of any real
 		// holdings the broker reports.
 		var openPositions = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase);
 
@@ -682,7 +682,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
-			// Theoretical mode bypasses the management executor â€” no live positions in scope, so the
+			// Theoretical mode bypasses the management executor — no live positions in scope, so the
 			// rule engine had nothing to react to. Opener executor still fires so the user can validate
 			// open-order placement off-hours against a sandbox account.
 			if (openerExecutor != null)
@@ -695,7 +695,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 	}
 }
 
-/// <summary>`ai replay` â€” historical replay against orders.jsonl with agreement analysis.</summary>
+/// <summary>`ai replay` — historical replay against orders.jsonl with agreement analysis.</summary>
 internal sealed class AIReplaySettings : AISingleTickerSubcommandSettings
 {
 	[CommandOption("--since <DATE>")]
@@ -727,7 +727,7 @@ internal sealed class AIReplaySettings : AISingleTickerSubcommandSettings
 
 internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AIReplaySettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, AIReplaySettings settings, CancellationToken cancellation)
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
@@ -767,7 +767,7 @@ internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 	}
 }
 
-/// <summary>`ai backtest` â€” simulate opening/managing positions from scratch over a historical window
+/// <summary>`ai backtest` — simulate opening/managing positions from scratch over a historical window
 /// using the AI rules + opener. No real fills involved; produces simulated P&L for rule tuning.</summary>
 internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 {
@@ -792,7 +792,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public decimal? FeePerContract { get; set; }
 
 	[CommandOption("--scan-stride <N>")]
-	[Description("Open-scan minute stride: evaluate every Nth minute for entries. Default 1 (every minute), matching live watch's per-tick cadence â€” coarser strides alias past the minutes where a marginal score crosses minScoreToOpen and silently under-count opens vs reality. Raise N to speed up multi-year sweeps (~Nx fewer candidate enumerations) at the cost of missing single-minute threshold crossings.")]
+	[Description("Open-scan minute stride: evaluate every Nth minute for entries. Default 1 (every minute), matching live watch's per-tick cadence — coarser strides alias past the minutes where a marginal score crosses minScoreToOpen and silently under-count opens vs reality. Raise N to speed up multi-year sweeps (~Nx fewer candidate enumerations) at the cost of missing single-minute threshold crossings.")]
 	public int ScanStride { get; set; } = 1;
 
 
@@ -817,11 +817,11 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public string? FillsJsonlPath { get; set; }
 
 	[CommandOption("--split")]
-	[Description("Book split structures (DoubleCalendar/DoubleDiagonal/DiagonalVertical/CalendarVertical) as their TWO combo orders â€” independent positions managed against their own debits, exactly how Webull holds them live. Default off books each structure whole, so take-profit/stop-loss see the combined mark. A/B knob for split-half vs whole-structure exit policy; friction and fees are identical across modes.")]
+	[Description("Book split structures (DoubleCalendar/DoubleDiagonal/DiagonalVertical/CalendarVertical) as their TWO combo orders — independent positions managed against their own debits, exactly how Webull holds them live. Default off books each structure whole, so take-profit/stop-loss see the combined mark. A/B knob for split-half vs whole-structure exit policy; friction and fees are identical across modes.")]
 	public bool Split { get; set; }
 
 	[CommandOption("--oracle")]
-	[Description("Research mode (by-design lookahead): the minute loop evaluates every minute of the trading day, forward-simulates each proposal to expiry using known daily close intrinsic, and opens the minute whose proposal yields the highest realized P&L. Produces an upper bound on strategy performance with perfect timing. Not realistic â€” use to size the gap between the current realistic scan and a theoretical ceiling.")]
+	[Description("Research mode (by-design lookahead): the minute loop evaluates every minute of the trading day, forward-simulates each proposal to expiry using known daily close intrinsic, and opens the minute whose proposal yields the highest realized P&L. Produces an upper bound on strategy performance with perfect timing. Not realistic — use to size the gap between the current realistic scan and a theoretical ceiling.")]
 	public bool Oracle { get; set; }
 
 	[CommandOption("--profile")]
@@ -829,11 +829,11 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public bool Profile { get; set; }
 
 	[CommandOption("--bias-drift <VALUE>")]
-	[Description("Override opener.weights.biasDrift for this run (after the per-ticker config merge). Useful for ad-hoc parameter exploration without copying the config file. Range typically 1.0â€“1.5 for SPXW.")]
+	[Description("Override opener.weights.biasDrift for this run (after the per-ticker config merge). Useful for ad-hoc parameter exploration without copying the config file. Range typically 1.0–1.5 for SPXW.")]
 	public decimal? BiasDriftOverride { get; set; }
 
 	[CommandOption("--min-score-to-open <VALUE>")]
-	[Description("Override opener.minScoreToOpen for this run (after the per-ticker config merge). Lowering opens more days; raising fires only on high-conviction setups. Range typically 0.0â€“0.20.")]
+	[Description("Override opener.minScoreToOpen for this run (after the per-ticker config merge). Lowering opens more days; raising fires only on high-conviction setups. Range typically 0.0–0.20.")]
 	public decimal? MinScoreToOpenOverride { get; set; }
 
 	[CommandOption("--intraday-tape-weight <VALUE>")]
@@ -841,7 +841,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public decimal? IntradayTapeWeightOverride { get; set; }
 
 	[CommandOption("--gex-bias-pull <VALUE>")]
-	[Description("Override opener.weights.gexBiasPull for this run (the GEX magnet's grid-shift strength; 0 disables). Sweep knob for validating the GEX signal: e.g. 0, 0.25, 0.5, 1.0. Must be â‰¥ 0.")]
+	[Description("Override opener.weights.gexBiasPull for this run (the GEX magnet's grid-shift strength; 0 disables). Sweep knob for validating the GEX signal: e.g. 0, 0.25, 0.5, 1.0. Must be = 0.")]
 	public decimal? GexBiasPullOverride { get; set; }
 
 	[CommandOption("--gamma-regime <VALUE>")]
@@ -873,7 +873,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public decimal? TpOverride { get; set; }
 
 	[CommandOption("--lots <N>")]
-	[Description("Fixed contracts per trade (sizing-neutral). Every open trades exactly N contracts and the cash/reserve gates are bypassed, so terminal P&L is the additive sum of per-trade results instead of a compounding curve â€” use this to measure per-trade edge (expectancy, profit factor) without the position-sizing feedback loop. Omit for normal equity-scaled sizing.")]
+	[Description("Fixed contracts per trade (sizing-neutral). Every open trades exactly N contracts and the cash/reserve gates are bypassed, so terminal P&L is the additive sum of per-trade results instead of a compounding curve — use this to measure per-trade edge (expectancy, profit factor) without the position-sizing feedback loop. Omit for normal equity-scaled sizing.")]
 	public int? Lots { get; set; }
 
 	[CommandOption("--sl <VALUE>")]
@@ -889,27 +889,27 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 		if (SlOverride.HasValue && (SlOverride.Value <= 0m || SlOverride.Value > 1m))
 			return ValidationResult.Error($"--sl: must be in (0, 1], got {SlOverride}");
 		if (Lots.HasValue && Lots.Value < 1)
-			return ValidationResult.Error($"--lots: must be â‰¥ 1, got {Lots}");
+			return ValidationResult.Error($"--lots: must be = 1, got {Lots}");
 		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--since: must be YYYY-MM-DD, got '{Since}'");
 		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--until: must be YYYY-MM-DD, got '{Until}'");
 		if (StartingCash <= 0m) return ValidationResult.Error($"--starting-cash: must be > 0, got {StartingCash}");
-		if (FeePerContract.HasValue && FeePerContract.Value < 0m) return ValidationResult.Error($"--fee-per-contract: must be â‰¥ 0, got {FeePerContract}");
+		if (FeePerContract.HasValue && FeePerContract.Value < 0m) return ValidationResult.Error($"--fee-per-contract: must be = 0, got {FeePerContract}");
 		if (IvHvPremium <= 0m) return ValidationResult.Error($"--iv-hv-premium: must be > 0, got {IvHvPremium}");
 		if (Smile != "off" && Smile != "static")
 			return ValidationResult.Error($"--smile: must be 'off' or 'static', got '{Smile}'");
-		if (TopPerStep < 1) return ValidationResult.Error($"--top-per-step: must be â‰¥ 1, got {TopPerStep}");
+		if (TopPerStep < 1) return ValidationResult.Error($"--top-per-step: must be = 1, got {TopPerStep}");
 		if (BiasDriftOverride.HasValue && BiasDriftOverride.Value < 0m)
-			return ValidationResult.Error($"--bias-drift: must be â‰¥ 0, got {BiasDriftOverride}");
+			return ValidationResult.Error($"--bias-drift: must be = 0, got {BiasDriftOverride}");
 		if (IntradayTapeWeightOverride.HasValue && (IntradayTapeWeightOverride.Value < 0m || IntradayTapeWeightOverride.Value > 1m))
 			return ValidationResult.Error($"--intraday-tape-weight: must be in [0, 1], got {IntradayTapeWeightOverride}");
 		if (GexBiasPullOverride.HasValue && GexBiasPullOverride.Value < 0m)
-			return ValidationResult.Error($"--gex-bias-pull: must be â‰¥ 0, got {GexBiasPullOverride}");
+			return ValidationResult.Error($"--gex-bias-pull: must be = 0, got {GexBiasPullOverride}");
 		if (GammaRegimeOverride.HasValue && GammaRegimeOverride.Value < 0m)
-			return ValidationResult.Error($"--gamma-regime: must be â‰¥ 0, got {GammaRegimeOverride}");
+			return ValidationResult.Error($"--gamma-regime: must be = 0, got {GammaRegimeOverride}");
 		if (MaxPainBiasPullOverride.HasValue && MaxPainBiasPullOverride.Value < 0m)
-			return ValidationResult.Error($"--max-pain: must be â‰¥ 0, got {MaxPainBiasPullOverride}");
+			return ValidationResult.Error($"--max-pain: must be = 0, got {MaxPainBiasPullOverride}");
 		if (IntradayW0Override.HasValue && (IntradayW0Override.Value < 0m || IntradayW0Override.Value > 1m))
 			return ValidationResult.Error($"--intraday-w0: must be in [0, 1], got {IntradayW0Override}");
 		if (LongConvictionOverride.HasValue && (LongConvictionOverride.Value < 0m || LongConvictionOverride.Value > 1m))
@@ -922,7 +922,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 
 internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AIBacktestSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, AIBacktestSettings settings, CancellationToken cancellation)
 		=> await AITextOutput.RunAsync(settings, "AIBacktest", async () =>
 	{
 		var config = AIContext.ResolveConfig(settings);
@@ -933,7 +933,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// Apply per-run CLI overrides on top of the merged config. Used by parameter sweeps
 		// to vary one knob at a time without maintaining N config-file copies (the per-ticker
 		// override file only contains diffs, so a copy-and-tweak approach loses the base config's
-		// scoring weights at load time â€” these flags sidestep that by mutating the already-merged
+		// scoring weights at load time — these flags sidestep that by mutating the already-merged
 		// in-memory config).
 		if (settings.BiasDriftOverride.HasValue) config.Opener.Weights.BiasDrift = settings.BiasDriftOverride.Value;
 		if (settings.MinScoreToOpenOverride.HasValue) config.Opener.MinScoreToOpen = settings.MinScoreToOpenOverride.Value;
@@ -978,16 +978,16 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			? DateTime.ParseExact(settings.Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
 			: DateTime.Today;
 
-		// Backtest is offline â€” the caches MUST already cover [since, until]. Run `wa ai history <ticker>` first.
+		// Backtest is offline — the caches MUST already cover [since, until]. Run `wa ai history <ticker>` first.
 		var bars = new Backtest.HistoricalBarCache(offline: true);
 
 		if (!await bars.HasCoverageAsync(config.Ticker, since, until, cancellation))
 		{
-			Console.Error.WriteLine($"Error: missing bar history for {config.Ticker} in [{since:yyyy-MM-dd} â†’ {until:yyyy-MM-dd}]. Run: wa ai history {config.Ticker}");
+			Console.Error.WriteLine($"Error: missing bar history for {config.Ticker} in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. Run: wa ai history {config.Ticker}");
 			return 1;
 		}
 		// VIX-driven tickers (SPX family) need a VIX bar history for ATM IV and a CBOE SMILE history
-		// for per-day smile scaling. VIX1D (â‰¤1 DTE) and VIX9D (â‰¤9 DTE) anchor short-dated ATM IV at
+		// for per-day smile scaling. VIX1D (=1 DTE) and VIX9D (=9 DTE) anchor short-dated ATM IV at
 		// the appropriate term. All ride along with the strategy ticker's history command
 		// (wa ai history SPXW/SPX/XSP/SPY pulls VIX, VIX1D, VIX9D, and SMILE).
 		var vixDriven = new[] { "SPY", "SPX", "SPXW", "XSP" };
@@ -996,27 +996,27 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		{
 			if (!await bars.HasCoverageAsync("VIX", since, until, cancellation))
 			{
-				Console.Error.WriteLine($"Error: missing VIX history in [{since:yyyy-MM-dd} â†’ {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
+				Console.Error.WriteLine($"Error: missing VIX history in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
 				return 1;
 			}
 			if (!await bars.HasCoverageAsync("VIX9D", since, until, cancellation))
 			{
-				Console.Error.WriteLine($"Error: missing VIX9D history in [{since:yyyy-MM-dd} â†’ {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
+				Console.Error.WriteLine($"Error: missing VIX9D history in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
 				return 1;
 			}
 			// VIX1D launched 2023-04-24. For windows that start before that date, partial coverage is
-			// expected â€” the IV provider falls back to VIX9D / VIX for missing dates. Warn loudly so
+			// expected — the IV provider falls back to VIX9D / VIX for missing dates. Warn loudly so
 			// the user knows their pre-launch backtest is using a longer-term anchor than ideal, but
 			// don't fail the run. Inside the launch window, treat missing data as a cache problem.
 			var vix1DLaunch = new DateTime(2023, 4, 24);
 			var vix1DWindowStart = since < vix1DLaunch ? vix1DLaunch : since;
 			if (vix1DWindowStart <= until && !await bars.HasCoverageAsync("VIX1D", vix1DWindowStart, until, cancellation))
 			{
-				Console.Error.WriteLine($"Warning: missing VIX1D history in [{vix1DWindowStart:yyyy-MM-dd} â†’ {until:yyyy-MM-dd}]. 0DTE pricing will fall back to VIX9D. Run: wa ai history {settings.Ticker}");
+				Console.Error.WriteLine($"Warning: missing VIX1D history in [{vix1DWindowStart:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. 0DTE pricing will fall back to VIX9D. Run: wa ai history {settings.Ticker}");
 			}
 			if (!await smile.HasCoverageAsync(since, until, cancellation))
 			{
-				Console.Error.WriteLine($"Error: missing CBOE SMILE history in [{since:yyyy-MM-dd} â†’ {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
+				Console.Error.WriteLine($"Error: missing CBOE SMILE history in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
 				return 1;
 			}
 		}
@@ -1029,14 +1029,14 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// hypothetical/secondary root the opener touches is covered.
 		var dividends = new Backtest.HistoricalDividendCache(offline: true);
 		var dividendsByRoot = await dividends.BuildScheduleMapAsync(config.TickerSet(), cancellation);
-		// Per-day full-chain OI (data/oi) â€” makes the GEX / max-pain factors computable in the backtest.
+		// Per-day full-chain OI (data/oi) — makes the GEX / max-pain factors computable in the backtest.
 		var oiCache = new Backtest.ChainSnapshotOiCache();
 		// Price foundation = real minute NBBO (data/quotes). The parametric source (BS + IV + smile, NO
-		// captured-bar overlay) answers ONLY the counterfactual reprices real NBBO can't â€” intraday SL/TP
+		// captured-bar overlay) answers ONLY the counterfactual reprices real NBBO can't — intraday SL/TP
 		// brackets and the profit projector price legs at a hypothetical spot. It is never a price foundation.
 		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 		// A strictly-0DTE strategy only ever queries same-day-expiry quotes, so the store can skip parsing
-		// the 45DTEâ†’1DTE tail that shares each expiry file (a big cold-load win for SPY, whose files carry
+		// the 45DTE?1DTE tail that shares each expiry file (a big cold-load win for SPY, whose files carry
 		// the QuickDC/DC chain). Safe only when every enabled structure is 0DTE AND no roll-to-future rule
 		// is active (a roll could otherwise query a later expiry the filter would have dropped).
 		var sameDayExpiryOnly = config.Opener.Structures.MaxDteAcrossEnabled() == 0
@@ -1052,11 +1052,11 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		}
 		var quoteStore = new Backtest.QuoteStoreCache(quoteDbPath, since: since, until: until, sameDayExpiryOnly: sameDayExpiryOnly);
 		// Real minute NBBO is the only fill foundation (parametric covers counterfactuals only), so an empty
-		// window prices nothing and silently reports no fills â€” indistinguishable from "the strategy declined
+		// window prices nothing and silently reports no fills — indistinguishable from "the strategy declined
 		// to trade". Warn explicitly: the usual cause is running --since <today> before the evening backfill
 		// (scripts/daily_backfill.sh, ~19:00 ET) has landed the day's quotes.
 		if (!quoteStore.HasAnyQuoteInWindow(config.Ticker, since, until))
-			Console.Error.WriteLine($"Warning: no real NBBO quotes for {config.Ticker} in [{since:yyyy-MM-dd} â†’ {until:yyyy-MM-dd}] (data/quotes) â€” the backtest will price nothing and report no fills. The evening backfill (scripts/daily_backfill.sh) lands the current day's quotes after ~19:00 ET; re-run once it has completed.");
+			Console.Error.WriteLine($"Warning: no real NBBO quotes for {config.Ticker} in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}] (data/quotes) — the backtest will price nothing and report no fills. The evening backfill (scripts/daily_backfill.sh) lands the current day's quotes after ~19:00 ET; re-run once it has completed.");
 		Backtest.IBacktestQuoteSource quotes = new Backtest.QuotesQuoteSource(
 			bars, quoteStore, parametric, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 
@@ -1065,7 +1065,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
 		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split);
 
-		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} â†’ {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) â€” no compounding[/]" : "")}");
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} ? {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
 
 		Backtest.BacktestResult result;

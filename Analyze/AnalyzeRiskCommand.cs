@@ -79,7 +79,7 @@ internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 
 internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeRiskSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, AnalyzeRiskSettings settings, CancellationToken cancellation)
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);

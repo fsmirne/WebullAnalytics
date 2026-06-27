@@ -16,7 +16,7 @@ class FetchSettings : CommandSettings
 
 class FetchCommand : AsyncCommand<FetchSettings>
 {
-	public override async Task<int> ExecuteAsync(CommandContext context, FetchSettings settings, CancellationToken cancellation)
+	protected override async Task<int> ExecuteAsync(CommandContext context, FetchSettings settings, CancellationToken cancellation)
 	{
 		var configPath = Program.ResolvePath(Program.ApiConfigPath);
 		var outputPath = Program.ResolvePath(Program.OrdersPath);

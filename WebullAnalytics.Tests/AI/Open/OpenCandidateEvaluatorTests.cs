@@ -67,9 +67,9 @@ public class OpenCandidateEvaluatorTests
 		var ctx = BuildContext(cash: 10000m, spot: 500m, quotes: new Dictionary<string, OptionContractQuote>());
 		var src = new StaticQuoteSource(new QuoteSnapshot(new Dictionary<string, OptionContractQuote>(), new Dictionary<string, decimal>()));
 		var ev = new OpenCandidateEvaluator(cfg, src);
-		var proposals = await ev.EvaluateAsync(ctx, default);
-		Assert.Empty(proposals);
-	}
+			var proposals = await ev.EvaluateAsync(ctx, TestContext.Current.CancellationToken);
+			Assert.Empty(proposals);
+		}
 
 	[Fact]
 	public async Task TopNPerTickerIsEnforced()
@@ -79,9 +79,9 @@ public class OpenCandidateEvaluatorTests
 		var ctx = BuildContext(cash: 100000m, spot: 500m, quotes: quotes);
 		var src = new StaticQuoteSource(new QuoteSnapshot(new Dictionary<string, OptionContractQuote>(), new Dictionary<string, decimal> { ["SPY"] = 500m }));
 		var ev = new OpenCandidateEvaluator(cfg, src);
-		var proposals = await ev.EvaluateAsync(ctx, default);
-		Assert.True(proposals.Count <= 2, $"expected ≤ 2 proposals, got {proposals.Count}");
-	}
+			var proposals = await ev.EvaluateAsync(ctx, TestContext.Current.CancellationToken);
+			Assert.True(proposals.Count <= 2, $"expected ≤ 2 proposals, got {proposals.Count}");
+		}
 
 	[Fact]
 	public async Task ZeroCashBlocksSizing()
@@ -91,10 +91,10 @@ public class OpenCandidateEvaluatorTests
 		var ctx = BuildContext(cash: 0m, spot: 500m, quotes: quotes);
 		var src = new StaticQuoteSource(new QuoteSnapshot(new Dictionary<string, OptionContractQuote>(), new Dictionary<string, decimal> { ["SPY"] = 500m }));
 		var ev = new OpenCandidateEvaluator(cfg, src);
-		var proposals = await ev.EvaluateAsync(ctx, default);
-		Assert.All(proposals, p => Assert.True(p.CashReserveBlocked));
-		Assert.All(proposals, p => Assert.Equal(0, p.Qty));
-	}
+			var proposals = await ev.EvaluateAsync(ctx, TestContext.Current.CancellationToken);
+			Assert.All(proposals, p => Assert.True(p.CashReserveBlocked));
+			Assert.All(proposals, p => Assert.Equal(0, p.Qty));
+		}
 
 	[Fact]
 	public async Task MaxQtyIsClamped()
@@ -104,10 +104,10 @@ public class OpenCandidateEvaluatorTests
 		var ctx = BuildContext(cash: 1_000_000m, spot: 500m, quotes: quotes);
 		var src = new StaticQuoteSource(new QuoteSnapshot(new Dictionary<string, OptionContractQuote>(), new Dictionary<string, decimal> { ["SPY"] = 500m }));
 		var ev = new OpenCandidateEvaluator(cfg, src);
-		var proposals = await ev.EvaluateAsync(ctx, default);
-		Assert.NotEmpty(proposals);
-		Assert.All(proposals, p => Assert.True(p.Qty <= 3));
-	}
+			var proposals = await ev.EvaluateAsync(ctx, TestContext.Current.CancellationToken);
+			Assert.NotEmpty(proposals);
+			Assert.All(proposals, p => Assert.True(p.Qty <= 3));
+		}
 
 	[Fact]
 	public void RankForOutputUsesFinalScoreForCalendars()
