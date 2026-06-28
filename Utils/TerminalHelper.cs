@@ -11,12 +11,12 @@ static class TerminalHelper
 	public const int SimplifiedMinWidth = 130;
 
 	/// <summary>Foreground color that stays legible on a given Spectre background color word — used for the
-	/// tick marker in gauge bars (analyze sentiment / regime / …). Light backgrounds (yellow, lime, grey85)
+	/// tick marker in gauge bars (analyze sentiment / regime / …). Light backgrounds (yellow, grey85)
 	/// get a black marker; dark ones (red, green, blue) get white. Without this a `white` marker washes out
-	/// against the yellow/lime segments of a red→green scale.</summary>
+	/// against the yellow/grey85 segments of a red→green scale.</summary>
 	public static string ContrastingForeground(string background) => background switch
 	{
-		"yellow" or "lime" or "grey85" or "white" or "silver" => "black",
+		"yellow" or "grey85" or "white" or "silver" => "Gray15",
 		_ => "white",
 	};
 
