@@ -29,6 +29,7 @@ internal sealed class NewOrder
 	[JsonPropertyName("quantity"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Quantity { get; set; }
 	[JsonPropertyName("limit_price"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? LimitPrice { get; set; }
 	[JsonPropertyName("option_strategy"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? OptionStrategy { get; set; }
+	[JsonPropertyName("position_intent"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? PositionIntent { get; set; }
 	[JsonPropertyName("legs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public List<OrderLeg>? Legs { get; set; }
 }
 
@@ -85,7 +86,8 @@ internal static class OrderRequestBuilder
 		string Side,              // "BUY" or "SELL" — explicit combo direction
 		string OrderType,         // "LIMIT" or "MARKET"
 		decimal? LimitPrice,      // absolute per-share combo price; null only when OrderType == MARKET
-		string TimeInForce);      // "DAY" or "GTC"
+		string TimeInForce,       // "DAY" or "GTC"
+		string? PositionIntent = null); // BUY_TO_OPEN | SELL_TO_OPEN | BUY_TO_CLOSE | SELL_TO_CLOSE; applied to order + every option leg
 
 	internal static OrderRequestBody Build(BuildParams p)
 	{
@@ -126,6 +128,7 @@ internal static class OrderRequestBuilder
 			order.Side = p.Side;
 			order.Quantity = leg.Quantity.ToString(System.Globalization.CultureInfo.InvariantCulture);
 			order.OptionStrategy = OptionStrategyEnum["Single"];
+			order.PositionIntent = p.PositionIntent; // option-only field; set on the order (MASTER), never per leg
 			order.Legs = new List<OrderLeg> { BuildOptionLeg(leg) };
 			return body;
 		}
@@ -140,6 +143,7 @@ internal static class OrderRequestBuilder
 		order.OptionStrategy = OptionStrategyEnum.TryGetValue(strat, out var mapped)
 			? mapped
 			: throw new InvalidOperationException($"Unknown strategy '{strat}' — extend OptionStrategyEnum");
+		order.PositionIntent = p.PositionIntent; // option-only field; set on the order (MASTER), never per leg
 		order.Legs = new List<OrderLeg>();
 		foreach (var leg in stockLegs) order.Legs.Add(BuildStockLeg(leg));
 		foreach (var leg in optionLegs) order.Legs.Add(BuildOptionLeg(leg));
@@ -166,6 +170,13 @@ internal static class OrderRequestBuilder
 		OptionExpireDate = leg.Option.ExpiryDate.ToString("yyyy-MM-dd"),
 		OptionType = leg.Option.CallPut == "C" ? "CALL" : "PUT",
 	};
+
+	/// <summary>Derives the Webull <c>position_intent</c> for an option order from the combo side and
+	/// whether it opens or closes exposure. position_intent is an order-level (MASTER) field and must
+	/// match <c>side</c>; it is NOT set per leg. Returns e.g. "SELL_TO_OPEN" for a credit/short open,
+	/// "BUY_TO_CLOSE" for buying back a short, etc.</summary>
+	internal static string DeriveOptionIntent(string side, bool opening) =>
+		$"{side.ToUpperInvariant()}_TO_{(opening ? "OPEN" : "CLOSE")}";
 
 	private static readonly JsonSerializerOptions CompactJson = new() { WriteIndented = false };
 
