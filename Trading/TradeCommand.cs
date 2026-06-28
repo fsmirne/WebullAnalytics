@@ -233,6 +233,10 @@ internal sealed class TradePlaceSettings : TradeSubcommandSettings
 	[Description("Override auto-detected strategy. Values: single|stock|vertical|calendar|diagonal|iron_condor|iron_butterfly|butterfly|condor|straddle|strangle|covered_call|protective_put|collar.")]
 	public string? Strategy { get; set; }
 
+	[CommandOption("--intent <VALUE>")]
+	[Description("Option position_intent applied to order + every option leg: buy_to_open|sell_to_open|buy_to_close|sell_to_close. Omit to send no intent (legacy behavior).")]
+	public string? Intent { get; set; }
+
 	[CommandOption("--submit")]
 	[Description("Actually place the order. Without this, runs preview only.")]
 	public bool Submit { get; set; }
@@ -341,7 +345,10 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 			Side: side,
 			OrderType: type.ToUpperInvariant(),
 			LimitPrice: limit,
-			TimeInForce: s.Tif.ToUpperInvariant()
+			TimeInForce: s.Tif.ToUpperInvariant(),
+			// `trade place` opens positions, so default to {side}_TO_OPEN; --intent overrides (e.g. a manual
+			// buy_to_close). Ignored by the builder for pure-stock orders (position_intent is option-only).
+			PositionIntent: string.IsNullOrWhiteSpace(s.Intent) ? OrderRequestBuilder.DeriveOptionIntent(side, opening: true) : s.Intent.ToUpperInvariant()
 		));
 
 		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]  [dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Side:[/] {Markup.Escape(side)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}");

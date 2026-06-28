@@ -227,7 +227,8 @@ internal sealed class OpenerAutoExecutor
 					Side: spec.Side,
 					OrderType: "LIMIT",
 					LimitPrice: spec.LimitAbs,
-					TimeInForce: _config.TimeInForce.ToUpperInvariant()));
+					TimeInForce: _config.TimeInForce.ToUpperInvariant(),
+					PositionIntent: OrderRequestBuilder.DeriveOptionIntent(spec.Side, opening: true)));
 
 				using var client = new WebullOpenApiClient(_account);
 				var placed = await client.PlaceOrderAsync(body);
