@@ -111,9 +111,9 @@ internal sealed class ScraperLoop
 	/// <summary>Pulls the chain and writes it to the two canonical stores that the backtest reads (the same
 	/// on-disk shape the ThetaData backfill produces, so live + historical are interchangeable):
 	/// <list type="bullet">
-	/// <item><c>data/quotes/&lt;TICKER&gt;/&lt;expiry&gt;.csv</c> — one row per kept contract this tick, appended,
+	/// <item><c>data/quotes/<TICKER>/<expiry>.csv</c> — one row per kept contract this tick, appended,
 	/// grouped into one CSV per expiration. Columns <c>date,time,strike,right,bid,ask,bid_size,ask_size</c>.</item>
-	/// <item><c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c> — exactly ONE full-chain snapshot per ET date (OI is
+	/// <item><c>data/oi/<TICKER>/<date>.jsonl</c> — exactly ONE full-chain snapshot per ET date (OI is
 	/// constant intraday), written on the first successful tick of the day and skipped thereafter.</item>
 	/// </list>
 	/// Keeps contracts expiring from today out to <c>config.MaxDte</c> calendar days, then applies a
@@ -215,7 +215,7 @@ internal sealed class ScraperLoop
 		return Task.CompletedTask;
 	}
 
-	/// <summary>Writes exactly ONE full-chain snapshot for the ET date to <c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>
+	/// <summary>Writes exactly ONE full-chain snapshot for the ET date to <c>data/oi/<TICKER>/<date>.jsonl</c>
 	/// on the first RTH tick (≥09:30 ET) of that date; OI is constant intraday, so subsequent ticks skip if the
 	/// file already exists. Gating to RTH (rather than the first tick, which may be pre-market) means the recorded
 	/// <c>underlyingPrice</c> and per-contract bid/ask/iv are regular-hours values, not a thin pre-market print —

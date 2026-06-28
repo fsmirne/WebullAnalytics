@@ -95,9 +95,9 @@ internal sealed class QuoteStoreCache
 
 	/// <summary>True if the store holds ANY real quote row dated within [<paramref name="since"/>, <paramref name="until"/>]
 	/// for <paramref name="root"/>. Distinguishes "the strategy declined to trade" from "the quote store has not been
-	/// backfilled for this window yet" (the common trap: running <c>--since &lt;today&gt;</c> before the evening
+	/// backfilled for this window yet" (the common trap: running <c>--since <today></c> before the evening
 	/// backfill has landed the day's quotes). A contract's rows are dated at or before its expiry, so the
-	/// <c>expiry &gt;= since</c> bound prunes earlier expiry slices; with the <c>(root, expiry, date)</c> index and
+	/// <c>expiry >= since</c> bound prunes earlier expiry slices; with the <c>(root, expiry, date)</c> index and
 	/// <c>LIMIT 1</c> the has-coverage path is near-instant.</summary>
 	public bool HasAnyQuoteInWindow(string root, DateTime since, DateTime until)
 	{
@@ -151,7 +151,7 @@ internal sealed class QuoteStoreCache
 		}
 
 		/// <summary>Loads the expiry slice from the canonical SQLite store. The DB holds already-validated rows
-		/// (the import applied the filters: ≥6 cols, valid time, strike, right C/P, BOTH bid&gt;0 AND ask&gt;0),
+		/// (the import applied the filters: ≥6 cols, valid time, strike, right C/P, BOTH bid>0 AND ask>0),
 		/// with bid/ask as scaled integers in ten-thousandths (price = value / 10000) — penny-tick data with the
 		/// source float noise (e.g. 0.35000000000000003) rounded away. The index on (root, expiry, date) makes
 		/// this fetch exactly the needed rows; the 45DTE tail an expiry slice carries is never touched.</summary>

@@ -361,7 +361,7 @@ internal static class OptionMath
 	}
 
 	/// <summary>Canonical breakeven bisection on a continuous P&L curve known to have a single sign change in
-	/// [<paramref name="a"/>, <paramref name="b"/>] (with <paramref name="a"/> &lt; <paramref name="b"/>). Stops when
+	/// [<paramref name="a"/>, <paramref name="b"/>] (with <paramref name="a"/> < <paramref name="b"/>). Stops when
 	/// the interval is ≤ 0.005 (sub-cent on a $25 underlying), capped at 60 iterations. Returns the unrounded
 	/// midpoint — callers round only at display time. Shared by the opener scorer's breakeven search and the
 	/// analyzer/rule numerical break-even finders so both engines agree to the same precision.</summary>
