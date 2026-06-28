@@ -38,14 +38,16 @@ public class CandidateScorerRationaleTests
 		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
 		var lines = rationale.Split('\n');
 
-		Assert.Equal(3, lines.Length);
+		Assert.Equal(4, lines.Length);
 		Assert.Equal("debit $74.00, maxProfit $36.91, maxLoss $74.00, R/R 0.50, prem 3.06x, BE $24.66/26.49, POP 51.1%, EV $7.62", lines[0]);
-		Assert.Contains("raw 0.025756 → tech-adjusted 0.025756", lines[1]);
-		Assert.Contains("[tech +0.13, fit 0 → no tech adjustment]", lines[1]);
-		Assert.Contains("→ final 0.010723", lines[1]);
-		Assert.DoesNotContain("adjusted 0.010411", lines[1]);
+		// Regime is the first indicator line (sibling to GEX / max-pain / F&G). fit 0 → no directional effect.
+		Assert.Equal("regime bias +0.13 (mild bullish), fit 0 → no directional effect on this structure", lines[1]);
+		Assert.Contains("raw 0.025756 → tech-adjusted 0.025756", lines[2]);
+		Assert.Contains("[tech +0.13, fit 0 → no tech adjustment]", lines[2]);
+		Assert.Contains("→ final 0.010723", lines[2]);
+		Assert.DoesNotContain("adjusted 0.010411", lines[2]);
 		// bal = 1/sqrt(3.06) ≈ 0.57: the R/R term is neutral at the default RrExponent 0.0.
-		Assert.Equal("tech-adjusted × pop 1.09 × scale 0.65 × runway 1.14\v× bal 0.57 × theta factor 1.03 (+1.50/day on $74 deployed) = final 0.010723", lines[2]);
+		Assert.Equal("tech-adjusted × pop 1.09 × scale 0.65 × runway 1.14\v× bal 0.57 × theta factor 1.03 (+1.50/day on $74 deployed) = final 0.010723", lines[3]);
 		Assert.DoesNotContain("geom", rationale);
 	}
 
@@ -119,11 +121,12 @@ public class CandidateScorerRationaleTests
 		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
 		var lines = rationale.Split('\n');
 
-		Assert.Equal(4, lines.Length);
-		Assert.Equal("rep IV 44.1% / underlying HV 34.6% = 1.27x → vol 0.86", lines[1]);
-		Assert.StartsWith("tech-adjusted × pop ", lines[3]);
-		Assert.Contains(" × vol 0.86 = final 0.010000", lines[3]);
-		Assert.DoesNotContain("adjusted 0.010000", lines[3]);
+		Assert.Equal(5, lines.Length);
+		Assert.Equal("regime bias +0.13 (mild bullish), fit 0 → no directional effect on this structure", lines[1]);
+		Assert.Equal("rep IV 44.1% / underlying HV 34.6% = 1.27x → vol 0.86", lines[2]);
+		Assert.StartsWith("tech-adjusted × pop ", lines[4]);
+		Assert.Contains(" × vol 0.86 = final 0.010000", lines[4]);
+		Assert.DoesNotContain("adjusted 0.010000", lines[4]);
 	}
 
 	[Fact]
@@ -199,9 +202,10 @@ public class CandidateScorerRationaleTests
 		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.05m, cfg: new OpenerConfig());
 		var lines = rationale.Split('\n');
 
-		Assert.Equal(4, lines.Length);
-		Assert.Equal("market net $-0.28 / theoretical net $-0.26, edge $+0.02/share → arb 1.01", lines[1]);
-		Assert.Contains(" × arb 1.01 = final 0.022291", lines[3]);
+		Assert.Equal(5, lines.Length);
+		Assert.Equal("regime bias +0.05 (neutral), fit 0 → no directional effect on this structure", lines[1]);
+		Assert.Equal("market net $-0.28 / theoretical net $-0.26, edge $+0.02/share → arb 1.01", lines[2]);
+		Assert.Contains(" × arb 1.01 = final 0.022291", lines[4]);
 	}
 
 	[Fact]
