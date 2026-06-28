@@ -151,7 +151,8 @@ internal sealed class TradeCloseCommand : AsyncCommand<TradeCloseSettings>
 				Side: side,
 				OrderType: "LIMIT",
 				LimitPrice: limitAbs,
-				TimeInForce: s.Tif.ToUpperInvariant()));
+				TimeInForce: s.Tif.ToUpperInvariant(),
+				PositionIntent: OrderRequestBuilder.DeriveOptionIntent(side, opening: false)));
 
 			try
 			{

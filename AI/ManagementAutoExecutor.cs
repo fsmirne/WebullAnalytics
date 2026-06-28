@@ -193,7 +193,11 @@ internal sealed class ManagementAutoExecutor
 			Side: "SELL",
 			OrderType: "LIMIT",
 			LimitPrice: limit,
-			TimeInForce: "DAY"));
+			TimeInForce: "DAY",
+			// Leg-in sells a new short against a held long. Without SELL_TO_OPEN, Webull classifies a
+			// lone short call as a covered-call write and rejects it for insufficient stock; the intent
+			// routes it to the (Level-4) open-short path so it nets against the long as a vertical.
+			PositionIntent: OrderRequestBuilder.DeriveOptionIntent("SELL", opening: true)));
 
 		try
 		{
@@ -314,7 +318,8 @@ internal sealed class ManagementAutoExecutor
 			Side: side,
 			OrderType: "LIMIT",
 			LimitPrice: limitAbs,
-			TimeInForce: _config.TimeInForce.ToUpperInvariant()));
+			TimeInForce: _config.TimeInForce.ToUpperInvariant(),
+			PositionIntent: OrderRequestBuilder.DeriveOptionIntent(side, opening: false)));
 
 		try
 		{
