@@ -1030,6 +1030,17 @@ internal static class CandidateScorer
 			factorParts.Add($"liq {p.LiquidityAdjustmentFactor.Value:F2}");
 
 		var indicatorParts = new List<string>();
+		// Regime: the directional-trend indicator, sibling to GEX / max-pain / F&G below. `bias` is the
+		// blended scoring bias (daily technical + VIX term + intraday tape, calibrated — see RegimeAnalyzer);
+		// its sign × this structure's fit is the tech tilt. `wa analyze regime` shows the full decomposition.
+		var regime = RegimeAnalyzer.Classify(bias);
+		var regimeLabel = regime.Direction == RegimeAnalyzer.RegimeDirection.Neutral
+			? "neutral"
+			: $"{RegimeAnalyzer.StrengthWord(regime.Strength)} {RegimeAnalyzer.DirectionWord(regime.Direction)}";
+		var regimeEffect = p.DirectionalFit == 0
+			? "fit 0 → no directional effect on this structure"
+			: $"fit {p.DirectionalFit:+0;-0} → {biasEffectPct:+0;-0}% {(biasEffectPct >= 0 ? "tech boost" : "tech cut")}";
+		indicatorParts.Add($"regime bias {bias:+0.00;-0.00} ({regimeLabel}), {regimeEffect}");
 		if (p.LiquidityAdjustmentFactor.HasValue)
 		{
 			var spreadStr = p.WorstLegBidAskSpreadPct is decimal s ? $"{(s * 100m).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}%" : "n/a";
