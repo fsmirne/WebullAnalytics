@@ -192,7 +192,7 @@ internal sealed class AnalyzeSentimentCommand : AsyncCommand<AnalyzeSentimentSet
 		for (var i = 0; i < width; i++)
 		{
 			var color = ColorFor((decimal)((i / (double)(width - 1)) * 100.0));
-			if (i == pos) sb.Append("[bold white on " + color + "]│[/]");
+			if (i == pos) sb.Append($"[bold {TerminalHelper.ContrastingForeground(color)} on {color}]│[/]");
 			else sb.Append("[" + color + "]█[/]");
 		}
 		return sb.ToString();

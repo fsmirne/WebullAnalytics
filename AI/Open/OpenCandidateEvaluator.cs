@@ -77,6 +77,11 @@ internal sealed class OpenCandidateEvaluator
 	/// Empty until the first call completes phase A0; stale (last tick's value) if the opener is disabled.</summary>
 	public IReadOnlyDictionary<string, decimal> LastUnderlyings { get; private set; } = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
+	/// <summary>Per-ticker regime inputs (macro/VIX/intraday/move-sign) captured on the last
+	/// <see cref="EvaluateAsync"/> call. Read-only side channel for <c>wa analyze regime</c>; nothing in the
+	/// scoring path reads it back.</summary>
+	public IReadOnlyDictionary<string, RegimeAnalyzer.RegimeComponents> LastRegimeComponents { get; private set; } = new Dictionary<string, RegimeAnalyzer.RegimeComponents>(StringComparer.OrdinalIgnoreCase);
+
 	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation, QuoteOverrides quoteOverrides = default)
 	{
 		var cfg = _config.Opener;
@@ -389,20 +394,14 @@ internal sealed class OpenCandidateEvaluator
 		// direction, so the on-disk cache stays lookahead-safe for distant historical asOfs too.
 		var eventCalendar = await EventCalendarLoader.LoadAsync(new[] { _config.Ticker }, cfg.Indicators.Events, ctx.Now, cancellation, cacheOnly: _backtestMode);
 
+		var lastRegimeComponents = new Dictionary<string, RegimeAnalyzer.RegimeComponents>(StringComparer.OrdinalIgnoreCase);
+
 		foreach (var tickerGroup in allSkeletons.GroupBy(s => s.Ticker))
 		{
 			if (!bootstrapSpots.TryGetValue(tickerGroup.Key, out var spot) || spot <= 0m) continue;
 			ctx.TechnicalSignals.TryGetValue(tickerGroup.Key, out var biasSignal);
 			var macroBias = biasSignal?.Score ?? 0m;
 
-			// VIX term-structure blend: layered on top of macroBias before the intraday blend.
-			// Collapses to macroBias when vixTermScore is null (Yahoo outage, pre-coverage backtest dates).
-			var biasedMacro = macroBias;
-			if (vixTermScore.HasValue && cfg.Weights.VixTermStructure > 0m)
-			{
-				var wVix = Math.Clamp(cfg.Weights.VixTermStructure, 0m, 1m);
-				biasedMacro = (1m - wVix) * macroBias + wVix * vixTermScore.Value;
-			}
 			// Intraday tape signal: fetch minute bars, derive open-to-now / gap / VWAP-deviation
 			// composite. Active in both live and backtest now that the BacktestRunner minute loop
 			// populates ctx.Now to the simulated minute (the backtest CSV cache reads
@@ -416,37 +415,19 @@ internal sealed class OpenCandidateEvaluator
 				intradayBias = await ComputeIntradayBiasAsync(tickerGroup.Key, prevClose > 0m ? prevClose : (decimal?)null, cfg.Indicators.IntradayTape, ctx.Now, cancellation);
 			}
 
-			// Per-candidate bias: blend macro (+VIX) with the intraday tape at a DTE-aware weight, then
-			// apply the directional-agreement calibration to the blended value. Folding both steps into
-			// one closure keeps the result bit-identical to the legacy single-scalar path when the DTE
-			// curve is disabled (the weight is constant across DTEs) while letting a 0DTE candidate lean
-			// fully on the tape and a swing candidate stay anchored to macro. Pure over its inputs, so
-			// it's safe to call from the Parallel.For scoring loop below.
+			// Per-candidate bias: the daily macro bias blended with VIX term structure and the intraday
+			// tape (DTE-aware weight), then directional-agreement calibrated. RegimeAnalyzer.BlendBias is
+			// the single source of truth shared with `wa analyze regime` and the risk-diagnostic panel —
+			// keeping the math in one place is what lets a 0DTE candidate lean fully on the tape while a
+			// swing candidate stays anchored to macro, identically across the opener and the inspectors.
 			biasCalibByTicker.TryGetValue(tickerGroup.Key, out var tickerCalib);
-			decimal BiasForDte(int dteCalendar)
-			{
-				var b = biasedMacro;
-				if (intradayBias != null && cfg.Weights.IntradayTape > 0m)
-				{
-					var w = cfg.IntradayTapeDteCurve.WeightForDte(dteCalendar, cfg.Weights.IntradayTape);
-					b = (1m - w) * biasedMacro + w * intradayBias.Score;
-				}
-				// Bias-signal calibration via directional agreement: if the bias direction disagreed with
-				// the recent N-day move, the signal is mis-pointing → dampen down to a 0.2× floor; on
-				// agreement, leave at full strength. Scales bias at the source so BOTH the grid-shift
-				// (BiasDriftWeight) and BiasAdjust see the calibrated value at once. Disabled when
-				// biasCalibrationLookbackDays = 0. (Tested-and-rejected additions: stability and
-				// vol-regime components — both fired too often in normal noise and dampened winners more
-				// than losers. Direction alone proved the only component with positive net P&L impact.)
-				if (cfg.BiasCalibrationLookbackDays > 0 && b != 0m && tickerCalib.MoveSign != 0m)
-				{
-					var biasSign = b > 0m ? 1m : -1m;
-					var agreement = biasSign * tickerCalib.MoveSign;
-					var reliability = Math.Clamp(0.5m + 0.5m * agreement, 0.2m, 1.0m);
-					b *= reliability;
-				}
-				return b;
-			}
+			decimal BiasForDte(int dteCalendar) => RegimeAnalyzer.BlendBias(
+				macroBias, vixTermScore, cfg.Weights.VixTermStructure,
+				intradayBias?.Score, cfg.Weights.IntradayTape, dteCalendar,
+				cfg.IntradayTapeDteCurve, cfg.BiasCalibrationLookbackDays, tickerCalib.MoveSign);
+
+			// Read-only capture for `wa analyze regime`: the raw inputs behind this ticker's BiasForDte.
+			lastRegimeComponents[tickerGroup.Key] = new RegimeAnalyzer.RegimeComponents(macroBias, vixTermScore, intradayBias, tickerCalib.MoveSign);
 
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
 			shortHorizonHvByTicker.TryGetValue(tickerGroup.Key, out var shortHorizonHv);
@@ -631,6 +612,7 @@ internal sealed class OpenCandidateEvaluator
 				}
 			}
 		}
+		LastRegimeComponents = lastRegimeComponents;
 
 		// Risk diagnostic: build one per surviving proposal. Trend fetched once per ticker; sentiment is
 		// market-wide so we reuse the snapshot fetched at the top of Phase C (if any). Still hard-skipped

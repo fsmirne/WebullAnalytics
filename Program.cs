@@ -96,6 +96,7 @@ class Program
 				analyze.AddCommand<AnalyzePositionCommand>("position");
 				analyze.AddCommand<AnalyzeGexCommand>("gex");
 				analyze.AddCommand<AnalyzeSentimentCommand>("sentiment");
+				analyze.AddCommand<AnalyzeRegimeCommand>("regime");
 			});
 			config.AddCommand<FetchCommand>("fetch");
 			config.AddCommand<SniffCommand>("sniff");
