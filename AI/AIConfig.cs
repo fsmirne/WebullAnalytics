@@ -359,7 +359,7 @@ internal sealed class CloseBeforeShortExpiryConfig
 	[JsonPropertyName("brokerForceCloseMinutesBeforeClose")] public int BrokerForceCloseMinutesBeforeClose { get; set; } = 30;
 	/// <summary>Webull also force-closes shorts merely AT RISK of finishing ITM, not only those already ITM.
 	/// This widens the trigger: a short within this percent of the money (call: spot > strike×(1−buffer);
-	/// put: spot &lt; strike×(1+buffer)) is treated as at-risk and liquidated. Default 0 (ITM only); the true
+	/// put: spot < strike×(1+buffer)) is treated as at-risk and liquidated. Default 0 (ITM only); the true
 	/// Webull threshold is opaque, so sweep this to bound the realistic drag.</summary>
 	[JsonPropertyName("brokerForceCloseMoneynessBufferPct")] public decimal BrokerForceCloseMoneynessBufferPct { get; set; } = 0m;
 }

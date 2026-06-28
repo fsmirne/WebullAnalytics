@@ -439,10 +439,10 @@ internal static class RiskDiagnosticProbeBuilder
 	/// same way AIContext.ResolveConfig does for the live pipeline. Validating the bare base layer is wrong:
 	/// it is intentionally incomplete (e.g. indicators.strikeStep lives only in the per-ticker layer), so the
 	/// unmerged config fails validation and the probe silently degrades to the generic no-score rationale.</summary>
-	/// <summary>Loads the opener config for scoring the probe (base → ai-config.&lt;TICKER&gt;.json, same as
+	/// <summary>Loads the opener config for scoring the probe (base → ai-config.<TICKER>.json, same as
 	/// AIContext.ResolveConfig). Returns null when no usable config exists, with <paramref name="unavailableReason"/>
 	/// set to a human-readable explanation — surfaced in the diagnostic so the user knows exactly what to create
-	/// (e.g. a missing per-ticker ai-config.&lt;TICKER&gt;.json supplying indicators.strikeStep) rather than the probe
+	/// (e.g. a missing per-ticker ai-config.<TICKER>.json supplying indicators.strikeStep) rather than the probe
 	/// silently degrading to a no-score rationale.</summary>
 	private static AIConfig? TryLoadAiConfigQuiet(string? ticker, out string? unavailableReason)
 	{

@@ -11,8 +11,8 @@ namespace WebullAnalytics.Scraper;
 /// mirroring <c>wa ai watch</c>'s start-time / end-time scheduling but with minute-aligned firing (no drift)
 /// and no proposal evaluation — purely persists the chain the backtest then replays against. Output goes to
 /// two canonical stores (the same shape the ThetaData backfill writes): minute NBBO to
-/// <c>data/quotes/&lt;TICKER&gt;/&lt;expiry&gt;.csv</c> and one daily full-chain OI snapshot to
-/// <c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>.</summary>
+/// <c>data/quotes/<TICKER>/<expiry>.csv</c> and one daily full-chain OI snapshot to
+/// <c>data/oi/<TICKER>/<date>.jsonl</c>.</summary>
 internal sealed class Program
 {
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");

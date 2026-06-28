@@ -34,7 +34,7 @@ internal static class SchwabOptionsClient
 	/// <summary>Fetches the full chain for <paramref name="root"/> between the given expiry dates (inclusive).
 	/// Returns the underlying spot and every quoted contract. An empty result (e.g. an unsupported index symbol)
 	/// comes back as <c>(null, empty)</c> rather than throwing, so the capture loop treats it as a soft miss.</summary>
-	/// <param name="strikeCount">When &gt; 0, asks Schwab to return only this many strikes around the
+	/// <param name="strikeCount">When > 0, asks Schwab to return only this many strikes around the
 	/// at-the-money price (per expiration) instead of the full <c>range=ALL</c> ladder. A caller that only
 	/// needs near-money strikes (e.g. <c>analyze gex</c>) sets this so the common case is a single small
 	/// request; 0 keeps the full ladder (what the scraper's backtest snapshot wants). Either way the body

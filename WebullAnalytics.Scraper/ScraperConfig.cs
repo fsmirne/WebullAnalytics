@@ -5,7 +5,7 @@ namespace WebullAnalytics.Scraper;
 
 /// <summary>Configuration for the chain scraper. Loaded from <c>data/scraper-config.json</c>; CLI flags
 /// override individual fields per-run. Output goes to the two canonical stores the backtest reads —
-/// <c>data/quotes/&lt;TICKER&gt;/&lt;expiry&gt;.csv</c> (minute NBBO) and <c>data/oi/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c>
+/// <c>data/quotes/<TICKER>/<expiry>.csv</c> (minute NBBO) and <c>data/oi/<TICKER>/<date>.jsonl</c>
 /// (one full-chain OI snapshot per day) — both rooted under <see cref="WebullAnalytics.Program.BaseDir"/>.</summary>
 internal sealed class ScraperConfig
 {
@@ -29,7 +29,7 @@ internal sealed class ScraperConfig
 	public string EndTime { get; set; } = "16:05";
 
 	/// <summary>Half-width of the post-fetch moneyness band, as a fraction of spot: a contract is kept only when
-	/// <c>|strike/spot - 1| &lt;= StrikeBandFraction</c>. Schwab returns range=ALL, so the band is enforced
+	/// <c>|strike/spot - 1| <= StrikeBandFraction</c>. Schwab returns range=ALL, so the band is enforced
 	/// scraper-side here (matches the ThetaData backfill's ±10% band). If spot is unknown for a tick the band
 	/// can't be applied and all contracts are kept. Default 0.10 (±10%).</summary>
 	[JsonPropertyName("strikeBandFraction")]

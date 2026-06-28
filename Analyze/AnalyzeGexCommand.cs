@@ -763,7 +763,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			AnsiConsole.MarkupLine($"[yellow]Dropped {skipped.Count} bucket(s) with no spot/quote within {tolerance.TotalMinutes:F0} min: {string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))} — the spot tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET{(date.Date == DateTime.Today ? $". Refresh today's tape with `wa ai history {ticker} --partial`" : "")}.[/]");
 	}
 
-	/// <summary>Reads the day's minute NBBO from <c>data/quotes/&lt;TICKER&gt;/&lt;date&gt;.csv</c> (the per-expiry store the
+	/// <summary>Reads the day's minute NBBO from <c>data/quotes/<TICKER>/<date>.csv</c> (the per-expiry store the
 	/// wa-scraper and the ThetaData evening sync both write) into one quote-set per RTH minute: every 0DTE contract that
 	/// had a two-sided book that minute, carrying the snapshot's OI but THAT minute's bid/ask with the IV nulled — so
 	/// <see cref="GexMatrix.Build"/> back-solves each bucket's IVs from the time-matched mids instead of reusing the
@@ -805,7 +805,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		return result;
 	}
 
-	/// <summary>Reads the live `analyze gex` log at <c>data/gex/&lt;TICKER&gt;/&lt;date&gt;.jsonl</c> and returns
+	/// <summary>Reads the live `analyze gex` log at <c>data/gex/<TICKER>/<date>.jsonl</c> and returns
 	/// ET time-of-day → the gravity strike that run displayed for the <paramref name="date"/> (0DTE) expiry.
 	/// Only records from <paramref name="source"/> are kept (records without a source field predate the
 	/// --source option and count as webull). Corrupt lines are skipped — a torn concurrent append must not
@@ -854,7 +854,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		[property: JsonPropertyName("dte")] int Dte,
 		[property: JsonPropertyName("expiries")] List<GexLogExpiry> Expiries);
 
-	/// <summary>Appends one record per LIVE run to <c>data/gex/&lt;TICKER&gt;/&lt;ET date&gt;.jsonl</c>: timestamp, source,
+	/// <summary>Appends one record per LIVE run to <c>data/gex/<TICKER>/<ET date>.jsonl</c>: timestamp, source,
 	/// spot, the window parameters the values depend on, and the per-expiry signals exactly as displayed (gravity + its
 	/// gross, walls, gamma flip, max pain). The live numbers are built on the chain vendor's reported IVs, which exist
 	/// nowhere on disk after the fact — without this log a historical replay has nothing to be validated against. The
@@ -878,7 +878,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	}
 
 	/// <summary>--dump: appends one CSV row per in-window contract of this LIVE fetch to
-	/// <c>data/iv/&lt;TICKER&gt;/&lt;ET date&gt;.csv</c> — the per-strike vendor inputs (bid/ask, vendor IV, OI)
+	/// <c>data/iv/<TICKER>/<ET date>.csv</c> — the per-strike vendor inputs (bid/ask, vendor IV, OI)
 	/// behind the displayed gex values, which are otherwise discarded after the run. Source-tagged so
 	/// interleaved webull/schwab dumps land in one day file and join on (time, expiry, strike, right).
 	/// Window = the same expiry/strike filters the heatmap uses; null bid/ask/IV/OI dump as empty fields

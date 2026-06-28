@@ -19,7 +19,7 @@ public class QuoteStoreCacheTests
 		"PRIMARY KEY (root, expiry, date, strike_milli, right, time_sec)) WITHOUT ROWID";
 
 	/// <summary>Builds a temp quotes.db holding the given rows (CSV-shaped "date,time,strike,right,bid,ask,bid_size,ask_size")
-	/// for SPY expiry 2026-06-18, applying the import's two-sided filter (BOTH bid&gt;0 AND ask&gt;0) and canonical
+	/// for SPY expiry 2026-06-18, applying the import's two-sided filter (BOTH bid>0 AND ask>0) and canonical
 	/// encoding (dates yyyymmdd, bid/ask ten-thousandths). Returns the db path.</summary>
 	private static string WriteStore(params string[] rows)
 	{

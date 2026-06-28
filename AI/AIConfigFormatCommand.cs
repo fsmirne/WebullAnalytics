@@ -11,7 +11,7 @@ internal sealed class AIConfigFormatSettings : CommandSettings
 	public string Path { get; set; } = "";
 }
 
-/// <summary>`wa ai config format &lt;PATH&gt;` — rewrites an existing JSON config in the house style
+/// <summary>`wa ai config format <PATH>` — rewrites an existing JSON config in the house style
 /// (<see cref="ConfigJsonWriter"/>): tab-indented, LF, with each opener.structures entry on one line.
 /// Use it to normalize hand-edited or generated config files.</summary>
 internal sealed class AIConfigFormatCommand : AsyncCommand<AIConfigFormatSettings>
