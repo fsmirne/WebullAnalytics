@@ -187,13 +187,13 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				// the per-tick [debug] summary below already carries the timestamp and counts.
 				var tickEmitted = (settings.EmitManagementProposals ? results.Count : 0) + openResultCount;
 				// On flat ticks the management-side snapshot has no position legs and therefore no underlying
-				// price — fall back to the spot the opener's bootstrap probe resolved this tick.
+				// price â€” fall back to the spot the opener's bootstrap probe resolved this tick.
 				var haveSpot = quoteSnapshot.Underlyings.TryGetValue(config.Ticker, out var hbSpot) || (openEvaluator?.LastUnderlyings.TryGetValue(config.Ticker, out hbSpot) ?? false);
 				if (!debug)
 				{
 					var spotStr = haveSpot ? hbSpot.ToString("0.00") : "?";
 					var summary = tickEmitted == 0 ? "no proposals emitted" : $"{tickEmitted} proposal(s) emitted";
-					AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} — {summary}[/]");
+					AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} â€” {summary}[/]");
 				}
 
 				if (debug)
@@ -231,7 +231,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 	// NYSE regular session, hardcoded. The watch loop is the only consumer; every other code path
 	// reuses MarketCalendar.IsOpen for day-of-week / holiday handling. If we ever need to support a
-	// different exchange, lift these constants — but the rest of the app assumes US equity/options too.
+	// different exchange, lift these constants â€” but the rest of the app assumes US equity/options too.
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan MarketOpenEt = new(9, 30, 0);
 	private static readonly TimeSpan MarketCloseEt = new(16, 0, 0);
