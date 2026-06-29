@@ -28,6 +28,34 @@ internal static class WebullOptionsClient
 		["VIX"] = 925323875,
 	};
 
+	// Diagnostic raw-response dump. When set (via `wa ai scan/watch --dump`), the first few chain/queryBatch
+	// HTTP bodies are written verbatim under this directory with a timing index, so a feed that looks wrong on
+	// the platform can be inspected field-by-field — e.g. whether the payload carries a quote/trade timestamp
+	// that lags the wall clock at fetch (a delayed-feed signature). Null = off, the normal-run default.
+	internal static string? RawDumpDir;
+	private static int _rawDumpCount;
+	private const int RawDumpCap = 8;
+
+	/// <summary>Writes one raw HTTP response body to <see cref="RawDumpDir"/> (capped at <see cref="RawDumpCap"/>
+	/// per process so a long watch can't fill disk) and appends a wall-clock line to index.tsv. The fetch time is
+	/// logged so the dumped payload's own timestamp fields can be compared against it.</summary>
+	private static void MaybeDumpRaw(string endpoint, string tag, string json)
+	{
+		if (RawDumpDir is not { } dir || _rawDumpCount >= RawDumpCap) return;
+		try
+		{
+			Directory.CreateDirectory(dir);
+			_rawDumpCount++;
+			var now = DateTime.Now;
+			var file = Path.Combine(dir, $"webull-{endpoint}-{tag}-{_rawDumpCount:D2}.json");
+			File.WriteAllText(file, json);
+			File.AppendAllText(Path.Combine(dir, "index.tsv"),
+				$"{now:yyyy-MM-dd HH:mm:ss.fff}\t{now.ToUniversalTime():HH:mm:ss}Z\t{endpoint}\t{tag}\t{Path.GetFileName(file)}\t{json.Length}B{Environment.NewLine}");
+			Console.WriteLine($"Webull: dumped raw {endpoint} response → {Path.GetFileName(file)} (fetched {now:HH:mm:ss} local; compare any quote/trade-time field inside to this clock).");
+		}
+		catch (Exception ex) { Console.WriteLine($"Webull: raw dump failed: {ex.Message}"); }
+	}
+
 	private static readonly Dictionary<string, string> DefaultHeaders = new()
 	{
 		["app"] = "global",
@@ -261,6 +289,7 @@ internal static class WebullOptionsClient
 				}
 
 				var json = await response.Content.ReadAsStringAsync(cancellationToken);
+				MaybeDumpRaw("strategylist", root, json);
 				var parsed = ParseStrategyListResponse(json, derivativeIdMap);
 				if (parsed.UnderlyingPrice.HasValue)
 					underlyingPrices[root] = parsed.UnderlyingPrice.Value;
@@ -361,6 +390,7 @@ internal static class WebullOptionsClient
 				}
 
 				var json = await response.Content.ReadAsStringAsync(cancellationToken);
+				MaybeDumpRaw("querybatch", "legs", json);
 				using var doc = JsonDocument.Parse(json);
 				if (doc.RootElement.ValueKind != JsonValueKind.Array)
 					return quotes;

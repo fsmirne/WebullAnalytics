@@ -75,6 +75,31 @@ internal abstract class AISingleTickerSubcommandSettings : AISubcommandSettings
 	public string Ticker { get; set; } = "";
 }
 
+/// <summary>Base for the live-fetch single-ticker subcommands (scan, watch): adds the chain-vendor selector
+/// and the raw-response dump switch. Replay/backtest don't fetch a live chain, so they stay on the plain
+/// <see cref="AISingleTickerSubcommandSettings"/> and never expose these.</summary>
+internal abstract class AILiveTickerSubcommandSettings : AISingleTickerSubcommandSettings
+{
+	private static readonly string[] ValidSources = ["webull", "schwab"];
+
+	[CommandOption("--source <SOURCE>")]
+	[Description("Live option-chain vendor: webull (sniffed-session chain) or schwab (chains API NBBO; needs `wa schwab login`). Overrides the config's `quoteSource` for this run; when omitted, the config value (default webull) applies. IV is re-based to the NBBO mid for both vendors, so the scorer sees the same basis — use schwab to cross-check when Webull's API quotes look off vs the platform.")]
+	public string? Source { get; set; }
+
+	[CommandOption("--dump")]
+	[Description("Diagnostic: dump the first few raw Webull chain/queryBatch HTTP responses to data/quote-dumps/ (with an index.tsv timing log) so the payload can be inspected — e.g. whether it carries a quote timestamp that lags the wall clock. Webull source only; capped per run.")]
+	public bool Dump { get; set; }
+
+	public override ValidationResult Validate()
+	{
+		var baseResult = base.Validate();
+		if (!baseResult.Successful) return baseResult;
+		if (Source != null && !ValidSources.Contains(Source, StringComparer.OrdinalIgnoreCase))
+			return ValidationResult.Error($"--source: expected webull or schwab, got '{Source}'");
+		return ValidationResult.Success();
+	}
+}
+
 internal static class AITextOutput
 {
 	internal static async Task<int> RunAsync(AISubcommandSettings settings, string stem, Func<Task<int>> action)
@@ -219,7 +244,13 @@ internal static class AIContext
 		return new LivePositionSource(account, trades, feeLookup);
 	}
 
-	internal static IQuoteSource BuildLiveQuoteSource(AIConfig config) => new LiveQuoteSource();
+	internal static IQuoteSource BuildLiveQuoteSource(AIConfig config, string source = "webull") =>
+		new LiveQuoteSource(string.Equals(source, "schwab", StringComparison.OrdinalIgnoreCase) ? QuoteVendor.Schwab : QuoteVendor.Webull);
+
+	/// <summary>Arms (or disarms) the Webull client's one-shot raw-response dump for this run. Routed through
+	/// here so the only dependency on <c>WebullAnalytics.Api</c> stays in this file.</summary>
+	internal static void ConfigureRawQuoteDump(bool enabled) =>
+		WebullAnalytics.Api.WebullOptionsClient.RawDumpDir = enabled ? Program.ResolvePath("data/quote-dumps") : null;
 
 	/// <summary>Resolves the broker account from api-config.json. <paramref name="accountOverride"/>
 	/// mirrors `wa trade place --account`: when non-null, it wins; when null, falls back to
@@ -274,7 +305,7 @@ internal static class AIContext
 }
 
 /// <summary>`ai scan` — one evaluation pass, print proposals, exit.</summary>
-internal sealed class AIScanSettings : AISingleTickerSubcommandSettings
+internal sealed class AIScanSettings : AILiveTickerSubcommandSettings
 {
 	[CommandOption("--top <N>")]
 	[Description("Override opener.topNPerTicker from ai-config.json.")]
@@ -410,8 +441,11 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 	private static async Task<int> RunLiveAsync(AIScanSettings settings, AIConfig config, CancellationToken cancellation)
 	{
+		AIContext.ConfigureRawQuoteDump(settings.Dump);
+		var source = (settings.Source ?? config.QuoteSource).ToLowerInvariant();
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
-		var quotes = AIContext.BuildLiveQuoteSource(config);
+		var quotes = AIContext.BuildLiveQuoteSource(config, source);
+		AnsiConsole.MarkupLine($"[dim]quote source: {source}[/]");
 
 		var tickerSet = config.TickerSet();
 		var now = DateTime.Now;
