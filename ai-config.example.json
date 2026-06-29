@@ -8,6 +8,7 @@
 		"value": 25
 	},
 	"log-level": "information",
+	"quoteSource": "webull",
 	"indicators": {
 		"strikeStep": 1.0,
 		"ivDefaultPct": 18,

@@ -7,7 +7,7 @@ using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
 
-internal sealed class AIWatchSettings : AISingleTickerSubcommandSettings
+internal sealed class AIWatchSettings : AILiveTickerSubcommandSettings
 {
 	[CommandOption("--tick <SECONDS>")]
 	[Description("Override watch.tickIntervalSeconds.")]
@@ -113,8 +113,10 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 		var stopAt = ComputeStopTime(settings);
 
+		AIContext.ConfigureRawQuoteDump(settings.Dump);
+		var source = (settings.Source ?? config.QuoteSource).ToLowerInvariant();
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
-		var quotes = AIContext.BuildLiveQuoteSource(config);
+		var quotes = AIContext.BuildLiveQuoteSource(config, source);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 		var tickerSet = config.TickerSet();
 
@@ -133,7 +135,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
 		}
 
-		AnsiConsole.MarkupLine($"[bold]ai watch[/] ticker={config.Ticker} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss}");
+		AnsiConsole.MarkupLine($"[bold]ai watch[/] ticker={config.Ticker} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss} source={source}");
 
 		// Mirror `wa ai scan`'s debug banner so watch is never silent in debug mode: when the opener
 		// finds nothing the only other debug output (the per-structure breakdown) doesn't fire, leaving

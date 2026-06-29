@@ -26,6 +26,7 @@ internal sealed class AIConfig
 	[JsonPropertyName("watch")] public WatchConfig Watch { get; set; } = new();
 	[JsonPropertyName("cashReserve")] public CashReserveConfig CashReserve { get; set; } = new();
 	[JsonPropertyName("log-level")] public string LogLevel { get; set; } = "information"; // error | information | debug
+	[JsonPropertyName("quoteSource")] public string QuoteSource { get; set; } = "webull"; // webull | schwab — default live-fetch vendor for scan/watch; --source overrides per run
 	[JsonPropertyName("indicators")] public IndicatorsConfig Indicators { get; set; } = new();
 	[JsonPropertyName("rules")] public RulesConfig Rules { get; set; } = new();
 	[JsonPropertyName("execution")] public ExecutionConfig Execution { get; set; } = new();
@@ -435,6 +436,8 @@ internal static class AIConfigLoader
 		if (c.CashReserve.Value < 0m) return $"cashReserve.value: must be non-negative, got {c.CashReserve.Value}";
 		if (c.CashReserve.Mode == "percent" && c.CashReserve.Value > 100m) return $"cashReserve.value: must be ≤ 100 for mode 'percent', got {c.CashReserve.Value}";
 		if (c.LogLevel is not ("error" or "information" or "debug")) return $"log-level: must be error|information|debug, got '{c.LogLevel}'";
+		if (!string.Equals(c.QuoteSource, "webull", StringComparison.OrdinalIgnoreCase) && !string.Equals(c.QuoteSource, "schwab", StringComparison.OrdinalIgnoreCase))
+			return $"quoteSource: must be webull|schwab, got '{c.QuoteSource}'";
 
 		var sl = c.Rules.StopLoss;
 		if (sl.PctOfMaxLoss <= 0m || sl.PctOfMaxLoss > 1m) return $"rules.stopLoss.pctOfMaxLoss: must be in (0, 1], got {sl.PctOfMaxLoss}";
