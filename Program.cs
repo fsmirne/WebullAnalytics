@@ -99,6 +99,7 @@ class Program
 				analyze.AddCommand<AnalyzeRegimeCommand>("regime");
 			});
 			config.AddCommand<FetchCommand>("fetch");
+			config.AddCommand<Ledger.LedgerCommand>("ledger");
 			config.AddCommand<SniffCommand>("sniff");
 			config.AddBranch("trade", trade =>
 			{
