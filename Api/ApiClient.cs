@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using WebullAnalytics.Trading;
@@ -7,6 +9,7 @@ namespace WebullAnalytics.Api;
 internal static class ApiClient
 {
 	private const string OrderListUrl = "https://ustrade.webullfinance.com/api/trading/v1/webull/profitloss/ticker/orderList/v2";
+	private const string CashRecordUrl = "https://ustrade.webullfinance.com/api/trading/v1/webull/cashrecord/activities/v2";
 
 	private static readonly Dictionary<string, string> DefaultHeaders = new()
 	{
@@ -73,6 +76,73 @@ internal static class ApiClient
 		}
 
 		File.Move(tmpPath, outputPath, overwrite: true);
+	}
+
+	/// <summary>One fund activity from Webull's consumer cash-record ledger: a trade fill, expiry settlement,
+	/// fee, interest, or transfer. <see cref="RunningTotal"/> is the post-event cash balance Webull
+	/// stamps on each row (its <c>totalAmount</c> field), so the first item's running total is the
+	/// platform's current cash. <see cref="Amount"/> is signed (incoming positive, outgoing negative).</summary>
+	internal sealed record FundActivity(string OccurredTime, string Name, string Category, string Description, decimal Amount, decimal RunningTotal, string Direction);
+
+	/// <summary>Result of <see cref="FetchFundActivitiesAsync"/>: the ledger rows (newest-first, as Webull
+	/// returns them) plus the server's <c>updateTime</c> stamp.</summary>
+	internal sealed record FundActivitiesResult(string? UpdateTime, IReadOnlyList<FundActivity> Items);
+
+	/// <summary>Pulls the most-recent <paramref name="pageSize"/> fund activities (the running-balance
+	/// ledger the Webull platform shows). Uses the same scraped session as <see cref="FetchOrdersToJsonl"/> /
+	/// <c>wa sniff</c> against the same trading host. Mirrors <see cref="WebullChartsClient"/>'s contract:
+	/// drops the per-URL <c>x-s</c>/<c>x-sv</c> signature headers (the endpoint doesn't validate them —
+	/// verified — and a stale value computed for a different request is meaningless) and refreshes
+	/// <c>t_time</c> to defeat the freshness check. Throws on transport error or non-2xx so the caller can
+	/// surface a "session may be stale — run wa sniff" hint.</summary>
+	internal static async Task<FundActivitiesResult> FetchFundActivitiesAsync(ApiConfig config, int pageSize, CancellationToken cancellation)
+	{
+		using var client = new HttpClient();
+		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
+
+		var secId = config.Webull.SecAccountId;
+		var url = $"{CashRecordUrl}?secAccountId={secId}";
+		var body = $"{{\"secAccountId\":{secId},\"pageIndex\":1,\"pageSize\":{pageSize},\"conditions\":[{{\"key\":\"date\",\"values\":[\"CY\"]}},{{\"key\":\"category\",\"values\":[\"all\"]}}]}}";
+
+		using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+		request.Headers.TryAddWithoutValidation("accept", "*/*");
+		foreach (var (key, value) in DefaultHeaders)
+			request.Headers.TryAddWithoutValidation(key, value);
+		foreach (var (key, value) in config.Webull.Headers)
+		{
+			if (string.Equals(key, "x-s", StringComparison.OrdinalIgnoreCase)) continue;
+			if (string.Equals(key, "x-sv", StringComparison.OrdinalIgnoreCase)) continue;
+			if (string.Equals(key, "t_time", StringComparison.OrdinalIgnoreCase)) continue;
+			request.Headers.TryAddWithoutValidation(key, value);
+		}
+		request.Headers.TryAddWithoutValidation("t_time", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture));
+
+		var response = await client.SendAsync(request, cancellation);
+		response.EnsureSuccessStatusCode();
+		var json = await response.Content.ReadAsStringAsync(cancellation);
+		return ParseFundActivities(json);
+	}
+
+	/// <summary>Parses the cash-record activities payload. Tolerant of missing/typed-null fields — every
+	/// item field defaults to empty/zero rather than throwing, since Webull's schema varies by row type.</summary>
+	internal static FundActivitiesResult ParseFundActivities(string json)
+	{
+		using var doc = JsonDocument.Parse(json);
+		var root = doc.RootElement;
+		var updateTime = root.TryGetProperty("updateTime", out var ut) && ut.ValueKind == JsonValueKind.String ? ut.GetString() : null;
+
+		var items = new List<FundActivity>();
+		if (root.TryGetProperty("items", out var arr) && arr.ValueKind == JsonValueKind.Array)
+		{
+			foreach (var it in arr.EnumerateArray())
+			{
+				string Str(string name) => it.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
+				decimal Dec(string name) => it.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String && decimal.TryParse(v.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var d) ? d : 0m;
+				items.Add(new FundActivity(Str("occurredTime"), Str("name"), Str("category2"), Str("description"), Dec("amount"), Dec("totalAmount"), Str("direction")));
+			}
+		}
+
+		return new FundActivitiesResult(updateTime, items);
 	}
 }
 
