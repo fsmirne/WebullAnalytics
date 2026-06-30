@@ -56,7 +56,7 @@ internal sealed class OpenerAutoExecutor
 	/// spent. The run stays bounded to MaxOrdersPerDay submissions and all other guards (held-position
 	/// dedup, broker dedup, affordability) remain active. The watch loop must never set this: it would
 	/// re-fire on every tick, which is exactly what the cap exists to prevent.</param>
-	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, IReadOnlyDictionary<string, OpenPosition> openPositions, DateTime now, CancellationToken cancellation, bool bypassDailyCap = false)
+	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, IReadOnlyDictionary<string, OpenPosition> openPositions, DateTime now, CancellationToken cancellation, bool bypassDailyCap = false, object? cycleToken = null)
 	{
 		if (!_config.Enabled) return 0;
 		if (proposals.Count == 0) return 0;
@@ -72,7 +72,7 @@ internal sealed class OpenerAutoExecutor
 		// Broker-truth refresh. If submit is on but the API call fails, do nothing this tick.
 		// Dry-runs proceed without the refresh (informational; users still see "would submit" lines
 		// even if a matching order already exists at the broker).
-		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation))
+		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation, cycleToken))
 			return 0;
 
 		// Daily cap is scoped to this run's ticker (one ticker per process — proposals share it), so a
@@ -131,7 +131,7 @@ internal sealed class OpenerAutoExecutor
 			{
 				if (!bypassDailyCap)
 				{
-					AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (daily cap):[/] {_config.MaxOrdersPerDay} order(s) already active at broker today (filled + pending).");
+					AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (daily cap):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/] — {_config.MaxOrdersPerDay} order(s) already active at broker today (filled + pending).");
 					break;
 				}
 				if (ordersThisTick >= _config.MaxOrdersPerDay) break; // --submit-override lifts the broker count, not this run's bound

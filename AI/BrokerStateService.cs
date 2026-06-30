@@ -261,15 +261,31 @@ internal sealed class BrokerStateService
 			return $"{side}:{parsed.Root.ToUpperInvariant()}:{parsed.ExpiryDate:yyyy-MM-dd}:{parsed.Strike.ToString("F2", CultureInfo.InvariantCulture)}:{cp}";
 		}).OrderBy(s => s, StringComparer.Ordinal));
 
+	// Coalescing state: the watch/scan loop hands BOTH auto-executors the same per-cycle token, so the
+	// second one reuses the first's outcome instead of re-pulling. Each refresh is two HTTP round-trips
+	// (today's-orders + open-orders); the management+opener pair otherwise doubled the order-endpoint
+	// calls per tick and tripped Webull's rate limiter (429 → fail-closed skip). Reference identity, so
+	// a fresh `new object()` per tick guarantees inequality across ticks without any clock dependency.
+	private object? _lastCycleToken;
+	private bool _lastCycleResult;
+
 	/// <summary>Convenience: refresh-or-skip pattern. Wraps <see cref="RefreshAsync"/> in
 	/// try/catch, logs the failure, and returns false on any error. Callers use the
-	/// return value to decide whether to proceed with live submission attempts.</summary>
-	public async Task<bool> TryRefreshAsync(CancellationToken cancellation)
+	/// return value to decide whether to proceed with live submission attempts.
+	/// <para>When <paramref name="cycleToken"/> is supplied and matches the token of the previous call,
+	/// the broker round-trip is skipped and that call's outcome is reused — this is how the two
+	/// auto-executors share a single pull per tick. A null token (the `wa trade` paths) always refreshes,
+	/// so coalescing is opt-in and a forgotten/duplicate token degrades to the prior always-refresh
+	/// behavior, never to a stale snapshot.</para></summary>
+	public async Task<bool> TryRefreshAsync(CancellationToken cancellation, object? cycleToken = null)
 	{
+		if (cycleToken != null && ReferenceEquals(cycleToken, _lastCycleToken)) return _lastCycleResult;
+
+		bool ok;
 		try
 		{
 			await RefreshAsync(cancellation);
-			return true;
+			ok = true;
 		}
 		catch (Exception ex)
 		{
@@ -277,7 +293,10 @@ internal sealed class BrokerStateService
 			_activeFingerprintCounts = null;
 			_activeByFingerprint = null;
 			_activeOrderCountByRoot = null;
-			return false;
+			ok = false;
 		}
+
+		if (cycleToken != null) { _lastCycleToken = cycleToken; _lastCycleResult = ok; }
+		return ok;
 	}
 }
