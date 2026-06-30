@@ -921,8 +921,17 @@ internal static class CandidateScorer
 
 	private static ResolvedLegPrice? ResolveLegPrice(string symbol, OptionParsed parsed, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultIv)
 	{
-	   if (!quotes.TryGetValue(symbol, out _))
+	   if (!quotes.TryGetValue(symbol, out var costBasisQuote))
 			return null;
+
+		// A cost-basis-collapsed quote (bid == ask) carries the position's entry price, not a live market
+		// quote — use it directly, even when non-positive (a rolled credit leg's per-leg basis nets negative;
+		// its difference vs the other leg is the true position credit). TryLiveBidAsk would reject the
+		// non-positive ask and force BS-from-IV pricing, which ignores the cost basis. Real market quotes
+		// only ever have bid == ask when both are positive, where TryLiveBidAsk returns the same value — so
+		// this changes nothing for the live opener / backtest.
+		if (costBasisQuote.Bid.HasValue && costBasisQuote.Ask.HasValue && costBasisQuote.Bid.Value == costBasisQuote.Ask.Value)
+			return new ResolvedLegPrice(costBasisQuote.Bid.Value, costBasisQuote.Ask.Value, UsedFallback: false);
 
 		var live = TryLiveBidAsk(symbol, quotes);
 		if (live.HasValue)
