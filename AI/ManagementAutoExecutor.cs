@@ -59,7 +59,7 @@ internal sealed class ManagementAutoExecutor
 
 	/// <summary>Inspects rule results and dispatches eligible Close proposals through the tranche
 	/// scheduler. Returns the count of orders submitted (or planned, in dry-run mode) on this tick.</summary>
-	public async Task<int> HandleAsync(IReadOnlyList<RuleEvaluator.EvaluationResult> results, EvaluationContext ctx, CancellationToken cancellation)
+	public async Task<int> HandleAsync(IReadOnlyList<RuleEvaluator.EvaluationResult> results, EvaluationContext ctx, CancellationToken cancellation, object? cycleToken = null)
 	{
 		if (!_config.Enabled) return 0;
 
@@ -72,7 +72,7 @@ internal sealed class ManagementAutoExecutor
 		}
 
 		// Broker-truth refresh. If submit is on but the API call fails, do nothing this tick.
-		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation))
+		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation, cycleToken))
 			return 0;
 
 		var orders = 0;

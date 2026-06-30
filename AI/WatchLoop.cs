@@ -158,6 +158,10 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			try
 			{
 				var now = DateTime.Now;
+				// One broker-state pull per tick, shared by both auto-executors. A fresh token each tick lets
+				// BrokerStateService coalesce the management+opener refreshes into a single Webull order-endpoint
+				// round-trip (halving the per-tick calls that were tripping the rate limiter).
+				var cycleToken = new object();
 				var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
 				var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
 				var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
@@ -169,7 +173,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 					foreach (var r in results) { sink.Emit(r.Proposal, r.IsRepeat); proposalsEmitted++; }
 
 				if (autoExecutor != null)
-					await autoExecutor.HandleAsync(results, ctx, cancellation);
+					await autoExecutor.HandleAsync(results, ctx, cancellation, cycleToken);
 
 				var openResultCount = 0;
 				if (openEvaluator != null && openSink != null)
@@ -178,7 +182,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 					openResultCount = openResults.Count;
 					for (var i = 0; i < openResults.Count; i++) { openSink.Emit(openResults[i], rank: i + 1); proposalsEmitted++; }
 					if (openerExecutor != null)
-						await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation);
+						await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation, cycleToken: cycleToken);
 				}
 
 				// Per-tick pulse: a timestamped line EVERY tick so both proposals and quiet ticks are anchored
