@@ -279,16 +279,13 @@ internal static class RiskDiagnosticBuilder
 				// not current mark-to-market. Falls back to current prices for the open pipeline.
 				var longPrice = L.CostBasisPerShare ?? L.PricePerShare ?? 0m;
 				var shortPrice = S.CostBasisPerShare ?? S.PricePerShare ?? 0m;
+				// Directional bias depends only on which strike you are long, not on debit/credit: a
+				// vertical is bullish iff you hold the lower strike (long low call = bull call; long low
+				// put = bull put — both net-positive-delta). The debit/credit split only selects the label.
+				// (The old per-cp conditions had the call-credit and put-debit cases inverted.)
 				var debit = longPrice > shortPrice;
-				if (debit)
-				{
-					var bullish = (cp == "C" && L.Parsed.Strike < S.Parsed.Strike)
-							   || (cp == "P" && L.Parsed.Strike > S.Parsed.Strike);
-					return ("vertical_debit", bullish ? "bullish" : "bearish");
-				}
-				var bullishCredit = (cp == "C" && L.Parsed.Strike > S.Parsed.Strike)
-								 || (cp == "P" && L.Parsed.Strike < S.Parsed.Strike);
-				return ("vertical_credit", bullishCredit ? "bullish" : "bearish");
+				var bullish = L.Parsed.Strike < S.Parsed.Strike;
+				return (debit ? "vertical_debit" : "vertical_credit", bullish ? "bullish" : "bearish");
 			}
 			if (L.Parsed.Strike == S.Parsed.Strike) return ("calendar", "neutral");
 			var coveredBullish = (cp == "C" && L.Parsed.Strike < S.Parsed.Strike)

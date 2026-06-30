@@ -233,11 +233,12 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 	{
 		try
 		{
-			var path = Program.ResolvePath(AIConfigLoader.ConfigPath);
-			if (!File.Exists(path)) return 0m;
-			var cfg = System.Text.Json.JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(path));
+			// Resolve the merged base → ai-config.{TICKER}.json config (same loader the probe scores with).
+			// Reading the bare base config and validating it returned 0 bias for EVERY ticker: the base layer
+			// has strikeStep=0 and fails AIConfigLoader.Validate (strikeStep lives only in the per-ticker
+			// layer), so the validation guard tripped on every call regardless of ticker or market hours.
+			var cfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
 			if (cfg == null) return 0m;
-			if (AIConfigLoader.Validate(cfg) != null) return 0m;
 
 			var filter = cfg.Indicators.TechnicalFilter;
 			if (!filter.Enabled) return 0m;
