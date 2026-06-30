@@ -65,8 +65,10 @@ internal sealed class LedgerCommand : AsyncCommand<LedgerSettings>
 		table.AddColumn(new TableColumn("Amount").RightAligned());
 		table.AddColumn(new TableColumn("Running").RightAligned());
 
-		foreach (var it in result.Items)
+		// Webull returns newest-first; render oldest-first so the most recent activity sits at the bottom.
+		for (var i = result.Items.Count - 1; i >= 0; i--)
 		{
+			var it = result.Items[i];
 			var amtColor = it.Amount < 0 ? "red" : "green";
 			var type = string.IsNullOrEmpty(it.Name) ? it.Category : it.Name;
 			table.AddRow(
