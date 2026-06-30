@@ -481,8 +481,10 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			using var sink = new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
 		}
+		// One shared broker-state pull for this scan, reused by both executors (see BrokerStateService coalescing).
+		var cycleToken = new object();
 		if (mgmtExecutor != null)
-			await mgmtExecutor.HandleAsync(results, ctx, cancellation);
+			await mgmtExecutor.HandleAsync(results, ctx, cancellation, cycleToken);
 
 		var openCount = 0;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
@@ -493,7 +495,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
 			if (openerExecutor != null)
-				await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation, bypassDailyCap: settings.SubmitOverride);
+				await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation, bypassDailyCap: settings.SubmitOverride, cycleToken: cycleToken);
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
