@@ -218,7 +218,12 @@ internal static class OptionMath
 		if (q.Bid.Value < 0m || q.Ask.Value <= 0m) return null;
 		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
 		if (mid <= 0m) return null;
-		if (mid <= Intrinsic(spot, parsed.Strike, parsed.CallPut)) return null;
+		// Require the *bid* itself to exceed intrinsic, not just the mid. A mid only marginally above
+		// intrinsic carries time value smaller than the bid/ask half-spread (bid < intrinsic ⇔
+		// extrinsic < half-spread), so the back-solved IV is dominated by quote noise rather than real
+		// vol — deep-ITM legs in a wide or stale (off-hours) book collapse to a near-zero IV that then
+		// craters POP / expected-move math downstream. Such legs keep the broker/vendor IV instead.
+		if (q.Bid.Value <= Intrinsic(spot, parsed.Strike, parsed.CallPut)) return null;
 		var t = (parsed.ExpiryDate.Date + MarketClose - asOf).TotalDays / 365.0;
 		if (t <= 0) return null;
 		try

@@ -1,5 +1,4 @@
-﻿using System.Text.Json;
-using WebullAnalytics.AI.Events;
+﻿using WebullAnalytics.AI.Events;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.RiskDiagnostics;
@@ -430,6 +429,11 @@ internal static class RiskDiagnosticProbeBuilder
 			if (!leg.CostBasisPerShare.HasValue) continue;
 			if (!map.TryGetValue(leg.Symbol, out var q)) continue;
 			var px = leg.CostBasisPerShare.Value;
+			// Collapse bid/ask to the per-leg cost basis — even when negative. A rolled credit leg stores a
+			// signed/net per-leg basis (here short −0.46, long −0.69) whose difference is the true position
+			// credit (0.23). ResolveLegPrice honors this collapsed (bid == ask) quote directly so the
+			// structural score (credit/BE/maxLoss/POP) reflects the actual entry, matching `wa report` — not
+			// the current market mid (which answers a different question: "open this fresh now").
 			map[leg.Symbol] = q with { Bid = px, Ask = px };
 		}
 		return map;
@@ -444,7 +448,7 @@ internal static class RiskDiagnosticProbeBuilder
 	/// set to a human-readable explanation — surfaced in the diagnostic so the user knows exactly what to create
 	/// (e.g. a missing per-ticker ai-config.<TICKER>.json supplying indicators.strikeStep) rather than the probe
 	/// silently degrading to a no-score rationale.</summary>
-	private static AIConfig? TryLoadAiConfigQuiet(string? ticker, out string? unavailableReason)
+	internal static AIConfig? TryLoadAiConfigQuiet(string? ticker, out string? unavailableReason)
 	{
 		var key = ticker?.ToUpperInvariant() ?? "";
 		if (_cachedConfigsByTicker.TryGetValue(key, out var cached)) { unavailableReason = cached.Reason; return cached.Config; }
