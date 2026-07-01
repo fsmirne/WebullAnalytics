@@ -48,9 +48,15 @@ internal static class FearGreedClient
 	/// while still picking up T+1 caches once they exist for the asOf date.</summary>
 	public static async Task<SentimentSnapshot?> FetchAsync(DateTime asOf, CancellationToken cancellation, bool cacheOnly = false)
 	{
-		var dateStr = asOf.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+		// Backtest replay (cacheOnly): today's F&G isn't published until the 5pm settle, so reading day D's
+		// cached EOD score to make an intraday decision on D is look-ahead. The value actually knowable during
+		// a session on `asOf` is the PRIOR trading day's settled close (empirically within ~0.1 of the live
+		// 09:30 reading, since F&G barely moves overnight). Live (cacheOnly == false) keeps `asOf`: it fetches
+		// CNN's real-time reading, which is legitimately knowable now.
+		var lookup = cacheOnly ? MarketCalendar.PreviousOpenOnOrBefore(asOf.Date.AddDays(-1)) : asOf;
+		var dateStr = lookup.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 		var cachePath = Program.ResolvePath(Path.Combine(CacheDir, $"{dateStr}.json"));
-		var settled = IsSettled(asOf, DateTime.UtcNow);
+		var settled = IsSettled(lookup, DateTime.UtcNow);
 
 		if (settled && File.Exists(cachePath))
 		{
