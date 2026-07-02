@@ -28,10 +28,13 @@ public class ClassifyStructureCharacterizationTests
 	[Fact] public void SingleShortCall() => Assert.Equal(("single_short", "bearish"), Classify(Opt("C", Near, 50m, false, 1m)));
 	[Fact] public void SingleShortPut() => Assert.Equal(("single_short", "bullish"), Classify(Opt("P", Near, 50m, false, 1m)));
 
-	// Same-expiry 1L1S: debit when long leg costs more than short leg, else credit.
+	// Same-expiry 1L1S: debit when long leg costs more than short leg, else credit. Bias is by long strike
+	// vs short strike (long the lower strike = bullish, both cps) — the call-credit and put-debit cases
+	// originally locked the classifier's inverted-bias quirk; e449fba fixed the code and these now assert
+	// the financially correct direction.
 	[Fact] public void CallDebitVertical() => Assert.Equal(("vertical_debit", "bullish"), Classify(Opt("C", Near, 50m, true, 2m), Opt("C", Near, 52m, false, 1m)));
-	[Fact] public void CallCreditVertical() => Assert.Equal(("vertical_credit", "bullish"), Classify(Opt("C", Near, 52m, true, 1m), Opt("C", Near, 50m, false, 2m)));
-	[Fact] public void PutDebitVertical() => Assert.Equal(("vertical_debit", "bullish"), Classify(Opt("P", Near, 52m, true, 2m), Opt("P", Near, 50m, false, 1m)));
+	[Fact] public void CallCreditVertical() => Assert.Equal(("vertical_credit", "bearish"), Classify(Opt("C", Near, 52m, true, 1m), Opt("C", Near, 50m, false, 2m)));
+	[Fact] public void PutDebitVertical() => Assert.Equal(("vertical_debit", "bearish"), Classify(Opt("P", Near, 52m, true, 2m), Opt("P", Near, 50m, false, 1m)));
 	[Fact] public void PutCreditVertical() => Assert.Equal(("vertical_credit", "bullish"), Classify(Opt("P", Near, 50m, true, 1m), Opt("P", Near, 52m, false, 2m)));
 
 	// Diff-expiry 1L1S.
