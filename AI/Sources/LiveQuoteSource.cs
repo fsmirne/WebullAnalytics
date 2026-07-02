@@ -121,6 +121,18 @@ internal sealed class LiveQuoteSource : IQuoteSource
 			?? throw new InvalidOperationException("api-config.json is empty.");
 	}
 
+	/// <summary>Re-solves ImpliedVolatility from the NBBO mid for every quote whose root is <paramref name="root"/>,
+	/// against <paramref name="spot"/> instead of the spot the chain fetch reported. Used by the premarket spot
+	/// override: the fetch-time back-solve above ran against the chain's stale prior-session close, so a corrected
+	/// spot has to re-base the IVs too or the smile stays skewed by the overnight move. Other roots pass through.</summary>
+	internal static IReadOnlyDictionary<string, OptionContractQuote> RebaseIvForSpot(IReadOnlyDictionary<string, OptionContractQuote> options, string root, decimal spot, DateTime asOf)
+	{
+		var spots = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [root] = spot };
+		var rebased = new Dictionary<string, OptionContractQuote>(options.Count, StringComparer.OrdinalIgnoreCase);
+		foreach (var (sym, q) in options) rebased[sym] = BackSolveIvFromMid(sym, q, spots, asOf);
+		return rebased;
+	}
+
 	/// <summary>Returns <paramref name="q"/> with ImpliedVolatility re-solved from the NBBO mid (matching the
 	/// backtest), or unchanged when the book is one-sided / inputs are degenerate (keeps the vendor IV).</summary>
 	private static OptionContractQuote BackSolveIvFromMid(string sym, OptionContractQuote q, IReadOnlyDictionary<string, decimal> spots, DateTime asOf)

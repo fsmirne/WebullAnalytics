@@ -23,7 +23,7 @@ namespace WebullAnalytics.Analyze;
 /// <c>wa ai scan</c>), then re-scores the best candidate of each directional family across a bias sweep to
 /// locate the flip. Live only — needs a sniffed Webull session (or the configured live quote source).
 /// </summary>
-internal sealed class AnalyzeRegimeSettings : AISingleTickerSubcommandSettings
+internal sealed class AnalyzeRegimeSettings : AILiveTickerSubcommandSettings
 {
 	[CommandOption("--account <ALIAS>")]
 	[System.ComponentModel.Description("Account alias or ID from api-config.json. Used only for the live position/account read; defaults to defaultAccount.")]
@@ -87,14 +87,23 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 	private static async Task<RegimeContext> BuildLiveContextAsync(AIConfig config, AnalyzeRegimeSettings settings, CancellationToken cancellation)
 	{
 		var now = DateTime.Now;
+		AIContext.ConfigureRawQuoteDump(settings.Dump);
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
-		var quotes = AIContext.BuildLiveQuoteSource(config);
+		// Honor --source / the config's vendor so the numbers actually match `wa ai scan` (this was silently
+		// pinned to Webull before). Premarket note: Schwab's chain books are frozen until the bell while
+		// Webull's GTH books are live until 09:15 ET — `--source webull` gives the quote-coherent premarket read.
+		var source = (settings.Source ?? config.QuoteSource).ToLowerInvariant();
+		var quotes = AIContext.BuildLiveQuoteSource(config, source);
+		AnsiConsole.MarkupLine($"[dim]quote source: {source}[/]");
 		var tickerSet = config.TickerSet();
 		var priceCache = new HistoricalPriceCache();
 
 		var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
 		var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
 		var snapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
+		// Premarket: replace the chain's stale prior-session spot with a live estimate (GTH-quote parity /
+		// SPY-converted premarket bar) so the regime read reflects the overnight move, not yesterday's close.
+		snapshot = await PremarketSpotOverride.ApplyAsync(snapshot, config, quotes, now, cancellation);
 		var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, priceCache, config.Indicators.TechnicalFilter, now, cancellation);
 		var ctx = new EvaluationContext(now, openPositions, snapshot.Underlyings, snapshot.Options, cash, accountValue, technicalSignals);
 		var evaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache);
