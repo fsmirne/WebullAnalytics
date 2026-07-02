@@ -65,8 +65,8 @@ fi
 
 PY=python3
 SCRIPT="$SCRIPT_DIR/backfill_thetadata.py"
-TICKERS="SPY:60 SPXW:0 XSP:0 GME:60"   # quotes + oi (per-ticker DTE)
-VERIFY="SPY SPXW XSP GME"              # verify-quotes (bare names, no DTE)
+TICKERS="SPXW:0 XSP:0 SPY:60 GME:60"   # quotes + oi (per-ticker DTE)
+VERIFY="SPXW XSP SPY GME"              # verify-quotes (bare names, no DTE)
 CONC=2
 
 # Stop at the last COMPLETE day. ThetaData finalizes a session's data at ~17:15 ET, so an evening
