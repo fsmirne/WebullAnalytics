@@ -67,4 +67,90 @@ public class LivePositionSourceTests : IDisposable
 		Assert.Equal(0.92m, decimal.Round(initial, 2));
 		Assert.Equal(0.73m, decimal.Round(adjusted, 2));
 	}
+
+	// ── Leg-side inference (BuildPositionLegs / MapWebullStrategyToAiKind) ──────────────────────
+	// Webull's holdings response has no per-leg side; sides come from structure geometry plus the
+	// parent quantity's sign (negative = sold to open). These pin the mapping for every supported
+	// strategy, both directions. The credit-vertical cases replicate the live 2026-07-02 XSP book
+	// that the old qty<=0 skip dropped as "unclassifiable".
+
+	private static LivePositionSource.ParsedLeg Leg(string root, DateTime expiry, decimal strike, string cp) =>
+		new(MatchKeys.OccSymbol(root, expiry, strike, cp), root, cp, strike, expiry);
+
+	private static readonly DateTime Exp = new(2026, 7, 2);
+	private static readonly DateTime FarExp = new(2026, 7, 6);
+
+	[Fact]
+	public void BuildPositionLegs_CreditPutVertical_ShortsTheHigherStrike()
+	{
+		var legs = LivePositionSource.BuildPositionLegs("VERTICAL", new List<LivePositionSource.ParsedLeg> { Leg("XSP", Exp, 742m, "P"), Leg("XSP", Exp, 744m, "P") }, qty: 32, inverted: true)!;
+		Assert.Equal(Side.Sell, legs.Single(l => l.Strike == 744m).Side);
+		Assert.Equal(Side.Buy, legs.Single(l => l.Strike == 742m).Side);
+		Assert.All(legs, l => Assert.Equal(32, l.Qty));
+		Assert.Equal("ShortPutVertical", LivePositionSource.MapWebullStrategyToAiKind("VERTICAL", legs, inverted: true));
+	}
+
+	[Fact]
+	public void BuildPositionLegs_CreditCallVertical_ShortsTheLowerStrike()
+	{
+		var legs = LivePositionSource.BuildPositionLegs("VERTICAL", new List<LivePositionSource.ParsedLeg> { Leg("XSP", Exp, 748m, "C"), Leg("XSP", Exp, 750m, "C") }, qty: 32, inverted: true)!;
+		Assert.Equal(Side.Sell, legs.Single(l => l.Strike == 748m).Side);
+		Assert.Equal(Side.Buy, legs.Single(l => l.Strike == 750m).Side);
+		Assert.Equal("ShortCallVertical", LivePositionSource.MapWebullStrategyToAiKind("VERTICAL", legs, inverted: true));
+	}
+
+	[Fact]
+	public void BuildPositionLegs_DebitCallVertical_LongsTheLowerStrike()
+	{
+		var legs = LivePositionSource.BuildPositionLegs("VERTICAL", new List<LivePositionSource.ParsedLeg> { Leg("SPY", Exp, 748m, "C"), Leg("SPY", Exp, 750m, "C") }, qty: 1, inverted: false)!;
+		Assert.Equal(Side.Buy, legs.Single(l => l.Strike == 748m).Side);
+		Assert.Equal(Side.Sell, legs.Single(l => l.Strike == 750m).Side);
+		Assert.Equal("LongCallVertical", LivePositionSource.MapWebullStrategyToAiKind("VERTICAL", legs, inverted: false));
+	}
+
+	[Fact]
+	public void BuildPositionLegs_DebitPutVertical_LongsTheHigherStrike()
+	{
+		// The pre-fix inference marked lower=long for puts too (debit-call default); a debit put
+		// vertical is long the higher (more expensive) strike.
+		var legs = LivePositionSource.BuildPositionLegs("VERTICAL", new List<LivePositionSource.ParsedLeg> { Leg("SPY", Exp, 742m, "P"), Leg("SPY", Exp, 744m, "P") }, qty: 1, inverted: false)!;
+		Assert.Equal(Side.Buy, legs.Single(l => l.Strike == 744m).Side);
+		Assert.Equal(Side.Sell, legs.Single(l => l.Strike == 742m).Side);
+		Assert.Equal("LongPutVertical", LivePositionSource.MapWebullStrategyToAiKind("VERTICAL", legs, inverted: false));
+	}
+
+	[Fact]
+	public void BuildPositionLegs_Single_DirectionFollowsQuantitySign()
+	{
+		var longLegs = LivePositionSource.BuildPositionLegs("SINGLE", new List<LivePositionSource.ParsedLeg> { Leg("SPY", Exp, 750m, "C") }, qty: 2, inverted: false)!;
+		Assert.Equal(Side.Buy, longLegs.Single().Side);
+		Assert.Equal("LongCall", LivePositionSource.MapWebullStrategyToAiKind("SINGLE", longLegs, inverted: false));
+
+		var shortLegs = LivePositionSource.BuildPositionLegs("SINGLE", new List<LivePositionSource.ParsedLeg> { Leg("SPY", Exp, 750m, "P") }, qty: 2, inverted: true)!;
+		Assert.Equal(Side.Sell, shortLegs.Single().Side);
+		Assert.Equal("ShortPut", LivePositionSource.MapWebullStrategyToAiKind("SINGLE", shortLegs, inverted: true));
+	}
+
+	[Fact]
+	public void BuildPositionLegs_Calendar_ShortsTheNearExpiry_ReversedWhenSold()
+	{
+		var parsed = () => new List<LivePositionSource.ParsedLeg> { Leg("SPY", FarExp, 750m, "C"), Leg("SPY", Exp, 750m, "C") };
+
+		var longCal = LivePositionSource.BuildPositionLegs("CALENDAR", parsed(), qty: 1, inverted: false)!;
+		Assert.Equal(Side.Sell, longCal.Single(l => l.Expiry == Exp).Side);
+		Assert.Equal(Side.Buy, longCal.Single(l => l.Expiry == FarExp).Side);
+		Assert.Equal("LongCalendar", LivePositionSource.MapWebullStrategyToAiKind("CALENDAR", longCal, inverted: false));
+
+		var shortCal = LivePositionSource.BuildPositionLegs("CALENDAR", parsed(), qty: 1, inverted: true)!;
+		Assert.Equal(Side.Buy, shortCal.Single(l => l.Expiry == Exp).Side);
+		Assert.Equal(Side.Sell, shortCal.Single(l => l.Expiry == FarExp).Side);
+		Assert.Equal("ShortCalendar", LivePositionSource.MapWebullStrategyToAiKind("CALENDAR", shortCal, inverted: true));
+	}
+
+	[Fact]
+	public void BuildPositionLegs_ThreeOrMoreLegs_ReturnsNull()
+	{
+		var legs = LivePositionSource.BuildPositionLegs("CUSTOM", new List<LivePositionSource.ParsedLeg> { Leg("SPY", Exp, 748m, "C"), Leg("SPY", Exp, 750m, "C"), Leg("SPY", Exp, 752m, "C") }, qty: 1, inverted: false);
+		Assert.Null(legs);
+	}
 }

@@ -25,8 +25,10 @@ namespace WebullAnalytics.AI.Sources;
 /// When no replay match is found (positions opened outside the tracked trade history), we fall
 /// back to the broker's CostPrice.
 ///
-/// Positions whose option_strategy is null (single-leg) or whose strategy is not in the supported
-/// set (currently CALENDAR and DIAGONAL) are skipped.
+/// Positions whose option_strategy is not in the supported set (SINGLE, VERTICAL, CALENDAR,
+/// DIAGONAL) or that have 3+ legs are skipped. A negative parent quantity means the combo was sold
+/// to open (credit vertical, naked short, reverse calendar/diagonal): quantity is reported as its
+/// magnitude, every inferred leg side is inverted, and the basis is carried as a negative debit.
 /// </summary>
 internal sealed class LivePositionSource : IPositionSource
 {
@@ -78,7 +80,11 @@ internal sealed class LivePositionSource : IPositionSource
 			if (string.IsNullOrEmpty(h.OptionStrategy) || !SupportedStrategies.Contains(h.OptionStrategy)) continue;
 			if (h.Legs == null || h.Legs.Count < 1) continue;
 
-			if (!int.TryParse(h.Quantity, NumberStyles.Any, CultureInfo.InvariantCulture, out var qty) || qty <= 0) continue;
+			// Negative parent quantity = the combo was sold to open (credit structure: short vertical,
+			// naked short single, reverse calendar/diagonal). Same legs, every side inverted.
+			if (!int.TryParse(h.Quantity, NumberStyles.Any, CultureInfo.InvariantCulture, out var signedQty) || signedQty == 0) continue;
+			var inverted = signedQty < 0;
+			var qty = Math.Abs(signedQty);
 			if (!decimal.TryParse(h.CostPrice, NumberStyles.Any, CultureInfo.InvariantCulture, out var brokerNetDebit)) brokerNetDebit = 0m;
 
 			var parsedLegs = new List<ParsedLeg>();
@@ -90,22 +96,21 @@ internal sealed class LivePositionSource : IPositionSource
 			}
 			if (parsedLegs.Count == 0) continue;
 
-			// Build PositionLeg list. For multi-leg positions we infer side from the cost — Webull
-			// doesn't expose per-leg side directly on the holdings response, but for SINGLE (always
-			// long the leg the user paid for) and for the long-side verticals/calendars/diagonals
-			// the AI rules care about, side can be inferred from leg ordering (earlier-expiry/
-			// closer-to-spot is typically the short). For multi-leg single-expiry verticals we use
-			// strike ordering; for multi-expiry we use expiry ordering. This matches the prior
-			// short-vs-long inference used by the calendar/diagonal path.
-			var positionLegs = BuildPositionLegs(h.OptionStrategy!, parsedLegs, qty);
+			// Build PositionLeg list. Webull doesn't expose per-leg side on the holdings response;
+			// sides are inferred from structure geometry plus the parent quantity's sign (see
+			// BuildPositionLegs).
+			var positionLegs = BuildPositionLegs(h.OptionStrategy!, parsedLegs, qty, inverted);
 			if (positionLegs == null) continue;
 
-			var strategyKind = MapWebullStrategyToAiKind(h.OptionStrategy!, positionLegs);
+			var strategyKind = MapWebullStrategyToAiKind(h.OptionStrategy!, positionLegs, inverted);
 
 			var legSetKey = BuildLegSetKey(positionLegs.Select(l => l.Symbol));
 			var (initialDebit, adjustedDebit) = costBasisLookup.TryGetValue(legSetKey, out var basis)
 				? basis
 				: (brokerNetDebit, brokerNetDebit);
+			// Sold-to-open structures carry their basis as a net credit (negative debit) so
+			// PositionRiskEstimator computes max loss as wing width minus credit, not credit itself.
+			if (inverted) { initialDebit = -Math.Abs(initialDebit); adjustedDebit = -Math.Abs(adjustedDebit); }
 
 			// Position key needs to be stable even for single-leg (no "short leg" in that case).
 			// For multi-leg, use the short leg's strike+expiry (existing convention); for single-leg,
@@ -126,7 +131,8 @@ internal sealed class LivePositionSource : IPositionSource
 				AdjustedNetDebit: adjustedDebit,
 				Quantity: qty,
 				OpenedAt: openedAt,
-				MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, positionLegs)
+				MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, positionLegs),
+				PositionId: h.PositionId
 			);
 		}
 
@@ -134,44 +140,42 @@ internal sealed class LivePositionSource : IPositionSource
 	}
 
 	/// <summary>Builds the per-leg list from Webull's parsed legs. Webull's holdings response doesn't
-	/// expose per-leg side, so for multi-leg structures we infer it. For SINGLE the leg is always
-	/// long. For multi-leg structures we apply the existing convention: earlier-expiry leg is the
-	/// short (calendars/diagonals); same-expiry vertical → the leg closer to spot is the short.
-	/// Returns null if the structure can't be classified.</summary>
-	private static List<PositionLeg>? BuildPositionLegs(string optionStrategy, List<ParsedLeg> parsed, int qty)
+	/// expose per-leg side, so we infer it from structure geometry plus the parent quantity's sign
+	/// (inverted = sold to open). SINGLE: the one leg carries the position's direction. Same-expiry
+	/// vertical: the leg closer to the money (lower strike for calls, higher for puts) carries the
+	/// higher premium — it's the long leg of a debit vertical and the short leg of a credit one.
+	/// Calendar/diagonal: earlier expiry is the short when long the structure, reversed when sold.
+	/// Returns null if the structure can't be classified. Internal for tests.</summary>
+	internal static List<PositionLeg>? BuildPositionLegs(string optionStrategy, List<ParsedLeg> parsed, int qty, bool inverted)
 	{
+		var longSide = inverted ? Side.Sell : Side.Buy;
+		var shortSide = inverted ? Side.Buy : Side.Sell;
 		if (parsed.Count == 1)
 		{
 			var l = parsed[0];
-			return new List<PositionLeg> { new(l.OccSymbol, Side.Buy, l.Strike, l.Expiry, l.CallPut, qty) };
+			return new List<PositionLeg> { new(l.OccSymbol, longSide, l.Strike, l.Expiry, l.CallPut, qty) };
 		}
 		if (parsed.Count == 2)
 		{
 			parsed.Sort((a, b) => a.Expiry.CompareTo(b.Expiry));
 			var first = parsed[0];
 			var second = parsed[1];
-			bool sameExpiry = first.Expiry == second.Expiry;
-			if (sameExpiry)
+			if (first.Expiry == second.Expiry)
 			{
-				// Vertical: short leg is the one closer to ATM (lower strike for puts, higher strike for calls).
-				// Webull's "VERTICAL" doesn't say whether it's debit or credit; we infer from strike order.
-				// For a LongCall debit spread: long the lower strike, short the higher strike. So lower strike = long.
-				// For a ShortCall credit spread: short the lower strike, long the higher strike. So lower strike = short.
-				// Without knowing debit vs credit, default to debit (long lower / short higher) — matches our
-				// bot's primary use case (LegInShortRule converts LongCall to LongCallVertical).
 				var lower = first.Strike < second.Strike ? first : second;
 				var higher = first.Strike < second.Strike ? second : first;
+				var money = first.CallPut == "C" ? lower : higher;
+				var wing = ReferenceEquals(money, lower) ? higher : lower;
 				return new List<PositionLeg>
 				{
-					new(lower.OccSymbol, Side.Buy, lower.Strike, lower.Expiry, lower.CallPut, qty),
-					new(higher.OccSymbol, Side.Sell, higher.Strike, higher.Expiry, higher.CallPut, qty),
+					new(money.OccSymbol, longSide, money.Strike, money.Expiry, money.CallPut, qty),
+					new(wing.OccSymbol, shortSide, wing.Strike, wing.Expiry, wing.CallPut, qty),
 				};
 			}
-			// Calendar / diagonal: shorter expiry is the short (existing convention).
 			return new List<PositionLeg>
 			{
-				new(first.OccSymbol, Side.Sell, first.Strike, first.Expiry, first.CallPut, qty),
-				new(second.OccSymbol, Side.Buy, second.Strike, second.Expiry, second.CallPut, qty),
+				new(first.OccSymbol, shortSide, first.Strike, first.Expiry, first.CallPut, qty),
+				new(second.OccSymbol, longSide, second.Strike, second.Expiry, second.CallPut, qty),
 			};
 		}
 		// 3+ legs: not yet supported in live mode. The bot doesn't open these structures, so this is
@@ -179,23 +183,19 @@ internal sealed class LivePositionSource : IPositionSource
 		return null;
 	}
 
-	/// <summary>Maps Webull's option_strategy + inferred leg sides to an OpenStructureKind name
-	/// string the AI rules recognize.</summary>
-	private static string MapWebullStrategyToAiKind(string webullStrategy, IReadOnlyList<PositionLeg> legs)
+	/// <summary>Maps Webull's option_strategy + parent-quantity sign to an OpenStructureKind name
+	/// string the AI rules recognize. ShortCalendar/ShortDiagonal have no enum entry — no rule
+	/// manages them — but the name still flows through display and `wa trade close`. Internal for tests.</summary>
+	internal static string MapWebullStrategyToAiKind(string webullStrategy, IReadOnlyList<PositionLeg> legs, bool inverted)
 	{
 		switch (webullStrategy.ToUpperInvariant())
 		{
 			case "SINGLE":
-				return legs[0].CallPut == "C" ? "LongCall" : "LongPut";
+				return legs[0].CallPut == "C" ? (inverted ? "ShortCall" : "LongCall") : (inverted ? "ShortPut" : "LongPut");
 			case "VERTICAL":
-				// 2 legs same expiry; we set lower=long, higher=short by convention above (debit spread).
-				// If both legs are puts → LongPutVertical (or ShortPutVertical for credit); if both calls →
-				// LongCallVertical. Heuristic for debit vs credit: positive net debit → long vertical.
-				// Without that signal here we default to the long variant; rules that distinguish credit
-				// vs debit can compute from per-leg quotes.
-				return legs[0].CallPut == "C" ? "LongCallVertical" : "LongPutVertical";
-			case "CALENDAR": return "LongCalendar";
-			case "DIAGONAL": return "LongDiagonal";
+				return legs[0].CallPut == "C" ? (inverted ? "ShortCallVertical" : "LongCallVertical") : (inverted ? "ShortPutVertical" : "LongPutVertical");
+			case "CALENDAR": return inverted ? "ShortCalendar" : "LongCalendar";
+			case "DIAGONAL": return inverted ? "ShortDiagonal" : "LongDiagonal";
 			default: return webullStrategy; // pass through for any not-yet-mapped strategy
 		}
 	}
@@ -368,5 +368,5 @@ internal sealed class LivePositionSource : IPositionSource
 	private static decimal ParseDecimal(string? s) =>
 		decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : 0m;
 
-	private sealed record ParsedLeg(string OccSymbol, string Root, string CallPut, decimal Strike, DateTime Expiry);
+	internal sealed record ParsedLeg(string OccSymbol, string Root, string CallPut, decimal Strike, DateTime Expiry);
 }
