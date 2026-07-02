@@ -292,8 +292,11 @@ internal sealed class ManagementAutoExecutor
 		// Round to the exchange-required tick (single-leg vs SPX-complex vs penny-complex) so Webull
 		// doesn't reject with OAUTH_OPENAPI_OPTION_PRICE_STEP_GTE. Dry-run output uses the rounded
 		// value too so the printed `wa trade place` hint matches what live submission would send.
+		// A worthless position rounds to a $0.00 net, which the broker rejects — flatten by paying one
+		// tick instead (around zero the side sign is quote noise anyway).
 		var side = netMid >= 0m ? "SELL" : "BUY";
 		var limitAbs = OptionPriceRounding.RoundToTick(Math.Abs(netMid), position.Legs.Count, position.Ticker);
+		if (limitAbs == 0m) { side = "BUY"; limitAbs = OptionPriceRounding.MinTick(position.Legs.Count, position.Ticker); }
 
 		var argLegs = string.Join(",", legSpecs.Select(l => $"{l.Action}:{l.Symbol}:{l.LegQty}"));
 		var summary = $"close {qty}/{position.Quantity} {position.Ticker} @ ${limitAbs:F2} ({side.ToLowerInvariant()})";

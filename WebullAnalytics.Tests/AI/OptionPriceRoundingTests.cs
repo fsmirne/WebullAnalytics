@@ -26,10 +26,30 @@ public class OptionPriceRoundingTests
 	[InlineData(1.234, "SPXW", 1.25)]    // SPX-class complex: $0.05 net
 	[InlineData(0.07, "SPXW", 0.05)]
 	[InlineData(2.97, "SPX", 2.95)]
-	[InlineData(10.82, "XSP", 10.80)]    // XSP grouped with SPX-class
 	public void MultiLeg_SpxClass_UsesFiveCentNet(decimal input, string ticker, decimal expected)
 	{
 		Assert.Equal(expected, OptionPriceRounding.RoundToTick(input, legCount: 4, ticker));
+	}
+
+	[Theory]
+	[InlineData(10.82, 4, 10.82)]        // complex: penny net (NOT grouped with SPX/SPXW)
+	[InlineData(0.02, 2, 0.02)]          // worthless-vertical close: $0.02 stays placeable
+	[InlineData(10.82, 1, 10.82)]        // single-leg penny too
+	[InlineData(0.07, 1, 0.07)]
+	public void Xsp_UsesPennyTickForAllSeries(decimal input, int legCount, decimal expected)
+	{
+		// Cboe Mini-SPX: minimum tick is $0.01 for all series (broker-verified live 2026-07-02).
+		Assert.Equal(expected, OptionPriceRounding.RoundToTick(input, legCount, "XSP"));
+	}
+
+	[Theory]
+	[InlineData(2, "XSP", 0.01)]
+	[InlineData(2, "SPXW", 0.05)]
+	[InlineData(2, "SPY", 0.01)]
+	[InlineData(1, "SPY", 0.05)]
+	public void MinTick_MatchesTickTable(int legCount, string ticker, decimal expected)
+	{
+		Assert.Equal(expected, OptionPriceRounding.MinTick(legCount, ticker));
 	}
 
 	[Theory]
