@@ -43,8 +43,10 @@ public static class TableRenderer
 			try { terminalWidth = Console.WindowWidth; }
 			catch { terminalWidth = 200; }
 
-			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: false);
-			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: false, individualResults: breakEvens);
+			// Grids are rendered below with TableBorder.Rounded, whose outer left/right borders cost 2 chars;
+			// the width estimate must account for them or the last date column wraps on tight terminals.
+			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true);
+			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true, individualResults: breakEvens);
 			var combinedByTicker = new Dictionary<string, BreakEvenResult>(StringComparer.Ordinal);
 			foreach (var c in combined)
 			{
