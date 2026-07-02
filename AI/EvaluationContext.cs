@@ -46,6 +46,8 @@ internal sealed record EvaluationContext(
 /// credit structures, net debit for debit structures. Used by StopLossRule (and others) to fire at the
 /// same threshold the opener's scorer assumed. Null when the source can't derive it (e.g., naked single
 /// leg). Always non-negative when set.</param>
+/// <param name="PositionId">Broker-assigned position identifier (Webull holdings position_id). Only set
+/// by LivePositionSource; null for replay/backtest sources. Lets `wa trade close` target one position.</param>
 internal sealed record OpenPosition(
 	string Key,
 	string Ticker,
@@ -55,7 +57,8 @@ internal sealed record OpenPosition(
 	decimal AdjustedNetDebit,
 	int Quantity,
 	DateTime? OpenedAt = null,
-	decimal? MaxLossPerShare = null
+	decimal? MaxLossPerShare = null,
+	string? PositionId = null
 );
 
 /// <summary>
