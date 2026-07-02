@@ -1070,7 +1070,7 @@ internal sealed class OpenCandidateEvaluator
 	private static Task<IReadOnlyList<MinuteBar>> BacktestNoopIntradayFetcher(string ticker, BarInterval interval, int count, bool includeExtended, CancellationToken cancellation)
 		=> Task.FromResult<IReadOnlyList<MinuteBar>>(Array.Empty<MinuteBar>());
 
-	private static ApiConfig? TryLoadApiConfig()
+	internal static ApiConfig? TryLoadApiConfig()
 	{
 		try
 		{

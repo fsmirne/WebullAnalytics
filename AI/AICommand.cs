@@ -464,6 +464,9 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		// runs against the broker's reported spot — for managed-position scenarios with a wildly stale
 		// underlying, enumerated strike brackets may be slightly off-target, but proposal pricing/scoring
 		// still uses the overridden spot.
+		// Auto premarket correction first (fresh spot from GTH-quote parity or the SPY-converted premarket
+		// bar, IVs re-based); the explicit flags below still overwrite whatever it set.
+		quoteSnapshot = await PremarketSpotOverride.ApplyAsync(quoteSnapshot, config, quotes, now, cancellation);
 		quoteSnapshot = await ApplySpotOverridesAsync(settings, config, quoteSnapshot, quotes, now, cancellation);
 		if (quoteSnapshot == null) return 1;
 
@@ -551,7 +554,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			foreach (var ticker in needsParity)
 			{
 				var diagLines = new List<string>();
-				var derived = DeriveSpotFromParity(ticker, options, riskFreeRate: 0.036, now, diag: line => diagLines.Add(line));
+				var derived = PremarketSpotOverride.DeriveSpotFromParity(ticker, options, riskFreeRate: 0.036, now, diag: line => diagLines.Add(line));
 				if (derived == null)
 				{
 					Console.Error.WriteLine($"Error: --premarket: could not back-solve spot for {ticker} (no expiry had a strike with both call+put bid/ask or last-price).");
@@ -571,74 +574,6 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		if (banner.Length > 0) AnsiConsole.MarkupLine($"[bold yellow]Spot overrides:[/] {banner}");
 
 		return new QuoteSnapshot(options, merged);
-	}
-
-	internal readonly record struct ParityResult(decimal Spot, decimal AtmStrike, int Dte);
-
-	/// <summary>Back-solves the underlying spot from put-call parity on the ATM straddle in the fetched
-	/// option chain. Returns null if no expiry has a strike with both a call and put quote.
-	/// Parity (European, no dividends — exact for cash-settled SPX/SPXW/NDX/XSP/RUT): S = (C - P) + K * exp(-r*T).
-	/// Picks the nearest non-negative DTE expiry, then the strike where |C_mid - P_mid| is minimum (ATM).
-	/// Quote preference per leg: bid+ask mid (bid=0, ask>0, ask=bid), else LastPrice if positive. The LastPrice
-	/// fallback handles premarket chains where Webull echoes the prior-session close but omits bid/ask.
-	/// </summary>
-	internal static ParityResult? DeriveSpotFromParity(string ticker, IReadOnlyDictionary<string, OptionContractQuote> quotes, double riskFreeRate, DateTime asOf, Action<string>? diag = null)
-	{
-		// Group by expiry: { expiry ? { strike ? (call?, put?) } }.
-		var byExpiry = new Dictionary<DateTime, Dictionary<decimal, (OptionContractQuote? call, OptionContractQuote? put)>>();
-		foreach (var (sym, q) in quotes)
-		{
-			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
-			if (!byExpiry.TryGetValue(p.ExpiryDate, out var byStrike))
-				byExpiry[p.ExpiryDate] = byStrike = new Dictionary<decimal, (OptionContractQuote?, OptionContractQuote?)>();
-			byStrike.TryGetValue(p.Strike, out var pair);
-			byStrike[p.Strike] = p.CallPut == "C" ? (q, pair.put) : (pair.call, q);
-		}
-
-		if (byExpiry.Count == 0)
-		{
-			diag?.Invoke($"  {ticker}: no contracts for this root in the fetched chain.");
-			return null;
-		}
-
-		// Pick the nearest non-negative DTE expiry that has at least one strike with both call+put viable mids.
-		foreach (var expiry in byExpiry.Keys.Where(d => d.Date >= asOf.Date).OrderBy(d => d))
-		{
-			var byStrike = byExpiry[expiry];
-			decimal? bestStrike = null;
-			decimal bestDiff = decimal.MaxValue;
-			decimal bestC = 0m, bestP = 0m;
-			int bothPresent = 0, callOnly = 0, putOnly = 0, neither = 0;
-			foreach (var (k, pair) in byStrike)
-			{
-				var cMid = Mid(pair.call);
-				var pMid = Mid(pair.put);
-				if (cMid != null && pMid != null) bothPresent++;
-				else if (cMid != null) callOnly++;
-				else if (pMid != null) putOnly++;
-				else neither++;
-				if (cMid == null || pMid == null) continue;
-				var diff = Math.Abs(cMid.Value - pMid.Value);
-				if (diff < bestDiff) { bestDiff = diff; bestStrike = k; bestC = cMid.Value; bestP = pMid.Value; }
-			}
-			diag?.Invoke($"  {ticker} {expiry:yyyy-MM-dd}: {byStrike.Count} strikes (both={bothPresent}, callOnly={callOnly}, putOnly={putOnly}, neither={neither}).");
-			if (bestStrike == null) continue;
-
-			var dte = Math.Max(0, (expiry.Date - asOf.Date).Days);
-			var discount = (decimal)Math.Exp(-riskFreeRate * dte / 365.0);
-			var spot = (bestC - bestP) + bestStrike.Value * discount;
-			return new ParityResult(spot, bestStrike.Value, dte);
-		}
-		return null;
-
-		static decimal? Mid(OptionContractQuote? q)
-		{
-			if (q == null) return null;
-			if (q.Bid is decimal b && q.Ask is decimal a && b >= 0m && a > 0m && a >= b) return (b + a) / 2m;
-			if (q.LastPrice is decimal lp && lp > 0m) return lp;
-			return null;
-		}
 	}
 
 	/// <summary>Theoretical scan: same opener pipeline as the live path, but the live quote source is

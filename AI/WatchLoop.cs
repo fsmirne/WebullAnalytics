@@ -165,6 +165,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
 				var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
 				var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
+				// No-op during RTH; corrects the stale chain spot on premarket ticks (--ignore-market-hours runs).
+				quoteSnapshot = await PremarketSpotOverride.ApplyAsync(quoteSnapshot, config, quotes, now, cancellation);
 				var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, priceCache, config.Indicators.TechnicalFilter, now, cancellation);
 
 				var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
