@@ -79,16 +79,21 @@ if not exist "%INSTALL_DIR%" (
 REM Copy the executables.
 REM A running process (wa ai watch, wa-scraper capturing until 16:05) locks its exe against
 REM overwrite, which used to make the copy fail silently-ish and leave a stale install. Windows
-REM does allow RENAMING a running exe, so: move the live file aside to *.old (the running process
-REM keeps executing the renamed file untouched), copy the new build into place, and sweep the
-REM *.old files on the next install once those processes have exited. Running processes still
-REM execute the OLD code until restarted — the install just stops being blocked by them.
+REM does allow RENAMING a running exe, so: try the plain copy first, and only when it fails
+REM (target locked by a running process) move the live file aside to *.old (the running process
+REM keeps executing the renamed file untouched), then copy again. The *.old files are swept on
+REM the next install once those processes have exited. Running processes still execute the OLD
+REM code until restarted — the install just stops being blocked by them.
 del "%INSTALL_DIR%\wa.exe.*.old" >nul 2>&1
 del "%INSTALL_DIR%\wa-scraper.exe.*.old" >nul 2>&1
 
 echo Copying wa.exe to %INSTALL_DIR%...
-if exist "%INSTALL_DIR%\wa.exe" move /y "%INSTALL_DIR%\wa.exe" "%INSTALL_DIR%\wa.exe.%RANDOM%.old" >nul
-copy /y "bin\Release\net10.0\win-x64\publish\wa.exe" "%INSTALL_DIR%\" >nul
+copy /y "bin\Release\net10.0\win-x64\publish\wa.exe" "%INSTALL_DIR%\" >nul 2>&1
+if %errorLevel% neq 0 (
+    echo wa.exe is in use - moving the live file aside...
+    move /y "%INSTALL_DIR%\wa.exe" "%INSTALL_DIR%\wa.exe.%RANDOM%.old" >nul
+    copy /y "bin\Release\net10.0\win-x64\publish\wa.exe" "%INSTALL_DIR%\" >nul
+)
 if %errorLevel% neq 0 (
     echo ERROR: Failed to copy executable.
     pause
@@ -96,8 +101,12 @@ if %errorLevel% neq 0 (
 )
 
 echo Copying wa-scraper.exe to %INSTALL_DIR%...
-if exist "%INSTALL_DIR%\wa-scraper.exe" move /y "%INSTALL_DIR%\wa-scraper.exe" "%INSTALL_DIR%\wa-scraper.exe.%RANDOM%.old" >nul
-copy /y "WebullAnalytics.Scraper\bin\Release\net10.0\win-x64\publish\wa-scraper.exe" "%INSTALL_DIR%\" >nul
+copy /y "WebullAnalytics.Scraper\bin\Release\net10.0\win-x64\publish\wa-scraper.exe" "%INSTALL_DIR%\" >nul 2>&1
+if %errorLevel% neq 0 (
+    echo wa-scraper.exe is in use - moving the live file aside...
+    move /y "%INSTALL_DIR%\wa-scraper.exe" "%INSTALL_DIR%\wa-scraper.exe.%RANDOM%.old" >nul
+    copy /y "WebullAnalytics.Scraper\bin\Release\net10.0\win-x64\publish\wa-scraper.exe" "%INSTALL_DIR%\" >nul
+)
 if %errorLevel% neq 0 (
     echo ERROR: Failed to copy scraper executable.
     pause
