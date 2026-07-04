@@ -5,7 +5,9 @@ using WebullAnalytics.Api;
 namespace WebullAnalytics.AI.Backtest;
 
 /// <summary>
-/// Disk-cached daily OHLC + Adj Close bars from Yahoo. Backtest uses Open for N+1 fill timing, High/Low
+/// Disk-cached daily OHLC + Adj Close bars. Underlying tickers come from Yahoo; VIX-family index series
+/// come from CBOE's own daily-prices CSVs (see <see cref="CboeIndexHistoryClient"/> for why Yahoo is never
+/// used for those, not even as a fallback). Backtest uses Open for N+1 fill timing, High/Low
 /// for intraday stop-loss / take-profit fidelity, and AdjClose for HV calc (so dividends and splits
 /// don't leave fake gaps in realized vol). Cache files live under <c>data/history/{TICKER}.csv</c>
 /// alongside <see cref="WebullAnalytics.AI.Replay.HistoricalPriceCache"/>'s close-only files. Both caches
@@ -23,7 +25,12 @@ internal sealed class HistoricalBarCache
 	private readonly bool _offline;
 	private readonly Dictionary<string, Dictionary<DateTime, YahooOptionsClient.HistoricalBar>> _memory = new(StringComparer.OrdinalIgnoreCase);
 
-	public HistoricalBarCache(string? cacheDir = null, bool offline = false) : this(cacheDir, YahooOptionsClient.FetchHistoricalBarsAsync, offline: offline) { }
+	public HistoricalBarCache(string? cacheDir = null, bool offline = false) : this(cacheDir, DispatchFetchAsync, offline: offline) { }
+
+	private static Task<Dictionary<DateTime, YahooOptionsClient.HistoricalBar>> DispatchFetchAsync(string ticker, DateTime from, DateTime to, CancellationToken cancellation)
+		=> CboeIndexHistoryClient.IsCboeSeries(ticker)
+			? CboeIndexHistoryClient.FetchHistoricalBarsAsync(ticker, from, to, cancellation)
+			: YahooOptionsClient.FetchHistoricalBarsAsync(ticker, from, to, cancellation);
 
 	internal HistoricalBarCache(string? cacheDir, Func<string, DateTime, DateTime, CancellationToken, Task<Dictionary<DateTime, YahooOptionsClient.HistoricalBar>>> fetch, Func<DateTime>? utcNow = null, bool offline = false)
 	{
@@ -94,7 +101,7 @@ internal sealed class HistoricalBarCache
 				// one-or-two-day incremental window comes back empty and the cache would never advance past its last
 				// bar. Always request at least a two-week trailing window; the merge below is keyed by date, so
 				// re-fetching the days we already hold is idempotent.
-				var from = map.Count > 0 ? map.Keys.Max().AddDays(1) : effectiveThrough.AddYears(-2);
+				var from = map.Count > 0 ? map.Keys.Max().AddDays(1) : InitialFetchFrom(ticker, effectiveThrough);
 				var minFrom = effectiveThrough.AddDays(-14);
 				if (from > minFrom) from = minFrom;
 				var refreshed = await _fetch(ticker, from, effectiveThrough.AddDays(1), cancellation);
@@ -110,7 +117,7 @@ internal sealed class HistoricalBarCache
 			}
 			else
 			{
-				map = await _fetch(ticker, effectiveThrough.AddYears(-2), effectiveThrough.AddDays(1), cancellation);
+				map = await _fetch(ticker, InitialFetchFrom(ticker, effectiveThrough), effectiveThrough.AddDays(1), cancellation);
 				if (map.Count > 0) await File.WriteAllTextAsync(path, SerializeCsv(map), cancellation);
 			}
 		}
@@ -129,6 +136,13 @@ internal sealed class HistoricalBarCache
 		var max = map.Keys.Max();
 		return min <= from.Date && max >= ClampToSettled(to.Date);
 	}
+
+	/// <summary>Start of the window requested when a ticker has no cached bars yet. CBOE series take their
+	/// entire published history: the client downloads the full CSV regardless (the window only discards rows),
+	/// so capping at two years would throw away free data — VIX reaches back to 1990. Yahoo requests stay at
+	/// two years; its chart API charges for the range and nothing consumes deeper underlying history.</summary>
+	private static DateTime InitialFetchFrom(string ticker, DateTime effectiveThrough)
+		=> CboeIndexHistoryClient.IsCboeSeries(ticker) ? DateTime.MinValue : effectiveThrough.AddYears(-2);
 
 	private DateTime ClampToSettled(DateTime neededThrough)
 	{

@@ -117,8 +117,9 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// the appropriate term (0–1 DTE, 2–9 DTE, 10+ DTE respectively); VIX9D + VIX also feed the VIX
 		// term-structure signal in the opener. CBOE SMILE drives per-day smile steepness scaling in
 		// BacktestIVProvider so backtest fills track the actual regime (calm vs stressed days) instead
-		// of using a single anchor calibration. SMILE comes from CBOE directly (its own daily CSV);
-		// VIX / VIX1D / VIX9D come from Yahoo as OHLC. VIX1D was launched 2023-04-24; pre-launch dates
+		// of using a single anchor calibration. The whole family comes from CBOE directly (authoritative
+		// for its own indices — see CboeIndexHistoryClient for why Yahoo is not even a fallback); the bar
+		// cache routes VIX / VIX1D / VIX9D there by ticker. VIX1D was launched 2023-04-24; pre-launch dates
 		// fall back to VIX9D in the IV provider, so historical backtests beyond that point still work.
 		if (VixDrivenTickers.Contains(ticker))
 		{
@@ -183,15 +184,16 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		{
 			if (MarketCalendar.IsOpen(probe)) bar = await bars.GetBarAsync(ticker, probe, cancellation);
 		}
+		var source = CboeIndexHistoryClient.IsCboeSeries(ticker) ? "CBOE" : "Yahoo";
 		if (bar == null)
 		{
-			AnsiConsole.MarkupLine($"  {Markup.Escape(ticker)}: [red]failed[/] (Yahoo unreachable or unknown ticker)");
+			AnsiConsole.MarkupLine($"  {Markup.Escape(ticker)}: [red]failed[/] ({source} unreachable or unknown ticker)");
 			return false;
 		}
 		var hasCoverage = await bars.HasCoverageAsync(ticker, earliest, asOf, cancellation);
 		AnsiConsole.MarkupLine(hasCoverage
 			? $"  {Markup.Escape(ticker)}: [green]ok[/] (covers {earliest:yyyy-MM-dd} → {asOf:yyyy-MM-dd})"
-			: $"  {Markup.Escape(ticker)}: [yellow]partial[/] (Yahoo returned a shorter window than requested)");
+			: $"  {Markup.Escape(ticker)}: [yellow]partial[/] ({source} returned a shorter window than requested)");
 		return true;
 	}
 
