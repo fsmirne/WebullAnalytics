@@ -954,7 +954,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 
 		if (!await bars.HasCoverageAsync(config.Ticker, since, until, cancellation))
 		{
-			Console.Error.WriteLine($"Error: missing bar history for {config.Ticker} in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. Run: wa ai history {config.Ticker}");
+			Console.Error.WriteLine($"Error: missing bar history for {config.Ticker} in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {config.Ticker}");
 			return 1;
 		}
 		// VIX-driven tickers (SPX family) need a VIX bar history for ATM IV and a CBOE SMILE history
@@ -967,12 +967,12 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		{
 			if (!await bars.HasCoverageAsync("VIX", since, until, cancellation))
 			{
-				Console.Error.WriteLine($"Error: missing VIX history in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
+				Console.Error.WriteLine($"Error: missing VIX history in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
 				return 1;
 			}
 			if (!await bars.HasCoverageAsync("VIX9D", since, until, cancellation))
 			{
-				Console.Error.WriteLine($"Error: missing VIX9D history in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
+				Console.Error.WriteLine($"Error: missing VIX9D history in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
 				return 1;
 			}
 			// VIX1D launched 2023-04-24. For windows that start before that date, partial coverage is
@@ -983,11 +983,11 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			var vix1DWindowStart = since < vix1DLaunch ? vix1DLaunch : since;
 			if (vix1DWindowStart <= until && !await bars.HasCoverageAsync("VIX1D", vix1DWindowStart, until, cancellation))
 			{
-				Console.Error.WriteLine($"Warning: missing VIX1D history in [{vix1DWindowStart:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. 0DTE pricing will fall back to VIX9D. Run: wa ai history {settings.Ticker}");
+				Console.Error.WriteLine($"Warning: missing VIX1D history in [{vix1DWindowStart:yyyy-MM-dd} → {until:yyyy-MM-dd}]. 0DTE pricing will fall back to VIX9D. Run: wa ai history {settings.Ticker}");
 			}
 			if (!await smile.HasCoverageAsync(since, until, cancellation))
 			{
-				Console.Error.WriteLine($"Error: missing CBOE SMILE history in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
+				Console.Error.WriteLine($"Error: missing CBOE SMILE history in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}]. Run: wa ai history {settings.Ticker}");
 				return 1;
 			}
 		}
@@ -1027,7 +1027,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// to trade". Warn explicitly: the usual cause is running --since <today> before the evening backfill
 		// (scripts/daily_backfill.sh, ~19:00 ET) has landed the day's quotes.
 		if (!quoteStore.HasAnyQuoteInWindow(config.Ticker, since, until))
-			Console.Error.WriteLine($"Warning: no real NBBO quotes for {config.Ticker} in [{since:yyyy-MM-dd} ? {until:yyyy-MM-dd}] (data/quotes) — the backtest will price nothing and report no fills. The evening backfill (scripts/daily_backfill.sh) lands the current day's quotes after ~19:00 ET; re-run once it has completed.");
+			Console.Error.WriteLine($"Warning: no real NBBO quotes for {config.Ticker} in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}] (data/quotes) — the backtest will price nothing and report no fills. The evening backfill (scripts/daily_backfill.sh) lands the current day's quotes after ~19:00 ET; re-run once it has completed.");
 		Backtest.IBacktestQuoteSource quotes = new Backtest.QuotesQuoteSource(
 			bars, quoteStore, parametric, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 
@@ -1036,7 +1036,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
 		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split);
 
-		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} ? {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
 
 		Backtest.BacktestResult result;
