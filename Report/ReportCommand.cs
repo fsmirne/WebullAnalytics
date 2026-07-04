@@ -43,7 +43,7 @@ class ReportSettings : CommandSettings
 	[DefaultValue(0)]
 	public decimal InitialAmount { get; set; } = 0m;
 
-	[Description("Report view: 'detailed' (all columns, default) or 'simplified' (hides Asset, Option, Closed Qty, Realized P&L)")]
+	[Description("Report view: 'detailed' (all columns, default) or 'simplified' (hides Asset, Option, Closed, Running)")]
 	[CommandOption("--view")]
 	[DefaultValue("detailed")]
 	public string View { get; set; } = "detailed";
