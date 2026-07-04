@@ -31,9 +31,9 @@ public static class TableBuilder
 		table.AddColumn(new TableColumn("Qty").RightAligned());
 		table.AddColumn(new TableColumn("Price").RightAligned());
 		table.AddColumn(new TableColumn("Fees").RightAligned());
-		if (!simplified) table.AddColumn(new TableColumn("Closed Qty").RightAligned());
-		table.AddColumn(new TableColumn("Realized P&L").RightAligned());
-		if (!simplified) table.AddColumn(new TableColumn("Running P&L").RightAligned());
+		if (!simplified) table.AddColumn(new TableColumn("Closed").RightAligned());
+		table.AddColumn(new TableColumn("Realized").RightAligned());
+		if (!simplified) table.AddColumn(new TableColumn("Running").RightAligned());
 		table.AddColumn(new TableColumn("Cash").RightAligned());
 		table.AddColumn(new TableColumn("Total").RightAligned());
 
