@@ -143,12 +143,15 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// shorter CBOE tenors exist). VIX + VIX9D ride along too — the vixTermStructure opener signal
 		// is a market-wide regime read shared by every ticker, and a QQQ-only environment would
 		// otherwise never populate them. SMILE scales the index-class smile in the parametric path.
+		// Intraday VXN rides along as a Yahoo forward capture (trailing week, accumulates day by day —
+		// no source anywhere serves deep 1m VXN history, so each daily run banks what exists now).
 		if (ticker is "QQQ" or "NDX")
 		{
 			if (!await FetchAndReportAsync(bars, "VXN", earliest, asOf, cancellation)) return 1;
 			if (!await FetchAndReportAsync(bars, "VIX", earliest, asOf, cancellation)) return 1;
 			if (!await FetchAndReportAsync(bars, "VIX9D", earliest, asOf, cancellation)) return 1;
 			if (!await FetchSmileAsync(earliest, asOf, cancellation)) return 1;
+			await BackfillIntradayAsync("VXN", earliest, asOf, cancellation);
 		}
 
 		// Intraday gap-fill from Webull. Best-effort: failures here log a warning but don't fail
@@ -371,6 +374,10 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	/// touched (live Webull owns the current session). The sealed manifest is rewritten after every
 	/// successful CSV write so a crash mid-loop can't desync the on-disk CSV from sealed.json; a written
 	/// day is only sealed when it actually LooksComplete, so a short pull stays visibly partial.</summary>
+	/// <summary>Tickers whose intraday tape comes from Yahoo's trailing-week 1m endpoint — forward
+	/// capture only, for CBOE indices with no deep-history source anywhere (see FetchRangeAsync).</summary>
+	private static bool IsYahooIntradayCapture(string ticker) => string.Equals(ticker, "VXN", StringComparison.OrdinalIgnoreCase);
+
 	private static async Task BackfillIntradayAsync(string inputTicker, DateTime earliest, DateTime asOf, CancellationToken cancellation)
 	{
 		var apiConfig = TryLoadApiConfig();
@@ -382,6 +389,11 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
 		var earliestNy = TimeZoneInfo.ConvertTime(earliest, NyTz).Date;
+		// Yahoo-forward-capture tapes (VXN): the 1m endpoint serves only the trailing ~7 days, so days
+		// older than that are unreachable by construction — clamp the audit window to what the source
+		// can serve, or every daily run reports years of forever-missing days.
+		var isYahooCapture = IsYahooIntradayCapture(inputTicker);
+		if (isYahooCapture && earliestNy < todayNy.AddDays(-8)) earliestNy = todayNy.AddDays(-8);
 		var audit = AuditIntraday(inputTicker, earliestNy, todayNy);
 		var totalDays = audit.Complete.Count + audit.Partial.Count + audit.Missing.Count;
 		// Backfill MISSING days, and COMPLETE partial days (all in the past — the audit window excludes
@@ -400,7 +412,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		var isSpxFamily = WebullIntradayBars.SpxFamilyTickers.Contains(inputTicker);
 		var completeNote = audit.Partial.Count > 0 ? $" (completing [yellow]{audit.Partial.Count} partial day(s)[/])" : "";
 		var isVix = string.Equals(inputTicker, "VIX", StringComparison.OrdinalIgnoreCase);
-		var sourceLabel = isSpxFamily ? "Webull (SPX) + massive (SPY)" : isVix ? "Webull" : "massive";
+		var sourceLabel = isSpxFamily ? "Webull (SPX) + massive (SPY)" : isVix ? "Webull" : isYahooCapture ? "Yahoo (trailing week)" : "massive";
 		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: {audit.Complete.Count}/{totalDays} complete; pulling {needBackfill.Count} day(s) from {sourceLabel}{completeNote}");
 		AnsiConsole.MarkupLine($"    needed: {Markup.Escape(FormatDateList(needBackfill, maxInline: 12))}");
 
@@ -701,6 +713,17 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			// paginator as SPX (the method resolves VIX's chart id from ChartKnownTickerIds), no
 			// SPY merge (nothing tracks the VIX overnight, and the backtest reads it RTH-only).
 			var bars = await FetchSpxFamilyRthFromWebullAsync(apiConfig, ticker, startNyDate, endNyDate, cancellation);
+			return GroupBarsByNyDate(bars);
+		}
+		else if (IsYahooIntradayCapture(ticker))
+		{
+			// CBOE indices with NO deep-history source anywhere (VXN: Webull's feed died 2024-04,
+			// massive's index namespace is unentitled): Yahoo's chart endpoint serves the trailing
+			// ~7 days of 1m — a forward-capture-only tape that accumulates day by day. The caller
+			// clamps the audit window to the same horizon.
+			AnsiConsole.MarkupLine($"    pulling {Markup.Escape(ticker)} trailing week from Yahoo");
+			var bars = await YahooOptionsClient.FetchIntradayMinuteBarsAsync(ticker, cancellation);
+			AnsiConsole.MarkupLine($"    Yahoo returned {bars.Count} {Markup.Escape(ticker)} bars");
 			return GroupBarsByNyDate(bars);
 		}
 		else
