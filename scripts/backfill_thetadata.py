@@ -276,7 +276,12 @@ OI_OI = ["open_interest", "oi"]
 _TRANSIENT = ("UNAVAILABLE", "http2 header with status: 5", "RST_STREAM", "Deadline",
               "Internal", "502", "503", "504", "GOAWAY",
               "ConnectTimeout", "ReadTimeout", "ConnectionError", "timed out",
-              "Connection reset", "Connection refused")
+              "Connection reset", "Connection refused",
+              # WSL's DNS proxy flaps under sustained connection load -- a resolver outage
+              # (httpcore.ConnectError: Temporary failure in name resolution) killed a 6h pull
+              # 2026-07-05. Ride it out like any other transient.
+              "ConnectError", "Temporary failure in name resolution",
+              "Name or service not known", "getaddrinfo")
 
 
 def thetacall(fn, *args, **kwargs):
