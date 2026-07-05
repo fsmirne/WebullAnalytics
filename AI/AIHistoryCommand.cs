@@ -49,6 +49,10 @@ internal sealed class AIHistorySettings : CommandSettings
 	[Description("One-time bootstrap: import a text file of SPX query-mini rows (one per line, `ts,o,c,h,l,prevClose,vol,vwap` format) sniffed from Webull's web app and merge with SPY ext-hours pulled per-day from the API. Used to load 2 years of historical SPX intraday — Webull's chart endpoint requires per-URL x-s signatures we can't forge, so deep history is captured via a browser console sniffer that records the chart's own signed requests. SPY ext-hours doesn't need signatures and is fetched here.")]
 	public string? ImportWebullSpxFile { get; set; }
 
+	[CommandOption("--import <file>")]
+	[Description("One-time bootstrap: import a text file of query-mini rows (same sniffed format as --import-webull-spx) for THIS ticker as-is — no SPY ext-hours merge or scaling. Used for standalone index tapes (VIX): capture via scripts/webscraper.js on the ticker's 1-min chart, scroll back as far as Webull serves, __dumpBars(), then import here. Ongoing top-up is the normal daily run.")]
+	public string? ImportFile { get; set; }
+
 	[CommandOption("--partial")]
 	[Description("Capture today's incomplete intraday tape (up to the minute it's run) from Webull's live chart endpoint and write data/intraday/<ticker>/<today>.csv. Use when the live `wa ai watch` session was missed (outage, late start) — the normal backfill skips today (it expects live capture to own it). RTH only for SPX-family; the file is NOT sealed (the session isn't done). Mutually exclusive with --audit and --import-webull-spx.")]
 	public bool Partial { get; set; }
@@ -97,6 +101,12 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			return await ImportSniffedSpxAsync(ticker, settings.ImportWebullSpxFile, cancellation);
 		}
 
+		if (!string.IsNullOrEmpty(settings.ImportFile))
+		{
+			AnsiConsole.MarkupLine($"[bold]Importing sniffed Webull rows into {Markup.Escape(ticker)}[/]");
+			return ImportSniffedIndex(ticker, settings.ImportFile);
+		}
+
 		if (settings.Partial)
 		{
 			// --partial only changes the UNDERLYING tape (capture today's incomplete bars vs. the normal
@@ -132,6 +142,15 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// Intraday gap-fill from Webull. Best-effort: failures here log a warning but don't fail
 		// the whole command, since the daily caches (the main thing backtests need) are already on disk.
 		await BackfillIntradayAsync(ticker, earliest, asOf, cancellation);
+
+		// Intraday VIX rides along with SPX-family runs, like the daily VIX-family closes above. The
+		// backtest's minute-walk MaxVix gates (LegInShort / CompleteCondor) read data/intraday/VIX/ for
+		// the causal per-minute VIX and fall back to the prior-day settled close where the tape is
+		// missing. Deep history comes from the one-time `wa ai history VIX --import <sniffed>` bootstrap
+		// (Webull's chart endpoint only pages ~3 RTH days back without per-URL signatures); this
+		// ride-along keeps the recent edge current.
+		if (VixDrivenTickers.Contains(ticker))
+			await BackfillIntradayAsync("VIX", earliest, asOf, cancellation);
 
 		// CNN Fear & Greed sentiment cache fill — ticker-agnostic daily series. Without this, the cache
 		// only grows when something else calls `FearGreedClient.FetchAsync` AFTER 5pm ET (settlement
@@ -368,7 +387,8 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 		var isSpxFamily = WebullIntradayBars.SpxFamilyTickers.Contains(inputTicker);
 		var completeNote = audit.Partial.Count > 0 ? $" (completing [yellow]{audit.Partial.Count} partial day(s)[/])" : "";
-		var sourceLabel = isSpxFamily ? "Webull (SPX) + massive (SPY)" : "massive";
+		var isVix = string.Equals(inputTicker, "VIX", StringComparison.OrdinalIgnoreCase);
+		var sourceLabel = isSpxFamily ? "Webull (SPX) + massive (SPY)" : isVix ? "Webull" : "massive";
 		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: {audit.Complete.Count}/{totalDays} complete; pulling {needBackfill.Count} day(s) from {sourceLabel}{completeNote}");
 		AnsiConsole.MarkupLine($"    needed: {Markup.Escape(FormatDateList(needBackfill, maxInline: 12))}");
 
@@ -423,8 +443,14 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 		var skipNote = skipped.Count > 0 ? $", [yellow]skipped {skipped.Count}[/]" : "";
 		AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [green]wrote {written.Count}[/] file(s){skipNote}");
-		foreach (var (d, reason) in skipped)
+		// Cap the per-day skip detail: a not-yet-bootstrapped deep history (e.g. intraday VIX before its
+		// one-time --import) legitimately skips hundreds of days every run — the summary count above
+		// carries the signal; ten examples carry the diagnosis.
+		var skipShow = skipped.Take(10).ToList();
+		foreach (var (d, reason) in skipShow)
 			AnsiConsole.MarkupLine($"    [yellow]{d:yyyy-MM-dd}[/]: skipped ({Markup.Escape(reason)})");
+		if (skipped.Count > skipShow.Count)
+			AnsiConsole.MarkupLine($"    …and {skipped.Count - skipShow.Count} more");
 	}
 
 	/// <summary>One-time bootstrap importer for the 2-year historical pull. Reads a text file of SPX
@@ -546,6 +572,57 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		return 0;
 	}
 
+	/// <summary>One-time bootstrap importer for a standalone index tape (VIX): writes the sniffed rows
+	/// as-is per NY date — no SPY ext-hours merge or ratio scaling (nothing tracks the VIX overnight, and
+	/// the backtest reads it RTH-only). Existing complete days are left untouched; partial days are
+	/// union-merged with the sniffed rows so a prior live capture is never degraded. Purely local — the
+	/// sniffed file is the entire data source, so unlike the SPX import there is no network half.</summary>
+	private static int ImportSniffedIndex(string ticker, string sniffedPath)
+	{
+		var sniffed = ParseSniffedRows(sniffedPath);
+		if (sniffed.Count == 0)
+		{
+			AnsiConsole.MarkupLine($"  [red]no parseable rows in {Markup.Escape(sniffedPath)}[/]");
+			return 1;
+		}
+
+		var byDate = GroupBarsByNyDate(sniffed);
+		AnsiConsole.MarkupLine($"  loaded {sniffed.Count} bars covering {byDate.Count} trading day(s): {byDate.Keys.Min():yyyy-MM-dd} → {byDate.Keys.Max():yyyy-MM-dd}");
+
+		var intradayDir = Path.Combine(Program.ResolvePath("data/intraday"), ticker);
+		Directory.CreateDirectory(intradayDir);
+		var sealedPath = Path.Combine(intradayDir, "sealed.json");
+		var sealedDates = LoadSealedManifest(sealedPath);
+		var todayNy = TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz).Date;
+
+		var written = 0;
+		var alreadyComplete = 0;
+		foreach (var d in byDate.Keys.Where(d => d < todayNy).OrderBy(d => d))
+		{
+			var path = Path.Combine(intradayDir, $"{d:yyyy-MM-dd}.csv");
+			if (File.Exists(path) && LooksComplete(path)) { alreadyComplete++; continue; }
+
+			IReadOnlyList<MinuteBar> toWrite = byDate[d];
+			if (File.Exists(path))
+			{
+				// Union-merge with the partial on-disk day; the sniffed rows win on overlapping minutes.
+				var merged = ReadIntradayCsv(path).ToDictionary(b => b.Timestamp.UtcDateTime);
+				foreach (var b in byDate[d]) merged[b.Timestamp.UtcDateTime] = b;
+				toWrite = merged.Values.OrderBy(b => b.Timestamp.UtcDateTime).ToList();
+			}
+			WriteIntradayCsv(path, toWrite);
+			if (LooksComplete(path))
+			{
+				sealedDates.Add(d);
+				SaveSealedManifest(sealedPath, sealedDates);
+			}
+			written++;
+		}
+
+		AnsiConsole.MarkupLine($"  [green]wrote {written}[/] file(s); {alreadyComplete} already complete");
+		return 0;
+	}
+
 	/// <summary>Parses a text file of <c>query-mini</c> response rows (one per line). Each row's
 	/// 8-column format matches what Webull's chart endpoint returns: <c>ts,open,close,high,low,prevClose,volume,vwap</c>.
 	/// Reuses <see cref="WebullChartsClient.ParseMiniBarRow"/> so the schema stays in one place.</summary>
@@ -604,6 +681,15 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			var spxBars = await FetchSpxFamilyRthFromWebullAsync(apiConfig, ticker, startNyDate, endNyDate, cancellation);
 			var spyBars = await FetchFromMassiveAsync(apiConfig, "SPY", startNyDate, endNyDate, cancellation);
 			return MergeSpxAndSpyByDate(spxBars, spyBars);
+		}
+		else if (string.Equals(ticker, "VIX", StringComparison.OrdinalIgnoreCase))
+		{
+			// VIX is a CBOE cash index: massive's equity-aggregates entitlement excludes indices
+			// (I:VIX → NOT_AUTHORIZED), so the tape comes from Webull's chart endpoint alone — same
+			// paginator as SPX (the method resolves VIX's chart id from ChartKnownTickerIds), no
+			// SPY merge (nothing tracks the VIX overnight, and the backtest reads it RTH-only).
+			var bars = await FetchSpxFamilyRthFromWebullAsync(apiConfig, ticker, startNyDate, endNyDate, cancellation);
+			return GroupBarsByNyDate(bars);
 		}
 		else
 		{

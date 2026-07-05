@@ -479,7 +479,7 @@ internal sealed class BacktestRunner
 
 			var bar = await _bars.GetBarAsync(pos.Ticker, step.Date, cancellation);
 			if (bar == null) continue;
-			await TryIntradayTriggerAsync(step, pos, bar.Low, bar.High, cash, accountValue, realizedExpectancy, cancellation);
+			await TryIntradayTriggerAsync(step, pos, bar.Open, bar.Low, bar.High, cash, accountValue, realizedExpectancy, cancellation);
 		}
 	}
 
@@ -529,28 +529,27 @@ internal sealed class BacktestRunner
 			&& realizedExpectancy.StopLossPctOfMaxLoss < 1m)
 			slTarget = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxLoss * pos.MaxLossPerShare.Value;
 
-		// TP threshold (mark at or above fires TP). Use the day's bar.High as the projector spot
-		// to mirror legacy behavior — the projector iterates over future spots so the choice has
-		// minimal effect for 0DTE, but staying consistent makes side-by-side comparisons cleaner.
+		// TP threshold (mark at or above fires TP). The projector spot is the first walk minute's open —
+		// the spot actually observable when the walk begins. The prior implementation anchored on the
+		// day's bar.High, which is only known at EOD: on days where the high lands late, the 10:00 TP
+		// threshold was computed from a spot the market hadn't printed yet (lookahead). The projector
+		// iterates over future spots so the anchor choice is second-order for 0DTE, but causal is causal.
 		// Symmetric with the SL gate: skip when ProfitTargetPctOfMaxProfit ≥ 1.0 (the threshold
 		// equals theoretical max profit, which no intraday mark realistically reaches — walking
 		// every minute to verify that costs ~390 iterations per open position per day for no gain).
 		decimal? tpTarget = null;
 		if (_config.Rules.TakeProfit.Enabled && realizedExpectancy.ProfitTargetPctOfMaxProfit < 1m)
 		{
-			var bar = await _bars.GetBarAsync(pos.Ticker, step.Date, cancellation);
-			if (bar != null)
-			{
-				var quotesHighForProjector = await _quotes.GetIntradayQuotesAsync(
-					step, pos.Ticker, bar.High, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
-				var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
-				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = bar.High };
-				var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
-				var projectorCtx = new EvaluationContext(step, stillOpen, underlyings, quotesHighForProjector, cash, accountValue, emptySignals);
-				var maxProjected = ProfitProjector.MaxForCurrentColumn(pos, projectorCtx);
-				if (maxProjected.HasValue && maxProjected.Value > 0m)
-					tpTarget = pos.AdjustedNetDebit + realizedExpectancy.ProfitTargetPctOfMaxProfit * maxProjected.Value;
-			}
+			var anchorSpot = minuteBars[0].Open;
+			var quotesForProjector = await _quotes.GetIntradayQuotesAsync(
+				step, pos.Ticker, anchorSpot, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+			var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
+			var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = anchorSpot };
+			var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
+			var projectorCtx = new EvaluationContext(step, stillOpen, underlyings, quotesForProjector, cash, accountValue, emptySignals);
+			var maxProjected = ProfitProjector.MaxForCurrentColumn(pos, projectorCtx);
+			if (maxProjected.HasValue && maxProjected.Value > 0m)
+				tpTarget = pos.AdjustedNetDebit + realizedExpectancy.ProfitTargetPctOfMaxProfit * maxProjected.Value;
 		}
 
 		// LegInShort: only meaningful on single-leg long calls/puts and only fires intraday for 0DTE
@@ -571,15 +570,29 @@ internal sealed class BacktestRunner
 			? new Rules.CompleteCondorRule(_config.Rules.CompleteCondor)
 			: null;
 
-		// Regime indicators for LegInShort / CompleteCondor: VIX (per-day constant, fetched once) and
-		// intraday range (tracked across the minute loop). Both null when not needed — keep the lookup cost
-		// off the hot path when neither rule's enabled flag is set.
-		decimal? dayVix = null;
+		// Regime indicators for LegInShort / CompleteCondor: VIX and intraday range (tracked across the
+		// minute loop). Both null when not needed — keep the lookup cost off the hot path when neither
+		// rule's enabled flag is set. VIX is read causally per minute from the day's real intraday tape
+		// (data/intraday/VIX/, captured from Webull like the SPX tape): at decision minute M the value is
+		// bar M's open (start-of-bar convention — the M:00 print) or, when M's bar is absent, the latest
+		// completed bar's close. This mirrors live, where the gates see the real-time VIX quote. Where the
+		// tape is missing the fallback is the most recent settled close STRICTLY BEFORE step (walked back
+		// 5 days over weekends/holidays, mirroring BacktestIVProvider.GetVixSeriesCloseAsync) — never the
+		// day's own 16:00 close, which is not knowable during the walk (using it let the 10:00 MaxVix gate
+		// "see" a close-of-day vol spike — lookahead).
+		decimal? fallbackVix = null;
+		IReadOnlyList<MinuteBar> vixBars = Array.Empty<MinuteBar>();
 		if (legInRule != null || completeCondorRule != null)
 		{
-			var vixBar = await _bars.GetBarAsync("VIX", step.Date, cancellation);
-			if (vixBar != null) dayVix = vixBar.Close;
+			var rthStartUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(step.Date.Add(MarketOpenTime), NyTz), TimeSpan.Zero);
+			vixBars = await _intradayBars.GetBarsAsync("VIX", rthStartUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
+			for (var i = 1; i <= 5 && fallbackVix == null; i++)
+			{
+				var vixBar = await _bars.GetBarAsync("VIX", step.Date.AddDays(-i), cancellation);
+				if (vixBar != null) fallbackVix = vixBar.Close;
+			}
 		}
+		var vixCursor = 0;
 
 		// LegInShort needs the minute walk even when SL/TP are both disabled (e.g. SPXW's
 		// profit/stop pcts pinned at 1.0 to defer all closes to expiration). Without this carve-out,
@@ -610,6 +623,17 @@ internal sealed class BacktestRunner
 			// Update intraday range with this minute's H/L.
 			if (minuteBar.High > dayHigh) dayHigh = minuteBar.High;
 			if (minuteBar.Low < dayLow) dayLow = minuteBar.Low;
+
+			// Causal VIX at this minute: advance to the last VIX bar at-or-before the decision minute.
+			// A bar stamped exactly at this minute contributes its OPEN (the M:00 print); an earlier bar
+			// its CLOSE (completed before this minute). Missing tape → prior-day settled close.
+			while (vixCursor < vixBars.Count && vixBars[vixCursor].Timestamp <= minuteUtc) vixCursor++;
+			var vixNow = fallbackVix;
+			if (vixCursor > 0)
+			{
+				var vb = vixBars[vixCursor - 1];
+				vixNow = vb.Timestamp == minuteUtc ? vb.Open : vb.Close;
+			}
 
 			// For LegInShort: pre-generate candidate strikes around spot at the long's expiry so the
 			// rule has multiple strikes to pick from. Only done when the rule is applicable to this
@@ -659,7 +683,7 @@ internal sealed class BacktestRunner
 				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot };
 				var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
 				decimal? rangePct = dayOpenSpot > 0m ? (dayHigh - dayLow) / dayOpenSpot * 100m : null;
-				var minuteCtx = new EvaluationContext(legInMinuteEt, stillOpen, underlyings, quotes, cash, accountValue, emptySignals, dayVix, rangePct);
+				var minuteCtx = new EvaluationContext(legInMinuteEt, stillOpen, underlyings, quotes, cash, accountValue, emptySignals, vixNow, rangePct);
 				var legInProposal = legInRule.Evaluate(pos, minuteCtx);
 				if (legInProposal != null)
 				{
@@ -694,7 +718,7 @@ internal sealed class BacktestRunner
 				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot };
 				var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
 				decimal? rangePct = dayOpenSpot > 0m ? (dayHigh - dayLow) / dayOpenSpot * 100m : null;
-				var condorCtx = new EvaluationContext(minuteEt, stillOpen, underlyings, quotes, cash, accountValue, emptySignals, dayVix, rangePct);
+				var condorCtx = new EvaluationContext(minuteEt, stillOpen, underlyings, quotes, cash, accountValue, emptySignals, vixNow, rangePct);
 				var condorProposal = completeCondorRule.Evaluate(pos, condorCtx);
 				if (condorProposal != null)
 				{
@@ -772,7 +796,7 @@ internal sealed class BacktestRunner
 	}
 
 	private async Task TryIntradayTriggerAsync(
-		DateTime step, OpenPosition pos, decimal barLow, decimal barHigh,
+		DateTime step, OpenPosition pos, decimal barOpen, decimal barLow, decimal barHigh,
 		decimal cash, decimal accountValue,
 		OpenerRealizedExpectancyConfig realizedExpectancy, CancellationToken cancellation)
 	{
@@ -809,15 +833,18 @@ internal sealed class BacktestRunner
 		// TP threshold (mark at or above this = take-profit triggered).
 		// pctCaptured = (mark - InitialNetDebit) / maxProjected; TP fires when pctCaptured ≥ tpPct,
 		// i.e. when mark ≥ InitialNetDebit + tpPct × maxProjected. maxProjected uses the projector
-		// against the bar.High quotes — for 0DTE the projector iterates over future spots so current
-		// spot doesn't materially affect the result.
+		// anchored at the day's OPEN — the spot knowable at 09:30, unlike bar.High which only exists
+		// at EOD (anchoring there was lookahead). For 0DTE the projector iterates over future spots so
+		// the anchor choice doesn't materially affect the result.
 		decimal? tpTarget = null;
 		if (_config.Rules.TakeProfit.Enabled && realizedExpectancy.ProfitTargetPctOfMaxProfit < 1m)
 		{
+			var quotesOpen = await _quotes.GetIntradayQuotesAsync(
+				step, pos.Ticker, barOpen, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
 			var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
-			var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = barHigh };
+			var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = barOpen };
 			var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
-			var projectorCtx = new EvaluationContext(step, stillOpen, underlyings, quotesHigh, cash, accountValue, emptySignals);
+			var projectorCtx = new EvaluationContext(step, stillOpen, underlyings, quotesOpen, cash, accountValue, emptySignals);
 			var maxProjected = ProfitProjector.MaxForCurrentColumn(pos, projectorCtx);
 			if (maxProjected.HasValue && maxProjected.Value > 0m)
 				tpTarget = pos.AdjustedNetDebit + realizedExpectancy.ProfitTargetPctOfMaxProfit * maxProjected.Value;

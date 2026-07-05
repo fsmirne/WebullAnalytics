@@ -60,6 +60,10 @@ internal static class WebullChartsClient
 		["SPX"] = 913354362,
 		["SPXW"] = 913354362,
 		["XSP"] = 925377660,
+		// CBOE VIX cash index. Same id as the option-chain namespace — verified 2026-07-04 via a live
+		// query-mini probe (returned VIX-scale closes). Feeds the intraday VIX tape the backtest's
+		// minute-walk MaxVix gates read (data/intraday/VIX/).
+		["VIX"] = 925323875,
 	};
 
 	/// <summary>True if a chart-namespace tickerId is registered for this symbol. Callers that
