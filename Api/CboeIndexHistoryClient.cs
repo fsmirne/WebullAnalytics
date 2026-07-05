@@ -15,7 +15,7 @@ internal static class CboeIndexHistoryClient
 {
 	private const string EndpointFormat = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{0}_History.csv";
 	private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
-	private static readonly HashSet<string> Series = new(StringComparer.OrdinalIgnoreCase) { "VIX", "VIX1D", "VIX9D", "VIX3M" };
+	private static readonly HashSet<string> Series = new(StringComparer.OrdinalIgnoreCase) { "VIX", "VIX1D", "VIX9D", "VIX3M", "VXN" };
 
 	/// <summary>True when <paramref name="ticker"/> is a CBOE-published index series whose history must come from CBOE rather than Yahoo.</summary>
 	internal static bool IsCboeSeries(string ticker) => Series.Contains(ticker);
