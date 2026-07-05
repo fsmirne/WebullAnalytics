@@ -62,6 +62,15 @@ internal sealed class BacktestIVProvider
 	{
 		"SPY", "SPX", "SPXW", "XSP"
 	};
+
+	// VXN is the Nasdaq-100 analog of VIX (30-day implied vol of NDX options) — the native anchor for
+	// QQQ/NDX. CBOE publishes no 1-day / 9-day VXN companions, so every DTE anchors to the single
+	// 30-day series (adequate for the multi-day DC band this exists for; short-dated NDX-family
+	// gamma-premium anchoring is out of scope until CBOE ships the shorter tenors).
+	private static readonly HashSet<string> VxnDrivenTickers = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"QQQ", "NDX"
+	};
 	private const int HvLookbackDays = 30;
 
 	/// <param name="ivHvPremium">Multiplier applied to historical vol to approximate IV (non-SPY tickers). Default 1.15.</param>
@@ -162,6 +171,15 @@ internal sealed class BacktestIVProvider
 			var vix = await GetVixSeriesCloseAsync("VIX", asOf, cancellation);
 			if (vix.HasValue) return vix.Value / 100m;
 			// Fall through to HV if all VIX series unavailable.
+		}
+
+		if (VxnDrivenTickers.Contains(ticker))
+		{
+			// Nasdaq-100 family anchors to VXN at every DTE (no shorter CBOE tenors exist — see
+			// VxnDrivenTickers). Same strictly-prior-close causality as the VIX path.
+			var vxn = await GetVixSeriesCloseAsync("VXN", asOf, cancellation);
+			if (vxn.HasValue) return vxn.Value / 100m;
+			// Fall through to HV if VXN is unavailable.
 		}
 
 		var closes = await _bars.GetRecentAdjClosesAsync(ticker, HvLookbackDays + 1, asOf, cancellation);

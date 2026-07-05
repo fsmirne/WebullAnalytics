@@ -139,6 +139,18 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			if (!await FetchSmileAsync(earliest, asOf, cancellation)) return 1;
 		}
 
+		// Nasdaq-100 family: VXN anchors QQQ/NDX ATM IV in BacktestIVProvider (the VIX analog; no
+		// shorter CBOE tenors exist). VIX + VIX9D ride along too — the vixTermStructure opener signal
+		// is a market-wide regime read shared by every ticker, and a QQQ-only environment would
+		// otherwise never populate them. SMILE scales the index-class smile in the parametric path.
+		if (ticker is "QQQ" or "NDX")
+		{
+			if (!await FetchAndReportAsync(bars, "VXN", earliest, asOf, cancellation)) return 1;
+			if (!await FetchAndReportAsync(bars, "VIX", earliest, asOf, cancellation)) return 1;
+			if (!await FetchAndReportAsync(bars, "VIX9D", earliest, asOf, cancellation)) return 1;
+			if (!await FetchSmileAsync(earliest, asOf, cancellation)) return 1;
+		}
+
 		// Intraday gap-fill from Webull. Best-effort: failures here log a warning but don't fail
 		// the whole command, since the daily caches (the main thing backtests need) are already on disk.
 		await BackfillIntradayAsync(ticker, earliest, asOf, cancellation);
