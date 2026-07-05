@@ -172,16 +172,40 @@ internal sealed class SimulatedBook
 		var fees = Math.Abs(oldPos.Quantity) * legFills.Count * _feePerContract;
 		Cash += cashFlow - fees;
 
-		// Synthesize the post-roll leg set: keep buys, replace short(s) with the new short(s) the rule chose.
-		// In this engine a Roll proposal expresses the *delta* (closing legs + opening legs as a single net debit).
-		// We rebuild PositionLegs from the resulting structure by reusing rollLegs filtered to the new
-		// short/long sides. For phase-1 we treat the rolled position's leg set as the rollLegs themselves —
-		// upstream rules emit a complete new structure.
-		var structureKind = newStructureKind ?? Enum.Parse<OpenStructureKind>(oldPos.StrategyKind, ignoreCase: true);
-		var newLegs = BuildLegsFromFills(legFills, oldPos.Quantity, out var strategyKind, structureKind);
+		// Post-roll leg set = the OLD legs with the roll's delta applied. A Roll proposal expresses the
+		// delta (closing legs + opening legs as one net execution): a fill that opposes an existing leg
+		// (buy-to-close an existing short / sell-to-close an existing long) removes that leg; any other
+		// fill opens a new leg. Legs the roll never touches — the calendar/diagonal's far-dated long —
+		// survive unchanged. The previous implementation rebuilt the position from the delta fills alone,
+		// which dropped the untouched long (its entire remaining value silently vanished from the book)
+		// and kept the bought-back short as a phantom long; every rolled calendar/diagonal lost its long
+		// leg's value to that hole (10/10 rolled DC trades "lost" −$800 avg — a measurement artifact, not
+		// the roll rule's doing).
+		var strategyKind = newStructureKind?.ToString() ?? oldPos.StrategyKind;
+		var newLegs = new List<PositionLeg>(oldPos.Legs);
+		foreach (var f in legFills)
+		{
+			var closing = newLegs.FindIndex(l => string.Equals(l.Symbol, f.Symbol, StringComparison.OrdinalIgnoreCase) && l.Side != f.Side);
+			if (closing >= 0)
+			{
+				newLegs.RemoveAt(closing);
+				continue;
+			}
+			var parsed = ParsingHelpers.ParseOptionSymbol(f.Symbol);
+			if (parsed == null) continue;
+			newLegs.Add(new PositionLeg(
+				Symbol: f.Symbol,
+				Side: f.Side,
+				Strike: parsed.Strike,
+				Expiry: parsed.ExpiryDate,
+				CallPut: parsed.CallPut,
+				Qty: oldPos.Quantity));
+		}
+		// A delta that offsets every leg is a full close mislabeled as a roll — no rule emits this; keep
+		// the old legs rather than book a position with no legs (the pre-fix defensive fallback).
 		if (newLegs.Count == 0)
 		{
-			newLegs = oldPos.Legs;
+			newLegs = new List<PositionLeg>(oldPos.Legs);
 			strategyKind = oldPos.StrategyKind;
 		}
 
