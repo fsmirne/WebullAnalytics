@@ -25,7 +25,7 @@
       }
       if (added > 0) {
         const oldest = Math.min(...seen);
-        const name = tid === '913354362' ? 'SPX' : tid === '913243251' ? 'SPY' : tid;
+        const name = tid === '913354362' ? 'SPX' : tid === '913243251' ? 'SPY' : tid === '925323875' ? 'VIX' : tid;
         console.log(`${name}: +${added} bars (total ${bars.length}, oldest ${new Date(oldest*1000).toISOString().slice(0,16)}Z)`);
       }
     }
@@ -50,7 +50,7 @@
       if (window.__sniffBars.size === 0) { console.warn('No bars captured.'); return; }
       for (const [tid, bars] of window.__sniffBars) {
         if (bars.length === 0) continue;
-        const name = tid === '913354362' ? 'spx' : tid === '913243251' ? 'spy' : `t${tid}`;
+        const name = tid === '913354362' ? 'spx' : tid === '913243251' ? 'spy' : tid === '925323875' ? 'vix' : `t${tid}`;
         const blob = new Blob([bars.join('\n')], {type:'text/plain'});
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);

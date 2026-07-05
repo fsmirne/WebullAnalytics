@@ -40,12 +40,17 @@ internal sealed class SmileIndexCache
 		Directory.CreateDirectory(Path.GetDirectoryName(_cachePath)!);
 	}
 
-	/// <summary>Returns the SMILE index value for <paramref name="date"/>, walking back up to 5 calendar
-	/// days for weekends/holidays. Null if the cache doesn't reach this date and we can't fetch.</summary>
+	/// <summary>Returns the most recent settled SMILE index value strictly before <paramref name="date"/>,
+	/// walking back up to 5 calendar days for weekends/holidays. Strictly-before because the value for
+	/// <paramref name="date"/> itself is published at EOD on that date and is not available to a 09:30
+	/// backtest decision — using it would be lookahead (same convention as
+	/// <see cref="BacktestIVProvider"/>'s VIX-close lookup). Live callers are unaffected in practice:
+	/// today's value never exists in the cache pre-settlement anyway. Null if the cache doesn't reach
+	/// this date and we can't fetch.</summary>
 	public async Task<decimal?> GetValueAsync(DateTime date, CancellationToken cancellation)
 	{
 		var map = await EnsureLoadedAsync(cancellation);
-		for (var i = 0; i <= 5; i++)
+		for (var i = 1; i <= 6; i++)
 		{
 			var d = date.Date.AddDays(-i);
 			if (map.TryGetValue(d, out var v)) return v;
