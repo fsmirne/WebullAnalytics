@@ -1039,6 +1039,11 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
 
+		// Wall-clock stamps for the run itself (the summary table has no time axis otherwise — piped/
+		// redirected runs were unmeasurable without --profile). Local time, printed after the summary.
+		var runStartedAt = DateTime.Now;
+		var runStopwatch = System.Diagnostics.Stopwatch.StartNew();
+
 		Backtest.BacktestResult result;
 		if (settings.Profile)
 		{
@@ -1065,7 +1070,9 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 				});
 			result = captured!;
 		}
+		runStopwatch.Stop();
 		Backtest.BacktestSummaryRenderer.Render(result, settings.ShowFills);
+		AnsiConsole.MarkupLine($"[dim]Wall time: {runStopwatch.Elapsed.TotalMinutes:F1} min ({runStartedAt:HH:mm:ss} → {DateTime.Now:HH:mm:ss})[/]");
 
 		if (!string.IsNullOrWhiteSpace(settings.FillsJsonlPath))
 		{
