@@ -5,13 +5,20 @@ using System.Text.Json.Nodes;
 namespace WebullAnalytics;
 
 /// <summary>House JSON formatter for ai-config files: tab-indented, LF-terminated, but with each
-/// <c>opener.structures.*</c> entry collapsed onto a single line (and arrays kept inline) so the
-/// per-structure knob sets are easy to scan at a glance. Everything else is one key per line.</summary>
+/// <c>opener.structures.*</c> and <c>rules.*</c> entry collapsed onto a single line (and arrays kept
+/// inline) so the per-structure / per-rule knob sets are easy to scan at a glance. Everything else is
+/// one key per line.</summary>
 internal static class ConfigJsonWriter
 {
 	/// <summary>Object-valued keys whose contents are collapsed onto a single line (small knob bags that
-	/// read better inline). <c>structures</c> is handled separately (container multi-line, each entry inline).</summary>
+	/// read better inline). <c>structures</c> and <c>rules</c> are handled separately (container
+	/// multi-line, each entry inline).</summary>
 	private static readonly HashSet<string> InlineObjectKeys = new(StringComparer.Ordinal) { "events", "execution" };
+
+	/// <summary>Container keys whose entries each collapse onto one line: a rule, structure, or autoExecute
+	/// section is a small flat knob bag, and one-per-line reads like a table (the style the newer strategy
+	/// layers use). A nested object inside an entry (e.g. a non-default scaleOut) inlines recursively.</summary>
+	private static readonly HashSet<string> InlineEntryContainers = new(StringComparer.Ordinal) { "structures", "rules", "autoExecute" };
 
 	/// <summary>Canonical top-level key order (matches the AIConfig property order), so base/ticker/strategy
 	/// files all read consistently regardless of how they were built. Unlisted keys keep their order, after.</summary>
@@ -63,9 +70,9 @@ internal static class ConfigJsonWriter
 			var kv = items[i];
 			Indent(sb, depth + 1);
 			sb.Append(JsonSerializer.Serialize(kv.Key)).Append(": ");
-			// opener.structures: container stays one-entry-per-line, but each structure's knobs go inline.
-			if (kv.Key == "structures" && kv.Value is JsonObject structures)
-				WriteStructuresContainer(sb, structures, depth + 1);
+			// opener.structures / rules: container stays one-entry-per-line, but each entry's knobs go inline.
+			if (InlineEntryContainers.Contains(kv.Key) && kv.Value is JsonObject entries)
+				WriteInlineEntryContainer(sb, entries, depth + 1);
 			else if (InlineObjectKeys.Contains(kv.Key) && kv.Value is JsonObject)
 				WriteValue(sb, kv.Value, depth + 1, compact: true);
 			else
@@ -77,17 +84,17 @@ internal static class ConfigJsonWriter
 		sb.Append('}');
 	}
 
-	private static void WriteStructuresContainer(StringBuilder sb, JsonObject structures, int depth)
+	private static void WriteInlineEntryContainer(StringBuilder sb, JsonObject entries, int depth)
 	{
-		if (structures.Count == 0) { sb.Append("{}"); return; }
+		if (entries.Count == 0) { sb.Append("{}"); return; }
 		sb.Append("{\n");
-		var items = structures.ToList();
+		var items = entries.ToList();
 		for (var i = 0; i < items.Count; i++)
 		{
 			var kv = items[i];
 			Indent(sb, depth + 1);
 			sb.Append(JsonSerializer.Serialize(kv.Key)).Append(": ");
-			WriteValue(sb, kv.Value, depth + 1, compact: true);   // each structure on one line
+			WriteValue(sb, kv.Value, depth + 1, compact: true);   // each entry on one line
 			if (i < items.Count - 1) sb.Append(',');
 			sb.Append('\n');
 		}
