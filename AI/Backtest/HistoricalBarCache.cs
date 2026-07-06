@@ -134,7 +134,7 @@ internal sealed class HistoricalBarCache
 		if (map.Count == 0) return false;
 		var min = map.Keys.Min();
 		var max = map.Keys.Max();
-		return min <= from.Date && max >= ClampToSettled(to.Date);
+		return min <= from.Date && max >= ClampToSettled(to.Date, CboeIndexHistoryClient.IsCboeSeries(ticker));
 	}
 
 	/// <summary>Start of the window requested when a ticker has no cached bars yet. CBOE series take their
@@ -144,7 +144,7 @@ internal sealed class HistoricalBarCache
 	private static DateTime InitialFetchFrom(string ticker, DateTime effectiveThrough)
 		=> CboeIndexHistoryClient.IsCboeSeries(ticker) ? DateTime.MinValue : effectiveThrough.AddYears(-2);
 
-	private DateTime ClampToSettled(DateTime neededThrough)
+	private DateTime ClampToSettled(DateTime neededThrough, bool cboeLagTolerant = false)
 	{
 		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(_utcNow(), NyTz);
 		var settled = nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
@@ -153,6 +153,13 @@ internal sealed class HistoricalBarCache
 		// weekend/holiday --until demands a bar that will never exist. (settled=today after the 17:00 cutoff
 		// is intentional — it lets a backtest include today once its EOD bar has posted.)
 		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
+		// CBOE index EOD values (VIX/VIX1D/VIX9D) publish later than Yahoo's underlyings — often well after our
+		// 17:00 cutoff — so a coverage check must not demand *today's* CBOE bar the instant the cutoff passes, or
+		// it reports a spurious "partial" every evening until CBOE posts. Back the requirement off to the prior
+		// settled session for CBOE series; the fetch path keeps the strict ceiling so it still pulls today's bar
+		// the moment it's available.
+		if (cboeLagTolerant && settled == nowNy.Date)
+			settled = MarketCalendar.PreviousOpenOnOrBefore(settled.AddDays(-1));
 		var neededOpen = MarketCalendar.PreviousOpenOnOrBefore(neededThrough.Date);
 		return neededOpen < settled ? neededOpen : settled;
 	}
