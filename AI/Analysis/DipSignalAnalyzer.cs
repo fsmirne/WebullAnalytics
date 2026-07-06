@@ -24,6 +24,18 @@ internal readonly record struct SwingTrade(DateTime EntryEt, decimal EntryPrice,
 /// after entry (a win for a dip-buy).</summary>
 internal sealed record DipSignal(DateTime EntryEt, decimal EntryPrice, decimal Rsi, decimal Close, decimal LowerBand, decimal MacdHist, decimal? Ret30, decimal? Ret60, decimal RetEod);
 
+/// <summary>A fired TOP (overbought) signal and the underlying's forward returns expressed as SHORT P&amp;L —
+/// positive = price FELL after entry = profit for a short. The mirror of <see cref="DipSignal"/>. <see cref="ScalpRet"/>
+/// is the realized short P&amp;L of a TP/SL path exit (null when neither TP nor SL is configured); <see cref="ScalpExit"/>
+/// is "tp"/"sl"/"eod".</summary>
+internal sealed record ShortSignal(DateTime EntryEt, decimal EntryPrice, decimal Rsi, decimal Close, decimal UpperBand, decimal MacdHist, decimal? Ret30, decimal? Ret60, decimal RetEod, decimal? ScalpRet, string? ScalpExit, int ScalpHoldBars);
+
+internal sealed record ShortAnalysisResult(int BarCount, int SessionCount, IReadOnlyList<ShortSignal> Signals, ConditionCounts Counts);
+
+/// <summary>Result of the compounding long-only dip→top equity sim. <see cref="EndBalance"/> marks any still-open
+/// position to the final close; <see cref="BuyHoldEnd"/> is the same capital bought-and-held over the window.</summary>
+internal readonly record struct EquityResult(decimal StartCapital, decimal EndBalance, int RoundTrips, bool EndedLong, decimal BuyHoldEnd, decimal TimeInMarketPct, int Bars, DateTime FirstEt, DateTime LastEt, decimal MaxDrawdownPct);
+
 /// <summary>How often each leg of the conjunction (and all) holds across evaluable bars — makes a rare signal
 /// count interpretable and shows that the <c>hist<0</c> gate is near-always satisfied inside a dip.</summary>
 internal sealed record ConditionCounts(int Evaluable, int HistNeg, int Rsi, int Band, int All);
@@ -116,6 +128,124 @@ internal static class DipSignalAnalyzer
 		var close = bars[entryIdx].Close;
 		for (var j = entryIdx; j < bars.Count && bars[j].Day == day; j++) close = bars[j].Close;
 		return close;
+	}
+
+	/// <summary>Mirror of <see cref="Analyze"/> for the SHORT side: fires on the TOP/overbought trigger
+	/// (<c>MACD hist ≥ 0 AND RSI &gt; RsiHigh AND close &gt; upper BB</c>) and reports forward returns as SHORT P&amp;L
+	/// (positive = price fell = profit). When <paramref name="tp"/> or <paramref name="sl"/> is &gt; 0, each signal
+	/// also carries a path-based TP/SL exit (fractional underlying moves: <paramref name="tp"/> = favorable drop,
+	/// <paramref name="sl"/> = adverse rise); same-bar TP+SL touch resolves to the STOP (conservative). Entry = open
+	/// of the bar after the signal, same session.</summary>
+	public static ShortAnalysisResult AnalyzeShort(IReadOnlyList<IntradayBar> bars, DipParams p, int intervalMinutes, decimal tp, decimal sl)
+	{
+		var bars30 = Math.Max(1, (int)Math.Round(30.0 / intervalMinutes));
+		var bars60 = Math.Max(1, (int)Math.Round(60.0 / intervalMinutes));
+		var signals = new List<ShortSignal>();
+		var sessions = bars.Select(b => b.Day).Distinct().Count();
+		if (bars.Count == 0) return new ShortAnalysisResult(0, 0, signals, new ConditionCounts(0, 0, 0, 0, 0));
+
+		var closes = bars.Select(b => b.Close).ToArray();
+		var rsi = SeriesIndicators.Rsi(closes, p.RsiPeriod);
+		var (_, _, upper) = SeriesIndicators.Bollinger(closes, p.BbPeriod, p.BbK, emaBasis: true);
+		var (_, _, hist) = SeriesIndicators.Macd(closes, p.MacdFast, p.MacdSlow, p.MacdSignal);
+
+		int evaluable = 0, cH = 0, cR = 0, cB = 0, cAll = 0;
+		for (var i = 0; i < bars.Count; i++)
+		{
+			if (rsi[i] is not { } r || upper[i] is not { } ub || hist[i] is not { } h) continue;
+			evaluable++;
+			bool condH = h >= 0m, condR = r > p.RsiHigh, condB = closes[i] > ub;
+			if (condH) cH++;
+			if (condR) cR++;
+			if (condB) cB++;
+			if (!(condH && condR && condB)) continue;
+			cAll++;
+
+			var e = i + 1;
+			if (e >= bars.Count || bars[e].Day != bars[i].Day) continue;
+			var entry = bars[e].Open;
+			if (entry <= 0m) continue;
+
+			var (scalpRet, scalpExit, scalpHold) = tp > 0m || sl > 0m ? ScalpShort(bars, e, entry, tp, sl) : (null, null, 0);
+			signals.Add(new ShortSignal(
+				EntryEt: bars[e].EtStart,
+				EntryPrice: entry,
+				Rsi: r, Close: closes[i], UpperBand: ub, MacdHist: h,
+				Ret30: ShortReturn(bars, e, bars30, entry),
+				Ret60: ShortReturn(bars, e, bars60, entry),
+				RetEod: (entry - SessionClose(bars, e)) / entry,
+				ScalpRet: scalpRet, ScalpExit: scalpExit, ScalpHoldBars: scalpHold));
+		}
+		return new ShortAnalysisResult(bars.Count, sessions, signals, new ConditionCounts(evaluable, cH, cR, cB, cAll));
+	}
+
+	/// <summary>Short forward return: profit if price fell, so (entry − futureClose)/entry. Null past the close.</summary>
+	private static decimal? ShortReturn(IReadOnlyList<IntradayBar> bars, int entryIdx, int barsAhead, decimal entry)
+	{
+		var j = entryIdx + barsAhead;
+		if (j >= bars.Count || bars[j].Day != bars[entryIdx].Day) return null;
+		return (entry - bars[j].Close) / entry;
+	}
+
+	/// <summary>Walks the intraday path of a SHORT from <paramref name="entry"/> (bar <paramref name="entryIdx"/>),
+	/// exiting the first bar that touches the take-profit (Low ≤ entry×(1−tp)) or stop (High ≥ entry×(1+sl)); if a
+	/// bar touches both, the STOP wins (conservative). No touch → exit at the session close. Returns the realized
+	/// short P&amp;L fraction (positive = profit), the reason ("tp"/"sl"/"eod"), and bars held.</summary>
+	private static (decimal? Ret, string Exit, int Hold) ScalpShort(IReadOnlyList<IntradayBar> bars, int entryIdx, decimal entry, decimal tp, decimal sl)
+	{
+		var day = bars[entryIdx].Day;
+		var stopPx = entry * (1m + sl);
+		var tpPx = entry * (1m - tp);
+		var lastClose = entry;
+		for (var j = entryIdx; j < bars.Count && bars[j].Day == day; j++)
+		{
+			lastClose = bars[j].Close;
+			if (sl > 0m && bars[j].High >= stopPx) return (-sl, "sl", j - entryIdx);       // stop-first on same-bar ambiguity
+			if (tp > 0m && bars[j].Low <= tpPx) return (tp, "tp", j - entryIdx);
+		}
+		return ((entry - lastClose) / entry, "eod", 0);
+	}
+
+	/// <summary>Compounding LONG-ONLY equity curve: start flat with <paramref name="startCapital"/>; go all-in
+	/// long at the open of the bar AFTER a DIP trigger fires while flat; sell to flat at the open of the bar after
+	/// a TOP trigger fires while long. Holds ACROSS sessions (no forced EOD exit) — a position opened on a dip is
+	/// carried until the next top signal, however many days later. Fills take <paramref name="frictionBps"/> bps of
+	/// slippage per side. If still long at the last bar, the ending balance marks the open position to the final
+	/// close (partly unrealized). Reported alongside a buy-and-hold baseline (first open → last close).</summary>
+	public static EquityResult SimulateEquityCurve(IReadOnlyList<IntradayBar> bars, DipParams p, decimal startCapital, decimal frictionBps)
+	{
+		if (bars.Count < 2) return new EquityResult(startCapital, startCapital, 0, false, startCapital, 0m, bars.Count, default, default, 0m);
+
+		var closes = bars.Select(b => b.Close).ToArray();
+		var rsi = SeriesIndicators.Rsi(closes, p.RsiPeriod);
+		var (lower, _, upper) = SeriesIndicators.Bollinger(closes, p.BbPeriod, p.BbK, emaBasis: true);
+		var (_, _, hist) = SeriesIndicators.Macd(closes, p.MacdFast, p.MacdSlow, p.MacdSignal);
+		bool Dip(int i) => rsi[i] is { } r && lower[i] is { } lb && hist[i] is { } h && h < 0m && r < p.RsiLow && closes[i] < lb;
+		bool Top(int i) => rsi[i] is { } r && upper[i] is { } ub && hist[i] is { } h && h >= 0m && r > p.RsiHigh && closes[i] > ub;
+
+		var f = frictionBps / 10000m;
+		decimal balance = startCapital, entryPx = 0m, peak = startCapital, maxDd = 0m;
+		bool inPos = false;
+		int roundTrips = 0, inMarketBars = 0;
+
+		for (var i = 0; i < bars.Count; i++)
+		{
+			var eq = inPos && entryPx > 0m ? balance * (closes[i] / entryPx) : balance;   // mark-to-market for drawdown
+			if (eq > peak) peak = eq;
+			if (peak > 0m && (peak - eq) / peak > maxDd) maxDd = (peak - eq) / peak;
+			if (inPos) inMarketBars++;
+
+			if (i + 1 >= bars.Count) continue;
+			var next = bars[i + 1].Open;
+			if (next <= 0m) continue;
+			if (!inPos && Dip(i)) { inPos = true; entryPx = next * (1m + f); }
+			else if (inPos && Top(i)) { balance *= next * (1m - f) / entryPx; inPos = false; roundTrips++; }
+		}
+
+		var endBalance = inPos && entryPx > 0m ? balance * (closes[^1] / entryPx) : balance;
+		var buyHold = startCapital * (closes[^1] / bars[0].Open);
+		var timeIn = bars.Count > 0 ? 100m * inMarketBars / bars.Count : 0m;
+		return new EquityResult(startCapital, endBalance, roundTrips, inPos, buyHold, timeIn, bars.Count, bars[0].EtStart, bars[^1].EtStart, maxDd * 100m);
 	}
 
 	/// <summary>Round-trip swing sim. ENTER on the first bar after a dip-signal run clears (wait for the
