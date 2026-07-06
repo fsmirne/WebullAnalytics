@@ -25,6 +25,23 @@ internal static class MarketCalendar
 		return d;
 	}
 
+	/// <summary>True if <paramref name="date"/> is an NYSE/CBOE early-close (1:00pm ET) half-day: the Friday
+	/// after Thanksgiving, July 3 (day before Independence Day), and December 24 (Christmas Eve) — each only
+	/// when it is itself a regular trading day AND the adjacent full holiday falls on its own weekday, so a
+	/// shifted observance (holiday landing on a weekend) doesn't turn the half-day into a full closure or a
+	/// normal session. The rarer holiday-on-weekend early-close variants aren't modeled; add them if a
+	/// window needs one. Note: index feeds (VIX) may keep printing ~15 min past the 13:00 equity close.</summary>
+	internal static bool IsEarlyClose(DateTime date)
+	{
+		var d = date.Date;
+		if (!IsOpen(d)) return false;
+		int y = d.Year;
+		if (d == NthWeekday(y, 11, DayOfWeek.Thursday, 4).AddDays(1)) return true;                            // Fri after Thanksgiving
+		if (d == new DateTime(y, 7, 3) && Observed(new DateTime(y, 7, 4)) == new DateTime(y, 7, 4)) return true;   // July 3
+		if (d == new DateTime(y, 12, 24) && Observed(new DateTime(y, 12, 25)) == new DateTime(y, 12, 25)) return true; // Christmas Eve
+		return false;
+	}
+
 	// Ad-hoc US market closures outside the recurring NYSE holiday calendar. Add new entries as they
 	// happen — the backtest's 2-year lookback only sees recent dates, so the historical 9/11, Hurricane
 	// Sandy, and Bush 41 closures aren't tracked here.
