@@ -1165,15 +1165,17 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 		if (!hasOpening) return false;
 
-		// Regular session: last bar at 15:59 ET (some files may have a 16:00 print stamped as the close).
-		if (lastRthMinute >= regularCloseMinute && rthCount >= 380) return true;
+		// The session's real close depends on the date: NYSE/CBOE half-days (Fri after Thanksgiving, Jul 3,
+		// Christmas Eve) close at 13:00. Consult the calendar so we don't (a) demand a 16:00 tail on a half-day
+		// or (b) accept a truncated regular day that happens to end near 1pm. On a known early-close day, index
+		// feeds (VIX) legitimately print ~15 min past the 13:00 equity close, so we take last≥12:59 with no
+		// upper bound; on a regular day we require the 15:59 tail.
+		var earlyClose = DateTime.TryParseExact(Path.GetFileNameWithoutExtension(path), "yyyy-MM-dd",
+			CultureInfo.InvariantCulture, DateTimeStyles.None, out var day) && MarketCalendar.IsEarlyClose(day);
 
-		// Early-close session: last bar at 12:59 (closing minute of a half-day). Accept exactly 12:59 or
-		// 13:00 (some feeds emit a 13:00 bar as the close); reject 13:01+ because that range overlaps with
-		// truncated regular days (e.g., a normal day where `wa ai watch` was killed early afternoon).
-		if (lastRthMinute >= earlyCloseMinute && lastRthMinute <= 13 * 60 && rthCount >= 200) return true;
-
-		return false;
+		if (earlyClose)
+			return lastRthMinute >= earlyCloseMinute && rthCount >= 200;
+		return lastRthMinute >= regularCloseMinute && rthCount >= 380;
 	}
 
 	private static List<MinuteBar> ReadIntradayCsv(string path)
