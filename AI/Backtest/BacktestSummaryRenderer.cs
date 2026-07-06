@@ -134,8 +134,8 @@ internal static class BacktestSummaryRenderer
 	private static string ShortRule(string? rule) => rule switch
 	{
 		null or "" => "—",
-		"CloseBeforeShortExpiryRule" => "CloseB4Exp",
-		"CloseSurvivorOnShortExpiry" => "SurvivorClose",
+		"CloseBeforeShortExpiryRule" => "ClosePreExp",
+		"CloseSurvivorOnShortExpiry" => "CloseLeft",
 		"RollShortOnExpiryRule" => "RollShort",
 		"OpportunisticRollRule" => "OppRoll",
 		"DefensiveRollRule" => "DefRoll",
