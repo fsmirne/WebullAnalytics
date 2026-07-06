@@ -15,9 +15,13 @@ namespace WebullAnalytics.Analyze;
 
 internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 {
-	[CommandArgument(0, "<spec>")]
-	[Description("Leg list to evaluate using current market quotes. Format: ACTION:SYMBOL[[:QTY]][[@PRICE]] where ACTION is buy|sell, QTY defaults to 1, and PRICE is an optional cost basis (decimal or BID|MID|ASK). When @PRICE is omitted, MID is used by default. Examples: sell:GME260501C00025500,buy:GME260522C00026000 OR sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12")]
+	[CommandArgument(0, "[spec]")]
+	[Description("Leg list to evaluate using current market quotes. Format: ACTION:SYMBOL[[:QTY]][[@PRICE]] where ACTION is buy|sell, QTY defaults to 1, and PRICE is an optional cost basis (decimal or BID|MID|ASK). When @PRICE is omitted, MID is used by default. Examples: sell:GME260501C00025500,buy:GME260522C00026000 OR sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12. Omit when using --proposal.")]
 	public string Spec { get; set; } = "";
+
+	[CommandOption("--proposal")]
+	[Description("Render the risk diagnostic from a stored proposal snapshot instead of live quotes. Format: FILE[[:LINE]] where FILE is a path, a data/ filename (ai-proposals.SPY.0DTE.jsonl), or the TICKER.strategy shorthand (SPY.0DTE); LINE is a 1-based line number, defaulting to the last line.")]
+	public string? Proposal { get; set; }
 
 	[CommandOption("--iv-default")]
 	[Description("Fallback implied volatility for theoretical pricing when no live IV exists. Percent, default 40.")]
@@ -33,8 +37,15 @@ internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 
+		if (Proposal != null)
+		{
+			if (!string.IsNullOrWhiteSpace(Spec))
+				return ValidationResult.Error("pass either <spec> or --proposal, not both");
+			return ValidationResult.Success();
+		}
+
 		if (string.IsNullOrWhiteSpace(Spec))
-			return ValidationResult.Error("<spec> is required");
+			return ValidationResult.Error("provide <spec> or --proposal");
 
 		try { _ = ParseRiskLegs(Spec); }
 		catch (FormatException ex) { return ValidationResult.Error($"<spec>: {ex.Message}"); }
@@ -91,6 +102,9 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		}
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
+
+		if (settings.Proposal != null)
+			return RenderFromProposal(settings);
 
 		var parsedLegs = AnalyzeRiskSettings.ParseRiskLegs(settings.Spec);
 		var symbols = parsedLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -225,6 +239,50 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		else
 		{
 			AnalyzeCommon.RenderProposalPanel(positionLegs, strategyLabel, spot.Value, diagnostic);
+		}
+		return 0;
+	}
+
+	/// <summary>--proposal: re-render the risk diagnostic exactly as it was stored in the proposal snapshot,
+	/// with no live fetch or recalibration. The snapshot's diagnostic already carries the calibrated IVs,
+	/// greeks, opener score and rule hits from when the proposal was scored.</summary>
+	private static int RenderFromProposal(AnalyzeRiskSettings settings)
+	{
+		var (snap, error) = ProposalSnapshot.TryLoad(settings.Proposal!);
+		if (snap == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
+		if (snap.Diagnostic == null) { Console.Error.WriteLine($"Error: proposal line {snap.LineNumber} of '{snap.SourcePath}' has no diagnostic block to render."); return 1; }
+
+		if (!settings.EvaluationDateOverride.HasValue)
+			EvaluationDate.Set(snap.AsOf.Date);
+
+		var positionLegs = snap.Legs
+			.Select(l => new AnalyzePositionCommand.PositionSnapshot(Symbol: l.Symbol, Action: l.Action, Qty: l.Qty, CostBasis: snap.CostBasis(l.Symbol), Parsed: l.Parsed))
+			.ToList();
+
+		var underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [snap.Ticker] = snap.Spot };
+		var spot = ResolveSpot(snap.Ticker, settings.Spot, underlyingPrices) ?? snap.Spot;
+
+		var kind = AnalyzePositionCommand.ClassifyStructure(positionLegs);
+		var strategyLabel = kind != AnalyzePositionCommand.StructureKind.Unsupported
+			? kind.ToString()
+			: ParsingHelpers.ClassifyStrategyKind(
+				legCount: positionLegs.Count,
+				distinctExpiries: positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().Count(),
+				distinctStrikes: positionLegs.Select(l => l.Parsed.Strike).Distinct().Count(),
+				distinctCallPut: positionLegs.Select(l => l.Parsed.CallPut).Distinct().Count());
+
+		AnsiConsole.MarkupLine($"[dim]Proposal snapshot: {Markup.Escape(Path.GetFileName(snap.SourcePath))} line {snap.LineNumber}, emitted {snap.AsOf:yyyy-MM-dd HH:mm:ss}[/]");
+		if (settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase))
+		{
+			var stringWriter = new StringWriter();
+			var fileConsole = WebullAnalytics.IO.TextFileExporter.CreateTextConsole(stringWriter);
+			AnalyzeCommon.RenderProposalPanel(positionLegs, strategyLabel, spot, snap.Diagnostic, fileConsole, ascii: true);
+			var path = settings.OutputPath ?? AnalyzeCommon.DefaultTextOutputName("AnalyzeRisk");
+			WebullAnalytics.IO.TextFileExporter.WriteConsoleOutputToTextFile(stringWriter, path, "Risk analysis written to");
+		}
+		else
+		{
+			AnalyzeCommon.RenderProposalPanel(positionLegs, strategyLabel, spot, snap.Diagnostic);
 		}
 		return 0;
 	}

@@ -39,9 +39,13 @@ internal abstract class AnalyzeSubcommandSettings : ReportSettings
 
 internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
 {
-	[CommandArgument(0, "<spec>")]
-	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, and PRICE is a decimal or BID|MID|ASK (keywords require --api). Comma-separated for multiple. Example: buy:GME260501C00023000:300@MID")]
+	[CommandArgument(0, "[spec]")]
+	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, and PRICE is a decimal or BID|MID|ASK (keywords require --api). Comma-separated for multiple. Example: buy:GME260501C00023000:300@MID. Omit when using --proposal.")]
 	public string Spec { get; set; } = "";
+
+	[CommandOption("--proposal")]
+	[Description("Reconstruct the hypothetical trade from a stored proposal snapshot (its legs, entry mids, spot, IVs and date) instead of the <spec> argument. Format: FILE[[:LINE]] where FILE is a path, a data/ filename (ai-proposals.SPY.0DTE.jsonl), or the TICKER.strategy shorthand (SPY.0DTE); LINE is a 1-based line number, defaulting to the last line.")]
+	public string? Proposal { get; set; }
 
 	[CommandOption("--standalone")]
 	[Description("Ignore all existing trades/positions and run the pipeline only on the synthetic legs. Useful for judging a trade in isolation.")]
@@ -51,6 +55,16 @@ internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
+
+		if (Proposal != null)
+		{
+			if (!string.IsNullOrWhiteSpace(Spec))
+				return ValidationResult.Error("pass either <spec> or --proposal, not both");
+			return ValidationResult.Success();
+		}
+
+		if (string.IsNullOrWhiteSpace(Spec))
+			return ValidationResult.Error("provide <spec> or --proposal");
 
 		List<ParsedLeg> legs;
 		try { legs = AnalyzeCommon.ParseAllLegs(Spec).ToList(); }
@@ -74,6 +88,9 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
+
+		if (settings.Proposal != null && !ReconstructSpecFromProposal(settings))
+			return 1;
 
 		if (settings.EvaluationDateOverride.HasValue)
 		{
@@ -112,6 +129,36 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(settings.Spec, maxSeq, baseTime, quotes));
 
 		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation);
+	}
+
+	/// <summary>--proposal: rebuild the <c>&lt;spec&gt;</c> from a stored proposal snapshot — its legs priced at the
+	/// entry mids captured when scored, plus the snapshot's spot, per-leg IVs and date as overrides — so the
+	/// report pipeline projects the trade against the market as it stood then. Explicit --spot/--iv/--date flags
+	/// still win. Returns false (with an error printed) when the snapshot can't be loaded.</summary>
+	private static bool ReconstructSpecFromProposal(AnalyzeTradeSettings settings)
+	{
+		var (snap, error) = ProposalSnapshot.TryLoad(settings.Proposal!);
+		if (snap == null) { Console.Error.WriteLine($"Error: {error}"); return false; }
+
+		settings.Spec = string.Join(",", snap.Legs.Select(l => $"{(l.Action == LegAction.Buy ? "buy" : "sell")}:{l.Symbol}:{l.Qty}@{snap.CostBasis(l.Symbol).ToString(CultureInfo.InvariantCulture)}"));
+
+		if (string.IsNullOrEmpty(settings.Spot))
+			settings.Spot = $"{snap.Ticker}:{snap.Spot.ToString(CultureInfo.InvariantCulture)}";
+
+		if (string.IsNullOrEmpty(settings.IvOverrides))
+		{
+			var ivs = snap.Legs
+				.Where(l => snap.TryGetLegIv(l.Symbol, out _))
+				.Select(l => { snap.TryGetLegIv(l.Symbol, out var iv); return $"{l.Symbol}:{(iv * 100m).ToString(CultureInfo.InvariantCulture)}"; });
+			var ivStr = string.Join(",", ivs);
+			if (!string.IsNullOrEmpty(ivStr)) settings.IvOverrides = ivStr;
+		}
+
+		if (settings.Date == null)
+			settings.Date = snap.AsOf.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+		Console.WriteLine($"Proposal snapshot: {Path.GetFileName(snap.SourcePath)} line {snap.LineNumber}, emitted {snap.AsOf:yyyy-MM-dd HH:mm:ss}");
+		return true;
 	}
 }
 
