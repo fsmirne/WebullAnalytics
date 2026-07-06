@@ -148,10 +148,13 @@ internal sealed class HistoricalBarCache
 	{
 		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(_utcNow(), NyTz);
 		var settled = nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
-		// Yahoo never prints a bar on weekends or NYSE holidays — walk back to the most recent open
-		// trading day so coverage checks on a Saturday don't demand a Saturday bar that will never exist.
+		// Yahoo never prints a bar on weekends or NYSE holidays — walk BOTH the settled ceiling and the
+		// requested end back to the most recent open trading day, so neither a Saturday "today" nor a
+		// weekend/holiday --until demands a bar that will never exist. (settled=today after the 17:00 cutoff
+		// is intentional — it lets a backtest include today once its EOD bar has posted.)
 		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
-		return neededThrough.Date < settled ? neededThrough.Date : settled;
+		var neededOpen = MarketCalendar.PreviousOpenOnOrBefore(neededThrough.Date);
+		return neededOpen < settled ? neededOpen : settled;
 	}
 
 	private static bool NeedsRefresh(Dictionary<DateTime, YahooOptionsClient.HistoricalBar> map, DateTime neededThrough)
