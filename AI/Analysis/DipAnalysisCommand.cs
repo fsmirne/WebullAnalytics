@@ -73,6 +73,26 @@ internal sealed class DipAnalysisSettings : CommandSettings
 	[Description("Linear put skew: IV rises this many vol points per 1% the strike is below spot. 0 = flat (VIX1D for both legs). Try 3-6 for SPX. Default: 0.")]
 	public decimal PutSkew { get; set; }
 
+	[CommandOption("--capital <X>")]
+	[Description("Compounding LONG-ONLY equity sim: start with $X, go all-in long at the bar after a DIP trigger, sell flat at the bar after a TOP trigger, holding ACROSS sessions. Prints the ending balance vs buy-and-hold. 0 = off.")]
+	public decimal Capital { get; set; }
+
+	[CommandOption("--friction <BPS>")]
+	[Description("With --capital: per-side slippage in basis points applied to each fill. Default 0 (shares have ~1bp spread; add a few bps to stress it).")]
+	public decimal FrictionBps { get; set; }
+
+	[CommandOption("--short")]
+	[Description("Study the OVERBOUGHT top trigger as a SHORT entry (mirror of the dip): MACD hist >= 0 AND RSI > --rsi-high AND close > upper BB. Forward returns are SHORT P&L (positive = price fell = profit). Entry = next bar open.")]
+	public bool Short { get; set; }
+
+	[CommandOption("--tp <PCT>")]
+	[Description("With --short: take-profit as a % underlying move in your favor (price falls this %). Simulates a path exit instead of buy-and-hold. 0 = off (pure forward returns). Default 0.")]
+	public decimal Tp { get; set; }
+
+	[CommandOption("--sl <PCT>")]
+	[Description("With --short: stop-loss as a % underlying move against you (price rises this %). Same-bar TP+SL touch resolves to the stop (conservative). 0 = off. Default 0.")]
+	public decimal Sl { get; set; }
+
 	[CommandOption("--first-only")]
 	[Description("Keep only the FIRST signal of each session (collapses a multi-bar dip into one event). All stats and overlays then run on that subset. Default: off (every trigger).")]
 	public bool FirstOnly { get; set; }
@@ -165,6 +185,29 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		if (!string.IsNullOrWhiteSpace(settings.Dump)) { Dump(bars, settings.Dump); return 0; }
 
 		var p = new DipParams(RsiLow: settings.RsiLow, RsiHigh: settings.RsiHigh, BbK: settings.BbK);
+
+		if (settings.Capital > 0m)
+		{
+			var eq = DipSignalAnalyzer.SimulateEquityCurve(bars, p, settings.Capital, settings.FrictionBps);
+			RenderEquity(settings, eq);
+			return 0;
+		}
+
+		if (settings.Short)
+		{
+			var sr = DipSignalAnalyzer.AnalyzeShort(bars, p, settings.Interval, settings.Tp / 100m, settings.Sl / 100m);
+			if (settings.FirstOnly)
+				sr = sr with
+				{
+					Signals = sr.Signals
+						.GroupBy(s => s.EntryEt.Date)
+						.Select(g => g.OrderBy(x => x.EntryEt).First())
+						.OrderBy(s => s.EntryEt)
+						.ToList()
+				};
+			RenderShort(settings, since, until, sr);
+			return 0;
+		}
 
 		if (settings.ExitOnTop)
 		{
@@ -265,6 +308,94 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 			AnsiConsole.Write(mt);
 		}
 	}
+
+	private static void RenderEquity(DipAnalysisSettings s, EquityResult e)
+	{
+		AnsiConsole.MarkupLine($"[bold]{s.Ticker.ToUpperInvariant()} dip→top compounding equity[/]  {e.FirstEt:yyyy-MM-dd} → {e.LastEt:yyyy-MM-dd}  ({s.Interval}-min RTH, continuous indicators)");
+		AnsiConsole.MarkupLine($"Long-only: buy all-in at the bar after a DIP trigger (RSI<{s.RsiLow} & close<lowerBB & hist<0), sell flat at the bar after a TOP trigger (RSI>{s.RsiHigh} & close>upperBB & hist>=0). Holds across sessions. Friction {s.FrictionBps}bps/side.");
+		AnsiConsole.WriteLine();
+
+		var stratRet = e.StartCapital > 0m ? (e.EndBalance / e.StartCapital - 1m) * 100m : 0m;
+		var bhRet = e.StartCapital > 0m ? (e.BuyHoldEnd / e.StartCapital - 1m) * 100m : 0m;
+
+		var t = new Table().Border(TableBorder.Rounded);
+		foreach (var col in new[] { "", "End balance", "Return", "Max DD", "Round trips", "Time in mkt" }) t.AddColumn(col);
+		t.AddRow("[bold]dip→top swing[/]", $"${e.EndBalance:N0}", $"{stratRet:+0.0;-0.0}%", $"{e.MaxDrawdownPct:F1}%", e.RoundTrips.ToString(), $"{e.TimeInMarketPct:F0}%");
+		t.AddRow("[dim]buy & hold[/]", $"${e.BuyHoldEnd:N0}", $"{bhRet:+0.0;-0.0}%", "—", "—", "100%");
+		AnsiConsole.Write(t);
+
+		if (e.EndedLong) AnsiConsole.MarkupLine("[yellow]Ended still LONG — the ending balance marks the open position to the final close (partly unrealized).[/]");
+		var verdict = e.EndBalance >= e.BuyHoldEnd ? "[green]beat[/]" : "[red]trailed[/]";
+		AnsiConsole.MarkupLine($"[dim]Strategy {verdict} buy & hold by ${Math.Abs(e.EndBalance - e.BuyHoldEnd):N0} while in the market only {e.TimeInMarketPct:F0}% of the time.[/]");
+	}
+
+	private static void RenderShort(DipAnalysisSettings s, DateTime since, DateTime until, ShortAnalysisResult r)
+	{
+		AnsiConsole.MarkupLine($"[bold]{s.Ticker.ToUpperInvariant()} SHORT (top trigger)[/]  {since:yyyy-MM-dd} → {until:yyyy-MM-dd}  ({s.Interval}-min RTH, continuous indicators{(s.FirstOnly ? ", first signal/session" : "")})");
+		AnsiConsole.MarkupLine($"Rule (overbought mirror of the dip): MACD(12,26,9) hist >= 0 AND RSI(14) > {s.RsiHigh} AND close > upper BB(20,{s.BbK}σ, EMA basis). Entry = next bar open. [bold]Returns are SHORT P&L — positive = price fell = profit.[/]");
+		var perSession = r.SessionCount > 0 ? (double)r.Signals.Count / r.SessionCount : 0;
+		AnsiConsole.MarkupLine($"{r.BarCount:N0} bars · {r.SessionCount} sessions · [bold]{r.Signals.Count} signals[/] ({perSession:F2}/session)\n");
+
+		var table = new Table().Border(TableBorder.Rounded).Title("[bold]Forward returns (SHORT P&L, positive = profit)[/]");
+		foreach (var col in new[] { "Horizon", "N", "Win %", "Avg %", "Median %", "Best %", "Worst %" }) table.AddColumn(col);
+		AddRow(table, "+30 min", r.Signals.Select(x => x.Ret30));
+		AddRow(table, "+60 min", r.Signals.Select(x => x.Ret60));
+		AddRow(table, "to close", r.Signals.Select(x => (decimal?)x.RetEod));
+		AnsiConsole.Write(table);
+
+		if (s.Tp > 0m || s.Sl > 0m)
+		{
+			var scalps = r.Signals.Where(x => x.ScalpRet.HasValue).ToList();
+			var rets = scalps.Select(x => x.ScalpRet).ToList();
+			int tp = scalps.Count(x => x.ScalpExit == "tp"), sl = scalps.Count(x => x.ScalpExit == "sl"), eod = scalps.Count(x => x.ScalpExit == "eod");
+			var avgHoldMin = scalps.Count(x => x.ScalpExit != "eod") is var closed && closed > 0
+				? scalps.Where(x => x.ScalpExit != "eod").Average(x => x.ScalpHoldBars) * s.Interval : 0;
+			AnsiConsole.MarkupLine($"\n[bold]TP/SL scalp[/] — TP {s.Tp}% (favorable drop) / SL {s.Sl}% (adverse rise) on the underlying path; same-bar TP+SL resolves to the stop.");
+			var st = new Table().Border(TableBorder.Rounded).Title("[bold]Short scalp P&L (underlying)[/]");
+			foreach (var col in new[] { "N", "TP %", "SL %", "EOD %", "Win %", "Avg %", "Median %", "Avg hold (TP/SL)" }) st.AddColumn(col);
+			st.AddRow(scalps.Count.ToString(),
+				Frac(tp, scalps.Count), Frac(sl, scalps.Count), Frac(eod, scalps.Count),
+				Pct(WinRate(rets)), Signed(Avg(rets)), Signed(Median(rets)), $"{avgHoldMin:F0}m");
+			AnsiConsole.Write(st);
+		}
+
+		var c = r.Counts;
+		var ct = new Table().Border(TableBorder.Rounded).Title($"[bold]Condition co-occurrence[/] (of {c.Evaluable:N0} evaluable bars)");
+		foreach (var col in new[] { "Condition", "Bars", "% of evaluable" }) ct.AddColumn(col);
+		void CRow(string label, int n) => ct.AddRow(label, n.ToString("N0"), c.Evaluable > 0 ? $"{100.0 * n / c.Evaluable:F2}%" : "—");
+		CRow("MACD hist >= 0", c.HistNeg);
+		CRow($"RSI > {s.RsiHigh}", c.Rsi);
+		CRow($"close > upper BB({s.BbK}σ, EMA)", c.Band);
+		CRow("[bold]all three (top trigger)[/]", c.All);
+		AnsiConsole.Write(ct);
+
+		var byMonth = r.Signals.GroupBy(x => new DateTime(x.EntryEt.Year, x.EntryEt.Month, 1)).OrderBy(g => g.Key).ToList();
+		if (byMonth.Count > 1)
+		{
+			var mt = new Table().Border(TableBorder.Rounded).Title("[bold]By month (SHORT, entry→close)[/]");
+			foreach (var col in new[] { "Month", "Signals", "Win %", "Avg %" }) mt.AddColumn(col);
+			foreach (var g in byMonth)
+			{
+				var mr = g.Select(x => (decimal?)x.RetEod).ToList();
+				mt.AddRow(g.Key.ToString("yyyy-MM"), g.Count().ToString(), Pct(WinRate(mr)), Signed(Avg(mr)));
+			}
+			AnsiConsole.Write(mt);
+		}
+
+		if (s.List > 0)
+		{
+			var t = new Table().Border(TableBorder.Rounded).Title($"[bold]First {Math.Min(s.List, r.Signals.Count)} short signals[/]");
+			foreach (var col in new[] { "Entry (ET)", "Price", "RSI", "Close>Band", "MACD hist", "+30m", "+60m", "Close", "Scalp" }) t.AddColumn(col);
+			foreach (var sig in r.Signals.Take(s.List))
+				t.AddRow(sig.EntryEt.ToString("yyyy-MM-dd HH:mm"), sig.EntryPrice.ToString("F2"), sig.Rsi.ToString("F1"),
+					$"{sig.Close:F2}>{sig.UpperBand:F2}", sig.MacdHist.ToString("F2"),
+					PctN(sig.Ret30), PctN(sig.Ret60), Signed(sig.RetEod),
+					sig.ScalpRet.HasValue ? $"{Signed(sig.ScalpRet.Value)} ({sig.ScalpExit})" : "—");
+			AnsiConsole.Write(t);
+		}
+	}
+
+	private static string Frac(int n, int total) => total > 0 ? $"{100.0 * n / total:F0}%" : "—";
 
 	private static void RenderList(DipAnalysisResult r, int n)
 	{
