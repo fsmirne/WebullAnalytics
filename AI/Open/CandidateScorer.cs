@@ -1855,25 +1855,39 @@ internal static class CandidateScorer
 		return (lower, upper);
 	}
 
-	/// <summary>Locates the peak P&L of a calendar/diagonal at the short leg's expiry by scanning a
-	/// fine grid (±60% from spot, 240 points) and returning the maximum-PnL value sampled. The 5-point
-	/// scenario grid the EV calculation uses misses the peak — for a $25 ATM diagonal the actual peak
-	/// sits between two grid points, so the scenario-max underestimates max_profit by ~30%. R/R needs
-	/// the true peak to be meaningful.</summary>
+	/// <summary>Locates the peak P&L of a calendar/diagonal at the short leg's expiry. A coarse uniform
+	/// grid (±60% from spot, 240 points) locates the peak's neighborhood, but the payoff is a sharp cusp
+	/// AT the short strike (short intrinsic = 0, long extrinsic maximal), and the ~$3.74 uniform step for
+	/// an SPY-class underlying straddles that strike without ever landing on it — understating max_profit
+	/// by ~30%, which then drags R/R and the balance factor in scoring. So the scan is seeded with each
+	/// leg's strike plus a fine ±$2 @ $0.10 refinement around it, guaranteeing the cusp is sampled (the
+	/// short strike for a pure calendar; both strikes catch a diagonal whose peak sits between them).</summary>
 	private static decimal FindCalendarOrDiagonalPeakPnl(decimal spot, OptionParsed shortLeg, OptionParsed longLeg, DateTime shortExpiryClose, decimal ivLong, decimal debitPerContract, IReadOnlyList<DividendEvent>? dividends, OptionMath.BlackScholesEvaluator longBs)
 	{
+		var peak = decimal.MinValue;
+		void Sample(decimal s)
+		{
+			var pnl = CalendarOrDiagonalPnLAtShortExpiry(s, shortLeg, longLeg, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
+			if (pnl > peak) peak = pnl;
+		}
+
 		const int steps = 240;
 		var sMin = spot * 0.4m;
 		var sMax = spot * 1.6m;
 		var stepSize = (sMax - sMin) / steps;
-
-		var peak = decimal.MinValue;
 		for (var i = 0; i <= steps; i++)
-		{
-			var s = sMin + stepSize * i;
-			var pnl = CalendarOrDiagonalPnLAtShortExpiry(s, shortLeg, longLeg, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
-			if (pnl > peak) peak = pnl;
-		}
+			Sample(sMin + stepSize * i);
+
+		// Seed the cusp: the peak of a calendar/diagonal is at (or between) the strikes, which the uniform
+		// grid above generally misses. Sample each strike exactly, plus a fine local window to catch a
+		// diagonal peak that sits just off a strike.
+		foreach (var strike in new[] { shortLeg.Strike, longLeg.Strike })
+			for (var offset = -2.0m; offset <= 2.0m; offset += 0.1m)
+			{
+				var s = strike + offset;
+				if (s > 0m) Sample(s);
+			}
+
 		return peak;
 	}
 
