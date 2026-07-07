@@ -1050,23 +1050,30 @@ internal static class CandidateScorer
 			? "fit 0 → no directional effect on this structure"
 			: $"fit {p.DirectionalFit:+0;-0} → {biasEffectPct:+0;-0}% {(biasEffectPct >= 0 ? "tech boost" : "tech cut")}";
 		indicatorParts.Add($"regime bias {bias:+0.00;-0.00} ({regimeLabel}), {regimeEffect}");
-		if (p.LiquidityAdjustmentFactor.HasValue)
+		// Liquidity is INFORMATIONAL: show the spread/OI reading whenever it exists, regardless of weight.
+		// The factor enters the factors line only when its weight is active (see line ~1038); here the
+		// indicator renders the factor's effect, or "off" when the weight is 0, so the reading stays visible.
+		if (p.WorstLegBidAskSpreadPct.HasValue || p.MinOpenInterest.HasValue || p.MinRelativeOpenInterest.HasValue)
 		{
 			var spreadStr = p.WorstLegBidAskSpreadPct is decimal s ? $"{(s * 100m).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}%" : "n/a";
 			var liqStr = p.MinOpenInterest.HasValue ? p.MinOpenInterest.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "n/a";
 			var relStr = p.MinRelativeOpenInterest is decimal rel ? $"{(rel * 100m).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}%" : "n/a";
-			indicatorParts.Add($"worst-leg spread {spreadStr}, min OI/vol {liqStr} (rel {relStr}) → liq {p.LiquidityAdjustmentFactor.Value:F2}");
+			var effect = p.LiquidityAdjustmentFactor.HasValue ? $"liq {p.LiquidityAdjustmentFactor.Value:F2}" : "liq off";
+			indicatorParts.Add($"worst-leg spread {spreadStr}, min OI/vol {liqStr} (rel {relStr}) → {effect}");
 		}
-		string? volDetail = null;
-		if (p.VolatilityAdjustmentFactor.HasValue && p.ImpliedVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.Value > 0m)
+		// Vol (IV-vs-HV richness) is INFORMATIONAL: show the reading whenever IV and HV exist, regardless of
+		// weight. The factor enters the factors line only when its weight is active; the indicator renders
+		// the factor's effect, or "off" when the weight is 0, so the reading stays visible.
+		if (p.VolatilityAdjustmentFactor.HasValue)
+			factorParts.Add($"vol {p.VolatilityAdjustmentFactor.Value:F2}");
+		if (p.ImpliedVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.Value > 0m)
 		{
 			var richness = p.ImpliedVolatilityAnnual.Value / p.HistoricalVolatilityAnnual.Value;
-			factorParts.Add($"vol {p.VolatilityAdjustmentFactor.Value:F2}");
 			var vegaStr = p.NetVegaPerContract is decimal v
 				? $", ν {v.ToString("+0.00;-0.00", System.Globalization.CultureInfo.InvariantCulture)}/IV pt"
 				: "";
-			volDetail = $"rep IV {p.ImpliedVolatilityAnnual.Value:P1} / underlying HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x{vegaStr} → vol {p.VolatilityAdjustmentFactor.Value:F2}";
-			indicatorParts.Add(volDetail);
+			var effect = p.VolatilityAdjustmentFactor.HasValue ? $"vol {p.VolatilityAdjustmentFactor.Value:F2}" : "vol off";
+			indicatorParts.Add($"rep IV {p.ImpliedVolatilityAnnual.Value:P1} / underlying HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x{vegaStr} → {effect}");
 		}
 		if (p.TargetExpiryMaxPain.HasValue)
 			indicatorParts.Add($"max-pain target ${p.TargetExpiryMaxPain.Value:F2}");
@@ -1085,17 +1092,27 @@ internal static class CandidateScorer
 		}
 		if (p.AssignmentRiskFactor.HasValue)
 			factorParts.Add($"assign {p.AssignmentRiskFactor.Value:F2}");
-		if (p.StatArbAdjustmentFactor.HasValue && p.MarketNetPremiumPerShare.HasValue && p.TheoreticalNetPremiumPerShare.HasValue)
-		{
+		// Stat-arb (market mid vs theoretical) is INFORMATIONAL: show the reading whenever both nets exist,
+		// regardless of weight. The factor enters the factors line only when its weight is active; the
+		// indicator renders the factor's effect, or "off" when the weight is 0.
+		if (p.StatArbAdjustmentFactor.HasValue)
 			factorParts.Add($"arb {p.StatArbAdjustmentFactor.Value:F2}");
-			var edge = p.TheoreticalNetPremiumPerShare.Value - p.MarketNetPremiumPerShare.Value;
-			indicatorParts.Add($"market net ${p.MarketNetPremiumPerShare.Value:+0.00;-0.00} / theoretical net ${p.TheoreticalNetPremiumPerShare.Value:+0.00;-0.00}, edge ${edge:+0.00;-0.00}/share → arb {p.StatArbAdjustmentFactor.Value:F2}");
-		}
-		if (p.SentimentAdjustmentFactor.HasValue && p.MarketSentimentScore.HasValue)
+		if (p.MarketNetPremiumPerShare.HasValue && p.TheoreticalNetPremiumPerShare.HasValue)
 		{
+			var edge = p.TheoreticalNetPremiumPerShare.Value - p.MarketNetPremiumPerShare.Value;
+			var effect = p.StatArbAdjustmentFactor.HasValue ? $"arb {p.StatArbAdjustmentFactor.Value:F2}" : "arb off";
+			indicatorParts.Add($"market net ${p.MarketNetPremiumPerShare.Value:+0.00;-0.00} / theoretical net ${p.TheoreticalNetPremiumPerShare.Value:+0.00;-0.00}, edge ${edge:+0.00;-0.00}/share → {effect}");
+		}
+		// F&G sentiment is INFORMATIONAL: show the reading whenever it exists, regardless of weight. The
+		// factor enters the factors line only when its weight is active; the indicator renders the factor's
+		// effect, or "off" when the weight is 0, so the reading stays visible.
+		if (p.SentimentAdjustmentFactor.HasValue)
 			factorParts.Add($"sentiment {p.SentimentAdjustmentFactor.Value:F2}");
+		if (p.MarketSentimentScore.HasValue)
+		{
 			var rating = p.MarketSentimentRating ?? SentimentRating.FromScore(p.MarketSentimentScore.Value);
-			indicatorParts.Add($"F&G {p.MarketSentimentScore.Value:F0}/100 ({rating}), fit {p.DirectionalFit:+0;-0} → sentiment {p.SentimentAdjustmentFactor.Value:F2}");
+			var effect = p.SentimentAdjustmentFactor.HasValue ? $"sentiment {p.SentimentAdjustmentFactor.Value:F2}" : "sentiment off";
+			indicatorParts.Add($"F&G {p.MarketSentimentScore.Value:F0}/100 ({rating}), fit {p.DirectionalFit:+0;-0} → {effect}");
 		}
 		var finalScore = p.FinalScore ?? ComputeFinalScore(p.BiasAdjustedScore, p.ThetaPerDayPerContract, efficiencyCapital);
 		var thetaFactor = ComputeThetaFactor(p.ThetaPerDayPerContract, efficiencyCapital);

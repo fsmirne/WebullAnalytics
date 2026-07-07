@@ -286,12 +286,12 @@ internal sealed class OpenCandidateEvaluator
 		// historical replay. The on-disk cache (data/sentiment-cache/<date>.json) is date-keyed and
 		// only written for settled dates, so reading it in backtest is lookahead-safe by construction
 		// and gives T+1 replays access to the same value live saw the day before.
-		decimal? sentimentScore = null;
-		if (cfg.Weights.Sentiment > 0m)
-		{
-			var snapshot = await FearGreedClient.FetchAsync(ctx.Now, cancellation, cacheOnly: _backtestMode);
-			if (snapshot != null) sentimentScore = snapshot.Score;
-		}
+		// Display is decoupled from scoring: fetch the snapshot and pass the score unconditionally so the
+		// reading is available to the diagnostic even when the sentiment weight is 0. ComputeSentimentFactor
+		// gates on weight (returns null at weight <= 0), so a zero weight leaves scoring untouched — the
+		// reading is informational only. cacheOnly still applies in backtest, keeping the read lookahead-safe.
+		var sentimentSnapshot = await FearGreedClient.FetchAsync(ctx.Now, cancellation, cacheOnly: _backtestMode);
+		decimal? sentimentScore = sentimentSnapshot?.Score;
 
 		// VIX term structure (VIX vs VIX9D): a market-wide regime signal shared across all tickers.
 		// Pulled once per scan from the daily-close cache. Both legs use the most-recent settled close
@@ -626,13 +626,10 @@ internal sealed class OpenCandidateEvaluator
 			foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
 				trendByTicker[ticker] = await TrendFetcher.FetchAsync(ticker, ctx.Now, cancellation);
 		}
-		// Diagnostic re-fetch: the snapshot above gave us just the score; the diagnostic panel wants
-		// the full SentimentSnapshot. Same cacheOnly handling as the scoring fetch — backtest reads
-		// the cache when present, never hits the network. Gated on sentimentScore.HasValue so we
-		// don't bother re-fetching when the scoring read returned null.
-		SentimentSnapshot? diagnosticSentiment = null;
-		if (sentimentScore.HasValue)
-			diagnosticSentiment = await FearGreedClient.FetchAsync(ctx.Now, cancellation, cacheOnly: _backtestMode);
+		// The diagnostic panel shows the full SentimentSnapshot (score/rating/Δ1w). We reuse the snapshot
+		// fetched once above rather than gating on the scoring value, so the reading renders regardless
+		// of the sentiment weight (display decoupled from scoring).
+		SentimentSnapshot? diagnosticSentiment = sentimentSnapshot;
 
 		var annotated = new List<OpenProposal>(output.Count);
 		foreach (var p in output)
