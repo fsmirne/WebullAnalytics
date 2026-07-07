@@ -122,6 +122,36 @@ public class CandidateScorerCalendarTests
 	}
 
 	[Fact]
+	public void CalendarMaxProfitCapturesPeakAtStrike()
+	{
+		// Regression: the peak of a calendar's payoff at short expiry is a sharp cusp AT the short strike
+		// (short intrinsic = 0, long extrinsic maximal). The old uniform ±60% / 240-point scan stepped by
+		// ~$3.74 for an SPY-class spot and straddled the strike (samples at ~748.81 / ~752.55, never 751),
+		// understating max_profit by ~30%. FindCalendarOrDiagonalPeakPnl now seeds the scan with the strikes.
+		// Setup mirrors the live SPY 751 calendar: at spot 748.82 the strike sits ~$1.79 from the nearest
+		// old-grid point, the worst-case miss. ivLong is pinned to the quote IV (useMarketImpliedIv: false)
+		// so the peak value is deterministic: long 751P @ 21 DTE, 12.5% ≈ $8.31/sh, debit = 9.32 − 3.30 =
+		// $6.02/sh → true peak ≈ $229/contract. The old straddle reported ≈ $152; guard well above it.
+		var asOf = new DateTime(2026, 7, 7);
+		var shortExp = new DateTime(2026, 7, 10); // 3 DTE
+		var longExp = new DateTime(2026, 7, 31);   // 24 DTE
+		var shortSym = MatchKeys.OccSymbol("SPY", shortExp, 751m, "P");
+		var longSym = MatchKeys.OccSymbol("SPY", longExp, 751m, "P");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongCalendar, new[]
+		{
+			new ProposalLeg("sell", shortSym, 1),
+			new ProposalLeg("buy", longSym, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(3.27m, 3.33m, 0.107m), // mid 3.30
+			[longSym] = TestQuote.Q(9.28m, 9.36m, 0.125m)   // mid 9.32
+		};
+		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 748.82m, asOf, quotes, bias: 0m, Cfg(), useMarketImpliedIv: false)!;
+		Assert.True(p.MaxProfitPerContract > 200m, $"peak-at-strike should give ≈$229/contract, got {p.MaxProfitPerContract} (old cusp-miss reported ≈$152)");
+	}
+
+	[Fact]
 	public void CalendarPopIsProbInProfitBand()
 	{
 		var asOf = new DateTime(2026, 4, 20);
