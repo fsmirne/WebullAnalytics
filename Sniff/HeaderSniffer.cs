@@ -43,14 +43,20 @@ public static class HeaderSniffer
 			// and evaluate returns an error immediately. Each tick here is independent, so it just retries through
 			// the navigation, then clicks 'unlock' and focuses the PIN field once the SPA has rendered the dialog.
 			// The field is an <input type=number> in a styled-components Dialog/Modal — match on type, never class
-			// name (Webull's classes are capitalized, so [class*=dialog] misses); type=tel/password are kept as
-			// fallbacks. We re-click 'unlock' every tick to cover the race where the anchor renders before React
-			// binds its handler. We never type blind: if the dialog never opens we abort, so the PIN can't leak
-			// into the page's search box.
-			Console.WriteLine("Opening unlock dialog and entering code...");
+			// name (Webull's classes are capitalized, so [class*=dialog] misses); type=tel is kept as a fallback.
+			// We deliberately DO NOT match type=password: in the dedicated CDP profile the first run shows Webull's
+			// LOGIN form (which has a password field), and typing the PIN blind into it would leak the code. The
+			// trading PIN dialog is numeric, so number/tel alone identifies it. We re-click 'unlock' every tick to
+			// cover the race where the anchor renders before React binds its handler.
+			//
+			// The deadline is generous (5 min) because on first run — or after the session cookies expire — the
+			// user must log into Webull manually in the launched window; once they reach the account page the loop
+			// picks up the unlock dialog automatically. Steady-state runs (cookies still valid) hit it in seconds.
+			Console.WriteLine("Waiting for the Webull trading PIN dialog...");
+			Console.WriteLine("If a login screen appears, log in in the browser window — sniffing continues automatically once the PIN dialog shows.");
 			const string unlockTickJs = """
 				(() => {
-					const inp = document.querySelector('input[type=number], input[type=tel], input[type=password]');
+					const inp = document.querySelector('input[type=number], input[type=tel]');
 					if (inp && inp.offsetParent) {
 						inp.click(); inp.focus();
 						return document.activeElement === inp ? 'focused' : 'found';
@@ -60,7 +66,7 @@ public static class HeaderSniffer
 					return 'waiting';
 				})()
 				""";
-			var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+			var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(5);
 			bool everClicked = false;
 			string? state = null;
 			while (DateTime.UtcNow < deadline)
@@ -74,7 +80,7 @@ public static class HeaderSniffer
 			if (state is not ("focused" or "found"))
 				throw new InvalidOperationException(everClicked
 					? "Clicked 'unlock' but the PIN dialog never appeared — the Webull page layout may have changed."
-					: "The 'unlock' link never appeared on the Webull account page — the page may not have loaded, or its layout changed.");
+					: "The trading PIN dialog never appeared. If a login screen was shown, the login may not have completed in time; otherwise the page layout may have changed.");
 			await Task.Delay(300, cancellation);
 
 			foreach (var c in pin)
@@ -145,21 +151,19 @@ public static class HeaderSniffer
 			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
 		], "Microsoft Edge");
 
-		string userDataDir;
-		if (OperatingSystem.IsWindows())
-			userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "Edge", "User Data");
-		else if (OperatingSystem.IsMacOS())
-			userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Application Support", "Microsoft Edge");
-		else
-			userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "microsoft-edge");
-
-		if (!Directory.Exists(userDataDir))
-			throw new InvalidOperationException($"Edge user data directory not found: {userDataDir}");
+		// Chromium 136+ (Edge included) silently disables remote debugging when --user-data-dir points at the
+		// browser's DEFAULT profile — a security fix against malware attaching to a logged-in session over CDP.
+		// So we cannot reuse the user's normal Edge profile; we run against a dedicated, persistent CDP profile.
+		// It is empty on first run (the user logs into Webull once in the launched window), and its session
+		// cookies persist across runs so later sniffs go straight to the PIN dialog. The dir must be created up
+		// front — Edge won't create a --user-data-dir that doesn't exist when remote debugging is enabled.
+		var userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WebullAnalytics", "edge-cdp");
+		Directory.CreateDirectory(userDataDir);
 
 		return new("msedge", binaryPath, new ProcessStartInfo
 		{
 			FileName = binaryPath,
-			Arguments = $"--remote-debugging-port={CdpPort} --user-data-dir=\"{userDataDir}\" --profile-directory=Default https://app.webull.com/account",
+			Arguments = $"--remote-debugging-port={CdpPort} --user-data-dir=\"{userDataDir}\" https://app.webull.com/account",
 			UseShellExecute = false,
 		});
 	}
