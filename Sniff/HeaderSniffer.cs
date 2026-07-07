@@ -163,7 +163,9 @@ public static class HeaderSniffer
 		return new("msedge", binaryPath, new ProcessStartInfo
 		{
 			FileName = binaryPath,
-			Arguments = $"--remote-debugging-port={CdpPort} --user-data-dir=\"{userDataDir}\" https://app.webull.com/account",
+			// --no-first-run / --no-default-browser-check suppress Edge's welcome tabs, which a fresh dedicated
+			// profile would otherwise open alongside our target and confuse target selection in WaitForDebuggerUrl.
+			Arguments = $"--remote-debugging-port={CdpPort} --user-data-dir=\"{userDataDir}\" --no-first-run --no-default-browser-check https://app.webull.com/account",
 			UseShellExecute = false,
 		});
 	}
@@ -249,15 +251,21 @@ public static class HeaderSniffer
 			try
 			{
 				var json = await http.GetStringAsync($"http://localhost:{CdpPort}/json", cancellation);
+				// Select the Webull page target specifically — a fresh profile can spawn other page targets
+				// (Edge welcome tabs, blank tabs) and grabbing the first one attaches the CDP session to the
+				// wrong tab, so the unlock loop drives a page that never shows the PIN dialog. Keep polling until
+				// the Webull tab reports a debugger URL (it starts as about:blank, then navigates to webull.com).
 				foreach (var page in JsonDocument.Parse(json).RootElement.EnumerateArray())
 				{
+					if (page.TryGetProperty("type", out var type) && type.GetString() != "page") continue;
+					if (!page.TryGetProperty("url", out var url) || url.GetString()?.Contains("webull.com", StringComparison.OrdinalIgnoreCase) != true) continue;
 					if (page.TryGetProperty("webSocketDebuggerUrl", out var wsUrl))
 						return wsUrl.GetString()!;
 				}
 			}
 			catch (HttpRequestException) { }
 		}
-		throw new TimeoutException("Timed out waiting for DevTools to become available.");
+		throw new TimeoutException("Timed out waiting for the Webull tab to appear in DevTools.");
 	}
 
 	private static async Task<JsonElement?> CdpReceive(ClientWebSocket ws, CancellationToken cancellation)
