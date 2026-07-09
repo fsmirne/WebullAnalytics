@@ -639,7 +639,7 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
             upsert_expiry(conn, ticker, exp_int, rows)
         finally:
             conn.close()
-    log.info(f"    exp {exp_d} rows={len(rows)} days={res['date'].nunique()} spot_days={len(unders)}")
+    log.info(f"    exp {ticker} {exp_d} rows={len(rows)} days={res['date'].nunique()} spot_days={len(unders)}")
     return len(rows)
 
 
