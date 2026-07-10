@@ -131,10 +131,11 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation);
 	}
 
-	/// <summary>--proposal: rebuild the <c>&lt;spec&gt;</c> from a stored proposal snapshot — its legs priced at the
-	/// entry mids captured when scored, plus the snapshot's spot, per-leg IVs and date as overrides — so the
-	/// report pipeline projects the trade against the market as it stood then. Explicit --spot/--iv/--date flags
-	/// still win. Returns false (with an error printed) when the snapshot can't be loaded.</summary>
+	/// <summary>--proposal: rebuild the <c>&lt;spec&gt;</c> from a stored proposal snapshot — its legs at the entry
+	/// mids captured when scored (the cost basis) — then let the report pipeline value and project the trade
+	/// against the LIVE market now, not the market as it stood when the proposal was emitted. Spot, IVs and the
+	/// evaluation date are left to resolve live (explicit --spot/--iv/--date flags still win). Only
+	/// 'analyze risk --proposal' replays the frozen snapshot. Returns false (error printed) when it can't load.</summary>
 	private static bool ReconstructSpecFromProposal(AnalyzeTradeSettings settings)
 	{
 		var (snap, error) = ProposalSnapshot.TryLoad(settings.Proposal!);
@@ -142,22 +143,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 
 		settings.Spec = string.Join(",", snap.Legs.Select(l => $"{(l.Action == LegAction.Buy ? "buy" : "sell")}:{l.Symbol}:{l.Qty}@{snap.CostBasis(l.Symbol).ToString(CultureInfo.InvariantCulture)}"));
 
-		if (string.IsNullOrEmpty(settings.Spot))
-			settings.Spot = $"{snap.Ticker}:{snap.Spot.ToString(CultureInfo.InvariantCulture)}";
-
-		if (string.IsNullOrEmpty(settings.IvOverrides))
-		{
-			var ivs = snap.Legs
-				.Where(l => snap.TryGetLegIv(l.Symbol, out _))
-				.Select(l => { snap.TryGetLegIv(l.Symbol, out var iv); return $"{l.Symbol}:{(iv * 100m).ToString(CultureInfo.InvariantCulture)}"; });
-			var ivStr = string.Join(",", ivs);
-			if (!string.IsNullOrEmpty(ivStr)) settings.IvOverrides = ivStr;
-		}
-
-		if (settings.Date == null)
-			settings.Date = snap.AsOf.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-
-		Console.WriteLine($"Proposal snapshot: {Path.GetFileName(snap.SourcePath)} line {snap.LineNumber}, emitted {snap.AsOf:yyyy-MM-dd HH:mm:ss}");
+		Console.WriteLine($"Proposal snapshot: {Path.GetFileName(snap.SourcePath)} line {snap.LineNumber}, emitted {snap.AsOf:yyyy-MM-dd HH:mm:ss} — evaluating against the live market now.");
 		return true;
 	}
 }
