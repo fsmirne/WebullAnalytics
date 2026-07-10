@@ -9,9 +9,10 @@ namespace WebullAnalytics.Analyze;
 
 /// <summary>
 /// Rehydrates a single proposal line from an <c>ai-proposals.&lt;TICKER&gt;.&lt;strategy&gt;.jsonl</c> log into the
-/// frozen inputs the analyze commands render from — legs, spot, evaluation instant, per-leg quotes and the
-/// stored <see cref="RiskDiagnostic"/>. This lets <c>analyze position|risk|trade --proposal</c> re-render a
-/// past proposal exactly as it stood when the opener/manager emitted it, without touching the live market.
+/// inputs the analyze commands render from — legs, spot, evaluation instant, per-leg cost basis and the stored
+/// <see cref="RiskDiagnostic"/>. <c>analyze risk --proposal</c> replays the stored diagnostic exactly as it
+/// stood when the opener/manager emitted it; <c>analyze position|trade --proposal</c> take only the legs and
+/// entry cost basis from here and re-evaluate them against the live market now.
 /// Handles both <c>type=open</c> (opener) and <c>type=management</c> (manage) records; the two differ only in
 /// where the leg list lives (<c>legs</c> vs <c>proposal.legs</c>).
 /// </summary>
@@ -31,20 +32,6 @@ internal sealed class ProposalSnapshot
 
 	private IReadOnlyDictionary<string, RiskDiagnosticLegQuote> _legQuotes = new Dictionary<string, RiskDiagnosticLegQuote>(StringComparer.OrdinalIgnoreCase);
 
-	/// <summary>Reconstructs the frozen per-leg quote surface from the snapshot's <c>probe.legQuotes</c> block —
-	/// the bid/ask/IV/OI captured when the proposal was scored. Used to price scenarios and drive the report
-	/// grid off the snapshot instead of the live chain.</summary>
-	public IReadOnlyDictionary<string, OptionContractQuote> BuildQuotes()
-	{
-		var result = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
-		foreach (var (sym, q) in _legQuotes)
-			result[sym] = new OptionContractQuote(
-				ContractSymbol: sym, LastPrice: null, Bid: q.Bid, Ask: q.Ask, Change: null, PercentChange: null,
-				Volume: q.Volume, OpenInterest: q.OpenInterest, ImpliedVolatility: q.ImpliedVolatility,
-				HistoricalVolatility: q.HistoricalVolatility, ImpliedVolatility5Day: q.ImpliedVolatility5Day);
-		return result;
-	}
-
 	/// <summary>Per-leg cost basis: the bid/ask mid captured at proposal time (how the opener priced the fill).
 	/// Falls back to whichever side is quoted, then 0 when neither is.</summary>
 	public decimal CostBasis(string symbol)
@@ -52,13 +39,6 @@ internal sealed class ProposalSnapshot
 		if (!_legQuotes.TryGetValue(symbol, out var q)) return 0m;
 		if (q.Bid.HasValue && q.Ask.HasValue) return (q.Bid.Value + q.Ask.Value) / 2m;
 		return q.Bid ?? q.Ask ?? 0m;
-	}
-
-	public bool TryGetLegIv(string symbol, out decimal iv)
-	{
-		if (_legQuotes.TryGetValue(symbol, out var q) && q.ImpliedVolatility is decimal v && v > 0m) { iv = v; return true; }
-		iv = 0m;
-		return false;
 	}
 
 	/// <summary>Loads and parses one proposal line. <paramref name="spec"/> is <c>FILE[:LINE]</c>: FILE is a

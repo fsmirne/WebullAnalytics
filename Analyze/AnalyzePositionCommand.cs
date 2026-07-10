@@ -130,8 +130,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
-		if (settings.Proposal != null)
-			return RenderFromProposal(settings);
+		if (settings.Proposal != null && !TryLoadProposalSpec(settings))
+			return 1;
 
 		List<PositionSnapshot> positionLegs;
 		if (string.IsNullOrEmpty(settings.Spec))
@@ -351,58 +351,20 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return 0;
 	}
 
-	/// <summary>--proposal: re-render the position diagnostic and management scenarios from a stored proposal
-	/// snapshot instead of live quotes. The diagnostic panel comes straight from the snapshot (calibrated IVs,
-	/// greeks, opener score and rule hits as scored); scenarios are re-projected from the snapshot's frozen leg
-	/// quotes and spot so the "what to do next" table reflects the market as it stood then.</summary>
-	private static int RenderFromProposal(AnalyzePositionSettings settings)
+	/// <summary>--proposal: load a stored proposal snapshot and rebuild the <c>&lt;spec&gt;</c> — its legs at the
+	/// entry mids captured when scored — then fall through to the normal live path so the diagnostic, quotes,
+	/// spot and management scenarios all reflect how the position is behaving NOW, not when it was proposed.
+	/// Only 'analyze risk --proposal' replays the frozen snapshot diagnostic verbatim. Returns false (with an
+	/// error printed) when the snapshot can't be loaded.</summary>
+	private static bool TryLoadProposalSpec(AnalyzePositionSettings settings)
 	{
 		var (snap, error) = ProposalSnapshot.TryLoad(settings.Proposal!);
-		if (snap == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
-		if (snap.Diagnostic == null) { Console.Error.WriteLine($"Error: proposal line {snap.LineNumber} of '{snap.SourcePath}' has no diagnostic block to render."); return 1; }
+		if (snap == null) { Console.Error.WriteLine($"Error: {error}"); return false; }
 
-		if (!settings.EvaluationDateOverride.HasValue)
-			EvaluationDate.Set(snap.AsOf.Date);
+		settings.Spec = string.Join(",", snap.Legs.Select(l => $"{(l.Action == LegAction.Buy ? "buy" : "sell")}:{l.Symbol}:{l.Qty}@{snap.CostBasis(l.Symbol).ToString(CultureInfo.InvariantCulture)}"));
 
-		var positionLegs = snap.Legs
-			.Select(l => new PositionSnapshot(Symbol: l.Symbol, Action: l.Action, Qty: l.Qty, CostBasis: snap.CostBasis(l.Symbol), Parsed: l.Parsed))
-			.ToList();
-
-		var ticker = positionLegs[0].Parsed.Root;
-		var underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = snap.Spot };
-		var spot = ResolveSpot(ticker, settings, underlyingPrices) ?? snap.Spot;
-
-		var structure = ClassifyStructure(positionLegs);
-		var quotes = snap.BuildQuotes();
-		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot, EvaluationDate.Today, quotes);
-
-		var toText = settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase);
-		StringWriter? stringWriter = null;
-		IAnsiConsole renderConsole;
-		if (toText)
-		{
-			stringWriter = new StringWriter();
-			renderConsole = WebullAnalytics.IO.TextFileExporter.CreateTextConsole(stringWriter);
-		}
-		else
-		{
-			renderConsole = AnsiConsole.Console;
-		}
-
-		renderConsole.MarkupLine($"[dim]Proposal snapshot: {Markup.Escape(Path.GetFileName(snap.SourcePath))} line {snap.LineNumber}, emitted {snap.AsOf:yyyy-MM-dd HH:mm:ss}[/]");
-		AnalyzeCommon.RenderProposalPanel(positionLegs, structure.ToString(), spot, snap.Diagnostic, renderConsole, ascii: toText);
-
-		if (scenarios.Count == 0)
-			renderConsole.MarkupLine($"[yellow]No scenarios defined yet for structure type '{structure}'. Supported: single-long, vertical, calendar, diagonal, iron butterfly, iron condor, double calendar, double diagonal.[/]");
-		else
-			RenderScenarioTable(scenarios, settings, renderConsole, ascii: toText);
-
-		if (toText)
-		{
-			var path = settings.OutputPath ?? AnalyzeCommon.DefaultTextOutputName("AnalyzePosition");
-			WebullAnalytics.IO.TextFileExporter.WriteConsoleOutputToTextFile(stringWriter!, path, "Position analysis written to");
-		}
-		return 0;
+		Console.WriteLine($"Proposal snapshot: {Path.GetFileName(snap.SourcePath)} line {snap.LineNumber}, emitted {snap.AsOf:yyyy-MM-dd HH:mm:ss} — evaluating against the live market now.");
+		return true;
 	}
 
 	private static async Task<(decimal Cash, string AccountAlias)?> TryResolveAvailableCashAsync(string? accountFlag, CancellationToken cancellation)
