@@ -96,12 +96,18 @@ internal static class DerivativeIdRegistry
 		}
 	}
 
-	/// <summary>Expiry dates of <paramref name="ticker"/> that already carry a snapshot dated
-	/// <paramref name="asOf"/> — i.e. today's daily liquidity sweep covered them (tradeable or not).
+	/// <summary>Expiry dates of <paramref name="ticker"/> whose daily sweep dated <paramref name="asOf"/>
+	/// found at least one TRADEABLE strike — i.e. we successfully learned that expiry's grid.
 	/// Lets the opener sweep only the expiries a wider-DTE strategy needs that an earlier narrower run
 	/// didn't cover, instead of treating the whole ticker as "done for the day": gating the sweep on
 	/// (ticker, date) alone let a 0DTE config — which sweeps only the front expiry — mark SPY done and
-	/// starve a later calendar/diagonal (QuickDC) run of its 2-7d / 2-4w legs.</summary>
+	/// starve a later calendar/diagonal (QuickDC) run of its 2-7d / 2-4w legs.
+	/// <para>Coverage requires a tradeable strike, NOT merely a recorded one: a sweep taken during the
+	/// 09:30 open-time Webull feed lag comes back with null bid/ask for every far-expiry strike and would
+	/// otherwise mark those expiries "covered" for the whole session — freezing a transient feed outage
+	/// into a persistent one that starves the opener of calendar/diagonal long legs all day. An all-dead
+	/// expiry stays uncovered so the next tick re-sweeps it; once real quotes appear (seconds later) the
+	/// snapshot sticks and stops retrying.</para></summary>
 	public static IReadOnlySet<DateTime> CoveredExpiries(string ticker, string asOf)
 	{
 		lock (_lock)
@@ -110,7 +116,7 @@ internal static class DerivativeIdRegistry
 			var result = new HashSet<DateTime>();
 			foreach (var (occ, e) in _cache!)
 			{
-				if (e.AsOf != asOf) continue;
+				if (e.AsOf != asOf || !e.Tradeable) continue;
 				var p = ParsingHelpers.ParseOptionSymbol(occ);
 				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
 				result.Add(p.ExpiryDate.Date);
