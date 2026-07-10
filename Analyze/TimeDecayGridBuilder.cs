@@ -246,8 +246,6 @@ internal static class TimeDecayGridBuilder
 	internal static List<DateTime> BuildDateColumns(DateTime expiry, int maxColumns)
 	{
 		var today = EvaluationDate.Today;
-		if ((expiry.Date - today).TotalDays <= 0)
-			return [OptionMath.ObservationInstant(), expiry.Date + OptionMath.MarketClose];
 
 		// Today's columns are always present and never subject to the even-spacing trim: the observation-instant
 		// anchor (live now / last close off-hours), plus — pre-open on a trading day — today's 09:30 open, so a
@@ -255,6 +253,11 @@ internal static class TimeDecayGridBuilder
 		var anchor = OptionMath.ObservationInstant();
 		var todayColumns = new List<DateTime> { anchor };
 		if (MarketCalendar.IsOpen(today) && anchor.Date < today.Date) todayColumns.Add(today.Date + OptionMath.MarketOpen);
+
+		// Same-day expiry: no interior days. Keep the today columns (so a pre-open run still shows today's open,
+		// not just yesterday's anchor and "At Exp") and cap with today's close.
+		if ((expiry.Date - today).TotalDays <= 0)
+			return [.. todayColumns, expiry.Date + OptionMath.MarketClose];
 
 		// Classify every future calendar day (after today, before expiry) by priority tier.
 		var tradingDays = new List<DateTime>();
