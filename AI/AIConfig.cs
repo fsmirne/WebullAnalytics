@@ -112,6 +112,22 @@ internal sealed class OpenerAutoExecuteConfig
 	[JsonPropertyName("maxOrdersPerDay")] public int MaxOrdersPerDay { get; set; } = 1;
 	/// <summary>Allow-list of <c>OpenStructureKind</c> names to auto-execute. Empty = all structures allowed.</summary>
 	[JsonPropertyName("structures")] public List<string> Structures { get; set; } = new();
+	/// <summary>Pre-submit liquidity guard (live-only — the backtest opens via BacktestRunner, not this
+	/// executor). Hard-blocks auto-submit of a proposal whose worst leg is too illiquid to exit cleanly:
+	/// the failure mode the scorer's liquidity FACTOR only softly nudges (a score multiplier that can be
+	/// out-voted by raw EV) and the hard liquidity GATE misses live (snapshot-tradeable strikes bypass it
+	/// by design for thin index roots). Reads the stats already attached to the proposal, so it is
+	/// independent of <c>opener.liquidity</c> scoring and never touches the backtest edge. Deterministic:
+	/// unlike the score factor it does not depend on where the trade lands relative to minScoreToOpen.
+	/// Both thresholds default to 0 = off; the guard is submit-independent so watch's dry-run reports the
+	/// skip too, and the proposal is still emitted for display.</summary>
+	/// <remarks>Reject when the worst leg's bid/ask spread as a fraction of mid exceeds this (e.g. 0.25 =
+	/// 25%). Exit cost on a wider spread is dominated by liquidity friction, not fair value.</remarks>
+	[JsonPropertyName("maxWorstLegSpreadPct")] public decimal MaxWorstLegSpreadPct { get; set; } = 0m;
+	/// <summary>Reject when the worst leg's open interest is below this fraction of the maximum among
+	/// same-expiry near-spot strikes (e.g. 0.25 = 25%) — a sub-grid dead strike the chain listed but that
+	/// activity is clustering away from. 0 = off.</summary>
+	[JsonPropertyName("minRelativeOpenInterest")] public decimal MinRelativeOpenInterest { get; set; } = 0m;
 }
 
 /// <summary>
