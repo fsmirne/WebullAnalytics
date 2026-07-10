@@ -149,12 +149,14 @@ public class DerivativeIdRegistryTests : IDisposable
 	}
 
 	[Fact]
-	public void CoveredExpiries_ReturnsSweptExpiries_RegardlessOfTradeable_FilteredByTickerAndDate()
+	public void CoveredExpiries_RequiresTradeableStrike_FilteredByTickerAndDate()
 	{
 		DerivativeIdRegistry.Register(new Dictionary<string, long>
 		{
 			["XSP260605C00760000"] = 111, // expiry 2026-06-05, tradeable
-			["XSP260605C00761000"] = 112, // expiry 2026-06-05, dead — still a covered expiry
+			["XSP260605C00761000"] = 112, // expiry 2026-06-05, dead — one live strike still covers the expiry
+			["XSP260612C00760000"] = 115, // expiry 2026-06-12, ALL dead — NOT covered, must re-sweep
+			["XSP260612C00761000"] = 116, // expiry 2026-06-12, dead
 			["XSP260619C00760000"] = 113, // expiry 2026-06-19, tradeable
 			["SPXW260605C04000000"] = 114, // different ticker, same date
 		});
@@ -162,14 +164,17 @@ public class DerivativeIdRegistryTests : IDisposable
 		{
 			["XSP260605C00760000"] = (true, 1200),
 			["XSP260605C00761000"] = (false, null),
+			["XSP260612C00760000"] = (false, null),
+			["XSP260612C00761000"] = (false, null),
 			["XSP260619C00760000"] = (true, 50),
 			["SPXW260605C04000000"] = (true, 999),
 		});
 
 		var covered = DerivativeIdRegistry.CoveredExpiries("XSP", "2026-06-01");
 		Assert.Equal(2, covered.Count);
-		Assert.Contains(new DateTime(2026, 6, 5), covered);   // included even though one strike was dead
+		Assert.Contains(new DateTime(2026, 6, 5), covered);   // covered: has a live strike (one dead strike doesn't matter)
 		Assert.Contains(new DateTime(2026, 6, 19), covered);
+		Assert.DoesNotContain(new DateTime(2026, 6, 12), covered); // all-dead sweep (feed lag) → uncovered, re-swept next tick
 
 		Assert.Empty(DerivativeIdRegistry.CoveredExpiries("XSP", "2026-06-02")); // wrong date
 		Assert.Single(DerivativeIdRegistry.CoveredExpiries("SPXW", "2026-06-01")); // ticker-scoped
