@@ -164,6 +164,35 @@ public class OpenCandidateEvaluatorTests
 		Assert.Equal(new[] { "high-score", "high-theta" }, ranked.Select(p => p.Fingerprint).ToArray());
 	}
 
+	/// <summary>Records whether the bootstrap probe fetched, and returns an empty snapshot.</summary>
+	private sealed class RecordingQuoteSource : IQuoteSource
+	{
+		public bool Probed { get; private set; }
+		public Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> symbols, IReadOnlySet<string> tickers, CancellationToken ct, QuoteOverrides overrides = default)
+		{
+			Probed = true;
+			return Task.FromResult(new QuoteSnapshot(new Dictionary<string, OptionContractQuote>(), new Dictionary<string, decimal>()));
+		}
+	}
+
+	// Regression: under Schwab (and the backtest) a fetch returns only the requested expiry window, so a
+	// no-position tick's front-only chain leaves the far band expiries absent. The probe must still fire to
+	// pull them — the old "any chain present" trigger saw the front contract, skipped the probe, and starved
+	// the opener of every calendar/diagonal long leg (0 candidates all session under --source schwab).
+	[Fact]
+	public async Task ProbesWhenChainSpansOnlyFrontExpiry()
+	{
+		var cfg = BuildConfig(new OpenerConfig()); // defaults enable calendar/diagonal structures with multi-band DTE
+		// One front-expiry SPY contract present + spot present: HasChainFor would report "chain present" and the
+		// old trigger would NOT probe. The needed long-band expiries are still absent, so the new trigger must.
+		var quotes = new Dictionary<string, OptionContractQuote> { ["SPY   260421C00500000"] = TestQuote.Q(1.00m, 1.10m, 0.40m) };
+		var ctx = BuildContext(cash: 100000m, spot: 500m, quotes: quotes);
+		var src = new RecordingQuoteSource();
+		var ev = new OpenCandidateEvaluator(cfg, src);
+		await ev.EvaluateAsync(ctx, TestContext.Current.CancellationToken);
+		Assert.True(src.Probed, "expected the bootstrap probe to fetch when the chain spans only the front expiry");
+	}
+
 	/// <summary>Fake quote dictionary: returns a constant 1.00/1.10 quote with the given IV for every requested symbol.</summary>
 	private sealed class FakeUniversalQuotes : IReadOnlyDictionary<string, OptionContractQuote>
 	{

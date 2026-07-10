@@ -107,7 +107,7 @@ internal sealed class OpenCandidateEvaluator
 		// phantom $1 strikes). Live is unchanged: no-position ticks miss the spot (probe as before), and
 		// with-position ticks already carry the chain via the position legs (no extra probe).
 		var spotMissing = !bootstrapSpots.TryGetValue(_config.Ticker, out var bootSpot) || bootSpot <= 0m;
-		var chainMissing = !HasChainFor(_config.Ticker, ctx.Quotes);
+		var chainMissing = ChainMissesNeededExpiries(_config.Ticker, cfg, ctx);
 		var missingTickers = (spotMissing || chainMissing) ? new List<string> { _config.Ticker } : new List<string>();
 		if (missingTickers.Count > 0)
 		{
@@ -968,6 +968,45 @@ internal sealed class OpenCandidateEvaluator
 	/// <paramref name="ticker"/> — i.e. the chain is present and the bootstrap probe (and, in the backtest,
 	/// its captured-chain expansion) doesn't need to run for the grid. Enumerating Keys mirrors
 	/// <see cref="IndexExpirations"/>; test fakes that expose empty Keys simply report "no chain" and probe.</summary>
+	/// <summary>True when the live chain in <paramref name="ctx"/> doesn't span every expiry the enabled
+	/// structures' DTE bands need — the check that decides whether the bootstrap probe must run. Webull
+	/// returns the WHOLE chain from any single fetch, so once a chain is present every band expiry comes with
+	/// it and this is false; but Schwab (and the backtest) return only the requested expiry window, so a
+	/// no-position tick's front-only chain (Schwab windows an empty request to [today,today]) or a held
+	/// calendar's [short,long] window leaves the other band expiries absent and the enumerator can't build
+	/// the missing-band leg. Falls back to "no chain at all" when no band expiry resolves (empty cadence).</summary>
+	private static bool ChainMissesNeededExpiries(string ticker, OpenerConfig cfg, EvaluationContext ctx)
+	{
+		var maxDte = MaxDteAcrossStructures(cfg);
+		var dteRanges = DteRangesForStructures(cfg);
+		bool InAnyBand(DateTime exp)
+		{
+			var d = (exp.Date - ctx.Now.Date).Days;
+			return d >= 0 && dteRanges.Any(r => d >= r.Min && d <= r.Max);
+		}
+		var needed = new HashSet<DateTime>();
+		foreach (var exp in OpenerExpiryHelpers.NextExpiriesForTicker(ticker, ctx.Now, 0, maxDte).Where(InAnyBand)) needed.Add(exp.Date);
+		// Calendar/diagonal long legs reach into monthly DTE; include those 3rd-Fridays too.
+		foreach (var exp in OpenerExpiryHelpers.MonthlyExpiriesInRange(ctx.Now, 0, maxDte).Where(InAnyBand)) needed.Add(exp.Date);
+		if (needed.Count == 0) return !HasChainFor(ticker, ctx.Quotes);
+		var present = ChainExpiriesFor(ticker, ctx.Quotes);
+		return needed.Any(e => !present.Contains(e));
+	}
+
+	/// <summary>Set of expiry dates for which <paramref name="quotes"/> carries at least one contract of
+	/// <paramref name="ticker"/>. Mirrors <see cref="HasChainFor"/> but per-expiry, so the probe trigger can
+	/// tell a full chain from a windowed one.</summary>
+	private static HashSet<DateTime> ChainExpiriesFor(string ticker, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		var set = new HashSet<DateTime>();
+		foreach (var k in quotes.Keys)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(k);
+			if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) set.Add(p.ExpiryDate.Date);
+		}
+		return set;
+	}
+
 	private static bool HasChainFor(string ticker, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
 		foreach (var k in quotes.Keys)
