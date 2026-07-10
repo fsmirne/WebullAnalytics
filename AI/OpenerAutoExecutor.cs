@@ -97,6 +97,18 @@ internal sealed class OpenerAutoExecutor
 			if (p.CashReserveBlocked) continue;
 			if (p.Qty < 1) continue;
 
+			// Pre-submit liquidity guard: hard-block a proposal whose worst leg is too illiquid to exit
+			// cleanly (wide spread and/or sub-grid open interest). This is the deterministic backstop the
+			// scorer can't provide live — the liquidity FACTOR only nudges the score, and the hard liquidity
+			// GATE is bypassed for snapshot-tradeable strikes. Submit-independent (no broker call) so watch's
+			// dry-run reports the skip; the proposal is still emitted by the display sink.
+			var liquidityFailure = LiquidityGuardFailure(p);
+			if (liquidityFailure != null)
+			{
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (liquidity guard):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} — {Markup.Escape(liquidityFailure)} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
+				continue;
+			}
+
 			// Held-position guard: when the proposed structure already exists as an open position (every
 			// combo group is held), the opener must NOT auto-open a duplicate — adding to an existing
 			// position is `wa analyze position`'s job, not the opener's. Warn and skip, same as the
@@ -252,6 +264,18 @@ internal sealed class OpenerAutoExecutor
 		return placedCount > 0
 			? new SubmitResult(SubmitOutcome.Submitted, firstOrderId, firstClientId)
 			: new SubmitResult(SubmitOutcome.NotActed);
+	}
+
+	/// <summary>Returns a human-readable reason when the proposal's worst leg fails the pre-submit liquidity
+	/// guard, or null when it passes (or the guard is disabled). Reads the liquidity stats the scorer already
+	/// attached to the proposal — no quote recompute. Each threshold is checked only when configured &gt; 0.</summary>
+	private string? LiquidityGuardFailure(OpenProposal p)
+	{
+		if (_config.MaxWorstLegSpreadPct > 0m && p.WorstLegBidAskSpreadPct is decimal spread && spread > _config.MaxWorstLegSpreadPct)
+			return $"worst-leg spread {spread:P0} > {_config.MaxWorstLegSpreadPct:P0}";
+		if (_config.MinRelativeOpenInterest > 0m && p.MinRelativeOpenInterest is decimal relOi && relOi < _config.MinRelativeOpenInterest)
+			return $"worst-leg relative OI {relOi:P0} < {_config.MinRelativeOpenInterest:P0} (sub-grid strike)";
+		return null;
 	}
 
 	/// <summary>Per-order limit/side/leg-arg from the leg set. PricePerShare is signed by action ("buy"
