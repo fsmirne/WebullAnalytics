@@ -20,6 +20,15 @@ internal sealed class OpenerConfig
 	// a backtest --config to keep the live scan exhaustive.
 	[JsonPropertyName("maxLongAnchors")] public int MaxLongAnchors { get; set; } = 40;
 	[JsonPropertyName("maxShortAnchors")] public int MaxShortAnchors { get; set; } = 30;
+	/// <summary>Diagonal-only: in addition to the shortDelta-band shorts, emit shorts at 1..N strikes on
+	/// either side of the long anchor (covered side OTM-of-long; the reverse side is dropped unless
+	/// <c>allowInverted</c>). This SUPPLEMENTS — and is NOT clamped by — the shortDelta band, so it can
+	/// (by design) place near-anchor shorts well outside [shortDeltaMin, shortDeltaMax]. It exists because
+	/// the coarse delta spanning can never land an adjacent-strike pairing, and the balanced near-ATM
+	/// covered diagonals the scorer rates highest need those tight pairings to exist. Consequence: the
+	/// shortDelta band is NOT a hard moneyness bound on the short while this is > 0. Set to 0 to enforce a
+	/// band-only (true-OTM) short — required for a poor-man's-covered-call, where a deep-ITM long plus a
+	/// non-zero value here would otherwise leak near-ATM/near-ITM shorts.</summary>
 	[JsonPropertyName("maxTightGapStrikes")] public int MaxTightGapStrikes { get; set; } = 6;
 	[JsonPropertyName("maxQtyPerProposal")] public int MaxQtyPerProposal { get; set; } = 10;
 
@@ -352,9 +361,12 @@ internal sealed class OpenerCalendarVerticalConfig
 
 /// <summary>LongCalendar / LongDiagonal config. Strike placement: when <see cref="DeltaMax"/> > 0 strikes
 /// are picked by delta band (the anchor / long-leg lands in <see cref="DeltaMin"/>–<see cref="DeltaMax"/>;
-/// for a diagonal the near short leg lands in <see cref="ShortDeltaMin"/>–<see cref="ShortDeltaMax"/>, further
-/// OTM — mirrors DiagonalVertical / CalendarVertical). When DeltaMax is 0 (default) it falls back to the legacy
-/// ATM-centered strike grid (diagonal long leg one strike off the short), preserving prior behavior.</summary>
+/// for a diagonal the near short leg is drawn from <see cref="ShortDeltaMin"/>–<see cref="ShortDeltaMax"/>,
+/// further OTM — mirrors DiagonalVertical / CalendarVertical). NOTE: the short band is not the sole source —
+/// <see cref="OpenerConfig.MaxTightGapStrikes"/> also emits shorts adjacent to the long anchor that bypass this
+/// band (so with it > 0 the band is not a hard moneyness bound on the short; set it to 0 for a band-only short).
+/// When DeltaMax is 0 (default) it falls back to the legacy ATM-centered strike grid (diagonal long leg one
+/// strike off the short), preserving prior behavior.</summary>
 internal sealed class OpenerCalendarLikeConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
