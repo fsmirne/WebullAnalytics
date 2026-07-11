@@ -65,6 +65,17 @@ internal sealed class SmileIndexCache
 		return map.Keys.Min() <= from.Date && map.Keys.Max() >= ClampToSettled(to.Date);
 	}
 
+	/// <summary>Earliest and latest dates present in the cache (after any needed fetch), or null when the
+	/// cache is empty and unreachable. Callers reporting freshness use this instead of
+	/// <see cref="HasCoverageAsync"/> so they can judge the recent edge against CBOE's actual publish lag
+	/// rather than the strict same-session settlement clamp the backtest gate needs.</summary>
+	public async Task<(DateTime Min, DateTime Max)?> GetCoverageAsync(CancellationToken cancellation)
+	{
+		var map = await EnsureLoadedAsync(cancellation);
+		if (map.Count == 0) return null;
+		return (map.Keys.Min(), map.Keys.Max());
+	}
+
 	private async Task<Dictionary<DateTime, decimal>> EnsureLoadedAsync(CancellationToken cancellation)
 	{
 		if (_memory != null) return _memory;
