@@ -234,17 +234,41 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	private static async Task<bool> FetchSmileAsync(DateTime earliest, DateTime asOf, CancellationToken cancellation)
 	{
 		var smile = new SmileIndexCache();
-		var probe = await smile.GetValueAsync(asOf.Date.AddDays(-1), cancellation);
-		if (probe == null)
+		var coverage = await smile.GetCoverageAsync(cancellation);
+		if (coverage == null)
 		{
 			AnsiConsole.MarkupLine($"  SMILE: [red]failed[/] (CBOE CSV unreachable)");
 			return false;
 		}
-		var hasCoverage = await smile.HasCoverageAsync(earliest, asOf, cancellation);
-		AnsiConsole.MarkupLine(hasCoverage
-			? $"  SMILE: [green]ok[/] (covers {earliest:yyyy-MM-dd} → {asOf:yyyy-MM-dd})"
-			: $"  SMILE: [yellow]partial[/] (CBOE history shorter than requested)");
+		var (min, max) = coverage.Value;
+
+		// CBOE posts each session's SMILE value only after that session settles (a same-evening run won't
+		// see today's yet), so "current" means the cache reaches the PRIOR settled session, not asOf. Judge
+		// the recent edge against that — otherwise every evening run falsely reports "partial". Only a
+		// genuinely short deep history, or a feed that has fallen multiple sessions behind, is worth a warning.
+		var expectedLatest = PriorSettledSession(asOf);
+		var historyShort = min.Date > earliest.Date;
+		var stale = max.Date < expectedLatest;
+		if (!historyShort && !stale)
+		{
+			AnsiConsole.MarkupLine($"  SMILE: [green]ok[/] (covers {min:yyyy-MM-dd} → {max:yyyy-MM-dd})");
+			return true;
+		}
+		var reason = historyShort
+			? $"history starts {min:yyyy-MM-dd}, short of requested {earliest:yyyy-MM-dd}"
+			: $"latest {max:yyyy-MM-dd}, behind expected {expectedLatest:yyyy-MM-dd}";
+		AnsiConsole.MarkupLine($"  SMILE: [yellow]partial[/] ({reason})");
 		return true;
+	}
+
+	/// <summary>Most recent trading day strictly before asOf's NY calendar date — the latest session CBOE
+	/// will have published a SMILE value for by the time this runs (evening or later).</summary>
+	private static DateTime PriorSettledSession(DateTime asOf)
+	{
+		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(asOf.Kind == DateTimeKind.Utc ? asOf : asOf.ToUniversalTime(), NyTz);
+		var d = nowNy.Date.AddDays(-1);
+		while (!MarketCalendar.IsOpen(d)) d = d.AddDays(-1);
+		return d;
 	}
 
 	/// <summary>Fills <c>data/sentiment-cache/<date>.json</c> for every trading day in
