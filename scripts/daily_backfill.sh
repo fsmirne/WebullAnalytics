@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Daily ThetaData refresh of the canonical data stores:
+#   0. wa ai history   -> data/... (daily closes + intraday tape) for SPY/XSP/SPXW/QQQ, run FIRST
 #   1. --quotes        -> data/quotes.db (SQLite)            (minute NBBO, ±10% strike band — written directly)
 #   2. --run           -> data/oi/<TICKER>/<date>.jsonl      (EOD open interest + back-solved IV)
 #   3. verify          (SQL coverage + crossed-quote scan of quotes.db; no network)
@@ -70,6 +71,16 @@ TICKERS="SPXW:0 XSP:0 SPY:60 GME:60 QQQ:30"   # quotes + oi (per-ticker DTE)
 VERIFY="SPXW XSP SPY GME QQQ"                 # verify-quotes (bare names, no DTE)
 CONC=2
 
+# Resolve the wa executable — install.sh/.bat publish it alongside this script in the install dir
+# (wa on Linux/macOS, wa.exe on Windows/WSL); fall back to PATH when run from the repo checkout.
+if [ -x "$SCRIPT_DIR/wa" ]; then WA="$SCRIPT_DIR/wa"
+elif [ -x "$SCRIPT_DIR/wa.exe" ]; then WA="$SCRIPT_DIR/wa.exe"
+else WA="wa"; fi
+
+# Daily/close price + intraday-tape history refresh for the strategy tickers. Runs BEFORE the
+# ThetaData pull so downstream stores have fresh underlying history to lean on.
+HISTORY_TICKERS="SPY XSP SPXW QQQ"
+
 # Stop at the last COMPLETE day. ThetaData finalizes a session's data at ~17:15 ET, so an evening
 # run (>= 19:00 local, comfortably past that) may include TODAY; earlier runs stop at yesterday —
 # their docs and our own error ("Current day requests must have a start time less than current
@@ -98,11 +109,14 @@ step() {  # "label" command args...
 # on tomorrow's run; quotes still capture today on evening runs.
 END_OI="${BACKFILL_END:-$(date -d 'yesterday' +%F)}"
 
-echo "[$(ts)] === daily data update: quotes through $END, oi through $END_OI, verify ==="
+echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes through $END, oi through $END_OI, verify ==="
 
-step "(1/3) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END" --concurrency "$CONC"
-step "(2/3) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" --concurrency "$CONC"
-step "(3/3) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root SPY --verify
+for t in $HISTORY_TICKERS; do
+  step "(1/4) ai history $t"                        "$WA" ai history "$t"
+done
+step "(2/4) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END" --concurrency "$CONC"
+step "(3/4) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" --concurrency "$CONC"
+step "(4/4) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root SPY --verify
 
 if [ "$rc" -eq 0 ]; then
   echo "[$(ts)] === ALL OK ==="
