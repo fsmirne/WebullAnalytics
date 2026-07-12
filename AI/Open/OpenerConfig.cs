@@ -61,11 +61,18 @@ internal sealed class OpenerConfig
 	/// the live opener should likewise withhold opens until this time.</summary>
 	[JsonPropertyName("earliestEntryTimeEt")] public string? EarliestEntryTimeEt { get; set; } = null;
 
-	/// <summary>When true, restrict candidate expiries to the liquid Friday expiries (weeklies + the monthly).
-	/// SPX/SPXW Mon–Thu dailies are thin: they're disproportionately the no-trade legs that price synthetically
-	/// in the backtest and that the live liquidity filter rejects. Trading only Fridays raises real-bar coverage,
-	/// keeps the backtest aligned with what's actually live-tradeable, and shrinks the candidate space. Default false.</summary>
-	[JsonPropertyName("weeklyMonthlyExpiriesOnly")] public bool WeeklyMonthlyExpiriesOnly { get; set; } = false;
+	/// <summary>Restrict which expiry types are eligible for the SHORT and LONG legs of calendar/diagonal
+	/// structures independently. Dailies are Mon–Thu expirations (SPX/SPXW/SPY daily chains). Weeklies are
+	/// non-monthly Fridays. Monthlies are the holiday-adjusted 3rd-Friday of each month. All six default to
+	/// true. Typical uses: set allowShortDailies=false to restrict short legs to Fridays only (equivalent to
+	/// the old weeklyMonthlyExpiriesOnly flag); set allowLongWeeklies=false for underlyings like GME where
+	/// far-dated weeklies have no usable bid/ask, limiting the long leg to the liquid monthly cycle.</summary>
+	[JsonPropertyName("allowShortDailies")] public bool AllowShortDailies { get; set; } = true;
+	[JsonPropertyName("allowShortWeeklies")] public bool AllowShortWeeklies { get; set; } = true;
+	[JsonPropertyName("allowShortMonthlies")] public bool AllowShortMonthlies { get; set; } = true;
+	[JsonPropertyName("allowLongDailies")] public bool AllowLongDailies { get; set; } = true;
+	[JsonPropertyName("allowLongWeeklies")] public bool AllowLongWeeklies { get; set; } = true;
+	[JsonPropertyName("allowLongMonthlies")] public bool AllowLongMonthlies { get; set; } = true;
 
 	/// <summary>How the Fear & Greed sentiment overlay reads the score: <c>"contrarian"</c> (default — extreme
 	/// fear favors bullish structures, greed favors bearish; the legacy hardcoded behaviour) or <c>"momentum"</c>
