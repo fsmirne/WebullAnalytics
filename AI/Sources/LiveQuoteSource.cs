@@ -39,7 +39,7 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		// not each vendor's own model IV). Vendor IV is kept as the fallback when the book is one-sided.
 		var rebased = new Dictionary<string, OptionContractQuote>(options.Count, StringComparer.OrdinalIgnoreCase);
 		foreach (var (sym, q) in options)
-			rebased[sym] = BackSolveIvFromMid(sym, q, spots, asOf);
+			rebased[sym] = BackSolveIvFromMid(sym, q, spots);
 
 		// Filter spots to the tickers requested.
 		var filteredSpots = spots.Where(kv => tickers.Contains(kv.Key))
@@ -129,23 +129,23 @@ internal sealed class LiveQuoteSource : IQuoteSource
 	{
 		var spots = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [root] = spot };
 		var rebased = new Dictionary<string, OptionContractQuote>(options.Count, StringComparer.OrdinalIgnoreCase);
-		foreach (var (sym, q) in options) rebased[sym] = BackSolveIvFromMid(sym, q, spots, asOf);
+		foreach (var (sym, q) in options) rebased[sym] = BackSolveIvFromMid(sym, q, spots);
 		return rebased;
 	}
 
 	/// <summary>Returns <paramref name="q"/> with ImpliedVolatility re-solved from the NBBO mid (matching the
 	/// backtest), or unchanged when the book is one-sided / inputs are degenerate (keeps the vendor IV).</summary>
-	private static OptionContractQuote BackSolveIvFromMid(string sym, OptionContractQuote q, IReadOnlyDictionary<string, decimal> spots, DateTime asOf)
+	private static OptionContractQuote BackSolveIvFromMid(string sym, OptionContractQuote q, IReadOnlyDictionary<string, decimal> spots)
 	{
 		if (q.Bid is not (> 0m) || q.Ask is not (> 0m)) return q;        // one-sided / missing book → no mid to solve from
 		var p = ParsingHelpers.ParseOptionSymbol(sym);
 		if (p is null || p.CallPut is not ("C" or "P")) return q;
 		if (!spots.TryGetValue(p.Root, out var spot) || spot <= 0m) return q;
-		// Use elapsed fractional time to 16:00 on expiry day — identical to TryMarketImpliedIv. The older
-		// OpenerExpiryHelpers.TimeYearsToExpiry truncates to integer calendar days for multi-day options,
-		// which causes a ~5% t undercount for short-dated legs (e.g. 5DTE at 10am → 5 vs 5.25 days) and
-		// back-solves an IV ~10-15% too high relative to the analyze-trade path.
-		var t = (p.ExpiryDate.Date + OptionMath.MarketClose - asOf).TotalDays / 365.0;
+		// Anchor time to when the quotes were actually struck: ObservationInstant() returns DateTime.Now
+		// during RTH and the previous session's close off-hours/weekends — identical to the anchor that
+		// AnalyzePositionCommand/AnalyzeRiskCommand use when calling TryMarketImpliedIv, so the "cal" IV
+		// shown in scan output matches analyze output for the same frozen quote.
+		var t = (p.ExpiryDate.Date + OptionMath.MarketClose - OptionMath.ObservationInstant()).TotalDays / 365.0;
 		if (t <= 0) return q;
 		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
 		if (mid <= 0m) return q;
