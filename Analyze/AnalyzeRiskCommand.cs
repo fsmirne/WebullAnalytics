@@ -172,7 +172,13 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 				distinctStrikes: positionLegs.Select(l => l.Parsed.Strike).Distinct().Count(),
 				distinctCallPut: positionLegs.Select(l => l.Parsed.CallPut).Distinct().Count());
 
-		var asOf = OptionMath.ObservationInstant(); // when the loaded quotes were struck — correct T for the diagnostic's greeks/EM
+		// Two anchors, same as the scanner:
+		// asOf = DateTime.Now: how much time the trade has left as of RIGHT NOW — DTE display, EV/POP
+		//   scenario grid, score divisor. On Sunday this says "5 days to Friday expiry," matching the scan.
+		// quoteAsOf = ObservationInstant(): when the loaded quotes were struck — correct T for greeks,
+		//   expected-move, and the IV back-solve that inverts the option mid to find the market-implied IV.
+		var asOf = DateTime.Now;
+		var quoteAsOf = OptionMath.ObservationInstant();
 		var trend = await TrendFetcher.FetchAsync(ticker, asOf, cancellation);
 
 		var technicalBias = await TryComputeTechnicalBiasAsync(ticker, asOf, cancellation);
@@ -202,12 +208,12 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var historicalVolAnnual = await TryComputeHistoricalVolAsync(ticker, asOf, cancellation);
 		var sentiment = await FearGreedClient.FetchAsync(asOf, cancellation);
 
-		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, trend, quotes, sentiment);
+		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot.Value, quoteAsOf, ResolveIv, trend, quotes, sentiment);
 		// At hypothetical spots (--spot override), the leg market mids are stale and back-solving IV
 		// against them produces a nonsense IV. Use broker IV in that case for an internally-consistent
 		// projection.
 		var useMarketImpliedIv = string.IsNullOrEmpty(settings.Spot);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score, ivSolveAsOf: quoteAsOf);
 		diagnostic = diagnostic with { Probe = probe };
 
 		var logPath = Program.ResolvePath("data/analyze-risk.jsonl");
