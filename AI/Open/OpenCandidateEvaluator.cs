@@ -461,11 +461,14 @@ internal sealed class OpenCandidateEvaluator
 			var debugRejectLinesLeft = 25;
 
 			var scoredByStructure = new Dictionary<OpenStructureKind, List<OpenProposal>>();
-			// IV back-solve anchor: ObservationInstant() returns DateTime.Now during RTH (== ctx.Now),
-			// and the previous session's close off-hours. Using it here aligns the scorer's MarketImpliedIv
-			// with the same anchor that BackSolveIvFromMid and the analyze commands use, so BEs and
-			// calibrated IVs are consistent across all callers regardless of when the scan runs.
-			var ivSolveAsOf = _backtestMode ? ctx.Now : OptionMath.ObservationInstant();
+			// asOf = the quote anchor: ObservationInstant() returns DateTime.Now during RTH and the previous
+			// session's close off-hours/weekends. All pricing-consistent calculations (DTE, shortYears, POP,
+			// EV, raw-score divisor, IV back-solve) use this so scan and analyze agree regardless of when they
+			// run. vetoNow = the actual current date: EventVeto uses it for "is this event still upcoming?"
+			// which must measure against wall-clock time (e.g., Friday earnings are past on Sunday even though
+			// the quote anchor is Friday 16:00). During RTH ObservationInstant() == ctx.Now so no difference.
+			var scoringAsOf = _backtestMode ? ctx.Now : OptionMath.ObservationInstant();
+			var ivSolveAsOf = scoringAsOf; // same anchor — kept as a named var so ScoreCalendarOrDiagonal can pass it explicitly
 
 			if (debug)
 			{
@@ -475,7 +478,7 @@ internal sealed class OpenCandidateEvaluator
 				foreach (var skel in tickerGroup)
 				{
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf);
+					var p = CandidateScorer.Score(skel, spot, scoringAsOf, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf, vetoNow: ctx.Now);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
@@ -527,7 +530,7 @@ internal sealed class OpenCandidateEvaluator
 				{
 					var skel = skels[i];
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf);
+					var p = CandidateScorer.Score(skel, spot, scoringAsOf, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf, vetoNow: ctx.Now);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
