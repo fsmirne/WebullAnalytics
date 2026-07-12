@@ -5,6 +5,7 @@ using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
+using WebullAnalytics.Pricing;
 using WebullAnalytics.Sentiment;
 
 namespace WebullAnalytics.AI;
@@ -460,6 +461,11 @@ internal sealed class OpenCandidateEvaluator
 			var debugRejectLinesLeft = 25;
 
 			var scoredByStructure = new Dictionary<OpenStructureKind, List<OpenProposal>>();
+			// IV back-solve anchor: ObservationInstant() returns DateTime.Now during RTH (== ctx.Now),
+			// and the previous session's close off-hours. Using it here aligns the scorer's MarketImpliedIv
+			// with the same anchor that BackSolveIvFromMid and the analyze commands use, so BEs and
+			// calibrated IVs are consistent across all callers regardless of when the scan runs.
+			var ivSolveAsOf = _backtestMode ? ctx.Now : OptionMath.ObservationInstant();
 
 			if (debug)
 			{
@@ -469,7 +475,7 @@ internal sealed class OpenCandidateEvaluator
 				foreach (var skel in tickerGroup)
 				{
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable);
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
@@ -521,7 +527,7 @@ internal sealed class OpenCandidateEvaluator
 				{
 					var skel = skels[i];
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable);
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
