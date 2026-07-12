@@ -181,7 +181,10 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var quoteAsOf = OptionMath.ObservationInstant();
 		var trend = await TrendFetcher.FetchAsync(ticker, asOf, cancellation);
 
-		var technicalBias = await TryComputeTechnicalBiasAsync(ticker, asOf, cancellation);
+		// DTE of the nearest expiry — the same DTE the scanner uses in BiasForDte to weight the
+		// intraday tape component relative to the macro/VIX-term signal.
+		var dteCalendar = positionLegs.Count > 0 ? Math.Max(1, (positionLegs.Min(l => l.Parsed.ExpiryDate.Date) - asOf.Date).Days) : 5;
+		var technicalBias = await TryComputeTechnicalBiasAsync(ticker, asOf, dteCalendar, cancellation);
 
 		decimal ResolveIv(string sym) =>
 			quotes.TryGetValue(sym, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m
@@ -297,28 +300,59 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		return 0;
 	}
 
-	private static async Task<decimal> TryComputeTechnicalBiasAsync(string ticker, DateTime asOf, CancellationToken cancellation)
+	/// <summary>Replicates the per-ticker bias pipeline from OpenCandidateEvaluator: macro technical
+	/// signal blended with VIX term structure and bias-calibration move sign, then calls
+	/// RegimeAnalyzer.BlendBias. Intraday tape is intentionally skipped — it is null off-hours and
+	/// would require a live Webull session during RTH; the scan degrades to the same three-component
+	/// blend when intraday is unavailable, so behavior matches in practice.</summary>
+	private static async Task<decimal> TryComputeTechnicalBiasAsync(string ticker, DateTime asOf, int dteCalendar, CancellationToken cancellation)
 	{
 		try
 		{
-			// Resolve the merged base → ai-config.{TICKER}.json config (same loader the probe scores with).
-			// Reading the bare base config and validating it returned 0 bias for EVERY ticker: the base layer
-			// has strikeStep=0 and fails AIConfigLoader.Validate (strikeStep lives only in the per-ticker
-			// layer), so the validation guard tripped on every call regardless of ticker or market hours.
 			var cfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
 			if (cfg == null) return 0m;
 
 			var filter = cfg.Indicators.TechnicalFilter;
-			if (!filter.Enabled) return 0m;
-
 			var cache = new HistoricalPriceCache();
-			var res = await AIPipelineHelper.ComputeTechnicalSignalsAsync(
-				tickers: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker },
-				priceCache: cache,
-				filter: filter,
-				asOf: asOf,
-				cancellation: cancellation);
-			return res.TryGetValue(ticker, out var b) ? b.Score : 0m;
+
+			// Macro bias: SMA/trend technical composite
+			decimal macroBias = 0m;
+			decimal moveSign = 0m;
+			if (filter.Enabled)
+			{
+				var effectiveLookback = filter.Sma200Weight > 0m ? Math.Max(filter.LookbackDays, 200) : filter.LookbackDays;
+				// Load enough closes to cover both the technical filter and bias calibration lookback
+				// (biasCalibLookbackDays+2 is always ≤ effectiveLookback for typical configs).
+				var closes = await cache.GetRecentClosesAsync(ticker, effectiveLookback, asOf, cancellation);
+				var bias = TechnicalIndicators.Compute(closes, filter);
+				macroBias = bias?.Score ?? 0m;
+
+				// Move sign for bias calibration (same logic as OpenCandidateEvaluator)
+				var n = cfg.Opener.BiasCalibrationLookbackDays;
+				if (n > 0 && closes.Count > n)
+				{
+					var recentClose = closes[^1];
+					var olderClose = closes[closes.Count - 1 - n];
+					if (olderClose > 0m)
+						moveSign = recentClose > olderClose ? 1m : (recentClose < olderClose ? -1m : 0m);
+				}
+			}
+
+			// VIX term structure — two daily-close reads; null on missing data (blend falls back to macro)
+			decimal? vixTermScore = null;
+			if (cfg.Opener.Weights.VixTermStructure > 0m)
+			{
+				var vixCloses = await cache.GetRecentClosesAsync("VIX", 1, asOf, cancellation);
+				var vix9dCloses = await cache.GetRecentClosesAsync("VIX9D", 1, asOf, cancellation);
+				if (vixCloses.Count > 0 && vix9dCloses.Count > 0)
+					vixTermScore = VixTermStructureIndicator.Compute(vixCloses[^1], vix9dCloses[^1]);
+			}
+
+			// Intraday bias: null (off-hours) or unavailable (no Webull session) — BlendBias skips it
+			return RegimeAnalyzer.BlendBias(
+				macroBias, vixTermScore, cfg.Opener.Weights.VixTermStructure,
+				intradayScore: null, intradayWeight: 0m, dteCalendar,
+				cfg.Opener.IntradayTapeDteCurve, cfg.Opener.BiasCalibrationLookbackDays, moveSign);
 		}
 		catch
 		{
@@ -337,7 +371,8 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			// VolatilityFit weight from a strategy-specific layer (e.g. ai-config.GME.DC.json) is visible.
 			var cfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
 			if (cfg == null) return null;
-			if (cfg.Opener.Weights.VolatilityFit <= 0m) return null;
+			// Either factor may use historical vol; only skip if both are disabled.
+			if (cfg.Opener.Weights.VolatilityFit <= 0m && cfg.Opener.Weights.IvRealizedPremium <= 0m) return null;
 
 			var cache = new HistoricalPriceCache();
 			var closes = await cache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
