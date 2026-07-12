@@ -376,7 +376,7 @@ internal static class OptionMath
 		for (var i = 0; i < 60; i++)
 		{
 			var mid = (a + b) / 2m;
-			if (b - a <= 0.005m) return mid;
+			if (b - a <= 0.0001m) return mid;
 			var fm = pnl(mid);
 			if ((fa < 0m && fm < 0m) || (fa >= 0m && fm >= 0m)) { a = mid; fa = fm; }
 			else { b = mid; }

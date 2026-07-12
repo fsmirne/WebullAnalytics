@@ -465,8 +465,22 @@ internal static class RiskDiagnosticProbeBuilder
 				var hasTickerConfig = false;
 				if (key.Length > 0)
 				{
-					var tickerPath = Path.Combine(Path.GetDirectoryName(basePath) ?? string.Empty, $"ai-config.{key}.json");
+					var dir = Path.GetDirectoryName(basePath) ?? string.Empty;
+					var tickerPath = Path.Combine(dir, $"ai-config.{key}.json");
 					if (File.Exists(tickerPath)) { paths.Add(tickerPath); hasTickerConfig = true; }
+					// Respect defaultStrategy: if the ticker config names a strategy (e.g. "DC"), load that
+					// layer too — same merge chain as AIContext.ResolveConfig so analyze uses the same weights
+					// as the scan that proposed the trade.
+					if (hasTickerConfig)
+					{
+						var core = AIConfigMerge.LoadMerged(basePath, tickerPath);
+						var strategy = core?.DefaultStrategy?.Trim() ?? "";
+						if (strategy.Length > 0)
+						{
+							var stratPath = Path.Combine(dir, $"ai-config.{key}.{strategy}.json");
+							if (File.Exists(stratPath)) paths.Add(stratPath);
+						}
+					}
 				}
 				var config = AIConfigMerge.LoadMerged(paths.ToArray());
 				if (config == null)

@@ -1,5 +1,3 @@
-using WebullAnalytics.AI;
-
 namespace WebullAnalytics.AI.Events;
 
 /// <summary>Hard-veto rules for scheduled catalysts. Pure functions over (skeleton, asOf, events,
@@ -14,16 +12,22 @@ namespace WebullAnalytics.AI.Events;
 /// <see cref="WebullAnalytics.AI.RiskDiagnostics.Rules.EarningsProximityRule"/>.</summary>
 internal static class EventVeto
 {
-	public static bool ShouldVeto(CandidateSkeleton skel, DateTime asOf, TickerEvents? events, OpenerEventsConfig cfg, out string? reason)
+	/// <param name="vetoNow">The actual current date/time for "is this event still upcoming?" checks.
+	/// Separate from <paramref name="asOf"/> because asOf is the quote anchor (ObservationInstant — the
+	/// last session's close) while vetoNow is the real wall-clock date. Off-hours they differ: asOf=Friday,
+	/// vetoNow=Sunday. Earnings on Friday are already past on Sunday so should not veto. When null, asOf
+	/// is used for both purposes (backtest: asOf==ctx.Now anyway; tests: controlled fixed date).</param>
+	public static bool ShouldVeto(CandidateSkeleton skel, DateTime asOf, TickerEvents? events, OpenerEventsConfig cfg, out string? reason, DateTime? vetoNow = null)
 	{
 		reason = null;
 		if (!cfg.Enabled || events == null) return false;
+		var vetoDate = (vetoNow ?? asOf).Date;
 
 		if (events.NextEarningsDate.HasValue && HasShortLeg(skel.StructureKind))
 		{
 			var earnings = events.NextEarningsDate.Value.Date;
 			var blackoutEnd = skel.TargetExpiry.Date.AddDays(Math.Max(0, cfg.EarningsBlackoutDaysAfter));
-			if (earnings >= asOf.Date && earnings <= blackoutEnd)
+			if (earnings >= vetoDate && earnings <= blackoutEnd)
 			{
 				reason = $"earnings on {earnings:yyyy-MM-dd} ≤ target expiry {skel.TargetExpiry:yyyy-MM-dd}+{cfg.EarningsBlackoutDaysAfter}d";
 				return true;
@@ -33,7 +37,7 @@ internal static class EventVeto
 		if (cfg.RejectShortCallsThroughExDiv && events.NextExDividendDate.HasValue)
 		{
 			var exDiv = events.NextExDividendDate.Value.Date;
-			if (exDiv >= asOf.Date)
+			if (exDiv >= vetoDate)
 			{
 				foreach (var leg in skel.Legs)
 				{

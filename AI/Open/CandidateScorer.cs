@@ -971,13 +971,13 @@ internal static class CandidateScorer
 	/// running at a hypothetical spot (e.g., <c>--spot</c> override) should pass false,
 	/// because the market mid was set at a different spot and back-solving against it produces a
 	/// nonsensical IV that collapses calendar/diagonal residual time value.</summary>
-	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null) => skel.StructureKind switch
+	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null) => skel.StructureKind switch
 	{
 		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events, snapshotTradeable),
-		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events, snapshotTradeable),
+		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events, snapshotTradeable, vetoNow: vetoNow),
 		OpenStructureKind.LongCallVertical or OpenStructureKind.LongPutVertical => ScoreLongVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events, snapshotTradeable),
-		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf),
-		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor or OpenStructureKind.DiagonalVertical or OpenStructureKind.CalendarVertical or OpenStructureKind.Condor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf),
+		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow),
+		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor or OpenStructureKind.DiagonalVertical or OpenStructureKind.CalendarVertical or OpenStructureKind.Condor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow),
 		_ => null
 	};
 
@@ -1318,9 +1318,9 @@ internal static class CandidateScorer
 		return (decimal)(dir == Direction.Above ? N_d2 : 1.0 - N_d2);
 	}
 
-	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null)
+	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? vetoNow = null)
 	{
-		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _)) return null;
+		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _, vetoNow)) return null;
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
 		var longLeg = skel.Legs.First(l => l.Action == "buy");
 		var shortParsed = ParsingHelpers.ParseOptionSymbol(shortLeg.Symbol);
@@ -2054,9 +2054,9 @@ internal static class CandidateScorer
 		return (maxProfit, maxLoss);
 	}
 
-	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null)
+	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null)
 	{
-		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _)) return null;
+		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _, vetoNow)) return null;
 		var defs = new List<MultiLegDefinition>(skel.Legs.Count);
 		var usedFallback = false;
 		// Net entry accumulates from the RESOLVED leg prices (live book, or Black-Scholes when the book
@@ -2227,9 +2227,9 @@ internal static class CandidateScorer
 			ExpectedMoveUpper: expectedMoveBoundsMl?.Upper);
 	}
 
-	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null)
+	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null)
 	{
-		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _)) return null;
+		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _, vetoNow)) return null;
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
 		var longLeg = skel.Legs.First(l => l.Action == "buy");
 		var shortParsed = ParsingHelpers.ParseOptionSymbol(shortLeg.Symbol);
