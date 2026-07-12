@@ -213,7 +213,11 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		// against them produces a nonsense IV. Use broker IV in that case for an internally-consistent
 		// projection.
 		var useMarketImpliedIv = string.IsNullOrEmpty(settings.Spot);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score, ivSolveAsOf: quoteAsOf);
+		// useCostBasisForOpenerScore:false — analyze risk evaluates a hypothetical new trade at current
+		// market mids, not an existing position with a stale cost basis. Cost-basis mode would suppress
+		// useMarketImpliedIv and use broker IV instead of the back-solved mid IV, diverging from the
+		// scan. With false, the scorer uses real bid/ask and back-solves ivLong, matching scan exactly.
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: false, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score, ivSolveAsOf: quoteAsOf);
 		diagnostic = diagnostic with { Probe = probe };
 
 		var logPath = Program.ResolvePath("data/analyze-risk.jsonl");
@@ -329,11 +333,10 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 	{
 		try
 		{
-			var path = Program.ResolvePath(AIConfigLoader.ConfigPath);
-			if (!File.Exists(path)) return null;
-			var cfg = System.Text.Json.JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(path));
+			// Use the same full merge chain (base + ticker + strategy) as TryLoadAiConfigQuiet so the
+			// VolatilityFit weight from a strategy-specific layer (e.g. ai-config.GME.DC.json) is visible.
+			var cfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
 			if (cfg == null) return null;
-			if (AIConfigLoader.Validate(cfg) != null) return null;
 			if (cfg.Opener.Weights.VolatilityFit <= 0m) return null;
 
 			var cache = new HistoricalPriceCache();
