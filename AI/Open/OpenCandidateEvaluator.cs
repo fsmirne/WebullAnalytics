@@ -25,6 +25,11 @@ internal sealed class OpenCandidateEvaluator
 	private readonly bool _enableChainSnapshot;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
 	private IntradayBarCache? _intradayCache;
+	// Far-expiry bid/ask from the daily chain sweep (keyed by OCC symbol). The sweep only runs once per
+	// ET day; on subsequent ticks within the same session the registry returns candidateExps.Count==0 and
+	// EnsureDailySnapshotAsync returns null. Caching here lets every tick merge the swept quotes back into
+	// bootstrapOptions so the scorer can price far-leg candidates without re-hitting the network.
+	private Dictionary<string, OptionContractQuote>? _snapshotQuoteCache;
 
 	/// <param name="priceCache">Shared close-price cache. Pass the runner-owned instance so the in-memory
 	/// per-ticker dictionary survives across ticks/steps instead of being rebuilt (and the CSV re-read) each call.</param>
@@ -165,7 +170,21 @@ internal sealed class OpenCandidateEvaluator
 		if (_enableChainSnapshot)
 		{
 			var chainOccs = bootstrapOptions.Keys.Concat(ctx.Quotes.Keys);
-			await EnsureDailySnapshotAsync(ctx, bootstrapSpots, availableByTicker, chainOccs, cfg, debug, cancellation, quoteOverrides);
+			var snapshotQuotes = await EnsureDailySnapshotAsync(ctx, bootstrapSpots, availableByTicker, chainOccs, cfg, debug, cancellation, quoteOverrides);
+			if (snapshotQuotes != null)
+			{
+				// First sweep of the day: cache the far-expiry quotes for reuse on subsequent ticks.
+				_snapshotQuoteCache ??= new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+				foreach (var (occ, q) in snapshotQuotes)
+					if (q is { Bid: > 0m, Ask: > 0m })
+						_snapshotQuoteCache[occ] = q;
+			}
+			// Merge cached far-expiry bid/ask into bootstrapOptions so the scorer can price far-leg
+			// candidates. Skips any symbol the live chain fetch already quoted (don't overwrite fresher data).
+			if (_snapshotQuoteCache != null)
+				foreach (var (occ, q) in _snapshotQuoteCache)
+					if (!bootstrapOptions.TryGetValue(occ, out var existing) || existing.Bid is null or <= 0m || existing.Ask is null or <= 0m)
+						bootstrapOptions[occ] = q;
 			foreach (var (occ, q) in BuildSnapshotOverlay(_config.Ticker, ctx.Now, bootstrapOptions, ctx.Quotes))
 				bootstrapOptions[occ] = q;
 		}
@@ -874,12 +893,12 @@ internal sealed class OpenCandidateEvaluator
 	/// Persists the result in the derivative registry (<see cref="DerivativeIdRegistry.RecordSnapshot"/>);
 	/// the sweep is incremental per expiry, so a re-run with the same DTE bands is a no-op (those expiries
 	/// are already covered today) while a wider-DTE strategy still fills in the bands an earlier run left out.</summary>
-	private async Task EnsureDailySnapshotAsync(EvaluationContext ctx, IReadOnlyDictionary<string, decimal> spots, IReadOnlyDictionary<string, HashSet<DateTime>> availableByTicker, IEnumerable<string> chainOccs, OpenerConfig cfg, bool debug, CancellationToken cancellation, QuoteOverrides quoteOverrides)
+	private async Task<IReadOnlyDictionary<string, OptionContractQuote>?> EnsureDailySnapshotAsync(EvaluationContext ctx, IReadOnlyDictionary<string, decimal> spots, IReadOnlyDictionary<string, HashSet<DateTime>> availableByTicker, IEnumerable<string> chainOccs, OpenerConfig cfg, bool debug, CancellationToken cancellation, QuoteOverrides quoteOverrides)
 	{
 		var ticker = _config.Ticker;
 		var asOf = SnapshotDate(ctx.Now);
-		if (!spots.TryGetValue(ticker, out var spot) || spot <= 0m) return;
-		if (!availableByTicker.TryGetValue(ticker, out var expiries) || expiries.Count == 0) return;
+		if (!spots.TryGetValue(ticker, out var spot) || spot <= 0m) return null;
+		if (!availableByTicker.TryGetValue(ticker, out var expiries) || expiries.Count == 0) return null;
 
 		// Cover every enabled structure's DTE band(s): the nearest few expiries within each band, so both
 		// the short (3–10 DTE) and long (21–45 DTE) legs of diagonals/calendars get swept. Skip expiries
@@ -895,7 +914,7 @@ internal sealed class OpenCandidateEvaluator
 				.Where(e => !covered.Contains(e.Date))
 				.OrderBy(e => e).Take(SnapshotExpiriesPerBand))
 				candidateExps.Add(e);
-		if (candidateExps.Count == 0) return;
+		if (candidateExps.Count == 0) return null;
 
 		var lo = spot * (1m - SnapshotWindowPct);
 		var hi = spot * (1m + SnapshotWindowPct);
@@ -908,7 +927,7 @@ internal sealed class OpenCandidateEvaluator
 			if (p.Strike < lo || p.Strike > hi) continue;
 			symbols.Add(occ);
 		}
-		if (symbols.Count == 0) return;
+		if (symbols.Count == 0) return null;
 
 		var fetched = await _quotes.GetQuotesAsync(ctx.Now, symbols, _config.TickerSet(), cancellation, quoteOverrides);
 		var liquidity = new Dictionary<string, (bool Tradeable, long? OpenInterest)>(StringComparer.OrdinalIgnoreCase);
@@ -926,6 +945,7 @@ internal sealed class OpenCandidateEvaluator
 		}
 		DerivativeIdRegistry.RecordSnapshot(asOf, liquidity);
 		if (debug) Console.Error.WriteLine($"[debug] {ticker} daily chain snapshot {asOf}: probed {symbols.Count} near-money strikes across {candidateExps.Count} expiries, {liquidity.Count(kv => kv.Value.Tradeable)} quoted/tradeable ({withOiButNoQuote} had OI but no bid/ask — excluded).");
+		return fetched.Options;
 	}
 
 	/// <summary>Turns today's snapshot of tradeable strikes into chain-overlay markers (open-interest = 1,
