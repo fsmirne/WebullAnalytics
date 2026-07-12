@@ -7,6 +7,7 @@ using WebullAnalytics.AI;
 using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.RiskDiagnostics;
+using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
 using WebullAnalytics.IO;
 using WebullAnalytics.Positions;
@@ -247,13 +248,29 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// Risk diagnostic: structured analysis of the current position (greeks, geometry, premium ratio,
 		// trend alignment, rule hits). Logged to data/analyze-position.jsonl for AI consumers.
 		var asOfForDiagnostic = EvaluationDate.Today;
-		var technicalBias = await TryComputeTechnicalBiasAsync(ticker, asOfForDiagnostic, cancellation);
 		var tickerForTrend = positionLegs.Count > 0 ? positionLegs[0].Parsed.Root : null;
 		TrendSnapshot? trendSnap = null;
 		if (!string.IsNullOrEmpty(tickerForTrend))
 			trendSnap = await TrendFetcher.FetchAsync(tickerForTrend, asOfForDiagnostic, cancellation);
 
-		var historicalVolAnnual = await TryComputeHistoricalVolAsync(tickerForTrend, asOfForDiagnostic, cancellation);
+		// Shared price cache for both regime and vol-fit fetches — avoids a redundant disk read for the ticker's closes.
+		var priceCache = new HistoricalPriceCache();
+		var aiCfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
+		decimal macroBias = 0m;
+		if (aiCfg?.Indicators.TechnicalFilter.Enabled == true)
+		{
+			var filter = aiCfg.Indicators.TechnicalFilter;
+			var effectiveLookback = filter.Sma200Weight > 0m ? Math.Max(filter.LookbackDays, 200) : filter.LookbackDays;
+			var closes = await priceCache.GetRecentClosesAsync(ticker, effectiveLookback, asOfForDiagnostic, cancellation);
+			macroBias = TechnicalIndicators.Compute(closes, filter)?.Score ?? 0m;
+		}
+		var apiConfig = OpenCandidateEvaluator.TryLoadApiConfig();
+		var intradayCache = apiConfig != null ? new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)) : null;
+		var dteCalendar = positionLegs.Count > 0 ? Math.Max(1, (positionLegs.Min(l => l.Parsed.ExpiryDate.Date) - asOfForDiagnostic.Date).Days) : 5;
+		var regimeComponents = aiCfg != null ? await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, DateTime.Now, priceCache, intradayCache, includeCurrentBar: true, cancellation) : default;
+		var technicalBias = aiCfg != null ? RegimeAnalyzer.BlendBias(regimeComponents, aiCfg.Opener, dteCalendar) : 0m;
+
+		var historicalVolAnnual = await TryComputeHistoricalVolAsync(ticker, asOfForDiagnostic, priceCache, cancellation);
 		var sentiment = await FearGreedClient.FetchAsync(asOfForDiagnostic, cancellation);
 
 		// Scheduled-catalyst events (earnings + ex-dividend) for the position's ticker. cacheOnly:false
@@ -392,52 +409,19 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 	}
 
-	private static async Task<decimal> TryComputeTechnicalBiasAsync(string ticker, DateTime asOf, CancellationToken cancellation)
-	{
-		try
-		{
-			// Resolve the merged base → ai-config.{TICKER}.json config (same loader the probe scores with).
-			// Reading the bare base config and validating it returned 0 bias for EVERY ticker: the base layer
-			// has strikeStep=0 and fails AIConfigLoader.Validate (strikeStep lives only in the per-ticker
-			// layer), so the validation guard tripped on every call regardless of ticker or market hours.
-			var cfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
-			if (cfg == null) return 0m;
-
-			var filter = cfg.Indicators.TechnicalFilter;
-			if (!filter.Enabled) return 0m;
-
-			var cache = new HistoricalPriceCache();
-			var res = await AIPipelineHelper.ComputeTechnicalSignalsAsync(
-				tickers: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker },
-				priceCache: cache,
-				filter: filter,
-				asOf: asOf,
-				cancellation: cancellation);
-			return res.TryGetValue(ticker, out var b) ? b.Score : 0m;
-		}
-		catch
-		{
-			return 0m;
-		}
-	}
-
 	/// <summary>Mirrors OpenCandidateEvaluator's HV pull so analyze position scores get the same vol-fit
-	/// factor as the live opener pipeline. Returns null when the config, lookback, or cache is missing —
-	/// the scorer treats that as "skip the vol factor".</summary>
-	private static async Task<decimal?> TryComputeHistoricalVolAsync(string? ticker, DateTime asOf, CancellationToken cancellation)
+	/// factor as the live opener pipeline. Accepts the caller's shared HistoricalPriceCache so the
+	/// in-memory bar cache is reused across the regime and vol-fit fetches. Returns null when the
+	/// config, lookback, or cache is missing — the scorer treats that as "skip the vol factor".</summary>
+	private static async Task<decimal?> TryComputeHistoricalVolAsync(string ticker, DateTime asOf, HistoricalPriceCache priceCache, CancellationToken cancellation)
 	{
-		if (string.IsNullOrEmpty(ticker)) return null;
 		try
 		{
-			var path = Program.ResolvePath(AIConfigLoader.ConfigPath);
-			if (!File.Exists(path)) return null;
-			var cfg = System.Text.Json.JsonSerializer.Deserialize<AIConfig>(File.ReadAllText(path));
+			var cfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
 			if (cfg == null) return null;
-			if (AIConfigLoader.Validate(cfg) != null) return null;
-			if (cfg.Opener.Weights.VolatilityFit <= 0m) return null;
+			if (cfg.Opener.Weights.VolatilityFit <= 0m && cfg.Opener.Weights.IvRealizedPremium <= 0m) return null;
 
-			var cache = new HistoricalPriceCache();
-			var closes = await cache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
+			var closes = await priceCache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
 			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
 			return hv is decimal v && v > 0m ? v : null;
 		}
