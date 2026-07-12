@@ -72,6 +72,12 @@ internal static class RegimeAnalyzer
 		return b;
 	}
 
+	/// <summary>Convenience overload: blends pre-computed RegimeComponents at a given calendar DTE. Identical
+	/// to the six-scalar overload — exists so callers that already hold a RegimeComponents value don't need
+	/// to unpack it manually. OpenerConfig supplies the weights and curve parameters.</summary>
+	public static decimal BlendBias(RegimeComponents components, OpenerConfig cfg, int dteCalendar)
+		=> BlendBias(components.MacroBias, components.VixTermScore, cfg.Weights.VixTermStructure, components.Intraday?.Score, cfg.Weights.IntradayTape, dteCalendar, cfg.IntradayTapeDteCurve, cfg.BiasCalibrationLookbackDays, components.MoveSign);
+
 	/// <summary>The biasedMacro intermediate (daily bias blended with VIX term structure), exposed so the
 	/// analyze-regime breakdown can show the macro-after-VIX value separately from the intraday-blended final.</summary>
 	public static decimal BlendMacro(decimal macroBias, decimal? vixTermScore, decimal vixWeight)
