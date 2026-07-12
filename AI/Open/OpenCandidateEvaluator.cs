@@ -305,48 +305,18 @@ internal sealed class OpenCandidateEvaluator
 		var sentimentSnapshot = await FearGreedClient.FetchAsync(ctx.Now, cancellation, cacheOnly: _backtestMode);
 		decimal? sentimentScore = sentimentSnapshot?.Score;
 
-		// VIX term structure (VIX vs VIX9D): a market-wide regime signal shared across all tickers.
-		// Pulled once per scan from the daily-close cache. Both legs use the most-recent settled close
-		// strictly before ctx.Now, which keeps backtests lookahead-safe (same filter the technical-bias
-		// pipeline uses). Null on missing data — the blend collapses to macroBias.
-		decimal? vixTermScore = null;
-		if (cfg.Weights.VixTermStructure > 0m)
-		{
-			try
-			{
-				var vixCloses = await _priceCache.GetRecentClosesAsync("VIX", 1, ctx.Now, cancellation);
-				var vix9dCloses = await _priceCache.GetRecentClosesAsync("VIX9D", 1, ctx.Now, cancellation);
-				if (vixCloses.Count > 0 && vix9dCloses.Count > 0)
-					vixTermScore = VixTermStructureIndicator.Compute(vixCloses[^1], vix9dCloses[^1]);
-			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
-			{
-				Console.WriteLine($"VIX term structure: fetch failed: {ex.Message}");
-			}
-		}
 		var historicalVolByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		var shortHorizonHvByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-		// Bias calibration inputs per ticker: directional move sign over the lookback, plus the
-		// stability score (1 - chop_ratio) derived from sign-flips in daily returns. Both feed the
-		// per-ticker confidence calculation in the structure-scoring loop below.
-		var biasCalibByTicker = new Dictionary<string, (decimal MoveSign, decimal Stability)>(StringComparer.OrdinalIgnoreCase);
-		// Yesterday's settled close per ticker, captured during the closes prefetch. Consumed by the
-		// intraday tape signal's gap component below — null when intraday is disabled.
-		var prevCloseByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-		// Need closes whenever any of:
-		//   - 30-day vol-fit factor (HV vs IV)
-		//   - 3-day whipsaw factor (3d vs 30d realized vol)
-		//   - Bias-calibration factor (recent N-day move vs technical bias direction)
-		//   - Intraday tape signal's gap component (yesterday's close)
-		// Pulling once and computing all three is cheap.
-		var needCloses = cfg.Weights.VolatilityFit > 0m || cfg.Weights.Whipsaw > 0m || cfg.BiasCalibrationLookbackDays > 0 || cfg.Weights.IntradayTape > 0m;
+		// Load historical closes for the vol-fit and whipsaw factors. Bias-calibration (moveSign),
+		// VIX term structure, and intraday tape are now computed inside ComputeRegimeComponentsAsync
+		// so they're identical whether called from the scanner or wa analyze risk.
+		var needCloses = cfg.Weights.VolatilityFit > 0m || cfg.Weights.Whipsaw > 0m;
 		if (needCloses)
 		{
-			var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, Math.Max(4, cfg.BiasCalibrationLookbackDays + 2));
+			var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, 4);
 			foreach (var ticker in new[] { _config.Ticker })
 			{
 				var closes = await _priceCache.GetRecentClosesAsync(ticker, lookback, ctx.Now, cancellation);
-				if (closes.Count > 0) prevCloseByTicker[ticker] = closes[^1];
 				var hv30 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
 				if (hv30.HasValue && hv30.Value > 0m)
 					historicalVolByTicker[ticker] = hv30.Value;
@@ -356,42 +326,6 @@ internal sealed class OpenCandidateEvaluator
 					var hv3 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(recent);
 					if (hv3.HasValue && hv3.Value > 0m)
 						shortHorizonHvByTicker[ticker] = hv3.Value;
-				}
-				// Bias calibration: combine three reliability components, derived from closes:
-				//   1. Directional move sign over the lookback window (paired with bias sign in the loop)
-				//   2. Stability — fraction of consecutive same-sign daily returns (1 = monotonic trend,
-				//      0 = fully alternating chop). Stable trends → bias is more trustworthy.
-				// (Vol-regime component is handled per-structure-loop using the already-computed HV ratio.)
-				if (cfg.BiasCalibrationLookbackDays > 0 && closes.Count > cfg.BiasCalibrationLookbackDays)
-				{
-					var n = cfg.BiasCalibrationLookbackDays;
-					var recentClose = closes[^1];
-					var olderClose = closes[closes.Count - 1 - n];
-					if (olderClose > 0m)
-					{
-						var moveSign = recentClose > olderClose ? 1m : (recentClose < olderClose ? -1m : 0m);
-
-						// Sign-flip count over the lookback. Each consecutive same-sign daily return pair
-						// counts toward stability; opposite-sign pairs subtract from it. Zero-return days
-						// are ignored (don't double-penalize sideways days).
-						var dailySigns = new List<int>();
-						for (int i = closes.Count - n; i < closes.Count; i++)
-						{
-							var ret = closes[i] - closes[i - 1];
-							dailySigns.Add(ret > 0m ? 1 : (ret < 0m ? -1 : 0));
-						}
-						int sameSign = 0, oppSign = 0;
-						for (int i = 1; i < dailySigns.Count; i++)
-						{
-							if (dailySigns[i] == 0 || dailySigns[i - 1] == 0) continue;
-							if (dailySigns[i] == dailySigns[i - 1]) sameSign++;
-							else oppSign++;
-						}
-						var totalPairs = sameSign + oppSign;
-						var stability = totalPairs > 0 ? (decimal)sameSign / totalPairs : 0.5m;
-
-						biasCalibByTicker[ticker] = (moveSign, stability);
-					}
 				}
 			}
 		}
@@ -414,32 +348,13 @@ internal sealed class OpenCandidateEvaluator
 			ctx.TechnicalSignals.TryGetValue(tickerGroup.Key, out var biasSignal);
 			var macroBias = biasSignal?.Score ?? 0m;
 
-			// Intraday tape signal: fetch minute bars, derive open-to-now / gap / VWAP-deviation
-			// composite. Active in both live and backtest now that the BacktestRunner minute loop
-			// populates ctx.Now to the simulated minute (the backtest CSV cache reads
-			// data/intraday/<TICKER>/<date>.csv with no HTTP, so each scan tick reuses disk-cached
-			// bars). Skipped only when the weight is 0. The blend into bias happens PER CANDIDATE below
-			// (DTE-aware), not here, because the intraday tape's weight depends on each candidate's DTE.
-			IntradayBias? intradayBias = null;
-			if (cfg.Weights.IntradayTape > 0m)
-			{
-				prevCloseByTicker.TryGetValue(tickerGroup.Key, out var prevClose);
-				intradayBias = await ComputeIntradayBiasAsync(tickerGroup.Key, prevClose > 0m ? prevClose : (decimal?)null, cfg.Indicators.IntradayTape, ctx.Now, cancellation);
-			}
-
-			// Per-candidate bias: the daily macro bias blended with VIX term structure and the intraday
-			// tape (DTE-aware weight), then directional-agreement calibrated. RegimeAnalyzer.BlendBias is
-			// the single source of truth shared with `wa analyze regime` and the risk-diagnostic panel —
-			// keeping the math in one place is what lets a 0DTE candidate lean fully on the tape while a
-			// swing candidate stays anchored to macro, identically across the opener and the inspectors.
-			biasCalibByTicker.TryGetValue(tickerGroup.Key, out var tickerCalib);
-			decimal BiasForDte(int dteCalendar) => RegimeAnalyzer.BlendBias(
-				macroBias, vixTermScore, cfg.Weights.VixTermStructure,
-				intradayBias?.Score, cfg.Weights.IntradayTape, dteCalendar,
-				cfg.IntradayTapeDteCurve, cfg.BiasCalibrationLookbackDays, tickerCalib.MoveSign);
-
-			// Read-only capture for `wa analyze regime`: the raw inputs behind this ticker's BiasForDte.
-			lastRegimeComponents[tickerGroup.Key] = new RegimeAnalyzer.RegimeComponents(macroBias, vixTermScore, intradayBias, tickerCalib.MoveSign);
+			// Compute the complete per-ticker regime components — VIX term structure, bias-calibration
+			// moveSign, and intraday tape — via the shared static pipeline that wa analyze risk also calls.
+			// This is the single source of truth; having one code path guarantees identical bias values
+			// across the scanner and every inspector command.
+			var regimeComponents = await ComputeRegimeComponentsAsync(tickerGroup.Key, cfg, macroBias, ctx.Now, _priceCache, GetOrCreateIntradayCache(), includeCurrentBar: !_backtestMode, cancellation);
+			decimal BiasForDte(int dteCalendar) => RegimeAnalyzer.BlendBias(regimeComponents, cfg, dteCalendar);
+			lastRegimeComponents[tickerGroup.Key] = regimeComponents;
 
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
 			shortHorizonHvByTicker.TryGetValue(tickerGroup.Key, out var shortHorizonHv);
@@ -1039,60 +954,81 @@ internal sealed class OpenCandidateEvaluator
 		}
 	}
 
-	/// <summary>Fetches the configured-lookback minute bars for the strategy ticker (mapped to its
-	/// chart-source ticker if the config specifies one) and runs the indicator. Returns null on any
-	/// failure path (no bars, fetcher error, insufficient bars) so the caller falls back to
-	/// macro-only bias. Logs warnings rather than throwing — an intraday outage must never silence
-	/// the rest of the scan.</summary>
-	private async Task<IntradayBias?> ComputeIntradayBiasAsync(string strategyTicker, decimal? prevClose, OpenerIntradayTapeConfig tapeCfg, DateTime asOf, CancellationToken cancellation)
+	/// <summary>Computes the complete per-ticker regime signal components — VIX term structure,
+	/// directional-agreement moveSign, and intraday tape — alongside the caller-supplied macro bias.
+	/// Both the scanner and wa analyze risk call this same method, guaranteeing byte-identical bias
+	/// values regardless of which command surfaced the trade. Feed the result into
+	/// RegimeAnalyzer.BlendBias(components, cfg, dteCalendar) to get the DTE-aware blended bias.
+	///
+	/// includeCurrentBar: true = live (include the partial current minute), false = backtest (exclude
+	/// the forming bar to prevent one-minute look-ahead in a bar-start-convention tape).</summary>
+	internal static async Task<RegimeAnalyzer.RegimeComponents> ComputeRegimeComponentsAsync(string ticker, OpenerConfig cfg, decimal macroBias, DateTime asOf, HistoricalPriceCache priceCache, IntradayBarCache? intradayCache, bool includeCurrentBar, CancellationToken cancellation)
 	{
-		var cache = GetOrCreateIntradayCache();
-		if (cache == null) return null;
-
-		// Strategy ticker IS the cache key. The fetcher handles source-mapping internally — SPXW
-		// transparently merges SPX RTH + SPY pre-market in SPX scale, for example — and writes to
-		// data/intraday/<strategyTicker>/, keeping the on-disk layout aligned with the daily-close
-		// cache at data/history/<strategyTicker>.csv.
-		var chartTicker = strategyTicker;
-
-		var interval = ParseBarInterval(tapeCfg.BarIntervalCode);
-		// asOf is the simulator's ctx.Now in live or backtest — ET-naive (Kind=Unspecified), so
-		// convert to UTC explicitly. Live callers can pass DateTime.UtcNow with Kind=Utc and the
-		// conversion is a no-op.
-		var asOfUtc = asOf.Kind == DateTimeKind.Utc
-			? new DateTimeOffset(asOf, TimeSpan.Zero)
-			: new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(asOf, DateTimeKind.Unspecified), NyTz), TimeSpan.Zero);
-		// Live: include the boundary bar so the scanner sees the partial current minute (its open plus
-		// the price so far) — the most data available at decision time, and fillable at the live mark.
-		// Backtest: exclude it. A bar stamped at minute M (start-of-bar convention) covers M→M+1, which
-		// is still in the future at the M:00 decision, and the simulator fills at that bar's OPEN — so
-		// feeding its CLOSE into openToNow/VWAP here would be a one-minute look-ahead. Drop back to the
-		// last completed bar (M-1, whose close ≈ M's open, i.e. the price actually transactable at fill).
-		var toUtc = _backtestMode ? asOfUtc.AddTicks(-1) : asOfUtc;
-		var fromUtc = toUtc.AddMinutes(-Math.Max(60, tapeCfg.LookbackMinutes));
-
-		IReadOnlyList<MinuteBar> bars;
-		try
+		// VIX term structure (VIX vs VIX9D)
+		decimal? vixTermScore = null;
+		if (cfg.Weights.VixTermStructure > 0m)
 		{
-			bars = await cache.GetBarsAsync(chartTicker, fromUtc, toUtc, interval, tapeCfg.IncludeExtended, cancellation);
-		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
-		{
-			Console.WriteLine($"Intraday tape: bar fetch failed for {chartTicker}: {ex.Message}");
-			return null;
+			try
+			{
+				var vixCloses = await priceCache.GetRecentClosesAsync("VIX", 1, asOf, cancellation);
+				var vix9dCloses = await priceCache.GetRecentClosesAsync("VIX9D", 1, asOf, cancellation);
+				if (vixCloses.Count > 0 && vix9dCloses.Count > 0)
+					vixTermScore = VixTermStructureIndicator.Compute(vixCloses[^1], vix9dCloses[^1]);
+			}
+			catch (Exception ex) when (ex is not OperationCanceledException)
+			{
+				Console.WriteLine($"VIX term structure: fetch failed: {ex.Message}");
+			}
 		}
 
-		if (bars.Count == 0) return null;
-
-		var indicatorCfg = new IntradayTapeConfig
+		// Bias-calibration move sign and yesterday's close (intraday gap component)
+		decimal moveSign = 0m;
+		decimal? prevClose = null;
+		if (cfg.BiasCalibrationLookbackDays > 0 || cfg.Weights.IntradayTape > 0m)
 		{
-			MinBars = tapeCfg.MinBars,
-			GapWeight = tapeCfg.GapWeight,
-			OpenToNowWeight = tapeCfg.OpenToNowWeight,
-			VwapDeviationWeight = tapeCfg.VwapDeviationWeight,
-			IncludeExtended = tapeCfg.IncludeExtended,
-		};
-		return IntradayTapeIndicators.Compute(bars, prevClose, toUtc, indicatorCfg);
+			try
+			{
+				var n = cfg.BiasCalibrationLookbackDays;
+				var closes = await priceCache.GetRecentClosesAsync(ticker, Math.Max(4, n + 2), asOf, cancellation);
+				if (closes.Count > 0) prevClose = closes[^1];
+				if (n > 0 && closes.Count > n)
+				{
+					var recentClose = closes[^1];
+					var olderClose = closes[closes.Count - 1 - n];
+					if (olderClose > 0m)
+						moveSign = recentClose > olderClose ? 1m : (recentClose < olderClose ? -1m : 0m);
+				}
+			}
+			catch { }
+		}
+
+		// Intraday tape signal — strategy ticker is the cache key; the fetcher handles source-mapping
+		// internally (e.g. SPXW transparently uses SPX RTH bars). Null on any failure so the caller
+		// degrades gracefully to macro+VIX-term bias.
+		IntradayBias? intradayBias = null;
+		if (cfg.Weights.IntradayTape > 0m && intradayCache != null)
+		{
+			try
+			{
+				var tapeCfg = cfg.Indicators.IntradayTape;
+				var interval = ParseBarInterval(tapeCfg.BarIntervalCode);
+				var asOfUtc = asOf.Kind == DateTimeKind.Utc
+					? new DateTimeOffset(asOf, TimeSpan.Zero)
+					: new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(asOf, DateTimeKind.Unspecified), NyTz), TimeSpan.Zero);
+				// Live: include boundary bar (partial current minute). Backtest: exclude (look-ahead guard).
+				var toUtc = includeCurrentBar ? asOfUtc : asOfUtc.AddTicks(-1);
+				var fromUtc = toUtc.AddMinutes(-Math.Max(60, tapeCfg.LookbackMinutes));
+				var bars = await intradayCache.GetBarsAsync(ticker, fromUtc, toUtc, interval, tapeCfg.IncludeExtended, cancellation);
+				if (bars.Count > 0)
+					intradayBias = IntradayTapeIndicators.Compute(bars, prevClose, toUtc, new IntradayTapeConfig { MinBars = tapeCfg.MinBars, GapWeight = tapeCfg.GapWeight, OpenToNowWeight = tapeCfg.OpenToNowWeight, VwapDeviationWeight = tapeCfg.VwapDeviationWeight, IncludeExtended = tapeCfg.IncludeExtended });
+			}
+			catch (Exception ex) when (ex is not OperationCanceledException)
+			{
+				Console.WriteLine($"Intraday tape: bar fetch failed for {ticker}: {ex.Message}");
+			}
+		}
+
+		return new RegimeAnalyzer.RegimeComponents(macroBias, vixTermScore, intradayBias, moveSign);
 	}
 
 	private IntradayBarCache? GetOrCreateIntradayCache()
