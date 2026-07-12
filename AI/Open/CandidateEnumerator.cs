@@ -109,14 +109,36 @@ internal static class CandidateEnumerator
 		return available.Select(MarketCalendar.PreviousOpenOnOrBefore).Where(d => d >= start && d <= end).Distinct().OrderBy(d => d);
 	}
 
+	private static IEnumerable<DateTime> FilterShortExpiries(IEnumerable<DateTime> exps, OpenerConfig cfg)
+	{
+		if (cfg.AllowShortDailies && cfg.AllowShortWeeklies && cfg.AllowShortMonthlies) return exps;
+		return exps.Where(d => {
+			bool isMonthly = OpenerExpiryHelpers.IsMonthlyExpiry(d);
+			bool isWeekly = !isMonthly && OpenerExpiryHelpers.IsWeekEndingExpiry(d);
+			bool isDaily = !isWeekly && !isMonthly;
+			return (isDaily && cfg.AllowShortDailies) || (isWeekly && cfg.AllowShortWeeklies) || (isMonthly && cfg.AllowShortMonthlies);
+		});
+	}
+
+	private static IEnumerable<DateTime> FilterLongExpiries(IEnumerable<DateTime> exps, OpenerConfig cfg)
+	{
+		if (cfg.AllowLongDailies && cfg.AllowLongWeeklies && cfg.AllowLongMonthlies) return exps;
+		return exps.Where(d => {
+			bool isMonthly = OpenerExpiryHelpers.IsMonthlyExpiry(d);
+			bool isWeekly = !isMonthly && OpenerExpiryHelpers.IsWeekEndingExpiry(d);
+			bool isDaily = !isWeekly && !isMonthly;
+			return (isDaily && cfg.AllowLongDailies) || (isWeekly && cfg.AllowLongWeeklies) || (isMonthly && cfg.AllowLongMonthlies);
+		});
+	}
+
 	private static IEnumerable<CandidateSkeleton> EnumerateCalendarLike(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, OpenerCalendarLikeConfig sCfg, OpenStructureKind kind, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		// Bound the expiry cross-product (same cap as DiagonalVertical): on daily-expiry chains (SPXW) the
 		// short window holds ~7 expiries and the long window ~20, and the full product × strikes × sides feeds
 		// thousands of candidates per tick into the numerical breakeven scan — the per-minute scoring grinds.
 		// Nearest 2 short × nearest 3 long keeps it tractable and matches the DiagonalVertical breadth.
-		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
-		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
+		var shortExps = FilterShortExpiries(WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax), cfg).OrderBy(e => e).Take(2).ToList();
+		var longExps = FilterLongExpiries(MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax), cfg).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = FallbackStep(spot);
@@ -310,8 +332,8 @@ internal static class CandidateEnumerator
 		// short window holds ~7 expiries and the long window ~20, and the full product × strikes × sides feeds
 		// thousands of candidates per tick into the numerical breakeven scan — the per-minute scoring grinds.
 		// Nearest 2 short × nearest 3 long keeps it tractable and matches the DiagonalVertical breadth.
-		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
-		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
+		var shortExps = FilterShortExpiries(WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax), cfg).OrderBy(e => e).Take(2).ToList();
+		var longExps = FilterLongExpiries(MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax), cfg).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = FallbackStep(spot);
@@ -356,8 +378,8 @@ internal static class CandidateEnumerator
 		// short window holds ~7 expiries and the long window ~20, and the full product × strikes × sides feeds
 		// thousands of candidates per tick into the numerical breakeven scan — the per-minute scoring grinds.
 		// Nearest 2 short × nearest 3 long keeps it tractable and matches the DiagonalVertical breadth.
-		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
-		var longExps = MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
+		var shortExps = FilterShortExpiries(WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax), cfg).OrderBy(e => e).Take(2).ToList();
+		var longExps = FilterLongExpiries(MonthlyExpiriesInRange(availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax), cfg).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = FallbackStep(spot);
@@ -412,8 +434,8 @@ internal static class CandidateEnumerator
 		// Bound the expiry cross-product: a diagonal uses the nearest short expiry and a small set of long
 		// expiries, not every pair. Without this the candidate count explodes on daily-expiry chains (SPXW)
 		// and the per-minute scoring grinds. Nearest 2 short × nearest 3 long keeps it tractable.
-		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
-		var longExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
+		var shortExps = FilterShortExpiries(WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax), cfg).OrderBy(e => e).Take(2).ToList();
+		var longExps = FilterLongExpiries(WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax), cfg).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
@@ -521,8 +543,8 @@ internal static class CandidateEnumerator
 	private static IEnumerable<CandidateSkeleton> EnumerateCalendarVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
 	{
 		var sCfg = cfg.Structures.CalendarVertical;
-		var shortExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax).OrderBy(e => e).Take(2).ToList();
-		var longExps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax).OrderBy(e => e).Take(3).ToList();
+		var shortExps = FilterShortExpiries(WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.ShortDteMin, sCfg.ShortDteMax), cfg).OrderBy(e => e).Take(2).ToList();
+		var longExps = FilterLongExpiries(WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax), cfg).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;

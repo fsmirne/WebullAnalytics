@@ -141,10 +141,16 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		var p = ParsingHelpers.ParseOptionSymbol(sym);
 		if (p is null || p.CallPut is not ("C" or "P")) return q;
 		if (!spots.TryGetValue(p.Root, out var spot) || spot <= 0m) return q;
-		var t = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, p.ExpiryDate);
+		// Use elapsed fractional time to 16:00 on expiry day — identical to TryMarketImpliedIv. The older
+		// OpenerExpiryHelpers.TimeYearsToExpiry truncates to integer calendar days for multi-day options,
+		// which causes a ~5% t undercount for short-dated legs (e.g. 5DTE at 10am → 5 vs 5.25 days) and
+		// back-solves an IV ~10-15% too high relative to the analyze-trade path.
+		var t = (p.ExpiryDate.Date + OptionMath.MarketClose - asOf).TotalDays / 365.0;
 		if (t <= 0) return q;
 		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
 		if (mid <= 0m) return q;
+		// Skip deep-ITM legs whose bid doesn't cover intrinsic: the back-solved IV is noise-dominated.
+		if (q.Bid.Value <= OptionMath.Intrinsic(spot, p.Strike, p.CallPut)) return q;
 		var iv = OptionMath.ImpliedVol(spot, p.Strike, t, OptionMath.RiskFreeRate, mid, p.CallPut);
 		return q with { ImpliedVolatility = iv, VendorImpliedVolatility = q.VendorImpliedVolatility ?? q.ImpliedVolatility };
 	}

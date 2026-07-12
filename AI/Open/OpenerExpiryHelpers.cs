@@ -72,6 +72,21 @@ internal static class OpenerExpiryHelpers
 	}
 
 	/// <summary>Returns the 3rd-Friday date in the given month. No holiday adjustment — standard monthly expiries.</summary>
+	/// <summary>True when <paramref name="expiry"/> is the last open trading day of its Mon–Sun week — a weekly
+	/// or monthly expiry, not a Mon–Thu daily. Normally that's Friday, but it correctly keeps a holiday-shifted
+	/// expiry (e.g. Thursday 2026-06-18 when Friday 06-19 is Juneteenth).</summary>
+	public static bool IsWeekEndingExpiry(DateTime expiry)
+	{
+		for (var d = expiry.AddDays(1); d.DayOfWeek != DayOfWeek.Monday; d = d.AddDays(1))
+			if (MarketCalendar.IsOpen(d)) return false;
+		return true;
+	}
+
+	/// <summary>True when <paramref name="expiry"/> is the holiday-adjusted 3rd-Friday monthly expiry for its
+	/// month (i.e., it equals <see cref="ThirdFridayInMonth"/> for the same year/month).</summary>
+	public static bool IsMonthlyExpiry(DateTime expiry) =>
+		IsWeekEndingExpiry(expiry) && expiry.Date == ThirdFridayInMonth(expiry.Year, expiry.Month);
+
 	public static DateTime ThirdFridayInMonth(int year, int month)
 	{
 		var first = new DateTime(year, month, 1);
