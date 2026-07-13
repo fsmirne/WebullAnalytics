@@ -2,6 +2,7 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 using WebullAnalytics.AI.Output;
+using WebullAnalytics.Api;
 using WebullAnalytics.IO;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Report;
@@ -449,11 +450,15 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 		var tickerSet = config.TickerSet();
 		var now = DateTime.Now;
+		var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
 
 		var priceCache = new Replay.HistoricalPriceCache();
 
 		var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
 		var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
+		// Apply before FetchQuotesWithHypotheticals: LiveQuoteSource.BackSolveIvFromMid reads OptionMath.RiskFreeRate
+		// when re-calibrating IV from the NBBO mid; using the same live rate here keeps scan in sync with analyze risk.
+		YahooOptionsClient.ApplyToOptionMath(await riskFreeTask);
 
 		var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
 
@@ -594,11 +599,14 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var asOf = settings.ResolveAsOf();
 		var tickerSet = config.TickerSet();
 
+		var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
 		var bars = new Backtest.HistoricalBarCache(offline: true);
 		var smile = new Backtest.SmileIndexCache(offline: true);
 		var ivProvider = new Backtest.BacktestIVProvider(bars, smile: smile);
 		var dividendsByRoot = await new Backtest.HistoricalDividendCache(offline: true).BuildScheduleMapAsync(tickerSet, cancellation);
-		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, spotOverrides: spotOverrides, dividendsByRoot: dividendsByRoot);
+		var liveRate = await riskFreeTask;
+		YahooOptionsClient.ApplyToOptionMath(liveRate);
+		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: liveRate ?? 0.036, spotOverrides: spotOverrides, dividendsByRoot: dividendsByRoot);
 		var priceCache = new Replay.HistoricalPriceCache(bars);
 
 		// Cash sizing: prefer the live broker balance so proposals reflect what the user could actually

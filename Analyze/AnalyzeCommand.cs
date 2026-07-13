@@ -545,12 +545,7 @@ internal static class AnalyzeCommon
 			WebullAnalytics.Utils.Log.Debug("Webull: fetching option chain data for roll analysis...");
 			(quotes, underlyingPrices) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
 
-			var riskFreeRate = await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
-			if (riskFreeRate.HasValue)
-			{
-				OptionMath.RiskFreeRate = riskFreeRate.Value;
-				WebullAnalytics.Utils.Log.Debug($"Risk-free rate (13-week T-bill): {riskFreeRate.Value:P2}");
-			}
+			YahooOptionsClient.ApplyToOptionMath(await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation));
 		}
 		catch (Exception ex)
 		{
