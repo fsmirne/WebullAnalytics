@@ -349,13 +349,18 @@ internal static class OptionMath
 				results.Add(curr.UnderlyingPrice);
 				continue;
 			}
-			if ((curr.PnL > 0 && next.PnL < 0) || (curr.PnL < 0 && next.PnL > 0))
+			// When a continuous pnlFunc is available, use it directly for sign-change detection so
+			// that 2-decimal rounding in the ladder (from BuildPriceLadder) does not shift the bracket
+			// and produce a different break-even than CandidateScorer, which scans the unrounded curve.
+			var pCurr = pnlFunc != null ? pnlFunc(curr.UnderlyingPrice) : curr.PnL;
+			var pNext = pnlFunc != null ? pnlFunc(next.UnderlyingPrice) : next.PnL;
+			if ((pCurr > 0 && pNext < 0) || (pCurr < 0 && pNext > 0))
 			{
 				if (pnlFunc != null)
 					results.Add(BisectBreakEven(pnlFunc, curr.UnderlyingPrice, next.UnderlyingPrice));
 				else
 				{
-					var fraction = Math.Abs(curr.PnL) / (Math.Abs(curr.PnL) + Math.Abs(next.PnL));
+					var fraction = Math.Abs(pCurr) / (Math.Abs(pCurr) + Math.Abs(pNext));
 					results.Add(Math.Round(curr.UnderlyingPrice + fraction * (next.UnderlyingPrice - curr.UnderlyingPrice), 2));
 				}
 			}
