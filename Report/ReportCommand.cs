@@ -309,12 +309,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 					dividends = DividendScheduleBuilder.Build(calendar, underlyingPrices, eventsCfg);
 				}
 
-				var riskFreeRate = await riskFreeTask;
-				if (riskFreeRate.HasValue)
-				{
-					OptionMath.RiskFreeRate = riskFreeRate.Value;
-					WebullAnalytics.Utils.Log.Debug($"Risk-free rate (13-week T-bill): {riskFreeRate.Value:P2}");
-				}
+				YahooOptionsClient.ApplyToOptionMath(await riskFreeTask);
 			}
 			catch (Exception ex)
 			{

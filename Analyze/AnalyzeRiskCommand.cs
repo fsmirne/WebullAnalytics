@@ -126,8 +126,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		// Sync the risk-free rate with what RunReportPipeline (analyze trade) uses so both commands calibrate
 		// the long-leg IV against the same rate; a stale default here produces a different calibrated IV,
 		// which shifts the break-evens by ~$0.01 near the sign-change boundary.
-		var fetchedRate = await riskFreeTask;
-		if (fetchedRate.HasValue) OptionMath.RiskFreeRate = fetchedRate.Value;
+		YahooOptionsClient.ApplyToOptionMath(await riskFreeTask);
 
 		// Re-base IV to the live mid surface (default; --calibrated false shows raw vendor IV for debugging).
 		// A --spot override makes the leg mids stale, so the back-solve would be nonsense — skip it then.

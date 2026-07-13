@@ -19,6 +19,15 @@ internal static class YahooOptionsClient
 	/// chart fetch so index roots resolve to the real index rather than an unrelated OTC quote.</summary>
 	internal static string ToYahooTicker(string root) => YahooTickerMap.TryGetValue(root, out var mapped) ? mapped : root;
 
+	/// <summary>Applies a fetched risk-free rate to <see cref="Pricing.OptionMath.RiskFreeRate"/> and logs it.
+	/// No-op when <paramref name="rate"/> is null (fetch failed gracefully).</summary>
+	internal static void ApplyToOptionMath(double? rate)
+	{
+		if (!rate.HasValue) return;
+		Pricing.OptionMath.RiskFreeRate = rate.Value;
+		Utils.Log.Debug($"Risk-free rate (13-week T-bill): {rate.Value:P2}");
+	}
+
 	/// <summary>
 	/// Fetches the 13-week T-bill yield (^IRX) from Yahoo Finance as a risk-free rate.
 	/// Returns the rate as a decimal (e.g., 0.043 for 4.3%), or null on failure.
