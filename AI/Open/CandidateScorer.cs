@@ -1844,7 +1844,13 @@ internal static class CandidateScorer
 			var pnlNext = Pnl(sNext);
 			if ((pnlPrev < 0m && pnlNext >= 0m) || (pnlPrev >= 0m && pnlNext < 0m))
 			{
-				var root = OptionMath.BisectBreakEven(Pnl, sPrev, sNext);
+				// Snap to 0.01-aligned boundaries so NarrowBracket scans the same grid points as the
+				// analyzer's per-dollar ladder, ensuring both engines find the same sub-bracket and
+				// produce identical display values even when the true BE lands near a 0.005 boundary.
+				var snappedPrev = Math.Floor(sPrev / 0.01m) * 0.01m;
+				var snappedNext = Math.Ceiling(sNext / 0.01m) * 0.01m;
+				var (nA, nB) = OptionMath.NarrowBracket(Pnl, snappedPrev, snappedNext);
+				var root = OptionMath.BisectBreakEven(Pnl, nA, nB);
 				if (lower == null) lower = root;
 				else upper = root;
 				if (upper != null) break;

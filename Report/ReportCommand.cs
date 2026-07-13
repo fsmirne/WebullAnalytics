@@ -236,7 +236,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		return (trades, feeLookup, 0);
 	}
 
-	internal static async Task<int> RunReportPipeline(ReportSettings settings, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal>? feeLookup, CancellationToken cancellation)
+	internal static async Task<int> RunReportPipeline(ReportSettings settings, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal>? feeLookup, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null)
 	{
 		var rootConfig = Program.LoadAppConfigRoot();
 		var autoExpandTerminal = rootConfig != null && rootConfig.TryGetBool("autoExpandTerminal", out var ae) && ae;
@@ -264,8 +264,8 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		// current IV / spot / theta. Failures (no api-config.json, expired headers, network blip) degrade
 		// gracefully: the report falls through to the 1D price ladder. Skipped when there are no positions
 		// to enrich.
-		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = null;
-		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
+		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = preloadedQuotes;
+		IReadOnlyDictionary<string, decimal>? underlyingPrices = preloadedUnderlyingPrices;
 		IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends = null;
 		if (positionRows.Count > 0)
 		{
@@ -273,37 +273,40 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			{
 				var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
 
-				var configPath = Program.ResolvePath(Program.ApiConfigPath);
-				if (!File.Exists(configPath))
+				if (preloadedQuotes == null)
 				{
-					Console.WriteLine("Note: api-config.json not found — skipping live chain fetch. Run 'sniff' first to enable the time-decay grid.");
-				}
-				else
-				{
-					var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-					if (config == null || config.Webull.Headers.Count == 0)
+					var configPath = Program.ResolvePath(Program.ApiConfigPath);
+					if (!File.Exists(configPath))
 					{
-						Console.WriteLine("Note: api-config.json has no headers — skipping live chain fetch. Run 'sniff' to capture them.");
+						Console.WriteLine("Note: api-config.json not found — skipping live chain fetch. Run 'sniff' first to enable the time-decay grid.");
 					}
 					else
 					{
-						WebullAnalytics.Utils.Log.Debug("Webull: fetching option chain data...");
-						var webullData = await WebullOptionsClient.FetchOptionQuotesAsync(config, positionRows, cancellation);
-						optionQuotesBySymbol = webullData.OptionQuotes;
-						underlyingPrices = webullData.UnderlyingPrices;
-						WebullAnalytics.Utils.Log.Debug($"Webull: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
-
-						// Dividend schedule for the held tickers, so the theoretical time-decay grid prices
-						// legs on the ex-dividend-adjusted forward (a long calendar leg trading through an
-						// ex-date is otherwise overpriced). cacheOnly:false refreshes the 12h event cache —
-						// this is also what keeps data/event-cache warm for tickers the opener never scans.
-						if (underlyingPrices.Count > 0)
+						var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+						if (config == null || config.Webull.Headers.Count == 0)
 						{
-							var eventsCfg = new OpenerEventsConfig();
-							var calendar = await EventCalendarLoader.LoadAsync(underlyingPrices.Keys.ToList(), eventsCfg, EvaluationDate.Today, cancellation, cacheOnly: false);
-							dividends = DividendScheduleBuilder.Build(calendar, underlyingPrices, eventsCfg);
+							Console.WriteLine("Note: api-config.json has no headers — skipping live chain fetch. Run 'sniff' to capture them.");
+						}
+						else
+						{
+							WebullAnalytics.Utils.Log.Debug("Webull: fetching option chain data...");
+							var webullData = await WebullOptionsClient.FetchOptionQuotesAsync(config, positionRows, cancellation);
+							optionQuotesBySymbol = webullData.OptionQuotes;
+							underlyingPrices = webullData.UnderlyingPrices;
+							WebullAnalytics.Utils.Log.Debug($"Webull: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
 						}
 					}
+				}
+
+				// Dividend schedule for the held tickers, so the theoretical time-decay grid prices
+				// legs on the ex-dividend-adjusted forward (a long calendar leg trading through an
+				// ex-date is otherwise overpriced). cacheOnly:false refreshes the 12h event cache —
+				// this is also what keeps data/event-cache warm for tickers the opener never scans.
+				if (underlyingPrices != null && underlyingPrices.Count > 0)
+				{
+					var eventsCfg = new OpenerEventsConfig();
+					var calendar = await EventCalendarLoader.LoadAsync(underlyingPrices.Keys.ToList(), eventsCfg, EvaluationDate.Today, cancellation, cacheOnly: false);
+					dividends = DividendScheduleBuilder.Build(calendar, underlyingPrices, eventsCfg);
 				}
 
 				var riskFreeRate = await riskFreeTask;
