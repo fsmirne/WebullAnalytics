@@ -113,9 +113,11 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		}
 
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
+		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
 		if (AnalyzeCommon.NeedsMarketPrices(settings.Spec))
 		{
-			quotes = await AnalyzeCommon.FetchQuotesForSymbols(settings.Spec, cancellation);
+			var symbols = AnalyzeCommon.ParseAllLegs(settings.Spec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(symbols, cancellation);
 			if (quotes == null) return 1;
 		}
 
@@ -128,7 +130,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : DateTime.Now;
 		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(settings.Spec, maxSeq, baseTime, quotes));
 
-		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation);
+		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation, preloadedQuotes: quotes, preloadedUnderlyingPrices: underlyingPrices);
 	}
 
 	/// <summary>--proposal: rebuild the <c>&lt;spec&gt;</c> from a stored proposal snapshot — its legs at the entry

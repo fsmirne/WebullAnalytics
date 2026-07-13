@@ -357,7 +357,11 @@ internal static class OptionMath
 			if ((pCurr > 0 && pNext < 0) || (pCurr < 0 && pNext > 0))
 			{
 				if (pnlFunc != null)
-					results.Add(BisectBreakEven(pnlFunc, curr.UnderlyingPrice, next.UnderlyingPrice));
+				{
+					var (nA, nB) = NarrowBracket(pnlFunc, curr.UnderlyingPrice, next.UnderlyingPrice);
+					var beVal = BisectBreakEven(pnlFunc, nA, nB);
+					results.Add(beVal);
+				}
 				else
 				{
 					var fraction = Math.Abs(pCurr) / (Math.Abs(pCurr) + Math.Abs(pNext));
@@ -387,6 +391,25 @@ internal static class OptionMath
 			else { b = mid; }
 		}
 		return (a + b) / 2m;
+	}
+
+	/// <summary>Narrows a coarse bracket [a, b] to a ≤$0.01 interval by scanning fn at $0.01 steps so that
+	/// both break-even engines start bisection from the same bracket and produce an identical display value.
+	/// Without this, the scorer (120-step ±60% scan) and the analyzer (strike-step ladder) find different coarse
+	/// brackets; bisecting from different brackets on the same continuous curve gives results that differ by
+	/// ~$0.0001–$0.0002 — invisible in absolute terms but enough to straddle a $0.005 display boundary and show
+	/// $22.21 vs $22.22. Returns (a, b) unchanged when the bracket is already ≤$0.01.</summary>
+	internal static (decimal a, decimal b) NarrowBracket(Func<decimal, decimal> fn, decimal a, decimal b)
+	{
+		if (b - a <= 0.01m) return (a, b);
+		var pA = fn(a);
+		for (var x = a + 0.01m; x < b; x += 0.01m)
+		{
+			var pX = fn(x);
+			if ((pA > 0m && pX < 0m) || (pA < 0m && pX > 0m)) return (x - 0.01m, x);
+			pA = pX;
+		}
+		return (a, b);
 	}
 
 	// --- Implied Volatility ---

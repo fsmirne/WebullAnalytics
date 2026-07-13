@@ -4,6 +4,7 @@ using Spectre.Console.Rendering;
 using System.ComponentModel;
 using System.Globalization;
 using WebullAnalytics.AI;
+using WebullAnalytics.Api;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.AI.RiskDiagnostics;
@@ -110,6 +111,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var parsedLegs = AnalyzeRiskSettings.ParseRiskLegs(settings.Spec);
 		var symbols = parsedLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
+		var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
 		var (quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(symbols, cancellation);
 		if (quotes == null) return 1;
 
@@ -120,6 +122,12 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or run 'wa sniff' to refresh Webull headers.");
 			return 1;
 		}
+
+		// Sync the risk-free rate with what RunReportPipeline (analyze trade) uses so both commands calibrate
+		// the long-leg IV against the same rate; a stale default here produces a different calibrated IV,
+		// which shifts the break-evens by ~$0.01 near the sign-change boundary.
+		var fetchedRate = await riskFreeTask;
+		if (fetchedRate.HasValue) OptionMath.RiskFreeRate = fetchedRate.Value;
 
 		// Re-base IV to the live mid surface (default; --calibrated false shows raw vendor IV for debugging).
 		// A --spot override makes the leg mids stale, so the back-solve would be nonsense — skip it then.
