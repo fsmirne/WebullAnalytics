@@ -61,7 +61,6 @@ internal sealed record RiskDiagnosticLegQuote(
 	decimal? Ask,
 	decimal? ImpliedVolatility,
 	decimal? HistoricalVolatility,
-	decimal? ImpliedVolatility5Day,
 	long? OpenInterest,
 	long? Volume,
 	// The vendor's originally-reported IV when ImpliedVolatility above was recalibrated to the NBBO-mid

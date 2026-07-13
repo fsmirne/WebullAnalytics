@@ -3,6 +3,7 @@ using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
 using WebullAnalytics.AI.Output;
+using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
@@ -114,9 +115,9 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var stopAt = ComputeStopTime(settings);
 
 		AIContext.ConfigureRawQuoteDump(settings.Dump);
-		var source = (settings.Source ?? config.QuoteSource).ToLowerInvariant();
+		var vendor = LiveQuoteSource.ResolveVendor(settings.Vendor);
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
-		var quotes = AIContext.BuildLiveQuoteSource(config, source);
+		var quotes = AIContext.BuildLiveQuoteSource(vendor);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 		var tickerSet = config.TickerSet();
 
@@ -135,7 +136,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
 		}
 
-		AnsiConsole.MarkupLine($"[bold]ai watch[/] ticker={config.Ticker} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss} source={source}");
+		AnsiConsole.MarkupLine($"[bold]ai watch[/] ticker={config.Ticker} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss} source={LiveQuoteSource.VendorName(vendor)}");
 
 		// Mirror `wa ai scan`'s debug banner so watch is never silent in debug mode: when the opener
 		// finds nothing the only other debug output (the per-structure breakdown) doesn't fire, leaving

@@ -89,12 +89,12 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 		var now = DateTime.Now;
 		AIContext.ConfigureRawQuoteDump(settings.Dump);
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
-		// Honor --source / the config's vendor so the numbers actually match `wa ai scan` (this was silently
-		// pinned to Webull before). Premarket note: Schwab's chain books are frozen until the bell while
-		// Webull's GTH books are live until 09:15 ET — `--source webull` gives the quote-coherent premarket read.
-		var source = (settings.Source ?? config.QuoteSource).ToLowerInvariant();
-		var quotes = AIContext.BuildLiveQuoteSource(config, source);
-		AnsiConsole.MarkupLine($"[dim]quote source: {source}[/]");
+		// Honor --vendor / config.json's top-level `vendor` so the numbers actually match `wa ai scan` (this was
+		// silently pinned to Webull before). Premarket note: Schwab's chain books are frozen until the bell while
+		// Webull's GTH books are live until 09:15 ET — `--vendor webull` gives the quote-coherent premarket read.
+		var vendor = LiveQuoteSource.ResolveVendor(settings.Vendor);
+		var quotes = AIContext.BuildLiveQuoteSource(vendor);
+		AnsiConsole.MarkupLine($"[dim]quote source: {LiveQuoteSource.VendorName(vendor)}[/]");
 		var tickerSet = config.TickerSet();
 		var priceCache = new HistoricalPriceCache();
 

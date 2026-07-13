@@ -43,7 +43,6 @@ internal static class RiskDiagnosticProbeBuilder
 					Ask: q.Ask,
 					ImpliedVolatility: q.ImpliedVolatility,
 					HistoricalVolatility: q.HistoricalVolatility,
-					ImpliedVolatility5Day: q.ImpliedVolatility5Day,
 					OpenInterest: q.OpenInterest,
 					Volume: q.Volume,
 					VendorImpliedVolatility: q.VendorImpliedVolatility));

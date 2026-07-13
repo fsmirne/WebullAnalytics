@@ -411,12 +411,11 @@ internal static class WebullOptionsClient
 						Bid: GetBestPrice(contract, "bidList"),
 						Ask: GetBestPrice(contract, "askList"),
 						Change: GetDecimal(contract, "change"),
-						PercentChange: GetDecimal(contract, "changeRatio"),
+						PercentChange: GetDecimal(contract, "changeRatio") * 100m,   // changeRatio is a fraction (0.18 = 18%); scale to the percent units the display/Schwab use
 						Volume: GetLong(contract, "volume"),
 						OpenInterest: GetLong(contract, "openInterest"),
 						ImpliedVolatility: GetDecimal(contract, "impVol"),
 						HistoricalVolatility: GetDecimal(contract, "hiv"),
-						ImpliedVolatility5Day: GetDecimal(contract, "iv5"),
 						BidSize: GetBestSize(contract, "bidList"),
 						AskSize: GetBestSize(contract, "askList")
 					));
@@ -465,12 +464,11 @@ internal static class WebullOptionsClient
 					Bid: GetBestPrice(contract, "bidList"),
 					Ask: GetBestPrice(contract, "askList"),
 					Change: GetDecimal(contract, "change"),
-					PercentChange: GetDecimal(contract, "changeRatio"),
+					PercentChange: GetDecimal(contract, "changeRatio") * 100m,   // changeRatio is a fraction (0.18 = 18%); scale to the percent units the display/Schwab use
 					Volume: GetLong(contract, "volume"),
 					OpenInterest: GetLong(contract, "openInterest"),
 					ImpliedVolatility: GetDecimal(contract, "impVol"),
 					HistoricalVolatility: GetDecimal(contract, "hiv"),
-					ImpliedVolatility5Day: GetDecimal(contract, "iv5"),
 					BidSize: GetBestSize(contract, "bidList"),
 					AskSize: GetBestSize(contract, "askList")
 				));

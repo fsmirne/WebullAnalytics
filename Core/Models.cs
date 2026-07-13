@@ -173,7 +173,6 @@ public record OptionContractQuote(
 	long? OpenInterest,
 	decimal? ImpliedVolatility,
 	decimal? HistoricalVolatility = null,
-	decimal? ImpliedVolatility5Day = null,
 	long? BidSize = null,
 	long? AskSize = null,
 	// The vendor's originally-reported IV, preserved when ImpliedVolatility is recalibrated to the NBBO-mid

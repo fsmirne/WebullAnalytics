@@ -6,6 +6,8 @@ using System.Text.Json;
 using WebullAnalytics.AI;
 using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.Replay;
+using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Analyze;
 using WebullAnalytics.Api;
 using WebullAnalytics.IO;
 using WebullAnalytics.Positions;
@@ -16,10 +18,14 @@ namespace WebullAnalytics.Report;
 
 class ReportSettings : CommandSettings
 {
-	[Description("Data source: 'api' (JSONL from API, default) or 'export' (Webull CSV exports)")]
+	[Description("Trade-data source: 'api' (JSONL from API, default) or 'export' (Webull CSV exports)")]
 	[CommandOption("--source")]
 	[DefaultValue("api")]
 	public string Source { get; set; } = "api";
+
+	[Description("Live option-chain quote vendor: 'webull' (sniffed-session chain) or 'schwab' (chains-API NBBO; needs `wa schwab login`). When omitted, the top-level `vendor` in config.json applies (default webull). Overrides it for this run.")]
+	[CommandOption("--vendor <VENDOR>")]
+	public string? Vendor { get; set; }
 
 	[Description("Include only trades on or after this date (YYYY-MM-DD format)")]
 	[CommandOption("--since")]
@@ -135,6 +141,9 @@ class ReportSettings : CommandSettings
 		if (source is not ("api" or "export"))
 			return ValidationResult.Error("--source must be 'api' or 'export'");
 
+		if (Vendor != null && Vendor.Trim().ToLowerInvariant() is not ("webull" or "schwab"))
+			return ValidationResult.Error($"--vendor: expected webull or schwab, got '{Vendor}'");
+
 		var format = OutputFormat.ToLowerInvariant();
 		if (format is not ("console" or "excel" or "text"))
 			return ValidationResult.Error("--output must be 'console', 'excel', or 'text'");
@@ -236,6 +245,14 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		return (trades, feeLookup, 0);
 	}
 
+	/// <summary>Extracts the distinct OCC option symbols from a set of position rows (equity rows have no
+	/// option MatchKey and are skipped). Used to window the Schwab chain fetch to the held legs.</summary>
+	private static List<string> OptionSymbolsFromRows(IReadOnlyList<PositionRow> rows) =>
+		rows.Where(r => r.MatchKey != null && MatchKeys.TryGetOptionSymbol(r.MatchKey, out _))
+			.Select(r => { MatchKeys.TryGetOptionSymbol(r.MatchKey!, out var sym); return sym; })
+			.Distinct(StringComparer.OrdinalIgnoreCase)
+			.ToList();
+
 	internal static async Task<int> RunReportPipeline(ReportSettings settings, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal>? feeLookup, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null)
 	{
 		var rootConfig = Program.LoadAppConfigRoot();
@@ -267,35 +284,27 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		IReadOnlyDictionary<string, OptionContractQuote>? optionQuotesBySymbol = preloadedQuotes;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = preloadedUnderlyingPrices;
 		IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends = null;
+		var vendor = LiveQuoteSource.ResolveVendor(settings.Vendor);
 		if (positionRows.Count > 0)
 		{
 			try
 			{
 				var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
 
-				if (preloadedQuotes == null)
+				// Fetch the full open-position chain from the selected vendor via the single vendor seam, and use
+				// it as authoritative. analyze trade preloads quotes for the spec legs only (to price @MID) and
+				// passes them here; those preloaded quotes DON'T cover held legs the spec omits (e.g. the far leg
+				// of an existing diagonal) and carry such legs as un-batched stubs, so overlaying them would
+				// clobber the legs this full fetch just batched and suppress their break-even panel. The seam's
+				// wanted set is the full open position, so it strictly dominates the preload; preloadedQuotes is
+				// only the fallback kept when the fetch throws (no creds / network) and the report degrades.
+				var optionSymbols = OptionSymbolsFromRows(positionRows);
+				if (optionSymbols.Count > 0)
 				{
-					var configPath = Program.ResolvePath(Program.ApiConfigPath);
-					if (!File.Exists(configPath))
-					{
-						Console.WriteLine("Note: api-config.json not found — skipping live chain fetch. Run 'sniff' first to enable the time-decay grid.");
-					}
-					else
-					{
-						var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-						if (config == null || config.Webull.Headers.Count == 0)
-						{
-							Console.WriteLine("Note: api-config.json has no headers — skipping live chain fetch. Run 'sniff' to capture them.");
-						}
-						else
-						{
-							WebullAnalytics.Utils.Log.Debug("Webull: fetching option chain data...");
-							var webullData = await WebullOptionsClient.FetchOptionQuotesAsync(config, positionRows, cancellation);
-							optionQuotesBySymbol = webullData.OptionQuotes;
-							underlyingPrices = webullData.UnderlyingPrices;
-							WebullAnalytics.Utils.Log.Debug($"Webull: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
-						}
-					}
+					var (quotes, underlyings) = await AnalyzeCommon.FetchLiveChainByVendor(optionSymbols, vendor, cancellation);
+					optionQuotesBySymbol = quotes;
+					underlyingPrices = underlyings;
+					WebullAnalytics.Utils.Log.Debug($"{LiveQuoteSource.VendorName(vendor)}: retrieved {optionQuotesBySymbol.Count} contract quote(s).");
 				}
 
 				// Dividend schedule for the held tickers, so the theoretical time-decay grid prices
@@ -314,7 +323,8 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			catch (Exception ex)
 			{
 				if (ex is OperationCanceledException) throw;
-				Console.WriteLine($"Warning: Failed to fetch option data: {ex.Message}");
+				var hint = vendor == QuoteVendor.Schwab ? " Re-run 'wa schwab login' if the token expired, or pass --vendor webull." : " Run 'sniff' to refresh Webull headers, or pass --vendor schwab.";
+				Console.WriteLine($"Warning: Failed to fetch option data ({LiveQuoteSource.VendorName(vendor)}): {ex.Message}{hint} Falling back to the 1D price ladder.");
 			}
 		}
 

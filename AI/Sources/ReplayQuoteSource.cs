@@ -75,8 +75,7 @@ internal sealed class ReplayQuoteSource : IQuoteSource
 				Volume: null,
 				OpenInterest: null,
 				ImpliedVolatility: iv,
-				HistoricalVolatility: null,
-				ImpliedVolatility5Day: null
+				HistoricalVolatility: null
 			);
 		}
 

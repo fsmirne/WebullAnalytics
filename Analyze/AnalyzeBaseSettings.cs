@@ -32,6 +32,10 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	[Description("Override implied volatility per option leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple legs.")]
 	public string? IvOverrides { get; set; }
 
+	[CommandOption("--vendor <VENDOR>")]
+	[Description("Live option-chain quote vendor: 'webull' (sniffed-session chain) or 'schwab' (chains-API NBBO; needs `wa schwab login`). When omitted, the top-level `vendor` in config.json applies (default webull). Overrides it for this run.")]
+	public string? Vendor { get; set; }
+
 	[CommandOption("--output")]
 	[DefaultValue("console")]
 	[Description("Output format: 'console' (default) or 'text' (writes to a default .txt file when --output-path is omitted)")]
@@ -43,6 +47,12 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 
 	internal DateTime? EvaluationDateOverride =>
 		Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
+
+	/// <summary>Resolved live quote vendor: <c>--vendor</c> flag, else config.json's top-level <c>vendor</c>, else Webull.</summary>
+	internal WebullAnalytics.AI.Sources.QuoteVendor ResolvedVendor => WebullAnalytics.AI.Sources.LiveQuoteSource.ResolveVendor(Vendor);
+
+	/// <summary>Canonical lowercase name of the <see cref="ResolvedVendor"/> (for logging / source-tagging).</summary>
+	internal string VendorName => WebullAnalytics.AI.Sources.LiveQuoteSource.VendorName(ResolvedVendor);
 
 	/// <summary>Reads the same `report` config block as <see cref="WebullAnalytics.Report.ReportSettings.ApplyConfig"/>,
 	/// but only applies keys whose corresponding options live on this lean base. Unrecognized
@@ -64,6 +74,9 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 		var format = OutputFormat.ToLowerInvariant();
 		if (format is not ("console" or "text"))
 			return ValidationResult.Error("--output must be 'console' or 'text'");
+
+		if (Vendor != null && Vendor.Trim().ToLowerInvariant() is not ("webull" or "schwab"))
+			return ValidationResult.Error($"--vendor: expected webull or schwab, got '{Vendor}'");
 
 		if (Spot != null)
 		{

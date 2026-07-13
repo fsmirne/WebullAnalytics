@@ -14,7 +14,7 @@ namespace WebullAnalytics.Analyze;
 /// `wa analyze gex <TICKER>` — Renders a 2D GEX heatmap over the option chain
 /// (strikes × expirations), a per-expiration summary (gravity / gamma flip / max pain), a chain
 /// totals panel, and call/put walls. Pulls the chain live from Webull (default; api-config.json must
-/// already be sniffed) or Schwab (--source schwab; `wa schwab login`) — the two vendors' chain IVs
+/// already be sniffed) or Schwab (--vendor schwab; `wa schwab login`) — the two vendors' chain IVs
 /// disagree materially on gravity, so the source is logged with every data/gex record. Yahoo isn't
 /// supported because chain-level analytics need full OI + IV across every strike/expiry.
 /// </summary>
@@ -48,13 +48,8 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	[Description("Number of top call/put walls to list. Default: 5.")]
 	public int TopWalls { get; set; } = 5;
 
-	[CommandOption("--source <SOURCE>")]
-	[DefaultValue("webull")]
-	[Description("Chain vendor for the live fetch: webull (sniffed-session chain IV/OI, default) or schwab (chains API with Schwab's model IVs; needs `wa schwab login`). Each data/gex record carries its source, and --intraday's Live row shows only matching-source records. Offline --date snapshot runs ignore it.")]
-	public string Source { get; set; } = "webull";
-
 	[CommandOption("--dump")]
-	[Description("Also append every in-window contract from this live fetch (expiry, strike, right, bid/ask, vendor IV, OI, spot) to data/iv/<TICKER>/<ET-date>.csv, source-tagged. The raw per-strike inputs behind the displayed gex values — capture them from both --source vendors to measure cross-vendor IV gaps. Live fetch only.")]
+	[Description("Also append every in-window contract from this live fetch (expiry, strike, right, bid/ask, vendor IV, OI, spot) to data/iv/<TICKER>/<ET-date>.csv, source-tagged. The raw per-strike inputs behind the displayed gex values — capture them from both --vendor sources to measure cross-vendor IV gaps. Live fetch only.")]
 	public bool Dump { get; set; }
 
 	[CommandOption("--intraday")]
@@ -83,8 +78,6 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (IntervalMin < 5 || IntervalMin > 120) return ValidationResult.Error($"--interval: must be in [5, 120] minutes, got {IntervalMin}");
 		if (Exante && !Intraday) return ValidationResult.Error("--exante only applies to the --intraday heatmap");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
-		if (!string.Equals(Source, "webull", StringComparison.OrdinalIgnoreCase) && !string.Equals(Source, "schwab", StringComparison.OrdinalIgnoreCase))
-			return ValidationResult.Error($"--source: expected webull or schwab, got '{Source}'");
 		if (Dump && EvaluationDateOverride.HasValue) return ValidationResult.Error("--dump applies to live fetches only (no --date)");
 		return ValidationResult.Success();
 	}
@@ -136,11 +129,11 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				return 1;
 			}
 			var apiConfig = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-			if (string.Equals(settings.Source, "schwab", StringComparison.OrdinalIgnoreCase))
+			if (settings.VendorName == "schwab")
 			{
 				if (apiConfig?.Schwab == null)
 				{
-					AnsiConsole.MarkupLine("[red]Error: --source schwab needs Schwab credentials in api-config.json. Run 'wa schwab login' first.[/]");
+					AnsiConsole.MarkupLine("[red]Error: schwab vendor needs Schwab credentials in api-config.json. Run 'wa schwab login' first.[/]");
 					return 1;
 				}
 				IReadOnlyList<OptionContractQuote> schwabQuotes;
@@ -213,7 +206,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			}
 			if (settings.Exante && !ApplyExanteIvs(ticker, asOf.Date, quotes))
 				return 1;
-			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.Source.ToLowerInvariant());
+			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName);
 			return 0;
 		}
 
@@ -276,7 +269,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				quotes[sym] = new OptionContractQuote(
 					ContractSymbol: sym, LastPrice: Dec("last"), Bid: Dec("bid"), Ask: Dec("ask"),
 					Change: null, PercentChange: null, Volume: Lng("volume"), OpenInterest: Lng("openInterest"),
-					ImpliedVolatility: Dec("iv"), HistoricalVolatility: Dec("hv"), ImpliedVolatility5Day: Dec("iv5"));
+					ImpliedVolatility: Dec("iv"), HistoricalVolatility: Dec("hv"));
 			}
 		return (spot, quotes);
 	}
@@ -870,7 +863,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			var (callWall, putWall) = matrix.FindWalls(exp);
 			rows.Add(new GexLogExpiry(exp.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), gravity, gross, callWall, putWall, matrix.FindGammaFlip(spot, exp), matrix.FindMaxPain(exp)));
 		}
-		var record = new GexLogRecord(nowEt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture), settings.Source.ToLowerInvariant(), spot, settings.StrikeRangePct, settings.MaxStrikes, settings.Dte, rows);
+		var record = new GexLogRecord(nowEt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture), settings.VendorName, spot, settings.StrikeRangePct, settings.MaxStrikes, settings.Dte, rows);
 		var path = Program.ResolvePath($"data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl");
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		File.AppendAllText(path, JsonSerializer.Serialize(record) + "\n");
@@ -886,7 +879,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	private static void AppendIvDump(string ticker, decimal spot, Dictionary<string, OptionContractQuote> quotes, AnalyzeGexSettings settings, DateTime asOf, DateTime? expiryFilter)
 	{
 		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
-		var source = settings.Source.ToLowerInvariant();
+		var source = settings.VendorName;
 		var band = settings.StrikeRangePct / 100m;
 		var sb = new System.Text.StringBuilder();
 		var rows = 0;

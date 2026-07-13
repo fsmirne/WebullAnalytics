@@ -1,6 +1,7 @@
 using System.Text.Json;
 using WebullAnalytics.Api;
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI.Sources;
 
@@ -11,7 +12,7 @@ internal enum QuoteVendor { Webull, Schwab }
 
 /// <summary>Live option-chain quote source. Webull is the default backing vendor (Yahoo's chain endpoint omits
 /// the historical-vol and 5-day IV fields the scorer relies on and exhibits throttling / gaps the AI pipeline
-/// can't tolerate); Schwab is selectable via <c>--source schwab</c> to cross-check Webull's feed. Either vendor
+/// can't tolerate); Schwab is selectable via <c>--vendor schwab</c> to cross-check Webull's feed. Either vendor
 /// returns the full chain for the requested expiry window, so the opener can enumerate the strike ladder.
 /// Webull requires <c>api-config.json</c> populated by <c>wa sniff</c>; Schwab requires <c>wa schwab login</c>.</summary>
 internal sealed class LiveQuoteSource : IQuoteSource
@@ -19,6 +20,28 @@ internal sealed class LiveQuoteSource : IQuoteSource
 	private readonly QuoteVendor _vendor;
 
 	public LiveQuoteSource(QuoteVendor vendor = QuoteVendor.Webull) => _vendor = vendor;
+
+	/// <summary>The single seam every live-quote command resolves its vendor through so scan/watch/analyze/
+	/// report/gex/regime all choose identically. Precedence: an explicit <c>--vendor</c> flag
+	/// (<paramref name="cliVendor"/>) wins; otherwise the top-level <c>"vendor"</c> in config.json; otherwise
+	/// Webull. ai-config's old <c>quoteSource</c> is no longer consulted — config.json is the single source of truth.</summary>
+	internal static QuoteVendor ResolveVendor(string? cliVendor)
+	{
+		var s = cliVendor;
+		if (string.IsNullOrWhiteSpace(s))
+		{
+			var root = Program.LoadAppConfigRoot();
+			if (root != null && root.TryGetString("vendor", out var cfg)) s = cfg;
+		}
+		return ParseVendor(s);
+	}
+
+	/// <summary>Maps a vendor string to <see cref="QuoteVendor"/> (schwab → Schwab, anything else → Webull).</summary>
+	internal static QuoteVendor ParseVendor(string? s) =>
+		string.Equals(s?.Trim(), "schwab", StringComparison.OrdinalIgnoreCase) ? QuoteVendor.Schwab : QuoteVendor.Webull;
+
+	/// <summary>Canonical lowercase name for a vendor, for logging / source-tagging.</summary>
+	internal static string VendorName(QuoteVendor v) => v == QuoteVendor.Schwab ? "schwab" : "webull";
 
 	public async Task<QuoteSnapshot> GetQuotesAsync(
 		DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers,
@@ -82,7 +105,7 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		var configPath = Program.ResolvePath(Program.ApiConfigPath);
 		var config = LoadApiConfig();
 		if (config.Schwab is null || string.IsNullOrEmpty(config.Schwab.RefreshToken))
-			throw new InvalidOperationException("--source schwab needs Schwab credentials in api-config.json. Run 'wa schwab login' first.");
+			throw new InvalidOperationException("schwab vendor needs Schwab credentials in api-config.json. Run 'wa schwab login' first.");
 
 		var token = await SchwabAuthClient.GetAccessTokenAsync(config.Schwab, configPath, cancellation);
 

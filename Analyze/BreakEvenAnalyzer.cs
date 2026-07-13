@@ -497,8 +497,6 @@ public static class BreakEvenAnalyzer
 			volParts.Add($"{FormatIvVal(overrideIv.Value, ivColor)}{calTag}");
 		if (quote.HistoricalVolatility.HasValue)
 			volParts.Add($"HV {FormatIvPct(quote.HistoricalVolatility.Value)}");
-		if (quote.ImpliedVolatility5Day.HasValue)
-			volParts.Add($"IV5 {FormatIvPct(quote.ImpliedVolatility5Day.Value)}");
 		if (volParts.Count > 0)
 			parts.Add($"IV {string.Join(" | ", volParts)}");
 

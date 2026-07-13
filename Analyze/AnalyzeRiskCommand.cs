@@ -112,7 +112,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var symbols = parsedLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
 		var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
-		var (quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(symbols, cancellation);
+		var (quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(symbols, settings.ResolvedVendor, cancellation);
 		if (quotes == null) return 1;
 
 		var ticker = parsedLegs[0].Option!.Root;
