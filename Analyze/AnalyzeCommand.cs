@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
 using WebullAnalytics.AI.RiskDiagnostics;
+using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
@@ -117,7 +118,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		if (AnalyzeCommon.NeedsMarketPrices(settings.Spec))
 		{
 			var symbols = AnalyzeCommon.ParseAllLegs(settings.Spec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(symbols, cancellation);
+			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(symbols, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
 			if (quotes == null) return 1;
 		}
 
@@ -362,32 +363,26 @@ internal static class AnalyzeCommon
 			: $"{leg.Action.ToString().ToLowerInvariant()}:{leg.Symbol}:{leg.Quantity}@{price}";
 	}
 
-	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(string tradesSpec, CancellationToken cancellation)
+	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbols(string tradesSpec, QuoteVendor vendor, CancellationToken cancellation)
 	{
 		var symbols = ParseAllLegs(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(symbols, cancellation);
+		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(symbols, vendor, cancellation);
 		return quotes;
 	}
 
-	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbolList(IReadOnlyCollection<string> symbols, CancellationToken cancellation)
+	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>?> FetchQuotesForSymbolList(IReadOnlyCollection<string> symbols, QuoteVendor vendor, CancellationToken cancellation)
 	{
-		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(symbols, cancellation);
+		var (quotes, _) = await FetchQuotesAndUnderlyingForSymbolList(symbols, vendor, cancellation);
 		return quotes;
 	}
 
-	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? UnderlyingPrices)> FetchQuotesAndUnderlyingForSymbolList(IReadOnlyCollection<string> symbols, CancellationToken cancellation)
+	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? UnderlyingPrices)> FetchQuotesAndUnderlyingForSymbolList(IReadOnlyCollection<string> symbols, QuoteVendor vendor, CancellationToken cancellation)
 	{
 		if (symbols.Count == 0) return (new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase), new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase));
-		var minimalRows = symbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
 
 		try
 		{
-			var configPath = Program.ResolvePath(Program.ApiConfigPath);
-			if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return (null, null); }
-			var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-			if (config == null || config.Webull.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return (null, null); }
-			WebullAnalytics.Utils.Log.Debug($"Webull: fetching quotes for {symbols.Count} symbol(s)...");
-			var (quotes, underlying) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
+			var (quotes, underlying) = await FetchLiveChainByVendor(symbols, vendor, cancellation);
 			return (quotes, underlying);
 		}
 		catch (Exception ex)
@@ -396,6 +391,95 @@ internal static class AnalyzeCommon
 			Console.WriteLine($"Error: Failed to fetch quotes: {ex.Message}");
 			return (null, null);
 		}
+	}
+
+	/// <summary>THE single live-chain fetch seam: every analyze/report command resolves its vendor to a
+	/// <see cref="QuoteVendor"/> and calls this — the one place vendor is interpreted, so adding a vendor is a
+	/// single new arm here rather than an if/else in each command. Returns the full chain + spots per requested
+	/// root (so far-dated held legs are covered), with a uniform realized-vol HV backfilled on every leg
+	/// regardless of vendor (<see cref="FillMissingHistoricalVolAsync"/>) so IV+HV read consistently. When
+	/// <paramref name="targetExpiries"/> is supplied (single-root position/GEX use), the Webull arm refreshes
+	/// OI/IV breadth around those expiries so max-pain/GEX don't lock onto the position's own strike; Schwab's
+	/// range=ALL chain already carries that breadth. Throws on missing credentials so the caller can degrade.</summary>
+	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote> Quotes, IReadOnlyDictionary<string, decimal> Underlyings)> FetchLiveChainByVendor(
+		IReadOnlyCollection<string> symbols, QuoteVendor vendor, CancellationToken cancellation, IReadOnlyCollection<DateTime>? targetExpiries = null)
+	{
+		IReadOnlyDictionary<string, OptionContractQuote> quotes;
+		IReadOnlyDictionary<string, decimal> underlyings;
+
+		if (vendor == QuoteVendor.Schwab)
+		{
+			var symbolSet = symbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
+			var tickers = symbols.Select(s => ParsingHelpers.ParseOptionSymbol(s)?.Root).Where(r => r != null).Select(r => r!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+			WebullAnalytics.Utils.Log.Debug($"Schwab: fetching quotes for {symbols.Count} symbol(s)...");
+			var snap = await new LiveQuoteSource(QuoteVendor.Schwab).GetQuotesAsync(OptionMath.ObservationInstant(), symbolSet, tickers, cancellation);
+			(quotes, underlyings) = (snap.Options, snap.Underlyings);
+		}
+		else
+		{
+			var configPath = Program.ResolvePath(Program.ApiConfigPath);
+			if (!File.Exists(configPath)) throw new InvalidOperationException("api-config.json not found. Run 'sniff' first.");
+			var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+			if (config == null || config.Webull.Headers.Count == 0) throw new InvalidOperationException("api-config.json has no headers. Run 'sniff' first.");
+
+			if (targetExpiries is { Count: > 0 })
+			{
+				// Position/GEX path: full chain with OI/IV breadth around each target expiry, then queryBatch any
+				// position legs the chain left unpriced (deep-OTM wings / far-dated expiries outside the cycle).
+				var root = ParsingHelpers.ParseOptionSymbol(symbols.First())?.Root ?? throw new InvalidOperationException($"Cannot parse root from '{symbols.First()}'.");
+				WebullAnalytics.Utils.Log.Debug($"Webull: fetching chain (expiry-refresh) for {root}...");
+				var (chain, spot, derivativeIds) = await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(config, root, targetExpiries, 0.20m, cancellation);
+				var mutable = new Dictionary<string, OptionContractQuote>(chain, StringComparer.OrdinalIgnoreCase);
+				var missing = symbols.Where(s => !mutable.TryGetValue(s, out var q) || q.Bid == null || q.Ask == null).ToList();
+				if (missing.Count > 0)
+				{
+					var ids = new Dictionary<string, long>(derivativeIds, StringComparer.OrdinalIgnoreCase);
+					foreach (var s in missing)
+						if (!ids.ContainsKey(s) && DerivativeIdRegistry.TryGetId(s, out var rid)) ids[s] = rid;
+					await WebullOptionsClient.RefreshContractsAsync(config, mutable, missing, ids, cancellation);
+				}
+				quotes = mutable;
+				underlyings = spot.HasValue ? new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [root] = spot.Value } : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+			}
+			else
+			{
+				var minimalRows = symbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
+				WebullAnalytics.Utils.Log.Debug($"Webull: fetching quotes for {symbols.Count} symbol(s)...");
+				(quotes, underlyings) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
+			}
+		}
+
+		quotes = await ApplyRealizedVolAsync(quotes, cancellation);
+		return (quotes, underlyings);
+	}
+
+	/// <summary>Sets every leg's HistoricalVolatility to its underlying's 20-session annualized close-to-close
+	/// realized vol — the SAME metric the opener scores on (<see cref="WebullAnalytics.AI.CandidateScorer.ComputeHistoricalVolatilityAnnualized"/>,
+	/// <c>volatilityLookbackDays</c> default 20) — so HV means one consistent thing regardless of vendor.
+	/// (Webull's proprietary hiv is a ~1-year window; Schwab reports none — both are replaced here.) One
+	/// realized-vol number per underlying. Display-only; nothing prices off this field. Legs whose root has
+	/// too little price history keep whatever they had.</summary>
+	internal static async Task<IReadOnlyDictionary<string, OptionContractQuote>> ApplyRealizedVolAsync(IReadOnlyDictionary<string, OptionContractQuote> quotes, CancellationToken cancellation)
+	{
+		if (quotes.Count == 0) return quotes;
+
+		var cache = new WebullAnalytics.AI.Replay.HistoricalPriceCache();
+		var hvByRoot = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		foreach (var root in quotes.Keys.Select(s => ParsingHelpers.ParseOptionSymbol(s)?.Root).Where(r => r != null).Select(r => r!).Distinct(StringComparer.OrdinalIgnoreCase))
+		{
+			var closes = await cache.GetRecentClosesAsync(root, 21, EvaluationDate.Today, cancellation);
+			var hv = WebullAnalytics.AI.CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+			if (hv is > 0m) hvByRoot[root] = hv.Value;
+		}
+		if (hvByRoot.Count == 0) return quotes;
+
+		var result = new Dictionary<string, OptionContractQuote>(quotes.Count, StringComparer.OrdinalIgnoreCase);
+		foreach (var (sym, q) in quotes)
+		{
+			var root = ParsingHelpers.ParseOptionSymbol(sym)?.Root;
+			result[sym] = root != null && hvByRoot.TryGetValue(root, out var hv) ? q with { HistoricalVolatility = hv } : q;
+		}
+		return result;
 	}
 
 	/// <summary>Re-bases every quote's ImpliedVolatility to the mid-implied value — back-solved from the
@@ -532,19 +616,12 @@ internal static class AnalyzeCommon
 		var allSymbols = pairOccSymbol != null
 			? new[] { oldSymbol, newSymbol, pairOccSymbol }
 			: new[] { oldSymbol, newSymbol };
-		var minimalRows = allSymbols.Select(s => new PositionRow(Instrument: s, Asset: Asset.Option, OptionKind: "Call", Side: Side.Buy, Qty: 1, AvgPrice: 0m, Expiry: null, MatchKey: MatchKeys.Option(s))).ToList();
 
 		IReadOnlyDictionary<string, OptionContractQuote> quotes;
 		IReadOnlyDictionary<string, decimal> underlyingPrices;
 		try
 		{
-			var configPath = Program.ResolvePath(Program.ApiConfigPath);
-			if (!File.Exists(configPath)) { Console.WriteLine("Error: api-config.json not found. Run 'sniff' first."); return 1; }
-			var config = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-			if (config == null || config.Webull.Headers.Count == 0) { Console.WriteLine("Error: api-config.json has no headers. Run 'sniff' first."); return 1; }
-			WebullAnalytics.Utils.Log.Debug("Webull: fetching option chain data for roll analysis...");
-			(quotes, underlyingPrices) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
-
+			(quotes, underlyingPrices) = await FetchLiveChainByVendor(allSymbols, settings.ResolvedVendor, cancellation);
 			YahooOptionsClient.ApplyToOptionMath(await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation));
 		}
 		catch (Exception ex)

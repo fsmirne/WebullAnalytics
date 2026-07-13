@@ -97,8 +97,8 @@ public class RiskDiagnosticRendererTests
 				EnumDeltaPass: null,
 				LegQuotes: new[]
 				{
-					new RiskDiagnosticLegQuote("short", "GME260501C00025000", 0.10m, 0.14m, 0.400m, 0.350m, 0.380m, 100, 10),
-					new RiskDiagnosticLegQuote("long", "GME260522C00025000", 0.80m, 0.90m, 0.420m, 0.360m, 0.410m, 200, 20),
+					new RiskDiagnosticLegQuote("short", "GME260501C00025000", 0.10m, 0.14m, 0.400m, 0.350m, 100, 10),
+					new RiskDiagnosticLegQuote("long", "GME260522C00025000", 0.80m, 0.90m, 0.420m, 0.360m, 200, 20),
 				},
 				OpenerScore: null));
 
@@ -107,8 +107,8 @@ public class RiskDiagnosticRendererTests
 		Assert.Contains("Long quote:", text);
 		Assert.Contains("mid=0.12", text);
 		Assert.Contains("mid=0.85", text);
-		Assert.Contains("iv=0.400 hv=0.350 iv5=0.380", text);
-		Assert.Contains("iv=0.420 hv=0.360 iv5=0.410", text);
+		Assert.Contains("iv=0.400 hv=0.350 oi=100", text);
+		Assert.Contains("iv=0.420 hv=0.360 oi=200", text);
 	}
 
 	[Fact]
@@ -128,9 +128,9 @@ public class RiskDiagnosticRendererTests
 				LegQuotes: new[]
 				{
 					// short: calibrated 0.350, vendor 0.400 → struck vendor + cal tag.
-					new RiskDiagnosticLegQuote("short", "GME260501C00025000", 0.10m, 0.14m, 0.350m, 0.350m, 0.380m, 100, 10, VendorImpliedVolatility: 0.400m),
+					new RiskDiagnosticLegQuote("short", "GME260501C00025000", 0.10m, 0.14m, 0.350m, 0.350m, 100, 10, VendorImpliedVolatility: 0.400m),
 					// long: no recalibration → plain IV, no tag.
-					new RiskDiagnosticLegQuote("long", "GME260522C00025000", 0.80m, 0.90m, 0.420m, 0.360m, 0.410m, 200, 20),
+					new RiskDiagnosticLegQuote("long", "GME260522C00025000", 0.80m, 0.90m, 0.420m, 0.360m, 200, 20),
 				},
 				OpenerScore: null));
 

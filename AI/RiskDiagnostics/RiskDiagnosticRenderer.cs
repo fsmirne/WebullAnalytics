@@ -66,10 +66,9 @@ internal static class RiskDiagnosticRenderer
 					: "null";
 				var iv = FormatLegIv(q);
 				var hv = q.HistoricalVolatility.HasValue ? q.HistoricalVolatility.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
-				var iv5 = q.ImpliedVolatility5Day.HasValue ? q.ImpliedVolatility5Day.Value.ToString("F3", CultureInfo.InvariantCulture) : "null";
 				var oi = q.OpenInterest.HasValue ? q.OpenInterest.Value.ToString(CultureInfo.InvariantCulture) : "null";
 				var vol = q.Volume.HasValue ? q.Volume.Value.ToString(CultureInfo.InvariantCulture) : "null";
-				items.Add((label, $"bid={bid} ask={ask} mid={mid} iv={iv} hv={hv} iv5={iv5} oi={oi} vol={vol} sym={Markup.Escape(q.Symbol)}"));
+				items.Add((label, $"bid={bid} ask={ask} mid={mid} iv={iv} hv={hv} oi={oi} vol={vol} sym={Markup.Escape(q.Symbol)}"));
 			}
 
 			if (p.OpenerScore is RiskDiagnosticOpenerScore s)

@@ -167,9 +167,8 @@ public static class ExcelExporter
 		sheet.Cells[1, 8].Value = "Expiry";
 		sheet.Cells[1, 9].Value = "IV";
 		sheet.Cells[1, 10].Value = "HV";
-		sheet.Cells[1, 11].Value = "IV5";
 
-		FormatHeaderRow(sheet, 1, 1, 11);
+		FormatHeaderRow(sheet, 1, 1, 10);
 
 		// Data rows
 		int row = 2;
@@ -202,13 +201,11 @@ public static class ExcelExporter
 			{
 				FormatIvCell(sheet.Cells[row, 9], q.ImpliedVolatility);
 				FormatIvCell(sheet.Cells[row, 10], q.HistoricalVolatility);
-				FormatIvCell(sheet.Cells[row, 11], q.ImpliedVolatility5Day);
 			}
 			else
 			{
 				sheet.Cells[row, 9].Value = "-";
 				sheet.Cells[row, 10].Value = "-";
-				sheet.Cells[row, 11].Value = "-";
 			}
 
 			row++;

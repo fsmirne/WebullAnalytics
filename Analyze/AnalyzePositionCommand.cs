@@ -172,39 +172,19 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
 		var positionSymbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-		var apiConfigPath = Program.ResolvePath(Program.ApiConfigPath);
-		if (File.Exists(apiConfigPath))
+		// Single vendor seam. targetExpiries drives the Webull arm's near-ATM OI/IV refresh so max-pain/GEX see
+		// the full chain rather than just the position's strike; Schwab's range=ALL chain already carries that
+		// breadth. HV is backfilled uniformly inside the seam so the diagnostic reads consistently across vendors.
+		var targetExpiries = positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().ToList();
+		try
 		{
-			var apiCfg = System.Text.Json.JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(apiConfigPath));
-			if (apiCfg != null && apiCfg.Webull.Headers.Count > 0)
-			{
-				var targetExpiries = positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().ToList();
-				var (chainQuotes, chainSpot, derivativeIds) = await WebullOptionsClient.FetchChainWithExpiryRefreshAsync(apiCfg, ticker, targetExpiries, strikeRangeFraction: 0.20m, cancellation);
-
-				// The near-ATM refresh above gives max-pain/GEX their chain breadth, but it leaves the
-				// position's OWN legs unpriced when they sit outside ±20% of spot (e.g. the deep-OTM wings of
-				// a wide condor). Those legs are the whole point of `analyze position`, so refresh any that
-				// came back without a usable bid/ask directly from queryBatch — resolving the derivativeId
-				// from this fetch's map first, then the persisted registry so a leg the chain dropped entirely
-				// (far-dated expiries outside the strategy/list cycle) can still be priced.
-				var legsMissingQuote = positionSymbols.Where(s => !chainQuotes.TryGetValue(s, out var q) || q.Bid == null || q.Ask == null).ToList();
-				if (legsMissingQuote.Count > 0)
-				{
-					var ids = new Dictionary<string, long>(derivativeIds, StringComparer.OrdinalIgnoreCase);
-					foreach (var s in legsMissingQuote)
-						if (!ids.ContainsKey(s) && DerivativeIdRegistry.TryGetId(s, out var rid)) ids[s] = rid;
-					var mutableChain = new Dictionary<string, OptionContractQuote>(chainQuotes, StringComparer.OrdinalIgnoreCase);
-					await WebullOptionsClient.RefreshContractsAsync(apiCfg, mutableChain, legsMissingQuote, ids, cancellation);
-					chainQuotes = mutableChain;
-				}
-				quotes = chainQuotes;
-				if (chainSpot.HasValue)
-					underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = chainSpot.Value };
-			}
+			(quotes, underlyingPrices) = await AnalyzeCommon.FetchLiveChainByVendor(positionSymbols, settings.ResolvedVendor, cancellation, targetExpiries);
 		}
-
-		if (quotes == null)
-			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(positionSymbols, cancellation);
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			var hint = settings.ResolvedVendor == QuoteVendor.Schwab ? "Re-run 'wa schwab login' if the token expired, or pass --vendor webull." : "Run 'wa sniff' to refresh Webull headers, or pass --vendor schwab.";
+			Console.Error.WriteLine($"Warning: live chain fetch failed ({settings.VendorName}): {ex.Message} {hint}");
+		}
 
 		var spot = ResolveSpot(ticker, settings, underlyingPrices);
 		if (spot == null)
@@ -231,7 +211,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				.ToList();
 			if (hypotheticalSymbols.Count > 0)
 			{
-				var hypotheticalQuotes = await AnalyzeCommon.FetchQuotesForSymbolList(hypotheticalSymbols, cancellation);
+				var hypotheticalQuotes = await AnalyzeCommon.FetchQuotesForSymbolList(hypotheticalSymbols, settings.ResolvedVendor, cancellation);
 				if (hypotheticalQuotes != null)
 				{
 					// Prefer Phase 1's refreshed entries: FetchQuotesForSymbolList re-fetches the entire
@@ -2249,7 +2229,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				ask = q.Ask,
 				impliedVolatility = q.ImpliedVolatility,
 				historicalVolatility = q.HistoricalVolatility,
-				impliedVolatility5Day = q.ImpliedVolatility5Day,
 				openInterest = q.OpenInterest,
 				volume = q.Volume,
 			}),

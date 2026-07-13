@@ -212,7 +212,6 @@ internal sealed class ProposalSnapshot
 					Ask: DecN(q, "ask"),
 					ImpliedVolatility: DecN(q, "impliedVolatility"),
 					HistoricalVolatility: DecN(q, "historicalVolatility"),
-					ImpliedVolatility5Day: DecN(q, "impliedVolatility5Day"),
 					OpenInterest: LongN(q, "openInterest"),
 					Volume: LongN(q, "volume")));
 

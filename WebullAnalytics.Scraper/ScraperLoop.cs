@@ -244,7 +244,6 @@ internal sealed class ScraperLoop
 				openInterest = q.OpenInterest,
 				iv = q.ImpliedVolatility,
 				hv = q.HistoricalVolatility,
-				iv5 = q.ImpliedVolatility5Day,
 			})
 		};
 

@@ -202,8 +202,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 				Volume: null,
 				OpenInterest: oi,
 				ImpliedVolatility: iv,
-				HistoricalVolatility: null,
-				ImpliedVolatility5Day: null
+				HistoricalVolatility: null
 			);
 		}
 
@@ -301,8 +300,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 				Volume: null,
 				OpenInterest: null,
 				ImpliedVolatility: iv,
-				HistoricalVolatility: null,
-				ImpliedVolatility5Day: null);
+				HistoricalVolatility: null);
 		}
 		return options;
 	}
