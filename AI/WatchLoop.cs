@@ -170,7 +170,18 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				quoteSnapshot = await PremarketSpotOverride.ApplyAsync(quoteSnapshot, config, quotes, now, cancellation);
 				var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, priceCache, config.Indicators.TechnicalFilter, now, cancellation);
 
-				var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
+				// Underlying 20-session realized vol per ticker — the vendor-independent HV shown in the risk
+				// diagnostic panel (never the vendor's per-contract hiv). Cheap: HistoricalPriceCache serves
+				// repeat reads from cache after the first tick.
+				var historicalVolByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+				foreach (var ticker in tickerSet)
+				{
+					var closes = await priceCache.GetRecentClosesAsync(ticker, Math.Max(config.Opener.VolatilityLookbackDays + 1, 4), now, cancellation);
+					var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+					if (hv is > 0m) historicalVolByTicker[ticker] = hv.Value;
+				}
+
+				var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals, HistoricalVolByTicker: historicalVolByTicker);
 				var results = evaluator.Evaluate(ctx);
 				if (settings.EmitManagementProposals)
 					foreach (var r in results) { sink.Emit(r.Proposal, r.IsRepeat); proposalsEmitted++; }
