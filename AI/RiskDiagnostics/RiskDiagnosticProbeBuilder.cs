@@ -25,6 +25,12 @@ internal static class RiskDiagnosticProbeBuilder
 		var legQuotes = new List<RiskDiagnosticLegQuote>();
 		if (quotes != null)
 		{
+			// HV displayed on the leg line is ALWAYS the underlying's 20-session realized vol
+			// (historicalVolAnnual), the SAME vendor-independent metric `wa analyze` shows
+			// (AnalyzeCommand.ApplyRealizedVolAsync). The vendor's per-contract hiv is never used: Webull
+			// reports a ~1-year hiv, Schwab reports none, so it means different things per vendor. When no
+			// underlying HV was computed the line shows hv=null rather than falling back to the vendor value.
+			var hv = historicalVolAnnual;
 			// Keep labels stable: short/long for the first pair, otherwise fall back to leg1/leg2/...
 			var shortIdx = 0;
 			var longIdx = 0;
@@ -33,7 +39,7 @@ internal static class RiskDiagnosticProbeBuilder
 				var label = leg.IsLong ? (longIdx++ == 0 ? "long" : $"long{longIdx}") : (shortIdx++ == 0 ? "short" : $"short{shortIdx}");
 				if (!quotes.TryGetValue(leg.Symbol, out var q))
 				{
-					legQuotes.Add(new RiskDiagnosticLegQuote(label, leg.Symbol, null, null, null, null, null, null, null));
+					legQuotes.Add(new RiskDiagnosticLegQuote(label, leg.Symbol, null, null, null, hv, null, null, null));
 					continue;
 				}
 				legQuotes.Add(new RiskDiagnosticLegQuote(
@@ -42,7 +48,7 @@ internal static class RiskDiagnosticProbeBuilder
 					Bid: q.Bid,
 					Ask: q.Ask,
 					ImpliedVolatility: q.ImpliedVolatility,
-					HistoricalVolatility: q.HistoricalVolatility,
+					HistoricalVolatility: hv,
 					OpenInterest: q.OpenInterest,
 					Volume: q.Volume,
 					VendorImpliedVolatility: q.VendorImpliedVolatility));

@@ -17,6 +17,10 @@ namespace WebullAnalytics.AI;
 /// <param name="IntradaySpotRangePct">Today's running (high − low) / open as a percent of open, measured up to
 /// <see cref="Now"/>. Null outside of intraday rule evaluation. Used as a "trend-day" proxy — large early-day
 /// ranges correlate with continued large moves, which is exactly when capping the long is destructive.</param>
+/// <param name="HistoricalVolByTicker">Underlying 20-session annualized realized vol per ticker — the same
+/// vendor-independent metric the opener and `wa analyze` compute. Feeds the risk-diagnostic HV display so the
+/// watch panel never shows the vendor's per-contract hiv (Webull-only; Schwab reports none). Null/missing entry
+/// leaves the HV line blank.</param>
 internal sealed record EvaluationContext(
 	DateTime Now,
 	IReadOnlyDictionary<string, OpenPosition> OpenPositions,
@@ -26,7 +30,8 @@ internal sealed record EvaluationContext(
 	decimal AccountValue,
 	IReadOnlyDictionary<string, TechnicalBias> TechnicalSignals,
 	decimal? Vix = null,
-	decimal? IntradaySpotRangePct = null
+	decimal? IntradaySpotRangePct = null,
+	IReadOnlyDictionary<string, decimal>? HistoricalVolByTicker = null
 );
 
 /// <summary>

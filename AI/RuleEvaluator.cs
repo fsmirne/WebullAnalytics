@@ -108,8 +108,9 @@ internal sealed class RuleEvaluator
 		}
 
 		var technicalBias = ctx.TechnicalSignals.TryGetValue(position.Ticker, out var signal) ? signal.Score : 0m;
+		var historicalVolAnnual = ctx.HistoricalVolByTicker != null && ctx.HistoricalVolByTicker.TryGetValue(position.Ticker, out var hv) ? hv : (decimal?)null;
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, ctx.Now, IvResolver, trend: null, quotes: ctx.Quotes);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, ctx.Now, IvResolver, ctx.Quotes, opener: null, technicalBiasOverride: technicalBias);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, ctx.Now, IvResolver, ctx.Quotes, opener: null, technicalBiasOverride: technicalBias, historicalVolAnnual: historicalVolAnnual);
 		return proposal with { Diagnostic = diagnostic with { Probe = probe } };
 	}
 

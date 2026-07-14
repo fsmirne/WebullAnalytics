@@ -567,6 +567,19 @@ internal sealed class OpenCandidateEvaluator
 		// of the sentiment weight (display decoupled from scoring).
 		SentimentSnapshot? diagnosticSentiment = sentimentSnapshot;
 
+		// HV shown in the diagnostic leg-quote line is the underlying's 20-session realized vol — the same
+		// vendor-independent metric `wa analyze` displays. Reuse the value already computed for the
+		// vol-fit/whipsaw factors; compute it here for any output ticker that lacks one (when both weights
+		// are 0, needCloses was false) so the reading appears regardless of scoring weights.
+		var diagnosticHvByTicker = new Dictionary<string, decimal>(historicalVolByTicker, StringComparer.OrdinalIgnoreCase);
+		foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
+		{
+			if (diagnosticHvByTicker.ContainsKey(ticker)) continue;
+			var closes = await _priceCache.GetRecentClosesAsync(ticker, Math.Max(cfg.VolatilityLookbackDays + 1, 4), ctx.Now, cancellation);
+			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+			if (hv is > 0m) diagnosticHvByTicker[ticker] = hv.Value;
+		}
+
 		var annotated = new List<OpenProposal>(output.Count);
 		foreach (var p in output)
 		{
@@ -631,6 +644,7 @@ internal sealed class OpenCandidateEvaluator
 					: 0.40m,
 				quotes: mergedQuotes,
 				opener: openerScore,
+				historicalVolAnnual: diagnosticHvByTicker.TryGetValue(p.Ticker, out var pHv) ? pHv : (decimal?)null,
 				sentimentScore: sentimentScore);
 
 			annotated.Add(p with { Diagnostic = diagnostic with { Probe = probe } });
