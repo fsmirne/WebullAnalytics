@@ -89,25 +89,50 @@ internal static class SchwabOptionsClient
 			+ $"&includeUnderlyingQuote=true&fromDate={from:yyyy-MM-dd}&toDate={to:yyyy-MM-dd}"
 			+ (strikeCount > 0 ? $"&strikeCount={strikeCount}" : "");
 
-		using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-		using var request = new HttpRequestMessage(HttpMethod.Get, url);
-		request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-		request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-		using var response = await client.SendAsync(request, ct);
-		var body = await response.Content.ReadAsStringAsync(ct);
-		if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-			throw new SchwabAuthException($"chains request unauthorized (HTTP {(int)response.StatusCode}) — token rejected.");
-		if (!response.IsSuccessStatusCode)
+		var (statusCode, body) = await SendWithTransientRetryAsync(url, accessToken, ct);
+		if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+			throw new SchwabAuthException($"chains request unauthorized (HTTP {(int)statusCode}) — token rejected.");
+		if (!IsSuccess(statusCode))
 		{
-			var tooBig = (int)response.StatusCode == 502 && body.Contains("TooBigBody", StringComparison.OrdinalIgnoreCase);
+			var tooBig = (int)statusCode == 502 && body.Contains("TooBigBody", StringComparison.OrdinalIgnoreCase);
 			if (!tooBig)
-				Console.WriteLine($"Schwab: chains returned {(int)response.StatusCode} for {symbol}: {Truncate(body, 200)}");
+				Console.WriteLine($"Schwab: chains returned {(int)statusCode} for {symbol}: {Truncate(body, 200)}");
 			return (null, Array.Empty<OptionContractQuote>(), tooBig);
 		}
 
 		var (spot, quotes) = ParseChain(body, symbol);
 		return (spot, quotes, false);
+	}
+
+	private static bool IsSuccess(HttpStatusCode code) => (int)code is >= 200 and <= 299;
+
+	/// <summary>Issues the chains GET with a bounded retry on transport-level transient failures — SSL handshake
+	/// aborts and mid-request connection resets (<c>HttpRequestException</c>/<c>IOException</c>, typically an inner
+	/// <c>SocketException</c> "forcibly closed by the remote host") that show up as intermittent single-tick failures
+	/// in the live watch loop. A fresh client+request is used per attempt; non-transport failures (auth, 502 TooBig,
+	/// timeouts) propagate to the caller unchanged.</summary>
+	private static async Task<(HttpStatusCode Status, string Body)> SendWithTransientRetryAsync(string url, string accessToken, CancellationToken ct)
+	{
+		const int maxAttempts = 3;
+		for (var attempt = 1; ; attempt++)
+		{
+			try
+			{
+				using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+				using var request = new HttpRequestMessage(HttpMethod.Get, url);
+				request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+				request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+				using var response = await client.SendAsync(request, ct);
+				var body = await response.Content.ReadAsStringAsync(ct);
+				return (response.StatusCode, body);
+			}
+			catch (Exception ex) when (ex is HttpRequestException or IOException && attempt < maxAttempts && !ct.IsCancellationRequested)
+			{
+				Console.WriteLine($"Schwab: chains transport error (attempt {attempt}/{maxAttempts}), retrying: {ex.Message}");
+				await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
+			}
+		}
 	}
 
 	private static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes) ParseChain(string json, string symbol)
