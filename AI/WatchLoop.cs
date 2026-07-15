@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Globalization;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Api;
 using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI;
@@ -119,11 +120,15 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
 		var quotes = AIContext.BuildLiveQuoteSource(vendor);
 		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
-		var tickerSet = config.TickerSet();
 
 		// Auto-executors: turn proposals into real (or dry-run) order submissions. Both off by default;
 		// both honor enabled/submit gates independently. Shared with `wa ai scan` via AIContext.BuildAutoExecutors.
 		var (autoExecutor, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
+
+		// Apply the live 13-week T-bill risk-free rate once (mirrors `wa ai scan`): the opener's IV back-solve
+		// and BS pricing read OptionMath.RiskFreeRate, so watch must set it too or it prices against a stale
+		// default and diverges from scan/backtest. Fetched once per session — the rate barely moves intraday.
+		YahooOptionsClient.ApplyToOptionMath(await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation));
 
 		var priceCache = new Replay.HistoricalPriceCache();
 
@@ -147,8 +152,10 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var failures = 0;
 		var ticksRun = 0;
 		var proposalsEmitted = 0;
-		var quoteGuard = config.Opener.QuoteGuard;
-		var staleUnverifiableNoted = false;   // one-time note when the vendor stamps no quote times
+		var tickState = new LiveTickState();   // persists the one-time staleness note across ticks
+		// Watch = "one live tick in a loop". The opener never bypasses its daily cap here (that's a scan flag).
+		var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, autoExecutor, openEvaluator, sink, openSink, openerExecutor,
+			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false);
 
 		while (!cancellation.IsCancellationRequested && DateTime.Now < stopAt)
 		{
@@ -161,73 +168,22 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			try
 			{
 				var now = DateTime.Now;
-				// One broker-state pull per tick, shared by both auto-executors. A fresh token each tick lets
-				// BrokerStateService coalesce the management+opener refreshes into a single Webull order-endpoint
-				// round-trip (halving the per-tick calls that were tripping the rate limiter).
-				var cycleToken = new object();
-				var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
-				var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
-				var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
-				// No-op during RTH; corrects the stale chain spot on premarket ticks (--ignore-market-hours runs).
-				quoteSnapshot = await PremarketSpotOverride.ApplyAsync(quoteSnapshot, config, quotes, now, cancellation);
-				var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, priceCache, config.Indicators.TechnicalFilter, now, cancellation);
+				var tick = await LiveTick.EvaluateAsync(now, deps, tickState, applySpotOverrides: null, cancellation);
+				var mgmtEmitted = settings.EmitManagementProposals ? tick.MgmtCount : 0;
+				proposalsEmitted += mgmtEmitted + tick.OpenCount;
 
-				// Underlying 20-session realized vol per ticker — the vendor-independent HV shown in the risk
-				// diagnostic panel (never the vendor's per-contract hiv). Cheap: HistoricalPriceCache serves
-				// repeat reads from cache after the first tick.
-				var historicalVolByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-				foreach (var ticker in tickerSet)
-				{
-					var closes = await priceCache.GetRecentClosesAsync(ticker, Math.Max(config.Opener.VolatilityLookbackDays + 1, 4), now, cancellation);
-					var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
-					if (hv is > 0m) historicalVolByTicker[ticker] = hv.Value;
-				}
-
-				var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals, HistoricalVolByTicker: historicalVolByTicker);
-				var results = evaluator.Evaluate(ctx);
-				if (settings.EmitManagementProposals)
-					foreach (var r in results) { sink.Emit(r.Proposal, r.IsRepeat); proposalsEmitted++; }
-
-				if (autoExecutor != null)
-					await autoExecutor.HandleAsync(results, ctx, cancellation, cycleToken);
-
-				var openResultCount = 0;
-				if (openEvaluator != null && openSink != null)
-				{
-					var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
-					openResultCount = openResults.Count;
-					// LIVE quote-integrity guard: warn loudly on a stale feed or torn NBBO (the 07-13 SPY case: long
-					// leg bid 10.36 / ask 20.36) and withhold the affected opens from auto-execution. Proposals still
-					// render so the issue stays visible amid the fast-scrolling watch.
-					var (feedStale, suspect) = LiveQuoteGuard.Inspect(quoteSnapshot.Options, new DateTimeOffset(now), LiveQuoteSource.VendorName(vendor), quoteGuard, openResults, ref staleUnverifiableNoted);
-					for (var i = 0; i < openResults.Count; i++) { openSink.Emit(openResults[i], rank: i + 1); proposalsEmitted++; }
-					if (openerExecutor != null)
-					{
-						// A stale feed poisons every quote → hold all opens this tick; otherwise drop only the
-						// torn-quote proposals and let clean lower-ranked ones proceed.
-						var safeToOpen = feedStale ? new List<OpenProposal>() : openResults.Where((_, i) => !suspect.Contains(i)).ToList();
-						await openerExecutor.HandleAsync(safeToOpen, openPositions, now, cancellation, cycleToken: cycleToken);
-					}
-				}
-
-				// Per-tick pulse: a timestamped line EVERY tick so both proposals and quiet ticks are anchored
-				// in time (no more silent blinking caret). When proposals printed above, this footer says when
-				// and how many; when none, it's the "nothing met the bar" heartbeat. Suppressed at debug, where
-				// the per-tick [debug] summary below already carries the timestamp and counts.
-				var tickEmitted = (settings.EmitManagementProposals ? results.Count : 0) + openResultCount;
-				// On flat ticks the management-side snapshot has no position legs and therefore no underlying
-				// price — fall back to the spot the opener's bootstrap probe resolved this tick.
-				var haveSpot = quoteSnapshot.Underlyings.TryGetValue(config.Ticker, out var hbSpot) || (openEvaluator?.LastUnderlyings.TryGetValue(config.Ticker, out hbSpot) ?? false);
+				// Per-tick pulse: a timestamped line EVERY tick so proposals and quiet ticks are anchored in time
+				// (no silent blinking caret). Suppressed at debug, where the [debug] summary below already carries it.
+				var tickEmitted = mgmtEmitted + tick.OpenCount;
 				if (!debug)
 				{
-					var spotStr = haveSpot ? hbSpot.ToString("0.00") : "?";
+					var spotStr = tick.Spot.HasValue ? tick.Spot.Value.ToString("0.00") : "?";
 					var summary = tickEmitted == 0 ? "no proposals emitted" : $"{tickEmitted} proposal(s) emitted";
 					AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} — {summary}[/]");
 				}
-
-				if (debug)
+				else
 				{
-					Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={(haveSpot ? hbSpot : null)} positions={openPositions.Count} mgmtResults={results.Count} openProposals={openResultCount}");
+					Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={tick.Spot} positions={tick.PositionCount} mgmtResults={tick.MgmtCount} openProposals={tick.OpenCount}");
 				}
 
 				ticksRun++;
@@ -262,7 +218,6 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 	// reuses MarketCalendar.IsOpen for day-of-week / holiday handling. If we ever need to support a
 	// different exchange, lift these constants — but the rest of the app assumes US equity/options too.
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-	private static readonly TimeSpan MarketOpenEt = new(9, 30, 0);
 	private static readonly TimeSpan MarketCloseEt = new(16, 0, 0);
 
 	private static DateTime ComputeStopTime(AIWatchSettings s)
@@ -286,9 +241,6 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 	private static bool IsMarketOpen()
 	{
-		var nowLocal = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
-		if (!MarketCalendar.IsOpen(nowLocal.Date)) return false;
-		var t = nowLocal.TimeOfDay;
-		return t >= MarketOpenEt && t <= MarketCloseEt;
+		return MarketCalendar.IsRegularHours(DateTimeOffset.Now);
 	}
 }

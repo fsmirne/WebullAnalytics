@@ -84,18 +84,25 @@ internal static class LiveQuoteGuard
 	/// (poisons every quote → hold ALL opens this evaluation) and <c>Suspect</c> (indices of proposals with
 	/// torn legs → hold just those). <paramref name="staleUnverifiableNoted"/> gates the one-time
 	/// "no timestamp" note across watch ticks; scan passes a throwaway. No-op when the guard is disabled.</summary>
-	public static (bool FeedStale, HashSet<int> Suspect) Inspect(IReadOnlyDictionary<string, OptionContractQuote> book, DateTimeOffset now, string vendorName, OpenerQuoteGuardConfig cfg, IReadOnlyList<OpenProposal> proposals, ref bool staleUnverifiableNoted)
+	public static (bool FeedStale, HashSet<int> Suspect) Inspect(IReadOnlyDictionary<string, OptionContractQuote> book, DateTimeOffset now, bool marketOpen, string vendorName, OpenerQuoteGuardConfig cfg, IReadOnlyList<OpenProposal> proposals, ref bool staleUnverifiableNoted)
 	{
 		var suspect = new HashSet<int>();
 		if (cfg is null || !cfg.Enabled) return (false, suspect);
 
-		var feedStale = QuoteSanity.IsFeedStale(book, now, cfg.MaxQuoteAgeSeconds, out var freshestAge);
-		if (feedStale)
-			AnsiConsole.MarkupLine($"[red bold]⚠ QUOTE WARNING:[/] {Markup.Escape(vendorName)} feed looks STALE — freshest quote {freshestAge:0}s old (> {cfg.MaxQuoteAgeSeconds}s). Holding opens; mid/--limit unreliable.");
-		else if (freshestAge is null && !staleUnverifiableNoted)
+		// Staleness is RTH-only: after the close every quote is legitimately minutes-to-hours old, so checking
+		// off-hours would cry wolf on every research scan and train the eye to ignore the real warning. Torn-NBBO
+		// runs regardless (a crossed/absurd spread is wrong at any hour).
+		var feedStale = false;
+		if (marketOpen)
 		{
-			staleUnverifiableNoted = true;
-			AnsiConsole.MarkupLine($"[yellow]note:[/] staleness unverifiable on {Markup.Escape(vendorName)} (quotes carry no timestamp this tick); torn-NBBO guard still active.");
+			feedStale = QuoteSanity.IsFeedStale(book, now, cfg.MaxQuoteAgeSeconds, out var freshestAge);
+			if (feedStale)
+				AnsiConsole.MarkupLine($"[red bold]⚠ QUOTE WARNING:[/] {Markup.Escape(vendorName)} feed looks STALE — freshest quote {freshestAge:0}s old (> {cfg.MaxQuoteAgeSeconds}s). Holding opens; mid/--limit unreliable.");
+			else if (freshestAge is null && !staleUnverifiableNoted)
+			{
+				staleUnverifiableNoted = true;
+				AnsiConsole.MarkupLine($"[yellow]note:[/] staleness unverifiable on {Markup.Escape(vendorName)} (quotes carry no timestamp this tick); torn-NBBO guard still active.");
+			}
 		}
 
 		for (var i = 0; i < proposals.Count; i++)
