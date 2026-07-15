@@ -67,14 +67,20 @@ internal static class WebullOptionsClient
 		["platform"] = "web",
 	};
 
-	// Bound every HTTP call so a Webull stall (throttle, dropped connection, partial response)
-	// can't freeze a watch tick for the .NET default 100s. 15s is comfortably above normal
-	// chain/queryBatch round-trip (~1-3s) and short enough to give the tick interval headroom.
-	private static HttpClient CreateClient()
+	// Shared HttpClient. Creating one per public call (the `using var client = new HttpClient()` pattern)
+	// churns TCP sockets/ports — under the sustained per-tick churn of the live watch loop (a fresh client
+	// per ~65s tick when vendor=webull) the Webull edge starts dropping connections at the TLS handshake,
+	// surfacing as "The SSL connection could not be established". A single pooled client (keep-alive) avoids
+	// it. Same fix already applied to WebullChartsClient (42ce622) and SchwabHttp for the identical symptom;
+	// kept a separate client from WebullChartsClient.SharedClient because the timeout differs (see below) and
+	// Timeout is a client-level property. The 15s timeout bounds every call so a Webull stall (throttle,
+	// dropped connection, partial response) can't freeze a watch tick for the .NET default 100s — 15s is
+	// comfortably above normal chain/queryBatch round-trip (~1-3s) and short enough to give the tick headroom.
+	private static readonly HttpClient SharedClient = new() { Timeout = TimeSpan.FromSeconds(15) };
+
+	static WebullOptionsClient()
 	{
-		var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
-		return client;
+		SharedClient.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
 	}
 
 	public static async Task<(IReadOnlyDictionary<string, OptionContractQuote> OptionQuotes, IReadOnlyDictionary<string, decimal> UnderlyingPrices)> FetchOptionQuotesAsync(ApiConfig config, IEnumerable<PositionRow> positionRows, CancellationToken cancellationToken)
@@ -92,7 +98,7 @@ internal static class WebullOptionsClient
 
 		var roots = wantedSymbols.Select(s => ParsingHelpers.ParseOptionSymbol(s)).Where(p => p != null).Select(p => p!.Root).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-		using var client = CreateClient();
+		var client = SharedClient;
 
 		// derivativeIdMap is populated as a side effect of FetchChainsAsync so we can run the queryBatch
 		// fallback below for position legs that came back without a usable bid/ask.
@@ -154,7 +160,7 @@ internal static class WebullOptionsClient
 	/// chain dict to <see cref="RefreshContractsAsync"/> to fill in OI/IV for symbols beyond the front month.</summary>
 	public static async Task<(IReadOnlyDictionary<string, OptionContractQuote> OptionQuotes, decimal? UnderlyingPrice, IReadOnlyDictionary<string, long> DerivativeIds)> FetchChainAsync(ApiConfig config, string ticker, CancellationToken cancellationToken)
 	{
-		using var client = CreateClient();
+		var client = SharedClient;
 		var derivativeIdMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 		var (quotes, underlyings) = await FetchChainsInternalAsync(client, config, new[] { ticker }, derivativeIdMap, cancellationToken);
 		underlyings.TryGetValue(ticker, out var spot);
@@ -221,7 +227,7 @@ internal static class WebullOptionsClient
 
 		if (ids.Count == 0) return 0;
 
-		using var client = CreateClient();
+		var client = SharedClient;
 
 		var refreshed = 0;
 		const int batchSize = 50;
@@ -307,7 +313,7 @@ internal static class WebullOptionsClient
 
 	public static async Task<Dictionary<string, long>> ResolveTickerIdsAsync(IEnumerable<string> symbols, CancellationToken cancellationToken)
 	{
-		using var client = CreateClient();
+		var client = SharedClient;
 		var result = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 		foreach (var symbol in symbols)
 		{
