@@ -25,6 +25,17 @@ internal sealed class WebullOpenApiException : Exception
 
 internal sealed class WebullOpenApiClient : IDisposable
 {
+	// Pooled HttpClient per distinct host. Constructing one per instance (the old `new HttpClient()` in the
+	// ctor) churned a fresh TCP/TLS connection every time a WebullOpenApiClient was built — and the live watch
+	// loop builds one PER TICK for the broker-state/position/account reads (BrokerStateService, LivePositionSource).
+	// Under that sustained per-tick churn the Webull OpenAPI edge starts dropping the TLS handshake, surfacing as
+	// "The SSL connection could not be established" -> "connection forcibly closed by the remote host" bubbling up
+	// as a whole-tick failure (distinct from the Schwab quote path — different host, no chains-retry message). Same
+	// churn fix already applied to WebullChartsClient/WebullOptionsClient/SchwabHttp/MassivePolygonClient. Keyed by
+	// BaseUrl so the client's BaseAddress stays fixed; the account-specific token is applied per-request via
+	// ApplyAccessTokenHeader, so accounts sharing a host safely share one pooled connection.
+	private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, HttpClient> SharedClients = new();
+
 	private readonly HttpClient _http;
 	private readonly TradeAccount _account;
 	private readonly string? _accessToken;
@@ -33,13 +44,16 @@ internal sealed class WebullOpenApiClient : IDisposable
 	internal WebullOpenApiClient(TradeAccount account)
 	{
 		_account = account;
-		_http = new HttpClient { BaseAddress = new Uri(account.BaseUrl) };
+		_http = SharedClients.GetOrAdd(account.BaseUrl, static url => new HttpClient { BaseAddress = new Uri(url) });
 		// Load cached token so subsequent requests include x-access-token automatically.
 		var cached = TokenStore.Load(account.Alias);
 		_accessToken = cached?.Status == "NORMAL" ? cached.Token : null;
 	}
 
-	public void Dispose() => _http.Dispose();
+	// No-op: _http is a process-wide pooled client shared across every instance for this host (see SharedClients),
+	// so it must outlive any single instance. Kept on IDisposable so existing `using var client = ...` sites — which
+	// correctly scope the wrapper — continue to compile and read naturally; only the transport is no longer torn down.
+	public void Dispose() { }
 
 	private void ApplyAccessTokenHeader(HttpRequestMessage req, string path)
 	{
