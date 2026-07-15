@@ -84,13 +84,12 @@ internal static class SchwabAuthClient
 
 	private static async Task PostTokenAsync(SchwabConfig schwab, Dictionary<string, string> form, bool isRefresh, CancellationToken ct)
 	{
-		using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 		using var request = new HttpRequestMessage(HttpMethod.Post, TokenUrl);
 		var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{schwab.ClientId}:{schwab.ClientSecret}"));
 		request.Headers.Authorization = new AuthenticationHeaderValue("Basic", basic);
 		request.Content = new FormUrlEncodedContent(form);
 
-		using var response = await client.SendAsync(request, ct);
+		using var response = await SchwabHttp.Client.SendAsync(request, ct);
 		var body = await response.Content.ReadAsStringAsync(ct);
 		if (!response.IsSuccessStatusCode)
 			throw new SchwabAuthException($"HTTP {(int)response.StatusCode}: {Truncate(body, 300)}");

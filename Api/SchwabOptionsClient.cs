@@ -109,8 +109,9 @@ internal static class SchwabOptionsClient
 	/// <summary>Issues the chains GET with a bounded retry on transport-level transient failures — SSL handshake
 	/// aborts and mid-request connection resets (<c>HttpRequestException</c>/<c>IOException</c>, typically an inner
 	/// <c>SocketException</c> "forcibly closed by the remote host") that show up as intermittent single-tick failures
-	/// in the live watch loop. A fresh client+request is used per attempt; non-transport failures (auth, 502 TooBig,
-	/// timeouts) propagate to the caller unchanged.</summary>
+	/// in the live watch loop. Sends through the pooled <see cref="SchwabHttp.Client"/> (see its comment: churning a
+	/// fresh client per call is what provokes the RST in the first place); a fresh request message is used per attempt.
+	/// Non-transport failures (auth, 502 TooBig, timeouts) propagate to the caller unchanged.</summary>
 	private static async Task<(HttpStatusCode Status, string Body)> SendWithTransientRetryAsync(string url, string accessToken, CancellationToken ct)
 	{
 		const int maxAttempts = 3;
@@ -118,12 +119,11 @@ internal static class SchwabOptionsClient
 		{
 			try
 			{
-				using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 				using var request = new HttpRequestMessage(HttpMethod.Get, url);
 				request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
 				request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-				using var response = await client.SendAsync(request, ct);
+				using var response = await SchwabHttp.Client.SendAsync(request, ct);
 				var body = await response.Content.ReadAsStringAsync(ct);
 				return (response.StatusCode, body);
 			}
