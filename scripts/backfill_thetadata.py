@@ -738,11 +738,57 @@ def seal_quote_expiry(out_root: Path, ticker: str, exp_iso: str, end_date: date)
             conn.close()
 
 
+# ----- run-scoped completed-expiration manifest (threaded pull only) -----------------------------------
+# When the supervisor RESTARTS a wedged worker, the fresh worker rebuilds its todo from the DB `sealed`
+# table alone — so an unsealed expiration the previous worker already finished (today's / future frontier
+# contracts, which are NEVER sealed) would be pulled AGAIN from scratch, wasting the whole re-pull. This
+# manifest records every expiration COMPLETED during the CURRENT supervisor run so the restarted worker
+# skips it and CONTINUES the pass instead of restarting it. It is deleted at the start and end of each
+# supervisor run, so it never persists across daily runs — the frontier still refreshes every invocation.
+# Sibling of quotes.db.
+_RUN_PROGRESS_LOCK = threading.Lock()  # worker threads record concurrently → serialize manifest writes
+
+
+def _run_progress_path(out_root: Path) -> Path:
+    return _quotes_db_path(out_root).with_name("quotes.db-runprogress.json")
+
+
+def load_run_progress(out_root: Path) -> set:
+    """Keys "TICKER|EXP" completed earlier in this supervisor run. Missing/unreadable → empty (re-pull)."""
+    p = _run_progress_path(out_root)
+    if not p.exists():
+        return set()
+    try:
+        return set(json.loads(p.read_text()).get("done", []))
+    except Exception:
+        return set()  # unreadable → treat as nothing done; re-pull rather than silently skip coverage
+
+
+def clear_run_progress(out_root: Path):
+    _run_progress_path(out_root).unlink(missing_ok=True)
+
+
+def record_run_progress(out_root: Path, ticker: str, exp_iso: str):
+    """Mark (ticker, exp) done for this run so a restarted worker skips it. Thread-safe; atomic write."""
+    key = f"{ticker}|{exp_iso}"
+    with _RUN_PROGRESS_LOCK:
+        done = load_run_progress(out_root)
+        if key in done:
+            return
+        done.add(key)
+        p = _run_progress_path(out_root)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"done": sorted(done)}, indent=2))
+        os.replace(tmp, p)  # atomic
+
+
 def _build_quote_work_with(client, tickers, start, end, out_root, dte_map):
     """List expirations per ticker (via the given client) and return [(ticker, exp, dte)] for those not
-    yet SEALED. Unsealed expirations — including still-alive/future ones near `end` — are (re)pulled so
-    the live frontier fills in as days elapse; sealed (final) ones are skipped."""
+    yet SEALED and not already COMPLETED earlier in this supervisor run. Unsealed expirations — including
+    still-alive/future ones near `end` — are (re)pulled so the live frontier fills in as days elapse;
+    sealed (final) ones are skipped, as are this-run completions (so a restart continues, not restarts)."""
     work = []
+    done = load_run_progress(out_root)
     for ticker in tickers:
         dte = dte_map.get(ticker)
         if dte is None:
@@ -756,8 +802,11 @@ def _build_quote_work_with(client, tickers, start, end, out_root, dte_map):
             continue
         hi = (end + timedelta(days=dte)).isoformat()
         rel = sorted(e for e in exps if start.isoformat() <= e <= hi)
-        todo = [(ticker, e, dte) for e in rel if e not in sealed]
-        log.info(f"=== {ticker} (dte={dte}): {len(rel)} expirations, {len(sealed)} sealed, {len(todo)} to pull ===")
+        sealed_n = sum(1 for e in rel if e in sealed)
+        todo = [(ticker, e, dte) for e in rel if e not in sealed and f"{ticker}|{e}" not in done]
+        skipped = len(rel) - sealed_n - len(todo)  # unsealed but already completed THIS run
+        tail = f", {skipped} done this run" if skipped > 0 else ""
+        log.info(f"=== {ticker} (dte={dte}): {len(rel)} expirations, {sealed_n} sealed, {len(todo)} to pull{tail} ===")
         work.extend(todo)
     return work
 
@@ -794,6 +843,7 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
             log.info(f"  exp {ticker} {e}")
             process_one_expiration(c, ticker, e, dte, rate, out_root, start, end, chunk_days)
             seal_quote_expiry(out_root, ticker, e, end)
+            record_run_progress(out_root, ticker, e)  # so a restarted worker skips this completed expiry
         except BaseException as ex:  # one failed expiration shouldn't stop the pass; a later run retries it (not sealed)
             log.info(f"  [error] {ticker} exp {e}: {type(ex).__name__}: {ex}")
         finally:
@@ -820,6 +870,7 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
         # DB file mtime advances on each expiry commit; the -wal sidecar too. Either rising = progress.
         return max((p.stat().st_mtime for p in (db_path, db_path.with_suffix(".db-wal")) if p.exists()), default=0.0)
 
+    clear_run_progress(out_root)  # fresh run: forget prior-run completions so the frontier still refreshes
     restarts = 0
     p = None
     try:
@@ -858,6 +909,7 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
         if p is not None and p.is_alive():
             log.info("[abort] terminating quote worker")
             p.terminate(); p.join()
+        clear_run_progress(out_root)  # run over (clean finish or abort) → drop the this-run completion manifest
 
 
 def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency):
