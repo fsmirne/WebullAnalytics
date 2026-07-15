@@ -198,7 +198,9 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			catch (Exception ex)
 			{
 				failures++;
-				AnsiConsole.MarkupLine($"[red]Tick {ticksRun + 1} failed ({failures}/5): {Markup.Escape(ex.Message)}[/]");
+				var chain = new System.Text.StringBuilder(ex.Message);
+				for (var inner = ex.InnerException; inner != null; inner = inner.InnerException) chain.Append(" -> ").Append(inner.GetType().Name).Append(": ").Append(inner.Message);
+				AnsiConsole.MarkupLine($"[red]Tick {ticksRun + 1} failed ({failures}/5): {Markup.Escape(chain.ToString())}[/]");
 				if (failures >= 5)
 				{
 					Console.Error.WriteLine("Circuit breaker: 5 consecutive tick failures. Exiting.");
