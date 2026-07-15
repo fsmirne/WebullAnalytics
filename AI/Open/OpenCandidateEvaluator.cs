@@ -88,6 +88,16 @@ internal sealed class OpenCandidateEvaluator
 	/// scoring path reads it back.</summary>
 	public IReadOnlyDictionary<string, RegimeAnalyzer.RegimeComponents> LastRegimeComponents { get; private set; } = new Dictionary<string, RegimeAnalyzer.RegimeComponents>(StringComparer.OrdinalIgnoreCase);
 
+	/// <summary>The option book the opener actually priced its candidates from on the most recent
+	/// <see cref="EvaluateAsync"/> call — <c>ctx.Quotes</c> overlaid with the bootstrap/snapshot chain and any
+	/// Phase-B refetch. The live quote-integrity guard must inspect THIS, not the management-side ctx book: on a
+	/// no-position scan the ctx fetch spans only the same-day expiry window, so a ticker whose earliest expiry
+	/// isn't today (e.g. GME, whose weeklies start Friday) leaves ctx.Quotes empty of every traded leg. The guard
+	/// would then find no timestamped two-sided quote and mis-report "staleness unverifiable" while silently
+	/// skipping the torn-NBBO check on legs it can't see. Reset to empty at the top of each call and populated
+	/// once Phase B finalizes the priced book; stays empty when the opener enumerates nothing.</summary>
+	public IReadOnlyDictionary<string, OptionContractQuote> LastPricedQuotes { get; private set; } = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+
 	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation, QuoteOverrides quoteOverrides = default)
 	{
 		var cfg = _config.Opener;
@@ -100,6 +110,8 @@ internal sealed class OpenCandidateEvaluator
 
 		var tickerSet = _config.TickerSet();
 		var output = new List<OpenProposal>();
+		// Reset so the live quote guard never inspects a prior tick's book; repopulated once Phase B finalizes it.
+		LastPricedQuotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 
 		// Phase A0: bootstrap spots + chains for tickers missing from ctx.UnderlyingPrices.
 		// The live-quote clients return the full chain plus the underlying spot for any OCC symbol,
@@ -279,6 +291,9 @@ internal sealed class OpenCandidateEvaluator
 				mergedQuotes = new OverlayQuoteDictionary(ctx.Quotes, overlay);
 			}
 		}
+
+		// Expose the finalized priced book for the live quote-integrity guard (see LastPricedQuotes).
+		LastPricedQuotes = mergedQuotes;
 
 		// Snapshot-tradeable strikes (live only): the daily chain snapshot is the authoritative liquidity
 		// signal. A leg the snapshot confirmed tradeable (real bid/ask) bypasses the scorer's open-interest

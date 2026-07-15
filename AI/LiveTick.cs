@@ -89,7 +89,13 @@ internal static class LiveTick
 			// leg bid 10.36 / ask 20.36) and withhold the affected opens from auto-execution. Proposals still
 			// render so the issue stays visible amid a fast-scrolling watch.
 			var nowOffset = new DateTimeOffset(now);
-			var (feedStale, suspect) = LiveQuoteGuard.Inspect(quoteSnapshot.Options, nowOffset, MarketCalendar.IsRegularHours(nowOffset), deps.VendorName, config.Opener.QuoteGuard, openResults, ref state.StaleUnverifiableNoted);
+			// Inspect the book the opener actually priced these proposals from, not the management-side ctx book.
+			// On a no-position scan ctx only spans the same-day expiry window, so a ticker whose earliest expiry
+			// isn't today (GME) leaves ctx empty of the traded legs — the guard would mis-report staleness as
+			// "unverifiable" and skip torn-NBBO on legs it can't see. Falls back to ctx when the opener enumerated
+			// nothing (empty priced book → no proposals to guard anyway).
+			var guardBook = deps.OpenEvaluator?.LastPricedQuotes is { Count: > 0 } priced ? priced : quoteSnapshot.Options;
+			var (feedStale, suspect) = LiveQuoteGuard.Inspect(guardBook, nowOffset, MarketCalendar.IsRegularHours(nowOffset), deps.VendorName, config.Opener.QuoteGuard, openResults, ref state.StaleUnverifiableNoted);
 			for (var i = 0; i < openResults.Count; i++) deps.OpenSink.Emit(openResults[i], rank: i + 1);
 			if (deps.OpenerExecutor != null)
 			{
