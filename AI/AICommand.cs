@@ -348,6 +348,10 @@ internal sealed class AIScanSettings : AILiveTickerSubcommandSettings
 	[Description("Like --submit, but additionally ignores the per-day opening cap (today's broker order count) for this ONE run — the deliberate \"place one more trade today\" escape hatch. The run itself is still bounded to maxOrdersPerDay submission(s), and every other guard (held-position dedup, broker dedup, cash gating) stays active. Deliberately scan-only — watch re-evaluates every tick, so an uncapped watch would re-fire all day.")]
 	public bool SubmitOverride { get; set; }
 
+	[CommandOption("--all")]
+	[Description("Ignore opener.minScoreToOpen for this run: emit the full top-N ranked proposals even when their FinalScore is at or below the threshold that would normally suppress them. This is a real gate override, not a display filter — combined with --submit it will place the top pick even if it scored below the threshold. Every other guard (liquidity, held-position/broker dedup, cash gating, per-day cap) stays active.")]
+	public bool All { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -464,7 +468,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			if (config.Opener.Enabled && settings.EmitOpenProposals)
 			{
 				openSink = new OpenProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
-				openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
+				openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true, showAllScores: settings.All);
 			}
 
 			// Scan = one live tick. The only scan-specific behaviour is --spot/--premarket (nonsensical in a watch
@@ -627,7 +631,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
 		{
 			var openSink = new OpenProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
-			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, backtestMode: true, dividendsByRoot: dividendsByRoot);
+			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, backtestMode: true, dividendsByRoot: dividendsByRoot, showAllScores: settings.All);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
