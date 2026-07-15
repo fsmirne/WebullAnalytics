@@ -24,6 +24,7 @@ internal sealed class OpenCandidateEvaluator
 	private readonly HistoricalPriceCache _priceCache;
 	private readonly bool _backtestMode;
 	private readonly bool _enableChainSnapshot;
+	private readonly bool _showAllScores;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
 	private IntradayBarCache? _intradayCache;
 	// Far-expiry bid/ask from the daily chain sweep (keyed by OCC symbol). The sweep only runs once per
@@ -47,7 +48,12 @@ internal sealed class OpenCandidateEvaluator
 	/// instead of the event-cache's single stale forward-projected date — so backtest candidate scoring,
 	/// and therefore selection/fills, matches the dividend-aware live path and the quote source. Null in
 	/// live mode (the event-cache's next ex-date IS the real upcoming one there).</param>
-	public OpenCandidateEvaluator(AIConfig config, IQuoteSource quotes, string pricingMode = SuggestionPricing.Mid, HistoricalPriceCache? priceCache = null, bool backtestMode = false, bool enableChainSnapshot = false, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null)
+	/// <param name="showAllScores">Scan-only gate override (`wa ai scan --all`): emit the top-N ranked
+	/// proposals even when their FinalScore is at or below <c>minScoreToOpen</c>. This is a real override, not a
+	/// display filter — the emitted proposals are ordinary ranked picks, so with <c>--submit</c> the auto-executor
+	/// will place the top one even if it scored below the threshold. Only the scan paths (live and theoretical)
+	/// pass it; watch and the backtest runner leave it false.</param>
+	public OpenCandidateEvaluator(AIConfig config, IQuoteSource quotes, string pricingMode = SuggestionPricing.Mid, HistoricalPriceCache? priceCache = null, bool backtestMode = false, bool enableChainSnapshot = false, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool showAllScores = false)
 	{
 		_config = config;
 		_quotes = quotes;
@@ -55,6 +61,7 @@ internal sealed class OpenCandidateEvaluator
 		_priceCache = priceCache ?? new HistoricalPriceCache();
 		_backtestMode = backtestMode;
 		_enableChainSnapshot = enableChainSnapshot && !backtestMode;
+		_showAllScores = showAllScores;
 		_dividendsByRoot = dividendsByRoot;
 	}
 
@@ -540,7 +547,13 @@ internal sealed class OpenCandidateEvaluator
 			// legacy behavior of emitting any positive-EV trade.
 			var minScore = cfg.MinScoreToOpen;
 			var ranked = RankForOutput(survivors).ToList();
-			foreach (var proposal in ranked.Where(p => (p.FinalScore ?? 0m) > minScore).Take(cfg.TopNPerTicker))
+			// `--all` (scan-only): drop the minScoreToOpen gate so the full top-N is emitted regardless of score.
+			// This is a genuine override, not a display filter — the emitted proposals are ordinary ranked picks,
+			// so `--all --submit` will place the top one even when it scored below the threshold that normally
+			// suppresses it. Every downstream guard (liquidity, dedup, cash, per-day cap) still applies. Without
+			// `--all` the gate stands: only candidates the score endorses (FinalScore > minScoreToOpen) are emitted.
+			var selected = _showAllScores ? ranked : ranked.Where(p => (p.FinalScore ?? 0m) > minScore);
+			foreach (var proposal in selected.Take(cfg.TopNPerTicker))
 				output.Add(proposal);
 
 			// Structure-coverage floor (DEBUG/exploration only): an enabled structure whose best candidate
