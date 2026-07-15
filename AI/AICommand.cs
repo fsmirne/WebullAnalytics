@@ -1086,10 +1086,11 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		{
 			var path = Path.IsPathRooted(settings.FillsJsonlPath) ? settings.FillsJsonlPath : Path.GetFullPath(settings.FillsJsonlPath);
 			using var w = new StreamWriter(path);
+			static string Num(decimal? v) => v.HasValue ? v.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null";
 			foreach (var f in result.Fills)
 			{
 				var legs = string.Join(",", f.Legs.Select(l => $"{{\"sym\":\"{l.Symbol}\",\"side\":\"{l.Side}\",\"qty\":{l.Qty},\"price\":{l.PricePerShare.ToString(System.Globalization.CultureInfo.InvariantCulture)}}}"));
-				w.WriteLine($"{{\"ts\":\"{f.Date:yyyy-MM-ddTHH:mm:ss}\",\"ticker\":\"{f.Ticker}\",\"key\":\"{f.PositionKey}\",\"kind\":\"{f.Kind}\",\"strategy\":\"{f.StrategyKind}\",\"spot\":{f.Spot.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"qty\":{f.Qty},\"net\":{f.NetCashFlow.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"fees\":{f.Fees.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"rule\":{(f.RuleName == null ? "null" : $"\"{f.RuleName}\"")},\"lineage\":{f.LineageId},\"legs\":[{legs}]}}");
+				w.WriteLine($"{{\"ts\":\"{f.Date:yyyy-MM-ddTHH:mm:ss}\",\"ticker\":\"{f.Ticker}\",\"key\":\"{f.PositionKey}\",\"kind\":\"{f.Kind}\",\"strategy\":\"{f.StrategyKind}\",\"spot\":{f.Spot.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"qty\":{f.Qty},\"net\":{f.NetCashFlow.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"fees\":{f.Fees.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"rawScore\":{Num(f.RawScore)},\"finalScore\":{Num(f.FinalScore)},\"iv\":{Num(f.RepIv)},\"rule\":{(f.RuleName == null ? "null" : $"\"{f.RuleName}\"")},\"lineage\":{f.LineageId},\"legs\":[{legs}]}}");
 			}
 		}
 		return 0;

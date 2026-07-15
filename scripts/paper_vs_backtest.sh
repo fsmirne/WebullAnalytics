@@ -67,12 +67,25 @@ if os.path.exists(fills_path):
             bt=f; break
 
 def entry_debit(legs, price_key, side_key):
-    # net debit per contract = sum(buy price) - sum(sell price)
+    # net debit per share = sum(buy price) - sum(sell price)
     s=0.0
     for l in legs:
         p=float(l.get(price_key,0) or 0)
         s += p if str(l[side_key]).lower()=='buy' else -p
-    return round(s,2)
+    return round(s,4)
+
+def live_quote_map(live):
+    # symbol -> {mid,bid,ask,iv,oi} from the opener's captured per-leg NBBO (diagnostic.probe.legQuotes)
+    q={}
+    probe=(live.get('diagnostic') or {}).get('probe') or {}
+    for lq in (probe.get('legQuotes') or []):
+        bid,ask=lq.get('bid'),lq.get('ask')
+        mid=(bid+ask)/2 if bid is not None and ask is not None else None
+        q[lq.get('symbol')]={'mid':mid,'bid':bid,'ask':ask,'iv':lq.get('impliedVolatility'),'oi':lq.get('openInterest')}
+    return q
+
+def fmt(v, nd=3):
+    return f"{v:.{nd}f}" if isinstance(v,(int,float)) else "n/a"
 
 print(f"=== paper vs backtest — SPY {date} ===")
 if not live and not bt:
@@ -89,9 +102,72 @@ live_legs=norm_legs(live['legs'],'symbol','action')
 bt_legs=norm_legs(bt['legs'],'sym','side')
 struct_ok = live_struct==bt_struct
 legs_ok = live_legs==bt_legs
-bt_entry=entry_debit(bt['legs'],'price','side')
-print(f"  live: {live.get('structure'):13s} legs={live_legs}  score={live.get('finalScore'):.5f}")
-print(f"  bt:   {bt.get('strategy'):13s} legs={bt_legs}  entry_debit=${bt_entry}")
+
+# ---- shared aligned grid: label(LW) + live(W) + bt(W) + Δ(W) [+ note] ----
+LW, W = 26, 11
+def cell(s): return f"{s:>{W}}"
+def row(label, a, b, d, note=""):
+    line=f"  {label:<{LW}}{cell(a)}{cell(b)}{cell(d)}"
+    if note: line+=f"   {note}"
+    print(line.rstrip())
+def sf(v, nd, pct=False, sign=False):
+    if not isinstance(v,(int,float)): return "n/a"
+    x=v*100 if pct else v
+    s=f"{x:+.{nd}f}" if sign else f"{x:.{nd}f}"
+    return s+("pt" if pct and sign else "%" if pct else "")
+def delta(a,b): return (b-a) if isinstance(a,(int,float)) and isinstance(b,(int,float)) else None
+def verdict(label, detail, ok):
+    print(f"  {label:<{LW}}{detail:<{2*W}}{'MATCH ✓' if ok else 'MISMATCH ✗'}")
+
+diag=live.get('diagnostic') or {}
+lq=live_quote_map(live)
+bt_p={l['sym']:(float(l.get('price',0) or 0), str(l['side']).lower()) for l in bt['legs']}
+live_side={l['symbol']:str(l['action']).lower() for l in live['legs']}
+
+# ---- structure + legs (the PASS criterion) ----
+verdict("structure", live.get('structure') if struct_ok else f"{live.get('structure')} vs {bt.get('strategy')}", struct_ok)
+verdict("legs", f"{len(live_legs)} legs", legs_ok)
+
+# ---- per-leg: live captured mid vs backtest fill (bid/ask, iv, oi are live-side context) ----
+print()
+row("per-leg", "live mid", "bt fill", "Δ(bt-lv)")
+for sym in sorted(set(live_side)|set(bt_p)):
+    side=live_side.get(sym) or (bt_p.get(sym,(None,''))[1])
+    q=lq.get(sym) or {}
+    mid,bp=q.get('mid'),bt_p.get(sym,(None,None))[0]
+    extra=[]
+    if isinstance(q.get('bid'),(int,float)): extra.append(f"{q['bid']:.2f}/{q['ask']:.2f}")
+    if isinstance(q.get('iv'),(int,float)):  extra.append(f"iv {q['iv']*100:.1f}%")
+    if isinstance(q.get('oi'),(int,float)):  extra.append(f"oi {q['oi']}")
+    row(f"{side:<4} {sym}", sf(mid,3), sf(bp,3), sf(delta(mid,bp),3,sign=True), f"({', '.join(extra)})" if extra else "")
+
+# ---- headline metrics: all comparable (both sides emit these) ----
+print()
+row("metric", "live", "bt", "Δ(bt-lv)")
+live_net=diag.get('netMidPerShare')
+if live_net is None and live.get('cashImpactPerContract') is not None: live_net=abs(live['cashImpactPerContract'])/100.0
+bt_mid=entry_debit(bt['legs'],'price','side')                       # mid-based, no slippage
+bt_fill=abs(bt.get('net',0))/max(1,bt.get('qty',1))/100.0           # what the sim actually paid (mid + slippage model)
+row("net debit/share", sf(live_net,3), sf(bt_mid,3), sf(delta(live_net,bt_mid),3,sign=True), f"bt fill {sf(bt_fill,3)} incl. slippage")
+lspot,bspot=diag.get('spotAtEvaluation'),bt.get('spot')
+row("spot @ entry", sf(lspot,2), sf(bspot,2), sf(delta(lspot,bspot),2,sign=True), f"live @ {live['ts'][11:19]}")
+# live rep IV = mean of the structure's per-leg IVs (== the scorer's representativeIv; see CandidateScorer)
+ivs=[q['iv'] for q in lq.values() if isinstance(q.get('iv'),(int,float))]
+live_iv=sum(ivs)/len(ivs) if ivs else None
+lf,bf=live.get('finalScore'),bt.get('finalScore')
+lr,br=live.get('rawScore'),bt.get('rawScore')
+row("finalScore", sf(lf,5), sf(bf,5), sf(delta(lf,bf),5,sign=True))
+row("rawScore", sf(lr,5), sf(br,5), sf(delta(lr,br),5,sign=True))
+row("rep IV", sf(live_iv,2,pct=True), sf(bt.get('iv'),2,pct=True), sf(delta(live_iv,bt.get('iv')),2,pct=True,sign=True))
+
+# ---- live-only context (no backtest-fill counterpart) ----
+print()
+be=live.get('breakevens') or []
+betail=f"   BE {'/'.join(f'{b:.2f}' for b in be)}" if be else ""
+if isinstance(live.get('pop'),(int,float)):
+    print(f"  live-only   pop {live['pop']*100:.1f}%   ev ${fmt(live.get('ev'),2)}   θ/day ${fmt(live.get('thetaPerDayPerContract'),2)}{betail}")
+
+print()
 if struct_ok and legs_ok:
     print("  RESULT: MATCH ✓ (same structure + same legs)"); sys.exit(0)
 print(f"  RESULT: MISMATCH — structure_ok={struct_ok} legs_ok={legs_ok}"); sys.exit(1)

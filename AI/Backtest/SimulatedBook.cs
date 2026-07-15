@@ -14,7 +14,13 @@ internal sealed record BacktestFill(
 	decimal NetCashFlow,   // signed: +credit, -debit. Excludes fees.
 	decimal Fees,
 	string? RuleName,      // null for Open, else the management rule that fired
-	decimal Spot           // underlying price at the fill — lets the ledger compare strikes vs spot
+	decimal Spot,          // underlying price at the fill — lets the ledger compare strikes vs spot
+	// Scorer outputs carried from the opening proposal, for the paper-vs-backtest fidelity check. Open
+	// fills only (null on Close/Roll/Expire/LegIn — those aren't scored). RepIv = representative IV
+	// (mean of the structure's leg IVs), the same number the scorer feeds volatilityFit.
+	decimal? RawScore = null,
+	decimal? FinalScore = null,
+	decimal? RepIv = null
 );
 
 internal sealed record BacktestLegFill(
@@ -103,7 +109,8 @@ internal sealed class SimulatedBook
 	public int OpenCount => _positions.Count;
 
 	/// <param name="legFills">Per-leg fills. <c>PricePerShare</c> must be set; <c>Side</c> is the executed direction.</param>
-	public bool Open(DateTime date, string ticker, OpenStructureKind structureKind, IReadOnlyList<BacktestLegFill> legFills, int qty, decimal spot)
+	public bool Open(DateTime date, string ticker, OpenStructureKind structureKind, IReadOnlyList<BacktestLegFill> legFills, int qty, decimal spot,
+		decimal? rawScore = null, decimal? finalScore = null, decimal? repIv = null)
 	{
 		var positionLegs = BuildLegsFromFills(legFills, qty, out var strategyKind, structureKind);
 		if (positionLegs.Count == 0) return false;
@@ -138,7 +145,7 @@ internal sealed class SimulatedBook
 		var lineageId = _nextLineageId++;
 		_lineageByKey[key] = lineageId;
 
-		_fills.Add(new BacktestFill(date, key, ticker, strategyKind, qty, BacktestFillKind.Open, lineageId, legFills, cashFlow, fees, null, spot));
+		_fills.Add(new BacktestFill(date, key, ticker, strategyKind, qty, BacktestFillKind.Open, lineageId, legFills, cashFlow, fees, null, spot, rawScore, finalScore, repIv));
 		return true;
 	}
 

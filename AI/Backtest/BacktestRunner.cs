@@ -357,7 +357,7 @@ internal sealed class BacktestRunner
 		if (groups == null || groups.Count == 1)
 		{
 			var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-			return legFills != null && _book.Open(when, p.Ticker, p.StructureKind, legFills, qty, p.Spot);
+			return legFills != null && _book.Open(when, p.Ticker, p.StructureKind, legFills, qty, p.Spot, p.RawScore, p.FinalScore, p.ImpliedVolatilityAnnual);
 		}
 
 		var groupFills = new List<(OpenStructureKind Kind, IReadOnlyList<BacktestLegFill> Fills)>(groups.Count);
@@ -369,7 +369,7 @@ internal sealed class BacktestRunner
 		}
 		var opened = false;
 		foreach (var (kind, fills) in groupFills)
-			opened |= _book.Open(when, p.Ticker, kind, fills, qty, p.Spot);
+			opened |= _book.Open(when, p.Ticker, kind, fills, qty, p.Spot, p.RawScore, p.FinalScore, p.ImpliedVolatilityAnnual);
 		return opened;
 	}
 
@@ -1132,7 +1132,7 @@ internal sealed class BacktestRunner
 		if (_oracle && bestOracle != null)
 		{
 			var b = bestOracle.Value;
-			_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, b.LegFills, b.Proposal.Qty, b.Proposal.Spot);
+			_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, b.LegFills, b.Proposal.Qty, b.Proposal.Spot, b.Proposal.RawScore, b.Proposal.FinalScore, b.Proposal.ImpliedVolatilityAnnual);
 		}
 
 		return new DailyOpenScanResult(HasIntraday: true, LegacyProposals: Array.Empty<OpenProposal>());
