@@ -448,73 +448,36 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var quotes = AIContext.BuildLiveQuoteSource(vendor);
 		AnsiConsole.MarkupLine($"[dim]quote source: {LiveQuoteSource.VendorName(vendor)}[/]");
 
-		var tickerSet = config.TickerSet();
-		var now = DateTime.Now;
-		var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
+			var now = DateTime.Now;
+			var priceCache = new Replay.HistoricalPriceCache();
+			// Apply the live 13-week T-bill risk-free rate before pricing (opener IV back-solve + BS read
+			// OptionMath.RiskFreeRate); keeps scan, watch and analyze-risk consistent.
+			YahooOptionsClient.ApplyToOptionMath(await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation));
 
-		var priceCache = new Replay.HistoricalPriceCache();
-
-		var openPositions = await positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
-		var (cash, accountValue) = await positions.GetAccountStateAsync(now, cancellation);
-		// Apply before FetchQuotesWithHypotheticals: LiveQuoteSource.BackSolveIvFromMid reads OptionMath.RiskFreeRate
-		// when re-calibrating IV from the NBBO mid; using the same live rate here keeps scan in sync with analyze risk.
-		YahooOptionsClient.ApplyToOptionMath(await riskFreeTask);
-
-		var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, quotes, config, cancellation);
-
-		// Spot overrides: --spot pins explicit values (premarket SPXW etc.); --premarket back-solves from
-		// put-call parity on the ATM straddle for any ticker without an explicit pin. The underlying quote
-		// from the chain is replaced before the EvaluationContext is built so the opener scores against the
-		// caller's intended spot. Note: phase-2 hypothetical strike enumeration in FetchQuotesWithHypotheticals
-		// runs against the broker's reported spot — for managed-position scenarios with a wildly stale
-		// underlying, enumerated strike brackets may be slightly off-target, but proposal pricing/scoring
-		// still uses the overridden spot.
-		// Auto premarket correction first (fresh spot from GTH-quote parity or the SPY-converted premarket
-		// bar, IVs re-based); the explicit flags below still overwrite whatever it set.
-		quoteSnapshot = await PremarketSpotOverride.ApplyAsync(quoteSnapshot, config, quotes, now, cancellation);
-		quoteSnapshot = await ApplySpotOverridesAsync(settings, config, quoteSnapshot, quotes, now, cancellation);
-		if (quoteSnapshot == null) return 1;
-
-		var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(
-			tickerSet, priceCache, config.Indicators.TechnicalFilter, now, cancellation);
-
-		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
-		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
-		var (mgmtExecutor, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
-
-		var results = evaluator.Evaluate(ctx);
-		var managementCount = settings.EmitManagementProposals ? results.Count : 0;
-		if (settings.EmitManagementProposals)
-		{
-			using var sink = new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
-			foreach (var r in results) sink.Emit(r.Proposal, r.IsRepeat);
-		}
-		// One shared broker-state pull for this scan, reused by both executors (see BrokerStateService coalescing).
-		var cycleToken = new object();
-		if (mgmtExecutor != null)
-			await mgmtExecutor.HandleAsync(results, ctx, cancellation, cycleToken);
-
-		var openCount = 0;
-		if (config.Opener.Enabled && settings.EmitOpenProposals)
-		{
-			var openSink = new OpenProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
-			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
-			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
-			// LIVE quote-integrity guard: warn loudly on a stale feed or torn NBBO and withhold the affected
-			// opens from auto-execution (same guard as `wa ai watch`; the backtest scan path never runs it).
-			var quoteNoted = false;
-			var (feedStale, suspect) = LiveQuoteGuard.Inspect(quoteSnapshot.Options, new DateTimeOffset(now), LiveQuoteSource.VendorName(vendor), config.Opener.QuoteGuard, openResults, ref quoteNoted);
-			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
-			openCount = openResults.Count;
-			if (openerExecutor != null)
+			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
+			var (mgmtExecutor, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
+			using ProposalSink? mgmtSink = settings.EmitManagementProposals
+				? new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput)
+				: null;
+			OpenProposalSink? openSink = null;
+			OpenCandidateEvaluator? openEvaluator = null;
+			if (config.Opener.Enabled && settings.EmitOpenProposals)
 			{
-				var safeToOpen = feedStale ? new List<OpenProposal>() : openResults.Where((_, i) => !suspect.Contains(i)).ToList();
-				await openerExecutor.HandleAsync(safeToOpen, openPositions, now, cancellation, bypassDailyCap: settings.SubmitOverride, cycleToken: cycleToken);
+				openSink = new OpenProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+				openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
 			}
-		}
 
-		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");
-		return 0;
+			// Scan = one live tick. The only scan-specific behaviour is --spot/--premarket (nonsensical in a watch
+			// loop) and --submit-override bypassing the opener's daily cap; everything else matches watch exactly.
+			var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, mgmtExecutor, openEvaluator, mgmtSink, openSink, openerExecutor,
+				config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: settings.SubmitOverride);
+			var result = await LiveTick.EvaluateAsync(now, deps, new LiveTickState(),
+				snapshot => ApplySpotOverridesAsync(settings, config, snapshot, quotes, now, cancellation), cancellation);
+			if (result.Aborted) return 1;
+
+			var managementCount = settings.EmitManagementProposals ? result.MgmtCount : 0;
+			AnsiConsole.MarkupLine($"[dim]Tick complete: {result.PositionCount} position(s), {managementCount} mgmt proposal(s), {result.OpenCount} open proposal(s) emitted[/]");
+			return 0;
 	}
 
 	/// <summary>Applies --spot and --premarket overrides to the live quote snapshot's Underlyings map.

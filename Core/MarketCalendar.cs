@@ -6,12 +6,28 @@ namespace WebullAnalytics;
 /// </summary>
 internal static class MarketCalendar
 {
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+	private static readonly TimeSpan RegularOpenEt = new(9, 30, 0);
+	private static readonly TimeSpan RegularCloseEt = new(16, 0, 0);
+	private static readonly TimeSpan EarlyCloseEt = new(13, 0, 0);
+
 	/// <summary>Returns true if US options markets are open for regular trading on the given date.</summary>
 	internal static bool IsOpen(DateTime date)
 	{
 		if (date.DayOfWeek == DayOfWeek.Saturday || date.DayOfWeek == DayOfWeek.Sunday)
 			return false;
 		return !IsHoliday(date);
+	}
+
+	/// <summary>True when <paramref name="now"/> falls inside NYSE regular trading hours — 09:30–16:00 ET on a
+	/// trading day (13:00 on an early-close half-day). Gates RTH-only live logic such as the quote-staleness
+	/// guard, which is meaningless off-hours (after the close every quote is legitimately minutes-to-hours old).</summary>
+	internal static bool IsRegularHours(DateTimeOffset now)
+	{
+		var et = TimeZoneInfo.ConvertTime(now, NyTz);
+		if (!IsOpen(et.Date)) return false;
+		var t = et.TimeOfDay;
+		return t >= RegularOpenEt && t <= (IsEarlyClose(et.Date) ? EarlyCloseEt : RegularCloseEt);
 	}
 
 	/// <summary>The given date if it's a trading day, else the nearest open day before it. Used to map a
