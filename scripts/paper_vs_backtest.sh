@@ -26,7 +26,29 @@ LXFILLS="/mnt/c/Users/USER/AppData/Local/WebullAnalytics/sweeps/pvb.jsonl"
 [ -f "$PROPOSALS" ] || { echo "NOTE: no proposal log yet at $PROPOSALS — run 'wa ai watch SPY --strategy $STRATEGY' (submit off) first."; exit 2; }
 
 rm -f "$LXFILLS" 2>/dev/null
-"$WA" ai backtest SPY --strategy "$STRATEGY" --since "$DATE" --until "$DATE" --lots 1 --scan-stride 1 --fills-jsonl "$WINFILLS" >/dev/null 2>&1
+
+# Bar-align the backtest to live's ACTUAL entry minute. The opener normally fires at the 09:30 open, but a
+# quote-vendor outage can delay the first successful proposal (e.g. Webull API down till 09:45). --open-after
+# withholds backtest opens until that ET minute so BOTH sides evaluate the same bar; on a clean day it resolves
+# to 09:30 (a no-op). NOTE: --open-after also lets the 09:30→entry intraday tape blend into the directional
+# bias, so it aligns the entry BAR, not the bias provenance a broken live day actually had.
+LIVE_MIN=$(python3 - "$DATE" "$PROPOSALS" <<'PY'
+import json, sys
+date, path = sys.argv[1], sys.argv[2]
+mins=[]
+for line in open(path):
+    line=line.strip()
+    if not line: continue
+    try: r=json.loads(line)
+    except Exception: continue
+    if r.get('type')=='open' and r.get('ts','')[:10]==date and r['ts'][11:19]>='09:30:00':
+        mins.append(r['ts'][11:16])
+print(min(mins) if mins else '')
+PY
+)
+OPEN_AFTER=()
+[ -n "$LIVE_MIN" ] && OPEN_AFTER=(--open-after "$LIVE_MIN")
+"$WA" ai backtest SPY --strategy "$STRATEGY" --since "$DATE" --until "$DATE" --lots 1 --scan-stride 1 ${OPEN_AFTER[@]+"${OPEN_AFTER[@]}"} --fills-jsonl "$WINFILLS" >/dev/null 2>&1
 
 python3 - "$DATE" "$PROPOSALS" "$LXFILLS" <<'PY'
 import json, os, sys
@@ -128,29 +150,48 @@ live_side={l['symbol']:str(l['action']).lower() for l in live['legs']}
 verdict("structure", live.get('structure') if struct_ok else f"{live.get('structure')} vs {bt.get('strategy')}", struct_ok)
 verdict("legs", f"{len(live_legs)} legs", legs_ok)
 
-# ---- per-leg: live captured mid vs backtest fill (bid/ask, iv, oi are live-side context) ----
+# ---- per-leg ----
 print()
-row("per-leg", "live mid", "bt fill", "Δ(bt-lv)")
-for sym in sorted(set(live_side)|set(bt_p)):
-    side=live_side.get(sym) or (bt_p.get(sym,(None,''))[1])
+def leg_ctx(sym):   # live-side bid/ask, iv, oi for a symbol
     q=lq.get(sym) or {}
-    mid,bp=q.get('mid'),bt_p.get(sym,(None,None))[0]
-    extra=[]
-    if isinstance(q.get('bid'),(int,float)): extra.append(f"{q['bid']:.2f}/{q['ask']:.2f}")
-    if isinstance(q.get('iv'),(int,float)):  extra.append(f"iv {q['iv']*100:.1f}%")
-    if isinstance(q.get('oi'),(int,float)):  extra.append(f"oi {q['oi']}")
-    row(f"{side:<4} {sym}", sf(mid,3), sf(bp,3), sf(delta(mid,bp),3,sign=True), f"({', '.join(extra)})" if extra else "")
+    parts=[]
+    if isinstance(q.get('bid'),(int,float)): parts.append(f"{q['bid']:.2f}/{q['ask']:.2f}")
+    if isinstance(q.get('iv'),(int,float)):  parts.append(f"iv {q['iv']*100:.1f}%")
+    if isinstance(q.get('oi'),(int,float)):  parts.append(f"oi {q['oi']}")
+    return f"({', '.join(parts)})" if parts else ""
+if legs_ok:
+    # same legs → align by symbol: live captured mid vs backtest fill
+    row("per-leg", "live mid", "bt fill", "Δ(bt-lv)")
+    for sym in sorted(live_side):
+        mid,bp=(lq.get(sym) or {}).get('mid'),bt_p.get(sym,(None,None))[0]
+        row(f"{live_side[sym]:<4} {sym}", sf(mid,3), sf(bp,3), sf(delta(mid,bp),3,sign=True), leg_ctx(sym))
+else:
+    # different legs → don't fake a symbol alignment; list each side's legs, each row prefixed live/bt
+    print("  legs differ — listed per side (no per-leg Δ):")
+    for sym in sorted(live_side):
+        print(f"    live  {live_side[sym]:<4} {sym}  @ {fmt((lq.get(sym) or {}).get('mid'),3)}   {leg_ctx(sym)}".rstrip())
+    for sym in sorted(bt_p):
+        price,side=bt_p[sym]
+        print(f"    bt    {side:<4} {sym}  @ {fmt(price,3)}")
 
 # ---- headline metrics: all comparable (both sides emit these) ----
 print()
 row("metric", "live", "bt", "Δ(bt-lv)")
+# entry-time alignment: --open-after should have pinned bt to live's minute; a residual gap flags a day the
+# backtest couldn't bar-align (deltas below would then reflect timing, not the engine).
+def hms(t):
+    try: h,m,s=t.split(':'); return int(h)*3600+int(m)*60+int(float(s))
+    except Exception: return None
+lt_s,bt_s=hms(live['ts'][11:19]),hms(bt['ts'][11:19])
+skew=(bt_s-lt_s) if lt_s is not None and bt_s is not None else None
+row("entry time ET", live['ts'][11:19], bt['ts'][11:19], "aligned" if (skew is not None and abs(skew)<60) else (f"{skew//60:+d}m" if skew is not None else "n/a"))
 live_net=diag.get('netMidPerShare')
 if live_net is None and live.get('cashImpactPerContract') is not None: live_net=abs(live['cashImpactPerContract'])/100.0
 bt_mid=entry_debit(bt['legs'],'price','side')                       # mid-based, no slippage
 bt_fill=abs(bt.get('net',0))/max(1,bt.get('qty',1))/100.0           # what the sim actually paid (mid + slippage model)
 row("net debit/share", sf(live_net,3), sf(bt_mid,3), sf(delta(live_net,bt_mid),3,sign=True), f"bt fill {sf(bt_fill,3)} incl. slippage")
 lspot,bspot=diag.get('spotAtEvaluation'),bt.get('spot')
-row("spot @ entry", sf(lspot,2), sf(bspot,2), sf(delta(lspot,bspot),2,sign=True), f"live @ {live['ts'][11:19]}")
+row("spot @ entry", sf(lspot,2), sf(bspot,2), sf(delta(lspot,bspot),2,sign=True))
 # live rep IV = mean of the structure's per-leg IVs (== the scorer's representativeIv; see CandidateScorer)
 ivs=[q['iv'] for q in lq.values() if isinstance(q.get('iv'),(int,float))]
 live_iv=sum(ivs)/len(ivs) if ivs else None
@@ -166,6 +207,9 @@ be=live.get('breakevens') or []
 betail=f"   BE {'/'.join(f'{b:.2f}' for b in be)}" if be else ""
 if isinstance(live.get('pop'),(int,float)):
     print(f"  live-only   pop {live['pop']*100:.1f}%   ev ${fmt(live.get('ev'),2)}   θ/day ${fmt(live.get('thetaPerDayPerContract'),2)}{betail}")
+
+if skew is not None and abs(skew)>=60:
+    print(f"  ⚠ entry-time skew {skew//60:+d}m — backtest could NOT bar-align to live; deltas may reflect timing, not the engine.")
 
 print()
 if struct_ok and legs_ok:
