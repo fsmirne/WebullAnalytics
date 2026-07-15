@@ -417,7 +417,8 @@ internal static class WebullOptionsClient
 						ImpliedVolatility: GetDecimal(contract, "impVol"),
 						HistoricalVolatility: GetDecimal(contract, "hiv"),
 						BidSize: GetBestSize(contract, "bidList"),
-						AskSize: GetBestSize(contract, "askList")
+						AskSize: GetBestSize(contract, "askList"),
+						QuoteTime: GetTradeTime(contract)
 					));
 				}
 			}
@@ -470,7 +471,8 @@ internal static class WebullOptionsClient
 					ImpliedVolatility: GetDecimal(contract, "impVol"),
 					HistoricalVolatility: GetDecimal(contract, "hiv"),
 					BidSize: GetBestSize(contract, "bidList"),
-					AskSize: GetBestSize(contract, "askList")
+					AskSize: GetBestSize(contract, "askList"),
+					QuoteTime: GetTradeTime(contract)
 				));
 			}
 		}
@@ -514,5 +516,19 @@ internal static class WebullOptionsClient
 			JsonValueKind.String => long.TryParse(el.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var l) ? l : null,
 			_ => null,
 		};
+	}
+
+	// Webull stamps each contract with tradeStamp (epoch ms of the LAST TRADE). It's a last-trade time, not a
+	// quote time, so a single illiquid strike can read old even on a live feed — the live staleness guard keys
+	// off the FRESHEST such stamp across the whole book, which stays recent while any near-ATM strike trades.
+	// Falls back to parsing the ISO tradeTime string if tradeStamp is absent. 0/negative -> null.
+	private static DateTimeOffset? GetTradeTime(JsonElement contract)
+	{
+		if (GetLong(contract, "tradeStamp") is { } ms && ms > 0)
+			return DateTimeOffset.FromUnixTimeMilliseconds(ms);
+		if (contract.TryGetProperty("tradeTime", out var tt) && tt.ValueKind == JsonValueKind.String
+			&& DateTimeOffset.TryParse(tt.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+			return parsed;
+		return null;
 	}
 }

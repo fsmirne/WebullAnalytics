@@ -500,10 +500,17 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			var openSink = new OpenProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 			var openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
 			var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
+			// LIVE quote-integrity guard: warn loudly on a stale feed or torn NBBO and withhold the affected
+			// opens from auto-execution (same guard as `wa ai watch`; the backtest scan path never runs it).
+			var quoteNoted = false;
+			var (feedStale, suspect) = LiveQuoteGuard.Inspect(quoteSnapshot.Options, new DateTimeOffset(now), LiveQuoteSource.VendorName(vendor), config.Opener.QuoteGuard, openResults, ref quoteNoted);
 			for (var i = 0; i < openResults.Count; i++) openSink.Emit(openResults[i], rank: i + 1);
 			openCount = openResults.Count;
 			if (openerExecutor != null)
-				await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation, bypassDailyCap: settings.SubmitOverride, cycleToken: cycleToken);
+			{
+				var safeToOpen = feedStale ? new List<OpenProposal>() : openResults.Where((_, i) => !suspect.Contains(i)).ToList();
+				await openerExecutor.HandleAsync(safeToOpen, openPositions, now, cancellation, bypassDailyCap: settings.SubmitOverride, cycleToken: cycleToken);
+			}
 		}
 
 		AnsiConsole.MarkupLine($"[dim]Tick complete: {openPositions.Count} position(s), {managementCount} mgmt proposal(s), {openCount} open proposal(s) emitted[/]");

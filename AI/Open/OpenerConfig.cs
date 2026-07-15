@@ -99,6 +99,10 @@ internal sealed class OpenerConfig
 
 	[JsonPropertyName("liquidity")] public OpenerLiquidityConfig Liquidity { get; set; } = new();
 
+	/// <summary>LIVE-only quote-integrity guards (staleness + torn-NBBO). Never consulted in the backtest,
+	/// which prices from a clean historical store. Defaults on. See <see cref="OpenerQuoteGuardConfig"/>.</summary>
+	[JsonPropertyName("quoteGuard")] public OpenerQuoteGuardConfig QuoteGuard { get; set; } = new();
+
 	/// <summary>Entry noise gate: the structure's |net entry per share| (at mid) must be at least this
 	/// multiple of the summed per-leg half-spreads, else the candidate is rejected before scoring. When a
 	/// structure's value is small relative to its legs' quote widths, the mid-priced "debit" is dominated
@@ -507,6 +511,33 @@ internal sealed class OpenerLiquidityConfig
 	/// worst-leg spread + min-OI to a value in [0.30, 1.00]. Higher weight = sharper penalty for
 	/// borderline-liquidity candidates among those that survived the hard filter. Default 0.50.</summary>
 	[JsonPropertyName("weight")] public decimal Weight { get; set; } = 0.50m;
+}
+
+/// <summary>LIVE-only quote-integrity guards. A logged-off/degraded vendor feed can return quotes that are
+/// stale (delayed by minutes) or torn (a bid and ask stitched from different moments, e.g. bid 10.36 / ask
+/// 20.36). Either corrupts the mid the opener prices and the <c>--limit</c> it proposes. These guards detect
+/// both and surface a loud warning; the backtest (clean historical NBBO) never runs them.</summary>
+internal sealed class OpenerQuoteGuardConfig
+{
+	/// <summary>Master switch. Default true. False disables both the staleness and torn-NBBO checks.</summary>
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+
+	/// <summary>Feed is flagged stale when even the FRESHEST two-sided quote in the fetched book is older than
+	/// this many seconds vs wall-clock now — the signature of a lagging/logged-off session. Uses the freshest
+	/// (not per-strike) age so an individually quiet strike doesn't false-trip. Only vendors that stamp a quote
+	/// time (Schwab quoteTimeInLong) can be assessed; a vendor with no timestamp is reported as "unverifiable".
+	/// Default 120s. 0 disables the staleness check.</summary>
+	[JsonPropertyName("maxQuoteAgeSeconds")] public int MaxQuoteAgeSeconds { get; set; } = 120;
+
+	/// <summary>A leg's two-sided quote is "torn" when its spread exceeds BOTH this fraction of the mid AND
+	/// <see cref="MinAbsSpreadDollars"/> — the AND keeps genuinely cheap options (wide in % but pennies in
+	/// absolute terms) from tripping it. A crossed quote (bid ≥ ask) is always torn regardless. Default 0.50
+	/// (50% of mid). 0 disables the wide-spread check (crossed is still caught).</summary>
+	[JsonPropertyName("maxSpreadPctOfMid")] public decimal MaxSpreadPctOfMid { get; set; } = 0.50m;
+
+	/// <summary>Absolute spread floor (dollars/share) for the torn-NBBO check; a leg trips only when its
+	/// spread clears this AND <see cref="MaxSpreadPctOfMid"/>. Default $1.00.</summary>
+	[JsonPropertyName("minAbsSpreadDollars")] public decimal MinAbsSpreadDollars { get; set; } = 1.00m;
 }
 
 /// <summary>Scheduled-catalyst gates: earnings and ex-dividend filtering. Defaults reject short-leg
