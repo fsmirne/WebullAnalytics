@@ -89,9 +89,6 @@ internal static class WebullChartsClient
 	{
 		if (count <= 0) return Array.Empty<MinuteBar>();
 
-		using var client = new HttpClient();
-		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
-
 		var typeCode = BarIntervalToCode(interval);
 		var url = $"{ChartsQueryUrl}?tickerIds={tickerId}&type={typeCode}&count={count}&extendTrading={(includeExtended ? 1 : 0)}";
 
@@ -102,7 +99,7 @@ internal static class WebullChartsClient
 		HttpResponseMessage response;
 		try
 		{
-			response = await client.SendAsync(request, cancellationToken);
+			response = await SharedClient.SendAsync(request, cancellationToken);
 		}
 		catch (Exception ex)
 		{
