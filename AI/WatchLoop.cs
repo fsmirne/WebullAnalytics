@@ -147,6 +147,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var failures = 0;
 		var ticksRun = 0;
 		var proposalsEmitted = 0;
+		var quoteGuard = config.Opener.QuoteGuard;
+		var staleUnverifiableNoted = false;   // one-time note when the vendor stamps no quote times
 
 		while (!cancellation.IsCancellationRequested && DateTime.Now < stopAt)
 		{
@@ -194,9 +196,18 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				{
 					var openResults = await openEvaluator.EvaluateAsync(ctx, cancellation);
 					openResultCount = openResults.Count;
+					// LIVE quote-integrity guard: warn loudly on a stale feed or torn NBBO (the 07-13 SPY case: long
+					// leg bid 10.36 / ask 20.36) and withhold the affected opens from auto-execution. Proposals still
+					// render so the issue stays visible amid the fast-scrolling watch.
+					var (feedStale, suspect) = LiveQuoteGuard.Inspect(quoteSnapshot.Options, new DateTimeOffset(now), LiveQuoteSource.VendorName(vendor), quoteGuard, openResults, ref staleUnverifiableNoted);
 					for (var i = 0; i < openResults.Count; i++) { openSink.Emit(openResults[i], rank: i + 1); proposalsEmitted++; }
 					if (openerExecutor != null)
-						await openerExecutor.HandleAsync(openResults, openPositions, now, cancellation, cycleToken: cycleToken);
+					{
+						// A stale feed poisons every quote → hold all opens this tick; otherwise drop only the
+						// torn-quote proposals and let clean lower-ranked ones proceed.
+						var safeToOpen = feedStale ? new List<OpenProposal>() : openResults.Where((_, i) => !suspect.Contains(i)).ToList();
+						await openerExecutor.HandleAsync(safeToOpen, openPositions, now, cancellation, cycleToken: cycleToken);
+					}
 				}
 
 				// Per-tick pulse: a timestamped line EVERY tick so both proposals and quiet ticks are anchored

@@ -178,7 +178,11 @@ public record OptionContractQuote(
 	// The vendor's originally-reported IV, preserved when ImpliedVolatility is recalibrated to the NBBO-mid
 	// surface (mid back-solve). Null means ImpliedVolatility is still the vendor value (no recalibration).
 	// Display-only: lets the report/diagnostic show the vendor IV struck through next to the calibrated one.
-	decimal? VendorImpliedVolatility = null
+	decimal? VendorImpliedVolatility = null,
+	// When the vendor stamped this quote (its own quote/trade time), if reported. The LIVE quote-staleness
+	// guard compares this to wall-clock now to detect a lagging/logged-off feed. Null when the vendor
+	// doesn't expose a timestamp (or a synthetic/backtest source) — the staleness guard then can't assess.
+	DateTimeOffset? QuoteTime = null
 );
 
 /// <summary>OHLCV bar at a single point on a fixed interval. Timestamp is the bar's open time in UTC.

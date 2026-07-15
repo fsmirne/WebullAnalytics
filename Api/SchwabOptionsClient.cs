@@ -149,7 +149,10 @@ internal static class SchwabOptionsClient
 					// -999.0 is Schwab's "no value" sentinel.
 					ImpliedVolatility: ToFraction(GetDecimal(contract, "volatility")),
 					BidSize: GetLong(contract, "bidSize"),
-					AskSize: GetLong(contract, "askSize")
+					AskSize: GetLong(contract, "askSize"),
+					// Schwab stamps each contract with quoteTimeInLong (epoch ms); feeds the live staleness guard.
+					// Fall back to tradeTimeInLong when the quote time is absent.
+					QuoteTime: EpochMsToOffset(GetLong(contract, "quoteTimeInLong") ?? GetLong(contract, "tradeTimeInLong"))
 				));
 			}
 		}
@@ -164,6 +167,9 @@ internal static class SchwabOptionsClient
 	private static decimal? ToFraction(decimal? pct) => pct is { } v && v >= 0m ? v / 100m : null;
 
 	private static decimal? PositiveOrNull(decimal? v) => v is { } d && d > 0m ? d : null;
+
+	// Epoch milliseconds -> DateTimeOffset (UTC). 0/negative (Schwab's "no value") -> null.
+	private static DateTimeOffset? EpochMsToOffset(long? epochMs) => epochMs is { } ms && ms > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(ms) : null;
 
 	private static decimal? GetDecimal(JsonElement item, string prop)
 	{
