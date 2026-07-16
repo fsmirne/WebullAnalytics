@@ -1,5 +1,8 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
+using System.Diagnostics;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text.Json;
 using WebullAnalytics.Api;
 
@@ -38,34 +41,51 @@ internal static class SchwabConfigGate
 
 internal sealed class SchwabLoginSettings : CommandSettings { }
 
-/// <summary>Three-legged OAuth login: prints the authorize URL, takes the pasted post-login redirect URL,
-/// exchanges the code for tokens, and stores the refresh token (good for 7 days).</summary>
+/// <summary>Three-legged OAuth login: opens the authorize URL, captures the post-login redirect on a local loopback
+/// listener (falling back to a pasted URL), exchanges the code for tokens, and stores the refresh token (7 days).</summary>
 internal sealed class SchwabLoginCommand : AsyncCommand<SchwabLoginSettings>
 {
 	protected override async Task<int> ExecuteAsync(CommandContext context, SchwabLoginSettings settings, CancellationToken cancellation)
 	{
 		if (!SchwabConfigGate.TryLoad(out _, out var schwab, out var configPath)) return 1;
 
-		AnsiConsole.MarkupLine("[bold]Schwab login[/] — open this URL, log in, and authorize:");
+		var authorizeUrl = SchwabAuthClient.BuildAuthorizeUrl(schwab);
+		AnsiConsole.MarkupLine("[bold]Schwab login[/] — a browser will open for you to log in and authorize.");
+		AnsiConsole.MarkupLine("If it doesn't open, visit this URL manually:");
 		AnsiConsole.WriteLine();
-		AnsiConsole.WriteLine(SchwabAuthClient.BuildAuthorizeUrl(schwab));
+		AnsiConsole.WriteLine(authorizeUrl);
 		AnsiConsole.WriteLine();
-		AnsiConsole.MarkupLine($"Your browser will redirect to [dim]{Markup.Escape(schwab.RedirectUri)}...[/] (the page may fail to load — that's fine).");
-		AnsiConsole.MarkupLine("Copy the [bold]entire URL[/] from the address bar and paste it here:");
-		Console.Write("> ");
+		TryOpenBrowser(authorizeUrl);
 
-		var pasted = Console.ReadLine();
-		if (string.IsNullOrWhiteSpace(pasted))
+		string? code = null;
+		try
 		{
-			AnsiConsole.MarkupLine("[red]No URL entered.[/]");
-			return 1;
+			AnsiConsole.MarkupLine($"Waiting for the redirect to [dim]{Markup.Escape(schwab.RedirectUri)}[/] …");
+			AnsiConsole.MarkupLine("[yellow]Your browser will warn the connection isn't private (self-signed cert) — click Advanced → Proceed to continue.[/]");
+			code = await SchwabRedirectListener.WaitForCodeAsync(schwab, TimeSpan.FromMinutes(5), cancellation);
+		}
+		catch (Exception ex) when (ex is SocketException or AuthenticationException or IOException)
+		{
+			// Port already in use, no permission to bind, or a TLS setup problem — the paste fallback still works.
+			AnsiConsole.MarkupLine($"[yellow]Automatic capture unavailable ({Markup.Escape(ex.Message)}).[/]");
 		}
 
-		var code = SchwabAuthClient.ExtractCode(pasted);
 		if (code == null)
 		{
-			AnsiConsole.MarkupLine("[red]Could not find a 'code' parameter in that URL.[/] Paste the full redirect URL including '?code=...'.");
-			return 1;
+			AnsiConsole.MarkupLine("[dim]Falling back to manual entry.[/] Copy the [bold]entire URL[/] from the address bar and paste it here:");
+			Console.Write("> ");
+			var pasted = Console.ReadLine();
+			if (string.IsNullOrWhiteSpace(pasted))
+			{
+				AnsiConsole.MarkupLine("[red]No URL entered.[/]");
+				return 1;
+			}
+			code = SchwabAuthClient.ExtractCode(pasted);
+			if (code == null)
+			{
+				AnsiConsole.MarkupLine("[red]Could not find a 'code' parameter in that URL.[/] Paste the full redirect URL including '?code=...'.");
+				return 1;
+			}
 		}
 
 		try
@@ -80,6 +100,19 @@ internal sealed class SchwabLoginCommand : AsyncCommand<SchwabLoginSettings>
 
 		AnsiConsole.MarkupLine("[green]Logged in.[/] Refresh token stored — valid for [bold]7 days[/]. Re-run `wa schwab login` weekly.");
 		return 0;
+	}
+
+	/// <summary>Best-effort open of the authorize URL in the default browser; the URL is printed too, so a failure
+	/// here just means the user clicks it themselves.</summary>
+	private static void TryOpenBrowser(string url)
+	{
+		try
+		{
+			if (OperatingSystem.IsWindows()) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+			else if (OperatingSystem.IsMacOS()) Process.Start("open", url);
+			else Process.Start("xdg-open", url);
+		}
+		catch { /* fall back to the printed URL */ }
 	}
 }
 
