@@ -41,6 +41,7 @@ for line in open(path):
     if not line: continue
     try: r=json.loads(line)
     except Exception: continue
+    if r.get('mode')=='scan': continue   # `wa ai scan --all` writes to the same log; not what watch does
     if r.get('type')=='open' and r.get('ts','')[:10]==date and r['ts'][11:19]>='09:30:00':
         mins.append(r['ts'][11:16])
 print(min(mins) if mins else '')
@@ -69,6 +70,7 @@ for line in open(proposals_path):
     except: continue
     ts=r.get('ts','')
     if ts[:10]!=date: continue
+    if r.get('mode')=='scan': continue      # `wa ai scan --all` writes to the same log; only watch reflects live entries
     if r.get('type')!='open': continue
     if ts[11:19] < '09:30:00': continue   # skip pre-market ticks
     day_rows.append(r)
