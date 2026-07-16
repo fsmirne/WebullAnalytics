@@ -28,14 +28,14 @@ internal static class ReproductionCommands
 			{
 				var sideTrades = string.Join(",", g.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 				var sideLimit = (SuggestionPricing.TryGetLimitPerShare(g.Legs, suggestPricing) ?? 0m).ToString("F2", CultureInfo.InvariantCulture);
-				lines.Add($"wa trade place --trade \"{sideTrades}\" --limit {sideLimit}  # {g.Label}");
+				lines.Add($"wa trade place \"{sideTrades}\" --limit {sideLimit}  # {g.Label}");
 			}
 		}
 		else
 		{
 			var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 			var limit = (SuggestionPricing.TryGetLimitPerShare(p.Legs, suggestPricing) ?? Math.Abs(p.DebitOrCreditPerContract / 100m)).ToString("F2", CultureInfo.InvariantCulture);
-			lines.Add($"wa trade place --trade \"{tradesArg}\" --limit {limit}");
+			lines.Add($"wa trade place \"{tradesArg}\" --limit {limit}");
 		}
 
 		var analyzeArg = string.Join(",", p.Legs.Select(l =>

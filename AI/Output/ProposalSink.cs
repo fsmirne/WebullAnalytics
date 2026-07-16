@@ -123,7 +123,7 @@ internal sealed class ProposalSink : IDisposable
 				foreach (var leg in p.Legs)
 				{
 					var legLimit = SuggestionPricing.PriceFor(leg, _suggestPricing)!.Value.ToString("F2", CultureInfo.InvariantCulture);
-					rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape($"{leg.Action}:{leg.Symbol}:{leg.Qty}")}\" --limit {legLimit}[/]"));
+					rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place \"{Markup.Escape($"{leg.Action}:{leg.Symbol}:{leg.Qty}")}\" --limit {legLimit}[/]"));
 				}
 			}
 			else
@@ -131,7 +131,7 @@ internal sealed class ProposalSink : IDisposable
 				var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 				var limitPerShare = SuggestionPricing.TryGetLimitPerShare(p.Legs, _suggestPricing) ?? Math.Abs(p.NetDebit / 100m);
 				var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
-				rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
+				rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
 			}
 
 			rows.Add(new Markup($"[dim]{_cmdPrefix} wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));
@@ -164,7 +164,7 @@ internal sealed class ProposalSink : IDisposable
 			   ?? 0m;
 		var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
 		var arg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-		rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place --trade \"{Markup.Escape(arg)}\" --limit {limit}[/]"));
+		rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place \"{Markup.Escape(arg)}\" --limit {limit}[/]"));
 	}
 
 	private static Color SpectreColor(string name) => name switch

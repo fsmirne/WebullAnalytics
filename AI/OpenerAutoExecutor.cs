@@ -189,7 +189,7 @@ internal sealed class OpenerAutoExecutor
 			{
 				var spec = BuildOrderSpec(g.Legs, p.Ticker);
 				var suffix = string.IsNullOrEmpty(g.Label) ? "" : $"  # {g.Label}";
-				AnsiConsole.MarkupLine($"  [grey50]wa trade place --trade \"{Markup.Escape(spec.ArgLegs)}\" --side {spec.Side.ToLowerInvariant()} --limit {spec.LimitAbs:F2} --submit{suffix}[/]");
+				AnsiConsole.MarkupLine($"  [grey50]wa trade place \"{Markup.Escape(spec.ArgLegs)}\" --side {spec.Side.ToLowerInvariant()} --limit {spec.LimitAbs:F2} --submit{suffix}[/]");
 			}
 			return new SubmitResult(SubmitOutcome.DryRun);
 		}

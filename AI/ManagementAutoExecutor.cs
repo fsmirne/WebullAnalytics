@@ -177,7 +177,7 @@ internal sealed class ManagementAutoExecutor
 		{
 			var reason = _account == null ? "no account configured" : "submit=false";
 			AnsiConsole.MarkupLine($"[cyan]auto-execute (dry-run, {Markup.Escape(reason)}):[/] [dim]{Markup.Escape(p.Rule)}[/] {Markup.Escape(summary)}");
-			AnsiConsole.MarkupLine($"  [grey50]wa trade place --trade \"{Markup.Escape(argLegs)}\" --side sell --limit {limit:F2} --submit[/]");
+			AnsiConsole.MarkupLine($"  [grey50]wa trade place \"{Markup.Escape(argLegs)}\" --side sell --limit {limit:F2} --submit[/]");
 			return true;
 		}
 
@@ -305,7 +305,7 @@ internal sealed class ManagementAutoExecutor
 		{
 			var reason = _account == null ? "no account configured" : "submit=false";
 			AnsiConsole.MarkupLine($"[cyan]auto-execute (dry-run, {Markup.Escape(reason)}):[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(summary)}");
-			AnsiConsole.MarkupLine($"  [grey50]wa trade place --trade \"{Markup.Escape(argLegs)}\" --side {side.ToLowerInvariant()} --limit {limitAbs:F2} --submit[/]");
+			AnsiConsole.MarkupLine($"  [grey50]wa trade place \"{Markup.Escape(argLegs)}\" --side {side.ToLowerInvariant()} --limit {limitAbs:F2} --submit[/]");
 			return true;
 		}
 

@@ -34,9 +34,9 @@ public class BuildReproductionCommandsTests
 		Assert.NotNull(trades);
 		Assert.Equal(2, trades!.Count);
 		// Close half: sell 0.71 − buy 0.07 = +0.64 credit; limit is absolute.
-		Assert.Equal("wa trade place --trade \"buy:GME260424C00025000:100,sell:GME260501C00024500:100\" --limit 0.64", trades[0]);
+		Assert.Equal("wa trade place \"buy:GME260424C00025000:100,sell:GME260501C00024500:100\" --limit 0.64", trades[0]);
 		// Open half: sell 0.50 − buy 1.19 = −0.69 debit; limit is absolute.
-		Assert.Equal("wa trade place --trade \"buy:GME260522C00025000:100,sell:GME260501C00025000:100\" --limit 0.69", trades[1]);
+		Assert.Equal("wa trade place \"buy:GME260522C00025000:100,sell:GME260501C00025000:100\" --limit 0.69", trades[1]);
 		Assert.Equal(
 			"wa analyze trade \"buy:GME260424C00025000:100@0.07,sell:GME260501C00024500:100@0.71;buy:GME260522C00025000:100@1.19,sell:GME260501C00025000:100@0.50\"",
 			analyze);
@@ -56,7 +56,7 @@ public class BuildReproductionCommandsTests
 		Assert.NotNull(trades);
 		Assert.Single(trades!);
 		// Combo limit comes from CashImpactPerContract / 100.
-		Assert.Equal("wa trade place --trade \"buy:GME260424C00025000:100,sell:GME260501C00025000:100\" --limit 0.43", trades[0]);
+		Assert.Equal("wa trade place \"buy:GME260424C00025000:100,sell:GME260501C00025000:100\" --limit 0.43", trades[0]);
 	}
 
 	[Fact]
@@ -71,8 +71,8 @@ public class BuildReproductionCommandsTests
 
 		Assert.NotNull(trades);
 		Assert.Equal(2, trades!.Count);
-		Assert.Equal("wa trade place --trade \"buy:GME260424C00025000:100\" --limit 0.07", trades[0]);
-		Assert.Equal("wa trade place --trade \"sell:GME260501C00024500:100\" --limit 0.71", trades[1]);
+		Assert.Equal("wa trade place \"buy:GME260424C00025000:100\" --limit 0.07", trades[0]);
+		Assert.Equal("wa trade place \"sell:GME260501C00024500:100\" --limit 0.71", trades[1]);
 		Assert.Equal("wa analyze trade \"buy:GME260424C00025000:100@0.07;sell:GME260501C00024500:100@0.71\"", analyze);
 	}
 

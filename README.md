@@ -532,22 +532,22 @@ The example ships with the three sandbox test accounts Webull publishes in its O
 
 ```bash
 # Preview a single equity limit buy (no order is placed).
-wa trade place --trade "buy:SPY:10" --limit 580
+wa trade place "buy:SPY:10" --limit 580
 
 # Place the same order.
-wa trade place --trade "buy:SPY:10" --limit 580 --submit
+wa trade place "buy:SPY:10" --limit 580 --submit
 
 # Preview a vertical call spread for 1 contract, net debit $0.75.
-wa trade place --trade "buy:SPY260515C00580000:1,sell:SPY260515C00590000:1" --limit 0.75
+wa trade place "buy:SPY260515C00580000:1,sell:SPY260515C00590000:1" --limit 0.75
 
 # Calendar roll — sell near, buy far.
-wa trade place --trade "sell:GME260410C00023000:1,buy:GME260417C00023000:1" --limit 0.20
+wa trade place "sell:GME260410C00023000:1,buy:GME260417C00023000:1" --limit 0.20
 
 # Covered call — long 100 shares + short 1 call.
-wa trade place --trade "buy:GME:100,sell:GME260501C00025000:1" --limit 23.50
+wa trade place "buy:GME:100,sell:GME260501C00025000:1" --limit 23.50
 
 # Market order, single equity.
-wa trade place --trade "buy:SPY:10" --type market --submit
+wa trade place "buy:SPY:10" --type market --submit
 
 # Cancel a single order.
 wa trade cancel <clientOrderId>
@@ -587,10 +587,10 @@ wa trade token create
 wa trade token check
 
 # Use a non-default account.
-wa trade place --trade "buy:SPY:1" --limit 1 --account test2
+wa trade place "buy:SPY:1" --limit 1 --account test2
 ```
 
-#### `--trade` syntax
+#### `trade` syntax
 
 Format: `ACTION:SYMBOL:QTY`, comma-separated for multiple legs.
 
@@ -604,7 +604,7 @@ Per-leg prices (`@PRICE`) are **not** allowed in `trade` — combo orders use a 
 
 ```
 Options (place):
-  --trade <legs>           Comma-separated legs in ACTION:SYMBOL:QTY format (required).
+  <trade>                   Comma-separated legs in ACTION:SYMBOL:QTY format (positional, required).
   --limit <net>            Absolute per-share net limit price. Required for --type limit.
   --side <buy|sell>        Override inferred combo direction. Use only when auto-inference is not what you want.
   --type <type>             limit or market. Default: limit. Market is rejected for multi-leg orders.

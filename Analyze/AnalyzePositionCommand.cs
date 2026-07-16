@@ -2103,7 +2103,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var legLimit = decimal.TryParse(l.Price, NumberStyles.Any, CultureInfo.InvariantCulture, out var p)
 					? p.ToString("F2", CultureInfo.InvariantCulture)
 					: l.Price;
-				return $"wa trade place --trade \"{l.Action}:{l.Symbol}:{l.Qty}\" --limit {legLimit}";
+				return $"wa trade place \"{l.Action}:{l.Symbol}:{l.Qty}\" --limit {legLimit}";
 			}).ToList();
 			return (trades, analyze);
 		}
@@ -2127,7 +2127,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 		var halfLimit = Math.Abs(signedNet).ToString("F2", CultureInfo.InvariantCulture);
 		var halfArg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-		return $"wa trade place --trade \"{halfArg}\" --limit {halfLimit}";
+		return $"wa trade place \"{halfArg}\" --limit {halfLimit}";
 	}
 
 	/// <summary>Builds a RiskDiagnostic for the given position and appends it to the analyze-position

@@ -170,7 +170,7 @@ internal sealed class TradeCloseCommand : AsyncCommand<TradeCloseSettings>
 			var summary = $"close {pos.Ticker} {pos.StrategyKind} x{pos.Quantity} @ ${limitAbs:F2} ({side.ToLowerInvariant()}, {(net >= 0m ? "credit" : "debit")}) [{pos.PositionId ?? "-"}]";
 
 			AnsiConsole.MarkupLine($"[cyan]planned:[/] {Markup.Escape(summary)}");
-			AnsiConsole.MarkupLine($"  [grey50]wa trade place --trade \"{Markup.Escape(argLegs)}\" --side {side.ToLowerInvariant()} --limit {limitAbs:F2} --tif {s.Tif.ToLowerInvariant()} --submit[/]");
+			AnsiConsole.MarkupLine($"  [grey50]wa trade place \"{Markup.Escape(argLegs)}\" --side {side.ToLowerInvariant()} --limit {limitAbs:F2} --tif {s.Tif.ToLowerInvariant()} --submit[/]");
 			plans.Add((pos, legSpecs, side, limitAbs, argLegs, summary));
 		}
 
