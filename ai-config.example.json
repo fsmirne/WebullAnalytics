@@ -73,6 +73,7 @@
 			"doubleDiagonal": { "enabled": true, "shortDteMin": 5, "shortDteMax": 21, "longDteMin": 21, "longDteMax": 60, "widthSteps": [2, 4], "longWingSteps": [1] },
 			"ironButterfly": { "enabled": true, "dteMin": 5, "dteMax": 21, "wingSteps": [4, 6, 10] },
 			"ironCondor": { "enabled": true, "dteMin": 5, "dteMax": 21, "widthSteps": [4, 6, 10], "bodyWidthSteps": [2, 4], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
+			"condor": { "enabled": false, "dteMin": 5, "dteMax": 21, "side": "both", "widthSteps": [2, 4], "bodyWidthSteps": [2, 4], "shortDeltaMin": 0.15, "shortDeltaMax": 0.45 },
 			"shortVertical": { "enabled": true, "dteMin": 5, "dteMax": 21, "widthSteps": [4, 6, 10], "shortDeltaMin": 0.15, "shortDeltaMax": 0.35 },
 			"longCallPut":   { "enabled": true, "dteMin": 21, "dteMax": 60, "deltaMin": 0.30, "deltaMax": 0.60 },
 			"longVertical":  { "enabled": false, "dteMin": 21, "dteMax": 60, "widthSteps": [2, 4, 8], "longDeltaMin": 0.30, "longDeltaMax": 0.55 }

@@ -44,6 +44,10 @@ internal static class CandidateEnumerator
 			foreach (var sk in EnumerateIronCondors(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
 
+		if (cfg.Structures.Condor.Enabled)
+			foreach (var sk in EnumerateCondors(ticker, spot, asOf, cfg, availableExpirations, quotes))
+				yield return sk;
+
 		if (cfg.Structures.ShortVertical.Enabled)
 			foreach (var sk in EnumerateShortVerticals(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
@@ -693,6 +697,78 @@ internal static class CandidateEnumerator
 			new ProposalLeg("buy", longCall, 1)
 		};
 		return new CandidateSkeleton(ticker, OpenStructureKind.IronCondor, legs, TargetExpiry: exp);
+	}
+
+	// How far below/above spot the anchor (near-spot inner short) search reaches, in listed strikes. The
+	// short-delta band trims this down; the count only has to be generous enough to reach the OTM tail
+	// on fine ($1) strike ladders before the band cuts it off.
+	private const int CondorAnchorSearchStrikes = 30;
+
+	/// <summary>Single-sided (all-put OR all-call) LONG condor. Unlike the iron condor — which brackets
+	/// spot and thus always has ITM legs on one side — a condor is placed to ONE side of spot so every
+	/// leg stays OTM (no early-assignment risk): puts below spot express a bearish profit zone, calls
+	/// above a bullish one. Enumeration anchors the body's inner short nearest spot (kept OTM via the
+	/// short-delta band), extends the body <c>bodyWidthSteps</c> further from spot to the second inner
+	/// short, then places the two long wings <c>widthSteps</c> beyond each inner short. <c>side</c> picks
+	/// put / call / both.</summary>
+	private static IEnumerable<CandidateSkeleton> EnumerateCondors(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	{
+		var sCfg = cfg.Structures.Condor;
+		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
+		if (exps.Count == 0) yield break;
+
+		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var step = FallbackStep(spot);
+		var sides = sCfg.Side.Trim().ToLowerInvariant() switch
+		{
+			"put" => new[] { "P" },
+			"call" => new[] { "C" },
+			_ => new[] { "P", "C" },
+		};
+
+		foreach (var exp in exps)
+		{
+			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
+			foreach (var type in sides)
+			{
+				var ladder = StrikeLadder.Build(ticker, exp, type, quotes);
+				var dir = type == "P" ? -1 : 1;   // body/wings extend away from spot: down for puts, up for calls
+				var anchors = (type == "P" ? StrikesBelow(spot, step, CondorAnchorSearchStrikes, ladder) : StrikesAbove(spot, step, CondorAnchorSearchStrikes, ladder))
+					.Where(k =>
+					{
+						var iv = ResolveIv(ticker, exp, k, type, quotes, defaultIv);
+						var delta = Math.Abs(OptionMath.Delta(spot, k, years, OptionMath.RiskFreeRate, iv, type));
+						return delta >= sCfg.ShortDeltaMin && delta <= sCfg.ShortDeltaMax;
+					})
+					.ToList();
+
+				foreach (var anchor in anchors)
+					foreach (var bodyWidth in sCfg.BodyWidthSteps.Distinct().OrderBy(w => w))
+						foreach (var wing in sCfg.WidthSteps.Distinct().OrderBy(w => w))
+						{
+							if (WingStrike(anchor, bodyWidth, dir, step, ladder) is not { } farInner || farInner <= 0m) continue;
+							if (WingStrike(anchor, wing, -dir, step, ladder) is not { } nearWing || nearWing <= 0m) continue;   // wing toward spot
+							if (WingStrike(farInner, wing, dir, step, ladder) is not { } farWing || farWing <= 0m) continue;    // wing away from spot
+
+							var strikes = new[] { anchor, farInner, nearWing, farWing }.OrderBy(s => s).ToArray();
+							if (strikes.Distinct().Count() != 4) continue;
+							yield return BuildCondor(ticker, exp, type, strikes[0], strikes[1], strikes[2], strikes[3]);
+						}
+			}
+		}
+	}
+
+	private static CandidateSkeleton BuildCondor(string ticker, DateTime exp, string type, decimal outerLow, decimal innerLow, decimal innerHigh, decimal outerHigh)
+	{
+		// Long (debit) condor: buy the outer wings, sell the two inner body strikes — all one option type.
+		var legs = new[]
+		{
+			new ProposalLeg("buy", MatchKeys.OccSymbol(ticker, exp, outerLow, type), 1),
+			new ProposalLeg("sell", MatchKeys.OccSymbol(ticker, exp, innerLow, type), 1),
+			new ProposalLeg("sell", MatchKeys.OccSymbol(ticker, exp, innerHigh, type), 1),
+			new ProposalLeg("buy", MatchKeys.OccSymbol(ticker, exp, outerHigh, type), 1)
+		};
+		return new CandidateSkeleton(ticker, OpenStructureKind.Condor, legs, TargetExpiry: exp);
 	}
 
 	private static IEnumerable<CandidateSkeleton> EnumerateShortVerticals(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)

@@ -6,18 +6,45 @@ namespace WebullAnalytics.AI;
 
 internal sealed class AIConfigInitSettings : CommandSettings
 {
+	[CommandArgument(0, "[TICKER]")]
+	[Description("Optional ticker. When given, scaffolds a per-ticker override (ai-config.<TICKER>.json) plus a starter strategy layer (ai-config.<TICKER>.<STRATEGY>.json) instead of the complete base config. strikeStep and ivDefaultPct are derived from the live chain.")]
+	public string? Ticker { get; set; }
+
+	[CommandOption("--strategy <TOKEN>")]
+	[Description("Ticker mode: strategy-layer token for the scaffolded ai-config.<TICKER>.<STRATEGY>.json (default: IC). The per-ticker file's defaultStrategy is set to this, so `wa ai scan <TICKER>` runs with no --strategy.")]
+	public string Strategy { get; set; } = "IC";
+
+	[CommandOption("--vendor <VENDOR>")]
+	[Description("Ticker mode: live chain vendor for strikeStep/IV derivation — webull or schwab. Defaults to config.json's vendor.")]
+	public string? Vendor { get; set; }
+
+	[CommandOption("--force")]
+	[Description("Ticker mode: overwrite existing ai-config.<TICKER>*.json files (default: refuse and exit).")]
+	public bool Force { get; set; }
+
 	[CommandOption("--out <PATH>")]
-	[Description("Write the generated base config to this path (relative to the data dir or absolute) instead of stdout.")]
+	[Description("Base mode: write the generated base config to this file (relative to the data dir or absolute) instead of stdout. Ticker mode: directory to write the scaffolded files into (default: the data dir).")]
 	public string? Out { get; set; }
 }
 
-/// <summary>`wa ai config init [--out PATH]` — emits a COMPLETE base config: every parameter the schema
-/// defines, at its code default, with all management rules and all opener structures forced to
-/// <c>enabled: false</c>. Serialized from <see cref="AIConfig"/> itself, so it never drifts from the code.
-/// Intended as the base layer (ai-config.json); per-ticker and per-(ticker,strategy) layers then override.</summary>
+/// <summary>`wa ai config init [TICKER] [--out PATH]`. Without a ticker: emits a COMPLETE base config —
+/// every parameter the schema defines, at its code default, with all management rules and all opener
+/// structures forced to <c>enabled: false</c>. Serialized from <see cref="AIConfig"/> itself, so it never
+/// drifts from the code. Intended as the base layer (ai-config.json). With a ticker: scaffolds a minimal
+/// per-ticker override plus a starter strategy layer (see <see cref="AIConfigInitTicker"/>) — the loader
+/// requires a strategy layer to exist, so a lone per-ticker file would not be runnable.</summary>
 internal sealed class AIConfigInitCommand : AsyncCommand<AIConfigInitSettings>
 {
 	protected override Task<int> ExecuteAsync(CommandContext context, AIConfigInitSettings settings, CancellationToken cancellationToken)
+	{
+		if (!string.IsNullOrWhiteSpace(settings.Ticker))
+			return AIConfigInitTicker.RunAsync(settings, cancellationToken);
+
+		return Task.FromResult(RunBase(settings));
+	}
+
+	/// <summary>Base-config mode: the complete, all-disabled schema dump.</summary>
+	private static int RunBase(AIConfigInitSettings settings)
 	{
 		var cfg = new AIConfig();
 		DisableEnabledFlags(cfg.Rules);                 // all management rules off in the base
@@ -36,7 +63,7 @@ internal sealed class AIConfigInitCommand : AsyncCommand<AIConfigInitSettings>
 		{
 			Console.WriteLine(json);
 		}
-		return Task.FromResult(0);
+		return 0;
 	}
 
 	/// <summary>Sets every immediate sub-object's bool <c>Enabled</c> property to false. Reflection-based so

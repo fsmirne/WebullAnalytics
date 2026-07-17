@@ -913,6 +913,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 				case "doublediagonal": config.Opener.Structures.DoubleDiagonal.Enabled = true; break;
 				case "ironbutterfly": config.Opener.Structures.IronButterfly.Enabled = true; break;
 				case "ironcondor": config.Opener.Structures.IronCondor.Enabled = true; break;
+				case "condor": config.Opener.Structures.Condor.Enabled = true; break;
 				case "shortvertical": config.Opener.Structures.ShortVertical.Enabled = true; break;
 				case "longcallput": config.Opener.Structures.LongCallPut.Enabled = true; break;
 				case "longvertical": config.Opener.Structures.LongVertical.Enabled = true; break;
