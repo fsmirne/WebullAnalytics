@@ -297,6 +297,16 @@ internal sealed class OpenerLongConvictionGateConfig
 	}
 }
 
+/// <summary>Common surface for an opener structure's config so the DTE horizon/band logic has a single
+/// source of truth (see <see cref="OpenerStructuresConfig.All"/>). Each structure reports the DTE window(s)
+/// it prices into — one range for single-expiry structures, two (short + long) for calendar/diagonal
+/// families. Adding a structure means implementing this once, not editing three separate DTE if-chains.</summary>
+internal interface IOpenerStructure
+{
+	bool Enabled { get; }
+	IEnumerable<(int Min, int Max)> DteRanges();
+}
+
 internal sealed class OpenerStructuresConfig
 {
 	[JsonPropertyName("longCalendar")] public OpenerCalendarLikeConfig LongCalendar { get; set; } = new();
@@ -305,32 +315,31 @@ internal sealed class OpenerStructuresConfig
 	[JsonPropertyName("doubleDiagonal")] public OpenerDoubleDiagonalConfig DoubleDiagonal { get; set; } = new();
 	[JsonPropertyName("ironButterfly")] public OpenerIronButterflyConfig IronButterfly { get; set; } = new();
 	[JsonPropertyName("ironCondor")] public OpenerIronCondorConfig IronCondor { get; set; } = new();
+	[JsonPropertyName("condor")] public OpenerCondorConfig Condor { get; set; } = new();
 	[JsonPropertyName("shortVertical")] public OpenerShortVerticalConfig ShortVertical { get; set; } = new();
 	[JsonPropertyName("longCallPut")] public OpenerLongCallPutConfig LongCallPut { get; set; } = new();
 	[JsonPropertyName("longVertical")] public OpenerLongVerticalConfig LongVertical { get; set; } = new();
 	[JsonPropertyName("diagonalVertical")] public OpenerDiagonalVerticalConfig DiagonalVertical { get; set; } = new();
 	[JsonPropertyName("calendarVertical")] public OpenerCalendarVerticalConfig CalendarVertical { get; set; } = new();
 
-	/// <summary>Furthest DTE any ENABLED structure can reach — the max expiry horizon the opener will
-	/// query. 0 means every enabled structure is same-day (0DTE). Multi-expiry structures report their
-	/// long leg's DteMax; single-expiry ones their DteMax. Used by the backtest quote store to skip
-	/// parsing the longer-dated tail of each expiry file when the whole strategy is 0DTE.</summary>
-	public int MaxDteAcrossEnabled()
+	/// <summary>Every structure config, in one place — the single registry the DTE-range helpers iterate so
+	/// none of them carries its own per-structure list. Adding a structure = add its property here (and
+	/// implement <see cref="IOpenerStructure"/> on the config).</summary>
+	public IEnumerable<IOpenerStructure> All() => new IOpenerStructure[]
 	{
-		var max = 0;
-		if (LongCalendar.Enabled) max = Math.Max(max, LongCalendar.LongDteMax);
-		if (DoubleCalendar.Enabled) max = Math.Max(max, DoubleCalendar.LongDteMax);
-		if (LongDiagonal.Enabled) max = Math.Max(max, LongDiagonal.LongDteMax);
-		if (DoubleDiagonal.Enabled) max = Math.Max(max, DoubleDiagonal.LongDteMax);
-		if (IronButterfly.Enabled) max = Math.Max(max, IronButterfly.DteMax);
-		if (IronCondor.Enabled) max = Math.Max(max, IronCondor.DteMax);
-		if (ShortVertical.Enabled) max = Math.Max(max, ShortVertical.DteMax);
-		if (LongCallPut.Enabled) max = Math.Max(max, LongCallPut.DteMax);
-		if (LongVertical.Enabled) max = Math.Max(max, LongVertical.DteMax);
-		if (DiagonalVertical.Enabled) max = Math.Max(max, DiagonalVertical.LongDteMax);
-		if (CalendarVertical.Enabled) max = Math.Max(max, CalendarVertical.LongDteMax);
-		return max;
-	}
+		LongCalendar, DoubleCalendar, LongDiagonal, DoubleDiagonal, IronButterfly, IronCondor,
+		Condor, ShortVertical, LongCallPut, LongVertical, DiagonalVertical, CalendarVertical
+	};
+
+	/// <summary>The DTE windows the enabled structures price into — one range per single-expiry structure,
+	/// two (short + long) per calendar/diagonal. Drives both the live bootstrap probe / snapshot sweep and
+	/// the backtest quote-store horizon so they can never disagree about which expiries a strategy needs.</summary>
+	public IEnumerable<(int Min, int Max)> EnabledDteRanges() => All().Where(s => s.Enabled).SelectMany(s => s.DteRanges());
+
+	/// <summary>Furthest DTE any ENABLED structure can reach — the max expiry horizon the opener will
+	/// query. 0 means every enabled structure is same-day (0DTE). Used by the backtest quote store to skip
+	/// parsing the longer-dated tail of each expiry file when the whole strategy is 0DTE.</summary>
+	public int MaxDteAcrossEnabled() => EnabledDteRanges().Select(r => r.Max).DefaultIfEmpty(0).Max();
 }
 
 /// <summary>Diagonal-from-verticals: a near-dated SHORT vertical (credit) + a far-dated LONG vertical
@@ -339,8 +348,9 @@ internal sealed class OpenerStructuresConfig
 /// (further OTM, theta financing). WidthSteps × strike step sizes the near short vertical; the far long
 /// vertical's protective wing is pinned to the near vertical's protective wing so the far leg hedges the near
 /// vertical's whole loss zone (a diagonal tent, not a zigzag with an unhedged downside cliff). Disabled by default.</summary>
-internal sealed class OpenerDiagonalVerticalConfig
+internal sealed class OpenerDiagonalVerticalConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (ShortDteMin, ShortDteMax), (LongDteMin, LongDteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
 	[JsonPropertyName("shortDteMin")] public int ShortDteMin { get; set; } = 3;
 	[JsonPropertyName("shortDteMax")] public int ShortDteMax { get; set; } = 10;
@@ -358,8 +368,9 @@ internal sealed class OpenerDiagonalVerticalConfig
 /// sits in <see cref="DeltaMin"/>–<see cref="DeltaMax"/> (typically near-ATM, where calendar theta/vega is
 /// richest); each vertical's wing is <see cref="WidthSteps"/> × strike step further OTM, the same on both
 /// expiries. Net = long calendar at the anchor capped by a short calendar at the wing. Disabled by default.</summary>
-internal sealed class OpenerCalendarVerticalConfig
+internal sealed class OpenerCalendarVerticalConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (ShortDteMin, ShortDteMax), (LongDteMin, LongDteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
 	[JsonPropertyName("shortDteMin")] public int ShortDteMin { get; set; } = 3;
 	[JsonPropertyName("shortDteMax")] public int ShortDteMax { get; set; } = 10;
@@ -378,8 +389,9 @@ internal sealed class OpenerCalendarVerticalConfig
 /// band (so with it > 0 the band is not a hard moneyness bound on the short; set it to 0 for a band-only short).
 /// When DeltaMax is 0 (default) it falls back to the legacy ATM-centered strike grid (diagonal long leg one
 /// strike off the short), preserving prior behavior.</summary>
-internal sealed class OpenerCalendarLikeConfig
+internal sealed class OpenerCalendarLikeConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (ShortDteMin, ShortDteMax), (LongDteMin, LongDteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("shortDteMin")] public int ShortDteMin { get; set; } = 3;
 	[JsonPropertyName("shortDteMax")] public int ShortDteMax { get; set; } = 10;
@@ -404,8 +416,9 @@ internal sealed class OpenerCalendarLikeConfig
 	[JsonPropertyName("allowInverted")] public bool AllowInverted { get; set; } = false;
 }
 
-internal sealed class OpenerDoubleCalendarConfig
+internal sealed class OpenerDoubleCalendarConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (ShortDteMin, ShortDteMax), (LongDteMin, LongDteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("shortDteMin")] public int ShortDteMin { get; set; } = 3;
 	[JsonPropertyName("shortDteMax")] public int ShortDteMax { get; set; } = 10;
@@ -414,8 +427,9 @@ internal sealed class OpenerDoubleCalendarConfig
 	[JsonPropertyName("widthSteps")] public List<int> WidthSteps { get; set; } = new() { 2, 4 };
 }
 
-internal sealed class OpenerDoubleDiagonalConfig
+internal sealed class OpenerDoubleDiagonalConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (ShortDteMin, ShortDteMax), (LongDteMin, LongDteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("shortDteMin")] public int ShortDteMin { get; set; } = 3;
 	[JsonPropertyName("shortDteMax")] public int ShortDteMax { get; set; } = 10;
@@ -425,16 +439,18 @@ internal sealed class OpenerDoubleDiagonalConfig
 	[JsonPropertyName("longWingSteps")] public List<int> LongWingSteps { get; set; } = new() { 1 };
 }
 
-internal sealed class OpenerIronButterflyConfig
+internal sealed class OpenerIronButterflyConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (DteMin, DteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("dteMin")] public int DteMin { get; set; } = 3;
 	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 10;
 	[JsonPropertyName("wingSteps")] public List<int> WingSteps { get; set; } = new() { 1, 2, 3, 4 };
 }
 
-internal sealed class OpenerIronCondorConfig
+internal sealed class OpenerIronCondorConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (DteMin, DteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("dteMin")] public int DteMin { get; set; } = 3;
 	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 10;
@@ -444,8 +460,31 @@ internal sealed class OpenerIronCondorConfig
 	[JsonPropertyName("shortDeltaMax")] public decimal ShortDeltaMax { get; set; } = 0.35m;
 }
 
-internal sealed class OpenerShortVerticalConfig
+/// <summary>Single-sided (all-put OR all-call) LONG condor: buy the two outer-wing strikes, sell the two
+/// inner body strikes — a net DEBIT with the same neutral, two-break-even payoff as an iron condor but
+/// financed as a debit rather than a credit. Strike selection is identical to the iron condor (two body
+/// shorts bracketing spot in the <c>shortDelta</c> band; long wings <c>widthSteps</c> listed strikes
+/// further out); the difference is only that all four legs are one option type. Because a bracketing
+/// same-type condor always has two ITM legs (a put condor's upper strikes, a call condor's lower), fills
+/// are wider and the short ITM leg carries early-assignment risk on American-style equities — the iron
+/// condor is usually the better execution for the same view. <see cref="Side"/> selects the leg type:
+/// <c>put</c>, <c>call</c>, or <c>both</c> (enumerate each and let scoring pick the better-priced side).</summary>
+internal sealed class OpenerCondorConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (DteMin, DteMax) };
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	[JsonPropertyName("dteMin")] public int DteMin { get; set; } = 3;
+	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 10;
+	[JsonPropertyName("widthSteps")] public List<int> WidthSteps { get; set; } = new() { 1, 2, 3, 4 };
+	[JsonPropertyName("bodyWidthSteps")] public List<int> BodyWidthSteps { get; set; } = new() { 1, 2, 3, 4 };
+	[JsonPropertyName("shortDeltaMin")] public decimal ShortDeltaMin { get; set; } = 0.15m;
+	[JsonPropertyName("shortDeltaMax")] public decimal ShortDeltaMax { get; set; } = 0.35m;
+	[JsonPropertyName("side")] public string Side { get; set; } = "both";
+}
+
+internal sealed class OpenerShortVerticalConfig : IOpenerStructure
+{
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (DteMin, DteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("dteMin")] public int DteMin { get; set; } = 3;
 	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 10;
@@ -454,8 +493,9 @@ internal sealed class OpenerShortVerticalConfig
 	[JsonPropertyName("shortDeltaMax")] public decimal ShortDeltaMax { get; set; } = 0.30m;
 }
 
-internal sealed class OpenerLongCallPutConfig
+internal sealed class OpenerLongCallPutConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (DteMin, DteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	[JsonPropertyName("dteMin")] public int DteMin { get; set; } = 21;
 	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 60;
@@ -468,8 +508,9 @@ internal sealed class OpenerLongCallPutConfig
 /// capped downside — pays less than a naked long, gives up extreme tail upside, but has explicit
 /// max-loss = debit-paid bounds. WidthSteps are in strike-grid increments (so width=2 with $5 step
 /// SPX = $10 wide).</summary>
-internal sealed class OpenerLongVerticalConfig
+internal sealed class OpenerLongVerticalConfig : IOpenerStructure
 {
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (DteMin, DteMax) };
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
 	[JsonPropertyName("dteMin")] public int DteMin { get; set; } = 0;
 	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 0;

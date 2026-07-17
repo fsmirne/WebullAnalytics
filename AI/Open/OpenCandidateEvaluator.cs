@@ -801,44 +801,15 @@ internal sealed class OpenCandidateEvaluator
 
 	/// <summary>Widest DteMax across every enabled structure. Used to size the bootstrap-probe horizon so
 	/// the backtest discovers every expiry the enumerators could legitimately propose.</summary>
-	private static int MaxDteAcrossStructures(OpenerConfig cfg)
-	{
-		var s = cfg.Structures;
-		int max = 7;
-		if (s.LongCalendar.Enabled) max = Math.Max(max, Math.Max(s.LongCalendar.ShortDteMax, s.LongCalendar.LongDteMax));
-		if (s.DoubleCalendar.Enabled) max = Math.Max(max, Math.Max(s.DoubleCalendar.ShortDteMax, s.DoubleCalendar.LongDteMax));
-		if (s.LongDiagonal.Enabled) max = Math.Max(max, Math.Max(s.LongDiagonal.ShortDteMax, s.LongDiagonal.LongDteMax));
-		if (s.DoubleDiagonal.Enabled) max = Math.Max(max, Math.Max(s.DoubleDiagonal.ShortDteMax, s.DoubleDiagonal.LongDteMax));
-		if (s.IronButterfly.Enabled) max = Math.Max(max, s.IronButterfly.DteMax);
-		if (s.IronCondor.Enabled) max = Math.Max(max, s.IronCondor.DteMax);
-		if (s.ShortVertical.Enabled) max = Math.Max(max, s.ShortVertical.DteMax);
-		if (s.LongCallPut.Enabled) max = Math.Max(max, s.LongCallPut.DteMax);
-		if (s.LongVertical.Enabled) max = Math.Max(max, s.LongVertical.DteMax);
-		if (s.DiagonalVertical.Enabled) max = Math.Max(max, Math.Max(s.DiagonalVertical.ShortDteMax, s.DiagonalVertical.LongDteMax));
-		if (s.CalendarVertical.Enabled) max = Math.Max(max, Math.Max(s.CalendarVertical.ShortDteMax, s.CalendarVertical.LongDteMax));
-		return max;
-	}
+	// Probe horizon floors at 7 days so the underlying spot still surfaces even when every enabled structure
+	// is same-day (0DTE). Both the horizon and the per-band ranges come from the single source of truth on
+	// OpenerStructuresConfig, so a newly added structure is covered automatically (no local list to update).
+	private static int MaxDteAcrossStructures(OpenerConfig cfg) => Math.Max(7, cfg.Structures.MaxDteAcrossEnabled());
 
 	/// <summary>The DTE windows the enabled structures actually price into — one range per single-expiry
 	/// structure, two (short + long) per calendar/diagonal. The snapshot sweep covers the nearest few
 	/// expiries in each so both legs of a multi-expiry structure get real strikes.</summary>
-	private static List<(int Min, int Max)> DteRangesForStructures(OpenerConfig cfg)
-	{
-		var s = cfg.Structures;
-		var r = new List<(int, int)>();
-		if (s.LongCalendar.Enabled) { r.Add((s.LongCalendar.ShortDteMin, s.LongCalendar.ShortDteMax)); r.Add((s.LongCalendar.LongDteMin, s.LongCalendar.LongDteMax)); }
-		if (s.DoubleCalendar.Enabled) { r.Add((s.DoubleCalendar.ShortDteMin, s.DoubleCalendar.ShortDteMax)); r.Add((s.DoubleCalendar.LongDteMin, s.DoubleCalendar.LongDteMax)); }
-		if (s.LongDiagonal.Enabled) { r.Add((s.LongDiagonal.ShortDteMin, s.LongDiagonal.ShortDteMax)); r.Add((s.LongDiagonal.LongDteMin, s.LongDiagonal.LongDteMax)); }
-		if (s.DoubleDiagonal.Enabled) { r.Add((s.DoubleDiagonal.ShortDteMin, s.DoubleDiagonal.ShortDteMax)); r.Add((s.DoubleDiagonal.LongDteMin, s.DoubleDiagonal.LongDteMax)); }
-		if (s.DiagonalVertical.Enabled) { r.Add((s.DiagonalVertical.ShortDteMin, s.DiagonalVertical.ShortDteMax)); r.Add((s.DiagonalVertical.LongDteMin, s.DiagonalVertical.LongDteMax)); }
-		if (s.CalendarVertical.Enabled) { r.Add((s.CalendarVertical.ShortDteMin, s.CalendarVertical.ShortDteMax)); r.Add((s.CalendarVertical.LongDteMin, s.CalendarVertical.LongDteMax)); }
-		if (s.IronButterfly.Enabled) r.Add((s.IronButterfly.DteMin, s.IronButterfly.DteMax));
-		if (s.IronCondor.Enabled) r.Add((s.IronCondor.DteMin, s.IronCondor.DteMax));
-		if (s.ShortVertical.Enabled) r.Add((s.ShortVertical.DteMin, s.ShortVertical.DteMax));
-		if (s.LongCallPut.Enabled) r.Add((s.LongCallPut.DteMin, s.LongCallPut.DteMax));
-		if (s.LongVertical.Enabled) r.Add((s.LongVertical.DteMin, s.LongVertical.DteMax));
-		return r;
-	}
+	private static List<(int Min, int Max)> DteRangesForStructures(OpenerConfig cfg) => cfg.Structures.EnabledDteRanges().ToList();
 
 	// Daily snapshot sweep bounds. ±8% reaches the ~delta-0.20 short anchors at 30–45 DTE. Expiries are
 	// selected PER DTE BAND (the nearest few in each enabled structure's short and long window) rather than

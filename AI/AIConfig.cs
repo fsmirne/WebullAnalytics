@@ -628,6 +628,19 @@ internal static class AIConfigLoader
 		if (ic.ShortDeltaMin <= 0m || ic.ShortDeltaMin >= 1m) return $"opener.structures.ironCondor.shortDeltaMin: must be in (0, 1), got {ic.ShortDeltaMin}";
 		if (ic.ShortDeltaMax <= ic.ShortDeltaMin || ic.ShortDeltaMax >= 1m) return $"opener.structures.ironCondor.shortDeltaMax: must be in (shortDeltaMin, 1), got {ic.ShortDeltaMax}";
 
+		var cd = op.Structures.Condor;
+		if (cd.DteMin < 0) return $"opener.structures.condor.dteMin: must be ≥ 0, got {cd.DteMin}";
+		if (cd.DteMax < cd.DteMin) return $"opener.structures.condor.dteMax: must be ≥ dteMin, got {cd.DteMax}";
+		if (cd.WidthSteps.Count == 0) return "opener.structures.condor.widthSteps: must have at least one value";
+		foreach (var w in cd.WidthSteps)
+			if (w < 1) return $"opener.structures.condor.widthSteps: each value must be ≥ 1, got {w}";
+		if (cd.BodyWidthSteps.Count == 0) return "opener.structures.condor.bodyWidthSteps: must have at least one value";
+		foreach (var w in cd.BodyWidthSteps)
+			if (w < 1) return $"opener.structures.condor.bodyWidthSteps: each value must be ≥ 1, got {w}";
+		if (cd.ShortDeltaMin <= 0m || cd.ShortDeltaMin >= 1m) return $"opener.structures.condor.shortDeltaMin: must be in (0, 1), got {cd.ShortDeltaMin}";
+		if (cd.ShortDeltaMax <= cd.ShortDeltaMin || cd.ShortDeltaMax >= 1m) return $"opener.structures.condor.shortDeltaMax: must be in (shortDeltaMin, 1), got {cd.ShortDeltaMax}";
+		if (cd.Side is not ("put" or "call" or "both")) return $"opener.structures.condor.side: must be put, call, or both, got '{cd.Side}'";
+
 		var sv = op.Structures.ShortVertical;
 		if (sv.DteMin < 0) return $"opener.structures.shortVertical.dteMin: must be ≥ 0, got {sv.DteMin}";
 		if (sv.DteMax < sv.DteMin) return $"opener.structures.shortVertical.dteMax: must be ≥ dteMin, got {sv.DteMax}";

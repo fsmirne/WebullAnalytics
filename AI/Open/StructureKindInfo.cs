@@ -44,7 +44,7 @@ internal static class StructureKindInfo
 	/// <summary>+1 short-vol (wants realized below implied), −1 long-vol (wants expansion), 0 neutral.</summary>
 	public static int VolatilityFitSign(OpenStructureKind k) => k switch
 	{
-		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor => 1,
+		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor or OpenStructureKind.Condor => 1,
 		OpenStructureKind.LongCalendar or OpenStructureKind.DoubleCalendar or OpenStructureKind.LongDiagonal or OpenStructureKind.DoubleDiagonal or OpenStructureKind.LongCall or OpenStructureKind.LongPut or OpenStructureKind.DiagonalVertical or OpenStructureKind.CalendarVertical => -1,
 		_ => 0,
 	};
