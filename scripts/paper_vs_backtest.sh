@@ -11,6 +11,11 @@
 #               (the opener fires once at the RTH open — earliest-wins entry rule).
 # BACKTEST pick = the Open fill from a single-day backtest of the same strategy.
 # PASS = same structure AND same legs (side+strike+expiry). Also prints entry debit.
+# THIRD OUTCOME (INCONCLUSIVE, exit 3) — opposite-side ATM tie: when spot sits on the short strike the put and
+#   call variants of a diagonal/calendar score within noise and the #1 side flips on feed noise. Structure and
+#   expiries agree but the two sides open OPPOSITE legs, so their P&L curves WILL diverge (a trend day resolves
+#   the coin-flip after the fact). This is neither a clean fidelity confirmation nor a scorer bug, so it is NOT
+#   counted as a pass — it's flagged separately so it doesn't inflate the match tally or masquerade as a defect.
 #
 # Run AFTER the evening ThetaData backfill lands the day's quotes (~19:00 ET), else the
 # single-day backtest has nothing to price. Reads the installed wa.exe + AppData.
@@ -27,11 +32,12 @@ LXFILLS="/mnt/c/Users/USER/AppData/Local/WebullAnalytics/sweeps/pvb.jsonl"
 
 rm -f "$LXFILLS" 2>/dev/null
 
-# Bar-align the backtest to live's ACTUAL entry minute. The opener normally fires at the 09:30 open, but a
-# quote-vendor outage can delay the first successful proposal (e.g. Webull API down till 09:45). --open-after
-# withholds backtest opens until that ET minute so BOTH sides evaluate the same bar; on a clean day it resolves
-# to 09:30 (a no-op). NOTE: --open-after also lets the 09:30→entry intraday tape blend into the directional
-# bias, so it aligns the entry BAR, not the bias provenance a broken live day actually had.
+# Bar-align the backtest to live's ACTUAL entry minute. The opener normally fires at the 09:30 open, but the
+# first successful proposal can land later — a quote-vendor hiccup, or (more often) simply nothing clearing
+# MinScoreToOpen until a few minutes in. --open-after withholds backtest opens until that ET minute so BOTH
+# sides evaluate the same bar; on a clean day it resolves to 09:30 (a no-op). NOTE: --open-after also lets the
+# 09:30→entry intraday tape blend into the directional bias, so it aligns the entry BAR, not the bias
+# provenance a delayed live day actually had.
 LIVE_MIN=$(python3 - "$DATE" "$PROPOSALS" <<'PY'
 import json, sys
 date, path = sys.argv[1], sys.argv[2]
@@ -148,9 +154,43 @@ lq=live_quote_map(live)
 bt_p={l['sym']:(float(l.get('price',0) or 0), str(l['side']).lower()) for l in bt['legs']}
 live_side={l['symbol']:str(l['action']).lower() for l in live['legs']}
 
+# ---- opposite-side ATM tie tolerance ----
+# When spot sits on the short strike, the put-side and call-side variants of a diagonal/calendar are near-mirror
+# images that score within noise of each other; which side ranks #1 flips minute-to-minute and differs between
+# the live vendor feed and ThetaData. That's a coin-flip, not a scorer bug — but the two sides are DIFFERENT
+# trades whose P&L diverges on a trend day, so this is NOT treated as a pass. It gets its own INCONCLUSIVE
+# verdict, distinct from a real MISMATCH (structure/expiry divergence). Detected via: same structure, same sold
+# strike(s)+expiry, same long expiry, spot within ATM_BAND of the short strike, finalScores within noise, and
+# OPPOSITE option side. Anything else (different short strike, wrong expiry, wide score gap) stays a MISMATCH.
+def occ(sym):                          # OCC layout, parsed from the right so root length is irrelevant:
+    return sym[-15:-9], sym[-9], int(sym[-8:]) / 1000.0   # (YYMMDD expiry, C|P type, strike)
+def skeleton(legs, sym_key, side_key):
+    types, shorts, longs = set(), [], []
+    for l in legs:
+        exp, typ, strike = occ(l[sym_key])
+        types.add(typ)
+        (shorts if str(l[side_key]).lower() == 'sell' else longs).append((exp, strike))
+    return types, sorted(shorts), sorted(longs)
+ATM_BAND = 1.0        # $ from short strike within which put/call variants are treated as symmetric
+atm_tie = False
+if struct_ok and not legs_ok:
+    l_types, l_short, l_long = skeleton(live['legs'], 'symbol', 'action')
+    b_types, b_short, b_long = skeleton(bt['legs'], 'sym', 'side')
+    opposite = bool(l_types) and l_types.isdisjoint(b_types)               # no shared option type => opposite side
+    same_short = l_short == b_short                                        # same sold strike(s)+expiry
+    same_long_exp = [e for e, _ in l_long] == [e for e, _ in b_long]       # same long expiry (strike may drift at ATM)
+    spot = diag.get('spotAtEvaluation') if isinstance(diag.get('spotAtEvaluation'), (int, float)) else bt.get('spot')
+    near_atm = isinstance(spot, (int, float)) and all(abs(spot - k) <= ATM_BAND for _, k in l_short + b_short)
+    lf0, bf0 = live.get('finalScore'), bt.get('finalScore')
+    score_close = isinstance(lf0, (int, float)) and isinstance(bf0, (int, float)) and abs(bf0 - lf0) <= max(5e-4, 0.25 * max(abs(lf0), abs(bf0)))
+    atm_tie = opposite and same_short and same_long_exp and near_atm and score_close
+
 # ---- structure + legs (the PASS criterion) ----
 verdict("structure", live.get('structure') if struct_ok else f"{live.get('structure')} vs {bt.get('strategy')}", struct_ok)
-verdict("legs", f"{len(live_legs)} legs", legs_ok)
+if legs_ok or not atm_tie:
+    verdict("legs", f"{len(live_legs)} legs", legs_ok)
+else:
+    print(f"  {'legs':<{LW}}{'opposite-side ATM tie':<{2*W}}INCONCLUSIVE ⚠ (coin-flip; P&L will diverge)")
 
 # ---- per-leg ----
 print()
@@ -169,7 +209,7 @@ if legs_ok:
         row(f"{live_side[sym]:<4} {sym}", sf(mid,3), sf(bp,3), sf(delta(mid,bp),3,sign=True), leg_ctx(sym))
 else:
     # different legs → don't fake a symbol alignment; list each side's legs, each row prefixed live/bt
-    print("  legs differ — listed per side (no per-leg Δ):")
+    print("  legs differ (opposite-side ATM tie — sides split; P&L will diverge):" if atm_tie else "  legs differ — listed per side (no per-leg Δ):")
     for sym in sorted(live_side):
         print(f"    live  {live_side[sym]:<4} {sym}  @ {fmt((lq.get(sym) or {}).get('mid'),3)}   {leg_ctx(sym)}".rstrip())
     for sym in sorted(bt_p):
@@ -216,5 +256,10 @@ if skew is not None and abs(skew)>=60:
 print()
 if struct_ok and legs_ok:
     print("  RESULT: MATCH ✓ (same structure + same legs)"); sys.exit(0)
+if struct_ok and atm_tie:
+    print("  RESULT: INCONCLUSIVE ⚠ — opposite-side ATM tie (put/call coin-flip at the short strike).")
+    print("          Structure + expiries agree, but live and backtest opened OPPOSITE sides, so their P&L")
+    print("          curves WILL diverge. NOT a pass (don't count toward fidelity) and NOT a scorer bug.")
+    sys.exit(3)
 print(f"  RESULT: MISMATCH — structure_ok={struct_ok} legs_ok={legs_ok}"); sys.exit(1)
 PY
