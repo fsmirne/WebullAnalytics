@@ -216,6 +216,24 @@ else:
         price,side=bt_p[sym]
         print(f"    bt    {side:<4} {sym}  @ {fmt(price,3)}")
 
+# ---- ready-to-run standalone marks: value BOTH structures at current quotes and compare where they went.
+# Printed every open day (not just mismatches): even on a clean leg match it lets you eyeball live-vs-sim
+# tracking as the trade ages. Priced at each side's entry (live = opener's captured mid, bt = sim fill),
+# 1x/1x for an apples-to-apples per-contract P&L. Needs a live vendor (`wa schwab login`) and is only
+# meaningful while the legs are open.
+def spec(legs, sym_key, side_key, price_of):
+    parts=[]
+    for l in sorted(legs, key=lambda x: 0 if str(x[side_key]).lower()=='sell' else 1):   # sell leg(s) first
+        p=price_of(l); ps=f"{p:.2f}" if isinstance(p,(int,float)) else "MID"
+        parts.append(f"{str(l[side_key]).lower()}:{l[sym_key]}:1@{ps}")
+    return ",".join(parts)
+live_spec=spec(live['legs'],'symbol','action', lambda l:(lq.get(l['symbol']) or {}).get('mid'))
+bt_spec=spec(bt['legs'],'sym','side', lambda l:float(l.get('price',0) or 0))
+print()
+print("  mark both at current quotes (run side by side):")
+print(f'    live: wa analyze trade "{live_spec}" --vendor schwab --standalone')
+print(f'    bt:   wa analyze trade "{bt_spec}" --vendor schwab --standalone')
+
 # ---- headline metrics: all comparable (both sides emit these) ----
 print()
 row("metric", "live", "bt", "Δ(bt-lv)")
