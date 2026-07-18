@@ -306,29 +306,54 @@ def thetacall(fn, *args, **kwargs):
     raise last
 
 
+def _local_underlying_closes(ticker: str, start: date, end: date) -> dict:
+    """Daily closes from the local data/history/<ticker>.csv (populated by `wa ai history`, sourced from
+    Yahoo). A free, deep daily-close store: it reaches past ThetaData's underlying-EOD horizon (~2y) and
+    needs no index/underlying entitlement, so the quote pull's ±10% band + IV back-solve work on old dates
+    ThetaData won't serve the spot for. Returns {date_str: close} within [start, end]; empty if absent."""
+    try:
+        path = resolve_data_dir() / "history" / f"{ticker.upper()}.csv"
+        if not path.exists():
+            return {}
+        df = pd.read_csv(path, usecols=["date", "close"])
+        s, e = start.isoformat(), end.isoformat()
+        df = df[(df["date"].astype(str) >= s) & (df["date"].astype(str) <= e)]
+        return {str(d): coerce(c) for d, c in zip(df["date"], df["close"]) if pd.notna(c)}
+    except Exception:
+        return {}
+
+
 def fetch_underlying_closes(client, ticker: str, start: date, end: date) -> dict:
-    """Best-effort daily underlying close for the IV back-solve. Tries the equity EOD feed first; on no
-    data falls back to the index EOD feed (index options settle on the index — a trailing 'W' weekly root
-    maps to its index, e.g. a weekly index root -> that index). Generic so it works for any equity OR
-    index ticker without naming one. Returns {date_str: price}; empty on failure (underlyingPrice=null)."""
+    """Best-effort daily underlying close for the ±10% strike band + IV back-solve. Prefers the free local
+    daily-close cache (reaches deep history without a ThetaData underlying/index entitlement); falls back to
+    ThetaData's equity EOD feed, then its index EOD feed (index options settle on the index — a trailing 'W'
+    weekly root maps to its index). Returns {date_str: price}; empty on total failure (underlyingPrice=null)."""
     def _closes(df):
         dc = pick_col(df, ["date", "created", "timestamp"])
         cc = pick_col(df, ["close", "price", "last"])
         return {norm_date(r[dc]): coerce(r[cc]) for _, r in df.iterrows()}
+    # Local cache first: if it already reaches ~end, use it alone and skip ThetaData entirely (avoids the
+    # index-entitlement error on deep ranges). A ~week tolerance covers weekend/holiday tails.
+    local = _local_underlying_closes(ticker, start, end)
+    if local and max(local) >= (end - timedelta(days=6)).isoformat():
+        return local
+    remote = {}
     try:
         df = thetacall(client.stock_history_eod, symbol=ticker, start_date=start, end_date=end)
         if df is not None and not df.empty:
-            return _closes(df)
+            remote = _closes(df)
     except Exception:
         pass  # not an equity (or the equity feed errored) — try the index feed below
-    try:
-        idx = ticker[:-1] if ticker.endswith("W") else ticker
-        df = thetacall(client.index_history_eod, symbol=idx, start_date=start, end_date=end)
-        if df is not None and not df.empty:
-            return _closes(df)
-    except Exception as e:  # method name / entitlement uncertain — degrade gracefully
-        log.info(f"  [warn] underlying close fetch failed for {ticker}: {e}; underlyingPrice=null")
-    return {}
+    if not remote:
+        try:
+            idx = ticker[:-1] if ticker.endswith("W") else ticker
+            df = thetacall(client.index_history_eod, symbol=idx, start_date=start, end_date=end)
+            if df is not None and not df.empty:
+                remote = _closes(df)
+        except Exception as e:  # method name / entitlement uncertain — degrade gracefully
+            if not local:
+                log.info(f"  [warn] underlying close fetch failed for {ticker}: {e}; underlyingPrice=null")
+    return {**remote, **local}  # local (deep, free) wins where present
 
 
 def _is_settled_eod_file(p: Path) -> bool:

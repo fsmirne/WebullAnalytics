@@ -85,23 +85,33 @@ internal sealed class HistoricalBarCache
 		return null;
 	}
 
-	private async Task<Dictionary<DateTime, YahooOptionsClient.HistoricalBar>> LoadOrFetchAsync(string ticker, DateTime neededThrough, CancellationToken cancellation)
+	private async Task<Dictionary<DateTime, YahooOptionsClient.HistoricalBar>> LoadOrFetchAsync(string ticker, DateTime neededThrough, CancellationToken cancellation, DateTime? desiredFrom = null)
 	{
 		var effectiveThrough = ClampToSettled(neededThrough);
-		if (_memory.TryGetValue(ticker, out var cached) && !NeedsRefresh(cached, effectiveThrough)) return cached;
+		// Fetch floor = normally two years back (InitialFetchFrom), but an explicit deep-history request
+		// (desiredFrom, e.g. --lookback-years 4 or a backtest's --since) pushes it earlier so the on-disk
+		// cache extends BACKWARD, not just forward. Yahoo's chart API serves arbitrary ranges — we simply
+		// never asked for more, on the (now-false) assumption nothing consumes deeper underlying history.
+		var fetchFloor = InitialFetchFrom(ticker, effectiveThrough);
+		if (desiredFrom.HasValue && desiredFrom.Value.Date < fetchFloor) fetchFloor = desiredFrom.Value.Date;
+		bool NeedsBackfill(Dictionary<DateTime, YahooOptionsClient.HistoricalBar> m) =>
+			desiredFrom.HasValue && (m.Count == 0 || m.Keys.Min() > desiredFrom.Value.Date);
+
+		if (_memory.TryGetValue(ticker, out var cached) && !NeedsRefresh(cached, effectiveThrough) && !NeedsBackfill(cached)) return cached;
 
 		var path = Path.Combine(_cacheDir, $"{ticker.ToUpperInvariant()}.csv");
 		Dictionary<DateTime, YahooOptionsClient.HistoricalBar> map;
 		if (File.Exists(path))
 		{
 			map = ParseCsv(await File.ReadAllTextAsync(path, cancellation));
-			if (!_offline && NeedsRefresh(map, effectiveThrough))
+			if (!_offline && (NeedsRefresh(map, effectiveThrough) || NeedsBackfill(map)))
 			{
 				// Yahoo's chart endpoint returns a meta-only response (no daily series) for very short ranges, so a
 				// one-or-two-day incremental window comes back empty and the cache would never advance past its last
 				// bar. Always request at least a two-week trailing window; the merge below is keyed by date, so
-				// re-fetching the days we already hold is idempotent.
-				var from = map.Count > 0 ? map.Keys.Max().AddDays(1) : InitialFetchFrom(ticker, effectiveThrough);
+				// re-fetching the days we already hold is idempotent. A backward extend (NeedsBackfill) restarts at
+				// the fetch floor so the missing OLDER days come in, not just the forward frontier.
+				var from = (map.Count == 0 || NeedsBackfill(map)) ? fetchFloor : map.Keys.Max().AddDays(1);
 				var minFrom = effectiveThrough.AddDays(-14);
 				if (from > minFrom) from = minFrom;
 				var refreshed = await _fetch(ticker, from, effectiveThrough.AddDays(1), cancellation);
@@ -117,7 +127,7 @@ internal sealed class HistoricalBarCache
 			}
 			else
 			{
-				map = await _fetch(ticker, InitialFetchFrom(ticker, effectiveThrough), effectiveThrough.AddDays(1), cancellation);
+				map = await _fetch(ticker, fetchFloor, effectiveThrough.AddDays(1), cancellation);
 				if (map.Count > 0) await File.WriteAllTextAsync(path, SerializeCsv(map), cancellation);
 			}
 		}
@@ -130,17 +140,18 @@ internal sealed class HistoricalBarCache
 	/// Used by the backtest to validate inputs before running so we fail fast instead of mid-loop.</summary>
 	public async Task<bool> HasCoverageAsync(string ticker, DateTime from, DateTime to, CancellationToken cancellation)
 	{
-		var map = await LoadOrFetchAsync(ticker, to, cancellation);
+		var map = await LoadOrFetchAsync(ticker, to, cancellation, desiredFrom: from);
 		if (map.Count == 0) return false;
 		var min = map.Keys.Min();
 		var max = map.Keys.Max();
 		return min <= from.Date && max >= ClampToSettled(to.Date, CboeIndexHistoryClient.IsCboeSeries(ticker));
 	}
 
-	/// <summary>Start of the window requested when a ticker has no cached bars yet. CBOE series take their
+	/// <summary>Default start of the window when a ticker has no cached bars yet. CBOE series take their
 	/// entire published history: the client downloads the full CSV regardless (the window only discards rows),
-	/// so capping at two years would throw away free data — VIX reaches back to 1990. Yahoo requests stay at
-	/// two years; its chart API charges for the range and nothing consumes deeper underlying history.</summary>
+	/// so capping at two years would throw away free data — VIX reaches back to 1990. Yahoo underlyings default
+	/// to two years (the common daily-signal lookback); a caller wanting more passes <c>desiredFrom</c> to
+	/// <see cref="LoadOrFetchAsync"/>, which pushes this floor earlier (Yahoo's chart API serves any range).</summary>
 	private static DateTime InitialFetchFrom(string ticker, DateTime effectiveThrough)
 		=> CboeIndexHistoryClient.IsCboeSeries(ticker) ? DateTime.MinValue : effectiveThrough.AddYears(-2);
 
