@@ -41,6 +41,10 @@ internal sealed class AIHistorySettings : CommandSettings
 	[Description("How far back to ensure the cache covers when starting fresh. Default: 2.")]
 	public int LookbackYears { get; set; } = 2;
 
+	[CommandOption("--vendor <VENDOR>")]
+	[Description("Intraday source for equity/ETF deep history: 'webull' skips the massive.com attempt and pulls straight from Webull's chart paginator (for old data past massive's ~2y horizon); 'massive' forces massive only. Default (unset) tries massive first, then falls back to Webull for any day massive can't serve. No effect on VIX/SPX-family (always Webull) or VXN (Yahoo).")]
+	public string? Vendor { get; set; }
+
 	[CommandOption("--audit")]
 	[Description("Report intraday CSV completeness over the full on-disk history (earliest CSV through yesterday). Audit's window is determined from on-disk CSVs, so it is mutually exclusive with --lookback-years. No network fetches. Reconciles sealed.json with any LooksComplete file not yet listed. Exit code 0 if every trading day is complete, 2 otherwise.")]
 	public bool Audit { get; set; }
@@ -61,6 +65,8 @@ internal sealed class AIHistorySettings : CommandSettings
 	{
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("ticker is required");
 		if (LookbackYears < 1) return ValidationResult.Error($"--lookback-years: must be ≥ 1, got {LookbackYears}");
+		if (Vendor != null && !Vendor.Equals("webull", StringComparison.OrdinalIgnoreCase) && !Vendor.Equals("massive", StringComparison.OrdinalIgnoreCase))
+			return ValidationResult.Error($"--vendor: must be 'webull' or 'massive', got '{Vendor}'");
 		if (Audit && Program.RawArgs.Any(a => a.Equals("--lookback-years", StringComparison.OrdinalIgnoreCase) || a.StartsWith("--lookback-years=", StringComparison.OrdinalIgnoreCase)))
 			return ValidationResult.Error("--audit and --lookback-years are mutually exclusive: audit derives its window from on-disk CSVs, so a lookback override would silently be ignored.");
 		if (Audit && !string.IsNullOrEmpty(ImportWebullSpxFile))
@@ -151,12 +157,12 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			if (!await FetchAndReportAsync(bars, "VIX", earliest, asOf, cancellation)) return 1;
 			if (!await FetchAndReportAsync(bars, "VIX9D", earliest, asOf, cancellation)) return 1;
 			if (!await FetchSmileAsync(earliest, asOf, cancellation)) return 1;
-			await BackfillIntradayAsync("VXN", earliest, asOf, cancellation);
+			await BackfillIntradayAsync("VXN", earliest, asOf, cancellation, settings.Vendor);
 		}
 
 		// Intraday gap-fill from Webull. Best-effort: failures here log a warning but don't fail
 		// the whole command, since the daily caches (the main thing backtests need) are already on disk.
-		await BackfillIntradayAsync(ticker, earliest, asOf, cancellation);
+		await BackfillIntradayAsync(ticker, earliest, asOf, cancellation, settings.Vendor);
 
 		// Intraday VIX rides along with SPX-family runs, like the daily VIX-family closes above. The
 		// backtest's minute-walk MaxVix gates (LegInShort / CompleteCondor) read data/intraday/VIX/ for
@@ -165,7 +171,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// (Webull's chart endpoint only pages ~3 RTH days back without per-URL signatures); this
 		// ride-along keeps the recent edge current.
 		if (VixDrivenTickers.Contains(ticker))
-			await BackfillIntradayAsync("VIX", earliest, asOf, cancellation);
+			await BackfillIntradayAsync("VIX", earliest, asOf, cancellation, settings.Vendor);
 
 		// CNN Fear & Greed sentiment cache fill — ticker-agnostic daily series. Without this, the cache
 		// only grows when something else calls `FearGreedClient.FetchAsync` AFTER 5pm ET (settlement
@@ -402,7 +408,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	/// capture only, for CBOE indices with no deep-history source anywhere (see FetchRangeAsync).</summary>
 	private static bool IsYahooIntradayCapture(string ticker) => string.Equals(ticker, "VXN", StringComparison.OrdinalIgnoreCase);
 
-	private static async Task BackfillIntradayAsync(string inputTicker, DateTime earliest, DateTime asOf, CancellationToken cancellation)
+	private static async Task BackfillIntradayAsync(string inputTicker, DateTime earliest, DateTime asOf, CancellationToken cancellation, string? vendor = null)
 	{
 		var apiConfig = TryLoadApiConfig();
 		if (apiConfig == null)
@@ -446,7 +452,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		Dictionary<DateTime, List<MinuteBar>> barsByDate;
 		try
 		{
-			barsByDate = await FetchRangeAsync(apiConfig, inputTicker, isSpxFamily, earliestMissing, latestMissing, cancellation);
+			barsByDate = await FetchRangeAsync(apiConfig, inputTicker, isSpxFamily, earliestMissing, latestMissing, cancellation, vendor);
 		}
 		catch (Exception ex) when (ex is not OperationCanceledException)
 		{
@@ -722,7 +728,8 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		bool isSpxFamily,
 		DateTime startNyDate,
 		DateTime endNyDate,
-		CancellationToken cancellation)
+		CancellationToken cancellation,
+		string? vendor = null)
 	{
 		if (isSpxFamily)
 		{
@@ -752,10 +759,63 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		}
 		else
 		{
+			// --vendor webull: skip the massive attempt and pull straight from Webull's paginator (for old
+			// data past massive's ~2y horizon — no wasted 403). Default tries massive first, then falls back.
+			if (string.Equals(vendor, "webull", StringComparison.OrdinalIgnoreCase))
+			{
+				var deep = await FetchEquityDeepFromWebullAsync(apiConfig, ticker, startNyDate, endNyDate, cancellation);
+				return GroupBarsByNyDate(deep);
+			}
 			var bars = await FetchFromMassiveAsync(apiConfig, ticker, startNyDate, endNyDate, cancellation);
 			var byDate = GroupBarsByNyDate(bars);
+			// Default (auto): massive's SIP aggregates only reach ~2 years; fill any day it didn't return from
+			// Webull's query-mini paginator (the same one VIX/SPX use — walks back years with the captured
+			// session's signed requests). massive wins on days it served (higher-fidelity SIP); Webull fills the
+			// older tail. includeExtended keeps SPY's pre/post-market. --vendor massive suppresses the fallback.
+			if (!string.Equals(vendor, "massive", StringComparison.OrdinalIgnoreCase))
+			{
+				var gaps = new List<DateTime>();
+				for (var d = startNyDate.Date; d <= endNyDate.Date; d = d.AddDays(1))
+					if (MarketCalendar.IsOpen(d) && !byDate.ContainsKey(d)) gaps.Add(d);
+				if (gaps.Count > 0)
+				{
+					var deep = await FetchEquityDeepFromWebullAsync(apiConfig, ticker, gaps[0], gaps[^1], cancellation);
+					foreach (var (d, b) in GroupBarsByNyDate(deep))
+						if (!byDate.ContainsKey(d)) byDate[d] = b;
+				}
+			}
 			return byDate;
 		}
+	}
+
+	/// <summary>Deep intraday history for an equity/ETF (e.g. SPY) from Webull's query-mini chart paginator —
+	/// the same one the SPX/VIX path uses, which walks back years using the captured session's signed
+	/// requests (massive's SIP aggregates only reach ~2y). Resolves the chart tickerId from the known-chart
+	/// map, else dynamically via getQuote. includeExtended so SPY's pre/post-market minutes come through
+	/// (the tape anchors on the pre-market open). Empty when the id can't be resolved.</summary>
+	private static async Task<IReadOnlyList<MinuteBar>> FetchEquityDeepFromWebullAsync(
+		ApiConfig apiConfig, string ticker, DateTime startNyDate, DateTime endNyDate, CancellationToken cancellation)
+	{
+		if (!WebullChartsClient.TryResolveKnownChartTickerId(ticker, out var tickerId))
+		{
+			var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(new[] { ticker }, cancellation);
+			if (!resolved.TryGetValue(ticker, out tickerId) || tickerId == 0)
+			{
+				AnsiConsole.MarkupLine($"    [yellow]could not resolve Webull chart id for {Markup.Escape(ticker)}; skipping deep Webull fill[/]");
+				return Array.Empty<MinuteBar>();
+			}
+		}
+		var startEt = new DateTime(startNyDate.Year, startNyDate.Month, startNyDate.Day, 4, 0, 0, DateTimeKind.Unspecified);
+		var endEt = new DateTime(endNyDate.Year, endNyDate.Month, endNyDate.Day, 20, 0, 0, DateTimeKind.Unspecified);
+		var startUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(startEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+		var endUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+		AnsiConsole.MarkupLine($"    paginating {Markup.Escape(ticker)} from Webull ({startNyDate:yyyy-MM-dd} → {endNyDate:yyyy-MM-dd})");
+		var bars = await WebullChartsClient.FetchPaginatedHistoricalMinuteBarsAsync(
+			apiConfig, tickerId, startUnix, endUnix,
+			includeExtended: true, countPerPage: 800,
+			delayBetweenPages: TimeSpan.FromSeconds(1), onPageProgress: null, cancellation);
+		AnsiConsole.MarkupLine($"    Webull returned {bars.Count} {Markup.Escape(ticker)} bars");
+		return bars;
 	}
 
 	private static async Task<IReadOnlyList<MinuteBar>> FetchFromMassiveAsync(
