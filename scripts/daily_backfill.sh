@@ -21,6 +21,11 @@
 # ~17:15 ET: an evening run (>= 19:00) captures TODAY; a morning run captures through yesterday.
 # Each pull also tees its own timestamped log to data/logs/backfill_*.log.
 #
+# Overrides (env): BACKFILL_END=YYYY-MM-DD (last day); BACKFILL_START=YYYY-MM-DD (extend the quotes+OI
+# floor back for a one-time history fill — sealed data is still skipped); BACKFILL_TICKERS / BACKFILL_VERIFY
+# / BACKFILL_HISTORY_TICKERS (scope the roots). E.g. a one-off 4-year SPY fill (no 0DTE roots dragged in):
+#   BACKFILL_START=2022-07-18 BACKFILL_TICKERS="SPY:60" BACKFILL_VERIFY="SPY" BACKFILL_HISTORY_TICKERS="SPY" bash daily_backfill.sh
+#
 # NOTE: re-pulling an unsealed expiration REWRITES its CSV, replacing any rows the Schwab scraper
 # captured live that day — snapshot them first if needed (scripts/snapshot_schwab_day.py).
 #
@@ -68,8 +73,10 @@ fi
 
 PY=python3
 SCRIPT="$SCRIPT_DIR/backfill_thetadata.py"
-TICKERS="SPXW:0 XSP:0 SPY:60 GME:60 QQQ:60"   # quotes + oi (per-ticker DTE)
-VERIFY="SPXW XSP SPY GME QQQ"                 # verify-quotes (bare names, no DTE)
+# Ticker sets are env-overridable so a one-off historical fill can be scoped to a single root (e.g. a
+# 4-year SPY pull) without dragging the 0DTE index roots into a multi-year pull. Defaults = the daily set.
+TICKERS="${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60 GME:60 QQQ:60}"   # quotes + oi (per-ticker DTE)
+VERIFY="${BACKFILL_VERIFY:-SPXW XSP SPY GME QQQ}"                  # verify-quotes (bare names, no DTE)
 CONC=2
 
 # Resolve the wa executable — install.sh/.bat publish it alongside this script in the install dir
@@ -79,8 +86,9 @@ elif [ -x "$SCRIPT_DIR/wa.exe" ]; then WA="$SCRIPT_DIR/wa.exe"
 else WA="wa"; fi
 
 # Daily/close price + intraday-tape history refresh for the strategy tickers. Runs BEFORE the
-# ThetaData pull so downstream stores have fresh underlying history to lean on.
-HISTORY_TICKERS="SPY XSP SPXW QQQ"
+# ThetaData pull so downstream stores have fresh underlying history to lean on. Env-overridable to
+# scope a historical fill to one root (e.g. BACKFILL_HISTORY_TICKERS="SPY").
+HISTORY_TICKERS="${BACKFILL_HISTORY_TICKERS:-SPY XSP SPXW QQQ}"
 
 # Stop at the last COMPLETE day. ThetaData finalizes a session's data at ~17:15 ET, so an evening
 # run (>= 19:00 local, comfortably past that) may include TODAY; earlier runs stop at yesterday —
@@ -92,6 +100,16 @@ if [ -z "${BACKFILL_END:-}" ] && [ "$(date +%H)" -ge 19 ]; then
 else
   END="${BACKFILL_END:-$(date -d 'yesterday' +%F)}"
 fi
+
+# Historical backfill floor for the quotes + OI pulls. Unset => backfill_thetadata.py's own default
+# (2025-01-01), i.e. the daily frontier only — normal daily runs are unchanged. Set
+# BACKFILL_START=YYYY-MM-DD to extend the pull back for a one-time history fill; sealed expirations/days
+# are still skipped, so it only fetches the genuinely-missing older data. Does NOT affect the `wa ai
+# history` step (that uses its own lookback). Example one-off 4-year SPY fill:
+#   BACKFILL_START=2022-07-18 BACKFILL_TICKERS="SPY:60" BACKFILL_VERIFY="SPY" \
+#     BACKFILL_HISTORY_TICKERS="SPY" bash daily_backfill.sh
+START_OPT=()
+[ -n "${BACKFILL_START:-}" ] && START_OPT=(--start "$BACKFILL_START")
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 rc=0
@@ -110,13 +128,13 @@ step() {  # "label" command args...
 # on tomorrow's run; quotes still capture today on evening runs.
 END_OI="${BACKFILL_END:-$(date -d 'yesterday' +%F)}"
 
-echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes through $END, oi through $END_OI, verify ==="
+echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes ${BACKFILL_START:+from $BACKFILL_START }through $END, oi through $END_OI, verify ==="
 
 for t in $HISTORY_TICKERS; do
   step "(1/4) ai history $t"                        "$WA" ai history "$t"
 done
-step "(2/4) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END" --concurrency "$CONC"
-step "(3/4) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" --concurrency "$CONC"
+step "(2/4) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+step "(3/4) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
 step "(4/4) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root SPY --verify
 
 if [ "$rc" -eq 0 ]; then
