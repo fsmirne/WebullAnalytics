@@ -22,9 +22,9 @@ public class BreakEvenEngineParityTests
 {
 	private static OpenerConfig Cfg() => new()
 	{
-		Indicators = new() { IvDefaultPct = 40m, StrikeStep = 1.0m },
+		Indicators = new() { IvDefaultPct = 0.4m, StrikeStep = 1.0m },
 		Weights = new() { DirectionalFit = 0.5m },
-		ProfitBandPct = 5m,
+		ProfitBandPct = 0.05m,
 	};
 
 	[Fact]

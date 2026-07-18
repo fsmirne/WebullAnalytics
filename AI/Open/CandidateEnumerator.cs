@@ -146,7 +146,7 @@ internal static class CandidateEnumerator
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
 		var step = FallbackStep(spot);
-		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct;
 		var useDelta = sCfg.DeltaMax > 0m; // delta-band placement vs legacy ATM grid
 		foreach (var callPut in new[] { "C", "P" })
 			foreach (var shortExp in shortExps)
@@ -442,7 +442,7 @@ internal static class CandidateEnumerator
 		var longExps = FilterLongExpiries(WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax), cfg).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
-		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct;
 		var step = FallbackStep(spot);
 
 		foreach (var side in new[] { "C", "P" })
@@ -551,7 +551,7 @@ internal static class CandidateEnumerator
 		var longExps = FilterLongExpiries(WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.LongDteMin, sCfg.LongDteMax), cfg).OrderBy(e => e).Take(3).ToList();
 		if (shortExps.Count == 0 || longExps.Count == 0) yield break;
 
-		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct;
 		var step = FallbackStep(spot);
 		var deltaMid = (sCfg.DeltaMin + sCfg.DeltaMax) / 2m;
 
@@ -635,7 +635,7 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct;
 		var step = FallbackStep(spot);
 
 		foreach (var exp in exps)
@@ -717,7 +717,7 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct;
 		var step = FallbackStep(spot);
 		var sides = sCfg.Side.Trim().ToLowerInvariant() switch
 		{
@@ -777,7 +777,7 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct;
 		var step = FallbackStep(spot);
 
 		foreach (var exp in exps)
@@ -825,7 +825,7 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).ToList();
 		if (exps.Count == 0) yield break;
 
-		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct;
 		var step = FallbackStep(spot);
 
 		foreach (var exp in exps)
@@ -909,7 +909,7 @@ internal static class CandidateEnumerator
 		var exps = WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax).Take(2).ToList();
 		if (exps.Count == 0) yield break;
 
-		var defaultIv = cfg.Indicators.IvDefaultPct / 100m;
+		var defaultIv = cfg.Indicators.IvDefaultPct;
 		var step = FallbackStep(spot);
 
 		foreach (var exp in exps)

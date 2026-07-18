@@ -43,14 +43,20 @@ internal sealed class TakeProfitRule : IManagementRule
 		// Independent of realizedExpectancy (it's a flat return threshold, not a grid-relative one).
 		if (_config.ProfitTargetPctOfDebit > 0m && position.AdjustedNetDebit > 0m)
 		{
-			var pctOfDebit = profitPerContract / position.AdjustedNetDebit * 100m;
+			var pctOfDebit = profitPerContract / position.AdjustedNetDebit;
 			if (pctOfDebit >= _config.ProfitTargetPctOfDebit)
-				rationale = $"captured {pctOfDebit:F0}% of net debit ${position.AdjustedNetDebit:F2}/contract (target {_config.ProfitTargetPctOfDebit:F0}%)";
+				rationale = $"captured {pctOfDebit * 100m:F0}% of net debit ${position.AdjustedNetDebit:F2}/contract (target {_config.ProfitTargetPctOfDebit * 100m:F0}%)";
 		}
 
 		// Target B — % of max projected profit (aligns with the scorer's EV clamp). Needs the realized-
-		// expectancy model for the threshold and the grid for the projection.
-		if (rationale == null && _realizedExpectancy.Enabled)
+		// expectancy model for the threshold and the grid for the projection. A threshold ≥ 1.0 DISABLES
+		// this target ("ride to max projected profit"): a mark can only equal the projector's max at its
+		// theoretical peak, so firing at exactly 1.0 closes as soon as the position brushes that max —
+		// which for a thin-max structure (e.g. a diagonal whose projected max is a small fraction of its
+		// debit) is a near-zero absolute gain. This mirrors the intraday gate (BacktestRunner: skip when
+		// ProfitTargetPctOfMaxProfit ≥ 1.0) and the documented pctOfMaxProfit semantics; without it the
+		// two paths disagree and a config that means to disable Target B still fires it at EOD.
+		if (rationale == null && _realizedExpectancy.Enabled && _realizedExpectancy.ProfitTargetPctOfMaxProfit < 1m)
 		{
 			// Max projected profit from grid: use the peak net value in the current-date column.
 			var maxProjected = GetMaxProjectedProfitPerContract(position, ctx);

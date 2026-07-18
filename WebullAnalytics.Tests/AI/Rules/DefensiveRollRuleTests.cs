@@ -14,9 +14,9 @@ public class DefensiveRollRuleTests
 			{
 				Enabled = true,
 				TriggerDTE = 3,
-				SpotWithinPctOfShortStrike = 1.0m,
+				SpotWithinPctOfShortStrike = 0.01m,
 			},
-			new IndicatorsConfig { IvDefaultPct = 40m, StrikeStep = 0.50m });
+			new IndicatorsConfig { IvDefaultPct = 0.4m, StrikeStep = 0.50m });
 
 		var position = new OpenPosition(
 			Key: "GME_CALENDAR_25.00_20260501",

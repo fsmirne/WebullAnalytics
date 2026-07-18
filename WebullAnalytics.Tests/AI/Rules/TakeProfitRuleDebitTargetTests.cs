@@ -44,7 +44,7 @@ public class TakeProfitRuleDebitTargetTests
 	[Fact]
 	public void Fires_AnyDay_WhenProfitReachesDebitTarget_EvenWithRealizedExpectancyOff()
 	{
-		var cfg = new TakeProfitConfig { Enabled = true, ProfitTargetPctOfDebit = 25m };
+		var cfg = new TakeProfitConfig { Enabled = true, ProfitTargetPctOfDebit = 0.25m };
 		var rule = new TakeProfitRule(cfg, NoRealizedExpectancy());
 		var position = CallCalendar(initialDebit: 0.50m);
 		// mark = 0.85 - 0.20 = 0.65; profit = 0.15 = 30% of 0.50 debit ≥ 25% target.
@@ -57,7 +57,7 @@ public class TakeProfitRuleDebitTargetTests
 	[Fact]
 	public void DoesNotFire_WhenProfitBelowDebitTarget()
 	{
-		var cfg = new TakeProfitConfig { Enabled = true, ProfitTargetPctOfDebit = 35m };
+		var cfg = new TakeProfitConfig { Enabled = true, ProfitTargetPctOfDebit = 0.35m };
 		var rule = new TakeProfitRule(cfg, NoRealizedExpectancy());
 		var position = CallCalendar(initialDebit: 0.50m);
 		// profit = 30% of debit, below the 35% target.

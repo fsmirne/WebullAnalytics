@@ -7,7 +7,7 @@ public class CandidateEnumeratorCalendarVerticalTests
 {
 	private static OpenerConfig Cfg()
 	{
-		var cfg = new OpenerConfig { Indicators = new() { IvDefaultPct = 40m, StrikeStep = 1.0m } };
+		var cfg = new OpenerConfig { Indicators = new() { IvDefaultPct = 0.4m, StrikeStep = 1.0m } };
 		cfg.Structures.LongCalendar.Enabled = false;
 		cfg.Structures.DoubleCalendar.Enabled = false;
 		cfg.Structures.LongDiagonal.Enabled = false;

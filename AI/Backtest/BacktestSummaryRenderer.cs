@@ -1,10 +1,11 @@
+using System.Globalization;
 using Spectre.Console;
 
 namespace WebullAnalytics.AI.Backtest;
 
 internal static class BacktestSummaryRenderer
 {
-	public static void Render(BacktestResult result, bool showFills)
+	public static void Render(BacktestResult result, bool showFills, bool bookCmd = false)
 	{
 		AnsiConsole.MarkupLine("[yellow bold]Backtest assumptions:[/]");
 		AnsiConsole.MarkupLine("[dim]  • Quotes prefer captured per-minute option bars when available (from `wa ai history <ticker> --options`); legs without captured data fall back to Black-Scholes synthesized — SPX-family uses VIX as ATM IV, other tickers use 30-day realized HV × premium. Bid/ask is always synthesized with a per-ticker half-spread (the captured endpoint reports trade prints, not NBBO).[/]");
@@ -16,6 +17,36 @@ internal static class BacktestSummaryRenderer
 		if (showFills) RenderFillsTable(result);
 		RenderSummaryPanel(result);
 		RenderPerTickerBreakdown(result);
+		if (bookCmd) RenderBookCommand(result);
+	}
+
+	/// <summary>--book-cmd: emit a ready-to-paste <c>wa analyze trade</c> command reconstructing the whole
+	/// window's book from the fill ledger. Every fill becomes one ';'-separated group of
+	/// <c>side:SYMBOL:qty@price</c> legs priced at its executed fill. Fed through <c>analyze trade
+	/// --standalone</c>, each group is valued at current quotes: a still-open position marks to now
+	/// (unrealized P&L), while a closed lineage's Open + Close legs offset so the current mark cancels and
+	/// the group nets to its realized P&L. Summed, the combined book therefore equals the backtest's total
+	/// P&L for the window — which is why every fill (not just the still-open ones) is included.</summary>
+	private static void RenderBookCommand(BacktestResult result)
+	{
+		var groups = new List<string>();
+		foreach (var f in result.Fills)
+		{
+			var legs = f.Legs
+				.Where(l => l.Qty != 0)
+				.Select(l => $"{(l.Side == Side.Buy ? "buy" : "sell")}:{l.Symbol}:{Math.Abs(l.Qty)}@{l.PricePerShare.ToString("0.####", CultureInfo.InvariantCulture)}");
+			var group = string.Join(",", legs);
+			if (group.Length > 0) groups.Add(group);
+		}
+		if (groups.Count == 0) { AnsiConsole.MarkupLine("[dim]No fills — no book command.[/]"); return; }
+
+		var spec = string.Join(";", groups);
+		AnsiConsole.WriteLine();
+		AnsiConsole.MarkupLine("[bold]Combined book (analyze trade) — open positions mark to current quotes; closed lineages net to realized P&L:[/]");
+		// Raw Console.WriteLine, NOT AnsiConsole: Spectre hard-wraps to the console width, which shatters the
+		// (often long) command across lines and breaks copy-paste. Raw stdout emits one line the terminal only
+		// soft-wraps, so it still copies as a single command.
+		Console.WriteLine($"wa analyze trade \"{spec}\" --standalone --vendor schwab");
 	}
 
 	private static void RenderFillsTable(BacktestResult result)
@@ -143,10 +174,11 @@ internal static class BacktestSummaryRenderer
 		_ => rule.EndsWith("Rule", StringComparison.Ordinal) ? rule[..^4] : rule,
 	};
 
-	/// <summary>Compact summary of the leg set: unique sorted strikes, then earliest/latest expiry.
-	/// Single-expiry structures (iron condors, butterflies, verticals) show one date; multi-expiry
-	/// structures (calendars, diagonals) show "shortExp→longExp".
-	/// Examples: "685 @ 01/09→02/13" (LongCalendar), "680/685/690 @ 01/16" (IronButterfly).</summary>
+	/// <summary>Compact summary of the leg set: unique sorted strikes (each tagged C/P), then earliest/latest
+	/// expiry. Single-expiry structures (iron condors, butterflies, verticals) show one date; multi-expiry
+	/// structures (calendars, diagonals) show "shortExp→longExp". The C/P tag disambiguates whether calls or
+	/// puts were opened — a diagonal's "751/752" reads as "751C/752C" so the side is unmistakable.
+	/// Examples: "685C @ 01/09→02/13" (LongCalendar), "680P/685P/685C/690C @ 01/16" (IronCondor).</summary>
 	private static string FormatLegDetail(IReadOnlyList<BacktestLegFill> legs)
 	{
 		var parsed = legs
@@ -156,10 +188,12 @@ internal static class BacktestSummaryRenderer
 			.ToList();
 		if (parsed.Count == 0) return "";
 
-		var strikes = parsed.Select(p => p.Strike).Distinct().OrderBy(s => s).ToList();
+		// Key on (strike, type) so a straddle/strangle or an iron condor sharing a strike across a call and a
+		// put don't collapse into one entry — each priced side stays visible.
+		var strikes = parsed.Select(p => (p.Strike, p.CallPut)).Distinct().OrderBy(s => s.Strike).ThenBy(s => s.CallPut).ToList();
 		var expiries = parsed.Select(p => p.ExpiryDate.Date).Distinct().OrderBy(d => d).ToList();
 
-		var strikesStr = string.Join("/", strikes.Select(FormatStrike));
+		var strikesStr = string.Join("/", strikes.Select(s => FormatStrike(s.Strike) + s.CallPut));
 		var expStr = expiries.Count == 1
 			? expiries[0].ToString("MM/dd")
 			: $"{expiries[0]:MM/dd}→{expiries[^1]:MM/dd}";

@@ -9,8 +9,8 @@ public class CloseBeforeShortExpiryRuleTests
 	private static CloseBeforeShortExpiryConfig DefaultConfig() => new()
 	{
 		Enabled = true,
-		MinProfitPct = 30m,
-		EmergencyBreakEvenBufferPct = 1.0m,
+		MinProfitPct = 0.3m,
+		EmergencyBreakEvenBufferPct = 0.01m,
 	};
 
 	private static OpenPosition GmePutCalendar(int qty = 300, decimal initialDebit = 0.50m, decimal adjDebit = 0.50m) => new(

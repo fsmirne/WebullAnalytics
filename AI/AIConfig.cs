@@ -52,9 +52,9 @@ internal sealed class WatchConfig
 internal sealed class IndicatorsConfig
 {
 	/// <summary>Fallback implied volatility used when a leg has no live IV. Applies to opener scoring
-	/// and rule evaluation alike. Stored as a percentage (e.g. 18 = 18%); sane for index/ETF underlyings,
+	/// and rule evaluation alike. Stored as a fraction (e.g. 0.18 = 18%); sane for index/ETF underlyings,
 	/// override per-ticker for higher-vol names.</summary>
-	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 18m;
+	[JsonPropertyName("ivDefaultPct")] public decimal IvDefaultPct { get; set; } = 0.18m;
 
 	/// <summary>Strike-grid increment for the active ticker, in dollars. Ticker-specific (SPXW=5,
 	/// SPY=1, GME=0.5, …). Used by the opener candidate enumerator and the roll-rule strike snappers.
@@ -220,8 +220,8 @@ internal sealed class RulesConfig
 internal sealed class LegInShortConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
-	/// <summary>Spot must be at least this percent in-the-money relative to the long strike. Default 1.0%.</summary>
-	[JsonPropertyName("minSpotPctITM")] public decimal MinSpotPctITM { get; set; } = 1.0m;
+	/// <summary>Spot must be at least this fraction in-the-money relative to the long strike. Default 0.01 (1%).</summary>
+	[JsonPropertyName("minSpotPctITM")] public decimal MinSpotPctITM { get; set; } = 0.01m;
 	/// <summary>Absolute delta of the long leg must be at least this. Default 0.65 — gamma-saturated;
 	/// additional underlying moves give diminishing premium pickup so capping upside is fair trade.</summary>
 	[JsonPropertyName("minLongDelta")] public decimal MinLongDelta { get; set; } = 0.65m;
@@ -251,10 +251,10 @@ internal sealed class LegInShortConfig
 	/// fat-tail moves and the rule's cap-the-winner action gives up massive upside. Default 999
 	/// (disabled). Sensible test value: 20-25.</summary>
 	[JsonPropertyName("maxVix")] public decimal MaxVix { get; set; } = 999m;
-	/// <summary>Skip leg-in when today's running range (high − low / open, in percent) is at or above
+	/// <summary>Skip leg-in when today's running range (high − low / open, as a fraction) is at or above
 	/// this level by the time the rule evaluates. "Trend day" filter — early big ranges correlate with
-	/// continued big moves. Default 999 (disabled). Sensible test value: 0.8 - 1.5%.</summary>
-	[JsonPropertyName("maxIntradayRangePct")] public decimal MaxIntradayRangePct { get; set; } = 999m;
+	/// continued big moves. Default 9.99 (disabled). Sensible test value: 0.008 - 0.015.</summary>
+	[JsonPropertyName("maxIntradayRangePct")] public decimal MaxIntradayRangePct { get; set; } = 9.99m;
 }
 
 /// <summary>Config for <c>CompleteCondorRule</c> — converts a held single-sided short vertical into an
@@ -262,10 +262,10 @@ internal sealed class LegInShortConfig
 internal sealed class CompleteCondorConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
-	/// <summary>The held short strike must be at least this percent OTM (spot has moved away from it)
+	/// <summary>The held short strike must be at least this fraction OTM (spot has moved away from it)
 	/// before the opposite side is added. The "held side is winning" gate that makes this a range bet
-	/// rather than a blind premium grab. Default 1.0%.</summary>
-	[JsonPropertyName("minHeldSidePctOtm")] public decimal MinHeldSidePctOtm { get; set; } = 1.0m;
+	/// rather than a blind premium grab. Default 0.01 (1%).</summary>
+	[JsonPropertyName("minHeldSidePctOtm")] public decimal MinHeldSidePctOtm { get; set; } = 0.01m;
 	/// <summary>Absolute-delta band for the opposite-side short leg. Mirror of the opener's shortVertical
 	/// band; default 0.10–0.30 (far enough OTM that completing doesn't immediately re-arm a near-money loss).</summary>
 	[JsonPropertyName("shortDeltaMin")] public decimal ShortDeltaMin { get; set; } = 0.10m;
@@ -277,10 +277,10 @@ internal sealed class CompleteCondorConfig
 	/// <summary>Skip when VIX is at or above this level — fat-tail regimes are exactly where capping the
 	/// held winner and re-arming the opposite side turns hostile. Default 999 (disabled).</summary>
 	[JsonPropertyName("maxVix")] public decimal MaxVix { get; set; } = 999m;
-	/// <summary>Skip when today's running range (high − low / open, percent) is at or above this by the
+	/// <summary>Skip when today's running range (high − low / open, as a fraction) is at or above this by the
 	/// time the rule evaluates. Trend-day filter — completing into a trend is how you get run over.
-	/// Default 999 (disabled). Sensible test value: 0.8 - 1.5%.</summary>
-	[JsonPropertyName("maxIntradayRangePct")] public decimal MaxIntradayRangePct { get; set; } = 999m;
+	/// Default 9.99 (disabled). Sensible test value: 0.008 - 0.015.</summary>
+	[JsonPropertyName("maxIntradayRangePct")] public decimal MaxIntradayRangePct { get; set; } = 9.99m;
 }
 
 internal sealed class OpportunisticRollConfig
@@ -288,14 +288,14 @@ internal sealed class OpportunisticRollConfig
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 	/// <summary>Minimum P&L-per-day-per-contract improvement (dollars) vs hold required to fire a proposal.</summary>
 	[JsonPropertyName("minImprovementPerDayPerContract")] public decimal MinImprovementPerDayPerContract { get; set; } = 0.50m;
-	/// <summary>Minimum OTM distance required for the new short leg, as a percentage of spot, at neutral technicals.</summary>
-	[JsonPropertyName("baseOtmBufferPct")] public decimal BaseOtmBufferPct { get; set; } = 2.0m;
+	/// <summary>Minimum OTM distance required for the new short leg, as a fraction of spot, at neutral technicals. Default 0.02 (2%).</summary>
+	[JsonPropertyName("baseOtmBufferPct")] public decimal BaseOtmBufferPct { get; set; } = 0.02m;
 	/// <summary>Scales the OTM buffer by (1 + |compositeScore| × multiplier) when technicals are extended.</summary>
 	[JsonPropertyName("technicalBufferMultiplier")] public decimal TechnicalBufferMultiplier { get; set; } = 1.5m;
-	/// <summary>Maximum allowed increase in net position delta magnitude after the roll, as a percentage of current delta.</summary>
-	[JsonPropertyName("maxDeltaIncreasePct")] public decimal MaxDeltaIncreasePct { get; set; } = 25.0m;
-	/// <summary>Minimum required profit at current spot as a percentage of spot, at neutral technicals. Widens with technical extension using the same multiplier as baseOtmBufferPct.</summary>
-	[JsonPropertyName("minBreakEvenMarginPct")] public decimal MinBreakEvenMarginPct { get; set; } = 0.5m;
+	/// <summary>Maximum allowed increase in net position delta magnitude after the roll, as a fraction of current delta. Default 0.25 (25%).</summary>
+	[JsonPropertyName("maxDeltaIncreasePct")] public decimal MaxDeltaIncreasePct { get; set; } = 0.25m;
+	/// <summary>Minimum required profit at current spot as a fraction of spot, at neutral technicals. Widens with technical extension using the same multiplier as baseOtmBufferPct. Default 0.005 (0.5%).</summary>
+	[JsonPropertyName("minBreakEvenMarginPct")] public decimal MinBreakEvenMarginPct { get; set; } = 0.005m;
 	/// <summary>Composite technical-bias score above which call positions are blocked from rolling
 	/// (extended bullish setup → don't reach further into the move). Reads the same bias the opener uses.</summary>
 	[JsonPropertyName("bullishBlockThreshold")] public decimal BullishBlockThreshold { get; set; } = 0.25m;
@@ -321,9 +321,9 @@ internal sealed class TakeProfitConfig
 	/// long premium often runs to 1.0). The scorer prices candidates against this same target (copied into
 	/// the realized-EV bundle at load). 1.0 disables (= ride to max profit). Default 0.50.</summary>
 	[JsonPropertyName("pctOfMaxProfit")] public decimal PctOfMaxProfit { get; set; } = 0.50m;
-	/// <summary>Fixed take-profit: close on ANY day once mark-to-market profit reaches this % of the
-	/// initial net debit (e.g. 25 = exit at +25% on debit). Models the discretionary "grab the win and
-	/// recycle capital" policy, which fires far earlier than the % -of-max-projected-profit target.
+	/// <summary>Fixed take-profit: close on ANY day once mark-to-market profit reaches this fraction of the
+	/// initial net debit (e.g. 0.25 = exit at +25% on debit). Models the discretionary "grab the win and
+	/// recycle capital" policy, which fires far earlier than the fraction-of-max-projected-profit target.
 	/// Default 0 = off (only the max-projected target applies). Fires first when both are configured.</summary>
 	[JsonPropertyName("profitTargetPctOfDebit")] public decimal ProfitTargetPctOfDebit { get; set; } = 0m;
 }
@@ -344,7 +344,8 @@ internal sealed class ExecutionConfig
 internal sealed class DefensiveRollConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
-	[JsonPropertyName("spotWithinPctOfShortStrike")] public decimal SpotWithinPctOfShortStrike { get; set; } = 1.0m;
+	/// <summary>Fire when spot is within this fraction of the short strike. Default 0.01 (1%).</summary>
+	[JsonPropertyName("spotWithinPctOfShortStrike")] public decimal SpotWithinPctOfShortStrike { get; set; } = 0.01m;
 	[JsonPropertyName("triggerDTE")] public int TriggerDTE { get; set; } = 3;
 }
 
@@ -363,10 +364,10 @@ internal sealed class RollShortOnExpiryConfig
 internal sealed class CloseBeforeShortExpiryConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
-	/// <summary>Minimum mark-to-market profit (as % of initial debit) before the rule fires on expiry day.</summary>
-	[JsonPropertyName("minProfitPct")] public decimal MinProfitPct { get; set; } = 30m;
-	/// <summary>How far past the calendar/diagonal break-even band (as % of BE level) before the emergency-close fires regardless of profit threshold.</summary>
-	[JsonPropertyName("emergencyBreakEvenBufferPct")] public decimal EmergencyBreakEvenBufferPct { get; set; } = 1.0m;
+	/// <summary>Minimum mark-to-market profit (as a fraction of initial debit) before the rule fires on expiry day. Default 0.30 (30%).</summary>
+	[JsonPropertyName("minProfitPct")] public decimal MinProfitPct { get; set; } = 0.30m;
+	/// <summary>How far past the calendar/diagonal break-even band (as a fraction of BE level) before the emergency-close fires regardless of profit threshold. Default 0.01 (1%).</summary>
+	[JsonPropertyName("emergencyBreakEvenBufferPct")] public decimal EmergencyBreakEvenBufferPct { get; set; } = 0.01m;
 	/// <summary>Models the broker's forced liquidation of ITM short options before cash settlement: Webull
 	/// force-closes ITM SPY positions ~30 min before the bell to prevent assignment a retail account can't
 	/// cover. When the rule is enabled, a PHYSICALLY-settled 0DTE position whose short leg is ITM this many
@@ -374,7 +375,7 @@ internal sealed class CloseBeforeShortExpiryConfig
 	/// index roots (XSP/SPXW) are exempt — European cash settlement, no assignment. Default 30 (= 15:30 ET).</summary>
 	[JsonPropertyName("brokerForceCloseMinutesBeforeClose")] public int BrokerForceCloseMinutesBeforeClose { get; set; } = 30;
 	/// <summary>Webull also force-closes shorts merely AT RISK of finishing ITM, not only those already ITM.
-	/// This widens the trigger: a short within this percent of the money (call: spot > strike×(1−buffer);
+	/// This widens the trigger: a short within this fraction of the money (call: spot > strike×(1−buffer);
 	/// put: spot < strike×(1+buffer)) is treated as at-risk and liquidated. Default 0 (ITM only); the true
 	/// Webull threshold is opaque, so sweep this to bound the realistic drag.</summary>
 	[JsonPropertyName("brokerForceCloseMoneynessBufferPct")] public decimal BrokerForceCloseMoneynessBufferPct { get; set; } = 0m;
@@ -542,7 +543,7 @@ internal static class AIConfigLoader
 		if (op.MaxCandidatesPerStructurePerTicker < 1) return $"opener.maxCandidatesPerStructurePerTicker: must be ≥ 1, got {op.MaxCandidatesPerStructurePerTicker}";
 		if (op.MaxQtyPerProposal < 1) return $"opener.maxQtyPerProposal: must be ≥ 1, got {op.MaxQtyPerProposal}";
 		if (op.MaxRiskPctPerProposal < 0m || op.MaxRiskPctPerProposal > 1m) return $"opener.maxRiskPctPerProposal: must be in [0, 1], got {op.MaxRiskPctPerProposal}";
-		if (op.ProfitBandPct <= 0m || op.ProfitBandPct > 50m) return $"opener.profitBandPct: must be in (0, 50], got {op.ProfitBandPct}";
+		if (op.ProfitBandPct <= 0m || op.ProfitBandPct > 0.5m) return $"opener.profitBandPct: must be in (0, 0.5], got {op.ProfitBandPct}";
 		if (op.VolatilityLookbackDays < 5) return $"opener.volatilityLookbackDays: must be ≥ 5, got {op.VolatilityLookbackDays}";
 
 		var wgt = op.Weights;

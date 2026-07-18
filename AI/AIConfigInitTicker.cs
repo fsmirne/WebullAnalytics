@@ -95,8 +95,8 @@ internal static class AIConfigInitTicker
 		return min > 0m ? min : 1.0m;
 	}
 
-	/// <summary>ATM implied vol (fraction) at the strike nearest spot on the front expiry, converted to the
-	/// whole-percent scale ivDefaultPct expects. Null when spot or a positive IV is unavailable.</summary>
+	/// <summary>ATM implied vol (fraction) at the strike nearest spot on the front expiry — the same 0-1
+	/// fraction ivDefaultPct expects. Null when spot or a positive IV is unavailable.</summary>
 	private static decimal? AtmIvPct(List<(OptionParsed p, OptionContractQuote q)> contracts, DateTime expiry, decimal? spot)
 	{
 		if (spot is not { } s) return null;
@@ -105,7 +105,7 @@ internal static class AIConfigInitTicker
 			.OrderBy(c => Math.Abs(c.p.Strike - s))
 			.Select(c => c.q.ImpliedVolatility)
 			.FirstOrDefault();
-		return iv is { } v ? Math.Round(v * 100m, 0) : null;   // stored as a fraction (0.18); config wants 18
+		return iv is { } v ? Math.Round(v, 4) : null;   // ivDefaultPct is a 0-1 fraction (e.g. 0.18)
 	}
 
 	/// <summary>Minimal per-ticker override, matching the shape of the hand-written single-name configs
@@ -113,7 +113,7 @@ internal static class AIConfigInitTicker
 	private static JsonNode BuildTickerConfig(string strategy, decimal strikeStep, decimal? ivPct)
 	{
 		var step = strikeStep.ToString("0.####", CultureInfo.InvariantCulture);
-		var iv = ivPct.HasValue ? (int)ivPct.Value : 40;        // neutral single-name fallback when IV wasn't derived
+		var iv = ivPct.HasValue ? ivPct.Value.ToString("0.####", CultureInfo.InvariantCulture) : "0.40";   // neutral single-name fallback when IV wasn't derived
 		var json = $$"""
 		{
 			"defaultStrategy": "{{strategy}}",
@@ -151,7 +151,7 @@ internal static class AIConfigInitTicker
 			"rules": {
 				"stopLoss": { "enabled": true, "pctOfMaxLoss": 0.75 },
 				"takeProfit": { "enabled": true, "pctOfMaxProfit": 0.50 },
-				"closeBeforeShortExpiry": { "enabled": true, "minProfitPct": 25, "emergencyBreakEvenBufferPct": 1.0 }
+				"closeBeforeShortExpiry": { "enabled": true, "minProfitPct": 0.25, "emergencyBreakEvenBufferPct": 0.01 }
 			},
 			"execution": { "slippagePerSharePerOrder": 0.02, "roundTrips": 2 },
 			"opener": {

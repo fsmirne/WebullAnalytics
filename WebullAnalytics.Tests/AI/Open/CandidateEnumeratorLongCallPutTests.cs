@@ -7,7 +7,7 @@ public class CandidateEnumeratorLongCallPutTests
 {
 	private static OpenerConfig Cfg() => new()
 	{
-		Indicators = new() { IvDefaultPct = 40m, StrikeStep = 1.0m },
+		Indicators = new() { IvDefaultPct = 0.4m, StrikeStep = 1.0m },
 		Structures = new OpenerStructuresConfig
 		{
 			LongCalendar = new OpenerCalendarLikeConfig { Enabled = false },

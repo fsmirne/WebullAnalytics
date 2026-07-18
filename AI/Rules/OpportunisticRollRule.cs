@@ -82,7 +82,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		var availableCash = Math.Max(0m, ctx.AccountCash - CashReserveHelper.ComputeReserve("percent", 0m, ctx.AccountValue));
 		var opt = new ScenarioEngine.EvaluateOptions(
 			InitialNetDebitPerShare: position.AdjustedNetDebit,
-			IvDefault: _indicators.IvDefaultPct,
+			IvDefault: _indicators.IvDefaultPct * 100m,   // ScenarioEngine.IvDefault is 0-100 ("percent"); IvDefaultPct is now a 0-1 fraction
 			StrikeStep: _indicators.StrikeStep,
 			AvailableCash: availableCash > 0m ? availableCash : null,
 			IvOverrides: null,
@@ -213,7 +213,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		// Gate 2: OTM buffer adjusted by technical extension.
 		var compositeScore = ctx.TechnicalSignals.TryGetValue(position.Ticker, out var bias) ? bias.Score : 0m;
 		var technicalFactor = 1m + Math.Abs(compositeScore) * config.TechnicalBufferMultiplier;
-		var requiredOtmFraction = config.BaseOtmBufferPct * technicalFactor / 100m;
+		var requiredOtmFraction = config.BaseOtmBufferPct * technicalFactor;
 		var actualOtmFraction = newShort.CallPut == "P"
 			? (spot - newShort.Strike) / spot
 			: (newShort.Strike - spot) / spot;
@@ -224,7 +224,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		}
 
 		// Gate 3: Break-even at current spot at new short expiry — must be profitable by at least minBreakEvenMarginPct of spot (widened by same technical factor as OTM buffer).
-		var minBeMargin = spot * config.MinBreakEvenMarginPct * technicalFactor / 100m;
+		var minBeMargin = spot * config.MinBreakEvenMarginPct * technicalFactor;
 		var beMargin = ComputeBreakEvenMargin(position, newShort, spot, ctx, indicators);
 		if (beMargin < minBeMargin)
 		{
@@ -233,10 +233,10 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		}
 
 		// Gate 4: Delta change cap.
-		var ivDefault = indicators.IvDefaultPct / 100m;
+		var ivDefault = indicators.IvDefaultPct;
 		var currentDelta = ComputeNetDelta(position.Legs, spot, ctx.Now, ctx.Quotes, ivDefault);
 		var proposedDelta = ComputeProposedDelta(position.Legs, spot, ctx.Now, ctx.Quotes, ivDefault, oldShortProposalLeg?.Symbol, newShort, newShortProposalLeg.Symbol);
-		var maxAllowedAbsDelta = Math.Abs(currentDelta) * (1m + config.MaxDeltaIncreasePct / 100m);
+		var maxAllowedAbsDelta = Math.Abs(currentDelta) * (1m + config.MaxDeltaIncreasePct);
 		if (Math.Abs(proposedDelta) > maxAllowedAbsDelta)
 		{
 			rejectReason = $"delta cap failed: |{proposedDelta:+0.00;-0.00}| > max {maxAllowedAbsDelta:0.00}";
@@ -252,7 +252,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 	private static decimal ComputeBreakEvenMargin(OpenPosition position, OptionParsed newShort, decimal spot, EvaluationContext ctx, IndicatorsConfig indicators)
 	{
 		var shortExpiry = newShort.ExpiryDate.Date;
-		var ivDefault = indicators.IvDefaultPct / 100m;
+		var ivDefault = indicators.IvDefaultPct;
 		var longValue = 0m;
 		foreach (var leg in position.Legs)
 		{

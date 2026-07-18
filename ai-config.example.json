@@ -11,7 +11,7 @@
 	"quoteSource": "webull",
 	"indicators": {
 		"strikeStep": 1.0,
-		"ivDefaultPct": 18,
+		"ivDefaultPct": 0.18,
 		"technicalFilter": {
 			"enabled": true,
 			"lookbackDays": 20,
@@ -40,7 +40,7 @@
 		"maxRiskPctPerProposal": 0.05,
 		"maxDollarRiskPerProposal": 10000,
 		"minScoreToOpen": 0.0,
-		"profitBandPct": 5.0,
+		"profitBandPct": 0.05,
 		"volatilityLookbackDays": 20,
 		"biasCalibrationLookbackDays": 0,
 		"scenarioGridSigma": 1.0,
@@ -87,10 +87,10 @@
 		"opportunisticRoll": {
 			"enabled": true,
 			"minImprovementPerDayPerContract": 0.50,
-			"baseOtmBufferPct": 2.0,
+			"baseOtmBufferPct": 0.02,
 			"technicalBufferMultiplier": 1.5,
-			"maxDeltaIncreasePct": 25.0,
-			"minBreakEvenMarginPct": 0.5,
+			"maxDeltaIncreasePct": 0.25,
+			"minBreakEvenMarginPct": 0.005,
 			"bullishBlockThreshold": 0.25,
 			"bearishBlockThreshold": -0.25
 		},
@@ -100,7 +100,7 @@
 		},
 		"defensiveRoll": {
 			"enabled": true,
-			"spotWithinPctOfShortStrike": 1.0,
+			"spotWithinPctOfShortStrike": 0.01,
 			"triggerDTE": 3
 		},
 		"rollShortOnExpiry": {
@@ -111,12 +111,12 @@
 		},
 		"closeBeforeShortExpiry": {
 			"enabled": false,
-			"minProfitPct": 30,
-			"emergencyBreakEvenBufferPct": 1.0
+			"minProfitPct": 0.3,
+			"emergencyBreakEvenBufferPct": 0.01
 		},
 		"legInShort": {
 			"enabled": false,
-			"minSpotPctITM": 1.0,
+			"minSpotPctITM": 0.01,
 			"minLongDelta": 0.65,
 			"triggerProfitPct": 0.50,
 			"minDTE": 5,
@@ -125,7 +125,7 @@
 			"minShortCreditPerShare": 0.30,
 			"creditSpread": false,
 			"maxVix": 999.0,
-			"maxIntradayRangePct": 999.0
+			"maxIntradayRangePct": 9.99
 		}
 	},
 	"execution": { "slippagePerSharePerOrder": 0, "roundTrips": 2 },
