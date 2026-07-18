@@ -8,71 +8,61 @@ public class RealizedExpectancyTests
 {
 	private static OpenerRealizedExpectancyConfig Cfg(
 		bool enabled = true,
-		decimal profitTargetPct = 0.50m,
 		decimal stopLossPct = 0.50m,
 		decimal slippagePerSharePerOrder = 0m,
 		int roundTrips = 2) =>
 		new()
 		{
 			Enabled = enabled,
-			ProfitTargetPctOfMaxProfit = profitTargetPct,
 			StopLossPctOfMaxLoss = stopLossPct,
 			SlippagePerSharePerOrder = slippagePerSharePerOrder,
 			RoundTrips = roundTrips,
 		};
 
 	[Fact]
-	public void RealizePnl_ClampsAboveProfitTarget()
+	public void RealizePnl_DoesNotCapWinners()
 	{
-		// maxProfit $100, target 50% → cap at $50. PnL $80 → realized $50.
-		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: 80m, maxProfit: 100m, maxLoss: -200m, frictionPerContract: 0m, cfg: Cfg());
-		Assert.Equal(50m, realized);
+		// Target B removed → no profit cap. maxLoss -$200, stop 50% → floor -$100. PnL $80 rides through.
+		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: 80m, maxLoss: -200m, frictionPerContract: 0m, cfg: Cfg());
+		Assert.Equal(80m, realized);
 	}
 
 	[Fact]
 	public void RealizePnl_ClampsBelowStopLoss()
 	{
 		// maxLoss -$200, stop 50% → floor at -$100. PnL -$150 → realized -$100.
-		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: -150m, maxProfit: 100m, maxLoss: -200m, frictionPerContract: 0m, cfg: Cfg());
+		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: -150m, maxLoss: -200m, frictionPerContract: 0m, cfg: Cfg());
 		Assert.Equal(-100m, realized);
 	}
 
 	[Fact]
-	public void RealizePnl_PassesThroughInsideWindow()
+	public void RealizePnl_PassesThroughAboveFloor()
 	{
-		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: 25m, maxProfit: 100m, maxLoss: -200m, frictionPerContract: 0m, cfg: Cfg());
+		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: 25m, maxLoss: -200m, frictionPerContract: 0m, cfg: Cfg());
 		Assert.Equal(25m, realized);
 	}
 
 	[Fact]
 	public void RealizePnl_SubtractsFriction()
 	{
-		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: 25m, maxProfit: 100m, maxLoss: -200m, frictionPerContract: 8m, cfg: Cfg());
+		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: 25m, maxLoss: -200m, frictionPerContract: 8m, cfg: Cfg());
 		Assert.Equal(17m, realized);
 	}
 
 	[Fact]
-	public void RealizePnl_DisabledNoopsClampingButStillSubtractsFriction()
+	public void RealizePnl_DisabledNoopsFlooringButStillSubtractsFriction()
 	{
-		// Disabled → no clamping. Friction still subtracted (caller is expected to zero it out, but the
+		// Disabled → no flooring. Friction still subtracted (caller is expected to zero it out, but the
 		// function stays monotonic so passing nonzero doesn't break the contract).
-		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: 200m, maxProfit: 100m, maxLoss: -200m, frictionPerContract: 5m, cfg: Cfg(enabled: false));
-		Assert.Equal(195m, realized);
+		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: -300m, maxLoss: -200m, frictionPerContract: 5m, cfg: Cfg(enabled: false));
+		Assert.Equal(-305m, realized);
 	}
 
 	[Fact]
-	public void RealizePnl_DegenerateMaxesPassThrough()
+	public void RealizePnl_DegenerateMaxLossPassesThrough()
 	{
-		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: 50m, maxProfit: 0m, maxLoss: 0m, frictionPerContract: 0m, cfg: Cfg());
+		var realized = RealizedExpectancy.RealizePnl(theoreticalPnl: 50m, maxLoss: 0m, frictionPerContract: 0m, cfg: Cfg());
 		Assert.Equal(50m, realized);
-	}
-
-	[Fact]
-	public void ProfitTargetPerContract_RespectsConfig()
-	{
-		Assert.Equal(50m, RealizedExpectancy.ProfitTargetPerContract(100m, Cfg(profitTargetPct: 0.50m)));
-		Assert.Equal(25m, RealizedExpectancy.ProfitTargetPerContract(100m, Cfg(profitTargetPct: 0.25m)));
-		Assert.Equal(100m, RealizedExpectancy.ProfitTargetPerContract(100m, Cfg(enabled: false)));
 	}
 
 	[Fact]
@@ -155,20 +145,21 @@ public class RealizedExpectancyTests
 		decimal theoreticalEv = 0m;
 		foreach (var pt in grid) theoreticalEv += pt.Weight * Pnl(pt.SpotAtExpiry);
 
-		var realized = RealizedExpectancy.RealizeEv(grid, Pnl, maxProfit: 1000m, maxLoss: -1000m, frictionPerContract: 0m, cfg: Cfg(enabled: false));
+		var realized = RealizedExpectancy.RealizeEv(grid, Pnl, maxLoss: -1000m, frictionPerContract: 0m, cfg: Cfg(enabled: false));
 		Assert.Equal(theoreticalEv, realized);
 	}
 
 	[Fact]
-	public void RealizeEv_ManagedExitReducesUpsideEv()
+	public void RealizeEv_ManagedStopRaisesEv()
 	{
+		// With losses floored at the stop and winners riding to max, the managed EV sits ABOVE theoretical.
 		var grid = CandidateScorer.BuildScenarioGrid(spot: 100m, ivAnnual: 0.30m, years: 30 / 365.0);
+		decimal Pnl(decimal sT) => (sT - 100m) * 100m;
 
-		decimal AsymPnl(decimal sT) => Math.Max(-50m, (sT - 100m) * 100m);
 		decimal theoreticalEv = 0m;
-		foreach (var pt in grid) theoreticalEv += pt.Weight * AsymPnl(pt.SpotAtExpiry);
+		foreach (var pt in grid) theoreticalEv += pt.Weight * Pnl(pt.SpotAtExpiry);
 
-		var clampedAsymEv = RealizedExpectancy.RealizeEv(grid, AsymPnl, maxProfit: 1000m, maxLoss: -50m, frictionPerContract: 0m, cfg: Cfg(profitTargetPct: 0.20m));
-		Assert.True(clampedAsymEv < theoreticalEv, $"managed-exit EV ({clampedAsymEv}) should drop below theoretical ({theoreticalEv}) when upside is capped");
+		var flooredEv = RealizedExpectancy.RealizeEv(grid, Pnl, maxLoss: -1000m, frictionPerContract: 0m, cfg: Cfg(stopLossPct: 0.50m));
+		Assert.True(flooredEv > theoreticalEv, $"managed-stop EV ({flooredEv}) should sit above theoretical ({theoreticalEv}) when downside is floored");
 	}
 }

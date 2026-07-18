@@ -135,7 +135,6 @@ internal sealed record OpenProposal(
 	decimal? SentimentAdjustmentFactor = null,
 	decimal? RealizedExpectedValuePerContract = null,
 	decimal? EstimatedSlippagePerContract = null,
-	decimal? ProfitTargetPerContract = null,
 	decimal? StopLossPerContract = null,
 	decimal? BreakevenRoomFactor = null,
 	decimal? ExpectedMoveCreditFactor = null,

@@ -624,30 +624,26 @@ internal sealed class OpenerEventsConfig
 /// assumption with a managed-exit model plus round-trip slippage. When enabled, scoring uses the
 /// adjusted EV; the theoretical numbers are preserved on the proposal so users can audit the gap.
 ///
-/// Per-scenario realized P&L = clamp(theoretical_pnl, -<see cref="StopLossPctOfMaxLoss"/> × |maxLoss|,
-/// +<see cref="ProfitTargetPctOfMaxProfit"/> × maxProfit) − friction. Friction = sum of per-leg
-/// (half-spread + <see cref="SlippagePerSharePerOrder"/>) × 100 × <see cref="RoundTrips"/>.
+/// Per-scenario realized P&L = max(theoretical_pnl, -<see cref="StopLossPctOfMaxLoss"/> × |maxLoss|)
+/// − friction. Friction = sum of per-leg (half-spread + <see cref="SlippagePerSharePerOrder"/>) × 100 ×
+/// <see cref="RoundTrips"/>. Only the downside is clamped — winners ride to their theoretical max (the
+/// profit-target cap was removed with Target B).
 ///
-/// The clamping is a path-conservative approximation: it credits managed exits only at terminal
-/// scenario points, ignoring the optionality of closing intra-life when the path crosses the
-/// target. The error is in the safe direction (under-estimates managed-exit value). Defaults match
-/// tastytrade-style management: close shorts at 50% of max profit, stop at 50% of max loss
-/// (≈ 2× credit on typical 2× wide IC widths), one round trip's worth of half-spread per leg per
-/// side.</summary>
+/// The flooring is a path-conservative approximation: it credits the managed stop only at terminal
+/// scenario points, ignoring the optionality of stopping intra-life when the path crosses the floor. The
+/// error is in the safe direction. Default stops at 50% of max loss (≈ 2× credit on typical 2× wide IC
+/// widths), one round trip's worth of half-spread per leg per side.</summary>
 /// <summary>The realized-EV parameters the candidate scorer prices against. The scorer receives only
 /// <see cref="OpenerConfig"/>, so this is the load-time aggregation point: <see cref="Enabled"/> is the
 /// only field read from JSON (the EV master switch); the exit thresholds and cost model are sourced from
-/// their real homes — <c>rules.stopLoss.pctOfMaxLoss</c>, <c>rules.takeProfit.pctOfMaxProfit</c>, and the
-/// top-level <c>execution</c> block — and copied in by AIConfigLoader.PopulateRealizedEv at load. Marked
+/// their real homes — <c>rules.stopLoss.pctOfMaxLoss</c> and the top-level <c>execution</c> block — and
+/// copied in by AIConfigLoader.PopulateRealizedEv at load. Marked
 /// [JsonIgnore] here so they live in one canonical JSON home (not duplicated in the opener block).</summary>
 internal sealed class OpenerRealizedExpectancyConfig
 {
 	/// <summary>Master switch. False bypasses the realized adjustment entirely and the scorer runs
 	/// on theoretical EV. Populated from opener.realizedEvScoring at load. Default true.</summary>
 	[JsonIgnore] public bool Enabled { get; set; } = true;
-
-	/// <summary>Profit-target as a fraction of theoretical max profit. Populated from rules.takeProfit.pctOfMaxProfit.</summary>
-	[JsonIgnore] public decimal ProfitTargetPctOfMaxProfit { get; set; } = 0.50m;
 
 	/// <summary>Stop-loss as a fraction of theoretical max loss. Populated from rules.stopLoss.pctOfMaxLoss.</summary>
 	[JsonIgnore] public decimal StopLossPctOfMaxLoss { get; set; } = 0.50m;

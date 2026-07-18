@@ -529,28 +529,8 @@ internal sealed class BacktestRunner
 			&& realizedExpectancy.StopLossPctOfMaxLoss < 1m)
 			slTarget = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxLoss * pos.MaxLossPerShare.Value;
 
-		// TP threshold (mark at or above fires TP). The projector spot is the first walk minute's open —
-		// the spot actually observable when the walk begins. The prior implementation anchored on the
-		// day's bar.High, which is only known at EOD: on days where the high lands late, the 10:00 TP
-		// threshold was computed from a spot the market hadn't printed yet (lookahead). The projector
-		// iterates over future spots so the anchor choice is second-order for 0DTE, but causal is causal.
-		// Symmetric with the SL gate: skip when ProfitTargetPctOfMaxProfit ≥ 1.0 (the threshold
-		// equals theoretical max profit, which no intraday mark realistically reaches — walking
-		// every minute to verify that costs ~390 iterations per open position per day for no gain).
-		decimal? tpTarget = null;
-		if (_config.Rules.TakeProfit.Enabled && realizedExpectancy.ProfitTargetPctOfMaxProfit < 1m)
-		{
-			var anchorSpot = minuteBars[0].Open;
-			var quotesForProjector = await _quotes.GetIntradayQuotesAsync(
-				step, pos.Ticker, anchorSpot, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
-			var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
-			var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = anchorSpot };
-			var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
-			var projectorCtx = new EvaluationContext(step, stillOpen, underlyings, quotesForProjector, cash, accountValue, emptySignals);
-			var maxProjected = ProfitProjector.MaxForCurrentColumn(pos, projectorCtx);
-			if (maxProjected.HasValue && maxProjected.Value > 0m)
-				tpTarget = pos.AdjustedNetDebit + realizedExpectancy.ProfitTargetPctOfMaxProfit * maxProjected.Value;
-		}
+		// Intraday take-profit was Target-B only (% of max projected profit); removed. Target A (% of debit)
+		// is evaluated at start-of-day in the main rule loop, so 0DTE positions still get it there.
 
 		// LegInShort: only meaningful on single-leg long calls/puts and only fires intraday for 0DTE
 		// strategies (multi-day positions get evaluated at start-of-day in the main rule loop).
@@ -601,7 +581,7 @@ internal sealed class BacktestRunner
 		// index options (XSP/SPXW) settle in cash with no assignment, so they're never force-closed.
 		var forceCloseActive = _config.Rules.CloseBeforeShortExpiry.Enabled
 			&& !OptionSettlement.CashSettledIndexRoots.Contains(pos.Ticker);
-		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null && completeCondorRule == null && !forceCloseActive) return false;
+		if (!slTarget.HasValue && legInRule == null && completeCondorRule == null && !forceCloseActive) return false;
 
 		// Track intraday range running from session start to the current minute. Used by LegInShort's
 		// trend-day filter. We use the first minute bar's open as the day's open reference (close to
@@ -758,11 +738,9 @@ internal sealed class BacktestRunner
 			}
 
 			bool slFires = slTarget.HasValue && mark.Value <= slTarget.Value;
-			bool tpFires = tpTarget.HasValue && mark.Value >= tpTarget.Value;
-			if (!slFires && !tpFires) continue;
+			if (!slFires) continue;
 
-			// SL before TP if both crossed at the same minute — conservative whipsaw assumption.
-			var ruleName = slFires ? "StopLossRule" : "TakeProfitRule";
+			var ruleName = "StopLossRule";
 
 			var legFills = new List<BacktestLegFill>(pos.Legs.Count);
 			bool allLegsPriced = true;
@@ -830,56 +808,25 @@ internal sealed class BacktestRunner
 			&& realizedExpectancy.StopLossPctOfMaxLoss < 1m)
 			slTarget = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxLoss * pos.MaxLossPerShare.Value;
 
-		// TP threshold (mark at or above this = take-profit triggered).
-		// pctCaptured = (mark - InitialNetDebit) / maxProjected; TP fires when pctCaptured ≥ tpPct,
-		// i.e. when mark ≥ InitialNetDebit + tpPct × maxProjected. maxProjected uses the projector
-		// anchored at the day's OPEN — the spot knowable at 09:30, unlike bar.High which only exists
-		// at EOD (anchoring there was lookahead). For 0DTE the projector iterates over future spots so
-		// the anchor choice doesn't materially affect the result.
-		decimal? tpTarget = null;
-		if (_config.Rules.TakeProfit.Enabled && realizedExpectancy.ProfitTargetPctOfMaxProfit < 1m)
-		{
-			var quotesOpen = await _quotes.GetIntradayQuotesAsync(
-				step, pos.Ticker, barOpen, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
-			var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
-			var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = barOpen };
-			var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
-			var projectorCtx = new EvaluationContext(step, stillOpen, underlyings, quotesOpen, cash, accountValue, emptySignals);
-			var maxProjected = ProfitProjector.MaxForCurrentColumn(pos, projectorCtx);
-			if (maxProjected.HasValue && maxProjected.Value > 0m)
-				tpTarget = pos.AdjustedNetDebit + realizedExpectancy.ProfitTargetPctOfMaxProfit * maxProjected.Value;
-		}
+		// Intraday take-profit was Target-B only; removed (Target A fires at start-of-day in the main loop).
 
-		// Does either threshold sit in [markLow, markHigh]? The mark is monotonic in spot for every
+		// Does the stop threshold sit in [markLow, markHigh]? The mark is monotonic in spot for every
 		// structure currently enumerated (verticals, naked longs, iron condors). If the threshold
 		// lies between the two extreme marks, there's a spot in [barLow, barHigh] where mark equals
 		// the threshold.
 		decimal markMin = Math.Min(markLow.Value, markHigh.Value);
 		decimal markMax = Math.Max(markLow.Value, markHigh.Value);
 		bool slFires = slTarget.HasValue && slTarget.Value >= markMin && slTarget.Value <= markMax;
-		bool tpFires = tpTarget.HasValue && tpTarget.Value >= markMin && tpTarget.Value <= markMax;
 
 		// Also catch the case where the position was ALREADY past the threshold at bar.Open. We don't
 		// have bar.Open here, but if BOTH extreme marks are past the threshold the day opened past it.
 		// Trigger and close at the threshold price (conservative — gives back any deeper capture).
 		if (slTarget.HasValue && markLow.Value <= slTarget.Value && markHigh.Value <= slTarget.Value) slFires = true;
-		if (tpTarget.HasValue && markLow.Value >= tpTarget.Value && markHigh.Value >= tpTarget.Value) tpFires = true;
 
-		if (!slFires && !tpFires) return;
+		if (!slFires) return;
 
-		// Conservative: SL fires before TP on whipsaw days.
-		string ruleName;
-		decimal targetMark;
-		if (slFires)
-		{
-			ruleName = "StopLossRule";
-			targetMark = slTarget!.Value;
-		}
-		else
-		{
-			ruleName = "TakeProfitRule";
-			targetMark = tpTarget!.Value;
-		}
+		string ruleName = "StopLossRule";
+		decimal targetMark = slTarget!.Value;
 
 		// Find the spot in [barLow, barHigh] where the position mark equals targetMark.
 		var thresholdSpot = await FindSpotForMarkAsync(

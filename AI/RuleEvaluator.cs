@@ -141,7 +141,7 @@ internal sealed class RuleEvaluator
 			// only fires on held 2-leg short verticals.
 			new CompleteCondorRule(config.Rules.CompleteCondor),
 			new OpportunisticRollRule(config.Rules.OpportunisticRoll, config.Indicators, config.Opener.RealizedExpectancy, debug, normalizedPricing),
-			new TakeProfitRule(config.Rules.TakeProfit, config.Opener.RealizedExpectancy, debug),
+			new TakeProfitRule(config.Rules.TakeProfit, debug),
 			new DefensiveRollRule(config.Rules.DefensiveRoll, config.Indicators),
 			new RollShortOnExpiryRule(config.Rules.RollShortOnExpiry)
 		};

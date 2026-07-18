@@ -825,13 +825,9 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Force-enable a structure for this run (repeatable). Names: longCalendar, doubleCalendar, longDiagonal, doubleDiagonal, ironButterfly, ironCondor, shortVertical, longCallPut, longVertical. Sets the structure's Enabled=true on top of the merged config; doesn't disable other enabled structures.")]
 	public string[] EnableStructures { get; set; } = Array.Empty<string>();
 
-	[CommandOption("--tp <VALUE>")]
-	[Description("Override rules.takeProfit.pctOfMaxProfit for this run. 1.0 = no profit cap (ride to expiry); 0.5 = close at half max profit. Range 0..1.")]
-	public decimal? TpOverride { get; set; }
-
-	[CommandOption("--tp-debit <VALUE>")]
-	[Description("Override rules.takeProfit.profitTargetPctOfDebit for this run (Target A: close on any day once mark profit reaches this fraction of the entry debit; e.g. 0.10 = +10%). 0 = that target off. Sweep knob for the take-profit % — pair with --tp 1.0 to isolate it (Target B, the fraction-of-max-projected exit, disabled). Must be = 0.")]
-	public decimal? TpDebitOverride { get; set; }
+	[CommandOption("--tp-pct <VALUE>")]
+	[Description("Override rules.takeProfit.profitTargetPctOfPremium for this run: close on any day once mark profit reaches this fraction of the entry premium (debit paid or credit received; e.g. 0.20 = +20%). 0 = take-profit off. Sweep knob for the take-profit %. Must be = 0.")]
+	public decimal? TpPctOverride { get; set; }
 
 	[CommandOption("--lots <N>")]
 	[Description("Fixed contracts per trade (sizing-neutral). Every open trades exactly N contracts and the cash/reserve gates are bypassed, so terminal P&L is the additive sum of per-trade results instead of a compounding curve — use this to measure per-trade edge (expectancy, profit factor) without the position-sizing feedback loop. Omit for normal equity-scaled sizing.")]
@@ -845,10 +841,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
-		if (TpOverride.HasValue && (TpOverride.Value <= 0m || TpOverride.Value > 1m))
-			return ValidationResult.Error($"--tp: must be in (0, 1], got {TpOverride}");
-		if (TpDebitOverride.HasValue && TpDebitOverride.Value < 0m)
-			return ValidationResult.Error($"--tp-debit: must be ≥ 0, got {TpDebitOverride}");
+		if (TpPctOverride.HasValue && TpPctOverride.Value < 0m)
+			return ValidationResult.Error($"--tp-pct: must be ≥ 0, got {TpPctOverride}");
 		if (SlOverride.HasValue && (SlOverride.Value <= 0m || SlOverride.Value > 1m))
 			return ValidationResult.Error($"--sl: must be in (0, 1], got {SlOverride}");
 		if (Lots.HasValue && Lots.Value < 1)
@@ -911,8 +905,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		}
 		if (settings.LongConvictionOverride.HasValue) config.Opener.LongConvictionGate.Weight = settings.LongConvictionOverride.Value;
 		if (!string.IsNullOrWhiteSpace(settings.OpenAfterOverride)) config.Opener.EarliestEntryTimeEt = settings.OpenAfterOverride;
-		if (settings.TpOverride.HasValue) config.Opener.RealizedExpectancy.ProfitTargetPctOfMaxProfit = settings.TpOverride.Value;
-		if (settings.TpDebitOverride.HasValue) config.Rules.TakeProfit.ProfitTargetPctOfDebit = settings.TpDebitOverride.Value;
+		if (settings.TpPctOverride.HasValue) config.Rules.TakeProfit.ProfitTargetPctOfPremium = settings.TpPctOverride.Value;
 		if (settings.SlOverride.HasValue) config.Opener.RealizedExpectancy.StopLossPctOfMaxLoss = settings.SlOverride.Value;
 		foreach (var name in settings.EnableStructures)
 		{

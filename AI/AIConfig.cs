@@ -317,15 +317,11 @@ internal sealed class StopLossConfig
 internal sealed class TakeProfitConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
-	/// <summary>Take-profit as a fraction of theoretical max profit (0.50 = close at half the max credit;
-	/// long premium often runs to 1.0). The scorer prices candidates against this same target (copied into
-	/// the realized-EV bundle at load). 1.0 disables (= ride to max profit). Default 0.50.</summary>
-	[JsonPropertyName("pctOfMaxProfit")] public decimal PctOfMaxProfit { get; set; } = 0.50m;
 	/// <summary>Fixed take-profit: close on ANY day once mark-to-market profit reaches this fraction of the
-	/// initial net debit (e.g. 0.25 = exit at +25% on debit). Models the discretionary "grab the win and
-	/// recycle capital" policy, which fires far earlier than the fraction-of-max-projected-profit target.
-	/// Default 0 = off (only the max-projected target applies). Fires first when both are configured.</summary>
-	[JsonPropertyName("profitTargetPctOfDebit")] public decimal ProfitTargetPctOfDebit { get; set; } = 0m;
+	/// entry premium — debit paid for a debit structure, credit received for a credit structure (e.g. 0.25 =
+	/// exit at +25% of premium). For a credit structure this equals a fraction of max profit. Models the
+	/// discretionary "grab the win and recycle capital" policy. Default 0 = off.</summary>
+	[JsonPropertyName("profitTargetPctOfPremium")] public decimal ProfitTargetPctOfPremium { get; set; } = 0m;
 }
 
 /// <summary>Fill-cost assumptions shared by the opener's scorer and the backtest simulator. These are
@@ -437,7 +433,6 @@ internal static class AIConfigLoader
 		var ev = config.Opener.RealizedExpectancy;
 		ev.Enabled = config.Opener.RealizedEvScoring;
 		ev.StopLossPctOfMaxLoss = config.Rules.StopLoss.PctOfMaxLoss;
-		ev.ProfitTargetPctOfMaxProfit = config.Rules.TakeProfit.PctOfMaxProfit;
 		ev.SlippagePerSharePerOrder = config.Execution.SlippagePerSharePerOrder;
 		ev.RoundTrips = config.Execution.RoundTrips;
 	}
@@ -457,8 +452,7 @@ internal static class AIConfigLoader
 		if (sl.PctOfMaxLoss <= 0m || sl.PctOfMaxLoss > 1m) return $"rules.stopLoss.pctOfMaxLoss: must be in (0, 1], got {sl.PctOfMaxLoss}";
 
 		var tp = c.Rules.TakeProfit;
-		if (tp.PctOfMaxProfit <= 0m || tp.PctOfMaxProfit > 1m) return $"rules.takeProfit.pctOfMaxProfit: must be in (0, 1], got {tp.PctOfMaxProfit}";
-		if (tp.ProfitTargetPctOfDebit < 0m) return $"rules.takeProfit.profitTargetPctOfDebit: must be ≥ 0, got {tp.ProfitTargetPctOfDebit}";
+		if (tp.ProfitTargetPctOfPremium < 0m) return $"rules.takeProfit.profitTargetPctOfPremium: must be ≥ 0, got {tp.ProfitTargetPctOfPremium}";
 
 		var ex = c.Execution;
 		if (ex.SlippagePerSharePerOrder < 0m) return $"execution.slippagePerSharePerOrder: must be ≥ 0, got {ex.SlippagePerSharePerOrder}";

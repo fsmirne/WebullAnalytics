@@ -95,8 +95,7 @@
 			"bearishBlockThreshold": -0.25
 		},
 		"takeProfit": {
-			"enabled": true,
-			"pctOfMaxProfit": 0.50
+			"enabled": true
 		},
 		"defensiveRoll": {
 			"enabled": true,
