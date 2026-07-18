@@ -54,13 +54,13 @@ internal sealed class CompleteCondorRule : IManagementRule
 		// Regime gates (mirror LegInShortRule). Off at the 999 sentinel; non-binding when the source can't
 		// supply the indicator so the rule still fires in environments without VIX / intraday-range data.
 		if (_config.MaxVix < 999m && ctx.Vix is decimal vix && vix >= _config.MaxVix) return null;
-		if (_config.MaxIntradayRangePct < 999m && ctx.IntradaySpotRangePct is decimal r && r >= _config.MaxIntradayRangePct) return null;
+		if (_config.MaxIntradayRangePct < 9.99m && ctx.IntradaySpotRangePct is decimal r && r >= _config.MaxIntradayRangePct) return null;
 
-		// Held-side cushion: the held short must sit at least minHeldSidePctOtm% OTM — i.e. spot has moved
-		// away from it. Put short is below spot (safe once spot rose); call short is above spot (safe once
+		// Held-side cushion: the held short must sit at least minHeldSidePctOtm OTM (fraction) — i.e. spot has
+		// moved away from it. Put short is below spot (safe once spot rose); call short is above spot (safe once
 		// spot fell). This is the "held side is winning" trigger that makes adding the other side a range
 		// bet rather than a blind premium grab.
-		var cushion = _config.MinHeldSidePctOtm / 100m;
+		var cushion = _config.MinHeldSidePctOtm;
 		var heldSafe = isPutVert
 			? spot >= heldShort.Strike * (1m + cushion)
 			: spot <= heldShort.Strike * (1m - cushion);

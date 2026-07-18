@@ -9,7 +9,7 @@ public class LegInShortRuleTests
 	private static LegInShortConfig DefaultConfig() => new()
 	{
 		Enabled = true,
-		MinSpotPctITM = 1.0m,
+		MinSpotPctITM = 0.01m,
 		MinLongDelta = 0.65m,
 		TriggerProfitPct = 0.50m,
 		MinDTE = 5,

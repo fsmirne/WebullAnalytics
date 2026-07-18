@@ -102,7 +102,7 @@ internal static class RiskDiagnosticProbeBuilder
 						var liveIv = ivResolver(shortLeg.Symbol);
 						var iv = liveIv > 0m
 							? liveIv
-							: (opener.HasValue ? opener.Value.cfg.Indicators.IvDefaultPct / 100m : liveIv);
+							: (opener.HasValue ? opener.Value.cfg.Indicators.IvDefaultPct : liveIv);
 						enumDelta = Math.Abs(OptionMath.Delta(spot, shortLeg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, shortLeg.Parsed.CallPut));
 						enumPass = enumDelta >= enumMin && enumDelta <= enumMax;
 					}

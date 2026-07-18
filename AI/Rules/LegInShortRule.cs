@@ -52,10 +52,10 @@ internal sealed class LegInShortRule : IManagementRule
 		// at its sentinel (999); when the source can't supply the indicator (ctx field null) the
 		// gate is treated as non-binding so the rule still fires in environments without VIX data.
 		if (_config.MaxVix < 999m && ctx.Vix is decimal vix && vix >= _config.MaxVix) return null;
-		if (_config.MaxIntradayRangePct < 999m && ctx.IntradaySpotRangePct is decimal r && r >= _config.MaxIntradayRangePct) return null;
+		if (_config.MaxIntradayRangePct < 9.99m && ctx.IntradaySpotRangePct is decimal r && r >= _config.MaxIntradayRangePct) return null;
 
-		// ITM check: spot ≥ K × (1 + minSpotPctITM%) for calls; spot ≤ K × (1 − minSpotPctITM%) for puts.
-		var pctITM = _config.MinSpotPctITM / 100m;
+		// ITM check: spot ≥ K × (1 + minSpotPctITM) for calls; spot ≤ K × (1 − minSpotPctITM) for puts.
+		var pctITM = _config.MinSpotPctITM;
 		var itm = isLongCall
 			? spot >= longLeg.Strike * (1m + pctITM)
 			: spot <= longLeg.Strike * (1m - pctITM);

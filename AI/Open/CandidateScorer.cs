@@ -890,11 +890,11 @@ internal static class CandidateScorer
 	private readonly record struct MagnetBias(decimal Total, decimal? GexSigmas);
 
    /// <summary>Resolves IV from live quote → config default, as a decimal fraction (e.g. 0.40).</summary>
-	public static decimal ResolveIv(string symbol, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultPct)
+	public static decimal ResolveIv(string symbol, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultIv)
 	{
 		if (quotes.TryGetValue(symbol, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m)
 			return q.ImpliedVolatility.Value;
-		return defaultPct / 100m;
+		return defaultIv;
 	}
 
 	/// <summary>Returns the IV that, when fed to Black-Scholes, reproduces the option's market mid

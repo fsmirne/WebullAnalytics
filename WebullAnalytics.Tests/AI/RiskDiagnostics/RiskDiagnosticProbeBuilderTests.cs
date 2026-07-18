@@ -72,7 +72,7 @@ public class RiskDiagnosticProbeBuilderTests
 		var longSymbol = MatchKeys.OccSymbol("GME", expiry, 26.5m, "C");
 		var shortLeg = new DiagnosticLeg(shortSymbol, new OptionParsed("GME", expiry, "C", 25.5m), IsLong: false, Qty: 1, PricePerShare: 0.36m, CostBasisPerShare: null);
 		var longLeg = new DiagnosticLeg(longSymbol, new OptionParsed("GME", expiry, "C", 26.5m), IsLong: true, Qty: 1, PricePerShare: 0.12m, CostBasisPerShare: null);
-		var cfg = new OpenerConfig { Indicators = new IndicatorsConfig { IvDefaultPct = 40m, StrikeStep = 1.0m } };
+		var cfg = new OpenerConfig { Indicators = new IndicatorsConfig { IvDefaultPct = 0.4m, StrikeStep = 1.0m } };
 		cfg.Structures.ShortVertical.ShortDeltaMin = 0.15m;
 		cfg.Structures.ShortVertical.ShortDeltaMax = 0.35m;
 
@@ -123,7 +123,7 @@ public class RiskDiagnosticProbeBuilderTests
 		var longSymbol = MatchKeys.OccSymbol("GME", expiry, 26.5m, "C");
 		var shortLeg = new DiagnosticLeg(shortSymbol, new OptionParsed("GME", expiry, "C", 25.5m), IsLong: false, Qty: 1, PricePerShare: 0.36m, CostBasisPerShare: null);
 		var longLeg = new DiagnosticLeg(longSymbol, new OptionParsed("GME", expiry, "C", 26.5m), IsLong: true, Qty: 1, PricePerShare: 0.12m, CostBasisPerShare: null);
-		var cfg = new OpenerConfig { Indicators = new IndicatorsConfig { IvDefaultPct = 40m, StrikeStep = 1.0m } };
+		var cfg = new OpenerConfig { Indicators = new IndicatorsConfig { IvDefaultPct = 0.4m, StrikeStep = 1.0m } };
 		cfg.Structures.ShortVertical.ShortDeltaMin = 0.15m;
 		cfg.Structures.ShortVertical.ShortDeltaMax = 0.35m;
 

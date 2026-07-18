@@ -769,6 +769,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Also write each fill as a JSON line to the given path. Useful for parameter-sweep scripts that need structure mix / per-trade P&L without scraping the Spectre table (which wraps under piped stdout). Independent of --show-fills.")]
 	public string? FillsJsonlPath { get; set; }
 
+	[CommandOption("--book-cmd")]
+	[Description("After the run, print a ready-to-paste `wa analyze trade` command reconstructing the whole window's book from the fill ledger — every fill becomes a ';'-separated leg group priced at its executed fill. Fed through `analyze trade --standalone`, open positions mark to current quotes while closed lineages' offsetting legs net to realized P&L, so the combined book equals the backtest's total P&L. Independent of --show-fills.")]
+	public bool BookCmd { get; set; }
+
 	[CommandOption("--split")]
 	[Description("Book split structures (DoubleCalendar/DoubleDiagonal/DiagonalVertical/CalendarVertical) as their TWO combo orders — independent positions managed against their own debits, exactly how Webull holds them live. Default off books each structure whole, so take-profit/stop-loss see the combined mark. A/B knob for split-half vs whole-structure exit policy; friction and fees are identical across modes.")]
 	public bool Split { get; set; }
@@ -825,6 +829,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Override rules.takeProfit.pctOfMaxProfit for this run. 1.0 = no profit cap (ride to expiry); 0.5 = close at half max profit. Range 0..1.")]
 	public decimal? TpOverride { get; set; }
 
+	[CommandOption("--tp-debit <VALUE>")]
+	[Description("Override rules.takeProfit.profitTargetPctOfDebit for this run (Target A: close on any day once mark profit reaches this fraction of the entry debit; e.g. 0.10 = +10%). 0 = that target off. Sweep knob for the take-profit % — pair with --tp 1.0 to isolate it (Target B, the fraction-of-max-projected exit, disabled). Must be = 0.")]
+	public decimal? TpDebitOverride { get; set; }
+
 	[CommandOption("--lots <N>")]
 	[Description("Fixed contracts per trade (sizing-neutral). Every open trades exactly N contracts and the cash/reserve gates are bypassed, so terminal P&L is the additive sum of per-trade results instead of a compounding curve — use this to measure per-trade edge (expectancy, profit factor) without the position-sizing feedback loop. Omit for normal equity-scaled sizing.")]
 	public int? Lots { get; set; }
@@ -839,6 +847,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 		if (!baseResult.Successful) return baseResult;
 		if (TpOverride.HasValue && (TpOverride.Value <= 0m || TpOverride.Value > 1m))
 			return ValidationResult.Error($"--tp: must be in (0, 1], got {TpOverride}");
+		if (TpDebitOverride.HasValue && TpDebitOverride.Value < 0m)
+			return ValidationResult.Error($"--tp-debit: must be ≥ 0, got {TpDebitOverride}");
 		if (SlOverride.HasValue && (SlOverride.Value <= 0m || SlOverride.Value > 1m))
 			return ValidationResult.Error($"--sl: must be in (0, 1], got {SlOverride}");
 		if (Lots.HasValue && Lots.Value < 1)
@@ -902,6 +912,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (settings.LongConvictionOverride.HasValue) config.Opener.LongConvictionGate.Weight = settings.LongConvictionOverride.Value;
 		if (!string.IsNullOrWhiteSpace(settings.OpenAfterOverride)) config.Opener.EarliestEntryTimeEt = settings.OpenAfterOverride;
 		if (settings.TpOverride.HasValue) config.Opener.RealizedExpectancy.ProfitTargetPctOfMaxProfit = settings.TpOverride.Value;
+		if (settings.TpDebitOverride.HasValue) config.Rules.TakeProfit.ProfitTargetPctOfDebit = settings.TpDebitOverride.Value;
 		if (settings.SlOverride.HasValue) config.Opener.RealizedExpectancy.StopLossPctOfMaxLoss = settings.SlOverride.Value;
 		foreach (var name in settings.EnableStructures)
 		{
@@ -1054,7 +1065,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			result = captured!;
 		}
 		runStopwatch.Stop();
-		Backtest.BacktestSummaryRenderer.Render(result, settings.ShowFills);
+		Backtest.BacktestSummaryRenderer.Render(result, settings.ShowFills, settings.BookCmd);
 		AnsiConsole.MarkupLine($"[dim]Wall time: {runStopwatch.Elapsed.TotalMinutes:F1} min ({runStartedAt:HH:mm:ss} → {DateTime.Now:HH:mm:ss})[/]");
 
 		if (!string.IsNullOrWhiteSpace(settings.FillsJsonlPath))

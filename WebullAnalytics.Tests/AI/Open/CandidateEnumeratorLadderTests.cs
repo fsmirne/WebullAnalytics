@@ -41,7 +41,7 @@ public class CandidateEnumeratorLadderTests
 
 	private static OpenerConfig DiagVertCfg()
 	{
-		var cfg = new OpenerConfig { Indicators = new() { IvDefaultPct = 20m, StrikeStep = 1.0m } };
+		var cfg = new OpenerConfig { Indicators = new() { IvDefaultPct = 0.2m, StrikeStep = 1.0m } };
 		foreach (var s in new[]
 		{
 			cfg.Structures.LongCalendar, cfg.Structures.LongDiagonal,
@@ -123,7 +123,7 @@ public class CandidateEnumeratorLadderTests
 
 	private static OpenerConfig DeltaCalDiagCfg()
 	{
-		var cfg = new OpenerConfig { Indicators = new() { IvDefaultPct = 20m, StrikeStep = 1.0m } };
+		var cfg = new OpenerConfig { Indicators = new() { IvDefaultPct = 0.2m, StrikeStep = 1.0m } };
 		cfg.Structures.DoubleCalendar.Enabled = false;
 		cfg.Structures.DoubleDiagonal.Enabled = false;
 		cfg.Structures.IronButterfly.Enabled = false;

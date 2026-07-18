@@ -93,7 +93,7 @@ internal sealed class OpenerConfig
 	/// 5 trading days — short enough to be responsive, long enough to be meaningful.</summary>
 	[JsonPropertyName("biasCalibrationLookbackDays")] public int BiasCalibrationLookbackDays { get; set; } = 0;
 
-	[JsonPropertyName("profitBandPct")] public decimal ProfitBandPct { get; set; } = 5.0m;
+	[JsonPropertyName("profitBandPct")] public decimal ProfitBandPct { get; set; } = 0.05m;
 
 	[JsonPropertyName("volatilityLookbackDays")] public int VolatilityLookbackDays { get; set; } = 20;
 

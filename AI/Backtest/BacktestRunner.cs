@@ -786,7 +786,7 @@ internal sealed class BacktestRunner
 	// ITM (short call: spot > strike×(1−b); short put: spot < strike×(1+b)).
 	private static bool HasAtRiskShortLeg(IReadOnlyList<PositionLeg> legs, decimal spot, decimal bufferPct)
 	{
-		var b = bufferPct / 100m;
+		var b = bufferPct;
 		foreach (var leg in legs)
 		{
 			if (leg.Side != Side.Sell || leg.CallPut == null) continue;

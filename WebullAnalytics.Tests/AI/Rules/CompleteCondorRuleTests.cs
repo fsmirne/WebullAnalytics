@@ -9,7 +9,7 @@ public class CompleteCondorRuleTests
 	private static CompleteCondorConfig DefaultConfig() => new()
 	{
 		Enabled = true,
-		MinHeldSidePctOtm = 1.0m,
+		MinHeldSidePctOtm = 0.01m,
 		ShortDeltaMin = 0.10m,
 		ShortDeltaMax = 0.50m,
 		MinCreditPerShare = 0.10m,
@@ -130,10 +130,10 @@ public class CompleteCondorRuleTests
 	public void DoesNotFire_OnTrendDay()
 	{
 		var cfg = DefaultConfig();
-		cfg.MaxIntradayRangePct = 1.0m;
+		cfg.MaxIntradayRangePct = 0.01m;
 		var rule = new CompleteCondorRule(cfg);
 		var pos = HeldPutVertical();
-		Assert.Null(rule.Evaluate(pos, Ctx(spot: 7400m, pos, PutVerticalChain(), rangePct: 1.5m)));
+		Assert.Null(rule.Evaluate(pos, Ctx(spot: 7400m, pos, PutVerticalChain(), rangePct: 0.015m)));
 	}
 
 	[Fact]

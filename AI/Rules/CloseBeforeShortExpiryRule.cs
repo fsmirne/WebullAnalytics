@@ -63,11 +63,11 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 		if (initialDebit <= 0m) return null;
 
 		var profitPerContract = markPerContract.Value - initialDebit;
-		var profitPct = profitPerContract / initialDebit * 100m;
+		var profitPct = profitPerContract / initialDebit;
 		if (profitPct < _config.MinProfitPct) return null;
 
 		return BuildClose(position,
-			$"expiry day, profit ${profitPerContract:F2}/contract = {profitPct:F1}% ≥ threshold {_config.MinProfitPct:F1}%, close all {position.Quantity}",
+			$"expiry day, profit ${profitPerContract:F2}/contract = {profitPct * 100m:F1}% ≥ threshold {_config.MinProfitPct * 100m:F1}%, close all {position.Quantity}",
 			isEmergency: false);
 	}
 
@@ -118,7 +118,7 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 		beLow = low.Value;
 		beHigh = high.Value;
 
-		var buffer = _config.EmergencyBreakEvenBufferPct / 100m;
+		var buffer = _config.EmergencyBreakEvenBufferPct;
 		return spot < beLow * (1m - buffer) || spot > beHigh * (1m + buffer);
 	}
 
