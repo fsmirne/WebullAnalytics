@@ -10,7 +10,8 @@
 # OI store stays as data/oi/<TICKER>/<date>.jsonl with its own sealed.json.
 #
 # Tickers: SPY/GME at 60 DTE (covers the longCalendar/diagonal longDteMax=60 long legs),
-# QQQ at 30 DTE (covers the DC strategy's 21-30 long legs — cross-vehicle validation store),
+# QQQ at 60 DTE (the DC cross-vehicle store; the QQQ.DC long leg is 30-45 DTE, same as SPY — a
+#   narrower :30 pull truncated it at exactly the long leg, crippling the QQQ backtest),
 # SPXW/XSP at 0 DTE. ThetaData allows ONE session per account, so the pulls run STRICTLY
 # SEQUENTIALLY — never in parallel — each with --concurrency 2 (the Value-tier request limit).
 #
@@ -67,7 +68,7 @@ fi
 
 PY=python3
 SCRIPT="$SCRIPT_DIR/backfill_thetadata.py"
-TICKERS="SPXW:0 XSP:0 SPY:60 GME:60 QQQ:30"   # quotes + oi (per-ticker DTE)
+TICKERS="SPXW:0 XSP:0 SPY:60 GME:60 QQQ:60"   # quotes + oi (per-ticker DTE)
 VERIFY="SPXW XSP SPY GME QQQ"                 # verify-quotes (bare names, no DTE)
 CONC=2
 
