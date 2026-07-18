@@ -312,6 +312,7 @@ def _local_underlying_closes(ticker: str, start: date, end: date) -> dict:
     needs no index/underlying entitlement, so the quote pull's ±10% band + IV back-solve work on old dates
     ThetaData won't serve the spot for. Returns {date_str: close} within [start, end]; empty if absent."""
     try:
+        import pandas as pd  # module imports pandas locally per-function (no top-level `pd`)
         path = resolve_data_dir() / "history" / f"{ticker.upper()}.csv"
         if not path.exists():
             return {}
