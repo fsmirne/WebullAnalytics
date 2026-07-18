@@ -43,6 +43,26 @@
 
 set -uo pipefail
 
+# CLI flags (take precedence over the matching BACKFILL_* env vars):
+#   --start YYYY-MM-DD      extend the quotes+OI pull floor back (one-off history fill)
+#   --end YYYY-MM-DD        last day to pull
+#   --tickers 'SPY:60 ...'  scope the quotes/OI roots (per-ticker DTE)
+#   --verify 'SPY ...'      scope the verify roots
+#   --history-tickers 'SPY ...' | --no-history   scope or skip the `wa ai history` step
+CLI_START=""; CLI_END=""; CLI_TICKERS=""; CLI_HISTORY=""; CLI_VERIFY=""; NO_HISTORY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --start)           CLI_START="${2:?--start needs a date}"; shift 2 ;;
+    --end)             CLI_END="${2:?--end needs a date}"; shift 2 ;;
+    --tickers)         CLI_TICKERS="${2:?--tickers needs a value}"; shift 2 ;;
+    --history-tickers) CLI_HISTORY="${2:?--history-tickers needs a value}"; shift 2 ;;
+    --no-history)      NO_HISTORY=1; shift ;;
+    --verify)          CLI_VERIFY="${2:?--verify needs a value}"; shift 2 ;;
+    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--history-tickers 'SPY ...' | --no-history] [--verify 'SPY ...']"; exit 0 ;;
+    *)                 echo "[daily_backfill] unknown argument: $1 (see --help)" >&2; exit 2 ;;
+  esac
+done
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Prod data folder (LocalApplicationData), matching Program.cs's BaseDir resolution.
@@ -75,8 +95,8 @@ PY=python3
 SCRIPT="$SCRIPT_DIR/backfill_thetadata.py"
 # Ticker sets are env-overridable so a one-off historical fill can be scoped to a single root (e.g. a
 # 4-year SPY pull) without dragging the 0DTE index roots into a multi-year pull. Defaults = the daily set.
-TICKERS="${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60 GME:60 QQQ:60}"   # quotes + oi (per-ticker DTE)
-VERIFY="${BACKFILL_VERIFY:-SPXW XSP SPY GME QQQ}"                  # verify-quotes (bare names, no DTE)
+TICKERS="${CLI_TICKERS:-${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60 GME:60 QQQ:60}}"   # quotes + oi (per-ticker DTE)
+VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW XSP SPY GME QQQ}}"                   # verify-quotes (bare names, no DTE)
 CONC=2
 
 # Resolve the wa executable — install.sh/.bat publish it alongside this script in the install dir
@@ -86,15 +106,20 @@ elif [ -x "$SCRIPT_DIR/wa.exe" ]; then WA="$SCRIPT_DIR/wa.exe"
 else WA="wa"; fi
 
 # Daily/close price + intraday-tape history refresh for the strategy tickers. Runs BEFORE the
-# ThetaData pull so downstream stores have fresh underlying history to lean on. Env-overridable to
-# scope a historical fill to one root (e.g. BACKFILL_HISTORY_TICKERS="SPY").
-HISTORY_TICKERS="${BACKFILL_HISTORY_TICKERS:-SPY XSP SPXW QQQ}"
+# ThetaData pull so downstream stores have fresh underlying history to lean on. Scope with
+# --history-tickers / BACKFILL_HISTORY_TICKERS, or skip entirely with --no-history.
+if [ "$NO_HISTORY" -eq 1 ]; then
+  HISTORY_TICKERS=""
+else
+  HISTORY_TICKERS="${CLI_HISTORY:-${BACKFILL_HISTORY_TICKERS:-SPY XSP SPXW QQQ}}"
+fi
 
 # Stop at the last COMPLETE day. ThetaData finalizes a session's data at ~17:15 ET, so an evening
 # run (>= 19:00 local, comfortably past that) may include TODAY; earlier runs stop at yesterday —
 # their docs and our own error ("Current day requests must have a start time less than current
 # time") show intraday same-day minute requests aren't reliable. On a Mon morning this resolves to
-# Sun and the pull simply ends at the prior Fri. Override by exporting BACKFILL_END=YYYY-MM-DD.
+# Sun and the pull simply ends at the prior Fri. Override with --end / BACKFILL_END=YYYY-MM-DD.
+[ -n "$CLI_END" ] && BACKFILL_END="$CLI_END"
 if [ -z "${BACKFILL_END:-}" ] && [ "$(date +%H)" -ge 19 ]; then
   END=$(date +%F)
 else
@@ -102,14 +127,14 @@ else
 fi
 
 # Historical backfill floor for the quotes + OI pulls. Unset => backfill_thetadata.py's own default
-# (2025-01-01), i.e. the daily frontier only — normal daily runs are unchanged. Set
-# BACKFILL_START=YYYY-MM-DD to extend the pull back for a one-time history fill; sealed expirations/days
-# are still skipped, so it only fetches the genuinely-missing older data. Does NOT affect the `wa ai
-# history` step (that uses its own lookback). Example one-off 4-year SPY fill:
-#   BACKFILL_START=2022-07-18 BACKFILL_TICKERS="SPY:60" BACKFILL_VERIFY="SPY" \
-#     BACKFILL_HISTORY_TICKERS="SPY" bash daily_backfill.sh
+# (2025-01-01), i.e. the daily frontier only — normal daily runs are unchanged. Set --start (or
+# BACKFILL_START) to extend the pull back for a one-time history fill; sealed expirations/days are still
+# skipped, so it only fetches the genuinely-missing older data. Does NOT affect the `wa ai history` step
+# (that uses its own lookback). Example one-off SPY option fill scoped to SPY, skipping history:
+#   bash daily_backfill.sh --start 2024-05-20 --tickers "SPY:60" --verify SPY --no-history
+START_VALUE="${CLI_START:-${BACKFILL_START:-}}"
 START_OPT=()
-[ -n "${BACKFILL_START:-}" ] && START_OPT=(--start "$BACKFILL_START")
+[ -n "$START_VALUE" ] && START_OPT=(--start "$START_VALUE")
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 rc=0
@@ -128,7 +153,7 @@ step() {  # "label" command args...
 # on tomorrow's run; quotes still capture today on evening runs.
 END_OI="${BACKFILL_END:-$(date -d 'yesterday' +%F)}"
 
-echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes ${BACKFILL_START:+from $BACKFILL_START }through $END, oi through $END_OI, verify ==="
+echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes ${START_VALUE:+from $START_VALUE }through $END, oi through $END_OI, verify ==="
 
 for t in $HISTORY_TICKERS; do
   step "(1/4) ai history $t"                        "$WA" ai history "$t"
