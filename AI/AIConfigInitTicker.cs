@@ -150,7 +150,7 @@ internal static class AIConfigInitTicker
 		{
 			"rules": {
 				"stopLoss": { "enabled": true, "pctOfMaxLoss": 0.75 },
-				"takeProfit": { "enabled": true, "pctOfMaxProfit": 0.50 },
+				"takeProfit": { "enabled": true, "profitTargetPctOfPremium": 0.5 },
 				"closeBeforeShortExpiry": { "enabled": true, "minProfitPct": 0.25, "emergencyBreakEvenBufferPct": 0.01 }
 			},
 			"execution": { "slippagePerSharePerOrder": 0.02, "roundTrips": 2 },

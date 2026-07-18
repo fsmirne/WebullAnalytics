@@ -1368,7 +1368,7 @@ internal static class CandidateScorer
 
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxLoss, friction, cfg.RealizedExpectancy);
 		// Terminal-EV scoring. The previous barrier-aware adjustment was asymmetric across structure
 		// types — applied to multi-leg credit structures but not to single-leg longs, which let
 		// LongCall/LongPut candidates skate past more conservative calendars/diagonals even when the
@@ -1465,7 +1465,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
@@ -1536,7 +1535,7 @@ internal static class CandidateScorer
 
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxLoss, friction, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		// popFactor skipped — see method-level XML comment.
@@ -1629,7 +1628,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: null,
@@ -2139,7 +2137,7 @@ internal static class CandidateScorer
 		var debitPaid = Math.Max(0m, -netEntryPerContract);
 		var efficiencyCapital = Math.Max(debitPaid, capitalAtRisk);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, pnl, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, pnl, maxLoss, friction, cfg.RealizedExpectancy);
 		// Terminal-EV scoring. See ScoreShortVertical for full rationale on dropping the
 		// barrier-aware adjustment; in short, applying it only to some structure types created an
 		// asymmetric bias that buried calendars/diagonals/IBs in favor of single-leg longs.
@@ -2224,7 +2222,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
@@ -2365,7 +2362,7 @@ internal static class CandidateScorer
 
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtTarget, maxProfit, maxLossPoint, friction, cfg.RealizedExpectancy);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtTarget, maxLossPoint, friction, cfg.RealizedExpectancy);
 		// Terminal-EV scoring (see ScoreShortVertical for rationale on dropping AdjustEvForBarrier).
 		// For calendars/diagonals the barrier-aware penalty was particularly miscalibrated: BE-as-stop
 		// massively overstated P_hit because theta accumulates favorably over the holding period and
@@ -2466,7 +2463,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLossPoint, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
@@ -2574,7 +2570,7 @@ internal static class CandidateScorer
 		var capitalAtRisk = debitPerContract;
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxProfit, maxLoss, friction, cfg.RealizedExpectancy);
+		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxLoss, friction, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		// LongCall/LongPut is a positive-skew lottery trade: low POP is the SHAPE of the trade, not
@@ -2662,7 +2658,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			ProfitTargetPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.ProfitTargetPerContract(maxProfit, cfg.RealizedExpectancy) : null,
 			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
 			ExpectedMoveLower: expectedMoveBoundsLc?.Lower,

@@ -1,24 +1,22 @@
 namespace WebullAnalytics.AI.Rules;
 
 /// <summary>
-/// Priority 2: close the position when mark-to-market has captured a configured percentage of
-/// max projected profit (estimated via ProfitProjector across the full remaining lifetime grid).
-/// Threshold is read from <see cref="OpenerRealizedExpectancyConfig.ProfitTargetPctOfMaxProfit"/>
-/// (decimal 0–1, default 0.50) so the rule fires at the same exit point the candidate scorer's
-/// EV calc clamps grid scenarios at. Without this alignment the scorer ranks against a managed-exit
-/// policy the runtime doesn't actually implement — the prior split (rule at 60% maxProfit, scorer
-/// clamp at 50% maxProfit) made backtest P&L systematically diverge from scorer EV.
+/// Priority 2: close the position on any day once mark-to-market profit reaches a fixed fraction of the
+/// entry premium — debit paid or credit received (<see cref="TakeProfitConfig.ProfitTargetPctOfPremium"/>)
+/// — the discretionary "grab +X% and recycle the capital" exit. For a credit structure the fraction of the
+/// credit captured equals the fraction of max profit (the tastytrade convention). The former "% of max
+/// projected profit" target (Target B) was removed: it
+/// fired at the projector's thin per-column max (a near-zero absolute gain for low-max structures) and its
+/// only defensible setting was 1.0 (disabled), so it earned nothing but confusion.
 /// </summary>
 internal sealed class TakeProfitRule : IManagementRule
 {
 	private readonly TakeProfitConfig _config;
-	private readonly OpenerRealizedExpectancyConfig _realizedExpectancy;
 	private readonly bool _debug;
 
-	public TakeProfitRule(TakeProfitConfig config, OpenerRealizedExpectancyConfig realizedExpectancy, bool debug = false)
+	public TakeProfitRule(TakeProfitConfig config, bool debug = false)
 	{
 		_config = config;
-		_realizedExpectancy = realizedExpectancy;
 		_debug = debug;
 	}
 
@@ -27,48 +25,23 @@ internal sealed class TakeProfitRule : IManagementRule
 
 	public ManagementProposal? Evaluate(OpenPosition position, EvaluationContext ctx)
 	{
-		if (!_config.Enabled) return null;
+		if (!_config.Enabled || _config.ProfitTargetPctOfPremium <= 0m) return null;
 
 		var currentMarkPerContract = ComputeMarkPerContract(position, ctx);
 		if (currentMarkPerContract == null) return null;
 
-		// Current realized-if-closed = mark - initial debit; positive means profit-per-contract.
+		// Realized-if-closed = mark − entry cash. Works for both structure types: a debit position paid
+		// AdjustedNetDebit (> 0) and marks positive; a credit position received it (< 0) and marks negative,
+		// so mark − AdjustedNetDebit is the credit captured either way.
 		var profitPerContract = currentMarkPerContract.Value - position.AdjustedNetDebit;
-		if (profitPerContract <= 0m) return null;
+		var entryPremium = Math.Abs(position.AdjustedNetDebit);   // debit paid OR credit received
+		if (profitPerContract <= 0m || entryPremium <= 0m) return null;
 
-		string? rationale = null;
-
-		// Target A — fixed % of net debit, fires ANY day. The discretionary "grab +X% and recycle the
-		// capital" exit; triggers far earlier than the % -of-max-projected target, so check it first.
-		// Independent of realizedExpectancy (it's a flat return threshold, not a grid-relative one).
-		if (_config.ProfitTargetPctOfDebit > 0m && position.AdjustedNetDebit > 0m)
-		{
-			var pctOfDebit = profitPerContract / position.AdjustedNetDebit;
-			if (pctOfDebit >= _config.ProfitTargetPctOfDebit)
-				rationale = $"captured {pctOfDebit * 100m:F0}% of net debit ${position.AdjustedNetDebit:F2}/contract (target {_config.ProfitTargetPctOfDebit * 100m:F0}%)";
-		}
-
-		// Target B — % of max projected profit (aligns with the scorer's EV clamp). Needs the realized-
-		// expectancy model for the threshold and the grid for the projection. A threshold ≥ 1.0 DISABLES
-		// this target ("ride to max projected profit"): a mark can only equal the projector's max at its
-		// theoretical peak, so firing at exactly 1.0 closes as soon as the position brushes that max —
-		// which for a thin-max structure (e.g. a diagonal whose projected max is a small fraction of its
-		// debit) is a near-zero absolute gain. This mirrors the intraday gate (BacktestRunner: skip when
-		// ProfitTargetPctOfMaxProfit ≥ 1.0) and the documented pctOfMaxProfit semantics; without it the
-		// two paths disagree and a config that means to disable Target B still fires it at EOD.
-		if (rationale == null && _realizedExpectancy.Enabled && _realizedExpectancy.ProfitTargetPctOfMaxProfit < 1m)
-		{
-			// Max projected profit from grid: use the peak net value in the current-date column.
-			var maxProjected = GetMaxProjectedProfitPerContract(position, ctx);
-			if (maxProjected != null && maxProjected.Value > 0m)
-			{
-				var pctCapturedFraction = profitPerContract / maxProjected.Value;
-				if (pctCapturedFraction >= _realizedExpectancy.ProfitTargetPctOfMaxProfit)
-					rationale = $"captured {pctCapturedFraction * 100m:F0}% of max projected profit ${maxProjected.Value:F2}/contract (threshold {_realizedExpectancy.ProfitTargetPctOfMaxProfit:P0})";
-			}
-		}
-
-		if (rationale == null) return null;
+		// Fixed % of entry premium, fires ANY day: the discretionary "grab +X% and recycle the capital" exit.
+		// For a credit structure this is the fraction of the credit captured (= fraction of max profit).
+		var pctOfPremium = profitPerContract / entryPremium;
+		if (pctOfPremium < _config.ProfitTargetPctOfPremium) return null;
+		var rationale = $"captured {pctOfPremium * 100m:F0}% of net premium ${entryPremium:F2}/contract (target {_config.ProfitTargetPctOfPremium * 100m:F0}%)";
 
 		// Stamp each leg with per-share mid (default limit) and the side-aware bid/ask edge so the
 		// sink emits a realistic limit; otherwise the fallback path mis-scales NetDebit by quantity.
@@ -119,7 +92,4 @@ internal sealed class TakeProfitRule : IManagementRule
 		}
 		return total;
 	}
-
-	private static decimal? GetMaxProjectedProfitPerContract(OpenPosition p, EvaluationContext ctx) =>
-		ProfitProjector.MaxForCurrentColumn(p, ctx);
 }

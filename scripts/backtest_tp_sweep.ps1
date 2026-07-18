@@ -1,23 +1,21 @@
 <#
-backtest_tp_sweep.ps1 - 1D sweep over the SPY DC take-profit target (Target A: profitTargetPctOfDebit).
+backtest_tp_sweep.ps1 - 1D sweep over the SPY DC take-profit target (Target A: profitTargetPctOfPremium).
 
 Modeled on backtest_sweep.ps1 (the GEX-signal sweep), reusing its fills.jsonl parser and CSV/ranking
 machinery. The only axis here is the fixed-%-of-debit take-profit: close a position on any day once its
 mark-to-market profit reaches N% of the entry debit.
 
-WHY NOW: the TakeProfit "maxprofit-disable" bug (Target B fired at pctOfMaxProfit=1.0 despite "1.0 disables"
-semantics) contaminated every earlier DC sweep. With that fixed, this isolates Target A: each cell passes
-  --tp-debit N   (Target A = close at +N% of debit; N=0 turns Target A off)
-  --tp 1.0       (Target B, the % -of-max-projected exit, DISABLED -> also makes its scorer EV-clamp a no-op)
-so the ONLY thing changing across cells is the take-profit %. Cell N=0 (off) is the baseline: no take-profit
-at all, exits handled solely by CloseBeforeShortExpiry. It answers "does taking profit help, and at what %?".
+Each cell passes --tp-pct N: close on any day once mark profit reaches N% of the entry premium (debit paid or
+credit received); N=0 turns take-profit off. The "% of max projected profit" target was removed, so this is
+the only take-profit knob. Cell N=0 (off) is the baseline: exits handled solely by CloseBeforeShortExpiry.
+It answers "does taking profit help, and at what %?".
 
 Sizing-neutral (--lots 1): closed-lifecycle P&L is additive, so PF / total / avg measure per-trade EDGE, not
 a compounding curve. Rank here, then confirm the winner's drawdown at the real balance separately.
 
 Runs SEQUENTIALLY (concurrent backtests contend on quotes.db). Nothing else may run a backtest while this is
 live. Point -Wa at the FIXED binary: either the pinned dev build (…\.sweep-bin\wa.dll, needs -Dotnet) or the
-installed wa.exe AFTER running install.bat to deploy the fix + the new --tp-debit flag.
+installed wa.exe AFTER running install.bat to deploy the fix + the new --tp-pct flag.
 
 Run on Windows (leave the window open):
   # against the pinned fixed build (no install.bat needed):
@@ -36,7 +34,7 @@ Ctrl-C'd and the remaining cells resumed with -TpDebits <the rest>.
 
 PHASE 2 — after the --lots 1 sweep picks a winner N, re-run it WITH COMPOUNDING at the real balance to see the
 equity curve + drawdown (sizing-neutral PF doesn't capture cash-starvation or compounding). One run, no --lots:
-  wa ai backtest SPY --strategy DC --tp-debit N --tp 1.0 --starting-cash 50000 --show-fills --book-cmd
+  wa ai backtest SPY --strategy DC --tp-pct N --starting-cash 50000 --show-fills --book-cmd
 
 Customize:
   -TpDebits    Grid of take-profit %-of-debit values. Default: off + 5..100 step 5 (21 cells).
@@ -152,7 +150,7 @@ function Get-FillsStats {
 Log "=== take-profit (% of debit) backtest sweep ==="
 Log ("wa: {0}{1}" -f $Wa, $(if ($UseDotnet) { " (via $Dotnet)" } else { "" }))
 Log "ticker=$Ticker strategy=$Strategy since=$Since until=$Until lots=$Lots scanStride=$ScanStride"
-Log "grid: tpDebit=[$($Grid -join ', ')]  (Target B held OFF via --tp 1.0)"
+Log "grid: tpPct=[$($Grid -join ', ')]  (take-profit = fraction of entry premium)"
 Log "run dir: $RunDir"
 
 $total = $Grid.Count
@@ -169,7 +167,7 @@ foreach ($td in $Grid) {
 
   Log ("[{0}/{1}] tpDebit={2} ({3}) -> running" -f $idx, $total, $td, $label)
   $args = @('ai','backtest',$Ticker,'--strategy',$Strategy,'--since',$Since,'--until',$Until,
-            '--lots',$Lots,'--scan-stride',$ScanStride,'--tp-debit',$td,'--tp','1.0','--fills-jsonl',$fillsPath)
+            '--lots',$Lots,'--scan-stride',$ScanStride,'--tp-pct',$td,'--fills-jsonl',$fillsPath)
   if ($UseDotnet) { & $Dotnet $Wa @args *>&1 | Tee-Object -FilePath $cellLog | Out-Null }
   else            { & $Wa      @args *>&1 | Tee-Object -FilePath $cellLog | Out-Null }
   $rc = $LASTEXITCODE
