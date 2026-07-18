@@ -369,20 +369,19 @@ def _is_settled_eod_file(p: Path) -> bool:
     return '"tsEt"' in head and ("T16:00:00-" in head or "T16:00:00+" in head)
 
 
-def oi_pull_start(tdir: Path, sealed: set, start: date, end: date) -> date:
-    """Earliest day in [start, end] that still needs pulling — the first UNSEALED day. A past day's
-    settled OI never changes, so once sealed it's skipped forever (like a sealed quote expiration).
-    Resume is gap-safe: if a day-file on disk isn't sealed (a failed/partial day, e.g. an intraday live
-    snapshot the EOD pull must overwrite), we back up to it; otherwise we pull only days after the last
-    one on disk. With nothing on disk we pull the whole range."""
-    lo, hi = start.isoformat(), end.isoformat()
-    on_disk = sorted(p.stem for p in tdir.glob("*.jsonl") if lo <= p.stem <= hi)
-    unsealed = [d for d in on_disk if d not in sealed]
-    if unsealed:
-        return max(start, date.fromisoformat(unsealed[0]))      # re-pull from the first stale/partial day
-    if on_disk:
-        return max(start, date.fromisoformat(on_disk[-1]) + timedelta(days=1))  # only days newer than the last sealed one
-    return start
+def oi_chunk_done(tdir: Path, sealed: set, cs: date, ce: date, last_iso: str) -> bool:
+    """True if a month-chunk needs NO pull. Judged per-chunk against the sealed set — NOT via a single
+    frontier pointer — so resume is gap-safe: a --start that reaches back before the earliest file on
+    disk, or a hole between two already-filled blocks, is filled rather than skipped. A chunk is done
+    iff every day-file it contains is sealed AND it doesn't extend past `last_iso` (the newest day on
+    disk store-wide). Re-pulled otherwise: no files (missing history/gap), any unsealed file (a failed
+    or partial pull — chunks seal atomically, so a killed month leaves its files unsealed), or a chunk
+    reaching past the last file (the frontier, whose latest trading days aren't pulled yet)."""
+    lo, hi = cs.isoformat(), ce.isoformat()
+    files = [p.stem for p in tdir.glob("*.jsonl") if lo <= p.stem <= hi]
+    if not files or hi > last_iso:
+        return False
+    return all(d in sealed for d in files)
 
 
 def process_one_chunk(client, ticker, cs, ce, max_dte, rate, out_root):
@@ -523,13 +522,14 @@ def run(tickers, start: date, end: date, out_root: Path, max_dte, rate, creds, t
                 sealed = seed
                 save_sealed(tdir, sealed)
                 log.info(f"  [seed] sealed {len(seed)} existing settled day-file(s) — skipping history re-pull")
-        eff_start = oi_pull_start(tdir, sealed, start, end)
-        if eff_start > end:
-            log.info(f"\n=== {ticker} -> {tdir}  ({len(sealed)} day(s) sealed, nothing new through {end}) ===")
+        on_disk = sorted(p.stem for p in tdir.glob("*.jsonl"))
+        last_iso = on_disk[-1] if on_disk else ""  # newest day store-wide; "" => empty store, pull everything
+        pending = [(cs, ce) for cs, ce in month_chunks(start, end) if not oi_chunk_done(tdir, sealed, cs, ce, last_iso)]
+        if not pending:
+            log.info(f"\n=== {ticker} -> {tdir}  ({len(sealed)} day(s) sealed, nothing new in {start}..{end}) ===")
             continue
-        chunks = list(month_chunks(eff_start, end))
-        log.info(f"\n=== {ticker} -> {tdir}  (max_dte={max_dte}, {len(sealed)} day(s) sealed, pulling {eff_start}..{end}) ===")
-        for cs, ce in chunks:
+        log.info(f"\n=== {ticker} -> {tdir}  (max_dte={max_dte}, {len(sealed)} day(s) sealed, pulling {len(pending)} chunk(s) in {pending[0][0]}..{end}) ===")
+        for cs, ce in pending:
             log.info(f"  chunk {cs} .. {ce}  [{datetime.now():%H:%M:%S}]")
             written = run_resilient(_eod_chunk_worker, (creds, ticker, cs, ce, max_dte, rate, str(out_root)),
                                     f"{ticker} {cs}..{ce}", timeout_s, retries)
