@@ -130,6 +130,7 @@ echo Publishing data-refresh scripts to %INSTALL_DIR%...
 copy /y "scripts\daily_backfill.ps1" "%INSTALL_DIR%\" >nul
 copy /y "scripts\backfill_thetadata.py" "%INSTALL_DIR%\" >nul
 copy /y "scripts\import_quotes_sqlite.py" "%INSTALL_DIR%\" >nul
+copy /y "requirements.txt" "%INSTALL_DIR%\" >nul
 
 REM Add install directory to user PATH if not already present
 echo Checking PATH...

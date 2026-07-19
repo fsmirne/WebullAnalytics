@@ -76,7 +76,7 @@ mkdir -p "$DATA_DIR"
 # daily_backfill.sh resolves these by its own path and the store via WA_DATA_DIR, so it works
 # from $INSTALL_DIR.
 echo "Publishing data-refresh scripts to $INSTALL_DIR..."
-cp -f scripts/daily_backfill.sh scripts/backfill_thetadata.py scripts/import_quotes_sqlite.py "$INSTALL_DIR/"
+cp -f scripts/daily_backfill.sh scripts/backfill_thetadata.py scripts/import_quotes_sqlite.py requirements.txt "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/daily_backfill.sh"
 
 # Add install directory to PATH if not already present

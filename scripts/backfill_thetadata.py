@@ -11,7 +11,7 @@ Schwab serves OI for equities but not for index options. ThetaData Value ($40/mo
 has both, for equities + index options, back ~4 years. See memory reference_thetadata_options.
 
 Data source: the thetadata Python library (standalone/cloud, no Theta Terminal).
-    pip install thetadata pandas tzdata     # Python 3.12+  (tzdata needed on Windows: no system tz db)
+    pip install -r requirements.txt         # Python 3.12+  (tzdata needed on Windows: no system tz db)
 Auth: a creds.txt (email on line 1, password on line 2) in the repo root, or pass
 --creds /path/to/creds.txt, or set THETADATA_CREDENTIALS_FILE.
 
@@ -112,7 +112,7 @@ def make_client(creds: str | None):
     try:
         from thetadata import ThetaClient
     except ImportError:
-        sys.exit("thetadata not installed. Run: pip install thetadata pandas  (Python 3.12+)")
+        sys.exit("thetadata not installed. Run: pip install -r requirements.txt  (Python 3.12+)")
     # Force pandas (library defaults to polars); pass creds file if given, else
     # the client looks for creds.txt / THETADATA_CREDENTIALS_FILE.
     if creds:
