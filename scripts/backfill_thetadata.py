@@ -863,16 +863,10 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
         pool.put(c)
     log.info(f"--- threaded pull: {len(work)} expirations, {concurrency} concurrent on one session ---")
 
-    _progress = {"n": 0}
-    _progress_lock = threading.Lock()
-
-    def do_one(item):
-        ticker, e, dte = item
+    def do_one(pair):
+        idx, (ticker, e, dte) = pair  # idx = stable 1-based position in the plan (may print out of order under concurrency)
         c = pool.get()
         try:
-            with _progress_lock:
-                _progress["n"] += 1
-                idx = _progress["n"]
             log.info(f"  exp {ticker} {e}")
             process_one_expiration(c, ticker, e, dte, rate, out_root, start, end, chunk_days, progress=f"{idx}/{len(work)}: ")
             seal_quote_expiry(out_root, ticker, e, end)
@@ -883,7 +877,7 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
             pool.put(c)
 
     with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
-        list(ex.map(do_one, work))
+        list(ex.map(do_one, enumerate(work, 1)))
 
 
 def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, chunk_days, concurrency, stall_secs):
