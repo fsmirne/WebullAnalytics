@@ -1,0 +1,13 @@
+# Python dependencies for the ThetaData backfill + SQLite importer
+# (scripts/backfill_thetadata.py, scripts/import_quotes_sqlite.py). Python 3.12+.
+#
+# Install:  python -m pip install -r requirements.txt
+#
+# On Linux/WSL the system tz database satisfies zoneinfo, but native Windows Python has none —
+# hence tzdata is required here so ZoneInfo("America/New_York") resolves. python-dotenv is a
+# thetadata transitive dependency its package metadata fails to declare, so it's pinned explicitly.
+thetadata
+pandas
+numpy
+tzdata
+python-dotenv
