@@ -42,8 +42,8 @@
 	./daily_backfill.ps1
 
 .EXAMPLE
-	# One-off 4-year SPY option fill, scoped to SPY, skipping the history step
-	./daily_backfill.ps1 -Start 2022-07-18 -Tickers 'SPY:60' -Verify 'SPY' -NoHistory
+	# One-off history fill for SPY + QQQ, scoped verify, skipping the history step
+	./daily_backfill.ps1 -Start 2022-01-01 -Tickers SPY:60,QQQ:60 -Verify SPY,QQQ -NoHistory
 #>
 [CmdletBinding()]
 param(
