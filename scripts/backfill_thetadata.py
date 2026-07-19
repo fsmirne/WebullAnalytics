@@ -590,9 +590,10 @@ def windows(start: date, end: date, days: int):
         cur = w_end + timedelta(days=1)
 
 
-def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gend, chunk_days):
+def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gend, chunk_days, progress=""):
     """Pull minute NBBO for one expiration across its DTE window (clamped to [gstart,gend]),
-    keep ±10% strikes, write straight into the canonical SQLite store (data/quotes.db). Returns row count."""
+    keep ±10% strikes, write straight into the canonical SQLite store (data/quotes.db). Returns row count.
+    `progress` is an optional "x/total: " prefix for the per-expiry summary line."""
     import numpy as np  # noqa
     import pandas as pd
     exp_d = date.fromisoformat(exp) if isinstance(exp, str) else exp
@@ -665,15 +666,16 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
             upsert_expiry(conn, ticker, exp_int, rows)
         finally:
             conn.close()
-    log.info(f"    exp {ticker} {exp_d} rows={len(rows)} days={res['date'].nunique()} spot_days={len(unders)}")
+    log.info(f"    {progress}exp {ticker} {exp_d} rows={len(rows)} days={res['date'].nunique()} spot_days={len(unders)}")
     return len(rows)
 
 
-def _quote_expiry_worker(result_q, creds, ticker, exp, dte, rate, out_root_str, gstart_iso, gend_iso, chunk_days):
+def _quote_expiry_worker(result_q, creds, ticker, exp, dte, rate, out_root_str, gstart_iso, gend_iso, chunk_days, idx=0, total=0):
     try:
         client = make_client(creds)
+        progress = f"{idx}/{total}: " if total else ""
         n = process_one_expiration(client, ticker, exp, dte, rate, Path(out_root_str),
-                                   date.fromisoformat(gstart_iso), date.fromisoformat(gend_iso), chunk_days)
+                                   date.fromisoformat(gstart_iso), date.fromisoformat(gend_iso), chunk_days, progress=progress)
         result_q.put(("ok", n))
     except BaseException as e:
         result_q.put(("err", f"{type(e).__name__}: {e}"))
@@ -739,9 +741,8 @@ def _quotes_db_path(out_root: Path) -> Path:
 
 def load_sealed_quotes(out_root: Path, ticker: str) -> set:
     """Sealed expirations (ISO strings) for a quote ticker, read from the DB `sealed` table."""
-    conn = sqlite3.connect(_quotes_db_path(out_root), timeout=60)
+    conn = connect_wal(_quotes_db_path(out_root))
     try:
-        conn.execute("PRAGMA busy_timeout=60000")
         conn.execute(SEALED_SQL)
         rows = conn.execute("SELECT expiry FROM sealed WHERE root=?", (ticker,)).fetchall()
     finally:
@@ -862,12 +863,18 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
         pool.put(c)
     log.info(f"--- threaded pull: {len(work)} expirations, {concurrency} concurrent on one session ---")
 
+    _progress = {"n": 0}
+    _progress_lock = threading.Lock()
+
     def do_one(item):
         ticker, e, dte = item
         c = pool.get()
         try:
+            with _progress_lock:
+                _progress["n"] += 1
+                idx = _progress["n"]
             log.info(f"  exp {ticker} {e}")
-            process_one_expiration(c, ticker, e, dte, rate, out_root, start, end, chunk_days)
+            process_one_expiration(c, ticker, e, dte, rate, out_root, start, end, chunk_days, progress=f"{idx}/{len(work)}: ")
             seal_quote_expiry(out_root, ticker, e, end)
             record_run_progress(out_root, ticker, e)  # so a restarted worker skips this completed expiry
         except BaseException as ex:  # one failed expiration shouldn't stop the pass; a later run retries it (not sealed)
@@ -961,10 +968,10 @@ def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, r
         rel = sorted(e for e in exps if start.isoformat() <= e <= hi)
         todo = [e for e in rel if e not in sealed]
         log.info(f"=== {ticker} (dte={dte}) -> quotes.db: {len(rel)} expirations, {len(sealed)} sealed, {len(todo)} to pull ===")
-        for e in todo:
+        for i, e in enumerate(todo, 1):
             log.info(f"  exp {e}")
             ok = run_resilient(_quote_expiry_worker,
-                               (creds, ticker, e, dte, rate, str(out_root), start.isoformat(), end.isoformat(), chunk_days),
+                               (creds, ticker, e, dte, rate, str(out_root), start.isoformat(), end.isoformat(), chunk_days, i, len(todo)),
                                f"{ticker} exp {e}", timeout_s, retries)
             if ok is not None:  # success (row count, possibly 0) → seal if final; give-up (None) leaves it unsealed
                 seal_quote_expiry(out_root, ticker, e, end)

@@ -187,7 +187,9 @@ def main():
         conn.execute("DROP TABLE IF EXISTS quotes")
     conn.execute(SCHEMA_SQL)
 
-    total = 0
+    # Gather the expiry files to import first (across all roots, after since/until filtering) so we can
+    # show an "x/total: " progress counter on each imported line.
+    jobs = []
     for root in [r.strip().upper() for r in args.root.split(",")]:
         files = sorted(glob.glob(os.path.join(quotes_dir, root, "*.csv")))
         for path in files:
@@ -198,15 +200,19 @@ def main():
                 continue
             if args.until and expiry > args.until:
                 continue
-            expiry_int = int(expiry[:4] + expiry[5:7] + expiry[8:10])
-            batch = rows_from_csv(path, root, expiry_int)
-            # Incremental: replace this expiry's rows so a re-pulled/finalized expiry is updated in place.
-            if args.incremental:
-                conn.execute("DELETE FROM quotes WHERE root=? AND expiry=?", (root, expiry_int))
-            conn.executemany("INSERT OR IGNORE INTO quotes VALUES (?,?,?,?,?,?,?,?,?,?)", batch)
-            conn.commit()
-            total += len(batch)
-            print(f"  {root}/{expiry}: {len(batch):,} rows (cum {total:,})", flush=True)
+            jobs.append((root, path, expiry, int(expiry[:4] + expiry[5:7] + expiry[8:10])))
+
+    total = 0
+    njobs = len(jobs)
+    for i, (root, path, expiry, expiry_int) in enumerate(jobs, 1):
+        batch = rows_from_csv(path, root, expiry_int)
+        # Incremental: replace this expiry's rows so a re-pulled/finalized expiry is updated in place.
+        if args.incremental:
+            conn.execute("DELETE FROM quotes WHERE root=? AND expiry=?", (root, expiry_int))
+        conn.executemany("INSERT OR IGNORE INTO quotes VALUES (?,?,?,?,?,?,?,?,?,?)", batch)
+        conn.commit()
+        total += len(batch)
+        print(f"  {i}/{njobs}: {root}/{expiry}: {len(batch):,} rows (cum {total:,})", flush=True)
 
     if args.incremental:
         # Don't re-scan the whole multi-GB table to restat a few new expiries — fold the WAL back into the

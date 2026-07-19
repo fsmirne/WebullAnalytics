@@ -123,10 +123,11 @@ if not exist "%DATA_DIR%" (
 
 REM Publish the daily data-refresh script + its Python helpers alongside the wa executable so the
 REM scheduled refresh runs self-contained from the install location (not the repo checkout).
-REM daily_backfill.sh resolves these by its own path and the store via WA_DATA_DIR, so it works
-REM from %INSTALL_DIR%.
+REM Windows publishes daily_backfill.ps1 ONLY (native-Windows Python + wa.exe, so the SQLite writer and
+REM the backtest reader share one OS's WAL/file locking); the WSL/Linux daily_backfill.sh is intentionally
+REM NOT published here. It resolves its helpers by its own path and the store via WA_DATA_DIR.
 echo Publishing data-refresh scripts to %INSTALL_DIR%...
-copy /y "scripts\daily_backfill.sh" "%INSTALL_DIR%\" >nul
+copy /y "scripts\daily_backfill.ps1" "%INSTALL_DIR%\" >nul
 copy /y "scripts\backfill_thetadata.py" "%INSTALL_DIR%\" >nul
 copy /y "scripts\import_quotes_sqlite.py" "%INSTALL_DIR%\" >nul
 
