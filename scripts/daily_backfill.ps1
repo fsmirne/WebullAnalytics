@@ -132,9 +132,9 @@ function Get-Ts { (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }
 
 $script:rc = 0
 function Invoke-Step {
-	param([string]$Label, [string]$Exe, [string[]]$Args)
+	param([string]$Label, [string]$Exe, [string[]]$CmdArgs)
 	Write-Host "[$(Get-Ts)] $Label"
-	& $Exe @Args
+	& $Exe @CmdArgs
 	$ec = $LASTEXITCODE
 	if ($ec -ne 0) {
 		Write-Host "[$(Get-Ts)] [FAIL] $Label (exit $ec)"
