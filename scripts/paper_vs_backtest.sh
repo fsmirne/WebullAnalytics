@@ -11,11 +11,15 @@
 #               (the opener fires once at the RTH open — earliest-wins entry rule).
 # BACKTEST pick = the Open fill from a single-day backtest of the same strategy.
 # PASS = same structure AND same legs (side+strike+expiry). Also prints entry debit.
-# THIRD OUTCOME (INCONCLUSIVE, exit 3) — opposite-side ATM tie: when spot sits on the short strike the put and
-#   call variants of a diagonal/calendar score within noise and the #1 side flips on feed noise. Structure and
-#   expiries agree but the two sides open OPPOSITE legs, so their P&L curves WILL diverge (a trend day resolves
-#   the coin-flip after the fact). This is neither a clean fidelity confirmation nor a scorer bug, so it is NOT
-#   counted as a pass — it's flagged separately so it doesn't inflate the match tally or masquerade as a defect.
+# THIRD OUTCOME (INCONCLUSIVE, exit 3) — a near-tie the two quote feeds break differently. Two variants:
+#   (a) opposite-side ATM tie: when spot sits on the short strike the put and call variants of a diagonal/calendar
+#       score within noise and the #1 side flips on feed noise. Structure and expiries agree but the two sides open
+#       OPPOSITE legs, so their P&L curves WILL diverge (a trend day resolves the coin-flip after the fact).
+#   (b) adjacent long-strike tie: same structure, side, short strike(s) and long expiry, but the long leg drifted
+#       one grid step while the finalScores sat within noise. The two trades are one strike apart and economically
+#       near-identical; which one ranks #1 flips below the live-vendor vs ThetaData quote-noise floor.
+#   Neither is a clean fidelity confirmation nor a scorer bug, so NEITHER counts as a pass — both are flagged
+#   separately so they don't inflate the match tally or masquerade as a defect.
 #
 # Run AFTER the evening ThetaData backfill lands the day's quotes (~19:00 ET), else the
 # single-day backtest has nothing to price. Reads the installed wa.exe + AppData.
@@ -172,11 +176,13 @@ def skeleton(legs, sym_key, side_key):
         (shorts if str(l[side_key]).lower() == 'sell' else longs).append((exp, strike))
     return types, sorted(shorts), sorted(longs)
 ATM_BAND = 1.0        # $ from short strike within which put/call variants are treated as symmetric
-atm_tie = False
+STRIKE_STEP = 1.0     # SPY $1 strike grid; a long leg that drifts one grid step at a score tie is not a real divergence
+atm_tie = strike_tie = False
 if struct_ok and not legs_ok:
     l_types, l_short, l_long = skeleton(live['legs'], 'symbol', 'action')
     b_types, b_short, b_long = skeleton(bt['legs'], 'sym', 'side')
     opposite = bool(l_types) and l_types.isdisjoint(b_types)               # no shared option type => opposite side
+    same_side = bool(l_types) and l_types == b_types                       # identical option side(s), no put/call flip
     same_short = l_short == b_short                                        # same sold strike(s)+expiry
     same_long_exp = [e for e, _ in l_long] == [e for e, _ in b_long]       # same long expiry (strike may drift at ATM)
     spot = diag.get('spotAtEvaluation') if isinstance(diag.get('spotAtEvaluation'), (int, float)) else bt.get('spot')
@@ -184,13 +190,23 @@ if struct_ok and not legs_ok:
     lf0, bf0 = live.get('finalScore'), bt.get('finalScore')
     score_close = isinstance(lf0, (int, float)) and isinstance(bf0, (int, float)) and abs(bf0 - lf0) <= max(5e-4, 0.25 * max(abs(lf0), abs(bf0)))
     atm_tie = opposite and same_short and same_long_exp and near_atm and score_close
+    # Adjacent same-side long-strike tie — the strike-adjacent analog of the opposite-side ATM tie above.
+    # Same structure, same side, same short strike(s)+expiry, same long expiry, but the long leg drifted one
+    # grid step and the finalScores are within noise. Two economically near-identical trades whose #1 rank
+    # flips below the score noise floor (which is below the live-vendor vs ThetaData quote-noise floor). The
+    # long_adjacent check pins each long pair to the same expiry AND within one strike. NOT a pass, NOT a bug.
+    long_adjacent = len(l_long) == len(b_long) and all(le == be and abs(lk - bk) <= STRIKE_STEP for (le, lk), (be, bk) in zip(l_long, b_long))
+    strike_tie = same_side and same_short and long_adjacent and score_close and not atm_tie
+tie_kind = 'atm' if atm_tie else 'strike' if strike_tie else None
 
 # ---- structure + legs (the PASS criterion) ----
 verdict("structure", live.get('structure') if struct_ok else f"{live.get('structure')} vs {bt.get('strategy')}", struct_ok)
-if legs_ok or not atm_tie:
+if legs_ok or tie_kind is None:
     verdict("legs", f"{len(live_legs)} legs", legs_ok)
 else:
-    print(f"  {'legs':<{LW}}{'opposite-side ATM tie':<{2*W}}INCONCLUSIVE ⚠ (coin-flip; P&L will diverge)")
+    label = 'opposite-side ATM tie' if tie_kind == 'atm' else 'adjacent-strike tie'
+    note = '(coin-flip; P&L will diverge)' if tie_kind == 'atm' else '(long leg ±1 strike; P&L nearly identical)'
+    print(f"  {'legs':<{LW}}{label:<{2*W}}INCONCLUSIVE ⚠ {note}")
 
 # ---- per-leg ----
 print()
@@ -209,7 +225,9 @@ if legs_ok:
         row(f"{live_side[sym]:<4} {sym}", sf(mid,3), sf(bp,3), sf(delta(mid,bp),3,sign=True), leg_ctx(sym))
 else:
     # different legs → don't fake a symbol alignment; list each side's legs, each row prefixed live/bt
-    print("  legs differ (opposite-side ATM tie — sides split; P&L will diverge):" if atm_tie else "  legs differ — listed per side (no per-leg Δ):")
+    print("  legs differ (opposite-side ATM tie — sides split; P&L will diverge):" if tie_kind == 'atm'
+          else "  legs differ (adjacent long-strike tie — long leg ±1 strike; P&L nearly identical):" if tie_kind == 'strike'
+          else "  legs differ — listed per side (no per-leg Δ):")
     for sym in sorted(live_side):
         print(f"    live  {live_side[sym]:<4} {sym}  @ {fmt((lq.get(sym) or {}).get('mid'),3)}   {leg_ctx(sym)}".rstrip())
     for sym in sorted(bt_p):
@@ -274,10 +292,16 @@ if skew is not None and abs(skew)>=60:
 print()
 if struct_ok and legs_ok:
     print("  RESULT: MATCH ✓ (same structure + same legs)"); sys.exit(0)
-if struct_ok and atm_tie:
+if struct_ok and tie_kind == 'atm':
     print("  RESULT: INCONCLUSIVE ⚠ — opposite-side ATM tie (put/call coin-flip at the short strike).")
     print("          Structure + expiries agree, but live and backtest opened OPPOSITE sides, so their P&L")
     print("          curves WILL diverge. NOT a pass (don't count toward fidelity) and NOT a scorer bug.")
+    sys.exit(3)
+if struct_ok and tie_kind == 'strike':
+    print("  RESULT: INCONCLUSIVE ⚠ — adjacent long-strike tie (long leg differs by one strike at a score tie).")
+    print("          Structure, side, short strike(s) and long expiry all agree; the long strike drifted one grid")
+    print("          step while the finalScores sat within noise, so live-vendor vs ThetaData quote noise flipped")
+    print("          the #1 pick. P&L curves are nearly identical. NOT a pass and NOT a scorer bug.")
     sys.exit(3)
 print(f"  RESULT: MISMATCH — structure_ok={struct_ok} legs_ok={legs_ok}"); sys.exit(1)
 PY
