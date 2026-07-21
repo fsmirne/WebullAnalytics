@@ -40,6 +40,9 @@ internal sealed class BacktestRunner
 	// composite position. See OpenProposalIntoBook.
 	private readonly bool _splitStructures;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
+	// Proposal-replay mode (--proposals): non-null replaces the opener entirely — each day's recorded live
+	// proposal opens are booked at their recorded submit prices, then managed by the normal rule engine.
+	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
 	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET — the
@@ -50,8 +53,9 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null)
 	{
+		_replayOpensByDate = replayOpens?.GroupBy(o => o.OpenEt.Date).ToDictionary(g => g.Key, g => g.OrderBy(o => o.OpenEt).ToList());
 		_config = config;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
 		_scanStride = Math.Max(1, scanStride);
@@ -163,19 +167,31 @@ internal sealed class BacktestRunner
 			// existing score gate (cfg.MinScoreToOpen) decide when conditions warrant a fill. Top-N
 			// per step caps the number of opens (typically 1 for SPXW); first proposal that passes
 			// score + cash + qty wins the day. If no minute crosses, the day skips.
-			var openedAtMinute = await TryOpenAcrossDayAsync(step, tickerSet, openEvaluator, cancellation);
-			// Fallback: if there is no intraday data for this day (pre-2025 dates outside the
-			// Polygon backfill, or any future hole), use the legacy 09:30 single-call path.
-			if (!openedAtMinute.HasIntraday)
+			// Proposal-replay mode (--proposals) replaces this step entirely: the day's live-recorded proposal
+			// opens book at their recorded time, qty, and submit price — no scoring, sizing, or cash gate (the
+			// live sim already decided those) — and the rules/triggers/settlement below manage them as usual.
+			if (_replayOpensByDate != null)
 			{
-				var openProposals = openedAtMinute.LegacyProposals;
-				// Selection must not be dictated by affordability: consider only the top-N by score and
-				// skip any we can't afford — never fall through to a cheaper, lower-ranked substitute.
-				foreach (var p in openProposals.Take(_topNPerStep))
+				if (_replayOpensByDate.TryGetValue(step.Date, out var todaysOpens))
+					foreach (var o in todaysOpens)
+						OpenLegsIntoBook(o.OpenEt, o.Ticker, o.StructureKind, o.Legs, o.Qty, o.Spot, o.RawScore, o.FinalScore, repIv: null, applySlippage: false);
+			}
+			else
+			{
+				var openedAtMinute = await TryOpenAcrossDayAsync(step, tickerSet, openEvaluator, cancellation);
+				// Fallback: if there is no intraday data for this day (pre-2025 dates outside the
+				// Polygon backfill, or any future hole), use the legacy 09:30 single-call path.
+				if (!openedAtMinute.HasIntraday)
 				{
-					var qty = ResolveOpenQty(p);
-					if (qty < 1) continue;
-					OpenProposalIntoBook(step, p, qty);
+					var openProposals = openedAtMinute.LegacyProposals;
+					// Selection must not be dictated by affordability: consider only the top-N by score and
+					// skip any we can't afford — never fall through to a cheaper, lower-ranked substitute.
+					foreach (var p in openProposals.Take(_topNPerStep))
+					{
+						var qty = ResolveOpenQty(p);
+						if (qty < 1) continue;
+						OpenProposalIntoBook(step, p, qty);
+					}
 				}
 			}
 
@@ -352,12 +368,15 @@ internal sealed class BacktestRunner
 	/// exit-policy granularity. All halves must price or nothing books (live validates the whole leg set the
 	/// same way). Returns true when at least one position was opened.</summary>
 	private bool OpenProposalIntoBook(DateTime when, OpenProposal p, int qty)
+		=> OpenLegsIntoBook(when, p.Ticker, p.StructureKind, p.Legs, qty, p.Spot, p.RawScore, p.FinalScore, p.ImpliedVolatilityAnnual, applySlippage: true);
+
+	private bool OpenLegsIntoBook(DateTime when, string ticker, OpenStructureKind structureKind, IReadOnlyList<ProposalLeg> legs, int qty, decimal spot, decimal? rawScore, decimal? finalScore, decimal? repIv, bool applySlippage)
 	{
-		var groups = _splitStructures ? StructureOrderSplit.Split(p.StructureKind, p.Legs) : null;
+		var groups = _splitStructures ? StructureOrderSplit.Split(structureKind, legs) : null;
 		if (groups == null || groups.Count == 1)
 		{
-			var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-			return legFills != null && _book.Open(when, p.Ticker, p.StructureKind, legFills, qty, p.Spot, p.RawScore, p.FinalScore, p.ImpliedVolatilityAnnual);
+			var legFills = BuildLegFillsFromProposal(legs, qty);
+			return legFills != null && _book.Open(when, ticker, structureKind, legFills, qty, spot, rawScore, finalScore, repIv, applySlippage);
 		}
 
 		var groupFills = new List<(OpenStructureKind Kind, IReadOnlyList<BacktestLegFill> Fills)>(groups.Count);
@@ -365,11 +384,11 @@ internal sealed class BacktestRunner
 		{
 			var fills = BuildLegFillsFromProposal(g.Legs, qty);
 			if (fills == null) return false;
-			groupFills.Add((HalfStructureKind(p.StructureKind, fills), fills));
+			groupFills.Add((HalfStructureKind(structureKind, fills), fills));
 		}
 		var opened = false;
 		foreach (var (kind, fills) in groupFills)
-			opened |= _book.Open(when, p.Ticker, kind, fills, qty, p.Spot, p.RawScore, p.FinalScore, p.ImpliedVolatilityAnnual);
+			opened |= _book.Open(when, ticker, kind, fills, qty, spot, rawScore, finalScore, repIv, applySlippage);
 		return opened;
 	}
 

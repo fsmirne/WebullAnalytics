@@ -109,8 +109,10 @@ internal sealed class SimulatedBook
 	public int OpenCount => _positions.Count;
 
 	/// <param name="legFills">Per-leg fills. <c>PricePerShare</c> must be set; <c>Side</c> is the executed direction.</param>
+	/// <param name="applySlippage">False for proposal-replay opens: the fill IS the submitted limit price, so the
+	/// mid-vs-fill friction model doesn't apply. Management/close fills always keep slippage on.</param>
 	public bool Open(DateTime date, string ticker, OpenStructureKind structureKind, IReadOnlyList<BacktestLegFill> legFills, int qty, decimal spot,
-		decimal? rawScore = null, decimal? finalScore = null, decimal? repIv = null)
+		decimal? rawScore = null, decimal? finalScore = null, decimal? repIv = null, bool applySlippage = true)
 	{
 		var positionLegs = BuildLegsFromFills(legFills, qty, out var strategyKind, structureKind);
 		if (positionLegs.Count == 0) return false;
@@ -119,7 +121,7 @@ internal sealed class SimulatedBook
 		if (_positions.ContainsKey(key)) return false;
 
 		// Deduct slippage from cash flow so realized P&L matches the friction-aware EV the scorer used.
-		var cashFlow = ComputeCashFlow(legFills) - ComputeSlippage(structureKind, qty);
+		var cashFlow = ComputeCashFlow(legFills) - (applySlippage ? ComputeSlippage(structureKind, qty) : 0m);
 		var fees = Math.Abs(qty) * legFills.Count * _feePerContract;
 		Cash += cashFlow - fees;
 

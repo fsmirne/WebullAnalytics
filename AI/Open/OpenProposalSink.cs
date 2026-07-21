@@ -38,23 +38,25 @@ internal sealed class OpenProposalSink : IDisposable
 
 	public void Emit(OpenProposal p, int? rank = null)
 	{
-		WriteJsonl(p);
+		WriteJsonl(p, rank);
 		if (_consoleVerbosity != "error") WriteConsole(p, rank);
 	}
 
 	public void Flush() => _file.Flush();
 
-	private void WriteJsonl(OpenProposal p) => _file.WriteLine(SerializeRecord(p, _mode, _strategy));
+	private void WriteJsonl(OpenProposal p, int? rank) => _file.WriteLine(SerializeRecord(p, _mode, _strategy, rank));
 
 	/// <summary>Serializes one open proposal to its JSONL line. Pure (no I/O) so it's unit-testable
 	/// without touching the filesystem; the sink wraps it with the append writer.</summary>
-	internal static string SerializeRecord(OpenProposal p, string mode, string strategy = "")
+	internal static string SerializeRecord(OpenProposal p, string mode, string strategy = "", int? rank = null)
 	{
 		var record = new
 		{
 			type = "open",
 			ts = DateTime.Now.ToString("o"),
 			mode = mode,
+			rank = rank,
+			informational = p.Informational,
 			ticker = p.Ticker,
 			strategy = strategy,
 			structure = p.StructureKind.ToString(),
