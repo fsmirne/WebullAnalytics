@@ -36,7 +36,7 @@ internal static class ProposalReplayLoader
 		var file = Path.GetFileName(path);
 		var lineNo = 0;
 
-		foreach (var line in File.ReadLines(path))
+		foreach (var line in WebullAnalytics.IO.SharedFileReader.ReadLines(path))
 		{
 			lineNo++;
 			if (string.IsNullOrWhiteSpace(line)) continue;

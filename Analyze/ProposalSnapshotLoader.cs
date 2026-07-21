@@ -3,7 +3,6 @@ using System.Text.Json;
 using WebullAnalytics.AI;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.Trading;
-using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.Analyze;
 
@@ -66,7 +65,7 @@ internal sealed class ProposalSnapshot
 			return (null, $"--proposal: no proposal file found for '{file}'. Pass a path, a data/ filename (ai-proposals.SPY.0DTE.jsonl), or the TICKER.strategy shorthand (SPY.0DTE).");
 
 		string[] lines;
-		try { lines = File.ReadAllLines(resolved); }
+		try { lines = WebullAnalytics.IO.SharedFileReader.ReadAllLines(resolved); }
 		catch (Exception ex) { return (null, $"--proposal: failed to read '{resolved}': {ex.Message}"); }
 
 		string? lineText;
