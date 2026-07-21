@@ -773,6 +773,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("After the run, print a ready-to-paste `wa analyze trade` command reconstructing the whole window's book from the fill ledger — every fill becomes a ';'-separated leg group priced at its executed fill. Fed through `analyze trade --standalone`, open positions mark to current quotes while closed lineages' offsetting legs net to realized P&L, so the combined book equals the backtest's total P&L. Independent of --show-fills.")]
 	public bool BookCmd { get; set; }
 
+	[CommandOption("--replay")]
+	[Description("Replay mode: skip the opener and seed the book from the live proposal log (data/ai-proposals.<TICKER>.<strategy>.jsonl). Per trading day, the first non-informational open proposal recorded at/after 09:30 ET books at its recorded qty and vendor-quote submit price (tick-rounded like the auto-executor's limit; no entry slippage or re-pricing) — then the management rules, intraday triggers, and expiry settlement run as normal. Reconstructs what the live/simulated opener actually proposed over [--since, --until]; combine with --book-cmd for the matching `wa analyze trade` line.")]
+	public bool Replay { get; set; }
+
 	[CommandOption("--split")]
 	[Description("Book split structures (DoubleCalendar/DoubleDiagonal/DiagonalVertical/CalendarVertical) as their TWO combo orders — independent positions managed against their own debits, exactly how Webull holds them live. Default off books each structure whole, so take-profit/stop-loss see the combined mark. A/B knob for split-half vs whole-structure exit policy; friction and fees are identical across modes.")]
 	public bool Split { get; set; }
@@ -873,6 +877,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--long-conviction: must be in [0, 1], got {LongConvictionOverride}");
 		if (!string.IsNullOrWhiteSpace(OpenAfterOverride) && !TimeSpan.TryParse(OpenAfterOverride, System.Globalization.CultureInfo.InvariantCulture, out _))
 			return ValidationResult.Error($"--open-after: must be HH:mm, got '{OpenAfterOverride}'");
+		if (Replay && Oracle)
+			return ValidationResult.Error("--replay: incompatible with --oracle (replay books the recorded opens; oracle searches for its own)");
 		return ValidationResult.Success();
 	}
 }
@@ -935,6 +941,28 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var until = settings.Until != null
 			? DateTime.ParseExact(settings.Until, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)
 			: DateTime.Today;
+
+		// Proposal-replay mode: load the window's live-recorded opens up front — MinScoreToOpen must be the
+		// post-override value (the informational fallback for pre-`informational`-field records compares against it).
+		IReadOnlyList<Backtest.ProposalReplayOpen>? replayOpens = null;
+		if (settings.Replay)
+		{
+			var proposalPath = ProposalLog.ResolvedPath(config.Ticker, config.Strategy);
+			if (!File.Exists(proposalPath))
+			{
+				Console.Error.WriteLine($"Error: proposal log not found at '{proposalPath}'. Replay mode reads the log `wa ai watch`/`wa ai scan` writes for this ticker+strategy.");
+				return 1;
+			}
+			var (loadedOpens, loadWarnings) = Backtest.ProposalReplayLoader.Load(proposalPath, since, until, config.Opener.MinScoreToOpen);
+			foreach (var w in loadWarnings) Console.Error.WriteLine($"Warning: {w}");
+			if (loadedOpens.Count == 0)
+			{
+				Console.Error.WriteLine($"Error: no qualifying open proposals in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}] in '{proposalPath}'.");
+				return 1;
+			}
+			replayOpens = loadedOpens;
+			AnsiConsole.MarkupLine($"[cyan]Proposal replay:[/] {loadedOpens.Count} open(s) from {Markup.Escape(proposalPath)} — opener disabled, entries at recorded submit prices.");
+		}
 
 		// Backtest is offline — the caches MUST already cover [since, until]. Run `wa ai history <ticker>` first.
 		var bars = new Backtest.HistoricalBarCache(offline: true);
@@ -1001,6 +1029,10 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			&& !config.Rules.OpportunisticRoll.Enabled
 			&& !config.Rules.DefensiveRoll.Enabled
 			&& !config.Rules.RollShortOnExpiry.Enabled;
+		// Replayed legs come from the log, not the enabled-structure config — the filter is only safe when
+		// every replayed leg actually expires on its own open date.
+		if (replayOpens != null)
+			sameDayExpiryOnly = sameDayExpiryOnly && replayOpens.All(o => o.Legs.All(l => ParsingHelpers.ParseOptionSymbol(l.Symbol)?.ExpiryDate.Date == o.OpenEt.Date));
 		// SQLite is the only quote store. --quote-db overrides the path; otherwise the canonical data/quotes.db.
 		var quoteDbPath = settings.QuoteDb ?? Program.ResolvePath("data/quotes.db");
 		if (!File.Exists(quoteDbPath))
@@ -1021,9 +1053,9 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split, replayOpens: replayOpens);
 
-		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Replay ? " | [yellow]PROPOSAL REPLAY (opener off)[/]" : "")}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
 
 		// Wall-clock stamps for the run itself (the summary table has no time axis otherwise — piped/

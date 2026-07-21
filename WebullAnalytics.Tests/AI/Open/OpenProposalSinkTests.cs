@@ -48,6 +48,18 @@ public class OpenProposalSinkTests
 	}
 
 	[Fact]
+	public void WriteJsonlIncludesRankAndInformational()
+	{
+		var json = OpenProposalSink.SerializeRecord(MakeProposal(0.01m, "fp1"), mode: "watch", rank: 1);
+		Assert.Contains("\"rank\":1", json);
+		Assert.Contains("\"informational\":false", json);
+
+		var informational = OpenProposalSink.SerializeRecord(MakeProposal(0.01m, "fp2") with { Informational = true }, mode: "watch");
+		Assert.Contains("\"rank\":null", informational);
+		Assert.Contains("\"informational\":true", informational);
+	}
+
+	[Fact]
 	public void SerializeIsDeterministicAcrossRepeats()
 	{
 		// Repeats are never deduped in the JSONL — each Emit writes its own line. Serialization of the
