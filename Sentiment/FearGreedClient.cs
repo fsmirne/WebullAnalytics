@@ -1,6 +1,6 @@
 using System.Globalization;
-using System.Net.Http;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace WebullAnalytics.Sentiment;
 
@@ -63,7 +63,7 @@ internal static class FearGreedClient
 			try
 			{
 				var cached = await File.ReadAllTextAsync(cachePath, cancellation);
-				var parsed = ParseResponse(cached);
+				var parsed = ParseResponse(cached, lookup.Date);
 				if (parsed != null) return parsed;
 			}
 			catch (IOException) { }
@@ -86,13 +86,17 @@ internal static class FearGreedClient
 		{
 			try
 			{
-				Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-				await File.WriteAllTextAsync(cachePath, body, cancellation);
+				var toCache = NormalizeForCache(body, lookup.Date);
+				if (toCache != null)
+				{
+					Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+					await File.WriteAllTextAsync(cachePath, toCache, cancellation);
+				}
 			}
 			catch (IOException) { }
 		}
 
-		return ParseResponse(body);
+		return ParseResponse(body, lookup.Date);
 	}
 
 	/// <summary>True when <paramref name="asOf"/> is on or before the most recent settled NY date.
@@ -105,8 +109,15 @@ internal static class FearGreedClient
 	}
 
 	/// <summary>Parses the CNN response body. Public for unit tests; production callers use
-	/// <see cref="FetchAsync"/>.</summary>
-	internal static SentimentSnapshot? ParseResponse(string json)
+	/// <see cref="FetchAsync"/>.
+	///
+	/// The graphdata endpoint always puts the AS-OF-FETCH composite at top level regardless of the date
+	/// segment in the URL — that segment only sets where the historical arrays start. A cache file
+	/// fetched after its own date therefore carries a later day's reading at top level. When
+	/// <paramref name="forDate"/> is given, the top-level snapshot is only trusted if its NY date matches;
+	/// otherwise the score is taken from the <c>fear_and_greed_historical</c> point for that date, and
+	/// null is returned when no such point exists — a requested date is never served another day's data.</summary>
+	internal static SentimentSnapshot? ParseResponse(string json, DateTime? forDate = null)
 	{
 		if (string.IsNullOrWhiteSpace(json)) return null;
 		try
@@ -115,6 +126,14 @@ internal static class FearGreedClient
 			var root = doc.RootElement;
 			if (!root.TryGetProperty("fear_and_greed", out var fg)) return null;
 			if (!fg.TryGetProperty("score", out var scoreEl)) return null;
+
+			if (forDate.HasValue && TimeZoneInfo.ConvertTimeFromUtc(TryParseCompositeTimestamp(fg), NyTz).Date != forDate.Value.Date)
+			{
+				var pt = FindHistoricalPoint(root, forDate.Value.Date);
+				if (pt == null) return null;
+				var (histScore, histRating, histMillis, histPrev) = pt.Value;
+				return new SentimentSnapshot(histScore, histRating ?? SentimentRating.FromScore(histScore), DateTimeOffset.FromUnixTimeMilliseconds(histMillis).UtcDateTime, histPrev, null, null, null, new List<SentimentComponent>());
+			}
 
 			var score = (decimal)scoreEl.GetDouble();
 			var rating = fg.TryGetProperty("rating", out var rEl) ? rEl.GetString() ?? SentimentRating.FromScore(score) : SentimentRating.FromScore(score);
@@ -137,6 +156,71 @@ internal static class FearGreedClient
 		}
 		catch (JsonException) { return null; }
 		catch (FormatException) { return null; }
+	}
+
+	/// <summary>Finds the <c>fear_and_greed_historical.data</c> point whose UTC date equals
+	/// <paramref name="date"/> (points are stamped midnight UTC of their NY trading date), plus the
+	/// preceding point's score as the previous close when the array reaches that far back. Returns null
+	/// when the payload has no point for the date.</summary>
+	private static (decimal Score, string? Rating, long UnixMillis, decimal? PrevClose)? FindHistoricalPoint(JsonElement root, DateTime date)
+	{
+		if (!root.TryGetProperty("fear_and_greed_historical", out var hist) || !hist.TryGetProperty("data", out var arr) || arr.ValueKind != JsonValueKind.Array) return null;
+		decimal? prev = null;
+		foreach (var pt in arr.EnumerateArray())
+		{
+			if (!pt.TryGetProperty("x", out var xEl) || xEl.ValueKind != JsonValueKind.Number || !pt.TryGetProperty("y", out var yEl) || yEl.ValueKind != JsonValueKind.Number) continue;
+			var millis = (long)xEl.GetDouble();
+			var ptDate = DateTimeOffset.FromUnixTimeMilliseconds(millis).UtcDateTime.Date;
+			if (ptDate < date) { prev = (decimal)yEl.GetDouble(); continue; }
+			if (ptDate > date) return null;   // array is ascending; the date has no point
+			var score = (decimal)yEl.GetDouble();
+			var rating = pt.TryGetProperty("rating", out var rEl) ? rEl.GetString() : null;
+			return (score, rating, millis, prev);
+		}
+		return null;
+	}
+
+	/// <summary>Write-side counterpart of the date-aware read. Backfilling an old date (see
+	/// <c>AIHistoryCommand</c>) returns a payload whose top level is TODAY's reading plus multi-year
+	/// history arrays — persisting that raw body bloats the cache ~400x and plants a wrong top-level
+	/// score under a historical filename. Returns the body unchanged when it already is a same-day
+	/// snapshot, a reduced single-date payload built from the historical point otherwise, or null when
+	/// the payload has no point for the date (nothing trustworthy to cache). Internal for unit tests.</summary>
+	internal static string? NormalizeForCache(string body, DateTime date)
+	{
+		try
+		{
+			using var doc = JsonDocument.Parse(body);
+			var root = doc.RootElement;
+			if (!root.TryGetProperty("fear_and_greed", out var fg)) return null;
+			if (TimeZoneInfo.ConvertTimeFromUtc(TryParseCompositeTimestamp(fg), NyTz).Date == date.Date) return body;
+
+			var pt = FindHistoricalPoint(root, date.Date);
+			if (pt == null) return null;
+			var (score, rating, millis, prevClose) = pt.Value;
+			var ratingStr = rating ?? SentimentRating.FromScore(score);
+			var composite = new JsonObject
+			{
+				["score"] = score,
+				["rating"] = ratingStr,
+				// 23:59 UTC = pre-midnight NY on the same date, so the date-aware read trusts the top level.
+				["timestamp"] = $"{date:yyyy-MM-dd}T23:59:00+00:00",
+			};
+			if (prevClose.HasValue) composite["previous_close"] = prevClose.Value;
+			var payload = new JsonObject
+			{
+				["fear_and_greed"] = composite,
+				["fear_and_greed_historical"] = new JsonObject
+				{
+					["timestamp"] = millis,
+					["score"] = score,
+					["rating"] = ratingStr,
+					["data"] = new JsonArray(new JsonObject { ["x"] = millis, ["y"] = score, ["rating"] = ratingStr }),
+				},
+			};
+			return payload.ToJsonString();
+		}
+		catch (JsonException) { return null; }
 	}
 
 	private static void AddComponent(JsonElement root, string key, string label, List<SentimentComponent> sink)
