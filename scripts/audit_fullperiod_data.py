@@ -89,6 +89,33 @@ for day in sessions[::max(1, len(sessions) // 120)]:
         if bid > ask or (bid == 0 and ask == 0): per_year[day[:4]][0] += 1
 print('H5 crossed/zero NBBO share @10:00 (sampled):', {y: f'{c}/{n}' for y, (c, n) in sorted(per_year.items())})
 
+# H7 - per-expiry window completeness. Session-level checks (H1) pass if ANY expiry covers a date, which
+# hides a partially-pulled expiry (e.g. a straggler whose re-pull died mid-window: its own chain stops
+# early or is empty while neighbors cover the sessions). Three signatures, chosen so late-listing weeklies
+# (whose window legitimately STARTS late) don't false-positive:
+#   EMPTY      - an expiry in the sealed manifest or the in-window listing set with zero rows
+#   HOLE       - missing trading days strictly INSIDE the expiry's own [first, last] observed span
+#   TRUNCATED  - last observed day earlier than min(expiry, last completed session) by > 1 trading day
+print('\n== H7 per-expiry window completeness ==')
+def dcount(a, b):   # trading days in [a, b] inclusive (d8 ints)
+    lo = bisect.bisect_left(sessions, iso(a)); hi = bisect.bisect_right(sessions, iso(b))
+    return hi - lo
+empty, holes, trunc7 = [], [], []
+last_session_d8 = d8(sessions[-1])
+for e in all_exps:
+    n, lo, hi = con.execute("select count(distinct date), min(date), max(date) from quotes where root='SPY' and expiry=? and date between ? and ?", (e, d8(SINCE), d8(UNTIL))).fetchone()
+    if n == 0:
+        if e <= last_session_d8 or con.execute("select 1 from sealed where root='SPY' and expiry=?", (e,)).fetchone(): empty.append(e)
+        continue
+    span = dcount(lo, hi)
+    if n < span: holes.append((e, span - n))
+    tail_target = min(e, last_session_d8)
+    gap = dcount(hi, tail_target) - 1
+    if gap > 1: trunc7.append((e, iso(hi), gap))
+print(f'H7 EMPTY expiries: {len(empty)} {[iso(x) for x in empty[:8]]}')
+print(f'H7 expiries with internal HOLES: {len(holes)} {[(iso(e), m) for e, m in holes[:8]]}')
+print(f'H7 TRUNCATED tails: {len(trunc7)} {[(iso(e), h, g) for e, h, g in trunc7[:8]]}')
+
 # H6 - fills-side anomalies (cell 1 output)
 fills = Path(sys.argv[1]) / 'fills_DC_lots1.jsonl'
 if fills.exists():
