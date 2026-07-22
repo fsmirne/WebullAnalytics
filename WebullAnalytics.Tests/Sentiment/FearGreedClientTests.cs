@@ -47,6 +47,96 @@ public class FearGreedClientTests
 	}
 	""";
 
+	// Shape of a bulk-backfilled cache file: fetched 2026-05-08 for a 2022 start date, so the top level
+	// is the 2026 reading while the requested date's truth sits in fear_and_greed_historical.data.
+	private const string StaleBulkResponse = """
+	{
+	  "fear_and_greed": {
+	    "score": 66.9142857142857,
+	    "rating": "greed",
+	    "timestamp": "2026-05-08T23:33:07+00:00",
+	    "previous_close": 67.5714285714286
+	  },
+	  "fear_and_greed_historical": {
+	    "timestamp": 1778283187000.0,
+	    "score": 66.9142857142857,
+	    "rating": "greed",
+	    "data": [
+	      {"x": 1651104000000.0, "y": 24.25714285714286, "rating": "extreme fear"},
+	      {"x": 1651190400000.0, "y": 27.6, "rating": "fear"},
+	      {"x": 1778283187000.0, "y": 66.9142857142857, "rating": "greed"}
+	    ]
+	  }
+	}
+	""";
+
+	[Fact]
+	public void DateAwareParseUsesHistoricalPointWhenTopLevelIsStale()
+	{
+		// 1651104000000 = 2022-04-28 00:00 UTC; the top level is 2026-05-08 and must not be served.
+		var s = FearGreedClient.ParseResponse(StaleBulkResponse, new DateTime(2022, 4, 28));
+		Assert.NotNull(s);
+		Assert.InRange(s!.Score, 24.2m, 24.3m);
+		Assert.Equal("extreme fear", s.Rating);
+		Assert.Null(s.PreviousClose);   // array starts at the requested date - no prior point to read
+		Assert.Empty(s.Components);
+	}
+
+	[Fact]
+	public void DateAwareParseCarriesPreviousCloseFromPriorPoint()
+	{
+		var s = FearGreedClient.ParseResponse(StaleBulkResponse, new DateTime(2022, 4, 29));
+		Assert.NotNull(s);
+		Assert.InRange(s!.Score, 27.5m, 27.7m);
+		Assert.InRange(s.PreviousClose ?? 0m, 24.2m, 24.3m);
+	}
+
+	[Fact]
+	public void DateAwareParseReturnsNullWhenDateAbsent()
+	{
+		// 2022-05-02 sits between array points; wrong-date data must never be served for it.
+		Assert.Null(FearGreedClient.ParseResponse(StaleBulkResponse, new DateTime(2022, 5, 2)));
+	}
+
+	[Fact]
+	public void DateAwareParseTrustsMatchingTopLevel()
+	{
+		// SampleResponse's composite timestamp is 2026-05-08T23:33:07Z = 19:33 NY on 05-08: a same-day
+		// snapshot, so the full top-level parse (including components) applies.
+		var s = FearGreedClient.ParseResponse(SampleResponse, new DateTime(2026, 5, 8));
+		Assert.NotNull(s);
+		Assert.InRange(s!.Score, 66.9m, 67.0m);
+		Assert.Equal(7, s.Components.Count);
+	}
+
+	[Fact]
+	public void NormalizeForCacheReducesStalePayloadToSingleDate()
+	{
+		var reduced = FearGreedClient.NormalizeForCache(StaleBulkResponse, new DateTime(2022, 4, 29));
+		Assert.NotNull(reduced);
+		Assert.True(reduced!.Length < StaleBulkResponse.Length);
+		// The reduced payload must parse as a same-day snapshot for its date (top level now trusted)...
+		var s = FearGreedClient.ParseResponse(reduced, new DateTime(2022, 4, 29));
+		Assert.NotNull(s);
+		Assert.InRange(s!.Score, 27.5m, 27.7m);
+		Assert.Equal("fear", s.Rating);
+		Assert.InRange(s.PreviousClose ?? 0m, 24.2m, 24.3m);
+		// ...and must NOT parse for a different date (no other-day data survives the reduction).
+		Assert.Null(FearGreedClient.ParseResponse(reduced, new DateTime(2022, 4, 28)));
+	}
+
+	[Fact]
+	public void NormalizeForCachePassesSameDayPayloadThrough()
+	{
+		Assert.Same(SampleResponse, FearGreedClient.NormalizeForCache(SampleResponse, new DateTime(2026, 5, 8)));
+	}
+
+	[Fact]
+	public void NormalizeForCacheReturnsNullWhenDateAbsent()
+	{
+		Assert.Null(FearGreedClient.NormalizeForCache(StaleBulkResponse, new DateTime(2022, 5, 2)));
+	}
+
 	[Fact]
 	public void ParsesCompositeScoreAndRating()
 	{
