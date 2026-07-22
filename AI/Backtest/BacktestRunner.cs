@@ -43,6 +43,8 @@ internal sealed class BacktestRunner
 	// Proposal-replay mode (--proposals): non-null replaces the opener entirely — each day's recorded live
 	// proposal opens are booked at their recorded submit prices, then managed by the normal rule engine.
 	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
+	private int _droppedRuleActions;   // rule-proposed Close/Roll/LegIn dropped because the day had no leg quotes (see WarnDroppedRuleAction)
+	private int _blindPositionDays;    // position-days where NO leg had a quote, so rules could not evaluate the position at all
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
 	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET — the
@@ -114,6 +116,18 @@ internal sealed class BacktestRunner
 			{
 				var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
 				var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, step, _quotes, _config, cancellation);
+				// A position whose legs have NO quotes today leaves every management rule blind: nothing can price a
+				// close, and value-gated rules (TakeProfit, CloseBeforeShortExpiry's minProfitPct) silently decline
+				// to propose. Happens when the store lacks the day — today's session before the evening NBBO pull,
+				// or a historical gap. Warn per position-day so a missing exit reads as a data gap, not a rule decision.
+				foreach (var pos in openPositions.Values)
+				{
+					if (pos.Legs.Count > 0 && pos.Legs.All(l => !quoteSnapshot.Options.ContainsKey(l.Symbol)))
+					{
+						_blindPositionDays++;
+						Console.WriteLine($"⚠ {step:yyyy-MM-dd}: no option quotes for {pos.Ticker} {pos.Key} — management rules are blind for this position today (quote-store gap; today's session lands with the evening pull, historical gaps need a backfill).");
+					}
+				}
 				var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Indicators.TechnicalFilter, step, cancellation);
 				var ctx = new EvaluationContext(step, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 				var results = evaluator.Evaluate(ctx);
@@ -126,15 +140,18 @@ internal sealed class BacktestRunner
 					{
 						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
 						if (legFills != null) _book.Close(step, p.PositionKey, legFills, p.Rule, quoteSnapshot.Underlyings.GetValueOrDefault(pos.Ticker));
+						else WarnDroppedRuleAction(step, p, pos);
 					}
 					else if (p.Kind == ProposalKind.Roll)
 					{
 						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
 						if (legFills != null) _book.Roll(step, p.PositionKey, legFills, p.Rule, quoteSnapshot.Underlyings.GetValueOrDefault(pos.Ticker));
+						else WarnDroppedRuleAction(step, p, pos);
 					}
 					else if (p.Kind == ProposalKind.LegIn)
 					{
 						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
+						if (legFills == null) WarnDroppedRuleAction(step, p, pos);
 						// Rule emits the new structure name via convention: LongCall→LongCallVertical, LongPut→LongPutVertical.
 						// Derive from the existing strategy + the fact that the new leg is opposite-side.
 						if (legFills != null)
@@ -257,7 +274,19 @@ internal sealed class BacktestRunner
 			Fills: _book.Fills,
 			EndMtmByLineage: endMtmByLineage,
 			Provenance: ComputeProvenance(),
-			Cleanliness: ComputeCleanliness());
+			Cleanliness: ComputeCleanliness(),
+			DroppedRuleActions: _droppedRuleActions,
+			BlindPositionDays: _blindPositionDays);
+	}
+
+	/// <summary>A rule proposed an action but the day's quote snapshot has no prices for the position's legs
+	/// (store gap: e.g. today's session before the evening NBBO pull, or a historical hole), so the action was
+	/// dropped. Warn loudly instead of silently leaving the position open — a silent drop under-counts closes
+	/// and masquerades as "the rule didn't fire".</summary>
+	private void WarnDroppedRuleAction(DateTime step, ManagementProposal p, OpenPosition pos)
+	{
+		_droppedRuleActions++;
+		Console.WriteLine($"⚠ {step:yyyy-MM-dd}: {p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} but NO option quotes exist for its legs that day — action dropped, position left open. (Store gap: today's quotes land with the evening pull; historical gaps need a backfill.)");
 	}
 
 	/// <summary>Per-lineage MTM of still-open positions at the final step. Used by the renderer to split
@@ -1413,7 +1442,9 @@ internal sealed record BacktestResult(
 	IReadOnlyList<BacktestFill> Fills,
 	IReadOnlyDictionary<long, decimal> EndMtmByLineage,
 	PricingProvenance Provenance,
-	CleanlinessBreakdown Cleanliness)
+	CleanlinessBreakdown Cleanliness,
+	int DroppedRuleActions = 0,
+	int BlindPositionDays = 0)
 {
 	/// <summary>P&L on closed lifecycles only (lineages that ended in Close or Expire). Each lifecycle's
 	/// P&L = sum of (NetCashFlow - Fees) across all fills sharing its LineageId.</summary>

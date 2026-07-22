@@ -305,6 +305,10 @@ internal static class BacktestSummaryRenderer
 		var openPctOfDays = result.EquityCurve.Count > 0 ? result.OpenFills * 100m / result.EquityCurve.Count : 0m;
 		table.AddRow("Opens", result.EquityCurve.Count > 0 ? $"{result.OpenFills} ({openPctOfDays:F1}% of days)" : result.OpenFills.ToString());
 		table.AddRow("Closes (rules)", result.CloseFills.ToString());
+		if (result.DroppedRuleActions > 0)
+			table.AddRow("[red]Dropped rule actions (no quotes)[/]", $"[red]{result.DroppedRuleActions} — see ⚠ lines above; results under-count closes/rolls[/]");
+		if (result.BlindPositionDays > 0)
+			table.AddRow("[red]Rule-blind position-days (no quotes)[/]", $"[red]{result.BlindPositionDays} — see ⚠ lines above; exits could not be evaluated on those days[/]");
 		table.AddRow("Rolls", result.RollFills.ToString());
 		table.AddRow("Leg-ins", result.LegInFills.ToString());
 		table.AddRow("Expirations", result.ExpireFills.ToString());
