@@ -77,6 +77,11 @@ class SniffCommand : AsyncCommand<SniffSettings>
 
 			headers = parsed;
 			WriteResponse(ctx, 200, $"captured {parsed.Count} header(s)");
+			// Give the 200 time to cross loopback before Stop() tears down the http.sys queue. Response.Close()
+			// only hands the bytes to the OS; stopping (and exiting the process) immediately after races the
+			// transmission, and the userscript's GM_xmlhttpRequest then fires onerror ("Could not reach wa")
+			// even though the capture succeeded.
+			await Task.Delay(500, CancellationToken.None);
 		}
 
 		listener.Stop();
@@ -105,6 +110,7 @@ class SniffCommand : AsyncCommand<SniffSettings>
 		{
 			var bytes = Encoding.UTF8.GetBytes(message);
 			ctx.Response.ContentType = "text/plain";
+			ctx.Response.ContentLength64 = bytes.Length;   // definite length lets the client see a complete response instead of an ambiguous connection-close
 			ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
 		}
 		ctx.Response.Close();
