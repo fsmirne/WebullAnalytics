@@ -155,6 +155,24 @@ public static class TableBuilder
 				spotText = $"Current Price: {Markup.Escape($"${result.UnderlyingPrice.Value.ToString("N2", CultureInfo.InvariantCulture)}")} {sep} ";
 			else
 				spotText = "";
+			// Current P&L = the grid's today column at the price row nearest spot. That cell is market-anchored to the
+			// live bid/ask mid when quotes are available (see TimeDecayGridBuilder), so it IS the marked P&L, in the
+			// same whole-position dollars as Max Profit/Loss; nearest-row lookup (not interpolation) preserves the anchor.
+			var currentPnlText = "";
+			if (result.Grid != null && result.UnderlyingPrice.HasValue && result.Grid.PriceRows.Count > 0 && result.Grid.DateColumns.Count > 0)
+			{
+				int closestRow = 0;
+				var closestDist = decimal.MaxValue;
+				for (int pi = 0; pi < result.Grid.PriceRows.Count; pi++)
+				{
+					var dist = Math.Abs(result.Grid.PriceRows[pi] - result.UnderlyingPrice.Value);
+					if (dist < closestDist) { closestDist = dist; closestRow = pi; }
+				}
+				var currentPnl = result.Grid.PnLs[closestRow, 0];
+				// Return on the entry basis (net debit paid / credit received), e.g. "$532.00 (5.5%)".
+				var pctText = result.EntryBasis.HasValue && result.EntryBasis.Value != 0 ? $" ({(100m * currentPnl / Math.Abs(result.EntryBasis.Value)).ToString("0.0", CultureInfo.InvariantCulture)}%)" : "";
+				currentPnlText = currentPnl >= 0 ? $"Current P&L: [green]${currentPnl.ToString("N2", CultureInfo.InvariantCulture)}{pctText}[/] {sep} " : $"Current P&L: [red]-${Math.Abs(currentPnl).ToString("N2", CultureInfo.InvariantCulture)}{pctText}[/] {sep} ";
+			}
 			var beText = result.BreakEvens.Count > 0 ? string.Join(", ", result.BreakEvens.Select(be => $"${be.ToString("N2", CultureInfo.InvariantCulture)}")) : "N/A";
 			var maxProfitText = result.MaxProfit.HasValue ? (result.MaxProfit.Value >= 0 ? $"[green]${result.MaxProfit.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : $"[red]-${Math.Abs(result.MaxProfit.Value).ToString("N2", CultureInfo.InvariantCulture)}[/]") : "Unlimited";
 			if (result.MaxProfit.HasValue && result.MaxProfitPrice.HasValue)
@@ -163,7 +181,7 @@ public static class TableBuilder
 			if (result.MaxLoss.HasValue && result.MaxLossPrice.HasValue)
 				maxLossText += $" @ {result.MaxLossPrice.Value.ToString("N2", CultureInfo.InvariantCulture)}";
 			var marginText = result.Margin.HasValue ? $" {sep} Margin: [yellow]${result.Margin.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : "";
-			items.Add(new Markup($"{spotText}Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}{marginText}"));
+			items.Add(new Markup($"{spotText}{currentPnlText}Break-even: {Markup.Escape(beText)} {sep} Max Profit: {maxProfitText} {sep} Max Loss: {maxLossText}{marginText}"));
 
 			if (result.EarlyExercise != null)
 			{
