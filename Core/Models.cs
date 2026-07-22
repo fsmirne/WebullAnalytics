@@ -278,5 +278,6 @@ public record BreakEvenResult(
 	decimal? OriginalUnderlyingPrice = null,
 	decimal? Margin = null,
 	decimal? MaxProfitPrice = null,
-	decimal? MaxLossPrice = null
+	decimal? MaxLossPrice = null,
+	decimal? EntryBasis = null
 );

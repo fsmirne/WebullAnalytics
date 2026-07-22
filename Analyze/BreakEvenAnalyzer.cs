@@ -171,7 +171,7 @@ public static class BreakEvenAnalyzer
 		if (!isLong && spot.HasValue)
 			margin = AnalyzeCommon.ComputeLegMargin(parsed, qty, spot.Value, premium, null, null, 0, 0m, isExisting: false).Total;
 
-		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, Note: null, Legs: legsDisplay, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(parsed.Root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice);
+		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, Note: null, Legs: legsDisplay, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(parsed.Root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice, EntryBasis: (isLong ? 1 : -1) * premium * qty * 100m);
 	}
 
 	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
@@ -351,7 +351,7 @@ public static class BreakEvenAnalyzer
 			}
 		}
 
-		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice);
+		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice, EntryBasis: (parent.Side == Side.Buy ? 1 : -1) * netPremium * qty * 100m);
 	}
 
 	private static decimal EstimateTimeSpreadAssignmentStrikeLossPerShare(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, DateTime nearestExpiry)

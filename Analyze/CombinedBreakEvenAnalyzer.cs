@@ -291,7 +291,8 @@ public static class CombinedBreakEvenAnalyzer
 			OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(ticker, opts),
 			Margin: margin,
 			MaxProfitPrice: maxProfitPrice,
-			MaxLossPrice: maxLossPrice
+			MaxLossPrice: maxLossPrice,
+			EntryBasis: netPremium * normalizingQty * 100m
 		);
 	}
 
