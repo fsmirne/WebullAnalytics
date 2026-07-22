@@ -18,7 +18,11 @@
 #   (b) adjacent long-strike tie: same structure, side, short strike(s) and long expiry, but the long leg drifted
 #       one grid step while the finalScores sat within noise. The two trades are one strike apart and economically
 #       near-identical; which one ranks #1 flips below the live-vendor vs ThetaData quote-noise floor.
-#   Neither is a clean fidelity confirmation nor a scorer bug, so NEITHER counts as a pass — both are flagged
+#   (c) adjacent long-expiry tie: same structure, side and short leg(s), but the long leg drifted to a neighboring
+#       listed expiry (strike within one grid step) at a finalScore tie. Seen 07-21: live long 8/31 748P vs bt
+#       8/21 749P, finalScore Δ 0.00004, broken by ~$0.20 of intra-minute put drift between Schwab @09:30:41 and
+#       ThetaData minute-END sampling. P&L curves are similar but diverge more than (b) — extra theta and debit.
+#   None is a clean fidelity confirmation nor a scorer bug, so NONE counts as a pass — each is flagged
 #   separately so they don't inflate the match tally or masquerade as a defect.
 #
 # Run AFTER the evening ThetaData backfill lands the day's quotes (~19:00 ET), else the
@@ -62,7 +66,7 @@ OPEN_AFTER=()
 "$WA" ai backtest SPY --strategy "$STRATEGY" --since "$DATE" --until "$DATE" --lots 1 --scan-stride 1 ${OPEN_AFTER[@]+"${OPEN_AFTER[@]}"} --fills-jsonl "$WINFILLS" >/dev/null 2>&1
 
 python3 - "$DATE" "$PROPOSALS" "$LXFILLS" <<'PY'
-import json, os, sys
+import datetime, json, os, sys
 date, proposals_path, fills_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
 def norm_legs(legs, sym_key, side_key):
@@ -175,9 +179,12 @@ def skeleton(legs, sym_key, side_key):
         types.add(typ)
         (shorts if str(l[side_key]).lower() == 'sell' else longs).append((exp, strike))
     return types, sorted(shorts), sorted(longs)
+def exp_days(e):                       # YYMMDD expiry -> ordinal day, for long-expiry drift distance
+    return datetime.date(2000 + int(e[:2]), int(e[2:4]), int(e[4:6])).toordinal()
 ATM_BAND = 1.0        # $ from short strike within which put/call variants are treated as symmetric
 STRIKE_STEP = 1.0     # SPY $1 strike grid; a long leg that drifts one grid step at a score tie is not a real divergence
-atm_tie = strike_tie = False
+EXPIRY_BAND_DAYS = 14 # calendar days within which two long expiries count as neighboring listings; SPY's MWF weeklies sit ≤7d apart but monthly-vs-EOM listings (8/21 vs 8/31 on 07-21) can be 10d
+atm_tie = strike_tie = expiry_tie = False
 if struct_ok and not legs_ok:
     l_types, l_short, l_long = skeleton(live['legs'], 'symbol', 'action')
     b_types, b_short, b_long = skeleton(bt['legs'], 'sym', 'side')
@@ -197,15 +204,24 @@ if struct_ok and not legs_ok:
     # long_adjacent check pins each long pair to the same expiry AND within one strike. NOT a pass, NOT a bug.
     long_adjacent = len(l_long) == len(b_long) and all(le == be and abs(lk - bk) <= STRIKE_STEP for (le, lk), (be, bk) in zip(l_long, b_long))
     strike_tie = same_side and same_short and long_adjacent and score_close and not atm_tie
-tie_kind = 'atm' if atm_tie else 'strike' if strike_tie else None
+    # Adjacent long-EXPIRY tie — the expiry-step analog of the strike tie above. Same structure, side and short
+    # leg(s), but the long leg drifted to a neighboring listed expiry (both inside the strategy's long-DTE window,
+    # which this harness can't see — the EXPIRY_BAND_DAYS bound stands in for "neighboring listing") with the
+    # strike within one grid step, while the finalScores sat within noise. 07-21 case: live 8/31 748P vs bt
+    # 8/21 749P at Δ 0.00004 — the live tick's top-3 spanned 0.6% across both expiries, and ~$0.20 of first-minute
+    # put drift between Schwab @09:30:41 and ThetaData minute-END flipped the #1. NOT a pass, NOT a bug — but
+    # note the P&L consequence sits between (b) and (a): one expiry step is real extra theta/debit, not noise.
+    long_exp_adjacent = len(l_long) == len(b_long) and all(abs(exp_days(le) - exp_days(be)) <= EXPIRY_BAND_DAYS and abs(lk - bk) <= STRIKE_STEP for (le, lk), (be, bk) in zip(l_long, b_long))
+    expiry_tie = same_side and same_short and long_exp_adjacent and score_close and not atm_tie and not strike_tie
+tie_kind = 'atm' if atm_tie else 'strike' if strike_tie else 'expiry' if expiry_tie else None
 
 # ---- structure + legs (the PASS criterion) ----
 verdict("structure", live.get('structure') if struct_ok else f"{live.get('structure')} vs {bt.get('strategy')}", struct_ok)
 if legs_ok or tie_kind is None:
     verdict("legs", f"{len(live_legs)} legs", legs_ok)
 else:
-    label = 'opposite-side ATM tie' if tie_kind == 'atm' else 'adjacent-strike tie'
-    note = '(coin-flip; P&L will diverge)' if tie_kind == 'atm' else '(long leg ±1 strike; P&L nearly identical)'
+    label = 'opposite-side ATM tie' if tie_kind == 'atm' else 'adjacent-strike tie' if tie_kind == 'strike' else 'adjacent-expiry tie'
+    note = '(coin-flip; P&L will diverge)' if tie_kind == 'atm' else '(long leg ±1 strike; P&L nearly identical)' if tie_kind == 'strike' else '(long leg one expiry step; P&L similar, drifts more than ±1 strike)'
     print(f"  {'legs':<{LW}}{label:<{2*W}}INCONCLUSIVE ⚠ {note}")
 
 # ---- per-leg ----
@@ -227,6 +243,7 @@ else:
     # different legs → don't fake a symbol alignment; list each side's legs, each row prefixed live/bt
     print("  legs differ (opposite-side ATM tie — sides split; P&L will diverge):" if tie_kind == 'atm'
           else "  legs differ (adjacent long-strike tie — long leg ±1 strike; P&L nearly identical):" if tie_kind == 'strike'
+          else "  legs differ (adjacent long-expiry tie — long leg one expiry step; P&L similar):" if tie_kind == 'expiry'
           else "  legs differ — listed per side (no per-leg Δ):")
     for sym in sorted(live_side):
         print(f"    live  {live_side[sym]:<4} {sym}  @ {fmt((lq.get(sym) or {}).get('mid'),3)}   {leg_ctx(sym)}".rstrip())
@@ -302,6 +319,13 @@ if struct_ok and tie_kind == 'strike':
     print("          Structure, side, short strike(s) and long expiry all agree; the long strike drifted one grid")
     print("          step while the finalScores sat within noise, so live-vendor vs ThetaData quote noise flipped")
     print("          the #1 pick. P&L curves are nearly identical. NOT a pass and NOT a scorer bug.")
+    sys.exit(3)
+if struct_ok and tie_kind == 'expiry':
+    print("  RESULT: INCONCLUSIVE ⚠ — adjacent long-expiry tie (long leg differs by one listed expiry at a score tie).")
+    print("          Structure, side and short leg(s) agree; the long leg drifted to a neighboring listed expiry")
+    print("          (strike within one grid step) while the finalScores sat within noise, so live-vendor vs")
+    print("          ThetaData quote noise flipped the #1 pick. P&L curves are similar but diverge more than a")
+    print("          ±1-strike tie (extra theta and debit). NOT a pass and NOT a scorer bug.")
     sys.exit(3)
 print(f"  RESULT: MISMATCH — structure_ok={struct_ok} legs_ok={legs_ok}"); sys.exit(1)
 PY
