@@ -101,6 +101,11 @@ class Program
 			config.AddCommand<FetchCommand>("fetch");
 			config.AddCommand<Ledger.LedgerCommand>("ledger");
 			config.AddCommand<SniffCommand>("sniff");
+			config.AddBranch("clipboard", clipboard =>
+			{
+				clipboard.SetDescription("Commands that read their input from the system clipboard.");
+				clipboard.AddCommand<WebullAnalytics.Clipboard.ClipboardOrderCommand>("order");
+			});
 			config.AddBranch("trade", trade =>
 			{
 				trade.AddCommand<TradePlaceCommand>("place");
