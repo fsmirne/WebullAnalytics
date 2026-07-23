@@ -19,7 +19,7 @@ internal static class TesseractOcr
 		@"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
 	];
 
-	public static IReadOnlyList<OcrWord>? TryRecognize(byte[] imageBytes)
+	public static IReadOnlyList<OcrWord>? TryRecognize(byte[] imageBytes, int scale = 3, int psm = 4, bool greenChannel = false, bool removeLines = true)
 	{
 		var exe = Resolve();
 		if (exe == null)
@@ -31,10 +31,10 @@ internal static class TesseractOcr
 			return null;
 		}
 
-		imageBytes = ImagePreprocess.ForOcr(imageBytes);
+		imageBytes = ImagePreprocess.ForOcr(imageBytes, scale, greenChannel, removeLines);
 
-		// `stdin ... stdout tsv` = read image from stdin, emit word-level TSV on stdout. PSM 4 ("single column of variable-size text") reads the ticket's styled header row reliably where PSM 6 drops it (verified on the preprocessed sample).
-		var psi = new ProcessStartInfo(exe, "stdin stdout --psm 4 tsv")
+		// `stdin ... stdout tsv` = read image from stdin, emit word-level TSV on stdout. PSM 4 (single column) reads the styled header reliably; PSM 11 (sparse text) recovers colored-row words PSM 4 drops — the caller ensembles both, and our own Y-clustering makes PSM 11's weak layout handling irrelevant.
+		var psi = new ProcessStartInfo(exe, $"stdin stdout --psm {psm} tsv")
 		{ RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
 		using var p = Process.Start(psi);
 		if (p == null) return null;
