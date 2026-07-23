@@ -51,6 +51,42 @@ public class WebullTicketParserTests
 	}
 
 	[Fact]
+	public void LostLegRowsAreCaughtByHeaderStrikeArity()
+	{
+		// Real failure: a 4-leg iron butterfly whose Leg 3 lost its red "Call" and whose Leg 4 was fully
+		// garbled — only 2 legs parse. The header's 4-strike field is the tell; emitting a 2-leg order at
+		// the full-structure limit would be catastrophic.
+		var rows = new[]
+		{
+			"iron Butterfly GME 20.5/21.5/21.5/23 31 Jul 26(W) Sell 499 Limit $0.64 Day",
+			"Leg 1 GME 20.5 31 Jul 26(W) Put Buy 499",
+			"Leg 2 GME 21.5 31 Jul 26(W) Put Sell 499",
+			"Leg 3 GME 21.5 31 Jul 26(W) Sell 499",
+			"ig ome 3152600 ay 499",
+		};
+		var p = WebullTicketParser.Parse(rows);
+		Assert.Equal(2, p.Legs.Count);
+		Assert.Contains(p.Problems, x => x.Contains("OCR lost leg rows"));
+	}
+
+	[Fact]
+	public void FourLegTicketWithAllRowsParsesClean()
+	{
+		var rows = new[]
+		{
+			"iron Butterfly GME 20.5/21.5/21.5/23 31 Jul 26(W) Sell 499 Limit $0.64 Day",
+			"Leg 1 GME 20.5 31 Jul 26(W) Put Buy 499",
+			"Leg 2 GME 21.5 31 Jul 26(W) Put Sell 499",
+			"Leg 3 GME 21.5 31 Jul 26(W) Call Sell 499",
+			"Leg 4 GME 23 31 Jul 26(W) Call Buy 499",
+		};
+		var p = WebullTicketParser.Parse(rows);
+		Assert.Empty(p.Problems);
+		Assert.Equal(4, p.Legs.Count);
+		Assert.Equal(0.64m, p.NetLimit);
+	}
+
+	[Fact]
 	public void HeaderStrikeMismatchIsReported()
 	{
 		var rows = NoisyRows.ToArray();
@@ -91,6 +127,97 @@ public class WebullTicketParserTests
 		var rows = NoisyRows.ToArray();
 		rows[1] = "Calendar GME 21.5/21 .5 24 Jul Aug 26(W)  Put Buy 1 ,500 Limit $0.28 GTC";
 		Assert.Equal("gtc", WebullTicketParser.Parse(rows).Tif);
+	}
+
+	[Fact]
+	public void MergeUnionsLegsAcrossPassesAndBreaksQtyTiesWithHeaderQty()
+	{
+		// Pass A (psm 4): sees legs 1-2 cleanly. Pass B (psm 11): sees legs 3-4 but fragments leg 1's qty
+		// ("499" -> "19"). Union recovers all four; the 499-vs-19 tie is broken by the voted header qty.
+		var passA = WebullTicketParser.Parse(new[]
+		{
+			"iron Butterfly GME 20.5/21.5/21.5/23 31 Jul 26(W) Sell 499 Limit $0.64 Day",
+			"Leg 1 GME 20.5 31 Jul 26(W) Put Buy 499",
+			"Leg 2 GME 21.5 31 Jul 26(W) Put Sell 499",
+		});
+		var passB = WebullTicketParser.Parse(new[]
+		{
+			"iron Butterfly GME 20.5/21.5/21.5/23 31 Jul 26(W) Sell 499 Limit $0.64 Day",
+			"Leg 1 GME 20.5 31 Jul 26(W) Put Buy 19",
+			"Leg 3 GME 21.5 31 Jul 26(W) Call Sell 499",
+			"Leg 4 GME 23 31 Jul 26(W) Call Buy 499",
+		});
+		var m = WebullTicketParser.Merge([passA, passB]);
+		Assert.Empty(m.Problems);
+		Assert.Equal(4, m.Legs.Count);
+		Assert.All(m.Legs, l => Assert.Equal(499, l.Qty));
+		Assert.Equal(0.64m, m.NetLimit);
+	}
+
+	[Fact]
+	public void MergeFlagsQtyTieTheHeaderCannotBreak()
+	{
+		var passA = WebullTicketParser.Parse(new[] { "Diagonal GME 21/21.5 24 Jul 26(W)/07 Aug 26(W) Call Buy 499 Limit $0.63 Day", "Leg 1 GME 21 07 Aug 26(W) Call Buy 400" });
+		var passB = WebullTicketParser.Parse(new[] { "Diagonal GME 21/21.5 24 Jul 26(W)/07 Aug 26(W) Call Buy 499 Limit $0.63 Day", "Leg 1 GME 21 07 Aug 26(W) Call Buy 410" });
+		var m = WebullTicketParser.Merge([passA, passB]);
+		Assert.Contains(m.Problems, x => x.Contains("passes disagree on qty"));
+	}
+
+	[Fact]
+	public void ReconstructsSingleMissingLegFromHeaderAndPartialRow()
+	{
+		// Real case: Leg 4's strike "22" OCR'd as "2" and its side mangled, so the full parse never sees it.
+		// Header strike field + the partial row + shared expiry + header qty rebuild it — with a warning.
+		var pass = WebullTicketParser.Parse(new[]
+		{
+			"iron Butterfly GME 20/21.5/21.5/22 07 Aug 26(W) Sell 250 Limit $0.56 Day",
+			"Leg 1 GME 20 07 Aug 26(W) Put Buy 250",
+			"Leg 2 GME 21.5 07 Aug 26(W) Put Sell 250",
+			"Leg 3 GME 21.5 07 Aug 26(W) Call Sell 250",
+			"Leg 4 GME 2 07 Aug 26(W) Call “Buy 250",
+		});
+		var m = WebullTicketParser.Merge([pass]);
+		Assert.Empty(m.Problems);
+		Assert.Single(m.Warnings);
+		Assert.Equal(4, m.Legs.Count);
+		var rebuilt = m.Legs.Single(l => l.OccSymbol == "GME260807C00022000");
+		Assert.Equal("buy", rebuilt.Action);
+		Assert.Equal(250, rebuilt.Qty);
+	}
+
+	[Fact]
+	public void ReconstructionDeducesSideFromDefinedRiskStructureWhenUnreadable()
+	{
+		// Real case: OCR renders "Buy" as "By" — unusable (never fuzzy-match side). But a single-expiry
+		// 2P/2C 4-strike ticket is an iron structure where each type is a vertical: the recovered call is a
+		// SELL, so the missing 22C wing is forced to BUY.
+		var pass = WebullTicketParser.Parse(new[]
+		{
+			"iron Butterfly GME 20/21.5/21.5/22 07 Aug 26(W) Sell 250 Limit $0.56 Day",
+			"Leg 1 GME 20 07 Aug 26(W) Put Buy 250",
+			"Leg 2 GME 21.5 07 Aug 26(W) Put Sell 250",
+			"Leg 3 GME 21.5 07 Aug 26(W) Call Sell 250",
+			"Leg 4 GME 22 Call “By 250",
+		});
+		var m = WebullTicketParser.Merge([pass]);
+		Assert.Empty(m.Problems);
+		Assert.Contains(m.Warnings, w => w.Contains("DEDUCED"));
+		var rebuilt = m.Legs.Single(l => l.OccSymbol == "GME260807C00022000");
+		Assert.Equal("buy", rebuilt.Action);
+	}
+
+	[Fact]
+	public void ReconstructionAbortsWhenTwoLegsAreMissing()
+	{
+		var pass = WebullTicketParser.Parse(new[]
+		{
+			"iron Butterfly GME 20/21.5/21.5/22 07 Aug 26(W) Sell 250 Limit $0.56 Day",
+			"Leg 1 GME 20 07 Aug 26(W) Put Buy 250",
+			"Leg 2 GME 21.5 07 Aug 26(W) Put Sell 250",
+		});
+		var m = WebullTicketParser.Merge([pass]);
+		Assert.Empty(m.Warnings);
+		Assert.Contains(m.Problems, x => x.Contains("header lists 4 strikes"));
 	}
 
 	[Fact]
