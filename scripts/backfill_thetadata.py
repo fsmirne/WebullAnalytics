@@ -333,14 +333,19 @@ def fetch_underlying_closes(client, ticker: str, start: date, end: date) -> dict
         dc = pick_col(df, ["date", "created", "timestamp"])
         cc = pick_col(df, ["close", "price", "last"])
         return {norm_date(r[dc]): coerce(r[cc]) for _, r in df.iterrows()}
-    # Local cache first: if it already reaches ~end, use it alone and skip ThetaData entirely (avoids the
-    # index-entitlement error on deep ranges). A ~week tolerance covers weekend/holiday tails.
+    # Local cache first: if it reaches `end`, use it alone and skip ThetaData entirely (avoids the
+    # index-entitlement error on deep ranges). A cache that stops short of `end` — even by one day — must NOT be trusted alone:
+    # the ±10% band filter silently drops quote days with no spot, so an evening pull whose history CSV still ended yesterday
+    # lost the newest session entirely (SPY 2026-07-22). Fetch only the missing tail remotely and merge (local wins where
+    # present); an empty tail (weekend/holiday) degrades to local alone, and the tail-sized request keeps deep index ranges
+    # off ThetaData just like before.
     local = _local_underlying_closes(ticker, start, end)
-    if local and max(local) >= (end - timedelta(days=6)).isoformat():
+    if local and max(local) >= end.isoformat():
         return local
+    tail_start = max(start, date.fromisoformat(max(local)) + timedelta(days=1)) if local else start
     remote = {}
     try:
-        df = thetacall(client.stock_history_eod, symbol=ticker, start_date=start, end_date=end)
+        df = thetacall(client.stock_history_eod, symbol=ticker, start_date=tail_start, end_date=end)
         if df is not None and not df.empty:
             remote = _closes(df)
     except Exception:
@@ -348,7 +353,7 @@ def fetch_underlying_closes(client, ticker: str, start: date, end: date) -> dict
     if not remote:
         try:
             idx = ticker[:-1] if ticker.endswith("W") else ticker
-            df = thetacall(client.index_history_eod, symbol=idx, start_date=start, end_date=end)
+            df = thetacall(client.index_history_eod, symbol=idx, start_date=tail_start, end_date=end)
             if df is not None and not df.empty:
                 remote = _closes(df)
         except Exception as e:  # method name / entitlement uncertain — degrade gracefully
@@ -614,7 +619,7 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
     # mid-pull partial state is never observed for a final/sealed one.
     exp_int = ymd_int(exp_d.isoformat())
     db_path = _quotes_db_path(out_root)
-    total_rows, days, saw_quotes, first_write = 0, set(), False, True
+    total_rows, days, saw_quotes, first_write, nospot_days = 0, set(), False, True, set()
     for ms, me in windows(start_d, end_d, chunk_days):  # small windows: server stalls on large minute requests
         df = thetacall(client.option_history_quote, symbol=ticker, expiration=exp_d, interval="1m",
                        strike="*", start_date=ms, end_date=me)
@@ -635,6 +640,7 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         ts = pd.to_datetime(df[qt]) - pd.Timedelta(seconds=60)
         dts = ts.map(norm_date)
         spot = pd.to_numeric(dts.map(unders.get), errors="coerce")
+        nospot_days.update(dts[spot.isna()].unique())  # quote days the band filter is about to discard for lack of a spot close
         strike = pd.to_numeric(df[qk], errors="coerce")
         bidv = pd.to_numeric(df[qb], errors="coerce")
         askv = pd.to_numeric(df[qa], errors="coerce")
@@ -676,6 +682,8 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
     # in-band contracts: return empty so it SEALS instead of being re-attempted forever as a "feed error".
     if saw_quotes and not unders:
         raise RuntimeError(f"quotes present but no underlying spot for {ticker} {start_d}..{end_d} (transient underlying feed?)")
+    if nospot_days:
+        log.info(f"    [warn] {ticker} {exp_d}: DROPPED {len(nospot_days)} quote day(s) with no underlying close ({min(nospot_days)}..{max(nospot_days)}) — spot series ends {max(unders) if unders else 'never'}; those sessions are missing from the store until a re-pull with spot coverage")
     if total_rows == 0:
         return 0
     log.info(f"    {progress}exp {ticker} {exp_d} rows={total_rows} days={len(days)} spot_days={len(unders)}")
