@@ -16,11 +16,12 @@ exists to rule out the non-benign ones. Each check maps to a defect hypothesis:
 Run AFTER the backtest cells complete (quotes.db reads contend with a running backtest).
 Usage: audit_fullperiod_data.py <sweep-dir> [since] [until]
 """
-import bisect, csv, datetime, json, sqlite3, sys
+import bisect, csv, datetime, json, os, sqlite3, sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-DATA = Path('/mnt/c/Users/USER/AppData/Local/WebullAnalytics/data')
+# WA_DATA_DIR -> LOCALAPPDATA (native Windows Python — the preferred host for quotes.db work: NTFS-native I/O and same-OS WAL locking as wa.exe) -> WSL /mnt/c fallback.
+DATA = Path(os.environ.get('WA_DATA_DIR') or (Path(os.environ['LOCALAPPDATA']) / 'WebullAnalytics' / 'data' if os.environ.get('LOCALAPPDATA') else next(iter(sorted(Path('/mnt/c/Users').glob('*/AppData/Local/WebullAnalytics/data'))), 'MISSING-set-WA_DATA_DIR')))
 SINCE = sys.argv[2] if len(sys.argv) > 2 else '2022-01-01'
 UNTIL = sys.argv[3] if len(sys.argv) > 3 else '2026-07-20'
 RTH_MIN = 380   # minutes; full session is 390, early-close ~210 - flag anything under this that isn't a known half-day
@@ -30,7 +31,7 @@ def iso(d8v): s = str(d8v); return f'{s[:4]}-{s[4:6]}-{s[6:8]}'
 
 spy = {r['date']: float(r['close']) for r in csv.DictReader(open(DATA / 'history' / 'SPY.csv')) if SINCE <= r['date'] <= UNTIL}
 sessions = sorted(spy)
-con = sqlite3.connect(f'file:{DATA}/quotes.db?mode=ro', uri=True)
+con = sqlite3.connect(f'file:{(DATA / "quotes.db").as_posix()}?mode=ro', uri=True)
 
 print(f'== audit {SINCE}..{UNTIL}: {len(sessions)} calendar sessions ==')
 

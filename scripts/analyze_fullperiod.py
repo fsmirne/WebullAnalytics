@@ -10,16 +10,17 @@ year so a regime that suppresses opens (e.g. a VIX gate in 2022) is visible rath
 
 Usage: analyze_fullperiod.py <fills.jsonl>
 """
-import csv, json, math, sys
+import csv, json, math, os, sys
 from collections import defaultdict
 from pathlib import Path
 
 IS_CUTOVER = "2025-01-01"   # entries before this = OOS (untuned period), after = in-sample tuning window
 
 def data_dir():
-    for p in (Path("/mnt/c/Users/USER/AppData/Local/WebullAnalytics/data"),):
+    cands = [os.environ.get("WA_DATA_DIR")] + ([str(Path(os.environ["LOCALAPPDATA"]) / "WebullAnalytics" / "data")] if os.environ.get("LOCALAPPDATA") else [])
+    for p in [Path(c) for c in cands if c] + sorted(Path("/mnt/c/Users").glob("*/AppData/Local/WebullAnalytics/data")):
         if p.is_dir(): return p
-    sys.exit("FATAL: AppData data dir not found")
+    sys.exit("FATAL: AppData data dir not found (set WA_DATA_DIR)")
 
 def load_daily(path, col="close"):
     out = {}

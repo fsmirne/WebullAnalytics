@@ -21,7 +21,8 @@ import sys
 import statistics
 from collections import defaultdict
 
-DATA = "/mnt/c/Users/USER/AppData/Local/WebullAnalytics/data"
+import glob as _glob, os as _os
+DATA = _os.environ.get("WA_DATA_DIR") or next(iter(sorted(_glob.glob("/mnt/c/Users/*/AppData/Local/WebullAnalytics/data"))), None) or sys.exit("FATAL: data dir not found (set WA_DATA_DIR)")
 MULT = 100  # SPX/SPXW contract multiplier
 SYM = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
 # Config-change cutover: morning directional regime vs afternoon intraday-only regime.

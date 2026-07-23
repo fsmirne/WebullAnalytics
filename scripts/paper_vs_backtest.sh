@@ -30,10 +30,12 @@
 set -u
 DATE="${1:?usage: paper_vs_backtest.sh YYYY-MM-DD}"
 STRATEGY=DC        # DC = the consolidated live strategy (diag-only 5-15/30-45 @ 0.20)
-WA="/mnt/c/Users/USER/AppData/Local/WebullAnalytics/wa.exe"
-PROPOSALS="/mnt/c/Users/USER/AppData/Local/WebullAnalytics/data/ai-proposals.SPY.${STRATEGY}.jsonl"
-WINFILLS='C:\Users\USER\AppData\Local\WebullAnalytics\sweeps\pvb.jsonl'
-LXFILLS="/mnt/c/Users/USER/AppData/Local/WebullAnalytics/sweeps/pvb.jsonl"
+WAHOME="$(ls -d /mnt/c/Users/*/AppData/Local/WebullAnalytics 2>/dev/null | head -1)"
+WINUSER="$(echo "$WAHOME" | cut -d/ -f5)"
+WA="$WAHOME/wa.exe"
+PROPOSALS="$WAHOME/data/ai-proposals.SPY.${STRATEGY}.jsonl"
+WINFILLS="C:\\Users\\$WINUSER\\AppData\\Local\\WebullAnalytics\\sweeps\\pvb.jsonl"
+LXFILLS="$WAHOME/sweeps/pvb.jsonl"
 
 [ -x "$WA" ] || { echo "FATAL: wa.exe not found"; exit 2; }
 [ -f "$PROPOSALS" ] || { echo "NOTE: no proposal log yet at $PROPOSALS — run 'wa ai watch SPY --strategy $STRATEGY' (submit off) first."; exit 2; }

@@ -18,10 +18,12 @@
 set -u
 SINCE="${1:-2022-01-01}"
 UNTIL="${2:-2026-07-20}"
-WA="/mnt/c/Users/USER/AppData/Local/WebullAnalytics/wa.exe"
+WAHOME="$(ls -d /mnt/c/Users/*/AppData/Local/WebullAnalytics 2>/dev/null | head -1)"
+WINUSER="$(echo "$WAHOME" | cut -d/ -f5)"
+WA="$WAHOME/wa.exe"
 RUNID="fullperiod-$(date +%Y%m%d-%H%M%S)"
-LXDIR="/mnt/c/Users/USER/AppData/Local/WebullAnalytics/sweeps/$RUNID"
-WINDIR="C:\\Users\\USER\\AppData\\Local\\WebullAnalytics\\sweeps\\$RUNID"
+LXDIR="$WAHOME/sweeps/$RUNID"
+WINDIR="C:\\Users\\$WINUSER\\AppData\\Local\\WebullAnalytics\\sweeps\\$RUNID"
 mkdir -p "$LXDIR"
 echo "run dir: $LXDIR"
 
