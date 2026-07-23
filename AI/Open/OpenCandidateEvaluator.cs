@@ -695,7 +695,11 @@ internal sealed class OpenCandidateEvaluator
 
 	private static OpenProposal ApplyCashSizing(OpenProposal p, decimal freeCash, decimal accountValue, OpenerConfig cfg, decimal bias)
 	{
-		if (p.CapitalAtRiskPerContract <= 0m)
+		// Penny floor, not just <= 0: degenerate off-hours books (null/one-sided legs) can leave an
+		// epsilon-sized positive CapitalAtRiskPerContract (decimal residue), and freeCash / 1e-25
+		// overflows Decimal (observed: `wa ai scan USO` off-hours). Nothing real risks under a cent
+		// per contract — treat it as the same unsizable-degenerate case as zero/negative.
+		if (p.CapitalAtRiskPerContract < 0.01m)
 			return p with { Rationale = CandidateScorer.BuildRationale(p, bias, cfg) };
 
 		// Three caps on qty:
