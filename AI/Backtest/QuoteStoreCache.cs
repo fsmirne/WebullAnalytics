@@ -151,7 +151,9 @@ internal sealed class QuoteStoreCache
 		}
 
 		/// <summary>Loads the expiry slice from the canonical SQLite store. The DB holds already-validated rows
-		/// (the import applied the filters: ≥6 cols, valid time, strike, right C/P, BOTH bid>0 AND ask>0),
+		/// (the import validates structure only — valid time, strike, right C/P; the store is FAITHFUL to the
+		/// vendor as of 2026-07-22, so one-sided books arrive here with the absent side stored as 0 and policy
+		/// belongs to consumers: opener gates require two-sided books, management prices from what exists),
 		/// with bid/ask as scaled integers in ten-thousandths (price = value / 10000) — penny-tick data with the
 		/// source float noise (e.g. 0.35000000000000003) rounded away. The index on (root, expiry, date) makes
 		/// this fetch exactly the needed rows; the 45DTE tail an expiry slice carries is never touched.</summary>

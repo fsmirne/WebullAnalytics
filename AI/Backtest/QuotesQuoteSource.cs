@@ -96,7 +96,10 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 
 		// Price one OCC symbol off the real NBBO store (mid + back-solved IV + snapshot OI). Null when the
-		// store has no two-sided quote within staleness for that contract at this minute.
+		// store has no quote row within staleness for that contract at this minute. Rows may be one-sided
+		// (absent side stored as 0 — the store is faithful to the vendor): Mid is then half the live side,
+		// which is what management wants for a buyback; the opener's two-sided gates keep such books out of
+		// NEW entries (StrikeLadder / QuoteSanity / CandidateScorer).
 		OptionContractQuote? BuildQuote(string sym, OptionParsed p)
 		{
 			if (!underlyings.TryGetValue(p.Root, out var spot)) return null;

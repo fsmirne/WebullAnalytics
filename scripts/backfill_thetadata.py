@@ -646,7 +646,7 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         askv = pd.to_numeric(df[qa], errors="coerce")
         keep = (spot.notna() & strike.notna()
                 & ((strike / spot - 1.0).abs() <= 0.10)   # ±10% band
-                & (bidv.notna() | askv.notna()))          # keep quoted minutes (0/0 auction stays; dropped on read)
+                & (bidv.notna() | askv.notna()))          # any numeric side = a real quote; store is faithful, readers own policy (encode_quote keeps one-sided/0-bid books, absent side -> 0)
         if not keep.any():
             continue
         part = pd.DataFrame({

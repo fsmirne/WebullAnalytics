@@ -82,20 +82,38 @@ def ymd_int(date_str):
 
 
 def encode_quote(root, expiry_int, date_str, time_str, strike, right, bid, ask, bid_size=0, ask_size=0):
-    """Encode one quote into the canonical row tuple, or None if it fails the validity filters: valid time,
-    strike, right C/P, and BOTH bid>0 AND ask>0. The single encoder used by every writer so the store is
-    byte-identical regardless of source. bid/ask are penny-tick floats (possibly float-noisy) rounded to
-    ten-thousandths; dates -> INTEGER yyyymmdd."""
+    """Encode one quote into the canonical row tuple, or None only when the row is structurally invalid
+    (bad time/strike/right) or carries NO numeric side at all (no quote disseminated that minute). The store
+    is FAITHFUL to the vendor: one-sided books (bid 0/absent with a live ask — the far-OTM/expiry-day norm)
+    and empty 0/0 auction rows are KEPT, with an absent side stored as 0 (an NBBO bid/ask of 0 IS absence).
+    Policy lives in the READERS: the opener requires two-sided books (StrikeLadder/QuoteSanity/CandidateScorer
+    gates), management prices exits from whatever side exists. History: until 2026-07-22 this encoder REQUIRED
+    bid>0 AND ask>0, which silently annihilated one-sided books store-wide and left management rules blind on
+    expiry-day buybacks (e.g. SPY 477C 2022-01-10, quoted 0.00x0.01 all day at the vendor, absent here).
+    The single encoder used by every writer so the store is byte-identical regardless of source. bid/ask are
+    penny-tick floats (possibly float-noisy) rounded to ten-thousandths; dates -> INTEGER yyyymmdd."""
     sec = parse_time_sec(str(time_str))
     if sec < 0:
         return None
     try:
         strike_milli = round(float(strike) * 1000)
-        bid_t = round(float(bid) * 10000)
-        ask_t = round(float(ask) * 10000)
     except (ValueError, TypeError):
         return None
-    if bid_t <= 0 or ask_t <= 0:
+
+    def tick(v):
+        try:
+            f = float(v)
+        except (ValueError, TypeError):
+            return None
+        if f != f:  # NaN — that side wasn't disseminated
+            return None
+        return round(f * 10000)
+
+    bid_t, ask_t = tick(bid), tick(ask)
+    if bid_t is None and ask_t is None:
+        return None
+    bid_t, ask_t = bid_t if bid_t is not None else 0, ask_t if ask_t is not None else 0
+    if bid_t < 0 or ask_t < 0:
         return None
     rt = str(right).strip().upper()
     cp = rt[0] if rt else "?"

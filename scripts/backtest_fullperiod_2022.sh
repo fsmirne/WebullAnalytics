@@ -12,8 +12,8 @@
 # scripts/analyze_fullperiod.py — one backtest, many slices, instead of N regime-windowed backtests whose
 # lineages would be truncated at window edges.
 #
-# PRE-REQ: OI store must cover the window (data/oi/SPY starts 2022-04-01 until the Jan-Mar 2022 backfill
-# lands — run backfill_thetadata.py --run --tickers SPY:60 --start 2022-01-01 --end 2022-03-31 first).
+# PRE-REQ: OI store must cover the window (data/oi/SPY covers 2022-01-03 onward — the Jan-Mar 2022
+# backfill landed; verify with `ls data/oi/SPY | head` if extending the window earlier).
 # RUNTIME: campaign calibration was ~13-37 min per 1.5yr cell at stride 1; 4.5yr => ~40 min-2h per cell.
 set -u
 SINCE="${1:-2022-01-01}"
