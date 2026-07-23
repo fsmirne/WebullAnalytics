@@ -94,9 +94,14 @@ internal static class WebullTicketParser
 			var hs = Regex.Match(header, @"(\d+(?:\s*\.\s*\d+)?)\s*/\s*(\d+(?:\s*\.\s*\d+)?)");
 			if (hs.Success && legs.Count == 2)
 			{
-				var hdr = new[] { decimal.Parse(hs.Groups[1].Value.Replace(" ", ""), CultureInfo.InvariantCulture), decimal.Parse(hs.Groups[2].Value.Replace(" ", ""), CultureInfo.InvariantCulture) }.OrderBy(x => x).ToArray();
-				var leg = legs.Select(l => l.Strike).OrderBy(x => x).ToArray();
-				if (hdr[0] != leg[0] || hdr[1] != leg[1]) problems.Add($"header strikes {hdr[0]}/{hdr[1]} != leg strikes {leg[0]}/{leg[1]}");
+				// Compare DIGIT SEQUENCES, not values: tesseract's known failure mode on the cramped header
+				// strike cell is dropping the decimal point ("21.5" reads as "215"). Digits-only comparison
+				// forgives exactly that ("215" == "21.5" stripped) while still catching real mismatches
+				// ("22.5" vs "21.5" stay different). The leg rows remain the authoritative strike values.
+				static string Digits(string s) => Regex.Replace(s, @"[^\d]", "");
+				var hdr = new[] { Digits(hs.Groups[1].Value), Digits(hs.Groups[2].Value) }.OrderBy(x => x, StringComparer.Ordinal).ToArray();
+				var leg = legs.Select(l => Digits(l.Strike.ToString(CultureInfo.InvariantCulture))).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+				if (hdr[0] != leg[0] || hdr[1] != leg[1]) problems.Add($"header strikes {hs.Groups[1].Value}/{hs.Groups[2].Value} != leg strikes {legs[0].Strike}/{legs[1].Strike}");
 			}
 			var ht = Regex.Match(header, @"\b(Call|Put)\b", RegexOptions.IgnoreCase);
 			if (ht.Success)

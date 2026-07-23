@@ -33,6 +33,24 @@ public class WebullTicketParserTests
 	}
 
 	[Fact]
+	public void HeaderDecimalDropIsForgiven()
+	{
+		// Real tesseract failure on the cramped header strike cell: "21/21.5" reads as "21/215". The legs
+		// carry the true strikes; a digits-only comparison must treat this as consistent.
+		var rows = new[]
+		{
+			"Diagonal GME 21/215 24 Jul 26(W)/07 Aug 26(W) Call Buy 499 Limit $0.63 Day",
+			"Leg 1 GME 21 07 Aug 26(W) Call Buy 499",
+			"Leg 2 GME 21.5 24 Jul 26(W) Call Sell 499",
+		};
+		var p = WebullTicketParser.Parse(rows);
+		Assert.Empty(p.Problems);
+		Assert.Equal(0.63m, p.NetLimit);
+		Assert.Equal("GME260807C00021000", p.Legs.Single(l => l.Action == "buy").OccSymbol);
+		Assert.Equal("GME260724C00021500", p.Legs.Single(l => l.Action == "sell").OccSymbol);
+	}
+
+	[Fact]
 	public void HeaderStrikeMismatchIsReported()
 	{
 		var rows = NoisyRows.ToArray();
