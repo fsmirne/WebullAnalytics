@@ -34,7 +34,7 @@ import statistics
 import sys
 from datetime import datetime, timezone
 
-DATA = "/mnt/c/Users/USER/AppData/Local/WebullAnalytics/data"
+DATA = os.environ.get("WA_DATA_DIR") or next(iter(sorted(glob.glob("/mnt/c/Users/*/AppData/Local/WebullAnalytics/data"))), None) or sys.exit("FATAL: data dir not found (set WA_DATA_DIR)")
 SYM = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
 
 

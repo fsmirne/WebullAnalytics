@@ -22,10 +22,12 @@ STRATEGY=DC        # DC is now the source of truth = the winner (diag-only 5-15/
 TICKER=SPY
 SINCE=2025-01-02
 UNTIL=2025-03-31
-WA="/mnt/c/Users/USER/AppData/Local/WebullAnalytics/wa.exe"
+WAHOME="$(ls -d /mnt/c/Users/*/AppData/Local/WebullAnalytics 2>/dev/null | head -1)"
+WINUSER="$(echo "$WAHOME" | cut -d/ -f5)"
+WA="$WAHOME/wa.exe"
 BASELINE="/mnt/c/dev/WebullAnalytics/scripts/golden_master.${STRATEGY}.baseline.json"
-WINFILLS='C:\Users\USER\AppData\Local\WebullAnalytics\sweeps\golden_master.jsonl'
-LXFILLS="/mnt/c/Users/USER/AppData/Local/WebullAnalytics/sweeps/golden_master.jsonl"
+WINFILLS="C:\\Users\\$WINUSER\\AppData\\Local\\WebullAnalytics\\sweeps\\golden_master.jsonl"
+LXFILLS="$WAHOME/sweeps/golden_master.jsonl"
 UPDATE=0; [ "${1:-}" = "--update" ] && UPDATE=1
 
 [ -x "$WA" ] || { echo "FATAL: wa.exe not found at $WA"; exit 2; }

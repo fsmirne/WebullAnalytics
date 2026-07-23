@@ -8,11 +8,14 @@ Usage: diff_quotes_snapshot.py <snapshot.db> <YYYYMMDD-date> [root]
 Reports per expiry: row counts, rows only in one side, strike-set drift (±10%-band membership), and
 per-(minute,strike,right) bid/ask value diffs. Run it after any re-pull that touched the date.
 """
-import sqlite3, sys
+import os, sqlite3, sys
+from pathlib import Path
 
 snap_path, d8 = sys.argv[1], int(sys.argv[2])
 root = sys.argv[3] if len(sys.argv) > 3 else 'SPY'
-store = sqlite3.connect('file:/mnt/c/Users/USER/AppData/Local/WebullAnalytics/data/quotes.db?mode=ro', uri=True)
+# WA_DATA_DIR -> LOCALAPPDATA (native Windows Python — the preferred host for quotes.db work: NTFS-native I/O and same-OS WAL locking as wa.exe) -> WSL /mnt/c fallback.
+DATA = Path(os.environ.get('WA_DATA_DIR') or (Path(os.environ['LOCALAPPDATA']) / 'WebullAnalytics' / 'data' if os.environ.get('LOCALAPPDATA') else next(iter(sorted(Path('/mnt/c/Users').glob('*/AppData/Local/WebullAnalytics/data'))), 'MISSING-set-WA_DATA_DIR')))
+store = sqlite3.connect(f'file:{(DATA / "quotes.db").as_posix()}?mode=ro', uri=True)
 snap = sqlite3.connect(f'file:{snap_path}?mode=ro', uri=True)
 exps = [r[0] for r in snap.execute("select distinct expiry from quotes order by expiry")]
 tot_v = tot_rows = 0
