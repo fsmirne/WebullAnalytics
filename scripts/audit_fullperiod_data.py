@@ -103,16 +103,27 @@ def dcount(a, b):   # trading days in [a, b] inclusive (d8 ints)
     return hi - lo
 empty, holes, trunc7 = [], [], []
 last_session_d8 = d8(sessions[-1])
+# Vendor-proven interior gaps (known_holes table in quotes.db, curated at seal time by the backfill's
+# completeness check) are netted out of the HOLE signature — they're documented reality, not pull defects.
+try:
+    kh = defaultdict(set)
+    for r, e_, dd in con.execute("select root, expiry, date from known_holes where root='SPY'"): kh[e_].add(dd)
+except sqlite3.OperationalError:
+    kh = defaultdict(set)  # pre-known_holes store (e.g. the legacy DB)
+kh_excluded = 0
 for e in all_exps:
     n, lo, hi = con.execute("select count(distinct date), min(date), max(date) from quotes where root='SPY' and expiry=? and date between ? and ?", (e, d8(SINCE), d8(UNTIL))).fetchone()
     if n == 0:
         if e <= last_session_d8 or con.execute("select 1 from sealed where root='SPY' and expiry=?", (e,)).fetchone(): empty.append(e)
         continue
     span = dcount(lo, hi)
-    if n < span: holes.append((e, span - n))
+    known_in_span = sum(1 for dd in kh.get(e, ()) if lo <= dd <= hi)
+    kh_excluded += known_in_span
+    if n < span - known_in_span: holes.append((e, span - known_in_span - n))
     tail_target = min(e, last_session_d8)
     gap = dcount(hi, tail_target) - 1
     if gap > 1: trunc7.append((e, iso(hi), gap))
+if kh_excluded: print(f'H7 known-hole days excluded (vendor-proven, known_holes table): {kh_excluded}')
 print(f'H7 EMPTY expiries: {len(empty)} {[iso(x) for x in empty[:8]]}')
 print(f'H7 expiries with internal HOLES: {len(holes)} {[(iso(e), m) for e, m in holes[:8]]}')
 print(f'H7 TRUNCATED tails: {len(trunc7)} {[(iso(e), h, g) for e, h, g in trunc7[:8]]}')

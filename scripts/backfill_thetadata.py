@@ -46,7 +46,7 @@ import logging
 
 # Canonical quote store: encoding + DB helpers are single-sourced in import_quotes_sqlite so the backfill,
 # the scraper, and the importer all write byte-identical rows (scripts/ is on sys.path when run as a script).
-from import_quotes_sqlite import encode_quote, connect_wal, ymd_int, SEALED_SQL
+from import_quotes_sqlite import encode_quote, connect_wal, ymd_int, SEALED_SQL, KNOWN_HOLES_SQL
 
 NY = zoneinfo.ZoneInfo("America/New_York")
 log = logging.getLogger("backfill")  # our own messages go here (not root), so we can quiet libraries
@@ -595,10 +595,15 @@ def windows(start: date, end: date, days: int):
         cur = w_end + timedelta(days=1)
 
 
-def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gend, chunk_days, progress=""):
+def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gend, chunk_days, progress="", band=0.10, supplement=False):
     """Pull minute NBBO for one expiration across its DTE window (clamped to [gstart,gend]),
-    keep ±10% strikes, write straight into the canonical SQLite store (data/quotes.db). Returns row count.
-    `progress` is an optional "x/total: " prefix for the per-expiry summary line."""
+    keep ±`band` strikes (default 10%), write straight into the canonical SQLite store (data/quotes.db).
+    Returns row count. `progress` is an optional "x/total: " prefix for the per-expiry summary line.
+    `supplement` = additive patch mode for scoped wider-band top-ups (e.g. crash days where held strikes
+    drifted outside the default band, blinding backtest management — SPY 2022-06-13/14 at ±10%): NO
+    whole-expiry DELETE (INSERT OR IGNORE layers the new band ring alongside existing rows), sealed
+    expiries are pulled anyway, nothing is (re)sealed, and the interior-completeness raise is skipped
+    (partial windows are the point)."""
     import numpy as np  # noqa
     import pandas as pd
     exp_d = date.fromisoformat(exp) if isinstance(exp, str) else exp
@@ -624,7 +629,17 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         df = thetacall(client.option_history_quote, symbol=ticker, expiration=exp_d, interval="1m",
                        strike="*", start_date=ms, end_date=me)
         if df is None or len(df) == 0:
-            continue
+            # Pre-listing chunks are legitimately empty and skip silently. But an empty chunk AFTER data
+            # has started flowing is a mid-window hole candidate: a transient server blip returning empty
+            # here used to be accepted silently, the expiry sealed anyway, and resume never revisited it —
+            # three sealed-with-holes expiries failed the H7 gate on 2026-07-26. Retry once, then warn loudly.
+            if not saw_quotes:
+                continue
+            df = thetacall(client.option_history_quote, symbol=ticker, expiration=exp_d, interval="1m",
+                           strike="*", start_date=ms, end_date=me)
+            if df is None or len(df) == 0:
+                log.info(f"    [warn] {ticker} {exp_d}: chunk {ms}..{me} EMPTY after data began — possible internal hole (transient server blip?); sessions left unfilled, audit/H7 will flag")
+                continue
         saw_quotes = True
         if not unders:
             continue   # have quotes but no spot to band-filter -> resolved after the loop
@@ -645,7 +660,7 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         bidv = pd.to_numeric(df[qb], errors="coerce")
         askv = pd.to_numeric(df[qa], errors="coerce")
         keep = (spot.notna() & strike.notna()
-                & ((strike / spot - 1.0).abs() <= 0.10)   # ±10% band
+                & ((strike / spot - 1.0).abs() <= band)   # ± strike band (default 10%)
                 & (bidv.notna() | askv.notna()))          # any numeric side = a real quote; store is faithful, readers own policy (encode_quote keeps one-sided/0-bid books, absent side -> 0)
         if not keep.any():
             continue
@@ -668,7 +683,7 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         with _DB_WRITE_LOCK:  # serialize writes across the threaded pull's workers (SQLite single-writer)
             conn = connect_wal(db_path)
             try:
-                if first_write:  # clear this expiry's prior rows ONCE so a re-pull fully replaces (idempotent)
+                if first_write and not supplement:  # clear this expiry's prior rows ONCE so a re-pull fully replaces (idempotent); supplement mode is purely additive
                     conn.execute("DELETE FROM quotes WHERE root=? AND expiry=?", (ticker, exp_int))
                     first_write = False
                 conn.executemany("INSERT OR IGNORE INTO quotes VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
@@ -684,18 +699,31 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         raise RuntimeError(f"quotes present but no underlying spot for {ticker} {start_d}..{end_d} (transient underlying feed?)")
     if nospot_days:
         log.info(f"    [warn] {ticker} {exp_d}: DROPPED {len(nospot_days)} quote day(s) with no underlying close ({min(nospot_days)}..{max(nospot_days)}) — spot series ends {max(unders) if unders else 'never'}; those sessions are missing from the store until a re-pull with spot coverage")
+    # Seal-time completeness check: from the first day this expiry quoted through the window end, every
+    # trading day (the spot calendar) must be present. A missing interior day = a hole — a partial chunk
+    # response that used to seal silently (three sealed-with-holes expiries failed the H7 gate 2026-07-26,
+    # incl. one whose chunk was NON-empty but lacked days inside it, which the empty-chunk retry can't see).
+    # Raising marks the unit failed → seal withheld → the run's retry pass (and any later run) re-pulls it;
+    # days proven absent at the vendor are accepted via data/quotes_known_holes.json. Sealing is thereby a
+    # completeness certificate, not just "the pull didn't crash".
+    if days and not supplement:
+        known = _known_holes(out_root, ticker, exp_d.isoformat())
+        missing = sorted(d for d in unders if min(days) <= d <= end_d.isoformat() and d not in days and d not in known)
+        if missing:
+            shown = ", ".join(missing[:5]) + ("..." if len(missing) > 5 else "")
+            raise RuntimeError(f"INCOMPLETE {ticker} {exp_d}: {len(missing)} interior trading day(s) absent ({shown}) — seal withheld; transient partial responses heal on the retry pass, proven vendor gaps belong in the known_holes table (INSERT INTO known_holes VALUES('{ticker}', {ymd_int(exp_d.isoformat())}, {missing[0].replace('-', '')});)")
     if total_rows == 0:
         return 0
     log.info(f"    {progress}exp {ticker} {exp_d} rows={total_rows} days={len(days)} spot_days={len(unders)}")
     return total_rows
 
 
-def _quote_expiry_worker(result_q, creds, ticker, exp, dte, rate, out_root_str, gstart_iso, gend_iso, chunk_days, idx=0, total=0):
+def _quote_expiry_worker(result_q, creds, ticker, exp, dte, rate, out_root_str, gstart_iso, gend_iso, chunk_days, idx=0, total=0, band=0.10, supplement=False):
     try:
         client = make_client(creds)
         progress = f"{idx}/{total}: " if total else ""
         n = process_one_expiration(client, ticker, exp, dte, rate, Path(out_root_str),
-                                   date.fromisoformat(gstart_iso), date.fromisoformat(gend_iso), chunk_days, progress=progress)
+                                   date.fromisoformat(gstart_iso), date.fromisoformat(gend_iso), chunk_days, progress=progress, band=band, supplement=supplement)
         result_q.put(("ok", n))
     except BaseException as e:
         result_q.put(("err", f"{type(e).__name__}: {e}"))
@@ -785,6 +813,22 @@ def seal_quote_expiry(out_root: Path, ticker: str, exp_iso: str, end_date: date)
             conn.close()
 
 
+def _known_holes(out_root: Path, ticker: str, exp_iso: str) -> set:
+    """Interior trading days PROVEN absent at the vendor for this expiry, from the `known_holes` table in
+    quotes.db (reproducible across pulls; e.g. the SPY 2022-09-26 gap the H7 audit gate caught 2026-07-26 —
+    the legacy store never had those sessions either). In-DB, not a sidecar file, so the knowledge travels
+    with the store like the `sealed` table; a fresh rebuild starts skeptical (empty table) and the
+    INCOMPLETE raise names the exact dates to insert. The seal-time completeness check accepts exactly
+    these days; everything else missing withholds the seal. Returns ISO date strings."""
+    conn = connect_wal(_quotes_db_path(out_root))
+    try:
+        conn.execute(KNOWN_HOLES_SQL)
+        rows = conn.execute("SELECT date FROM known_holes WHERE root=? AND expiry=?", (ticker, ymd_int(exp_iso))).fetchall()
+    finally:
+        conn.close()
+    return {f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:8]}" for (d,) in rows}
+
+
 # ----- run-scoped completed-expiration manifest (threaded pull only) -----------------------------------
 # When the supervisor RESTARTS a wedged worker, the fresh worker rebuilds its todo from the DB `sealed`
 # table alone — so an unsealed expiration the previous worker already finished (today's / future frontier
@@ -829,7 +873,7 @@ def record_run_progress(out_root: Path, ticker: str, exp_iso: str):
         os.replace(tmp, p)  # atomic
 
 
-def _build_quote_work_with(client, tickers, start, end, out_root, dte_map):
+def _build_quote_work_with(client, tickers, start, end, out_root, dte_map, include_sealed=False):
     """List expirations per ticker (via the given client) and return [(ticker, exp, dte)] for those not
     yet SEALED and not already COMPLETED earlier in this supervisor run. Unsealed expirations — including
     still-alive/future ones near `end` — are (re)pulled so the live frontier fills in as days elapse;
@@ -850,7 +894,7 @@ def _build_quote_work_with(client, tickers, start, end, out_root, dte_map):
         hi = (end + timedelta(days=dte)).isoformat()
         rel = sorted(e for e in exps if start.isoformat() <= e <= hi)
         sealed_n = sum(1 for e in rel if e in sealed)
-        todo = [(ticker, e, dte) for e in rel if e not in sealed and f"{ticker}|{e}" not in done]
+        todo = [(ticker, e, dte) for e in rel if (include_sealed or e not in sealed) and f"{ticker}|{e}" not in done]
         skipped = len(rel) - sealed_n - len(todo)  # unsealed but already completed THIS run
         tail = f", {skipped} done this run" if skipped > 0 else ""
         log.info(f"=== {ticker} (dte={dte}): {len(rel)} expirations, {sealed_n} sealed, {len(todo)} to pull{tail} ===")
@@ -858,7 +902,7 @@ def _build_quote_work_with(client, tickers, start, end, out_root, dte_map):
     return work
 
 
-def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, out_root_str, chunk_days, concurrency):
+def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, out_root_str, chunk_days, concurrency, band=0.10, supplement=False):
     """One worker PROCESS = ONE ThetaData session. `concurrency` clients share that session via
     existing_authorized_client (the lib's documented multi-client pattern), one per worker thread, so
     `concurrency` requests are in flight at once — the tier's real allowance. One pass over the unsealed
@@ -873,7 +917,7 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
     base = make_client(creds)
     # Build work first: the listing calls force `base` to AUTHORIZE its session before we derive the
     # shared clients — otherwise each shared client could open its own session (→ Invalid session ID).
-    work = _build_quote_work_with(base, tickers, start, end, out_root, dte_map)
+    work = _build_quote_work_with(base, tickers, start, end, out_root, dte_map, include_sealed=supplement)
     if not work:
         return
     clients = [base] + [ThetaClient(existing_authorized_client=base, dataframe_type="pandas")
@@ -888,8 +932,9 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
         c = pool.get()
         try:
             log.info(f"  exp {ticker} {e}")
-            process_one_expiration(c, ticker, e, dte, rate, out_root, start, end, chunk_days, progress=f"{idx}/{len(work)}: ")
-            seal_quote_expiry(out_root, ticker, e, end)
+            process_one_expiration(c, ticker, e, dte, rate, out_root, start, end, chunk_days, progress=f"{idx}/{len(work)}: ", band=band, supplement=supplement)
+            if not supplement:
+                seal_quote_expiry(out_root, ticker, e, end)
             record_run_progress(out_root, ticker, e)  # so a restarted worker skips this completed expiry
         except BaseException as ex:  # one failed expiration shouldn't stop the pass; a later run retries it (not sealed)
             log.info(f"  [error] {ticker} exp {e}: {type(ex).__name__}: {ex}")
@@ -900,7 +945,7 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
         list(ex.map(do_one, enumerate(work, 1)))
 
 
-def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, chunk_days, concurrency, stall_secs):
+def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, chunk_days, concurrency, stall_secs, fresh_progress=True, clear_on_exit=True, band=0.10, supplement=False):
     """Supervisor: runs the threaded worker in a child process. The worker makes ONE pass over the
     unsealed expirations and exits cleanly — that ends the pull. We only RESTART it if it STALLS (a hung
     gRPC call wedges a thread, holding a server slot until the process dies) or crashes; after 3 restarts
@@ -917,7 +962,8 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
         # DB file mtime advances on each expiry commit; the -wal sidecar too. Either rising = progress.
         return max((p.stat().st_mtime for p in (db_path, db_path.with_suffix(".db-wal")) if p.exists()), default=0.0)
 
-    clear_run_progress(out_root)  # fresh run: forget prior-run completions so the frontier still refreshes
+    if fresh_progress:
+        clear_run_progress(out_root)  # fresh run: forget prior-run completions so the frontier still refreshes
     restarts = 0
     p = None
     try:
@@ -925,7 +971,7 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
             before = newest_write()
             p = ctx.Process(target=_threaded_quote_worker,
                             args=(creds, list(tickers), start.isoformat(), end.isoformat(),
-                                  dte_map, rate, str(out_root), chunk_days, concurrency))
+                                  dte_map, rate, str(out_root), chunk_days, concurrency, band, supplement))
             p.start()
             last_progress, last_t, stalled = before, time.time(), False
             while p.is_alive():
@@ -956,14 +1002,61 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
         if p is not None and p.is_alive():
             log.info("[abort] terminating quote worker")
             p.terminate(); p.join()
-        clear_run_progress(out_root)  # run over (clean finish or abort) → drop the this-run completion manifest
+        if clear_on_exit:
+            clear_run_progress(out_root)  # run over (clean finish or abort) → drop the this-run completion manifest
 
 
-def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency):
+def _list_unsealed_sealable(creds, tickers, dte_map, start, end, out_root):
+    """Expirations that SHOULD be sealed after a pull pass (elapsed: exp < today, fully in range: exp <= end)
+    but aren't — this run's genuine failures: RPC errors and INCOMPLETE seal-withholds. Fresh listing client;
+    the pull session is closed by the time this runs."""
+    failed = []
+    try:
+        client = make_client(creds)
+        today_iso = date.today().isoformat()
+        for ticker in tickers:
+            if dte_map.get(ticker) is None:
+                continue
+            sealed = load_sealed_quotes(out_root, ticker)
+            exps = _expirations_from(thetacall(client.option_list_expirations, ticker))
+            failed += [(ticker, e) for e in exps if start.isoformat() <= e <= end.isoformat() and e < today_iso and e not in sealed]
+    except Exception as ex:
+        log.info(f"  [warn] post-pass seal verification failed ({ex}) — cannot enumerate unsealed units this pass")
+    return failed
+
+
+def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency, band=0.10, supplement=False):
     # Resume is seal-driven: sealed (final) expirations are skipped, unsealed ones (re)pulled every run.
+    # Two passes: pass 2 retries ONLY units that failed pass 1 (RPC errors / INCOMPLETE seal-withholds) —
+    # the threaded run-progress manifest is preserved between passes so pass 2 skips everything already
+    # completed, frontier included. Returns the count of sealable units still unsealed after both passes
+    # (0 = certified complete); main() exits nonzero on failures so chain scripts can gate on rc.
+    # Supplement mode (additive wider-band patches) seals nothing by design, so the seal-driven retry pass
+    # and verification are meaningless there: single pass, rc 0.
+    if supplement:
+        _run_quotes_pass(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency,
+                         fresh_progress=True, clear_on_exit=True, band=band, supplement=True)
+        return 0
+    for attempt in (1, 2):
+        _run_quotes_pass(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency,
+                         fresh_progress=(attempt == 1), clear_on_exit=(attempt == 2), band=band)
+        failed = _list_unsealed_sealable(creds, tickers, dte_map, start, end, out_root)
+        if not failed:
+            if attempt == 2:
+                log.info("[retry-pass] clean — every previously-failed unit sealed")
+            return 0
+        names = ", ".join(f"{t} {e}" for t, e in failed[:8]) + ("..." if len(failed) > 8 else "")
+        if attempt == 1:
+            log.info(f"[retry-pass] {len(failed)} sealable unit(s) unsealed after pass 1 ({names}) — retrying just those")
+    log.info(f"[FAILED] {len(failed)} sealable unit(s) STILL unsealed after the retry pass: {names} — store INCOMPLETE for these; re-run --quotes to retry, or record proven vendor gaps in the known_holes table")
+    return len(failed)
+
+
+def _run_quotes_pass(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency, fresh_progress, clear_on_exit, band=0.10, supplement=False):
     if concurrency > 1:
         _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds,
-                             chunk_days, concurrency, stall_secs=max(timeout_s, 300))
+                             chunk_days, concurrency, stall_secs=max(timeout_s, 300),
+                             fresh_progress=fresh_progress, clear_on_exit=clear_on_exit, band=band, supplement=supplement)
         return
     # Sequential: one expiration at a time via the run_resilient process watchdog (clean hang-kill).
     listing = make_client(creds)
@@ -980,14 +1073,14 @@ def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, r
             continue
         hi = (end + timedelta(days=dte)).isoformat()
         rel = sorted(e for e in exps if start.isoformat() <= e <= hi)
-        todo = [e for e in rel if e not in sealed]
+        todo = [e for e in rel if supplement or e not in sealed]
         log.info(f"=== {ticker} (dte={dte}) -> quotes.db: {len(rel)} expirations, {len(sealed)} sealed, {len(todo)} to pull ===")
         for i, e in enumerate(todo, 1):
             log.info(f"  exp {e}")
             ok = run_resilient(_quote_expiry_worker,
-                               (creds, ticker, e, dte, rate, str(out_root), start.isoformat(), end.isoformat(), chunk_days, i, len(todo)),
+                               (creds, ticker, e, dte, rate, str(out_root), start.isoformat(), end.isoformat(), chunk_days, i, len(todo), band, supplement),
                                f"{ticker} exp {e}", timeout_s, retries)
-            if ok is not None:  # success (row count, possibly 0) → seal if final; give-up (None) leaves it unsealed
+            if ok is not None and not supplement:  # success (row count, possibly 0) → seal if final; give-up (None) leaves it unsealed; supplement never (re)seals
                 seal_quote_expiry(out_root, ticker, e, end)
 
 
@@ -1093,6 +1186,8 @@ def main():
     ap.add_argument("--quote-out", help="output root for --quotes (default: <data>/quotes)")
     ap.add_argument("--log", help="log file path for --run/--quotes (default: <data>/logs/backfill_<mode>_<ts>.log). Output is timestamped and tee'd to console + file.")
     ap.add_argument("--verbose", action="store_true", help="also show third-party library logs (thetadata auth, grpc, urllib3). Default: only our messages.")
+    ap.add_argument("--band", type=float, default=0.10, help="strike band as a fraction of that day's spot (default 0.10). Wider bands only make sense with --supplement — a full pull at a new width still records the same seals, so mixed-width history would be undetectable.")
+    ap.add_argument("--supplement", action="store_true", help="additive patch mode: pull sealed expiries too, never DELETE or (re)seal — INSERT OR IGNORE layers new rows (e.g. a wider --band ring for crash days where held strikes drifted out of the default band) alongside existing ones. Scope with --start/--end to the affected sessions.")
     ap.add_argument("--concurrency", type=int, default=1,
                     help="--quotes: requests in flight at once, via threads sharing ONE session (ThetaData "
                          "allows one session/account). Set to your tier's concurrent-request limit (Value=2). "
@@ -1155,8 +1250,11 @@ def main():
             sys.exit(f"--quotes needs a DTE for {missing}: pass {missing[0]}:DTE (e.g. {missing[0]}:45) or --max-dte")
         qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"  # base for the DB sibling, not a CSV dir
         log.info(f"data dir = {data_dir}\nquote store = {_quotes_db_path(qout)}  (minute NBBO ±10%, per-ticker DTE)")
-        run_quotes(tickers, args.start, args.end, qout, dte_map, args.rate,
-                   args.creds, args.timeout, args.retries, args.quote_chunk_days, args.concurrency)
+        n_failed = run_quotes(tickers, args.start, args.end, qout, dte_map, args.rate,
+                              args.creds, args.timeout, args.retries, args.quote_chunk_days, args.concurrency,
+                              band=args.band, supplement=args.supplement)
+        if n_failed:
+            sys.exit(1)  # chain scripts gate on rc: nonzero = sealable units left unsealed (store incomplete)
     else:
         sys.exit("specify one of --probe / --quotes-probe / --run / --quotes / --verify-quotes")
 

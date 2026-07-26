@@ -74,6 +74,11 @@ SCHEMA_SQL = (
     "PRIMARY KEY (root, expiry, date, strike_milli, right, time_sec)) WITHOUT ROWID"
 )
 SEALED_SQL = "CREATE TABLE IF NOT EXISTS sealed (root TEXT, expiry INTEGER, PRIMARY KEY (root, expiry)) WITHOUT ROWID"
+# Interior trading days PROVEN absent at the vendor for an expiry (reproducible across pulls) — the
+# seal-time completeness check accepts exactly these and nothing else. Lives IN the DB (like `sealed`,
+# which replaced sealed.json) so the knowledge travels with the store; a fresh rebuild starts with an
+# empty table and must re-prove gaps. Curated by hand: INSERT INTO known_holes VALUES('SPY', 20220926, 20220815);
+KNOWN_HOLES_SQL = "CREATE TABLE IF NOT EXISTS known_holes (root TEXT, expiry INTEGER, date INTEGER, PRIMARY KEY (root, expiry, date)) WITHOUT ROWID"
 
 
 def ymd_int(date_str):
