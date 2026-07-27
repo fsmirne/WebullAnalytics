@@ -55,49 +55,72 @@ internal static class TimeDecayGridBuilder
 			}
 		}
 
-		// Anchor the first column (today) to market bid/ask mid-prices when available.
+		// Default (non-theoretical) mode: anchor the grid to the real market mid and CARRY that anchor across
+		// EVERY column, not just today — so the whole grid rides on the observed price and reconciles with the
+		// panel's Current P&L (the same mid + modeled-change mark). Per leg, the anchor basis (model − mid,
+		// measured at the observation-instant column at the row nearest spot) is subtracted from each column
+		// where that leg still has time value; once a leg reaches expiry its cells are true intrinsic and take
+		// NO basis, so the expiry payoff stays exact. Theoretical mode skips this (pure model) — that's the
+		// point of --theoretical: model vs market-anchored, consistently across BOTH the grid and the headline.
 		if (!opts.Theoretical && opts.OptionQuotes != null && underlyingPrice.HasValue)
 		{
-			var marketMid = ComputeSpreadMarketMid(legs, opts.OptionQuotes);
-			if (marketMid.HasValue)
+			int closestRow = 0;
+			var closestDist = decimal.MaxValue;
+			for (int pi = 0; pi < priceRows.Count; pi++)
 			{
-				int closestRow = 0;
-				var closestDist = decimal.MaxValue;
-				for (int pi = 0; pi < priceRows.Count; pi++)
-				{
-					var dist = Math.Abs(priceRows[pi] - underlyingPrice.Value);
-					if (dist < closestDist) { closestDist = dist; closestRow = pi; }
-				}
+				var dist = Math.Abs(priceRows[pi] - underlyingPrice.Value);
+				if (dist < closestDist) { closestDist = dist; closestRow = pi; }
+			}
 
-				var marketValue = parentSide == Side.Sell ? -marketMid.Value : marketMid.Value;
-				var bsValue = values[closestRow, 0];
-				var adjustment = bsValue - marketValue;
-				if (adjustment != 0)
+			if (legValues != null)
+			{
+				// Per-leg anchor basis. Require every leg quoted two-sided, else leave the grid pure-BS (as before).
+				var legAdj = new decimal[legs.Count];
+				var allQuoted = true;
+				for (int li = 0; li < legs.Count && allQuoted; li++)
 				{
-					for (int pi = 0; pi < priceRows.Count; pi++)
-					{
-						values[pi, 0] = Math.Round(values[pi, 0] - adjustment, 4);
-						var adjDisplayValue = Math.Round(values[pi, 0], 2);
-						pnls[pi, 0] = parentSide == Side.Buy ? Math.Round((adjDisplayValue - netPremium) * qty * 100, 2) : Math.Round((netPremium - adjDisplayValue) * qty * 100, 2);
-					}
+					if (!opts.OptionQuotes.TryGetValue(legs[li].symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) { allQuoted = false; break; }
+					legAdj[li] = legValues[li, closestRow, 0] - (q.Bid.Value + q.Ask.Value) / 2m;
 				}
-
-				// Anchor per-leg values to market mid as well.
-				if (legValues != null)
+				if (allQuoted)
 				{
-					for (int li = 0; li < legs.Count; li++)
-					{
-						var l = legs[li];
-						if (!opts.OptionQuotes.TryGetValue(l.symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) continue;
-						var legMid = (q.Bid.Value + q.Ask.Value) / 2m;
-						var legBs = legValues[li, closestRow, 0];
-						var legAdj = legBs - legMid;
-						if (legAdj != 0)
+					for (int di = 0; di < dates.Count; di++)
+						for (int pi = 0; pi < priceRows.Count; pi++)
 						{
-							for (int pi = 0; pi < priceRows.Count; pi++)
-								legValues[li, pi, 0] = Math.Round(legValues[li, pi, 0] - legAdj, 4);
+							decimal cellAdj = 0m;
+							for (int li = 0; li < legs.Count; li++)
+							{
+								if (dates[di] >= legs[li].parsed.ExpiryDate.Date + OptionMath.MarketClose) continue; // expired → intrinsic, no basis
+								legValues[li, pi, di] = Math.Round(legValues[li, pi, di] - legAdj[li], 4);
+								cellAdj += (legs[li].row.Side == Side.Buy ? 1m : -1m) * legAdj[li];
+							}
+							values[pi, di] = Math.Round(values[pi, di] - cellAdj, 4);
+							var adjV = Math.Round(values[pi, di], 2);
+							pnls[pi, di] = parentSide == Side.Buy ? Math.Round((adjV - netPremium) * qty * 100, 2) : Math.Round((netPremium - adjV) * qty * 100, 2);
 						}
-					}
+				}
+			}
+			else
+			{
+				// Single-leg grid (no per-leg array): the spread IS the one leg; carry the spread mid anchor
+				// across its alive columns (its expiry == the grid's terminal column).
+				var marketMid = ComputeSpreadMarketMid(legs, opts.OptionQuotes);
+				if (marketMid.HasValue)
+				{
+					var marketValue = parentSide == Side.Sell ? -marketMid.Value : marketMid.Value;
+					var adjustment = values[closestRow, 0] - marketValue;
+					var legExpClose = legs[0].parsed.ExpiryDate.Date + OptionMath.MarketClose;
+					if (adjustment != 0)
+						for (int di = 0; di < dates.Count; di++)
+						{
+							if (dates[di] >= legExpClose) continue;
+							for (int pi = 0; pi < priceRows.Count; pi++)
+							{
+								values[pi, di] = Math.Round(values[pi, di] - adjustment, 4);
+								var adjV = Math.Round(values[pi, di], 2);
+								pnls[pi, di] = parentSide == Side.Buy ? Math.Round((adjV - netPremium) * qty * 100, 2) : Math.Round((netPremium - adjV) * qty * 100, 2);
+							}
+						}
 				}
 			}
 		}
@@ -168,48 +191,66 @@ internal static class TimeDecayGridBuilder
 			}
 		}
 
-		// Anchor the first column (today) to market bid/ask mid if all merged option legs have quotes.
+		// Default mode: anchor to market mid and CARRY it across every column (see the uniform-qty overload for
+		// the full rationale) so the grid reconciles with the panel's Current P&L. Per leg, the anchor basis is
+		// subtracted while the leg has time value; expired legs stay true intrinsic. Theoretical mode = pure model.
 		if (!opts.Theoretical && opts.OptionQuotes != null && underlyingPrice.HasValue)
 		{
-			var marketMid = ComputeMergedMarketMid(optionLegs, normalizingQty, opts.OptionQuotes);
-			if (marketMid.HasValue)
+			int closestRow = 0;
+			var closestDist = decimal.MaxValue;
+			for (int pi = 0; pi < priceRows.Count; pi++)
 			{
-				int closestRow = 0;
-				var closestDist = decimal.MaxValue;
-				for (int pi = 0; pi < priceRows.Count; pi++)
+				var dist = Math.Abs(priceRows[pi] - underlyingPrice.Value);
+				if (dist < closestDist) { closestDist = dist; closestRow = pi; }
+			}
+
+			if (legValues != null)
+			{
+				var legAdj = new decimal[optionLegs.Count];
+				var allQuoted = true;
+				for (int li = 0; li < optionLegs.Count && allQuoted; li++)
 				{
-					var dist = Math.Abs(priceRows[pi] - underlyingPrice.Value);
-					if (dist < closestDist) { closestDist = dist; closestRow = pi; }
+					if (!opts.OptionQuotes.TryGetValue(optionLegs[li].Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) { allQuoted = false; break; }
+					legAdj[li] = legValues[li, closestRow, 0] - (q.Bid.Value + q.Ask.Value) / 2m;
 				}
-
-				var bsPerPairValue = values[closestRow, 0];
-				var perPairAdjustment = bsPerPairValue - marketMid.Value;
-
-				if (perPairAdjustment != 0)
+				if (allQuoted)
 				{
-					for (int pi = 0; pi < priceRows.Count; pi++)
-					{
-						values[pi, 0] = Math.Round(values[pi, 0] - perPairAdjustment, 4);
-						var adjDisplayValue = Math.Round(values[pi, 0], 2, MidpointRounding.AwayFromZero);
-						pnls[pi, 0] = Math.Round((adjDisplayValue - netPremium) * normalizingQty * 100m, 2);
-					}
-				}
-
-				if (legValues != null)
-				{
-					for (int li = 0; li < optionLegs.Count; li++)
-					{
-						var l = optionLegs[li];
-						if (!opts.OptionQuotes.TryGetValue(l.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) continue;
-						var legMid = (q.Bid.Value + q.Ask.Value) / 2m;
-						var legBs = legValues[li, closestRow, 0];
-						var legAdj = legBs - legMid;
-						if (legAdj != 0)
+					for (int di = 0; di < dates.Count; di++)
+						for (int pi = 0; pi < priceRows.Count; pi++)
 						{
-							for (int pi = 0; pi < priceRows.Count; pi++)
-								legValues[li, pi, 0] = Math.Round(legValues[li, pi, 0] - legAdj, 4);
+							decimal cellAdj = 0m;
+							for (int li = 0; li < optionLegs.Count; li++)
+							{
+								if (dates[di] >= optionLegs[li].Parsed!.ExpiryDate.Date + OptionMath.MarketClose) continue;
+								legValues[li, pi, di] = Math.Round(legValues[li, pi, di] - legAdj[li], 4);
+								var signed = optionLegs[li].Side == Side.Buy ? 1m : -1m;
+								var weight = normalizingQty > 0 ? (decimal)optionLegs[li].Qty / normalizingQty : 0m;
+								cellAdj += signed * weight * legAdj[li];
+							}
+							values[pi, di] = Math.Round(values[pi, di] - cellAdj, 4);
+							var adjV = Math.Round(values[pi, di], 2, MidpointRounding.AwayFromZero);
+							pnls[pi, di] = Math.Round((adjV - netPremium) * normalizingQty * 100m, 2);
 						}
-					}
+				}
+			}
+			else
+			{
+				var marketMid = ComputeMergedMarketMid(optionLegs, normalizingQty, opts.OptionQuotes);
+				if (marketMid.HasValue)
+				{
+					var perPairAdjustment = values[closestRow, 0] - marketMid.Value;
+					var legExpClose = optionLegs[0].Parsed!.ExpiryDate.Date + OptionMath.MarketClose;
+					if (perPairAdjustment != 0)
+						for (int di = 0; di < dates.Count; di++)
+						{
+							if (dates[di] >= legExpClose) continue;
+							for (int pi = 0; pi < priceRows.Count; pi++)
+							{
+								values[pi, di] = Math.Round(values[pi, di] - perPairAdjustment, 4);
+								var adjV = Math.Round(values[pi, di], 2, MidpointRounding.AwayFromZero);
+								pnls[pi, di] = Math.Round((adjV - netPremium) * normalizingQty * 100m, 2);
+							}
+						}
 				}
 			}
 		}
