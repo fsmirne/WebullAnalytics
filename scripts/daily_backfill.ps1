@@ -31,8 +31,14 @@
 .PARAMETER HistoryTickers
 	Scope the `wa ai history` step (bare names, no DTE). Default = SPY XSP SPXW QQQ.
 
+.PARAMETER Steps
+	Which of the four steps to run (default all): history,quotes,oi,verify. Kept byte-identical in meaning
+	to daily_backfill.sh --steps. E.g. -Steps history runs ONLY the history refresh (no ThetaData session,
+	no quotes.db write — safe to run while a separate quote pull is in progress). -Steps quotes,oi,verify
+	skips history.
+
 .PARAMETER NoHistory
-	Skip the `wa ai history` step entirely.
+	Back-compat alias for -Steps quotes,oi,verify.
 
 .PARAMETER Verify
 	Scope the verify roots (bare names). Default = SPXW XSP SPY GME QQQ.
@@ -51,6 +57,7 @@ param(
 	[string]$End = "",
 	[string[]]$Tickers,
 	[string[]]$HistoryTickers,
+	[string[]]$Steps,
 	[switch]$NoHistory,
 	[string[]]$Verify
 )
@@ -94,8 +101,17 @@ if (-not $Verify -or $Verify.Count -eq 0) {
 	else { $Verify = @('SPXW','XSP','SPY','GME','QQQ') }
 }
 
-# --- `wa ai history` scope (skip entirely with -NoHistory). --------------------------------------------------
-if ($NoHistory) {
+# --- Step selection (default all four; identical semantics to daily_backfill.sh --steps). --------------------
+if (-not $Steps -or $Steps.Count -eq 0) {
+	if ($env:BACKFILL_STEPS) { $Steps = $env:BACKFILL_STEPS -split '[,\s]+' }
+	else { $Steps = @('history','quotes','oi','verify') }
+}
+if ($NoHistory) { $Steps = $Steps | Where-Object { $_ -ne 'history' } }   # back-compat alias
+$Steps = @($Steps | ForEach-Object { $_.ToLower() })
+function Has-Step([string]$name) { return $Steps -contains $name }
+
+# --- `wa ai history` scope. ----------------------------------------------------------------------------------
+if (-not (Has-Step 'history')) {
 	$HistoryList = @()
 } elseif ($HistoryTickers -and $HistoryTickers.Count -gt 0) {
 	$HistoryList = $HistoryTickers
@@ -149,13 +165,19 @@ foreach ($t in $HistoryList) {
 	Invoke-Step "(1/4) ai history $t" $WA @('ai','history',$t)
 }
 
-$quotesArgs = @($Script,'--quotes','--tickers') + $Tickers + @('--end',$End) + $StartOpt + @('--concurrency',"$Conc")
-Invoke-Step "(2/4) minute-NBBO quotes -> data/quotes.db" $PY $quotesArgs
+if (Has-Step 'quotes') {
+	$quotesArgs = @($Script,'--quotes','--tickers') + $Tickers + @('--end',$End) + $StartOpt + @('--concurrency',"$Conc")
+	Invoke-Step "(2/4) minute-NBBO quotes -> data/quotes.db" $PY $quotesArgs
+}
 
-$oiArgs = @($Script,'--run','--tickers') + $Tickers + @('--end',$EndOi) + $StartOpt + @('--concurrency',"$Conc")
-Invoke-Step "(3/4) EOD open interest -> data/oi" $PY $oiArgs
+if (Has-Step 'oi') {
+	$oiArgs = @($Script,'--run','--tickers') + $Tickers + @('--end',$EndOi) + $StartOpt + @('--concurrency',"$Conc")
+	Invoke-Step "(3/4) EOD open interest -> data/oi" $PY $oiArgs
+}
 
-Invoke-Step "(4/4) quote-store coverage + integrity" $PY @($Importer,'--root','SPY','--verify')
+if (Has-Step 'verify') {
+	Invoke-Step "(4/4) quote-store coverage + integrity" $PY @($Importer,'--root','SPY','--verify')
+}
 
 if ($script:rc -eq 0) {
 	Write-Host "[$(Get-Ts)] === ALL OK ==="

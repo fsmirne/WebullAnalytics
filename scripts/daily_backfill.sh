@@ -48,17 +48,21 @@ set -uo pipefail
 #   --end YYYY-MM-DD        last day to pull
 #   --tickers 'SPY:60 ...'  scope the quotes/OI roots (per-ticker DTE)
 #   --verify 'SPY ...'      scope the verify roots
-#   --history-tickers 'SPY ...' | --no-history   scope or skip the `wa ai history` step
-CLI_START=""; CLI_END=""; CLI_TICKERS=""; CLI_HISTORY=""; CLI_VERIFY=""; NO_HISTORY=0
+#   --history-tickers 'SPY ...'   scope the `wa ai history` step roots
+#   --steps history,quotes,oi,verify   which steps to run (comma/space list; default all four). Kept
+#                                       byte-identical to daily_backfill.ps1 -Steps. --no-history is a
+#                                       back-compat alias for --steps quotes,oi,verify.
+CLI_START=""; CLI_END=""; CLI_TICKERS=""; CLI_HISTORY=""; CLI_VERIFY=""; CLI_STEPS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --start)           CLI_START="${2:?--start needs a date}"; shift 2 ;;
     --end)             CLI_END="${2:?--end needs a date}"; shift 2 ;;
     --tickers)         CLI_TICKERS="${2:?--tickers needs a value}"; shift 2 ;;
     --history-tickers) CLI_HISTORY="${2:?--history-tickers needs a value}"; shift 2 ;;
-    --no-history)      NO_HISTORY=1; shift ;;
+    --steps)           CLI_STEPS="${2:?--steps needs a value}"; shift 2 ;;
+    --no-history)      CLI_STEPS="quotes,oi,verify"; shift ;;   # back-compat alias
     --verify)          CLI_VERIFY="${2:?--verify needs a value}"; shift 2 ;;
-    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--history-tickers 'SPY ...' | --no-history] [--verify 'SPY ...']"; exit 0 ;;
+    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--history-tickers 'SPY ...'] [--steps history,quotes,oi,verify] [--verify 'SPY ...']"; exit 0 ;;
     *)                 echo "[daily_backfill] unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -105,13 +109,19 @@ if [ -x "$SCRIPT_DIR/wa" ]; then WA="$SCRIPT_DIR/wa"
 elif [ -x "$SCRIPT_DIR/wa.exe" ]; then WA="$SCRIPT_DIR/wa.exe"
 else WA="wa"; fi
 
+# Which of the four steps to run (default all). Kept identical to daily_backfill.ps1 -Steps: a step runs
+# iff it appears in STEPS. Commas or spaces both work. `has_step NAME` is the single guard both scripts mirror.
+STEPS="${CLI_STEPS:-${BACKFILL_STEPS:-history,quotes,oi,verify}}"
+STEPS="${STEPS//,/ }"
+has_step() { case " $STEPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
 # Daily/close price + intraday-tape history refresh for the strategy tickers. Runs BEFORE the
-# ThetaData pull so downstream stores have fresh underlying history to lean on. Scope with
-# --history-tickers / BACKFILL_HISTORY_TICKERS, or skip entirely with --no-history.
-if [ "$NO_HISTORY" -eq 1 ]; then
-  HISTORY_TICKERS=""
-else
+# ThetaData pull so downstream stores have fresh underlying history to lean on. Scope roots with
+# --history-tickers / BACKFILL_HISTORY_TICKERS; drop the step via --steps (or the --no-history alias).
+if has_step history; then
   HISTORY_TICKERS="${CLI_HISTORY:-${BACKFILL_HISTORY_TICKERS:-SPY XSP SPXW QQQ}}"
+else
+  HISTORY_TICKERS=""
 fi
 
 # Stop at the last COMPLETE day. ThetaData finalizes a session's data at ~17:15 ET, so an evening
@@ -158,9 +168,9 @@ echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes ${STA
 for t in $HISTORY_TICKERS; do
   step "(1/4) ai history $t"                        "$WA" ai history "$t"
 done
-step "(2/4) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-step "(3/4) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-step "(4/4) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root SPY --verify
+has_step quotes && step "(2/4) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step oi     && step "(3/4) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step verify && step "(4/4) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root SPY --verify
 
 if [ "$rc" -eq 0 ]; then
   echo "[$(ts)] === ALL OK ==="
