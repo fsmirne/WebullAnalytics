@@ -186,13 +186,20 @@ internal static class OptionMath
 	/// </list></summary>
 	internal static decimal? LegMarkPerShare(OptionParsed parsed, string symbol, Side side, AnalysisOptions opts)
 	{
-		var now = EvaluationDate.Now;
+		// Price TO the same instant the grid's eval-date column uses so the headline and grid reconcile
+		// exactly: a pinned --date means "at that day's market open" (canonical, and independent of what
+		// wall-clock time the command is run — the old EvaluationDate.Now made P&L drift with run time).
+		// No pin → the live observation instant (RTH now / last close off-hours), matching the grid's today
+		// column. The market-spot reference is always the observation instant (where the mid was struck), so
+		// a future --date's delta carries both the spot move and the elapsed theta.
+		var evalInstant = EvaluationDate.IsOverridden ? EvaluationDate.Today + MarketOpen : ObservationInstant();
+		var refInstant = ObservationInstant();
 		if (opts.Theoretical)
 		{
 			var spot = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var op) ? op
 					 : opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var up) ? up : (decimal?)null;
 			if (!spot.HasValue) return null;
-			return LegContractValueWithBs(spot.Value, parsed, symbol, side, now, opts);
+			return LegContractValueWithBs(spot.Value, parsed, symbol, side, evalInstant, opts);
 		}
 
 		if (opts.OptionQuotes == null || !opts.OptionQuotes.TryGetValue(symbol, out var quote) || !quote.Bid.HasValue || !quote.Ask.HasValue)
@@ -201,8 +208,7 @@ internal static class OptionMath
 		if (opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var ovSpot)
 			&& opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var mktSpot))
 		{
-			var refInstant = EvaluationDate.Today.Date > DateTime.Today ? ObservationInstant() : now;
-			mark += LegContractValueWithBs(ovSpot, parsed, symbol, side, now, opts)
+			mark += LegContractValueWithBs(ovSpot, parsed, symbol, side, evalInstant, opts)
 				  - LegContractValueWithBs(mktSpot, parsed, symbol, side, refInstant, opts);
 		}
 		return mark;
