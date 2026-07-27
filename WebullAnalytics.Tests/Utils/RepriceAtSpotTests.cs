@@ -56,10 +56,14 @@ public class RepriceAtSpotTests : IDisposable
 		// A long call loses value as spot falls — the override must move the number, not echo the mid.
 		Assert.True(repriced < baseVal, $"expected reprice below {baseVal}, got {repriced}");
 
-		// Exact: raw mid shifted by the grid's own (dividend-aware) pricing path.
-		var now = OptionMath.ObservationInstant(); // same-day pin (Set(Today)) prices at the live instant, matching LegMarkPerShare + the grid
-		var shift = OptionMath.LegContractValueWithBs(LowerSpot, parsed, occ, Side.Buy, now, optsOv)
-				  - OptionMath.LegContractValueWithBs(MarketSpot, parsed, occ, Side.Buy, now, optsOv);
+		// Exact: raw mid shifted by the grid's own (dividend-aware) pricing path — mirroring LegMarkPerShare's
+		// TWO-instant delta: the override leg is priced at the eval-to instant (pre-open explicit --date →
+		// today's open) while the market-spot reference stays at the observation instant (where the mid was
+		// struck, last close pre-open), so the shift carries both the spot move and the elapsed theta.
+		var evalInstant = OptionMath.EvaluationInstant(DateTime.Now);
+		var refInstant = OptionMath.ObservationInstant();
+		var shift = OptionMath.LegContractValueWithBs(LowerSpot, parsed, occ, Side.Buy, evalInstant, optsOv)
+				  - OptionMath.LegContractValueWithBs(MarketSpot, parsed, occ, Side.Buy, refInstant, optsOv);
 		Assert.Equal((10.00m + shift) * 100m, repriced, 2);
 	}
 
@@ -93,7 +97,7 @@ public class RepriceAtSpotTests : IDisposable
 
 		var value = TableBuilder.ComputeOpenPositionsMarketValue(lots, opts);
 
-		var expected = OptionMath.LegContractValueWithBs(MarketSpot, parsed, occ, Side.Buy, OptionMath.ObservationInstant(), opts) * 100m;
+		var expected = OptionMath.LegContractValueWithBs(MarketSpot, parsed, occ, Side.Buy, OptionMath.EvaluationInstant(DateTime.Now), opts) * 100m;
 		Assert.NotNull(value);
 		Assert.Equal(expected, value!.Value, 2);
 	}

@@ -40,6 +40,29 @@ internal static class OptionMath
 		return MarketCalendar.PreviousOpenOnOrBefore(now.Date.AddDays(-1)) + MarketClose;                // pre-open / weekend / holiday
 	}
 
+	/// <summary>The instant a mark is evaluated TO — distinct from <see cref="ObservationInstant"/>, which is
+	/// where the quotes were STRUCK. Encodes the --date semantics so the headline and the grid's eval column
+	/// reconcile:
+	/// <list type="bullet">
+	/// <item>FUTURE --date → that day's 09:30 open (a forward what-if starts at the open).</item>
+	/// <item>Explicit same-day --date, run BEFORE today's open on a trading day → today's 09:30 open. This keeps
+	/// a --date that was "future" at 23:59 continuous one minute after midnight: without it, the eval collapses
+	/// back to the previous close and drops the overnight/weekend theta the position will have carried at the
+	/// open (the "07/24 vs 07/27" jump).</item>
+	/// <item>Everything else (RTH, after close, no --date, past --date) → the observation instant (run-time now /
+	/// last close), so an open-market eval reflects the actual run time, not a phantom 09:30.</item>
+	/// </list>
+	/// Takes <paramref name="now"/> explicitly so the branch logic is testable without touching the wall clock.</summary>
+	internal static DateTime EvaluationInstant(DateTime now)
+	{
+		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date > now.Date)
+			return EvaluationDate.Today + MarketOpen;
+		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date == now.Date
+			&& MarketCalendar.IsOpen(now.Date) && now < now.Date + MarketOpen)
+			return now.Date + MarketOpen;
+		return ObservationInstant();
+	}
+
 	// --- Black-Scholes ---
 
 	/// <summary>
@@ -192,13 +215,10 @@ internal static class OptionMath
 		// No pin → the live observation instant (RTH now / last close off-hours), matching the grid's today
 		// column. The market-spot reference is always the observation instant (where the mid was struck), so
 		// a future --date's delta carries both the spot move and the elapsed theta.
-		// Price TO: a FUTURE --date → that day's 09:30 open (a forward what-if starts at the open). Today or no
-		// pin → the live observation instant (RTH run-time now, or last close off-hours) via ObservationInstant,
-		// so evaluating "today" after the open reflects the run time, not a phantom 09:30. refInstant (where the
-		// mid was struck) is always the live observation instant.
-		var evalInstant = EvaluationDate.IsOverridden && EvaluationDate.Today.Date > DateTime.Today
-			? EvaluationDate.Today + MarketOpen
-			: ObservationInstant();
+		// Price TO the eval instant (FUTURE --date → its 09:30 open; explicit same-day --date pre-open → today's
+		// 09:30 open; else run-time now / last close — see EvaluationInstant). refInstant (where the mid was
+		// struck) is always the live observation instant, so an override delta carries both spot move and theta.
+		var evalInstant = EvaluationInstant(DateTime.Now);
 		var refInstant = ObservationInstant();
 		if (opts.Theoretical)
 		{

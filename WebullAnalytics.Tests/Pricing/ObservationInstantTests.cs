@@ -46,4 +46,54 @@ public class ObservationInstantTests : IDisposable
 		Assert.NotEqual(future + OptionMath.MarketOpen, anchor);
 		Assert.True(anchor.Date <= DateTime.Today, $"future-date anchor should be at/before today, got {anchor:yyyy-MM-dd HH:mm}");
 	}
+
+	// EvaluationInstant is the eval-TO instant (where the mark is projected), distinct from the quote anchor
+	// above. `now` is injected so the branch logic is deterministic regardless of the wall clock at test time.
+
+	[Fact]
+	public void EvaluationInstant_FutureDate_IsThatDaysOpen()
+	{
+		var now = MondayNoon();
+		EvaluationDate.Set(now.Date.AddDays(7));
+		Assert.Equal(now.Date.AddDays(7) + OptionMath.MarketOpen, OptionMath.EvaluationInstant(now));
+	}
+
+	[Fact]
+	public void EvaluationInstant_ExplicitToday_PreOpenTradingDay_ProjectsToTodaysOpen()
+	{
+		// The regression this guards: a --date that was "future" at 23:59 must not collapse to the previous
+		// close one minute after midnight. Pre-open on the same trading day → today's 09:30 open, not last close.
+		var preOpen = MondayNoon().Date + new TimeSpan(2, 0, 0); // 02:00 on a trading day
+		EvaluationDate.Set(preOpen.Date);
+		Assert.Equal(preOpen.Date + OptionMath.MarketOpen, OptionMath.EvaluationInstant(preOpen));
+	}
+
+	[Fact]
+	public void EvaluationInstant_ExplicitToday_AfterOpen_UsesObservationInstant_NotPhantomOpen()
+	{
+		// Once RTH begins the explicit same-day --date must track the run time (ObservationInstant), not pin 09:30.
+		EvaluationDate.Reset();
+		var live = OptionMath.ObservationInstant();
+		EvaluationDate.Set(DateTime.Today);
+		var afterOpenNow = DateTime.Today + new TimeSpan(12, 0, 0);
+		Assert.Equal(OptionMath.ObservationInstant(), OptionMath.EvaluationInstant(afterOpenNow));
+	}
+
+	[Fact]
+	public void EvaluationInstant_NoOverride_PreOpen_StaysObservationInstant_NotTodaysOpen()
+	{
+		// The pre-open→today's-open projection is scoped to an EXPLICIT same-day --date. With no --date the
+		// "current" value must remain the honest last-known mark (ObservationInstant), never a phantom 09:30.
+		EvaluationDate.Reset();
+		var preOpen = MondayNoon().Date + new TimeSpan(2, 0, 0);
+		Assert.Equal(OptionMath.ObservationInstant(), OptionMath.EvaluationInstant(preOpen));
+	}
+
+	// A guaranteed open trading day at noon, derived relatively so the test never goes stale.
+	private static DateTime MondayNoon()
+	{
+		var d = DateTime.Today.AddDays(14);
+		while (!MarketCalendar.IsOpen(d.Date)) d = d.AddDays(1);
+		return d.Date + new TimeSpan(12, 0, 0);
+	}
 }
