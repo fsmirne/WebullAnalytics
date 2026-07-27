@@ -172,6 +172,42 @@ internal static class OptionMath
 	internal static decimal LegContractValueWithBs(decimal underlyingPrice, OptionParsed parsed, string symbol, Side side, DateTime evaluationDate, AnalysisOptions opts)
 		=> LegValueAt(underlyingPrice, evaluationDate, parsed, GetLegIv(side, symbol, opts), GetLegDividends(parsed.Root, opts));
 
+	/// <summary>The single authoritative "what is this leg worth right now / at the eval point" per-share
+	/// mark, shared by the open-positions aggregate (report/analyze summary) and each position's break-even
+	/// panel so a per-position "Current P&L" and the portfolio total always reconcile to the same math.
+	/// Returns null when the leg can't be priced (no resolvable spot in theoretical mode; no two-sided quote
+	/// otherwise). Modes:
+	/// <list type="bullet">
+	/// <item><b>Theoretical</b> — pure model at the (override-or-market) spot and the current eval instant.</item>
+	/// <item><b>Default</b> — the observed bid/ask mid; with a --spot override, shifted by the model's value
+	/// change from the market spot to the override. For a FUTURE eval date the market-spot reference is taken
+	/// at <see cref="ObservationInstant"/> (when the mid was struck) so the shift carries elapsed theta, not
+	/// just the spot move; same-day/past keep the plain `now` reference (byte-identical).</item>
+	/// </list></summary>
+	internal static decimal? LegMarkPerShare(OptionParsed parsed, string symbol, Side side, AnalysisOptions opts)
+	{
+		var now = EvaluationDate.Now;
+		if (opts.Theoretical)
+		{
+			var spot = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var op) ? op
+					 : opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var up) ? up : (decimal?)null;
+			if (!spot.HasValue) return null;
+			return LegContractValueWithBs(spot.Value, parsed, symbol, side, now, opts);
+		}
+
+		if (opts.OptionQuotes == null || !opts.OptionQuotes.TryGetValue(symbol, out var quote) || !quote.Bid.HasValue || !quote.Ask.HasValue)
+			return null;
+		var mark = (quote.Bid.Value + quote.Ask.Value) / 2m;
+		if (opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var ovSpot)
+			&& opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var mktSpot))
+		{
+			var refInstant = EvaluationDate.Today.Date > DateTime.Today ? ObservationInstant() : now;
+			mark += LegContractValueWithBs(ovSpot, parsed, symbol, side, now, opts)
+				  - LegContractValueWithBs(mktSpot, parsed, symbol, side, refInstant, opts);
+		}
+		return mark;
+	}
+
 	/// <summary>Computes total P&L at expiration for all legs (intrinsic value only).</summary>
 	internal static decimal StrategyPnLAtExpiration(decimal underlyingPrice, List<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty) =>
 		legs.Sum(l => OptionPnLAtExpiration(underlyingPrice, l.parsed.Strike, l.parsed.CallPut, l.row.Side, qty, GetPremium(l.row)));

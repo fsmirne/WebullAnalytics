@@ -279,5 +279,10 @@ public record BreakEvenResult(
 	decimal? Margin = null,
 	decimal? MaxProfitPrice = null,
 	decimal? MaxLossPrice = null,
-	decimal? EntryBasis = null
+	decimal? EntryBasis = null,
+	// Authoritative marked P&L for THIS position at the eval spot/date, computed from the same per-leg mark
+	// (OptionMath.LegMarkPerShare) as the portfolio total — so the panel's "Current P&L" reconciles with the
+	// aggregate and stays correct under --date/--spot. Null when legs can't be marked; panel then falls back
+	// to the grid's anchor-column cell.
+	decimal? CurrentPnl = null
 );

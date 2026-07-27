@@ -155,11 +155,11 @@ public static class TableBuilder
 				spotText = $"Current Price: {Markup.Escape($"${result.UnderlyingPrice.Value.ToString("N2", CultureInfo.InvariantCulture)}")} {sep} ";
 			else
 				spotText = "";
-			// Current P&L = the grid's today column at the price row nearest spot. That cell is market-anchored to the
-			// live bid/ask mid when quotes are available (see TimeDecayGridBuilder), so it IS the marked P&L, in the
-			// same whole-position dollars as Max Profit/Loss; nearest-row lookup (not interpolation) preserves the anchor.
-			var currentPnlText = "";
-			if (result.Grid != null && result.UnderlyingPrice.HasValue && result.Grid.PriceRows.Count > 0 && result.Grid.DateColumns.Count > 0)
+			// Current P&L: prefer the authoritative marked P&L (CurrentPnl — same per-leg mark as the portfolio
+			// total, correct under --date/--spot). Fall back to the grid's today-column cell nearest spot only
+			// when CurrentPnl is unavailable (e.g. past eval date, or a path that carries a grid but no marks).
+			decimal? currentPnl = result.CurrentPnl;
+			if (!currentPnl.HasValue && result.Grid != null && result.UnderlyingPrice.HasValue && result.Grid.PriceRows.Count > 0 && result.Grid.DateColumns.Count > 0)
 			{
 				int closestRow = 0;
 				var closestDist = decimal.MaxValue;
@@ -168,10 +168,15 @@ public static class TableBuilder
 					var dist = Math.Abs(result.Grid.PriceRows[pi] - result.UnderlyingPrice.Value);
 					if (dist < closestDist) { closestDist = dist; closestRow = pi; }
 				}
-				var currentPnl = result.Grid.PnLs[closestRow, 0];
+				currentPnl = result.Grid.PnLs[closestRow, 0];
+			}
+			var currentPnlText = "";
+			if (currentPnl.HasValue)
+			{
+				var pnl = currentPnl.Value;
 				// Return on the entry basis (net debit paid / credit received), e.g. "$532.00 (5.5%)".
-				var pctText = result.EntryBasis.HasValue && result.EntryBasis.Value != 0 ? $" ({(100m * currentPnl / Math.Abs(result.EntryBasis.Value)).ToString("0.0", CultureInfo.InvariantCulture)}%)" : "";
-				currentPnlText = currentPnl >= 0 ? $"Current P&L: [green]${currentPnl.ToString("N2", CultureInfo.InvariantCulture)}{pctText}[/] {sep} " : $"Current P&L: [red]-${Math.Abs(currentPnl).ToString("N2", CultureInfo.InvariantCulture)}{pctText}[/] {sep} ";
+				var pctText = result.EntryBasis.HasValue && result.EntryBasis.Value != 0 ? $" ({(100m * pnl / Math.Abs(result.EntryBasis.Value)).ToString("0.0", CultureInfo.InvariantCulture)}%)" : "";
+				currentPnlText = pnl >= 0 ? $"Current P&L: [green]${pnl.ToString("N2", CultureInfo.InvariantCulture)}{pctText}[/] {sep} " : $"Current P&L: [red]-${Math.Abs(pnl).ToString("N2", CultureInfo.InvariantCulture)}{pctText}[/] {sep} ";
 			}
 			var beText = result.BreakEvens.Count > 0 ? string.Join(", ", result.BreakEvens.Select(be => $"${be.ToString("N2", CultureInfo.InvariantCulture)}")) : "N/A";
 			var maxProfitText = result.MaxProfit.HasValue ? (result.MaxProfit.Value >= 0 ? $"[green]${result.MaxProfit.Value.ToString("N2", CultureInfo.InvariantCulture)}[/]" : $"[red]-${Math.Abs(result.MaxProfit.Value).ToString("N2", CultureInfo.InvariantCulture)}[/]") : "Unlimited";
@@ -539,7 +544,6 @@ public static class TableBuilder
 		if (EvaluationDate.Today < DateTime.Today)
 			return null;
 
-		var now = EvaluationDate.Now;
 		decimal total = 0;
 		bool anyPriced = false;
 
@@ -555,44 +559,12 @@ public static class TableBuilder
 			if (parsed == null)
 				continue;
 
-			decimal currentValue;
-			if (opts.Theoretical)
-			{
-				// Theoretical mode prices each leg purely from the model at the (override-or-market) spot — the
-				// override IS the reprice here, since there's no observed mid to anchor. Route through the grid's
-				// own LegContractValueWithBs so dividends (DividendAdjustedSpot) and IV precedence (--iv →
-				// calibrated → broker) match the grid exactly. A leg with no resolvable IV now falls back to
-				// intrinsic (as the grid does) instead of being dropped from the total.
-				var spot = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var op) ? op : opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var up) ? up : (decimal?)null;
-				if (!spot.HasValue)
-					continue;
-				currentValue = OptionMath.LegContractValueWithBs(spot.Value, parsed, symbol, lots[0].Side, now, opts);
-			}
-			else
-			{
-				if (opts.OptionQuotes == null || !opts.OptionQuotes.TryGetValue(symbol, out var quote) || !quote.Bid.HasValue || !quote.Ask.HasValue)
-					continue;
-				currentValue = (quote.Bid.Value + quote.Ask.Value) / 2m;
-
-				// A --spot override reprices open positions at the hypothetical spot, consistent with the grid's
-				// today column. Reuse the grid's own pricing path (LegContractValueWithBs → DividendAdjustedSpot
-				// + GetLegIv, so calibrated/broker/--iv precedence and dividends are handled identically) and
-				// shift the observed mid by the model's value change from the real market spot to the override.
-				// The mid stays the basis — it was struck at the market spot — so only the model delta applies.
-				if (opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var ovSpot)
-					&& opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var mktSpot))
-				{
-					var side = lots[0].Side;
-					// For a FUTURE eval date, reference the market-spot leg value at the instant the mid was struck
-					// (ObservationInstant = real now) rather than at `now` (the future date), so the delta carries
-					// both the spot move AND the elapsed theta from struck-time to the eval date. Same-day/past runs
-					// keep the original `now` reference verbatim (spot-only delta) — byte-identical.
-					var refInstant = EvaluationDate.Today.Date > DateTime.Today ? OptionMath.ObservationInstant() : now;
-					var vMarket = OptionMath.LegContractValueWithBs(mktSpot, parsed, symbol, side, refInstant, opts);
-					var vOverride = OptionMath.LegContractValueWithBs(ovSpot, parsed, symbol, side, now, opts);
-					currentValue += vOverride - vMarket;
-				}
-			}
+			// Single authoritative per-leg mark (see OptionMath.LegMarkPerShare) — the same call each position's
+			// break-even panel uses, so per-position Current P&L and this portfolio total reconcile exactly.
+			var mark = OptionMath.LegMarkPerShare(parsed, symbol, lots[0].Side, opts);
+			if (!mark.HasValue)
+				continue;
+			var currentValue = mark.Value;
 
 			var totalQty = lots.Sum(l => l.Qty);
 			var sideSign = lots[0].Side == Side.Buy ? 1m : -1m;

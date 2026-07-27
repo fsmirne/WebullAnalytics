@@ -171,7 +171,26 @@ public static class BreakEvenAnalyzer
 		if (!isLong && spot.HasValue)
 			margin = AnalyzeCommon.ComputeLegMargin(parsed, qty, spot.Value, premium, null, null, 0, 0m, isExisting: false).Total;
 
-		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, Note: null, Legs: legsDisplay, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(parsed.Root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice, EntryBasis: (isLong ? 1 : -1) * premium * qty * 100m);
+		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, Note: null, Legs: legsDisplay, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(parsed.Root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice, EntryBasis: (isLong ? 1 : -1) * premium * qty * 100m, CurrentPnl: ComputeCurrentPnl(new List<(PositionRow row, OptionParsed parsed, string symbol)> { (row, parsed, symbol) }, qty, (isLong ? 1 : -1) * premium * qty * 100m, opts));
+	}
+
+	/// <summary>Marked P&L for this position at the eval spot/date, summed from the same per-leg mark
+	/// (<see cref="OptionMath.LegMarkPerShare"/>) the portfolio total uses — so a panel's "Current P&L"
+	/// reconciles with the aggregate and stays correct under --date/--spot. Returns null (panel then falls
+	/// back to the grid's anchor-column cell) when any leg can't be marked or the eval date is in the past
+	/// (mirrors <see cref="TableBuilder.ComputeOpenPositionsMarketValue"/>'s guard).</summary>
+	private static decimal? ComputeCurrentPnl(IReadOnlyList<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty, decimal entryBasis, AnalysisOptions opts)
+	{
+		if (EvaluationDate.Today < DateTime.Today) return null;
+		decimal value = 0m;
+		foreach (var leg in legs)
+		{
+			var mark = OptionMath.LegMarkPerShare(leg.parsed, leg.symbol, leg.row.Side, opts);
+			if (!mark.HasValue) return null;
+			var sideSign = leg.row.Side == Side.Buy ? 1m : -1m;
+			value += sideSign * mark.Value * qty * Trade.OptionMultiplier;
+		}
+		return value - entryBasis;
 	}
 
 	private static BreakEvenResult? AnalyzeStrategy(PositionRow parent, List<PositionRow> legs, AnalysisOptions opts, decimal padding, int terminalWidth, string displayMode, bool showLegs, int? forcedMaxGridColumns, bool gridTableHasBorder)
@@ -351,7 +370,7 @@ public static class BreakEvenAnalyzer
 			}
 		}
 
-		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice, EntryBasis: (parent.Side == Side.Buy ? 1 : -1) * netPremium * qty * 100m);
+		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice, EntryBasis: (parent.Side == Side.Buy ? 1 : -1) * netPremium * qty * 100m, CurrentPnl: ComputeCurrentPnl(parsedLegs, qty, (parent.Side == Side.Buy ? 1 : -1) * netPremium * qty * 100m, opts));
 	}
 
 	private static decimal EstimateTimeSpreadAssignmentStrikeLossPerShare(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, DateTime nearestExpiry)
