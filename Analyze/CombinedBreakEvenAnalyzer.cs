@@ -273,6 +273,26 @@ public static class CombinedBreakEvenAnalyzer
 			note = "P&L estimated using Black-Scholes at earliest-expiry date. Actual results will vary with volatility.";
 		}
 
+		// Authoritative combined Current P&L: each option leg marked by the shared OptionMath.LegMarkPerShare
+		// (the same mark the grid's carry-forward and the portfolio aggregate use) at its own qty, minus the
+		// entry basis, plus stock P&L at the eval spot. Reconciles with the grid's eval-date column by
+		// construction: (grid per-pair value − netPremium) × normalizingQty × 100 + stock == this. Null (panel
+		// falls back to the grid cell) if a leg can't be marked or the eval date is in the past.
+		decimal? combinedCurrentPnl = null;
+		if (EvaluationDate.Today.Date >= DateTime.Today.Date && optionLegs.Count > 0 && spot.HasValue)
+		{
+			decimal optsValue = 0m;
+			var allMarked = true;
+			foreach (var leg in optionLegs)
+			{
+				var mark = OptionMath.LegMarkPerShare(leg.Parsed!, leg.Symbol, leg.Side, opts);
+				if (!mark.HasValue) { allMarked = false; break; }
+				optsValue += (leg.Side == Side.Buy ? 1m : -1m) * mark.Value * leg.Qty * 100m;
+			}
+			if (allMarked)
+				combinedCurrentPnl = optsValue - netPremium * normalizingQty * 100m + StockDollarPnL(spot.Value);
+		}
+
 		return new BreakEvenResult(
 			Title: title,
 			Details: details,
@@ -292,7 +312,8 @@ public static class CombinedBreakEvenAnalyzer
 			Margin: margin,
 			MaxProfitPrice: maxProfitPrice,
 			MaxLossPrice: maxLossPrice,
-			EntryBasis: netPremium * normalizingQty * 100m
+			EntryBasis: netPremium * normalizingQty * 100m,
+			CurrentPnl: combinedCurrentPnl
 		);
 	}
 

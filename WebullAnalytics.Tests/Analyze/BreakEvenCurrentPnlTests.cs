@@ -107,4 +107,53 @@ public class BreakEvenCurrentPnlTests : IDisposable
 		Assert.True(Math.Abs(grid.PnLs[row, col] - res.CurrentPnl!.Value) < 25m,
 			$"grid eval cell {grid.PnLs[row, col]} vs headline {res.CurrentPnl} — carry-forward should reconcile them (old col-0-only differs by the ~$1000+ basis)");
 	}
+
+	/// <summary>Combined panel: its Current P&L must reconcile with its own grid the same way —
+	/// (grid eval-column value) reduces to CurrentPnl. Two same-qty diagonals merged into one combined view.</summary>
+	[Fact]
+	public void CombinedPanel_CurrentPnl_MatchesItsGridEvalColumn()
+	{
+		var near = DateTime.Today.AddDays(45);
+		var far = DateTime.Today.AddDays(90);
+		var sA = MatchKeys.OccSymbol("GME", near, 25m, "C");
+		var lA = MatchKeys.OccSymbol("GME", far, 25m, "C");
+		var sB = MatchKeys.OccSymbol("GME", near, 26m, "C");
+		var lB = MatchKeys.OccSymbol("GME", far, 26m, "C");
+		// Two diagonal units (parent OptionStrategy + legs each), same 10-lot size → clean per-structure quoting.
+		var parentA = new PositionRow(Instrument: "GME Diag A", Asset: Asset.OptionStrategy, OptionKind: "Diagonal", Side: Side.Buy, Qty: 10, AvgPrice: 1.80m, Expiry: near, IsStrategyLeg: false, MatchKey: "GME-DIAG-A");
+		var parentB = new PositionRow(Instrument: "GME Diag B", Asset: Asset.OptionStrategy, OptionKind: "Diagonal", Side: Side.Buy, Qty: 10, AvgPrice: 1.70m, Expiry: near, IsStrategyLeg: false, MatchKey: "GME-DIAG-B");
+		var rows = new List<PositionRow>
+		{
+			parentA, Leg(lA, Side.Buy, 10, 3.00m, far, "C"), Leg(sA, Side.Sell, 10, 1.20m, near, "C"),
+			parentB, Leg(lB, Side.Buy, 10, 2.60m, far, "C"), Leg(sB, Side.Sell, 10, 0.90m, near, "C"),
+		};
+		var opts = new AnalysisOptions
+		{
+			OptionQuotes = new Dictionary<string, OptionContractQuote>
+			{
+				[lA] = TestQuote.Q(2.95m, 3.05m, iv: 0.55m), [sA] = TestQuote.Q(1.15m, 1.25m, iv: 0.60m),
+				[lB] = TestQuote.Q(2.55m, 2.65m, iv: 0.54m), [sB] = TestQuote.Q(0.85m, 0.95m, iv: 0.61m),
+			},
+			UnderlyingPrices = new Dictionary<string, decimal> { ["GME"] = 24.50m },
+			UnderlyingPriceOverrides = new Dictionary<string, decimal> { ["GME"] = 26.00m },
+			IvOverrides = new Dictionary<string, decimal> { [sA] = 0.60m, [lA] = 0.55m, [sB] = 0.61m, [lB] = 0.54m },
+			Theoretical = false,
+		};
+
+		EvaluationDate.Set(DateTime.Today.AddDays(15));
+
+		var res = CombinedBreakEvenAnalyzer.Analyze(rows, opts).Single(r => r.Grid != null && r.CurrentPnl.HasValue);
+		var grid = res.Grid!;
+
+		int col = -1;
+		for (int c = 0; c < grid.DateColumns.Count; c++)
+			if (grid.DateColumns[c].Date == EvaluationDate.Today.Date) col = c;
+		Assert.True(col >= 0, "combined grid has an eval-date column");
+
+		int row = 0; var best = decimal.MaxValue;
+		for (int r = 0; r < grid.PriceRows.Count; r++) { var d = Math.Abs(grid.PriceRows[r] - 26.00m); if (d < best) { best = d; row = r; } }
+
+		Assert.True(Math.Abs(grid.PnLs[row, col] - res.CurrentPnl!.Value) < 25m,
+			$"combined grid eval cell {grid.PnLs[row, col]} vs combined Current P&L {res.CurrentPnl} must reconcile");
+	}
 }
