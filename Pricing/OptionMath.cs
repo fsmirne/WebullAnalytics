@@ -26,7 +26,13 @@ internal static class OptionMath
 	/// </list></summary>
 	internal static DateTime ObservationInstant()
 	{
-		if (EvaluationDate.IsOverridden) return EvaluationDate.Today + MarketOpen;
+		// A pinned eval date in the PAST or TODAY (historical replay, report --until, proposal-snapshot replay,
+		// backtest step) anchors the quotes at that date's session open — that IS when those quotes were struck.
+		// A FUTURE eval date is a forward what-if on quotes struck NOW, so it must anchor at the real observation
+		// moment; otherwise calibration and greeks would use the future date's (shorter) DTE and forward pricing
+		// would show zero elapsed decay. Gated on future-only so every past/same-day caller is byte-identical.
+		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date <= DateTime.Today)
+			return EvaluationDate.Today + MarketOpen;
 		var now = DateTime.Now;
 		var todayTrades = MarketCalendar.IsOpen(now.Date);
 		if (todayTrades && now >= now.Date + MarketOpen && now <= now.Date + MarketClose) return now;   // live RTH

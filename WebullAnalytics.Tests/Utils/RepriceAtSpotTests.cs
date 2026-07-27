@@ -99,6 +99,33 @@ public class RepriceAtSpotTests : IDisposable
 	}
 
 	[Fact]
+	public void FutureDate_AddsThetaDecay_ToShortPositionValue()
+	{
+		// A future eval date must carry elapsed theta, not just the spot move. For a SHORT option the buy-back
+		// cost falls as time passes, so a future-dated reprice at the SAME spot is worth strictly more to the
+		// short holder than a same-day reprice at that spot. Before the ObservationInstant fix the future date
+		// re-based the anchor and this decay collapsed to ~0.
+		var (lots, quotes, _, _) = BuildLeg("C", Side.Sell);
+		var prices = new Dictionary<string, decimal> { ["SPY"] = MarketSpot };
+		var overrideSpot = new Dictionary<string, decimal> { ["SPY"] = MarketSpot }; // same spot → isolate decay
+		var opts = new AnalysisOptions(OptionQuotes: quotes, UnderlyingPrices: prices, UnderlyingPriceOverrides: overrideSpot);
+
+		var sameDay = TableBuilder.ComputeOpenPositionsMarketValue(lots, opts)!.Value;
+
+		try
+		{
+			EvaluationDate.Set(DateTime.Today.AddDays(10));
+			var future = TableBuilder.ComputeOpenPositionsMarketValue(lots, opts)!.Value;
+			// Short position value = -(cost to buy back). Ten days of decay lowers the buy-back, raising the value.
+			Assert.True(future > sameDay, $"future-dated short value {future} should exceed same-day {sameDay} by the decay");
+		}
+		finally
+		{
+			EvaluationDate.Set(DateTime.Today); // restore the collection's pinned baseline for sibling tests
+		}
+	}
+
+	[Fact]
 	public void Theoretical_NoIv_FallsBackToIntrinsicInsteadOfSkipping()
 	{
 		// No quotes, no --iv, no calibration → GetLegIv returns null. Previously the leg was dropped from the

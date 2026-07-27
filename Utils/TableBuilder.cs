@@ -583,7 +583,12 @@ public static class TableBuilder
 					&& opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var mktSpot))
 				{
 					var side = lots[0].Side;
-					var vMarket = OptionMath.LegContractValueWithBs(mktSpot, parsed, symbol, side, now, opts);
+					// For a FUTURE eval date, reference the market-spot leg value at the instant the mid was struck
+					// (ObservationInstant = real now) rather than at `now` (the future date), so the delta carries
+					// both the spot move AND the elapsed theta from struck-time to the eval date. Same-day/past runs
+					// keep the original `now` reference verbatim (spot-only delta) — byte-identical.
+					var refInstant = EvaluationDate.Today.Date > DateTime.Today ? OptionMath.ObservationInstant() : now;
+					var vMarket = OptionMath.LegContractValueWithBs(mktSpot, parsed, symbol, side, refInstant, opts);
 					var vOverride = OptionMath.LegContractValueWithBs(ovSpot, parsed, symbol, side, now, opts);
 					currentValue += vOverride - vMarket;
 				}
