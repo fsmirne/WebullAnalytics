@@ -282,6 +282,16 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	/// which handles the "settled" check internally (CNN settles a date's score at 17:00 ET; pre-settlement
 	/// fetches don't write to disk). Throttled at 400ms per call to be polite to CNN's public endpoint.
 	/// Best-effort — failures don't fail the command, since the sentiment factor is opt-in scoring.</summary>
+	// Trading days for which CNN's Fear & Greed source itself has NO value (a hole in CNN's own history,
+	// distinct from a market closure — the market WAS open these days, so they must NOT go in MarketCalendar
+	// or every other consumer would wrongly treat them as closed). Without this the sentiment refresh reports
+	// "pulling 1 missing day / skipped 1" on EVERY run forever, re-hammering CNN for a date it can't serve.
+	// The reader already returns null for a missing file; this just stops the futile re-fetch + noise.
+	private static readonly HashSet<DateTime> KnownSentimentSourceGaps = new()
+	{
+		new DateTime(2026, 3, 12),  // confirmed absent from CNN F&G history (found during the 2021→ cache rebuild)
+	};
+
 	private static async Task RefreshSentimentCacheAsync(DateTime earliest, DateTime asOf, CancellationToken cancellation)
 	{
 		var earliestNy = TimeZoneInfo.ConvertTime(earliest, NyTz).Date;
@@ -292,6 +302,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		for (var d = earliestNy; d <= todayNy; d = d.AddDays(1))
 		{
 			if (!MarketCalendar.IsOpen(d)) continue;
+			if (KnownSentimentSourceGaps.Contains(d)) continue;   // CNN itself has no value — never fillable, don't re-attempt/re-warn every run
 			var path = Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json");
 			if (File.Exists(path)) continue;
 			needed.Add(d);
