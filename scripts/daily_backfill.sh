@@ -50,8 +50,7 @@ set -uo pipefail
 #   --verify 'SPY ...'      scope the verify roots
 #   --history-tickers 'SPY ...'   scope the `wa ai history` step roots
 #   --steps history,quotes,oi,verify   which steps to run (comma/space list; default all four). Kept
-#                                       byte-identical to daily_backfill.ps1 -Steps. --no-history is a
-#                                       back-compat alias for --steps quotes,oi,verify.
+#                                       byte-identical to daily_backfill.ps1 -Steps.
 CLI_START=""; CLI_END=""; CLI_TICKERS=""; CLI_HISTORY=""; CLI_VERIFY=""; CLI_STEPS=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -60,7 +59,6 @@ while [ $# -gt 0 ]; do
     --tickers)         CLI_TICKERS="${2:?--tickers needs a value}"; shift 2 ;;
     --history-tickers) CLI_HISTORY="${2:?--history-tickers needs a value}"; shift 2 ;;
     --steps)           CLI_STEPS="${2:?--steps needs a value}"; shift 2 ;;
-    --no-history)      CLI_STEPS="quotes,oi,verify"; shift ;;   # back-compat alias
     --verify)          CLI_VERIFY="${2:?--verify needs a value}"; shift 2 ;;
     -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--history-tickers 'SPY ...'] [--steps history,quotes,oi,verify] [--verify 'SPY ...']"; exit 0 ;;
     *)                 echo "[daily_backfill] unknown argument: $1 (see --help)" >&2; exit 2 ;;
@@ -117,7 +115,7 @@ has_step() { case " $STEPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # Daily/close price + intraday-tape history refresh for the strategy tickers. Runs BEFORE the
 # ThetaData pull so downstream stores have fresh underlying history to lean on. Scope roots with
-# --history-tickers / BACKFILL_HISTORY_TICKERS; drop the step via --steps (or the --no-history alias).
+# --history-tickers / BACKFILL_HISTORY_TICKERS; drop the step via --steps (omit 'history' from the list).
 if has_step history; then
   HISTORY_TICKERS="${CLI_HISTORY:-${BACKFILL_HISTORY_TICKERS:-SPY XSP SPXW QQQ}}"
 else
@@ -141,7 +139,7 @@ fi
 # BACKFILL_START) to extend the pull back for a one-time history fill; sealed expirations/days are still
 # skipped, so it only fetches the genuinely-missing older data. Does NOT affect the `wa ai history` step
 # (that uses its own lookback). Example one-off SPY option fill scoped to SPY, skipping history:
-#   bash daily_backfill.sh --start 2024-05-20 --tickers "SPY:60" --verify SPY --no-history
+#   bash daily_backfill.sh --start 2024-05-20 --tickers "SPY:60" --verify SPY --steps quotes,oi,verify
 START_VALUE="${CLI_START:-${BACKFILL_START:-}}"
 START_OPT=()
 [ -n "$START_VALUE" ] && START_OPT=(--start "$START_VALUE")

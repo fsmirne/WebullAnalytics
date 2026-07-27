@@ -37,9 +37,6 @@
 	no quotes.db write — safe to run while a separate quote pull is in progress). -Steps quotes,oi,verify
 	skips history.
 
-.PARAMETER NoHistory
-	Back-compat alias for -Steps quotes,oi,verify.
-
 .PARAMETER Verify
 	Scope the verify roots (bare names). Default = SPXW XSP SPY GME QQQ.
 
@@ -49,7 +46,7 @@
 
 .EXAMPLE
 	# One-off history fill for SPY + QQQ, scoped verify, skipping the history step
-	./daily_backfill.ps1 -Start 2022-01-01 -Tickers SPY:60,QQQ:60 -Verify SPY,QQQ -NoHistory
+	./daily_backfill.ps1 -Start 2022-01-01 -Tickers SPY:60,QQQ:60 -Verify SPY,QQQ -Steps quotes,oi,verify
 #>
 [CmdletBinding()]
 param(
@@ -58,7 +55,6 @@ param(
 	[string[]]$Tickers,
 	[string[]]$HistoryTickers,
 	[string[]]$Steps,
-	[switch]$NoHistory,
 	[string[]]$Verify
 )
 
@@ -106,7 +102,6 @@ if (-not $Steps -or $Steps.Count -eq 0) {
 	if ($env:BACKFILL_STEPS) { $Steps = $env:BACKFILL_STEPS -split '[,\s]+' }
 	else { $Steps = @('history','quotes','oi','verify') }
 }
-if ($NoHistory) { $Steps = $Steps | Where-Object { $_ -ne 'history' } }   # back-compat alias
 $Steps = @($Steps | ForEach-Object { $_.ToLower() })
 function Has-Step([string]$name) { return $Steps -contains $name }
 
