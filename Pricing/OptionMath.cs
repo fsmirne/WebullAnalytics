@@ -26,12 +26,12 @@ internal static class OptionMath
 	/// </list></summary>
 	internal static DateTime ObservationInstant()
 	{
-		// A pinned eval date in the PAST or TODAY (historical replay, report --until, proposal-snapshot replay,
-		// backtest step) anchors the quotes at that date's session open — that IS when those quotes were struck.
-		// A FUTURE eval date is a forward what-if on quotes struck NOW, so it must anchor at the real observation
-		// moment; otherwise calibration and greeks would use the future date's (shorter) DTE and forward pricing
-		// would show zero elapsed decay. Gated on future-only so every past/same-day caller is byte-identical.
-		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date <= DateTime.Today)
+		// A pinned eval date in the PAST (historical replay, report --until, proposal-snapshot replay, backtest
+		// step) anchors the quotes at that date's session open — that IS when those quotes were struck. A TODAY
+		// or FUTURE pin uses live quotes struck NOW, so it falls through to the real observation moment; pricing
+		// TO a future date's open is handled separately (see LegMarkPerShare), but the quote anchor itself is
+		// always "now". This keeps a same-day --date identical to no --date (real run-time, not a phantom 9:30).
+		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date < DateTime.Today)
 			return EvaluationDate.Today + MarketOpen;
 		var now = DateTime.Now;
 		var todayTrades = MarketCalendar.IsOpen(now.Date);
@@ -192,7 +192,13 @@ internal static class OptionMath
 		// No pin → the live observation instant (RTH now / last close off-hours), matching the grid's today
 		// column. The market-spot reference is always the observation instant (where the mid was struck), so
 		// a future --date's delta carries both the spot move and the elapsed theta.
-		var evalInstant = EvaluationDate.IsOverridden ? EvaluationDate.Today + MarketOpen : ObservationInstant();
+		// Price TO: a FUTURE --date → that day's 09:30 open (a forward what-if starts at the open). Today or no
+		// pin → the live observation instant (RTH run-time now, or last close off-hours) via ObservationInstant,
+		// so evaluating "today" after the open reflects the run time, not a phantom 09:30. refInstant (where the
+		// mid was struck) is always the live observation instant.
+		var evalInstant = EvaluationDate.IsOverridden && EvaluationDate.Today.Date > DateTime.Today
+			? EvaluationDate.Today + MarketOpen
+			: ObservationInstant();
 		var refInstant = ObservationInstant();
 		if (opts.Theoretical)
 		{

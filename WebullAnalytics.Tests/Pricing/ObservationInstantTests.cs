@@ -23,10 +23,16 @@ public class ObservationInstantTests : IDisposable
 	}
 
 	[Fact]
-	public void TodayOverride_AnchorsAtTodaysSessionOpen()
+	public void TodayOverride_UsesLiveInstant_NotPinnedOpen()
 	{
+		// A same-day --date is NOT historical: it must price at the live run-time instant (RTH now / last
+		// close off-hours), identical to no override — not a phantom 09:30 that ignores the day's elapsed theta.
+		EvaluationDate.Reset();
+		var live = OptionMath.ObservationInstant();
 		EvaluationDate.Set(DateTime.Today);
-		Assert.Equal(DateTime.Today + OptionMath.MarketOpen, OptionMath.ObservationInstant());
+		var pinned = OptionMath.ObservationInstant();
+		Assert.Equal(live.Date, pinned.Date);
+		Assert.True(Math.Abs((pinned - live).TotalMinutes) < 1, $"today-override {pinned} should track the live instant {live}, not pin to 09:30");
 	}
 
 	[Fact]
