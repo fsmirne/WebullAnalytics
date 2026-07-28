@@ -35,6 +35,10 @@ class ReportSettings : CommandSettings
 	[CommandOption("--until")]
 	public string? Until { get; set; }
 
+	[CommandOption("--date")]
+	[Description("Override 'today' for evaluation (YYYY-MM-DD): open positions forward-project to that date with theta decay — pair with --spot to predict the book's value at that date. Shared with `analyze trade`, same code path. Distinct from --until (a trade-range FILTER); --date only moves the pricing anchor. A future date prices at that day's 09:30 ET open; today prices at the current run time.")]
+	public string? Date { get; set; }
+
 	[Description("Output format: 'console', 'excel', or 'text'")]
 	[CommandOption("--output")]
 	[DefaultValue("console")]
@@ -103,6 +107,10 @@ class ReportSettings : CommandSettings
 
 	public DateTime UntilDate => Until != null ? DateTime.ParseExact(Until, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MaxValue;
 
+	// The evaluation-anchor override (--date). Parsed identically to analyze trade so `report` and
+	// `analyze trade` set EvaluationDate the same way and share the forward-pricing path.
+	internal DateTime? EvaluationDateOverride => Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
+
 	public HashSet<string>? TickerFilter => Tickers != null ? new HashSet<string>(Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), StringComparer.OrdinalIgnoreCase) : null;
 
 	/// <summary>Applies config.json defaults for any option not explicitly passed on the CLI.</summary>
@@ -133,6 +141,9 @@ class ReportSettings : CommandSettings
 
 		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
 			return ValidationResult.Error("--until must be in YYYY-MM-DD format");
+
+		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+			return ValidationResult.Error("--date must be in YYYY-MM-DD format");
 
 		if (Since != null && Until != null && SinceDate > UntilDate)
 			return ValidationResult.Error("--since date must not be after --until date");
@@ -206,6 +217,15 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
 
+		// --date moves the evaluation anchor so open positions forward-project to that date (theta decay +
+		// any --spot). Identical block to AnalyzeTradeCommand.ExecuteAsync so `report --date` and
+		// `analyze trade --date` set EvaluationDate the same way and flow through the same valuation.
+		if (settings.EvaluationDateOverride.HasValue)
+		{
+			EvaluationDate.Set(settings.EvaluationDateOverride.Value);
+			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
+		}
+
 		var (trades, feeLookup, err) = LoadTrades(settings);
 		if (err != 0) return err;
 
@@ -267,7 +287,10 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		if (settings.Until != null)
 		{
 			trades.RemoveAll(t => t.Timestamp.Date > settings.UntilDate.Date);
-			EvaluationDate.Set(settings.UntilDate);
+			// --until doubles as the historical as-of anchor, BUT --date (set in ExecuteAsync) is the explicit
+			// evaluation override and wins — so only anchor to --until when no --date was given.
+			if (!settings.EvaluationDateOverride.HasValue)
+				EvaluationDate.Set(settings.UntilDate);
 		}
 
 		var initialAmount = settings.InitialAmount;

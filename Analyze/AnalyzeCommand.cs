@@ -15,25 +15,11 @@ using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.Analyze;
 
-// Shared base for both subcommands.
+// Base for analyze subcommands that inject synthetic trades into the report pipeline. --date, --spot,
+// EvaluationDateOverride and their validation all live on ReportSettings now, so `analyze trade` and
+// `report` share one definition and one forward-pricing path (they diverged before, causing subtle bugs).
 internal abstract class AnalyzeSubcommandSettings : ReportSettings
 {
-	[CommandOption("--date")]
-	[Description("Override 'today' for evaluation. Simulates running on a different date (e.g., after short leg expiration). Format: YYYY-MM-DD")]
-	public string? Date { get; set; }
-
-	internal DateTime? EvaluationDateOverride => Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
-
-	public override ValidationResult Validate()
-	{
-		var baseResult = base.Validate();
-		if (!baseResult.Successful) return baseResult;
-
-		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
-			return ValidationResult.Error($"--date: expected format YYYY-MM-DD, got '{Date}'");
-
-		return ValidationResult.Success();
-	}
 }
 
 // --- `analyze trade` ----------------------------------------------------------
