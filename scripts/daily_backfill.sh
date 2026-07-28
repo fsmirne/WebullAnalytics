@@ -9,7 +9,7 @@
 # WAL so the scraper/backtest can touch it concurrently; quote sealing lives in the DB `sealed` table. The
 # OI store stays as data/oi/<TICKER>/<date>.jsonl with its own sealed.json.
 #
-# Tickers: SPY/GME at 60 DTE (covers the longCalendar/diagonal longDteMax=60 long legs),
+# Tickers: SPY at 60 DTE (covers the longCalendar/diagonal longDteMax=60 long legs),
 # QQQ at 60 DTE (the DC cross-vehicle store; the QQQ.DC long leg is 30-45 DTE, same as SPY — a
 #   narrower :30 pull truncated it at exactly the long leg, crippling the QQQ backtest),
 # SPXW/XSP at 0 DTE. ThetaData allows ONE session per account, so the pulls run STRICTLY
@@ -97,8 +97,8 @@ PY=python3
 SCRIPT="$SCRIPT_DIR/backfill_thetadata.py"
 # Ticker sets are env-overridable so a one-off historical fill can be scoped to a single root (e.g. a
 # 4-year SPY pull) without dragging the 0DTE index roots into a multi-year pull. Defaults = the daily set.
-TICKERS="${CLI_TICKERS:-${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60 GME:60 QQQ:60}}"   # quotes + oi (per-ticker DTE)
-VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW XSP SPY GME QQQ}}"                   # verify-quotes (bare names, no DTE)
+TICKERS="${CLI_TICKERS:-${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60 QQQ:60}}"   # quotes + oi (per-ticker DTE)
+VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW XSP SPY QQQ}}"                 # verify-quotes (bare names, no DTE)
 CONC=2
 
 # Resolve the wa executable — install.sh/.bat publish it alongside this script in the install dir

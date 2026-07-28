@@ -38,7 +38,7 @@
 	skips history.
 
 .PARAMETER Verify
-	Scope the verify roots (bare names). Default = SPXW XSP SPY GME QQQ.
+	Scope the verify roots (bare names). Default = SPXW XSP SPY QQQ.
 
 .EXAMPLE
 	# Normal daily run
@@ -90,11 +90,11 @@ $Conc = 2
 # --- Ticker sets (defaults = the daily set; -Tickers / -Verify override, matching the .sh env knobs). --------
 if (-not $Tickers -or $Tickers.Count -eq 0) {
 	if ($env:BACKFILL_TICKERS) { $Tickers = $env:BACKFILL_TICKERS -split '\s+' }
-	else { $Tickers = @('SPXW:0','XSP:0','SPY:60','GME:60','QQQ:60') }
+	else { $Tickers = @('SPXW:0','XSP:0','SPY:60','QQQ:60') }
 }
 if (-not $Verify -or $Verify.Count -eq 0) {
 	if ($env:BACKFILL_VERIFY) { $Verify = $env:BACKFILL_VERIFY -split '\s+' }
-	else { $Verify = @('SPXW','XSP','SPY','GME','QQQ') }
+	else { $Verify = @('SPXW','XSP','SPY','QQQ') }
 }
 
 # --- Step selection (default all four; identical semantics to daily_backfill.sh --steps). --------------------
