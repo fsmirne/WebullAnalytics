@@ -834,7 +834,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public decimal? TpPctOverride { get; set; }
 
 	[CommandOption("--lots <N>")]
-	[Description("Fixed contracts per trade (sizing-neutral). Every open trades exactly N contracts and the cash/reserve gates are bypassed, so terminal P&L is the additive sum of per-trade results instead of a compounding curve — use this to measure per-trade edge (expectancy, profit factor) without the position-sizing feedback loop. Omit for normal equity-scaled sizing.")]
+	[Description("Fixed contracts per trade (sizing-neutral). Every open trades exactly N contracts and the cash/reserve gates are bypassed, so terminal P&L is the additive sum of per-trade results instead of a compounding curve — use this to measure per-trade edge (expectancy, profit factor) without the position-sizing feedback loop. Also OVERRIDES the recorded quantity under --replay (which otherwise opens at the live proposal's size), so a replay run can be compared per-lot / at a fixed size against a normal backtest. Omit for normal equity-scaled sizing (or, under --replay, the live-recorded size).")]
 	public int? Lots { get; set; }
 
 	[CommandOption("--sl <VALUE>")]

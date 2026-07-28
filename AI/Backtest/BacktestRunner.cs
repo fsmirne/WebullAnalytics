@@ -187,11 +187,13 @@ internal sealed class BacktestRunner
 			// Proposal-replay mode (--proposals) replaces this step entirely: the day's live-recorded proposal
 			// opens book at their recorded time, qty, and submit price — no scoring, sizing, or cash gate (the
 			// live sim already decided those) — and the rules/triggers/settlement below manage them as usual.
+			// EXCEPTION: --lots N (fixedContracts) overrides the recorded qty so a replay run can be compared
+			// per-lot / at a fixed size to a normal backtest (else the live 6-11 lot size dwarfs a --lots 1 run).
 			if (_replayOpensByDate != null)
 			{
 				if (_replayOpensByDate.TryGetValue(step.Date, out var todaysOpens))
 					foreach (var o in todaysOpens)
-						OpenLegsIntoBook(o.OpenEt, o.Ticker, o.StructureKind, o.Legs, o.Qty, o.Spot, o.RawScore, o.FinalScore, repIv: null, applySlippage: false);
+						OpenLegsIntoBook(o.OpenEt, o.Ticker, o.StructureKind, o.Legs, _fixedContracts ?? o.Qty, o.Spot, o.RawScore, o.FinalScore, repIv: null, applySlippage: false);
 			}
 			else
 			{

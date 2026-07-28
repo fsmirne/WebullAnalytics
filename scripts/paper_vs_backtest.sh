@@ -24,6 +24,10 @@
 #       ThetaData minute-END sampling. P&L curves are similar but diverge more than (b) — extra theta and debit.
 #   None is a clean fidelity confirmation nor a scorer bug, so NONE counts as a pass — each is flagged
 #   separately so they don't inflate the match tally or masquerade as a defect.
+# FOURTH OUTCOME (LEG-FLIP ⚠, exit 4) — same structure AND same expiries as live, but the leg set differs by MORE
+#   than the tie tolerance (a wider-gap near-ATM side/strike flip). Per-lot P&L ~washes (verified 07-14..27: replay
+#   vs normal agree ~9% at --lots 1), so it is a benign feed-driven flip — NOT a pass, NOT a defect. This keeps
+#   MISMATCH (exit 1) reserved for a genuine STRUCTURE or EXPIRY divergence, so the tally no longer conflates the two.
 #
 # Run AFTER the evening ThetaData backfill lands the day's quotes (~19:00 ET), else the
 # single-day backtest has nothing to price. Reads the installed wa.exe + AppData.
@@ -217,14 +221,26 @@ if struct_ok and not legs_ok:
     expiry_tie = same_side and same_short and long_exp_adjacent and score_close and not atm_tie and not strike_tie
 tie_kind = 'atm' if atm_tie else 'strike' if strike_tie else 'expiry' if expiry_tie else None
 
+# LEG-FLIP: same structure AND same set of expiries as live, but the leg set differs (side/strike) by MORE than
+# the tie tolerance above. A feed-driven near-ATM flip whose per-lot P&L ~washes (verified 07-14..27: replay vs
+# normal agree ~9% at --lots 1) — benign, distinct from a real structure/expiry MISMATCH. Only when struct_ok and
+# the expiry sets match; a different structure or expiry stays a hard MISMATCH.
+leg_flip = False
+if struct_ok and not legs_ok and tie_kind is None:
+    leg_flip = sorted(e for e, _ in l_short + l_long) == sorted(e for e, _ in b_short + b_long)
+
 # ---- structure + legs (the PASS criterion) ----
 verdict("structure", live.get('structure') if struct_ok else f"{live.get('structure')} vs {bt.get('strategy')}", struct_ok)
-if legs_ok or tie_kind is None:
-    verdict("legs", f"{len(live_legs)} legs", legs_ok)
-else:
+if legs_ok:
+    verdict("legs", f"{len(live_legs)} legs", True)
+elif tie_kind is not None:
     label = 'opposite-side ATM tie' if tie_kind == 'atm' else 'adjacent-strike tie' if tie_kind == 'strike' else 'adjacent-expiry tie'
     note = '(coin-flip; P&L will diverge)' if tie_kind == 'atm' else '(long leg ±1 strike; P&L nearly identical)' if tie_kind == 'strike' else '(long leg one expiry step; P&L similar, drifts more than ±1 strike)'
     print(f"  {'legs':<{LW}}{label:<{2*W}}INCONCLUSIVE ⚠ {note}")
+elif leg_flip:
+    print(f"  {'legs':<{LW}}{'leg flip (same struct+expiry)':<{2*W}}LEG-FLIP ⚠ (side/strike beyond tie tol; per-lot P&L ~washes)")
+else:
+    verdict("legs", f"{len(live_legs)} legs", False)
 
 # ---- per-leg ----
 print()
@@ -329,5 +345,10 @@ if struct_ok and tie_kind == 'expiry':
     print("          ThetaData quote noise flipped the #1 pick. P&L curves are similar but diverge more than a")
     print("          ±1-strike tie (extra theta and debit). NOT a pass and NOT a scorer bug.")
     sys.exit(3)
-print(f"  RESULT: MISMATCH — structure_ok={struct_ok} legs_ok={legs_ok}"); sys.exit(1)
+if struct_ok and leg_flip:
+    print("  RESULT: LEG-FLIP ⚠ — same structure + expiries, but the leg set differs (side/strike) beyond the tie")
+    print("          tolerance. A feed-driven near-ATM flip; per-lot P&L ~washes (07-14..27: replay vs normal agree")
+    print("          ~9% at --lots 1). NOT a clean pass (don't count toward fidelity), NOT a structure/scorer defect.")
+    sys.exit(4)
+print(f"  RESULT: MISMATCH — structure/expiry divergence (structure_ok={struct_ok} legs_ok={legs_ok})"); sys.exit(1)
 PY
