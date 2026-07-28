@@ -76,7 +76,10 @@ public class ObservationInstantTests : IDisposable
 		var live = OptionMath.ObservationInstant();
 		EvaluationDate.Set(DateTime.Today);
 		var afterOpenNow = DateTime.Today + new TimeSpan(12, 0, 0);
-		Assert.Equal(OptionMath.ObservationInstant(), OptionMath.EvaluationInstant(afterOpenNow));
+		// Compare within a tolerance: during RTH ObservationInstant() returns the live wall-clock, so two calls
+		// differ by microseconds — a phantom 09:30 would be off by hours, which this still catches.
+		var expected = OptionMath.ObservationInstant();
+		Assert.True(Math.Abs((OptionMath.EvaluationInstant(afterOpenNow) - expected).TotalSeconds) < 2, "explicit-today after-open must track ObservationInstant (run-time now), not a phantom 09:30");
 	}
 
 	[Fact]
@@ -86,7 +89,9 @@ public class ObservationInstantTests : IDisposable
 		// "current" value must remain the honest last-known mark (ObservationInstant), never a phantom 09:30.
 		EvaluationDate.Reset();
 		var preOpen = MondayNoon().Date + new TimeSpan(2, 0, 0);
-		Assert.Equal(OptionMath.ObservationInstant(), OptionMath.EvaluationInstant(preOpen));
+		// Tolerance for the same reason as above: RTH ObservationInstant() is the live clock, not a fixed value.
+		var expected = OptionMath.ObservationInstant();
+		Assert.True(Math.Abs((OptionMath.EvaluationInstant(preOpen) - expected).TotalSeconds) < 2, "no-override must track ObservationInstant, never a phantom today's-open");
 	}
 
 	// A guaranteed open trading day at noon, derived relatively so the test never goes stale.
