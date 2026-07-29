@@ -142,6 +142,10 @@ wa report --range 4
 # Override the current underlying price (for "what-if" evaluation)
 wa report --spot GME:24.88,SPY:580.50
 
+# Evaluate open positions AS OF a future/past date (forward P&L) — pairs with --spot to answer
+# "what will these be worth at the 07/28 open if SPY is 585?". Same evaluation path as `analyze trade --date`.
+wa report --date 2026-07-28 --spot SPY:585
+
 # Use Black-Scholes theoretical prices instead of market mid for today's grid column
 wa report --theoretical
 
@@ -172,6 +176,7 @@ Options:
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --grid <layout>           Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg values '1.23|0.45|$0.78')
   --spot <prices>           Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
+  --date <date>             Evaluate open positions AS OF this date (YYYY-MM-DD) instead of now — forward/backward P&L with options decayed to that date (a same-day pre-open date evaluates at that day's 09:30 open). Distinct from --since/--until, which only filter which trades are included. Shares the evaluation path with `analyze trade --date`.
   --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
   --calibrated              Back-solve each leg's IV from its live bid/ask mid so the today column reproduces market mid and future columns decay on the mid-consistent surface (instead of Webull's reported IV)
   --levels <prices>         Additional reference price levels (support/resistance, targets) to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
@@ -917,7 +922,14 @@ ai backtest only:
   --scan-stride <n>        Evaluate every Nth minute for entries. Default: 1 (every minute, matching live watch);
                            coarser strides alias past single-minute score crossings and under-count opens.
   --lots <n>               Fixed contracts per trade, cash gates bypassed — measures per-trade edge (expectancy,
-                           profit factor) without the compounding/sizing feedback loop.
+                           profit factor) without the compounding/sizing feedback loop. Also OVERRIDES the recorded
+                           quantity under --replay, so a replay run can be compared per-lot against a normal backtest.
+  --replay                 Skip the opener and seed the book from the live proposal log
+                           (data/ai-proposals.<TICKER>.<strategy>.jsonl): each trading day's first non-informational
+                           open at/after 09:30 ET books at its recorded qty and submit price, then management rules,
+                           intraday triggers, and expiry settlement run as normal — reconstructing what the live
+                           opener actually proposed over [--since, --until]. Pair with --book-cmd for the matching
+                           `wa analyze trade` line. Incompatible with --oracle.
   --split                  Book split structures (double calendars/diagonals, diagonal/calendar verticals) as their
                            TWO combo orders, managed independently against their own debits — exactly how Webull holds them.
   --tp / --sl <value>      Override rules.takeProfit.pctOfMaxProfit / rules.stopLoss.pctOfMaxLoss for this run (0..1; 1.0 = off).
@@ -937,6 +949,7 @@ ai backtest sweep knobs (override the merged config for this run — parameter e
   --max-pain <v>                opener.weights.maxPainBiasPull (max-pain magnet; 0 disables)
   --long-conviction <v>         opener.longConvictionGate.weight — de-rate low-conviction long-premium trades (0..1)
   --open-after <HHMM>           opener.earliestEntryTimeEt — withhold opens until this ET time
+  --open-before <HHMM>          opener.latestEntryTimeEt — suppress opens AFTER this ET time (backtest + watch; scan ignores it)
   --enable-structure <name>     Force-enable a structure for this run (repeatable)
 ```
 
@@ -954,6 +967,10 @@ ai backtest sweep knobs (override the merged config for this run — parameter e
 **Fail-closed on API errors.** If the broker query fails, the executor returns 0 and does nothing this tick — an order not placed is reversible, an over-placed order is not. There is no local-cache fallback by design.
 
 **Opener per-day cap:** `autoExecute.opener.maxOrdersPerDay` (default 1, matching the backtest's `--top-per-step 1`) caps total LIVE opens per trading day. The count is `today's-opened positions` (from the position source's `OpenedAt` field) + opens issued in this tick. Dry-runs are NOT capped — they continue to emit so you can monitor what would be placed.
+
+**Add-to-held (default on):** `autoExecute.opener.allowAddToHeldPosition` (default `true`) lets the opener open its top-ranked structure even when a matching position is already held (carried from a prior day) — the ranking is the edge signal, so "more of what you already hold" opens rather than being blocked into a lower-scored substitute. The stack self-limits (the held short leg ages out of the enumeration DTE band and strike drift stops exact re-matches) and `maxOrdersPerDay` still bounds it to one add/day. Set `false` to restore the strict no-duplicate guard (skip any proposal whose every combo group is already held). The same-day broker-order dedup above is independent of this flag and always active.
+
+**Latest-entry cutoff:** `opener.latestEntryTimeEt` (`"HH:mm"` ET, the mirror of `earliestEntryTimeEt`) stops the `wa ai watch` loop from *submitting* new opens after that time — proposals still render and position management still runs. It's a safety rail for the all-day retry loop, since the diagonal/calendar entry edge decays after ~09:40. **`wa ai scan --submit` deliberately ignores it** (a manual scan is an intentional decision to open now). The backtest enforces the same cutoff and trims its minute scan to the `[earliest, latest]` window, so a config can be validated against it (or overridden per-run with `--open-before`). Null/empty = no cutoff. Validation rejects `latest ≤ earliest` (empty window).
 
 **Scope of the cap:** OPEN proposals only. Closing or managing existing positions is never throttled by `maxOrdersPerDay`. Management rules flow through `ManagementAutoExecutor`, which has its own logic:
 
