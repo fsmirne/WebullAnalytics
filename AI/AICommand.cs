@@ -825,6 +825,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Set opener.earliestEntryTimeEt: withhold opens until this ET time (\"HH:mm\", e.g. 10:00) so the intraday tape forms and blends into the bias before the directional read commits. Empty/omitted = 09:30 open. Sweep knob for delayed-entry research.")]
 	public string? OpenAfterOverride { get; set; }
 
+	[CommandOption("--open-before <HHMM>")]
+	[Description("Set opener.latestEntryTimeEt: suppress opens AFTER this ET time (\"HH:mm\", e.g. 09:40) — the tail-of-session mirror of --open-after (the diagonal entry edge decays after ~09:40). Enforced by the backtest and the `wa ai watch` loop; `wa ai scan --submit` deliberately ignores it. Empty/omitted = no cutoff.")]
+	public string? OpenBeforeOverride { get; set; }
+
 	[CommandOption("--enable-structure <NAME>")]
 	[Description("Force-enable a structure for this run (repeatable). Names: longCalendar, doubleCalendar, longDiagonal, doubleDiagonal, ironButterfly, ironCondor, shortVertical, longCallPut, longVertical. Sets the structure's Enabled=true on top of the merged config; doesn't disable other enabled structures.")]
 	public string[] EnableStructures { get; set; } = Array.Empty<string>();
@@ -911,6 +915,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		}
 		if (settings.LongConvictionOverride.HasValue) config.Opener.LongConvictionGate.Weight = settings.LongConvictionOverride.Value;
 		if (!string.IsNullOrWhiteSpace(settings.OpenAfterOverride)) config.Opener.EarliestEntryTimeEt = settings.OpenAfterOverride;
+		if (!string.IsNullOrWhiteSpace(settings.OpenBeforeOverride)) config.Opener.LatestEntryTimeEt = settings.OpenBeforeOverride;
 		if (settings.TpPctOverride.HasValue) config.Rules.TakeProfit.ProfitTargetPctOfPremium = settings.TpPctOverride.Value;
 		if (settings.SlOverride.HasValue) config.Opener.RealizedExpectancy.StopLossPctOfMaxLoss = settings.SlOverride.Value;
 		foreach (var name in settings.EnableStructures)

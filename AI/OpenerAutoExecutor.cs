@@ -109,13 +109,15 @@ internal sealed class OpenerAutoExecutor
 				continue;
 			}
 
-			// Held-position guard: when the proposed structure already exists as an open position (every
-			// combo group is held), the opener must NOT auto-open a duplicate — adding to an existing
-			// position is `wa analyze position`'s job, not the opener's. Warn and skip, same as the
-			// broker-order dedup below; the proposal itself is still emitted by the sink (with its
-			// `wa trade place` hint) so the user can add to it manually if they choose. Catches the
-			// prior-day carryover the broker-order dedup misses; submit-independent (no broker call).
-			if (heldFingerprints.Count > 0
+			// Held-position guard (OPT-IN via allowAddToHeldPosition=false): when the proposed structure
+			// already exists as an open position (every combo group is held), skip it — the strict
+			// no-duplicate stance. DEFAULT is allowAddToHeldPosition=true, which SKIPS this guard: the
+			// ranking is the edge signal, so if "more of what you hold" is the top pick it opens (bounded
+			// to one add/day by MaxOrdersPerDay and self-limiting as the held short leg ages out of band).
+			// The same-day broker-order dedup below is independent and always active. Submit-independent
+			// (no broker call), so watch's dry-run reports the skip when the guard is on.
+			if (!_config.AllowAddToHeldPosition
+				&& heldFingerprints.Count > 0
 				&& StructureOrderSplit.Split(p.StructureKind, p.Legs).All(g => heldFingerprints.Contains(FingerprintLegSet(g.Legs.Select(l => (l.Action, l.Symbol))))))
 			{
 				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (already hold matching position):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/].");

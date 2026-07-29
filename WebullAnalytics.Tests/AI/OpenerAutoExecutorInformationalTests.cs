@@ -70,13 +70,37 @@ public class OpenerAutoExecutorInformationalTests
 	}
 
 	[Fact]
-	public async Task HandleAsync_SkipsProposalAlreadyHeldAsPosition()
+	public async Task HandleAsync_AllowsAddToHeldPosition_ByDefault()
 	{
+		// Default allowAddToHeldPosition=true: the ranking IS the edge signal, so "more of what you already
+		// hold" — when it's the top pick — opens rather than being blocked into a lower-scored substitute.
 		var exec = new OpenerAutoExecutor(DryRunConfig(), account: null);
 		var proposals = new[] { Proposal(OpenStructureKind.LongCalendar, informational: false) };
 
-		// A held position with the same leg set — sides match the proposal's open actions (sell near, buy
-		// far), qty intentionally differs (3 held vs 1 proposed) to prove the fingerprint ignores quantity.
+		var count = await exec.HandleAsync(proposals, HeldCalendarMatching(), DateTime.UtcNow, CancellationToken.None);
+
+		Assert.Equal(1, count);
+	}
+
+	[Fact]
+	public async Task HandleAsync_SkipsHeldPosition_WhenAddToHeldDisabled()
+	{
+		// Opt-in strict guard: allowAddToHeldPosition=false restores the no-duplicate behavior — a proposal
+		// whose every combo group is already held is skipped.
+		var config = DryRunConfig();
+		config.AllowAddToHeldPosition = false;
+		var exec = new OpenerAutoExecutor(config, account: null);
+		var proposals = new[] { Proposal(OpenStructureKind.LongCalendar, informational: false) };
+
+		var count = await exec.HandleAsync(proposals, HeldCalendarMatching(), DateTime.UtcNow, CancellationToken.None);
+
+		Assert.Equal(0, count);
+	}
+
+	// A held position whose leg set matches the LongCalendar proposal's open actions (sell near, buy far);
+	// qty intentionally differs (3 held vs 1 proposed) to prove the fingerprint ignores quantity.
+	private static IReadOnlyDictionary<string, OpenPosition> HeldCalendarMatching()
+	{
 		var held = new OpenPosition(
 			Key: "SPY_CALENDAR_757.00_20260610",
 			Ticker: "SPY",
@@ -89,11 +113,6 @@ public class OpenerAutoExecutorInformationalTests
 			InitialNetDebit: 2.00m,
 			AdjustedNetDebit: 2.00m,
 			Quantity: 3);
-		var positions = new Dictionary<string, OpenPosition> { [held.Key] = held };
-
-		var count = await exec.HandleAsync(proposals, positions, DateTime.UtcNow, CancellationToken.None);
-
-		// Already held → opener must not auto-open a duplicate.
-		Assert.Equal(0, count);
+		return new Dictionary<string, OpenPosition> { [held.Key] = held };
 	}
 }

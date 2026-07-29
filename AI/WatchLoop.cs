@@ -157,6 +157,15 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, autoExecutor, openEvaluator, sink, openSink, openerExecutor,
 			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false);
 
+		// Latest-entry cutoff (ET): past it the watch loop stops SUBMITTING opens — nulling the opener executor
+		// for the tick suppresses ONLY auto-execution (proposals still render, management still runs). This is
+		// watch-only by construction: scan builds its own deps and never nulls, and the backtest enforces the
+		// mirror gate itself, so `wa ai scan --submit` is never time-gated. See OpenerConfig.LatestEntryTimeEt.
+		TimeSpan? openCutoff = null;
+		if (!string.IsNullOrWhiteSpace(config.Opener.LatestEntryTimeEt) && TimeSpan.TryParse(config.Opener.LatestEntryTimeEt, CultureInfo.InvariantCulture, out var lc))
+			openCutoff = lc;
+		var openCutoffNoted = false;
+
 		while (!cancellation.IsCancellationRequested && DateTime.Now < stopAt)
 		{
 			if (!settings.IgnoreMarketHours && !IsMarketOpen())
@@ -168,7 +177,14 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			try
 			{
 				var now = DateTime.Now;
-				var tick = await LiveTick.EvaluateAsync(now, deps, tickState, applySpotOverrides: null, cancellation);
+				var pastOpenCutoff = openCutoff.HasValue && TimeZoneInfo.ConvertTime(now, NyTz).TimeOfDay > openCutoff.Value;
+				if (pastOpenCutoff && !openCutoffNoted)
+				{
+					AnsiConsole.MarkupLine($"[dim]past latest-entry {config.Opener.LatestEntryTimeEt} ET — opens no longer submitted (managing only).[/]");
+					openCutoffNoted = true;
+				}
+				var tickDeps = pastOpenCutoff ? deps with { OpenerExecutor = null } : deps;
+				var tick = await LiveTick.EvaluateAsync(now, tickDeps, tickState, applySpotOverrides: null, cancellation);
 				var mgmtEmitted = settings.EmitManagementProposals ? tick.MgmtCount : 0;
 				proposalsEmitted += mgmtEmitted + tick.OpenCount;
 

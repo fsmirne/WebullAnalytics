@@ -61,6 +61,16 @@ internal sealed class OpenerConfig
 	/// the live opener should likewise withhold opens until this time.</summary>
 	[JsonPropertyName("earliestEntryTimeEt")] public string? EarliestEntryTimeEt { get; set; } = null;
 
+	/// <summary>Latest wall-clock time (ET, "HH:mm") at which an open may fire; opens are suppressed AFTER it.
+	/// The mirror of <see cref="EarliestEntryTimeEt"/> for the tail of the session: backtests show the
+	/// diagonal/calendar entry edge is strongest at the 09:30 open and decays after ~09:40, so a late entry
+	/// carries degraded expectancy — and nothing else stops the all-day watch retry loop from taking one.
+	/// Enforced by the backtest (skips minutes after this time) and the `wa ai watch` loop (stops SUBMITTING
+	/// opens past it — proposals still render and position management still runs). Deliberately NOT honored by
+	/// `wa ai scan --submit`: a manual scan is an explicit decision to open now, so it is never time-gated.
+	/// Null/empty = no cutoff (opens allowed until close). Must be later than <see cref="EarliestEntryTimeEt"/>.</summary>
+	[JsonPropertyName("latestEntryTimeEt")] public string? LatestEntryTimeEt { get; set; } = null;
+
 	/// <summary>Restrict which expiry types are eligible for the SHORT and LONG legs of calendar/diagonal
 	/// structures independently. Dailies are Mon–Thu expirations (SPX/SPXW/SPY daily chains). Weeklies are
 	/// non-monthly Fridays. Monthlies are the holiday-adjusted 3rd-Friday of each month. All six default to

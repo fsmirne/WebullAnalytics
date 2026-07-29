@@ -1002,6 +1002,12 @@ internal sealed class BacktestRunner
 		if (!string.IsNullOrWhiteSpace(_config.Opener.EarliestEntryTimeEt)
 			&& TimeSpan.TryParse(_config.Opener.EarliestEntryTimeEt, System.Globalization.CultureInfo.InvariantCulture, out var ee))
 			earliestEntry = ee;
+		// Latest-entry gate: suppress opens AFTER this ET time (the tail-of-session mirror of earliestEntry).
+		// Models the `wa ai watch` cutoff so a backtest can validate it. Parsed once per day; null/empty = none.
+		TimeSpan? latestEntry = null;
+		if (!string.IsNullOrWhiteSpace(_config.Opener.LatestEntryTimeEt)
+			&& TimeSpan.TryParse(_config.Opener.LatestEntryTimeEt, System.Globalization.CultureInfo.InvariantCulture, out var le))
+			latestEntry = le;
 
 		var timestampList = allTimestamps.ToList();
 		// Open-scan stride: evaluate every Nth minute instead of all 390. On days that never open, the
@@ -1064,6 +1070,7 @@ internal sealed class BacktestRunner
 				if (entryDecided) break;
 				var minuteTimeEt = TimeZoneInfo.ConvertTime(minuteUtc2, NyTz).TimeOfDay;
 				if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
+				if (latestEntry.HasValue && minuteTimeEt > latestEntry.Value) continue;
 				if (openProposals.Count > 0)
 				{
 					entryDecided = true;
@@ -1108,6 +1115,7 @@ internal sealed class BacktestRunner
 
 					var minuteTimeEt = TimeZoneInfo.ConvertTime(minuteUtc2, NyTz).TimeOfDay;
 					if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
+					if (latestEntry.HasValue && minuteTimeEt > latestEntry.Value) continue;
 					if (openProposals.Count > 0)
 					{
 						entryDecided = true;

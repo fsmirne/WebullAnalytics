@@ -40,6 +40,8 @@
 		"maxRiskPctPerProposal": 0.05,
 		"maxDollarRiskPerProposal": 10000,
 		"minScoreToOpen": 0.0,
+		"earliestEntryTimeEt": null,
+		"latestEntryTimeEt": null,
 		"profitBandPct": 0.05,
 		"volatilityLookbackDays": 20,
 		"biasCalibrationLookbackDays": 0,
@@ -159,6 +161,7 @@
 			"submit": false,
 			"timeInForce": "GTC",
 			"maxOrdersPerDay": 1,
+			"allowAddToHeldPosition": true,
 			"structures": []
 		}
 	}

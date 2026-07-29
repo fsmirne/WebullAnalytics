@@ -111,6 +111,15 @@ internal sealed class OpenerAutoExecuteConfig
 	[JsonPropertyName("maxOrdersPerDay")] public int MaxOrdersPerDay { get; set; } = 1;
 	/// <summary>Allow-list of <c>OpenStructureKind</c> names to auto-execute. Empty = all structures allowed.</summary>
 	[JsonPropertyName("structures")] public List<string> Structures { get; set; } = new();
+	/// <summary>Allow the opener to add to a position it ALREADY HOLDS (carried from a PRIOR day) when that
+	/// same structure re-scores as the top pick. Default true: the ranking is the edge signal — if "more of
+	/// what you hold" beats every other candidate, blocking it only forces a lower-scored different structure.
+	/// The stack self-limits (the held contract's short leg ages out of the enumeration DTE band within days,
+	/// and strike drift stops the exact match reappearing) and <see cref="MaxOrdersPerDay"/> still bounds it to
+	/// one add per day. Set false to restore the strict no-duplicate guard (skip any proposal whose every combo
+	/// group is already held). The same-day broker-order dedup is independent of this flag and always active, so
+	/// one structure can never be double-submitted within a single day regardless.</summary>
+	[JsonPropertyName("allowAddToHeldPosition")] public bool AllowAddToHeldPosition { get; set; } = true;
 	/// <summary>Pre-submit liquidity guard (live-only — the backtest opens via BacktestRunner, not this
 	/// executor). Hard-blocks auto-submit of a proposal whose worst leg is too illiquid to exit cleanly:
 	/// the failure mode the scorer's liquidity FACTOR only softly nudges (a score multiplier that can be
@@ -565,6 +574,13 @@ internal static class AIConfigLoader
 		if (lcg.Reference < 0m) return $"opener.longConvictionGate.reference: must be ≥ 0, got {lcg.Reference}";
 		if (!string.IsNullOrWhiteSpace(op.EarliestEntryTimeEt) && !TimeSpan.TryParse(op.EarliestEntryTimeEt, CultureInfo.InvariantCulture, out _))
 			return $"opener.earliestEntryTimeEt: must be HH:mm, got '{op.EarliestEntryTimeEt}'";
+		if (!string.IsNullOrWhiteSpace(op.LatestEntryTimeEt) && !TimeSpan.TryParse(op.LatestEntryTimeEt, CultureInfo.InvariantCulture, out _))
+			return $"opener.latestEntryTimeEt: must be HH:mm, got '{op.LatestEntryTimeEt}'";
+		if (!string.IsNullOrWhiteSpace(op.EarliestEntryTimeEt) && !string.IsNullOrWhiteSpace(op.LatestEntryTimeEt)
+			&& TimeSpan.TryParse(op.EarliestEntryTimeEt, CultureInfo.InvariantCulture, out var eeChk)
+			&& TimeSpan.TryParse(op.LatestEntryTimeEt, CultureInfo.InvariantCulture, out var leChk)
+			&& leChk <= eeChk)
+			return $"opener.latestEntryTimeEt ('{op.LatestEntryTimeEt}') must be later than earliestEntryTimeEt ('{op.EarliestEntryTimeEt}') — otherwise the window is empty and nothing ever opens";
 
 		var liq = op.Liquidity;
 		if (liq.MinOpenInterest < 0) return $"opener.liquidity.minOpenInterest: must be ≥ 0, got {liq.MinOpenInterest}";
