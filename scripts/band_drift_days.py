@@ -31,7 +31,8 @@ def main():
     ap.add_argument("--band", type=float, default=0.10, help="the band the store was pulled with (default 0.10)")
     ap.add_argument("--margin", type=float, default=0.005, help="safety margin subtracted from band (default 0.005 → flag at 9.5%% for a 10%% band)")
     ap.add_argument("--window", type=int, default=45, help="trailing sessions a position could have been opened in (default 45)")
-    ap.add_argument("--wide", type=float, default=0.15, help="band for the suggested supplement commands (default 0.15)")
+    ap.add_argument("--wide", type=float, default=0.15, help="floor band for the suggested supplement commands (default 0.15)")
+    ap.add_argument("--min-drift", type=float, default=0.0, help="only emit supplement commands for runs whose MAX drift exceeds this (e.g. 0.15 = crash windows only; shallow windows are still listed)")
     a = ap.parse_args()
     root = a.ticker.split(":")[0].upper()
 
@@ -61,9 +62,20 @@ def main():
     for run in runs:
         days = ", ".join(f"{d} ({p}%)" for d, p in run)
         print(f"  {days}")
-    print(f"\nSupplement command(s) (additive ±{a.wide:.0%} ring, no DELETE/re-seal — safe on a sealed store):")
+    # Each window's supplement ring is sized to ITS OWN deepest drift (+2% headroom), floored at --wide — so a
+    # shallow 11% window pulls a thin 10-13% ring while a 30% crash window pulls the full wide ring. Minimal
+    # over-pull: only the affected windows get widened, and each only as far as it actually drifted.
+    scope = f" for crash windows (max drift > {a.min_drift:.0%})" if a.min_drift else ""
+    print(f"\nSupplement command(s){scope} (additive ring sized per-window to its max drift +2%, floor ±{a.wide:.0%}; no DELETE/re-seal):")
+    skipped = 0
     for run in runs:
-        print(f"  python backfill_thetadata.py --quotes --supplement --band {a.wide} --ticker {a.ticker} --start {run[0][0]} --end {run[-1][0]} --timeout 1200 --concurrency 2")
+        run_max = max(p for _, p in run) / 100.0
+        if run_max <= a.min_drift:
+            skipped += 1
+            continue
+        band = max(a.wide, round(run_max + 0.02, 2))
+        print(f"  python backfill_thetadata.py --quotes --supplement --band {band} --ticker {a.ticker} --start {run[0][0]} --end {run[-1][0]} --timeout 1200 --concurrency 2")
+    if skipped: print(f"({skipped} shallow window(s) <= {a.min_drift:.0%} drift skipped — barely past the ±10% store band, left as-is)")
 
 
 if __name__ == "__main__":
