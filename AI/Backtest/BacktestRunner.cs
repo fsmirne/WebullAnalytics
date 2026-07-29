@@ -1022,6 +1022,19 @@ internal sealed class BacktestRunner
 			timestampList = strided;
 		}
 
+		// Entry-window trim: a non-oracle open can only fire within [earliestEntry, latestEntry], so scoring
+		// minutes outside that window is pure waste — on a day that never qualifies, the scan would otherwise
+		// enumerate candidates for every one of the ~390 minutes. Trimming caps a no-open/late-open day at the
+		// window length: with a 09:40 cutoff and no earliest, a dead day scans ~10 minutes then stops instead
+		// of the full session. The per-minute earliest/latest guards below stay as a defensive backstop.
+		// Oracle needs every minute for its best-EOD benchmark, so it is never trimmed.
+		if (!_oracle && (earliestEntry.HasValue || latestEntry.HasValue) && timestampList.Count > 0)
+			timestampList = timestampList.Where(t =>
+			{
+				var tod = TimeZoneInfo.ConvertTime(t, NyTz).TimeOfDay;
+				return (!earliestEntry.HasValue || tod >= earliestEntry.Value) && (!latestEntry.HasValue || tod <= latestEntry.Value);
+			}).ToList();
+
 		// In non-oracle mode we only need the first qualifying minute. Evaluate in parallel batches of
 		// ProcessorCount and stop as soon as any minute in the batch yields a qualifying entry. This gives
 		// ~Nx speedup while preserving chronological entry semantics. Oracle mode needs every minute
