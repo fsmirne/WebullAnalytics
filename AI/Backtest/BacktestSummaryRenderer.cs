@@ -114,29 +114,24 @@ internal static class BacktestSummaryRenderer
 			var perShareLabel = perShare >= 0m ? $"+${perShare:N2}" : $"-${-perShare:N2}";
 			var totalLabel = f.NetCashFlow >= 0m ? $"+${f.NetCashFlow:N2}" : $"-${-f.NetCashFlow:N2}";
 			var cashColor = f.NetCashFlow >= 0m ? "green" : "red";
-			// Running P&L = account movement since the start, cash-basis: it moves on EVERY fill (an open
-			// dips it by the debit paid, a close recovers it plus/minus the trade's P&L). Distinct from the
-			// realized-only "Return %" (which holds flat across opens); the last row's value is cash-basis, so
-			// it trails the summary's Ending equity by any still-open positions' unrealized mark.
-			var runningPnl = runningCash - result.StartingCash;
-			var runningColor = runningPnl >= 0m ? "green" : "red";
-			var runningPnlLabel = runningPnl >= 0m ? $"+${runningPnl:N2}" : $"-${-runningPnl:N2}";
-
-			// Lineage P&L %: realized P&L through this fill divided by the absolute opening cash
-			// flow. Long-debit positions: a winner shows positive (e.g. +124% means realized P&L =
-			// 1.24× the debit paid). Short-credit positions: 100% is the cap (kept the full credit),
-			// negative values can exceed -100% when realized loss is larger than the credit. Shown
-			// only on rows that close a position (Close, Expire, Roll); Open rows show "—".
-			string pnlPctLabel = "—";
-			string pnlPctColor = "dim";
+			// Lineage realized P&L, shown as a matching $ / % pair: realized P&L through this fill for the
+			// lineage (its fills' net cash − fees), and that over the absolute opening cash flow. Shown ONLY on
+			// rows that finalize/adjust a position (Close / Expire / Roll); Open rows show "—" because an open
+			// books a debit but realizes no P&L — counting that debit is exactly the spurious-loss bug this
+			// replaced. So BOTH columns reflect CLOSED positions only: a winner is positive (+124% means realized
+			// P&L = 1.24× the debit paid), a short-credit caps at +100%, and a loss can exceed −100%.
+			string pnlPctLabel = "—", pnlDollarLabel = "—";
+			string pnlPctColor = "dim", pnlDollarColor = "dim";
 			if (f.Kind != BacktestFillKind.Open
 				&& openCashByLineage.TryGetValue(f.LineageId, out var openCash)
 				&& fillsByLineage.TryGetValue(f.LineageId, out var lineageFills))
 			{
+				var cumPnl = lineageFills.Where(x => x.Date <= f.Date).Sum(x => x.NetCashFlow - x.Fees);
+				pnlDollarLabel = cumPnl >= 0m ? $"+${cumPnl:N2}" : $"-${-cumPnl:N2}";
+				pnlDollarColor = cumPnl >= 0m ? "green" : "red";
 				var basis = Math.Abs(openCash);
 				if (basis > 0m)
 				{
-					var cumPnl = lineageFills.Where(x => x.Date <= f.Date).Sum(x => x.NetCashFlow - x.Fees);
 					var pct = cumPnl / basis * 100m;
 					pnlPctLabel = pct >= 0m ? $"+{pct:F1}%" : $"{pct:F1}%";
 					pnlPctColor = pct >= 0m ? "green" : "red";
@@ -167,7 +162,7 @@ internal static class BacktestSummaryRenderer
 				$"[{cashColor}]{perShareLabel}[/]",
 				$"[{cashColor}]{totalLabel}[/]",
 				$"[{pnlPctColor}]{pnlPctLabel}[/]",
-				$"[{runningColor}]{runningPnlLabel}[/]",
+				$"[{pnlDollarColor}]{pnlDollarLabel}[/]",
 				$"${f.Fees:N2}",
 				runningCash < 0m ? $"[red]${runningCash:N2}[/]" : $"${runningCash:N2}",
 				$"[{returnColor}]{returnLabel}[/]",
