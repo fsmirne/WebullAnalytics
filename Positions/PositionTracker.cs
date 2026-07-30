@@ -41,8 +41,14 @@ public static class PositionTracker
 				var legs = Trade.GetLegs(allTrades, trade.Seq);
 				if (legs.Count >= 2)
 				{
+					// parentCash mirrors the cash walk (Round2, same as BuildReportRow's tradeValue); legCash must
+					// stay UNROUNDED because ApplyToLots' FIFO realized is unrounded — rounding it detaches
+					// realized from cash by the sub-cent×qty residue (e.g. a CSV-precision 0.2599 leg × 150:
+					// Round2(38.985) = 38.98 lost $0.50 of realized while cash moved the full amount; a flat book
+					// then shows Total ≠ Cash). This adjustment is exactly what maps leg-based FIFO P&L onto
+					// parent-based cash, so both sides must use the numbers they actually flow.
 					var parentCash = (trade.Side == Side.Sell ? 1m : -1m) * Math.Round(trade.Qty * trade.Price, 2) * trade.Multiplier;
-					var legCash = legs.Sum(leg => (leg.Side == Side.Sell ? 1m : -1m) * Math.Round(leg.Qty * leg.Price, 2) * leg.Multiplier);
+					var legCash = legs.Sum(leg => (leg.Side == Side.Sell ? 1m : -1m) * leg.Qty * leg.Price * leg.Multiplier);
 					realized += parentCash - legCash;
 				}
 			}
@@ -166,6 +172,17 @@ public static class PositionTracker
 
 		realized -= fee;
 		cash -= fee;
+		// Broker-posted cash (fee-inclusive, from the cash-record overlay) supersedes the price×qty±fee
+		// reconstruction above. The correction is applied to cash AND realized symmetrically — that is the
+		// invariant that keeps Total (initialAmount + running) equal to the cash walk when the book is flat;
+		// truing only cash would reintroduce the drift on the P&L side. Lot basis stays on fill prices.
+		if (trade.BrokerCash is { } postedCash && trade.Side is Side.Buy or Side.Sell)
+		{
+			var computedCash = (trade.Side == Side.Sell ? 1m : -1m) * tradeValue - fee;
+			var correction = postedCash - computedCash;
+			cash += correction;
+			realized += correction;
+		}
 		running += realized;
 		var displayQty = trade.Side == Side.Expire ? closedQty : trade.Qty;
 

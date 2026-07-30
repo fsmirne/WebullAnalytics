@@ -56,6 +56,7 @@ class Program
 
 	internal const string ApiConfigPath = "data/api-config.json";
 	internal const string OrdersPath = "data/orders.jsonl";
+	internal const string CashRecordPath = "data/cashrecord.jsonl";
 	internal const string AppConfigPath = "data/config.json";
 	internal const string DerivativeIdsPath = "data/derivative-ids.json";
 

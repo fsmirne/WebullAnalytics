@@ -99,10 +99,17 @@ internal static class ApiClient
 	{
 		using var client = new HttpClient();
 		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
+		var json = await SendCashRecordPageAsync(client, config, pageIndex: 1, pageSize, dateRange: "CY", cancellation);
+		return ParseFundActivities(json);
+	}
 
+	/// <summary>POSTs one cash-record page and returns the raw response body. Shared by the on-demand
+	/// `wa ledger` view (page 1, CY) and the full-history pager <see cref="FetchCashRecordToJsonl"/>.</summary>
+	private static async Task<string> SendCashRecordPageAsync(HttpClient client, ApiConfig config, int pageIndex, int pageSize, string dateRange, CancellationToken cancellation)
+	{
 		var secId = config.Webull.SecAccountId;
 		var url = $"{CashRecordUrl}?secAccountId={secId}";
-		var body = $"{{\"secAccountId\":{secId},\"pageIndex\":1,\"pageSize\":{pageSize},\"conditions\":[{{\"key\":\"date\",\"values\":[\"CY\"]}},{{\"key\":\"category\",\"values\":[\"all\"]}}]}}";
+		var body = $"{{\"secAccountId\":{secId},\"pageIndex\":{pageIndex},\"pageSize\":{pageSize},\"conditions\":[{{\"key\":\"date\",\"values\":[\"{dateRange}\"]}},{{\"key\":\"category\",\"values\":[\"all\"]}}]}}";
 
 		using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
 		request.Headers.TryAddWithoutValidation("accept", "*/*");
@@ -119,8 +126,55 @@ internal static class ApiClient
 
 		var response = await client.SendAsync(request, cancellation);
 		response.EnsureSuccessStatusCode();
-		var json = await response.Content.ReadAsStringAsync(cancellation);
-		return ParseFundActivities(json);
+		return await response.Content.ReadAsStringAsync(cancellation);
+	}
+
+	/// <summary>Pages the FULL cash record (date=all — verified accepted alongside the ledger view's CY; avoids
+	/// losing prior-year rows every January) into a JSONL file, one raw item per line, newest-first as Webull
+	/// returns them. This file is the broker's posted-cash truth `wa report` overlays on orders.jsonl: exact
+	/// per-leg amounts with the REAL fees folded in (the order export's fee field overstates XSP by ~25x) and
+	/// the cash settlements the order export never carries. Same scraped session as <see cref="FetchOrdersToJsonl"/>;
+	/// throws on transport error / non-2xx; refuses to overwrite an existing file when nothing comes back.</summary>
+	internal static async Task<int> FetchCashRecordToJsonl(ApiConfig config, string outputPath, CancellationToken cancellation)
+	{
+		const int pageSize = 100;
+		const int maxPages = 100;  // 10k rows — far above any realistic ledger; guards a paging bug from looping forever
+
+		using var client = new HttpClient();
+		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
+		var tmpPath = outputPath + ".tmp";
+		var total = 0;
+
+		try
+		{
+			await using var writer = new StreamWriter(tmpPath);
+			for (var page = 1; page <= maxPages; page++)
+			{
+				var json = await SendCashRecordPageAsync(client, config, page, pageSize, dateRange: "all", cancellation);
+				using var doc = JsonDocument.Parse(json);
+				if (!doc.RootElement.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array || items.GetArrayLength() == 0)
+					break;
+				foreach (var item in items.EnumerateArray())
+					await writer.WriteLineAsync(JsonSerializer.Serialize(item));
+				total += items.GetArrayLength();
+				if (items.GetArrayLength() < pageSize) break;
+				await Task.Delay(300, cancellation);  // stay polite on the consumer endpoint
+			}
+		}
+		catch
+		{
+			try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+			throw;
+		}
+
+		if (total == 0)
+		{
+			try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+			throw new InvalidOperationException("Cash record returned no items; refusing to overwrite the existing file.");
+		}
+
+		File.Move(tmpPath, outputPath, overwrite: true);
+		return total;
 	}
 
 	/// <summary>Parses the cash-record activities payload. Tolerant of missing/typed-null fields — every

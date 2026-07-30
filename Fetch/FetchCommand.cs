@@ -32,6 +32,21 @@ class FetchCommand : AsyncCommand<FetchSettings>
 			return 1;
 		}
 
+		// Broker-posted cash truth for the report's money columns. Runs BEFORE the orders pull: the two
+		// artifacts are independent, and this endpoint tolerates an older session (it drops the per-URL
+		// signature headers) while orderList can 403 first. Non-fatal: a stale cashrecord.jsonl only means
+		// report falls back to computed cash for rows it doesn't cover.
+		var cashRecordPath = Program.ResolvePath(Program.CashRecordPath);
+		try
+		{
+			var rows = await ApiClient.FetchCashRecordToJsonl(config, cashRecordPath, cancellation);
+			Console.WriteLine($"Written {rows} cash-record row(s) to {cashRecordPath}");
+		}
+		catch (Exception ex)
+		{
+			Console.WriteLine($"Warning: cash-record fetch failed ({ex.Message}); report will use computed cash for rows not in the existing {Path.GetFileName(cashRecordPath)}.");
+		}
+
 		Console.WriteLine($"Fetching orders for {resolved.Count} ticker(s)...");
 		await ApiClient.FetchOrdersToJsonl(config, resolved.Values.ToArray(), outputPath);
 		Console.WriteLine($"Written to {outputPath}");

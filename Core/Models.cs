@@ -67,7 +67,12 @@ public record Trade
 	// Exact fee+commission for THIS fill, when the source carries it per row (the jsonl order export
 	// does; the CSV export keeps fees in a separate file and leaves this null). Preferred over the
 	// (timestamp, side, qty) fee dictionary, whose key collides when two combos fill in the same second.
-	decimal? Fee = null
+	decimal? Fee = null,
+	// Broker-POSTED signed cash for this trade (fee already folded in), from the cash-record ledger
+	// (data/cashrecord.jsonl). When set it supersedes every price×qty±fee reconstruction — the order
+	// export's average price is quantized and its fee field can be plain wrong (XSP), so posted cash is
+	// the only value that ties to the platform. For combo parents this is the sum of the matched legs.
+	decimal? BrokerCash = null
 )
 {
 	public const decimal OptionMultiplier = 100m;

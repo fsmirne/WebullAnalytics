@@ -261,6 +261,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			(trades, feeLookup) = JsonlParser.ParseOrdersJsonl(ordersPath);
 			ReconcileParentPrices(trades);
 			ApplyOfficialPrices(trades, dataDir);
+			BrokerCashOverlay.Apply(trades, dataDir);
 		}
 		return (trades, feeLookup, 0);
 	}
