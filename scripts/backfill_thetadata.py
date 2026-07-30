@@ -718,22 +718,32 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         # Seal-time STRIKE-completeness gate (extends the day gate above): a session can be PRESENT yet missing
         # near-money strikes the vendor served on neighboring sessions — a scattered per-contract gap the
         # day-granular check is blind to (SPY 07-29 expiry on 07-28 omitted 738P and neighbors while 07-27 had
-        # the full ladder; it silently corrupted a backtest's window-end mark). Restricted to the FRONTIER
-        # sessions (the last few before expiry), where spot is stable so counts should match AND where the
-        # vendor's just-settled-minute lag actually strikes — this avoids false positives from legitimate
-        # spot-drift strike-count changes over a long expiry's life. A frontier session short of the frontier
-        # median by a clear margin (< 90% AND >= 5 strikes) is treated like a missing day: seal withheld -> the
-        # retry pass / a later run re-pulls (transient lag self-heals; a proven permanent gap goes in known_holes).
+        # the full ladder; it silently corrupted a backtest's window-end mark). A session is thin only if it
+        # lacks strikes an EARLIER session quoted inside the session's own ±band — comparing against earlier
+        # sessions ONLY is what separates real vendor gaps from legitimate ladder growth: new $1 fill-ins
+        # listed after a sharp spot move (QQQ 2026-07-24 listed 636..669 mid-selloff), a weekly's listing-day
+        # coarse $5 grid, and expiry-day band drift into a sparser grid all first appear LATER or fall out of
+        # band, so none can trip it (all three false-sealed-blocked the 2026-07-30 run under the previous
+        # frontier-median form of this gate). Still restricted to the FRONTIER sessions (the last few in the
+        # store), where the vendor's just-settled-minute lag actually strikes. A clear shortfall (>= 5 strikes
+        # AND < 90% of the earlier-quoted in-band ladder) is treated like a missing day: seal withheld -> the
+        # retry pass / a later run re-pulls (transient lag self-heals; a proven permanent gap goes in known_strike_holes).
         recent = sorted(strikes_by_day)[-6:]
         if len(recent) >= 3:
-            ksh = _known_strike_holes(out_root, ticker, exp_d.isoformat())  # certified per-session absent strikes -> credited back
-            adj = {d: len(strikes_by_day[d]) + ksh.get(d, 0) for d in recent}
-            counts = sorted(adj.values())
-            median = counts[len(counts) // 2]
-            thin = [d for d in recent if median - adj[d] >= 5 and adj[d] < 0.90 * median and d not in known]
+            ksh = _known_strike_holes(out_root, ticker, exp_d.isoformat())  # certified per-session absent strikes -> not NEW gaps
+            all_days = sorted(strikes_by_day)
+            thin = []
+            for d in recent:
+                spot = unders.get(d)
+                if d in known or spot is None:
+                    continue
+                prior = {k for e in all_days if e < d for k in strikes_by_day[e] if abs(k / spot - 1.0) <= band}
+                miss = sorted(prior - strikes_by_day[d] - ksh.get(d, set()))
+                if len(miss) >= 5 and len(strikes_by_day[d]) < 0.90 * (len(strikes_by_day[d]) + len(miss)):
+                    thin.append((d, miss))
             if thin:
-                shown = ", ".join(f"{d}({len(strikes_by_day[d])}+{ksh.get(d, 0)}/{median})" for d in thin)
-                raise RuntimeError(f"THIN-LADDER {ticker} {exp_d}: {len(thin)} frontier session(s) short of the {median}-strike frontier median ({shown}) — seal withheld; a transient partial vendor response heals on re-pull, a proven permanent gap belongs in the known_strike_holes table")
+                shown = ", ".join(f"{d}(has {len(strikes_by_day[d])}, lacks {len(m)}: {', '.join(f'{k:g}' for k in m[:4])}{'...' if len(m) > 4 else ''})" for d, m in thin)
+                raise RuntimeError(f"THIN-LADDER {ticker} {exp_d}: {len(thin)} frontier session(s) missing in-band strikes earlier sessions quoted ({shown}) — seal withheld; a transient partial vendor response heals on re-pull, a proven permanent gap belongs in the known_strike_holes table")
     if total_rows == 0:
         return 0
     log.info(f"    {progress}exp {ticker} {exp_d} rows={total_rows} days={len(days)} spot_days={len(unders)}")
@@ -855,18 +865,19 @@ def _known_strike_holes(out_root: Path, ticker: str, exp_iso: str) -> dict:
     """Strike-level analog of _known_holes: per-(session,strike) contracts PROVEN absent at the vendor for this
     expiry, from the `known_strike_holes` table in quotes.db (a scattered near-money strike the vendor never
     served while the rest of the session is present — e.g. the QQQ 2022/2024 gaps a targeted re-pull couldn't
-    heal). Returns {iso_date: count} so the strike-completeness gate credits them back to a session's ladder
-    count (a certified-absent strike is not a NEW gap). Table travels with the store like `known_holes`."""
+    heal). Returns {iso_date: {strike, ...}} (dollars, rounded like strikes_by_day) so the strike-completeness
+    gate can subtract certified-absent strikes from a session's missing set (a certified-absent strike is not
+    a NEW gap). Table travels with the store like `known_holes`."""
     conn = connect_wal(_quotes_db_path(out_root))
     try:
         conn.execute("CREATE TABLE IF NOT EXISTS known_strike_holes (root TEXT, expiry INTEGER, date INTEGER, strike_milli INTEGER, right TEXT, PRIMARY KEY (root, expiry, date, strike_milli, right)) WITHOUT ROWID")
-        rows = conn.execute("SELECT date FROM known_strike_holes WHERE root=? AND expiry=?", (ticker, ymd_int(exp_iso))).fetchall()
+        rows = conn.execute("SELECT date, strike_milli FROM known_strike_holes WHERE root=? AND expiry=?", (ticker, ymd_int(exp_iso))).fetchall()
     finally:
         conn.close()
     out: dict = {}
-    for (d,) in rows:
+    for d, sm in rows:
         iso = f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:8]}"
-        out[iso] = out.get(iso, 0) + 1
+        out.setdefault(iso, set()).add(round(sm / 1000.0, 3))
     return out
 
 
