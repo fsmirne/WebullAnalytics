@@ -77,10 +77,10 @@ internal static class BacktestSummaryRenderer
 		table.AddColumn(new TableColumn("Price").RightAligned());
 		table.AddColumn(new TableColumn("P&L %").RightAligned());
 		table.AddColumn(new TableColumn("P&L $").RightAligned());
-		table.AddColumn(new TableColumn("Total").RightAligned());
 		table.AddColumn(new TableColumn("Fees").RightAligned());
 		table.AddColumn(new TableColumn("Cash").RightAligned());
 		table.AddColumn(new TableColumn("Return").RightAligned());
+		table.AddColumn(new TableColumn("Total").RightAligned());
 		table.AddColumn("Rule");
 
 		// Pre-index by lineage so we can compute cumulative realized P&L at any closing fill.
@@ -168,10 +168,10 @@ internal static class BacktestSummaryRenderer
 				$"[{cashColor}]{perShareLabel}[/]",
 				$"[{pnlPctColor}]{pnlPctLabel}[/]",
 				$"[{pnlDollarColor}]{pnlDollarLabel}[/]",
-				acctLabel,
 				$"${f.Fees:N2}",
 				runningCash < result.StartingCash ? $"[red]${runningCash:N2}[/]" : $"[green]${runningCash:N2}[/]",
 				$"[{returnColor}]{returnLabel}[/]",
+				acctLabel,
 				Markup.Escape(ShortRule(f.RuleName)));
 		}
 		AnsiConsole.Write(table);
