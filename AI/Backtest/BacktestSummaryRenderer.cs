@@ -75,9 +75,9 @@ internal static class BacktestSummaryRenderer
 		table.AddColumn(new TableColumn("Spot").RightAligned());
 		table.AddColumn(new TableColumn("Qty").RightAligned());
 		table.AddColumn(new TableColumn("Price").RightAligned());
-		table.AddColumn(new TableColumn("Total").RightAligned());
 		table.AddColumn(new TableColumn("P&L %").RightAligned());
 		table.AddColumn(new TableColumn("P&L $").RightAligned());
+		table.AddColumn(new TableColumn("Total").RightAligned());
 		table.AddColumn(new TableColumn("Fees").RightAligned());
 		table.AddColumn(new TableColumn("Cash").RightAligned());
 		table.AddColumn(new TableColumn("Return").RightAligned());
@@ -114,8 +114,12 @@ internal static class BacktestSummaryRenderer
 			// Per-share price = per-contract / 100 (option multiplier); matches the limit price on a broker ticket.
 			var perShare = perContract / 100m;
 			var perShareLabel = perShare >= 0m ? $"+${perShare:N2}" : $"-${-perShare:N2}";
-			var totalLabel = f.NetCashFlow >= 0m ? $"+${f.NetCashFlow:N2}" : $"-${-f.NetCashFlow:N2}";
 			var cashColor = f.NetCashFlow >= 0m ? "green" : "red";
+			// Running account total (equity, realized basis) = starting cash + realized P&L booked so far. Moves
+			// only on closes (an open books a debit but no realized P&L, so it holds flat until the position
+			// finalizes); colored vs the starting amount — mirrors the Total column in `wa report`/`wa analyze trade`.
+			var acctTotal = result.StartingCash + cumulativeRealized;
+			var acctLabel = acctTotal >= result.StartingCash ? $"[green]${acctTotal:N2}[/]" : $"[red]${acctTotal:N2}[/]";
 			// Lineage realized P&L, shown as a matching $ / % pair: realized P&L through this fill for the
 			// lineage (its fills' net cash − fees), and that over the absolute opening cash flow. Shown ONLY on
 			// rows that finalize/adjust a position (Close / Expire / Roll); Open rows show "—" because an open
@@ -162,9 +166,9 @@ internal static class BacktestSummaryRenderer
 				f.Spot > 0m ? $"{f.Spot:N2}" : "—",
 				f.Qty.ToString(),
 				$"[{cashColor}]{perShareLabel}[/]",
-				$"[{cashColor}]{totalLabel}[/]",
 				$"[{pnlPctColor}]{pnlPctLabel}[/]",
 				$"[{pnlDollarColor}]{pnlDollarLabel}[/]",
+				acctLabel,
 				$"${f.Fees:N2}",
 				runningCash < result.StartingCash ? $"[red]${runningCash:N2}[/]" : $"[green]${runningCash:N2}[/]",
 				$"[{returnColor}]{returnLabel}[/]",
