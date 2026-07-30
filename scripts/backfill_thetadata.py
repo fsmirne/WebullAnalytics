@@ -726,12 +726,14 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         # retry pass / a later run re-pulls (transient lag self-heals; a proven permanent gap goes in known_holes).
         recent = sorted(strikes_by_day)[-6:]
         if len(recent) >= 3:
-            counts = sorted(len(strikes_by_day[d]) for d in recent)
+            ksh = _known_strike_holes(out_root, ticker, exp_d.isoformat())  # certified per-session absent strikes -> credited back
+            adj = {d: len(strikes_by_day[d]) + ksh.get(d, 0) for d in recent}
+            counts = sorted(adj.values())
             median = counts[len(counts) // 2]
-            thin = [d for d in recent if median - len(strikes_by_day[d]) >= 5 and len(strikes_by_day[d]) < 0.90 * median and d not in known]
+            thin = [d for d in recent if median - adj[d] >= 5 and adj[d] < 0.90 * median and d not in known]
             if thin:
-                shown = ", ".join(f"{d}({len(strikes_by_day[d])}/{median})" for d in thin)
-                raise RuntimeError(f"THIN-LADDER {ticker} {exp_d}: {len(thin)} frontier session(s) short of the {median}-strike frontier median ({shown}) — seal withheld; a transient partial vendor response heals on re-pull, a proven permanent gap belongs in the known_holes table")
+                shown = ", ".join(f"{d}({len(strikes_by_day[d])}+{ksh.get(d, 0)}/{median})" for d in thin)
+                raise RuntimeError(f"THIN-LADDER {ticker} {exp_d}: {len(thin)} frontier session(s) short of the {median}-strike frontier median ({shown}) — seal withheld; a transient partial vendor response heals on re-pull, a proven permanent gap belongs in the known_strike_holes table")
     if total_rows == 0:
         return 0
     log.info(f"    {progress}exp {ticker} {exp_d} rows={total_rows} days={len(days)} spot_days={len(unders)}")
@@ -847,6 +849,25 @@ def _known_holes(out_root: Path, ticker: str, exp_iso: str) -> set:
     finally:
         conn.close()
     return {f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:8]}" for (d,) in rows}
+
+
+def _known_strike_holes(out_root: Path, ticker: str, exp_iso: str) -> dict:
+    """Strike-level analog of _known_holes: per-(session,strike) contracts PROVEN absent at the vendor for this
+    expiry, from the `known_strike_holes` table in quotes.db (a scattered near-money strike the vendor never
+    served while the rest of the session is present — e.g. the QQQ 2022/2024 gaps a targeted re-pull couldn't
+    heal). Returns {iso_date: count} so the strike-completeness gate credits them back to a session's ladder
+    count (a certified-absent strike is not a NEW gap). Table travels with the store like `known_holes`."""
+    conn = connect_wal(_quotes_db_path(out_root))
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS known_strike_holes (root TEXT, expiry INTEGER, date INTEGER, strike_milli INTEGER, right TEXT, PRIMARY KEY (root, expiry, date, strike_milli, right)) WITHOUT ROWID")
+        rows = conn.execute("SELECT date FROM known_strike_holes WHERE root=? AND expiry=?", (ticker, ymd_int(exp_iso))).fetchall()
+    finally:
+        conn.close()
+    out: dict = {}
+    for (d,) in rows:
+        iso = f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:8]}"
+        out[iso] = out.get(iso, 0) + 1
+    return out
 
 
 # ----- run-scoped completed-expiration manifest (threaded pull only) -----------------------------------

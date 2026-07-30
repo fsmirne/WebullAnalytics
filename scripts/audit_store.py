@@ -105,6 +105,13 @@ try:
     for r, e_, dd in con.execute("select root, expiry, date from known_holes where root=?", (ROOT,)): kh[e_].add(dd)
 except sqlite3.OperationalError:
     kh = defaultdict(set)
+# Strike-level certified gaps (proven-absent contract on a session) — credited back in H8 so a session
+# short only by certified holes is not re-flagged. Day-level `kh` above certifies whole absent sessions.
+ksh = defaultdict(lambda: defaultdict(int))
+try:
+    for r, e_, dd, sm, rt in con.execute("select root, expiry, date, strike_milli, right from known_strike_holes where root=?", (ROOT,)): ksh[e_][dd] += 1
+except sqlite3.OperationalError:
+    pass
 kh_excl = 0
 for e in all_exps:
     n, lo, hi = con.execute("select count(distinct date), min(date), max(date) from quotes where root=? and expiry=? and date between ? and ?", (ROOT, e, d8(a.since), d8(a.until))).fetchone()
@@ -129,12 +136,16 @@ print(f'H7 TRUNCATED tails: {len(trunc7)} {[(iso(e), h, g) for e, h, g in trunc7
 # by a clear margin (< 90% AND >= 5 strikes). Mirrors the backfill seal-time strike-completeness gate.
 print('\n== H8 scattered strike holes (session present but ladder short vs neighbors) ==')
 h8 = []
+ksh_credited = 0
 for e in all_exps:
     rows = con.execute("select date, count(distinct strike_milli) from quotes where root=? and expiry=? and date between ? and ? group by date order by date", (ROOT, e, d8(a.since), d8(a.until))).fetchall()
     if len(rows) < 3: continue
+    adj = [c + ksh.get(e, {}).get(dd, 0) for (dd, c) in rows]   # credit certified strike-holes so they don't re-flag
+    ksh_credited += sum(ksh.get(e, {}).get(dd, 0) for (dd, _) in rows)
     for i, (dd, c) in enumerate(rows):
-        window = [rows[j][1] for j in range(max(0, i - 3), min(len(rows), i + 4))]
+        window = [adj[j] for j in range(max(0, i - 3), min(len(rows), i + 4))]
         med = sorted(window)[len(window) // 2]
-        if med - c >= 5 and c < 0.90 * med and dd not in kh.get(e, ()):
+        if med - adj[i] >= 5 and adj[i] < 0.90 * med and dd not in kh.get(e, ()):
             h8.append((iso(e), iso(dd), c, med))
+if ksh_credited: print(f'H8 certified strike-holes credited (known_strike_holes): {ksh_credited}')
 print(f'H8 thin-ladder sessions: {len(h8)} {[(ex, s, f"{c}/{m}") for ex, s, c, m in h8[:12]]}')
