@@ -120,3 +120,21 @@ if kh_excl: print(f'H7 known-hole days excluded (vendor-proven): {kh_excl}')
 print(f'H7 EMPTY expiries: {len(empty)} {[iso(x) for x in empty[:8]]}')
 print(f'H7 internal HOLES: {len(holes)} {[(iso(e), m) for e, m in holes[:10]]}')
 print(f'H7 TRUNCATED tails: {len(trunc7)} {[(iso(e), h, g) for e, h, g in trunc7[:8]]}')
+
+# H8 SCATTERED STRIKE HOLES: a session is present (has rows) but its strike ladder is short of its
+# neighbors' — the per-contract vendor gap that H1/H7 (day-level) and H3 (one probe expiry vs a uniform
+# grid) are both blind to. It corrupts backtest window-end marks (a held leg whose strike vanished that
+# session). Compared to a ±3-session neighbor-window median PER EXPIRY (not a global expectation), so
+# legitimate spot-drift strike-count changes over an expiry's life don't false-trip; flags a session short
+# by a clear margin (< 90% AND >= 5 strikes). Mirrors the backfill seal-time strike-completeness gate.
+print('\n== H8 scattered strike holes (session present but ladder short vs neighbors) ==')
+h8 = []
+for e in all_exps:
+    rows = con.execute("select date, count(distinct strike_milli) from quotes where root=? and expiry=? and date between ? and ? group by date order by date", (ROOT, e, d8(a.since), d8(a.until))).fetchall()
+    if len(rows) < 3: continue
+    for i, (dd, c) in enumerate(rows):
+        window = [rows[j][1] for j in range(max(0, i - 3), min(len(rows), i + 4))]
+        med = sorted(window)[len(window) // 2]
+        if med - c >= 5 and c < 0.90 * med and dd not in kh.get(e, ()):
+            h8.append((iso(e), iso(dd), c, med))
+print(f'H8 thin-ladder sessions: {len(h8)} {[(ex, s, f"{c}/{m}") for ex, s, c, m in h8[:12]]}')

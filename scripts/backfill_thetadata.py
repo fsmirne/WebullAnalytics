@@ -625,6 +625,7 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
     exp_int = ymd_int(exp_d.isoformat())
     db_path = _quotes_db_path(out_root)
     total_rows, days, saw_quotes, first_write, nospot_days = 0, set(), False, True, set()
+    strikes_by_day = {}   # date -> set of in-band strikes seen, for the seal-time strike-completeness gate
     for ms, me in windows(start_d, end_d, chunk_days):  # small windows: server stalls on large minute requests
         df = thetacall(client.option_history_quote, symbol=ticker, expiration=exp_d, interval="1m",
                        strike="*", start_date=ms, end_date=me)
@@ -692,6 +693,8 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
                 conn.close()
         total_rows += len(rows)
         days.update(part["date"].tolist())
+        for d, s in zip(part["date"].tolist(), part["strike"].tolist()):
+            strikes_by_day.setdefault(d, set()).add(round(float(s), 3))
     # Quotes present but no underlying spot -> can't band-filter; treat as transient (raise -> retry).
     # No quotes AT ALL -> a non-trading day (e.g. the 2025-01-09 market closure) or an expiration with no
     # in-band contracts: return empty so it SEALS instead of being re-attempted forever as a "feed error".
@@ -712,6 +715,23 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         if missing:
             shown = ", ".join(missing[:5]) + ("..." if len(missing) > 5 else "")
             raise RuntimeError(f"INCOMPLETE {ticker} {exp_d}: {len(missing)} interior trading day(s) absent ({shown}) — seal withheld; transient partial responses heal on the retry pass, proven vendor gaps belong in the known_holes table (INSERT INTO known_holes VALUES('{ticker}', {ymd_int(exp_d.isoformat())}, {missing[0].replace('-', '')});)")
+        # Seal-time STRIKE-completeness gate (extends the day gate above): a session can be PRESENT yet missing
+        # near-money strikes the vendor served on neighboring sessions — a scattered per-contract gap the
+        # day-granular check is blind to (SPY 07-29 expiry on 07-28 omitted 738P and neighbors while 07-27 had
+        # the full ladder; it silently corrupted a backtest's window-end mark). Restricted to the FRONTIER
+        # sessions (the last few before expiry), where spot is stable so counts should match AND where the
+        # vendor's just-settled-minute lag actually strikes — this avoids false positives from legitimate
+        # spot-drift strike-count changes over a long expiry's life. A frontier session short of the frontier
+        # median by a clear margin (< 90% AND >= 5 strikes) is treated like a missing day: seal withheld -> the
+        # retry pass / a later run re-pulls (transient lag self-heals; a proven permanent gap goes in known_holes).
+        recent = sorted(strikes_by_day)[-6:]
+        if len(recent) >= 3:
+            counts = sorted(len(strikes_by_day[d]) for d in recent)
+            median = counts[len(counts) // 2]
+            thin = [d for d in recent if median - len(strikes_by_day[d]) >= 5 and len(strikes_by_day[d]) < 0.90 * median and d not in known]
+            if thin:
+                shown = ", ".join(f"{d}({len(strikes_by_day[d])}/{median})" for d in thin)
+                raise RuntimeError(f"THIN-LADDER {ticker} {exp_d}: {len(thin)} frontier session(s) short of the {median}-strike frontier median ({shown}) — seal withheld; a transient partial vendor response heals on re-pull, a proven permanent gap belongs in the known_holes table")
     if total_rows == 0:
         return 0
     log.info(f"    {progress}exp {ticker} {exp_d} rows={total_rows} days={len(days)} spot_days={len(unders)}")
