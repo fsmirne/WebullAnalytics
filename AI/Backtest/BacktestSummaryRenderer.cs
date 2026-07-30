@@ -73,9 +73,9 @@ internal static class BacktestSummaryRenderer
 		table.AddColumn(new TableColumn("Spot").RightAligned());
 		table.AddColumn(new TableColumn("Qty").RightAligned());
 		table.AddColumn(new TableColumn("Price").RightAligned());
-		table.AddColumn(new TableColumn("Net/Ct").RightAligned());
 		table.AddColumn(new TableColumn("Total").RightAligned());
 		table.AddColumn(new TableColumn("P&L %").RightAligned());
+		table.AddColumn(new TableColumn("P&L $").RightAligned());
 		table.AddColumn(new TableColumn("Fees").RightAligned());
 		table.AddColumn(new TableColumn("Cash").RightAligned());
 		table.AddColumn(new TableColumn("Return").RightAligned());
@@ -112,10 +112,15 @@ internal static class BacktestSummaryRenderer
 			// Per-share price = per-contract / 100 (option multiplier); matches the limit price on a broker ticket.
 			var perShare = perContract / 100m;
 			var perShareLabel = perShare >= 0m ? $"+${perShare:N2}" : $"-${-perShare:N2}";
-			var perCtLabel = perContract >= 0m ? $"+${perContract:N2}" : $"-${-perContract:N2}";
 			var totalLabel = f.NetCashFlow >= 0m ? $"+${f.NetCashFlow:N2}" : $"-${-f.NetCashFlow:N2}";
 			var cashColor = f.NetCashFlow >= 0m ? "green" : "red";
-			var runningColor = runningCash >= result.StartingCash ? "green" : "red";
+			// Running P&L = account movement since the start, cash-basis: it moves on EVERY fill (an open
+			// dips it by the debit paid, a close recovers it plus/minus the trade's P&L). Distinct from the
+			// realized-only "Return %" (which holds flat across opens); the last row's value is cash-basis, so
+			// it trails the summary's Ending equity by any still-open positions' unrealized mark.
+			var runningPnl = runningCash - result.StartingCash;
+			var runningColor = runningPnl >= 0m ? "green" : "red";
+			var runningPnlLabel = runningPnl >= 0m ? $"+${runningPnl:N2}" : $"-${-runningPnl:N2}";
 
 			// Lineage P&L %: realized P&L through this fill divided by the absolute opening cash
 			// flow. Long-debit positions: a winner shows positive (e.g. +124% means realized P&L =
@@ -160,11 +165,11 @@ internal static class BacktestSummaryRenderer
 				f.Spot > 0m ? $"{f.Spot:N2}" : "—",
 				f.Qty.ToString(),
 				$"[{cashColor}]{perShareLabel}[/]",
-				$"[{cashColor}]{perCtLabel}[/]",
 				$"[{cashColor}]{totalLabel}[/]",
 				$"[{pnlPctColor}]{pnlPctLabel}[/]",
+				$"[{runningColor}]{runningPnlLabel}[/]",
 				$"${f.Fees:N2}",
-				$"[{runningColor}]${runningCash:N2}[/]",
+				runningCash < 0m ? $"[red]${runningCash:N2}[/]" : $"${runningCash:N2}",
 				$"[{returnColor}]{returnLabel}[/]",
 				Markup.Escape(ShortRule(f.RuleName)));
 		}
