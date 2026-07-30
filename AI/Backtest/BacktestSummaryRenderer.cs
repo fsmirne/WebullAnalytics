@@ -16,6 +16,8 @@ internal static class BacktestSummaryRenderer
 
 		if (showFills) RenderFillsTable(result);
 		RenderSummaryPanel(result);
+		if (result.OpenPositionsFallbackMarked > 0)
+			AnsiConsole.MarkupLine($"[yellow]⚠ {result.OpenPositionsFallbackMarked} open position(s) had a leg with no window-end NBBO — marked at entry price, so their unrealized P&L is approximate (not fully real-priced). Re-pull the quote store to resolve.[/]");
 		RenderPerTickerBreakdown(result);
 		if (bookCmd) RenderBookCommand(result);
 	}

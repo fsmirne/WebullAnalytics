@@ -45,6 +45,7 @@ internal sealed class BacktestRunner
 	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
 	private int _droppedRuleActions;   // rule-proposed Close/Roll/LegIn dropped because the day had no leg quotes (see WarnDroppedRuleAction)
 	private int _blindPositionDays;    // position-days where NO leg had a quote, so rules could not evaluate the position at all
+	private readonly HashSet<long> _openFallbackLineages = new();   // window-end lineages with >=1 leg marked at entry price (no NBBO) — unrealized not fully real-priced
 
 	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
 	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET — the
@@ -278,7 +279,8 @@ internal sealed class BacktestRunner
 			Provenance: ComputeProvenance(),
 			Cleanliness: ComputeCleanliness(),
 			DroppedRuleActions: _droppedRuleActions,
-			BlindPositionDays: _blindPositionDays);
+			BlindPositionDays: _blindPositionDays,
+			OpenPositionsFallbackMarked: _openFallbackLineages.Count);
 	}
 
 	/// <summary>A rule proposed an action but the day's quote snapshot has no prices for the position's legs
@@ -308,22 +310,34 @@ internal sealed class BacktestRunner
 			.GroupBy(f => f.PositionKey, StringComparer.OrdinalIgnoreCase)
 			.ToDictionary(g => g.Key, g => g.Last().LineageId, StringComparer.OrdinalIgnoreCase);
 
+		// Entry (open-fill) price per (PositionKey, Symbol) — the fallback mark for a leg with no NBBO at the
+		// window end. Previously a single missing near-money quote set allLegsPriced=false and zeroed the WHOLE
+		// position (EndMtm dropped to 0 → unrealized booked the full debit as a loss, discarding the value of
+		// the well-priced legs). Now each leg marks independently: real NBBO if present, else its entry price
+		// (assume unchanged since open — approximate but bounded), and the lineage is flagged so the summary can
+		// warn that its unrealized is not fully real-priced. A leg with neither NBBO nor an entry marks at 0.
+		var entryPriceByKeySymbol = _book.Fills
+			.Where(f => f.Kind == BacktestFillKind.Open)
+			.SelectMany(f => f.Legs.Select(l => (f.PositionKey, l.Symbol, l.PricePerShare)))
+			.GroupBy(x => (x.PositionKey, x.Symbol))
+			.ToDictionary(g => g.Key, g => g.First().PricePerShare);
+
 		foreach (var pos in _book.OpenPositions.Values)
 		{
 			if (!lineageByKey.TryGetValue(pos.Key, out var lineage)) continue;
 			decimal perContract = 0m;
-			var allLegsPriced = true;
+			var usedFallback = false;
 			foreach (var leg in pos.Legs)
 			{
-				if (!snap.Options.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue)
-				{
-					allLegsPriced = false;
-					break;
-				}
-				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				decimal mid;
+				if (snap.Options.TryGetValue(leg.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
+					mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				else if (entryPriceByKeySymbol.TryGetValue((pos.Key, leg.Symbol), out var entry)) { mid = entry; usedFallback = true; }
+				else { mid = 0m; usedFallback = true; }
 				perContract += leg.Side == Side.Buy ? mid : -mid;
 			}
-			if (allLegsPriced) byLineage[lineage] = perContract * 100m * pos.Quantity;
+			byLineage[lineage] = perContract * 100m * pos.Quantity;
+			if (usedFallback) _openFallbackLineages.Add(lineage);
 		}
 		return byLineage;
 	}
@@ -1467,7 +1481,8 @@ internal sealed record BacktestResult(
 	PricingProvenance Provenance,
 	CleanlinessBreakdown Cleanliness,
 	int DroppedRuleActions = 0,
-	int BlindPositionDays = 0)
+	int BlindPositionDays = 0,
+	int OpenPositionsFallbackMarked = 0)
 {
 	/// <summary>P&L on closed lifecycles only (lineages that ended in Close or Expire). Each lifecycle's
 	/// P&L = sum of (NetCashFlow - Fees) across all fills sharing its LineageId.</summary>
