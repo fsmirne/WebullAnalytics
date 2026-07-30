@@ -166,7 +166,7 @@ internal static class BacktestSummaryRenderer
 				$"[{pnlPctColor}]{pnlPctLabel}[/]",
 				$"[{pnlDollarColor}]{pnlDollarLabel}[/]",
 				$"${f.Fees:N2}",
-				runningCash < 0m ? $"[red]${runningCash:N2}[/]" : $"${runningCash:N2}",
+				runningCash < result.StartingCash ? $"[red]${runningCash:N2}[/]" : $"[green]${runningCash:N2}[/]",
 				$"[{returnColor}]{returnLabel}[/]",
 				Markup.Escape(ShortRule(f.RuleName)));
 		}
