@@ -174,8 +174,8 @@ internal sealed class BacktestRunner
 			else
 			{
 				var openedAtMinute = await TryOpenAcrossDayAsync(step, tickerSet, openEvaluator, cancellation);
-				// Fallback: if there is no intraday data for this day (pre-2025 dates outside the
-				// Polygon backfill, or any future hole), use the legacy 09:30 single-call path.
+				// Fallback: if there is no intraday data for this day (dates before the massive.com/Polygon
+				// tape, which covers SPY from 2021-07-19, or any future hole), use the legacy 09:30 single-call path.
 				if (!openedAtMinute.HasIntraday)
 				{
 					var openProposals = openedAtMinute.LegacyProposals;
