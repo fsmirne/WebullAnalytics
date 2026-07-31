@@ -1,9 +1,10 @@
 <#
 backtest_tp_sweep.ps1 - 1D sweep over the SPY DC take-profit target (Target A: profitTargetPctOfPremium).
 
-Modeled on backtest_sweep.ps1 (the GEX-signal sweep), reusing its fills.jsonl parser and CSV/ranking
-machinery. The only axis here is the fixed-%-of-debit take-profit: close a position on any day once its
-mark-to-market profit reaches N% of the entry debit.
+Modeled on the retired backtest_sweep.ps1 (the GEX-signal sweep, deleted with its concluded campaign);
+its fills.jsonl parser lives on here in closed-lifecycles-only form. The only axis here is the
+fixed-%-of-debit take-profit: close a position on any day once its mark-to-market profit reaches N% of
+the entry debit.
 
 Each cell passes --tp-pct N: close on any day once mark profit reaches N% of the entry premium (debit paid or
 credit received); N=0 turns take-profit off. The "% of max projected profit" target was removed, so this is
