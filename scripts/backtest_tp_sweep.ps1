@@ -101,36 +101,42 @@ function Log($msg) {
 }
 
 # Parse a fills.jsonl produced by `wa ai backtest --fills-jsonl`. Per-lineage P&L = sum(net) - sum(fees) over
-# all fills with that lineage id. Total P&L = sum across lineages. Win rate = fraction of lineages > 0. Profit
-# factor = gross wins / gross losses (the key cost-aware edge metric). Identical to backtest_sweep.ps1.
+# all fills with that lineage id. CLOSED lifecycles only (a Close or Expire fill in the lineage): a position
+# still open at --until has paid its debit but realized nothing, so counting it makes the debit look like a
+# pure loss and drags PF/WR — non-uniformly across cells, since the swept knob changes hold duration and thus
+# the open-at-until count. Matches the renderer's closed-lifecycle summary. OpenAtEnd reports what was excluded.
 function Get-FillsStats {
   param([string]$Path)
 
-  $empty = [ordered]@{ Trades = 0; Wins = 0; Losses = 0; WinRate = 0.0; ProfitFactor = 0.0; TotalPnl = 0.0; AvgPnl = 0.0; BestPnl = 0.0; WorstPnl = 0.0; TotalFees = 0.0 }
+  $empty = [ordered]@{ Trades = 0; Wins = 0; Losses = 0; WinRate = 0.0; ProfitFactor = 0.0; TotalPnl = 0.0; AvgPnl = 0.0; BestPnl = 0.0; WorstPnl = 0.0; TotalFees = 0.0; OpenAtEnd = 0 }
   if (-not (Test-Path $Path)) { return $empty }
 
   $lineagePnl = @{}
+  $lineageClosed = @{}
   $totalFees = 0.0
 
   Get-Content $Path | ForEach-Object {
     if ([string]::IsNullOrWhiteSpace($_)) { return }
     try { $f = $_ | ConvertFrom-Json } catch { return }
     $lid = [string]$f.lineage
-    if (-not $lineagePnl.ContainsKey($lid)) { $lineagePnl[$lid] = 0.0 }
+    if (-not $lineagePnl.ContainsKey($lid)) { $lineagePnl[$lid] = 0.0; $lineageClosed[$lid] = $false }
     $lineagePnl[$lid] += ([double]$f.net - [double]$f.fees)
     $totalFees += [double]$f.fees
+    if ($f.kind -eq 'Close' -or $f.kind -eq 'Expire') { $lineageClosed[$lid] = $true }
   }
 
-  $trades = $lineagePnl.Count
+  $closedPnl = @($lineagePnl.Keys | Where-Object { $lineageClosed[$_] } | ForEach-Object { $lineagePnl[$_] })
+  $openAtEnd = $lineagePnl.Count - $closedPnl.Count
+  $trades = $closedPnl.Count
   if ($trades -eq 0) { return $empty }
 
-  $wins   = @($lineagePnl.Values | Where-Object { $_ -gt 0 }).Count
-  $losses = @($lineagePnl.Values | Where-Object { $_ -le 0 }).Count
-  $total  = ($lineagePnl.Values | Measure-Object -Sum).Sum
-  $best   = ($lineagePnl.Values | Measure-Object -Maximum).Maximum
-  $worst  = ($lineagePnl.Values | Measure-Object -Minimum).Minimum
-  $grossWin  = (($lineagePnl.Values | Where-Object { $_ -gt 0 }) | Measure-Object -Sum).Sum
-  $grossLoss = (($lineagePnl.Values | Where-Object { $_ -le 0 }) | Measure-Object -Sum).Sum
+  $wins   = @($closedPnl | Where-Object { $_ -gt 0 }).Count
+  $losses = @($closedPnl | Where-Object { $_ -le 0 }).Count
+  $total  = ($closedPnl | Measure-Object -Sum).Sum
+  $best   = ($closedPnl | Measure-Object -Maximum).Maximum
+  $worst  = ($closedPnl | Measure-Object -Minimum).Minimum
+  $grossWin  = (($closedPnl | Where-Object { $_ -gt 0 }) | Measure-Object -Sum).Sum
+  $grossLoss = (($closedPnl | Where-Object { $_ -le 0 }) | Measure-Object -Sum).Sum
   $pf = if ($grossLoss -ne 0) { [math]::Round($grossWin / [math]::Abs($grossLoss), 2) } else { [double]::PositiveInfinity }
 
   return [ordered]@{
@@ -144,6 +150,7 @@ function Get-FillsStats {
     BestPnl  = [math]::Round($best, 2)
     WorstPnl = [math]::Round($worst, 2)
     TotalFees = [math]::Round($totalFees, 2)
+    OpenAtEnd = $openAtEnd
   }
 }
 
@@ -166,8 +173,12 @@ foreach ($td in $Grid) {
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
   Log ("[{0}/{1}] tpDebit={2} ({3}) -> running" -f $idx, $total, $td, $label)
+  # Grid values are PERCENT for human ergonomics (tags/labels/CSV), but --tp-pct takes a FRACTION post the
+  # config 0-1 migration (0.20 = +20%; passing 20 = +2000% = never fires = silently identical to off).
+  # Format invariant: a culture-default ToString can emit "0,2" on comma-decimal locales.
+  $tpFraction = ([double]$td / 100.0).ToString('0.####', $inv)
   $args = @('ai','backtest',$Ticker,'--strategy',$Strategy,'--since',$Since,'--until',$Until,
-            '--lots',$Lots,'--scan-stride',$ScanStride,'--tp-pct',$td,'--fills-jsonl',$fillsPath)
+            '--lots',$Lots,'--scan-stride',$ScanStride,'--tp-pct',$tpFraction,'--fills-jsonl',$fillsPath)
   if ($UseDotnet) { & $Dotnet $Wa @args *>&1 | Tee-Object -FilePath $cellLog | Out-Null }
   else            { & $Wa      @args *>&1 | Tee-Object -FilePath $cellLog | Out-Null }
   $rc = $LASTEXITCODE
@@ -192,6 +203,7 @@ foreach ($td in $Grid) {
     BestPnl      = $stats.BestPnl
     WorstPnl     = $stats.WorstPnl
     TotalFees    = $stats.TotalFees
+    OpenAtEnd    = $stats.OpenAtEnd
     Elapsed      = [math]::Round($sw.Elapsed.TotalSeconds, 1)
   }
   [void]$results.Add($row)
