@@ -133,42 +133,17 @@ internal sealed class BacktestRunner
 				var ctx = new EvaluationContext(step, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 				var results = evaluator.Evaluate(ctx);
 
-				foreach (var r in results)
-				{
-					var p = r.Proposal;
-					if (!openPositions.TryGetValue(p.PositionKey, out var pos)) continue;
-					if (p.Kind == ProposalKind.Close)
-					{
-						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
-						if (legFills != null) _book.Close(step, p.PositionKey, legFills, p.Rule, quoteSnapshot.Underlyings.GetValueOrDefault(pos.Ticker));
-						else WarnDroppedRuleAction(step, p, pos);
-					}
-					else if (p.Kind == ProposalKind.Roll)
-					{
-						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
-						if (legFills != null) _book.Roll(step, p.PositionKey, legFills, p.Rule, quoteSnapshot.Underlyings.GetValueOrDefault(pos.Ticker));
-						else WarnDroppedRuleAction(step, p, pos);
-					}
-					else if (p.Kind == ProposalKind.LegIn)
-					{
-						var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quoteSnapshot.Options);
-						if (legFills == null) WarnDroppedRuleAction(step, p, pos);
-						// Rule emits the new structure name via convention: LongCall→LongCallVertical, LongPut→LongPutVertical.
-						// Derive from the existing strategy + the fact that the new leg is opposite-side.
-						if (legFills != null)
-						{
-							var newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical
-								: string.Equals(pos.StrategyKind, "LongPut", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongPutVertical
-								// CompleteCondorRule adds the opposite-side vertical to a held short vertical → iron condor.
-								: string.Equals(pos.StrategyKind, "ShortPutVertical", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.IronCondor
-								: string.Equals(pos.StrategyKind, "ShortCallVertical", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.IronCondor
-								: (OpenStructureKind?)null;
-							if (newStructure != null) _book.LegIn(step, p.PositionKey, legFills, p.Rule, newStructure.Value, quoteSnapshot.Underlyings.GetValueOrDefault(pos.Ticker));
-						}
-					}
-					// AlertOnly: noop in backtest.
-				}
+				ApplyManagementResults(step, results, openPositions, quoteSnapshot.Options, quoteSnapshot.Underlyings, warnOnDrop: true);
 			}
+
+			// Step 1.5: intraday management minute-walk for carry-over multi-DTE positions — live watch
+			// re-evaluates the full rule set every ~60s, so exits fire mid-session (ITM assignment
+			// force-close, TakeProfit crossing), not just at the open. Must run BEFORE settlement so an
+			// expiry-day short that goes ITM intraday is closed the way live would close it, rather than
+			// riding to a 16:00 intrinsic settle (2026-07-29: a diagonal at +17% at 09:30 — under every
+			// gate — rode the sell-off to a ~0% ITM expiry that live's assignment-risk trigger would have
+			// closed near +30% at the strike cross).
+			await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: false, cancellation);
 
 			if (profile) { msStep1 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
 
@@ -224,6 +199,11 @@ internal sealed class BacktestRunner
 			// settlement so any 0DTE position that would have stopped intraday doesn't double-count
 			// at expiration.
 			await RunIntradayTriggersAsync(step, evaluator, cancellation);
+
+			// Positions opened THIS step get the same management minute-walk from the minute after their
+			// fill — live manages a fresh open on its very next tick. Runs after the opener so the fills
+			// exist, and before the settlement pass below for the same reason as Step 1.5.
+			await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: true, cancellation);
 
 			// 0DTE: a position opened this step whose short leg expires today must settle today, not
 			// roll over to tomorrow and pick up the wrong bar. The second pass is a no-op when none
@@ -287,6 +267,53 @@ internal sealed class BacktestRunner
 	/// (store gap: e.g. today's session before the evening NBBO pull, or a historical hole), so the action was
 	/// dropped. Warn loudly instead of silently leaving the position open — a silent drop under-counts closes
 	/// and masquerades as "the rule didn't fire".</summary>
+	/// <summary>Executes management-rule proposals (Close/Roll/LegIn) against the book at <paramref name="ts"/>,
+	/// pricing fills from <paramref name="quotes"/> under the active pricing mode. Shared by the daily 09:30 rule
+	/// pass and the intraday management minute-walk so both paths fill identically. Returns the keys of positions
+	/// an action was actually executed for. <paramref name="warnOnDrop"/> is true for the daily pass (a dropped
+	/// action there means the whole day had no usable leg quotes — worth surfacing); the minute-walk passes false
+	/// because it retries every minute and a transiently unpriceable leg would flood the console.</summary>
+	private HashSet<string> ApplyManagementResults(DateTime ts, IReadOnlyList<RuleEvaluator.EvaluationResult> results, IReadOnlyDictionary<string, OpenPosition> openPositions, IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> underlyings, bool warnOnDrop)
+	{
+		var acted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		foreach (var r in results)
+		{
+			var p = r.Proposal;
+			if (!openPositions.TryGetValue(p.PositionKey, out var pos)) continue;
+			if (p.Kind == ProposalKind.Close)
+			{
+				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
+				if (legFills != null) { _book.Close(ts, p.PositionKey, legFills, p.Rule, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
+				else if (warnOnDrop) WarnDroppedRuleAction(ts, p, pos);
+			}
+			else if (p.Kind == ProposalKind.Roll)
+			{
+				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
+				if (legFills != null) { _book.Roll(ts, p.PositionKey, legFills, p.Rule, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
+				else if (warnOnDrop) WarnDroppedRuleAction(ts, p, pos);
+			}
+			else if (p.Kind == ProposalKind.LegIn)
+			{
+				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
+				if (legFills == null && warnOnDrop) WarnDroppedRuleAction(ts, p, pos);
+				// Rule emits the new structure name via convention: LongCall→LongCallVertical, LongPut→LongPutVertical.
+				// Derive from the existing strategy + the fact that the new leg is opposite-side.
+				if (legFills != null)
+				{
+					var newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical
+						: string.Equals(pos.StrategyKind, "LongPut", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongPutVertical
+						// CompleteCondorRule adds the opposite-side vertical to a held short vertical → iron condor.
+						: string.Equals(pos.StrategyKind, "ShortPutVertical", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.IronCondor
+						: string.Equals(pos.StrategyKind, "ShortCallVertical", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.IronCondor
+						: (OpenStructureKind?)null;
+					if (newStructure != null) { _book.LegIn(ts, p.PositionKey, legFills, p.Rule, newStructure.Value, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
+				}
+			}
+			// AlertOnly: noop in backtest.
+		}
+		return acted;
+	}
+
 	private void WarnDroppedRuleAction(DateTime step, ManagementProposal p, OpenPosition pos)
 	{
 		_droppedRuleActions++;
@@ -482,11 +509,11 @@ internal sealed class BacktestRunner
 	/// adverse move is assumed to have come first (bear-case path).</summary>
 	/// <summary>True when every expiring leg of <paramref name="pos"/> expires on or before
 	/// <paramref name="step"/> (DTE ≤ 0) — i.e. the position carries no leg that lives past today.
-	/// Only such positions are eligible for the intraday-trigger minute-walk, whose parametric leg
+	/// Only such positions are eligible for the SL/TP intraday-trigger minute-walk, whose parametric leg
 	/// pricing (<see cref="BacktestQuoteSource.PriceAtSpot"/>) is consistent with the captured-bar
 	/// entry pricing only for short-TTE near-intrinsic 0DTE legs. A position with any future-dated leg
-	/// (calendar / diagonal long leg) must be managed by the daily rule loop instead, which prices on
-	/// the same captured-bar basis as entry.</summary>
+	/// (calendar / diagonal long leg) is managed by the daily rule loop plus
+	/// <see cref="RunManagementMinuteWalkAsync"/>, both of which price on the same captured-bar basis as entry.</summary>
 	private static bool IsAllZeroDte(OpenPosition pos, DateTime step)
 	{
 		foreach (var leg in pos.Legs)
@@ -494,6 +521,79 @@ internal sealed class BacktestRunner
 			if (leg.Expiry is { } exp && (exp.Date - step.Date).Days > 0) return false;
 		}
 		return true;
+	}
+
+	/// <summary>Intraday management for multi-DTE positions — the backtest analog of the live watch tick.
+	/// Live (`wa ai watch` → <see cref="LiveTick"/>) re-runs the full <see cref="RuleEvaluator"/> every ~60s,
+	/// so an expiry-day short that goes ITM at 11:00 is force-closed for assignment risk and a position that
+	/// crosses the TakeProfit target at 14:00 exits at 14:00; a once-daily 09:30 pass sees neither. Walks each
+	/// RTH minute after the daily pass, re-prices positions through the same captured-NBBO path the daily pass
+	/// and entry use (<see cref="AIPipelineHelper.FetchQuotesWithHypotheticals"/> with a minute asOf), evaluates
+	/// the same rule set, and executes proposals via <see cref="ApplyManagementResults"/>. Multi-DTE positions
+	/// were historically excluded from ALL intraday triggering because the old walk priced legs parametrically
+	/// and manufactured phantom same-day profits on calendars/diagonals; the quotes-only pivot removed that
+	/// divergence — marks here are real minute NBBO, the same basis as entry. Days with no minute tape keep the
+	/// daily-pass-only behavior. A position that fires any rule is consumed for the day (same semantics as the
+	/// 0DTE walk; live would keep managing a rolled position intraday — the next daily pass picks it up).
+	/// <paramref name="openedToday"/> selects the population so the two call sites never double-walk: false =
+	/// carry-over positions, walked between the daily rule pass and settlement (an expiry-day short must be
+	/// closeable BEFORE <see cref="SettleExpirationsAsync"/> sweeps it); true = positions opened this step,
+	/// walked after the opener so the fills exist, starting the minute after each fill (live's next tick).</summary>
+	private async Task RunManagementMinuteWalkAsync(DateTime step, RuleEvaluator evaluator, IReadOnlySet<string> tickerSet, bool openedToday, CancellationToken cancellation)
+	{
+		var byTicker = _book.OpenPositions.Values
+			.Where(p => !IsAllZeroDte(p, step) && (p.OpenedAt.HasValue && p.OpenedAt.Value.Date == step.Date) == openedToday)
+			.GroupBy(p => p.Ticker, StringComparer.OrdinalIgnoreCase)
+			.ToList();
+		if (byTicker.Count == 0) return;
+
+		var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
+		var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Indicators.TechnicalFilter, step, cancellation);
+
+		foreach (var group in byTicker)
+		{
+			var ticker = group.Key;
+			var pending = group.Select(p => p.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+			// 09:30 itself belongs to the daily rule pass; the walk owns everything after it.
+			var walkStartEt = step.Date.Add(MarketOpenTime).AddMinutes(1);
+			var walkEndEt = step.Date.Add(MarketCloseTime);
+			var startUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(walkStartEt, NyTz), TimeSpan.Zero);
+			var endUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(walkEndEt, NyTz), TimeSpan.Zero);
+			var minuteBars = await _intradayBars.GetBarsAsync(ticker, startUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
+			var oneTicker = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker };
+
+			foreach (var minuteBar in minuteBars)
+			{
+				cancellation.ThrowIfCancellationRequested();
+				pending.RemoveWhere(k => !_book.OpenPositions.ContainsKey(k));
+				if (pending.Count == 0) break;
+				var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteBar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+
+				// Population at this minute: still open, and (for today's opens) strictly past their fill
+				// minute — live's first management look at a fresh open is the tick AFTER the fill.
+				var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase);
+				foreach (var key in pending)
+				{
+					var pos = _book.OpenPositions[key];
+					if (openedToday && pos.OpenedAt.HasValue && minuteEt <= pos.OpenedAt.Value) continue;
+					stillOpen[key] = pos;
+				}
+				if (stillOpen.Count == 0) continue;
+
+				// Spot at this minute's open (start-of-bar convention, matching ctx.Now semantics); the TTE
+				// override only affects legs that fall back to parametric pricing (captured NBBO needs neither).
+				var spot = minuteBar.Open;
+				var minutesToClose = Math.Max(1.0, (endUtc - minuteBar.Timestamp).TotalMinutes);
+				var overrides = new QuoteOverrides(
+					Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot },
+					ZeroDteTimeYears: minutesToClose / 60.0 / 24.0 / 365.0);
+				var snap = await AIPipelineHelper.FetchQuotesWithHypotheticals(stillOpen, oneTicker, minuteEt, _quotes, _config, cancellation, overrides);
+				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot };
+				var ctx = new EvaluationContext(minuteEt, stillOpen, underlyings, snap.Options, cash, accountValue, technicalSignals);
+				var acted = ApplyManagementResults(minuteEt, evaluator.Evaluate(ctx), stillOpen, snap.Options, underlyings, warnOnDrop: false);
+				pending.ExceptWith(acted);
+			}
+		}
 	}
 
 	private async Task RunIntradayTriggersAsync(DateTime step, RuleEvaluator evaluator, CancellationToken cancellation)
@@ -518,9 +618,10 @@ internal sealed class BacktestRunner
 			// which deliberately ignores captured bars. For a multi-DTE structure (calendar / diagonal) the
 			// entry debit is set from the captured-bar path while this pass re-marks the long leg parametrically;
 			// the two models diverge and manufacture an instant same-day paper profit that TakeProfit harvests
-			// (observed: +44.8% in 19 minutes, 99.4% win rate). Multi-DTE positions are instead managed by the
-			// daily rule loop (Step 1), which prices via GetQuotesAsync — the same captured-bar basis as entry,
-			// so entry and management never disagree. Gate the intraday pass to all-0DTE positions only.
+			// (observed: +44.8% in 19 minutes, 99.4% win rate). Multi-DTE positions are managed by the daily
+			// rule loop (Step 1) plus RunManagementMinuteWalkAsync — both price via GetQuotesAsync, the same
+			// captured-bar basis as entry, so entry and management never disagree. This specialized SL/TP
+			// walk stays all-0DTE-only.
 			if (!IsAllZeroDte(pos, step)) continue;
 
 			// Prefer the minute-walk: walks minute bars chronologically and triggers at the first
