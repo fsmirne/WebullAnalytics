@@ -262,7 +262,11 @@ internal sealed class BacktestRunner
 			MaxDrawdownPct: maxDrawdownPct,
 			PeakEquity: peakEquity,
 			EquityCurve: equityCurve,
-			Fills: _book.Fills,
+			// Chronological, not append order: the day loop books carry-over management closes (Step 1.5 minute
+			// walk) before the day's opens (Step 3), so a 15:30 Close lands in _fills ahead of that day's 09:31
+			// Open. Every consumer that walks Fills sequentially (fill-ledger running cash, --fills-jsonl,
+			// --book-cmd) expects time order; OrderBy is stable so same-timestamp fills keep append order.
+			Fills: _book.Fills.OrderBy(f => f.Date).ToList(),
 			EndMtmByLineage: endMtmByLineage,
 			Provenance: ComputeProvenance(),
 			Cleanliness: ComputeCleanliness(),
