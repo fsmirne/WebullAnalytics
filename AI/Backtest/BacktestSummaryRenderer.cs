@@ -279,10 +279,12 @@ internal static class BacktestSummaryRenderer
 		var realizedPct = result.StartingCash > 0m ? realized / result.StartingCash * 100m : 0m;
 		var unrealizedPct = result.StartingCash > 0m ? unrealized / result.StartingCash * 100m : 0m;
 		var totalPct = result.StartingCash > 0m ? total / result.StartingCash * 100m : 0m;
-		// Drawdown is the standard peak-to-trough equity drop, expressed as a percentage of peak equity.
-		// (Earlier we expressed it as a % of starting cash, which is meaningless once equity has grown
-		// past starting cash — a 40% drop from a $30k peak looked like 120% of starting $10k.)
-		var ddPct = result.PeakEquity > 0m ? result.MaxDrawdown / result.PeakEquity * 100m : 0m;
+		// Drawdown percent is the runner's true path maximum of (drop / peak IN FORCE at the time), which
+		// can peak at a different point than the dollar max. Two earlier renderings were both misleading:
+		// % of starting cash exploded once equity grew (40% off a $30k peak read as 120% of starting $10k),
+		// and dollar-max / END-OF-WINDOW peak buried early pain (the 2022-26 DC run printed 18.4% while the
+		// 2022 path sat ~60% under its starting peak).
+		var ddPct = result.MaxDrawdownPct * 100m;
 		var winRate = totalClosedLifecycles > 0 ? wins * 100m / totalClosedLifecycles : 0m;
 
 		var openMtm = endingEquity - result.EndingCash;
@@ -314,7 +316,7 @@ internal static class BacktestSummaryRenderer
 		{
 			table.AddRow("Peak equity", $"${result.PeakEquity:N2}");
 		}
-		table.AddRow("Max drawdown", $"[red]${result.MaxDrawdown:N2} ({ddPct:F2}% of peak)[/]");
+		table.AddRow("Max drawdown", $"[red]${result.MaxDrawdown:N2} dollar-max / {ddPct:F2}% worst peak-to-trough[/]");
 		table.AddRow("Trading days", result.EquityCurve.Count.ToString());
 		var streaks = ComputeDailyStreaks(result);
 		table.AddRow("Longest win streak", streaks.WinDays > 0 ? $"[green]{streaks.WinDays} day{(streaks.WinDays == 1 ? "" : "s")} ({streaks.WinStart:yyyy-MM-dd} → {streaks.WinEnd:yyyy-MM-dd})[/]" : "—");

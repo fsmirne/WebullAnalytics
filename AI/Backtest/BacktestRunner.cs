@@ -94,6 +94,7 @@ internal sealed class BacktestRunner
 		var startingCash = _book.Cash;
 		var peakEquity = startingCash;
 		var maxDrawdown = 0m;
+		var maxDrawdownPct = 0m;
 		var steps = EnumerateTradingDays(since, until).ToList();
 
 		// Per-step timing diagnostic. Enabled via --profile on `wa ai backtest`; off otherwise (zero
@@ -221,6 +222,12 @@ internal sealed class BacktestRunner
 			{
 				var dd = peakEquity - equity;
 				if (dd > maxDrawdown) maxDrawdown = dd;
+				// Percent DD against the peak IN FORCE at the time, tracked separately from the dollar max —
+				// the two can peak at different points. Dividing the dollar max by the END-OF-WINDOW peak
+				// (the old renderer behavior) hid early-window pain entirely: the 2022-01..2026-07 DC run
+				// printed 18.4% while the actual 2022 path sat ~60% under its $50k starting peak.
+				var ddPct = peakEquity > 0m ? dd / peakEquity : 0m;
+				if (ddPct > maxDrawdownPct) maxDrawdownPct = ddPct;
 			}
 
 			if (profile) msMtm += swSection!.ElapsedMilliseconds;
@@ -252,6 +259,7 @@ internal sealed class BacktestRunner
 			LegInFills: _book.Fills.Count(f => f.Kind == BacktestFillKind.LegIn),
 			ExpireFills: _book.Fills.Count(f => f.Kind == BacktestFillKind.Expire),
 			MaxDrawdown: maxDrawdown,
+			MaxDrawdownPct: maxDrawdownPct,
 			PeakEquity: peakEquity,
 			EquityCurve: equityCurve,
 			Fills: _book.Fills,
@@ -1575,6 +1583,7 @@ internal sealed record BacktestResult(
 	int LegInFills,
 	int ExpireFills,
 	decimal MaxDrawdown,
+	decimal MaxDrawdownPct,
 	decimal PeakEquity,
 	IReadOnlyList<(DateTime Date, decimal Equity)> EquityCurve,
 	IReadOnlyList<BacktestFill> Fills,
