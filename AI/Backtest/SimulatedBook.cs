@@ -111,14 +111,20 @@ internal sealed class SimulatedBook
 	/// <param name="legFills">Per-leg fills. <c>PricePerShare</c> must be set; <c>Side</c> is the executed direction.</param>
 	/// <param name="applySlippage">False for proposal-replay opens: the fill IS the submitted limit price, so the
 	/// mid-vs-fill friction model doesn't apply. Management/close fills always keep slippage on.</param>
+	/// <param name="allowAdd">Mirrors <c>allowAddToHeldPosition</c>: when the proposed structure is already held
+	/// with the EXACT same leg set, merge the add into the existing position (qty-weighted basis, same lineage)
+	/// the way the broker averages a re-take. False keeps the strict no-duplicate stance. A same-key proposal
+	/// whose legs differ (the key derives from the short leg only, so the long leg can differ) is declined either
+	/// way — one book position can't hold two different long legs.</param>
 	public bool Open(DateTime date, string ticker, OpenStructureKind structureKind, IReadOnlyList<BacktestLegFill> legFills, int qty, decimal spot,
-		decimal? rawScore = null, decimal? finalScore = null, decimal? repIv = null, bool applySlippage = true)
+		decimal? rawScore = null, decimal? finalScore = null, decimal? repIv = null, bool applySlippage = true, bool allowAdd = false)
 	{
 		var positionLegs = BuildLegsFromFills(legFills, qty, out var strategyKind, structureKind);
 		if (positionLegs.Count == 0) return false;
 
 		var key = ComputeKey(ticker, strategyKind, positionLegs);
-		if (_positions.ContainsKey(key)) return false;
+		if (_positions.TryGetValue(key, out var held))
+			return allowAdd && AddToHeldPosition(date, held, structureKind, legFills, qty, spot, rawScore, finalScore, repIv, applySlippage);
 
 		// Deduct slippage from cash flow so realized P&L matches the friction-aware EV the scorer used.
 		var cashFlow = ComputeCashFlow(legFills) - (applySlippage ? ComputeSlippage(structureKind, qty) : 0m);
@@ -148,6 +154,44 @@ internal sealed class SimulatedBook
 		_lineageByKey[key] = lineageId;
 
 		_fills.Add(new BacktestFill(date, key, ticker, strategyKind, qty, BacktestFillKind.Open, lineageId, legFills, cashFlow, fees, null, spot, rawScore, finalScore, repIv));
+		return true;
+	}
+
+	/// <summary>Merges a re-take of an already-held structure into the existing position, mirroring how the
+	/// broker averages: quantity adds, per-share bases become the qty-weighted average of held and add (both
+	/// InitialNetDebit and AdjustedNetDebit — rules like TakeProfit then evaluate against the same blended
+	/// AvgPrice live watch reads from the broker), and the add books as a second Open fill on the SAME lineage
+	/// so the lifecycle's P&L accounts open+add+close as one trade. Only an exact leg-set match merges.</summary>
+	private bool AddToHeldPosition(DateTime date, OpenPosition held, OpenStructureKind structureKind, IReadOnlyList<BacktestLegFill> legFills, int qty, decimal spot,
+		decimal? rawScore, decimal? finalScore, decimal? repIv, bool applySlippage)
+	{
+		if (qty < 1) return false;
+		var heldSet = held.Legs.Select(l => (Symbol: l.Symbol.ToUpperInvariant(), l.Side)).OrderBy(x => x.Symbol).ThenBy(x => x.Side).ToList();
+		var addSet = legFills.Select(l => (Symbol: l.Symbol.ToUpperInvariant(), l.Side)).OrderBy(x => x.Symbol).ThenBy(x => x.Side).ToList();
+		if (!heldSet.SequenceEqual(addSet)) return false;
+
+		var key = held.Key;
+		var cashFlow = ComputeCashFlow(legFills) - (applySlippage ? ComputeSlippage(structureKind, qty) : 0m);
+		var fees = Math.Abs(qty) * legFills.Count * _feePerContract;
+		Cash += cashFlow - fees;
+
+		var addDebitPerShare = -cashFlow / (qty * Multiplier);
+		var totalQty = held.Quantity + qty;
+		var initialDebit = (_initialDebitPerContract[key] * held.Quantity + addDebitPerShare * qty) / totalQty;
+		var adjustedDebit = (_adjustedDebitPerContract[key] * held.Quantity + addDebitPerShare * qty) / totalQty;
+		var mergedLegs = held.Legs.Select(l => l with { Qty = totalQty }).ToList();
+		_positions[key] = held with
+		{
+			Legs = mergedLegs,
+			InitialNetDebit = initialDebit,
+			AdjustedNetDebit = adjustedDebit,
+			Quantity = totalQty,
+			MaxLossPerShare = PositionRiskEstimator.MaxLossPerShare(initialDebit, mergedLegs),
+		};
+		_initialDebitPerContract[key] = initialDebit;
+		_adjustedDebitPerContract[key] = adjustedDebit;
+
+		_fills.Add(new BacktestFill(date, key, held.Ticker, held.StrategyKind, qty, BacktestFillKind.Open, _lineageByKey[key], legFills, cashFlow, fees, null, spot, rawScore, finalScore, repIv));
 		return true;
 	}
 

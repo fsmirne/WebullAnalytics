@@ -456,11 +456,17 @@ internal sealed class BacktestRunner
 
 	private bool OpenLegsIntoBook(DateTime when, string ticker, OpenStructureKind structureKind, IReadOnlyList<ProposalLeg> legs, int qty, decimal spot, decimal? rawScore, decimal? finalScore, decimal? repIv, bool applySlippage)
 	{
+		// Mirrors the live executor's held-position stance (OpenerAutoExecutor): allowAddToHeldPosition=true
+		// (the default) lets an exact re-take of a held structure merge in as an add instead of being dropped.
+		// Applies to the scored opener AND proposal replay — a replayed live add was recorded because live's
+		// executor passed it, so dropping it here silently diverges the books (2026-07-29: live added to its
+		// 07-28 diagonal; replay skipped the day entirely).
+		var allowAdd = _config.AutoExecute.Opener.AllowAddToHeldPosition;
 		var groups = _splitStructures ? StructureOrderSplit.Split(structureKind, legs) : null;
 		if (groups == null || groups.Count == 1)
 		{
 			var legFills = BuildLegFillsFromProposal(legs, qty);
-			return legFills != null && _book.Open(when, ticker, structureKind, legFills, qty, spot, rawScore, finalScore, repIv, applySlippage);
+			return legFills != null && _book.Open(when, ticker, structureKind, legFills, qty, spot, rawScore, finalScore, repIv, applySlippage, allowAdd);
 		}
 
 		var groupFills = new List<(OpenStructureKind Kind, IReadOnlyList<BacktestLegFill> Fills)>(groups.Count);
@@ -472,7 +478,7 @@ internal sealed class BacktestRunner
 		}
 		var opened = false;
 		foreach (var (kind, fills) in groupFills)
-			opened |= _book.Open(when, ticker, kind, fills, qty, spot, rawScore, finalScore, repIv, applySlippage);
+			opened |= _book.Open(when, ticker, kind, fills, qty, spot, rawScore, finalScore, repIv, applySlippage, allowAdd);
 		return opened;
 	}
 

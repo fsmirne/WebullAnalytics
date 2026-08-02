@@ -84,12 +84,13 @@ internal static class BacktestSummaryRenderer
 		table.AddColumn("Rule");
 
 		// Pre-index by lineage so we can compute cumulative realized P&L at any closing fill.
-		// Each lineage's "basis" is the absolute opening cash flow (debit paid or credit received);
-		// the P&L % shown on Close/Expire/Roll rows is cumulative-lineage-P&L / basis.
+		// Each lineage's "basis" is the absolute opening cash flow (debit paid or credit received),
+		// SUMMED over all Open fills — an add-to-held (allowAddToHeldPosition) books a second Open on
+		// the same lineage. The P&L % shown on Close/Expire/Roll rows is cumulative-lineage-P&L / basis.
 		var openCashByLineage = result.Fills
 			.Where(f => f.Kind == BacktestFillKind.Open)
 			.GroupBy(f => f.LineageId)
-			.ToDictionary(g => g.Key, g => g.First().NetCashFlow);
+			.ToDictionary(g => g.Key, g => g.Sum(f => f.NetCashFlow));
 		var fillsByLineage = result.Fills
 			.GroupBy(f => f.LineageId)
 			.ToDictionary(g => g.Key, g => g.OrderBy(f => f.Date).ToList());
