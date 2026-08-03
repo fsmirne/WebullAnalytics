@@ -373,6 +373,12 @@ internal sealed class CloseBeforeShortExpiryConfig
 	[JsonPropertyName("minProfitPct")] public decimal MinProfitPct { get; set; } = 0.30m;
 	/// <summary>How far past the calendar/diagonal break-even band (as a fraction of BE level) before the emergency-close fires regardless of profit threshold. Default 0.01 (1%).</summary>
 	[JsonPropertyName("emergencyBreakEvenBufferPct")] public decimal EmergencyBreakEvenBufferPct { get; set; } = 0.01m;
+	/// <summary>When the emergency-BE trigger fires with the short leg still OTM (runaway on the covered
+	/// side), roll the short to the next trading day at the same strike instead of closing — keep
+	/// harvesting daily theta until spot re-enters the BE band, the short goes ITM (assignment close
+	/// still applies), or the roll would reach the long leg's expiry. Falls back to the emergency close
+	/// whenever the next-day contract lacks a two-sided quote. Default false (close, the validated path).</summary>
+	[JsonPropertyName("rollPastBreakEven")] public bool RollPastBreakEven { get; set; } = false;
 	/// <summary>Models the broker's forced liquidation of ITM short options before cash settlement: Webull
 	/// force-closes ITM SPY positions ~30 min before the bell to prevent assignment a retail account can't
 	/// cover. When the rule is enabled, a PHYSICALLY-settled 0DTE position whose short leg is ITM this many

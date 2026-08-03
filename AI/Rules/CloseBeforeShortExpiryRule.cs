@@ -47,9 +47,16 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 				isEmergency: true);
 		}
 
-		// Emergency: spot past BE band → close immediately, profit threshold doesn't apply.
+		// Emergency: spot past BE band → close immediately, profit threshold doesn't apply. With
+		// rollPastBreakEven, an OTM short (the ITM case closed above) rolls one trading day at the
+		// same strike instead, harvesting theta while waiting for spot to re-enter the band.
 		if (IsSpotPastBreakEven(position, ctx, out var spot, out var beLow, out var beHigh))
 		{
+			if (_config.RollPastBreakEven)
+			{
+				var roll = TryBuildRoll(position, shortLeg, ctx, spot, beLow, beHigh);
+				if (roll != null) return roll;
+			}
 			return BuildClose(position,
 				$"emergency: spot ${spot:F2} outside BE band [${beLow:F2}, ${beHigh:F2}] on expiry day, close all {position.Quantity}",
 				isEmergency: true);
@@ -120,6 +127,38 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 
 		var buffer = _config.EmergencyBreakEvenBufferPct;
 		return spot < beLow * (1m - buffer) || spot > beHigh * (1m + buffer);
+	}
+
+	/// <summary>Builds the same-strike next-trading-day roll for the OTM short on expiry day. Returns null
+	/// (caller falls back to the emergency close) when the roll would reach the long leg's expiry or the
+	/// old/new contract lacks a two-sided quote.</summary>
+	private ManagementProposal? TryBuildRoll(OpenPosition position, PositionLeg shortLeg, EvaluationContext ctx, decimal spot, decimal beLow, decimal beHigh)
+	{
+		var longExpiry = position.Legs.Where(l => l.Side == Side.Buy && l.Expiry.HasValue).Select(l => l.Expiry!.Value.Date).DefaultIfEmpty(DateTime.MinValue).Min();
+		var newExpiry = MarketCalendar.NextOpenAfter(shortLeg.Expiry!.Value.Date);
+		if (longExpiry == DateTime.MinValue || newExpiry >= longExpiry) return null;
+
+		if (!ctx.Quotes.TryGetValue(shortLeg.Symbol, out var oldQ) || oldQ.Bid == null || oldQ.Ask == null) return null;
+		var newSymbol = MatchKeys.OccSymbol(position.Ticker, newExpiry, shortLeg.Strike, shortLeg.CallPut!);
+		if (!ctx.Quotes.TryGetValue(newSymbol, out var newQ) || newQ.Bid == null || newQ.Ask == null) return null;
+
+		var oldMid = (oldQ.Bid.Value + oldQ.Ask.Value) / 2m;
+		var newMid = (newQ.Bid.Value + newQ.Ask.Value) / 2m;
+		var legs = new[]
+		{
+			new ProposalLeg("buy", shortLeg.Symbol, shortLeg.Qty, oldMid, oldQ.Ask),
+			new ProposalLeg("sell", newSymbol, shortLeg.Qty, newMid, newQ.Bid)
+		};
+
+		return new ManagementProposal(
+			Rule: Name,
+			Ticker: position.Ticker,
+			PositionKey: position.Key,
+			Kind: ProposalKind.Roll,
+			Legs: legs,
+			NetDebit: oldMid - newMid,
+			Rationale: $"[roll] spot ${spot:F2} outside BE band [${beLow:F2}, ${beHigh:F2}] on expiry day, short OTM — roll to {newExpiry:yyyy-MM-dd} same strike ${shortLeg.Strike:F2}, mid credit ${newMid - oldMid:F2}"
+		);
 	}
 
 	private static ManagementProposal BuildClose(OpenPosition p, string rationale, bool isEmergency)

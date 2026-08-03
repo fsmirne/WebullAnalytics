@@ -1033,7 +1033,8 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var sameDayExpiryOnly = config.Opener.Structures.MaxDteAcrossEnabled() == 0
 			&& !config.Rules.OpportunisticRoll.Enabled
 			&& !config.Rules.DefensiveRoll.Enabled
-			&& !config.Rules.RollShortOnExpiry.Enabled;
+			&& !config.Rules.RollShortOnExpiry.Enabled
+			&& !(config.Rules.CloseBeforeShortExpiry.Enabled && config.Rules.CloseBeforeShortExpiry.RollPastBreakEven);
 		// Replayed legs come from the log, not the enabled-structure config — the filter is only safe when
 		// every replayed leg actually expires on its own open date.
 		if (replayOpens != null)
