@@ -105,6 +105,11 @@ internal sealed class OpenCandidateEvaluator
 	/// once Phase B finalizes the priced book; stays empty when the opener enumerates nothing.</summary>
 	public IReadOnlyDictionary<string, OptionContractQuote> LastPricedQuotes { get; private set; } = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 
+	/// <summary>The top-ranked candidate of the most recent <see cref="EvaluateAsync"/> call BEFORE the MinScoreToOpen gate (post sizing and per-structure truncation; highest FinalScore across tickers).
+	/// The watch heartbeat logs this so a suppressed tick records what the opener's best idea scored — without it a day where nothing clears the gate is indistinguishable from a dead watch in the
+	/// proposal log (the 2026-08-03 incident). Null when the opener enumerated or priced nothing.</summary>
+	public OpenProposal? LastTopCandidate { get; private set; }
+
 	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation, QuoteOverrides quoteOverrides = default)
 	{
 		var cfg = _config.Opener;
@@ -119,6 +124,7 @@ internal sealed class OpenCandidateEvaluator
 		var output = new List<OpenProposal>();
 		// Reset so the live quote guard never inspects a prior tick's book; repopulated once Phase B finalizes it.
 		LastPricedQuotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		LastTopCandidate = null;
 
 		// Phase A0: bootstrap spots + chains for tickers missing from ctx.UnderlyingPrices.
 		// The live-quote clients return the full chain plus the underlying spot for any OCC symbol,
@@ -547,6 +553,8 @@ internal sealed class OpenCandidateEvaluator
 			// legacy behavior of emitting any positive-EV trade.
 			var minScore = cfg.MinScoreToOpen;
 			var ranked = RankForOutput(survivors).ToList();
+			// Captured BEFORE the gate below so the watch heartbeat can log the best below-gate score on a suppressed tick (see LastTopCandidate).
+			if (ranked.FirstOrDefault() is { } topRanked && (topRanked.FinalScore ?? 0m) > (LastTopCandidate?.FinalScore ?? decimal.MinValue)) LastTopCandidate = topRanked;
 			// `--all` (scan-only): drop the minScoreToOpen gate so the full top-N is emitted regardless of score.
 			// This is a genuine override, not a display filter — the emitted proposals are ordinary ranked picks,
 			// so `--all --submit` will place the top one even when it scored below the threshold that normally

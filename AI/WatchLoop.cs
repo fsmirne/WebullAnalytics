@@ -202,6 +202,12 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 					Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={tick.Spot} positions={tick.PositionCount} mgmtResults={tick.MgmtCount} openProposals={tick.OpenCount}");
 				}
 
+				// Persisted heartbeat: the console pulse above dies with the terminal, so in the proposal LOG a day
+				// suppressed by MinScoreToOpen was indistinguishable from a watch that never ran (2026-08-03: watch
+				// ran all day, nothing cleared the gate, zero rows). One lean type:"tick" line per successful tick
+				// records liveness plus the best pre-gate candidate's score; type=="open" consumers never see them.
+				if (!tick.Aborted) openSink?.EmitTick(tick.Spot, tick.OpenCount, tick.MgmtCount, openEvaluator?.LastTopCandidate, config.Opener.MinScoreToOpen);
+
 				ticksRun++;
 				failures = 0;
 			}

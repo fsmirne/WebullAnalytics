@@ -60,6 +60,27 @@ public class OpenProposalSinkTests
 	}
 
 	[Fact]
+	public void TickRecordCarriesTopCandidateAndGate()
+	{
+		var json = OpenProposalSink.SerializeTickRecord(mode: "watch", ticker: "SPY", strategy: "DC", spot: 750.12m, openCount: 0, mgmtCount: 1, topCandidate: MakeProposal(0.0008m, "fp1"), minScoreToOpen: 0.002m);
+		Assert.Contains("\"type\":\"tick\"", json);
+		Assert.Contains("\"ticker\":\"SPY\"", json);
+		Assert.Contains("\"strategy\":\"DC\"", json);
+		Assert.Contains("\"openCount\":0", json);
+		Assert.Contains("\"minScoreToOpen\":0.002", json);
+		Assert.Contains("\"finalScore\":0.0008", json);
+		Assert.Contains("\"structure\":\"LongCall\"", json);
+	}
+
+	[Fact]
+	public void TickRecordWithNoCandidateHasNullTop()
+	{
+		var json = OpenProposalSink.SerializeTickRecord(mode: "watch", ticker: "SPY", strategy: "DC", spot: null, openCount: 0, mgmtCount: 0, topCandidate: null, minScoreToOpen: 0.002m);
+		Assert.Contains("\"top\":null", json);
+		Assert.Contains("\"spot\":null", json);
+	}
+
+	[Fact]
 	public void SerializeIsDeterministicAcrossRepeats()
 	{
 		// Repeats are never deduped in the JSONL — each Emit writes its own line. Serialization of the

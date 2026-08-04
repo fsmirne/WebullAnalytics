@@ -22,12 +22,14 @@ internal sealed class OpenProposalSink : IDisposable
 	private readonly bool _ascii;
 	private readonly string _cmdPrefix;
 	private readonly string _strategy;
+	private readonly string _ticker;
 
 	public OpenProposalSink(string consoleVerbosity, string ticker, string strategy, string mode, string suggestPricing = SuggestionPricing.Mid, bool ascii = false)
 	{
 		_consoleVerbosity = consoleVerbosity;
 		_mode = mode;
 		_strategy = strategy;
+		_ticker = ticker;
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
 		_ascii = ascii;
 		_cmdPrefix = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
@@ -43,6 +45,37 @@ internal sealed class OpenProposalSink : IDisposable
 	}
 
 	public void Flush() => _file.Flush();
+
+	/// <summary>Writes one lean <c>type:"tick"</c> heartbeat line per watch tick (JSONL only, no console — the watch's own per-tick pulse covers the terminal). Records that the loop RAN and what the
+	/// opener's best pre-gate candidate scored, so a day suppressed by MinScoreToOpen is distinguishable from a dead watch after the fact (2026-08-03: watch ran all day, emitted nothing, and the log
+	/// couldn't prove it). Every replay/harness consumer filters <c>type=="open"</c>, so these lines are invisible to them by construction.</summary>
+	public void EmitTick(decimal? spot, int openCount, int mgmtCount, OpenProposal? topCandidate, decimal minScoreToOpen) => _file.WriteLine(SerializeTickRecord(_mode, _ticker, _strategy, spot, openCount, mgmtCount, topCandidate, minScoreToOpen));
+
+	/// <summary>Serializes one heartbeat line. Pure (no I/O) so it's unit-testable, mirroring <see cref="SerializeRecord"/>. <paramref name="topCandidate"/> is the best-ranked candidate BEFORE the
+	/// MinScoreToOpen gate — on a suppressed tick (openCount 0) its finalScore vs <paramref name="minScoreToOpen"/> is the diagnosis; null means the opener enumerated or priced nothing at all.</summary>
+	internal static string SerializeTickRecord(string mode, string ticker, string strategy, decimal? spot, int openCount, int mgmtCount, OpenProposal? topCandidate, decimal minScoreToOpen)
+	{
+		var record = new
+		{
+			type = "tick",
+			ts = DateTime.Now.ToString("o"),
+			mode = mode,
+			ticker = ticker,
+			strategy = strategy,
+			spot = spot,
+			openCount = openCount,
+			mgmtCount = mgmtCount,
+			minScoreToOpen = minScoreToOpen,
+			top = topCandidate is null ? null : new
+			{
+				structure = topCandidate.StructureKind.ToString(),
+				finalScore = topCandidate.FinalScore,
+				rawScore = topCandidate.RawScore,
+				legs = topCandidate.Legs.Select(l => new { action = l.Action, symbol = l.Symbol, qty = l.Qty }),
+			},
+		};
+		return JsonSerializer.Serialize(record);
+	}
 
 	private void WriteJsonl(OpenProposal p, int? rank) => _file.WriteLine(SerializeRecord(p, _mode, _strategy, rank));
 
