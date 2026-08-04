@@ -230,7 +230,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		// Live runs log what THIS computation showed (gravity/walls/flip/max-pain per expiry) to data/gex —
 		// the vendor-reported IVs these values are built on are never persisted intraday, so the displayed
-		// numbers are otherwise irreproducible; the --intraday heatmap reads this log back as its "Live" row.
+		// numbers are otherwise irreproducible; the --intraday heatmap reads this log back as its "Gravity" row.
 		if (!settings.EvaluationDateOverride.HasValue)
 		{
 			AppendGexLog(ticker, spot.Value, matrix, settings);
@@ -668,7 +668,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// wa-scraper / ThetaData sync) covers this day, each bucket's IVs are back-solved from THAT minute's NBBO mids
 	/// instead of the morning snapshot's frozen values — the snapshot IVs age badly through a 0DTE session (IV
 	/// collapses intraday, sharpening gamma toward ATM), which is why a frozen-IV replay disagrees with what the
-	/// live command showed. A data/gex live log (when present) is rendered as a "Live" footer row for comparison.</summary>
+	/// live command showed. A data/gex live log (when present) is rendered as a "Gravity" footer row for comparison.</summary>
 	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int intervalMin, bool exante, string source, bool liveChain = false)
 	{
 		var expiry = date.Date;
@@ -761,13 +761,13 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			table.AddRow(cells.ToArray());
 		}
 
-		// "Live" footer row: per bucket, the gravity the live `analyze gex` runs actually displayed (data/gex log)
+		// "Gravity" footer row: per bucket, the gravity the live `analyze gex` runs actually displayed (data/gex log)
 		// nearest the mark. The live values come from vendor-reported IVs that are never persisted, so this row is
 		// the only ground truth a replay can be compared against.
 		var liveGravity = LoadLiveGravityLog(ticker, date, source);
 		if (liveGravity.Count > 0)
 		{
-			var liveCells = new List<string> { "[bold cyan]Live[/]" };
+			var liveCells = new List<string> { "[bold cyan]Gravity[/]" };
 			foreach (var h in hours)
 			{
 				decimal? g = null;
@@ -783,7 +783,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 
 		AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma)." + (liveGravity.Count > 0 ? " [cyan]Live[/] row = gravity logged by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
+		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma)." + (liveGravity.Count > 0 ? " [cyan]Gravity[/] row = the gravity strike logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
 		if (skipped.Count > 0 && liveChain)
 			AnsiConsole.MarkupLine($"[dim]{skipped.Count} bucket(s) still ahead ({string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))}) — the session tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET; re-run to extend the columns as the day unfolds.[/]");
 		else if (skipped.Count > 0)
@@ -901,7 +901,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var path = Program.ResolvePath($"data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl");
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		File.AppendAllText(path, JsonSerializer.Serialize(record) + "\n");
-		AnsiConsole.MarkupLine($"[dim]Logged to data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl (the --intraday heatmap reads this back as its \"Live\" row).[/]");
+		AnsiConsole.MarkupLine($"[dim]Logged to data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl (the --intraday heatmap reads this back as its \"Gravity\" row).[/]");
 	}
 
 	/// <summary>--dump: appends one CSV row per in-window contract of this LIVE fetch to
