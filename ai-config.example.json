@@ -84,7 +84,8 @@
 	"rules": {
 		"stopLoss": {
 			"enabled": true,
-			"pctOfMaxLoss": 0.75
+			"pctOfMaxLoss": 0.75,
+			"thetaExhaustShortMid": 0
 		},
 		"opportunisticRoll": {
 			"enabled": true,

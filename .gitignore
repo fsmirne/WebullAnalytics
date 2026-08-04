@@ -502,6 +502,9 @@ creds.txt
 /*.jsonl
 .gex_analysis/
 
+# pinned build for parameter sweeps (see scripts/backtest_*_sweep.ps1)
+.sweep-bin/
+
 # local working notes — keep out of the remote
 scripts/pvb_campaign.md
 CAMPAIGN_STATE.md

@@ -321,6 +321,14 @@ internal sealed class StopLossConfig
 	/// tracks the EV the opener ranked. 1.0 disables the stop (= let it ride to the max-loss floor). Default
 	/// 0.50 ≈ the "2× credit" rule on typical 4×-width credit spreads.</summary>
 	[JsonPropertyName("pctOfMaxLoss")] public decimal PctOfMaxLoss { get; set; } = 0.50m;
+	/// <summary>Theta-exhaustion close for cross-expiry structures (calendars / diagonals / doubles): when
+	/// > 0 and the position is underwater, close once EVERY short leg expiring before the longest long has
+	/// decayed to a mid ≤ this per-share floor, with at least 1 day left to short expiry (expiry day itself
+	/// belongs to CloseBeforeShortExpiry). Rationale: at pennies of remaining short premium the structure's
+	/// recovery engine is gone — what's left is an unchosen naked-long directional bet bleeding theta.
+	/// Deliberately independent of <c>enabled</c> and <c>pctOfMaxLoss</c>, which gate the realized-loss stop
+	/// and feed the opener's scorer EV — arming this knob must not change opener rankings. 0 disables (default).</summary>
+	[JsonPropertyName("thetaExhaustShortMid")] public decimal ThetaExhaustShortMid { get; set; } = 0m;
 }
 
 internal sealed class TakeProfitConfig

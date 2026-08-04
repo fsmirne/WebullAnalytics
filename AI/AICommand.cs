@@ -845,6 +845,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Override rules.stopLoss.pctOfMaxLoss for this run. 1.0 = SL effectively off (ride to expiry/settlement); 0.5 = cut at half of max loss. Range 0..1.")]
 	public decimal? SlOverride { get; set; }
 
+	[CommandOption("--exhaust <VALUE>")]
+	[Description("Override rules.stopLoss.thetaExhaustShortMid for this run: close an underwater cross-expiry position once every early short leg's mid has decayed to ≤ this per-share floor with ≥ 1 day to short expiry (theta capture exhausted — the structure can no longer earn its way back). 0 = off. Sweep knob for the theta-exhaustion stop; independent of --sl and of opener scoring.")]
+	public decimal? ExhaustOverride { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -853,6 +857,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--tp-pct: must be ≥ 0, got {TpPctOverride}");
 		if (SlOverride.HasValue && (SlOverride.Value <= 0m || SlOverride.Value > 1m))
 			return ValidationResult.Error($"--sl: must be in (0, 1], got {SlOverride}");
+		if (ExhaustOverride.HasValue && ExhaustOverride.Value < 0m)
+			return ValidationResult.Error($"--exhaust: must be ≥ 0, got {ExhaustOverride}");
 		if (Lots.HasValue && Lots.Value < 1)
 			return ValidationResult.Error($"--lots: must be = 1, got {Lots}");
 		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
@@ -918,6 +924,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (!string.IsNullOrWhiteSpace(settings.OpenBeforeOverride)) config.Opener.LatestEntryTimeEt = settings.OpenBeforeOverride;
 		if (settings.TpPctOverride.HasValue) config.Rules.TakeProfit.ProfitTargetPctOfPremium = settings.TpPctOverride.Value;
 		if (settings.SlOverride.HasValue) config.Opener.RealizedExpectancy.StopLossPctOfMaxLoss = settings.SlOverride.Value;
+		if (settings.ExhaustOverride.HasValue) config.Rules.StopLoss.ThetaExhaustShortMid = settings.ExhaustOverride.Value;
 		foreach (var name in settings.EnableStructures)
 		{
 			switch (name.ToLowerInvariant())

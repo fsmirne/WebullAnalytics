@@ -2,7 +2,9 @@ namespace WebullAnalytics.AI.Rules;
 
 /// <summary>
 /// Priority 1: close the position when realized loss reaches a configured fraction of the position's
-/// max possible loss.
+/// max possible loss, or — independently, via <c>thetaExhaustShortMid</c> — when an underwater
+/// cross-expiry structure's short legs have decayed to pennies (theta capture exhausted; see
+/// <see cref="EvaluateThetaExhaust"/>).
 ///
 /// The P&L trigger mirrors the candidate scorer's terminal-PnL stop (<c>stopLossPctOfMaxLoss</c> on
 /// <see cref="OpenerRealizedExpectancyConfig"/>) so realized exits track the EV the opener ranked
@@ -31,7 +33,8 @@ internal sealed class StopLossRule : IManagementRule
 
 	public ManagementProposal? Evaluate(OpenPosition position, EvaluationContext ctx)
 	{
-		if (!_config.Enabled) return null;
+		var thetaExhaustArmed = _config.ThetaExhaustShortMid > 0m;
+		if (!_config.Enabled && !thetaExhaustArmed) return null;
 		if (position.Legs.Count == 0) return null;
 
 		var markPerShare = ComputeMarkPerShare(position, ctx);
@@ -48,7 +51,7 @@ internal sealed class StopLossRule : IManagementRule
 		// theoretical max loss, which mirrors the scorer's terminal-PnL clamp at -1.0×maxLoss
 		// (no effective stop). Closing at the max-loss floor produces the same economic outcome as
 		// letting the position expire, while removing the optionality of intraday recovery.
-		if (maxLossPerShare.HasValue && maxLossPerShare.Value > 0m && _realizedExpectancy.Enabled
+		if (_config.Enabled && maxLossPerShare.HasValue && maxLossPerShare.Value > 0m && _realizedExpectancy.Enabled
 			&& _realizedExpectancy.StopLossPctOfMaxLoss < 1m)
 		{
 			var threshold = maxLossPerShare.Value * _realizedExpectancy.StopLossPctOfMaxLoss;
@@ -59,7 +62,47 @@ internal sealed class StopLossRule : IManagementRule
 			}
 		}
 
+		if (thetaExhaustArmed && realizedLoss > 0m)
+		{
+			var rationale = EvaluateThetaExhaust(position, ctx, realizedLoss);
+			if (rationale != null) return BuildClose(position, ctx, markPerShare.Value, rationale);
+		}
+
 		return null;
+	}
+
+	/// <summary>Theta-exhaustion trigger: on an underwater cross-expiry structure, once every short leg
+	/// expiring before the longest long has decayed to a mid at or below the configured floor, the
+	/// position no longer earns theta — closing is recognizing the trade's thesis expired early, not a
+	/// loss-percentage stop. Returns the rationale when the trigger fires, null otherwise. Expiry-day
+	/// shorts are left to CloseBeforeShortExpiryRule (its defer-to-late-session behavior wins there).</summary>
+	private string? EvaluateThetaExhaust(OpenPosition position, EvaluationContext ctx, decimal realizedLoss)
+	{
+		var longestLongExpiry = position.Legs
+			.Where(l => l.Side == Side.Buy && l.CallPut != null && l.Expiry.HasValue)
+			.Select(l => l.Expiry!.Value.Date)
+			.DefaultIfEmpty(DateTime.MinValue)
+			.Max();
+		if (longestLongExpiry == DateTime.MinValue) return null;
+
+		var earlyShorts = position.Legs
+			.Where(l => l.Side == Side.Sell && l.CallPut != null && l.Expiry.HasValue && l.Expiry.Value.Date < longestLongExpiry)
+			.ToList();
+		if (earlyShorts.Count == 0) return null;
+		if (earlyShorts.Min(l => l.Expiry!.Value.Date) <= ctx.Now.Date) return null;
+
+		decimal worstMid = 0m;
+		foreach (var leg in earlyShorts)
+		{
+			// ComputeMarkPerShare already required a two-sided quote on every leg, so the lookup can't miss.
+			var q = ctx.Quotes[leg.Symbol];
+			var mid = (q.Bid!.Value + q.Ask!.Value) / 2m;
+			if (mid > _config.ThetaExhaustShortMid) return null;
+			if (mid > worstMid) worstMid = mid;
+		}
+
+		var dte = (earlyShorts.Min(l => l.Expiry!.Value.Date) - ctx.Now.Date).Days;
+		return $"theta exhausted: all {earlyShorts.Count} early short leg(s) at mid ≤ ${worstMid:F2} (floor ${_config.ThetaExhaustShortMid:F2}) with {dte}d to short expiry, underwater ${realizedLoss:F2}/share — no premium left to recover through";
 	}
 
 	private static ManagementProposal BuildClose(OpenPosition p, EvaluationContext ctx, decimal markPerShare, string rationale)
