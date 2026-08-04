@@ -23,11 +23,16 @@ class Program
 	/// debug build was still reading its own copy.
 	///
 	/// Resolution order:
-	///   1. If <c>%LOCALAPPDATA%/WebullAnalytics/data</c> exists, use <c>%LOCALAPPDATA%/WebullAnalytics</c>
+	///   1. If <c>WA_DATA_DIR</c> is set, it names the data directory itself (the convention the
+	///      backfill scripts and daily_backfill already use — conventionally <c>.../WebullAnalytics/data</c>)
+	///      and its parent becomes the base. Honored even when the directory doesn't exist yet: an
+	///      explicit override that silently landed in the exe-dir fallback would be worse than
+	///      creating the requested location.
+	///   2. If <c>%LOCALAPPDATA%/WebullAnalytics/data</c> exists, use <c>%LOCALAPPDATA%/WebullAnalytics</c>
 	///      as the base regardless of where the executable lives. This makes the prod data dir the
 	///      single source of truth across every invocation path (published wa.exe, dotnet run from
 	///      source, bin/Debug/wa.exe, etc).
-	///   2. Otherwise fall back to the executable's directory — preserves the prior behavior for
+	///   3. Otherwise fall back to the executable's directory — preserves the prior behavior for
 	///      first-run setups where the user hasn't created an AppData dir yet, and for tests that
 	///      rely on bin/.../data for fixtures.
 	///
@@ -39,19 +44,29 @@ class Program
 	private static string ResolveBaseDir()
 	{
 		var exeDir = Path.GetDirectoryName(Environment.ProcessPath ?? AppContext.BaseDirectory)!;
+		var dataDirOverride = Environment.GetEnvironmentVariable("WA_DATA_DIR");
+		if (!string.IsNullOrEmpty(dataDirOverride))
+			return Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirOverride))) ?? exeDir;
+		var canonical = CanonicalBaseDir();
+		if (canonical != null && Directory.Exists(Path.Combine(canonical, "data")))
+			return canonical;
+		return exeDir;
+	}
+
+	/// <summary>The OS-canonical prod base dir (<c>%LOCALAPPDATA%\WebullAnalytics</c> on Windows,
+	/// <c>~/.local/share/WebullAnalytics</c> on Linux — the layout install.bat/install.sh create),
+	/// independent of whether its <c>data/</c> subdir exists yet. Null when the platform can't supply
+	/// a local-app-data folder (e.g. HOME unset under cron).</summary>
+	internal static string? CanonicalBaseDir()
+	{
 		try
 		{
 			var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-			if (!string.IsNullOrEmpty(appData))
-			{
-				var candidate = Path.Combine(appData, "WebullAnalytics");
-				if (Directory.Exists(Path.Combine(candidate, "data")))
-					return candidate;
-			}
+			if (!string.IsNullOrEmpty(appData)) return Path.Combine(appData, "WebullAnalytics");
 		}
 		catch (PlatformNotSupportedException) { }
 		catch (IOException) { }
-		return exeDir;
+		return null;
 	}
 
 	internal const string ApiConfigPath = "data/api-config.json";

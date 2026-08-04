@@ -97,7 +97,9 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 }
 
 /// <summary>`wa data restore` — inverse of `wa data backup`. Defaults to the most-recent
-/// <c>wa-data-*.tar.gz</c> in <c><BaseDir>/backups/</c>. Restore is atomic: extracts to a staging
+/// <c>wa-data-*.tar.gz</c> in <c><BaseDir>/backups/</c>. On a machine with no <c>data/</c> yet the
+/// destination is the OS-canonical prod location (see <see cref="ResolveRestoreBaseDir"/>), not the
+/// exe-dir fallback <see cref="Program.BaseDir"/> would give. Restore is atomic: extracts to a staging
 /// directory first, then applies. A full archive swaps the whole <c>data/</c> dir in (the existing dir
 /// is renamed to <c>data.bak.<timestamp>/</c>); a settings-only payload — a settings backup, or any
 /// archive restored with <c>--settings</c> — is OVERLAID instead: only the top-level files are replaced
@@ -123,10 +125,11 @@ internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 {
 	protected override async Task<int> ExecuteAsync(CommandContext context, DataRestoreSettings settings, CancellationToken cancellation)
 	{
-		var inputPath = settings.Input ?? FindLatestBackup();
+		var baseDir = ResolveRestoreBaseDir();
+		var inputPath = settings.Input ?? FindLatestBackup(baseDir);
 		if (inputPath == null)
 		{
-			var backupsDir = Path.Combine(Program.BaseDir, "backups");
+			var backupsDir = Path.Combine(baseDir, "backups");
 			AnsiConsole.MarkupLine($"[red]no backups found[/] in {Markup.Escape(backupsDir)} — pass --input to specify one");
 			return 1;
 		}
@@ -136,7 +139,7 @@ internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 			return 1;
 		}
 
-		var dataDir = Program.ResolvePath("data");
+		var dataDir = Path.Combine(baseDir, "data");
 		var parent = Path.GetDirectoryName(dataDir)!;
 		Directory.CreateDirectory(parent);
 
@@ -240,9 +243,22 @@ internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 		}
 	}
 
-	private static string? FindLatestBackup()
+	/// <summary>Restore exists to CREATE the prod data dir, so unlike <see cref="Program.BaseDir"/> it must not
+	/// land in the exe-dir fallback just because <c>data/</c> doesn't exist yet — that's exactly the fresh-machine
+	/// migration case the command is for (observed on Linux: restore before install.sh populated
+	/// <c>~/.local/bin/data</c>, which every later invocation ignored once the XDG dir appeared). A WA_DATA_DIR
+	/// override or an already-resolved data/ next to <see cref="Program.BaseDir"/> wins as usual; otherwise
+	/// target the OS-canonical location even though it's empty.</summary>
+	private static string ResolveRestoreBaseDir()
 	{
-		var dir = Path.Combine(Program.BaseDir, "backups");
+		if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WA_DATA_DIR"))) return Program.BaseDir;
+		if (Directory.Exists(Path.Combine(Program.BaseDir, "data"))) return Program.BaseDir;
+		return Program.CanonicalBaseDir() ?? Program.BaseDir;
+	}
+
+	private static string? FindLatestBackup(string baseDir)
+	{
+		var dir = Path.Combine(baseDir, "backups");
 		if (!Directory.Exists(dir)) return null;
 		return Directory.EnumerateFiles(dir, "wa-data-*.tar.gz")
 			.OrderByDescending(f => File.GetLastWriteTimeUtc(f))
