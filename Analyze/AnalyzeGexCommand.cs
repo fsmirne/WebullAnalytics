@@ -53,7 +53,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public bool Dump { get; set; }
 
 	[CommandOption("--intraday")]
-	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Per-bucket IVs are back-solved from the minute-quote store (data/quotes) when it covers the day, else frozen from the snapshot. Offline-only — requires an explicit --date (today included) with a data/oi snapshot. Skips the walls/totals/per-expiry tables.")]
+	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Without --date (or with --date today) this is the RUNNING-DAY view: OI/IVs come from the live chain fetch and the columns run 09:30 through the current bucket. A past --date replays that day offline from its data/oi snapshot, with per-bucket IVs back-solved from the minute-quote store (data/quotes) when it covers the day, else frozen from the snapshot. Skips the walls/totals/per-expiry tables.")]
 	public bool Intraday { get; set; }
 
 	[CommandOption("--interval <MIN>")]
@@ -101,6 +101,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		Dictionary<string, OptionContractQuote> quotes;
 		decimal? spot;
 		var isOfflineHistorical = false;
+		ApiConfig? apiConfig = null;   // set on the live-fetch path; the running-day --intraday tape refresh reuses it
 
 		// Historical/offline: for an explicit --date (today included) with a captured chain in data/oi (ThetaData
 		// backfill or the live scraper), read that day's snapshot — OI + IV + spot are inlined for the full chain —
@@ -128,7 +129,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				AnsiConsole.MarkupLine("[red]Error: api-config.json not found. Run 'sniff' first (or pass a past --date with a data/oi snapshot).[/]");
 				return 1;
 			}
-			var apiConfig = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
+			apiConfig = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
 			if (settings.VendorName == "schwab")
 			{
 				if (apiConfig?.Schwab == null)
@@ -199,14 +200,24 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// --date with both a data/oi snapshot and a data/intraday spot file). Replaces the normal tables.
 		if (settings.Intraday)
 		{
-			if (!isOfflineHistorical)
+			if (!isOfflineHistorical && asOf.Date != DateTime.Today)
 			{
-				AnsiConsole.MarkupLine("[red]--intraday requires an explicit --date with a data/oi snapshot (offline-historical mode); none was loaded.[/]");
+				AnsiConsole.MarkupLine("[red]--intraday for a past day requires a data/oi snapshot for that --date (offline-historical mode); none was loaded. The running day needs no snapshot — omit --date.[/]");
 				return 1;
 			}
 			if (settings.Exante && !ApplyExanteIvs(ticker, asOf.Date, quotes))
 				return 1;
-			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName);
+			if (!isOfflineHistorical)
+			{
+				// Running-day mode: the chain just fetched live carries today's real OI (constant intraday, published
+				// pre-open) and current IVs, so the 09:30 -> now migration is renderable without waiting for tomorrow's
+				// backfill snapshot. Refresh the intraday tape first so the spot columns extend to the current minute
+				// instead of ending wherever the last tape-touching command left the file; columns after "now" have no
+				// spot within tolerance and drop out naturally.
+				await RefreshIntradayTapeAsync(ticker, apiConfig, cancellation);
+				AnsiConsole.MarkupLine($"[dim]Running-day heatmap from the live {Markup.Escape(settings.VendorName)} chain ({quotes.Count} contracts); columns end at the current bucket.[/]");
+			}
+			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical);
 			return 0;
 		}
 
@@ -606,6 +617,25 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// <summary>Reads data/intraday/<TICKER>/<date>.csv (header timestamp_utc,open,high,low,close,volume; UTC ISO
 	/// timestamps), converts each row to ET, keeps the RTH window (09:30–16:00 ET), and returns ET-time-of-day → close.
 	/// Returns empty when the file is absent.</summary>
+	/// <summary>Refreshes today's <c>data/intraday/&lt;TICKER&gt;/&lt;date&gt;.csv</c> through the same Webull chart path that normally maintains it (<see cref="WebullAnalytics.AI.Replay.IntradayBarCache"/>
+	/// persists fetched bars as its side effect), so the running-day heatmap's spot columns reach the current minute. Best-effort: on any failure the heatmap still renders from whatever the tape file
+	/// already holds — a warning notes that the columns stop at the last cached bar.</summary>
+	private static async Task RefreshIntradayTapeAsync(string ticker, ApiConfig? apiConfig, CancellationToken cancellation)
+	{
+		if (apiConfig == null) return;
+		try
+		{
+			var cache = new WebullAnalytics.AI.Replay.IntradayBarCache(WebullAnalytics.AI.Sources.WebullIntradayBars.CreateFetcher(apiConfig));
+			var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+			var openUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(nowEt.Date.AddHours(9).AddMinutes(30), NyTz));
+			await cache.GetBarsAsync(ticker, openUtc, DateTimeOffset.UtcNow, BarInterval.M1, includeExtended: true, cancellation);
+		}
+		catch (Exception ex)
+		{
+			AnsiConsole.MarkupLine($"[yellow]Intraday tape refresh failed ({Markup.Escape(ex.Message)}); heatmap columns end at the tape's last cached bar.[/]");
+		}
+	}
+
 	private static SortedDictionary<TimeSpan, decimal> LoadIntradaySpots(string ticker, DateTime date)
 	{
 		var spots = new SortedDictionary<TimeSpan, decimal>();
@@ -639,7 +669,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// instead of the morning snapshot's frozen values — the snapshot IVs age badly through a 0DTE session (IV
 	/// collapses intraday, sharpening gamma toward ATM), which is why a frozen-IV replay disagrees with what the
 	/// live command showed. A data/gex live log (when present) is rendered as a "Live" footer row for comparison.</summary>
-	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int intervalMin, bool exante, string source)
+	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int intervalMin, bool exante, string source, bool liveChain = false)
 	{
 		var expiry = date.Date;
 		var intradaySpots = LoadIntradaySpots(ticker, date);
@@ -710,7 +740,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		AnsiConsole.MarkupLine($"[bold]{ticker}[/] 0DTE {date:yyyy-MM-dd} — intraday GEX gravity migration");
 		AnsiConsole.MarkupLine(minuteQuotes.Count > 0
 			? $"[dim]IVs: back-solved per bucket from minute NBBO mids (data/quotes/{ticker}/{date:yyyy-MM-dd}.csv); OI fixed from the day's snapshot.[/]"
-			: $"[dim]IVs: frozen from the day's {(exante ? "prior-day --exante" : "OI-snapshot")} values (no minute-quote coverage for this day{(exante ? "" : " in data/quotes")}).[/]");
+			: exante ? "[dim]IVs: frozen from the prior-day --exante values (no minute-quote coverage for this day).[/]"
+			: liveChain ? "[dim]IVs: frozen from the live chain at fetch time; OI fixed from the same fetch (running day — early columns replay today's OI at each bucket's spot with current IVs).[/]"
+			: "[dim]IVs: frozen from the day's OI-snapshot values (no minute-quote coverage for this day in data/quotes).[/]");
 
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
 		table.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
@@ -752,7 +784,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		AnsiConsole.Write(table);
 		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma)." + (liveGravity.Count > 0 ? " [cyan]Live[/] row = gravity logged by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
-		if (skipped.Count > 0)
+		if (skipped.Count > 0 && liveChain)
+			AnsiConsole.MarkupLine($"[dim]{skipped.Count} bucket(s) still ahead ({string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))}) — the session tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET; re-run to extend the columns as the day unfolds.[/]");
+		else if (skipped.Count > 0)
 			AnsiConsole.MarkupLine($"[yellow]Dropped {skipped.Count} bucket(s) with no spot/quote within {tolerance.TotalMinutes:F0} min: {string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))} — the spot tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET{(date.Date == DateTime.Today ? $". Refresh today's tape with `wa ai history {ticker} --partial`" : "")}.[/]");
 	}
 
