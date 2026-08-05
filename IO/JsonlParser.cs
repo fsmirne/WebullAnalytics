@@ -52,7 +52,17 @@ public static partial class JsonlParser
 
 		foreach (var group in groups)
 		{
-			foreach (var combo in PartitionIntoCombos(group.ToList()))
+			// Equity fills (covered-stock / married-put tickets share the option legs' transactTime) become
+			// standalone Asset.Stock trades: the option-only combo machinery below (strike/expiry/call-put
+			// partitioning, strategy parents priced at the 100x multiplier) has no valid representation for a
+			// 1x share leg, and the per-ticker combined break-even panel merges the units downstream anyway.
+			var equities = group.Where(o => o.IsEquity).ToList();
+			var options = group.Where(o => !o.IsEquity).ToList();
+			foreach (var equity in equities)
+				BuildStandaloneEquityTrade(equity, trades, fees, ref seq);
+			if (options.Count == 0) continue;
+
+			foreach (var combo in PartitionIntoCombos(options))
 			{
 				if (combo.Count >= 2)
 					BuildStrategyTrades(combo, trades, fees, ref seq);
@@ -75,6 +85,24 @@ public static partial class JsonlParser
 		var feeStr = elem.GetProperty("fee").GetString()!;
 		var commissionStr = elem.GetProperty("commission").GetString()!;
 		var transactTime = elem.GetProperty("transactTime").GetInt64();
+
+		if (subSymbol.Equals("EQUITY", StringComparison.OrdinalIgnoreCase))
+		{
+			if (!ParsingHelpers.TryParseWebullDateTime(filledTimeStr, out var equityFilledTime)) return null;
+			return new ParsedOrder
+			{
+				Root = symbol.Trim(),
+				CallPut = "",
+				OccSymbol = "",
+				IsEquity = true,
+				FilledTime = equityFilledTime,
+				TransactTime = transactTime,
+				Side = action.Equals("BUY", StringComparison.OrdinalIgnoreCase) ? Side.Buy : Side.Sell,
+				Qty = (int)decimal.Parse(quantityStr, CultureInfo.InvariantCulture),
+				Price = decimal.Parse(filledPriceStr, CultureInfo.InvariantCulture),
+				TotalFee = decimal.Parse(feeStr, CultureInfo.InvariantCulture) + decimal.Parse(commissionStr, CultureInfo.InvariantCulture),
+			};
+		}
 
 		var symMatch = SymbolRegex().Match(symbol);
 		if (!symMatch.Success) return null;
@@ -167,6 +195,12 @@ public static partial class JsonlParser
 		return result;
 	}
 
+	private static void BuildStandaloneEquityTrade(ParsedOrder order, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal> fees, ref int seq)
+	{
+		trades.Add(new Trade(Seq: seq++, Timestamp: order.FilledTime, Instrument: order.Root, MatchKey: MatchKeys.Stock(order.Root), Asset: Asset.Stock, OptionKind: "", Side: order.Side, Qty: order.Qty, Price: RoundPrice(order.Price), Multiplier: Trade.StockMultiplier, Expiry: null, Fee: order.TotalFee));
+		AddFee(fees, order.FilledTime, order.Side, order.Qty, order.TotalFee);
+	}
+
 	private static void BuildStandaloneTrade(ParsedOrder order, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal> fees, ref int seq)
 	{
 		var instrument = Formatters.FormatOptionDisplay(order.Root, order.ExpiryDate, order.Strike);
@@ -236,6 +270,9 @@ public static partial class JsonlParser
 		public DateTime ExpiryDate { get; init; }
 		public required string CallPut { get; init; }
 		public required string OccSymbol { get; init; }
+		/// <summary>True for a share fill (subSymbol "EQUITY"): Strike/ExpiryDate/CallPut/OccSymbol are
+		/// meaningless and the order must never enter the option combo partitioning.</summary>
+		public bool IsEquity { get; init; }
 		public DateTime FilledTime { get; init; }
 		public long TransactTime { get; init; }
 		public Side Side { get; init; }

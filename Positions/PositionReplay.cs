@@ -921,6 +921,11 @@ internal static class PositionReplay
 				var carried = singleCarriedLegPrices.GetValueOrDefault(matchKey);
 				var openPrice = ResolveOpeningPrice(lin.OpeningCash, lin.OpeningQty, lin.Multiplier);
 				var displayQty = asset == Asset.Stock && lin.StockShareCount.TryGetValue(matchKey, out var shares) ? Math.Abs(shares) : leg.Qty;
+				// lin.UnitQty holds 100-share units for stock (qty/100 at ingest) while RunningCash is true
+				// per-share cash, so the per-unit parentAdj overstates a stock leg's adjusted basis 100x —
+				// divide by the real share count instead. LegMerger feeds this price to the combined
+				// break-even panel, so it must be per-share.
+				var adjustedAvg = asset == Asset.Stock && displayQty > 0 ? Math.Abs(lin.RunningCash / displayQty) : Math.Abs(parentAdj);
 				rows.Add(new PositionRow(
 					Instrument: instrument,
 					Asset: asset,
@@ -931,7 +936,7 @@ internal static class PositionReplay
 					Expiry: expiry,
 					IsStrategyLeg: false,
 					InitialAvgPrice: Math.Abs(openPrice),
-					AdjustedAvgPrice: Math.Abs(parentAdj),
+					AdjustedAvgPrice: adjustedAvg,
 					MatchKey: matchKey,
 					OpenQty: lin.OpeningQty
 				));
@@ -1062,7 +1067,7 @@ internal static class PositionReplay
 				return (Asset.Option, ParsingHelpers.CallPutDisplayName(p.CallPut), p.ExpiryDate, Formatters.FormatOptionDisplay(p.Root, p.ExpiryDate, p.Strike));
 			}
 		}
-		return (Asset.Stock, "-", null, lin.Underlying);
+		return (Asset.Stock, "-", null, MatchKeys.GetTicker(matchKey) ?? lin.Underlying);
 	}
 
 	private static Dictionary<string, decimal> ComputeLegEntryPrices(Lineage lin)

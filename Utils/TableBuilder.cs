@@ -553,7 +553,22 @@ public static class TableBuilder
 				continue;
 
 			if (!MatchKeys.TryGetOptionSymbol(matchKey, out var symbol))
+			{
+				// Stock lots mark at the underlying spot (1x multiplier). The spot comes from the report's
+				// chain fetch, which only runs when the book also holds option legs on the ticker — a pure
+				// stock book stays unpriced here, same as before.
+				if (matchKey.StartsWith(MatchKeys.StockPrefix, StringComparison.Ordinal) && MatchKeys.GetTicker(matchKey) is string stockTicker)
+				{
+					var spot = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(stockTicker, out var ov) ? ov
+						: opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(stockTicker, out var up) ? up : (decimal?)null;
+					if (spot.HasValue)
+					{
+						total += (lots[0].Side == Side.Buy ? 1m : -1m) * spot.Value * lots.Sum(l => l.Qty) * Trade.StockMultiplier;
+						anyPriced = true;
+					}
+				}
 				continue;
+			}
 
 			var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
 			if (parsed == null)
