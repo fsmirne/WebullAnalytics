@@ -606,6 +606,9 @@ internal sealed class BacktestRunner
 					Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot },
 					ZeroDteTimeYears: minutesToClose / 60.0 / 24.0 / 365.0);
 				var snap = await AIPipelineHelper.FetchQuotesWithHypotheticals(stillOpen, oneTicker, minuteEt, _quotes, _config, cancellation, overrides);
+				// The helper's parity spot guard may have corrected the bar spot against the option book
+				// (composed-open lag) — adopt its value so rule moneyness matches the quotes being priced.
+				if (snap.Underlyings.TryGetValue(ticker, out var snapSpot) && snapSpot > 0m) spot = snapSpot;
 				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot };
 				var ctx = new EvaluationContext(minuteEt, stillOpen, underlyings, snap.Options, cash, accountValue, technicalSignals);
 				var acted = ApplyManagementResults(minuteEt, evaluator.Evaluate(ctx), stillOpen, snap.Options, underlyings, warnOnDrop: false);
@@ -801,7 +804,13 @@ internal sealed class BacktestRunner
 			// For LegInShort: pre-generate candidate strikes around spot at the long's expiry so the
 			// rule has multiple strikes to pick from. Only done when the rule is applicable to this
 			// position's structure; otherwise we fetch just the position's leg symbols.
-			IEnumerable<string> quoteSymbols = symbols;
+			// Parity probes ride along either way: the position legs alone rarely carry a same-strike
+			// call+put pair, and without one the parity spot guard below can't cross-check the bar spot
+			// against the option book (composed-open lag on gap-day 09:30/09:31 bars).
+			var probeExpiry = pos.Legs.FirstOrDefault(l => l.Expiry.HasValue)?.Expiry;
+			IEnumerable<string> quoteSymbols = probeExpiry.HasValue
+				? symbols.Concat(ParitySpotGuard.ProbeSymbols(pos.Ticker, probeExpiry.Value.Date, spot, _config.Indicators.StrikeStep))
+				: symbols;
 			if (legInRule != null || completeCondorRule != null)
 			{
 				// Side of the strikes to pre-price: LegInShort sells on the long's own side; CompleteCondor
@@ -812,7 +821,7 @@ internal sealed class BacktestRunner
 					? anchorLeg.CallPut!
 					: (anchorLeg.CallPut == "P" ? "C" : "P");
 				var step5 = _config.Indicators.StrikeStep > 0m ? _config.Indicators.StrikeStep : 5m;
-				var candidateSymbols = new HashSet<string>(symbols, StringComparer.OrdinalIgnoreCase);
+				var candidateSymbols = new HashSet<string>(quoteSymbols, StringComparer.OrdinalIgnoreCase);
 				// ±100 points (at $5 step → 40 strikes) covers the 0.05–0.95 delta range for SPXW even
 				// at short DTE with elevated IV. Cheap enough at minute resolution.
 				for (decimal k = Math.Floor(spot / step5) * step5 - 100m; k <= Math.Ceiling(spot / step5) * step5 + 100m; k += step5)
@@ -832,6 +841,10 @@ internal sealed class BacktestRunner
 				Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot },
 				ZeroDteTimeYears: minuteZeroDteTimeYears);
 			var quotes = (await _quotes.GetQuotesAsync(minuteEt, quoteSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase), new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pos.Ticker }, cancellation, minuteOverrides)).Options;
+			// Parity spot guard: LegInShort's minSpotPctITM, CompleteCondor's cushion, and the assignment-risk
+			// force-close all gate on spot-vs-strike moneyness, so they must see the spot the option book is
+			// pricing, not a lagging bar print (the SL mark itself is quote-based and unaffected).
+			if (ParitySpotGuard.Correct(pos.Ticker, spot, quotes, minuteEt) is decimal paritySpot) spot = paritySpot;
 			var mark = ComputeMarkFromQuotes(pos.Legs, quotes);
 			if (!mark.HasValue) continue;
 
@@ -1313,7 +1326,10 @@ internal sealed class BacktestRunner
 		// the backtest pick systematically lower strikes than live on up-drifting minutes. The midpoint
 		// keeps the same within-minute semantic as pricing and does NOT introduce the full 1-minute
 		// lookahead that bar.Close would — the 09:30==^GSPC.Open anchor invariant governs the SPXW
-		// curve/leg pricing, not the opener's spot.
+		// curve/leg pricing, not the opener's spot. On gap-day 09:30 bars the official open print lags the
+		// option book (composed-open lag: constituents stagger in over the first minute) and this midpoint
+		// inherits it; the opener corrects that downstream via ParitySpotGuard once the minute's chain is
+		// in hand (live 2026-08-03: bar mid 7511.72 vs parity 7520.6 bought a put vertical into a rip).
 		var minuteSpots = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		foreach (var t in tickerSet)
 		{

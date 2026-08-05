@@ -48,14 +48,46 @@ internal static class AIPipelineHelper
 			}
 		}
 
-		if (phase2Symbols.Count == 0) return phase1;
+		// Parity probes: a cash-index spot can lag the option book (composed-open lag on gap days — see
+		// ParitySpotGuard), and the position legs alone rarely carry the same-strike call+put pair that
+		// parity needs (verticals are single-right). Add ATM straddle probes at each index position's
+		// earliest live expiry so the guard below has a pair to solve from. Live quote clients return the
+		// whole chain anyway, so the probes are usually already priced and add nothing to the fetch.
+		foreach (var group in openPositions.Values.GroupBy(p => p.Ticker, StringComparer.OrdinalIgnoreCase))
+		{
+			if (!phase1.Underlyings.TryGetValue(group.Key, out var spot) || spot <= 0m) continue;
+			var expiry = group.SelectMany(p => p.Legs).Where(l => l.Expiry.HasValue && l.Expiry.Value.Date >= asOf.Date).Select(l => l.Expiry!.Value.Date).DefaultIfEmpty().Min();
+			if (expiry == default) continue;
+			foreach (var sym in ParitySpotGuard.ProbeSymbols(group.Key, expiry, spot, config.Indicators.StrikeStep))
+				if (!phase1.Options.ContainsKey(sym)) phase2Symbols.Add(sym);
+		}
 
-		var phase2 = await quotes.GetQuotesAsync(asOf, phase2Symbols, tickerSet, cancellation, overrides);
+		var options = phase1.Options;
+		if (phase2Symbols.Count > 0)
+		{
+			var phase2 = await quotes.GetQuotesAsync(asOf, phase2Symbols, tickerSet, cancellation, overrides);
+			// Merge phase2 option quotes into phase1. Underlyings already correct from phase1.
+			var merged = new Dictionary<string, OptionContractQuote>(phase1.Options, StringComparer.OrdinalIgnoreCase);
+			foreach (var (k, v) in phase2.Options) merged[k] = v;
+			options = merged;
+		}
 
-		// Merge phase2 option quotes into phase1. Underlyings already correct from phase1.
-		var merged = new Dictionary<string, OptionContractQuote>(phase1.Options, StringComparer.OrdinalIgnoreCase);
-		foreach (var (k, v) in phase2.Options) merged[k] = v;
-		return new QuoteSnapshot(merged, phase1.Underlyings);
+		// Parity spot guard: management rules gate on moneyness (LegInShort's minSpotPctITM, assignment-risk
+		// force-close, roll strike selection), so they must see the same spot the option book prices —
+		// exactly like the opener's post-bootstrap correction in OpenCandidateEvaluator.
+		Dictionary<string, decimal>? correctedUnderlyings = null;
+		foreach (var ticker in openPositions.Values.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
+		{
+			if (!phase1.Underlyings.TryGetValue(ticker, out var spot)) continue;
+			if (ParitySpotGuard.Correct(ticker, spot, options, asOf) is decimal paritySpot)
+			{
+				correctedUnderlyings ??= new Dictionary<string, decimal>(phase1.Underlyings, StringComparer.OrdinalIgnoreCase);
+				correctedUnderlyings[ticker] = paritySpot;
+			}
+		}
+
+		if (correctedUnderlyings == null && ReferenceEquals(options, phase1.Options)) return phase1;
+		return new QuoteSnapshot(options, correctedUnderlyings ?? phase1.Underlyings);
 	}
 
 	/// <summary>Fetches recent daily closes per ticker and computes a composite technical bias.

@@ -173,6 +173,18 @@ internal sealed class OpenCandidateEvaluator
 			foreach (var (k, v) in boot.Underlyings) bootstrapSpots[k] = v;
 			foreach (var (k, v) in boot.Options) bootstrapOptions[k] = v;
 		}
+
+		// Parity spot guard: for cash-index tickers, the reported spot (bar midpoint in the backtest, vendor
+		// index print live) can lag the option book at the 09:30 bell on gap days (composed-open lag — see
+		// ParitySpotGuard). Everything downstream — strike enumeration, moneyness, EV scoring — must be
+		// consistent with the quotes the fills price off, so on material disagreement the book's parity-implied
+		// spot replaces the reported one before any candidate is enumerated.
+		if (bootstrapSpots.TryGetValue(_config.Ticker, out var reportedSpot))
+		{
+			var parityQuotes = bootstrapOptions.Count > 0 ? new OverlayQuoteDictionary(ctx.Quotes, bootstrapOptions) : ctx.Quotes;
+			if (ParitySpotGuard.Correct(_config.Ticker, reportedSpot, parityQuotes, ctx.Now) is decimal paritySpot)
+				bootstrapSpots[_config.Ticker] = paritySpot;
+		}
 		LastUnderlyings = bootstrapSpots;
 
 		// Index the chain expirations available per ticker so the enumerator can use real chain dates
