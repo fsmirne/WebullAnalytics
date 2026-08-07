@@ -141,15 +141,25 @@ internal static class BacktestSummaryRenderer
 		// Cumulative realized P&L mirrors BacktestResult.RealizedPnL semantics — it only changes
 		// when a lineage finalizes via Close or Expire. Open fills don't move it (the debit is
 		// paid but no P&L is realized yet; equity dips on Open and recovers on Expire, but realized
-		// return is unchanged until the lineage finalizes).
+		// return is unchanged until the lineage finalizes). A lineage can finalize across MULTIPLE
+		// terminal fills (short leg Expires, surviving long leg Closes moments later), so each
+		// terminal fill books only the INCREMENT over what the lineage already booked — summing the
+		// full lineage-to-date P&L on every terminal fill double-counted split-fill lifecycles. Lineages
+		// still open at the window end (half-settled survivors included) book nothing, matching
+		// BacktestResult.RealizedPnL.
 		decimal cumulativeRealized = 0m;
+		var bookedByLineage = new Dictionary<long, decimal>();
 		foreach (var f in result.Fills)
 		{
 			runningCash += f.NetCashFlow - f.Fees;
-			if (f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire)
+			if ((f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire) && !result.EndMtmByLineage.ContainsKey(f.LineageId))
 			{
 				if (fillsByLineage.TryGetValue(f.LineageId, out var lineageFillsForRealized))
-					cumulativeRealized += lineageFillsForRealized.Where(x => x.Date <= f.Date).Sum(x => x.NetCashFlow - x.Fees);
+				{
+					var lineageCum = lineageFillsForRealized.Where(x => x.Date <= f.Date).Sum(x => x.NetCashFlow - x.Fees);
+					cumulativeRealized += lineageCum - (bookedByLineage.TryGetValue(f.LineageId, out var booked) ? booked : 0m);
+					bookedByLineage[f.LineageId] = lineageCum;
+				}
 			}
 
 			// Net per-contract (signed): positive = credit received, negative = debit paid.
@@ -234,10 +244,13 @@ internal static class BacktestSummaryRenderer
 		_ => rule.EndsWith("Rule", StringComparison.Ordinal) ? rule[..^4] : rule,
 	};
 
-	/// <summary>Compact summary of the leg set: unique sorted strikes (each tagged C/P), then earliest/latest
+	/// <summary>Compact summary of the leg set: unique strikes (each tagged C/P), then earliest/latest
 	/// expiry. Single-expiry structures (iron condors, butterflies, verticals) show one date; multi-expiry
 	/// structures (calendars, diagonals) show "shortExp→longExp". The C/P tag disambiguates whether calls or
 	/// puts were opened — a diagonal's "751/752" reads as "751C/752C" so the side is unmistakable.
+	/// Strikes are ordered by their own leg's expiry first (then strike), so the strike list pairs
+	/// positionally with the expiry arrow: a call diagonal short 736C 08/05 / long 735C 08/31 renders
+	/// "736C/735C @ 08/05→08/31" — sorting strikes independently of expiries implied the wrong legs.
 	/// Examples: "685C @ 01/09→02/13" (LongCalendar), "680P/685P/685C/690C @ 01/16" (IronCondor).</summary>
 	private static string FormatLegDetail(IReadOnlyList<BacktestLegFill> legs)
 	{
@@ -249,8 +262,14 @@ internal static class BacktestSummaryRenderer
 		if (parsed.Count == 0) return "";
 
 		// Key on (strike, type) so a straddle/strangle or an iron condor sharing a strike across a call and a
-		// put don't collapse into one entry — each priced side stays visible.
-		var strikes = parsed.Select(p => (p.Strike, p.CallPut)).Distinct().OrderBy(s => s.Strike).ThenBy(s => s.CallPut).ToList();
+		// put don't collapse into one entry — each priced side stays visible. Order by each strike's earliest
+		// leg expiry so position i in the strike list matches position i in the expiry list (calendars keep
+		// one strike across both expiries, so their ordering is untouched).
+		var strikes = parsed
+			.GroupBy(p => (p.Strike, p.CallPut))
+			.Select(g => (g.Key.Strike, g.Key.CallPut, MinExpiry: g.Min(p => p.ExpiryDate.Date)))
+			.OrderBy(s => s.MinExpiry).ThenBy(s => s.Strike).ThenBy(s => s.CallPut)
+			.ToList();
 		var expiries = parsed.Select(p => p.ExpiryDate.Date).Distinct().OrderBy(d => d).ToList();
 
 		var strikesStr = string.Join("/", strikes.Select(s => FormatStrike(s.Strike) + s.CallPut));
@@ -281,6 +300,7 @@ internal static class BacktestSummaryRenderer
 		var realizedByDay = new SortedDictionary<DateTime, decimal>();
 		foreach (var g in result.Fills.GroupBy(f => f.LineageId))
 		{
+			if (result.EndMtmByLineage.ContainsKey(g.Key)) continue; // still open at window end (possibly half-settled) — nothing realized
 			var terminal = g.Where(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire)
 				.OrderBy(f => f.Date).LastOrDefault();
 			if (terminal == null) continue; // still open — nothing realized

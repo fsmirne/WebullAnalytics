@@ -108,6 +108,11 @@ internal sealed class SimulatedBook
 
 	public int OpenCount => _positions.Count;
 
+	/// <summary>Lineage id for an open position's key, or null if unknown. The book is the single source of
+	/// truth here: a partial expiry re-keys the surviving legs (<see cref="Expire"/>) without booking a fill
+	/// under the new key, so deriving lineage from the fill history by PositionKey silently loses survivors.</summary>
+	public long? LineageFor(string positionKey) => _lineageByKey.TryGetValue(positionKey, out var id) ? id : null;
+
 	/// <param name="legFills">Per-leg fills. <c>PricePerShare</c> must be set; <c>Side</c> is the executed direction.</param>
 	/// <param name="applySlippage">False for proposal-replay opens: the fill IS the submitted limit price, so the
 	/// mid-vs-fill friction model doesn't apply. Management/close fills always keep slippage on.</param>

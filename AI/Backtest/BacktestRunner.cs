@@ -269,7 +269,7 @@ internal sealed class BacktestRunner
 			Fills: _book.Fills.OrderBy(f => f.Date).ToList(),
 			EndMtmByLineage: endMtmByLineage,
 			Provenance: ComputeProvenance(),
-			Cleanliness: ComputeCleanliness(),
+			Cleanliness: ComputeCleanliness(endMtmByLineage.Keys),
 			DroppedRuleActions: _droppedRuleActions,
 			BlindPositionDays: _blindPositionDays,
 			OpenPositionsFallbackMarked: _openFallbackLineages.Count);
@@ -344,26 +344,28 @@ internal sealed class BacktestRunner
 		var tickers = _book.OpenPositions.Values.Select(p => p.Ticker).ToHashSet(StringComparer.OrdinalIgnoreCase);
 		var snap = await _quotes.GetQuotesAsync(step, symbols, tickers, cancellation);
 
-		// Lineage lookup: each open position's lineage id is the LineageId of the most recent fill on that position's PositionKey.
-		var lineageByKey = _book.Fills
-			.GroupBy(f => f.PositionKey, StringComparer.OrdinalIgnoreCase)
-			.ToDictionary(g => g.Key, g => g.Last().LineageId, StringComparer.OrdinalIgnoreCase);
-
-		// Entry (open-fill) price per (PositionKey, Symbol) — the fallback mark for a leg with no NBBO at the
+		// Entry (open-fill) price per (LineageId, Symbol) — the fallback mark for a leg with no NBBO at the
 		// window end. Previously a single missing near-money quote set allLegsPriced=false and zeroed the WHOLE
 		// position (EndMtm dropped to 0 → unrealized booked the full debit as a loss, discarding the value of
 		// the well-priced legs). Now each leg marks independently: real NBBO if present, else its entry price
 		// (assume unchanged since open — approximate but bounded), and the lineage is flagged so the summary can
 		// warn that its unrealized is not fully real-priced. A leg with neither NBBO nor an entry marks at 0.
-		var entryPriceByKeySymbol = _book.Fills
+		// Keyed by lineage, not PositionKey: a partial-expiry survivor is re-keyed with no fill under the new
+		// key, but its lineage — and its legs' open fills — are unchanged.
+		var entryPriceByLineageSymbol = _book.Fills
 			.Where(f => f.Kind == BacktestFillKind.Open)
-			.SelectMany(f => f.Legs.Select(l => (f.PositionKey, l.Symbol, l.PricePerShare)))
-			.GroupBy(x => (x.PositionKey, x.Symbol))
+			.SelectMany(f => f.Legs.Select(l => (f.LineageId, l.Symbol, l.PricePerShare)))
+			.GroupBy(x => (x.LineageId, x.Symbol))
 			.ToDictionary(g => g.Key, g => g.First().PricePerShare);
 
 		foreach (var pos in _book.OpenPositions.Values)
 		{
-			if (!lineageByKey.TryGetValue(pos.Key, out var lineage)) continue;
+			// The book's own key→lineage map, NOT a fills-derived join: a partial-expiry survivor's re-keyed
+			// position has no fill under its new key, and dropping it here excluded the survivor from
+			// EndMtmByLineage — which both zeroed its unrealized MTM and let the summary misclassify the
+			// half-settled lineage as a fully realized loss.
+			var lineage = _book.LineageFor(pos.Key);
+			if (lineage == null) continue;
 			decimal perContract = 0m;
 			var usedFallback = false;
 			foreach (var leg in pos.Legs)
@@ -371,12 +373,12 @@ internal sealed class BacktestRunner
 				decimal mid;
 				if (snap.Options.TryGetValue(leg.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
 					mid = (q.Bid.Value + q.Ask.Value) / 2m;
-				else if (entryPriceByKeySymbol.TryGetValue((pos.Key, leg.Symbol), out var entry)) { mid = entry; usedFallback = true; }
+				else if (entryPriceByLineageSymbol.TryGetValue((lineage.Value, leg.Symbol), out var entry)) { mid = entry; usedFallback = true; }
 				else { mid = 0m; usedFallback = true; }
 				perContract += leg.Side == Side.Buy ? mid : -mid;
 			}
-			byLineage[lineage] = perContract * 100m * pos.Quantity;
-			if (usedFallback) _openFallbackLineages.Add(lineage);
+			byLineage[lineage.Value] = perContract * 100m * pos.Quantity;
+			if (usedFallback) _openFallbackLineages.Add(lineage.Value);
 		}
 		return byLineage;
 	}
@@ -1460,7 +1462,15 @@ internal sealed class BacktestRunner
 		foreach (var leg in pos.Legs)
 		{
 			if (leg.CallPut == null) continue;
-			if (!snap.Options.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) return; // can't price → leave open for next-day management
+			if (!snap.Options.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue)
+			{
+				// Can't price → leave open for next-day management. Warn like a dropped rule action: silently
+				// carrying the survivor reads as "the close never fired", and at the data frontier (--until today
+				// before the evening pull) there IS no next day — the lineage ends the window half-settled.
+				_droppedRuleActions++;
+				Console.WriteLine($"⚠ {settleTime:yyyy-MM-dd}: CloseSurvivorOnShortExpiry for {ticker} {survivorKey} dropped — no NBBO for {leg.Symbol} at the {settleTime:HH:mm} settle — surviving leg left open. (Store gap: today's quotes land with the evening pull; historical gaps need a backfill.)");
+				return;
+			}
 			var closeSide = leg.Side == Side.Buy ? Side.Sell : Side.Buy;
 			fills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
 		}
@@ -1534,13 +1544,16 @@ internal sealed class BacktestRunner
 	/// <summary>Per-trade cleanliness split. Under the quotes-only path every market-priced fill used real NBBO
 	/// by construction, so every finalized lineage is "clean" (none contaminated). Kept so the renderer can
 	/// print the clean-trade P&L row.</summary>
-	private CleanlinessBreakdown ComputeCleanliness()
+	private CleanlinessBreakdown ComputeCleanliness(IEnumerable<long> openAtEndLineages)
 	{
+		var stillOpen = openAtEndLineages.ToHashSet();
 		int cleanN = 0, cleanW = 0, cleanL = 0;
 		decimal cleanPnl = 0m, cleanGrossWin = 0m, cleanGrossLoss = 0m;
 		foreach (var g in _book.Fills.GroupBy(f => f.LineageId))
 		{
-			if (!g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire)) continue; // only finalized trades
+			// Only fully finalized trades: a lineage still open at the window end (even half-settled — short
+			// leg Expired, survivor unclosed) has outstanding exit proceeds and would book a phantom loss.
+			if (stillOpen.Contains(g.Key) || !g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire)) continue;
 			var pnl = g.Sum(f => f.NetCashFlow - f.Fees);
 			cleanN++; cleanPnl += pnl;
 			if (pnl > 0m) { cleanW++; cleanGrossWin += pnl; } else { cleanL++; cleanGrossLoss += Math.Abs(pnl); }
@@ -1620,17 +1633,28 @@ internal sealed record BacktestResult(
 	int BlindPositionDays = 0,
 	int OpenPositionsFallbackMarked = 0)
 {
-	/// <summary>P&L on closed lifecycles only (lineages that ended in Close or Expire). Each lifecycle's
-	/// P&L = sum of (NetCashFlow - Fees) across all fills sharing its LineageId.</summary>
+	/// <summary>A lineage is still open at the window end when the book carried its position into the final
+	/// MTM pass — even if it already booked a terminal fill (a diagonal whose short leg Expired but whose
+	/// surviving long couldn't be closed for lack of quotes, e.g. a --until at today's data frontier).
+	/// Keying "realized" off the mere presence of a Close/Expire fill booked such half-settled lifecycles as
+	/// realized losses (the long's exit proceeds are still outstanding) while excluding their MTM from
+	/// unrealized — distorting P&L, PF, expectancy and win rate whenever a survivor is left open.</summary>
+	private bool IsOpenAtEnd(IGrouping<long, BacktestFill> g) =>
+		EndMtmByLineage.ContainsKey(g.Key) || !g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire);
+
+	/// <summary>P&L on closed lifecycles only (lineages fully finalized via Close/Expire — none of their
+	/// legs survive at the window end). Each lifecycle's P&L = sum of (NetCashFlow - Fees) across all fills
+	/// sharing its LineageId.</summary>
 	public decimal RealizedPnL => Fills
 		.GroupBy(f => f.LineageId)
-		.Where(g => g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire))
+		.Where(g => !IsOpenAtEnd(g))
 		.Sum(g => g.Sum(f => f.NetCashFlow - f.Fees));
 
-	/// <summary>Unrealized P&L = per-lineage net cash + per-lineage final MTM, summed across still-open lifecycles.</summary>
+	/// <summary>Unrealized P&L = per-lineage net cash + per-lineage final MTM, summed across lifecycles still
+	/// open at the window end (including half-settled ones whose remaining legs the MTM pass marked).</summary>
 	public decimal UnrealizedPnL => Fills
 		.GroupBy(f => f.LineageId)
-		.Where(g => !g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire))
+		.Where(IsOpenAtEnd)
 		.Sum(g => g.Sum(f => f.NetCashFlow - f.Fees) + (EndMtmByLineage.TryGetValue(g.Key, out var m) ? m : 0m));
 
 	public decimal TotalPnL => RealizedPnL + UnrealizedPnL;
@@ -1643,7 +1667,7 @@ internal sealed record BacktestResult(
 	/// unlike compounded terminal equity, don't depend on position sizing.</summary>
 	public IReadOnlyList<decimal> LifecyclePnLs() => Fills
 		.GroupBy(f => f.LineageId)
-		.Where(g => g.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire))
+		.Where(g => !IsOpenAtEnd(g))
 		.Select(g => g.Sum(f => f.NetCashFlow - f.Fees))
 		.ToList();
 
