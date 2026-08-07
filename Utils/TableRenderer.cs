@@ -9,7 +9,7 @@ namespace WebullAnalytics.Utils;
 /// </summary>
 public static class TableRenderer
 {
-	private const string LegPrefix = "  └─ ";
+	public const string LegPrefix = "  └─ ";
 
 	public static void RenderReport(List<ReportRow> rows, List<PositionRow> positions, Dictionary<string, List<Lot>> lotsByMatchKey, decimal running, decimal initialAmount, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null, bool showLegs = false)
 	{

@@ -1,5 +1,8 @@
 using System.Globalization;
 using Spectre.Console;
+using WebullAnalytics.Analyze;
+using WebullAnalytics.Positions;
+using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.AI.Backtest;
 
@@ -15,6 +18,7 @@ internal static class BacktestSummaryRenderer
 		AnsiConsole.WriteLine();
 
 		if (showFills) RenderFillsTable(result);
+		RenderOpenPositionsTable(result);
 		RenderSummaryPanel(result);
 		if (result.OpenPositionsFallbackMarked > 0)
 			AnsiConsole.MarkupLine($"[yellow]⚠ {result.OpenPositionsFallbackMarked} open position(s) had a leg with no window-end NBBO — marked at entry price, so their unrealized P&L is approximate (not fully real-priced). Re-pull the quote store to resolve.[/]");
@@ -35,15 +39,7 @@ internal static class BacktestSummaryRenderer
 	/// window end. Every fill (not just still-open ones) is included so closed lineages net correctly.</summary>
 	private static void RenderBookCommand(BacktestResult result)
 	{
-		var groups = new List<string>();
-		foreach (var f in result.Fills)
-		{
-			var legs = f.Legs
-				.Where(l => l.Qty != 0)
-				.Select(l => $"{(l.Side == Side.Buy ? "buy" : "sell")}:{l.Symbol}:{Math.Abs(l.Qty)}@{l.PricePerShare.ToString("0.####", CultureInfo.InvariantCulture)}");
-			var group = string.Join(",", legs);
-			if (group.Length > 0) groups.Add(group);
-		}
+		var groups = BuildFillLegGroups(result);
 		if (groups.Count == 0) { AnsiConsole.MarkupLine("[dim]No fills — no book command.[/]"); return; }
 
 		var spec = string.Join(";", groups);
@@ -62,11 +58,57 @@ internal static class BacktestSummaryRenderer
 		Console.WriteLine($"wa analyze trade \"{spec}\" --standalone{dateArg}");
 	}
 
+	/// <summary>Every fill as one <c>side:SYMBOL:qty@price</c> leg group — the shared currency between the
+	/// --book-cmd spec and the open-positions table, both of which reconstruct the book by netting all fills.</summary>
+	private static List<string> BuildFillLegGroups(BacktestResult result)
+	{
+		var groups = new List<string>();
+		foreach (var f in result.Fills)
+		{
+			var legs = f.Legs
+				.Where(l => l.Qty != 0)
+				.Select(l => $"{(l.Side == Side.Buy ? "buy" : "sell")}:{l.Symbol}:{Math.Abs(l.Qty)}@{l.PricePerShare.ToString("0.####", CultureInfo.InvariantCulture)}");
+			var group = string.Join(",", legs);
+			if (group.Length > 0) groups.Add(group);
+		}
+		return groups;
+	}
+
+	/// <summary>The `wa analyze trade` Open Positions table for the window's still-open book: all fills are
+	/// replayed through the same PositionTracker pipeline the report path uses, so closed lineages' legs net
+	/// to zero and only the positions open at window end survive into the table. Evaluation is pinned to the
+	/// window end (the --book-cmd `--date` anchor) — at the real wall-clock date the tracker would settle any
+	/// since-expired short legs and the still-open diagonals would degrade to lone long legs.</summary>
+	private static void RenderOpenPositionsTable(BacktestResult result)
+	{
+		var groups = BuildFillLegGroups(result);
+		if (groups.Count == 0) return;
+
+		var priorOverride = EvaluationDate.IsOverridden ? EvaluationDate.Today : (DateTime?)null;
+		var baseTime = result.Fills[^1].Date;
+		EvaluationDate.Set(result.EquityCurve.Count > 0 ? result.EquityCurve[^1].Date : baseTime);
+		try
+		{
+			var trades = AnalyzeCommon.ParseSyntheticTrades(string.Join(";", groups), startSeq: 0, baseTimestamp: baseTime);
+			var (_, lots, _) = PositionTracker.ComputeReport(trades);
+			var tradeIndex = PositionTracker.BuildTradeIndex(trades);
+			var (rows, _, _) = PositionTracker.BuildPositionRows(lots, tradeIndex, trades);
+			if (rows.Count == 0) return;
+
+			AnsiConsole.Write(TableBuilder.BuildPositionsTable(rows, TableRenderer.LegPrefix, TableBorder.Rounded));
+			AnsiConsole.WriteLine();
+		}
+		finally
+		{
+			if (priorOverride.HasValue) EvaluationDate.Set(priorOverride.Value); else EvaluationDate.Reset();
+		}
+	}
+
 	private static void RenderFillsTable(BacktestResult result)
 	{
 		if (result.Fills.Count == 0) { AnsiConsole.MarkupLine("[dim]No fills.[/]"); return; }
 
-		var table = new Table().Border(TableBorder.Rounded).Title("[bold]Fill ledger[/]");
+		var table = new Table().Border(TableBorder.Rounded).Title("[bold]Fill ledger[/]").Expand();
 		table.AddColumn("When (ET)");
 		table.AddColumn("Ticker");
 		table.AddColumn("Kind");
