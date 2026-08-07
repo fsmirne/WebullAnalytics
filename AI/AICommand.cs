@@ -1085,21 +1085,27 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		else
 		{
 			Backtest.BacktestResult? captured = null;
-			await AnsiConsole.Progress()
-				.AutoClear(true)            // remove the bar once done; the summary table prints below
-				.HideCompleted(true)
-				.Columns(new SpinnerColumn(), new TaskDescriptionColumn(), new ProgressBarColumn(),
-						 new PercentageColumn(), new ElapsedTimeColumn())
-				.StartAsync(async ctx =>
-				{
-					var task = ctx.AddTask($"[green]Backtesting {Markup.Escape(config.Ticker)}[/]");
-					captured = await runner.RunAsync(since, until, cancellation, (doneDays, totalDays, day) =>
+			// The runner warns per position-day about quote-store gaps from deep inside the day loop; those
+			// writes would land mid-repaint and shred the bar. Buffer everything but the bar itself, and let
+			// it replay below once the bar has cleared and before the summary renders.
+			using (var deferral = ConsoleDeferral.Begin())
+			{
+				await deferral.Live.Progress()
+					.AutoClear(true)            // remove the bar once done; the summary table prints below
+					.HideCompleted(true)
+					.Columns(new SpinnerColumn(), new TaskDescriptionColumn(), new ProgressBarColumn(),
+							 new PercentageColumn(), new ElapsedTimeColumn())
+					.StartAsync(async ctx =>
 					{
-						task.MaxValue = totalDays;
-						task.Value = doneDays;
-						task.Description = $"[green]Backtesting {Markup.Escape(config.Ticker)}[/] [grey]{day:yyyy-MM-dd}[/]";
+						var task = ctx.AddTask($"[green]Backtesting {Markup.Escape(config.Ticker)}[/]");
+						captured = await runner.RunAsync(since, until, cancellation, (doneDays, totalDays, day) =>
+						{
+							task.MaxValue = totalDays;
+							task.Value = doneDays;
+							task.Description = $"[green]Backtesting {Markup.Escape(config.Ticker)}[/] [grey]{day:yyyy-MM-dd}[/]";
+						});
 					});
-				});
+			}
 			result = captured!;
 		}
 		runStopwatch.Stop();
