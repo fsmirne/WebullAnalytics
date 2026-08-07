@@ -24,6 +24,11 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	[Description("Underlying ticker symbol (e.g., GME, SPY).")]
 	public string Ticker { get; set; } = "";
 
+	[CommandOption("--greek <NAME>")]
+	[DefaultValue("gamma")]
+	[Description("Which exposure to map: gamma (default, the classic GEX) or vanna (VEX — dollars of dealer delta per vol point of IV change). Vanna is signed and flips just below the money, so it maps a hedging FLOW under an IV move, not a price magnet: the gamma-only anchors (gravity, gamma flip, call/put walls, max pain) are replaced by the per-expiry net vanna and its implied flow.")]
+	public string Greek { get; set; } = "gamma";
+
 	[CommandOption("--expiry <DATE>")]
 	[Description("Restrict to a single expiration date (YYYY-MM-DD). Default: show all expirations in the chain.")]
 	public string? Expiry { get; set; }
@@ -70,6 +75,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("<ticker> is required");
+		if (!TryParseGreek(Greek, out _)) return ValidationResult.Error($"--greek: expected 'gamma' or 'vanna', got '{Greek}'");
 		if (Expiry != null && !DateTime.TryParseExact(Expiry, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--expiry: expected YYYY-MM-DD, got '{Expiry}'");
 		if (StrikeRangePct <= 0 || StrikeRangePct > 200) return ValidationResult.Error($"--strike-range: must be in (0, 200], got {StrikeRangePct}");
@@ -77,9 +83,24 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (Dte < 0 || Dte > 60) return ValidationResult.Error($"--dte: must be in [0, 60], got {Dte}");
 		if (IntervalMin < 5 || IntervalMin > 120) return ValidationResult.Error($"--interval: must be in [5, 120] minutes, got {IntervalMin}");
 		if (Exante && !Intraday) return ValidationResult.Error("--exante only applies to the --intraday heatmap");
+		// The intraday view's whole subject is the gravity strike migrating as spot moves, and it reads its Gravity row
+		// back out of the gamma-only data/gex log. Vanna has no gravity, so rather than render a gamma frame around a
+		// vanna matrix the combination is refused outright.
+		if (Intraday && TryParseGreek(Greek, out var g) && g != GreekKind.Gamma) return ValidationResult.Error("--intraday maps the gamma gravity migration and has no vanna equivalent; drop --greek vanna");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
 		if (Dump && EvaluationDateOverride.HasValue) return ValidationResult.Error("--dump applies to live fetches only (no --date)");
 		return ValidationResult.Success();
+	}
+
+	internal static bool TryParseGreek(string? name, out GreekKind greek)
+	{
+		greek = GreekKind.Gamma;
+		switch ((name ?? "").Trim().ToLowerInvariant())
+		{
+			case "" or "gamma" or "gex": return true;
+			case "vanna" or "vex": greek = GreekKind.Vanna; return true;
+			default: return false;
+		}
 	}
 }
 
@@ -221,7 +242,8 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return 0;
 		}
 
-		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes);
+		AnalyzeGexSettings.TryParseGreek(settings.Greek, out var greek);
+		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, greek);
 		if (matrix.Strikes.Count == 0 || matrix.Expiries.Count == 0)
 		{
 			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
@@ -231,21 +253,28 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// Live runs log what THIS computation showed (gravity/walls/flip/max-pain per expiry) to data/gex —
 		// the vendor-reported IVs these values are built on are never persisted intraday, so the displayed
 		// numbers are otherwise irreproducible; the --intraday heatmap reads this log back as its "Gravity" row.
+		// data/gex carries gamma anchors (gravity/walls/flip/max-pain) and is read back by --intraday; a vanna run
+		// has none of those, so it stays out of the log rather than writing rows the readers would misinterpret.
 		if (!settings.EvaluationDateOverride.HasValue)
 		{
-			AppendGexLog(ticker, spot.Value, matrix, settings);
+			if (greek == GreekKind.Gamma) AppendGexLog(ticker, spot.Value, matrix, settings);
 			if (settings.Dump) AppendIvDump(ticker, spot.Value, quotes, settings, asOf, expiryFilter);
 		}
 
 		RenderHeader(ticker, spot.Value, asOf, expiryFilter, matrix);
 		AnsiConsole.WriteLine();
-		RenderHeatmap(matrix, spot.Value);
+		RenderHeatmap(matrix, spot.Value, greek);
 		AnsiConsole.WriteLine();
-		RenderPerExpirySummary(matrix, spot.Value, asOf);
+		if (greek == GreekKind.Vanna)
+			RenderPerExpiryVanna(matrix, asOf);
+		else
+			RenderPerExpirySummary(matrix, spot.Value, asOf);
 		AnsiConsole.WriteLine();
-		RenderTotals(matrix, spot.Value);
+		RenderTotals(matrix, spot.Value, greek);
 		AnsiConsole.WriteLine();
-		RenderWalls(matrix, settings.TopWalls);
+		// Walls are max-gamma-per-side strikes read as support/resistance. There is no vanna analogue — the largest
+		// |vanna| strike is just where OI meets d2 ≈ ±1 — so the panel is gamma-only rather than relabelled.
+		if (greek == GreekKind.Gamma) RenderWalls(matrix, settings.TopWalls);
 		return 0;
 	}
 
@@ -432,7 +461,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// red = put-dominated); cell brightness encodes |net GEX| relative to the chain max.
 	/// Numeric label inside each cell is the net GEX (compact: "+1.2M", "-450k").
 	/// </summary>
-	private static void RenderHeatmap(GexMatrix matrix, decimal spot)
+	private static void RenderHeatmap(GexMatrix matrix, decimal spot, GreekKind greek)
 	{
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
 		table.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
@@ -453,14 +482,18 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			foreach (var exp in matrix.Expiries)
 			{
 				matrix.Cells.TryGetValue((exp, strike), out var cell);
-				var isGravity = matrix.GravityByExpiry.TryGetValue(exp, out var grav) && grav.HasValue && grav.Value == strike;
+				// The gravity marker is a max-gross-GAMMA anchor. Under vanna the same strike would just be the biggest
+				// |vanna|×OI pile, which is precisely the "level" reading this greek does not support — so it is not drawn.
+				var isGravity = greek == GreekKind.Gamma && matrix.GravityByExpiry.TryGetValue(exp, out var grav) && grav.HasValue && grav.Value == strike;
 				cells.Add(BuildHeatmapCellMarkup(cell, maxAbsNet, isGravity));
 			}
 			table.AddRow(cells.ToArray());
 		}
 
 		AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Cell = net GEX ($call gamma×OI − $put gamma×OI). [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell (e.g. [bold underline]+1.2M[/]) = per-expiry gravity strike (max gross gamma).[/]");
+		AnsiConsole.MarkupLine(greek == GreekKind.Vanna
+			? "[dim]Cell = net VEX ($call vanna×OI − $put vanna×OI), in dollars of dealer delta per ONE vol point of IV change. [green]Green[/] = dealers gain delta when IV rises (they sell underlying to re-hedge), [red]red[/] = they lose delta (they buy); brightness ∝ |net|. Multiply by the vol-point move you expect: the sign of net × ΔIV is the hedging flow. Note the polarity flip near the money — that is vanna's d2 sign change, not a level.[/]"
+			: "[dim]Cell = net GEX ($call gamma×OI − $put gamma×OI). [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell (e.g. [bold underline]+1.2M[/]) = per-expiry gravity strike (max gross gamma).[/]");
 	}
 
 	private static string BuildHeatmapCellMarkup(GexCell? cell, decimal maxAbsNet, bool isGravity)
@@ -491,9 +524,11 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		return content;
 	}
 
-	private static void RenderTotals(GexMatrix matrix, decimal spot)
+	private static void RenderTotals(GexMatrix matrix, decimal spot, GreekKind greek)
 	{
-		var totalAbs = matrix.TotalCallGex + matrix.TotalPutGex;
+		var isVanna = greek == GreekKind.Vanna;
+		var label = isVanna ? "VEX" : "GEX";
+		var totalAbs = Math.Abs(matrix.TotalCallGex) + Math.Abs(matrix.TotalPutGex);
 		var net = matrix.TotalCallGex - matrix.TotalPutGex;
 		var netFrac = totalAbs > 0m ? net / totalAbs : 0m;
 		var netSign = net >= 0m ? "+" : "−";
@@ -502,13 +537,90 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title("[bold]Chain totals[/]");
 		table.AddColumn("Metric");
 		table.AddColumn(new TableColumn("Value").RightAligned().NoWrap());
-		table.AddRow("Total call GEX", $"[green]+{FormatCompactDollars(matrix.TotalCallGex)}[/]");
-		table.AddRow("Total put GEX",  $"[red]−{FormatCompactDollars(matrix.TotalPutGex)}[/]");
+		table.AddRow($"Total call {label}", FormatSignedDollars(matrix.TotalCallGex));
+		table.AddRow($"Total put {label}", FormatSignedDollars(matrix.TotalPutGex));
 		table.AddRow("Total absolute (gross)", FormatCompactDollars(totalAbs));
 		table.AddRow("Net (call − put)", $"[bold {netColor}]{netSign}{FormatCompactDollars(Math.Abs(net))}[/]");
-		table.AddRow("Net fraction", $"[bold {netColor}]{netFrac:+0.00;-0.00}[/]  [dim](+1 = pure call, −1 = pure put)[/]");
-		table.AddRow("Gamma flip", FormatGammaFlipDisplay(matrix.FindGammaFlip(spot), spot));
+		if (isVanna)
+		{
+			// No net-fraction row: it reads |net| against gross to say "how call- vs put-dominated", which is a
+			// gamma statement. Call and put vanna carry OPPOSITE signs under this convention (puts sit below the d2
+			// flip), so call − put adds their magnitudes and the ratio pins to ±1.00 on every chain — pure noise.
+			table.AddRow("Flow @ IV −5 pts", FormatVannaFlow(net, volPoints: -5m, spot));
+		}
+		else
+		{
+			table.AddRow("Net fraction", $"[bold {netColor}]{netFrac:+0.00;-0.00}[/]  [dim](+1 = pure call, −1 = pure put)[/]");
+			table.AddRow("Gamma flip", FormatGammaFlipDisplay(matrix.FindGammaFlip(spot), spot));
+		}
 		AnsiConsole.Write(table);
+		if (isVanna)
+			AnsiConsole.MarkupLine("[dim]Net VEX = dollars of dealer delta gained per vol point of IV RISE. The flow row reads it the way an IV move actually arrives: dealers re-hedge by trading the OPPOSITE sign of the delta they pick up, so net × ΔIV > 0 means they sell the underlying and < 0 means they buy. This is a flow estimate, not a target price.[/]");
+	}
+
+	/// <summary>Renders "$1.2M" green for a positive exposure and "−$1.2M" red for a negative one. Gamma sides are
+	/// always non-negative; vanna sides carry a real sign, so the total cannot be prefixed unconditionally.</summary>
+	private static string FormatSignedDollars(decimal value)
+	{
+		if (value == 0m) return "[dim]$0[/]";
+		return value > 0m ? $"[green]+{FormatCompactDollars(value)}[/]" : $"[red]−{FormatCompactDollars(Math.Abs(value))}[/]";
+	}
+
+	/// <summary>Translates net vanna into the underlying trade it implies for the given IV move: dealers pick up
+	/// (net × volPoints) dollars of delta and hedge it away by trading the opposite sign, so a vol crush against a
+	/// positive net vanna book is dealer BUYING. Shown in both notional and shares (notional ÷ spot).</summary>
+	private static string FormatVannaFlow(decimal netVanna, decimal volPoints, decimal spot)
+	{
+		var deltaGained = netVanna * volPoints;
+		var hedgeNotional = -deltaGained;
+		if (hedgeNotional == 0m || spot <= 0m) return "[dim]—[/]";
+		var buying = hedgeNotional > 0m;
+		var shares = Math.Abs(hedgeNotional) / spot;
+		var verb = buying ? "BUY" : "SELL";
+		var color = buying ? "green" : "red";
+		return $"[bold {color}]dealers {verb} {FormatCompactDollars(Math.Abs(hedgeNotional))}[/]  [dim](≈{shares:N0} shares)[/]";
+	}
+
+	/// <summary>Vanna's per-expiry panel. Deliberately NOT the gamma one: gravity, call/put walls, gamma flip and max
+	/// pain are all strike-anchored gamma concepts, and reprinting them over a vanna matrix would assert exactly the
+	/// price-magnet reading vanna does not support. What vanna has to say is per-expiry: how much dealer delta each
+	/// maturity's book gains per vol point, and which way that forces them to trade when IV moves.</summary>
+	private static void RenderPerExpiryVanna(GexMatrix matrix, DateTime asOf)
+	{
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title("[bold]Per-expiration (vanna)[/]");
+		table.AddColumn(new TableColumn("[bold]Expiry[/]").NoWrap());
+		table.AddColumn(new TableColumn("[bold]DTE[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Net VEX[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Gross[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Share of gross[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Hedge @ IV −5 pts[/]").RightAligned().NoWrap());
+
+		var chainGross = matrix.Expiries.Sum(e => ExpiryTotals(matrix, e).Gross);
+		foreach (var exp in matrix.Expiries)
+		{
+			var (net, gross) = ExpiryTotals(matrix, exp);
+			var dte = Math.Max(0, (exp.Date - asOf.Date).Days);
+			var share = chainGross > 0m ? gross / chainGross : 0m;
+			var hedge = -net * -5m;
+			var hedgeCell = hedge == 0m ? "[dim]—[/]" : hedge > 0m ? $"[green]buy {FormatCompactDollars(hedge)}[/]" : $"[red]sell {FormatCompactDollars(Math.Abs(hedge))}[/]";
+			table.AddRow($"{exp:yyyy-MM-dd}", dte.ToString(), FormatSignedDollars(net), FormatCompactDollars(gross), $"{share:P0}", hedgeCell);
+		}
+
+		AnsiConsole.Write(table);
+		AnsiConsole.MarkupLine("[dim]Net VEX = $ of dealer delta per vol point of IV rise for that maturity; Gross = |call| + |put| (how much vanna the maturity carries at all, regardless of netting). Front expiries dominate the gross on an IV shock because their IV moves most — read the hedge column as a direction and rough size, never as a target strike.[/]");
+	}
+
+	/// <summary>(net, gross) VEX summed across every displayed strike of one expiry.</summary>
+	private static (decimal Net, decimal Gross) ExpiryTotals(GexMatrix matrix, DateTime expiry)
+	{
+		decimal net = 0m, gross = 0m;
+		foreach (var strike in matrix.Strikes)
+			if (matrix.Cells.TryGetValue((expiry, strike), out var cell))
+			{
+				net += cell.Net;
+				gross += cell.Gross;
+			}
+		return (net, gross);
 	}
 
 	/// <summary>Formats the gamma flip cell: price + % distance from spot + regime label, colored by regime.
@@ -961,11 +1073,22 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	}
 }
 
-/// <summary>One cell of the GEX matrix at a given (expiry, strike). CallGex/PutGex are dollar-gamma
-/// exposures (gamma × OI × 100 × spot), always non-negative. Net = call − put (signed).</summary>
+/// <summary>Which greek the exposure matrix is built from. Gamma is the classic GEX; Vanna is the VEX the
+/// dealer-flow work needs — see <see cref="GexMatrix.Build"/> for each one's dollar scaling.</summary>
+internal enum GreekKind
+{
+	Gamma,
+	Vanna,
+}
+
+/// <summary>One cell of the exposure matrix at a given (expiry, strike). CallGex/PutGex are the per-side dollar
+/// exposures (see <see cref="GexMatrix.Build"/>); non-negative for gamma, signed for vanna. Net = call − put
+/// (the dealer long-call / short-put convention), Gross = the magnitude concentration at the strike.</summary>
 internal sealed record GexCell(decimal CallGex, decimal PutGex)
 {
-	public decimal Gross => CallGex + PutGex;
+	// Abs-sum, not a plain sum: identical to call+put for gamma (both sides already non-negative), and the
+	// right magnitude aggregate for vanna, whose per-side values are signed and would otherwise cancel.
+	public decimal Gross => Math.Abs(CallGex) + Math.Abs(PutGex);
 	public decimal Net => CallGex - PutGex;
 }
 
@@ -1136,8 +1259,15 @@ internal sealed class GexMatrix
 	}
 
 	/// <summary>
-	/// Builds the (expiry × strike) GEX matrix from a raw chain. Per-cell exposure is split between
-	/// CallGex and PutGex, each computed as Black-Scholes gamma × OI × 100 × spot. Filters strikes to
+	/// Builds the (expiry × strike) exposure matrix from a raw chain. Per-cell exposure is split between
+	/// CallGex and PutGex, each computed from <paramref name="greek"/>:
+	/// <list type="bullet">
+	/// <item><description><b>Gamma</b> (GEX) — gamma × OI × 100 × spot: dollars of dealer delta per $1 move in spot.</description></item>
+	/// <item><description><b>Vanna</b> (VEX) — vanna × OI × 100 × spot × 0.01: dollars of dealer delta per ONE vol point
+	/// of IV change. The 0.01 makes the number directly readable as flow (vanna itself is per 1.00 = 100 vol points),
+	/// and keeps the two greeks on comparable "$ of delta per unit move" footing.</description></item>
+	/// </list>
+	/// Filters strikes to
 	/// ±strikeRangeFraction of spot and (when expiryFilter is null) keeps every expiration within
 	/// maxDteDays days-to-expiry. When expiryFilter is set, all other expirations are dropped.
 	/// Caps row count to <paramref name="maxStrikes"/> by keeping the strikes closest to spot — high-priced
@@ -1151,7 +1281,8 @@ internal sealed class GexMatrix
 		DateTime? expiryFilter,
 		decimal strikeRangeFraction,
 		int maxDteDays,
-		int maxStrikes)
+		int maxStrikes,
+		GreekKind greek = GreekKind.Gamma)
 	{
 		var minStrike = spot * (1m - strikeRangeFraction);
 		var maxStrike = spot * (1m + strikeRangeFraction);
@@ -1192,9 +1323,12 @@ internal sealed class GexMatrix
 			}
 			if (iv <= 0m) continue;
 
-			var gamma = (decimal)OptionMath.Gamma(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, iv);
-			var dollarGex = gamma * q.OpenInterest.Value * 100m * spot;
-			if (dollarGex <= 0m) continue;
+			var dollarGex = greek == GreekKind.Vanna
+				? OptionMath.Vanna(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, iv) * q.OpenInterest.Value * 100m * spot * 0.01m
+				: OptionMath.Gamma(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, iv) * q.OpenInterest.Value * 100m * spot;
+			// Only a dead contract is dropped. Gamma is non-negative so this is the old `<= 0` guard; vanna is signed,
+			// and dropping its negative half would silently delete every strike above the d2 = 0 flip.
+			if (dollarGex == 0m) continue;
 
 			var isCall = parsed.CallPut == "C";
 			var key = (parsed.ExpiryDate.Date, parsed.Strike);

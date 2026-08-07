@@ -553,4 +553,25 @@ internal static class OptionMath
 		var pdf = Math.Exp(-0.5 * d1 * d1) / Math.Sqrt(2.0 * Math.PI);
 		return (decimal)(pdf / (s * sigma * Math.Sqrt(t)));
 	}
+
+	/// <summary>Vanna of a European option under Black-Scholes — the cross-derivative ∂²V/∂S∂σ, equivalently ∂Δ/∂σ:
+	/// how much an option's delta moves per 1.00 (= 100 vol points) change in implied vol. Same formula for calls and
+	/// puts (both share d1/d2), so the dealer long-call / short-put sign convention is applied by the caller exactly as
+	/// it is for gamma.
+	///
+	/// <para>Unlike gamma this is SIGNED and flips at d2 = 0 (just below the money): strikes BELOW that point have
+	/// negative vanna (K &lt; S ⇒ d2 &gt; 0), strikes above it positive. It is also ~0 at the money and peaks around
+	/// d2 = ±1, so the biggest contributors sit off the money, not on it. That sign flip is the whole point — it is why
+	/// an IV move produces a directional hedging flow rather than a symmetric one, and why a "max |vanna| strike" is not
+	/// a price magnet the way a gamma pile is.</para></summary>
+	internal static decimal Vanna(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv)
+	{
+		if (timeYears <= 0 || iv <= 0m) return 0m;
+		double s = (double)spot, k = (double)strike, sigma = (double)iv, t = timeYears, r = riskFreeRate;
+		var sqrtT = Math.Sqrt(t);
+		var d1 = (Math.Log(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
+		var d2 = d1 - sigma * sqrtT;
+		var pdf = Math.Exp(-0.5 * d1 * d1) / Math.Sqrt(2.0 * Math.PI);
+		return (decimal)(-pdf * d2 / sigma);
+	}
 }
