@@ -212,8 +212,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// ~17:00 ET, so before then the latest settled session is the prior trading day; walk back
 		// over weekends/holidays either way.
 		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(asOf.Kind == DateTimeKind.Utc ? asOf : asOf.ToUniversalTime(), NyTz);
-		var settled = nowNy.TimeOfDay >= TimeSpan.FromHours(17) ? nowNy.Date : nowNy.Date.AddDays(-1);
-		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
+		var settled = MarketCalendar.PreviousOpenOnOrBefore(nowNy.TimeOfDay >= TimeSpan.FromHours(17) ? nowNy.Date : nowNy.Date.AddDays(-1));
 
 		// A single session can be absent from a vendor's series even when the fetch fully succeeded — e.g.
 		// ^VIX1D / ^VIX9D occasionally publish a null print for one day while neighbouring days are fine. Probing
@@ -272,9 +271,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	private static DateTime PriorSettledSession(DateTime asOf)
 	{
 		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(asOf.Kind == DateTimeKind.Utc ? asOf : asOf.ToUniversalTime(), NyTz);
-		var d = nowNy.Date.AddDays(-1);
-		while (!MarketCalendar.IsOpen(d)) d = d.AddDays(-1);
-		return d;
+		return MarketCalendar.PreviousOpenOnOrBefore(nowNy.Date.AddDays(-1));
 	}
 
 	/// <summary>Fills <c>data/sentiment-cache/<date>.json</c> for every trading day in

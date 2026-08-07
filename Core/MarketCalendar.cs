@@ -41,15 +41,20 @@ internal static class MarketCalendar
 		return d;
 	}
 
-	/// <summary>The first trading day strictly after <paramref name="date"/>. Used by the roll-past-BE
-	/// variant of CloseBeforeShortExpiryRule to target the next listed daily expiry (SPY/QQQ have
-	/// Mon–Fri dailies, so the next open day is always a listed expiry for those roots).</summary>
-	internal static DateTime NextOpenAfter(DateTime date)
+	/// <summary>The given date if it's a trading day, else the nearest open day after it — the forward mirror of
+	/// <see cref="PreviousOpenOnOrBefore"/>. Use this to snap a nominal date onto a session that actually trades
+	/// (a settlement cutoff landing on a Saturday, a projected eval date, the next daily expiry).</summary>
+	internal static DateTime NextOpenOnOrAfter(DateTime date)
 	{
-		var d = date.Date.AddDays(1);
+		var d = date.Date;
 		while (!IsOpen(d)) d = d.AddDays(1);
 		return d;
 	}
+
+	/// <summary>The first trading day strictly after <paramref name="date"/>. Used by the roll-past-BE
+	/// variant of CloseBeforeShortExpiryRule to target the next listed daily expiry (SPY/QQQ have
+	/// Mon–Fri dailies, so the next open day is always a listed expiry for those roots).</summary>
+	internal static DateTime NextOpenAfter(DateTime date) => NextOpenOnOrAfter(date.Date.AddDays(1));
 
 	/// <summary>True if <paramref name="date"/> is an NYSE/CBOE early-close (1:00pm ET) half-day: the Friday
 	/// after Thanksgiving, July 3 (day before Independence Day), and December 24 (Christmas Eve) — each only

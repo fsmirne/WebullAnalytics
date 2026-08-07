@@ -406,7 +406,7 @@ internal sealed class AIScanSettings : AILiveTickerSubcommandSettings
 	{
 		var date = Date != null
 			? DateTime.ParseExact(Date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture).Date
-			: NextBusinessDay(DateTime.Today);
+			: MarketCalendar.NextOpenAfter(DateTime.Today);
 		// Stamp at 09:30 ET to match the backtest's per-step convention (the first RTH minute under
 		// our normalized start-of-bar convention; see BacktestRunner.MarketOpenTime). HV/VIX lookups
 		// only use .Date so the time component is cosmetic for those, but option-chart cache lookups
@@ -415,12 +415,6 @@ internal sealed class AIScanSettings : AILiveTickerSubcommandSettings
 		return date.Add(new TimeSpan(9, 30, 0));
 	}
 
-	private static DateTime NextBusinessDay(DateTime today)
-	{
-		var d = today.AddDays(1);
-		while (!MarketCalendar.IsOpen(d)) d = d.AddDays(1);
-		return d;
-	}
 }
 
 internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>

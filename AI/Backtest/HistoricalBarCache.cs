@@ -163,7 +163,7 @@ internal sealed class HistoricalBarCache
 		// requested end back to the most recent open trading day, so neither a Saturday "today" nor a
 		// weekend/holiday --until demands a bar that will never exist. (settled=today after the 17:00 cutoff
 		// is intentional — it lets a backtest include today once its EOD bar has posted.)
-		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
+		settled = MarketCalendar.PreviousOpenOnOrBefore(settled);
 		// CBOE index EOD values (VIX/VIX1D/VIX9D) publish later than Yahoo's underlyings — often well after our
 		// 17:00 cutoff — so a coverage check must not demand *today's* CBOE bar the instant the cutoff passes, or
 		// it reports a spurious "partial" every evening until CBOE posts. Back the requirement off to the prior

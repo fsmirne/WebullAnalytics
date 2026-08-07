@@ -21,6 +21,14 @@ public class BreakEvenCurrentPnlTests : IDisposable
 		=> new(Instrument: occ, Asset: Asset.Option, OptionKind: callPut == "C" ? "Call" : "Put",
 			   Side: side, Qty: qty, AvgPrice: price, Expiry: expiry, IsStrategyLeg: true, MatchKey: MatchKeys.Option(occ));
 
+	/// <summary>A future eval date at least <paramref name="minDaysAhead"/> out that is guaranteed to be a TRADING
+	/// day. The grid only carries a column for the eval date when the market is open on it — BuildDateColumns adds
+	/// `today.Date + MarketOpen` under a MarketCalendar.IsOpen guard, and the interior columns start the day after —
+	/// so a bare Today.AddDays(n) makes the grid tests pass or fail on whichever weekday the suite happens to run
+	/// (they landed on Saturday 2026-08-22 and asserted a column that correctly does not exist).</summary>
+	private static DateTime FutureTradingDay(int minDaysAhead)
+		=> MarketCalendar.NextOpenOnOrAfter(DateTime.Today.AddDays(minDaysAhead));
+
 	[Theory]
 	[InlineData(0)]    // same-day
 	[InlineData(15)]   // future --date: CurrentPnl must still track the aggregate (decay + spot)
@@ -91,7 +99,7 @@ public class BreakEvenCurrentPnlTests : IDisposable
 			Theoretical = false,
 		};
 
-		EvaluationDate.Set(DateTime.Today.AddDays(15));  // future eval; short still 30 DTE so intraday theta is negligible
+		EvaluationDate.Set(FutureTradingDay(15));  // future eval; short still ~30 DTE so intraday theta is negligible
 
 		var res = BreakEvenAnalyzer.Analyze(group, opts).Single(r => r.Grid != null && r.CurrentPnl.HasValue);
 		var grid = res.Grid!;
@@ -140,7 +148,7 @@ public class BreakEvenCurrentPnlTests : IDisposable
 			Theoretical = false,
 		};
 
-		EvaluationDate.Set(DateTime.Today.AddDays(15));
+		EvaluationDate.Set(FutureTradingDay(15));
 
 		var res = CombinedBreakEvenAnalyzer.Analyze(rows, opts).Single(r => r.Grid != null && r.CurrentPnl.HasValue);
 		var grid = res.Grid!;

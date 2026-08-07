@@ -114,9 +114,7 @@ internal sealed class SmileIndexCache
 	private DateTime ClampToSettled(DateTime utcNow)
 	{
 		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(utcNow.Kind == DateTimeKind.Utc ? utcNow : DateTime.SpecifyKind(utcNow, DateTimeKind.Utc), NyTz);
-		var settled = nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
-		while (!MarketCalendar.IsOpen(settled)) settled = settled.AddDays(-1);
-		return settled;
+		return MarketCalendar.PreviousOpenOnOrBefore(nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1));
 	}
 
 	private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };

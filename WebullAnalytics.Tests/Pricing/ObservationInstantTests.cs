@@ -97,8 +97,6 @@ public class ObservationInstantTests : IDisposable
 	// A guaranteed open trading day at noon, derived relatively so the test never goes stale.
 	private static DateTime MondayNoon()
 	{
-		var d = DateTime.Today.AddDays(14);
-		while (!MarketCalendar.IsOpen(d.Date)) d = d.AddDays(1);
-		return d.Date + new TimeSpan(12, 0, 0);
+		return MarketCalendar.NextOpenOnOrAfter(DateTime.Today.AddDays(14)) + new TimeSpan(12, 0, 0);
 	}
 }
