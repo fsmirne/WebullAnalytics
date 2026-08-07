@@ -774,7 +774,7 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public bool BookCmd { get; set; }
 
 	[CommandOption("--replay")]
-	[Description("Replay mode: skip the opener and seed the book from the live proposal log (data/ai-proposals.<TICKER>.<strategy>.jsonl). Per trading day, the first non-informational open proposal recorded at/after 09:30 ET books at its recorded qty and vendor-quote submit price (tick-rounded like the auto-executor's limit; no entry slippage or re-pricing) — then the management rules, intraday triggers, and expiry settlement run as normal. Reconstructs what the live/simulated opener actually proposed over [--since, --until]; combine with --book-cmd for the matching `wa analyze trade` line.")]
+	[Description("Replay mode: skip the opener and seed the book from the live proposal log (data/ai-proposals.<TICKER>.<strategy>.jsonl). Per trading day, the first non-informational open proposal recorded at/after 09:30 ET books at its recorded qty and vendor-quote submit price (tick-rounded like the auto-executor's limit; no entry slippage or re-pricing) — then the management rules, intraday triggers, and expiry settlement run as normal. Reconstructs what the live/simulated opener actually proposed over [[--since, --until]]; combine with --book-cmd for the matching `wa analyze trade` line.")]
 	public bool Replay { get; set; }
 
 	[CommandOption("--split")]

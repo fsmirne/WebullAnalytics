@@ -654,7 +654,7 @@ internal sealed class TradeHistorySettings : TradeSubcommandSettings
 	public string? StartDate { get; set; }
 
 	[CommandOption("--end-date <YYYY-MM-DD>")]
-	[Description("End date (yyyy-MM-dd). Defaults to start-date + 1 (the API requires end > start, so 'today' means [today, tomorrow)).")]
+	[Description("End date (yyyy-MM-dd). Defaults to start-date + 1 (the API requires end > start, so 'today' means [[today, tomorrow)).")]
 	public string? EndDate { get; set; }
 
 	[CommandOption("--all")]
