@@ -275,8 +275,18 @@ internal static class OptionMath
 		// surface. A user --iv override still wins; legs that couldn't be calibrated fall through to broker IV.
 		if (opts.CalibratedIv != null && opts.CalibratedIv.TryGetValue(symbol, out var calibrated))
 			return calibrated;
-		if (opts.OptionQuotes != null && opts.OptionQuotes.TryGetValue(symbol, out var quote) && quote.ImpliedVolatility.HasValue && quote.ImpliedVolatility.Value > 0)
-			return quote.ImpliedVolatility.Value;
+		if (opts.OptionQuotes != null && opts.OptionQuotes.TryGetValue(symbol, out var quote))
+		{
+			// Vendor-reported IV is only trusted when the quote carries a live two-sided book. A one-sided or
+			// empty book (off-hours residue, a dead expiring contract) reports IVs unanchored to any tradeable
+			// price — e.g. a 0.01-ask no-bid book carrying IV 145% that reprices a 1-DTE leg to a multiple of
+			// its real value. Such legs fall back to the quote's HV as the sanest available surface; with no
+			// HV either they return null and price at intrinsic.
+			if (quote.ImpliedVolatility is > 0m && quote.Bid is > 0m && quote.Ask is > 0m)
+				return quote.ImpliedVolatility.Value;
+			if (quote.HistoricalVolatility is > 0m)
+				return quote.HistoricalVolatility.Value;
+		}
 		return null;
 	}
 

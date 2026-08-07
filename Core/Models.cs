@@ -262,7 +262,11 @@ public record AnalysisOptions(
 	IReadOnlyDictionary<string, List<decimal>>? ExtraLevels = null,
 	IReadOnlyDictionary<string, decimal>? IvOverrides = null,
 	IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? Dividends = null,
-	IReadOnlyDictionary<string, decimal>? CalibratedIv = null
+	IReadOnlyDictionary<string, decimal>? CalibratedIv = null,
+	// Past --date only: every leg's quote was replaced with the quote store's real NBBO as of the eval date's
+	// close (HistoricalMarkOverlay), so bid/ask mids ARE as-of-then marks and the current-P&L / market-value
+	// paths may price from them directly instead of short-circuiting to null on a past eval date.
+	bool MarksAsOfEvalDate = false
 );
 
 public record BreakEvenResult(

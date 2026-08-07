@@ -177,11 +177,13 @@ public static class BreakEvenAnalyzer
 	/// <summary>Marked P&L for this position at the eval spot/date, summed from the same per-leg mark
 	/// (<see cref="OptionMath.LegMarkPerShare"/>) the portfolio total uses — so a panel's "Current P&L"
 	/// reconciles with the aggregate and stays correct under --date/--spot. Returns null (panel then falls
-	/// back to the grid's anchor-column cell) when any leg can't be marked or the eval date is in the past
-	/// (mirrors <see cref="TableBuilder.ComputeOpenPositionsMarketValue"/>'s guard).</summary>
+	/// back to the grid's anchor-column cell) when any leg can't be marked, or when the eval date is in the
+	/// past with quotes struck today — UNLESS every leg's quote was replaced with the store's as-of NBBO
+	/// (opts.MarksAsOfEvalDate), in which case the mids ARE the past-date marks and pricing from them is
+	/// exact (mirrors <see cref="TableBuilder.ComputeOpenPositionsMarketValue"/>'s guard).</summary>
 	private static decimal? ComputeCurrentPnl(IReadOnlyList<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty, decimal entryBasis, AnalysisOptions opts)
 	{
-		if (EvaluationDate.Today < DateTime.Today) return null;
+		if (EvaluationDate.Today < DateTime.Today && !opts.MarksAsOfEvalDate) return null;
 		decimal value = 0m;
 		foreach (var leg in legs)
 		{

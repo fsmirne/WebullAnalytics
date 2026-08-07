@@ -541,7 +541,9 @@ public static class TableBuilder
 		if (lotsByMatchKey.Count == 0)
 			return null;
 
-		if (EvaluationDate.Today < DateTime.Today)
+		// A past eval date can't be marked from quotes struck today — unless every leg's quote was replaced
+		// with the store's as-of NBBO (MarksAsOfEvalDate), making the mids exact past-date marks.
+		if (EvaluationDate.Today < DateTime.Today && !opts.MarksAsOfEvalDate)
 			return null;
 
 		decimal total = 0;

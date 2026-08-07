@@ -352,6 +352,21 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			}
 		}
 
+		// Past --date: replace live quotes/spots with the quote store's real NBBO and daily close as of that
+		// date (per-leg; misses keep the live quote and are warned). Live quotes struck today are only honest
+		// marks for today/future evals — un-decaying them to a past date runs on vendor IVs that an after-hours
+		// one-sided book renders garbage (the 145%-IV dead-residue reprice). MarksAsOfEvalDate is set only when
+		// every leg was store-marked, which is what lets the mid-based current-P&L paths run for a past date.
+		var pastDateEval = EvaluationDate.IsOverridden && EvaluationDate.Today < DateTime.Today;
+		var marksAsOfEvalDate = false;
+		if (pastDateEval && positionRows.Count > 0)
+		{
+			var overlay = await HistoricalMarkOverlay.ApplyAsync(EvaluationDate.Today, OptionSymbolsFromRows(positionRows), optionQuotesBySymbol, underlyingPrices, cancellation);
+			optionQuotesBySymbol = overlay.Quotes;
+			underlyingPrices = overlay.UnderlyingPrices;
+			marksAsOfEvalDate = overlay.AllLegsCovered;
+		}
+
 		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null;
 		if (settings.Spot != null)
 		{
@@ -377,14 +392,17 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		}
 
 		IReadOnlyDictionary<string, decimal>? calibratedIv = null;
-		if (settings.Calibrated && optionQuotesBySymbol != null && underlyingPrices != null)
+		// A past --date always calibrates: overlaid legs get the IV implied by their stored as-of mid (the
+		// surface the grid decays on), and fallback legs get today's mid-implied IV — either way the reprice
+		// never rests on a vendor-reported IV, which an off-hours book can render meaningless.
+		if ((settings.Calibrated || pastDateEval) && optionQuotesBySymbol != null && underlyingPrices != null)
 		{
 			calibratedIv = BuildCalibratedIv(optionQuotesBySymbol, underlyingPrices, ivOverrides, dividends);
 			if (calibratedIv != null)
 				WebullAnalytics.Utils.Log.Debug($"Calibration: solved mid-implied IV for {calibratedIv.Count} contract(s); future grid values anchored to the live mid surface.");
 		}
 
-		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends, calibratedIv);
+		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends, calibratedIv, marksAsOfEvalDate);
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
 		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments, singleLegStandalones);
