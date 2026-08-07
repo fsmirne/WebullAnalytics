@@ -277,18 +277,23 @@ internal static class OptionMath
 			return calibrated;
 		if (opts.OptionQuotes != null && opts.OptionQuotes.TryGetValue(symbol, out var quote))
 		{
-			// Vendor-reported IV is only trusted when the quote carries a live two-sided book. A one-sided or
-			// empty book (off-hours residue, a dead expiring contract) reports IVs unanchored to any tradeable
-			// price — e.g. a 0.01-ask no-bid book carrying IV 145% that reprices a 1-DTE leg to a multiple of
-			// its real value. Such legs fall back to the quote's HV as the sanest available surface; with no
-			// HV either they return null and price at intrinsic.
-			if (quote.ImpliedVolatility is > 0m && quote.Bid is > 0m && quote.Ask is > 0m)
-				return quote.ImpliedVolatility.Value;
+			// Such legs fall back to the quote's HV as the sanest available surface; with no HV either they
+			// return null and price at intrinsic. See TrustedVendorIv for why the book has to be two-sided.
+			if (TrustedVendorIv(quote) is { } vendorIv) return vendorIv;
 			if (quote.HistoricalVolatility is > 0m)
 				return quote.HistoricalVolatility.Value;
 		}
 		return null;
 	}
+
+	/// <summary>The quote's vendor-reported IV, but only when it carries a live TWO-SIDED book (bid &gt; 0 AND
+	/// ask &gt; 0); null otherwise so callers fall through to their own surface. A one-sided or empty book —
+	/// off-hours residue, a dead or just-expired contract — reports an IV anchored to no tradeable price at all:
+	/// a no-bid/0.01-ask SPY 745P carried Schwab IV 145% and repriced a 1-DTE leg to a multiple of its real
+	/// value, and a no-bid/0.01-ask SPCX 110P carried IV 887%, which collapsed that strike's dollar gamma from
+	/// $13.4M to $1.0M and rearranged the whole GEX heatmap. Every consumer of a vendor IV must go through here.</summary>
+	internal static decimal? TrustedVendorIv(OptionContractQuote quote)
+		=> quote.ImpliedVolatility is > 0m && quote.Bid is > 0m && quote.Ask is > 0m ? quote.ImpliedVolatility : null;
 
 	/// <summary>Back-solves the IV that reproduces a leg's market mid `(bid + ask) / 2` at the given
 	/// <paramref name="spot"/> (pass the dividend-adjusted spot to keep calibration consistent with how

@@ -1305,11 +1305,18 @@ internal sealed class GexMatrix
 
 			var timeYears = Math.Max(1, (parsed.ExpiryDate.Date - asOfDate).Days) / 365.0;
 
+			// Vendor IV is taken only from a live two-sided book (see OptionMath.TrustedVendorIv). Without that
+			// guard the heatmap is at the mercy of dead books, and an expiry-day evening — exactly when this
+			// command gets run — is full of them: Schwab quoted the just-expired SPCX 110P at no-bid/0.01-ask
+			// with IV 887%, which cut that strike's dollar gamma from $13.4M to $1.0M and reshuffled the ladder.
+			//
 			// The data/oi EOD snapshot stores iv = null for every contract on its OWN expiry day: the Python
 			// back-solve degenerates at T≈0 against the 16:00 stamp, so the entire 0DTE expiry would otherwise
 			// vanish (and `analyze gex` falls through to the next day). Back-solve the IV from the captured mid
 			// at the (already day-floored) timeYears so the 0DTE — which still carries real OI + bid/ask — survives.
-			var iv = q.ImpliedVolatility ?? 0m;
+			// That solve is now also the fallback for an untrusted vendor IV; it needs a two-sided book itself,
+			// so a genuinely dead contract solves to nothing and drops out instead of contributing phantom gamma.
+			var iv = OptionMath.TrustedVendorIv(q) ?? 0m;
 			if (iv <= 0m && !string.IsNullOrEmpty(parsed.CallPut))
 			{
 				var mid = q.Bid.HasValue && q.Ask.HasValue && q.Bid.Value > 0m && q.Ask.Value > 0m
@@ -1321,6 +1328,7 @@ internal sealed class GexMatrix
 					if (solved > 0.011m && solved < 4.99m) iv = solved;
 				}
 			}
+			if (iv <= 0m && q.HistoricalVolatility is > 0m) iv = q.HistoricalVolatility.Value;
 			if (iv <= 0m) continue;
 
 			var dollarGex = greek == GreekKind.Vanna
