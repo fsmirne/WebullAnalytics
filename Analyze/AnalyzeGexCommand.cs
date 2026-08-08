@@ -25,9 +25,9 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public string Ticker { get; set; } = "";
 
 	[CommandOption("--greek <NAME>")]
-	[DefaultValue("gamma")]
-	[Description("Which exposure to map: gamma (default, the classic GEX) or vanna (VEX — dollars of dealer delta per vol point of IV change). Vanna is signed and flips just below the money, so it maps a hedging FLOW under an IV move, not a price magnet: the gamma-only anchors (gravity, gamma flip, call/put walls, max pain) are replaced by the per-expiry net vanna and its implied flow.")]
-	public string Greek { get; set; } = "gamma";
+	[DefaultValue("both")]
+	[Description("Which exposure to map: both (default — the gamma and vanna heatmaps side by side, trimmed to the front expiries that fit the terminal), gamma/gex (the classic GEX alone), or vanna/vex (dollars of dealer delta per vol point of IV change, alone). Vanna is signed and flips just below the money, so it maps a hedging FLOW under an IV move, not a price magnet: the gamma-only anchors (gravity, gamma flip, call/put walls, max pain) are replaced by the per-expiry net vanna and its implied flow.")]
+	public string Greek { get; set; } = "both";
 
 	[CommandOption("--expiry <DATE>")]
 	[Description("Restrict to a single expiration date (YYYY-MM-DD). Default: show all expirations in the chain.")]
@@ -62,9 +62,12 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public bool Intraday { get; set; }
 
 	[CommandOption("--interval <MIN>")]
-	[DefaultValue(30)]
-	[Description("--intraday time-bucket size in minutes (default 30): the RTH column spacing from 09:30 to 16:00.")]
-	public int IntervalMin { get; set; } = 30;
+	[Description("--intraday time-bucket size in minutes. Default: auto — the finest of 30/45/60/90/120 whose panels fit the terminal width side by side (both the gamma and VEX migration tables under the default --greek both; just the gamma table under --greek gamma).")]
+	public int? IntervalMin { get; set; }
+
+	[CommandOption("--time <HH:MM>")]
+	[Description("--intraday only: narrow the VEX side panel to the single bucket nearest this ET time (default: a full VEX migration panel, one column per bucket like the gamma table) — e.g. --time 10:00 focuses on what the 0DTE vanna book looked like at 10am. The gamma migration columns are unaffected.")]
+	public string? Time { get; set; }
 
 	[CommandOption("--exante")]
 	[Description("--intraday only: price the 0DTE gamma with the PRIOR trading day's snapshot IVs (falling back to a back-solve from the prior day's mids at the prior day's spot) instead of back-solving from this day's EOD mids. The default solve leaks the session's outcome into every column — a put that finished ITM has a fat EOD mid, back-solves to an inflated IV, and its strike re-brightens/dims by where the day CLOSED; ex-ante IVs show what was actually hedgeable at each bucket. 0DTE contracts absent from the prior snapshot are dropped.")]
@@ -75,22 +78,28 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 		if (string.IsNullOrWhiteSpace(Ticker)) return ValidationResult.Error("<ticker> is required");
-		if (!TryParseGreek(Greek, out _)) return ValidationResult.Error($"--greek: expected 'gamma' or 'vanna', got '{Greek}'");
+		if (!BothGreeks && !TryParseGreek(Greek, out _)) return ValidationResult.Error($"--greek: expected 'gamma', 'vanna' or 'both', got '{Greek}'");
 		if (Expiry != null && !DateTime.TryParseExact(Expiry, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--expiry: expected YYYY-MM-DD, got '{Expiry}'");
 		if (StrikeRangePct <= 0 || StrikeRangePct > 200) return ValidationResult.Error($"--strike-range: must be in (0, 200], got {StrikeRangePct}");
 		if (MaxStrikes < 1 || MaxStrikes > 200) return ValidationResult.Error($"--max-strikes: must be in [1, 200], got {MaxStrikes}");
 		if (Dte < 0 || Dte > 60) return ValidationResult.Error($"--dte: must be in [0, 60], got {Dte}");
-		if (IntervalMin < 5 || IntervalMin > 120) return ValidationResult.Error($"--interval: must be in [5, 120] minutes, got {IntervalMin}");
+		if (IntervalMin.HasValue && (IntervalMin.Value < 5 || IntervalMin.Value > 120)) return ValidationResult.Error($"--interval: must be in [5, 120] minutes, got {IntervalMin}");
+		if (Time != null && !Intraday) return ValidationResult.Error("--time anchors the --intraday VEX column; add --intraday");
+		if (Time != null && !TimeSpan.TryParseExact(Time, @"hh\:mm", CultureInfo.InvariantCulture, out var vt)) return ValidationResult.Error($"--time: expected HH:MM (ET), got '{Time}'");
+		else if (Time != null && TimeSpan.TryParseExact(Time, @"hh\:mm", CultureInfo.InvariantCulture, out var vtOk) && (vtOk < new TimeSpan(9, 30, 0) || vtOk > new TimeSpan(16, 0, 0))) return ValidationResult.Error($"--time: must be within RTH 09:30–16:00 ET, got '{Time}'");
 		if (Exante && !Intraday) return ValidationResult.Error("--exante only applies to the --intraday heatmap");
 		// The intraday view's whole subject is the gravity strike migrating as spot moves, and it reads its Gravity row
-		// back out of the gamma-only data/gex log. Vanna has no gravity, so rather than render a gamma frame around a
-		// vanna matrix the combination is refused outright.
-		if (Intraday && TryParseGreek(Greek, out var g) && g != GreekKind.Gamma) return ValidationResult.Error("--intraday maps the gamma gravity migration and has no vanna equivalent; drop --greek vanna");
+		// back out of the gamma-only data/gex log. Vanna has no gravity, so an explicit vanna request is refused
+		// outright; the 'both' default quietly resolves to the gamma view so plain --intraday keeps working.
+		if (Intraday && !BothGreeks && TryParseGreek(Greek, out var g) && g != GreekKind.Gamma) return ValidationResult.Error("--intraday maps the gamma gravity migration and has no vanna equivalent; drop --greek vanna");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
 		if (Dump && EvaluationDateOverride.HasValue) return ValidationResult.Error("--dump applies to live fetches only (no --date)");
 		return ValidationResult.Success();
 	}
+
+	/// <summary>'both' = render the gamma AND vanna maps in one run, side by side when the terminal is wide enough.</summary>
+	internal bool BothGreeks => string.Equals(Greek?.Trim(), "both", StringComparison.OrdinalIgnoreCase);
 
 	internal static bool TryParseGreek(string? name, out GreekKind greek)
 	{
@@ -238,12 +247,17 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				await RefreshIntradayTapeAsync(ticker, apiConfig, cancellation);
 				AnsiConsole.MarkupLine($"[dim]Running-day heatmap from the live {Markup.Escape(settings.VendorName)} chain ({quotes.Count} contracts); columns end at the current bucket.[/]");
 			}
-			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical);
+			TimeSpan? vexAt = settings.Time != null ? TimeSpan.ParseExact(settings.Time, @"hh\:mm", CultureInfo.InvariantCulture) : null;
+			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical, withVexNow: settings.BothGreeks, vexAt: vexAt);
 			return 0;
 		}
 
+		// --greek both: TryParseGreek leaves greek at Gamma, so `matrix` below IS the gamma matrix — the data/gex
+		// log condition and every gamma-only panel stay correct; the vanna matrix rides alongside for rendering.
 		AnalyzeGexSettings.TryParseGreek(settings.Greek, out var greek);
+		var both = settings.BothGreeks;
 		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, greek);
+		var vannaMatrix = both ? GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, GreekKind.Vanna) : null;
 		if (matrix.Strikes.Count == 0 || matrix.Expiries.Count == 0)
 		{
 			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
@@ -263,14 +277,25 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		RenderHeader(ticker, spot.Value, asOf, expiryFilter, matrix);
 		AnsiConsole.WriteLine();
-		RenderHeatmap(matrix, spot.Value, greek);
+		if (vannaMatrix != null)
+			RenderHeatmapsSideBySide(matrix, vannaMatrix, spot.Value);
+		else
+			RenderHeatmap(matrix, spot.Value, greek);
 		AnsiConsole.WriteLine();
 		if (greek == GreekKind.Vanna)
 			RenderPerExpiryVanna(matrix, asOf);
 		else
 			RenderPerExpirySummary(matrix, spot.Value, asOf);
+		if (vannaMatrix != null)
+		{
+			AnsiConsole.WriteLine();
+			RenderPerExpiryVanna(vannaMatrix, asOf);
+		}
 		AnsiConsole.WriteLine();
-		RenderTotals(matrix, spot.Value, greek);
+		if (vannaMatrix != null)
+			RenderTotalsSideBySide(matrix, vannaMatrix, spot.Value);
+		else
+			RenderTotals(matrix, spot.Value, greek);
 		AnsiConsole.WriteLine();
 		// Walls are max-gamma-per-side strikes read as support/resistance. There is no vanna analogue — the largest
 		// |vanna| strike is just where OI meets d2 ≈ ±1 — so the panel is gamma-only rather than relabelled.
@@ -463,9 +488,44 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// </summary>
 	private static void RenderHeatmap(GexMatrix matrix, decimal spot, GreekKind greek)
 	{
+		AnsiConsole.Write(BuildHeatmapTable(matrix, spot, greek));
+		AnsiConsole.MarkupLine(HeatmapLegend(greek));
+	}
+
+	/// <summary>--greek both: the gamma and vanna heatmaps in one view. The strike ladders are identical by
+	/// construction (strike selection is closest-to-spot, independent of the greek), so the rows line up 1:1 for
+	/// left-right comparison. To keep the pair side by side instead of wrapping, the heatmaps are trimmed to the
+	/// FRONT expiries that fit the terminal width (per-expiry and chain-totals tables still cover the full set);
+	/// Columns then wraps to stacked only if even one expiry per panel cannot fit. Each map keeps its OWN
+	/// brightness normalization (gamma and vanna magnitudes are not comparable); both legends print below.</summary>
+	private static void RenderHeatmapsSideBySide(GexMatrix gammaMatrix, GexMatrix vannaMatrix, decimal spot)
+	{
+		// Rendered widths, from the fixed cell geometry: cell content 7 ("+192.8M") + 2 padding + 1 border = 10
+		// per expiry column; strike column = label + 2 padding + 1 border; +1 closing border per panel; ~2 for
+		// the Columns gutter. Solve for the expiry count that keeps BOTH panels inside the console width.
+		var strikeW = gammaMatrix.Strikes.Count > 0 ? gammaMatrix.Strikes.Max(k => StrikeLabel(k, IsWholeGrid(gammaMatrix.Strikes)).Length) : 7;
+		var perExpiry = 10;
+		var fixedPerPanel = 1 + strikeW + 3;
+		var budget = AnsiConsole.Profile.Width - 2 - 2 * fixedPerPanel;
+		var maxExpiries = Math.Max(1, budget / (2 * perExpiry));
+		var shown = gammaMatrix.Expiries.Take(maxExpiries).ToList();
+
+		var g = BuildHeatmapTable(gammaMatrix, spot, GreekKind.Gamma, shown).Title("[bold]GEX (gamma)[/]");
+		var v = BuildHeatmapTable(vannaMatrix, spot, GreekKind.Vanna, shown).Title("[bold]VEX (vanna)[/]");
+		AnsiConsole.Write(new Columns(g, v) { Expand = false });
+		if (shown.Count < gammaMatrix.Expiries.Count)
+			AnsiConsole.MarkupLine($"[dim]Heatmaps show the first {shown.Count} of {gammaMatrix.Expiries.Count} expiries so both panels fit {AnsiConsole.Profile.Width} columns side by side — the per-expiration and chain-totals tables below cover all of them (narrow with --dte/--expiry, or widen the terminal, to see more).[/]");
+		AnsiConsole.MarkupLine(HeatmapLegend(GreekKind.Gamma));
+		AnsiConsole.MarkupLine(HeatmapLegend(GreekKind.Vanna));
+	}
+
+	private static Table BuildHeatmapTable(GexMatrix matrix, decimal spot, GreekKind greek, IReadOnlyList<DateTime>? expiries = null)
+	{
+		var shownExpiries = expiries ?? matrix.Expiries;
+		var wholeGrid = IsWholeGrid(matrix.Strikes);
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
 		table.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
-		foreach (var exp in matrix.Expiries)
+		foreach (var exp in shownExpiries)
 			table.AddColumn(new TableColumn($"[bold]{exp:M/d}[/]").Centered().NoWrap());
 
 		// Strike closest to spot — gets the bold yellow ATM marker.
@@ -474,12 +534,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		foreach (var strike in matrix.Strikes)
 		{
-			var strikeStr = $"${strike:N2}";
+			var strikeStr = StrikeLabel(strike, wholeGrid);
 			var isAtm = strike == atmStrike;
 			var strikeMarkup = isAtm ? $"[bold yellow]{strikeStr}[/]" : strikeStr;
 
 			var cells = new List<string> { strikeMarkup };
-			foreach (var exp in matrix.Expiries)
+			foreach (var exp in shownExpiries)
 			{
 				matrix.Cells.TryGetValue((exp, strike), out var cell);
 				// The gravity marker is a max-gross-GAMMA anchor. Under vanna the same strike would just be the biggest
@@ -490,11 +550,20 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			table.AddRow(cells.ToArray());
 		}
 
-		AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine(greek == GreekKind.Vanna
-			? "[dim]Cell = net VEX ($call vanna×OI − $put vanna×OI), in dollars of dealer delta per ONE vol point of IV change. [green]Green[/] = dealers gain delta when IV rises (they sell underlying to re-hedge), [red]red[/] = they lose delta (they buy); brightness ∝ |net|. Multiply by the vol-point move you expect: the sign of net × ΔIV is the hedging flow. Note the polarity flip near the money — that is vanna's d2 sign change, not a level.[/]"
-			: "[dim]Cell = net GEX ($call gamma×OI − $put gamma×OI). [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell (e.g. [bold underline]+1.2M[/]) = per-expiry gravity strike (max gross gamma).[/]");
+		return table;
 	}
+
+	private static string HeatmapLegend(GreekKind greek) => greek == GreekKind.Vanna
+		? "[dim]Cell = net VEX ($call vanna×OI − $put vanna×OI), in dollars of dealer delta per ONE vol point of IV change. [green]Green[/] = dealers gain delta when IV rises (they sell underlying to re-hedge), [red]red[/] = they lose delta (they buy); brightness ∝ |net|. Multiply by the vol-point move you expect: the sign of net × ΔIV is the hedging flow. Note the polarity flip near the money — that is vanna's d2 sign change, not a level.[/]"
+		: "[dim]Cell = net GEX ($call gamma×OI − $put gamma×OI). [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell (e.g. [bold underline]+1.2M[/]) = per-expiry gravity strike (max gross gamma).[/]";
+
+	/// <summary>Strike label for the heatmap ladders. Cents are dropped only when the WHOLE displayed ladder
+	/// is integer ("$7,885" on the SPY/SPXW dollar grids) — a ladder with any fractional strike (GME's $0.50
+	/// steps, sub-dollar grids) keeps two decimals on every row so the column reads uniformly instead of
+	/// mixing "$27" with "$26.50".</summary>
+	private static string StrikeLabel(decimal strike, bool wholeGrid) => wholeGrid ? $"${strike:N0}" : $"${strike:N2}";
+
+	private static bool IsWholeGrid(IEnumerable<decimal> strikes) => strikes.All(s => s == Math.Truncate(s));
 
 	private static string BuildHeatmapCellMarkup(GexCell? cell, decimal maxAbsNet, bool isGravity)
 	{
@@ -526,6 +595,24 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 	private static void RenderTotals(GexMatrix matrix, decimal spot, GreekKind greek)
 	{
+		AnsiConsole.Write(BuildTotalsTable(matrix, spot, greek));
+		if (greek == GreekKind.Vanna)
+			AnsiConsole.MarkupLine(VannaTotalsFootnote);
+	}
+
+	/// <summary>--greek both: the two chain-totals tables in one view, side by side when the width allows.</summary>
+	private static void RenderTotalsSideBySide(GexMatrix gammaMatrix, GexMatrix vannaMatrix, decimal spot)
+	{
+		var g = BuildTotalsTable(gammaMatrix, spot, GreekKind.Gamma).Title("[bold]Chain totals — GEX[/]");
+		var v = BuildTotalsTable(vannaMatrix, spot, GreekKind.Vanna).Title("[bold]Chain totals — VEX[/]");
+		AnsiConsole.Write(new Columns(g, v) { Expand = false });
+		AnsiConsole.MarkupLine(VannaTotalsFootnote);
+	}
+
+	private const string VannaTotalsFootnote = "[dim]Net VEX = dollars of dealer delta gained per vol point of IV RISE. The flow row reads it the way an IV move actually arrives: dealers re-hedge by trading the OPPOSITE sign of the delta they pick up, so net × ΔIV > 0 means they sell the underlying and < 0 means they buy. This is a flow estimate, not a target price.[/]";
+
+	private static Table BuildTotalsTable(GexMatrix matrix, decimal spot, GreekKind greek)
+	{
 		var isVanna = greek == GreekKind.Vanna;
 		var label = isVanna ? "VEX" : "GEX";
 		var totalAbs = Math.Abs(matrix.TotalCallGex) + Math.Abs(matrix.TotalPutGex);
@@ -553,9 +640,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			table.AddRow("Net fraction", $"[bold {netColor}]{netFrac:+0.00;-0.00}[/]  [dim](+1 = pure call, −1 = pure put)[/]");
 			table.AddRow("Gamma flip", FormatGammaFlipDisplay(matrix.FindGammaFlip(spot), spot));
 		}
-		AnsiConsole.Write(table);
-		if (isVanna)
-			AnsiConsole.MarkupLine("[dim]Net VEX = dollars of dealer delta gained per vol point of IV RISE. The flow row reads it the way an IV move actually arrives: dealers re-hedge by trading the OPPOSITE sign of the delta they pick up, so net × ΔIV > 0 means they sell the underlying and < 0 means they buy. This is a flow estimate, not a target price.[/]");
+		return table;
 	}
 
 	/// <summary>Renders "$1.2M" green for a positive exposure and "−$1.2M" red for a negative one. Gamma sides are
@@ -781,7 +866,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// instead of the morning snapshot's frozen values — the snapshot IVs age badly through a 0DTE session (IV
 	/// collapses intraday, sharpening gamma toward ATM), which is why a frozen-IV replay disagrees with what the
 	/// live command showed. A data/gex live log (when present) is rendered as a "Gravity" footer row for comparison.</summary>
-	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int intervalMin, bool exante, string source, bool liveChain = false)
+	private static TimeSpan AbsSpan(TimeSpan t) => t < TimeSpan.Zero ? -t : t;
+
+	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int? intervalMin, bool exante, string source, bool liveChain = false, bool withVexNow = false, TimeSpan? vexAt = null)
 	{
 		var expiry = date.Date;
 		var intradaySpots = LoadIntradaySpots(ticker, date);
@@ -792,20 +879,35 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 
 		// --exante deliberately pins prior-day IVs, so the time-matched minute quotes would defeat its purpose.
+
+		// Resolve the bucket size: an explicit --interval is honored as-is; the default picks the finest of the
+		// standard sizes whose panel set fits the terminal side by side (two migration panels under --greek both,
+		// one under --greek gamma), using the same fixed cell geometry as the rendering below. Strike labels track
+		// the spot magnitude, so a tape sample prices the column widths before any matrix is built.
+		var panels = withVexNow ? 2 : 1;
+		var sampleSpot = intradaySpots.Values.First();
+		var estStrikeW = sampleSpot < 100m ? $"${sampleSpot:N2}".Length : StrikeLabel(Math.Round(sampleSpot), wholeGrid: true).Length;
+		var estColW = 3 + Math.Max(7, $"{sampleSpot:F2}".Length);
+		var fixedW = panels * (1 + estStrikeW + 3) + (panels - 1) * 2;
+		int BucketsFor(int min) { var n = 0; for (var t = new TimeSpan(9, 30, 0); t < new TimeSpan(16, 0, 0); t += TimeSpan.FromMinutes(min)) n++; return n + 1; }
+		var interval = intervalMin ?? new[] { 30, 45, 60, 90, 120 }.FirstOrDefault(c => fixedW + panels * BucketsFor(c) * estColW <= AnsiConsole.Profile.Width, 120);
 		var minuteQuotes = exante ? new SortedDictionary<TimeSpan, Dictionary<string, OptionContractQuote>>() : LoadMinuteQuoteSets(ticker, date, quotes);
 
 		// Column marks: 09:30 stepping by --interval to 16:00 (always include the 16:00 close).
 		var open = new TimeSpan(9, 30, 0);
 		var close = new TimeSpan(16, 0, 0);
 		var hourMarks = new List<TimeSpan>();
-		for (var t = open; t < close; t += TimeSpan.FromMinutes(intervalMin)) hourMarks.Add(t);
+		for (var t = open; t < close; t += TimeSpan.FromMinutes(interval)) hourMarks.Add(t);
 		hourMarks.Add(close);
 		// Match the nearest intraday minute within half a bucket so adjacent columns never share a spot.
-		var tolerance = TimeSpan.FromMinutes(Math.Max(1, intervalMin / 2));
+		var tolerance = TimeSpan.FromMinutes(Math.Max(1, interval / 2));
 
 		// Per kept hour: the spot, the per-strike GexCells for the 0DTE, and that hour's gravity strike.
 		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity)>();
 		var skipped = new List<TimeSpan>();
+		// Per-bucket VEX cells (same time-matched quotes as the gamma bucket) — the vanna MIGRATION panel
+		// rendered beside the gamma one; --time narrows the panel to the single bucket nearest that ET time.
+		var vannaHours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells)>();
 		foreach (var mark in hourMarks)
 		{
 			decimal? spot = null;
@@ -838,6 +940,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			if (cells.Count == 0) continue;
 			m.GravityByExpiry.TryGetValue(expiry, out var grav);
 			hours.Add((mark, spot.Value, cells, grav));
+			if (withVexNow)
+			{
+				var vmB = GexMatrix.Build(bucketQuotes, ticker, spot.Value, expiry + mark, expiryFilter: expiry, strikeRangeFraction, maxDteDays: 0, maxStrikes, GreekKind.Vanna);
+				var vCells = new Dictionary<decimal, GexCell>();
+				foreach (var strike in vmB.Strikes)
+					if (vmB.Cells.TryGetValue((expiry, strike), out var vc)) vCells[strike] = vc;
+				vannaHours.Add((mark, spot.Value, vCells));
+			}
 		}
 
 		if (hours.Count == 0)
@@ -848,6 +958,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		var maxAbsNet = Math.Max(1m, hours.SelectMany(h => h.Cells.Values).Select(c => Math.Abs(c.Net)).DefaultIfEmpty(0m).Max());
 		var allStrikes = hours.SelectMany(h => h.Cells.Keys).Distinct().OrderByDescending(s => s).ToList();
+		var wholeGrid = IsWholeGrid(allStrikes);
 
 		AnsiConsole.MarkupLine($"[bold]{ticker}[/] 0DTE {date:yyyy-MM-dd} — intraday GEX gravity migration");
 		AnsiConsole.MarkupLine(minuteQuotes.Count > 0
@@ -856,14 +967,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			: liveChain ? "[dim]IVs: frozen from the live chain at fetch time; OI fixed from the same fetch (running day — early columns replay today's OI at each bucket's spot with current IVs).[/]"
 			: "[dim]IVs: frozen from the day's OI-snapshot values (no minute-quote coverage for this day in data/quotes).[/]");
 
-		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title("[bold]GEX (gamma)[/]");
 		table.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
 		foreach (var h in hours)
-			table.AddColumn(new TableColumn($"[bold]{h.Mark:hh\\:mm}[/]\n[dim]${h.Spot:F2}[/]").Centered().NoWrap());
+			table.AddColumn(new TableColumn($"[bold]{h.Mark:hh\\:mm}[/]\n[dim]{h.Spot:F2}[/]").Centered().NoWrap());
 
 		foreach (var strike in allStrikes)
 		{
-			var cells = new List<string> { $"${strike:N2}" };
+			var cells = new List<string> { StrikeLabel(strike, wholeGrid) };
 			foreach (var h in hours)
 			{
 				h.Cells.TryGetValue(strike, out var cell);
@@ -894,8 +1005,48 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			table.AddRow(liveCells.ToArray());
 		}
 
-		AnsiConsole.Write(table);
+		// VEX migration panel: the vanna analogue of the gamma table, bucket for bucket from the SAME
+		// time-matched quotes, sharing the exact strike rows (headers are two lines in both, neither table has a
+		// title, and the gamma table's Gravity footer is its LAST row — so the ladders align 1:1). --time narrows
+		// the panel to the single bucket nearest that ET time for a focused read. Columns wraps the panel below
+		// when the pair exceeds the terminal; the hint suggests the interval that would fit side by side.
+		if (withVexNow && vannaHours.Count > 0)
+		{
+			var shownVanna = vexAt == null ? vannaHours : new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells)> { vannaHours.OrderBy(v => AbsSpan(v.Mark - vexAt.Value)).First() };
+			var vMax = Math.Max(1m, shownVanna.SelectMany(h => h.Cells.Values).Select(c => Math.Abs(c.Net)).DefaultIfEmpty(0m).Max());
+			var vex = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title("[bold]VEX (vanna)[/]");
+			vex.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
+			foreach (var h in shownVanna)
+				vex.AddColumn(new TableColumn($"[bold]{h.Mark:hh\\:mm}[/]\n[dim]{h.Spot:F2}[/]").Centered().NoWrap());
+			foreach (var strike in allStrikes)
+			{
+				var vCells = new List<string> { StrikeLabel(strike, wholeGrid) };
+				foreach (var h in shownVanna)
+				{
+					h.Cells.TryGetValue(strike, out var cell);
+					vCells.Add(BuildHeatmapCellMarkup(cell, vMax, isGravity: false));
+				}
+				vex.AddRow(vCells.ToArray());
+			}
+			AnsiConsole.Write(new Columns(table, vex) { Expand = false });
+
+			// Same fixed cell geometry as the side-by-side expiry heatmaps: content max(7, spot label) + 2 padding
+			// + 1 border per bucket column; strike column + 2 padding + 1 border; +1 closing border per panel.
+			var strikeW = allStrikes.Count > 0 ? allStrikes.Max(k => StrikeLabel(k, wholeGrid).Length) : 7;
+			var colW = 3 + Math.Max(7, hours.Max(h => $"{h.Spot:F2}".Length));
+			var pairWidth = 2 * (1 + strikeW + 3) + (hours.Count + shownVanna.Count) * colW + 2;
+			if (pairWidth > AnsiConsole.Profile.Width && vexAt == null)
+			{
+				var fitBuckets = Math.Max(2, (AnsiConsole.Profile.Width - 2 - 2 * (1 + strikeW + 3)) / (2 * colW));
+				var fitInterval = (int)Math.Ceiling(390.0 / (fitBuckets - 1) / 30) * 30;
+				AnsiConsole.MarkupLine($"[dim]Panels are stacked — together they need {pairWidth} columns but the terminal has {AnsiConsole.Profile.Width}. Raise --interval to ~{fitInterval} (or drop --interval for the auto fit, or use --time HH:MM for a single VEX bucket) to fit them side by side.[/]");
+			}
+		}
+		else
+			AnsiConsole.Write(table);
 		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma)." + (liveGravity.Count > 0 ? " [cyan]Gravity[/] row = the gravity strike logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
+		if (withVexNow && vannaHours.Count > 0)
+			AnsiConsole.MarkupLine($"[dim]VEX panel = 0DTE net vanna ($ dealer delta per vol point) recomputed at each bucket's spot, same quotes as the gamma columns{(vexAt != null ? $" (narrowed to the bucket nearest --time {vexAt:hh\\:mm})" : "")}. No gravity marker — vanna maps a hedging flow under an IV move, not a level. Full multi-expiry VEX: `analyze gex {Markup.Escape(ticker)}` without --intraday.[/]");
 		if (skipped.Count > 0 && liveChain)
 			AnsiConsole.MarkupLine($"[dim]{skipped.Count} bucket(s) still ahead ({string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))}) — the session tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET; re-run to extend the columns as the day unfolds.[/]");
 		else if (skipped.Count > 0)
