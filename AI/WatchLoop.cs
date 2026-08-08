@@ -119,7 +119,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var vendor = LiveQuoteSource.ResolveVendor(settings.Vendor);
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
 		var quotes = AIContext.BuildLiveQuoteSource(vendor);
-		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
+		var expiryRegimes = new Rules.ExpiryRegimeProvider();
+		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, expiryRegimes), config);
 
 		// Auto-executors: turn proposals into real (or dry-run) order submissions. Both off by default;
 		// both honor enabled/submit gates independently. Shared with `wa ai scan` via AIContext.BuildAutoExecutors.
@@ -177,6 +178,13 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			try
 			{
 				var now = DateTime.Now;
+				// Layer-2: classify today's expiry-day regime once (first tick with a short dying today);
+				// one extra chain probe per day, only while the knob is on.
+				if (config.Rules.CloseBeforeShortExpiry.Regime.Enabled && !expiryRegimes.Has(config.Ticker, now.Date))
+				{
+					var regimePositions = await positions.GetOpenPositionsAsync(now, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { config.Ticker }, cancellation);
+					await Rules.ExpiryRegimeHost.PopulateAsync(expiryRegimes, config.Rules.CloseBeforeShortExpiry.Regime, regimePositions.Values, quotes, now, cancellation);
+				}
 				var pastOpenCutoff = openCutoff.HasValue && TimeZoneInfo.ConvertTime(now, NyTz).TimeOfDay > openCutoff.Value;
 				if (pastOpenCutoff && !openCutoffNoted)
 				{

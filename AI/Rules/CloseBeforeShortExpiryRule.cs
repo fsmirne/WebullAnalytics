@@ -17,8 +17,9 @@ namespace WebullAnalytics.AI.Rules;
 internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 {
 	private readonly CloseBeforeShortExpiryConfig _config;
+	private readonly ExpiryRegimeProvider? _regimes;
 
-	public CloseBeforeShortExpiryRule(CloseBeforeShortExpiryConfig config) { _config = config; }
+	public CloseBeforeShortExpiryRule(CloseBeforeShortExpiryConfig config, ExpiryRegimeProvider? regimes = null) { _config = config; _regimes = regimes; }
 
 	public string Name => "CloseBeforeShortExpiryRule";
 	public int Priority => 2;
@@ -62,6 +63,16 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 				isEmergency: true);
 		}
 
+		// Layer-2 regime modulation (campaign: gex_layers). PIN sessions defer the PROFIT-gated close
+		// (emergencies above always run) so pin-day decay keeps working; AMPLIFICATION sessions lower the
+		// profit threshold so the smaller win is banked before the terrain can manufacture the tail.
+		// Unclassified days (regime None / provider absent) are bit-identical to the unmodulated rule.
+		var regime = _regimes != null && _config.Regime.Enabled ? _regimes.Get(position.Ticker, ctx.Now.Date) : ExpiryDayRegime.None;
+		if (regime == ExpiryDayRegime.Pin && !string.IsNullOrWhiteSpace(_config.Regime.PinDeferProfitCloseUntilEt)
+			&& TimeSpan.TryParse(_config.Regime.PinDeferProfitCloseUntilEt, System.Globalization.CultureInfo.InvariantCulture, out var deferUntil)
+			&& ctx.Now.TimeOfDay < deferUntil)
+			return null;
+
 		// Profit gate: mark-to-market value vs. initial debit.
 		var markPerContract = ComputeMarkPerContract(position, ctx);
 		if (markPerContract == null) return null;
@@ -69,12 +80,13 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 		var initialDebit = Math.Abs(position.InitialNetDebit);
 		if (initialDebit <= 0m) return null;
 
+		var effectiveMinProfitPct = regime == ExpiryDayRegime.Amplification ? _config.MinProfitPct * _config.Regime.AmpMinProfitPctFactor : _config.MinProfitPct;
 		var profitPerContract = markPerContract.Value - initialDebit;
 		var profitPct = profitPerContract / initialDebit;
-		if (profitPct < _config.MinProfitPct) return null;
+		if (profitPct < effectiveMinProfitPct) return null;
 
 		return BuildClose(position,
-			$"expiry day, profit ${profitPerContract:F2}/contract = {profitPct * 100m:F1}% ≥ threshold {_config.MinProfitPct * 100m:F1}%, close all {position.Quantity}",
+			$"expiry day, profit ${profitPerContract:F2}/contract = {profitPct * 100m:F1}% ≥ threshold {effectiveMinProfitPct * 100m:F1}%{(regime == ExpiryDayRegime.Amplification ? " (amplification regime, lowered)" : regime == ExpiryDayRegime.Pin ? " (pin regime, deferred)" : "")}, close all {position.Quantity}",
 			isEmergency: false);
 	}
 

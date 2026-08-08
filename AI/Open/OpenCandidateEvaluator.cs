@@ -554,7 +554,22 @@ internal sealed class OpenCandidateEvaluator
 			// nearest leg expiry, which is the structure's scoring target (short-leg expiry for
 			// calendars/diagonals, the shared expiry for everything else).
 			for (int i = 0; i < survivors.Count; i++)
-				survivors[i] = ApplyCashSizing(survivors[i], freeCash, ctx.AccountValue, cfg, BiasForDte(CalendarDteToTarget(survivors[i], ctx.Now)));
+			{
+				// Layer-3 VEX sizing scalar: front-book (short-expiry) net vanna as a crush-tailwind proxy,
+				// signed by the structure's net vega. Weight 0 (default) pins the scalar to 1.0.
+				var vexScalar = 1m;
+				if (cfg.VexSizing.Weight > 0m)
+				{
+					var shortExp = survivors[i].Legs.Select(l => ParsingHelpers.ParseOptionSymbol(l.Symbol)?.ExpiryDate.Date).Where(d => d != null).DefaultIfEmpty(null).Min();
+					if (shortExp is DateTime se && spot > 0m)
+					{
+						var vex = CandidateScorer.VexCached(survivors[i].Ticker, se, spot, ctx.Now, mergedQuotes);
+						var vegaSign = survivors[i].NetVegaPerContract >= 0m ? 1 : -1;
+						vexScalar = cfg.VexSizing.Scalar(vex.NetVexFraction, vegaSign);
+					}
+				}
+				survivors[i] = ApplyCashSizing(survivors[i], freeCash, ctx.AccountValue, cfg, BiasForDte(CalendarDteToTarget(survivors[i], ctx.Now)), vexScalar);
+			}
 
 			// Per-ticker top-N. DoubleCalendar/DoubleDiagonal stay as one 4-leg proposal here and render as a
 			// unified two-side panel downstream, so each counts as a single suggestion against the cap.
@@ -713,7 +728,7 @@ internal sealed class OpenCandidateEvaluator
 			.ToList();
 	}
 
-	private static OpenProposal ApplyCashSizing(OpenProposal p, decimal freeCash, decimal accountValue, OpenerConfig cfg, decimal bias)
+	private static OpenProposal ApplyCashSizing(OpenProposal p, decimal freeCash, decimal accountValue, OpenerConfig cfg, decimal bias, decimal sizingScalar = 1m)
 	{
 		// Penny floor, not just <= 0: degenerate off-hours books (null/one-sided legs) can leave an
 		// epsilon-sized positive CapitalAtRiskPerContract (decimal residue), and freeCash / 1e-25
@@ -740,6 +755,10 @@ internal sealed class OpenCandidateEvaluator
 		var riskBudget = Math.Min(pctBudget, dollarBudget);
 		var riskCap = riskBudget > 0m ? SaturatingFloorToInt(riskBudget / p.CapitalAtRiskPerContract) : 0;
 		var maxQty = Math.Min(Math.Min(cashCap, riskCap), cfg.MaxQtyPerProposal);
+		// Layer-3 sizing scalar: applied AFTER every hard cap (it can only shrink, never exceed a cap) and
+		// floored at 1 lot when the caps themselves allowed one — a 0.75× must not zero a 1-lot account.
+		if (sizingScalar != 1m && maxQty >= 1)
+			maxQty = Math.Max(1, SaturatingFloorToInt(maxQty * sizingScalar));
 
 		OpenProposal updated;
 		if (maxQty >= 1)

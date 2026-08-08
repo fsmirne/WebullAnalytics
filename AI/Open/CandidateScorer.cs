@@ -107,6 +107,7 @@ internal static class CandidateScorer
 	{
 		public readonly ConcurrentDictionary<(string, DateTime), decimal?> MaxPain = new();
 		public readonly ConcurrentDictionary<(string, DateTime), GexResult> Gex = new();
+		public readonly ConcurrentDictionary<(string, DateTime), VexResult> Vex = new();
 		// Long-leg Black-Scholes memoized per tick. The breakeven (120 pt) + peak (240 pt) scans evaluate
 		// the SAME long-leg BS curve for every short paired with a given (long leg, short expiry) — dozens
 		// of redundant recomputes under dense enumeration. Keyed on the full BS inputs so it's exact.
@@ -143,6 +144,53 @@ internal static class CandidateScorer
 		if (quotes == null) return ComputeGex(ticker, expiry, spot, asOf, quotes!);
 		return _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache())
 			.Gex.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => ComputeGex(ticker, expiry, spot, asOf, quotes));
+	}
+
+	internal static VexResult VexCached(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		if (quotes == null) return ComputeVex(ticker, expiry, spot, asOf, quotes!);
+		return _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache())
+			.Vex.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => ComputeVex(ticker, expiry, spot, asOf, quotes));
+	}
+
+	/// <summary>Layer-1 terrain veto: true when a SHORT leg's strike sits inside the put-dominated
+	/// (negative net-GEX) band of ITS OWN expiry — the zone where dealer hedging amplifies a move through
+	/// the strike and the DC left tail is manufactured. The net is summed over the strike and its
+	/// ±windowStrikes listed neighbors to smooth single-strike OI noise. Placebo mode ("nearSpot") vetoes
+	/// by distance alone — the matched control the campaign requires. No terrain data (missing OI snapshot
+	/// day) → never vetoes, so a data gap cannot silently suppress trading.</summary>
+	internal static bool ShortStrikePlacementVetoed(OpenerPlacementVetoConfig cfg, string ticker, DateTime shortExpiry, decimal shortStrike, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, out string? reason)
+	{
+		reason = null;
+		if (!cfg.Enabled) return false;
+		if (string.Equals(cfg.Mode, "nearSpot", StringComparison.OrdinalIgnoreCase))
+		{
+			if (spot <= 0m) return false;
+			var distPct = Math.Abs(shortStrike - spot) / spot;
+			if (distPct <= cfg.NearSpotMaxDistancePct)
+			{
+				reason = $"placement veto (placebo): short {shortStrike} within {cfg.NearSpotMaxDistancePct:P2} of spot {spot:F2}";
+				return true;
+			}
+			return false;
+		}
+
+		var gex = GexCached(ticker, shortExpiry, spot, asOf, quotes);
+		if (gex.NetByStrike == null || gex.NetByStrike.Count == 0) return false;
+		if (!gex.NetByStrike.ContainsKey(shortStrike)) return false;
+		var ladder = gex.NetByStrike.Keys.OrderBy(k => k).ToList();
+		var idx = ladder.BinarySearch(shortStrike);
+		if (idx < 0) return false;
+		var lo = Math.Max(0, idx - cfg.WindowStrikes);
+		var hi = Math.Min(ladder.Count - 1, idx + cfg.WindowStrikes);
+		decimal windowNet = 0m;
+		for (var i = lo; i <= hi; i++) windowNet += gex.NetByStrike[ladder[i]];
+		if (windowNet < cfg.MinWindowNetGex)
+		{
+			reason = $"placement veto: short {shortStrike} @ {shortExpiry:yyyy-MM-dd} sits in put-dominated band (±{cfg.WindowStrikes} net {windowNet:N0} < {cfg.MinWindowNetGex:N0})";
+			return true;
+		}
+		return false;
 	}
 
 	public static decimal? ComputeMaxPainPrice(string ticker, DateTime expiry, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot = null)
@@ -253,7 +301,38 @@ internal static class CandidateScorer
 
 		var totalAbs = totalCallGex + totalPutGex;
 		var netGexFraction = totalAbs > 0 ? (decimal)((totalCallGex - totalPutGex) / totalAbs) : 0m;
-		return new GexResult(gravity, netGexFraction);
+		// Per-strike net (call − put) dollar gamma — the terrain the placement veto and regime classifier
+		// read: a negative strike sits in the put-dominated (amplifying) band.
+		var netByStrike = new Dictionary<decimal, decimal>(allStrikes.Count);
+		foreach (var strike in allStrikes)
+		{
+			callGexByStrike.TryGetValue(strike, out var c);
+			putGexByStrike.TryGetValue(strike, out var p);
+			netByStrike[strike] = (decimal)(c - p);
+		}
+		return new GexResult(gravity, netGexFraction, netByStrike);
+	}
+
+	/// <summary>Per-expiry net vanna exposure — the VEX aggregate of <see cref="ComputeGex"/>. Same quote
+	/// requirements (OI + IV), same 1-day time floor. Signed per side: calls below the d2 flip carry negative
+	/// vanna, puts positive — the NET is what maps the dealer re-hedging flow under an IV move.</summary>
+	public static VexResult ComputeVex(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	{
+		var timeYears = Math.Max(1, (expiry.Date - asOf.Date).Days) / 365.0;
+		decimal net = 0m, gross = 0m;
+		decimal callSum = 0m, putSum = 0m;
+		foreach (var kv in quotes)
+		{
+			var parsed = ParsingHelpers.ParseOptionSymbol(kv.Key);
+			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase) || parsed.ExpiryDate.Date != expiry.Date) continue;
+			if (!kv.Value.OpenInterest.HasValue || kv.Value.OpenInterest.Value <= 0 || !kv.Value.ImpliedVolatility.HasValue || kv.Value.ImpliedVolatility.Value <= 0m) continue;
+			var vanna = OptionMath.Vanna(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, kv.Value.ImpliedVolatility.Value);
+			var dollars = vanna * kv.Value.OpenInterest.Value * 100m;
+			if (parsed.CallPut == "C") callSum += dollars; else putSum += dollars;
+			gross += Math.Abs(dollars);
+		}
+		net = callSum - putSum;
+		return new VexResult(gross > 0m ? Math.Clamp(net / gross, -1m, 1m) : 0m, net, gross);
 	}
 
 	public static decimal GammaRegimeAdjust(decimal score, decimal? factor) => factor.HasValue ? ApplyFactor(score, factor.Value) : score;
@@ -288,7 +367,12 @@ internal static class CandidateScorer
 	/// NetGexFraction is total net gamma exposure normalized to [−1, +1]: positive = call gamma dominates (suppressive),
 	/// negative = put gamma dominates (amplifying).
 	/// </summary>
-	internal readonly record struct GexResult(decimal? GexGravity, decimal NetGexFraction);
+	internal readonly record struct GexResult(decimal? GexGravity, decimal NetGexFraction, IReadOnlyDictionary<decimal, decimal>? NetByStrike = null);
+
+	/// <summary>Per-expiry net VEX aggregate: NetVexFraction = (ΣcallVanna×OI − ΣputVanna×OI) / Σ|vanna×OI|
+	/// in [−1, +1] (positive = the book gains dealer delta when IV rises), NetVexDollars the raw net. Null
+	/// gravity-style "no data" is expressed as GrossVexDollars == 0.</summary>
+	internal readonly record struct VexResult(decimal NetVexFraction, decimal NetVexDollars, decimal GrossVexDollars);
 
 	internal readonly record struct MarketTheoreticalAggregate(decimal MarketNet, decimal TheoreticalNet, decimal GrossTheoretical);
 
@@ -1355,6 +1439,8 @@ internal static class CandidateScorer
 		var creditPerShare = PriceForSell(shortMid, shortQ.Value.Bid, pricingMode) - PriceForBuy(longMid, longQ.Value.Ask, pricingMode);
 		if (creditPerShare <= 0m) return null; // not a credit spread at these quotes
 		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, creditPerShare, cfg.MinEntryToNoiseRatio)) return null;
+		// Layer-1 terrain veto: reject a short strike parked in the put-dominated band of its own expiry.
+		if (applyLiquidityGate && ShortStrikePlacementVetoed(cfg.PlacementVeto, skel.Ticker, shortParsed.ExpiryDate.Date, shortParsed.Strike, spot, asOf, quotes, out _)) return null;
 
 		var creditPerContract = creditPerShare * 100m;
 		var width = Math.Abs(shortParsed.Strike - longParsed.Strike);
@@ -2107,6 +2193,8 @@ internal static class CandidateScorer
 			var legPrice = leg.Action == "buy" ? PriceForBuy(legMid, resolved.Value.Ask, pricingMode) : PriceForSell(legMid, resolved.Value.Bid, pricingMode);
 			netEntryPerShare += leg.Action == "buy" ? -legPrice * leg.Qty : legPrice * leg.Qty;
 			var legIv = ScoredLegIv(cache, leg.Symbol, parsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
+			// Layer-1 terrain veto: any SHORT leg parked in the put-dominated band of its own expiry kills the candidate.
+			if (applyLiquidityGate && leg.Action != "buy" && ShortStrikePlacementVetoed(cfg.PlacementVeto, skel.Ticker, parsed.ExpiryDate.Date, parsed.Strike, spot, asOf, quotes, out _)) return null;
 			defs.Add(new MultiLegDefinition(leg, parsed, leg.Action == "buy", legIv));
 		}
 		if (applyLiquidityGate && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot, snapshotTradeable)) return null;
@@ -2306,6 +2394,9 @@ internal static class CandidateScorer
 		// rocketing to #1 on a $3 debit). This aligns the score divisor with the max-loss the risk
 		// reporting (CapitalAtRiskPerContract / MaxLossPerContract) already shows.
 		var efficiencyCapital = capitalAtRisk;
+
+		// Layer-1 terrain veto: reject a short strike parked in the put-dominated band of its own expiry.
+		if (applyLiquidityGate && ShortStrikePlacementVetoed(cfg.PlacementVeto, skel.Ticker, shortParsed.ExpiryDate.Date, shortParsed.Strike, spot, asOf, quotes, out _)) return null;
 
 		var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortParsed.ExpiryDate);
 		// Dividend handling, two windows. (1) The surviving long trades through any ex-date between the short

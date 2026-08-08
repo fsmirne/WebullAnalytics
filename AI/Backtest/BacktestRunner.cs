@@ -43,6 +43,9 @@ internal sealed class BacktestRunner
 	// Historical ^IRX closes (fractions) — pins OptionMath.RiskFreeRate per trading day so the whole
 	// engine (quote-source IV back-solve + scorer BS/greeks) prices at the rate that prevailed that day.
 	private readonly IReadOnlyList<(DateTime Date, double Rate)>? _rateHistory;
+	// Layer-2 expiry-day regime store (campaign: gex_layers) — populated per step for tickers whose
+	// short leg expires that day, read by CloseBeforeShortExpiryRule. Inert while the knob is off.
+	private readonly Rules.ExpiryRegimeProvider _expiryRegimes = new();
 	// Proposal-replay mode (--proposals): non-null replaces the opener entirely — each day's recorded live
 	// proposal opens are booked at their recorded submit prices, then managed by the normal rule engine.
 	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
@@ -91,7 +94,7 @@ internal sealed class BacktestRunner
 	public async Task<BacktestResult> RunAsync(DateTime since, DateTime until, CancellationToken cancellation, Action<int, int, DateTime>? onStep = null)
 	{
 		var tickerSet = _config.TickerSet();
-		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(_config), _config);
+		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(_config, expiryRegimes: _expiryRegimes), _config);
 		var openEvaluator = new OpenCandidateEvaluator(_config, _quotes, SuggestionPricing.Mid, _closeCache, backtestMode: true, dividendsByRoot: _dividendsByRoot);
 
 		var equityCurve = new List<(DateTime Date, decimal Equity)>();
@@ -124,6 +127,9 @@ internal sealed class BacktestRunner
 			var openPositions = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
 			if (openPositions.Count > 0)
 			{
+				// Layer-2: classify the expiry-day session (one probe fetch per ticker with a short dying
+				// today) before any rule evaluation, so the 09:30 pass and the minute walk read one regime.
+				await Rules.ExpiryRegimeHost.PopulateAsync(_expiryRegimes, _config.Rules.CloseBeforeShortExpiry.Regime, openPositions.Values, _quotes, step, cancellation);
 				var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
 				var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, step, _quotes, _config, cancellation);
 				// A position whose legs have NO quotes today leaves every management rule blind: nothing can price a

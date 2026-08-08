@@ -174,6 +174,61 @@ internal sealed class OpenerConfig
 	/// full strength. Disabled by default (<c>weight = 0</c>), leaving long scoring bit-identical.</summary>
 	[JsonPropertyName("longConvictionGate")] public OpenerLongConvictionGateConfig LongConvictionGate { get; set; } = new();
 
+	/// <summary>Layer-1 GEX terrain veto on SHORT-leg strike placement (campaign: gex_layers). A short
+	/// strike whose ±window net dollar-gamma at ITS OWN expiry is put-dominated (negative) is rejected at
+	/// scoring, pushing the opener to the next-ranked candidate — a left-tail filter, not an alpha signal.
+	/// Off by default; "nearSpot" mode is the campaign's distance-matched placebo.</summary>
+	[JsonPropertyName("placementVeto")] public OpenerPlacementVetoConfig PlacementVeto { get; set; } = new();
+
+	/// <summary>Layer-3 VEX sizing scalar (campaign: gex_layers). Scales the opener's final qty by
+	/// clamp(1 + weight × netVexFraction(short expiry) × sign(netVega), min, max) — front-book vanna as a
+	/// crush-tailwind proxy for freshly opened positive-vega structures. Never raises hard caps, never
+	/// zeroes a 1-lot. Off by default (weight 0).</summary>
+	[JsonPropertyName("vexSizing")] public OpenerVexSizingConfig VexSizing { get; set; } = new();
+
+}
+
+/// <summary>Layer-1 short-strike placement veto — see the property doc on <see cref="OpenerConfig.PlacementVeto"/>.</summary>
+internal sealed class OpenerPlacementVetoConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+
+	/// <summary>"terrain" (default) vetoes by the ±window net-GEX sign at the short leg's expiry;
+	/// "nearSpot" is the pre-registered placebo that vetoes by strike distance from spot alone.</summary>
+	[JsonPropertyName("mode")] public string Mode { get; set; } = "terrain";
+
+	/// <summary>Listed-strike neighbors summed on each side of the short strike when reading the net —
+	/// smooths single-strike OI noise. 1 = strike ± one listed neighbor. Range [0, 5].</summary>
+	[JsonPropertyName("windowStrikes")] public int WindowStrikes { get; set; } = 1;
+
+	/// <summary>Veto when the ±window net dollar-gamma is below this (default 0 = any put-dominated window).
+	/// Negative values tolerate mild put dominance; positive values demand call-dominated terrain.</summary>
+	[JsonPropertyName("minWindowNetGex")] public decimal MinWindowNetGex { get; set; } = 0m;
+
+	/// <summary>Placebo mode only: veto shorts within this fraction of spot (e.g. 0.005 = 0.5%). Calibrated
+	/// after the terrain A-run so the placebo rejects a matched share of entries.</summary>
+	[JsonPropertyName("nearSpotMaxDistancePct")] public decimal NearSpotMaxDistancePct { get; set; } = 0.005m;
+}
+
+/// <summary>Layer-3 VEX sizing scalar — see the property doc on <see cref="OpenerConfig.VexSizing"/>.</summary>
+internal sealed class OpenerVexSizingConfig
+{
+	/// <summary>Scalar strength; 0 disables (scalar pinned to 1.0).</summary>
+	[JsonPropertyName("weight")] public decimal Weight { get; set; } = 0m;
+
+	/// <summary>Lower clamp on the qty multiplier. Range (0, 1].</summary>
+	[JsonPropertyName("min")] public decimal Min { get; set; } = 0.75m;
+
+	/// <summary>Upper clamp on the qty multiplier. Never overrides maxQtyPerProposal or the cash/risk caps.</summary>
+	[JsonPropertyName("max")] public decimal Max { get; set; } = 1.25m;
+
+	/// <summary>Qty multiplier for a proposal whose short-expiry net-VEX fraction is <paramref name="netVexFraction"/>
+	/// and whose net vega sign is <paramref name="vegaSign"/> (+1 long vega / −1 short vega). Clamped to [Min, Max].</summary>
+	public decimal Scalar(decimal netVexFraction, int vegaSign)
+	{
+		if (Weight <= 0m) return 1m;
+		return Math.Clamp(1m + Weight * netVexFraction * vegaSign, Min, Max);
+	}
 }
 
 /// <summary>Multiplicative-factor weights applied to the opener candidate score chain. Each field is
@@ -331,6 +386,7 @@ internal sealed class OpenerStructuresConfig
 	[JsonPropertyName("longVertical")] public OpenerLongVerticalConfig LongVertical { get; set; } = new();
 	[JsonPropertyName("diagonalVertical")] public OpenerDiagonalVerticalConfig DiagonalVertical { get; set; } = new();
 	[JsonPropertyName("calendarVertical")] public OpenerCalendarVerticalConfig CalendarVertical { get; set; } = new();
+	[JsonPropertyName("gravityFly")] public OpenerGravityFlyConfig GravityFly { get; set; } = new();
 
 	/// <summary>Every structure config, in one place — the single registry the DTE-range helpers iterate so
 	/// none of them carries its own per-structure list. Adding a structure = add its property here (and
@@ -338,7 +394,7 @@ internal sealed class OpenerStructuresConfig
 	public IEnumerable<IOpenerStructure> All() => new IOpenerStructure[]
 	{
 		LongCalendar, DoubleCalendar, LongDiagonal, DoubleDiagonal, IronButterfly, IronCondor,
-		Condor, ShortVertical, LongCallPut, LongVertical, DiagonalVertical, CalendarVertical
+		Condor, ShortVertical, LongCallPut, LongVertical, DiagonalVertical, CalendarVertical, GravityFly
 	};
 
 	/// <summary>The DTE windows the enabled structures price into — one range per single-expiry structure,
@@ -456,6 +512,22 @@ internal sealed class OpenerIronButterflyConfig : IOpenerStructure
 	[JsonPropertyName("dteMin")] public int DteMin { get; set; } = 3;
 	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 10;
 	[JsonPropertyName("wingSteps")] public List<int> WingSteps { get; set; } = new() { 1, 2, 3, 4 };
+}
+
+/// <summary>Layer-4 pin-day fly pilot (campaign: gex_layers). An IronButterfly whose BODY is centered on
+/// the expiry's GEX gravity strike (snapped to the listed ladder) instead of spot — only emitted when
+/// gravity sits within maxGravityDistancePct of spot (the pin-day precondition; the concentration gate is
+/// applied by the campaign's entry-time/score config, not here). Skeletons carry the IronButterfly
+/// structure kind, so scoring/management are the stock multi-leg paths. Disabled by default.</summary>
+internal sealed class OpenerGravityFlyConfig : IOpenerStructure
+{
+	public IEnumerable<(int Min, int Max)> DteRanges() => new[] { (DteMin, DteMax) };
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	[JsonPropertyName("dteMin")] public int DteMin { get; set; } = 0;
+	[JsonPropertyName("dteMax")] public int DteMax { get; set; } = 0;
+	[JsonPropertyName("wingSteps")] public List<int> WingSteps { get; set; } = new() { 2, 3, 4 };
+	/// <summary>Max |gravity − spot| / spot for a fly to be emitted (pin precondition). Default 0.003.</summary>
+	[JsonPropertyName("maxGravityDistancePct")] public decimal MaxGravityDistancePct { get; set; } = 0.003m;
 }
 
 internal sealed class OpenerIronCondorConfig : IOpenerStructure

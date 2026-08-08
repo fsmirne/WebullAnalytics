@@ -398,6 +398,9 @@ internal sealed class CloseBeforeShortExpiryConfig
 	/// put: spot < strike×(1+buffer)) is treated as at-risk and liquidated. Default 0 (ITM only); the true
 	/// Webull threshold is opaque, so sweep this to bound the realistic drag.</summary>
 	[JsonPropertyName("brokerForceCloseMoneynessBufferPct")] public decimal BrokerForceCloseMoneynessBufferPct { get; set; } = 0m;
+	/// <summary>Layer-2 GEX regime modulation of this rule's expiry-day behavior (campaign: gex_layers).
+	/// Off by default; see <see cref="Rules.ExpiryDayRegimeConfig"/>.</summary>
+	[JsonPropertyName("regime")] public Rules.ExpiryDayRegimeConfig Regime { get; set; } = new();
 }
 
 /// <summary>Composite technical-bias indicator config (SMA5/20, RSI(14), N-day momentum, 200-day

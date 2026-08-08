@@ -40,6 +40,10 @@ internal static class CandidateEnumerator
 			foreach (var sk in EnumerateIronButterflies(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
 
+		if (cfg.Structures.GravityFly.Enabled)
+			foreach (var sk in EnumerateGravityFlies(ticker, spot, asOf, cfg, availableExpirations, quotes))
+				yield return sk;
+
 		if (cfg.Structures.IronCondor.Enabled)
 			foreach (var sk in EnumerateIronCondors(ticker, spot, asOf, cfg, availableExpirations, quotes))
 				yield return sk;
@@ -627,6 +631,38 @@ internal static class CandidateEnumerator
 			new ProposalLeg("buy", longCall, 1)
 		};
 		return new CandidateSkeleton(ticker, OpenStructureKind.IronButterfly, legs, TargetExpiry: exp);
+	}
+
+	/// <summary>Layer-4 gravity fly (campaign: gex_layers): an IronButterfly whose body sits on the
+	/// expiry's max-gross-gamma (gravity) strike, snapped to the listed ladder — only when gravity is
+	/// within the configured distance of spot. Requires a chain (gravity needs OI+IV); no chain → nothing.</summary>
+	private static IEnumerable<CandidateSkeleton> EnumerateGravityFlies(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)
+	{
+		if (quotes == null || spot <= 0m) yield break;
+		var sCfg = cfg.Structures.GravityFly;
+		var step = FallbackStep(spot);
+		foreach (var exp in WeeklyExpiriesInRange(ticker, availableExpirations, asOf, sCfg.DteMin, sCfg.DteMax))
+		{
+			var gex = CandidateScorer.ComputeGex(ticker, exp, spot, asOf, quotes);
+			if (gex.GexGravity is not { } gravity || Math.Abs(gravity - spot) / spot > sCfg.MaxGravityDistancePct) continue;
+
+			var putLadder = StrikeLadder.Build(ticker, exp, "P", quotes);
+			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
+			var bodyLadder = StrikeLadder.Build(ticker, exp, null, quotes);
+			var body = bodyLadder.ChainPresent ? bodyLadder.Offset(gravity, 0) : gravity;
+			if (body is not { } b || b <= 0m) continue;
+			// The body must be listed on BOTH sides (the combined ladder is a union): anchor each side's
+			// ladder at the body with a zero offset and demand it lands exactly there.
+			if (putLadder.ChainPresent && WingStrike(b, 0, -1, step, putLadder) != b) continue;
+			if (callLadder.ChainPresent && WingStrike(b, 0, 1, step, callLadder) != b) continue;
+			foreach (var w in sCfg.WingSteps.Distinct().OrderBy(x => x))
+			{
+				if (w < 1) continue;
+				if (WingStrike(b, w, -1, step, putLadder) is not { } putWing || putWing <= 0m || putWing >= b) continue;
+				if (WingStrike(b, w, 1, step, callLadder) is not { } callWing || callWing <= 0m || callWing <= b) continue;
+				yield return BuildIronButterfly(ticker, exp, putWing, b, callWing);
+			}
+		}
 	}
 
 	private static IEnumerable<CandidateSkeleton> EnumerateIronCondors(string ticker, decimal spot, DateTime asOf, OpenerConfig cfg, IReadOnlySet<DateTime>? availableExpirations, IReadOnlyDictionary<string, OptionContractQuote>? quotes)

@@ -123,7 +123,7 @@ internal sealed class RuleEvaluator
 	}
 
 	/// <summary>Constructs the default rule set from config.</summary>
-	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config, string pricingMode = SuggestionPricing.Mid)
+	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config, string pricingMode = SuggestionPricing.Mid, ExpiryRegimeProvider? expiryRegimes = null)
 	{
 		var debug = string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
 		var normalizedPricing = SuggestionPricing.Normalize(pricingMode);
@@ -132,7 +132,7 @@ internal sealed class RuleEvaluator
 			new StopLossRule(config.Rules.StopLoss, config.Opener.RealizedExpectancy),
 			// CloseBeforeShortExpiry runs ahead of OpportunisticRoll/RollShortOnExpiry so a position
 			// scheduled for unwind on expiry day takes the close path instead of getting rolled forward.
-			new CloseBeforeShortExpiryRule(config.Rules.CloseBeforeShortExpiry),
+			new CloseBeforeShortExpiryRule(config.Rules.CloseBeforeShortExpiry, expiryRegimes),
 			// LegInShort runs ahead of TakeProfit (alphabetical L < T at priority 2) so a saturated
 			// long-call/put gets converted to a vertical instead of flat-closed when both gates trip.
 			new LegInShortRule(config.Rules.LegInShort, config.Indicators),
