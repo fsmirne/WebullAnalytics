@@ -40,6 +40,9 @@ internal sealed class BacktestRunner
 	// composite position. See OpenProposalIntoBook.
 	private readonly bool _splitStructures;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
+	// Historical ^IRX closes (fractions) — pins OptionMath.RiskFreeRate per trading day so the whole
+	// engine (quote-source IV back-solve + scorer BS/greeks) prices at the rate that prevailed that day.
+	private readonly IReadOnlyList<(DateTime Date, double Rate)>? _rateHistory;
 	// Proposal-replay mode (--proposals): non-null replaces the opener entirely — each day's recorded live
 	// proposal opens are booked at their recorded submit prices, then managed by the normal rule engine.
 	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
@@ -56,8 +59,9 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null, IReadOnlyList<(DateTime Date, double Rate)>? rateHistory = null)
 	{
+		_rateHistory = rateHistory;
 		_replayOpensByDate = replayOpens?.GroupBy(o => o.OpenEt.Date).ToDictionary(g => g.Key, g => g.OrderBy(o => o.OpenEt).ToList());
 		_config = config;
 		_pricingMode = SuggestionPricing.Normalize(pricingMode);
@@ -108,6 +112,10 @@ internal sealed class BacktestRunner
 		foreach (var step in steps)
 		{
 			cancellation.ThrowIfCancellationRequested();
+			// The day's risk-free rate = the prior ^IRX close (the value knowable at this open). Absent
+			// series/coverage keeps the current value rather than silently reverting to a constant.
+			if (_rateHistory != null && HistoricalRateCache.RateOn(_rateHistory, step) is double dayRate)
+				Pricing.OptionMath.RiskFreeRate = dayRate;
 			var swSection = profile ? System.Diagnostics.Stopwatch.StartNew() : null;
 
 			// Step 1: management rules. Run BEFORE settlement so CloseBeforeShortExpiryRule (and

@@ -56,7 +56,7 @@ internal static class PremarketSpotOverride
 		// when it agrees with the extended-hours bar; on disagreement the bar wins and the quotes themselves
 		// are flagged stale (validated live 2026-07-02: Webull GTH parity 751.92 ≈ bar 752.30 vs Schwab
 		// frozen parity 748.13 ≈ prior close 748.32, a 3.6-point overnight move the frozen books missed).
-		var parity = DeriveSpotFromParity(ticker, options, riskFreeRate: 0.036, now, allowLastPrice: false);
+		var parity = DeriveSpotFromParity(ticker, options, riskFreeRate: Pricing.OptionMath.RiskFreeRate, now, allowLastPrice: false);
 		var barClose = await LatestExtendedBarCloseAsync(ticker, now, cancellation);
 
 		decimal? fresh = null;

@@ -908,6 +908,23 @@ internal static class CandidateScorer
 	public static decimal MarketImpliedIv(string symbol, OptionParsed parsed, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal defaultPct) =>
 		OptionMath.TryMarketImpliedIv(symbol, parsed, spot, asOf, quotes) ?? ResolveIv(symbol, quotes, defaultPct);
 
+	/// <summary>IV for a leg the scorer actually prices: back-solved from the CURRENT market mid on the
+	/// leg's dividend-adjusted spot — one basis for every structure, so ranking inputs always match entry
+	/// pricing and never inherit an IV struck at another time (the backtest's chain quotes carry the PRIOR
+	/// session's EOD snapshot IV, which skewed representative IV by half the overnight IV move and pushed
+	/// finalScore across the open gate on IV-crush days). Falls back to the quote's carried IV via
+	/// <see cref="MarketImpliedIv"/> when the book is one-sided / bid ≤ intrinsic / the solver fails, and
+	/// skips the solve entirely at hypothetical spots (<paramref name="useMarketImpliedIv"/> false) where
+	/// the stale mid no longer reflects the shifted spot.</summary>
+	private static decimal ScoredLegIv(ChainScalarCache? cache, string symbol, OptionParsed parsed, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, OpenerConfig cfg, bool useMarketImpliedIv, DateTime? ivSolveAsOf, IReadOnlyList<DividendEvent>? dividends)
+	{
+		if (!useMarketImpliedIv) return ResolveIv(symbol, quotes, cfg.Indicators.IvDefaultPct);
+		var solveSpot = dividends == null || dividends.Count == 0
+			? spot
+			: OptionMath.DividendAdjustedSpot(spot, dividends, asOf, parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate);
+		return MarketImpliedIvCached(cache, symbol, parsed, solveSpot, ivSolveAsOf ?? asOf, quotes, cfg.Indicators.IvDefaultPct);
+	}
+
 	/// <summary>Looks up bid/ask, returning null if any leg lacks a usable two-sided quote.</summary>
 	public static (decimal bid, decimal ask)? TryLiveBidAsk(string symbol, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
@@ -973,9 +990,9 @@ internal static class CandidateScorer
 	/// nonsensical IV that collapses calendar/diagonal residual time value.</summary>
 	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null) => skel.StructureKind switch
 	{
-		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events, snapshotTradeable),
-		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events, snapshotTradeable, vetoNow: vetoNow),
-		OpenStructureKind.LongCallVertical or OpenStructureKind.LongPutVertical => ScoreLongVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, sentimentScore, events, snapshotTradeable),
+		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf),
+		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow: vetoNow),
+		OpenStructureKind.LongCallVertical or OpenStructureKind.LongPutVertical => ScoreLongVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf),
 		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow),
 		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor or OpenStructureKind.DiagonalVertical or OpenStructureKind.CalendarVertical or OpenStructureKind.Condor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow),
 		_ => null
@@ -1318,7 +1335,7 @@ internal static class CandidateScorer
 		return (decimal)(dir == Direction.Above ? N_d2 : 1.0 - N_d2);
 	}
 
-	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? vetoNow = null)
+	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null)
 	{
 		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _, vetoNow)) return null;
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
@@ -1353,7 +1370,9 @@ internal static class CandidateScorer
 		  : shortParsed.Strike - creditPerShare;  // put credit: loses if S_T < short − credit
 
 		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
-		var iv = ResolveIv(shortLeg.Symbol, quotes, cfg.Indicators.IvDefaultPct);
+		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, cfg.Indicators.Events);
+		var cache = _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache());
+		var iv = ScoredLegIv(cache, shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 
 		// POP = P(S_T inside profitable side of breakeven).
 		var pop = LogNormalProbability(isCall ? Direction.Below : Direction.Above, spot, breakeven, years, (double)iv);
@@ -1390,7 +1409,7 @@ internal static class CandidateScorer
 		var shortLegStrikes = ExtractShortLegStrikes(skel.Legs);
 		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(spot, iv, tradingDaysToTarget, creditPerContract, shortLegStrikes, cfg.Weights.ExpectedMoveCredit);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, creditPerContract, cfg.Weights.IvRealizedPremium);
-		var longIv = ResolveIv(longLeg.Symbol, quotes, cfg.Indicators.IvDefaultPct);
+		var longIv = ScoredLegIv(cache, longLeg.Symbol, longParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 		var legGreeks = new[]
 		{
 			(Parsed: shortParsed, Iv: iv, IsLong: false),
@@ -1480,7 +1499,7 @@ internal static class CandidateScorer
 	/// Like <see cref="ScoreLongCallPut"/> the popFactor penalty is skipped — debit verticals are
 	/// positive-skew bets where a low POP is the trade's structural feature, not a defect, and
 	/// applying ComputeProbabilityFactor would unfairly demote them against credit spreads.</summary>
-	public static OpenProposal? ScoreLongVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null)
+	public static OpenProposal? ScoreLongVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null)
 	{
 		// Long-only structures aren't event-vetoed (no short leg to take assignment risk on).
 		_ = events;
@@ -1519,7 +1538,9 @@ internal static class CandidateScorer
 			: longParsed.Strike - debitPerShare;
 
 		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
-		var iv = ResolveIv(longLeg.Symbol, quotes, cfg.Indicators.IvDefaultPct);
+		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, cfg.Indicators.Events);
+		var cache = _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache());
+		var iv = ScoredLegIv(cache, longLeg.Symbol, longParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 
 		// POP = P(S_T past breakeven in the profitable direction).
 		var pop = LogNormalProbability(isCall ? Direction.Above : Direction.Below, spot, breakeven, years, (double)iv);
@@ -1550,17 +1571,17 @@ internal static class CandidateScorer
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(spot, iv, tradingDaysToTarget, [breakeven]);
 		var expectedMoveBounds = ComputeExpectedMoveBounds(spot, iv, tradingDaysToTarget);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
-		var longIv = ResolveIv(longLeg.Symbol, quotes, cfg.Indicators.IvDefaultPct);
+		var shortIv = ScoredLegIv(cache, shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 		var legGreeks = new[]
 		{
-			(Parsed: shortParsed, Iv: iv, IsLong: false),
-			(Parsed: longParsed, Iv: longIv, IsLong: true)
+			(Parsed: shortParsed, Iv: shortIv, IsLong: false),
+			(Parsed: longParsed, Iv: iv, IsLong: true)
 		};
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(legGreeks, asOf, spot);
 		var netVegaPerContract = ComputeNetVegaPerContract(legGreeks, asOf, spot);
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
-		var representativeIv = (iv + longIv) / 2m;
+		var representativeIv = (shortIv + iv) / 2m;
 		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit);
 		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
@@ -2069,6 +2090,11 @@ internal static class CandidateScorer
 		// off-hours scans), which paired a zero entry cost with a fully-valued BS payoff curve and put
 		// degenerate doubles at the top of the board. With live quotes the resolved prices ARE the raw
 		// book, so on-hours and backtest entries are unchanged.
+		// Every scored leg's IV is back-solved from the CURRENT market mid on its dividend-adjusted spot
+		// (same basis as the entry debit), including target-expiry legs — their IVs average into
+		// representativeIv, so a carried snapshot IV would leak another instant's vol into the ranking.
+		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, cfg.Indicators.Events);
+		var cache = _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache());
 		var netEntryPerShare = 0m;
 		foreach (var leg in skel.Legs)
 		{
@@ -2080,13 +2106,7 @@ internal static class CandidateScorer
 			var legMid = (resolved.Value.Bid + resolved.Value.Ask) / 2m;
 			var legPrice = leg.Action == "buy" ? PriceForBuy(legMid, resolved.Value.Ask, pricingMode) : PriceForSell(legMid, resolved.Value.Bid, pricingMode);
 			netEntryPerShare += leg.Action == "buy" ? -legPrice * leg.Qty : legPrice * leg.Qty;
-			// Legs that survive past the target (e.g., long wings of a double calendar/diagonal) need
-			// market-implied IV so the BS exit value matches the entry debit's pricing convention.
-			// Legs that expire at target are intrinsic-only and IV is irrelevant. Calibration is
-			// skipped at hypothetical spots — the market mid is stale w.r.t. the new spot.
-			var legIv = parsed.ExpiryDate.Date > skel.TargetExpiry.Date && useMarketImpliedIv
-				? MarketImpliedIv(leg.Symbol, parsed, spot, ivSolveAsOf ?? asOf, quotes, cfg.Indicators.IvDefaultPct)
-				: ResolveIv(leg.Symbol, quotes, cfg.Indicators.IvDefaultPct);
+			var legIv = ScoredLegIv(cache, leg.Symbol, parsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 			defs.Add(new MultiLegDefinition(leg, parsed, leg.Action == "buy", legIv));
 		}
 		if (applyLiquidityGate && !PassesLiquidityGate(skel.Legs, quotes, cfg.Liquidity, spot, snapshotTradeable)) return null;
@@ -2288,18 +2308,16 @@ internal static class CandidateScorer
 		var efficiencyCapital = capitalAtRisk;
 
 		var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortParsed.ExpiryDate);
-		var ivShort = ResolveIv(shortLeg.Symbol, quotes, cfg.Indicators.IvDefaultPct);
 		// Dividend handling, two windows. (1) The surviving long trades through any ex-date between the short
 		// and long expiries; that forward shift is applied per-valuation inside OptionMath.LegValueAt (pass
 		// `dividends` + the short expiry close). Dividends on/before the short expiry are excluded: by then the
-		// spot path has already absorbed the drop, and both legs crossed it symmetrically. (2) the long's IV
+		// spot path has already absorbed the drop, and both legs crossed it symmetrically. (2) each leg's IV
 		// back-solve must invert its mid at TODAY's dividend-adjusted spot (the mid prices the coming drop), or
 		// the dividend gets double-counted as vol. Provider ex-dates are holiday-snapped upstream in
 		// DividendScheduleBuilder.
 		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, cfg.Indicators.Events);
 		var shortExpiryClose = shortParsed.ExpiryDate.Date + OptionMath.MarketClose;
 		var longExpiryClose = longParsed.ExpiryDate.Date + OptionMath.MarketClose;
-		var longIvSolveSpot = OptionMath.DividendAdjustedSpot(spot, dividends, asOf, longExpiryClose, OptionMath.RiskFreeRate);
 		// Per-tick compute cache (memoizes the long-leg BS curve + IV back-solve shared across the many
 		// candidates that pair with this long leg). Keyed on the quotes object → auto-evicts each tick.
 		// quotes is non-null here (already dereferenced above), matching the MaxPain/Gex cache pattern.
@@ -2308,14 +2326,12 @@ internal static class CandidateScorer
 		// minus the constant rate) is unchanged, so this stays byte-identical to the prior direct LongBlackScholes
 		// calls AND keeps the cross-candidate cache hit rate.
 		OptionMath.BlackScholesEvaluator longBs = (s, k, t, iv, cp) => LongBlackScholes(cache, s, k, t, iv, cp);
-		// Long-leg IV is back-solved from the market mid so EV/breakeven/maxProfit math uses pricing
-		// consistent with the entry debit. When the long leg has a wide bid/ask, the broker's reported
-		// IV implies a BS price well above mid — using it would inflate residual time value at short
-		// expiry and create phantom alpha for illiquid contracts. Skipped at hypothetical spots
-		// (--spot overrides) because the stale market mid no longer reflects the new spot.
-		var ivLong = useMarketImpliedIv
-			? MarketImpliedIvCached(cache, longLeg.Symbol, longParsed, longIvSolveSpot, ivSolveAsOf ?? asOf, quotes, cfg.Indicators.IvDefaultPct)
-			: ResolveIv(longLeg.Symbol, quotes, cfg.Indicators.IvDefaultPct);
+		// BOTH legs' IVs are back-solved from the market mid so EV/breakeven/maxProfit math — and the
+		// representative IV the score factors read — use pricing consistent with the entry debit. A wide
+		// bid/ask book's broker-reported IV implies a BS price well above mid (phantom alpha for illiquid
+		// contracts), and in the backtest the carried quote IV is the PRIOR session's EOD snapshot.
+		var ivShort = ScoredLegIv(cache, shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
+		var ivLong = ScoredLegIv(cache, longLeg.Symbol, longParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 
 		// Breakevens are the roots of the position-value-at-short-expiry curve, found numerically because
 		// the curve mixes Black-Scholes (long leg) with piecewise-linear intrinsic (short leg) and has
@@ -2517,12 +2533,11 @@ internal static class CandidateScorer
 		return netVegaPerShare * 100m;
 	}
 
-	public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null)
+	public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null)
 	{
-		// Long-only structures are never vetoed by events (EventVeto.HasShortLeg returns false). The
-		// parameter is plumbed for signature symmetry and so the diagnostic builder can surface the
-		// catalyst on these proposals via EarningsProximityRule.
-		_ = events;
+		// Long-only structures are never vetoed by events (EventVeto.HasShortLeg returns false); events
+		// still feed the dividend schedule for the leg's IV back-solve, and the diagnostic builder
+		// surfaces the catalyst on these proposals via EarningsProximityRule.
 		var leg = skel.Legs[0];
 		var parsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
 		if (parsed == null) return null;
@@ -2536,7 +2551,9 @@ internal static class CandidateScorer
 		var mid = (bid + ask) / 2m;
 
 		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
-		var iv = ResolveIv(leg.Symbol, quotes, cfg.Indicators.IvDefaultPct);
+		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, cfg.Indicators.Events);
+		var cache = _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache());
+		var iv = ScoredLegIv(cache, leg.Symbol, parsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 
 		var debitPerShare = PriceForBuy(mid, ask, pricingMode);
 		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, debitPerShare, cfg.MinEntryToNoiseRatio)) return null;

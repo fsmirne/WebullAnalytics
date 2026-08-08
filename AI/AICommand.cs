@@ -450,7 +450,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			var priceCache = new Replay.HistoricalPriceCache();
 			// Apply the live 13-week T-bill risk-free rate before pricing (opener IV back-solve + BS read
 			// OptionMath.RiskFreeRate); keeps scan, watch and analyze-risk consistent.
-			YahooOptionsClient.ApplyToOptionMath(await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation));
+			YahooOptionsClient.ApplyToOptionMath(await Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation));
 
 			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 			var (mgmtExecutor, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
@@ -527,7 +527,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			foreach (var ticker in needsParity)
 			{
 				var diagLines = new List<string>();
-				var derived = PremarketSpotOverride.DeriveSpotFromParity(ticker, options, riskFreeRate: 0.036, now, diag: line => diagLines.Add(line));
+				var derived = PremarketSpotOverride.DeriveSpotFromParity(ticker, options, riskFreeRate: Pricing.OptionMath.RiskFreeRate, now, diag: line => diagLines.Add(line));
 				if (derived == null)
 				{
 					Console.Error.WriteLine($"Error: --premarket: could not back-solve spot for {ticker} (no expiry had a strike with both call+put bid/ask or last-price).");
@@ -567,14 +567,14 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		var asOf = settings.ResolveAsOf();
 		var tickerSet = config.TickerSet();
 
-		var riskFreeTask = YahooOptionsClient.FetchRiskFreeRateAsync(cancellation);
+		var riskFreeTask = Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation);
 		var bars = new Backtest.HistoricalBarCache(offline: true);
 		var smile = new Backtest.SmileIndexCache(offline: true);
 		var ivProvider = new Backtest.BacktestIVProvider(bars, smile: smile);
 		var dividendsByRoot = await new Backtest.HistoricalDividendCache(offline: true).BuildScheduleMapAsync(tickerSet, cancellation);
 		var liveRate = await riskFreeTask;
 		YahooOptionsClient.ApplyToOptionMath(liveRate);
-		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: liveRate ?? 0.036, spotOverrides: spotOverrides, dividendsByRoot: dividendsByRoot);
+		var quotes = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: liveRate, spotOverrides: spotOverrides, dividendsByRoot: dividendsByRoot);
 		var priceCache = new Replay.HistoricalPriceCache(bars);
 
 		// Cash sizing: prefer the live broker balance so proposals reflect what the user could actually
@@ -707,7 +707,7 @@ internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 		}
 
 		var positions = new Sources.ReplayPositionSource(trades, feeLookup);
-		var quotes = new Sources.ReplayQuoteSource(priceCache, ivSolver, riskFreeRate: 0.036);
+		var quotes = new Sources.ReplayQuoteSource(priceCache, ivSolver, riskFreeRate: Pricing.OptionMath.RiskFreeRate);
 
 		var runner = new Replay.ReplayRunner(config, positions, quotes, trades, priceCache);
 		return await runner.RunAsync(since, until, settings.Granularity, cancellation);
@@ -1021,12 +1021,18 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// hypothetical/secondary root the opener touches is covered.
 		var dividends = new Backtest.HistoricalDividendCache(offline: true);
 		var dividendsByRoot = await dividends.BuildScheduleMapAsync(config.TickerSet(), cancellation);
+		// Historical ^IRX closes (data/rates/IRX.csv, populated by `wa ai history`) — the runner pins
+		// OptionMath.RiskFreeRate to the prior close per trading day, so IV back-solves and scorer BS
+		// price at the rate that actually prevailed instead of a hardcoded constant.
+		var rateHistory = await new Backtest.HistoricalRateCache(offline: true).GetAsync(cancellation);
+		if (rateHistory.Count == 0)
+			Console.Error.WriteLine("Warning: no historical risk-free rates at data/rates/IRX.csv (run `wa ai history` to populate) — the whole window prices at the compile-time default rate.");
 		// Per-day full-chain OI (data/oi) — makes the GEX / max-pain factors computable in the backtest.
 		var oiCache = new Backtest.ChainSnapshotOiCache();
 		// Price foundation = real minute NBBO (data/quotes). The parametric source (BS + IV + smile, NO
 		// captured-bar overlay) answers ONLY the counterfactual reprices real NBBO can't — intraday SL/TP
 		// brackets and the profit projector price legs at a hypothetical spot. It is never a price foundation.
-		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 		// A strictly-0DTE strategy only ever queries same-day-expiry quotes, so the store can skip parsing
 		// the 45DTE?1DTE tail that shares each expiry file (a big cold-load win for SPY, whose files carry
 		// the QuickDC/DC chain). Safe only when every enabled structure is 0DTE AND no roll-to-future rule
@@ -1055,12 +1061,12 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (!quoteStore.HasAnyQuoteInWindow(config.Ticker, since, until))
 			Console.Error.WriteLine($"Warning: no real NBBO quotes for {config.Ticker} in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}] (data/quotes) — the backtest will price nothing and report no fills. The evening backfill (scripts/daily_backfill.sh) lands the current day's quotes after ~19:00 ET; re-run once it has completed.");
 		Backtest.IBacktestQuoteSource quotes = new Backtest.QuotesQuoteSource(
-			bars, quoteStore, parametric, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+			bars, quoteStore, parametric, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split, replayOpens: replayOpens);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split, replayOpens: replayOpens, rateHistory: rateHistory);
 
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Replay ? " | [yellow]PROPOSAL REPLAY (opener off)[/]" : "")}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();

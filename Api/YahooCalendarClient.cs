@@ -357,6 +357,62 @@ internal static class YahooCalendarClient
 		}
 	}
 
+	/// <summary>Crumb-free daily-close history from Yahoo's chart endpoint, oldest-first. Used for series
+	/// that ARE the value being cached (e.g. ^IRX, whose close is the 13-week T-bill yield in percentage
+	/// points) rather than an underlying price. Best-effort: empty on non-2xx / malformed / any failure.</summary>
+	internal static async Task<IReadOnlyList<(DateTime Date, decimal Close)>> FetchDailyCloseHistoryAsync(string ticker, string range, CancellationToken cancellation)
+	{
+		try
+		{
+			using var handler = new HttpClientHandler { AutomaticDecompression = DecompressionMethods.All };
+			using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
+			client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebullAnalytics/1.0");
+			client.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/plain, */*");
+			var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(ticker)}?range={Uri.EscapeDataString(range)}&interval=1d";
+			using var resp = await client.GetAsync(url, cancellation);
+			if (!resp.IsSuccessStatusCode) return Array.Empty<(DateTime, decimal)>();
+			return ParseDailyCloseHistory(await resp.Content.ReadAsStringAsync(cancellation));
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			return Array.Empty<(DateTime, decimal)>();
+		}
+	}
+
+	/// <summary>Parses a Yahoo chart body into (calendar date, close) pairs, oldest-first, skipping null
+	/// closes (holidays/halts leave nulls in the aligned arrays). Public for testing without a network.</summary>
+	internal static IReadOnlyList<(DateTime Date, decimal Close)> ParseDailyCloseHistory(string json)
+	{
+		var history = new List<(DateTime Date, decimal Close)>();
+		if (string.IsNullOrWhiteSpace(json)) return history;
+		try
+		{
+			using var doc = JsonDocument.Parse(json);
+			if (!doc.RootElement.TryGetProperty("chart", out var chart)) return history;
+			if (!chart.TryGetProperty("result", out var arr) || arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0) return history;
+			var result = arr[0];
+			if (!result.TryGetProperty("timestamp", out var ts) || ts.ValueKind != JsonValueKind.Array) return history;
+			if (!result.TryGetProperty("indicators", out var ind) || !ind.TryGetProperty("quote", out var quoteArr)
+				|| quoteArr.ValueKind != JsonValueKind.Array || quoteArr.GetArrayLength() == 0
+				|| !quoteArr[0].TryGetProperty("close", out var closes) || closes.ValueKind != JsonValueKind.Array) return history;
+
+			var n = Math.Min(ts.GetArrayLength(), closes.GetArrayLength());
+			for (int i = 0; i < n; i++)
+			{
+				if (ts[i].ValueKind != JsonValueKind.Number || closes[i].ValueKind != JsonValueKind.Number) continue;
+				var close = closes[i].GetDecimal();
+				if (close <= 0m) continue;
+				history.Add((UnixToCalendarDate(ts[i].GetInt64()), close));
+			}
+			history.Sort((a, b) => a.Date.CompareTo(b.Date));
+		}
+		catch (JsonException)
+		{
+			return new List<(DateTime, decimal)>();
+		}
+		return history;
+	}
+
 	/// <summary>Yahoo timestamps are mid-session instants (e.g. ~09:30 ET ≈ 13:30 UTC), so the UTC
 	/// calendar date equals the ET ex-/earnings date. Returned as Kind=Unspecified to match the
 	/// NY-local calendar-date contract of <see cref="TickerEvents"/> (and so it serializes without a Z).</summary>

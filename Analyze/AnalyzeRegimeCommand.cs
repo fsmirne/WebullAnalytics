@@ -125,13 +125,17 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 		var ivProvider = new Backtest.BacktestIVProvider(bars, smile: smile);
 		var dividendsByRoot = await new Backtest.HistoricalDividendCache(offline: true).BuildScheduleMapAsync(tickerSet, cancellation);
 		var oiCache = new Backtest.ChainSnapshotOiCache();
-		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+		// Pin the day's risk-free rate (prior ^IRX close) before any solve, exactly like the backtest runner.
+		var rateHistory = await new Backtest.HistoricalRateCache(offline: true).GetAsync(cancellation);
+		if (Backtest.HistoricalRateCache.RateOn(rateHistory, date) is double dayRate)
+			Pricing.OptionMath.RiskFreeRate = dayRate;
+		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 
 		var quoteDbPath = Program.ResolvePath("data/quotes.db");
 		if (!File.Exists(quoteDbPath))
 			throw new FileNotFoundException($"SQLite quote store not found at '{quoteDbPath}'. Build it with scripts/import_quotes_sqlite.py (the daily backfill keeps it current).");
 		var quoteStore = new Backtest.QuoteStoreCache(quoteDbPath, since: date.Date, until: date.Date, sameDayExpiryOnly: false);
-		IQuoteSource quotes = new Backtest.QuotesQuoteSource(bars, quoteStore, parametric, riskFreeRate: 0.036, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+		IQuoteSource quotes = new Backtest.QuotesQuoteSource(bars, quoteStore, parametric, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 		var priceCache = new HistoricalPriceCache(bars);
 
 		var openPositions = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase);

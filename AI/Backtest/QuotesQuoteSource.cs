@@ -32,14 +32,18 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 	private readonly HistoricalBarCache _bars;
 	private readonly QuoteStoreCache _store;
 	private readonly BacktestQuoteSource _parametric;
-	private readonly double _riskFreeRate;
+	// Null = follow OptionMath.RiskFreeRate at call time (the backtest runner pins it per trading day
+	// from the historical ^IRX series); a fixed value is for tests that need a deterministic solve.
+	private readonly double? _riskFreeRate;
+
+	private double Rate => _riskFreeRate ?? OptionMath.RiskFreeRate;
 	private readonly IReadOnlyDictionary<string, decimal>? _spotOverrides;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
 	private readonly ChainSnapshotOiCache? _oiCache;
 
 	/// <param name="parametric">The trade-bar/BS source used ONLY for counterfactual reprices
 	/// (<see cref="GetIntradayQuotesAsync"/>) that real NBBO can't answer. All real marks/fills use the store.</param>
-	public QuotesQuoteSource(HistoricalBarCache bars, QuoteStoreCache store, BacktestQuoteSource parametric, double riskFreeRate,
+	public QuotesQuoteSource(HistoricalBarCache bars, QuoteStoreCache store, BacktestQuoteSource parametric, double? riskFreeRate = null,
 		IReadOnlyDictionary<string, decimal>? spotOverrides = null,
 		IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null,
 		ChainSnapshotOiCache? oiCache = null)
@@ -65,7 +69,7 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 	private decimal AdjSpot(string root, decimal spot, DateTime asOf, DateTime expiry)
 	{
 		if (_dividendsByRoot == null || !_dividendsByRoot.TryGetValue(root, out var divs) || divs.Count == 0) return spot;
-		return OptionMath.DividendAdjustedSpot(spot, divs, asOf, expiry.Date + OptionMath.MarketClose, _riskFreeRate);
+		return OptionMath.DividendAdjustedSpot(spot, divs, asOf, expiry.Date + OptionMath.MarketClose, Rate);
 	}
 
 	public async Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols,
@@ -112,7 +116,7 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 			decimal? iv = null;
 			if (p.CallPut != null && timeYears > 0 && mid > 0m)
 			{
-				var solved = OptionMath.ImpliedVol(AdjSpot(p.Root, spot, asOf, p.ExpiryDate), p.Strike, timeYears, _riskFreeRate, mid, p.CallPut);
+				var solved = OptionMath.ImpliedVol(AdjSpot(p.Root, spot, asOf, p.ExpiryDate), p.Strike, timeYears, Rate, mid, p.CallPut);
 				if (solved > 0.011m && solved < 4.99m) iv = solved;   // reject vega-flat back-solver bounds
 			}
 			long? oi = null;
@@ -154,7 +158,7 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 					var timeYears = dte <= 0 ? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears) : dte / 365.0;
 					if (timeYears > 0)
 					{
-						var solved = OptionMath.ImpliedVol(AdjSpot(pe.Root, spot, asOf, pe.ExpiryDate), pe.Strike, timeYears, _riskFreeRate, q.Value.Mid, pe.CallPut);
+						var solved = OptionMath.ImpliedVol(AdjSpot(pe.Root, spot, asOf, pe.ExpiryDate), pe.Strike, timeYears, Rate, q.Value.Mid, pe.CallPut);
 						if (solved > 0.011m && solved < 4.99m) iv = solved;   // reject vega-flat back-solver bounds
 					}
 				}

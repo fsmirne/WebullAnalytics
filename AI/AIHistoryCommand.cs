@@ -192,6 +192,11 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// subtracts. Non-payers / index roots (SPX/SPXW/XSP) simply write nothing → no adjustment.
 		await RefreshDividendHistoryAsync(ticker, cancellation);
 
+		// Historical 13-week T-bill series (data/rates/IRX.csv) for the backtest's per-day risk-free rate —
+		// the same ^IRX the live scan applies in real time, banked so historical pricing solves at the rate
+		// that actually prevailed. Ticker-independent; the cache no-ops the refetch after the first ticker.
+		await RefreshRateHistoryAsync(cancellation);
+
 		// Register every currently-live contract's Webull derivativeId + tradeable-OCC/liquidity snapshot in
 		// the derivative registry. Ids are perishable (gone from the chain at expiry); the opener reads this
 		// registry (DerivativeIdRegistry.TradeableOccs) for its strike ladder + liquidity gating, and the
@@ -388,6 +393,31 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		catch (Exception ex)
 		{
 			AnsiConsole.MarkupLine($"  dividends: [yellow]skipped[/] ({Markup.Escape(ex.Message)})");
+		}
+	}
+
+	// One shared instance so a multi-ticker history run refreshes ^IRX once (GetAsync memoizes).
+	private static readonly HistoricalRateCache RateHistory = new();
+
+	/// <summary>Refreshes <c>data/rates/IRX.csv</c> (13-week T-bill daily closes as fractions) from Yahoo's
+	/// crumb-free chart endpoint. Best-effort — a failure logs a warning and never fails the command.</summary>
+	private static async Task RefreshRateHistoryAsync(CancellationToken cancellation)
+	{
+		try
+		{
+			var rates = await RateHistory.GetAsync(cancellation);
+			if (rates.Count == 0)
+			{
+				AnsiConsole.MarkupLine("  rates: [yellow]none[/] (^IRX history unavailable — backtest keeps its current risk-free rate)");
+				return;
+			}
+			var last = rates[^1];
+			AnsiConsole.MarkupLine($"  rates: [green]ok[/] ({rates.Count} close(s) cached; latest {last.Date:yyyy-MM-dd} {last.Rate.ToString("P2", CultureInfo.InvariantCulture)})");
+		}
+		catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { throw; }
+		catch (Exception ex)
+		{
+			AnsiConsole.MarkupLine($"  rates: [yellow]skipped[/] ({Markup.Escape(ex.Message)})");
 		}
 	}
 

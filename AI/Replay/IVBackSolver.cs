@@ -30,7 +30,7 @@ internal sealed class IVBackSolver
 
 		var dte = Math.Max(1, (expiry.Date - anchor.ts.Date).Days);
 		var timeYears = dte / 365.0;
-		const double riskFreeRate = 0.036;
+		var riskFreeRate = OptionMath.RiskFreeRate;
 
 		return OptionMath.ImpliedVol(
 			spot: anchor.underlying,

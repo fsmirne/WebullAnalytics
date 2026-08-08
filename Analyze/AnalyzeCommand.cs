@@ -608,7 +608,7 @@ internal static class AnalyzeCommon
 		try
 		{
 			(quotes, underlyingPrices) = await FetchLiveChainByVendor(allSymbols, settings.ResolvedVendor, cancellation);
-			YahooOptionsClient.ApplyToOptionMath(await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation));
+			YahooOptionsClient.ApplyToOptionMath(await AI.Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation));
 		}
 		catch (Exception ex)
 		{

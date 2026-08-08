@@ -128,7 +128,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		// Apply the live 13-week T-bill risk-free rate once (mirrors `wa ai scan`): the opener's IV back-solve
 		// and BS pricing read OptionMath.RiskFreeRate, so watch must set it too or it prices against a stale
 		// default and diverges from scan/backtest. Fetched once per session — the rate barely moves intraday.
-		YahooOptionsClient.ApplyToOptionMath(await YahooOptionsClient.FetchRiskFreeRateAsync(cancellation));
+		YahooOptionsClient.ApplyToOptionMath(await Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation));
 
 		var priceCache = new Replay.HistoricalPriceCache();
 

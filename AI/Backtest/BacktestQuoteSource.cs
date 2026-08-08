@@ -46,7 +46,9 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 
 	private readonly HistoricalBarCache _bars;
 	private readonly BacktestIVProvider _iv;
-	private readonly double _riskFreeRate;
+	// Null = follow OptionMath.RiskFreeRate at call time (pinned per trading day by the backtest runner
+	// from the historical ^IRX series); a fixed value is for tests that need a deterministic price.
+	private readonly double? _riskFreeRate;
 	private readonly IReadOnlyDictionary<string, decimal>? _spotOverrides;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
 	// Per-day per-contract open interest (+ IV) from the scraped chain snapshots. The captured option BARS
@@ -54,6 +56,8 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 	// quote we return for a contract that exists in the day's snapshot gets its real OI (and a snapshot IV for
 	// the OI-only ladder markers, which ComputeGex needs to weight gamma). Null → unchanged (OI stays absent).
 	private readonly ChainSnapshotOiCache? _oiCache;
+
+	private double Rate => _riskFreeRate ?? OptionMath.RiskFreeRate;
 
 	/// <param name="spotOverrides">When supplied for a ticker, replaces the bar.open lookup for that
 	/// ticker. Used by <c>ai scan --theoretical</c> to evaluate a hypothetical spot at an asOf for which
@@ -64,7 +68,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 	/// path. This prices synthetic legs on the correct reduced forward. Null (or a root with no schedule)
 	/// leaves that root unadjusted (q=0), unchanged behaviour — correct for cash-settled index roots
 	/// (SPX/SPXW/XSP).</param>
-	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double riskFreeRate, IReadOnlyDictionary<string, decimal>? spotOverrides = null, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, ChainSnapshotOiCache? oiCache = null)
+	public BacktestQuoteSource(HistoricalBarCache bars, BacktestIVProvider iv, double? riskFreeRate = null, IReadOnlyDictionary<string, decimal>? spotOverrides = null, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, ChainSnapshotOiCache? oiCache = null)
 	{
 		_bars = bars;
 		_iv = iv;
@@ -82,7 +86,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 	private decimal AdjSpot(string root, decimal spot, DateTime asOf, DateTime expiryDate)
 	{
 		if (_dividendsByRoot == null || !_dividendsByRoot.TryGetValue(root, out var divs) || divs.Count == 0) return spot;
-		return OptionMath.DividendAdjustedSpot(spot, divs, asOf, expiryDate.Date + OptionMath.MarketClose, _riskFreeRate);
+		return OptionMath.DividendAdjustedSpot(spot, divs, asOf, expiryDate.Date + OptionMath.MarketClose, Rate);
 	}
 
 	public async Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers, CancellationToken cancellation, QuoteOverrides overrides = default)
@@ -179,7 +183,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 			if (atm.HasValue)
 				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
 			if (iv.HasValue)
-				price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, _riskFreeRate, iv.Value, parsed.CallPut!);
+				price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, Rate, iv.Value, parsed.CallPut!);
 			else
 				price = parsed.CallPut == "C" ? Math.Max(0m, spot - parsed.Strike) : Math.Max(0m, parsed.Strike - spot);
 
@@ -285,7 +289,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 			var atmIv = atmByDte.TryGetValue(dte, out var hit) ? hit : fallbackAtm;
 			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale) ?? atmIv;
 			var timeYears = dte <= 0 ? zeroDteTimeYears : dte / 365.0;
-			var price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, _riskFreeRate, iv, parsed.CallPut);
+			var price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, Rate, iv, parsed.CallPut);
 
 			var halfSpread = HalfSpreadFor(parsed.Root, price);
 			var bid = Math.Max(0m, price - halfSpread);

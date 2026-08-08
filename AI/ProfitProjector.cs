@@ -10,7 +10,8 @@ namespace WebullAnalytics.AI;
 /// </summary>
 internal static class ProfitProjector
 {
-	private const double RiskFreeRate = 0.036;
+	// Follows the engine-wide rate: live ^IRX in scans/watch, the per-day historical close in backtests.
+	private static double RiskFreeRate => OptionMath.RiskFreeRate;
 	private const int DateSamples = 8;        // today + 6 mid + latest expiry
 	private const int PriceSamples = 21;      // 21 price rows across ±25% around spot
 	private const decimal PriceRangePct = 0.25m;

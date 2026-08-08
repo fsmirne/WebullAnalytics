@@ -793,7 +793,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 	private static double? OptDelta(char cp, double s, double k, double tYr, double iv)
 	{
 		if (iv <= 0 || tYr <= 0 || s <= 0 || k <= 0) return null;
-		var d1 = (Math.Log(s / k) + (0.036 + iv * iv / 2) * tYr) / (iv * Math.Sqrt(tYr));
+		var d1 = (Math.Log(s / k) + (OptionMath.RiskFreeRate + iv * iv / 2) * tYr) / (iv * Math.Sqrt(tYr));
 		var cd = NormCdf(d1);
 		return cp == 'C' ? cd : cd - 1;
 	}

@@ -273,9 +273,12 @@ public class CandidateScorerCalendarTests
 			[longSym]  = TestQuote.Q(bid: 1.92m, ask: 1.92m, iv: 0.628m)
 		};
 
-		// BUG path (useMarketImpliedIv=true): MarketImpliedIv back-solves ivLong from mid=$1.92 at spot=$23.84.
-		// The option is OTM so there's no intrinsic guard; the solver returns IV≈1.04 >> broker 0.628.
-		// This inflates residual time value in the breakeven scan and drops the lower BE well below spot.
+		// BUG path (useMarketImpliedIv=true): ScoredLegIv back-solves BOTH legs from their stale cost-basis
+		// mids at spot=$23.84. The long is OTM so there's no intrinsic guard; the solver returns
+		// ivLong≈1.04 >> broker 0.628, inflating residual time value in the breakeven scan and dropping the
+		// lower BE well below spot. The short's solve (mid=$1.00, 4 DTE) lands even higher (≈1.4), which
+		// widens the POP log-normal — so POP inflates less than under the old long-leg-only solve, but the
+		// inflation vs the correct-IV path is still material.
 		var pBug = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 23.84m, asOf, costBasisQuotes, bias: 0m, Cfg(), useMarketImpliedIv: true)!;
 
 		// FIX path (useMarketImpliedIv=false): ivLong = ResolveIv = broker Iv field = 0.628.
@@ -285,8 +288,9 @@ public class CandidateScorerCalendarTests
 		// Both paths compute the same cost-basis debit.
 		Assert.Equal(pBug.DebitOrCreditPerContract, pFix.DebitOrCreditPerContract);
 
-		// Bug path: inflated ivLong → lower BE ≈ $21.49 (well below spot $23.84) → POP ≈ 81%.
-		Assert.True(pBug.ProbabilityOfProfit > 0.70m, $"Bug path POP {pBug.ProbabilityOfProfit:P1} should exceed 70%");
+		// Bug path: inflated ivLong → lower BE well below spot $23.84 → POP ≈ 64% (≈81% before the short
+		// leg's IV joined the back-solve).
+		Assert.True(pBug.ProbabilityOfProfit > 0.55m, $"Bug path POP {pBug.ProbabilityOfProfit:P1} should exceed 55%");
 		Assert.True(pBug.Breakevens.Count == 2 && pBug.Breakevens[0] < 23.84m, $"Bug path lower BE {pBug.Breakevens[0]:F2} should be below spot $23.84");
 
 		// Fix path: correct ivLong → lower BE ≈ $24+ (above spot $23.84) → POP ≈ 40%.
@@ -294,7 +298,7 @@ public class CandidateScorerCalendarTests
 		Assert.True(pFix.Breakevens.Count == 2 && pFix.Breakevens[0] > 23.84m, $"Fix path lower BE {pFix.Breakevens[0]:F2} should be above spot $23.84 (position below cost-basis breakeven)");
 
 		// The inflation is material — not a rounding difference.
-		Assert.True(pBug.ProbabilityOfProfit > pFix.ProbabilityOfProfit + 0.30m, $"Bug path POP should exceed fix path by >30pp; got {pBug.ProbabilityOfProfit:P1} vs {pFix.ProbabilityOfProfit:P1}");
+		Assert.True(pBug.ProbabilityOfProfit > pFix.ProbabilityOfProfit + 0.15m, $"Bug path POP should exceed fix path by >15pp; got {pBug.ProbabilityOfProfit:P1} vs {pFix.ProbabilityOfProfit:P1}");
 	}
 
 	[Fact]

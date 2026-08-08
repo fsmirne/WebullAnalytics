@@ -159,7 +159,7 @@ internal static class ScenarioEngine
 			var shortMid = LiveOrBsMid(quotes, newShortSym, spot, longLeg.Parsed.Strike, dteShort, ivNewShort, callPut);
 			var (shortBid, _) = LiveBidAsk(quotes, newShortSym, shortMid);
 			var dteLongAtShortExp = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days);
-			var longAtShortExp = (decimal)OptionMath.BlackScholes(spot, longLeg.Parsed.Strike, dteLongAtShortExp / 365.0, 0.036, iv, callPut);
+			var longAtShortExp = (decimal)OptionMath.BlackScholes(spot, longLeg.Parsed.Strike, dteLongAtShortExp / 365.0, OptionMath.RiskFreeRate, iv, callPut);
 			var shortAtShortExp = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
 			var net = longAtShortExp - shortAtShortExp;
 			list.Add(BuildSingleLeg($"Convert to calendar (sell {shortExpiry:yyyy-MM-dd} @ ${longLeg.Parsed.Strike:F2})",
@@ -194,7 +194,7 @@ internal static class ScenarioEngine
 		var currentMargin = AnalyzeCommon.ComputeLegMargin(shortLeg.Parsed, 1, spot, shortMidNow, longLeg.Parsed, null, 1, longMidNow, isExisting: true).Total;
 
 		decimal LongValueAtShortExpiry(decimal longStrike, DateTime shortExpiry) =>
-			(decimal)OptionMath.BlackScholes(spot, longStrike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days) / 365.0, 0.036, ivLong, callPut);
+			(decimal)OptionMath.BlackScholes(spot, longStrike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivLong, callPut);
 
 		var longAtOriginalExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate);
 		var shortAtOriginalExp = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
@@ -331,7 +331,7 @@ internal static class ScenarioEngine
 				var closeNet = longCloseNow - shortCloseNow;
 				var openNet = SellPrice(newShortMidExec, newShortBid, opt.PricingMode) - BuyPrice(newLongMidExec, newLongAsk, opt.PricingMode);
 				var cashPerShare = closeNet + openNet;
-				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(spot, newStrike, Math.Max(1, (newLongExp.Date - newShortExp.Date).Days) / 365.0, 0.036, ivNewLong, callPut);
+				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(spot, newStrike, Math.Max(1, (newLongExp.Date - newShortExp.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivNewLong, callPut);
 				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newShortExp, callPut, newStrike);
@@ -379,8 +379,8 @@ internal static class ScenarioEngine
 					var daysToOrigShort = origShortDte;
 					var tRemainNewShort = Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0;
 					var tRemainNewLong = Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0;
-					var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewShort, 0.036, ivNewShort, addCp);
-					var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewLong, 0.036, ivNewLong, addCp);
+					var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewShort, OptionMath.RiskFreeRate, ivNewShort, addCp);
+					var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewLong, OptionMath.RiskFreeRate, ivNewLong, addCp);
 					var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp;
 
 					// Opening a long calendar/diagonal is pure-debit: margin required = the selected price-basis
@@ -539,7 +539,7 @@ internal static class ScenarioEngine
 	{
 		if (quotes != null && quotes.TryGetValue(symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue && q.Bid.Value >= 0m && q.Ask.Value > 0m)
 			return (q.Bid.Value + q.Ask.Value) / 2m;
-		return (decimal)OptionMath.BlackScholes(spot, strike, dte / 365.0, 0.036, iv, callPut);
+		return (decimal)OptionMath.BlackScholes(spot, strike, dte / 365.0, OptionMath.RiskFreeRate, iv, callPut);
 	}
 
 	private static decimal BuyPrice(decimal mid, decimal ask, string pricingMode) =>
