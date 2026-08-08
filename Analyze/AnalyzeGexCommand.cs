@@ -151,6 +151,21 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			AnsiConsole.MarkupLine($"[dim]Historical GEX from {Markup.Escape(oiPath)} ({quotes.Count} contracts; offline — no live fetch).[/]");
 			isOfflineHistorical = true;
 		}
+		else if (settings.EvaluationDateOverride.HasValue && asOf.Date < DateTime.Today)
+		{
+			// A PAST --date with no captured snapshot can never be served by a live fetch (the chain would be
+			// today's book wearing yesterday's label — and roots only the scraper ever covered, like SPCX, just
+			// produce a confusing vendor 400). Fail fast and say what IS available instead.
+			var dir = Program.ResolvePath($"data/oi/{ticker}");
+			var available = Directory.Exists(dir)
+				? Directory.EnumerateFiles(dir, "????-??-??.jsonl").Select(Path.GetFileNameWithoutExtension).OrderBy(d => d).ToList()
+				: new List<string?>();
+			AnsiConsole.MarkupLine($"[red]No data/oi snapshot for {Markup.Escape(ticker)} on {asOf:yyyy-MM-dd} — a past --date renders only from a captured chain (no live fallback).[/]");
+			AnsiConsole.MarkupLine(available.Count > 0
+				? $"[dim]Available {Markup.Escape(ticker)} snapshot dates: {Markup.Escape(available.Count > 12 ? string.Join(", ", available.Take(3)) + $", … ({available.Count - 6} more) …, " + string.Join(", ", available.TakeLast(3)) : string.Join(", ", available))}.[/]"
+				: $"[dim]No snapshots exist under data/oi/{Markup.Escape(ticker)}/ at all — the ThetaData backfill and the live scraper are the writers.[/]");
+			return 1;
+		}
 		else
 		{
 			var configPath = Program.ResolvePath(Program.ApiConfigPath);
