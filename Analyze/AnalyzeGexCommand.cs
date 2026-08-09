@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using WebullAnalytics.AI.Backtest;
 using WebullAnalytics.Api;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Utils;
@@ -30,8 +31,12 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public string Greek { get; set; } = "both";
 
 	[CommandOption("--expiry <DATE>")]
-	[Description("Restrict to a single expiration date (YYYY-MM-DD). Default: show all expirations in the chain.")]
+	[Description("Pin the view to a single expiration date (YYYY-MM-DD). Default: show all expirations in the chain. Pinning one expiry frees the column axis for TIME, so it changes what the heatmap plots: alone it becomes the build-up view (columns = trading sessions, see --since), and with --intraday it becomes that expiry's intraday migration on --date rather than the same-day 0DTE. The per-expiration, chain-totals and wall tables are unaffected.")]
 	public string? Expiry { get; set; }
+
+	[CommandOption("--since <DATE>")]
+	[Description("Build-up view (--expiry without --intraday) only: first session shown (YYYY-MM-DD). Default: the Monday of --date's week, so a weekly expiry shows its own Mon-to-date build. Each column is that session's OWN captured chain from data/oi — its real OI, IVs and close spot at the correct DTE — so the panel shows the pinned expiry's book filling in day by day.")]
+	public string? Since { get; set; }
 
 	[CommandOption("--strike-range <PCT>")]
 	[DefaultValue(20)]
@@ -58,19 +63,27 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public bool Dump { get; set; }
 
 	[CommandOption("--intraday")]
-	[Description("0DTE intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Without --date (or with --date today) this is the RUNNING-DAY view: OI/IVs come from the live chain fetch and the columns run 09:30 through the current bucket. A past --date replays that day offline from its data/oi snapshot, with per-bucket IVs back-solved from the minute-quote store (data/quotes) when it covers the day, else frozen from the snapshot. Skips the walls/totals/per-expiry tables.")]
+	[Description("Intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Maps --date's own 0DTE by default; pass --expiry to watch a LATER expiry's gravity move through --date instead (the only option on roots with no daily expirations). Without --date (or with --date today) this is the RUNNING-DAY view: OI/IVs come from the live chain fetch and the columns run 09:30 through the current bucket. A past --date replays that day offline from its data/oi snapshot, with per-bucket IVs back-solved from the minute-quote store (data/quotes/<TICKER>/<expiry>.csv) when it covers the day, else frozen from the snapshot. Skips the walls/totals/per-expiry tables.")]
 	public bool Intraday { get; set; }
 
 	[CommandOption("--interval <MIN>")]
-	[Description("--intraday time-bucket size in minutes. Default: auto — the finest of 30/45/60/90/120 whose panels fit the terminal width side by side (both the gamma and VEX migration tables under the default --greek both; just the gamma table under --greek gamma).")]
+	[Description("--intraday time-bucket size in minutes, 1-120. Default: auto — the finest standard size whose panels fit the terminal width side by side (both the gamma and VEX migration tables under the default --greek both; just the gamma table under --greek gamma). Narrow the window with --start/--end to keep a fine interval readable: minute buckets over a 30-minute slice pin exactly when the gravity flips.")]
 	public int? IntervalMin { get; set; }
 
+	[CommandOption("--start <HH:MM>")]
+	[Description("--intraday only: first column's ET time (default 09:30). Bounds the migration to a slice of the session, so a fine --interval stays readable instead of overflowing the terminal.")]
+	public string? Start { get; set; }
+
+	[CommandOption("--end <HH:MM>")]
+	[Description("--intraday only: last column's ET time (default 16:00). Pairs with --start.")]
+	public string? End { get; set; }
+
 	[CommandOption("--time <HH:MM>")]
-	[Description("--intraday only: narrow the VEX side panel to the single bucket nearest this ET time (default: a full VEX migration panel, one column per bucket like the gamma table) — e.g. --time 10:00 focuses on what the 0DTE vanna book looked like at 10am. The gamma migration columns are unaffected.")]
+	[Description("--intraday only: narrow the VEX side panel to the single bucket nearest this ET time (default: a full VEX migration panel, one column per bucket like the gamma table) — e.g. --time 10:00 focuses on what the mapped expiry's vanna book looked like at 10am. The gamma migration columns are unaffected.")]
 	public string? Time { get; set; }
 
 	[CommandOption("--exante")]
-	[Description("--intraday only: price the 0DTE gamma with the PRIOR trading day's snapshot IVs (falling back to a back-solve from the prior day's mids at the prior day's spot) instead of back-solving from this day's EOD mids. The default solve leaks the session's outcome into every column — a put that finished ITM has a fat EOD mid, back-solves to an inflated IV, and its strike re-brightens/dims by where the day CLOSED; ex-ante IVs show what was actually hedgeable at each bucket. 0DTE contracts absent from the prior snapshot are dropped.")]
+	[Description("--intraday only: price the mapped expiry's gamma with the PRIOR trading day's snapshot IVs (falling back to a back-solve from the prior day's mids at the prior day's spot) instead of back-solving from this day's EOD mids. The default solve leaks the session's outcome into every column — a put that finished ITM has a fat EOD mid, back-solves to an inflated IV, and its strike re-brightens/dims by where the day CLOSED; ex-ante IVs show what was actually hedgeable at each bucket. Contracts absent from the prior snapshot are dropped.")]
 	public bool Exante { get; set; }
 
 	public override ValidationResult Validate()
@@ -81,13 +94,21 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (!BothGreeks && !TryParseGreek(Greek, out _)) return ValidationResult.Error($"--greek: expected 'gamma', 'vanna' or 'both', got '{Greek}'");
 		if (Expiry != null && !DateTime.TryParseExact(Expiry, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
 			return ValidationResult.Error($"--expiry: expected YYYY-MM-DD, got '{Expiry}'");
+		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+			return ValidationResult.Error($"--since: expected YYYY-MM-DD, got '{Since}'");
+		if (Since != null && Expiry == null) return ValidationResult.Error("--since sets the first column of the build-up view, which needs a pinned expiry; add --expiry YYYY-MM-DD");
+		if (Since != null && Intraday) return ValidationResult.Error("--since spans sessions and --intraday spans one session's time buckets; use one or the other");
 		if (StrikeRangePct <= 0 || StrikeRangePct > 200) return ValidationResult.Error($"--strike-range: must be in (0, 200], got {StrikeRangePct}");
 		if (MaxStrikes < 1 || MaxStrikes > 200) return ValidationResult.Error($"--max-strikes: must be in [1, 200], got {MaxStrikes}");
 		if (Dte < 0 || Dte > 60) return ValidationResult.Error($"--dte: must be in [0, 60], got {Dte}");
-		if (IntervalMin.HasValue && (IntervalMin.Value < 5 || IntervalMin.Value > 120)) return ValidationResult.Error($"--interval: must be in [5, 120] minutes, got {IntervalMin}");
+		if (IntervalMin.HasValue && (IntervalMin.Value < 1 || IntervalMin.Value > 120)) return ValidationResult.Error($"--interval: must be in [1, 120] minutes, got {IntervalMin}");
 		if (Time != null && !Intraday) return ValidationResult.Error("--time anchors the --intraday VEX column; add --intraday");
-		if (Time != null && !TimeSpan.TryParseExact(Time, @"hh\:mm", CultureInfo.InvariantCulture, out var vt)) return ValidationResult.Error($"--time: expected HH:MM (ET), got '{Time}'");
-		else if (Time != null && TimeSpan.TryParseExact(Time, @"hh\:mm", CultureInfo.InvariantCulture, out var vtOk) && (vtOk < new TimeSpan(9, 30, 0) || vtOk > new TimeSpan(16, 0, 0))) return ValidationResult.Error($"--time: must be within RTH 09:30–16:00 ET, got '{Time}'");
+		if (Start != null && !Intraday) return ValidationResult.Error("--start bounds the --intraday columns; add --intraday");
+		if (End != null && !Intraday) return ValidationResult.Error("--end bounds the --intraday columns; add --intraday");
+		if (RthTimeError(Time, "--time") is { } timeErr) return ValidationResult.Error(timeErr);
+		if (RthTimeError(Start, "--start") is { } startErr) return ValidationResult.Error(startErr);
+		if (RthTimeError(End, "--end") is { } endErr) return ValidationResult.Error(endErr);
+		if (ParseEtTime(Start) is { } s && ParseEtTime(End) is { } e && s >= e) return ValidationResult.Error($"--start {Start} must be before --end {End}");
 		if (Exante && !Intraday) return ValidationResult.Error("--exante only applies to the --intraday heatmap");
 		// The intraday view's whole subject is the gravity strike migrating as spot moves, and it reads its Gravity row
 		// back out of the gamma-only data/gex log. Vanna has no gravity, so an explicit vanna request is refused
@@ -100,6 +121,23 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 
 	/// <summary>'both' = render the gamma AND vanna maps in one run, side by side when the terminal is wide enough.</summary>
 	internal bool BothGreeks => string.Equals(Greek?.Trim(), "both", StringComparison.OrdinalIgnoreCase);
+
+	internal static readonly TimeSpan RthOpen = new(9, 30, 0);
+	internal static readonly TimeSpan RthClose = new(16, 0, 0);
+	// "9:40" is what anyone actually types; requiring the leading zero is a papercut, so both forms parse.
+	private static readonly string[] EtTimeFormats = { @"hh\:mm", @"h\:mm" };
+
+	/// <summary>An ET HH:MM flag value, or null when the flag was absent. Validation has already rejected malformed
+	/// and out-of-RTH values, so callers can treat this as a plain parse.</summary>
+	internal static TimeSpan? ParseEtTime(string? value) => value != null && TimeSpan.TryParseExact(value, EtTimeFormats, CultureInfo.InvariantCulture, out var t) ? t : null;
+
+	/// <summary>Validation message for an ET time flag, or null when it is absent or valid.</summary>
+	private static string? RthTimeError(string? value, string flag)
+	{
+		if (value == null) return null;
+		if (ParseEtTime(value) is not { } t) return $"{flag}: expected HH:MM (ET), got '{value}'";
+		return t < RthOpen || t > RthClose ? $"{flag}: must be within RTH 09:30-16:00 ET, got '{value}'" : null;
+	}
 
 	internal static bool TryParseGreek(string? name, out GreekKind greek)
 	{
@@ -254,7 +292,15 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				AnsiConsole.MarkupLine("[red]--intraday for a past day requires a data/oi snapshot for that --date (offline-historical mode); none was loaded. The running day needs no snapshot — omit --date.[/]");
 				return 1;
 			}
-			if (settings.Exante && !ApplyExanteIvs(ticker, asOf.Date, quotes))
+			// Which expiry's gamma the columns map. Default = --date's own 0DTE; --expiry moves it to a later series,
+			// which is the ONLY way to see a gravity migration on a root that lists no same-day expiration.
+			var intradayExpiry = expiryFilter?.Date ?? asOf.Date;
+			if (intradayExpiry < asOf.Date)
+			{
+				AnsiConsole.MarkupLine($"[red]--expiry {intradayExpiry:yyyy-MM-dd} precedes --date {asOf.Date:yyyy-MM-dd} — the intraday map replays a session against an expiry that is still listed on it.[/]");
+				return 1;
+			}
+			if (settings.Exante && !ApplyExanteIvs(ticker, asOf.Date, intradayExpiry, quotes))
 				return 1;
 			if (!isOfflineHistorical)
 			{
@@ -266,8 +312,10 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				await RefreshIntradayTapeAsync(ticker, apiConfig, cancellation);
 				AnsiConsole.MarkupLine($"[dim]Running-day heatmap from the live {Markup.Escape(settings.VendorName)} chain ({quotes.Count} contracts); columns end at the current bucket.[/]");
 			}
-			TimeSpan? vexAt = settings.Time != null ? TimeSpan.ParseExact(settings.Time, @"hh\:mm", CultureInfo.InvariantCulture) : null;
-			RenderIntradayGexHeatmap(ticker, asOf.Date, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical, withVexNow: settings.BothGreeks, vexAt: vexAt);
+			RenderIntradayGexHeatmap(ticker, asOf.Date, intradayExpiry, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical, withVexNow: settings.BothGreeks,
+				vexAt: AnalyzeGexSettings.ParseEtTime(settings.Time),
+				windowStart: AnalyzeGexSettings.ParseEtTime(settings.Start) ?? AnalyzeGexSettings.RthOpen,
+				windowEnd: AnalyzeGexSettings.ParseEtTime(settings.End) ?? AnalyzeGexSettings.RthClose);
 			return 0;
 		}
 
@@ -296,7 +344,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		RenderHeader(ticker, spot.Value, asOf, expiryFilter, matrix);
 		AnsiConsole.WriteLine();
-		if (vannaMatrix != null)
+		// A pinned --expiry collapses the heatmap's column axis to one expiration, which is a whole panel spent on a
+		// single column. Spend it on TIME instead: the same expiry re-read from each prior session's own snapshot, so
+		// the book is seen filling in. The rightmost column is exactly what the one-column heatmap used to show.
+		if (expiryFilter.HasValue)
+			RenderExpiryBuildup(ticker, expiryFilter.Value.Date, asOf.Date, ResolveBuildupStart(settings.Since, asOf.Date), quotes, spot.Value, settings, greek, vannaMatrix != null);
+		else if (vannaMatrix != null)
 			RenderHeatmapsSideBySide(matrix, vannaMatrix, spot.Value);
 		else
 			RenderHeatmap(matrix, spot.Value, greek);
@@ -358,13 +411,13 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		return (spot, quotes);
 	}
 
-	/// <summary>--exante: replaces every 0DTE contract's IV with the prior trading day's snapshot value (falling back
+	/// <summary>--exante: replaces every mapped-expiry contract's IV with the prior trading day's snapshot value (falling back
 	/// to a back-solve from the prior day's captured mid at the prior day's spot). The data/oi EOD snapshot stores
 	/// iv = null for the own-day expiry, so GexMatrix.Build otherwise back-solves 0DTE IVs from POST-session mids at
 	/// each bucket's historical spot — which leaks the day's outcome into every column (a put that finished ITM has a
 	/// fat EOD mid, back-solves to an inflated IV, and its gamma re-shapes by where the day closed). Contracts with no
 	/// usable prior-day IV or mid are removed so Build cannot fall back to the leaky same-day solve.</summary>
-	private static bool ApplyExanteIvs(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes)
+	private static bool ApplyExanteIvs(string ticker, DateTime date, DateTime expiry, Dictionary<string, OptionContractQuote> quotes)
 	{
 		var dir = Program.ResolvePath($"data/oi/{ticker}");
 		DateTime? priorDate = null;
@@ -386,12 +439,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return false;
 		}
 
-		const double timeYears = 1.0 / 365.0; // same 0DTE day-floor as GexMatrix.Build
+		// The solve is priced as of the PRIOR day (its spot, its mids), so time-to-expiry runs from there — with the
+		// same one-day floor GexMatrix.Build applies. For a 0DTE map that is the original 1/365.
+		var timeYears = Math.Max(1, (expiry.Date - priorDate.Value).Days) / 365.0;
 		int applied = 0, solved = 0, dropped = 0;
 		foreach (var sym in quotes.Keys.ToList())
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(sym);
-			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase) || parsed.ExpiryDate.Date != date) continue; // only the 0DTE expiry is rendered
+			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase) || parsed.ExpiryDate.Date != expiry.Date) continue; // only the mapped expiry is rendered
 			var iv = 0m;
 			if (priorQuotes.TryGetValue(sym, out var prior))
 			{
@@ -416,7 +471,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				dropped++;
 			}
 		}
-		AnsiConsole.MarkupLine($"[dim]--exante: 0DTE IVs from {Markup.Escape(priorPath)} ({applied} snapshot IVs, {solved} back-solved from prior-day mids, {dropped} contract(s) dropped).[/]");
+		AnsiConsole.MarkupLine($"[dim]--exante: {expiry:yyyy-MM-dd} IVs from {Markup.Escape(priorPath)} ({applied} snapshot IVs, {solved} back-solved from prior-day mids, {dropped} contract(s) dropped).[/]");
 		return true;
 	}
 
@@ -643,6 +698,130 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 
 		return table;
+	}
+
+	/// <summary>One column of a TIME-axis heatmap — an --intraday bucket or a build-up session. Two header lines (the
+	/// mark and its spot), the per-strike cells, and the gravity strike to mark, which is null under vanna since vanna
+	/// has no gravity.</summary>
+	private sealed record HeatColumn(string Header, string SubHeader, Dictionary<decimal, GexCell> Cells, decimal? Gravity);
+
+	/// <summary>Rows = <paramref name="strikes"/> in the order given, columns = <paramref name="columns"/>. Shared by
+	/// the --intraday migration panels and the --expiry build-up panel so a gamma table and a vanna table built off one
+	/// strike ladder align row-for-row when placed side by side.</summary>
+	private static Table BuildColumnHeatmapTable(string title, IReadOnlyList<HeatColumn> columns, IReadOnlyList<decimal> strikes, bool wholeGrid, decimal maxAbsNet)
+	{
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title(title);
+		table.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
+		foreach (var c in columns)
+			table.AddColumn(new TableColumn($"[bold]{c.Header}[/]\n[dim]{c.SubHeader}[/]").Centered().NoWrap());
+
+		foreach (var strike in strikes)
+		{
+			var row = new List<string> { StrikeLabel(strike, wholeGrid) };
+			foreach (var c in columns)
+			{
+				c.Cells.TryGetValue(strike, out var cell);
+				row.Add(BuildHeatmapCellMarkup(cell, maxAbsNet, c.Gravity.HasValue && c.Gravity.Value == strike));
+			}
+			table.AddRow(row.ToArray());
+		}
+		return table;
+	}
+
+	/// <summary>Resolves the build-up view's first column: --since when given, else the Monday of <paramref name="asOf"/>'s
+	/// week — for a weekly expiry that is its own Monday-to-date build, which is the read this view exists for.</summary>
+	private static DateTime ResolveBuildupStart(string? since, DateTime asOf) => since != null
+		? DateTime.ParseExact(since, "yyyy-MM-dd", CultureInfo.InvariantCulture).Date
+		: asOf.Date.AddDays(-(((int)asOf.Date.DayOfWeek + 6) % 7));
+
+	/// <summary>Renders the --expiry build-up heatmap: rows = strikes, columns = trading SESSIONS from
+	/// <paramref name="since"/> through <paramref name="asOf"/>, every one of them showing the same pinned
+	/// <paramref name="expiry"/>. Each prior column is rebuilt from that session's own data/oi snapshot — the OI, IVs and
+	/// close spot actually captured that day, at the DTE the expiry actually had — so the panel shows one series' book
+	/// filling in over the week instead of a single day re-read N times. The last column is the chain this run already
+	/// loaded for asOf (live fetch or its own snapshot), so it agrees with the per-expiry and totals tables below it.
+	/// Sessions whose snapshot does not carry the expiry are named in a footnote rather than drawn as blank columns.</summary>
+	private static void RenderExpiryBuildup(string ticker, DateTime expiry, DateTime asOf, DateTime since, Dictionary<string, OptionContractQuote> quotes, decimal spot, AnalyzeGexSettings settings, GreekKind greek, bool withVex)
+	{
+		var strikeRange = settings.StrikeRangePct / 100m;
+		var sessions = new List<(DateTime Date, decimal Spot, Dictionary<string, OptionContractQuote> Quotes)>();
+		var dir = Program.ResolvePath($"data/oi/{ticker}");
+		if (Directory.Exists(dir))
+			foreach (var file in Directory.EnumerateFiles(dir, "????-??-??.jsonl").OrderBy(f => f, StringComparer.Ordinal))
+			{
+				if (!DateTime.TryParseExact(Path.GetFileNameWithoutExtension(file), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
+				if (d.Date < since.Date || d.Date >= asOf.Date) continue;   // asOf gets the already-loaded chain below, not a re-read
+				var (snapSpot, snapQuotes) = LoadOiSnapshot(file);
+				if (!snapSpot.HasValue || snapSpot.Value <= 0m || snapQuotes.Count == 0) continue;
+				sessions.Add((d.Date, snapSpot.Value, snapQuotes));
+			}
+		sessions.Add((asOf.Date, spot, quotes));
+
+		var gamma = new List<HeatColumn>();
+		var vanna = new List<HeatColumn>();
+		var union = new HashSet<decimal>();
+		var absent = new List<DateTime>();
+		foreach (var (d, s, q) in sessions)
+		{
+			var dte = Math.Max(0, (expiry - d).Days);
+			var m = GexMatrix.Build(q, ticker, s, d, expiryFilter: expiry, strikeRange, maxDteDays: dte, settings.MaxStrikes, greek);
+			var cells = new Dictionary<decimal, GexCell>();
+			foreach (var k in m.Strikes)
+				if (m.Cells.TryGetValue((expiry, k), out var c)) cells[k] = c;
+			if (cells.Count == 0) { absent.Add(d); continue; }
+			m.GravityByExpiry.TryGetValue(expiry, out var grav);
+			gamma.Add(new HeatColumn($"{d:M/d}", $"{s:F2}", cells, greek == GreekKind.Gamma ? grav : null));
+			foreach (var k in cells.Keys) union.Add(k);
+			// Appended in the SAME branch, empty or not, so the two lists stay index-aligned for the width trim below.
+			if (withVex)
+			{
+				var vm = GexMatrix.Build(q, ticker, s, d, expiryFilter: expiry, strikeRange, maxDteDays: dte, settings.MaxStrikes, GreekKind.Vanna);
+				var vCells = new Dictionary<decimal, GexCell>();
+				foreach (var k in vm.Strikes)
+					if (vm.Cells.TryGetValue((expiry, k), out var vc)) vCells[k] = vc;
+				vanna.Add(new HeatColumn($"{d:M/d}", $"{s:F2}", vCells, Gravity: null));
+			}
+		}
+
+		if (gamma.Count == 0)
+		{
+			AnsiConsole.MarkupLine($"[yellow]No {expiry:yyyy-MM-dd} cells in any session from {since:yyyy-MM-dd} to {asOf:yyyy-MM-dd} — no captured snapshot in that span lists the expiry with OI inside ±{settings.StrikeRangePct}% of spot.[/]");
+			return;
+		}
+
+		// Each session banded its own strikes around its own spot, so the union can span far more rows than one day's
+		// window. Cap it around the LAST column's spot — that is the ladder the reader is actually anchored on.
+		var strikeSet = union.OrderBy(k => Math.Abs(k - spot)).Take(settings.MaxStrikes).ToHashSet();
+		var ladder = strikeSet.OrderByDescending(k => k).ToList();
+		var wholeGrid = IsWholeGrid(ladder);
+		decimal MaxNet(List<HeatColumn> cols) => Math.Max(1m, cols.SelectMany(c => c.Cells).Where(kv => strikeSet.Contains(kv.Key)).Select(kv => Math.Abs(kv.Value.Net)).DefaultIfEmpty(0m).Max());
+
+		// Same fixed cell geometry as the other paired heatmaps. Oldest columns are dropped first: the near-expiry
+		// sessions carry the positioning that still matters.
+		var panels = withVex ? 2 : 1;
+		var strikeW = ladder.Max(k => StrikeLabel(k, wholeGrid).Length);
+		var colW = 3 + Math.Max(7, gamma.Max(c => c.SubHeader.Length));
+		var fit = Math.Max(1, (AnsiConsole.Profile.Width - 2 - panels * (1 + strikeW + 3)) / (panels * colW));
+		var dropped = Math.Max(0, gamma.Count - fit);
+		if (dropped > 0)
+		{
+			gamma = gamma.Skip(dropped).ToList();
+			if (withVex) vanna = vanna.Skip(dropped).ToList();
+		}
+
+		AnsiConsole.MarkupLine($"[bold]{ticker}[/] {expiry:yyyy-MM-dd} expiry — build-up over {gamma.Count} session(s), {gamma[0].Header} → {gamma[^1].Header}");
+		AnsiConsole.MarkupLine($"[dim]Each column is that session's own data/oi snapshot — the OI and IVs captured that day, priced at that day's close spot and its real DTE. Column header = session, subhead = its spot.{(dropped > 0 ? $" Oldest {dropped} session(s) dropped to fit {AnsiConsole.Profile.Width} columns; narrow with --since." : "")}[/]");
+
+		var table = BuildColumnHeatmapTable(greek == GreekKind.Vanna ? "[bold]VEX (vanna)[/]" : "[bold]GEX (gamma)[/]", gamma, ladder, wholeGrid, MaxNet(gamma));
+		if (withVex)
+			AnsiConsole.Write(new Columns(table, BuildColumnHeatmapTable("[bold]VEX (vanna)[/]", vanna, ladder, wholeGrid, MaxNet(vanna))) { Expand = false });
+		else
+			AnsiConsole.Write(table);
+
+		AnsiConsole.MarkupLine(HeatmapLegend(greek));
+		if (withVex) AnsiConsole.MarkupLine(HeatmapLegend(GreekKind.Vanna));
+		if (absent.Count > 0)
+			AnsiConsole.MarkupLine($"[dim]No {expiry:yyyy-MM-dd} cells on {string.Join(", ", absent.Select(d => d.ToString("M/d")))} — the series was unlisted, carried no OI, or sat outside ±{settings.StrikeRangePct}% of that session's spot.[/]");
 	}
 
 	private static string HeatmapLegend(GreekKind greek) => greek == GreekKind.Vanna
@@ -950,19 +1129,23 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		return spots;
 	}
 
-	/// <summary>Renders the 0DTE intraday GEX gravity-migration heatmap: rows = strikes (descending), columns = RTH
-	/// hour marks. At each hour the per-strike GEX is recomputed at that hour's intraday spot against the day's fixed
-	/// OI, so the gravity strike (bold-underlined) is seen migrating as price moves. Brightness ∝ |net| across all
-	/// hours; green = call-dominated, red = put-dominated. When the minute-quote store (data/quotes, written by the
-	/// wa-scraper / ThetaData sync) covers this day, each bucket's IVs are back-solved from THAT minute's NBBO mids
-	/// instead of the morning snapshot's frozen values — the snapshot IVs age badly through a 0DTE session (IV
-	/// collapses intraday, sharpening gamma toward ATM), which is why a frozen-IV replay disagrees with what the
-	/// live command showed. A data/gex live log (when present) is rendered as a "Gravity" footer row for comparison.</summary>
+	/// <summary>Renders the intraday GEX gravity-migration heatmap for ONE expiry: rows = strikes (descending),
+	/// columns = RTH hour marks. At each hour the per-strike GEX is recomputed at that hour's intraday spot against the
+	/// day's fixed OI, so the gravity strike (bold-underlined) is seen migrating as price moves. Brightness ∝ |net|
+	/// across all hours; green = call-dominated, red = put-dominated. <paramref name="expiry"/> is usually
+	/// <paramref name="date"/>'s own 0DTE, but any later listed expiry works — on a root with no daily expirations
+	/// (SPCX and friends list Fridays only) that is the sole way to get this panel at all, and it reads as "where was
+	/// the 8/7 book's magnet sitting as Thursday traded". When the minute-quote store (data/quotes, written by the
+	/// wa-scraper / ThetaData sync) covers this expiry on this day, each bucket's IVs are back-solved from THAT
+	/// minute's NBBO mids instead of the morning snapshot's frozen values — the snapshot IVs age badly through a 0DTE
+	/// session (IV collapses intraday, sharpening gamma toward ATM), which is why a frozen-IV replay disagrees with
+	/// what the live command showed. A data/gex live log (when present) is rendered as a "Gravity" footer row.</summary>
 	private static TimeSpan AbsSpan(TimeSpan t) => t < TimeSpan.Zero ? -t : t;
 
-	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int? intervalMin, bool exante, string source, bool liveChain = false, bool withVexNow = false, TimeSpan? vexAt = null)
+	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, DateTime targetExpiry, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int? intervalMin, bool exante, string source, bool liveChain = false, bool withVexNow = false, TimeSpan? vexAt = null, TimeSpan? windowStart = null, TimeSpan? windowEnd = null)
 	{
-		var expiry = date.Date;
+		var expiry = targetExpiry.Date;
+		var dte = Math.Max(0, (expiry - date.Date).Days);
 		var intradaySpots = LoadIntradaySpots(ticker, date);
 		if (intradaySpots.Count == 0)
 		{
@@ -977,25 +1160,27 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// one under --greek gamma), using the same fixed cell geometry as the rendering below. Strike labels track
 		// the spot magnitude, so a tape sample prices the column widths before any matrix is built.
 		var panels = withVexNow ? 2 : 1;
+		var open = windowStart ?? AnalyzeGexSettings.RthOpen;
+		var close = windowEnd ?? AnalyzeGexSettings.RthClose;
 		var sampleSpot = intradaySpots.Values.First();
 		var estStrikeW = sampleSpot < 100m ? $"${sampleSpot:N2}".Length : StrikeLabel(Math.Round(sampleSpot), wholeGrid: true).Length;
 		var estColW = 3 + Math.Max(7, $"{sampleSpot:F2}".Length);
 		var fixedW = panels * (1 + estStrikeW + 3) + (panels - 1) * 2;
-		int BucketsFor(int min) { var n = 0; for (var t = new TimeSpan(9, 30, 0); t < new TimeSpan(16, 0, 0); t += TimeSpan.FromMinutes(min)) n++; return n + 1; }
-		var interval = intervalMin ?? new[] { 30, 45, 60, 90, 120 }.FirstOrDefault(c => fixedW + panels * BucketsFor(c) * estColW <= AnsiConsole.Profile.Width, 120);
-		var minuteQuotes = exante ? new SortedDictionary<TimeSpan, Dictionary<string, OptionContractQuote>>() : LoadMinuteQuoteSets(ticker, date, quotes);
+		int BucketsFor(int min) { var n = 0; for (var t = open; t < close; t += TimeSpan.FromMinutes(min)) n++; return n + 1; }
+		// Candidates run down to single minutes: over a --start/--end slice the fine sizes fit, and pinning the
+		// exact minute a gravity flips is the reason to narrow the window in the first place.
+		var interval = intervalMin ?? new[] { 1, 2, 5, 10, 15, 20, 30, 45, 60, 90, 120 }.FirstOrDefault(c => fixedW + panels * BucketsFor(c) * estColW <= AnsiConsole.Profile.Width, 120);
+		var minuteQuotes = exante ? null : IntradayQuoteSlice.Open(ticker, date, expiry, quotes);
 
-		// Column marks: 09:30 stepping by --interval to 16:00 (always include the 16:00 close).
-		var open = new TimeSpan(9, 30, 0);
-		var close = new TimeSpan(16, 0, 0);
+		// Column marks: --start stepping by --interval to --end (the end mark is always included).
 		var hourMarks = new List<TimeSpan>();
 		for (var t = open; t < close; t += TimeSpan.FromMinutes(interval)) hourMarks.Add(t);
 		hourMarks.Add(close);
 		// Match the nearest intraday minute within half a bucket so adjacent columns never share a spot.
 		var tolerance = TimeSpan.FromMinutes(Math.Max(1, interval / 2));
 
-		// Per kept hour: the spot, the per-strike GexCells for the 0DTE, and that hour's gravity strike.
-		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity)>();
+		// Per kept hour: the spot, the per-strike GexCells for the mapped expiry, and that hour's gravity strike.
+		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity, decimal? Centroid, decimal? Pull)>();
 		var skipped = new List<TimeSpan>();
 		// Per-bucket VEX cells (same time-matched quotes as the gamma bucket) — the vanna MIGRATION panel
 		// rendered beside the gamma one; --time narrows the panel to the single bucket nearest that ET time.
@@ -1012,29 +1197,29 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			if (!spot.HasValue || spot.Value <= 0m) { skipped.Add(mark); continue; }
 
 			var bucketQuotes = quotes;
-			if (minuteQuotes.Count > 0)
+			if (minuteQuotes != null)
 			{
-				Dictionary<string, OptionContractQuote>? nearest = null;
-				var bestQuoteDiff = tolerance;
-				foreach (var kv in minuteQuotes)
-				{
-					var diff = kv.Key >= mark ? kv.Key - mark : mark - kv.Key;
-					if (diff <= bestQuoteDiff) { bestQuoteDiff = diff; nearest = kv.Value; }
-				}
-				if (nearest == null) { skipped.Add(mark); continue; }   // store covers the day but not this bucket — a frozen-IV cell among time-matched ones would mislead
-				bucketQuotes = nearest;
+				// Strictly at-or-before the mark, within the store's staleness window — never a later print. The
+				// whole point of this panel is what was visible AT the bucket, so a forward reach would be a leak.
+				var atMark = minuteQuotes.At(date.Date + mark);
+				if (atMark.Count == 0) { skipped.Add(mark); continue; }   // store covers the day but not this bucket — a frozen-IV cell among time-matched ones would mislead
+				bucketQuotes = atMark;
 			}
 
-			var m = GexMatrix.Build(bucketQuotes, ticker, spot.Value, expiry + mark, expiryFilter: expiry, strikeRangeFraction, maxDteDays: 0, maxStrikes);
+			// asOf is the OBSERVATION instant (the bucket on --date), not the expiry — that is what gives Build the
+			// right time-to-expiry once the mapped expiry is allowed to sit days ahead of the session being replayed.
+			var m = GexMatrix.Build(bucketQuotes, ticker, spot.Value, date.Date + mark, expiryFilter: expiry, strikeRangeFraction, maxDteDays: dte, maxStrikes);
 			var cells = new Dictionary<decimal, GexCell>();
 			foreach (var strike in m.Strikes)
 				if (m.Cells.TryGetValue((expiry, strike), out var c)) cells[strike] = c;
 			if (cells.Count == 0) continue;
 			m.GravityByExpiry.TryGetValue(expiry, out var grav);
-			hours.Add((mark, spot.Value, cells, grav));
+			m.GrossCentroidByExpiry.TryGetValue(expiry, out var cent);
+			m.NetPullByExpiry.TryGetValue(expiry, out var pull);
+			hours.Add((mark, spot.Value, cells, grav, cent, pull));
 			if (withVexNow)
 			{
-				var vmB = GexMatrix.Build(bucketQuotes, ticker, spot.Value, expiry + mark, expiryFilter: expiry, strikeRangeFraction, maxDteDays: 0, maxStrikes, GreekKind.Vanna);
+				var vmB = GexMatrix.Build(bucketQuotes, ticker, spot.Value, date.Date + mark, expiryFilter: expiry, strikeRangeFraction, maxDteDays: dte, maxStrikes, GreekKind.Vanna);
 				var vCells = new Dictionary<decimal, GexCell>();
 				foreach (var strike in vmB.Strikes)
 					if (vmB.Cells.TryGetValue((expiry, strike), out var vc)) vCells[strike] = vc;
@@ -1044,7 +1229,18 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		if (hours.Count == 0)
 		{
-			AnsiConsole.MarkupLine($"[yellow]No 0DTE GEX cells at any hour for {ticker} {date:yyyy-MM-dd} (±{strikeRangeFraction * 100m:F0}% window).[/]");
+			// Two very different causes, and the ±window one is the rarer: far more often the requested expiry simply
+			// is not listed on this date (a Thursday --date on a Friday-only root), so name the expiries that ARE.
+			var listed = quotes.Keys
+				.Select(ParsingHelpers.ParseOptionSymbol)
+				.Where(p => p != null && string.Equals(p!.Root, ticker, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date >= date.Date)
+				.Select(p => p!.ExpiryDate.Date).Distinct().OrderBy(d => d).ToList();
+			if (!listed.Contains(expiry))
+				AnsiConsole.MarkupLine(listed.Count > 0
+					? $"[yellow]{ticker} lists no {expiry:yyyy-MM-dd} expiry on {date:yyyy-MM-dd} — this root has no daily expirations. Nearest listed: {string.Join(", ", listed.Take(4).Select(d => d.ToString("yyyy-MM-dd")))}. Re-run with --expiry {listed[0]:yyyy-MM-dd}.[/]"
+					: $"[yellow]{ticker} has no expiry at or after {date:yyyy-MM-dd} in the {date:yyyy-MM-dd} chain.[/]");
+			else
+				AnsiConsole.MarkupLine($"[yellow]No {expiry:yyyy-MM-dd} GEX cells at any hour for {ticker} on {date:yyyy-MM-dd} — the expiry is listed but no strike carries OI within ±{strikeRangeFraction * 100m:F0}% of spot. Widen with --strike-range.[/]");
 			return;
 		}
 
@@ -1052,37 +1248,45 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var allStrikes = hours.SelectMany(h => h.Cells.Keys).Distinct().OrderByDescending(s => s).ToList();
 		var wholeGrid = IsWholeGrid(allStrikes);
 
-		AnsiConsole.MarkupLine($"[bold]{ticker}[/] 0DTE {date:yyyy-MM-dd} — intraday GEX gravity migration");
-		AnsiConsole.MarkupLine(minuteQuotes.Count > 0
-			? $"[dim]IVs: back-solved per bucket from minute NBBO mids (data/quotes/{ticker}/{date:yyyy-MM-dd}.csv); OI fixed from the day's snapshot.[/]"
-			: exante ? "[dim]IVs: frozen from the prior-day --exante values (no minute-quote coverage for this day).[/]"
+		AnsiConsole.MarkupLine(dte == 0
+			? $"[bold]{ticker}[/] 0DTE {date:yyyy-MM-dd} — intraday GEX gravity migration"
+			: $"[bold]{ticker}[/] {expiry:yyyy-MM-dd} expiry ({dte}DTE) as it traded on {date:yyyy-MM-dd} — intraday GEX gravity migration");
+		AnsiConsole.MarkupLine(minuteQuotes != null
+			? $"[dim]IVs: back-solved per bucket from REAL minute NBBO at or before each mark (data/quotes.db, {ticker} {expiry:yyyy-MM-dd} expiry on {date:yyyy-MM-dd}); OI fixed from the day's snapshot.[/]"
+			: exante ? "[dim]IVs: frozen from the prior-day --exante values.[/]"
 			: liveChain ? "[dim]IVs: frozen from the live chain at fetch time; OI fixed from the same fetch (running day — early columns replay today's OI at each bucket's spot with current IVs).[/]"
-			: "[dim]IVs: frozen from the day's OI-snapshot values (no minute-quote coverage for this day in data/quotes).[/]");
+			: $"[yellow]IVs: back-solved from the day's OI-snapshot mids — that snapshot is stamped at the CLOSE, so every column is priced off the session's OUTCOME and the early ones are not what was visible then. data/quotes.db has no {ticker} {expiry:yyyy-MM-dd} rows for {date:yyyy-MM-dd}; backfill it, or use --exante for prior-day IVs.[/]");
 
-		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title("[bold]GEX (gamma)[/]");
-		table.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
+		var table = BuildColumnHeatmapTable("[bold]GEX (gamma)[/]", hours.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, h.Gravity)).ToList(), allStrikes, wholeGrid, maxAbsNet);
+
+		// Computed-gravity footer row. The gravity cell is bold+underlined in the matrix, but styling is dropped
+		// whenever output is not an interactive terminal (piped, captured, pasted into notes) — which is exactly
+		// when someone is reading the migration carefully. Spell the strike out.
+		var gravityCells = new List<string> { "[bold]Gravity[/]" };
 		foreach (var h in hours)
-			table.AddColumn(new TableColumn($"[bold]{h.Mark:hh\\:mm}[/]\n[dim]{h.Spot:F2}[/]").Centered().NoWrap());
+			gravityCells.Add(h.Gravity.HasValue ? $"[bold]${h.Gravity.Value:N0}[/]" : "[dim]·[/]");
+		table.AddRow(gravityCells.ToArray());
 
-		foreach (var strike in allStrikes)
+		// Whole-ladder rows. Gravity is one strike chosen by argmax; these two read the WHOLE book, which is the
+		// question a "sea of red below, sea of green above" eyeball is really asking. Centroid is where the gross
+		// gamma mass sits; Pull is how far the NET exposure leans from spot, signed.
+		var centroidCells = new List<string> { "[bold]Centroid[/]" };
+		var pullCells = new List<string> { "[bold]Pull[/]" };
+		foreach (var h in hours)
 		{
-			var cells = new List<string> { StrikeLabel(strike, wholeGrid) };
-			foreach (var h in hours)
-			{
-				h.Cells.TryGetValue(strike, out var cell);
-				var isGravity = h.Gravity.HasValue && h.Gravity.Value == strike;
-				cells.Add(BuildHeatmapCellMarkup(cell, maxAbsNet, isGravity));
-			}
-			table.AddRow(cells.ToArray());
+			centroidCells.Add(h.Centroid.HasValue ? $"[bold]${h.Centroid.Value:N0}[/]" : "[dim]·[/]");
+			pullCells.Add(h.Pull.HasValue ? $"[bold {(h.Pull.Value >= 0m ? "green" : "red")}]{(h.Pull.Value >= 0m ? "+" : "−")}{Math.Abs(h.Pull.Value):N1}[/]" : "[dim]·[/]");
 		}
+		table.AddRow(centroidCells.ToArray());
+		table.AddRow(pullCells.ToArray());
 
-		// "Gravity" footer row: per bucket, the gravity the live `analyze gex` runs actually displayed (data/gex log)
-		// nearest the mark. The live values come from vendor-reported IVs that are never persisted, so this row is
-		// the only ground truth a replay can be compared against.
-		var liveGravity = LoadLiveGravityLog(ticker, date, source);
+		// "Gravity·live" footer row: per bucket, the gravity the live `analyze gex` runs actually displayed (data/gex
+		// log) nearest the mark. The live values come from vendor-reported IVs that are never persisted, so this row
+		// is the only ground truth a replay can be compared against.
+		var liveGravity = LoadLiveGravityLog(ticker, date, expiry, source);
 		if (liveGravity.Count > 0)
 		{
-			var liveCells = new List<string> { "[bold cyan]Gravity[/]" };
+			var liveCells = new List<string> { "[bold cyan]Gravity·live[/]" };
 			foreach (var h in hours)
 			{
 				decimal? g = null;
@@ -1106,20 +1310,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		{
 			var shownVanna = vexAt == null ? vannaHours : new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells)> { vannaHours.OrderBy(v => AbsSpan(v.Mark - vexAt.Value)).First() };
 			var vMax = Math.Max(1m, shownVanna.SelectMany(h => h.Cells.Values).Select(c => Math.Abs(c.Net)).DefaultIfEmpty(0m).Max());
-			var vex = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title("[bold]VEX (vanna)[/]");
-			vex.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
-			foreach (var h in shownVanna)
-				vex.AddColumn(new TableColumn($"[bold]{h.Mark:hh\\:mm}[/]\n[dim]{h.Spot:F2}[/]").Centered().NoWrap());
-			foreach (var strike in allStrikes)
-			{
-				var vCells = new List<string> { StrikeLabel(strike, wholeGrid) };
-				foreach (var h in shownVanna)
-				{
-					h.Cells.TryGetValue(strike, out var cell);
-					vCells.Add(BuildHeatmapCellMarkup(cell, vMax, isGravity: false));
-				}
-				vex.AddRow(vCells.ToArray());
-			}
+			var vex = BuildColumnHeatmapTable("[bold]VEX (vanna)[/]", shownVanna.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, Gravity: null)).ToList(), allStrikes, wholeGrid, vMax);
 			AnsiConsole.Write(new Columns(table, vex) { Expand = false });
 
 			// Same fixed cell geometry as the side-by-side expiry heatmaps: content max(7, spot label) + 2 padding
@@ -1136,68 +1327,93 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 		else
 			AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma)." + (liveGravity.Count > 0 ? " [cyan]Gravity[/] row = the gravity strike logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
+		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); [bold]Pull[/] = net-GEX-weighted distance from spot in points, [green]+[/] = the ladder's net exposure sits ABOVE spot, [red]−[/] = below. Both aggregate every in-range strike, not just the displayed rows." + (liveGravity.Count > 0 ? " [cyan]Gravity·live[/] row = the gravity strike logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
 		if (withVexNow && vannaHours.Count > 0)
-			AnsiConsole.MarkupLine($"[dim]VEX panel = 0DTE net vanna ($ dealer delta per vol point) recomputed at each bucket's spot, same quotes as the gamma columns{(vexAt != null ? $" (narrowed to the bucket nearest --time {vexAt:hh\\:mm})" : "")}. No gravity marker — vanna maps a hedging flow under an IV move, not a level. Full multi-expiry VEX: `analyze gex {Markup.Escape(ticker)}` without --intraday.[/]");
+			AnsiConsole.MarkupLine($"[dim]VEX panel = the mapped expiry's net vanna ($ dealer delta per vol point) recomputed at each bucket's spot, same quotes as the gamma columns{(vexAt != null ? $" (narrowed to the bucket nearest --time {vexAt:hh\\:mm})" : "")}. No gravity marker — vanna maps a hedging flow under an IV move, not a level. Full multi-expiry VEX: `analyze gex {Markup.Escape(ticker)}` without --intraday.[/]");
 		if (skipped.Count > 0 && liveChain)
 			AnsiConsole.MarkupLine($"[dim]{skipped.Count} bucket(s) still ahead ({string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))}) — the session tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET; re-run to extend the columns as the day unfolds.[/]");
 		else if (skipped.Count > 0)
 			AnsiConsole.MarkupLine($"[yellow]Dropped {skipped.Count} bucket(s) with no spot/quote within {tolerance.TotalMinutes:F0} min: {string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))} — the spot tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET{(date.Date == DateTime.Today ? $". Refresh today's tape with `wa ai history {ticker} --partial`" : "")}.[/]");
 	}
 
-	/// <summary>Reads the day's minute NBBO from <c>data/quotes/<TICKER>/<date>.csv</c> (the per-expiry store the
-	/// wa-scraper and the ThetaData evening sync both write) into one quote-set per RTH minute: every 0DTE contract that
-	/// had a two-sided book that minute, carrying the snapshot's OI but THAT minute's bid/ask with the IV nulled — so
-	/// <see cref="GexMatrix.Build"/> back-solves each bucket's IVs from the time-matched mids instead of reusing the
-	/// morning snapshot's frozen values. Store rows are end-of-bar labeled (row T = the book at instant T+1, the
-	/// convention validated 2026-06-11), so labels are shifted +1 minute here to mean wall-clock instants. One-sided or
-	/// empty books (bid/ask 0.0) are skipped; contracts absent from the snapshot have no OI and are skipped too.</summary>
-	private static SortedDictionary<TimeSpan, Dictionary<string, OptionContractQuote>> LoadMinuteQuoteSets(string ticker, DateTime date, Dictionary<string, OptionContractQuote> snapshot)
+	/// <summary>Time-matched real NBBO for one expiry's contracts, out of the canonical ThetaData minute store
+	/// <c>data/quotes.db</c> — the same source the backtest prices off, read through the same
+	/// <see cref="QuoteStoreCache"/> so the price scaling, the row-label convention and the staleness policy have
+	/// exactly one implementation. (The old per-ticker <c>data/quotes/*.csv</c> files this used to read were retired
+	/// by the quotes-only pivot; reading them meant silently falling back to close-stamped snapshot IVs on every
+	/// historical replay.)
+	///
+	/// <para>Each bucket gets the latest two-sided book at or BEFORE its mark, never a later one: the panel's whole
+	/// claim is what a strike looked like at that moment, so reaching forward would leak the outcome that the
+	/// snapshot-IV fallback already leaks. Contracts keep the snapshot's OI (constant intraday, published pre-open)
+	/// but carry that minute's bid/ask with the IV nulled, so <see cref="GexMatrix.Build"/> back-solves each bucket's
+	/// IVs from time-matched mids.</para></summary>
+	private sealed class IntradayQuoteSlice
 	{
-		var result = new SortedDictionary<TimeSpan, Dictionary<string, OptionContractQuote>>();
-		var path = Program.ResolvePath($"data/quotes/{ticker}/{date:yyyy-MM-dd}.csv");
-		if (!File.Exists(path)) return result;
+		// Matches the store's own default: minute NBBO is dense for near-money contracts, so a short window keeps
+		// "this is what it looked like then" honest rather than papering a gap with a five-bucket-old print.
+		private const int MaxStaleMinutes = 5;
 
-		var bySide = new Dictionary<(decimal Strike, string Right), OptionContractQuote>();
-		foreach (var (sym, q) in snapshot)
-		{
-			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p == null || p.ExpiryDate.Date != date.Date || string.IsNullOrEmpty(p.CallPut)) continue;
-			bySide[(p.Strike, p.CallPut)] = q;
-		}
-		if (bySide.Count == 0) return result;
+		private readonly QuoteStoreCache _cache;
+		private readonly List<OptionContractQuote> _contracts;
 
-		var dateStr = date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-		var first = true;
-		foreach (var line in File.ReadLines(path))
+		private IntradayQuoteSlice(QuoteStoreCache cache, List<OptionContractQuote> contracts)
 		{
-			if (first) { first = false; continue; } // header: date,time,strike,right,bid,ask,bid_size,ask_size
-			if (!line.StartsWith(dateStr, StringComparison.Ordinal)) continue;
-			var parts = line.Split(',');
-			if (parts.Length < 6) continue;
-			if (!TimeSpan.TryParse(parts[1], CultureInfo.InvariantCulture, out var tod)) continue;
-			if (!decimal.TryParse(parts[2], NumberStyles.Any, CultureInfo.InvariantCulture, out var strike)) continue;
-			if (!decimal.TryParse(parts[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var bid) || !decimal.TryParse(parts[5], NumberStyles.Any, CultureInfo.InvariantCulture, out var ask)) continue;
-			if (bid <= 0m || ask <= 0m) continue;
-			if (!bySide.TryGetValue((strike, parts[3]), out var snap)) continue;
-			var instant = tod + TimeSpan.FromMinutes(1);
-			if (!result.TryGetValue(instant, out var set)) { set = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase); result[instant] = set; }
-			set[snap.ContractSymbol] = snap with { Bid = bid, Ask = ask, ImpliedVolatility = null };
+			_cache = cache;
+			_contracts = contracts;
 		}
-		return result;
+
+		/// <summary>Null when the store cannot serve this (ticker, expiry, date) — no DB, no snapshot contracts for
+		/// the expiry, or no captured rows for the session. The caller then says so instead of quietly pricing off
+		/// the close.</summary>
+		public static IntradayQuoteSlice? Open(string ticker, DateTime date, DateTime expiry, IReadOnlyDictionary<string, OptionContractQuote> snapshot)
+		{
+			var dbPath = Program.ResolvePath("data/quotes.db");
+			if (!File.Exists(dbPath)) return null;
+
+			var contracts = new List<OptionContractQuote>();
+			foreach (var (sym, q) in snapshot)
+			{
+				var p = ParsingHelpers.ParseOptionSymbol(sym);
+				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || p.ExpiryDate.Date != expiry.Date || string.IsNullOrEmpty(p.CallPut)) continue;
+				if (!q.OpenInterest.HasValue || q.OpenInterest.Value <= 0) continue;   // no OI = no exposure to plot
+				contracts.Add(q);
+			}
+			if (contracts.Count == 0) return null;
+
+			// since/until pin the load to this one session, so an expiry slice carrying weeks of longer-dated rows
+			// parses only the day being replayed.
+			var cache = new QuoteStoreCache(dbPath, MaxStaleMinutes, since: date.Date, until: date.Date, sameDayExpiryOnly: expiry.Date == date.Date);
+			return cache.HasAnyQuoteInWindow(ticker, date.Date, date.Date) ? new IntradayQuoteSlice(cache, contracts) : null;
+		}
+
+		/// <summary>The mapped expiry's contracts as of <paramref name="instantEt"/>, carrying real two-sided books
+		/// only. Empty when the store has nothing within the staleness window — the caller drops that bucket rather
+		/// than mixing a frozen-IV column in among time-matched ones.</summary>
+		public Dictionary<string, OptionContractQuote> At(DateTime instantEt)
+		{
+			var set = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+			foreach (var c in _contracts)
+			{
+				if (_cache.NbboAt(c.ContractSymbol, instantEt) is not { } nbbo || nbbo.Bid <= 0m || nbbo.Ask <= 0m) continue;
+				set[c.ContractSymbol] = c with { Bid = nbbo.Bid, Ask = nbbo.Ask, ImpliedVolatility = null };
+			}
+			return set;
+		}
 	}
 
 	/// <summary>Reads the live `analyze gex` log at <c>data/gex/<TICKER>/<date>.jsonl</c> and returns
-	/// ET time-of-day → the gravity strike that run displayed for the <paramref name="date"/> (0DTE) expiry.
+	/// ET time-of-day → the gravity strike that run displayed for the <paramref name="expiry"/> series. The log file is
+	/// per SESSION and each record carries every expiry it rendered, so an off-expiry map still finds its own row.
 	/// Only records from <paramref name="source"/> are kept (records without a source field predate the
 	/// --source option and count as webull). Corrupt lines are skipped — a torn concurrent append must not
 	/// take down the heatmap.</summary>
-	private static SortedDictionary<TimeSpan, decimal> LoadLiveGravityLog(string ticker, DateTime date, string source)
+	private static SortedDictionary<TimeSpan, decimal> LoadLiveGravityLog(string ticker, DateTime date, DateTime expiry, string source)
 	{
 		var result = new SortedDictionary<TimeSpan, decimal>();
 		var path = Program.ResolvePath($"data/gex/{ticker}/{date:yyyy-MM-dd}.jsonl");
 		if (!File.Exists(path)) return result;
-		var expiryStr = date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+		var expiryStr = expiry.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 		foreach (var line in File.ReadLines(path))
 		{
 			if (string.IsNullOrWhiteSpace(line)) continue;
@@ -1352,9 +1568,17 @@ internal sealed class GexMatrix
 	public decimal TotalCallGex { get; }
 	public decimal TotalPutGex { get; }
 	public Dictionary<DateTime, decimal?> GravityByExpiry { get; }
+	/// <summary>Gross-gamma-weighted mean strike per expiry — the smooth analogue of <see cref="GravityByExpiry"/>.
+	/// Gravity is an argmax, so when the top strikes are near-tied it rattles between them minute to minute and a
+	/// coarse sampling grid turns that flicker into a false signal. The centroid moves continuously instead.</summary>
+	public Dictionary<DateTime, decimal?> GrossCentroidByExpiry { get; }
+	/// <summary>Net-GEX-weighted signed distance from spot per expiry, in strike points:
+	/// Σ(net_k × (K − S)) / Σ|net_k|. Positive = the net exposure sits ABOVE spot (a ladder that is green up top),
+	/// negative = below (red underneath). This is the whole-ladder reading rather than any single strike.</summary>
+	public Dictionary<DateTime, decimal?> NetPullByExpiry { get; }
 	public IReadOnlyList<GexContributor> Contributors { get; }
 
-	private GexMatrix(List<DateTime> expiries, List<decimal> strikes, Dictionary<(DateTime, decimal), GexCell> cells, decimal maxGross, decimal maxAbsNet, decimal totalCallGex, decimal totalPutGex, Dictionary<DateTime, decimal?> gravityByExpiry, IReadOnlyList<GexContributor> contributors)
+	private GexMatrix(List<DateTime> expiries, List<decimal> strikes, Dictionary<(DateTime, decimal), GexCell> cells, decimal maxGross, decimal maxAbsNet, decimal totalCallGex, decimal totalPutGex, Dictionary<DateTime, decimal?> gravityByExpiry, Dictionary<DateTime, decimal?> grossCentroidByExpiry, Dictionary<DateTime, decimal?> netPullByExpiry, IReadOnlyList<GexContributor> contributors)
 	{
 		Expiries = expiries;
 		Strikes = strikes;
@@ -1364,6 +1588,8 @@ internal sealed class GexMatrix
 		TotalCallGex = totalCallGex;
 		TotalPutGex = totalPutGex;
 		GravityByExpiry = gravityByExpiry;
+		GrossCentroidByExpiry = grossCentroidByExpiry;
+		NetPullByExpiry = netPullByExpiry;
 		Contributors = contributors;
 	}
 
@@ -1634,6 +1860,27 @@ internal sealed class GexMatrix
 				gravity[exp] = null;
 		}
 
+		// Whole-ladder aggregates, computed over every in-range strike rather than the --max-strikes DISPLAY set:
+		// a centroid or a pull that shifted when the row cap trimmed a tail would be reporting the cap, not the book.
+		// Same principle the contributors below follow.
+		var centroid = new Dictionary<DateTime, decimal?>();
+		var netPull = new Dictionary<DateTime, decimal?>();
+		foreach (var exp in expiries)
+		{
+			decimal grossSum = 0m, grossMoment = 0m, absNetSum = 0m, netMoment = 0m;
+			foreach (var ((e, strike), v) in raw)
+			{
+				if (e != exp) continue;
+				var cell = new GexCell(v.CallGex, v.PutGex);
+				grossSum += cell.Gross;
+				grossMoment += cell.Gross * strike;
+				absNetSum += Math.Abs(cell.Net);
+				netMoment += cell.Net * (strike - spot);
+			}
+			centroid[exp] = grossSum > 0m ? grossMoment / grossSum : null;
+			netPull[exp] = absNetSum > 0m ? netMoment / absNetSum : null;
+		}
+
 		// Analytics use the full strike-range × kept-expiries set, NOT the --max-strikes display cap —
 		// per-expiry max pain and gamma flip would be skewed by an arbitrary display-row limit.
 		var contributors = rawContribs
@@ -1641,6 +1888,6 @@ internal sealed class GexMatrix
 			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall))
 			.ToList();
 
-		return new GexMatrix(expiries, strikes, cells, maxGross, maxAbsNet, totalCall, totalPut, gravity, contributors);
+		return new GexMatrix(expiries, strikes, cells, maxGross, maxAbsNet, totalCall, totalPut, gravity, centroid, netPull, contributors);
 	}
 }
