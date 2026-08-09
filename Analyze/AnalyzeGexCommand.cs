@@ -241,6 +241,10 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return 1;
 		}
 
+		// Unusual opening activity: strikes trading a multiple of their standing OI — arithmetically
+		// guaranteed opening flow, no print signing needed. Rendered in both the normal and --intraday views.
+		RenderUnusualActivity(ticker, quotes, asOf, isOfflineHistorical);
+
 		// --intraday: 0DTE strikes × RTH-hours gravity-migration heatmap. Offline-historical only (needs an explicit
 		// --date with both a data/oi snapshot and a data/intraday spot file). Replaces the normal tables.
 		if (settings.Intraday)
@@ -487,6 +491,79 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				return p;
 		}
 		return null;
+	}
+
+	/// <summary>Unsigned opening-activity screen (the free tier of the flow idea, campaign gex_layers):
+	/// a contract whose day volume is a multiple of its standing OI is GUARANTEED to contain opening trades
+	/// — total position count can't turn over more than the open interest without someone opening. No print
+	/// signing needed; direction stays unknown ("who" and "which way" need signed prints). 0DTE contracts
+	/// are excluded (day-trading churn makes volume≫OI the norm there, not a signal). For an offline --date,
+	/// the NEXT session's snapshot (when captured) supplies the ΔOI confirmation — the CELH-style overnight
+	/// jump, visible the day it was being built. Thresholds fixed on purpose: vol ≥ 2× max(OI,1) and
+	/// vol ≥ 250 (the OI floor keeps fresh listings from flooding the list), top 12 by volume.</summary>
+	private static void RenderUnusualActivity(string ticker, Dictionary<string, OptionContractQuote> quotes, DateTime asOf, bool isOfflineHistorical)
+	{
+		const decimal MinRatio = 2m;
+		const long MinVolume = 250;
+		var hits = new List<(string Sym, OptionParsed P, long Vol, long Oi, decimal Ratio)>();
+		foreach (var (sym, q) in quotes)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (p.ExpiryDate.Date <= asOf.Date) continue;   // 0DTE churn is not opening-activity signal
+			if (q.Volume is not { } vol || vol < MinVolume) continue;
+			var oi = Math.Max(q.OpenInterest ?? 0, 1);
+			var ratio = (decimal)vol / oi;
+			if (ratio < MinRatio) continue;
+			hits.Add((sym, p, vol, q.OpenInterest ?? 0, ratio));
+		}
+		if (hits.Count == 0) return;
+
+		// ΔOI confirmation from the next captured session's snapshot (offline replays only — live/today
+		// confirms in tomorrow's file).
+		Dictionary<string, OptionContractQuote>? next = null;
+		string? nextDate = null;
+		if (isOfflineHistorical)
+		{
+			for (var d = asOf.Date.AddDays(1); d <= asOf.Date.AddDays(5); d = d.AddDays(1))
+			{
+				var path = Program.ResolvePath($"data/oi/{ticker}/{d:yyyy-MM-dd}.jsonl");
+				if (!File.Exists(path)) continue;
+				(_, next) = LoadOiSnapshot(path);
+				nextDate = d.ToString("yyyy-MM-dd");
+				break;
+			}
+		}
+
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title("[bold]Unusual opening activity (volume ≥ 2× OI)[/]");
+		table.AddColumn(new TableColumn("[bold]Contract[/]").NoWrap());
+		table.AddColumn(new TableColumn("[bold]Volume[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]OI[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Vol/OI[/]").RightAligned().NoWrap());
+		if (next != null) table.AddColumn(new TableColumn($"[bold]ΔOI → {nextDate}[/]").RightAligned().NoWrap());
+
+		foreach (var h in hits.OrderByDescending(h => h.Vol).Take(12))
+		{
+			var cells = new List<string>
+			{
+				$"{h.P.ExpiryDate:M/d} {StrikeLabel(h.P.Strike, wholeGrid: h.P.Strike == Math.Truncate(h.P.Strike))}{h.P.CallPut}",
+				h.Vol.ToString("N0"),
+				h.Oi.ToString("N0"),
+				$"[bold]{h.Ratio:F1}×[/]"
+			};
+			if (next != null)
+			{
+				long? nextOi = next.TryGetValue(h.Sym, out var nq) ? nq.OpenInterest : null;
+				var delta = nextOi.HasValue ? nextOi.Value - h.Oi : (long?)null;
+				cells.Add(delta.HasValue
+					? delta.Value > 0 ? $"[green]+{delta.Value:N0}[/]" : delta.Value < 0 ? $"[red]{delta.Value:N0}[/]" : "[dim]0[/]"
+					: "[dim]n/a[/]");
+			}
+			table.AddRow(cells.ToArray());
+		}
+		AnsiConsole.Write(table);
+		AnsiConsole.MarkupLine("[dim]Volume ≥ 2× standing OI guarantees opening trades (positions can't turn over past the open interest without new ones) — DIRECTION unknown without signed prints. 0DTE excluded (churn, not positioning). " + (next != null ? "ΔOI = next captured session's OI change: the overnight jump this activity was building." : "Confirm in tomorrow's snapshot (ΔOI).") + "[/]");
+		AnsiConsole.WriteLine();
 	}
 
 	private static void RenderHeader(string ticker, decimal spot, DateTime asOf, DateTime? expiryFilter, GexMatrix matrix)
