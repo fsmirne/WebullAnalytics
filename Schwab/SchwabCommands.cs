@@ -68,24 +68,30 @@ internal sealed class SchwabLoginCommand : AsyncCommand<SchwabLoginSettings>
 		{
 			// Port already in use, no permission to bind, or a TLS setup problem — the paste fallback still works.
 			AnsiConsole.MarkupLine($"[yellow]Automatic capture unavailable ({Markup.Escape(ex.Message)}).[/]");
+			var port = new Uri(schwab.RedirectUri).Port;
+			if (ex is SocketException { SocketErrorCode: SocketError.AccessDenied } && !OperatingSystem.IsWindows() && port < 1024)
+				AnsiConsole.MarkupLine($"[yellow]Binding port {port} needs root on this OS. For automatic capture, add a port to your app's callback URL at developer.schwab.com (e.g. https://127.0.0.1:8443) and set redirectUri in api-config.json to match.[/]");
 		}
 
 		if (code == null)
 		{
-			AnsiConsole.MarkupLine("[dim]Falling back to manual entry.[/] Copy the [bold]entire URL[/] from the address bar and paste it here:");
-			Console.Write("> ");
-			var pasted = Console.ReadLine();
-			if (string.IsNullOrWhiteSpace(pasted))
+			AnsiConsole.MarkupLine("[dim]Falling back to manual entry.[/] After you authorize, the browser will fail to load the 127.0.0.1 page — that's expected.");
+			AnsiConsole.MarkupLine("Copy the [bold]entire URL[/] from the address bar (it contains ?code=...) and paste it here:");
+			// A rejected paste re-prompts instead of exiting — restarting the whole login costs the user minutes.
+			for (var attempt = 0; code == null && attempt < 3; attempt++)
 			{
-				AnsiConsole.MarkupLine("[red]No URL entered.[/]");
-				return 1;
+				Console.Write("> ");
+				var pasted = Console.ReadLine();
+				if (string.IsNullOrWhiteSpace(pasted))
+				{
+					AnsiConsole.MarkupLine("[red]No URL entered.[/]");
+					return 1;
+				}
+				code = SchwabAuthClient.ExtractCode(pasted);
+				if (code == null)
+					AnsiConsole.MarkupLine("[red]Could not find a 'code' parameter in that URL.[/] Paste the full redirect URL including '?code=...'.");
 			}
-			code = SchwabAuthClient.ExtractCode(pasted);
-			if (code == null)
-			{
-				AnsiConsole.MarkupLine("[red]Could not find a 'code' parameter in that URL.[/] Paste the full redirect URL including '?code=...'.");
-				return 1;
-			}
+			if (code == null) return 1;
 		}
 
 		try
@@ -110,7 +116,9 @@ internal sealed class SchwabLoginCommand : AsyncCommand<SchwabLoginSettings>
 		{
 			if (OperatingSystem.IsWindows()) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
 			else if (OperatingSystem.IsMacOS()) Process.Start("open", url);
-			else Process.Start("xdg-open", url);
+			// Browsers spawned via xdg-open inherit the terminal's stdio and spray warnings over the paste
+			// prompt, so route the launch through a shell that discards the output.
+			else Process.Start(new ProcessStartInfo("sh") { ArgumentList = { "-c", "exec xdg-open \"$1\" >/dev/null 2>&1", "sh", url } });
 		}
 		catch { /* fall back to the printed URL */ }
 	}

@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace WebullAnalytics.Api;
 
@@ -20,19 +21,14 @@ internal static class SchwabAuthClient
 	public static string BuildAuthorizeUrl(SchwabConfig schwab) =>
 		$"{AuthorizeUrl}?client_id={Uri.EscapeDataString(schwab.ClientId)}&redirect_uri={Uri.EscapeDataString(schwab.RedirectUri)}";
 
-	/// <summary>Extracts the <c>code</c> query parameter from the pasted post-login redirect URL. Schwab URL-encodes
-	/// the code (it commonly ends with <c>%40</c> = '@'), so we unescape it.</summary>
+	/// <summary>Extracts the <c>code</c> query parameter from the pasted post-login redirect URL. Scans for the
+	/// parameter instead of parsing the string as a URI: terminals with bracketed paste wrap pasted text in
+	/// invisible escape sequences (\e[200~ … \e[201~) that reach Console.ReadLine and would make URI parsing fail.
+	/// Schwab URL-encodes the code (it commonly ends with <c>%40</c> = '@'), so we unescape it.</summary>
 	public static string? ExtractCode(string redirectUrl)
 	{
-		if (!Uri.TryCreate(redirectUrl.Trim(), UriKind.Absolute, out var uri)) return null;
-		foreach (var pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
-		{
-			var eq = pair.IndexOf('=');
-			if (eq <= 0) continue;
-			if (pair[..eq] == "code")
-				return Uri.UnescapeDataString(pair[(eq + 1)..]);
-		}
-		return null;
+		var match = Regex.Match(redirectUrl, @"[?&]code=([^&#\s\x1b]+)");
+		return match.Success ? Uri.UnescapeDataString(match.Groups[1].Value) : null;
 	}
 
 	/// <summary>Exchanges an authorization code for an access+refresh token pair and persists them. Called by
