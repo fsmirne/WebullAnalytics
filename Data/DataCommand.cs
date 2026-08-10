@@ -7,9 +7,10 @@ using System.IO.Compression;
 namespace WebullAnalytics.Data;
 
 /// <summary>`wa data backup` — snapshot the AppData <c>data/</c> directory into a single <c>.tar.gz</c>.
-/// By default only the top-level files are archived (configs, proposals, orders — the irreplaceable
-/// state, ~MBs); <c>--full</c> includes the subdirectories too (quotes/, oi/, ... — many GB of market
-/// data that can be re-pulled from its providers, far too much to duplicate in a daily backup).
+/// By default only the top-level files are archived, minus the quote store (<c>quotes.*</c>) — the
+/// irreplaceable state (configs, proposals, orders — ~MBs); <c>--full</c> includes the quote store and
+/// the subdirectories too (oi/, intraday/, ... — 100+ GB of market data that can be re-pulled from its
+/// providers, far too much to duplicate in a daily backup).
 /// Designed for portability: the archive is self-contained and re-hydrates the prod data dir on any
 /// machine via <c>wa data restore</c>. tar.gz is used (not zip) because the dataset is dominated by many
 /// small text files (CSV/JSON/JSONL) and solid compression typically halves the archive size vs. per-entry
@@ -22,7 +23,7 @@ internal sealed class DataBackupSettings : CommandSettings
 	public string? Output { get; set; }
 
 	[CommandOption("--full")]
-	[Description("Also back up the data subdirectories (quotes/, oi/, intraday/, ... — many GB of re-pullable market data). Default: settings only — the top-level data/ files (configs, proposals, orders).")]
+	[Description("Also back up the quote store (quotes.*) and the data subdirectories (oi/, intraday/, ... — 100+ GB of re-pullable market data). Default: settings only — the top-level data/ files (configs, proposals, orders) minus quotes.*.")]
 	public bool Full { get; set; }
 }
 
@@ -40,30 +41,38 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 		var outputPath = settings.Output ?? DefaultOutputPath(settings.Full);
 		Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
 
-		AnsiConsole.MarkupLine($"[bold]Backing up[/] {Markup.Escape(dataDir)} {(settings.Full ? "[grey](full)[/]" : "[grey](settings only — pass --full to include subdirectories)[/]")}");
+		AnsiConsole.MarkupLine($"[bold]Backing up[/] {Markup.Escape(dataDir)} {(settings.Full ? "[grey](full)[/]" : "[grey](settings only — pass --full to include quotes.* and subdirectories)[/]")}");
 		AnsiConsole.MarkupLine($"  → {Markup.Escape(outputPath)}");
+
+		// Pre-scan the file list so the progress bar has a real total to estimate remaining time against.
+		var files = Directory.EnumerateFiles(dataDir, "*", settings.Full ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly).Where(path => settings.Full || !IsQuotesStoreFile(Path.GetFileName(path))).Select(path => (Path: path, Length: new FileInfo(path).Length)).ToList();
+		var uncompressedBytes = files.Sum(f => f.Length);
+		var fileCount = files.Count;
 
 		// Write to a sibling .tmp first and atomic-rename on success. A killed/crashed backup never
 		// leaves a half-written .tar.gz that looks restorable but isn't.
 		var tmpPath = outputPath + ".tmp";
-		long uncompressedBytes = 0;
-		int fileCount = 0;
 		try
 		{
-			await using (var fileStream = File.Create(tmpPath))
-			await using (var gzipStream = new GZipStream(fileStream, CompressionLevel.Optimal))
-			await using (var tarWriter = new TarWriter(gzipStream, leaveOpen: false))
-			{
-				foreach (var path in Directory.EnumerateFiles(dataDir, "*", settings.Full ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
+			await AnsiConsole.Progress()
+				.Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new TransferSpeedColumn(), new RemainingTimeColumn())
+				.StartAsync(async ctx =>
 				{
-					cancellation.ThrowIfCancellationRequested();
-					// Use forward slashes in the archive regardless of OS — tar's portable convention.
-					var rel = Path.GetRelativePath(dataDir, path).Replace('\\', '/');
-					await tarWriter.WriteEntryAsync(path, "data/" + rel, cancellation);
-					uncompressedBytes += new FileInfo(path).Length;
-					fileCount++;
-				}
-			}
+					var progress = ctx.AddTask($"compressing {fileCount:N0} file(s), {FormatBytes(uncompressedBytes)}", maxValue: Math.Max(1, uncompressedBytes));
+					await using var fileStream = File.Create(tmpPath);
+					await using var gzipStream = new GZipStream(fileStream, CompressionLevel.Optimal);
+					// Progress is counted on the tar byte flow INTO gzip — approximately the uncompressed payload — because TarWriter offers no per-file callbacks and a single huge entry (quotes.db) would otherwise pin the bar for most of the run.
+					await using var countingStream = new ByteProgressStream(gzipStream, advanced => progress.Increment(advanced));
+					await using var tarWriter = new TarWriter(countingStream, leaveOpen: false);
+					foreach (var (path, _) in files)
+					{
+						cancellation.ThrowIfCancellationRequested();
+						// Use forward slashes in the archive regardless of OS — tar's portable convention.
+						var rel = Path.GetRelativePath(dataDir, path).Replace('\\', '/');
+						await tarWriter.WriteEntryAsync(path, "data/" + rel, cancellation);
+					}
+					progress.Value = progress.MaxValue;
+				});
 			File.Move(tmpPath, outputPath, overwrite: true);
 		}
 		catch
@@ -87,6 +96,11 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 		return Path.Combine(backupsDir, $"wa-data{(full ? "" : "-settings")}-{stamp}.tar.gz");
 	}
 
+	/// <summary>The quote store (quotes.db plus its WAL/SHM sidecars) lives at data/ top level but is 100+ GB
+	/// of re-pullable market data — exactly what the settings backup exists to avoid. Matched by name so
+	/// backup (exclude from the settings payload) and restore (never overlay) agree on what "settings" means.</summary>
+	internal static bool IsQuotesStoreFile(string fileName) => fileName.StartsWith("quotes.", StringComparison.OrdinalIgnoreCase);
+
 	internal static string FormatBytes(long b)
 	{
 		if (b < 1024) return $"{b} B";
@@ -103,9 +117,10 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 /// directory first, then applies. A full archive swaps the whole <c>data/</c> dir in (the existing dir
 /// is renamed to <c>data.bak.<timestamp>/</c>); a settings-only payload — a settings backup, or any
 /// archive restored with <c>--settings</c> — is OVERLAID instead: only the top-level files are replaced
-/// (originals copied to <c>data.bak.<timestamp>/</c>) and the data subdirectories are never touched, so
-/// restoring a daily settings backup can't displace many GB of market data. If <c>data/</c> already
-/// exists, either path refuses unless <c>--force</c> is passed.</summary>
+/// (originals copied to <c>data.bak.<timestamp>/</c>) and the data subdirectories and quote store
+/// (<c>quotes.*</c>) are never touched, so restoring a daily settings backup can't displace 100+ GB of
+/// market data or replace the live quote store with a stale copy. If <c>data/</c> already exists, either
+/// path refuses unless <c>--force</c> is passed.</summary>
 internal sealed class DataRestoreSettings : CommandSettings
 {
 	[CommandOption("-i|--input <path>")]
@@ -117,7 +132,7 @@ internal sealed class DataRestoreSettings : CommandSettings
 	public bool Force { get; set; }
 
 	[CommandOption("--settings")]
-	[Description("Restore only the top-level setting files from the archive, leaving the data subdirectories untouched. Implied when the archive itself is settings-only.")]
+	[Description("Restore only the top-level setting files from the archive, leaving the data subdirectories and the quote store (quotes.*) untouched. Implied when the archive itself is settings-only.")]
 	public bool SettingsOnly { get; set; }
 }
 
@@ -160,33 +175,43 @@ internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 		try
 		{
 			var stagedDataDir = Path.Combine(stagingDir, "data");
-			await using (var fileStream = File.OpenRead(inputPath))
-			await using (var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress))
-			{
-				if (settings.SettingsOnly)
+			// Progress is counted on COMPRESSED bytes read from the archive: the total is just the file
+			// length, it needs no hook into the extraction internals, and gzip consumes its input evenly
+			// enough that the remaining-time estimate is honest.
+			var archiveBytes = new FileInfo(inputPath).Length;
+			await AnsiConsole.Progress()
+				.Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new TransferSpeedColumn(), new RemainingTimeColumn())
+				.StartAsync(async ctx =>
 				{
-					// Extract only the top-level data/ files: a full archive carries many GB of subdirectory
-					// market data that --settings must neither stage to disk nor restore. Targets are built
-					// from the entry's file NAME only, so hostile paths can't escape the staging dir.
-					Directory.CreateDirectory(stagedDataDir);
-					await using var tarReader = new TarReader(gzipStream, leaveOpen: false);
-					while (await tarReader.GetNextEntryAsync(false, cancellation) is { } entry)
+					var progress = ctx.AddTask($"extracting {DataBackupCommand.FormatBytes(archiveBytes)} archive", maxValue: Math.Max(1, archiveBytes));
+					await using var fileStream = File.OpenRead(inputPath);
+					await using var countingStream = new ByteProgressStream(fileStream, advanced => progress.Increment(advanced));
+					await using var gzipStream = new GZipStream(countingStream, CompressionMode.Decompress);
+					if (settings.SettingsOnly)
 					{
-						if (entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile)) continue;
-						var name = entry.Name.Replace('\\', '/');
-						if (!name.StartsWith("data/")) continue;
-						var rel = name["data/".Length..];
-						if (rel.Length == 0 || rel.Contains('/')) continue; // subdirectory content — out of scope by design
-						await entry.ExtractToFileAsync(Path.Combine(stagedDataDir, rel), overwrite: true, cancellation);
+						// Extract only the top-level data/ files: a full archive carries many GB of subdirectory
+						// market data that --settings must neither stage to disk nor restore. Targets are built
+						// from the entry's file NAME only, so hostile paths can't escape the staging dir.
+						Directory.CreateDirectory(stagedDataDir);
+						await using var tarReader = new TarReader(gzipStream, leaveOpen: false);
+						while (await tarReader.GetNextEntryAsync(false, cancellation) is { } entry)
+						{
+							if (entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile)) continue;
+							var name = entry.Name.Replace('\\', '/');
+							if (!name.StartsWith("data/")) continue;
+							var rel = name["data/".Length..];
+							if (rel.Length == 0 || rel.Contains('/') || DataBackupCommand.IsQuotesStoreFile(rel)) continue; // subdirectory content and the quote store — out of scope by design
+							await entry.ExtractToFileAsync(Path.Combine(stagedDataDir, rel), overwrite: true, cancellation);
+						}
 					}
-				}
-				else
-				{
-					// TarFile.ExtractToDirectoryAsync (BCL) refuses entries whose paths escape the destination,
-					// so we get zip-slip / tar-slip protection for free.
-					await TarFile.ExtractToDirectoryAsync(gzipStream, stagingDir, overwriteFiles: true, cancellation);
-				}
-			}
+					else
+					{
+						// TarFile.ExtractToDirectoryAsync (BCL) refuses entries whose paths escape the destination,
+						// so we get zip-slip / tar-slip protection for free.
+						await TarFile.ExtractToDirectoryAsync(gzipStream, stagingDir, overwriteFiles: true, cancellation);
+					}
+					progress.Value = progress.MaxValue;
+				});
 
 			if (!Directory.Exists(stagedDataDir))
 			{
@@ -209,6 +234,9 @@ internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 				foreach (var staged in Directory.EnumerateFiles(stagedDataDir))
 				{
 					cancellation.ThrowIfCancellationRequested();
+					// Old settings archives (pre quotes.* exclusion) captured the 100+ GB quote store at top
+					// level — never let a settings overlay replace the live one with a stale copy.
+					if (DataBackupCommand.IsQuotesStoreFile(Path.GetFileName(staged))) continue;
 					var target = Path.Combine(dataDir, Path.GetFileName(staged));
 					if (File.Exists(target))
 					{
@@ -232,8 +260,9 @@ internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 			}
 			Directory.Move(stagedDataDir, dataDir);
 
-			var fileCount = Directory.EnumerateFiles(dataDir, "*", SearchOption.AllDirectories).Count();
-			var totalBytes = Directory.EnumerateFiles(dataDir, "*", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length);
+			var fileCount = 0;
+			long totalBytes = 0;
+			foreach (var restoredFile in Directory.EnumerateFiles(dataDir, "*", SearchOption.AllDirectories)) { fileCount++; totalBytes += new FileInfo(restoredFile).Length; }
 			AnsiConsole.MarkupLine($"  [green]restored {fileCount} file(s)[/] ({DataBackupCommand.FormatBytes(totalBytes)})");
 			return 0;
 		}
@@ -264,4 +293,31 @@ internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 			.OrderByDescending(f => File.GetLastWriteTimeUtc(f))
 			.FirstOrDefault();
 	}
+}
+
+/// <summary>Pass-through stream that reports every byte moved through it. tar+gzip streaming exposes no
+/// per-file or per-block callbacks, so this is the only place a progress bar can observe the transfer:
+/// backup counts writes (tar bytes into gzip ≈ uncompressed payload), restore counts reads (compressed
+/// bytes out of the archive). Non-seekable by design — both sides of a gzip pipe are forward-only.</summary>
+internal sealed class ByteProgressStream(Stream inner, Action<long> onBytes) : Stream
+{
+	public override bool CanRead => inner.CanRead;
+	public override bool CanSeek => false;
+	public override bool CanWrite => inner.CanWrite;
+	public override long Length => inner.Length;
+	public override long Position { get => inner.Position; set => throw new NotSupportedException(); }
+	public override void Flush() => inner.Flush();
+	public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
+	public override int Read(byte[] buffer, int offset, int count) { var n = inner.Read(buffer, offset, count); onBytes(n); return n; }
+	public override int Read(Span<byte> buffer) { var n = inner.Read(buffer); onBytes(n); return n; }
+	public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+	public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) { var n = await inner.ReadAsync(buffer, cancellationToken); onBytes(n); return n; }
+	public override void Write(byte[] buffer, int offset, int count) { inner.Write(buffer, offset, count); onBytes(count); }
+	public override void Write(ReadOnlySpan<byte> buffer) { inner.Write(buffer); onBytes(buffer.Length); }
+	public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+	public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) { await inner.WriteAsync(buffer, cancellationToken); onBytes(buffer.Length); }
+	public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+	public override void SetLength(long value) => throw new NotSupportedException();
+	protected override void Dispose(bool disposing) { if (disposing) inner.Dispose(); base.Dispose(disposing); }
+	public override async ValueTask DisposeAsync() { await inner.DisposeAsync(); await base.DisposeAsync(); }
 }
