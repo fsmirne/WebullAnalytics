@@ -52,6 +52,14 @@ NY = zoneinfo.ZoneInfo("America/New_York")
 log = logging.getLogger("backfill")  # our own messages go here (not root), so we can quiet libraries
 
 
+def et_today() -> date:
+    """The trading calendar's 'today': the current date in America/New_York. Sessions, expirations
+    and OI settlement are all ET-dated, so every elapsed/forming decision (sealing, frontiers) uses
+    this — never the machine-local date, which is a day behind ET late in the evening from zones west
+    of it (e.g. 8pm in Hawaii is already past midnight ET) and would wrongly withhold seals there."""
+    return datetime.now(NY).date()
+
+
 def _setup_logging():
     """Our messages (timestamped) to console + (when BF_LOG_FILE set) an append file. Third-party
     chatter (thetadata auth POSTs, grpc, urllib3) is suppressed unless BF_VERBOSE=1. Called at import so
@@ -82,7 +90,7 @@ def _setup_logging():
 _setup_logging()
 # No default tickers/DTEs are committed — the caller supplies them on the CLI (NAME or NAME:DTE).
 DEFAULT_START = date(2025, 1, 1)
-DEFAULT_END = date.today()
+DEFAULT_END = et_today()
 
 
 def resolve_data_dir() -> Path:
@@ -512,10 +520,10 @@ def run(tickers, start: date, end: date, out_root: Path, max_dte, rate, creds, t
     # Sealing mirrors --quotes (data/oi/<ticker>/sealed.json = {"sealed": ["YYYY-MM-DD", ...]}), but
     # per DAY: a past trading day's settled OI never changes (T+1 final), so once pulled it's sealed and
     # skipped on every later run — only genuinely NEW days are fetched. We pull from the first unsealed
-    # day forward (still month-chunked to bound request size) and seal each written day < today. Today's
-    # forming day is never sealed; a day that fails (e.g. a DNS drop) isn't sealed, so a re-run retries
-    # it. Delete sealed.json to force a full re-pull.
-    today = date.today()
+    # day forward (still month-chunked to bound request size) and seal each written day < ET-today (the
+    # trading calendar is ET; see et_today). The ET-forming day is never sealed; a day that fails (e.g.
+    # a DNS drop) isn't sealed, so a re-run retries it. Delete sealed.json to force a full re-pull.
+    today = et_today()
     today_iso = today.isoformat()
     for ticker in tickers:
         tdir = out_root / ticker
@@ -796,10 +804,11 @@ def save_sealed(tdir: Path, sealed: set):
 
 
 def should_seal(exp_iso: str, end_date: date) -> bool:
-    """Seal only when the expiration is FINAL: elapsed (exp < today → no more live quotes) AND fully in
+    """Seal only when the expiration is FINAL: elapsed (exp < ET-today → no more live quotes; the
+    session day is ET-dated, so a post-midnight-ET run seals it no matter the local zone) AND fully in
     range (exp <= end → the window wasn't cut short by `end`)."""
     e = date.fromisoformat(exp_iso)
-    return e < date.today() and e <= end_date
+    return e < et_today() and e <= end_date
 
 
 def _seal_if_final(tdir: Path, exp_iso: str, end_date: date, sealed: set):
@@ -1065,7 +1074,7 @@ def _list_unsealed_sealable(creds, tickers, dte_map, start, end, out_root):
     failed = []
     try:
         client = make_client(creds)
-        today_iso = date.today().isoformat()
+        today_iso = et_today().isoformat()
         for ticker in tickers:
             if dte_map.get(ticker) is None:
                 continue
@@ -1140,7 +1149,7 @@ def quote_probe(client, ticker: str):
     """Pull one near expiration's minute quotes for a few days; print the real schema so we
     confirm the time/column names before the full pull."""
     exps = sorted(_expirations_from(thetacall(client.option_list_expirations, ticker)))
-    today = date.today().isoformat()
+    today = et_today().isoformat()
     past = [e for e in exps if e < today]
     exp = past[-1] if past else exps[0]           # a recent EXPIRED contract → real data
     exp_d = date.fromisoformat(exp)

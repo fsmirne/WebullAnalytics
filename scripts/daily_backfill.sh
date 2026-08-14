@@ -17,8 +17,10 @@
 #
 # Re-run safe & incremental: --quotes skips sealed (expired) expirations; --run (OI) skips sealed
 # (settled, past) days via oi/<ticker>/sealed.json. Only the live frontier (new days / unsealed
-# expirations) is re-pulled each run — no full-history re-pull. ThetaData finalizes a session at
-# ~17:15 ET: an evening run (>= 19:00) captures TODAY; a morning run captures through yesterday.
+# expirations) is re-pulled each run — no full-history re-pull. All date gates run on the ET clock
+# (the trading calendar), not local time, so runs from any timezone behave identically: ThetaData
+# finalizes a session at ~17:15 ET, so past 19:00 ET the pull captures ET-today; earlier it stops
+# at ET-yesterday.
 # Each pull also tees its own timestamped log to data/logs/backfill_*.log.
 #
 # Overrides (env): BACKFILL_END=YYYY-MM-DD (last day); BACKFILL_START=YYYY-MM-DD (extend the quotes+OI
@@ -122,16 +124,20 @@ else
   HISTORY_TICKERS=""
 fi
 
-# Stop at the last COMPLETE day. ThetaData finalizes a session's data at ~17:15 ET, so an evening
-# run (>= 19:00 local, comfortably past that) may include TODAY; earlier runs stop at yesterday —
-# their docs and our own error ("Current day requests must have a start time less than current
-# time") show intraday same-day minute requests aren't reliable. On a Mon morning this resolves to
-# Sun and the pull simply ends at the prior Fri. Override with --end / BACKFILL_END=YYYY-MM-DD.
+# Stop at the last COMPLETE day, judged on the ET clock — sessions are ET-dated, so local time is
+# irrelevant (an 8pm-Hawaii run is 2am ET: ET-yesterday IS the just-finished session). ThetaData
+# finalizes a session's data at ~17:15 ET, so past 19:00 ET (comfortably beyond that) the pull may
+# include ET-today; earlier it stops at ET-yesterday — their docs and our own error ("Current day
+# requests must have a start time less than current time") show intraday same-day minute requests
+# aren't reliable. On a Mon morning this resolves to Sun and the pull simply ends at the prior Fri.
+# Override with --end / BACKFILL_END=YYYY-MM-DD.
+read -r ET_TODAY ET_HOUR < <(TZ=America/New_York date '+%F %H')
+ET_YESTERDAY=$(date -d "$ET_TODAY - 1 day" +%F)
 [ -n "$CLI_END" ] && BACKFILL_END="$CLI_END"
-if [ -z "${BACKFILL_END:-}" ] && [ "$(date +%H)" -ge 19 ]; then
-  END=$(date +%F)
+if [ -z "${BACKFILL_END:-}" ] && [ "$ET_HOUR" -ge 19 ]; then
+  END="$ET_TODAY"
 else
-  END="${BACKFILL_END:-$(date -d 'yesterday' +%F)}"
+  END="${BACKFILL_END:-$ET_YESTERDAY}"
 fi
 
 # Historical backfill floor for the quotes + OI pulls. Unset => backfill_thetadata.py's own default
@@ -155,11 +161,17 @@ step() {  # "label" command args...
   if [ "$ec" -ne 0 ]; then echo "[$(ts)] [FAIL] $label (exit $ec)"; rc=1; fi
 }
 
-# OI always stops at yesterday regardless of the evening gate: OCC publishes a session's open
-# interest the NEXT morning, and ThetaData's wildcard-expiration EOD/OI requests reject the current
-# day outright ("Cannot fetch current-day data without specifying an expiration"). Today's OI lands
-# on tomorrow's run; quotes still capture today on evening runs.
-END_OI="${BACKFILL_END:-$(date -d 'yesterday' +%F)}"
+# OI lags one session behind the evening gate: OCC publishes a session's open interest the NEXT
+# morning (ET), and ThetaData's wildcard-expiration EOD/OI requests reject the current day outright
+# ("Cannot fetch current-day data without specifying an expiration"). So ET-yesterday's OI is only
+# safe to pull once that ET morning has passed (>= 09:00 ET); before that (e.g. a post-midnight-ET
+# run) stop one day earlier — pulling it too soon would seal pre-publication OI. A session's OI
+# lands on the run after its publication; quotes still capture ET-today on evening runs.
+if [ "$ET_HOUR" -ge 9 ]; then
+  END_OI="${BACKFILL_END:-$ET_YESTERDAY}"
+else
+  END_OI="${BACKFILL_END:-$(date -d "$ET_TODAY - 2 days" +%F)}"
+fi
 
 echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes ${START_VALUE:+from $START_VALUE }through $END, oi through $END_OI, verify ==="
 

@@ -23,7 +23,8 @@
 	Extend the quotes+OI pull floor back for a one-off history fill (YYYY-MM-DD). Sealed data is still skipped.
 
 .PARAMETER End
-	Last day to pull (YYYY-MM-DD). Defaults to today on evening runs (>= 19:00), else yesterday.
+	Last day to pull (YYYY-MM-DD). Defaults to ET-today past 19:00 ET, else ET-yesterday — the date
+	gates run on the ET clock (the trading calendar), not local time.
 
 .PARAMETER Tickers
 	Scope the quotes/OI roots with per-ticker DTE, e.g. 'SPY:60','XSP:0'. Default = the daily set.
@@ -120,18 +121,26 @@ if (-not (Has-Step 'history')) {
 if (Test-Path -LiteralPath (Join-Path $ScriptDir "wa.exe")) { $WA = Join-Path $ScriptDir "wa.exe" }
 else { $WA = "wa" }
 
-# --- Date window. ThetaData finalizes a session ~17:15 ET, so an evening run (>= 19:00 local) may include ----
-# TODAY; earlier runs stop at yesterday. -End / BACKFILL_END overrides.
-if (-not $End) { $End = $env:BACKFILL_END }
-if (-not $End) {
-	if ((Get-Date).Hour -ge 19) { $End = (Get-Date).ToString('yyyy-MM-dd') }
-	else { $End = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd') }
-}
+# --- Date window, judged on the ET clock (the trading calendar) — local time is irrelevant, so runs from ----
+# any timezone behave identically. ThetaData finalizes a session ~17:15 ET, so past 19:00 ET the pull may
+# include ET-today; earlier it stops at ET-yesterday. -End / BACKFILL_END overrides. (Mirrors daily_backfill.sh.)
+$EtTz = [System.TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time')
+$EtNow = [System.TimeZoneInfo]::ConvertTime([DateTime]::UtcNow, $EtTz)
+$EndOverride = $End                                          # -End takes precedence over BACKFILL_END,
+if (-not $EndOverride) { $EndOverride = $env:BACKFILL_END }  # and (like the .sh) caps the OI window too
+if ($EndOverride) { $End = $EndOverride }
+elseif ($EtNow.Hour -ge 19) { $End = $EtNow.ToString('yyyy-MM-dd') }
+else { $End = $EtNow.AddDays(-1).ToString('yyyy-MM-dd') }
 
-# OI always stops at yesterday: OCC publishes a session's open interest the NEXT morning, and ThetaData's
-# wildcard-expiration EOD/OI requests reject the current day outright. Today's OI lands on tomorrow's run.
-$EndOi = $env:BACKFILL_END
-if (-not $EndOi) { $EndOi = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd') }
+# OI lags one session behind the evening gate: OCC publishes a session's open interest the NEXT morning (ET),
+# and ThetaData's wildcard-expiration EOD/OI requests reject the current day outright. ET-yesterday's OI is
+# only safe once that ET morning has passed (>= 09:00 ET); before that (e.g. a post-midnight-ET run) stop one
+# day earlier — pulling it too soon would seal pre-publication OI.
+$EndOi = $EndOverride
+if (-not $EndOi) {
+	if ($EtNow.Hour -ge 9) { $EndOi = $EtNow.AddDays(-1).ToString('yyyy-MM-dd') }
+	else { $EndOi = $EtNow.AddDays(-2).ToString('yyyy-MM-dd') }
+}
 
 # Historical backfill floor (-Start / BACKFILL_START). Unset => backfill_thetadata.py's own default.
 $StartValue = $Start
