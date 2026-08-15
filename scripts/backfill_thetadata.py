@@ -550,6 +550,7 @@ def run(tickers, start: date, end: date, out_root: Path, max_dte, rate, creds, t
             if newly:
                 sealed.update(newly)
                 save_sealed(tdir, sealed)  # checkpoint after each chunk so a later failure can't lose it
+                log.info(f"  [seal] {ticker} OI day(s): {', '.join(sorted(newly))} ({len(sealed)} total)")
 
 
 # ===== minute NBBO quote pull (option_history_quote) ==========================
@@ -848,8 +849,10 @@ def seal_quote_expiry(out_root: Path, ticker: str, exp_iso: str, end_date: date)
         try:
             conn.execute("PRAGMA busy_timeout=60000")
             conn.execute(SEALED_SQL)
-            conn.execute("INSERT OR IGNORE INTO sealed VALUES (?,?)", (ticker, ymd_int(exp_iso)))
+            cur = conn.execute("INSERT OR IGNORE INTO sealed VALUES (?,?)", (ticker, ymd_int(exp_iso)))
             conn.commit()
+            if cur.rowcount:  # newly sealed (not a re-run over an already-sealed expiration)
+                log.info(f"  [seal] {ticker} exp {exp_iso}")
         finally:
             conn.close()
 
