@@ -622,15 +622,17 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         return 0
 
     unders = fetch_underlying_closes(client, ticker, start_d, end_d)
-    # Write straight into the canonical SQLite store ONE WINDOW AT A TIME (not once after the whole DTE window
-    # is fetched). Each per-window commit advances quotes.db's mtime, which is the threaded supervisor's ONLY
-    # progress signal. A large historical expiration (e.g. SPY 60-DTE = ~9 seven-day windows, millions of rows)
-    # can take longer than the stall timeout to pull in full; committing only at the end left the mtime flat
-    # for that entire pull, so the supervisor mistook a working worker for a wedged one, killed it, and the
-    # restart re-picked the SAME expiration from scratch — a livelock that never completes. Committing per
-    # window keeps the signal live. The expiry's stale rows are cleared once, on the first window's write, so a
-    # re-pull still fully replaces (idempotent); only UNSEALED expirations are ever re-pulled, so the brief
-    # mid-pull partial state is never observed for a final/sealed one.
+    # Write into the store ONE WINDOW AT A TIME (not once after the whole DTE window is fetched). Each
+    # per-window commit advances quotes.db's mtime, which is the threaded supervisor's ONLY progress signal.
+    # A large historical expiration (e.g. SPY 60-DTE = ~9 seven-day windows, millions of rows) can take longer
+    # than the stall timeout to pull in full; committing only at the end left the mtime flat for that entire
+    # pull, so the supervisor mistook a working worker for a wedged one, killed it, and the restart re-picked
+    # the SAME expiration from scratch — a livelock that never completes. Committing per window keeps the
+    # signal live. Windows land in `quotes_staging`, NOT the live table: the finished expiry is promoted in a
+    # single DELETE+copy transaction after the last window, so a kill/abort anywhere mid-pull leaves the live
+    # rows exactly as they were. (Previously the live DELETE committed with the FIRST window's write; the
+    # 2026-08-16 aborted run left SPY 2026-08-21 truncated at 07-17 — sessions 07-20..08-14 silently gone —
+    # and the truncation traveled through a full backup/restore into the desktop store.)
     exp_int = ymd_int(exp_d.isoformat())
     db_path = _quotes_db_path(out_root)
     total_rows, days, saw_quotes, first_write, nospot_days = 0, set(), False, True, set()
@@ -643,7 +645,12 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
             # has started flowing is a mid-window hole candidate: a transient server blip returning empty
             # here used to be accepted silently, the expiry sealed anyway, and resume never revisited it —
             # three sealed-with-holes expiries failed the H7 gate on 2026-07-26. Retry once, then warn loudly.
+            # A chunk with NO trading session in it is expected-empty, not a hole: END is a raw calendar date
+            # (a Sunday-morning run gets END=Saturday), so window alignment can isolate a weekend/holiday tail
+            # chunk — judge against the same spot calendar (`unders`) the seal-time completeness gate trusts.
             if not saw_quotes:
+                continue
+            if not any(ms.isoformat() <= d <= me.isoformat() for d in unders):
                 continue
             df = thetacall(client.option_history_quote, symbol=ticker, expiration=exp_d, interval="1m",
                            strike="*", start_date=ms, end_date=me)
@@ -693,10 +700,13 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         with _DB_WRITE_LOCK:  # serialize writes across the threaded pull's workers (SQLite single-writer)
             conn = connect_wal(db_path)
             try:
-                if first_write and not supplement:  # clear this expiry's prior rows ONCE so a re-pull fully replaces (idempotent); supplement mode is purely additive
-                    conn.execute("DELETE FROM quotes WHERE root=? AND expiry=?", (ticker, exp_int))
-                    first_write = False
-                conn.executemany("INSERT OR IGNORE INTO quotes VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+                if supplement:  # additive patch mode layers straight onto the live table — never deletes, abort-safe by nature
+                    conn.executemany("INSERT OR IGNORE INTO quotes VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+                else:
+                    if first_write:  # clear a prior aborted pull's leftover staging rows ONCE so the promote copies only this pull
+                        conn.execute("DELETE FROM quotes_staging WHERE root=? AND expiry=?", (ticker, exp_int))
+                        first_write = False
+                    conn.executemany("INSERT OR IGNORE INTO quotes_staging VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
                 conn.commit()
             finally:
                 conn.close()
@@ -704,6 +714,19 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
         days.update(part["date"].tolist())
         for d, s in zip(part["date"].tolist(), part["strike"].tolist()):
             strikes_by_day.setdefault(d, set()).add(round(float(s), 3))
+    if total_rows and not supplement:
+        # Promote the fully-pulled expiry: replace the live rows with the staged pull and clear the staging
+        # rows, all in ONE transaction. Runs before the seal gates below on purpose — a seal-withheld pull
+        # still lands its data (same as always), the gates only govern sealing.
+        with _DB_WRITE_LOCK:
+            conn = connect_wal(db_path)
+            try:
+                conn.execute("DELETE FROM quotes WHERE root=? AND expiry=?", (ticker, exp_int))
+                conn.execute("INSERT INTO quotes SELECT * FROM quotes_staging WHERE root=? AND expiry=?", (ticker, exp_int))
+                conn.execute("DELETE FROM quotes_staging WHERE root=? AND expiry=?", (ticker, exp_int))
+                conn.commit()
+            finally:
+                conn.close()
     # Quotes present but no underlying spot -> can't band-filter; treat as transient (raise -> retry).
     # No quotes AT ALL -> a non-trading day (e.g. the 2025-01-09 market closure) or an expiration with no
     # in-band contracts: return empty so it SEALS instead of being re-attempted forever as a "feed error".

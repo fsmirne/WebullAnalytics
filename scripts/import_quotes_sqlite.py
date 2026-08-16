@@ -73,6 +73,11 @@ SCHEMA_SQL = (
     "strike_milli INTEGER, right TEXT, bid INTEGER, ask INTEGER, bid_size INTEGER, ask_size INTEGER, "
     "PRIMARY KEY (root, expiry, date, strike_milli, right, time_sec)) WITHOUT ROWID"
 )
+# Same shape as `quotes` (SELECT * copies positionally): the backfill's chunked pull lands each window here,
+# then promotes the finished expiry into `quotes` in one DELETE+copy transaction — an aborted pull must never
+# leave the live table half-rebuilt (the first-window DELETE used to commit long before the later windows, so
+# a 2026-08-16 abort left SPY 2026-08-21 truncated at 07-17 and the truncation traveled through backup/restore).
+STAGING_SQL = SCHEMA_SQL.replace("quotes (", "quotes_staging (", 1)
 SEALED_SQL = "CREATE TABLE IF NOT EXISTS sealed (root TEXT, expiry INTEGER, PRIMARY KEY (root, expiry)) WITHOUT ROWID"
 # Interior trading days PROVEN absent at the vendor for an expiry (reproducible across pulls) — the
 # seal-time completeness check accepts exactly these and nothing else. Lives IN the DB (like `sealed`,
@@ -135,6 +140,7 @@ def connect_wal(db_path):
     conn.execute("PRAGMA busy_timeout=60000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(SCHEMA_SQL)
+    conn.execute(STAGING_SQL)
     return conn
 
 
