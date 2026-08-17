@@ -135,8 +135,9 @@ internal sealed class ScraperLoop
 		var fireEt = TimeZoneInfo.ConvertTime(fireWallClock, NyTz);
 		var fireUtc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(fireEt, DateTimeKind.Unspecified), NyTz);
 
-		// Retry the chain fetch when Webull returns no contracts for this minute (throttle, dropped
-		// session, transient empty response). A missing minute is worse than a marginally delayed one:
+		// Retry the chain fetch when the vendor returns no contracts for this minute (throttle, dropped
+		// session, transient empty response) OR a degenerate chain with contracts but no usable quotes —
+		// see the usability check below. A missing minute is worse than a marginally delayed one:
 		// the backtest replays this file minute-by-minute, so a gap forces interpolation. Retry a few
 		// times within the interval; only persist once we actually have contracts, never an empty line.
 		List<OptionContractQuote> todayContracts = new();
@@ -167,10 +168,16 @@ internal sealed class ScraperLoop
 					return true;
 				})
 				.ToList();
-			if (todayContracts.Count > 0) break;
+			// A usable tick needs a positive spot and at least one two-sided book, not merely a non-empty contract
+			// list: a transient vendor hiccup can return the full chain with every quote nulled and no spot
+			// (2026-08-17 fires 15:05/15:25/15:43 each lost their minute this way while both neighbors were fine),
+			// so that case retries exactly like an empty chain instead of silently dropping the minute. If it were
+			// ever genuinely true (it wasn't even at 15:59 on a 0DTE), the retries cost ~9s and the tick proceeds
+			// with whatever the last fetch gave — the downstream writers already handle a quote-less tick safely.
+			if (todayContracts.Count > 0 && spot is > 0m && todayContracts.Any(q => q.Bid is > 0m && q.Ask is > 0m)) break;
 			if (attempt < _config.EmptyRetryCount)
 			{
-				AnsiConsole.MarkupLine($"[yellow]{fireEt:HH:mm:ss} empty chain — retry {attempt + 1}/{_config.EmptyRetryCount} in {_config.EmptyRetryDelaySeconds}s[/]");
+				AnsiConsole.MarkupLine($"[yellow]{fireEt:HH:mm:ss} {(todayContracts.Count == 0 ? "empty chain" : "chain has no two-sided quote/spot")} — retry {attempt + 1}/{_config.EmptyRetryCount} in {_config.EmptyRetryDelaySeconds}s[/]");
 				await Task.Delay(TimeSpan.FromSeconds(_config.EmptyRetryDelaySeconds), cancellation);
 			}
 		}
