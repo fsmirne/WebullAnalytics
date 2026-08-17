@@ -573,7 +573,8 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// are excluded (day-trading churn makes volume≫OI the norm there, not a signal). For an offline --date,
 	/// the NEXT session's snapshot (when captured) supplies the ΔOI confirmation — the CELH-style overnight
 	/// jump, visible the day it was being built. Thresholds fixed on purpose: vol ≥ 2× max(OI,1) and
-	/// vol ≥ 250 (the OI floor keeps fresh listings from flooding the list), top 12 by volume.</summary>
+	/// vol ≥ 250 (the OI floor keeps fresh listings from flooding the list), top 12 by volume, listed by
+	/// expiry then strike-descending (matching the heatmap ladder) then volume.</summary>
 	private static void RenderUnusualActivity(string ticker, Dictionary<string, OptionContractQuote> quotes, DateTime asOf, bool isOfflineHistorical)
 	{
 		const decimal MinRatio = 2m;
@@ -615,7 +616,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		table.AddColumn(new TableColumn("[bold]Vol/OI[/]").RightAligned().NoWrap());
 		if (next != null) table.AddColumn(new TableColumn($"[bold]ΔOI → {nextDate}[/]").RightAligned().NoWrap());
 
-		foreach (var h in hits.OrderByDescending(h => h.Vol).Take(12))
+		// Selection stays top-12 by volume (the screen's criterion); display order groups by expiry date, then
+		// strike-descending within it (matching the heatmap ladder), then volume for same-strike C/P pairs.
+		foreach (var h in hits.OrderByDescending(h => h.Vol).Take(12).OrderBy(h => h.P.ExpiryDate).ThenByDescending(h => h.P.Strike).ThenByDescending(h => h.Vol))
 		{
 			var cells = new List<string>
 			{
