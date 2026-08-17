@@ -53,6 +53,15 @@ internal sealed class ScraperConfig
 	[JsonPropertyName("emptyRetryDelaySeconds")]
 	public int EmptyRetryDelaySeconds { get; set; } = 3;
 
+	/// <summary>If true (default), each RTH tick also appends the kept contracts' VENDOR-perspective inputs —
+	/// bid/ask, the vendor's reported IV, OI — to <c>data/iv/&lt;TICKER&gt;/&lt;date&gt;.csv</c> (the `analyze gex --dump`
+	/// archive). quotes.db deliberately persists NBBO only, and vendor IVs exist nowhere after the fetch; this is the
+	/// only record of them, and the running-day `analyze gex --intraday` heatmap reads it as its capture fallback.
+	/// Purely additive: never touches quotes.db or data/oi, so the ThetaData stores are unaffected. Set false to
+	/// scrape NBBO/OI only.</summary>
+	[JsonPropertyName("ivCapture")]
+	public bool IvCapture { get; set; } = true;
+
 	/// <summary>How many calendar days of expiries to capture, measured from the scrape date. 0 (default)
 	/// keeps only today's expiry (0DTE) — the original behavior and smallest files. Raise it to also capture
 	/// the further-dated expiries the diagonal/calendar long legs use (e.g. 45 covers the 21–45 DTE band), so

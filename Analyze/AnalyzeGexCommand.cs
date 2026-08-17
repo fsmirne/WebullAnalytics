@@ -63,7 +63,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public bool Dump { get; set; }
 
 	[CommandOption("--intraday")]
-	[Description("Intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Maps --date's own 0DTE by default; pass --expiry to watch a LATER expiry's gravity move through --date instead (the only option on roots with no daily expirations). Without --date (or with --date today) this is the RUNNING-DAY view: OI/IVs come from the live chain fetch and the columns run 09:30 through the current bucket; every column is repriced with the CURRENT chain's IVs, so finished buckets shift between calls — but each call also captures the current bucket's gravity to the data/gex log, and those static as-displayed values render as the \"Gravity·live\" row. A past --date replays that day offline from its data/oi snapshot, with per-bucket IVs back-solved from the minute-quote store (data/quotes/<TICKER>/<expiry>.csv) when it covers the day, else frozen from the snapshot. Skips the chain-totals and per-expiry tables; the walls appear as per-bucket Wall·C/Wall·P footer rows instead of their own table.")]
+	[Description("Intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Maps --date's own 0DTE by default; pass --expiry to watch a LATER expiry's gravity move through --date instead (the only option on roots with no daily expirations). Without --date (or with --date today) this is the RUNNING-DAY view: the columns run 09:30 through the current bucket, and each call captures its chain to data/iv and its anchors to data/gex — a bucket near a capture is rebuilt from that capture's surface (as-displayed-then, static across re-runs, matching the \"·live\" footer rows), while a bucket with no capture is provisionally priced with the current fetch's IVs until tomorrow's quote backfill enables the full ex-ante replay. A past --date replays that day offline from its data/oi snapshot, with per-bucket IVs back-solved from the minute-quote store (data/quotes/<TICKER>/<expiry>.csv) when it covers the day, else frozen from the snapshot. Skips the chain-totals and per-expiry tables; the walls appear as per-bucket Wall·C/Wall·P footer rows instead of their own table.")]
 	public bool Intraday { get; set; }
 
 	[CommandOption("--interval <MIN>")]
@@ -85,6 +85,10 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	[CommandOption("--exante")]
 	[Description("--intraday only: price the mapped expiry's gamma with the PRIOR trading day's snapshot IVs (falling back to a back-solve from the prior day's mids at the prior day's spot) instead of back-solving from this day's EOD mids. The default solve leaks the session's outcome into every column — a put that finished ITM has a fat EOD mid, back-solves to an inflated IV, and its strike re-brightens/dims by where the day CLOSED; ex-ante IVs show what was actually hedgeable at each bucket. Contracts absent from the prior snapshot are dropped.")]
 	public bool Exante { get; set; }
+
+	[CommandOption("--captured")]
+	[Description("--intraday only: price every bucket from the VENDOR-reported IVs/OI archived in data/iv (written by running-day analyze calls and wa-scraper's per-minute ivCapture) instead of the default source (minute-NBBO back-solve when the store covers the day, else the live chain). Buckets with no capture within half an interval are DROPPED, so the panel is purely vendor-surfaced — run the same command with and without the flag to compare NBBO-solved vs vendor-reported gamma terrain. Captures are matched to the --vendor in effect.")]
+	public bool Captured { get; set; }
 
 	public override ValidationResult Validate()
 	{
@@ -110,6 +114,8 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (RthTimeError(End, "--end") is { } endErr) return ValidationResult.Error(endErr);
 		if (ParseEtTime(Start) is { } s && ParseEtTime(End) is { } e && s >= e) return ValidationResult.Error($"--start {Start} must be before --end {End}");
 		if (Exante && !Intraday) return ValidationResult.Error("--exante only applies to the --intraday heatmap");
+		if (Captured && !Intraday) return ValidationResult.Error("--captured only applies to the --intraday heatmap");
+		if (Captured && Exante) return ValidationResult.Error("--exante replays prior-day IVs and --captured replays this day's captured vendor IVs; use one or the other");
 		// The intraday view's whole subject is the gravity strike migrating as spot moves, and it reads its Gravity row
 		// back out of the gamma-only data/gex log. Vanna has no gravity, so an explicit vanna request is refused
 		// outright; the 'both' default quietly resolves to the gamma view so plain --intraday keeps working.
@@ -311,19 +317,20 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				// spot within tolerance and drop out naturally.
 				await RefreshIntradayTapeAsync(ticker, apiConfig, cancellation);
 				AnsiConsole.MarkupLine($"[dim]Running-day heatmap from the live {Markup.Escape(settings.VendorName)} chain ({quotes.Count} contracts); columns end at the current bucket.[/]");
-				// A running-day --intraday call is often the only gex command run all session, but only plain runs fed
-				// the data/gex live log — so the heatmap's own "Gravity·live" row stayed empty while every re-render
-				// silently repriced the finished buckets with the current chain's IVs. Capture the one bucket that IS
-				// current before rendering: the mapped expiry's gravity at the live spot, exactly the record a plain run
-				// writes. Earlier columns are retro-priced by construction and are never logged from here. --exante swaps
-				// the chain's IVs for prior-day values, which must not enter the log as live observations.
+				// A running-day --intraday call is often the only gex command run all session, so it must feed both live
+				// stores itself: the data/gex anchor log (the "·live" footer rows) AND a data/iv chain capture — the
+				// per-strike bid/ask/vendor-IV/OI behind THIS run's numbers, which the heatmap reads back so buckets
+				// near a capture are rebuilt from what was actually visible then instead of being silently repriced
+				// with whatever chain the latest call fetched. --exante swaps the chain's IVs for prior-day values,
+				// which must not enter either store as live observations.
 				if (!settings.Exante)
 				{
 					var liveMatrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter: intradayExpiry, settings.StrikeRangePct / 100m, maxDteDays: Math.Max(0, (intradayExpiry - asOf.Date).Days), settings.MaxStrikes);
 					if (liveMatrix.Expiries.Count > 0) AppendGexLog(ticker, spot.Value, liveMatrix, settings);
+					AppendIvDump(ticker, spot.Value, quotes, settings, asOf, intradayExpiry);
 				}
 			}
-			RenderIntradayGexHeatmap(ticker, asOf.Date, intradayExpiry, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical, withVexNow: settings.BothGreeks,
+			RenderIntradayGexHeatmap(ticker, asOf.Date, intradayExpiry, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical, withVexNow: settings.BothGreeks, vendorIvs: settings.Captured,
 				vexAt: AnalyzeGexSettings.ParseEtTime(settings.Time),
 				windowStart: AnalyzeGexSettings.ParseEtTime(settings.Start) ?? AnalyzeGexSettings.RthOpen,
 				windowEnd: AnalyzeGexSettings.ParseEtTime(settings.End) ?? AnalyzeGexSettings.RthClose);
@@ -1150,10 +1157,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// wa-scraper / ThetaData sync) covers this expiry on this day, each bucket's IVs are back-solved from THAT
 	/// minute's NBBO mids instead of the morning snapshot's frozen values — the snapshot IVs age badly through a 0DTE
 	/// session (IV collapses intraday, sharpening gamma toward ATM), which is why a frozen-IV replay disagrees with
-	/// what the live command showed. A data/gex live log (when present) is rendered as "·live" footer rows (gravity + walls).</summary>
+	/// what the live command showed. On the RUNNING day (no minute store yet) the same time-matching runs off this
+	/// session's own data/iv chain captures instead, so already-watched buckets stop migrating between calls. A
+	/// data/gex live log (when present) is rendered as "·live" footer rows (gravity + walls).</summary>
 	private static TimeSpan AbsSpan(TimeSpan t) => t < TimeSpan.Zero ? -t : t;
 
-	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, DateTime targetExpiry, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int? intervalMin, bool exante, string source, bool liveChain = false, bool withVexNow = false, TimeSpan? vexAt = null, TimeSpan? windowStart = null, TimeSpan? windowEnd = null)
+	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, DateTime targetExpiry, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int? intervalMin, bool exante, string source, bool liveChain = false, bool withVexNow = false, bool vendorIvs = false, TimeSpan? vexAt = null, TimeSpan? windowStart = null, TimeSpan? windowEnd = null)
 	{
 		var expiry = targetExpiry.Date;
 		var dte = Math.Max(0, (expiry - date.Date).Days);
@@ -1181,7 +1190,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// Candidates run down to single minutes: over a --start/--end slice the fine sizes fit, and pinning the
 		// exact minute a gravity flips is the reason to narrow the window in the first place.
 		var interval = intervalMin ?? new[] { 1, 2, 5, 10, 15, 20, 30, 45, 60, 90, 120 }.FirstOrDefault(c => fixedW + panels * BucketsFor(c) * estColW <= AnsiConsole.Profile.Width, 120);
-		var minuteQuotes = exante ? null : IntradayQuoteSlice.Open(ticker, date, expiry, quotes);
+		var minuteQuotes = exante || vendorIvs ? null : IntradayQuoteSlice.Open(ticker, date, expiry, quotes);
 
 		// Column marks: --start stepping by --interval to --end (the end mark is always included).
 		var hourMarks = new List<TimeSpan>();
@@ -1189,6 +1198,22 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		hourMarks.Add(close);
 		// Match the nearest intraday minute within half a bucket so adjacent columns never share a spot.
 		var tolerance = TimeSpan.FromMinutes(Math.Max(1, interval / 2));
+		// Sparse capture series (data/iv chain captures, data/gex ·live anchors) match on a TRUE half-interval: the
+		// integer tolerance above leaves dead zones on odd intervals (a 13:02:11 capture missed its 13:00 mark by 11
+		// seconds at --interval 5) — harmless against the dense per-minute spot tape, but it drops real captures.
+		var captureTolerance = TimeSpan.FromSeconds(Math.Max(60, interval * 30));
+		// Running day: this session's own chain captures (appended by every prior --intraday call and by
+		// wa-scraper's per-minute ivCapture) — a bucket near one is rebuilt from the surface that was actually
+		// visible then, making the column static across re-runs. --vendor forces this source on ANY date (the
+		// NBBO-vs-vendor comparison view), where an uncovered bucket drops instead of falling back.
+		var captureSlices = (liveChain || vendorIvs) && !exante ? LoadCaptureSlices(ticker, date, expiry, source, quotes) : null;
+		if (captureSlices != null && captureSlices.Count == 0) captureSlices = null;
+		if (vendorIvs && captureSlices == null)
+		{
+			AnsiConsole.MarkupLine($"[red]--captured: no data/iv/{ticker}/{date:yyyy-MM-dd}.csv capture rows from source '{Markup.Escape(source)}' cover the {expiry:yyyy-MM-dd} expiry. The archive is written by running-day `analyze gex` calls and wa-scraper's ivCapture.[/]");
+			return;
+		}
+		var capturedMarks = new HashSet<TimeSpan>();
 
 		// Per kept hour: the spot, the per-strike GexCells for the mapped expiry, and that hour's anchor strikes.
 		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity, decimal? Centroid, decimal? Pull, decimal? CallWall, decimal? PutWall)>();
@@ -1215,6 +1240,20 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				var atMark = minuteQuotes.At(date.Date + mark);
 				if (atMark.Count == 0) { skipped.Add(mark); continue; }   // store covers the day but not this bucket — a frozen-IV cell among time-matched ones would mislead
 				bucketQuotes = atMark;
+			}
+			else if (captureSlices != null)
+			{
+				// Nearest capture within half a bucket (same matching as the ·live rows, so the two agree column for
+				// column). No capture near the mark → the current fetch stands in and the column stays provisional.
+				Dictionary<string, OptionContractQuote>? nearestCapture = null;
+				var bestCapDiff = captureTolerance;
+				foreach (var (ts, slice) in captureSlices)
+				{
+					var capDiff = ts >= mark ? ts - mark : mark - ts;
+					if (capDiff <= bestCapDiff) { bestCapDiff = capDiff; nearestCapture = slice; }
+				}
+				if (nearestCapture != null) { bucketQuotes = nearestCapture; capturedMarks.Add(mark); }
+				else if (vendorIvs) { skipped.Add(mark); continue; }   // a comparison panel must be purely vendor-surfaced — no silent fallback columns
 			}
 
 			// asOf is the OBSERVATION instant (the bucket on --date), not the expiry — that is what gives Build the
@@ -1266,7 +1305,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		AnsiConsole.MarkupLine(minuteQuotes != null
 			? $"[dim]IVs: back-solved per bucket from REAL minute NBBO at or before each mark (data/quotes.db, {ticker} {expiry:yyyy-MM-dd} expiry on {date:yyyy-MM-dd}); OI fixed from the day's snapshot.[/]"
 			: exante ? "[dim]IVs: frozen from the prior-day --exante values.[/]"
-			: liveChain ? "[dim]IVs: frozen from the live chain at fetch time; OI fixed from the same fetch (running day — early columns replay today's OI at each bucket's spot with current IVs).[/]"
+			: vendorIvs ? $"[dim]IVs/OI: VENDOR-reported per bucket from the data/iv captures ({Markup.Escape(source)}); buckets without a capture within half an interval are dropped. Run without --captured for the NBBO-solved panel to compare against.[/]"
+			: liveChain && capturedMarks.Count > 0 ? $"[dim]IVs/OI: {capturedMarks.Count} of {hours.Count} bucket(s) rebuilt from this session's own captured chains (data/iv, appended by each running-day call) — those columns are as-displayed-then and static across re-runs; the rest are frozen from the current live fetch until a capture lands near them.[/]"
+			: liveChain ? "[dim]IVs: frozen from the live chain at fetch time; OI fixed from the same fetch (running day — every column replays today's OI at each bucket's spot with CURRENT IVs until this session accumulates data/iv captures; each call appends one).[/]"
 			: $"[yellow]IVs: back-solved from the day's OI-snapshot mids — that snapshot is stamped at the CLOSE, so every column is priced off the session's OUTCOME and the early ones are not what was visible then. data/quotes.db has no {ticker} {expiry:yyyy-MM-dd} rows for {date:yyyy-MM-dd}; backfill it, or use --exante for prior-day IVs.[/]");
 
 		var table = BuildColumnHeatmapTable("[bold]GEX (gamma)[/]", hours.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, h.Gravity)).ToList(), allStrikes, wholeGrid, maxAbsNet);
@@ -1317,7 +1358,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			foreach (var h in hours)
 			{
 				LiveGexAnchors? a = null;
-				var bestDiff = tolerance;
+				var bestDiff = captureTolerance;
 				foreach (var kv in liveLog)
 				{
 					var diff = kv.Key >= h.Mark ? kv.Key - h.Mark : h.Mark - kv.Key;
@@ -1361,7 +1402,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); [bold]Pull[/] = net-GEX-weighted distance from spot in points, [green]+[/] = the ladder's net exposure sits ABOVE spot, [red]−[/] = below. Both aggregate every in-range strike, not just the displayed rows. [green]Wall·C[/]/[red]Wall·P[/] = the strike carrying the largest call/put GEX that bucket (per-side argmax — a big two-sided strike can be a wall yet net toward dim in the map)." + (liveLog.Count > 0 ? " [cyan]·live[/] rows = the gravity/walls logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
 		if (withVexNow && vannaHours.Count > 0)
 			AnsiConsole.MarkupLine($"[dim]VEX panel = the mapped expiry's net vanna ($ dealer delta per vol point) recomputed at each bucket's spot, same quotes as the gamma columns{(vexAt != null ? $" (narrowed to the bucket nearest --time {vexAt:hh\\:mm})" : "")}. No gravity marker — vanna maps a hedging flow under an IV move, not a level. Full multi-expiry VEX: `analyze gex {Markup.Escape(ticker)}` without --intraday.[/]");
-		if (skipped.Count > 0 && liveChain)
+		if (skipped.Count > 0 && vendorIvs)
+			AnsiConsole.MarkupLine($"[dim]{skipped.Count} bucket(s) without a vendor capture within {captureTolerance.TotalMinutes:F1} min dropped: {string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))} — denser coverage comes from wa-scraper's per-minute ivCapture or more frequent analyze runs.[/]");
+		else if (skipped.Count > 0 && liveChain)
 			AnsiConsole.MarkupLine($"[dim]{skipped.Count} bucket(s) still ahead ({string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))}) — the session tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET; re-run to extend the columns as the day unfolds.[/]");
 		else if (skipped.Count > 0)
 			AnsiConsole.MarkupLine($"[yellow]Dropped {skipped.Count} bucket(s) with no spot/quote within {tolerance.TotalMinutes:F0} min: {string.Join(", ", skipped.Select(s => s.ToString(@"hh\:mm")))} — the spot tape ends at {intradaySpots.Keys.Last():hh\\:mm} ET{(date.Date == DateTime.Today ? $". Refresh today's tape with `wa ai history {ticker} --partial`" : "")}.[/]");
@@ -1431,6 +1474,43 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			}
 			return set;
 		}
+	}
+
+	/// <summary>Today's captured chain surfaces for one expiry, read back from the data/iv dump every running-day
+	/// --intraday call appends: ET capture time → the mapped expiry's contracts carrying that capture's bid/ask,
+	/// vendor IV and OI, rejoined to the live chain's contract symbols by (strike, right). Each capture is exactly
+	/// the per-strike input set behind a displayed run, so a bucket rebuilt from one reproduces what that run showed
+	/// instead of repricing history with the current fetch. Source-filtered like the data/gex reader; malformed lines
+	/// are skipped. Rows whose contract is absent from the current fetch drop out — with the fetch window spanning
+	/// hundreds of points around spot, intraday drift does not reach that edge in practice.</summary>
+	private static List<(TimeSpan Ts, Dictionary<string, OptionContractQuote> Quotes)> LoadCaptureSlices(string ticker, DateTime date, DateTime expiry, string source, Dictionary<string, OptionContractQuote> chain)
+	{
+		var result = new List<(TimeSpan, Dictionary<string, OptionContractQuote>)>();
+		var path = Program.ResolvePath($"data/iv/{ticker}/{date:yyyy-MM-dd}.csv");
+		if (!File.Exists(path)) return result;
+		var bySpec = new Dictionary<(decimal Strike, string Right), OptionContractQuote>();
+		foreach (var (sym, q) in chain)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date == expiry.Date && !string.IsNullOrEmpty(p.CallPut)) bySpec[(p.Strike, p.CallPut)] = q;
+		}
+		if (bySpec.Count == 0) return result;
+		var expiryStr = expiry.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+		var byTs = new SortedDictionary<TimeSpan, Dictionary<string, OptionContractQuote>>();
+		foreach (var line in File.ReadLines(path).Skip(1))
+		{
+			var f = line.Split(',');
+			if (f.Length < 11 || !string.Equals(f[2], source, StringComparison.OrdinalIgnoreCase) || f[3] != expiryStr) continue;
+			if (!TimeSpan.TryParseExact(f[1], @"hh\:mm\:ss", CultureInfo.InvariantCulture, out var ts)) continue;
+			if (!decimal.TryParse(f[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var strike) || !bySpec.TryGetValue((strike, f[5]), out var baseQuote)) continue;
+			decimal? Num(string s) => decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : null;
+			if (!byTs.TryGetValue(ts, out var slice)) byTs[ts] = slice = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+			// LastPrice is nulled: the dump doesn't persist it, and letting the CURRENT fetch's last price serve as a
+			// mid fallback inside a time-matched column would quietly re-import the very leak this slice removes.
+			slice[baseQuote.ContractSymbol] = baseQuote with { Bid = Num(f[6]), Ask = Num(f[7]), ImpliedVolatility = Num(f[8]), OpenInterest = long.TryParse(f[9], NumberStyles.Integer, CultureInfo.InvariantCulture, out var oi) ? oi : null, LastPrice = null };
+		}
+		foreach (var kv in byTs) result.Add((kv.Key, kv.Value));
+		return result;
 	}
 
 	/// <summary>The gamma anchors one live `analyze gex` run displayed for one expiry, as read back from the data/gex
@@ -1515,41 +1595,24 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		AnsiConsole.MarkupLine($"[dim]Logged to data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl (the --intraday heatmap reads this back as its \"Gravity\" row).[/]");
 	}
 
-	/// <summary>--dump: appends one CSV row per in-window contract of this LIVE fetch to
-	/// <c>data/iv/<TICKER>/<ET date>.csv</c> — the per-strike vendor inputs (bid/ask, vendor IV, OI)
-	/// behind the displayed gex values, which are otherwise discarded after the run. Source-tagged so
-	/// interleaved webull/schwab dumps land in one day file and join on (time, expiry, strike, right).
-	/// Window = the same expiry/strike filters the heatmap uses; null bid/ask/IV/OI dump as empty fields
-	/// (a vendor null is itself data). The time column is the actual ET fetch time, not a bar label.</summary>
+	/// <summary>--dump (and the running-day --intraday capture): appends one row per in-window contract of this LIVE
+	/// fetch to the <see cref="IvDumpStore"/> archive — the per-strike vendor inputs (bid/ask, vendor IV, OI) behind
+	/// the displayed gex values, which are otherwise discarded after the run. Window = the same expiry/strike filters
+	/// the heatmap uses; the row format and file layout live in the shared store.</summary>
 	private static void AppendIvDump(string ticker, decimal spot, Dictionary<string, OptionContractQuote> quotes, AnalyzeGexSettings settings, DateTime asOf, DateTime? expiryFilter)
 	{
 		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
-		var source = settings.VendorName;
 		var band = settings.StrikeRangePct / 100m;
-		var sb = new System.Text.StringBuilder();
-		var rows = 0;
-		foreach (var kv in quotes.OrderBy(k => k.Key, StringComparer.Ordinal))
+		var inWindow = quotes.Values.Where(q =>
 		{
-			var parsed = ParsingHelpers.ParseOptionSymbol(kv.Key);
-			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			var parsed = ParsingHelpers.ParseOptionSymbol(q.ContractSymbol);
+			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)) return false;
 			var exp = parsed.ExpiryDate.Date;
-			if (expiryFilter.HasValue ? exp != expiryFilter.Value.Date : exp < asOf.Date || exp > asOf.Date.AddDays(settings.Dte)) continue;
-			if (Math.Abs(parsed.Strike - spot) / spot > band) continue;
-			var q = kv.Value;
-			string D(decimal? v) => v?.ToString(CultureInfo.InvariantCulture) ?? "";
-			sb.Append(nowEt.ToString("yyyy-MM-dd,HH:mm:ss", CultureInfo.InvariantCulture)).Append(',').Append(source).Append(',')
-				.Append(exp.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).Append(',')
-				.Append(parsed.Strike.ToString(CultureInfo.InvariantCulture)).Append(',').Append(parsed.CallPut).Append(',')
-				.Append(D(q.Bid)).Append(',').Append(D(q.Ask)).Append(',').Append(D(q.ImpliedVolatility)).Append(',')
-				.Append(q.OpenInterest?.ToString(CultureInfo.InvariantCulture) ?? "").Append(',')
-				.Append(spot.ToString(CultureInfo.InvariantCulture)).Append('\n');
-			rows++;
-		}
-		var path = Program.ResolvePath($"data/iv/{ticker}/{nowEt:yyyy-MM-dd}.csv");
-		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-		if (!File.Exists(path)) File.WriteAllText(path, "date,time,source,expiry,strike,right,bid,ask,iv,oi,spot\n");
-		File.AppendAllText(path, sb.ToString());
-		AnsiConsole.MarkupLine($"[dim]Dumped {rows} {source} contract row(s) to data/iv/{ticker}/{nowEt:yyyy-MM-dd}.csv.[/]");
+			if (expiryFilter.HasValue ? exp != expiryFilter.Value.Date : exp < asOf.Date || exp > asOf.Date.AddDays(settings.Dte)) return false;
+			return Math.Abs(parsed.Strike - spot) / spot <= band;
+		});
+		var rows = IvDumpStore.Append(ticker, settings.VendorName, nowEt, spot, inWindow);
+		AnsiConsole.MarkupLine($"[dim]Dumped {rows} {settings.VendorName} contract row(s) to data/iv/{ticker}/{nowEt:yyyy-MM-dd}.csv.[/]");
 	}
 
 	private static string FormatCompact(decimal v)

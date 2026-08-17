@@ -36,7 +36,7 @@ internal sealed class ScraperLoop
 
 	public async Task<int> RunAsync(DateTime startEt, DateTime endEt, CancellationToken cancellation)
 	{
-		AnsiConsole.MarkupLine($"[bold]wa-scraper[/] ticker={_ticker} interval={_config.IntervalSeconds}s startEt={startEt:HH:mm:ss} endEt={endEt:HH:mm:ss} quotes=data/quotes.db oi={Markup.Escape(_oiDir)}");
+		AnsiConsole.MarkupLine($"[bold]wa-scraper[/] ticker={_ticker} interval={_config.IntervalSeconds}s startEt={startEt:HH:mm:ss} endEt={endEt:HH:mm:ss} quotes=data/quotes.db oi={Markup.Escape(_oiDir)}{(_config.IvCapture ? $" iv=data/iv/{_ticker}" : "")}");
 
 		// Sleep until first fire. If startEt is in the past, we begin immediately at the next
 		// minute-boundary so the first persisted line has a clean ET wall-clock minute stamp.
@@ -115,6 +115,9 @@ internal sealed class ScraperLoop
 	/// grouped into one CSV per expiration. Columns <c>date,time,strike,right,bid,ask,bid_size,ask_size</c>.</item>
 	/// <item><c>data/oi/<TICKER>/<date>.jsonl</c> — exactly ONE full-chain snapshot per ET date (OI is
 	/// constant intraday), written on the first successful tick of the day and skipped thereafter.</item>
+	/// <item><c>data/iv/<TICKER>/<date>.csv</c> (when <c>config.IvCapture</c>) — one row per kept contract per RTH
+	/// tick carrying the VENDOR-reported bid/ask/IV/OI, via the shared <see cref="WebullAnalytics.IvDumpStore"/>.
+	/// Additive vendor archive; not a backtest store and never touched by the ThetaData backfill.</item>
 	/// </list>
 	/// Keeps contracts expiring from today out to <c>config.MaxDte</c> calendar days, then applies a
 	/// <c>±config.StrikeBandFraction</c> moneyness band around the fetched spot (Schwab returns range=ALL, so the
@@ -187,7 +190,15 @@ internal sealed class ScraperLoop
 		// (verified 2026-06-10), so fires before the open are skipped; the 09:30:00 fire is the first real
 		// sample and lands as the 09:29-labeled auction-boundary row.
 		if (fireEt.TimeOfDay >= MarketOpenEt)
+		{
 			await AppendQuotesAsync(todayContracts, dateStr, timeStr, cancellation);
+			// Vendor-perspective capture (same pre-open gate — a frozen indicative book's IVs are not observations):
+			// the vendor's reported IVs/OI per contract, which quotes.db (NBBO-only by schema) cannot carry and which
+			// are otherwise gone after this tick. Additive CSV archive; stamped with the actual fire time, matching
+			// the `analyze gex --dump` convention rather than the store's end-of-bar label.
+			if (_config.IvCapture && spot is decimal sp2 && sp2 > 0m)
+				WebullAnalytics.IvDumpStore.Append(_ticker, _config.Source.Trim().ToLowerInvariant(), fireEt, sp2, todayContracts);
+		}
 
 		// --- data/oi/<TICKER>/<date>.jsonl : ONE full-chain snapshot per day (OI is constant intraday).
 		// OI is keyed by the calendar session, not a bar boundary — stamp the FIRE date (the label date
