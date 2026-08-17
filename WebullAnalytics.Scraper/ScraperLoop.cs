@@ -197,7 +197,7 @@ internal sealed class ScraperLoop
 			// are otherwise gone after this tick. Additive CSV archive; stamped with the actual fire time, matching
 			// the `analyze gex --dump` convention rather than the store's end-of-bar label.
 			if (_config.IvCapture && spot is decimal sp2 && sp2 > 0m)
-				WebullAnalytics.IvDumpStore.Append(_ticker, _config.Source.Trim().ToLowerInvariant(), fireEt, sp2, todayContracts);
+				WebullAnalytics.IvDumpStore.Append(_ticker, _config.Vendor.Trim().ToLowerInvariant(), fireEt, sp2, todayContracts);
 		}
 
 		// --- data/oi/<TICKER>/<date>.jsonl : ONE full-chain snapshot per day (OI is constant intraday).

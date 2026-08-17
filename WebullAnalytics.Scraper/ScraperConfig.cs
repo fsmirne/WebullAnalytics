@@ -9,11 +9,12 @@ namespace WebullAnalytics.Scraper;
 /// (one full-chain OI snapshot per day) — both rooted under <see cref="WebullAnalytics.Program.BaseDir"/>.</summary>
 internal sealed class ScraperConfig
 {
-	/// <summary>Chain data source: <c>"schwab"</c> (default — real NBBO + OI via the Schwab Trader API, requires
+	/// <summary>Chain vendor: <c>"schwab"</c> (default — real NBBO + OI via the Schwab Trader API, requires
 	/// `wa schwab login`) or <c>"webull"</c> (the legacy scraped session; bid/ask null beyond the front expiry).
-	/// Switch back to Webull by setting this to "webull" (or passing <c>--source webull</c>).</summary>
+	/// Switch back to Webull by setting this to "webull" (or passing <c>--vendor webull</c>). The JSON key stays
+	/// <c>source</c> so existing scraper-config.json files keep working.</summary>
 	[JsonPropertyName("source")]
-	public string Source { get; set; } = "schwab";
+	public string Vendor { get; set; } = "schwab";
 
 	[JsonPropertyName("intervalSeconds")]
 	public int IntervalSeconds { get; set; } = 60;

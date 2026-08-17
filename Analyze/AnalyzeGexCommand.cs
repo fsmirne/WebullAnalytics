@@ -1214,6 +1214,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return;
 		}
 		var capturedMarks = new HashSet<TimeSpan>();
+		var storeMarks = new HashSet<TimeSpan>();
 
 		// Per kept hour: the spot, the per-strike GexCells for the mapped expiry, and that hour's anchor strikes.
 		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity, decimal? Centroid, decimal? Pull, decimal? CallWall, decimal? PutWall)>();
@@ -1233,15 +1234,20 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			if (!spot.HasValue || spot.Value <= 0m) { skipped.Add(mark); continue; }
 
 			var bucketQuotes = quotes;
+			var storeServed = false;
 			if (minuteQuotes != null)
 			{
 				// Strictly at-or-before the mark, within the store's staleness window — never a later print. The
 				// whole point of this panel is what was visible AT the bucket, so a forward reach would be a leak.
 				var atMark = minuteQuotes.At(date.Date + mark);
-				if (atMark.Count == 0) { skipped.Add(mark); continue; }   // store covers the day but not this bucket — a frozen-IV cell among time-matched ones would mislead
-				bucketQuotes = atMark;
+				if (atMark.Count > 0) { bucketQuotes = atMark; storeServed = true; storeMarks.Add(mark); }
+				// A bucket the store can't serve: on a PAST-date replay it drops (a frozen-IV cell among
+				// time-matched ones would mislead), but on the RUNNING day a partial store is the NORM — a
+				// mid-session scraper start would otherwise erase every already-watched morning column — so
+				// the bucket falls through to the capture slices, then stays provisional on the live fetch.
+				else if (!liveChain) { skipped.Add(mark); continue; }
 			}
-			else if (captureSlices != null)
+			if (!storeServed && captureSlices != null)
 			{
 				// Nearest capture within half a bucket (same matching as the ·live rows, so the two agree column for
 				// column). No capture near the mark → the current fetch stands in and the column stays provisional.
@@ -1302,12 +1308,11 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		AnsiConsole.MarkupLine(dte == 0
 			? $"[bold]{ticker}[/] 0DTE {date:yyyy-MM-dd} — intraday GEX gravity migration"
 			: $"[bold]{ticker}[/] {expiry:yyyy-MM-dd} expiry ({dte}DTE) as it traded on {date:yyyy-MM-dd} — intraday GEX gravity migration");
-		AnsiConsole.MarkupLine(minuteQuotes != null
+		AnsiConsole.MarkupLine(minuteQuotes != null && !liveChain
 			? $"[dim]IVs: back-solved per bucket from REAL minute NBBO at or before each mark (data/quotes.db, {ticker} {expiry:yyyy-MM-dd} expiry on {date:yyyy-MM-dd}); OI fixed from the day's snapshot.[/]"
 			: exante ? "[dim]IVs: frozen from the prior-day --exante values.[/]"
 			: vendorIvs ? $"[dim]IVs/OI: VENDOR-reported per bucket from the data/iv captures ({Markup.Escape(source)}); buckets without a capture within half an interval are dropped. Run without --captured for the NBBO-solved panel to compare against.[/]"
-			: liveChain && capturedMarks.Count > 0 ? $"[dim]IVs/OI: {capturedMarks.Count} of {hours.Count} bucket(s) rebuilt from this session's own captured chains (data/iv, appended by each running-day call) — those columns are as-displayed-then and static across re-runs; the rest are frozen from the current live fetch until a capture lands near them.[/]"
-			: liveChain ? "[dim]IVs: frozen from the live chain at fetch time; OI fixed from the same fetch (running day — every column replays today's OI at each bucket's spot with CURRENT IVs until this session accumulates data/iv captures; each call appends one).[/]"
+			: liveChain ? $"[dim]IVs/OI running day: {storeMarks.Count} bucket(s) time-matched from minute NBBO (data/quotes.db, wa-scraper), {capturedMarks.Count} from this session's data/iv chain captures, {hours.Count - storeMarks.Count - capturedMarks.Count} provisional on the current live fetch (those reprice each call until coverage lands near them).[/]"
 			: $"[yellow]IVs: back-solved from the day's OI-snapshot mids — that snapshot is stamped at the CLOSE, so every column is priced off the session's OUTCOME and the early ones are not what was visible then. data/quotes.db has no {ticker} {expiry:yyyy-MM-dd} rows for {date:yyyy-MM-dd}; backfill it, or use --exante for prior-day IVs.[/]");
 
 		var table = BuildColumnHeatmapTable("[bold]GEX (gamma)[/]", hours.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, h.Gravity)).ToList(), allStrikes, wholeGrid, maxAbsNet);
