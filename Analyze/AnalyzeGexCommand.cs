@@ -63,7 +63,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public bool Dump { get; set; }
 
 	[CommandOption("--intraday")]
-	[Description("Intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Maps --date's own 0DTE by default; pass --expiry to watch a LATER expiry's gravity move through --date instead (the only option on roots with no daily expirations). Without --date (or with --date today) this is the RUNNING-DAY view: OI/IVs come from the live chain fetch and the columns run 09:30 through the current bucket. A past --date replays that day offline from its data/oi snapshot, with per-bucket IVs back-solved from the minute-quote store (data/quotes/<TICKER>/<expiry>.csv) when it covers the day, else frozen from the snapshot. Skips the walls/totals/per-expiry tables.")]
+	[Description("Intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Maps --date's own 0DTE by default; pass --expiry to watch a LATER expiry's gravity move through --date instead (the only option on roots with no daily expirations). Without --date (or with --date today) this is the RUNNING-DAY view: OI/IVs come from the live chain fetch and the columns run 09:30 through the current bucket; every column is repriced with the CURRENT chain's IVs, so finished buckets shift between calls — but each call also captures the current bucket's gravity to the data/gex log, and those static as-displayed values render as the \"Gravity·live\" row. A past --date replays that day offline from its data/oi snapshot, with per-bucket IVs back-solved from the minute-quote store (data/quotes/<TICKER>/<expiry>.csv) when it covers the day, else frozen from the snapshot. Skips the chain-totals and per-expiry tables; the walls appear as per-bucket Wall·C/Wall·P footer rows instead of their own table.")]
 	public bool Intraday { get; set; }
 
 	[CommandOption("--interval <MIN>")]
@@ -311,6 +311,17 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				// spot within tolerance and drop out naturally.
 				await RefreshIntradayTapeAsync(ticker, apiConfig, cancellation);
 				AnsiConsole.MarkupLine($"[dim]Running-day heatmap from the live {Markup.Escape(settings.VendorName)} chain ({quotes.Count} contracts); columns end at the current bucket.[/]");
+				// A running-day --intraday call is often the only gex command run all session, but only plain runs fed
+				// the data/gex live log — so the heatmap's own "Gravity·live" row stayed empty while every re-render
+				// silently repriced the finished buckets with the current chain's IVs. Capture the one bucket that IS
+				// current before rendering: the mapped expiry's gravity at the live spot, exactly the record a plain run
+				// writes. Earlier columns are retro-priced by construction and are never logged from here. --exante swaps
+				// the chain's IVs for prior-day values, which must not enter the log as live observations.
+				if (!settings.Exante)
+				{
+					var liveMatrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter: intradayExpiry, settings.StrikeRangePct / 100m, maxDteDays: Math.Max(0, (intradayExpiry - asOf.Date).Days), settings.MaxStrikes);
+					if (liveMatrix.Expiries.Count > 0) AppendGexLog(ticker, spot.Value, liveMatrix, settings);
+				}
 			}
 			RenderIntradayGexHeatmap(ticker, asOf.Date, intradayExpiry, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical, withVexNow: settings.BothGreeks,
 				vexAt: AnalyzeGexSettings.ParseEtTime(settings.Time),
@@ -1139,7 +1150,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// wa-scraper / ThetaData sync) covers this expiry on this day, each bucket's IVs are back-solved from THAT
 	/// minute's NBBO mids instead of the morning snapshot's frozen values — the snapshot IVs age badly through a 0DTE
 	/// session (IV collapses intraday, sharpening gamma toward ATM), which is why a frozen-IV replay disagrees with
-	/// what the live command showed. A data/gex live log (when present) is rendered as a "Gravity" footer row.</summary>
+	/// what the live command showed. A data/gex live log (when present) is rendered as "·live" footer rows (gravity + walls).</summary>
 	private static TimeSpan AbsSpan(TimeSpan t) => t < TimeSpan.Zero ? -t : t;
 
 	private static void RenderIntradayGexHeatmap(string ticker, DateTime date, DateTime targetExpiry, Dictionary<string, OptionContractQuote> quotes, decimal strikeRangeFraction, int maxStrikes, int? intervalMin, bool exante, string source, bool liveChain = false, bool withVexNow = false, TimeSpan? vexAt = null, TimeSpan? windowStart = null, TimeSpan? windowEnd = null)
@@ -1179,8 +1190,8 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// Match the nearest intraday minute within half a bucket so adjacent columns never share a spot.
 		var tolerance = TimeSpan.FromMinutes(Math.Max(1, interval / 2));
 
-		// Per kept hour: the spot, the per-strike GexCells for the mapped expiry, and that hour's gravity strike.
-		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity, decimal? Centroid, decimal? Pull)>();
+		// Per kept hour: the spot, the per-strike GexCells for the mapped expiry, and that hour's anchor strikes.
+		var hours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, decimal? Gravity, decimal? Centroid, decimal? Pull, decimal? CallWall, decimal? PutWall)>();
 		var skipped = new List<TimeSpan>();
 		// Per-bucket VEX cells (same time-matched quotes as the gamma bucket) — the vanna MIGRATION panel
 		// rendered beside the gamma one; --time narrows the panel to the single bucket nearest that ET time.
@@ -1216,7 +1227,8 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			m.GravityByExpiry.TryGetValue(expiry, out var grav);
 			m.GrossCentroidByExpiry.TryGetValue(expiry, out var cent);
 			m.NetPullByExpiry.TryGetValue(expiry, out var pull);
-			hours.Add((mark, spot.Value, cells, grav, cent, pull));
+			var (callWall, putWall) = m.FindWalls(expiry);
+			hours.Add((mark, spot.Value, cells, grav, cent, pull, callWall, putWall));
 			if (withVexNow)
 			{
 				var vmB = GexMatrix.Build(bucketQuotes, ticker, spot.Value, date.Date + mark, expiryFilter: expiry, strikeRangeFraction, maxDteDays: dte, maxStrikes, GreekKind.Vanna);
@@ -1280,25 +1292,44 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		table.AddRow(centroidCells.ToArray());
 		table.AddRow(pullCells.ToArray());
 
-		// "Gravity·live" footer row: per bucket, the gravity the live `analyze gex` runs actually displayed (data/gex
-		// log) nearest the mark. The live values come from vendor-reported IVs that are never persisted, so this row
-		// is the only ground truth a replay can be compared against.
-		var liveGravity = LoadLiveGravityLog(ticker, date, expiry, source);
-		if (liveGravity.Count > 0)
+		// Per-side wall rows: the strike carrying the largest CALL GEX and the largest PUT GEX that bucket. The net
+		// color map cannot substitute for these — a strike with a huge call AND put book nets toward zero and renders
+		// dim, yet can be either wall (or both) — so they get their own rows, migrating per bucket like the gravity.
+		var wallCCells = new List<string> { "[bold green]Wall·C[/]" };
+		var wallPCells = new List<string> { "[bold red]Wall·P[/]" };
+		foreach (var h in hours)
 		{
-			var liveCells = new List<string> { "[bold cyan]Gravity·live[/]" };
+			wallCCells.Add(h.CallWall.HasValue ? $"[green]${h.CallWall.Value:N0}[/]" : "[dim]·[/]");
+			wallPCells.Add(h.PutWall.HasValue ? $"[red]${h.PutWall.Value:N0}[/]" : "[dim]·[/]");
+		}
+		table.AddRow(wallCCells.ToArray());
+		table.AddRow(wallPCells.ToArray());
+
+		// "·live" footer rows: per bucket, the gravity and walls the live `analyze gex` runs actually displayed
+		// (data/gex log) nearest the mark. The live values come from vendor-reported IVs that are never persisted, so
+		// these rows are the only ground truth a replay can be compared against.
+		var liveLog = LoadLiveGexLog(ticker, date, expiry, source);
+		if (liveLog.Count > 0)
+		{
+			var liveGravityCells = new List<string> { "[bold cyan]Gravity·live[/]" };
+			var liveWallCCells = new List<string> { "[bold cyan]Wall·C·live[/]" };
+			var liveWallPCells = new List<string> { "[bold cyan]Wall·P·live[/]" };
 			foreach (var h in hours)
 			{
-				decimal? g = null;
+				LiveGexAnchors? a = null;
 				var bestDiff = tolerance;
-				foreach (var kv in liveGravity)
+				foreach (var kv in liveLog)
 				{
 					var diff = kv.Key >= h.Mark ? kv.Key - h.Mark : h.Mark - kv.Key;
-					if (diff <= bestDiff) { bestDiff = diff; g = kv.Value; }
+					if (diff <= bestDiff) { bestDiff = diff; a = kv.Value; }
 				}
-				liveCells.Add(g.HasValue ? $"[bold cyan]${g.Value:N2}[/]" : "[dim]·[/]");
+				liveGravityCells.Add(a?.Gravity != null ? $"[bold cyan]${a.Gravity.Value:N2}[/]" : "[dim]·[/]");
+				liveWallCCells.Add(a?.CallWall != null ? $"[cyan]${a.CallWall.Value:N2}[/]" : "[dim]·[/]");
+				liveWallPCells.Add(a?.PutWall != null ? $"[cyan]${a.PutWall.Value:N2}[/]" : "[dim]·[/]");
 			}
-			table.AddRow(liveCells.ToArray());
+			table.AddRow(liveGravityCells.ToArray());
+			table.AddRow(liveWallCCells.ToArray());
+			table.AddRow(liveWallPCells.ToArray());
 		}
 
 		// VEX migration panel: the vanna analogue of the gamma table, bucket for bucket from the SAME
@@ -1327,7 +1358,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 		else
 			AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); [bold]Pull[/] = net-GEX-weighted distance from spot in points, [green]+[/] = the ladder's net exposure sits ABOVE spot, [red]−[/] = below. Both aggregate every in-range strike, not just the displayed rows." + (liveGravity.Count > 0 ? " [cyan]Gravity·live[/] row = the gravity strike logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
+		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); [bold]Pull[/] = net-GEX-weighted distance from spot in points, [green]+[/] = the ladder's net exposure sits ABOVE spot, [red]−[/] = below. Both aggregate every in-range strike, not just the displayed rows. [green]Wall·C[/]/[red]Wall·P[/] = the strike carrying the largest call/put GEX that bucket (per-side argmax — a big two-sided strike can be a wall yet net toward dim in the map)." + (liveLog.Count > 0 ? " [cyan]·live[/] rows = the gravity/walls logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
 		if (withVexNow && vannaHours.Count > 0)
 			AnsiConsole.MarkupLine($"[dim]VEX panel = the mapped expiry's net vanna ($ dealer delta per vol point) recomputed at each bucket's spot, same quotes as the gamma columns{(vexAt != null ? $" (narrowed to the bucket nearest --time {vexAt:hh\\:mm})" : "")}. No gravity marker — vanna maps a hedging flow under an IV move, not a level. Full multi-expiry VEX: `analyze gex {Markup.Escape(ticker)}` without --intraday.[/]");
 		if (skipped.Count > 0 && liveChain)
@@ -1402,15 +1433,20 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 	}
 
+	/// <summary>The gamma anchors one live `analyze gex` run displayed for one expiry, as read back from the data/gex
+	/// log. Fields are independently nullable — a record can carry a gravity with no walls (or vice versa) when the
+	/// in-window cell set was one-sided.</summary>
+	private sealed record LiveGexAnchors(decimal? Gravity, decimal? CallWall, decimal? PutWall);
+
 	/// <summary>Reads the live `analyze gex` log at <c>data/gex/<TICKER>/<date>.jsonl</c> and returns
-	/// ET time-of-day → the gravity strike that run displayed for the <paramref name="expiry"/> series. The log file is
-	/// per SESSION and each record carries every expiry it rendered, so an off-expiry map still finds its own row.
-	/// Only records from <paramref name="source"/> are kept (records without a source field predate the
+	/// ET time-of-day → the gravity and wall strikes that run displayed for the <paramref name="expiry"/> series. The
+	/// log file is per SESSION and each record carries every expiry it rendered, so an off-expiry map still finds its
+	/// own row. Only records from <paramref name="source"/> are kept (records without a source field predate the
 	/// --source option and count as webull). Corrupt lines are skipped — a torn concurrent append must not
 	/// take down the heatmap.</summary>
-	private static SortedDictionary<TimeSpan, decimal> LoadLiveGravityLog(string ticker, DateTime date, DateTime expiry, string source)
+	private static SortedDictionary<TimeSpan, LiveGexAnchors> LoadLiveGexLog(string ticker, DateTime date, DateTime expiry, string source)
 	{
-		var result = new SortedDictionary<TimeSpan, decimal>();
+		var result = new SortedDictionary<TimeSpan, LiveGexAnchors>();
 		var path = Program.ResolvePath($"data/gex/{ticker}/{date:yyyy-MM-dd}.jsonl");
 		if (!File.Exists(path)) return result;
 		var expiryStr = expiry.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -1426,8 +1462,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				if (!root.TryGetProperty("tsEt", out var tsEl) || !DateTime.TryParse(tsEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var ts)) continue;
 				if (!root.TryGetProperty("expiries", out var exps) || exps.ValueKind != JsonValueKind.Array) continue;
 				foreach (var e in exps.EnumerateArray())
-					if (e.TryGetProperty("expiry", out var ex) && ex.GetString() == expiryStr && e.TryGetProperty("gravity", out var g) && g.ValueKind == JsonValueKind.Number)
-						result[ts.TimeOfDay] = g.GetDecimal();
+				{
+					if (!e.TryGetProperty("expiry", out var ex) || ex.GetString() != expiryStr) continue;
+					decimal? Num(string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDecimal() : null;
+					var anchors = new LiveGexAnchors(Num("gravity"), Num("callWall"), Num("putWall"));
+					if (anchors.Gravity.HasValue || anchors.CallWall.HasValue || anchors.PutWall.HasValue) result[ts.TimeOfDay] = anchors;
+				}
 			}
 			catch (JsonException) { }
 		}
