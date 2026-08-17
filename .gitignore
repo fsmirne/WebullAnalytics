@@ -507,6 +507,8 @@ creds.txt
 
 # local working notes — keep out of the remote
 scripts/pvb_campaign.md
+scripts/gex_gravity_range_study.md
+scripts/gravity_range_daily.csv
 CAMPAIGN_STATE.md
 clipboard.png
 pre.png
