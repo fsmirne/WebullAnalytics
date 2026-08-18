@@ -46,7 +46,7 @@ import logging
 
 # Canonical quote store: encoding + DB helpers are single-sourced in import_quotes_sqlite so the backfill,
 # the scraper, and the importer all write byte-identical rows (scripts/ is on sys.path when run as a script).
-from import_quotes_sqlite import encode_quote, connect_wal, ymd_int, SEALED_SQL, KNOWN_HOLES_SQL
+from import_quotes_sqlite import encode_quote, encode_ohlcv, connect_wal, ymd_int, SEALED_SQL, KNOWN_HOLES_SQL, OHLCV_SEALED_SQL, OHLCV_KNOWN_HOLES_SQL
 
 NY = zoneinfo.ZoneInfo("America/New_York")
 log = logging.getLogger("backfill")  # our own messages go here (not root), so we can quiet libraries
@@ -782,12 +782,119 @@ def process_one_expiration(client, ticker, exp, dte, rate, out_root, gstart, gen
     return total_rows
 
 
-def _quote_expiry_worker(result_q, creds, ticker, exp, dte, rate, out_root_str, gstart_iso, gend_iso, chunk_days, idx=0, total=0, band=0.10, supplement=False):
+def process_one_expiration_ohlcv(client, ticker, exp, dte, rate, out_root, gstart, gend, chunk_days, progress="", band=0.10):
+    """Pull minute trade OHLCV for one expiration across its DTE window (clamped to [gstart,gend]), keep
+    ±`band` strikes and TRADED bars only (the endpoint serves a dense minute grid with volume=0 filler), and
+    write into the canonical store's `ohlcv` table via the same staging+promote discipline as the quote pull.
+    Bar labels are START-of-bar as served (validated 2026-08-18: the 09:30:00 bar carries the opening trades;
+    per-contract day sums reconcile to EOD volume up to the GTH session) — the quotes pull's -60s relabel does
+    NOT apply here. Completeness gate: interior-day only (a session between the expiry's first and last traded
+    day with NO trades chain-wide inside the band would be a vendor hole on these roots; proven vendor gaps go
+    in `ohlcv_known_holes`). There is deliberately NO strike-ladder gate — sparse volume ladders are the norm,
+    unlike quote ladders. Returns row count."""
+    import numpy as np  # noqa
+    import pandas as pd
+    exp_d = date.fromisoformat(exp) if isinstance(exp, str) else exp
+    start_d = max(gstart, exp_d - timedelta(days=dte))
+    end_d = min(gend, exp_d)
+    if start_d > end_d:
+        return 0
+
+    unders = fetch_underlying_closes(client, ticker, start_d, end_d)
+    exp_int = ymd_int(exp_d.isoformat())
+    db_path = _quotes_db_path(out_root)
+    total_rows, days, saw_bars, first_write = 0, set(), False, True
+    for ms, me in windows(start_d, end_d, chunk_days):
+        df = thetacall(client.option_history_ohlc, symbol=ticker, expiration=exp_d, interval="1m",
+                       strike="*", start_date=ms, end_date=me)
+        if df is None or len(df) == 0:
+            # Same empty-chunk discipline as the quote pull: pre-listing chunks skip silently; an empty chunk
+            # after data began, covering a real session, gets one retry then a loud warning.
+            if not saw_bars:
+                continue
+            if not any(ms.isoformat() <= d <= me.isoformat() for d in unders):
+                continue
+            df = thetacall(client.option_history_ohlc, symbol=ticker, expiration=exp_d, interval="1m",
+                           strike="*", start_date=ms, end_date=me)
+            if df is None or len(df) == 0:
+                log.info(f"    [warn] {ticker} {exp_d}: ohlcv chunk {ms}..{me} EMPTY after data began — possible internal hole; sessions left unfilled")
+                continue
+        saw_bars = True
+        if not unders:
+            continue
+        qt = pick_col(df, QUOTE_TIME)
+        qk, qr = pick_col(df, EOD_STRIKE), pick_col(df, EOD_RIGHT)
+        vol = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+        ts = pd.to_datetime(df[qt])   # START-of-bar labels as served — no -60s relabel (see docstring)
+        dts = ts.map(norm_date)
+        spot = pd.to_numeric(dts.map(unders.get), errors="coerce")
+        strike = pd.to_numeric(df[qk], errors="coerce")
+        keep = (spot.notna() & strike.notna() & (vol > 0)
+                & ((strike / spot - 1.0).abs() <= band))
+        if not keep.any():
+            continue
+        part = pd.DataFrame({
+            "date": dts[keep],
+            "time": ts[keep].map(norm_minute),
+            "strike": strike[keep],
+            "right": df.loc[keep, qr].map(norm_right),
+            "open": df.loc[keep, "open"], "high": df.loc[keep, "high"],
+            "low": df.loc[keep, "low"], "close": df.loc[keep, "close"],
+            "volume": vol[keep], "trades": df.loc[keep, "count"] if "count" in df.columns else 0,
+            "vwap": df.loc[keep, "vwap"] if "vwap" in df.columns else float("nan"),
+        })
+        rows = [encode_ohlcv(ticker, exp_int, r.date, r.time, r.strike, r.right, r.open, r.high, r.low, r.close, r.volume, r.trades, r.vwap)
+                for r in part.itertuples(index=False)]
+        rows = [row for row in rows if row is not None]
+        if not rows:
+            continue
+        rows.sort(key=lambda r: (r[2], r[4], r[5], r[3]))
+        with _DB_WRITE_LOCK:
+            conn = connect_wal(db_path)
+            try:
+                if first_write:
+                    conn.execute("DELETE FROM ohlcv_staging WHERE root=? AND expiry=?", (ticker, exp_int))
+                    first_write = False
+                conn.executemany("INSERT OR IGNORE INTO ohlcv_staging VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                conn.commit()
+            finally:
+                conn.close()
+        total_rows += len(rows)
+        days.update(part["date"].tolist())
+    if total_rows:
+        with _DB_WRITE_LOCK:
+            conn = connect_wal(db_path)
+            try:
+                conn.execute("DELETE FROM ohlcv WHERE root=? AND expiry=?", (ticker, exp_int))
+                conn.execute("INSERT INTO ohlcv SELECT * FROM ohlcv_staging WHERE root=? AND expiry=?", (ticker, exp_int))
+                conn.execute("DELETE FROM ohlcv_staging WHERE root=? AND expiry=?", (ticker, exp_int))
+                conn.commit()
+            finally:
+                conn.close()
+    if saw_bars and not unders:
+        raise RuntimeError(f"ohlcv bars present but no underlying spot for {ticker} {start_d}..{end_d} (transient underlying feed?)")
+    if days:
+        known = _known_holes(out_root, ticker, exp_d.isoformat(), dataset="ohlcv")
+        missing = sorted(d for d in unders if min(days) <= d <= end_d.isoformat() and d not in days and d not in known)
+        if missing:
+            shown = ", ".join(missing[:5]) + ("..." if len(missing) > 5 else "")
+            raise RuntimeError(f"INCOMPLETE ohlcv {ticker} {exp_d}: {len(missing)} interior trading day(s) with no traded bar ({shown}) — seal withheld; transient partial responses heal on the retry pass, a proven zero-trade/vendor-gap day belongs in ohlcv_known_holes (INSERT INTO ohlcv_known_holes VALUES('{ticker}', {ymd_int(exp_d.isoformat())}, {missing[0].replace('-', '')});)")
+    if total_rows == 0:
+        return 0
+    log.info(f"    {progress}ohlcv {ticker} {exp_d} rows={total_rows} days={len(days)} spot_days={len(unders)}")
+    return total_rows
+
+
+def _quote_expiry_worker(result_q, creds, ticker, exp, dte, rate, out_root_str, gstart_iso, gend_iso, chunk_days, idx=0, total=0, band=0.10, supplement=False, dataset="quotes"):
     try:
         client = make_client(creds)
         progress = f"{idx}/{total}: " if total else ""
-        n = process_one_expiration(client, ticker, exp, dte, rate, Path(out_root_str),
-                                   date.fromisoformat(gstart_iso), date.fromisoformat(gend_iso), chunk_days, progress=progress, band=band, supplement=supplement)
+        if dataset == "ohlcv":
+            n = process_one_expiration_ohlcv(client, ticker, exp, dte, rate, Path(out_root_str),
+                                             date.fromisoformat(gstart_iso), date.fromisoformat(gend_iso), chunk_days, progress=progress, band=band)
+        else:
+            n = process_one_expiration(client, ticker, exp, dte, rate, Path(out_root_str),
+                                       date.fromisoformat(gstart_iso), date.fromisoformat(gend_iso), chunk_days, progress=progress, band=band, supplement=supplement)
         result_q.put(("ok", n))
     except BaseException as e:
         result_q.put(("err", f"{type(e).__name__}: {e}"))
@@ -852,45 +959,56 @@ def _quotes_db_path(out_root: Path) -> Path:
     return out_root.parent / "quotes.db"
 
 
-def load_sealed_quotes(out_root: Path, ticker: str) -> set:
-    """Sealed expirations (ISO strings) for a quote ticker, read from the DB `sealed` table."""
+# The quotes and ohlcv datasets share every pull mechanic but certify DIFFERENT completeness, so each keeps
+# its own seal + proven-hole tables inside quotes.db. One registry maps the dataset name to its bookkeeping.
+_DATASETS = {
+    "quotes": {"sealed_table": "sealed", "sealed_sql": SEALED_SQL, "holes_table": "known_holes", "holes_sql": KNOWN_HOLES_SQL},
+    "ohlcv": {"sealed_table": "ohlcv_sealed", "sealed_sql": OHLCV_SEALED_SQL, "holes_table": "ohlcv_known_holes", "holes_sql": OHLCV_KNOWN_HOLES_SQL},
+}
+
+
+def load_sealed_quotes(out_root: Path, ticker: str, dataset: str = "quotes") -> set:
+    """Sealed expirations (ISO strings) for a ticker, read from the dataset's DB seal table."""
+    ds = _DATASETS[dataset]
     conn = connect_wal(_quotes_db_path(out_root))
     try:
-        conn.execute(SEALED_SQL)
-        rows = conn.execute("SELECT expiry FROM sealed WHERE root=?", (ticker,)).fetchall()
+        conn.execute(ds["sealed_sql"])
+        rows = conn.execute(f"SELECT expiry FROM {ds['sealed_table']} WHERE root=?", (ticker,)).fetchall()
     finally:
         conn.close()
     return {f"{str(e)[:4]}-{str(e)[4:6]}-{str(e)[6:8]}" for (e,) in rows}  # yyyymmdd int -> 'yyyy-MM-dd'
 
 
-def seal_quote_expiry(out_root: Path, ticker: str, exp_iso: str, end_date: date):
-    """Seal a quote expiration into the DB table if it's final. Idempotent; thread-safe."""
+def seal_quote_expiry(out_root: Path, ticker: str, exp_iso: str, end_date: date, dataset: str = "quotes"):
+    """Seal an expiration into the dataset's DB seal table if it's final. Idempotent; thread-safe."""
     if not should_seal(exp_iso, end_date):
         return
+    ds = _DATASETS[dataset]
     with _SEAL_LOCK:
         conn = sqlite3.connect(_quotes_db_path(out_root), timeout=60)
         try:
             conn.execute("PRAGMA busy_timeout=60000")
-            conn.execute(SEALED_SQL)
-            cur = conn.execute("INSERT OR IGNORE INTO sealed VALUES (?,?)", (ticker, ymd_int(exp_iso)))
+            conn.execute(ds["sealed_sql"])
+            cur = conn.execute(f"INSERT OR IGNORE INTO {ds['sealed_table']} VALUES (?,?)", (ticker, ymd_int(exp_iso)))
             conn.commit()
             if cur.rowcount:  # newly sealed (not a re-run over an already-sealed expiration)
-                log.info(f"  [seal] {ticker} exp {exp_iso}")
+                log.info(f"  [seal:{dataset}] {ticker} exp {exp_iso}")
         finally:
             conn.close()
 
 
-def _known_holes(out_root: Path, ticker: str, exp_iso: str) -> set:
+def _known_holes(out_root: Path, ticker: str, exp_iso: str, dataset: str = "quotes") -> set:
     """Interior trading days PROVEN absent at the vendor for this expiry, from the `known_holes` table in
     quotes.db (reproducible across pulls; e.g. the SPY 2022-09-26 gap the H7 audit gate caught 2026-07-26 —
     the legacy store never had those sessions either). In-DB, not a sidecar file, so the knowledge travels
     with the store like the `sealed` table; a fresh rebuild starts skeptical (empty table) and the
     INCOMPLETE raise names the exact dates to insert. The seal-time completeness check accepts exactly
     these days; everything else missing withholds the seal. Returns ISO date strings."""
+    ds = _DATASETS[dataset]
     conn = connect_wal(_quotes_db_path(out_root))
     try:
-        conn.execute(KNOWN_HOLES_SQL)
-        rows = conn.execute("SELECT date FROM known_holes WHERE root=? AND expiry=?", (ticker, ymd_int(exp_iso))).fetchall()
+        conn.execute(ds["holes_sql"])
+        rows = conn.execute(f"SELECT date FROM {ds['holes_table']} WHERE root=? AND expiry=?", (ticker, ymd_int(exp_iso))).fetchall()
     finally:
         conn.close()
     return {f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:8]}" for (d,) in rows}
@@ -927,13 +1045,14 @@ def _known_strike_holes(out_root: Path, ticker: str, exp_iso: str) -> dict:
 _RUN_PROGRESS_LOCK = threading.Lock()  # worker threads record concurrently → serialize manifest writes
 
 
-def _run_progress_path(out_root: Path) -> Path:
-    return _quotes_db_path(out_root).with_name("quotes.db-runprogress.json")
+def _run_progress_path(out_root: Path, dataset: str = "quotes") -> Path:
+    suffix = "" if dataset == "quotes" else f"-{dataset}"
+    return _quotes_db_path(out_root).with_name(f"quotes.db-runprogress{suffix}.json")
 
 
-def load_run_progress(out_root: Path) -> set:
+def load_run_progress(out_root: Path, dataset: str = "quotes") -> set:
     """Keys "TICKER|EXP" completed earlier in this supervisor run. Missing/unreadable → empty (re-pull)."""
-    p = _run_progress_path(out_root)
+    p = _run_progress_path(out_root, dataset)
     if not p.exists():
         return set()
     try:
@@ -942,37 +1061,37 @@ def load_run_progress(out_root: Path) -> set:
         return set()  # unreadable → treat as nothing done; re-pull rather than silently skip coverage
 
 
-def clear_run_progress(out_root: Path):
-    _run_progress_path(out_root).unlink(missing_ok=True)
+def clear_run_progress(out_root: Path, dataset: str = "quotes"):
+    _run_progress_path(out_root, dataset).unlink(missing_ok=True)
 
 
-def record_run_progress(out_root: Path, ticker: str, exp_iso: str):
+def record_run_progress(out_root: Path, ticker: str, exp_iso: str, dataset: str = "quotes"):
     """Mark (ticker, exp) done for this run so a restarted worker skips it. Thread-safe; atomic write."""
     key = f"{ticker}|{exp_iso}"
     with _RUN_PROGRESS_LOCK:
-        done = load_run_progress(out_root)
+        done = load_run_progress(out_root, dataset)
         if key in done:
             return
         done.add(key)
-        p = _run_progress_path(out_root)
+        p = _run_progress_path(out_root, dataset)
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"done": sorted(done)}, indent=2))
         os.replace(tmp, p)  # atomic
 
 
-def _build_quote_work_with(client, tickers, start, end, out_root, dte_map, include_sealed=False):
+def _build_quote_work_with(client, tickers, start, end, out_root, dte_map, include_sealed=False, dataset="quotes"):
     """List expirations per ticker (via the given client) and return [(ticker, exp, dte)] for those not
     yet SEALED and not already COMPLETED earlier in this supervisor run. Unsealed expirations — including
     still-alive/future ones near `end` — are (re)pulled so the live frontier fills in as days elapse;
     sealed (final) ones are skipped, as are this-run completions (so a restart continues, not restarts)."""
     work = []
-    done = load_run_progress(out_root)
+    done = load_run_progress(out_root, dataset)
     for ticker in tickers:
         dte = dte_map.get(ticker)
         if dte is None:
             log.info(f"  [error] no DTE for {ticker} (use {ticker}:DTE or --max-dte) — skipping ticker")
             continue
-        sealed = load_sealed_quotes(out_root, ticker)
+        sealed = load_sealed_quotes(out_root, ticker, dataset)
         try:
             exps = _expirations_from(thetacall(client.option_list_expirations, ticker))
         except Exception as e:
@@ -989,7 +1108,7 @@ def _build_quote_work_with(client, tickers, start, end, out_root, dte_map, inclu
     return work
 
 
-def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, out_root_str, chunk_days, concurrency, band=0.10, supplement=False):
+def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, out_root_str, chunk_days, concurrency, band=0.10, supplement=False, dataset="quotes"):
     """One worker PROCESS = ONE ThetaData session. `concurrency` clients share that session via
     existing_authorized_client (the lib's documented multi-client pattern), one per worker thread, so
     `concurrency` requests are in flight at once — the tier's real allowance. One pass over the unsealed
@@ -1004,7 +1123,7 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
     base = make_client(creds)
     # Build work first: the listing calls force `base` to AUTHORIZE its session before we derive the
     # shared clients — otherwise each shared client could open its own session (→ Invalid session ID).
-    work = _build_quote_work_with(base, tickers, start, end, out_root, dte_map, include_sealed=supplement)
+    work = _build_quote_work_with(base, tickers, start, end, out_root, dte_map, include_sealed=supplement, dataset=dataset)
     if not work:
         return
     clients = [base] + [ThetaClient(existing_authorized_client=base, dataframe_type="pandas")
@@ -1019,10 +1138,13 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
         c = pool.get()
         try:
             log.info(f"  exp {ticker} {e}")
-            process_one_expiration(c, ticker, e, dte, rate, out_root, start, end, chunk_days, progress=f"{idx}/{len(work)}: ", band=band, supplement=supplement)
+            if dataset == "ohlcv":
+                process_one_expiration_ohlcv(c, ticker, e, dte, rate, out_root, start, end, chunk_days, progress=f"{idx}/{len(work)}: ", band=band)
+            else:
+                process_one_expiration(c, ticker, e, dte, rate, out_root, start, end, chunk_days, progress=f"{idx}/{len(work)}: ", band=band, supplement=supplement)
             if not supplement:
-                seal_quote_expiry(out_root, ticker, e, end)
-            record_run_progress(out_root, ticker, e)  # so a restarted worker skips this completed expiry
+                seal_quote_expiry(out_root, ticker, e, end, dataset)
+            record_run_progress(out_root, ticker, e, dataset)  # so a restarted worker skips this completed expiry
         except BaseException as ex:  # one failed expiration shouldn't stop the pass; a later run retries it (not sealed)
             log.info(f"  [error] {ticker} exp {e}: {type(ex).__name__}: {ex}")
         finally:
@@ -1032,7 +1154,7 @@ def _threaded_quote_worker(creds, tickers, start_iso, end_iso, dte_map, rate, ou
         list(ex.map(do_one, enumerate(work, 1)))
 
 
-def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, chunk_days, concurrency, stall_secs, fresh_progress=True, clear_on_exit=True, band=0.10, supplement=False):
+def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, chunk_days, concurrency, stall_secs, fresh_progress=True, clear_on_exit=True, band=0.10, supplement=False, dataset="quotes"):
     """Supervisor: runs the threaded worker in a child process. The worker makes ONE pass over the
     unsealed expirations and exits cleanly — that ends the pull. We only RESTART it if it STALLS (a hung
     gRPC call wedges a thread, holding a server slot until the process dies) or crashes; after 3 restarts
@@ -1050,7 +1172,7 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
         return max((p.stat().st_mtime for p in (db_path, db_path.with_suffix(".db-wal")) if p.exists()), default=0.0)
 
     if fresh_progress:
-        clear_run_progress(out_root)  # fresh run: forget prior-run completions so the frontier still refreshes
+        clear_run_progress(out_root, dataset)  # fresh run: forget prior-run completions so the frontier still refreshes
     restarts = 0
     p = None
     try:
@@ -1058,7 +1180,7 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
             before = newest_write()
             p = ctx.Process(target=_threaded_quote_worker,
                             args=(creds, list(tickers), start.isoformat(), end.isoformat(),
-                                  dte_map, rate, str(out_root), chunk_days, concurrency, band, supplement))
+                                  dte_map, rate, str(out_root), chunk_days, concurrency, band, supplement, dataset))
             p.start()
             last_progress, last_t, stalled = before, time.time(), False
             while p.is_alive():
@@ -1090,10 +1212,10 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
             log.info("[abort] terminating quote worker")
             p.terminate(); p.join()
         if clear_on_exit:
-            clear_run_progress(out_root)  # run over (clean finish or abort) → drop the this-run completion manifest
+            clear_run_progress(out_root, dataset)  # run over (clean finish or abort) → drop the this-run completion manifest
 
 
-def _list_unsealed_sealable(creds, tickers, dte_map, start, end, out_root):
+def _list_unsealed_sealable(creds, tickers, dte_map, start, end, out_root, dataset="quotes"):
     """Expirations that SHOULD be sealed after a pull pass (elapsed: exp < today, fully in range: exp <= end)
     but aren't — this run's genuine failures: RPC errors and INCOMPLETE seal-withholds. Fresh listing client;
     the pull session is closed by the time this runs."""
@@ -1104,7 +1226,7 @@ def _list_unsealed_sealable(creds, tickers, dte_map, start, end, out_root):
         for ticker in tickers:
             if dte_map.get(ticker) is None:
                 continue
-            sealed = load_sealed_quotes(out_root, ticker)
+            sealed = load_sealed_quotes(out_root, ticker, dataset)
             exps = _expirations_from(thetacall(client.option_list_expirations, ticker))
             failed += [(ticker, e) for e in exps if start.isoformat() <= e <= end.isoformat() and e < today_iso and e not in sealed]
     except Exception as ex:
@@ -1112,7 +1234,7 @@ def _list_unsealed_sealable(creds, tickers, dte_map, start, end, out_root):
     return failed
 
 
-def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency, band=0.10, supplement=False):
+def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency, band=0.10, supplement=False, dataset="quotes"):
     # Resume is seal-driven: sealed (final) expirations are skipped, unsealed ones (re)pulled every run.
     # Two passes: pass 2 retries ONLY units that failed pass 1 (RPC errors / INCOMPLETE seal-withholds) —
     # the threaded run-progress manifest is preserved between passes so pass 2 skips everything already
@@ -1126,8 +1248,8 @@ def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, r
         return 0
     for attempt in (1, 2):
         _run_quotes_pass(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency,
-                         fresh_progress=(attempt == 1), clear_on_exit=(attempt == 2), band=band)
-        failed = _list_unsealed_sealable(creds, tickers, dte_map, start, end, out_root)
+                         fresh_progress=(attempt == 1), clear_on_exit=(attempt == 2), band=band, dataset=dataset)
+        failed = _list_unsealed_sealable(creds, tickers, dte_map, start, end, out_root, dataset)
         if not failed:
             if attempt == 2:
                 log.info("[retry-pass] clean — every previously-failed unit sealed")
@@ -1139,11 +1261,11 @@ def run_quotes(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, r
     return len(failed)
 
 
-def _run_quotes_pass(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency, fresh_progress, clear_on_exit, band=0.10, supplement=False):
+def _run_quotes_pass(tickers, start, end, out_root, dte_map, rate, creds, timeout_s, retries, chunk_days, concurrency, fresh_progress, clear_on_exit, band=0.10, supplement=False, dataset="quotes"):
     if concurrency > 1:
         _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds,
                              chunk_days, concurrency, stall_secs=max(timeout_s, 300),
-                             fresh_progress=fresh_progress, clear_on_exit=clear_on_exit, band=band, supplement=supplement)
+                             fresh_progress=fresh_progress, clear_on_exit=clear_on_exit, band=band, supplement=supplement, dataset=dataset)
         return
     # Sequential: one expiration at a time via the run_resilient process watchdog (clean hang-kill).
     listing = make_client(creds)
@@ -1152,7 +1274,7 @@ def _run_quotes_pass(tickers, start, end, out_root, dte_map, rate, creds, timeou
         if dte is None:
             log.info(f"  [error] no DTE for {ticker} (use {ticker}:DTE or --max-dte) — skipping ticker")
             continue
-        sealed = load_sealed_quotes(out_root, ticker)
+        sealed = load_sealed_quotes(out_root, ticker, dataset)
         try:
             exps = _expirations_from(thetacall(listing.option_list_expirations, ticker))
         except Exception as e:
@@ -1161,14 +1283,14 @@ def _run_quotes_pass(tickers, start, end, out_root, dte_map, rate, creds, timeou
         hi = (end + timedelta(days=dte)).isoformat()
         rel = sorted(e for e in exps if start.isoformat() <= e <= hi)
         todo = [e for e in rel if supplement or e not in sealed]
-        log.info(f"=== {ticker} (dte={dte}) -> quotes.db: {len(rel)} expirations, {len(sealed)} sealed, {len(todo)} to pull ===")
+        log.info(f"=== {ticker} (dte={dte}) -> quotes.db ({dataset}): {len(rel)} expirations, {len(sealed)} sealed, {len(todo)} to pull ===")
         for i, e in enumerate(todo, 1):
             log.info(f"  exp {e}")
             ok = run_resilient(_quote_expiry_worker,
-                               (creds, ticker, e, dte, rate, str(out_root), start.isoformat(), end.isoformat(), chunk_days, i, len(todo), band, supplement),
+                               (creds, ticker, e, dte, rate, str(out_root), start.isoformat(), end.isoformat(), chunk_days, i, len(todo), band, supplement, dataset),
                                f"{ticker} exp {e}", timeout_s, retries)
             if ok is not None and not supplement:  # success (row count, possibly 0) → seal if final; give-up (None) leaves it unsealed; supplement never (re)seals
-                seal_quote_expiry(out_root, ticker, e, end)
+                seal_quote_expiry(out_root, ticker, e, end, dataset)
 
 
 def quote_probe(client, ticker: str):
@@ -1261,6 +1383,7 @@ def main():
     ap.add_argument("--probe", action="store_true", help="print EOD/OI DataFrame schema for one ticker")
     ap.add_argument("--run", action="store_true", help="run the daily EOD backfill")
     ap.add_argument("--quotes", action="store_true", help="run the minute-NBBO quote pull (+-10pct band, per-ticker DTE)")
+    ap.add_argument("--ohlcv", action="store_true", help="run the minute trade-OHLCV pull into quotes.db's ohlcv table (same band/DTE/seal mechanics as --quotes, its own ohlcv_sealed bookkeeping; traded bars only, START-of-bar labels as served)")
     ap.add_argument("--quotes-probe", action="store_true", help="print minute-quote schema for one ticker")
     ap.add_argument("--verify-quotes", action="store_true", help="integrity-scan the quote store for empty/truncated files + stray .tmp")
     ap.add_argument("--ticker", help="single ticker (NAME or NAME:DTE); overrides --tickers for ALL modes")
@@ -1294,7 +1417,7 @@ def main():
     # A single --ticker overrides the list for any mode. Tokens are NAME or NAME:DTE.
     raw = [args.ticker] if args.ticker else (args.tickers or [])
     tickers, dte_map = parse_ticker_specs(raw, args.max_dte)
-    if not tickers and (args.run or args.quotes or args.verify_quotes or args.probe or args.quotes_probe):
+    if not tickers and (args.run or args.quotes or args.ohlcv or args.verify_quotes or args.probe or args.quotes_probe):
         sys.exit("specify tickers, e.g. --tickers ABC:45 XYZ:0  (or a single --ticker ABC:45)")
 
     if args.verbose:
@@ -1307,8 +1430,8 @@ def main():
     # File logging (timestamped, tee'd to console) for the long runs so they're auditable. Set
     # BF_LOG_FILE so spawned worker children inherit it and log to the SAME file. (Only the parent
     # runs main(); children configure via _setup_logging() at import using the inherited env var.)
-    if (args.run or args.quotes) and not os.environ.get("BF_LOG_FILE"):
-        mode = "quotes" if args.quotes else "eod"
+    if (args.run or args.quotes or args.ohlcv) and not os.environ.get("BF_LOG_FILE"):
+        mode = "quotes" if args.quotes else "ohlcv" if args.ohlcv else "eod"
         logdir = data_dir / "logs"
         logdir.mkdir(parents=True, exist_ok=True)
         os.environ["BF_LOG_FILE"] = args.log or str(logdir / f"backfill_{mode}_{datetime.now():%Y%m%d_%H%M%S}.log")
@@ -1342,8 +1465,19 @@ def main():
                               band=args.band, supplement=args.supplement)
         if n_failed:
             sys.exit(1)  # chain scripts gate on rc: nonzero = sealable units left unsealed (store incomplete)
+    elif args.ohlcv:
+        missing = [t for t in tickers if t not in dte_map]
+        if missing:
+            sys.exit(f"--ohlcv needs a DTE for {missing}: pass {missing[0]}:DTE (e.g. {missing[0]}:45) or --max-dte")
+        qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"  # base for the DB sibling, not a CSV dir
+        log.info(f"data dir = {data_dir}\nohlcv store = {_quotes_db_path(qout)} (ohlcv table; minute trade bars ±10%, per-ticker DTE)")
+        n_failed = run_quotes(tickers, args.start, args.end, qout, dte_map, args.rate,
+                              args.creds, args.timeout, args.retries, args.quote_chunk_days, args.concurrency,
+                              band=args.band, dataset="ohlcv")
+        if n_failed:
+            sys.exit(1)
     else:
-        sys.exit("specify one of --probe / --quotes-probe / --run / --quotes / --verify-quotes")
+        sys.exit("specify one of --probe / --quotes-probe / --run / --quotes / --ohlcv / --verify-quotes")
 
 
 if __name__ == "__main__":

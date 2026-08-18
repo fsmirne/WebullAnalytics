@@ -1352,13 +1352,18 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var captureSlices = !exante ? LoadCaptureSlices(ticker, date, expiry, source, quotes) : null;
 		if (captureSlices != null && captureSlices.Count == 0) captureSlices = null;
 		var hasTape = captureSlices != null && captureSlices.Any(s => s.Quotes.Values.Any(q => q.Volume.HasValue));
+		// Historical tape source: the canonical store's ohlcv table (minute trade bars, written by the nightly
+		// --ohlcv backfill step) serves days whose captures carry no volume — offline replays and pre-column
+		// sessions. The running day prefers the captures (they exist hours before any nightly pull can).
+		var storeBars = !exante && !hasTape ? LoadStoreTape(ticker, date.Date, expiry) : null;
+		var hasStoreTape = storeBars is { Count: > 0 };
 
 		// Resolve the bucket size: an explicit --interval is honored as-is; the default picks the finest of the
 		// standard sizes whose panel set fits the terminal side by side (gamma alone, plus the volume tape when
 		// capture volume exists, plus the VEX panel under --vanna), using the same fixed cell geometry as the
 		// rendering below. Strike labels track the spot magnitude, so a tape sample prices the column widths
 		// before any matrix is built.
-		var panels = 1 + (hasTape ? 1 : 0) + (withVexNow ? 1 : 0);
+		var panels = 1 + (hasTape || hasStoreTape ? 1 : 0) + (withVexNow ? 1 : 0);
 		var open = windowStart ?? AnalyzeGexSettings.RthOpen;
 		var close = windowEnd ?? AnalyzeGexSettings.RthClose;
 		var sampleSpot = intradaySpots.Values.First();
@@ -1489,7 +1494,31 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// without signed prints). A mark whose nearest volume-bearing capture is the same one the previous column
 		// consumed contributes no new information and is skipped rather than rendered as a fake zero column.
 		var tapeHours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, long Total)>();
-		if (hasTape)
+		if (hasStoreTape)
+		{
+			// Store bars are per-minute INTERVAL volumes with start-of-bar labels, so a bucket is the sum of the
+			// bar minutes in [prev mark, mark) — the same trailing window the capture diff produces; the first
+			// mark has no trailing window and stays empty by construction.
+			for (var i = 1; i < hours.Count; i++)
+			{
+				var (prev, mark) = (hours[i - 1].Mark, hours[i].Mark);
+				var byStrike = new Dictionary<decimal, (decimal C, decimal P)>();
+				long total = 0;
+				foreach (var (ts, strikes) in storeBars!)
+				{
+					if (ts < prev || ts >= mark) continue;
+					foreach (var (k, v) in strikes)
+					{
+						byStrike.TryGetValue(k, out var e);
+						byStrike[k] = (e.C + v.C, e.P + v.P);
+						total += (long)(v.C + v.P);
+					}
+				}
+				if (byStrike.Count == 0) continue;
+				tapeHours.Add((mark, hours[i].Spot, byStrike.ToDictionary(kv => kv.Key, kv => new GexCell(kv.Value.C, kv.Value.P)), total));
+			}
+		}
+		else if (hasTape)
 		{
 			var lastCum = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 			TimeSpan? lastCapTs = null;
@@ -1640,7 +1669,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			AnsiConsole.Write(table);
 		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); [bold]Pull[/] = net-GEX-weighted lean from spot in ATM-expected-move units (raw points ÷ spot·σ_atm·√T for the remaining life — a static book holds roughly flat as the clock decays instead of bleeding to zero), [green]+[/] = the ladder's net exposure sits ABOVE spot, [red]−[/] = below. Both aggregate every in-range strike, not just the displayed rows. [green]Wall·C[/]/[red]Wall·P[/] = the strike carrying the largest call/put GEX that bucket (per-side argmax — a big two-sided strike can be a wall yet net toward dim in the map)." + (liveLog.Count > 0 ? " [cyan]·live[/] rows = the gravity/walls logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
 		if (tapeHours.Count > 0)
-			AnsiConsole.MarkupLine("[dim]Volume tape = contracts TRADED per bucket (Δ of the captures' cumulative day volume; the first column is volume since the open), cell = net call−put Δvolume on the same color language as the gamma map — [green]green[/] = call-side flow, [red]red[/] = put-side. Which side traded, NOT which way: open/close and buy/sell need signed prints. [bold]Σvol[/] = total contracts that bucket across the window. The book is static intraday (OI settles overnight); this tape is the only live axis.[/]");
+			AnsiConsole.MarkupLine($"[dim]Volume tape = contracts TRADED per bucket ({(hasStoreTape ? "summed from the store's ohlcv minute bars (data/quotes.db, ThetaData); the first mark has no trailing window and stays empty" : "Δ of the captures' cumulative day volume; the first column is volume since the open")}), cell = net call−put Δvolume on the same color language as the gamma map — [green]green[/] = call-side flow, [red]red[/] = put-side. Which side traded, NOT which way: open/close and buy/sell need signed prints. [bold]Σvol[/] = total contracts that bucket across the window. The book is static intraday (OI settles overnight); this tape is the only live axis.[/]");
 		else if (liveChain && !hasTape)
 			AnsiConsole.MarkupLine("[dim]Volume tape unavailable: today's data/iv captures carry no volume column yet (added 2026-08-18 — restart wa-scraper to start recording; the tape appears from that minute on).[/]");
 		if (withVexNow && vannaHours.Count > 0)
@@ -1717,6 +1746,46 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			}
 			return set;
 		}
+	}
+
+	/// <summary>Per-minute traded volume for one (ticker, date, expiry) from the canonical store's `ohlcv` table
+	/// (ThetaData minute trade bars, START-of-bar labels, traded minutes only — written by the --ohlcv backfill
+	/// step). The volume tape's HISTORICAL source; running days read the data/iv captures instead, which exist
+	/// hours before any nightly pull can. Returns minute → strike → (call volume, put volume); empty when the
+	/// store, the table, or the day's coverage is absent — the tape panel then simply doesn't render.</summary>
+	private static SortedDictionary<TimeSpan, Dictionary<decimal, (decimal C, decimal P)>> LoadStoreTape(string ticker, DateTime date, DateTime expiry)
+	{
+		var result = new SortedDictionary<TimeSpan, Dictionary<decimal, (decimal C, decimal P)>>();
+		var dbPath = Program.ResolvePath("data/quotes.db");
+		if (!File.Exists(dbPath)) return result;
+		try
+		{
+			using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Shared");
+			conn.Open();
+			using (var probe = conn.CreateCommand())
+			{
+				probe.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ohlcv'";
+				if (probe.ExecuteScalar() == null) return result;   // store predates the ohlcv feature
+			}
+			using var cmd = conn.CreateCommand();
+			cmd.CommandText = "SELECT time_sec, strike_milli, right, volume FROM ohlcv WHERE root=$root AND expiry=$exp AND date=$date";
+			cmd.Parameters.AddWithValue("$root", ticker);
+			cmd.Parameters.AddWithValue("$exp", expiry.Year * 10000 + expiry.Month * 100 + expiry.Day);
+			cmd.Parameters.AddWithValue("$date", date.Year * 10000 + date.Month * 100 + date.Day);
+			using var reader = cmd.ExecuteReader();
+			while (reader.Read())
+			{
+				var ts = TimeSpan.FromSeconds(reader.GetInt64(0));
+				var strike = reader.GetInt64(1) / 1000m;
+				var isCall = reader.GetString(2) == "C";
+				var vol = (decimal)reader.GetInt64(3);
+				if (!result.TryGetValue(ts, out var byStrike)) result[ts] = byStrike = new Dictionary<decimal, (decimal C, decimal P)>();
+				byStrike.TryGetValue(strike, out var e);
+				byStrike[strike] = isCall ? (e.C + vol, e.P) : (e.C, e.P + vol);
+			}
+		}
+		catch (Exception ex) { Log.Debug($"ohlcv tape read failed: {ex.Message}"); }
+		return result;
 	}
 
 	/// <summary>Today's captured chain surfaces for one expiry, read back from the data/iv dump every running-day

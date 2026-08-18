@@ -2,8 +2,9 @@
 # Daily ThetaData refresh of the canonical data stores:
 #   0. wa ai history   -> data/... (daily closes + intraday tape) for SPY/XSP/SPXW/QQQ, run FIRST
 #   1. --quotes        -> data/quotes.db (SQLite)            (minute NBBO, ±10% strike band — written directly)
-#   2. --run           -> data/oi/<TICKER>/<date>.jsonl      (EOD open interest + back-solved IV)
-#   3. verify          (SQL coverage + crossed-quote scan of quotes.db; no network)
+#   2. --ohlcv         -> data/quotes.db `ohlcv` table       (minute trade OHLCV, same band/DTE, own seals)
+#   3. --run           -> data/oi/<TICKER>/<date>.jsonl      (EOD open interest + back-solved IV)
+#   4. verify          (SQL coverage + crossed-quote scan of quotes.db; no network)
 #
 # Quotes are written straight into the canonical SQLite store (no CSV staging) — per-expiry DELETE+INSERT,
 # WAL so the scraper/backtest can touch it concurrently; quote sealing lives in the DB `sealed` table. The
@@ -62,7 +63,7 @@ while [ $# -gt 0 ]; do
     --history-tickers) CLI_HISTORY="${2:?--history-tickers needs a value}"; shift 2 ;;
     --steps)           CLI_STEPS="${2:?--steps needs a value}"; shift 2 ;;
     --verify)          CLI_VERIFY="${2:?--verify needs a value}"; shift 2 ;;
-    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--history-tickers 'SPY ...'] [--steps history,quotes,oi,verify] [--verify 'SPY ...']"; exit 0 ;;
+    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--history-tickers 'SPY ...'] [--steps history,quotes,ohlcv,oi,verify] [--verify 'SPY ...']"; exit 0 ;;
     *)                 echo "[daily_backfill] unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -111,7 +112,7 @@ else WA="wa"; fi
 
 # Which of the four steps to run (default all). Kept identical to daily_backfill.ps1 -Steps: a step runs
 # iff it appears in STEPS. Commas or spaces both work. `has_step NAME` is the single guard both scripts mirror.
-STEPS="${CLI_STEPS:-${BACKFILL_STEPS:-history,quotes,oi,verify}}"
+STEPS="${CLI_STEPS:-${BACKFILL_STEPS:-history,quotes,ohlcv,oi,verify}}"
 STEPS="${STEPS//,/ }"
 has_step() { case " $STEPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
@@ -173,14 +174,15 @@ else
   END_OI="${BACKFILL_END:-$(date -d "$ET_TODAY - 2 days" +%F)}"
 fi
 
-echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes ${START_VALUE:+from $START_VALUE }through $END, oi through $END_OI, verify ==="
+echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes+ohlcv ${START_VALUE:+from $START_VALUE }through $END, oi through $END_OI, verify ==="
 
 for t in $HISTORY_TICKERS; do
-  step "(1/4) ai history $t"                        "$WA" ai history "$t"
+  step "(1/5) ai history $t"                        "$WA" ai history "$t"
 done
-has_step quotes && step "(2/4) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step oi     && step "(3/4) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step verify && step "(4/4) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root SPY --verify
+has_step quotes && step "(2/5) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step ohlcv  && step "(3/5) minute trade OHLCV -> data/quotes.db"  "$PY" "$SCRIPT" --ohlcv  --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step oi     && step "(4/5) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step verify && step "(5/5) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root SPY --verify
 
 if [ "$rc" -eq 0 ]; then
   echo "[$(ts)] === ALL OK ==="

@@ -85,6 +85,26 @@ SEALED_SQL = "CREATE TABLE IF NOT EXISTS sealed (root TEXT, expiry INTEGER, PRIM
 # empty table and must re-prove gaps. Curated by hand: INSERT INTO known_holes VALUES('SPY', 20220926, 20220815);
 KNOWN_HOLES_SQL = "CREATE TABLE IF NOT EXISTS known_holes (root TEXT, expiry INTEGER, date INTEGER, PRIMARY KEY (root, expiry, date)) WITHOUT ROWID"
 
+# OHLCV sibling table (2026-08-18): per-minute trade bars from ThetaData option_history_ohlc — the TAPE
+# beside the quotes table's BOOK. Deliberately its own table, never new columns on `quotes`: sealed quote
+# rows are byte-final by policy, quote rows exist for every disseminated minute while trade bars exist only
+# for traded minutes (volume > 0 is an ingest invariant here), and the two endpoints carry different label
+# conventions — OHLC bars arrive START-of-bar labeled (validated 2026-08-18: the 09:30:00 bar carries the
+# opening trades, and per-contract minute sums reconcile to the EOD day volume up to the overnight GTH
+# session EOD includes), so the quotes pull's -60s relabel does NOT apply. RTH bars only. Prices (and vwap)
+# share the quotes tick encoding (ten-thousandths); `trades` = the vendor's per-bar print count. Sealing and
+# proven-hole bookkeeping are separate from quotes (`ohlcv_sealed`/`ohlcv_known_holes`) because volume
+# completeness certifies a different pull than quote completeness.
+OHLCV_SQL = (
+    "CREATE TABLE IF NOT EXISTS ohlcv (root TEXT, expiry INTEGER, date INTEGER, time_sec INTEGER, "
+    "strike_milli INTEGER, right TEXT, open INTEGER, high INTEGER, low INTEGER, close INTEGER, "
+    "volume INTEGER, trades INTEGER, vwap INTEGER, "
+    "PRIMARY KEY (root, expiry, date, strike_milli, right, time_sec)) WITHOUT ROWID"
+)
+OHLCV_STAGING_SQL = OHLCV_SQL.replace("ohlcv (", "ohlcv_staging (", 1)
+OHLCV_SEALED_SQL = "CREATE TABLE IF NOT EXISTS ohlcv_sealed (root TEXT, expiry INTEGER, PRIMARY KEY (root, expiry)) WITHOUT ROWID"
+OHLCV_KNOWN_HOLES_SQL = "CREATE TABLE IF NOT EXISTS ohlcv_known_holes (root TEXT, expiry INTEGER, date INTEGER, PRIMARY KEY (root, expiry, date)) WITHOUT ROWID"
+
 
 def ymd_int(date_str):
     """'yyyy-MM-dd' -> 20260617 (the on-disk date encoding)."""
@@ -133,6 +153,44 @@ def encode_quote(root, expiry_int, date_str, time_str, strike, right, bid, ask, 
             parse_int_loose(str(bid_size)), parse_int_loose(str(ask_size)))
 
 
+def encode_ohlcv(root, expiry_int, date_str, time_str, strike, right, o, h, l, c, volume, trades, vwap):
+    """Encode one minute trade bar into the canonical ohlcv row tuple, or None when the bar is structurally
+    invalid or carries no trades — ONLY traded minutes are stored (the vendor serves a dense minute grid with
+    volume=0/NaN filler rows; persisting those would bloat the table with non-information a reader can infer).
+    A traded bar without a numeric close is vendor noise and is dropped. Prices/vwap use the quotes table's
+    ten-thousandths tick encoding; a NaN price side stores as 0 (absent)."""
+    sec = parse_time_sec(str(time_str))
+    if sec < 0:
+        return None
+    try:
+        strike_milli = round(float(strike) * 1000)
+    except (ValueError, TypeError):
+        return None
+    vol = parse_int_loose(str(volume))
+    if vol <= 0:
+        return None
+
+    def tick(v):
+        try:
+            f = float(v)
+        except (ValueError, TypeError):
+            return None
+        if f != f:  # NaN
+            return None
+        return round(f * 10000)
+
+    ct = tick(c)
+    if ct is None or ct < 0:
+        return None
+    rt = str(right).strip().upper()
+    cp = rt[0] if rt else "?"
+    if cp not in ("C", "P"):
+        return None
+    z = lambda t: t if t is not None and t >= 0 else 0
+    return (root, expiry_int, ymd_int(date_str), sec, strike_milli, cp,
+            z(tick(o)), z(tick(h)), z(tick(l)), ct, vol, parse_int_loose(str(trades)), z(tick(vwap)))
+
+
 def connect_wal(db_path):
     """Open the canonical store in WAL mode with a generous busy-timeout — the multi-writer setting that lets
     the importer, the backfill, and the scraper all write while the backtest reads."""
@@ -141,6 +199,8 @@ def connect_wal(db_path):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(SCHEMA_SQL)
     conn.execute(STAGING_SQL)
+    conn.execute(OHLCV_SQL)
+    conn.execute(OHLCV_STAGING_SQL)
     return conn
 
 

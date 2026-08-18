@@ -12,9 +12,10 @@
 
 	Steps (same order/semantics as the .sh):
 	  1/4  wa ai history   -> daily closes + intraday tape for the strategy tickers (run FIRST)
-	  2/4  --quotes        -> data/quotes.db (minute NBBO, per-expiry DELETE+INSERT, WAL)
-	  3/4  --run           -> data/oi/<TICKER>/<date>.jsonl (EOD open interest + back-solved IV)
-	  4/4  verify          -> SQL coverage + crossed-quote scan of quotes.db (no network)
+	  2/5  --quotes        -> data/quotes.db (minute NBBO, per-expiry DELETE+INSERT, WAL)
+	  3/5  --ohlcv         -> data/quotes.db `ohlcv` table (minute trade OHLCV, same band/DTE, own seals)
+	  4/5  --run           -> data/oi/<TICKER>/<date>.jsonl (EOD open interest + back-solved IV)
+	  5/5  verify          -> SQL coverage + crossed-quote scan of quotes.db (no network)
 
 	Use daily_backfill.sh on true Linux/macOS/WSL; use this daily_backfill.ps1 as the default on Windows 11.
 	Requires native Windows Python on PATH (python) and the wa.exe executable (published alongside, or on PATH).
@@ -33,7 +34,7 @@
 	Scope the `wa ai history` step (bare names, no DTE). Default = SPY XSP SPXW QQQ.
 
 .PARAMETER Steps
-	Which of the four steps to run (default all): history,quotes,oi,verify. Kept byte-identical in meaning
+	Which of the five steps to run (default all): history,quotes,ohlcv,oi,verify. Kept byte-identical in meaning
 	to daily_backfill.sh --steps. E.g. -Steps history runs ONLY the history refresh (no ThetaData session,
 	no quotes.db write — safe to run while a separate quote pull is in progress). -Steps quotes,oi,verify
 	skips history.
@@ -98,10 +99,10 @@ if (-not $Verify -or $Verify.Count -eq 0) {
 	else { $Verify = @('SPXW','XSP','SPY','QQQ') }
 }
 
-# --- Step selection (default all four; identical semantics to daily_backfill.sh --steps). --------------------
+# --- Step selection (default all five; identical semantics to daily_backfill.sh --steps). --------------------
 if (-not $Steps -or $Steps.Count -eq 0) {
 	if ($env:BACKFILL_STEPS) { $Steps = $env:BACKFILL_STEPS -split '[,\s]+' }
-	else { $Steps = @('history','quotes','oi','verify') }
+	else { $Steps = @('history','quotes','ohlcv','oi','verify') }
 }
 $Steps = @($Steps | ForEach-Object { $_.ToLower() })
 function Has-Step([string]$name) { return $Steps -contains $name }
@@ -163,24 +164,29 @@ function Invoke-Step {
 }
 
 $startNote = if ($StartValue) { "from $StartValue " } else { "" }
-Write-Host "[$(Get-Ts)] === daily data update: ai history ($($HistoryList -join ' ')), quotes ${startNote}through $End, oi through $EndOi, verify ==="
+Write-Host "[$(Get-Ts)] === daily data update: ai history ($($HistoryList -join ' ')), quotes+ohlcv ${startNote}through $End, oi through $EndOi, verify ==="
 
 foreach ($t in $HistoryList) {
-	Invoke-Step "(1/4) ai history $t" $WA @('ai','history',$t)
+	Invoke-Step "(1/5) ai history $t" $WA @('ai','history',$t)
 }
 
 if (Has-Step 'quotes') {
 	$quotesArgs = @($Script,'--quotes','--tickers') + $Tickers + @('--end',$End) + $StartOpt + @('--concurrency',"$Conc")
-	Invoke-Step "(2/4) minute-NBBO quotes -> data/quotes.db" $PY $quotesArgs
+	Invoke-Step "(2/5) minute-NBBO quotes -> data/quotes.db" $PY $quotesArgs
+}
+
+if (Has-Step 'ohlcv') {
+	$ohlcvArgs = @($Script,'--ohlcv','--tickers') + $Tickers + @('--end',$End) + $StartOpt + @('--concurrency',"$Conc")
+	Invoke-Step "(3/5) minute trade OHLCV -> data/quotes.db" $PY $ohlcvArgs
 }
 
 if (Has-Step 'oi') {
 	$oiArgs = @($Script,'--run','--tickers') + $Tickers + @('--end',$EndOi) + $StartOpt + @('--concurrency',"$Conc")
-	Invoke-Step "(3/4) EOD open interest -> data/oi" $PY $oiArgs
+	Invoke-Step "(4/5) EOD open interest -> data/oi" $PY $oiArgs
 }
 
 if (Has-Step 'verify') {
-	Invoke-Step "(4/4) quote-store coverage + integrity" $PY @($Importer,'--root','SPY','--verify')
+	Invoke-Step "(5/5) quote-store coverage + integrity" $PY @($Importer,'--root','SPY','--verify')
 }
 
 if ($script:rc -eq 0) {
