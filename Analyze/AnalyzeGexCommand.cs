@@ -1490,13 +1490,13 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		// Whole-ladder rows. Gravity is one strike chosen by argmax; these two read the WHOLE book, which is the
 		// question a "sea of red below, sea of green above" eyeball is really asking. Centroid is where the gross
-		// gamma mass sits; Pull is how far the NET exposure leans from spot, signed.
+		// gamma mass sits; Pull is how far the NET exposure leans from spot, signed, in expected-move units.
 		var centroidCells = new List<string> { "[bold]Centroid[/]" };
 		var pullCells = new List<string> { "[bold]Pull[/]" };
 		foreach (var h in hours)
 		{
 			centroidCells.Add(h.Centroid.HasValue ? $"[bold]${h.Centroid.Value:N0}[/]" : "[dim]·[/]");
-			pullCells.Add(h.Pull.HasValue ? $"[bold {(h.Pull.Value >= 0m ? "green" : "red")}]{(h.Pull.Value >= 0m ? "+" : "−")}{Math.Abs(h.Pull.Value):N1}[/]" : "[dim]·[/]");
+			pullCells.Add(h.Pull.HasValue ? $"[bold {(h.Pull.Value >= 0m ? "green" : "red")}]{(h.Pull.Value >= 0m ? "+" : "−")}{Math.Abs(h.Pull.Value):F2}σ[/]" : "[dim]·[/]");
 		}
 		table.AddRow(centroidCells.ToArray());
 		table.AddRow(pullCells.ToArray());
@@ -1567,7 +1567,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 		else
 			AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); [bold]Pull[/] = net-GEX-weighted distance from spot in points, [green]+[/] = the ladder's net exposure sits ABOVE spot, [red]−[/] = below. Both aggregate every in-range strike, not just the displayed rows. [green]Wall·C[/]/[red]Wall·P[/] = the strike carrying the largest call/put GEX that bucket (per-side argmax — a big two-sided strike can be a wall yet net toward dim in the map)." + (liveLog.Count > 0 ? " [cyan]·live[/] rows = the gravity/walls logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
+		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); [bold]Pull[/] = net-GEX-weighted lean from spot in ATM-expected-move units (raw points ÷ spot·σ_atm·√T for the remaining life — a static book holds roughly flat as the clock decays instead of bleeding to zero), [green]+[/] = the ladder's net exposure sits ABOVE spot, [red]−[/] = below. Both aggregate every in-range strike, not just the displayed rows. [green]Wall·C[/]/[red]Wall·P[/] = the strike carrying the largest call/put GEX that bucket (per-side argmax — a big two-sided strike can be a wall yet net toward dim in the map)." + (liveLog.Count > 0 ? " [cyan]·live[/] rows = the gravity/walls logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
 		if (withVexNow && vannaHours.Count > 0)
 			AnsiConsole.MarkupLine($"[dim]VEX panel = the mapped expiry's net vanna ($ dealer delta per vol point) recomputed at each bucket's spot, same quotes as the gamma columns{(vexAt != null ? $" (narrowed to the bucket nearest --time {vexAt:hh\\:mm})" : "")}. No gravity marker — vanna maps a hedging flow under an IV move, not a level. Full multi-expiry VEX: `analyze gex {Markup.Escape(ticker)}` without --intraday.[/]");
 		if (skipped.Count > 0 && vendorIvs)
@@ -2162,7 +2162,14 @@ internal sealed class GexMatrix
 				netMoment += cell.Net * (strike - spot);
 			}
 			centroid[exp] = grossSum > 0m ? grossMoment / grossSum : null;
-			netPull[exp] = absNetSum > 0m ? netMoment / absNetSum : null;
+			// Pull is reported in ATM-expected-move units: the raw lean (points) divided by spot·σ_atm·√T for the
+			// contract's remaining life. In points the row decays mechanically all session — the true clock
+			// concentrates gamma onto ATM as T shrinks, so a STATIC book bleeds toward zero into the close —
+			// while in expected-move units a static book holds roughly flat and only genuine spot/IV changes
+			// move the number. σ_atm = the IV of the contributor(s) nearest spot (normally the ATM C/P pair).
+			var atm = rawContribs.Where(c => c.Expiry == exp).OrderBy(c => Math.Abs(c.Strike - spot)).Take(2).ToList();
+			var expectedMove = atm.Count > 0 ? spot * (decimal)(Math.Sqrt(atm[0].TimeYears) * (double)atm.Average(c => c.Iv)) : 0m;
+			netPull[exp] = absNetSum > 0m && expectedMove > 0m ? netMoment / absNetSum / expectedMove : null;
 		}
 
 		// Analytics use the full strike-range × kept-expiries set, NOT the --max-strikes display cap —
