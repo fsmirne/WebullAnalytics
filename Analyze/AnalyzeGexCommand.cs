@@ -63,11 +63,11 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public bool Dump { get; set; }
 
 	[CommandOption("--intraday")]
-	[Description("Intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Maps --date's own 0DTE by default; pass --expiry to watch a LATER expiry's gravity move through --date instead (the only option on roots with no daily expirations). Without --date (or with --date today) this is the RUNNING-DAY view: the columns run 09:30 through the current bucket, and each call captures its chain to data/iv and its anchors to data/gex — a bucket near a capture is rebuilt from that capture's surface (as-displayed-then, static across re-runs, matching the \"·live\" footer rows), while a bucket with no capture is provisionally priced with the current fetch's IVs until tomorrow's quote backfill enables the full ex-ante replay. A past --date replays that day offline from its data/oi snapshot, with per-bucket IVs back-solved from the minute-quote store (data/quotes/<TICKER>/<expiry>.csv) when it covers the day, else frozen from the snapshot. Skips the chain-totals and per-expiry tables; the walls appear as per-bucket Wall·C/Wall·P footer rows instead of their own table.")]
+	[Description("Intraday GEX heatmap: rows = strikes, columns = RTH time buckets (--interval), recomputing per-strike GEX at each bucket's spot (from data/intraday) against the day's fixed OI. Shows the gravity migrating as price moves. Maps --date's own 0DTE by default; pass --expiry to watch a LATER expiry's gravity move through --date instead (the only option on roots with no daily expirations). Without --date (or with --date today) this is the RUNNING-DAY view: the columns run 09:30 through the current bucket, and each call captures its chain to data/iv and its anchors to data/gex — a bucket near a capture is rebuilt from that capture's surface (as-displayed-then, static across re-runs, matching the \"·live\" footer rows), while a bucket with no capture is provisionally priced with the current fetch's IVs until tomorrow's quote backfill enables the full ex-ante replay. A past --date replays that day offline from its data/oi snapshot, with per-bucket IVs back-solved from the minute-quote store (data/quotes/<TICKER>/<expiry>.csv) when it covers the day, else frozen from the snapshot. Renders the gamma migration beside the session's VOLUME TAPE by default (per-bucket Δ of the captures' cumulative day volume, colored by call/put mix — the tape landing on the book; the panel self-skips on days whose captures predate the volume column); --vanna adds the VEX migration as an optional third panel. Skips the chain-totals and per-expiry tables; the walls appear as per-bucket Wall·C/Wall·P footer rows instead of their own table.")]
 	public bool Intraday { get; set; }
 
 	[CommandOption("--interval <MIN>")]
-	[Description("--intraday time-bucket size in minutes, 1-120. Default: auto — the finest standard size whose panels fit the terminal width side by side (both the gamma and VEX migration tables under the default --greek both; just the gamma table under --greek gamma). Narrow the window with --start/--end to keep a fine interval readable: minute buckets over a 30-minute slice pin exactly when the gravity flips.")]
+	[Description("--intraday time-bucket size in minutes, 1-120. Default: auto — the finest standard size whose ACTIVE panel set fits the terminal width side by side (gamma alone; plus the volume tape when capture volume exists; plus VEX under --vanna). Narrow the window with --start/--end to keep a fine interval readable: minute buckets over a 30-minute slice pin exactly when the gravity flips.")]
 	public int? IntervalMin { get; set; }
 
 	[CommandOption("--start <HH:MM>")]
@@ -85,6 +85,10 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	[CommandOption("--exante")]
 	[Description("--intraday only: price the mapped expiry's gamma with the PRIOR trading day's snapshot IVs (falling back to a back-solve from the prior day's mids at the prior day's spot) instead of back-solving from this day's EOD mids. The default solve leaks the session's outcome into every column — a put that finished ITM has a fat EOD mid, back-solves to an inflated IV, and its strike re-brightens/dims by where the day CLOSED; ex-ante IVs show what was actually hedgeable at each bucket. Contracts absent from the prior snapshot are dropped.")]
 	public bool Exante { get; set; }
+
+	[CommandOption("--vanna")]
+	[Description("--intraday only: add the VEX (vanna) migration panel as a third panel beside the gamma map and the volume tape. It was the default second panel before the tape took that seat; the flow study's null result (vanna adds nothing over ΔIV) demoted it to opt-in. The normal (non---intraday) view is unaffected — --greek both still renders the gamma and vanna heatmaps there.")]
+	public bool Vanna { get; set; }
 
 	[CommandOption("--lookback <DAYS>")]
 	[DefaultValue(5)]
@@ -112,6 +116,8 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (Dte < 0 || Dte > 60) return ValidationResult.Error($"--dte: must be in [0, 60], got {Dte}");
 		if (IntervalMin.HasValue && (IntervalMin.Value < 1 || IntervalMin.Value > 120)) return ValidationResult.Error($"--interval: must be in [1, 120] minutes, got {IntervalMin}");
 		if (Time != null && !Intraday) return ValidationResult.Error("--time anchors the --intraday VEX column; add --intraday");
+		if (Time != null && !Vanna) return ValidationResult.Error("--time narrows the VEX panel, which is opt-in now; add --vanna");
+		if (Vanna && !Intraday) return ValidationResult.Error("--vanna adds the --intraday VEX migration panel; the normal view gets vanna via --greek both/vanna");
 		if (Start != null && !Intraday) return ValidationResult.Error("--start bounds the --intraday columns; add --intraday");
 		if (End != null && !Intraday) return ValidationResult.Error("--end bounds the --intraday columns; add --intraday");
 		if (RthTimeError(Time, "--time") is { } timeErr) return ValidationResult.Error(timeErr);
@@ -346,7 +352,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 					AppendIvDump(ticker, spot.Value, quotes, settings, asOf, intradayExpiry);
 				}
 			}
-			RenderIntradayGexHeatmap(ticker, asOf.Date, intradayExpiry, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical, withVexNow: settings.BothGreeks, vendorIvs: settings.Captured,
+			RenderIntradayGexHeatmap(ticker, asOf.Date, intradayExpiry, quotes, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.IntervalMin, settings.Exante, settings.VendorName, liveChain: !isOfflineHistorical, withVexNow: settings.Vanna, vendorIvs: settings.Captured,
 				vexAt: AnalyzeGexSettings.ParseEtTime(settings.Time),
 				windowStart: AnalyzeGexSettings.ParseEtTime(settings.Start) ?? AnalyzeGexSettings.RthOpen,
 				windowEnd: AnalyzeGexSettings.ParseEtTime(settings.End) ?? AnalyzeGexSettings.RthClose);
@@ -1338,11 +1344,21 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		// --exante deliberately pins prior-day IVs, so the time-matched minute quotes would defeat its purpose.
 
+		// This session's own chain captures (appended by every prior --intraday call and by wa-scraper's per-minute
+		// ivCapture). Loaded up front — before the interval fit — because they answer two independent questions:
+		// whether buckets can be rebuilt from as-seen vendor surfaces (running day / --captured, gated below), and
+		// whether the volume tape has data (captures carrying the volume column exist for the mapped expiry). The
+		// load itself is interval-independent; only the matching tolerance below depends on the bucket size.
+		var captureSlices = !exante ? LoadCaptureSlices(ticker, date, expiry, source, quotes) : null;
+		if (captureSlices != null && captureSlices.Count == 0) captureSlices = null;
+		var hasTape = captureSlices != null && captureSlices.Any(s => s.Quotes.Values.Any(q => q.Volume.HasValue));
+
 		// Resolve the bucket size: an explicit --interval is honored as-is; the default picks the finest of the
-		// standard sizes whose panel set fits the terminal side by side (two migration panels under --greek both,
-		// one under --greek gamma), using the same fixed cell geometry as the rendering below. Strike labels track
-		// the spot magnitude, so a tape sample prices the column widths before any matrix is built.
-		var panels = withVexNow ? 2 : 1;
+		// standard sizes whose panel set fits the terminal side by side (gamma alone, plus the volume tape when
+		// capture volume exists, plus the VEX panel under --vanna), using the same fixed cell geometry as the
+		// rendering below. Strike labels track the spot magnitude, so a tape sample prices the column widths
+		// before any matrix is built.
+		var panels = 1 + (hasTape ? 1 : 0) + (withVexNow ? 1 : 0);
 		var open = windowStart ?? AnalyzeGexSettings.RthOpen;
 		var close = windowEnd ?? AnalyzeGexSettings.RthClose;
 		var sampleSpot = intradaySpots.Values.First();
@@ -1365,12 +1381,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// integer tolerance above leaves dead zones on odd intervals (a 13:02:11 capture missed its 13:00 mark by 11
 		// seconds at --interval 5) — harmless against the dense per-minute spot tape, but it drops real captures.
 		var captureTolerance = TimeSpan.FromSeconds(Math.Max(60, interval * 30));
-		// Running day: this session's own chain captures (appended by every prior --intraday call and by
-		// wa-scraper's per-minute ivCapture) — a bucket near one is rebuilt from the surface that was actually
-		// visible then, making the column static across re-runs. --vendor forces this source on ANY date (the
-		// NBBO-vs-vendor comparison view), where an uncovered bucket drops instead of falling back.
-		var captureSlices = (liveChain || vendorIvs) && !exante ? LoadCaptureSlices(ticker, date, expiry, source, quotes) : null;
-		if (captureSlices != null && captureSlices.Count == 0) captureSlices = null;
+		// Bucket REBUILD from captures stays gated to the running day / --captured (an offline past-date replay
+		// keeps its store-or-drop discipline); the volume tape below reads the slices on any date.
+		var rebuildFromCaptures = (liveChain || vendorIvs) && captureSlices != null;
 		if (vendorIvs && captureSlices == null)
 		{
 			AnsiConsole.MarkupLine($"[red]--captured: no data/iv/{ticker}/{date:yyyy-MM-dd}.csv capture rows from source '{Markup.Escape(source)}' cover the {expiry:yyyy-MM-dd} expiry. The archive is written by running-day `analyze gex` calls and wa-scraper's ivCapture.[/]");
@@ -1410,13 +1423,13 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				// the bucket falls through to the capture slices, then stays provisional on the live fetch.
 				else if (!liveChain) { skipped.Add(mark); continue; }
 			}
-			if (!storeServed && captureSlices != null)
+			if (!storeServed && rebuildFromCaptures)
 			{
 				// Nearest capture within half a bucket (same matching as the ·live rows, so the two agree column for
 				// column). No capture near the mark → the current fetch stands in and the column stays provisional.
 				Dictionary<string, OptionContractQuote>? nearestCapture = null;
 				var bestCapDiff = captureTolerance;
-				foreach (var (ts, slice) in captureSlices)
+				foreach (var (ts, slice) in captureSlices!)
 				{
 					var capDiff = ts >= mark ? ts - mark : mark - ts;
 					if (capDiff <= bestCapDiff) { bestCapDiff = capDiff; nearestCapture = slice; }
@@ -1467,6 +1480,48 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var maxAbsNet = Math.Max(1m, hours.SelectMany(h => h.Cells.Values).Select(c => Math.Abs(c.Net)).DefaultIfEmpty(0m).Max());
 		var allStrikes = hours.SelectMany(h => h.Cells.Keys).Distinct().OrderByDescending(s => s).ToList();
 		var wholeGrid = IsWholeGrid(allStrikes);
+
+		// Volume tape: the session's TAPE laid on the same ladder as the BOOK. Each column is the Δ of the
+		// captures' cumulative day volume between this mark's capture and the previous one that carried volume
+		// (the first such column is volume since the open — the baseline is zero, not an earlier capture). Cells
+		// reuse GexCell with call/put Δvolume, so the color language matches the gamma map: green = CALL-dominated
+		// flow, red = PUT-dominated — which side TRADED, not which way (open/close and buy/sell are unknowable
+		// without signed prints). A mark whose nearest volume-bearing capture is the same one the previous column
+		// consumed contributes no new information and is skipped rather than rendered as a fake zero column.
+		var tapeHours = new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells, long Total)>();
+		if (hasTape)
+		{
+			var lastCum = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+			TimeSpan? lastCapTs = null;
+			foreach (var h in hours)
+			{
+				Dictionary<string, OptionContractQuote>? cap = null;
+				TimeSpan? capTs = null;
+				var best = captureTolerance;
+				foreach (var (ts, slice) in captureSlices!)
+				{
+					var diff = ts >= h.Mark ? ts - h.Mark : h.Mark - ts;
+					if (diff <= best && slice.Values.Any(q => q.Volume.HasValue)) { best = diff; cap = slice; capTs = ts; }
+				}
+				if (cap == null || capTs == lastCapTs) continue;
+				lastCapTs = capTs;
+				var byStrike = new Dictionary<decimal, (decimal C, decimal P)>();
+				long total = 0;
+				foreach (var (sym, q) in cap)
+				{
+					if (q.Volume is not { } cum) continue;
+					var p = ParsingHelpers.ParseOptionSymbol(sym);
+					if (p == null || string.IsNullOrEmpty(p.CallPut)) continue;
+					var d = Math.Max(0, cum - lastCum.GetValueOrDefault(sym));   // cumulative never falls; a vendor reset clamps to 0
+					lastCum[sym] = cum;
+					if (d == 0) continue;
+					total += d;
+					byStrike.TryGetValue(p.Strike, out var e);
+					byStrike[p.Strike] = p.CallPut == "C" ? (e.C + d, e.P) : (e.C, e.P + d);
+				}
+				tapeHours.Add((h.Mark, h.Spot, byStrike.ToDictionary(kv => kv.Key, kv => new GexCell(kv.Value.C, kv.Value.P)), total));
+			}
+		}
 
 		AnsiConsole.MarkupLine(dte == 0
 			? $"[bold]{ticker}[/] 0DTE {date:yyyy-MM-dd} — intraday GEX gravity migration"
@@ -1541,33 +1596,53 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			table.AddRow(liveWallPCells.ToArray());
 		}
 
-		// VEX migration panel: the vanna analogue of the gamma table, bucket for bucket from the SAME
-		// time-matched quotes, sharing the exact strike rows (headers are two lines in both, neither table has a
-		// title, and the gamma table's Gravity footer is its LAST row — so the ladders align 1:1). --time narrows
-		// the panel to the single bucket nearest that ET time for a focused read. Columns wraps the panel below
-		// when the pair exceeds the terminal; the hint suggests the interval that would fit side by side.
+		// Companion panels beside the gamma map, all sharing the exact strike rows (headers are two lines in every
+		// table, none has a title row, and only the gamma table carries footer rows BELOW the ladder — so the
+		// ladders align 1:1): the volume tape (default whenever capture volume exists) and the VEX migration panel
+		// (--vanna; --time narrows it to the single bucket nearest that ET time). Columns wraps panels below when
+		// the set exceeds the terminal; the hint suggests the interval that would fit side by side.
+		var shownTables = new List<Table> { table };
+		var shownColumnCounts = new List<int> { hours.Count };
+		if (tapeHours.Count > 0)
+		{
+			var tMax = Math.Max(1m, tapeHours.SelectMany(t => t.Cells.Values).Select(c => Math.Abs(c.Net)).DefaultIfEmpty(0m).Max());
+			var tape = BuildColumnHeatmapTable("[bold]Volume (Δ tape)[/]", tapeHours.Select(t => new HeatColumn($"{t.Mark:hh\\:mm}", $"{t.Spot:F2}", t.Cells, Gravity: null)).ToList(), allStrikes, wholeGrid, tMax);
+			var sumCells = new List<string> { "[bold]Σvol[/]" };
+			foreach (var t in tapeHours) sumCells.Add(t.Total > 0 ? $"[bold]{FormatCompact(t.Total).TrimStart('+')}[/]" : "[dim]0[/]");
+			tape.AddRow(sumCells.ToArray());
+			shownTables.Add(tape);
+			shownColumnCounts.Add(tapeHours.Count);
+		}
 		if (withVexNow && vannaHours.Count > 0)
 		{
 			var shownVanna = vexAt == null ? vannaHours : new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells)> { vannaHours.OrderBy(v => AbsSpan(v.Mark - vexAt.Value)).First() };
 			var vMax = Math.Max(1m, shownVanna.SelectMany(h => h.Cells.Values).Select(c => Math.Abs(c.Net)).DefaultIfEmpty(0m).Max());
-			var vex = BuildColumnHeatmapTable("[bold]VEX (vanna)[/]", shownVanna.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, Gravity: null)).ToList(), allStrikes, wholeGrid, vMax);
-			AnsiConsole.Write(new Columns(table, vex) { Expand = false });
+			shownTables.Add(BuildColumnHeatmapTable("[bold]VEX (vanna)[/]", shownVanna.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, Gravity: null)).ToList(), allStrikes, wholeGrid, vMax));
+			shownColumnCounts.Add(shownVanna.Count);
+		}
+		if (shownTables.Count > 1)
+		{
+			AnsiConsole.Write(new Columns(shownTables) { Expand = false });
 
 			// Same fixed cell geometry as the side-by-side expiry heatmaps: content max(7, spot label) + 2 padding
 			// + 1 border per bucket column; strike column + 2 padding + 1 border; +1 closing border per panel.
 			var strikeW = allStrikes.Count > 0 ? allStrikes.Max(k => StrikeLabel(k, wholeGrid).Length) : 7;
 			var colW = 3 + Math.Max(7, hours.Max(h => $"{h.Spot:F2}".Length));
-			var pairWidth = 2 * (1 + strikeW + 3) + (hours.Count + shownVanna.Count) * colW + 2;
-			if (pairWidth > AnsiConsole.Profile.Width && vexAt == null)
+			var setWidth = shownTables.Count * (1 + strikeW + 3 + 1) + shownColumnCounts.Sum() * colW;
+			if (setWidth > AnsiConsole.Profile.Width && vexAt == null)
 			{
-				var fitBuckets = Math.Max(2, (AnsiConsole.Profile.Width - 2 - 2 * (1 + strikeW + 3)) / (2 * colW));
+				var fitBuckets = Math.Max(2, (AnsiConsole.Profile.Width - shownTables.Count * (1 + strikeW + 3 + 1)) / (shownTables.Count * colW));
 				var fitInterval = (int)Math.Ceiling(390.0 / (fitBuckets - 1) / 30) * 30;
-				AnsiConsole.MarkupLine($"[dim]Panels are stacked — together they need {pairWidth} columns but the terminal has {AnsiConsole.Profile.Width}. Raise --interval to ~{fitInterval} (or drop --interval for the auto fit, or use --time HH:MM for a single VEX bucket) to fit them side by side.[/]");
+				AnsiConsole.MarkupLine($"[dim]Panels are stacked — together they need {setWidth} columns but the terminal has {AnsiConsole.Profile.Width}. Raise --interval to ~{fitInterval} (or drop --interval for the auto fit{(withVexNow ? ", or use --time HH:MM for a single VEX bucket" : "")}) to fit them side by side.[/]");
 			}
 		}
 		else
 			AnsiConsole.Write(table);
 		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); [bold]Pull[/] = net-GEX-weighted lean from spot in ATM-expected-move units (raw points ÷ spot·σ_atm·√T for the remaining life — a static book holds roughly flat as the clock decays instead of bleeding to zero), [green]+[/] = the ladder's net exposure sits ABOVE spot, [red]−[/] = below. Both aggregate every in-range strike, not just the displayed rows. [green]Wall·C[/]/[red]Wall·P[/] = the strike carrying the largest call/put GEX that bucket (per-side argmax — a big two-sided strike can be a wall yet net toward dim in the map)." + (liveLog.Count > 0 ? " [cyan]·live[/] rows = the gravity/walls logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
+		if (tapeHours.Count > 0)
+			AnsiConsole.MarkupLine("[dim]Volume tape = contracts TRADED per bucket (Δ of the captures' cumulative day volume; the first column is volume since the open), cell = net call−put Δvolume on the same color language as the gamma map — [green]green[/] = call-side flow, [red]red[/] = put-side. Which side traded, NOT which way: open/close and buy/sell need signed prints. [bold]Σvol[/] = total contracts that bucket across the window. The book is static intraday (OI settles overnight); this tape is the only live axis.[/]");
+		else if (liveChain && !hasTape)
+			AnsiConsole.MarkupLine("[dim]Volume tape unavailable: today's data/iv captures carry no volume column yet (added 2026-08-18 — restart wa-scraper to start recording; the tape appears from that minute on).[/]");
 		if (withVexNow && vannaHours.Count > 0)
 			AnsiConsole.MarkupLine($"[dim]VEX panel = the mapped expiry's net vanna ($ dealer delta per vol point) recomputed at each bucket's spot, same quotes as the gamma columns{(vexAt != null ? $" (narrowed to the bucket nearest --time {vexAt:hh\\:mm})" : "")}. No gravity marker — vanna maps a hedging flow under an IV move, not a level. Full multi-expiry VEX: `analyze gex {Markup.Escape(ticker)}` without --intraday.[/]");
 		if (skipped.Count > 0 && vendorIvs)
@@ -1675,7 +1750,10 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			if (!byTs.TryGetValue(ts, out var slice)) byTs[ts] = slice = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 			// LastPrice is nulled: the dump doesn't persist it, and letting the CURRENT fetch's last price serve as a
 			// mid fallback inside a time-matched column would quietly re-import the very leak this slice removes.
-			slice[baseQuote.ContractSymbol] = baseQuote with { Bid = Num(f[6]), Ask = Num(f[7]), ImpliedVolatility = Num(f[8]), OpenInterest = long.TryParse(f[9], NumberStyles.Integer, CultureInfo.InvariantCulture, out var oi) ? oi : null, LastPrice = null };
+			// Volume likewise: rows written before the column existed (pre-2026-08-18 files, or a writer not yet
+			// restarted) have 11 fields — their volume is UNKNOWN, and inheriting the current fetch's cumulative
+			// count would hand the tape a same-instant total wearing an old timestamp.
+			slice[baseQuote.ContractSymbol] = baseQuote with { Bid = Num(f[6]), Ask = Num(f[7]), ImpliedVolatility = Num(f[8]), OpenInterest = long.TryParse(f[9], NumberStyles.Integer, CultureInfo.InvariantCulture, out var oi) ? oi : null, LastPrice = null, Volume = f.Length >= 12 && long.TryParse(f[11], NumberStyles.Integer, CultureInfo.InvariantCulture, out var vol) ? vol : null };
 		}
 		foreach (var kv in byTs) result.Add((kv.Key, kv.Value));
 		return result;
