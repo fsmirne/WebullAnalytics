@@ -464,8 +464,10 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return false;
 		}
 
-		// The solve is priced as of the PRIOR day (its spot, its mids), so time-to-expiry runs from there — with the
-		// same one-day floor GexMatrix.Build applies. For a 0DTE map that is the original 1/365.
+		// The solve is priced as of the PRIOR day (its spot, its EOD mids, both stamped near that day's close), so
+		// time-to-expiry runs close-to-close: whole calendar days, which IS the true clock here — matching the
+		// clock-accurate GexMatrix.TimeYears convention without needing an intraday instant. (Scraper-written
+		// snapshots are morning captures, overstating this by ~⅔ of a day; accepted, the solve stays two-sided.)
 		var timeYears = Math.Max(1, (expiry.Date - priorDate.Value).Days) / 365.0;
 		int applied = 0, solved = 0, dropped = 0;
 		foreach (var sym in quotes.Keys.ToList())
@@ -1869,6 +1871,19 @@ internal sealed class GexMatrix
 	/// Caps row count to <paramref name="maxStrikes"/> by keeping the strikes closest to spot — high-priced
 	/// underlyings (e.g. SPY) otherwise pull hundreds of strikes into the heatmap.
 	/// </summary>
+	/// <summary>True remaining life of a contract: calendar time from the observation instant to the expiry
+	/// session's close (13:00 ET on early-close half days), floored at 15 minutes so an at-or-after-close run
+	/// degrades to a near-expiry ATM spike instead of a division blow-up. Replaces the old one-day floor, which
+	/// paired the vendor's true-clock IVs with a T up to ~4× too long all through a 0DTE session — overstating
+	/// the implied distribution width and inflating far-from-money gamma (a 15.9k-OI put ~1% OTM out-gunned the
+	/// ATM complex for gravity on 2026-08-18 under the floor; the same book at true clock ranked them correctly).
+	/// The mid back-solve inside Build stays self-consistent either way because it solves at this same T.</summary>
+	internal static double TimeYears(DateTime asOf, DateTime expiryDate)
+	{
+		var close = expiryDate.Date + (MarketCalendar.IsEarlyClose(expiryDate.Date) ? new TimeSpan(13, 0, 0) : new TimeSpan(16, 0, 0));
+		return Math.Max((close - asOf).TotalDays, 15.0 / (24 * 60)) / 365.0;
+	}
+
 	public static GexMatrix Build(
 		IReadOnlyDictionary<string, OptionContractQuote> quotes,
 		string ticker,
@@ -1899,7 +1914,7 @@ internal sealed class GexMatrix
 			var q = kv.Value;
 			if (!q.OpenInterest.HasValue || q.OpenInterest.Value <= 0) continue;
 
-			var timeYears = Math.Max(1, (parsed.ExpiryDate.Date - asOfDate).Days) / 365.0;
+			var timeYears = TimeYears(asOf, parsed.ExpiryDate);
 
 			// Vendor IV is taken only from a live two-sided book (see OptionMath.TrustedVendorIv). Without that
 			// guard the heatmap is at the mercy of dead books, and an expiry-day evening — exactly when this
