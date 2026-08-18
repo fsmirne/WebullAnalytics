@@ -714,18 +714,27 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 		if (books.Count == 0) return;
 
-		// The chain the command is already rendering supplies the terminal OI — what the flagged activity matured into.
-		Dictionary<string, long>? terminalOi = null;
+		// Terminal OI — what the flagged activity matured into. The analysis day's own data/oi snapshot goes in
+		// first (the scraper's morning capture spans the full ladder), then the chain the command is already
+		// rendering overlays it: a live fetch covers only ~maxStrikes around spot, so without the snapshot the
+		// far strikes — where unusual builds live — settle to n/a. OI is static intraday, so the two agree where
+		// they overlap; on the offline path quotes IS that snapshot and the overlay is a no-op.
+		var terminalOi = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+		var todayPath = Program.ResolvePath($"data/oi/{ticker}/{asOf:yyyy-MM-dd}.jsonl");
+		if (File.Exists(todayPath))
+			foreach (var (sym, q) in LoadOiSnapshot(todayPath).Quotes)
+			{
+				var p = ParsingHelpers.ParseOptionSymbol(sym);
+				if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date == targetExpiry.Date && q.OpenInterest is { } snapOi)
+					terminalOi[sym] = snapOi;
+			}
 		if (chainHasOi)
-		{
-			terminalOi = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 			foreach (var (sym, q) in quotes)
 			{
 				var p = ParsingHelpers.ParseOptionSymbol(sym);
 				if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date == targetExpiry.Date && q.OpenInterest is { } oi)
 					terminalOi[sym] = oi;
 			}
-		}
 
 		var hits = new List<(DateTime Day, string Sym, OptionParsed P, long Vol, long Oi, long? Delta, DateTime? DeltaTo, bool VolHit, DateTime SortDay, string SessionLabel)>();
 		for (var i = 0; i < books.Count; i++)
@@ -737,7 +746,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				DateTime? nextDay = null;
 				for (var j = i + 1; j < books.Count && !nextOi.HasValue; j++)
 					if (books[j].Book.TryGetValue(sym, out var later)) { nextOi = later.Oi; nextDay = books[j].Day; }
-				if (!nextOi.HasValue && terminalOi != null && terminalOi.TryGetValue(sym, out var now)) { nextOi = now; nextDay = asOf.Date; }
+				if (!nextOi.HasValue && terminalOi.TryGetValue(sym, out var now)) { nextOi = now; nextDay = asOf.Date; }
 
 				var delta = nextOi.HasValue ? nextOi.Value - oi : (long?)null;
 				var volHit = vol >= UnusualMinFloor && vol >= UnusualMinRatio * Math.Max(oi, 1);
