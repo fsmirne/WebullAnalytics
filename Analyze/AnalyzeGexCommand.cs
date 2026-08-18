@@ -285,9 +285,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			return 1;
 		}
 
+		// Chain-wide OI absence = vendor OI blackout (Schwab zeroes openInterest overnight until the next OCC
+		// update posts), not "every contract is a fresh listing" — every OI-dependent panel must know the field
+		// is unusable rather than treat 0 as a real standing-interest reading.
+		var chainHasOi = quotes.Values.Any(q => q.OpenInterest is > 0);
+
 		// Unusual opening activity: strikes trading a multiple of their standing OI — arithmetically
 		// guaranteed opening flow, no print signing needed. Rendered in both the normal and --intraday views.
-		RenderUnusualActivity(ticker, quotes, asOf, isOfflineHistorical);
+		RenderUnusualActivity(ticker, quotes, asOf, isOfflineHistorical, chainHasOi);
 
 		// --intraday: 0DTE strikes × RTH-hours gravity-migration heatmap. Offline-historical only (needs an explicit
 		// --date with both a data/oi snapshot and a data/intraday spot file). Replaces the normal tables.
@@ -345,7 +350,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var vannaMatrix = both ? GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, GreekKind.Vanna) : null;
 		if (matrix.Strikes.Count == 0 || matrix.Expiries.Count == 0)
 		{
-			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
+			AnsiConsole.MarkupLine(chainHasOi
+				? $"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]"
+				: $"[yellow]The vendor returned no open interest for any of the {quotes.Count} fetched contracts (overnight OI blackout — OI is zeroed until the next morning's OCC update) and GEX is built from OI, so there is nothing to compute. Re-run during market hours, or use --date with a captured data/oi snapshot.[/]");
 			return 1;
 		}
 
@@ -574,9 +581,18 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// the NEXT session's snapshot (when captured) supplies the ΔOI confirmation — the CELH-style overnight
 	/// jump, visible the day it was being built. Thresholds fixed on purpose: vol ≥ 2× max(OI,1) and
 	/// vol ≥ 250 (the OI floor keeps fresh listings from flooding the list), top 12 by volume, listed by
-	/// expiry then strike-descending (matching the heatmap ladder) then volume.</summary>
-	private static void RenderUnusualActivity(string ticker, Dictionary<string, OptionContractQuote> quotes, DateTime asOf, bool isOfflineHistorical)
+	/// expiry then strike-descending (matching the heatmap ladder) then volume. When the vendor is in its
+	/// overnight OI blackout (chainHasOi false — no contract anywhere in the fetch carries OI), the screen is
+	/// skipped with a note instead of rendered: every ratio would be vol/1, turning the panel into a plain
+	/// volume leaderboard wearing an "unusual" label.</summary>
+	private static void RenderUnusualActivity(string ticker, Dictionary<string, OptionContractQuote> quotes, DateTime asOf, bool isOfflineHistorical, bool chainHasOi)
 	{
+		if (!chainHasOi)
+		{
+			AnsiConsole.MarkupLine("[dim]Unusual-activity screen skipped: the vendor returned no open interest for any fetched contract (overnight OI blackout), so volume/OI ratios are meaningless right now. Re-run during market hours.[/]");
+			AnsiConsole.WriteLine();
+			return;
+		}
 		const decimal MinRatio = 2m;
 		const long MinVolume = 250;
 		var hits = new List<(string Sym, OptionParsed P, long Vol, long Oi, decimal Ratio)>();
