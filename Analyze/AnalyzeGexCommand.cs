@@ -794,7 +794,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				h.Oi.ToString("N0"),
 				gapped ? $"[bold]≥{oiMultiple:F0}×[/]" : ratio >= UnusualMinRatio ? $"[bold]{ratio:F1}×[/]" : $"[dim]{ratio:F1}×[/]",
 				h.Delta is { } dd
-					? (dd > 0 ? $"[green]+{dd:N0}[/]" : dd < 0 ? $"[red]{dd:N0}[/]" : "[dim]0[/]") + (oiMultiple >= UnusualMinRatio && !gapped ? $" [bold]{oiMultiple:F0}×[/]" : "") + $" [dim]→{h.DeltaTo:M/d}[/]"
+					? (dd > 0 ? $"[green]+{dd:N0}[/]" : dd < 0 ? $"[red]{dd:N0}[/]" : "[dim]0[/]") + (oiMultiple > 0m && !gapped ? oiMultiple >= UnusualMinRatio ? $" [bold]{oiMultiple:F0}×[/]" : $" [dim]{oiMultiple:F1}×[/]" : "") + $" [dim]→{h.DeltaTo:M/d}[/]"
 					: "[dim]n/a[/]");
 		}
 		AnsiConsole.Write(table);
