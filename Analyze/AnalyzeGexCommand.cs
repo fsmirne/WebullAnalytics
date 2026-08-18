@@ -86,6 +86,11 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	[Description("--intraday only: price the mapped expiry's gamma with the PRIOR trading day's snapshot IVs (falling back to a back-solve from the prior day's mids at the prior day's spot) instead of back-solving from this day's EOD mids. The default solve leaks the session's outcome into every column — a put that finished ITM has a fat EOD mid, back-solves to an inflated IV, and its strike re-brightens/dims by where the day CLOSED; ex-ante IVs show what was actually hedgeable at each bucket. Contracts absent from the prior snapshot are dropped.")]
 	public bool Exante { get; set; }
 
+	[CommandOption("--lookback <DAYS>")]
+	[DefaultValue(5)]
+	[Description("How many prior sessions the expiring-contracts activity panel scans (0 disables it). The panel reads the last N data/oi snapshots and lists contracts expiring on the analysis day (or the pinned --expiry) that showed unusual activity while they still had days to run: day volume ≥ 2× that day's OI (guaranteed opening flow, same rule as the unusual-opening-activity screen), or an OI jump ≥ 2× the prior standing OI between consecutive covered snapshots (catches positioning built on a day whose snapshot missed the expiry — the live scraper's files carry only the 0DTE chain until the nightly backfill supplements them). Default: 5.")]
+	public int Lookback { get; set; } = 5;
+
 	[CommandOption("--captured")]
 	[Description("--intraday only: price every bucket from the VENDOR-reported IVs/OI archived in data/iv (written by running-day analyze calls and wa-scraper's per-minute ivCapture) instead of the default source (minute-NBBO back-solve when the store covers the day, else the live chain). Buckets with no capture within half an interval are DROPPED, so the panel is purely vendor-surfaced — run the same command with and without the flag to compare NBBO-solved vs vendor-reported gamma terrain. Captures are matched to the --vendor in effect.")]
 	public bool Captured { get; set; }
@@ -121,6 +126,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		// outright; the 'both' default quietly resolves to the gamma view so plain --intraday keeps working.
 		if (Intraday && !BothGreeks && TryParseGreek(Greek, out var g) && g != GreekKind.Gamma) return ValidationResult.Error("--intraday maps the gamma gravity migration and has no vanna equivalent; drop --greek vanna");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
+		if (Lookback < 0 || Lookback > 30) return ValidationResult.Error($"--lookback: must be in [0, 30] sessions, got {Lookback}");
 		if (Dump && EvaluationDateOverride.HasValue) return ValidationResult.Error("--dump applies to live fetches only (no --date)");
 		return ValidationResult.Success();
 	}
@@ -293,6 +299,11 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// Unusual opening activity: strikes trading a multiple of their standing OI — arithmetically
 		// guaranteed opening flow, no print signing needed. Rendered in both the normal and --intraday views.
 		RenderUnusualActivity(ticker, quotes, asOf, isOfflineHistorical, chainHasOi);
+
+		// The companion look BACK: the screen above excludes contracts expiring on the analysis day (0DTE churn),
+		// but a contract dying TODAY that printed unusual volume on a PRIOR session — when it still had days to
+		// run — is positioning that matured into today's OI, i.e. today's gamma terrain. Rendered in both views.
+		RenderExpiryLookback(ticker, quotes, asOf, expiryFilter?.Date ?? asOf.Date, settings.Lookback, chainHasOi);
 
 		// --intraday: 0DTE strikes × RTH-hours gravity-migration heatmap. Offline-historical only (needs an explicit
 		// --date with both a data/oi snapshot and a data/intraday spot file). Replaces the normal tables.
@@ -587,6 +598,11 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// overnight OI blackout (chainHasOi false — no contract anywhere in the fetch carries OI), the screen is
 	/// skipped with a note instead of rendered: every ratio would be vol/1, turning the panel into a plain
 	/// volume leaderboard wearing an "unusual" label.</summary>
+	// Thresholds shared by both unusual-activity screens: 2× the standing interest, with an absolute floor that
+	// keeps fresh listings and odd lots out of the list.
+	private const decimal UnusualMinRatio = 2m;
+	private const long UnusualMinFloor = 250;
+
 	private static void RenderUnusualActivity(string ticker, Dictionary<string, OptionContractQuote> quotes, DateTime asOf, bool isOfflineHistorical, bool chainHasOi)
 	{
 		if (!chainHasOi)
@@ -595,18 +611,16 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			AnsiConsole.WriteLine();
 			return;
 		}
-		const decimal MinRatio = 2m;
-		const long MinVolume = 250;
 		var hits = new List<(string Sym, OptionParsed P, long Vol, long Oi, decimal Ratio)>();
 		foreach (var (sym, q) in quotes)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
 			if (p.ExpiryDate.Date <= asOf.Date) continue;   // 0DTE churn is not opening-activity signal
-			if (q.Volume is not { } vol || vol < MinVolume) continue;
+			if (q.Volume is not { } vol || vol < UnusualMinFloor) continue;
 			var oi = Math.Max(q.OpenInterest ?? 0, 1);
 			var ratio = (decimal)vol / oi;
-			if (ratio < MinRatio) continue;
+			if (ratio < UnusualMinRatio) continue;
 			hits.Add((sym, p, vol, q.OpenInterest ?? 0, ratio));
 		}
 		if (hits.Count == 0) return;
@@ -657,6 +671,125 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 		AnsiConsole.Write(table);
 		AnsiConsole.MarkupLine("[dim]Volume ≥ 2× standing OI guarantees opening trades (positions can't turn over past the open interest without new ones) — DIRECTION unknown without signed prints. 0DTE excluded (churn, not positioning). " + (next != null ? "ΔOI = next captured session's OI change: the overnight jump this activity was building." : "Confirm in tomorrow's snapshot (ΔOI).") + "[/]");
+		AnsiConsole.WriteLine();
+	}
+
+	/// <summary>The companion screen looking BACKWARD at the analysis day's own expiry: contracts dying today whose
+	/// unusual trading happened on a PRIOR session, when they still had ≥1 day to run — the sibling screen's 0DTE-churn
+	/// exclusion never shows them, yet that activity is exactly what matured into today's OI and therefore today's
+	/// gamma terrain. Two triggers per (session, contract), thresholds shared with the sibling: day volume ≥ 2× that
+	/// day's standing OI (arithmetically guaranteed opening flow), or ΔOI ≥ 2× prior OI into the next COVERED snapshot
+	/// (the settled evidence — it survives a trade day whose snapshot missed the expiry entirely: the live scraper
+	/// writes 0DTE-only files until the nightly ThetaData backfill supplements them, so ΔOI is measured between
+	/// consecutive snapshots that actually list the expiry and the cell names the session it landed on). The newest
+	/// covered session settles against the chain this command is already looking at — skipped during the vendor's
+	/// overnight OI blackout, when live OI reads 0 chain-wide and every delta would be a fake collapse.</summary>
+	private static void RenderExpiryLookback(string ticker, Dictionary<string, OptionContractQuote> quotes, DateTime asOf, DateTime targetExpiry, int lookbackDays, bool chainHasOi)
+	{
+		if (lookbackDays <= 0 || targetExpiry.Date < asOf.Date) return;
+		var dir = Program.ResolvePath($"data/oi/{ticker}");
+		if (!Directory.Exists(dir)) return;
+		var sessionDates = Directory.EnumerateFiles(dir, "????-??-??.jsonl")
+			.Select(f => DateTime.TryParseExact(Path.GetFileNameWithoutExtension(f), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d.Date : (DateTime?)null)
+			.Where(d => d.HasValue && d.Value < asOf.Date)
+			.Select(d => d!.Value)
+			.OrderByDescending(d => d).Take(lookbackDays).OrderBy(d => d).ToList();
+		if (sessionDates.Count == 0) return;
+
+		// Per session: the target expiry's (volume, OI) book. A snapshot listing no contract for the expiry (the
+		// scraper's 0DTE-only files) is "uncovered": it contributes no volume rows and ΔOI spans across it.
+		var books = new List<(DateTime Day, Dictionary<string, (long Vol, long Oi)> Book)>();
+		var uncovered = new List<DateTime>();
+		foreach (var day in sessionDates)
+		{
+			var (_, snap) = LoadOiSnapshot(Path.Combine(dir, $"{day:yyyy-MM-dd}.jsonl"));
+			var book = new Dictionary<string, (long Vol, long Oi)>(StringComparer.OrdinalIgnoreCase);
+			foreach (var (sym, q) in snap)
+			{
+				var p = ParsingHelpers.ParseOptionSymbol(sym);
+				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || p.ExpiryDate.Date != targetExpiry.Date) continue;
+				book[sym] = (q.Volume ?? 0, q.OpenInterest ?? 0);
+			}
+			if (book.Count > 0) books.Add((day, book)); else uncovered.Add(day);
+		}
+		if (books.Count == 0) return;
+
+		// The chain the command is already rendering supplies the terminal OI — what the flagged activity matured into.
+		Dictionary<string, long>? terminalOi = null;
+		if (chainHasOi)
+		{
+			terminalOi = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+			foreach (var (sym, q) in quotes)
+			{
+				var p = ParsingHelpers.ParseOptionSymbol(sym);
+				if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date == targetExpiry.Date && q.OpenInterest is { } oi)
+					terminalOi[sym] = oi;
+			}
+		}
+
+		var hits = new List<(DateTime Day, string Sym, OptionParsed P, long Vol, long Oi, long? Delta, DateTime? DeltaTo, bool VolHit, DateTime SortDay, string SessionLabel)>();
+		for (var i = 0; i < books.Count; i++)
+		{
+			var (day, book) = books[i];
+			foreach (var (sym, (vol, oi)) in book)
+			{
+				long? nextOi = null;
+				DateTime? nextDay = null;
+				for (var j = i + 1; j < books.Count && !nextOi.HasValue; j++)
+					if (books[j].Book.TryGetValue(sym, out var later)) { nextOi = later.Oi; nextDay = books[j].Day; }
+				if (!nextOi.HasValue && terminalOi != null && terminalOi.TryGetValue(sym, out var now)) { nextOi = now; nextDay = asOf.Date; }
+
+				var delta = nextOi.HasValue ? nextOi.Value - oi : (long?)null;
+				var volHit = vol >= UnusualMinFloor && vol >= UnusualMinRatio * Math.Max(oi, 1);
+				var oiHit = delta is { } d && d >= UnusualMinFloor && d >= UnusualMinRatio * Math.Max(oi, 1);
+				if (!volHit && !oiHit) continue;
+				// Attribute an OI build with no same-day volume evidence to the session(s) it must have traded in:
+				// the trading days between this snapshot and the next covered one (the gap the scraper's 0DTE-only
+				// files leave). A 8/14-snapshot row whose OI lands on 8/18 traded on Monday 8/17, and should read —
+				// and sort — as 8/17 activity, not as an 8/14 row with a mystery delta.
+				var gap = new List<DateTime>();
+				if (!volHit && nextDay.HasValue)
+					for (var g = day.AddDays(1); g < nextDay.Value; g = g.AddDays(1))
+						if (MarketCalendar.IsOpen(g)) gap.Add(g);
+				var sortDay = gap.Count > 0 ? gap[0] : day;
+				var label = gap.Count == 0 ? $"{day:M/d}" : gap.Count == 1 ? $"~{gap[0]:M/d}" : $"~{gap[0]:M/d}–{gap[^1]:M/d}";
+				hits.Add((day, sym, ParsingHelpers.ParseOptionSymbol(sym)!, vol, oi, delta, nextDay, volHit, sortDay, label));
+			}
+		}
+		if (hits.Count == 0) return;
+
+		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title($"[bold]Unusual activity into the {targetExpiry:M/d} expiry (last {books.Count} covered session(s))[/]");
+		table.AddColumn(new TableColumn("[bold]Session[/]").NoWrap());
+		table.AddColumn(new TableColumn("[bold]Contract[/]").NoWrap());
+		table.AddColumn(new TableColumn("[bold]Volume[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]OI[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Vol/OI[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]ΔOI[/]").RightAligned().NoWrap());
+
+		// Same selection cap as the sibling screen (top 12, by the larger trigger magnitude); same display order too:
+		// session ascending (the attributed trade session for gap rows), then strike-descending to match the heatmap
+		// ladder, then volume.
+		foreach (var h in hits.OrderByDescending(h => Math.Max(h.Vol, h.Delta ?? 0)).Take(12).OrderBy(h => h.SortDay).ThenByDescending(h => h.P.Strike).ThenByDescending(h => h.Vol))
+		{
+			// A gap-attributed row has NO captured volume for its trade session — the snapshot that day was
+			// 0DTE-only. But opening ΔOI new contracts requires at least ΔOI contracts to trade, so the Volume
+			// and Vol/OI cells carry that inferred floor rather than the prior covered session's stale (and
+			// misleading) numbers.
+			var gapped = h.SortDay != h.Day;
+			var ratio = (decimal)h.Vol / Math.Max(h.Oi, 1);
+			var oiMultiple = h.Delta is { } dm && dm > 0 ? (decimal)dm / Math.Max(h.Oi, 1) : 0m;
+			table.AddRow(
+				h.SessionLabel,
+				$"{StrikeLabel(h.P.Strike, wholeGrid: h.P.Strike == Math.Truncate(h.P.Strike))}{h.P.CallPut}",
+				gapped ? $"≥{h.Delta:N0}" : h.VolHit ? h.Vol.ToString("N0") : $"[dim]{h.Vol:N0}[/]",
+				h.Oi.ToString("N0"),
+				gapped ? $"[bold]≥{oiMultiple:F0}×[/]" : ratio >= UnusualMinRatio ? $"[bold]{ratio:F1}×[/]" : $"[dim]{ratio:F1}×[/]",
+				h.Delta is { } dd
+					? (dd > 0 ? $"[green]+{dd:N0}[/]" : dd < 0 ? $"[red]{dd:N0}[/]" : "[dim]0[/]") + (oiMultiple >= UnusualMinRatio && !gapped ? $" [bold]{oiMultiple:F0}×[/]" : "") + $" [dim]→{h.DeltaTo:M/d}[/]"
+					: "[dim]n/a[/]");
+		}
+		AnsiConsole.Write(table);
+		AnsiConsole.MarkupLine($"[dim]Contracts expiring {targetExpiry:M/d} that were unusually active while they still had days to run — this activity matured into today's OI, i.e. today's gamma terrain. Bold Vol/OI ≥ 2× = guaranteed opening flow that session. ΔOI = standing-interest change into the next covered snapshot (→date). A ~session row is a build attributed to the snapshot gap it traded in — that day's own chain was never captured, so its Volume and Vol/OI are inferred floors: opening ΔOI new interest takes at least ΔOI contracts traded. DIRECTION unknown without signed prints.{(uncovered.Count > 0 ? $" No {targetExpiry:M/d} coverage in: {string.Join(", ", uncovered.Select(u => u.ToString("M/d")))} (0DTE-only scraper file, pending backfill)." : "")}[/]");
 		AnsiConsole.WriteLine();
 	}
 
