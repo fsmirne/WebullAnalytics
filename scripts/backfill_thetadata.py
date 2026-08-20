@@ -883,12 +883,17 @@ def process_one_expiration_ohlcv(client, ticker, exp, dte, rate, out_root, gstar
     if saw_bars and not unders:
         raise RuntimeError(f"ohlcv bars present but no underlying spot for {ticker} {start_d}..{end_d} (transient underlying feed?)")
     if total_rows == 0 and unders:
-        # Zero traded bars across a window with real trading sessions does not happen on these liquid roots —
-        # it is the signature of the vendor's bogus-NoData mode (2026-08-19: identical option_history_ohlc
-        # requests flipped to NoDataFoundError minutes apart, then recovered). Sealing here would certify an
-        # empty expiry forever; raising withholds the seal so the retry pass / a later run re-pulls it. A
-        # genuinely never-traded series belongs in ohlcv_known_holes.
-        raise RuntimeError(f"NO BARS AT ALL for {ticker} {exp_d} across {len(unders)} trading session(s) — refusing to seal-empty (bogus vendor NoData?); re-pull later, or record a proven gap in ohlcv_known_holes")
+        # Zero traded bars across a window with real trading sessions: for an ELAPSED, sealable expiry that
+        # is the signature of the vendor's bogus-NoData mode — sealing would certify an empty expiry forever,
+        # so raise to withhold the seal (retry pass / later runs re-pull; a proven never-traded series goes in
+        # ohlcv_known_holes). A FUTURE expiry is different: the work list reaches end+DTE so recent chains stay
+        # covered, but Tue/Wed dailies list only days ahead (verified 2026-08-20: SPY/QQQ 09-01 and 09-02 had
+        # ZERO quote rows through 08-17 while the 09-04 Friday weekly had 1.78M since July) — an all-empty
+        # window there is pre-listing, not vendor failure. Return 0 unsealed; it fills as sessions elapse.
+        if should_seal(exp_d.isoformat(), gend):
+            raise RuntimeError(f"NO BARS AT ALL for {ticker} {exp_d} across {len(unders)} trading session(s) — refusing to seal-empty (bogus vendor NoData?); re-pull later, or record a proven gap in ohlcv_known_holes")
+        log.info(f"    {progress}ohlcv {ticker} {exp_d}: no bars in {start_d}..{end_d} — future expiry not yet listed in the window; fills as sessions elapse")
+        return 0
     if days:
         known = _known_holes(out_root, ticker, exp_d.isoformat(), dataset="ohlcv")
         missing = sorted(d for d in unders if min(days) <= d <= end_d.isoformat() and d not in days and d not in known)
