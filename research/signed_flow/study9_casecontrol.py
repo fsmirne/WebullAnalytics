@@ -21,7 +21,8 @@ from import_quotes_sqlite import resolve_data_dir  # noqa: E402
 
 DATA = resolve_data_dir()
 CASES = DATA.parent / "research" / "study9_cases.json"
-MIN_MOVE, MIN_PX, MIN_DVOL, TOP_N, WIN = 0.40, 5.0, 25e6, 24, 10
+MIN_MOVE, MIN_PX, MIN_DVOL, TOP_N, WIN = 0.25, 5.0, 25e6, 24, 10   # 9b: +25% bar, case set = first TOP_N OPTIONABLE candidates
+CAND_N = 100
 
 
 def trading_days(start, end):
@@ -98,7 +99,7 @@ def discover():
         if best:
             events.append(best)
     events.sort(reverse=True)
-    events = [e for e in events if e[1] != "MRNA"][:TOP_N]
+    events = [e for e in events if e[1] != "MRNA"][:CAND_N]
     CASES.parent.mkdir(parents=True, exist_ok=True)
     CASES.write_text(json.dumps([{"ticker": t, "event": d, "move": round(mv, 3), "prior_close": c} for mv, t, d, c in events], indent=2))
     print(f"cases -> {CASES}")
@@ -127,17 +128,50 @@ def plan_windows(cases):
     return plans
 
 
+def has_window_data(ticker, start, end):
+    d = DATA / "oi" / ticker
+    if not d.exists():
+        return False
+    for p_ in d.glob("????-??-??.jsonl"):
+        if start.isoformat() <= p_.stem <= end.isoformat():
+            try:
+                rec = json.loads(p_.read_text().strip().splitlines()[-1])
+                if rec.get("options"):
+                    return True
+            except Exception:
+                pass
+    return False
+
+
 def pull():
     from backfill_thetadata import run as bf_run  # noqa: E402  (sequential, one session per chunk child)
     cases = json.loads(CASES.read_text())
-    plans = plan_windows(cases)
-    print(f"{len(plans)} window pulls")
-    for i, (t, s, e, kind) in enumerate(plans, 1):
-        print(f"[{i}/{len(plans)}] {t} {kind} {s}..{e}", flush=True)
+    optionable = []
+    for c in cases:   # move order; stop once TOP_N optionable case tickers are in
+        if len(optionable) >= TOP_N:
+            break
+        plans = plan_windows([c])
+        if not plans or plans[0][3] != "case":
+            continue
+        t, s, e, _ = plans[0]
+        print(f"probe {t} case {s}..{e}", flush=True)
         try:
             bf_run([t], s, e + timedelta(days=5), DATA / "oi", 60, 0.045, None, 300, 2)
         except Exception as ex:
-            print(f"  [error] {t} {s}: {type(ex).__name__}: {ex}")
+            print(f"  [error] {t}: {type(ex).__name__}: {ex}")
+            continue
+        if not has_window_data(t, s, e):
+            print(f"  {t}: no options data — candidate dropped")
+            continue
+        optionable.append(c)
+        for t2, s2, e2, kind in plans[1:]:
+            print(f"  {t2} {kind} {s2}..{e2}", flush=True)
+            try:
+                bf_run([t2], s2, e2 + timedelta(days=5), DATA / "oi", 60, 0.045, None, 300, 2)
+            except Exception as ex:
+                print(f"  [error] {t2} {s2}: {type(ex).__name__}: {ex}")
+    (CASES.parent / "study9b_optionable.json").write_text(json.dumps(optionable, indent=2))
+    print(f"optionable case set: {len(optionable)} -> study9b_optionable.json")
 
 
 def fingerprint(ticker, start, end):
@@ -189,7 +223,8 @@ def fingerprint(ticker, start, end):
 
 
 def score():
-    cases = json.loads(CASES.read_text())
+    opt = CASES.parent / "study9b_optionable.json"
+    cases = json.loads(opt.read_text()) if opt.exists() else json.loads(CASES.read_text())
     plans = plan_windows(cases)
     rows = []
     for t, s, e, kind in plans:
