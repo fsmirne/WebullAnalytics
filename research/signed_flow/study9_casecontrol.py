@@ -38,17 +38,33 @@ def discover():
     key = json.load(open(DATA / "api-config.json"))["massive"]["apiKey"]
     closes = {}   # ticker -> list of (date, close, dollar_vol)
     days = trading_days(date(2025, 1, 2), date(2026, 8, 14))
-    loaded = failed = 0
+    import gzip
+    # Whole-market grouped dailies are a reusable dataset (12k tickers x OHLCV per session) that costs
+    # ~12.5s of quota each — cache every fetched day under data/grouped/ so re-runs and future studies
+    # (different thresholds, other event definitions) read from disk instead of re-spending the quota.
+    cache_dir = DATA / "grouped"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    loaded = failed = fetched = 0
     for i, d in enumerate(days):
-        url = f"https://api.massive.com/v2/aggs/grouped/locale/us/market/stocks/{d}?adjusted=true&apiKey={key}"
+        cache = cache_dir / f"{d}.json.gz"
         r = None
-        for attempt in range(4):
+        if cache.exists():
             try:
-                r = json.load(urllib.request.urlopen(url, timeout=60))
-                break
+                r = json.loads(gzip.decompress(cache.read_bytes()))
             except Exception:
-                time.sleep(20 * (attempt + 1))   # the grouped endpoint is quota'd ~5/min: long backoff, few retries
-        time.sleep(12.5)   # pace UNDER the quota so failures are the exception, not 22% of requests
+                r = None
+        if r is None:
+            url = f"https://api.massive.com/v2/aggs/grouped/locale/us/market/stocks/{d}?adjusted=true&apiKey={key}"
+            for attempt in range(4):
+                try:
+                    r = json.load(urllib.request.urlopen(url, timeout=60))
+                    break
+                except Exception:
+                    time.sleep(20 * (attempt + 1))   # the grouped endpoint is quota'd ~5/min: long backoff, few retries
+            time.sleep(12.5)   # pace UNDER the quota so failures are the exception, not 22% of requests
+            if r and r.get("status") == "OK":
+                cache.write_bytes(gzip.compress(json.dumps(r).encode()))
+                fetched += 1
         if not r or r.get("status") != "OK":
             failed += 1
             continue
