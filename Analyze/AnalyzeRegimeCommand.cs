@@ -135,7 +135,8 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 		if (!File.Exists(quoteDbPath))
 			throw new FileNotFoundException($"SQLite quote store not found at '{quoteDbPath}'. Build it with scripts/import_quotes_sqlite.py (the daily backfill keeps it current).");
 		var quoteStore = new Backtest.QuoteStoreCache(quoteDbPath, since: date.Date, until: date.Date, sameDayExpiryOnly: false);
-		IQuoteSource quotes = new Backtest.QuotesQuoteSource(bars, quoteStore, parametric, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+		IQuoteSource quotes = new Backtest.QuotesQuoteSource(bars, quoteStore, parametric, dividendsByRoot: dividendsByRoot, oiCache: oiCache,
+			openerConfig: config.Opener, defaultIv: config.Indicators.IvDefaultPct, strikeStep: config.Indicators.StrikeStep);
 		var priceCache = new HistoricalPriceCache(bars);
 
 		var openPositions = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase);

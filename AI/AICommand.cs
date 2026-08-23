@@ -1061,7 +1061,8 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (!quoteStore.HasAnyQuoteInWindow(config.Ticker, since, until))
 			Console.Error.WriteLine($"Warning: no real NBBO quotes for {config.Ticker} in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}] (data/quotes) — the backtest will price nothing and report no fills. The evening backfill (scripts/daily_backfill.sh) lands the current day's quotes after ~19:00 ET; re-run once it has completed.");
 		Backtest.IBacktestQuoteSource quotes = new Backtest.QuotesQuoteSource(
-			bars, quoteStore, parametric, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
+			bars, quoteStore, parametric, dividendsByRoot: dividendsByRoot, oiCache: oiCache,
+			openerConfig: config.Opener, defaultIv: config.Indicators.IvDefaultPct, strikeStep: config.Indicators.StrikeStep);
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);

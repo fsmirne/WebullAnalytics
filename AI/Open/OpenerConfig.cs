@@ -158,6 +158,10 @@ internal sealed class OpenerConfig
 
 	[JsonPropertyName("structures")] public OpenerStructuresConfig Structures { get; set; } = new();
 
+	/// <summary>Computes the required chain expansion fraction for an expiry based on enabled structures.</summary>
+	public decimal ComputeRequiredExpansionPct(decimal spot, double timeYears, decimal iv, decimal strikeStep, double riskFreeRate)
+		=> Structures.ComputeRequiredExpansionPct(spot, timeYears, iv, strikeStep, riskFreeRate);
+
 	/// <summary>DTE-aware shaping of the intraday-tape blend weight. When disabled (default) the blend
 	/// uses the flat <see cref="OpenerWeightsConfig.IntradayTape"/> at every DTE — exactly the legacy
 	/// behavior. When enabled, the effective intraday weight ramps from <c>weightAt0Dte</c> at same-day
@@ -406,6 +410,74 @@ internal sealed class OpenerStructuresConfig
 	/// query. 0 means every enabled structure is same-day (0DTE). Used by the backtest quote store to skip
 	/// parsing the longer-dated tail of each expiry file when the whole strategy is 0DTE.</summary>
 	public int MaxDteAcrossEnabled() => EnabledDteRanges().Select(r => r.Max).DefaultIfEmpty(0).Max();
+
+	/// <summary>Minimum delta across all enabled structures (defaults to 0.15m if none configured/enabled).</summary>
+	public decimal MinDeltaAcrossEnabled()
+	{
+		var deltas = new List<decimal>();
+		if (ShortVertical.Enabled) deltas.Add(ShortVertical.ShortDeltaMin);
+		if (LongVertical.Enabled) deltas.Add(LongVertical.LongDeltaMin);
+		if (IronCondor.Enabled) deltas.Add(IronCondor.ShortDeltaMin);
+		if (Condor.Enabled) deltas.Add(Condor.ShortDeltaMin);
+		if (LongCalendar.Enabled && LongCalendar.DeltaMax > 0m) deltas.Add(LongCalendar.DeltaMin);
+		if (LongDiagonal.Enabled)
+		{
+			deltas.Add(LongDiagonal.ShortDeltaMin);
+			if (LongDiagonal.DeltaMax > 0m) deltas.Add(LongDiagonal.DeltaMin);
+		}
+		if (DiagonalVertical.Enabled)
+		{
+			deltas.Add(DiagonalVertical.ShortDeltaMin);
+			deltas.Add(DiagonalVertical.LongDeltaMin);
+		}
+		if (CalendarVertical.Enabled) deltas.Add(CalendarVertical.DeltaMin);
+		if (LongCallPut.Enabled) deltas.Add(LongCallPut.DeltaMin);
+		return deltas.Count > 0 ? deltas.Where(d => d > 0m && d < 1m).DefaultIfEmpty(0.15m).Min() : 0.15m;
+	}
+
+	/// <summary>Maximum width or wing steps across all enabled structures (defaults to 2 if none).</summary>
+	public int MaxWingStepsAcrossEnabled()
+	{
+		var steps = new List<int>();
+		if (ShortVertical.Enabled && ShortVertical.WidthSteps.Count > 0) steps.Add(ShortVertical.WidthSteps.Max());
+		if (LongVertical.Enabled && LongVertical.WidthSteps.Count > 0) steps.Add(LongVertical.WidthSteps.Max());
+		if (IronCondor.Enabled) steps.Add((IronCondor.WidthSteps.Count > 0 ? IronCondor.WidthSteps.Max() : 0) + (IronCondor.BodyWidthSteps.Count > 0 ? IronCondor.BodyWidthSteps.Max() : 0));
+		if (Condor.Enabled) steps.Add((Condor.WidthSteps.Count > 0 ? Condor.WidthSteps.Max() : 0) + (Condor.BodyWidthSteps.Count > 0 ? Condor.BodyWidthSteps.Max() : 0));
+		if (IronButterfly.Enabled && IronButterfly.WingSteps.Count > 0) steps.Add(IronButterfly.WingSteps.Max());
+		if (GravityFly.Enabled && GravityFly.WingSteps.Count > 0) steps.Add(GravityFly.WingSteps.Max());
+		if (DoubleCalendar.Enabled && DoubleCalendar.WidthSteps.Count > 0) steps.Add(DoubleCalendar.WidthSteps.Max());
+		if (DoubleDiagonal.Enabled) steps.Add((DoubleDiagonal.WidthSteps.Count > 0 ? DoubleDiagonal.WidthSteps.Max() : 0) + (DoubleDiagonal.LongWingSteps.Count > 0 ? DoubleDiagonal.LongWingSteps.Max() : 0));
+		if (DiagonalVertical.Enabled && DiagonalVertical.WidthSteps.Count > 0) steps.Add(DiagonalVertical.WidthSteps.Max());
+		if (CalendarVertical.Enabled && CalendarVertical.WidthSteps.Count > 0) steps.Add(CalendarVertical.WidthSteps.Max());
+		return steps.Count > 0 ? Math.Max(2, steps.Max()) : 2;
+	}
+
+	/// <summary>Computes the fraction of spot needed to expand the chain around spot for an expiry at
+	/// <paramref name="timeYears"/> to ensure all candidate strikes and wings fit on the ladder.</summary>
+	public decimal ComputeRequiredExpansionPct(decimal spot, double timeYears, decimal iv, decimal strikeStep, double riskFreeRate)
+	{
+		if (spot <= 0m) return 0.20m;
+		var minDelta = MinDeltaAcrossEnabled();
+		var maxWingSteps = MaxWingStepsAcrossEnabled();
+		var effectiveIv = iv > 0.01m ? iv : 0.25m;
+		var effectiveStep = strikeStep > 0m ? strikeStep : (spot >= 100m ? 5m : (spot >= 25m ? 1m : 0.5m));
+		var effectiveTimeYears = timeYears <= 0.0 ? (6.5 / 24.0 / 365.0) : timeYears;
+
+		var putStrike = Pricing.OptionMath.DeltaToStrike(spot, effectiveTimeYears, riskFreeRate, effectiveIv, minDelta, "P");
+		var callStrike = Pricing.OptionMath.DeltaToStrike(spot, effectiveTimeYears, riskFreeRate, effectiveIv, minDelta, "C");
+
+		var wingDist = maxWingSteps * effectiveStep;
+		var loStrike = Math.Max(0.01m, putStrike - wingDist);
+		var hiStrike = callStrike + wingDist;
+
+		var loPct = (spot - loStrike) / spot;
+		var hiPct = (hiStrike - spot) / spot;
+		var rawPct = Math.Max(loPct, hiPct);
+
+		// Add 25% safety margin, with 5% floor and 80% ceiling
+		var finalPct = rawPct * 1.25m;
+		return Math.Max(0.05m, Math.Min(0.80m, finalPct));
+	}
 }
 
 /// <summary>Diagonal-from-verticals: a near-dated SHORT vertical (credit) + a far-dated LONG vertical

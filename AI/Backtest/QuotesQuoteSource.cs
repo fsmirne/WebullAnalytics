@@ -40,13 +40,19 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 	private readonly IReadOnlyDictionary<string, decimal>? _spotOverrides;
 	private readonly IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? _dividendsByRoot;
 	private readonly ChainSnapshotOiCache? _oiCache;
+	private readonly OpenerConfig? _openerConfig;
+	private readonly decimal? _defaultIv;
+	private readonly decimal? _strikeStep;
 
 	/// <param name="parametric">The trade-bar/BS source used ONLY for counterfactual reprices
 	/// (<see cref="GetIntradayQuotesAsync"/>) that real NBBO can't answer. All real marks/fills use the store.</param>
 	public QuotesQuoteSource(HistoricalBarCache bars, QuoteStoreCache store, BacktestQuoteSource parametric, double? riskFreeRate = null,
 		IReadOnlyDictionary<string, decimal>? spotOverrides = null,
 		IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null,
-		ChainSnapshotOiCache? oiCache = null)
+		ChainSnapshotOiCache? oiCache = null,
+		OpenerConfig? openerConfig = null,
+		decimal? defaultIv = null,
+		decimal? strikeStep = null)
 	{
 		_bars = bars;
 		_store = store;
@@ -55,6 +61,9 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		_spotOverrides = spotOverrides;
 		_dividendsByRoot = dividendsByRoot;
 		_oiCache = oiCache;
+		_openerConfig = openerConfig;
+		_defaultIv = defaultIv;
+		_strikeStep = strikeStep;
 	}
 
 	/// <summary>Counterfactual reprice at a hypothetical spot (bar.High/Low brackets, profit projector) —
@@ -129,13 +138,18 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 
 		// Chain expansion: the live broker returns the whole chain for any one symbol, but this store returns
 		// only exact matches — so the opener's per-band-expiry placeholder probe would surface no contracts and
-		// enumerate nothing. Expand each requested expiry into the store's real near-money chain (±15% strikes)
-		// so the opener sees a full chain to build calendars/diagonals from, exactly like live.
+		// enumerate nothing. Expand each requested expiry into the store's real near-money chain dynamically
+		// sized based on the executing strategy's delta/wing parameters, TTE, and volatility.
 		foreach (var grp in parsed.GroupBy(x => (x.P.Root, Exp: x.P.ExpiryDate.Date)))
 		{
 			if (!underlyings.TryGetValue(grp.Key.Root, out var spot) || spot <= 0m) continue;
 			var oiDay = _oiCache?.ForDay(grp.Key.Root, asOf.Date);   // one memoized lookup per (root, day), reused across strikes
-			foreach (var occ in _store.ContractsOn(grp.Key.Root, grp.Key.Exp, asOf.Date, spot * (1m - ChainExpandPct), spot * (1m + ChainExpandPct)))
+			var dte = (grp.Key.Exp - asOf.Date).Days;
+			var timeYears = dte <= 0 ? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears) : dte / 365.0;
+			var expandPct = _openerConfig != null
+				? _openerConfig.ComputeRequiredExpansionPct(spot, timeYears, _defaultIv ?? _openerConfig.Indicators.IvDefaultPct, _strikeStep ?? _openerConfig.Indicators.StrikeStep, Rate)
+				: FallbackChainExpandPct(timeYears, _defaultIv ?? 0.25m);
+			foreach (var occ in _store.ContractsOn(grp.Key.Root, grp.Key.Exp, asOf.Date, spot * (1m - expandPct), spot * (1m + expandPct)))
 			{
 				if (options.ContainsKey(occ)) continue;
 				var q = _store.NbboAt(occ, asOf);
@@ -154,8 +168,6 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 				// (snapshot IV present) keeps its no-Newton-per-strike behaviour.
 				if (iv == null && q.Value.Mid > 0m && ParsingHelpers.ParseOptionSymbol(occ) is OptionParsed pe && pe.CallPut != null)
 				{
-					var dte = (grp.Key.Exp - asOf.Date).Days;
-					var timeYears = dte <= 0 ? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears) : dte / 365.0;
 					if (timeYears > 0)
 					{
 						var solved = OptionMath.ImpliedVol(AdjSpot(pe.Root, spot, asOf, pe.ExpiryDate), pe.Strike, timeYears, Rate, q.Value.Mid, pe.CallPut);
@@ -169,7 +181,13 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		return new QuoteSnapshot(options, underlyings);
 	}
 
-	/// <summary>Strike half-window for the probe→chain expansion above, as a fraction of spot. Wide enough to
-	/// cover calendar/diagonal long legs (which can sit a few % OTM) without pricing the whole deep-wing tail.</summary>
-	private const decimal ChainExpandPct = 0.06m;
+	private static decimal FallbackChainExpandPct(double timeYears, decimal iv)
+	{
+		// Default 3 standard deviations + 25% safety margin, clamped to [0.05, 0.80]
+		var sigma = Math.Max(0.05, (double)iv);
+		var t = Math.Max(6.5 / 24.0 / 365.0, timeYears);
+		var stdDev = sigma * Math.Sqrt(t);
+		var pct = (decimal)(stdDev * 3.0) * 1.25m;
+		return Math.Max(0.05m, Math.Min(0.80m, pct));
+	}
 }
