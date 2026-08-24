@@ -55,6 +55,16 @@ internal sealed class BacktestIVProvider
 	private const decimal SmileFloor = -0.30m;
 	private const decimal SmileCeiling = 1.50m;
 
+	// The put-wing constants above are calibrated from a same-session 0DTE snapshot (T ~ 6.5h), where
+	// OTM strikes cluster within ~1% of spot. Applied unscaled to a multi-day expiry, the same raw-%
+	// moneyness sits many fewer realized-vol standard deviations out (sigma*sqrt(T) grows with T), so
+	// a routine ~9% OTM strike on a 51 DTE vertical saturated the 150% ceiling and priced a $580 put on
+	// a $635 underlying richer than a strike 10 points closer to the money (inverted vs. the real chain).
+	// Skew flattens roughly as 1/sqrt(T) (a standard vol-surface heuristic), so ApplySmile scales the
+	// coefficients by sqrt(ReferenceSmileTimeYears / T): 1.0 at the calibration term, decaying for
+	// longer-dated legs.
+	private const double ReferenceSmileTimeYears = 6.5 / 24.0 / 365.0;
+
 	// VIX is the 30-day implied vol of SPX options, so any ticker that tracks the S&P 500 — SPY (ETF),
 	// SPX (full-size index), SPXW (PM-settled weeklies), XSP (mini-SPX index) — should read IV from VIX
 	// directly rather than from realized vol.
@@ -90,7 +100,8 @@ internal sealed class BacktestIVProvider
 		var atm = await GetAtmIVAsync(ticker, asOf, dteDays, cancellation);
 		if (!atm.HasValue) return null;
 		var smileScale = await GetSmileScaleAsync(ticker, asOf, cancellation);
-		return ApplySmile(atm.Value, ticker, strike, spot, smileScale);
+		var timeYears = dteDays <= 0 ? ReferenceSmileTimeYears : dteDays / 365.0;
+		return ApplySmile(atm.Value, ticker, strike, spot, smileScale, timeYears);
 	}
 
 	/// <summary>Resolves the per-day smile scale factor for <paramref name="ticker"/> at <paramref name="asOf"/>.
@@ -107,16 +118,20 @@ internal sealed class BacktestIVProvider
 
 	/// <summary>Synchronous smile application. Splits the async ATM-IV + smile-scale lookup from the
 	/// per-strike math so they amortize across thousands of per-strike pricings in parallel — see
-	/// <see cref="BacktestQuoteSource"/>. Pure function; safe to call concurrently.</summary>
-	public decimal? ApplySmile(decimal atm, string ticker, decimal strike, decimal spot, decimal smileScale = 1m)
+	/// <see cref="BacktestQuoteSource"/>. Pure function; safe to call concurrently.
+	/// <paramref name="timeYears"/> is the leg's time-to-expiry; omit (or pass the 0DTE reference term)
+	/// for same-session legs — see <see cref="ReferenceSmileTimeYears"/> for why longer-dated legs need
+	/// it to keep the put-wing lift from saturating.</summary>
+	public decimal? ApplySmile(decimal atm, string ticker, decimal strike, decimal spot, decimal smileScale = 1m, double timeYears = ReferenceSmileTimeYears)
 	{
 		if (atm <= 0m || spot <= 0m) return atm;
 		if (!_smileEnabled) return atm;
 
 		var m = (strike - spot) / spot;
 		var (linearSkew, curvature) = GetSmileParams(ticker, isCallSide: m >= 0m);
-		linearSkew *= smileScale;
-		curvature *= smileScale;
+		var termScale = timeYears > 0 ? Math.Min(1.0, Math.Sqrt(ReferenceSmileTimeYears / timeYears)) : 1.0;
+		linearSkew *= smileScale * (decimal)termScale;
+		curvature *= smileScale * (decimal)termScale;
 		var absM = m < 0m ? -m : m;
 		var rawSmile = linearSkew * m + curvature * absM;
 		var smile = Math.Clamp(rawSmile, SmileFloor, SmileCeiling);

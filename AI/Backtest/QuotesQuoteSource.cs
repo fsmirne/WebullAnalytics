@@ -8,6 +8,11 @@ namespace WebullAnalytics.AI.Backtest;
 /// <see cref="BacktestQuoteSource"/>. For each leg at the scan minute it returns the real bid/ask, sets
 /// LastPrice to the mid (for marking — the runner's fill model decides how far to cross), and back-solves
 /// IV on demand from the mid on the dividend-adjusted forward (same dividend-aware basis as the live path).
+/// A one-sided book (one side genuinely 0 — the far-OTM/expiry-day norm, not a data gap) is real and gets
+/// priced: <see cref="QuoteStoreCache.QuoteAt.Mid"/> resolves to the one live side rather than blending a
+/// real number with an absent one. Never priced from the store: a print with NO real side at all
+/// (<see cref="QuoteStoreCache.QuoteAt.IsEmpty"/> — nothing disseminated that minute) or an inverted print
+/// (<see cref="QuoteStoreCache.QuoteAt.IsCrossed"/> — a genuine feed anomaly); both are treated as missing.
 ///
 /// <para>A leg with no quote within the staleness window is OMITTED from the snapshot — the consumer's
 /// missing-quote policy then decides (skip the candidate, widen, etc.). This is the alternate price
@@ -109,15 +114,16 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 
 		// Price one OCC symbol off the real NBBO store (mid + back-solved IV + snapshot OI). Null when the
-		// store has no quote row within staleness for that contract at this minute. Rows may be one-sided
-		// (absent side stored as 0 — the store is faithful to the vendor): Mid is then half the live side,
-		// which is what management wants for a buyback; the opener's two-sided gates keep such books out of
-		// NEW entries (StrikeLadder / QuoteSanity / CandidateScorer).
+		// store has no quote row within staleness for that contract at this minute, or when the print carries
+		// no trustworthy price (IsEmpty: nothing disseminated that minute; IsCrossed: a genuine feed anomaly)
+		// — the caller's missing-quote policy then decides (skip the candidate, widen, drop the action). A
+		// one-sided print (one side genuinely 0 — the far-OTM/expiry-day norm) is real data and IS priced:
+		// QuoteAt.Mid already resolves to the one live side instead of manufacturing a synthetic blend.
 		OptionContractQuote? BuildQuote(string sym, OptionParsed p)
 		{
 			if (!underlyings.TryGetValue(p.Root, out var spot)) return null;
 			var q = _store.NbboAt(sym, asOf);
-			if (q == null) return null;
+			if (q == null || q.Value.IsEmpty || q.Value.IsCrossed) return null;
 			var nbbo = q.Value;
 			var mid = nbbo.Mid;
 			var dte = (p.ExpiryDate.Date - asOf.Date).Days;
@@ -153,7 +159,7 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 			{
 				if (options.ContainsKey(occ)) continue;
 				var q = _store.NbboAt(occ, asOf);
-				if (q == null) continue;
+				if (q == null || q.Value.IsEmpty || q.Value.IsCrossed) continue;
 				// Cheap surface: real bid/ask (binary search) + snapshot OI/IV. Deliberately NOT back-solving IV
 				// for the whole chain — that Newton solve per strike per minute was the slowdown. The scorer
 				// re-solves market-implied IV for the few legs it actually selects; snapshot IV here is enough

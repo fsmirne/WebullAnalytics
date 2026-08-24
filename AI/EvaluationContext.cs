@@ -83,3 +83,35 @@ internal sealed record PositionLeg(
 	string? CallPut,
 	int Qty
 );
+
+/// <summary>Shared by the live opener (<see cref="OpenerAutoExecutor"/>) and the backtest book
+/// (<see cref="Backtest.SimulatedBook"/>) so both refuse the exact same trade — a new candidate whose legs
+/// oppose a DIFFERENT already-open position's legs on the same symbol.</summary>
+internal static class HeldLegGuard
+{
+	/// <summary>True when <paramref name="candidateLegs"/> holds the OPPOSITE side of a symbol a held position
+	/// (not a clean re-take of the SAME structure) already holds. A real account can never independently carry
+	/// a short lot from one strategy and a long lot from another on the same option symbol — the broker/clearer
+	/// nets them, which would break the held position out from under it. Adding to the SAME side (selling more
+	/// of a symbol already sold elsewhere, or buying more of one already bought) is fine — it's exactly how a
+	/// real account accumulates size on a symbol, tracked here as independent lineages that each demand their
+	/// own margin, which sums to the same total a single combined lot would. A candidate whose leg-symbol set
+	/// exactly matches an already-held position's is NOT a collision either way — that's a legitimate add/re-take
+	/// of the SAME structure, governed by the caller's own held-position policy (e.g. <c>allowAddToHeldPosition</c>),
+	/// not this guard.</summary>
+	public static bool CollidesWithHeldLeg(IEnumerable<(string Symbol, Side Side)> candidateLegs, IEnumerable<OpenPosition> heldPositions)
+	{
+		var candidate = candidateLegs as IReadOnlyCollection<(string Symbol, Side Side)> ?? candidateLegs.ToList();
+		var candidateSymbols = new HashSet<string>(candidate.Select(l => l.Symbol), StringComparer.OrdinalIgnoreCase);
+		foreach (var pos in heldPositions)
+		{
+			var heldSymbols = new HashSet<string>(pos.Legs.Select(l => l.Symbol), StringComparer.OrdinalIgnoreCase);
+			if (heldSymbols.SetEquals(candidateSymbols)) continue;   // same structure re-taken — not a collision
+			foreach (var held in pos.Legs)
+				foreach (var cand in candidate)
+					if (cand.Side != held.Side && string.Equals(cand.Symbol, held.Symbol, StringComparison.OrdinalIgnoreCase))
+						return true;
+		}
+		return false;
+	}
+}

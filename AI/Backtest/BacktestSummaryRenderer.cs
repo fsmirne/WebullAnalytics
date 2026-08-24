@@ -39,7 +39,7 @@ internal static class BacktestSummaryRenderer
 	/// window end. Every fill (not just still-open ones) is included so closed lineages net correctly.</summary>
 	private static void RenderBookCommand(BacktestResult result)
 	{
-		var groups = BuildFillLegGroups(result);
+		var groups = BuildFillLegGroups(result.Fills);
 		if (groups.Count == 0) { AnsiConsole.MarkupLine("[dim]No fills — no book command.[/]"); return; }
 
 		var spec = string.Join(";", groups);
@@ -59,11 +59,11 @@ internal static class BacktestSummaryRenderer
 	}
 
 	/// <summary>Every fill as one <c>side:SYMBOL:qty@price</c> leg group — the shared currency between the
-	/// --book-cmd spec and the open-positions table, both of which reconstruct the book by netting all fills.</summary>
-	private static List<string> BuildFillLegGroups(BacktestResult result)
+	/// --book-cmd spec and the open-positions table, both of which reconstruct a book by netting fills.</summary>
+	private static List<string> BuildFillLegGroups(IEnumerable<BacktestFill> fills)
 	{
 		var groups = new List<string>();
-		foreach (var f in result.Fills)
+		foreach (var f in fills)
 		{
 			var legs = f.Legs
 				.Where(l => l.Qty != 0)
@@ -74,28 +74,43 @@ internal static class BacktestSummaryRenderer
 		return groups;
 	}
 
-	/// <summary>The `wa analyze trade` Open Positions table for the window's still-open book: all fills are
-	/// replayed through the same PositionTracker pipeline the report path uses, so closed lineages' legs net
-	/// to zero and only the positions open at window end survive into the table. Evaluation is pinned to the
-	/// window end (the --book-cmd `--date` anchor) — at the real wall-clock date the tracker would settle any
-	/// since-expired short legs and the still-open diagonals would degrade to lone long legs.</summary>
+	/// <summary>The `wa analyze trade` Open Positions table for the window's still-open book. Each LINEAGE's
+	/// fills are replayed through the PositionTracker pipeline SEPARATELY, so closed lineages' legs net to
+	/// zero and only the positions open at window end survive into the table. Lineages never mix in one
+	/// replay: two unrelated lineages can share an option symbol on opposite sides (e.g. one strategy's short
+	/// leg is another's long leg at the same strike, purely by coincidence of which strikes got picked on
+	/// which days) — PositionTracker's FIFO lot-matching would otherwise net them against each other as if
+	/// one were closing the other, silently under-counting contracts and fabricating a "Vertical" pairing
+	/// between legs of two economically unrelated positions. Evaluation is pinned to the window end (the
+	/// --book-cmd `--date` anchor) — at the real wall-clock date the tracker would settle any since-expired
+	/// short legs and the still-open diagonals would degrade to lone long legs.</summary>
 	private static void RenderOpenPositionsTable(BacktestResult result)
 	{
-		var groups = BuildFillLegGroups(result);
-		if (groups.Count == 0) return;
+		if (result.Fills.Count == 0) return;
 
 		var priorOverride = EvaluationDate.IsOverridden ? EvaluationDate.Today : (DateTime?)null;
 		var baseTime = result.Fills[^1].Date;
 		EvaluationDate.Set(result.EquityCurve.Count > 0 ? result.EquityCurve[^1].Date : baseTime);
 		try
 		{
-			var trades = AnalyzeCommon.ParseSyntheticTrades(string.Join(";", groups), startSeq: 0, baseTimestamp: baseTime);
-			var (_, lots, _) = PositionTracker.ComputeReport(trades);
-			var tradeIndex = PositionTracker.BuildTradeIndex(trades);
-			var (rows, _, _) = PositionTracker.BuildPositionRows(lots, tradeIndex, trades);
-			if (rows.Count == 0) return;
+			var allRows = new List<PositionRow>();
+			foreach (var lineageFills in result.Fills.GroupBy(f => f.LineageId))
+			{
+				var isOpenAtEnd = result.EndMtmByLineage.ContainsKey(lineageFills.Key)
+					|| !lineageFills.Any(f => f.Kind == BacktestFillKind.Close || f.Kind == BacktestFillKind.Expire);
+				if (!isOpenAtEnd) continue;
 
-			AnsiConsole.Write(TableBuilder.BuildPositionsTable(rows, TableRenderer.LegPrefix, TableBorder.Rounded));
+				var groups = BuildFillLegGroups(lineageFills);
+				if (groups.Count == 0) continue;
+				var trades = AnalyzeCommon.ParseSyntheticTrades(string.Join(";", groups), startSeq: allRows.Count, baseTimestamp: baseTime);
+				var (_, lots, _) = PositionTracker.ComputeReport(trades);
+				var tradeIndex = PositionTracker.BuildTradeIndex(trades);
+				var (rows, _, _) = PositionTracker.BuildPositionRows(lots, tradeIndex, trades);
+				allRows.AddRange(rows);
+			}
+			if (allRows.Count == 0) return;
+
+			AnsiConsole.Write(TableBuilder.BuildPositionsTable(allRows, TableRenderer.LegPrefix, TableBorder.Rounded));
 			AnsiConsole.WriteLine();
 		}
 		finally
@@ -391,6 +406,8 @@ internal static class BacktestSummaryRenderer
 			table.AddRow("[red]Dropped rule actions (no quotes)[/]", $"[red]{result.DroppedRuleActions} — see ⚠ lines above; results under-count closes/rolls[/]");
 		if (result.BlindPositionDays > 0)
 			table.AddRow("[red]Rule-blind position-days (no quotes)[/]", $"[red]{result.BlindPositionDays} — see ⚠ lines above; exits could not be evaluated on those days[/]");
+		if (result.LegCollisionBlockedOpens > 0)
+			table.AddRow("[yellow]Opens blocked (leg already held)[/]", $"[yellow]{result.LegCollisionBlockedOpens} — a top-ranked candidate would hold the OPPOSITE side of an option symbol a DIFFERENT already-open position holds; a real OCC-cleared account would net them instead, so the open was skipped[/]");
 		table.AddRow("Rolls", result.RollFills.ToString());
 		table.AddRow("Leg-ins", result.LegInFills.ToString());
 		table.AddRow("Expirations", result.ExpireFills.ToString());

@@ -15,10 +15,22 @@ namespace WebullAnalytics.AI.Backtest;
 /// the daily backfill; there is no CSV read path.</summary>
 internal sealed class QuoteStoreCache
 {
-	/// <summary>A real two-sided quote, with how stale it is vs the requested minute (0 = exact-minute print).</summary>
+	/// <summary>A real NBBO print, with how stale it is vs the requested minute (0 = exact-minute print). One
+	/// side reading 0 is real data (the far-OTM/expiry-day norm — nobody bids a near-worthless contract), NOT
+	/// a bug, so it is never overridden here — see <see cref="Mid"/>. <see cref="IsEmpty"/> and
+	/// <see cref="IsCrossed"/> flag the two prints that carry no trustworthy price at all.</summary>
 	internal readonly record struct QuoteAt(decimal Bid, decimal Ask, int BidSize, int AskSize, int AgeMinutes)
 	{
-		public decimal Mid => (Bid + Ask) / 2m;
+		/// <summary>Blending a live side with an absent (0) side would manufacture a price nobody could
+		/// transact at in either direction, so a one-sided print's Mid is just its one real side, not half of
+		/// it. Two-sided prints keep the ordinary average.</summary>
+		public decimal Mid => Bid > 0m && Ask > 0m ? (Bid + Ask) / 2m : Math.Max(Bid, Ask);
+		/// <summary>Neither side printed this minute — an auction/no-dissemination placeholder, not a $0
+		/// price. Equivalent to a missing quote for pricing purposes.</summary>
+		public bool IsEmpty => Bid <= 0m && Ask <= 0m;
+		/// <summary>Both sides printed but inverted (ask below bid) — a genuine feed anomaly, not a real
+		/// market state. Equivalent to a missing quote for pricing purposes.</summary>
+		public bool IsCrossed => Bid > 0m && Ask > 0m && Ask < Bid;
 	}
 
 	private readonly int _maxStaleMinutes;

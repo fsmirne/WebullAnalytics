@@ -95,6 +95,30 @@ public class BacktestIVProviderTests
 	}
 
 	[Fact]
+	public void MultiDte_PutSkew_FlattensWithTerm_InsteadOfSaturatingTheZeroDteCeiling()
+	{
+		var bars = BuildBars(vix: 17.0m, vix9d: 18.5m, vix1d: 25.5m);
+		var provider = new BacktestIVProvider(bars, smileEnabled: true);
+
+		// The put-wing constants (linear=-8, curvature=20) are calibrated from a same-session 0DTE
+		// snapshot where OTM strikes cluster within ~1% of spot. Applied unscaled to a 51 DTE leg,
+		// a routine ~8-9% OTM strike (SPY 580/590P vs a 635 spot) saturated the 150% ceiling and
+		// priced the FURTHER-OTM 580 strike richer than the CLOSER 590 strike — an inverted, ~4x
+		// overpriced fill that produced an impossible >1000% gain closing a short put vertical
+		// (2025-07-30 SV backtest). With the term scaling, both strikes stay well under the ceiling
+		// and keep the correct skew ordering (further OTM = higher IV, not inverted).
+		var atm = 0.175m;
+		var timeYears51Dte = 51.0 / 365.0;
+		var iv580 = provider.ApplySmile(atm, "SPY", strike: 580m, spot: 635.35m, timeYears: timeYears51Dte);
+		var iv590 = provider.ApplySmile(atm, "SPY", strike: 590m, spot: 635.35m, timeYears: timeYears51Dte);
+
+		Assert.NotNull(iv580);
+		Assert.NotNull(iv590);
+		Assert.True(iv580.Value < atm * 1.5m, $"51 DTE put IV should stay well under the 0DTE-calibrated 2.5x ceiling, got {iv580.Value / atm:P} of ATM");
+		Assert.True(iv580.Value > iv590.Value, "the further-OTM strike should still carry the higher (not inverted) skew");
+	}
+
+	[Fact]
 	public void EquityTicker_RetainsSymmetricVShape()
 	{
 		var bars = BuildBars(vix: 17.0m, vix9d: 18.5m, vix1d: 25.5m);

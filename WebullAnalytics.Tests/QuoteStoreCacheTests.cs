@@ -99,6 +99,34 @@ public class QuoteStoreCacheTests
 	}
 
 	[Fact]
+	public void QuoteAt_OneSidedIsRealData_MidIsTheLiveSideNotHalfOfIt()
+	{
+		// A genuine bid=0 (the far-OTM/expiry-day norm — nobody bids a near-worthless contract) is real
+		// data, not a bug: it must NOT be flagged empty/crossed, and Mid must resolve to the one live side
+		// rather than blending a real ask with an absent bid into a synthetic half-value.
+		var quote = new QuoteStoreCache.QuoteAt(0m, 2.07m, 0, 108, 0);
+		Assert.False(quote.IsEmpty);
+		Assert.False(quote.IsCrossed);
+		Assert.Equal(2.07m, quote.Mid);
+	}
+
+	[Fact]
+	public void QuoteAt_BothSidesZero_IsEmpty()
+	{
+		// Neither side printed — an auction/no-dissemination placeholder, not a $0 price.
+		var quote = new QuoteStoreCache.QuoteAt(0m, 0m, 0, 0, 0);
+		Assert.True(quote.IsEmpty);
+	}
+
+	[Fact]
+	public void QuoteAt_AskBelowBid_IsCrossed()
+	{
+		// Both sides printed but inverted — a genuine feed anomaly, not a real market state.
+		var quote = new QuoteStoreCache.QuoteAt(2.10m, 2.05m, 10, 10, 0);
+		Assert.True(quote.IsCrossed);
+	}
+
+	[Fact]
 	public void MissingContract_ReturnsNull()
 	{
 		var db = WriteStore("2026-06-18,09:31:00,750,C,2.05,2.07,55,108");

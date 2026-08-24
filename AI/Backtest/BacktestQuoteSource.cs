@@ -181,7 +181,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 			decimal price;
 			decimal? iv = null;
 			if (atm.HasValue)
-				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale);
+				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale, timeYears);
 			if (iv.HasValue)
 				price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, Rate, iv.Value, parsed.CallPut!);
 			else
@@ -287,8 +287,8 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 
 			var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
 			var atmIv = atmByDte.TryGetValue(dte, out var hit) ? hit : fallbackAtm;
-			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale) ?? atmIv;
 			var timeYears = dte <= 0 ? zeroDteTimeYears : dte / 365.0;
+			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale, timeYears) ?? atmIv;
 			var price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, Rate, iv, parsed.CallPut);
 
 			var halfSpread = HalfSpreadFor(parsed.Root, price);

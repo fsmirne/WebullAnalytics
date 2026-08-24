@@ -286,7 +286,8 @@ internal sealed class BacktestRunner
 			Cleanliness: ComputeCleanliness(endMtmByLineage.Keys),
 			DroppedRuleActions: _droppedRuleActions,
 			BlindPositionDays: _blindPositionDays,
-			OpenPositionsFallbackMarked: _openFallbackLineages.Count);
+			OpenPositionsFallbackMarked: _openFallbackLineages.Count,
+			LegCollisionBlockedOpens: _book.LegCollisionBlockedOpens);
 	}
 
 	/// <summary>A rule proposed an action but the day's quote snapshot has no prices for the position's legs
@@ -386,7 +387,7 @@ internal sealed class BacktestRunner
 			{
 				decimal mid;
 				if (snap.Options.TryGetValue(leg.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
-					mid = (q.Bid.Value + q.Ask.Value) / 2m;
+					mid = SafeMid(q.Bid.Value, q.Ask.Value);
 				else if (entryPriceByLineageSymbol.TryGetValue((lineage.Value, leg.Symbol), out var entry)) { mid = entry; usedFallback = true; }
 				else { mid = 0m; usedFallback = true; }
 				perContract += leg.Side == Side.Buy ? mid : -mid;
@@ -401,9 +402,26 @@ internal sealed class BacktestRunner
 	/// the spread midpoint; <c>bidask</c> crosses the spread (a buy lifts the ask, a sell hits the bid),
 	/// modelling worst-case marketable fills. Slippage (<c>slippagePerSharePerOrder</c>) applies additively
 	/// on top in <see cref="SimulatedBook"/>, independent of this. Marks (MTM / threshold detection) always
-	/// use mid — only realized fills cross the spread.</summary>
+	/// use mid — only realized fills cross the spread.
+	///
+	/// <para>A one-sided book (bid or ask genuinely 0 — the far-OTM/expiry-day norm, not a data gap) has no
+	/// coherent "mid": blending a live side with an absent one manufactures a price nobody could transact at
+	/// in either direction. There, regardless of <c>--pricing</c>, the trade uses the one real side it
+	/// actually needs — paying the real ask to buy, receiving the real bid (which can genuinely be $0) to
+	/// sell — exactly as <c>bidask</c> mode would. A fully two-sided book still respects the configured
+	/// mode.</para></summary>
 	private decimal ExecPrice(Side side, decimal bid, decimal ask)
-		=> _pricingMode == SuggestionPricing.BidAsk ? (side == Side.Buy ? ask : bid) : (bid + ask) / 2m;
+	{
+		if (bid <= 0m || ask <= 0m) return side == Side.Buy ? ask : bid;
+		return _pricingMode == SuggestionPricing.BidAsk ? (side == Side.Buy ? ask : bid) : (bid + ask) / 2m;
+	}
+
+	/// <summary>Fair-value mark for a leg from its real bid/ask — used for MTM and profit-target/stop-loss
+	/// threshold detection, never for a realized fill (see <see cref="ExecPrice"/>). A two-sided book uses
+	/// the ordinary average; a one-sided book (one side genuinely 0) uses its one real side rather than
+	/// manufacturing a synthetic half-value nobody could mark to.</summary>
+	private static decimal SafeMid(decimal bid, decimal ask)
+		=> bid > 0m && ask > 0m ? (bid + ask) / 2m : Math.Max(bid, ask);
 
 	/// <summary>For management proposals (close/roll), re-price each leg under the active pricing mode.
 	/// Returns null if any leg lacks a usable quote.</summary>
@@ -1248,13 +1266,21 @@ internal sealed class BacktestRunner
 				if (latestEntry.HasValue && minuteTimeEt > latestEntry.Value) continue;
 				if (openProposals.Count > 0)
 				{
-					entryDecided = true;
+					// Only the top-ranked candidate(s) up to _topNPerStep are ever attempted — never a
+					// lower-ranked fallback. entryDecided latches ONLY on an actual successful open, not on
+					// merely having a candidate: a top pick refused by a downstream guard (e.g. HeldLegGuard —
+					// it collides with an already-held position on the opposite side) must not forfeit the
+					// rest of the day. The scan keeps checking later minutes (bounded by latestEntryTimeEt)
+					// for the SAME best-scoring opportunity to clear, exactly as live re-evaluates every tick.
 					foreach (var p in openProposals.Take(_topNPerStep - opened))
 					{
 						var qty = ResolveOpenQty(p);
 						if (qty < 1) continue;
 						if (OpenProposalIntoBook(minuteEt, p, qty))
+						{
 							opened++;
+							entryDecided = true;
+						}
 					}
 				}
 			}
@@ -1293,13 +1319,18 @@ internal sealed class BacktestRunner
 					if (latestEntry.HasValue && minuteTimeEt > latestEntry.Value) continue;
 					if (openProposals.Count > 0)
 					{
-						entryDecided = true;
+						// See the needAllMinutes branch above: entryDecided latches ONLY on an actual
+						// successful open, not merely on having a candidate, so a top pick refused by
+						// HeldLegGuard (or any other downstream guard) doesn't forfeit the rest of the day.
 						foreach (var p in openProposals.Take(_topNPerStep - opened))
 						{
 							var qty = ResolveOpenQty(p);
 							if (qty < 1) continue;
 							if (OpenProposalIntoBook(minuteEt, p, qty))
+							{
 								opened++;
+								entryDecided = true;
+							}
 						}
 					}
 				}
@@ -1428,7 +1459,7 @@ internal sealed class BacktestRunner
 			if (leg.CallPut == null) continue;
 			if (!quotes.TryGetValue(leg.Symbol, out var q)) return null;
 			if (!q.Bid.HasValue || !q.Ask.HasValue) return null;
-			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+			var mid = SafeMid(q.Bid.Value, q.Ask.Value);
 			total += leg.Side == Side.Buy ? mid : -mid;
 		}
 		return total;
@@ -1511,7 +1542,7 @@ internal sealed class BacktestRunner
 				decimal legValue;
 				if (snap.Options.TryGetValue(leg.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
 				{
-					legValue = (q.Bid.Value + q.Ask.Value) / 2m;
+					legValue = SafeMid(q.Bid.Value, q.Ask.Value);
 				}
 				else if (snap.Underlyings.TryGetValue(pos.Ticker, out var spot) && leg.CallPut != null)
 				{
@@ -1645,7 +1676,8 @@ internal sealed record BacktestResult(
 	CleanlinessBreakdown Cleanliness,
 	int DroppedRuleActions = 0,
 	int BlindPositionDays = 0,
-	int OpenPositionsFallbackMarked = 0)
+	int OpenPositionsFallbackMarked = 0,
+	int LegCollisionBlockedOpens = 0)
 {
 	/// <summary>A lineage is still open at the window end when the book carried its position into the final
 	/// MTM pass — even if it already booked a terminal fill (a diagonal whose short leg Expired but whose

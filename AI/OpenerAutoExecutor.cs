@@ -124,6 +124,18 @@ internal sealed class OpenerAutoExecutor
 				continue;
 			}
 
+			// Held-leg guard (always on — not gated by allowAddToHeldPosition, which only governs a clean
+			// re-take of the SAME structure above). OCC clearing holds one NET position per contract, so a
+			// broker would never let this account independently carry a short lot from one held position and
+			// a long lot from another (or vice versa) on the same option symbol — it would net them instead.
+			// Skip a candidate whose legs collide with a DIFFERENT already-held position; shared with the
+			// backtest book (see HeldLegGuard) so both refuse the same trade.
+			if (HeldLegGuard.CollidesWithHeldLeg(p.Legs.Select(l => (l.Symbol, string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase) ? Side.Buy : Side.Sell)), openPositions.Values))
+			{
+				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (leg already held by a different position):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
+				continue;
+			}
+
 			// Broker-truth dedup: if the structure is already active (pending or filled today) and not
 			// closed since, skip. This catches same-proposal-across-ticks, cross-process, cross-restart,
 			// and the "limit placed and filled, now we'd otherwise re-fire" case — while NETTING opens

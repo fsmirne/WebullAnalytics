@@ -101,6 +101,12 @@ internal sealed class SimulatedBook
 	public IReadOnlyDictionary<string, OpenPosition> OpenPositions => _positions;
 	public IReadOnlyList<BacktestFill> Fills => _fills;
 
+	/// <summary>Count of candidates refused by <see cref="Open"/>'s leg-collision guard: a proposed structure
+	/// would hold the OPPOSITE side of an option symbol a DIFFERENT already-open position already holds,
+	/// which the real OCC-cleared account would net away rather than hold as two positions. Surfaced in the
+	/// summary so a run isn't silently missing opens the ranking would otherwise have taken.</summary>
+	public int LegCollisionBlockedOpens { get; private set; }
+
 	/// <summary>Realized P&L = cash flow on closed/expired positions only. Open positions' mark-to-market is excluded.</summary>
 	public decimal RealizedPnL => _fills.Sum(f => f.NetCashFlow - f.Fees);
 
@@ -130,6 +136,16 @@ internal sealed class SimulatedBook
 		var key = ComputeKey(ticker, strategyKind, positionLegs);
 		if (_positions.TryGetValue(key, out var held))
 			return allowAdd && AddToHeldPosition(date, held, structureKind, legFills, qty, spot, rawScore, finalScore, repIv, applySlippage);
+
+		// Same guard the live opener applies (see HeldLegGuard) — a structure that would hold the OPPOSITE
+		// side of a symbol a DIFFERENT already-open position holds is refused (that's what the broker would
+		// net away instead of tracking as two positions); adding to the SAME side on a shared symbol is
+		// fine. An exact-key rematch is handled above via AddToHeldPosition, not here.
+		if (HeldLegGuard.CollidesWithHeldLeg(positionLegs.Select(l => (l.Symbol, l.Side)), _positions.Values))
+		{
+			LegCollisionBlockedOpens++;
+			return false;
+		}
 
 		// Deduct slippage from cash flow so realized P&L matches the friction-aware EV the scorer used.
 		var cashFlow = ComputeCashFlow(legFills) - (applySlippage ? ComputeSlippage(structureKind, qty) : 0m);
