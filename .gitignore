@@ -499,8 +499,11 @@ docs/
 creds.txt
 
 # backtest fills exports + ad-hoc analysis artifacts (not source)
-/*.jsonl
+*.jsonl
 .gex_analysis/
+
+# ad-hoc backtest sweep/confirm run output dirs (data, not source — see scripts/*confirm*.ps1, backtest_sv_*sweep.ps1)
+*_confirm/
 
 # pinned build for parameter sweeps (see scripts/backtest_*_sweep.ps1)
 .sweep-bin/
@@ -509,6 +512,7 @@ creds.txt
 scripts/pvb_campaign.md
 scripts/gex_gravity_range_study.md
 scripts/gravity_range_daily.csv
+scripts/quote_coverage_gaps_2022_2026.md
 CAMPAIGN_STATE.md
 clipboard.png
 pre.png
