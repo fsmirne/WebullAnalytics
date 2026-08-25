@@ -144,7 +144,8 @@ internal sealed class LiveQuoteSource : IQuoteSource
 			?? throw new InvalidOperationException("api-config.json is empty.");
 	}
 
-	/// <summary>Re-solves ImpliedVolatility from the NBBO mid for every quote whose root is <paramref name="root"/>,
+	/// <summary>Re-solves ImpliedVolatility from the NBBO mid for every quote whose root is <paramref name="root"/>
+	/// (or its SPX/SPXW sibling, which shares the same spot — see <see cref="ParsingHelpers.TryResolveForRoot"/>),
 	/// against <paramref name="spot"/> instead of the spot the chain fetch reported. Used by the premarket spot
 	/// override: the fetch-time back-solve above ran against the chain's stale prior-session close, so a corrected
 	/// spot has to re-base the IVs too or the smile stays skewed by the overnight move. Other roots pass through.</summary>
@@ -163,7 +164,7 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		if (q.Bid is not (> 0m) || q.Ask is not (> 0m)) return q;        // one-sided / missing book → no mid to solve from
 		var p = ParsingHelpers.ParseOptionSymbol(sym);
 		if (p is null || p.CallPut is not ("C" or "P")) return q;
-		if (!spots.TryGetValue(p.Root, out var spot) || spot <= 0m) return q;
+		if (!ParsingHelpers.TryResolveForRoot(spots, p.Root, out var spot) || spot <= 0m) return q;
 		// Anchor time to when the quotes were actually struck: ObservationInstant() returns DateTime.Now
 		// during RTH and the previous session's close off-hours/weekends — identical to the anchor that
 		// AnalyzePositionCommand/AnalyzeRiskCommand use when calling TryMarketImpliedIv, so the "cal" IV

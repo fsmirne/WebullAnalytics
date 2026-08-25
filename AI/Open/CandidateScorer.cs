@@ -198,7 +198,7 @@ internal static class CandidateScorer
 		var chain = quotes
 			.Select(kv => (parsed: ParsingHelpers.ParseOptionSymbol(kv.Key), quote: kv.Value))
 			.Where(x => x.parsed != null
-				&& string.Equals(x.parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)
+				&& ParsingHelpers.RootsMatchForAggregation(x.parsed.Root, ticker, expiry)
 				&& x.parsed.ExpiryDate.Date == expiry.Date
 				&& x.quote.OpenInterest.HasValue
 				&& x.quote.OpenInterest.Value > 0)
@@ -272,7 +272,7 @@ internal static class CandidateScorer
 		foreach (var kv in quotes)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(kv.Key);
-			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase) || parsed.ExpiryDate.Date != expiry.Date) continue;
+			if (parsed == null || !ParsingHelpers.RootsMatchForAggregation(parsed.Root, ticker, expiry) || parsed.ExpiryDate.Date != expiry.Date) continue;
 			if (!kv.Value.OpenInterest.HasValue || kv.Value.OpenInterest.Value <= 0 || !kv.Value.ImpliedVolatility.HasValue || kv.Value.ImpliedVolatility.Value <= 0m) continue;
 			var gamma = (double)OptionMath.Gamma(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, kv.Value.ImpliedVolatility.Value);
 			var dollars = gamma * (double)kv.Value.OpenInterest.Value * 100.0 * (double)spot;
@@ -324,7 +324,7 @@ internal static class CandidateScorer
 		foreach (var kv in quotes)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(kv.Key);
-			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase) || parsed.ExpiryDate.Date != expiry.Date) continue;
+			if (parsed == null || !ParsingHelpers.RootsMatchForAggregation(parsed.Root, ticker, expiry) || parsed.ExpiryDate.Date != expiry.Date) continue;
 			if (!kv.Value.OpenInterest.HasValue || kv.Value.OpenInterest.Value <= 0 || !kv.Value.ImpliedVolatility.HasValue || kv.Value.ImpliedVolatility.Value <= 0m) continue;
 			var vanna = OptionMath.Vanna(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, kv.Value.ImpliedVolatility.Value);
 			var dollars = vanna * kv.Value.OpenInterest.Value * 100m;
@@ -601,7 +601,7 @@ internal static class CandidateScorer
 			if (!liq.HasValue || liq.Value <= maxLiq) continue;
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null) continue;
-			if (!p.Root.Equals(leg.Root, StringComparison.OrdinalIgnoreCase)) continue;
+			if (!ParsingHelpers.RootsMatchForAggregation(p.Root, leg.Root, leg.ExpiryDate)) continue;
 			if (p.ExpiryDate.Date != leg.ExpiryDate.Date) continue;
 			if (p.CallPut != leg.CallPut) continue;
 			if (Math.Abs(p.Strike - spot) / spot > 0.10m) continue;

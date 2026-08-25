@@ -332,6 +332,15 @@ def _local_underlying_closes(ticker: str, start: date, end: date) -> dict:
         return {}
 
 
+# SPX (legacy AM-settled, untraded — backfilled only for the OI/IV standard-monthly root-fragmentation fix,
+# see ParsingHelpers.AggregationRoots) settles against the identical S&P 500 spot as SPXW; the AM-vs-PM
+# distinction is a settlement-calculation detail at expiration, not a different daily/intraday quoted level.
+# Reuse SPXW's local Yahoo-sourced history cache instead of ThetaData's index feed, which needs a paid
+# STANDARD subscription this account doesn't have (SPXW's own cache already exists — `wa ai history SPXW`
+# runs daily as part of this same backfill).
+UNDERLYING_LOCAL_ALIAS = {"SPX": "SPXW"}
+
+
 def fetch_underlying_closes(client, ticker: str, start: date, end: date) -> dict:
     """Best-effort daily underlying close for the ±10% strike band + IV back-solve. Prefers the free local
     daily-close cache (reaches deep history without a ThetaData underlying/index entitlement); falls back to
@@ -348,6 +357,9 @@ def fetch_underlying_closes(client, ticker: str, start: date, end: date) -> dict
     # present); an empty tail (weekend/holiday) degrades to local alone, and the tail-sized request keeps deep index ranges
     # off ThetaData just like before.
     local = _local_underlying_closes(ticker, start, end)
+    if (not local or max(local) < end.isoformat()) and ticker in UNDERLYING_LOCAL_ALIAS:
+        alias_local = _local_underlying_closes(UNDERLYING_LOCAL_ALIAS[ticker], start, end)
+        local = {**alias_local, **local}  # ticker's own local cache wins where present, alias fills the rest
     if local and max(local) >= end.isoformat():
         return local
     tail_start = max(start, date.fromisoformat(max(local)) + timedelta(days=1)) if local else start

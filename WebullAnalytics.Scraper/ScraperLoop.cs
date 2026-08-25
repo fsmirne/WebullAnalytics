@@ -156,10 +156,11 @@ internal sealed class ScraperLoop
 					var parsed = WebullAnalytics.ParsingHelpers.ParseOptionSymbol(q.ContractSymbol);
 					if (parsed == null) return false;
 					// Querying SPXW's underlying (SPX) returns BOTH roots — SPX (AM-settled monthly) and
-					// SPXW (PM weekly). On monthly-expiry dates the SPX series comes back unquoted and
-					// shadows the real SPXW strikes (a consumer keying on expiry/strike/right could grab
-					// the empty SPX entry). Keep only the requested root.
-					if (!string.Equals(parsed.Root, _ticker, StringComparison.OrdinalIgnoreCase)) return false;
+					// SPXW (PM weekly). On a standard-monthly expiry both roots carry real, distinct open
+					// interest (see ParsingHelpers.AggregationRoots) — keep both so the store captures the
+					// whole book instead of silently dropping whichever root wasn't asked for. Every other
+					// date only ever has the requested root, so this never widens the keep set outside monthlies.
+					if (!WebullAnalytics.ParsingHelpers.RootsMatchForAggregation(parsed.Root, _ticker, parsed.ExpiryDate)) return false;
 					var dte = (parsed.ExpiryDate.Date - fireEt.Date).Days;
 					if (dte < 0 || dte > _config.MaxDte) return false;
 					// ±band moneyness filter. Schwab returns range=ALL, so the band is enforced post-fetch here.
@@ -227,7 +228,7 @@ internal sealed class ScraperLoop
 	/// so a time check against it would also drop the legitimate 09:29-labeled auction-boundary row.</summary>
 	private Task AppendQuotesAsync(List<OptionContractQuote> contracts, string dateStr, string timeStr, CancellationToken cancellation)
 	{
-		var written = _quoteWriter.WriteTick(_ticker, dateStr, timeStr, contracts);
+		var written = _quoteWriter.WriteTick(dateStr, timeStr, contracts);
 		if (written == 0)
 			AnsiConsole.MarkupLine($"[grey]  {timeStr}: no two-sided quotes to write[/]");
 		return Task.CompletedTask;

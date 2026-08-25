@@ -67,7 +67,7 @@ internal static class RiskDiagnosticProbeBuilder
 			var shortLeg = legs.FirstOrDefault(l => !l.IsLong);
 			var longLeg = legs.FirstOrDefault(l => l.IsLong);
 			if (shortLeg != null && longLeg != null
-				&& shortLeg.Parsed.Root.Equals(longLeg.Parsed.Root, StringComparison.OrdinalIgnoreCase)
+				&& (ParsingHelpers.RootsMatchForAggregation(shortLeg.Parsed.Root, longLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate) || ParsingHelpers.RootsMatchForAggregation(shortLeg.Parsed.Root, longLeg.Parsed.Root, longLeg.Parsed.ExpiryDate))
 				&& shortLeg.Parsed.CallPut == longLeg.Parsed.CallPut
 				&& shortLeg.Parsed.ExpiryDate.Date == longLeg.Parsed.ExpiryDate.Date)
 			{
@@ -290,7 +290,7 @@ internal static class RiskDiagnosticProbeBuilder
 			var shortLeg = legs.FirstOrDefault(l => !l.IsLong);
 			var longLeg = legs.FirstOrDefault(l => l.IsLong);
 			if (shortLeg == null || longLeg == null) return null;
-			if (!shortLeg.Parsed.Root.Equals(longLeg.Parsed.Root, StringComparison.OrdinalIgnoreCase) || shortLeg.Parsed.CallPut != longLeg.Parsed.CallPut)
+			if (!(ParsingHelpers.RootsMatchForAggregation(shortLeg.Parsed.Root, longLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate) || ParsingHelpers.RootsMatchForAggregation(shortLeg.Parsed.Root, longLeg.Parsed.Root, longLeg.Parsed.ExpiryDate)) || shortLeg.Parsed.CallPut != longLeg.Parsed.CallPut)
 				return null;
 
 			OpenStructureKind? kind = null;

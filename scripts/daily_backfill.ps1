@@ -28,7 +28,13 @@
 	gates run on the ET clock (the trading calendar), not local time.
 
 .PARAMETER Tickers
-	Scope the quotes/OI roots with per-ticker DTE, e.g. 'SPY:60','XSP:0'. Default = the daily set.
+	Scope the quotes/ohlcv roots with per-ticker DTE, e.g. 'SPY:60','XSP:0'. Default = the daily set.
+
+.PARAMETER OiTickers
+	Scope the OI roots (bare names, no DTE — OI is a daily full-chain snapshot, not DTE-windowed like
+	quotes/ohlcv, so backfill_thetadata.py's --run mode ignores per-ticker :DTE tokens entirely). Default
+	= the traded roots plus SPX, the untraded legacy monthly root whose OI/IV is needed to fix SPXW GEX
+	on monthly expiries.
 
 .PARAMETER HistoryTickers
 	Scope the `wa ai history` step (bare names, no DTE). Default = SPY XSP SPXW QQQ.
@@ -55,6 +61,7 @@ param(
 	[string]$Start = "",
 	[string]$End = "",
 	[string[]]$Tickers,
+	[string[]]$OiTickers,
 	[string[]]$HistoryTickers,
 	[string[]]$Steps,
 	[string[]]$Verify
@@ -93,6 +100,17 @@ $Conc = 2
 if (-not $Tickers -or $Tickers.Count -eq 0) {
 	if ($env:BACKFILL_TICKERS) { $Tickers = $env:BACKFILL_TICKERS -split '\s+' }
 	else { $Tickers = @('SPXW:0','XSP:0','SPY:60','QQQ:60') }
+}
+# OI is a daily-snapshot instrument (one full-chain capture/day, not a DTE-windowed pull like
+# quotes/ohlcv): backfill_thetadata.py's --run mode ignores per-ticker :DTE tokens entirely and always
+# uses one global --max-dte across every ticker passed, so bare names are all this step needs or accepts
+# meaningfully. SPX (legacy AM-settled root) is included but untraded: on a standard-monthly (3rd Friday)
+# expiry real open interest splits across SPX and SPXW (see ParsingHelpers.AggregationRoots) - without
+# SPX's OI backfilled too, GEX/max-pain/strike-ladder factors only ever see half that date's book. No
+# minute-NBBO quotes/ohlcv pull for it - OI (+ the EOD-solved IV alongside it) is all ComputeGex needs.
+if (-not $OiTickers -or $OiTickers.Count -eq 0) {
+	if ($env:BACKFILL_OI_TICKERS) { $OiTickers = $env:BACKFILL_OI_TICKERS -split '\s+' }
+	else { $OiTickers = @('SPXW','XSP','SPY','QQQ','SPX') }
 }
 if (-not $Verify -or $Verify.Count -eq 0) {
 	if ($env:BACKFILL_VERIFY) { $Verify = $env:BACKFILL_VERIFY -split '\s+' }
@@ -181,12 +199,12 @@ if (Has-Step 'ohlcv') {
 }
 
 if (Has-Step 'oi') {
-	$oiArgs = @($Script,'--run','--tickers') + $Tickers + @('--end',$EndOi) + $StartOpt + @('--concurrency',"$Conc")
+	$oiArgs = @($Script,'--run','--tickers') + $OiTickers + @('--end',$EndOi) + $StartOpt + @('--concurrency',"$Conc")
 	Invoke-Step "(4/5) EOD open interest -> data/oi" $PY $oiArgs
 }
 
 if (Has-Step 'verify') {
-	Invoke-Step "(5/5) quote-store coverage + integrity" $PY @($Importer,'--root','SPY','--verify')
+	Invoke-Step "(5/5) quote-store coverage + integrity" $PY @($Importer,'--root',($Verify -join ','),'--verify')
 }
 
 if ($script:rc -eq 0) {

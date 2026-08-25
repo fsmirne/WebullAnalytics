@@ -191,7 +191,7 @@ internal static class WebullOptionsClient
 		foreach (var (sym, q) in chain)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
 			if (!expirySet.Contains(p.ExpiryDate.Date)) continue;
 			if (p.Strike < minStrike || p.Strike > maxStrike) continue;
 			var hasOi = q.OpenInterest.HasValue && q.OpenInterest.Value > 0;

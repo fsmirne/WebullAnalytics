@@ -508,7 +508,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			{
 				// Ensure the snapshot has contracts for every ticker we need parity on. Webull's live source
 				// returns the full chain for any single OCC symbol, so one placeholder per ticker suffices.
-				var tickersWithoutContracts = needsParity.Where(t => !options.Any(kv => ParsingHelpers.ParseOptionSymbol(kv.Key) is { } p && string.Equals(p.Root, t, StringComparison.OrdinalIgnoreCase))).ToList();
+				var tickersWithoutContracts = needsParity.Where(t => !options.Any(kv => ParsingHelpers.ParseOptionSymbol(kv.Key) is { } p && (string.Equals(p.Root, t, StringComparison.OrdinalIgnoreCase) || (ParsingHelpers.IsIndexMonthlyFragmentedRoot(p.Root) && ParsingHelpers.IsIndexMonthlyFragmentedRoot(t))))).ToList();
 				if (tickersWithoutContracts.Count > 0)
 				{
 					var placeholders = new HashSet<string>(tickersWithoutContracts.Select(t => MatchKeys.OccSymbol(t, now.Date.AddDays(7), 1m, "C")), StringComparer.OrdinalIgnoreCase);

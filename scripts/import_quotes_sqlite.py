@@ -11,6 +11,9 @@ Usage:
   import_quotes_sqlite.py --db <out.db> --quotes-dir <dir> --root SPY[,XSP] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
 
 --since/--until filter which EXPIRY files (by filename) are imported. Omit for the whole store.
+
+With --verify, --root instead scopes which roots the coverage/integrity check reports on (comma-separated);
+omit --root to check every root present in the DB.
 """
 import argparse
 import glob
@@ -255,7 +258,7 @@ def main():
     conn = sqlite3.connect(db, timeout=60)
     conn.execute("PRAGMA busy_timeout=60000")  # wait for the lock (multi-writer world) instead of erroring
     if args.verify:
-        verify(conn, full=args.full)
+        verify(conn, full=args.full, roots=[r.strip().upper() for r in args.root.split(",")] if args.root else None)
         return
     if args.analyze:
         print("analyzing (full-table stats) ...", flush=True)
@@ -315,15 +318,17 @@ def main():
     print(f"done: {total:,} rows -> {db}")
 
 
-def verify(conn, full=False, recent_days=21):
+def verify(conn, full=False, recent_days=21, roots=None):
     """Coverage + crossed-quote integrity check. Default (daily) is CHEAP: per root it scans only the recent
     expiries (expiry >= today−recent_days) via the WITHOUT-ROWID PK — confirming coverage advanced and no
     crossed quotes in what the backfill just touched — instead of a full-table scan that crawls over drvfs.
-    Pass full=True for the whole-table report (end-of-day, alongside --analyze)."""
+    Pass full=True for the whole-table report (end-of-day, alongside --analyze). Pass roots to scope the
+    report to those (already-uppercased) roots instead of every root present in the DB."""
     try:
-        roots = [r[0] for r in conn.execute("SELECT DISTINCT root FROM quotes ORDER BY root")]
+        all_roots = [r[0] for r in conn.execute("SELECT DISTINCT root FROM quotes ORDER BY root")]
     except sqlite3.OperationalError as e:
         print(f"verify: no quotes table ({e})"); return
+    roots = [r for r in roots if r in all_roots] if roots else all_roots
 
     if full:
         print("[full-table scan]")

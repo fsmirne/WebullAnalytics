@@ -501,10 +501,10 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			// spot the mid→IV inversion must use. A --spot override only reprices/re-centers the grid; folding
 			// it into the IV solve would absorb the spot move into vol and defeat the repricing. Want a
 			// different vol at the new spot? Pass --iv (which wins over calibration in GetLegIv).
-			if (!underlyingPrices.TryGetValue(parsed.Root, out var spot)) continue;
+			if (!ParsingHelpers.TryResolveForRoot(underlyingPrices, parsed.Root, out var spot)) continue;
 
 			IReadOnlyList<DividendEvent>? divs = null;
-			dividends?.TryGetValue(parsed.Root, out divs);
+			if (dividends != null) ParsingHelpers.TryResolveForRoot(dividends, parsed.Root, out divs);
 			var expirationTime = parsed.ExpiryDate.Date + OptionMath.MarketClose;
 			var adjustedSpot = OptionMath.DividendAdjustedSpot(spot, divs, asOf, expirationTime, OptionMath.RiskFreeRate);
 

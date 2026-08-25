@@ -254,11 +254,13 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 					AnsiConsole.MarkupLine($"[red]Schwab auth failed: {Markup.Escape(ex.Message)} Re-run 'wa schwab login'.[/]");
 					return 1;
 				}
-				// A $SPX chains request returns BOTH the SPX and SPXW roots — keep only the requested one.
+				// A $SPX chains request returns BOTH the SPX and SPXW roots. Keep both — SPXW is the requested
+				// root on every date, but on a standard monthly (3rd Friday) real open interest is split
+				// across both, and downstream per-expiry aggregation (ParsingHelpers.RootsMatchForAggregation)
+				// merges them correctly for that date while still isolating them on every other date.
 				quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 				foreach (var q in schwabQuotes)
-					if (string.Equals(ParsingHelpers.ParseOptionSymbol(q.ContractSymbol)?.Root, ticker, StringComparison.OrdinalIgnoreCase))
-						quotes[q.ContractSymbol] = q;
+					quotes[q.ContractSymbol] = q;
 				if (quotes.Count == 0)
 				{
 					AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker} from Schwab.[/]");
@@ -490,7 +492,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		foreach (var sym in quotes.Keys.ToList())
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(sym);
-			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase) || parsed.ExpiryDate.Date != expiry.Date) continue; // only the mapped expiry is rendered
+			if (parsed == null || !ParsingHelpers.RootsMatchForAggregation(parsed.Root, ticker, expiry) || parsed.ExpiryDate.Date != expiry.Date) continue; // only the mapped expiry is rendered
 			var iv = 0m;
 			if (priorQuotes.TryGetValue(sym, out var prior))
 			{
@@ -546,7 +548,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		foreach (var sym in chain.Keys)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
 			if (p.ExpiryDate.Date < asOfDate) continue;
 			if (expiryFilter.HasValue && p.ExpiryDate.Date != expiryFilter.Value.Date) continue;
 			inScopeExpiries.Add(p.ExpiryDate.Date);
@@ -565,7 +567,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		foreach (var (sym, q) in chain)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
 			if (!keptExpiries.Contains(p.ExpiryDate.Date)) continue;
 			if (!keptStrikes.Contains(p.Strike)) continue;
 			var hasOi = q.OpenInterest.HasValue && q.OpenInterest.Value > 0;
@@ -621,7 +623,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		foreach (var (sym, q) in quotes)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
 			if (p.ExpiryDate.Date <= asOf.Date) continue;   // 0DTE churn is not opening-activity signal
 			if (q.Volume is not { } vol || vol < UnusualMinFloor) continue;
 			var oi = Math.Max(q.OpenInterest ?? 0, 1);
@@ -713,7 +715,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			foreach (var (sym, q) in snap)
 			{
 				var p = ParsingHelpers.ParseOptionSymbol(sym);
-				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || p.ExpiryDate.Date != targetExpiry.Date) continue;
+				if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, targetExpiry) || p.ExpiryDate.Date != targetExpiry.Date) continue;
 				book[sym] = (q.Volume ?? 0, q.OpenInterest ?? 0);
 			}
 			if (book.Count > 0) books.Add((day, book)); else uncovered.Add(day);
@@ -731,14 +733,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			foreach (var (sym, q) in LoadOiSnapshot(todayPath).Quotes)
 			{
 				var p = ParsingHelpers.ParseOptionSymbol(sym);
-				if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date == targetExpiry.Date && q.OpenInterest is { } snapOi)
+				if (p != null && ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, targetExpiry) && p.ExpiryDate.Date == targetExpiry.Date && q.OpenInterest is { } snapOi)
 					terminalOi[sym] = snapOi;
 			}
 		if (chainHasOi)
 			foreach (var (sym, q) in quotes)
 			{
 				var p = ParsingHelpers.ParseOptionSymbol(sym);
-				if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date == targetExpiry.Date && q.OpenInterest is { } oi)
+				if (p != null && ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, targetExpiry) && p.ExpiryDate.Date == targetExpiry.Date && q.OpenInterest is { } oi)
 					terminalOi[sym] = oi;
 			}
 
@@ -1721,7 +1723,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			foreach (var (sym, q) in snapshot)
 			{
 				var p = ParsingHelpers.ParseOptionSymbol(sym);
-				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || p.ExpiryDate.Date != expiry.Date || string.IsNullOrEmpty(p.CallPut)) continue;
+				if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, expiry) || p.ExpiryDate.Date != expiry.Date || string.IsNullOrEmpty(p.CallPut)) continue;
 				if (!q.OpenInterest.HasValue || q.OpenInterest.Value <= 0) continue;   // no OI = no exposure to plot
 				contracts.Add(q);
 			}
@@ -1767,9 +1769,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				probe.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ohlcv'";
 				if (probe.ExecuteScalar() == null) return result;   // store predates the ohlcv feature
 			}
+			// On a standard-monthly expiry, real OI/volume splits across the legacy SPX and SPXW roots (see
+			// ParsingHelpers.AggregationRoots) — query every root that book could be under, not just the one asked for.
+			var roots = ParsingHelpers.AggregationRoots(ticker, expiry);
 			using var cmd = conn.CreateCommand();
-			cmd.CommandText = "SELECT time_sec, strike_milli, right, volume FROM ohlcv WHERE root=$root AND expiry=$exp AND date=$date";
-			cmd.Parameters.AddWithValue("$root", ticker);
+			cmd.CommandText = $"SELECT time_sec, strike_milli, right, volume FROM ohlcv WHERE root IN ({string.Join(",", roots.Select((_, i) => $"$root{i}"))}) AND expiry=$exp AND date=$date";
+			for (var i = 0; i < roots.Count; i++) cmd.Parameters.AddWithValue($"$root{i}", roots[i]);
 			cmd.Parameters.AddWithValue("$exp", expiry.Year * 10000 + expiry.Month * 100 + expiry.Day);
 			cmd.Parameters.AddWithValue("$date", date.Year * 10000 + date.Month * 100 + date.Day);
 			using var reader = cmd.ExecuteReader();
@@ -1804,7 +1809,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		foreach (var (sym, q) in chain)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date == expiry.Date && !string.IsNullOrEmpty(p.CallPut)) bySpec[(p.Strike, p.CallPut)] = q;
+			if (p != null && ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, expiry) && p.ExpiryDate.Date == expiry.Date && !string.IsNullOrEmpty(p.CallPut)) bySpec[(p.Strike, p.CallPut)] = q;
 		}
 		if (bySpec.Count == 0) return result;
 		var expiryStr = expiry.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -1921,7 +1926,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var inWindow = quotes.Values.Where(q =>
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(q.ContractSymbol);
-			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)) return false;
+			if (parsed == null || !ParsingHelpers.RootsMatchForAggregation(parsed.Root, ticker, parsed.ExpiryDate)) return false;
 			var exp = parsed.ExpiryDate.Date;
 			if (expiryFilter.HasValue ? exp != expiryFilter.Value.Date : exp < asOf.Date || exp > asOf.Date.AddDays(settings.Dte)) return false;
 			return Math.Abs(parsed.Strike - spot) / spot <= band;
@@ -2196,7 +2201,7 @@ internal sealed class GexMatrix
 		foreach (var kv in quotes)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(kv.Key);
-			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (parsed == null || !ParsingHelpers.RootsMatchForAggregation(parsed.Root, ticker, parsed.ExpiryDate)) continue;
 			if (expiryFilter.HasValue && parsed.ExpiryDate.Date != expiryFilter.Value.Date) continue;
 			if (parsed.ExpiryDate.Date < asOfDate) continue;
 			if (parsed.Strike < minStrike || parsed.Strike > maxStrike) continue;

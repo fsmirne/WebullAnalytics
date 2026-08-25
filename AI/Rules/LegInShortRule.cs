@@ -127,7 +127,7 @@ internal sealed class LegInShortRule : IManagementRule
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null) continue;
-			if (!string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (!ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, longLeg.Expiry!.Value)) continue;
 			if (p.ExpiryDate != longLeg.Expiry!.Value) continue;
 			if (p.CallPut != longLeg.CallPut) continue;
 

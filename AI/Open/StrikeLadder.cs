@@ -175,23 +175,32 @@ internal sealed class StrikeLadder
 
 		public StrikeLadder GetLadder(string ticker, DateTime expiry, string? callPut)
 		{
-			var root = ticker.ToUpperInvariant();
 			var exp = expiry.Date;
+			// On a standard-monthly expiry the real ladder can be split across the SPX/SPXW roots (see
+			// ParsingHelpers.AggregationRoots) — union both instead of looking up only the requested one.
+			var roots = ParsingHelpers.AggregationRoots(ticker, exp);
 			decimal[] chosen;
 			if (callPut != null)
 			{
 				var side = callPut.ToUpperInvariant();
-				chosen = Lookup(_quoted, root, exp, side);
-				if (chosen.Length == 0) chosen = Lookup(_tradeable, root, exp, side);
+				chosen = LookupRoots(_quoted, roots, exp, side);
+				if (chosen.Length == 0) chosen = LookupRoots(_tradeable, roots, exp, side);
 			}
 			else
 			{
 				// Combined both-sides ladder (iron-condor body width): union of C+P quoted, else of C+P
 				// tradeable — mirrors the per-side quoted→tradeable preference across both rights.
-				chosen = Union(Lookup(_quoted, root, exp, "C"), Lookup(_quoted, root, exp, "P"));
-				if (chosen.Length == 0) chosen = Union(Lookup(_tradeable, root, exp, "C"), Lookup(_tradeable, root, exp, "P"));
+				chosen = Union(LookupRoots(_quoted, roots, exp, "C"), LookupRoots(_quoted, roots, exp, "P"));
+				if (chosen.Length == 0) chosen = Union(LookupRoots(_tradeable, roots, exp, "C"), LookupRoots(_tradeable, roots, exp, "P"));
 			}
 			return chosen.Length == 0 ? EmptyChainPresent : new StrikeLadder(chosen, chainPresent: true);
+		}
+
+		private static decimal[] LookupRoots(Dictionary<(string, DateTime, string), decimal[]> map, IReadOnlyList<string> roots, DateTime exp, string side)
+		{
+			var result = Lookup(map, roots[0].ToUpperInvariant(), exp, side);
+			for (var i = 1; i < roots.Count; i++) result = Union(result, Lookup(map, roots[i].ToUpperInvariant(), exp, side));
+			return result;
 		}
 
 		private static decimal[] Lookup(Dictionary<(string, DateTime, string), decimal[]> map, string root, DateTime exp, string side)

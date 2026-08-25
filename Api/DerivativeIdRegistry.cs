@@ -90,7 +90,7 @@ internal static class DerivativeIdRegistry
 		{
 			EnsureLoaded();
 			foreach (var (occ, e) in _cache!)
-				if (e.AsOf == asOf && OccRoot(occ) is { } root && string.Equals(root, ticker, StringComparison.OrdinalIgnoreCase))
+				if (e.AsOf == asOf && OccRoot(occ) is { } root && (string.Equals(root, ticker, StringComparison.OrdinalIgnoreCase) || (ParsingHelpers.IsIndexMonthlyFragmentedRoot(root) && ParsingHelpers.IsIndexMonthlyFragmentedRoot(ticker))))
 					return true;
 			return false;
 		}
@@ -118,7 +118,7 @@ internal static class DerivativeIdRegistry
 			{
 				if (e.AsOf != asOf || !e.Tradeable) continue;
 				var p = ParsingHelpers.ParseOptionSymbol(occ);
-				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+				if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
 				result.Add(p.ExpiryDate.Date);
 			}
 			return result;
@@ -134,8 +134,12 @@ internal static class DerivativeIdRegistry
 			EnsureLoaded();
 			var result = new List<string>();
 			foreach (var (occ, e) in _cache!)
-				if (e.Tradeable && e.AsOf == asOf && OccRoot(occ) is { } root && string.Equals(root, ticker, StringComparison.OrdinalIgnoreCase))
-					result.Add(occ);
+			{
+				if (!e.Tradeable || e.AsOf != asOf) continue;
+				var p = ParsingHelpers.ParseOptionSymbol(occ);
+				if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
+				result.Add(occ);
+			}
 			return result;
 		}
 	}

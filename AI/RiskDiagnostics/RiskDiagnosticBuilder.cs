@@ -442,7 +442,7 @@ internal static class RiskDiagnosticBuilder
 			if (!liq.HasValue || liq.Value <= maxLiq) continue;
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null) continue;
-			if (!p.Root.Equals(leg.Root, StringComparison.OrdinalIgnoreCase)) continue;
+			if (!ParsingHelpers.RootsMatchForAggregation(p.Root, leg.Root, leg.ExpiryDate)) continue;
 			if (p.ExpiryDate.Date != leg.ExpiryDate.Date) continue;
 			if (p.CallPut != leg.CallPut) continue;
 			if (Math.Abs(p.Strike - spot) / spot > 0.10m) continue;

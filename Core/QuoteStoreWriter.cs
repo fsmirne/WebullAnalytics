@@ -38,20 +38,24 @@ internal sealed class QuoteStoreWriter : IDisposable
 		c.ExecuteNonQuery();
 	}
 
-	/// <summary>Writes one tick's two-sided quotes for <paramref name="root"/> at the given ET date/time.
-	/// Contracts missing a positive bid AND ask are skipped (the same two-sided filter the reader applies),
-	/// so a one-sided book contributes no row. Returns the number of rows written.</summary>
-	public int WriteTick(string root, string dateStr, string timeStr, IEnumerable<OptionContractQuote> contracts)
+	/// <summary>Writes one tick's two-sided quotes at the given ET date/time, keyed by each contract's OWN
+	/// parsed root — NOT a single caller-supplied root. A fetch scoped to one ticker (e.g. SPXW) can return
+	/// contracts under a sibling root too (SPX on a standard-monthly expiry carries real, distinct open
+	/// interest at the same expiry/strike/right — see ParsingHelpers.AggregationRoots); keying every row to
+	/// the requested ticker instead of the contract's real root would collide two genuinely different
+	/// contracts onto the same primary key and silently drop one. Contracts missing a positive bid AND ask
+	/// are skipped (the same two-sided filter the reader applies), so a one-sided book contributes no row.
+	/// Returns the number of rows written.</summary>
+	public int WriteTick(string dateStr, string timeStr, IEnumerable<OptionContractQuote> contracts)
 	{
 		var dateYmd = YmdInt(dateStr);
 		var sec = SecOfDay(timeStr);
 		if (sec < 0) return 0;
-		var rootUp = root.ToUpperInvariant();
 
 		using var tx = _conn.BeginTransaction();
 		using var cmd = _conn.CreateCommand();
 		cmd.CommandText = "INSERT OR IGNORE INTO quotes VALUES ($root,$exp,$date,$sec,$strike,$right,$bid,$ask,$bsz,$asz)";
-		var pRoot = cmd.CreateParameter(); pRoot.ParameterName = "$root"; pRoot.Value = rootUp; cmd.Parameters.Add(pRoot);
+		var pRoot = Param(cmd, "$root");
 		var pExp = Param(cmd, "$exp"); var pDate = Param(cmd, "$date"); var pSec = Param(cmd, "$sec");
 		var pStrike = Param(cmd, "$strike"); var pRight = Param(cmd, "$right");
 		var pBid = Param(cmd, "$bid"); var pAsk = Param(cmd, "$ask"); var pBsz = Param(cmd, "$bsz"); var pAsz = Param(cmd, "$asz");
@@ -64,6 +68,7 @@ internal sealed class QuoteStoreWriter : IDisposable
 			if (q.Ask is not decimal ask || ask <= 0m) continue;
 			var p = ParsingHelpers.ParseOptionSymbol(q.ContractSymbol);
 			if (p?.CallPut is not string cp || cp.Length == 0) continue;
+			pRoot.Value = p.Root.ToUpperInvariant();
 			pExp.Value = YmdInt(p.ExpiryDate);
 			pStrike.Value = (long)Math.Round(p.Strike * 1000m);
 			pRight.Value = char.ToUpperInvariant(cp[0]).ToString();

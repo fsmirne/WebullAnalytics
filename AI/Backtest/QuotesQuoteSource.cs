@@ -121,7 +121,7 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		// QuoteAt.Mid already resolves to the one live side instead of manufacturing a synthetic blend.
 		OptionContractQuote? BuildQuote(string sym, OptionParsed p)
 		{
-			if (!underlyings.TryGetValue(p.Root, out var spot)) return null;
+			if (!ParsingHelpers.TryResolveForRoot(underlyings, p.Root, out var spot)) return null;
 			var q = _store.NbboAt(sym, asOf);
 			if (q == null || q.Value.IsEmpty || q.Value.IsCrossed) return null;
 			var nbbo = q.Value;
@@ -148,14 +148,18 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		// sized based on the executing strategy's delta/wing parameters, TTE, and volatility.
 		foreach (var grp in parsed.GroupBy(x => (x.P.Root, Exp: x.P.ExpiryDate.Date)))
 		{
-			if (!underlyings.TryGetValue(grp.Key.Root, out var spot) || spot <= 0m) continue;
-			var oiDay = _oiCache?.ForDay(grp.Key.Root, asOf.Date);   // one memoized lookup per (root, day), reused across strikes
+			if (!ParsingHelpers.TryResolveForRoot(underlyings, grp.Key.Root, out var spot) || spot <= 0m) continue;
+			var oiDay = _oiCache?.ForDay(grp.Key.Root, asOf.Date);   // one memoized lookup per (root, day); already merges the SPX/SPXW sibling on monthlies
 			var dte = (grp.Key.Exp - asOf.Date).Days;
 			var timeYears = dte <= 0 ? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears) : dte / 365.0;
 			var expandPct = _openerConfig != null
 				? _openerConfig.ComputeRequiredExpansionPct(spot, timeYears, _defaultIv ?? _openerConfig.Indicators.IvDefaultPct, _strikeStep ?? _openerConfig.Indicators.StrikeStep, Rate)
 				: FallbackChainExpandPct(timeYears, _defaultIv ?? 0.25m);
-			foreach (var occ in _store.ContractsOn(grp.Key.Root, grp.Key.Exp, asOf.Date, spot * (1m - expandPct), spot * (1m + expandPct)))
+			// On a standard-monthly expiry the real near-money book is split across the SPX/SPXW roots (see
+			// ParsingHelpers.AggregationRoots) - expand the store chain for EACH, not just the requested one,
+			// or the backtest's GEX/max-pain factors only ever see half the real open interest.
+			foreach (var expandRoot in ParsingHelpers.AggregationRoots(grp.Key.Root, grp.Key.Exp))
+			foreach (var occ in _store.ContractsOn(expandRoot, grp.Key.Exp, asOf.Date, spot * (1m - expandPct), spot * (1m + expandPct)))
 			{
 				if (options.ContainsKey(occ)) continue;
 				var q = _store.NbboAt(occ, asOf);
@@ -182,6 +186,22 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 				}
 				options[occ] = new OptionContractQuote(occ, q.Value.Mid, q.Value.Bid, q.Value.Ask, null, null, Volume: null, OpenInterest: oi, ImpliedVolatility: iv);
 			}
+
+			// The sibling root on a monthly expiry (legacy SPX) is never traded, so its ThetaData backfill
+			// pulls OI only — no minute-NBBO, hence nothing for the loop above to find via _store.ContractsOn.
+			// ComputeGex/ComputeMaxPainPrice only need OI+IV, not a quote, so surface each in-band sibling
+			// contract straight from the merged OI snapshot with null bid/ask/last. Guarded to the SIBLING
+			// root only (never grp.Key.Root itself) so the requested root's own contracts still require a
+			// real NBBO print, unchanged from the loop above.
+			if (oiDay != null)
+				foreach (var (sym, snap) in oiDay)
+				{
+					if (options.ContainsKey(sym) || snap.Oi <= 0 || snap.Iv <= 0m) continue;
+					var pOi = ParsingHelpers.ParseOptionSymbol(sym);
+					if (pOi == null || pOi.ExpiryDate.Date != grp.Key.Exp || string.Equals(pOi.Root, grp.Key.Root, StringComparison.OrdinalIgnoreCase)) continue;
+					if (pOi.Strike < spot * (1m - expandPct) || pOi.Strike > spot * (1m + expandPct)) continue;
+					options[sym] = new OptionContractQuote(sym, null, null, null, null, null, Volume: null, OpenInterest: snap.Oi, ImpliedVolatility: snap.Iv);
+				}
 		}
 
 		return new QuoteSnapshot(options, underlyings);

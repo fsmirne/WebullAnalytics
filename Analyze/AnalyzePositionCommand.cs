@@ -544,6 +544,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	// ─── Classifier ──────────────────────────────────────────────────────────
 
+	/// <summary>True when two legs' roots belong to the same underlying's book — exact match, or SPX/SPXW on
+	/// a standard-monthly expiry (see ParsingHelpers.RootsMatchForAggregation). Checked against EITHER leg's
+	/// own expiry since a calendar/diagonal pairs two different dates and either one could be the monthly.</summary>
+	private static bool RootsShareBook(string rootA, string rootB, DateTime expiryA, DateTime expiryB) =>
+		ParsingHelpers.RootsMatchForAggregation(rootA, rootB, expiryA) || ParsingHelpers.RootsMatchForAggregation(rootA, rootB, expiryB);
+
 	internal static StructureKind ClassifyStructure(IReadOnlyList<PositionSnapshot> legs)
 	{
 		if (legs.Count == 1)
@@ -554,7 +560,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var sl = legs.FirstOrDefault(l => l.Action == LegAction.Sell);
 			var ll = legs.FirstOrDefault(l => l.Action == LegAction.Buy);
 			if (sl == null || ll == null) return StructureKind.Unsupported;
-			if (sl.Parsed.Root != ll.Parsed.Root || sl.Parsed.CallPut != ll.Parsed.CallPut) return StructureKind.Unsupported;
+			if (!RootsShareBook(sl.Parsed.Root, ll.Parsed.Root, sl.Parsed.ExpiryDate, ll.Parsed.ExpiryDate) || sl.Parsed.CallPut != ll.Parsed.CallPut) return StructureKind.Unsupported;
 			if (sl.Parsed.ExpiryDate == ll.Parsed.ExpiryDate) return StructureKind.Vertical;
 			if (sl.Parsed.ExpiryDate < ll.Parsed.ExpiryDate)
 				return sl.Parsed.Strike == ll.Parsed.Strike ? StructureKind.Calendar : StructureKind.Diagonal;
@@ -565,8 +571,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			// Every 4-leg structure we recognize has the same component breakdown:
 			// one short put, one long put, one short call, one long call, all on the
 			// same underlying. What differs is the expiry / strike geometry.
-			var root = legs[0].Parsed.Root;
-			if (!legs.All(l => l.Parsed.Root == root)) return StructureKind.Unsupported;
+			var anchor = legs[0].Parsed;
+			if (!legs.All(l => RootsShareBook(l.Parsed.Root, anchor.Root, l.Parsed.ExpiryDate, anchor.ExpiryDate))) return StructureKind.Unsupported;
 
 			// All-same-right condor: one expiry, one side (all puts or all calls), 2 long + 2 short, four
 			// distinct strikes, with the longs at the wings and shorts in the body (long condor) or the
@@ -1428,7 +1434,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			// of a fixed StrikeStep grid keeps the add on real contracts (SPY lists $1 near spot, not $0.50).
 			List<decimal> ListedStrikes(DateTime exp, string cp) => quotes == null ? new List<decimal>()
 				: quotes.Keys.Select(ParsingHelpers.ParseOptionSymbol)
-					.Where(p => p != null && string.Equals(p.Root, shortLeg.Parsed.Root, StringComparison.OrdinalIgnoreCase) && p.ExpiryDate.Date == exp.Date && p.CallPut == cp)
+					.Where(p => p != null && ParsingHelpers.RootsMatchForAggregation(p.Root, shortLeg.Parsed.Root, exp) && p.ExpiryDate.Date == exp.Date && p.CallPut == cp)
 					.Select(p => p!.Strike).Distinct().OrderBy(s => s).ToList();
 
 			// Strike grid comes from the FRONT (short) expiry, which the chain fetch populates fully. The far
@@ -1936,7 +1942,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			foreach (var kv in quotes)
 			{
 				var p = ParsingHelpers.ParseOptionSymbol(kv.Key);
-				if (p == null || p.CallPut != cp || p.Strike != strike || p.ExpiryDate.Date != expiry || !string.Equals(p.Root, root, StringComparison.OrdinalIgnoreCase)) continue;
+				if (p == null || p.CallPut != cp || p.Strike != strike || p.ExpiryDate.Date != expiry || !ParsingHelpers.RootsMatchForAggregation(p.Root, root, expiry)) continue;
 				if (!kv.Value.Bid.HasValue || !kv.Value.Ask.HasValue || kv.Value.Ask.Value <= 0m) return null;
 				return (kv.Value.Bid.Value + kv.Value.Ask.Value) / 2m;
 			}

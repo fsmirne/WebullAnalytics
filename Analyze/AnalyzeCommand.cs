@@ -223,7 +223,7 @@ internal sealed class AnalyzeRollSettings : AnalyzeBaseSettings
 				{
 					var oldSymSpec = Spec[..specGtIdx];
 					var oldOpt = ParsingHelpers.ParseOptionSymbol(oldSymSpec);
-					if (oldOpt != null && !string.Equals(longOpt.Root, oldOpt.Root, StringComparison.OrdinalIgnoreCase))
+					if (oldOpt != null && !ParsingHelpers.RootsMatchForAggregation(longOpt.Root, oldOpt.Root, oldOpt.ExpiryDate))
 						return ValidationResult.Error($"--pair: option root '{longOpt.Root}' does not match rolled leg root '{oldOpt.Root}'");
 				}
 			}
@@ -463,7 +463,7 @@ internal static class AnalyzeCommon
 		foreach (var (sym, q) in quotes)
 		{
 			var root = ParsingHelpers.ParseOptionSymbol(sym)?.Root;
-			result[sym] = root != null && hvByRoot.TryGetValue(root, out var hv) ? q with { HistoricalVolatility = hv } : q;
+			result[sym] = root != null && ParsingHelpers.TryResolveForRoot(hvByRoot, root, out var hv) ? q with { HistoricalVolatility = hv } : q;
 		}
 		return result;
 	}
@@ -483,9 +483,9 @@ internal static class AnalyzeCommon
 		foreach (var (sym, q) in quotes)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(sym);
-			if (parsed == null || !underlyingPrices.TryGetValue(parsed.Root, out var spot)) { result[sym] = q; continue; }
+			if (parsed == null || !ParsingHelpers.TryResolveForRoot(underlyingPrices, parsed.Root, out var spot)) { result[sym] = q; continue; }
 			IReadOnlyList<DividendEvent>? divs = null;
-			dividends?.TryGetValue(parsed.Root, out divs);
+			if (dividends != null) ParsingHelpers.TryResolveForRoot(dividends, parsed.Root, out divs);
 			var adjSpot = OptionMath.DividendAdjustedSpot(spot, divs, asOf, parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate);
 			var iv = OptionMath.TryMarketImpliedIv(sym, parsed, adjSpot, asOf, quotes);
 			result[sym] = iv.HasValue ? q with { ImpliedVolatility = iv.Value, VendorImpliedVolatility = q.VendorImpliedVolatility ?? q.ImpliedVolatility } : q;
@@ -628,11 +628,11 @@ internal static class AnalyzeCommon
 			return 1;
 		}
 
-		var spot = underlyingPrices.TryGetValue(oldParsed.Root, out var sp) ? sp : 0m;
+		var spot = ParsingHelpers.TryResolveForRoot(underlyingPrices, oldParsed.Root, out var sp) ? sp : 0m;
 		if (settings.Spot != null)
 		{
 			var overrides = ReportCommand.ParseUnderlyingPriceOverrides(settings.Spot);
-			if (overrides.TryGetValue(oldParsed.Root, out var ovr)) spot = ovr;
+			if (ParsingHelpers.TryResolveForRoot(overrides, oldParsed.Root, out var ovr)) spot = ovr;
 		}
 		if (spot == 0) { Console.WriteLine($"Error: Could not determine underlying price for {oldParsed.Root}"); return 1; }
 
@@ -771,7 +771,7 @@ internal static class AnalyzeCommon
 		var extraNotables = new List<decimal> { spot, bestPrice };
 		if (settings.Levels != null)
 			foreach (var pair in ReportCommand.ParseLevels(settings.Levels))
-				if (pair.Key.Equals(oldParsed.Root, StringComparison.OrdinalIgnoreCase))
+				if (ParsingHelpers.RootsMatchForAggregation(oldParsed.Root, pair.Key, oldParsed.ExpiryDate))
 					extraNotables.AddRange(pair.Value);
 
 		// Build price rows targeting ~20 rows — same auto-step logic as the report grids.

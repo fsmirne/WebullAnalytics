@@ -61,7 +61,7 @@ internal static class AIConfigInitTicker
 
 			var contracts = snap.Options
 				.Select(kv => (parsed: ParsingHelpers.ParseOptionSymbol(kv.Key), q: kv.Value))
-				.Where(x => x.parsed is { } p && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase))
+				.Where(x => x.parsed is { } p && (string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || (ParsingHelpers.IsIndexMonthlyFragmentedRoot(p.Root) && ParsingHelpers.IsIndexMonthlyFragmentedRoot(ticker))))
 				.Select(x => (p: x.parsed!, x.q))
 				.ToList();
 			if (contracts.Count == 0)

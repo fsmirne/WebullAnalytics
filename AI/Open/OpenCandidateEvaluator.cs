@@ -254,7 +254,7 @@ internal sealed class OpenCandidateEvaluator
 				foreach (var kv in ivLookupQuotes)
 				{
 					var p = ParsingHelpers.ParseOptionSymbol(kv.Key);
-					if (p == null || p.CallPut != "C" || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+					if (p == null || p.CallPut != "C" || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
 					if (!byExp.TryGetValue(p.ExpiryDate.Date, out var agg)) byExp[p.ExpiryDate.Date] = agg = (0, 0, 0, new SortedSet<decimal>());
 					var quoted = kv.Value.Bid is > 0m && kv.Value.Ask is > 0m;
 					var tradeable = quoted || kv.Value.OpenInterest is > 0 || kv.Value.Volume is > 0;
@@ -903,7 +903,7 @@ internal sealed class OpenCandidateEvaluator
 		foreach (var occ in chainOccs)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(occ);
-			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
 			if (!candidateExps.Contains(p.ExpiryDate.Date)) continue;
 			if (p.Strike < lo || p.Strike > hi) continue;
 			symbols.Add(occ);
@@ -983,7 +983,7 @@ internal sealed class OpenCandidateEvaluator
 		foreach (var k in quotes.Keys)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(k);
-			if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) set.Add(p.ExpiryDate.Date);
+			if (p != null && ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) set.Add(p.ExpiryDate.Date);
 		}
 		return set;
 	}
@@ -993,7 +993,7 @@ internal sealed class OpenCandidateEvaluator
 		foreach (var k in quotes.Keys)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(k);
-			if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) return true;
+			if (p != null && (string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || (ParsingHelpers.IsIndexMonthlyFragmentedRoot(p.Root) && ParsingHelpers.IsIndexMonthlyFragmentedRoot(ticker)))) return true;
 		}
 		return false;
 	}
@@ -1006,7 +1006,9 @@ internal sealed class OpenCandidateEvaluator
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null) continue;
-			if (byTicker.TryGetValue(p.Root, out var set)) set.Add(p.ExpiryDate.Date);
+			foreach (var (tk, set) in byTicker)
+				if (ParsingHelpers.RootsMatchForAggregation(p.Root, tk, p.ExpiryDate))
+					set.Add(p.ExpiryDate.Date);
 		}
 	}
 

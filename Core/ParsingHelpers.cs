@@ -101,6 +101,58 @@ public static partial class ParsingHelpers
 	/// </summary>
 	public static string CallPutDisplayName(string callPut) => callPut == "C" ? "Call" : "Put";
 
+	private static readonly string[] IndexRootPair = ["SPX", "SPXW"];
+	private static readonly HashSet<string> IndexMonthlyFragmentedRoots = new(IndexRootPair, StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>
+	/// The set of option-chain roots that should be treated as one book when aggregating by
+	/// <paramref name="requestedRoot"/> at <paramref name="expiry"/> (GEX/max-pain/OI/strike-ladder lookups etc).
+	/// Normally just <paramref name="requestedRoot"/> itself. On a standard-monthly (3rd Friday) expiry, SPX (legacy
+	/// AM-settled) and SPXW (PM-settled) both count: CBOE lists real open interest under both roots on that date, so
+	/// filtering to either alone silently drops most of it — verified live 2026-08-25 (SPXW-only gravity landed on
+	/// the opposite side of spot from SPY and from SPX-only). Every other date (dailies, non-3rd-Friday weeklies)
+	/// only ever lists SPXW, so this never widens the match outside monthlies.
+	/// </summary>
+	public static IReadOnlyList<string> AggregationRoots(string requestedRoot, DateTime expiry) =>
+		IndexMonthlyFragmentedRoots.Contains(requestedRoot) && WebullAnalytics.AI.OpenerExpiryHelpers.IsMonthlyExpiry(expiry.Date)
+			? IndexRootPair
+			: [requestedRoot];
+
+	/// <summary>True when <paramref name="parsedRoot"/> is in <see cref="AggregationRoots"/> for
+	/// <paramref name="requestedRoot"/> at <paramref name="expiry"/>. See <see cref="AggregationRoots"/> for why.</summary>
+	public static bool RootsMatchForAggregation(string parsedRoot, string requestedRoot, DateTime expiry) =>
+		AggregationRoots(requestedRoot, expiry).Contains(parsedRoot, StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>True for SPX/SPXW — the pair that shares a book on standard-monthly expiries (see
+	/// <see cref="AggregationRoots"/>). For presence/coverage checks that aren't tied to one specific expiry,
+	/// where being permissive about which of the pair "counts" costs nothing.</summary>
+	public static bool IsIndexMonthlyFragmentedRoot(string root) => IndexMonthlyFragmentedRoots.Contains(root);
+
+	/// <summary>Like <see cref="AggregationRoots"/> but ungated by expiry — both SPX and SPXW whenever
+	/// <paramref name="root"/> is either of them, on every date, not just monthlies. Only safe when the
+	/// caller's OWN data source is inherently monthly-only for the sibling root already (e.g. a per-day file
+	/// keyed by root that ThetaData never populates with non-monthly SPX rows to begin with), so merging in
+	/// an empty/absent sibling file on a non-monthly day is a harmless no-op rather than a real widening.</summary>
+	public static IReadOnlyList<string> RelatedRootsUnconditional(string root) =>
+		IsIndexMonthlyFragmentedRoot(root) ? IndexRootPair : [root];
+
+	/// <summary>Looks up <paramref name="root"/> in a by-root dictionary (underlying spot prices, historical vol,
+	/// dividend schedules, etc.), falling back to the sibling SPX/SPXW root when <paramref name="root"/> itself
+	/// isn't present. Data keyed by whichever of the pair was fetched (e.g. "$SPX" resolves live spot under one
+	/// key) shouldn't leave the OTHER root's legs/contracts without a match just because they're the same
+	/// underlying. Not expiry-gated — unlike <see cref="AggregationRoots"/>, a spot/HV/dividend value is the same
+	/// number under either root on any date, so this is safe to use everywhere, not just on monthlies.</summary>
+	public static bool TryResolveForRoot<T>(IReadOnlyDictionary<string, T> byRoot, string root, out T value)
+	{
+		if (byRoot.TryGetValue(root, out value!)) return true;
+		if (IsIndexMonthlyFragmentedRoot(root))
+			foreach (var sibling in IndexRootPair)
+				if (!string.Equals(sibling, root, StringComparison.OrdinalIgnoreCase) && byRoot.TryGetValue(sibling, out value!))
+					return true;
+		value = default!;
+		return false;
+	}
+
 	/// <summary>
 	/// Extracts the strategy type from a Webull strategy name.
 	/// </summary>

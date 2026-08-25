@@ -82,6 +82,62 @@ public class ComputeGexTests
 		Assert.True(CandidateScorer.ComputeGex("GME", expiry, spot, asOf, putHeavy).NetGexFraction < 0m);
 	}
 
+	/// <summary>Standard-monthly (3rd Friday) SPX expiries fragment OI across two roots: legacy SPX
+	/// (AM-settled) and SPXW (PM-settled). A gravity request for either root on that date must pick up
+	/// both, or it reads a fraction of the real book — reproduces the live 2026-08-25 finding where
+	/// SPXW-only gravity at 2026-10-16 landed on the opposite side of spot from SPY and from SPX-only.</summary>
+	[Fact]
+	public void GexMergesSpxAndSpxwRootsOnStandardMonthlyExpiry()
+	{
+		var monthlyExpiry = new DateTime(2026, 10, 16); // 3rd Friday of October 2026
+		var asOf = new DateTime(2026, 8, 25);
+		var spot = 7673.73m;
+		var iv = 0.15m;
+
+		var quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase)
+		{
+			// SPXW-only book: light OI, gravity lands above spot.
+			[OccSymbol("SPXW", monthlyExpiry, 7700m, "C")] = Q(500, iv),
+			[OccSymbol("SPXW", monthlyExpiry, 7700m, "P")] = Q(500, iv),
+			// Legacy SPX-rooted OI at the same expiry dwarfs it, and sits below spot.
+			[OccSymbol("SPX", monthlyExpiry, 7600m, "C")] = Q(20000, iv),
+			[OccSymbol("SPX", monthlyExpiry, 7600m, "P")] = Q(20000, iv),
+		};
+
+		var resultForSpxw = CandidateScorer.ComputeGex("SPXW", monthlyExpiry, spot, asOf, quotes);
+		var resultForSpx = CandidateScorer.ComputeGex("SPX", monthlyExpiry, spot, asOf, quotes);
+
+		Assert.Equal(7600m, resultForSpxw.GexGravity);
+		Assert.Equal(7600m, resultForSpx.GexGravity);
+
+		var maxPain = CandidateScorer.ComputeMaxPainPrice("SPXW", monthlyExpiry, quotes, spot);
+		Assert.Equal(7600m, maxPain);
+	}
+
+	/// <summary>Every non-monthly SPXW date (dailies, non-3rd-Friday weeklies) only ever lists under the
+	/// SPXW root — there's no legacy SPX contract to merge, and the fix must not reach across roots there.</summary>
+	[Fact]
+	public void GexDoesNotMergeRootsOnNonMonthlyExpiry()
+	{
+		var weeklyExpiry = new DateTime(2026, 10, 9); // Friday, but 2nd Friday - not the monthly
+		var asOf = new DateTime(2026, 8, 25);
+		var spot = 7673.73m;
+		var iv = 0.15m;
+
+		var quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase)
+		{
+			[OccSymbol("SPXW", weeklyExpiry, 7700m, "C")] = Q(500, iv),
+			[OccSymbol("SPXW", weeklyExpiry, 7700m, "P")] = Q(500, iv),
+			// A stray SPX-rooted symbol at this date shouldn't exist in real data, and must not be picked up.
+			[OccSymbol("SPX", weeklyExpiry, 7600m, "C")] = Q(20000, iv),
+			[OccSymbol("SPX", weeklyExpiry, 7600m, "P")] = Q(20000, iv),
+		};
+
+		var result = CandidateScorer.ComputeGex("SPXW", weeklyExpiry, spot, asOf, quotes);
+
+		Assert.Equal(7700m, result.GexGravity);
+	}
+
 	private static string OccSymbol(string root, DateTime expiry, decimal strike, string callPut)
 	{
 		var strikeMillis = (long)(strike * 1000m);

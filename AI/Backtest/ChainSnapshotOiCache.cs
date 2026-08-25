@@ -42,9 +42,25 @@ internal sealed class ChainSnapshotOiCache
 
 	/// <summary>Per-contract (open interest, implied vol) for <paramref name="root"/> on the ET trading day of
 	/// <paramref name="date"/>, keyed by OCC symbol, with only intraday-knowable values (see class remarks for
-	/// the EOD-IV substitution). Empty when no snapshot file exists for that day.</summary>
+	/// the EOD-IV substitution). Empty when no snapshot file exists for that day.
+	///
+	/// <para>On SPX/SPXW, also merges in the sibling root's own file for the same day (see
+	/// <see cref="ParsingHelpers.RelatedRootsUnconditional"/>): standard-monthly expiries list real open
+	/// interest under both the legacy SPX (AM-settled) and SPXW (PM-settled) roots, and a request scoped to
+	/// just one silently misses the other's book. OCC symbols embed their own root, so merging two roots'
+	/// maps together can't collide keys; the sibling file is simply absent (harmless no-op) on every other
+	/// day, since SPX only ever lists monthlies to begin with.</para></summary>
 	public IReadOnlyDictionary<string, (long Oi, decimal Iv)> ForDay(string root, DateTime date)
-		=> _merged.GetOrAdd((root.ToUpperInvariant(), date.Date), key => BuildCausal(key.Root, key.Date));
+	{
+		var roots = ParsingHelpers.RelatedRootsUnconditional(root.ToUpperInvariant());
+		if (roots.Count == 1) return _merged.GetOrAdd((roots[0], date.Date), key => BuildCausal(key.Root, key.Date));
+
+		var merged = new Dictionary<string, (long Oi, decimal Iv)>(StringComparer.OrdinalIgnoreCase);
+		foreach (var r in roots)
+			foreach (var (sym, v) in _merged.GetOrAdd((r, date.Date), key => BuildCausal(key.Root, key.Date)))
+				merged[sym] = v;
+		return merged;
+	}
 
 	private IReadOnlyDictionary<string, (long Oi, decimal Iv)> BuildCausal(string root, DateTime date)
 	{

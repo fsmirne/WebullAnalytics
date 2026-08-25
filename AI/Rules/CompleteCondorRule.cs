@@ -123,7 +123,7 @@ internal sealed class CompleteCondorRule : IManagementRule
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
 			if (p == null || p.CallPut == null) continue;
-			if (!string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (!ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, exp)) continue;
 			if (p.ExpiryDate != exp) continue;
 			if (p.CallPut != side) continue;
 			if (side == "C" && p.Strike <= spot) continue;

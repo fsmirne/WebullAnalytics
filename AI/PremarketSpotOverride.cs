@@ -112,7 +112,7 @@ internal static class PremarketSpotOverride
 		foreach (var (sym, q) in quotes)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) continue;
+			if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
 			if (!byExpiry.TryGetValue(p.ExpiryDate, out var byStrike))
 				byExpiry[p.ExpiryDate] = byStrike = new Dictionary<decimal, (OptionContractQuote?, OptionContractQuote?)>();
 			byStrike.TryGetValue(p.Strike, out var pair);
@@ -188,7 +188,7 @@ internal static class PremarketSpotOverride
 		foreach (var k in quotes.Keys)
 		{
 			var p = ParsingHelpers.ParseOptionSymbol(k);
-			if (p != null && string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase)) return true;
+			if (p != null && (string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || (ParsingHelpers.IsIndexMonthlyFragmentedRoot(p.Root) && ParsingHelpers.IsIndexMonthlyFragmentedRoot(ticker)))) return true;
 		}
 		return false;
 	}

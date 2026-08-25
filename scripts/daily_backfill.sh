@@ -13,7 +13,12 @@
 # Tickers: SPY at 60 DTE (covers the longCalendar/diagonal longDteMax=60 long legs),
 # QQQ at 60 DTE (the DC cross-vehicle store; the QQQ.DC long leg is 30-45 DTE, same as SPY — a
 #   narrower :30 pull truncated it at exactly the long leg, crippling the QQQ backtest),
-# SPXW/XSP at 0 DTE. ThetaData allows ONE session per account, so the pulls run STRICTLY
+# SPXW/XSP at 0 DTE (quotes/ohlcv). The OI step is separately scoped (OI_TICKERS, bare names — OI is a
+#   daily full-chain snapshot, not DTE-windowed, so per-ticker :DTE is meaningless there) and additionally
+#   pulls SPX (legacy AM-settled root, untraded): on a standard-monthly (3rd Friday) expiry real open
+#   interest splits across SPX and SPXW, and ComputeGex needs SPX's OI/IV too or it only sees half that
+#   date's book; no minute-NBBO pull for SPX since nothing trades it.
+# ThetaData allows ONE session per account, so the pulls run STRICTLY
 # SEQUENTIALLY — never in parallel — each with --concurrency 2 (the Value-tier request limit).
 #
 # Re-run safe & incremental: --quotes skips sealed (expired) expirations; --run (OI) skips sealed
@@ -25,8 +30,8 @@
 # Each pull also tees its own timestamped log to data/logs/backfill_*.log.
 #
 # Overrides (env): BACKFILL_END=YYYY-MM-DD (last day); BACKFILL_START=YYYY-MM-DD (extend the quotes+OI
-# floor back for a one-time history fill — sealed data is still skipped); BACKFILL_TICKERS / BACKFILL_VERIFY
-# / BACKFILL_HISTORY_TICKERS (scope the roots). E.g. a one-off 4-year SPY fill (no 0DTE roots dragged in):
+# floor back for a one-time history fill — sealed data is still skipped); BACKFILL_TICKERS / BACKFILL_OI_TICKERS
+# / BACKFILL_VERIFY / BACKFILL_HISTORY_TICKERS (scope the roots). E.g. a one-off 4-year SPY fill (no 0DTE roots dragged in):
 #   BACKFILL_START=2022-07-18 BACKFILL_TICKERS="SPY:60" BACKFILL_VERIFY="SPY" BACKFILL_HISTORY_TICKERS="SPY" bash daily_backfill.sh
 #
 # NOTE: re-pulling an unsealed expiration REWRITES its CSV, replacing any rows the Schwab scraper
@@ -49,21 +54,25 @@ set -uo pipefail
 # CLI flags (take precedence over the matching BACKFILL_* env vars):
 #   --start YYYY-MM-DD      extend the quotes+OI pull floor back (one-off history fill)
 #   --end YYYY-MM-DD        last day to pull
-#   --tickers 'SPY:60 ...'  scope the quotes/OI roots (per-ticker DTE)
+#   --tickers 'SPY:60 ...'  scope the quotes/ohlcv roots (per-ticker DTE)
+#   --oi-tickers 'SPY ...'  scope the OI roots (bare names, no DTE — see the OI_TICKERS comment below for
+#                           why). Default: the traded roots plus SPX, the untraded legacy monthly root
+#                           whose OI/IV is needed to fix SPXW GEX on monthly expiries
 #   --verify 'SPY ...'      scope the verify roots
 #   --history-tickers 'SPY ...'   scope the `wa ai history` step roots
 #   --steps history,quotes,oi,verify   which steps to run (comma/space list; default all four). Kept
 #                                       byte-identical to daily_backfill.ps1 -Steps.
-CLI_START=""; CLI_END=""; CLI_TICKERS=""; CLI_HISTORY=""; CLI_VERIFY=""; CLI_STEPS=""
+CLI_START=""; CLI_END=""; CLI_TICKERS=""; CLI_OI_TICKERS=""; CLI_HISTORY=""; CLI_VERIFY=""; CLI_STEPS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --start)           CLI_START="${2:?--start needs a date}"; shift 2 ;;
     --end)             CLI_END="${2:?--end needs a date}"; shift 2 ;;
     --tickers)         CLI_TICKERS="${2:?--tickers needs a value}"; shift 2 ;;
+    --oi-tickers)      CLI_OI_TICKERS="${2:?--oi-tickers needs a value}"; shift 2 ;;
     --history-tickers) CLI_HISTORY="${2:?--history-tickers needs a value}"; shift 2 ;;
     --steps)           CLI_STEPS="${2:?--steps needs a value}"; shift 2 ;;
     --verify)          CLI_VERIFY="${2:?--verify needs a value}"; shift 2 ;;
-    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--history-tickers 'SPY ...'] [--steps history,quotes,ohlcv,oi,verify] [--verify 'SPY ...']"; exit 0 ;;
+    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--oi-tickers 'SPY ...'] [--history-tickers 'SPY ...'] [--steps history,quotes,ohlcv,oi,verify] [--verify 'SPY ...']"; exit 0 ;;
     *)                 echo "[daily_backfill] unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -100,8 +109,16 @@ PY=python3
 SCRIPT="$SCRIPT_DIR/backfill_thetadata.py"
 # Ticker sets are env-overridable so a one-off historical fill can be scoped to a single root (e.g. a
 # 4-year SPY pull) without dragging the 0DTE index roots into a multi-year pull. Defaults = the daily set.
-TICKERS="${CLI_TICKERS:-${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60 QQQ:60}}"   # quotes + oi (per-ticker DTE)
+TICKERS="${CLI_TICKERS:-${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60 QQQ:60}}"   # quotes + ohlcv (per-ticker DTE)
 VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW XSP SPY QQQ}}"                 # verify-quotes (bare names, no DTE)
+# OI is a daily-snapshot instrument (one full-chain capture/day, not a DTE-windowed pull like quotes/ohlcv):
+# backfill_thetadata.py's --run mode ignores per-ticker :DTE tokens entirely and always uses one global
+# --max-dte across every ticker passed, so bare names are all this step needs or accepts meaningfully.
+# SPX (legacy AM-settled root) is included but untraded: on a standard-monthly (3rd Friday) expiry real open
+# interest splits across SPX and SPXW (see ParsingHelpers.AggregationRoots) — without SPX's OI backfilled
+# too, GEX/max-pain/strike-ladder factors only ever see half that date's book. No minute-NBBO quotes/ohlcv
+# pull for it — OI (+ the EOD-solved IV alongside it) is all ComputeGex needs.
+OI_TICKERS="${CLI_OI_TICKERS:-${BACKFILL_OI_TICKERS:-SPXW XSP SPY QQQ SPX}}"   # bare names, no DTE
 CONC=2
 
 # Resolve the wa executable — install.sh/.bat publish it alongside this script in the install dir
@@ -181,8 +198,8 @@ for t in $HISTORY_TICKERS; do
 done
 has_step quotes && step "(2/5) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
 has_step ohlcv  && step "(3/5) minute trade OHLCV -> data/quotes.db"  "$PY" "$SCRIPT" --ohlcv  --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step oi     && step "(4/5) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $TICKERS --end "$END_OI" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step verify && step "(5/5) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root SPY --verify
+has_step oi     && step "(4/5) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $OI_TICKERS --end "$END_OI" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step verify && step "(5/5) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root "${VERIFY// /,}" --verify
 
 if [ "$rc" -eq 0 ]; then
   echo "[$(ts)] === ALL OK ==="
