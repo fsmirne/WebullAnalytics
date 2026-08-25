@@ -172,7 +172,7 @@ internal static class CandidateEnumerator
 						// so a band like 0.40–0.70 yields OTM, ATM, and ITM long legs as distinct candidates and the
 						// scorer picks per regime (e.g. ITM call diagonals in a bull tape). The band is the user's
 						// delta control; MaxLongAnchors caps the per-minute scan by downsampling a wide band evenly.
-						var bandStrikes = StrikesAround(spot, step, 24, longLadder)
+						var bandStrikes = StrikesInDeltaBand(spot, step, longLadder, longYears, defaultIv, sCfg.DeltaMin, sCfg.DeltaMax, callPut)
 							.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, longYears, OptionMath.RiskFreeRate, ResolveIv(ticker, longExp, k, callPut, quotes, defaultIv), callPut))))
 							.Where(x => x.d >= sCfg.DeltaMin && x.d <= sCfg.DeltaMax)
 							.OrderBy(x => x.d).Select(x => x.k).ToList();
@@ -197,7 +197,7 @@ internal static class CandidateEnumerator
 								// Clustering at shortMid pinned the short near delta 0.40 and never reached the ATM
 								// (~0.50) end, so the tight near-ATM covered diagonals (rich short premium, balanced BE)
 								// were never enumerated. Now the scorer can choose them.
-								var shortInBand = StrikesAround(spot, step, 24, shortLadder)
+								var shortInBand = StrikesInDeltaBand(spot, step, shortLadder, shortYears, defaultIv, sCfg.ShortDeltaMin, sCfg.ShortDeltaMax, callPut)
 									.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, shortYears, OptionMath.RiskFreeRate, ResolveIv(ticker, shortExp, k, callPut, quotes, defaultIv), callPut))))
 									.Where(x => x.d >= sCfg.ShortDeltaMin && x.d <= sCfg.ShortDeltaMax)
 									.OrderBy(x => x.d).Select(x => x.k).ToList();
@@ -290,17 +290,30 @@ internal static class CandidateEnumerator
 	private static IReadOnlyList<decimal> StrikeGrid(decimal spot, decimal step, StrikeLadder ladder)
 		=> ladder.ChainPresent ? ladder.Around(spot, 3).ToList() : StrikeGrid(spot, step);
 
-	/// <summary>Listed strikes below spot when a chain is present, else the uniform step grid.</summary>
-	private static IReadOnlyList<decimal> StrikesBelow(decimal spot, decimal step, int count, StrikeLadder ladder)
-		=> ladder.ChainPresent ? ladder.Below(spot, count).ToList() : StrikesBelowSpot(spot, step, count).ToList();
-
-	/// <summary>Listed strikes above spot when a chain is present, else the uniform step grid.</summary>
-	private static IReadOnlyList<decimal> StrikesAbove(decimal spot, decimal step, int count, StrikeLadder ladder)
-		=> ladder.ChainPresent ? ladder.Above(spot, count).ToList() : StrikesAboveSpot(spot, step, count).ToList();
-
-	/// <summary>Listed strikes bracketing spot when a chain is present, else the uniform step grid.</summary>
-	private static IReadOnlyList<decimal> StrikesAround(decimal spot, decimal step, int count, StrikeLadder ladder)
-		=> ladder.ChainPresent ? ladder.Around(spot, count).ToList() : StrikesAroundSpot(spot, step, count).ToList();
+	/// <summary>Strikes spanning the delta band [<paramref name="deltaMin"/>, <paramref name="deltaMax"/>],
+	/// located via Black-Scholes delta-to-strike inversion (<see cref="OptionMath.DeltaToStrike"/>) instead of
+	/// a fixed nearest-N radius. A fixed radius undershoots badly as DTE stretches out: the dollar distance
+	/// from spot to a given delta grows with roughly sqrt(DTE), so a band sitting a few points from spot at
+	/// 0DTE can sit 20-40+ points out at 45-60 DTE — well beyond any small hardcoded strike count on a fine
+	/// ($1) grid (this is what silenced shortVertical at 45-60 DTE / delta 0.15-0.30: the old radius-8 search
+	/// never reached far enough OTM to find a matching strike). <paramref name="iv"/> is a static/ATM estimate
+	/// — the strike's own live IV isn't known until a candidate is picked — so callers must still re-verify
+	/// each returned strike's actual delta via <see cref="ResolveIv"/> before accepting it; <see
+	/// cref="StrikeLadder.Between"/>'s padding absorbs the gap between the two IV estimates. Shared by every
+	/// delta-band structure (verticals, condors, calendars/diagonals) so the fix lives in one place.</summary>
+	private static IReadOnlyList<decimal> StrikesInDeltaBand(decimal spot, decimal step, StrikeLadder ladder, double years, decimal iv, decimal deltaMin, decimal deltaMax, string callPut)
+	{
+		var effIv = iv > 0m ? iv : 0.20m;
+		var kLo = OptionMath.DeltaToStrike(spot, years, OptionMath.RiskFreeRate, effIv, deltaMin, callPut);
+		var kHi = OptionMath.DeltaToStrike(spot, years, OptionMath.RiskFreeRate, effIv, deltaMax, callPut);
+		var lo = Math.Min(kLo, kHi);
+		var hi = Math.Max(kLo, kHi);
+		if (ladder.ChainPresent) return ladder.Between(lo, hi).ToList();
+		var strikes = new List<decimal>();
+		for (var k = Math.Floor(lo / step) * step; k <= hi + step; k += step)
+			if (k > 0m) strikes.Add(k);
+		return strikes;
+	}
 
 	/// <summary>Up to <paramref name="max"/> items evenly spaced across <paramref name="sorted"/> (a
 	/// delta-sorted strike list), always including both ends, so anchors span the configured band instead
@@ -459,26 +472,24 @@ internal static class CandidateEnumerator
 
 					// Per-expiry ladders: the back-month grid is coarser than the front week on SPX-family
 					// chains, so the long and short legs each snap to their own expiry's listed strikes and
-					// widths count strikes along that ladder. Wide both-sided band (±24): the delta filter must
-					// reach the OTM short anchor (delta ~0.20–0.35), well outside ATM.
+					// widths count strikes along that ladder.
 					var longLadder = StrikeLadder.Build(ticker, longExp, side, quotes);
 					var shortLadder = StrikeLadder.Build(ticker, shortExp, side, quotes);
-					var longGrid = StrikesAround(spot, step, 24, longLadder);
-					var shortGrid = StrikesAround(spot, step, 24, shortLadder);
+					var longGrid = StrikesInDeltaBand(spot, step, longLadder, longYears, defaultIv, sCfg.LongDeltaMin, sCfg.LongDeltaMax, side);
+					var shortGrid = StrikesInDeltaBand(spot, step, shortLadder, shortYears, defaultIv, sCfg.ShortDeltaMin, sCfg.ShortDeltaMax, side);
 
 					// Far long-vertical anchor: the long leg, directional, in the LongDelta band at the far expiry.
-					// Cap to the 2 strikes nearest the band centre (delta-filtered strikes are few, but cap defensively).
-					var longMid = (sCfg.LongDeltaMin + sCfg.LongDeltaMax) / 2m;
-					var longAnchors = longGrid
+					// Spans the whole band (not just its midpoint) so ITM/ATM/OTM anchors are all distinct
+					// candidates the scorer can choose between — same convention as EnumerateCalendarLike.
+					var longAnchors = SpanEvenly(longGrid
 						.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, longYears, OptionMath.RiskFreeRate, ResolveIv(ticker, longExp, k, side, quotes, defaultIv), side))))
 						.Where(x => x.d >= sCfg.LongDeltaMin && x.d <= sCfg.LongDeltaMax)
-						.OrderBy(x => Math.Abs(x.d - longMid)).Take(2).Select(x => x.k).ToList();
+						.OrderBy(x => x.d).Select(x => x.k).ToList(), cfg.MaxLongAnchors);
 					// Near short-vertical anchor: the short leg, further OTM, in the ShortDelta band at the near expiry.
-					var shortMid = (sCfg.ShortDeltaMin + sCfg.ShortDeltaMax) / 2m;
-					var shortAnchors = shortGrid
+					var shortAnchors = SpanEvenly(shortGrid
 						.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, shortYears, OptionMath.RiskFreeRate, ResolveIv(ticker, shortExp, k, side, quotes, defaultIv), side))))
 						.Where(x => x.d >= sCfg.ShortDeltaMin && x.d <= sCfg.ShortDeltaMax)
-						.OrderBy(x => Math.Abs(x.d - shortMid)).Take(2).Select(x => x.k).ToList();
+						.OrderBy(x => x.d).Select(x => x.k).ToList(), cfg.MaxShortAnchors);
 
 					var dir = side == "C" ? 1 : -1;
 					foreach (var longStrike in longAnchors)
@@ -557,7 +568,6 @@ internal static class CandidateEnumerator
 
 		var defaultIv = cfg.Indicators.IvDefaultPct;
 		var step = FallbackStep(spot);
-		var deltaMid = (sCfg.DeltaMin + sCfg.DeltaMax) / 2m;
 
 		foreach (var side in new[] { "C", "P" })
 			foreach (var shortExp in shortExps)
@@ -571,13 +581,14 @@ internal static class CandidateEnumerator
 					// short ladder. Empty ladders → uniform step grid (tests / --theoretical).
 					var longLadder = StrikeLadder.Build(ticker, longExp, side, quotes);
 					var shortLadder = StrikeLadder.Build(ticker, shortExp, side, quotes);
-					var longGrid = StrikesAround(spot, step, 24, longLadder);
+					var longGrid = StrikesInDeltaBand(spot, step, longLadder, longYears, defaultIv, sCfg.DeltaMin, sCfg.DeltaMax, side);
 					// Single shared anchor: the calendar strike, picked in the delta band on the far (long) leg —
-					// the directional anchor, same convention as the diagonal-vertical's long anchor.
-					var anchors = longGrid
+					// the directional anchor, same convention as the diagonal-vertical's long anchor. Spans the
+					// whole band rather than clustering at its midpoint (same reasoning as EnumerateCalendarLike).
+					var anchors = SpanEvenly(longGrid
 						.Select(k => (k, d: Math.Abs(OptionMath.Delta(spot, k, longYears, OptionMath.RiskFreeRate, ResolveIv(ticker, longExp, k, side, quotes, defaultIv), side))))
 						.Where(x => x.d >= sCfg.DeltaMin && x.d <= sCfg.DeltaMax)
-						.OrderBy(x => Math.Abs(x.d - deltaMid)).Take(2).Select(x => x.k).ToList();
+						.OrderBy(x => x.d).Select(x => x.k).ToList(), cfg.MaxLongAnchors);
 
 					var dir = side == "C" ? 1 : -1;
 					foreach (var anchor in anchors)
@@ -681,7 +692,8 @@ internal static class CandidateEnumerator
 			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
 			// Combined both-sides ladder to measure the body width as a count of listed strikes across spot.
 			var bodyLadder = StrikeLadder.Build(ticker, exp, null, quotes);
-			var putShorts = StrikesBelow(spot, step, 8, putLadder)
+			var putShorts = StrikesInDeltaBand(spot, step, putLadder, years, defaultIv, sCfg.ShortDeltaMin, sCfg.ShortDeltaMax, "P")
+				.Where(k => k < spot)
 				.Where(shortStrike =>
 				{
 					var iv = ResolveIv(ticker, exp, shortStrike, "P", quotes, defaultIv);
@@ -689,7 +701,8 @@ internal static class CandidateEnumerator
 					return delta >= sCfg.ShortDeltaMin && delta <= sCfg.ShortDeltaMax;
 				})
 				.ToList();
-			var callShorts = StrikesAbove(spot, step, 8, callLadder)
+			var callShorts = StrikesInDeltaBand(spot, step, callLadder, years, defaultIv, sCfg.ShortDeltaMin, sCfg.ShortDeltaMax, "C")
+				.Where(k => k > spot)
 				.Where(shortStrike =>
 				{
 					var iv = ResolveIv(ticker, exp, shortStrike, "C", quotes, defaultIv);
@@ -735,11 +748,6 @@ internal static class CandidateEnumerator
 		return new CandidateSkeleton(ticker, OpenStructureKind.IronCondor, legs, TargetExpiry: exp);
 	}
 
-	// How far below/above spot the anchor (near-spot inner short) search reaches, in listed strikes. The
-	// short-delta band trims this down; the count only has to be generous enough to reach the OTM tail
-	// on fine ($1) strike ladders before the band cuts it off.
-	private const int CondorAnchorSearchStrikes = 30;
-
 	/// <summary>Single-sided (all-put OR all-call) LONG condor. Unlike the iron condor — which brackets
 	/// spot and thus always has ITM legs on one side — a condor is placed to ONE side of spot so every
 	/// leg stays OTM (no early-assignment risk): puts below spot express a bearish profit zone, calls
@@ -769,7 +777,8 @@ internal static class CandidateEnumerator
 			{
 				var ladder = StrikeLadder.Build(ticker, exp, type, quotes);
 				var dir = type == "P" ? -1 : 1;   // body/wings extend away from spot: down for puts, up for calls
-				var anchors = (type == "P" ? StrikesBelow(spot, step, CondorAnchorSearchStrikes, ladder) : StrikesAbove(spot, step, CondorAnchorSearchStrikes, ladder))
+				var anchors = StrikesInDeltaBand(spot, step, ladder, years, defaultIv, sCfg.ShortDeltaMin, sCfg.ShortDeltaMax, type)
+					.Where(k => type == "P" ? k < spot : k > spot)
 					.Where(k =>
 					{
 						var iv = ResolveIv(ticker, exp, k, type, quotes, defaultIv);
@@ -822,8 +831,8 @@ internal static class CandidateEnumerator
 			var putLadder = StrikeLadder.Build(ticker, exp, "P", quotes);
 			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
 
-			// Put credit side (bullish): short strike below spot.
-			foreach (var shortStrike in StrikesBelow(spot, step, 8, putLadder))
+			// Put credit side (bullish): short strike below spot, in the ShortDelta band.
+			foreach (var shortStrike in StrikesInDeltaBand(spot, step, putLadder, years, defaultIv, sCfg.ShortDeltaMin, sCfg.ShortDeltaMax, "P").Where(k => k < spot))
 			{
 				var iv = ResolveIv(ticker, exp, shortStrike, "P", quotes, defaultIv);
 				var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "P"));
@@ -835,8 +844,8 @@ internal static class CandidateEnumerator
 				}
 			}
 
-			// Call credit side (bearish): short strike above spot.
-			foreach (var shortStrike in StrikesAbove(spot, step, 8, callLadder))
+			// Call credit side (bearish): short strike above spot, in the ShortDelta band.
+			foreach (var shortStrike in StrikesInDeltaBand(spot, step, callLadder, years, defaultIv, sCfg.ShortDeltaMin, sCfg.ShortDeltaMax, "C").Where(k => k > spot))
 			{
 				var iv = ResolveIv(ticker, exp, shortStrike, "C", quotes, defaultIv);
 				var delta = Math.Abs(OptionMath.Delta(spot, shortStrike, years, OptionMath.RiskFreeRate, iv, "C"));
@@ -874,7 +883,7 @@ internal static class CandidateEnumerator
 			// Filter long-leg by delta in [longDeltaMin, longDeltaMax]. Iterate strikes both above
 			// and below spot since delta-0.55 can be slightly ITM (strike below spot) and
 			// delta-0.30 can be OTM (strike above).
-			foreach (var longStrike in StrikesAround(spot, step, 8, callLadder))
+			foreach (var longStrike in StrikesInDeltaBand(spot, step, callLadder, years, defaultIv, sCfg.LongDeltaMin, sCfg.LongDeltaMax, "C"))
 			{
 				var iv = ResolveIv(ticker, exp, longStrike, "C", quotes, defaultIv);
 				var longDelta = Math.Abs(OptionMath.Delta(spot, longStrike, years, OptionMath.RiskFreeRate, iv, "C"));
@@ -887,7 +896,7 @@ internal static class CandidateEnumerator
 			}
 
 			// Bear put spread (LongPutVertical): buy a near-ATM put, sell a further-OTM put.
-			foreach (var longStrike in StrikesAround(spot, step, 8, putLadder))
+			foreach (var longStrike in StrikesInDeltaBand(spot, step, putLadder, years, defaultIv, sCfg.LongDeltaMin, sCfg.LongDeltaMax, "P"))
 			{
 				var iv = ResolveIv(ticker, exp, longStrike, "P", quotes, defaultIv);
 				var longDelta = Math.Abs(OptionMath.Delta(spot, longStrike, years, OptionMath.RiskFreeRate, iv, "P"));
@@ -898,29 +907,6 @@ internal static class CandidateEnumerator
 					yield return BuildVertical(ticker, OpenStructureKind.LongPutVertical, exp, shortStrike, longStrike, "P");
 				}
 			}
-		}
-	}
-
-	private static IEnumerable<decimal> StrikesBelowSpot(decimal spot, decimal step, int count)
-	{
-		var k = Math.Floor(spot / step) * step;
-		if (k == spot) k -= step;
-		for (int i = 0; i < count; i++)
-		{
-			if (k <= 0m) yield break;
-			yield return k;
-			k -= step;
-		}
-	}
-
-	private static IEnumerable<decimal> StrikesAboveSpot(decimal spot, decimal step, int count)
-	{
-		var k = Math.Ceiling(spot / step) * step;
-		if (k == spot) k += step;
-		for (int i = 0; i < count; i++)
-		{
-			yield return k;
-			k += step;
 		}
 	}
 
@@ -955,7 +941,7 @@ internal static class CandidateEnumerator
 			foreach (var callPut in new[] { "C", "P" })
 			{
 				var ladder = StrikeLadder.Build(ticker, exp, callPut, quotes);
-				foreach (var strike in StrikesAround(spot, step, 10, ladder))
+				foreach (var strike in StrikesInDeltaBand(spot, step, ladder, years, defaultIv, sCfg.DeltaMin, sCfg.DeltaMax, callPut))
 				{
 					var iv = ResolveIv(ticker, exp, strike, callPut, quotes, defaultIv);
 					var delta = Math.Abs(OptionMath.Delta(spot, strike, years, OptionMath.RiskFreeRate, iv, callPut));
@@ -970,10 +956,4 @@ internal static class CandidateEnumerator
 		}
 	}
 
-	private static IEnumerable<decimal> StrikesAroundSpot(decimal spot, decimal step, int count)
-	{
-		var below = StrikesBelowSpot(spot, step, count).ToList();
-		var above = StrikesAboveSpot(spot, step, count).ToList();
-		return below.Concat(above).Distinct();
-	}
 }

@@ -90,6 +90,25 @@ internal sealed class StrikeLadder
 		return _strikes[target];
 	}
 
+	/// <summary>Listed strikes within [<paramref name="lo"/>, <paramref name="hi"/>], plus <paramref name="pad"/>
+	/// extra strikes on each side — the caller computed <paramref name="lo"/>/<paramref name="hi"/> from a
+	/// target delta band using a static/ATM IV estimate, not each strike's own live IV, so the pad absorbs
+	/// that gap (the caller re-verifies every candidate's real delta afterward). When nothing lists inside
+	/// [lo, hi] (a band narrower than the local grid spacing), falls back to the single nearest listed strike
+	/// so a valid band still yields a candidate. Ascending order.</summary>
+	public IEnumerable<decimal> Between(decimal lo, decimal hi, int pad = 1)
+	{
+		if (_strikes.Length == 0) yield break;
+		if (lo > hi) (lo, hi) = (hi, lo);
+		int first = -1, last = -1;
+		for (var i = 0; i < _strikes.Length; i++)
+			if (_strikes[i] >= lo && _strikes[i] <= hi) { if (first < 0) first = i; last = i; }
+		if (first < 0) first = last = NearestIndex((lo + hi) / 2m);
+		var start = Math.Max(0, first - pad);
+		var end = Math.Min(_strikes.Length - 1, last + pad);
+		for (var i = start; i <= end; i++) yield return _strikes[i];
+	}
+
 	/// <summary>Count of listed strikes between <paramref name="a"/> and <paramref name="b"/> — the absolute
 	/// index difference after snapping each to the nearest listed strike. Null when the ladder is empty. Used
 	/// for iron-condor body width expressed as a count of strikes along the real ladder.</summary>
