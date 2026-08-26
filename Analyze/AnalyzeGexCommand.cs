@@ -45,7 +45,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 
 	[CommandOption("--max-strikes <N>")]
 	[DefaultValue(200)]
-	[Description("Max strike rows to display, and (Schwab vendor) how many strikes around the money to fetch. Picks the N strikes closest to spot within --strike-range. Default: 200 (the max) — a thin book's real gravity strike can sit well outside a small window (verified live on XSP), and Gravity/Centroid/NetPull/gamma-flip/max-pain all read the full fetched set regardless of this cap, so a smaller value only trims display rows, not analytics quality.")]
+	[Description("Max strike rows the raw (pre-grouping) ladder keeps, picking the N strikes closest to spot within --strike-range. Display only — the Schwab fetch is always the full chain (strikeCount: 0), so this never starves Gravity/Centroid/NetPull/gamma-flip/max-pain of data; lowering it only trims the ladder those analytics themselves draw from before --strike-range and the display grouping shrink it further to fit the terminal. Default: 200 (the max), since a thin book's real gravity strike can sit well outside a small window (verified live on XSP).")]
 	public int MaxStrikes { get; set; } = 200;
 
 	[CommandOption("--dte <N>")]
@@ -245,9 +245,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 					var token = await SchwabAuthClient.GetAccessTokenAsync(apiConfig.Schwab, configPath, cancellation);
 					var fromExpiry = expiryFilter.HasValue ? DateOnly.FromDateTime(expiryFilter.Value) : DateOnly.FromDateTime(asOf.Date);
 					var toExpiry = expiryFilter.HasValue ? DateOnly.FromDateTime(expiryFilter.Value) : DateOnly.FromDateTime(asOf.Date).AddDays(settings.Dte);
-					// Bound to the near-money strikes the heatmap shows (the webull path already caps at MaxStrikes),
-					// so the common case is one small request; the client still date-splits as a safety net.
-					(schwabSpot, schwabQuotes) = await SchwabOptionsClient.FetchChainAsync(token, ticker, fromExpiry, toExpiry, cancellation, strikeCount: settings.MaxStrikes);
+					// Full ladder (strikeCount: 0), NOT bounded by --max-strikes: that's a DISPLAY cap now (GravityByExpiry/
+					// Centroid/NetPull/MaxPainContributors all read the complete fetched set — see GexMatrix.Build), and a
+					// vendor-side strike cap here would starve them of data no in-memory fix can recover. Also the only way
+					// this stays consistent with `wa ai scan`'s own live fetch (LiveQuoteSource), which has always been
+					// unbounded — verified live: capping this to 200 here left Max Pain reading $7,820 against ai scan's
+					// $7,420 for the same SPXW 10/16 book. The client still date-splits on an oversized response as a
+					// safety net, so this doesn't risk the 502 the original cap was partly guarding against.
+					(schwabSpot, schwabQuotes) = await SchwabOptionsClient.FetchChainAsync(token, ticker, fromExpiry, toExpiry, cancellation, strikeCount: 0);
 				}
 				catch (SchwabAuthException ex)
 				{
@@ -1262,7 +1267,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			matrix.GravityByExpiry.TryGetValue(exp, out var gravity);
 			var (callWall, putWall) = matrix.FindWalls(exp);
 			var flip = matrix.FindGammaFlip(spot, exp);
-			var maxPain = matrix.FindMaxPain(exp);
+			var maxPain = matrix.FindMaxPain(exp, spot);
 
 			var gravityCell = gravity.HasValue ? $"${gravity.Value:N2}" : "[dim]—[/]";
 			var grossCell = gravity.HasValue && matrix.Cells.TryGetValue((exp, gravity.Value), out var gc) ? FormatCompactDollars(gc.Gross) : "[dim]—[/]";
@@ -1968,7 +1973,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			matrix.GravityByExpiry.TryGetValue(exp, out var gravity);
 			decimal? gross = gravity.HasValue && matrix.Cells.TryGetValue((exp, gravity.Value), out var gc) ? Math.Round(gc.Gross) : null;
 			var (callWall, putWall) = matrix.FindWalls(exp);
-			rows.Add(new GexLogExpiry(exp.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), gravity, gross, callWall, putWall, matrix.FindGammaFlip(spot, exp), matrix.FindMaxPain(exp)));
+			rows.Add(new GexLogExpiry(exp.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), gravity, gross, callWall, putWall, matrix.FindGammaFlip(spot, exp), matrix.FindMaxPain(exp, spot)));
 		}
 		var record = new GexLogRecord(nowEt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture), settings.VendorName, spot, settings.StrikeRangePct, settings.MaxStrikes, settings.Dte, rows);
 		var path = Program.ResolvePath($"data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl");
@@ -2062,8 +2067,15 @@ internal sealed class GexMatrix
 	/// negative = below (red underneath). This is the whole-ladder reading rather than any single strike.</summary>
 	public Dictionary<DateTime, decimal?> NetPullByExpiry { get; }
 	public IReadOnlyList<GexContributor> Contributors { get; }
+	/// <summary>Separate from <see cref="Contributors"/>: max pain sums total ITM payout across every listed
+	/// contract, so — unlike Gravity/Centroid/NetPull/gamma-flip, all argmax- or weighted-average-shaped and
+	/// so exactly what a single static OI block (SPX's legacy AM-settled root on a standard-monthly expiry)
+	/// can hijack — merging the sibling root back in is the right read here, matching
+	/// <see cref="CandidateScorer.ComputeMaxPainPrice"/>'s choice to keep merging while
+	/// <see cref="CandidateScorer.ComputeGex"/> stopped.</summary>
+	public IReadOnlyList<GexContributor> MaxPainContributors { get; }
 
-	private GexMatrix(List<DateTime> expiries, List<decimal> strikes, Dictionary<(DateTime, decimal), GexCell> cells, decimal maxGross, decimal maxAbsNet, decimal totalCallGex, decimal totalPutGex, Dictionary<DateTime, decimal?> gravityByExpiry, Dictionary<DateTime, decimal?> grossCentroidByExpiry, Dictionary<DateTime, decimal?> netPullByExpiry, IReadOnlyList<GexContributor> contributors)
+	private GexMatrix(List<DateTime> expiries, List<decimal> strikes, Dictionary<(DateTime, decimal), GexCell> cells, decimal maxGross, decimal maxAbsNet, decimal totalCallGex, decimal totalPutGex, Dictionary<DateTime, decimal?> gravityByExpiry, Dictionary<DateTime, decimal?> grossCentroidByExpiry, Dictionary<DateTime, decimal?> netPullByExpiry, IReadOnlyList<GexContributor> contributors, IReadOnlyList<GexContributor> maxPainContributors)
 	{
 		Expiries = expiries;
 		Strikes = strikes;
@@ -2076,6 +2088,7 @@ internal sealed class GexMatrix
 		GrossCentroidByExpiry = grossCentroidByExpiry;
 		NetPullByExpiry = netPullByExpiry;
 		Contributors = contributors;
+		MaxPainContributors = maxPainContributors;
 	}
 
 	/// <summary>
@@ -2184,17 +2197,24 @@ internal sealed class GexMatrix
 	/// Returns the max-pain strike for <paramref name="expiry"/>: the listed strike that minimizes the
 	/// total dollar value of contracts expiring in-the-money (Σ max(S−K,0)·OI for calls + Σ max(K−S,0)·OI
 	/// for puts). This is the "pin" level where holders collectively lose the most. Evaluated only at
-	/// strikes actually present in the contributor set for that expiry — out-of-window strikes are ignored,
-	/// so for narrow --strike-range values the result may miss a true max-pain that sits beyond the window.
+	/// strikes actually present in the contributor set for that expiry. Unlike Gravity/Centroid/NetPull (which
+	/// read the fetched chain within --strike-range), <see cref="MaxPainContributors"/> is NOT windowed by
+	/// --strike-range at all — a candidate strike inside the window can still have its payout swung by real
+	/// OI sitting outside it, matching <see cref="CandidateScorer.ComputeMaxPainPrice"/>'s own unbounded scan.
+	/// A near-flat payout curve routinely leaves several strikes within pennies of the true minimum; ties
+	/// break toward the strike closest to <paramref name="spot"/>, matching
+	/// <see cref="CandidateScorer.ComputeMaxPainPrice"/> — this used to pick the lowest tied strike instead
+	/// (no spot input at all), which was the last live source of `wa analyze gex` and `wa ai scan` reporting
+	/// different max-pain for the identical book.
 	/// </summary>
-	public decimal? FindMaxPain(DateTime expiry)
+	public decimal? FindMaxPain(DateTime expiry, decimal spot)
 	{
-		var perExpiry = Contributors.Where(c => c.Expiry == expiry.Date).ToList();
+		var perExpiry = MaxPainContributors.Where(c => c.Expiry == expiry.Date).ToList();
 		if (perExpiry.Count == 0) return null;
 
 		var candidateStrikes = perExpiry.Select(c => c.Strike).Distinct().OrderBy(s => s).ToList();
 		decimal? bestStrike = null;
-		decimal bestPayout = decimal.MaxValue;
+		decimal? bestPayout = null;
 		foreach (var s in candidateStrikes)
 		{
 			decimal payout = 0m;
@@ -2203,11 +2223,14 @@ internal sealed class GexMatrix
 				var itm = c.IsCall ? Math.Max(s - c.Strike, 0m) : Math.Max(c.Strike - s, 0m);
 				payout += itm * c.Oi;
 			}
-			if (payout < bestPayout)
+			if (!bestPayout.HasValue || payout < bestPayout.Value)
 			{
 				bestPayout = payout;
 				bestStrike = s;
+				continue;
 			}
+			if (payout != bestPayout.Value || !bestStrike.HasValue) continue;
+			if (Math.Abs(s - spot) < Math.Abs(bestStrike.Value - spot)) bestStrike = s;
 		}
 		return bestStrike;
 	}
@@ -2259,18 +2282,37 @@ internal sealed class GexMatrix
 		var expirySet = new HashSet<DateTime>();
 		var strikeSet = new HashSet<decimal>();
 		var rawContribs = new List<(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall)>();
+		// Max pain sums total ITM payout across every listed contract, so unlike Gravity/Centroid/NetPull/the
+		// chain totals below (all argmax- or weighted-average-shaped, and so exactly the statistics a single
+		// static block — SPX's legacy AM-settled OI on a standard-monthly expiry — can hijack, per
+		// CandidateScorer.ComputeGex) it's the one place the merge is still the right read: a strike's real
+		// total liability doesn't care which of the two roots the OI sits under. Kept as its own contributor
+		// list rather than switching the whole loop, so it's the one exception, not a silent default.
+		var maxPainContribs = new List<(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall)>();
 
 		foreach (var kv in quotes)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(kv.Key);
 			if (parsed == null || !ParsingHelpers.RootsMatchForAggregation(parsed.Root, ticker, parsed.ExpiryDate)) continue;
+			var exactRoot = string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase);
 			if (expiryFilter.HasValue && parsed.ExpiryDate.Date != expiryFilter.Value.Date) continue;
 			if (parsed.ExpiryDate.Date < asOfDate) continue;
-			if (parsed.Strike < minStrike || parsed.Strike > maxStrike) continue;
 			var q = kv.Value;
 			if (!q.OpenInterest.HasValue || q.OpenInterest.Value <= 0) continue;
 
 			var timeYears = TimeYears(asOf, parsed.ExpiryDate);
+			var isCall = parsed.CallPut == "C";
+
+			// Max pain only needs strike/side/OI, and — unlike everything below — is NOT bounded by --strike-range
+			// (minStrike/maxStrike): a candidate strike WITHIN the window can still have its total payout swung by
+			// OI sitting OUTSIDE it, and ComputeMaxPainPrice (the `wa ai scan` side) has no range restriction at
+			// all. Recorded before both the IV gate below (a contract can carry real OI with a dead book — routine
+			// for SPX's legacy strikes, which barely trade) and the range check further down. Verified live: with
+			// --strike-range at its 20% default this was still leaving max pain $80 off CandidateScorer's answer
+			// for the identical SPXW 10/16 book; widening to the full 200% converged them exactly, so the miss was
+			// specifically OI beyond the display window feeding the payout sum, not a fetch or IV gap.
+			maxPainContribs.Add((parsed.ExpiryDate.Date, parsed.Strike, timeYears, 0m, q.OpenInterest.Value, isCall));
+			if (parsed.Strike < minStrike || parsed.Strike > maxStrike) continue;
 
 			// Vendor IV is taken only from a live two-sided book (see OptionMath.TrustedVendorIv). Without that
 			// guard the heatmap is at the mercy of dead books, and an expiry-day evening — exactly when this
@@ -2305,7 +2347,8 @@ internal sealed class GexMatrix
 			// and dropping its negative half would silently delete every strike above the d2 = 0 flip.
 			if (dollarGex == 0m) continue;
 
-			var isCall = parsed.CallPut == "C";
+			if (!exactRoot) continue; // merged-root-only contract: already counted for max pain above, nothing else below
+
 			var key = (parsed.ExpiryDate.Date, parsed.Strike);
 			raw.TryGetValue(key, out var existing);
 			if (isCall)
@@ -2399,12 +2442,17 @@ internal sealed class GexMatrix
 		}
 
 		// Analytics use the full strike-range × kept-expiries set, NOT the --max-strikes display cap —
-		// per-expiry max pain and gamma flip would be skewed by an arbitrary display-row limit.
+		// gamma flip would be skewed by an arbitrary display-row limit.
 		var contributors = rawContribs
 			.Where(r => keptExpirySet.Contains(r.Expiry))
 			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall))
 			.ToList();
+		// Max pain's own contributor list — see the comment on maxPainContribs above for why this one stays merged.
+		var maxPainContributors = maxPainContribs
+			.Where(r => keptExpirySet.Contains(r.Expiry))
+			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall))
+			.ToList();
 
-		return new GexMatrix(expiries, strikes, cells, maxGross, maxAbsNet, totalCall, totalPut, gravity, centroid, netPull, contributors);
+		return new GexMatrix(expiries, strikes, cells, maxGross, maxAbsNet, totalCall, totalPut, gravity, centroid, netPull, contributors, maxPainContributors);
 	}
 }
