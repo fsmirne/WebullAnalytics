@@ -44,9 +44,9 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	public int StrikeRangePct { get; set; } = 20;
 
 	[CommandOption("--max-strikes <N>")]
-	[DefaultValue(50)]
-	[Description("Max strike rows to display. Picks the N strikes closest to spot within --strike-range. Default: 50.")]
-	public int MaxStrikes { get; set; } = 50;
+	[DefaultValue(200)]
+	[Description("Max strike rows to display, and (Schwab vendor) how many strikes around the money to fetch. Picks the N strikes closest to spot within --strike-range. Default: 200 (the max) — a thin book's real gravity strike can sit well outside a small window (verified live on XSP), and Gravity/Centroid/NetPull/gamma-flip/max-pain all read the full fetched set regardless of this cap, so a smaller value only trims display rows, not analytics quality.")]
+	public int MaxStrikes { get; set; } = 200;
 
 	[CommandOption("--dte <N>")]
 	[DefaultValue(14)]
@@ -868,19 +868,18 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var atmStrike = matrix.Strikes.OrderBy(s => Math.Abs(s - spot)).FirstOrDefault();
 		var maxAbsNet = Math.Max(matrix.MaxAbsNet, 1m);
 
-		foreach (var strike in matrix.Strikes)
+		foreach (var bucket in GroupStrikesForDisplay(matrix.Strikes, spot))
 		{
-			var strikeStr = StrikeLabel(strike, wholeGrid);
-			var isAtm = strike == atmStrike;
-			var strikeMarkup = isAtm ? $"[bold yellow]{strikeStr}[/]" : strikeStr;
+			var isAtm = bucket.Contains(atmStrike);
+			var strikeMarkup = isAtm ? $"[bold yellow]{BucketLabel(bucket, wholeGrid)}[/]" : BucketLabel(bucket, wholeGrid);
 
 			var cells = new List<string> { strikeMarkup };
 			foreach (var exp in shownExpiries)
 			{
-				matrix.Cells.TryGetValue((exp, strike), out var cell);
+				var cell = AggregateBucketCell(bucket, s => matrix.Cells.TryGetValue((exp, s), out var c) ? c : null);
 				// The gravity marker is a max-gross-GAMMA anchor. Under vanna the same strike would just be the biggest
 				// |vanna|×OI pile, which is precisely the "level" reading this greek does not support — so it is not drawn.
-				var isGravity = greek == GreekKind.Gamma && matrix.GravityByExpiry.TryGetValue(exp, out var grav) && grav.HasValue && grav.Value == strike;
+				var isGravity = greek == GreekKind.Gamma && matrix.GravityByExpiry.TryGetValue(exp, out var grav) && grav.HasValue && bucket.Contains(grav.Value);
 				cells.Add(BuildHeatmapCellMarkup(cell, maxAbsNet, isGravity));
 			}
 			table.AddRow(cells.ToArray());
@@ -897,20 +896,21 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// <summary>Rows = <paramref name="strikes"/> in the order given, columns = <paramref name="columns"/>. Shared by
 	/// the --intraday migration panels and the --expiry build-up panel so a gamma table and a vanna table built off one
 	/// strike ladder align row-for-row when placed side by side.</summary>
-	private static Table BuildColumnHeatmapTable(string title, IReadOnlyList<HeatColumn> columns, IReadOnlyList<decimal> strikes, bool wholeGrid, decimal maxAbsNet)
+	private static Table BuildColumnHeatmapTable(string title, IReadOnlyList<HeatColumn> columns, IReadOnlyList<decimal> strikes, bool wholeGrid, decimal maxAbsNet, decimal spot)
 	{
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title(title);
 		table.AddColumn(new TableColumn("[bold]Strike[/]").RightAligned().NoWrap());
 		foreach (var c in columns)
 			table.AddColumn(new TableColumn($"[bold]{c.Header}[/]\n[dim]{c.SubHeader}[/]").Centered().NoWrap());
 
-		foreach (var strike in strikes)
+		foreach (var bucket in GroupStrikesForDisplay(strikes, spot))
 		{
-			var row = new List<string> { StrikeLabel(strike, wholeGrid) };
+			var row = new List<string> { BucketLabel(bucket, wholeGrid) };
 			foreach (var c in columns)
 			{
-				c.Cells.TryGetValue(strike, out var cell);
-				row.Add(BuildHeatmapCellMarkup(cell, maxAbsNet, c.Gravity.HasValue && c.Gravity.Value == strike));
+				var cell = AggregateBucketCell(bucket, s => c.Cells.TryGetValue(s, out var v) ? v : null);
+				var isGravity = c.Gravity.HasValue && bucket.Contains(c.Gravity.Value);
+				row.Add(BuildHeatmapCellMarkup(cell, maxAbsNet, isGravity));
 			}
 			table.AddRow(row.ToArray());
 		}
@@ -1001,9 +1001,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		AnsiConsole.MarkupLine($"[bold]{ticker}[/] {expiry:yyyy-MM-dd} expiry — build-up over {gamma.Count} session(s), {gamma[0].Header} → {gamma[^1].Header}");
 		AnsiConsole.MarkupLine($"[dim]Each column is that session's own data/oi snapshot — the OI and IVs captured that day, priced at that day's close spot and its real DTE. Column header = session, subhead = its spot.{(dropped > 0 ? $" Oldest {dropped} session(s) dropped to fit {AnsiConsole.Profile.Width} columns; narrow with --since." : "")}[/]");
 
-		var table = BuildColumnHeatmapTable(greek == GreekKind.Vanna ? "[bold]VEX (vanna)[/]" : "[bold]GEX (gamma)[/]", gamma, ladder, wholeGrid, MaxNet(gamma));
+		var table = BuildColumnHeatmapTable(greek == GreekKind.Vanna ? "[bold]VEX (vanna)[/]" : "[bold]GEX (gamma)[/]", gamma, ladder, wholeGrid, MaxNet(gamma), spot);
 		if (withVex)
-			AnsiConsole.Write(new Columns(table, BuildColumnHeatmapTable("[bold]VEX (vanna)[/]", vanna, ladder, wholeGrid, MaxNet(vanna))) { Expand = false });
+			AnsiConsole.Write(new Columns(table, BuildColumnHeatmapTable("[bold]VEX (vanna)[/]", vanna, ladder, wholeGrid, MaxNet(vanna), spot)) { Expand = false });
 		else
 			AnsiConsole.Write(table);
 
@@ -1024,6 +1024,65 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	private static string StrikeLabel(decimal strike, bool wholeGrid) => wholeGrid ? $"${strike:N0}" : $"${strike:N2}";
 
 	private static bool IsWholeGrid(IEnumerable<decimal> strikes) => strikes.All(s => s == Math.Truncate(s));
+
+	/// <summary>Buckets a strike ladder into display rows: single-strike resolution for the <paramref name="coreRadius"/>
+	/// strikes nearest spot on each side, then geometrically wider buckets (2, 2, 4, 4, 8, 8, ... capped at
+	/// <paramref name="maxBucketSize"/>) moving further out-of-the-money. Row count grows with log(strikes) instead of
+	/// strikes itself, so raising --max-strikes to fetch a fuller book (needed for Gravity/analytics correctness — see
+	/// <see cref="GexMatrix.Build"/>) doesn't force scrolling through hundreds of rows to read the table: the near-money
+	/// detail that matters for a pin read stays exact, and the far tail — mostly noise or a single legacy block anyway —
+	/// collapses into a handful of summary rows. Call and put sides are bucketed independently so the grouping stays
+	/// symmetric around spot regardless of how lopsided the raw ladder is (a thin book can have far more strikes listed
+	/// on one side than the other). Returns groups ordered highest-strike-first, matching the table's display order.</summary>
+	private static List<List<decimal>> GroupStrikesForDisplay(IReadOnlyList<decimal> strikes, decimal spot, int coreRadius = 15, int maxBucketSize = 25)
+	{
+		List<List<decimal>> GroupOneSide(List<decimal> nearestToFarthest)
+		{
+			var groups = new List<List<decimal>>();
+			int i = 0, n = 0, step = 1;
+			while (i < nearestToFarthest.Count)
+			{
+				var size = Math.Min(n < coreRadius ? 1 : step, nearestToFarthest.Count - i);
+				groups.Add(nearestToFarthest.GetRange(i, size));
+				i += size;
+				n++;
+				if (n >= coreRadius) step = Math.Min(step * 2, maxBucketSize);
+			}
+			return groups;
+		}
+
+		var above = GroupOneSide(strikes.Where(s => s > spot).OrderBy(s => s).ToList());   // ascending = nearest spot first
+		var atSpot = strikes.Where(s => s == spot).ToList();
+		var below = GroupOneSide(strikes.Where(s => s < spot).OrderByDescending(s => s).ToList()); // descending = nearest spot first
+
+		var rows = new List<List<decimal>>();
+		for (var i = above.Count - 1; i >= 0; i--) rows.Add(above[i]); // farthest-above first (highest price at top)
+		if (atSpot.Count > 0) rows.Add(atSpot);
+		rows.AddRange(below); // nearest-below first, working down to farthest
+		return rows;
+	}
+
+	/// <summary>Row label for a <see cref="GroupStrikesForDisplay"/> bucket: a single strike unchanged, a multi-strike
+	/// bucket as "lo–hi".</summary>
+	private static string BucketLabel(IReadOnlyList<decimal> bucket, bool wholeGrid) => bucket.Count == 1
+		? StrikeLabel(bucket[0], wholeGrid)
+		: $"{StrikeLabel(bucket.Min(), wholeGrid)}–{StrikeLabel(bucket.Max(), wholeGrid).TrimStart('$')}";
+
+	/// <summary>Sums the cells of a <see cref="GroupStrikesForDisplay"/> bucket via <paramref name="lookup"/>
+	/// (per-side dollar exposures add linearly), or null when no strike in the bucket has a cell.</summary>
+	private static GexCell? AggregateBucketCell(IReadOnlyList<decimal> bucket, Func<decimal, GexCell?> lookup)
+	{
+		decimal call = 0m, put = 0m;
+		var any = false;
+		foreach (var s in bucket)
+		{
+			if (lookup(s) is not { } cell) continue;
+			call += cell.CallGex;
+			put += cell.PutGex;
+			any = true;
+		}
+		return any ? new GexCell(call, put) : null;
+	}
 
 	private static string BuildHeatmapCellMarkup(GexCell? cell, decimal maxAbsNet, bool isGravity)
 	{
@@ -1564,7 +1623,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			: liveChain ? $"[dim]IVs/OI running day: {storeMarks.Count} bucket(s) time-matched from minute NBBO (data/quotes.db, wa-scraper), {capturedMarks.Count} from this session's data/iv chain captures, {hours.Count - storeMarks.Count - capturedMarks.Count} provisional on the current live fetch (those reprice each call until coverage lands near them).[/]"
 			: $"[yellow]IVs: back-solved from the day's OI-snapshot mids — that snapshot is stamped at the CLOSE, so every column is priced off the session's OUTCOME and the early ones are not what was visible then. data/quotes.db has no {ticker} {expiry:yyyy-MM-dd} rows for {date:yyyy-MM-dd}; backfill it, or use --exante for prior-day IVs.[/]");
 
-		var table = BuildColumnHeatmapTable("[bold]GEX (gamma)[/]", hours.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, h.Gravity)).ToList(), allStrikes, wholeGrid, maxAbsNet);
+		var table = BuildColumnHeatmapTable("[bold]GEX (gamma)[/]", hours.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, h.Gravity)).ToList(), allStrikes, wholeGrid, maxAbsNet, hours[^1].Spot);
 
 		// Computed-gravity footer row. The gravity cell is bold+underlined in the matrix, but styling is dropped
 		// whenever output is not an interactive terminal (piped, captured, pasted into notes) — which is exactly
@@ -1637,7 +1696,10 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		if (tapeHours.Count > 0)
 		{
 			var tMax = Math.Max(1m, tapeHours.SelectMany(t => t.Cells.Values).Select(c => Math.Abs(c.Net)).DefaultIfEmpty(0m).Max());
-			var tape = BuildColumnHeatmapTable("[bold]Volume (Δ tape)[/]", tapeHours.Select(t => new HeatColumn($"{t.Mark:hh\\:mm}", $"{t.Spot:F2}", t.Cells, Gravity: null)).ToList(), allStrikes, wholeGrid, tMax);
+			// Same spot anchor as the gamma table above (hours[^1].Spot, not this panel's own tapeHours[^1].Spot) —
+			// the panels are meant to line up row-for-row, which only holds if every BuildColumnHeatmapTable call
+			// here buckets the shared `allStrikes` ladder around the same spot.
+			var tape = BuildColumnHeatmapTable("[bold]Volume (Δ tape)[/]", tapeHours.Select(t => new HeatColumn($"{t.Mark:hh\\:mm}", $"{t.Spot:F2}", t.Cells, Gravity: null)).ToList(), allStrikes, wholeGrid, tMax, hours[^1].Spot);
 			var sumCells = new List<string> { "[bold]Σvol[/]" };
 			foreach (var t in tapeHours) sumCells.Add(t.Total > 0 ? $"[bold]{FormatCompact(t.Total).TrimStart('+')}[/]" : "[dim]0[/]");
 			tape.AddRow(sumCells.ToArray());
@@ -1648,7 +1710,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		{
 			var shownVanna = vexAt == null ? vannaHours : new List<(TimeSpan Mark, decimal Spot, Dictionary<decimal, GexCell> Cells)> { vannaHours.OrderBy(v => AbsSpan(v.Mark - vexAt.Value)).First() };
 			var vMax = Math.Max(1m, shownVanna.SelectMany(h => h.Cells.Values).Select(c => Math.Abs(c.Net)).DefaultIfEmpty(0m).Max());
-			shownTables.Add(BuildColumnHeatmapTable("[bold]VEX (vanna)[/]", shownVanna.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, Gravity: null)).ToList(), allStrikes, wholeGrid, vMax));
+			shownTables.Add(BuildColumnHeatmapTable("[bold]VEX (vanna)[/]", shownVanna.Select(h => new HeatColumn($"{h.Mark:hh\\:mm}", $"{h.Spot:F2}", h.Cells, Gravity: null)).ToList(), allStrikes, wholeGrid, vMax, hours[^1].Spot));
 			shownColumnCounts.Add(shownVanna.Count);
 		}
 		if (shownTables.Count > 1)
@@ -2271,7 +2333,6 @@ internal sealed class GexMatrix
 
 		var cells = new Dictionary<(DateTime, decimal), GexCell>();
 		decimal maxGross = 0m, maxAbsNet = 0m, totalCall = 0m, totalPut = 0m;
-		var grossByExpiry = new Dictionary<DateTime, Dictionary<decimal, decimal>>();
 		foreach (var ((exp, strike), v) in raw)
 		{
 			if (!keptExpirySet.Contains(exp)) continue;
@@ -2283,14 +2344,27 @@ internal sealed class GexMatrix
 			if (absNet > maxAbsNet) maxAbsNet = absNet;
 			totalCall += cell.CallGex;
 			totalPut += cell.PutGex;
-			if (!grossByExpiry.TryGetValue(exp, out var g)) { g = new(); grossByExpiry[exp] = g; }
-			g[strike] = cell.Gross;
+		}
+
+		// Gravity is an argmax over strikes, computed over the full in-range set rather than the --max-strikes
+		// DISPLAY cap (the same reasoning Centroid/NetPull/Contributors below already follow). An argmax is
+		// even more exposed to that cap than a weighted average: a smooth stat like centroid just shifts a
+		// little when a tail strike drops out, but an argmax can flip entirely the moment the true winner
+		// falls outside the row cap — exactly what happened live on a thin book (XSP), where the real gravity
+		// strike sat outside the default 50-strike window and got silently replaced by a within-cap local max.
+		var grossByExpiryFull = new Dictionary<DateTime, Dictionary<decimal, decimal>>();
+		foreach (var ((exp, strike), v) in raw)
+		{
+			if (!keptExpirySet.Contains(exp)) continue;
+			var gross = new GexCell(v.CallGex, v.PutGex).Gross;
+			if (!grossByExpiryFull.TryGetValue(exp, out var g)) { g = new(); grossByExpiryFull[exp] = g; }
+			g[strike] = gross;
 		}
 
 		var gravity = new Dictionary<DateTime, decimal?>();
 		foreach (var exp in expiries)
 		{
-			if (grossByExpiry.TryGetValue(exp, out var g) && g.Count > 0)
+			if (grossByExpiryFull.TryGetValue(exp, out var g) && g.Count > 0)
 				gravity[exp] = g.OrderByDescending(kv => kv.Value).First().Key;
 			else
 				gravity[exp] = null;

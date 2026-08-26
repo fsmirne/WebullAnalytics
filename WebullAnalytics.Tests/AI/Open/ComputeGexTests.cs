@@ -83,11 +83,14 @@ public class ComputeGexTests
 	}
 
 	/// <summary>Standard-monthly (3rd Friday) SPX expiries fragment OI across two roots: legacy SPX
-	/// (AM-settled) and SPXW (PM-settled). A gravity request for either root on that date must pick up
-	/// both, or it reads a fraction of the real book — reproduces the live 2026-08-25 finding where
-	/// SPXW-only gravity at 2026-10-16 landed on the opposite side of spot from SPY and from SPX-only.</summary>
+	/// (AM-settled) and SPXW (PM-settled). OI/max-pain aggregation merges both, or it reads a fraction of
+	/// the real book. Gravity/NetGexFraction deliberately do NOT merge, even on a monthly: live history
+	/// (2022-2026, 1,196 sessions) shows SPX's legacy OI concentrates in a static block at a round $1000
+	/// strike a median 8.5% from spot — merging it in doesn't recover a fuller reading of SPXW's own
+	/// near-term book, it just replaces that reading with a multi-year-old structural artifact. See
+	/// <see cref="CandidateScorer.ComputeGex"/>.</summary>
 	[Fact]
-	public void GexMergesSpxAndSpxwRootsOnStandardMonthlyExpiry()
+	public void GexStaysScopedToRequestedRootOnStandardMonthlyExpiryButMaxPainMerges()
 	{
 		var monthlyExpiry = new DateTime(2026, 10, 16); // 3rd Friday of October 2026
 		var asOf = new DateTime(2026, 8, 25);
@@ -107,9 +110,11 @@ public class ComputeGexTests
 		var resultForSpxw = CandidateScorer.ComputeGex("SPXW", monthlyExpiry, spot, asOf, quotes);
 		var resultForSpx = CandidateScorer.ComputeGex("SPX", monthlyExpiry, spot, asOf, quotes);
 
-		Assert.Equal(7600m, resultForSpxw.GexGravity);
+		// Each root's gravity reflects only its own book, not the merged pair.
+		Assert.Equal(7700m, resultForSpxw.GexGravity);
 		Assert.Equal(7600m, resultForSpx.GexGravity);
 
+		// Max-pain still merges — that path wasn't the one dominated by the legacy block.
 		var maxPain = CandidateScorer.ComputeMaxPainPrice("SPXW", monthlyExpiry, quotes, spot);
 		Assert.Equal(7600m, maxPain);
 	}

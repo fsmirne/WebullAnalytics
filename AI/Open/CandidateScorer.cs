@@ -257,6 +257,14 @@ internal static class CandidateScorer
 	/// did not match what public sources call the gravity point.
 	/// NetGexFraction = (totalCallGex − totalPutGex) / (totalCallGex + totalPutGex), normalized to [−1, +1];
 	/// positive means call gamma dominates the chain.
+	/// Deliberately does NOT use <see cref="ParsingHelpers.RootsMatchForAggregation"/> — unlike OI/backfill/max-
+	/// pain, this stays scoped to the exact requested root even on a standard-monthly expiry. SPX's legacy
+	/// AM-settled OI concentrates in enormous static blocks at round $1000 strikes (verified across 2022-2026:
+	/// the max-gross-OI strike sits a median 8.5% from spot, sometimes 30%+) that swamp SPXW's own near-term
+	/// book once merged — Gravity stops reflecting current dealer positioning and instead just reports
+	/// whichever round number SPX has accumulated at over the years. Merging it in only occasionally skews
+	/// NetGexFraction (skew >0.30 on ~1.7% of days, never >0.6), but it dominates Gravity on effectively every
+	/// monthly-adjacent day, so both stay SPXW-only here.
 	/// </summary>
 	public static GexResult ComputeGex(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
@@ -272,7 +280,7 @@ internal static class CandidateScorer
 		foreach (var kv in quotes)
 		{
 			var parsed = ParsingHelpers.ParseOptionSymbol(kv.Key);
-			if (parsed == null || !ParsingHelpers.RootsMatchForAggregation(parsed.Root, ticker, expiry) || parsed.ExpiryDate.Date != expiry.Date) continue;
+			if (parsed == null || !string.Equals(parsed.Root, ticker, StringComparison.OrdinalIgnoreCase) || parsed.ExpiryDate.Date != expiry.Date) continue;
 			if (!kv.Value.OpenInterest.HasValue || kv.Value.OpenInterest.Value <= 0 || !kv.Value.ImpliedVolatility.HasValue || kv.Value.ImpliedVolatility.Value <= 0m) continue;
 			var gamma = (double)OptionMath.Gamma(spot, parsed.Strike, timeYears, OptionMath.RiskFreeRate, kv.Value.ImpliedVolatility.Value);
 			var dollars = gamma * (double)kv.Value.OpenInterest.Value * 100.0 * (double)spot;
