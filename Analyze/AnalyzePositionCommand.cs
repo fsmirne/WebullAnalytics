@@ -1071,7 +1071,13 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			  rationale: $"close at mid prices → net ${cash:+0.00;-0.00}/share"));
 		}
 
-		foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
+		// Same fixed-step-vs-listed-grid problem as the complementary-wing search below: a uniform
+		// --strike-step around spot guesses strikes the venue never lists on SPX-family chains. Anchored at
+		// spot itself (not mirrored) — a roll IS meant to move the short toward a fresh near-the-money
+		// strike, unlike the complementary wing which mirrors the held strike's own OTM distance.
+		var rollLadder = StrikeLadder.Build(shortLeg.Parsed.Root, expiry, callPut, quotesForPricing);
+		var candidateRollStrikes = rollLadder.IsEmpty ? BracketStrikes(spot, settings.StrikeStep) : rollLadder.Around(spot, 1);
+		foreach (var newStrike in candidateRollStrikes)
 		{
 			if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
 
@@ -1101,7 +1107,17 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		var width = Math.Abs(longLeg.Parsed.Strike - shortLeg.Parsed.Strike);
 		var oppositeCp = callPut == "C" ? "P" : "C";
-		foreach (var newShortStrike in BracketStrikes(spot, settings.StrikeStep))
+		// Candidate short strikes for the complementary wing, from the LISTED chain rather than a fixed
+		// --strike-step grid: SPX-family strike spacing varies ($5-50 depending on moneyness/expiry), so a
+		// uniform step guesses strikes the venue never lists and every candidate below silently drops at the
+		// HasLiveQuote check. Anchored at the MIRROR of the held short strike across spot, not spot itself —
+		// a held vertical that's already far OTM wants its iron-condor partner the same distance OTM on the
+		// other side, not an at-the-money wing. Falls back to the old spot-anchored step grid when no chain
+		// is available (tests, --theoretical), which also keeps that path's exact prior behavior.
+		var complementLadder = StrikeLadder.Build(shortLeg.Parsed.Root, expiry, oppositeCp, quotesForPricing);
+		var mirrorStrike = 2m * spot - shortLeg.Parsed.Strike;
+		var candidateShortStrikes = complementLadder.IsEmpty ? BracketStrikes(spot, settings.StrikeStep) : complementLadder.Around(mirrorStrike, 1);
+		foreach (var newShortStrike in candidateShortStrikes)
 		{
 			if (!IsComplementaryShortStrike(oppositeCp, newShortStrike, spot)) continue;
 

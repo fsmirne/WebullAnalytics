@@ -1182,7 +1182,14 @@ internal static class CandidateScorer
 				? $", ν {v.ToString("+0.00;-0.00", System.Globalization.CultureInfo.InvariantCulture)}/IV pt"
 				: "";
 			var effect = p.VolatilityAdjustmentFactor.HasValue ? $"vol {p.VolatilityAdjustmentFactor.Value:F2}" : "vol off";
-			indicatorParts.Add($"rep IV {p.ImpliedVolatilityAnnual.Value:P1} / underlying HV {p.HistoricalVolatilityAnnual.Value:P1} = {richness:F2}x{vegaStr} → {effect}");
+			// Built by hand rather than ":P1" — "P" pulls its digit-grouping AND its space-before-%
+			// placement from the current culture (invariant culture itself inserts a space, e.g. "44.1 %"),
+			// so the same build produces different console output depending on the host's locale. Explicit
+			// InvariantCulture on the F1 conversion also keeps the decimal point from turning into a comma
+			// on a comma-decimal locale.
+			var ivStr = (p.ImpliedVolatilityAnnual.Value * 100m).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+			var hvStr = (p.HistoricalVolatilityAnnual.Value * 100m).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+			indicatorParts.Add($"rep IV {ivStr}% / underlying HV {hvStr}% = {richness:F2}x{vegaStr} → {effect}");
 		}
 		if (p.TargetExpiryMaxPain.HasValue)
 			indicatorParts.Add($"max-pain target ${p.TargetExpiryMaxPain.Value:F2}");

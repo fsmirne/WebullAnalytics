@@ -504,22 +504,11 @@ Pulls the Webull cash-record activity ledger — the running-balance feed the pl
 wa sniff
 ```
 
-Launches a browser with remote debugging, navigates to Webull, enters your unlock PIN, and captures the API session headers from the network traffic. The captured headers are written directly into `data/api-config.json`, replacing the existing `headers` object.
-
-**Browser selection:**
-- **Windows**: Microsoft Edge
-- **Linux/macOS**: Microsoft Edge if installed, otherwise Firefox
+Listens on loopback (`127.0.0.1:9223`) for a companion Tampermonkey userscript (`scripts/webull-header-dump.user.js`) running in your already-logged-in Webull tab. Run the script's "Dump Webull headers to wa" command; it POSTs the session headers here, and they're written directly into `data/api-config.json`, replacing the existing `headers` object.
 
 **Requirements:**
-- A supported browser must be installed
-- The browser will be closed if running (prompts for confirmation)
-- The `pin` field must be set in `data/api-config.json`
-
-**Configuration** (in `config.json` under `"sniff"`):
-
-| Field | Description |
-|---|---|
-| `autoCloseBrowser` | If `true`, closes the browser without prompting (default: `false`) |
+- `scripts/webull-header-dump.user.js` installed in Tampermonkey (one-time setup)
+- An already-logged-in Webull tab, with at least one authenticated request made (e.g. open Orders) so the script has an `access_token` to capture
 
 ### Trade Command
 
@@ -1217,9 +1206,6 @@ An optional `data/config.json` file provides default values for command-line opt
     "theoretical": false,
     "levels": null,
     "tickers": null
-  },
-  "sniff": {
-    "autoCloseBrowser": false
   }
 }
 ```

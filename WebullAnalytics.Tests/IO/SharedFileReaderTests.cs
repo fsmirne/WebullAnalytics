@@ -18,6 +18,11 @@ public class SharedFileReaderTests : IDisposable
 	[Fact]
 	public void ReadsWhileWriterHoldsAppendHandle()
 	{
+		// Mandatory deny-write locking is a Windows/NTFS behavior; Linux locking is advisory, so
+		// File.ReadLines never throws there against another process's open handle. The premise this test
+		// documents (and SharedFileReader exists to route around) only holds on the platform prod runs on.
+		Assert.SkipUnless(OperatingSystem.IsWindows(), "mandatory file locking is Windows-only; File.ReadLines doesn't throw against an open writer on Linux");
+
 		using var writer = new StreamWriter(File.Open(_path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
 		writer.WriteLine("line1");
 		writer.WriteLine("line2");
