@@ -512,6 +512,8 @@ creds.txt
 scripts/pvb_campaign.md
 scripts/gex_gravity_range_study.md
 scripts/gravity_range_daily.csv
+scripts/gex_wall_barrier_study.md
+scripts/gex_wall_barrier_daily.csv
 scripts/quote_coverage_gaps_2022_2026.md
 CAMPAIGN_STATE.md
 clipboard.png
