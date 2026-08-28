@@ -2053,6 +2053,12 @@ internal sealed class GexMatrix
 	public List<DateTime> Expiries { get; }
 	public List<decimal> Strikes { get; }
 	public Dictionary<(DateTime Expiry, decimal Strike), GexCell> Cells { get; }
+	/// <summary>Same per-strike gamma cells as <see cref="Cells"/>, but bounded only by --strike-range ×
+	/// kept-expiries — NOT the --max-strikes display cap. <see cref="FindWalls"/> reads from here for the
+	/// same reason Gravity/Centroid/NetPull/Contributors do (see the comment above their construction
+	/// below): a wall is an argmax, so a strike cap can silently swap in a lesser local max the moment the
+	/// true wall falls outside the row window — the exact class of bug already fixed for Gravity.</summary>
+	public Dictionary<(DateTime Expiry, decimal Strike), GexCell> FullCells { get; }
 	public decimal MaxGross { get; }
 	public decimal MaxAbsNet { get; }
 	public decimal TotalCallGex { get; }
@@ -2075,11 +2081,12 @@ internal sealed class GexMatrix
 	/// <see cref="CandidateScorer.ComputeGex"/> stopped.</summary>
 	public IReadOnlyList<GexContributor> MaxPainContributors { get; }
 
-	private GexMatrix(List<DateTime> expiries, List<decimal> strikes, Dictionary<(DateTime, decimal), GexCell> cells, decimal maxGross, decimal maxAbsNet, decimal totalCallGex, decimal totalPutGex, Dictionary<DateTime, decimal?> gravityByExpiry, Dictionary<DateTime, decimal?> grossCentroidByExpiry, Dictionary<DateTime, decimal?> netPullByExpiry, IReadOnlyList<GexContributor> contributors, IReadOnlyList<GexContributor> maxPainContributors)
+	private GexMatrix(List<DateTime> expiries, List<decimal> strikes, Dictionary<(DateTime, decimal), GexCell> cells, Dictionary<(DateTime, decimal), GexCell> fullCells, decimal maxGross, decimal maxAbsNet, decimal totalCallGex, decimal totalPutGex, Dictionary<DateTime, decimal?> gravityByExpiry, Dictionary<DateTime, decimal?> grossCentroidByExpiry, Dictionary<DateTime, decimal?> netPullByExpiry, IReadOnlyList<GexContributor> contributors, IReadOnlyList<GexContributor> maxPainContributors)
 	{
 		Expiries = expiries;
 		Strikes = strikes;
 		Cells = cells;
+		FullCells = fullCells;
 		MaxGross = maxGross;
 		MaxAbsNet = maxAbsNet;
 		TotalCallGex = totalCallGex;
@@ -2177,14 +2184,16 @@ internal sealed class GexMatrix
 
 	/// <summary>
 	/// Returns (callWall, putWall) for <paramref name="expiry"/>: the strikes carrying the largest CallGex
-	/// and PutGex within that expiry's row of the heatmap. Walls are sourced from the displayed cell set
-	/// (so they reflect the same window as the per-expiry gravity marker), not from the wider analytic set.
+	/// and PutGex within that expiry's row of the heatmap. Sourced from <see cref="FullCells"/> — every
+	/// strike in range, not the --max-strikes-capped <see cref="Cells"/> the display table draws from — so
+	/// a wall outside the row window can't be silently replaced by a lesser in-window local max (the same
+	/// bug already fixed for Gravity).
 	/// </summary>
 	public (decimal? CallWall, decimal? PutWall) FindWalls(DateTime expiry)
 	{
 		decimal? bestCall = null, bestPut = null;
 		decimal bestCallGex = 0m, bestPutGex = 0m;
-		foreach (var ((exp, strike), cell) in Cells)
+		foreach (var ((exp, strike), cell) in FullCells)
 		{
 			if (exp != expiry.Date) continue;
 			if (cell.CallGex > bestCallGex) { bestCallGex = cell.CallGex; bestCall = strike; }
@@ -2396,12 +2405,14 @@ internal sealed class GexMatrix
 		// falls outside the row cap — exactly what happened live on a thin book (XSP), where the real gravity
 		// strike sat outside the default 50-strike window and got silently replaced by a within-cap local max.
 		var grossByExpiryFull = new Dictionary<DateTime, Dictionary<decimal, decimal>>();
+		var fullCells = new Dictionary<(DateTime, decimal), GexCell>();
 		foreach (var ((exp, strike), v) in raw)
 		{
 			if (!keptExpirySet.Contains(exp)) continue;
-			var gross = new GexCell(v.CallGex, v.PutGex).Gross;
+			var cell = new GexCell(v.CallGex, v.PutGex);
+			fullCells[(exp, strike)] = cell;
 			if (!grossByExpiryFull.TryGetValue(exp, out var g)) { g = new(); grossByExpiryFull[exp] = g; }
-			g[strike] = gross;
+			g[strike] = cell.Gross;
 		}
 
 		var gravity = new Dictionary<DateTime, decimal?>();
@@ -2453,6 +2464,6 @@ internal sealed class GexMatrix
 			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall))
 			.ToList();
 
-		return new GexMatrix(expiries, strikes, cells, maxGross, maxAbsNet, totalCall, totalPut, gravity, centroid, netPull, contributors, maxPainContributors);
+		return new GexMatrix(expiries, strikes, cells, fullCells, maxGross, maxAbsNet, totalCall, totalPut, gravity, centroid, netPull, contributors, maxPainContributors);
 	}
 }
