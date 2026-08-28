@@ -149,14 +149,15 @@ fi
 # requests must have a start time less than current time") show intraday same-day minute requests
 # aren't reliable. On a Mon morning this resolves to Sun and the pull simply ends at the prior Fri.
 # Override with --end / BACKFILL_END=YYYY-MM-DD.
-read -r ET_TODAY ET_HOUR < <(TZ=America/New_York date '+%F %H')
-ET_YESTERDAY=$(date -d "$ET_TODAY - 1 day" +%F)
+# Resolved FRESH at each step's own invocation (see resolve_end/resolve_end_oi below), not once up
+# front: history/quotes/ohlcv can run for hours, so a run started at 08:50 ET reaching the oi step at
+# 10:15 ET must see 10:15's gate, not 08:50's — a stale snapshot silently pulled OI two days behind.
 [ -n "$CLI_END" ] && BACKFILL_END="$CLI_END"
-if [ -z "${BACKFILL_END:-}" ] && [ "$ET_HOUR" -ge 19 ]; then
-  END="$ET_TODAY"
-else
-  END="${BACKFILL_END:-$ET_YESTERDAY}"
-fi
+resolve_end() {
+  if [ -n "${BACKFILL_END:-}" ]; then echo "$BACKFILL_END"; return; fi
+  read -r now_today now_hour < <(TZ=America/New_York date '+%F %H')
+  if [ "$now_hour" -ge 19 ]; then echo "$now_today"; else date -d "$now_today - 1 day" +%F; fi
+}
 
 # Historical backfill floor for the quotes + OI pulls. Unset => backfill_thetadata.py's own default
 # (2025-01-01), i.e. the daily frontier only — normal daily runs are unchanged. Set --start (or
@@ -185,20 +186,20 @@ step() {  # "label" command args...
 # safe to pull once that ET morning has passed (>= 09:00 ET); before that (e.g. a post-midnight-ET
 # run) stop one day earlier — pulling it too soon would seal pre-publication OI. A session's OI
 # lands on the run after its publication; quotes still capture ET-today on evening runs.
-if [ "$ET_HOUR" -ge 9 ]; then
-  END_OI="${BACKFILL_END:-$ET_YESTERDAY}"
-else
-  END_OI="${BACKFILL_END:-$(date -d "$ET_TODAY - 2 days" +%F)}"
-fi
+resolve_end_oi() {
+  if [ -n "${BACKFILL_END:-}" ]; then echo "$BACKFILL_END"; return; fi
+  read -r now_today now_hour < <(TZ=America/New_York date '+%F %H')
+  if [ "$now_hour" -ge 9 ]; then date -d "$now_today - 1 day" +%F; else date -d "$now_today - 2 days" +%F; fi
+}
 
-echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes+ohlcv ${START_VALUE:+from $START_VALUE }through $END, oi through $END_OI, verify ==="
+echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes+ohlcv ${START_VALUE:+from $START_VALUE }through $(resolve_end) (as of now; re-resolved per step), oi through $(resolve_end_oi) (as of now; re-resolved per step), verify ==="
 
 for t in $HISTORY_TICKERS; do
   step "(1/5) ai history $t"                        "$WA" ai history "$t"
 done
-has_step quotes && step "(2/5) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step ohlcv  && step "(3/5) minute trade OHLCV -> data/quotes.db"  "$PY" "$SCRIPT" --ohlcv  --tickers $TICKERS --end "$END"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step oi     && step "(4/5) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $OI_TICKERS --end "$END_OI" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step quotes && step "(2/5) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$(resolve_end)"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step ohlcv  && step "(3/5) minute trade OHLCV -> data/quotes.db"  "$PY" "$SCRIPT" --ohlcv  --tickers $TICKERS --end "$(resolve_end)"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step oi     && step "(4/5) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $OI_TICKERS --end "$(resolve_end_oi)" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
 has_step verify && step "(5/5) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root "${VERIFY// /,}" --verify
 
 if [ "$rc" -eq 0 ]; then

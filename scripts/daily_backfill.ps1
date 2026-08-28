@@ -143,22 +143,30 @@ else { $WA = "wa" }
 # --- Date window, judged on the ET clock (the trading calendar) — local time is irrelevant, so runs from ----
 # any timezone behave identically. ThetaData finalizes a session ~17:15 ET, so past 19:00 ET the pull may
 # include ET-today; earlier it stops at ET-yesterday. -End / BACKFILL_END overrides. (Mirrors daily_backfill.sh.)
+# Resolved FRESH at each step's own invocation, not once up front: history/quotes/ohlcv can run for hours,
+# so a run started at 08:50 ET reaching the oi step at 10:15 ET must see 10:15's gate, not 08:50's — a stale
+# snapshot silently pulled OI two days behind (08-26 instead of 08-27 on a run that crossed 09:00 ET mid-flight).
 $EtTz = [System.TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time')
-$EtNow = [System.TimeZoneInfo]::ConvertTime([DateTime]::UtcNow, $EtTz)
+function Get-EtNow { [System.TimeZoneInfo]::ConvertTime([DateTime]::UtcNow, $EtTz) }
 $EndOverride = $End                                          # -End takes precedence over BACKFILL_END,
 if (-not $EndOverride) { $EndOverride = $env:BACKFILL_END }  # and (like the .sh) caps the OI window too
-if ($EndOverride) { $End = $EndOverride }
-elseif ($EtNow.Hour -ge 19) { $End = $EtNow.ToString('yyyy-MM-dd') }
-else { $End = $EtNow.AddDays(-1).ToString('yyyy-MM-dd') }
+
+function Resolve-End {
+	if ($EndOverride) { return $EndOverride }
+	$now = Get-EtNow
+	if ($now.Hour -ge 19) { return $now.ToString('yyyy-MM-dd') }
+	else { return $now.AddDays(-1).ToString('yyyy-MM-dd') }
+}
 
 # OI lags one session behind the evening gate: OCC publishes a session's open interest the NEXT morning (ET),
 # and ThetaData's wildcard-expiration EOD/OI requests reject the current day outright. ET-yesterday's OI is
 # only safe once that ET morning has passed (>= 09:00 ET); before that (e.g. a post-midnight-ET run) stop one
 # day earlier — pulling it too soon would seal pre-publication OI.
-$EndOi = $EndOverride
-if (-not $EndOi) {
-	if ($EtNow.Hour -ge 9) { $EndOi = $EtNow.AddDays(-1).ToString('yyyy-MM-dd') }
-	else { $EndOi = $EtNow.AddDays(-2).ToString('yyyy-MM-dd') }
+function Resolve-EndOi {
+	if ($EndOverride) { return $EndOverride }
+	$now = Get-EtNow
+	if ($now.Hour -ge 9) { return $now.AddDays(-1).ToString('yyyy-MM-dd') }
+	else { return $now.AddDays(-2).ToString('yyyy-MM-dd') }
 }
 
 # Historical backfill floor (-Start / BACKFILL_START). Unset => backfill_thetadata.py's own default.
@@ -182,24 +190,24 @@ function Invoke-Step {
 }
 
 $startNote = if ($StartValue) { "from $StartValue " } else { "" }
-Write-Host "[$(Get-Ts)] === daily data update: ai history ($($HistoryList -join ' ')), quotes+ohlcv ${startNote}through $End, oi through $EndOi, verify ==="
+Write-Host "[$(Get-Ts)] === daily data update: ai history ($($HistoryList -join ' ')), quotes+ohlcv ${startNote}through $(Resolve-End) (as of now; re-resolved per step), oi through $(Resolve-EndOi) (as of now; re-resolved per step), verify ==="
 
 foreach ($t in $HistoryList) {
 	Invoke-Step "(1/5) ai history $t" $WA @('ai','history',$t)
 }
 
 if (Has-Step 'quotes') {
-	$quotesArgs = @($Script,'--quotes','--tickers') + $Tickers + @('--end',$End) + $StartOpt + @('--concurrency',"$Conc")
+	$quotesArgs = @($Script,'--quotes','--tickers') + $Tickers + @('--end',(Resolve-End)) + $StartOpt + @('--concurrency',"$Conc")
 	Invoke-Step "(2/5) minute-NBBO quotes -> data/quotes.db" $PY $quotesArgs
 }
 
 if (Has-Step 'ohlcv') {
-	$ohlcvArgs = @($Script,'--ohlcv','--tickers') + $Tickers + @('--end',$End) + $StartOpt + @('--concurrency',"$Conc")
+	$ohlcvArgs = @($Script,'--ohlcv','--tickers') + $Tickers + @('--end',(Resolve-End)) + $StartOpt + @('--concurrency',"$Conc")
 	Invoke-Step "(3/5) minute trade OHLCV -> data/quotes.db" $PY $ohlcvArgs
 }
 
 if (Has-Step 'oi') {
-	$oiArgs = @($Script,'--run','--tickers') + $OiTickers + @('--end',$EndOi) + $StartOpt + @('--concurrency',"$Conc")
+	$oiArgs = @($Script,'--run','--tickers') + $OiTickers + @('--end',(Resolve-EndOi)) + $StartOpt + @('--concurrency',"$Conc")
 	Invoke-Step "(4/5) EOD open interest -> data/oi" $PY $oiArgs
 }
 
