@@ -802,6 +802,10 @@ internal sealed class OpenerRealizedExpectancyConfig
 	/// <summary>Stop-loss as a fraction of theoretical max loss. Populated from rules.stopLoss.pctOfMaxLoss.</summary>
 	[JsonIgnore] public decimal StopLossPctOfMaxLoss { get; set; } = 0.50m;
 
+	/// <summary>Independent stop-loss as a fraction of theoretical max profit. Populated from
+	/// rules.stopLoss.pctOfMaxProfit. 0 disables (default).</summary>
+	[JsonIgnore] public decimal StopLossPctOfMaxProfit { get; set; } = 0m;
+
 	/// <summary>Per-share friction per broker order (×RoundTrips for exit). Populated from execution.slippagePerSharePerOrder.</summary>
 	[JsonIgnore] public decimal SlippagePerSharePerOrder { get; set; } = 0m;
 

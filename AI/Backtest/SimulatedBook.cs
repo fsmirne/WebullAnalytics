@@ -168,7 +168,8 @@ internal sealed class SimulatedBook
 			AdjustedNetDebit: initialDebitPerShare,
 			Quantity: qty,
 			OpenedAt: date,
-			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebitPerShare, positionLegs));
+			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebitPerShare, positionLegs),
+			MaxProfitPerShare: PositionRiskEstimator.MaxProfitPerShare(initialDebitPerShare, positionLegs));
 		_initialDebitPerContract[key] = initialDebitPerShare;
 		_adjustedDebitPerContract[key] = initialDebitPerShare;
 		var lineageId = _nextLineageId++;
@@ -208,6 +209,7 @@ internal sealed class SimulatedBook
 			AdjustedNetDebit = adjustedDebit,
 			Quantity = totalQty,
 			MaxLossPerShare = PositionRiskEstimator.MaxLossPerShare(initialDebit, mergedLegs),
+			MaxProfitPerShare = PositionRiskEstimator.MaxProfitPerShare(initialDebit, mergedLegs),
 		};
 		_initialDebitPerContract[key] = initialDebit;
 		_adjustedDebitPerContract[key] = adjustedDebit;
@@ -305,7 +307,8 @@ internal sealed class SimulatedBook
 			AdjustedNetDebit: adjustedDebit,
 			Quantity: oldPos.Quantity,
 			OpenedAt: oldPos.OpenedAt,
-			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, newLegs));
+			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, newLegs),
+			MaxProfitPerShare: PositionRiskEstimator.MaxProfitPerShare(initialDebit, newLegs));
 		_initialDebitPerContract[newKey] = initialDebit;
 		_adjustedDebitPerContract[newKey] = adjustedDebit;
 		_lineageByKey[newKey] = lineageId;
@@ -371,7 +374,8 @@ internal sealed class SimulatedBook
 			AdjustedNetDebit: adjustedDebit,
 			Quantity: oldPos.Quantity,
 			OpenedAt: oldPos.OpenedAt,
-			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, mergedLegs));
+			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, mergedLegs),
+			MaxProfitPerShare: PositionRiskEstimator.MaxProfitPerShare(initialDebit, mergedLegs));
 		_initialDebitPerContract[newKey] = initialDebit;
 		_adjustedDebitPerContract[newKey] = adjustedDebit;
 		_lineageByKey[newKey] = lineageId;
@@ -472,7 +476,8 @@ internal sealed class SimulatedBook
 			AdjustedNetDebit: adjustedDebit,
 			Quantity: pos.Quantity,
 			OpenedAt: pos.OpenedAt,
-			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, survivingLegs));
+			MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, survivingLegs),
+			MaxProfitPerShare: PositionRiskEstimator.MaxProfitPerShare(initialDebit, survivingLegs));
 		_initialDebitPerContract[newKey] = initialDebit;
 		_adjustedDebitPerContract[newKey] = adjustedDebit;
 		_lineageByKey[newKey] = lineageId;

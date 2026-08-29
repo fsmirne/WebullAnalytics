@@ -211,6 +211,7 @@ internal static class ProposalLog
 internal sealed class RulesConfig
 {
 	[JsonPropertyName("stopLoss")] public StopLossConfig StopLoss { get; set; } = new();
+	[JsonPropertyName("timeStop")] public TimeStopConfig TimeStop { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("opportunisticRoll")] public OpportunisticRollConfig OpportunisticRoll { get; set; } = new();
 	[JsonPropertyName("takeProfit")] public TakeProfitConfig TakeProfit { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("defensiveRoll")] public DefensiveRollConfig DefensiveRoll { get; set; } = new() { Enabled = false };
@@ -321,6 +322,14 @@ internal sealed class StopLossConfig
 	/// tracks the EV the opener ranked. 1.0 disables the stop (= let it ride to the max-loss floor). Default
 	/// 0.50 ≈ the "2× credit" rule on typical 4×-width credit spreads.</summary>
 	[JsonPropertyName("pctOfMaxLoss")] public decimal PctOfMaxLoss { get; set; } = 0.50m;
+	/// <summary>Independent stop-loss trigger: close when realized loss reaches this fraction of the
+	/// position's theoretical MAX PROFIT (not max loss) — e.g. 1.0 gives back exactly what you could
+	/// have made (sell a vertical for $500 max profit, stop at -$500). Fires whichever of this and
+	/// <see cref="PctOfMaxLoss"/> is reached first; the two are independent and both may be armed at
+	/// once. 0 disables (default) — undefined for structures with no strike-width profit ceiling
+	/// (calendars/diagonals; see <see cref="PositionRiskEstimator.MaxProfitPerShare(OpenPosition)"/>),
+	/// where it silently never fires.</summary>
+	[JsonPropertyName("pctOfMaxProfit")] public decimal PctOfMaxProfit { get; set; } = 0m;
 	/// <summary>Theta-exhaustion close for cross-expiry structures (calendars / diagonals / doubles): when
 	/// > 0 and the position is underwater, close once EVERY short leg expiring before the longest long has
 	/// decayed to a mid ≤ this per-share floor, with at least 1 day left to short expiry (expiry day itself
@@ -329,6 +338,19 @@ internal sealed class StopLossConfig
 	/// Deliberately independent of <c>enabled</c> and <c>pctOfMaxLoss</c>, which gate the realized-loss stop
 	/// and feed the opener's scorer EV — arming this knob must not change opener rankings. 0 disables (default).</summary>
 	[JsonPropertyName("thetaExhaustShortMid")] public decimal ThetaExhaustShortMid { get; set; } = 0m;
+}
+
+/// <summary>Force-close a position, regardless of P&L, once elapsed calendar days since open reach
+/// this fraction of its original DTE (days from open to its furthest leg's expiry) — "don't let a
+/// structure ride out its full theta-decay window; take the capital back once its useful life is
+/// half-consumed." E.g. 0.5 on a 50-DTE vertical force-closes 25 elapsed days after open. Independent
+/// of StopLoss/TakeProfit — see <see cref="WebullAnalytics.AI.Rules.TimeStopRule"/>.</summary>
+internal sealed class TimeStopConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>Fraction of original DTE elapsed that triggers the close. 0.5 = half the position's
+	/// life. Must be > 0 for the rule to arm (checked alongside <see cref="Enabled"/>).</summary>
+	[JsonPropertyName("lifeFractionElapsed")] public decimal LifeFractionElapsed { get; set; } = 0.50m;
 }
 
 internal sealed class TakeProfitConfig
@@ -459,6 +481,7 @@ internal static class AIConfigLoader
 		var ev = config.Opener.RealizedExpectancy;
 		ev.Enabled = config.Opener.RealizedEvScoring;
 		ev.StopLossPctOfMaxLoss = config.Rules.StopLoss.PctOfMaxLoss;
+		ev.StopLossPctOfMaxProfit = config.Rules.StopLoss.PctOfMaxProfit;
 		ev.SlippagePerSharePerOrder = config.Execution.SlippagePerSharePerOrder;
 		ev.RoundTrips = config.Execution.RoundTrips;
 	}

@@ -51,6 +51,10 @@ internal sealed record EvaluationContext(
 /// credit structures, net debit for debit structures. Used by StopLossRule (and others) to fire at the
 /// same threshold the opener's scorer assumed. Null when the source can't derive it (e.g., naked single
 /// leg). Always non-negative when set.</param>
+/// <param name="MaxProfitPerShare">Best-case profit per share at expiry — the credit collected for
+/// credit structures, wing width minus net debit for a defined-risk debit spread. Used by StopLossRule's
+/// max-profit-based stop. Null when the source can't derive it (calendars/diagonals have no strike-width
+/// profit ceiling; naked single legs have none either). Always non-negative when set.</param>
 /// <param name="PositionId">Broker-assigned position identifier (Webull holdings position_id). Only set
 /// by LivePositionSource; null for replay/backtest sources. Lets `wa trade close` target one position.</param>
 internal sealed record OpenPosition(
@@ -63,6 +67,7 @@ internal sealed record OpenPosition(
 	int Quantity,
 	DateTime? OpenedAt = null,
 	decimal? MaxLossPerShare = null,
+	decimal? MaxProfitPerShare = null,
 	string? PositionId = null
 );
 

@@ -28,6 +28,26 @@ internal static class PositionRiskEstimator
 	public static decimal? MaxLossPerShare(OpenPosition position) =>
 		MaxLossPerShare(position.InitialNetDebit, position.Legs);
 
+	/// <summary>Best-case profit-per-share at expiry, mirroring <see cref="MaxLossPerShare"/>. For
+	/// credit-receiving structures, max profit = the credit collected (every leg expires worthless) —
+	/// always computable. For debit-paying structures, max profit = wing width minus the debit paid,
+	/// which only means something for a same-expiry defined-risk spread (a long vertical); calendars/
+	/// diagonals have no strike-width ceiling on profit, so <see cref="MaxWingWidth"/> returns null
+	/// there and so does this.</summary>
+	public static decimal? MaxProfitPerShare(decimal initialNetDebit, IReadOnlyList<PositionLeg> legs)
+	{
+		if (legs.Count == 0) return null;
+
+		if (initialNetDebit <= 0m) return -initialNetDebit;
+
+		var wingWidth = MaxWingWidth(legs);
+		if (!wingWidth.HasValue || wingWidth.Value <= 0m) return null;
+		return Math.Max(0m, wingWidth.Value - initialNetDebit);
+	}
+
+	public static decimal? MaxProfitPerShare(OpenPosition position) =>
+		MaxProfitPerShare(position.InitialNetDebit, position.Legs);
+
 	private static decimal? MaxWingWidth(IReadOnlyList<PositionLeg> legs)
 	{
 		decimal? best = null;

@@ -514,6 +514,7 @@ scripts/gex_gravity_range_study.md
 scripts/gravity_range_daily.csv
 scripts/gex_wall_barrier_study.md
 scripts/gex_wall_barrier_daily.csv
+scripts/timestop_maxprofit_sl_study.md
 scripts/quote_coverage_gaps_2022_2026.md
 CAMPAIGN_STATE.md
 clipboard.png

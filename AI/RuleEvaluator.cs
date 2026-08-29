@@ -130,6 +130,9 @@ internal sealed class RuleEvaluator
 		return new IManagementRule[]
 		{
 			new StopLossRule(config.Rules.StopLoss, config.Opener.RealizedExpectancy),
+			// TimeStop (priority 1, ties with StopLoss) — a time-budget exit, not P&L-driven, so it
+			// belongs at the same top tier rather than gated behind the roll/take-profit rules below.
+			new TimeStopRule(config.Rules.TimeStop),
 			// CloseBeforeShortExpiry runs ahead of OpportunisticRoll/RollShortOnExpiry so a position
 			// scheduled for unwind on expiry day takes the close path instead of getting rolled forward.
 			new CloseBeforeShortExpiryRule(config.Rules.CloseBeforeShortExpiry, expiryRegimes),

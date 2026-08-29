@@ -715,6 +715,28 @@ internal sealed class BacktestRunner
 	/// closes from the position's open time (or 09:30 ET for carry-over positions) to 16:00 ET,
 	/// price the chain at each minute's spot with a remaining-session TTE, and fire on the first
 	/// real crossing. Closes at that minute's mark — no bisection needed.</summary>
+	/// <summary>Combined SL mark-level threshold (mark at or below this fires): the tighter — i.e.
+	/// fires-soonest as mark declines — of the independent max-loss-based and max-profit-based
+	/// triggers, whichever are armed. Null when neither is armed. Both share the same shape: threshold
+	/// mark = AdjustedNetDebit − pct × maxX; a HIGHER mark threshold requires less of a decline to
+	/// reach, so it fires first — hence Math.Max over whichever candidates exist.</summary>
+	private decimal? ComputeSlTarget(OpenPosition pos, OpenerRealizedExpectancyConfig realizedExpectancy)
+	{
+		if (!_config.Rules.StopLoss.Enabled) return null;
+
+		decimal? fromMaxLoss = null;
+		if (pos.MaxLossPerShare.HasValue && pos.MaxLossPerShare.Value > 0m && realizedExpectancy.StopLossPctOfMaxLoss < 1m)
+			fromMaxLoss = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxLoss * pos.MaxLossPerShare.Value;
+
+		decimal? fromMaxProfit = null;
+		if (pos.MaxProfitPerShare.HasValue && pos.MaxProfitPerShare.Value > 0m && realizedExpectancy.StopLossPctOfMaxProfit > 0m)
+			fromMaxProfit = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxProfit * pos.MaxProfitPerShare.Value;
+
+		if (!fromMaxLoss.HasValue) return fromMaxProfit;
+		if (!fromMaxProfit.HasValue) return fromMaxLoss;
+		return Math.Max(fromMaxLoss.Value, fromMaxProfit.Value);
+	}
+
 	private async Task<bool> TryMinuteWalkTriggerAsync(DateTime step, OpenPosition pos, decimal cash, decimal accountValue, OpenerRealizedExpectancyConfig realizedExpectancy, CancellationToken cancellation)
 	{
 		var symbols = pos.Legs
@@ -744,10 +766,7 @@ internal sealed class BacktestRunner
 		if (minuteBars.Count == 0) return false;
 
 		// SL threshold (mark at or below this fires SL). Matches legacy logic exactly.
-		decimal? slTarget = null;
-		if (_config.Rules.StopLoss.Enabled && pos.MaxLossPerShare.HasValue && pos.MaxLossPerShare.Value > 0m
-			&& realizedExpectancy.StopLossPctOfMaxLoss < 1m)
-			slTarget = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxLoss * pos.MaxLossPerShare.Value;
+		decimal? slTarget = ComputeSlTarget(pos, realizedExpectancy);
 
 		// Intraday take-profit was Target-B only (% of max projected profit); removed. Target A (% of debit)
 		// is evaluated at start-of-day in the main rule loop, so 0DTE positions still get it there.
@@ -1033,10 +1052,7 @@ internal sealed class BacktestRunner
 		// and the BS-priced mark of a deep-OTM 0DTE leg can round to exactly 0, firing SL the same
 		// morning the position opens and foreclosing intraday recovery. Letting it run hits the same
 		// economic outcome via expiration if the day actually ends at the floor.
-		decimal? slTarget = null;
-		if (_config.Rules.StopLoss.Enabled && pos.MaxLossPerShare.HasValue && pos.MaxLossPerShare.Value > 0m
-			&& realizedExpectancy.StopLossPctOfMaxLoss < 1m)
-			slTarget = pos.AdjustedNetDebit - realizedExpectancy.StopLossPctOfMaxLoss * pos.MaxLossPerShare.Value;
+		decimal? slTarget = ComputeSlTarget(pos, realizedExpectancy);
 
 		// Intraday take-profit was Target-B only; removed (Target A fires at start-of-day in the main loop).
 

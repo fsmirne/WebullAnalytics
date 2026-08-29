@@ -132,6 +132,7 @@ internal sealed class LivePositionSource : IPositionSource
 				Quantity: qty,
 				OpenedAt: openedAt,
 				MaxLossPerShare: PositionRiskEstimator.MaxLossPerShare(initialDebit, positionLegs),
+				MaxProfitPerShare: PositionRiskEstimator.MaxProfitPerShare(initialDebit, positionLegs),
 				PositionId: h.PositionId
 			);
 		}

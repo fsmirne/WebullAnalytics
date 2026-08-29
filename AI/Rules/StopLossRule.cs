@@ -2,14 +2,18 @@ namespace WebullAnalytics.AI.Rules;
 
 /// <summary>
 /// Priority 1: close the position when realized loss reaches a configured fraction of the position's
-/// max possible loss, or — independently, via <c>thetaExhaustShortMid</c> — when an underwater
-/// cross-expiry structure's short legs have decayed to pennies (theta capture exhausted; see
-/// <see cref="EvaluateThetaExhaust"/>).
+/// max possible loss, or — independently, via <c>pctOfMaxProfit</c> — a fraction of its max possible
+/// PROFIT (e.g. 1.0 gives back exactly what it could have made), or — independently again, via
+/// <c>thetaExhaustShortMid</c> — when an underwater cross-expiry structure's short legs have decayed
+/// to pennies (theta capture exhausted; see <see cref="EvaluateThetaExhaust"/>). Whichever trigger's
+/// threshold is reached first fires; each is armed and priced independently.
 ///
-/// The P&L trigger mirrors the candidate scorer's terminal-PnL stop (<c>stopLossPctOfMaxLoss</c> on
-/// <see cref="OpenerRealizedExpectancyConfig"/>) so realized exits track the EV the opener ranked
-/// the trade against. <c>MaxLossPerShare</c> is read from the position (set at open time by the
-/// source) or, when missing, derived on the fly from leg geometry via
+/// The max-loss trigger mirrors the candidate scorer's terminal-PnL stop (<c>stopLossPctOfMaxLoss</c>
+/// on <see cref="OpenerRealizedExpectancyConfig"/>) so realized exits track the EV the opener ranked
+/// the trade against; the max-profit trigger (<c>stopLossPctOfMaxProfit</c>) is not yet mirrored in
+/// the scorer's EV grid — it only affects realized exits, not open-time candidate ranking.
+/// <c>MaxLossPerShare</c> / <c>MaxProfitPerShare</c> are read from the position (set at open time by
+/// the source) or, when missing, derived on the fly from leg geometry via
 /// <see cref="PositionRiskEstimator"/>.
 ///
 /// Historical context: this rule used to gate on <c>currentDebit ≥ initialDebit × multiplier</c>,
@@ -59,6 +63,23 @@ internal sealed class StopLossRule : IManagementRule
 			{
 				return BuildClose(position, ctx, markPerShare.Value,
 					$"realized loss ${realizedLoss:F2}/share ≥ {_realizedExpectancy.StopLossPctOfMaxLoss:P0} of max loss ${maxLossPerShare.Value:F2}");
+			}
+		}
+
+		// Independent of the max-loss trigger above: close once realized loss reaches a fraction of
+		// theoretical MAX PROFIT instead (e.g. 1.0 = give back exactly what the position could have
+		// made). 0 (default) disables. Undefined for structures with no strike-width profit ceiling
+		// (calendars/diagonals) — MaxProfitPerShare returns null there, so this silently never fires.
+		var maxProfitPerShare = position.MaxProfitPerShare
+			?? PositionRiskEstimator.MaxProfitPerShare(position);
+		if (_config.Enabled && maxProfitPerShare.HasValue && maxProfitPerShare.Value > 0m && _realizedExpectancy.Enabled
+			&& _realizedExpectancy.StopLossPctOfMaxProfit > 0m)
+		{
+			var threshold = maxProfitPerShare.Value * _realizedExpectancy.StopLossPctOfMaxProfit;
+			if (realizedLoss >= threshold)
+			{
+				return BuildClose(position, ctx, markPerShare.Value,
+					$"realized loss ${realizedLoss:F2}/share ≥ {_realizedExpectancy.StopLossPctOfMaxProfit:P0} of max profit ${maxProfitPerShare.Value:F2}");
 			}
 		}
 
