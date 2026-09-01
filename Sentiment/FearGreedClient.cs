@@ -45,8 +45,12 @@ internal static class FearGreedClient
 	/// When <paramref name="cacheOnly"/> is true, the network branch is skipped — returns the cached
 	/// value if present, otherwise null. Used by the backtest path so a replay never hits CNN (the
 	/// endpoint's current-day reading would otherwise leak as-of-now data into historical decisions)
-	/// while still picking up T+1 caches once they exist for the asOf date.</summary>
-	public static async Task<SentimentSnapshot?> FetchAsync(DateTime asOf, CancellationToken cancellation, bool cacheOnly = false)
+	/// while still picking up T+1 caches once they exist for the asOf date.
+	/// <paramref name="forceRefresh"/> skips the cache read and always hits the network, overwriting
+	/// the cache file with whatever comes back — CNN keeps revising a settled score for roughly two
+	/// weeks after first publish (confirmed empirically 2026-09-01: same-day captures were off by
+	/// ~2 points, decaying to ~0 by three weeks out), so "settled" does not mean "final".</summary>
+	public static async Task<SentimentSnapshot?> FetchAsync(DateTime asOf, CancellationToken cancellation, bool cacheOnly = false, bool forceRefresh = false)
 	{
 		// Backtest replay (cacheOnly): today's F&G isn't published until the 5pm settle, so reading day D's
 		// cached EOD score to make an intraday decision on D is look-ahead. The value actually knowable during
@@ -58,7 +62,7 @@ internal static class FearGreedClient
 		var cachePath = Program.ResolvePath(Path.Combine(CacheDir, $"{dateStr}.json"));
 		var settled = IsSettled(lookup, DateTime.UtcNow);
 
-		if (settled && File.Exists(cachePath))
+		if (settled && File.Exists(cachePath) && !forceRefresh)
 		{
 			try
 			{

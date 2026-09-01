@@ -342,6 +342,58 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/], [yellow]skipped {skipped}[/] (not yet settled or CNN unreachable)");
 		else
 			AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/] day(s)");
+
+		await RevalidateRecentSentimentAsync(todayNy, cancellation);
+	}
+
+	// CNN keeps revising a settled Fear & Greed score for a few weeks after first publish — confirmed
+	// empirically 2026-09-01 by re-querying CNN's own historical array: dates cached 3-5 days earlier were
+	// off by ~2 points (one rating flip, greed->neutral), and dates 18-21 days old still showed ~0.6-1 point
+	// residual drift in that single sample, only settling exactly by ~2-3 weeks in the cleanest cases.
+	// `FearGreedClient.FetchAsync`'s settled-cache-is-forever assumption only holds once a date ages out of
+	// this window, so re-fetch and overwrite recent settled days here instead of trusting first capture as
+	// final. 30 days gives margin over the observed 18-21 day residual rather than cutting it close.
+	private const int SentimentRevisionWindowDays = 30;
+
+	private static async Task RevalidateRecentSentimentAsync(DateTime todayNy, CancellationToken cancellation)
+	{
+		var cacheDir = Program.ResolvePath("data/sentiment-cache");
+		var windowStart = todayNy.AddDays(-SentimentRevisionWindowDays);
+
+		var candidates = new List<DateTime>();
+		for (var d = windowStart; d < todayNy; d = d.AddDays(1))
+		{
+			if (!MarketCalendar.IsOpen(d)) continue;
+			if (KnownSentimentSourceGaps.Contains(d)) continue;
+			if (!File.Exists(Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json"))) continue;   // missing-day fill above handles these
+			candidates.Add(d);
+		}
+		if (candidates.Count == 0) return;
+
+		var revised = 0;
+		var index = 0;
+		foreach (var d in candidates)
+		{
+			cancellation.ThrowIfCancellationRequested();
+			if (index > 0) await Task.Delay(TimeSpan.FromMilliseconds(400), cancellation);
+			index++;
+
+			var path = Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json");
+			SentimentSnapshot? before = null;
+			try { before = FearGreedClient.ParseResponse(await File.ReadAllTextAsync(path, cancellation), d); }
+			catch (IOException) { }
+
+			var after = await FearGreedClient.FetchAsync(d, cancellation, forceRefresh: true);
+			if (before != null && after != null && Math.Abs(before.Score - after.Score) > 0.01m)
+			{
+				revised++;
+				AnsiConsole.MarkupLine($"    revised {d:yyyy-MM-dd}: {before.Score:0.##} -> {after.Score:0.##} ({before.Rating} -> {after.Rating})");
+			}
+		}
+
+		AnsiConsole.MarkupLine(revised > 0
+			? $"  sentiment: [yellow]revised {revised}[/] of {candidates.Count} recent day(s) (CNN restates scores for ~2 weeks post-publish)"
+			: $"  sentiment: [green]no revisions[/] across last {candidates.Count} recent day(s)");
 	}
 
 	/// <summary>Refreshes <c>data/event-cache/<TICKER>.json</c> (next earnings + ex-dividend) from
