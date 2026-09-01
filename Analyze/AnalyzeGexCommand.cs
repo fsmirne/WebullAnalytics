@@ -1281,6 +1281,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title("[bold]Per-expiration[/]");
 		table.AddColumn(new TableColumn("[bold]Expiry[/]").NoWrap());
 		table.AddColumn(new TableColumn("[bold]DTE[/]").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("[bold]Spot[/]").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("[bold]Gravity[/]").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("[bold]Gross γ[/]").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("[bold green]Call wall[/]").RightAligned().NoWrap());
@@ -1304,7 +1305,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 			var gravityCell = gravity.HasValue ? $"${gravity.Value:N2}" : "[dim]—[/]";
 			var grossCell = gravity.HasValue && matrix.Cells.TryGetValue((exp, gravity.Value), out var gc) ? FormatCompactDollars(gc.Gross) : "[dim]—[/]";
-			table.AddRow($"{exp:yyyy-MM-dd}", dte.ToString(), gravityCell, grossCell,
+			table.AddRow($"{exp:yyyy-MM-dd}", dte.ToString(), $"[bold]${spot:N2}[/]", gravityCell, grossCell,
 				FormatWallStrike(callWall, "green"), FormatWallStrike(putWall, "red"),
 				FormatWallStrike(oiCallWall, "green"), FormatWallStrike(oiPutWall, "red"),
 				FormatWallStrike(volCallWall, "green"), FormatWallStrike(volPutWall, "red"),
@@ -1312,7 +1313,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 
 		AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Gravity = strike with max gross gamma; Gross γ = the gross GEX ($call γ×OI + $put γ×OI) at that strike (the value underlined in the heatmap above). [green]Call wall[/] / [red]put wall[/] = strike with the largest call / put GEX for that expiry (resistance / support, the GEX cluster). OI wall = strike with the largest standing call / put open interest for that expiry (the OI cluster). Vol wall = strike with the largest call / put day volume for that expiry (the volume cluster). Gamma flip = where dealer net dollar-gamma crosses 0 ([green]green[/] = spot in positive-γ regime, [red]red[/] = negative-γ). Max pain = strike minimizing total ITM payout (where most contracts expire worthless).[/]");
+		AnsiConsole.MarkupLine("[dim]Spot = the underlying price every other column in this row is measured against. Gravity = strike with max gross gamma; Gross γ = the gross GEX ($call γ×OI + $put γ×OI) at that strike (the value underlined in the heatmap above). [green]Call wall[/] / [red]put wall[/] = strike with the largest call / put GEX for that expiry (resistance / support, the GEX cluster). OI wall = strike with the largest standing call / put open interest for that expiry (the OI cluster). Vol wall = strike with the largest call / put day volume for that expiry (the volume cluster). Gamma flip = where dealer net dollar-gamma crosses 0 ([green]green[/] = spot in positive-γ regime, [red]red[/] = negative-γ). Max pain = strike minimizing total ITM payout (where most contracts expire worthless).[/]");
 	}
 
 	private static string FormatWallStrike(decimal? strike, string color) => strike.HasValue ? $"[bold {color}]${strike.Value:N2}[/]" : "[dim]—[/]";
