@@ -2,6 +2,9 @@
 	"autoExpandTerminal": false,
 	"terminalWidth": null,
 	"log-level": "information",
+	"analyze": {
+		"view": "detailed"
+	},
 	"report": {
 		"source": "api",
 		"since": null,
