@@ -160,12 +160,14 @@ function Resolve-End {
 
 # OI lags one session behind the evening gate: OCC publishes a session's open interest the NEXT morning (ET),
 # and ThetaData's wildcard-expiration EOD/OI requests reject the current day outright. ET-yesterday's OI is
-# only safe once that ET morning has passed (>= 09:00 ET); before that (e.g. a post-midnight-ET run) stop one
+# only safe once that ET morning has passed (>= 08:00 ET); before that (e.g. a post-midnight-ET run) stop one
 # day earlier — pulling it too soon would seal pre-publication OI.
+# Verified 2026-09-02: ThetaData's OI ingest batch lands 06:30:00-06:30:37 ET with zero variance across 10
+# sampled sessions (08-19..09-01) — 08:00 keeps ~90min of buffer past that batch. (Mirrors daily_backfill.sh.)
 function Resolve-EndOi {
 	if ($EndOverride) { return $EndOverride }
 	$now = Get-EtNow
-	if ($now.Hour -ge 9) { return $now.AddDays(-1).ToString('yyyy-MM-dd') }
+	if ($now.Hour -ge 8) { return $now.AddDays(-1).ToString('yyyy-MM-dd') }
 	else { return $now.AddDays(-2).ToString('yyyy-MM-dd') }
 }
 

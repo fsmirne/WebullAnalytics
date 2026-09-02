@@ -183,13 +183,15 @@ step() {  # "label" command args...
 # OI lags one session behind the evening gate: OCC publishes a session's open interest the NEXT
 # morning (ET), and ThetaData's wildcard-expiration EOD/OI requests reject the current day outright
 # ("Cannot fetch current-day data without specifying an expiration"). So ET-yesterday's OI is only
-# safe to pull once that ET morning has passed (>= 09:00 ET); before that (e.g. a post-midnight-ET
+# safe to pull once that ET morning has passed (>= 08:00 ET); before that (e.g. a post-midnight-ET
 # run) stop one day earlier — pulling it too soon would seal pre-publication OI. A session's OI
 # lands on the run after its publication; quotes still capture ET-today on evening runs.
+# Verified 2026-09-02: ThetaData's OI ingest batch lands 06:30:00-06:30:37 ET with zero variance
+# across 10 sampled sessions (08-19..09-01) — 08:00 keeps ~90min of buffer past that batch.
 resolve_end_oi() {
   if [ -n "${BACKFILL_END:-}" ]; then echo "$BACKFILL_END"; return; fi
   read -r now_today now_hour < <(TZ=America/New_York date '+%F %H')
-  if [ "$now_hour" -ge 9 ]; then date -d "$now_today - 1 day" +%F; else date -d "$now_today - 2 days" +%F; fi
+  if [ "$now_hour" -ge 8 ]; then date -d "$now_today - 1 day" +%F; else date -d "$now_today - 2 days" +%F; fi
 }
 
 echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes+ohlcv ${START_VALUE:+from $START_VALUE }through $(resolve_end) (as of now; re-resolved per step), oi through $(resolve_end_oi) (as of now; re-resolved per step), verify ==="
