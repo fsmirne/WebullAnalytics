@@ -221,6 +221,218 @@ public class WebullTicketParserTests
 	}
 
 	[Fact]
+	public void OnePoisonedHeaderReadingDoesNotFailACleanTicket()
+	{
+		// Real failure: one of the eight OCR passes read the header strike cell with a stray space inside the
+		// second strike ("100/1 30"), which the field regex truncates to "100/1". Header fields used to come
+		// from whichever pass sorted first, so that single reading failed the cross-check on a ticket the other
+		// passes read correctly — and the outcome flipped with pass ORDER. The readings vote instead.
+		var poisoned = WebullTicketParser.Parse(
+		[
+			"Vertical SPY 100/1 30 16 Oct 26 Call Buy 1 Limit $2.50 Day",
+			"Leg 1 SPY 100 16 Oct 26 Call Buy 1",
+			"Leg 2 SPY 130 16 Oct 26 Call Sell 1",
+		]);
+		var clean = WebullTicketParser.Parse(
+		[
+			"Vertical SPY 100/130 16 Oct 26 Call Buy 1 Limit $2.50 Day",
+			"Leg 1 SPY 100 16 Oct 26 Call Buy 1",
+			"Leg 2 SPY 130 16 Oct 26 Call Sell 1",
+		]);
+		foreach (var passes in new[] { new[] { poisoned, clean }, [clean, poisoned] })
+		{
+			var m = WebullTicketParser.Merge(passes);
+			Assert.Empty(m.Problems);
+			Assert.Equal(2, m.Legs.Count);
+			Assert.Equal(2.50m, m.NetLimit);
+		}
+	}
+
+	[Fact]
+	public void HeaderStrikeArityIsVotedSoOneSplitTokenCannotFakeALostLeg()
+	{
+		// A pass that reads the header's decimal point as a slash ("21.5" -> "21/5") inflates the strike count
+		// and used to raise a phantom "OCR lost leg rows" on a complete 2-leg ticket. Majority count wins.
+		var split = WebullTicketParser.Parse(
+		[
+			"Diagonal GME 21/5/21.5 24 Jul 26(W)/07 Aug 26(W) Call Buy 499 Limit $0.63 Day",
+			"Leg 1 GME 21 07 Aug 26(W) Call Buy 499",
+			"Leg 2 GME 21.5 24 Jul 26(W) Call Sell 499",
+		]);
+		var clean = WebullTicketParser.Parse(
+		[
+			"Diagonal GME 21/21.5 24 Jul 26(W)/07 Aug 26(W) Call Buy 499 Limit $0.63 Day",
+			"Leg 1 GME 21 07 Aug 26(W) Call Buy 499",
+			"Leg 2 GME 21.5 24 Jul 26(W) Call Sell 499",
+		]);
+		Assert.Empty(WebullTicketParser.Merge([split, clean, clean]).Problems);
+	}
+
+	[Fact]
+	public void RealHeaderStrikeMismatchStillFailsAcrossPasses()
+	{
+		// The tripwire must survive the vote: no pass's reading of the header reconciles with a misread leg.
+		var passes = Enumerable.Range(0, 3).Select(_ => WebullTicketParser.Parse(
+		[
+			"Vertical SPY 100/130 16 Oct 26 Call Buy 1 Limit $2.50 Day",
+			"Leg 1 SPY 100 16 Oct 26 Call Buy 1",
+			"Leg 2 SPY 180 16 Oct 26 Call Sell 1",
+		])).ToList();
+		Assert.Contains(WebullTicketParser.Merge(passes).Problems, x => x.Contains("header strikes"));
+	}
+
+	[Fact]
+	public void NetLimitIsVotedNotTakenFromTheFirstPass()
+	{
+		// "$0.28" read as "$0.2 8" parses 0.20. The limit is the one field the ticket does NOT repeat, so a
+		// first-found limit would put a wrong PRICE on the place line with nothing to catch it.
+		var wrong = WebullTicketParser.Parse(
+		[
+			"Calendar GME 21.5/21.5 24 Jul Aug 26(W)  Put Buy 1 ,500 Limit $0.2 8",
+			"Leg 1 GME 21.5 24 Jul 26(W) Put Sell 1 ,500",
+			"Leg 2 GME 21.5 07 Aug 26(W) Put Buy 1 ,500",
+		]);
+		Assert.Equal(0.2m, wrong.NetLimit);   // the misread pass on its own
+		var right = WebullTicketParser.Parse(NoisyRows);
+		var m = WebullTicketParser.Merge([wrong, right, right]);
+		Assert.Equal(0.28m, m.NetLimit);
+		Assert.Empty(m.Problems);
+	}
+
+	[Fact]
+	public void TiedNetLimitReadingsAreReported()
+	{
+		var wrong = WebullTicketParser.Parse(
+		[
+			"Calendar GME 21.5/21.5 24 Jul Aug 26(W)  Put Buy 1 ,500 Limit $0.2 8",
+			"Leg 1 GME 21.5 24 Jul 26(W) Put Sell 1 ,500",
+			"Leg 2 GME 21.5 07 Aug 26(W) Put Buy 1 ,500",
+		]);
+		var m = WebullTicketParser.Merge([wrong, WebullTicketParser.Parse(NoisyRows)]);
+		Assert.Contains(m.Problems, x => x.Contains("disagree on the net limit"));
+	}
+
+	// The eight OCR passes of a real USO put-condor snip (1391x224), verbatim from `wa clipboard order --rows`.
+	// Every failure mode this parser guards against is present at once: the header strike cell breaks its tokens
+	// on spaces in all eight passes ("100/110/120/130" -> "100/1 10/1 20/1 30"), the green-channel passes lose
+	// the RED "Sell" word on both short legs, the max-channel passes glue the expiry ("15Jan27") and sprinkle
+	// the dropdown caret between strike and date ("110 vy 15 Jan 27"), and two passes drop the TIF.
+	private static readonly string[][] UsoCondorPasses =
+	[
+		[
+			"Condor vy USO 100/1 10/1 20/1 30 15 Jan 27 Put Buy 295 Limit $1.76 Day",
+			"4 4",
+			"Leg 1 USO 100 vy 15Jan27 Put Buy 295",
+			"Leg 2 USO 110 15 Jan 27 Put 295",
+			"Leg 3 USO 120 15 Jan 27 Put 295",
+			"Leg 4 USO 130 vy 15Jan27 Put Buy 295",
+		],
+		[
+			"—int ST wn lt tobe ~~ TH ave",
+			"Condor USO 100/1 10/1 20/1 30 15 Jan 27 Put Buy 295 Limit $1.76 Day",
+			"Leg 1 USO 100 15 Jan 27 Put Buy 295",
+			"Leg 2 USO 110 15 Jan 27 Put 295",
+			"Leg 3 USO 120 15 Jan 27 Put 295",
+			"Leg 4 USO 130 15 Jan 27 Put Buy 295",
+		],
+		[
+			"Strategy Symbol Strike =xpirayuar Type Siae Qvaruy Orcer Type amt Price",
+			"Condor vy USO 100/1 10/1 20/130 15 Jan 27 Put Buy 295 Limit $1.76 Day",
+			"Leg 1 USO 100 15Jan27 Put Buy 295",
+			"Leg 2 USO 110 vy 15 Jan 27 Put Sell 295",
+			"Leg 3 USO 120 Ad 15 Jan 27 Put Sell 295",
+			"Leg 4 USO 130 15Jan27 Put Buy 295",
+		],
+		[
+			"Sirategy Symbol Strike Exprauor ype Siae Lar ty Orcer ype imt Price",
+			"Condor USO 100/1 10/1 20/130 15jJan27 Put Buy 295 Limit $1.76 Day",
+			"Leg 1 USO 100 15jJan27 Put Buy 295",
+			"Leg 2 USO 110 15Jan27 Put Sell 295",
+			"Leg 3 USO 120 15Jan27 Put Sell 295",
+			"Leg 4 USO 130 15jJan27 Put Buy 295",
+		],
+		[
+			"Wb tes ao",
+			"Condor USO 100/1 10/1 20/1 30 15 Jan 27 Put Buy 295 Limit $1.76",
+			"Leg 1 USO 100 15 Jan 27 Put Buy 295",
+			"Leg 2 USO 110 15 Jan 27 Put 295",
+			"Leg 3 USO 120 15 Jan 27 Put 295",
+			"Leg 4 USO 130 15 Jan 27 Put Buy 295",
+		],
+		[
+			"—int ST wn lt tobe ~~ TH ave",
+			"Condor USO 100/1 10/1 20/1 30 15 Jan 27 Put Buy 295 Limit $1.76 Day",
+			"Leg 1 USO 100 15 Jan 27 Put Buy 295",
+			"Leg 2 USO 110 15 Jan 27 Put 295",
+			"Leg 3 USO 120 15 Jan 27 Put 295",
+			"Leg 4 USO 130 15 Jan 27 Put Buy 295",
+		],
+		[
+			"Strategy Symbol Strike =xpirayuar Type Siae Qvaruy Orcer Type amt Price",
+			"Condor vy USO 100/1 10/1 20/130 15 Jan 27 Put Buy 295 Limit $1.76 Day",
+			"4 4",
+			"Leg 1 USO 100 15Jan27 Put Buy 295",
+			"Leg 2 USO 110 vy 15 Jan 27 Put Sell 295",
+			"Leg 3 USO 120 vy 15 Jan 27 Put Sell 295",
+			"Leg 4 USO 130 15Jan27 Put Buy 295",
+		],
+		[
+			"Sirategy Symbol Strike Exprauor ype Siae Lar ty Orcer ype imt Price",
+			"oe",
+			"Condor USO 100/1 10/1 20/130 15jJan27 Put Buy 295 Limit $1.76",
+			"Leg 1 USO 100 15jJan27 Put Buy 295",
+			"Leg 2 USO 110 15Jan27 Put Sell 295",
+			"Leg 3 USO 120 15Jan27 Put Sell 295",
+			"Leg 4 USO 130 15jJan27 Put Buy 295",
+		],
+	];
+
+	[Fact]
+	public void RealUsoCondorSnipParsesAllFourLegsClean()
+	{
+		var m = WebullTicketParser.Merge(UsoCondorPasses.Select(WebullTicketParser.Parse).ToList());
+		Assert.Empty(m.Problems);
+		Assert.Empty(m.Warnings);   // all four legs READ, none reconstructed
+		Assert.Equal(1.76m, m.NetLimit);
+		Assert.Equal("day", m.Tif);
+		Assert.Equal(new[] { "buy", "sell", "sell", "buy" }, m.Legs.Select(l => l.Action).ToArray());
+		Assert.Equal(new[] { 100m, 110m, 120m, 130m }, m.Legs.Select(l => l.Strike).ToArray());
+		Assert.All(m.Legs, l => Assert.Equal(295, l.Qty));
+		Assert.All(m.Legs, l => Assert.Equal("USO270115P" + ((long)(l.Strike * 1000m)).ToString("00000000"), l.OccSymbol));
+	}
+
+	[Fact]
+	public void SplitHeaderStrikeTokensStopAtTheExpirationDay()
+	{
+		// The absorption that rejoins "100/1 10" must never swallow the expiry's day number, which is the digit
+		// group the letters of the month follow.
+		var p = WebullTicketParser.Parse(
+		[
+			"Condor USO 100/1 10/1 20/1 30 15 Jan 27 Put Buy 295 Limit $1.76 Day",
+			"Leg 1 USO 100 15 Jan 27 Put Buy 295",
+			"Leg 2 USO 110 15 Jan 27 Put Sell 295",
+			"Leg 3 USO 120 15 Jan 27 Put Sell 295",
+			"Leg 4 USO 130 15 Jan 27 Put Buy 295",
+		]);
+		Assert.Equal("100/110/120/130", p.HeaderStrikeField);
+		Assert.Empty(p.Problems);
+	}
+
+	[Fact]
+	public void GluedExpiryLegRowsParse()
+	{
+		// Max-channel passes are the only ones that read the red "Sell"; they also glue the date cell.
+		var p = WebullTicketParser.Parse(
+		[
+			"Vertical USO 110/120 15 Jan 27 Put Sell 295 Limit $1.76 Day",
+			"Leg 1 USO 110 vy 15Jan27 Put Sell 295",
+			"Leg 2 USO 120 Ad 15 Jan 27 Put Buy 295",
+		]);
+		Assert.Empty(p.Problems);
+		Assert.Equal(new DateTime(2027, 1, 15), Assert.Single(p.Legs, l => l.Action == "sell").Expiry);
+	}
+
+	[Fact]
 	public void ClusterRowsGroupsWordsByBaselineAndOrdersByX()
 	{
 		var words = new List<OcrWord>
