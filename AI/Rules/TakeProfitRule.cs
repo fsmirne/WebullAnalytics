@@ -13,11 +13,16 @@ internal sealed class TakeProfitRule : IManagementRule
 {
 	private readonly TakeProfitConfig _config;
 	private readonly bool _debug;
+	/// <summary>Same knob as the opener's <c>minEntryToNoiseRatio</c> (<see cref="OpenerConfig.MinEntryToNoiseRatio"/>),
+	/// applied on the exit side via <see cref="CandidateScorer.PassesExitNoiseGate"/> — see that method's
+	/// doc for why an entry-only gate wasn't enough. 0 (default) preserves prior behavior exactly.</summary>
+	private readonly decimal _minEntryToNoiseRatio;
 
-	public TakeProfitRule(TakeProfitConfig config, bool debug = false)
+	public TakeProfitRule(TakeProfitConfig config, bool debug = false, decimal minEntryToNoiseRatio = 0m)
 	{
 		_config = config;
 		_debug = debug;
+		_minEntryToNoiseRatio = minEntryToNoiseRatio;
 	}
 
 	public string Name => "TakeProfitRule";
@@ -41,6 +46,19 @@ internal sealed class TakeProfitRule : IManagementRule
 		// For a credit structure this is the fraction of the credit captured (= fraction of max profit).
 		var pctOfPremium = profitPerContract / entryPremium;
 		if (pctOfPremium < _config.ProfitTargetPctOfPremium) return null;
+
+		// Noise gate: don't honor a profit crossing that the legs' own quote noise fully explains. A
+		// same-minute NBBO tick on one thin/far-dated leg can swing the mark past the target on a position
+		// whose real economics haven't moved at all — see PassesExitNoiseGate's doc for the trade that
+		// exposed this (a diagonal that "captured" 137% of its debit in one minute on a flat underlying).
+		var symbols = position.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol);
+		if (!CandidateScorer.PassesExitNoiseGate(symbols, ctx.Quotes, profitPerContract, _minEntryToNoiseRatio))
+		{
+			if (_debug)
+				Console.Error.WriteLine($"[TakeProfitRule] {position.Key}: {pctOfPremium:P0} profit crossing did not clear the quote-noise floor (minRatio={_minEntryToNoiseRatio}) — treating as noise, not firing.");
+			return null;
+		}
+
 		var rationale = $"captured {pctOfPremium * 100m:F0}% of net premium ${entryPremium:F2}/contract (target {_config.ProfitTargetPctOfPremium * 100m:F0}%)";
 
 		// Stamp each leg with per-share mid (default limit) and the side-aware bid/ask edge so the

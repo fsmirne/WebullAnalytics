@@ -166,6 +166,11 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		if (!string.IsNullOrWhiteSpace(config.Opener.LatestEntryTimeEt) && TimeSpan.TryParse(config.Opener.LatestEntryTimeEt, CultureInfo.InvariantCulture, out var lc))
 			openCutoff = lc;
 		var openCutoffNoted = false;
+		// 0DTE session gate: remember the last state rendered so a long "waiting" stretch prints once per
+		// state change rather than once per tick, and remember whether the day has been declared closed so
+		// the no-trade verdict is announced exactly once.
+		var lastGateState = (Open.ZeroDte.ZeroDteGateState?)null;
+		var gateDayClosedNoted = false;
 
 		while (!cancellation.IsCancellationRequested && DateTime.Now < stopAt)
 		{
@@ -208,6 +213,24 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				else
 				{
 					Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={tick.Spot} positions={tick.PositionCount} mgmtResults={tick.MgmtCount} openProposals={tick.OpenCount}");
+				}
+
+				// 0DTE gate narration. The pulse above says "no proposals emitted"; without this the user cannot
+				// tell a session the gate is deliberately sitting out from one where nothing scored. Printed on
+				// every state CHANGE (so a 90-minute wait is one line, not 90) and once when the day closes.
+				if (config.Opener.ZeroDteGate.Enabled && openEvaluator != null && openEvaluator.LastGateVerdicts.TryGetValue(config.Ticker, out var gateVerdict))
+				{
+					if (gateVerdict.State != lastGateState)
+					{
+						var color = gateVerdict.AllowsEntry ? "green" : gateVerdict.DayClosed ? "yellow" : "dim";
+						AnsiConsole.MarkupLine($"[{color}]gate {gateVerdict.State}: {Markup.Escape(gateVerdict.Summary)}[/]");
+						lastGateState = gateVerdict.State;
+					}
+					if (gateVerdict.DayClosed && !gateDayClosedNoted)
+					{
+						AnsiConsole.MarkupLine($"[yellow]No trade today — the session never satisfied the entry conditions. Still managing open positions.[/]");
+						gateDayClosedNoted = true;
+					}
 				}
 
 				// Persisted heartbeat: the console pulse above dies with the terminal, so in the proposal LOG a day

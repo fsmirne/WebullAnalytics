@@ -147,6 +147,7 @@ class Program
 				ai.AddCommand<AI.AIBacktestCommand>("backtest");
 				ai.AddCommand<AI.AIHistoryCommand>("history");
 				ai.AddCommand<AI.Analysis.DipAnalysisCommand>("dip");
+				ai.AddCommand<AI.Open.ZeroDte.AIGateCommand>("gate");
 				ai.AddBranch("config", cfg =>
 				{
 					cfg.AddCommand<AI.AIConfigShowCommand>("show");

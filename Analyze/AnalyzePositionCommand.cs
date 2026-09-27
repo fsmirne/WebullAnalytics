@@ -247,7 +247,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var apiConfig = OpenCandidateEvaluator.TryLoadApiConfig();
 		var intradayCache = apiConfig != null ? new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)) : null;
 		var dteCalendar = positionLegs.Count > 0 ? Math.Max(1, (positionLegs.Min(l => l.Parsed.ExpiryDate.Date) - asOfForDiagnostic.Date).Days) : 5;
-		var regimeComponents = aiCfg != null ? await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, DateTime.Now, priceCache, intradayCache, includeCurrentBar: true, cancellation) : default;
+		var regimeComponents = aiCfg != null ? (await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, DateTime.Now, priceCache, intradayCache, includeCurrentBar: true, cancellation)).Components : default;
 		var technicalBias = aiCfg != null ? RegimeAnalyzer.BlendBias(regimeComponents, aiCfg.Opener, dteCalendar) : 0m;
 
 		var historicalVolAnnual = await TryComputeHistoricalVolAsync(ticker, asOfForDiagnostic, priceCache, cancellation);

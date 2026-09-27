@@ -311,18 +311,18 @@ internal sealed class BacktestRunner
 			{
 				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
 				if (legFills != null) { _book.Close(ts, p.PositionKey, legFills, p.Rule, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
-				else if (warnOnDrop) WarnDroppedRuleAction(ts, p, pos);
+				else if (warnOnDrop) WarnDroppedRuleAction(ts, p, pos, quotes);
 			}
 			else if (p.Kind == ProposalKind.Roll)
 			{
 				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
 				if (legFills != null) { _book.Roll(ts, p.PositionKey, legFills, p.Rule, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
-				else if (warnOnDrop) WarnDroppedRuleAction(ts, p, pos);
+				else if (warnOnDrop) WarnDroppedRuleAction(ts, p, pos, quotes);
 			}
 			else if (p.Kind == ProposalKind.LegIn)
 			{
 				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
-				if (legFills == null && warnOnDrop) WarnDroppedRuleAction(ts, p, pos);
+				if (legFills == null && warnOnDrop) WarnDroppedRuleAction(ts, p, pos, quotes);
 				// Rule emits the new structure name via convention: LongCall→LongCallVertical, LongPut→LongPutVertical.
 				// Derive from the existing strategy + the fact that the new leg is opposite-side.
 				if (legFills != null)
@@ -341,10 +341,25 @@ internal sealed class BacktestRunner
 		return acted;
 	}
 
-	private void WarnDroppedRuleAction(DateTime step, ManagementProposal p, OpenPosition pos)
+	private void WarnDroppedRuleAction(DateTime step, ManagementProposal p, OpenPosition pos, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
 		_droppedRuleActions++;
-		Console.WriteLine($"⚠ {step:yyyy-MM-dd}: {p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} but NO option quotes exist for its legs that day — action dropped, position left open. (Store gap: today's quotes land with the evening pull; historical gaps need a backfill.)");
+		// Distinguish the two reasons BuildLegFillsFromQuotes returns null: a genuine store gap (no quote
+		// at all) vs a leg whose market is too wide to trust — the two need different messages, and
+		// printing "NO quotes exist" for a leg that has a perfectly real, just-too-wide quote is misleading.
+		var wideLeg = p.Legs.FirstOrDefault(l => quotes.TryGetValue(l.Symbol, out var q) && q.Bid is > 0m && q.Ask is > 0m
+			&& !CandidateScorer.PassesFillSpreadGate(new[] { l.Symbol }, quotes, _config.Opener.Liquidity.MaxFillSpreadPctOfMid, _config.Opener.Liquidity.MinAbsFillSpreadDollars));
+		if (wideLeg != null)
+		{
+			var q = quotes[wideLeg.Symbol];
+			var spread = q.Ask!.Value - q.Bid!.Value;
+			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+			Console.WriteLine($"⚠ {step:yyyy-MM-dd}: {p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} but {wideLeg.Symbol}'s market ({q.Bid}/{q.Ask}, {spread / mid:P0} of mid) is too wide to trust as a fill — action dropped, position left open.");
+		}
+		else
+		{
+			Console.WriteLine($"⚠ {step:yyyy-MM-dd}: {p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} but NO option quotes exist for its legs that day — action dropped, position left open. (Store gap: today's quotes land with the evening pull; historical gaps need a backfill.)");
+		}
 	}
 
 	/// <summary>Per-lineage MTM of still-open positions at the final step. Used by the renderer to split
@@ -425,8 +440,16 @@ internal sealed class BacktestRunner
 
 	/// <summary>For management proposals (close/roll), re-price each leg under the active pricing mode.
 	/// Returns null if any leg lacks a usable quote.</summary>
+	/// <summary>Fills every leg from <paramref name="quotes"/> for a rule-driven close/roll/leg-in, or
+	/// returns null (no fill — same signal as a missing quote, which the callers already treat as "left
+	/// the position open") when any leg's market is too wide to trust as an achievable price. This is the
+	/// backtest's analog of a real limit order not filling against a bad print — live needs no equivalent
+	/// call, a real broker already won't fill one; see PassesFillSpreadGate's doc for the trade that
+	/// motivated this and CandidateScorer.PassesExitNoiseGate's doc for why this belongs in the simulator
+	/// rather than in StopLossRule/TakeProfitRule.</summary>
 	private IReadOnlyList<BacktestLegFill>? BuildLegFillsFromQuotes(IReadOnlyList<ProposalLeg> legs, int qty, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
+		if (!CandidateScorer.PassesFillSpreadGate(legs.Select(l => l.Symbol), quotes, _config.Opener.Liquidity.MaxFillSpreadPctOfMid, _config.Opener.Liquidity.MinAbsFillSpreadDollars)) return null;
 		var fills = new List<BacktestLegFill>(legs.Count);
 		foreach (var l in legs)
 		{
@@ -614,8 +637,9 @@ internal sealed class BacktestRunner
 			var minuteBars = await _intradayBars.GetBarsAsync(ticker, startUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
 			var oneTicker = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker };
 
-			foreach (var minuteBar in minuteBars)
+			for (var mwi = 0; mwi < minuteBars.Count; mwi++)
 			{
+				var minuteBar = minuteBars[mwi];
 				cancellation.ThrowIfCancellationRequested();
 				pending.RemoveWhere(k => !_book.OpenPositions.ContainsKey(k));
 				if (pending.Count == 0) break;
@@ -645,10 +669,88 @@ internal sealed class BacktestRunner
 				if (snap.Underlyings.TryGetValue(ticker, out var snapSpot) && snapSpot > 0m) spot = snapSpot;
 				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot };
 				var ctx = new EvaluationContext(minuteEt, stillOpen, underlyings, snap.Options, cash, accountValue, technicalSignals);
-				var acted = ApplyManagementResults(minuteEt, evaluator.Evaluate(ctx), stillOpen, snap.Options, underlyings, warnOnDrop: false);
+				var results = evaluator.Evaluate(ctx);
+
+				// Fill-realism check on P&L-threshold-driven closes only (StopLossRule / TakeProfitRule):
+				// don't honor a crossing unless it still holds one minute later. This belongs here, not in
+				// the rule (see project_dc_sweep_tp_noise_artifact.md) — the RULE's job is "does this
+				// position's economics justify an exit," which is unconditional and identical for live; the
+				// SIMULATOR's job is "would a real order actually have filled at this print," which live gets
+				// for free from the broker (a bad quote just doesn't fill) and backtest has to model itself.
+				// A same-minute noise-ratio check (PassesExitNoiseGate) doesn't catch this failure mode — the
+				// confirming minute's OWN spread can look perfectly ordinary in isolation; only comparing
+				// against the ADJACENT minute exposes a print that didn't persist. Everything else (rolls,
+				// leg-ins, other closes) passes through immediately, unconfirmed, as before.
+				var confirmed = results.Count == 0 || mwi + 1 >= minuteBars.Count
+					? results // nothing to filter, or no next bar to confirm against (last bar of the day —
+					          // fire unconfirmed rather than silently suppress every end-of-day exit)
+					: await ConfirmPnlClosesAsync(results, stillOpen, ticker, evaluator, minuteBars[mwi + 1], endUtc, cash, accountValue, technicalSignals, cancellation);
+
+				var acted = ApplyManagementResults(minuteEt, confirmed, stillOpen, snap.Options, underlyings, warnOnDrop: false);
 				pending.ExceptWith(acted);
 			}
 		}
+	}
+
+	/// <summary>Filters <paramref name="results"/> down to the ones a real order would plausibly have
+	/// filled: proposals other than a StopLossRule/TakeProfitRule close pass through untouched; those two
+	/// are re-checked by re-evaluating the SAME position against <paramref name="nextBar"/>'s real quotes
+	/// and requiring the SAME rule to fire again there. Re-invoking the actual rule (rather than
+	/// re-deriving its threshold math here) means this can never drift out of sync with what
+	/// StopLossRule/TakeProfitRule actually do — including the two rules' own AdjustedNetDebit-vs-
+	/// InitialNetDebit difference, which a hand-rolled copy of the formula would risk getting wrong.
+	///
+	/// <para>Calling <paramref name="evaluator"/> a second time here does touch its internal per-position
+	/// dedup fingerprint one minute early, but <c>ApplyManagementResults</c> never consults
+	/// <c>EvaluationResult.IsRepeat</c> (it's display-only, read by the proposal sinks) and ONLY when
+	/// confirmation SUCCEEDS does the position leave <c>pending</c> — an unconfirmed position is still
+	/// re-evaluated for real when the walk reaches <paramref name="nextBar"/>'s minute on its own next
+	/// iteration, which simply re-derives the identical fingerprint. Benign, not worth extra machinery to
+	/// avoid.</para></summary>
+	private async Task<IReadOnlyList<RuleEvaluator.EvaluationResult>> ConfirmPnlClosesAsync(
+		IReadOnlyList<RuleEvaluator.EvaluationResult> results, IReadOnlyDictionary<string, OpenPosition> stillOpen, string ticker,
+		RuleEvaluator evaluator, MinuteBar nextBar, DateTimeOffset endUtc, decimal cash, decimal accountValue,
+		IReadOnlyDictionary<string, TechnicalBias> technicalSignals, CancellationToken cancellation)
+	{
+		List<RuleEvaluator.EvaluationResult>? confirmed = null; // allocated lazily; the common case (nothing to confirm) copies nothing
+		for (var i = 0; i < results.Count; i++)
+		{
+			var r = results[i];
+			var isPnlClose = r.Proposal.Kind == ProposalKind.Close
+				&& (string.Equals(r.Proposal.Rule, "StopLossRule", StringComparison.Ordinal) || string.Equals(r.Proposal.Rule, "TakeProfitRule", StringComparison.Ordinal));
+			if (!isPnlClose)
+			{
+				confirmed?.Add(r);
+				continue;
+			}
+
+			if (confirmed == null) { confirmed = new List<RuleEvaluator.EvaluationResult>(results.Count); for (var j = 0; j < i; j++) confirmed.Add(results[j]); }
+
+			if (!stillOpen.TryGetValue(r.Proposal.PositionKey, out var pos)) continue; // defensive; shouldn't happen
+			var symbols = pos.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
+			if (symbols.Count == 0) { confirmed.Add(r); continue; } // nothing priced to confirm against — don't block on it
+
+			var nextEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(nextBar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+			var nextSpot = nextBar.Open;
+			var nextMinutesToClose = Math.Max(1.0, (endUtc - nextBar.Timestamp).TotalMinutes);
+			var nextOverrides = new QuoteOverrides(
+				Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = nextSpot },
+				ZeroDteTimeYears: nextMinutesToClose / 60.0 / 24.0 / 365.0);
+			var nextQuotes = (await _quotes.GetQuotesAsync(nextEt, symbols, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker }, cancellation, nextOverrides)).Options;
+			if (nextQuotes.Count == 0) { confirmed.Add(r); continue; } // no data to confirm against — don't block on a store gap
+
+			var confirmCtx = new EvaluationContext(nextEt,
+				new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { [pos.Key] = pos },
+				new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = nextSpot },
+				nextQuotes, cash, accountValue, technicalSignals);
+			var nextResults = evaluator.Evaluate(confirmCtx);
+			var stillFires = nextResults.Any(nr => nr.Proposal.Kind == ProposalKind.Close
+				&& string.Equals(nr.Proposal.Rule, r.Proposal.Rule, StringComparison.Ordinal)
+				&& string.Equals(nr.Proposal.PositionKey, pos.Key, StringComparison.OrdinalIgnoreCase));
+			if (stillFires) confirmed.Add(r);
+			// else: drop. Position stays open; the walk's own next iteration re-evaluates it for real.
+		}
+		return confirmed ?? results;
 	}
 
 	private async Task RunIntradayTriggersAsync(DateTime step, RuleEvaluator evaluator, CancellationToken cancellation)
@@ -737,6 +839,29 @@ internal sealed class BacktestRunner
 		return Math.Max(fromMaxLoss.Value, fromMaxProfit.Value);
 	}
 
+	/// <summary>Take-profit mark-level threshold (mark at or ABOVE this fires), mirroring
+	/// <see cref="ComputeSlTarget"/> on the other side of entry. Same definition as
+	/// <see cref="Rules.TakeProfitRule"/>: fire once <c>(mark − AdjustedNetDebit) / |AdjustedNetDebit|</c>
+	/// reaches <c>profitTargetPctOfPremium</c>, i.e. once <c>mark ≥ AdjustedNetDebit + pct × |AdjustedNetDebit|</c>.
+	/// Disjoint from the SL threshold by construction — one needs the mark up, the other down.
+	///
+	/// <para>This exists because <c>rules.takeProfit</c> could NEVER fire for a position opened the same day it
+	/// expires. All-0DTE positions are excluded from both management minute-walks by design, so their only
+	/// path is <see cref="TryMinuteWalkTriggerAsync"/> — which evaluated stop-loss, leg-in and force-close but
+	/// not take-profit, and early-returned outright when stop-loss was disabled. The result was a silent
+	/// no-op: a 0DTE config with <c>takeProfit.enabled: true</c> produced a run byte-identical to one with it
+	/// off, reporting <c>Closes (rules) 0</c>. That is a correctness bug, not a strategy finding, and it
+	/// invalidated any prior 0DTE conclusion that rested on take-profit being active.</para></summary>
+	private decimal? ComputeTpTarget(OpenPosition pos)
+	{
+		if (!_config.Rules.TakeProfit.Enabled) return null;
+		var pct = _config.Rules.TakeProfit.ProfitTargetPctOfPremium;
+		if (pct <= 0m) return null;
+		var entryPremium = Math.Abs(pos.AdjustedNetDebit);
+		if (entryPremium <= 0m) return null;
+		return pos.AdjustedNetDebit + pct * entryPremium;
+	}
+
 	private async Task<bool> TryMinuteWalkTriggerAsync(DateTime step, OpenPosition pos, decimal cash, decimal accountValue, OpenerRealizedExpectancyConfig realizedExpectancy, CancellationToken cancellation)
 	{
 		var symbols = pos.Legs
@@ -768,8 +893,11 @@ internal sealed class BacktestRunner
 		// SL threshold (mark at or below this fires SL). Matches legacy logic exactly.
 		decimal? slTarget = ComputeSlTarget(pos, realizedExpectancy);
 
-		// Intraday take-profit was Target-B only (% of max projected profit); removed. Target A (% of debit)
-		// is evaluated at start-of-day in the main rule loop, so 0DTE positions still get it there.
+		// TP threshold (mark at or above this fires TP). Target A (% of entry premium) — the same definition
+		// TakeProfitRule uses, evaluated here because a same-day-opened 0DTE position settles in the step it
+		// opened and the start-of-day rule loop therefore never sees it. (The removed Target B, % of max
+		// PROJECTED profit, is not reinstated.)
+		decimal? tpTarget = ComputeTpTarget(pos);
 
 		// LegInShort: only meaningful on single-leg long calls/puts and only fires intraday for 0DTE
 		// strategies (multi-day positions get evaluated at start-of-day in the main rule loop).
@@ -820,7 +948,7 @@ internal sealed class BacktestRunner
 		// index options (XSP/SPXW) settle in cash with no assignment, so they're never force-closed.
 		var forceCloseActive = _config.Rules.CloseBeforeShortExpiry.Enabled
 			&& !OptionSettlement.CashSettledIndexRoots.Contains(pos.Ticker);
-		if (!slTarget.HasValue && legInRule == null && completeCondorRule == null && !forceCloseActive) return false;
+		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null && completeCondorRule == null && !forceCloseActive) return false;
 
 		// Track intraday range running from session start to the current minute. Used by LegInShort's
 		// trend-day filter. We use the first minute bar's open as the day's open reference (close to
@@ -831,8 +959,9 @@ internal sealed class BacktestRunner
 		// Walk minute bars. At each minute, re-price the position at that minute's bar.Open spot
 		// (start-of-minute price; consistent with ctx.Now semantics elsewhere in the simulator)
 		// using a remaining-session TTE. Trigger on first SL/TP crossing.
-		foreach (var minuteBar in minuteBars)
+		for (var mwi = 0; mwi < minuteBars.Count; mwi++)
 		{
+			var minuteBar = minuteBars[mwi];
 			cancellation.ThrowIfCancellationRequested();
 			var minuteUtc = minuteBar.Timestamp;
 			var spot = minuteBar.Open;
@@ -987,9 +1116,59 @@ internal sealed class BacktestRunner
 			}
 
 			bool slFires = slTarget.HasValue && mark.Value <= slTarget.Value;
-			if (!slFires) continue;
+			bool tpFires = tpTarget.HasValue && mark.Value >= tpTarget.Value;
+			if (slFires || tpFires)
+			{
+				// Noise gate, same model as the opener's minEntryToNoiseRatio (CandidateScorer.PassesExitNoiseGate):
+				// don't honor a threshold crossing the legs' own quote noise fully explains. This is the fast
+				// 0DTE-only path that bypasses StopLossRule/TakeProfitRule entirely (see IsAllZeroDte above), so
+				// it needs its own copy of the same check those rule classes now carry. A same-minute NBBO tick
+				// on one leg is exactly what produced the trade that motivated this: a LongDiagonal that
+				// "captured" 137% of its debit in one minute on a flat underlying (project_dc_sweep_tp_noise_artifact.md).
+				if (!CandidateScorer.PassesExitNoiseGate(symbols, quotes, mark.Value - pos.AdjustedNetDebit, _config.Opener.MinEntryToNoiseRatio))
+					slFires = tpFires = false;
+			}
+			if (!slFires && !tpFires) continue;
 
-			var ruleName = "StopLossRule";
+			// SL wins a tie it cannot actually have — the two thresholds sit on opposite sides of entry — but
+			// checking it first keeps the precedence explicit and matches the rules' own priority order.
+			var ruleName = slFires ? "StopLossRule" : "TakeProfitRule";
+
+			// Fill-realism check: don't honor the crossing unless it still holds one minute later, re-priced
+			// from scratch (mirrors ConfirmPnlClosesAsync's role for the shared-rule path — see its doc for
+			// why this belongs in the simulator rather than the rule, and why the noise gate above isn't
+			// enough on its own: it only looks at the current minute's OWN spread, which can look perfectly
+			// ordinary while still disagreeing wildly with the prior minute). Fire unconfirmed on the day's
+			// last bar (nothing to confirm against) rather than silently suppress every end-of-day exit.
+			if (mwi + 1 < minuteBars.Count)
+			{
+				var nextBar = minuteBars[mwi + 1];
+				var nextMinuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(nextBar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+				var nextSpot = nextBar.Open;
+				var nextMinutesToClose = Math.Max(1.0, (endUtc - nextBar.Timestamp).TotalMinutes);
+				var nextOverrides = new QuoteOverrides(
+					Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = nextSpot },
+					ZeroDteTimeYears: nextMinutesToClose / 60.0 / 24.0 / 365.0);
+				var nextQuotes = (await _quotes.GetQuotesAsync(nextMinuteEt, symbols, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pos.Ticker }, cancellation, nextOverrides)).Options;
+				var nextMark = ComputeMarkFromQuotes(pos.Legs, nextQuotes);
+				var nextSlFires = nextMark.HasValue && slTarget.HasValue && nextMark.Value <= slTarget.Value;
+				var nextTpFires = nextMark.HasValue && tpTarget.HasValue && nextMark.Value >= tpTarget.Value;
+				if ((nextSlFires || nextTpFires) && !CandidateScorer.PassesExitNoiseGate(symbols, nextQuotes, nextMark!.Value - pos.AdjustedNetDebit, _config.Opener.MinEntryToNoiseRatio))
+					nextSlFires = nextTpFires = false;
+				if (!nextSlFires && !nextTpFires) continue; // didn't persist — position stays open, next iteration re-checks for real
+
+				// Confirmed: fill against the CONFIRMING minute's quotes, not the fleeting one that triggered
+				// the check — that's the price basis actually validated as real.
+				minuteEt = nextMinuteEt;
+				spot = nextSpot;
+				quotes = nextQuotes;
+				ruleName = nextSlFires ? "StopLossRule" : "TakeProfitRule";
+			}
+
+			// Fill-realism check on the basis actually being used (the confirming minute's quotes, when a
+			// confirmation happened above) — same gate ApplyManagementResults' BuildLegFillsFromQuotes
+			// applies for the shared-rule path; this fast path builds fills inline so it needs its own call.
+			if (!CandidateScorer.PassesFillSpreadGate(symbols, quotes, _config.Opener.Liquidity.MaxFillSpreadPctOfMid, _config.Opener.Liquidity.MinAbsFillSpreadDollars)) continue;
 
 			var legFills = new List<BacktestLegFill>(pos.Legs.Count);
 			bool allLegsPriced = true;
@@ -1204,6 +1383,20 @@ internal sealed class BacktestRunner
 		if (!string.IsNullOrWhiteSpace(_config.Opener.LatestEntryTimeEt)
 			&& TimeSpan.TryParse(_config.Opener.LatestEntryTimeEt, System.Globalization.CultureInfo.InvariantCulture, out var le))
 			latestEntry = le;
+
+		// The 0DTE session gate carries its own entry window and will reject every minute outside it, so fold
+		// that window into the scan trim: without this a config that sets only opener.zeroDteGate.{earliest,
+		// latest}EntryEt still enumerates and scores all 390 minutes and throws the out-of-window ones away.
+		// Narrowing only (Math.Max / Math.Min) so neither window can ever WIDEN what the other allows.
+		if (_config.Opener.ZeroDteGate.Enabled)
+		{
+			if (!string.IsNullOrWhiteSpace(_config.Opener.ZeroDteGate.EarliestEntryEt)
+				&& TimeSpan.TryParse(_config.Opener.ZeroDteGate.EarliestEntryEt, System.Globalization.CultureInfo.InvariantCulture, out var gee))
+				earliestEntry = earliestEntry.HasValue ? TimeSpan.FromTicks(Math.Max(earliestEntry.Value.Ticks, gee.Ticks)) : gee;
+			if (!string.IsNullOrWhiteSpace(_config.Opener.ZeroDteGate.LatestEntryEt)
+				&& TimeSpan.TryParse(_config.Opener.ZeroDteGate.LatestEntryEt, System.Globalization.CultureInfo.InvariantCulture, out var gle))
+				latestEntry = latestEntry.HasValue ? TimeSpan.FromTicks(Math.Min(latestEntry.Value.Ticks, gle.Ticks)) : gle;
+		}
 
 		var timestampList = allTimestamps.ToList();
 		// Open-scan stride: evaluate every Nth minute instead of all 390. On days that never open, the

@@ -297,12 +297,19 @@ internal static class CandidateScorer
 		var bestGross = double.MinValue;
 		var totalCallGex = 0.0;
 		var totalPutGex = 0.0;
+		// Side-restricted per-side maxima — the Class #05 protective levels. Restricted to the correct side
+		// of spot on purpose: a barrier only protects a short strike if it stands between price and that
+		// strike. See the GexResult doc for why this differs from analyze gex's unrestricted FindWalls.
+		decimal? callWallAbove = null, putWallBelow = null;
+		double bestCallAbove = 0.0, bestPutBelow = 0.0;
 		foreach (var strike in allStrikes)
 		{
 			callGexByStrike.TryGetValue(strike, out var c);
 			putGexByStrike.TryGetValue(strike, out var p);
 			var gross = c + p;
 			if (gross > bestGross) { bestGross = gross; gravity = strike; }
+			if (strike >= spot && c > bestCallAbove) { bestCallAbove = c; callWallAbove = strike; }
+			if (strike <= spot && p > bestPutBelow) { bestPutBelow = p; putWallBelow = strike; }
 			totalCallGex += c;
 			totalPutGex += p;
 		}
@@ -318,7 +325,7 @@ internal static class CandidateScorer
 			putGexByStrike.TryGetValue(strike, out var p);
 			netByStrike[strike] = (decimal)(c - p);
 		}
-		return new GexResult(gravity, netGexFraction, netByStrike);
+		return new GexResult(gravity, netGexFraction, netByStrike, callWallAbove, putWallBelow);
 	}
 
 	/// <summary>Per-expiry net vanna exposure — the VEX aggregate of <see cref="ComputeGex"/>. Same quote
@@ -374,8 +381,20 @@ internal static class CandidateScorer
 	/// gravity / pin point where dealer hedging is most concentrated.
 	/// NetGexFraction is total net gamma exposure normalized to [−1, +1]: positive = call gamma dominates (suppressive),
 	/// negative = put gamma dominates (amplifying).
+	/// CallWallAbove / PutWallBelow are the SIDE-RESTRICTED per-side maxima: the strike carrying the most call
+	/// dollar-gamma at or above spot (resistance) and the most put dollar-gamma at or below spot (support) —
+	/// the "Call Wall" / "Put Wall" of the GEXOptionsTrading Class #05 short-strike rule. Deliberately NOT the
+	/// same as <c>analyze gex</c>'s GexMatrix.FindWalls, which is an unrestricted per-side argmax and so can
+	/// report a "call wall" below spot; as a protective level for strike PLACEMENT only the correct side of
+	/// spot can serve, because the whole point is a barrier standing between price and the short strike.
+	/// Null when no strike on that side of spot carries any priceable gamma.
 	/// </summary>
-	internal readonly record struct GexResult(decimal? GexGravity, decimal NetGexFraction, IReadOnlyDictionary<decimal, decimal>? NetByStrike = null);
+	internal readonly record struct GexResult(
+		decimal? GexGravity,
+		decimal NetGexFraction,
+		IReadOnlyDictionary<decimal, decimal>? NetByStrike = null,
+		decimal? CallWallAbove = null,
+		decimal? PutWallBelow = null);
 
 	/// <summary>Per-expiry net VEX aggregate: NetVexFraction = (ΣcallVanna×OI − ΣputVanna×OI) / Σ|vanna×OI|
 	/// in [−1, +1] (positive = the book gains dealer delta when IV rises), NetVexDollars the raw net. Null
@@ -497,6 +516,17 @@ internal static class CandidateScorer
 			if (legLiq.HasValue && legLiq.Value < cfg.MinOpenInterest)
 				failures.Add($"{leg.Symbol} oi {legLiq.Value}<{cfg.MinOpenInterest}");
 
+			// Fill-realism check: is this leg's own market too wide to trust its mid as achievable? See
+			// PassesFillSpreadGate's doc — distinct from the OI checks above (a liquid-by-OI leg can still
+			// be quoting an unsettled, too-wide-to-trade market, which is exactly what happened at 09:30:00
+			// on the trade that motivated this). Single symbol per call so the failure message can name it.
+			if (!PassesFillSpreadGate(new[] { leg.Symbol }, quotes, cfg.MaxFillSpreadPctOfMid, cfg.MinAbsFillSpreadDollars) && q.Bid is > 0m && q.Ask is > 0m)
+			{
+				var spread = q.Ask.Value - q.Bid.Value;
+				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				failures.Add($"{leg.Symbol} spread {(mid > 0m ? spread / mid : 0m):P0}>{cfg.MaxFillSpreadPctOfMid:P0} (${spread:F2} wide) — market too wide to trust");
+			}
+
 			// Relative-OI check: leg fails only if the ratio is below the relative threshold AND its
 			// absolute OI is below the absolute floor. High-absolute-OI strikes always pass.
 			if (cfg.MinRelativeOpenInterest > 0m && spot.HasValue && spot.Value > 0m && legLiq.HasValue && legLiq.Value > 0)
@@ -514,28 +544,96 @@ internal static class CandidateScorer
 		return failures;
 	}
 
-	/// <summary>Hard noise gate: |net entry per share| must clear <paramref name="minRatio"/> × the per-leg
-	/// half-spreads combined in quadrature (root-sum-square) from the REAL quote book. Below that, the
-	/// mid-priced entry is quote noise, not economics — the candidate's "value" can swing by more than
-	/// itself on spread wobble alone (the deep-ITM calendar mirage: $0.02 debit, ~$1.19 of combined
-	/// half-spread noise, +1690% "profit" overnight). RSS rather than a linear sum because per-leg mid
-	/// wobble is roughly independent — a linear sum over-penalizes honest 4-leg structures whose debit is
-	/// genuinely small relative to the arithmetic total of four narrow spreads. Legs without a real
-	/// two-sided quote contribute zero width, so fully synthetic-priced candidates (no NBBO store, legacy
-	/// bar backtests) pass unchanged. Disabled when <paramref name="minRatio"/> ≤ 0.</summary>
-	internal static bool PassesEntryNoiseGate(IReadOnlyList<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal netEntryPerShare, decimal minRatio)
+	/// <summary>Per-leg half-spreads combined in quadrature (root-sum-square) from the REAL quote book —
+	/// the shared noise-floor estimate behind both <see cref="PassesEntryNoiseGate"/> (opener) and
+	/// <see cref="PassesExitNoiseGate"/> (management rules). RSS rather than a linear sum because per-leg
+	/// mid wobble is roughly independent — a linear sum over-penalizes an honest 4-leg structure whose net
+	/// value is genuinely small relative to the arithmetic total of four narrow spreads. Legs without a
+	/// real two-sided quote contribute zero width, so a fully synthetic-priced position (no NBBO store,
+	/// legacy bar backtests) reads as zero noise and the caller's gate passes unchanged.</summary>
+	internal static decimal ComputeLegNoiseFloor(IEnumerable<string> symbols, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
-		if (minRatio <= 0m) return true;
 		var sumSq = 0m;
-		foreach (var leg in legs)
+		foreach (var symbol in symbols)
 		{
-			if (!quotes.TryGetValue(leg.Symbol, out var q) || q.Bid is not > 0m || q.Ask is not > 0m) continue;
+			if (!quotes.TryGetValue(symbol, out var q) || q.Bid is not > 0m || q.Ask is not > 0m) continue;
 			var half = Math.Max(0m, (q.Ask.Value - q.Bid.Value) / 2m);
 			sumSq += half * half;
 		}
-		if (sumSq <= 0m) return true;
-		var noise = (decimal)Math.Sqrt((double)sumSq);
+		return sumSq > 0m ? (decimal)Math.Sqrt((double)sumSq) : 0m;
+	}
+
+	/// <summary>Hard noise gate: |net entry per share| must clear <paramref name="minRatio"/> ×
+	/// <see cref="ComputeLegNoiseFloor"/>. Below that, the mid-priced entry is quote noise, not economics —
+	/// the candidate's "value" can swing by more than itself on spread wobble alone (the deep-ITM calendar
+	/// mirage: $0.02 debit, ~$1.19 of combined half-spread noise, +1690% "profit" overnight). Disabled
+	/// when <paramref name="minRatio"/> ≤ 0.</summary>
+	internal static bool PassesEntryNoiseGate(IReadOnlyList<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal netEntryPerShare, decimal minRatio)
+	{
+		if (minRatio <= 0m) return true;
+		var noise = ComputeLegNoiseFloor(legs.Select(l => l.Symbol), quotes);
+		if (noise <= 0m) return true;
 		return Math.Abs(netEntryPerShare) >= minRatio * noise;
+	}
+
+	/// <summary>Management-side sibling of <see cref="PassesEntryNoiseGate"/>: the exact same noise floor,
+	/// applied to a position's REALIZED SWING (mark − entry, i.e. what <c>TakeProfitRule</c>/<c>StopLossRule</c>
+	/// are about to act on) instead of an entry price. Built 2026-09-26 after a SPY LongDiagonal backtest
+	/// trade — real NBBO, "100% real-priced" — flipped from a $101/contract debit to a $246.50/contract
+	/// credit in ONE MINUTE on a 0.165-point spot move (see project_dc_sweep_tp_noise_artifact.md): not
+	/// achievable via real Greeks, only via a same-minute NBBO tick on one leg. The entry-side gate
+	/// protects OPENS; nothing protected the mark an exit rule reads a minute later — this closes that gap
+	/// with the identical model rather than a new one. Same "0 disables" convention.</summary>
+	internal static bool PassesExitNoiseGate(IEnumerable<string> symbols, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal realizedSwingPerShare, decimal minRatio)
+	{
+		if (minRatio <= 0m) return true;
+		var noise = ComputeLegNoiseFloor(symbols, quotes);
+		if (noise <= 0m) return true;
+		return Math.Abs(realizedSwingPerShare) >= minRatio * noise;
+	}
+
+	/// <summary>Fill-realism gate, distinct from both noise gates above: rejects a fill outright when a
+	/// leg's OWN market is too wide to trust its mid as an achievable transaction price — independent of
+	/// how big or small the resulting structure's net debit/credit happens to be. Built after a SPY
+	/// LongDiagonal opened at 09:30:00 on a 763P market quoted 8.87/10.78 (19.4% of mid, $1.91 wide) and a
+	/// 764P market quoted 10.00/11.67 (15.4%, $1.67 wide) — both legs settled to a tight, stable ~3-4%
+	/// spread by 09:31 and held there for six straight minutes. The 09:30 quotes were real (this wasn't
+	/// torn/garbage NBBO — <see cref="OpenerQuoteGuardConfig"/>'s far looser 50%-of-mid torn check would
+	/// never have caught 15-19%), they just hadn't settled yet: the very first tick of the session, before
+	/// market makers have repriced off the just-opened underlying, is a well-known unreliable window. The
+	/// existing noise gates don't catch this either — <see cref="PassesEntryNoiseGate"/> compares the
+	/// debit's SIZE to the spread noise, and $1.03/share cleared that easily against wide-but-not-absurd
+	/// per-leg noise; the market being untrustworthy is a property of the QUOTE, not the debit.
+	///
+	/// <para>Requires BOTH <paramref name="maxSpreadPctOfMid"/> AND <paramref name="minAbsSpreadDollars"/>
+	/// to be cleared before rejecting — mirroring <see cref="OpenerQuoteGuardConfig"/>'s torn-NBBO AND —
+	/// so a genuinely cheap, thin, far-OTM leg (a $0.20 option with a nickel-wide $0.05 market: 25% of mid,
+	/// completely normal) isn't rejected on percentage alone. Only a leg that is BOTH wide relative to its
+	/// own mid AND wide in real dollar terms fails — exactly the profile an unsettled expensive-underlying
+	/// market like SPY at 09:30:00 has, and a normal cheap deep-OTM wing does not.</para>
+	///
+	/// <para>Applies to BOTH opens (wired into <see cref="GetLiquidityFailures"/>, so live and backtest
+	/// share the one gate — a candidate this touches is never proposed at all) and, in the backtest
+	/// simulator only, closes/rolls/leg-ins (see <c>BacktestRunner.BuildLegFillsFromQuotes</c> and its
+	/// 0DTE fast-path sibling) — live needs no equivalent there: a real broker already won't fill a limit
+	/// order against a market this wide, so the exit side of this gate exists purely to keep the SIMULATOR
+	/// honest about what a real order would have achieved, matching the same decision-vs-execution split
+	/// discussed for <see cref="PassesExitNoiseGate"/>.</para>
+	///
+	/// <para>0 or negative <paramref name="maxSpreadPctOfMid"/> disables (legacy behavior, unchanged).</para></summary>
+	internal static bool PassesFillSpreadGate(IEnumerable<string> symbols, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal maxSpreadPctOfMid, decimal minAbsSpreadDollars)
+	{
+		if (maxSpreadPctOfMid <= 0m) return true;
+		foreach (var symbol in symbols)
+		{
+			if (!quotes.TryGetValue(symbol, out var q) || q.Bid is not > 0m || q.Ask is not > 0m) continue;
+			var spread = q.Ask.Value - q.Bid.Value;
+			if (spread < minAbsSpreadDollars) continue; // cheap leg, wide-in-% is normal — not this gate's concern
+			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+			if (mid <= 0m) continue;
+			if (spread / mid > maxSpreadPctOfMid) return false;
+		}
+		return true;
 	}
 
 	/// <summary>Worst-leg bid/ask spread (as fraction of mid), minimum effective liquidity across legs,

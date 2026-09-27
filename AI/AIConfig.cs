@@ -622,10 +622,54 @@ internal static class AIConfigLoader
 			&& leChk <= eeChk)
 			return $"opener.latestEntryTimeEt ('{op.LatestEntryTimeEt}') must be later than earliestEntryTimeEt ('{op.EarliestEntryTimeEt}') — otherwise the window is empty and nothing ever opens";
 
+		var zg = op.ZeroDteGate;
+		if (!string.IsNullOrWhiteSpace(zg.EarliestEntryEt) && !TimeSpan.TryParse(zg.EarliestEntryEt, CultureInfo.InvariantCulture, out _))
+			return $"opener.zeroDteGate.earliestEntryEt: must be HH:mm, got '{zg.EarliestEntryEt}'";
+		if (!string.IsNullOrWhiteSpace(zg.LatestEntryEt) && !TimeSpan.TryParse(zg.LatestEntryEt, CultureInfo.InvariantCulture, out _))
+			return $"opener.zeroDteGate.latestEntryEt: must be HH:mm, got '{zg.LatestEntryEt}'";
+		if (!string.IsNullOrWhiteSpace(zg.EarliestEntryEt) && !string.IsNullOrWhiteSpace(zg.LatestEntryEt)
+			&& TimeSpan.TryParse(zg.EarliestEntryEt, CultureInfo.InvariantCulture, out var zgE)
+			&& TimeSpan.TryParse(zg.LatestEntryEt, CultureInfo.InvariantCulture, out var zgL)
+			&& zgL <= zgE)
+			return $"opener.zeroDteGate.latestEntryEt ('{zg.LatestEntryEt}') must be later than earliestEntryEt ('{zg.EarliestEntryEt}') — otherwise no minute can ever confirm";
+		if (zg.MinBarsBeforeDecision < 0) return $"opener.zeroDteGate.minBarsBeforeDecision: must be ≥ 0, got {zg.MinBarsBeforeDecision}";
+		var zgValidModes = new[] { "gapandvwap", "vwaponly", "netchange", "composite", "off" };
+		if (!zgValidModes.Contains((zg.Direction.Mode ?? string.Empty).ToLowerInvariant()))
+			return $"opener.zeroDteGate.direction.mode: must be one of gapAndVwap|vwapOnly|netChange|composite|off, got '{zg.Direction.Mode}'";
+		if (zg.Direction.MinGapPct < 0m) return $"opener.zeroDteGate.direction.minGapPct: must be ≥ 0, got {zg.Direction.MinGapPct}";
+		if (zg.Direction.MinVwapHoldMinutes < 0) return $"opener.zeroDteGate.direction.minVwapHoldMinutes: must be ≥ 0, got {zg.Direction.MinVwapHoldMinutes}";
+		if (zg.Direction.MaxVwapFlips < 0) return $"opener.zeroDteGate.direction.maxVwapFlips: must be ≥ 0, got {zg.Direction.MaxVwapFlips}";
+		if (!string.IsNullOrWhiteSpace(zg.Range.EarliestEntryEt) && !TimeSpan.TryParse(zg.Range.EarliestEntryEt, CultureInfo.InvariantCulture, out var zgRangeFloor))
+			return $"opener.zeroDteGate.range.earliestEntryEt: must be HH:mm, got '{zg.Range.EarliestEntryEt}'";
+		if (!string.IsNullOrWhiteSpace(zg.Range.EarliestEntryEt) && !string.IsNullOrWhiteSpace(zg.LatestEntryEt)
+			&& TimeSpan.TryParse(zg.Range.EarliestEntryEt, CultureInfo.InvariantCulture, out var zgRf)
+			&& TimeSpan.TryParse(zg.LatestEntryEt, CultureInfo.InvariantCulture, out var zgLf)
+			&& zgRf >= zgLf)
+			return $"opener.zeroDteGate.range.earliestEntryEt ('{zg.Range.EarliestEntryEt}') must be earlier than latestEntryEt ('{zg.LatestEntryEt}') — otherwise the balanced state can never confirm";
+		if (zg.Range.WindowMinutes < 1) return $"opener.zeroDteGate.range.windowMinutes: must be ≥ 1, got {zg.Range.WindowMinutes}";
+		if (zg.Range.MaxRangePct < 0m) return $"opener.zeroDteGate.range.maxRangePct: must be ≥ 0, got {zg.Range.MaxRangePct}";
+		if (zg.Range.MinBoundaryTouches < 0) return $"opener.zeroDteGate.range.minBoundaryTouches: must be ≥ 0, got {zg.Range.MinBoundaryTouches}";
+		if (zg.Range.BoundaryTolerancePct < 0m) return $"opener.zeroDteGate.range.boundaryTolerancePct: must be ≥ 0, got {zg.Range.BoundaryTolerancePct}";
+		if (zg.Range.MinVwapCrosses < 0) return $"opener.zeroDteGate.range.minVwapCrosses: must be ≥ 0, got {zg.Range.MinVwapCrosses}";
+		var zgValidSources = new[] { "gexwall", "rangeboundary", "both" };
+		if (!zgValidSources.Contains((zg.Placement.LevelSource ?? string.Empty).ToLowerInvariant()))
+			return $"opener.zeroDteGate.placement.levelSource: must be one of gexWall|rangeBoundary|both, got '{zg.Placement.LevelSource}'";
+		if (zg.Placement.MinShortDistancePct < 0m) return $"opener.zeroDteGate.placement.minShortDistancePct: must be ≥ 0, got {zg.Placement.MinShortDistancePct}";
+		if (zg.Placement.MaxShortDistancePct < 0m) return $"opener.zeroDteGate.placement.maxShortDistancePct: must be ≥ 0, got {zg.Placement.MaxShortDistancePct}";
+		if (zg.Placement.MinShortDistancePct > 0m && zg.Placement.MaxShortDistancePct > 0m && zg.Placement.MaxShortDistancePct <= zg.Placement.MinShortDistancePct)
+			return $"opener.zeroDteGate.placement.maxShortDistancePct ({zg.Placement.MaxShortDistancePct}) must exceed minShortDistancePct ({zg.Placement.MinShortDistancePct}) — otherwise no strike qualifies";
+		if (zg.Placement.MaxLevelDistancePct < 0m) return $"opener.zeroDteGate.placement.maxLevelDistancePct: must be ≥ 0, got {zg.Placement.MaxLevelDistancePct}";
+		if (zg.Credit.MinPctOfWidth < 0m || zg.Credit.MinPctOfWidth >= 1m) return $"opener.zeroDteGate.credit.minPctOfWidth: must be in [0, 1), got {zg.Credit.MinPctOfWidth}";
+		if (zg.Credit.MaxPctOfWidth < 0m) return $"opener.zeroDteGate.credit.maxPctOfWidth: must be ≥ 0, got {zg.Credit.MaxPctOfWidth}";
+		if (zg.Credit.MaxPctOfWidth is > 0m and < 1m && zg.Credit.MaxPctOfWidth <= zg.Credit.MinPctOfWidth)
+			return $"opener.zeroDteGate.credit.maxPctOfWidth ({zg.Credit.MaxPctOfWidth}) must exceed minPctOfWidth ({zg.Credit.MinPctOfWidth}) — otherwise no credit qualifies";
+
 		var liq = op.Liquidity;
 		if (liq.MinOpenInterest < 0) return $"opener.liquidity.minOpenInterest: must be ≥ 0, got {liq.MinOpenInterest}";
 		if (liq.MinRelativeOpenInterest < 0m || liq.MinRelativeOpenInterest > 1m) return $"opener.liquidity.minRelativeOpenInterest: must be in [0, 1], got {liq.MinRelativeOpenInterest}";
 		if (liq.Weight < 0m || liq.Weight > 1m) return $"opener.liquidity.weight: must be in [0, 1], got {liq.Weight}";
+		if (liq.MaxFillSpreadPctOfMid < 0m) return $"opener.liquidity.maxFillSpreadPctOfMid: must be ≥ 0, got {liq.MaxFillSpreadPctOfMid}";
+		if (liq.MinAbsFillSpreadDollars < 0m) return $"opener.liquidity.minAbsFillSpreadDollars: must be ≥ 0, got {liq.MinAbsFillSpreadDollars}";
 
 		var lc = op.Structures.LongCalendar;
 		if (lc.ShortDteMin < 0) return $"opener.structures.longCalendar.shortDteMin: must be ≥ 0, got {lc.ShortDteMin}";

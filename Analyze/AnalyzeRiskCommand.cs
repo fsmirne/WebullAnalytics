@@ -204,7 +204,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		}
 		var apiConfig = OpenCandidateEvaluator.TryLoadApiConfig();
 		var intradayCache = apiConfig != null ? new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)) : null;
-		var regimeComponents = aiCfg != null ? await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, asOf, priceCache, intradayCache, includeCurrentBar: true, cancellation) : default;
+		var regimeComponents = aiCfg != null ? (await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, asOf, priceCache, intradayCache, includeCurrentBar: true, cancellation)).Components : default;
 		var technicalBias = aiCfg != null ? RegimeAnalyzer.BlendBias(regimeComponents, aiCfg.Opener, dteCalendar) : 0m;
 
 		decimal ResolveIv(string sym) =>

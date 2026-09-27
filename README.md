@@ -659,7 +659,7 @@ There is no `--yes` flag — every place, cancel, and cancel-all prompts interac
 
 The `ai` command evaluates live or replayed positions and emits structured proposal logs. It can emit both management proposals (roll / take-profit / stop-loss / defensive-roll) and opening candidates for new positions. It is **read-only in phase 1**: the command never places orders.
 
-Seven subcommands — `scan` / `watch` / `replay` / `backtest` share one evaluation engine, `history` manages the caches they read, `config` inspects/creates the layered config files (`show` prints the fully-resolved effective config after all merges, `init` emits a complete base config with every parameter at its code default and everything disabled, `format` normalizes one), and `dip` is a standalone dip-signal research tool (see below):
+Eight subcommands — `scan` / `watch` / `replay` / `backtest` share one evaluation engine, `history` manages the caches they read, `config` inspects/creates the layered config files (`show` prints the fully-resolved effective config after all merges, `init` emits a complete base config with every parameter at its code default and everything disabled, `format` normalizes one), `gate` replays the 0DTE session gate's reasoning offline (see below), and `dip` is a standalone dip-signal research tool:
 
 ```bash
 # Continuous monitoring during market hours (default: until 4 PM ET)
@@ -688,6 +688,12 @@ wa ai scan GME --proposals open
 
 # Study the intraday dip signal (RSI + Bollinger + MACD-sign) over a history of 1-min CSVs
 wa ai dip SPXW --since 2025-01-01 --interval 5
+
+# Why did the 0DTE session gate not trade today? Replay its state minute by minute
+wa ai gate SPXW --strategy CLASS --date 2026-09-24
+
+# What share of sessions does the gate consider tradeable at all, and when does it confirm?
+wa ai gate SPXW --strategy CLASS --since 2022-01-03 --until 2026-09-25
 ```
 
 The ticker is a required positional argument — every AI subcommand operates on exactly one ticker per run, and the config layer is selected by that argument.
@@ -746,6 +752,45 @@ The 12 scoring weights live under `opener.weights` (formerly flat `*Weight` fiel
 | `ivRealizedPremium` | IV-vs-HV regime-alignment factor (credit favored when IV > HV). |
 | `vixTermStructure` | Blend weight for the VIX9D/VIX term-structure regime signal. |
 | `intradayTape` | Blend weight for the intraday tape signal (0DTE wants 0.5–0.8; swing wants 0.0–0.2). |
+
+**`opener.zeroDteGate`** — same-day-expiry entry CONDITION gate (off by default). Everything else in `opener` ranks candidates; this decides whether the session qualifies to trade **at all**, and can end the day flat.
+
+The problem it solves: the only pre-existing entry conditions are a wall-clock window (`earliestEntryTimeEt`) and a continuous score floor (`minScoreToOpen`). With a permissive floor the opener therefore fires at the *first legal minute of every session* — a full-history SPXW 0DTE run opens on 97% of days, all of them stamped at the window boundary. A framework that asks yes/no questions and answers "no trade today" cannot be expressed that way.
+
+The gate is a session state machine plus a strike-placement rule. Exactly three states permit an entry:
+
+| State | Meaning | Endorsed structure |
+|---|---|---|
+| `BullConfirmed` | Bullish read, confirmed and held | short put vertical (bull put spread) |
+| `BearConfirmed` | Bearish read, confirmed and held | short call vertical (bear call spread) |
+| `RangeConfirmed` | Balanced — rotating inside a defined range | iron condor |
+| `WaitingForConfirmation` / `Choppy` / `WarmingUp` / `BeforeWindow` | conditions not satisfied; day still live | none |
+| `PastCutoff` | past `latestEntryEt` with nothing confirmed | none — **no trade today** |
+| `NoTape` | no RTH minute tape on disk | none (fails closed, and says so) |
+
+Directional states are tested **before** the balanced state, so a day that both trends and has coiled is treated as a trending day that paused.
+
+| Key | Purpose |
+|---|---|
+| `zeroDteOnly` | When true (default) only same-day-expiry candidates are gated; longer-dated ones pass through, so the gate layers onto a mixed-DTE config safely. |
+| `earliestEntryEt` / `latestEntryEt` | Entry window (ET). Past the latter the day is closed for entries. |
+| `minBarsBeforeDecision` | Bars that must print before the gate answers anything but "warming up". |
+| `direction.mode` | Which read decides direction: `gapAndVwap` (gap and VWAP must agree *and* the side must have held), `vwapOnly`, `netChange` (spot vs prior close), `composite` (sign of the engine's existing `IntradayBias` blend), or `off`. |
+| `direction.minVwapHoldMinutes` | Consecutive minutes on the required side of the **running** VWAP before confirming — the "reclaim and hold" requirement the engine previously had no representation for. |
+| `direction.maxVwapFlips` | Chop veto: more side changes than this and no directional state confirms. |
+| `range.earliestEntryEt` | The balanced state's own, later floor (default `12:00`). The two states mature at different times — a gap+VWAP read is legible soon after the open, a range only once the morning has drawn it. |
+| `range.windowMinutes` / `maxRangePct` / `minBoundaryTouches` / `boundaryTolerancePct` / `minVwapCrosses` | What counts as an established range: a tight enough trailing window whose edges have each been tested repeatedly, with enough VWAP rotation to say neither side is in control. |
+| `placement.levelSource` | Where the protective level comes from: `gexWall` (the side-restricted max-gamma strike — call wall above spot, put wall below), `rangeBoundary`, or `both` (clear the farther of the two). |
+| `placement.shortBeyondLevel` | Require the short strike to sit at or beyond that level, so price must break a real barrier before threatening it. |
+| `placement.minShortDistancePct` / `maxShortDistancePct` | Bounds on short-strike distance from spot, as a percent of spot. |
+| `placement.maxLevelDistancePct` | If the protective level is further out than this there is nowhere logical to place the short, and the side is passed on rather than placed unprotected. |
+| `credit.minPctOfWidth` / `maxPctOfWidth` | Credit must pay for the width, and must not be so rich that the short is sitting on top of price. |
+
+Every threshold is a percentage of spot or of width, so they transfer unchanged across roots — there is no per-ticker retuning.
+
+Defaults are calibrated against 1,129 SPX sessions (2022-01 → 2026-09) rather than guessed; the measured distribution behind each one is recorded in the XML docs on `ZeroDteGateConfig`. Two of them matter most: the 45-minute trailing range at 10:15 ET has a **median of 0.43%**, so a `maxRangePct` of 0.45 would admit half of all days and mean nothing (hence 0.25, which admits 17%); and the VWAP hold streak runs p25 6m / median 16m / p75 29m, so a 10-minute hold requirement barely discriminates (hence 20).
+
+Use `wa ai gate <TICKER> [--strategy TOK]` to see what it decided and why — per minute for one session, or per day with a state tally over a range. Without it, "no proposals emitted" looks identical whether the session was rejected on the gap, on the VWAP hold, on chop, or on a missing tape file, and no threshold can be tuned honestly.
 
 **`rules`** — management rule triggers and thresholds. Each rule's config holds only the gates specific to that rule (stop-loss multipliers, take-profit percentages, roll-specific thresholds). The `opportunisticRoll` block contains `bullishBlockThreshold` / `bearishBlockThreshold` — composite-bias score boundaries that block call rolls in extended-bullish setups and put rolls in extended-bearish setups.
 

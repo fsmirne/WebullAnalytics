@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using WebullAnalytics.AI.Open.ZeroDte;
 
 namespace WebullAnalytics.AI;
 
@@ -183,6 +184,13 @@ internal sealed class OpenerConfig
 	/// scoring, pushing the opener to the next-ranked candidate — a left-tail filter, not an alpha signal.
 	/// Off by default; "nearSpot" mode is the campaign's distance-matched placebo.</summary>
 	[JsonPropertyName("placementVeto")] public OpenerPlacementVetoConfig PlacementVeto { get; set; } = new();
+
+	/// <summary>Same-day-expiry entry CONDITION gate, modelled on the GEXOptionsTrading Academy framework:
+	/// a session state machine (gap / VWAP confirmation / established range) that must positively endorse an
+	/// entry, and a short-strike placement rule that requires a protective level between spot and the short.
+	/// The one thing <see cref="MinScoreToOpen"/> cannot express: it can withhold entry for a whole session
+	/// and end the day flat. Off by default; enabling it only ever REMOVES candidates.</summary>
+	[JsonPropertyName("zeroDteGate")] public ZeroDteGateConfig ZeroDteGate { get; set; } = new();
 
 	/// <summary>Layer-3 VEX sizing scalar (campaign: gex_layers). Scales the opener's final qty by
 	/// clamp(1 + weight × netVexFraction(short expiry) × sign(netVega), min, max) — front-book vanna as a
@@ -701,6 +709,23 @@ internal sealed class OpenerLiquidityConfig
 	/// regularly have one strike with 10k+ OI which makes every other active strike look "relatively
 	/// thin" under the 25% relative gate. Set to a very high number to disable the escape hatch.</summary>
 	[JsonPropertyName("minAbsoluteOpenInterest")] public long MinAbsoluteOpenInterest { get; set; } = 100;
+
+	/// <summary>Hard reject: a leg's spread as a fraction of its own mid, ABOVE which the market is too
+	/// wide to trust its mid as an achievable price — see <see cref="CandidateScorer.PassesFillSpreadGate"/>
+	/// for the trade that motivated this (SPY's own 09:30:00 open quote, 15-19% of mid, wasn't torn/garbage
+	/// data, it just hadn't settled yet). Only rejects when the leg ALSO clears
+	/// <see cref="MinAbsFillSpreadDollars"/> — a cheap, thin, genuinely-wide-in-% far-OTM leg is normal and
+	/// must not trip this. Default 0.12 (12%): a ~3x cushion over SPY's observed settled baseline
+	/// (2.6-4.2%) while decisively catching the observed 15.4%/19.4% unsettled-open case. Distinct from,
+	/// and much tighter than, <see cref="OpenerQuoteGuardConfig.MaxSpreadPctOfMid"/> (default 50%), which
+	/// detects torn/garbage NBBO — a different, much rarer failure mode. 0 disables.</summary>
+	[JsonPropertyName("maxFillSpreadPctOfMid")] public decimal MaxFillSpreadPctOfMid { get; set; } = 0.12m;
+
+	/// <summary>Absolute-dollar floor paired with <see cref="MaxFillSpreadPctOfMid"/> (AND, not OR) — a
+	/// leg only fails when its spread clears BOTH. Default $0.50: SPY's incident legs were $1.67-1.91
+	/// wide, comfortably above this; a $0.20 option with a nickel-wide $0.05 market (25% of mid) stays
+	/// well under it and is correctly left alone.</summary>
+	[JsonPropertyName("minAbsFillSpreadDollars")] public decimal MinAbsFillSpreadDollars { get; set; } = 0.50m;
 
 	/// <summary>Strength of the multiplicative liquidity factor on the score chain. The factor maps
 	/// worst-leg spread + min-OI to a value in [0.30, 1.00]. Higher weight = sharper penalty for

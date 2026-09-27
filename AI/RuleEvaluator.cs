@@ -129,7 +129,7 @@ internal sealed class RuleEvaluator
 		var normalizedPricing = SuggestionPricing.Normalize(pricingMode);
 		return new IManagementRule[]
 		{
-			new StopLossRule(config.Rules.StopLoss, config.Opener.RealizedExpectancy),
+			new StopLossRule(config.Rules.StopLoss, config.Opener.RealizedExpectancy, config.Opener.MinEntryToNoiseRatio),
 			// TimeStop (priority 1, ties with StopLoss) — a time-budget exit, not P&L-driven, so it
 			// belongs at the same top tier rather than gated behind the roll/take-profit rules below.
 			new TimeStopRule(config.Rules.TimeStop),
@@ -144,7 +144,7 @@ internal sealed class RuleEvaluator
 			// only fires on held 2-leg short verticals.
 			new CompleteCondorRule(config.Rules.CompleteCondor),
 			new OpportunisticRollRule(config.Rules.OpportunisticRoll, config.Indicators, config.Opener.RealizedExpectancy, debug, normalizedPricing),
-			new TakeProfitRule(config.Rules.TakeProfit, debug),
+			new TakeProfitRule(config.Rules.TakeProfit, debug, config.Opener.MinEntryToNoiseRatio),
 			new DefensiveRollRule(config.Rules.DefensiveRoll, config.Indicators),
 			new RollShortOnExpiryRule(config.Rules.RollShortOnExpiry)
 		};

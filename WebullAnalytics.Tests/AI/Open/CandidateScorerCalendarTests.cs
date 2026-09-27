@@ -444,8 +444,12 @@ public class CandidateScorerCalendarTests
 	{
 		// Regression: the real 2026-01-15 SPY phantom. Spot ~694, 713P calendar 01/23→02/06 priced
 		// $0.02 at mid-of-mids while the front leg's book was $2.34 wide — the "debit" was quote noise,
-		// and the backtest booked +1690% overnight on first-minute spread wobble. Both new gates must
-		// reject it: entry-to-noise ($0.02 vs ~$1.19 RSS) and short-leg extrinsic (~$0.1 vs $1.17 half-spread).
+		// and the backtest booked +1690% overnight on first-minute spread wobble. THREE independent gates
+		// now reject it: entry-to-noise ($0.02 vs ~$1.19 RSS), short-leg extrinsic (~$0.1 vs $1.17
+		// half-spread) — both from the original 2026-01-15 fix — and the fill-spread gate added after the
+		// 2026-09-26 SPY diagonal incident (project_dc_sweep_tp_noise_artifact.md): the short leg's
+		// 17.62/19.96 market is $2.34 wide, 12.5% of its own mid, clearing both the % and $ floors on its
+		// own regardless of what the position's overall debit looks like.
 		var asOf = new DateTime(2026, 1, 15);
 		var shortExp = new DateTime(2026, 1, 23);
 		var longExp = new DateTime(2026, 2, 6);
@@ -464,11 +468,18 @@ public class CandidateScorerCalendarTests
 
 		Assert.Null(CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 694.3m, asOf, quotes, bias: 0m, Cfg()));
 
-		// Same candidate with the gates disabled scores — proving the rejection came from the gates.
-		var cfgOff = Cfg();
-		cfgOff.MinEntryToNoiseRatio = 0m;
-		cfgOff.MinShortExtrinsicToNoiseRatio = 0m;
-		Assert.NotNull(CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 694.3m, asOf, quotes, bias: 0m, cfgOff));
+		// Disabling only the ORIGINAL two gates still rejects — the fill-spread gate catches it independently.
+		var cfgTwoOff = Cfg();
+		cfgTwoOff.MinEntryToNoiseRatio = 0m;
+		cfgTwoOff.MinShortExtrinsicToNoiseRatio = 0m;
+		Assert.Null(CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 694.3m, asOf, quotes, bias: 0m, cfgTwoOff));
+
+		// All three off: proves the rejection came from these gates, not something else in the pipeline.
+		var cfgAllOff = Cfg();
+		cfgAllOff.MinEntryToNoiseRatio = 0m;
+		cfgAllOff.MinShortExtrinsicToNoiseRatio = 0m;
+		cfgAllOff.Liquidity.MaxFillSpreadPctOfMid = 0m;
+		Assert.NotNull(CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 694.3m, asOf, quotes, bias: 0m, cfgAllOff));
 	}
 
 	[Fact]
@@ -575,6 +586,110 @@ public class CandidateScorerCalendarTests
 		Assert.True(CandidateScorer.PassesEntryNoiseGate(legs, quotes, netEntryPerShare: 0.01m, minRatio: 0m));     // ratio 0 disables
 		// Legs without a real book contribute no noise: an all-synthetic candidate always passes.
 		Assert.True(CandidateScorer.PassesEntryNoiseGate(legs, new Dictionary<string, OptionContractQuote>(), netEntryPerShare: 0.001m, minRatio: 0.5m));
+	}
+
+	/// <summary>The management-side sibling: identical RSS math, applied to the SWING a TakeProfitRule/
+	/// StopLossRule is about to act on rather than an entry price. Same fixture as
+	/// <see cref="EntryNoiseGateCombinesLegSpreadsInQuadrature"/> so the noise floor (≈0.0901) is the
+	/// same known quantity.</summary>
+	[Fact]
+	public void ExitNoiseGateCombinesLegSpreadsInQuadrature()
+	{
+		var symbols = new[] { "A", "B", "C", "D" };
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			["A"] = TestQuote.Q(1.80m, 1.90m), // half-spread 0.05
+			["B"] = TestQuote.Q(1.30m, 1.40m), // 0.05
+			["C"] = TestQuote.Q(1.50m, 1.55m), // 0.025
+			["D"] = TestQuote.Q(1.05m, 1.15m)  // 0.05
+		};
+		// Same RSS noise floor ≈ 0.0901 as the entry gate — it's the identical formula.
+		Assert.True(CandidateScorer.PassesExitNoiseGate(symbols, quotes, realizedSwingPerShare: 0.075m, minRatio: 0.5m));
+		Assert.False(CandidateScorer.PassesExitNoiseGate(symbols, quotes, realizedSwingPerShare: 0.04m, minRatio: 0.5m));
+		Assert.True(CandidateScorer.PassesExitNoiseGate(symbols, quotes, realizedSwingPerShare: 0.01m, minRatio: 0m));
+		Assert.True(CandidateScorer.PassesExitNoiseGate(symbols, new Dictionary<string, OptionContractQuote>(), realizedSwingPerShare: 0.001m, minRatio: 0.5m));
+
+		// The sign of the swing doesn't matter — a stop-loss swing is negative, a take-profit swing positive,
+		// and the gate must catch noise-sized moves on either side identically.
+		Assert.False(CandidateScorer.PassesExitNoiseGate(symbols, quotes, realizedSwingPerShare: -0.04m, minRatio: 0.5m));
+	}
+
+	/// <summary>Illustrates the shape of the case that motivated this gate (project_dc_sweep_tp_noise_artifact.md
+	/// — a SPY LongDiagonal that "captured" 137% of its debit in one minute on a flat underlying): a thin,
+	/// wide-spread structure needs a correspondingly larger swing before the gate will trust it as real,
+	/// rather than as the position's own two legs sitting on opposite sides of a wide same-minute spread.
+	/// Numbers here are illustrative (chosen to make the arithmetic checkable), not the literal captured
+	/// NBBO from that trade — the fill ledger records realized fill prices, not the bid/ask width behind them.</summary>
+	[Fact]
+	public void ExitNoiseGateRejectsASwingASingleWideLegCouldFullyExplain()
+	{
+		var symbols = new[] { "763P", "764P" };
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			["763P"] = TestQuote.Q(8.50m, 11.50m),  // half-spread 1.50 — thin, far-dated, wide market
+			["764P"] = TestQuote.Q(9.00m, 12.00m)   // half-spread 1.50
+		};
+		// noise = sqrt(1.50² + 1.50²) ≈ 2.121, so at minRatio 0.5 the threshold is ≈1.061/share.
+		// A $0.75/share swing sits under that — exactly the "value swung by less than the spread noise
+		// floor" case — and must not clear the gate.
+		Assert.False(CandidateScorer.PassesExitNoiseGate(symbols, quotes, realizedSwingPerShare: 0.75m, minRatio: 0.5m));
+		// A $5/share swing on the same book clears the threshold — real economics, not spread wobble.
+		Assert.True(CandidateScorer.PassesExitNoiseGate(symbols, quotes, realizedSwingPerShare: 5.00m, minRatio: 0.5m));
+	}
+
+	/// <summary>PassesFillSpreadGate — the third gate, distinct from both noise gates: it rejects a market
+	/// that's too wide to trust regardless of how big or small the resulting debit/swing is. Fixture is
+	/// the actual incident (project_dc_sweep_tp_noise_artifact.md): SPY's own 09:30:00 open quote.</summary>
+	[Fact]
+	public void FillSpreadGate_RejectsTheObservedUnsettledOpen()
+	{
+		var symbols = new[] { "763P", "764P" };
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			["763P"] = TestQuote.Q(8.87m, 10.78m),  // 19.4% of mid, $1.91 wide — the real 09:30:00 SPY quote
+			["764P"] = TestQuote.Q(10.00m, 11.67m)  // 15.4% of mid, $1.67 wide
+		};
+		Assert.False(CandidateScorer.PassesFillSpreadGate(symbols, quotes, maxSpreadPctOfMid: 0.12m, minAbsSpreadDollars: 0.50m));
+	}
+
+	[Fact]
+	public void FillSpreadGate_PassesTheSameLegsOnceSettled()
+	{
+		// The same two contracts, one minute later (09:31), once the market actually caught up.
+		var symbols = new[] { "763P", "764P" };
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			["763P"] = TestQuote.Q(8.72m, 9.09m),   // 4.2% of mid
+			["764P"] = TestQuote.Q(11.22m, 11.52m)  // 2.6% of mid
+		};
+		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, quotes, maxSpreadPctOfMid: 0.12m, minAbsSpreadDollars: 0.50m));
+	}
+
+	/// <summary>The AND requirement is what keeps this from rejecting perfectly normal cheap, thin,
+	/// far-OTM legs — a $0.20 option with a nickel-wide market is 25% of mid (would fail on % alone) but
+	/// only $0.05 of real dollar risk, comfortably under the absolute floor.</summary>
+	[Fact]
+	public void FillSpreadGate_ExemptsACheapLegEvenAtAWidePercentage()
+	{
+		var symbols = new[] { "cheapleg" };
+		var quotes = new Dictionary<string, OptionContractQuote> { ["cheapleg"] = TestQuote.Q(0.175m, 0.225m) }; // $0.05 wide, 25% of mid
+		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, quotes, maxSpreadPctOfMid: 0.12m, minAbsSpreadDollars: 0.50m));
+	}
+
+	[Fact]
+	public void FillSpreadGate_ZeroThresholdDisables()
+	{
+		var symbols = new[] { "763P" };
+		var quotes = new Dictionary<string, OptionContractQuote> { ["763P"] = TestQuote.Q(8.87m, 10.78m) };
+		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, quotes, maxSpreadPctOfMid: 0m, minAbsSpreadDollars: 0.50m));
+	}
+
+	[Fact]
+	public void FillSpreadGate_LegsWithNoQuote_DoNotBlock()
+	{
+		// No two-sided book for either symbol — synthetic-priced legs are not this gate's concern.
+		var symbols = new[] { "A", "B" };
+		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, new Dictionary<string, OptionContractQuote>(), maxSpreadPctOfMid: 0.12m, minAbsSpreadDollars: 0.50m));
 	}
 
 	[Fact]

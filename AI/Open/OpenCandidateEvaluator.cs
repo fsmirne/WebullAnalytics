@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using WebullAnalytics.AI.Events;
+using WebullAnalytics.AI.Open.ZeroDte;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.RiskDiagnostics;
@@ -110,6 +111,24 @@ internal sealed class OpenCandidateEvaluator
 	/// proposal log (the 2026-08-03 incident). Null when the opener enumerated or priced nothing.</summary>
 	public OpenProposal? LastTopCandidate { get; private set; }
 
+	/// <summary>The 0DTE session-gate verdict from the most recent <see cref="EvaluateAsync"/> call, per
+	/// ticker. Empty when the gate is disabled. Surfaced so `wa ai watch` can render WHY a tick withheld an
+	/// entry — without it a gated session is indistinguishable from a dead loop, which is the same failure
+	/// the tick heartbeat was added to fix.
+	///
+	/// <para>Locked because <c>BacktestRunner</c> shares ONE evaluator instance across a
+	/// <c>Parallel.ForEachAsync</c> over the day's minutes. The neighbouring <see cref="LastTopCandidate"/>
+	/// and <see cref="LastPricedQuotes"/> get away with being unsynchronised — they are reference
+	/// assignments, so a race is a benign last-writer-wins — but concurrent mutation of a
+	/// <see cref="Dictionary{TKey,TValue}"/> can corrupt its buckets or throw. The lock is taken once per
+	/// minute per ticker, which is nothing next to candidate scoring.</para></summary>
+	public IReadOnlyDictionary<string, ZeroDteGateVerdict> LastGateVerdicts
+	{
+		get { lock (_gateVerdictLock) return new Dictionary<string, ZeroDteGateVerdict>(_lastGateVerdicts, StringComparer.OrdinalIgnoreCase); }
+	}
+	private readonly Dictionary<string, ZeroDteGateVerdict> _lastGateVerdicts = new(StringComparer.OrdinalIgnoreCase);
+	private readonly object _gateVerdictLock = new();
+
 	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation, QuoteOverrides quoteOverrides = default)
 	{
 		var cfg = _config.Opener;
@@ -125,6 +144,7 @@ internal sealed class OpenCandidateEvaluator
 		// Reset so the live quote guard never inspects a prior tick's book; repopulated once Phase B finalizes it.
 		LastPricedQuotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		LastTopCandidate = null;
+		lock (_gateVerdictLock) _lastGateVerdicts.Clear();
 
 		// Phase A0: bootstrap spots + chains for tickers missing from ctx.UnderlyingPrices.
 		// The live-quote clients return the full chain plus the underlying spot for any OCC symbol,
@@ -392,9 +412,34 @@ internal sealed class OpenCandidateEvaluator
 			// moveSign, and intraday tape — via the shared static pipeline that wa analyze risk also calls.
 			// This is the single source of truth; having one code path guarantees identical bias values
 			// across the scanner and every inspector command.
-			var regimeComponents = await ComputeRegimeComponentsAsync(tickerGroup.Key, cfg, macroBias, ctx.Now, _priceCache, GetOrCreateIntradayCache(), includeCurrentBar: !_backtestMode, cancellation);
+			var regimeComputation = await ComputeRegimeComponentsAsync(tickerGroup.Key, cfg, macroBias, ctx.Now, _priceCache, GetOrCreateIntradayCache(), includeCurrentBar: !_backtestMode, cancellation);
+			var regimeComponents = regimeComputation.Components;
 			decimal BiasForDte(int dteCalendar) => RegimeAnalyzer.BlendBias(regimeComponents, cfg, dteCalendar);
 			lastRegimeComponents[tickerGroup.Key] = regimeComponents;
+
+			// 0DTE session gate (opener.zeroDteGate). Applied BEFORE scoring so a session the framework has
+			// not endorsed costs nothing to price, and so the reason is attributable to a named condition
+			// rather than to a score that came out low. Skeletons the gate rejects are dropped outright — this
+			// is the mechanism by which the day can end flat.
+			IEnumerable<CandidateSkeleton> gatedGroup = tickerGroup;
+			if (cfg.ZeroDteGate.Enabled)
+			{
+				var nowEt = ToEasternWallClock(ctx.Now);
+				var verdict = ZeroDteSessionGate.Evaluate(cfg.ZeroDteGate, regimeComputation.SessionRthBars, regimeComputation.PrevClose, regimeComponents.Intraday?.Score, nowEt);
+				lock (_gateVerdictLock) _lastGateVerdicts[tickerGroup.Key] = verdict;
+				var gateRejects = 0;
+				var firstGateReason = string.Empty;
+				var kept = new List<CandidateSkeleton>();
+				foreach (var skel in tickerGroup)
+				{
+					if (ZeroDteCandidateFilter.Admits(cfg.ZeroDteGate, verdict, skel, spot, ctx.Now, mergedQuotes, out var gateReason)) { kept.Add(skel); continue; }
+					gateRejects++;
+					if (firstGateReason.Length == 0) firstGateReason = gateReason;
+				}
+				gatedGroup = kept;
+				if (debug)
+					Console.Error.WriteLine($"[debug] {tickerGroup.Key} 0DTE gate state={verdict.State} kept={kept.Count} rejected={gateRejects} — {verdict.Summary}{(gateRejects > 0 ? $" | first reject: {firstGateReason}" : string.Empty)}");
+			}
 
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
 			shortHorizonHvByTicker.TryGetValue(tickerGroup.Key, out var shortHorizonHv);
@@ -431,7 +476,7 @@ internal sealed class OpenCandidateEvaluator
 				// Debug path stays serial: the per-skeleton rejection counters and Console.Error writes
 				// need ordered, single-threaded access. Scoring volume in debug mode is the cost of getting
 				// the diagnostic output, which is the whole point of running with --debug.
-				foreach (var skel in tickerGroup)
+				foreach (var skel in gatedGroup)
 				{
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
 					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf, vetoNow: ctx.Now);
@@ -479,7 +524,7 @@ internal sealed class OpenCandidateEvaluator
 				// parallel, so fanning scoring out here too is nested parallelism — it oversubscribes the
 				// pool and the contention dominates. Cap to 1 (serial) under backtest; the minute-level
 				// parallelism is what keeps all cores busy. Live (single evaluation at a time) still fans out.
-				var skels = tickerGroup.ToList();
+				var skels = gatedGroup.ToList();
 				var results = new OpenProposal?[skels.Count];
 				var scoreOpts = new ParallelOptions { CancellationToken = cancellation, MaxDegreeOfParallelism = _backtestMode ? 1 : -1 };
 				Parallel.For(0, skels.Count, scoreOpts, i =>
@@ -542,6 +587,28 @@ internal sealed class OpenCandidateEvaluator
 						foreach (var line in Output.ReproductionCommands.Build(bestCandidate, _pricingMode, explicitAnalyzePrices: true))
 							Console.Error.WriteLine($"          ↪ {line}");
 				}
+			}
+
+			// 0DTE gate, second half: the credit-vs-width check (Class #03 §7 / #04 §8). It lives here rather
+			// than with the pre-scoring placement check because it needs the PRICED net credit. Applied before
+			// the per-structure truncation so rejected candidates don't consume top-N slots.
+			if (cfg.ZeroDteGate.Enabled)
+			{
+				var creditRejects = 0;
+				var firstCreditReason = string.Empty;
+				foreach (var key in scoredByStructure.Keys.ToList())
+				{
+					var kept = new List<OpenProposal>(scoredByStructure[key].Count);
+					foreach (var p in scoredByStructure[key])
+					{
+						if (ZeroDteCandidateFilter.AdmitsCredit(cfg.ZeroDteGate, p, ctx.Now, out var creditReason)) { kept.Add(p); continue; }
+						creditRejects++;
+						if (firstCreditReason.Length == 0) firstCreditReason = creditReason;
+					}
+					scoredByStructure[key] = kept;
+				}
+				if (debug && creditRejects > 0)
+					Console.Error.WriteLine($"[debug] {tickerGroup.Key} 0DTE gate credit check rejected {creditRejects} priced candidate(s) — first: {firstCreditReason}");
 			}
 
 			// Per-structure top-N truncation.
@@ -1020,7 +1087,16 @@ internal sealed class OpenCandidateEvaluator
 	///
 	/// includeCurrentBar: true = live (include the partial current minute), false = backtest (exclude
 	/// the forming bar to prevent one-minute look-ahead in a bar-start-convention tape).</summary>
-	internal static async Task<RegimeAnalyzer.RegimeComponents> ComputeRegimeComponentsAsync(string ticker, OpenerConfig cfg, decimal macroBias, DateTime asOf, HistoricalPriceCache priceCache, IntradayBarCache? intradayCache, bool includeCurrentBar, CancellationToken cancellation)
+	/// <summary>What <see cref="ComputeRegimeComponentsAsync"/> resolved: the blended-bias inputs plus the two
+	/// raw session artifacts the 0DTE gate needs. The gate reads <see cref="SessionRthBars"/> and
+	/// <see cref="PrevClose"/> rather than re-deriving them so its gap and VWAP can never disagree with the
+	/// <see cref="IntradayBias"/> the scorer is using on the same tick.</summary>
+	internal readonly record struct RegimeComputation(
+		RegimeAnalyzer.RegimeComponents Components,
+		IReadOnlyList<MinuteBar> SessionRthBars,
+		decimal? PrevClose);
+
+	internal static async Task<RegimeComputation> ComputeRegimeComponentsAsync(string ticker, OpenerConfig cfg, decimal macroBias, DateTime asOf, HistoricalPriceCache priceCache, IntradayBarCache? intradayCache, bool includeCurrentBar, CancellationToken cancellation)
 	{
 		// VIX term structure (VIX vs VIX9D)
 		decimal? vixTermScore = null;
@@ -1042,7 +1118,7 @@ internal sealed class OpenCandidateEvaluator
 		// Bias-calibration move sign and yesterday's close (intraday gap component)
 		decimal moveSign = 0m;
 		decimal? prevClose = null;
-		if (cfg.BiasCalibrationLookbackDays > 0 || cfg.Weights.IntradayTape > 0m)
+		if (cfg.BiasCalibrationLookbackDays > 0 || cfg.Weights.IntradayTape > 0m || cfg.ZeroDteGate.Enabled)
 		{
 			try
 			{
@@ -1086,7 +1162,71 @@ internal sealed class OpenCandidateEvaluator
 			}
 		}
 
-		return new RegimeAnalyzer.RegimeComponents(macroBias, vixTermScore, intradayBias, moveSign);
+		// Session RTH bars for the 0DTE gate. Fetched separately from the tape's window on purpose: the tape
+		// looks back `lookbackMinutes` (which may reach into yesterday, and whose last prior-date bar is what
+		// supplies its own prevClose), whereas the gate needs TODAY'S session from the 09:30 bell so its
+		// VWAP-hold and range-window counts are anchored to the open. Second call is an in-memory hit on the
+		// same IntradayBarCache entry, so this costs a filter pass, not a fetch.
+		var sessionBars = (IReadOnlyList<MinuteBar>)Array.Empty<MinuteBar>();
+		if (cfg.ZeroDteGate.Enabled && intradayCache != null)
+		{
+			try
+			{
+				// Local (live) must go through the machine's own offset; Unspecified (backtest minuteEt) is
+				// already ET and is interpreted as such. Getting this wrong shifts the whole session window.
+				var asOfUtc = asOf.Kind switch
+				{
+					DateTimeKind.Utc => new DateTimeOffset(asOf, TimeSpan.Zero),
+					DateTimeKind.Local => new DateTimeOffset(asOf.ToUniversalTime(), TimeSpan.Zero),
+					_ => new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(asOf, DateTimeKind.Unspecified), NyTz), TimeSpan.Zero)
+				};
+				var toUtc = includeCurrentBar ? asOfUtc : asOfUtc.AddTicks(-1);
+				var nowEt = TimeZoneInfo.ConvertTime(asOfUtc, NyTz);
+				var openEtUnspecified = new DateTime(nowEt.Year, nowEt.Month, nowEt.Day, 9, 30, 0, DateTimeKind.Unspecified);
+				var fromUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(openEtUnspecified, NyTz), TimeSpan.Zero);
+				if (fromUtc <= toUtc)
+				{
+					var raw = await intradayCache.GetBarsAsync(ticker, fromUtc, toUtc, BarInterval.M1, includeExtended: false, cancellation);
+					// The cache serves every row on disk regardless of includeExtended, so filter RTH here —
+					// SessionTape's contract is RTH-only input and a 04:00 ET pre-market bar would otherwise
+					// become the session "open" anchor.
+					sessionBars = raw.Where(b => IsRegularSessionEt(b.Timestamp)).ToList();
+				}
+			}
+			catch (Exception ex) when (ex is not OperationCanceledException)
+			{
+				Console.WriteLine($"0DTE gate: session bar fetch failed for {ticker}: {ex.Message}");
+			}
+		}
+
+		return new RegimeComputation(new RegimeAnalyzer.RegimeComponents(macroBias, vixTermScore, intradayBias, moveSign), sessionBars, prevClose);
+	}
+
+	/// <summary>Converts an evaluation instant to an ET wall-clock time, which is what every time-of-day gate
+	/// compares against. The three callers hand this three different kinds and they must not be conflated:
+	/// <list type="bullet">
+	///   <item><description><b>Unspecified</b> — the backtest's per-minute <c>minuteEt</c>, already ET by
+	///     construction (<c>DateTime.SpecifyKind(ConvertTimeFromUtc(..., NyTz), Unspecified)</c>). Pass through.</description></item>
+	///   <item><description><b>Local</b> — live <c>DateTime.Now</c> from <c>wa ai watch</c>/<c>scan</c>. On a
+	///     machine that is not set to New York this is NOT ET, so it must be converted. Treating it as ET
+	///     would shift every entry-window boundary by the machine's UTC offset — a European clock would open
+	///     the 10:15 window at 04:15 ET and a no-trade day would look like a normal one.</description></item>
+	///   <item><description><b>Utc</b> — converted.</description></item>
+	/// </list></summary>
+	internal static DateTime ToEasternWallClock(DateTime instant) => instant.Kind switch
+	{
+		DateTimeKind.Utc => DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(instant, NyTz), DateTimeKind.Unspecified),
+		DateTimeKind.Local => DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(instant, NyTz), DateTimeKind.Unspecified),
+		_ => instant
+	};
+
+	private static readonly TimeSpan RegularSessionStartEt = new(9, 30, 0);
+	private static readonly TimeSpan RegularSessionEndEt = new(16, 0, 0);
+
+	private static bool IsRegularSessionEt(DateTimeOffset ts)
+	{
+		var tod = TimeZoneInfo.ConvertTime(ts, NyTz).TimeOfDay;
+		return tod >= RegularSessionStartEt && tod < RegularSessionEndEt;
 	}
 
 	private IntradayBarCache? GetOrCreateIntradayCache()

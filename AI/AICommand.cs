@@ -916,8 +916,26 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (settings.LongConvictionOverride.HasValue) config.Opener.LongConvictionGate.Weight = settings.LongConvictionOverride.Value;
 		if (!string.IsNullOrWhiteSpace(settings.OpenAfterOverride)) config.Opener.EarliestEntryTimeEt = settings.OpenAfterOverride;
 		if (!string.IsNullOrWhiteSpace(settings.OpenBeforeOverride)) config.Opener.LatestEntryTimeEt = settings.OpenBeforeOverride;
-		if (settings.TpPctOverride.HasValue) config.Rules.TakeProfit.ProfitTargetPctOfPremium = settings.TpPctOverride.Value;
-		if (settings.SlOverride.HasValue) config.Opener.RealizedExpectancy.StopLossPctOfMaxLoss = settings.SlOverride.Value;
+		if (settings.TpPctOverride.HasValue)
+		{
+			config.Rules.TakeProfit.ProfitTargetPctOfPremium = settings.TpPctOverride.Value;
+			// Also ARM the rule. Setting the percentage alone was a silent no-op on any config with
+			// rules.takeProfit.enabled=false: the run came back byte-identical to the baseline and looked
+			// like "take-profit makes no difference" when in fact take-profit never ran. A sweep flag that
+			// can silently do nothing is worse than no flag. Pass --tp-pct 0 to disable instead.
+			config.Rules.TakeProfit.Enabled = settings.TpPctOverride.Value > 0m;
+		}
+		if (settings.SlOverride.HasValue)
+		{
+			// Three writes, not one. The flag's own description says it overrides rules.stopLoss.pctOfMaxLoss,
+			// but it only ever wrote the opener's realized-EV copy — so on a config with stopLoss disabled it
+			// silently re-ranked candidates without ever arming an exit, and the sweep came back with
+			// "Closes (rules) 0" and a P&L that moved only because the SCORER's EV model had changed. Same
+			// class of silent no-op as --tp-pct above. --sl 1.0 still means "no stop" (ride to settlement).
+			config.Opener.RealizedExpectancy.StopLossPctOfMaxLoss = settings.SlOverride.Value;
+			config.Rules.StopLoss.PctOfMaxLoss = settings.SlOverride.Value;
+			config.Rules.StopLoss.Enabled = settings.SlOverride.Value < 1m;
+		}
 		if (settings.ExhaustOverride.HasValue) config.Rules.StopLoss.ThetaExhaustShortMid = settings.ExhaustOverride.Value;
 		foreach (var name in settings.EnableStructures)
 		{

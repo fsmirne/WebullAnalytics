@@ -25,11 +25,17 @@ internal sealed class StopLossRule : IManagementRule
 {
 	private readonly StopLossConfig _config;
 	private readonly OpenerRealizedExpectancyConfig _realizedExpectancy;
+	/// <summary>Same knob as the opener's <c>minEntryToNoiseRatio</c> (<see cref="OpenerConfig.MinEntryToNoiseRatio"/>),
+	/// applied on the exit side via <see cref="CandidateScorer.PassesExitNoiseGate"/>. 0 (default) preserves
+	/// prior behavior exactly. Gates the two realized-loss triggers below, not theta-exhaust (that trigger
+	/// already requires every early short leg's mid to agree at a floor, which is its own noise dampening).</summary>
+	private readonly decimal _minEntryToNoiseRatio;
 
-	public StopLossRule(StopLossConfig config, OpenerRealizedExpectancyConfig realizedExpectancy)
+	public StopLossRule(StopLossConfig config, OpenerRealizedExpectancyConfig realizedExpectancy, decimal minEntryToNoiseRatio = 0m)
 	{
 		_config = config;
 		_realizedExpectancy = realizedExpectancy;
+		_minEntryToNoiseRatio = minEntryToNoiseRatio;
 	}
 
 	public string Name => "StopLossRule";
@@ -59,7 +65,7 @@ internal sealed class StopLossRule : IManagementRule
 			&& _realizedExpectancy.StopLossPctOfMaxLoss < 1m)
 		{
 			var threshold = maxLossPerShare.Value * _realizedExpectancy.StopLossPctOfMaxLoss;
-			if (realizedLoss >= threshold)
+			if (realizedLoss >= threshold && PassesExitNoise(position, ctx, realizedLoss))
 			{
 				return BuildClose(position, ctx, markPerShare.Value,
 					$"realized loss ${realizedLoss:F2}/share ≥ {_realizedExpectancy.StopLossPctOfMaxLoss:P0} of max loss ${maxLossPerShare.Value:F2}");
@@ -76,7 +82,7 @@ internal sealed class StopLossRule : IManagementRule
 			&& _realizedExpectancy.StopLossPctOfMaxProfit > 0m)
 		{
 			var threshold = maxProfitPerShare.Value * _realizedExpectancy.StopLossPctOfMaxProfit;
-			if (realizedLoss >= threshold)
+			if (realizedLoss >= threshold && PassesExitNoise(position, ctx, realizedLoss))
 			{
 				return BuildClose(position, ctx, markPerShare.Value,
 					$"realized loss ${realizedLoss:F2}/share ≥ {_realizedExpectancy.StopLossPctOfMaxProfit:P0} of max profit ${maxProfitPerShare.Value:F2}");
@@ -125,6 +131,13 @@ internal sealed class StopLossRule : IManagementRule
 		var dte = (earlyShorts.Min(l => l.Expiry!.Value.Date) - ctx.Now.Date).Days;
 		return $"theta exhausted: all {earlyShorts.Count} early short leg(s) at mid ≤ ${worstMid:F2} (floor ${_config.ThetaExhaustShortMid:F2}) with {dte}d to short expiry, underwater ${realizedLoss:F2}/share — no premium left to recover through";
 	}
+
+	/// <summary>Wraps <see cref="CandidateScorer.PassesExitNoiseGate"/> for this rule's two realized-loss
+	/// trigger sites, so a threshold crossing that the legs' own quote noise fully explains doesn't fire —
+	/// see the field doc on <see cref="_minEntryToNoiseRatio"/> and the gate's own doc for the trade that
+	/// exposed the gap.</summary>
+	private bool PassesExitNoise(OpenPosition position, EvaluationContext ctx, decimal realizedSwing)
+		=> CandidateScorer.PassesExitNoiseGate(position.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol), ctx.Quotes, realizedSwing, _minEntryToNoiseRatio);
 
 	private static ManagementProposal BuildClose(OpenPosition p, EvaluationContext ctx, decimal markPerShare, string rationale)
 	{
