@@ -68,7 +68,9 @@ internal static class SchwabAuthClient
 		}
 		catch (SchwabAuthException ex)
 		{
-			throw new SchwabAuthException($"Schwab token refresh failed ({ex.Message}). The 7-day refresh token has likely expired — run `wa schwab login`.", ex);
+			var days = RefreshTokenDaysRemaining(schwab);
+			var cause = days is > 0 ? $"The refresh token was revoked by Schwab {7 - days.Value:0.#} days after issue (a newer `wa schwab login` or a Schwab-side revocation invalidates it)" : "The 7-day refresh token has expired";
+			throw new SchwabAuthException($"Schwab token refresh failed ({ex.Message}). {cause} — run `wa schwab login`.", ex);
 		}
 		Persist(schwab, apiConfigPath);
 		return schwab.AccessToken!;
@@ -88,7 +90,7 @@ internal static class SchwabAuthClient
 		using var response = await SchwabHttp.Client.SendAsync(request, ct);
 		var body = await response.Content.ReadAsStringAsync(ct);
 		if (!response.IsSuccessStatusCode)
-			throw new SchwabAuthException($"HTTP {(int)response.StatusCode}: {Truncate(body, 300)}");
+			throw new SchwabAuthException($"HTTP {(int)response.StatusCode}: {DescribeError(body)}");
 
 		using var doc = JsonDocument.Parse(body);
 		var root = doc.RootElement;
@@ -120,6 +122,15 @@ internal static class SchwabAuthClient
 		var tmp = apiConfigPath + ".tmp";
 		File.WriteAllText(tmp, json);
 		File.Move(tmp, apiConfigPath, overwrite: true);
+	}
+
+	/// <summary>Schwab nests the upstream OAuth error as a JSON string inside error_description, e.g.
+	/// <c>{"error":"unsupported_token_type","error_description":"400 Bad Request: \"{\"error_description\":\"Refresh token is invalid, expired or revoked\",\"error\":\"invalid_grant\"}\""}</c>.
+	/// Surfaces the innermost error_description when present; otherwise the truncated raw body.</summary>
+	internal static string DescribeError(string body)
+	{
+		var inner = Regex.Matches(body, @"\\?""error_description\\?""\s*:\s*\\?""([^""\\]+)").LastOrDefault();
+		return inner != null ? inner.Groups[1].Value : Truncate(body, 300);
 	}
 
 	private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max];

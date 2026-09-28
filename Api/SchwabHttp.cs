@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace WebullAnalytics.Api;
 
 /// <summary>Process-wide shared <see cref="HttpClient"/> for the Schwab host (<c>api.schwabapi.com</c>). Both the
@@ -11,8 +13,11 @@ namespace WebullAnalytics.Api;
 /// long-lived client with connection pooling (keep-alive) avoids it. Auth is passed per-request (Bearer on chains,
 /// Basic on token), never on the client, so sharing one client across both paths is safe; HttpClient is thread-safe
 /// for concurrent requests, so it also holds up under concurrent scraper calls. Mirrors
-/// <see cref="WebullChartsClient"/>'s SharedClient (a separate pool — different host and default headers).</summary>
+/// <see cref="WebullChartsClient"/>'s SharedClient (a separate pool — different host and default headers).
+///
+/// Schwab gzips response bodies (including OAuth error bodies) even when the request sends no Accept-Encoding, so
+/// automatic decompression is required or error text surfaces as binary garbage.</summary>
 internal static class SchwabHttp
 {
-	public static readonly HttpClient Client = new() { Timeout = TimeSpan.FromSeconds(30) };
+	public static readonly HttpClient Client = new(new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All }) { Timeout = TimeSpan.FromSeconds(30) };
 }

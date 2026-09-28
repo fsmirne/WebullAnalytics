@@ -28,4 +28,18 @@ public class SchwabAuthClientTests
 	{
 		Assert.Null(SchwabAuthClient.ExtractCode("https://127.0.0.1/?session=xyz"));
 	}
+
+	[Fact]
+	public void DescribeError_unwraps_nested_oauth_error()
+	{
+		// Verbatim shape of Schwab's 400 for a revoked refresh token (decompressed).
+		const string body = "{\"error\":\"unsupported_token_type\",\"error_description\":\"400 Bad Request: \\\"{\\\"error_description\\\":\\\"Refresh token is invalid, expired or revoked\\\",\\\"error\\\":\\\"invalid_grant\\\"}\\\"\"}";
+		Assert.Equal("Refresh token is invalid, expired or revoked", SchwabAuthClient.DescribeError(body));
+	}
+
+	[Fact]
+	public void DescribeError_falls_back_to_raw_body()
+	{
+		Assert.Equal("Service Unavailable", SchwabAuthClient.DescribeError("Service Unavailable"));
+	}
 }
