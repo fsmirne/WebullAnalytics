@@ -1,11 +1,29 @@
 #!/usr/bin/env bash
-# paper_vs_backtest.sh <YYYY-MM-DD> — daily FIDELITY check for the SPY winner.
+# paper_vs_backtest.sh <YYYY-MM-DD> [STRATEGY|auto] [TICKER] — daily FIDELITY check for the live winner.
 #
 # WHY: the backtest is only trustworthy for sizing/holding-through-DD if it predicts
 # what live actually does. cec0170 showed the backtest can silently diverge from live.
 # This compares, for one date, the LIVE paper pick (from the watch's proposal log) to
 # the same-day BACKTEST pick for the same config. Agreement over ~1-2 weeks is what
 # earns trust before real capital.
+#
+# STRATEGY SELECTION (was hardcoded DC; that silently mis-reported any day the live watch
+# ran a different strategy — e.g. SPY.DC2 from 09-28 on). Default is `auto`: discover which
+# strategies the watch ACTUALLY ran on <date> from the per-strategy proposal logs
+# (data/ai-proposals.<TICKER>.<STRATEGY>.jsonl) and compare each one. Override with the 2nd
+# arg (a single token, or a comma-separated list) or $PVB_STRATEGY; ticker with the 3rd arg
+# or $PVB_TICKER (default SPY).
+#   paper_vs_backtest.sh 2026-09-29            # auto -> DC2 (the strategy live ran that day)
+#   paper_vs_backtest.sh 2026-07-15 DC         # pin a strategy (needed for pre-`tick`-heartbeat
+#                                              # campaign days where live legitimately never opened)
+#   paper_vs_backtest.sh 2026-09-29 DC,DC2     # compare both
+# Discovery keys off `mode:"watch"` rows, NOT just open proposals, so a day where the watch
+# ran but nothing cleared MinScoreToOpen is still compared (that's the open/no-open check —
+# a campaign hard fail — and skipping it would hide it). `mode:"scan"` rows are ignored
+# throughout: `wa ai scan --all` writes to the same logs and is not what watch does.
+# Strategies that opened rank first; when more than one is compared the script prints a
+# per-strategy summary and exits with the most severe code (MISMATCH > FATAL > LEG-FLIP >
+# INCONCLUSIVE > MATCH).
 #
 # LIVE pick   = top-finalScore 'open' proposal at the FIRST tick >= 09:30 ET that day
 #               (the opener fires once at the RTH open — earliest-wins entry rule).
@@ -37,19 +55,95 @@
 # Run AFTER the evening ThetaData backfill lands the day's quotes (~19:00 ET), else the
 # single-day backtest has nothing to price. Reads the installed wa.exe + AppData.
 set -u
-DATE="${1:?usage: paper_vs_backtest.sh YYYY-MM-DD}"
-STRATEGY=DC        # DC = the consolidated live strategy (diag-only 5-15/30-45 @ 0.20)
+DATE="${1:?usage: paper_vs_backtest.sh YYYY-MM-DD [STRATEGY|auto] [TICKER]}"
+STRATEGY_ARG="${2:-${PVB_STRATEGY:-auto}}"
+TICKER="${3:-${PVB_TICKER:-SPY}}"
 WAHOME="$(ls -d /mnt/c/Users/*/AppData/Local/WebullAnalytics 2>/dev/null | head -1)"
 WINUSER="$(echo "$WAHOME" | cut -d/ -f5)"
 WA="$WAHOME/wa.exe"
-PROPOSALS="$WAHOME/data/ai-proposals.SPY.${STRATEGY}.jsonl"
-WINFILLS="C:\\Users\\$WINUSER\\AppData\\Local\\WebullAnalytics\\sweeps\\pvb.jsonl"
-LXFILLS="$WAHOME/sweeps/pvb.jsonl"
+DATADIR="$WAHOME/data"
 
 [ -x "$WA" ] || { echo "FATAL: wa.exe not found"; exit 2; }
-[ -f "$PROPOSALS" ] || { echo "NOTE: no proposal log yet at $PROPOSALS — run 'wa ai watch SPY --strategy $STRATEGY' (submit off) first."; exit 2; }
+[ -d "$DATADIR" ] || { echo "FATAL: data dir not found at $DATADIR"; exit 2; }
 
-rm -f "$LXFILLS" 2>/dev/null
+# ---- which strategies was the watch running on $DATE? -------------------------------------------
+# Scans data/ai-proposals.<TICKER>.*.jsonl for mode:"watch" rows dated $DATE. Emits the ones that
+# produced an open proposal >=09:30 first (the live pick is there), then the ones that only
+# heartbeat-ticked (watch ran, nothing cleared the gate — still worth comparing: that is the
+# open/no-open check). A log whose last write predates $DATE cannot contain rows for it, so it is
+# skipped unread — this keeps the 71MB SPY.DC log off the hot path for recent dates.
+discover_strategies() {
+	python3 - "$DATE" "$DATADIR" "$TICKER" <<'PY'
+import datetime, glob, json, os, re, sys
+date, datadir, ticker = sys.argv[1], sys.argv[2], sys.argv[3]
+name_re = re.compile(r"^ai-proposals\." + re.escape(ticker) + r"\.(.+)\.jsonl$")
+opened, ticked = set(), set()
+for path in sorted(glob.glob(os.path.join(datadir, f"ai-proposals.{ticker}.*.jsonl"))):
+    m = name_re.match(os.path.basename(path))
+    if not m: continue
+    try:
+        st = os.stat(path)
+    except OSError: continue
+    if st.st_size == 0: continue
+    # last write before $DATE began => cannot hold rows dated $DATE
+    if datetime.date.fromtimestamp(st.st_mtime).isoformat() < date: continue
+    strat = m.group(1)
+    for line in open(path, errors='replace'):
+        line = line.strip()
+        if not line: continue
+        try: r = json.loads(line)
+        except Exception: continue
+        if r.get('mode') != 'watch': continue      # `wa ai scan --all` writes here too; not what watch does
+        ts = r.get('ts', '')
+        if ts[:10] != date: continue
+        ticked.add(strat)
+        if r.get('type') == 'open' and ts[11:19] >= '09:30:00': opened.add(strat)
+print(' '.join(sorted(opened) + sorted(ticked - opened)))
+PY
+}
+
+# Error-path diagnostic only: what each proposal log actually covers, so a bad date/ticker is
+# obvious instead of looking like a silent no-open.
+describe_logs() {
+	python3 - "$DATADIR" "$TICKER" <<'PY'
+import glob, json, os, re, sys
+datadir, ticker = sys.argv[1], sys.argv[2]
+name_re = re.compile(r"^ai-proposals\." + re.escape(ticker) + r"\.(.+)\.jsonl$")
+rows = []
+for path in sorted(glob.glob(os.path.join(datadir, f"ai-proposals.{ticker}.*.jsonl"))):
+    m = name_re.match(os.path.basename(path))
+    if not m: continue
+    days = set()
+    for line in open(path, errors='replace'):
+        line = line.strip()
+        if not line: continue
+        try: r = json.loads(line)
+        except Exception: continue
+        if r.get('mode') == 'watch' and r.get('ts'): days.add(r['ts'][:10])
+    d = sorted(days)
+    rows.append((m.group(1), len(d), d[0] if d else '-', d[-1] if d else '-'))
+if not rows:
+    print(f"  (no ai-proposals.{ticker}.*.jsonl logs at all)"); sys.exit(0)
+print(f"  {'strategy':<12}{'watch days':>11}  {'first':<12}{'last':<12}")
+for s, n, a, b in rows:
+    print(f"  {s:<12}{n:>11}  {a:<12}{b:<12}")
+PY
+}
+
+if [ "$STRATEGY_ARG" = auto ]; then
+	read -r -a STRATEGIES <<<"$(discover_strategies)"
+	if [ "${#STRATEGIES[@]}" -eq 0 ]; then
+		echo "FATAL: no '$TICKER' strategy has any mode:\"watch\" proposal row dated $DATE."
+		echo "       The watch either wasn't running that day, or its log is under a different ticker."
+		echo "       Per-strategy coverage of data/ai-proposals.$TICKER.*.jsonl:"
+		describe_logs
+		echo "       Pin one explicitly if you know it: paper_vs_backtest.sh $DATE <STRATEGY> [$TICKER]"
+		exit 2
+	fi
+	[ "${#STRATEGIES[@]}" -gt 1 ] && echo "NOTE: $TICKER ran ${#STRATEGIES[@]} strategies on $DATE — comparing each: ${STRATEGIES[*]}"
+else
+	IFS=, read -r -a STRATEGIES <<<"$STRATEGY_ARG"
+fi
 
 # Bar-align the backtest to live's ACTUAL entry minute. The opener normally fires at the 09:30 open, but the
 # first successful proposal can land later — a quote-vendor hiccup, or (more often) simply nothing clearing
@@ -57,7 +151,27 @@ rm -f "$LXFILLS" 2>/dev/null
 # sides evaluate the same bar; on a clean day it resolves to 09:30 (a no-op). NOTE: --open-after also lets the
 # 09:30→entry intraday tape blend into the directional bias, so it aligns the entry BAR, not the bias
 # provenance a delayed live day actually had.
-LIVE_MIN=$(python3 - "$DATE" "$PROPOSALS" <<'PY'
+compare_one() {
+	local STRATEGY="$1"
+	local PROPOSALS="$DATADIR/ai-proposals.$TICKER.${STRATEGY}.jsonl"
+	local TICKERCFG="$DATADIR/ai-config.$TICKER.${STRATEGY}.json"
+	local WINFILLS="C:\\Users\\$WINUSER\\AppData\\Local\\WebullAnalytics\\sweeps\\pvb.$TICKER.${STRATEGY}.jsonl"
+	local LXFILLS="$WAHOME/sweeps/pvb.$TICKER.${STRATEGY}.jsonl"
+
+	if [ ! -f "$PROPOSALS" ]; then
+		echo "FATAL [$TICKER $STRATEGY]: no proposal log at $PROPOSALS — run 'wa ai watch $TICKER --strategy $STRATEGY' (submit off) first."
+		return 2
+	fi
+	# Without this the backtest silently falls back to another config and the comparison is meaningless.
+	if [ ! -f "$TICKERCFG" ]; then
+		echo "FATAL [$TICKER $STRATEGY]: no strategy config at $TICKERCFG — the backtest has nothing to reproduce the live picks with."
+		return 2
+	fi
+
+	rm -f "$LXFILLS" 2>/dev/null
+
+	local LIVE_MIN
+	LIVE_MIN=$(python3 - "$DATE" "$PROPOSALS" <<'PY'
 import json, sys
 date, path = sys.argv[1], sys.argv[2]
 mins=[]
@@ -71,14 +185,31 @@ for line in open(path):
         mins.append(r['ts'][11:16])
 print(min(mins) if mins else '')
 PY
-)
-OPEN_AFTER=()
-[ -n "$LIVE_MIN" ] && OPEN_AFTER=(--open-after "$LIVE_MIN")
-"$WA" ai backtest SPY --strategy "$STRATEGY" --since "$DATE" --until "$DATE" --lots 1 --scan-stride 1 ${OPEN_AFTER[@]+"${OPEN_AFTER[@]}"} --fills-jsonl "$WINFILLS" >/dev/null 2>&1
+	)
+	local OPEN_AFTER=()
+	[ -n "$LIVE_MIN" ] && OPEN_AFTER=(--open-after "$LIVE_MIN")
+	local BTLOG
+	BTLOG="$(mktemp)"
+	"$WA" ai backtest "$TICKER" --strategy "$STRATEGY" --since "$DATE" --until "$DATE" --lots 1 --scan-stride 1 ${OPEN_AFTER[@]+"${OPEN_AFTER[@]}"} --fills-jsonl "$WINFILLS" >"$BTLOG" 2>&1
 
-python3 - "$DATE" "$PROPOSALS" "$LXFILLS" <<'PY'
+	# A day run before the evening ThetaData backfill has NO quotes, so the backtest prices nothing and
+	# emits no fills. Left unchecked that reads as "live OPENED but backtest no-open" = exit 1 MISMATCH,
+	# i.e. a phantom campaign hard-fail on every same-day run. Detect it and report "could not run" (2).
+	if grep -q 'no real NBBO quotes' "$BTLOG"; then
+		echo "=== paper vs backtest — $TICKER $STRATEGY $DATE ==="
+		echo "FATAL [$TICKER $STRATEGY]: no NBBO in the quote store for $DATE — the backtest priced nothing,"
+		echo "       so there is no bt side to compare (this is NOT a mismatch)."
+		grep -m1 'no real NBBO quotes' "$BTLOG" | sed 's/^/       /'
+		echo "       Re-run after the evening backfill (scripts/daily_backfill.sh) has landed the day's quotes."
+		rm -f "$BTLOG"
+		return 2
+	fi
+	rm -f "$BTLOG"
+
+	python3 - "$DATE" "$PROPOSALS" "$LXFILLS" "$TICKER" "$STRATEGY" <<'PY'
 import datetime, json, os, sys
 date, proposals_path, fills_path = sys.argv[1], sys.argv[2], sys.argv[3]
+ticker, strategy = sys.argv[4], sys.argv[5]
 
 def norm_legs(legs, sym_key, side_key):
     out=[]
@@ -136,7 +267,7 @@ def live_quote_map(live):
 def fmt(v, nd=3):
     return f"{v:.{nd}f}" if isinstance(v,(int,float)) else "n/a"
 
-print(f"=== paper vs backtest — SPY {date} ===")
+print(f"=== paper vs backtest — {ticker} {strategy} {date} ===")
 if not live and not bt:
     print("BOTH: no open this day — consistent (no trade)."); sys.exit(0)
 if bool(live) != bool(bt):
@@ -166,7 +297,8 @@ def sf(v, nd, pct=False, sign=False):
     return s+("pt" if pct and sign else "%" if pct else "")
 def delta(a,b): return (b-a) if isinstance(a,(int,float)) and isinstance(b,(int,float)) else None
 def verdict(label, detail, ok):
-    print(f"  {label:<{LW}}{detail:<{2*W}}{'MATCH ✓' if ok else 'MISMATCH ✗'}")
+    # pad to 2*W but always keep >=1 space, else a long detail glues to the verdict word
+    print(f"  {label:<{LW}}{detail:<{2*W}} {'MATCH ✓' if ok else 'MISMATCH ✗'}")
 
 diag=live.get('diagnostic') or {}
 lq=live_quote_map(live)
@@ -251,9 +383,9 @@ if legs_ok:
 elif tie_kind is not None:
     label = 'opposite-side ATM tie' if tie_kind == 'atm' else 'adjacent-strike tie' if tie_kind == 'strike' else 'adjacent-expiry tie' if tie_kind == 'expiry' else 'adjacent short-expiry tie'
     note = '(coin-flip; P&L will diverge)' if tie_kind == 'atm' else '(long leg ±1 strike; P&L nearly identical)' if tie_kind == 'strike' else '(long leg one expiry step; P&L similar, drifts more than ±1 strike)' if tie_kind == 'expiry' else '(short leg one listed expiry step; P&L similar, one day of theta apart)'
-    print(f"  {'legs':<{LW}}{label:<{2*W}}INCONCLUSIVE ⚠ {note}")
+    print(f"  {'legs':<{LW}}{label:<{2*W}} INCONCLUSIVE ⚠ {note}")
 elif leg_flip:
-    print(f"  {'legs':<{LW}}{'leg flip (same struct+expiry)':<{2*W}}LEG-FLIP ⚠ (side/strike beyond tie tol; per-lot P&L ~washes)")
+    print(f"  {'legs':<{LW}}{'leg flip (same struct+expiry)':<{2*W}} LEG-FLIP ⚠ (side/strike beyond tie tol; per-lot P&L ~washes)")
 else:
     verdict("legs", f"{len(live_legs)} legs", False)
 
@@ -375,3 +507,44 @@ if struct_ok and leg_flip:
     sys.exit(4)
 print(f"  RESULT: MISMATCH — structure/expiry divergence (structure_ok={struct_ok} legs_ok={legs_ok})"); sys.exit(1)
 PY
+}
+
+# Severity ladder for the aggregate exit code. MISMATCH outranks FATAL deliberately: a real
+# structure/expiry divergence is the campaign's hard fail and must not be masked by another
+# strategy's missing config.
+severity() { case "$1" in 0) echo 0;; 3) echo 1;; 4) echo 2;; 2) echo 3;; 1) echo 4;; *) echo 5;; esac; }
+label_of() {
+	case "$1" in
+		0) echo "MATCH / both-no-open ✓";;
+		1) echo "MISMATCH ✗";;
+		2) echo "FATAL (could not run)";;
+		3) echo "INCONCLUSIVE ⚠";;
+		4) echo "LEG-FLIP ⚠";;
+		*) echo "exit $1";;
+	esac
+}
+
+WORST=0
+RESULTS=()
+FIRST=1
+for S in "${STRATEGIES[@]}"; do
+	[ -n "$S" ] || continue
+	[ "$FIRST" -eq 1 ] || echo
+	FIRST=0
+	compare_one "$S"
+	RC=$?
+	RESULTS+=("$S=$RC")
+	[ "$(severity "$RC")" -gt "$(severity "$WORST")" ] && WORST="$RC"
+done
+
+# Single-strategy runs keep the original output verbatim (the campaign ledger is transcribed from
+# it); only a multi-strategy run adds the roll-up.
+if [ "${#RESULTS[@]}" -gt 1 ]; then
+	echo
+	echo "=== summary — $TICKER $DATE (${#RESULTS[@]} strategies) ==="
+	for R in "${RESULTS[@]}"; do
+		printf '  %-12s %s\n' "${R%%=*}" "$(label_of "${R##*=}")"
+	done
+	echo "  overall: $(label_of "$WORST") (exit $WORST)"
+fi
+exit "$WORST"
