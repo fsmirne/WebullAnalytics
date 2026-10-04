@@ -10,9 +10,10 @@ namespace WebullAnalytics.Report;
 /// (XSP: ~$0.80/leg claimed vs ~$0.03 charged) — the cash record is the only source that ties to the
 /// platform's book to the penny. Matching is per LEG by root+expiry+right+side+posting DATE (posted rows
 /// lag fills by up to ~20 min and recent descriptions omit the strike, so time and strike can't be hard
-/// keys; strike equality IS enforced when the row carries one), closest-amount-first, each posted row
-/// consumed at most once. Purely offline — reads the local file only; anything unmatched (stale file,
-/// pre-history rows, settlements) keeps the computed fallback.</summary>
+/// keys; strike equality IS enforced when the row carries one). Supports single fills as well as split fills
+/// (multiple posted rows summing to computed cash within tolerance), each posted row consumed at most once.
+/// Purely offline — reads the local file only; anything unmatched (stale file, pre-history rows, settlements)
+/// keeps the computed fallback.</summary>
 internal static partial class BrokerCashOverlay
 {
 	// "Bought SPY 20260828P  740.000" / "Sold XSP 20260623C 752.000" / "Sold SPY 20260805P" (no strike)
@@ -32,8 +33,9 @@ internal static partial class BrokerCashOverlay
 	}
 
 	/// <summary>Sets <see cref="Trade.BrokerCash"/> on every option leg/standalone trade with a matching
-	/// posted row, then on each strategy parent whose legs ALL matched (parent = sum of leg postings; a
-	/// partially-matched combo keeps the computed path so its cash stays internally consistent).</summary>
+	/// posted row (or set of split-fill rows summing to computed cash), then on each strategy parent whose legs
+	/// ALL matched (parent = sum of leg postings; a partially-matched combo keeps the computed path so its cash
+	/// stays internally consistent).</summary>
 	internal static void Apply(List<Trade> trades, string dataDir)
 	{
 		var path = Path.Combine(dataDir, Path.GetFileName(Program.CashRecordPath));
@@ -56,11 +58,36 @@ internal static partial class BrokerCashOverlay
 
 			// Fee-inclusive computed cash for THIS leg — the yardstick for closest-amount matching.
 			var computed = (t.Side == Side.Sell ? 1m : -1m) * t.Price * t.Qty * t.Multiplier - (t.Fee ?? 0m);
-			var best = candidates.Where(c => !c.Used && (c.Strike == null || c.Strike == p.Strike)).OrderBy(c => Math.Abs(c.Amount - computed)).FirstOrDefault();
-			if (best == null) continue;
+			var tolerance = Math.Max(5.0m, t.Qty * 2.0m);
 
-			best.Used = true;
-			trades[i] = t with { BrokerCash = best.Amount };
+			var available = candidates.Where(c => !c.Used && (c.Strike == null || c.Strike == p.Strike))
+				.OrderBy(c => Math.Abs((c.Date - t.Timestamp).TotalSeconds))
+				.ToList();
+			if (available.Count == 0) continue;
+
+			// 1. Single candidate match within tolerance
+			var singleMatches = available
+				.Where(c => Math.Abs(c.Amount - computed) <= tolerance)
+				.OrderBy(c => Math.Abs(c.Amount - computed))
+				.ThenBy(c => Math.Abs((c.Date - t.Timestamp).TotalSeconds))
+				.ToList();
+
+			if (singleMatches.Count > 0)
+			{
+				var best = singleMatches[0];
+				best.Used = true;
+				trades[i] = t with { BrokerCash = best.Amount };
+				continue;
+			}
+
+			// 2. Split fills: check if a combination of available candidates sums to computed cash within tolerance
+			var bestSubset = FindBestSubset(available, computed, tolerance, t.Timestamp);
+			if (bestSubset != null)
+			{
+				foreach (var c in bestSubset)
+					c.Used = true;
+				trades[i] = t with { BrokerCash = bestSubset.Sum(c => c.Amount) };
+			}
 		}
 
 		// Parents: posted cash moves at the parent row in ComputeReport, so a combo gets broker cash
@@ -106,5 +133,46 @@ internal static partial class BrokerCashOverlay
 			});
 		}
 		return rows;
+	}
+
+	/// <summary>
+	/// Searches for a combination of 2 or more available posted rows whose sum equals target within tolerance.
+	/// Prefers subsets with smallest diff, then smallest size, then closest average time to tradeTime.
+	/// </summary>
+	private static List<PostedRow>? FindBestSubset(List<PostedRow> available, decimal target, decimal tolerance, DateTime tradeTime, int maxSubsetSize = 5)
+	{
+		List<PostedRow>? bestSubset = null;
+		decimal bestDiff = decimal.MaxValue;
+		double bestTimeDiff = double.MaxValue;
+
+		void Search(int startIdx, List<PostedRow> current, decimal currentSum)
+		{
+			if (current.Count >= 2)
+			{
+				var diff = Math.Abs(currentSum - target);
+				if (diff <= tolerance)
+				{
+					var timeDiff = current.Average(c => Math.Abs((c.Date - tradeTime).TotalSeconds));
+					if (diff < bestDiff || (diff == bestDiff && (current.Count < bestSubset!.Count || (current.Count == bestSubset.Count && timeDiff < bestTimeDiff))))
+					{
+						bestSubset = new List<PostedRow>(current);
+						bestDiff = diff;
+						bestTimeDiff = timeDiff;
+					}
+				}
+			}
+
+			if (current.Count >= maxSubsetSize) return;
+
+			for (var i = startIdx; i < available.Count; i++)
+			{
+				current.Add(available[i]);
+				Search(i + 1, current, currentSum + available[i].Amount);
+				current.RemoveAt(current.Count - 1);
+			}
+		}
+
+		Search(0, new List<PostedRow>(), 0m);
+		return bestSubset;
 	}
 }

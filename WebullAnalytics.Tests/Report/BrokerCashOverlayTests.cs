@@ -70,4 +70,59 @@ public class BrokerCashOverlayTests
 
 		Assert.Null(trades[2].BrokerCash);
 	}
+
+	[Fact]
+	public void Apply_SplitFills_SumsPartialFillsIntoLegAndParent()
+	{
+		// A 9-contract order split into 6 and 3 contracts:
+		// Sell leg: 9 contracts @ 3.56, fee 0.48 -> computed 3203.52. Cash record: 2135.68 (6x) + 1067.83 (3x) = 3203.51.
+		// Buy leg: 9 contracts @ 8.01, fee 0.41 -> computed -7209.41. Cash record: -4806.27 (6x) + -2403.14 (3x) = -7209.41.
+		var fillTime = new DateTime(2026, 10, 2, 10, 9, 39);
+		var shortExpiry = new DateTime(2026, 10, 8);
+		var longExpiry = new DateTime(2026, 10, 23);
+		const string parentKey = "strategy:Diagonal:SPY:2026-10-23:P770,P771";
+
+		var trades = new List<Trade>
+		{
+			new(1, fillTime, "SPY 23 Oct 2026", parentKey, Asset.OptionStrategy, "Diagonal", Side.Buy, 9, 4.45m, Trade.OptionMultiplier, longExpiry),
+			new(2, fillTime, Formatters.FormatOptionDisplay("SPY", longExpiry, 771m), MatchKeys.Option(MatchKeys.OccSymbol("SPY", longExpiry, 771m, "P")), Asset.Option, "Put", Side.Buy, 9, 8.01m, Trade.OptionMultiplier, longExpiry, 1, Fee: 0.41m),
+			new(3, fillTime, Formatters.FormatOptionDisplay("SPY", shortExpiry, 770m), MatchKeys.Option(MatchKeys.OccSymbol("SPY", shortExpiry, 770m, "P")), Asset.Option, "Put", Side.Sell, 9, 3.56m, Trade.OptionMultiplier, shortExpiry, 1, Fee: 0.48m),
+		};
+
+		var dir = WriteCashRecord(
+			"""{"name":"Trade","description":"Sold SPY 20261008P","amount":"2135.68","totalAmount":"1.00","occurredTime":"10/02/2026 10:09:39 EDT"}""",
+			"""{"name":"Trade","description":"Sold SPY 20261008P","amount":"1067.83","totalAmount":"1.00","occurredTime":"10/02/2026 10:09:39 EDT"}""",
+			"""{"name":"Trade","description":"Bought SPY 20261023P","amount":"-4806.27","totalAmount":"1.00","occurredTime":"10/02/2026 10:09:39 EDT"}""",
+			"""{"name":"Trade","description":"Bought SPY 20261023P","amount":"-2403.14","totalAmount":"1.00","occurredTime":"10/02/2026 10:09:39 EDT"}""");
+
+		BrokerCashOverlay.Apply(trades, dir);
+
+		Assert.Equal(-7209.41m, trades[1].BrokerCash);
+		Assert.Equal(3203.51m, trades[2].BrokerCash);
+		Assert.Equal(-7209.41m + 3203.51m, trades[0].BrokerCash);
+	}
+
+	[Fact]
+	public void Apply_PartialFillWithoutRemainder_DoesNotMatch()
+	{
+		// Only the 6-contract portion (-4806.27) is present for a 9-contract order (-7209.41 computed).
+		// Because the diff exceeds tolerance ($18.00), it must not match (keeps computed fallback).
+		var fillTime = new DateTime(2026, 10, 2, 10, 9, 39);
+		var longExpiry = new DateTime(2026, 10, 23);
+		const string parentKey = "strategy:Diagonal:SPY:2026-10-23:P770,P771";
+
+		var trades = new List<Trade>
+		{
+			new(1, fillTime, "SPY 23 Oct 2026", parentKey, Asset.OptionStrategy, "Diagonal", Side.Buy, 9, 4.45m, Trade.OptionMultiplier, longExpiry),
+			new(2, fillTime, Formatters.FormatOptionDisplay("SPY", longExpiry, 771m), MatchKeys.Option(MatchKeys.OccSymbol("SPY", longExpiry, 771m, "P")), Asset.Option, "Put", Side.Buy, 9, 8.01m, Trade.OptionMultiplier, longExpiry, 1, Fee: 0.41m),
+		};
+
+		var dir = WriteCashRecord(
+			"""{"name":"Trade","description":"Bought SPY 20261023P","amount":"-4806.27","totalAmount":"1.00","occurredTime":"10/02/2026 10:09:39 EDT"}""");
+
+		BrokerCashOverlay.Apply(trades, dir);
+
+		Assert.Null(trades[1].BrokerCash);
+		Assert.Null(trades[0].BrokerCash);
+	}
 }
