@@ -73,6 +73,20 @@ public static partial class ParsingHelpers
 		return DateTime.TryParseExact(clean, DateTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out result);
 	}
 
+	// "9:40" is what anyone actually types; requiring the leading zero is a papercut, so both forms parse.
+	private static readonly string[] ClockTimeFormats = [@"hh\:mm", @"h\:mm"];
+
+	/// <summary>
+	/// Parses a wall-clock time of day ("HH:mm" or "H:mm"). Strict on purpose: TimeSpan.TryParse reads "0945"
+	/// as 945 DAYS, which passes validation and silently pushes an entry window past every session.
+	/// Returns false for null/blank or anything that isn't a time of day.
+	/// </summary>
+	public static bool TryParseClockTime(string? text, out TimeSpan result)
+	{
+		result = default;
+		return !string.IsNullOrWhiteSpace(text) && TimeSpan.TryParseExact(text.Trim(), ClockTimeFormats, CultureInfo.InvariantCulture, out result);
+	}
+
 	/// <summary>
 	/// Parses an OCC-format option symbol into its components.
 	/// Returns null if the symbol doesn't match the expected format.

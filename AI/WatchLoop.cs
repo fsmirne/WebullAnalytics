@@ -163,7 +163,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		// watch-only by construction: scan builds its own deps and never nulls, and the backtest enforces the
 		// mirror gate itself, so `wa ai scan --submit` is never time-gated. See OpenerConfig.LatestEntryTimeEt.
 		TimeSpan? openCutoff = null;
-		if (!string.IsNullOrWhiteSpace(config.Opener.LatestEntryTimeEt) && TimeSpan.TryParse(config.Opener.LatestEntryTimeEt, CultureInfo.InvariantCulture, out var lc))
+		if (ParsingHelpers.TryParseClockTime(config.Opener.LatestEntryTimeEt, out var lc))
 			openCutoff = lc;
 		var openCutoffNoted = false;
 		// 0DTE session gate: remember the last state rendered so a long "waiting" stretch prints once per

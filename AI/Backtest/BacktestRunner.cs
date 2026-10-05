@@ -1374,14 +1374,12 @@ internal sealed class BacktestRunner
 		// can form and blend into the bias before the directional read is committed (vs trading the stale
 		// 09:30 overnight macro). Parsed once per day; null/empty = no delay.
 		TimeSpan? earliestEntry = null;
-		if (!string.IsNullOrWhiteSpace(_config.Opener.EarliestEntryTimeEt)
-			&& TimeSpan.TryParse(_config.Opener.EarliestEntryTimeEt, System.Globalization.CultureInfo.InvariantCulture, out var ee))
+		if (ParsingHelpers.TryParseClockTime(_config.Opener.EarliestEntryTimeEt, out var ee))
 			earliestEntry = ee;
 		// Latest-entry gate: suppress opens AFTER this ET time (the tail-of-session mirror of earliestEntry).
 		// Models the `wa ai watch` cutoff so a backtest can validate it. Parsed once per day; null/empty = none.
 		TimeSpan? latestEntry = null;
-		if (!string.IsNullOrWhiteSpace(_config.Opener.LatestEntryTimeEt)
-			&& TimeSpan.TryParse(_config.Opener.LatestEntryTimeEt, System.Globalization.CultureInfo.InvariantCulture, out var le))
+		if (ParsingHelpers.TryParseClockTime(_config.Opener.LatestEntryTimeEt, out var le))
 			latestEntry = le;
 
 		// The 0DTE session gate carries its own entry window and will reject every minute outside it, so fold
@@ -1390,11 +1388,9 @@ internal sealed class BacktestRunner
 		// Narrowing only (Math.Max / Math.Min) so neither window can ever WIDEN what the other allows.
 		if (_config.Opener.ZeroDteGate.Enabled)
 		{
-			if (!string.IsNullOrWhiteSpace(_config.Opener.ZeroDteGate.EarliestEntryEt)
-				&& TimeSpan.TryParse(_config.Opener.ZeroDteGate.EarliestEntryEt, System.Globalization.CultureInfo.InvariantCulture, out var gee))
+			if (ParsingHelpers.TryParseClockTime(_config.Opener.ZeroDteGate.EarliestEntryEt, out var gee))
 				earliestEntry = earliestEntry.HasValue ? TimeSpan.FromTicks(Math.Max(earliestEntry.Value.Ticks, gee.Ticks)) : gee;
-			if (!string.IsNullOrWhiteSpace(_config.Opener.ZeroDteGate.LatestEntryEt)
-				&& TimeSpan.TryParse(_config.Opener.ZeroDteGate.LatestEntryEt, System.Globalization.CultureInfo.InvariantCulture, out var gle))
+			if (ParsingHelpers.TryParseClockTime(_config.Opener.ZeroDteGate.LatestEntryEt, out var gle))
 				latestEntry = latestEntry.HasValue ? TimeSpan.FromTicks(Math.Min(latestEntry.Value.Ticks, gle.Ticks)) : gle;
 		}
 

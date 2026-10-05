@@ -43,7 +43,7 @@ internal sealed class AnalyzeRegimeSettings : AILiveTickerSubcommandSettings
 		if (!baseResult.Successful) return baseResult;
 		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
 			return Spectre.Console.ValidationResult.Error($"--date: expected YYYY-MM-DD, got '{Date}'");
-		if (!TimeSpan.TryParse(Time, CultureInfo.InvariantCulture, out _))
+		if (!ParsingHelpers.TryParseClockTime(Time, out _))
 			return Spectre.Console.ValidationResult.Error($"--time: expected HH:mm, got '{Time}'");
 		return Spectre.Console.ValidationResult.Success();
 	}

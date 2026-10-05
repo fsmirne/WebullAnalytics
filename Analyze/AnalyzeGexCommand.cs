@@ -158,12 +158,10 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 
 	internal static readonly TimeSpan RthOpen = new(9, 30, 0);
 	internal static readonly TimeSpan RthClose = new(16, 0, 0);
-	// "9:40" is what anyone actually types; requiring the leading zero is a papercut, so both forms parse.
-	private static readonly string[] EtTimeFormats = { @"hh\:mm", @"h\:mm" };
 
 	/// <summary>An ET HH:MM flag value, or null when the flag was absent. Validation has already rejected malformed
 	/// and out-of-RTH values, so callers can treat this as a plain parse.</summary>
-	internal static TimeSpan? ParseEtTime(string? value) => value != null && TimeSpan.TryParseExact(value, EtTimeFormats, CultureInfo.InvariantCulture, out var t) ? t : null;
+	internal static TimeSpan? ParseEtTime(string? value) => ParsingHelpers.TryParseClockTime(value, out var t) ? t : null;
 
 	/// <summary>Validation message for an ET time flag, or null when it is absent or valid.</summary>
 	private static string? RthTimeError(string? value, string flag)

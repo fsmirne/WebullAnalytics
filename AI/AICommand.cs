@@ -815,11 +815,11 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Set opener.longConvictionGate.weight: penalty depth for low-conviction long-premium trades (long call/put, debit verticals). 0 = off (no de-rating); 0.8 = a zero-conviction long scores 0.2x. De-rates flat-day directional coin-flips. Must be 0 to 1 inclusive.")]
 	public decimal? LongConvictionOverride { get; set; }
 
-	[CommandOption("--open-after <HHMM>")]
+	[CommandOption("--open-after <HH:mm>")]
 	[Description("Set opener.earliestEntryTimeEt: withhold opens until this ET time (\"HH:mm\", e.g. 10:00) so the intraday tape forms and blends into the bias before the directional read commits. Empty/omitted = 09:30 open. Sweep knob for delayed-entry research.")]
 	public string? OpenAfterOverride { get; set; }
 
-	[CommandOption("--open-before <HHMM>")]
+	[CommandOption("--open-before <HH:mm>")]
 	[Description("Set opener.latestEntryTimeEt: suppress opens AFTER this ET time (\"HH:mm\", e.g. 09:40) — the tail-of-session mirror of --open-after (the diagonal entry edge decays after ~09:40). Enforced by the backtest and the `wa ai watch` loop; `wa ai scan --submit` deliberately ignores it. Empty/omitted = no cutoff.")]
 	public string? OpenBeforeOverride { get; set; }
 
@@ -879,8 +879,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--intraday-w0: must be in [0, 1], got {IntradayW0Override}");
 		if (LongConvictionOverride.HasValue && (LongConvictionOverride.Value < 0m || LongConvictionOverride.Value > 1m))
 			return ValidationResult.Error($"--long-conviction: must be in [0, 1], got {LongConvictionOverride}");
-		if (!string.IsNullOrWhiteSpace(OpenAfterOverride) && !TimeSpan.TryParse(OpenAfterOverride, System.Globalization.CultureInfo.InvariantCulture, out _))
+		if (!string.IsNullOrWhiteSpace(OpenAfterOverride) && !ParsingHelpers.TryParseClockTime(OpenAfterOverride, out _))
 			return ValidationResult.Error($"--open-after: must be HH:mm, got '{OpenAfterOverride}'");
+		if (!string.IsNullOrWhiteSpace(OpenBeforeOverride) && !ParsingHelpers.TryParseClockTime(OpenBeforeOverride, out _))
+			return ValidationResult.Error($"--open-before: must be HH:mm, got '{OpenBeforeOverride}'");
 		if (Replay && Oracle)
 			return ValidationResult.Error("--replay: incompatible with --oracle (replay books the recorded opens; oracle searches for its own)");
 		return ValidationResult.Success();

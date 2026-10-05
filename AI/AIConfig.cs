@@ -553,7 +553,7 @@ internal static class AIConfigLoader
 			("tranche3Start", so.Tranche3Start), ("tranche3End", so.Tranche3End),
 		})
 		{
-			if (!TimeSpan.TryParseExact(value, "hh\\:mm", CultureInfo.InvariantCulture, out _))
+			if (!ParsingHelpers.TryParseClockTime(value, out _))
 				return $"autoExecute.management.scaleOut.{label}: must be HH:MM, got '{value}'";
 		}
 		if (so.Tranche1Fraction <= 0m || so.Tranche1Fraction >= 1m) return $"autoExecute.management.scaleOut.tranche1Fraction: must be in (0, 1), got {so.Tranche1Fraction}";
@@ -612,24 +612,24 @@ internal static class AIConfigLoader
 		var lcg = op.LongConvictionGate;
 		if (lcg.Weight < 0m || lcg.Weight > 1m) return $"opener.longConvictionGate.weight: must be in [0, 1], got {lcg.Weight}";
 		if (lcg.Reference < 0m) return $"opener.longConvictionGate.reference: must be ≥ 0, got {lcg.Reference}";
-		if (!string.IsNullOrWhiteSpace(op.EarliestEntryTimeEt) && !TimeSpan.TryParse(op.EarliestEntryTimeEt, CultureInfo.InvariantCulture, out _))
+		if (!string.IsNullOrWhiteSpace(op.EarliestEntryTimeEt) && !ParsingHelpers.TryParseClockTime(op.EarliestEntryTimeEt, out _))
 			return $"opener.earliestEntryTimeEt: must be HH:mm, got '{op.EarliestEntryTimeEt}'";
-		if (!string.IsNullOrWhiteSpace(op.LatestEntryTimeEt) && !TimeSpan.TryParse(op.LatestEntryTimeEt, CultureInfo.InvariantCulture, out _))
+		if (!string.IsNullOrWhiteSpace(op.LatestEntryTimeEt) && !ParsingHelpers.TryParseClockTime(op.LatestEntryTimeEt, out _))
 			return $"opener.latestEntryTimeEt: must be HH:mm, got '{op.LatestEntryTimeEt}'";
 		if (!string.IsNullOrWhiteSpace(op.EarliestEntryTimeEt) && !string.IsNullOrWhiteSpace(op.LatestEntryTimeEt)
-			&& TimeSpan.TryParse(op.EarliestEntryTimeEt, CultureInfo.InvariantCulture, out var eeChk)
-			&& TimeSpan.TryParse(op.LatestEntryTimeEt, CultureInfo.InvariantCulture, out var leChk)
+			&& ParsingHelpers.TryParseClockTime(op.EarliestEntryTimeEt, out var eeChk)
+			&& ParsingHelpers.TryParseClockTime(op.LatestEntryTimeEt, out var leChk)
 			&& leChk <= eeChk)
 			return $"opener.latestEntryTimeEt ('{op.LatestEntryTimeEt}') must be later than earliestEntryTimeEt ('{op.EarliestEntryTimeEt}') — otherwise the window is empty and nothing ever opens";
 
 		var zg = op.ZeroDteGate;
-		if (!string.IsNullOrWhiteSpace(zg.EarliestEntryEt) && !TimeSpan.TryParse(zg.EarliestEntryEt, CultureInfo.InvariantCulture, out _))
+		if (!string.IsNullOrWhiteSpace(zg.EarliestEntryEt) && !ParsingHelpers.TryParseClockTime(zg.EarliestEntryEt, out _))
 			return $"opener.zeroDteGate.earliestEntryEt: must be HH:mm, got '{zg.EarliestEntryEt}'";
-		if (!string.IsNullOrWhiteSpace(zg.LatestEntryEt) && !TimeSpan.TryParse(zg.LatestEntryEt, CultureInfo.InvariantCulture, out _))
+		if (!string.IsNullOrWhiteSpace(zg.LatestEntryEt) && !ParsingHelpers.TryParseClockTime(zg.LatestEntryEt, out _))
 			return $"opener.zeroDteGate.latestEntryEt: must be HH:mm, got '{zg.LatestEntryEt}'";
 		if (!string.IsNullOrWhiteSpace(zg.EarliestEntryEt) && !string.IsNullOrWhiteSpace(zg.LatestEntryEt)
-			&& TimeSpan.TryParse(zg.EarliestEntryEt, CultureInfo.InvariantCulture, out var zgE)
-			&& TimeSpan.TryParse(zg.LatestEntryEt, CultureInfo.InvariantCulture, out var zgL)
+			&& ParsingHelpers.TryParseClockTime(zg.EarliestEntryEt, out var zgE)
+			&& ParsingHelpers.TryParseClockTime(zg.LatestEntryEt, out var zgL)
 			&& zgL <= zgE)
 			return $"opener.zeroDteGate.latestEntryEt ('{zg.LatestEntryEt}') must be later than earliestEntryEt ('{zg.EarliestEntryEt}') — otherwise no minute can ever confirm";
 		if (zg.MinBarsBeforeDecision < 0) return $"opener.zeroDteGate.minBarsBeforeDecision: must be ≥ 0, got {zg.MinBarsBeforeDecision}";
@@ -639,11 +639,11 @@ internal static class AIConfigLoader
 		if (zg.Direction.MinGapPct < 0m) return $"opener.zeroDteGate.direction.minGapPct: must be ≥ 0, got {zg.Direction.MinGapPct}";
 		if (zg.Direction.MinVwapHoldMinutes < 0) return $"opener.zeroDteGate.direction.minVwapHoldMinutes: must be ≥ 0, got {zg.Direction.MinVwapHoldMinutes}";
 		if (zg.Direction.MaxVwapFlips < 0) return $"opener.zeroDteGate.direction.maxVwapFlips: must be ≥ 0, got {zg.Direction.MaxVwapFlips}";
-		if (!string.IsNullOrWhiteSpace(zg.Range.EarliestEntryEt) && !TimeSpan.TryParse(zg.Range.EarliestEntryEt, CultureInfo.InvariantCulture, out var zgRangeFloor))
+		if (!string.IsNullOrWhiteSpace(zg.Range.EarliestEntryEt) && !ParsingHelpers.TryParseClockTime(zg.Range.EarliestEntryEt, out var zgRangeFloor))
 			return $"opener.zeroDteGate.range.earliestEntryEt: must be HH:mm, got '{zg.Range.EarliestEntryEt}'";
 		if (!string.IsNullOrWhiteSpace(zg.Range.EarliestEntryEt) && !string.IsNullOrWhiteSpace(zg.LatestEntryEt)
-			&& TimeSpan.TryParse(zg.Range.EarliestEntryEt, CultureInfo.InvariantCulture, out var zgRf)
-			&& TimeSpan.TryParse(zg.LatestEntryEt, CultureInfo.InvariantCulture, out var zgLf)
+			&& ParsingHelpers.TryParseClockTime(zg.Range.EarliestEntryEt, out var zgRf)
+			&& ParsingHelpers.TryParseClockTime(zg.LatestEntryEt, out var zgLf)
 			&& zgRf >= zgLf)
 			return $"opener.zeroDteGate.range.earliestEntryEt ('{zg.Range.EarliestEntryEt}') must be earlier than latestEntryEt ('{zg.LatestEntryEt}') — otherwise the balanced state can never confirm";
 		if (zg.Range.WindowMinutes < 1) return $"opener.zeroDteGate.range.windowMinutes: must be ≥ 1, got {zg.Range.WindowMinutes}";

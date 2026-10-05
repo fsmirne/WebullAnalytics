@@ -84,10 +84,10 @@ internal static class ZeroDteSessionGate
 		if (tape == null)
 			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.NoTape, null, "no RTH minute tape for this session — gate cannot confirm conditions, entry withheld");
 
-		if (TryTime(cfg.LatestEntryEt, out var latest) && tod > latest)
+		if (ParsingHelpers.TryParseClockTime(cfg.LatestEntryEt, out var latest) && tod > latest)
 			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.PastCutoff, tape, $"past latest entry {cfg.LatestEntryEt} ET with no confirmed setup — no trade today");
 
-		if (TryTime(cfg.EarliestEntryEt, out var earliest) && tod < earliest)
+		if (ParsingHelpers.TryParseClockTime(cfg.EarliestEntryEt, out var earliest) && tod < earliest)
 			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.BeforeWindow, tape, $"before earliest entry {cfg.EarliestEntryEt} ET — letting the session reveal its structure");
 
 		if (tape.BarCount < cfg.MinBarsBeforeDecision)
@@ -135,7 +135,7 @@ internal static class ZeroDteSessionGate
 		if (!r.Enabled) return null;
 		// The balanced state's own (normally later) time floor. A range is only a range once the morning has
 		// finished drawing it; without this the state confirms at the gate's window floor on most sessions.
-		if (TryTime(r.EarliestEntryEt, out var rangeFloor) && tod < rangeFloor) return null;
+		if (ParsingHelpers.TryParseClockTime(r.EarliestEntryEt, out var rangeFloor) && tod < rangeFloor) return null;
 		if (tape.WindowBars < r.WindowMinutes) return null;
 		if (r.MaxRangePct > 0m && tape.WindowRangePct > r.MaxRangePct) return null;
 		if (tape.WindowHighTouches < r.MinBoundaryTouches) return null;
@@ -219,14 +219,8 @@ internal static class ZeroDteSessionGate
 	private static string DescribeRange(ZeroDteGateConfig cfg, SessionTape tape, TimeSpan tod)
 	{
 		if (!cfg.Range.Enabled) return "range state disabled";
-		if (TryTime(cfg.Range.EarliestEntryEt, out var floor) && tod < floor)
+		if (ParsingHelpers.TryParseClockTime(cfg.Range.EarliestEntryEt, out var floor) && tod < floor)
 			return $"range state not open until {cfg.Range.EarliestEntryEt} ET";
 		return $"range {tape.WindowRangePct:F2}% vs max {cfg.Range.MaxRangePct}%, tests {tape.WindowLowTouches}/{tape.WindowHighTouches} vs min {cfg.Range.MinBoundaryTouches}, crosses {tape.VwapFlips} vs min {cfg.Range.MinVwapCrosses}";
-	}
-
-	private static bool TryTime(string? hhmm, out TimeSpan value)
-	{
-		value = default;
-		return !string.IsNullOrWhiteSpace(hhmm) && TimeSpan.TryParse(hhmm, CultureInfo.InvariantCulture, out value);
 	}
 }

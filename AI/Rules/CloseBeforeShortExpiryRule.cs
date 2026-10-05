@@ -68,8 +68,7 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 		// profit threshold so the smaller win is banked before the terrain can manufacture the tail.
 		// Unclassified days (regime None / provider absent) are bit-identical to the unmodulated rule.
 		var regime = _regimes != null && _config.Regime.Enabled ? _regimes.Get(position.Ticker, ctx.Now.Date) : ExpiryDayRegime.None;
-		if (regime == ExpiryDayRegime.Pin && !string.IsNullOrWhiteSpace(_config.Regime.PinDeferProfitCloseUntilEt)
-			&& TimeSpan.TryParse(_config.Regime.PinDeferProfitCloseUntilEt, System.Globalization.CultureInfo.InvariantCulture, out var deferUntil)
+		if (regime == ExpiryDayRegime.Pin && ParsingHelpers.TryParseClockTime(_config.Regime.PinDeferProfitCloseUntilEt, out var deferUntil)
 			&& ctx.Now.TimeOfDay < deferUntil)
 			return null;
 
