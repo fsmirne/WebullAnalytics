@@ -10,7 +10,10 @@ internal static class WebullOptionsClient
 	private const string StrategyListUrl = "https://quotes-gw.webullfintech.com/api/quote/option/strategy/list";
 	private const string QueryBatchUrl = "https://quotes-gw.webullfintech.com/api/quote/option/quotes/queryBatch";
 
-	// Index/derivative tickers that the search endpoint can't resolve.
+	// Index/derivative tickers that the search endpoint can't resolve, plus the tradables we configure, pinned so
+	// startup and every watch tick don't depend on the search endpoint (a search stall costs the 15s timeout
+	// per tick and disables the intraday signal). Tradable securities share one tickerId across the chain and
+	// chart endpoints, so those entries are valid for both. IDs taken from the search endpoint's exact-symbol match.
 	// Add entries here as needed — use 'sniff' or browser network tools to find the tickerId
 	// from Webull's option chain requests for the index.
 	//
@@ -26,6 +29,13 @@ internal static class WebullOptionsClient
 		["NDX"] = 913354088,
 		["DJX"] = 925377883,
 		["VIX"] = 925323875,
+		["SPY"] = 913243251,
+		["QQQ"] = 913243249,
+		["AAPL"] = 913256135,
+		["EBAY"] = 913256419,
+		["GME"] = 913255341,
+		["SPCX"] = 951015522,
+		["USO"] = 913244544,
 	};
 
 	// Diagnostic raw-response dump. When set (via `wa ai scan/watch --dump`), the first few chain/queryBatch
