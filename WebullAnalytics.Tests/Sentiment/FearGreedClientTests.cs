@@ -201,12 +201,13 @@ public class FearGreedClientTests
 	public void RatingFromScoreMapsBands()
 	{
 		Assert.Equal("extreme fear", SentimentRating.FromScore(0m));
-		Assert.Equal("extreme fear", SentimentRating.FromScore(24m));
+		Assert.Equal("extreme fear", SentimentRating.FromScore(24.8m));
 		Assert.Equal("fear", SentimentRating.FromScore(25m));
-		Assert.Equal("fear", SentimentRating.FromScore(49m));
-		Assert.Equal("neutral", SentimentRating.FromScore(50m));
-		Assert.Equal("greed", SentimentRating.FromScore(51m));
-		Assert.Equal("greed", SentimentRating.FromScore(74m));
+		Assert.Equal("fear", SentimentRating.FromScore(44.9m));
+		Assert.Equal("neutral", SentimentRating.FromScore(45m));
+		Assert.Equal("neutral", SentimentRating.FromScore(54.9m));
+		Assert.Equal("greed", SentimentRating.FromScore(55m));
+		Assert.Equal("greed", SentimentRating.FromScore(74.9m));
 		Assert.Equal("extreme greed", SentimentRating.FromScore(75m));
 		Assert.Equal("extreme greed", SentimentRating.FromScore(100m));
 	}

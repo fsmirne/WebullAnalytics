@@ -34,7 +34,9 @@ internal sealed record SentimentComponent(
 	DateTime Timestamp);
 
 /// <summary>Maps a numeric sentiment score (0–100) to one of CNN's five rating labels. Used when the
-/// API doesn't echo a rating (e.g., previous-period values come back as bare numbers).</summary>
+/// API doesn't echo a rating (e.g., previous-period values come back as bare numbers). Bands match CNN's
+/// own labels across the cached 2021→ history: [0,25) extreme fear, [25,45) fear, [45,55) neutral,
+/// [55,75) greed, [75,100] extreme greed.</summary>
 internal static class SentimentRating
 {
 	public const string ExtremeFear = "extreme fear";
@@ -45,9 +47,9 @@ internal static class SentimentRating
 
 	public static string FromScore(decimal score) => score switch
 	{
-		<= 24m => ExtremeFear,
-		< 50m => Fear,
-		<= 50m => Neutral,
+		< 25m => ExtremeFear,
+		< 45m => Fear,
+		< 55m => Neutral,
 		< 75m => Greed,
 		_ => ExtremeGreed,
 	};
