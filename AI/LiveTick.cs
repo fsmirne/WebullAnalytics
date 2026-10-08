@@ -45,10 +45,10 @@ internal static class LiveTick
 		var config = deps.Config;
 		var tickerSet = config.TickerSet();
 
-		// One broker-state pull per tick, shared by both auto-executors. A fresh token each tick lets
-		// BrokerStateService coalesce the management+opener refreshes into one Webull order-endpoint round-trip.
+		// One broker-state pull per tick, shared by the position source and both auto-executors. A fresh token each tick lets
+		// TodayOrdersFeed/BrokerStateService coalesce their pulls into one Webull order-history round-trip.
 		var cycleToken = new object();
-		var openPositions = await deps.Positions.GetOpenPositionsAsync(now, tickerSet, cancellation);
+		var openPositions = await deps.Positions.GetOpenPositionsAsync(now, tickerSet, cancellation, cycleToken);
 		var (cash, accountValue) = await deps.Positions.GetAccountStateAsync(now, cancellation);
 		var quoteSnapshot = await AIPipelineHelper.FetchQuotesWithHypotheticals(openPositions, tickerSet, now, deps.Quotes, config, cancellation);
 		// No-op during RTH; corrects the stale chain spot on premarket ticks (--ignore-market-hours runs).

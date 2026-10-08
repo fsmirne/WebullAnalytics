@@ -19,7 +19,7 @@ internal sealed class ReplayPositionSource : IPositionSource
 	}
 
 	public Task<IReadOnlyDictionary<string, OpenPosition>> GetOpenPositionsAsync(
-		DateTime asOf, IReadOnlySet<string> tickers, CancellationToken cancellation)
+		DateTime asOf, IReadOnlySet<string> tickers, CancellationToken cancellation, object? cycleToken = null)
 	{
 		var slice = _allTrades.Where(t => t.Timestamp <= asOf).ToList();
 		if (slice.Count == 0) return Task.FromResult<IReadOnlyDictionary<string, OpenPosition>>(new Dictionary<string, OpenPosition>());

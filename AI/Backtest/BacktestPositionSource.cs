@@ -23,7 +23,7 @@ internal sealed class BacktestPositionSource : IPositionSource
 		_quotes = quotes;
 	}
 
-	public Task<IReadOnlyDictionary<string, OpenPosition>> GetOpenPositionsAsync(DateTime asOf, IReadOnlySet<string> tickers, CancellationToken cancellation)
+	public Task<IReadOnlyDictionary<string, OpenPosition>> GetOpenPositionsAsync(DateTime asOf, IReadOnlySet<string> tickers, CancellationToken cancellation, object? cycleToken = null)
 	{
 		var filtered = _book.OpenPositions
 			.Where(kv => tickers.Contains(kv.Value.Ticker))

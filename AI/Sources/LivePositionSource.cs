@@ -48,7 +48,7 @@ internal sealed class LivePositionSource : IPositionSource
 	}
 
 	public async Task<IReadOnlyDictionary<string, OpenPosition>> GetOpenPositionsAsync(
-		DateTime asOf, IReadOnlySet<string> tickers, CancellationToken cancellation)
+		DateTime asOf, IReadOnlySet<string> tickers, CancellationToken cancellation, object? cycleToken = null)
 	{
 		using var client = new WebullOpenApiClient(_account);
 
@@ -67,7 +67,7 @@ internal sealed class LivePositionSource : IPositionSource
 		// don't fail the position-source if this call errors — the position's still tradable, just
 		// OpenedAt stays null and any rule that gates on it falls back to its missing-OpenedAt path.
 		List<WebullOpenApiClient.OpenOrder> todaysOrders = new();
-		try { todaysOrders = await client.ListTodayOrdersAsync(cancellation); }
+		try { todaysOrders = await TodayOrdersFeed.For(_account).GetAsync(cycleToken, cancellation); }
 		catch { /* OpenedAt enrichment is best-effort */ }
 
 		var costBasisLookup = BuildCostBasisLookup(_trades, _feeLookup);

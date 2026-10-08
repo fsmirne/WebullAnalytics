@@ -86,14 +86,16 @@ internal sealed class BrokerStateService
 	/// partially filled, working, queued, etc. Canceled / rejected entries are dropped: we should
 	/// be free to retry their leg shape. Throws on API/network failure; caller catches and decides
 	/// whether to skip the tick. Successive calls overwrite the previous snapshot atomically.</summary>
-	public async Task RefreshAsync(CancellationToken cancellation)
+	public async Task RefreshAsync(CancellationToken cancellation, object? cycleToken = null)
 	{
 		using var client = new WebullOpenApiClient(_account);
 
 		// Pull both endpoints. Today's-orders catches everything (working + filled); /open is a
 		// safety net in case today's-orders is missing carried-over orders for some reason. We
 		// union them and dedup by client_order_id (within the orders list).
-		var todayOrders = await client.ListTodayOrdersAsync(cancellation);
+		// Today's orders come from the tick-shared feed: the position source already pulled them earlier in this tick,
+		// and a second order-history call seconds later is what tripped Webull's 2-req/2-s limit (HTTP 429).
+		var todayOrders = await TodayOrdersFeed.For(_account).GetAsync(cycleToken, cancellation);
 		var openOrders = await client.ListOpenOrdersAsync(cancellation);
 
 		var seenClientIds = new HashSet<string>(StringComparer.Ordinal);
@@ -284,7 +286,7 @@ internal sealed class BrokerStateService
 		bool ok;
 		try
 		{
-			await RefreshAsync(cancellation);
+			await RefreshAsync(cancellation, cycleToken);
 			ok = true;
 		}
 		catch (Exception ex)
