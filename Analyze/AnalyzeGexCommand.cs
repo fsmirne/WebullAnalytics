@@ -101,7 +101,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 
 	[CommandOption("--view <MODE>")]
 	[DefaultValue("detailed")]
-	[Description("Display mode: 'detailed' (default — unusual-activity screens, heatmap, per-expiration table, chain totals, and walls) or 'simplified' (only the per-expiration table). Config.json's analyze.view sets the default.")]
+	[Description("Display mode: 'detailed' (default — unusual-activity screens, heatmap, per-expiration table, chain totals, and walls), 'simplified' (only the per-expiration table), or 'squeeze' (a gamma-squeeze screener panel: a 0-100 score from five factors — gamma regime vs the flip, distance to the call/put wall, delta-weighted call/put volume, recent volume pace from data/iv captures, and the open-interest change since the prior data/oi snapshot — scored for both sides with the higher one shown as the bias; a live run also appends a data/iv capture so successive runs feed the volume-pace factor). Config.json's analyze.view sets the default.")]
 	public string View { get; set; } = "detailed";
 
 	public override ValidationResult Validate()
@@ -139,7 +139,9 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
 		if (Lookback < 0 || Lookback > 30) return ValidationResult.Error($"--lookback: must be in [0, 30] sessions, got {Lookback}");
 		if (Dump && EvaluationDateOverride.HasValue) return ValidationResult.Error("--dump applies to live fetches only (no --date)");
-		if (View?.Trim().ToLowerInvariant() is not ("detailed" or "simplified")) return ValidationResult.Error($"--view: expected 'detailed' or 'simplified', got '{View}'");
+		if (View?.Trim().ToLowerInvariant() is not ("detailed" or "simplified" or "squeeze")) return ValidationResult.Error($"--view: expected 'detailed', 'simplified' or 'squeeze', got '{View}'");
+		if (Squeeze && Intraday) return ValidationResult.Error("--view squeeze is a point-in-time panel; drop --intraday");
+		if (Squeeze && !BothGreeks && TryParseGreek(Greek, out var sg) && sg != GreekKind.Gamma) return ValidationResult.Error("--view squeeze reads the gamma terrain; drop --greek vanna");
 		return ValidationResult.Success();
 	}
 
@@ -147,6 +149,8 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 	internal bool BothGreeks => string.Equals(Greek?.Trim(), "both", StringComparison.OrdinalIgnoreCase);
 
 	internal bool Simplified => string.Equals(View?.Trim(), "simplified", StringComparison.OrdinalIgnoreCase);
+
+	internal bool Squeeze => string.Equals(View?.Trim(), "squeeze", StringComparison.OrdinalIgnoreCase);
 
 	/// <summary>Applies the `analyze` config.json section's `view` key — kept separate from
 	/// AnalyzeBaseSettings.ApplyConfig's `report` section since detailed/simplified is specific to
@@ -328,13 +332,13 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// Unusual opening activity: strikes trading a multiple of their standing OI — arithmetically
 		// guaranteed opening flow, no print signing needed. Rendered in both the normal and --intraday views;
 		// --view simplified drops it, since that view's whole point is JUST the per-expiration table.
-		if (!settings.Simplified)
+		if (!settings.Simplified && !settings.Squeeze)
 			RenderUnusualActivity(ticker, quotes, asOf, isOfflineHistorical, chainHasOi);
 
 		// The companion look BACK: the screen above excludes contracts expiring on the analysis day (0DTE churn),
 		// but a contract dying TODAY that printed unusual volume on a PRIOR session — when it still had days to
 		// run — is positioning that matured into today's OI, i.e. today's gamma terrain. Rendered in both views.
-		if (!settings.Simplified)
+		if (!settings.Simplified && !settings.Squeeze)
 			RenderExpiryLookback(ticker, quotes, asOf, expiryFilter?.Date ?? asOf.Date, settings.Lookback, chainHasOi);
 
 		// --intraday: 0DTE strikes × RTH-hours gravity-migration heatmap. Offline-historical only (needs an explicit
@@ -407,7 +411,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		if (!settings.EvaluationDateOverride.HasValue)
 		{
 			if (greek == GreekKind.Gamma) AppendGexLog(ticker, spot.Value, matrix, settings);
-			if (settings.Dump) AppendIvDump(ticker, spot.Value, quotes, settings, asOf, expiryFilter);
+			// The squeeze view's volume-pace factor compares data/iv captures, so each live squeeze run records one.
+			if (settings.Dump || settings.Squeeze) AppendIvDump(ticker, spot.Value, quotes, settings, asOf, expiryFilter);
+		}
+
+		if (settings.Squeeze)
+		{
+			RenderSqueeze(ticker, spot.Value, asOf, expiryFilter, matrix, settings);
+			return 0;
 		}
 
 		// --view simplified renders ONLY the per-expiration table below — header, heatmap, chain totals and the
@@ -447,6 +458,46 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// |vanna| strike is just where OI meets d2 ≈ ±1 — so the panel is gamma-only rather than relabelled.
 		if (greek == GreekKind.Gamma) RenderWalls(matrix, settings.TopWalls);
 		return 0;
+	}
+
+	/// <summary>--view squeeze: scores the gamma terrain plus the flow inputs and renders the screener panel. Volume pace reads
+	/// the --date's data/iv captures (live runs have just appended one); ΔOI compares against the latest data/oi snapshot
+	/// within a week before --date.</summary>
+	private static void RenderSqueeze(string ticker, decimal spot, DateTime asOf, DateTime? expiryFilter, GexMatrix matrix, AnalyzeGexSettings settings)
+	{
+		var band = settings.StrikeRangePct / 100m;
+		var expiries = matrix.Expiries.ToHashSet();
+		var captures = IvDumpStore.LoadVolumeSeries(ticker, asOf.Date, settings.VendorName, (exp, strike) => expiries.Contains(exp) && Math.Abs(strike - spot) / spot <= band);
+		var (priorDate, priorOi) = LoadPriorOi(ticker, asOf.Date);
+		var inputs = new SqueezeInputs(
+			GexSqueezeScreener.FlowShare(matrix.Contributors, spot),
+			GexSqueezeScreener.VolumePaceFrom(captures, AnalyzeGexSettings.RthOpen),
+			priorOi != null ? GexSqueezeScreener.DeltaOiShare(matrix.Contributors, spot, priorOi) : null,
+			priorDate);
+		var reading = GexSqueezeScreener.Evaluate(GexSqueezeScreener.TerrainFrom(matrix, spot, asOf), inputs);
+		var scope = expiryFilter.HasValue ? $"expiry {expiryFilter.Value:yyyy-MM-dd}" : $"{matrix.Expiries.Count} expiration(s) ≤{settings.Dte}DTE";
+		GexSqueezePanel.Render(ticker, asOf, scope, reading);
+	}
+
+	/// <summary>Per-contract (expiry, strike, right) open interest from the latest data/oi snapshot dated within 7 days before
+	/// <paramref name="date"/>, exact root only (matching the GexMatrix contributors it is joined to). (null, null) when none exists.</summary>
+	private static (DateTime? Date, Dictionary<(DateTime Expiry, decimal Strike, bool IsCall), long>? Oi) LoadPriorOi(string ticker, DateTime date)
+	{
+		for (var d = date.AddDays(-1); d >= date.AddDays(-7); d = d.AddDays(-1))
+		{
+			var path = Program.ResolvePath($"data/oi/{ticker}/{d:yyyy-MM-dd}.jsonl");
+			if (!File.Exists(path)) continue;
+			var (_, quotes) = LoadOiSnapshot(path);
+			var oi = new Dictionary<(DateTime, decimal, bool), long>();
+			foreach (var (sym, q) in quotes)
+			{
+				var p = ParsingHelpers.ParseOptionSymbol(sym);
+				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || q.OpenInterest is not { } o) continue;
+				oi[(p.ExpiryDate.Date, p.Strike, p.CallPut == "C")] = o;
+			}
+			return (d, oi);
+		}
+		return (null, null);
 	}
 
 	/// <summary>Loads a historical day's chain from a data/oi snapshot (the per-day full-chain JSONL written by
@@ -2081,8 +2132,8 @@ internal sealed record GexCell(decimal CallGex, decimal PutGex)
 /// a hypothetical spot S* (used by <see cref="GexMatrix.FindGammaFlip(decimal)"/>) and total ITM payout
 /// at a strike (used by <see cref="GexMatrix.FindMaxPain"/>). One entry per (expiry, strike, side) that
 /// survived the strike-range filter for a kept expiry — NOT capped by --max-strikes, since analytics
-/// shouldn't be skewed by a display-only cap.</summary>
-internal sealed record GexContributor(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall);
+/// shouldn't be skewed by a display-only cap. Volume is the contract's day volume (0 when the vendor gave none).</summary>
+internal sealed record GexContributor(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall, long Volume);
 
 internal sealed class GexMatrix
 {
@@ -2246,6 +2297,21 @@ internal sealed class GexMatrix
 		return (bestCall, bestPut);
 	}
 
+	/// <summary>Chain-wide variant of <see cref="FindWalls(DateTime)"/>: per-strike call and put dollar gamma summed across every
+	/// kept expiry before the argmax, so the wall is the strike carrying the most gamma over the whole --dte window.</summary>
+	public (decimal? CallWall, decimal? PutWall) FindChainWalls()
+	{
+		var byStrike = new Dictionary<decimal, (decimal CallGex, decimal PutGex)>();
+		foreach (var ((_, strike), cell) in FullCells)
+		{
+			byStrike.TryGetValue(strike, out var acc);
+			byStrike[strike] = (acc.CallGex + cell.CallGex, acc.PutGex + cell.PutGex);
+		}
+		decimal? callWall = byStrike.Count > 0 && byStrike.Values.Any(v => v.CallGex > 0m) ? byStrike.MaxBy(kv => kv.Value.CallGex).Key : null;
+		decimal? putWall = byStrike.Count > 0 && byStrike.Values.Any(v => v.PutGex > 0m) ? byStrike.MaxBy(kv => kv.Value.PutGex).Key : null;
+		return (callWall, putWall);
+	}
+
 	/// <summary>Same shape as <see cref="FindWalls"/> but ranked by standing open interest instead of dollar
 	/// gamma — the strikes where the most contracts are actually parked, per side, for <paramref name="expiry"/>.</summary>
 	public (decimal? CallWall, decimal? PutWall) FindOiWalls(DateTime expiry)
@@ -2369,14 +2435,14 @@ internal sealed class GexMatrix
 		var rawVolume = new Dictionary<(DateTime, decimal), (long CallVolume, long PutVolume)>();
 		var expirySet = new HashSet<DateTime>();
 		var strikeSet = new HashSet<decimal>();
-		var rawContribs = new List<(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall)>();
+		var rawContribs = new List<(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall, long Volume)>();
 		// Max pain sums total ITM payout across every listed contract, so unlike Gravity/Centroid/NetPull/the
 		// chain totals below (all argmax- or weighted-average-shaped, and so exactly the statistics a single
 		// static block — SPX's legacy AM-settled OI on a standard-monthly expiry — can hijack, per
 		// CandidateScorer.ComputeGex) it's the one place the merge is still the right read: a strike's real
 		// total liability doesn't care which of the two roots the OI sits under. Kept as its own contributor
 		// list rather than switching the whole loop, so it's the one exception, not a silent default.
-		var maxPainContribs = new List<(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall)>();
+		var maxPainContribs = new List<(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall, long Volume)>();
 
 		foreach (var kv in quotes)
 		{
@@ -2399,7 +2465,7 @@ internal sealed class GexMatrix
 			// --strike-range at its 20% default this was still leaving max pain $80 off CandidateScorer's answer
 			// for the identical SPXW 10/16 book; widening to the full 200% converged them exactly, so the miss was
 			// specifically OI beyond the display window feeding the payout sum, not a fetch or IV gap.
-			maxPainContribs.Add((parsed.ExpiryDate.Date, parsed.Strike, timeYears, 0m, q.OpenInterest.Value, isCall));
+			maxPainContribs.Add((parsed.ExpiryDate.Date, parsed.Strike, timeYears, 0m, q.OpenInterest.Value, isCall, q.Volume ?? 0L));
 			if (parsed.Strike < minStrike || parsed.Strike > maxStrike) continue;
 
 			// Vendor IV is taken only from a live two-sided book (see OptionMath.TrustedVendorIv). Without that
@@ -2443,7 +2509,7 @@ internal sealed class GexMatrix
 				raw[key] = (existing.CallGex + dollarGex, existing.PutGex);
 			else
 				raw[key] = (existing.CallGex, existing.PutGex + dollarGex);
-			rawContribs.Add((parsed.ExpiryDate.Date, parsed.Strike, timeYears, iv, q.OpenInterest.Value, isCall));
+			rawContribs.Add((parsed.ExpiryDate.Date, parsed.Strike, timeYears, iv, q.OpenInterest.Value, isCall, q.Volume ?? 0L));
 			expirySet.Add(parsed.ExpiryDate.Date);
 			strikeSet.Add(parsed.Strike);
 
@@ -2558,12 +2624,12 @@ internal sealed class GexMatrix
 		// gamma flip would be skewed by an arbitrary display-row limit.
 		var contributors = rawContribs
 			.Where(r => keptExpirySet.Contains(r.Expiry))
-			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall))
+			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall, r.Volume))
 			.ToList();
 		// Max pain's own contributor list — see the comment on maxPainContribs above for why this one stays merged.
 		var maxPainContributors = maxPainContribs
 			.Where(r => keptExpirySet.Contains(r.Expiry))
-			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall))
+			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall, r.Volume))
 			.ToList();
 
 		return new GexMatrix(expiries, strikes, cells, fullCells, fullOi, fullVolume, maxGross, maxAbsNet, totalCall, totalPut, gravity, centroid, netPull, contributors, maxPainContributors);

@@ -42,4 +42,26 @@ internal static class IvDumpStore
 		File.AppendAllText(path, sb.ToString());
 		return rows;
 	}
+
+	/// <summary>Per-capture cumulative day volume for one ET date and source: capture time → (expiry, strike, right) → volume,
+	/// keeping only rows <paramref name="include"/> accepts (by expiry and strike). Rows without a volume field (pre-2026-08-18
+	/// layout) are skipped rather than read as zero. Empty when the day file does not exist.</summary>
+	internal static SortedDictionary<TimeSpan, Dictionary<(DateTime Expiry, decimal Strike, string Right), long>> LoadVolumeSeries(string ticker, DateTime date, string source, Func<DateTime, decimal, bool> include)
+	{
+		var series = new SortedDictionary<TimeSpan, Dictionary<(DateTime, decimal, string), long>>();
+		var path = Program.ResolvePath($"data/iv/{ticker}/{date:yyyy-MM-dd}.csv");
+		if (!File.Exists(path)) return series;
+		foreach (var line in File.ReadLines(path).Skip(1))
+		{
+			var f = line.Split(',');
+			if (f.Length < 12 || !string.Equals(f[2], source, StringComparison.OrdinalIgnoreCase)) continue;
+			if (!TimeSpan.TryParseExact(f[1], @"hh\:mm\:ss", CultureInfo.InvariantCulture, out var ts)) continue;
+			if (!DateTime.TryParseExact(f[3], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry)) continue;
+			if (!decimal.TryParse(f[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var strike) || !include(expiry, strike)) continue;
+			if (!long.TryParse(f[11], NumberStyles.Integer, CultureInfo.InvariantCulture, out var volume)) continue;
+			if (!series.TryGetValue(ts, out var capture)) series[ts] = capture = new Dictionary<(DateTime, decimal, string), long>();
+			capture[(expiry, strike, f[5])] = volume;
+		}
+		return series;
+	}
 }
