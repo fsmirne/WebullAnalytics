@@ -60,6 +60,68 @@ def et_today() -> date:
     return datetime.now(NY).date()
 
 
+# ----- NYSE trading calendar (mirrors Core/MarketCalendar.cs — keep the two in sync) ---------------------------
+# Used to judge OI completeness: a chunk is done only when every TRADING day in it is sealed, so the calendar must
+# know which weekdays had no session. Observed-date shifting, Juneteenth from 2022, and ad-hoc closures match the C#.
+AD_HOC_CLOSURES = {date(2025, 1, 9)}  # National Day of Mourning for President Jimmy Carter
+
+
+def _observed(d: date) -> date:
+    """Fixed-date holiday on Saturday -> preceding Friday; on Sunday -> following Monday."""
+    if d.weekday() == 5:
+        return d - timedelta(days=1)
+    if d.weekday() == 6:
+        return d + timedelta(days=1)
+    return d
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    first = date(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7 + (n - 1) * 7)
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    last = (date(year, month, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def _good_friday(year: int) -> date:
+    """Easter Sunday (Anonymous Gregorian algorithm) minus 2 days."""
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month, day = (h + l - 7 * m + 114) // 31, (h + l - 7 * m + 114) % 31 + 1
+    return date(year, month, day) - timedelta(days=2)
+
+
+def is_nyse_holiday(d: date) -> bool:
+    y = d.year
+    return (d in AD_HOC_CLOSURES
+            or d == _observed(date(y, 1, 1))              # New Year's Day
+            or d == _nth_weekday(y, 1, 0, 3)              # Martin Luther King Jr. Day
+            or d == _nth_weekday(y, 2, 0, 3)              # Presidents' Day
+            or d == _good_friday(y)                       # Good Friday
+            or d == _last_weekday(y, 5, 0)                # Memorial Day
+            or (y >= 2022 and d == _observed(date(y, 6, 19)))  # Juneteenth (since 2022)
+            or d == _observed(date(y, 7, 4))              # Independence Day
+            or d == _nth_weekday(y, 9, 0, 1)              # Labor Day
+            or d == _nth_weekday(y, 11, 3, 4)             # Thanksgiving
+            or d == _observed(date(y, 12, 25)))           # Christmas
+
+
+def is_trading_day(d: date) -> bool:
+    return d.weekday() < 5 and not is_nyse_holiday(d)
+
+
+def trading_days(start: date, end: date) -> list:
+    return [start + timedelta(days=i) for i in range((end - start).days + 1) if is_trading_day(start + timedelta(days=i))]
+
+
 def _setup_logging():
     """Our messages (timestamped) to console + (when BF_LOG_FILE set) an append file. Third-party
     chatter (thetadata auth POSTs, grpc, urllib3) is suppressed unless BF_VERBOSE=1. Called at import so
@@ -394,19 +456,16 @@ def _is_settled_eod_file(p: Path) -> bool:
     return '"tsEt"' in head and ("T16:00:00-" in head or "T16:00:00+" in head)
 
 
-def oi_chunk_done(tdir: Path, sealed: set, cs: date, ce: date, last_iso: str) -> bool:
-    """True if a month-chunk needs NO pull. Judged per-chunk against the sealed set — NOT via a single
-    frontier pointer — so resume is gap-safe: a --start that reaches back before the earliest file on
-    disk, or a hole between two already-filled blocks, is filled rather than skipped. A chunk is done
-    iff every day-file it contains is sealed AND it doesn't extend past `last_iso` (the newest day on
-    disk store-wide). Re-pulled otherwise: no files (missing history/gap), any unsealed file (a failed
-    or partial pull — chunks seal atomically, so a killed month leaves its files unsealed), or a chunk
-    reaching past the last file (the frontier, whose latest trading days aren't pulled yet)."""
-    lo, hi = cs.isoformat(), ce.isoformat()
-    files = [p.stem for p in tdir.glob("*.jsonl") if lo <= p.stem <= hi]
-    if not files or hi > last_iso:
-        return False
-    return all(d in sealed for d in files)
+def oi_chunk_done(sealed: set, cs: date, ce: date) -> bool:
+    """True if a month-chunk needs NO pull: every NYSE trading day in [cs, ce] is sealed. Judged per trading day
+    against the sealed set, so any hole — a missing history block, a single skipped day, a failed or partial pull
+    (chunks seal atomically, so a killed month leaves its days unsealed), or the frontier's not-yet-pulled days —
+    makes the chunk pending. The ET-forming day is never sealed, so a chunk reaching it is always re-pulled.
+
+    The previous test (every day-FILE present is sealed, and the chunk ends before the newest file on disk) could
+    not see a day with no file at all: on 2026-10-08 the live scraper had already written SPXW's 10-08 snapshot,
+    so the October chunk (10-01..10-07, files all sealed, ending before 10-08) passed and 10-07 was never pulled."""
+    return all(d.isoformat() in sealed for d in trading_days(cs, ce))
 
 
 def process_one_chunk(client, ticker, cs, ce, max_dte, rate, out_root):
@@ -547,9 +606,7 @@ def run(tickers, start: date, end: date, out_root: Path, max_dte, rate, creds, t
                 sealed = seed
                 save_sealed(tdir, sealed)
                 log.info(f"  [seed] sealed {len(seed)} existing settled day-file(s) — skipping history re-pull")
-        on_disk = sorted(p.stem for p in tdir.glob("*.jsonl"))
-        last_iso = on_disk[-1] if on_disk else ""  # newest day store-wide; "" => empty store, pull everything
-        pending = [(cs, ce) for cs, ce in month_chunks(start, end) if not oi_chunk_done(tdir, sealed, cs, ce, last_iso)]
+        pending = [(cs, ce) for cs, ce in month_chunks(start, end) if not oi_chunk_done(sealed, cs, ce)]
         if not pending:
             log.info(f"\n=== {ticker} -> {tdir}  ({len(sealed)} day(s) sealed, nothing new in {start}..{end}) ===")
             continue
@@ -563,6 +620,11 @@ def run(tickers, start: date, end: date, out_root: Path, max_dte, rate, creds, t
                 sealed.update(newly)
                 save_sealed(tdir, sealed)  # checkpoint after each chunk so a later failure can't lose it
                 log.info(f"  [seal] {ticker} OI day(s): {', '.join(sorted(newly))} ({len(sealed)} total)")
+            # A settled trading day the vendor returned nothing for stays unsealed, so every run re-pulls this chunk
+            # until it fills. Say so: a persistent entry here is a vendor gap or an ad-hoc closure the calendar lacks.
+            missing = [d.isoformat() for d in trading_days(cs, ce) if d.isoformat() < today_iso and d.isoformat() not in sealed]
+            if missing:
+                log.warning(f"  [gap] {ticker} OI: no data for trading day(s) {', '.join(missing)} — left unsealed; re-pulled next run")
 
 
 # ===== minute NBBO quote pull (option_history_quote) ==========================
