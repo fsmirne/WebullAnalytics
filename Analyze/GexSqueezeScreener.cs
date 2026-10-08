@@ -81,6 +81,9 @@ internal static class GexSqueezeScreener
 	/// <summary>Volume pace scores zero at or below <see cref="VolumeZeroRatio"/>× the session average, full at or above
 	/// <see cref="VolumeFullRatio"/>×; at or above <see cref="VolumeAcceleratingRatio"/>× it reads as accelerating.</summary>
 	internal const decimal VolumeZeroRatio = 1m, VolumeFullRatio = 2m, VolumeAcceleratingRatio = 1.5m;
+	/// <summary>ΔOI alignment ramps linearly from 0 (balanced) to full at a lean of <see cref="DeltaOiFullShare"/> toward the side;
+	/// a lean under <see cref="DeltaOiBalancedShare"/> either way reads as balanced.</summary>
+	internal const decimal DeltaOiFullShare = 0.30m, DeltaOiBalancedShare = 0.05m;
 	/// <summary>Lower bounds of the Possible / Likely / Imminent bands.</summary>
 	internal const int BandPossible = 30, BandLikely = 50, BandImminent = 75;
 	/// <summary>Wall proximity scores full at or inside this many daily moves and zero at or beyond <see cref="WallZeroMoves"/>.</summary>
@@ -279,9 +282,13 @@ internal static class GexSqueezeScreener
 	{
 		const string name = "Delta OI Alignment";
 		if (!share.HasValue || !priorDate.HasValue) return new SqueezeFactor(name, DeltaOiMax, null, SetupMark.Unknown, "ΔOI n/a — no prior data/oi snapshot overlapping this window");
-		var aligned = side == SqueezeSide.Bullish ? share.Value > 0m : share.Value < 0m;
-		var lean = share.Value > 0m ? "calls" : share.Value < 0m ? "puts" : "neither side";
-		return new SqueezeFactor(name, DeltaOiMax, aligned ? DeltaOiMax : 0, aligned ? SetupMark.Pass : SetupMark.Fail, $"OI build since {priorDate.Value:MM-dd} favors {lean} ({share.Value:+0.00;-0.00})");
+		var toward = side == SqueezeSide.Bullish ? share.Value : -share.Value;   // + = leans toward this side
+		var points = (int)Math.Round(DeltaOiMax * Math.Clamp(toward / DeltaOiFullShare, 0m, 1m), MidpointRounding.AwayFromZero);
+		var detail = $"since {priorDate.Value:MM-dd} ({share.Value:+0.00;-0.00})";
+		if (Math.Abs(share.Value) < DeltaOiBalancedShare) return new SqueezeFactor(name, DeltaOiMax, points, SetupMark.Warn, $"OI build roughly balanced {detail}");
+		var lean = share.Value > 0m ? "calls" : "puts";
+		var mark = toward <= 0m ? SetupMark.Fail : points * 2 > DeltaOiMax ? SetupMark.Pass : SetupMark.Warn;
+		return new SqueezeFactor(name, DeltaOiMax, points, mark, $"OI build favors {lean} {detail}");
 	}
 
 	private static string Capitalize(string s) => s.Length == 0 ? s : char.ToUpperInvariant(s[0]) + s[1..];

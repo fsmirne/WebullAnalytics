@@ -21,7 +21,23 @@ public class GexSqueezeScreenerTests
 		Assert.Equal(SqueezeSide.Bullish, r.Side);
 		Assert.Equal(0, Points(r, "Gamma Regime"));
 		Assert.Equal(10, Points(r, "Flow Alignment"));
-		Assert.Equal(5, Points(r, "Delta OI Alignment"));
+		Assert.Equal(3, Points(r, "Delta OI Alignment"));   // 0.20 lean toward calls → 5 × 0.20 / 0.30 = 3.3 → 3
+	}
+
+	[Theory]
+	[InlineData(0.01, 0, "Warn")]     // balanced: a +0.01 lean is no longer a coin flip worth the full 5
+	[InlineData(0.06, 1, "Warn")]
+	[InlineData(0.15, 3, "Pass")]     // 2.5 → 3 (away from zero)
+	[InlineData(0.30, 5, "Pass")]
+	[InlineData(0.50, 5, "Pass")]
+	[InlineData(-0.20, 0, "Fail")]    // leaning against the bullish side
+	public void DeltaOiAlignment_RampsWithTheLean(double share, int expected, string mark)
+	{
+		var t = LongGammaTerrain() with { PutWall = 7000m };   // keep the bullish side ahead whatever the ΔOI
+		var r = GexSqueezeScreener.Evaluate(t, new SqueezeInputs(FlowShare: 0.5m, null, DeltaOiShare: (decimal)share, PriorOiDate: new DateTime(2026, 10, 7)));
+		Assert.Equal(SqueezeSide.Bullish, r.Side);
+		var f = r.Factors.Single(x => x.Name == "Delta OI Alignment");
+		Assert.Equal((expected, Enum.Parse<SetupMark>(mark)), (f.Points!.Value, f.Mark));
 	}
 
 	[Fact]
