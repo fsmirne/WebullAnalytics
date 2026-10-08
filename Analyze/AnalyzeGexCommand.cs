@@ -461,22 +461,45 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	}
 
 	/// <summary>--view squeeze: scores the gamma terrain plus the flow inputs and renders the screener panel. Volume pace reads
-	/// the --date's data/iv captures (live runs have just appended one); ΔOI compares against the latest data/oi snapshot
-	/// within a week before --date.</summary>
+	/// the --date's data/iv captures for the front expiry (live runs have just appended one) and rates the recent window against
+	/// the same clock window on prior sessions; ΔOI compares against the latest data/oi snapshot within a week before --date.</summary>
 	private static void RenderSqueeze(string ticker, decimal spot, DateTime asOf, DateTime? expiryFilter, GexMatrix matrix, AnalyzeGexSettings settings)
 	{
 		var band = settings.StrikeRangePct / 100m;
-		var expiries = matrix.Expiries.ToHashSet();
-		var captures = IvDumpStore.LoadVolumeSeries(ticker, asOf.Date, settings.VendorName, (exp, strike) => expiries.Contains(exp) && Math.Abs(strike - spot) / spot <= band);
+		var front = matrix.Expiries[0];
+		var captures = IvDumpStore.LoadVolumeSeries(ticker, asOf.Date, settings.VendorName, (exp, strike) => exp == front && Math.Abs(strike - spot) / spot <= band);
+		var window = GexSqueezeScreener.RecentVolumeWindow(captures, AnalyzeGexSettings.RthOpen);
 		var (priorDate, priorOi) = LoadPriorOi(ticker, asOf.Date);
 		var inputs = new SqueezeInputs(
 			GexSqueezeScreener.FlowShare(matrix.Contributors, spot),
-			GexSqueezeScreener.VolumePaceFrom(captures, AnalyzeGexSettings.RthOpen),
+			window != null ? GexSqueezeScreener.VolumePaceFrom(window, AnalyzeGexSettings.RthOpen, SameWindowHistory(ticker, asOf.Date, (front - asOf.Date).Days, window)) : null,
 			priorOi != null ? GexSqueezeScreener.DeltaOiShare(matrix.Contributors, spot, priorOi) : null,
 			priorDate);
 		var reading = GexSqueezeScreener.Evaluate(GexSqueezeScreener.TerrainFrom(matrix, spot, asOf), inputs);
 		var scope = expiryFilter.HasValue ? $"expiry {expiryFilter.Value:yyyy-MM-dd}" : $"{matrix.Expiries.Count} expiration(s) ≤{settings.Dte}DTE";
 		GexSqueezePanel.Render(ticker, asOf, scope, reading);
+	}
+
+	/// <summary>Contracts traded in <paramref name="window"/>'s clock window on each of up to <see cref="GexSqueezeScreener.BaselineSessions"/>
+	/// prior sessions, for the expiry the same number of days out as today's front (<paramref name="dteOffset"/>; 0 = each session's
+	/// own 0DTE), from the store's ohlcv minute bars — the same feed as the volume tape (Schwab's capture Δvolume and ThetaData's trade
+	/// volume agreed within ~1% on 2026-08-18). Sessions with no store coverage for that expiry, and early-close sessions whose close
+	/// falls inside the window, are skipped rather than counted as zero. No strike filter: 0DTE volume outside ±5% of the money is
+	/// under 0.2% of the day (2026-08..10), so the whole ladder matches the captures' ±10%+ band.</summary>
+	private static List<long> SameWindowHistory(string ticker, DateTime date, int dteOffset, VolumeWindow window)
+	{
+		var from = new TimeSpan(window.ReferenceTs.Hours, window.ReferenceTs.Minutes, 0);
+		var to = new TimeSpan(window.AnchorTs.Hours, window.AnchorTs.Minutes, 0);
+		var history = new List<long>();
+		var earliest = date.AddDays(-3 * GexSqueezeScreener.BaselineSessions);
+		for (var d = MarketCalendar.PreviousOpenOnOrBefore(date.AddDays(-1)); d >= earliest && history.Count < GexSqueezeScreener.BaselineSessions; d = MarketCalendar.PreviousOpenOnOrBefore(d.AddDays(-1)))
+		{
+			if (MarketCalendar.IsEarlyClose(d) && to > new TimeSpan(13, 0, 0)) continue;
+			var tape = LoadStoreTape(ticker, d, d.AddDays(dteOffset));
+			if (tape.Count == 0) continue;
+			history.Add((long)tape.Where(kv => kv.Key >= from && kv.Key < to).Sum(kv => kv.Value.Values.Sum(v => v.C + v.P)));
+		}
+		return history;
 	}
 
 	/// <summary>Per-contract (expiry, strike, right) open interest from the latest data/oi snapshot dated within 7 days before

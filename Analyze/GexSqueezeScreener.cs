@@ -24,8 +24,21 @@ internal sealed record SqueezeFactor(string Name, int Max, int? Points, SetupMar
 /// short-gamma zone, the chain-wide call/put walls, and a one-trading-day expected move used to scale wall distance.</summary>
 internal sealed record SqueezeTerrain(decimal Spot, decimal? Trigger, bool ShortGamma, decimal? CallWall, decimal? PutWall, decimal? DailyMove);
 
-/// <summary>Recent volume pace vs the session's average pace, from two data/iv captures (see <see cref="GexSqueezeScreener.VolumePaceFrom"/>).</summary>
-internal sealed record VolumePace(decimal Ratio, TimeSpan ReferenceTs, TimeSpan AnchorTs);
+/// <summary>Today's recent window from two data/iv captures: contracts traded between <see cref="ReferenceTs"/> and
+/// <see cref="AnchorTs"/>, and the cumulative session volume at the anchor (see <see cref="GexSqueezeScreener.RecentVolumeWindow"/>).</summary>
+internal sealed record VolumeWindow(TimeSpan ReferenceTs, TimeSpan AnchorTs, long WindowVolume, long SessionVolume);
+
+/// <summary>What the recent window was measured against: the median of the same clock window on prior sessions, or —
+/// when too few prior sessions have store data — the session's own average pace.</summary>
+internal enum VolumeBasis
+{
+	SameWindowHistory,
+	SessionAverage,
+}
+
+/// <summary>Recent volume relative to its basis (1.0 = normal). <see cref="Sessions"/> is the number of prior sessions in
+/// the median (0 for the session-average fallback).</summary>
+internal sealed record VolumePace(decimal Ratio, TimeSpan ReferenceTs, TimeSpan AnchorTs, VolumeBasis Basis, int Sessions);
 
 /// <summary>The flow-side inputs. FlowShare and DeltaOiShare are delta-weighted call-minus-put shares in [−1, 1].</summary>
 internal sealed record SqueezeInputs(decimal? FlowShare, VolumePace? Volume, decimal? DeltaOiShare, DateTime? PriorOiDate);
@@ -48,7 +61,7 @@ internal sealed record SqueezeReading(SqueezeSide Side, int Score, string Band, 
 /// <item><description>Gamma regime (25) — how far spot sits below the gamma flip (dealers net short gamma, hedging amplifies moves), ramped linearly over ±<see cref="RegimeRampMoves"/> daily moves so crossing the flip by pennies moves the score a few points, not 25.</description></item>
 /// <item><description>Wall proximity (25) — distance to the call wall (bullish) / put wall (bearish) ahead of spot, in daily expected moves.</description></item>
 /// <item><description>Flow alignment (25) — delta-weighted call-vs-put day volume. Volume is unsigned: it says which side traded, not who bought.</description></item>
-/// <item><description>Volume confirm (20) — the last ~15 minutes' contract pace vs the session average, from data/iv captures.</description></item>
+/// <item><description>Volume confirm (20) — the front expiry's volume over the last ~15 minutes (data/iv captures) vs the median of the same clock window over recent sessions (quotes.db ohlcv). Option volume is U-shaped through the day, so comparing against the session's own average would read every midday lull as deceleration; the session average is only the fallback when the store has too little history.</description></item>
 /// <item><description>ΔOI alignment (5) — delta-weighted call-vs-put open-interest change since the prior data/oi snapshot.</description></item>
 /// </list>
 /// A factor without data is dropped from the denominator, and an incomplete reading is capped at "Likely" so a missing
@@ -72,6 +85,8 @@ internal static class GexSqueezeScreener
 	internal const decimal RegimeRampMoves = 0.5m;
 	/// <summary>Minimum spacing between the two captures the volume pace compares.</summary>
 	internal static readonly TimeSpan RecentWindow = TimeSpan.FromMinutes(15);
+	/// <summary>Prior sessions the same-window median draws from, and the fewest it needs before falling back to the session average.</summary>
+	internal const int BaselineSessions = 20, MinBaselineSessions = 5;
 
 	public static SqueezeReading Evaluate(SqueezeTerrain terrain, SqueezeInputs inputs)
 	{
@@ -130,11 +145,10 @@ internal static class GexSqueezeScreener
 		return gross > 0m ? net / gross : null;
 	}
 
-	/// <summary>Recent-vs-session volume pace from cumulative-volume captures: the anchor is the latest capture, the reference
-	/// the latest one at least <see cref="RecentWindow"/> earlier. Both are summed over the contracts present in both captures so
-	/// a capture with a wider strike window cannot fake a burst. Ratio = (Δvolume / Δminutes) / (anchor volume / minutes since
-	/// <paramref name="sessionOpen"/>). Null without two qualifying captures or with no volume at the anchor.</summary>
-	public static VolumePace? VolumePaceFrom<TKey>(SortedDictionary<TimeSpan, Dictionary<TKey, long>> captures, TimeSpan sessionOpen) where TKey : notnull
+	/// <summary>Today's recent window from cumulative-volume captures: the anchor is the latest capture, the reference the latest
+	/// one at least <see cref="RecentWindow"/> earlier. Both are summed over the contracts present in both captures so a capture
+	/// with a wider strike window cannot fake a burst. Null without two qualifying captures or with no volume at the anchor.</summary>
+	public static VolumeWindow? RecentVolumeWindow<TKey>(SortedDictionary<TimeSpan, Dictionary<TKey, long>> captures, TimeSpan sessionOpen) where TKey : notnull
 	{
 		var times = captures.Keys.Where(t => t > sessionOpen).ToList();
 		if (times.Count < 2) return null;
@@ -150,10 +164,29 @@ internal static class GexSqueezeScreener
 			anchorVol += vol;
 			refVol += prior;
 		}
-		if (anchorVol <= 0) return null;
-		var recentRate = Math.Max(0m, anchorVol - refVol) / (decimal)(anchorTs - refTs).TotalMinutes;
-		var sessionRate = anchorVol / (decimal)(anchorTs - sessionOpen).TotalMinutes;
-		return new VolumePace(recentRate / sessionRate, refTs, anchorTs);
+		return anchorVol > 0 ? new VolumeWindow(refTs, anchorTs, Math.Max(0, anchorVol - refVol), anchorVol) : null;
+	}
+
+	/// <summary>Rates the recent window against <paramref name="sameWindowHistory"/> — the volume each prior session traded in the
+	/// same clock window — as window ÷ median. With fewer than <see cref="MinBaselineSessions"/> sessions (store not backfilled
+	/// yet, new root, early-close window) it falls back to (window pace) ÷ (session-average pace since <paramref name="sessionOpen"/>),
+	/// which is time-of-day biased but needs nothing beyond today's captures.</summary>
+	public static VolumePace VolumePaceFrom(VolumeWindow w, TimeSpan sessionOpen, IReadOnlyList<long> sameWindowHistory)
+	{
+		var median = Median(sameWindowHistory);
+		if (sameWindowHistory.Count >= MinBaselineSessions && median > 0m)
+			return new VolumePace(w.WindowVolume / median, w.ReferenceTs, w.AnchorTs, VolumeBasis.SameWindowHistory, sameWindowHistory.Count);
+		var recentRate = w.WindowVolume / (decimal)(w.AnchorTs - w.ReferenceTs).TotalMinutes;
+		var sessionRate = w.SessionVolume / (decimal)(w.AnchorTs - sessionOpen).TotalMinutes;
+		return new VolumePace(recentRate / sessionRate, w.ReferenceTs, w.AnchorTs, VolumeBasis.SessionAverage, 0);
+	}
+
+	private static decimal Median(IReadOnlyList<long> values)
+	{
+		if (values.Count == 0) return 0m;
+		var sorted = values.OrderBy(v => v).ToList();
+		var mid = sorted.Count / 2;
+		return sorted.Count % 2 == 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2m;
 	}
 
 	private static decimal? WallDistance(SqueezeSide side, SqueezeTerrain t)
@@ -223,10 +256,13 @@ internal static class GexSqueezeScreener
 		const string name = "Volume Confirm";
 		if (pace == null) return new SqueezeFactor(name, VolumeMax, null, SetupMark.Unknown, $"Volume pace n/a — needs two data/iv captures ≥{RecentWindow.TotalMinutes:F0} min apart (re-run, or keep wa-scraper running)");
 		var points = (int)Math.Round(VolumeMax * Math.Clamp((pace.Ratio - VolumeZeroRatio) / (VolumeFullRatio - VolumeZeroRatio), 0m, 1m), MidpointRounding.AwayFromZero);
-		var window = $"{pace.ReferenceTs:hh\\:mm}→{pace.AnchorTs:hh\\:mm} vs session";
-		if (pace.Ratio >= VolumeAcceleratingRatio) return new SqueezeFactor(name, VolumeMax, points, SetupMark.Pass, $"Visible flow accelerating ({pace.Ratio:F2}x recent, {window})");
-		if (pace.Ratio >= VolumeZeroRatio) return new SqueezeFactor(name, VolumeMax, points, SetupMark.Warn, $"Flow pace steady ({pace.Ratio:F2}x recent, {window})");
-		return new SqueezeFactor(name, VolumeMax, points, SetupMark.Fail, $"Flow decelerating ({pace.Ratio:F2}x recent, {window})");
+		var window = $"{pace.ReferenceTs:hh\\:mm}→{pace.AnchorTs:hh\\:mm}";
+		var basis = pace.Basis == VolumeBasis.SameWindowHistory
+			? $"{pace.Ratio:F2}x the median {window} volume of the last {pace.Sessions} sessions"
+			: $"{pace.Ratio:F2}x the session-average pace, {window} — fewer than {MinBaselineSessions} prior sessions in quotes.db for this window";
+		if (pace.Ratio >= VolumeAcceleratingRatio) return new SqueezeFactor(name, VolumeMax, points, SetupMark.Pass, $"Visible flow accelerating ({basis})");
+		if (pace.Ratio >= VolumeZeroRatio) return new SqueezeFactor(name, VolumeMax, points, SetupMark.Warn, $"Flow about normal ({basis})");
+		return new SqueezeFactor(name, VolumeMax, points, SetupMark.Fail, $"Flow below normal ({basis})");
 	}
 
 	private static SqueezeFactor DeltaOiFactor(SqueezeSide side, decimal? share, DateTime? priorDate)

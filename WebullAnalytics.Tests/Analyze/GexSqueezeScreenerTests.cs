@@ -99,34 +99,61 @@ public class GexSqueezeScreenerTests
 	[InlineData(75, "Imminent")]
 	public void Bands(int score, string band) => Assert.Equal(band, GexSqueezeScreener.Band(score));
 
-	[Fact]
-	public void VolumePace_ComparesRecentRateToSessionRate_OverSharedContracts()
+	private static readonly TimeSpan Open = new(9, 30, 0);
+
+	private static SortedDictionary<TimeSpan, Dictionary<string, long>> Captures() => new()
 	{
-		var open = new TimeSpan(9, 30, 0);
-		var captures = new SortedDictionary<TimeSpan, Dictionary<string, long>>
-		{
-			[new TimeSpan(10, 30, 0)] = new() { ["A"] = 600, ["B"] = 400 },
-			[new TimeSpan(10, 50, 0)] = new() { ["A"] = 700 },
-			// Anchor adds contract C (a wider window) which must not count as recent flow.
-			[new TimeSpan(11, 0, 0)] = new() { ["A"] = 900, ["B"] = 500, ["C"] = 5000 },
-		};
-		var pace = GexSqueezeScreener.VolumePaceFrom(captures, open);
-		Assert.NotNull(pace);
-		// Reference = 10:30 (latest ≥15 min before 11:00; 10:50 is too close). Shared {A,B}: 1000 → 1400 over 30 min
-		// = 13.33/min recent vs 1400 / 90 min = 15.56/min session → 0.857x.
-		Assert.Equal(new TimeSpan(10, 30, 0), pace!.ReferenceTs);
-		Assert.Equal(0.857m, Math.Round(pace.Ratio, 3));
+		[new TimeSpan(10, 30, 0)] = new() { ["A"] = 600, ["B"] = 400 },
+		[new TimeSpan(10, 50, 0)] = new() { ["A"] = 700 },
+		// Anchor adds contract C (a wider window) which must not count as recent flow.
+		[new TimeSpan(11, 0, 0)] = new() { ["A"] = 900, ["B"] = 500, ["C"] = 5000 },
+	};
+
+	[Fact]
+	public void RecentWindow_SumsSharedContracts_FromTheLatestCaptureAtLeast15MinBack()
+	{
+		var w = GexSqueezeScreener.RecentVolumeWindow(Captures(), Open);
+		// Reference = 10:30 (latest ≥15 min before 11:00; 10:50 is too close). Shared {A,B}: 1000 → 1400.
+		Assert.Equal(new VolumeWindow(new TimeSpan(10, 30, 0), new TimeSpan(11, 0, 0), 400, 1400), w);
 	}
 
 	[Fact]
-	public void VolumePace_NullWithoutAQualifyingReference()
+	public void RecentWindow_NullWithoutAQualifyingReference()
 	{
 		var captures = new SortedDictionary<TimeSpan, Dictionary<string, long>>
 		{
 			[new TimeSpan(10, 50, 0)] = new() { ["A"] = 700 },
 			[new TimeSpan(11, 0, 0)] = new() { ["A"] = 900 },
 		};
-		Assert.Null(GexSqueezeScreener.VolumePaceFrom(captures, new TimeSpan(9, 30, 0)));
+		Assert.Null(GexSqueezeScreener.RecentVolumeWindow(captures, Open));
+	}
+
+	[Fact]
+	public void VolumePace_RatesAgainstTheSameWindowMedian()
+	{
+		var w = new VolumeWindow(new TimeSpan(11, 7, 0), new TimeSpan(11, 22, 0), 30_000, 400_000);
+		var pace = GexSqueezeScreener.VolumePaceFrom(w, Open, [10_000, 20_000, 15_000, 12_000, 18_000]);
+		Assert.Equal(VolumeBasis.SameWindowHistory, pace.Basis);
+		Assert.Equal(5, pace.Sessions);
+		Assert.Equal(2m, pace.Ratio);   // 30k ÷ median 15k
+	}
+
+	[Fact]
+	public void VolumePace_EvenCountMedian_AveragesTheMiddlePair()
+	{
+		var w = new VolumeWindow(new TimeSpan(11, 7, 0), new TimeSpan(11, 22, 0), 30_000, 400_000);
+		var pace = GexSqueezeScreener.VolumePaceFrom(w, Open, [10_000, 20_000, 15_000, 12_000, 18_000, 30_000]);
+		Assert.Equal(30_000m / 16_500m, pace.Ratio);
+	}
+
+	[Fact]
+	public void VolumePace_FallsBackToSessionAverage_WithTooLittleHistory()
+	{
+		// 400 over 30 min = 13.33/min recent vs 1400 over 90 min = 15.56/min session → 0.857x.
+		var w = new VolumeWindow(new TimeSpan(10, 30, 0), new TimeSpan(11, 0, 0), 400, 1400);
+		var pace = GexSqueezeScreener.VolumePaceFrom(w, Open, [500, 600, 700, 800]);
+		Assert.Equal(VolumeBasis.SessionAverage, pace.Basis);
+		Assert.Equal(0.857m, Math.Round(pace.Ratio, 3));
 	}
 
 	[Fact]
