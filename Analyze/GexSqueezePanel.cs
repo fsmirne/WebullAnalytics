@@ -45,7 +45,21 @@ internal static class GexSqueezePanel
 		AnsiConsole.Write(new Panel(new Rows(rows)).Border(BoxBorder.Rounded).BorderColor(Color.Grey).Padding(2, 1));
 		var missing = reading.Factors.Where(f => !f.Points.HasValue).Select(f => f.Name).ToList();
 		var excluded = missing.Count > 0 ? $"; excluded for lack of data: {string.Join(", ", missing)}" : "";
-		AnsiConsole.MarkupLine($"[dim]Weights follow the third-party panel (25/25/25/20/5); the thresholds are ours. Score = points ÷ max over the factors with data{Markup.Escape(excluded)}. Both sides are scored and the bias is the higher one. Trigger = chain-wide gamma flip; walls = the strikes with the most call/put dollar gamma summed over the window. Volume is unsigned (which side traded, not who bought), and GEX terrain has tested as a RANGE signal, not a direction signal.[/]");
+		foreach (var line in ScoringLegend())
+			AnsiConsole.MarkupLine($"[dim]{Markup.Escape(line)}[/]");
+		AnsiConsole.MarkupLine($"[dim]Score = points ÷ max over the factors with data{Markup.Escape(excluded)}. Both sides are scored and the bias is the higher one. Trigger = chain-wide gamma flip; walls = the strikes with the most call/put dollar gamma summed over the window. Volume is unsigned (which side traded, not who bought), and GEX terrain has tested as a RANGE signal, not a direction signal.[/]");
+	}
+
+	/// <summary>The weights and thresholds behind each factor, read from the scorer's constants so the legend cannot drift from the scoring.</summary>
+	private static IEnumerable<string> ScoringLegend()
+	{
+		yield return "Scoring:";
+		yield return $"  Gamma Regime ({GexSqueezeScreener.RegimeMax}): full at ≥{GexSqueezeScreener.RegimeRampMoves} daily moves below the flip, half at the flip, 0 at ≥{GexSqueezeScreener.RegimeRampMoves} above";
+		yield return $"  Wall Proximity ({GexSqueezeScreener.WallMax}): full within {GexSqueezeScreener.WallFullMoves} daily moves of the wall ahead of spot, falling to 0 at {GexSqueezeScreener.WallZeroMoves}; 0 once price is through it";
+		yield return $"  Flow Alignment ({GexSqueezeScreener.FlowMax}): Δ-weighted call share leaning ≥{GexSqueezeScreener.FlowNeutralBand:0.00} toward the side = {GexSqueezeScreener.FlowMax}, within ±{GexSqueezeScreener.FlowNeutralBand:0.00} = {GexSqueezeScreener.FlowNeutralPoints}, leaning against = 0";
+		yield return $"  Volume Confirm ({GexSqueezeScreener.VolumeMax}): last {GexSqueezeScreener.RecentWindow.TotalMinutes:F0} min pace vs session average, 0 at ≤{GexSqueezeScreener.VolumeZeroRatio:0.0}x rising to {GexSqueezeScreener.VolumeMax} at ≥{GexSqueezeScreener.VolumeFullRatio:0.0}x";
+		yield return $"  Delta OI Alignment ({GexSqueezeScreener.DeltaOiMax}): {GexSqueezeScreener.DeltaOiMax} when the Δ-weighted OI change since the prior snapshot leans toward the side, else 0";
+		yield return $"  Bands: <{GexSqueezeScreener.BandPossible} Unlikely · {GexSqueezeScreener.BandPossible}-{GexSqueezeScreener.BandLikely - 1} Possible · {GexSqueezeScreener.BandLikely}-{GexSqueezeScreener.BandImminent - 1} Likely · ≥{GexSqueezeScreener.BandImminent} Imminent (capped at Likely while a factor is n/a)";
 	}
 
 	private static Table FactorTable(IReadOnlyList<SqueezeFactor> factors)
@@ -82,7 +96,7 @@ internal static class GexSqueezePanel
 	private static string ScoreBar(int score)
 	{
 		var filled = (int)Math.Round(ScoreBarWidth * Math.Clamp(score, 0, 100) / 100m, MidpointRounding.AwayFromZero);
-		var ticks = new[] { 30, 50, 75 }.Select(b => b * ScoreBarWidth / 100).ToHashSet();
+		var ticks = new[] { GexSqueezeScreener.BandPossible, GexSqueezeScreener.BandLikely, GexSqueezeScreener.BandImminent }.Select(b => b * ScoreBarWidth / 100).ToHashSet();
 		var sb = new System.Text.StringBuilder();
 		for (var i = 0; i < ScoreBarWidth; i++)
 		{
@@ -98,8 +112,8 @@ internal static class GexSqueezePanel
 		var line = new char[ScoreBarWidth];
 		Array.Fill(line, ' ');
 		Place(line, 0, "Unlikely");
-		Place(line, 30 * ScoreBarWidth / 100, "Possible");
-		Place(line, 50 * ScoreBarWidth / 100, "Likely");
+		Place(line, GexSqueezeScreener.BandPossible * ScoreBarWidth / 100, "Possible");
+		Place(line, GexSqueezeScreener.BandLikely * ScoreBarWidth / 100, "Likely");
 		Place(line, ScoreBarWidth - "Imminent".Length, "Imminent");
 		return new string(line);
 	}

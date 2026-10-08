@@ -42,10 +42,8 @@ internal sealed record SqueezeReading(SqueezeSide Side, int Score, string Band, 
 }
 
 /// <summary>
-/// `analyze gex --view squeeze`: a five-factor gamma-squeeze score modeled on a third-party "Gamma Squeeze Screener"
-/// panel. The factor names and weights (25/25/25/20/5) match that panel; its formulas are not published, so every
-/// threshold below is our own definition. Both sides are scored and the higher one is shown, so the bias is simply
-/// the side whose setup scores better:
+/// `analyze gex --view squeeze`: a five-factor gamma-squeeze score (weights 25/25/25/20/5). Both sides are scored and the
+/// higher one is shown, so the bias is simply the side whose setup scores better:
 /// <list type="bullet">
 /// <item><description>Gamma regime (25) — how far spot sits below the gamma flip (dealers net short gamma, hedging amplifies moves), ramped linearly over ±<see cref="RegimeRampMoves"/> daily moves so crossing the flip by pennies moves the score a few points, not 25.</description></item>
 /// <item><description>Wall proximity (25) — distance to the call wall (bullish) / put wall (bearish) ahead of spot, in daily expected moves.</description></item>
@@ -60,8 +58,14 @@ internal sealed record SqueezeReading(SqueezeSide Side, int Score, string Band, 
 internal static class GexSqueezeScreener
 {
 	internal const int RegimeMax = 25, WallMax = 25, FlowMax = 25, VolumeMax = 20, DeltaOiMax = 5;
-	/// <summary>|delta-weighted call share| below this is "neutral" flow.</summary>
+	/// <summary>|delta-weighted call share| below this is "neutral" flow, which scores <see cref="FlowNeutralPoints"/>.</summary>
 	internal const decimal FlowNeutralBand = 0.15m;
+	internal const int FlowNeutralPoints = 10;
+	/// <summary>Volume pace scores zero at or below <see cref="VolumeZeroRatio"/>× the session average, full at or above
+	/// <see cref="VolumeFullRatio"/>×; at or above <see cref="VolumeAcceleratingRatio"/>× it reads as accelerating.</summary>
+	internal const decimal VolumeZeroRatio = 1m, VolumeFullRatio = 2m, VolumeAcceleratingRatio = 1.5m;
+	/// <summary>Lower bounds of the Possible / Likely / Imminent bands.</summary>
+	internal const int BandPossible = 30, BandLikely = 50, BandImminent = 75;
 	/// <summary>Wall proximity scores full at or inside this many daily moves and zero at or beyond <see cref="WallZeroMoves"/>.</summary>
 	internal const decimal WallFullMoves = 0.5m, WallZeroMoves = 3m;
 	/// <summary>Gamma regime scores full this many daily moves below the flip, zero this many above, and half at the flip.</summary>
@@ -78,13 +82,13 @@ internal static class GexSqueezeScreener
 	}
 
 	/// <summary>The band for a score, capped at "Likely" when a factor had no data.</summary>
-	public static string Band(int score, bool complete) => !complete && score >= 75 ? "Likely" : Band(score);
+	public static string Band(int score, bool complete) => !complete && score >= BandImminent ? "Likely" : Band(score);
 
 	public static string Band(int score) => score switch
 	{
-		< 30 => "Unlikely",
-		< 50 => "Possible",
-		< 75 => "Likely",
+		< BandPossible => "Unlikely",
+		< BandLikely => "Possible",
+		< BandImminent => "Likely",
 		_ => "Imminent",
 	};
 
@@ -211,17 +215,17 @@ internal static class GexSqueezeScreener
 		var tag = $"(Δ-weighted call share {share.Value:+0.00;-0.00})";
 		if (signed >= FlowNeutralBand) return new SqueezeFactor(name, FlowMax, FlowMax, SetupMark.Pass, $"{Capitalize(sideWord)} flow {tag}");
 		if (signed <= -FlowNeutralBand) return new SqueezeFactor(name, FlowMax, 0, SetupMark.Fail, $"Flow opposes the {sideWord} setup {tag}");
-		return new SqueezeFactor(name, FlowMax, 10, SetupMark.Warn, $"Neutral flow — {sideWord} flow would strengthen {tag}");
+		return new SqueezeFactor(name, FlowMax, FlowNeutralPoints, SetupMark.Warn, $"Neutral flow — {sideWord} flow would strengthen {tag}");
 	}
 
 	private static SqueezeFactor VolumeFactor(VolumePace? pace)
 	{
 		const string name = "Volume Confirm";
 		if (pace == null) return new SqueezeFactor(name, VolumeMax, null, SetupMark.Unknown, $"Volume pace n/a — needs two data/iv captures ≥{RecentWindow.TotalMinutes:F0} min apart (re-run, or keep wa-scraper running)");
-		var points = (int)Math.Round(VolumeMax * Math.Clamp(pace.Ratio - 1m, 0m, 1m), MidpointRounding.AwayFromZero);
+		var points = (int)Math.Round(VolumeMax * Math.Clamp((pace.Ratio - VolumeZeroRatio) / (VolumeFullRatio - VolumeZeroRatio), 0m, 1m), MidpointRounding.AwayFromZero);
 		var window = $"{pace.ReferenceTs:hh\\:mm}→{pace.AnchorTs:hh\\:mm} vs session";
-		if (pace.Ratio >= 1.5m) return new SqueezeFactor(name, VolumeMax, points, SetupMark.Pass, $"Visible flow accelerating ({pace.Ratio:F2}x recent, {window})");
-		if (pace.Ratio >= 1m) return new SqueezeFactor(name, VolumeMax, points, SetupMark.Warn, $"Flow pace steady ({pace.Ratio:F2}x recent, {window})");
+		if (pace.Ratio >= VolumeAcceleratingRatio) return new SqueezeFactor(name, VolumeMax, points, SetupMark.Pass, $"Visible flow accelerating ({pace.Ratio:F2}x recent, {window})");
+		if (pace.Ratio >= VolumeZeroRatio) return new SqueezeFactor(name, VolumeMax, points, SetupMark.Warn, $"Flow pace steady ({pace.Ratio:F2}x recent, {window})");
 		return new SqueezeFactor(name, VolumeMax, points, SetupMark.Fail, $"Flow decelerating ({pace.Ratio:F2}x recent, {window})");
 	}
 
