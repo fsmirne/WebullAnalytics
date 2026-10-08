@@ -23,6 +23,8 @@ internal static class GexSqueezePanel
 		grid.AddRow(new Markup($"[bold {sideColor}]⚡ {sideWord} Squeeze[/]"), new Markup($"[bold {bandColor}]{reading.Band.ToUpperInvariant()}[/]"));
 		grid.AddEmptyRow();
 		grid.AddRow(new Markup("[bold grey]PROBABILITY SCORE[/]"), new Markup($"[bold {bandColor}]{reading.Score}[/][bold]/100[/]"));
+		var coverage = $"{reading.Points}/{reading.Possible} pts · {reading.FactorsScored} of {reading.Factors.Count} factors";
+		grid.AddRow(new Text(""), new Markup(reading.Complete ? $"[dim]{coverage}[/]" : $"[yellow]{coverage} · capped at Likely[/]"));
 
 		var rows = new List<Spectre.Console.Rendering.IRenderable>
 		{

@@ -30,9 +30,15 @@ internal sealed record VolumePace(decimal Ratio, TimeSpan ReferenceTs, TimeSpan 
 /// <summary>The flow-side inputs. FlowShare and DeltaOiShare are delta-weighted call-minus-put shares in [−1, 1].</summary>
 internal sealed record SqueezeInputs(decimal? FlowShare, VolumePace? Volume, decimal? DeltaOiShare, DateTime? PriorOiDate);
 
+/// <summary>Score is points ÷ the max of the factors that had data, scaled to 100; Points/Possible and the factor counts
+/// expose that coverage so a 100 built from four factors is not read as a 100 built from five.</summary>
 internal sealed record SqueezeReading(SqueezeSide Side, int Score, string Band, SqueezeTerrain Terrain, IReadOnlyList<SqueezeFactor> Factors)
 {
 	public decimal? Wall => Side == SqueezeSide.Bullish ? Terrain.CallWall : Terrain.PutWall;
+	public int Points => Factors.Sum(f => f.Points ?? 0);
+	public int Possible => Factors.Where(f => f.Points.HasValue).Sum(f => f.Max);
+	public int FactorsScored => Factors.Count(f => f.Points.HasValue);
+	public bool Complete => FactorsScored == Factors.Count;
 }
 
 /// <summary>
@@ -41,13 +47,14 @@ internal sealed record SqueezeReading(SqueezeSide Side, int Score, string Band, 
 /// threshold below is our own definition. Both sides are scored and the higher one is shown, so the bias is simply
 /// the side whose setup scores better:
 /// <list type="bullet">
-/// <item><description>Gamma regime (25) — spot below the gamma flip (dealers net short gamma, hedging amplifies moves).</description></item>
+/// <item><description>Gamma regime (25) — how far spot sits below the gamma flip (dealers net short gamma, hedging amplifies moves), ramped linearly over ±<see cref="RegimeRampMoves"/> daily moves so crossing the flip by pennies moves the score a few points, not 25.</description></item>
 /// <item><description>Wall proximity (25) — distance to the call wall (bullish) / put wall (bearish) ahead of spot, in daily expected moves.</description></item>
 /// <item><description>Flow alignment (25) — delta-weighted call-vs-put day volume. Volume is unsigned: it says which side traded, not who bought.</description></item>
 /// <item><description>Volume confirm (20) — the last ~15 minutes' contract pace vs the session average, from data/iv captures.</description></item>
 /// <item><description>ΔOI alignment (5) — delta-weighted call-vs-put open-interest change since the prior data/oi snapshot.</description></item>
 /// </list>
-/// Our own studies found GEX terrain predicts range, not direction (see the project's GEX research notes), so read the
+/// A factor without data is dropped from the denominator, and an incomplete reading is capped at "Likely" so a missing
+/// factor cannot produce "Imminent". Our own studies found GEX terrain predicts range, not direction (see the project's GEX research notes), so read the
 /// bias as a description of the book, not a forecast.
 /// </summary>
 internal static class GexSqueezeScreener
@@ -57,6 +64,8 @@ internal static class GexSqueezeScreener
 	internal const decimal FlowNeutralBand = 0.15m;
 	/// <summary>Wall proximity scores full at or inside this many daily moves and zero at or beyond <see cref="WallZeroMoves"/>.</summary>
 	internal const decimal WallFullMoves = 0.5m, WallZeroMoves = 3m;
+	/// <summary>Gamma regime scores full this many daily moves below the flip, zero this many above, and half at the flip.</summary>
+	internal const decimal RegimeRampMoves = 0.5m;
 	/// <summary>Minimum spacing between the two captures the volume pace compares.</summary>
 	internal static readonly TimeSpan RecentWindow = TimeSpan.FromMinutes(15);
 
@@ -67,6 +76,9 @@ internal static class GexSqueezeScreener
 		if (bull.Score != bear.Score) return bull.Score > bear.Score ? bull : bear;
 		return (WallDistance(SqueezeSide.Bullish, terrain) ?? decimal.MaxValue) <= (WallDistance(SqueezeSide.Bearish, terrain) ?? decimal.MaxValue) ? bull : bear;
 	}
+
+	/// <summary>The band for a score, capped at "Likely" when a factor had no data.</summary>
+	public static string Band(int score, bool complete) => !complete && score >= 75 ? "Likely" : Band(score);
 
 	public static string Band(int score) => score switch
 	{
@@ -153,15 +165,27 @@ internal static class GexSqueezeScreener
 		var available = factors.Where(f => f.Points.HasValue).ToList();
 		var max = available.Sum(f => f.Max);
 		var score = max > 0 ? (int)Math.Round(100m * available.Sum(f => f.Points!.Value) / max, MidpointRounding.AwayFromZero) : 0;
-		return new SqueezeReading(side, score, Band(score), t, factors);
+		return new SqueezeReading(side, score, Band(score, available.Count == factors.Count), t, factors);
 	}
 
+	/// <summary>Proportional when both the flip and a daily move exist: depth below the flip in daily moves, ramped over
+	/// ±<see cref="RegimeRampMoves"/>. Without them it falls back to the all-or-nothing sign (no distance to scale).</summary>
 	private static SqueezeFactor RegimeFactor(SqueezeTerrain t)
 	{
-		var flip = t.Trigger.HasValue ? $" — spot {(t.ShortGamma ? "below" : "above")} the ${t.Trigger.Value:N2} flip" : " — no flip in range, read from net gamma at spot";
-		return t.ShortGamma
-			? new SqueezeFactor("Gamma Regime", RegimeMax, RegimeMax, SetupMark.Pass, $"Short gamma environment (amplifies moves){flip}")
-			: new SqueezeFactor("Gamma Regime", RegimeMax, 0, SetupMark.Fail, $"Long gamma environment (dampens squeeze){flip}");
+		const string name = "Gamma Regime";
+		if (!t.Trigger.HasValue || t.DailyMove is not > 0m)
+		{
+			var why = t.Trigger.HasValue ? $" — no ATM IV to scale the distance to the ${t.Trigger.Value:N2} flip" : " — no flip in range, read from net gamma at spot";
+			return t.ShortGamma
+				? new SqueezeFactor(name, RegimeMax, RegimeMax, SetupMark.Pass, $"Short gamma environment (amplifies moves){why}")
+				: new SqueezeFactor(name, RegimeMax, 0, SetupMark.Fail, $"Long gamma environment (dampens squeeze){why}");
+		}
+		var depth = (t.Trigger.Value - t.Spot) / t.DailyMove.Value;   // + = below the flip (short gamma)
+		var points = (int)Math.Round(RegimeMax * Math.Clamp((depth + RegimeRampMoves) / (2m * RegimeRampMoves), 0m, 1m), MidpointRounding.AwayFromZero);
+		var where = $"spot {Math.Abs(depth):F2} daily moves {(depth >= 0m ? "below" : "above")} the ${t.Trigger.Value:N2} flip";
+		if (points * 3 >= RegimeMax * 2) return new SqueezeFactor(name, RegimeMax, points, SetupMark.Pass, $"Short gamma environment (amplifies moves) — {where}");
+		if (points * 3 <= RegimeMax) return new SqueezeFactor(name, RegimeMax, points, SetupMark.Fail, $"Long gamma environment (dampens squeeze) — {where}");
+		return new SqueezeFactor(name, RegimeMax, points, SetupMark.Warn, $"Near the gamma flip, regime unsettled — {where}");
 	}
 
 	private static SqueezeFactor WallFactor(SqueezeSide side, SqueezeTerrain t)

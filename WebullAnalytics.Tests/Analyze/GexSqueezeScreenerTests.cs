@@ -43,14 +43,44 @@ public class GexSqueezeScreenerTests
 	}
 
 	[Fact]
-	public void UnavailableFactors_DropOutOfTheDenominator()
+	public void UnavailableFactors_DropOutOfTheDenominator_AndCapTheBand()
 	{
-		// Only regime (25/25) and wall (17/25) have data → 42/50 = 84, not 42/100.
-		var t = LongGammaTerrain() with { ShortGamma = true };
+		// Flip 1.34 moves above spot → regime 25/25; wall 17/25. Only those two have data → 42/50 = 84, not 42/100,
+		// and with three factors missing the 84 cannot read "Imminent".
+		var t = LongGammaTerrain() with { Trigger = 7900m, ShortGamma = true };
 		var r = GexSqueezeScreener.Evaluate(t, new SqueezeInputs(null, null, null, null));
 		Assert.Equal(84, r.Score);
-		Assert.Equal("Imminent", r.Band);
+		Assert.Equal((42, 50, 2), (r.Points, r.Possible, r.FactorsScored));
+		Assert.False(r.Complete);
+		Assert.Equal("Likely", r.Band);
 	}
+
+	[Theory]
+	[InlineData(0, 13)]        // at the flip: half credit
+	[InlineData(37, 25)]       // half a daily move (74) below: full
+	[InlineData(-18.5, 6)]     // a quarter move above: 25 × 0.25 = 6.25 → 6
+	[InlineData(-37, 0)]       // half a move above: none
+	[InlineData(2.5, 13)]      // the 2026-10-08 09:31 shape: $2.50 below the flip (0.03 moves) no longer earns the full 25
+	public void GammaRegime_RampsAcrossTheFlip(double flipMinusSpot, int expected)
+	{
+		var t = LongGammaTerrain() with { Trigger = 7801.15m + (decimal)flipMinusSpot };
+		var r = GexSqueezeScreener.Evaluate(t, new SqueezeInputs(null, null, null, null));
+		Assert.Equal(expected, Points(r, "Gamma Regime"));
+	}
+
+	[Fact]
+	public void GammaRegime_FallsBackToSign_WithoutADailyMove()
+	{
+		var t = LongGammaTerrain(dailyMove: null) with { ShortGamma = true, Trigger = 7802m };
+		var r = GexSqueezeScreener.Evaluate(t, new SqueezeInputs(null, null, null, null));
+		Assert.Equal(25, Points(r, "Gamma Regime"));
+	}
+
+	[Theory]
+	[InlineData(90, true, "Imminent")]
+	[InlineData(90, false, "Likely")]
+	[InlineData(40, false, "Possible")]
+	public void Band_IsCappedOnlyWhenIncomplete(int score, bool complete, string band) => Assert.Equal(band, GexSqueezeScreener.Band(score, complete));
 
 	[Fact]
 	public void BearishFlowAndPutBuild_PickTheBearishSide()
