@@ -28,7 +28,13 @@
 	gates run on the ET clock (the trading calendar), not local time.
 
 .PARAMETER Tickers
-	Scope the quotes/ohlcv roots with per-ticker DTE, e.g. 'SPY:60','XSP:0'. Default = the daily set.
+	Scope the quotes/ohlcv roots with per-ticker DTE, e.g. 'SPY:60','XSP:0'. Default = the daily set
+	(SPXW:0 XSP:0 SPY:60). QQQ is OPT-IN (dropped from every default 2026-10-08: no live strategy trades it, and
+	its 60-DTE quote+ohlcv pull pushed the morning run past the open). Pull it on demand at 60 DTE (the QQQ.DC
+	long leg is 30-45 DTE; a :30 pull truncates it):
+	  ./daily_backfill.ps1 -Tickers QQQ:60 -OiTickers QQQ -Verify QQQ -HistoryTickers QQQ
+	No gap accrues while it is off: the pull floor is backfill_thetadata.py's DEFAULT_START and sealed data is
+	skipped, so the next run that names QQQ fills everything since its last pull.
 
 .PARAMETER OiTickers
 	Scope the OI roots (bare names, no DTE — OI is a daily full-chain snapshot, not DTE-windowed like
@@ -37,7 +43,7 @@
 	on monthly expiries.
 
 .PARAMETER HistoryTickers
-	Scope the `wa ai history` step (bare names, no DTE). Default = SPY XSP SPXW QQQ.
+	Scope the `wa ai history` step (bare names, no DTE). Default = SPY XSP SPXW.
 
 .PARAMETER Steps
 	Which of the five steps to run (default all): history,quotes,ohlcv,oi,verify. Kept byte-identical in meaning
@@ -46,7 +52,7 @@
 	skips history.
 
 .PARAMETER Verify
-	Scope the verify roots (bare names). Default = SPXW XSP SPY QQQ.
+	Scope the verify roots (bare names). Default = SPXW XSP SPY.
 
 .EXAMPLE
 	# Normal daily run
@@ -99,7 +105,7 @@ $Conc = 2
 # --- Ticker sets (defaults = the daily set; -Tickers / -Verify override, matching the .sh env knobs). --------
 if (-not $Tickers -or $Tickers.Count -eq 0) {
 	if ($env:BACKFILL_TICKERS) { $Tickers = $env:BACKFILL_TICKERS -split '\s+' }
-	else { $Tickers = @('SPXW:0','XSP:0','SPY:60','QQQ:60') }
+	else { $Tickers = @('SPXW:0','XSP:0','SPY:60') }
 }
 # OI is a daily-snapshot instrument (one full-chain capture/day, not a DTE-windowed pull like
 # quotes/ohlcv): backfill_thetadata.py's --run mode ignores per-ticker :DTE tokens entirely and always
@@ -110,11 +116,11 @@ if (-not $Tickers -or $Tickers.Count -eq 0) {
 # minute-NBBO quotes/ohlcv pull for it - OI (+ the EOD-solved IV alongside it) is all ComputeGex needs.
 if (-not $OiTickers -or $OiTickers.Count -eq 0) {
 	if ($env:BACKFILL_OI_TICKERS) { $OiTickers = $env:BACKFILL_OI_TICKERS -split '\s+' }
-	else { $OiTickers = @('SPXW','XSP','SPY','QQQ','SPX') }
+	else { $OiTickers = @('SPXW','XSP','SPY','SPX') }
 }
 if (-not $Verify -or $Verify.Count -eq 0) {
 	if ($env:BACKFILL_VERIFY) { $Verify = $env:BACKFILL_VERIFY -split '\s+' }
-	else { $Verify = @('SPXW','XSP','SPY','QQQ') }
+	else { $Verify = @('SPXW','XSP','SPY') }
 }
 
 # --- Step selection (default all five; identical semantics to daily_backfill.sh --steps). --------------------
@@ -133,7 +139,7 @@ if (-not (Has-Step 'history')) {
 } elseif ($env:BACKFILL_HISTORY_TICKERS) {
 	$HistoryList = $env:BACKFILL_HISTORY_TICKERS -split '\s+'
 } else {
-	$HistoryList = @('SPY','XSP','SPXW','QQQ')
+	$HistoryList = @('SPY','XSP','SPXW')
 }
 
 # --- Resolve the wa executable (published alongside this script by install.bat; else PATH). ------------------

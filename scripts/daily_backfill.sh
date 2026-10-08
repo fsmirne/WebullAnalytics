@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Daily ThetaData refresh of the canonical data stores:
-#   0. wa ai history   -> data/... (daily closes + intraday tape) for SPY/XSP/SPXW/QQQ, run FIRST
+#   0. wa ai history   -> data/... (daily closes + intraday tape) for SPY/XSP/SPXW, run FIRST
 #   1. --quotes        -> data/quotes.db (SQLite)            (minute NBBO, ±10% strike band — written directly)
 #   2. --ohlcv         -> data/quotes.db `ohlcv` table       (minute trade OHLCV, same band/DTE, own seals)
 #   3. --run           -> data/oi/<TICKER>/<date>.jsonl      (EOD open interest + back-solved IV)
@@ -11,13 +11,17 @@
 # OI store stays as data/oi/<TICKER>/<date>.jsonl with its own sealed.json.
 #
 # Tickers: SPY at 60 DTE (covers the longCalendar/diagonal longDteMax=60 long legs),
-# QQQ at 60 DTE (the DC cross-vehicle store; the QQQ.DC long leg is 30-45 DTE, same as SPY — a
-#   narrower :30 pull truncated it at exactly the long leg, crippling the QQQ backtest),
 # SPXW/XSP at 0 DTE (quotes/ohlcv). The OI step is separately scoped (OI_TICKERS, bare names — OI is a
 #   daily full-chain snapshot, not DTE-windowed, so per-ticker :DTE is meaningless there) and additionally
 #   pulls SPX (legacy AM-settled root, untraded): on a standard-monthly (3rd Friday) expiry real open
 #   interest splits across SPX and SPXW, and ComputeGex needs SPX's OI/IV too or it only sees half that
 #   date's book; no minute-NBBO pull for SPX since nothing trades it.
+# QQQ is OPT-IN (dropped from every default 2026-10-08: no live strategy trades it, and its 60-DTE quote+ohlcv
+#   pull pushed the morning run past the open). Pull it on demand at 60 DTE — the QQQ.DC long leg is 30-45 DTE,
+#   and a narrower :30 pull truncated it at exactly the long leg, crippling the QQQ backtest:
+#     BACKFILL_TICKERS="QQQ:60" BACKFILL_OI_TICKERS="QQQ" BACKFILL_VERIFY="QQQ" BACKFILL_HISTORY_TICKERS="QQQ" bash daily_backfill.sh
+#   No gap accrues while it is off: the pull floor is backfill_thetadata.py's DEFAULT_START and sealed data is
+#   skipped, so the next run that names QQQ fills everything since its last pull.
 # ThetaData allows ONE session per account, so the pulls run STRICTLY
 # SEQUENTIALLY — never in parallel — each with --concurrency 2 (the Value-tier request limit).
 #
@@ -109,8 +113,8 @@ PY=python3
 SCRIPT="$SCRIPT_DIR/backfill_thetadata.py"
 # Ticker sets are env-overridable so a one-off historical fill can be scoped to a single root (e.g. a
 # 4-year SPY pull) without dragging the 0DTE index roots into a multi-year pull. Defaults = the daily set.
-TICKERS="${CLI_TICKERS:-${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60 QQQ:60}}"   # quotes + ohlcv (per-ticker DTE)
-VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW XSP SPY QQQ}}"                 # verify-quotes (bare names, no DTE)
+TICKERS="${CLI_TICKERS:-${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60}}"   # quotes + ohlcv (per-ticker DTE)
+VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW XSP SPY}}"                 # verify-quotes (bare names, no DTE)
 # OI is a daily-snapshot instrument (one full-chain capture/day, not a DTE-windowed pull like quotes/ohlcv):
 # backfill_thetadata.py's --run mode ignores per-ticker :DTE tokens entirely and always uses one global
 # --max-dte across every ticker passed, so bare names are all this step needs or accepts meaningfully.
@@ -118,7 +122,7 @@ VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW XSP SPY QQQ}}"                 # v
 # interest splits across SPX and SPXW (see ParsingHelpers.AggregationRoots) — without SPX's OI backfilled
 # too, GEX/max-pain/strike-ladder factors only ever see half that date's book. No minute-NBBO quotes/ohlcv
 # pull for it — OI (+ the EOD-solved IV alongside it) is all ComputeGex needs.
-OI_TICKERS="${CLI_OI_TICKERS:-${BACKFILL_OI_TICKERS:-SPXW XSP SPY QQQ SPX}}"   # bare names, no DTE
+OI_TICKERS="${CLI_OI_TICKERS:-${BACKFILL_OI_TICKERS:-SPXW XSP SPY SPX}}"   # bare names, no DTE
 CONC=2
 
 # Resolve the wa executable — install.sh/.bat publish it alongside this script in the install dir
@@ -137,7 +141,7 @@ has_step() { case " $STEPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 # ThetaData pull so downstream stores have fresh underlying history to lean on. Scope roots with
 # --history-tickers / BACKFILL_HISTORY_TICKERS; drop the step via --steps (omit 'history' from the list).
 if has_step history; then
-  HISTORY_TICKERS="${CLI_HISTORY:-${BACKFILL_HISTORY_TICKERS:-SPY XSP SPXW QQQ}}"
+  HISTORY_TICKERS="${CLI_HISTORY:-${BACKFILL_HISTORY_TICKERS:-SPY XSP SPXW}}"
 else
   HISTORY_TICKERS=""
 fi
