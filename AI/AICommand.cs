@@ -1130,20 +1130,25 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			result = captured!;
 		}
 		runStopwatch.Stop();
+		// Persist the fills BEFORE rendering: the run can take hours, and a summary-rendering failure used to throw away
+		// the whole ledger (both full-history DC2 runs on 2026-10-08 died in the summary after ~3 h and wrote nothing).
+		if (!string.IsNullOrWhiteSpace(settings.FillsJsonlPath))
+			WriteFillsJsonl(Path.IsPathRooted(settings.FillsJsonlPath) ? settings.FillsJsonlPath : Path.GetFullPath(settings.FillsJsonlPath), result.Fills);
 		Backtest.BacktestSummaryRenderer.Render(result, settings.ShowFills, settings.BookCmd);
 		AnsiConsole.MarkupLine($"[dim]Wall time: {runStopwatch.Elapsed.TotalMinutes:F1} min ({runStartedAt:HH:mm:ss} → {DateTime.Now:HH:mm:ss})[/]");
 
-		if (!string.IsNullOrWhiteSpace(settings.FillsJsonlPath))
-		{
-			var path = Path.IsPathRooted(settings.FillsJsonlPath) ? settings.FillsJsonlPath : Path.GetFullPath(settings.FillsJsonlPath);
-			using var w = new StreamWriter(path);
-			static string Num(decimal? v) => v.HasValue ? v.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null";
-			foreach (var f in result.Fills)
-			{
-				var legs = string.Join(",", f.Legs.Select(l => $"{{\"sym\":\"{l.Symbol}\",\"side\":\"{l.Side}\",\"qty\":{l.Qty},\"price\":{l.PricePerShare.ToString(System.Globalization.CultureInfo.InvariantCulture)}}}"));
-				w.WriteLine($"{{\"ts\":\"{f.Date:yyyy-MM-ddTHH:mm:ss}\",\"ticker\":\"{f.Ticker}\",\"key\":\"{f.PositionKey}\",\"kind\":\"{f.Kind}\",\"strategy\":\"{f.StrategyKind}\",\"spot\":{f.Spot.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"qty\":{f.Qty},\"net\":{f.NetCashFlow.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"fees\":{f.Fees.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"rawScore\":{Num(f.RawScore)},\"finalScore\":{Num(f.FinalScore)},\"iv\":{Num(f.RepIv)},\"rule\":{(f.RuleName == null ? "null" : $"\"{f.RuleName}\"")},\"lineage\":{f.LineageId},\"legs\":[{legs}]}}");
-			}
-		}
 		return 0;
 	});
+
+	/// <summary>--fills-jsonl: one JSON line per fill (see the option's description for the schema).</summary>
+	private static void WriteFillsJsonl(string path, IEnumerable<Backtest.BacktestFill> fills)
+	{
+		using var w = new StreamWriter(path);
+		static string Num(decimal? v) => v.HasValue ? v.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null";
+		foreach (var f in fills)
+		{
+			var legs = string.Join(",", f.Legs.Select(l => $"{{\"sym\":\"{l.Symbol}\",\"side\":\"{l.Side}\",\"qty\":{l.Qty},\"price\":{l.PricePerShare.ToString(System.Globalization.CultureInfo.InvariantCulture)}}}"));
+			w.WriteLine($"{{\"ts\":\"{f.Date:yyyy-MM-ddTHH:mm:ss}\",\"ticker\":\"{f.Ticker}\",\"key\":\"{f.PositionKey}\",\"kind\":\"{f.Kind}\",\"strategy\":\"{f.StrategyKind}\",\"spot\":{f.Spot.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"qty\":{f.Qty},\"net\":{f.NetCashFlow.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"fees\":{f.Fees.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"rawScore\":{Num(f.RawScore)},\"finalScore\":{Num(f.FinalScore)},\"iv\":{Num(f.RepIv)},\"rule\":{(f.RuleName == null ? "null" : $"\"{f.RuleName}\"")},\"lineage\":{f.LineageId},\"legs\":[{legs}]}}");
+		}
+	}
 }
