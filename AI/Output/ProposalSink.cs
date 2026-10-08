@@ -13,9 +13,9 @@ namespace WebullAnalytics.AI.Output;
 /// Idempotency dedup is handled by RuleEvaluator; this sink respects the `isRepeat` flag to suppress
 /// repeat console lines at normal verbosity while always appending to the JSONL file.
 /// </summary>
-internal sealed class ProposalSink : IDisposable
+internal sealed class ProposalSink
 {
-	private readonly StreamWriter _file;
+	private readonly string _path;
 	private readonly string _consoleVerbosity;
 	private readonly string _mode; // "watch" | "scan" | "replay"
 	private readonly string _suggestPricing;
@@ -31,9 +31,8 @@ internal sealed class ProposalSink : IDisposable
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
 		_ascii = ascii;
 		_cmdPrefix = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
-		var path = ProposalLog.ResolvedPath(ticker, strategy);
-		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
+		_path = ProposalLog.ResolvedPath(ticker, strategy);
+		Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
 	}
 
 	public void Emit(ManagementProposal p, bool isRepeat)
@@ -42,7 +41,7 @@ internal sealed class ProposalSink : IDisposable
 		WriteConsole(p, isRepeat);
 	}
 
-	private void WriteJsonl(ManagementProposal p) => _file.WriteLine(SerializeRecord(p, _mode, _strategy));
+	private void WriteJsonl(ManagementProposal p) => WebullAnalytics.IO.SharedFileAppender.AppendLine(_path, SerializeRecord(p, _mode, _strategy));
 
 	/// <summary>Serializes one management proposal to its JSONL line. Pure (no I/O) so it's unit-testable
 	/// without touching the filesystem; the sink wraps it with the append writer.</summary>
@@ -174,6 +173,4 @@ internal sealed class ProposalSink : IDisposable
 		"grey" => Color.Grey,
 		_ => Color.White
 	};
-
-	public void Dispose() => _file.Dispose();
 }

@@ -2186,21 +2186,17 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		diagnostic = diagnostic with { Probe = probe };
 
 		Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-		using (var writer = new StreamWriter(File.Open(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)))
+		var record = new
 		{
-			writer.AutoFlush = true;
-			var record = new
-			{
-				type = "analyze_position",
-				ts = DateTime.Now.ToString("o"),
-				ticker,
-				positionKey,
-				spot,
-				diagnostic = SerializeDiagnostic(diagnostic),
-				mode = "analyze_position",
-			};
-			writer.WriteLine(System.Text.Json.JsonSerializer.Serialize(record));
-		}
+			type = "analyze_position",
+			ts = DateTime.Now.ToString("o"),
+			ticker,
+			positionKey,
+			spot,
+			diagnostic = SerializeDiagnostic(diagnostic),
+			mode = "analyze_position",
+		};
+		WebullAnalytics.IO.SharedFileAppender.AppendLine(logPath, System.Text.Json.JsonSerializer.Serialize(record));
 
 		return diagnostic;
 	}

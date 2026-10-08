@@ -133,7 +133,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 		var priceCache = new Replay.HistoricalPriceCache();
 
-		using var sink = new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
+		var sink = new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "watch", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput);
 		OpenProposalSink? openSink = null;
 		OpenCandidateEvaluator? openEvaluator = null;
 		if (config.Opener.Enabled && settings.EmitOpenProposals)
@@ -264,7 +264,6 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			try { await Task.Delay(TimeSpan.FromSeconds(tickSeconds), cancellation); } catch (OperationCanceledException) { break; }
 		}
 
-		openSink?.Dispose();
 		AnsiConsole.MarkupLine($"[dim]Loop exited. ticks={ticksRun} proposals={proposalsEmitted} failures={failures}[/]");
 		return 0;
 	});

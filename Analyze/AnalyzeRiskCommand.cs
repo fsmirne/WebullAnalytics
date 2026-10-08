@@ -246,21 +246,17 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 
 		var logPath = Program.ResolvePath("data/analyze-risk.jsonl");
 		Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-		using (var writer = new StreamWriter(File.Open(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)))
+		var record = new
 		{
-			writer.AutoFlush = true;
-			var record = new
-			{
-				type = "analyze_risk",
-				ts = DateTime.Now.ToString("o"),
-				ticker,
-				positionKey = string.Join("|", positionLegs.Select(l => l.Symbol)),
-				spot = spot.Value,
-				diagnostic = AnalyzePositionCommand.SerializeDiagnostic(diagnostic),
-				mode = "analyze_risk",
-			};
-			writer.WriteLine(System.Text.Json.JsonSerializer.Serialize(record));
-		}
+			type = "analyze_risk",
+			ts = DateTime.Now.ToString("o"),
+			ticker,
+			positionKey = string.Join("|", positionLegs.Select(l => l.Symbol)),
+			spot = spot.Value,
+			diagnostic = AnalyzePositionCommand.SerializeDiagnostic(diagnostic),
+			mode = "analyze_risk",
+		};
+		WebullAnalytics.IO.SharedFileAppender.AppendLine(logPath, System.Text.Json.JsonSerializer.Serialize(record));
 
 		if (settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase))
 		{

@@ -454,7 +454,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 
 			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
 			var (mgmtExecutor, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
-			using ProposalSink? mgmtSink = settings.EmitManagementProposals
+			ProposalSink? mgmtSink = settings.EmitManagementProposals
 				? new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput)
 				: null;
 			OpenProposalSink? openSink = null;

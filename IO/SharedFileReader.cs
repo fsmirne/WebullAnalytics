@@ -1,8 +1,8 @@
 namespace WebullAnalytics.IO;
 
 /// <summary>
-/// Line readers that open with <c>FileShare.ReadWrite</c> so files a live process holds open for
-/// append (proposal JSONL logs from `wa ai watch`, whose sinks share ReadWrite) can be read
+/// Line readers that open with <c>FileShare.ReadWrite</c> so files a live process is appending to
+/// (proposal JSONL logs from `wa ai watch`, written through <see cref="SharedFileAppender"/>) can be read
 /// concurrently. <c>File.ReadLines</c>/<c>ReadAllLines</c> open with <c>FileShare.Read</c>, which
 /// denies write sharing and fails against an active writer's handle.
 /// </summary>

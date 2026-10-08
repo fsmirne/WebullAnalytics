@@ -13,9 +13,9 @@ namespace WebullAnalytics.AI.Output;
 /// line referring to a proposal the user couldn't see on the same tick. Watch-mode dedup is
 /// now exclusively the auto-executor's job (and only for live submits).
 /// </summary>
-internal sealed class OpenProposalSink : IDisposable
+internal sealed class OpenProposalSink
 {
-	private readonly StreamWriter _file;
+	private readonly string _path;
 	private readonly string _consoleVerbosity;
 	private readonly string _mode;
 	private readonly string _suggestPricing;
@@ -33,9 +33,8 @@ internal sealed class OpenProposalSink : IDisposable
 		_suggestPricing = SuggestionPricing.Normalize(suggestPricing);
 		_ascii = ascii;
 		_cmdPrefix = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
-		var path = ProposalLog.ResolvedPath(ticker, strategy);
-		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-		_file = new StreamWriter(File.Open(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
+		_path = ProposalLog.ResolvedPath(ticker, strategy);
+		Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
 	}
 
 	public void Emit(OpenProposal p, int? rank = null)
@@ -44,12 +43,10 @@ internal sealed class OpenProposalSink : IDisposable
 		if (_consoleVerbosity != "error") WriteConsole(p, rank);
 	}
 
-	public void Flush() => _file.Flush();
-
 	/// <summary>Writes one lean <c>type:"tick"</c> heartbeat line per watch tick (JSONL only, no console — the watch's own per-tick pulse covers the terminal). Records that the loop RAN and what the
 	/// opener's best pre-gate candidate scored, so a day suppressed by MinScoreToOpen is distinguishable from a dead watch after the fact (2026-08-03: watch ran all day, emitted nothing, and the log
 	/// couldn't prove it). Every replay/harness consumer filters <c>type=="open"</c>, so these lines are invisible to them by construction.</summary>
-	public void EmitTick(decimal? spot, int openCount, int mgmtCount, OpenProposal? topCandidate, decimal minScoreToOpen) => _file.WriteLine(SerializeTickRecord(_mode, _ticker, _strategy, spot, openCount, mgmtCount, topCandidate, minScoreToOpen));
+	public void EmitTick(decimal? spot, int openCount, int mgmtCount, OpenProposal? topCandidate, decimal minScoreToOpen) => WebullAnalytics.IO.SharedFileAppender.AppendLine(_path, SerializeTickRecord(_mode, _ticker, _strategy, spot, openCount, mgmtCount, topCandidate, minScoreToOpen));
 
 	/// <summary>Serializes one heartbeat line. Pure (no I/O) so it's unit-testable, mirroring <see cref="SerializeRecord"/>. <paramref name="topCandidate"/> is the best-ranked candidate BEFORE the
 	/// MinScoreToOpen gate — on a suppressed tick (openCount 0) its finalScore vs <paramref name="minScoreToOpen"/> is the diagnosis; null means the opener enumerated or priced nothing at all.</summary>
@@ -77,7 +74,7 @@ internal sealed class OpenProposalSink : IDisposable
 		return JsonSerializer.Serialize(record);
 	}
 
-	private void WriteJsonl(OpenProposal p, int? rank) => _file.WriteLine(SerializeRecord(p, _mode, _strategy, rank));
+	private void WriteJsonl(OpenProposal p, int? rank) => WebullAnalytics.IO.SharedFileAppender.AppendLine(_path, SerializeRecord(p, _mode, _strategy, rank));
 
 	/// <summary>Serializes one open proposal to its JSONL line. Pure (no I/O) so it's unit-testable
 	/// without touching the filesystem; the sink wraps it with the append writer.</summary>
@@ -214,6 +211,4 @@ internal sealed class OpenProposalSink : IDisposable
 		"magenta" => Color.Magenta1,
 		_ => Color.White
 	};
-
-	public void Dispose() => _file.Dispose();
 }
