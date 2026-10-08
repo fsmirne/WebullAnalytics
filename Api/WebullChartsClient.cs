@@ -29,7 +29,7 @@ internal static class WebullChartsClient
 	// pattern) churns through TCP sockets and ports — under sustained bulk pulls Webull's edge starts
 	// dropping connections at the TLS handshake, which surfaces as "The SSL connection could not be
 	// established" mid-loop. A single long-lived client with HTTP/2 connection pooling avoids it.
-	private static readonly HttpClient SharedClient = new();
+	private static readonly HttpClient SharedClient = new(PooledHttp.CreateHandler());
 
 	static WebullChartsClient()
 	{

@@ -44,7 +44,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 	internal WebullOpenApiClient(TradeAccount account)
 	{
 		_account = account;
-		_http = SharedClients.GetOrAdd(account.BaseUrl, static url => new HttpClient { BaseAddress = new Uri(url) });
+		_http = SharedClients.GetOrAdd(account.BaseUrl, static url => new HttpClient(PooledHttp.CreateHandler()) { BaseAddress = new Uri(url) });
 		// Load cached token so subsequent requests include x-access-token automatically.
 		var cached = TokenStore.Load(account.Alias);
 		_accessToken = cached?.Status == "NORMAL" ? cached.Token : null;

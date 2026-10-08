@@ -16,8 +16,9 @@ namespace WebullAnalytics.Api;
 /// <see cref="WebullChartsClient"/>'s SharedClient (a separate pool — different host and default headers).
 ///
 /// Schwab gzips response bodies (including OAuth error bodies) even when the request sends no Accept-Encoding, so
-/// automatic decompression is required or error text surfaces as binary garbage.</summary>
+/// automatic decompression is required or error text surfaces as binary garbage. The handler's idle window comes from
+/// <see cref="PooledHttp"/> so the pooled connection outlives the gap between watch ticks.</summary>
 internal static class SchwabHttp
 {
-	public static readonly HttpClient Client = new(new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All }) { Timeout = TimeSpan.FromSeconds(30) };
+	public static readonly HttpClient Client = new(PooledHttp.CreateHandler(DecompressionMethods.All)) { Timeout = TimeSpan.FromSeconds(30) };
 }

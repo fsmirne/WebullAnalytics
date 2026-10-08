@@ -86,7 +86,7 @@ internal static class WebullOptionsClient
 	// Timeout is a client-level property. The 15s timeout bounds every call so a Webull stall (throttle,
 	// dropped connection, partial response) can't freeze a watch tick for the .NET default 100s — 15s is
 	// comfortably above normal chain/queryBatch round-trip (~1-3s) and short enough to give the tick headroom.
-	private static readonly HttpClient SharedClient = new() { Timeout = TimeSpan.FromSeconds(15) };
+	private static readonly HttpClient SharedClient = new(PooledHttp.CreateHandler()) { Timeout = TimeSpan.FromSeconds(15) };
 
 	static WebullOptionsClient()
 	{
