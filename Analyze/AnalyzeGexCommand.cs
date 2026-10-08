@@ -473,7 +473,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var inputs = new SqueezeInputs(
 			GexSqueezeScreener.FlowShare(matrix.Contributors, spot),
 			window != null ? GexSqueezeScreener.VolumePaceFrom(window, AnalyzeGexSettings.RthOpen, SameWindowHistory(ticker, asOf.Date, (front - asOf.Date).Days, window)) : null,
-			priorOi != null ? GexSqueezeScreener.DeltaOiShare(matrix.Contributors, spot, priorOi) : null,
+			priorOi != null ? GexSqueezeScreener.DeltaOiShare(matrix.Contributors, priorOi) : null,
 			priorDate);
 		var reading = GexSqueezeScreener.Evaluate(GexSqueezeScreener.TerrainFrom(matrix, spot, asOf), inputs);
 		var scope = expiryFilter.HasValue ? $"expiry {expiryFilter.Value:yyyy-MM-dd}" : $"{matrix.Expiries.Count} expiration(s) ≤{settings.Dte}DTE";
@@ -502,23 +502,37 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		return history;
 	}
 
-	/// <summary>Per-contract (expiry, strike, right) open interest from the latest data/oi snapshot dated within 7 days before
-	/// <paramref name="date"/>, exact root only (matching the GexMatrix contributors it is joined to). (null, null) when none exists.</summary>
-	private static (DateTime? Date, Dictionary<(DateTime Expiry, decimal Strike, bool IsCall), long>? Oi) LoadPriorOi(string ticker, DateTime date)
+	/// <summary>Per-contract (expiry, strike, right) open interest and |delta| from the latest data/oi snapshot dated within 7 days before
+	/// <paramref name="date"/>, exact root only (matching the GexMatrix contributors it is joined to). The delta is the snapshot's own:
+	/// its spot, its timestamp (16:00 when the record carries none), and the contract's snapshot IV — back-solved from the snapshot mid
+	/// when the IV is absent or untrusted — so the ΔOI weighting is fixed for the whole session. Contracts with no usable IV are dropped.
+	/// (null, null) when no snapshot exists.</summary>
+	private static (DateTime? Date, Dictionary<(DateTime Expiry, decimal Strike, bool IsCall), PriorContract>? Oi) LoadPriorOi(string ticker, DateTime date)
 	{
 		for (var d = date.AddDays(-1); d >= date.AddDays(-7); d = d.AddDays(-1))
 		{
 			var path = Program.ResolvePath($"data/oi/{ticker}/{d:yyyy-MM-dd}.jsonl");
 			if (!File.Exists(path)) continue;
-			var (_, quotes) = LoadOiSnapshot(path);
-			var oi = new Dictionary<(DateTime, decimal, bool), long>();
-			foreach (var (sym, q) in quotes)
+			var snapshot = LoadOiSnapshot(path);
+			var prior = new Dictionary<(DateTime, decimal, bool), PriorContract>();
+			if (snapshot.Spot is not > 0m) return (d, prior);
+			var spot = snapshot.Spot.Value;
+			var asOf = snapshot.TsEt ?? d.Date + AnalyzeGexSettings.RthClose;
+			foreach (var (sym, q) in snapshot.Quotes)
 			{
 				var p = ParsingHelpers.ParseOptionSymbol(sym);
-				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || q.OpenInterest is not { } o) continue;
-				oi[(p.ExpiryDate.Date, p.Strike, p.CallPut == "C")] = o;
+				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || q.OpenInterest is not { } o || p.ExpiryDate.Date < d.Date) continue;
+				var t = GexMatrix.TimeYears(asOf, p.ExpiryDate);
+				var iv = OptionMath.TrustedVendorIv(q) ?? 0m;
+				if (iv <= 0m && q.Bid is > 0m && q.Ask is > 0m)
+				{
+					var solved = OptionMath.ImpliedVol(spot, p.Strike, t, OptionMath.RiskFreeRate, (q.Bid.Value + q.Ask.Value) / 2m, p.CallPut);
+					if (solved > 0.011m && solved < 4.99m) iv = solved;
+				}
+				if (iv <= 0m) continue;
+				prior[(p.ExpiryDate.Date, p.Strike, p.CallPut == "C")] = new PriorContract(o, Math.Abs(OptionMath.Delta(spot, p.Strike, t, OptionMath.RiskFreeRate, iv, p.CallPut)));
 			}
-			return (d, oi);
+			return (d, prior);
 		}
 		return (null, null);
 	}
@@ -527,7 +541,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// the ThetaData backfill / live scraper) into (spot, quotes) — OI + IV inlined for every contract, so the
 	/// GEX heatmap computes off real captured data with no live fetch. Picks the first RTH (≥09:30 ET) record,
 	/// else the first line.</summary>
-	private static (decimal? Spot, Dictionary<string, OptionContractQuote> Quotes) LoadOiSnapshot(string path)
+	/// <summary>One data/oi snapshot record: underlying spot, the record's ET timestamp (16:00 for a backfilled EOD file, the
+	/// capture time for a scraper-written one) and the chain. Deconstructs to (Spot, Quotes) for the callers that need only those.</summary>
+	private sealed record OiSnapshot(decimal? Spot, DateTime? TsEt, Dictionary<string, OptionContractQuote> Quotes)
+	{
+		public void Deconstruct(out decimal? spot, out Dictionary<string, OptionContractQuote> quotes) => (spot, quotes) = (Spot, Quotes);
+	}
+
+	private static OiSnapshot LoadOiSnapshot(string path)
 	{
 		var quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		string? chosen = null, firstAny = null;
@@ -540,11 +561,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				&& et.TimeOfDay >= new TimeSpan(9, 30, 0)) { chosen = line; break; }
 		}
 		chosen ??= firstAny;
-		if (chosen == null) return (null, quotes);
+		if (chosen == null) return new OiSnapshot(null, null, quotes);
 
 		using var doc = JsonDocument.Parse(chosen);
 		var root = doc.RootElement;
 		decimal? spot = root.TryGetProperty("underlyingPrice", out var sp) && sp.ValueKind == JsonValueKind.Number ? sp.GetDecimal() : null;
+		DateTime? tsEt = root.TryGetProperty("tsEt", out var tsEl) && DateTimeOffset.TryParse(tsEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var tsOff) ? tsOff.DateTime : null;
 		if (root.TryGetProperty("options", out var opts) && opts.ValueKind == JsonValueKind.Array)
 			foreach (var o in opts.EnumerateArray())
 			{
@@ -556,7 +578,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 					Change: null, PercentChange: null, Volume: Lng("volume"), OpenInterest: Lng("openInterest"),
 					ImpliedVolatility: Dec("iv"), HistoricalVolatility: Dec("hv"));
 			}
-		return (spot, quotes);
+		return new OiSnapshot(spot, tsEt, quotes);
 	}
 
 	/// <summary>--exante: replaces every mapped-expiry contract's IV with the prior trading day's snapshot value (falling back

@@ -40,6 +40,10 @@ internal enum VolumeBasis
 /// the median (0 for the session-average fallback).</summary>
 internal sealed record VolumePace(decimal Ratio, TimeSpan ReferenceTs, TimeSpan AnchorTs, VolumeBasis Basis, int Sessions);
 
+/// <summary>One contract in the prior data/oi snapshot: its open interest and |delta| as of that snapshot (its own spot, IV
+/// and timestamp), so the overnight OI change can be weighted without reference to today's spot.</summary>
+internal sealed record PriorContract(long Oi, decimal AbsDelta);
+
 /// <summary>The flow-side inputs. FlowShare and DeltaOiShare are delta-weighted call-minus-put shares in [−1, 1].</summary>
 internal sealed record SqueezeInputs(decimal? FlowShare, VolumePace? Volume, decimal? DeltaOiShare, DateTime? PriorOiDate);
 
@@ -125,21 +129,27 @@ internal static class GexSqueezeScreener
 
 	/// <summary>Delta-weighted call share of day volume: (Σcall vol·|Δ| − Σput vol·|Δ|) / (sum of both). Null with no volume.</summary>
 	public static decimal? FlowShare(IEnumerable<GexContributor> contributors, decimal spot) =>
-		Share(contributors.Select(c => (c, (decimal)c.Volume)), spot);
+		Share(contributors.Select(c => (c.IsCall, c.Volume * Math.Abs(OptionMath.Delta(spot, c.Strike, c.TimeYears, OptionMath.RiskFreeRate, c.Iv, c.IsCall ? "C" : "P")))));
 
 	/// <summary>Delta-weighted call share of the open-interest CHANGE since a prior snapshot, signed: (Σcall ΔOI·|Δ| − Σput ΔOI·|Δ|) /
-	/// Σ|ΔOI|·|Δ|. Contracts missing from the prior snapshot are skipped, not read as fresh listings — the live scraper's
-	/// snapshots carry only the 0DTE chain until the nightly backfill completes them, so absence is not evidence of zero.</summary>
-	public static decimal? DeltaOiShare(IEnumerable<GexContributor> contributors, decimal spot, IReadOnlyDictionary<(DateTime Expiry, decimal Strike, bool IsCall), long> priorOi) =>
-		Share(contributors.Where(c => priorOi.ContainsKey((c.Expiry, c.Strike, c.IsCall))).Select(c => (c, (decimal)(c.Oi - priorOi[(c.Expiry, c.Strike, c.IsCall)]))), spot);
+	/// Σ|ΔOI|·|Δ|, with |Δ| taken from the PRIOR snapshot (<see cref="PriorContract.AbsDelta"/>). OI is fixed for the session, so the
+	/// factor must be too: weighting by today's delta re-weighted the same overnight change on every spot tick — 0DTE deltas swing
+	/// hardest near expiry, and they carry much of the change (−0.16 → −0.32 in 26 minutes on 2026-10-08). Contracts missing from
+	/// the prior snapshot are skipped, not read as fresh listings — the live scraper's snapshots carry only the 0DTE chain until the
+	/// nightly backfill completes them, so absence is not evidence of zero.</summary>
+	public static decimal? DeltaOiShare(IEnumerable<GexContributor> contributors, IReadOnlyDictionary<(DateTime Expiry, decimal Strike, bool IsCall), PriorContract> prior) =>
+		Share(contributors.Where(c => prior.ContainsKey((c.Expiry, c.Strike, c.IsCall))).Select(c =>
+		{
+			var p = prior[(c.Expiry, c.Strike, c.IsCall)];
+			return (c.IsCall, (c.Oi - p.Oi) * p.AbsDelta);
+		}));
 
-	private static decimal? Share(IEnumerable<(GexContributor C, decimal Amount)> rows, decimal spot)
+	private static decimal? Share(IEnumerable<(bool IsCall, decimal Weighted)> rows)
 	{
 		decimal net = 0m, gross = 0m;
-		foreach (var (c, amount) in rows)
+		foreach (var (isCall, weighted) in rows)
 		{
-			var weighted = amount * Math.Abs(OptionMath.Delta(spot, c.Strike, c.TimeYears, OptionMath.RiskFreeRate, c.Iv, c.IsCall ? "C" : "P"));
-			net += c.IsCall ? weighted : -weighted;
+			net += isCall ? weighted : -weighted;
 			gross += Math.Abs(weighted);
 		}
 		return gross > 0m ? net / gross : null;

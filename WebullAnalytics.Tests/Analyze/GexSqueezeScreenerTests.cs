@@ -157,6 +157,27 @@ public class GexSqueezeScreenerTests
 	}
 
 	[Fact]
+	public void DeltaOiShare_WeightsTheChangeByThePriorSnapshotsDelta()
+	{
+		// Calls +1000 contracts at prior |Δ| 0.1 (= 100); puts +200 at prior |Δ| 0.5 (= 100) → balanced, despite 5× the raw call change.
+		// Today's contributor IV/T are deliberately extreme: the result must not depend on them (or on today's spot).
+		var contributors = new[]
+		{
+			new GexContributor(Expiry, 7900m, 1.0 / 365, 0.90m, 3000, IsCall: true, Volume: 0),
+			new GexContributor(Expiry, 7800m, 1.0 / 365, 0.90m, 1200, IsCall: false, Volume: 0),
+			new GexContributor(Expiry, 7700m, 1.0 / 365, 0.90m, 500, IsCall: false, Volume: 0),   // not in the prior snapshot: skipped
+		};
+		var prior = new Dictionary<(DateTime, decimal, bool), PriorContract>
+		{
+			[(Expiry, 7900m, true)] = new PriorContract(2000, 0.1m),
+			[(Expiry, 7800m, false)] = new PriorContract(1000, 0.5m),
+		};
+		Assert.Equal(0m, GexSqueezeScreener.DeltaOiShare(contributors, prior));
+		prior[(Expiry, 7800m, false)] = new PriorContract(1100, 0.5m);   // puts +100 → 50 vs calls 100 → (100 − 50) / 150
+		Assert.Equal(50m / 150m, GexSqueezeScreener.DeltaOiShare(contributors, prior));
+	}
+
+	[Fact]
 	public void FlowShare_IsDeltaWeighted()
 	{
 		// Equal raw volume, but the call is ATM (|Δ|≈0.5) and the put far OTM (|Δ| small) → strongly call-leaning.
