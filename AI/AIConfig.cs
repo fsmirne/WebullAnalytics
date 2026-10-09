@@ -475,13 +475,20 @@ internal static class AIConfigLoader
 	/// <c>rules.takeProfit</c>, top-level <c>execution</c>) into the opener's [JsonIgnore] bundle. The
 	/// candidate scorer receives only <see cref="OpenerConfig"/>, so this load-time copy is how it reaches
 	/// those values. Idempotent — call once per resolved config after layering. Keep
-	/// <see cref="OpenerRealizedExpectancyConfig.Enabled"/> as-is (it deserializes from the opener block).</summary>
+	/// <see cref="OpenerRealizedExpectancyConfig.Enabled"/> as-is (it deserializes from the opener block).
+	/// <para>The scorer's realized EV floors every losing scenario at the stop, so it may only model a stop that will actually
+	/// be taken. With <c>rules.stopLoss.enabled</c> false nothing ever exits at the stop (StopLossRule and the backtest's intraday
+	/// SL both gate on it), so the bundle gets "no stop": pct-of-max-loss 1.0 (the floor equals the max loss — no clamp) and
+	/// pct-of-max-profit 0. Previously the configured percentage was copied regardless, so SPY DC2 (stop disabled) and SPY
+	/// 0DTE ranked every candidate against a 50%/60% stop that was never placed — e.g. a 0DTE put spread scored +$8.19 "real"
+	/// EV against a hold-to-expiry EV of −$5.58 (2026-10-09).</para></summary>
 	internal static void PopulateRealizedEv(AIConfig config)
 	{
 		var ev = config.Opener.RealizedExpectancy;
 		ev.Enabled = config.Opener.RealizedEvScoring;
-		ev.StopLossPctOfMaxLoss = config.Rules.StopLoss.PctOfMaxLoss;
-		ev.StopLossPctOfMaxProfit = config.Rules.StopLoss.PctOfMaxProfit;
+		var stopArmed = config.Rules.StopLoss.Enabled;
+		ev.StopLossPctOfMaxLoss = stopArmed ? config.Rules.StopLoss.PctOfMaxLoss : 1m;
+		ev.StopLossPctOfMaxProfit = stopArmed ? config.Rules.StopLoss.PctOfMaxProfit : 0m;
 		ev.SlippagePerSharePerOrder = config.Execution.SlippagePerSharePerOrder;
 		ev.RoundTrips = config.Execution.RoundTrips;
 	}
