@@ -472,7 +472,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var (priorDate, priorOi) = LoadPriorOi(ticker, asOf.Date);
 		var inputs = new SqueezeInputs(
 			GexSqueezeScreener.FlowShare(matrix.Contributors, spot),
-			window != null ? GexSqueezeScreener.VolumePaceFrom(window, AnalyzeGexSettings.RthOpen, SameWindowHistory(ticker, asOf.Date, (front - asOf.Date).Days, window)) : null,
+			window != null ? GexSqueezeScreener.VolumePaceFrom(window, AnalyzeGexSettings.RthOpen, GexSqueezeScreener.SameWindowHistory(asOf.Date, window, d => StoreMinuteVolume(ticker, d, d.AddDays((front - asOf.Date).Days)))) : null,
 			priorOi != null ? GexSqueezeScreener.DeltaOiShare(matrix.Contributors, priorOi) : null,
 			priorDate);
 		var reading = GexSqueezeScreener.Evaluate(GexSqueezeScreener.TerrainFrom(matrix, spot, asOf), inputs);
@@ -480,26 +480,18 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		GexSqueezePanel.Render(ticker, asOf, scope, reading);
 	}
 
-	/// <summary>Contracts traded in <paramref name="window"/>'s clock window on each of up to <see cref="GexSqueezeScreener.BaselineSessions"/>
-	/// prior sessions, for the expiry the same number of days out as today's front (<paramref name="dteOffset"/>; 0 = each session's
-	/// own 0DTE), from the store's ohlcv minute bars — the same feed as the volume tape (Schwab's capture Δvolume and ThetaData's trade
-	/// volume agreed within ~1% on 2026-08-18). Sessions with no store coverage for that expiry, and early-close sessions whose close
-	/// falls inside the window, are skipped rather than counted as zero. No strike filter: 0DTE volume outside ±5% of the money is
-	/// under 0.2% of the day (2026-08..10), so the whole ladder matches the captures' ±10%+ band.</summary>
-	private static List<long> SameWindowHistory(string ticker, DateTime date, int dteOffset, VolumeWindow window)
+	/// <summary>Per-minute traded volume (calls + puts, all strikes) for one (ticker, date, expiry) from the store's ohlcv
+	/// minute bars, or null when the store has no coverage for it — the provider <see cref="GexSqueezeScreener.SameWindowHistory"/>
+	/// draws its baseline from. No strike filter: 0DTE volume outside ±5% of the money is under 0.2% of the day (2026-08..10),
+	/// so the whole ladder matches the live captures' ±10%+ band. Schwab capture Δvolume and ThetaData trade volume agreed
+	/// within ~1% on 2026-08-18.</summary>
+	internal static SortedDictionary<TimeSpan, long>? StoreMinuteVolume(string ticker, DateTime date, DateTime expiry)
 	{
-		var from = new TimeSpan(window.ReferenceTs.Hours, window.ReferenceTs.Minutes, 0);
-		var to = new TimeSpan(window.AnchorTs.Hours, window.AnchorTs.Minutes, 0);
-		var history = new List<long>();
-		var earliest = date.AddDays(-3 * GexSqueezeScreener.BaselineSessions);
-		for (var d = MarketCalendar.PreviousOpenOnOrBefore(date.AddDays(-1)); d >= earliest && history.Count < GexSqueezeScreener.BaselineSessions; d = MarketCalendar.PreviousOpenOnOrBefore(d.AddDays(-1)))
-		{
-			if (MarketCalendar.IsEarlyClose(d) && to > new TimeSpan(13, 0, 0)) continue;
-			var tape = LoadStoreTape(ticker, d, d.AddDays(dteOffset));
-			if (tape.Count == 0) continue;
-			history.Add((long)tape.Where(kv => kv.Key >= from && kv.Key < to).Sum(kv => kv.Value.Values.Sum(v => v.C + v.P)));
-		}
-		return history;
+		var tape = LoadStoreTape(ticker, date, expiry);
+		if (tape.Count == 0) return null;
+		var totals = new SortedDictionary<TimeSpan, long>();
+		foreach (var (minute, byStrike) in tape) totals[minute] = (long)byStrike.Values.Sum(v => v.C + v.P);
+		return totals;
 	}
 
 	/// <summary>Per-contract (expiry, strike, right) open interest and |delta| from the latest data/oi snapshot dated within 7 days before
@@ -507,7 +499,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// its spot, its timestamp (16:00 when the record carries none), and the contract's snapshot IV — back-solved from the snapshot mid
 	/// when the IV is absent or untrusted — so the ΔOI weighting is fixed for the whole session. Contracts with no usable IV are dropped.
 	/// (null, null) when no snapshot exists.</summary>
-	private static (DateTime? Date, Dictionary<(DateTime Expiry, decimal Strike, bool IsCall), PriorContract>? Oi) LoadPriorOi(string ticker, DateTime date)
+	internal static (DateTime? Date, Dictionary<(DateTime Expiry, decimal Strike, bool IsCall), PriorContract>? Oi) LoadPriorOi(string ticker, DateTime date)
 	{
 		for (var d = date.AddDays(-1); d >= date.AddDays(-7); d = d.AddDays(-1))
 		{
@@ -543,12 +535,12 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// else the first line.</summary>
 	/// <summary>One data/oi snapshot record: underlying spot, the record's ET timestamp (16:00 for a backfilled EOD file, the
 	/// capture time for a scraper-written one) and the chain. Deconstructs to (Spot, Quotes) for the callers that need only those.</summary>
-	private sealed record OiSnapshot(decimal? Spot, DateTime? TsEt, Dictionary<string, OptionContractQuote> Quotes)
+	internal sealed record OiSnapshot(decimal? Spot, DateTime? TsEt, Dictionary<string, OptionContractQuote> Quotes)
 	{
 		public void Deconstruct(out decimal? spot, out Dictionary<string, OptionContractQuote> quotes) => (spot, quotes) = (Spot, Quotes);
 	}
 
-	private static OiSnapshot LoadOiSnapshot(string path)
+	internal static OiSnapshot LoadOiSnapshot(string path)
 	{
 		var quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		string? chosen = null, firstAny = null;
@@ -1895,7 +1887,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// snapshot-IV fallback already leaks. Contracts keep the snapshot's OI (constant intraday, published pre-open)
 	/// but carry that minute's bid/ask with the IV nulled, so <see cref="GexMatrix.Build"/> back-solves each bucket's
 	/// IVs from time-matched mids.</para></summary>
-	private sealed class IntradayQuoteSlice
+	internal sealed class IntradayQuoteSlice
 	{
 		// Matches the store's own default: minute NBBO is dense for near-money contracts, so a short window keeps
 		// "this is what it looked like then" honest rather than papering a gap with a five-bucket-old print.
@@ -1954,7 +1946,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// step). The volume tape's HISTORICAL source; running days read the data/iv captures instead, which exist
 	/// hours before any nightly pull can. Returns minute → strike → (call volume, put volume); empty when the
 	/// store, the table, or the day's coverage is absent — the tape panel then simply doesn't render.</summary>
-	private static SortedDictionary<TimeSpan, Dictionary<decimal, (decimal C, decimal P)>> LoadStoreTape(string ticker, DateTime date, DateTime expiry)
+	internal static SortedDictionary<TimeSpan, Dictionary<decimal, (decimal C, decimal P)>> LoadStoreTape(string ticker, DateTime date, DateTime expiry)
 	{
 		var result = new SortedDictionary<TimeSpan, Dictionary<decimal, (decimal C, decimal P)>>();
 		var dbPath = Program.ResolvePath("data/quotes.db");

@@ -194,6 +194,24 @@ internal static class GexSqueezeScreener
 		return new VolumePace(recentRate / sessionRate, w.ReferenceTs, w.AnchorTs, VolumeBasis.SessionAverage, 0);
 	}
 
+	/// <summary>Contracts traded in <paramref name="window"/>'s clock window on each of up to <see cref="BaselineSessions"/> prior
+	/// sessions, read through <paramref name="minuteVolume"/> (minute → contracts; null = no store coverage that session). Sessions
+	/// without coverage, and early-close sessions whose close falls inside the window, are skipped rather than counted as zero.</summary>
+	public static List<long> SameWindowHistory(DateTime date, VolumeWindow window, Func<DateTime, IReadOnlyDictionary<TimeSpan, long>?> minuteVolume)
+	{
+		var from = new TimeSpan(window.ReferenceTs.Hours, window.ReferenceTs.Minutes, 0);
+		var to = new TimeSpan(window.AnchorTs.Hours, window.AnchorTs.Minutes, 0);
+		var history = new List<long>();
+		var earliest = date.AddDays(-3 * BaselineSessions);
+		for (var d = MarketCalendar.PreviousOpenOnOrBefore(date.AddDays(-1)); d >= earliest && history.Count < BaselineSessions; d = MarketCalendar.PreviousOpenOnOrBefore(d.AddDays(-1)))
+		{
+			if (MarketCalendar.IsEarlyClose(d) && to > new TimeSpan(13, 0, 0)) continue;
+			if (minuteVolume(d) is not { } minutes) continue;
+			history.Add(minutes.Where(kv => kv.Key >= from && kv.Key < to).Sum(kv => kv.Value));
+		}
+		return history;
+	}
+
 	private static decimal Median(IReadOnlyList<long> values)
 	{
 		if (values.Count == 0) return 0m;
