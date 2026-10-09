@@ -979,7 +979,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 				Console.Error.WriteLine($"Error: proposal log not found at '{proposalPath}'. Replay mode reads the log `wa ai watch`/`wa ai scan` writes for this ticker+strategy.");
 				return 1;
 			}
-			var (loadedOpens, loadWarnings) = Backtest.ProposalReplayLoader.Load(proposalPath, since, until, config.Opener.MinScoreToOpen);
+			var (loadedOpens, loadWarnings) = Backtest.ProposalReplayLoader.Load(proposalPath, since, until, config.Opener);
 			foreach (var w in loadWarnings) Console.Error.WriteLine($"Warning: {w}");
 			if (loadedOpens.Count == 0)
 			{

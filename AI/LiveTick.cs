@@ -19,7 +19,8 @@ internal sealed record LiveTickDeps(
 	AIConfig Config,
 	string VendorName,
 	bool EmitManagement,
-	bool BypassOpenerDailyCap);
+	bool BypassOpenerDailyCap,
+	bool OutsideEntryWindow = false);
 
 /// <summary>Mutable state that must persist across ticks (watch) but reset per run (scan).</summary>
 internal sealed class LiveTickState
@@ -84,6 +85,10 @@ internal static class LiveTick
 		if (deps.OpenEvaluator != null && deps.OpenSink != null)
 		{
 			var openResults = await deps.OpenEvaluator.EvaluateAsync(ctx, cancellation);
+			// Outside the entry window watch submits nothing, so every proposal is display-only: log it as informational,
+			// or consumers that read the log as "what live would have placed" (wa ai backtest --replay, paper_vs_backtest)
+			// treat a 13:04 proposal past an 11:00 cutoff as a live open (2026-10-08).
+			if (deps.OutsideEntryWindow) openResults = openResults.Select(p => p with { Informational = true }).ToList();
 			openCount = openResults.Count;
 			// LIVE quote-integrity guard: warn loudly on a stale feed or torn NBBO (the 07-13 SPY case: long
 			// leg bid 10.36 / ask 20.36) and withhold the affected opens from auto-execution. Proposals still

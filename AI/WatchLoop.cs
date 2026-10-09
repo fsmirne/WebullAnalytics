@@ -158,14 +158,12 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, autoExecutor, openEvaluator, sink, openSink, openerExecutor,
 			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false);
 
-		// Latest-entry cutoff (ET): past it the watch loop stops SUBMITTING opens — nulling the opener executor
-		// for the tick suppresses ONLY auto-execution (proposals still render, management still runs). This is
-		// watch-only by construction: scan builds its own deps and never nulls, and the backtest enforces the
-		// mirror gate itself, so `wa ai scan --submit` is never time-gated. See OpenerConfig.LatestEntryTimeEt.
-		TimeSpan? openCutoff = null;
-		if (ParsingHelpers.TryParseClockTime(config.Opener.LatestEntryTimeEt, out var lc))
-			openCutoff = lc;
-		var openCutoffNoted = false;
+		// Entry window (ET, opener.earliestEntryTimeEt..latestEntryTimeEt): outside it the watch loop stops SUBMITTING
+		// opens — nulling the opener executor for the tick suppresses ONLY auto-execution (proposals still render,
+		// logged as informational; management still runs). The backtest enforces the same window, so the two agree;
+		// the earliest end was previously honored by the backtest only. Watch-only by construction: scan builds its
+		// own deps and never nulls, so `wa ai scan --submit` is never time-gated.
+		string? windowState = null;   // last state announced: "before" / "after" / null (inside)
 		// 0DTE session gate: remember the last state rendered so a long "waiting" stretch prints once per
 		// state change rather than once per tick, and remember whether the day has been declared closed so
 		// the no-trade verdict is announced exactly once.
@@ -190,13 +188,16 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 					var regimePositions = await positions.GetOpenPositionsAsync(now, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { config.Ticker }, cancellation);
 					await Rules.ExpiryRegimeHost.PopulateAsync(expiryRegimes, config.Rules.CloseBeforeShortExpiry.Regime, regimePositions.Values, quotes, now, cancellation);
 				}
-				var pastOpenCutoff = openCutoff.HasValue && TimeZoneInfo.ConvertTime(now, NyTz).TimeOfDay > openCutoff.Value;
-				if (pastOpenCutoff && !openCutoffNoted)
+				var etTimeOfDay = TimeZoneInfo.ConvertTime(now, NyTz).TimeOfDay;
+				var outsideWindow = !config.Opener.IsWithinEntryWindow(etTimeOfDay);
+				var state = !outsideWindow ? null : ParsingHelpers.TryParseClockTime(config.Opener.EarliestEntryTimeEt, out var earliest) && etTimeOfDay < earliest ? "before" : "after";
+				if (state != windowState)
 				{
-					AnsiConsole.MarkupLine($"[dim]past latest-entry {config.Opener.LatestEntryTimeEt} ET — opens no longer submitted (managing only).[/]");
-					openCutoffNoted = true;
+					if (state == "before") AnsiConsole.MarkupLine($"[dim]before earliest-entry {config.Opener.EarliestEntryTimeEt} ET — opens withheld until then (managing only).[/]");
+					else if (state == "after") AnsiConsole.MarkupLine($"[dim]past latest-entry {config.Opener.LatestEntryTimeEt} ET — opens no longer submitted (managing only).[/]");
+					windowState = state;
 				}
-				var tickDeps = pastOpenCutoff ? deps with { OpenerExecutor = null } : deps;
+				var tickDeps = outsideWindow ? deps with { OpenerExecutor = null, OutsideEntryWindow = true } : deps;
 				var tick = await LiveTick.EvaluateAsync(now, tickDeps, tickState, applySpotOverrides: null, cancellation);
 				var mgmtEmitted = settings.EmitManagementProposals ? tick.MgmtCount : 0;
 				proposalsEmitted += mgmtEmitted + tick.OpenCount;

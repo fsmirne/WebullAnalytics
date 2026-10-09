@@ -12,8 +12,11 @@ internal sealed record ProposalReplayOpen(DateTime OpenEt, string Ticker, OpenSt
 
 /// <summary>
 /// Reads an <c>ai-proposals.&lt;TICKER&gt;.&lt;strategy&gt;.jsonl</c> log and selects, per trading day, the open
-/// proposal the live executor would have placed: the first <c>type=open</c> record at/after 09:30 ET that is
-/// not informational (below <c>minScoreToOpen</c>), not cash-reserve-blocked, and sized to at least 1 contract.
+/// proposal the live executor would have placed: the first <c>type=open</c> record at/after 09:30 ET, written by
+/// `wa ai watch` (a `wa ai scan` record is a manual look, never an auto-placed order), inside the strategy's entry
+/// window (watch submits nothing outside it — <see cref="OpenerConfig.IsWithinEntryWindow"/>; checked directly so
+/// records logged before watch marked out-of-window proposals informational are judged correctly), not informational
+/// (below <c>minScoreToOpen</c>), not cash-reserve-blocked, and sized to at least 1 contract.
 /// Records are scanned in file order, which is the sink's emission order (rank order within a tick), so the
 /// first qualifying record of a day is that day's top-ranked actionable proposal. Entry prices come from the
 /// stored <c>diagnostic.probe.legQuotes</c> bid/ask mids — the same numbers the scorer priced the fill from —
@@ -28,7 +31,7 @@ internal static class ProposalReplayLoader
 	private static readonly TimeSpan MarketOpen = new(9, 30, 0);
 	private static readonly TimeSpan MarketClose = new(16, 0, 0);
 
-	public static (IReadOnlyList<ProposalReplayOpen> Opens, IReadOnlyList<string> Warnings) Load(string path, DateTime since, DateTime until, decimal minScoreToOpen)
+	public static (IReadOnlyList<ProposalReplayOpen> Opens, IReadOnlyList<string> Warnings) Load(string path, DateTime since, DateTime until, OpenerConfig opener)
 	{
 		var opens = new List<ProposalReplayOpen>();
 		var warnings = new List<string>();
@@ -54,11 +57,13 @@ internal static class ProposalReplayLoader
 				if (openEt == null || openEt.Value.Date < since.Date || openEt.Value.Date > until.Date) continue;
 				if (openEt.Value.TimeOfDay < MarketOpen || openEt.Value.TimeOfDay >= MarketClose) continue;
 				if (decidedDates.Contains(openEt.Value.Date)) continue;
+				if (string.Equals(Str(root, "mode"), "scan", StringComparison.OrdinalIgnoreCase)) continue;
+				if (!opener.IsWithinEntryWindow(openEt.Value.TimeOfDay)) continue;
 
 				// Live-executor gates. `informational` is authoritative on records new enough to carry it; the
 				// score-vs-gate comparison covers older logs (exact for an unchanged config). Cash-blocked
 				// proposals render but are never placed; qty<1 can't size an order.
-				if (root.TryGetProperty("informational", out var inf) ? inf.ValueKind == JsonValueKind.True : (Dec(root, "finalScore") ?? 0m) < minScoreToOpen) continue;
+				if (root.TryGetProperty("informational", out var inf) ? inf.ValueKind == JsonValueKind.True : (Dec(root, "finalScore") ?? 0m) < opener.MinScoreToOpen) continue;
 				if (root.TryGetProperty("cashReserveBlocked", out var crb) && crb.ValueKind == JsonValueKind.True) continue;
 				var qty = (int)(Dec(root, "qty") ?? 0m);
 				if (qty < 1) continue;

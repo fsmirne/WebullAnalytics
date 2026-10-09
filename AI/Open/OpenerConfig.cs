@@ -59,7 +59,7 @@ internal sealed class OpenerConfig
 	/// <see cref="OpenerWeightsConfig.IntradayTape"/>) before the directional read is committed, instead
 	/// of trading on the stale overnight macro bias at 09:30 — the dominant long-premium misfire. The
 	/// backtest skips minutes before this time and decides at the first qualifying minute at/after it;
-	/// the live opener should likewise withhold opens until this time.</summary>
+	/// `wa ai watch` likewise withholds submitting opens until this time (see <see cref="IsWithinEntryWindow"/>).</summary>
 	[JsonPropertyName("earliestEntryTimeEt")] public string? EarliestEntryTimeEt { get; set; } = null;
 
 	/// <summary>Latest wall-clock time (ET, "HH:mm") at which an open may fire; opens are suppressed AFTER it.
@@ -67,10 +67,17 @@ internal sealed class OpenerConfig
 	/// diagonal/calendar entry edge is strongest at the 09:30 open and decays after ~09:40, so a late entry
 	/// carries degraded expectancy — and nothing else stops the all-day watch retry loop from taking one.
 	/// Enforced by the backtest (skips minutes after this time) and the `wa ai watch` loop (stops SUBMITTING
-	/// opens past it — proposals still render and position management still runs). Deliberately NOT honored by
+	/// opens past it — proposals still render, logged as informational, and position management still runs). Deliberately NOT honored by
 	/// `wa ai scan --submit`: a manual scan is an explicit decision to open now, so it is never time-gated.
 	/// Null/empty = no cutoff (opens allowed until close). Must be later than <see cref="EarliestEntryTimeEt"/>.</summary>
 	[JsonPropertyName("latestEntryTimeEt")] public string? LatestEntryTimeEt { get; set; } = null;
+
+	/// <summary>True when an ET time of day lies inside [<see cref="EarliestEntryTimeEt"/>, <see cref="LatestEntryTimeEt"/>], both
+	/// ends inclusive and each optional — the same window the backtest scans. `wa ai watch` submits opens only inside it, and the
+	/// proposal-replay loader only replays proposals logged inside it. Malformed values are rejected at config validation.</summary>
+	internal bool IsWithinEntryWindow(TimeSpan etTimeOfDay) =>
+		(!ParsingHelpers.TryParseClockTime(EarliestEntryTimeEt, out var earliest) || etTimeOfDay >= earliest)
+		&& (!ParsingHelpers.TryParseClockTime(LatestEntryTimeEt, out var latest) || etTimeOfDay <= latest);
 
 	/// <summary>Restrict which expiry types are eligible for the SHORT and LONG legs of calendar/diagonal
 	/// structures independently. Dailies are Mon–Thu expirations (SPX/SPXW/SPY daily chains). Weeklies are

@@ -25,7 +25,8 @@
 # per-strategy summary and exits with the most severe code (MISMATCH > FATAL > LEG-FLIP >
 # INCONCLUSIVE > MATCH).
 #
-# LIVE pick   = top-finalScore 'open' proposal at the FIRST tick >= 09:30 ET that day
+# LIVE pick   = top-finalScore 'open' proposal at the FIRST tick >= 09:30 ET that day, among watch records that are
+#               not informational and fall inside the strategy's entry window (opener.earliest/latestEntryTimeEt)
 #               (the opener fires once at the RTH open — earliest-wins entry rule).
 # BACKTEST pick = the Open fill from a single-day backtest of the same strategy.
 # PASS = same structure AND same legs (side+strike+expiry). Also prints entry debit.
@@ -170,10 +171,21 @@ compare_one() {
 
 	rm -f "$LXFILLS" 2>/dev/null
 
+	# The strategy's entry window (merged config, as the backtest resolves it). Live watch submits only inside it, so
+	# a proposal logged outside it (e.g. DC2's 13:04 crossing on 2026-10-08, past its 11:00 cutoff) is display-only
+	# and must not count as the live pick — records from before watch marked such proposals informational need this.
+	local CFG EARLIEST LATEST
+	CFG=$("$WA" ai config show "$TICKER" --strategy "$STRATEGY" 2>/dev/null)
+	EARLIEST=$(awk '$1=="opener.earliestEntryTimeEt" {gsub(/"/,"",$3); print ($3=="null" ? "" : $3)}' <<<"$CFG")
+	LATEST=$(awk '$1=="opener.latestEntryTimeEt" {gsub(/"/,"",$3); print ($3=="null" ? "" : $3)}' <<<"$CFG")
+	export PVB_EARLIEST="$EARLIEST" PVB_LATEST="$LATEST"
+
 	local LIVE_MIN
 	LIVE_MIN=$(python3 - "$DATE" "$PROPOSALS" <<'PY'
-import json, sys
+import json, os, sys
 date, path = sys.argv[1], sys.argv[2]
+earliest, latest = os.environ.get('PVB_EARLIEST', ''), os.environ.get('PVB_LATEST', '')
+in_window = lambda hhmm: (not earliest or hhmm >= earliest) and (not latest or hhmm <= latest)
 mins=[]
 for line in open(path):
     line=line.strip()
@@ -181,7 +193,7 @@ for line in open(path):
     try: r=json.loads(line)
     except Exception: continue
     if r.get('mode')=='scan': continue   # `wa ai scan --all` writes to the same log; not what watch does
-    if r.get('type')=='open' and r.get('ts','')[:10]==date and r['ts'][11:19]>='09:30:00':
+    if r.get('type')=='open' and r.get('ts','')[:10]==date and r['ts'][11:19]>='09:30:00' and in_window(r['ts'][11:16]):
         mins.append(r['ts'][11:16])
 print(min(mins) if mins else '')
 PY
@@ -209,6 +221,8 @@ PY
 	python3 - "$DATE" "$PROPOSALS" "$LXFILLS" "$TICKER" "$STRATEGY" <<'PY'
 import datetime, json, os, sys
 date, proposals_path, fills_path = sys.argv[1], sys.argv[2], sys.argv[3]
+earliest, latest = os.environ.get('PVB_EARLIEST', ''), os.environ.get('PVB_LATEST', '')
+in_window = lambda hhmm: (not earliest or hhmm >= earliest) and (not latest or hhmm <= latest)
 ticker, strategy = sys.argv[4], sys.argv[5]
 
 def norm_legs(legs, sym_key, side_key):
@@ -229,6 +243,8 @@ for line in open(proposals_path):
     if r.get('mode')=='scan': continue      # `wa ai scan --all` writes to the same log; only watch reflects live entries
     if r.get('type')!='open': continue
     if ts[11:19] < '09:30:00': continue   # skip pre-market ticks
+    if r.get('informational') is True: continue   # display-only: below the gate, or (newer logs) outside the entry window
+    if not in_window(ts[11:16]): continue          # outside the strategy's entry window: watch never submits these
     day_rows.append(r)
 live=None
 if day_rows:

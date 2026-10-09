@@ -178,7 +178,7 @@ internal sealed class OpenProposalSink
 		// Informational proposals are the best candidate of an enabled structure that didn't clear the
 		// top-N / MinScoreToOpen bar — surfaced for visibility, never auto-executed. Flag them so they
 		// don't read as actionable ranked picks.
-		var informational = p.Informational ? " [grey]ⓘ below threshold — informational, not auto-executed[/]" : "";
+		var informational = p.Informational ? " [grey]ⓘ informational — not auto-executed (below threshold or outside the entry window)[/]" : "";
 		var rankPrefix = p.Informational ? "[grey]·[/] " : (rank is int n ? $"[grey]#{n}[/] " : "");
 		var header = $"{rankPrefix}[bold {color}]{p.StructureKind}[/] [grey]{p.Ticker}[/] x{p.Qty}{blocked}{negativeEv}{informational}";
 		var panel = new Panel(new Rows(rows))

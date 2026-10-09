@@ -18,10 +18,10 @@ public class ProposalReplayLoaderTests : IDisposable
 
 	/// <summary>An open record shaped like OpenProposalSink.SerializeRecord output. <paramref name="ts"/> carries an
 	/// explicit ET offset (-04:00) so the loader's ET conversion is machine-timezone-independent in tests.</summary>
-	private static string OpenRecord(string ts, string structure = "LongCalendar", int qty = 2, decimal finalScore = 0.5m, string? informational = null, bool blocked = false,
+	private static string OpenRecord(string ts, string structure = "LongCalendar", int qty = 2, decimal finalScore = 0.5m, string? informational = null, bool blocked = false, string mode = "watch",
 		string legsJson = "[{\"action\":\"sell\",\"symbol\":\"SPY   260715C00620000\",\"qty\":2},{\"action\":\"buy\",\"symbol\":\"SPY   260814C00620000\",\"qty\":2}]",
 		string quotesJson = "[{\"symbol\":\"SPY   260715C00620000\",\"bid\":0.90,\"ask\":0.92},{\"symbol\":\"SPY   260814C00620000\",\"bid\":2.33,\"ask\":2.34}]")
-		=> $"{{\"type\":\"open\",\"ts\":\"{ts}\",\"mode\":\"watch\",{(informational != null ? $"\"informational\":{informational}," : "")}\"ticker\":\"SPY\",\"strategy\":\"TEST\",\"structure\":\"{structure}\",\"legs\":{legsJson},\"qty\":{qty},\"finalScore\":{finalScore},\"cashReserveBlocked\":{(blocked ? "true" : "false")},\"diagnostic\":{{\"spotAtEvaluation\":620.5,\"probe\":{{\"legQuotes\":{quotesJson}}}}}}}";
+		=> $"{{\"type\":\"open\",\"ts\":\"{ts}\",\"mode\":\"{mode}\",{(informational != null ? $"\"informational\":{informational}," : "")}\"ticker\":\"SPY\",\"strategy\":\"TEST\",\"structure\":\"{structure}\",\"legs\":{legsJson},\"qty\":{qty},\"finalScore\":{finalScore},\"cashReserveBlocked\":{(blocked ? "true" : "false")},\"diagnostic\":{{\"spotAtEvaluation\":620.5,\"probe\":{{\"legQuotes\":{quotesJson}}}}}}}";
 
 	[Fact]
 	public void SelectsFirstQualifyingRecordPerDayAtOrAfter0930()
@@ -33,12 +33,39 @@ public class ProposalReplayLoaderTests : IDisposable
 			OpenRecord("2026-07-15T09:32:02.0000000-04:00", qty: 7),             // later tick — ignored
 			OpenRecord("2026-07-16T10:05:00.0000000-04:00", qty: 1),             // next day — its own pick
 		});
-		var (opens, warnings) = ProposalReplayLoader.Load(_path, Since, Until, minScoreToOpen: 0.1m);
+		var (opens, warnings) = ProposalReplayLoader.Load(_path, Since, Until, new OpenerConfig { MinScoreToOpen = 0.1m });
 		Assert.Empty(warnings);
 		Assert.Equal(2, opens.Count);
 		Assert.Equal(new DateTime(2026, 7, 15, 9, 31, 2), opens[0].OpenEt);
 		Assert.Equal(3, opens[0].Qty);
 		Assert.Equal(new DateTime(2026, 7, 16, 10, 5, 0), opens[1].OpenEt);
+	}
+
+	[Fact]
+	public void SkipsScanRecordsAndRecordsOutsideTheEntryWindow()
+	{
+		// 2026-10-08's shape: DC2 (latestEntryTimeEt 11:00) logged qualifying proposals at 13:04 that watch never submitted.
+		File.WriteAllLines(_path, new[]
+		{
+			OpenRecord("2026-07-15T09:31:00.0000000-04:00", mode: "scan", qty: 9),   // a manual `wa ai scan` look — never auto-placed
+			OpenRecord("2026-07-15T13:04:52.0000000-04:00", qty: 5),                 // past the 11:00 cutoff — display-only live
+			OpenRecord("2026-07-16T10:59:00.0000000-04:00", qty: 6),                 // inside the window — the day's pick
+		});
+		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, new OpenerConfig { MinScoreToOpen = 0.1m, LatestEntryTimeEt = "11:00" });
+		var open = Assert.Single(opens);
+		Assert.Equal((new DateTime(2026, 7, 16, 10, 59, 0), 6), (open.OpenEt, open.Qty));
+	}
+
+	[Fact]
+	public void SkipsRecordsBeforeTheEarliestEntryTime()
+	{
+		File.WriteAllLines(_path, new[]
+		{
+			OpenRecord("2026-07-15T10:14:00.0000000-04:00", qty: 2),
+			OpenRecord("2026-07-15T10:15:00.0000000-04:00", qty: 3),   // the window is inclusive at both ends
+		});
+		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, new OpenerConfig { MinScoreToOpen = 0.1m, EarliestEntryTimeEt = "10:15" });
+		Assert.Equal(3, Assert.Single(opens).Qty);
 	}
 
 	[Fact]
@@ -52,7 +79,7 @@ public class ProposalReplayLoaderTests : IDisposable
 			OpenRecord("2026-07-15T09:31:03.0000000-04:00", qty: 0),                                   // unsizeable
 			OpenRecord("2026-07-15T09:31:04.0000000-04:00", qty: 4),                                   // the actual pick
 		});
-		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, minScoreToOpen: 0.1m);
+		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, new OpenerConfig { MinScoreToOpen = 0.1m });
 		var open = Assert.Single(opens);
 		Assert.Equal(4, open.Qty);
 	}
@@ -67,7 +94,7 @@ public class ProposalReplayLoaderTests : IDisposable
 			OpenRecord("2026-07-15T09:31:00.0000000-04:00",
 				quotesJson: "[{\"symbol\":\"SPY   260715C00620000\",\"bid\":0.90,\"ask\":0.92},{\"symbol\":\"SPY   260814C00620000\",\"bid\":2.33,\"ask\":2.34}]"),
 		});
-		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, minScoreToOpen: 0.1m);
+		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, new OpenerConfig { MinScoreToOpen = 0.1m });
 		var open = Assert.Single(opens);
 		var sell = open.Legs.Single(l => l.Action == "sell");
 		var buy = open.Legs.Single(l => l.Action == "buy");
@@ -88,7 +115,7 @@ public class ProposalReplayLoaderTests : IDisposable
 			OpenRecord("2026-07-15T09:31:00.0000000-04:00", quotesJson: "[{\"symbol\":\"SPY   260715C00620000\",\"bid\":0.90,\"ask\":0.92}]"),
 			OpenRecord("2026-07-15T09:32:00.0000000-04:00"),
 		});
-		var (opens, warnings) = ProposalReplayLoader.Load(_path, Since, Until, minScoreToOpen: 0.1m);
+		var (opens, warnings) = ProposalReplayLoader.Load(_path, Since, Until, new OpenerConfig { MinScoreToOpen = 0.1m });
 		Assert.Empty(opens);
 		Assert.Single(warnings);
 		Assert.Contains("SPY   260814C00620000", warnings[0]);
@@ -104,7 +131,7 @@ public class ProposalReplayLoaderTests : IDisposable
 			OpenRecord("2026-07-20T09:31:00.0000000-04:00"),   // after --until
 			OpenRecord("2026-07-15T09:31:00.0000000-04:00"),
 		});
-		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, minScoreToOpen: 0.1m);
+		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, new OpenerConfig { MinScoreToOpen = 0.1m });
 		var open = Assert.Single(opens);
 		Assert.Equal(new DateTime(2026, 7, 15).Date, open.OpenEt.Date);
 	}
@@ -113,7 +140,7 @@ public class ProposalReplayLoaderTests : IDisposable
 	public void ConvertsUtcTimestampsToEasternWallClock()
 	{
 		File.WriteAllLines(_path, new[] { OpenRecord("2026-07-15T13:31:02.0000000Z") });   // 09:31:02 ET during DST
-		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, minScoreToOpen: 0.1m);
+		var (opens, _) = ProposalReplayLoader.Load(_path, Since, Until, new OpenerConfig { MinScoreToOpen = 0.1m });
 		var open = Assert.Single(opens);
 		Assert.Equal(new DateTime(2026, 7, 15, 9, 31, 2), open.OpenEt);
 	}
