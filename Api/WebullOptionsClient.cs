@@ -300,7 +300,7 @@ internal static class WebullOptionsClient
 			{
 				if (!response.IsSuccessStatusCode)
 				{
-					Console.WriteLine($"Webull: received {(int)response.StatusCode} for {root}. Session may have expired — run 'sniff' to refresh.");
+					Console.WriteLine($"Webull: received {(int)response.StatusCode} for {root}. {WebullStatusHint.For(response.StatusCode)}");
 					continue;
 				}
 

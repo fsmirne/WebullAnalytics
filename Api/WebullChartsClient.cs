@@ -112,7 +112,7 @@ internal static class WebullChartsClient
 		{
 			if (!response.IsSuccessStatusCode)
 			{
-				Console.WriteLine($"Webull charts: received {(int)response.StatusCode} for tickerId {tickerId}. Session may have expired — run 'sniff' to refresh.");
+				Console.WriteLine($"Webull charts: received {(int)response.StatusCode} for tickerId {tickerId}. {WebullStatusHint.For(response.StatusCode)}");
 				return Array.Empty<MinuteBar>();
 			}
 
@@ -187,7 +187,7 @@ internal static class WebullChartsClient
 		{
 			if (!response.IsSuccessStatusCode)
 			{
-				Console.WriteLine($"Webull charts (mini): received {(int)response.StatusCode} for tickerId {tickerId}. Session may have expired — run 'sniff' to refresh.");
+				Console.WriteLine($"Webull charts (mini): received {(int)response.StatusCode} for tickerId {tickerId}. {WebullStatusHint.For(response.StatusCode)}");
 				return Array.Empty<MinuteBar>();
 			}
 
@@ -249,7 +249,7 @@ internal static class WebullChartsClient
 		{
 			if (!response.IsSuccessStatusCode)
 			{
-				Console.WriteLine($"Webull option chart: received {(int)response.StatusCode} for derivativeId {derivativeId}. Session may have expired — run 'sniff' to refresh.");
+				Console.WriteLine($"Webull option chart: received {(int)response.StatusCode} for derivativeId {derivativeId}. {WebullStatusHint.For(response.StatusCode)}");
 				return Array.Empty<OptionMinuteBar>();
 			}
 
