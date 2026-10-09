@@ -33,6 +33,10 @@ internal sealed class LocalOrderLedger
 
 	public LocalOrderLedger(string path) { _path = path; }
 
+	/// <summary>The ledger every order-placing command shares (watch/scan executors, `wa trade place`, `wa trade close`), so a
+	/// manual order counts toward the opener's daily cap the moment it is placed.</summary>
+	internal static LocalOrderLedger Default() => new(Program.ResolvePath("data/local-orders.jsonl"));
+
 	public void Append(string root, bool open, string fingerprint, string? clientOrderId, DateTime etNow)
 	{
 		var entry = new Entry(etNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), root.ToUpperInvariant(), open, fingerprint, clientOrderId);

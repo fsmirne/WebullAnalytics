@@ -338,6 +338,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		}
 
 		// 6. Build order.
+		var positionIntent = string.IsNullOrWhiteSpace(s.Intent) ? OrderRequestBuilder.DeriveOptionIntent(side, opening: true) : s.Intent.ToUpperInvariant();
 		var body = OrderRequestBuilder.Build(new OrderRequestBuilder.BuildParams(
 			AccountId: account.AccountId,
 			Legs: legs,
@@ -348,7 +349,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 			TimeInForce: s.Tif.ToUpperInvariant(),
 			// `trade place` opens positions, so default to {side}_TO_OPEN; --intent overrides (e.g. a manual
 			// buy_to_close). Ignored by the builder for pure-stock orders (position_intent is option-only).
-			PositionIntent: string.IsNullOrWhiteSpace(s.Intent) ? OrderRequestBuilder.DeriveOptionIntent(side, opening: true) : s.Intent.ToUpperInvariant()
+			PositionIntent: positionIntent
 		));
 
 		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]  [dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Side:[/] {Markup.Escape(side)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}");
@@ -359,11 +360,11 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		// Trade place is the manual path — the user invoked it explicitly, so we trust intent and
 		// just surface the duplicate's details (client_order_id, side, qty, limit) so they can
 		// abort at the Y/N prompt (no --submit) or knowingly proceed with --submit.
+		var brokerState = new AI.BrokerStateService(account, AI.LocalOrderLedger.Default());
+		var legsForFp = legs.Select(l => (l.Symbol, l.Action == LegAction.Buy ? "buy" : "sell")).ToList();
 		try
 		{
-			var brokerState = new AI.BrokerStateService(account);
 			await brokerState.RefreshAsync(cancellationToken);
-			var legsForFp = legs.Select(l => (l.Symbol, l.Action == LegAction.Buy ? "buy" : "sell"));
 			var matches = brokerState.FindPendingMatching(legsForFp);
 			if (matches.Count > 0)
 			{
@@ -416,6 +417,11 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		{
 			var placed = await client.PlaceOrderAsync(body);
 			AnsiConsole.MarkupLine($"[green]Placed.[/] order_id={Markup.Escape(placed.OrderId ?? "-")}  client_order_id={Markup.Escape(placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId)}");
+			// Record it in the shared local-order ledger, exactly as the auto-executors do: Webull's order history can lag a fill by
+			// 10+ minutes, and until then a running `wa ai watch --submit` would not see this order — so a manual open would not
+			// count toward the opener's daily cap, and the opener could stack its own open (or add to this position) in that window.
+			var root = ParsingHelpers.ParseOptionSymbol(legs[0].Symbol)?.Root ?? legs[0].Symbol;
+			brokerState.RecordLocalPlacement(root, legsForFp, placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: !positionIntent.EndsWith("_TO_CLOSE", StringComparison.Ordinal));
 			AnsiConsole.MarkupLine($"[dim]Check status with:[/] wa trade status {Markup.Escape(placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId)}");
 			return 0;
 		}
