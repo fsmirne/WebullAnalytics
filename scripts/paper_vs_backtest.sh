@@ -30,6 +30,10 @@
 #               (the opener fires once at the RTH open — earliest-wins entry rule).
 # BACKTEST pick = the Open fill from a single-day backtest of the same strategy.
 # PASS = same structure AND same legs (side+strike+expiry). Also prints entry debit.
+# EARLY OPEN (MISMATCH, exit 1) — the bt pick above is pinned to live's first-open minute (--open-after), which hides a
+#   backtest that would have opened EARLIER. On a late-entry day the harness also runs the backtest unpinned; if that
+#   run opens before live's first open, the day is a MISMATCH even when the pinned pick matches (2026-10-09: live first
+#   cleared the gate at 10:00, the unpinned backtest opened a different diagonal at 09:44 at 0.00209 vs the 0.002 gate).
 # THIRD OUTCOME (INCONCLUSIVE, exit 3) — a near-tie the two quote feeds break differently. Two variants:
 #   (a) opposite-side ATM tie: when spot sits on the short strike the put and call variants of a diagonal/calendar
 #       score within noise and the #1 side flips on feed noise. Structure and expiries agree but the two sides open
@@ -151,13 +155,16 @@ fi
 # MinScoreToOpen until a few minutes in. --open-after withholds backtest opens until that ET minute so BOTH
 # sides evaluate the same bar; on a clean day it resolves to 09:30 (a no-op). NOTE: --open-after also lets the
 # 09:30→entry intraday tape blend into the directional bias, so it aligns the entry BAR, not the bias
-# provenance a delayed live day actually had.
+# provenance a delayed live day actually had. Because the pin can only push the backtest LATER, it can never show a
+# backtest that would have opened before live; a late-entry day therefore also gets an unpinned run (EARLY OPEN check).
 compare_one() {
 	local STRATEGY="$1"
 	local PROPOSALS="$DATADIR/ai-proposals.$TICKER.${STRATEGY}.jsonl"
 	local TICKERCFG="$DATADIR/ai-config.$TICKER.${STRATEGY}.json"
 	local WINFILLS="C:\\Users\\$WINUSER\\AppData\\Local\\WebullAnalytics\\sweeps\\pvb.$TICKER.${STRATEGY}.jsonl"
 	local LXFILLS="$WAHOME/sweeps/pvb.$TICKER.${STRATEGY}.jsonl"
+	local WINFREEFILLS="C:\\Users\\$WINUSER\\AppData\\Local\\WebullAnalytics\\sweeps\\pvb.$TICKER.${STRATEGY}.unpinned.jsonl"
+	local LXFREEFILLS="$WAHOME/sweeps/pvb.$TICKER.${STRATEGY}.unpinned.jsonl"
 
 	if [ ! -f "$PROPOSALS" ]; then
 		echo "FATAL [$TICKER $STRATEGY]: no proposal log at $PROPOSALS — run 'wa ai watch $TICKER --strategy $STRATEGY' (submit off) first."
@@ -169,16 +176,17 @@ compare_one() {
 		return 2
 	fi
 
-	rm -f "$LXFILLS" 2>/dev/null
+	rm -f "$LXFILLS" "$LXFREEFILLS" 2>/dev/null
 
 	# The strategy's entry window (merged config, as the backtest resolves it). Live watch submits only inside it, so
 	# a proposal logged outside it (e.g. DC2's 13:04 crossing on 2026-10-08, past its 11:00 cutoff) is display-only
 	# and must not count as the live pick — records from before watch marked such proposals informational need this.
-	local CFG EARLIEST LATEST
+	local CFG EARLIEST LATEST GATE
 	CFG=$("$WA" ai config show "$TICKER" --strategy "$STRATEGY" 2>/dev/null)
 	EARLIEST=$(awk '$1=="opener.earliestEntryTimeEt" {gsub(/"/,"",$3); print ($3=="null" ? "" : $3)}' <<<"$CFG")
 	LATEST=$(awk '$1=="opener.latestEntryTimeEt" {gsub(/"/,"",$3); print ($3=="null" ? "" : $3)}' <<<"$CFG")
-	export PVB_EARLIEST="$EARLIEST" PVB_LATEST="$LATEST"
+	GATE=$(awk '$1=="opener.minScoreToOpen" {print $3}' <<<"$CFG")
+	export PVB_EARLIEST="$EARLIEST" PVB_LATEST="$LATEST" PVB_GATE="$GATE"
 
 	local LIVE_MIN
 	LIVE_MIN=$(python3 - "$DATE" "$PROPOSALS" <<'PY'
@@ -218,9 +226,16 @@ PY
 	fi
 	rm -f "$BTLOG"
 
-	python3 - "$DATE" "$PROPOSALS" "$LXFILLS" "$TICKER" "$STRATEGY" <<'PY'
+	# Unpinned run, only when the pin actually moved the backtest past the window's first minute (else it is the same run).
+	local FIRST_MIN="09:30"
+	[ -n "$EARLIEST" ] && [[ "$EARLIEST" > "$FIRST_MIN" ]] && FIRST_MIN="$EARLIEST"
+	if [ -n "$LIVE_MIN" ] && [[ "$LIVE_MIN" > "$FIRST_MIN" ]]; then
+		"$WA" ai backtest "$TICKER" --strategy "$STRATEGY" --since "$DATE" --until "$DATE" --lots 1 --scan-stride 1 --fills-jsonl "$WINFREEFILLS" >/dev/null 2>&1
+	fi
+
+	python3 - "$DATE" "$PROPOSALS" "$LXFILLS" "$TICKER" "$STRATEGY" "$LXFREEFILLS" <<'PY'
 import datetime, json, os, sys
-date, proposals_path, fills_path = sys.argv[1], sys.argv[2], sys.argv[3]
+date, proposals_path, fills_path, free_fills_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[6]
 earliest, latest = os.environ.get('PVB_EARLIEST', ''), os.environ.get('PVB_LATEST', '')
 in_window = lambda hhmm: (not earliest or hhmm >= earliest) and (not latest or hhmm <= latest)
 ticker, strategy = sys.argv[4], sys.argv[5]
@@ -233,6 +248,7 @@ def norm_legs(legs, sym_key, side_key):
 
 # ---- LIVE pick: first tick >= 09:30 that day, top finalScore ----
 day_rows=[]
+eval_mins=set()   # every minute the live watch evaluated (tick heartbeat or open), for the EARLY OPEN check
 for line in open(proposals_path):
     line=line.strip()
     if not line: continue
@@ -241,6 +257,7 @@ for line in open(proposals_path):
     ts=r.get('ts','')
     if ts[:10]!=date: continue
     if r.get('mode')=='scan': continue      # `wa ai scan --all` writes to the same log; only watch reflects live entries
+    if r.get('mode')=='watch': eval_mins.add(ts[11:16])
     if r.get('type')!='open': continue
     if ts[11:19] < '09:30:00': continue   # skip pre-market ticks
     if r.get('informational') is True: continue   # display-only: below the gate, or (newer logs) outside the entry window
@@ -253,14 +270,28 @@ if day_rows:
     live=max(tick_rows, key=lambda r: r.get('finalScore') or 0)  # top-1 = what the opener opens
 
 # ---- BACKTEST pick: the Open fill for that day ----
-bt=None
-if os.path.exists(fills_path):
-    for line in open(fills_path):
+def first_open(path):
+    if not os.path.exists(path): return None
+    for line in open(path):
         line=line.strip()
         if not line: continue
         f=json.loads(line)
         if f.get('kind')=='Open' and f.get('ts','')[:10]==date:
-            bt=f; break
+            return f
+    return None
+bt=first_open(fills_path)
+
+# ---- EARLY OPEN: the unpinned backtest (run only on a late-entry day) opened before live's first open ----
+free=first_open(free_fills_path) if live else None
+# Counts only if live evaluated at/after the bt open minute and still didn't open. A watch whose first tick lands after
+# the bt open (started late, or the 09:31 first tick of 09-28) never saw that minute, which is not a divergence.
+early=free if free and free['ts'][11:16] < live['ts'][11:16] and any(free['ts'][11:16] <= m < live['ts'][11:16] for m in eval_mins) else None
+def print_early():
+    gate=os.environ.get('PVB_GATE', '') or 'n/a'
+    legs=' '.join(f"{str(l['side']).lower()}:{l['sym']}" for l in early['legs'])
+    print(f"  ⚠ EARLY OPEN: unpinned backtest opened at {early['ts'][11:19]}, before live's first open at {live['ts'][11:19]}")
+    print(f"    bt    {early.get('strategy')} {legs}   finalScore {fmt(early.get('finalScore'),5)} vs gate {gate}")
+    print("    Live never cleared the gate at that minute, so the backtest would have traded a different day than live did.")
 
 def entry_debit(legs, price_key, side_key):
     # net debit per share = sum(buy price) - sum(sell price)
@@ -290,6 +321,7 @@ if bool(live) != bool(bt):
     print(f"*** MISMATCH: live {'OPENED' if live else 'no-open'} but backtest {'OPENED' if bt else 'no-open'} ***")
     if live: print("  live:", live.get('structure'), norm_legs(live['legs'],'symbol','action'))
     if bt:   print("  bt:  ", bt.get('strategy'), norm_legs(bt['legs'],'sym','side'))
+    if early: print_early()
     sys.exit(1)
 
 live_struct=(live.get('structure') or '').lower()
@@ -489,6 +521,9 @@ if skew is not None and abs(skew)>=60:
     print(f"  ⚠ entry-time skew {skew//60:+d}m — backtest could NOT bar-align to live; deltas may reflect timing, not the engine.")
 
 print()
+if early:
+    print_early()
+    print("  RESULT: MISMATCH — EARLY OPEN (the pinned comparison above holds only from live's entry minute on)"); sys.exit(1)
 if struct_ok and legs_ok:
     print("  RESULT: MATCH ✓ (same structure + same legs)"); sys.exit(0)
 if struct_ok and tie_kind == 'atm':
