@@ -405,6 +405,8 @@ internal static class BacktestSummaryRenderer
 		table.AddRow("Closes (rules)", result.CloseFills.ToString());
 		if (result.DroppedRuleActions > 0)
 			table.AddRow("[red]Dropped rule actions (no quotes / too wide)[/]", $"[red]{result.DroppedRuleActions} — see ⚠ lines above; results under-count closes/rolls[/]");
+		if (result.NoArbClampedFills > 0)
+			table.AddRow("[yellow]No-arb clamped fills[/]", $"[yellow]{result.NoArbClampedFills} — summed leg prices sat outside the structure's payoff range; net held {ComboFill.NoArbMargin:0.00} inside it[/]");
 		if (result.BlindPositionDays > 0)
 			table.AddRow("[red]Rule-blind position-days (no quotes)[/]", $"[red]{result.BlindPositionDays} — see ⚠ lines above; exits could not be evaluated on those days[/]");
 		if (result.LegCollisionBlockedOpens > 0)

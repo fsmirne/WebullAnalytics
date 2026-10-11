@@ -34,7 +34,9 @@ internal sealed class BacktestRunner
 	private readonly bool _oracle;
 	private readonly bool _profile;
 	private readonly int? _fixedContracts;
-	private readonly string _pricingMode;
+	// Fraction of each leg's half-spread a fill gives up: 0 = mid (--pricing mid), 1 = cross the spread (--pricing bidask),
+	// in between = --cross. See ComboFill.
+	private readonly decimal _cross;
 	private readonly int _scanStride;
 	// Book each split structure as its two combo orders (live-broker representation) instead of one
 	// composite position. See OpenProposalIntoBook.
@@ -49,6 +51,7 @@ internal sealed class BacktestRunner
 	// Proposal-replay mode (--proposals): non-null replaces the opener entirely — each day's recorded live
 	// proposal opens are booked at their recorded submit prices, then managed by the normal rule engine.
 	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
+	private int _noArbClampedFills;   // multi-leg fills whose summed leg prices fell outside the structure's expiry-payoff range (see NoArb)
 	private int _droppedRuleActions;   // rule-proposed Close/Roll/LegIn dropped because the day had no leg quotes (see WarnDroppedRuleAction)
 	private int _blindPositionDays;    // position-days where NO leg had a quote, so rules could not evaluate the position at all
 	private readonly HashSet<long> _openFallbackLineages = new();   // window-end lineages with >=1 leg marked at entry price (no NBBO) — unrealized not fully real-priced
@@ -62,12 +65,12 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null, IReadOnlyList<(DateTime Date, double Rate)>? rateHistory = null)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, decimal? cross = null, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null, IReadOnlyList<(DateTime Date, double Rate)>? rateHistory = null)
 	{
 		_rateHistory = rateHistory;
 		_replayOpensByDate = replayOpens?.GroupBy(o => o.OpenEt.Date).ToDictionary(g => g.Key, g => g.OrderBy(o => o.OpenEt).ToList());
 		_config = config;
-		_pricingMode = SuggestionPricing.Normalize(pricingMode);
+		_cross = cross ?? (SuggestionPricing.Normalize(pricingMode) == SuggestionPricing.BidAsk ? 1m : 0m);
 		_scanStride = Math.Max(1, scanStride);
 		_splitStructures = splitStructures;
 		_dividendsByRoot = dividendsByRoot;
@@ -285,6 +288,7 @@ internal sealed class BacktestRunner
 			Provenance: ComputeProvenance(),
 			Cleanliness: ComputeCleanliness(endMtmByLineage.Keys),
 			DroppedRuleActions: _droppedRuleActions,
+			NoArbClampedFills: _noArbClampedFills,
 			BlindPositionDays: _blindPositionDays,
 			OpenPositionsFallbackMarked: _openFallbackLineages.Count,
 			LegCollisionBlockedOpens: _book.LegCollisionBlockedOpens);
@@ -413,9 +417,10 @@ internal sealed class BacktestRunner
 		return byLineage;
 	}
 
-	/// <summary>Execution price for a single leg under the active <c>--pricing</c> mode. <c>mid</c> fills at
-	/// the spread midpoint; <c>bidask</c> crosses the spread (a buy lifts the ask, a sell hits the bid),
-	/// modelling worst-case marketable fills. Slippage (<c>slippagePerSharePerOrder</c>) applies additively
+	/// <summary>Execution price for a single leg: the midpoint moved <see cref="_cross"/> of the way to the crossing side
+	/// (<c>--pricing mid</c> = 0 fills at the midpoint; <c>bidask</c> = 1 lifts the ask / hits the bid, worst-case marketable
+	/// fills; <c>--cross</c> sets anything in between). Multi-leg orders are then held inside their no-arbitrage range by
+	/// <see cref="NoArb"/> at the call sites. Slippage (<c>slippagePerSharePerOrder</c>) applies additively
 	/// on top in <see cref="SimulatedBook"/>, independent of this. Marks (MTM / threshold detection) always
 	/// use mid — only realized fills cross the spread.
 	///
@@ -428,7 +433,7 @@ internal sealed class BacktestRunner
 	private decimal ExecPrice(Side side, decimal bid, decimal ask)
 	{
 		if (bid <= 0m || ask <= 0m) return side == Side.Buy ? ask : bid;
-		return _pricingMode == SuggestionPricing.BidAsk ? (side == Side.Buy ? ask : bid) : (bid + ask) / 2m;
+		return ComboFill.LegPrice((bid + ask) / 2m, side == Side.Buy ? ask : bid, _cross);
 	}
 
 	/// <summary>Fair-value mark for a leg from its real bid/ask — used for MTM and profit-target/stop-loss
@@ -457,7 +462,7 @@ internal sealed class BacktestRunner
 			var side = string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase) ? Side.Buy : Side.Sell;
 			fills.Add(new BacktestLegFill(l.Symbol, side, qty, ExecPrice(side, q.Bid.Value, q.Ask.Value)));
 		}
-		return fills;
+		return NoArb(fills);
 	}
 
 	/// <summary>Resolves the contract quantity for an open. Normal mode uses the evaluator's
@@ -554,17 +559,26 @@ internal sealed class BacktestRunner
 			: (isCall ? OpenStructureKind.ShortCallVertical : OpenStructureKind.ShortPutVertical);
 	}
 
+	/// <summary>Holds a multi-leg order inside its no-arbitrage range (<see cref="ComboFill.ClampToNoArb"/>) and counts the fills
+	/// that needed it, so the summary shows how much of a result rests on corrected prices.</summary>
+	private IReadOnlyList<BacktestLegFill> NoArb(IReadOnlyList<BacktestLegFill> fills)
+	{
+		var clamped = ComboFill.ClampToNoArb(fills);
+		if (!ReferenceEquals(clamped, fills)) _noArbClampedFills++;
+		return clamped;
+	}
+
 	private IReadOnlyList<BacktestLegFill>? BuildLegFillsFromProposal(IReadOnlyList<ProposalLeg> legs, int qty)
 	{
 		var fills = new List<BacktestLegFill>(legs.Count);
 		foreach (var l in legs)
 		{
 			if (!l.PricePerShare.HasValue) return null;
-			var price = (_pricingMode == SuggestionPricing.BidAsk ? l.ExecutionPricePerShare : l.PricePerShare) ?? l.PricePerShare.Value;
+			var price = l.ExecutionPricePerShare is decimal crossing ? ComboFill.LegPrice(l.PricePerShare.Value, crossing, _cross) : l.PricePerShare.Value;
 			var side = string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase) ? Side.Buy : Side.Sell;
 			fills.Add(new BacktestLegFill(l.Symbol, side, qty, price));
 		}
-		return fills;
+		return NoArb(fills);
 	}
 
 	/// <summary>Intraday SL/TP simulation. Per-position: re-price each leg at bar.Low and bar.High,
@@ -1090,7 +1104,7 @@ internal sealed class BacktestRunner
 							new BacktestLegFill(sellLeg.Symbol, Side.Sell, pos.Quantity, ExecPrice(Side.Sell, csBid, csAsk)),
 							new BacktestLegFill(buyLeg.Symbol, Side.Buy, pos.Quantity, ExecPrice(Side.Buy, cbBid, cbAsk))
 						};
-						_book.LegIn(minuteEt, pos.Key, condorFills, "CompleteCondorRule", OpenStructureKind.IronCondor, spot);
+						_book.LegIn(minuteEt, pos.Key, NoArb(condorFills), "CompleteCondorRule", OpenStructureKind.IronCondor, spot);
 						return true;
 					}
 				}
@@ -1112,7 +1126,7 @@ internal sealed class BacktestRunner
 					var cs = leg.Side == Side.Buy ? Side.Sell : Side.Buy;
 					fcFills.Add(new BacktestLegFill(leg.Symbol, cs, pos.Quantity, ExecPrice(cs, q.Bid.Value, q.Ask.Value)));
 				}
-				if (fcPriced) { _book.Close(minuteEt, pos.Key, fcFills, "CloseBeforeShortExpiryRule", spot); return true; }
+				if (fcPriced) { _book.Close(minuteEt, pos.Key, NoArb(fcFills), "CloseBeforeShortExpiryRule", spot); return true; }
 			}
 
 			bool slFires = slTarget.HasValue && mark.Value <= slTarget.Value;
@@ -1181,7 +1195,7 @@ internal sealed class BacktestRunner
 			}
 			if (!allLegsPriced) continue;
 
-			_book.Close(minuteEt, pos.Key, legFills, ruleName, spot);
+			_book.Close(minuteEt, pos.Key, NoArb(legFills), ruleName, spot);
 			return true;
 		}
 
@@ -1269,7 +1283,7 @@ internal sealed class BacktestRunner
 			legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
 		}
 
-		_book.Close(step, pos.Key, legFills, ruleName, thresholdSpot);
+		_book.Close(step, pos.Key, NoArb(legFills), ruleName, thresholdSpot);
 	}
 
 	/// <summary>Bisects spot in <c>[spotLow, spotHigh]</c> to find where the position's mark equals
@@ -1725,7 +1739,7 @@ internal sealed class BacktestRunner
 			fills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
 		}
 		if (fills.Count > 0)
-			_book.Close(settleTime, survivorKey, fills, "CloseSurvivorOnShortExpiry", spotAtClose);
+			_book.Close(settleTime, survivorKey, NoArb(fills), "CloseSurvivorOnShortExpiry", spotAtClose);
 	}
 
 	private async Task<decimal> ComputeOpenMarkAsync(DateTime step, CancellationToken cancellation)
@@ -1880,6 +1894,7 @@ internal sealed record BacktestResult(
 	PricingProvenance Provenance,
 	CleanlinessBreakdown Cleanliness,
 	int DroppedRuleActions = 0,
+	int NoArbClampedFills = 0,
 	int BlindPositionDays = 0,
 	int OpenPositionsFallbackMarked = 0,
 	int LegCollisionBlockedOpens = 0)

@@ -835,6 +835,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Fixed contracts per trade (sizing-neutral). Every open trades exactly N contracts and the cash/reserve gates are bypassed, so terminal P&L is the additive sum of per-trade results instead of a compounding curve — use this to measure per-trade edge (expectancy, profit factor) without the position-sizing feedback loop. Also OVERRIDES the recorded quantity under --replay (which otherwise opens at the live proposal's size), so a replay run can be compared per-lot / at a fixed size against a normal backtest. Omit for normal equity-scaled sizing (or, under --replay, the live-recorded size).")]
 	public int? Lots { get; set; }
 
+	[CommandOption("--cross <FRACTION>")]
+	[Description("Fill model between mid and bid/ask: each leg fills this fraction of its half-spread away from mid (0 = mid, 1 = bid/ask; e.g. 0.25 for a combo limit that usually fills a little past mid). Requires --pricing mid. Every same-expiry multi-leg fill is also held strictly inside the structure's expiry-payoff range in all modes, so a credit can never reach the wing width. Range 0..1.")]
+	public decimal? Cross { get; set; }
+
 	[CommandOption("--sl <VALUE>")]
 	[Description("Override rules.stopLoss.pctOfMaxLoss for this run. 1.0 = SL effectively off (ride to expiry/settlement); 0.5 = cut at half of max loss. Range 0..1.")]
 	public decimal? SlOverride { get; set; }
@@ -847,6 +851,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
+		if (Cross is < 0m or > 1m)
+			return ValidationResult.Error($"--cross: must be in [0, 1], got {Cross}");
+		if (Cross.HasValue && SuggestionPricing.Normalize(Pricing) != SuggestionPricing.Mid)
+			return ValidationResult.Error("--cross: requires --pricing mid (bidask already crosses the full spread)");
 		if (TpPctOverride.HasValue && TpPctOverride.Value < 0m)
 			return ValidationResult.Error($"--tp-pct: must be ≥ 0, got {TpPctOverride}");
 		if (SlOverride.HasValue && (SlOverride.Value <= 0m || SlOverride.Value > 1m))
@@ -1087,9 +1095,9 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split, replayOpens: replayOpens, rateHistory: rateHistory);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, cross: settings.Cross, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split, replayOpens: replayOpens, rateHistory: rateHistory);
 
-		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={SuggestionPricing.Normalize(settings.Pricing)}{(settings.Replay ? " | [yellow]PROPOSAL REPLAY (opener off)[/]" : "")}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
+		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={(settings.Cross.HasValue ? $"mid+{settings.Cross:0.##}×half-spread" : SuggestionPricing.Normalize(settings.Pricing))}{(settings.Replay ? " | [yellow]PROPOSAL REPLAY (opener off)[/]" : "")}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
 
 		// Wall-clock stamps for the run itself (the summary table has no time axis otherwise — piped/
