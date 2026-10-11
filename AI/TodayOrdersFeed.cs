@@ -18,6 +18,7 @@ internal sealed class TodayOrdersFeed
 	private static readonly ConcurrentDictionary<(string BaseUrl, string AccountId), TodayOrdersFeed> Feeds = new();
 
 	private readonly Func<CancellationToken, Task<List<WebullOpenApiClient.OpenOrder>>> _fetch;
+	private readonly object _sync = new();
 	private object? _lastToken;
 	private Task<List<WebullOpenApiClient.OpenOrder>>? _lastPull;
 
@@ -27,10 +28,16 @@ internal sealed class TodayOrdersFeed
 
 	public Task<List<WebullOpenApiClient.OpenOrder>> GetAsync(object? cycleToken, CancellationToken cancellation)
 	{
-		if (cycleToken != null && ReferenceEquals(cycleToken, _lastToken) && _lastPull is { IsCompletedSuccessfully: true }) return _lastPull;
-		var pull = _fetch(cancellation);
-		if (cycleToken != null) { _lastToken = cycleToken; _lastPull = pull; }
-		return pull;
+		if (cycleToken == null) return _fetch(cancellation);
+		lock (_sync)
+		{
+			if (ReferenceEquals(cycleToken, _lastToken) && _lastPull != null && !_lastPull.IsFaulted && !_lastPull.IsCanceled)
+				return _lastPull;
+			var pull = _fetch(cancellation);
+			_lastToken = cycleToken;
+			_lastPull = pull;
+			return pull;
+		}
 	}
 
 	private static async Task<List<WebullOpenApiClient.OpenOrder>> FetchAsync(TradeAccount account, CancellationToken cancellation)

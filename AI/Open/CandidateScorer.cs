@@ -2034,9 +2034,7 @@ internal static class CandidateScorer
 		// (the short, expiring now, settles on the actual spot — intrinsic only). longBs injects the per-tick
 		// long-leg cache so dense candidate enumeration reuses the BS curve.
 		var longValue = OptionMath.LegValueAt(sT, shortExpiryClose, longLeg, ivLong, dividends, longBs);
-		var shortIntrinsic = longLeg.CallPut == "C"
-			? Math.Max(0m, sT - shortLeg.Strike)
-			: Math.Max(0m, shortLeg.Strike - sT);
+		var shortIntrinsic = OptionMath.Intrinsic(sT, shortLeg.Strike, shortLeg.CallPut);
 		return (longValue - shortIntrinsic) * 100m - debitPerContract;
 	}
 

@@ -22,20 +22,20 @@ public class HistoricalRateCacheTests : IDisposable
 	public async Task OnlineFetch_ConvertsPercentPointsToFractions_AndPersists()
 	{
 		var cache = new HistoricalRateCache(_dir, c => Fetch((new DateTime(2026, 8, 6), 4.21m), (new DateTime(2026, 8, 7), 4.18m)));
-		var rates = await cache.GetAsync(CancellationToken.None);
+		var rates = await cache.GetAsync(TestContext.Current.CancellationToken);
 
 		Assert.Equal(2, rates.Count);
 		Assert.Equal(0.0421, rates[0].Rate, precision: 6);
 		Assert.Equal(0.0418, rates[1].Rate, precision: 6);
-		Assert.Contains("2026-08-07,0.0418", await File.ReadAllTextAsync(CsvPath));
+		Assert.Contains("2026-08-07,0.0418", await File.ReadAllTextAsync(CsvPath, TestContext.Current.CancellationToken));
 	}
 
 	[Fact]
 	public async Task Offline_ReadsDiskOnly_NeverFetches()
 	{
-		await File.WriteAllTextAsync(CsvPath, "date,rate\n2026-08-06,0.0421\n");
+		await File.WriteAllTextAsync(CsvPath, "date,rate\n2026-08-06,0.0421\n", TestContext.Current.CancellationToken);
 		var cache = new HistoricalRateCache(_dir, c => throw new InvalidOperationException("offline must not fetch"), offline: true);
-		var rates = await cache.GetAsync(CancellationToken.None);
+		var rates = await cache.GetAsync(TestContext.Current.CancellationToken);
 
 		Assert.Single(rates);
 		Assert.Equal(new DateTime(2026, 8, 6), rates[0].Date);
@@ -44,12 +44,12 @@ public class HistoricalRateCacheTests : IDisposable
 	[Fact]
 	public async Task EmptyFetch_KeepsGoodCachedFile()
 	{
-		await File.WriteAllTextAsync(CsvPath, "date,rate\n2026-08-06,0.0421\n");
+		await File.WriteAllTextAsync(CsvPath, "date,rate\n2026-08-06,0.0421\n", TestContext.Current.CancellationToken);
 		var cache = new HistoricalRateCache(_dir, c => Fetch());
-		var rates = await cache.GetAsync(CancellationToken.None);
+		var rates = await cache.GetAsync(TestContext.Current.CancellationToken);
 
 		Assert.Single(rates);
-		Assert.Contains("2026-08-06,0.0421", await File.ReadAllTextAsync(CsvPath));
+		Assert.Contains("2026-08-06,0.0421", await File.ReadAllTextAsync(CsvPath, TestContext.Current.CancellationToken));
 	}
 
 	[Fact]

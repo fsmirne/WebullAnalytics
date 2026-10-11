@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace WebullAnalytics.AI.RiskDiagnostics;
@@ -9,23 +10,31 @@ internal static class TrendFetcher
 {
 	private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+	private static readonly ConcurrentDictionary<string, (DateTime CachedAt, TrendSnapshot Snapshot)> MemoryCache = new(StringComparer.OrdinalIgnoreCase);
+	private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(2);
 
 	internal static async Task<TrendSnapshot?> FetchAsync(string ticker, DateTime asOf, CancellationToken ct)
 	{
+		if (MemoryCache.TryGetValue(ticker, out var cached) && DateTime.UtcNow - cached.CachedAt < CacheTtl && cached.Snapshot.AsOf.Date == asOf.Date)
+			return cached.Snapshot with { AsOf = asOf };
+
 		try
 		{
 			var period2 = new DateTimeOffset(asOf.Date.AddDays(1)).ToUnixTimeSeconds();
 			var period1 = new DateTimeOffset(asOf.Date.AddDays(-50)).ToUnixTimeSeconds();
 			// Index roots (XSP, SPX, NDX, …) resolve to an unrelated OTC quote on Yahoo unless mapped
-				// to their caret symbol (^XSP, ^SPX, …); without this the parse fails and trend is null.
-				var yahooTicker = Api.YahooOptionsClient.ToYahooTicker(ticker);
-				var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(yahooTicker)}?period1={period1}&period2={period2}&interval=1d&events=history";
+			// to their caret symbol (^XSP, ^SPX, …); without this the parse fails and trend is null.
+			var yahooTicker = Api.YahooOptionsClient.ToYahooTicker(ticker);
+			var url = $"https://query2.finance.yahoo.com/v8/finance/chart/{Uri.EscapeDataString(yahooTicker)}?period1={period1}&period2={period2}&interval=1d&events=history";
 			using var req = new HttpRequestMessage(HttpMethod.Get, url);
 			req.Headers.UserAgent.ParseAdd("Mozilla/5.0 WebullAnalytics/1.0");
 			using var resp = await Http.SendAsync(req, ct);
 			if (!resp.IsSuccessStatusCode) return null;
 			var body = await resp.Content.ReadAsStringAsync(ct);
-			return ParseSnapshot(body, asOf);
+			var snapshot = ParseSnapshot(body, asOf);
+			if (snapshot != null)
+				MemoryCache[ticker] = (DateTime.UtcNow, snapshot);
+			return snapshot;
 		}
 		catch
 		{

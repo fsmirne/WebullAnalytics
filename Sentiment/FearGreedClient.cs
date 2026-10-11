@@ -40,8 +40,12 @@ internal static class FearGreedClient
 		return c;
 	}
 
+	private static (DateTime CachedAt, DateTime ForDate, SentimentSnapshot Snapshot)? _intradayLiveCache;
+	private static readonly object _liveCacheLock = new();
+	private static readonly TimeSpan LiveTtl = TimeSpan.FromSeconds(60);
+
 	/// <summary>Returns the sentiment snapshot for <paramref name="asOf"/>, using the on-disk cache when
-	/// the date is settled. Intra-day calls always hit the network. Returns null on any failure.
+	/// the date is settled. Intra-day calls hit the network with a 60-second in-memory TTL cache. Returns null on any failure.
 	/// When <paramref name="cacheOnly"/> is true, the network branch is skipped — returns the cached
 	/// value if present, otherwise null. Used by the backtest path so a replay never hits CNN (the
 	/// endpoint's current-day reading would otherwise leak as-of-now data into historical decisions)
@@ -76,6 +80,15 @@ internal static class FearGreedClient
 
 		if (cacheOnly) return null;
 
+		if (!settled && !forceRefresh)
+		{
+			lock (_liveCacheLock)
+			{
+				if (_intradayLiveCache is { } live && DateTime.UtcNow - live.CachedAt < LiveTtl && live.ForDate.Date == lookup.Date)
+					return live.Snapshot;
+			}
+		}
+
 		string body;
 		try
 		{
@@ -100,7 +113,13 @@ internal static class FearGreedClient
 			catch (IOException) { }
 		}
 
-		return ParseResponse(body, lookup.Date);
+		var parsedResult = ParseResponse(body, lookup.Date);
+		if (!settled && parsedResult != null)
+		{
+			lock (_liveCacheLock)
+				_intradayLiveCache = (DateTime.UtcNow, lookup.Date, parsedResult);
+		}
+		return parsedResult;
 	}
 
 	/// <summary>True when <paramref name="asOf"/> is on or before the most recent settled NY date.

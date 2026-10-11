@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.Open.ZeroDte;
 using WebullAnalytics.AI.Output;
@@ -365,7 +365,9 @@ internal sealed class OpenCandidateEvaluator
 		var sentimentSnapshot = await FearGreedClient.FetchAsync(ctx.Now, cancellation, cacheOnly: _backtestMode);
 		decimal? sentimentScore = sentimentSnapshot?.Score;
 
-		var historicalVolByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		var historicalVolByTicker = ctx.HistoricalVolByTicker != null && ctx.HistoricalVolByTicker.Count > 0
+			? new Dictionary<string, decimal>(ctx.HistoricalVolByTicker, StringComparer.OrdinalIgnoreCase)
+			: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		var shortHorizonHvByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		// Load historical closes for the vol-fit and whipsaw factors. Bias-calibration (moveSign),
 		// VIX term structure, and intraday tape are now computed inside ComputeRegimeComponentsAsync
@@ -377,9 +379,12 @@ internal sealed class OpenCandidateEvaluator
 			foreach (var ticker in new[] { _config.Ticker })
 			{
 				var closes = await _priceCache.GetRecentClosesAsync(ticker, lookback, ctx.Now, cancellation);
-				var hv30 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
-				if (hv30.HasValue && hv30.Value > 0m)
-					historicalVolByTicker[ticker] = hv30.Value;
+				if (!historicalVolByTicker.ContainsKey(ticker))
+				{
+					var hv30 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+					if (hv30.HasValue && hv30.Value > 0m)
+						historicalVolByTicker[ticker] = hv30.Value;
+				}
 				if (closes.Count >= 4)
 				{
 					var recent = closes.Skip(closes.Count - 4).ToList();
@@ -1300,9 +1305,13 @@ internal sealed class OverlayQuoteDictionary : IReadOnlyDictionary<string, Optio
 	}
 	public bool ContainsKey(string key) => _overlay.ContainsKey(key) || _base.ContainsKey(key);
 	public OptionContractQuote this[string key] => TryGetValue(key, out var v) ? v : throw new KeyNotFoundException(key);
-	public IEnumerable<string> Keys => _overlay.Keys.Concat(_base.Keys.Where(k => !_overlay.ContainsKey(k)));
-	public IEnumerable<OptionContractQuote> Values => Keys.Select(k => this[k]);
+	public IEnumerable<string> Keys => this.Select(kv => kv.Key);
+	public IEnumerable<OptionContractQuote> Values => this.Select(kv => kv.Value);
 	public int Count => _overlay.Count + _base.Keys.Count(k => !_overlay.ContainsKey(k));
-	public IEnumerator<KeyValuePair<string, OptionContractQuote>> GetEnumerator() => Keys.Select(k => new KeyValuePair<string, OptionContractQuote>(k, this[k])).GetEnumerator();
+	public IEnumerator<KeyValuePair<string, OptionContractQuote>> GetEnumerator()
+	{
+		foreach (var kv in _overlay) yield return kv;
+		foreach (var kv in _base) if (!_overlay.ContainsKey(kv.Key)) yield return kv;
+	}
 	System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
 }

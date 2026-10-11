@@ -8,6 +8,9 @@ namespace WebullAnalytics.Pricing;
 /// </summary>
 internal static class OptionMath
 {
+	private const double InvSqrt2 = 0.70710678118654752440084436210485; // 1.0 / Math.Sqrt(2.0)
+	private const double InvSqrt2Pi = 0.39894228040143267793994605993438; // 1.0 / Math.Sqrt(2.0 * Math.PI)
+
 	internal static double RiskFreeRate = 0.043; // default; updated at runtime from ^IRX when available
 	internal static readonly TimeSpan MarketOpen = new(9, 30, 0);
 	// 16:00 ET — equity options cease trading and PM-settled index options settle on the 4:00 close print.
@@ -190,7 +193,7 @@ internal static class OptionMath
 	{
 		const double a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
 		int sign = x < 0 ? -1 : 1;
-		x = Math.Abs(x) / Math.Sqrt(2.0);
+		x = Math.Abs(x) * InvSqrt2;
 		double t = 1.0 / (1.0 + p * x);
 		double y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.Exp(-x * x);
 		return 0.5 * (1.0 + sign * y);
@@ -605,9 +608,10 @@ internal static class OptionMath
 		var r = riskFreeRate;
 		var sigma = (double)iv;
 		if (sigma <= 0) return 0m;
-		var d1 = (Math.Log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.Sqrt(T));
-		var pdf = Math.Exp(-0.5 * d1 * d1) / Math.Sqrt(2 * Math.PI);
-		return (decimal)(S * pdf * Math.Sqrt(T));
+		var sqrtT = Math.Sqrt(T);
+		var d1 = (Math.Log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrtT);
+		var pdf = Math.Exp(-0.5 * d1 * d1) * InvSqrt2Pi;
+		return (decimal)(S * pdf * sqrtT);
 	}
 
 	/// <summary>Gamma of a European option under Black-Scholes: second derivative of price w.r.t. spot. Same formula for calls and puts.</summary>
@@ -615,9 +619,10 @@ internal static class OptionMath
 	{
 		if (timeYears <= 0 || iv <= 0m) return 0m;
 		double s = (double)spot, k = (double)strike, sigma = (double)iv, t = timeYears, r = riskFreeRate;
-		var d1 = (Math.Log(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * Math.Sqrt(t));
-		var pdf = Math.Exp(-0.5 * d1 * d1) / Math.Sqrt(2.0 * Math.PI);
-		return (decimal)(pdf / (s * sigma * Math.Sqrt(t)));
+		var sqrtT = Math.Sqrt(t);
+		var d1 = (Math.Log(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
+		var pdf = Math.Exp(-0.5 * d1 * d1) * InvSqrt2Pi;
+		return (decimal)(pdf / (s * sigma * sqrtT));
 	}
 
 	/// <summary>Vanna of a European option under Black-Scholes — the cross-derivative ∂²V/∂S∂σ, equivalently ∂Δ/∂σ:
@@ -637,7 +642,7 @@ internal static class OptionMath
 		var sqrtT = Math.Sqrt(t);
 		var d1 = (Math.Log(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
 		var d2 = d1 - sigma * sqrtT;
-		var pdf = Math.Exp(-0.5 * d1 * d1) / Math.Sqrt(2.0 * Math.PI);
+		var pdf = Math.Exp(-0.5 * d1 * d1) * InvSqrt2Pi;
 		return (decimal)(-pdf * d2 / sigma);
 	}
 }

@@ -39,12 +39,14 @@ internal sealed class LivePositionSource : IPositionSource
 	private readonly TradeAccount _account;
 	private readonly IReadOnlyList<Trade>? _trades;
 	private readonly Dictionary<(DateTime, Side, int), decimal>? _feeLookup;
+	private readonly Lazy<Dictionary<string, (decimal initialDebit, decimal adjustedDebit)>> _costBasisLookup;
 
 	public LivePositionSource(TradeAccount account, IReadOnlyList<Trade>? trades = null, Dictionary<(DateTime, Side, int), decimal>? feeLookup = null)
 	{
 		_account = account;
 		_trades = trades;
 		_feeLookup = feeLookup;
+		_costBasisLookup = new Lazy<Dictionary<string, (decimal initialDebit, decimal adjustedDebit)>>(() => BuildCostBasisLookup(_trades, _feeLookup));
 	}
 
 	public async Task<IReadOnlyDictionary<string, OpenPosition>> GetOpenPositionsAsync(
@@ -70,7 +72,7 @@ internal sealed class LivePositionSource : IPositionSource
 		try { todaysOrders = await TodayOrdersFeed.For(_account).GetAsync(cycleToken, cancellation); }
 		catch { /* OpenedAt enrichment is best-effort */ }
 
-		var costBasisLookup = BuildCostBasisLookup(_trades, _feeLookup);
+		var costBasisLookup = _costBasisLookup.Value;
 
 		var result = new Dictionary<string, OpenPosition>();
 		foreach (var h in holdings)
