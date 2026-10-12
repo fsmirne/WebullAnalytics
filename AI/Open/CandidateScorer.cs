@@ -2261,14 +2261,19 @@ internal static class CandidateScorer
 		return Math.Clamp(pop, 0m, 1m);
 	}
 
-	private static (decimal maxProfit, decimal maxLoss) ScanPnlRange(Func<decimal, decimal> pnl, decimal lower, decimal upper, int steps = 360)
+	/// <summary>Max profit/loss of the target-date P&L over [lower, upper]. Samples a fixed grid PLUS every leg strike: when all legs expire at
+	/// the target the payoff is piecewise-linear with kinks only at the strikes, so its extremes sit exactly on a strike or an end of the range.
+	/// The grid alone misses them on SPX-class tickers (spot×0.40–1.60 over 360 steps ≈ $26 apart), e.g. an iron fly's peak at its body strike —
+	/// the scan then reported the P&L at the nearest grid point (often spot) as max profit. For cross-expiry structures the strikes sit at or near
+	/// the time-value peaks, so including them tightens those too.</summary>
+	internal static (decimal maxProfit, decimal maxLoss) ScanPnlRange(Func<decimal, decimal> pnl, decimal lower, decimal upper, IEnumerable<decimal> strikes, int steps = 360)
 	{
 		var stepSize = (upper - lower) / steps;
+		var samples = Enumerable.Range(0, steps + 1).Select(i => lower + stepSize * i).Concat(strikes.Where(k => k >= lower && k <= upper));
 		var maxProfit = decimal.MinValue;
 		var maxLoss = decimal.MaxValue;
-		for (var i = 0; i <= steps; i++)
+		foreach (var s in samples)
 		{
-			var s = lower + stepSize * i;
 			var value = pnl(s);
 			if (value > maxProfit) maxProfit = value;
 			if (value < maxLoss) maxLoss = value;
@@ -2347,7 +2352,7 @@ internal static class CandidateScorer
 		decimal ev = 0m;
 		foreach (var pt in grid)
 			ev += pt.Weight * pnl(pt.SpotAtExpiry);
-		var (maxProfit, maxLoss) = ScanPnlRange(pnl, scanLower, scanUpper);
+		var (maxProfit, maxLoss) = ScanPnlRange(pnl, scanLower, scanUpper, defs.Select(d => d.Parsed.Strike));
 		var capitalAtRisk = Math.Abs(Math.Min(0m, maxLoss));
 		if (capitalAtRisk <= 0m) return null;
 		// Score divisor = the larger of cash deployed and worst-case loss. Covered debit structures (DC) scan to maxLoss ≤ debit, so this stays the debit; credit structures (IB/IC) have debit 0, so the margin held against max-loss stays the divisor. Gap-bearing debit structures
