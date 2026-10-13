@@ -110,7 +110,10 @@ internal static class LiveTick
 				// A stale feed poisons every quote → hold all opens this tick; otherwise drop only the
 				// torn-quote proposals and let clean lower-ranked ones proceed.
 				var safeToOpen = feedStale ? new List<OpenProposal>() : openResults.Where((_, i) => !suspect.Contains(i)).ToList();
-				await deps.OpenerExecutor.HandleAsync(safeToOpen, openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: cycleToken);
+				for (var i = 0; i < openResults.Count; i++)
+					if (!openResults[i].Informational && (feedStale || suspect.Contains(i)))
+						deps.OpenSink.EmitAutoExecute(openResults[i], "skipped", "quote guard", feedStale ? "stale feed" : "torn NBBO on a leg");
+				await deps.OpenerExecutor.HandleAsync(safeToOpen, openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: cycleToken, log: deps.OpenSink);
 			}
 		}
 

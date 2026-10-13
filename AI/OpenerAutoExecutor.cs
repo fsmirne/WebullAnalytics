@@ -1,6 +1,7 @@
 using Spectre.Console;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using WebullAnalytics.AI.Output;
 using WebullAnalytics.Api;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Trading;
@@ -56,7 +57,9 @@ internal sealed class OpenerAutoExecutor
 	/// spent. The run stays bounded to MaxOrdersPerDay submissions and all other guards (held-position
 	/// dedup, broker dedup, affordability) remain active. The watch loop must never set this: it would
 	/// re-fire on every tick, which is exactly what the cap exists to prevent.</param>
-	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, IReadOnlyDictionary<string, OpenPosition> openPositions, DateTime now, CancellationToken cancellation, bool bypassDailyCap = false, object? cycleToken = null)
+	/// <param name="log">When set, every outcome (skipped / dry-run / placed / failed) is also recorded as a <c>type:"autoexec"</c> line in the proposal JSONL, so a
+	/// no-order day can be diagnosed after the terminal is gone.</param>
+	public async Task<int> HandleAsync(IReadOnlyList<OpenProposal> proposals, IReadOnlyDictionary<string, OpenPosition> openPositions, DateTime now, CancellationToken cancellation, bool bypassDailyCap = false, object? cycleToken = null, OpenProposalSink? log = null)
 	{
 		if (!_config.Enabled) return 0;
 		if (proposals.Count == 0) return 0;
@@ -69,18 +72,6 @@ internal sealed class OpenerAutoExecutor
 			if (pos.Quantity > 0)
 				heldFingerprints.Add(FingerprintLegSet(pos.Legs.Select(l => (l.Side == Side.Buy ? "buy" : "sell", l.Symbol))));
 
-		// Broker-truth refresh. If submit is on but the API call fails, do nothing this tick.
-		// Dry-runs proceed without the refresh (informational; users still see "would submit" lines
-		// even if a matching order already exists at the broker).
-		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation, cycleToken))
-			return 0;
-
-		// Daily cap is scoped to this run's ticker (one ticker per process — proposals share it), so a
-		// concurrent watch on another ticker enforces its own cap rather than contending on a shared one.
-		var ticker = proposals[0].Ticker;
-		var brokerActiveCount = _config.Submit && _brokerState != null && _brokerState.IsReady ? _brokerState.TodaysActiveOrderCount(ticker) : 0;
-
-		var ordersThisTick = 0;
 		// Apply the structure allow-list as a SELECTION filter first — a disabled structure must never
 		// trade, so fall through to the best allowed pick. Then consider only the top-N by score (the
 		// day's order cap) and skip any we can't afford: affordability must not pick the trade by
@@ -92,10 +83,28 @@ internal sealed class OpenerAutoExecutor
 		var eligible = _allowedStructures.Count > 0
 			? tradeable.Where(p => _allowedStructures.Contains(p.StructureKind.ToString()))
 			: tradeable;
-		foreach (var p in eligible.Take(_config.MaxOrdersPerDay))
+		var candidates = eligible.Take(_config.MaxOrdersPerDay).ToList();
+
+		// Broker-truth refresh. If submit is on but the API call fails, do nothing this tick.
+		// Dry-runs proceed without the refresh (informational; users still see "would submit" lines
+		// even if a matching order already exists at the broker).
+		if (_config.Submit && _brokerState != null && !await _brokerState.TryRefreshAsync(cancellation, cycleToken))
 		{
-			if (p.CashReserveBlocked) continue;
-			if (p.Qty < 1) continue;
+			foreach (var p in candidates) log?.EmitAutoExecute(p, "skipped", "broker state refresh failed", _brokerState.LastRefreshError);
+			return 0;
+		}
+
+		// Daily cap is scoped to this run's ticker (one ticker per process — proposals share it), so a
+		// concurrent watch on another ticker enforces its own cap rather than contending on a shared one.
+		var ticker = proposals[0].Ticker;
+		var brokerActiveCount = _config.Submit && _brokerState != null && _brokerState.IsReady ? _brokerState.TodaysActiveOrderCount(ticker) : 0;
+
+		var ordersThisTick = 0;
+		foreach (var p in candidates)
+		{
+			// Both already shown on the proposal's own panel ("⚠ blocked" / x0), so these are logged without a console line.
+			if (p.CashReserveBlocked) { log?.EmitAutoExecute(p, "skipped", "cash reserve", p.CashReserveDetail); continue; }
+			if (p.Qty < 1) { log?.EmitAutoExecute(p, "skipped", "sized to zero contracts"); continue; }
 
 			// Pre-submit liquidity guard: hard-block a proposal whose worst leg is too illiquid to exit
 			// cleanly (wide spread and/or sub-grid open interest). This is the deterministic backstop the
@@ -105,7 +114,7 @@ internal sealed class OpenerAutoExecutor
 			var liquidityFailure = LiquidityGuardFailure(p);
 			if (liquidityFailure != null)
 			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (liquidity guard):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} — {Markup.Escape(liquidityFailure)} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
+				Skip(p, "liquidity guard", liquidityFailure, log);
 				continue;
 			}
 
@@ -120,7 +129,7 @@ internal sealed class OpenerAutoExecutor
 				&& heldFingerprints.Count > 0
 				&& StructureOrderSplit.Split(p.StructureKind, p.Legs).All(g => heldFingerprints.Contains(FingerprintLegSet(g.Legs.Select(l => (l.Action, l.Symbol))))))
 			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (already hold matching position):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
+				Skip(p, "already hold matching position", null, log);
 				continue;
 			}
 
@@ -132,7 +141,7 @@ internal sealed class OpenerAutoExecutor
 			// backtest book (see HeldLegGuard) so both refuse the same trade.
 			if (HeldLegGuard.CollidesWithHeldLeg(p.Legs.Select(l => (l.Symbol, string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase) ? Side.Buy : Side.Sell)), openPositions.Values))
 			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (leg already held by a different position):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
+				Skip(p, "leg already held by a different position", null, log);
 				continue;
 			}
 
@@ -147,7 +156,7 @@ internal sealed class OpenerAutoExecutor
 			if (_config.Submit && _brokerState != null
 				&& StructureOrderSplit.Split(p.StructureKind, p.Legs).All(g => _brokerState.HasNetOpenMatching(g.Legs.Select(l => (l.Symbol, l.Action)))))
 			{
-				AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (broker already has matching order):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
+				Skip(p, "broker already has matching order", null, log);
 				continue;
 			}
 
@@ -157,14 +166,14 @@ internal sealed class OpenerAutoExecutor
 			{
 				if (!bypassDailyCap)
 				{
-					AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped (daily cap):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty} [dim]({Markup.Escape(p.Legs.Describe())})[/] — {_config.MaxOrdersPerDay} order(s) already active at broker today (filled + pending).");
+					Skip(p, "daily cap", $"{_config.MaxOrdersPerDay} order(s) already active at broker today (filled + pending)", log);
 					break;
 				}
 				if (ordersThisTick >= _config.MaxOrdersPerDay) break; // --submit-override lifts the broker count, not this run's bound
 				AnsiConsole.MarkupLine($"[yellow]daily cap BYPASSED (--submit-override):[/] {brokerActiveCount} opening order(s) already active at broker today; submitting anyway.");
 			}
 
-			var result = await SubmitOpen(p, cancellation);
+			var result = await SubmitOpen(p, cancellation, log);
 			if (result.Outcome == SubmitOutcome.NotActed) continue;
 			if (result.Outcome == SubmitOutcome.Submitted) ordersThisTick++;
 			else if (result.Outcome == SubmitOutcome.DryRun) ordersThisTick++;
@@ -178,13 +187,13 @@ internal sealed class OpenerAutoExecutor
 	/// append. Dry-run paths return <see cref="SubmitOutcome.DryRun"/> (logged, but caller still
 	/// re-emits next tick). <see cref="SubmitOutcome.NotActed"/> means the proposal was skipped
 	/// (missing price, submit error) so the caller doesn't count it.</summary>
-	private async Task<SubmitResult> SubmitOpen(OpenProposal p, CancellationToken cancellation)
+	private async Task<SubmitResult> SubmitOpen(OpenProposal p, CancellationToken cancellation, OpenProposalSink? log)
 	{
 		// Never place a partial structure because of a missing leg price — validate the whole set first.
 		var missing = p.Legs.FirstOrDefault(l => !l.PricePerShare.HasValue);
 		if (missing != null)
 		{
-			AnsiConsole.MarkupLine($"[yellow]opener auto-execute:[/] {Markup.Escape(p.Ticker)} {p.StructureKind} skipped — missing price on leg {Markup.Escape(missing.Symbol)}");
+			Skip(p, "missing leg price", missing.Symbol, log);
 			return new SubmitResult(SubmitOutcome.NotActed);
 		}
 
@@ -205,6 +214,7 @@ internal sealed class OpenerAutoExecutor
 				var suffix = string.IsNullOrEmpty(g.Label) ? "" : $"  # {g.Label}";
 				AnsiConsole.MarkupLine($"  [grey50]wa trade place \"{Markup.Escape(spec.ArgLegs)}\" --side {spec.Side.ToLowerInvariant()} --limit {spec.LimitAbs:F2} --submit{suffix}[/]");
 			}
+			log?.EmitAutoExecute(p, "dry-run", reason);
 			return new SubmitResult(SubmitOutcome.DryRun);
 		}
 
@@ -237,6 +247,7 @@ internal sealed class OpenerAutoExecutor
 				AnsiConsole.MarkupLine($"[yellow]opener auto-execute:[/] {Markup.Escape(p.Ticker)} {p.StructureKind}{LabelSuffix(g.Label)} skipped — could not classify the leg-set to a Webull strategy.");
 				if (placedCount > 0)
 					AnsiConsole.MarkupLine($"[red bold]WARNING:[/] {Markup.Escape(p.Ticker)} {p.StructureKind} is PARTIALLY open — {placedCount} of {groups.Count} order(s) placed. Complete or cancel the open leg-set manually.");
+				log?.EmitAutoExecute(p, "failed", "unclassifiable leg-set", $"{p.StructureKind}{LabelSuffix(g.Label)}; {placedCount} of {groups.Count} order(s) placed");
 				break;
 			}
 
@@ -259,6 +270,7 @@ internal sealed class OpenerAutoExecutor
 				using var client = new WebullOpenApiClient(_account);
 				var placed = await client.PlaceOrderAsync(body);
 				AnsiConsole.MarkupLine($"[green]opener auto-execute placed:[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
+				log?.EmitAutoExecute(p, "placed", null, summary, placed.OrderId);
 				_brokerState?.RecordLocalPlacement(p.Ticker, g.Legs.Select(l => (l.Symbol, l.Action)), placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: true);
 				placedCount++;
 				firstOrderId ??= placed.OrderId;
@@ -271,6 +283,8 @@ internal sealed class OpenerAutoExecutor
 				if (body != null) PrintFailureDiagnostics(body, ex);
 				if (placedCount > 0)
 					AnsiConsole.MarkupLine($"[red bold]WARNING:[/] {Markup.Escape(p.Ticker)} {p.StructureKind} is PARTIALLY open — {placedCount} of {groups.Count} order(s) placed; the rest failed. Complete or cancel the open leg-set manually.");
+				var reason = ex is WebullOpenApiException we ? $"webull error {we.ErrorCode ?? "?"}" : ex is HttpRequestException ? "network error" : "order-build error";
+				log?.EmitAutoExecute(p, "failed", reason, $"{summary} — {ex.Message}; {placedCount} of {groups.Count} order(s) placed");
 				break;
 			}
 		}
@@ -316,6 +330,14 @@ internal sealed class OpenerAutoExecutor
 		string.Join("|", legs
 			.Select(l => $"{l.Action.ToUpperInvariant()}:{l.Symbol.ToUpperInvariant()}")
 			.OrderBy(s => s, StringComparer.Ordinal));
+
+	/// <summary>One skip = one yellow console line plus, when logging, one <c>autoexec</c> record carrying the same reason.</summary>
+	private static void Skip(OpenProposal p, string reason, string? detail, OpenProposalSink? log)
+	{
+		var detailText = detail == null ? "" : $" — {Markup.Escape(detail)}";
+		AnsiConsole.MarkupLine($"[yellow]opener auto-execute skipped ({Markup.Escape(reason)}):[/] {Markup.Escape(p.Ticker)} {p.StructureKind} x{p.Qty}{detailText} [dim]({Markup.Escape(p.Legs.Describe())})[/].");
+		log?.EmitAutoExecute(p, "skipped", reason, detail);
+	}
 
 	private static string LabelSuffix(string label) => string.IsNullOrEmpty(label) ? "" : $" ({label})";
 

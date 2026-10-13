@@ -80,15 +80,29 @@ internal sealed class ProposalSnapshot
 		{
 			chosenLine = -1;
 			lineText = null;
+			// Default = the last PROPOSAL record: watch interleaves type:"tick" heartbeats and type:"autoexec" outcomes, so the literal last line is rarely a proposal.
 			for (var i = lines.Length - 1; i >= 0; i--)
-				if (!string.IsNullOrWhiteSpace(lines[i])) { lineText = lines[i]; chosenLine = i + 1; break; }
-			if (lineText == null) return (null, $"--proposal: '{resolved}' has no non-empty lines");
+				if (IsProposalLine(lines[i])) { lineText = lines[i]; chosenLine = i + 1; break; }
+			if (lineText == null) return (null, $"--proposal: '{resolved}' has no open or management proposal lines");
 		}
 
 		if (string.IsNullOrWhiteSpace(lineText)) return (null, $"--proposal: line {chosenLine} of '{resolved}' is empty");
 
 		try { return (Parse(lineText, resolved, chosenLine), null); }
 		catch (Exception ex) { return (null, $"--proposal: line {chosenLine} of '{resolved}' is not a valid proposal: {ex.Message}"); }
+	}
+
+	/// <summary>True for an <c>open</c> / <c>management</c> record (or a legacy line with no <c>type</c>, which predates the field and is always an open). Unparseable lines are skipped.</summary>
+	internal static bool IsProposalLine(string line)
+	{
+		if (string.IsNullOrWhiteSpace(line)) return false;
+		try
+		{
+			using var doc = JsonDocument.Parse(line);
+			var type = Str(doc.RootElement, "type") ?? "open";
+			return type.Equals("open", StringComparison.OrdinalIgnoreCase) || type.Equals("management", StringComparison.OrdinalIgnoreCase);
+		}
+		catch (JsonException) { return false; }
 	}
 
 	private static string? ResolveFile(string file)

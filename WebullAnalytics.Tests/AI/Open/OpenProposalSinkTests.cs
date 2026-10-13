@@ -48,6 +48,31 @@ public class OpenProposalSinkTests
 	}
 
 	[Fact]
+	public void AutoExecuteRecordCarriesOutcomeReasonAndFingerprint()
+	{
+		var json = OpenProposalSink.SerializeAutoExecuteRecord(MakeProposal(0.01m, "fp-skip"), mode: "watch", strategy: "DC2", outcome: "skipped", reason: "daily cap", detail: "1 order(s) already active at broker today (filled + pending)", orderId: null);
+		Assert.Contains("\"type\":\"autoexec\"", json);
+		Assert.Contains("\"outcome\":\"skipped\"", json);
+		Assert.Contains("\"reason\":\"daily cap\"", json);
+		Assert.Contains("\"fingerprint\":\"fp-skip\"", json);
+		Assert.Contains("\"strategy\":\"DC2\"", json);
+		Assert.Contains("\"orderId\":null", json);
+	}
+
+	[Fact]
+	public void AutoExecuteRecordIsNotAProposalLine()
+	{
+		var autoexec = OpenProposalSink.SerializeAutoExecuteRecord(MakeProposal(0.01m, "fp"), "watch", "DC2", "placed", null, "open LongCall SPY x1", "ORDER1");
+		var tick = OpenProposalSink.SerializeTickRecord("watch", "SPY", "DC2", 500m, 0, 0, null, 0.002m);
+		var open = OpenProposalSink.SerializeRecord(MakeProposal(0.01m, "fp"), mode: "watch", strategy: "DC2", rank: 1);
+		Assert.False(WebullAnalytics.Analyze.ProposalSnapshot.IsProposalLine(autoexec));
+		Assert.False(WebullAnalytics.Analyze.ProposalSnapshot.IsProposalLine(tick));
+		Assert.True(WebullAnalytics.Analyze.ProposalSnapshot.IsProposalLine(open));
+		Assert.True(WebullAnalytics.Analyze.ProposalSnapshot.IsProposalLine("{\"ticker\":\"SPY\"}"));
+		Assert.False(WebullAnalytics.Analyze.ProposalSnapshot.IsProposalLine("not json"));
+	}
+
+	[Fact]
 	public void WriteJsonlIncludesRankAndInformational()
 	{
 		var json = OpenProposalSink.SerializeRecord(MakeProposal(0.01m, "fp1"), mode: "watch", rank: 1);

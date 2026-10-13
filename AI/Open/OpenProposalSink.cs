@@ -74,6 +74,35 @@ internal sealed class OpenProposalSink
 		return JsonSerializer.Serialize(record);
 	}
 
+	/// <summary>Writes one <c>type:"autoexec"</c> line recording what the opener auto-executor did with a proposal (JSONL only — the executor prints its own console line). Skip reasons were
+	/// console-only, so a day with a gate-clearing proposal but no order could only be diagnosed from the terminal scrollback (2026-10-08). <paramref name="outcome"/> is one of
+	/// <c>skipped</c> / <c>dry-run</c> / <c>placed</c> / <c>failed</c>; <paramref name="reason"/> is a stable category, <paramref name="detail"/> the free-text specifics. Joins its
+	/// <c>type:"open"</c> record by fingerprint.</summary>
+	public void EmitAutoExecute(OpenProposal p, string outcome, string? reason, string? detail = null, string? orderId = null) => WebullAnalytics.IO.SharedFileAppender.AppendLine(_path, SerializeAutoExecuteRecord(p, _mode, _strategy, outcome, reason, detail, orderId));
+
+	/// <summary>Serializes one auto-execute outcome line. Pure (no I/O) so it's unit-testable, mirroring <see cref="SerializeRecord"/>.</summary>
+	internal static string SerializeAutoExecuteRecord(OpenProposal p, string mode, string strategy, string outcome, string? reason, string? detail, string? orderId)
+	{
+		var record = new
+		{
+			type = "autoexec",
+			ts = DateTime.Now.ToString("o"),
+			mode = mode,
+			ticker = p.Ticker,
+			strategy = strategy,
+			outcome = outcome,
+			reason = reason,
+			detail = detail,
+			orderId = orderId,
+			structure = p.StructureKind.ToString(),
+			qty = p.Qty,
+			finalScore = p.FinalScore,
+			fingerprint = p.Fingerprint,
+			legs = p.Legs.Select(l => new { action = l.Action, symbol = l.Symbol, qty = l.Qty }),
+		};
+		return JsonSerializer.Serialize(record);
+	}
+
 	private void WriteJsonl(OpenProposal p, int? rank) => WebullAnalytics.IO.SharedFileAppender.AppendLine(_path, SerializeRecord(p, _mode, _strategy, rank));
 
 	/// <summary>Serializes one open proposal to its JSONL line. Pure (no I/O) so it's unit-testable

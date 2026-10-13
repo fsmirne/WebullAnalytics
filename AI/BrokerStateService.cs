@@ -271,6 +271,9 @@ internal sealed class BrokerStateService
 	private object? _lastCycleToken;
 	private bool _lastCycleResult;
 
+	/// <summary>The exception message of the most recent failed <see cref="TryRefreshAsync"/>, null after a success — lets a fail-closed caller record WHY it skipped.</summary>
+	public string? LastRefreshError { get; private set; }
+
 	/// <summary>Convenience: refresh-or-skip pattern. Wraps <see cref="RefreshAsync"/> in
 	/// try/catch, logs the failure, and returns false on any error. Callers use the
 	/// return value to decide whether to proceed with live submission attempts.
@@ -288,6 +291,7 @@ internal sealed class BrokerStateService
 		{
 			await RefreshAsync(cancellation, cycleToken);
 			ok = true;
+			LastRefreshError = null;
 		}
 		catch (Exception ex)
 		{
@@ -295,6 +299,7 @@ internal sealed class BrokerStateService
 			_activeFingerprintCounts = null;
 			_activeByFingerprint = null;
 			_activeOrderCountByRoot = null;
+			LastRefreshError = ex.Message;
 			ok = false;
 		}
 

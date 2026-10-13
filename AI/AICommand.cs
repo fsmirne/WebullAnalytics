@@ -633,7 +633,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// rule engine had nothing to react to. Opener executor still fires so the user can validate
 			// open-order placement off-hours against a sandbox account.
 			if (openerExecutor != null)
-				openerOrdersThisRun = await openerExecutor.HandleAsync(openResults, openPositions, asOf, cancellation, bypassDailyCap: settings.SubmitOverride);
+				openerOrdersThisRun = await openerExecutor.HandleAsync(openResults, openPositions, asOf, cancellation, bypassDailyCap: settings.SubmitOverride, log: openSink);
 		}
 
 		var execSuffix = openerExecutor != null ? $" | opener auto-execute: {openerOrdersThisRun} order(s) acted on" : "";
