@@ -262,10 +262,6 @@ internal sealed class OpenerWeightsConfig
 	/// Factor = <c>1 − weight × max(0, hv3/hv30 − 1.5)</c>. 0 disables; 0.5–1.0 penalizes meaningfully.</summary>
 	[JsonPropertyName("whipsaw")] public decimal Whipsaw { get; set; } = 0m;
 
-	/// <summary>Strength of the vega-aware HV-vs-IV fit factor. Distinct from <see cref="IvRealizedPremium"/>:
-	/// that one fires on trade-type sign alone; this one weighs the structure's vega exposure.</summary>
-	[JsonPropertyName("volatilityFit")] public decimal VolatilityFit { get; set; } = 0.50m;
-
 	/// <summary>Net dealer-gamma REGIME tilt (the volatility, not directional, half of the old GEX factor):
 	/// <c>max(0.10, 1 + weight × clamp(NetGexFraction × volFitSign, −1, 1))</c>. Negative net gamma (put-gamma
 	/// dominant, amplifying regime) favors long-vol/long-premium structures; positive net gamma (suppressive)
@@ -299,10 +295,6 @@ internal sealed class OpenerWeightsConfig
 	/// <summary>EM-vs-short-strike credit-trade safety factor. Ramps from −1 (≤0.5σ cushion) to +1
 	/// (≥1.5σ cushion). Credit trades only.</summary>
 	[JsonPropertyName("expectedMoveCredit")] public decimal ExpectedMoveCredit { get; set; } = 0.20m;
-
-	/// <summary>IV-vs-HV regime-alignment factor. Credit favored when IV > HV; debit favored when
-	/// IV < HV. Fires on trade-type sign alone (vega-agnostic).</summary>
-	[JsonPropertyName("ivRealizedPremium")] public decimal IvRealizedPremium { get; set; } = 0.15m;
 
 	/// <summary>Blend weight for the VIX term-structure regime signal on top of the daily-close technical
 	/// bias. Layered between macroBias and intradayBias. Default 0 disables. Recommended 0.15–0.30.</summary>

@@ -51,6 +51,20 @@ public class CandidateScorerLongCallPutTests
 	}
 
 	[Fact]
+	public void LongCallMaxProfitIsUnbounded_LongPutPeaksAtZero()
+	{
+		var asOf = new DateTime(2026, 4, 1);
+		var exp = new DateTime(2026, 5, 15);
+		var call = MatchKeys.OccSymbol("SPY", exp, 500m, "C");
+		var put = MatchKeys.OccSymbol("SPY", exp, 500m, "P");
+		var quotes = new Dictionary<string, OptionContractQuote> { [call] = TestQuote.Q(4.90m, 5.10m, 0.40m), [put] = TestQuote.Q(4.90m, 5.10m, 0.40m) };
+		var pc = CandidateScorer.ScoreLongCallPut(new CandidateSkeleton("SPY", OpenStructureKind.LongCall, new[] { new ProposalLeg("buy", call, 1) }, TargetExpiry: exp), spot: 500m, asOf, quotes, bias: 0m, Cfg())!;
+		var pp = CandidateScorer.ScoreLongCallPut(new CandidateSkeleton("SPY", OpenStructureKind.LongPut, new[] { new ProposalLeg("buy", put, 1) }, TargetExpiry: exp), spot: 500m, asOf, quotes, bias: 0m, Cfg())!;
+		Assert.Null(pc.MaxProfitPerContract);
+		Assert.Equal(500m * 100m - 500m, pp.MaxProfitPerContract);   // strike × 100 − debit
+	}
+
+	[Fact]
 	public void LongCallPopIsProbSpotGreaterThanBreakeven()
 	{
 		var asOf = new DateTime(2026, 4, 1);

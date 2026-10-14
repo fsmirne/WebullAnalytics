@@ -14,7 +14,7 @@ internal static class RiskDiagnosticProbeBuilder
 		DateTime asOf,
 		Func<string, decimal> ivResolver,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes,
-		(decimal bias, OpenerConfig cfg, string structure, int qty, string rationale, decimal creditPerContract, decimal maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore, decimal? thetaPerDayPerContract, decimal? finalScore)? opener = null,
+		(decimal bias, OpenerConfig cfg, string structure, int qty, string rationale, decimal creditPerContract, decimal? maxProfit, decimal maxLoss, decimal risk, decimal pop, decimal ev, int days, decimal rawScore, decimal biasScore, decimal? thetaPerDayPerContract, decimal? finalScore)? opener = null,
 		decimal? technicalBiasOverride = null,
 		bool useCostBasisForOpenerScore = false,
 		decimal? historicalVolAnnual = null,
@@ -456,9 +456,9 @@ internal static class RiskDiagnosticProbeBuilder
 	/// set to a human-readable explanation — surfaced in the diagnostic so the user knows exactly what to create
 	/// (e.g. a missing per-ticker ai-config.<TICKER>.json supplying indicators.strikeStep) rather than the probe
 	/// silently degrading to a no-score rationale.</summary>
-	/// <summary>Vol inputs for an ad-hoc analyze scoring, mirroring the opener pipeline: the underlying's realized HV for
-	/// the vol-fit / IV-vs-realized factors (null when both weights are 0, as the opener skips it) and the real-world
-	/// <see cref="RealizedVolModel"/> for the scoring distribution. Both null when the config or history is missing.</summary>
+	/// <summary>Vol inputs for an ad-hoc analyze scoring, mirroring the opener pipeline: the underlying's close-to-close HV
+	/// (the informational IV/HV reading) and the real-world <see cref="RealizedVolModel"/> for the scoring distribution.
+	/// Both null when the config or history is missing.</summary>
 	internal static async Task<(decimal? HistoricalVolAnnual, RealizedVolModel? RealizedVol)> TryLoadVolInputsAsync(string ticker, DateTime asOf, HistoricalPriceCache priceCache, CancellationToken cancellation)
 	{
 		try
@@ -466,8 +466,7 @@ internal static class RiskDiagnosticProbeBuilder
 			// Full merge chain (base + ticker + strategy) so a strategy layer's weights and lookback are visible.
 			var cfg = TryLoadAiConfigQuiet(ticker, out _);
 			if (cfg == null) return (null, null);
-			var realizedVol = await RealizedVolModel.LoadAsync(priceCache, ticker, cfg.Opener.VolatilityLookbackDays, asOf, cancellation);
-			if (cfg.Opener.Weights.VolatilityFit <= 0m && cfg.Opener.Weights.IvRealizedPremium <= 0m) return (null, realizedVol);
+			var realizedVol = await RealizedVolModel.LoadAsync(priceCache, ticker, asOf, cancellation);
 			var closes = await priceCache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
 			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
 			return (hv is decimal v && v > 0m ? v : null, realizedVol);

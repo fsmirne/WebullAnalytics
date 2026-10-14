@@ -115,7 +115,6 @@ public class CandidateScorerRationaleTests
 			PremiumRatio: 3.06m,
 			ImpliedVolatilityAnnual: 0.441m,
 			HistoricalVolatilityAnnual: 0.346m,
-			VolatilityAdjustmentFactor: 0.86m,
 			FinalScore: 0.010000m);
 
 		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
@@ -123,9 +122,10 @@ public class CandidateScorerRationaleTests
 
 		Assert.Equal(5, lines.Length);
 		Assert.Equal("regime bias +0.13 (mild bullish), fit 0 → no directional effect on this structure", lines[1]);
-		Assert.Equal("rep IV 44.1% / underlying HV 34.6% = 1.27x → vol 0.86", lines[2]);
+		Assert.Equal("rep IV 44.1% / underlying HV 34.6% = 1.27x", lines[2]);
 		Assert.StartsWith("tech-adjusted × pop ", lines[4]);
-		Assert.Contains(" × vol 0.86 = final 0.010000", lines[4]);
+		Assert.Contains("= final 0.010000", lines[4]);
+		Assert.DoesNotContain(" vol ", lines[4]);
 		Assert.DoesNotContain("adjusted 0.010000", lines[4]);
 	}
 

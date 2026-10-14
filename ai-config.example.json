@@ -50,13 +50,11 @@
 			"directionalFit": 0.3,
 			"biasDrift": 1.5,
 			"whipsaw": 3.0,
-			"volatilityFit": 0.50,
 			"maxPain": 0.25,
 			"gex": 0.30,
 			"statArb": 0.15,
 			"sentiment": 0.15,
 			"expectedMoveCredit": 0.50,
-			"ivRealizedPremium": 0.30,
 			"vixTermStructure": 0,
 			"intradayTape": 0
 		},

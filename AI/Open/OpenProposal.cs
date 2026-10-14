@@ -49,7 +49,7 @@ public enum OpenStructureKind
 /// <param name="Legs">Opening legs in OCC notation. Reuses ProposalLeg from the management side.</param>
 /// <param name="Qty">Sized to available cash. 0 when CashReserveBlocked.</param>
 /// <param name="DebitOrCreditPerContract">Negative = debit paid; positive = credit received (dollars per contract, i.e. ×100).</param>
-/// <param name="MaxProfitPerContract">Positive dollars. For unlimited-profit structures (long call/put), taken as projected profit at +2σ grid point.</param>
+/// <param name="MaxProfitPerContract">Positive dollars; null when unbounded (long call). A long put's is strike × 100 − debit (S → 0).</param>
 /// <param name="MaxLossPerContract">Negative dollars (loss magnitude).</param>
 /// <param name="CapitalAtRiskPerContract">Debit for longs/calendars; (width×100 − credit) for short verticals. Always ≥ 0.</param>
 /// <param name="Breakevens">Underlying price levels where P&L crosses zero at the target date.</param>
@@ -68,7 +68,6 @@ public enum OpenStructureKind
 /// where the ratio collapses to 1. Surfaced separately so the rationale can render it without recomputing.</param>
 /// <param name="ImpliedVolatilityAnnual">Representative annualized IV used for ranking, as a fraction (0.40 = 40%).</param>
 /// <param name="HistoricalVolatilityAnnual">Annualized realized volatility over the configured lookback, as a fraction.</param>
-/// <param name="VolatilityAdjustmentFactor">IV-vs-HV multiplier applied during ranking; null when HV was unavailable.</param>
 /// <param name="TargetExpiryMaxPain">Max-pain price inferred from open interest for the proposal's target expiry (display only; the directional max-pain pull lives in the maxPainBiasPull grid magnet).</param>
 /// <param name="GexGravity">Strike with the highest gross gamma×OI (calls + puts) at the target expiry — the gravity / pin point where dealer hedging is most concentrated, matching the convention used by Barchart and most public GEX tools. Drives the gexBiasPull grid magnet.</param>
 /// <param name="NetGexFraction">Net dealer gamma exposure normalized to [−1, +1]: positive = call gamma dominates (dealers net long gamma, suppressive regime); negative = put gamma dominates (amplifying regime).</param>
@@ -83,7 +82,6 @@ public enum OpenStructureKind
 /// <param name="StatArbAdjustmentFactor">Stat-arb multiplier applied during ranking. Edge = theoreticalNet − marketNet; positive edge boosts (favors the entrant — paid less than fair on debit, received more than fair on credit). Null when prerequisite values are unavailable.</param>
 /// <param name="FinalScore">Final opener ranking score. This is the score used for output ordering.</param>
 /// <param name="ExpectedMoveCreditFactor">EM-vs-short-strike cushion factor for credit trades only. Measures the spot-to-nearest-short distance in one-sigma EM units (spot × IV × √(trading-days/252)); <1σ is unsafe, >1.5σ is safe. Null for debit trades, structures without shorts, or degenerate inputs.</param>
-/// <param name="IvRealizedPremiumFactor">"Trade vs vol regime" factor based on IV/HV richness, distinct from the vega-aware adjustment. Credit favored when IV > HV; debit favored when IV < HV. Null when HV unavailable or weight = 0.</param>
 /// <param name="ExpectedMoveLower">Lower bound of the one-sigma expected-move price envelope at the target expiry, <c>spot − spot × IV × √(trading-days/252)</c>. Surfaced for display next to <see cref="Breakevens"/>. Null when IV or DTE are unavailable.</param>
 /// <param name="ExpectedMoveUpper">Upper bound of the one-sigma expected-move price envelope at the target expiry, <c>spot + spot × IV × √(trading-days/252)</c>. Surfaced for display next to <see cref="Breakevens"/>. Null when IV or DTE are unavailable.</param>
 internal sealed record OpenProposal(
@@ -92,7 +90,7 @@ internal sealed record OpenProposal(
 	IReadOnlyList<ProposalLeg> Legs,
 	int Qty,
 	decimal DebitOrCreditPerContract,
-	decimal MaxProfitPerContract,
+	decimal? MaxProfitPerContract,
 	decimal MaxLossPerContract,
 	decimal CapitalAtRiskPerContract,
 	IReadOnlyList<decimal> Breakevens,
@@ -111,7 +109,6 @@ internal sealed record OpenProposal(
 	decimal? PremiumRatio = null,
 	decimal? ImpliedVolatilityAnnual = null,
 	decimal? HistoricalVolatilityAnnual = null,
-	decimal? VolatilityAdjustmentFactor = null,
 	decimal? TargetExpiryMaxPain = null,
 	decimal? GexGravity = null,
 	decimal? NetGexFraction = null,
@@ -137,7 +134,6 @@ internal sealed record OpenProposal(
 	decimal? EstimatedSlippagePerContract = null,
 	decimal? BreakevenRoomFactor = null,
 	decimal? ExpectedMoveCreditFactor = null,
-	decimal? IvRealizedPremiumFactor = null,
 	decimal? ExpectedMoveLower = null,
 	decimal? ExpectedMoveUpper = null,
 	// True when this proposal is surfaced only for visibility — the best candidate of an enabled

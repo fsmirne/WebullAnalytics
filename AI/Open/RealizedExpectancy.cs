@@ -39,16 +39,16 @@ internal static class RealizedExpectancy
 		cfg.Enabled && cfg.TakeProfitPctOfPremium > 0m && entryValuePerContract != 0m ? cfg.TakeProfitPctOfPremium * Math.Abs(entryValuePerContract) : null;
 
 	/// <summary>Loss per contract (&gt; 0) at which StopLossRule closes: the nearer of <c>pctOfMaxLoss × |maxLoss|</c> and
-	/// <c>pctOfMaxProfit × maxProfit</c>. Null when realized-EV scoring is off or no stop is armed (a disabled stop is
+	/// <c>pctOfMaxProfit × maxProfit</c> (skipped when max profit is unbounded). Null when realized-EV scoring is off or no stop is armed (a disabled stop is
 	/// populated as pct-of-max-loss 1.0, which never fires before max loss).</summary>
-	public static decimal? StopLossPerContract(decimal maxProfit, decimal maxLoss, OpenerRealizedExpectancyConfig cfg)
+	public static decimal? StopLossPerContract(decimal? maxProfit, decimal maxLoss, OpenerRealizedExpectancyConfig cfg)
 	{
 		if (!cfg.Enabled) return null;
 		decimal? stop = null;
 		if (cfg.StopLossPctOfMaxLoss < 1m && maxLoss < 0m) stop = cfg.StopLossPctOfMaxLoss * Math.Abs(maxLoss);
-		if (cfg.StopLossPctOfMaxProfit > 0m && maxProfit > 0m)
+		if (cfg.StopLossPctOfMaxProfit > 0m && maxProfit is > 0m)
 		{
-			var byProfit = cfg.StopLossPctOfMaxProfit * maxProfit;
+			var byProfit = cfg.StopLossPctOfMaxProfit * maxProfit.Value;
 			stop = stop.HasValue ? Math.Min(stop.Value, byProfit) : byProfit;
 		}
 		return stop is > 0m ? stop : null;

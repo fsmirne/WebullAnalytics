@@ -190,14 +190,10 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 
 		// Inputs for the per-family re-score sweep. Match what the evaluator fed the scorer so the flip
 		// thresholds line up with live selection.
-		decimal? hv = null;
-		if (op.Weights.VolatilityFit > 0m)
-		{
-			var closes = await rc.PriceCache.GetRecentClosesAsync(ticker, op.VolatilityLookbackDays + 1, asOf, cancellation);
-			var h = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
-			if (h.HasValue && h.Value > 0m) hv = h.Value;
-		}
-		var realizedVol = await RealizedVolModel.LoadAsync(rc.PriceCache, ticker, op.VolatilityLookbackDays, asOf, cancellation);
+		var closes = await rc.PriceCache.GetRecentClosesAsync(ticker, op.VolatilityLookbackDays + 1, asOf, cancellation);
+		var h = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+		decimal? hv = h is > 0m ? h : null;
+		var realizedVol = await RealizedVolModel.LoadAsync(rc.PriceCache, ticker, asOf, cancellation);
 		decimal? sentiment = null;
 		if (op.Weights.Sentiment > 0m)
 		{

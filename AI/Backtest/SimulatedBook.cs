@@ -17,7 +17,7 @@ internal sealed record BacktestFill(
 	decimal Spot,          // underlying price at the fill — lets the ledger compare strikes vs spot
 	// Scorer outputs carried from the opening proposal, for the paper-vs-backtest fidelity check. Open
 	// fills only (null on Close/Roll/Expire/LegIn — those aren't scored). RepIv = representative IV
-	// (mean of the structure's leg IVs), the same number the scorer feeds volatilityFit.
+	// (mean of the structure's leg IVs), the representative IV the scorer reports.
 	decimal? RawScore = null,
 	decimal? FinalScore = null,
 	decimal? RepIv = null

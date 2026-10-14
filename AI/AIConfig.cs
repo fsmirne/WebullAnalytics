@@ -601,14 +601,12 @@ internal static class AIConfigLoader
 		if (wgt.DirectionalFit < 0m) return $"opener.weights.directionalFit: must be ≥ 0, got {wgt.DirectionalFit}";
 		if (wgt.BiasDrift < 0m) return $"opener.weights.biasDrift: must be ≥ 0, got {wgt.BiasDrift}";
 		if (wgt.Whipsaw < 0m) return $"opener.weights.whipsaw: must be ≥ 0, got {wgt.Whipsaw}";
-		if (wgt.VolatilityFit < 0m) return $"opener.weights.volatilityFit: must be ≥ 0, got {wgt.VolatilityFit}";
 		if (wgt.GammaRegime < 0m) return $"opener.weights.gammaRegime: must be ≥ 0, got {wgt.GammaRegime}";
 		if (wgt.GexBiasPull < 0m) return $"opener.weights.gexBiasPull: must be ≥ 0, got {wgt.GexBiasPull}";
 		if (wgt.MaxPainBiasPull < 0m) return $"opener.weights.maxPainBiasPull: must be ≥ 0, got {wgt.MaxPainBiasPull}";
 		if (wgt.StatArb < 0m) return $"opener.weights.statArb: must be ≥ 0, got {wgt.StatArb}";
 		if (wgt.Sentiment < 0m) return $"opener.weights.sentiment: must be ≥ 0, got {wgt.Sentiment}";
 		if (wgt.ExpectedMoveCredit < 0m) return $"opener.weights.expectedMoveCredit: must be ≥ 0, got {wgt.ExpectedMoveCredit}";
-		if (wgt.IvRealizedPremium < 0m) return $"opener.weights.ivRealizedPremium: must be ≥ 0, got {wgt.IvRealizedPremium}";
 		if (wgt.VixTermStructure < 0m || wgt.VixTermStructure > 1m) return $"opener.weights.vixTermStructure: must be in [0, 1], got {wgt.VixTermStructure}";
 		if (wgt.IntradayTape < 0m || wgt.IntradayTape > 1m) return $"opener.weights.intradayTape: must be in [0, 1], got {wgt.IntradayTape}";
 

@@ -57,14 +57,6 @@ public class OpenerConfigValidationTests
 	}
 
 	[Fact]
-	public void VolatilityFitWeightMustBeNonNegative()
-	{
-		var cfg = MinimalValidConfig();
-		cfg.Opener.Weights.VolatilityFit = -0.1m;
-		Assert.Contains("opener.weights.volatilityFit", AIConfigLoader.Validate(cfg) ?? "");
-	}
-
-	[Fact]
 	public void GammaRegimeWeightMustBeNonNegative()
 	{
 		var cfg = MinimalValidConfig();

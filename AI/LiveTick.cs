@@ -78,7 +78,7 @@ internal static class LiveTick
 		}
 		var realizedVolByTicker = new Dictionary<string, RealizedVolModel>(StringComparer.OrdinalIgnoreCase);
 		foreach (var ticker in tickerSet)
-			if (await RealizedVolModel.LoadAsync(deps.PriceCache, ticker, config.Opener.VolatilityLookbackDays, now, cancellation) is { } model)
+			if (await RealizedVolModel.LoadAsync(deps.PriceCache, ticker, now, cancellation) is { } model)
 				realizedVolByTicker[ticker] = model;
 
 		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals, HistoricalVolByTicker: historicalVolByTicker, RealizedVolByTicker: realizedVolByTicker);

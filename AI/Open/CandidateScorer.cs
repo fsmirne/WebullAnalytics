@@ -70,33 +70,6 @@ internal static class CandidateScorer
 		return double.IsFinite(annualized) ? (decimal)annualized : null;
 	}
 
-	/// <summary>Vega-aware IV/HV richness factor. Replaces the old kind-based fit sign with a continuous
-	/// signal driven by the candidate's actual net vega per contract: long-vega positions read negative,
-	/// short-vega positions read positive. Magnitude discriminates structures that share a sign — a
-	/// double calendar with high vega earns a sharper boost when IV is cheap (and a sharper cut when
-	/// rich) than a double diagonal whose long wings sit further OTM. <paramref name="vegaRef"/> is the
-	/// $/IV-point at which the position-vega axis saturates at ±1; defaults to 3 (a meaningful
-	/// long/short vol exposure).</summary>
-	public static decimal? ComputeVolatilityAdjustmentFactor(decimal netVegaPerContract, decimal ivAnnual, decimal? historicalVolAnnual, decimal weight, decimal vegaRef = 3m)
-	{
-		if (weight <= 0m || ivAnnual <= 0m || !historicalVolAnnual.HasValue || historicalVolAnnual.Value <= 0m || vegaRef <= 0m)
-			return null;
-
-		var vegaScaled = Math.Clamp(netVegaPerContract / vegaRef, -1m, 1m);
-		if (vegaScaled == 0m) return null;
-
-		var richness = Math.Clamp(ivAnnual / historicalVolAnnual.Value - 1m, -1m, 1m);
-		// Boost when (long-vega AND IV cheap) or (short-vega AND IV rich); cut otherwise. Both products
-		// share a sign in the favorable cases, so the negation flips the alignment to a positive lift.
-		return Math.Max(0.10m, 1m - weight * vegaScaled * richness);
-	}
-
-	public static decimal VolatilityAdjust(decimal score, decimal netVegaPerContract, decimal ivAnnual, decimal? historicalVolAnnual, decimal weight, decimal vegaRef = 3m)
-	{
-		var factor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, ivAnnual, historicalVolAnnual, weight, vegaRef);
-		return factor.HasValue ? ApplyFactor(score, factor.Value) : score;
-	}
-
 	// Max-pain and GEX depend only on (ticker, expiry, spot, chain), all constant across every candidate scored
 	// in one evaluation tick, yet each was recomputed (full chain scan) per candidate. Memoize per (root, expiry)
 	// keyed on the quotes object — the quotes dictionary is replaced each tick, so the cache auto-evicts and is
@@ -859,23 +832,6 @@ internal static class CandidateScorer
 		return Math.Max(0.10m, 1m + weight * signal);
 	}
 
-	/// <summary>"Is the trade fighting the vol regime?" factor. Distinct from the vega-aware
-	/// VolatilityAdjustmentFactor: that one scales by net-vega magnitude (small for plain credit
-	/// verticals, large for calendars/diagonals); this one fires on trade-type sign alone, so even
-	/// near-zero-vega credit/debit structures still get a regime read. Credit trades favored when
-	/// IV > HV (rich premium to collect); debit trades favored when IV < HV (cheap premium
-	/// to pay). Premium clamped to ±100% so a 3× IV/HV blowout doesn't dominate the chain. Null
-	/// when HV unavailable or weight = 0.</summary>
-	internal static decimal? ComputeIvRealizedPremiumFactor(decimal iv, decimal? historicalVolAnnual, decimal debitOrCreditPerContract, decimal weight)
-	{
-		if (weight <= 0m || iv <= 0m || !historicalVolAnnual.HasValue || historicalVolAnnual.Value <= 0m)
-			return null;
-		var premium = Math.Clamp(iv / historicalVolAnnual.Value - 1m, -1m, 1m);
-		var isCredit = debitOrCreditPerContract >= 0m;
-		var signal = isCredit ? premium : -premium;
-		return Math.Max(0.10m, 1m + weight * signal);
-	}
-
 	private static IReadOnlyList<(decimal Strike, string CallPut)> ExtractShortLegStrikes(IReadOnlyList<ProposalLeg> legs)
 	{
 		var result = new List<(decimal, string)>();
@@ -1000,7 +956,7 @@ internal static class CandidateScorer
 	/// <summary>Expected P&amp;L per contract after friction, with the configured take-profit / stop exits applied along the
 	/// path (<see cref="PathExitModel"/>) over the same distribution as <paramref name="grid"/>. With realized-EV scoring off,
 	/// or no exit armed, it is the grid's end-of-life EV minus friction (friction is 0 when scoring is off).</summary>
-	private static decimal ManagedEv(IReadOnlyList<ScenarioPoint> grid, Func<decimal, decimal> pnlAtTarget, IReadOnlyList<PathLeg> legs, decimal entryValuePerContract, decimal maxProfit, decimal maxLoss, decimal friction, decimal spot, decimal forward, decimal scenarioVol, double years, decimal biasShiftSigmas, DateTime asOf, DateTime targetExpiry, RealizedVolModel? realizedVol, IReadOnlyList<DividendEvent>? dividends, OpenerRealizedExpectancyConfig cfg, OptionMath.BlackScholesEvaluator? blackScholes = null)
+	private static decimal ManagedEv(IReadOnlyList<ScenarioPoint> grid, Func<decimal, decimal> pnlAtTarget, IReadOnlyList<PathLeg> legs, decimal entryValuePerContract, decimal? maxProfit, decimal maxLoss, decimal friction, decimal spot, decimal forward, decimal scenarioVol, double years, decimal biasShiftSigmas, DateTime asOf, DateTime targetExpiry, RealizedVolModel? realizedVol, IReadOnlyList<DividendEvent>? dividends, OpenerRealizedExpectancyConfig cfg, OptionMath.BlackScholesEvaluator? blackScholes = null)
 	{
 		var takeProfit = RealizedExpectancy.TakeProfitPerContract(entryValuePerContract, cfg);
 		var stopLoss = RealizedExpectancy.StopLossPerContract(maxProfit, maxLoss, cfg);
@@ -1258,7 +1214,8 @@ internal static class CandidateScorer
 
 		// R/R and premium_ratio surface the asymmetry/cushion factors that BalanceFactor folds into the
 		// score. Showing them inline lets the reader compare two similarly-scored trades by their shape.
-		var rr = Math.Abs(p.MaxLossPerContract) > 0m ? Math.Max(0m, p.MaxProfitPerContract / Math.Abs(p.MaxLossPerContract)) : 0m;
+		var rrStr = p.MaxProfitPerContract is not decimal mp ? "unbounded"
+			: (Math.Abs(p.MaxLossPerContract) > 0m ? Math.Max(0m, mp / Math.Abs(p.MaxLossPerContract)) : 0m).ToString("F2");
 		var ratioStr = p.PremiumRatio.HasValue ? $", prem {p.PremiumRatio.Value:F2}x" : "";
 		// Capital efficiency uses the cash actually deployed (debit) when the structure was a debit
 		// trade; for credit structures the deployed capital is the margin held against max-loss,
@@ -1283,8 +1240,6 @@ internal static class CandidateScorer
 			factorParts.Add($"be-room {p.BreakevenRoomFactor.Value:F2}");
 		if (p.ExpectedMoveCreditFactor.HasValue)
 			factorParts.Add($"em-cred {p.ExpectedMoveCreditFactor.Value:F2}");
-		if (p.IvRealizedPremiumFactor.HasValue)
-			factorParts.Add($"iv-rv {p.IvRealizedPremiumFactor.Value:F2}");
 		factorParts.Add($"bal {balance:F2}");
 		if (p.LiquidityAdjustmentFactor.HasValue)
 			factorParts.Add($"liq {p.LiquidityAdjustmentFactor.Value:F2}");
@@ -1312,18 +1267,14 @@ internal static class CandidateScorer
 			var effect = p.LiquidityAdjustmentFactor.HasValue ? $"liq {p.LiquidityAdjustmentFactor.Value:F2}" : "liq off";
 			indicatorParts.Add($"worst-leg spread {spreadStr}, min OI/vol {liqStr} (rel {relStr}) → {effect}");
 		}
-		// Vol (IV-vs-HV richness) is INFORMATIONAL: show the reading whenever IV and HV exist, regardless of
-		// weight. The factor enters the factors line only when its weight is active; the indicator renders
-		// the factor's effect, or "off" when the weight is 0, so the reading stays visible.
-		if (p.VolatilityAdjustmentFactor.HasValue)
-			factorParts.Add($"vol {p.VolatilityAdjustmentFactor.Value:F2}");
+		// Vol (IV-vs-HV richness) is INFORMATIONAL only: the premium it measures is priced directly by scoring outcomes
+		// on the realized-vol forecast while legs stay at implied (RealizedVolModel), so no factor re-applies it.
 		if (p.ImpliedVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.HasValue && p.HistoricalVolatilityAnnual.Value > 0m)
 		{
 			var richness = p.ImpliedVolatilityAnnual.Value / p.HistoricalVolatilityAnnual.Value;
 			var vegaStr = p.NetVegaPerContract is decimal v
 				? $", ν {v.ToString("+0.00;-0.00", System.Globalization.CultureInfo.InvariantCulture)}/IV pt"
 				: "";
-			var effect = p.VolatilityAdjustmentFactor.HasValue ? $"vol {p.VolatilityAdjustmentFactor.Value:F2}" : "vol off";
 			// Built by hand rather than ":P1" — "P" pulls its digit-grouping AND its space-before-%
 			// placement from the current culture (invariant culture itself inserts a space, e.g. "44.1 %"),
 			// so the same build produces different console output depending on the host's locale. Explicit
@@ -1331,7 +1282,7 @@ internal static class CandidateScorer
 			// on a comma-decimal locale.
 			var ivStr = (p.ImpliedVolatilityAnnual.Value * 100m).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
 			var hvStr = (p.HistoricalVolatilityAnnual.Value * 100m).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
-			indicatorParts.Add($"rep IV {ivStr}% / underlying HV {hvStr}% = {richness:F2}x{vegaStr} → {effect}");
+			indicatorParts.Add($"rep IV {ivStr}% / underlying HV {hvStr}% = {richness:F2}x{vegaStr}");
 		}
 		if (p.TargetExpiryMaxPain.HasValue)
 			indicatorParts.Add($"max-pain target ${p.TargetExpiryMaxPain.Value:F2}");
@@ -1383,7 +1334,7 @@ internal static class CandidateScorer
 		var realizedTag = p.RealizedExpectedValuePerContract.HasValue
 			? $" (real ${p.RealizedExpectedValuePerContract.Value:F2}{(p.EstimatedSlippagePerContract is decimal slip && slip > 0m ? $", −${slip:F2} fric" : "")})"
 			: "";
-		var rationaleLine = $"{cashSide}, maxProfit ${p.MaxProfitPerContract:F2}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rr:F2}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}{realizedTag}";
+		var rationaleLine = $"{cashSide}, maxProfit {(p.MaxProfitPerContract is decimal maxP ? $"${maxP:F2}" : "unbounded")}, maxLoss ${-p.MaxLossPerContract:F2}, R/R {rrStr}{ratioStr}, {beStr}POP {p.ProbabilityOfProfit * 100m:F1}%, EV ${p.ExpectedValuePerContract:F2}{realizedTag}";
 		var scoreLine = $"raw {p.RawScore:F6} → tech-adjusted {techAdjusted:F6} {biasTag} → final {finalScore:F6}";
 		// Factors can chain 10+ multiplicands; balance into at most two lines so neither wraps mid-token
 		// and we don't waste vertical space with a third nearly-empty row.
@@ -1588,7 +1539,6 @@ internal static class CandidateScorer
 		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, scenarioVol, years);
 		var shortLegStrikes = ExtractShortLegStrikes(skel.Legs);
 		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, scenarioVol, years, creditPerContract, shortLegStrikes, cfg.Weights.ExpectedMoveCredit);
-		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, creditPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = new[]
 		{
 			(Parsed: shortParsed, Iv: iv, IsLong: false),
@@ -1599,7 +1549,6 @@ internal static class CandidateScorer
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
 		var representativeIv = (iv + longIv) / 2m;
-		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit);
 		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gammaRegimeFactor = ComputeGammaRegimeFactor(skel, gex, cfg);
@@ -1612,8 +1561,8 @@ internal static class CandidateScorer
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.Weights.Sentiment, !string.Equals(cfg.SentimentMode, "momentum", StringComparison.OrdinalIgnoreCase));
 		var biasAdjBase = BiasAdjust(rawScore, bias, fit, cfg.Weights.DirectionalFit);
-		var afterFactors = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBase, popFactor), scaleFactor), setupFactor ?? 1m), breakevenRoomFactor ?? 1m), expectedMoveCreditFactor ?? 1m), ivRealizedPremiumFactor ?? 1m), balance), liquidityFactor ?? 1m);
-		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(VolatilityAdjust(afterFactors, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit), gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var afterFactors = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBase, popFactor), scaleFactor), setupFactor ?? 1m), breakevenRoomFactor ?? 1m), expectedMoveCreditFactor ?? 1m), balance), liquidityFactor ?? 1m);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(afterFactors, gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1640,7 +1589,6 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
-			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
@@ -1665,7 +1613,6 @@ internal static class CandidateScorer
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
-			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
 			ExpectedMoveLower: expectedMoveBounds?.Lower,
 			ExpectedMoveUpper: expectedMoveBounds?.Upper
 		);
@@ -1749,7 +1696,6 @@ internal static class CandidateScorer
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, [breakeven]);
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, scenarioVol, years, [breakeven]);
 		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, scenarioVol, years);
-		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = new[]
 		{
 			(Parsed: shortParsed, Iv: shortIv, IsLong: false),
@@ -1760,7 +1706,6 @@ internal static class CandidateScorer
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
 		var representativeIv = (shortIv + iv) / 2m;
-		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit);
 		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gammaRegimeFactor = ComputeGammaRegimeFactor(skel, gex, cfg);
@@ -1776,8 +1721,8 @@ internal static class CandidateScorer
 		// the trade-aligned bias is weak. Disabled by default (factor 1.0).
 		var convictionFactor = cfg.LongConvictionGate.Factor(bias * fit);
 		var biasAdjBase = BiasAdjust(rawScore, bias, fit, cfg.Weights.DirectionalFit);
-		var afterFactors = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBase, popFactor), scaleFactor), setupFactor ?? 1m), breakevenRoomFactor ?? 1m), ivRealizedPremiumFactor ?? 1m), balance), liquidityFactor ?? 1m), convictionFactor);
-		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(VolatilityAdjust(afterFactors, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit), gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var afterFactors = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBase, popFactor), scaleFactor), setupFactor ?? 1m), breakevenRoomFactor ?? 1m), balance), liquidityFactor ?? 1m), convictionFactor);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(afterFactors, gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -1804,7 +1749,6 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
-			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
@@ -1829,7 +1773,6 @@ internal static class CandidateScorer
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: null,
-			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
 			ExpectedMoveLower: expectedMoveBounds?.Lower,
 			ExpectedMoveUpper: expectedMoveBounds?.Upper
 		);
@@ -1962,15 +1905,19 @@ internal static class CandidateScorer
 	/// thread it through every call.</summary>
 	internal static double RrExponent { get; set; } = 0.0;
 
-	internal static decimal BalanceFactor(decimal maxProfit, decimal maxLoss, decimal premiumRatio)
+	/// <summary>R/R ceiling in <see cref="BalanceFactor"/>; an unbounded upside (long call) scores at it.</summary>
+	private const decimal RrCap = 3m;
+
+	/// <param name="maxProfit">Null = unbounded (long call): R/R takes its cap.</param>
+	internal static decimal BalanceFactor(decimal? maxProfit, decimal maxLoss, decimal premiumRatio)
 	{
 		var lossAbs = Math.Abs(maxLoss);
-		var rr = lossAbs > 0m ? Math.Max(0m, maxProfit / lossAbs) : 0m;
+		var rr = maxProfit is not decimal mp ? RrCap : lossAbs > 0m ? Math.Max(0m, mp / lossAbs) : 0m;
 		var ratio = Math.Max(1m, premiumRatio);
 		if (rr <= 0m)
 			return 0m;
 
-		var rrComponent = (decimal)Math.Pow((double)Math.Min(rr, 3m), RrExponent);
+		var rrComponent = (decimal)Math.Pow((double)Math.Min(rr, RrCap), RrExponent);
 		var ratioPenalty = (decimal)Math.Sqrt((double)ratio);
 		// Floor at 0.05, not 0.25. The higher floor was clamping out real signal: genuinely
 		// asymmetric structures (R/R 0.14 with premium ratio 12, computing factor 0.108) got
@@ -2356,13 +2303,11 @@ internal static class CandidateScorer
 		var expectedMoveBoundsMl = ComputeExpectedMoveBounds(forward, scenarioVol, years);
 		var shortLegStrikesMl = ExtractShortLegStrikes(skel.Legs);
 		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, scenarioVol, years, netEntryPerContract, shortLegStrikesMl, cfg.Weights.ExpectedMoveCredit);
-		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(representativeIv, historicalVolAnnual, netEntryPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = defs.Select(d => (d.Parsed, d.Iv, d.IsLong)).ToList();
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(legGreeks, asOf, spot);
 		var netVegaPerContract = ComputeNetVegaPerContract(legGreeks, asOf, spot);
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
-		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit);
 		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gammaRegimeFactor = ComputeGammaRegimeFactor(skel, gex, cfg);
@@ -2373,8 +2318,8 @@ internal static class CandidateScorer
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.Weights.Sentiment, !string.Equals(cfg.SentimentMode, "momentum", StringComparison.OrdinalIgnoreCase));
 		var biasAdjBaseMl = BiasAdjust(rawScore, bias, fit, cfg.Weights.DirectionalFit);
-		var afterFactorsMl = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseMl, popFactor), scaleFactor), setupFactor ?? 1m), runwayFactor ?? 1m), breakevenRoomFactor ?? 1m), expectedMoveCreditFactor ?? 1m), ivRealizedPremiumFactor ?? 1m), balance), liquidityFactor ?? 1m);
-		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(VolatilityAdjust(afterFactorsMl, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit), gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var afterFactorsMl = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseMl, popFactor), scaleFactor), setupFactor ?? 1m), runwayFactor ?? 1m), breakevenRoomFactor ?? 1m), expectedMoveCreditFactor ?? 1m), balance), liquidityFactor ?? 1m);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(afterFactorsMl, gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, efficiencyCapital);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -2401,7 +2346,6 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
-			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
@@ -2427,7 +2371,6 @@ internal static class CandidateScorer
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
-			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
 			ExpectedMoveLower: expectedMoveBoundsMl?.Lower,
 			ExpectedMoveUpper: expectedMoveBoundsMl?.Upper);
 	}
@@ -2589,7 +2532,6 @@ internal static class CandidateScorer
 		var expectedMoveBoundsCd = ComputeExpectedMoveBounds(forward, scenarioVol, shortYears);
 		var shortLegStrikesCd = ExtractShortLegStrikes(skel.Legs);
 		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, scenarioVol, shortYears, -debitPerContract, shortLegStrikesCd, cfg.Weights.ExpectedMoveCredit);
-		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(representativeIvEarly, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = new[]
 		{
 			(Parsed: shortParsed, Iv: ivShort, IsLong: false),
@@ -2600,7 +2542,6 @@ internal static class CandidateScorer
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLossPoint, premiumRatio);
 		var representativeIv = representativeIvEarly;
-		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit);
 		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var gammaRegimeFactor = ComputeGammaRegimeFactor(skel, gex, cfg);
@@ -2613,8 +2554,8 @@ internal static class CandidateScorer
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.Weights.Sentiment, !string.Equals(cfg.SentimentMode, "momentum", StringComparison.OrdinalIgnoreCase));
 		var biasAdjBaseCd = BiasAdjust(rawScore, bias, fit, cfg.Weights.DirectionalFit);
-		var afterFactorsCd = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseCd, popFactor), scaleFactor), setupFactor ?? 1m), runwayFactor ?? 1m), breakevenRoomFactor ?? 1m), expectedMoveCreditFactor ?? 1m), ivRealizedPremiumFactor ?? 1m), balance), liquidityFactor ?? 1m);
-		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(VolatilityAdjust(afterFactorsCd, netVegaPerContract, representativeIv, historicalVolAnnual, cfg.Weights.VolatilityFit), gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var afterFactorsCd = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseCd, popFactor), scaleFactor), setupFactor ?? 1m), runwayFactor ?? 1m), breakevenRoomFactor ?? 1m), expectedMoveCreditFactor ?? 1m), balance), liquidityFactor ?? 1m);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(afterFactorsCd, gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, efficiencyCapital);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -2641,7 +2582,6 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
-			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
@@ -2667,7 +2607,6 @@ internal static class CandidateScorer
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
-			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
 			ExpectedMoveLower: expectedMoveBoundsCd?.Lower,
 			ExpectedMoveUpper: expectedMoveBoundsCd?.Upper
 		);
@@ -2764,14 +2703,12 @@ internal static class CandidateScorer
 			return intrinsic * 100m - debitPerContract;
 		}
 		decimal ev = 0m;
-		decimal maxProfit = 0m;
-		decimal maxLoss = -debitPerContract;
 		foreach (var pt in grid)
-		{
-			var pnl = PnlAtExpiry(pt.SpotAtExpiry);
-			ev += pt.Weight * pnl;
-			if (pnl > maxProfit) maxProfit = pnl;
-		}
+			ev += pt.Weight * PnlAtExpiry(pt.SpotAtExpiry);
+		// A long call's upside is unbounded (null); a long put's peaks at S → 0. Never a grid point, which only
+		// says how far the discretization happens to reach.
+		decimal? maxProfit = parsed.CallPut == "C" ? null : parsed.Strike * 100m - debitPerContract;
+		var maxLoss = -debitPerContract;
 
 		var capitalAtRisk = debitPerContract;
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
@@ -2790,7 +2727,6 @@ internal static class CandidateScorer
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, [breakeven]);
 		var expectedMoveBoundsLc = ComputeExpectedMoveBounds(forward, scenarioVol, years);
-		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = new[] { (Parsed: parsed, Iv: iv, IsLong: true) };
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(legGreeks, asOf, spot);
 		var netVegaPerContract = ComputeNetVegaPerContract(legGreeks, asOf, spot);
@@ -2798,7 +2734,6 @@ internal static class CandidateScorer
 		// collapses to just the R/R term, where R/R = projected_max_profit_at_+2σ / debit.
 		var premiumRatio = ComputePremiumRatio(skel.Legs, quotes, pricingMode);
 		var balance = BalanceFactor(maxProfit, maxLoss, premiumRatio);
-		var volFactor = ComputeVolatilityAdjustmentFactor(netVegaPerContract, iv, historicalVolAnnual, cfg.Weights.VolatilityFit);
 		var maxPain = MaxPainCached(skel.Ticker, skel.TargetExpiry.Date, quotes, spot);
 		// gex (gravity) was computed above for the scenario-grid magnet; reuse it for the multiplicative factor.
 		var gammaRegimeFactor = ComputeGammaRegimeFactor(skel, gex, cfg);
@@ -2812,8 +2747,8 @@ internal static class CandidateScorer
 		// the trade-aligned bias is weak (the flat/choppy-day coin-flips that dominate long losses).
 		var convictionFactor = cfg.LongConvictionGate.Factor(bias * fit);
 		var biasAdjBaseLc = BiasAdjust(rawScore, bias, fit, cfg.Weights.DirectionalFit);
-		var afterFactorsLc = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseLc, popFactor), scaleFactor), setupFactor ?? 1m), ivRealizedPremiumFactor ?? 1m), balance), liquidityFactor ?? 1m), convictionFactor);
-		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(VolatilityAdjust(afterFactorsLc, netVegaPerContract, iv, historicalVolAnnual, cfg.Weights.VolatilityFit), gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
+		var afterFactorsLc = ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(ApplyFactor(biasAdjBaseLc, popFactor), scaleFactor), setupFactor ?? 1m), balance), liquidityFactor ?? 1m), convictionFactor);
+		var biasAdj = SentimentAdjust(StatArbAdjust(AssignmentRiskAdjust(GammaRegimeAdjust(afterFactorsLc, gammaRegimeFactor), assignmentFactor), statArbFactor), sentimentFactor);
 		var finalScore = ComputeFinalScore(biasAdj, thetaPerDayPerContract, capitalAtRisk);
 		var fp = ComputeFingerprint(skel.Ticker, skel.StructureKind, skel.Legs, qty: 1);
 
@@ -2840,7 +2775,6 @@ internal static class CandidateScorer
 			PremiumRatio: null,   // single-leg: ratio collapses to 1 (no shorts), don't display "prem 1.00x"
 			ImpliedVolatilityAnnual: iv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
-			VolatilityAdjustmentFactor: volFactor,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
@@ -2863,7 +2797,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
 			ExpectedMoveLower: expectedMoveBoundsLc?.Lower,
 			ExpectedMoveUpper: expectedMoveBoundsLc?.Upper
 		);

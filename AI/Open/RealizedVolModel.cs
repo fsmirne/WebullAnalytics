@@ -14,29 +14,40 @@ namespace WebullAnalytics.AI;
 /// </summary>
 internal sealed record RealizedVolModel(double OvernightVariance, double SessionVariance)
 {
-	/// <summary>Builds the model from daily bars, oldest-first, strictly before the scoring instant (no lookahead).
+	/// <summary>EWMA half-life, in sessions. Calibrated 2026-10-14 by QLIKE on next-1 and next-5-session realized variance
+	/// (overnight + session), SPY / SPXW / QQQ 2022-01..2026-10: half-life 5–10 beat simple 10/20/40/60/120-day means on every
+	/// ticker and horizon (SPY 5-session 0.366 vs 0.401 for the 20-day mean); 10 is best or within 0.01 of best throughout.</summary>
+	internal const double HalfLifeSessions = 10.0;
+
+	/// <summary>Sessions of history loaded: six half-lives, beyond which the remaining weight is under 2%.</summary>
+	internal const int HistorySessions = 60;
+
+	/// <summary>Builds the model from daily bars, oldest-first, strictly before the scoring instant (no lookahead): an
+	/// exponentially weighted (<see cref="HalfLifeSessions"/>) mean of each squared overnight and session log return.
 	/// Null when fewer than two bars or a non-positive price makes a return undefined.</summary>
 	internal static RealizedVolModel? FromBars(IReadOnlyList<YahooOptionsClient.HistoricalBar> bars)
 	{
 		if (bars.Count < 2) return null;
-		double overnight = 0, session = 0;
-		for (var i = 1; i < bars.Count; i++)
+		var decay = Math.Pow(0.5, 1.0 / HalfLifeSessions);
+		double overnight = 0, session = 0, totalWeight = 0, weight = 1;
+		for (var i = bars.Count - 1; i >= 1; i--)
 		{
 			var priorClose = (double)bars[i - 1].Close;
 			var open = (double)bars[i].Open;
 			var close = (double)bars[i].Close;
 			if (priorClose <= 0 || open <= 0 || close <= 0) return null;
-			overnight += Math.Pow(Math.Log(open / priorClose), 2);
-			session += Math.Pow(Math.Log(close / open), 2);
+			overnight += weight * Math.Pow(Math.Log(open / priorClose), 2);
+			session += weight * Math.Pow(Math.Log(close / open), 2);
+			totalWeight += weight;
+			weight *= decay;
 		}
-		var n = bars.Count - 1;
-		return new RealizedVolModel(overnight / n, session / n);
+		return new RealizedVolModel(overnight / totalWeight, session / totalWeight);
 	}
 
-	/// <summary>Loads the trailing <paramref name="lookbackDays"/> sessions strictly before <paramref name="asOf"/> and builds
-	/// the model; null when the history is too short.</summary>
-	internal static async Task<RealizedVolModel?> LoadAsync(HistoricalPriceCache priceCache, string ticker, int lookbackDays, DateTime asOf, CancellationToken cancellation)
-		=> FromBars(await priceCache.GetRecentBarsAsync(ticker, lookbackDays + 1, asOf, cancellation));
+	/// <summary>Loads the trailing <see cref="HistorySessions"/> sessions strictly before <paramref name="asOf"/> and builds the
+	/// model; null when the history is too short.</summary>
+	internal static async Task<RealizedVolModel?> LoadAsync(HistoricalPriceCache priceCache, string ticker, DateTime asOf, CancellationToken cancellation)
+		=> FromBars(await priceCache.GetRecentBarsAsync(ticker, HistorySessions + 1, asOf, cancellation));
 
 	/// <summary>Realized log-variance expected between <paramref name="asOf"/> (ET) and the close of
 	/// <paramref name="targetExpiry"/>: the unelapsed fraction of today's session (plus today's gap if before the

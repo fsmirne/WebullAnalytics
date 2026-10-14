@@ -56,51 +56,6 @@ public class CandidateScorerBiasTests
 	}
 
 	[Fact]
-	public void HighIvRelativeToHvBoostsShortVegaPositions()
-	{
-		// netVega = -3 saturates short-vega side at vegaScaled = -1; richness saturates at +1 with IV at
-		// 2× HV. Factor = 1 - 0.5 × (-1) × 1 = 1.5. Score 0.010 × 1.5 = 0.015.
-		var adjusted = CandidateScorer.VolatilityAdjust(
-			score: 0.010m,
-			netVegaPerContract: -3m,
-			ivAnnual: 0.60m,
-			historicalVolAnnual: 0.30m,
-			weight: 0.50m);
-
-		Assert.Equal(0.015m, adjusted);
-	}
-
-	[Fact]
-	public void HighIvRelativeToHvCutsLongVegaPositions()
-	{
-		// netVega = +3 saturates long-vega side at vegaScaled = +1; richness +1. Factor = 1 - 0.5 × 1 × 1 = 0.5.
-		var adjusted = CandidateScorer.VolatilityAdjust(
-			score: 0.010m,
-			netVegaPerContract: 3m,
-			ivAnnual: 0.60m,
-			historicalVolAnnual: 0.30m,
-			weight: 0.50m);
-
-		Assert.Equal(0.005m, adjusted);
-	}
-
-	[Fact]
-	public void LowVegaPositionGetsSmallerVolFactorSwingThanHighVega()
-	{
-		// Two long-vega positions in a rich-IV environment. The fatter-vega one (DC-like, +$3) gets
-		// cut from 0.010 to 0.005; the thinner-vega one (DD-like, +$1) gets cut to ~0.00833.
-		var rich = 0.60m;
-		var hv = 0.30m;
-		var weight = 0.50m;
-		var heavyVega = CandidateScorer.VolatilityAdjust(0.010m, 3m, rich, hv, weight);
-		var lightVega = CandidateScorer.VolatilityAdjust(0.010m, 1m, rich, hv, weight);
-
-		Assert.True(heavyVega < lightVega, $"expected heavier-vega cut to be sharper; heavy={heavyVega} light={lightVega}");
-		Assert.Equal(0.005m, heavyVega);
-		Assert.Equal(0.0083333333333333333333333333m, lightVega, 12);
-	}
-
-	[Fact]
 	public void BalanceFactorUsesTemperedRiskRewardAndDebitPenalty()
 	{
 		var factor = CandidateScorer.BalanceFactor(maxProfit: 100m, maxLoss: -50m, premiumRatio: 4m);

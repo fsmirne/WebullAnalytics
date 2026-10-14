@@ -369,39 +369,34 @@ internal sealed class OpenCandidateEvaluator
 			? new Dictionary<string, decimal>(ctx.HistoricalVolByTicker, StringComparer.OrdinalIgnoreCase)
 			: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		var shortHorizonHvByTicker = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-		// Load historical closes for the vol-fit and whipsaw factors. Bias-calibration (moveSign),
-		// VIX term structure, and intraday tape are now computed inside ComputeRegimeComponentsAsync
-		// so they're identical whether called from the scanner or wa analyze risk.
-		var needCloses = cfg.Weights.VolatilityFit > 0m || cfg.Weights.Whipsaw > 0m;
-		if (needCloses)
+		// Underlying HV (20-session, close-to-close): the whipsaw factor's input and the informational IV/HV reading.
+		// Bias-calibration (moveSign), VIX term structure, and intraday tape are computed inside
+		// ComputeRegimeComponentsAsync so they're identical whether called from the scanner or wa analyze risk.
+		var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, 4);
+		foreach (var ticker in new[] { _config.Ticker })
 		{
-			var lookback = Math.Max(cfg.VolatilityLookbackDays + 1, 4);
-			foreach (var ticker in new[] { _config.Ticker })
+			var closes = await _priceCache.GetRecentClosesAsync(ticker, lookback, ctx.Now, cancellation);
+			if (!historicalVolByTicker.ContainsKey(ticker))
 			{
-				var closes = await _priceCache.GetRecentClosesAsync(ticker, lookback, ctx.Now, cancellation);
-				if (!historicalVolByTicker.ContainsKey(ticker))
-				{
-					var hv30 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
-					if (hv30.HasValue && hv30.Value > 0m)
-						historicalVolByTicker[ticker] = hv30.Value;
-				}
-				if (closes.Count >= 4)
-				{
-					var recent = closes.Skip(closes.Count - 4).ToList();
-					var hv3 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(recent);
-					if (hv3.HasValue && hv3.Value > 0m)
-						shortHorizonHvByTicker[ticker] = hv3.Value;
-				}
+				var hv30 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+				if (hv30.HasValue && hv30.Value > 0m)
+					historicalVolByTicker[ticker] = hv30.Value;
+			}
+			if (closes.Count >= 4)
+			{
+				var recent = closes.Skip(closes.Count - 4).ToList();
+				var hv3 = CandidateScorer.ComputeHistoricalVolatilityAnnualized(recent);
+				if (hv3.HasValue && hv3.Value > 0m)
+					shortHorizonHvByTicker[ticker] = hv3.Value;
 			}
 		}
 
 		// Real-world vol forecast for the scoring distribution (overnight/session split from daily OHLC strictly before
-		// ctx.Now — lookahead-safe in backtest). Always loaded: unlike the closes above it isn't gated on a weight,
-		// because every candidate's EV/POP distribution reads it. Same lookback as the HV the factors use.
+		// ctx.Now — lookahead-safe in backtest). Every candidate's EV/POP distribution reads it.
 		var realizedVolByTicker = new Dictionary<string, RealizedVolModel>(StringComparer.OrdinalIgnoreCase);
 		foreach (var ticker in new[] { _config.Ticker })
 		{
-			if (await RealizedVolModel.LoadAsync(_priceCache, ticker, cfg.VolatilityLookbackDays, ctx.Now, cancellation) is { } model)
+			if (await RealizedVolModel.LoadAsync(_priceCache, ticker, ctx.Now, cancellation) is { } model)
 				realizedVolByTicker[ticker] = model;
 		}
 
@@ -714,18 +709,7 @@ internal sealed class OpenCandidateEvaluator
 		SentimentSnapshot? diagnosticSentiment = sentimentSnapshot;
 
 		// HV shown in the diagnostic leg-quote line is the underlying's 20-session realized vol — the same
-		// vendor-independent metric `wa analyze` displays. Reuse the value already computed for the
-		// vol-fit/whipsaw factors; compute it here for any output ticker that lacks one (when both weights
-		// are 0, needCloses was false) so the reading appears regardless of scoring weights.
-		var diagnosticHvByTicker = new Dictionary<string, decimal>(historicalVolByTicker, StringComparer.OrdinalIgnoreCase);
-		foreach (var ticker in output.Select(p => p.Ticker).Distinct(StringComparer.OrdinalIgnoreCase))
-		{
-			if (diagnosticHvByTicker.ContainsKey(ticker)) continue;
-			var closes = await _priceCache.GetRecentClosesAsync(ticker, Math.Max(cfg.VolatilityLookbackDays + 1, 4), ctx.Now, cancellation);
-			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
-			if (hv is > 0m) diagnosticHvByTicker[ticker] = hv.Value;
-		}
-
+		// vendor-independent metric `wa analyze` displays, loaded above for the scan's ticker.
 		var annotated = new List<OpenProposal>(output.Count);
 		foreach (var p in output)
 		{
@@ -790,7 +774,7 @@ internal sealed class OpenCandidateEvaluator
 					: 0.40m,
 				quotes: mergedQuotes,
 				opener: openerScore,
-				historicalVolAnnual: diagnosticHvByTicker.TryGetValue(p.Ticker, out var pHv) ? pHv : (decimal?)null,
+				historicalVolAnnual: historicalVolByTicker.TryGetValue(p.Ticker, out var pHv) ? pHv : (decimal?)null,
 				sentimentScore: sentimentScore,
 				realizedVol: realizedVolByTicker.GetValueOrDefault(p.Ticker));
 
