@@ -147,12 +147,6 @@ internal sealed class OpenerConfig
 	/// above plus rules.stopLoss/takeProfit and execution — never deserialized directly, hence [JsonIgnore].</summary>
 	[JsonIgnore] public OpenerRealizedExpectancyConfig RealizedExpectancy { get; set; } = new();
 
-	/// <summary>Half-width of the EV scenario grid, in standard deviations. Grid points are placed at
-	/// ±sigma and ±sigma/2 around spot. Default 1.0 gives a ±1σ / ±0.5σ grid that better matches
-	/// realized moves on high-IV names and doesn't overweight fat tails. Prior behavior (and stress tests)
-	/// used 2.0 which pumps long-call EV at the expense of pin/theta structures.</summary>
-	[JsonPropertyName("scenarioGridSigma")] public decimal ScenarioGridSigma { get; set; } = 1.0m;
-
 	/// <summary>Exponent on the risk/reward component of the scorer's BalanceFactor. 0.0 (default) neutralizes
 	/// the R/R term entirely (the premium-ratio cushion penalty remains); 0.5 = sqrt softening; 1.0 = linear;
 	/// >1 penalizes sub-1 R/R progressively harder. The exponent's historical job — de-ranking inverted

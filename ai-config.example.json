@@ -45,7 +45,6 @@
 		"profitBandPct": 0.05,
 		"volatilityLookbackDays": 20,
 		"biasCalibrationLookbackDays": 0,
-		"scenarioGridSigma": 1.0,
 		"balanceRrExponent": 0.0,
 		"weights": {
 			"directionalFit": 0.3,

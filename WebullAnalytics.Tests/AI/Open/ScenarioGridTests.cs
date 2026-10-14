@@ -1,4 +1,5 @@
 using WebullAnalytics.AI;
+using WebullAnalytics.Pricing;
 using Xunit;
 
 namespace WebullAnalytics.Tests.AI.Open;
@@ -6,18 +7,11 @@ namespace WebullAnalytics.Tests.AI.Open;
 public class ScenarioGridTests
 {
 	[Fact]
-	public void GridHasFivePoints()
-	{
-		var grid = CandidateScorer.BuildScenarioGrid(forward: 100m, ivAnnual: 0.40m, years: 30.0 / 365.0);
-		Assert.Equal(5, grid.Count);
-	}
-
-	[Fact]
 	public void WeightsSumToOne()
 	{
 		var grid = CandidateScorer.BuildScenarioGrid(forward: 100m, ivAnnual: 0.40m, years: 30.0 / 365.0);
 		var sum = grid.Sum(p => p.Weight);
-		Assert.InRange((double)sum, 0.999, 1.001);
+		Assert.InRange((double)sum, 0.999999, 1.000001);
 	}
 
 	[Fact]
@@ -38,36 +32,42 @@ public class ScenarioGridTests
 	}
 
 	[Fact]
-	public void EndpointsScaleWithSigmaRange()
+	public void TailMassBeyondOneSigmaMatchesTheNormal()
 	{
-		var iv = 0.40m;
-		var years = 30.0 / 365.0;
-		var sigma = (double)iv * Math.Sqrt(years);
+		// The former 5-point grid stopped at ±1σ, so nothing ever landed beyond it; a normal puts ~31.7% there.
+		const double iv = 0.20, years = 0.25;
+		var sigma = iv * Math.Sqrt(years);
+		var grid = CandidateScorer.BuildScenarioGrid(forward: 100m, ivAnnual: (decimal)iv, years: years);
+		var median = Math.Exp(Math.Log(100.0) - sigma * sigma / 2.0);
+		var tail = grid.Where(p => Math.Abs(Math.Log((double)p.SpotAtExpiry / median)) > sigma).Sum(p => (double)p.Weight);
+		// Tolerance = the mass of the bin straddling ±1σ (its node sits just inside, so it counts as "inside"): ~0.015 per side.
+		Assert.InRange(tail, 0.285, 0.335);
+	}
 
-		// Default sigmaRange = 1.0 → endpoints at center·e^(±1σ)
-		var defaultGrid = CandidateScorer.BuildScenarioGrid(100m, iv, years);
-		var center = (double)defaultGrid[2].SpotAtExpiry;
-		Assert.InRange((double)defaultGrid[0].SpotAtExpiry, center * Math.Exp(-sigma) - 0.01, center * Math.Exp(-sigma) + 0.01);
-		Assert.InRange((double)defaultGrid[4].SpotAtExpiry, center * Math.Exp(sigma) - 0.01, center * Math.Exp(sigma) + 0.01);
-
-		// Explicit sigmaRange = 2.0 → endpoints at center·e^(±2σ)
-		var wideGrid = CandidateScorer.BuildScenarioGrid(100m, iv, years, sigmaRange: 2.0m);
-		var wideCenter = (double)wideGrid[2].SpotAtExpiry;
-		Assert.InRange((double)wideGrid[0].SpotAtExpiry, wideCenter * Math.Exp(-2 * sigma) - 0.01, wideCenter * Math.Exp(-2 * sigma) + 0.01);
-		Assert.InRange((double)wideGrid[4].SpotAtExpiry, wideCenter * Math.Exp(2 * sigma) - 0.01, wideCenter * Math.Exp(2 * sigma) + 0.01);
+	[Theory]
+	[InlineData(100.0)]
+	[InlineData(110.0)]
+	[InlineData(125.0)]
+	public void CallPayoffExpectationMatchesBlackScholesForwardValue(double strike)
+	{
+		// EV of (S_T − K)+ over the grid must equal the undiscounted Black-Scholes call — including a 2.5σ-OTM strike
+		// that the old ±1σ grid valued at zero.
+		const double r = 0.04, iv = 0.20, years = 0.25;
+		var spot = 100m;
+		var forward = spot * (decimal)Math.Exp(r * years);
+		var grid = CandidateScorer.BuildScenarioGrid(forward, (decimal)iv, years);
+		var ev = grid.Sum(p => (double)p.Weight * Math.Max(0.0, (double)p.SpotAtExpiry - strike));
+		var bsForwardValue = (double)OptionMath.BlackScholes(spot, (decimal)strike, years, r, (decimal)iv, "C") * Math.Exp(r * years);
+		Assert.InRange(ev, bsForwardValue * 0.99 - 0.002, bsForwardValue * 1.01 + 0.002);
 	}
 
 	[Fact]
-	public void InnerPointsAreHalfTheEndpoint()
+	public void ExpectedMoveUsesTheSameClockAsTheIv()
 	{
-		var iv = 0.40m;
-		var years = 30.0 / 365.0;
-		var sigma = (double)iv * Math.Sqrt(years);
-		var grid = CandidateScorer.BuildScenarioGrid(100m, iv, years, sigmaRange: 1.0m);
-		var center = (double)grid[2].SpotAtExpiry;
-
-		// grid[1] and grid[3] are at ±0.5σ around the center
-		Assert.InRange((double)grid[1].SpotAtExpiry, center * Math.Exp(-0.5 * sigma) - 0.01, center * Math.Exp(-0.5 * sigma) + 0.01);
-		Assert.InRange((double)grid[3].SpotAtExpiry, center * Math.Exp(0.5 * sigma) - 0.01, center * Math.Exp(0.5 * sigma) + 0.01);
+		// 0DTE: 5.4h left on the calendar-hour clock the IV was solved on → σ√T ≈ $29 on SPX, not the full-day ~$74 the
+		// old trading-day floor produced.
+		var years = 5.4 / 24.0 / 365.0;
+		var move = CandidateScorer.ExpectedMove(7754m, 0.151m, years);
+		Assert.InRange((double)move, 28.5, 29.5);
 	}
 }

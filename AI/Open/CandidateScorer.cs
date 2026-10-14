@@ -777,24 +777,15 @@ internal static class CandidateScorer
 		return Math.Clamp((decimal)Math.Sqrt((double)scaled), 0.35m, 1m);
 	}
 
-	/// <summary>Counts trading days (Mon–Fri) strictly between <paramref name="asOf"/> and
-	/// <paramref name="target"/>. US market holidays are not subtracted — for EM scaling on typical
-	/// 1–60 DTE structures the weekend exclusion captures ~95% of the calendar-vs-trading-day gap and
-	/// avoids carrying a holiday calendar around just for this signal.</summary>
-	internal static int CountTradingDays(DateTime asOf, DateTime target)
-	{
-		if (target.Date <= asOf.Date) return 0;
-		var count = 0;
-		for (var d = asOf.Date.AddDays(1); d <= target.Date; d = d.AddDays(1))
-		{
-			if (d.DayOfWeek != DayOfWeek.Saturday && d.DayOfWeek != DayOfWeek.Sunday)
-				count++;
-		}
-		return count;
-	}
+	/// <summary>One-sigma expected move to the target: <c>forward × IV × √years</c>, where <paramref name="years"/> is the
+	/// SAME time-to-target the IV was back-solved with (<see cref="OpenerExpiryHelpers.TimeYearsToExpiry"/>), so the
+	/// move matches the σ√T the option prices, scenario grid and POP imply. (A separate trading-day clock with a 1-day
+	/// floor made the 0DTE move ~2.5x the market-implied one.) Zero when inputs are degenerate.</summary>
+	internal static decimal ExpectedMove(decimal forward, decimal iv, double years)
+		=> forward <= 0m || iv <= 0m || years <= 0 ? 0m : forward * iv * (decimal)Math.Sqrt(years);
 
 	/// <summary>Path-aware safety factor: ratio of nearest-breakeven distance to one-sigma expected
-	/// move over the holding period (<c>forward × IV × √(tradingDays/252)</c>), squashed through tanh.
+	/// move over the holding period (<see cref="ExpectedMove"/>), squashed through tanh.
 	/// Distances are measured from <c>forward</c>, the risk-neutral expected price at the target
 	/// (<see cref="OptionMath.ForwardPrice"/>) — the same center the scenario grid and POP use. The
 	/// existing SetupFactor measures static centeredness inside the BE band; this one measures how
@@ -802,14 +793,11 @@ internal static class CandidateScorer
 	/// touch it. Narrow-wing IBs on high-vol single stocks (e.g. a 1.5-wide GME IB at 65% IV with
 	/// 7 DTE) score ~0.30; wider structures on the same name and tight indexes score above 0.6.
 	/// Null when inputs are degenerate; falls to the 0.10 floor when forward has already crossed the
-	/// safe band for a two-BE structure. Trading-day denominator matches retail-desk EM convention
-	/// (vol doesn't realize over weekends) — numerically close to calendar/365 on long DTE but
-	/// meaningfully different on short-DTE structures spanning a weekend.</summary>
-	internal static decimal? ComputeBreakevenRoomFactor(decimal forward, decimal iv, int tradingDaysToTarget, IReadOnlyList<decimal> breakevens)
+	/// safe band for a two-BE structure.</summary>
+	internal static decimal? ComputeBreakevenRoomFactor(decimal forward, decimal iv, double years, IReadOnlyList<decimal> breakevens)
 	{
-		if (forward <= 0m || iv <= 0m || tradingDaysToTarget <= 0 || breakevens.Count == 0) return null;
-		var years = (decimal)tradingDaysToTarget / 252m;
-		var expectedMove = forward * iv * (decimal)Math.Sqrt((double)years);
+		if (breakevens.Count == 0) return null;
+		var expectedMove = ExpectedMove(forward, iv, years);
 		if (expectedMove <= 0m) return null;
 
 		decimal edgeDistance;
@@ -831,15 +819,12 @@ internal static class CandidateScorer
 		return Math.Clamp(factor, 0.10m, 1m);
 	}
 
-	/// <summary>One-sigma expected-move price envelope: <c>(forward − EM, forward + EM)</c> where
-	/// <c>EM = forward × IV × √(tradingDays/252)</c>. Trading-day denominator mirrors the EM-based
-	/// scoring factors (BreakevenRoomFactor, ExpectedMoveCreditFactor) so the rendered range lines
-	/// up with what those factors evaluated against. Null when inputs are degenerate.</summary>
-	internal static (decimal Lower, decimal Upper)? ComputeExpectedMoveBounds(decimal forward, decimal iv, int tradingDaysToTarget)
+	/// <summary>One-sigma expected-move price envelope: <c>(forward − EM, forward + EM)</c> with EM from
+	/// <see cref="ExpectedMove"/> — the same move the EM-based scoring factors (BreakevenRoomFactor,
+	/// ExpectedMoveCreditFactor) evaluate against, so the rendered range lines up with them. Null when inputs are degenerate.</summary>
+	internal static (decimal Lower, decimal Upper)? ComputeExpectedMoveBounds(decimal forward, decimal iv, double years)
 	{
-		if (forward <= 0m || iv <= 0m || tradingDaysToTarget <= 0) return null;
-		var years = (decimal)tradingDaysToTarget / 252m;
-		var em = forward * iv * (decimal)Math.Sqrt((double)years);
+		var em = ExpectedMove(forward, iv, years);
 		if (em <= 0m) return null;
 		return (forward - em, forward + em);
 	}
@@ -852,12 +837,11 @@ internal static class CandidateScorer
 	/// returns null on debit trades, no shorts, or degenerate inputs. Signal is a linear ramp
 	/// centered on 1σ cushion: −1 at ≤0.5σ (or forward already past a short), +1 at ≥1.5σ. Factor:
 	/// <c>max(0.10, 1 + weight × signal)</c>.</summary>
-	internal static decimal? ComputeExpectedMoveCreditFactor(decimal forward, decimal iv, int tradingDaysToTarget, decimal debitOrCreditPerContract, IReadOnlyList<(decimal Strike, string CallPut)> shortLegs, decimal weight)
+	internal static decimal? ComputeExpectedMoveCreditFactor(decimal forward, decimal iv, double years, decimal debitOrCreditPerContract, IReadOnlyList<(decimal Strike, string CallPut)> shortLegs, decimal weight)
 	{
-		if (weight <= 0m || debitOrCreditPerContract < 0m || forward <= 0m || iv <= 0m || tradingDaysToTarget <= 0 || shortLegs.Count == 0)
+		if (weight <= 0m || debitOrCreditPerContract < 0m || shortLegs.Count == 0)
 			return null;
-		var years = (decimal)tradingDaysToTarget / 252m;
-		var expectedMove = forward * iv * (decimal)Math.Sqrt((double)years);
+		var expectedMove = ExpectedMove(forward, iv, years);
 		if (expectedMove <= 0m) return null;
 
 		var minSafeDistance = decimal.MaxValue;
@@ -1013,49 +997,55 @@ internal static class CandidateScorer
 	private static decimal ScenarioForward(decimal spot, IReadOnlyList<DividendEvent>? dividends, DateTime asOf, DateTime targetExpiry, double years)
 		=> OptionMath.ForwardPrice(spot, dividends, asOf, targetExpiry.Date + OptionMath.MarketClose, years, OptionMath.RiskFreeRate);
 
+	private const int ScenarioBins = 81;
+	private const double ScenarioBinEdgeSigmas = 5.0;
+	private static readonly (double Z, double Weight)[] ScenarioNodes = BuildScenarioNodes();
+
+	/// <summary>Standard-normal discretization: <see cref="ScenarioBins"/> equal-width z-bins spanning
+	/// ±<see cref="ScenarioBinEdgeSigmas"/>, the two outer bins open-ended so the tails are fully counted.
+	/// Weight = the bin's exact probability mass Φ(b) − Φ(a); node = the bin's conditional mean
+	/// (φ(a) − φ(b)) / (Φ(b) − Φ(a)), so the discrete distribution's mean in z is exact.</summary>
+	private static (double Z, double Weight)[] BuildScenarioNodes()
+	{
+		var width = 2.0 * ScenarioBinEdgeSigmas / ScenarioBins;
+		var nodes = new (double Z, double Weight)[ScenarioBins];
+		for (var i = 0; i < ScenarioBins; i++)
+		{
+			var a = i == 0 ? double.NegativeInfinity : -ScenarioBinEdgeSigmas + i * width;
+			var b = i == ScenarioBins - 1 ? double.PositiveInfinity : -ScenarioBinEdgeSigmas + (i + 1) * width;
+			// NormalCdf / NormalPdf evaluate to exactly 0/1 and 0 at ±∞, so the open-ended tail bins need no special case.
+			var mass = OptionMath.NormalCdf(b) - OptionMath.NormalCdf(a);
+			nodes[i] = ((OptionMath.NormalPdf(a) - OptionMath.NormalPdf(b)) / mass, mass);
+		}
+		return nodes;
+	}
+
 	/// <summary>
-	/// Builds 5 scenario points at S_T ∈ {c·e^(−sigmaRange·σ), c·e^(−sigmaRange·σ/2), c,
-	/// c·e^(+sigmaRange·σ/2), c·e^(+sigmaRange·σ)} where σ = ivAnnual · √years.
-	/// Weights = log-normal density at each point, renormalized to sum to 1. Neutral drift: the center
-	/// c is chosen so the probability-weighted mean of the grid equals <paramref name="forward"/>
-	/// (<see cref="OptionMath.ForwardPrice"/>), the drift every leg is Black-Scholes-priced with. A grid
-	/// centered on raw spot implied the underlying underperforms T-bills — a hidden bearish view that
-	/// scored bullish structures below their bearish mirrors.
-	/// sigmaRange defaults to 1.0 (±1σ and ±0.5σ). Larger values test further-out scenarios and
-	/// overweight fat tails, favoring unbounded-upside structures over pin/theta structures.
+	/// Discretized log-normal terminal distribution: S_T = c·e^(drift + z·σ) at each standard-normal node
+	/// (<see cref="BuildScenarioNodes"/>), σ = ivAnnual · √years, weights = exact bin probabilities. Covers the
+	/// whole distribution — the former 5-point grid stopped at ±1σ, so any credit structure whose loss zone
+	/// sat beyond 1σ scored EV ≈ its full credit while its POP said it lost ~30% of the time.
+	/// Neutral drift: c is chosen so the probability-weighted mean equals <paramref name="forward"/>
+	/// (<see cref="OptionMath.ForwardPrice"/>), the drift every leg is Black-Scholes-priced with.
 	/// </summary>
-	public static IReadOnlyList<ScenarioPoint> BuildScenarioGrid(decimal forward, decimal ivAnnual, double years, decimal sigmaRange = 1.0m, decimal biasShiftSigmas = 0m)
+	public static IReadOnlyList<ScenarioPoint> BuildScenarioGrid(decimal forward, decimal ivAnnual, double years, decimal biasShiftSigmas = 0m)
 	{
 		var sigma = (double)ivAnnual * Math.Sqrt(Math.Max(1e-9, years));
-		var range = (double)sigmaRange;
 		// biasShiftSigmas (typically bias × cfg.Weights.BiasDrift) translates the grid center along the
 		// log-spot axis. Positive shifts scenarios up; negative shifts down. Allows long-premium
 		// structures to score positive raw EV under strong directional signals — sign-symmetric
 		// ApplyFactor downstream can't flip a negative score, so the bias must be encoded here.
 		var drift = (double)biasShiftSigmas * sigma;
-		var multipliers = new[] { -range, -range * 0.5, 0.0, range * 0.5, range };
-		var points = new ScenarioPoint[5];
 
-		// Unnormalized log-normal density at each z-point: φ(z) = (1/√(2π)) · e^(−z²/2). Weights are the densities.
-		double[] rawWeights = new double[5];
-		double totalWeight = 0;
-		for (int i = 0; i < 5; i++)
-		{
-			var z = multipliers[i];
-			rawWeights[i] = Math.Exp(-z * z / 2.0);
-			totalWeight += rawWeights[i];
-		}
 		// Unshifted grid's mean relative to its center; dividing it out makes the neutral (no-bias) mean exactly the forward.
 		double meanShape = 0;
-		for (int i = 0; i < 5; i++)
-			meanShape += rawWeights[i] / totalWeight * Math.Exp(multipliers[i] * sigma);
+		foreach (var (z, weight) in ScenarioNodes)
+			meanShape += weight * Math.Exp(z * sigma);
 		var center = (double)forward / meanShape;
-		for (int i = 0; i < 5; i++)
-		{
-			var sT = (decimal)(center * Math.Exp(drift + multipliers[i] * sigma));
-			var w = (decimal)(rawWeights[i] / totalWeight);
-			points[i] = new ScenarioPoint(sT, w);
-		}
+
+		var points = new ScenarioPoint[ScenarioNodes.Length];
+		for (var i = 0; i < ScenarioNodes.Length; i++)
+			points[i] = new ScenarioPoint((decimal)(center * Math.Exp(drift + ScenarioNodes[i].Z * sigma)), (decimal)ScenarioNodes[i].Weight);
 		return points;
 	}
 
@@ -1539,7 +1529,7 @@ internal static class CandidateScorer
 
 	   // EV via scenario grid — payoff at expiry is piecewise linear.
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg);
-		var grid = BuildScenarioGrid(forward, iv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var grid = BuildScenarioGrid(forward, iv, years, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, creditPerContract, isCall);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -1559,15 +1549,10 @@ internal static class CandidateScorer
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, [breakeven]);
-		// CountTradingDays returns 0 for same-day (0DTE) targets, which silently nulls the EM-based
-		// factors (breakevenRoom, expectedMoveBounds, expectedMoveCredit) since their guard rejects
-		// tradingDays <= 0. A 0DTE position at the morning open is exposed to one full session of
-		// vol — that's 1 trading day's worth — so clamp to ≥ 1 to keep those factors firing.
-		var tradingDaysToTarget = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
-		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, iv, tradingDaysToTarget, [breakeven]);
-		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, iv, tradingDaysToTarget);
+		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, iv, years, [breakeven]);
+		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, iv, years);
 		var shortLegStrikes = ExtractShortLegStrikes(skel.Legs);
-		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, iv, tradingDaysToTarget, creditPerContract, shortLegStrikes, cfg.Weights.ExpectedMoveCredit);
+		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, iv, years, creditPerContract, shortLegStrikes, cfg.Weights.ExpectedMoveCredit);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, creditPerContract, cfg.Weights.IvRealizedPremium);
 		var longIv = ScoredLegIv(cache, longLeg.Symbol, longParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 		var legGreeks = new[]
@@ -1707,7 +1692,7 @@ internal static class CandidateScorer
 		var pop = LogNormalProbability(isCall ? Direction.Above : Direction.Below, forward, breakeven, years, (double)iv);
 
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg);
-		var grid = BuildScenarioGrid(forward, iv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var grid = BuildScenarioGrid(forward, iv, years, bias * cfg.Weights.BiasDrift + magnet.Total);
 		// VerticalPnLAtExpiry uses signed netEntry where credit=positive. For a debit spread we pay,
 		// so pass -debitPerContract as the "credit" parameter.
 		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, -debitPerContract, isCall);
@@ -1724,13 +1709,8 @@ internal static class CandidateScorer
 		var popFactor = 1m;
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, [breakeven]);
-		// CountTradingDays returns 0 for same-day (0DTE) targets, which silently nulls the EM-based
-		// factors (breakevenRoom, expectedMoveBounds, expectedMoveCredit) since their guard rejects
-		// tradingDays <= 0. A 0DTE position at the morning open is exposed to one full session of
-		// vol — that's 1 trading day's worth — so clamp to ≥ 1 to keep those factors firing.
-		var tradingDaysToTarget = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
-		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, iv, tradingDaysToTarget, [breakeven]);
-		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, iv, tradingDaysToTarget);
+		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, iv, years, [breakeven]);
+		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, iv, years);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
 		var shortIv = ScoredLegIv(cache, shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 		var legGreeks = new[]
@@ -2311,7 +2291,7 @@ internal static class CandidateScorer
 		var forward = ScenarioForward(spot, dividends, asOf, skel.TargetExpiry, years);
 		var pop = ComputeProbabilityOfProfit(pnl, breakevens, forward, years, representativeIv);
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, representativeIv, years, cfg);
-		var grid = BuildScenarioGrid(forward, representativeIv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var grid = BuildScenarioGrid(forward, representativeIv, years, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal ev = 0m;
 		foreach (var pt in grid)
 			ev += pt.Weight * pnl(pt.SpotAtExpiry);
@@ -2335,11 +2315,10 @@ internal static class CandidateScorer
 		var scaleFactor = ComputeCapitalScaleFactor(efficiencyCapital);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, breakevens);
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
-		var tradingDaysToTargetMl = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
-		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, representativeIv, tradingDaysToTargetMl, breakevens);
-		var expectedMoveBoundsMl = ComputeExpectedMoveBounds(forward, representativeIv, tradingDaysToTargetMl);
+		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, representativeIv, years, breakevens);
+		var expectedMoveBoundsMl = ComputeExpectedMoveBounds(forward, representativeIv, years);
 		var shortLegStrikesMl = ExtractShortLegStrikes(skel.Legs);
-		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, representativeIv, tradingDaysToTargetMl, netEntryPerContract, shortLegStrikesMl, cfg.Weights.ExpectedMoveCredit);
+		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, representativeIv, years, netEntryPerContract, shortLegStrikesMl, cfg.Weights.ExpectedMoveCredit);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(representativeIv, historicalVolAnnual, netEntryPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = defs.Select(d => (d.Parsed, d.Iv, d.IsLong)).ToList();
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(legGreeks, asOf, spot);
@@ -2540,7 +2519,7 @@ internal static class CandidateScorer
 		// 5-point grid points (e.g. an ATM call diagonal peaks at the short strike, which the ±0.5σ
 		// sampling misses) — using the scenario-grid max would understate R/R by ~30%.
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, ivShort, shortYears, cfg);
-		var grid = BuildScenarioGrid(forward, ivShort, shortYears, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var grid = BuildScenarioGrid(forward, ivShort, shortYears, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal PnlAtTarget(decimal sT) => CalendarOrDiagonalPnLAtShortExpiry(sT, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -2570,11 +2549,10 @@ internal static class CandidateScorer
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, beList);
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
 		var representativeIvEarly = (ivShort + ivLong) / 2m;
-		var tradingDaysToTargetCd = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
-		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, representativeIvEarly, tradingDaysToTargetCd, beList);
-		var expectedMoveBoundsCd = ComputeExpectedMoveBounds(forward, representativeIvEarly, tradingDaysToTargetCd);
+		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, representativeIvEarly, shortYears, beList);
+		var expectedMoveBoundsCd = ComputeExpectedMoveBounds(forward, representativeIvEarly, shortYears);
 		var shortLegStrikesCd = ExtractShortLegStrikes(skel.Legs);
-		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, representativeIvEarly, tradingDaysToTargetCd, -debitPerContract, shortLegStrikesCd, cfg.Weights.ExpectedMoveCredit);
+		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, representativeIvEarly, shortYears, -debitPerContract, shortLegStrikesCd, cfg.Weights.ExpectedMoveCredit);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(representativeIvEarly, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = new[]
 		{
@@ -2741,7 +2719,7 @@ internal static class CandidateScorer
 		// factor structurally cannot do. Gated by gexBiasPull / maxPainBiasPull (default 0 → live unchanged).
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg);
-		var grid = BuildScenarioGrid(forward, iv, years, cfg.ScenarioGridSigma, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var grid = BuildScenarioGrid(forward, iv, years, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal PnlAtExpiry(decimal sT)
 		{
 			var intrinsic = parsed.CallPut == "C" ? Math.Max(0m, sT - parsed.Strike) : Math.Max(0m, parsed.Strike - sT);
@@ -2773,8 +2751,7 @@ internal static class CandidateScorer
 		var popFactor = 1m;
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, [breakeven]);
-		var tradingDaysToTargetLc = Math.Max(1, CountTradingDays(asOf, skel.TargetExpiry.Date));
-		var expectedMoveBoundsLc = ComputeExpectedMoveBounds(forward, iv, tradingDaysToTargetLc);
+		var expectedMoveBoundsLc = ComputeExpectedMoveBounds(forward, iv, years);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = new[] { (Parsed: parsed, Iv: iv, IsLong: true) };
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(legGreeks, asOf, spot);

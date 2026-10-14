@@ -192,6 +192,9 @@ internal static class OptionMath
 			(((((b1 * r + b2) * r + b3) * r + b4) * r + b5) * r + 1.0);
 	}
 
+	/// <summary>Probability density function of the standard normal distribution.</summary>
+	internal static double NormalPdf(double x) => Math.Exp(-0.5 * x * x) * InvSqrt2Pi;
+
 	/// <summary>
 	/// Cumulative distribution function of the standard normal distribution.
 	/// Uses the Abramowitz & Stegun approximation (accuracy ~1.5e-7).
@@ -617,7 +620,7 @@ internal static class OptionMath
 		if (sigma <= 0) return 0m;
 		var sqrtT = Math.Sqrt(T);
 		var d1 = (Math.Log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrtT);
-		var pdf = Math.Exp(-0.5 * d1 * d1) * InvSqrt2Pi;
+		var pdf = NormalPdf(d1);
 		return (decimal)(S * pdf * sqrtT);
 	}
 
@@ -628,7 +631,7 @@ internal static class OptionMath
 		double s = (double)spot, k = (double)strike, sigma = (double)iv, t = timeYears, r = riskFreeRate;
 		var sqrtT = Math.Sqrt(t);
 		var d1 = (Math.Log(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
-		var pdf = Math.Exp(-0.5 * d1 * d1) * InvSqrt2Pi;
+		var pdf = NormalPdf(d1);
 		return (decimal)(pdf / (s * sigma * sqrtT));
 	}
 
@@ -649,7 +652,7 @@ internal static class OptionMath
 		var sqrtT = Math.Sqrt(t);
 		var d1 = (Math.Log(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
 		var d2 = d1 - sigma * sqrtT;
-		var pdf = Math.Exp(-0.5 * d1 * d1) * InvSqrt2Pi;
+		var pdf = NormalPdf(d1);
 		return (decimal)(-pdf * d2 / sigma);
 	}
 }
