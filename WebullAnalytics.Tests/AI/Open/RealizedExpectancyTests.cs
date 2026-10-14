@@ -139,7 +139,7 @@ public class RealizedExpectancyTests
 	[Fact]
 	public void RealizeEv_DisabledMinusZeroFrictionEqualsTheoretical()
 	{
-		var grid = CandidateScorer.BuildScenarioGrid(spot: 100m, ivAnnual: 0.30m, years: 30 / 365.0);
+		var grid = CandidateScorer.BuildScenarioGrid(forward: 100m, ivAnnual: 0.30m, years: 30 / 365.0);
 		decimal Pnl(decimal sT) => (sT - 100m) * 100m;
 
 		decimal theoreticalEv = 0m;
@@ -153,7 +153,7 @@ public class RealizedExpectancyTests
 	public void RealizeEv_ManagedStopRaisesEv()
 	{
 		// With losses floored at the stop and winners riding to max, the managed EV sits ABOVE theoretical.
-		var grid = CandidateScorer.BuildScenarioGrid(spot: 100m, ivAnnual: 0.30m, years: 30 / 365.0);
+		var grid = CandidateScorer.BuildScenarioGrid(forward: 100m, ivAnnual: 0.30m, years: 30 / 365.0);
 		decimal Pnl(decimal sT) => (sT - 100m) * 100m;
 
 		decimal theoreticalEv = 0m;

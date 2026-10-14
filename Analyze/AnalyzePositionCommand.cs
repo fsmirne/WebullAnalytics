@@ -1907,7 +1907,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		DateTime target, DateTime asOf, decimal spot, decimal gridIv, IReadOnlyList<DividendEvent>? dividends = null)
 	{
 		var yearsToTarget = Math.Max(1, (target.Date - asOf.Date).Days) / 365.0;
-		var grid = WebullAnalytics.AI.CandidateScorer.BuildScenarioGrid(spot, gridIv, yearsToTarget);
+		var forward = OptionMath.ForwardPrice(spot, dividends, asOf, target.Date + OptionMath.MarketClose, yearsToTarget, OptionMath.RiskFreeRate);
+		var grid = WebullAnalytics.AI.CandidateScorer.BuildScenarioGrid(forward, gridIv, yearsToTarget);
 		decimal ev = 0m;
 		foreach (var pt in grid)
 		{

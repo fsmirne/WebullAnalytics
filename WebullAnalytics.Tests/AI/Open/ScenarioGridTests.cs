@@ -8,62 +8,66 @@ public class ScenarioGridTests
 	[Fact]
 	public void GridHasFivePoints()
 	{
-		var grid = CandidateScorer.BuildScenarioGrid(spot: 100m, ivAnnual: 0.40m, years: 30.0 / 365.0);
+		var grid = CandidateScorer.BuildScenarioGrid(forward: 100m, ivAnnual: 0.40m, years: 30.0 / 365.0);
 		Assert.Equal(5, grid.Count);
 	}
 
 	[Fact]
 	public void WeightsSumToOne()
 	{
-		var grid = CandidateScorer.BuildScenarioGrid(spot: 100m, ivAnnual: 0.40m, years: 30.0 / 365.0);
+		var grid = CandidateScorer.BuildScenarioGrid(forward: 100m, ivAnnual: 0.40m, years: 30.0 / 365.0);
 		var sum = grid.Sum(p => p.Weight);
 		Assert.InRange((double)sum, 0.999, 1.001);
 	}
 
 	[Fact]
-	public void MiddlePointEqualsSpot()
+	public void WeightedMeanEqualsForward()
 	{
-		var grid = CandidateScorer.BuildScenarioGrid(spot: 100m, ivAnnual: 0.40m, years: 30.0 / 365.0);
-		var mid = grid[2];
-		Assert.Equal(100m, mid.SpotAtExpiry);
+		// Neutral drift: the probability-weighted mean of the unshifted grid is exactly the forward the legs are priced on.
+		var grid = CandidateScorer.BuildScenarioGrid(forward: 100.50m, ivAnnual: 0.40m, years: 30.0 / 365.0);
+		var mean = grid.Sum(p => p.Weight * p.SpotAtExpiry);
+		Assert.InRange((double)mean, 100.4999, 100.5001);
+	}
+
+	[Fact]
+	public void BiasShiftMovesTheMean()
+	{
+		var neutral = CandidateScorer.BuildScenarioGrid(forward: 100m, ivAnnual: 0.40m, years: 30.0 / 365.0);
+		var bullish = CandidateScorer.BuildScenarioGrid(forward: 100m, ivAnnual: 0.40m, years: 30.0 / 365.0, biasShiftSigmas: 0.5m);
+		Assert.True(bullish.Sum(p => p.Weight * p.SpotAtExpiry) > neutral.Sum(p => p.Weight * p.SpotAtExpiry));
 	}
 
 	[Fact]
 	public void EndpointsScaleWithSigmaRange()
 	{
-		var spot = 100m;
 		var iv = 0.40m;
 		var years = 30.0 / 365.0;
-		var sigma = (decimal)((double)iv * Math.Sqrt(years));
+		var sigma = (double)iv * Math.Sqrt(years);
 
-		// Default sigmaRange = 1.0 → endpoints at spot·e^(±1σ)
-		var defaultGrid = CandidateScorer.BuildScenarioGrid(spot, iv, years);
-		var defaultLo = spot * (decimal)Math.Exp((double)(-sigma));
-		var defaultHi = spot * (decimal)Math.Exp((double)sigma);
-		Assert.InRange((double)defaultGrid[0].SpotAtExpiry, (double)(defaultLo - 0.01m), (double)(defaultLo + 0.01m));
-		Assert.InRange((double)defaultGrid[4].SpotAtExpiry, (double)(defaultHi - 0.01m), (double)(defaultHi + 0.01m));
+		// Default sigmaRange = 1.0 → endpoints at center·e^(±1σ)
+		var defaultGrid = CandidateScorer.BuildScenarioGrid(100m, iv, years);
+		var center = (double)defaultGrid[2].SpotAtExpiry;
+		Assert.InRange((double)defaultGrid[0].SpotAtExpiry, center * Math.Exp(-sigma) - 0.01, center * Math.Exp(-sigma) + 0.01);
+		Assert.InRange((double)defaultGrid[4].SpotAtExpiry, center * Math.Exp(sigma) - 0.01, center * Math.Exp(sigma) + 0.01);
 
-		// Explicit sigmaRange = 2.0 → endpoints at spot·e^(±2σ) (matches pre-tuning behavior)
-		var wideGrid = CandidateScorer.BuildScenarioGrid(spot, iv, years, sigmaRange: 2.0m);
-		var wideLo = spot * (decimal)Math.Exp((double)(-2m * sigma));
-		var wideHi = spot * (decimal)Math.Exp((double)(2m * sigma));
-		Assert.InRange((double)wideGrid[0].SpotAtExpiry, (double)(wideLo - 0.01m), (double)(wideLo + 0.01m));
-		Assert.InRange((double)wideGrid[4].SpotAtExpiry, (double)(wideHi - 0.01m), (double)(wideHi + 0.01m));
+		// Explicit sigmaRange = 2.0 → endpoints at center·e^(±2σ)
+		var wideGrid = CandidateScorer.BuildScenarioGrid(100m, iv, years, sigmaRange: 2.0m);
+		var wideCenter = (double)wideGrid[2].SpotAtExpiry;
+		Assert.InRange((double)wideGrid[0].SpotAtExpiry, wideCenter * Math.Exp(-2 * sigma) - 0.01, wideCenter * Math.Exp(-2 * sigma) + 0.01);
+		Assert.InRange((double)wideGrid[4].SpotAtExpiry, wideCenter * Math.Exp(2 * sigma) - 0.01, wideCenter * Math.Exp(2 * sigma) + 0.01);
 	}
 
 	[Fact]
 	public void InnerPointsAreHalfTheEndpoint()
 	{
-		var spot = 100m;
 		var iv = 0.40m;
 		var years = 30.0 / 365.0;
-		var sigma = (decimal)((double)iv * Math.Sqrt(years));
-		var grid = CandidateScorer.BuildScenarioGrid(spot, iv, years, sigmaRange: 1.0m);
+		var sigma = (double)iv * Math.Sqrt(years);
+		var grid = CandidateScorer.BuildScenarioGrid(100m, iv, years, sigmaRange: 1.0m);
+		var center = (double)grid[2].SpotAtExpiry;
 
-		// grid[1] and grid[3] are at ±0.5σ
-		var innerLo = spot * (decimal)Math.Exp((double)(-0.5m * sigma));
-		var innerHi = spot * (decimal)Math.Exp((double)(0.5m * sigma));
-		Assert.InRange((double)grid[1].SpotAtExpiry, (double)(innerLo - 0.01m), (double)(innerLo + 0.01m));
-		Assert.InRange((double)grid[3].SpotAtExpiry, (double)(innerHi - 0.01m), (double)(innerHi + 0.01m));
+		// grid[1] and grid[3] are at ±0.5σ around the center
+		Assert.InRange((double)grid[1].SpotAtExpiry, center * Math.Exp(-0.5 * sigma) - 0.01, center * Math.Exp(-0.5 * sigma) + 0.01);
+		Assert.InRange((double)grid[3].SpotAtExpiry, center * Math.Exp(0.5 * sigma) - 0.01, center * Math.Exp(0.5 * sigma) + 0.01);
 	}
 }

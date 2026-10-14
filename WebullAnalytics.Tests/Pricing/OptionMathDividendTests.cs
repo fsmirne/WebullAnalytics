@@ -79,4 +79,15 @@ public class OptionMathDividendTests
 		var netWithout = longWithout - shortWithout;
 		Assert.True(netWith < netWithout, "net theoretical must shrink toward the market mid once the dividend is modeled");
 	}
+
+	[Fact]
+	public void ForwardPrice_GrowsAtRateAndDropsDividendsInWindow()
+	{
+		var years = 23.0 / 365.0;
+		Assert.Equal(754.13m * (decimal)Math.Exp(R * years), OptionMath.ForwardPrice(754.13m, null, Eval, Eval.AddDays(23), years, R), 6);
+
+		var divs = new List<DividendEvent> { new(Eval.AddDays(16), 1.75m) };
+		var adjusted = OptionMath.DividendAdjustedSpot(754.13m, divs, Eval, Eval.AddDays(23), R);
+		Assert.Equal(adjusted * (decimal)Math.Exp(R * years), OptionMath.ForwardPrice(754.13m, divs, Eval, Eval.AddDays(23), years, R), 6);
+	}
 }

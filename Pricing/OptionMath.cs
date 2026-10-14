@@ -114,6 +114,13 @@ internal static class OptionMath
 		return adjusted > 0m ? adjusted : spot;
 	}
 
+	/// <summary>Risk-neutral forward of the underlying at <paramref name="horizon"/>: the escrowed-dividend spot
+	/// (<see cref="DividendAdjustedSpot"/>) grown at <paramref name="riskFreeRate"/> over <paramref name="years"/>.
+	/// This is the drift Black-Scholes prices every leg with, so a scenario distribution centered on it is neutral
+	/// relative to the option prices; centering on raw spot instead implies the underlying underperforms T-bills.</summary>
+	internal static decimal ForwardPrice(decimal spot, IReadOnlyList<DividendEvent>? dividends, DateTime evalDate, DateTime horizon, double years, double riskFreeRate)
+		=> DividendAdjustedSpot(spot, dividends, evalDate, horizon, riskFreeRate) * (decimal)Math.Exp(riskFreeRate * Math.Max(0.0, years));
+
 	/// <summary>Computes the Black-Scholes delta for a European option. Returns signed delta: positive for calls, negative for puts.</summary>
 	internal static decimal Delta(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv, string callPut)
 	{
