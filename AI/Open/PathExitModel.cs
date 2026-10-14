@@ -23,7 +23,14 @@ internal readonly record struct PathLeg(OptionParsed Parsed, decimal Iv, bool Is
 /// </summary>
 internal static class PathExitModel
 {
-	private static readonly ConcurrentDictionary<int, double[,]> TransitionsBySteps = new();
+	/// <summary>One-step transition matrix with, per row, the first and last column holding non-zero probability — the
+	/// N(0, 1/K) kernel underflows to exactly 0 a few step-σ away, so the band is all the propagation has to touch.</summary>
+	private sealed record Transition(double[,] P, int[] First, int[] Last);
+
+	/// <summary>A leg's Black-Scholes inputs at one interior monitoring step — everything but the spot.</summary>
+	private readonly record struct LegAtStep(double Sign, double Strike, bool IsCall, bool Expired, double Years, double Iv, double DividendPv);
+
+	private static readonly ConcurrentDictionary<int, Transition> TransitionsBySteps = new();
 
 	/// <summary>Monitoring steps: about four per remaining session (≈ every 100 minutes), at least 4, at most 24.</summary>
 	internal static int StepCount(double sessionsRemaining) => Math.Clamp((int)Math.Ceiling(sessionsRemaining * 4.0), 4, 24);
@@ -37,7 +44,7 @@ internal static class PathExitModel
 	/// <param name="stepTimes">K clock times, ascending, the last being the target; evenly spaced in variance.</param>
 	/// <param name="takeProfit">P&amp;L per contract (&gt; 0) that triggers the take-profit, or null when not armed.</param>
 	/// <param name="stopLoss">Loss per contract (&gt; 0) that triggers the stop, or null when not armed.</param>
-	internal static decimal ExpectedPnl(IReadOnlyList<PathLeg> legs, decimal entryValuePerContract, Func<decimal, decimal> pnlAtTarget, decimal spot, double targetCenter, double sigmaTotal, IReadOnlyList<DateTime> stepTimes, decimal? takeProfit, decimal? stopLoss, IReadOnlyList<DividendEvent>? dividends, OptionMath.BlackScholesEvaluator? blackScholes = null)
+	internal static decimal ExpectedPnl(IReadOnlyList<PathLeg> legs, decimal entryValuePerContract, Func<decimal, decimal> pnlAtTarget, decimal spot, double targetCenter, double sigmaTotal, IReadOnlyList<DateTime> stepTimes, decimal? takeProfit, decimal? stopLoss, IReadOnlyList<DividendEvent>? dividends)
 	{
 		var nodes = CandidateScorer.ScenarioNodes;
 		var n = nodes.Length;
@@ -45,6 +52,8 @@ internal static class PathExitModel
 		var transition = TransitionsBySteps.GetOrAdd(steps, BuildTransition);
 		var tp = takeProfit.HasValue ? (double)takeProfit.Value : double.PositiveInfinity;
 		var sl = stopLoss.HasValue ? -(double)stopLoss.Value : double.NegativeInfinity;
+		var entry = (double)entryValuePerContract;
+		var legSteps = new LegAtStep[legs.Count];
 
 		var mass = new double[n];
 		mass[n / 2] = 1.0;
@@ -58,27 +67,22 @@ internal static class PathExitModel
 			Array.Clear(next);
 			for (var i = 0; i < n; i++)
 			{
-				if (mass[i] == 0) continue;
-				for (var j = 0; j < n; j++) next[j] += mass[i] * transition[i, j];
+				var m = mass[i];
+				if (m == 0) continue;
+				for (var j = transition.First[i]; j <= transition.Last[i]; j++) next[j] += m * transition.P[i, j];
 			}
 			(mass, next) = (next, mass);
+
+			if (k < steps)
+				for (var l = 0; l < legs.Count; l++) legSteps[l] = AtStep(legs[l], stepTimes[k - 1], dividends);
 
 			// Node prices at step k: the z-lattice is in total-σ units; the center slides from spot to the target center.
 			var center = Math.Exp(logSpot + logDrift * k / steps);
 			for (var j = 0; j < n; j++)
 			{
 				if (mass[j] < 1e-12) continue;
-				var s = (decimal)(center * Math.Exp(nodes[j].Z * sigmaTotal));
-				double pnl;
-				if (k == steps)
-					pnl = (double)pnlAtTarget(s);
-				else
-				{
-					decimal value = 0m;
-					foreach (var leg in legs)
-						value += (leg.IsLong ? 1m : -1m) * leg.Qty * OptionMath.LegValueAt(s, stepTimes[k - 1], leg.Parsed, leg.Iv, dividends, blackScholes);
-					pnl = (double)(value * 100m - entryValuePerContract);
-				}
+				var s = center * Math.Exp(nodes[j].Z * sigmaTotal);
+				var pnl = k == steps ? (double)pnlAtTarget((decimal)s) : PositionValue(legSteps, s) * 100.0 - entry;
 				if (k == steps || pnl >= tp || pnl <= sl)
 				{
 					ev += mass[j] * pnl;
@@ -89,24 +93,60 @@ internal static class PathExitModel
 		return (decimal)ev;
 	}
 
+	/// <summary>Per-share net value of the position at spot <paramref name="s"/>: Black-Scholes at each leg's own IV (on the
+	/// escrowed-dividend spot, as <see cref="OptionMath.LegValueAt"/>), intrinsic once the leg has expired.</summary>
+	private static double PositionValue(LegAtStep[] legs, double s)
+	{
+		double value = 0;
+		foreach (var leg in legs)
+		{
+			double legValue;
+			if (leg.Expired)
+				legValue = leg.IsCall ? Math.Max(0, s - leg.Strike) : Math.Max(0, leg.Strike - s);
+			else
+			{
+				var adjusted = s - leg.DividendPv;
+				legValue = OptionMath.BlackScholesValue(adjusted > 0 ? adjusted : s, leg.Strike, leg.Years, OptionMath.RiskFreeRate, leg.Iv, leg.IsCall);
+			}
+			value += leg.Sign * legValue;
+		}
+		return value;
+	}
+
+	private static LegAtStep AtStep(PathLeg leg, DateTime at, IReadOnlyList<DividendEvent>? dividends)
+	{
+		var expiry = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
+		var sign = (leg.IsLong ? 1.0 : -1.0) * leg.Qty;
+		var isCall = leg.Parsed.CallPut == "C";
+		if (at >= expiry) return new LegAtStep(sign, (double)leg.Parsed.Strike, isCall, Expired: true, 0, 0, 0);
+		return new LegAtStep(sign, (double)leg.Parsed.Strike, isCall, Expired: false, (expiry - at).TotalDays / 365.0, (double)leg.Iv, (double)OptionMath.DividendPresentValue(dividends, at, expiry, OptionMath.RiskFreeRate));
+	}
+
 	/// <summary>Row i = probability of moving from node i to each node in one step of variance 1/K (z units), binned on the
 	/// same edges as the scoring nodes (outer bins open-ended, so every row sums to 1).</summary>
-	private static double[,] BuildTransition(int steps)
+	private static Transition BuildTransition(int steps)
 	{
 		var nodes = CandidateScorer.ScenarioNodes;
 		var n = nodes.Length;
 		var width = 2.0 * CandidateScorer.ScenarioBinEdgeSigmas / n;
 		var stepSd = Math.Sqrt(1.0 / steps);
 		var m = new double[n, n];
+		var first = new int[n];
+		var last = new int[n];
 		for (var i = 0; i < n; i++)
 		{
+			first[i] = n;
+			last[i] = -1;
 			for (var j = 0; j < n; j++)
 			{
 				var lo = j == 0 ? double.NegativeInfinity : -CandidateScorer.ScenarioBinEdgeSigmas + j * width;
 				var hi = j == n - 1 ? double.PositiveInfinity : -CandidateScorer.ScenarioBinEdgeSigmas + (j + 1) * width;
 				m[i, j] = OptionMath.NormalCdf((hi - nodes[i].Z) / stepSd) - OptionMath.NormalCdf((lo - nodes[i].Z) / stepSd);
+				if (m[i, j] == 0) continue;
+				first[i] = Math.Min(first[i], j);
+				last[i] = j;
 			}
 		}
-		return m;
+		return new Transition(m, first, last);
 	}
 }

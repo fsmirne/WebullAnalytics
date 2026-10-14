@@ -169,7 +169,7 @@ internal static class RiskDiagnosticBuilder
 		// Liquidity stats: worst-leg bid/ask spread (as fraction of mid), absolute minimum OI across
 		// legs, and the worst leg's relative OI vs same-expiry near-spot strikes (catches sub-grid
 		// strikes that have absolute OI > floor but pale next to neighbors). Worst-leg gates the exit.
-		var (worstLegSpreadPct, minOpenInterest, minRelativeOi) = ComputeLiquidityStats(legs, quotes, spot);
+		var (worstLegSpreadPct, minOpenInterest, minRelativeOi) = quotes == null ? (null, null, null) : CandidateScorer.ComputeLegLiquidityStats(legs.Select(l => l.Symbol), quotes, spot);
 
 		var hasShortCallLeg = shortLegs.Any(l => l.Parsed.CallPut == "C");
 		var junkBondDemandScore = sentiment?.Components.FirstOrDefault(c => c.Key == "junk_bond_demand")?.Score;
@@ -371,83 +371,4 @@ internal static class RiskDiagnosticBuilder
 	private static string PascalToSnake(string s) =>
 		string.Concat(s.Select((c, i) => i > 0 && char.IsUpper(c) ? "_" + char.ToLowerInvariant(c) : char.ToLowerInvariant(c).ToString()));
 
-	/// <summary>Per-leg bid/ask spread as a fraction of mid; minimum effective liquidity per leg
-	/// (max of OI and intraday volume); relative liquidity per leg (leg's effective liquidity / max
-	/// among same-expiry strikes within ±10% of spot). Returns the worst spread, minimum absolute
-	/// effective liquidity, and minimum relative liquidity across legs. "Effective liquidity" credits
-	/// either standing OI or active volume — a low-OI contract trading 500 lots today is more
-	/// exit-friendly than its OI alone suggests. Values null when quotes are unavailable.</summary>
-	private static (decimal? worstSpreadPct, long? minOi, decimal? minRelOi) ComputeLiquidityStats(
-		IReadOnlyList<DiagnosticLeg> legs,
-		IReadOnlyDictionary<string, OptionContractQuote>? quotes,
-		decimal spot)
-	{
-		if (quotes == null || legs.Count == 0) return (null, null, null);
-
-		decimal? worstSpread = null;
-		long? minOi = null;
-		decimal? minRel = null;
-		foreach (var leg in legs)
-		{
-			if (!quotes.TryGetValue(leg.Symbol, out var q)) continue;
-
-			if (q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m)
-			{
-				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-				if (mid > 0m)
-				{
-					var spreadPct = (q.Ask.Value - q.Bid.Value) / mid;
-					if (worstSpread == null || spreadPct > worstSpread.Value)
-						worstSpread = spreadPct;
-				}
-			}
-
-			var legLiq = EffectiveLiquidity(q);
-			if (legLiq.HasValue && (minOi == null || legLiq.Value < minOi.Value))
-				minOi = legLiq.Value;
-
-			if (spot > 0m && legLiq.HasValue && legLiq.Value > 0)
-			{
-				var nearbyMax = FindMaxLiquidityNearStrike(leg.Parsed, quotes, spot);
-				if (nearbyMax > 0)
-				{
-					var ratio = (decimal)legLiq.Value / nearbyMax;
-					if (minRel == null || ratio < minRel.Value)
-						minRel = ratio;
-				}
-			}
-		}
-		return (worstSpread, minOi, minRel);
-	}
-
-	/// <summary>Combined OI/volume liquidity proxy: <c>max(OI, volume)</c>. Mirrors
-	/// CandidateScorer.EffectiveLiquidity; kept private here to avoid a public dependency.</summary>
-	private static long? EffectiveLiquidity(OptionContractQuote q)
-	{
-		var oi = q.OpenInterest ?? -1;
-		var vol = q.Volume ?? -1;
-		if (oi < 0 && vol < 0) return null;
-		return Math.Max(Math.Max(oi, 0), Math.Max(vol, 0));
-	}
-
-	/// <summary>Maximum effective liquidity (max OI/volume) across same-expiry, same-call/put strikes
-	/// within ±10% of spot. Used to detect sub-grid strikes by comparing a leg's liquidity to the
-	/// local maximum.</summary>
-	private static long FindMaxLiquidityNearStrike(OptionParsed leg, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot)
-	{
-		long maxLiq = 0;
-		foreach (var (sym, q) in quotes)
-		{
-			var liq = EffectiveLiquidity(q);
-			if (!liq.HasValue || liq.Value <= maxLiq) continue;
-			var p = ParsingHelpers.ParseOptionSymbol(sym);
-			if (p == null) continue;
-			if (!ParsingHelpers.RootsMatchForAggregation(p.Root, leg.Root, leg.ExpiryDate)) continue;
-			if (p.ExpiryDate.Date != leg.ExpiryDate.Date) continue;
-			if (p.CallPut != leg.CallPut) continue;
-			if (Math.Abs(p.Strike - spot) / spot > 0.10m) continue;
-			maxLiq = liq.Value;
-		}
-		return maxLiq;
-	}
 }

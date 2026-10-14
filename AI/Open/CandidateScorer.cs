@@ -78,9 +78,11 @@ internal static class CandidateScorer
 
 	private sealed class ChainScalarCache
 	{
-		public readonly ConcurrentDictionary<(string, DateTime), decimal?> MaxPain = new();
-		public readonly ConcurrentDictionary<(string, DateTime), GexResult> Gex = new();
-		public readonly ConcurrentDictionary<(string, DateTime), VexResult> Vex = new();
+		// Whole-chain scans are wrapped in Lazy so the parallel scorers that all miss on a fresh tick wait for one computation
+		// instead of each running it (GetOrAdd alone runs the factory on every racing thread).
+		public readonly ConcurrentDictionary<(string, DateTime), Lazy<decimal?>> MaxPain = new();
+		public readonly ConcurrentDictionary<(string, DateTime), Lazy<GexResult>> Gex = new();
+		public readonly ConcurrentDictionary<(string, DateTime), Lazy<VexResult>> Vex = new();
 		// Long-leg Black-Scholes memoized per tick. The breakeven (120 pt) + peak (240 pt) scans evaluate
 		// the SAME long-leg BS curve for every short paired with a given (long leg, short expiry) — dozens
 		// of redundant recomputes under dense enumeration. Keyed on the full BS inputs so it's exact.
@@ -88,6 +90,8 @@ internal static class CandidateScorer
 		// Back-solved market-implied IV per (symbol, spot) — the same long leg's IV is re-solved for every
 		// short paired with it. Keyed on spot too so it stays correct if a quotes object spans spots.
 		public readonly ConcurrentDictionary<(string Sym, decimal Spot), decimal> MarketIv = new();
+		// Max effective liquidity per (root, expiry, call/put, spot): a full-chain scan every candidate leg would otherwise repeat.
+		public readonly ConcurrentDictionary<(string Root, DateTime Expiry, string CallPut, decimal Spot), Lazy<long>> NearbyLiquidity = new();
 	}
 
 	/// <summary>Black-Scholes for a calendar/diagonal long leg, memoized per tick via <paramref name="cache"/>
@@ -109,21 +113,21 @@ internal static class CandidateScorer
 	{
 		if (quotes == null) return ComputeMaxPainPrice(ticker, expiry, quotes!, spot);
 		return _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache())
-			.MaxPain.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => ComputeMaxPainPrice(ticker, expiry, quotes, spot));
+			.MaxPain.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => new Lazy<decimal?>(() => ComputeMaxPainPrice(ticker, expiry, quotes, spot))).Value;
 	}
 
 	private static GexResult GexCached(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
 		if (quotes == null) return ComputeGex(ticker, expiry, spot, asOf, quotes!);
 		return _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache())
-			.Gex.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => ComputeGex(ticker, expiry, spot, asOf, quotes));
+			.Gex.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => new Lazy<GexResult>(() => ComputeGex(ticker, expiry, spot, asOf, quotes))).Value;
 	}
 
 	internal static VexResult VexCached(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
 		if (quotes == null) return ComputeVex(ticker, expiry, spot, asOf, quotes!);
 		return _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache())
-			.Vex.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => ComputeVex(ticker, expiry, spot, asOf, quotes));
+			.Vex.GetOrAdd((ticker.ToUpperInvariant(), expiry.Date), _ => new Lazy<VexResult>(() => ComputeVex(ticker, expiry, spot, asOf, quotes))).Value;
 	}
 
 	/// <summary>Layer-1 terrain veto: true when a SHORT leg's strike sits inside the put-dominated
@@ -616,14 +620,14 @@ internal static class CandidateScorer
 	/// makers are engaged and exit liquidity is real even if the standing book is thin. Volume falls
 	/// back to OI alone outside market hours (volume = 0 / null). Pass <paramref name="spot"/> = null
 	/// to skip the relative computation.</summary>
-	public static (decimal? worstSpreadPct, long? minOi, decimal? minRelOi) ComputeLegLiquidityStats(IEnumerable<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot)
+	public static (decimal? worstSpreadPct, long? minOi, decimal? minRelOi) ComputeLegLiquidityStats(IEnumerable<string> symbols, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot)
 	{
 		decimal? worstSpread = null;
 		long? minOi = null;
 		decimal? minRel = null;
-		foreach (var leg in legs)
+		foreach (var symbol in symbols)
 		{
-			if (!quotes.TryGetValue(leg.Symbol, out var q)) continue;
+			if (!quotes.TryGetValue(symbol, out var q)) continue;
 			if (q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m)
 			{
 				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
@@ -640,7 +644,7 @@ internal static class CandidateScorer
 
 			if (spot.HasValue && spot.Value > 0m && legLiq.HasValue && legLiq.Value > 0)
 			{
-				var legParsed = ParsingHelpers.ParseOptionSymbol(leg.Symbol);
+				var legParsed = ParsingHelpers.ParseOptionSymbol(symbol);
 				if (legParsed != null)
 				{
 					var nearbyMax = FindMaxLiquidityNearStrike(legParsed, quotes, spot.Value);
@@ -670,8 +674,11 @@ internal static class CandidateScorer
 
 	/// <summary>Maximum effective liquidity (max OI/volume) across same-expiry, same-call/put strikes
 	/// within ±10% of spot. Used to detect sub-grid strikes by comparing a leg's liquidity to the
-	/// local maximum.</summary>
+	/// local maximum. Memoized per quotes object (one tick's chain), like the other chain scalars.</summary>
 	private static long FindMaxLiquidityNearStrike(OptionParsed leg, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot)
+		=> _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache()).NearbyLiquidity.GetOrAdd((leg.Root, leg.ExpiryDate.Date, leg.CallPut, spot), _ => new Lazy<long>(() => ScanMaxLiquidityNearStrike(leg, quotes, spot))).Value;
+
+	private static long ScanMaxLiquidityNearStrike(OptionParsed leg, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot)
 	{
 		long maxLiq = 0;
 		foreach (var (sym, q) in quotes)
@@ -956,7 +963,7 @@ internal static class CandidateScorer
 	/// <summary>Expected P&amp;L per contract after friction, with the configured take-profit / stop exits applied along the
 	/// path (<see cref="PathExitModel"/>) over the same distribution as <paramref name="grid"/>. With realized-EV scoring off,
 	/// or no exit armed, it is the grid's end-of-life EV minus friction (friction is 0 when scoring is off).</summary>
-	private static decimal ManagedEv(IReadOnlyList<ScenarioPoint> grid, Func<decimal, decimal> pnlAtTarget, IReadOnlyList<PathLeg> legs, decimal entryValuePerContract, decimal? maxProfit, decimal maxLoss, decimal friction, decimal spot, decimal forward, decimal scenarioVol, double years, decimal biasShiftSigmas, DateTime asOf, DateTime targetExpiry, RealizedVolModel? realizedVol, IReadOnlyList<DividendEvent>? dividends, OpenerRealizedExpectancyConfig cfg, OptionMath.BlackScholesEvaluator? blackScholes = null)
+	private static decimal ManagedEv(IReadOnlyList<ScenarioPoint> grid, Func<decimal, decimal> pnlAtTarget, IReadOnlyList<PathLeg> legs, decimal entryValuePerContract, decimal? maxProfit, decimal maxLoss, decimal friction, decimal spot, decimal forward, decimal scenarioVol, double years, decimal biasShiftSigmas, DateTime asOf, DateTime targetExpiry, RealizedVolModel? realizedVol, IReadOnlyList<DividendEvent>? dividends, OpenerRealizedExpectancyConfig cfg)
 	{
 		var takeProfit = RealizedExpectancy.TakeProfitPerContract(entryValuePerContract, cfg);
 		var stopLoss = RealizedExpectancy.StopLossPerContract(maxProfit, maxLoss, cfg);
@@ -978,7 +985,7 @@ internal static class CandidateScorer
 			stepTimes[k - 1] = k == steps ? targetClose
 				: realizedVol != null ? realizedVol.TimeAtVarianceFraction(asOf, targetExpiry, (double)k / steps)
 				: asOf + (targetClose - asOf) * ((double)k / steps);
-		return PathExitModel.ExpectedPnl(legs, entryValuePerContract, pnlAtTarget, spot, targetCenter, sigmaTotal, stepTimes, takeProfit, stopLoss, dividends, blackScholes) - friction;
+		return PathExitModel.ExpectedPnl(legs, entryValuePerContract, pnlAtTarget, spot, targetCenter, sigmaTotal, stepTimes, takeProfit, stopLoss, dividends) - friction;
 	}
 
 	/// <summary>Annualized vol (on the IV's clock) of the scoring distribution: the realized-vol forecast when one is
@@ -1557,7 +1564,7 @@ internal static class CandidateScorer
 			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
 			spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
-		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
+		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs.Select(l => l.Symbol), quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.Weights.Sentiment, !string.Equals(cfg.SentimentMode, "momentum", StringComparison.OrdinalIgnoreCase));
 		var biasAdjBase = BiasAdjust(rawScore, bias, fit, cfg.Weights.DirectionalFit);
@@ -1714,7 +1721,7 @@ internal static class CandidateScorer
 			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
 			spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
-		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
+		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs.Select(l => l.Symbol), quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.Weights.Sentiment, !string.Equals(cfg.SentimentMode, "momentum", StringComparison.OrdinalIgnoreCase));
 		// Directional-conviction gate (debit verticals are directional long premium too): de-rate when
@@ -2314,7 +2321,7 @@ internal static class CandidateScorer
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(defs.Select(d => (d.Proposal.Symbol, d.Parsed, d.IsLong)), spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
-		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
+		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs.Select(l => l.Symbol), quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.Weights.Sentiment, !string.Equals(cfg.SentimentMode, "momentum", StringComparison.OrdinalIgnoreCase));
 		var biasAdjBaseMl = BiasAdjust(rawScore, bias, fit, cfg.Weights.DirectionalFit);
@@ -2512,7 +2519,7 @@ internal static class CandidateScorer
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
 		PathLeg[] pathLegs = [new(shortParsed, ivShort, false, 1), new(longParsed, ivLong, true, 1)];
-		var realizedEv = ManagedEv(grid, PnlAtTarget, pathLegs, debitPerContract, maxProfit, maxLoss: maxLossPoint, friction, spot, forward, scenarioVol, shortYears, biasShift, asOf, shortParsed.ExpiryDate, realizedVol, dividends, cfg.RealizedExpectancy, longBs);
+		var realizedEv = ManagedEv(grid, PnlAtTarget, pathLegs, debitPerContract, maxProfit, maxLoss: maxLossPoint, friction, spot, forward, scenarioVol, shortYears, biasShift, asOf, shortParsed.ExpiryDate, realizedVol, dividends, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(realizedEv, daysToTarget, efficiencyCapital);
 		// LongCalendar reads neutral (0); LongDiagonal picks up its sign from the strike layout via the
 		// skeleton overload, so the technical bias factor lifts/cuts a diagonal whose direction matches
@@ -2550,7 +2557,7 @@ internal static class CandidateScorer
 			new (string, OptionParsed, bool)[] { (shortLeg.Symbol, shortParsed, false), (longLeg.Symbol, longParsed, true) },
 			spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
-		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
+		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs.Select(l => l.Symbol), quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.Weights.Sentiment, !string.Equals(cfg.SentimentMode, "momentum", StringComparison.OrdinalIgnoreCase));
 		var biasAdjBaseCd = BiasAdjust(rawScore, bias, fit, cfg.Weights.DirectionalFit);
@@ -2740,7 +2747,7 @@ internal static class CandidateScorer
 		var assignmentFactor = ComputeAssignmentRiskFactor(skel, spot, asOf, ResolveStrikeStep(cfg, skel.Ticker), bias);
 		var statArb = ComputeMarketTheoreticalAggregate(new (string, OptionParsed, bool)[] { (leg.Symbol, parsed, true) }, spot, asOf, quotes, cfg.Indicators.IvDefaultPct, events, cfg.Indicators.Events);
 		var statArbFactor = ComputeStatArbAdjustmentFactor(statArb?.MarketNet, statArb?.TheoreticalNet, statArb?.GrossTheoretical, cfg.Weights.StatArb);
-		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs, quotes, spot);
+		var (worstSpread, minOi, minRelOi) = ComputeLegLiquidityStats(skel.Legs.Select(l => l.Symbol), quotes, spot);
 		var liquidityFactor = ComputeLiquidityFactor(worstSpread, minOi, minRelOi, cfg.Liquidity.Weight);
 		var sentimentFactor = ComputeSentimentFactor(sentimentScore, fit, cfg.Weights.Sentiment, !string.Equals(cfg.SentimentMode, "momentum", StringComparison.OrdinalIgnoreCase));
 		// Directional-conviction gate: long premium needs follow-through to beat theta; de-rate it when

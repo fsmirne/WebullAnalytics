@@ -75,16 +75,20 @@ internal static class OptionMath
 	{
 		if (timeYears <= 0)
 			return Intrinsic(spot, strike, callPut);
+		return (decimal)BlackScholesValue((double)spot, (double)strike, timeYears, riskFreeRate, (double)iv, callPut == "C");
+	}
 
-		double s = (double)spot, k = (double)strike, sigma = (double)iv, t = timeYears, r = riskFreeRate;
+	/// <summary><see cref="BlackScholes"/> in doubles, for hot loops that price many spots (timeYears &gt; 0).</summary>
+	internal static double BlackScholesValue(double s, double k, double t, double r, double sigma, bool isCall)
+	{
 		double d1 = (Math.Log(s / k) + (r + sigma * sigma / 2.0) * t) / (sigma * Math.Sqrt(t));
 		double d2 = d1 - sigma * Math.Sqrt(t);
 
-		double price = callPut == "C"
+		double price = isCall
 			? s * NormalCdf(d1) - k * Math.Exp(-r * t) * NormalCdf(d2)
 			: k * Math.Exp(-r * t) * NormalCdf(-d2) - s * NormalCdf(-d1);
 
-		return (decimal)Math.Max(0, price);
+		return Math.Max(0, price);
 	}
 
 	/// <summary>
@@ -100,7 +104,17 @@ internal static class OptionMath
 	/// </summary>
 	internal static decimal DividendAdjustedSpot(decimal spot, IReadOnlyList<DividendEvent>? dividends, DateTime evalDate, DateTime expiry, double riskFreeRate)
 	{
-		if (dividends == null || dividends.Count == 0) return spot;
+		var adjusted = spot - DividendPresentValue(dividends, evalDate, expiry, riskFreeRate);
+		// Guard against pathological over-subtraction (divs ≥ spot): a non-positive spot would blow up
+		// log(S/K) in Black-Scholes. Such inputs are non-physical, so fall back to the unadjusted spot.
+		return adjusted > 0m ? adjusted : spot;
+	}
+
+	/// <summary>Present value at <paramref name="evalDate"/> of the cash dividends going ex in (<paramref name="evalDate"/>,
+	/// <paramref name="expiry"/>] — the amount <see cref="DividendAdjustedSpot"/> subtracts.</summary>
+	internal static decimal DividendPresentValue(IReadOnlyList<DividendEvent>? dividends, DateTime evalDate, DateTime expiry, double riskFreeRate)
+	{
+		if (dividends == null || dividends.Count == 0) return 0m;
 		decimal pv = 0m;
 		foreach (var d in dividends)
 		{
@@ -108,10 +122,7 @@ internal static class OptionMath
 			var years = (d.ExDate - evalDate).TotalDays / 365.0;
 			pv += d.Amount * (decimal)Math.Exp(-riskFreeRate * years);
 		}
-		var adjusted = spot - pv;
-		// Guard against pathological over-subtraction (divs ≥ spot): a non-positive spot would blow up
-		// log(S/K) in Black-Scholes. Such inputs are non-physical, so fall back to the unadjusted spot.
-		return adjusted > 0m ? adjusted : spot;
+		return pv;
 	}
 
 	/// <summary>Risk-neutral forward of the underlying at <paramref name="horizon"/>: the escrowed-dividend spot
@@ -556,24 +567,33 @@ internal static class OptionMath
 		return (a + b) / 2m;
 	}
 
-	/// <summary>Narrows a coarse bracket [a, b] to a ≤$0.01 interval by scanning fn at $0.01 steps so that
-	/// both break-even engines start bisection from the same bracket and produce an identical display value.
-	/// Without this, the scorer (120-step ±60% scan) and the analyzer (strike-step ladder) find different coarse
-	/// brackets; bisecting from different brackets on the same continuous curve gives results that differ by
+	/// <summary>Narrows a coarse bracket [a, b] to the ≤$0.01 interval of the $0.01 grid a, a + 0.01, …, b that holds
+	/// the sign change, so that both break-even engines start bisection from the same bracket and produce an identical
+	/// display value. Without this, the scorer (120-step ±60% scan) and the analyzer (strike-step ladder) find different
+	/// coarse brackets; bisecting from different brackets on the same continuous curve gives results that differ by
 	/// ~$0.0001–$0.0002 — invisible in absolute terms but enough to straddle a $0.005 display boundary and show
-	/// $22.21 vs $22.22. Returns (a, b) unchanged when the bracket is already ≤$0.01.</summary>
+	/// $22.21 vs $22.22. The grid interval is found by bisecting over grid indices (a coarse bracket holds a single
+	/// crossing), not by walking every cent. Returns (a, b) unchanged when the bracket is already ≤$0.01 or its
+	/// ends do not have strictly opposite signs.</summary>
 	internal static (decimal a, decimal b) NarrowBracket(Func<decimal, decimal> fn, decimal a, decimal b)
 	{
 		if (b - a <= 0.01m) return (a, b);
 		var pA = fn(a);
-		for (var x = a + 0.01m; x < b; x += 0.01m)
+		var pB = fn(b);
+		if (!((pA > 0m && pB < 0m) || (pA < 0m && pB > 0m))) return (a, b);
+		var n = (int)Math.Ceiling((b - a) / 0.01m);
+		int lo = 0, hi = n;
+		while (hi - lo > 1)
 		{
-			var pX = fn(x);
-			if ((pA > 0m && pX < 0m) || (pA < 0m && pX > 0m)) return (x - 0.01m, x);
-			pA = pX;
+			var mid = (lo + hi) / 2;
+			var pM = fn(CentGridPoint(a, b, n, mid));
+			if (pM != 0m && (pM > 0m) == (pA > 0m)) lo = mid;
+			else hi = mid;
 		}
-		return (a, b);
+		return (CentGridPoint(a, b, n, lo), CentGridPoint(a, b, n, hi));
 	}
+
+	private static decimal CentGridPoint(decimal a, decimal b, int n, int i) => i >= n ? b : a + 0.01m * i;
 
 	// --- Implied Volatility ---
 
