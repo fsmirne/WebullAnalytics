@@ -57,6 +57,34 @@ internal sealed record RealizedVolModel(double OvernightVariance, double Session
 		return variance;
 	}
 
+	/// <summary>Inverse of <see cref="VarianceTo"/>: the clock time by which <paramref name="fraction"/> of the variance
+	/// left until the target close has accrued. An overnight gap accrues all at once at the open, so a fraction that lands
+	/// inside a gap maps to that open; inside a session it maps proportionally through the session's minutes.</summary>
+	internal DateTime TimeAtVarianceFraction(DateTime asOf, DateTime targetExpiry, double fraction)
+	{
+		var remaining = VarianceTo(asOf, targetExpiry) * Math.Clamp(fraction, 0.0, 1.0);
+		DateTime last = asOf;
+		for (var day = asOf.Date; day <= targetExpiry.Date; day = day.AddDays(1))
+		{
+			if (!MarketCalendar.IsOpen(day)) continue;
+			var open = day + OptionMath.MarketOpen;
+			var close = day + (MarketCalendar.IsEarlyClose(day) ? new TimeSpan(13, 0, 0) : OptionMath.MarketClose);
+			if (asOf >= close) continue;
+			if (asOf < open)
+			{
+				if (remaining <= OvernightVariance) return open;
+				remaining -= OvernightVariance;
+			}
+			var start = asOf > open ? asOf : open;
+			var sessionLeft = SessionVariance * (close - start).TotalMinutes / (close - open).TotalMinutes;
+			if (remaining <= sessionLeft)
+				return SessionVariance > 0 ? start.AddMinutes(remaining / SessionVariance * (close - open).TotalMinutes) : close;
+			remaining -= sessionLeft;
+			last = close;
+		}
+		return last;
+	}
+
 	/// <summary>The forecast expressed as an annualized vol on the same clock as <paramref name="years"/> (the
 	/// IV back-solve's time-to-target), so it drops into the scenario grid / POP / expected move in place of IV:
 	/// σ_scenario·√years = √VarianceTo. Null when there's no time or variance left.</summary>

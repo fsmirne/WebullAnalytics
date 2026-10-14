@@ -476,7 +476,7 @@ internal static class AIConfigLoader
 	/// candidate scorer receives only <see cref="OpenerConfig"/>, so this load-time copy is how it reaches
 	/// those values. Idempotent — call once per resolved config after layering. Keep
 	/// <see cref="OpenerRealizedExpectancyConfig.Enabled"/> as-is (it deserializes from the opener block).
-	/// <para>The scorer's realized EV floors every losing scenario at the stop, so it may only model a stop that will actually
+	/// <para>The scorer's realized EV exits paths at the stop / take-profit, so it may only model exits that will actually
 	/// be taken. With <c>rules.stopLoss.enabled</c> false nothing ever exits at the stop (StopLossRule and the backtest's intraday
 	/// SL both gate on it), so the bundle gets "no stop": pct-of-max-loss 1.0 (the floor equals the max loss — no clamp) and
 	/// pct-of-max-profit 0. Previously the configured percentage was copied regardless, so SPY DC2 (stop disabled) and SPY
@@ -489,6 +489,7 @@ internal static class AIConfigLoader
 		var stopArmed = config.Rules.StopLoss.Enabled;
 		ev.StopLossPctOfMaxLoss = stopArmed ? config.Rules.StopLoss.PctOfMaxLoss : 1m;
 		ev.StopLossPctOfMaxProfit = stopArmed ? config.Rules.StopLoss.PctOfMaxProfit : 0m;
+		ev.TakeProfitPctOfPremium = config.Rules.TakeProfit.Enabled ? config.Rules.TakeProfit.ProfitTargetPctOfPremium : 0m;
 		ev.SlippagePerSharePerOrder = config.Execution.SlippagePerSharePerOrder;
 		ev.RoundTrips = config.Execution.RoundTrips;
 	}

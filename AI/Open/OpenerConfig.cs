@@ -800,20 +800,10 @@ internal sealed class OpenerEventsConfig
 	[JsonPropertyName("dividendFrequency")] public int DividendFrequency { get; set; } = 4;
 }
 
-/// <summary>Realized-expectancy scoring: replaces the theoretical "hold to expiry, collect max"
-/// assumption with a managed-exit model plus round-trip slippage. When enabled, scoring uses the
-/// adjusted EV; the theoretical numbers are preserved on the proposal so users can audit the gap.
-///
-/// Per-scenario realized P&L = max(theoretical_pnl, -<see cref="StopLossPctOfMaxLoss"/> × |maxLoss|)
-/// − friction. Friction = sum of per-leg (half-spread + <see cref="SlippagePerSharePerOrder"/>) × 100 ×
-/// <see cref="RoundTrips"/>. Only the downside is clamped — winners ride to their theoretical max (the
-/// profit-target cap was removed with Target B).
-///
-/// The flooring is a path-conservative approximation: it credits the managed stop only at terminal
-/// scenario points, ignoring the optionality of stopping intra-life when the path crosses the floor. The
-/// error is in the safe direction. Default stops at 50% of max loss (≈ 2× credit on typical 2× wide IC
-/// widths), one round trip's worth of half-spread per leg per side.</summary>
-/// <summary>The realized-EV parameters the candidate scorer prices against. The scorer receives only
+/// <summary>Realized-expectancy scoring: replaces the theoretical "hold to expiry" assumption with the managed exits
+/// (take-profit / stop applied along the price path, <see cref="PathExitModel"/>) plus round-trip friction; the
+/// theoretical numbers are preserved on the proposal so users can audit the gap.
+/// These are the realized-EV parameters the candidate scorer prices against. The scorer receives only
 /// <see cref="OpenerConfig"/>, so this is the load-time aggregation point: <see cref="Enabled"/> is the
 /// only field read from JSON (the EV master switch); the exit thresholds and cost model are sourced from
 /// their real homes — <c>rules.stopLoss.pctOfMaxLoss</c> and the top-level <c>execution</c> block — and
@@ -831,6 +821,10 @@ internal sealed class OpenerRealizedExpectancyConfig
 	/// <summary>Independent stop-loss as a fraction of theoretical max profit. Populated from
 	/// rules.stopLoss.pctOfMaxProfit. 0 disables (default).</summary>
 	[JsonIgnore] public decimal StopLossPctOfMaxProfit { get; set; } = 0m;
+
+	/// <summary>Take-profit as a fraction of entry premium. Populated from rules.takeProfit.profitTargetPctOfPremium (0 when
+	/// the rule is disabled or the target is unset).</summary>
+	[JsonIgnore] public decimal TakeProfitPctOfPremium { get; set; } = 0m;
 
 	/// <summary>Per-share friction per broker order (×RoundTrips for exit). Populated from execution.slippagePerSharePerOrder.</summary>
 	[JsonIgnore] public decimal SlippagePerSharePerOrder { get; set; } = 0m;

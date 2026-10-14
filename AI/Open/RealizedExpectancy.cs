@@ -1,19 +1,8 @@
 namespace WebullAnalytics.AI;
 
-/// <summary>Adjusts the theoretical EV/PnL view with two corrections pros always apply:
-/// <list type="number">
-///   <item><description><b>Managed stop</b>: scenarios are floored at the stop-loss level rather than
-///   carried to their full theoretical loss (−50% max loss by default, the "2× credit stop" on typical
-///   short verticals). Winners ride to their theoretical max — the profit-target cap was removed with
-///   Target B, so only the downside is clamped.</description></item>
-///   <item><description><b>Slippage</b>: charges per-leg half-spread × round-trip count per
-///   contract. The flooring is path-conservative — it credits the managed stop only at terminal
-///   scenario points, ignoring the optionality of stopping intra-life when the path crosses the
-///   floor. Errs in the safe direction.</description></item>
-/// </list>
-/// All functions are pure. Caller decides whether the feature is on by passing
-/// <see cref="OpenerRealizedExpectancyConfig.Enabled"/>; when off, clamping no-ops and the caller
-/// should also pass <c>friction = 0</c> so the realized EV collapses to the theoretical EV.</summary>
+/// <summary>Inputs the scorer needs to price a trade the way it will actually be managed: round-trip friction and the
+/// take-profit / stop-loss levels the exit rules will act on. The path-dependent expectation itself lives in
+/// <see cref="PathExitModel"/>; all functions here are pure.</summary>
 internal static class RealizedExpectancy
 {
 	/// <summary>Round-trip per-contract friction in dollars:
@@ -44,38 +33,24 @@ internal static class RealizedExpectancy
 	/// verticals by construction); every other supported structure fills in 1.</summary>
 	internal static int OrdersForStructure(OpenStructureKind kind) => StructureKindInfo.OrderCount(kind);
 
-	/// <summary>Stop-loss dollar floor (≤ 0). Returns the raw <paramref name="maxLoss"/> when the
-	/// feature is disabled. <paramref name="maxLoss"/> is expected to be ≤ 0 (signed loss); the
-	/// floor is constructed as <c>-stopPct × |maxLoss|</c>.</summary>
-	public static decimal StopLossPerContract(decimal maxLoss, OpenerRealizedExpectancyConfig cfg) =>
-		cfg.Enabled ? -cfg.StopLossPctOfMaxLoss * Math.Abs(maxLoss) : maxLoss;
+	/// <summary>P&amp;L per contract (&gt; 0) at which TakeProfitRule closes: <c>pct × |entry premium|</c> (debit paid or credit
+	/// received). Null when realized-EV scoring is off or no take-profit is armed.</summary>
+	public static decimal? TakeProfitPerContract(decimal entryValuePerContract, OpenerRealizedExpectancyConfig cfg) =>
+		cfg.Enabled && cfg.TakeProfitPctOfPremium > 0m && entryValuePerContract != 0m ? cfg.TakeProfitPctOfPremium * Math.Abs(entryValuePerContract) : null;
 
-	/// <summary>Floors one scenario's theoretical PnL at the stop-loss level and subtracts friction. Winners
-	/// ride to their theoretical max (the profit-target cap was removed with Target B), so only the downside
-	/// is clamped. When the feature is disabled, returns the input minus friction unchanged — the caller is
-	/// responsible for passing <c>friction = 0</c> in that case (see <see cref="ComputeFrictionPerContract"/>).</summary>
-	public static decimal RealizePnl(decimal theoreticalPnl, decimal maxLoss, decimal frictionPerContract, OpenerRealizedExpectancyConfig cfg)
+	/// <summary>Loss per contract (&gt; 0) at which StopLossRule closes: the nearer of <c>pctOfMaxLoss × |maxLoss|</c> and
+	/// <c>pctOfMaxProfit × maxProfit</c>. Null when realized-EV scoring is off or no stop is armed (a disabled stop is
+	/// populated as pct-of-max-loss 1.0, which never fires before max loss).</summary>
+	public static decimal? StopLossPerContract(decimal maxProfit, decimal maxLoss, OpenerRealizedExpectancyConfig cfg)
 	{
-		if (!cfg.Enabled) return theoreticalPnl - frictionPerContract;
-
-		var stopFloor = StopLossPerContract(maxLoss, cfg);
-		// Degenerate (maxLoss == 0 → no meaningful floor): just subtract friction.
-		if (stopFloor >= 0m) return theoreticalPnl - frictionPerContract;
-
-		return Math.Max(theoreticalPnl, stopFloor) - frictionPerContract;
-	}
-
-	/// <summary>Realized EV across a scenario grid. Each grid point's PnL is run through
-	/// <see cref="RealizePnl"/> before being weighted. When the feature is disabled, this equals
-	/// the theoretical EV minus friction (which is 0 if the caller wired the gate correctly).</summary>
-	public static decimal RealizeEv(IReadOnlyList<CandidateScorer.ScenarioPoint> grid, Func<decimal, decimal> theoreticalPnlAt, decimal maxLoss, decimal frictionPerContract, OpenerRealizedExpectancyConfig cfg)
-	{
-		decimal ev = 0m;
-		foreach (var pt in grid)
+		if (!cfg.Enabled) return null;
+		decimal? stop = null;
+		if (cfg.StopLossPctOfMaxLoss < 1m && maxLoss < 0m) stop = cfg.StopLossPctOfMaxLoss * Math.Abs(maxLoss);
+		if (cfg.StopLossPctOfMaxProfit > 0m && maxProfit > 0m)
 		{
-			var theo = theoreticalPnlAt(pt.SpotAtExpiry);
-			ev += pt.Weight * RealizePnl(theo, maxLoss, frictionPerContract, cfg);
+			var byProfit = cfg.StopLossPctOfMaxProfit * maxProfit;
+			stop = stop.HasValue ? Math.Min(stop.Value, byProfit) : byProfit;
 		}
-		return ev;
+		return stop is > 0m ? stop : null;
 	}
 }

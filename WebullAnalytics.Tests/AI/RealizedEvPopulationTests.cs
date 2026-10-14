@@ -36,14 +36,24 @@ public class RealizedEvPopulationTests
 	}
 
 	[Fact]
-	public void DisabledStop_RealizedEvIsHoldToExpiryMinusFriction()
+	public void DisabledStop_GivesNoStopThreshold()
 	{
-		// The 2026-10-09 SPY 0DTE put debit spread shape: −$63 max loss, +$137 max profit. Two terminal scenarios.
-		var grid = new[] { new CandidateScorer.ScenarioPoint(770m, 0.4m), new CandidateScorer.ScenarioPoint(780m, 0.6m) };
-		decimal Pnl(decimal s) => s < 775m ? 137m : -63m;
 		var c = Config(stopEnabled: false);
 		AIConfigLoader.PopulateRealizedEv(c);
-		var ev = RealizedExpectancy.RealizeEv(grid, Pnl, maxLoss: -63m, frictionPerContract: 2m, c.Opener.RealizedExpectancy);
-		Assert.Equal(0.4m * 137m + 0.6m * -63m - 2m, ev);   // no 60% floor on the losing scenario
+		Assert.Null(RealizedExpectancy.StopLossPerContract(maxProfit: 137m, maxLoss: -63m, c.Opener.RealizedExpectancy));
+	}
+
+	[Fact]
+	public void TakeProfit_IsCopiedOnlyWhenTheRuleIsEnabled()
+	{
+		var c = Config(stopEnabled: false);
+		c.Rules.TakeProfit.Enabled = true;
+		c.Rules.TakeProfit.ProfitTargetPctOfPremium = 0.20m;
+		AIConfigLoader.PopulateRealizedEv(c);
+		Assert.Equal(0.20m, c.Opener.RealizedExpectancy.TakeProfitPctOfPremium);
+
+		c.Rules.TakeProfit.Enabled = false;
+		AIConfigLoader.PopulateRealizedEv(c);
+		Assert.Equal(0m, c.Opener.RealizedExpectancy.TakeProfitPctOfPremium);
 	}
 }

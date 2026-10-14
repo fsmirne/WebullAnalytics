@@ -997,14 +997,42 @@ internal static class CandidateScorer
 	private static decimal ScenarioForward(decimal spot, IReadOnlyList<DividendEvent>? dividends, DateTime asOf, DateTime targetExpiry, double years)
 		=> OptionMath.ForwardPrice(spot, dividends, asOf, targetExpiry.Date + OptionMath.MarketClose, years, OptionMath.RiskFreeRate);
 
+	/// <summary>Expected P&amp;L per contract after friction, with the configured take-profit / stop exits applied along the
+	/// path (<see cref="PathExitModel"/>) over the same distribution as <paramref name="grid"/>. With realized-EV scoring off,
+	/// or no exit armed, it is the grid's end-of-life EV minus friction (friction is 0 when scoring is off).</summary>
+	private static decimal ManagedEv(IReadOnlyList<ScenarioPoint> grid, Func<decimal, decimal> pnlAtTarget, IReadOnlyList<PathLeg> legs, decimal entryValuePerContract, decimal maxProfit, decimal maxLoss, decimal friction, decimal spot, decimal forward, decimal scenarioVol, double years, decimal biasShiftSigmas, DateTime asOf, DateTime targetExpiry, RealizedVolModel? realizedVol, IReadOnlyList<DividendEvent>? dividends, OpenerRealizedExpectancyConfig cfg, OptionMath.BlackScholesEvaluator? blackScholes = null)
+	{
+		var takeProfit = RealizedExpectancy.TakeProfitPerContract(entryValuePerContract, cfg);
+		var stopLoss = RealizedExpectancy.StopLossPerContract(maxProfit, maxLoss, cfg);
+		if (takeProfit == null && stopLoss == null || years <= 0)
+		{
+			decimal terminal = 0m;
+			foreach (var pt in grid) terminal += pt.Weight * pnlAtTarget(pt.SpotAtExpiry);
+			return terminal - friction;
+		}
+		var sigmaTotal = (double)scenarioVol * Math.Sqrt(years);
+		var targetCenter = ScenarioCenter(forward, sigmaTotal, (double)biasShiftSigmas * sigmaTotal);
+		var targetClose = targetExpiry.Date + OptionMath.MarketClose;
+		var sessions = realizedVol != null && realizedVol.OvernightVariance + realizedVol.SessionVariance > 0
+			? realizedVol.VarianceTo(asOf, targetExpiry) / (realizedVol.OvernightVariance + realizedVol.SessionVariance)
+			: years * 252.0;
+		var steps = PathExitModel.StepCount(sessions);
+		var stepTimes = new DateTime[steps];
+		for (var k = 1; k <= steps; k++)
+			stepTimes[k - 1] = k == steps ? targetClose
+				: realizedVol != null ? realizedVol.TimeAtVarianceFraction(asOf, targetExpiry, (double)k / steps)
+				: asOf + (targetClose - asOf) * ((double)k / steps);
+		return PathExitModel.ExpectedPnl(legs, entryValuePerContract, pnlAtTarget, spot, targetCenter, sigmaTotal, stepTimes, takeProfit, stopLoss, dividends, blackScholes) - friction;
+	}
+
 	/// <summary>Annualized vol (on the IV's clock) of the scoring distribution: the realized-vol forecast when one is
 	/// available, else the implied vol — see <see cref="RealizedVolModel"/>.</summary>
 	private static decimal ScenarioVol(RealizedVolModel? realizedVol, DateTime asOf, DateTime targetExpiry, double years, decimal impliedVol)
 		=> realizedVol?.ScenarioVol(asOf, targetExpiry, years) ?? impliedVol;
 
-	private const int ScenarioBins = 81;
-	private const double ScenarioBinEdgeSigmas = 5.0;
-	private static readonly (double Z, double Weight)[] ScenarioNodes = BuildScenarioNodes();
+	internal const int ScenarioBins = 81;
+	internal const double ScenarioBinEdgeSigmas = 5.0;
+	internal static readonly (double Z, double Weight)[] ScenarioNodes = BuildScenarioNodes();
 
 	/// <summary>Standard-normal discretization: <see cref="ScenarioBins"/> equal-width z-bins spanning
 	/// ±<see cref="ScenarioBinEdgeSigmas"/>, the two outer bins open-ended so the tails are fully counted.
@@ -1040,18 +1068,21 @@ internal static class CandidateScorer
 		// log-spot axis. Positive shifts scenarios up; negative shifts down. Allows long-premium
 		// structures to score positive raw EV under strong directional signals — sign-symmetric
 		// ApplyFactor downstream can't flip a negative score, so the bias must be encoded here.
-		var drift = (double)biasShiftSigmas * sigma;
+		var center = ScenarioCenter(forward, sigma, (double)biasShiftSigmas * sigma);
+		var points = new ScenarioPoint[ScenarioNodes.Length];
+		for (var i = 0; i < ScenarioNodes.Length; i++)
+			points[i] = new ScenarioPoint((decimal)(center * Math.Exp(ScenarioNodes[i].Z * sigma)), (decimal)ScenarioNodes[i].Weight);
+		return points;
+	}
 
-		// Unshifted grid's mean relative to its center; dividing it out makes the neutral (no-bias) mean exactly the forward.
+	/// <summary>The z = 0 price of the scoring distribution: the center whose unshifted grid mean is exactly
+	/// <paramref name="forward"/>, then translated by the bias <paramref name="drift"/> (log units).</summary>
+	internal static double ScenarioCenter(decimal forward, double sigma, double drift)
+	{
 		double meanShape = 0;
 		foreach (var (z, weight) in ScenarioNodes)
 			meanShape += weight * Math.Exp(z * sigma);
-		var center = (double)forward / meanShape;
-
-		var points = new ScenarioPoint[ScenarioNodes.Length];
-		for (var i = 0; i < ScenarioNodes.Length; i++)
-			points[i] = new ScenarioPoint((decimal)(center * Math.Exp(drift + ScenarioNodes[i].Z * sigma)), (decimal)ScenarioNodes[i].Weight);
-		return points;
+		return (double)forward / meanShape * Math.Exp(drift);
 	}
 
 	/// <summary>Combined GEX-gravity + max-pain MAGNET expressed as a scenario-grid bias shift (in sigma
@@ -1536,7 +1567,8 @@ internal static class CandidateScorer
 
 	   // EV via scenario grid — payoff at expiry is piecewise linear.
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, years, cfg);
-		var grid = BuildScenarioGrid(forward, scenarioVol, years, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var biasShift = bias * cfg.Weights.BiasDrift + magnet.Total;
+		var grid = BuildScenarioGrid(forward, scenarioVol, years, biasShift);
 		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, creditPerContract, isCall);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -1544,13 +1576,9 @@ internal static class CandidateScorer
 
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxLoss, friction, cfg.RealizedExpectancy);
-		// Terminal-EV scoring. The previous barrier-aware adjustment was asymmetric across structure
-		// types — applied to multi-leg credit structures but not to single-leg longs, which let
-		// LongCall/LongPut candidates skate past more conservative calendars/diagonals even when the
-		// directional trade had worse POP and worse expected value. BreakevenRoomFactor and the
-		// sign-symmetric factor chain already encode path safety as a ranking signal in a more
-		// proportionate way that applies consistently across all structures.
+		var longIv = ScoredLegIv(cache, longLeg.Symbol, longParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
+		PathLeg[] pathLegs = [new(shortParsed, iv, false, 1), new(longParsed, longIv, true, 1)];
+		var realizedEv = ManagedEv(grid, PnlAtExpiry, pathLegs, -creditPerContract, maxProfit, maxLoss, friction, spot, forward, scenarioVol, years, biasShift, asOf, skel.TargetExpiry, realizedVol, dividends, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
@@ -1561,7 +1589,6 @@ internal static class CandidateScorer
 		var shortLegStrikes = ExtractShortLegStrikes(skel.Legs);
 		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, scenarioVol, years, creditPerContract, shortLegStrikes, cfg.Weights.ExpectedMoveCredit);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, creditPerContract, cfg.Weights.IvRealizedPremium);
-		var longIv = ScoredLegIv(cache, longLeg.Symbol, longParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 		var legGreeks = new[]
 		{
 			(Parsed: shortParsed, Iv: iv, IsLong: false),
@@ -1636,7 +1663,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
 			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
@@ -1701,7 +1727,8 @@ internal static class CandidateScorer
 		var pop = LogNormalProbability(isCall ? Direction.Above : Direction.Below, forward, breakeven, years, (double)scenarioVol);
 
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, years, cfg);
-		var grid = BuildScenarioGrid(forward, scenarioVol, years, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var biasShift = bias * cfg.Weights.BiasDrift + magnet.Total;
+		var grid = BuildScenarioGrid(forward, scenarioVol, years, biasShift);
 		// VerticalPnLAtExpiry uses signed netEntry where credit=positive. For a debit spread we pay,
 		// so pass -debitPerContract as the "credit" parameter.
 		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, -debitPerContract, isCall);
@@ -1711,7 +1738,9 @@ internal static class CandidateScorer
 
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxLoss, friction, cfg.RealizedExpectancy);
+		var shortIv = ScoredLegIv(cache, shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
+		PathLeg[] pathLegs = [new(shortParsed, shortIv, false, 1), new(longParsed, iv, true, 1)];
+		var realizedEv = ManagedEv(grid, PnlAtExpiry, pathLegs, debitPerContract, maxProfit, maxLoss, friction, spot, forward, scenarioVol, years, biasShift, asOf, skel.TargetExpiry, realizedVol, dividends, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		// popFactor skipped — see method-level XML comment.
@@ -1721,7 +1750,6 @@ internal static class CandidateScorer
 		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, scenarioVol, years, [breakeven]);
 		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, scenarioVol, years);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
-		var shortIv = ScoredLegIv(cache, shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 		var legGreeks = new[]
 		{
 			(Parsed: shortParsed, Iv: shortIv, IsLong: false),
@@ -1799,7 +1827,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: null,
 			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
@@ -2302,7 +2329,8 @@ internal static class CandidateScorer
 		var scenarioVol = ScenarioVol(realizedVol, asOf, skel.TargetExpiry, years, representativeIv);
 		var pop = ComputeProbabilityOfProfit(pnl, breakevens, forward, years, scenarioVol);
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, years, cfg);
-		var grid = BuildScenarioGrid(forward, scenarioVol, years, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var biasShift = bias * cfg.Weights.BiasDrift + magnet.Total;
+		var grid = BuildScenarioGrid(forward, scenarioVol, years, biasShift);
 		decimal ev = 0m;
 		foreach (var pt in grid)
 			ev += pt.Weight * pnl(pt.SpotAtExpiry);
@@ -2315,11 +2343,9 @@ internal static class CandidateScorer
 		var debitPaid = Math.Max(0m, -netEntryPerContract);
 		var efficiencyCapital = Math.Max(debitPaid, capitalAtRisk);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, pnl, maxLoss, friction, cfg.RealizedExpectancy);
-		// Terminal-EV scoring. See ScoreShortVertical for full rationale on dropping the
-		// barrier-aware adjustment; in short, applying it only to some structure types created an
-		// asymmetric bias that buried calendars/diagonals/IBs in favor of single-leg longs.
-		// BreakevenRoomFactor + sign-symmetric factor chain carries the path-safety signal.
+		// Marks match the terminal valuation (PositionValueAtTarget prices legs without the dividend schedule).
+		var pathLegs = defs.Select(d => new PathLeg(d.Parsed, d.Iv, d.IsLong, d.Proposal.Qty)).ToList();
+		var realizedEv = ManagedEv(grid, pnl, pathLegs, -netEntryPerContract, maxProfit, maxLoss, friction, spot, forward, scenarioVol, years, biasShift, asOf, skel.TargetExpiry, realizedVol, dividends: null, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(realizedEv, daysToTarget, efficiencyCapital);
 		var fit = DirectionalFit.SignFor(skel);
 		var popFactor = ComputeProbabilityFactor(pop);
@@ -2399,7 +2425,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
 			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
@@ -2532,7 +2557,8 @@ internal static class CandidateScorer
 		// 5-point grid points (e.g. an ATM call diagonal peaks at the short strike, which the ±0.5σ
 		// sampling misses) — using the scenario-grid max would understate R/R by ~30%.
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, shortYears, cfg);
-		var grid = BuildScenarioGrid(forward, scenarioVol, shortYears, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var biasShift = bias * cfg.Weights.BiasDrift + magnet.Total;
+		var grid = BuildScenarioGrid(forward, scenarioVol, shortYears, biasShift);
 		decimal PnlAtTarget(decimal sT) => CalendarOrDiagonalPnLAtShortExpiry(sT, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -2542,11 +2568,8 @@ internal static class CandidateScorer
 
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtTarget, maxLossPoint, friction, cfg.RealizedExpectancy);
-		// Terminal-EV scoring (see ScoreShortVertical for rationale on dropping the barrier-aware adjustment).
-		// For calendars/diagonals the barrier-aware penalty was particularly miscalibrated: BE-as-stop
-		// massively overstated P_hit because theta accumulates favorably over the holding period and
-		// the actual stop fires much deeper than break-even.
+		PathLeg[] pathLegs = [new(shortParsed, ivShort, false, 1), new(longParsed, ivLong, true, 1)];
+		var realizedEv = ManagedEv(grid, PnlAtTarget, pathLegs, debitPerContract, maxProfit, maxLoss: maxLossPoint, friction, spot, forward, scenarioVol, shortYears, biasShift, asOf, shortParsed.ExpiryDate, realizedVol, dividends, cfg.RealizedExpectancy, longBs);
 		var rawScore = ComputeRawScore(realizedEv, daysToTarget, efficiencyCapital);
 		// LongCalendar reads neutral (0); LongDiagonal picks up its sign from the strike layout via the
 		// skeleton overload, so the technical bias factor lifts/cuts a diagonal whose direction matches
@@ -2642,7 +2665,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLossPoint, cfg.RealizedExpectancy) : null,
 			BreakevenRoomFactor: breakevenRoomFactor,
 			ExpectedMoveCreditFactor: expectedMoveCreditFactor,
 			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
@@ -2734,7 +2756,8 @@ internal static class CandidateScorer
 		// factor structurally cannot do. Gated by gexBiasPull / maxPainBiasPull (default 0 → live unchanged).
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, years, cfg);
-		var grid = BuildScenarioGrid(forward, scenarioVol, years, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var biasShift = bias * cfg.Weights.BiasDrift + magnet.Total;
+		var grid = BuildScenarioGrid(forward, scenarioVol, years, biasShift);
 		decimal PnlAtExpiry(decimal sT)
 		{
 			var intrinsic = parsed.CallPut == "C" ? Math.Max(0m, sT - parsed.Strike) : Math.Max(0m, parsed.Strike - sT);
@@ -2753,7 +2776,7 @@ internal static class CandidateScorer
 		var capitalAtRisk = debitPerContract;
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
 		var friction = RealizedExpectancy.ComputeFrictionPerContract(cfg.RealizedExpectancy, skel.StructureKind);
-		var realizedEv = RealizedExpectancy.RealizeEv(grid, PnlAtExpiry, maxLoss, friction, cfg.RealizedExpectancy);
+		var realizedEv = ManagedEv(grid, PnlAtExpiry, [new PathLeg(parsed, iv, true, 1)], debitPerContract, maxProfit, maxLoss, friction, spot, forward, scenarioVol, years, biasShift, asOf, skel.TargetExpiry, realizedVol, dividends, cfg.RealizedExpectancy);
 		var rawScore = ComputeRawScore(realizedEv, daysToTarget, capitalAtRisk);
 		var fit = DirectionalFit.SignFor(skel);
 		// LongCall/LongPut is a positive-skew lottery trade: low POP is the SHAPE of the trade, not
@@ -2840,7 +2863,6 @@ internal static class CandidateScorer
 			SentimentAdjustmentFactor: sentimentFactor,
 			RealizedExpectedValuePerContract: cfg.RealizedExpectancy.Enabled ? realizedEv : null,
 			EstimatedSlippagePerContract: cfg.RealizedExpectancy.Enabled ? friction : null,
-			StopLossPerContract: cfg.RealizedExpectancy.Enabled ? RealizedExpectancy.StopLossPerContract(maxLoss, cfg.RealizedExpectancy) : null,
 			IvRealizedPremiumFactor: ivRealizedPremiumFactor,
 			ExpectedMoveLower: expectedMoveBoundsLc?.Lower,
 			ExpectedMoveUpper: expectedMoveBoundsLc?.Upper
