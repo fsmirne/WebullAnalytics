@@ -20,7 +20,8 @@ internal sealed record LiveTickDeps(
 	string VendorName,
 	bool EmitManagement,
 	bool BypassOpenerDailyCap,
-	bool OutsideEntryWindow = false);
+	bool OutsideEntryWindow = false,
+	OrderRepricer? Repricer = null);
 
 /// <summary>Mutable state that must persist across ticks (watch) but reset per run (scan).</summary>
 internal sealed class LiveTickState
@@ -85,6 +86,10 @@ internal static class LiveTick
 		var results = deps.Evaluator.Evaluate(ctx);
 		if (deps.EmitManagement && deps.MgmtSink != null)
 			foreach (var r in results) deps.MgmtSink.Emit(r.Proposal, r.IsRepeat);
+		// Step resting auto-execute limits before the executors run, so a replacement placed now is already in the
+		// local ledger when they dedup and count today's orders.
+		if (deps.Repricer != null)
+			await deps.Repricer.TickAsync(now, cancellation);
 		if (deps.MgmtExecutor != null)
 			await deps.MgmtExecutor.HandleAsync(results, ctx, cancellation, cycleToken);
 

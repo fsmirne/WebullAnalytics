@@ -275,8 +275,10 @@ internal static class AIContext
 	/// <c>wa ai watch</c> loop (every tick) and the <c>wa ai scan</c> one-shot. Either executor may
 	/// be null when its <c>enabled</c> flag is off; when account resolution fails (e.g. api-config
 	/// missing) both executors are still instantiated but with a null account, so they degrade to
-	/// dry-run logging — same fallback the watch loop has always used.</summary>
-	internal static (ManagementAutoExecutor? Management, OpenerAutoExecutor? Opener) BuildAutoExecutors(AIConfig config, string? accountOverride = null)
+	/// dry-run logging — same fallback the watch loop has always used. The <see cref="OrderRepricer"/> is shared by both
+	/// executors (they register the live orders they place) and is null without an account or when disabled; only the
+	/// watch loop drives it.</summary>
+	internal static (ManagementAutoExecutor? Management, OpenerAutoExecutor? Opener, OrderRepricer? Repricer) BuildAutoExecutors(AIConfig config, string? accountOverride = null)
 	{
 		TradeAccount? account = null;
 		if (config.AutoExecute.Management.Enabled || config.AutoExecute.Opener.Enabled)
@@ -285,9 +287,10 @@ internal static class AIContext
 			catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]auto-execute disabled (account resolution failed): {Markup.Escape(ex.Message)}[/]"); }
 		}
 		var brokerState = account != null ? new BrokerStateService(account, LocalOrderLedger.Default()) : null;
-		var mgmt = config.AutoExecute.Management.Enabled ? new ManagementAutoExecutor(config.AutoExecute.Management, account, brokerState) : null;
-		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account, brokerState) : null;
-		return (mgmt, opener);
+		var repricer = account != null && config.AutoExecute.Reprice.Enabled ? new OrderRepricer(config.AutoExecute.Reprice, new WebullOrderGateway(account), brokerState) : null;
+		var mgmt = config.AutoExecute.Management.Enabled ? new ManagementAutoExecutor(config.AutoExecute.Management, account, brokerState, repricer) : null;
+		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account, brokerState, repricer) : null;
+		return (mgmt, opener, repricer);
 	}
 
 	/// <summary>Warns when --submit was requested but the matching executor is disabled via
@@ -453,7 +456,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			YahooOptionsClient.ApplyToOptionMath(await Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation));
 
 			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
-			var (mgmtExecutor, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
+			var (mgmtExecutor, openerExecutor, _) = AIContext.BuildAutoExecutors(config, settings.Account);
 			ProposalSink? mgmtSink = settings.EmitManagementProposals
 				? new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput)
 				: null;
@@ -618,7 +621,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			tickerSet, priceCache, config.Indicators.TechnicalFilter, asOf, cancellation);
 
 		var ctx = new EvaluationContext(asOf, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
-		var (_, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
+		var (_, openerExecutor, _) = AIContext.BuildAutoExecutors(config, settings.Account);
 
 		var openCount = 0;
 		var openerOrdersThisRun = 0;

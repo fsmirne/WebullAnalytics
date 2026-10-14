@@ -124,7 +124,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 		// Auto-executors: turn proposals into real (or dry-run) order submissions. Both off by default;
 		// both honor enabled/submit gates independently. Shared with `wa ai scan` via AIContext.BuildAutoExecutors.
-		var (autoExecutor, openerExecutor) = AIContext.BuildAutoExecutors(config, settings.Account);
+		var (autoExecutor, openerExecutor, repricer) = AIContext.BuildAutoExecutors(config, settings.Account);
 
 		// Apply the live 13-week T-bill risk-free rate once (mirrors `wa ai scan`): the opener's IV back-solve
 		// and BS pricing read OptionMath.RiskFreeRate, so watch must set it too or it prices against a stale
@@ -156,7 +156,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var tickState = new LiveTickState();   // persists the one-time staleness note across ticks
 		// Watch = "one live tick in a loop". The opener never bypasses its daily cap here (that's a scan flag).
 		var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, autoExecutor, openEvaluator, sink, openSink, openerExecutor,
-			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false);
+			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false, Repricer: repricer);
 
 		// Entry window (ET, opener.earliestEntryTimeEt..latestEntryTimeEt): outside it the watch loop stops SUBMITTING
 		// opens — nulling the opener executor for the tick suppresses ONLY auto-execution (proposals still render,

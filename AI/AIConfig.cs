@@ -78,6 +78,18 @@ internal sealed class AutoExecuteConfig
 {
 	[JsonPropertyName("management")] public ManagementAutoExecuteConfig Management { get; set; } = new();
 	[JsonPropertyName("opener")] public OpenerAutoExecuteConfig Opener { get; set; } = new();
+	[JsonPropertyName("reprice")] public RepriceConfig Reprice { get; set; } = new();
+}
+
+/// <summary>Walks resting live auto-execute limits (opens and closes) toward the market — see <see cref="OrderRepricer"/>.
+/// Acts only on orders the executors actually submitted, so it is inert unless <c>submit</c> is on.</summary>
+internal sealed class RepriceConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+	/// <summary>Minimum seconds an order rests at a price before the next step (effective cadence is at least one watch tick).</summary>
+	[JsonPropertyName("stepSeconds")] public int StepSeconds { get; set; } = 60;
+	/// <summary>Most exchange ticks the limit may move from the original mid. 2 on a penny-tick combo = $0.02, the backtest's fill assumption; 0 disables.</summary>
+	[JsonPropertyName("maxTicks")] public int MaxTicks { get; set; } = 2;
 }
 
 /// <summary>
@@ -500,6 +512,8 @@ internal static class AIConfigLoader
 		if (c.Watch.TickIntervalSeconds < 1 || c.Watch.TickIntervalSeconds > 3600) return $"watch.tickIntervalSeconds: must be in [1, 3600], got {c.Watch.TickIntervalSeconds}";
 		if (!string.IsNullOrWhiteSpace(c.Watch.StartTime) && !TimeOnly.TryParse(c.Watch.StartTime, CultureInfo.InvariantCulture, out _))
 			return $"watch.startTime: must be HH:mm or HH:mm:ss (ET), got '{c.Watch.StartTime}'";
+		if (c.AutoExecute.Reprice.StepSeconds < 10) return $"autoExecute.reprice.stepSeconds: must be ≥ 10, got {c.AutoExecute.Reprice.StepSeconds}";
+		if (c.AutoExecute.Reprice.MaxTicks < 0) return $"autoExecute.reprice.maxTicks: must be ≥ 0, got {c.AutoExecute.Reprice.MaxTicks}";
 		if (c.CashReserve.Mode is not ("percent" or "absolute")) return $"cashReserve.mode: must be 'percent' or 'absolute', got '{c.CashReserve.Mode}'";
 		if (c.CashReserve.Value < 0m) return $"cashReserve.value: must be non-negative, got {c.CashReserve.Value}";
 		if (c.CashReserve.Mode == "percent" && c.CashReserve.Value > 100m) return $"cashReserve.value: must be ≤ 100 for mode 'percent', got {c.CashReserve.Value}";

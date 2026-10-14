@@ -40,7 +40,8 @@ internal static class OptionPriceRounding
 	/// worthless-position close rounds to a $0.00 net, which brokers reject outright.</summary>
 	public static decimal MinTick(int legCount, string ticker) => Tick(0m, legCount, ticker);
 
-	private static decimal Tick(decimal price, int legCount, string ticker)
+	/// <summary>Price increment the exchange accepts for an order of this shape at this price.</summary>
+	internal static decimal Tick(decimal price, int legCount, string ticker)
 	{
 		if (string.Equals(ticker, "XSP", StringComparison.OrdinalIgnoreCase)) return 0.01m;
 

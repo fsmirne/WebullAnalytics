@@ -28,13 +28,15 @@ internal sealed class OpenerAutoExecutor
 	private readonly OpenerAutoExecuteConfig _config;
 	private readonly TradeAccount? _account;
 	private readonly BrokerStateService? _brokerState;
+	private readonly OrderRepricer? _repricer;
 	private readonly HashSet<string> _allowedStructures;
 
-	public OpenerAutoExecutor(OpenerAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null)
+	public OpenerAutoExecutor(OpenerAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null, OrderRepricer? repricer = null)
 	{
 		_config = config;
 		_account = account;
 		_brokerState = brokerState;
+		_repricer = repricer;
 		_allowedStructures = new HashSet<string>(config.Structures, StringComparer.OrdinalIgnoreCase);
 	}
 
@@ -257,7 +259,7 @@ internal sealed class OpenerAutoExecutor
 			{
 				// Build inside the try: an unmapped strategy throws InvalidOperationException, which must
 				// degrade to a skip — not crash the watch loop.
-				body = OrderRequestBuilder.Build(new OrderRequestBuilder.BuildParams(
+				var build = new OrderRequestBuilder.BuildParams(
 					AccountId: _account.AccountId,
 					Legs: legs,
 					Strategy: strategy,
@@ -265,13 +267,16 @@ internal sealed class OpenerAutoExecutor
 					OrderType: "LIMIT",
 					LimitPrice: spec.LimitAbs,
 					TimeInForce: _config.TimeInForce.ToUpperInvariant(),
-					PositionIntent: OrderRequestBuilder.DeriveOptionIntent(spec.Side, opening: true)));
+					PositionIntent: OrderRequestBuilder.DeriveOptionIntent(spec.Side, opening: true));
+				body = OrderRequestBuilder.Build(build);
 
 				using var client = new WebullOpenApiClient(_account);
 				var placed = await client.PlaceOrderAsync(body);
 				AnsiConsole.MarkupLine($"[green]opener auto-execute placed:[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
 				log?.EmitAutoExecute(p, "placed", null, summary, placed.OrderId);
-				_brokerState?.RecordLocalPlacement(p.Ticker, g.Legs.Select(l => (l.Symbol, l.Action)), placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: true);
+				var clientOrderId = placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
+				_brokerState?.RecordLocalPlacement(p.Ticker, g.Legs.Select(l => (l.Symbol, l.Action)), clientOrderId, isOpen: true);
+				_repricer?.Track(build, clientOrderId, p.Ticker, isOpen: true, (outcome, detail) => log?.EmitAutoExecute(p, $"reprice {outcome}", null, detail));
 				placedCount++;
 				firstOrderId ??= placed.OrderId;
 				firstClientId ??= placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;

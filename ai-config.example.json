@@ -161,6 +161,7 @@
 			"maxOrdersPerDay": 1,
 			"allowAddToHeldPosition": true,
 			"structures": []
-		}
+		},
+		"reprice": { "enabled": true, "stepSeconds": 60, "maxTicks": 2 }
 	}
 }

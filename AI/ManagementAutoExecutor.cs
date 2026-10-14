@@ -37,6 +37,7 @@ internal sealed class ManagementAutoExecutor
 	private readonly ManagementAutoExecuteConfig _config;
 	private readonly TimeZoneInfo _marketTz;
 	private readonly TradeAccount? _account;
+	private readonly OrderRepricer? _repricer;
 	private readonly BrokerStateService? _brokerState;
 	private readonly HashSet<string> _allowedRules;
 
@@ -46,11 +47,12 @@ internal sealed class ManagementAutoExecutor
 	private readonly Dictionary<(string Rule, string PositionKey), HashSet<int>> _firedTranches = new();
 	private DateOnly _trackingDate;
 
-	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null)
+	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null, OrderRepricer? repricer = null)
 	{
 		_config = config;
 		_account = account;
 		_brokerState = brokerState;
+		_repricer = repricer;
 		_marketTz = TimeZoneInfo.FindSystemTimeZoneById(config.ScaleOut.Tz);
 		_allowedRules = new HashSet<string>(config.Rules, StringComparer.Ordinal);
 	}
@@ -186,7 +188,7 @@ internal sealed class ManagementAutoExecutor
 		try { strategy = StrategyClassifier.Classify(legs) ?? "Single"; }
 		catch (Exception) { strategy = "Single"; }
 
-		var body = OrderRequestBuilder.Build(new OrderRequestBuilder.BuildParams(
+		var build = new OrderRequestBuilder.BuildParams(
 			AccountId: _account.AccountId,
 			Legs: legs,
 			Strategy: strategy,
@@ -197,14 +199,17 @@ internal sealed class ManagementAutoExecutor
 			// Leg-in sells a new short against a held long. Without SELL_TO_OPEN, Webull classifies a
 			// lone short call as a covered-call write and rejects it for insufficient stock; the intent
 			// routes it to the (Level-4) open-short path so it nets against the long as a vertical.
-			PositionIntent: OrderRequestBuilder.DeriveOptionIntent("SELL", opening: true)));
+			PositionIntent: OrderRequestBuilder.DeriveOptionIntent("SELL", opening: true));
+		var body = OrderRequestBuilder.Build(build);
 
 		try
 		{
 			using var client = new WebullOpenApiClient(_account);
 			var placed = await client.PlaceOrderAsync(body);
 			AnsiConsole.MarkupLine($"[green]auto-execute placed:[/] [dim]{Markup.Escape(p.Rule)}[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
-			_brokerState?.RecordLocalPlacement(position.Ticker, p.Legs.Select(l => (l.Symbol, l.Action)), placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: true);
+			var clientOrderId = placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
+			_brokerState?.RecordLocalPlacement(position.Ticker, p.Legs.Select(l => (l.Symbol, l.Action)), clientOrderId, isOpen: true);
+			_repricer?.Track(build, clientOrderId, position.Ticker, isOpen: true);
 			return true;
 		}
 		catch (WebullOpenApiException ex)
@@ -314,7 +319,7 @@ internal sealed class ManagementAutoExecutor
 		try { strategy = StrategyClassifier.Classify(legs) ?? "Calendar"; }
 		catch (Exception) { strategy = "Calendar"; }
 
-		var body = OrderRequestBuilder.Build(new OrderRequestBuilder.BuildParams(
+		var build = new OrderRequestBuilder.BuildParams(
 			AccountId: _account.AccountId,
 			Legs: legs,
 			Strategy: strategy,
@@ -322,14 +327,17 @@ internal sealed class ManagementAutoExecutor
 			OrderType: "LIMIT",
 			LimitPrice: limitAbs,
 			TimeInForce: _config.TimeInForce.ToUpperInvariant(),
-			PositionIntent: OrderRequestBuilder.DeriveOptionIntent(side, opening: false)));
+			PositionIntent: OrderRequestBuilder.DeriveOptionIntent(side, opening: false));
+		var body = OrderRequestBuilder.Build(build);
 
 		try
 		{
 			using var client = new WebullOpenApiClient(_account);
 			var placed = await client.PlaceOrderAsync(body);
 			AnsiConsole.MarkupLine($"[green]auto-execute placed:[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
-			_brokerState?.RecordLocalPlacement(position.Ticker, legSpecs.Select(l => (l.Symbol, l.Action)), placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: false);
+			var clientOrderId = placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
+			_brokerState?.RecordLocalPlacement(position.Ticker, legSpecs.Select(l => (l.Symbol, l.Action)), clientOrderId, isOpen: false);
+			_repricer?.Track(build, clientOrderId, position.Ticker, isOpen: false);
 			return true;
 		}
 		catch (WebullOpenApiException ex)
