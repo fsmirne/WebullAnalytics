@@ -86,8 +86,7 @@ internal static class LiveTick
 		var results = deps.Evaluator.Evaluate(ctx);
 		if (deps.EmitManagement && deps.MgmtSink != null)
 			foreach (var r in results) deps.MgmtSink.Emit(r.Proposal, r.IsRepeat);
-		// Step resting auto-execute limits before the executors run, so a replacement placed now is already in the
-		// local ledger when they dedup and count today's orders.
+		// Step resting auto-execute limits (in-place replace — same order ids, so dedup and the daily cap are unaffected).
 		if (deps.Repricer != null)
 			await deps.Repricer.TickAsync(now, cancellation);
 		if (deps.MgmtExecutor != null)

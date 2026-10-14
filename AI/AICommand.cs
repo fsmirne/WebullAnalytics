@@ -287,7 +287,7 @@ internal static class AIContext
 			catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]auto-execute disabled (account resolution failed): {Markup.Escape(ex.Message)}[/]"); }
 		}
 		var brokerState = account != null ? new BrokerStateService(account, LocalOrderLedger.Default()) : null;
-		var repricer = account != null && config.AutoExecute.Reprice.Enabled ? new OrderRepricer(config.AutoExecute.Reprice, new WebullOrderGateway(account), brokerState) : null;
+		var repricer = account != null && config.AutoExecute.Reprice.Enabled ? new OrderRepricer(config.AutoExecute.Reprice, new WebullOrderGateway(account)) : null;
 		var mgmt = config.AutoExecute.Management.Enabled ? new ManagementAutoExecutor(config.AutoExecute.Management, account, brokerState, repricer) : null;
 		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account, brokerState, repricer) : null;
 		return (mgmt, opener, repricer);

@@ -8,158 +8,135 @@ namespace WebullAnalytics.Tests.AI;
 
 public class OrderRepricerTests
 {
-	/// <summary>Scripted broker: each GetOrderAsync returns the next queued (status, filled) for that client id, repeating the last.</summary>
+	/// <summary>Scripted broker: GetOrderAsync returns the next queued status (repeating the last); replaces are recorded.</summary>
 	private sealed class FakeGateway : IOrderGateway
 	{
-		public readonly Dictionary<string, Queue<(string Status, int Filled)>> Script = new();
-		public readonly List<string> Cancelled = new();
-		public readonly List<OrderRequestBody> Placed = new();
-		private (string, int) _last = ("WORKING", 0);
+		public readonly Queue<string> Statuses = new();
+		public readonly List<(string Id, int Qty, decimal Limit, IReadOnlyList<(string Id, int Quantity)>? Legs)> Replaces = new();
+		public bool FailNextReplace;
+		private string _last = "SUBMITTED";
 
 		public Task<WebullOpenApiClient.OrderDetail> GetOrderAsync(string clientOrderId, CancellationToken ct)
 		{
-			if (Script.TryGetValue(clientOrderId, out var q) && q.Count > 0) _last = q.Dequeue();
-			var (status, filled) = _last;
-			var order = new WebullOpenApiClient.OrderDetailOrder(clientOrderId, null, status, "SPY", null, "15", filled.ToString(), null, null, null, null, null, null, null, null, null);
+			if (Statuses.Count > 0) _last = Statuses.Dequeue();
+			var legs = new List<WebullOpenApiClient.OrderDetailLeg>
+			{
+				new("SPY", "SELL", "15", "PUT", "770", "2026-10-19", Id: "leg-short"),
+				new("SPY", "BUY", "15", "PUT", "771", "2026-11-13", Id: "leg-long"),
+			};
+			var order = new WebullOpenApiClient.OrderDetailOrder(clientOrderId, "oid", _last, "SPY", "BUY", "15", "0", null, null, null, null, null, null, null, null, legs);
 			return Task.FromResult(new WebullOpenApiClient.OrderDetail("NORMAL", null, [order]));
 		}
 
-		public Task CancelOrderAsync(string clientOrderId, CancellationToken ct) { Cancelled.Add(clientOrderId); return Task.CompletedTask; }
-
-		public Task<string> PlaceOrderAsync(OrderRequestBody body, CancellationToken ct)
+		public Task ReplaceOrderAsync(string clientOrderId, int quantity, decimal limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs, CancellationToken ct)
 		{
-			Placed.Add(body);
-			var id = $"new{Placed.Count}";
-			Script[id] = new Queue<(string, int)>([("WORKING", 0)]);
-			_last = ("WORKING", 0);
-			return Task.FromResult(id);
+			if (FailNextReplace) { FailNextReplace = false; throw new HttpRequestException("boom"); }
+			Replaces.Add((clientOrderId, quantity, limitPrice, legs));
+			return Task.CompletedTask;
 		}
 	}
 
 	private static readonly DateTime T0 = new(2026, 10, 14, 12, 11, 0);
-	private static RepriceConfig Cfg(int maxTicks = 2) => new() { Enabled = true, StepSeconds = 60, MaxTicks = maxTicks };
-	private static Task NoDelay(TimeSpan _, CancellationToken __) => Task.CompletedTask;
-
-	private static OrderRequestBuilder.BuildParams Diagonal(string side = "BUY", decimal limit = 7.19m)
-	{
-		var legs = TradeLegParser.Parse("sell:SPY261019P00770000:15,buy:SPY261113P00771000:15");
-		return new OrderRequestBuilder.BuildParams("acct", legs, StrategyClassifier.Classify(legs)!, side, "LIMIT", limit, "GTC", OrderRequestBuilder.DeriveOptionIntent(side, opening: true));
-	}
 
 	private static (OrderRepricer Repricer, FakeGateway Gateway) Setup(string side = "BUY", int maxTicks = 2)
 	{
 		var gw = new FakeGateway();
-		var r = new OrderRepricer(Cfg(maxTicks), gw, brokerState: null, NoDelay);
-		r.Track(Diagonal(side), "orig", "SPY", isOpen: true);
+		var r = new OrderRepricer(new RepriceConfig { Enabled = true, StepSeconds = 60, MaxTicks = maxTicks }, gw);
+		var legs = TradeLegParser.Parse("sell:SPY261019P00770000:15,buy:SPY261113P00771000:15");
+		r.Track(new OrderRequestBuilder.BuildParams("acct", legs, StrategyClassifier.Classify(legs)!, side, "LIMIT", 7.19m, "GTC"), "orig", "SPY", isOpen: true);
 		return (r, gw);
 	}
 
-	private static decimal LimitOf(OrderRequestBody body) => decimal.Parse(body.NewOrders[0].LimitPrice!, System.Globalization.CultureInfo.InvariantCulture);
-	private static int QtyOf(OrderRequestBody body) => body.NewOrders[0].Legs!.Select(l => int.Parse(l.Quantity!)).Min();
+	private static void Tick(OrderRepricer r, double seconds) => r.TickAsync(T0.AddSeconds(seconds), default).Wait();
 
 	[Fact]
 	public void WaitsAStepIntervalBeforeTouchingTheOrder()
 	{
 		var (r, gw) = Setup();
-		r.TickAsync(T0, default).Wait();                 // first sighting starts the clock
-		r.TickAsync(T0.AddSeconds(30), default).Wait();
-		Assert.Empty(gw.Cancelled);
-		Assert.Empty(gw.Placed);
+		Tick(r, 0);                 // first sighting starts the clock
+		Tick(r, 30);
+		Assert.Empty(gw.Replaces);
 	}
 
 	[Fact]
-	public void BuyStepsOneTickUpAfterAConfirmedCancel()
+	public void BuyStepsOneTickUpInPlace_ListingEveryLegById()
 	{
 		var (r, gw) = Setup();
-		gw.Script["orig"] = new Queue<(string, int)>([("WORKING", 0), ("CANCELLED", 0)]);
-		r.TickAsync(T0, default).Wait();
-		r.TickAsync(T0.AddSeconds(60), default).Wait();
-		Assert.Equal(["orig"], gw.Cancelled);
-		Assert.Single(gw.Placed);
-		Assert.Equal(7.20m, LimitOf(gw.Placed[0]));
-		Assert.Equal(15, QtyOf(gw.Placed[0]));
+		Tick(r, 0);
+		Tick(r, 60);
+		var (id, qty, limit, legs) = Assert.Single(gw.Replaces);
+		Assert.Equal("orig", id);
+		Assert.Equal(15, qty);
+		Assert.Equal(7.20m, limit);
+		Assert.Equal([("leg-short", 15), ("leg-long", 15)], legs!);
 	}
 
 	[Fact]
 	public void SellStepsOneTickDown()
 	{
 		var (r, gw) = Setup(side: "SELL");
-		gw.Script["orig"] = new Queue<(string, int)>([("WORKING", 0), ("CANCELLED", 0)]);
-		r.TickAsync(T0, default).Wait();
-		r.TickAsync(T0.AddSeconds(60), default).Wait();
-		Assert.Equal(7.18m, LimitOf(gw.Placed[0]));
-	}
-
-	[Fact]
-	public void AFillThatBeatsTheCancelPlacesNothing()
-	{
-		var (r, gw) = Setup();
-		gw.Script["orig"] = new Queue<(string, int)>([("WORKING", 0), ("FILLED", 15)]);
-		r.TickAsync(T0, default).Wait();
-		r.TickAsync(T0.AddSeconds(60), default).Wait();
-		Assert.Single(gw.Cancelled);
-		Assert.Empty(gw.Placed);
-		Assert.Equal(0, r.TrackedCount);
-	}
-
-	[Fact]
-	public void APartialFillDuringTheCancelReplacesOnlyTheRemainder()
-	{
-		var (r, gw) = Setup();
-		gw.Script["orig"] = new Queue<(string, int)>([("WORKING", 0), ("CANCELLED", 5)]);
-		r.TickAsync(T0, default).Wait();
-		r.TickAsync(T0.AddSeconds(60), default).Wait();
-		Assert.Equal(10, QtyOf(gw.Placed[0]));
-	}
-
-	[Fact]
-	public void AnOrderAlreadyPartiallyFilledIsLeftResting()
-	{
-		var (r, gw) = Setup();
-		gw.Script["orig"] = new Queue<(string, int)>([("PARTIALLY_FILLED", 5)]);
-		r.TickAsync(T0, default).Wait();
-		r.TickAsync(T0.AddSeconds(60), default).Wait();
-		Assert.Empty(gw.Cancelled);
-		Assert.Empty(gw.Placed);
-		Assert.Equal(0, r.TrackedCount);
-	}
-
-	[Fact]
-	public void AnUnconfirmedCancelPlacesNothingUntilTheBrokerConfirms()
-	{
-		var (r, gw) = Setup();
-		gw.Script["orig"] = new Queue<(string, int)>([("WORKING", 0), ("WORKING", 0), ("WORKING", 0), ("WORKING", 0), ("WORKING", 0), ("WORKING", 0), ("WORKING", 0), ("WORKING", 0), ("WORKING", 0), ("CANCELLED", 0)]);
-		r.TickAsync(T0, default).Wait();
-		r.TickAsync(T0.AddSeconds(60), default).Wait();     // cancel sent, 8 confirm polls all WORKING
-		Assert.Empty(gw.Placed);
-		Assert.Equal(1, r.TrackedCount);
-		r.TickAsync(T0.AddSeconds(65), default).Wait();     // pending cancel re-checked immediately: now CANCELLED
-		Assert.Single(gw.Cancelled);
-		Assert.Single(gw.Placed);
+		Tick(r, 0);
+		Tick(r, 60);
+		Assert.Equal(7.18m, gw.Replaces[0].Limit);
 	}
 
 	[Fact]
 	public void StopsAtTheTickCapAndLeavesTheOrderResting()
 	{
 		var (r, gw) = Setup(maxTicks: 2);
-		gw.Script["orig"] = new Queue<(string, int)>([("WORKING", 0), ("CANCELLED", 0)]);
-		r.TickAsync(T0, default).Wait();
-		r.TickAsync(T0.AddSeconds(60), default).Wait();     // 7.19 → 7.20
-		gw.Script["new1"] = new Queue<(string, int)>([("WORKING", 0), ("CANCELLED", 0)]);
-		r.TickAsync(T0.AddSeconds(120), default).Wait();    // 7.20 → 7.21
-		r.TickAsync(T0.AddSeconds(180), default).Wait();    // at cap: no third cancel
-		Assert.Equal(2, gw.Placed.Count);
-		Assert.Equal(7.21m, LimitOf(gw.Placed[1]));
-		Assert.Equal(2, gw.Cancelled.Count);
+		Tick(r, 0);
+		Tick(r, 60);                // 7.19 → 7.20
+		Tick(r, 120);               // 7.20 → 7.21
+		Tick(r, 180);               // at cap
+		Assert.Equal([7.20m, 7.21m], gw.Replaces.Select(x => x.Limit));
 		Assert.Equal(0, r.TrackedCount);
 	}
 
 	[Fact]
-	public void ScaleLegsKeepsRatioStructuresInProportion()
+	public void AFilledOrderStopsBeingTracked()
 	{
-		var legs = TradeLegParser.Parse("buy:SPY261113P00771000:5,sell:SPY261019P00770000:10");
-		Assert.Equal(5, OrderRepricer.ComboQuantity(legs));
-		var scaled = OrderRepricer.ScaleLegs(legs, 2);
-		Assert.Equal([2, 4], scaled.Select(l => l.Quantity));
+		var (r, gw) = Setup();
+		gw.Statuses.Enqueue("FILLED");
+		Tick(r, 0);
+		Tick(r, 60);
+		Assert.Empty(gw.Replaces);
+		Assert.Equal(0, r.TrackedCount);
+	}
+
+	[Fact]
+	public void APartiallyFilledOrderIsLeftResting()
+	{
+		var (r, gw) = Setup();
+		gw.Statuses.Enqueue("PARTIALLY_FILLED");
+		Tick(r, 0);
+		Tick(r, 60);
+		Assert.Empty(gw.Replaces);
+		Assert.Equal(0, r.TrackedCount);
+	}
+
+	[Fact]
+	public void ACancelledOrderStopsBeingTracked()
+	{
+		var (r, gw) = Setup();
+		gw.Statuses.Enqueue("CANCELLED");
+		Tick(r, 0);
+		Tick(r, 60);
+		Assert.Empty(gw.Replaces);
+		Assert.Equal(0, r.TrackedCount);
+	}
+
+	[Fact]
+	public void AFailedReplaceKeepsTheLimitAndRetriesNextInterval()
+	{
+		var (r, gw) = Setup();
+		gw.FailNextReplace = true;
+		Tick(r, 0);
+		Tick(r, 60);                // replace throws: nothing recorded, still tracked
+		Assert.Empty(gw.Replaces);
+		Assert.Equal(1, r.TrackedCount);
+		Tick(r, 90);                // within the interval of the failed attempt
+		Assert.Empty(gw.Replaces);
+		Tick(r, 120);               // retried from the unchanged limit
+		Assert.Equal(7.20m, Assert.Single(gw.Replaces).Limit);
 	}
 }

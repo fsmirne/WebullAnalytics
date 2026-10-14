@@ -193,6 +193,44 @@ internal sealed class WebullOpenApiClient : IDisposable
 		await PostAsync<CancelResult>("/openapi/trade/order/cancel",
 			new CancelRequest { AccountId = _account.AccountId, ClientOrderId = clientOrderId }, ct);
 
+	// ─── Replace ──────────────────────────────────────────────────────────────
+
+	private sealed class ReplaceRequest
+	{
+		[JsonPropertyName("account_id")] public string AccountId { get; set; } = "";
+		[JsonPropertyName("modify_orders")] public List<ModifyOrder> ModifyOrders { get; set; } = new();
+	}
+
+	private sealed class ModifyOrder
+	{
+		[JsonPropertyName("client_order_id")] public string ClientOrderId { get; set; } = "";
+		[JsonPropertyName("quantity")] public string Quantity { get; set; } = "";
+		[JsonPropertyName("limit_price")] public string LimitPrice { get; set; } = "";
+		[JsonPropertyName("legs")][JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public List<ModifyLeg>? Legs { get; set; }
+	}
+
+	private sealed class ModifyLeg
+	{
+		[JsonPropertyName("id")] public string Id { get; set; } = "";
+		[JsonPropertyName("quantity")] public string Quantity { get; set; } = "";
+	}
+
+	/// <summary>Modifies a working order's limit price and quantity in place (the only fields Webull lets change). An option
+	/// order must also list every leg by its id from <see cref="GetOrderAsync"/> with its new quantity — Webull's US sample
+	/// shape; without the legs an option replace is rejected ("Parameter error, invalid orders"). Equities omit legs.</summary>
+	internal async Task<PlaceResult> ReplaceOrderAsync(string clientOrderId, int quantity, decimal limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs = null, CancellationToken ct = default) =>
+		await PostAsync<PlaceResult>("/openapi/trade/order/replace", new ReplaceRequest
+		{
+			AccountId = _account.AccountId,
+			ModifyOrders = [new ModifyOrder
+			{
+				ClientOrderId = clientOrderId,
+				Quantity = quantity.ToString(CultureInfo.InvariantCulture),
+				LimitPrice = limitPrice.ToString("0.####", CultureInfo.InvariantCulture),
+				Legs = legs?.Select(l => new ModifyLeg { Id = l.Id, Quantity = l.Quantity.ToString(CultureInfo.InvariantCulture) }).ToList(),
+			}],
+		}, ct);
+
 	// ─── List open orders ─────────────────────────────────────────────────────
 
 	/// <summary>Open-orders envelope: outer ClientOrderId is the cancellation key; Orders[] holds the actual detail records (same shape as /order/detail).</summary>
@@ -340,7 +378,8 @@ internal sealed class WebullOpenApiClient : IDisposable
 		[property: JsonPropertyName("quantity")] string? Quantity,
 		[property: JsonPropertyName("option_type")] string? OptionType,
 		[property: JsonPropertyName("strike_price")] string? StrikePrice,
-		[property: JsonPropertyName("option_expire_date")] string? OptionExpireDate);
+		[property: JsonPropertyName("option_expire_date")] string? OptionExpireDate,
+		[property: JsonPropertyName("id")] string? Id = null);
 
 	internal sealed record OrderDetailOrder(
 		[property: JsonPropertyName("client_order_id")] string? ClientOrderId,

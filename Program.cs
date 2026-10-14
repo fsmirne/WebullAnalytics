@@ -129,6 +129,7 @@ class Program
 				trade.AddCommand<TradePlaceCommand>("place");
 				trade.AddCommand<TradeCloseCommand>("close");
 				trade.AddCommand<TradeCancelCommand>("cancel");
+				trade.AddCommand<TradeReplaceCommand>("replace");
 				trade.AddCommand<TradeStatusCommand>("status");
 				trade.AddCommand<TradeListCommand>("list");
 				trade.AddCommand<TradeHistoryCommand>("history");

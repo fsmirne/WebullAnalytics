@@ -550,6 +550,62 @@ internal sealed class TradeCancelCommand : AsyncCommand<TradeCancelSettings>
 	}
 }
 
+// ─── `trade replace` ──────────────────────────────────────────────────────────
+
+internal sealed class TradeReplaceSettings : TradeSubcommandSettings
+{
+	[CommandArgument(0, "<clientOrderId>")]
+	[Description("Client order ID of the working order to change.")]
+	public string ClientOrderId { get; set; } = "";
+
+	[CommandOption("--limit <PRICE>")]
+	[Description("New absolute limit price (per share; combo net).")]
+	public decimal Limit { get; set; }
+
+	[CommandOption("--qty <N>")]
+	[Description("New quantity. Defaults to the order's current quantity.")]
+	public int? Qty { get; set; }
+}
+
+/// <summary>Changes a working order's limit (and optionally quantity) in place. Reads the order's legs from the broker,
+/// since an option replace must list every leg by id.</summary>
+internal sealed class TradeReplaceCommand : AsyncCommand<TradeReplaceSettings>
+{
+	protected override async Task<int> ExecuteAsync(CommandContext context, TradeReplaceSettings s, CancellationToken cancellation)
+	{
+		var account = TradeContext.ResolveOrExit(s.Account);
+		if (account == null) return 2;
+		if (s.Limit <= 0m) { AnsiConsole.MarkupLine("[red]Error:[/] --limit must be positive."); return 2; }
+
+		using var client = new WebullOpenApiClient(account);
+		try
+		{
+			var order = (await client.GetOrderAsync(s.ClientOrderId, cancellation)).Orders?.FirstOrDefault();
+			if (order == null || !int.TryParse(order.TotalQuantity?.Split('.')[0], out var currentQty) || currentQty <= 0)
+			{ AnsiConsole.MarkupLine("[red]Error:[/] could not read the order from the broker."); return 3; }
+			var qty = s.Qty ?? currentQty;
+			var legs = order.Legs?.Where(l => !string.IsNullOrEmpty(l.Id))
+				.Select(l => (l.Id!, (int.TryParse(l.Quantity?.Split('.')[0], out var lq) ? lq : currentQty) * qty / currentQty))
+				.ToList();
+			if (!TradeContext.Confirm($"Replace order {s.ClientOrderId} → qty {qty} @ {s.Limit}?")) { AnsiConsole.MarkupLine("[dim]Aborted.[/]"); return 0; }
+			var result = await client.ReplaceOrderAsync(s.ClientOrderId, qty, s.Limit, legs is { Count: > 0 } ? legs : null, cancellation);
+			AnsiConsole.MarkupLine($"[green]Replaced.[/] order_id={Markup.Escape(result.OrderId ?? "-")}  client_order_id={Markup.Escape(result.ClientOrderId ?? s.ClientOrderId)}");
+			return 0;
+		}
+		catch (WebullOpenApiException ex)
+		{
+			AnsiConsole.MarkupLine($"[red]Replace failed [[{Markup.Escape(ex.ErrorCode ?? "?")}]]: {Markup.Escape(ex.Message)}[/]");
+			if (!string.IsNullOrWhiteSpace(ex.RawBody)) AnsiConsole.MarkupLine($"  [grey50]{Markup.Escape(ex.RawBody)}[/]");
+			return 3;
+		}
+		catch (HttpRequestException ex)
+		{
+			AnsiConsole.MarkupLine($"[red]Network error:[/] {Markup.Escape(ex.Message)}");
+			return 3;
+		}
+	}
+}
+
 // ─── `trade status` ───────────────────────────────────────────────────────────
 
 internal sealed class TradeStatusSettings : TradeSubcommandSettings
