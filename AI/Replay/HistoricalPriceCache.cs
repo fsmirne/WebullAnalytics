@@ -40,4 +40,8 @@ internal sealed class HistoricalPriceCache
 	/// cache only has settled days, so the strict filter is a no-op there.</summary>
 	public Task<IReadOnlyList<decimal>> GetRecentClosesAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
 		=> _bars.GetRecentClosesAsync(ticker, count, asOf, cancellation);
+
+	/// <summary>Last <paramref name="count"/> full OHLC bars strictly before <paramref name="asOf"/>, oldest-first.</summary>
+	public Task<IReadOnlyList<YahooOptionsClient.HistoricalBar>> GetRecentBarsAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
+		=> _bars.GetRecentBarsAsync(ticker, count, asOf, cancellation);
 }

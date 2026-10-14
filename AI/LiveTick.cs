@@ -76,8 +76,12 @@ internal static class LiveTick
 			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
 			if (hv is > 0m) historicalVolByTicker[ticker] = hv.Value;
 		}
+		var realizedVolByTicker = new Dictionary<string, RealizedVolModel>(StringComparer.OrdinalIgnoreCase);
+		foreach (var ticker in tickerSet)
+			if (await RealizedVolModel.LoadAsync(deps.PriceCache, ticker, config.Opener.VolatilityLookbackDays, now, cancellation) is { } model)
+				realizedVolByTicker[ticker] = model;
 
-		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals, HistoricalVolByTicker: historicalVolByTicker);
+		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals, HistoricalVolByTicker: historicalVolByTicker, RealizedVolByTicker: realizedVolByTicker);
 		var results = deps.Evaluator.Evaluate(ctx);
 		if (deps.EmitManagement && deps.MgmtSink != null)
 			foreach (var r in results) deps.MgmtSink.Emit(r.Proposal, r.IsRepeat);

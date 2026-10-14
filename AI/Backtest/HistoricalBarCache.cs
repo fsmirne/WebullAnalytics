@@ -60,7 +60,13 @@ internal sealed class HistoricalBarCache
 	public async Task<IReadOnlyList<decimal>> GetRecentClosesAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
 		=> await GetRecentValuesAsync(ticker, count, asOf, b => b.Close, cancellation);
 
-	private async Task<IReadOnlyList<decimal>> GetRecentValuesAsync(string ticker, int count, DateTime asOf, Func<YahooOptionsClient.HistoricalBar, decimal> select, CancellationToken cancellation)
+	/// <summary>Returns the last <paramref name="count"/> full OHLC bars strictly before <paramref name="asOf"/>, oldest-first —
+	/// the same strict-less-than lookahead guard as <see cref="GetRecentClosesAsync"/>. Feeds the overnight/session split
+	/// in <see cref="RealizedVolModel"/>.</summary>
+	public async Task<IReadOnlyList<YahooOptionsClient.HistoricalBar>> GetRecentBarsAsync(string ticker, int count, DateTime asOf, CancellationToken cancellation)
+		=> await GetRecentValuesAsync(ticker, count, asOf, b => b, cancellation);
+
+	private async Task<IReadOnlyList<T>> GetRecentValuesAsync<T>(string ticker, int count, DateTime asOf, Func<YahooOptionsClient.HistoricalBar, T> select, CancellationToken cancellation)
 	{
 		var map = await LoadOrFetchAsync(ticker, asOf.Date, cancellation);
 		return map

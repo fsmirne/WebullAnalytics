@@ -395,6 +395,16 @@ internal sealed class OpenCandidateEvaluator
 			}
 		}
 
+		// Real-world vol forecast for the scoring distribution (overnight/session split from daily OHLC strictly before
+		// ctx.Now — lookahead-safe in backtest). Always loaded: unlike the closes above it isn't gated on a weight,
+		// because every candidate's EV/POP distribution reads it. Same lookback as the HV the factors use.
+		var realizedVolByTicker = new Dictionary<string, RealizedVolModel>(StringComparer.OrdinalIgnoreCase);
+		foreach (var ticker in new[] { _config.Ticker })
+		{
+			if (await RealizedVolModel.LoadAsync(_priceCache, ticker, cfg.VolatilityLookbackDays, ctx.Now, cancellation) is { } model)
+				realizedVolByTicker[ticker] = model;
+		}
+
 		// Scheduled-catalyst calendar (earnings + ex-div) per ticker. Built once per scan; resolved
 		// per-ticker inside the per-ticker loop. The loader returns EventCalendar.Empty when the
 		// feature is disabled or when Yahoo is unreachable — the scorer treats null events as
@@ -447,6 +457,7 @@ internal sealed class OpenCandidateEvaluator
 			}
 
 			historicalVolByTicker.TryGetValue(tickerGroup.Key, out var historicalVolAnnual);
+			realizedVolByTicker.TryGetValue(tickerGroup.Key, out var realizedVol);
 			shortHorizonHvByTicker.TryGetValue(tickerGroup.Key, out var shortHorizonHv);
 			// Whipsaw penalty: when 3-day realized vol is well above 30-day, both put- and call-credit
 			// spreads get punished by counter-trend reversals (e.g. April 2025 SPX +$492 inside the crash
@@ -484,7 +495,7 @@ internal sealed class OpenCandidateEvaluator
 				foreach (var skel in gatedGroup)
 				{
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf, vetoNow: ctx.Now);
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf, vetoNow: ctx.Now, realizedVol: realizedVol);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
@@ -536,7 +547,7 @@ internal sealed class OpenCandidateEvaluator
 				{
 					var skel = skels[i];
 					var skelBias = BiasForDte((skel.TargetExpiry.Date - ctx.Now.Date).Days);
-					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf, vetoNow: ctx.Now);
+					var p = CandidateScorer.Score(skel, spot, ctx.Now, mergedQuotes, skelBias, cfg, historicalVolAnnual > 0m ? historicalVolAnnual : null, _pricingMode, sentimentScore: sentimentScore, events: tickerEvents, snapshotTradeable: snapshotTradeable, ivSolveAsOf: ivSolveAsOf, vetoNow: ctx.Now, realizedVol: realizedVol);
 					if (p != null && whipsawFactor < 1m && IsCreditStructure(skel.StructureKind))
 					{
 						var adjusted = CandidateScorer.ApplyFactor(p.FinalScore ?? 0m, whipsawFactor);
@@ -780,7 +791,8 @@ internal sealed class OpenCandidateEvaluator
 				quotes: mergedQuotes,
 				opener: openerScore,
 				historicalVolAnnual: diagnosticHvByTicker.TryGetValue(p.Ticker, out var pHv) ? pHv : (decimal?)null,
-				sentimentScore: sentimentScore);
+				sentimentScore: sentimentScore,
+				realizedVol: realizedVolByTicker.GetValueOrDefault(p.Ticker));
 
 			annotated.Add(p with { Diagnostic = diagnostic with { Probe = probe } });
 		}

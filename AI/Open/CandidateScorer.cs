@@ -997,6 +997,11 @@ internal static class CandidateScorer
 	private static decimal ScenarioForward(decimal spot, IReadOnlyList<DividendEvent>? dividends, DateTime asOf, DateTime targetExpiry, double years)
 		=> OptionMath.ForwardPrice(spot, dividends, asOf, targetExpiry.Date + OptionMath.MarketClose, years, OptionMath.RiskFreeRate);
 
+	/// <summary>Annualized vol (on the IV's clock) of the scoring distribution: the realized-vol forecast when one is
+	/// available, else the implied vol — see <see cref="RealizedVolModel"/>.</summary>
+	private static decimal ScenarioVol(RealizedVolModel? realizedVol, DateTime asOf, DateTime targetExpiry, double years, decimal impliedVol)
+		=> realizedVol?.ScenarioVol(asOf, targetExpiry, years) ?? impliedVol;
+
 	private const int ScenarioBins = 81;
 	private const double ScenarioBinEdgeSigmas = 5.0;
 	private static readonly (double Z, double Weight)[] ScenarioNodes = BuildScenarioNodes();
@@ -1186,13 +1191,13 @@ internal static class CandidateScorer
 	/// running at a hypothetical spot (e.g., <c>--spot</c> override) should pass false,
 	/// because the market mid was set at a different spot and back-solving against it produces a
 	/// nonsensical IV that collapses calendar/diagonal residual time value.</summary>
-	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null) => skel.StructureKind switch
+	public static OpenProposal? Score(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null, RealizedVolModel? realizedVol = null) => skel.StructureKind switch
 	{
-		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf),
-		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow: vetoNow),
-		OpenStructureKind.LongCallVertical or OpenStructureKind.LongPutVertical => ScoreLongVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf),
-		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow),
-		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor or OpenStructureKind.DiagonalVertical or OpenStructureKind.CalendarVertical or OpenStructureKind.Condor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow),
+		OpenStructureKind.LongCall or OpenStructureKind.LongPut => ScoreLongCallPut(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, realizedVol: realizedVol),
+		OpenStructureKind.ShortPutVertical or OpenStructureKind.ShortCallVertical => ScoreShortVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow: vetoNow, realizedVol: realizedVol),
+		OpenStructureKind.LongCallVertical or OpenStructureKind.LongPutVertical => ScoreLongVertical(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, realizedVol: realizedVol),
+		OpenStructureKind.LongCalendar or OpenStructureKind.LongDiagonal => ScoreCalendarOrDiagonal(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow, realizedVol),
+		OpenStructureKind.DoubleCalendar or OpenStructureKind.DoubleDiagonal or OpenStructureKind.IronButterfly or OpenStructureKind.IronCondor or OpenStructureKind.DiagonalVertical or OpenStructureKind.CalendarVertical or OpenStructureKind.Condor => ScoreMultiLeg(skel, spot, asOf, quotes, bias, cfg, historicalVolAnnual, pricingMode, applyLiquidityGate, useMarketImpliedIv, sentimentScore, events, snapshotTradeable, ivSolveAsOf, vetoNow, realizedVol),
 		_ => null
 	};
 
@@ -1482,7 +1487,7 @@ internal static class CandidateScorer
 		return (decimal)(dir == Direction.Above ? N_d2 : 1.0 - N_d2);
 	}
 
-	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null)
+	public static OpenProposal? ScoreShortVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null, RealizedVolModel? realizedVol = null)
 	{
 		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _, vetoNow)) return null;
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
@@ -1525,11 +1530,13 @@ internal static class CandidateScorer
 
 		// POP = P(S_T inside profitable side of breakeven).
 		var forward = ScenarioForward(spot, dividends, asOf, skel.TargetExpiry, years);
-		var pop = LogNormalProbability(isCall ? Direction.Below : Direction.Above, forward, breakeven, years, (double)iv);
+		// Real-world distribution: outcomes follow realized vol (implied when no forecast); legs stay priced at implied.
+		var scenarioVol = ScenarioVol(realizedVol, asOf, skel.TargetExpiry, years, iv);
+		var pop = LogNormalProbability(isCall ? Direction.Below : Direction.Above, forward, breakeven, years, (double)scenarioVol);
 
 	   // EV via scenario grid — payoff at expiry is piecewise linear.
-		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg);
-		var grid = BuildScenarioGrid(forward, iv, years, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, years, cfg);
+		var grid = BuildScenarioGrid(forward, scenarioVol, years, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, creditPerContract, isCall);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -1549,10 +1556,10 @@ internal static class CandidateScorer
 		var popFactor = ComputeProbabilityFactor(pop);
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, [breakeven]);
-		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, iv, years, [breakeven]);
-		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, iv, years);
+		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, scenarioVol, years, [breakeven]);
+		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, scenarioVol, years);
 		var shortLegStrikes = ExtractShortLegStrikes(skel.Legs);
-		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, iv, years, creditPerContract, shortLegStrikes, cfg.Weights.ExpectedMoveCredit);
+		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, scenarioVol, years, creditPerContract, shortLegStrikes, cfg.Weights.ExpectedMoveCredit);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, creditPerContract, cfg.Weights.IvRealizedPremium);
 		var longIv = ScoredLegIv(cache, longLeg.Symbol, longParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 		var legGreeks = new[]
@@ -1644,7 +1651,7 @@ internal static class CandidateScorer
 	/// Like <see cref="ScoreLongCallPut"/> the popFactor penalty is skipped — debit verticals are
 	/// positive-skew bets where a low POP is the trade's structural feature, not a defect, and
 	/// applying ComputeProbabilityFactor would unfairly demote them against credit spreads.</summary>
-	public static OpenProposal? ScoreLongVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null)
+	public static OpenProposal? ScoreLongVertical(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, RealizedVolModel? realizedVol = null)
 	{
 		// Long-only structures aren't event-vetoed (no short leg to take assignment risk on).
 		_ = events;
@@ -1689,10 +1696,12 @@ internal static class CandidateScorer
 
 		// POP = P(S_T past breakeven in the profitable direction).
 		var forward = ScenarioForward(spot, dividends, asOf, skel.TargetExpiry, years);
-		var pop = LogNormalProbability(isCall ? Direction.Above : Direction.Below, forward, breakeven, years, (double)iv);
+		// Real-world distribution: outcomes follow realized vol (implied when no forecast); legs stay priced at implied.
+		var scenarioVol = ScenarioVol(realizedVol, asOf, skel.TargetExpiry, years, iv);
+		var pop = LogNormalProbability(isCall ? Direction.Above : Direction.Below, forward, breakeven, years, (double)scenarioVol);
 
-		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg);
-		var grid = BuildScenarioGrid(forward, iv, years, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, years, cfg);
+		var grid = BuildScenarioGrid(forward, scenarioVol, years, bias * cfg.Weights.BiasDrift + magnet.Total);
 		// VerticalPnLAtExpiry uses signed netEntry where credit=positive. For a debit spread we pay,
 		// so pass -debitPerContract as the "credit" parameter.
 		decimal PnlAtExpiry(decimal sT) => VerticalPnLAtExpiry(sT, shortParsed.Strike, longParsed.Strike, -debitPerContract, isCall);
@@ -1709,8 +1718,8 @@ internal static class CandidateScorer
 		var popFactor = 1m;
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, [breakeven]);
-		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, iv, years, [breakeven]);
-		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, iv, years);
+		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, scenarioVol, years, [breakeven]);
+		var expectedMoveBounds = ComputeExpectedMoveBounds(forward, scenarioVol, years);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
 		var shortIv = ScoredLegIv(cache, shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
 		var legGreeks = new[]
@@ -2223,7 +2232,7 @@ internal static class CandidateScorer
 		return (maxProfit, maxLoss);
 	}
 
-	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null)
+	public static OpenProposal? ScoreMultiLeg(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null, RealizedVolModel? realizedVol = null)
 	{
 		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _, vetoNow)) return null;
 		var defs = new List<MultiLegDefinition>(skel.Legs.Count);
@@ -2289,9 +2298,11 @@ internal static class CandidateScorer
 			breakevens = FindBreakevens(pnl, beLower, beUpper, scanSteps);
 		}
 		var forward = ScenarioForward(spot, dividends, asOf, skel.TargetExpiry, years);
-		var pop = ComputeProbabilityOfProfit(pnl, breakevens, forward, years, representativeIv);
-		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, representativeIv, years, cfg);
-		var grid = BuildScenarioGrid(forward, representativeIv, years, bias * cfg.Weights.BiasDrift + magnet.Total);
+		// Real-world distribution: outcomes follow realized vol (implied when no forecast); legs stay priced at implied.
+		var scenarioVol = ScenarioVol(realizedVol, asOf, skel.TargetExpiry, years, representativeIv);
+		var pop = ComputeProbabilityOfProfit(pnl, breakevens, forward, years, scenarioVol);
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, years, cfg);
+		var grid = BuildScenarioGrid(forward, scenarioVol, years, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal ev = 0m;
 		foreach (var pt in grid)
 			ev += pt.Weight * pnl(pt.SpotAtExpiry);
@@ -2315,10 +2326,10 @@ internal static class CandidateScorer
 		var scaleFactor = ComputeCapitalScaleFactor(efficiencyCapital);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, breakevens);
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
-		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, representativeIv, years, breakevens);
-		var expectedMoveBoundsMl = ComputeExpectedMoveBounds(forward, representativeIv, years);
+		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, scenarioVol, years, breakevens);
+		var expectedMoveBoundsMl = ComputeExpectedMoveBounds(forward, scenarioVol, years);
 		var shortLegStrikesMl = ExtractShortLegStrikes(skel.Legs);
-		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, representativeIv, years, netEntryPerContract, shortLegStrikesMl, cfg.Weights.ExpectedMoveCredit);
+		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, scenarioVol, years, netEntryPerContract, shortLegStrikesMl, cfg.Weights.ExpectedMoveCredit);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(representativeIv, historicalVolAnnual, netEntryPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = defs.Select(d => (d.Parsed, d.Iv, d.IsLong)).ToList();
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(legGreeks, asOf, spot);
@@ -2396,7 +2407,7 @@ internal static class CandidateScorer
 			ExpectedMoveUpper: expectedMoveBoundsMl?.Upper);
 	}
 
-	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null)
+	public static OpenProposal? ScoreCalendarOrDiagonal(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, DateTime? vetoNow = null, RealizedVolModel? realizedVol = null)
 	{
 		if (applyLiquidityGate && EventVeto.ShouldVeto(skel, asOf, events, cfg.Indicators.Events, out _, vetoNow)) return null;
 		var shortLeg = skel.Legs.First(l => l.Action == "sell");
@@ -2489,11 +2500,13 @@ internal static class CandidateScorer
 		var (beLower, beUpper) = ComputeCalendarOrDiagonalBreakevens(spot, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
 		// Scoring horizon is the short expiry; ex-dates on/before it are absorbed into the forward (the long leg's valuation excludes them, see above).
 		var forward = OptionMath.ForwardPrice(spot, dividends, asOf, shortExpiryClose, shortYears, OptionMath.RiskFreeRate);
+		// Real-world distribution: outcomes follow realized vol (implied when no forecast); legs stay priced at implied.
+		var scenarioVol = ScenarioVol(realizedVol, asOf, shortParsed.ExpiryDate, shortYears, ivShort);
 		decimal pop;
 		if (beLower.HasValue && beUpper.HasValue)
 		{
-			var pAboveLower = LogNormalProbability(Direction.Above, forward, beLower.Value, shortYears, (double)ivShort);
-			var pAboveUpper = LogNormalProbability(Direction.Above, forward, beUpper.Value, shortYears, (double)ivShort);
+			var pAboveLower = LogNormalProbability(Direction.Above, forward, beLower.Value, shortYears, (double)scenarioVol);
+			var pAboveUpper = LogNormalProbability(Direction.Above, forward, beUpper.Value, shortYears, (double)scenarioVol);
 			pop = pAboveLower - pAboveUpper;
 			if (pop < 0m) pop = 0m;
 		}
@@ -2505,8 +2518,8 @@ internal static class CandidateScorer
 			// 0. Probe the payoff just past the breakeven to find the winning side; take the one-sided POP.
 			var profitableAbove = CalendarOrDiagonalPnLAtShortExpiry(beLower.Value * 1.02m, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs) > 0m;
 			pop = profitableAbove
-				? LogNormalProbability(Direction.Above, forward, beLower.Value, shortYears, (double)ivShort)
-				: LogNormalProbability(Direction.Below, forward, beLower.Value, shortYears, (double)ivShort);
+				? LogNormalProbability(Direction.Above, forward, beLower.Value, shortYears, (double)scenarioVol)
+				: LogNormalProbability(Direction.Below, forward, beLower.Value, shortYears, (double)scenarioVol);
 		}
 		else
 		{
@@ -2518,8 +2531,8 @@ internal static class CandidateScorer
 		// max_profit comes from a separate fine-grid scan because the true peak typically falls between
 		// 5-point grid points (e.g. an ATM call diagonal peaks at the short strike, which the ±0.5σ
 		// sampling misses) — using the scenario-grid max would understate R/R by ~30%.
-		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, ivShort, shortYears, cfg);
-		var grid = BuildScenarioGrid(forward, ivShort, shortYears, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, shortYears, cfg);
+		var grid = BuildScenarioGrid(forward, scenarioVol, shortYears, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal PnlAtTarget(decimal sT) => CalendarOrDiagonalPnLAtShortExpiry(sT, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -2549,10 +2562,10 @@ internal static class CandidateScorer
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, beList);
 		var runwayFactor = ComputeAdjustmentRunwayFactor(skel, asOf, spot, quotes);
 		var representativeIvEarly = (ivShort + ivLong) / 2m;
-		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, representativeIvEarly, shortYears, beList);
-		var expectedMoveBoundsCd = ComputeExpectedMoveBounds(forward, representativeIvEarly, shortYears);
+		var breakevenRoomFactor = ComputeBreakevenRoomFactor(forward, scenarioVol, shortYears, beList);
+		var expectedMoveBoundsCd = ComputeExpectedMoveBounds(forward, scenarioVol, shortYears);
 		var shortLegStrikesCd = ExtractShortLegStrikes(skel.Legs);
-		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, representativeIvEarly, shortYears, -debitPerContract, shortLegStrikesCd, cfg.Weights.ExpectedMoveCredit);
+		var expectedMoveCreditFactor = ComputeExpectedMoveCreditFactor(forward, scenarioVol, shortYears, -debitPerContract, shortLegStrikesCd, cfg.Weights.ExpectedMoveCredit);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(representativeIvEarly, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = new[]
 		{
@@ -2683,7 +2696,7 @@ internal static class CandidateScorer
 		return netVegaPerShare * 100m;
 	}
 
-	public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null)
+	public static OpenProposal? ScoreLongCallPut(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal bias, OpenerConfig cfg, decimal? historicalVolAnnual = null, string pricingMode = SuggestionPricing.Mid, bool applyLiquidityGate = true, bool useMarketImpliedIv = true, decimal? sentimentScore = null, TickerEvents? events = null, IReadOnlySet<string>? snapshotTradeable = null, DateTime? ivSolveAsOf = null, RealizedVolModel? realizedVol = null)
 	{
 		// Long-only structures are never vetoed by events (EventVeto.HasShortLeg returns false); events
 		// still feed the dividend schedule for the leg's IV back-solve, and the diagnostic builder
@@ -2711,15 +2724,17 @@ internal static class CandidateScorer
 		var breakeven = parsed.CallPut == "C" ? parsed.Strike + debitPerShare : parsed.Strike - debitPerShare;
 
 		var forward = ScenarioForward(spot, dividends, asOf, skel.TargetExpiry, years);
-		var pop = LogNormalProbability(parsed.CallPut == "C" ? Direction.Above : Direction.Below, forward, breakeven, years, (double)iv);
+		// Real-world distribution: outcomes follow realized vol (implied when no forecast); legs stay priced at implied.
+		var scenarioVol = ScenarioVol(realizedVol, asOf, skel.TargetExpiry, years, iv);
+		var pop = LogNormalProbability(parsed.CallPut == "C" ? Direction.Above : Direction.Below, forward, breakeven, years, (double)scenarioVol);
 
 		// gex (gravity) is needed below for the multiplicative factor; it also feeds the grid magnet via
 		// MagnetBiasSigmas — a gravity/max-pain level below spot pulls the EV distribution down so a long put's
 		// realized EV becomes genuinely positive (and a sensible strike is picked), which the multiplicative
 		// factor structurally cannot do. Gated by gexBiasPull / maxPainBiasPull (default 0 → live unchanged).
 		var gex = GexCached(skel.Ticker, skel.TargetExpiry.Date, spot, asOf, quotes);
-		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, iv, years, cfg);
-		var grid = BuildScenarioGrid(forward, iv, years, bias * cfg.Weights.BiasDrift + magnet.Total);
+		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, years, cfg);
+		var grid = BuildScenarioGrid(forward, scenarioVol, years, bias * cfg.Weights.BiasDrift + magnet.Total);
 		decimal PnlAtExpiry(decimal sT)
 		{
 			var intrinsic = parsed.CallPut == "C" ? Math.Max(0m, sT - parsed.Strike) : Math.Max(0m, parsed.Strike - sT);
@@ -2751,7 +2766,7 @@ internal static class CandidateScorer
 		var popFactor = 1m;
 		var scaleFactor = ComputeCapitalScaleFactor(capitalAtRisk);
 		var setupFactor = ComputeSetupFactor(skel.StructureKind, forward, [breakeven]);
-		var expectedMoveBoundsLc = ComputeExpectedMoveBounds(forward, iv, years);
+		var expectedMoveBoundsLc = ComputeExpectedMoveBounds(forward, scenarioVol, years);
 		var ivRealizedPremiumFactor = ComputeIvRealizedPremiumFactor(iv, historicalVolAnnual, -debitPerContract, cfg.Weights.IvRealizedPremium);
 		var legGreeks = new[] { (Parsed: parsed, Iv: iv, IsLong: true) };
 		var thetaPerDayPerContract = ComputeNetThetaPerDayPerContract(legGreeks, asOf, spot);

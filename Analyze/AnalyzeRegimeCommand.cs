@@ -197,6 +197,7 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 			var h = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
 			if (h.HasValue && h.Value > 0m) hv = h.Value;
 		}
+		var realizedVol = await RealizedVolModel.LoadAsync(rc.PriceCache, ticker, op.VolatilityLookbackDays, asOf, cancellation);
 		decimal? sentiment = null;
 		if (op.Weights.Sentiment > 0m)
 		{
@@ -211,7 +212,7 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 		AnsiConsole.WriteLine();
 
 		decimal Score(CandidateSkeleton skel, decimal bias)
-			=> CandidateScorer.Score(skel, spot, asOf, rc.Snapshot.Options, bias, op, hv, settings.Pricing, applyLiquidityGate: false, sentimentScore: sentiment, events: events)?.FinalScore ?? decimal.MinValue;
+			=> CandidateScorer.Score(skel, spot, asOf, rc.Snapshot.Options, bias, op, hv, settings.Pricing, applyLiquidityGate: false, sentimentScore: sentiment, events: events, realizedVol: realizedVol)?.FinalScore ?? decimal.MinValue;
 
 		RenderFlipMargin(families, blended, repDte, Score);
 		AnsiConsole.WriteLine();

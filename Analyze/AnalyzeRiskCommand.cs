@@ -229,7 +229,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			PricePerShare: ResolveLegMark(l.Symbol),
 			CostBasisPerShare: l.CostBasis)).ToList();
 
-		var historicalVolAnnual = await TryComputeHistoricalVolAsync(ticker, asOf, priceCache, cancellation);
+		var (historicalVolAnnual, realizedVol) = await RiskDiagnosticProbeBuilder.TryLoadVolInputsAsync(ticker, asOf, priceCache, cancellation);
 		var sentiment = await FearGreedClient.FetchAsync(asOf, cancellation);
 
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot.Value, quoteAsOf, ResolveIv, trend, quotes, sentiment);
@@ -241,7 +241,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		// market mids, not an existing position with a stale cost basis. Cost-basis mode would suppress
 		// useMarketImpliedIv and use broker IV instead of the back-solved mid IV, diverging from the
 		// scan. With false, the scorer uses real bid/ask and back-solves ivLong, matching scan exactly.
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: false, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score, ivSolveAsOf: quoteAsOf);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot.Value, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: false, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score, ivSolveAsOf: quoteAsOf, realizedVol: realizedVol);
 		diagnostic = diagnostic with { Probe = probe };
 
 		var logPath = Program.ResolvePath("data/analyze-risk.jsonl");
@@ -315,31 +315,6 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			AnalyzeCommon.RenderProposalPanel(positionLegs, strategyLabel, spot, snap.Diagnostic);
 		}
 		return 0;
-	}
-
-	/// <summary>Mirrors OpenCandidateEvaluator's HV pull so analyze risk scores get the same vol-fit
-	/// factor as the live opener pipeline. Accepts the caller's shared HistoricalPriceCache so the
-	/// in-memory bar cache is reused across the bias and vol-fit fetches. Returns null when the
-	/// config, lookback, or cache is missing — the scorer treats that as "skip the vol factor".</summary>
-	private static async Task<decimal?> TryComputeHistoricalVolAsync(string ticker, DateTime asOf, HistoricalPriceCache priceCache, CancellationToken cancellation)
-	{
-		try
-		{
-			// Use the same full merge chain (base + ticker + strategy) as TryLoadAiConfigQuiet so the
-			// VolatilityFit weight from a strategy-specific layer (e.g. ai-config.GME.DC.json) is visible.
-			var cfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
-			if (cfg == null) return null;
-			// Either factor may use historical vol; only skip if both are disabled.
-			if (cfg.Opener.Weights.VolatilityFit <= 0m && cfg.Opener.Weights.IvRealizedPremium <= 0m) return null;
-
-			var closes = await priceCache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
-			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
-			return hv is decimal v && v > 0m ? v : null;
-		}
-		catch
-		{
-			return null;
-		}
 	}
 
 	private static decimal? ResolveSpot(string ticker, string? spotOverrides, IReadOnlyDictionary<string, decimal>? underlyingPrices)

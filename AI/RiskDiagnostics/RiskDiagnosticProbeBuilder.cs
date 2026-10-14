@@ -1,4 +1,5 @@
 ﻿using WebullAnalytics.AI.Events;
+using WebullAnalytics.AI.Replay;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.RiskDiagnostics;
@@ -20,7 +21,8 @@ internal static class RiskDiagnosticProbeBuilder
 		bool useMarketImpliedIv = true,
 		decimal? sentimentScore = null,
 		TickerEvents? events = null,
-		DateTime? ivSolveAsOf = null)
+		DateTime? ivSolveAsOf = null,
+		RealizedVolModel? realizedVol = null)
 	{
 		var legQuotes = new List<RiskDiagnosticLegQuote>();
 		if (quotes != null)
@@ -158,7 +160,7 @@ internal static class RiskDiagnosticProbeBuilder
 					// false branch) reads the Iv field from the quote, which OverrideBidAskWithCostBasis
 					// does not touch, giving the current broker-reported IV.
 					var effectiveUseMarketImpliedIv = useCostBasisForOpenerScore ? false : useMarketImpliedIv;
-					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false, useMarketImpliedIv: effectiveUseMarketImpliedIv, sentimentScore: sentimentScore, events: events, ivSolveAsOf: ivSolveAsOf);
+					var scored = CandidateScorer.Score(skel, spot, asOf, scoringQuotes, bias, ai.Opener, historicalVolAnnual, applyLiquidityGate: false, useMarketImpliedIv: effectiveUseMarketImpliedIv, sentimentScore: sentimentScore, events: events, ivSolveAsOf: ivSolveAsOf, realizedVol: realizedVol);
 					if (scored != null)
 					{
 						// When cost-basis override is in play, the scorer's view of bid/ask is collapsed
@@ -454,6 +456,28 @@ internal static class RiskDiagnosticProbeBuilder
 	/// set to a human-readable explanation — surfaced in the diagnostic so the user knows exactly what to create
 	/// (e.g. a missing per-ticker ai-config.<TICKER>.json supplying indicators.strikeStep) rather than the probe
 	/// silently degrading to a no-score rationale.</summary>
+	/// <summary>Vol inputs for an ad-hoc analyze scoring, mirroring the opener pipeline: the underlying's realized HV for
+	/// the vol-fit / IV-vs-realized factors (null when both weights are 0, as the opener skips it) and the real-world
+	/// <see cref="RealizedVolModel"/> for the scoring distribution. Both null when the config or history is missing.</summary>
+	internal static async Task<(decimal? HistoricalVolAnnual, RealizedVolModel? RealizedVol)> TryLoadVolInputsAsync(string ticker, DateTime asOf, HistoricalPriceCache priceCache, CancellationToken cancellation)
+	{
+		try
+		{
+			// Full merge chain (base + ticker + strategy) so a strategy layer's weights and lookback are visible.
+			var cfg = TryLoadAiConfigQuiet(ticker, out _);
+			if (cfg == null) return (null, null);
+			var realizedVol = await RealizedVolModel.LoadAsync(priceCache, ticker, cfg.Opener.VolatilityLookbackDays, asOf, cancellation);
+			if (cfg.Opener.Weights.VolatilityFit <= 0m && cfg.Opener.Weights.IvRealizedPremium <= 0m) return (null, realizedVol);
+			var closes = await priceCache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
+			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
+			return (hv is decimal v && v > 0m ? v : null, realizedVol);
+		}
+		catch
+		{
+			return (null, null);
+		}
+	}
+
 	internal static AIConfig? TryLoadAiConfigQuiet(string? ticker, out string? unavailableReason)
 	{
 		var key = ticker?.ToUpperInvariant() ?? "";

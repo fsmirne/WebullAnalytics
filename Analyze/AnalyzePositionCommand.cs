@@ -250,7 +250,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var regimeComponents = aiCfg != null ? (await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, DateTime.Now, priceCache, intradayCache, includeCurrentBar: true, cancellation)).Components : default;
 		var technicalBias = aiCfg != null ? RegimeAnalyzer.BlendBias(regimeComponents, aiCfg.Opener, dteCalendar) : 0m;
 
-		var historicalVolAnnual = await TryComputeHistoricalVolAsync(ticker, asOfForDiagnostic, priceCache, cancellation);
+		var (historicalVolAnnual, realizedVol) = await RiskDiagnosticProbeBuilder.TryLoadVolInputsAsync(ticker, asOfForDiagnostic, priceCache, cancellation);
 		var sentiment = await FearGreedClient.FetchAsync(asOfForDiagnostic, cancellation);
 
 		// Scheduled-catalyst events (earnings + ex-dividend) for the position's ticker. cacheOnly:false
@@ -304,6 +304,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			quotesForProbe: quotes,
 			technicalBiasForProbe: technicalBias,
 			historicalVolAnnual: historicalVolAnnual,
+			realizedVol: realizedVol,
 			// At hypothetical spots (--spot override), the leg market mids are stale and back-solving
 			// IV against them produces a nonsense IV that collapses calendar/diagonal residual time
 			// value. Use the broker's reported IV instead so the projection is internally consistent.
@@ -384,28 +385,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			return null;
 		}
 		catch (System.Net.Http.HttpRequestException)
-		{
-			return null;
-		}
-	}
-
-	/// <summary>Mirrors OpenCandidateEvaluator's HV pull so analyze position scores get the same vol-fit
-	/// factor as the live opener pipeline. Accepts the caller's shared HistoricalPriceCache so the
-	/// in-memory bar cache is reused across the regime and vol-fit fetches. Returns null when the
-	/// config, lookback, or cache is missing — the scorer treats that as "skip the vol factor".</summary>
-	private static async Task<decimal?> TryComputeHistoricalVolAsync(string ticker, DateTime asOf, HistoricalPriceCache priceCache, CancellationToken cancellation)
-	{
-		try
-		{
-			var cfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
-			if (cfg == null) return null;
-			if (cfg.Opener.Weights.VolatilityFit <= 0m && cfg.Opener.Weights.IvRealizedPremium <= 0m) return null;
-
-			var closes = await priceCache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
-			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
-			return hv is decimal v && v > 0m ? v : null;
-		}
-		catch
 		{
 			return null;
 		}
@@ -2170,6 +2149,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		IReadOnlyDictionary<string, OptionContractQuote>? quotesForProbe = null,
 		decimal technicalBiasForProbe = 0m,
 		decimal? historicalVolAnnual = null,
+		RealizedVolModel? realizedVol = null,
 		bool useMarketImpliedIv = true,
 		SentimentSnapshot? sentiment = null,
 		TickerEvents? events = null)
@@ -2183,7 +2163,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			CostBasisPerShare: l.CostBasis)).ToList();
 
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, asOf, ivResolver, trend, quotesForProbe, sentiment, events);
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score, events: events);
+		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ivResolver, quotesForProbe, opener: null, technicalBiasOverride: technicalBiasForProbe, useCostBasisForOpenerScore: true, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score, events: events, realizedVol: realizedVol);
 		diagnostic = diagnostic with { Probe = probe };
 
 		Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);

@@ -21,6 +21,8 @@ namespace WebullAnalytics.AI;
 /// vendor-independent metric the opener and `wa analyze` compute. Feeds the risk-diagnostic HV display so the
 /// watch panel never shows the vendor's per-contract hiv (Webull-only; Schwab reports none). Null/missing entry
 /// leaves the HV line blank.</param>
+/// <param name="RealizedVolByTicker">Real-world vol forecast per ticker (<see cref="RealizedVolModel"/>) — the scoring
+/// distribution the risk-diagnostic's opener score uses. Null/missing entry falls back to implied vol.</param>
 internal sealed record EvaluationContext(
 	DateTime Now,
 	IReadOnlyDictionary<string, OpenPosition> OpenPositions,
@@ -31,7 +33,8 @@ internal sealed record EvaluationContext(
 	IReadOnlyDictionary<string, TechnicalBias> TechnicalSignals,
 	decimal? Vix = null,
 	decimal? IntradaySpotRangePct = null,
-	IReadOnlyDictionary<string, decimal>? HistoricalVolByTicker = null
+	IReadOnlyDictionary<string, decimal>? HistoricalVolByTicker = null,
+	IReadOnlyDictionary<string, RealizedVolModel>? RealizedVolByTicker = null
 );
 
 /// <summary>
