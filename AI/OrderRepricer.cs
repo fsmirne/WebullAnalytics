@@ -36,81 +36,76 @@ internal sealed class WebullOrderGateway(TradeAccount account) : IOrderGateway
 /// place (Webull's order replace — same order id, no cancel, so there is never a moment with nothing working and no race
 /// against a fill) one exchange tick more aggressive (BUY up, SELL down), never beyond <see cref="RepriceConfig.MaxTicks"/>
 /// ticks from the original limit — the scorer priced the trade at that mid, so the repricer never chases a market that
-/// moved away. A partially filled order is left resting. Tracking is in-memory: orders from before a restart are not
-/// repriced.
+/// moved away. A partially filled order is left resting. Tracking lives in <see cref="RepriceStore"/>, so a restarted
+/// watch loop resumes where the last one stopped, and any watch loop on the account steps orders placed by another
+/// process (e.g. `wa ai scan --submit`).
 /// </summary>
 internal sealed class OrderRepricer
 {
-	private sealed class Tracked
-	{
-		public required string ClientOrderId;
-		public required string Ticker;
-		public required string Side;
-		public required int LegCount;
-		public required bool IsOpen;
-		public required decimal OriginalLimit;
-		public required decimal CurrentLimit;
-		/// <summary>Null until the first tick that sees the order — every timestamp comes from the watch loop's clock.</summary>
-		public DateTime? LastStepAt;
-		public int Steps;
-		public Action<string, string>? OnEvent;
-	}
-
 	private enum OrderState { Working, PartiallyFilled, Filled, Ended }
 
 	private readonly RepriceConfig _config;
 	private readonly IOrderGateway _gateway;
-	private readonly List<Tracked> _orders = new();
+	private readonly RepriceStore _store;
+	private readonly string _accountId;
+	/// <summary>Event sinks of orders this process placed; orders resumed from the store report to the console only.</summary>
+	private readonly Dictionary<string, Action<string, string>> _onEvent = new();
 
-	public OrderRepricer(RepriceConfig config, IOrderGateway gateway)
+	public OrderRepricer(RepriceConfig config, IOrderGateway gateway, RepriceStore store, string accountId)
 	{
 		_config = config;
 		_gateway = gateway;
+		_store = store;
+		_accountId = accountId;
 	}
 
 	public bool Enabled => _config.Enabled && _config.MaxTicks > 0;
 
-	public int TrackedCount => _orders.Count;
+	public int TrackedCount => _store.Active(_accountId).Count;
 
 	/// <summary>Registers a just-placed live limit order. <paramref name="onEvent"/> receives (outcome, detail) for every step.</summary>
 	public void Track(OrderRequestBuilder.BuildParams build, string clientOrderId, string ticker, bool isOpen, Action<string, string>? onEvent = null)
 	{
 		if (!Enabled || build.OrderType != "LIMIT" || build.LimitPrice is not decimal limit) return;
-		_orders.Add(new Tracked { ClientOrderId = clientOrderId, Ticker = ticker, Side = build.Side, LegCount = build.Legs.Count, IsOpen = isOpen, OriginalLimit = limit, CurrentLimit = limit, OnEvent = onEvent });
+		_store.Append(new RepriceStore.State(_accountId, clientOrderId, ticker, build.Side, build.Legs.Count, isOpen, limit, limit, Steps: 0, LastStepAt: null));
+		if (onEvent != null) _onEvent[clientOrderId] = onEvent;
 	}
 
 	public async Task TickAsync(DateTime now, CancellationToken ct)
 	{
-		foreach (var t in _orders.ToList())
+		using var held = _store.TryLock();
+		if (held == null) return;
+		foreach (var t in _store.Active(_accountId))
 		{
-			t.LastStepAt ??= now;
-			if ((now - t.LastStepAt.Value).TotalSeconds < _config.StepSeconds) continue;
+			if (t.LastStepAt is not DateTime last) { _store.Append(t with { LastStepAt = now }); continue; }
+			if ((now - last).TotalSeconds < _config.StepSeconds) continue;
 			try
 			{
-				if (!await StepAsync(t, now, ct)) _orders.Remove(t);
+				_store.Append(await StepAsync(t, now, ct));
 			}
 			catch (Exception ex) when (ex is WebullOpenApiException or HttpRequestException)
 			{
 				// A transient failure, or a replace rejected because the order just filled / ended: keep tracking — the next
 				// tick re-reads broker truth before acting again.
-				t.LastStepAt = now;
+				_store.Append(t with { LastStepAt = now });
 				Report(t, "reprice error", ex.Message);
 			}
 		}
 	}
 
-	/// <summary>One step for one order. Returns false when the order should no longer be tracked.</summary>
-	private async Task<bool> StepAsync(Tracked t, DateTime now, CancellationToken ct)
+	/// <summary>One step for one order. Returns its next state (<c>Done</c> when it should no longer be tracked).</summary>
+	private async Task<RepriceStore.State> StepAsync(RepriceStore.State t, DateTime now, CancellationToken ct)
 	{
+		var done = t with { Done = true };
 		var order = (await _gateway.GetOrderAsync(t.ClientOrderId, ct)).Orders?.FirstOrDefault();
 		switch (Read(order?.Status))
 		{
-			case OrderState.Filled: Report(t, "filled", $"@ ≤ ${t.CurrentLimit:F2} after {t.Steps} step(s)"); return false;
-			case OrderState.PartiallyFilled: Report(t, "left resting", "partially filled — not repricing the remainder"); return false;
-			case OrderState.Ended: Report(t, "ended", $"order {order?.Status ?? "missing"} at the broker"); return false;
+			case OrderState.Filled: Report(t, "filled", $"@ ≤ ${t.CurrentLimit:F2} after {t.Steps} step(s)"); return done;
+			case OrderState.PartiallyFilled: Report(t, "left resting", "partially filled — not repricing the remainder"); return done;
+			case OrderState.Ended: Report(t, "ended", $"order {order?.Status ?? "missing"} at the broker"); return done;
 		}
-		if (t.Steps >= _config.MaxTicks) { Report(t, "at cap", $"resting at ${t.CurrentLimit:F2} ({t.Steps} tick(s) from ${t.OriginalLimit:F2})"); return false; }
-		if (ParseQty(order?.TotalQuantity) is not int quantity || quantity <= 0) { Report(t, "ended", "could not read the order quantity — not repricing"); return false; }
+		if (t.Steps >= _config.MaxTicks) { Report(t, "at cap", $"resting at ${t.CurrentLimit:F2} ({t.Steps} tick(s) from ${t.OriginalLimit:F2})"); return done; }
+		if (ParseQty(order?.TotalQuantity) is not int quantity || quantity <= 0) { Report(t, "ended", "could not read the order quantity — not repricing"); return done; }
 
 		var buying = string.Equals(t.Side, "BUY", StringComparison.OrdinalIgnoreCase);
 		var tick = OptionPriceRounding.Tick(t.CurrentLimit, t.LegCount, t.Ticker);
@@ -121,10 +116,7 @@ internal sealed class OrderRepricer
 
 		await _gateway.ReplaceOrderAsync(t.ClientOrderId, quantity, next, legs is { Count: > 0 } ? legs : null, ct);
 		Report(t, "repriced", $"${t.CurrentLimit:F2} → ${next:F2} (step {t.Steps + 1}/{_config.MaxTicks})");
-		t.CurrentLimit = next;
-		t.Steps++;
-		t.LastStepAt = now;
-		return true;
+		return t with { CurrentLimit = next, Steps = t.Steps + 1, LastStepAt = now };
 	}
 
 	private static OrderState Read(string? status)
@@ -140,10 +132,10 @@ internal sealed class OrderRepricer
 	private static int? ParseQty(string? raw) =>
 		decimal.TryParse(raw, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var q) ? (int)Math.Round(q) : null;
 
-	private static void Report(Tracked t, string outcome, string detail)
+	private void Report(RepriceStore.State t, string outcome, string detail)
 	{
 		var color = outcome is "repriced" or "filled" ? "green" : "yellow";
 		AnsiConsole.MarkupLine($"[{color}]repricer {Markup.Escape(outcome)}:[/] {Markup.Escape(t.Ticker)} {(t.IsOpen ? "open" : "close")} {Markup.Escape(t.Side)} — {Markup.Escape(detail)}");
-		t.OnEvent?.Invoke(outcome, detail);
+		if (_onEvent.TryGetValue(t.ClientOrderId, out var onEvent)) onEvent(outcome, detail);
 	}
 }

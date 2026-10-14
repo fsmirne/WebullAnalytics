@@ -500,6 +500,8 @@ creds.txt
 
 # backtest fills exports + ad-hoc analysis artifacts (not source)
 *.jsonl
+# cross-process lock beside the repricer store (data/reprice-orders.jsonl)
+*.jsonl.lock
 .gex_analysis/
 
 # ad-hoc backtest sweep/confirm run output dirs (data, not source — see scripts/*confirm*.ps1, backtest_sv_*sweep.ps1)

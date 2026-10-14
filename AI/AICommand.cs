@@ -277,7 +277,7 @@ internal static class AIContext
 	/// missing) both executors are still instantiated but with a null account, so they degrade to
 	/// dry-run logging — same fallback the watch loop has always used. The <see cref="OrderRepricer"/> is shared by both
 	/// executors (they register the live orders they place) and is null without an account or when disabled; only the
-	/// watch loop drives it.</summary>
+	/// watch loop drives it, and through its persisted store it also steps orders a scan placed.</summary>
 	internal static (ManagementAutoExecutor? Management, OpenerAutoExecutor? Opener, OrderRepricer? Repricer) BuildAutoExecutors(AIConfig config, string? accountOverride = null)
 	{
 		TradeAccount? account = null;
@@ -287,7 +287,7 @@ internal static class AIContext
 			catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]auto-execute disabled (account resolution failed): {Markup.Escape(ex.Message)}[/]"); }
 		}
 		var brokerState = account != null ? new BrokerStateService(account, LocalOrderLedger.Default()) : null;
-		var repricer = account != null && config.AutoExecute.Reprice.Enabled ? new OrderRepricer(config.AutoExecute.Reprice, new WebullOrderGateway(account)) : null;
+		var repricer = account != null && config.AutoExecute.Reprice.Enabled ? new OrderRepricer(config.AutoExecute.Reprice, new WebullOrderGateway(account), RepriceStore.Default(), account.AccountId) : null;
 		var mgmt = config.AutoExecute.Management.Enabled ? new ManagementAutoExecutor(config.AutoExecute.Management, account, brokerState, repricer) : null;
 		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account, brokerState, repricer) : null;
 		return (mgmt, opener, repricer);
