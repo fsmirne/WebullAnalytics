@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace WebullAnalytics;
 
 /// <summary>
@@ -62,16 +64,7 @@ internal static class MarketCalendar
 	/// shifted observance (holiday landing on a weekend) doesn't turn the half-day into a full closure or a
 	/// normal session. The rarer holiday-on-weekend early-close variants aren't modeled; add them if a
 	/// window needs one. Note: index feeds (VIX) may keep printing ~15 min past the 13:00 equity close.</summary>
-	internal static bool IsEarlyClose(DateTime date)
-	{
-		var d = date.Date;
-		if (!IsOpen(d)) return false;
-		int y = d.Year;
-		if (d == NthWeekday(y, 11, DayOfWeek.Thursday, 4).AddDays(1)) return true;                            // Fri after Thanksgiving
-		if (d == new DateTime(y, 7, 3) && Observed(new DateTime(y, 7, 4)) == new DateTime(y, 7, 4)) return true;   // July 3
-		if (d == new DateTime(y, 12, 24) && Observed(new DateTime(y, 12, 25)) == new DateTime(y, 12, 25)) return true; // Christmas Eve
-		return false;
-	}
+	internal static bool IsEarlyClose(DateTime date) => ForYear(date.Year).EarlyCloses.Contains(date.Date);
 
 	// Ad-hoc US market closures outside the recurring NYSE holiday calendar. Add new entries as they
 	// happen — the backtest's 2-year lookback only sees recent dates, so the historical 9/11, Hurricane
@@ -81,20 +74,38 @@ internal static class MarketCalendar
 		new DateTime(2025, 1, 9), // National Day of Mourning for President Jimmy Carter
 	};
 
-	private static bool IsHoliday(DateTime date)
+	private static bool IsHoliday(DateTime date) => ForYear(date.Year).Holidays.Contains(date.Date);
+
+	// Holidays and half-days per year, computed once: the realized-vol model walks the calendar day by day inside the
+	// scorer's inner loop, and recomputing every holiday rule (Easter included) per call was ~5% of backtest scoring CPU.
+	private sealed record YearCalendar(HashSet<DateTime> Holidays, HashSet<DateTime> EarlyCloses);
+
+	private static readonly ConcurrentDictionary<int, YearCalendar> Years = new();
+
+	private static YearCalendar ForYear(int year) => Years.GetOrAdd(year, BuildYear);
+
+	private static YearCalendar BuildYear(int y)
 	{
-		if (AdHocClosures.Contains(date.Date)) return true;
-		int y = date.Year;
-		return date.Date == Observed(new DateTime(y, 1, 1))                         // New Year's Day
-			|| date.Date == NthWeekday(y, 1, DayOfWeek.Monday, 3)                  // Martin Luther King Jr. Day
-			|| date.Date == NthWeekday(y, 2, DayOfWeek.Monday, 3)                  // Presidents' Day
-			|| date.Date == GoodFriday(y)                                           // Good Friday
-			|| date.Date == LastWeekday(y, 5, DayOfWeek.Monday)                    // Memorial Day
-			|| (y >= 2022 && date.Date == Observed(new DateTime(y, 6, 19)))         // Juneteenth (since 2022)
-			|| date.Date == Observed(new DateTime(y, 7, 4))                        // Independence Day
-			|| date.Date == NthWeekday(y, 9, DayOfWeek.Monday, 1)                  // Labor Day
-			|| date.Date == NthWeekday(y, 11, DayOfWeek.Thursday, 4)               // Thanksgiving
-			|| date.Date == Observed(new DateTime(y, 12, 25));                     // Christmas
+		var holidays = new HashSet<DateTime>
+		{
+			Observed(new DateTime(y, 1, 1)),                // New Year's Day
+			NthWeekday(y, 1, DayOfWeek.Monday, 3),          // Martin Luther King Jr. Day
+			NthWeekday(y, 2, DayOfWeek.Monday, 3),          // Presidents' Day
+			GoodFriday(y),                                  // Good Friday
+			LastWeekday(y, 5, DayOfWeek.Monday),            // Memorial Day
+			Observed(new DateTime(y, 7, 4)),                // Independence Day
+			NthWeekday(y, 9, DayOfWeek.Monday, 1),          // Labor Day
+			NthWeekday(y, 11, DayOfWeek.Thursday, 4),       // Thanksgiving
+			Observed(new DateTime(y, 12, 25)),              // Christmas
+		};
+		if (y >= 2022) holidays.Add(Observed(new DateTime(y, 6, 19)));   // Juneteenth (since 2022)
+		holidays.UnionWith(AdHocClosures.Where(d => d.Year == y));
+
+		var earlyCloses = new HashSet<DateTime> { NthWeekday(y, 11, DayOfWeek.Thursday, 4).AddDays(1) };   // Fri after Thanksgiving
+		if (Observed(new DateTime(y, 7, 4)) == new DateTime(y, 7, 4)) earlyCloses.Add(new DateTime(y, 7, 3));        // July 3
+		if (Observed(new DateTime(y, 12, 25)) == new DateTime(y, 12, 25)) earlyCloses.Add(new DateTime(y, 12, 24));  // Christmas Eve
+		earlyCloses.RemoveWhere(d => d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday || holidays.Contains(d));
+		return new YearCalendar(holidays, earlyCloses);
 	}
 
 	// If a fixed holiday falls on Saturday, observe on the preceding Friday.
