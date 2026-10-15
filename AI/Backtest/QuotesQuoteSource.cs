@@ -193,14 +193,12 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 			// contract straight from the merged OI snapshot with null bid/ask/last. Guarded to the SIBLING
 			// root only (never grp.Key.Root itself) so the requested root's own contracts still require a
 			// real NBBO print, unchanged from the loop above.
-			if (oiDay != null)
-				foreach (var (sym, snap) in oiDay)
+			if (_oiCache != null && _oiCache.ByExpiry(grp.Key.Root, asOf.Date).TryGetValue(grp.Key.Exp, out var expiryOi))
+				foreach (var c in expiryOi)
 				{
-					if (options.ContainsKey(sym) || snap.Oi <= 0 || snap.Iv <= 0m) continue;
-					var pOi = ParsingHelpers.ParseOptionSymbol(sym);
-					if (pOi == null || pOi.ExpiryDate.Date != grp.Key.Exp || string.Equals(pOi.Root, grp.Key.Root, StringComparison.OrdinalIgnoreCase)) continue;
-					if (pOi.Strike < spot * (1m - expandPct) || pOi.Strike > spot * (1m + expandPct)) continue;
-					options[sym] = new OptionContractQuote(sym, null, null, null, null, null, Volume: null, OpenInterest: snap.Oi, ImpliedVolatility: snap.Iv);
+					if (options.ContainsKey(c.Symbol) || c.Oi <= 0 || c.Iv <= 0m || string.Equals(c.Parsed.Root, grp.Key.Root, StringComparison.OrdinalIgnoreCase)) continue;
+					if (c.Parsed.Strike < spot * (1m - expandPct) || c.Parsed.Strike > spot * (1m + expandPct)) continue;
+					options[c.Symbol] = new OptionContractQuote(c.Symbol, null, null, null, null, null, Volume: null, OpenInterest: c.Oi, ImpliedVolatility: c.Iv);
 				}
 		}
 

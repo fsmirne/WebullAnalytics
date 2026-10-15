@@ -37,8 +37,31 @@ internal sealed class ChainSnapshotOiCache
 	private readonly ConcurrentDictionary<(string Root, DateTime Date), (IReadOnlyDictionary<string, (long Oi, decimal Iv)> Map, bool IsEod)> _raw = new();
 	// Causal merged views served to consumers (day-T OI, prior-day IV for EOD-stamped files).
 	private readonly ConcurrentDictionary<(string Root, DateTime Date), IReadOnlyDictionary<string, (long Oi, decimal Iv)>> _merged = new();
+	// The current day's ForDay view grouped by expiry, one slot per requested root: the backtest walks days in
+	// order, so only the latest day is ever asked for again and older indexes are dropped instead of accumulating.
+	private readonly ConcurrentDictionary<string, (DateTime Date, IReadOnlyDictionary<DateTime, IReadOnlyList<Contract>> Index)> _byExpiry = new(StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>One parseable contract of a day's snapshot.</summary>
+	internal sealed record Contract(string Symbol, OptionParsed Parsed, long Oi, decimal Iv);
 
 	public ChainSnapshotOiCache(string? dir = null) => _dir = dir ?? Program.ResolvePath("data/oi");
+
+	/// <summary>The <see cref="ForDay"/> view's contracts grouped by expiry date (snapshot order kept within each
+	/// expiry), each OCC symbol parsed once per day. Unparseable symbols are left out.</summary>
+	public IReadOnlyDictionary<DateTime, IReadOnlyList<Contract>> ByExpiry(string root, DateTime date)
+	{
+		if (_byExpiry.TryGetValue(root, out var slot) && slot.Date == date.Date) return slot.Index;
+		var index = new Dictionary<DateTime, List<Contract>>();
+		foreach (var (sym, v) in ForDay(root, date))
+		{
+			if (ParsingHelpers.ParseOptionSymbol(sym) is not OptionParsed p) continue;
+			if (!index.TryGetValue(p.ExpiryDate.Date, out var list)) index[p.ExpiryDate.Date] = list = new List<Contract>();
+			list.Add(new Contract(sym, p, v.Oi, v.Iv));
+		}
+		var built = index.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<Contract>)kv.Value);
+		_byExpiry[root] = (date.Date, built);
+		return built;
+	}
 
 	/// <summary>Per-contract (open interest, implied vol) for <paramref name="root"/> on the ET trading day of
 	/// <paramref name="date"/>, keyed by OCC symbol, with only intraday-knowable values (see class remarks for
