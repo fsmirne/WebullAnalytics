@@ -300,11 +300,13 @@ internal static class AIContext
 	/// print but no order — not even a dry-run line — is ever produced. Call after applying --submit.</summary>
 	internal static void WarnIfSubmitInert(AIConfig config)
 	{
-		var inert = new List<string>();
-		if (config.AutoExecute.Opener.Submit && !config.AutoExecute.Opener.Enabled) inert.Add("autoExecute.opener.enabled");
-		if (config.AutoExecute.Management.Submit && !config.AutoExecute.Management.Enabled) inert.Add("autoExecute.management.enabled");
-		if (inert.Count == 0) return;
-		AnsiConsole.MarkupLine($"[yellow]warning:[/] --submit has no effect while {Markup.Escape(string.Join(" and ", inert))}=false — proposals print but no orders are placed (not even dry-run). Set the flag(s) to true to enable auto-execute.");
+		if (config.AutoExecute.Opener.Submit && !config.AutoExecute.Opener.Enabled) WarnExecutorInert("opener");
+		if (config.AutoExecute.Management.Submit && !config.AutoExecute.Management.Enabled) WarnExecutorInert("management");
+	}
+
+	private static void WarnExecutorInert(string executor)
+	{
+		AnsiConsole.MarkupLine($"[yellow]warning:[/] --submit has no effect on {executor} proposals while autoExecute.{executor}.enabled=false — they print but are not placed (not even dry-run). Set it to true to auto-execute them.");
 	}
 }
 
