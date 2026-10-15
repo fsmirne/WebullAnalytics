@@ -187,7 +187,7 @@ internal sealed class BacktestRunner
 			{
 				if (_replayOpensByDate.TryGetValue(step.Date, out var todaysOpens))
 					foreach (var o in todaysOpens)
-						OpenLegsIntoBook(o.OpenEt, o.Ticker, o.StructureKind, o.Legs, _fixedContracts ?? o.Qty, o.Spot, o.RawScore, o.FinalScore, repIv: null, applySlippage: false);
+						OpenLegsIntoBook(o.OpenEt, o.Ticker, o.StructureKind, o.Legs, _fixedContracts ?? o.Qty, o.Spot, o.RawScore, o.FinalScore, o.RepIv, o.ApplySlippage);
 			}
 			else
 			{

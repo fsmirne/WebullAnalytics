@@ -8,7 +8,7 @@ namespace WebullAnalytics.AI.Backtest;
 /// rounding re-applied, i.e. the limit price the order would have been submitted (and assumed filled) at —
 /// <c>ExecutionPricePerShare</c> is set to the same value so the backtest's <c>--pricing</c> mode cannot
 /// re-price the entry.</summary>
-internal sealed record ProposalReplayOpen(DateTime OpenEt, string Ticker, OpenStructureKind StructureKind, int Qty, IReadOnlyList<ProposalLeg> Legs, decimal Spot, decimal? RawScore, decimal? FinalScore);
+internal sealed record ProposalReplayOpen(DateTime OpenEt, string Ticker, OpenStructureKind StructureKind, int Qty, IReadOnlyList<ProposalLeg> Legs, decimal Spot, decimal? RawScore, decimal? FinalScore, decimal? RepIv = null, bool ApplySlippage = false);
 
 /// <summary>
 /// Reads an <c>ai-proposals.&lt;TICKER&gt;.&lt;strategy&gt;.jsonl</c> log and selects, per trading day, the open

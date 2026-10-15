@@ -776,6 +776,10 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Replay mode: skip the opener and seed the book from the live proposal log (data/ai-proposals.<TICKER>.<strategy>.jsonl). Per trading day, the first non-informational open proposal recorded at/after 09:30 ET books at its recorded qty and vendor-quote submit price (tick-rounded like the auto-executor's limit; no entry slippage or re-pricing) — then the management rules, intraday triggers, and expiry settlement run as normal. Reconstructs what the live/simulated opener actually proposed over [[--since, --until]]; combine with --book-cmd for the matching `wa analyze trade` line.")]
 	public bool Replay { get; set; }
 
+	[CommandOption("--opens <FILLS>")]
+	[Description("Skip the opener and book a prior backtest's opens from its --fills-jsonl ledger: same minute, legs, qty and booked prices (slippage re-applied), then this run's management rules, triggers and settlement run as normal. For exit-rule sweeps: the opener (most of the run time) is paid once by the source run. Exact only while the opens don't depend on the exits — held-position gates still read the book — so check a new exit rule once against a full run.")]
+	public string? OpensPath { get; set; }
+
 	[CommandOption("--split")]
 	[Description("Book split structures (DoubleCalendar/DoubleDiagonal/DiagonalVertical/CalendarVertical) as their TWO combo orders — independent positions managed against their own debits, exactly how Webull holds them live. Default off books each structure whole, so take-profit/stop-loss see the combined mark. A/B knob for split-half vs whole-structure exit policy; friction and fees are identical across modes.")]
 	public bool Split { get; set; }
@@ -898,6 +902,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 			return ValidationResult.Error($"--open-before: must be HH:mm, got '{OpenBeforeOverride}'");
 		if (Replay && Oracle)
 			return ValidationResult.Error("--replay: incompatible with --oracle (replay books the recorded opens; oracle searches for its own)");
+		if (OpensPath != null && (Replay || Oracle))
+			return ValidationResult.Error("--opens: incompatible with --replay and --oracle (each supplies its own opens)");
 		return ValidationResult.Success();
 	}
 }
@@ -1001,6 +1007,19 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			}
 			replayOpens = loadedOpens;
 			AnsiConsole.MarkupLine($"[cyan]Proposal replay:[/] {loadedOpens.Count} open(s) from {Markup.Escape(proposalPath)} — opener disabled, entries at recorded submit prices.");
+		}
+		else if (settings.OpensPath != null)
+		{
+			var opensPath = Path.GetFullPath(settings.OpensPath);
+			if (!File.Exists(opensPath))
+			{
+				Console.Error.WriteLine($"Error: --opens: fills ledger not found at '{opensPath}'.");
+				return 1;
+			}
+			var (loadedOpens, loadWarnings) = Backtest.FillsReplayLoader.Load(opensPath, since, until);
+			foreach (var w in loadWarnings) Console.Error.WriteLine($"Warning: {w}");
+			replayOpens = loadedOpens;
+			AnsiConsole.MarkupLine($"[cyan]Opens replay:[/] {loadedOpens.Count} open(s) from {Markup.Escape(opensPath)} — opener disabled, entries at booked prices.");
 		}
 
 		// Backtest is offline — the caches MUST already cover [since, until]. Run `wa ai history <ticker>` first.
