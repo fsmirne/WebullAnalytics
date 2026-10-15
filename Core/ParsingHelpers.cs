@@ -8,11 +8,6 @@ namespace WebullAnalytics;
 /// </summary>
 public static partial class ParsingHelpers
 {
-	// OCC option symbol format: ROOT + YYMMDD + C/P + 8-digit strike (strike * 1000)
-	// Example: GME260213C00025000 = GME Feb 13 2026 $25 Call
-	[GeneratedRegex(@"^([A-Z]+)(\d{6})([CP])(\d{8})$")]
-	private static partial Regex OptionRegex();
-
 	[GeneratedRegex(@"[^\d.\-]")]
 	private static partial Regex NonNumericRegex();
 
@@ -88,26 +83,40 @@ public static partial class ParsingHelpers
 	}
 
 	/// <summary>
-	/// Parses an OCC-format option symbol into its components.
-	/// Returns null if the symbol doesn't match the expected format.
+	/// Parses an OCC-format option symbol (ROOT + YYMMDD + C/P + 8-digit strike×1000, e.g. GME260213C00025000 =
+	/// GME Feb 13 2026 $25 Call) into its components. Returns null if the symbol doesn't match the expected format.
 	/// </summary>
 	public static OptionParsed? ParseOptionSymbol(string symbol)
 	{
-		var match = OptionRegex().Match(symbol.Trim().ToUpperInvariant());
-		if (!match.Success)
+		// Hand-rolled match of ^[A-Z]+\d{6}[CP]\d{8}$ (a regex here was a backtest hotspot): the fixed 15-char tail
+		// is YYMMDD + C/P + strike×1000, everything before it the root.
+		var s = symbol.Trim().ToUpperInvariant();
+		var rootLength = s.Length - 15;
+		if (rootLength < 1) return null;
+		for (var i = 0; i < rootLength; i++)
+			if (s[i] is < 'A' or > 'Z') return null;
+		if (!TryParseDigits(s.AsSpan(rootLength, 6), out var yymmdd) || s[rootLength + 6] is not ('C' or 'P') || !TryParseDigits(s.AsSpan(rootLength + 7, 8), out var strikeRaw))
 			return null;
 
-		var root = match.Groups[1].Value;
-
-		if (!DateTime.TryParseExact(match.Groups[2].Value, "yyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiryDate))
+		// Two-digit year resolved the way DateTime.TryParseExact("yyMMdd") does (invariant calendar's TwoDigitYearMax).
+		var year = CultureInfo.InvariantCulture.Calendar.ToFourDigitYear((int)(yymmdd / 10000));
+		var month = (int)(yymmdd / 100 % 100);
+		var day = (int)(yymmdd % 100);
+		if (month is < 1 or > 12 || day < 1 || day > DateTime.DaysInMonth(year, month))
 			return null;
 
-		var callPut = match.Groups[3].Value;
+		return new OptionParsed(s[..rootLength], new DateTime(year, month, day), s[rootLength + 6] == 'C' ? "C" : "P", (decimal)strikeRaw / 1000m);
+	}
 
-		if (!decimal.TryParse(match.Groups[4].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var strikeRaw))
-			return null;
-
-		return new OptionParsed(root, expiryDate, callPut, strikeRaw / 1000m);
+	private static bool TryParseDigits(ReadOnlySpan<char> digits, out long value)
+	{
+		value = 0;
+		foreach (var c in digits)
+		{
+			if (c is < '0' or > '9') return false;
+			value = value * 10 + (c - '0');
+		}
+		return true;
 	}
 
 	/// <summary>
