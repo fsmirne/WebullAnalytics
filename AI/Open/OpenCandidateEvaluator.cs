@@ -529,15 +529,11 @@ internal sealed class OpenCandidateEvaluator
 				// ~150–300 candidates per day on SPXW 0DTE). It's a pure function over its inputs, so fan
 				// out across cores. Fixed-size array + Parallel.For preserves original ordering, keeping
 				// scoredByStructure insertion order — and downstream tie-breaking in RankForOutput —
-				// bit-identical to the serial path.
-				//
-				// In backtest mode the caller (BacktestRunner) already runs ~ProcessorCount MINUTES in
-				// parallel, so fanning scoring out here too is nested parallelism — it oversubscribes the
-				// pool and the contention dominates. Cap to 1 (serial) under backtest; the minute-level
-				// parallelism is what keeps all cores busy. Live (single evaluation at a time) still fans out.
+				// bit-identical to the serial path. Fans out in backtests too: the runner probes a day's first
+				// minute alone (it usually opens), so that minute's scoring is the only work in flight.
 				var skels = gatedGroup.ToList();
 				var results = new OpenProposal?[skels.Count];
-				var scoreOpts = new ParallelOptions { CancellationToken = cancellation, MaxDegreeOfParallelism = _backtestMode ? 1 : -1 };
+				var scoreOpts = new ParallelOptions { CancellationToken = cancellation };
 				Parallel.For(0, skels.Count, scoreOpts, i =>
 				{
 					var skel = skels[i];
