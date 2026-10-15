@@ -244,11 +244,6 @@ internal static class OptionMath
 		return pnlPerContract * qty * 100;
 	}
 
-	/// <summary>Black-Scholes call signature with the (constant) risk-free rate omitted, so an implementation
-	/// can memoize on just the varying inputs. Used by <see cref="LegValueAt"/> to let the opener scorer
-	/// inject its per-tick long-leg cache without changing the shared pricing math.</summary>
-	internal delegate decimal BlackScholesEvaluator(decimal spot, decimal strike, double timeYears, decimal iv, string callPut);
-
 	/// <summary>
 	/// Canonical per-leg contract value at underlying <paramref name="spot"/> and <paramref name="evalDate"/>:
 	/// Black-Scholes when the leg still has time past the eval date and an IV is known, intrinsic otherwise.
@@ -256,11 +251,8 @@ internal static class OptionMath
 	/// This is the SINGLE per-leg pricer shared by the position analyzer (report / analyze break-evens and the
 	/// time-decay grid) and the opener scorer (calendar/diagonal long-leg value, multi-leg terminal value), so
 	/// both engines price an identical leg to the same number.
-	/// <paramref name="blackScholes"/> optionally injects a memoized Black-Scholes (the scorer's per-tick
-	/// long-leg cache); null uses the direct <see cref="BlackScholes"/>. The evaluator omits the constant
-	/// risk-free rate so its cache key matches the inputs that actually vary.
 	/// </summary>
-	internal static decimal LegValueAt(decimal spot, DateTime evalDate, OptionParsed parsed, decimal? iv, IReadOnlyList<DividendEvent>? dividends, BlackScholesEvaluator? blackScholes = null)
+	internal static decimal LegValueAt(decimal spot, DateTime evalDate, OptionParsed parsed, decimal? iv, IReadOnlyList<DividendEvent>? dividends)
 	{
 		var expirationTime = parsed.ExpiryDate.Date + MarketClose;
 		if (!iv.HasValue || evalDate >= expirationTime)
@@ -268,9 +260,7 @@ internal static class OptionMath
 
 		var timeYears = (expirationTime - evalDate).TotalDays / 365.0;
 		var adjustedSpot = DividendAdjustedSpot(spot, dividends, evalDate, expirationTime, RiskFreeRate);
-		return blackScholes is null
-			? BlackScholes(adjustedSpot, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut)
-			: blackScholes(adjustedSpot, parsed.Strike, timeYears, iv.Value, parsed.CallPut);
+		return BlackScholes(adjustedSpot, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
 	}
 
 	/// <summary>

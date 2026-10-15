@@ -83,24 +83,12 @@ internal static class CandidateScorer
 		public readonly ConcurrentDictionary<(string, DateTime), Lazy<decimal?>> MaxPain = new();
 		public readonly ConcurrentDictionary<(string, DateTime), Lazy<GexResult>> Gex = new();
 		public readonly ConcurrentDictionary<(string, DateTime), Lazy<VexResult>> Vex = new();
-		// Long-leg Black-Scholes memoized per tick. The breakeven (120 pt) + peak (240 pt) scans evaluate
-		// the SAME long-leg BS curve for every short paired with a given (long leg, short expiry) — dozens
-		// of redundant recomputes under dense enumeration. Keyed on the full BS inputs so it's exact.
-		public readonly ConcurrentDictionary<(decimal S, decimal K, double T, decimal Iv, string Cp), decimal> LongBs = new();
 		// Back-solved market-implied IV per (symbol, spot) — the same long leg's IV is re-solved for every
 		// short paired with it. Keyed on spot too so it stays correct if a quotes object spans spots.
 		public readonly ConcurrentDictionary<(string Sym, decimal Spot), decimal> MarketIv = new();
 		// Max effective liquidity per (root, expiry, call/put, spot): a full-chain scan every candidate leg would otherwise repeat.
 		public readonly ConcurrentDictionary<(string Root, DateTime Expiry, string CallPut, decimal Spot), Lazy<long>> NearbyLiquidity = new();
 	}
-
-	/// <summary>Black-Scholes for a calendar/diagonal long leg, memoized per tick via <paramref name="cache"/>
-	/// (the per-quotes-object <see cref="ChainScalarCache"/>). Byte-identical to a direct call — the key is
-	/// the complete set of BS inputs (risk-free rate is constant). Null cache → direct, uncached.</summary>
-	private static decimal LongBlackScholes(ChainScalarCache? cache, decimal s, decimal strike, double t, decimal iv, string callPut)
-		=> cache == null
-			? OptionMath.BlackScholes(s, strike, t, OptionMath.RiskFreeRate, iv, callPut)
-			: cache.LongBs.GetOrAdd((s, strike, t, iv, callPut), static k => OptionMath.BlackScholes(k.S, k.K, k.T, OptionMath.RiskFreeRate, k.Iv, k.Cp));
 
 	/// <summary>Per-tick memoized <see cref="MarketImpliedIv"/> — same result, avoids re-running the IV
 	/// back-solve for a long leg shared across many candidates. Null cache → direct.</summary>
@@ -1959,13 +1947,12 @@ internal static class CandidateScorer
 	/// numerical breakeven root-finding on calendars/diagonals. Long leg is BS-priced with its
 	/// remaining time; short leg is intrinsic (already at expiry). The whole expression in dollars per
 	/// contract minus the entry debit gives signed P&L.</summary>
-	private static decimal CalendarOrDiagonalPnLAtShortExpiry(decimal sT, OptionParsed shortLeg, OptionParsed longLeg, DateTime shortExpiryClose, decimal ivLong, decimal debitPerContract, IReadOnlyList<DividendEvent>? dividends, OptionMath.BlackScholesEvaluator longBs)
+	private static decimal CalendarOrDiagonalPnLAtShortExpiry(decimal sT, OptionParsed shortLeg, OptionParsed longLeg, DateTime shortExpiryClose, decimal ivLong, decimal debitPerContract, IReadOnlyList<DividendEvent>? dividends)
 	{
 		// The surviving long is priced via the shared per-leg pricer at the short expiry's close: it carries
 		// its residual time value and dividend-adjusts the forward for any ex-date in its remaining window
-		// (the short, expiring now, settles on the actual spot — intrinsic only). longBs injects the per-tick
-		// long-leg cache so dense candidate enumeration reuses the BS curve.
-		var longValue = OptionMath.LegValueAt(sT, shortExpiryClose, longLeg, ivLong, dividends, longBs);
+		// (the short, expiring now, settles on the actual spot — intrinsic only).
+		var longValue = OptionMath.LegValueAt(sT, shortExpiryClose, longLeg, ivLong, dividends);
 		var shortIntrinsic = OptionMath.Intrinsic(sT, shortLeg.Strike, shortLeg.CallPut);
 		return (longValue - shortIntrinsic) * 100m - debitPerContract;
 	}
@@ -1974,9 +1961,9 @@ internal static class CandidateScorer
 	/// via bisection. Scans a wide grid (±60% from spot in 121 steps) to find an interval that brackets
 	/// each sign change, then bisects to ~$0.01 precision. Returns (null, null) if the payoff is never
 	/// positive (no breakevens exist) or if bisection can't bracket two roots.</summary>
-	private static (decimal? lower, decimal? upper) ComputeCalendarOrDiagonalBreakevens(decimal spot, OptionParsed shortLeg, OptionParsed longLeg, DateTime shortExpiryClose, decimal ivLong, decimal debitPerContract, IReadOnlyList<DividendEvent>? dividends, OptionMath.BlackScholesEvaluator longBs)
+	private static (decimal? lower, decimal? upper) ComputeCalendarOrDiagonalBreakevens(decimal spot, OptionParsed shortLeg, OptionParsed longLeg, DateTime shortExpiryClose, decimal ivLong, decimal debitPerContract, IReadOnlyList<DividendEvent>? dividends)
 	{
-		decimal Pnl(decimal s) => CalendarOrDiagonalPnLAtShortExpiry(s, shortLeg, longLeg, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
+		decimal Pnl(decimal s) => CalendarOrDiagonalPnLAtShortExpiry(s, shortLeg, longLeg, shortExpiryClose, ivLong, debitPerContract, dividends);
 
 		const int steps = 120;
 		var sMin = spot * 0.4m;
@@ -2016,12 +2003,12 @@ internal static class CandidateScorer
 	/// by ~30%, which then drags R/R and the balance factor in scoring. So the scan is seeded with each
 	/// leg's strike plus a fine ±$2 @ $0.10 refinement around it, guaranteeing the cusp is sampled (the
 	/// short strike for a pure calendar; both strikes catch a diagonal whose peak sits between them).</summary>
-	private static decimal FindCalendarOrDiagonalPeakPnl(decimal spot, OptionParsed shortLeg, OptionParsed longLeg, DateTime shortExpiryClose, decimal ivLong, decimal debitPerContract, IReadOnlyList<DividendEvent>? dividends, OptionMath.BlackScholesEvaluator longBs)
+	private static decimal FindCalendarOrDiagonalPeakPnl(decimal spot, OptionParsed shortLeg, OptionParsed longLeg, DateTime shortExpiryClose, decimal ivLong, decimal debitPerContract, IReadOnlyList<DividendEvent>? dividends)
 	{
 		var peak = decimal.MinValue;
 		void Sample(decimal s)
 		{
-			var pnl = CalendarOrDiagonalPnLAtShortExpiry(s, shortLeg, longLeg, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
+			var pnl = CalendarOrDiagonalPnLAtShortExpiry(s, shortLeg, longLeg, shortExpiryClose, ivLong, debitPerContract, dividends);
 			if (pnl > peak) peak = pnl;
 		}
 
@@ -2453,14 +2440,10 @@ internal static class CandidateScorer
 		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, cfg.Indicators.Events);
 		var shortExpiryClose = shortParsed.ExpiryDate.Date + OptionMath.MarketClose;
 		var longExpiryClose = longParsed.ExpiryDate.Date + OptionMath.MarketClose;
-		// Per-tick compute cache (memoizes the long-leg BS curve + IV back-solve shared across the many
-		// candidates that pair with this long leg). Keyed on the quotes object → auto-evicts each tick.
+		// Per-tick compute cache (memoizes the IV back-solve shared across the many candidates that pair
+		// with this long leg). Keyed on the quotes object → auto-evicts each tick.
 		// quotes is non-null here (already dereferenced above), matching the MaxPain/Gex cache pattern.
 		var cache = _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache());
-		// Inject the cached long-leg Black-Scholes into the shared per-leg pricer. The memo key (the BS inputs
-		// minus the constant rate) is unchanged, so this stays byte-identical to the prior direct LongBlackScholes
-		// calls AND keeps the cross-candidate cache hit rate.
-		OptionMath.BlackScholesEvaluator longBs = (s, k, t, iv, cp) => LongBlackScholes(cache, s, k, t, iv, cp);
 		// BOTH legs' IVs are back-solved from the market mid so EV/breakeven/maxProfit math — and the
 		// representative IV the score factors read — use pricing consistent with the entry debit. A wide
 		// bid/ask book's broker-reported IV implies a BS price well above mid (phantom alpha for illiquid
@@ -2472,7 +2455,7 @@ internal static class CandidateScorer
 		// the curve mixes Black-Scholes (long leg) with piecewise-linear intrinsic (short leg) and has
 		// no closed form. POP = P(BE_lower < S_T < BE_upper) under the same log-normal used for EV — a
 		// proper breakeven-based probability rather than the fixed 5%-band stand-in we used to ship.
-		var (beLower, beUpper) = ComputeCalendarOrDiagonalBreakevens(spot, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
+		var (beLower, beUpper) = ComputeCalendarOrDiagonalBreakevens(spot, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends);
 		// Scoring horizon is the short expiry; ex-dates on/before it are absorbed into the forward (the long leg's valuation excludes them, see above).
 		var forward = OptionMath.ForwardPrice(spot, dividends, asOf, shortExpiryClose, shortYears, OptionMath.RiskFreeRate);
 		// Real-world distribution: outcomes follow realized vol (implied when no forecast); legs stay priced at implied.
@@ -2491,7 +2474,7 @@ internal static class CandidateScorer
 			// gap exceeds the debit stays profitable past the short strike all the way to +∞ (calls) / 0
 			// (puts), so there's no second crossing and the closed-band P(lower<S<upper) above wrongly read
 			// 0. Probe the payoff just past the breakeven to find the winning side; take the one-sided POP.
-			var profitableAbove = CalendarOrDiagonalPnLAtShortExpiry(beLower.Value * 1.02m, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs) > 0m;
+			var profitableAbove = CalendarOrDiagonalPnLAtShortExpiry(beLower.Value * 1.02m, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends) > 0m;
 			pop = profitableAbove
 				? LogNormalProbability(Direction.Above, forward, beLower.Value, shortYears, (double)scenarioVol)
 				: LogNormalProbability(Direction.Below, forward, beLower.Value, shortYears, (double)scenarioVol);
@@ -2509,11 +2492,11 @@ internal static class CandidateScorer
 		var magnet = MagnetBiasSigmas(skel, spot, asOf, quotes, scenarioVol, shortYears, cfg);
 		var biasShift = bias * cfg.Weights.BiasDrift + magnet.Total;
 		var grid = BuildScenarioGrid(forward, scenarioVol, shortYears, biasShift);
-		decimal PnlAtTarget(decimal sT) => CalendarOrDiagonalPnLAtShortExpiry(sT, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
+		decimal PnlAtTarget(decimal sT) => CalendarOrDiagonalPnLAtShortExpiry(sT, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends);
 		decimal ev = 0m;
 		foreach (var pt in grid)
 			ev += pt.Weight * PnlAtTarget(pt.SpotAtExpiry);
-		var maxProfit = FindCalendarOrDiagonalPeakPnl(spot, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends, longBs);
+		var maxProfit = FindCalendarOrDiagonalPeakPnl(spot, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, dividends);
 		var maxLossPoint = -(debitPerContract + strikeLossPerContract);
 
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);

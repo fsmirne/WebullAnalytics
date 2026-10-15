@@ -74,25 +74,4 @@ public class BreakEvenEngineParityTests
 		Assert.True(Math.Abs(scorerBe[0] - analyzerBe[0]) < 0.01m, $"lower BE: scorer {scorerBe[0]} vs analyzer {analyzerBe[0]}");
 		Assert.True(Math.Abs(scorerBe[1] - analyzerBe[1]) < 0.01m, $"upper BE: scorer {scorerBe[1]} vs analyzer {analyzerBe[1]}");
 	}
-
-	[Fact]
-	public void LegValueAt_InjectedEvaluator_MatchesDirectBlackScholes()
-	{
-		// The scorer injects a memoized Black-Scholes into LegValueAt to keep its per-tick long-leg cache.
-		// That injection must be numerically transparent — identical to the direct path, including the
-		// dividend-adjusted forward — or the cache would silently shift the opener's calendar pricing.
-		var longLeg = new OptionParsed("SPY", new DateTime(2026, 7, 2), "P", 755m);
-		var evalDate = new DateTime(2026, 6, 18).Date + OptionMath.MarketClose; // short expiry close: long still has time
-		var divs = new[] { new DividendEvent(new DateTime(2026, 6, 22), 1.80m) };
-		var calls = 0;
-		OptionMath.BlackScholesEvaluator forwarding = (s, k, t, iv, cp) => { calls++; return OptionMath.BlackScholes(s, k, t, OptionMath.RiskFreeRate, iv, cp); };
-
-		foreach (var sT in new[] { 600m, 700m, 740m, 755m, 800m, 900m })
-		{
-			var direct = OptionMath.LegValueAt(sT, evalDate, longLeg, 0.17m, divs);
-			var injected = OptionMath.LegValueAt(sT, evalDate, longLeg, 0.17m, divs, forwarding);
-			Assert.Equal(direct, injected);
-		}
-		Assert.Equal(6, calls); // the BS branch (not intrinsic) was actually exercised for every point
-	}
 }
