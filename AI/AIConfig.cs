@@ -224,6 +224,7 @@ internal sealed class RulesConfig
 {
 	[JsonPropertyName("stopLoss")] public StopLossConfig StopLoss { get; set; } = new();
 	[JsonPropertyName("timeStop")] public TimeStopConfig TimeStop { get; set; } = new() { Enabled = false };
+	[JsonPropertyName("breakEvenGuard")] public BreakEvenGuardConfig BreakEvenGuard { get; set; } = new();
 	[JsonPropertyName("opportunisticRoll")] public OpportunisticRollConfig OpportunisticRoll { get; set; } = new();
 	[JsonPropertyName("takeProfit")] public TakeProfitConfig TakeProfit { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("defensiveRoll")] public DefensiveRollConfig DefensiveRoll { get; set; } = new() { Enabled = false };
@@ -363,6 +364,14 @@ internal sealed class TimeStopConfig
 	/// <summary>Fraction of original DTE elapsed that triggers the close. 0.5 = half the position's
 	/// life. Must be > 0 for the rule to arm (checked alongside <see cref="Enabled"/>).</summary>
 	[JsonPropertyName("lifeFractionElapsed")] public decimal LifeFractionElapsed { get; set; } = 0.50m;
+}
+
+/// <summary>Any-day break-even proximity exit for calendars/diagonals — see <see cref="WebullAnalytics.AI.Rules.BreakEvenGuardRule"/>.</summary>
+internal sealed class BreakEvenGuardConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>How close to a short-expiry break-even (fraction of the BE level) spot may come before the close fires. 0 = fire only at/past the BE. Default 0.0026 (≈ $2 on SPY at $770).</summary>
+	[JsonPropertyName("bufferPct")] public decimal BufferPct { get; set; } = 0.0026m;
 }
 
 internal sealed class TakeProfitConfig

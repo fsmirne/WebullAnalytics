@@ -135,6 +135,9 @@ internal sealed class RuleEvaluator
 			new TimeStopRule(config.Rules.TimeStop),
 			// CloseBeforeShortExpiry runs ahead of OpportunisticRoll/RollShortOnExpiry so a position
 			// scheduled for unwind on expiry day takes the close path instead of getting rolled forward.
+			// BreakEvenGuard (priority 2, B < C) ahead of CloseBeforeShortExpiry: an any-day proximity close
+			// pre-empts the expiry-day emergency, which only fires a buffer past the band.
+			new BreakEvenGuardRule(config.Rules.BreakEvenGuard),
 			new CloseBeforeShortExpiryRule(config.Rules.CloseBeforeShortExpiry, expiryRegimes),
 			// LegInShort runs ahead of TakeProfit (alphabetical L < T at priority 2) so a saturated
 			// long-call/put gets converted to a vertical instead of flat-closed when both gates trip.
