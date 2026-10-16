@@ -650,36 +650,41 @@ internal sealed class BacktestRunner
 			var endUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(walkEndEt, NyTz), TimeSpan.Zero);
 			var minuteBars = await _intradayBars.GetBarsAsync(ticker, startUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
 			var oneTicker = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker };
+			// Look-ahead quote snapshots. A minute's snapshot depends only on the held set and the store, never on the walk's
+			// decisions, so a batch of upcoming minutes is priced in parallel while the rules still run strictly minute by
+			// minute — the snapshots were this walk's serial cost with most cores idle. Any action (or the book dropping a
+			// position) changes the held set, so the batch is discarded and re-priced from the next minute.
+			var lookahead = new Task<QuoteSnapshot?>[minuteBars.Count];
+			var lookaheadValidFrom = int.MaxValue;
+			var batch = Math.Max(1, Environment.ProcessorCount);
 
 			for (var mwi = 0; mwi < minuteBars.Count; mwi++)
 			{
 				var minuteBar = minuteBars[mwi];
 				cancellation.ThrowIfCancellationRequested();
-				pending.RemoveWhere(k => !_book.OpenPositions.ContainsKey(k));
+				if (pending.RemoveWhere(k => !_book.OpenPositions.ContainsKey(k)) > 0) lookaheadValidFrom = int.MaxValue;
 				if (pending.Count == 0) break;
-				var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteBar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
-
-				// Population at this minute: still open, and (for today's opens) strictly past their fill
-				// minute — live's first management look at a fresh open is the tick AFTER the fill.
-				var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase);
-				foreach (var key in pending)
-				{
-					var pos = _book.OpenPositions[key];
-					if (openedToday && pos.OpenedAt.HasValue && minuteEt <= pos.OpenedAt.Value) continue;
-					stillOpen[key] = pos;
-				}
+				var minuteEt = MinuteEt(minuteBar);
+				var stillOpen = MinutePopulation(pending, minuteEt, openedToday);
 				if (stillOpen.Count == 0) continue;
 
-				// Spot at this minute's open (start-of-bar convention, matching ctx.Now semantics); the TTE
-				// override only affects legs that fall back to parametric pricing (captured NBBO needs neither).
+				if (mwi < lookaheadValidFrom || lookahead[mwi] == null)
+				{
+					var held = pending.ToList();
+					for (var j = mwi; j < Math.Min(minuteBars.Count, mwi + batch); j++)
+					{
+						var bar = minuteBars[j];
+						lookahead[j] = Task.Run(() => MinuteSnapshotAsync(held, bar, ticker, oneTicker, endUtc, openedToday, cancellation), cancellation);
+					}
+					for (var j = mwi + batch; j < minuteBars.Count; j++) lookahead[j] = null!;
+					lookaheadValidFrom = mwi;
+				}
+				var snap = (await lookahead[mwi])!;
+
+				// Spot at this minute's open (start-of-bar convention, matching ctx.Now semantics). The helper's parity spot
+				// guard may have corrected the bar spot against the option book (composed-open lag) — adopt its value so rule
+				// moneyness matches the quotes being priced.
 				var spot = minuteBar.Open;
-				var minutesToClose = Math.Max(1.0, (endUtc - minuteBar.Timestamp).TotalMinutes);
-				var overrides = new QuoteOverrides(
-					Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot },
-					ZeroDteTimeYears: minutesToClose / 60.0 / 24.0 / 365.0);
-				var snap = await AIPipelineHelper.FetchQuotesWithHypotheticals(stillOpen, oneTicker, minuteEt, _quotes, _config, cancellation, overrides);
-				// The helper's parity spot guard may have corrected the bar spot against the option book
-				// (composed-open lag) — adopt its value so rule moneyness matches the quotes being priced.
 				if (snap.Underlyings.TryGetValue(ticker, out var snapSpot) && snapSpot > 0m) spot = snapSpot;
 				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot };
 				var ctx = new EvaluationContext(minuteEt, stillOpen, underlyings, snap.Options, cash, accountValue, technicalSignals);
@@ -700,10 +705,48 @@ internal sealed class BacktestRunner
 					          // fire unconfirmed rather than silently suppress every end-of-day exit)
 					: await ConfirmPnlClosesAsync(results, stillOpen, ticker, evaluator, minuteBars[mwi + 1], endUtc, cash, accountValue, technicalSignals, cancellation);
 
+				if (confirmed.Count > 0)
+				{
+					// In-flight look-ahead reads the positions an action is about to mutate; let it finish first (its
+					// results are discarded below either way).
+					await Task.WhenAll(lookahead.Where(t => t != null)).ContinueWith(_ => { }, TaskScheduler.Default);
+					lookaheadValidFrom = int.MaxValue;
+				}
 				var acted = ApplyManagementResults(minuteEt, confirmed, stillOpen, snap.Options, underlyings, warnOnDrop: false);
 				pending.ExceptWith(acted);
 			}
 		}
+	}
+
+	private static DateTime MinuteEt(MinuteBar bar) => DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(bar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+
+	/// <summary>Population at a walk minute: still open, and (for today's opens) strictly past their fill minute — live's first
+	/// management look at a fresh open is the tick AFTER the fill.</summary>
+	private Dictionary<string, OpenPosition> MinutePopulation(IEnumerable<string> pending, DateTime minuteEt, bool openedToday)
+	{
+		var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase);
+		foreach (var key in pending)
+		{
+			var pos = _book.OpenPositions[key];
+			if (openedToday && pos.OpenedAt.HasValue && minuteEt <= pos.OpenedAt.Value) continue;
+			stillOpen[key] = pos;
+		}
+		return stillOpen;
+	}
+
+	/// <summary>The walk's quote snapshot at <paramref name="bar"/>'s minute for the held set, or null when no position is
+	/// in that minute's population. Spot is the bar open; the TTE override only affects legs that fall back to parametric
+	/// pricing (captured NBBO needs neither).</summary>
+	private async Task<QuoteSnapshot?> MinuteSnapshotAsync(IReadOnlyList<string> held, MinuteBar bar, string ticker, IReadOnlySet<string> oneTicker, DateTimeOffset endUtc, bool openedToday, CancellationToken cancellation)
+	{
+		var minuteEt = MinuteEt(bar);
+		var stillOpen = MinutePopulation(held, minuteEt, openedToday);
+		if (stillOpen.Count == 0) return null;
+		var minutesToClose = Math.Max(1.0, (endUtc - bar.Timestamp).TotalMinutes);
+		var overrides = new QuoteOverrides(
+			Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = bar.Open },
+			ZeroDteTimeYears: minutesToClose / 60.0 / 24.0 / 365.0);
+		return await AIPipelineHelper.FetchQuotesWithHypotheticals(stillOpen, oneTicker, minuteEt, _quotes, _config, cancellation, overrides);
 	}
 
 	/// <summary>Filters <paramref name="results"/> down to the ones a real order would plausibly have
