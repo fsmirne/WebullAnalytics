@@ -80,6 +80,16 @@ internal sealed class QuoteStoreCache
 		return Slice(p.Root, p.ExpiryDate, asOfEt.Date).Lookup((long)Math.Round(p.Strike * 1000m), p.CallPut[0], (int)asOfEt.TimeOfDay.TotalSeconds, _maxStaleMinutes);
 	}
 
+	/// <summary>Loads every not-yet-cached (root, expiry) slice for <paramref name="date"/> in parallel, each on its own
+	/// connection. A sim day's first quote request touches the whole DTE band at once; loaded one by one on first
+	/// lookup, those slices were the backtest's main serial stretch while every scoring core sat idle.</summary>
+	public void Prefetch(IEnumerable<(string Root, DateTime Expiry)> expiries, DateTime date)
+	{
+		EvictBefore(date.Date);
+		var missing = expiries.Select(e => (e.Root.ToUpperInvariant(), e.Expiry.Date, date.Date)).Where(k => !_cache.ContainsKey(k)).Distinct().ToList();
+		if (missing.Count > 0) Parallel.ForEach(missing, k => Slice(k.Item1, k.Item2, k.Item3));
+	}
+
 	private DaySlice Slice(string root, DateTime expiry, DateTime date)
 	{
 		var key = (root.ToUpperInvariant(), expiry.Date, date.Date);

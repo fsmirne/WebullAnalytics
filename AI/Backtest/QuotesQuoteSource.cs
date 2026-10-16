@@ -111,6 +111,8 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		foreach (var root in parsed.Select(x => x.P.Root).Distinct(StringComparer.OrdinalIgnoreCase))
 			await ResolveSpotAsync(root);
 
+		_store.Prefetch(parsed.SelectMany(x => ParsingHelpers.AggregationRoots(x.P.Root, x.P.ExpiryDate.Date).Select(r => (r, x.P.ExpiryDate))), asOf.Date);
+
 		var options = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 
 		// Price one OCC symbol off the real NBBO store (mid + back-solved IV + snapshot OI). Null when the
