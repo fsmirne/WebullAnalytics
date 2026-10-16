@@ -114,10 +114,14 @@ internal static class OptionMath
 	/// and future-dated scenario pricing.
 	/// </summary>
 	internal static decimal DividendAdjustedSpot(decimal spot, IReadOnlyList<DividendEvent>? dividends, DateTime evalDate, DateTime expiry, double riskFreeRate)
+		=> SpotLessDividends(spot, DividendPresentValue(dividends, evalDate, expiry, riskFreeRate));
+
+	/// <summary><paramref name="spot"/> less an already-computed dividend present value. Guards against pathological
+	/// over-subtraction (divs ≥ spot): a non-positive spot would blow up log(S/K) in Black-Scholes. Such inputs are
+	/// non-physical, so it falls back to the unadjusted spot.</summary>
+	internal static decimal SpotLessDividends(decimal spot, decimal dividendPv)
 	{
-		var adjusted = spot - DividendPresentValue(dividends, evalDate, expiry, riskFreeRate);
-		// Guard against pathological over-subtraction (divs ≥ spot): a non-positive spot would blow up
-		// log(S/K) in Black-Scholes. Such inputs are non-physical, so fall back to the unadjusted spot.
+		var adjusted = spot - dividendPv;
 		return adjusted > 0m ? adjusted : spot;
 	}
 
@@ -264,14 +268,18 @@ internal static class OptionMath
 	/// both engines price an identical leg to the same number.
 	/// </summary>
 	internal static decimal LegValueAt(decimal spot, DateTime evalDate, OptionParsed parsed, decimal? iv, IReadOnlyList<DividendEvent>? dividends)
+		=> LegValueAt(spot, evalDate, parsed, iv, DividendPresentValue(dividends, evalDate, parsed.ExpiryDate.Date + MarketClose, RiskFreeRate));
+
+	/// <summary><see cref="LegValueAt(decimal, DateTime, OptionParsed, decimal?, IReadOnlyList{DividendEvent}?)"/> with the
+	/// dividend present value over (<paramref name="evalDate"/>, expiry] already computed — for a caller valuing one leg at
+	/// one instant across many spots, where that PV is the same every time.</summary>
+	internal static decimal LegValueAt(decimal spot, DateTime evalDate, OptionParsed parsed, decimal? iv, decimal dividendPv)
 	{
 		var expirationTime = parsed.ExpiryDate.Date + MarketClose;
 		if (!iv.HasValue || evalDate >= expirationTime)
 			return Intrinsic(spot, parsed.Strike, parsed.CallPut);
-
 		var timeYears = (expirationTime - evalDate).TotalDays / 365.0;
-		var adjustedSpot = DividendAdjustedSpot(spot, dividends, evalDate, expirationTime, RiskFreeRate);
-		return BlackScholes(adjustedSpot, parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
+		return BlackScholes(SpotLessDividends(spot, dividendPv), parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
 	}
 
 	/// <summary>
