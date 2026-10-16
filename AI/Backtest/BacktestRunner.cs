@@ -657,6 +657,11 @@ internal sealed class BacktestRunner
 			var lookahead = new Task<QuoteSnapshot?>[minuteBars.Count];
 			var lookaheadValidFrom = int.MaxValue;
 			var batch = Math.Max(1, Environment.ProcessorCount);
+			// VIX only feeds WeekendCloseRule's VIX gate here — keep the tape read off the walk otherwise.
+			var (vixBars, vixPriorClose) = _config.Rules.WeekendClose is { Enabled: true, MinVixChangePct: > 0m }
+				? await LoadVixDayAsync(step, endUtc, cancellation)
+				: (Array.Empty<MinuteBar>(), null);
+			var vixCursor = 0;
 
 			for (var mwi = 0; mwi < minuteBars.Count; mwi++)
 			{
@@ -687,7 +692,8 @@ internal sealed class BacktestRunner
 				var spot = minuteBar.Open;
 				if (snap.Underlyings.TryGetValue(ticker, out var snapSpot) && snapSpot > 0m) spot = snapSpot;
 				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot };
-				var ctx = new EvaluationContext(minuteEt, stillOpen, underlyings, snap.Options, cash, accountValue, technicalSignals);
+				var vixNow = CausalVix(vixBars, ref vixCursor, minuteBar.Timestamp, vixPriorClose);
+				var ctx = new EvaluationContext(minuteEt, stillOpen, underlyings, snap.Options, cash, accountValue, technicalSignals, vixNow, VixPriorClose: vixPriorClose);
 				var results = evaluator.Evaluate(ctx);
 
 				// Fill-realism check on P&L-threshold-driven closes only (StopLossRule / TakeProfitRule):
@@ -716,6 +722,34 @@ internal sealed class BacktestRunner
 				pending.ExceptWith(acted);
 			}
 		}
+	}
+
+	/// <summary>The day's RTH VIX minute tape (data/intraday/VIX/) plus the most recent settled close STRICTLY BEFORE
+	/// <paramref name="step"/>, walked back 5 days over weekends/holidays (mirroring BacktestIVProvider.GetVixSeriesCloseAsync)
+	/// — never the day's own 16:00 close, which is not knowable during the walk (using it let a 10:00 VIX gate "see" a
+	/// close-of-day vol spike — lookahead). The prior close is both the missing-tape fallback and the base of the day's move.</summary>
+	private async Task<(IReadOnlyList<MinuteBar> Bars, decimal? PriorClose)> LoadVixDayAsync(DateTime step, DateTimeOffset endUtc, CancellationToken cancellation)
+	{
+		var rthStartUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(step.Date.Add(MarketOpenTime), NyTz), TimeSpan.Zero);
+		var bars = await _intradayBars.GetBarsAsync("VIX", rthStartUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
+		decimal? priorClose = null;
+		for (var i = 1; i <= 5 && priorClose == null; i++)
+		{
+			var vixBar = await _bars.GetBarAsync("VIX", step.Date.AddDays(-i), cancellation);
+			if (vixBar != null) priorClose = vixBar.Close;
+		}
+		return (bars, priorClose);
+	}
+
+	/// <summary>Causal VIX at <paramref name="minuteUtc"/>: advance <paramref name="cursor"/> to the last tape bar at-or-before
+	/// the decision minute. A bar stamped exactly at this minute contributes its OPEN (the M:00 print); an earlier bar its
+	/// CLOSE (completed before this minute). No bar yet → <paramref name="fallback"/> (the prior settled close).</summary>
+	private static decimal? CausalVix(IReadOnlyList<MinuteBar> bars, ref int cursor, DateTimeOffset minuteUtc, decimal? fallback)
+	{
+		while (cursor < bars.Count && bars[cursor].Timestamp <= minuteUtc) cursor++;
+		if (cursor == 0) return fallback;
+		var vb = bars[cursor - 1];
+		return vb.Timestamp == minuteUtc ? vb.Open : vb.Close;
 	}
 
 	private static DateTime MinuteEt(MinuteBar bar) => DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(bar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
@@ -984,18 +1018,9 @@ internal sealed class BacktestRunner
 		// 5 days over weekends/holidays, mirroring BacktestIVProvider.GetVixSeriesCloseAsync) — never the
 		// day's own 16:00 close, which is not knowable during the walk (using it let the 10:00 MaxVix gate
 		// "see" a close-of-day vol spike — lookahead).
-		decimal? fallbackVix = null;
-		IReadOnlyList<MinuteBar> vixBars = Array.Empty<MinuteBar>();
-		if (legInRule != null || completeCondorRule != null)
-		{
-			var rthStartUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(step.Date.Add(MarketOpenTime), NyTz), TimeSpan.Zero);
-			vixBars = await _intradayBars.GetBarsAsync("VIX", rthStartUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
-			for (var i = 1; i <= 5 && fallbackVix == null; i++)
-			{
-				var vixBar = await _bars.GetBarAsync("VIX", step.Date.AddDays(-i), cancellation);
-				if (vixBar != null) fallbackVix = vixBar.Close;
-			}
-		}
+		var (vixBars, fallbackVix) = legInRule != null || completeCondorRule != null
+			? await LoadVixDayAsync(step, endUtc, cancellation)
+			: (Array.Empty<MinuteBar>(), null);
 		var vixCursor = 0;
 
 		// LegInShort needs the minute walk even when SL/TP are both disabled (e.g. SPXW's
@@ -1029,16 +1054,7 @@ internal sealed class BacktestRunner
 			if (minuteBar.High > dayHigh) dayHigh = minuteBar.High;
 			if (minuteBar.Low < dayLow) dayLow = minuteBar.Low;
 
-			// Causal VIX at this minute: advance to the last VIX bar at-or-before the decision minute.
-			// A bar stamped exactly at this minute contributes its OPEN (the M:00 print); an earlier bar
-			// its CLOSE (completed before this minute). Missing tape → prior-day settled close.
-			while (vixCursor < vixBars.Count && vixBars[vixCursor].Timestamp <= minuteUtc) vixCursor++;
-			var vixNow = fallbackVix;
-			if (vixCursor > 0)
-			{
-				var vb = vixBars[vixCursor - 1];
-				vixNow = vb.Timestamp == minuteUtc ? vb.Open : vb.Close;
-			}
+			var vixNow = CausalVix(vixBars, ref vixCursor, minuteUtc, fallbackVix);
 
 			// For LegInShort: pre-generate candidate strikes around spot at the long's expiry so the
 			// rule has multiple strikes to pick from. Only done when the rule is applicable to this

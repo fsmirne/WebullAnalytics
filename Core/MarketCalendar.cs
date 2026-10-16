@@ -29,8 +29,11 @@ internal static class MarketCalendar
 		var et = TimeZoneInfo.ConvertTime(now, NyTz);
 		if (!IsOpen(et.Date)) return false;
 		var t = et.TimeOfDay;
-		return t >= RegularOpenEt && t <= (IsEarlyClose(et.Date) ? EarlyCloseEt : RegularCloseEt);
+		return t >= RegularOpenEt && t <= CloseTimeEt(et.Date);
 	}
+
+	/// <summary>The regular-session close (ET time of day) on <paramref name="date"/>: 13:00 on an early-close half-day, else 16:00.</summary>
+	internal static TimeSpan CloseTimeEt(DateTime date) => IsEarlyClose(date) ? EarlyCloseEt : RegularCloseEt;
 
 	/// <summary>The given date if it's a trading day, else the nearest open day before it. Used to map a
 	/// nominal Friday expiry that lands on a holiday (e.g. Good Friday) to the day the contract actually

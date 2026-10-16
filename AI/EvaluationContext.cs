@@ -14,6 +14,8 @@ namespace WebullAnalytics.AI;
 /// <param name="Vix">VIX index level at this tick (daily close for end-of-day eval, latest available for intraday).
 /// Null when the source can't supply it. Used by regime-gated rules (e.g. LegInShortRule) to skip firing during
 /// high-vol environments where the rule's tail-risk profile turns hostile.</param>
+/// <param name="VixPriorClose">VIX close of the session before <see cref="Now"/>'s date, so a rule can read the day's VIX
+/// move as <see cref="Vix"/> / VixPriorClose − 1. Null when the source can't supply it (WeekendCloseRule's VIX gate).</param>
 /// <param name="IntradaySpotRangePct">Today's running (high − low) / open as a percent of open, measured up to
 /// <see cref="Now"/>. Null outside of intraday rule evaluation. Used as a "trend-day" proxy — large early-day
 /// ranges correlate with continued large moves, which is exactly when capping the long is destructive.</param>
@@ -34,7 +36,8 @@ internal sealed record EvaluationContext(
 	decimal? Vix = null,
 	decimal? IntradaySpotRangePct = null,
 	IReadOnlyDictionary<string, decimal>? HistoricalVolByTicker = null,
-	IReadOnlyDictionary<string, RealizedVolModel>? RealizedVolByTicker = null
+	IReadOnlyDictionary<string, RealizedVolModel>? RealizedVolByTicker = null,
+	decimal? VixPriorClose = null
 );
 
 /// <summary>

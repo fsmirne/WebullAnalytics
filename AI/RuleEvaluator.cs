@@ -138,6 +138,9 @@ internal sealed class RuleEvaluator
 			// BreakEvenGuard (priority 2, B < C) ahead of CloseBeforeShortExpiry: an any-day proximity close
 			// pre-empts the expiry-day emergency, which only fires a buffer past the band.
 			new BreakEvenGuardRule(config.Rules.BreakEvenGuard),
+			// WeekendClose (priority 2): a pre-closure flatten in the session's last minutes; disjoint in time from the
+			// expiry-day rules except on a Friday expiry, where either one closing is the same outcome.
+			new WeekendCloseRule(config.Rules.WeekendClose),
 			new CloseBeforeShortExpiryRule(config.Rules.CloseBeforeShortExpiry, expiryRegimes),
 			// LegInShort runs ahead of TakeProfit (alphabetical L < T at priority 2) so a saturated
 			// long-call/put gets converted to a vertical instead of flat-closed when both gates trip.

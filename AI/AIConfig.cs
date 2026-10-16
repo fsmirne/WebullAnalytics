@@ -225,6 +225,7 @@ internal sealed class RulesConfig
 	[JsonPropertyName("stopLoss")] public StopLossConfig StopLoss { get; set; } = new();
 	[JsonPropertyName("timeStop")] public TimeStopConfig TimeStop { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("breakEvenGuard")] public BreakEvenGuardConfig BreakEvenGuard { get; set; } = new();
+	[JsonPropertyName("weekendClose")] public WeekendCloseConfig WeekendClose { get; set; } = new();
 	[JsonPropertyName("opportunisticRoll")] public OpportunisticRollConfig OpportunisticRoll { get; set; } = new();
 	[JsonPropertyName("takeProfit")] public TakeProfitConfig TakeProfit { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("defensiveRoll")] public DefensiveRollConfig DefensiveRoll { get; set; } = new() { Enabled = false };
@@ -372,6 +373,16 @@ internal sealed class BreakEvenGuardConfig
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
 	/// <summary>How close to a short-expiry break-even (fraction of the BE level) spot may come before the close fires. 0 = fire only at/past the BE. Default 0.0026 (≈ $2 on SPY at $770).</summary>
 	[JsonPropertyName("bufferPct")] public decimal BufferPct { get; set; } = 0.0026m;
+}
+
+/// <summary>Pre-weekend/holiday close — see <see cref="WebullAnalytics.AI.Rules.WeekendCloseRule"/>.</summary>
+internal sealed class WeekendCloseConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>The close fires in the last this-many minutes of the session before a market closure. Default 30 (15:30 ET; 12:30 on a half-day).</summary>
+	[JsonPropertyName("minutesBeforeClose")] public int MinutesBeforeClose { get; set; } = 30;
+	/// <summary>Fire only when VIX is up at least this fraction from the prior session's close (0.12 = +12%). 0 = unconditional. Needs a VIX level in the evaluation context (backtest minute walk only).</summary>
+	[JsonPropertyName("minVixChangePct")] public decimal MinVixChangePct { get; set; } = 0m;
 }
 
 internal sealed class TakeProfitConfig
@@ -550,6 +561,10 @@ internal static class AIConfigLoader
 		var ce = c.Rules.CloseBeforeShortExpiry;
 		if (ce.MinProfitPct < 0m) return $"rules.closeBeforeShortExpiry.minProfitPct: must be ≥ 0, got {ce.MinProfitPct}";
 		if (ce.EmergencyBreakEvenBufferPct < 0m) return $"rules.closeBeforeShortExpiry.emergencyBreakEvenBufferPct: must be ≥ 0, got {ce.EmergencyBreakEvenBufferPct}";
+
+		var wc = c.Rules.WeekendClose;
+		if (wc.MinutesBeforeClose <= 0) return $"rules.weekendClose.minutesBeforeClose: must be > 0, got {wc.MinutesBeforeClose}";
+		if (wc.MinVixChangePct < 0m) return $"rules.weekendClose.minVixChangePct: must be ≥ 0, got {wc.MinVixChangePct}";
 
 		var li = c.Rules.LegInShort;
 		if (li.MinSpotPctITM < 0m) return $"rules.legInShort.minSpotPctITM: must be ≥ 0, got {li.MinSpotPctITM}";
