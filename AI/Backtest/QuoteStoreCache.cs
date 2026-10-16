@@ -8,8 +8,8 @@ namespace WebullAnalytics.AI.Backtest;
 /// <c>(root, expiry, date, time_sec, strike_milli, right, bid, ask, bid_size, ask_size)</c> — and answers
 /// "real NBBO for this contract at this ET minute" with a bounded stale-quote lookback. This is the
 /// quotes-only price foundation that replaces massive trade-bars + the synthetic spread model (see
-/// <see cref="BacktestQuoteSource"/>). Per-expiration slices are loaded lazily (the index on
-/// <c>(root, expiry, date)</c> fetches exactly the needed rows) and cached. Quote age (exact vs
+/// <see cref="BacktestQuoteSource"/>). Per-(expiration, date) slices are loaded lazily (the primary key on
+/// <c>(root, expiry, date, …)</c> fetches exactly the needed rows) and cached. Quote age (exact vs
 /// stale-by-N-min vs missing) is the pricing-provenance signal — the analog of "captured bar vs
 /// synthetic" on the trade-bar path. The store is built/kept current by scripts/import_quotes_sqlite.py +
 /// the daily backfill; there is no CSV read path.</summary>
@@ -34,35 +34,30 @@ internal sealed class QuoteStoreCache
 	}
 
 	private readonly int _maxStaleMinutes;
-	private readonly ConcurrentDictionary<(string Root, DateTime Exp), ExpiryQuotes> _cache = new();
+	// Lazy so concurrent first touches of one slice (parallel scoring threads) share a single load instead of each
+	// running the factory — ConcurrentDictionary.GetOrAdd alone may invoke it once per racing thread.
+	private readonly ConcurrentDictionary<(string Root, DateTime Exp, DateTime Date), Lazy<DaySlice>> _cache = new();
 
 	/// <param name="maxStaleMinutes">How far back to accept the most recent quote when the exact minute has
 	/// none. Minute NBBO is dense for liquid near-money contracts, so a small window (default 5 min) keeps
 	/// staleness honest; raise it for thin far-dated legs.</param>
 	private readonly DateTime _since;
 	private readonly DateTime _until;
-	// When set, only rows whose trade-date equals the file's expiry are parsed — i.e. the 0DTE slice.
-	// A file is named by expiry and (for SPY) carries the whole 45DTE→0DTE life of every contract that
-	// expires that day; a strictly-0DTE strategy only ever queries the same-day rows, so parsing the
-	// longer-dated tail is pure waste. Set by the caller only when it has PROVEN the run is same-day
-	// (every enabled opener structure is 0DTE AND no roll-to-future rule is active).
+	// When set, only same-day-expiry rows (trade date == expiry, the 0DTE slice) are served; any other date reads as
+	// empty. Set by the caller only when it has PROVEN the run is same-day (every enabled opener structure is 0DTE
+	// AND no roll-to-future rule is active).
 	private readonly bool _sameDayExpiryOnly;
-	// Canonical SQLite store. The index on (root, expiry, date) lets the per-expiry load fetch exactly the
-	// rows it needs — no full-file scan, so the 45DTE tail an expiry slice carries is never read.
+	// Canonical SQLite store. The primary key on (root, expiry, date, strike, right, time) lets a slice load fetch
+	// exactly its rows, already grouped by contract and time-sorted.
 	private readonly string _dbPath;
-	// Expiry-eviction watermark: the backtest queries the store only at the current sim minute and never
-	// looks back at an expired contract (settlement prices from the underlying bar, not the option NBBO —
-	// see BacktestRunner.SettleExpirationsAsync), so once the sim date passes an expiry its parsed rows are
-	// dead weight. Without this a full-year run accumulates every expiry it ever touched (~tens of GB in the
-	// in-memory decimal form, several× the on-disk CSV) and GC-thrashes mid-year. We drop them as the sim
-	// date advances, bounding the cache to the live DTE band. Invariant: asOf advances monotonically forward.
+	// Day-eviction watermark: a lookup reads only its own date's rows (staleness never crosses midnight) and the
+	// backtest only moves forward, so once the sim date advances every earlier slice is dead weight. Holding whole
+	// expiry lives instead kept the full DTE band × every elapsed date resident — a multi-GB live heap that every GC
+	// had to walk. Evicting is safe for any caller: a later query for an evicted date just reloads it.
 	private long _lastSweepDateTicks;
 	private readonly object _evictLock = new();
 
-	/// <param name="since">/<param name="until">When set to the backtest window, each per-expiration file
-	/// only parses rows whose date is inside [since, until] — a 45-day file that a short tuning run barely
-	/// touches skips the out-of-window rows before parsing them (a big cold-load win for short windows; a
-	/// no-op for a full-period run). Defaults to all-dates.</param>
+	/// <param name="since">/<param name="until">Dates outside [since, until] read as empty. Defaults to all-dates.</param>
 	public QuoteStoreCache(string dbPath, int maxStaleMinutes = 5, DateTime? since = null, DateTime? until = null, bool sameDayExpiryOnly = false)
 	{
 		_dbPath = dbPath ?? throw new ArgumentNullException(nameof(dbPath));
@@ -79,28 +74,36 @@ internal sealed class QuoteStoreCache
 	/// contract, within the staleness window; null if none → the caller's missing-quote policy decides.</summary>
 	public QuoteAt? NbboAt(string occ, DateTime asOfEt)
 	{
-		EvictExpiredBefore(asOfEt.Date);
+		EvictBefore(asOfEt.Date);
 		var p = ParsingHelpers.ParseOptionSymbol(occ);
 		if (p?.CallPut == null) return null;
-		var eq = _cache.GetOrAdd((p.Root.ToUpperInvariant(), p.ExpiryDate.Date),
-			key => ExpiryQuotes.Load(key.Root, key.Exp, _since, _until, _sameDayExpiryOnly, _dbPath));
-		return eq.Lookup(asOfEt.Date, (long)Math.Round(p.Strike * 1000m), p.CallPut[0],
-			(int)asOfEt.TimeOfDay.TotalSeconds, _maxStaleMinutes);
+		return Slice(p.Root, p.ExpiryDate, asOfEt.Date).Lookup((long)Math.Round(p.Strike * 1000m), p.CallPut[0], (int)asOfEt.TimeOfDay.TotalSeconds, _maxStaleMinutes);
 	}
 
-	/// <summary>Drops every cached expiration that has already expired before <paramref name="asOfDate"/> —
-	/// the backtest never queries them again, so their parsed rows are pure memory pressure. Runs at most once
-	/// per sim day: the fast path is a lock-free atomic read of the watermark; only the first call of a new day
+	private DaySlice Slice(string root, DateTime expiry, DateTime date)
+	{
+		var key = (root.ToUpperInvariant(), expiry.Date, date.Date);
+		return _cache.GetOrAdd(key, k => new Lazy<DaySlice>(() => LoadSlice(k.Item1, k.Item2, k.Item3))).Value;
+	}
+
+	private DaySlice LoadSlice(string root, DateTime expiry, DateTime date)
+	{
+		var outside = date < _since || date > _until || (_sameDayExpiryOnly && date != expiry);
+		return outside ? DaySlice.Empty : DaySlice.Load(root, expiry, date, _dbPath);
+	}
+
+	/// <summary>Drops every cached slice dated before <paramref name="asOfDate"/> — the backtest never queries
+	/// them again, so their rows are pure memory pressure. Runs at most once per sim day: the fast path is a lock-free atomic read of the watermark; only the first call of a new day
 	/// takes the lock and sweeps. ConcurrentDictionary.Keys is a snapshot, so removing during enumeration (and
 	/// concurrent reads from the still-active minute scan) is safe.</summary>
-	private void EvictExpiredBefore(DateTime asOfDate)
+	private void EvictBefore(DateTime asOfDate)
 	{
 		if (asOfDate.Ticks <= Volatile.Read(ref _lastSweepDateTicks)) return;
 		lock (_evictLock)
 		{
 			if (asOfDate.Ticks <= _lastSweepDateTicks) return;
 			foreach (var key in _cache.Keys)
-				if (key.Exp.Date < asOfDate) _cache.TryRemove(key, out _);
+				if (key.Date < asOfDate) _cache.TryRemove(key, out _);
 			Volatile.Write(ref _lastSweepDateTicks, asOfDate.Ticks);
 		}
 	}
@@ -131,87 +134,79 @@ internal sealed class QuoteStoreCache
 	/// placeholder strike per band-expiry) would otherwise see no contracts and enumerate nothing.</summary>
 	public IEnumerable<string> ContractsOn(string root, DateTime expiry, DateTime date, decimal loStrike, decimal hiStrike)
 	{
-		EvictExpiredBefore(date.Date);
-		var eq = _cache.GetOrAdd((root.ToUpperInvariant(), expiry.Date),
-			key => ExpiryQuotes.Load(key.Root, key.Exp, _since, _until, _sameDayExpiryOnly, _dbPath));
+		EvictBefore(date.Date);
+		var slice = Slice(root, expiry, date);
 		var loMilli = (long)Math.Round(loStrike * 1000m);
 		var hiMilli = (long)Math.Round(hiStrike * 1000m);
 		var yy = expiry.ToString("yyMMdd", CultureInfo.InvariantCulture);
 		var rootUp = root.ToUpperInvariant();
-		foreach (var (strikeMilli, cp) in eq.ContractsOn(date.Date, loMilli, hiMilli))
+		foreach (var (strikeMilli, cp) in slice.ContractsOn(loMilli, hiMilli))
 			yield return $"{rootUp}{yy}{cp}{strikeMilli:D8}";
 	}
 
-	private sealed class ExpiryQuotes
-	{
-		private readonly Dictionary<(DateTime Date, long StrikeMilli, char Cp),
-			List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>> _rows;
-		// Per-date index of the (strike, call/put) contracts present, so ContractsOn is O(contracts-on-that-day)
-		// instead of re-scanning every key each minute (the chain-expansion hot path queries this per tick).
-		private readonly Dictionary<DateTime, List<(long StrikeMilli, char Cp)>> _byDate;
+	// One NBBO print as stored: bid/ask in ten-thousandths of a dollar (the on-disk encoding), decoded to decimal only
+	// when a lookup returns it. Ints instead of decimals keep a slice ~2.5x smaller and the load free of decimal math.
+	private readonly record struct Row(int Sec, int Bid, int Ask, int BidSz, int AskSz);
 
-		private ExpiryQuotes(Dictionary<(DateTime Date, long StrikeMilli, char Cp),
-			List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>> rows)
+	/// <summary>Every contract's prints for one (root, expiry, trade date).</summary>
+	private sealed class DaySlice
+	{
+		public static readonly DaySlice Empty = new([], new());
+
+		// Contracts in store order (strike, then right) so ContractsOn enumerates deterministically.
+		private readonly List<(long StrikeMilli, char Cp)> _contracts;
+		private readonly Dictionary<(long StrikeMilli, char Cp), Row[]> _rows;
+
+		private DaySlice(List<(long StrikeMilli, char Cp)> contracts, Dictionary<(long StrikeMilli, char Cp), Row[]> rows)
 		{
+			_contracts = contracts;
 			_rows = rows;
-			_byDate = new Dictionary<DateTime, List<(long, char)>>();
-			foreach (var key in rows.Keys)
-			{
-				if (!_byDate.TryGetValue(key.Date, out var list)) { list = new(); _byDate[key.Date] = list; }
-				list.Add((key.StrikeMilli, key.Cp));
-			}
 		}
 
-		/// <summary>Loads the expiry slice from the canonical SQLite store. The DB holds already-validated rows
-		/// (the import validates structure only — valid time, strike, right C/P; the store is FAITHFUL to the
-		/// vendor as of 2026-07-22, so one-sided books arrive here with the absent side stored as 0 and policy
-		/// belongs to consumers: opener gates require two-sided books, management prices from what exists),
-		/// with bid/ask as scaled integers in ten-thousandths (price = value / 10000) — penny-tick data with the
-		/// source float noise (e.g. 0.35000000000000003) rounded away. The index on (root, expiry, date) makes
-		/// this fetch exactly the needed rows; the 45DTE tail an expiry slice carries is never touched.</summary>
-		public static ExpiryQuotes Load(string root, DateTime exp, DateTime since, DateTime until, bool sameDayExpiryOnly, string dbPath)
+		/// <summary>Loads the slice from the canonical SQLite store. The DB holds already-validated rows (the import
+		/// validates structure only — valid time, strike, right C/P; the store is FAITHFUL to the vendor as of
+		/// 2026-07-22, so one-sided books arrive here with the absent side stored as 0 and policy belongs to
+		/// consumers: opener gates require two-sided books, management prices from what exists), with bid/ask as
+		/// scaled integers in ten-thousandths (price = value / 10000) — penny-tick data with the source float noise
+		/// (e.g. 0.35000000000000003) rounded away. The ORDER BY matches the primary key, so SQLite streams rows
+		/// grouped by contract and time-sorted at no sort cost and each contract's run is cut straight to an array.</summary>
+		public static DaySlice Load(string root, DateTime exp, DateTime date, string dbPath)
 		{
-			var rows = new Dictionary<(DateTime Date, long StrikeMilli, char Cp),
-				List<(int Sec, decimal Bid, decimal Ask, int BidSz, int AskSz)>>();
-			using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Cache=Shared");
+			var contracts = new List<(long StrikeMilli, char Cp)>();
+			var rows = new Dictionary<(long StrikeMilli, char Cp), Row[]>();
+			using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
 			conn.Open();
 			using var cmd = conn.CreateCommand();
-			// date/expiry stored as INTEGER yyyymmdd (monotonic, so range comparison is correct).
-			cmd.CommandText = sameDayExpiryOnly
-				? "SELECT date, time_sec, strike_milli, right, bid, ask, bid_size, ask_size FROM quotes WHERE root=$root AND expiry=$exp AND date=$exp"
-				: "SELECT date, time_sec, strike_milli, right, bid, ask, bid_size, ask_size FROM quotes WHERE root=$root AND expiry=$exp AND date>=$since AND date<=$until";
+			// date/expiry stored as INTEGER yyyymmdd; unicode(right) reads the C/P code point without a string per row.
+			cmd.CommandText = "SELECT strike_milli, unicode(right), time_sec, bid, ask, bid_size, ask_size FROM quotes WHERE root=$root AND expiry=$exp AND date=$date ORDER BY strike_milli, right, time_sec";
 			cmd.Parameters.AddWithValue("$root", root.ToUpperInvariant());
 			cmd.Parameters.AddWithValue("$exp", YmdInt(exp));
-			if (!sameDayExpiryOnly)
-			{
-				cmd.Parameters.AddWithValue("$since", YmdInt(since));
-				cmd.Parameters.AddWithValue("$until", YmdInt(until));
-			}
+			cmd.Parameters.AddWithValue("$date", YmdInt(date));
 			using var r = cmd.ExecuteReader();
+			var run = new List<Row>();
+			(long StrikeMilli, char Cp) current = default;
 			while (r.Read())
 			{
-				var di = r.GetInt32(0);
-				var d = new DateTime(di / 10000, di / 100 % 100, di % 100);
-				var sec = r.GetInt32(1);
-				var strikeMilli = r.GetInt64(2);
-				var c = r.GetString(3)[0];
-				var bid = r.GetInt64(4) / 10000m;
-				var ask = r.GetInt64(5) / 10000m;
-				var bsz = r.GetInt32(6);
-				var asz = r.GetInt32(7);
-				var key = (d.Date, strikeMilli, c);
-				if (!rows.TryGetValue(key, out var list)) { list = new(); rows[key] = list; }
-				list.Add((sec, bid, ask, bsz, asz));
+				var key = (r.GetInt64(0), (char)r.GetInt32(1));
+				if (key != current && run.Count > 0) { Add(contracts, rows, current, run); run.Clear(); }
+				current = key;
+				run.Add(new Row(r.GetInt32(2), checked((int)r.GetInt64(3)), checked((int)r.GetInt64(4)), r.GetInt32(5), r.GetInt32(6)));
 			}
-			foreach (var list in rows.Values) list.Sort((x, y) => x.Sec.CompareTo(y.Sec));
-			return new ExpiryQuotes(rows);
+			if (run.Count > 0) Add(contracts, rows, current, run);
+			return new DaySlice(contracts, rows);
 		}
 
-		public QuoteAt? Lookup(DateTime date, long strikeMilli, char cp, int asOfSec, int maxStaleMinutes)
+		private static void Add(List<(long StrikeMilli, char Cp)> contracts, Dictionary<(long StrikeMilli, char Cp), Row[]> rows, (long StrikeMilli, char Cp) key, List<Row> run)
 		{
-			if (!_rows.TryGetValue((date, strikeMilli, cp), out var list) || list.Count == 0) return null;
-			// Latest sec <= asOfSec (binary search; list is sorted ascending by Sec).
-			int lo = 0, hi = list.Count - 1, idx = -1;
+			contracts.Add(key);
+			rows[key] = run.ToArray();
+		}
+
+		public QuoteAt? Lookup(long strikeMilli, char cp, int asOfSec, int maxStaleMinutes)
+		{
+			if (!_rows.TryGetValue((strikeMilli, cp), out var list)) return null;
+			// Latest sec <= asOfSec (binary search; rows are sorted ascending by Sec).
+			int lo = 0, hi = list.Length - 1, idx = -1;
 			while (lo <= hi)
 			{
 				var m = (lo + hi) / 2;
@@ -220,15 +215,13 @@ internal sealed class QuoteStoreCache
 			if (idx < 0) return null;
 			var r = list[idx];
 			var age = (asOfSec - r.Sec) / 60;
-			return age <= maxStaleMinutes ? new QuoteAt(r.Bid, r.Ask, r.BidSz, r.AskSz, age) : null;
+			return age <= maxStaleMinutes ? new QuoteAt(r.Bid / 10000m, r.Ask / 10000m, r.BidSz, r.AskSz, age) : null;
 		}
 
-		/// <summary>Distinct (strikeMilli, call/put) contracts that have at least one row on <paramref name="date"/>
-		/// with strike in [<paramref name="loMilli"/>, <paramref name="hiMilli"/>] (strike×1000).</summary>
-		public IEnumerable<(long StrikeMilli, char Cp)> ContractsOn(DateTime date, long loMilli, long hiMilli)
+		/// <summary>Distinct (strikeMilli, call/put) contracts with strike in [<paramref name="loMilli"/>, <paramref name="hiMilli"/>] (strike×1000).</summary>
+		public IEnumerable<(long StrikeMilli, char Cp)> ContractsOn(long loMilli, long hiMilli)
 		{
-			if (!_byDate.TryGetValue(date, out var list)) yield break;
-			foreach (var (strikeMilli, cp) in list)
+			foreach (var (strikeMilli, cp) in _contracts)
 				if (strikeMilli >= loMilli && strikeMilli <= hiMilli)
 					yield return (strikeMilli, cp);
 		}
