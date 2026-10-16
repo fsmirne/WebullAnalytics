@@ -61,6 +61,9 @@ internal static class PathExitModel
 		mass[n / 2] = 1.0;
 		var next = new double[n];
 		double ev = 0;
+		// Each node's offset from the center, e^(z·σ), is the same at every step; only the center moves.
+		var nodeOffset = new double[n];
+		for (var j = 0; j < n; j++) nodeOffset[j] = Math.Exp(nodes[j].Z * sigmaTotal);
 		var logSpot = Math.Log((double)spot);
 		var logDrift = Math.Log(targetCenter) - logSpot;
 
@@ -77,7 +80,7 @@ internal static class PathExitModel
 			for (var j = 0; j < n; j++)
 			{
 				if (mass[j] < 1e-12) continue;
-				var s = center * Math.Exp(nodes[j].Z * sigmaTotal);
+				var s = center * nodeOffset[j];
 				var pnl = k == steps ? (double)pnlAtTarget((decimal)s) : PositionValue(legSteps, s) * 100.0 - entry;
 				if (k == steps || pnl >= tp || pnl <= sl)
 				{

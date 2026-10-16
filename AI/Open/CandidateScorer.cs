@@ -1157,9 +1157,7 @@ internal static class CandidateScorer
 	{
 		var sortedLegs = string.Join("|", legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}").OrderBy(s => s, StringComparer.Ordinal));
 		var payload = $"{ticker}|{kind}|{sortedLegs}|{qty}";
-		using var sha = System.Security.Cryptography.SHA1.Create();
-		var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(payload));
-		return Convert.ToHexString(bytes).ToLowerInvariant();
+		return Convert.ToHexStringLower(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(payload)));
 	}
 
 	/// <summary>Score a candidate. <paramref name="applyLiquidityGate"/> controls whether the hard
