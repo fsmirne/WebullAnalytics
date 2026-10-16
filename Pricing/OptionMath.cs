@@ -80,13 +80,24 @@ internal static class OptionMath
 
 	/// <summary><see cref="BlackScholes"/> in doubles, for hot loops that price many spots (timeYears &gt; 0).</summary>
 	internal static double BlackScholesValue(double s, double k, double t, double r, double sigma, bool isCall)
+		=> BlackScholesValue(s, k, isCall, BlackScholesTerms.Of(k, t, r, sigma));
+
+	/// <summary>The spot-independent parts of a Black-Scholes value: (r + σ²/2)·t, σ·√t and the discounted strike.
+	/// Computed once per leg and time, they let a caller pricing one leg at many spots (the path lattice) skip the
+	/// repeated sqrt/exp with bit-identical results.</summary>
+	internal readonly record struct BlackScholesTerms(double DriftT, double SigmaSqrtT, double DiscountedStrike)
 	{
-		double d1 = (Math.Log(s / k) + (r + sigma * sigma / 2.0) * t) / (sigma * Math.Sqrt(t));
-		double d2 = d1 - sigma * Math.Sqrt(t);
+		internal static BlackScholesTerms Of(double k, double t, double r, double sigma) => new((r + sigma * sigma / 2.0) * t, sigma * Math.Sqrt(t), k * Math.Exp(-r * t));
+	}
+
+	internal static double BlackScholesValue(double s, double k, bool isCall, BlackScholesTerms terms)
+	{
+		double d1 = (Math.Log(s / k) + terms.DriftT) / terms.SigmaSqrtT;
+		double d2 = d1 - terms.SigmaSqrtT;
 
 		double price = isCall
-			? s * NormalCdf(d1) - k * Math.Exp(-r * t) * NormalCdf(d2)
-			: k * Math.Exp(-r * t) * NormalCdf(-d2) - s * NormalCdf(-d1);
+			? s * NormalCdf(d1) - terms.DiscountedStrike * NormalCdf(d2)
+			: terms.DiscountedStrike * NormalCdf(-d2) - s * NormalCdf(-d1);
 
 		return Math.Max(0, price);
 	}

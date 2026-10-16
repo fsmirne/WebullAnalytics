@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Numerics;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI;
@@ -23,12 +24,13 @@ internal readonly record struct PathLeg(OptionParsed Parsed, decimal Iv, bool Is
 /// </summary>
 internal static class PathExitModel
 {
-	/// <summary>One-step transition matrix with, per row, the first and last column holding non-zero probability — the
-	/// N(0, 1/K) kernel underflows to exactly 0 a few step-σ away, so the band is all the propagation has to touch.</summary>
-	private sealed record Transition(double[,] P, int[] First, int[] Last);
+	/// <summary>One-step transition matrix, row-major (row i at offset i·n), with, per row, the first and last column holding
+	/// non-zero probability — the N(0, 1/K) kernel underflows to exactly 0 a few step-σ away, so the band is all the
+	/// propagation has to touch.</summary>
+	private sealed record Transition(double[] P, int[] First, int[] Last);
 
 	/// <summary>A leg's Black-Scholes inputs at one interior monitoring step — everything but the spot.</summary>
-	private readonly record struct LegAtStep(double Sign, double Strike, bool IsCall, bool Expired, double Years, double Iv, double DividendPv);
+	private readonly record struct LegAtStep(double Sign, double Strike, bool IsCall, bool Expired, double DividendPv, OptionMath.BlackScholesTerms Terms);
 
 	private static readonly ConcurrentDictionary<int, Transition> TransitionsBySteps = new();
 
@@ -64,13 +66,7 @@ internal static class PathExitModel
 
 		for (var k = 1; k <= steps; k++)
 		{
-			Array.Clear(next);
-			for (var i = 0; i < n; i++)
-			{
-				var m = mass[i];
-				if (m == 0) continue;
-				for (var j = transition.First[i]; j <= transition.Last[i]; j++) next[j] += m * transition.P[i, j];
-			}
+			Propagate(mass, next, transition, n);
 			(mass, next) = (next, mass);
 
 			if (k < steps)
@@ -93,6 +89,26 @@ internal static class PathExitModel
 		return (decimal)ev;
 	}
 
+	/// <summary>next = mass × P over each row's non-zero band. SIMD across columns: every next[j] still receives the same
+	/// products added in the same row order as the scalar loop, so the result is bit-identical.</summary>
+	private static void Propagate(double[] mass, double[] next, Transition transition, int n)
+	{
+		Array.Clear(next);
+		var width = Vector<double>.Count;
+		for (var i = 0; i < n; i++)
+		{
+			var m = mass[i];
+			if (m == 0) continue;
+			var row = i * n;
+			var last = transition.Last[i];
+			var j = transition.First[i];
+			var vm = new Vector<double>(m);
+			for (; j + width - 1 <= last; j += width)
+				(new Vector<double>(next, j) + vm * new Vector<double>(transition.P, row + j)).CopyTo(next, j);
+			for (; j <= last; j++) next[j] += m * transition.P[row + j];
+		}
+	}
+
 	/// <summary>Per-share net value of the position at spot <paramref name="s"/>: Black-Scholes at each leg's own IV (on the
 	/// escrowed-dividend spot, as <see cref="OptionMath.LegValueAt"/>), intrinsic once the leg has expired.</summary>
 	private static double PositionValue(LegAtStep[] legs, double s)
@@ -106,7 +122,7 @@ internal static class PathExitModel
 			else
 			{
 				var adjusted = s - leg.DividendPv;
-				legValue = OptionMath.BlackScholesValue(adjusted > 0 ? adjusted : s, leg.Strike, leg.Years, OptionMath.RiskFreeRate, leg.Iv, leg.IsCall);
+				legValue = OptionMath.BlackScholesValue(adjusted > 0 ? adjusted : s, leg.Strike, leg.IsCall, leg.Terms);
 			}
 			value += leg.Sign * legValue;
 		}
@@ -118,8 +134,10 @@ internal static class PathExitModel
 		var expiry = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
 		var sign = (leg.IsLong ? 1.0 : -1.0) * leg.Qty;
 		var isCall = leg.Parsed.CallPut == "C";
-		if (at >= expiry) return new LegAtStep(sign, (double)leg.Parsed.Strike, isCall, Expired: true, 0, 0, 0);
-		return new LegAtStep(sign, (double)leg.Parsed.Strike, isCall, Expired: false, (expiry - at).TotalDays / 365.0, (double)leg.Iv, (double)OptionMath.DividendPresentValue(dividends, at, expiry, OptionMath.RiskFreeRate));
+		var strike = (double)leg.Parsed.Strike;
+		if (at >= expiry) return new LegAtStep(sign, strike, isCall, Expired: true, 0, default);
+		var terms = OptionMath.BlackScholesTerms.Of(strike, (expiry - at).TotalDays / 365.0, OptionMath.RiskFreeRate, (double)leg.Iv);
+		return new LegAtStep(sign, strike, isCall, Expired: false, (double)OptionMath.DividendPresentValue(dividends, at, expiry, OptionMath.RiskFreeRate), terms);
 	}
 
 	/// <summary>Row i = probability of moving from node i to each node in one step of variance 1/K (z units), binned on the
@@ -130,7 +148,7 @@ internal static class PathExitModel
 		var n = nodes.Length;
 		var width = 2.0 * CandidateScorer.ScenarioBinEdgeSigmas / n;
 		var stepSd = Math.Sqrt(1.0 / steps);
-		var m = new double[n, n];
+		var m = new double[n * n];
 		var first = new int[n];
 		var last = new int[n];
 		for (var i = 0; i < n; i++)
@@ -141,8 +159,8 @@ internal static class PathExitModel
 			{
 				var lo = j == 0 ? double.NegativeInfinity : -CandidateScorer.ScenarioBinEdgeSigmas + j * width;
 				var hi = j == n - 1 ? double.PositiveInfinity : -CandidateScorer.ScenarioBinEdgeSigmas + (j + 1) * width;
-				m[i, j] = OptionMath.NormalCdf((hi - nodes[i].Z) / stepSd) - OptionMath.NormalCdf((lo - nodes[i].Z) / stepSd);
-				if (m[i, j] == 0) continue;
+				m[i * n + j] = OptionMath.NormalCdf((hi - nodes[i].Z) / stepSd) - OptionMath.NormalCdf((lo - nodes[i].Z) / stepSd);
+				if (m[i * n + j] == 0) continue;
 				first[i] = Math.Min(first[i], j);
 				last[i] = j;
 			}
