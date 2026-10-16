@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -43,6 +44,17 @@ internal static class FearGreedClient
 	private static (DateTime CachedAt, DateTime ForDate, SentimentSnapshot Snapshot)? _intradayLiveCache;
 	private static readonly object _liveCacheLock = new();
 	private static readonly TimeSpan LiveTtl = TimeSpan.FromSeconds(60);
+	// Backtest (cacheOnly) memo of each settled date's cached reading: the opener asks once per sim minute, and
+	// re-reading + re-parsing the same file every minute was ~7% of a backtest's thread time. Nothing in a
+	// cache-only run writes these files, so the first read is the answer for the rest of the process.
+	private static readonly ConcurrentDictionary<DateTime, SentimentSnapshot?> CacheOnlySnapshots = new();
+
+	private static SentimentSnapshot? ReadCache(string cachePath, DateTime forDate)
+	{
+		if (!File.Exists(cachePath)) return null;
+		try { return ParseResponse(File.ReadAllText(cachePath), forDate); }
+		catch (IOException) { return null; }
+	}
 
 	/// <summary>Returns the sentiment snapshot for <paramref name="asOf"/>, using the on-disk cache when
 	/// the date is settled. Intra-day calls hit the network with a 60-second in-memory TTL cache. Returns null on any failure.
@@ -66,19 +78,8 @@ internal static class FearGreedClient
 		var cachePath = Program.ResolvePath(Path.Combine(CacheDir, $"{dateStr}.json"));
 		var settled = IsSettled(lookup, DateTime.UtcNow);
 
-		if (settled && File.Exists(cachePath) && !forceRefresh)
-		{
-			try
-			{
-				var cached = await File.ReadAllTextAsync(cachePath, cancellation);
-				var parsed = ParseResponse(cached, lookup.Date);
-				if (parsed != null) return parsed;
-			}
-			catch (IOException) { }
-			catch (JsonException) { }
-		}
-
-		if (cacheOnly) return null;
+		if (cacheOnly) return settled && !forceRefresh ? CacheOnlySnapshots.GetOrAdd(lookup.Date, d => ReadCache(cachePath, d)) : null;
+		if (settled && !forceRefresh && ReadCache(cachePath, lookup.Date) is { } cached) return cached;
 
 		if (!settled && !forceRefresh)
 		{

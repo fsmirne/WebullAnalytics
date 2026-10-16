@@ -406,7 +406,7 @@ internal sealed class OpenCandidateEvaluator
 		// "no veto" so a calendar outage never silences the opener. In backtest we pass cacheOnly=true
 		// so the Yahoo branch is bypassed (quoteSummary returns current-state events regardless of
 		// asOf; calling it would leak future earnings/ex-div into a historical replay). The cache's
-		// symmetric TTL check in TryReadCache rejects entries fetched too far from asOf in either
+		// symmetric TTL check in YahooCalendarClient.FreshEvents rejects entries fetched too far from asOf in either
 		// direction, so the on-disk cache stays lookahead-safe for distant historical asOfs too.
 		var eventCalendar = await EventCalendarLoader.LoadAsync(new[] { _config.Ticker }, cfg.Indicators.Events, ctx.Now, cancellation, cacheOnly: _backtestMode);
 

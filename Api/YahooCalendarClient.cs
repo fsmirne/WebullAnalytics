@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Text.Encodings.Web;
@@ -25,6 +26,10 @@ internal static class YahooCalendarClient
 	// finance.yahoo.com is the live consent page that seats the A1/A3 cookie getcrumb needs.
 	private static readonly string[] CookieBootstrapUrls = { "https://fc.yahoo.com", "https://finance.yahoo.com" };
 	private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(12);
+	// Backtest (cacheOnly) memo of each ticker's cache file: the opener asks once per sim minute, and re-reading +
+	// re-parsing the same file every minute was ~20% of a backtest's thread time. Nothing in a cache-only run writes
+	// these files, so the first read stands for the process; the asOf freshness check still runs per call.
+	private static readonly ConcurrentDictionary<string, CacheEnvelope?> CacheOnlyEnvelopes = new(StringComparer.OrdinalIgnoreCase);
 
 	/// <summary>Batch-fetch events for a set of tickers. Uses one HttpClient + cookie jar across the
 	/// batch so the crumb is reused. Per-ticker failures are swallowed — the returned dictionary only
@@ -33,7 +38,7 @@ internal static class YahooCalendarClient
 	/// When <paramref name="cacheOnly"/> is true, the network branch is skipped — returns only what's
 	/// cached. Used by the backtest path: Yahoo's quoteSummary returns current state regardless of
 	/// asOf, so a backtest network call would leak future events into historical decisions. Reading
-	/// the cache is safe because <see cref="TryReadCache"/> rejects entries whose fetchedAt is more
+	/// the cache is safe because <see cref="FreshEvents"/> rejects entries whose fetchedAt is more
 	/// than CacheTtl outside asOf in either direction — so a cache fetched far in the future of asOf
 	/// won't be honored.</summary>
 	internal static async Task<IReadOnlyDictionary<string, TickerEvents>> FetchEventsAsync(IEnumerable<string> tickers, DateTime asOf, CancellationToken cancellation, bool cacheOnly = false)
@@ -48,14 +53,14 @@ internal static class YahooCalendarClient
 		if (distinct.Count == 0) return result;
 
 		var cacheDir = Program.ResolvePath("data/event-cache");
-		Directory.CreateDirectory(cacheDir);
 
 		// Try cache first for each ticker. Anything that hits stays out of the network call list.
 		var needsFetch = new List<string>();
 		foreach (var ticker in distinct)
 		{
 			var cachePath = Path.Combine(cacheDir, $"{ticker}.json");
-			var cached = TryReadCache(cachePath, asOf);
+			var envelope = cacheOnly ? CacheOnlyEnvelopes.GetOrAdd(cachePath, ReadCache) : ReadCache(cachePath);
+			var cached = FreshEvents(envelope, asOf);
 			if (cached != null)
 				result[ticker] = cached;
 			else
@@ -64,6 +69,7 @@ internal static class YahooCalendarClient
 
 		if (cacheOnly) return result;
 		if (needsFetch.Count == 0) return result;
+		Directory.CreateDirectory(cacheDir);
 
 		using var handler = new HttpClientHandler
 		{
@@ -462,28 +468,26 @@ internal static class YahooCalendarClient
 			Events = events,
 		}, CacheJsonOptions);
 
-	private static TickerEvents? TryReadCache(string cachePath, DateTime asOf)
+	private static CacheEnvelope? ReadCache(string cachePath)
 	{
 		if (!File.Exists(cachePath)) return null;
-		try
-		{
-			var raw = File.ReadAllText(cachePath);
-			var env = JsonSerializer.Deserialize<CacheEnvelope>(raw, CacheJsonOptions);
-			if (env?.Events == null) return null;
-			if (!DateTime.TryParse(env.FetchedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var fetchedAt)) return null;
-			// Reject cache entries whose fetchedAt is too far from asOf in either direction.
-			// Existing-side check (asOf - fetchedAt > TTL) catches stale caches in live use.
-			// Future-side check (fetchedAt - asOf > TTL) prevents a backtest replaying a past
-			// date from inheriting a cache fetched LATER than asOf — Yahoo's quoteSummary
-			// returns the "next earnings / ex-div" as of the fetch time, so a cache written
-			// today would leak future events into a 2025 replay. Symmetric tolerance keeps
-			// both behaviors with one check.
-			var driftAbs = (asOf.ToUniversalTime() - fetchedAt).Duration();
-			if (driftAbs > CacheTtl) return null;
-
-			return env.Events;
-		}
+		try { return JsonSerializer.Deserialize<CacheEnvelope>(File.ReadAllText(cachePath), CacheJsonOptions); }
 		catch (IOException) { return null; }
 		catch (JsonException) { return null; }
+	}
+
+	private static TickerEvents? FreshEvents(CacheEnvelope? env, DateTime asOf)
+	{
+		if (env?.Events == null) return null;
+		if (!DateTime.TryParse(env.FetchedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var fetchedAt)) return null;
+		// Reject cache entries whose fetchedAt is too far from asOf in either direction.
+		// Existing-side check (asOf - fetchedAt > TTL) catches stale caches in live use.
+		// Future-side check (fetchedAt - asOf > TTL) prevents a backtest replaying a past
+		// date from inheriting a cache fetched LATER than asOf — Yahoo's quoteSummary
+		// returns the "next earnings / ex-div" as of the fetch time, so a cache written
+		// today would leak future events into a 2025 replay. Symmetric tolerance keeps
+		// both behaviors with one check.
+		var driftAbs = (asOf.ToUniversalTime() - fetchedAt).Duration();
+		return driftAbs > CacheTtl ? null : env.Events;
 	}
 }
