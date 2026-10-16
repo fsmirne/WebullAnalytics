@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.Data.Sqlite;
+using SQLitePCL;
 
 namespace WebullAnalytics.AI.Backtest;
 
@@ -186,24 +187,33 @@ internal sealed class QuoteStoreCache
 			var rows = new Dictionary<(long StrikeMilli, char Cp), Row[]>();
 			using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
 			conn.Open();
-			using var cmd = conn.CreateCommand();
-			// date/expiry stored as INTEGER yyyymmdd; unicode(right) reads the C/P code point without a string per row.
-			cmd.CommandText = "SELECT strike_milli, unicode(right), time_sec, bid, ask, bid_size, ask_size FROM quotes WHERE root=$root AND expiry=$exp AND date=$date ORDER BY strike_milli, right, time_sec";
-			cmd.Parameters.AddWithValue("$root", root.ToUpperInvariant());
-			cmd.Parameters.AddWithValue("$exp", YmdInt(exp));
-			cmd.Parameters.AddWithValue("$date", YmdInt(date));
-			using var r = cmd.ExecuteReader();
+			// Raw SQLitePCL statement instead of SqliteDataReader: the reader's per-value type/null checks cost ~2x
+			// SQLite's own row stepping on these multi-million-row loads. date/expiry are INTEGER yyyymmdd;
+			// unicode(right) reads the C/P code point without a string per row.
+			const string sql = "SELECT strike_milli, unicode(right), time_sec, bid, ask, bid_size, ask_size FROM quotes WHERE root=?1 AND expiry=?2 AND date=?3 ORDER BY strike_milli, right, time_sec";
+			Check(raw.sqlite3_prepare_v2(conn.Handle, sql, out var stmt), conn);
+			using var _ = stmt;
+			Check(raw.sqlite3_bind_text(stmt, 1, root.ToUpperInvariant()), conn);
+			Check(raw.sqlite3_bind_int(stmt, 2, YmdInt(exp)), conn);
+			Check(raw.sqlite3_bind_int(stmt, 3, YmdInt(date)), conn);
 			var run = new List<Row>();
 			(long StrikeMilli, char Cp) current = default;
-			while (r.Read())
+			int rc;
+			while ((rc = raw.sqlite3_step(stmt)) == raw.SQLITE_ROW)
 			{
-				var key = (r.GetInt64(0), (char)r.GetInt32(1));
+				var key = (raw.sqlite3_column_int64(stmt, 0), (char)raw.sqlite3_column_int(stmt, 1));
 				if (key != current && run.Count > 0) { Add(contracts, rows, current, run); run.Clear(); }
 				current = key;
-				run.Add(new Row(r.GetInt32(2), checked((int)r.GetInt64(3)), checked((int)r.GetInt64(4)), r.GetInt32(5), r.GetInt32(6)));
+				run.Add(new Row(raw.sqlite3_column_int(stmt, 2), checked((int)raw.sqlite3_column_int64(stmt, 3)), checked((int)raw.sqlite3_column_int64(stmt, 4)), raw.sqlite3_column_int(stmt, 5), raw.sqlite3_column_int(stmt, 6)));
 			}
+			if (rc != raw.SQLITE_DONE) Check(rc, conn);
 			if (run.Count > 0) Add(contracts, rows, current, run);
 			return new DaySlice(contracts, rows);
+		}
+
+		private static void Check(int rc, SqliteConnection conn)
+		{
+			if (rc != raw.SQLITE_OK) throw new SqliteException(raw.sqlite3_errmsg(conn.Handle).utf8_to_string(), rc);
 		}
 
 		private static void Add(List<(long StrikeMilli, char Cp)> contracts, Dictionary<(long StrikeMilli, char Cp), Row[]> rows, (long StrikeMilli, char Cp) key, List<Row> run)
