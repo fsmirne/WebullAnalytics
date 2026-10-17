@@ -56,16 +56,17 @@ internal sealed class BacktestRunner
 	private int _blindPositionDays;    // position-days where NO leg had a quote, so rules could not evaluate the position at all
 	private readonly HashSet<long> _openFallbackLineages = new();   // window-end lineages with >=1 leg marked at entry price (no NBBO) — unrealized not fully real-priced
 
-	// Conceptual fill times within a trading day. Opens, closes, and rolls all price off bar.Open
-	// (BacktestQuoteSource uses the day's open as spot), so they're stamped at 09:30 ET — the
+	// Conceptual fill times within a trading day, stamped with start-of-minute labels — the
 	// start-of-bar convention: a bar at 09:30:00 covers the 09:30→09:31 ET minute and contains the
-	// auction-cleared open price. Webull natively stamps end-of-bar (09:31:00) but we normalize that
+	// auction-cleared open price. A fill labeled minute M prices off the quote store's row M, the book
+	// struck at M+1:00 (QuoteStoreCache.BookInstant); spot, TTE and tape/VIX for that minute are read at
+	// the same instant (bar M's close). Webull natively stamps end-of-bar (09:31:00) but we normalize that
 	// to start-of-bar at parse time in `WebullChartsClient` so the entire codebase agrees with
 	// Polygon, ToS, and TradingView. Expirations settle at bar.Close intrinsic, stamped at 16:00 ET.
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, decimal? cross = null, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null, IReadOnlyList<(DateTime Date, double Rate)>? rateHistory = null)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, decimal? cross = null, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null, IReadOnlyList<(DateTime Date, double Rate)>? rateHistory = null, IntradayBarCache? intradayBars = null)
 	{
 		_rateHistory = rateHistory;
 		_replayOpensByDate = replayOpens?.GroupBy(o => o.OpenEt.Date).ToDictionary(g => g.Key, g => g.OrderBy(o => o.OpenEt).ToList());
@@ -86,10 +87,10 @@ internal sealed class BacktestRunner
 		// Disk-only cache for backtest: the fetcher returns empty so any missing minute file fails
 		// closed (we fall back to the single 09:30 fill path). The on-disk read path serves the
 		// backfilled data/intraday/<TICKER>/<date>.csv files that the Polygon-mirror import created.
-		_intradayBars = new IntradayBarCache(NoopIntradayFetcher);
+		_intradayBars = intradayBars ?? new IntradayBarCache(NoopIntradayFetcher);
 	}
 
-	private static Task<IReadOnlyList<MinuteBar>> NoopIntradayFetcher(string ticker, BarInterval interval, int count, bool includeExtended, CancellationToken cancellation)
+	internal static Task<IReadOnlyList<MinuteBar>> NoopIntradayFetcher(string ticker, BarInterval interval, int count, bool includeExtended, CancellationToken cancellation)
 		=> Task.FromResult<IReadOnlyList<MinuteBar>>(Array.Empty<MinuteBar>());
 
 	/// <param name="onStep">Optional progress callback invoked after each trading day completes, with
@@ -686,13 +687,13 @@ internal sealed class BacktestRunner
 				}
 				var snap = (await lookahead[mwi])!;
 
-				// Spot at this minute's open (start-of-bar convention, matching ctx.Now semantics). The helper's parity spot
-				// guard may have corrected the bar spot against the option book (composed-open lag) — adopt its value so rule
-				// moneyness matches the quotes being priced.
-				var spot = minuteBar.Open;
+				// Spot at the book instant (bar close = M+1:00, the moment row M's book was struck). The helper's parity
+				// spot guard may have corrected the bar spot against the option book (composed-open lag) — adopt its value
+				// so rule moneyness matches the quotes being priced.
+				var spot = minuteBar.Close;
 				if (snap.Underlyings.TryGetValue(ticker, out var snapSpot) && snapSpot > 0m) spot = snapSpot;
 				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot };
-				var vixNow = CausalVix(vixBars, ref vixCursor, minuteBar.Timestamp, vixPriorClose);
+				var vixNow = CausalVix(vixBars, ref vixCursor, minuteBar.Timestamp + QuoteStoreCache.BookLag, vixPriorClose);
 				var ctx = new EvaluationContext(minuteEt, stillOpen, underlyings, snap.Options, cash, accountValue, technicalSignals, vixNow, VixPriorClose: vixPriorClose);
 				var results = evaluator.Evaluate(ctx);
 
@@ -769,16 +770,16 @@ internal sealed class BacktestRunner
 	}
 
 	/// <summary>The walk's quote snapshot at <paramref name="bar"/>'s minute for the held set, or null when no position is
-	/// in that minute's population. Spot is the bar open; the TTE override only affects legs that fall back to parametric
-	/// pricing (captured NBBO needs neither).</summary>
+	/// in that minute's population. Spot and TTE are at the book instant (bar close, M+1:00); the TTE override only affects
+	/// legs that fall back to parametric pricing (captured NBBO needs neither).</summary>
 	private async Task<QuoteSnapshot?> MinuteSnapshotAsync(IReadOnlyList<string> held, MinuteBar bar, string ticker, IReadOnlySet<string> oneTicker, DateTimeOffset endUtc, bool openedToday, CancellationToken cancellation)
 	{
 		var minuteEt = MinuteEt(bar);
 		var stillOpen = MinutePopulation(held, minuteEt, openedToday);
 		if (stillOpen.Count == 0) return null;
-		var minutesToClose = Math.Max(1.0, (endUtc - bar.Timestamp).TotalMinutes);
+		var minutesToClose = Math.Max(1.0, (endUtc - (bar.Timestamp + QuoteStoreCache.BookLag)).TotalMinutes);
 		var overrides = new QuoteOverrides(
-			Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = bar.Open },
+			Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = bar.Close },
 			ZeroDteTimeYears: minutesToClose / 60.0 / 24.0 / 365.0);
 		return await AIPipelineHelper.FetchQuotesWithHypotheticals(stillOpen, oneTicker, minuteEt, _quotes, _config, cancellation, overrides);
 	}
@@ -822,8 +823,8 @@ internal sealed class BacktestRunner
 			if (symbols.Count == 0) { confirmed.Add(r); continue; } // nothing priced to confirm against — don't block on it
 
 			var nextEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(nextBar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
-			var nextSpot = nextBar.Open;
-			var nextMinutesToClose = Math.Max(1.0, (endUtc - nextBar.Timestamp).TotalMinutes);
+			var nextSpot = nextBar.Close;
+			var nextMinutesToClose = Math.Max(1.0, (endUtc - (nextBar.Timestamp + QuoteStoreCache.BookLag)).TotalMinutes);
 			var nextOverrides = new QuoteOverrides(
 				Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = nextSpot },
 				ZeroDteTimeYears: nextMinutesToClose / 60.0 / 24.0 / 365.0);
@@ -1038,23 +1039,23 @@ internal sealed class BacktestRunner
 		var dayOpenSpot = minuteBars.Count > 0 ? minuteBars[0].Open : 0m;
 		decimal dayHigh = dayOpenSpot, dayLow = dayOpenSpot;
 
-		// Walk minute bars. At each minute, re-price the position at that minute's bar.Open spot
-		// (start-of-minute price; consistent with ctx.Now semantics elsewhere in the simulator)
-		// using a remaining-session TTE. Trigger on first SL/TP crossing.
+		// Walk minute bars. At each minute, re-price the position at the book instant — the bar's close
+		// (M+1:00, when the store's row-M book was struck) with the remaining-session TTE from that same
+		// instant. Trigger on first SL/TP crossing.
 		for (var mwi = 0; mwi < minuteBars.Count; mwi++)
 		{
 			var minuteBar = minuteBars[mwi];
 			cancellation.ThrowIfCancellationRequested();
 			var minuteUtc = minuteBar.Timestamp;
-			var spot = minuteBar.Open;
-			var minutesToClose = Math.Max(1.0, (endUtc - minuteUtc).TotalMinutes);
+			var spot = minuteBar.Close;
+			var minutesToClose = Math.Max(1.0, (endUtc - (minuteUtc + QuoteStoreCache.BookLag)).TotalMinutes);
 			var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
 
-			// Update intraday range with this minute's H/L.
+			// Update intraday range with this minute's H/L (complete at the book instant).
 			if (minuteBar.High > dayHigh) dayHigh = minuteBar.High;
 			if (minuteBar.Low < dayLow) dayLow = minuteBar.Low;
 
-			var vixNow = CausalVix(vixBars, ref vixCursor, minuteUtc, fallbackVix);
+			var vixNow = CausalVix(vixBars, ref vixCursor, minuteUtc + QuoteStoreCache.BookLag, fallbackVix);
 
 			// For LegInShort: pre-generate candidate strikes around spot at the long's expiry so the
 			// rule has multiple strikes to pick from. Only done when the rule is applicable to this
@@ -1217,8 +1218,8 @@ internal sealed class BacktestRunner
 			{
 				var nextBar = minuteBars[mwi + 1];
 				var nextMinuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(nextBar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
-				var nextSpot = nextBar.Open;
-				var nextMinutesToClose = Math.Max(1.0, (endUtc - nextBar.Timestamp).TotalMinutes);
+				var nextSpot = nextBar.Close;
+				var nextMinutesToClose = Math.Max(1.0, (endUtc - (nextBar.Timestamp + QuoteStoreCache.BookLag)).TotalMinutes);
 				var nextOverrides = new QuoteOverrides(
 					Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = nextSpot },
 					ZeroDteTimeYears: nextMinutesToClose / 60.0 / 24.0 / 365.0);
@@ -1643,29 +1644,24 @@ internal sealed class BacktestRunner
 		CancellationToken cancellation)
 	{
 		// Build per-minute spot dict. Skip when any required ticker has no bar at this minute — the
-		// opener's bootstrap would have no spot to work with. Anchor the strike-selection spot on the
-		// bar's TIME-MIDPOINT (Open+Close)/2, NOT bar.Open: live's tick scheduler (wa ai watch at :30
-		// each minute) samples ~30s into the bar, and the leg-pricing path already prices on this same
-		// midpoint (see BacktestQuoteSource: "Using bar.Open systematically under-samples by ~30 seconds
-		// on trending minutes"). Anchoring strikes on bar.Open while pricing legs on the midpoint made
-		// the backtest pick systematically lower strikes than live on up-drifting minutes. The midpoint
-		// keeps the same within-minute semantic as pricing and does NOT introduce the full 1-minute
-		// lookahead that bar.Close would — the 09:30==^GSPC.Open anchor invariant governs the SPXW
-		// curve/leg pricing, not the opener's spot. On gap-day 09:30 bars the official open print lags the
-		// option book (composed-open lag: constituents stagger in over the first minute) and this midpoint
-		// inherits it; the opener corrects that downstream via ParitySpotGuard once the minute's chain is
-		// in hand (live 2026-08-03: bar mid 7511.72 vs parity 7520.6 bought a put vertical into a rip).
+		// opener's bootstrap would have no spot to work with. The minute's legs price off the quote store's
+		// row M — the book struck at M+1:00 (QuoteStoreCache.BookInstant) — and the entry fills on that same
+		// book, so the strike-selection spot is the price at that same instant: the bar's close. (An earlier
+		// in-bar anchor — the open, then the (Open+Close)/2 midpoint mimicking live's :30 tick — paired a
+		// pre-book spot with the M+1:00 book.) On gap-day 09:30 bars the official open print lags the option
+		// book (composed-open lag: constituents stagger in over the first minute); the opener still corrects
+		// any residual via ParitySpotGuard once the minute's chain is in hand.
 		var minuteSpots = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 		foreach (var t in tickerSet)
 		{
 			if (!barIndexByTicker[t].TryGetValue(minuteUtc, out var bar)) return null;
-			minuteSpots[t] = (bar.Open + bar.Close) / 2m;
+			minuteSpots[t] = bar.Close;
 		}
 
-		// TTE for 0DTE legs: remaining minutes from this bar to 16:00 ET, in years. Floored at 1
-		// minute so deep-OTM 0DTE doesn't price exactly intrinsic before the actual close — the
+		// TTE for 0DTE legs: remaining minutes from the book instant (M+1:00) to 16:00 ET, in years. Floored
+		// at 1 minute so deep-OTM 0DTE doesn't price exactly intrinsic before the actual close — the
 		// existing settlement path handles the at-close cash flow.
-		var minutesToClose = Math.Max(1.0, (closeUtc - minuteUtc).TotalMinutes);
+		var minutesToClose = Math.Max(1.0, (closeUtc - (minuteUtc + QuoteStoreCache.BookLag)).TotalMinutes);
 		var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
 
 		// Convert the bar's UTC timestamp back to ET-naive (DateTimeKind.Unspecified) so it matches

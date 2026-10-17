@@ -1,4 +1,5 @@
 using System.Text.Json;
+using WebullAnalytics.AI.Backtest;
 using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.Open.ZeroDte;
 using WebullAnalytics.AI.Output;
@@ -422,7 +423,11 @@ internal sealed class OpenCandidateEvaluator
 			// moveSign, and intraday tape — via the shared static pipeline that wa analyze risk also calls.
 			// This is the single source of truth; having one code path guarantees identical bias values
 			// across the scanner and every inspector command.
-			var regimeComputation = await ComputeRegimeComponentsAsync(tickerGroup.Key, cfg, macroBias, ctx.Now, _priceCache, GetOrCreateIntradayCache(), includeCurrentBar: !_backtestMode, cancellation);
+			// Backtest: the tape is read at the book instant (bar M complete at M+1:00, when the store's row-M book
+			// the minute prices from was struck), excluding any bar still forming then. Live: now, partial bar included.
+			var regimeComputation = _backtestMode
+				? await ComputeRegimeComponentsAsync(tickerGroup.Key, cfg, macroBias, QuoteStoreCache.BookInstant(ctx.Now), _priceCache, GetOrCreateIntradayCache(), includeCurrentBar: false, cancellation)
+				: await ComputeRegimeComponentsAsync(tickerGroup.Key, cfg, macroBias, ctx.Now, _priceCache, GetOrCreateIntradayCache(), includeCurrentBar: true, cancellation);
 			var regimeComponents = regimeComputation.Components;
 			decimal BiasForDte(int dteCalendar) => RegimeAnalyzer.BlendBias(regimeComponents, cfg, dteCalendar);
 			lastRegimeComponents[tickerGroup.Key] = regimeComponents;
@@ -480,7 +485,7 @@ internal sealed class OpenCandidateEvaluator
 			// RTH, the previous session's close off-hours/weekends. The long-leg IV is back-solved by
 			// inverting its mid against this anchor so the solved IV matches what the market priced at close,
 			// regardless of when the scan runs. During RTH both anchors equal DateTime.Now — no difference.
-			var ivSolveAsOf = _backtestMode ? ctx.Now : OptionMath.ObservationInstant();
+			var ivSolveAsOf = _backtestMode ? QuoteStoreCache.BookInstant(ctx.Now) : OptionMath.ObservationInstant();
 
 			if (debug)
 			{

@@ -1112,14 +1112,17 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// (scripts/daily_backfill.sh, ~19:00 ET) has landed the day's quotes.
 		if (!quoteStore.HasAnyQuoteInWindow(config.Ticker, since, until))
 			Console.Error.WriteLine($"Warning: no real NBBO quotes for {config.Ticker} in [{since:yyyy-MM-dd} → {until:yyyy-MM-dd}] (data/quotes) — the backtest will price nothing and report no fills. The evening backfill (scripts/daily_backfill.sh) lands the current day's quotes after ~19:00 ET; re-run once it has completed.");
+		// One disk-only minute-bar cache shared by the runner (tape, minute walks) and the quote source (its default
+		// spot at the book instant), so both read the same bars.
+		var intradayBars = new Replay.IntradayBarCache(Backtest.BacktestRunner.NoopIntradayFetcher);
 		Backtest.IBacktestQuoteSource quotes = new Backtest.QuotesQuoteSource(
 			bars, quoteStore, parametric, dividendsByRoot: dividendsByRoot, oiCache: oiCache,
-			openerConfig: config.Opener, defaultIv: config.Indicators.IvDefaultPct, strikeStep: config.Indicators.StrikeStep);
+			openerConfig: config.Opener, defaultIv: config.Indicators.IvDefaultPct, strikeStep: config.Indicators.StrikeStep, intradayBars: intradayBars);
 
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, cross: settings.Cross, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split, replayOpens: replayOpens, rateHistory: rateHistory);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, cross: settings.Cross, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split, replayOpens: replayOpens, rateHistory: rateHistory, intradayBars: intradayBars);
 
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={(settings.Cross.HasValue ? $"mid+{settings.Cross:0.##}×half-spread" : SuggestionPricing.Normalize(settings.Pricing))}{(settings.Replay ? " | [yellow]PROPOSAL REPLAY (opener off)[/]" : "")}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();

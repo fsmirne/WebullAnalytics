@@ -1,4 +1,6 @@
+using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Api;
 using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.Backtest;
@@ -48,16 +50,21 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 	private readonly OpenerConfig? _openerConfig;
 	private readonly decimal? _defaultIv;
 	private readonly decimal? _strikeStep;
+	private readonly IntradayBarCache? _intradayBars;
+	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	/// <param name="parametric">The trade-bar/BS source used ONLY for counterfactual reprices
 	/// (<see cref="GetIntradayQuotesAsync"/>) that real NBBO can't answer. All real marks/fills use the store.</param>
+	/// <param name="intradayBars">Minute bars for the default spot at the book instant (see <see cref="SpotAtBookAsync"/>);
+	/// null = the day's open.</param>
 	public QuotesQuoteSource(HistoricalBarCache bars, QuoteStoreCache store, BacktestQuoteSource parametric, double? riskFreeRate = null,
 		IReadOnlyDictionary<string, decimal>? spotOverrides = null,
 		IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null,
 		ChainSnapshotOiCache? oiCache = null,
 		OpenerConfig? openerConfig = null,
 		decimal? defaultIv = null,
-		decimal? strikeStep = null)
+		decimal? strikeStep = null,
+		IntradayBarCache? intradayBars = null)
 	{
 		_bars = bars;
 		_store = store;
@@ -69,6 +76,19 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		_openerConfig = openerConfig;
 		_defaultIv = defaultIv;
 		_strikeStep = strikeStep;
+		_intradayBars = intradayBars;
+	}
+
+	/// <summary>The underlying's price at the instant the store's book for label <paramref name="asOf"/> was struck
+	/// (<see cref="QuoteStoreCache.BookInstant"/>): the close of the last RTH minute bar starting before that instant —
+	/// for a 09:30 label, the 09:30 bar's close (09:31:00), matching the 09:31:00 book. Null when no minute bar is
+	/// available (no cache, or the day isn't on disk) — the caller falls back to the day's open.</summary>
+	private async Task<decimal?> SpotAtBookAsync(string ticker, DateTime asOf, CancellationToken cancellation)
+	{
+		if (_intradayBars == null) return null;
+		var instantUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(QuoteStoreCache.BookInstant(asOf), DateTimeKind.Unspecified), NyTz), TimeSpan.Zero);
+		var bars = await _intradayBars.GetBarsAsync(ticker, instantUtc.AddMinutes(-5), instantUtc.AddTicks(-1), BarInterval.M1, includeExtended: false, cancellation);
+		return bars.Count > 0 ? bars[^1].Close : null;
 	}
 
 	/// <summary>Counterfactual reprice at a hypothetical spot (bar.High/Low brackets, profit projector) —
@@ -96,8 +116,9 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 			if (underlyings.ContainsKey(t)) return;
 			if (overrides.Spots != null && overrides.Spots.TryGetValue(t, out var ms)) { underlyings[t] = ms; return; }
 			if (_spotOverrides != null && _spotOverrides.TryGetValue(t, out var so)) { underlyings[t] = so; return; }
+			if (await SpotAtBookAsync(t, asOf, cancellation) is decimal bookSpot) { underlyings[t] = bookSpot; return; }
 			var bar = await _bars.GetBarAsync(t, asOf.Date, cancellation);
-			if (bar != null) underlyings[t] = bar.Open;   // day's open = the spot the opener sees (see BacktestQuoteSource)
+			if (bar != null) underlyings[t] = bar.Open;   // no minute bars: the day's open (see BacktestQuoteSource)
 		}
 
 		foreach (var t in tickers) await ResolveSpotAsync(t);

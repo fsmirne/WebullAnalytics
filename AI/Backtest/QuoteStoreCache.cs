@@ -16,6 +16,16 @@ namespace WebullAnalytics.AI.Backtest;
 /// the daily backfill; there is no CSV read path.</summary>
 internal sealed class QuoteStoreCache
 {
+	/// <summary>Labels follow the app standard (start-of-minute; 09:30 is the session's first minute), but a quote
+	/// row is not a bar — it is ONE book snapshot, ThetaData's end-of-minute stamp shifted −60 s at ingest. So the
+	/// row a lookup at label M returns is the book as of M + <see cref="BookLag"/> (M+1:00), and every input paired
+	/// with that book — spot, time to expiry, tape/VIX reads, the IV-solve anchor — must be read at that same
+	/// instant (<see cref="BookInstant"/>), or a "minute M" mixes M:00 inputs with an M+1:00 book.</summary>
+	public static readonly TimeSpan BookLag = TimeSpan.FromMinutes(1);
+
+	/// <summary>The instant the book returned for label <paramref name="labelEt"/> was struck.</summary>
+	public static DateTime BookInstant(DateTime labelEt) => labelEt + BookLag;
+
 	/// <summary>A real NBBO print, with how stale it is vs the requested minute (0 = exact-minute print). One
 	/// side reading 0 is real data (the far-OTM/expiry-day norm — nobody bids a near-worthless contract), NOT
 	/// a bug, so it is never overridden here — see <see cref="Mid"/>. <see cref="IsEmpty"/> and
