@@ -52,7 +52,8 @@ internal sealed class BacktestRunner
 	// proposal opens are booked at their recorded submit prices, then managed by the normal rule engine.
 	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
 	private int _noArbClampedFills;   // multi-leg fills whose summed leg prices fell outside the structure's expiry-payoff range (see NoArb)
-	private int _droppedRuleActions;   // rule-proposed Close/Roll/LegIn dropped because the day had no leg quotes (see WarnDroppedRuleAction)
+	private int _droppedRuleActions;   // rule-proposed Close/Roll/LegIn that never filled: unfillable at the 09:30 pass AND never filled by the minute walk (see ReportUnfilledRuleActions), or an unpriceable partial-expiry survivor
+	private readonly Dictionary<string, string> _unfilledRuleActions = new(StringComparer.OrdinalIgnoreCase);   // position key → why its 09:30 action couldn't fill; cleared when any later action fills it that session
 	private int _blindPositionDays;    // position-days where NO leg had a quote, so rules could not evaluate the position at all
 	private readonly HashSet<long> _openFallbackLineages = new();   // window-end lineages with >=1 leg marked at entry price (no NBBO) — unrealized not fully real-priced
 
@@ -152,7 +153,7 @@ internal sealed class BacktestRunner
 				var ctx = new EvaluationContext(step, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
 				var results = evaluator.Evaluate(ctx);
 
-				ApplyManagementResults(step, results, openPositions, quoteSnapshot.Options, quoteSnapshot.Underlyings, warnOnDrop: true);
+				ApplyManagementResults(step, results, openPositions, quoteSnapshot.Options, quoteSnapshot.Underlyings, recordDrop: true);
 			}
 
 			// Step 1.5: intraday management minute-walk for carry-over multi-DTE positions — live watch
@@ -163,6 +164,7 @@ internal sealed class BacktestRunner
 			// gate — rode the sell-off to a ~0% ITM expiry that live's assignment-risk trigger would have
 			// closed near +30% at the strike cross).
 			await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: false, cancellation);
+			ReportUnfilledRuleActions(step);
 
 			if (profile) { msStep1 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
 
@@ -295,17 +297,14 @@ internal sealed class BacktestRunner
 			LegCollisionBlockedOpens: _book.LegCollisionBlockedOpens);
 	}
 
-	/// <summary>A rule proposed an action but the day's quote snapshot has no prices for the position's legs
-	/// (store gap: e.g. today's session before the evening NBBO pull, or a historical hole), so the action was
-	/// dropped. Warn loudly instead of silently leaving the position open — a silent drop under-counts closes
-	/// and masquerades as "the rule didn't fire".</summary>
 	/// <summary>Executes management-rule proposals (Close/Roll/LegIn) against the book at <paramref name="ts"/>,
 	/// pricing fills from <paramref name="quotes"/> under the active pricing mode. Shared by the daily 09:30 rule
 	/// pass and the intraday management minute-walk so both paths fill identically. Returns the keys of positions
-	/// an action was actually executed for. <paramref name="warnOnDrop"/> is true for the daily pass (a dropped
-	/// action there means the whole day had no usable leg quotes — worth surfacing); the minute-walk passes false
-	/// because it retries every minute and a transiently unpriceable leg would flood the console.</summary>
-	private HashSet<string> ApplyManagementResults(DateTime ts, IReadOnlyList<RuleEvaluator.EvaluationResult> results, IReadOnlyDictionary<string, OpenPosition> openPositions, IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> underlyings, bool warnOnDrop)
+	/// an action was actually executed for. <paramref name="recordDrop"/> is true for the daily pass: an unfillable
+	/// action there is recorded, not printed, because the minute walk retries it every minute after — only one that
+	/// is still unfilled when the walk ends is a real drop (see <see cref="ReportUnfilledRuleActions"/>). The minute
+	/// walk passes false (it IS the retry); any action it executes clears the position's recorded drop.</summary>
+	private HashSet<string> ApplyManagementResults(DateTime ts, IReadOnlyList<RuleEvaluator.EvaluationResult> results, IReadOnlyDictionary<string, OpenPosition> openPositions, IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> underlyings, bool recordDrop)
 	{
 		var acted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		foreach (var r in results)
@@ -316,18 +315,18 @@ internal sealed class BacktestRunner
 			{
 				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
 				if (legFills != null) { _book.Close(ts, p.PositionKey, legFills, p.Rule, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
-				else if (warnOnDrop) WarnDroppedRuleAction(ts, p, pos, quotes);
+				else if (recordDrop) RecordUnfilledRuleAction(p, pos, quotes);
 			}
 			else if (p.Kind == ProposalKind.Roll)
 			{
 				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
 				if (legFills != null) { _book.Roll(ts, p.PositionKey, legFills, p.Rule, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
-				else if (warnOnDrop) WarnDroppedRuleAction(ts, p, pos, quotes);
+				else if (recordDrop) RecordUnfilledRuleAction(p, pos, quotes);
 			}
 			else if (p.Kind == ProposalKind.LegIn)
 			{
 				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
-				if (legFills == null && warnOnDrop) WarnDroppedRuleAction(ts, p, pos, quotes);
+				if (legFills == null && recordDrop) RecordUnfilledRuleAction(p, pos, quotes);
 				// Rule emits the new structure name via convention: LongCall→LongCallVertical, LongPut→LongPutVertical.
 				// Derive from the existing strategy + the fact that the new leg is opposite-side.
 				if (legFills != null)
@@ -343,12 +342,15 @@ internal sealed class BacktestRunner
 			}
 			// AlertOnly: noop in backtest.
 		}
+		foreach (var key in acted) _unfilledRuleActions.Remove(key);
 		return acted;
 	}
 
-	private void WarnDroppedRuleAction(DateTime step, ManagementProposal p, OpenPosition pos, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	/// <summary>Records why the 09:30 pass couldn't fill a rule's action. Not printed here: the minute walk retries
+	/// from 09:31, and an opening-minute market that is merely too wide usually fills minutes later — printing
+	/// "position left open" at 09:30 read as the position riding to expiry when it closed at 09:49.</summary>
+	private void RecordUnfilledRuleAction(ManagementProposal p, OpenPosition pos, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
-		_droppedRuleActions++;
 		// Distinguish the two reasons BuildLegFillsFromQuotes returns null: a genuine store gap (no quote
 		// at all) vs a leg whose market is too wide to trust — the two need different messages, and
 		// printing "NO quotes exist" for a leg that has a perfectly real, just-too-wide quote is misleading.
@@ -359,12 +361,26 @@ internal sealed class BacktestRunner
 			var q = quotes[wideLeg.Symbol];
 			var spread = q.Ask!.Value - q.Bid!.Value;
 			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-			Console.WriteLine($"⚠ {step:yyyy-MM-dd}: {p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} but {wideLeg.Symbol}'s market ({q.Bid}/{q.Ask}, {spread / mid:P0} of mid) is too wide to trust as a fill — action dropped, position left open.");
+			_unfilledRuleActions[p.PositionKey] = $"{p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} at 09:30 but {wideLeg.Symbol}'s market ({q.Bid}/{q.Ask}, {spread / mid:P0} of mid) was too wide to trust as a fill, and no later minute filled it";
 		}
 		else
 		{
-			Console.WriteLine($"⚠ {step:yyyy-MM-dd}: {p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} but NO option quotes exist for its legs that day — action dropped, position left open. (Store gap: today's quotes land with the evening pull; historical gaps need a backfill.)");
+			_unfilledRuleActions[p.PositionKey] = $"{p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} at 09:30 but NO option quotes exist for its legs, and no later minute filled it (store gap: today's quotes land with the evening pull; historical gaps need a backfill)";
 		}
+	}
+
+	/// <summary>Warns for each 09:30 action the minute walk never filled either, while the position is still open —
+	/// the real drop: it heads into settlement (an expiring short settles at intrinsic) or the next day unmanaged.
+	/// Runs after the carry-over walk and before <see cref="SettleExpirationsAsync"/>.</summary>
+	private void ReportUnfilledRuleActions(DateTime step)
+	{
+		foreach (var (key, reason) in _unfilledRuleActions)
+		{
+			if (!_book.OpenPositions.ContainsKey(key)) continue;
+			_droppedRuleActions++;
+			Console.WriteLine($"⚠ {step:yyyy-MM-dd}: {reason} — action dropped, position left open.");
+		}
+		_unfilledRuleActions.Clear();
 	}
 
 	/// <summary>Per-lineage MTM of still-open positions at the final step. Used by the renderer to split
@@ -720,10 +736,10 @@ internal sealed class BacktestRunner
 					await Task.WhenAll(lookahead.Where(t => t != null)).ContinueWith(_ => { }, TaskScheduler.Default);
 					lookaheadValidFrom = int.MaxValue;
 				}
-				pending.ExceptWith(ApplyManagementResults(minuteEt, now, stillOpen, snap.Options, underlyings, warnOnDrop: false));
+				pending.ExceptWith(ApplyManagementResults(minuteEt, now, stillOpen, snap.Options, underlyings, recordDrop: false));
 				foreach (var c in atNext)
 					if (pending.Contains(c.Result.Proposal.PositionKey)) // not already acted on at M (ApplyManagementResults reads the M snapshot)
-						pending.ExceptWith(ApplyManagementResults(c.MinuteEt, new[] { c.Result }, stillOpen, c.Quotes, c.Underlyings, warnOnDrop: false));
+						pending.ExceptWith(ApplyManagementResults(c.MinuteEt, new[] { c.Result }, stillOpen, c.Quotes, c.Underlyings, recordDrop: false));
 			}
 		}
 	}
