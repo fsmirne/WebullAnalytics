@@ -186,7 +186,7 @@ Options:
 
 ### Analyze Command
 
-The `analyze` command has seven subcommands:
+The `analyze` command has eight subcommands:
 
 - `analyze trade` — inject hypothetical trades into the report pipeline for what-if analysis.
 - `analyze roll` — show a 2D grid of theoretical roll credit/debit across underlying prices × times using Black-Scholes.
@@ -195,6 +195,7 @@ The `analyze` command has seven subcommands:
 - `analyze gex` — render a 2D dealer-gamma-exposure (GEX) heatmap over the option chain (strikes × expirations) plus chain totals and call/put walls.
 - `analyze sentiment` — render the current CNN Fear & Greed Index (score, rating, historical comparison, and component breakdown).
 - `analyze regime` — show the blended directional bias the live opener uses (daily technical composite + VIX term structure + intraday tape), its decomposition, and a per-structure-family ranking with flip-margin sweep.
+- `analyze top` — list Webull's market-wide top option contracts by volume, turnover, open interest, OI change, or IV.
 
 All subcommands accept the `report` command's options plus `--date` for simulating a future evaluation date. Some subcommands add extra flags documented below.
 
@@ -436,6 +437,20 @@ wa analyze regime XSP --date 2026-06-12 --time 09:35
 ```
 
 It accepts the shared AI ticker/config options (`--strategy`, `--source`, `--log-level`, …) plus `--account` for the live position read, and `--date <YYYY-MM-DD>` / `--time <HH:mm>` for offline historical mode.
+
+#### `analyze top`
+
+Webull's "Top Options" leaderboard: the most active option contracts across all US underlyings (no ticker filter — Webull ranks the whole market). Uses the sniffed session's `access_token` (run `wa sniff` first) and refuses to print anything when Webull reports `hasOpraPermission=false` (expired/invalid session → non-real-time feed).
+
+```bash
+# Top 50 contracts by volume
+wa analyze top
+
+# Top 100 by open-interest increase
+wa analyze top --by oi-up --count 100
+```
+
+`--by` takes `volume` (default), `turnover`, `oi`, `oi-up`, `oi-down`, or `iv`; `--count` is 1–500. Only unexpired contracts are listed, so after the close that session's expiring contracts (e.g. SPY 0DTE) have already dropped out.
 
 #### Options
 

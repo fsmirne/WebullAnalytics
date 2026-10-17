@@ -114,6 +114,7 @@ class Program
 				analyze.AddCommand<AnalyzeGexCommand>("gex");
 				analyze.AddCommand<AnalyzeSentimentCommand>("sentiment");
 				analyze.AddCommand<AnalyzeRegimeCommand>("regime");
+				analyze.AddCommand<AnalyzeTopCommand>("top");
 				analyze.AddCommand<AnalyzeSqueezeStudyCommand>("squeeze-study").IsHidden();
 			});
 			config.AddCommand<FetchCommand>("fetch");
