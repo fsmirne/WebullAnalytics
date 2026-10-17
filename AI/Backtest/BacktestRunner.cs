@@ -705,22 +705,25 @@ internal sealed class BacktestRunner
 				// for free from the broker (a bad quote just doesn't fill) and backtest has to model itself.
 				// A same-minute noise-ratio check (PassesExitNoiseGate) doesn't catch this failure mode — the
 				// confirming minute's OWN spread can look perfectly ordinary in isolation; only comparing
-				// against the ADJACENT minute exposes a print that didn't persist. Everything else (rolls,
-				// leg-ins, other closes) passes through immediately, unconfirmed, as before.
-				var confirmed = results.Count == 0 || mwi + 1 >= minuteBars.Count
-					? results // nothing to filter, or no next bar to confirm against (last bar of the day —
-					          // fire unconfirmed rather than silently suppress every end-of-day exit)
+				// against the ADJACENT minute exposes a print that didn't persist. A confirmed close fills at the
+				// CONFIRMING minute (its quotes, stamped then) — filling at minute M after seeing M+1 agree would be
+				// a look-ahead. Everything else (rolls, leg-ins, other closes) passes through immediately at M.
+				var (now, atNext) = results.Count == 0 || mwi + 1 >= minuteBars.Count
+					? (results, Array.Empty<ConfirmedClose>()) // nothing to filter, or no next bar to confirm against (last bar of
+					                                           // the day — fire unconfirmed rather than silently suppress every end-of-day exit)
 					: await ConfirmPnlClosesAsync(results, stillOpen, ticker, evaluator, minuteBars[mwi + 1], endUtc, cash, accountValue, technicalSignals, cancellation);
 
-				if (confirmed.Count > 0)
+				if (now.Count > 0 || atNext.Count > 0)
 				{
 					// In-flight look-ahead reads the positions an action is about to mutate; let it finish first (its
 					// results are discarded below either way).
 					await Task.WhenAll(lookahead.Where(t => t != null)).ContinueWith(_ => { }, TaskScheduler.Default);
 					lookaheadValidFrom = int.MaxValue;
 				}
-				var acted = ApplyManagementResults(minuteEt, confirmed, stillOpen, snap.Options, underlyings, warnOnDrop: false);
-				pending.ExceptWith(acted);
+				pending.ExceptWith(ApplyManagementResults(minuteEt, now, stillOpen, snap.Options, underlyings, warnOnDrop: false));
+				foreach (var c in atNext)
+					if (pending.Contains(c.Result.Proposal.PositionKey)) // not already acted on at M (ApplyManagementResults reads the M snapshot)
+						pending.ExceptWith(ApplyManagementResults(c.MinuteEt, new[] { c.Result }, stillOpen, c.Quotes, c.Underlyings, warnOnDrop: false));
 			}
 		}
 	}
@@ -784,10 +787,17 @@ internal sealed class BacktestRunner
 		return await AIPipelineHelper.FetchQuotesWithHypotheticals(stillOpen, oneTicker, minuteEt, _quotes, _config, cancellation, overrides);
 	}
 
-	/// <summary>Filters <paramref name="results"/> down to the ones a real order would plausibly have
-	/// filled: proposals other than a StopLossRule/TakeProfitRule close pass through untouched; those two
-	/// are re-checked by re-evaluating the SAME position against <paramref name="nextBar"/>'s real quotes
-	/// and requiring the SAME rule to fire again there. Re-invoking the actual rule (rather than
+	/// <summary>A StopLoss/TakeProfit close confirmed at the next minute: the confirming evaluation's own result, to be
+	/// filled at that minute — its quotes, spot and timestamp.</summary>
+	private sealed record ConfirmedClose(RuleEvaluator.EvaluationResult Result, DateTime MinuteEt, IReadOnlyDictionary<string, OptionContractQuote> Quotes, IReadOnlyDictionary<string, decimal> Underlyings);
+
+	/// <summary>Splits <paramref name="results"/> into what fills now and what a real order would plausibly have
+	/// filled one minute later: proposals other than a StopLossRule/TakeProfitRule close pass through untouched
+	/// (Now); those two are re-checked by re-evaluating the SAME position against <paramref name="nextBar"/>'s real
+	/// quotes and requiring the SAME rule to fire again there — and when it does, the close is the confirming
+	/// evaluation's result, filled at that minute (AtNext), since the simulator only knows the print persisted once
+	/// the next minute is in hand. A crossing that can't be checked (no legs to price, no next-minute quotes) fills
+	/// Now, unconfirmed. Re-invoking the actual rule (rather than
 	/// re-deriving its threshold math here) means this can never drift out of sync with what
 	/// StopLossRule/TakeProfitRule actually do — including the two rules' own AdjustedNetDebit-vs-
 	/// InitialNetDebit difference, which a hand-rolled copy of the formula would risk getting wrong.
@@ -799,12 +809,13 @@ internal sealed class BacktestRunner
 	/// re-evaluated for real when the walk reaches <paramref name="nextBar"/>'s minute on its own next
 	/// iteration, which simply re-derives the identical fingerprint. Benign, not worth extra machinery to
 	/// avoid.</para></summary>
-	private async Task<IReadOnlyList<RuleEvaluator.EvaluationResult>> ConfirmPnlClosesAsync(
+	private async Task<(IReadOnlyList<RuleEvaluator.EvaluationResult> Now, IReadOnlyList<ConfirmedClose> AtNext)> ConfirmPnlClosesAsync(
 		IReadOnlyList<RuleEvaluator.EvaluationResult> results, IReadOnlyDictionary<string, OpenPosition> stillOpen, string ticker,
 		RuleEvaluator evaluator, MinuteBar nextBar, DateTimeOffset endUtc, decimal cash, decimal accountValue,
 		IReadOnlyDictionary<string, TechnicalBias> technicalSignals, CancellationToken cancellation)
 	{
 		List<RuleEvaluator.EvaluationResult>? confirmed = null; // allocated lazily; the common case (nothing to confirm) copies nothing
+		List<ConfirmedClose>? atNext = null;
 		for (var i = 0; i < results.Count; i++)
 		{
 			var r = results[i];
@@ -836,13 +847,17 @@ internal sealed class BacktestRunner
 				new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = nextSpot },
 				nextQuotes, cash, accountValue, technicalSignals);
 			var nextResults = evaluator.Evaluate(confirmCtx);
-			var stillFires = nextResults.Any(nr => nr.Proposal.Kind == ProposalKind.Close
-				&& string.Equals(nr.Proposal.Rule, r.Proposal.Rule, StringComparison.Ordinal)
-				&& string.Equals(nr.Proposal.PositionKey, pos.Key, StringComparison.OrdinalIgnoreCase));
-			if (stillFires) confirmed.Add(r);
+			var confirming = nextResults
+				.Where(nr => nr.Proposal.Kind == ProposalKind.Close
+					&& string.Equals(nr.Proposal.Rule, r.Proposal.Rule, StringComparison.Ordinal)
+					&& string.Equals(nr.Proposal.PositionKey, pos.Key, StringComparison.OrdinalIgnoreCase))
+				.Select(nr => (RuleEvaluator.EvaluationResult?)nr)
+				.FirstOrDefault();
+			if (confirming is { } c)
+				(atNext ??= new()).Add(new ConfirmedClose(c, nextEt, nextQuotes, confirmCtx.UnderlyingPrices));
 			// else: drop. Position stays open; the walk's own next iteration re-evaluates it for real.
 		}
-		return confirmed ?? results;
+		return (confirmed ?? results, (IReadOnlyList<ConfirmedClose>?)atNext ?? Array.Empty<ConfirmedClose>());
 	}
 
 	private async Task RunIntradayTriggersAsync(DateTime step, RuleEvaluator evaluator, CancellationToken cancellation)
