@@ -56,8 +56,6 @@ internal static class TrendFetcher
 			var highs = ParseDecimalArray(quotes.GetProperty("high"));
 			var lows = ParseDecimalArray(quotes.GetProperty("low"));
 
-			if (closes.Count < 21) return null;
-
 			// Prior completed session = the last bar dated strictly BEFORE asOf (NY date). Positional
 			// count−2 is only correct while the market is open (last bar = today's forming bar); run
 			// pre-market or after hours, the last bar is already the most recent COMPLETED session and
@@ -84,6 +82,46 @@ internal static class TrendFetcher
 				&& meta.TryGetProperty("regularMarketTime", out var rmt) && rmt.ValueKind == JsonValueKind.Number
 				&& TimeZoneInfo.ConvertTime(DateTimeOffset.FromUnixTimeSeconds(rmt.GetInt64()), NyTz).Date == pd)
 				priorCloseVal = spot;
+
+			return Compute(closes, highs, lows, prior, priorCloseVal, spot, asOf);
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary>The trend snapshot as it stood at a PAST instant <paramref name="asOf"/>: completed daily bars
+	/// strictly before asOf's session (the backtest's lookahead-safe <see cref="Backtest.HistoricalBarCache"/>,
+	/// over the same ~50-calendar-day window the live chart request spans) plus that session's forming bar as of
+	/// asOf — high/low so far and close = <paramref name="spot"/> — which is exactly the shape the live Yahoo chart
+	/// has mid-session. The live path can't serve a past instant: its spot is Yahoo's CURRENT price and its last
+	/// bar carries the whole session's range.</summary>
+	internal static async Task<TrendSnapshot?> BuildAsOfAsync(string ticker, DateTime asOf, decimal spot, decimal sessionHigh, decimal sessionLow, Backtest.HistoricalBarCache bars, CancellationToken ct)
+	{
+		try
+		{
+			var prior = (await bars.GetRecentBarsAsync(ticker, 60, asOf, ct)).Where(b => b.Date.Date >= asOf.Date.AddDays(-50)).ToList();
+			if (prior.Count == 0) return null;
+			var closes = prior.Select(b => b.Close).Append(spot).ToList();
+			var highs = prior.Select(b => b.High).Append(sessionHigh).ToList();
+			var lows = prior.Select(b => b.Low).Append(sessionLow).ToList();
+			return Compute(closes, highs, lows, prior.Count - 1, prior[^1].Close, spot, asOf);
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			return null;
+		}
+	}
+
+	/// <summary>Builds the snapshot from daily bars whose LAST entry is the current session as of
+	/// <paramref name="asOf"/> (or the latest completed session off-hours). <paramref name="prior"/> indexes the
+	/// prior completed session; <paramref name="priorCloseVal"/> is its close (0 = unknown).</summary>
+	private static TrendSnapshot? Compute(IReadOnlyList<decimal> closes, IReadOnlyList<decimal> highs, IReadOnlyList<decimal> lows, int prior, decimal priorCloseVal, decimal spot, DateTime asOf)
+	{
+		try
+		{
+			if (closes.Count < 21) return null;
 
 			decimal? prevClose = priorCloseVal > 0m ? priorCloseVal : (decimal?)null;
 

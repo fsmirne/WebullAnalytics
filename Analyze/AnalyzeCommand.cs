@@ -27,12 +27,16 @@ internal abstract class AnalyzeSubcommandSettings : ReportSettings
 internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
 {
 	[CommandArgument(0, "[spec]")]
-	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, and PRICE is a decimal or BID|MID|ASK (keywords require --api). Comma-separated for multiple. Example: buy:GME260501C00023000:300@MID. Omit when using --proposal.")]
+	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, and PRICE is a decimal or BID|MID|ASK (keywords require --api). Comma-separated for multiple. Example: buy:GME260501C00023000:300@MID. Omit when using --proposal or --fill.")]
 	public string Spec { get; set; } = "";
 
 	[CommandOption("--proposal")]
 	[Description("Reconstruct the hypothetical trade from a stored proposal snapshot (its legs, entry mids, spot, IVs and date) instead of the <spec> argument. Format: FILE[[:LINE]] where FILE is a path, a data/ filename (ai-proposals.SPY.0DTE.jsonl), or the TICKER.strategy shorthand (SPY.0DTE); LINE is a 1-based line number, defaulting to the last line.")]
 	public string? Proposal { get; set; }
+
+	[CommandOption("--fill [N]")]
+	[Description("Evaluate one of your recent unexpired OPENING fills (Webull order history, last 30 days, any ticker) against the live market now, its per-leg fill prices as the cost basis. Implies --standalone: the fill is already in your trade log, so adding it on top would double-count it. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
+	public FlagValue<int>? Fill { get; set; }
 
 	[CommandOption("--standalone")]
 	[Description("Ignore all existing trades/positions and run the pipeline only on the synthetic legs. Useful for judging a trade in isolation.")]
@@ -43,15 +47,15 @@ internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 
+		var sources = (string.IsNullOrWhiteSpace(Spec) ? 0 : 1) + (Proposal != null ? 1 : 0) + (Fill?.IsSet == true ? 1 : 0);
+		if (sources > 1)
+			return ValidationResult.Error("pass only one of <spec>, --proposal or --fill");
+		if (sources == 0)
+			return ValidationResult.Error("provide <spec>, --proposal or --fill");
 		if (Proposal != null)
-		{
-			if (!string.IsNullOrWhiteSpace(Spec))
-				return ValidationResult.Error("pass either <spec> or --proposal, not both");
 			return ValidationResult.Success();
-		}
-
-		if (string.IsNullOrWhiteSpace(Spec))
-			return ValidationResult.Error("provide <spec> or --proposal");
+		if (Fill?.IsSet == true)
+			return Fill.Value < 0 ? ValidationResult.Error($"--fill: N must be ≥ 1, got {Fill.Value}") : ValidationResult.Success();
 
 		List<ParsedLeg> legs;
 		try { legs = AnalyzeCommon.ParseAllLegs(Spec).ToList(); }
@@ -78,6 +82,14 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 
 		if (settings.Proposal != null && !ReconstructSpecFromProposal(settings))
 			return 1;
+
+		if (settings.Fill?.IsSet == true)
+		{
+			var (spec, error) = await OpeningFillPicker.ResolveSpecAsync(settings.Fill.Value, cancellation);
+			if (spec == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
+			settings.Spec = spec;
+			settings.Standalone = true;
+		}
 
 		if (settings.EvaluationDateOverride.HasValue)
 		{
@@ -469,16 +481,16 @@ internal static class AnalyzeCommon
 	}
 
 	/// <summary>Re-bases every quote's ImpliedVolatility to the mid-implied value — back-solved from the
-	/// bid/ask mid at the dividend-adjusted spot, anchored at <see cref="OptionMath.ObservationInstant"/>
-	/// (now live / last close off-hours). This is the mid-consistent surface the engine prices on; the
+	/// bid/ask mid at the dividend-adjusted spot, anchored at <paramref name="asOf"/> — the instant the quotes were
+	/// struck (<see cref="OptionMath.ObservationInstant"/> for live quotes: now live / last close off-hours). This is the mid-consistent surface the engine prices on; the
 	/// vendor's reported IV field is 10–50 vol pts off at 0DTE. Quotes with no usable mid keep their existing
 	/// (vendor) IV as the fallback. Shared by analyze position and analyze risk so the two can't drift.</summary>
 	internal static IReadOnlyDictionary<string, OptionContractQuote> RecalibrateQuotesToMid(
 		IReadOnlyDictionary<string, OptionContractQuote> quotes,
 		IReadOnlyDictionary<string, decimal> underlyingPrices,
-		IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends)
+		IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends,
+		DateTime asOf)
 	{
-		var asOf = OptionMath.ObservationInstant();
 		var result = new Dictionary<string, OptionContractQuote>(quotes.Count, StringComparer.OrdinalIgnoreCase);
 		foreach (var (sym, q) in quotes)
 		{

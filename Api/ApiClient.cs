@@ -25,7 +25,6 @@ internal static class ApiClient
 	internal static async Task FetchOrdersToJsonl(ApiConfig config, IReadOnlyCollection<long> tickerIds, string outputPath)
 	{
 		using var client = new HttpClient();
-		client.DefaultRequestHeaders.Referrer = new Uri("https://app.webull.com/");
 		var tmpPath = outputPath + ".tmp";
 		var wroteAny = false;
 
@@ -35,18 +34,7 @@ internal static class ApiClient
 
 			foreach (var tickerId in tickerIds)
 			{
-				var url = $"{OrderListUrl}?tickerId={tickerId}&startDate={config.Webull.StartDate}&endDate={config.Webull.EndDate}&limit={config.Webull.Limit}&secAccountId={config.Webull.SecAccountId}";
-				var request = new HttpRequestMessage(HttpMethod.Get, url);
-
-				foreach (var (key, value) in DefaultHeaders)
-					request.Headers.TryAddWithoutValidation(key, value);
-				foreach (var (key, value) in config.Webull.Headers)
-					request.Headers.TryAddWithoutValidation(key, value);
-
-				var response = await client.SendAsync(request);
-				response.EnsureSuccessStatusCode();
-
-				var json = await response.Content.ReadAsStringAsync();
+				var json = await FetchTickerOrderListAsync(client, config, tickerId, config.Webull.StartDate, config.Webull.EndDate, CancellationToken.None);
 
 				// Validate it's a JSON object with an orderList before writing
 				using var doc = JsonDocument.Parse(json);
@@ -76,6 +64,25 @@ internal static class ApiClient
 		}
 
 		File.Move(tmpPath, outputPath, overwrite: true);
+	}
+
+	/// <summary>One ticker's filled-order list from the web session (<c>orderList/v2</c>) as raw JSON — one
+	/// row per filled LEG with its own fill price, which the OpenAPI order history doesn't carry (it only has
+	/// the combo's net price). Same scraped session headers as <c>wa fetch</c>; dates are yyyy-MM-dd.
+	/// Throws <see cref="HttpRequestException"/> on a non-success status (a stale session answers 403).</summary>
+	internal static async Task<string> FetchTickerOrderListAsync(HttpClient client, ApiConfig config, long tickerId, string startDate, string endDate, CancellationToken cancellation)
+	{
+		var url = $"{OrderListUrl}?tickerId={tickerId}&startDate={startDate}&endDate={endDate}&limit={config.Webull.Limit}&secAccountId={config.Webull.SecAccountId}";
+		using var request = new HttpRequestMessage(HttpMethod.Get, url);
+		request.Headers.Referrer = new Uri("https://app.webull.com/");
+		foreach (var (key, value) in DefaultHeaders)
+			request.Headers.TryAddWithoutValidation(key, value);
+		foreach (var (key, value) in config.Webull.Headers)
+			request.Headers.TryAddWithoutValidation(key, value);
+
+		using var response = await client.SendAsync(request, cancellation);
+		response.EnsureSuccessStatusCode();
+		return await response.Content.ReadAsStringAsync(cancellation);
 	}
 
 	/// <summary>One fund activity from Webull's consumer cash-record ledger: a trade fill, expiry settlement,

@@ -30,6 +30,10 @@ internal sealed class AnalyzePositionSettings : AnalyzeBaseSettings
 	[Description("Render the position diagnostic and management scenarios from a stored proposal snapshot instead of live quotes. Format: FILE[[:LINE]] where FILE is a path, a data/ filename (ai-proposals.SPY.0DTE.jsonl), or the TICKER.strategy shorthand (SPY.0DTE); LINE is a 1-based line number, defaulting to the last line.")]
 	public string? Proposal { get; set; }
 
+	[CommandOption("--fill [N]")]
+	[Description("Analyze one of your recent unexpired OPENING fills (Webull order history, last 30 days, any ticker) against the live market now, its per-leg fill prices as the cost basis, whether or not it is still held. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
+	public FlagValue<int>? Fill { get; set; }
+
 	[CommandOption("--iv-default")]
 	[Description("Fallback implied volatility for hypothetical legs when no live quote exists. Percent, default 40.")]
 	public decimal IvDefault { get; set; } = 40m;
@@ -82,8 +86,10 @@ internal sealed class AnalyzePositionSettings : AnalyzeBaseSettings
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 
-		if (Proposal != null && !string.IsNullOrEmpty(Spec))
-			return ValidationResult.Error("pass either <spec> or --proposal, not both");
+		if ((string.IsNullOrEmpty(Spec) ? 0 : 1) + (Proposal != null ? 1 : 0) + (Fill?.IsSet == true ? 1 : 0) > 1)
+			return ValidationResult.Error("pass only one of <spec>, --proposal or --fill");
+		if (Fill?.IsSet == true && Fill.Value < 0)
+			return ValidationResult.Error($"--fill: N must be ≥ 1, got {Fill.Value}");
 
 		if (LogLevel != null && LogLevel.ToLowerInvariant() is not ("error" or "information" or "debug"))
 			return ValidationResult.Error($"--log-level: must be error|information|debug, got '{LogLevel}'");
@@ -133,6 +139,13 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		if (settings.Proposal != null && !TryLoadProposalSpec(settings))
 			return 1;
+
+		if (settings.Fill?.IsSet == true)
+		{
+			var (spec, error) = await OpeningFillPicker.ResolveSpecAsync(settings.Fill.Value, cancellation);
+			if (spec == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
+			settings.Spec = spec;
+		}
 
 		List<PositionSnapshot> positionLegs;
 		if (string.IsNullOrEmpty(settings.Spec))

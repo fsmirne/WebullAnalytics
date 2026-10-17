@@ -74,6 +74,23 @@ public static partial class JsonlParser
 		return (trades, fees);
 	}
 
+	/// <summary>One filled option leg row from an <c>orderList</c> response: the OCC contract, side, contracts,
+	/// per-leg fill price and the second-resolution <c>transactTime</c> (epoch ms).</summary>
+	internal sealed record OptionLegFill(string OccSymbol, Side Side, int Qty, decimal Price, long TransactTimeMs);
+
+	/// <summary>Reads every filled option leg row from one <c>orderList</c> JSON object (one orders.jsonl line,
+	/// or a live single-ticker response). Equity rows and unparseable rows are skipped.</summary>
+	internal static List<OptionLegFill> ParseOptionLegFills(string orderListJson)
+	{
+		var fills = new List<OptionLegFill>();
+		using var doc = JsonDocument.Parse(orderListJson);
+		if (!doc.RootElement.TryGetProperty("orderList", out var orderList)) return fills;
+		foreach (var elem in orderList.EnumerateArray())
+			if (ParseOrder(elem) is { IsEquity: false } o)
+				fills.Add(new OptionLegFill(o.OccSymbol, o.Side, o.Qty, o.Price, o.TransactTime));
+		return fills;
+	}
+
 	private static ParsedOrder? ParseOrder(JsonElement elem)
 	{
 		var symbol = elem.GetProperty("symbol").GetString()!;
