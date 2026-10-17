@@ -1,5 +1,3 @@
-using System.ComponentModel.DataAnnotations;
-
 namespace WebullAnalytics;
 
 public enum Side
@@ -13,7 +11,6 @@ public enum Asset
 {
 	Stock,
 	Option,
-	[Display(Name = "Option Strategy")]
 	OptionStrategy
 }
 
