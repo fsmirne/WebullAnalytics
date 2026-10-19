@@ -17,10 +17,14 @@ internal interface IQuoteSource
 	Task<QuoteSnapshot> GetQuotesAsync(DateTime asOf, IReadOnlySet<string> optionSymbols, IReadOnlySet<string> tickers, CancellationToken cancellation, QuoteOverrides overrides = default);
 }
 
-/// <summary>Bundle of per-leg quotes and per-ticker spots returned by IQuoteSource.</summary>
+/// <summary>Bundle of per-leg quotes and per-ticker spots returned by IQuoteSource. <c>ReportedUnderlyings</c> holds the
+/// vendor-reported spots when <see cref="ParitySpotGuard"/> replaced any of them with the book's parity spot (null = the
+/// Underlyings are as reported) — the frozen-book quote guard must check the book against the vendor's spot, not against
+/// a spot derived from that same book.</summary>
 internal sealed record QuoteSnapshot(
 	IReadOnlyDictionary<string, OptionContractQuote> Options,
-	IReadOnlyDictionary<string, decimal> Underlyings
+	IReadOnlyDictionary<string, decimal> Underlyings,
+	IReadOnlyDictionary<string, decimal>? ReportedUnderlyings = null
 );
 
 /// <summary>Per-call quote-source overrides. <c>Spots</c> replaces the implementation's natural

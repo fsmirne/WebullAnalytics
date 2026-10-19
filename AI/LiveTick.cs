@@ -89,8 +89,21 @@ internal static class LiveTick
 		// Step resting auto-execute limits (in-place replace — same order ids, so dedup and the daily cap are unaffected).
 		if (deps.Repricer != null)
 			await deps.Repricer.TickAsync(now, cancellation);
+
+		// Frozen-book guard inputs (see QuoteSanity.ParityGaps): RTH-only, and the dividend schedule only when it will be used.
+		var nowOffset = new DateTimeOffset(now);
+		var marketOpen = MarketCalendar.IsRegularHours(nowOffset);
+		var guardCfg = config.Opener.QuoteGuard;
+		var dividends = guardCfg is { Enabled: true } && marketOpen ? await LoadDividendsAsync(config, ReportedSpot(quoteSnapshot, deps.OpenEvaluator, config.Ticker) ?? 0m, now, cancellation) : null;
+
 		if (deps.MgmtExecutor != null)
-			await deps.MgmtExecutor.HandleAsync(results, ctx, cancellation, cycleToken);
+		{
+			// A frozen book misprices the marks every exit rule reads, so a take-profit/stop could fire (or miss) on numbers the
+			// market isn't trading: hold auto-execution of management proposals on frozen expiries. They still render above.
+			var mgmtFrozen = results.Count == 0 ? new HashSet<DateTime>() : LiveQuoteGuard.FrozenExpiries(quoteSnapshot.Options, config.Ticker, ReportedSpot(quoteSnapshot, deps.OpenEvaluator, config.Ticker), now, marketOpen, deps.VendorName, dividends, guardCfg, "management auto-execution");
+			var mgmtResults = mgmtFrozen.Count == 0 ? results : results.Where(r => !QuoteSanity.TouchesExpiry(r.Proposal.Legs, mgmtFrozen)).ToList();
+			await deps.MgmtExecutor.HandleAsync(mgmtResults, ctx, cancellation, cycleToken);
+		}
 
 		var openCount = 0;
 		if (deps.OpenEvaluator != null && deps.OpenSink != null)
@@ -104,23 +117,23 @@ internal static class LiveTick
 			// LIVE quote-integrity guard: warn loudly on a stale feed or torn NBBO (the 07-13 SPY case: long
 			// leg bid 10.36 / ask 20.36) and withhold the affected opens from auto-execution. Proposals still
 			// render so the issue stays visible amid a fast-scrolling watch.
-			var nowOffset = new DateTimeOffset(now);
 			// Inspect the book the opener actually priced these proposals from, not the management-side ctx book.
 			// On a no-position scan ctx only spans the same-day expiry window, so a ticker whose earliest expiry
 			// isn't today (GME) leaves ctx empty of the traded legs — the guard would mis-report staleness as
 			// "unverifiable" and skip torn-NBBO on legs it can't see. Falls back to ctx when the opener enumerated
 			// nothing (empty priced book → no proposals to guard anyway).
 			var guardBook = deps.OpenEvaluator?.LastPricedQuotes is { Count: > 0 } priced ? priced : quoteSnapshot.Options;
-			var (feedStale, suspect) = LiveQuoteGuard.Inspect(guardBook, nowOffset, MarketCalendar.IsRegularHours(nowOffset), deps.VendorName, config.Opener.QuoteGuard, openResults, ref state.StaleUnverifiableNoted);
+			var openFrozen = openResults.Count == 0 ? new HashSet<DateTime>() : LiveQuoteGuard.FrozenExpiries(guardBook, config.Ticker, ReportedSpot(quoteSnapshot, deps.OpenEvaluator, config.Ticker), now, marketOpen, deps.VendorName, dividends, guardCfg, "opens");
+			var (feedStale, suspect) = LiveQuoteGuard.Inspect(guardBook, nowOffset, marketOpen, deps.VendorName, guardCfg, openResults, openFrozen, ref state.StaleUnverifiableNoted);
 			for (var i = 0; i < openResults.Count; i++) deps.OpenSink.Emit(openResults[i], rank: i + 1);
 			if (deps.OpenerExecutor != null)
 			{
 				// A stale feed poisons every quote → hold all opens this tick; otherwise drop only the
-				// torn-quote proposals and let clean lower-ranked ones proceed.
-				var safeToOpen = feedStale ? new List<OpenProposal>() : openResults.Where((_, i) => !suspect.Contains(i)).ToList();
+				// proposals with a torn leg or a leg on a frozen expiry and let clean lower-ranked ones proceed.
+				var safeToOpen = feedStale ? new List<OpenProposal>() : openResults.Where((_, i) => !suspect.ContainsKey(i)).ToList();
 				for (var i = 0; i < openResults.Count; i++)
-					if (!openResults[i].Informational && (feedStale || suspect.Contains(i)))
-						deps.OpenSink.EmitAutoExecute(openResults[i], "skipped", "quote guard", feedStale ? "stale feed" : "torn NBBO on a leg");
+					if (!openResults[i].Informational && (feedStale || suspect.ContainsKey(i)))
+						deps.OpenSink.EmitAutoExecute(openResults[i], "skipped", "quote guard", feedStale ? "stale feed" : suspect[i]);
 				await deps.OpenerExecutor.HandleAsync(safeToOpen, openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: cycleToken, log: deps.OpenSink);
 			}
 		}
@@ -129,5 +142,24 @@ internal static class LiveTick
 			: (deps.OpenEvaluator?.LastUnderlyings.TryGetValue(config.Ticker, out var hb) ?? false) ? hb
 			: (decimal?)null;
 		return new LiveTickResult(openPositions.Count, results.Count, openCount, spot, Aborted: false);
+	}
+
+	/// <summary>The vendor-reported spot the frozen-book guard checks the book against — never a <see cref="ParitySpotGuard"/>-corrected
+	/// one, which derives from the very book under test. Flat ticks carry no management-side spot, so the opener's pre-correction
+	/// bootstrap spot fills in.</summary>
+	private static decimal? ReportedSpot(QuoteSnapshot snapshot, OpenCandidateEvaluator? opener, string ticker)
+	{
+		if (snapshot.ReportedUnderlyings != null && snapshot.ReportedUnderlyings.TryGetValue(ticker, out var reported)) return reported;
+		if (snapshot.Underlyings.TryGetValue(ticker, out var spot)) return spot;
+		if (opener != null && opener.LastReportedUnderlyings.TryGetValue(ticker, out var boot)) return boot;
+		return null;
+	}
+
+	/// <summary>The ticker's discrete dividend schedule (same source and fallback chain the scorer prices with), so parity on an expiry
+	/// past an ex-date isn't read as a frozen book.</summary>
+	private static async Task<IReadOnlyList<DividendEvent>?> LoadDividendsAsync(AIConfig config, decimal spot, DateTime now, CancellationToken cancellation)
+	{
+		var calendar = await Events.EventCalendarLoader.LoadAsync(new[] { config.Ticker }, config.Indicators.Events, now, cancellation);
+		return Pricing.DividendScheduleBuilder.BuildForTicker(calendar.Get(config.Ticker), spot, config.Indicators.Events);
 	}
 }

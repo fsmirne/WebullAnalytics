@@ -92,6 +92,10 @@ internal sealed class OpenCandidateEvaluator
 	/// Empty until the first call completes phase A0; stale (last tick's value) if the opener is disabled.</summary>
 	public IReadOnlyDictionary<string, decimal> LastUnderlyings { get; private set; } = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
+	/// <summary><see cref="LastUnderlyings"/> as they stood before <see cref="ParitySpotGuard"/> could replace the ticker's spot with the
+	/// book's parity spot — the reference the live frozen-book quote guard checks the book against.</summary>
+	public IReadOnlyDictionary<string, decimal> LastReportedUnderlyings { get; private set; } = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
 	/// <summary>Per-ticker regime inputs (macro/VIX/intraday/move-sign) captured on the last
 	/// <see cref="EvaluateAsync"/> call. Read-only side channel for <c>wa analyze regime</c>; nothing in the
 	/// scoring path reads it back.</summary>
@@ -200,6 +204,7 @@ internal sealed class OpenCandidateEvaluator
 		// ParitySpotGuard). Everything downstream — strike enumeration, moneyness, EV scoring — must be
 		// consistent with the quotes the fills price off, so on material disagreement the book's parity-implied
 		// spot replaces the reported one before any candidate is enumerated.
+		LastReportedUnderlyings = new Dictionary<string, decimal>(bootstrapSpots, StringComparer.OrdinalIgnoreCase);
 		if (bootstrapSpots.TryGetValue(_config.Ticker, out var reportedSpot))
 		{
 			var parityQuotes = bootstrapOptions.Count > 0 ? new OverlayQuoteDictionary(ctx.Quotes, bootstrapOptions) : ctx.Quotes;

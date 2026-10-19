@@ -87,7 +87,7 @@ internal static class AIPipelineHelper
 		}
 
 		if (correctedUnderlyings == null && ReferenceEquals(options, phase1.Options)) return phase1;
-		return new QuoteSnapshot(options, correctedUnderlyings ?? phase1.Underlyings);
+		return new QuoteSnapshot(options, correctedUnderlyings ?? phase1.Underlyings, correctedUnderlyings != null ? phase1.Underlyings : null);
 	}
 
 	/// <summary>Fetches recent daily closes per ticker and computes a composite technical bias.
