@@ -71,37 +71,7 @@ public static partial class TextFileExporter
 				}
 			}
 
-			const int terminalWidth = 200;
-			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true);
-			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true, individualResults: breakEvens);
-			var combinedByTicker = new Dictionary<string, BreakEvenResult>(StringComparer.Ordinal);
-			foreach (var c in combined)
-			{
-				var sp = c.Title.IndexOf(' ');
-				if (sp > 0) combinedByTicker[c.Title[..sp]] = c;
-			}
-
-			void WriteResult(BreakEvenResult r)
-			{
-				console.Write(TableBuilder.BuildBreakEvenPanel(r, Spectre.Console.BoxBorder.Ascii, TableBorder.Ascii, ascii: true, displayMode: displayMode, showLegs: showLegs));
-				console.WriteLine();
-			}
-
-			string? lastTicker = null;
-			foreach (var result in breakEvens)
-			{
-				var sp = result.Title.IndexOf(' ');
-				var ticker = sp > 0 ? result.Title[..sp] : null;
-				if (lastTicker != null && ticker != lastTicker && combinedByTicker.TryGetValue(lastTicker, out var prev))
-				{
-					WriteResult(prev);
-					combinedByTicker.Remove(lastTicker);
-				}
-				WriteResult(result);
-				lastTicker = ticker;
-			}
-			if (lastTicker != null && combinedByTicker.TryGetValue(lastTicker, out var finalCombined))
-				WriteResult(finalCombined);
+			TableRenderer.WriteBreakEvenPanels(console, positions, opts, range, terminalWidth: 200, displayMode, showLegs, ascii: true);
 		}
 		else
 		{

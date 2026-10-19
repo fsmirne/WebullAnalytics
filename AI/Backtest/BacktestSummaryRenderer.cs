@@ -27,10 +27,10 @@ internal static class BacktestSummaryRenderer
 		if (bookCmd) RenderBookCommand(result);
 	}
 
-	/// <summary>--book-cmd: emit a ready-to-paste <c>wa analyze trade</c> command reconstructing the whole
+	/// <summary>--book-cmd: emit a ready-to-paste <c>wa report</c> command reconstructing the whole
 	/// window's book from the fill ledger. Every fill becomes one ';'-separated group of
-	/// <c>side:SYMBOL:qty@price</c> legs priced at its executed fill. Fed through <c>analyze trade
-	/// --standalone --date &lt;window-end&gt;</c>, each group is valued as of the backtest's last trading day: a
+	/// <c>side:SYMBOL:qty@price</c> legs priced at its executed fill. Fed through <c>report --source none
+	/// --trade … --date &lt;window-end&gt;</c> (no real trade history), each group is valued as of the backtest's last trading day: a
 	/// still-open position marks to that date (unrealized P&L), while a closed lineage's Open + Close legs
 	/// offset so the mark cancels and the group nets to its realized P&L. Summed, the combined book equals the
 	/// backtest's total P&L for the window — GROSS of the per-contract fees the backtest nets into P&L, and
@@ -45,18 +45,18 @@ internal static class BacktestSummaryRenderer
 
 		var spec = string.Join(";", groups);
 		// Pin the evaluation to the backtest's last valued trading day (EquityCurve tail) so still-open legs
-		// decay to the SAME instant the backtest marked them at. Without --date, analyze trade values them at
+		// decay to the SAME instant the backtest marked them at. Without --date, the report values them at
 		// run-time — adding however many days of theta have elapsed since the window end, which is the usual
 		// "totals don't match" surprise. No --vendor: let the config default apply rather than forcing one.
 		var endDate = result.EquityCurve.Count > 0 ? result.EquityCurve[^1].Date : (DateTime?)null;
 		var dateArg = endDate.HasValue ? $" --date {endDate.Value:yyyy-MM-dd}" : "";
 		AnsiConsole.WriteLine();
-		AnsiConsole.MarkupLine("[bold]Combined book (analyze trade) — open legs mark at the window-end date, closed lineages net to realized P&L:[/]");
+		AnsiConsole.MarkupLine("[bold]Combined book (report) — open legs mark at the window-end date, closed lineages net to realized P&L:[/]");
 		AnsiConsole.MarkupLine("[dim]  Reproduces the backtest total GROSS of fees (the backtest nets per-contract commissions into P&L); open legs are BS-decayed from the current chain, not historical NBBO.[/]");
 		// Raw Console.WriteLine, NOT AnsiConsole: Spectre hard-wraps to the console width, which shatters the
 		// (often long) command across lines and breaks copy-paste. Raw stdout emits one line the terminal only
 		// soft-wraps, so it still copies as a single command.
-		Console.WriteLine($"wa analyze trade \"{spec}\" --standalone{dateArg}");
+		Console.WriteLine($"wa report --source none --trade \"{spec}\"{dateArg}");
 	}
 
 	/// <summary>Every fill as one <c>side:SYMBOL:qty@price</c> leg group — the shared currency between the
@@ -75,7 +75,7 @@ internal static class BacktestSummaryRenderer
 		return groups;
 	}
 
-	/// <summary>The `wa analyze trade` Open Positions table for the window's still-open book. Each LINEAGE's
+	/// <summary>The `wa report` Open Positions table for the window's still-open book. Each LINEAGE's
 	/// fills are replayed through the PositionTracker pipeline SEPARATELY, so closed lineages' legs net to
 	/// zero and only the positions open at window end survive into the table. Lineages never mix in one
 	/// replay: two unrelated lineages can share an option symbol on opposite sides (e.g. one strategy's short
@@ -186,7 +186,7 @@ internal static class BacktestSummaryRenderer
 			var cashColor = f.NetCashFlow >= 0m ? "green" : "red";
 			// Running account total (equity, realized basis) = starting cash + realized P&L booked so far. Moves
 			// only on closes (an open books a debit but no realized P&L, so it holds flat until the position
-			// finalizes); colored vs the starting amount — mirrors the Total column in `wa report`/`wa analyze trade`.
+			// finalizes); colored vs the starting amount — mirrors the Total column in `wa report`.
 			var acctTotal = result.StartingCash + cumulativeRealized;
 			var acctLabel = acctTotal >= result.StartingCash ? $"[green]${acctTotal:N2}[/]" : $"[red]${acctTotal:N2}[/]";
 			// Lineage realized P&L, shown as a matching $ / % pair: realized P&L through this fill for the

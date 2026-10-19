@@ -769,11 +769,11 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public string? FillsJsonlPath { get; set; }
 
 	[CommandOption("--book-cmd")]
-	[Description("After the run, print a ready-to-paste `wa analyze trade` command reconstructing the whole window's book from the fill ledger — every fill becomes a ';'-separated leg group priced at its executed fill. Fed through `analyze trade --standalone`, open positions mark to current quotes while closed lineages' offsetting legs net to realized P&L, so the combined book equals the backtest's total P&L. Independent of --show-fills.")]
+	[Description("After the run, print a ready-to-paste `wa report --source none --trade` command reconstructing the whole window's book from the fill ledger — every fill becomes a ';'-separated leg group priced at its executed fill. With no real trade history loaded, open positions mark to current quotes while closed lineages' offsetting legs net to realized P&L, so the combined book equals the backtest's total P&L. Independent of --show-fills.")]
 	public bool BookCmd { get; set; }
 
 	[CommandOption("--replay")]
-	[Description("Replay mode: skip the opener and seed the book from the live proposal log (data/ai-proposals.<TICKER>.<strategy>.jsonl). Per trading day, the first non-informational open proposal recorded at/after 09:30 ET books at its recorded qty and vendor-quote submit price (tick-rounded like the auto-executor's limit; no entry slippage or re-pricing) — then the management rules, intraday triggers, and expiry settlement run as normal. Reconstructs what the live/simulated opener actually proposed over [[--since, --until]]; combine with --book-cmd for the matching `wa analyze trade` line.")]
+	[Description("Replay mode: skip the opener and seed the book from the live proposal log (data/ai-proposals.<TICKER>.<strategy>.jsonl). Per trading day, the first non-informational open proposal recorded at/after 09:30 ET books at its recorded qty and vendor-quote submit price (tick-rounded like the auto-executor's limit; no entry slippage or re-pricing) — then the management rules, intraday triggers, and expiry settlement run as normal. Reconstructs what the live/simulated opener actually proposed over [[--since, --until]]; combine with --book-cmd for the matching `wa report` line.")]
 	public bool Replay { get; set; }
 
 	[CommandOption("--opens <FILLS>")]

@@ -11,8 +11,7 @@ namespace WebullAnalytics.Analyze;
 /// Lean base for analyze subcommands that don't pipe through the full report renderer.
 /// <c>analyze risk</c>, <c>analyze position</c>, and <c>analyze roll</c> inherit from this; they
 /// only need a small slice of the broader report options. <c>analyze trade</c> is the exception —
-/// it injects synthetic trades into the report pipeline and inherits <see cref="AnalyzeSubcommandSettings"/>
-/// (which extends <see cref="WebullAnalytics.Report.ReportSettings"/>) instead.
+/// it renders the report's time-decay grid and inherits <see cref="WebullAnalytics.Report.GridSettings"/> instead.
 ///
 /// Subcommands that need additional report options (e.g., <c>--range</c>/<c>--view</c>/<c>--levels</c>
 /// for the grid in <c>analyze roll</c>) declare them locally rather than inheriting the entire

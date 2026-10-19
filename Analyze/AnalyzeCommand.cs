@@ -7,6 +7,7 @@ using System.Text.Json;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
+using WebullAnalytics.IO;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
 using WebullAnalytics.Report;
@@ -15,19 +16,14 @@ using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.Analyze;
 
-// Base for analyze subcommands that inject synthetic trades into the report pipeline. --date, --spot,
-// EvaluationDateOverride and their validation all live on ReportSettings now, so `analyze trade` and
-// `report` share one definition and one forward-pricing path (they diverged before, causing subtle bugs).
-internal abstract class AnalyzeSubcommandSettings : ReportSettings
-{
-}
-
 // --- `analyze trade` ----------------------------------------------------------
 
-internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
+/// <summary>`analyze trade` judges a trade on its own: it renders only the time-decay grid (break-even panel) of the legs given.
+/// The book-level view — the trade merged into your positions, realized P&amp;L, rolls, summary — is `report --trade`.</summary>
+internal sealed class AnalyzeTradeSettings : GridSettings
 {
 	[CommandArgument(0, "[spec]")]
-	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, and PRICE is a decimal or BID|MID|ASK (keywords require --api). Comma-separated for multiple. Example: buy:GME260501C00023000:300@MID. Omit when using --proposal or --fill.")]
+	[Description("Hypothetical trades. Format: ACTION:SYMBOL:QTY@PRICE where ACTION is buy|sell, SYMBOL is an OCC option symbol, and PRICE is a decimal or BID|MID|ASK. Legs comma-separated; ';' separates strategy groups (each its own panel). Example: buy:GME260501C00023000:300@MID. Omit when using --proposal or --fill.")]
 	public string Spec { get; set; } = "";
 
 	[CommandOption("--proposal")]
@@ -35,39 +31,26 @@ internal sealed class AnalyzeTradeSettings : AnalyzeSubcommandSettings
 	public string? Proposal { get; set; }
 
 	[CommandOption("--fill [N]")]
-	[Description("Evaluate one of your recent unexpired OPENING fills (Webull order history, last 30 days, any ticker) against the live market now, its per-leg fill prices as the cost basis. Implies --standalone: the fill is already in your trade log, so adding it on top would double-count it. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
+	[Description("Evaluate one of your recent unexpired OPENING fills (Webull order history, last 30 days, any ticker) against the live market now, its per-leg fill prices as the cost basis. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
 	public FlagValue<int>? Fill { get; set; }
-
-	[CommandOption("--standalone")]
-	[Description("Ignore all existing trades/positions and run the pipeline only on the synthetic legs. Useful for judging a trade in isolation.")]
-	public bool Standalone { get; set; }
 
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
 
+		if (OutputFormat.Equals("excel", StringComparison.OrdinalIgnoreCase))
+			return ValidationResult.Error("--output must be 'console' or 'text' (excel exports the whole book: use `report --trade`)");
+
 		var sources = (string.IsNullOrWhiteSpace(Spec) ? 0 : 1) + (Proposal != null ? 1 : 0) + (Fill?.IsSet == true ? 1 : 0);
 		if (sources > 1)
 			return ValidationResult.Error("pass only one of <spec>, --proposal or --fill");
 		if (sources == 0)
 			return ValidationResult.Error("provide <spec>, --proposal or --fill");
-		if (Proposal != null)
-			return ValidationResult.Success();
-		if (Fill?.IsSet == true)
-			return Fill.Value < 0 ? ValidationResult.Error($"--fill: N must be ≥ 1, got {Fill.Value}") : ValidationResult.Success();
-
-		List<ParsedLeg> legs;
-		try { legs = AnalyzeCommon.ParseAllLegs(Spec).ToList(); }
-		catch (FormatException ex) { return ValidationResult.Error($"<spec>: {ex.Message}"); }
-
-		foreach (var leg in legs)
-		{
-			if (leg.Option == null)
-				return ValidationResult.Error($"<spec>: '{leg.Symbol}' is not an OCC option symbol (analyze trade supports option legs only)");
-			if (leg.Price == null && leg.PriceKeyword == null)
-				return ValidationResult.Error($"<spec>: leg '{leg.Symbol}' is missing @PRICE (a decimal or BID|MID|ASK is required)");
-		}
+		if (Fill?.IsSet == true && Fill.Value < 0)
+			return ValidationResult.Error($"--fill: N must be ≥ 1, got {Fill.Value}");
+		if (!string.IsNullOrWhiteSpace(Spec) && AnalyzeCommon.ValidateTradeSpec(Spec, "<spec>") is { } specError)
+			return ValidationResult.Error(specError);
 
 		return ValidationResult.Success();
 	}
@@ -79,6 +62,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
+		if (settings.OutputFormat.Equals("excel", StringComparison.OrdinalIgnoreCase)) settings.OutputFormat = "console"; // a config-level report default; excel is the whole-book export
 
 		if (settings.Proposal != null && !ReconstructSpecFromProposal(settings))
 			return 1;
@@ -88,48 +72,39 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 			var (spec, error) = await OpeningFillPicker.ResolveSpecAsync(settings.Fill.Value, cancellation);
 			if (spec == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
 			settings.Spec = spec;
-			settings.Standalone = true;
 		}
 
-		if (settings.EvaluationDateOverride.HasValue)
+		ReportCommand.ApplyEvaluationDate(settings);
+
+		var trades = new List<Trade>();
+		var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Spec, DateTime.Now, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
+		if (added == null) return 1;
+
+		var closeLookup = await ReportCommand.BuildUnderlyingCloseLookup(trades, cancellation);
+		var (_, positions, _) = PositionTracker.ComputeReport(trades, 0m, null, closeLookup);
+		var (positionRows, _, _) = PositionTracker.BuildPositionRows(positions, PositionTracker.BuildTradeIndex(trades), trades);
+		if (positionRows.Count == 0)
 		{
-			EvaluationDate.Set(settings.EvaluationDateOverride.Value);
-			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
+			Console.WriteLine("No open position — the legs net to zero.");
+			return 0;
 		}
 
-		List<Trade> trades;
-		Dictionary<(DateTime, Side, int), decimal>? feeLookup;
-		if (settings.Standalone)
+		var opts = await ReportCommand.BuildAnalysisOptions(settings, positionRows, cancellation, added.Value.Quotes, added.Value.Underlyings);
+		var displayMode = settings.DisplayMode.ToLowerInvariant();
+		if (settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase))
 		{
-			trades = new List<Trade>();
-			feeLookup = null;
-		}
-		else
-		{
-			int err;
-			(trades, feeLookup, err) = ReportCommand.LoadTrades(settings);
-			if (err != 0) return err;
+			var writer = new StringWriter();
+			TableRenderer.WriteBreakEvenPanels(TextFileExporter.CreateTextConsole(writer), positionRows, opts, settings.Range, terminalWidth: 200, displayMode, settings.ShowLegs, ascii: true);
+			TextFileExporter.WriteConsoleOutputToTextFile(writer, settings.OutputPath ?? AnalyzeCommon.DefaultTextOutputName("trade"), "Trade analysis exported to");
+			return 0;
 		}
 
-		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
-		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
-		if (AnalyzeCommon.NeedsMarketPrices(settings.Spec))
-		{
-			var symbols = AnalyzeCommon.ParseAllLegs(settings.Spec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-			(quotes, underlyingPrices) = await AnalyzeCommon.FetchQuotesAndUnderlyingForSymbolList(symbols, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
-			if (quotes == null) return 1;
-		}
-
-		var maxSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
-		// The synthetic legs represent a trade evaluated "now" (or at --until). Stamp them at that moment,
-		// NOT at the latest existing trade's timestamp: when a Since/Until window (often config-driven)
-		// excludes older trades, a synthetic stamped in the past gets culled by RunReportPipeline's window
-		// filter and the hypothetical silently vanishes — visible only with --standalone. maxSeq+1 already
-		// orders the synthetic after existing trades, so the timestamp only needs to land inside the window.
-		var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : DateTime.Now;
-		trades.AddRange(AnalyzeCommon.ParseSyntheticTrades(settings.Spec, maxSeq, baseTime, quotes));
-
-		return await ReportCommand.RunReportPipeline(settings, trades, feeLookup, cancellation, preloadedQuotes: quotes, preloadedUnderlyingPrices: underlyingPrices);
+		TerminalHelper.EnsureTerminalWidthFromConfig();
+		int terminalWidth;
+		try { terminalWidth = Console.WindowWidth; }
+		catch { terminalWidth = 200; }
+		TableRenderer.WriteBreakEvenPanels(AnsiConsole.Console, positionRows, opts, settings.Range, terminalWidth, displayMode, settings.ShowLegs, ascii: false);
+		return 0;
 	}
 
 	/// <summary>--proposal: rebuild the <c>&lt;spec&gt;</c> from a stored proposal snapshot — its legs at the entry
@@ -349,6 +324,40 @@ internal static class AnalyzeCommon
 		tradesSpec
 			.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
 			.SelectMany(g => TradeLegParser.Parse(g));
+
+	/// <summary>Error message for a malformed trade spec (null when valid): every leg must be an OCC option with an @PRICE
+	/// (decimal or BID|MID|ASK). <paramref name="label"/> names the option in the message (&lt;spec&gt;, --trade).</summary>
+	internal static string? ValidateTradeSpec(string tradesSpec, string label)
+	{
+		List<ParsedLeg> legs;
+		try { legs = ParseAllLegs(tradesSpec).ToList(); }
+		catch (FormatException ex) { return $"{label}: {ex.Message}"; }
+		if (legs.Count == 0) return $"{label}: no legs";
+		foreach (var leg in legs)
+		{
+			if (leg.Option == null) return $"{label}: '{leg.Symbol}' is not an OCC option symbol (option legs only)";
+			if (leg.Price == null && leg.PriceKeyword == null) return $"{label}: leg '{leg.Symbol}' is missing @PRICE (a decimal or BID|MID|ASK is required)";
+		}
+		return null;
+	}
+
+	/// <summary>Appends <paramref name="tradesSpec"/> to <paramref name="trades"/> as synthetic trades stamped at <paramref name="baseTime"/>
+	/// (sequenced after the existing ones), first fetching live quotes when a leg prices at BID|MID|ASK. Returns the quotes and
+	/// underlyings that fetch loaded (empty when none was needed), or null after printing the error when it failed.</summary>
+	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? Underlyings)?> AppendSyntheticTrades(List<Trade> trades, string tradesSpec, DateTime baseTime, QuoteVendor vendor, CancellationToken cancellation)
+	{
+		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
+		IReadOnlyDictionary<string, decimal>? underlyings = null;
+		if (NeedsMarketPrices(tradesSpec))
+		{
+			var symbols = ParseAllLegs(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+			(quotes, underlyings) = await FetchQuotesAndUnderlyingForSymbolList(symbols, vendor, cancellation);
+			if (quotes == null) return null;
+		}
+		var nextSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
+		trades.AddRange(ParseSyntheticTrades(tradesSpec, nextSeq, baseTime, quotes));
+		return (quotes, underlyings);
+	}
 
 	internal static bool NeedsMarketPrices(string tradesSpec) =>
 		ParseAllLegs(tradesSpec).Any(leg => leg.PriceKeyword != null);

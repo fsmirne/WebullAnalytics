@@ -16,30 +16,20 @@ using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.Report;
 
-class ReportSettings : CommandSettings
+/// <summary>Options shared by everything that renders the time-decay grid — <c>report</c> (one grid per open position) and
+/// <c>analyze trade</c> (the grid alone): the quote vendor, the evaluation anchor, output target, and the pricing/grid
+/// knobs. Trade-history options (source, date window, tickers, initial amount, table view) live on <see cref="ReportSettings"/>.</summary>
+class GridSettings : CommandSettings
 {
-	[Description("Trade-data source: 'api' (JSONL from API, default) or 'export' (Webull CSV exports)")]
-	[CommandOption("--source")]
-	[DefaultValue("api")]
-	public string Source { get; set; } = "api";
-
 	[Description("Live option-chain quote vendor: 'webull' (sniffed-session chain) or 'schwab' (chains-API NBBO; needs `wa schwab login`). When omitted, the top-level `vendor` in config.json applies (default webull). Overrides it for this run.")]
 	[CommandOption("--vendor <VENDOR>")]
 	public string? Vendor { get; set; }
 
-	[Description("Include only trades on or after this date (YYYY-MM-DD format)")]
-	[CommandOption("--since")]
-	public string? Since { get; set; }
-
-	[Description("Include only trades on or before this date (YYYY-MM-DD format)")]
-	[CommandOption("--until")]
-	public string? Until { get; set; }
-
 	[CommandOption("--date")]
-	[Description("Override 'today' for evaluation (YYYY-MM-DD): open positions forward-project to that date with theta decay — pair with --spot to predict the book's value at that date. Shared with `analyze trade`, same code path. Distinct from --until (a trade-range FILTER); --date only moves the pricing anchor. A future date prices at that day's 09:30 ET open; today prices at the current run time.")]
+	[Description("Override 'today' for evaluation (YYYY-MM-DD): positions forward-project to that date with theta decay — pair with --spot to predict their value at that date. Shared by `report` and `analyze trade`, same code path. A future date prices at that day's 09:30 ET open; today prices at the current run time.")]
 	public string? Date { get; set; }
 
-	[Description("Output format: 'console', 'excel', or 'text'")]
+	[Description("Output format: 'console' or 'text' ('excel' too for `report`)")]
 	[CommandOption("--output")]
 	[DefaultValue("console")]
 	public string OutputFormat { get; set; } = "console";
@@ -47,16 +37,6 @@ class ReportSettings : CommandSettings
 	[Description("Path for output file (used with --output excel or text)")]
 	[CommandOption("--output-path")]
 	public string? OutputPath { get; set; }
-
-	[Description("Initial portfolio amount in dollars (default: 0)")]
-	[CommandOption("--initial-amount")]
-	[DefaultValue(0)]
-	public decimal InitialAmount { get; set; } = 0m;
-
-	[Description("Report view: 'detailed' (all columns, default) or 'simplified' (hides Asset, Option, Closed, Running)")]
-	[CommandOption("--view")]
-	[DefaultValue("detailed")]
-	public string View { get; set; } = "detailed";
 
 	[Description("Override implied volatility per option leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple legs.")]
 	[CommandOption("--iv")]
@@ -97,32 +77,15 @@ class ReportSettings : CommandSettings
 	[CommandOption("--levels")]
 	public string? Levels { get; set; }
 
-	[Description("Show only these tickers in the report. Comma-separated list (e.g., GME,SPY,AAPL)")]
-	[CommandOption("--tickers")]
-	public string? Tickers { get; set; }
-
-	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
-
-	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
-
-	public DateTime UntilDate => Until != null ? DateTime.ParseExact(Until, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MaxValue;
-
-	// The evaluation-anchor override (--date). Parsed identically to analyze trade so `report` and
-	// `analyze trade` set EvaluationDate the same way and share the forward-pricing path.
+	// The evaluation-anchor override (--date), parsed once here so `report` and `analyze trade` set EvaluationDate
+	// the same way and share the forward-pricing path.
 	internal DateTime? EvaluationDateOverride => Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
 
-	public HashSet<string>? TickerFilter => Tickers != null ? new HashSet<string>(Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), StringComparer.OrdinalIgnoreCase) : null;
-
-	/// <summary>Applies config.json defaults for any option not explicitly passed on the CLI.</summary>
-	internal void ApplyConfig(Dictionary<string, JsonElement> cfg)
+	/// <summary>Applies config.json's `report` block defaults for any grid option not explicitly passed on the CLI.</summary>
+	internal virtual void ApplyConfig(Dictionary<string, JsonElement> cfg)
 	{
-		if (!Program.HasCliOption("source") && cfg.TryGetString("source", out var source)) Source = source;
-		if (!Program.HasCliOption("since") && cfg.TryGetString("since", out var since)) Since = since;
-		if (!Program.HasCliOption("until") && cfg.TryGetString("until", out var until)) Until = until;
 		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) OutputFormat = output;
 		if (!Program.HasCliOption("output-path") && cfg.TryGetString("outputPath", out var outputPath)) OutputPath = outputPath;
-		if (!Program.HasCliOption("initial-amount") && cfg.TryGetDecimal("initialAmount", out var initialAmount)) InitialAmount = initialAmount;
-		if (!Program.HasCliOption("view") && cfg.TryGetString("view", out var view)) View = view;
 		if (!Program.HasCliOption("iv") && cfg.TryGetString("iv", out var iv)) IvOverrides = iv;
 		if (!Program.HasCliOption("range") && cfg.TryGetDecimal("range", out var range)) Range = range;
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
@@ -131,26 +94,12 @@ class ReportSettings : CommandSettings
 		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
 		if (!Program.HasCliOption("calibrated") && cfg.TryGetBool("calibrated", out var calibrated)) Calibrated = calibrated;
 		if (!Program.HasCliOption("levels") && cfg.TryGetString("levels", out var levels)) Levels = levels;
-		if (!Program.HasCliOption("tickers") && cfg.TryGetString("tickers", out var tickers)) Tickers = tickers;
 	}
 
 	public override ValidationResult Validate()
 	{
-		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
-			return ValidationResult.Error("--since must be in YYYY-MM-DD format");
-
-		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
-			return ValidationResult.Error("--until must be in YYYY-MM-DD format");
-
 		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
 			return ValidationResult.Error("--date must be in YYYY-MM-DD format");
-
-		if (Since != null && Until != null && SinceDate > UntilDate)
-			return ValidationResult.Error("--since date must not be after --until date");
-
-		var source = Source.ToLowerInvariant();
-		if (source is not ("api" or "export"))
-			return ValidationResult.Error("--source must be 'api' or 'export'");
 
 		if (Vendor != null && Vendor.Trim().ToLowerInvariant() is not ("webull" or "schwab"))
 			return ValidationResult.Error($"--vendor: expected webull or schwab, got '{Vendor}'");
@@ -158,10 +107,6 @@ class ReportSettings : CommandSettings
 		var format = OutputFormat.ToLowerInvariant();
 		if (format is not ("console" or "excel" or "text"))
 			return ValidationResult.Error("--output must be 'console', 'excel', or 'text'");
-
-		var view = View.ToLowerInvariant();
-		if (view is not ("detailed" or "simplified"))
-			return ValidationResult.Error("--view must be 'detailed' or 'simplified'");
 
 		if (Range < 0)
 			return ValidationResult.Error("--range must be 0 (auto) or a positive number");
@@ -203,6 +148,88 @@ class ReportSettings : CommandSettings
 	}
 }
 
+class ReportSettings : GridSettings
+{
+	[Description("Trade-data source: 'api' (JSONL from API, default), 'export' (Webull CSV exports), or 'none' (no trade history — with --trade, the report covers only the proposed trade)")]
+	[CommandOption("--source")]
+	[DefaultValue("api")]
+	public string Source { get; set; } = "api";
+
+	[Description("Include only trades on or after this date (YYYY-MM-DD format)")]
+	[CommandOption("--since")]
+	public string? Since { get; set; }
+
+	[Description("Include only trades on or before this date (YYYY-MM-DD format)")]
+	[CommandOption("--until")]
+	public string? Until { get; set; }
+
+	[Description("Initial portfolio amount in dollars (default: 0)")]
+	[CommandOption("--initial-amount")]
+	[DefaultValue(0)]
+	public decimal InitialAmount { get; set; } = 0m;
+
+	[Description("Report view: 'detailed' (all columns, default) or 'simplified' (hides Asset, Option, Closed, Running)")]
+	[CommandOption("--view")]
+	[DefaultValue("detailed")]
+	public string View { get; set; } = "detailed";
+
+	[Description("Show only these tickers in the report. Comma-separated list (e.g., GME,SPY,AAPL)")]
+	[CommandOption("--tickers")]
+	public string? Tickers { get; set; }
+
+	[Description("Add a proposed trade to the book and report the combined result — its legs merge into the matching open positions, so their grids show the adjusted break-evens. Same format as `analyze trade`: ACTION:SYMBOL:QTY@PRICE where PRICE is a decimal or BID|MID|ASK, legs comma-separated, strategy groups ';'-separated. Example: buy:GME260501C00023000:300@MID.")]
+	[CommandOption("--trade <SPEC>")]
+	public string? Trade { get; set; }
+
+	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
+
+	public DateTime SinceDate => Since != null ? DateTime.ParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MinValue;
+
+	public DateTime UntilDate => Until != null ? DateTime.ParseExact(Until, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.MaxValue;
+
+	public HashSet<string>? TickerFilter => Tickers != null ? new HashSet<string>(Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), StringComparer.OrdinalIgnoreCase) : null;
+
+	/// <summary>Applies config.json defaults for any option not explicitly passed on the CLI.</summary>
+	internal override void ApplyConfig(Dictionary<string, JsonElement> cfg)
+	{
+		base.ApplyConfig(cfg);
+		if (!Program.HasCliOption("source") && cfg.TryGetString("source", out var source)) Source = source;
+		if (!Program.HasCliOption("since") && cfg.TryGetString("since", out var since)) Since = since;
+		if (!Program.HasCliOption("until") && cfg.TryGetString("until", out var until)) Until = until;
+		if (!Program.HasCliOption("initial-amount") && cfg.TryGetDecimal("initialAmount", out var initialAmount)) InitialAmount = initialAmount;
+		if (!Program.HasCliOption("view") && cfg.TryGetString("view", out var view)) View = view;
+		if (!Program.HasCliOption("tickers") && cfg.TryGetString("tickers", out var tickers)) Tickers = tickers;
+	}
+
+	public override ValidationResult Validate()
+	{
+		var baseResult = base.Validate();
+		if (!baseResult.Successful) return baseResult;
+
+		if (Since != null && !DateTime.TryParseExact(Since, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+			return ValidationResult.Error("--since must be in YYYY-MM-DD format");
+
+		if (Until != null && !DateTime.TryParseExact(Until, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+			return ValidationResult.Error("--until must be in YYYY-MM-DD format");
+
+		if (Since != null && Until != null && SinceDate > UntilDate)
+			return ValidationResult.Error("--since date must not be after --until date");
+
+		var source = Source.ToLowerInvariant();
+		if (source is not ("api" or "export" or "none"))
+			return ValidationResult.Error("--source must be 'api', 'export', or 'none'");
+
+		var view = View.ToLowerInvariant();
+		if (view is not ("detailed" or "simplified"))
+			return ValidationResult.Error("--view must be 'detailed' or 'simplified'");
+
+		if (Trade != null && AnalyzeCommon.ValidateTradeSpec(Trade, "--trade") is { } specError)
+			return ValidationResult.Error(specError);
+
+		return ValidationResult.Success();
+	}
+}
+
 class ReportCommand : AsyncCommand<ReportSettings>
 {
 	private static readonly string[] WebullCsvFiles =
@@ -218,18 +245,33 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		if (appConfig != null) settings.ApplyConfig(appConfig);
 
 		// --date moves the evaluation anchor so open positions forward-project to that date (theta decay +
-		// any --spot). Identical block to AnalyzeTradeCommand.ExecuteAsync so `report --date` and
-		// `analyze trade --date` set EvaluationDate the same way and flow through the same valuation.
-		if (settings.EvaluationDateOverride.HasValue)
-		{
-			EvaluationDate.Set(settings.EvaluationDateOverride.Value);
-			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
-		}
+		// any --spot) — the same anchor `analyze trade --date` sets, flowing through the same valuation.
+		ApplyEvaluationDate(settings);
 
 		var (trades, feeLookup, err) = LoadTrades(settings);
 		if (err != 0) return err;
 
-		return await RunReportPipeline(settings, trades, feeLookup, cancellation);
+		// --trade: the proposed legs join the book as synthetic trades, so they merge into the matching open
+		// positions and every section (positions, grids, summary) shows the combined result.
+		IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null;
+		IReadOnlyDictionary<string, decimal>? preloadedUnderlyings = null;
+		if (settings.Trade != null)
+		{
+			var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : DateTime.Now;
+			var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Trade, baseTime, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
+			if (added == null) return 1;
+			(preloadedQuotes, preloadedUnderlyings) = added.Value;
+		}
+
+		return await RunReportPipeline(settings, trades, feeLookup, cancellation, preloadedQuotes, preloadedUnderlyings);
+	}
+
+	/// <summary>Sets the evaluation anchor from --date (no-op without it), announcing the override.</summary>
+	internal static void ApplyEvaluationDate(GridSettings settings)
+	{
+		if (!settings.EvaluationDateOverride.HasValue) return;
+		EvaluationDate.Set(settings.EvaluationDateOverride.Value);
+		Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
 	}
 
 	internal static (List<Trade> trades, Dictionary<(DateTime, Side, int), decimal>? feeLookup, int errorCode) LoadTrades(ReportSettings settings)
@@ -239,6 +281,9 @@ class ReportCommand : AsyncCommand<ReportSettings>
 
 		List<Trade> trades;
 		Dictionary<(DateTime, Side, int), decimal>? feeLookup = null;
+
+		if (settings.Source.Equals("none", StringComparison.OrdinalIgnoreCase))
+			return ([], null, 0);
 
 		if (settings.Source.Equals("export", StringComparison.OrdinalIgnoreCase))
 		{
@@ -301,6 +346,35 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var (positionRows, strategyAdjustments, singleLegStandalones) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
+		var opts = await BuildAnalysisOptions(settings, positionRows, cancellation, preloadedQuotes, preloadedUnderlyingPrices);
+		var displayMode = settings.DisplayMode.ToLowerInvariant();
+
+		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments, singleLegStandalones);
+
+		switch (settings.OutputFormat.ToLowerInvariant())
+		{
+			case "excel":
+				ExcelExporter.ExportToExcel(rows, positionRows, trades, positions, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", opts);
+				break;
+
+			case "text":
+				TextFileExporter.ExportToTextFile(rows, positionRows, positions, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns, settings.ShowLegs);
+				break;
+
+			default:
+				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal, maxTerminalWidth);
+				TableRenderer.RenderReport(rows, positionRows, positions, running, initialAmount, settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns, settings.ShowLegs);
+				break;
+		}
+
+		return 0;
+	}
+
+	/// <summary>Everything the break-even panels and time-decay grids price from, for <paramref name="positionRows"/>: the live
+	/// chain (or, for a past --date, the quote store's as-of marks), dividends, the risk-free rate, and the --spot/--iv/--levels/
+	/// calibration overrides. Shared by `report` and `analyze trade` so both grids price identically.</summary>
+	internal static async Task<AnalysisOptions> BuildAnalysisOptions(GridSettings settings, List<PositionRow> positionRows, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null)
+	{
 		// Fetch live option chain + risk-free rate so break-even panels show the time-decay grid with
 		// current IV / spot / theta. Failures (no api-config.json, expired headers, network blip) degrade
 		// gracefully: the report falls through to the 1D price ladder. Skipped when there are no positions
@@ -402,28 +476,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 				WebullAnalytics.Utils.Log.Debug($"Calibration: solved mid-implied IV for {calibratedIv.Count} contract(s); future grid values anchored to the live mid surface.");
 		}
 
-		var opts = new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends, calibratedIv, marksAsOfEvalDate);
-		var displayMode = settings.DisplayMode.ToLowerInvariant();
-
-		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments, singleLegStandalones);
-
-		switch (settings.OutputFormat.ToLowerInvariant())
-		{
-			case "excel":
-				ExcelExporter.ExportToExcel(rows, positionRows, trades, positions, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.xlsx", opts);
-				break;
-
-			case "text":
-				TextFileExporter.ExportToTextFile(rows, positionRows, positions, running, initialAmount, settings.OutputPath ?? $"WebullAnalytics_{dateStr}.txt", settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns, settings.ShowLegs);
-				break;
-
-			default:
-				TerminalHelper.EnsureTerminalWidth(settings.Simplified, autoExpandTerminal, maxTerminalWidth);
-				TableRenderer.RenderReport(rows, positionRows, positions, running, initialAmount, settings.Simplified, opts, settings.Range, displayMode, adjustmentBreakdowns, settings.ShowLegs);
-				break;
-		}
-
-		return 0;
+		return new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends, calibratedIv, marksAsOfEvalDate);
 	}
 
 	/// <summary>
@@ -432,7 +485,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 	/// to settle ITM legs at intrinsic value. Unknown pairs map to null, falling back to the
 	/// legacy "expire worthless" behavior — so this is safe to call even when history is missing.
 	/// </summary>
-	private static async Task<Func<string, DateTime, decimal?>> BuildUnderlyingCloseLookup(List<Trade> trades, CancellationToken cancellation)
+	internal static async Task<Func<string, DateTime, decimal?>> BuildUnderlyingCloseLookup(List<Trade> trades, CancellationToken cancellation)
 	{
 		var today = EvaluationDate.Today;
 		var pairs = trades

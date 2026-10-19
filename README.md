@@ -158,13 +158,20 @@ wa report --levels GME:20/25/30
 
 # Show only specific tickers in the report
 wa report --tickers GME,SPY
+
+# What if I roll my calendar's short leg? The legs merge into the held position, so its grid shows the
+# adjusted break-evens and the summary the combined book (';' separates strategy groups)
+wa report --trade "buy:GME260410C00023000:300@MID,sell:GME260417C00023000:300@MID"
+
+# What if I close 100 contracts of my long call?
+wa report --trade "sell:GME260501C00023000:100@0.70"
 ```
 
 #### Report Options
 
 ```
 Options:
-  --source <source>         Data source: 'api' or 'export' (default: api)
+  --source <source>         Data source: 'api', 'export', or 'none' (no trade history — with --trade, only the proposed trade) (default: api)
   --since <date>            Include only trades on or after this date (YYYY-MM-DD format)
   --until <date>            Include only trades on or before this date (YYYY-MM-DD format)
   --output <format>         Output format: 'console', 'excel', or 'text' (default: console)
@@ -181,6 +188,7 @@ Options:
   --calibrated              Back-solve each leg's IV from its live bid/ask mid so the today column reproduces market mid and future columns decay on the mid-consistent surface (instead of Webull's reported IV)
   --levels <prices>         Additional reference price levels (support/resistance, targets) to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
   --tickers <list>          Show only these tickers in the report. Comma-separated (e.g., GME,SPY,AAPL)
+  --trade <spec>            Add a proposed trade to the book (same spec as `analyze trade`) and report the combined result
   --help, -h                Show help message
 ```
 
@@ -188,7 +196,7 @@ Options:
 
 The `analyze` command has eight subcommands:
 
-- `analyze trade` — inject hypothetical trades into the report pipeline for what-if analysis.
+- `analyze trade` — the time-decay grid of a hypothetical trade, on its own.
 - `analyze roll` — show a 2D grid of theoretical roll credit/debit across underlying prices × times using Black-Scholes.
 - `analyze risk` — render a structured risk diagnostic for an option structure using live quotes.
 - `analyze position` — analyze an existing or manually specified option position and rank adjustment scenarios.
@@ -197,53 +205,48 @@ The `analyze` command has eight subcommands:
 - `analyze regime` — show the blended directional bias the live opener uses (daily technical composite + VIX term structure + intraday tape), its decomposition, and a per-structure-family ranking with flip-margin sweep.
 - `analyze top` — list Webull's market-wide top option contracts by volume, turnover, open interest, OI change, or IV.
 
-All subcommands accept the `report` command's options plus `--date` for simulating a future evaluation date. Some subcommands add extra flags documented below.
+All subcommands accept `--date` for simulating a future evaluation date. Some subcommands add extra flags documented below.
 
 #### `analyze trade`
 
-Runs a hypothetical what-if analysis by injecting synthetic trades into the report pipeline without modifying any data files.
+Judges a trade on its own: renders only the time-decay grid (break-even panel) of the legs you pass — no trade history, positions, rolls, or summary. To see how a trade changes your book (its legs merged into the positions you hold), use `wa report --trade "<spec>"`.
 
 ```
-wa analyze trade "<spec>" [--date <YYYY-MM-DD>] [report options]
+wa analyze trade "<spec>" [--date <YYYY-MM-DD>] [grid options]
+wa analyze trade --proposal <FILE[:LINE]> | --fill [N]
 ```
 
-The `<spec>` is a comma-separated list of legs. You can also separate independent execution groups with `;` when you want multiple synthetic order events in one run:
+The `<spec>` is a comma-separated list of legs; `;` separates strategy groups, each rendered as its own panel (plus a combined panel per ticker):
 
 ```
-ACTION:SYMBOL:QTY@PRICE,ACTION:SYMBOL:QTY@PRICE,...
+ACTION:SYMBOL:QTY@PRICE,ACTION:SYMBOL:QTY@PRICE;ACTION:SYMBOL:QTY@PRICE,...
 ```
 
 - **ACTION**: `buy` or `sell`.
-- **SYMBOL**: OCC option symbol (e.g., `GME260501C00023000`). `analyze trade` supports option legs only.
+- **SYMBOL**: OCC option symbol (e.g., `GME260501C00023000`). Option legs only.
 - **QTY**: Positive integer.
-- **PRICE**: Required. A decimal (e.g., `0.50`) or a market-price keyword (`BID`, `MID`, `ASK`, case-insensitive). Keywords trigger a live Webull quote fetch (requires sniffed headers via the `sniff` command).
+- **PRICE**: Required. A decimal (e.g., `0.50`) or a market-price keyword (`BID`, `MID`, `ASK`, case-insensitive). Keywords trigger a live quote fetch from the configured vendor.
+
+Grid options (shared with `report`): `--vendor`, `--date`, `--spot`, `--iv`, `--range`, `--display`, `--grid`, `--theoretical`, `--calibrated`, `--levels`, `--output console|text`, `--output-path`.
 
 Examples:
 
 ```bash
-# What if I roll the calendar short from Apr 10 to Apr 17 for $0.24 credit?
+# A calendar at explicit prices
 wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38"
 
-# Same roll but use live market prices (buy at ask, sell at bid)
-wa analyze trade "sell:GME260410C00023000:300@BID,buy:GME260417C00023000:300@ASK"
-
-# Use mid-market prices for both legs
+# The same at live mids
 wa analyze trade "sell:GME260410C00023000:300@MID,buy:GME260417C00023000:300@MID"
 
-# What if I close 100 contracts of my long call?
-wa analyze trade "sell:GME260501C00023000:100@0.70"
+# Two independent structures in one run
+wa analyze trade "sell:SPY261027P00765000:1@MID,buy:SPY261113P00766000:1@MID;sell:SPY261027C00775000:1@MID,buy:SPY261113C00776000:1@MID"
 
-# What if I add a protective put?
-wa analyze trade "sell:GME260501P00022000:455@0.25"
+# Value it as of a future date at a given spot
+wa analyze trade "buy:GME260417C00023000:300@0.38" --date 2026-04-11 --spot GME:23.20
 
-# Simulate running on a future date (e.g., after short leg expiration)
-wa analyze trade "buy:GME260417C00023000:300@0.38" --date 2026-04-11
-
-# Combine with report options (output to text, override underlying price)
-wa analyze trade "sell:GME260410C00023000:300@0.14,buy:GME260417C00023000:300@0.38" --output text --spot GME:23.20
+# A recent opening fill, at its fill prices
+wa analyze trade --fill 1
 ```
-
-When using `BID`, `MID`, or `ASK`, the command fetches live quotes from Webull before building the hypothetical trades. The synthetic trades are appended after all real trades and processed through the full report pipeline — FIFO matching, strategy grouping, break-even analysis, and rendering all work normally. The original trade files are never modified.
 
 #### `analyze roll`
 
@@ -978,7 +981,7 @@ ai backtest only:
                            open at/after 09:30 ET books at its recorded qty and submit price, then management rules,
                            intraday triggers, and expiry settlement run as normal — reconstructing what the live
                            opener actually proposed over [--since, --until]. Pair with --book-cmd for the matching
-                           `wa analyze trade` line. Incompatible with --oracle.
+                           `wa report` line. Incompatible with --oracle.
   --split                  Book split structures (double calendars/diagonals, diagonal/calendar verticals) as their
                            TWO combo orders, managed independently against their own debits — exactly how Webull holds them.
   --tp / --sl <value>      Override rules.takeProfit.pctOfMaxProfit / rules.stopLoss.pctOfMaxLoss for this run (0..1; 1.0 = off).

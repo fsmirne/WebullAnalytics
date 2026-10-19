@@ -42,37 +42,7 @@ public static class TableRenderer
 			int terminalWidth;
 			try { terminalWidth = Console.WindowWidth; }
 			catch { terminalWidth = 200; }
-
-			// Grids are rendered below with TableBorder.Rounded, whose outer left/right borders cost 2 chars;
-			// the width estimate must account for them or the last date column wraps on tight terminals.
-			var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true);
-			var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true, individualResults: breakEvens);
-			var combinedByTicker = new Dictionary<string, BreakEvenResult>(StringComparer.Ordinal);
-			foreach (var c in combined)
-			{
-				var ticker = ExtractTickerFromCombinedTitle(c.Title);
-				if (ticker != null) combinedByTicker[ticker] = c;
-			}
-
-			string? lastTicker = null;
-			foreach (var result in breakEvens)
-			{
-				var ticker = ExtractTickerFromTitle(result.Title);
-				if (lastTicker != null && ticker != lastTicker && combinedByTicker.TryGetValue(lastTicker, out var prevCombined))
-				{
-					console.Write(TableBuilder.BuildBreakEvenPanel(prevCombined, BoxBorder.Rounded, TableBorder.Rounded, displayMode: displayMode, showLegs: showLegs));
-					console.WriteLine();
-					combinedByTicker.Remove(lastTicker);
-				}
-				console.Write(TableBuilder.BuildBreakEvenPanel(result, BoxBorder.Rounded, TableBorder.Rounded, displayMode: displayMode, showLegs: showLegs));
-				console.WriteLine();
-				lastTicker = ticker;
-			}
-			if (lastTicker != null && combinedByTicker.TryGetValue(lastTicker, out var finalCombined))
-			{
-				console.Write(TableBuilder.BuildBreakEvenPanel(finalCombined, BoxBorder.Rounded, TableBorder.Rounded, displayMode: displayMode, showLegs: showLegs));
-				console.WriteLine();
-			}
+			WriteBreakEvenPanels(console, positions, opts, range, terminalWidth, displayMode, showLegs, ascii: false);
 		}
 		else
 		{
@@ -81,6 +51,42 @@ public static class TableRenderer
 
 		var openMarketValue = TableBuilder.ComputeOpenPositionsMarketValue(lotsByMatchKey, opts);
 		TableBuilder.RenderSummary(console, rows, running, initialAmount, openMarketValue);
+	}
+
+	/// <summary>The time-decay break-even panel of every position, each ticker's combined panel following its last position —
+	/// the grid section shared by `report` (console and text) and `analyze trade`, which renders nothing else.</summary>
+	internal static void WriteBreakEvenPanels(IAnsiConsole console, List<PositionRow> positions, AnalysisOptions opts, decimal range, int terminalWidth, string displayMode, bool showLegs, bool ascii)
+	{
+		var box = ascii ? BoxBorder.Ascii : BoxBorder.Rounded;
+		var border = ascii ? TableBorder.Ascii : TableBorder.Rounded;
+		// Grids render with an outer-bordered table, whose left/right borders cost 2 chars; the width estimate must
+		// account for them or the last date column wraps on tight terminals.
+		var breakEvens = BreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true);
+		var combined = CombinedBreakEvenAnalyzer.Analyze(positions, opts, range, terminalWidth, displayMode, showLegs, gridTableHasBorder: true, individualResults: breakEvens);
+		var combinedByTicker = new Dictionary<string, BreakEvenResult>(StringComparer.Ordinal);
+		foreach (var c in combined)
+		{
+			var ticker = ExtractTickerFromCombinedTitle(c.Title);
+			if (ticker != null) combinedByTicker[ticker] = c;
+		}
+
+		string? lastTicker = null;
+		foreach (var result in breakEvens)
+		{
+			var ticker = ExtractTickerFromTitle(result.Title);
+			if (lastTicker != null && ticker != lastTicker && combinedByTicker.Remove(lastTicker, out var prevCombined))
+				WritePanel(console, prevCombined, box, border, ascii, displayMode, showLegs);
+			WritePanel(console, result, box, border, ascii, displayMode, showLegs);
+			lastTicker = ticker;
+		}
+		if (lastTicker != null && combinedByTicker.TryGetValue(lastTicker, out var finalCombined))
+			WritePanel(console, finalCombined, box, border, ascii, displayMode, showLegs);
+	}
+
+	private static void WritePanel(IAnsiConsole console, BreakEvenResult result, BoxBorder box, TableBorder border, bool ascii, string displayMode, bool showLegs)
+	{
+		console.Write(TableBuilder.BuildBreakEvenPanel(result, box, border, ascii: ascii, displayMode: displayMode, showLegs: showLegs));
+		console.WriteLine();
 	}
 
 	// Max-grid-columns is computed per panel inside the analyzers based on each panel's leg count.
