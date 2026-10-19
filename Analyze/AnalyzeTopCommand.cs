@@ -16,7 +16,7 @@ internal sealed class AnalyzeTopSettings : CommandSettings
 {
 	[CommandOption("--by <RANK>")]
 	[DefaultValue("volume")]
-	[Description("Ranking: volume (default), turnover, oi, oi-up, oi-down, or iv.")]
+	[Description("Ranking: volume (default), turnover, oi, oi-up, oi-down (prior-session OI change), or iv.")]
 	public string By { get; set; } = "volume";
 
 	[CommandOption("--count <N>")]
@@ -78,7 +78,7 @@ internal sealed class AnalyzeTopCommand : AsyncCommand<AnalyzeTopSettings>
 		table.AddColumn(new TableColumn("Mid").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("Volume").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("OI").RightAligned().NoWrap());
-		table.AddColumn(new TableColumn("OI Δ").RightAligned().NoWrap());
+		table.AddColumn(new TableColumn("Prior OI Δ").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("Vol/OI").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("IV").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("Turnover").RightAligned().NoWrap());
@@ -106,6 +106,8 @@ internal sealed class AnalyzeTopCommand : AsyncCommand<AnalyzeTopSettings>
 
 		AnsiConsole.Write(table);
 		AnsiConsole.MarkupLine("[dim]Source: Webull Top Options (all US underlyings). Unexpired contracts only — after the close, that session's expiring contracts are already gone.[/]");
+		// Verified live 2026-10-19: OI/Δ rolled once early in the session (09:30 still showed Friday's rows) and then held while volume grew.
+		AnsiConsole.MarkupLine("[dim]OI and Prior OI Δ are OCC's overnight settlement, rolled once early in the session — they reflect the PRIOR session's opening/closing, not today's flow. Before the roll, every column is still the prior session's.[/]");
 		return 0;
 	}
 
