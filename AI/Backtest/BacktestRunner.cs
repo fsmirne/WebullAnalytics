@@ -531,9 +531,9 @@ internal sealed class BacktestRunner
 	/// exit-policy granularity. All halves must price or nothing books (live validates the whole leg set the
 	/// same way). Returns true when at least one position was opened.</summary>
 	private bool OpenProposalIntoBook(DateTime when, OpenProposal p, int qty)
-		=> OpenLegsIntoBook(when, p.Ticker, p.StructureKind, p.Legs, qty, p.Spot, p.RawScore, p.FinalScore, p.ImpliedVolatilityAnnual, applySlippage: true);
+		=> OpenLegsIntoBook(when, p.Ticker, p.StructureKind, p.Legs, qty, p.Spot, p.RawScore, p.FinalScore, p.ImpliedVolatilityAnnual, applySlippage: true, p.Breakevens);
 
-	private bool OpenLegsIntoBook(DateTime when, string ticker, OpenStructureKind structureKind, IReadOnlyList<ProposalLeg> legs, int qty, decimal spot, decimal? rawScore, decimal? finalScore, decimal? repIv, bool applySlippage)
+	private bool OpenLegsIntoBook(DateTime when, string ticker, OpenStructureKind structureKind, IReadOnlyList<ProposalLeg> legs, int qty, decimal spot, decimal? rawScore, decimal? finalScore, decimal? repIv, bool applySlippage, IReadOnlyList<decimal>? breakevens = null)
 	{
 		// Mirrors the live executor's held-position stance (OpenerAutoExecutor): allowAddToHeldPosition=true
 		// (the default) lets an exact re-take of a held structure merge in as an add instead of being dropped.
@@ -545,7 +545,7 @@ internal sealed class BacktestRunner
 		if (groups == null || groups.Count == 1)
 		{
 			var legFills = BuildLegFillsFromProposal(legs, qty);
-			return legFills != null && _book.Open(when, ticker, structureKind, legFills, qty, spot, rawScore, finalScore, repIv, applySlippage, allowAdd);
+			return legFills != null && _book.Open(when, ticker, structureKind, legFills, qty, spot, rawScore, finalScore, repIv, applySlippage, allowAdd, breakevens);
 		}
 
 		var groupFills = new List<(OpenStructureKind Kind, IReadOnlyList<BacktestLegFill> Fills)>(groups.Count);

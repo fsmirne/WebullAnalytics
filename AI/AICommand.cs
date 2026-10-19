@@ -1183,7 +1183,10 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		foreach (var f in fills)
 		{
 			var legs = string.Join(",", f.Legs.Select(l => $"{{\"sym\":\"{l.Symbol}\",\"side\":\"{l.Side}\",\"qty\":{l.Qty},\"price\":{l.PricePerShare.ToString(System.Globalization.CultureInfo.InvariantCulture)}}}"));
-			w.WriteLine($"{{\"ts\":\"{f.Date:yyyy-MM-ddTHH:mm:ss}\",\"ticker\":\"{f.Ticker}\",\"key\":\"{f.PositionKey}\",\"kind\":\"{f.Kind}\",\"strategy\":\"{f.StrategyKind}\",\"spot\":{f.Spot.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"qty\":{f.Qty},\"net\":{f.NetCashFlow.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"fees\":{f.Fees.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"rawScore\":{Num(f.RawScore)},\"finalScore\":{Num(f.FinalScore)},\"iv\":{Num(f.RepIv)},\"rule\":{(f.RuleName == null ? "null" : $"\"{f.RuleName}\"")},\"lineage\":{f.LineageId},\"legs\":[{legs}]}}");
+			w.WriteLine($"{{\"ts\":\"{f.Date:yyyy-MM-ddTHH:mm:ss}\",\"ticker\":\"{f.Ticker}\",\"key\":\"{f.PositionKey}\",\"kind\":\"{f.Kind}\",\"strategy\":\"{f.StrategyKind}\",\"spot\":{f.Spot.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"qty\":{f.Qty},\"net\":{f.NetCashFlow.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"fees\":{f.Fees.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"rawScore\":{Num(f.RawScore)},\"finalScore\":{Num(f.FinalScore)},\"iv\":{Num(f.RepIv)},\"rule\":{(f.RuleName == null ? "null" : $"\"{f.RuleName}\"")},\"lineage\":{f.LineageId},\"breakevens\":{JsonDecimals(f.Breakevens)},\"legs\":[{legs}]}}");
 		}
 	}
+
+	private static string JsonDecimals(IReadOnlyList<decimal>? values) =>
+		values == null ? "null" : "[" + string.Join(",", values.Select(v => v.ToString(System.Globalization.CultureInfo.InvariantCulture))) + "]";
 }
