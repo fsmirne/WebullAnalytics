@@ -1,6 +1,7 @@
 using Spectre.Console;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Replay;
+using WebullAnalytics.Pricing;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
 
@@ -423,7 +424,7 @@ internal sealed class BacktestRunner
 			{
 				decimal mid;
 				if (snap.Options.TryGetValue(leg.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
-					mid = SafeMid(q.Bid.Value, q.Ask.Value);
+					mid = OptionMath.HeldLegMark(q.Bid.Value, q.Ask.Value, leg.Side == Side.Buy);
 				else if (entryPriceByLineageSymbol.TryGetValue((lineage.Value, leg.Symbol), out var entry)) { mid = entry; usedFallback = true; }
 				else { mid = 0m; usedFallback = true; }
 				perContract += leg.Side == Side.Buy ? mid : -mid;
@@ -452,13 +453,6 @@ internal sealed class BacktestRunner
 		if (bid <= 0m || ask <= 0m) return side == Side.Buy ? ask : bid;
 		return ComboFill.LegPrice((bid + ask) / 2m, side == Side.Buy ? ask : bid, _cross);
 	}
-
-	/// <summary>Fair-value mark for a leg from its real bid/ask — used for MTM and profit-target/stop-loss
-	/// threshold detection, never for a realized fill (see <see cref="ExecPrice"/>). A two-sided book uses
-	/// the ordinary average; a one-sided book (one side genuinely 0) uses its one real side rather than
-	/// manufacturing a synthetic half-value nobody could mark to.</summary>
-	private static decimal SafeMid(decimal bid, decimal ask)
-		=> bid > 0m && ask > 0m ? (bid + ask) / 2m : Math.Max(bid, ask);
 
 	/// <summary>For management proposals (close/roll), re-price each leg under the active pricing mode.
 	/// Returns null if any leg lacks a usable quote.</summary>
@@ -1764,7 +1758,7 @@ internal sealed class BacktestRunner
 			if (leg.CallPut == null) continue;
 			if (!quotes.TryGetValue(leg.Symbol, out var q)) return null;
 			if (!q.Bid.HasValue || !q.Ask.HasValue) return null;
-			var mid = SafeMid(q.Bid.Value, q.Ask.Value);
+			var mid = OptionMath.HeldLegMark(q.Bid.Value, q.Ask.Value, leg.Side == Side.Buy);
 			total += leg.Side == Side.Buy ? mid : -mid;
 		}
 		return total;
@@ -1847,7 +1841,7 @@ internal sealed class BacktestRunner
 				decimal legValue;
 				if (snap.Options.TryGetValue(leg.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
 				{
-					legValue = SafeMid(q.Bid.Value, q.Ask.Value);
+					legValue = OptionMath.HeldLegMark(q.Bid.Value, q.Ask.Value, leg.Side == Side.Buy);
 				}
 				else if (snap.Underlyings.TryGetValue(pos.Ticker, out var spot) && leg.CallPut != null)
 				{

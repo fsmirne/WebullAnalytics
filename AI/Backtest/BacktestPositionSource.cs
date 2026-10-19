@@ -1,4 +1,5 @@
 using WebullAnalytics.AI.Sources;
+using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.Backtest;
 
@@ -61,7 +62,7 @@ internal sealed class BacktestPositionSource : IPositionSource
 					allLegsPriced = false;
 					break;
 				}
-				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+				var mid = OptionMath.HeldLegMark(q.Bid.Value, q.Ask.Value, leg.Side == Side.Buy);
 				perShare += leg.Side == Side.Buy ? mid : -mid;
 			}
 			if (allLegsPriced) total += perShare * Multiplier * pos.Quantity;

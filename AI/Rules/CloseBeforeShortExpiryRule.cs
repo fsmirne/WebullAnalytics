@@ -1,3 +1,5 @@
+using WebullAnalytics.Pricing;
+
 namespace WebullAnalytics.AI.Rules;
 
 /// <summary>
@@ -99,7 +101,7 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 			if (leg.CallPut == null) continue;
 			if (!ctx.Quotes.TryGetValue(leg.Symbol, out var q)) return null;
 			if (q.Bid == null || q.Ask == null || q.Ask.Value <= 0m) return null;
-			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+			var mid = OptionMath.HeldLegMark(q.Bid.Value, q.Ask.Value, leg.Side == Side.Buy);
 			total += leg.Side == Side.Buy ? mid : -mid;
 		}
 		return total;

@@ -236,6 +236,14 @@ internal static class OptionMath
 	}
 
 	/// <summary>Computes intrinsic value of an option at a given underlying price.</summary>
+	/// <summary>Per-share mark of a HELD leg — what exit thresholds (take-profit, stop) and mark-to-market read. A two-sided book
+	/// marks at mid. A one-sided book (one side genuinely 0 — the far-OTM/expiry-day norm) has no mid; it marks at the side
+	/// closing the leg would trade: a long leg at its bid (a bid-0 wing is worth $0 to sell), a short leg at its ask (falling back
+	/// to the bid when nobody offers). Neither the plain average (ask/2) nor the live side (the ask) is a price the position could
+	/// close at — both overvalue an unbid long wing, so a take-profit could fire on profit the close then fails to realize.</summary>
+	internal static decimal HeldLegMark(decimal bid, decimal ask, bool isLong) =>
+		bid > 0m && ask > 0m ? (bid + ask) / 2m : isLong ? bid : (ask > 0m ? ask : bid);
+
 	internal static decimal Intrinsic(decimal underlyingPrice, decimal strike, string callPut) =>
 		callPut == "C" ? Math.Max(0, underlyingPrice - strike) : Math.Max(0, strike - underlyingPrice);
 

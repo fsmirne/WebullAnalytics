@@ -1,3 +1,5 @@
+using WebullAnalytics.Pricing;
+
 namespace WebullAnalytics.AI.Rules;
 
 /// <summary>
@@ -105,7 +107,7 @@ internal sealed class TakeProfitRule : IManagementRule
 					Console.Error.WriteLine($"[TakeProfitRule] {p.Key}: no two-sided quote for leg {leg.Symbol} (bid={q?.Bid?.ToString() ?? "-"} ask={q?.Ask?.ToString() ?? "-"}); take-profit not evaluated this tick.");
 				return null;
 			}
-			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
+			var mid = OptionMath.HeldLegMark(q.Bid.Value, q.Ask.Value, leg.Side == Side.Buy);
 			total += leg.Side == Side.Buy ? mid : -mid;
 		}
 		return total;
