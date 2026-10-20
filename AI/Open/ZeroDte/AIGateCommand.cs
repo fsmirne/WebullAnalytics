@@ -87,7 +87,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 	/// <summary>One session, minute by minute: the tape facts alongside the state they produce.</summary>
 	private async Task<int> RenderSessionAsync(AIConfig config, ZeroDteGateConfig cfg, IntradayBarCache bars, HistoricalPriceCache closes, AIGateSettings settings, CancellationToken cancellation)
 	{
-		var date = settings.Date != null ? DateTime.ParseExact(settings.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.Today;
+		var date = settings.Date != null ? DateTime.ParseExact(settings.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : TodayEt();
 		var sessionBars = await LoadSessionAsync(bars, config.Ticker, date, cancellation);
 		if (sessionBars.Count == 0)
 		{
@@ -159,7 +159,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 	private async Task<int> RenderRangeAsync(AIConfig config, ZeroDteGateConfig cfg, IntradayBarCache bars, HistoricalPriceCache closes, AIGateSettings settings, CancellationToken cancellation)
 	{
 		var since = DateTime.ParseExact(settings.Since!, "yyyy-MM-dd", CultureInfo.InvariantCulture);
-		var until = settings.Until != null ? DateTime.ParseExact(settings.Until, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateTime.Today;
+		var until = settings.Until != null ? DateTime.ParseExact(settings.Until, "yyyy-MM-dd", CultureInfo.InvariantCulture) : TodayEt();
 		if (until < since) { Console.Error.WriteLine("--until must be on or after --since"); return 1; }
 
 		var outcomes = new List<(DateTime Date, ZeroDteGateState State, DateTime? EntryEt, string Summary)>();
@@ -209,6 +209,11 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 			AnsiConsole.MarkupLine($"[yellow]{noTape} session(s) had no tape on disk. Those are DATA gaps, not strategy decisions — the gate fails closed on them, so a backtest counts them as no-trade days.[/]");
 		return 0;
 	}
+
+	/// <summary>Today's session date in ET, Kind=Unspecified. Not DateTime.Today: that is the machine's date with
+	/// Kind=Local, which ConvertTimeToUtc(_, NyTz) rejects whenever NyTz isn't the very zone object TimeZoneInfo.Local
+	/// (always the case on Windows, where Local is "Eastern Standard Time", not "America/New_York").</summary>
+	private static DateTime TodayEt() => TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz).Date;
 
 	/// <summary>Today's regular-session bars for the ticker, oldest first. RTH-only, matching the contract
 	/// <see cref="SessionTape"/> expects (the cache serves every row on disk, pre-market included).</summary>
