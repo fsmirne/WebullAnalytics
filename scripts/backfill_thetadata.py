@@ -39,6 +39,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 import zoneinfo
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -176,6 +177,47 @@ def resolve_data_dir() -> Path:
         "Cannot resolve data dir. Set WA_DATA_DIR, e.g. "
         "export WA_DATA_DIR=/mnt/c/Users/<you>/AppData/Local/WebullAnalytics/data"
     )
+
+
+def _try_lock(handle) -> bool:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def acquire_session_lock(data_dir: Path, wait_s: int = 600):
+    """ThetaData allows one active session per login and a newer sign-in silently ends the older one, so this process and
+    wa.exe (Api/ThetaData/ThetaSessionLock.cs) never sign in at the same time: whoever holds data/thetadata.session.lock
+    owns the session. Windows: any open handle here makes wa.exe's exclusive (FileShare.None) open fail, and its exclusive
+    handle makes this open fail; msvcrt byte-locking additionally excludes a second Python run. Unix: .NET's FileShare.None
+    is an advisory flock. wa.exe holds it for seconds (an in-app quote lookup), so a batch run waits up to wait_s for it
+    rather than failing a nightly step. Returns the open handle — keep it referenced for the whole run; the OS releases it
+    on exit."""
+    path = data_dir / "thetadata.session.lock"
+    deadline = time.monotonic() + wait_s
+    waiting_logged = False
+    while True:
+        try:
+            handle = open(path, "a+b")
+            if _try_lock(handle):
+                return handle
+            handle.close()
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            sys.exit(f"ThetaData session still in use by another process after {wait_s}s (wa.exe or another backfill) - "
+                     f"{path} is held; signing in now would end its session.")
+        if not waiting_logged:
+            log.info(f"ThetaData session in use by another process ({path} held) - waiting up to {wait_s}s")
+            waiting_logged = True
+        time.sleep(5)
 
 
 def make_client(creds: str | None):
@@ -359,7 +401,6 @@ def thetacall(fn, *args, **kwargs):
     backoff. Returns None on NoDataFoundError (a legitimate empty result for that query — NOT an
     error; the caller's empty-check skips it). Non-transient errors propagate immediately;
     persistent transient errors re-raise after the retries (the watchdog then handles them)."""
-    import time
     last = None
     for attempt in range(5):
         try:
@@ -1258,7 +1299,6 @@ def _run_quotes_threaded(tickers, start, end, out_root, dte_map, rate, creds, ch
     signal would mistake a working worker that's overwriting frontier expirations for a stalled one and kill
     it — the false-stall/re-pull loop."""
     import multiprocessing as mp
-    import time
     ctx = mp.get_context("spawn")
     db_path = _quotes_db_path(out_root)
 
@@ -1539,6 +1579,7 @@ def main():
         verify_quotes(qout, tickers, args.end)
         return
 
+    session_lock = acquire_session_lock(data_dir)  # every mode below signs in; held until exit
     if args.probe:
         probe(make_client(args.creds), tickers[0])
     elif args.quotes_probe:

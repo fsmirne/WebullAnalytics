@@ -166,6 +166,7 @@ class Program
 				data.AddCommand<Data.DataOptimizeCommand>("optimize");
 				data.AddCommand<Data.DataCheckCommand>("check");
 				data.AddCommand<Data.DataStatsCommand>("stats");
+				data.AddCommand<Data.DataThetaCommand>("theta").IsHidden();
 			});
 			config.AddBranch("schwab", schwab =>
 			{
