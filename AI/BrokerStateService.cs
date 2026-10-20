@@ -40,6 +40,11 @@ internal sealed class BrokerStateService
 	// (open, close, re-open, ask again → 2 opens vs 1 close must still block).
 	private Dictionary<string, int>? _activeFingerprintCounts;
 	private Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>? _activeByFingerprint;
+	// Fingerprints of orders still WORKING — active but not fully filled (pending, partially filled, unknown
+	// status, or placed locally and not yet echoed by the broker). Close/leg-in dedup reads this, not the
+	// active multiset: a FILLED close has already shrunk the broker position, so it must not block the next
+	// close of the remainder (scale-out tranches 2/3, an auto take-profit after a manual trim).
+	private HashSet<string>? _workingFingerprints;
 	// Active-order count keyed by underlying root, so the daily cap can be scoped to the running ticker.
 	private Dictionary<string, int>? _activeOrderCountByRoot;
 
@@ -63,6 +68,10 @@ internal sealed class BrokerStateService
 
 	// Closing orders (BUY_TO_CLOSE / SELL_TO_CLOSE) don't consume the daily opening cap — de-risking an
 	// existing position must never block the day's open. Missing/unknown intent counts (fail-closed).
+	// Fully filled — the order is done and the broker position already reflects it. Anything else active
+	// (partial fill, missing status) is still working.
+	private static bool IsFilledStatus(string? status) => string.Equals(status, "FILLED", StringComparison.OrdinalIgnoreCase);
+
 	private static bool IsCloseIntent(string? positionIntent) =>
 		positionIntent != null && positionIntent.ToUpperInvariant().EndsWith("_TO_CLOSE", StringComparison.Ordinal);
 
@@ -101,6 +110,7 @@ internal sealed class BrokerStateService
 		var seenClientIds = new HashSet<string>(StringComparer.Ordinal);
 		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
 		var byFingerprint = new Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>(StringComparer.Ordinal);
+		var working = new HashSet<string>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 		// Every client_order_id the broker reported, ANY status (unlike seenClientIds, which is
 		// active-only). A local-ledger entry whose id appears here has been caught up by the broker —
@@ -120,6 +130,7 @@ internal sealed class BrokerStateService
 					var fp = FingerprintLegs(order.Legs);
 					if (string.IsNullOrEmpty(fp)) continue;
 					fingerprints[fp] = fingerprints.TryGetValue(fp, out var fpCount) ? fpCount + 1 : 1;
+					if (!IsFilledStatus(order.Status)) working.Add(fp);
 					if (!byFingerprint.TryGetValue(fp, out var list)) byFingerprint[fp] = list = new List<WebullOpenApiClient.OrderDetailOrder>();
 					list.Add(order);
 					var root = RootOf(order.Legs);
@@ -134,24 +145,27 @@ internal sealed class BrokerStateService
 		if (_ledger != null)
 		{
 			var etToday = TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz).Date;
-			MergeLedgerEntries(_ledger.ReadFor(etToday), reportedClientIds, fingerprints, rootCount);
+			MergeLedgerEntries(_ledger.ReadFor(etToday), reportedClientIds, fingerprints, working, rootCount);
 		}
 
 		_activeFingerprintCounts = fingerprints;
 		_activeByFingerprint = byFingerprint;
+		_workingFingerprints = working;
 		_activeOrderCountByRoot = rootCount;
 	}
 
 	/// <summary>Folds today's locally-placed orders into the broker snapshot. An entry is skipped once the
 	/// broker reports its client_order_id (any status — broker truth, including canceled/rejected = retryable,
-	/// governs from then on). Surviving entries count into the fingerprint multiset, and opening entries
+	/// governs from then on). Surviving entries count into the fingerprint multiset and the working set (status
+	/// unknown — it may have filled, but the broker hasn't said so yet, so fail closed), and opening entries
 	/// count toward the per-root daily cap.</summary>
-	internal static void MergeLedgerEntries(IReadOnlyList<LocalOrderLedger.Entry> entries, HashSet<string> reportedClientIds, Dictionary<string, int> fingerprints, Dictionary<string, int> rootCount)
+	internal static void MergeLedgerEntries(IReadOnlyList<LocalOrderLedger.Entry> entries, HashSet<string> reportedClientIds, Dictionary<string, int> fingerprints, HashSet<string> working, Dictionary<string, int> rootCount)
 	{
 		foreach (var e in entries)
 		{
 			if (!string.IsNullOrEmpty(e.ClientOrderId) && reportedClientIds.Contains(e.ClientOrderId)) continue;
 			fingerprints[e.Fingerprint] = fingerprints.TryGetValue(e.Fingerprint, out var c) ? c + 1 : 1;
+			working.Add(e.Fingerprint);
 			if (e.Open) rootCount[e.Root] = rootCount.TryGetValue(e.Root, out var rc) ? rc + 1 : 1;
 		}
 	}
@@ -168,6 +182,7 @@ internal sealed class BrokerStateService
 		catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]local order ledger append failed:[/] {Markup.Escape(ex.Message)} — dedup holds in-memory for this run only."); }
 		if (_activeFingerprintCounts != null)
 			_activeFingerprintCounts[fp] = _activeFingerprintCounts.TryGetValue(fp, out var c) ? c + 1 : 1;
+		_workingFingerprints?.Add(fp);
 		if (isOpen && _activeOrderCountByRoot != null)
 			_activeOrderCountByRoot[root] = _activeOrderCountByRoot.TryGetValue(root, out var rc) ? rc + 1 : 1;
 	}
@@ -182,24 +197,21 @@ internal sealed class BrokerStateService
 		return null;
 	}
 
-	/// <summary>Returns true when the proposal's leg set matches an ACTIVE order at the broker —
-	/// pending OR already filled/partial today (i.e. anything that should block a duplicate). Returns
-	/// false when <see cref="IsReady"/> is false; callers should have short-circuited beforehand.</summary>
-	public bool HasPendingMatching(IEnumerable<(string Symbol, string Action)> proposalLegs)
-	{
-		if (_activeFingerprintCounts == null) return false;
-		var fp = FingerprintProposal(proposalLegs);
-		return _activeFingerprintCounts.ContainsKey(fp);
-	}
+	/// <summary>Returns true when the proposal's leg set matches a WORKING order — pending, partially filled,
+	/// or placed by this machine and not yet reported by the broker. Close and leg-in dedup: never stack a
+	/// second order on one still resting. A fully FILLED order does not match — it already changed the broker
+	/// position the caller sized from, so a further close of the remainder is legitimate. Returns false when
+	/// <see cref="IsReady"/> is false; callers should have short-circuited beforehand.</summary>
+	public bool HasPendingMatching(IEnumerable<(string Symbol, string Action)> proposalLegs) =>
+		_workingFingerprints != null && _workingFingerprints.Contains(FingerprintProposal(proposalLegs));
 
 	/// <summary>Opener-side dedup: blocks only while today's matching OPEN orders outnumber the matching
 	/// CLOSES (a close is the same legs with sides inverted — a distinct fingerprint). A structure opened
 	/// and then closed today nets to zero and may be deliberately re-opened (live 2026-06-11: the morning's
 	/// DoubleDiagonal, closed before noon, blocked the afternoon's `scan --submit-override` re-entry); a
 	/// just-filled un-closed open stays net-positive and keeps blocking. ONLY for opening proposals — the
-	/// management executor's close dedup must stay presence-based (<see cref="HasPendingMatching"/>):
-	/// netting a close against its same-day open would report 0 while a close order rests, enabling a
-	/// double-close.</summary>
+	/// management executor's close dedup uses the working set (<see cref="HasPendingMatching"/>): netting a
+	/// close against its same-day open would report 0 while a close order rests, enabling a double-close.</summary>
 	public bool HasNetOpenMatching(IEnumerable<(string Symbol, string Action)> proposalLegs)
 	{
 		if (_activeFingerprintCounts == null) return false;
@@ -298,6 +310,7 @@ internal sealed class BrokerStateService
 			AnsiConsole.MarkupLine($"[yellow]broker state refresh failed:[/] {Markup.Escape(ex.Message)} — auto-execute skipped this tick (fail-closed).");
 			_activeFingerprintCounts = null;
 			_activeByFingerprint = null;
+			_workingFingerprints = null;
 			_activeOrderCountByRoot = null;
 			LastRefreshError = ex.Message;
 			ok = false;

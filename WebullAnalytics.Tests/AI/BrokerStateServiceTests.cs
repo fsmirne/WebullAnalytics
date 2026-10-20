@@ -120,10 +120,11 @@ public class BrokerStateServiceTests
 		Assert.False(IsCloseIntent("SOMETHING_ELSE"));
 	}
 
-	private static BrokerStateService SeededService(Dictionary<string, int> fingerprintCounts)
+	private static BrokerStateService SeededService(Dictionary<string, int> fingerprintCounts, HashSet<string>? working = null)
 	{
 		var svc = (BrokerStateService)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(BrokerStateService));
 		typeof(BrokerStateService).GetField("_activeFingerprintCounts", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(svc, fingerprintCounts);
+		typeof(BrokerStateService).GetField("_workingFingerprints", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(svc, working ?? new HashSet<string>(StringComparer.Ordinal));
 		return svc;
 	}
 
@@ -140,10 +141,39 @@ public class BrokerStateServiceTests
 			[FingerprintProposal(OpenLegs)] = 1,
 			[FingerprintProposal(CloseLegs)] = 1,
 		};
-		var svc = SeededService(counts);
+		var svc = SeededService(counts, new HashSet<string>(StringComparer.Ordinal) { FingerprintProposal(CloseLegs) });
 		Assert.False(svc.HasNetOpenMatching(OpenLegs));
-		// The close-side dedup must stay presence-based: a resting close still blocks a second close.
+		// The close-side dedup is not netted: a resting close still blocks a second close.
 		Assert.True(svc.HasPendingMatching(CloseLegs));
+	}
+
+	[Fact]
+	public void PendingMatching_FilledCloseDoesNotBlockNextClose()
+	{
+		// Scale-out: tranche 1's close FILLED and shrank the position; tranches 2/3 share its leg set and must
+		// still fire. Same for an auto take-profit after a manual partial trim of the same position.
+		var counts = new Dictionary<string, int>(StringComparer.Ordinal) { [FingerprintProposal(CloseLegs)] = 1 };
+		Assert.False(SeededService(counts).HasPendingMatching(CloseLegs));
+	}
+
+	[Fact]
+	public void PendingMatching_WorkingCloseBlocks()
+	{
+		var counts = new Dictionary<string, int>(StringComparer.Ordinal) { [FingerprintProposal(CloseLegs)] = 2 };
+		var svc = SeededService(counts, new HashSet<string>(StringComparer.Ordinal) { FingerprintProposal(CloseLegs) });
+		Assert.True(svc.HasPendingMatching(CloseLegs));
+	}
+
+	[Theory]
+	[InlineData("FILLED", true)]
+	[InlineData("filled", true)]
+	[InlineData("PARTIALLY_FILLED", false)]
+	[InlineData("WORKING", false)]
+	[InlineData(null, false)]
+	public void FilledStatus_OnlyFullFillsLeaveTheWorkingSet(string? status, bool filled)
+	{
+		var m = typeof(BrokerStateService).GetMethod("IsFilledStatus", BindingFlags.NonPublic | BindingFlags.Static)!;
+		Assert.Equal(filled, (bool)m.Invoke(null, new object?[] { status })!);
 	}
 
 	[Fact]

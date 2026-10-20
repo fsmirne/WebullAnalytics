@@ -45,11 +45,13 @@ public class LocalOrderLedgerTests : IDisposable
 		// The live failure: order placed and filled, broker history hasn't caught up yet.
 		var entries = new[] { new LocalOrderLedger.Entry("2026-06-11", "SPY", true, "fp-dd-call", "cid-1") };
 		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
+		var working = new HashSet<string>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, rootCount);
+		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, working, rootCount);
 
 		Assert.Equal(1, fingerprints["fp-dd-call"]);
+		Assert.Contains("fp-dd-call", working); // status unknown until the broker echoes it — fail closed
 		Assert.Equal(1, rootCount["SPY"]);
 	}
 
@@ -61,11 +63,13 @@ public class LocalOrderLedgerTests : IDisposable
 		var entries = new[] { new LocalOrderLedger.Entry("2026-06-11", "SPY", true, "fp-dd-call", "cid-1") };
 		var reported = new HashSet<string>(StringComparer.Ordinal) { "cid-1" };
 		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
+		var working = new HashSet<string>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-		BrokerStateService.MergeLedgerEntries(entries, reported, fingerprints, rootCount);
+		BrokerStateService.MergeLedgerEntries(entries, reported, fingerprints, working, rootCount);
 
 		Assert.Empty(fingerprints);
+		Assert.Empty(working);
 		Assert.False(rootCount.ContainsKey("SPY"));
 	}
 
@@ -77,9 +81,10 @@ public class LocalOrderLedgerTests : IDisposable
 		// fingerprint multiset and cap must both grow.
 		var entries = new[] { new LocalOrderLedger.Entry("2026-06-11", "SPY", true, "fp-dd-call", null) };
 		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal) { ["fp-dd-call"] = 1 };
+		var working = new HashSet<string>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase) { ["SPY"] = 1 };
 
-		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, rootCount);
+		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, working, rootCount);
 
 		Assert.Equal(2, fingerprints["fp-dd-call"]);
 		Assert.Equal(2, rootCount["SPY"]);
@@ -90,9 +95,10 @@ public class LocalOrderLedgerTests : IDisposable
 	{
 		var entries = new[] { new LocalOrderLedger.Entry("2026-06-11", "SPY", false, "fp-close", "cid-9") };
 		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
+		var working = new HashSet<string>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, rootCount);
+		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, working, rootCount);
 
 		Assert.Equal(1, fingerprints["fp-close"]);
 		Assert.False(rootCount.ContainsKey("SPY"));

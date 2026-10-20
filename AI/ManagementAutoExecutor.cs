@@ -268,12 +268,13 @@ internal sealed class ManagementAutoExecutor
 			})
 			.ToList();
 
-		// Broker-truth dedup: if the same closing combo is already working (or filled today) at the
-		// broker, skip — don't stack a second close. The in-memory _firedTranches bookkeeping can't see
-		// orders placed before a restart or by a concurrent watch/scan process; this leg-set match (the
-		// same mechanism the leg-in path uses) covers the "limit placed but unfilled, then relaunched"
-		// case. Return false so we DON'T mark the tranche fired: broker truth keeps gating each tick while
-		// the order rests, and we legitimately re-fire only if it's canceled (fingerprint disappears).
+		// Broker-truth dedup: if the same closing combo is still working at the broker, skip — don't stack a
+		// second close. The in-memory _firedTranches bookkeeping can't see orders placed before a restart or
+		// by a concurrent watch/scan process; this leg-set match (the same mechanism the leg-in path uses)
+		// covers the "limit placed but unfilled, then relaunched" case. A FILLED close doesn't block: it
+		// already shrank position.Quantity, so tranches 2/3 (same leg set as tranche 1) close the remainder.
+		// Return false so we DON'T mark the tranche fired: broker truth keeps gating each tick while the
+		// order rests, and we re-fire once it fills or is canceled (fingerprint leaves the working set).
 		if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(legSpecs.Select(l => (l.Symbol, l.Action))))
 		{
 			AnsiConsole.MarkupLine($"[yellow]auto-execute skipped (broker pending):[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(position.Key)} close — matching order already at broker.");

@@ -184,7 +184,7 @@ internal sealed class TradeCloseCommand : AsyncCommand<TradeCloseSettings>
 		// without it, confirm at y/N defaulting to No.
 		if (!s.Submit && !TradeContext.Confirm($"Submit {plans.Count} close order(s)?")) { AnsiConsole.MarkupLine("[dim]Preview only. Exiting.[/]"); return 0; }
 
-		// 5. Broker-truth dedup: don't stack a second close onto one already working/filled.
+		// 5. Broker-truth dedup: don't stack a second close onto one still working.
 		var brokerState = new BrokerStateService(account, LocalOrderLedger.Default());
 		if (!await brokerState.TryRefreshAsync(cancellation)) return 3;
 
