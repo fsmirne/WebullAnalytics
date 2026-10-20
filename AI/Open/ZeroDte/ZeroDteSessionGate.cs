@@ -84,16 +84,16 @@ internal static class ZeroDteSessionGate
 
 		var tape = SessionTape.Build(rthBars, prevClose, cfg.Direction.MinGapPct, cfg.Range.WindowMinutes, cfg.Range.BoundaryTolerancePct);
 		if (tape == null)
-			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.NoTape, null, "no RTH minute tape for this session — gate cannot confirm conditions, entry withheld");
+			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.NoTape, null, "no RTH tape — entry withheld");
 
 		if (ParsingHelpers.TryParseClockTime(cfg.LatestEntryEt, out var latest) && tod > latest)
-			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.PastCutoff, tape, $"past latest entry {cfg.LatestEntryEt} ET — entry window closed, no new entries today");
+			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.PastCutoff, tape, $"entry window closed at {cfg.LatestEntryEt} ET");
 
 		if (ParsingHelpers.TryParseClockTime(cfg.EarliestEntryEt, out var earliest) && tod < earliest)
-			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.BeforeWindow, tape, $"before earliest entry {cfg.EarliestEntryEt} ET — letting the session reveal its structure");
+			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.BeforeWindow, tape, $"before {cfg.EarliestEntryEt} ET window");
 
 		if (tape.BarCount < cfg.MinBarsBeforeDecision)
-			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.WarmingUp, tape, $"only {tape.BarCount} of {cfg.MinBarsBeforeDecision} bars printed — warming up");
+			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.WarmingUp, tape, $"warming up ({tape.BarCount}/{cfg.MinBarsBeforeDecision} bars)");
 
 		var choppy = cfg.Direction.MaxVwapFlips > 0 && tape.VwapFlips > cfg.Direction.MaxVwapFlips;
 
@@ -114,19 +114,19 @@ internal static class ZeroDteSessionGate
 					ProtectiveCallLevel: bull ? null : RangeLevel(cfg, tape, above: true),
 					ProtectivePutLevel: bull ? RangeLevel(cfg, tape, above: false) : null,
 					tape,
-					$"{(bull ? "BULLISH" : "BEARISH")} confirmed ({DescribeDirection(cfg.Direction, tape)}) → {(bull ? "bull put" : "bear call")} spread");
+					$"{(bull ? "BULLISH" : "BEARISH")}: {DescribeDirection(cfg.Direction, tape)} → {(bull ? "bull put" : "bear call")}");
 			}
 
 			// Not directional — fall through to the balanced test, remembering why.
 			var rangeVerdict = TryRange(cfg, tape, tod);
 			if (rangeVerdict != null) return rangeVerdict;
-			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.WaitingForConfirmation, tape, $"waiting — {missing}; no established range either ({DescribeRange(cfg, tape, tod)})");
+			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.WaitingForConfirmation, tape, $"{missing}; no range: {RangeShortfall(cfg, tape, tod)}");
 		}
 
 		// Choppy: directional is vetoed, but chop is what builds a range, so the balanced state still applies.
 		var choppyRange = TryRange(cfg, tape, tod);
 		if (choppyRange != null) return choppyRange;
-		return ZeroDteGateVerdict.Blocked(ZeroDteGateState.Choppy, tape, $"choppy — {tape.VwapFlips} VWAP flips exceeds max {cfg.Direction.MaxVwapFlips}, and no established range ({DescribeRange(cfg, tape, tod)})");
+		return ZeroDteGateVerdict.Blocked(ZeroDteGateState.Choppy, tape, $"choppy: {tape.VwapFlips} flips > {cfg.Direction.MaxVwapFlips}; no range: {RangeShortfall(cfg, tape, tod)}");
 	}
 
 	/// <summary>Balanced/range state per <see cref="ZeroDteRangeConfig"/>. Returns null when the session is
@@ -150,7 +150,7 @@ internal static class ZeroDteSessionGate
 			ProtectiveCallLevel: RangeLevel(cfg, tape, above: true),
 			ProtectivePutLevel: RangeLevel(cfg, tape, above: false),
 			tape,
-			$"BALANCED confirmed (range {tape.WindowLow:F2}–{tape.WindowHigh:F2}, {tape.WindowRangePct:F2}% over {tape.WindowBars}m, {tape.WindowLowTouches}/{tape.WindowHighTouches} boundary tests, {tape.VwapFlips} VWAP crosses) → iron condor");
+			$"BALANCED {tape.WindowLow:F2}–{tape.WindowHigh:F2} ({tape.WindowRangePct:F2}%/{tape.WindowBars}m, tests {tape.WindowLowTouches}/{tape.WindowHighTouches}, {tape.VwapFlips} crosses) → iron condor");
 	}
 
 	/// <summary>Reads the configured directional signal. Returns +1 bullish / −1 bearish / 0 unconfirmed,
@@ -160,19 +160,19 @@ internal static class ZeroDteSessionGate
 		switch ((cfg.Mode ?? "gapAndVwap").ToLowerInvariant())
 		{
 			case "off":
-				return (0, "direction.mode=off");
+				return (0, "direction off");
 
 			case "vwaponly":
 			{
-				if (tape.Side == VwapSide.At) return (0, "price sitting exactly on VWAP");
+				if (tape.Side == VwapSide.At) return (0, "price on VWAP");
 				if (tape.MinutesHeldOnSide < cfg.MinVwapHoldMinutes)
-					return (0, $"only {tape.MinutesHeldOnSide}m held {Describe(tape.Side)} VWAP, need {cfg.MinVwapHoldMinutes}m");
+					return (0, $"{Describe(tape.Side)} VWAP {tape.MinutesHeldOnSide}m, need {cfg.MinVwapHoldMinutes}m");
 				return (tape.Side == VwapSide.Above ? 1 : -1, "");
 			}
 
 			case "netchange":
 			{
-				if (prevClose is not > 0m) return (0, "no prior close available for net-change read");
+				if (prevClose is not > 0m) return (0, "no prior close");
 				var net = tape.Spot - prevClose.Value;
 				if (net == 0m) return (0, "unchanged on the day");
 				return (net > 0m ? 1 : -1, "");
@@ -180,20 +180,20 @@ internal static class ZeroDteSessionGate
 
 			case "composite":
 			{
-				if (!compositeBias.HasValue) return (0, "intraday composite bias unavailable");
-				if (compositeBias.Value == 0m) return (0, "composite bias exactly neutral");
+				if (!compositeBias.HasValue) return (0, "composite bias unavailable");
+				if (compositeBias.Value == 0m) return (0, "composite bias neutral");
 				return (compositeBias.Value > 0m ? 1 : -1, "");
 			}
 
 			default: // "gapAndVwap" — the published Class #02 rule.
 			{
 				if (tape.Gap == GapDirection.Flat)
-					return (0, $"gap {tape.GapPct:+0.00;-0.00}% is flat (< {cfg.MinGapPct}%), no initial bias");
+					return (0, $"flat gap {tape.GapPct:+0.00;-0.00}%");
 				var wantSide = tape.Gap == GapDirection.Bull ? VwapSide.Above : VwapSide.Below;
 				if (tape.Side != wantSide)
-					return (0, $"{(tape.Gap == GapDirection.Bull ? "bull" : "bear")} gap {tape.GapPct:+0.00;-0.00}% but price {Describe(tape.Side)} VWAP — unconfirmed, waiting for {(wantSide == VwapSide.Above ? "reclaim" : "break")}");
+					return (0, $"{(tape.Gap == GapDirection.Bull ? "bull" : "bear")} gap but {Describe(tape.Side)} VWAP");
 				if (tape.MinutesHeldOnSide < cfg.MinVwapHoldMinutes)
-					return (0, $"gap and VWAP agree but only {tape.MinutesHeldOnSide}m held, need {cfg.MinVwapHoldMinutes}m");
+					return (0, $"gap+VWAP agree, held {tape.MinutesHeldOnSide}m, need {cfg.MinVwapHoldMinutes}m");
 				return (tape.Gap == GapDirection.Bull ? 1 : -1, "");
 			}
 		}
@@ -218,11 +218,18 @@ internal static class ZeroDteSessionGate
 	private static string DescribeDirection(ZeroDteDirectionConfig cfg, SessionTape tape)
 		=> $"gap {tape.GapPct:+0.00;-0.00}%, {Describe(tape.Side)} VWAP {tape.MinutesHeldOnSide}m, {tape.VwapFlips} flips";
 
-	private static string DescribeRange(ZeroDteGateConfig cfg, SessionTape tape, TimeSpan tod)
+	/// <summary>Only the balanced-state conditions that failed, in <see cref="TryRange"/>'s order — the full checklist
+	/// repeats what the table's columns already show.</summary>
+	private static string RangeShortfall(ZeroDteGateConfig cfg, SessionTape tape, TimeSpan tod)
 	{
-		if (!cfg.Range.Enabled) return "range state disabled";
-		if (ParsingHelpers.TryParseClockTime(cfg.Range.EarliestEntryEt, out var floor) && tod < floor)
-			return $"range state not open until {cfg.Range.EarliestEntryEt} ET";
-		return $"range {tape.WindowRangePct:F2}% vs max {cfg.Range.MaxRangePct}%, tests {tape.WindowLowTouches}/{tape.WindowHighTouches} vs min {cfg.Range.MinBoundaryTouches}, crosses {tape.VwapFlips} vs min {cfg.Range.MinVwapCrosses}";
+		var r = cfg.Range;
+		if (!r.Enabled) return "range state off";
+		if (ParsingHelpers.TryParseClockTime(r.EarliestEntryEt, out var floor) && tod < floor) return $"opens {r.EarliestEntryEt} ET";
+		var misses = new List<string>();
+		if (tape.WindowBars < r.WindowMinutes) misses.Add($"window {tape.WindowBars}/{r.WindowMinutes}m");
+		if (r.MaxRangePct > 0m && tape.WindowRangePct > r.MaxRangePct) misses.Add($"{tape.WindowRangePct:F2}% > {r.MaxRangePct}%");
+		if (tape.WindowLowTouches < r.MinBoundaryTouches || tape.WindowHighTouches < r.MinBoundaryTouches) misses.Add($"tests {tape.WindowLowTouches}/{tape.WindowHighTouches} < {r.MinBoundaryTouches}");
+		if (tape.VwapFlips < r.MinVwapCrosses) misses.Add($"crosses {tape.VwapFlips} < {r.MinVwapCrosses}");
+		return string.Join(", ", misses);
 	}
 }

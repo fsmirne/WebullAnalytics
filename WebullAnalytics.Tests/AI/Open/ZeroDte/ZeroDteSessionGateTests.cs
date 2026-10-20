@@ -57,7 +57,7 @@ public class ZeroDteSessionGateTests
 		Assert.Equal(ZeroDteGateState.WaitingForConfirmation, v.State);
 		Assert.False(v.AllowsEntry);
 		Assert.Empty(v.AllowedStructures);
-		Assert.Contains("unconfirmed", v.Summary);
+		Assert.Contains("gap but", v.Summary);
 	}
 
 	/// <summary>A flat open carries no initial bias, so gapAndVwap has nothing to confirm however clean the
@@ -188,7 +188,7 @@ public class ZeroDteSessionGateTests
 		var late = ZeroDteSessionGate.Evaluate(cfg, bars, prevClose: 100m, compositeBias: null, Et(12, 30));
 
 		Assert.Equal(ZeroDteGateState.WaitingForConfirmation, early.State);
-		Assert.Contains("not open until 12:00", early.Summary);
+		Assert.Contains("opens 12:00", early.Summary);
 		Assert.Equal(ZeroDteGateState.RangeConfirmed, late.State);
 	}
 
@@ -279,6 +279,6 @@ public class ZeroDteSessionGateTests
 
 		Assert.Equal(ZeroDteGateState.NoTape, v.State);
 		Assert.False(v.AllowsEntry);
-		Assert.Contains("no RTH minute tape", v.Summary);
+		Assert.Contains("no RTH tape", v.Summary);
 	}
 }
