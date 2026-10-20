@@ -5,6 +5,7 @@ using System.Globalization;
 using WebullAnalytics.AI.Backtest;
 using WebullAnalytics.AI.Events;
 using WebullAnalytics.AI.Replay;
+using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
 using WebullAnalytics.Sentiment;
 using WebullAnalytics.Utils;
@@ -564,7 +565,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 			spyByDate.TryGetValue(d, out var spyOnDay);
 			var spxOnDay = spxByDate[d];
-			var merged = IntradayTapeBackfill.MergeSpxAndSpy(spxOnDay, spyOnDay ?? new List<MinuteBar>());
+			var merged = SpxFamilyTape.Merge(spxOnDay, spyOnDay ?? new List<MinuteBar>());
 			if (merged.Count == 0)
 			{
 				skipped.Add((d, "no usable bars after merge"));

@@ -81,9 +81,8 @@ internal static class WebullIntradayBars
 		};
 	}
 
-	/// <summary>Fetches SPX RTH bars and SPY extended-hours bars in parallel, converts SPY bars to
-	/// SPX scale using <c>spxPrevClose / spyPrevClose</c>, and returns the merged series. SPX bars
-	/// win on any timestamp covered by both; SPY-converted bars fill pre/post-market gaps. Falls
+	/// <summary>Fetches SPX RTH bars and SPY extended-hours bars in parallel and splices them via
+	/// <see cref="SpxFamilyTape.Merge"/> (SPX wins on overlap, SPY scaled into index units, volume 0). Falls
 	/// back to SPX-only on SPY resolution failure or insufficient data to compute the ratio.</summary>
 	private static async Task<IReadOnlyList<MinuteBar>> FetchSpxWithSpyExtendedAsync(
 		ApiConfig apiConfig,
@@ -101,7 +100,7 @@ internal static class WebullIntradayBars
 			if (!resolved.TryGetValue("SPY", out spyId))
 			{
 				Console.WriteLine("Webull intraday: could not resolve SPY tickerId for pre-market proxy; using SPX RTH only.");
-				return await spxTask;
+				return SpxFamilyTape.Merge(await spxTask, Array.Empty<MinuteBar>());
 			}
 			tickerIds.TryAdd("SPY", spyId);
 		}
@@ -111,38 +110,12 @@ internal static class WebullIntradayBars
 		var spxBars = await spxTask;
 		var spyBars = await spyTask;
 
-		if (spyBars.Count == 0 || spxBars.Count == 0) return spxBars;
-
 		// Ratio = SPX / SPY at an overlapping timestamp during today's RTH. Picking a common minute
 		// is more reliable than yesterday's close (which would require Webull to return historical
 		// bars going back across the overnight gap — often capped to the recent session only). The
 		// SPX/SPY ratio drifts very little intraday; one overlap is sufficient for converting the
 		// pre/post-market SPY bars into SPX scale.
-		var ratio = TryDeriveRatioFromOverlap(spxBars, spyBars);
-		if (!ratio.HasValue || ratio.Value <= 0m) return spxBars;
-
-		var spxTimestamps = new HashSet<long>(spxBars.Count);
-		foreach (var b in spxBars) spxTimestamps.Add(b.Timestamp.ToUnixTimeSeconds());
-
-		var ratioValue = ratio.Value;
-		var merged = new List<MinuteBar>(spxBars.Count + spyBars.Count);
-		merged.AddRange(spxBars);
-		foreach (var b in spyBars)
-		{
-			if (spxTimestamps.Contains(b.Timestamp.ToUnixTimeSeconds())) continue;
-			// Round to 2 decimals to match SPX's native precision. Decimal arithmetic preserves full
-			// precision through the multiplication; without rounding, the CSV would carry 28-digit
-			// values which are noisy and break visual comparison with native SPX rows.
-			merged.Add(new MinuteBar(
-				b.Timestamp,
-				Math.Round(b.Open * ratioValue, 2),
-				Math.Round(b.High * ratioValue, 2),
-				Math.Round(b.Low * ratioValue, 2),
-				Math.Round(b.Close * ratioValue, 2),
-				b.Volume));
-		}
-		merged.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
-		return merged;
+		return SpxFamilyTape.Merge(spxBars, spyBars);
 	}
 
 	/// <summary>Range-based historical fetch that paginates Webull's <c>query-mini</c> from
@@ -172,7 +145,8 @@ internal static class WebullIntradayBars
 		IReadOnlyList<MinuteBar> primaryBars;
 		IReadOnlyList<MinuteBar> spyBars = Array.Empty<MinuteBar>();
 
-		if (SpxFamilyTickers.Contains(ticker))
+		var isSpxFamily = SpxFamilyTickers.Contains(ticker);
+		if (isSpxFamily)
 		{
 			log?.Invoke($"paginating {ticker} RTH bars…");
 			primaryBars = await WebullChartsClient.FetchPaginatedHistoricalMinuteBarsAsync(
@@ -228,7 +202,8 @@ internal static class WebullIntradayBars
 		{
 			primaryByDate.TryGetValue(d, out var primary);
 			spyByDate.TryGetValue(d, out var spy);
-			var merged = MergeSpxAndSpyForDate(primary ?? new List<MinuteBar>(), spy ?? new List<MinuteBar>());
+			// Non-SPX tickers have no SPY splice: primary already carries their own ext-hours bars and real volume.
+			var merged = isSpxFamily ? SpxFamilyTape.Merge(primary ?? new List<MinuteBar>(), spy ?? new List<MinuteBar>()) : primary ?? new List<MinuteBar>();
 			if (merged.Count > 0) result[d] = merged;
 		}
 		return result;
@@ -245,65 +220,5 @@ internal static class WebullIntradayBars
 		}
 		foreach (var list in byDate.Values) list.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
 		return byDate;
-	}
-
-	private static List<MinuteBar> MergeSpxAndSpyForDate(List<MinuteBar> primary, List<MinuteBar> spy)
-	{
-		if (primary.Count == 0 && spy.Count == 0) return new List<MinuteBar>();
-		// Non-SPX-family path: primary already includes ext-hours, no SPY to merge.
-		if (spy.Count == 0) return new List<MinuteBar>(primary);
-		// SPX-family with no SPX (truncated day): no fallback — we'd be emitting SPY values without
-		// a meaningful overlap to compute the ratio at. Caller decides what to do; we return empty.
-		if (primary.Count == 0) return new List<MinuteBar>();
-
-		var ratio = TryDeriveRatioFromOverlap(primary, spy);
-		if (!ratio.HasValue || ratio.Value <= 0m) return new List<MinuteBar>(primary);
-
-		var primaryTimestamps = new HashSet<long>(primary.Count);
-		foreach (var b in primary) primaryTimestamps.Add(b.Timestamp.ToUnixTimeSeconds());
-
-		var ratioValue = ratio.Value;
-		var merged = new List<MinuteBar>(primary.Count + spy.Count);
-		merged.AddRange(primary);
-		foreach (var b in spy)
-		{
-			if (primaryTimestamps.Contains(b.Timestamp.ToUnixTimeSeconds())) continue;
-			merged.Add(new MinuteBar(
-				b.Timestamp,
-				Math.Round(b.Open * ratioValue, 2),
-				Math.Round(b.High * ratioValue, 2),
-				Math.Round(b.Low * ratioValue, 2),
-				Math.Round(b.Close * ratioValue, 2),
-				b.Volume));
-		}
-		merged.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
-		return merged;
-	}
-
-	/// <summary>Returns SPX/SPY ratio computed from the most-recent bar that exists in both series at
-	/// the same minute timestamp. Walks SPX bars from newest backward, looking for a matching SPY
-	/// timestamp; falls back to null when no overlap exists (e.g., one series is empty or both are
-	/// in different sessions). Using the most recent overlap rather than the oldest keeps the ratio
-	/// closest to current basis.</summary>
-	private static decimal? TryDeriveRatioFromOverlap(IReadOnlyList<MinuteBar> spxBars, IReadOnlyList<MinuteBar> spyBars)
-	{
-		if (spxBars.Count == 0 || spyBars.Count == 0) return null;
-
-		var spyByTimestamp = new Dictionary<long, decimal>(spyBars.Count);
-		foreach (var b in spyBars)
-		{
-			if (b.Close <= 0m) continue;
-			spyByTimestamp[b.Timestamp.ToUnixTimeSeconds()] = b.Close;
-		}
-		if (spyByTimestamp.Count == 0) return null;
-
-		for (int i = spxBars.Count - 1; i >= 0; i--)
-		{
-			var ts = spxBars[i].Timestamp.ToUnixTimeSeconds();
-			if (spxBars[i].Close <= 0m) continue;
-			if (spyByTimestamp.TryGetValue(ts, out var spyClose) && spyClose > 0m)
-				return spxBars[i].Close / spyClose;
-		}
-		return null;
 	}
 }

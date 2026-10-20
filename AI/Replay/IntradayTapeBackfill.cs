@@ -295,7 +295,7 @@ internal static class IntradayTapeBackfill
 	}
 
 	/// <summary>Groups SPX RTH bars and SPY ext-hours bars by NY date, then merges per-date with the
-	/// same SPX-wins-on-overlap-plus-SPY-scaled logic used by <see cref="ImportSniffedSpxAsync"/>.
+	/// same <see cref="SpxFamilyTape.Merge"/> splice every SPX-family writer uses.
 	/// Days where SPX has zero bars on that date are dropped (we'd be emitting pure SPY-scaled
 	/// without an anchor for the ratio).</summary>
 	private static Dictionary<DateTime, List<MinuteBar>> MergeSpxAndSpyByDate(IReadOnlyList<MinuteBar> spxBars, IReadOnlyList<MinuteBar> spyBars)
@@ -309,7 +309,7 @@ internal static class IntradayTapeBackfill
 		{
 			spxByDate.TryGetValue(d, out var spx);
 			spyByDate.TryGetValue(d, out var spy);
-			var merged = MergeSpxAndSpy(spx ?? new List<MinuteBar>(), spy ?? new List<MinuteBar>());
+			var merged = SpxFamilyTape.Merge(spx ?? new List<MinuteBar>(), spy ?? new List<MinuteBar>());
 			if (merged.Count > 0) result[d] = merged;
 		}
 		return result;
@@ -326,51 +326,6 @@ internal static class IntradayTapeBackfill
 		}
 		foreach (var list in by.Values) list.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
 		return by;
-	}
-
-	/// <summary>Combines SPX RTH bars (authoritative) with SPY ext-hours bars (proxy for SPX
-	/// pre/post-market, which the cash index doesn't have). SPX wins on minute overlap; SPY is scaled
-	/// by the most-recent SPX/SPY ratio observed in that day's overlap. Mirrors the live-capture path
-	/// in <see cref="WebullIntradayBars"/>.</summary>
-	internal static List<MinuteBar> MergeSpxAndSpy(List<MinuteBar> spx, List<MinuteBar> spy)
-	{
-		if (spx.Count == 0 && spy.Count == 0) return new List<MinuteBar>();
-		if (spy.Count == 0) return new List<MinuteBar>(spx);
-		if (spx.Count == 0) return new List<MinuteBar>();
-
-		decimal? ratio = null;
-		var spyByTs = new Dictionary<long, decimal>(spy.Count);
-		foreach (var b in spy) if (b.Close > 0m) spyByTs[b.Timestamp.ToUnixTimeSeconds()] = b.Close;
-		for (var i = spx.Count - 1; i >= 0; i--)
-		{
-			if (spx[i].Close <= 0m) continue;
-			if (spyByTs.TryGetValue(spx[i].Timestamp.ToUnixTimeSeconds(), out var spyClose) && spyClose > 0m)
-			{
-				ratio = spx[i].Close / spyClose;
-				break;
-			}
-		}
-		if (!ratio.HasValue || ratio.Value <= 0m) return new List<MinuteBar>(spx);
-
-		var spxTimestamps = new HashSet<long>(spx.Count);
-		foreach (var b in spx) spxTimestamps.Add(b.Timestamp.ToUnixTimeSeconds());
-
-		var ratioValue = ratio.Value;
-		var merged = new List<MinuteBar>(spx.Count + spy.Count);
-		merged.AddRange(spx);
-		foreach (var b in spy)
-		{
-			if (spxTimestamps.Contains(b.Timestamp.ToUnixTimeSeconds())) continue;
-			merged.Add(new MinuteBar(
-				b.Timestamp,
-				Math.Round(b.Open * ratioValue, 2),
-				Math.Round(b.High * ratioValue, 2),
-				Math.Round(b.Low * ratioValue, 2),
-				Math.Round(b.Close * ratioValue, 2),
-				b.Volume));
-		}
-		merged.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
-		return merged;
 	}
 
 	/// <summary>Walks every trading day in [earliestNy, endNyExclusive) (never today — live capture owns

@@ -44,7 +44,7 @@ def main():
             w.writerow(["timestamp_utc", "open", "high", "low", "close", "volume"])
             for row in r:
                 w.writerow([row["timestamp_utc"], f"{float(row['open'])/10:.2f}", f"{float(row['high'])/10:.2f}",
-                            f"{float(row['low'])/10:.2f}", f"{float(row['close'])/10:.2f}", row["volume"]])
+                            f"{float(row['low'])/10:.2f}", f"{float(row['close'])/10:.2f}", 0])  # an index has no volume
         made += 1
     print(f"{'would derive' if a.dry_run else 'derived'} {made} XSP day-file(s) from real SPXW, skipped {skipped} existing")
 
