@@ -100,16 +100,15 @@ internal sealed class ZeroDteRangeConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 
-	/// <summary>Earliest ET time the BALANCED state may confirm, "HH:mm" — separate from, and normally later
-	/// than, the gate's own <see cref="ZeroDteGateConfig.EarliestEntryEt"/>. The two states mature at
-	/// different times and the framework treats them that way: a gap+VWAP read is legible shortly after the
-	/// open, but a range is only a range once the morning has finished drawing it. The trader is explicit
-	/// about the asymmetry — his directional entries cluster at 10:15-10:30, while on range days he posts
-	/// "No trade expected before 12:30 PM New York time. I want to see whether SPX develops a clear and
-	/// well-defined range before entering anything" (08/28) and "No more trades until 12.15PM at least and
-	/// maybe 13PM, I really need time to see how market behaves and what range establishes" (09/17).
-	/// Null/empty = no separate floor (the gate's own window applies).</summary>
-	[JsonPropertyName("earliestEntryEt")] public string? EarliestEntryEt { get; set; } = "12:00";
+	/// <summary>Earliest ET time the BALANCED state may confirm, "HH:mm", when it should differ from the gate's own
+	/// <see cref="ZeroDteGateConfig.EarliestEntryEt"/>. Default none — the range state opens with the gate's window.
+	/// <para>The trader's framework delays it (directional entries cluster at 10:15-10:30, but on range days: "No trade
+	/// expected before 12:30 PM New York time. I want to see whether SPX develops a clear and well-defined range before
+	/// entering anything", 08/28; "No more trades until 12.15PM at least and maybe 13PM", 09/17), so the replication
+	/// layers (CLASS*) pin "12:00". No study supports a particular time: the 09-26 calibration showed a 12:00 entry
+	/// helps with or without the gate (it is the clock, not the range read), and IC entries at the 12:00-floored
+	/// BALANCED confirmation lost money (2026-10-20, PF 0.92 vs a time-matched control).</para></summary>
+	[JsonPropertyName("earliestEntryEt")] public string? EarliestEntryEt { get; set; }
 
 	/// <summary>Trailing window, in minutes, over which the range must hold.</summary>
 	[JsonPropertyName("windowMinutes")] public int WindowMinutes { get; set; } = 45;

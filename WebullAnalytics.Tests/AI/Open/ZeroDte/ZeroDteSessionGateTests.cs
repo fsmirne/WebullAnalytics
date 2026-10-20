@@ -192,16 +192,16 @@ public class ZeroDteSessionGateTests
 		Assert.Equal(ZeroDteGateState.RangeConfirmed, late.State);
 	}
 
-	/// <summary>Clearing the floor restores the old behaviour, so the asymmetry is opt-out.</summary>
+	/// <summary>With no separate floor (the default) the range state opens with the gate's own window; the later floor
+	/// is opt-in per layer.</summary>
 	[Fact]
-	public void RangeFloorCanBeDisabled()
+	public void RangeFloor_DefaultsToTheGateWindow()
 	{
 		var bars = Enumerable.Range(0, 60).Select(i => Bar(i, i % 2 == 0 ? 99.8m : 100.2m, high: 100.2m, low: 99.8m)).ToList();
 		var cfg = Cfg(c =>
 		{
 			c.Direction.Mode = "off";
 			c.Direction.MaxVwapFlips = 0;
-			c.Range.EarliestEntryEt = null;
 			c.Range.WindowMinutes = 45;
 			c.Range.MaxRangePct = 0.6m;
 			c.Range.MinBoundaryTouches = 2;
