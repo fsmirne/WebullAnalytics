@@ -131,11 +131,16 @@ internal sealed class ZeroDteRangeConfig
 	/// percent of spot.</summary>
 	[JsonPropertyName("boundaryTolerancePct")] public decimal BoundaryTolerancePct { get; set; } = 0.03m;
 
-	/// <summary>Minimum session VWAP crossings for the tape to read as rotation rather than trend —
-	/// "neither buyers nor sellers have clear control and price is rotating between defined levels".
-	/// Default 3 (median is 5 by 10:15, so this is a light requirement; the range width and boundary-test
-	/// counts do most of the discriminating).</summary>
-	[JsonPropertyName("minVwapCrosses")] public int MinVwapCrosses { get; set; } = 3;
+	/// <summary>Minimum VWAP crossings INSIDE the trailing window for the box to read as rotation rather than a
+	/// pause in a trend — "neither buyers nor sellers have clear control and price is rotating between defined
+	/// levels". Counted within the window, not over the session: a session count let morning chop certify a
+	/// later one-sided box (2026-10-20 11:09).
+	/// <para>Default 2 = one round trip across VWAP inside the box, the definitional minimum for rotation (one
+	/// cross is a level break). Measured on 1,195 SPX sessions 2022-01..2026-10 over every minute from 10:15
+	/// whose window already passes the width and touch tests: 65% have 0 window crosses (one-sided boxes);
+	/// ≥1 admits 35%, ≥2 30%, ≥3 23%. The former session-wide count (≥3) admitted 95.8% — it vetoed almost
+	/// nothing. No outcome data chose 2 over 3; the distribution only shows where the zero mass sits.</para></summary>
+	[JsonPropertyName("minVwapCrosses")] public int MinVwapCrosses { get; set; } = 2;
 }
 
 /// <summary>Class #05: the short strike must sit behind a protective level, not at a convenient delta.

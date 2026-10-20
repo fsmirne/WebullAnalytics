@@ -44,6 +44,11 @@ internal sealed record SessionTape(
 	decimal WindowLow,
 	int WindowHighTouches,
 	int WindowLowTouches,
+	/// <summary>VWAP side changes INSIDE the trailing window — the range state's rotation test. Distinct from
+	/// <see cref="VwapFlips"/> (session-wide, the chop measure): a box that sits wholly on one side of VWAP is a
+	/// pause in a trend however much the morning chopped (2026-10-20 11:09: 4 session flips, all before 10:00;
+	/// 0 inside the 10:25-11:09 box, which broke 20 minutes later).</summary>
+	int WindowVwapCrosses,
 	int WindowBars,
 	int MinutesSinceOpen,
 	int BarCount)
@@ -67,6 +72,7 @@ internal sealed record SessionTape(
 		var side = VwapSide.At;
 		var held = 0;
 		var flips = 0;
+		var flipBars = new List<int>();
 		decimal high = decimal.MinValue, low = decimal.MaxValue;
 		decimal vwap = sessionOpen;
 
@@ -85,7 +91,7 @@ internal sealed record SessionTape(
 			{
 				// A flip is a genuine side change; a bar sitting exactly on VWAP is neither side and
 				// does not count as a flip (it would double-count on the way through).
-				if (side != VwapSide.At && barSide != VwapSide.At) flips++;
+				if (side != VwapSide.At && barSide != VwapSide.At) { flips++; flipBars.Add(n); }
 				side = barSide;
 				held = 1;
 			}
@@ -108,6 +114,8 @@ internal sealed record SessionTape(
 			if (rthBars[i].High > wHigh) wHigh = rthBars[i].High;
 			if (rthBars[i].Low < wLow) wLow = rthBars[i].Low;
 		}
+		// A flip at bar i is a change against bar i−1, so only flips after the window's first bar happened inside it.
+		var windowCrosses = flipBars.Count(i => i > windowStart);
 		var tol = spot * boundaryTouchTolerancePct / 100m;
 		var highTouches = 0;
 		var lowTouches = 0;
@@ -136,6 +144,7 @@ internal sealed record SessionTape(
 			WindowLow: wLow,
 			WindowHighTouches: highTouches,
 			WindowLowTouches: lowTouches,
+			WindowVwapCrosses: windowCrosses,
 			WindowBars: windowBars,
 			MinutesSinceOpen: (int)Math.Round((last.Timestamp - rthBars[0].Timestamp).TotalMinutes),
 			BarCount: rthBars.Count);

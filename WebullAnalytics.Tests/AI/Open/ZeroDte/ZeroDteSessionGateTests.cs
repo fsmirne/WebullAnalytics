@@ -281,4 +281,26 @@ public class ZeroDteSessionGateTests
 		Assert.False(v.AllowsEntry);
 		Assert.Contains("no RTH tape", v.Summary);
 	}
+
+	/// <summary>The 2026-10-20 11:09 false range: morning chop supplies session flips, but the box itself sits
+	/// wholly above VWAP — a pause in a trend, not rotation. The range state must not confirm it.</summary>
+	[Fact]
+	public void OneSidedBox_AfterMorningChop_IsNotBalanced()
+	{
+		var chop = Enumerable.Range(0, 30).Select(i => Bar(i, i % 2 == 0 ? 100.2m : 99.8m));
+		var box = Enumerable.Range(30, 45).Select(i => Bar(i, i % 2 == 0 ? 101.1m : 101.0m, high: 101.1m, low: 101.0m));
+		var cfg = Cfg(c =>
+		{
+			c.Direction.Mode = "off";
+			c.Direction.MaxVwapFlips = 0;
+			c.Range.WindowMinutes = 45;
+			c.Range.MaxRangePct = 0.6m;
+			c.Range.MinBoundaryTouches = 2;
+		});
+
+		var v = ZeroDteSessionGate.Evaluate(cfg, chop.Concat(box).ToList(), prevClose: 100m, compositeBias: null, Et(12, 30));
+
+		Assert.NotEqual(ZeroDteGateState.RangeConfirmed, v.State);
+		Assert.Contains("crosses 0 < 2", v.Summary);
+	}
 }

@@ -154,6 +154,29 @@ public class SessionTapeTests
 	[Fact]
 	public void EmptySeries_ReturnsNull()
 		=> Assert.Null(SessionTape.Build(Array.Empty<MinuteBar>(), 100m, 0.05m, 20, 0.03m));
+
+	/// <summary>Window crosses count only side changes inside the trailing window: a morning that chops around
+	/// VWAP and then a box held wholly above it has many session flips but zero window crosses (2026-10-20 11:09).</summary>
+	[Fact]
+	public void WindowVwapCrosses_IgnoreFlipsBeforeTheWindow()
+	{
+		var chop = Enumerable.Range(0, 20).Select(i => Bar(i, i % 2 == 0 ? 100.2m : 99.8m));
+		var box = Enumerable.Range(20, 30).Select(i => Bar(i, i % 2 == 0 ? 101.1m : 101.0m));
+		var tape = SessionTape.Build(chop.Concat(box).ToList(), prevClose: 100m, minGapPct: 0.05m, rangeWindowMinutes: 20, boundaryTouchTolerancePct: 0.03m)!;
+
+		Assert.True(tape.VwapFlips > 2);
+		Assert.Equal(0, tape.WindowVwapCrosses);
+	}
+
+	/// <summary>A box that rotates around VWAP counts each side change inside it.</summary>
+	[Fact]
+	public void WindowVwapCrosses_CountRotationInsideTheWindow()
+	{
+		var bars = Enumerable.Range(0, 40).Select(i => Bar(i, i % 2 == 0 ? 100.2m : 99.8m)).ToList();
+		var tape = SessionTape.Build(bars, prevClose: 100m, minGapPct: 0.05m, rangeWindowMinutes: 20, boundaryTouchTolerancePct: 0.03m)!;
+
+		Assert.Equal(19, tape.WindowVwapCrosses); // every bar after the window's first flips side
+	}
 }
 
 // The gate's time-of-day comparisons are only correct if the evaluation instant is converted to ET. The three
@@ -193,4 +216,5 @@ public class EasternWallClockTests
 
 		Assert.Equal(new TimeSpan(10, 15, 0), et.TimeOfDay);
 	}
+
 }

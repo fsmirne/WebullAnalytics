@@ -142,7 +142,7 @@ internal static class ZeroDteSessionGate
 		if (r.MaxRangePct > 0m && tape.WindowRangePct > r.MaxRangePct) return null;
 		if (tape.WindowHighTouches < r.MinBoundaryTouches) return null;
 		if (tape.WindowLowTouches < r.MinBoundaryTouches) return null;
-		if (tape.VwapFlips < r.MinVwapCrosses) return null;
+		if (tape.WindowVwapCrosses < r.MinVwapCrosses) return null;
 
 		return new ZeroDteGateVerdict(
 			ZeroDteGateState.RangeConfirmed,
@@ -150,7 +150,7 @@ internal static class ZeroDteSessionGate
 			ProtectiveCallLevel: RangeLevel(cfg, tape, above: true),
 			ProtectivePutLevel: RangeLevel(cfg, tape, above: false),
 			tape,
-			$"BALANCED {tape.WindowLow:F2}–{tape.WindowHigh:F2} ({tape.WindowRangePct:F2}%/{tape.WindowBars}m, tests {tape.WindowLowTouches}/{tape.WindowHighTouches}, {tape.VwapFlips} crosses) → iron condor");
+			$"BALANCED {tape.WindowLow:F2}–{tape.WindowHigh:F2} ({tape.WindowRangePct:F2}%/{tape.WindowBars}m, tests {tape.WindowLowTouches}/{tape.WindowHighTouches}, {tape.WindowVwapCrosses} crosses) → iron condor");
 	}
 
 	/// <summary>Reads the configured directional signal. Returns +1 bullish / −1 bearish / 0 unconfirmed,
@@ -229,7 +229,7 @@ internal static class ZeroDteSessionGate
 		if (tape.WindowBars < r.WindowMinutes) misses.Add($"window {tape.WindowBars}/{r.WindowMinutes}m");
 		if (r.MaxRangePct > 0m && tape.WindowRangePct > r.MaxRangePct) misses.Add($"{tape.WindowRangePct:F2}% > {r.MaxRangePct}%");
 		if (tape.WindowLowTouches < r.MinBoundaryTouches || tape.WindowHighTouches < r.MinBoundaryTouches) misses.Add($"tests {tape.WindowLowTouches}/{tape.WindowHighTouches} < {r.MinBoundaryTouches}");
-		if (tape.VwapFlips < r.MinVwapCrosses) misses.Add($"crosses {tape.VwapFlips} < {r.MinVwapCrosses}");
+		if (tape.WindowVwapCrosses < r.MinVwapCrosses) misses.Add($"crosses {tape.WindowVwapCrosses} < {r.MinVwapCrosses}");
 		return string.Join(", ", misses);
 	}
 }
