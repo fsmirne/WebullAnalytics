@@ -22,8 +22,10 @@ internal enum ZeroDteGateState
 	BullConfirmed,
 	BearConfirmed,
 	RangeConfirmed,
-	/// <summary>Past <see cref="ZeroDteGateConfig.LatestEntryEt"/> with nothing ever confirmed — the day is
-	/// closed for entries. This is the "no trade today" outcome the framework treats as a valid decision.</summary>
+	/// <summary>Past <see cref="ZeroDteGateConfig.LatestEntryEt"/> — the entry window is closed and no new entry may
+	/// open today. Evaluation is per-minute and stateless, so this says nothing about whether an earlier minute
+	/// confirmed; a session that never confirmed ends here, which is the "no trade today" outcome the framework
+	/// treats as a valid decision.</summary>
 	PastCutoff
 }
 
@@ -85,7 +87,7 @@ internal static class ZeroDteSessionGate
 			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.NoTape, null, "no RTH minute tape for this session — gate cannot confirm conditions, entry withheld");
 
 		if (ParsingHelpers.TryParseClockTime(cfg.LatestEntryEt, out var latest) && tod > latest)
-			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.PastCutoff, tape, $"past latest entry {cfg.LatestEntryEt} ET with no confirmed setup — no trade today");
+			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.PastCutoff, tape, $"past latest entry {cfg.LatestEntryEt} ET — entry window closed, no new entries today");
 
 		if (ParsingHelpers.TryParseClockTime(cfg.EarliestEntryEt, out var earliest) && tod < earliest)
 			return ZeroDteGateVerdict.Blocked(ZeroDteGateState.BeforeWindow, tape, $"before earliest entry {cfg.EarliestEntryEt} ET — letting the session reveal its structure");

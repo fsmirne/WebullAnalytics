@@ -259,7 +259,7 @@ public class ZeroDteSessionGateTests
 		Assert.Equal(ZeroDteGateState.PastCutoff, v.State);
 		Assert.False(v.AllowsEntry);
 		Assert.True(v.DayClosed);
-		Assert.Contains("no trade today", v.Summary);
+		Assert.Contains("entry window closed", v.Summary);
 	}
 
 	[Fact]

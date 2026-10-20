@@ -89,7 +89,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		var bars = new IntradayBarCache((_, _, _, _, _) => Task.FromResult<IReadOnlyList<MinuteBar>>(Array.Empty<MinuteBar>()));
 		var closes = new HistoricalPriceCache();
 
-		AnsiConsole.MarkupLine($"[bold]0DTE session gate[/] {config.Ticker}  mode={cfg.Direction.Mode}  window={cfg.EarliestEntryEt ?? "open"}-{cfg.LatestEntryEt ?? "close"} ET  hold={cfg.Direction.MinVwapHoldMinutes}m  maxFlips={cfg.Direction.MaxVwapFlips}  range={cfg.Range.WindowMinutes}m/{cfg.Range.MaxRangePct}%");
+		AnsiConsole.MarkupLine($"[bold]0DTE session gate[/] {config.Ticker}  mode={cfg.Direction.Mode}  window={(string.IsNullOrWhiteSpace(cfg.EarliestEntryEt) ? "open" : cfg.EarliestEntryEt)}-{(string.IsNullOrWhiteSpace(cfg.LatestEntryEt) ? "close" : cfg.LatestEntryEt)} ET  hold={cfg.Direction.MinVwapHoldMinutes}m  maxFlips={cfg.Direction.MaxVwapFlips}  range={cfg.Range.WindowMinutes}m/{cfg.Range.MaxRangePct}%");
 
 		if (settings.Since != null)
 			return await RenderRangeAsync(config, cfg, bars, closes, settings, cancellation);

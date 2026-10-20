@@ -166,9 +166,10 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		string? windowState = null;   // last state announced: "before" / "after" / null (inside)
 		// 0DTE session gate: remember the last state rendered so a long "waiting" stretch prints once per
 		// state change rather than once per tick, and remember whether the day has been declared closed so
-		// the no-trade verdict is announced exactly once.
+		// the close is announced exactly once — as "no trade today" only if no minute ever allowed an entry.
 		var lastGateState = (Open.ZeroDte.ZeroDteGateState?)null;
 		var gateDayClosedNoted = false;
+		var gateEverAllowedEntry = false;
 
 		while (!cancellation.IsCancellationRequested && DateTime.Now < stopAt)
 		{
@@ -227,9 +228,12 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 						AnsiConsole.MarkupLine($"[{color}]gate {gateVerdict.State}: {Markup.Escape(gateVerdict.Summary)}[/]");
 						lastGateState = gateVerdict.State;
 					}
+					gateEverAllowedEntry |= gateVerdict.AllowsEntry;
 					if (gateVerdict.DayClosed && !gateDayClosedNoted)
 					{
-						AnsiConsole.MarkupLine($"[yellow]No trade today — the session never satisfied the entry conditions. Still managing open positions.[/]");
+						AnsiConsole.MarkupLine(gateEverAllowedEntry
+							? $"[yellow]Entry window closed at {Markup.Escape(config.Opener.ZeroDteGate.LatestEntryEt ?? "")} ET — no new 0DTE entries today. Still managing open positions.[/]"
+							: $"[yellow]No trade today — the session never satisfied the entry conditions. Still managing open positions.[/]");
 						gateDayClosedNoted = true;
 					}
 				}
