@@ -50,21 +50,21 @@ internal sealed class DataThetaCommand : AsyncCommand<DataThetaSettings>
 		var date = settings.Date != null ? DateOnly.ParseExact(settings.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz));
 		try
 		{
-			using var client = await ThetaDataClient.ConnectAsync(ThetaDataClient.DefaultCredsPath(), maxConcurrent: 1, TimeSpan.FromMinutes(3), cancellation);
-			var table = settings.At != null ? await client.OptionAtTimeQuoteAsync(contract, date, date, ParseTime(settings.At), cancellation)
-				: settings.From != null ? await client.OptionHistoryQuoteAsync(contract, "1m", date, ParseTime(settings.From), ParseTime(settings.To!), cancellation)
-				: await client.OptionSnapshotQuoteAsync(contract, cancellation);
-			if (table.Rows.Count == 0)
+			using var client = await ThetaDataClient.ConnectAsync(ThetaDataClient.DefaultCredsPath(), maxConcurrent: 1, stallTimeout: TimeSpan.FromMinutes(3), cancellation);
+			var table = await ThetaTable.CollectAsync(settings.At != null ? client.OptionAtTimeQuote(contract, date, date, ParseTime(settings.At), cancellation)
+				: settings.From != null ? client.OptionHistoryQuote(contract, "1m", date, date, cancellation, TimeText(settings.From), TimeText(settings.To!))
+				: client.OptionSnapshotQuote(contract, cancellation));
+			if (table.RowCount == 0)
 			{
 				AnsiConsole.MarkupLine("[yellow]no data[/] (ThetaData NOT_FOUND)");
 				return 0;
 			}
 			Console.WriteLine(string.Join(',', table.Headers));
-			foreach (var row in table.Rows)
-				Console.WriteLine(string.Join(',', row.Select(Format)));
+			for (var row = 0; row < table.RowCount; row++)
+				Console.WriteLine(string.Join(',', Enumerable.Range(0, table.Headers.Count).Select(column => Format(table.Value(row, column)))));
 			return 0;
 		}
-		catch (ThetaSessionException ex)
+		catch (Exception ex) when (ex is ThetaSessionException or ThetaStallException)
 		{
 			AnsiConsole.MarkupLine($"[red]{Markup.Escape(ex.Message)}[/]");
 			return 1;
@@ -72,6 +72,7 @@ internal sealed class DataThetaCommand : AsyncCommand<DataThetaSettings>
 	}
 
 	private static TimeOnly ParseTime(string text) => TimeOnly.ParseExact(text, ["HH:mm", "HH:mm:ss"], CultureInfo.InvariantCulture);
+	private static string TimeText(string text) => ParseTime(text).ToString("HH:mm:ss", CultureInfo.InvariantCulture);
 
 	// Round-trip formats so a value can be compared bit-for-bit against the Python library's.
 	private static string Format(object? value) => value switch

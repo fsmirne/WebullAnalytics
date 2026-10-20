@@ -13,12 +13,6 @@ namespace WebullAnalytics;
 /// backfill (another writer) and the backtest (reader). One instance is held open for the scraper session.</summary>
 internal sealed class QuoteStoreWriter : IDisposable
 {
-	// Must match scripts/import_quotes_sqlite.py SCHEMA_SQL exactly — the one canonical schema.
-	private const string SchemaSql =
-		"CREATE TABLE IF NOT EXISTS quotes (root TEXT, expiry INTEGER, date INTEGER, time_sec INTEGER, " +
-		"strike_milli INTEGER, right TEXT, bid INTEGER, ask INTEGER, bid_size INTEGER, ask_size INTEGER, " +
-		"PRIMARY KEY (root, expiry, date, strike_milli, right, time_sec)) WITHOUT ROWID";
-
 	private readonly SqliteConnection _conn;
 
 	public QuoteStoreWriter(string? dbPath = null)
@@ -28,7 +22,7 @@ internal sealed class QuoteStoreWriter : IDisposable
 		_conn.Open();
 		Exec("PRAGMA busy_timeout=60000");
 		Exec("PRAGMA journal_mode=WAL");
-		Exec(SchemaSql);
+		Exec(QuoteStoreSchema.QuotesSql);
 	}
 
 	private void Exec(string sql)

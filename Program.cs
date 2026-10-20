@@ -166,6 +166,14 @@ class Program
 				data.AddCommand<Data.DataOptimizeCommand>("optimize");
 				data.AddCommand<Data.DataCheckCommand>("check");
 				data.AddCommand<Data.DataStatsCommand>("stats");
+				data.AddCommand<Data.DataVerifyCommand>("verify");
+				data.AddBranch("backfill", backfill =>
+				{
+					backfill.SetDescription("Pull ThetaData into the canonical stores: minute NBBO and trade bars into data/quotes.db, daily EOD + open interest into data/oi.");
+					backfill.AddCommand<Data.Backfill.QuotesBackfillCommand>("quotes");
+					backfill.AddCommand<Data.Backfill.OhlcvBackfillCommand>("ohlcv");
+					backfill.AddCommand<Data.Backfill.OiBackfillCommand>("oi");
+				});
 				data.AddCommand<Data.DataThetaCommand>("theta").IsHidden();
 			});
 			config.AddBranch("schwab", schwab =>

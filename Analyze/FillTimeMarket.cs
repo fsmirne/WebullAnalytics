@@ -81,18 +81,18 @@ internal static class FillTimeMarket
 	{
 		try
 		{
-			using var client = await ThetaDataClient.ConnectAsync(ThetaDataClient.DefaultCredsPath(), maxConcurrent: 2, TimeSpan.FromMinutes(1), cancellation);
+			using var client = await ThetaDataClient.ConnectAsync(ThetaDataClient.DefaultCredsPath(), maxConcurrent: 2, stallTimeout: TimeSpan.FromMinutes(1), cancellation);
 			foreach (var boundary in boundaries)
 			{
 				var date = DateOnly.FromDateTime(boundary);
-				var tables = await Task.WhenAll(symbols.Select(symbol => client.OptionAtTimeQuoteAsync(OptionContract.FromOcc(symbol)!, date, date, TimeOnly.FromDateTime(boundary), cancellation)));
+				var tables = await Task.WhenAll(symbols.Select(symbol => ThetaTable.CollectAsync(client.OptionAtTimeQuote(OptionContract.FromOcc(symbol)!, date, date, TimeOnly.FromDateTime(boundary), cancellation))));
 				var bySymbol = symbols.Zip(tables).ToDictionary(p => p.First, p => ThetaQuotes.FirstBook(p.Second), StringComparer.OrdinalIgnoreCase);
 				if (BooksAt(symbols, symbol => bySymbol[symbol]) is { } books)
 					return (books, boundary, null);
 			}
 			return (null, default, "no book at either boundary for every leg");
 		}
-		catch (ThetaSessionException ex) { return (null, default, ex.Message); }
+		catch (Exception ex) when (ex is ThetaSessionException or ThetaStallException) { return (null, default, ex.Message); }
 		catch (Grpc.Core.RpcException ex) { return (null, default, $"{ex.StatusCode}: {ex.Status.Detail}"); }
 	}
 

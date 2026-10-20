@@ -45,7 +45,7 @@ public class ThetaDataClientTests
 		Assert.Equal(9874 * 0.01, table.Price(0, table.Column("ask")));
 		Assert.Equal(50L, table.Number(0, table.Column("bid_size")));
 		Assert.Equal("SPY", table.Text(0, table.Column("symbol")));
-		Assert.Equal(true, table.Rows[0][table.Column("flag")]);
+		Assert.Equal(true, table.Value(0, table.Column("flag")));
 	}
 
 	[Fact]
@@ -60,8 +60,8 @@ public class ThetaDataClientTests
 	public void DecodeChunkTimestampsCarryTheirZone()
 	{
 		// 1_791_983_220_000 ms = 2026-10-14 13:07:00 UTC -> 09:07:00 EDT.
-		var ny = ThetaDataClient.DecodeChunk(Chunk(QuoteTable(Row(Price(1, 8), Price(2, 8))), zstd: false)).Rows[0][1];
-		var utc = ThetaDataClient.DecodeChunk(Chunk(QuoteTable(Row(Price(1, 8), Price(2, 8), new ZonedDateTime { EpochMs = 1_791_983_220_000, Zone = WebullAnalytics.Api.ThetaData.Proto.TimeZone.Utc })), zstd: false)).Rows[0][1];
+		var ny = ThetaDataClient.DecodeChunk(Chunk(QuoteTable(Row(Price(1, 8), Price(2, 8))), zstd: false)).Value(0, 1);
+		var utc = ThetaDataClient.DecodeChunk(Chunk(QuoteTable(Row(Price(1, 8), Price(2, 8), new ZonedDateTime { EpochMs = 1_791_983_220_000, Zone = WebullAnalytics.Api.ThetaData.Proto.TimeZone.Utc })), zstd: false)).Value(0, 1);
 
 		Assert.Equal(new DateTimeOffset(2026, 10, 14, 9, 7, 0, TimeSpan.FromHours(-4)), ny);
 		Assert.Equal(TimeSpan.FromHours(-4), ((DateTimeOffset)ny!).Offset);
@@ -91,9 +91,9 @@ public class ThetaDataClientTests
 	[Fact]
 	public void TickRoundsHalfToEvenLikePython()
 	{
-		Assert.Equal(2L, ThetaQuotes.Tick(0.00025));   // round(2.5) == 2 in Python
-		Assert.Equal(4L, ThetaQuotes.Tick(0.00035));   // round(3.5) == 4
-		Assert.Null(ThetaQuotes.Tick(double.NaN));
+		Assert.Equal(2L, QuoteStoreSchema.Tick(0.00025));   // round(2.5) == 2 in Python
+		Assert.Equal(4L, QuoteStoreSchema.Tick(0.00035));   // round(3.5) == 4
+		Assert.Null(QuoteStoreSchema.Tick(double.NaN));
 	}
 
 	[Fact]
