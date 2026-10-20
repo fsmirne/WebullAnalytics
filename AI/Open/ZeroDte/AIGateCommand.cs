@@ -51,15 +51,22 @@ internal sealed class AIGateSettings : AISingleTickerSubcommandSettings
 /// emitted" in the watch log looks identical whether the session was rejected on the gap, on the VWAP hold,
 /// on chop, or on a missing tape file. Tuning any threshold without this is guesswork.</para>
 ///
-/// <para>Entirely offline — it reads <c>data/intraday/&lt;TICKER&gt;/</c> and the daily close cache, never the
-/// option chain, so it needs no market session, no credentials, and no quote store. The consequence is that
-/// it evaluates the SESSION half of the gate (state machine + protective range levels) and not the
-/// per-candidate half (GEX-wall placement and the credit floor), which need a priced book.</para></summary>
+/// <para>Reads <c>data/intraday/&lt;TICKER&gt;/</c> and the daily close cache, never the option chain, so it needs no
+/// quote store. Before replaying it heals the tape it is about to read (<see cref="HealTapeAsync"/>) through the same
+/// <see cref="IntradayTapeBackfill"/> paths `wa ai history` uses — nothing else writes SPXW minute bars unless a
+/// watch/scan happens to run, so a stale file would otherwise replay a session frozen at whenever it was last
+/// touched. The consequence of skipping the chain is that it evaluates the SESSION half of the gate (state
+/// machine + protective range levels) and not the per-candidate half (GEX-wall placement and the credit
+/// floor), which need a priced book.</para></summary>
 internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 {
 	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan RthStart = new(9, 30, 0);
 	private static readonly TimeSpan RthEnd = new(16, 0, 0);
+	// How far back the gate heals past sessions. Webull's SPX paginator only walks ~3 trading days back before
+	// truncating (see IntradayTapeBackfill.FetchSpxFamilyRthFromWebullAsync); older gaps are the nightly
+	// `wa ai history` / sniffer-import's job, and retrying them here would re-pull years of history every run.
+	private const int HealLookbackDays = 7;
 
 	protected override async Task<int> ExecuteAsync(CommandContext context, AIGateSettings settings, CancellationToken cancellation)
 		=> await AITextOutput.RunAsync(settings, "AIGate", async () =>
@@ -72,8 +79,8 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		if (!cfg.Enabled)
 			AnsiConsole.MarkupLine("[yellow]Note: opener.zeroDteGate.enabled is false in this config, so the live opener ignores the gate. Replaying its settings anyway.[/]");
 
-		// Disk-only bar source: the no-op fetcher makes a missing date read as "no tape" rather than
-		// reaching for Webull's 5-day intraday window, so a historical replay is deterministic.
+		// Disk-only bar source, read AFTER HealTapeAsync has brought the replayed sessions up to date: the no-op
+		// fetcher keeps the replay itself a pure function of what's on disk.
 		var bars = new IntradayBarCache((_, _, _, _, _) => Task.FromResult<IReadOnlyList<MinuteBar>>(Array.Empty<MinuteBar>()));
 		var closes = new HistoricalPriceCache();
 
@@ -88,6 +95,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 	private async Task<int> RenderSessionAsync(AIConfig config, ZeroDteGateConfig cfg, IntradayBarCache bars, HistoricalPriceCache closes, AIGateSettings settings, CancellationToken cancellation)
 	{
 		var date = settings.Date != null ? DateTime.ParseExact(settings.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : TodayEt();
+		await HealTapeAsync(config.Ticker, date, date, cancellation);
 		var sessionBars = await LoadSessionAsync(bars, config.Ticker, date, cancellation);
 		if (sessionBars.Count == 0)
 		{
@@ -161,6 +169,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		var since = DateTime.ParseExact(settings.Since!, "yyyy-MM-dd", CultureInfo.InvariantCulture);
 		var until = settings.Until != null ? DateTime.ParseExact(settings.Until, "yyyy-MM-dd", CultureInfo.InvariantCulture) : TodayEt();
 		if (until < since) { Console.Error.WriteLine("--until must be on or after --since"); return 1; }
+		await HealTapeAsync(config.Ticker, since, until, cancellation);
 
 		var outcomes = new List<(DateTime Date, ZeroDteGateState State, DateTime? EntryEt, string Summary)>();
 		for (var date = since.Date; date <= until.Date; date = date.AddDays(1))
@@ -208,6 +217,22 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		if (noTape > 0)
 			AnsiConsole.MarkupLine($"[yellow]{noTape} session(s) had no tape on disk. Those are DATA gaps, not strategy decisions — the gate fails closed on them, so a backtest counts them as no-trade days.[/]");
 		return 0;
+	}
+
+	/// <summary>Brings the on-disk tape for sessions in [<paramref name="firstNy"/>, <paramref name="lastNy"/>] up to date
+	/// before the replay reads it: recent past sessions that are missing or partial are re-pulled and sealed the way
+	/// `wa ai history` does, and today's file is re-captured (merged, never shrunk) when it lags the last completed
+	/// minute. Best-effort — every failure is logged by the backfill and the replay proceeds on what's on disk.</summary>
+	private static async Task HealTapeAsync(string ticker, DateTime firstNy, DateTime lastNy, CancellationToken cancellation)
+	{
+		var nowUtc = DateTime.UtcNow;
+		var today = TodayEt();
+		var healFrom = firstNy.Date > today.AddDays(-HealLookbackDays) ? firstNy.Date : today.AddDays(-HealLookbackDays);
+		var healTo = lastNy.Date < today ? lastNy.Date : today.AddDays(-1);
+		if (healFrom <= healTo)
+			await IntradayTapeBackfill.BackfillAsync(ticker, TimeZoneInfo.ConvertTimeToUtc(healFrom.AddHours(12), NyTz), nowUtc, cancellation, latestNy: healTo);
+		if (lastNy.Date >= today && IntradayTapeBackfill.IsTodayBehind(ticker, nowUtc))
+			await IntradayTapeBackfill.CaptureTodayAsync(ticker, nowUtc, cancellation);
 	}
 
 	/// <summary>Today's session date in ET, Kind=Unspecified. Not DateTime.Today: that is the machine's date with
