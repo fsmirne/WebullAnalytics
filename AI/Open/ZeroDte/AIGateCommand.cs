@@ -30,6 +30,10 @@ internal sealed class AIGateSettings : AISingleTickerSubcommandSettings
 	[Description("Single-session mode: print every minute, ignoring --every.")]
 	public bool All { get; set; }
 
+	[CommandOption("--csv <PATH>")]
+	[Description("Range mode: also write one row per session (date, state, entry_et, summary) to this CSV — the per-day outcomes behind the tally, for studies that condition on the gate's verdict. A Windows path when run as wa.exe.")]
+	public string? Csv { get; set; }
+
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -39,6 +43,7 @@ internal sealed class AIGateSettings : AISingleTickerSubcommandSettings
 				return ValidationResult.Error($"{name}: must be YYYY-MM-DD, got '{value}'");
 		if (Date != null && Since != null) return ValidationResult.Error("--date and --since are mutually exclusive: one session or a range, not both");
 		if (Every < 1 || Every > 390) return ValidationResult.Error($"--every: must be in [1, 390], got {Every}");
+		if (Csv != null && Since == null) return ValidationResult.Error("--csv: range mode only (needs --since)");
 		return ValidationResult.Success();
 	}
 }
@@ -195,6 +200,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		}
 
 		if (outcomes.Count == 0) { AnsiConsole.MarkupLine("[yellow]No trading days in range.[/]"); return 0; }
+		if (settings.Csv != null) WriteOutcomesCsv(settings.Csv, outcomes);
 
 		var traded = outcomes.Where(o => o.EntryEt != null).ToList();
 		var table = new Table().Border(TableBorder.Rounded).Title($"[bold]{config.Ticker} gate outcomes {since:yyyy-MM-dd} → {until:yyyy-MM-dd}[/]");
@@ -217,6 +223,17 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		if (noTape > 0)
 			AnsiConsole.MarkupLine($"[yellow]{noTape} session(s) had no tape on disk. Those are DATA gaps, not strategy decisions — the gate fails closed on them, so a backtest counts them as no-trade days.[/]");
 		return 0;
+	}
+
+	/// <summary>One row per session: the date, the state that decided it, the first entry-eligible ET minute (empty on a
+	/// no-trade day — the state is then the last live one, i.e. why the day ended flat), and the gate's summary line.</summary>
+	private static void WriteOutcomesCsv(string path, IReadOnlyList<(DateTime Date, ZeroDteGateState State, DateTime? EntryEt, string Summary)> outcomes)
+	{
+		var sb = new System.Text.StringBuilder("date,state,entry_et,summary\n");
+		foreach (var o in outcomes)
+			sb.Append($"{o.Date:yyyy-MM-dd},{o.State},{o.EntryEt?.ToString("HH:mm", CultureInfo.InvariantCulture)},\"{o.Summary.Replace("\"", "\"\"")}\"\n");
+		File.WriteAllText(path, sb.ToString());
+		AnsiConsole.MarkupLine($"[dim]Per-day outcomes → {Markup.Escape(path)}[/]");
 	}
 
 	/// <summary>Brings the on-disk tape for sessions in [<paramref name="firstNy"/>, <paramref name="lastNy"/>] up to date
