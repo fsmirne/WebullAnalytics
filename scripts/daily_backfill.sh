@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Daily ThetaData refresh of the canonical data stores:
-#   0. wa ai history   -> data/... (daily closes + intraday tape) for SPY/XSP/SPXW, run FIRST
-#   1. --quotes        -> data/quotes.db (SQLite)            (minute NBBO, ±10% strike band — written directly)
-#   2. --ohlcv         -> data/quotes.db `ohlcv` table       (minute trade OHLCV, same band/DTE, own seals)
-#   3. --run           -> data/oi/<TICKER>/<date>.jsonl      (EOD open interest + back-solved IV)
-#   4. verify          (SQL coverage + crossed-quote scan of quotes.db; no network)
+#   0. wa ai history             -> data/... (daily closes + intraday tape) for SPY/XSP/SPXW, run FIRST
+#   1. wa data backfill quotes   -> data/quotes.db (SQLite)            (minute NBBO, ±10% strike band — written directly)
+#   2. wa data backfill ohlcv    -> data/quotes.db `ohlcv` table       (minute trade OHLCV, same band/DTE, own seals)
+#   3. wa data backfill oi       -> data/oi/<TICKER>/<date>.jsonl      (EOD open interest + back-solved IV)
+#   4. wa data verify            (SQL coverage + crossed-quote scan of quotes.db; no network)
 #
 # Quotes are written straight into the canonical SQLite store (no CSV staging) — per-expiry DELETE+INSERT,
 # WAL so the scraper/backtest can touch it concurrently; quote sealing lives in the DB `sealed` table. The
@@ -20,7 +20,7 @@
 #   pull pushed the morning run past the open). Pull it on demand at 60 DTE — the QQQ.DC long leg is 30-45 DTE,
 #   and a narrower :30 pull truncated it at exactly the long leg, crippling the QQQ backtest:
 #     BACKFILL_TICKERS="QQQ:60" BACKFILL_OI_TICKERS="QQQ" BACKFILL_VERIFY="QQQ" BACKFILL_HISTORY_TICKERS="QQQ" bash daily_backfill.sh
-#   No gap accrues while it is off: the pull floor is backfill_thetadata.py's DEFAULT_START and sealed data is
+#   No gap accrues while it is off: the pull floor is `wa data backfill`'s default --start and sealed data is
 #   skipped, so the next run that names QQQ fills everything since its last pull.
 # ThetaData allows ONE session per account, so the pulls run STRICTLY
 # SEQUENTIALLY — never in parallel — each with --concurrency 2 (the Value-tier request limit).
@@ -38,13 +38,13 @@
 # / BACKFILL_VERIFY / BACKFILL_HISTORY_TICKERS (scope the roots). E.g. a one-off 4-year SPY fill (no 0DTE roots dragged in):
 #   BACKFILL_START=2022-07-18 BACKFILL_TICKERS="SPY:60" BACKFILL_VERIFY="SPY" BACKFILL_HISTORY_TICKERS="SPY" bash daily_backfill.sh
 #
-# NOTE: re-pulling an unsealed expiration REWRITES its CSV, replacing any rows the Schwab scraper
-# captured live that day — snapshot them first if needed (scripts/snapshot_schwab_day.py).
+# NOTE: re-pulling an unsealed expiration REPLACES its rows (staged, then promoted in one transaction),
+# including any rows the Schwab scraper captured live that day — snapshot them first if needed
+# (scripts/snapshot_schwab_day.py).
 #
-# Self-contained: install.sh publishes this script and its two Python helpers (backfill_thetadata.py,
-# import_quotes_sqlite.py) side-by-side into the install dir (alongside the wa executable), so it runs
-# identically from there or from the repo's scripts/ dir. Nothing depends on the working directory —
-# the Python helpers are resolved from this script's own location, and the data store from WA_DATA_DIR
+# Self-contained: install.sh publishes this script into the install dir alongside the wa executable, so it
+# runs identically from there or from the repo's scripts/ dir. Nothing depends on the working directory —
+# wa is resolved from this script's own location (else PATH), and the data store from WA_DATA_DIR
 # (exported below).
 #
 # Data dir: the prod data folder (the LocalApplicationData dir Program.cs treats as the single source
@@ -99,8 +99,7 @@ else
   PROD_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/WebullAnalytics/data"
 fi
 
-# Point the Python helpers at the canonical store. They resolve it via WA_DATA_DIR; without this they
-# fall back to Windows/WSL-only lookups (LOCALAPPDATA, /mnt/c) and abort on native Linux/macOS.
+# Point wa at the canonical store explicitly (it honors WA_DATA_DIR ahead of its own LocalApplicationData lookup).
 export WA_DATA_DIR="${WA_DATA_DIR:-$PROD_DATA}"
 
 # Point ThetaData auth at creds.txt in the data folder unless THETADATA_CREDENTIALS_FILE overrides it.
@@ -109,15 +108,12 @@ if [ -z "${THETADATA_CREDENTIALS_FILE:-}" ]; then
   [ -f "$THETADATA_CREDENTIALS_FILE" ] || echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] creds not found at $THETADATA_CREDENTIALS_FILE"
 fi
 
-PY=python3
-SCRIPT="$SCRIPT_DIR/backfill_thetadata.py"
 # Ticker sets are env-overridable so a one-off historical fill can be scoped to a single root (e.g. a
 # 4-year SPY pull) without dragging the 0DTE index roots into a multi-year pull. Defaults = the daily set.
 TICKERS="${CLI_TICKERS:-${BACKFILL_TICKERS:-SPXW:0 XSP:0 SPY:60}}"   # quotes + ohlcv (per-ticker DTE)
-VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW XSP SPY}}"                 # verify-quotes (bare names, no DTE)
+VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW XSP SPY}}"                 # verify (bare names, no DTE)
 # OI is a daily-snapshot instrument (one full-chain capture/day, not a DTE-windowed pull like quotes/ohlcv):
-# backfill_thetadata.py's --run mode ignores per-ticker :DTE tokens entirely and always uses one global
-# --max-dte across every ticker passed, so bare names are all this step needs or accepts meaningfully.
+# `wa data backfill oi` takes bare names and one global --dte across every ticker passed.
 # SPX (legacy AM-settled root) is included but untraded: on a standard-monthly (3rd Friday) expiry real open
 # interest splits across SPX and SPXW (see ParsingHelpers.AggregationRoots) — without SPX's OI backfilled
 # too, GEX/max-pain/strike-ladder factors only ever see half that date's book. No minute-NBBO quotes/ohlcv
@@ -163,7 +159,7 @@ resolve_end() {
   if [ "$now_hour" -ge 19 ]; then echo "$now_today"; else date -d "$now_today - 1 day" +%F; fi
 }
 
-# Historical backfill floor for the quotes + OI pulls. Unset => backfill_thetadata.py's own default
+# Historical backfill floor for the quotes + OI pulls. Unset => `wa data backfill`'s own default
 # (2025-01-01), i.e. the daily frontier only — normal daily runs are unchanged. Set --start (or
 # BACKFILL_START) to extend the pull back for a one-time history fill; sealed expirations/days are still
 # skipped, so it only fetches the genuinely-missing older data. Does NOT affect the `wa ai history` step
@@ -203,10 +199,10 @@ echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes+ohlcv
 for t in $HISTORY_TICKERS; do
   step "(1/5) ai history $t"                        "$WA" ai history "$t"
 done
-has_step quotes && step "(2/5) minute-NBBO quotes -> data/quotes.db"  "$PY" "$SCRIPT" --quotes --tickers $TICKERS --end "$(resolve_end)"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step ohlcv  && step "(3/5) minute trade OHLCV -> data/quotes.db"  "$PY" "$SCRIPT" --ohlcv  --tickers $TICKERS --end "$(resolve_end)"    ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step oi     && step "(4/5) EOD open interest -> data/oi"          "$PY" "$SCRIPT" --run    --tickers $OI_TICKERS --end "$(resolve_end_oi)" ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step verify && step "(5/5) quote-store coverage + integrity"      "$PY" "$SCRIPT_DIR/import_quotes_sqlite.py" --root "${VERIFY// /,}" --verify
+has_step quotes && step "(2/5) minute-NBBO quotes -> data/quotes.db"  "$WA" data backfill quotes --tickers "${TICKERS// /,}" --end "$(resolve_end)"       ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step ohlcv  && step "(3/5) minute trade OHLCV -> data/quotes.db"  "$WA" data backfill ohlcv  --tickers "${TICKERS// /,}" --end "$(resolve_end)"       ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step oi     && step "(4/5) EOD open interest -> data/oi"          "$WA" data backfill oi     --tickers "${OI_TICKERS// /,}" --end "$(resolve_end_oi)" ${START_OPT[@]+"${START_OPT[@]}"}
+has_step verify && step "(5/5) quote-store coverage + integrity"      "$WA" data verify --roots "${VERIFY// /,}"
 
 if [ "$rc" -eq 0 ]; then
   echo "[$(ts)] === ALL OK ==="

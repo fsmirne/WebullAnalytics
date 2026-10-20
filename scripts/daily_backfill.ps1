@@ -3,22 +3,22 @@
 	Daily ThetaData refresh of the canonical data stores — native-Windows PowerShell port of daily_backfill.sh.
 
 .DESCRIPTION
-	Runs the same four steps as daily_backfill.sh, but as native Windows processes so the SQLite writer
-	(this script's Python helpers) and the reader (the wa backtest, a Windows process) share ONE OS's file
+	Runs the same steps as daily_backfill.sh, but as native Windows processes so the SQLite writer
+	(wa data backfill) and the reader (the wa backtest, a Windows process) share ONE OS's file
 	locking + WAL shared-memory. That is the whole point of this port: on a WSL setup the backfill is a
 	Linux process writing quotes.db over /mnt/c while the backtest reads it as a Windows process — WAL's
 	-shm coordination does NOT interoperate across the WSL<->Windows 9p boundary, so a concurrent read can
 	hit "disk I/O error / database disk image is malformed". Keeping both sides native-Windows fixes that.
 
 	Steps (same order/semantics as the .sh):
-	  1/4  wa ai history   -> daily closes + intraday tape for the strategy tickers (run FIRST)
-	  2/5  --quotes        -> data/quotes.db (minute NBBO, per-expiry DELETE+INSERT, WAL)
-	  3/5  --ohlcv         -> data/quotes.db `ohlcv` table (minute trade OHLCV, same band/DTE, own seals)
-	  4/5  --run           -> data/oi/<TICKER>/<date>.jsonl (EOD open interest + back-solved IV)
-	  5/5  verify          -> SQL coverage + crossed-quote scan of quotes.db (no network)
+	  1/5  wa ai history             -> daily closes + intraday tape for the strategy tickers (run FIRST)
+	  2/5  wa data backfill quotes   -> data/quotes.db (minute NBBO, per-expiry staged then promoted, WAL)
+	  3/5  wa data backfill ohlcv    -> data/quotes.db `ohlcv` table (minute trade OHLCV, same band/DTE, own seals)
+	  4/5  wa data backfill oi       -> data/oi/<TICKER>/<date>.jsonl (EOD open interest + back-solved IV)
+	  5/5  wa data verify            -> SQL coverage + crossed-quote scan of quotes.db (no network)
 
 	Use daily_backfill.sh on true Linux/macOS/WSL; use this daily_backfill.ps1 as the default on Windows 11.
-	Requires native Windows Python on PATH (python) and the wa.exe executable (published alongside, or on PATH).
+	Requires the wa.exe executable (published alongside, or on PATH).
 
 .PARAMETER Start
 	Extend the quotes+OI pull floor back for a one-off history fill (YYYY-MM-DD). Sealed data is still skipped.
@@ -33,12 +33,12 @@
 	its 60-DTE quote+ohlcv pull pushed the morning run past the open). Pull it on demand at 60 DTE (the QQQ.DC
 	long leg is 30-45 DTE; a :30 pull truncates it):
 	  ./daily_backfill.ps1 -Tickers QQQ:60 -OiTickers QQQ -Verify QQQ -HistoryTickers QQQ
-	No gap accrues while it is off: the pull floor is backfill_thetadata.py's DEFAULT_START and sealed data is
+	No gap accrues while it is off: the pull floor is `wa data backfill`'s default -Start and sealed data is
 	skipped, so the next run that names QQQ fills everything since its last pull.
 
 .PARAMETER OiTickers
 	Scope the OI roots (bare names, no DTE — OI is a daily full-chain snapshot, not DTE-windowed like
-	quotes/ohlcv, so backfill_thetadata.py's --run mode ignores per-ticker :DTE tokens entirely). Default
+	quotes/ohlcv, so `wa data backfill oi` takes bare names and one global --dte). Default
 	= the traded roots plus SPX, the untraded legacy monthly root whose OI/IV is needed to fix SPXW GEX
 	on monthly expiries.
 
@@ -97,9 +97,6 @@ if (-not $env:THETADATA_CREDENTIALS_FILE) {
 	}
 }
 
-$PY = "python"                                  # native Windows Python on PATH
-$Script = Join-Path $ScriptDir "backfill_thetadata.py"
-$Importer = Join-Path $ScriptDir "import_quotes_sqlite.py"
 $Conc = 2
 
 # --- Ticker sets (defaults = the daily set; -Tickers / -Verify override, matching the .sh env knobs). --------
@@ -108,9 +105,7 @@ if (-not $Tickers -or $Tickers.Count -eq 0) {
 	else { $Tickers = @('SPXW:0','XSP:0','SPY:60') }
 }
 # OI is a daily-snapshot instrument (one full-chain capture/day, not a DTE-windowed pull like
-# quotes/ohlcv): backfill_thetadata.py's --run mode ignores per-ticker :DTE tokens entirely and always
-# uses one global --max-dte across every ticker passed, so bare names are all this step needs or accepts
-# meaningfully. SPX (legacy AM-settled root) is included but untraded: on a standard-monthly (3rd Friday)
+# quotes/ohlcv): `wa data backfill oi` takes bare names and one global --dte across every ticker passed. SPX (legacy AM-settled root) is included but untraded: on a standard-monthly (3rd Friday)
 # expiry real open interest splits across SPX and SPXW (see ParsingHelpers.AggregationRoots) - without
 # SPX's OI backfilled too, GEX/max-pain/strike-ladder factors only ever see half that date's book. No
 # minute-NBBO quotes/ohlcv pull for it - OI (+ the EOD-solved IV alongside it) is all ComputeGex needs.
@@ -177,7 +172,7 @@ function Resolve-EndOi {
 	else { return $now.AddDays(-2).ToString('yyyy-MM-dd') }
 }
 
-# Historical backfill floor (-Start / BACKFILL_START). Unset => backfill_thetadata.py's own default.
+# Historical backfill floor (-Start / BACKFILL_START). Unset => `wa data backfill`'s own default.
 $StartValue = $Start
 if (-not $StartValue) { $StartValue = $env:BACKFILL_START }
 $StartOpt = @()
@@ -205,22 +200,22 @@ foreach ($t in $HistoryList) {
 }
 
 if (Has-Step 'quotes') {
-	$quotesArgs = @($Script,'--quotes','--tickers') + $Tickers + @('--end',(Resolve-End)) + $StartOpt + @('--concurrency',"$Conc")
-	Invoke-Step "(2/5) minute-NBBO quotes -> data/quotes.db" $PY $quotesArgs
+	$quotesArgs = @('data','backfill','quotes','--tickers',($Tickers -join ','),'--end',(Resolve-End)) + $StartOpt + @('--concurrency',"$Conc")
+	Invoke-Step "(2/5) minute-NBBO quotes -> data/quotes.db" $WA $quotesArgs
 }
 
 if (Has-Step 'ohlcv') {
-	$ohlcvArgs = @($Script,'--ohlcv','--tickers') + $Tickers + @('--end',(Resolve-End)) + $StartOpt + @('--concurrency',"$Conc")
-	Invoke-Step "(3/5) minute trade OHLCV -> data/quotes.db" $PY $ohlcvArgs
+	$ohlcvArgs = @('data','backfill','ohlcv','--tickers',($Tickers -join ','),'--end',(Resolve-End)) + $StartOpt + @('--concurrency',"$Conc")
+	Invoke-Step "(3/5) minute trade OHLCV -> data/quotes.db" $WA $ohlcvArgs
 }
 
 if (Has-Step 'oi') {
-	$oiArgs = @($Script,'--run','--tickers') + $OiTickers + @('--end',(Resolve-EndOi)) + $StartOpt + @('--concurrency',"$Conc")
-	Invoke-Step "(4/5) EOD open interest -> data/oi" $PY $oiArgs
+	$oiArgs = @('data','backfill','oi','--tickers',($OiTickers -join ','),'--end',(Resolve-EndOi)) + $StartOpt
+	Invoke-Step "(4/5) EOD open interest -> data/oi" $WA $oiArgs
 }
 
 if (Has-Step 'verify') {
-	Invoke-Step "(5/5) quote-store coverage + integrity" $PY @($Importer,'--root',($Verify -join ','),'--verify')
+	Invoke-Step "(5/5) quote-store coverage + integrity" $WA @('data','verify','--roots',($Verify -join ','))
 }
 
 if ($script:rc -eq 0) {
