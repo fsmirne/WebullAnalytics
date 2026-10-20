@@ -63,8 +63,7 @@ internal sealed record SessionTape(
 		var sessionOpen = rthBars[0].Open;
 		if (sessionOpen <= 0m) return null;
 
-		decimal notional = 0m, typicalSum = 0m;
-		long volume = 0;
+		var sessionVwap = new SessionVwap();
 		var side = VwapSide.At;
 		var held = 0;
 		var flips = 0;
@@ -74,13 +73,8 @@ internal sealed record SessionTape(
 		for (var n = 0; n < rthBars.Count; n++)
 		{
 			var bar = rthBars[n];
-			var typical = (bar.High + bar.Low + bar.Close) / 3m;
-			notional += typical * bar.Volume;
-			volume += bar.Volume;
-			typicalSum += typical;
-			// TWAP fallback for zero-volume bars — cash indexes print no size on some feeds. Same
-			// convention as IntradayTapeIndicators.ComputeVwapDeviation so the two never disagree.
-			vwap = volume > 0 ? notional / volume : typicalSum / (n + 1);
+			sessionVwap.Add(bar);
+			vwap = sessionVwap.Value;
 
 			var barSide = bar.Close > vwap ? VwapSide.Above : bar.Close < vwap ? VwapSide.Below : VwapSide.At;
 			if (barSide == side)

@@ -7,8 +7,8 @@ namespace WebullAnalytics.AI;
 ///   <item><description><b>Open-to-now drift</b> — today's open vs last-bar close. The primary intraday
 ///     trend signal at the 0DTE horizon.</description></item>
 ///   <item><description><b>VWAP deviation</b> — last-bar close vs session VWAP. Catches price stretching
-///     away from the volume-weighted mean. Falls back to TWAP (equal-weight typical-price average) on
-///     bars with no volume — cash indexes like SPX always need this fallback.</description></item>
+///     away from the volume-weighted mean. TWAP (equal-weight typical-price average) whenever any bar lacks
+///     volume — see <see cref="SessionVwap"/>; cash indexes like SPX always take this path.</description></item>
 /// </list>
 /// Each sub-score is a percentage-return-style number clamped to [-1, +1] (1% move → ±1). The composite
 /// is a weighted average per <paramref name="cfg"/>.</summary>
@@ -89,28 +89,9 @@ internal static class IntradayTapeIndicators
 
 	private static decimal ComputeVwapDeviation(IReadOnlyList<MinuteBar> bars, decimal nowPrice)
 	{
-		decimal totalNotional = 0m;
-		long totalVolume = 0;
-		foreach (var b in bars)
-		{
-			var tp = (b.High + b.Low + b.Close) / 3m;
-			totalNotional += tp * b.Volume;
-			totalVolume += b.Volume;
-		}
-
-		decimal reference;
-		if (totalVolume > 0)
-		{
-			reference = totalNotional / totalVolume;
-		}
-		else
-		{
-			// TWAP fallback for zero-volume bars (cash indexes).
-			decimal sum = 0m;
-			foreach (var b in bars) sum += (b.High + b.Low + b.Close) / 3m;
-			reference = sum / bars.Count;
-		}
-
+		var vwap = new SessionVwap();
+		foreach (var b in bars) vwap.Add(b);
+		var reference = vwap.Value;
 		if (reference <= 0m) return 0m;
 		return Math.Clamp((nowPrice - reference) / reference * 100m, -1m, 1m);
 	}
