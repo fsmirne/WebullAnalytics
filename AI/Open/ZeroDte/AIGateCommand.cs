@@ -116,7 +116,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		table.AddColumn(new TableColumn("Side").Centered());
 		table.AddColumn(new TableColumn("Held").RightAligned());
 		table.AddColumn(new TableColumn("Flips").RightAligned());
-		table.AddColumn(new TableColumn("Win rng%").RightAligned());
+		table.AddColumn(new TableColumn("Window (low–high)").RightAligned());
 		table.AddColumn(new TableColumn("Tests").Centered());
 		table.AddColumn("State");
 		table.AddColumn("Why");
@@ -151,10 +151,10 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 				t == null ? "—" : t.Side switch { VwapSide.Above => "[green]▲[/]", VwapSide.Below => "[red]▼[/]", _ => "=" },
 				t?.MinutesHeldOnSide.ToString() ?? "—",
 				t?.VwapFlips.ToString() ?? "—",
-				t?.WindowRangePct.ToString("N2") ?? "—",
+				t == null ? "—" : $"{t.WindowLow:N2}–{t.WindowHigh:N2} ({t.WindowRangePct:N2}%)",
 				t == null ? "—" : $"{t.WindowLowTouches}/{t.WindowHighTouches}",
 				StateMarkup(verdict.State),
-				Markup.Escape(Truncate(verdict.Summary, 62)));
+				Markup.Escape(verdict.Summary));
 		}
 
 		AnsiConsole.Write(table);
@@ -164,7 +164,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 			AnsiConsole.MarkupLine($"[green]First entry-eligible minute: {firstEntryEt:HH:mm} ET — {Markup.Escape(firstEntry.Summary)}[/]");
 		else
 			AnsiConsole.MarkupLine($"[yellow]NO TRADE this session — the gate never confirmed. Minutes by state: {string.Join(", ", stateCounts.OrderByDescending(k => k.Value).Select(k => $"{k.Key}={k.Value}"))}[/]");
-		AnsiConsole.MarkupLine("[dim]Held = consecutive minutes on the current side of the RUNNING VWAP (resets on a cross). Flips = session VWAP side changes. Win rng% = trailing-window high-low as % of spot. Tests = low/high boundary touches in that window. The GEX-wall placement and credit-floor halves of the gate need a priced chain and are not evaluated here.[/]");
+		AnsiConsole.MarkupLine("[dim]Held = consecutive minutes on the current side of the RUNNING VWAP (resets on a cross). Flips = session VWAP side changes. Window = low–high of the trailing range window (width as % of spot). Tests = low/high boundary touches in that window. The GEX-wall placement and credit-floor halves of the gate need a priced chain and are not evaluated here.[/]");
 		return 0;
 	}
 
@@ -290,5 +290,4 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		_ => $"[dim]{state}[/]"
 	};
 
-	private static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
 }

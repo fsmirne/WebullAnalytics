@@ -150,7 +150,7 @@ internal static class ZeroDteSessionGate
 			ProtectiveCallLevel: RangeLevel(cfg, tape, above: true),
 			ProtectivePutLevel: RangeLevel(cfg, tape, above: false),
 			tape,
-			$"BALANCED confirmed (range {tape.WindowRangePct:F2}% over {tape.WindowBars}m, {tape.WindowLowTouches}/{tape.WindowHighTouches} boundary tests, {tape.VwapFlips} VWAP crosses) → iron condor");
+			$"BALANCED confirmed (range {tape.WindowLow:F2}–{tape.WindowHigh:F2}, {tape.WindowRangePct:F2}% over {tape.WindowBars}m, {tape.WindowLowTouches}/{tape.WindowHighTouches} boundary tests, {tape.VwapFlips} VWAP crosses) → iron condor");
 	}
 
 	/// <summary>Reads the configured directional signal. Returns +1 bullish / −1 bearish / 0 unconfirmed,
