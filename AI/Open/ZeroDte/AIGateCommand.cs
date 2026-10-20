@@ -30,6 +30,10 @@ internal sealed class AIGateSettings : AISingleTickerSubcommandSettings
 	[Description("Single-session mode: print every minute, ignoring --every.")]
 	public bool All { get; set; }
 
+	[CommandOption("--trace <PATH>")]
+	[Description("Range mode: also write the gate's state for EVERY RTH minute of every session (date, et, state) to this CSV — for studies of how the state evolves after an entry (e.g. exiting when it changes). A Windows path when run as wa.exe.")]
+	public string? Trace { get; set; }
+
 	[CommandOption("--csv <PATH>")]
 	[Description("Range mode: also write one row per session (date, state, entry_et, summary) to this CSV — the per-day outcomes behind the tally, for studies that condition on the gate's verdict. A Windows path when run as wa.exe.")]
 	public string? Csv { get; set; }
@@ -44,6 +48,7 @@ internal sealed class AIGateSettings : AISingleTickerSubcommandSettings
 		if (Date != null && Since != null) return ValidationResult.Error("--date and --since are mutually exclusive: one session or a range, not both");
 		if (Every < 1 || Every > 390) return ValidationResult.Error($"--every: must be in [1, 390], got {Every}");
 		if (Csv != null && Since == null) return ValidationResult.Error("--csv: range mode only (needs --since)");
+		if (Trace != null && Since == null) return ValidationResult.Error("--trace: range mode only (needs --since)");
 		return ValidationResult.Success();
 	}
 }
@@ -177,6 +182,8 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		await HealTapeAsync(config.Ticker, since, until, cancellation);
 
 		var outcomes = new List<(DateTime Date, ZeroDteGateState State, DateTime? EntryEt, string Summary)>();
+		using var trace = settings.Trace != null ? new StreamWriter(settings.Trace) : null;
+		trace?.WriteLine("date,et,state");
 		for (var date = since.Date; date <= until.Date; date = date.AddDays(1))
 		{
 			cancellation.ThrowIfCancellationRequested();
@@ -186,15 +193,16 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 			var prevClose = await PrevCloseAsync(closes, config.Ticker, date, cancellation);
 
 			// Walk to the first entry-eligible minute; if none, report the state at the last minute of the
-			// entry window, which is the reason the day ended flat.
+			// entry window, which is the reason the day ended flat. Tracing walks the whole session.
 			ZeroDteGateVerdict? last = null;
 			DateTime? entryEt = null;
 			for (var i = 0; i < sessionBars.Count; i++)
 			{
 				var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(sessionBars[i].Timestamp, NyTz).DateTime, DateTimeKind.Unspecified);
 				var v = ZeroDteSessionGate.Evaluate(cfg, sessionBars.Take(i + 1).ToList(), prevClose, null, minuteEt);
-				if (v.AllowsEntry) { outcomes.Add((date, v.State, minuteEt, v.Summary)); entryEt = minuteEt; break; }
-				if (!v.DayClosed) last = v;   // keep the last still-live state, not the trivial PastCutoff one
+				trace?.WriteLine($"{date:yyyy-MM-dd},{minuteEt:HH:mm},{v.State}");
+				if (entryEt == null && v.AllowsEntry) { outcomes.Add((date, v.State, minuteEt, v.Summary)); entryEt = minuteEt; if (trace == null) break; }
+				if (entryEt == null && !v.DayClosed) last = v;   // keep the last still-live state, not the trivial PastCutoff one
 			}
 			if (entryEt == null) outcomes.Add((date, last?.State ?? ZeroDteGateState.NoTape, null, last?.Summary ?? "no decision"));
 		}
