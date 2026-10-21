@@ -28,6 +28,9 @@ class SniffCommand : AsyncCommand<SniffSettings>
 {
 	// Must match WA_PORT in scripts/webull-header-dump.user.js. Loopback-only; explicit 127.0.0.1 needs no URL ACL.
 	private const int ListenPort = 9223;
+	// Opened once the listener is up, so the userscript's tab is a click away. Same browser profile as the user's
+	// existing Webull tab → same session cookies, so this is NOT a second sign-in.
+	private const string WebullWebUrl = "https://app.webull.com/";
 
 	protected override async Task<int> ExecuteAsync(CommandContext context, SniffSettings settings, CancellationToken cancellation)
 	{
@@ -40,6 +43,8 @@ class SniffCommand : AsyncCommand<SniffSettings>
 		catch (HttpListenerException ex) { Console.WriteLine($"Error: cannot listen on {prefix} ({ex.Message}). Is another 'wa sniff' already running?"); return 1; }
 
 		Console.WriteLine($"Listening on {prefix} for Webull session headers.");
+		Console.WriteLine($"Opening {WebullWebUrl} in your default browser.");
+		BrowserLauncher.TryOpen(WebullWebUrl);
 		Console.WriteLine("In your logged-in Webull tab, run the Tampermonkey command \"Dump Webull headers to wa\".");
 		Console.WriteLine("(One-time setup: install scripts/webull-header-dump.user.js in Tampermonkey.)");
 		Console.WriteLine("Press Ctrl+C to cancel.");

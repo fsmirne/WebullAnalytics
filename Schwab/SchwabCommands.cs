@@ -1,6 +1,5 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
-using System.Diagnostics;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Text.Json;
@@ -55,7 +54,7 @@ internal sealed class SchwabLoginCommand : AsyncCommand<SchwabLoginSettings>
 		AnsiConsole.WriteLine();
 		AnsiConsole.WriteLine(authorizeUrl);
 		AnsiConsole.WriteLine();
-		TryOpenBrowser(authorizeUrl);
+		BrowserLauncher.TryOpen(authorizeUrl);
 
 		string? code = null;
 		try
@@ -106,21 +105,6 @@ internal sealed class SchwabLoginCommand : AsyncCommand<SchwabLoginSettings>
 
 		AnsiConsole.MarkupLine("[green]Logged in.[/] Refresh token stored — valid for [bold]7 days[/]. Re-run `wa schwab login` weekly.");
 		return 0;
-	}
-
-	/// <summary>Best-effort open of the authorize URL in the default browser; the URL is printed too, so a failure
-	/// here just means the user clicks it themselves.</summary>
-	private static void TryOpenBrowser(string url)
-	{
-		try
-		{
-			if (OperatingSystem.IsWindows()) Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-			else if (OperatingSystem.IsMacOS()) Process.Start("open", url);
-			// Browsers spawned via xdg-open inherit the terminal's stdio and spray warnings over the paste
-			// prompt, so route the launch through a shell that discards the output.
-			else Process.Start(new ProcessStartInfo("sh") { ArgumentList = { "-c", "exec xdg-open \"$1\" >/dev/null 2>&1", "sh", url } });
-		}
-		catch { /* fall back to the printed URL */ }
 	}
 }
 
