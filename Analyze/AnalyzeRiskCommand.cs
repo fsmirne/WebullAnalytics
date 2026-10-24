@@ -26,7 +26,7 @@ internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 	public string? Proposal { get; set; }
 
 	[CommandOption("--fill [N]")]
-	[Description("Risk diagnostic of one of your recent OPENING fills (Webull order history, last 30 days, opener-placed or manual) as it stood AT THE FILL: your actual per-leg fill prices against the market at that instant (stored minute NBBO from quotes.db, minute-bar spot, as-of trend/regime). When quotes.db doesn't cover the legs at that minute (today's fills until the evening backfill; un-backfilled roots/strikes, e.g. manual trades on any ticker) the same NBBO is fetched from ThetaData; refuses when neither has it. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
+	[Description("Risk diagnostic of one of your recent OPENING fills (Webull order history, last 30 days, opener-placed or manual) as it stood AT THE FILL: your actual per-leg fill prices against the market at that instant (stored minute NBBO from quotes.db, minute-bar spot, as-of trend/regime). When quotes.db doesn't cover the legs at that minute (today's fills until the evening backfill; un-backfilled roots/strikes, e.g. manual trades on any ticker) the same NBBO is fetched from ThetaData if a ThetaData login is configured; refuses when no source has it. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
 	public FlagValue<int>? Fill { get; set; }
 
 	[CommandOption("--iv-default")]
@@ -311,7 +311,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 	/// <summary>--fill: the risk of a real opening fill as it stood AT THE FILL — your actual per-leg fill prices
 	/// as the cost basis, against the market at the nearest stored minute book (each leg's NBBO, the minute-bar spot,
 	/// as-of trend/regime/vol/sentiment and that day's rate). Covers any fill, opener-placed or manual; books the quote store
-	/// lacks come from ThetaData (see <see cref="FillTimeMarket"/>); refuses (naming why) when neither covers the legs.</summary>
+	/// lacks come from ThetaData when a login is configured (see <see cref="FillTimeMarket"/>); refuses (naming why) when no source covers the legs.</summary>
 	private static async Task<int> RenderFromFillAsync(AnalyzeRiskSettings settings, CancellationToken cancellation)
 	{
 		var (config, fills, error) = await OpeningFillPicker.LoadAsync(unexpiredOnly: false, cancellation);

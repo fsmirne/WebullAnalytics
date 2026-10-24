@@ -68,13 +68,22 @@ internal sealed class ThetaDataClient : IDisposable
 	/// <summary>The creds file the Python backfill uses: THETADATA_CREDENTIALS_FILE, else data/creds.txt (email line 1, password line 2).</summary>
 	internal static string DefaultCredsPath() => Environment.GetEnvironmentVariable("THETADATA_CREDENTIALS_FILE") is { Length: > 0 } path ? path : Program.ResolvePath("data/creds.txt");
 
+	/// <summary>Whether a ThetaData login is configured at <paramref name="credsPath"/> — ThetaData is optional, and paths that merely fall back to it
+	/// check this first so an install without an account never tries to sign in.</summary>
+	internal static bool HasCredentials(string credsPath) => ReadCredentials(credsPath) != null;
+
+	/// <summary>The creds file's lines when it holds an email (line 1) and a password (line 2), else null.</summary>
+	private static string[]? ReadCredentials(string credsPath)
+	{
+		var lines = File.Exists(credsPath) ? File.ReadAllLines(credsPath) : [];
+		return lines.Length >= 2 && !string.IsNullOrWhiteSpace(lines[0]) && !string.IsNullOrWhiteSpace(lines[1]) ? lines : null;
+	}
+
 	/// <param name="maxConcurrent">Requests in flight at once — the subscription tier's limit (Value 2, Standard 4, Pro 8).</param>
 	/// <param name="stallTimeout">Longest wait for the next response chunk before the call is cancelled as hung.</param>
 	internal static async Task<ThetaDataClient> ConnectAsync(string credsPath, int maxConcurrent, TimeSpan stallTimeout, CancellationToken cancellation)
 	{
-		var lines = File.Exists(credsPath) ? await File.ReadAllLinesAsync(credsPath, cancellation) : [];
-		if (lines.Length < 2 || string.IsNullOrWhiteSpace(lines[0]) || string.IsNullOrWhiteSpace(lines[1]))
-			throw new ThetaSessionException($"ThetaData credentials not found at {credsPath} (expected email on line 1, password on line 2)");
+		var lines = ReadCredentials(credsPath) ?? throw new ThetaSessionException($"ThetaData credentials not found at {credsPath} (expected email on line 1, password on line 2)");
 
 		var sessionLock = ThetaSessionLock.TryAcquire() ?? throw new ThetaSessionException($"ThetaData session is in use by another process (the backfill?) — {Program.ResolvePath(ThetaSessionLock.RelativePath)} is held; signing in now would end its session");
 		try
@@ -140,11 +149,14 @@ internal sealed class ThetaDataClient : IDisposable
 		return Stream(options => _stub.GetOptionHistoryEod(request, options), cancellation);
 	}
 
-	/// <summary>option_history_open_interest: each contract's reported open interest per day over [start, end].</summary>
-	internal IAsyncEnumerable<ThetaTable> OptionHistoryOpenInterest(OptionContract contract, DateOnly startDate, DateOnly endDate, int maxDte, CancellationToken cancellation)
+	/// <summary>option_history_open_interest: each contract's reported open interest per day over [start, end] — a chain's expirations within
+	/// <paramref name="maxDte"/> days of each day, or one fully specified contract with <paramref name="maxDte"/> null.</summary>
+	internal IAsyncEnumerable<ThetaTable> OptionHistoryOpenInterest(OptionContract contract, DateOnly startDate, DateOnly endDate, int? maxDte, CancellationToken cancellation)
 	{
-		var query = new OptionHistoryOpenInterestRequestQuery { ContractSpec = contract.Spec(), StartDate = Date(startDate), EndDate = Date(endDate), MaxDte = maxDte };
-		var request = new OptionHistoryOpenInterestRequest { QueryInfo = Info([.. contract.Parameters(), ("max_dte", maxDte.ToString(CultureInfo.InvariantCulture)), ("start_date", Date(startDate)), ("end_date", Date(endDate))]), Params = query };
+		var query = new OptionHistoryOpenInterestRequestQuery { ContractSpec = contract.Spec(), StartDate = Date(startDate), EndDate = Date(endDate) };
+		if (maxDte is int dte) query.MaxDte = dte;
+		(string, string)[] dteParameter = maxDte is int d ? [("max_dte", d.ToString(CultureInfo.InvariantCulture))] : [];
+		var request = new OptionHistoryOpenInterestRequest { QueryInfo = Info([.. contract.Parameters(), .. dteParameter, ("start_date", Date(startDate)), ("end_date", Date(endDate))]), Params = query };
 		return Stream(options => _stub.GetOptionHistoryOpenInterest(request, options), cancellation);
 	}
 

@@ -60,26 +60,34 @@ internal sealed class UnderlyingCloses(ThetaDataClient client, BackfillLog log)
 		return closes;
 	}
 
-	/// <summary>ThetaData's equity EOD, else its index EOD (a trailing-W weekly root maps to its index). Best effort: a failure
-	/// leaves the tail empty (logged when there's no local series either).</summary>
+	/// <summary>The tail from ThetaData (see <see cref="FetchEodAsync"/>). Best effort: a failure leaves the tail empty (logged when there's no
+	/// local series either).</summary>
 	private async Task<Dictionary<DateOnly, double>> RemoteAsync(string ticker, DateOnly start, DateOnly end, bool logFailure, CancellationToken cancellation)
+	{
+		var (closes, error) = await FetchEodAsync(client, ticker, start, end, cancellation);
+		if (error != null && logFailure) log.Info($"  [warn] underlying close fetch failed for {ticker}: {error}; underlyingPrice=null");
+		return closes;
+	}
+
+	/// <summary>Daily closes over [start, end] from ThetaData's equity EOD, else its index EOD (a trailing-W weekly root maps to its index), or
+	/// the index feed's failure when neither serves the ticker.</summary>
+	internal static async Task<(Dictionary<DateOnly, double> Closes, string? Error)> FetchEodAsync(ThetaDataClient client, string ticker, DateOnly start, DateOnly end, CancellationToken cancellation)
 	{
 		try
 		{
 			var stock = Closes(await ThetaRetry.CollectAsync(token => client.StockHistoryEod(ticker, start, end, token), cancellation));
-			if (stock.Count > 0) return stock;
+			if (stock.Count > 0) return (stock, null);
 		}
 		catch (Exception ex) when (ex is not (ThetaSessionException or OperationCanceledException)) { }   // not an equity — try the index feed
 
 		try
 		{
 			var index = ticker.EndsWith('W') ? ticker[..^1] : ticker;
-			return Closes(await ThetaRetry.CollectAsync(token => client.IndexHistoryEod(index, start, end, token), cancellation));
+			return (Closes(await ThetaRetry.CollectAsync(token => client.IndexHistoryEod(index, start, end, token), cancellation)), null);
 		}
 		catch (Exception ex) when (ex is not (ThetaSessionException or OperationCanceledException))
 		{
-			if (logFailure) log.Info($"  [warn] underlying close fetch failed for {ticker}: {ex.Message}; underlyingPrice=null");
-			return [];
+			return ([], ex.Message);
 		}
 	}
 

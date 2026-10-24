@@ -17,9 +17,12 @@ namespace WebullAnalytics.Analyze;
 /// pre-open). Every input is taken at that one instant. Nothing is approximated beyond that minute resolution.
 ///
 /// When the store has no book for every leg at either boundary — today's fills before the evening backfill, roots or strikes
-/// the backfill doesn't cover (manual trades on any ticker) — the books come from ThetaData directly: option_at_time_quote at
-/// the boundary instant is the same vendor book the backfill stores for that boundary (its END-of-minute stamp T is stored
-/// under label T-1), encoded by the store's rule. A leg neither source covers is an error naming why, never a substitute price.
+/// the backfill doesn't cover (manual trades on any ticker) — and a ThetaData login is configured, the books come from ThetaData
+/// directly: option_at_time_quote at the boundary instant is the same vendor book the backfill stores for that boundary (its
+/// END-of-minute stamp T is stored under label T-1), encoded by the store's rule. A leg no source covers is an error naming why,
+/// never a substitute price. Open interest likewise falls back to ThetaData (<see cref="AsOfOpenInterest"/>). A past session's
+/// spot bars missing from the on-disk tape (Webull's live m1 feed only reaches back ~5 days) are healed first by the tape
+/// backfill's deep-history sources (Webull's paginator, massive), the way `wa ai history` fills them.
 /// </summary>
 internal static class FillTimeMarket
 {
@@ -35,19 +38,22 @@ internal static class FillTimeMarket
 		var after = before.AddMinutes(1);
 		var boundaries = fillEt - before <= after - fillEt ? new[] { before, after } : new[] { after, before };
 
+		using var theta = ThetaFallback.TryCreate();
 		var (books, instant, bookSource, storeMiss) = StoreBooks(symbols, fillEt, boundaries);
 		if (books == null)
 		{
+			if (theta == null)
+				return (null, $"no NBBO at {before:HH:mm} or {after:HH:mm} for every leg ({string.Join(", ", symbols)}) — quote store: {storeMiss}; no ThetaData login configured ({ThetaDataClient.DefaultCredsPath()}) to fetch it");
 			string? thetaMiss;
-			(books, instant, thetaMiss) = await ThetaBooksAsync(symbols, boundaries, cancellation);
+			(books, instant, thetaMiss) = await ThetaBooksAsync(theta, symbols, boundaries, cancellation);
 			bookSource = "ThetaData at-time NBBO";
 			if (books == null)
 				return (null, $"no NBBO at {before:HH:mm} or {after:HH:mm} for every leg ({string.Join(", ", symbols)}) — quote store: {storeMiss}; ThetaData: {thetaMiss}");
 		}
-		var quotes = books.ToDictionary(kv => kv.Key, kv => new OptionContractQuote(kv.Key, LastPrice: kv.Value.Mid, Bid: kv.Value.Bid, Ask: kv.Value.Ask, Change: null, PercentChange: null, Volume: null, OpenInterest: null, ImpliedVolatility: null, HistoricalVolatility: null, BidSize: kv.Value.BidSize, AskSize: kv.Value.AskSize), StringComparer.OrdinalIgnoreCase);
+		var oi = await AsOfOpenInterest.LoadAsync(symbols, fillEt.Date, theta, cancellation);
+		var quotes = books.ToDictionary(kv => kv.Key, kv => new OptionContractQuote(kv.Key, LastPrice: kv.Value.Mid, Bid: kv.Value.Bid, Ask: kv.Value.Ask, Change: null, PercentChange: null, Volume: null, OpenInterest: oi.TryGetValue(kv.Key, out var o) ? o : null, ImpliedVolatility: null, HistoricalVolatility: null, BidSize: kv.Value.BidSize, AskSize: kv.Value.AskSize), StringComparer.OrdinalIgnoreCase);
 
-		var oi = new ChainSnapshotOiCache().ForDay(ticker, fillEt.Date);
-		quotes = quotes.ToDictionary(kv => kv.Key, kv => oi.TryGetValue(kv.Key, out var o) ? kv.Value with { OpenInterest = o.Oi } : kv.Value, StringComparer.OrdinalIgnoreCase);
+		await HealPastSessionTapeAsync(ticker, fillEt.Date, cancellation);
 
 		// Bars are start-of-bar labeled: those starting before the instant are complete at it, and the last one's
 		// close is the price at the instant.
@@ -77,23 +83,26 @@ internal static class FillTimeMarket
 
 	/// <summary>Every leg's ThetaData book at the first boundary that has one for all of them, or why none does (no data, or the
 	/// session is unavailable — e.g. the nightly backfill holds it).</summary>
-	private static async Task<(Dictionary<string, QuoteStoreCache.QuoteAt>? Books, DateTime Instant, string? Miss)> ThetaBooksAsync(IReadOnlyCollection<string> symbols, DateTime[] boundaries, CancellationToken cancellation)
+	private static async Task<(Dictionary<string, QuoteStoreCache.QuoteAt>? Books, DateTime Instant, string? Miss)> ThetaBooksAsync(ThetaFallback theta, IReadOnlyCollection<string> symbols, DateTime[] boundaries, CancellationToken cancellation)
 	{
-		try
+		foreach (var boundary in boundaries)
 		{
-			using var client = await ThetaDataClient.ConnectAsync(ThetaDataClient.DefaultCredsPath(), maxConcurrent: 2, stallTimeout: TimeSpan.FromMinutes(1), cancellation);
-			foreach (var boundary in boundaries)
-			{
-				var date = DateOnly.FromDateTime(boundary);
-				var tables = await Task.WhenAll(symbols.Select(symbol => ThetaTable.CollectAsync(client.OptionAtTimeQuote(OptionContract.FromOcc(symbol)!, date, date, TimeOnly.FromDateTime(boundary), cancellation))));
-				var bySymbol = symbols.Zip(tables).ToDictionary(p => p.First, p => ThetaQuotes.FirstBook(p.Second), StringComparer.OrdinalIgnoreCase);
-				if (BooksAt(symbols, symbol => bySymbol[symbol]) is { } books)
-					return (books, boundary, null);
-			}
-			return (null, default, "no book at either boundary for every leg");
+			var (found, error) = await theta.BooksAtAsync(symbols, boundary, cancellation);
+			if (error != null) return (null, default, error);
+			if (BooksAt(symbols, symbol => found.TryGetValue(symbol, out var book) ? book : null) is { } books)
+				return (books, boundary, null);
 		}
-		catch (Exception ex) when (ex is ThetaSessionException or ThetaStallException) { return (null, default, ex.Message); }
-		catch (Grpc.Core.RpcException ex) { return (null, default, $"{ex.StatusCode}: {ex.Status.Detail}"); }
+		return (null, default, "no book at either boundary for every leg");
+	}
+
+	/// <summary>Re-pulls a past session's spot tape when the on-disk file is missing or partial — before the bar cache reads it, since the cache
+	/// never refetches a past day beyond Webull's ~5-day m1 window and remembers a day it found empty. Today's session is the cache's own live
+	/// fetch. Best effort: the backfill logs its own failures, and a session still without bars is reported by the caller.</summary>
+	private static async Task HealPastSessionTapeAsync(string ticker, DateTime sessionEt, CancellationToken cancellation)
+	{
+		var todayEt = TimeZoneInfo.ConvertTime(DateTime.UtcNow, EtZone).Date;
+		if (sessionEt.Date >= todayEt || IntradayTapeBackfill.AuditIntraday(ticker, sessionEt.Date, sessionEt.Date.AddDays(1)).Complete.Contains(sessionEt.Date)) return;
+		await IntradayTapeBackfill.BackfillAsync(ticker, TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(sessionEt.Date.AddHours(12), DateTimeKind.Unspecified), EtZone), DateTime.UtcNow, cancellation, latestNy: sessionEt.Date);
 	}
 
 	/// <summary>Every leg's book from <paramref name="bookOf"/>, or null when any leg has none.</summary>

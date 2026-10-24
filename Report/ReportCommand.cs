@@ -371,7 +371,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 	}
 
 	/// <summary>Everything the break-even panels and time-decay grids price from, for <paramref name="positionRows"/>: the live
-	/// chain (or, for a past --date, the quote store's as-of marks), dividends, the risk-free rate, and the --spot/--iv/--levels/
+	/// chain (or, for a past --date, the real as-of close marks — quote store, else ThetaData), dividends, the risk-free rate, and the --spot/--iv/--levels/
 	/// calibration overrides. Shared by `report` and `analyze trade` so both grids price identically.</summary>
 	internal static async Task<AnalysisOptions> BuildAnalysisOptions(GridSettings settings, List<PositionRow> positionRows, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null)
 	{
@@ -426,11 +426,11 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			}
 		}
 
-		// Past --date: replace live quotes/spots with the quote store's real NBBO and daily close as of that
-		// date (per-leg; misses keep the live quote and are warned). Live quotes struck today are only honest
+		// Past --date: replace live quotes/spots with the real NBBO (quote store, else ThetaData) and daily close as of
+		// that date (per-leg; misses keep the live quote and are warned). Live quotes struck today are only honest
 		// marks for today/future evals — un-decaying them to a past date runs on vendor IVs that an after-hours
 		// one-sided book renders garbage (the 145%-IV dead-residue reprice). MarksAsOfEvalDate is set only when
-		// every leg was store-marked, which is what lets the mid-based current-P&L paths run for a past date.
+		// every leg was marked from as-of NBBO, which is what lets the mid-based current-P&L paths run for a past date.
 		var pastDateEval = EvaluationDate.IsOverridden && EvaluationDate.Today < DateTime.Today;
 		var marksAsOfEvalDate = false;
 		if (pastDateEval && positionRows.Count > 0)
