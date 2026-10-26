@@ -14,6 +14,10 @@ internal sealed class AIConfigInitSettings : CommandSettings
 	[Description("Ticker mode: strategy-layer token for the scaffolded ai-config.<TICKER>.<STRATEGY>.json (default: IC). The per-ticker file's defaultStrategy is set to this, so `wa ai scan <TICKER>` runs with no --strategy.")]
 	public string Strategy { get; set; } = "IC";
 
+	[CommandOption("--structures <LIST>")]
+	[Description("Ticker mode: comma-separated structures to enable in the strategy layer (longCallPut, longVertical, shortVertical, ironCondor, condor, ironButterfly); every other structure is written disabled. DTE windows snap to listed expiries and widths are sized from the live chain's expected move. Default: ironCondor,ironButterfly,shortVertical.")]
+	public string? Structures { get; set; }
+
 	[CommandOption("--vendor <VENDOR>")]
 	[Description("Ticker mode: live chain vendor for strikeStep/IV derivation — webull or schwab. Defaults to config.json's vendor.")]
 	public string? Vendor { get; set; }
