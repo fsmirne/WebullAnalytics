@@ -159,8 +159,6 @@ internal static class AIConfigInitTicker
 					"directionalFit": 0.10,
 					"biasDrift": 0.50,
 					"whipsaw": 3.0,
-					"maxPain": 0.25,
-					"gex": 0,
 					"statArb": 0.15,
 					"sentiment": 0,
 					"expectedMoveCredit": 0.60,
