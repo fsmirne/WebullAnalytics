@@ -103,6 +103,44 @@ public class BrokerCashOverlayTests
 	}
 
 	[Fact]
+	public void Apply_SixTrancheSplitFill_SumsAllRows()
+	{
+		// Real 2026-10-28 13:06 50-lot SPY put diagonal open: the short leg posted as 6 rows, which the old
+		// 5-row subset cap couldn't reach, so the whole combo fell back to the export's rounded averages
+		// (9.68 / 3.805 vs true 9.6848 / 3.8048) and the report ran $25.06 above the broker's book.
+		var fillTime = new DateTime(2026, 10, 28, 13, 6, 34);
+		var shortExpiry = new DateTime(2026, 11, 2);
+		var longExpiry = new DateTime(2026, 11, 20);
+		const string parentKey = "strategy:Diagonal:SPY:2026-11-20:P770,P771";
+
+		var trades = new List<Trade>
+		{
+			new(1, fillTime, "SPY 20 Nov 2026", parentKey, Asset.OptionStrategy, "Diagonal", Side.Buy, 50, 5.875m, Trade.OptionMultiplier, longExpiry),
+			new(2, fillTime, Formatters.FormatOptionDisplay("SPY", longExpiry, 771m), MatchKeys.Option(MatchKeys.OccSymbol("SPY", longExpiry, 771m, "P")), Asset.Option, "Put", Side.Buy, 50, 9.68m, Trade.OptionMultiplier, longExpiry, 1, Fee: 2.27m),
+			new(3, fillTime, Formatters.FormatOptionDisplay("SPY", shortExpiry, 770m), MatchKeys.Option(MatchKeys.OccSymbol("SPY", shortExpiry, 770m, "P")), Asset.Option, "Put", Side.Sell, 50, 3.805m, Trade.OptionMultiplier, shortExpiry, 1, Fee: 2.67m),
+		};
+
+		var dir = WriteCashRecord(
+			"""{"name":"Trade","description":"Bought SPY 20261120P","amount":"-968.05","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:34 EDT"}""",
+			"""{"name":"Trade","description":"Sold SPY 20261102P","amount":"379.94","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:34 EDT"}""",
+			"""{"name":"Trade","description":"Bought SPY 20261120P","amount":"-16456.78","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:34 EDT"}""",
+			"""{"name":"Trade","description":"Sold SPY 20261102P","amount":"379.94","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:34 EDT"}""",
+			"""{"name":"Trade","description":"Sold SPY 20261102P","amount":"6459.08","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:34 EDT"}""",
+			"""{"name":"Trade","description":"Sold SPY 20261102P","amount":"9498.66","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:35 EDT"}""",
+			"""{"name":"Trade","description":"Bought SPY 20261120P","amount":"-24201.14","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:35 EDT"}""",
+			"""{"name":"Trade","description":"Bought SPY 20261120P","amount":"-968.05","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:34 EDT"}""",
+			"""{"name":"Trade","description":"Sold SPY 20261102P","amount":"767.89","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:45 EDT"}""",
+			"""{"name":"Trade","description":"Sold SPY 20261102P","amount":"1535.78","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:45 EDT"}""",
+			"""{"name":"Trade","description":"Bought SPY 20261120P","amount":"-5832.27","totalAmount":"1.00","occurredTime":"10/28/2026 13:06:45 EDT"}""");
+
+		BrokerCashOverlay.Apply(trades, dir);
+
+		Assert.Equal(-48426.29m, trades[1].BrokerCash);
+		Assert.Equal(19021.29m, trades[2].BrokerCash);
+		Assert.Equal(-29405.00m, trades[0].BrokerCash);
+	}
+
+	[Fact]
 	public void Apply_PartialFillWithoutRemainder_DoesNotMatch()
 	{
 		// Only the 6-contract portion (-4806.27) is present for a 9-contract order (-7209.41 computed).

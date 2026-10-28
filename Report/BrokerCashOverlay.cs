@@ -11,7 +11,7 @@ namespace WebullAnalytics.Report;
 /// platform's book to the penny. Matching is per LEG by root+expiry+right+side+posting DATE (posted rows
 /// lag fills by up to ~20 min and recent descriptions omit the strike, so time and strike can't be hard
 /// keys; strike equality IS enforced when the row carries one). Supports single fills as well as split fills
-/// (multiple posted rows summing to computed cash within tolerance), each posted row consumed at most once.
+/// (a run of consecutive posted rows summing to computed cash within tolerance), each posted row consumed at most once.
 /// Purely offline — reads the local file only; anything unmatched (stale file, pre-history rows, settlements)
 /// keeps the computed fallback.</summary>
 internal static partial class BrokerCashOverlay
@@ -80,13 +80,13 @@ internal static partial class BrokerCashOverlay
 				continue;
 			}
 
-			// 2. Split fills: check if a combination of available candidates sums to computed cash within tolerance
-			var bestSubset = FindBestSubset(available, computed, tolerance, t.Timestamp);
-			if (bestSubset != null)
+			// 2. Split fills: a run of consecutive candidates summing to computed cash within tolerance
+			var bestRun = FindBestRun(available, computed, tolerance, t.Timestamp);
+			if (bestRun != null)
 			{
-				foreach (var c in bestSubset)
+				foreach (var c in bestRun)
 					c.Used = true;
-				trades[i] = t with { BrokerCash = bestSubset.Sum(c => c.Amount) };
+				trades[i] = t with { BrokerCash = bestRun.Sum(c => c.Amount) };
 			}
 		}
 
@@ -135,44 +135,32 @@ internal static partial class BrokerCashOverlay
 		return rows;
 	}
 
-	/// <summary>
-	/// Searches for a combination of 2 or more available posted rows whose sum equals target within tolerance.
-	/// Prefers subsets with smallest diff, then smallest size, then closest average time to tradeTime.
-	/// </summary>
-	private static List<PostedRow>? FindBestSubset(List<PostedRow> available, decimal target, decimal tolerance, DateTime tradeTime, int maxSubsetSize = 5)
+	/// <summary>Finds the run of 2 or more chronologically consecutive posted rows whose sum equals
+	/// <paramref name="target"/> within tolerance — one order's split-fill executions post back to back.
+	/// O(n²) with no length cap: an arbitrary-subset search is exponential and had to be capped at 5 rows,
+	/// which silently dropped a 6-tranche fill on 2026-10-28. Prefers the smallest diff, then the run
+	/// starting closest to <paramref name="tradeTime"/>.</summary>
+	private static List<PostedRow>? FindBestRun(List<PostedRow> available, decimal target, decimal tolerance, DateTime tradeTime)
 	{
-		List<PostedRow>? bestSubset = null;
-		decimal bestDiff = decimal.MaxValue;
-		double bestTimeDiff = double.MaxValue;
+		var chrono = available.OrderBy(c => c.Date).ToList();   // stable: same-second rows keep file order
+		List<PostedRow>? best = null;
+		var bestDiff = decimal.MaxValue;
+		var bestTimeDiff = double.MaxValue;
 
-		void Search(int startIdx, List<PostedRow> current, decimal currentSum)
+		for (var start = 0; start < chrono.Count; start++)
 		{
-			if (current.Count >= 2)
+			var sum = chrono[start].Amount;
+			var timeDiff = Math.Abs((chrono[start].Date - tradeTime).TotalSeconds);
+			for (var end = start + 1; end < chrono.Count; end++)
 			{
-				var diff = Math.Abs(currentSum - target);
-				if (diff <= tolerance)
-				{
-					var timeDiff = current.Average(c => Math.Abs((c.Date - tradeTime).TotalSeconds));
-					if (diff < bestDiff || (diff == bestDiff && (current.Count < bestSubset!.Count || (current.Count == bestSubset.Count && timeDiff < bestTimeDiff))))
-					{
-						bestSubset = new List<PostedRow>(current);
-						bestDiff = diff;
-						bestTimeDiff = timeDiff;
-					}
-				}
-			}
-
-			if (current.Count >= maxSubsetSize) return;
-
-			for (var i = startIdx; i < available.Count; i++)
-			{
-				current.Add(available[i]);
-				Search(i + 1, current, currentSum + available[i].Amount);
-				current.RemoveAt(current.Count - 1);
+				sum += chrono[end].Amount;
+				var diff = Math.Abs(sum - target);
+				if (diff > tolerance || diff > bestDiff || (diff == bestDiff && timeDiff >= bestTimeDiff)) continue;
+				best = chrono.GetRange(start, end - start + 1);
+				bestDiff = diff;
+				bestTimeDiff = timeDiff;
 			}
 		}
-
-		Search(0, new List<PostedRow>(), 0m);
-		return bestSubset;
+		return best;
 	}
 }
