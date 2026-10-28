@@ -12,7 +12,8 @@ namespace WebullAnalytics.Sentiment;
 /// sentiment factor / rule are opt-in extras and must never block scoring on outage.
 ///
 /// Cache freshness mirrors <c>HistoricalPriceCache</c>: a date is "settled" once NY time crosses 5pm
-/// on that date or later. Settled dates are cached forever (the published score is immutable).
+/// on that date or later. Settled is NOT final: CNN restates published scores weeks to months later, in
+/// batches that don't track age (see <see cref="SyncHistoryAsync"/>, which re-writes the whole window).
 /// Today's intra-day reading is never written to disk because the score moves throughout the session
 /// and we don't want a stale mid-day snapshot to masquerade as the day's final value on the next run.
 /// Each call before settlement re-fetches from CNN.
@@ -61,12 +62,8 @@ internal static class FearGreedClient
 	/// When <paramref name="cacheOnly"/> is true, the network branch is skipped — returns the cached
 	/// value if present, otherwise null. Used by the backtest path so a replay never hits CNN (the
 	/// endpoint's current-day reading would otherwise leak as-of-now data into historical decisions)
-	/// while still picking up T+1 caches once they exist for the asOf date.
-	/// <paramref name="forceRefresh"/> skips the cache read and always hits the network, overwriting
-	/// the cache file with whatever comes back — CNN keeps revising a settled score for roughly two
-	/// weeks after first publish (confirmed empirically 2026-09-01: same-day captures were off by
-	/// ~2 points, decaying to ~0 by three weeks out), so "settled" does not mean "final".</summary>
-	public static async Task<SentimentSnapshot?> FetchAsync(DateTime asOf, CancellationToken cancellation, bool cacheOnly = false, bool forceRefresh = false)
+	/// while still picking up T+1 caches once they exist for the asOf date.</summary>
+	public static async Task<SentimentSnapshot?> FetchAsync(DateTime asOf, CancellationToken cancellation, bool cacheOnly = false)
 	{
 		// Backtest replay (cacheOnly): today's F&G isn't published until the 5pm settle, so reading day D's
 		// cached EOD score to make an intraday decision on D is look-ahead. The value actually knowable during
@@ -78,10 +75,10 @@ internal static class FearGreedClient
 		var cachePath = Program.ResolvePath(Path.Combine(CacheDir, $"{dateStr}.json"));
 		var settled = IsSettled(lookup, DateTime.UtcNow);
 
-		if (cacheOnly) return settled && !forceRefresh ? CacheOnlySnapshots.GetOrAdd(lookup.Date, d => ReadCache(cachePath, d)) : null;
-		if (settled && !forceRefresh && ReadCache(cachePath, lookup.Date) is { } cached) return cached;
+		if (cacheOnly) return settled ? CacheOnlySnapshots.GetOrAdd(lookup.Date, d => ReadCache(cachePath, d)) : null;
+		if (settled && ReadCache(cachePath, lookup.Date) is { } cached) return cached;
 
-		if (!settled && !forceRefresh)
+		if (!settled)
 		{
 			lock (_liveCacheLock)
 			{
@@ -90,15 +87,8 @@ internal static class FearGreedClient
 			}
 		}
 
-		string body;
-		try
-		{
-			using var resp = await Http.GetAsync($"{Endpoint}/{dateStr}", cancellation);
-			if (!resp.IsSuccessStatusCode) return null;
-			body = await resp.Content.ReadAsStringAsync(cancellation);
-		}
-		catch (HttpRequestException) { return null; }
-		catch (TaskCanceledException) when (!cancellation.IsCancellationRequested) { return null; }
+		var body = await GetBodyAsync(lookup, cancellation);
+		if (body == null) return null;
 
 		if (settled && MarketCalendar.IsOpen(asOf.Date))
 		{
@@ -121,6 +111,45 @@ internal static class FearGreedClient
 				_intradayLiveCache = (DateTime.UtcNow, lookup.Date, parsedResult);
 		}
 		return parsedResult;
+	}
+
+	/// <summary>Overwrites <c>data/sentiment-cache/{date}.json</c> for every settled trading day CNN's
+	/// history array holds from <paramref name="from"/> on, from ONE request — CNN's current array is the
+	/// source of truth, written unconditionally. CNN restates published scores long after first publish and
+	/// not by age (2026-10-28: dates 30-170 days old were off by up to 9 points while 1-2 month old dates
+	/// matched), so no revalidation window can bound it. Returns the number of files written, or null when
+	/// CNN is unreachable. The endpoint 500s for start dates older than ~6 years.</summary>
+	public static async Task<int?> SyncHistoryAsync(DateTime from, CancellationToken cancellation)
+	{
+		var body = await GetBodyAsync(from, cancellation);
+		if (body == null) return null;
+
+		var days = SplitHistoryForCache(body);
+		if (days == null) return null;
+
+		var cacheDir = Program.ResolvePath(CacheDir);
+		Directory.CreateDirectory(cacheDir);
+		var now = DateTime.UtcNow;
+		var written = 0;
+		foreach (var (date, json) in days)
+		{
+			if (date < from.Date || !MarketCalendar.IsOpen(date) || !IsSettled(date, now)) continue;
+			await File.WriteAllTextAsync(Path.Combine(cacheDir, $"{date:yyyy-MM-dd}.json"), json, cancellation);
+			written++;
+		}
+		return written;
+	}
+
+	private static async Task<string?> GetBodyAsync(DateTime start, CancellationToken cancellation)
+	{
+		try
+		{
+			using var resp = await Http.GetAsync($"{Endpoint}/{start:yyyy-MM-dd}", cancellation);
+			if (!resp.IsSuccessStatusCode) return null;
+			return await resp.Content.ReadAsStringAsync(cancellation);
+		}
+		catch (HttpRequestException) { return null; }
+		catch (TaskCanceledException) when (!cancellation.IsCancellationRequested) { return null; }
 	}
 
 	/// <summary>True when <paramref name="asOf"/> is on or before the most recent settled NY date.
@@ -222,29 +251,60 @@ internal static class FearGreedClient
 			var pt = FindHistoricalPoint(root, date.Date);
 			if (pt == null) return null;
 			var (score, rating, millis, prevClose) = pt.Value;
-			var ratingStr = rating ?? SentimentRating.FromScore(score);
-			var composite = new JsonObject
-			{
-				["score"] = score,
-				["rating"] = ratingStr,
-				// 23:59 UTC = pre-midnight NY on the same date, so the date-aware read trusts the top level.
-				["timestamp"] = $"{date:yyyy-MM-dd}T23:59:00+00:00",
-			};
-			if (prevClose.HasValue) composite["previous_close"] = prevClose.Value;
-			var payload = new JsonObject
-			{
-				["fear_and_greed"] = composite,
-				["fear_and_greed_historical"] = new JsonObject
-				{
-					["timestamp"] = millis,
-					["score"] = score,
-					["rating"] = ratingStr,
-					["data"] = new JsonArray(new JsonObject { ["x"] = millis, ["y"] = score, ["rating"] = ratingStr }),
-				},
-			};
-			return payload.ToJsonString();
+			return BuildReducedPayload(date, score, rating, millis, prevClose);
 		}
 		catch (JsonException) { return null; }
+	}
+
+	/// <summary>Splits a multi-day graphdata body into one reduced single-date cache payload per
+	/// <c>fear_and_greed_historical</c> point (UTC date of the point = its NY trading date; a later point on
+	/// the same date wins). Null when the body has no history array. Internal for unit tests.</summary>
+	internal static List<(DateTime Date, string Json)>? SplitHistoryForCache(string body)
+	{
+		try
+		{
+			using var doc = JsonDocument.Parse(body);
+			if (!doc.RootElement.TryGetProperty("fear_and_greed_historical", out var hist) || !hist.TryGetProperty("data", out var arr) || arr.ValueKind != JsonValueKind.Array) return null;
+			var byDate = new SortedDictionary<DateTime, string>();
+			decimal? prev = null;
+			foreach (var pt in arr.EnumerateArray())
+			{
+				if (!pt.TryGetProperty("x", out var xEl) || xEl.ValueKind != JsonValueKind.Number || !pt.TryGetProperty("y", out var yEl) || yEl.ValueKind != JsonValueKind.Number) continue;
+				var millis = (long)xEl.GetDouble();
+				var date = DateTimeOffset.FromUnixTimeMilliseconds(millis).UtcDateTime.Date;
+				var score = (decimal)yEl.GetDouble();
+				var rating = pt.TryGetProperty("rating", out var rEl) ? rEl.GetString() : null;
+				byDate[date] = BuildReducedPayload(date, score, rating, millis, prev);
+				prev = score;
+			}
+			return byDate.Select(kv => (kv.Key, kv.Value)).ToList();
+		}
+		catch (JsonException) { return null; }
+	}
+
+	private static string BuildReducedPayload(DateTime date, decimal score, string? rating, long millis, decimal? prevClose)
+	{
+		var ratingStr = rating ?? SentimentRating.FromScore(score);
+		var composite = new JsonObject
+		{
+			["score"] = score,
+			["rating"] = ratingStr,
+			// 23:59 UTC = pre-midnight NY on the same date, so the date-aware read trusts the top level.
+			["timestamp"] = $"{date:yyyy-MM-dd}T23:59:00+00:00",
+		};
+		if (prevClose.HasValue) composite["previous_close"] = prevClose.Value;
+		var payload = new JsonObject
+		{
+			["fear_and_greed"] = composite,
+			["fear_and_greed_historical"] = new JsonObject
+			{
+				["timestamp"] = millis,
+				["score"] = score,
+				["rating"] = ratingStr,
+				["data"] = new JsonArray(new JsonObject { ["x"] = millis, ["y"] = score, ["rating"] = ratingStr }),
+			},
+		};
+		return payload.ToJsonString();
 	}
 
 	private static void AddComponent(JsonElement root, string key, string label, List<SentimentComponent> sink)

@@ -132,6 +132,26 @@ public class FearGreedClientTests
 	}
 
 	[Fact]
+	public void SplitHistoryForCacheWritesOneSameDayPayloadPerPoint()
+	{
+		var days = FearGreedClient.SplitHistoryForCache(StaleBulkResponse);
+		Assert.NotNull(days);
+		Assert.Equal(new[] { new DateTime(2022, 4, 28), new DateTime(2022, 4, 29), new DateTime(2026, 5, 8) }, days!.Select(d => d.Date));
+		var (date, json) = days[1];
+		var s = FearGreedClient.ParseResponse(json, date);
+		Assert.NotNull(s);
+		Assert.InRange(s!.Score, 27.5m, 27.7m);
+		Assert.InRange(s.PreviousClose ?? 0m, 24.2m, 24.3m);
+		Assert.Null(FearGreedClient.ParseResponse(json, date.AddDays(-1)));
+	}
+
+	[Fact]
+	public void SplitHistoryForCacheReturnsNullWithoutHistory()
+	{
+		Assert.Null(FearGreedClient.SplitHistoryForCache(SampleResponse));
+	}
+
+	[Fact]
 	public void NormalizeForCacheReturnsNullWhenDateAbsent()
 	{
 		Assert.Null(FearGreedClient.NormalizeForCache(StaleBulkResponse, new DateTime(2022, 5, 2)));

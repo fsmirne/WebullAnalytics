@@ -277,121 +277,43 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		return MarketCalendar.PreviousOpenOnOrBefore(nowNy.Date.AddDays(-1));
 	}
 
-	/// <summary>Fills <c>data/sentiment-cache/<date>.json</c> for every trading day in
-	/// [earliest, asOf-1] whose cache file is missing. Uses <see cref="FearGreedClient.FetchAsync"/>
-	/// which handles the "settled" check internally (CNN settles a date's score at 17:00 ET; pre-settlement
-	/// fetches don't write to disk). Throttled at 400ms per call to be polite to CNN's public endpoint.
-	/// Best-effort — failures don't fail the command, since the sentiment factor is opt-in scoring.</summary>
 	// Trading days for which CNN's Fear & Greed source itself has NO value (a hole in CNN's own history,
 	// distinct from a market closure — the market WAS open these days, so they must NOT go in MarketCalendar
-	// or every other consumer would wrongly treat them as closed). Without this the sentiment refresh reports
-	// "pulling 1 missing day / skipped 1" on EVERY run forever, re-hammering CNN for a date it can't serve.
-	// The reader already returns null for a missing file; this just stops the futile re-fetch + noise.
+	// or every other consumer would wrongly treat them as closed). Excluded from the missing-day warning so
+	// it doesn't fire on every run for a date CNN can't serve. The reader already returns null for a missing file.
 	private static readonly HashSet<DateTime> KnownSentimentSourceGaps = new()
 	{
 		new DateTime(2026, 3, 12),  // confirmed absent from CNN F&G history (found during the 2021→ cache rebuild)
 	};
 
+	/// <summary>Rewrites <c>data/sentiment-cache/<date>.json</c> for every settled trading day in
+	/// [earliest, asOf] from CNN's current history (one request, see <see cref="FearGreedClient.SyncHistoryAsync"/>),
+	/// then warns about any settled trading day CNN had no point for. Best-effort — failures don't fail the
+	/// command, since the sentiment factor is opt-in scoring.</summary>
 	private static async Task RefreshSentimentCacheAsync(DateTime earliest, DateTime asOf, CancellationToken cancellation)
 	{
 		var earliestNy = TimeZoneInfo.ConvertTime(earliest, NyTz).Date;
 		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
-		var cacheDir = Program.ResolvePath("data/sentiment-cache");
 
-		var needed = new List<DateTime>();
-		for (var d = earliestNy; d <= todayNy; d = d.AddDays(1))
+		var written = await FearGreedClient.SyncHistoryAsync(earliestNy, cancellation);
+		if (written == null)
 		{
-			if (!MarketCalendar.IsOpen(d)) continue;
-			if (KnownSentimentSourceGaps.Contains(d)) continue;   // CNN itself has no value — never fillable, don't re-attempt/re-warn every run
-			var path = Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json");
-			if (File.Exists(path)) continue;
-			needed.Add(d);
-		}
-
-		if (needed.Count == 0)
-		{
-			AnsiConsole.MarkupLine($"  sentiment: [green]ok[/] (cache complete through {todayNy:yyyy-MM-dd})");
+			AnsiConsole.MarkupLine("  sentiment: [yellow]CNN F&G unreachable[/] — cache left as is");
 			return;
 		}
 
-		AnsiConsole.MarkupLine($"  sentiment: pulling {needed.Count} missing day(s) from CNN F&G");
-		var written = 0;
-		var skipped = 0;
-		var index = 0;
-		foreach (var d in needed)
-		{
-			cancellation.ThrowIfCancellationRequested();
-			if (index > 0) await Task.Delay(TimeSpan.FromMilliseconds(400), cancellation);
-			index++;
-
-			var snapshot = await FearGreedClient.FetchAsync(d, cancellation);
-			if (snapshot == null) { skipped++; continue; }
-			// FearGreedClient writes the cache file only when the date is "settled" (past 17:00 ET).
-			// Today before settlement returns a snapshot but doesn't persist — that's expected; tomorrow's
-			// run will pick it up.
-			var path = Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json");
-			if (File.Exists(path)) written++; else skipped++;
-
-			if (index % 50 == 0)
-				AnsiConsole.MarkupLine($"    progress: {index}/{needed.Count}");
-		}
-
-		if (skipped > 0)
-			AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/], [yellow]skipped {skipped}[/] (not yet settled or CNN unreachable)");
-		else
-			AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/] day(s)");
-
-		await RevalidateRecentSentimentAsync(todayNy, cancellation);
-	}
-
-	// CNN keeps revising a settled Fear & Greed score for a few weeks after first publish — confirmed
-	// empirically 2026-09-01 by re-querying CNN's own historical array: dates cached 3-5 days earlier were
-	// off by ~2 points (one rating flip, greed->neutral), and dates 18-21 days old still showed ~0.6-1 point
-	// residual drift in that single sample, only settling exactly by ~2-3 weeks in the cleanest cases.
-	// `FearGreedClient.FetchAsync`'s settled-cache-is-forever assumption only holds once a date ages out of
-	// this window, so re-fetch and overwrite recent settled days here instead of trusting first capture as
-	// final. 30 days gives margin over the observed 18-21 day residual rather than cutting it close.
-	private const int SentimentRevisionWindowDays = 30;
-
-	private static async Task RevalidateRecentSentimentAsync(DateTime todayNy, CancellationToken cancellation)
-	{
 		var cacheDir = Program.ResolvePath("data/sentiment-cache");
-		var windowStart = todayNy.AddDays(-SentimentRevisionWindowDays);
-
-		var candidates = new List<DateTime>();
-		for (var d = windowStart; d < todayNy; d = d.AddDays(1))
+		var now = DateTime.UtcNow;
+		var missing = new List<DateTime>();
+		for (var d = earliestNy; d <= todayNy; d = d.AddDays(1))
 		{
-			if (!MarketCalendar.IsOpen(d)) continue;
-			if (KnownSentimentSourceGaps.Contains(d)) continue;
-			if (!File.Exists(Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json"))) continue;   // missing-day fill above handles these
-			candidates.Add(d);
-		}
-		if (candidates.Count == 0) return;
-
-		var revised = 0;
-		var index = 0;
-		foreach (var d in candidates)
-		{
-			cancellation.ThrowIfCancellationRequested();
-			if (index > 0) await Task.Delay(TimeSpan.FromMilliseconds(400), cancellation);
-			index++;
-
-			var path = Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json");
-			SentimentSnapshot? before = null;
-			try { before = FearGreedClient.ParseResponse(await File.ReadAllTextAsync(path, cancellation), d); }
-			catch (IOException) { }
-
-			var after = await FearGreedClient.FetchAsync(d, cancellation, forceRefresh: true);
-			if (before != null && after != null && Math.Abs(before.Score - after.Score) > 0.01m)
-			{
-				revised++;
-				AnsiConsole.MarkupLine($"    revised {d:yyyy-MM-dd}: {before.Score:0.##} -> {after.Score:0.##} ({before.Rating} -> {after.Rating})");
-			}
+			if (!MarketCalendar.IsOpen(d) || !FearGreedClient.IsSettled(d, now) || KnownSentimentSourceGaps.Contains(d)) continue;
+			if (!File.Exists(Path.Combine(cacheDir, $"{d:yyyy-MM-dd}.json"))) missing.Add(d);
 		}
 
-		AnsiConsole.MarkupLine(revised > 0
-			? $"  sentiment: [yellow]revised {revised}[/] of {candidates.Count} recent day(s) (CNN restates scores for ~2 weeks post-publish)"
-			: $"  sentiment: [green]no revisions[/] across last {candidates.Count} recent day(s)");
+		AnsiConsole.MarkupLine($"  sentiment: [green]wrote {written}[/] day(s) from CNN F&G ({earliestNy:yyyy-MM-dd} .. {todayNy:yyyy-MM-dd})");
+		if (missing.Count > 0)
+			AnsiConsole.MarkupLine($"  sentiment: [yellow]{missing.Count} settled trading day(s) absent from CNN history[/]: {string.Join(", ", missing.Select(d => d.ToString("yyyy-MM-dd")))}");
 	}
 
 	/// <summary>Refreshes <c>data/event-cache/<TICKER>.json</c> (next earnings + ex-dividend) from
