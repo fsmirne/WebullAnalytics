@@ -167,6 +167,7 @@ class Program
 				data.AddCommand<Data.DataCheckCommand>("check");
 				data.AddCommand<Data.DataStatsCommand>("stats");
 				data.AddCommand<Data.DataVerifyCommand>("verify");
+				data.AddCommand<Data.DataClockCommand>("clock");
 				data.AddBranch("backfill", backfill =>
 				{
 					backfill.SetDescription("Pull ThetaData into the canonical stores: minute NBBO and trade bars into data/quotes.db, daily EOD + open interest into data/oi.");

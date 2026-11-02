@@ -36,7 +36,7 @@ internal static class ThetaRetry
 	internal static bool IsTransient(Exception ex) => ex switch
 	{
 		ThetaStallException => true,
-		RpcException rpc => rpc.StatusCode is StatusCode.Unavailable or StatusCode.Internal or StatusCode.DeadlineExceeded or StatusCode.Unknown,
+		RpcException rpc => rpc.StatusCode is StatusCode.Unavailable or StatusCode.Internal or StatusCode.DeadlineExceeded or StatusCode.Unknown or StatusCode.ResourceExhausted,   // ResourceExhausted = over the plan's concurrent-request cap: back off and retry
 		HttpRequestException or SocketException or IOException => true,
 		_ => false
 	};

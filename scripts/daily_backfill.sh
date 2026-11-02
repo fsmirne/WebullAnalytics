@@ -5,6 +5,7 @@
 #   2. wa data backfill ohlcv    -> data/quotes.db `ohlcv` table       (minute trade OHLCV, same band/DTE, own seals)
 #   3. wa data backfill oi       -> data/oi/<TICKER>/<date>.jsonl      (EOD open interest + back-solved IV)
 #   4. wa data verify            (SQL coverage + crossed-quote scan of quotes.db; no network)
+#   5. wa data clock             -> data/clock/<TICKER>/            (close/09:45 calibration books, then refit the trading-time clock)
 #
 # Quotes are written straight into the canonical SQLite store (no CSV staging) — per-expiry DELETE+INSERT,
 # WAL so the scraper/backtest can touch it concurrently; quote sealing lives in the DB `sealed` table. The
@@ -76,7 +77,7 @@ while [ $# -gt 0 ]; do
     --history-tickers) CLI_HISTORY="${2:?--history-tickers needs a value}"; shift 2 ;;
     --steps)           CLI_STEPS="${2:?--steps needs a value}"; shift 2 ;;
     --verify)          CLI_VERIFY="${2:?--verify needs a value}"; shift 2 ;;
-    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--oi-tickers 'SPY ...'] [--history-tickers 'SPY ...'] [--steps history,quotes,ohlcv,oi,verify] [--verify 'SPY ...']"; exit 0 ;;
+    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--oi-tickers 'SPY ...'] [--history-tickers 'SPY ...'] [--steps history,quotes,ohlcv,oi,verify,clock] [--verify 'SPY ...']"; exit 0 ;;
     *)                 echo "[daily_backfill] unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -129,7 +130,7 @@ else WA="wa"; fi
 
 # Which of the four steps to run (default all). Kept identical to daily_backfill.ps1 -Steps: a step runs
 # iff it appears in STEPS. Commas or spaces both work. `has_step NAME` is the single guard both scripts mirror.
-STEPS="${CLI_STEPS:-${BACKFILL_STEPS:-history,quotes,ohlcv,oi,verify}}"
+STEPS="${CLI_STEPS:-${BACKFILL_STEPS:-history,quotes,ohlcv,oi,verify,clock}}"
 STEPS="${STEPS//,/ }"
 has_step() { case " $STEPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
@@ -194,15 +195,16 @@ resolve_end_oi() {
   if [ "$now_hour" -ge 8 ]; then date -d "$now_today - 1 day" +%F; else date -d "$now_today - 2 days" +%F; fi
 }
 
-echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes+ohlcv ${START_VALUE:+from $START_VALUE }through $(resolve_end) (as of now; re-resolved per step), oi through $(resolve_end_oi) (as of now; re-resolved per step), verify ==="
+echo "[$(ts)] === daily data update: ai history ($HISTORY_TICKERS), quotes+ohlcv ${START_VALUE:+from $START_VALUE }through $(resolve_end) (as of now; re-resolved per step), oi through $(resolve_end_oi) (as of now; re-resolved per step), verify, clock ==="
 
 for t in $HISTORY_TICKERS; do
-  step "(1/5) ai history $t"                        "$WA" ai history "$t"
+  step "(1/6) ai history $t"                        "$WA" ai history "$t"
 done
-has_step quotes && step "(2/5) minute-NBBO quotes -> data/quotes.db"  "$WA" data backfill quotes --tickers "${TICKERS// /,}" --end "$(resolve_end)"       ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step ohlcv  && step "(3/5) minute trade OHLCV -> data/quotes.db"  "$WA" data backfill ohlcv  --tickers "${TICKERS// /,}" --end "$(resolve_end)"       ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
-has_step oi     && step "(4/5) EOD open interest -> data/oi"          "$WA" data backfill oi     --tickers "${OI_TICKERS// /,}" --end "$(resolve_end_oi)" ${START_OPT[@]+"${START_OPT[@]}"}
-has_step verify && step "(5/5) quote-store coverage + integrity"      "$WA" data verify --roots "${VERIFY// /,}"
+has_step quotes && step "(2/6) minute-NBBO quotes -> data/quotes.db"  "$WA" data backfill quotes --tickers "${TICKERS// /,}" --end "$(resolve_end)"       ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step ohlcv  && step "(3/6) minute trade OHLCV -> data/quotes.db"  "$WA" data backfill ohlcv  --tickers "${TICKERS// /,}" --end "$(resolve_end)"       ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
+has_step oi     && step "(4/6) EOD open interest -> data/oi"          "$WA" data backfill oi     --tickers "${OI_TICKERS// /,}" --end "$(resolve_end_oi)" ${START_OPT[@]+"${START_OPT[@]}"}
+has_step verify && step "(5/6) quote-store coverage + integrity"      "$WA" data verify --roots "${VERIFY// /,}"
+has_step clock  && step "(6/6) trading-time clock calibration"        "$WA" data clock
 
 if [ "$rc" -eq 0 ]; then
   echo "[$(ts)] === ALL OK ==="

@@ -11,11 +11,12 @@
 	hit "disk I/O error / database disk image is malformed". Keeping both sides native-Windows fixes that.
 
 	Steps (same order/semantics as the .sh):
-	  1/5  wa ai history             -> daily closes + intraday tape for the strategy tickers (run FIRST)
-	  2/5  wa data backfill quotes   -> data/quotes.db (minute NBBO, per-expiry staged then promoted, WAL)
-	  3/5  wa data backfill ohlcv    -> data/quotes.db `ohlcv` table (minute trade OHLCV, same band/DTE, own seals)
-	  4/5  wa data backfill oi       -> data/oi/<TICKER>/<date>.jsonl (EOD open interest + back-solved IV)
-	  5/5  wa data verify            -> SQL coverage + crossed-quote scan of quotes.db (no network)
+	  1/6  wa ai history             -> daily closes + intraday tape for the strategy tickers (run FIRST)
+	  2/6  wa data backfill quotes   -> data/quotes.db (minute NBBO, per-expiry staged then promoted, WAL)
+	  3/6  wa data backfill ohlcv    -> data/quotes.db `ohlcv` table (minute trade OHLCV, same band/DTE, own seals)
+	  4/6  wa data backfill oi       -> data/oi/<TICKER>/<date>.jsonl (EOD open interest + back-solved IV)
+	  5/6  wa data verify            -> SQL coverage + crossed-quote scan of quotes.db (no network)
+	  6/6  wa data clock             -> data/clock/<TICKER>/ (close/09:45 calibration books, then refit the trading-time clock)
 
 	Use daily_backfill.sh on true Linux/macOS/WSL; use this daily_backfill.ps1 as the default on Windows 11.
 	Requires the wa.exe executable (published alongside, or on PATH).
@@ -46,7 +47,7 @@
 	Scope the `wa ai history` step (bare names, no DTE). Default = SPY XSP SPXW.
 
 .PARAMETER Steps
-	Which of the five steps to run (default all): history,quotes,ohlcv,oi,verify. Kept byte-identical in meaning
+	Which of the six steps to run (default all): history,quotes,ohlcv,oi,verify,clock. Kept byte-identical in meaning
 	to daily_backfill.sh --steps. E.g. -Steps history runs ONLY the history refresh (no ThetaData session,
 	no quotes.db write — safe to run while a separate quote pull is in progress). -Steps quotes,oi,verify
 	skips history.
@@ -118,10 +119,10 @@ if (-not $Verify -or $Verify.Count -eq 0) {
 	else { $Verify = @('SPXW','XSP','SPY') }
 }
 
-# --- Step selection (default all five; identical semantics to daily_backfill.sh --steps). --------------------
+# --- Step selection (default all six; identical semantics to daily_backfill.sh --steps). --------------------
 if (-not $Steps -or $Steps.Count -eq 0) {
 	if ($env:BACKFILL_STEPS) { $Steps = $env:BACKFILL_STEPS -split '[,\s]+' }
-	else { $Steps = @('history','quotes','ohlcv','oi','verify') }
+	else { $Steps = @('history','quotes','ohlcv','oi','verify','clock') }
 }
 $Steps = @($Steps | ForEach-Object { $_.ToLower() })
 function Has-Step([string]$name) { return $Steps -contains $name }
@@ -193,29 +194,33 @@ function Invoke-Step {
 }
 
 $startNote = if ($StartValue) { "from $StartValue " } else { "" }
-Write-Host "[$(Get-Ts)] === daily data update: ai history ($($HistoryList -join ' ')), quotes+ohlcv ${startNote}through $(Resolve-End) (as of now; re-resolved per step), oi through $(Resolve-EndOi) (as of now; re-resolved per step), verify ==="
+Write-Host "[$(Get-Ts)] === daily data update: ai history ($($HistoryList -join ' ')), quotes+ohlcv ${startNote}through $(Resolve-End) (as of now; re-resolved per step), oi through $(Resolve-EndOi) (as of now; re-resolved per step), verify, clock ==="
 
 foreach ($t in $HistoryList) {
-	Invoke-Step "(1/5) ai history $t" $WA @('ai','history',$t)
+	Invoke-Step "(1/6) ai history $t" $WA @('ai','history',$t)
 }
 
 if (Has-Step 'quotes') {
 	$quotesArgs = @('data','backfill','quotes','--tickers',($Tickers -join ','),'--end',(Resolve-End)) + $StartOpt + @('--concurrency',"$Conc")
-	Invoke-Step "(2/5) minute-NBBO quotes -> data/quotes.db" $WA $quotesArgs
+	Invoke-Step "(2/6) minute-NBBO quotes -> data/quotes.db" $WA $quotesArgs
 }
 
 if (Has-Step 'ohlcv') {
 	$ohlcvArgs = @('data','backfill','ohlcv','--tickers',($Tickers -join ','),'--end',(Resolve-End)) + $StartOpt + @('--concurrency',"$Conc")
-	Invoke-Step "(3/5) minute trade OHLCV -> data/quotes.db" $WA $ohlcvArgs
+	Invoke-Step "(3/6) minute trade OHLCV -> data/quotes.db" $WA $ohlcvArgs
 }
 
 if (Has-Step 'oi') {
 	$oiArgs = @('data','backfill','oi','--tickers',($OiTickers -join ','),'--end',(Resolve-EndOi)) + $StartOpt
-	Invoke-Step "(4/5) EOD open interest -> data/oi" $WA $oiArgs
+	Invoke-Step "(4/6) EOD open interest -> data/oi" $WA $oiArgs
 }
 
 if (Has-Step 'verify') {
-	Invoke-Step "(5/5) quote-store coverage + integrity" $WA @('data','verify','--roots',($Verify -join ','))
+	Invoke-Step "(5/6) quote-store coverage + integrity" $WA @('data','verify','--roots',($Verify -join ','))
+}
+
+if (Has-Step 'clock') {
+	Invoke-Step "(6/6) trading-time clock calibration" $WA @('data','clock')
 }
 
 if ($script:rc -eq 0) {
