@@ -2,7 +2,6 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Globalization;
-using System.Text.RegularExpressions;
 using WebullAnalytics.Pricing.Clock;
 
 namespace WebullAnalytics.Data;
@@ -10,7 +9,7 @@ namespace WebullAnalytics.Data;
 internal sealed class DataClockSettings : CommandSettings
 {
 	[CommandArgument(0, "[ticker]")]
-	[Description("Ticker to seed and fit. Omit to refresh every tracked ticker: those with an ai-config strategy file or an existing clock store.")]
+	[Description("Ticker to seed and fit (once per ticker whose positions cross nights). Omit to refresh every ticker already in the clock store.")]
 	public string? Ticker { get; set; }
 
 	[CommandOption("--since <yyyy-MM-dd>")]
@@ -26,14 +25,14 @@ internal sealed class DataClockSettings : CommandSettings
 /// <summary>`wa data clock [TICKER]`: keeps the trading-time clock calibrated. Seeds the ticker's close/09:45 book store for missing
 /// completed sessions (quotes.db when it has a usable book, else ThetaData), then refits the clock weights — a monthly history for
 /// backtests plus the newest window for live pricing — and prints what the newest fit found against the calendar clock.</summary>
-internal sealed partial class DataClockCommand : AsyncCommand<DataClockSettings>
+internal sealed class DataClockCommand : AsyncCommand<DataClockSettings>
 {
 	protected override async Task<int> ExecuteAsync(CommandContext context, DataClockSettings settings, CancellationToken cancellation)
 	{
 		var tickers = settings.Ticker != null ? [ClockFits.ClockRoot(settings.Ticker)] : TrackedRoots();
 		if (tickers.Count == 0)
 		{
-			AnsiConsole.MarkupLine("[yellow]No tracked tickers: pass one, e.g. `wa data clock SPY`.[/]");
+			AnsiConsole.MarkupLine("[yellow]No tickers in the clock store yet: seed one, e.g. `wa data clock SPY`.[/]");
 			return 0;
 		}
 		var today = DateOnly.FromDateTime(MarketTime.TodayEt());
@@ -59,18 +58,11 @@ internal sealed partial class DataClockCommand : AsyncCommand<DataClockSettings>
 
 	private static void Report(string line) => AnsiConsole.MarkupLine($"[dim]{Markup.Escape(line)}[/]");
 
-	/// <summary>Tickers with an ai-config strategy/ticker file (<c>ai-config.{TICKER}[.{STRATEGY}].json</c>) or an existing clock store.</summary>
+	/// <summary>Tickers already in the clock store — seeded once on demand with `wa data clock {TICKER}`. The daily refresh never seeds
+	/// new tickers on its own: only roots whose positions cross nights need a fit (same-day roots are clock-independent).</summary>
 	private static List<string> TrackedRoots()
 	{
-		var dataDir = Program.ResolvePath("data");
-		var fromConfigs = Directory.Exists(dataDir)
-			? Directory.EnumerateFiles(dataDir, "ai-config.*.json").Select(f => ConfigTicker().Match(Path.GetFileName(f))).Where(m => m.Success).Select(m => m.Groups[1].Value)
-			: [];
 		var clockDir = Program.ResolvePath("data/clock");
-		var fromStore = Directory.Exists(clockDir) ? Directory.EnumerateDirectories(clockDir).Select(Path.GetFileName).OfType<string>() : [];
-		return fromConfigs.Concat(fromStore).Select(ClockFits.ClockRoot).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(t => t).ToList();
+		return Directory.Exists(clockDir) ? Directory.EnumerateDirectories(clockDir).Select(Path.GetFileName).OfType<string>().Select(ClockFits.ClockRoot).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(t => t).ToList() : [];
 	}
-
-	[GeneratedRegex(@"^ai-config\.([A-Z][A-Z0-9]{0,5})(\.[A-Za-z0-9]+)?\.json$")]
-	private static partial Regex ConfigTicker();
 }

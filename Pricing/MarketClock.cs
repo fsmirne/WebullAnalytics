@@ -47,7 +47,7 @@ internal static class MarketClock
 	private static readonly ConcurrentDictionary<string, byte> Warned = new(StringComparer.OrdinalIgnoreCase);
 
 	// Weights per (root, day): pricing hot loops (the scorer, the backtest) ask millions of times per run.
-	private static readonly ConcurrentDictionary<(string Root, DateOnly Day), ClockWeights> Resolved = new();
+	private static readonly ConcurrentDictionary<(string Root, DateOnly Day), ClockWeights?> Resolved = new();
 
 	/// <summary>The simulated day a historical run prices on (the backtest pins it every step, like the day's risk-free rate). Null =
 	/// live: today, or a past --date (<see cref="EvaluationDate"/>).</summary>
@@ -60,20 +60,19 @@ internal static class MarketClock
 		PinnedDay?.ToDateTime(TimeOnly.MinValue) ?? (EvaluationDate.IsOverridden && EvaluationDate.Today < MarketTime.TodayEt() ? EvaluationDate.Today : MarketTime.TodayEt());
 
 	/// <summary>The clock weights in force for <paramref name="root"/> on day <paramref name="at"/>: the newest fit built before that day,
-	/// else the calendar clock with a one-time warning.</summary>
-	internal static ClockWeights WeightsFor(string root, DateTime at) => Resolved.GetOrAdd((root, DateOnly.FromDateTime(at)), static key => Resolve(key.Root, key.Day.ToDateTime(TimeOnly.MinValue)));
+	/// else the calendar clock.</summary>
+	internal static ClockWeights WeightsFor(string root, DateTime at) => FittedWeights(root, at) ?? ClockWeights.Calendar;
+
+	/// <summary>The newest fit's weights before day <paramref name="at"/>, or null when <paramref name="root"/> has none.</summary>
+	private static ClockWeights? FittedWeights(string root, DateTime at) => Resolved.GetOrAdd((root, DateOnly.FromDateTime(at)), static key => Resolve(key.Root, key.Day.ToDateTime(TimeOnly.MinValue)));
 
 	/// <summary>Forgets resolved weights — after a refit in-process, or when a test swaps <see cref="FitLookup"/>.</summary>
 	internal static void ResetResolved() => Resolved.Clear();
 
-	private static ClockWeights Resolve(string root, DateTime at)
+	private static ClockWeights? Resolve(string root, DateTime at)
 	{
 		var fit = FitLookup(root, at);
-		if (fit == null)
-		{
-			WarnOnce(root, $"no trading-time clock fit for {Clock.ClockFits.ClockRoot(root)} before {at:yyyy-MM-dd}: pricing on the calendar clock (run `wa data clock {Clock.ClockFits.ClockRoot(root)}`)");
-			return ClockWeights.Calendar;
-		}
+		if (fit == null) return null;
 		var ageDays = DateOnly.FromDateTime(at).DayNumber - fit.FittedThrough.DayNumber;
 		if (ageDays > StaleAfterDays && at.Date >= MarketTime.TodayEt().AddDays(-1))
 			WarnOnce(root, $"trading-time clock fit for {fit.Root} is {ageDays} days old (through {fit.FittedThrough:yyyy-MM-dd}): run `wa data clock`");
@@ -86,8 +85,19 @@ internal static class MarketClock
 	}
 
 	/// <summary><see cref="OptionTime"/> from <paramref name="from"/> to <paramref name="to"/> (both ET wall-clock) on <paramref name="root"/>'s
-	/// clock as calibrated on the pricing context's day (<see cref="KnowledgeDay"/>). Zero when <paramref name="to"/> is not after <paramref name="from"/>.</summary>
-	internal static OptionTime Between(string root, DateTime from, DateTime to) => to <= from ? OptionTime.Zero : Between(WeightsFor(root, KnowledgeDay), from, to);
+	/// clock as calibrated on the pricing context's day (<see cref="KnowledgeDay"/>). Zero when <paramref name="to"/> is not after <paramref name="from"/>.
+	/// A root without a fit prices on the calendar clock, warning once — but only when that matters: the interval crosses an overnight,
+	/// weekend or holiday (a same-session interval is clock-independent, so same-day roots never need a fit).</summary>
+	internal static OptionTime Between(string root, DateTime from, DateTime to)
+	{
+		if (to <= from) return OptionTime.Zero;
+		var day = KnowledgeDay;
+		if (FittedWeights(root, day) is { } fitted) return Between(fitted, from, to);
+		var mix = HourMixOf(from, to);
+		if (mix.Overnight + mix.Closed > 0)
+			WarnOnce(root, $"no trading-time clock fit for {Clock.ClockFits.ClockRoot(root)} before {day:yyyy-MM-dd}: pricing across nights/weekends on the calendar clock (run `wa data clock {Clock.ClockFits.ClockRoot(root)}`)");
+		return Between(ClockWeights.Calendar, from, to);
+	}
 
 	/// <summary><see cref="Between(string, DateTime, DateTime)"/> on explicit <paramref name="weights"/>.</summary>
 	internal static OptionTime Between(ClockWeights weights, DateTime from, DateTime to)
