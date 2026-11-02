@@ -180,8 +180,9 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 				: MarketClock.CloseToClose(parsed.Root, asOf, parsed.ExpiryDate);
 			decimal price;
 			decimal? iv = null;
-			if (atm.HasValue)
-				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale, timeYears.CalendarYears);
+			// The VIX-anchored ATM IV is a calendar-clock vol: re-express it on the root's clock before pricing.
+			if (atm.HasValue && _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale, timeYears.CalendarYears) is { } calendarIv)
+				iv = OptionMath.ClockSigma(calendarIv, timeYears);
 			if (iv.HasValue)
 				price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, Rate, iv.Value, parsed.CallPut!);
 			else
@@ -288,7 +289,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 			var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
 			var atmIv = atmByDte.TryGetValue(dte, out var hit) ? hit : fallbackAtm;
 			var timeYears = dte <= 0 ? zeroDteTime : MarketClock.CloseToClose(parsed.Root, asOf, parsed.ExpiryDate);
-			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale, timeYears.CalendarYears) ?? atmIv;
+			var iv = OptionMath.ClockSigma(_iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale, timeYears.CalendarYears) ?? atmIv, timeYears);   // calendar-clock VIX-anchored vol → root's clock
 			var price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, Rate, iv, parsed.CallPut);
 
 			var halfSpread = HalfSpreadFor(parsed.Root, price);

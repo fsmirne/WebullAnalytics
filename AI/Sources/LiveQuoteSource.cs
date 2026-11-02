@@ -64,9 +64,7 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		// book (anchor today's open) from a prior session's leftover book (anchor last close). Schwab stamps every quote
 		// (quoteTimeInLong); Webull's QuoteTime is a last-trade time, so it clears the stamp and the clock rule applies.
 		OptionMath.LiveQuotesStruckAt = _vendor == QuoteVendor.Schwab ? QuoteSanity.FreshestQuoteTime(options) : null;
-		var rebased = new Dictionary<string, OptionContractQuote>(options.Count, StringComparer.OrdinalIgnoreCase);
-		foreach (var (sym, q) in options)
-			rebased[sym] = BackSolveIvFromMid(sym, q, spots);
+		var rebased = NormalizeIvs(options, spots);
 
 		// Filter spots to the tickers requested.
 		var filteredSpots = spots.Where(kv => tickers.Contains(kv.Key))
@@ -161,25 +159,38 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		return rebased;
 	}
 
-	/// <summary>Returns <paramref name="q"/> with ImpliedVolatility re-solved from the NBBO mid (matching the
-	/// backtest), or unchanged when the book is one-sided / inputs are degenerate (keeps the vendor IV).</summary>
+	/// <summary>Every quote's IV on the trading-time clock (<see cref="BackSolveIvFromMid"/>) — the single normalization every live chain
+	/// fetch goes through (this source, the Webull-direct analyze path, analyze gex), so no consumer ever sees a vendor's calendar-clock IV.</summary>
+	internal static Dictionary<string, OptionContractQuote> NormalizeIvs(IReadOnlyDictionary<string, OptionContractQuote> options, IReadOnlyDictionary<string, decimal> spots)
+	{
+		var normalized = new Dictionary<string, OptionContractQuote>(options.Count, StringComparer.OrdinalIgnoreCase);
+		foreach (var (sym, q) in options) normalized[sym] = BackSolveIvFromMid(sym, q, spots);
+		return normalized;
+	}
+
+	/// <summary>Returns <paramref name="q"/> with ImpliedVolatility re-solved from the NBBO mid on the root's clock (matching the backtest).
+	/// When no mid can be solved (one-sided book, no spot, deep-ITM bid under intrinsic) the vendor's IV is kept but re-expressed on
+	/// the clock (<see cref="OptionMath.ClockSigma"/>): vendors quote calendar-time vols. The vendor's own number is preserved in
+	/// VendorImpliedVolatility and is always the conversion's source, so normalizing twice changes nothing.</summary>
 	private static OptionContractQuote BackSolveIvFromMid(string sym, OptionContractQuote q, IReadOnlyDictionary<string, decimal> spots)
 	{
-		if (q.Bid is not (> 0m) || q.Ask is not (> 0m)) return q;        // one-sided / missing book → no mid to solve from
 		var p = ParsingHelpers.ParseOptionSymbol(sym);
 		if (p is null || p.CallPut is not ("C" or "P")) return q;
-		if (!ParsingHelpers.TryResolveForRoot(spots, p.Root, out var spot) || spot <= 0m) return q;
 		// Anchor time to when the quotes were actually struck: ObservationInstant() returns DateTime.Now
 		// during RTH and the previous session's close off-hours/weekends — identical to the anchor that
 		// AnalyzePositionCommand/AnalyzeRiskCommand use when calling TryMarketImpliedIv, so the "cal" IV
 		// shown in scan output matches analyze output for the same frozen quote.
 		var t = MarketClock.Between(p.Root, OptionMath.ObservationInstant(), p.ExpiryDate.Date + OptionMath.MarketClose);
 		if (t.IsExpired) return q;
+		var vendorIv = q.VendorImpliedVolatility ?? q.ImpliedVolatility;
+		var vendorOnClock = vendorIv is > 0m ? q with { ImpliedVolatility = OptionMath.ClockSigma(vendorIv.Value, t), VendorImpliedVolatility = vendorIv } : q;
+		if (q.Bid is not (> 0m) || q.Ask is not (> 0m)) return vendorOnClock;        // one-sided / missing book → no mid to solve from
+		if (!ParsingHelpers.TryResolveForRoot(spots, p.Root, out var spot) || spot <= 0m) return vendorOnClock;
 		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-		if (mid <= 0m) return q;
+		if (mid <= 0m) return vendorOnClock;
 		// Skip deep-ITM legs whose bid doesn't cover intrinsic: the back-solved IV is noise-dominated.
-		if (q.Bid.Value <= OptionMath.Intrinsic(spot, p.Strike, p.CallPut)) return q;
+		if (q.Bid.Value <= OptionMath.Intrinsic(spot, p.Strike, p.CallPut)) return vendorOnClock;
 		var iv = OptionMath.ImpliedVol(spot, p.Strike, t, OptionMath.RiskFreeRate, mid, p.CallPut);
-		return q with { ImpliedVolatility = iv, VendorImpliedVolatility = q.VendorImpliedVolatility ?? q.ImpliedVolatility };
+		return q with { ImpliedVolatility = iv, VendorImpliedVolatility = vendorIv };
 	}
 }

@@ -129,6 +129,7 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 		var rateHistory = await new Backtest.HistoricalRateCache(offline: true).GetAsync(cancellation);
 		if (Backtest.HistoricalRateCache.RateOn(rateHistory, date) is double dayRate)
 			Pricing.OptionMath.RiskFreeRate = dayRate;
+		Pricing.MarketClock.PinnedDay = DateOnly.FromDateTime(date);   // that day's clock calibration, like the backtest
 		var parametric = new Backtest.BacktestQuoteSource(bars, ivProvider, dividendsByRoot: dividendsByRoot, oiCache: oiCache);
 
 		var quoteDbPath = Program.ResolvePath("data/quotes.db");

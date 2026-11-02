@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using WebullAnalytics.Pricing;
 
 namespace WebullAnalytics.AI.Backtest;
 
@@ -85,17 +86,30 @@ internal sealed class ChainSnapshotOiCache
 		return merged;
 	}
 
+	/// <summary>The day's (OI, IV) map with every IV re-expressed on the root's trading-time clock. Snapshot IVs are calendar-clock
+	/// numbers: an EOD file's IV was back-solved at that session's close on whole calendar days to expiry, a morning capture's is the
+	/// vendor's own. Each is converted over the interval it was quoted on (<see cref="OptionMath.ClockSigma"/>).</summary>
 	private IReadOnlyDictionary<string, (long Oi, decimal Iv)> BuildCausal(string root, DateTime date)
 	{
 		var (dayMap, isEod) = _raw.GetOrAdd((root, date), key => Load(_dir, key.Root, key.Date));
-		if (!isEod || dayMap.Count == 0) return dayMap;
+		if (dayMap.Count == 0) return dayMap;
+		if (!isEod) return dayMap.ToDictionary(kv => kv.Key, kv => (kv.Value.Oi, OnClock(kv.Key, kv.Value.Iv, date.Date + OptionMath.MarketOpen, wholeDays: false)), StringComparer.OrdinalIgnoreCase);
 
 		var priorDate = MarketCalendar.PreviousOpenOnOrBefore(date.AddDays(-1));
 		var (priorMap, _) = _raw.GetOrAdd((root, priorDate), key => Load(_dir, key.Root, key.Date));
 		var causal = new Dictionary<string, (long Oi, decimal Iv)>(dayMap.Count, StringComparer.OrdinalIgnoreCase);
 		foreach (var (sym, v) in dayMap)
-			causal[sym] = (v.Oi, priorMap.TryGetValue(sym, out var prior) ? prior.Iv : 0m);
+			causal[sym] = (v.Oi, priorMap.TryGetValue(sym, out var prior) ? OnClock(sym, prior.Iv, priorDate, wholeDays: true) : 0m);
 		return causal;
+	}
+
+	/// <summary><paramref name="calendarIv"/> quoted at <paramref name="quotedAt"/> (close-to-close whole days when <paramref name="wholeDays"/>,
+	/// as the EOD back-solve counted them) re-expressed on the contract root's clock. Zero/absent IVs and unparseable symbols pass through.</summary>
+	private static decimal OnClock(string symbol, decimal calendarIv, DateTime quotedAt, bool wholeDays)
+	{
+		if (calendarIv <= 0m || ParsingHelpers.ParseOptionSymbol(symbol) is not OptionParsed p) return calendarIv;
+		var time = wholeDays ? MarketClock.CloseToClose(p.Root, quotedAt, p.ExpiryDate) : MarketClock.Between(p.Root, quotedAt, p.ExpiryDate.Date + OptionMath.MarketClose);
+		return OptionMath.ClockSigma(calendarIv, time);
 	}
 
 	private static (IReadOnlyDictionary<string, (long Oi, decimal Iv)> Map, bool IsEod) Load(string dir, string root, DateTime date)

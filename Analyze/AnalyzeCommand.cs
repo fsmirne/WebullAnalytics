@@ -454,6 +454,8 @@ internal static class AnalyzeCommon
 				WebullAnalytics.Utils.Log.Debug($"Webull: fetching quotes for {symbols.Count} symbol(s)...");
 				(quotes, underlyings) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
 			}
+			// The Schwab branch normalizes inside LiveQuoteSource; this direct Webull fetch gets the same clock-consistent IVs here.
+			quotes = LiveQuoteSource.NormalizeIvs(quotes, underlyings);
 		}
 
 		quotes = await ApplyRealizedVolAsync(quotes, cancellation);

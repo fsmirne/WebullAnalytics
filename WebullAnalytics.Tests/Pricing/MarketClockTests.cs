@@ -1,4 +1,5 @@
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Pricing.Clock;
 using Xunit;
 
 namespace WebullAnalytics.Tests.Pricing;
@@ -74,5 +75,68 @@ public class MarketClockTests
 		var t = new OptionTime(0.010, 0.016);
 		var price = OptionMath.BlackScholes(760m, 765m, t, 0.04, 0.155m, "C");
 		Assert.Equal(0.155m, Math.Round(OptionMath.ImpliedVol(760m, 765m, t, 0.04, price, "C"), 3));
+	}
+}
+
+/// <summary>Swaps the process-wide fit lookup, so its tests must not overlap any other test class.</summary>
+[CollectionDefinition("MarketClockFits", DisableParallelization = true)]
+public class MarketClockFitsCollection { }
+
+/// <summary>The fitted clock in force: lookup by instant (never a fit built on or after the day), and calendar-quoted vols carried onto it.</summary>
+[Collection("MarketClockFits")]
+public class MarketClockFitLookupTests : IDisposable
+{
+	private static ClockFit Fit(DateOnly through, double o, double n) => new("SPY", through, through.AddDays(-365), o, n, 200, 40, 0, 50_000, 0.15, 0.19);
+
+	public MarketClockFitLookupTests()
+	{
+		var fits = new[] { Fit(new DateOnly(2026, 9, 30), 0.15, 0.05), Fit(new DateOnly(2026, 10, 30), 0.22, 0.13) };
+		MarketClock.FitLookup = (_, at) => fits.LastOrDefault(f => f.FittedThrough < DateOnly.FromDateTime(at));
+		MarketClock.ResetResolved();
+	}
+
+	public void Dispose()
+	{
+		TestClock.UseCalendarClock();
+		MarketClock.PinnedDay = null;
+		MarketClock.ResetResolved();
+	}
+
+	[Fact]
+	public void OnePricingContext_OneFit_EvenForIntervalsStartingLater()
+	{
+		// Simulated 2026-10-15: the 09-30 fit is in force — also for an interval that starts after the 10-30 refit (no look-ahead).
+		MarketClock.PinnedDay = new DateOnly(2026, 10, 15);
+		var later = MarketClock.Between("SPY", new DateTime(2026, 11, 2, 9, 30, 0), new DateTime(2026, 11, 5, 16, 0, 0));
+		Assert.Equal(MarketClock.Between(new ClockWeights(0.15, 0.05), new DateTime(2026, 11, 2, 9, 30, 0), new DateTime(2026, 11, 5, 16, 0, 0)), later);
+	}
+
+	[Fact]
+	public void UsesTheNewestFitBuiltBeforeTheInstant_ElseCalendar()
+	{
+		Assert.Equal(new ClockWeights(0.22, 0.13), MarketClock.WeightsFor("SPY", new DateTime(2026, 11, 2, 9, 30, 0)));
+		Assert.Equal(new ClockWeights(0.15, 0.05), MarketClock.WeightsFor("SPY", new DateTime(2026, 10, 30, 12, 0, 0)));   // the 10-30 fit isn't usable ON 10-30
+		Assert.Equal(ClockWeights.Calendar, MarketClock.WeightsFor("SPY", new DateTime(2026, 9, 1)));
+	}
+
+	[Fact]
+	public void WeekendDecay_IsMuchSmallerThanCalendar()
+	{
+		var fridayClose = new DateTime(2026, 10, 30, 16, 0, 0);
+		var mondayOpen = new DateTime(2026, 11, 2, 9, 30, 0);
+		var expiry = new DateTime(2026, 11, 5, 16, 0, 0);
+		var w = new ClockWeights(0.22, 0.13);
+		var atClose = MarketClock.Between(w, fridayClose, expiry);
+		var atOpen = MarketClock.Between(w, mondayOpen, expiry);
+		// Weekend share of the remaining variance: (0.22·17.5 + 0.13·48) / (4·(6.5 + 0.22·17.5) + 0.13·48) ≈ 21%, vs 2.73/6 ≈ 45% calendar.
+		Assert.Equal((0.22 * 17.5 + 0.13 * 48) / (4 * (6.5 + 0.22 * 17.5) + 0.13 * 48), 1 - atOpen.VarianceYears / atClose.VarianceYears, 9);
+	}
+
+	[Fact]
+	public void ClockSigma_InvertsCalendarSigma()
+	{
+		var t = MarketClock.Between("SPY", new DateTime(2026, 11, 2, 9, 30, 0), new DateTime(2026, 11, 27, 16, 0, 0));
+		var onClock = OptionMath.ClockSigma(0.15m, t);
+		Assert.Equal(0.15, OptionMath.CalendarSigma((double)onClock, t), 9);
 	}
 }

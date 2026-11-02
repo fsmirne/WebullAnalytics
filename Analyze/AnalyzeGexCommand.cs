@@ -283,9 +283,11 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				// root on every date, but on a standard monthly (3rd Friday) real open interest is split
 				// across both, and downstream per-expiry aggregation (ParsingHelpers.RootsMatchForAggregation)
 				// merges them correctly for that date while still isolating them on every other date.
-				quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+				var fetched = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 				foreach (var q in schwabQuotes)
-					quotes[q.ContractSymbol] = q;
+					fetched[q.ContractSymbol] = q;
+				// Same clock-consistent IVs every other live fetch gets (LiveQuoteSource): the vendor's own IVs are calendar-clock.
+				quotes = schwabSpot is > 0m ? WebullAnalytics.AI.Sources.LiveQuoteSource.NormalizeIvs(fetched, new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = schwabSpot.Value }) : fetched;
 				if (quotes.Count == 0)
 				{
 					AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker} from Schwab.[/]");

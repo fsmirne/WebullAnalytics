@@ -103,6 +103,12 @@ internal static class OptionMath
 	internal static double CalendarSigma(double sigma, OptionTime time) =>
 		time.VarianceYears == time.CalendarYears ? sigma : sigma * Math.Sqrt(time.VarianceYears / time.CalendarYears);
 
+	/// <summary>A vol quoted on calendar time (a vendor's IV, an EOD snapshot's calendar back-solve) re-expressed on the clock of
+	/// <paramref name="time"/>: the same total variance over the remaining life (σc²·T_cal = σ²·T_var). Inverse of
+	/// <see cref="CalendarSigma"/>; identity on a calendar clock or an expired time.</summary>
+	internal static decimal ClockSigma(decimal calendarSigma, OptionTime time) =>
+		time.IsExpired || time.VarianceYears == time.CalendarYears ? calendarSigma : calendarSigma * (decimal)Math.Sqrt(time.CalendarYears / time.VarianceYears);
+
 	/// <summary>The spot-independent parts of a Black-Scholes value: (r + σc²/2)·t, σc·√t and the discounted strike, on
 	/// calendar t with the clock-rescaled σc (<see cref="CalendarSigma"/>). Computed once per leg and time, they let a
 	/// caller pricing one leg at many spots (the path lattice) skip the repeated sqrt/exp with bit-identical results.</summary>

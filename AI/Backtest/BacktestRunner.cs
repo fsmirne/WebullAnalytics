@@ -124,6 +124,8 @@ internal sealed class BacktestRunner
 			// series/coverage keeps the current value rather than silently reverting to a constant.
 			if (_rateHistory != null && HistoricalRateCache.RateOn(_rateHistory, step) is double dayRate)
 				Pricing.OptionMath.RiskFreeRate = dayRate;
+			// The trading-time clock as calibrated through the prior session (a fit is only used after its last session).
+			Pricing.MarketClock.PinnedDay = DateOnly.FromDateTime(step);
 			var swSection = profile ? System.Diagnostics.Stopwatch.StartNew() : null;
 
 			// Step 1: management rules. Run BEFORE settlement so CloseBeforeShortExpiryRule (and
