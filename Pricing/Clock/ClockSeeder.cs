@@ -6,7 +6,7 @@ namespace WebullAnalytics.Pricing.Clock;
 
 /// <summary>Fills a root's <see cref="ClockStore"/> for completed sessions it lacks: from quotes.db when it holds a usable book for the
 /// day (read-only; a seed source only — nothing live ever reads quotes.db for the clock), else from ThetaData (option_at_time_quote,
-/// one request per expiration per instant). Half-day closes are skipped (a 16:00 book after a 13:00 close is stale).</summary>
+/// one wildcard-expiration request per instant per run of days). Half-day closes are skipped (a 16:00 book after a 13:00 close is stale).</summary>
 internal sealed class ClockSeeder : IDisposable
 {
 	/// <summary>quotes.db rows are start-of-minute labeled, so the books at 16:00 and 09:46 are its 15:59 and 09:45 rows.</summary>
@@ -118,55 +118,59 @@ internal sealed class ClockSeeder : IDisposable
 
 	// --- ThetaData ---
 
-	/// <summary>The close and 09:46 books for <paramref name="dates"/>, one at-time request per expiration per instant covering every
-	/// wanted date of that expiration's window; each response is cut to per-day banded books as it arrives.</summary>
+	/// <summary>Listed strikes kept either side of the money per request — wider than the ±5% store band on every root's ladder
+	/// (SPXW's 5-point grid needs ~70 at a 7000 index), so the band filter, not the request, decides what's stored.</summary>
+	private const int StrikeRange = 80;
+
+	/// <summary>Trading days per request (every expiration within <see cref="ClockStore.MaxDte"/>, banded around the money). ThetaData
+	/// only accepts a wildcard expiration for a single date.</summary>
+	private const int DaysPerRequest = 1;   // a wildcard expiration requires start == end
+
+	/// <summary>The close and 09:46 books for <paramref name="dates"/>: one at-time request per instant per run of up to
+	/// <see cref="DaysPerRequest"/> consecutive wanted days, every expiration at once (wildcard expiration, max DTE, strike range) —
+	/// each response cut to per-day, per-expiry banded books as it arrives.</summary>
 	private static async Task<Dictionary<DateOnly, ClockDay>> ReadThetaDaysAsync(ThetaDataClient client, string root, IReadOnlyList<DateOnly> dates, Action<string> progress, CancellationToken cancellation)
 	{
 		var wanted = dates.ToHashSet();
-		var (first, last) = (dates.Min(), dates.Max());
-		var expTable = await ThetaRetry.CollectAsync(token => client.OptionListExpirations(root, token), cancellation);
-		var expCol = expTable.Column("expiration");
-		var expirations = Enumerable.Range(0, expTable.RowCount).Select(r => ThetaCells.Date(expTable, r, expCol))
-			.Where(e => e >= first && e.DayNumber - last.DayNumber <= ClockStore.MaxDte).Distinct().OrderBy(e => e).ToList();
-
+		var chunks = dates.OrderBy(d => d).Chunk(DaysPerRequest).ToList();
 		var close = new Dictionary<DateOnly, List<ClockExpiryBook>>();
 		var open = new Dictionary<DateOnly, List<ClockExpiryBook>>();
+		var contract = new OptionContract(root.ToUpperInvariant(), null);
 		var done = 0;
-		await Parallel.ForEachAsync(expirations, new ParallelOptions { MaxDegreeOfParallelism = ThetaConcurrency, CancellationToken = cancellation }, async (expiry, token) =>
+		await Parallel.ForEachAsync(chunks, new ParallelOptions { MaxDegreeOfParallelism = ThetaConcurrency, CancellationToken = cancellation }, async (chunk, token) =>
 		{
-			var start = first.DayNumber > expiry.DayNumber - ClockStore.MaxDte ? first : DateOnly.FromDayNumber(expiry.DayNumber - ClockStore.MaxDte);
-			var end = last < expiry ? last : expiry;
-			if (end < start) return;
-			var contract = new OptionContract(root.ToUpperInvariant(), expiry);
-			var closeTable = await ThetaRetry.CollectAsync(t => client.OptionAtTimeQuote(contract, start, end, ClockStore.CloseTime, t), token);
-			var openTable = await ThetaRetry.CollectAsync(t => client.OptionAtTimeQuote(contract, start, end, ClockStore.OpenTime, t), token);
-			var closeBooks = BooksByDate(closeTable, expiry, wanted);
-			var openBooks = BooksByDate(openTable, expiry, wanted);
+			var (start, end) = (chunk[0], chunk[^1]);
+			var closeTable = await ThetaRetry.CollectAsync(t => client.OptionAtTimeQuote(contract, start, end, ClockStore.CloseTime, t, ClockStore.MaxDte, StrikeRange), token);
+			var openTable = await ThetaRetry.CollectAsync(t => client.OptionAtTimeQuote(contract, start, end, ClockStore.OpenTime, t, ClockStore.MaxDte, StrikeRange), token);
+			var closeBooks = Books(closeTable, wanted).Where(b => !IsHalfDay(b.Date)).ToList();
+			var openBooks = Books(openTable, wanted).ToList();
 			lock (close)
 			{
-				foreach (var (date, book) in closeBooks) if (!IsHalfDay(date)) (close.TryGetValue(date, out var l) ? l : close[date] = []).Add(book);
+				foreach (var (date, book) in closeBooks) (close.TryGetValue(date, out var l) ? l : close[date] = []).Add(book);
 				foreach (var (date, book) in openBooks) (open.TryGetValue(date, out var l) ? l : open[date] = []).Add(book);
-				if (++done % 25 == 0) progress($"{root}: {done}/{expirations.Count} expirations from ThetaData");
+				done++;
+				progress($"{root}: {done}/{chunks.Count} ThetaData day-runs ({end:yyyy-MM-dd})");
 			}
 		});
 		return dates.ToDictionary(d => d, d => new ClockDay(d, close.GetValueOrDefault(d) ?? [], open.GetValueOrDefault(d) ?? []));
 	}
 
-	/// <summary>Cuts one expiration's at-time table (all strikes, both rights, one row per contract per day) into per-day banded books.</summary>
-	private static IEnumerable<(DateOnly Date, ClockExpiryBook Book)> BooksByDate(ThetaTable table, DateOnly expiry, IReadOnlySet<DateOnly> wanted)
+	/// <summary>Cuts an at-time table (one row per contract per day, any expirations) into per-day, per-expiry banded books.</summary>
+	private static IEnumerable<(DateOnly Date, ClockExpiryBook Book)> Books(ThetaTable table, IReadOnlySet<DateOnly> wanted)
 	{
 		if (table.RowCount == 0) yield break;
-		var (strikeCol, rightCol, timeCol, bidCol, askCol) = (table.Column("strike"), table.Column("right"), table.Column("timestamp"), table.Column("bid"), table.Column("ask"));
-		var byDate = new Dictionary<DateOnly, List<(decimal, bool, decimal, decimal)>>();
+		var (expCol, strikeCol, rightCol, timeCol, bidCol, askCol) = (table.Column("expiration"), table.Column("strike"), table.Column("right"), table.Column("timestamp"), table.Column("bid"), table.Column("ask"));
+		var groups = new Dictionary<(DateOnly Date, DateOnly Expiry), List<(decimal, bool, decimal, decimal)>>();
 		for (var row = 0; row < table.RowCount; row++)
 		{
 			var date = DateOnly.FromDateTime(table.Timestamp(row, timeCol).DateTime);
 			if (!wanted.Contains(date)) continue;
 			var (bid, ask) = (table.Double(row, bidCol), table.Double(row, askCol));
 			if (double.IsNaN(bid) || double.IsNaN(ask) || bid <= 0 || ask <= 0) continue;
-			(byDate.TryGetValue(date, out var l) ? l : byDate[date] = []).Add(((decimal)table.Double(row, strikeCol), ThetaCells.Right(table, row, rightCol) == 'C', Math.Round((decimal)bid, 4), Math.Round((decimal)ask, 4)));
+			var key = (date, ThetaCells.Date(table, row, expCol));
+			(groups.TryGetValue(key, out var l) ? l : groups[key] = []).Add(((decimal)table.Double(row, strikeCol), ThetaCells.Right(table, row, rightCol) == 'C', Math.Round((decimal)bid, 4), Math.Round((decimal)ask, 4)));
 		}
-		foreach (var (date, quotes) in byDate)
+		foreach (var ((date, expiry), quotes) in groups)
 			if (ClockStore.BuildExpiryBook(expiry, quotes) is { } book) yield return (date, book);
 	}
 }

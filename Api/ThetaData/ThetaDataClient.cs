@@ -161,11 +161,15 @@ internal sealed class ThetaDataClient : IDisposable
 	}
 
 	/// <summary>option_at_time_quote: the last NBBO at <paramref name="timeOfDay"/> ET on each date in [start, end]. ThetaData warns
-	/// that sub-minute times can make the request hang; pass minute boundaries.</summary>
-	internal IAsyncEnumerable<ThetaTable> OptionAtTimeQuote(OptionContract contract, DateOnly startDate, DateOnly endDate, TimeOnly timeOfDay, CancellationToken cancellation)
+	/// that sub-minute times can make the request hang; pass minute boundaries. With a wildcard expiration, <paramref name="maxDte"/> keeps
+	/// expirations within that many days of each date and <paramref name="strikeRange"/> keeps that many listed strikes either side of ATM.</summary>
+	internal IAsyncEnumerable<ThetaTable> OptionAtTimeQuote(OptionContract contract, DateOnly startDate, DateOnly endDate, TimeOnly timeOfDay, CancellationToken cancellation, int? maxDte = null, int? strikeRange = null)
 	{
 		var query = new OptionAtTimeQuoteRequestQuery { ContractSpec = contract.Spec(), StartDate = Date(startDate), EndDate = Date(endDate), TimeOfDay = Time(timeOfDay) };
-		var request = new OptionAtTimeQuoteRequest { QueryInfo = Info([.. contract.Parameters(), ("start_date", Date(startDate)), ("end_date", Date(endDate)), ("time_of_day", Time(timeOfDay))]), Params = query };
+		(string, string)[] parameters = [.. contract.Parameters(), ("start_date", Date(startDate)), ("end_date", Date(endDate)), ("time_of_day", Time(timeOfDay))];
+		if (maxDte is int dte) { query.MaxDte = dte; parameters = [.. parameters, ("max_dte", dte.ToString(CultureInfo.InvariantCulture))]; }
+		if (strikeRange is int range) { query.StrikeRange = range; parameters = [.. parameters, ("strike_range", range.ToString(CultureInfo.InvariantCulture))]; }
+		var request = new OptionAtTimeQuoteRequest { QueryInfo = Info(parameters), Params = query };
 		return Stream(options => _stub.GetOptionAtTimeQuote(request, options), cancellation);
 	}
 
