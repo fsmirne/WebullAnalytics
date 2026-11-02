@@ -22,12 +22,27 @@ internal static class OptionMath
 	/// <list type="bullet">
 	/// <item>Live during RTH → wall-clock now.</item>
 	/// <item>Live after today's close → today's 16:00 (the day's last quotes; no further decay was priced).</item>
-	/// <item>Live pre-open / weekend / holiday → the most recent trading session's 16:00 close (the last real
-	/// quotes — e.g. Friday's close when run on a Saturday), so an off-hours report shows the position's value
-	/// as of the last close rather than a phantom value decayed against a dead clock.</item>
+	/// <item>Live pre-open on a trading day with a book the vendor stamped TODAY (<see cref="LiveQuotesStruckAt"/>) →
+	/// today's 09:30 open. Market makers' premarket quotes price the session about to open: the weekend/overnight
+	/// decay is already out of them (verified 2026-11-02: Schwab premarket SPY quotes stamped that morning tracked
+	/// spot with the weekend priced in). Anchoring them at the prior close instead made the grid decay the weekend
+	/// a SECOND time (+$0.70 phantom on a 3-DTE short diagonal).</item>
+	/// <item>Live pre-open (book from a prior session or unstamped) / weekend / holiday → the most recent trading
+	/// session's 16:00 close (the last real quotes — e.g. Friday's close when run on a Saturday), so an off-hours
+	/// report shows the position's value as of the last close rather than a phantom value decayed against a dead clock.</item>
 	/// <item>Historical --date run → that date's session open (wall-clock "now" is meaningless).</item>
 	/// </list></summary>
-	internal static DateTime ObservationInstant()
+	internal static DateTime ObservationInstant() => ObservationInstant(DateTime.Now, LiveQuotesStruckAt);
+
+	/// <summary>Freshest vendor timestamp on the most recent live chain fetch's two-sided quotes, or null when the
+	/// vendor doesn't stamp quotes (Webull's QuoteTime is a last-TRADE time, so it is never recorded here). Set by
+	/// <see cref="AI.Sources.LiveQuoteSource"/> on every fetch, before its IV back-solve, so the solve and the grid
+	/// anchor agree on when the book was struck.</summary>
+	internal static DateTimeOffset? LiveQuotesStruckAt { get; set; }
+
+	/// <summary><see cref="ObservationInstant()"/> with the clock (<paramref name="now"/>, machine-local = ET) and the
+	/// book's timestamp injected, so the branch logic is testable.</summary>
+	internal static DateTime ObservationInstant(DateTime now, DateTimeOffset? quotesStruckAt)
 	{
 		// A pinned eval date in the PAST (historical replay, report --until, proposal-snapshot replay, backtest
 		// step) anchors the quotes at that date's session open — that IS when those quotes were struck. A TODAY
@@ -36,10 +51,10 @@ internal static class OptionMath
 		// always "now". This keeps a same-day --date identical to no --date (real run-time, not a phantom 9:30).
 		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date < DateTime.Today)
 			return EvaluationDate.Today + MarketOpen;
-		var now = DateTime.Now;
 		var todayTrades = MarketCalendar.IsOpen(now.Date);
 		if (todayTrades && now >= now.Date + MarketOpen && now <= now.Date + MarketClose) return now;   // live RTH
 		if (todayTrades && now > now.Date + MarketClose) return now.Date + MarketClose;                  // after today's close
+		if (todayTrades && quotesStruckAt is { } struck && MarketTime.ToEt(struck).Date == now.Date) return now.Date + MarketOpen; // live premarket book
 		return MarketCalendar.PreviousOpenOnOrBefore(now.Date.AddDays(-1)) + MarketClose;                // pre-open / weekend / holiday
 	}
 

@@ -60,6 +60,10 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		// on. Re-basing here (the single seam both the opener and WatchLoop fetch through) makes live IV ≡
 		// backtest IV, and crucially makes the Webull and Schwab vendors comparable (both scored off the mid,
 		// not each vendor's own model IV). Vendor IV is kept as the fallback when the book is one-sided.
+		// Record when this book was struck BEFORE the back-solve: ObservationInstant() reads it to tell a live premarket
+		// book (anchor today's open) from a prior session's leftover book (anchor last close). Schwab stamps every quote
+		// (quoteTimeInLong); Webull's QuoteTime is a last-trade time, so it clears the stamp and the clock rule applies.
+		OptionMath.LiveQuotesStruckAt = _vendor == QuoteVendor.Schwab ? QuoteSanity.FreshestQuoteTime(options) : null;
 		var rebased = new Dictionary<string, OptionContractQuote>(options.Count, StringComparer.OrdinalIgnoreCase);
 		foreach (var (sym, q) in options)
 			rebased[sym] = BackSolveIvFromMid(sym, q, spots);

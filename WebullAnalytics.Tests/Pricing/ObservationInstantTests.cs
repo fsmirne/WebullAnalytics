@@ -94,6 +94,54 @@ public class ObservationInstantTests : IDisposable
 		Assert.True(Math.Abs((OptionMath.EvaluationInstant(preOpen) - expected).TotalSeconds) < 2, "no-override must track ObservationInstant, never a phantom today's-open");
 	}
 
+	// Live quote-stamp branch (pre-open). The stamp decides whether a premarket book is today's (priced for the
+	// open → anchor 09:30) or a prior session's leftover (anchor that session's close).
+
+	[Fact]
+	public void PreOpen_BookStampedToday_AnchorsAtTodaysOpen()
+	{
+		var tradingDay = MondayNoon().Date;
+		var now = tradingDay + new TimeSpan(8, 47, 0);
+		var struck = MarketTime.EtToInstant(tradingDay + new TimeSpan(8, 46, 30));
+		Assert.Equal(tradingDay + OptionMath.MarketOpen, OptionMath.ObservationInstant(now, struck));
+	}
+
+	[Fact]
+	public void PreOpen_BookStampedPriorSession_AnchorsAtPriorClose()
+	{
+		var tradingDay = MondayNoon().Date;
+		var priorSession = MarketCalendar.PreviousOpenOnOrBefore(tradingDay.AddDays(-1));
+		var now = tradingDay + new TimeSpan(8, 47, 0);
+		var struck = MarketTime.EtToInstant(priorSession + new TimeSpan(16, 14, 0));
+		Assert.Equal(priorSession + OptionMath.MarketClose, OptionMath.ObservationInstant(now, struck));
+	}
+
+	[Fact]
+	public void PreOpen_Unstamped_AnchorsAtPriorClose()
+	{
+		var tradingDay = MondayNoon().Date;
+		var now = tradingDay + new TimeSpan(8, 47, 0);
+		Assert.Equal(MarketCalendar.PreviousOpenOnOrBefore(tradingDay.AddDays(-1)) + OptionMath.MarketClose, OptionMath.ObservationInstant(now, null));
+	}
+
+	[Fact]
+	public void NonTradingDay_IgnoresStamp_AnchorsAtLastClose()
+	{
+		// A weekend run has no session to open today: the last close stays the anchor whatever the stamp says.
+		var tradingDay = MondayNoon().Date;
+		var saturday = tradingDay.AddDays(DayOfWeek.Saturday - tradingDay.DayOfWeek + (tradingDay.DayOfWeek == DayOfWeek.Sunday ? -7 : 0));
+		var now = saturday + new TimeSpan(10, 0, 0);
+		var struck = MarketTime.EtToInstant(saturday + new TimeSpan(9, 0, 0));
+		Assert.Equal(MarketCalendar.PreviousOpenOnOrBefore(saturday) + OptionMath.MarketClose, OptionMath.ObservationInstant(now, struck));
+	}
+
+	[Fact]
+	public void Rth_IgnoresStamp_UsesNow()
+	{
+		var now = MondayNoon();
+		Assert.Equal(now, OptionMath.ObservationInstant(now, MarketTime.EtToInstant(now.Date + new TimeSpan(8, 0, 0))));
+	}
+
 	// A guaranteed open trading day at noon, derived relatively so the test never goes stale.
 	private static DateTime MondayNoon()
 	{

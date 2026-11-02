@@ -28,15 +28,18 @@ internal static class QuoteSanity
 	/// the freshest quote minutes old. Uses the freshest (not a per-strike age) precisely so an individually
 	/// quiet strike can't false-trip it. Returns null when NO quote carries a timestamp — staleness is then
 	/// UNVERIFIABLE (e.g. a vendor that doesn't stamp quotes), which the caller must not treat as "fresh".</summary>
-	public static double? FreshestQuoteAgeSeconds(IReadOnlyDictionary<string, OptionContractQuote> book, DateTimeOffset now)
+	public static double? FreshestQuoteAgeSeconds(IReadOnlyDictionary<string, OptionContractQuote> book, DateTimeOffset now) =>
+		FreshestQuoteTime(book) is { } t ? (now - t).TotalSeconds : null;
+
+	/// <summary>Latest vendor timestamp among <paramref name="book"/>'s two-sided quotes, or null when none is stamped.</summary>
+	public static DateTimeOffset? FreshestQuoteTime(IReadOnlyDictionary<string, OptionContractQuote> book)
 	{
-		double? freshest = null;
+		DateTimeOffset? freshest = null;
 		foreach (var q in book.Values)
 		{
 			if (q.QuoteTime is not { } t) continue;
 			if (q.Bid is not > 0m || q.Ask is not > 0m) continue;
-			var age = (now - t).TotalSeconds;
-			if (freshest is null || age < freshest.Value) freshest = age;
+			if (freshest is null || t > freshest.Value) freshest = t;
 		}
 		return freshest;
 	}
