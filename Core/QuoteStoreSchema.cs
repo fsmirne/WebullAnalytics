@@ -3,11 +3,15 @@ using Microsoft.Data.Sqlite;
 namespace WebullAnalytics;
 
 /// <summary>One canonical minute-NBBO row: dates as INTEGER yyyymmdd, strike in thousandths, bid/ask in ten-thousandths (an absent
-/// side is 0), the WITHOUT-ROWID primary key <c>(root, expiry, date, strike_milli, right, time_sec)</c>.</summary>
+/// side is 0), the WITHOUT-ROWID primary key <c>(root, expiry, date, strike_milli, right, time_sec)</c>.
+/// TIME ZONE: <c>date</c> is the America/New_York trading date and <c>time_sec</c> is America/New_York (ET, DST-aware) wall-clock
+/// seconds since midnight — NOT UTC (57540 = 15:59:00 ET). This is the opposite of the intraday tape CSVs
+/// (data/intraday/{TICKER}/*.csv), whose ISO timestamps are UTC with a trailing Z. Quote rows are START-of-minute labeled
+/// (ThetaData's end-of-minute stamp shifted −60s at ingest).</summary>
 internal readonly record struct QuoteRow(string Root, int Expiry, int Date, int TimeSec, long StrikeMilli, char Right, long Bid, long Ask, long BidSize, long AskSize);
 
 /// <summary>One canonical minute trade bar: the <c>quotes</c> key, prices and vwap in ten-thousandths (a NaN side stored as 0),
-/// volume and the vendor's print count.</summary>
+/// volume and the vendor's print count. Same ET <c>date</c>/<c>time_sec</c> convention as <see cref="QuoteRow"/>; bars are START-of-bar labeled as delivered (no relabel).</summary>
 internal readonly record struct OhlcvRow(string Root, int Expiry, int Date, int TimeSec, long StrikeMilli, char Right, long Open, long High, long Low, long Close, long Volume, long Trades, long Vwap);
 
 /// <summary>The canonical quote store's schema (<c>data/quotes.db</c>) and the single row encoders every writer uses, so the store is
