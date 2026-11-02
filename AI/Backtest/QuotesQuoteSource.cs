@@ -32,10 +32,6 @@ namespace WebullAnalytics.AI.Backtest;
 /// command warns against combining them. Volume is null here (quotes carry sizes, not executed volume).</para></summary>
 internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 {
-	// One trading session (6.5h) as the 0DTE time-to-expiry so the open captures a day's theta before
-	// same-day settlement — mirrors BacktestQuoteSource.ZeroDteTimeYears.
-	private const double ZeroDteTimeYears = 6.5 / 24.0 / 365.0;
-
 	private readonly HistoricalBarCache _bars;
 	private readonly QuoteStoreCache _store;
 	private readonly BacktestQuoteSource _parametric;
@@ -94,8 +90,8 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 	/// delegated to the parametric source, since real NBBO has no quote for a price that never printed.</summary>
 	public Task<IReadOnlyDictionary<string, OptionContractQuote>> GetIntradayQuotesAsync(
 		DateTime asOf, string ticker, decimal spot, IEnumerable<string> optionSymbols,
-		double zeroDteTimeYears, CancellationToken cancellation)
-		=> _parametric.GetIntradayQuotesAsync(asOf, ticker, spot, optionSymbols, zeroDteTimeYears, cancellation);
+		OptionTime zeroDteTime, CancellationToken cancellation)
+		=> _parametric.GetIntradayQuotesAsync(asOf, ticker, spot, optionSymbols, zeroDteTime, cancellation);
 
 	/// <summary>Spot reduced by PV of dividends going ex in (asOf, expiry close]; unchanged for cash-settled
 	/// index roots / no schedule. Shared basis for the IV back-solve, matching the live dividend-aware path.</summary>
@@ -148,10 +144,9 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 			if (q == null || q.Value.IsEmpty || q.Value.IsCrossed) return null;
 			var nbbo = q.Value;
 			var mid = nbbo.Mid;
-			var dte = (p.ExpiryDate.Date - asOf.Date).Days;
-			var timeYears = dte <= 0 ? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears) : dte / 365.0;
+			var timeYears = ZeroDteAwareTime(p.Root, asOf, p.ExpiryDate, overrides);
 			decimal? iv = null;
-			if (p.CallPut != null && timeYears > 0 && mid > 0m)
+			if (p.CallPut != null && !timeYears.IsExpired && mid > 0m)
 			{
 				var solved = OptionMath.ImpliedVol(AdjSpot(p.Root, spot, asOf, p.ExpiryDate), p.Strike, timeYears, Rate, mid, p.CallPut);
 				if (solved > 0.011m && solved < 4.99m) iv = solved;   // reject vega-flat back-solver bounds
@@ -172,8 +167,7 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		{
 			if (!ParsingHelpers.TryResolveForRoot(underlyings, grp.Key.Root, out var spot) || spot <= 0m) continue;
 			var oiDay = _oiCache?.ForDay(grp.Key.Root, asOf.Date);   // one memoized lookup per (root, day); already merges the SPX/SPXW sibling on monthlies
-			var dte = (grp.Key.Exp - asOf.Date).Days;
-			var timeYears = dte <= 0 ? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears) : dte / 365.0;
+			var timeYears = ZeroDteAwareTime(grp.Key.Root, asOf, grp.Key.Exp, overrides);
 			var expandPct = _openerConfig != null
 				? _openerConfig.ComputeRequiredExpansionPct(spot, timeYears, _defaultIv ?? _openerConfig.Indicators.IvDefaultPct, _strikeStep ?? _openerConfig.Indicators.StrikeStep, Rate)
 				: FallbackChainExpandPct(timeYears, _defaultIv ?? 0.25m);
@@ -200,7 +194,7 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 				// (snapshot IV present) keeps its no-Newton-per-strike behaviour.
 				if (iv == null && q.Value.Mid > 0m && ParsingHelpers.ParseOptionSymbol(occ) is OptionParsed pe && pe.CallPut != null)
 				{
-					if (timeYears > 0)
+					if (!timeYears.IsExpired)
 					{
 						var solved = OptionMath.ImpliedVol(AdjSpot(pe.Root, spot, asOf, pe.ExpiryDate), pe.Strike, timeYears, Rate, q.Value.Mid, pe.CallPut);
 						if (solved > 0.011m && solved < 4.99m) iv = solved;   // reject vega-flat back-solver bounds
@@ -227,11 +221,18 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 		return new QuoteSnapshot(options, underlyings);
 	}
 
-	private static decimal FallbackChainExpandPct(double timeYears, decimal iv)
+	/// <summary>A leg's time-to-expiry at the book instant <paramref name="asOf"/>: same-day legs take the per-call 0DTE
+	/// override (remaining session from the minute loop), else a full session; later expiries close-to-close whole days.</summary>
+	private static OptionTime ZeroDteAwareTime(string root, DateTime asOf, DateTime expiry, QuoteOverrides overrides) =>
+		(expiry.Date - asOf.Date).Days <= 0
+			? overrides.ZeroDteWindow is { } w ? MarketClock.Between(root, w.From, w.To) : MarketClock.BeforeClose(root, asOf, BacktestQuoteSource.ZeroDteSessionHours)
+			: MarketClock.CloseToClose(root, asOf, expiry);
+
+	private static decimal FallbackChainExpandPct(OptionTime timeYears, decimal iv)
 	{
 		// Default 3 standard deviations + 25% safety margin, clamped to [0.05, 0.80]
 		var sigma = Math.Max(0.05, (double)iv);
-		var t = Math.Max(6.5 / 24.0 / 365.0, timeYears);
+		var t = Math.Max(6.5 / 24.0 / 365.0, timeYears.VarianceYears);
 		var stdDev = sigma * Math.Sqrt(t);
 		var pct = (decimal)(stdDev * 3.0) * 1.25m;
 		return Math.Max(0.05m, Math.Min(0.80m, pct));

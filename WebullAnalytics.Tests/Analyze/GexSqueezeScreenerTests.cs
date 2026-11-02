@@ -1,3 +1,4 @@
+using WebullAnalytics.Pricing;
 using WebullAnalytics.Analyze;
 using Xunit;
 
@@ -179,9 +180,9 @@ public class GexSqueezeScreenerTests
 		// Today's contributor IV/T are deliberately extreme: the result must not depend on them (or on today's spot).
 		var contributors = new[]
 		{
-			new GexContributor(Expiry, 7900m, 1.0 / 365, 0.90m, 3000, IsCall: true, Volume: 0),
-			new GexContributor(Expiry, 7800m, 1.0 / 365, 0.90m, 1200, IsCall: false, Volume: 0),
-			new GexContributor(Expiry, 7700m, 1.0 / 365, 0.90m, 500, IsCall: false, Volume: 0),   // not in the prior snapshot: skipped
+			new GexContributor(Expiry, 7900m, OptionTime.Calendar(1.0 / 365), 0.90m, 3000, IsCall: true, Volume: 0),
+			new GexContributor(Expiry, 7800m, OptionTime.Calendar(1.0 / 365), 0.90m, 1200, IsCall: false, Volume: 0),
+			new GexContributor(Expiry, 7700m, OptionTime.Calendar(1.0 / 365), 0.90m, 500, IsCall: false, Volume: 0),   // not in the prior snapshot: skipped
 		};
 		var prior = new Dictionary<(DateTime, decimal, bool), PriorContract>
 		{
@@ -199,8 +200,8 @@ public class GexSqueezeScreenerTests
 		// Equal raw volume, but the call is ATM (|Δ|≈0.5) and the put far OTM (|Δ| small) → strongly call-leaning.
 		var contributors = new[]
 		{
-			new GexContributor(Expiry, 7800m, 1.0 / 365, 0.15m, 1000, IsCall: true, Volume: 1000),
-			new GexContributor(Expiry, 7500m, 1.0 / 365, 0.15m, 1000, IsCall: false, Volume: 1000),
+			new GexContributor(Expiry, 7800m, OptionTime.Calendar(1.0 / 365), 0.15m, 1000, IsCall: true, Volume: 1000),
+			new GexContributor(Expiry, 7500m, OptionTime.Calendar(1.0 / 365), 0.15m, 1000, IsCall: false, Volume: 1000),
 		};
 		var share = GexSqueezeScreener.FlowShare(contributors, 7800m);
 		Assert.True(share > 0.9m, $"expected a call-dominated share, got {share}");

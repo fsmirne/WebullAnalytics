@@ -1,3 +1,4 @@
+using WebullAnalytics.Pricing;
 using WebullAnalytics.AI;
 using WebullAnalytics.Api;
 using Xunit;
@@ -65,7 +66,7 @@ public class RealizedVolModelTests
 	{
 		var asOf = new DateTime(2026, 10, 14, 12, 45, 0);
 		var years = 3.25 / 24.0 / 365.0;
-		var vol = Model.ScenarioVol(asOf, new DateTime(2026, 10, 14), years)!.Value;
+		var vol = Model.ScenarioVol(asOf, new DateTime(2026, 10, 14), OptionTime.Calendar(years))!.Value;
 		Assert.Equal(Math.Sqrt(0.0002), (double)vol * Math.Sqrt(years), 9);
 	}
 }

@@ -765,7 +765,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var longCallMid = LiveOrBsMid(quotesForPricing, longCall.Symbol, spot, longCall.Parsed.Strike, Math.Max(1, (longExpiry.Date - asOf.Date).Days), ivLongCall, "C", dividends);
 
 		// Long-leg value at the short expiry: BS with the residual time until the long's own expiry.
-		double tLongAtShortExp = Math.Max(1, (longExpiry.Date - shortExpiry.Date).Days) / 365.0;
+		var tLongAtShortExp = MarketClock.CloseToClose(longPut.Parsed.Root, shortExpiry, longExpiry, minDays: 1);
 		decimal LongPutAtShortExp(decimal s) => OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(s, dividends, shortExpiry.Date + OptionMath.MarketClose, longExpiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longPut.Parsed.Strike, tLongAtShortExp, OptionMath.RiskFreeRate, ivLongPut, "P");
 		decimal LongCallAtShortExp(decimal s) => OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(s, dividends, shortExpiry.Date + OptionMath.MarketClose, longExpiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longCall.Parsed.Strike, tLongAtShortExp, OptionMath.RiskFreeRate, ivLongCall, "C");
 		// Per-share value of the whole 4-leg position at the short expiry, evaluated at a given spot.
@@ -1004,8 +1004,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var dteShort = Math.Max(1, (shortExpiry - asOf).Days);
 			var shortMid = LiveOrBsMid(quotesForPricing, newShortSym, spot, longLeg.Parsed.Strike, dteShort, ivNewShort, callPut, dividends);
 			// Project value at short expiry: long BS value, short intrinsic.
-			var dteLongAtShortExp = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days);
-			var longAtShortExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, shortExpiry.Date + OptionMath.MarketClose, longLeg.Parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longLeg.Parsed.Strike, dteLongAtShortExp / 365.0, OptionMath.RiskFreeRate, iv, callPut);
+			var longAtShortExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, shortExpiry.Date + OptionMath.MarketClose, longLeg.Parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longLeg.Parsed.Strike, MarketClock.CloseToClose(longLeg.Parsed.Root, shortExpiry, longLeg.Parsed.ExpiryDate, minDays: 1), OptionMath.RiskFreeRate, iv, callPut);
 			var shortAtShortExp = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
 			var net = longAtShortExp - shortAtShortExp;
 			// margin delta: becomes a calendar (strike_loss = 0). Current is single long (no margin). Delta = 0.
@@ -1217,7 +1216,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var currentMargin = AnalyzeCommon.ComputeLegMargin(shortLeg.Parsed, 1, spot, shortMidNow, longLeg.Parsed, null, 1, longMidNow, isExisting: true).Total;
 
 		decimal LongValueAtShortExpiry(decimal longStrike, DateTime shortExpiry) =>
-			(decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, shortExpiry.Date + OptionMath.MarketClose, longLeg.Parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longStrike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivLong, callPut);
+			(decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, shortExpiry.Date + OptionMath.MarketClose, longLeg.Parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longStrike, MarketClock.CloseToClose(longLeg.Parsed.Root, shortExpiry, longLeg.Parsed.ExpiryDate, minDays: 1), OptionMath.RiskFreeRate, ivLong, callPut);
 
 		// Compute the "hold" per-share value once — used as the unchanged-portion projection for partial variants.
 		var longAtOriginalExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate);
@@ -1235,7 +1234,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut),
 			(shortLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate, ivShort, false, callPut),
 		};
-		var holdEvPerShare = ExpectedPositionValuePerShare(existingLegsForEv, shortLeg.Parsed.ExpiryDate, asOf, spot, ivShort, dividends);
+		var holdEvPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, existingLegsForEv, shortLeg.Parsed.ExpiryDate, asOf, spot, ivShort, dividends);
 
 		// 1. Hold to short expiry.
 		list.Add(NewScenarioSpread("Hold to short expiry", legs, "—",
@@ -1393,7 +1392,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var closeNet = longMidNow - shortMidNow;
 				var openNet = newShortMidExec - newLongMidExec;
 				var cashPerShare = closeNet + openNet;
-				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, newShortExp.Date + OptionMath.MarketClose, newLongExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), newStrike, Math.Max(1, (newLongExp.Date - newShortExp.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivNewLong, callPut);
+				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, newShortExp.Date + OptionMath.MarketClose, newLongExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), newStrike, MarketClock.CloseToClose(longLeg.Parsed.Root, newShortExp, newLongExp, minDays: 1), OptionMath.RiskFreeRate, ivNewLong, callPut);
 				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newShortExp, callPut, newStrike);
@@ -1462,7 +1461,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, addShortExp, oppShortStrike, oppCp);
 			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
 			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, oppShortStrike, dteNewShort, ivNewShort, oppCp, dividends);
-			var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, origShortExp.Date + OptionMath.MarketClose, addShortExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), oppShortStrike, Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivNewShort, oppCp);
+			var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, origShortExp.Date + OptionMath.MarketClose, addShortExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), oppShortStrike, MarketClock.CloseToClose(shortLeg.Parsed.Root, origShortExp, addShortExp, minDays: 1), OptionMath.RiskFreeRate, ivNewShort, oppCp);
 
 			// Build both add geometries, then flag the one with the best incremental EV per added margin.
 			var pending = new List<(string variant, decimal longStrike, string newLongSym, decimal newLongMidExec, decimal cashPerShare, decimal newPositionValuePerShare, decimal evNewPerShare, decimal newMargin, bool estimated, decimal efficiency)>();
@@ -1480,7 +1479,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var ivNewLong = ResolveIV(newLongSym, settings, quotes);
 				var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, longStrike, dteNewLong, ivNewLong, oppCp, dividends);
 				var cashPerShare = newShortMidExec - newLongMidExec; // debit (negative) to open the new spread
-				var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, origShortExp.Date + OptionMath.MarketClose, addLongExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longStrike, Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivNewLong, oppCp);
+				var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, origShortExp.Date + OptionMath.MarketClose, addLongExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longStrike, MarketClock.CloseToClose(shortLeg.Parsed.Root, origShortExp, addLongExp, minDays: 1), OptionMath.RiskFreeRate, ivNewLong, oppCp);
 				var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp; // pinned (at current spot)
 				// Probability-weighted EV of the NEW spread at the existing short expiry — the honest figure the
 				// "incremental return" should be judged on, not the spot-pinned peak.
@@ -1489,7 +1488,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					(longStrike, addLongExp, ivNewLong, true, oppCp),
 					(oppShortStrike, addShortExp, ivNewShort, false, oppCp),
 				};
-				var evNewPerShare = ExpectedPositionValuePerShare(newLegsForEv, origShortExp, asOf, spot, ivNewShort, dividends);
+				var evNewPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, newLegsForEv, origShortExp, asOf, spot, ivNewShort, dividends);
 				var newMargin = Math.Max(-cashPerShare, 0m) * 100m;           // long debit spread: margin = debit paid
 				var estimated = !Quoted(newShortSym) || !Quoted(newLongSym);
 				var efficiency = newMargin > 0m ? evNewPerShare * 100m / newMargin : 0m; // EV return per added $ of risk
@@ -1822,7 +1821,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			return (q.Bid.Value + q.Ask.Value) / 2m;
 		var expiryInstant = EvaluationDate.Today.Date.AddDays(dte) + OptionMath.MarketClose;
 		var adjSpot = OptionMath.DividendAdjustedSpot(spot, dividends, EvaluationDate.Today, expiryInstant, OptionMath.RiskFreeRate);
-		return (decimal)OptionMath.BlackScholes(adjSpot, strike, dte / 365.0, OptionMath.RiskFreeRate, iv, callPut);
+		var time = MarketClock.CloseToClose(ParsingHelpers.UnderlyingRoot(symbol), EvaluationDate.Today, EvaluationDate.Today.AddDays(dte));
+		return (decimal)OptionMath.BlackScholes(adjSpot, strike, time, OptionMath.RiskFreeRate, iv, callPut);
 	}
 
 	/// <summary>Returns (bid, ask) from live quote when available; otherwise a ±1% synthetic spread around the given mid.</summary>
@@ -1894,12 +1894,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	/// residual time. This is the honest counterpart to the spot-pinned projection shown elsewhere — at the pin
 	/// a near-ATM calendar shows its peak, but most of the lognormal mass lands off-peak. <paramref name="gridIv"/>
 	/// is the vol used for the spot distribution over [asOf, target] (the near-leg IV is the right horizon).</summary>
-	private static decimal ExpectedPositionValuePerShare(
+	private static decimal ExpectedPositionValuePerShare(string root,
 		IReadOnlyList<(decimal strike, DateTime expiry, decimal iv, bool isLong, string cp)> legs,
 		DateTime target, DateTime asOf, decimal spot, decimal gridIv, IReadOnlyList<DividendEvent>? dividends = null)
 	{
-		var yearsToTarget = Math.Max(1, (target.Date - asOf.Date).Days) / 365.0;
-		var forward = OptionMath.ForwardPrice(spot, dividends, asOf, target.Date + OptionMath.MarketClose, yearsToTarget, OptionMath.RiskFreeRate);
+		var yearsToTarget = MarketClock.CloseToClose(root, asOf, target, minDays: 1);
+		var forward = OptionMath.ForwardPrice(spot, dividends, asOf, target.Date + OptionMath.MarketClose, yearsToTarget.CalendarYears, OptionMath.RiskFreeRate);
 		var grid = WebullAnalytics.AI.CandidateScorer.BuildScenarioGrid(forward, gridIv, yearsToTarget);
 		decimal ev = 0m;
 		foreach (var pt in grid)
@@ -1909,7 +1909,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			{
 				var legValue = expiry.Date <= target.Date
 					? Intrinsic(pt.SpotAtExpiry, strike, cp)
-					: (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(pt.SpotAtExpiry, dividends, target.Date + OptionMath.MarketClose, expiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), strike, Math.Max(1, (expiry.Date - target.Date).Days) / 365.0, OptionMath.RiskFreeRate, iv, cp);
+					: (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(pt.SpotAtExpiry, dividends, target.Date + OptionMath.MarketClose, expiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), strike, MarketClock.CloseToClose(root, target, expiry, minDays: 1), OptionMath.RiskFreeRate, iv, cp);
 				value += (isLong ? 1m : -1m) * legValue;
 			}
 			ev += pt.Weight * value;

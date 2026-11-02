@@ -68,8 +68,8 @@ internal sealed class LegInShortRule : IManagementRule
 		// Compute long-leg delta. Need an IV estimate; prefer quote-supplied, fall back to back-solve from mid.
 		var longIv = ResolveIv(longLeg, spot, ctx);
 		var expiryTime = longLeg.Expiry.Value.Date + OptionMath.MarketClose;
-		var timeYears = (expiryTime - ctx.Now).TotalDays / 365.0;
-		if (timeYears <= 0) return null;
+		var timeYears = MarketClock.Between(position.Ticker, ctx.Now, expiryTime);
+		if (timeYears.IsExpired) return null;
 		var longDelta = OptionMath.Delta(spot, longLeg.Strike, timeYears, OptionMath.RiskFreeRate, longIv, longLeg.CallPut);
 		if (Math.Abs(longDelta) < _config.MinLongDelta) return null;
 
@@ -116,7 +116,7 @@ internal sealed class LegInShortRule : IManagementRule
 	/// long leg, but at a strike whose delta is closest to <c>targetShortDelta</c> (within tolerance).
 	/// Strikes on the wrong side of spot are excluded so we always sell OTM relative to the long's
 	/// directional bet.</summary>
-	private (string? Symbol, OptionContractQuote? Quote, decimal Delta) FindShortCandidate(string ticker, PositionLeg longLeg, decimal spot, double timeYears, EvaluationContext ctx)
+	private (string? Symbol, OptionContractQuote? Quote, decimal Delta) FindShortCandidate(string ticker, PositionLeg longLeg, decimal spot, OptionTime timeYears, EvaluationContext ctx)
 	{
 		string? bestSymbol = null;
 		OptionContractQuote? bestQuote = null;
@@ -183,8 +183,8 @@ internal sealed class LegInShortRule : IManagementRule
 				if (mid > 0m)
 				{
 					var expiryTime = leg.Expiry.Value.Date + OptionMath.MarketClose;
-					var timeYears = (expiryTime - ctx.Now).TotalDays / 365.0;
-					if (timeYears > 0)
+					var timeYears = MarketClock.Between(ParsingHelpers.UnderlyingRoot(leg.Symbol), ctx.Now, expiryTime);
+					if (!timeYears.IsExpired)
 					{
 						var solved = OptionMath.ImpliedVol(spot, leg.Strike, timeYears, OptionMath.RiskFreeRate, mid, leg.CallPut!);
 						if (solved > 0m && solved < 5m) return solved;

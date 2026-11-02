@@ -514,7 +514,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			{
 				var p = ParsingHelpers.ParseOptionSymbol(sym);
 				if (p == null || !string.Equals(p.Root, ticker, StringComparison.OrdinalIgnoreCase) || q.OpenInterest is not { } o || p.ExpiryDate.Date < d.Date) continue;
-				var t = GexMatrix.TimeYears(asOf, p.ExpiryDate);
+				var t = GexMatrix.TimeToExpiry(p.Root, asOf, p.ExpiryDate);
 				var iv = OptionMath.TrustedVendorIv(q) ?? 0m;
 				if (iv <= 0m && q.Bid is > 0m && q.Ask is > 0m)
 				{
@@ -603,9 +603,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 		// The solve is priced as of the PRIOR day (its spot, its EOD mids, both stamped near that day's close), so
 		// time-to-expiry runs close-to-close: whole calendar days, which IS the true clock here — matching the
-		// clock-accurate GexMatrix.TimeYears convention without needing an intraday instant. (Scraper-written
+		// clock-accurate GexMatrix.TimeToExpiry convention without needing an intraday instant. (Scraper-written
 		// snapshots are morning captures, overstating this by ~⅔ of a day; accepted, the solve stays two-sided.)
-		var timeYears = Math.Max(1, (expiry.Date - priorDate.Value).Days) / 365.0;
+		var timeYears = MarketClock.CloseToClose(ticker, priorDate.Value, expiry, minDays: 1);
 		int applied = 0, solved = 0, dropped = 0;
 		foreach (var sym in quotes.Keys.ToList())
 		{
@@ -2169,7 +2169,7 @@ internal sealed record GexCell(decimal CallGex, decimal PutGex)
 /// at a strike (used by <see cref="GexMatrix.FindMaxPain"/>). One entry per (expiry, strike, side) that
 /// survived the strike-range filter for a kept expiry — NOT capped by --max-strikes, since analytics
 /// shouldn't be skewed by a display-only cap. Volume is the contract's day volume (0 when the vendor gave none).</summary>
-internal sealed record GexContributor(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall, long Volume);
+internal sealed record GexContributor(DateTime Expiry, decimal Strike, OptionTime Time, decimal Iv, long Oi, bool IsCall, long Volume);
 
 internal sealed class GexMatrix
 {
@@ -2261,7 +2261,7 @@ internal sealed class GexMatrix
 			decimal sum = 0m;
 			foreach (var c in contribs)
 			{
-				var g = (decimal)OptionMath.Gamma(s, c.Strike, c.TimeYears, OptionMath.RiskFreeRate, c.Iv);
+				var g = (decimal)OptionMath.Gamma(s, c.Strike, c.Time, OptionMath.RiskFreeRate, c.Iv);
 				var dollar = g * c.Oi * 100m * s;
 				sum += c.IsCall ? dollar : -dollar;
 			}
@@ -2435,17 +2435,18 @@ internal sealed class GexMatrix
 	/// Caps row count to <paramref name="maxStrikes"/> by keeping the strikes closest to spot — high-priced
 	/// underlyings (e.g. SPY) otherwise pull hundreds of strikes into the heatmap.
 	/// </summary>
-	/// <summary>True remaining life of a contract: calendar time from the observation instant to the expiry
+	/// <summary>True remaining life of a contract on <paramref name="root"/>'s clock, from the observation instant to the expiry
 	/// session's close (13:00 ET on early-close half days), floored at 15 minutes so an at-or-after-close run
 	/// degrades to a near-expiry ATM spike instead of a division blow-up. Replaces the old one-day floor, which
 	/// paired the vendor's true-clock IVs with a T up to ~4× too long all through a 0DTE session — overstating
 	/// the implied distribution width and inflating far-from-money gamma (a 15.9k-OI put ~1% OTM out-gunned the
 	/// ATM complex for gravity on 2026-08-18 under the floor; the same book at true clock ranked them correctly).
 	/// The mid back-solve inside Build stays self-consistent either way because it solves at this same T.</summary>
-	internal static double TimeYears(DateTime asOf, DateTime expiryDate)
+	internal static OptionTime TimeToExpiry(string root, DateTime asOf, DateTime expiryDate)
 	{
-		var close = expiryDate.Date + (MarketCalendar.IsEarlyClose(expiryDate.Date) ? new TimeSpan(13, 0, 0) : new TimeSpan(16, 0, 0));
-		return Math.Max((close - asOf).TotalDays, 15.0 / (24 * 60)) / 365.0;
+		var close = expiryDate.Date + MarketCalendar.CloseTimeEt(expiryDate.Date);
+		var floor = close - TimeSpan.FromMinutes(15);
+		return MarketClock.Between(root, asOf < floor ? asOf : floor, close);
 	}
 
 	public static GexMatrix Build(
@@ -2471,14 +2472,14 @@ internal sealed class GexMatrix
 		var rawVolume = new Dictionary<(DateTime, decimal), (long CallVolume, long PutVolume)>();
 		var expirySet = new HashSet<DateTime>();
 		var strikeSet = new HashSet<decimal>();
-		var rawContribs = new List<(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall, long Volume)>();
+		var rawContribs = new List<(DateTime Expiry, decimal Strike, OptionTime Time, decimal Iv, long Oi, bool IsCall, long Volume)>();
 		// Max pain sums total ITM payout across every listed contract, so unlike Gravity/Centroid/NetPull/the
 		// chain totals below (all argmax- or weighted-average-shaped, and so exactly the statistics a single
 		// static block — SPX's legacy AM-settled OI on a standard-monthly expiry — can hijack, per
 		// CandidateScorer.ComputeGex) it's the one place the merge is still the right read: a strike's real
 		// total liability doesn't care which of the two roots the OI sits under. Kept as its own contributor
 		// list rather than switching the whole loop, so it's the one exception, not a silent default.
-		var maxPainContribs = new List<(DateTime Expiry, decimal Strike, double TimeYears, decimal Iv, long Oi, bool IsCall, long Volume)>();
+		var maxPainContribs = new List<(DateTime Expiry, decimal Strike, OptionTime Time, decimal Iv, long Oi, bool IsCall, long Volume)>();
 
 		foreach (var kv in quotes)
 		{
@@ -2490,7 +2491,7 @@ internal sealed class GexMatrix
 			var q = kv.Value;
 			if (!q.OpenInterest.HasValue || q.OpenInterest.Value <= 0) continue;
 
-			var timeYears = TimeYears(asOf, parsed.ExpiryDate);
+			var timeYears = TimeToExpiry(parsed.Root, asOf, parsed.ExpiryDate);
 			var isCall = parsed.CallPut == "C";
 
 			// Max pain only needs strike/side/OI, and — unlike everything below — is NOT bounded by --strike-range
@@ -2652,7 +2653,7 @@ internal sealed class GexMatrix
 			// while in expected-move units a static book holds roughly flat and only genuine spot/IV changes
 			// move the number. σ_atm = the IV of the contributor(s) nearest spot (normally the ATM C/P pair).
 			var atm = rawContribs.Where(c => c.Expiry == exp).OrderBy(c => Math.Abs(c.Strike - spot)).Take(2).ToList();
-			var expectedMove = atm.Count > 0 ? spot * (decimal)(Math.Sqrt(atm[0].TimeYears) * (double)atm.Average(c => c.Iv)) : 0m;
+			var expectedMove = atm.Count > 0 ? spot * (decimal)(Math.Sqrt(atm[0].Time.VarianceYears) * (double)atm.Average(c => c.Iv)) : 0m;
 			netPull[exp] = absNetSum > 0m && expectedMove > 0m ? netMoment / absNetSum / expectedMove : null;
 		}
 
@@ -2660,12 +2661,12 @@ internal sealed class GexMatrix
 		// gamma flip would be skewed by an arbitrary display-row limit.
 		var contributors = rawContribs
 			.Where(r => keptExpirySet.Contains(r.Expiry))
-			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall, r.Volume))
+			.Select(r => new GexContributor(r.Expiry, r.Strike, r.Time, r.Iv, r.Oi, r.IsCall, r.Volume))
 			.ToList();
 		// Max pain's own contributor list — see the comment on maxPainContribs above for why this one stays merged.
 		var maxPainContributors = maxPainContribs
 			.Where(r => keptExpirySet.Contains(r.Expiry))
-			.Select(r => new GexContributor(r.Expiry, r.Strike, r.TimeYears, r.Iv, r.Oi, r.IsCall, r.Volume))
+			.Select(r => new GexContributor(r.Expiry, r.Strike, r.Time, r.Iv, r.Oi, r.IsCall, r.Volume))
 			.ToList();
 
 		return new GexMatrix(expiries, strikes, cells, fullCells, fullOi, fullVolume, maxGross, maxAbsNet, totalCall, totalPut, gravity, centroid, netPull, contributors, maxPainContributors);

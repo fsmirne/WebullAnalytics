@@ -166,7 +166,7 @@ internal static class CandidateEnumerator
 					{
 						// Anchor (calendar shared strike / diagonal long leg) in the delta band on the FAR leg —
 						// the directional anchor, same convention as DiagonalVertical / CalendarVertical.
-						var longYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, longExp);
+						var longYears = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, longExp);
 						var dir = callPut == "C" ? 1 : -1;
 						// Anchors SPAN the whole [DeltaMin, DeltaMax] band (sorted OTM→ITM), not just the midpoint —
 						// so a band like 0.40–0.70 yields OTM, ATM, and ITM long legs as distinct candidates and the
@@ -192,7 +192,7 @@ internal static class CandidateEnumerator
 							{
 								// Diagonal: short leg from the ShortDelta band OR a tight gap off the long anchor, on
 								// either side of the long (covered + reverse).
-								var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortExp);
+								var shortYears = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, shortExp);
 								// Span the short delta band too (sorted, downsampled) — not the 2 nearest its midpoint.
 								// Clustering at shortMid pinned the short near delta 0.40 and never reached the ATM
 								// (~0.50) end, so the tight near-ATM covered diagonals (rich short premium, balanced BE)
@@ -301,7 +301,7 @@ internal static class CandidateEnumerator
 	/// each returned strike's actual delta via <see cref="ResolveIv"/> before accepting it; <see
 	/// cref="StrikeLadder.Between"/>'s padding absorbs the gap between the two IV estimates. Shared by every
 	/// delta-band structure (verticals, condors, calendars/diagonals) so the fix lives in one place.</summary>
-	private static IReadOnlyList<decimal> StrikesInDeltaBand(decimal spot, decimal step, StrikeLadder ladder, double years, decimal iv, decimal deltaMin, decimal deltaMax, string callPut)
+	private static IReadOnlyList<decimal> StrikesInDeltaBand(decimal spot, decimal step, StrikeLadder ladder, OptionTime years, decimal iv, decimal deltaMin, decimal deltaMax, string callPut)
 	{
 		var effIv = iv > 0m ? iv : 0.20m;
 		var kLo = OptionMath.DeltaToStrike(spot, years, OptionMath.RiskFreeRate, effIv, deltaMin, callPut);
@@ -467,8 +467,8 @@ internal static class CandidateEnumerator
 				foreach (var longExp in longExps)
 				{
 					if (longExp <= shortExp) continue;
-					var longYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, longExp);
-					var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortExp);
+					var longYears = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, longExp);
+					var shortYears = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, shortExp);
 
 					// Per-expiry ladders: the back-month grid is coarser than the front week on SPX-family
 					// chains, so the long and short legs each snap to their own expiry's listed strikes and
@@ -574,7 +574,7 @@ internal static class CandidateEnumerator
 				foreach (var longExp in longExps)
 				{
 					if (longExp <= shortExp) continue;
-					var longYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, longExp);
+					var longYears = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, longExp);
 					// A calendar shares one anchor strike AND one wing across both expiries, so both must be
 					// listed in BOTH expiries' ladders. Anchor candidates come from the long ladder ∩ short
 					// ladder (intersection); the wing is offset along the long ladder and re-checked on the
@@ -687,7 +687,7 @@ internal static class CandidateEnumerator
 
 		foreach (var exp in exps)
 		{
-			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
+			var years = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, exp);
 			var putLadder = StrikeLadder.Build(ticker, exp, "P", quotes);
 			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
 			// Combined both-sides ladder to measure the body width as a count of listed strikes across spot.
@@ -772,7 +772,7 @@ internal static class CandidateEnumerator
 
 		foreach (var exp in exps)
 		{
-			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
+			var years = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, exp);
 			foreach (var type in sides)
 			{
 				var ladder = StrikeLadder.Build(ticker, exp, type, quotes);
@@ -827,7 +827,7 @@ internal static class CandidateEnumerator
 
 		foreach (var exp in exps)
 		{
-			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
+			var years = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, exp);
 			var putLadder = StrikeLadder.Build(ticker, exp, "P", quotes);
 			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
 
@@ -875,7 +875,7 @@ internal static class CandidateEnumerator
 
 		foreach (var exp in exps)
 		{
-			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
+			var years = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, exp);
 			var callLadder = StrikeLadder.Build(ticker, exp, "C", quotes);
 			var putLadder = StrikeLadder.Build(ticker, exp, "P", quotes);
 
@@ -936,7 +936,7 @@ internal static class CandidateEnumerator
 
 		foreach (var exp in exps)
 		{
-			var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, exp);
+			var years = OpenerExpiryHelpers.TimeToExpiry(ticker, asOf, exp);
 
 			foreach (var callPut in new[] { "C", "P" })
 			{

@@ -1,3 +1,4 @@
+using WebullAnalytics.Pricing;
 using WebullAnalytics.AI.Sources;
 
 namespace WebullAnalytics.AI.Backtest;
@@ -18,5 +19,5 @@ internal interface IBacktestQuoteSource : IQuoteSource
 	/// intraday SL/TP bracket and the profit projector. Empty map if ATM IV is unavailable for the date.</summary>
 	Task<IReadOnlyDictionary<string, OptionContractQuote>> GetIntradayQuotesAsync(
 		DateTime asOf, string ticker, decimal spot, IEnumerable<string> optionSymbols,
-		double zeroDteTimeYears, CancellationToken cancellation);
+		OptionTime zeroDteTime, CancellationToken cancellation);
 }

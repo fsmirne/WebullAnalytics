@@ -17,7 +17,7 @@ public class OptionMathImpliedVolTests
 	[InlineData(110, 130, 0.55)]   // deep OTM call
 	public void BackSolve_RecoversVolUsedToPrice(decimal spot, decimal strike, double knownVol)
 	{
-		var t = 31.0 / 365.0;
+		var t = OptionTime.Calendar(31.0 / 365.0);
 		var cp = strike <= spot ? "P" : "C";
 		var price = OptionMath.BlackScholes(spot, strike, t, R, (decimal)knownVol, cp);
 
@@ -31,7 +31,7 @@ public class OptionMathImpliedVolTests
 	public void DeepOtm_DoesNotClampToUpperBound()
 	{
 		// USO P80 @ ~$110 spot, 31 DTE, mid $0.28 — the exact leg that showed plain (un-recalibrated) IV.
-		var t = 31.0 / 365.0;
+		var t = OptionTime.Calendar(31.0 / 365.0);
 		var solved = OptionMath.ImpliedVol(110m, 80m, t, R, 0.28m, "P");
 		Assert.True(solved < 5m, $"expected a converged vol, got the clamped bound {solved}");
 		Assert.InRange(solved, 0.55m, 0.70m);

@@ -57,7 +57,7 @@ public class BacktestQuoteSourceDividendTests : IDisposable
 
 		// And cheaper by exactly the model: reprice the no-div leg's own IV on the adjusted spot.
 		var dte = (Expiry.Date - AsOf.Date).Days;
-		var t = dte / 365.0;
+		var t = OptionTime.Calendar(dte / 365.0);
 		var adjSpot = OptionMath.DividendAdjustedSpot(405m, new[] { new DividendEvent(divEx, amt) }, AsOf, Expiry.Date + OptionMath.MarketClose, R);
 		var expected = OptionMath.BlackScholes(adjSpot, 410m, t, R, withDiv.ImpliedVolatility!.Value, "C");
 		Assert.Equal(expected, withDiv.LastPrice!.Value, 2);

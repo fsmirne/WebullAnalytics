@@ -4,26 +4,17 @@ namespace WebullAnalytics.AI;
 
 internal static class OpenerExpiryHelpers
 {
-	// Fraction of a year a full trading session represents (9:30–16:00 ET = 6.5h). Used as the
-	// upper bound for 0DTE time-to-expiry when asOf is before the opening bell — matches the
-	// backtest's open-of-day stepper.
-	public const double ZeroDteTimeYears = 6.5 / 24.0 / 365.0;
-
-	/// <summary>Years-to-expiry for the scorer. For 0DTE, uses the actual time-of-day between
-	/// <paramref name="asOf"/> and market close (capped at one full session if asOf is before
-	/// the opening bell). For >0DTE, returns <c>days/365</c> — preserves the calendar-day
-	/// approximation used across the scenario grid and breakeven analytics. Returns 0 when
-	/// already past the close on expiry day. Avoids the legacy <c>Math.Max(1, days)</c> 1-day
-	/// floor that priced expiring 0DTE candidates as if they had a full day of vol remaining.</summary>
-	public static double TimeYearsToExpiry(DateTime asOf, DateTime expiry)
+	/// <summary>Time-to-expiry for the scorer on <paramref name="root"/>'s clock. For 0DTE, the actual time between
+	/// <paramref name="asOf"/> and market close (capped at one full session if asOf is before the opening bell). For
+	/// >0DTE, close-to-close whole days from asOf's date to the expiry — the day-granular convention used across the
+	/// scenario grid and breakeven analytics. Zero when already past the close on expiry day. Avoids the legacy
+	/// <c>Math.Max(1, days)</c> 1-day floor that priced expiring 0DTE candidates as if they had a full day of vol remaining.</summary>
+	public static OptionTime TimeToExpiry(string root, DateTime asOf, DateTime expiry)
 	{
-		var days = (expiry.Date - asOf.Date).Days;
-		if (days > 0) return days / 365.0;
+		if ((expiry.Date - asOf.Date).Days > 0) return MarketClock.CloseToClose(root, asOf, expiry);
 		var expirationTime = expiry.Date + OptionMath.MarketClose;
-		if (asOf >= expirationTime) return 0.0;
 		var openTime = expiry.Date + OptionMath.MarketOpen;
-		var effectiveStart = asOf < openTime ? openTime : asOf;
-		return (expirationTime - effectiveStart).TotalDays / 365.0;
+		return MarketClock.Between(root, asOf < openTime ? openTime : asOf, expirationTime);
 	}
 
 	// Tickers with Mon-Fri daily option expirations.

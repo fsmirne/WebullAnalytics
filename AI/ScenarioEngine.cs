@@ -143,7 +143,7 @@ internal static class ScenarioEngine
 
 		// 2. Close now.
 		var dteNow = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
-		var midNow = LiveOrBsMid(quotes, longLeg.Symbol, spot, longLeg.Parsed.Strike, dteNow, iv, callPut);
+		var midNow = LiveOrBsMid(quotes, longLeg.Symbol, spot, longLeg.Parsed.Strike, asOf, dteNow, iv, callPut);
 		var (bidNow, _) = LiveBidAsk(quotes, longLeg.Symbol, midNow);
 		list.Add(BuildSingleLeg("Close now", $"SELL {longLeg.Symbol} x{longLeg.Qty}", longLeg.Qty, midNow, 0m, 0m, initialDebit, 1,
 			$"sell at mid ${midNow:F2}/share → close position",
@@ -156,10 +156,9 @@ internal static class ScenarioEngine
 			var newShortSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, shortExpiry, longLeg.Parsed.Strike, callPut);
 			var ivNewShort = ResolveIV(newShortSym, opt, quotes);
 			var dteShort = Math.Max(1, (shortExpiry - asOf).Days);
-			var shortMid = LiveOrBsMid(quotes, newShortSym, spot, longLeg.Parsed.Strike, dteShort, ivNewShort, callPut);
+			var shortMid = LiveOrBsMid(quotes, newShortSym, spot, longLeg.Parsed.Strike, asOf, dteShort, ivNewShort, callPut);
 			var (shortBid, _) = LiveBidAsk(quotes, newShortSym, shortMid);
-			var dteLongAtShortExp = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days);
-			var longAtShortExp = (decimal)OptionMath.BlackScholes(spot, longLeg.Parsed.Strike, dteLongAtShortExp / 365.0, OptionMath.RiskFreeRate, iv, callPut);
+			var longAtShortExp = (decimal)OptionMath.BlackScholes(spot, longLeg.Parsed.Strike, MarketClock.CloseToClose(longLeg.Parsed.Root, shortExpiry, longLeg.Parsed.ExpiryDate, minDays: 1), OptionMath.RiskFreeRate, iv, callPut);
 			var shortAtShortExp = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
 			var net = longAtShortExp - shortAtShortExp;
 			list.Add(BuildSingleLeg($"Convert to calendar (sell {shortExpiry:yyyy-MM-dd} @ ${longLeg.Parsed.Strike:F2})",
@@ -184,8 +183,8 @@ internal static class ScenarioEngine
 		var initialDebit = opt.InitialNetDebitPerShare;
 		var qty = legs[0].Qty;
 
-		var shortMidNow = LiveOrBsMid(quotes, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivShort, callPut);
-		var longMidNow = LiveOrBsMid(quotes, longLeg.Symbol, spot, longLeg.Parsed.Strike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivLong, callPut);
+		var shortMidNow = LiveOrBsMid(quotes, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, asOf, Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivShort, callPut);
+		var longMidNow = LiveOrBsMid(quotes, longLeg.Symbol, spot, longLeg.Parsed.Strike, asOf, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivLong, callPut);
 		var (shortBidNow, shortAskNow) = LiveBidAsk(quotes, shortLeg.Symbol, shortMidNow);
 		var (longBidNow, longAskNow) = LiveBidAsk(quotes, longLeg.Symbol, longMidNow);
 		var shortCloseNow = BuyPrice(shortMidNow, shortAskNow, opt.PricingMode);
@@ -194,7 +193,7 @@ internal static class ScenarioEngine
 		var currentMargin = AnalyzeCommon.ComputeLegMargin(shortLeg.Parsed, 1, spot, shortMidNow, longLeg.Parsed, null, 1, longMidNow, isExisting: true).Total;
 
 		decimal LongValueAtShortExpiry(decimal longStrike, DateTime shortExpiry) =>
-			(decimal)OptionMath.BlackScholes(spot, longStrike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - shortExpiry.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivLong, callPut);
+			(decimal)OptionMath.BlackScholes(spot, longStrike, MarketClock.CloseToClose(longLeg.Parsed.Root, shortExpiry, longLeg.Parsed.ExpiryDate, minDays: 1), OptionMath.RiskFreeRate, ivLong, callPut);
 
 		var longAtOriginalExp = LongValueAtShortExpiry(longLeg.Parsed.Strike, shortLeg.Parsed.ExpiryDate);
 		var shortAtOriginalExp = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
@@ -237,7 +236,7 @@ internal static class ScenarioEngine
 				{
 					var ivNewShort = ResolveIV(newSym, opt, quotes);
 					var dteNewShort = Math.Max(1, (newExp - asOf).Days);
-					var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, shortLeg.Parsed.Strike, dteNewShort, ivNewShort, callPut);
+					var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, shortLeg.Parsed.Strike, asOf, dteNewShort, ivNewShort, callPut);
 					var (newShortBid, _) = LiveBidAsk(quotes, newSym, newShortMidExec);
 					var oldShortClose = BuyPrice(shortMidNow, shortAskNow, opt.PricingMode);
 					var newShortOpen = SellPrice(newShortMidExec, newShortBid, opt.PricingMode);
@@ -263,7 +262,7 @@ internal static class ScenarioEngine
 
 				var ivSameExp = ResolveIV(sameExpSym, opt, quotes);
 				var dteSameExp = Math.Max(1, (shortLeg.Parsed.ExpiryDate - asOf).Days);
-				var newShortMidSameExp = LiveOrBsMid(quotes, sameExpSym, spot, newStrike, dteSameExp, ivSameExp, callPut);
+				var newShortMidSameExp = LiveOrBsMid(quotes, sameExpSym, spot, newStrike, asOf, dteSameExp, ivSameExp, callPut);
 				var (newShortBidSameExp, _) = LiveBidAsk(quotes, sameExpSym, newShortMidSameExp);
 				var oldShortClose = BuyPrice(shortMidNow, shortAskNow, opt.PricingMode);
 				var newShortOpenSameExp = SellPrice(newShortMidSameExp, newShortBidSameExp, opt.PricingMode);
@@ -290,7 +289,7 @@ internal static class ScenarioEngine
 
 				var ivNewShort = ResolveIV(newSym, opt, quotes);
 				var dteNewShort = Math.Max(1, (newExp - asOf).Days);
-				var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
+				var newShortMidExec = LiveOrBsMid(quotes, newSym, spot, newStrike, asOf, dteNewShort, ivNewShort, callPut);
 				var (newShortBid, _) = LiveBidAsk(quotes, newSym, newShortMidExec);
 				var oldShortClose = BuyPrice(shortMidNow, shortAskNow, opt.PricingMode);
 				var newShortOpen = SellPrice(newShortMidExec, newShortBid, opt.PricingMode);
@@ -324,14 +323,14 @@ internal static class ScenarioEngine
 				var ivNewLong = ResolveIV(newLongSym, opt, quotes);
 				var dteNewShort = Math.Max(1, (newShortExp - asOf).Days);
 				var dteNewLong = Math.Max(1, (newLongExp - asOf).Days);
-				var newShortMidExec = LiveOrBsMid(quotes, newShortSym, spot, newStrike, dteNewShort, ivNewShort, callPut);
-				var newLongMidExec = LiveOrBsMid(quotes, newLongSym, spot, newStrike, dteNewLong, ivNewLong, callPut);
+				var newShortMidExec = LiveOrBsMid(quotes, newShortSym, spot, newStrike, asOf, dteNewShort, ivNewShort, callPut);
+				var newLongMidExec = LiveOrBsMid(quotes, newLongSym, spot, newStrike, asOf, dteNewLong, ivNewLong, callPut);
 				var (newShortBid, _) = LiveBidAsk(quotes, newShortSym, newShortMidExec);
 				var (_, newLongAsk) = LiveBidAsk(quotes, newLongSym, newLongMidExec);
 				var closeNet = longCloseNow - shortCloseNow;
 				var openNet = SellPrice(newShortMidExec, newShortBid, opt.PricingMode) - BuyPrice(newLongMidExec, newLongAsk, opt.PricingMode);
 				var cashPerShare = closeNet + openNet;
-				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(spot, newStrike, Math.Max(1, (newLongExp.Date - newShortExp.Date).Days) / 365.0, OptionMath.RiskFreeRate, ivNewLong, callPut);
+				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(spot, newStrike, MarketClock.CloseToClose(longLeg.Parsed.Root, newShortExp, newLongExp, minDays: 1), OptionMath.RiskFreeRate, ivNewLong, callPut);
 				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newShortExp, callPut, newStrike);
@@ -368,8 +367,8 @@ internal static class ScenarioEngine
 					var ivNewLong = ResolveIV(newLongSym, opt, quotes);
 					var dteNewShort = Math.Max(1, (addShortExp - asOf).Days);
 					var dteNewLong = Math.Max(1, (addLongExp - asOf).Days);
-					var newShortMid = LiveOrBsMid(quotes, newShortSym, spot, newStrike, dteNewShort, ivNewShort, addCp);
-					var newLongMid = LiveOrBsMid(quotes, newLongSym, spot, newStrike, dteNewLong, ivNewLong, addCp);
+					var newShortMid = LiveOrBsMid(quotes, newShortSym, spot, newStrike, asOf, dteNewShort, ivNewShort, addCp);
+					var newLongMid = LiveOrBsMid(quotes, newLongSym, spot, newStrike, asOf, dteNewLong, ivNewLong, addCp);
 					var (newShortBid, _) = LiveBidAsk(quotes, newShortSym, newShortMid);
 					var (_, newLongAsk) = LiveBidAsk(quotes, newLongSym, newLongMid);
 					var cashPerShare = SellPrice(newShortMid, newShortBid, opt.PricingMode) - BuyPrice(newLongMid, newLongAsk, opt.PricingMode);
@@ -377,8 +376,8 @@ internal static class ScenarioEngine
 					// Project the NEW position at the existing short's expiry (first milestone).
 					var origShortExp = shortLeg.Parsed.ExpiryDate;
 					var daysToOrigShort = origShortDte;
-					var tRemainNewShort = Math.Max(1, (addShortExp.Date - origShortExp.Date).Days) / 365.0;
-					var tRemainNewLong = Math.Max(1, (addLongExp.Date - origShortExp.Date).Days) / 365.0;
+					var tRemainNewShort = MarketClock.CloseToClose(shortLeg.Parsed.Root, origShortExp, addShortExp, minDays: 1);
+					var tRemainNewLong = MarketClock.CloseToClose(shortLeg.Parsed.Root, origShortExp, addLongExp, minDays: 1);
 					var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewShort, OptionMath.RiskFreeRate, ivNewShort, addCp);
 					var newLongAtOrigExp = (decimal)OptionMath.BlackScholes(spot, newStrike, tRemainNewLong, OptionMath.RiskFreeRate, ivNewLong, addCp);
 					var newPositionValuePerShare = newLongAtOrigExp - newShortAtOrigExp;
@@ -535,11 +534,11 @@ internal static class ScenarioEngine
 	public static bool HasLiveQuote(IReadOnlyDictionary<string, OptionContractQuote> quotes, string symbol) =>
 		quotes.TryGetValue(symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m;
 
-	public static decimal LiveOrBsMid(IReadOnlyDictionary<string, OptionContractQuote>? quotes, string symbol, decimal spot, decimal strike, int dte, decimal iv, string callPut)
+	public static decimal LiveOrBsMid(IReadOnlyDictionary<string, OptionContractQuote>? quotes, string symbol, decimal spot, decimal strike, DateTime asOf, int dte, decimal iv, string callPut)
 	{
 		if (quotes != null && quotes.TryGetValue(symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue && q.Bid.Value >= 0m && q.Ask.Value > 0m)
 			return (q.Bid.Value + q.Ask.Value) / 2m;
-		return (decimal)OptionMath.BlackScholes(spot, strike, dte / 365.0, OptionMath.RiskFreeRate, iv, callPut);
+		return (decimal)OptionMath.BlackScholes(spot, strike, MarketClock.CloseToClose(ParsingHelpers.UnderlyingRoot(symbol), asOf, asOf.AddDays(dte)), OptionMath.RiskFreeRate, iv, callPut);
 	}
 
 	private static decimal BuyPrice(decimal mid, decimal ask, string pricingMode) =>

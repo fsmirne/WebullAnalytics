@@ -20,11 +20,11 @@ internal static class DipOptionsOverlay
 	/// <summary>Net return on premium of a long call from (s0,t0) to (s1,t1) at strike k, constant iv.
 	/// <paramref name="roundTripSpread"/> is a flat fraction of premium subtracted for entry+exit bid/ask.
 	/// Null if the entry premium is non-positive (degenerate).</summary>
-	public static decimal? CallReturnOnPremium(decimal s0, decimal s1, decimal k, double t0, double t1, double r, decimal iv, decimal roundTripSpread)
+	public static decimal? CallReturnOnPremium(decimal s0, decimal s1, decimal k, OptionTime t0, OptionTime t1, double r, decimal iv, decimal roundTripSpread)
 	{
 		var p0 = OptionMath.BlackScholes(s0, k, t0, r, iv, "C");
 		if (p0 <= 0m) return null;
-		var p1 = OptionMath.BlackScholes(s1, k, Math.Max(0.0, t1), r, iv, "C");
+		var p1 = OptionMath.BlackScholes(s1, k, t1, r, iv, "C");
 		return (p1 - p0) / p0 - roundTripSpread;
 	}
 
@@ -32,7 +32,7 @@ internal static class DipOptionsOverlay
 	/// drops to ≤ 0.25, then keep whichever of the last two strikes is closer to 0.25.</summary>
 	public static decimal AtmStrike(decimal spot) => Math.Round(spot / 5m) * 5m;
 
-	public static decimal Delta25Strike(decimal spot, double t, double r, decimal iv)
+	public static decimal Delta25Strike(decimal spot, OptionTime t, double r, decimal iv)
 	{
 		var k = AtmStrike(spot);
 		var prevK = k;
@@ -49,7 +49,7 @@ internal static class DipOptionsOverlay
 
 	/// <summary>The OTM short-put strike whose |delta| ≈ <paramref name="target"/>: walk down in $5 steps from
 	/// ATM until |put delta| first drops to ≤ target, keeping whichever of the last two strikes is closer.</summary>
-	public static decimal ShortPutStrikeForDelta(decimal spot, double t, double r, decimal iv, decimal target)
+	public static decimal ShortPutStrikeForDelta(decimal spot, OptionTime t, double r, decimal iv, decimal target)
 	{
 		var k = AtmStrike(spot);
 		var prevK = k;
@@ -81,7 +81,7 @@ internal static class DipOptionsOverlay
 		return iv < 0.001m ? 0.001m : iv;
 	}
 
-	public static IReadOnlyList<PutSpreadStats> RunPutSpreads(IReadOnlyList<IntradayBar> bars, IReadOnlyList<DipSignal> signals, Func<DateTime, decimal?> ivForDate, double r, decimal width, decimal frictionPts, decimal stopMultiple, decimal skewPtsPerPct)
+	public static IReadOnlyList<PutSpreadStats> RunPutSpreads(string root, IReadOnlyList<IntradayBar> bars, IReadOnlyList<DipSignal> signals, Func<DateTime, decimal?> ivForDate, double r, decimal width, decimal frictionPts, decimal stopMultiple, decimal skewPtsPerPct)
 	{
 		var modes = new (string Name, decimal Delta)[] { ("ATM", 0m), ("0.30Δ", 0.30m), ("0.15Δ", 0.15m) };
 		var ror = new Dictionary<string, List<decimal>>();
@@ -100,8 +100,8 @@ internal static class DipOptionsOverlay
 			if (!idxByEt.TryGetValue(sig.EntryEt, out var e)) continue;
 			var iv = ivPct / 100m;
 			var expiry = sig.EntryEt.Date.AddHours(16); // 0DTE: today's 16:00 ET
-			var t0 = (expiry - sig.EntryEt).TotalDays / 365.0;
-			if (t0 <= 0) continue;
+			var t0 = MarketClock.Between(root, sig.EntryEt, expiry);
+			if (t0.IsExpired) continue;
 			var sessionEnd = e;
 			while (sessionEnd + 1 < bars.Count && bars[sessionEnd + 1].Day == sig.EntryEt.Date) sessionEnd++;
 
@@ -116,7 +116,7 @@ internal static class DipOptionsOverlay
 				var maxLoss = width - credit;
 				if (maxLoss <= 0m) continue;
 
-				var (net, stopped) = ExitNet(bars, e, sessionEnd, expiry, ks, kl, width, credit, iv, r, frictionPts, stopMultiple, skewPtsPerPct);
+				var (net, stopped) = ExitNet(root, bars, e, sessionEnd, expiry, ks, kl, width, credit, iv, r, frictionPts, stopMultiple, skewPtsPerPct);
 				if (stopped) stops[name]++;
 				credits[name].Add(credit);
 				maxlosses[name].Add(maxLoss);
@@ -144,15 +144,15 @@ internal static class DipOptionsOverlay
 	/// to the close repricing the spread (BS, entry IV held constant — a real IV spike on a drop would worsen
 	/// the mark, so the modeled stop is approximate) and cut the moment the buy-back mark reaches
 	/// credit·(1+stop). If never hit (or no stop), settle to intrinsic at the close. Returns whether it stopped.</summary>
-	private static (decimal net, bool stopped) ExitNet(IReadOnlyList<IntradayBar> bars, int entryIdx, int sessionEnd, DateTime expiry, decimal ks, decimal kl, decimal width, decimal credit, decimal iv, double r, decimal frictionPts, decimal stopMultiple, decimal skewPtsPerPct)
+	private static (decimal net, bool stopped) ExitNet(string root, IReadOnlyList<IntradayBar> bars, int entryIdx, int sessionEnd, DateTime expiry, decimal ks, decimal kl, decimal width, decimal credit, decimal iv, double r, decimal frictionPts, decimal stopMultiple, decimal skewPtsPerPct)
 	{
 		if (stopMultiple > 0m)
 		{
 			var stopMark = credit * (1m + stopMultiple); // buy-back cost at which loss = stopMultiple × credit
 			for (var j = entryIdx; j < sessionEnd; j++)
 			{
-				var tj = (expiry - bars[j].EtStart).TotalDays / 365.0;
-				if (tj <= 0) break;
+				var tj = MarketClock.Between(root, bars[j].EtStart, expiry);
+				if (tj.IsExpired) break;
 				var mark = OptionMath.BlackScholes(bars[j].Close, ks, tj, r, SkewedIv(iv, bars[j].Close, ks, skewPtsPerPct), "P")
 					- OptionMath.BlackScholes(bars[j].Close, kl, tj, r, SkewedIv(iv, bars[j].Close, kl, skewPtsPerPct), "P");
 				mark = Math.Clamp(mark, 0m, width);
@@ -163,7 +163,7 @@ internal static class DipOptionsOverlay
 		return (credit - liab - frictionPts, false);
 	}
 
-	public static IReadOnlyList<CallStats> Run(IReadOnlyList<DipSignal> signals, Func<DateTime, decimal?> ivForDate, Func<DateTime, DateTime> nextTradingDay, double r, decimal roundTripSpread)
+	public static IReadOnlyList<CallStats> Run(string root, IReadOnlyList<DipSignal> signals, Func<DateTime, decimal?> ivForDate, Func<DateTime, DateTime> nextTradingDay, double r, decimal roundTripSpread)
 	{
 		// strikeMode → horizon → (gross, net) returns
 		var modes = new[] { "ATM", "0.25Δ" };
@@ -178,8 +178,8 @@ internal static class DipOptionsOverlay
 			if (ivForDate(sig.EntryEt.Date) is not { } ivPct || ivPct <= 0m) continue;
 			var iv = ivPct / 100m;
 			var expiry = nextTradingDay(sig.EntryEt.Date).Date.AddHours(16); // 1DTE expiry, 16:00 ET
-			var t0 = (expiry - sig.EntryEt).TotalDays / 365.0;
-			if (t0 <= 0) continue;
+			var t0 = MarketClock.Between(root, sig.EntryEt, expiry);
+			if (t0.IsExpired) continue;
 
 			foreach (var m in modes)
 			{
@@ -189,7 +189,7 @@ internal static class DipOptionsOverlay
 				{
 					if (ret is not { } und) continue;
 					var exitTime = h == "EOD" ? sig.EntryEt.Date.AddHours(16) : sig.EntryEt.AddMinutes(h == "+30m" ? 30 : 60);
-					var t1 = (expiry - exitTime).TotalDays / 365.0;
+					var t1 = MarketClock.Between(root, exitTime, expiry);
 					var s1 = sig.EntryPrice * (1m + und);
 					if (CallReturnOnPremium(sig.EntryPrice, s1, k, t0, t1, r, iv, roundTripSpread) is not { } netRet) continue;
 					net[(m, h)].Add(netRet);

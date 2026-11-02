@@ -35,14 +35,14 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 	// One trading day = 6.5h. Used to give 0DTE a non-zero time component so the open captures
 	// a full day's theta before the same-step expiry settles at intrinsic. Without this, BlackScholes
 	// returns intrinsic at both ends and the position can never collect time premium.
-	private const double ZeroDteTimeYears = 6.5 / 24.0 / 365.0;
+	internal const double ZeroDteSessionHours = 6.5;
 	// Half-session TTE — used as the approximation for "current moment is the middle of the session"
 	// when re-pricing positions at the day's High/Low for intraday stop-loss / take-profit checks.
 	// Without minute-bar history we can't know when the extreme actually occurred; mid-session is the
 	// expected midpoint and avoids systematically biasing either toward open (rich extrinsic) or close
 	// (zero extrinsic). Exposed as a constant so the same value is used by the intraday-trigger pass
 	// in <see cref="BacktestRunner"/>.
-	internal const double IntradayHalfSessionTimeYears = 3.25 / 24.0 / 365.0;
+	internal const double IntradayHalfSessionHours = 3.25;
 
 	private readonly HistoricalBarCache _bars;
 	private readonly BacktestIVProvider _iv;
@@ -176,12 +176,12 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 			// override (remaining session) for the intraday loop, else the day-step constant. Falls back to
 			// raw intrinsic only when no ATM IV is available for the term.
 			var timeYears = dte <= 0
-				? (overrides.ZeroDteTimeYears ?? ZeroDteTimeYears)
-				: dte / 365.0;
+				? (overrides.ZeroDteWindow is { } w ? MarketClock.Between(parsed.Root, w.From, w.To) : MarketClock.BeforeClose(parsed.Root, asOf, ZeroDteSessionHours))
+				: MarketClock.CloseToClose(parsed.Root, asOf, parsed.ExpiryDate);
 			decimal price;
 			decimal? iv = null;
 			if (atm.HasValue)
-				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale, timeYears);
+				iv = _iv.ApplySmile(atm.Value, parsed.Root, parsed.Strike, spot, smileScale, timeYears.CalendarYears);
 			if (iv.HasValue)
 				price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, Rate, iv.Value, parsed.CallPut!);
 			else
@@ -240,7 +240,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 	/// empty map if no leg's ATM IV is available for the date.</summary>
 	public async Task<IReadOnlyDictionary<string, OptionContractQuote>> GetIntradayQuotesAsync(
 		DateTime asOf, string ticker, decimal spot, IEnumerable<string> optionSymbols,
-		double zeroDteTimeYears, CancellationToken cancellation)
+		OptionTime zeroDteTime, CancellationToken cancellation)
 	{
 		var parsed = new List<(string Symbol, OptionParsed Parsed)>();
 		foreach (var sym in optionSymbols)
@@ -258,7 +258,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 		}
 		if (atmByDte.Count == 0) return new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		var smileScale = await _iv.GetSmileScaleAsync(ticker, asOf, cancellation);
-		return PriceAtSpot(asOf, optionSymbols, spot, atmByDte, smileScale, zeroDteTimeYears);
+		return PriceAtSpot(asOf, optionSymbols, spot, atmByDte, smileScale, zeroDteTime);
 	}
 
 	/// <summary>Re-prices a set of option legs at an explicit spot for a single ticker, with an
@@ -274,7 +274,7 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 	/// delegates its intraday-trigger / profit-projector reprices here.</para></summary>
 	internal IReadOnlyDictionary<string, OptionContractQuote> PriceAtSpot(
 		DateTime asOf, IEnumerable<string> optionSymbols, decimal spot,
-		IReadOnlyDictionary<int, decimal> atmByDte, decimal smileScale, double zeroDteTimeYears)
+		IReadOnlyDictionary<int, decimal> atmByDte, decimal smileScale, OptionTime zeroDteTime)
 	{
 		if (atmByDte.Count == 0) return new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		var fallbackAtm = atmByDte.OrderByDescending(kv => kv.Key).First().Value;
@@ -287,8 +287,8 @@ internal sealed class BacktestQuoteSource : IBacktestQuoteSource
 
 			var dte = (parsed.ExpiryDate.Date - asOf.Date).Days;
 			var atmIv = atmByDte.TryGetValue(dte, out var hit) ? hit : fallbackAtm;
-			var timeYears = dte <= 0 ? zeroDteTimeYears : dte / 365.0;
-			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale, timeYears) ?? atmIv;
+			var timeYears = dte <= 0 ? zeroDteTime : MarketClock.CloseToClose(parsed.Root, asOf, parsed.ExpiryDate);
+			var iv = _iv.ApplySmile(atmIv, parsed.Root, parsed.Strike, spot, smileScale, timeYears.CalendarYears) ?? atmIv;
 			var price = OptionMath.BlackScholes(AdjSpot(parsed.Root, spot, asOf, parsed.ExpiryDate), parsed.Strike, timeYears, Rate, iv, parsed.CallPut);
 
 			var halfSpread = HalfSpreadFor(parsed.Root, price);

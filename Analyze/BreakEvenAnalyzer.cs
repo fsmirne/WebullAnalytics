@@ -133,8 +133,10 @@ public static class BreakEvenAnalyzer
 		var iv = OptionMath.GetLegIv(row.Side, symbol, opts);
 		if (isLong && iv.HasValue && dte.HasValue && dte.Value >= 0)
 		{
-			var timeYears = dte.Value / 365.0;
-			earlyExercise = BjerksundStensland.ComputeExerciseBoundary(strike, timeYears, OptionMath.RiskFreeRate, (double)iv.Value, parsed.CallPut);
+			// The boundary model runs on one calendar T (it also carries r), so the clock's vol is re-expressed on it.
+			var time = MarketClock.CloseToClose(parsed.Root, EvaluationDate.Today, EvaluationDate.Today.AddDays(dte.Value));
+			if (!time.IsExpired)
+				earlyExercise = BjerksundStensland.ComputeExerciseBoundary(strike, time.CalendarYears, OptionMath.RiskFreeRate, OptionMath.CalendarSigma((double)iv.Value, time), parsed.CallPut);
 		}
 
 		TimeDecayGrid? grid = null;

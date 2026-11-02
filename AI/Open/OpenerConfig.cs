@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using WebullAnalytics.Pricing;
 using WebullAnalytics.AI.Open.ZeroDte;
 
 namespace WebullAnalytics.AI;
@@ -161,7 +162,7 @@ internal sealed class OpenerConfig
 	[JsonPropertyName("structures")] public OpenerStructuresConfig Structures { get; set; } = new();
 
 	/// <summary>Computes the required chain expansion fraction for an expiry based on enabled structures.</summary>
-	public decimal ComputeRequiredExpansionPct(decimal spot, double timeYears, decimal iv, decimal strikeStep, double riskFreeRate)
+	public decimal ComputeRequiredExpansionPct(decimal spot, OptionTime timeYears, decimal iv, decimal strikeStep, double riskFreeRate)
 		=> Structures.ComputeRequiredExpansionPct(spot, timeYears, iv, strikeStep, riskFreeRate);
 
 	/// <summary>DTE-aware shaping of the intraday-tape blend weight. When disabled (default) the blend
@@ -455,14 +456,14 @@ internal sealed class OpenerStructuresConfig
 
 	/// <summary>Computes the fraction of spot needed to expand the chain around spot for an expiry at
 	/// <paramref name="timeYears"/> to ensure all candidate strikes and wings fit on the ladder.</summary>
-	public decimal ComputeRequiredExpansionPct(decimal spot, double timeYears, decimal iv, decimal strikeStep, double riskFreeRate)
+	public decimal ComputeRequiredExpansionPct(decimal spot, OptionTime timeYears, decimal iv, decimal strikeStep, double riskFreeRate)
 	{
 		if (spot <= 0m) return 0.20m;
 		var minDelta = MinDeltaAcrossEnabled();
 		var maxWingSteps = MaxWingStepsAcrossEnabled();
 		var effectiveIv = iv > 0.01m ? iv : 0.25m;
 		var effectiveStep = strikeStep > 0m ? strikeStep : (spot >= 100m ? 5m : (spot >= 25m ? 1m : 0.5m));
-		var effectiveTimeYears = timeYears <= 0.0 ? (6.5 / 24.0 / 365.0) : timeYears;
+		var effectiveTimeYears = timeYears.IsExpired ? MarketClock.CalendarYears(6.5 / 24.0 / 365.0) : timeYears;
 
 		var putStrike = Pricing.OptionMath.DeltaToStrike(spot, effectiveTimeYears, riskFreeRate, effectiveIv, minDelta, "P");
 		var callStrike = Pricing.OptionMath.DeltaToStrike(spot, effectiveTimeYears, riskFreeRate, effectiveIv, minDelta, "C");

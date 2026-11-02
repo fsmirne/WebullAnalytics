@@ -234,12 +234,12 @@ internal static class CandidateScorer
 	public static GexResult ComputeGex(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
 		// Gamma weighting floors time-to-expiry at one full day, matching `wa analyze gex` (the diagnostic the
-		// gravity signal is validated against). The opener's intraday TimeYearsToExpiry shrinks toward 0 through
+		// gravity signal is validated against). The opener's intraday TimeToExpiry shrinks toward 0 through
 		// a 0DTE session, which makes gamma razor-sharp at the money so gravity just tracks spot (a coincident
 		// mirror) and the directional pin signal collapses. The 1-day floor keeps the gamma curve broad enough
 		// that a heavy-OI strike away from spot wins gravity — the leading "magnet" behaviour — and keeps the
 		// scorer's gravity identical to what `analyze gex` shows. Non-0DTE is unaffected (days ≥ 1 already).
-		var timeYears = Math.Max(1, (expiry.Date - asOf.Date).Days) / 365.0;
+		var timeYears = MarketClock.CloseToClose(ticker, asOf, expiry, minDays: 1);
 		var callGexByStrike = new Dictionary<decimal, double>();
 		var putGexByStrike = new Dictionary<decimal, double>();
 		foreach (var kv in quotes)
@@ -298,7 +298,7 @@ internal static class CandidateScorer
 	/// vanna, puts positive — the NET is what maps the dealer re-hedging flow under an IV move.</summary>
 	public static VexResult ComputeVex(string ticker, DateTime expiry, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes)
 	{
-		var timeYears = Math.Max(1, (expiry.Date - asOf.Date).Days) / 365.0;
+		var timeYears = MarketClock.CloseToClose(ticker, asOf, expiry, minDays: 1);
 		decimal net = 0m, gross = 0m;
 		decimal callSum = 0m, putSum = 0m;
 		foreach (var kv in quotes)
@@ -398,7 +398,7 @@ internal static class CandidateScorer
 			var iv = q.ImpliedVolatility.Value;
 
 			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
-			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
+			var t = MarketClock.Between(leg.Parsed.Root, asOf, expirationTime);
 			var adjSpot = OptionMath.DividendAdjustedSpot(spot, dividends, asOf, expirationTime, OptionMath.RiskFreeRate);
 			var theo = OptionMath.BlackScholes(adjSpot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 			if (theo <= 0m) return null;
@@ -746,11 +746,11 @@ internal static class CandidateScorer
 	}
 
 	/// <summary>One-sigma expected move to the target: <c>forward × IV × √years</c>, where <paramref name="years"/> is the
-	/// SAME time-to-target the IV was back-solved with (<see cref="OpenerExpiryHelpers.TimeYearsToExpiry"/>), so the
+	/// SAME time-to-target the IV was back-solved with (<see cref="OpenerExpiryHelpers.TimeToExpiry"/>), so the
 	/// move matches the σ√T the option prices, scenario grid and POP imply. (A separate trading-day clock with a 1-day
 	/// floor made the 0DTE move ~2.5x the market-implied one.) Zero when inputs are degenerate.</summary>
-	internal static decimal ExpectedMove(decimal forward, decimal iv, double years)
-		=> forward <= 0m || iv <= 0m || years <= 0 ? 0m : forward * iv * (decimal)Math.Sqrt(years);
+	internal static decimal ExpectedMove(decimal forward, decimal iv, OptionTime years)
+		=> forward <= 0m || iv <= 0m || years.IsExpired ? 0m : forward * iv * (decimal)Math.Sqrt(years.VarianceYears);
 
 	/// <summary>Path-aware safety factor: ratio of nearest-breakeven distance to one-sigma expected
 	/// move over the holding period (<see cref="ExpectedMove"/>), squashed through tanh.
@@ -762,7 +762,7 @@ internal static class CandidateScorer
 	/// 7 DTE) score ~0.30; wider structures on the same name and tight indexes score above 0.6.
 	/// Null when inputs are degenerate; falls to the 0.10 floor when forward has already crossed the
 	/// safe band for a two-BE structure.</summary>
-	internal static decimal? ComputeBreakevenRoomFactor(decimal forward, decimal iv, double years, IReadOnlyList<decimal> breakevens)
+	internal static decimal? ComputeBreakevenRoomFactor(decimal forward, decimal iv, OptionTime years, IReadOnlyList<decimal> breakevens)
 	{
 		if (breakevens.Count == 0) return null;
 		var expectedMove = ExpectedMove(forward, iv, years);
@@ -790,7 +790,7 @@ internal static class CandidateScorer
 	/// <summary>One-sigma expected-move price envelope: <c>(forward − EM, forward + EM)</c> with EM from
 	/// <see cref="ExpectedMove"/> — the same move the EM-based scoring factors (BreakevenRoomFactor,
 	/// ExpectedMoveCreditFactor) evaluate against, so the rendered range lines up with them. Null when inputs are degenerate.</summary>
-	internal static (decimal Lower, decimal Upper)? ComputeExpectedMoveBounds(decimal forward, decimal iv, double years)
+	internal static (decimal Lower, decimal Upper)? ComputeExpectedMoveBounds(decimal forward, decimal iv, OptionTime years)
 	{
 		var em = ExpectedMove(forward, iv, years);
 		if (em <= 0m) return null;
@@ -805,7 +805,7 @@ internal static class CandidateScorer
 	/// returns null on debit trades, no shorts, or degenerate inputs. Signal is a linear ramp
 	/// centered on 1σ cushion: −1 at ≤0.5σ (or forward already past a short), +1 at ≥1.5σ. Factor:
 	/// <c>max(0.10, 1 + weight × signal)</c>.</summary>
-	internal static decimal? ComputeExpectedMoveCreditFactor(decimal forward, decimal iv, double years, decimal debitOrCreditPerContract, IReadOnlyList<(decimal Strike, string CallPut)> shortLegs, decimal weight)
+	internal static decimal? ComputeExpectedMoveCreditFactor(decimal forward, decimal iv, OptionTime years, decimal debitOrCreditPerContract, IReadOnlyList<(decimal Strike, string CallPut)> shortLegs, decimal weight)
 	{
 		if (weight <= 0m || debitOrCreditPerContract < 0m || shortLegs.Count == 0)
 			return null;
@@ -945,28 +945,28 @@ internal static class CandidateScorer
 
 	/// <summary>Risk-neutral forward at the target expiry's close — the center of every scoring distribution
 	/// (scenario grid, POP, expected-move/breakeven-room/setup factors).</summary>
-	private static decimal ScenarioForward(decimal spot, IReadOnlyList<DividendEvent>? dividends, DateTime asOf, DateTime targetExpiry, double years)
-		=> OptionMath.ForwardPrice(spot, dividends, asOf, targetExpiry.Date + OptionMath.MarketClose, years, OptionMath.RiskFreeRate);
+	private static decimal ScenarioForward(decimal spot, IReadOnlyList<DividendEvent>? dividends, DateTime asOf, DateTime targetExpiry, OptionTime years)
+		=> OptionMath.ForwardPrice(spot, dividends, asOf, targetExpiry.Date + OptionMath.MarketClose, years.CalendarYears, OptionMath.RiskFreeRate);
 
 	/// <summary>Expected P&amp;L per contract after friction, with the configured take-profit / stop exits applied along the
 	/// path (<see cref="PathExitModel"/>) over the same distribution as <paramref name="grid"/>. With realized-EV scoring off,
 	/// or no exit armed, it is the grid's end-of-life EV minus friction (friction is 0 when scoring is off).</summary>
-	private static decimal ManagedEv(IReadOnlyList<ScenarioPoint> grid, Func<decimal, decimal> pnlAtTarget, IReadOnlyList<PathLeg> legs, decimal entryValuePerContract, decimal? maxProfit, decimal maxLoss, decimal friction, decimal spot, decimal forward, decimal scenarioVol, double years, decimal biasShiftSigmas, DateTime asOf, DateTime targetExpiry, RealizedVolModel? realizedVol, IReadOnlyList<DividendEvent>? dividends, OpenerRealizedExpectancyConfig cfg)
+	private static decimal ManagedEv(IReadOnlyList<ScenarioPoint> grid, Func<decimal, decimal> pnlAtTarget, IReadOnlyList<PathLeg> legs, decimal entryValuePerContract, decimal? maxProfit, decimal maxLoss, decimal friction, decimal spot, decimal forward, decimal scenarioVol, OptionTime years, decimal biasShiftSigmas, DateTime asOf, DateTime targetExpiry, RealizedVolModel? realizedVol, IReadOnlyList<DividendEvent>? dividends, OpenerRealizedExpectancyConfig cfg)
 	{
 		var takeProfit = RealizedExpectancy.TakeProfitPerContract(entryValuePerContract, cfg);
 		var stopLoss = RealizedExpectancy.StopLossPerContract(maxProfit, maxLoss, cfg);
-		if (takeProfit == null && stopLoss == null || years <= 0)
+		if (takeProfit == null && stopLoss == null || years.IsExpired)
 		{
 			decimal terminal = 0m;
 			foreach (var pt in grid) terminal += pt.Weight * pnlAtTarget(pt.SpotAtExpiry);
 			return terminal - friction;
 		}
-		var sigmaTotal = (double)scenarioVol * Math.Sqrt(years);
+		var sigmaTotal = (double)scenarioVol * Math.Sqrt(years.VarianceYears);
 		var targetCenter = ScenarioCenter(forward, sigmaTotal, (double)biasShiftSigmas * sigmaTotal);
 		var targetClose = targetExpiry.Date + OptionMath.MarketClose;
 		var sessions = realizedVol != null && realizedVol.OvernightVariance + realizedVol.SessionVariance > 0
 			? realizedVol.VarianceTo(asOf, targetExpiry) / (realizedVol.OvernightVariance + realizedVol.SessionVariance)
-			: years * 252.0;
+			: years.VarianceYears * 252.0;
 		var steps = PathExitModel.StepCount(sessions);
 		var stepTimes = new DateTime[steps];
 		for (var k = 1; k <= steps; k++)
@@ -978,7 +978,7 @@ internal static class CandidateScorer
 
 	/// <summary>Annualized vol (on the IV's clock) of the scoring distribution: the realized-vol forecast when one is
 	/// available, else the implied vol — see <see cref="RealizedVolModel"/>.</summary>
-	private static decimal ScenarioVol(RealizedVolModel? realizedVol, DateTime asOf, DateTime targetExpiry, double years, decimal impliedVol)
+	private static decimal ScenarioVol(RealizedVolModel? realizedVol, DateTime asOf, DateTime targetExpiry, OptionTime years, decimal impliedVol)
 		=> realizedVol?.ScenarioVol(asOf, targetExpiry, years) ?? impliedVol;
 
 	internal const int ScenarioBins = 81;
@@ -1012,9 +1012,9 @@ internal static class CandidateScorer
 	/// Neutral drift: c is chosen so the probability-weighted mean equals <paramref name="forward"/>
 	/// (<see cref="OptionMath.ForwardPrice"/>), the drift every leg is Black-Scholes-priced with.
 	/// </summary>
-	public static IReadOnlyList<ScenarioPoint> BuildScenarioGrid(decimal forward, decimal ivAnnual, double years, decimal biasShiftSigmas = 0m)
+	public static IReadOnlyList<ScenarioPoint> BuildScenarioGrid(decimal forward, decimal ivAnnual, OptionTime years, decimal biasShiftSigmas = 0m)
 	{
-		var sigma = (double)ivAnnual * Math.Sqrt(Math.Max(1e-9, years));
+		var sigma = (double)ivAnnual * Math.Sqrt(Math.Max(1e-9, years.VarianceYears));
 		// biasShiftSigmas (typically bias × cfg.Weights.BiasDrift) translates the grid center along the
 		// log-spot axis. Positive shifts scenarios up; negative shifts down. Allows long-premium
 		// structures to score positive raw EV under strong directional signals — sign-symmetric
@@ -1044,10 +1044,10 @@ internal static class CandidateScorer
 	/// zero"). Structure-independent: it's a market view on where price gravitates, so every structure's grid
 	/// shifts the same way. Gravity/max-pain come from per-quotes-object memoized caches, so recomputing here is
 	/// cheap. Returns 0 when both pulls are disabled (default) so the grid is bit-identical to before.</summary>
-	private static MagnetBias MagnetBiasSigmas(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal iv, double years, OpenerConfig cfg)
+	private static MagnetBias MagnetBiasSigmas(CandidateSkeleton skel, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal iv, OptionTime years, OpenerConfig cfg)
 	{
 		if ((cfg.Weights.GexBiasPull <= 0m && cfg.Weights.MaxPainBiasPull <= 0m) || spot <= 0m || iv <= 0m) return new MagnetBias(0m, null);
-		var expectedMove = Math.Max(ResolveStrikeStep(cfg, skel.Ticker), spot * iv * (decimal)Math.Sqrt(Math.Max(1e-9, years)));
+		var expectedMove = Math.Max(ResolveStrikeStep(cfg, skel.Ticker), spot * iv * (decimal)Math.Sqrt(Math.Max(1e-9, years.VarianceYears)));
 		if (expectedMove <= 0m) return new MagnetBias(0m, null);
 		var pull = 0m;
 		decimal? gexSigmas = null;
@@ -1140,7 +1140,7 @@ internal static class CandidateScorer
 			return new ResolvedLegPrice(live.Value.bid, live.Value.ask, UsedFallback: false);
 
 		var iv = ResolveIv(symbol, quotes, defaultIv);
-		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, parsed.ExpiryDate);
+		var years = OpenerExpiryHelpers.TimeToExpiry(parsed.Root, asOf, parsed.ExpiryDate);
 		var theoretical = OptionMath.BlackScholes(spot, parsed.Strike, years, OptionMath.RiskFreeRate, iv, parsed.CallPut);
 		return theoretical > 0m ? new ResolvedLegPrice(theoretical, theoretical, UsedFallback: true) : null;
 	}
@@ -1453,11 +1453,11 @@ internal static class CandidateScorer
 	/// P(S_T > level) or P(S_T < level) under the risk-neutral log-normal whose mean is <paramref name="forward"/>
 	/// (<see cref="OptionMath.ForwardPrice"/>): d2 = (ln(F/K) − σ²·T/2) / (σ·√T); P(S_T > K) = N(d2); P(S_T < K) = 1 − N(d2).
 	/// </summary>
-	public static decimal LogNormalProbability(Direction dir, decimal forward, decimal level, double years, double ivAnnual)
+	public static decimal LogNormalProbability(Direction dir, decimal forward, decimal level, OptionTime years, double ivAnnual)
 	{
-		if (level <= 0m || forward <= 0m || years <= 0 || ivAnnual <= 0) return 0m;
-		var sigmaSqrtT = ivAnnual * Math.Sqrt(years);
-		var d2 = (Math.Log((double)forward / (double)level) - 0.5 * ivAnnual * ivAnnual * years) / sigmaSqrtT;
+		if (level <= 0m || forward <= 0m || years.IsExpired || ivAnnual <= 0) return 0m;
+		var sigmaSqrtT = ivAnnual * Math.Sqrt(years.VarianceYears);
+		var d2 = (Math.Log((double)forward / (double)level) - 0.5 * ivAnnual * ivAnnual * years.VarianceYears) / sigmaSqrtT;
 		var N_d2 = OptionMath.NormalCdf(d2);
 		return (decimal)(dir == Direction.Above ? N_d2 : 1.0 - N_d2);
 	}
@@ -1498,7 +1498,7 @@ internal static class CandidateScorer
 			? shortParsed.Strike + creditPerShare   // call credit: loses if S_T > short + credit
 		  : shortParsed.Strike - creditPerShare;  // put credit: loses if S_T < short − credit
 
-		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
+		var years = OpenerExpiryHelpers.TimeToExpiry(skel.Ticker, asOf, skel.TargetExpiry);
 		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, cfg.Indicators.Events);
 		var cache = _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache());
 		var iv = ScoredLegIv(cache, shortLeg.Symbol, shortParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
@@ -1655,7 +1655,7 @@ internal static class CandidateScorer
 			? longParsed.Strike + debitPerShare
 			: longParsed.Strike - debitPerShare;
 
-		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
+		var years = OpenerExpiryHelpers.TimeToExpiry(skel.Ticker, asOf, skel.TargetExpiry);
 		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, cfg.Indicators.Events);
 		var cache = _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache());
 		var iv = ScoredLegIv(cache, longLeg.Symbol, longParsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);
@@ -2091,9 +2091,9 @@ internal static class CandidateScorer
 		var minStrike = legs.Min(l => l.Parsed.Strike);
 		var maxStrike = legs.Max(l => l.Parsed.Strike);
 		var longestExpiry = legs.Max(l => l.Parsed.ExpiryDate.Date);
-		var residualYears = Math.Max(0.0, (longestExpiry - targetExpiry.Date).TotalDays / 365.0);
-		var margin = residualYears > 0.0
-			? Math.Max(4m * step, 6m * spot * representativeIv * (decimal)Math.Sqrt(residualYears))
+		var residualYears = MarketClock.CloseToClose(legs[0].Parsed.Root, targetExpiry, longestExpiry);
+		var margin = !residualYears.IsExpired
+			? Math.Max(4m * step, 6m * spot * representativeIv * (decimal)Math.Sqrt(residualYears.VarianceYears))
 			: 4m * step;
 		return (Math.Max(0.01m, minStrike - margin), maxStrike + margin);
 	}
@@ -2147,7 +2147,7 @@ internal static class CandidateScorer
 		return roots;
 	}
 
-	private static decimal ProbabilityBetween(decimal forward, decimal? lower, decimal? upper, double years, decimal ivAnnual)
+	private static decimal ProbabilityBetween(decimal forward, decimal? lower, decimal? upper, OptionTime years, decimal ivAnnual)
 	{
 		if (lower.HasValue && upper.HasValue)
 			return LogNormalProbability(Direction.Above, forward, lower.Value, years, (double)ivAnnual) - LogNormalProbability(Direction.Above, forward, upper.Value, years, (double)ivAnnual);
@@ -2158,7 +2158,7 @@ internal static class CandidateScorer
 		return 1m;
 	}
 
-	private static decimal ComputeProbabilityOfProfit(Func<decimal, decimal> pnl, IReadOnlyList<decimal> breakevens, decimal forward, double years, decimal ivAnnual)
+	private static decimal ComputeProbabilityOfProfit(Func<decimal, decimal> pnl, IReadOnlyList<decimal> breakevens, decimal forward, OptionTime years, decimal ivAnnual)
 	{
 		decimal pop = 0m;
 		for (var i = 0; i <= breakevens.Count; i++)
@@ -2236,7 +2236,7 @@ internal static class CandidateScorer
 		var netEntryPerContract = netEntryPerShare * 100m;
 		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, netEntryPerContract / 100m, cfg.MinEntryToNoiseRatio)) return null;
 		var daysToTarget = Math.Max(1, (skel.TargetExpiry.Date - asOf.Date).Days);
-		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
+		var years = OpenerExpiryHelpers.TimeToExpiry(skel.Ticker, asOf, skel.TargetExpiry);
 		var targetLegs = defs.Where(l => l.Parsed.ExpiryDate.Date == skel.TargetExpiry.Date).ToList();
 		var representativeIv = (targetLegs.Count > 0 ? targetLegs : defs).Average(l => l.Iv);
 		var pnl = (decimal sT) => PositionValueAtTarget(sT, skel.TargetExpiry.Date, defs) + netEntryPerContract;
@@ -2427,7 +2427,7 @@ internal static class CandidateScorer
 		// Layer-1 terrain veto: reject a short strike parked in the put-dominated band of its own expiry.
 		if (applyLiquidityGate && ShortStrikePlacementVetoed(cfg.PlacementVeto, skel.Ticker, shortParsed.ExpiryDate.Date, shortParsed.Strike, spot, asOf, quotes, out _)) return null;
 
-		var shortYears = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortParsed.ExpiryDate);
+		var shortYears = OpenerExpiryHelpers.TimeToExpiry(skel.Ticker, asOf, shortParsed.ExpiryDate);
 		// Dividend handling, two windows. (1) The surviving long trades through any ex-date between the short
 		// and long expiries; that forward shift is applied per-valuation inside OptionMath.LegValueAt (pass
 		// `dividends` + the short expiry close). Dividends on/before the short expiry are excluded: by then the
@@ -2457,7 +2457,7 @@ internal static class CandidateScorer
 		var longDividendPv = OptionMath.DividendPresentValue(dividends, shortExpiryClose, longExpiryClose, OptionMath.RiskFreeRate);
 		var (beLower, beUpper) = ComputeCalendarOrDiagonalBreakevens(spot, shortParsed, longParsed, shortExpiryClose, ivLong, debitPerContract, longDividendPv);
 		// Scoring horizon is the short expiry; ex-dates on/before it are absorbed into the forward (the long leg's valuation excludes them, see above).
-		var forward = OptionMath.ForwardPrice(spot, dividends, asOf, shortExpiryClose, shortYears, OptionMath.RiskFreeRate);
+		var forward = OptionMath.ForwardPrice(spot, dividends, asOf, shortExpiryClose, shortYears.CalendarYears, OptionMath.RiskFreeRate);
 		// Real-world distribution: outcomes follow realized vol (implied when no forecast); legs stay priced at implied.
 		var scenarioVol = ScenarioVol(realizedVol, asOf, shortParsed.ExpiryDate, shortYears, ivShort);
 		decimal pop;
@@ -2618,8 +2618,8 @@ internal static class CandidateScorer
 		foreach (var leg in legs)
 		{
 			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
-			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
-			var tTomorrow = Math.Max(0.0, (expirationTime - asOf.AddDays(1)).TotalDays / 365.0);
+			var t = MarketClock.Between(leg.Parsed.Root, asOf, expirationTime);
+			var tTomorrow = MarketClock.Between(leg.Parsed.Root, asOf.AddDays(1), expirationTime);
 			var now = OptionMath.BlackScholes(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, leg.Iv, leg.Parsed.CallPut);
 			var tomorrow = OptionMath.BlackScholes(spot, leg.Parsed.Strike, tTomorrow, OptionMath.RiskFreeRate, leg.Iv, leg.Parsed.CallPut);
 			var thetaPerShare = tomorrow - now;
@@ -2638,7 +2638,7 @@ internal static class CandidateScorer
 		foreach (var leg in legs)
 		{
 			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
-			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
+			var t = MarketClock.Between(leg.Parsed.Root, asOf, expirationTime);
 			// OptionMath.Vega returns per 1.0 IV change; divide by 100 for per-1-IV-point.
 			var vegaPerShare = OptionMath.Vega(spot, leg.Parsed.Strike, t, OptionMath.RiskFreeRate, leg.Iv) / 100m;
 			netVegaPerShare += leg.IsLong ? vegaPerShare : -vegaPerShare;
@@ -2664,7 +2664,7 @@ internal static class CandidateScorer
 		var ask = quote.Value.Ask;
 		var mid = (bid + ask) / 2m;
 
-		var years = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, skel.TargetExpiry);
+		var years = OpenerExpiryHelpers.TimeToExpiry(skel.Ticker, asOf, skel.TargetExpiry);
 		var dividends = DividendScheduleBuilder.BuildForTicker(events, spot, cfg.Indicators.Events);
 		var cache = _chainScalarCache.GetValue(quotes, static _ => new ChainScalarCache());
 		var iv = ScoredLegIv(cache, leg.Symbol, parsed, spot, asOf, quotes, cfg, useMarketImpliedIv, ivSolveAsOf, dividends);

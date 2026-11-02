@@ -422,7 +422,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		}
 		decimal? Iv(DateTime date) => vix1d.TryGetValue(date.Date, out var v) ? v : null;
 
-		var stats = DipOptionsOverlay.Run(r.Signals, Iv, NextNTradingDays, OptionMath.RiskFreeRate, s.CallSpreadPct / 100m);
+		var stats = DipOptionsOverlay.Run(s.Ticker.ToUpperInvariant(), r.Signals, Iv, NextNTradingDays, OptionMath.RiskFreeRate, s.CallSpreadPct / 100m);
 
 		AnsiConsole.MarkupLine($"\n[bold]Long-call overlay[/] — {s.CallDte}DTE, VIX1D vol, {s.CallSpreadPct}% round-trip spread. [yellow]MODEL ESTIMATE (no real option quotes; constant IV over hold flatters long calls).[/]");
 		var t = new Table().Border(TableBorder.Rounded).Title("[bold]Call return on premium[/]");
@@ -439,7 +439,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		if (vix1d.Count == 0) { AnsiConsole.MarkupLine("[red]No VIX1D history for put-spread pricing.[/]"); return; }
 		decimal? Iv(DateTime date) => vix1d.TryGetValue(date.Date, out var v) ? v : null;
 
-		var stats = DipOptionsOverlay.RunPutSpreads(bars, r.Signals, Iv, OptionMath.RiskFreeRate, s.PutWidth, s.PutFriction, s.PutStop, s.PutSkew);
+		var stats = DipOptionsOverlay.RunPutSpreads(s.Ticker.ToUpperInvariant(), bars, r.Signals, Iv, OptionMath.RiskFreeRate, s.PutWidth, s.PutFriction, s.PutStop, s.PutSkew);
 
 		var stopDesc = s.PutStop > 0m ? $"stop at {s.PutStop}× credit" : "held to cash settle";
 		var skewDesc = s.PutSkew > 0m ? $"put skew {s.PutSkew}pt/1%" : "flat IV";
@@ -677,7 +677,8 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 			var (eS, xS) = ReadChainSnaps(path, t.EntryEt, t.ExitEt);
 			if (eS == null || xS == null) { skipped++; continue; }
 
-			var tYr = Math.Max(1.0 / 24 / 365, (new DateTime(day.Year, day.Month, day.Day, 16, 0, 0) - eS.Et).TotalHours / 24 / 365);
+			var close = day.Date + OptionMath.MarketClose;
+			var tYr = MarketClock.Between(ticker, eS.Et < close.AddHours(-1) ? eS.Et : close.AddHours(-1), close);   // floored at one hour
 			var calls = new List<(decimal K, double D, string Sym)>();
 			var puts = new List<(decimal K, double D, string Sym)>();
 			foreach (var kv in eS.Q)
@@ -781,20 +782,11 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		return (m.Groups[1].Value, exp, m.Groups[3].Value[0], int.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture) / 1000m);
 	}
 
-	private static double NormCdf(double x)
-	{
-		var t = 1 / (1 + 0.2316419 * Math.Abs(x));
-		var d = 0.3989423 * Math.Exp(-x * x / 2);
-		var p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-		return x > 0 ? 1 - p : p;
-	}
 
-	private static double? OptDelta(char cp, double s, double k, double tYr, double iv)
+	private static double? OptDelta(char cp, double s, double k, OptionTime tYr, double iv)
 	{
-		if (iv <= 0 || tYr <= 0 || s <= 0 || k <= 0) return null;
-		var d1 = (Math.Log(s / k) + (OptionMath.RiskFreeRate + iv * iv / 2) * tYr) / (iv * Math.Sqrt(tYr));
-		var cd = NormCdf(d1);
-		return cp == 'C' ? cd : cd - 1;
+		if (iv <= 0 || tYr.IsExpired || s <= 0 || k <= 0) return null;
+		return (double)OptionMath.Delta((decimal)s, (decimal)k, tYr, OptionMath.RiskFreeRate, (decimal)iv, cp == 'C' ? "C" : "P");
 	}
 
 	private static double WinRate(IEnumerable<decimal?> r) { var v = r.Where(x => x.HasValue).Select(x => x!.Value).ToList(); return v.Count == 0 ? 0 : (double)v.Count(x => x > 0m) / v.Count; }

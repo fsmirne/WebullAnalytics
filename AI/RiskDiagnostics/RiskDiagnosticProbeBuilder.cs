@@ -89,13 +89,13 @@ internal static class RiskDiagnosticProbeBuilder
 					if (enumMin.HasValue && enumMax.HasValue)
 					{
 						// Use the same time-to-expiry formula the enumerator uses
-						// (OpenerExpiryHelpers.TimeYearsToExpiry — fractional for 0DTE,
+						// (OpenerExpiryHelpers.TimeToExpiry — fractional for 0DTE,
 						// dte/365 otherwise). The earlier `Math.Max(1, dte)/365` was a
 						// stale pre-651eaa2 convention that floored 0DTE TTE at one full
 						// day; it produced delta values 3-4× larger than what the
 						// enumerator actually computed, so the "FAIL" tag mis-fired on
 						// every 0DTE short vertical the engine picked.
-						var t = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, shortLeg.Parsed.ExpiryDate);
+						var t = OpenerExpiryHelpers.TimeToExpiry(shortLeg.Parsed.Root, asOf, shortLeg.Parsed.ExpiryDate);
 						// Prefer the chain's live IV (same source the enumerator now reads via
 						// ResolveIv). Fall back to ivResolver / IvDefaultPct only when no live
 						// quote is available for this strike — that's also the fallback chain

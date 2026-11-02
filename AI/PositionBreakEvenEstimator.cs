@@ -48,8 +48,7 @@ internal static class PositionBreakEvenEstimator
 	/// case only the bounded crossing is returned.</summary>
 	private static (decimal? Low, decimal? High) SolveTimeSpreadBreakevens(PositionLeg shortLeg, PositionLeg longLeg, decimal longIv, decimal debit)
 	{
-		var residualDays = Math.Max(1, (longLeg.Expiry!.Value.Date - shortLeg.Expiry!.Value.Date).Days);
-		var t = residualDays / 365.0;
+		var t = MarketClock.CloseToClose(ParsingHelpers.UnderlyingRoot(longLeg.Symbol), shortLeg.Expiry!.Value, longLeg.Expiry!.Value, minDays: 1);
 		var r = OptionMath.RiskFreeRate;
 		var longCp = longLeg.CallPut!;
 		var shortCp = shortLeg.CallPut!;

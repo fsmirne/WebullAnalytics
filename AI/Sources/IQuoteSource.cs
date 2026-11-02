@@ -1,3 +1,4 @@
+using WebullAnalytics.Pricing;
 namespace WebullAnalytics.AI.Sources;
 
 /// <summary>
@@ -28,11 +29,12 @@ internal sealed record QuoteSnapshot(
 );
 
 /// <summary>Per-call quote-source overrides. <c>Spots</c> replaces the implementation's natural
-/// spot lookup per ticker; <c>ZeroDteTimeYears</c> replaces the 0DTE time-to-expiry assumption.
+/// spot lookup per ticker; <c>ZeroDteWindow</c> (ET book instant → session close) replaces the 0DTE time-to-expiry
+/// assumption — an interval, not a duration, so each root's time is measured on its own clock.
 /// Defaults to all-null (use natural values) so callers that don't need overrides can pass
 /// <c>default</c>. Used by BacktestRunner's per-minute opener scan to inject the minute's spot +
 /// remaining-session TTE without mutating BacktestQuoteSource shared state.</summary>
 internal readonly record struct QuoteOverrides(
 	IReadOnlyDictionary<string, decimal>? Spots = null,
-	double? ZeroDteTimeYears = null
+	(DateTime From, DateTime To)? ZeroDteWindow = null
 );

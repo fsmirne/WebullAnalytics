@@ -61,11 +61,11 @@ public class OptionMathDividendTests
 		decimal LegBs(int dte, decimal iv)
 		{
 			var expiry = Eval.AddDays(dte);
-			var t = dte / 365.0;
+			var t = OptionTime.Calendar(dte / 365.0);
 			var s = OptionMath.DividendAdjustedSpot(spot, divs, Eval, expiry, R);
 			return OptionMath.BlackScholes(s, strike, t, R, iv, "C");
 		}
-		decimal LegBsNoDiv(int dte, decimal iv) => OptionMath.BlackScholes(spot, strike, dte / 365.0, R, iv, "C");
+		decimal LegBsNoDiv(int dte, decimal iv) => OptionMath.BlackScholes(spot, strike, OptionTime.Calendar(dte / 365.0), R, iv, "C");
 
 		var longWith = LegBs(23, 0.129m);
 		var longWithout = LegBsNoDiv(23, 0.129m);

@@ -99,10 +99,10 @@ internal sealed record RealizedVolModel(double OvernightVariance, double Session
 	/// <summary>The forecast expressed as an annualized vol on the same clock as <paramref name="years"/> (the
 	/// IV back-solve's time-to-target), so it drops into the scenario grid / POP / expected move in place of IV:
 	/// σ_scenario·√years = √VarianceTo. Null when there's no time or variance left.</summary>
-	internal decimal? ScenarioVol(DateTime asOf, DateTime targetExpiry, double years)
+	internal decimal? ScenarioVol(DateTime asOf, DateTime targetExpiry, OptionTime years)
 	{
-		if (years <= 0) return null;
+		if (years.IsExpired) return null;
 		var variance = VarianceTo(asOf, targetExpiry);
-		return variance > 0 ? (decimal)Math.Sqrt(variance / years) : null;
+		return variance > 0 ? (decimal)Math.Sqrt(variance / years.VarianceYears) : null;
 	}
 }

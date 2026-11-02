@@ -767,6 +767,16 @@ internal sealed class BacktestRunner
 
 	private static DateTime MinuteEt(MinuteBar bar) => MarketTime.ToEt(bar.Timestamp).DateTime;
 
+	/// <summary>The same-day (0DTE) pricing window at a minute bar: from the book instant (bar + <see cref="QuoteStoreCache.BookLag"/>) to the
+	/// session close, floored at one minute so a deep-OTM 0DTE leg doesn't price exactly intrinsic before the actual close (the
+	/// settlement path handles the at-close cash flow). An interval, so each root measures it on its own clock.</summary>
+	private static (DateTime From, DateTime To) ZeroDteWindow(DateTimeOffset barUtc, DateTimeOffset closeUtc)
+	{
+		var close = MarketTime.ToEt(closeUtc).DateTime;
+		var book = MarketTime.ToEt(barUtc + QuoteStoreCache.BookLag).DateTime;
+		return (book < close.AddMinutes(-1) ? book : close.AddMinutes(-1), close);
+	}
+
 	/// <summary>Population at a walk minute: still open, and (for today's opens) strictly past their fill minute — live's first
 	/// management look at a fresh open is the tick AFTER the fill.</summary>
 	private Dictionary<string, OpenPosition> MinutePopulation(IEnumerable<string> pending, DateTime minuteEt, bool openedToday)
@@ -789,10 +799,9 @@ internal sealed class BacktestRunner
 		var minuteEt = MinuteEt(bar);
 		var stillOpen = MinutePopulation(held, minuteEt, openedToday);
 		if (stillOpen.Count == 0) return null;
-		var minutesToClose = Math.Max(1.0, (endUtc - (bar.Timestamp + QuoteStoreCache.BookLag)).TotalMinutes);
 		var overrides = new QuoteOverrides(
 			Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = bar.Close },
-			ZeroDteTimeYears: minutesToClose / 60.0 / 24.0 / 365.0);
+			ZeroDteWindow: ZeroDteWindow(bar.Timestamp, endUtc));
 		return await AIPipelineHelper.FetchQuotesWithHypotheticals(stillOpen, oneTicker, minuteEt, _quotes, _config, cancellation, overrides);
 	}
 
@@ -844,10 +853,9 @@ internal sealed class BacktestRunner
 
 			var nextEt = MarketTime.ToEt(nextBar.Timestamp).DateTime;
 			var nextSpot = nextBar.Close;
-			var nextMinutesToClose = Math.Max(1.0, (endUtc - (nextBar.Timestamp + QuoteStoreCache.BookLag)).TotalMinutes);
 			var nextOverrides = new QuoteOverrides(
 				Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = nextSpot },
-				ZeroDteTimeYears: nextMinutesToClose / 60.0 / 24.0 / 365.0);
+				ZeroDteWindow: ZeroDteWindow(nextBar.Timestamp, endUtc));
 			var nextQuotes = (await _quotes.GetQuotesAsync(nextEt, symbols, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker }, cancellation, nextOverrides)).Options;
 			if (nextQuotes.Count == 0) { confirmed.Add(r); continue; } // no data to confirm against — don't block on a store gap
 
@@ -1073,7 +1081,6 @@ internal sealed class BacktestRunner
 			var minuteUtc = minuteBar.Timestamp;
 			var spot = minuteBar.Close;
 			var minutesToClose = Math.Max(1.0, (endUtc - (minuteUtc + QuoteStoreCache.BookLag)).TotalMinutes);
-			var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
 
 			// Update intraday range with this minute's H/L (complete at the book instant).
 			if (minuteBar.High > dayHigh) dayHigh = minuteBar.High;
@@ -1119,7 +1126,7 @@ internal sealed class BacktestRunner
 			var minuteEt = MarketTime.ToEt(minuteUtc).DateTime;
 			var minuteOverrides = new QuoteOverrides(
 				Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot },
-				ZeroDteTimeYears: minuteZeroDteTimeYears);
+				ZeroDteWindow: ZeroDteWindow(minuteUtc, endUtc));
 			var quotes = (await _quotes.GetQuotesAsync(minuteEt, quoteSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase), new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pos.Ticker }, cancellation, minuteOverrides)).Options;
 			// Parity spot guard: LegInShort's minSpotPctITM, CompleteCondor's cushion, and the assignment-risk
 			// force-close all gate on spot-vs-strike moneyness, so they must see the spot the option book is
@@ -1243,10 +1250,9 @@ internal sealed class BacktestRunner
 				var nextBar = minuteBars[mwi + 1];
 				var nextMinuteEt = MarketTime.ToEt(nextBar.Timestamp).DateTime;
 				var nextSpot = nextBar.Close;
-				var nextMinutesToClose = Math.Max(1.0, (endUtc - (nextBar.Timestamp + QuoteStoreCache.BookLag)).TotalMinutes);
 				var nextOverrides = new QuoteOverrides(
 					Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = nextSpot },
-					ZeroDteTimeYears: nextMinutesToClose / 60.0 / 24.0 / 365.0);
+					ZeroDteWindow: ZeroDteWindow(nextBar.Timestamp, endUtc));
 				var nextQuotes = (await _quotes.GetQuotesAsync(nextMinuteEt, symbols, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pos.Ticker }, cancellation, nextOverrides)).Options;
 				var nextMark = ComputeMarkFromQuotes(pos.Legs, nextQuotes);
 				var nextSlFires = nextMark.HasValue && slTarget.HasValue && nextMark.Value <= slTarget.Value;
@@ -1312,9 +1318,9 @@ internal sealed class BacktestRunner
 
 		// Mark at the two extremes — these bracket the day's range of possible MTM values.
 		var quotesLow = await _quotes.GetIntradayQuotesAsync(
-			step, pos.Ticker, barLow, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+			step, pos.Ticker, barLow, symbols, MarketClock.BeforeClose(pos.Ticker, step, BacktestQuoteSource.IntradayHalfSessionHours), cancellation);
 		var quotesHigh = await _quotes.GetIntradayQuotesAsync(
-			step, pos.Ticker, barHigh, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+			step, pos.Ticker, barHigh, symbols, MarketClock.BeforeClose(pos.Ticker, step, BacktestQuoteSource.IntradayHalfSessionHours), cancellation);
 		var markLow = ComputeMarkFromQuotes(pos.Legs, quotesLow);
 		var markHigh = ComputeMarkFromQuotes(pos.Legs, quotesHigh);
 		if (!markLow.HasValue || !markHigh.HasValue) return;
@@ -1355,7 +1361,7 @@ internal sealed class BacktestRunner
 		var thresholdSpot = await FindSpotForMarkAsync(
 			step, pos, symbols, barLow, markLow.Value, barHigh, markHigh.Value, targetMark, cancellation);
 		var quotesAtThreshold = await _quotes.GetIntradayQuotesAsync(
-			step, pos.Ticker, thresholdSpot, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+			step, pos.Ticker, thresholdSpot, symbols, MarketClock.BeforeClose(pos.Ticker, step, BacktestQuoteSource.IntradayHalfSessionHours), cancellation);
 
 		// Reverse each leg's side to close. Fill price follows the active pricing mode (mid or cross-spread).
 		var legFills = new List<BacktestLegFill>(pos.Legs.Count);
@@ -1390,7 +1396,7 @@ internal sealed class BacktestRunner
 			cancellation.ThrowIfCancellationRequested();
 			var mid = (lo + hi) / 2m;
 			var quotes = await _quotes.GetIntradayQuotesAsync(
-				step, pos.Ticker, mid, symbols, BacktestQuoteSource.IntradayHalfSessionTimeYears, cancellation);
+				step, pos.Ticker, mid, symbols, MarketClock.BeforeClose(pos.Ticker, step, BacktestQuoteSource.IntradayHalfSessionHours), cancellation);
 			var mark = ComputeMarkFromQuotes(pos.Legs, quotes);
 			if (!mark.HasValue) break;
 
@@ -1682,17 +1688,11 @@ internal sealed class BacktestRunner
 			minuteSpots[t] = bar.Close;
 		}
 
-		// TTE for 0DTE legs: remaining minutes from the book instant (M+1:00) to 16:00 ET, in years. Floored
-		// at 1 minute so deep-OTM 0DTE doesn't price exactly intrinsic before the actual close — the
-		// existing settlement path handles the at-close cash flow.
-		var minutesToClose = Math.Max(1.0, (closeUtc - (minuteUtc + QuoteStoreCache.BookLag)).TotalMinutes);
-		var minuteZeroDteTimeYears = minutesToClose / 60.0 / 24.0 / 365.0;
-
 		// Convert the bar's UTC timestamp back to ET-naive (DateTimeKind.Unspecified) so it matches
 		// the simulator's ET-wall-clock convention.
 		var minuteEt = MarketTime.ToEt(minuteUtc).DateTime;
 
-		var minuteOverrides = new QuoteOverrides(Spots: minuteSpots, ZeroDteTimeYears: minuteZeroDteTimeYears);
+		var minuteOverrides = new QuoteOverrides(Spots: minuteSpots, ZeroDteWindow: ZeroDteWindow(minuteUtc, closeUtc));
 		var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, minuteEt, _quotes, _config, cancellation, minuteOverrides);
 		var postCtx = new EvaluationContext(minuteEt, postMgmt, postQuotes.Underlyings, postQuotes.Options, postCash, postAccount, postSignals);
 		var proposals = await openEvaluator.EvaluateAsync(postCtx, cancellation, minuteOverrides);

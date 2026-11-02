@@ -86,23 +86,34 @@ internal static class OptionMath
 	/// <summary>
 	/// Computes the Black-Scholes theoretical price for a European option.
 	/// </summary>
-	internal static decimal BlackScholes(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv, string callPut)
+	internal static decimal BlackScholes(decimal spot, decimal strike, OptionTime time, double riskFreeRate, decimal iv, string callPut)
 	{
-		if (timeYears <= 0)
+		if (time.IsExpired)
 			return Intrinsic(spot, strike, callPut);
-		return (decimal)BlackScholesValue((double)spot, (double)strike, timeYears, riskFreeRate, (double)iv, callPut == "C");
+		return (decimal)BlackScholesValue((double)spot, (double)strike, time, riskFreeRate, (double)iv, callPut == "C");
 	}
 
-	/// <summary><see cref="BlackScholes"/> in doubles, for hot loops that price many spots (timeYears &gt; 0).</summary>
-	internal static double BlackScholesValue(double s, double k, double t, double r, double sigma, bool isCall)
-		=> BlackScholesValue(s, k, isCall, BlackScholesTerms.Of(k, t, r, sigma));
+	/// <summary><see cref="BlackScholes"/> in doubles, for hot loops that price many spots (time not expired).</summary>
+	internal static double BlackScholesValue(double s, double k, OptionTime time, double r, double sigma, bool isCall)
+		=> BlackScholesValue(s, k, isCall, BlackScholesTerms.Of(k, time, r, sigma));
 
-	/// <summary>The spot-independent parts of a Black-Scholes value: (r + σ²/2)·t, σ·√t and the discounted strike.
-	/// Computed once per leg and time, they let a caller pricing one leg at many spots (the path lattice) skip the
-	/// repeated sqrt/exp with bit-identical results.</summary>
+	/// <summary>σ re-expressed on calendar time: the clock's total variance σ²·T_var written as σc²·T_cal, so every
+	/// formula here runs on the one calendar T that also carries r (discounting). Exactly σ on a calendar clock, which
+	/// keeps calendar pricing bit-identical to the single-T formulas. <paramref name="time"/> must not be expired.</summary>
+	internal static double CalendarSigma(double sigma, OptionTime time) =>
+		time.VarianceYears == time.CalendarYears ? sigma : sigma * Math.Sqrt(time.VarianceYears / time.CalendarYears);
+
+	/// <summary>The spot-independent parts of a Black-Scholes value: (r + σc²/2)·t, σc·√t and the discounted strike, on
+	/// calendar t with the clock-rescaled σc (<see cref="CalendarSigma"/>). Computed once per leg and time, they let a
+	/// caller pricing one leg at many spots (the path lattice) skip the repeated sqrt/exp with bit-identical results.</summary>
 	internal readonly record struct BlackScholesTerms(double DriftT, double SigmaSqrtT, double DiscountedStrike)
 	{
-		internal static BlackScholesTerms Of(double k, double t, double r, double sigma) => new((r + sigma * sigma / 2.0) * t, sigma * Math.Sqrt(t), k * Math.Exp(-r * t));
+		internal static BlackScholesTerms Of(double k, OptionTime time, double r, double sigma)
+		{
+			var t = time.CalendarYears;
+			var sc = CalendarSigma(sigma, time);
+			return new((r + sc * sc / 2.0) * t, sc * Math.Sqrt(t), k * Math.Exp(-r * t));
+		}
 	}
 
 	internal static double BlackScholesValue(double s, double k, bool isCall, BlackScholesTerms terms)
@@ -163,11 +174,11 @@ internal static class OptionMath
 		=> DividendAdjustedSpot(spot, dividends, evalDate, horizon, riskFreeRate) * (decimal)Math.Exp(riskFreeRate * Math.Max(0.0, years));
 
 	/// <summary>Computes the Black-Scholes delta for a European option. Returns signed delta: positive for calls, negative for puts.</summary>
-	internal static decimal Delta(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv, string callPut)
+	internal static decimal Delta(decimal spot, decimal strike, OptionTime time, double riskFreeRate, decimal iv, string callPut)
 	{
-		if (timeYears <= 0)
+		if (time.IsExpired)
 			return callPut == "C" ? (spot > strike ? 1m : 0m) : (spot < strike ? -1m : 0m);
-		double s = (double)spot, k = (double)strike, sigma = (double)iv, t = timeYears, r = riskFreeRate;
+		double s = (double)spot, k = (double)strike, sigma = CalendarSigma((double)iv, time), t = time.CalendarYears, r = riskFreeRate;
 		double d1 = (Math.Log(s / k) + (r + sigma * sigma / 2.0) * t) / (sigma * Math.Sqrt(t));
 		return callPut == "C" ? (decimal)NormalCdf(d1) : (decimal)(NormalCdf(d1) - 1.0);
 	}
@@ -175,12 +186,12 @@ internal static class OptionMath
 	/// <summary>
 	/// Computes the Black-Scholes strike corresponding to a target absolute delta in (0, 1).
 	/// </summary>
-	internal static decimal DeltaToStrike(decimal spot, double timeYears, double riskFreeRate, decimal iv, decimal delta, string callPut)
+	internal static decimal DeltaToStrike(decimal spot, OptionTime time, double riskFreeRate, decimal iv, decimal delta, string callPut)
 	{
-		if (timeYears <= 0 || spot <= 0m || iv <= 0m || delta <= 0m || delta >= 1m)
+		if (time.IsExpired || spot <= 0m || iv <= 0m || delta <= 0m || delta >= 1m)
 			return spot;
 
-		double s = (double)spot, sigma = (double)iv, t = timeYears, r = riskFreeRate;
+		double s = (double)spot, sigma = CalendarSigma((double)iv, time), t = time.CalendarYears, r = riskFreeRate;
 		double d1 = string.Equals(callPut, "C", StringComparison.OrdinalIgnoreCase)
 			? NormalInv((double)delta)
 			: NormalInv(1.0 - (double)delta);
@@ -301,8 +312,7 @@ internal static class OptionMath
 		var expirationTime = parsed.ExpiryDate.Date + MarketClose;
 		if (!iv.HasValue || evalDate >= expirationTime)
 			return Intrinsic(spot, parsed.Strike, parsed.CallPut);
-		var timeYears = (expirationTime - evalDate).TotalDays / 365.0;
-		return BlackScholes(SpotLessDividends(spot, dividendPv), parsed.Strike, timeYears, RiskFreeRate, iv.Value, parsed.CallPut);
+		return BlackScholes(SpotLessDividends(spot, dividendPv), parsed.Strike, MarketClock.Between(parsed.Root, evalDate, expirationTime), RiskFreeRate, iv.Value, parsed.CallPut);
 	}
 
 	/// <summary>
@@ -430,8 +440,8 @@ internal static class OptionMath
 		// vol — deep-ITM legs in a wide or stale (off-hours) book collapse to a near-zero IV that then
 		// craters POP / expected-move math downstream. Such legs keep the broker/vendor IV instead.
 		if (q.Bid.Value <= Intrinsic(spot, parsed.Strike, parsed.CallPut)) return null;
-		var t = (parsed.ExpiryDate.Date + MarketClose - asOf).TotalDays / 365.0;
-		if (t <= 0) return null;
+		var t = MarketClock.Between(parsed.Root, asOf, parsed.ExpiryDate.Date + MarketClose);
+		if (t.IsExpired) return null;
 		try
 		{
 			var iv = ImpliedVol(spot, parsed.Strike, t, RiskFreeRate, mid, parsed.CallPut);
@@ -633,13 +643,13 @@ internal static class OptionMath
 	/// [0.01, 5.0]. Newton-Raphson is the fast path; for deep OTM/ITM legs where Newton overshoots or
 	/// stalls (tiny vega), falls back to bisection on the monotone price→vol curve. Converges to within
 	/// $0.005 of marketPrice or returns the nearest bound when the price is outside the [0.01, 5.0] range.</summary>
-	internal static decimal ImpliedVol(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal marketPrice, string callPut)
+	internal static decimal ImpliedVol(decimal spot, decimal strike, OptionTime time, double riskFreeRate, decimal marketPrice, string callPut)
 	{
 		decimal vol = 0.3m;
 		for (var i = 0; i < 50; i++)
 		{
-			var price = BlackScholes(spot, strike, timeYears, riskFreeRate, vol, callPut);
-			var vega = Vega(spot, strike, timeYears, riskFreeRate, vol);
+			var price = BlackScholes(spot, strike, time, riskFreeRate, vol, callPut);
+			var vega = Vega(spot, strike, time, riskFreeRate, vol);
 			var diff = price - marketPrice;
 			if (Math.Abs(diff) < 0.005m) return vol;
 			// Vega is non-negative; for a deep OTM/ITM leg it's tiny-but-nonzero, where the price is
@@ -654,33 +664,34 @@ internal static class OptionMath
 
 		// Bisection fallback. The price is monotone in vol, so f(vol) = price(vol) - marketPrice has at
 		// most one sign change in [0.01, 5.0]; clamp to the bound when the market price sits outside it.
-		decimal Excess(decimal v) => BlackScholes(spot, strike, timeYears, riskFreeRate, v, callPut) - marketPrice;
+		decimal Excess(decimal v) => BlackScholes(spot, strike, time, riskFreeRate, v, callPut) - marketPrice;
 		if (Excess(0.01m) >= 0m) return 0.01m;
 		if (Excess(5m) <= 0m) return 5m;
 		return BisectBreakEven(Excess, 0.01m, 5m);
 	}
 
-	/// <summary>Vega of a European option under Black-Scholes: partial derivative of price w.r.t. vol.</summary>
-	internal static decimal Vega(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv)
+	/// <summary>Vega of a European option under Black-Scholes: partial derivative of price w.r.t. the clock's vol σ
+	/// (∂/∂σc · ∂σc/∂σ = S·φ(d1)·√T_cal · √(T_var/T_cal) = S·φ(d1)·√T_var).</summary>
+	internal static decimal Vega(decimal spot, decimal strike, OptionTime time, double riskFreeRate, decimal iv)
 	{
-		if (timeYears <= 0) return 0m;
+		if (time.IsExpired) return 0m;
 		var S = (double)spot;
 		var K = (double)strike;
-		var T = timeYears;
+		var T = time.CalendarYears;
 		var r = riskFreeRate;
-		var sigma = (double)iv;
-		if (sigma <= 0) return 0m;
+		if ((double)iv <= 0) return 0m;
+		var sigma = CalendarSigma((double)iv, time);
 		var sqrtT = Math.Sqrt(T);
 		var d1 = (Math.Log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrtT);
 		var pdf = NormalPdf(d1);
-		return (decimal)(S * pdf * sqrtT);
+		return (decimal)(S * pdf * Math.Sqrt(time.VarianceYears));
 	}
 
 	/// <summary>Gamma of a European option under Black-Scholes: second derivative of price w.r.t. spot. Same formula for calls and puts.</summary>
-	internal static decimal Gamma(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv)
+	internal static decimal Gamma(decimal spot, decimal strike, OptionTime time, double riskFreeRate, decimal iv)
 	{
-		if (timeYears <= 0 || iv <= 0m) return 0m;
-		double s = (double)spot, k = (double)strike, sigma = (double)iv, t = timeYears, r = riskFreeRate;
+		if (time.IsExpired || iv <= 0m) return 0m;
+		double s = (double)spot, k = (double)strike, sigma = CalendarSigma((double)iv, time), t = time.CalendarYears, r = riskFreeRate;
 		var sqrtT = Math.Sqrt(t);
 		var d1 = (Math.Log(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
 		var pdf = NormalPdf(d1);
@@ -697,14 +708,15 @@ internal static class OptionMath
 	/// d2 = ±1, so the biggest contributors sit off the money, not on it. That sign flip is the whole point — it is why
 	/// an IV move produces a directional hedging flow rather than a symmetric one, and why a "max |vanna| strike" is not
 	/// a price magnet the way a gamma pile is.</para></summary>
-	internal static decimal Vanna(decimal spot, decimal strike, double timeYears, double riskFreeRate, decimal iv)
+	internal static decimal Vanna(decimal spot, decimal strike, OptionTime time, double riskFreeRate, decimal iv)
 	{
-		if (timeYears <= 0 || iv <= 0m) return 0m;
-		double s = (double)spot, k = (double)strike, sigma = (double)iv, t = timeYears, r = riskFreeRate;
+		if (time.IsExpired || iv <= 0m) return 0m;
+		// ∂Δ/∂σ = −φ(d1)·d2/σc · ∂σc/∂σ = −φ(d1)·d2/σ (σc = clock σ rescaled to calendar time).
+		double s = (double)spot, k = (double)strike, sigma = CalendarSigma((double)iv, time), t = time.CalendarYears, r = riskFreeRate;
 		var sqrtT = Math.Sqrt(t);
 		var d1 = (Math.Log(s / k) + (r + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
 		var d2 = d1 - sigma * sqrtT;
 		var pdf = NormalPdf(d1);
-		return (decimal)(-pdf * d2 / sigma);
+		return (decimal)(-pdf * d2 / (double)iv);
 	}
 }

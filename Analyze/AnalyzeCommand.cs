@@ -781,8 +781,8 @@ internal static class AnalyzeCommon
 		{
 			var credit = evalTimes.Max(t =>
 			{
-				var newVal = OptionMath.BlackScholes(p, newParsed.Strike, (newExpiry.Date + OptionMath.MarketClose - t).TotalDays / 365.0, rfr, newIv.Value, newParsed.CallPut);
-				var oldVal = OptionMath.BlackScholes(p, oldParsed.Strike, (oldExpiry.Date + OptionMath.MarketClose - t).TotalDays / 365.0, rfr, oldIv.Value, oldParsed.CallPut);
+				var newVal = OptionMath.BlackScholes(p, newParsed.Strike, MarketClock.Between(newParsed.Root, t, newExpiry.Date + OptionMath.MarketClose), rfr, newIv.Value, newParsed.CallPut);
+				var oldVal = OptionMath.BlackScholes(p, oldParsed.Strike, MarketClock.Between(oldParsed.Root, t, oldExpiry.Date + OptionMath.MarketClose), rfr, oldIv.Value, oldParsed.CallPut);
 				return isLong ? oldVal - newVal : newVal - oldVal;
 			});
 			if (credit > bestCredit) { bestCredit = credit; bestPrice = Math.Round(p, 2); }
@@ -977,8 +977,8 @@ internal static class AnalyzeCommon
 		for (int pi = 0; pi < priceList.Count; pi++)
 			for (int di = 0; di < evalTimes.Count; di++)
 			{
-				var oldDte = (oldExpiry.Date + OptionMath.MarketClose - evalTimes[di]).TotalDays / 365.0;
-				var newDte = (newExpiry.Date + OptionMath.MarketClose - evalTimes[di]).TotalDays / 365.0;
+				var oldDte = MarketClock.Between(oldParsed.Root, evalTimes[di], oldExpiry.Date + OptionMath.MarketClose);
+				var newDte = MarketClock.Between(newParsed.Root, evalTimes[di], newExpiry.Date + OptionMath.MarketClose);
 				og[pi, di] = OptionMath.BlackScholes(priceList[pi], oldParsed.Strike, oldDte, rfr, oldIv, oldParsed.CallPut);
 				ng[pi, di] = OptionMath.BlackScholes(priceList[pi], newParsed.Strike, newDte, rfr, newIv, newParsed.CallPut);
 				cg[pi, di] = isLong ? og[pi, di] - ng[pi, di] : ng[pi, di] - og[pi, di];

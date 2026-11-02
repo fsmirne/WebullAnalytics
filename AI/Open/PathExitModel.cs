@@ -139,7 +139,7 @@ internal static class PathExitModel
 		var isCall = leg.Parsed.CallPut == "C";
 		var strike = (double)leg.Parsed.Strike;
 		if (at >= expiry) return new LegAtStep(sign, strike, isCall, Expired: true, 0, default);
-		var terms = OptionMath.BlackScholesTerms.Of(strike, (expiry - at).TotalDays / 365.0, OptionMath.RiskFreeRate, (double)leg.Iv);
+		var terms = OptionMath.BlackScholesTerms.Of(strike, MarketClock.Between(leg.Parsed.Root, at, expiry), OptionMath.RiskFreeRate, (double)leg.Iv);
 		return new LegAtStep(sign, strike, isCall, Expired: false, (double)OptionMath.DividendPresentValue(dividends, at, expiry, OptionMath.RiskFreeRate), terms);
 	}
 

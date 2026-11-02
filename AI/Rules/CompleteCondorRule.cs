@@ -68,8 +68,8 @@ internal sealed class CompleteCondorRule : IManagementRule
 
 		var newSide = isPutVert ? "C" : "P";
 		var expiryTime = exp.Date + OptionMath.MarketClose;
-		var timeYears = (expiryTime - ctx.Now).TotalDays / 365.0;
-		if (timeYears <= 0) return null;
+		var timeYears = MarketClock.Between(position.Ticker, ctx.Now, expiryTime);
+		if (timeYears.IsExpired) return null;
 
 		var (shortSymbol, shortQuote, shortStrike) = FindOppositeShort(position.Ticker, exp, newSide, spot, timeYears, ctx);
 		if (shortSymbol == null || shortQuote == null || shortQuote.Bid == null || shortQuote.Ask == null) return null;
@@ -111,7 +111,7 @@ internal sealed class CompleteCondorRule : IManagementRule
 	/// <summary>Scan <see cref="EvaluationContext.Quotes"/> for OTM opposite-side contracts at the target
 	/// expiry, returning the strike whose |delta| is closest to the middle of the configured band (and
 	/// inside it). OTM = strike above spot for calls, below spot for puts.</summary>
-	private (string? Symbol, OptionContractQuote? Quote, decimal Strike) FindOppositeShort(string ticker, DateTime exp, string side, decimal spot, double timeYears, EvaluationContext ctx)
+	private (string? Symbol, OptionContractQuote? Quote, decimal Strike) FindOppositeShort(string ticker, DateTime exp, string side, decimal spot, OptionTime timeYears, EvaluationContext ctx)
 	{
 		var target = (_config.ShortDeltaMin + _config.ShortDeltaMax) / 2m;
 		string? bestSymbol = null;

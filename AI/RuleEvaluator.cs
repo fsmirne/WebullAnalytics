@@ -99,9 +99,9 @@ internal sealed class RuleEvaluator
 			if (leg != null && mid.HasValue)
 			{
 				var expiryTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
-				var timeYears = (expiryTime - ctx.Now).TotalDays / 365.0;
-				if (timeYears > 0)
-					return OptionMath.ImpliedVol(spot, leg.Parsed.Strike, timeYears, OptionMath.RiskFreeRate, mid.Value, leg.Parsed.CallPut);
+				var time = MarketClock.Between(leg.Parsed.Root, ctx.Now, expiryTime);
+				if (!time.IsExpired)
+					return OptionMath.ImpliedVol(spot, leg.Parsed.Strike, time, OptionMath.RiskFreeRate, mid.Value, leg.Parsed.CallPut);
 			}
 
 			return 0.40m;

@@ -173,8 +173,8 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		// during RTH and the previous session's close off-hours/weekends — identical to the anchor that
 		// AnalyzePositionCommand/AnalyzeRiskCommand use when calling TryMarketImpliedIv, so the "cal" IV
 		// shown in scan output matches analyze output for the same frozen quote.
-		var t = (p.ExpiryDate.Date + OptionMath.MarketClose - OptionMath.ObservationInstant()).TotalDays / 365.0;
-		if (t <= 0) return q;
+		var t = MarketClock.Between(p.Root, OptionMath.ObservationInstant(), p.ExpiryDate.Date + OptionMath.MarketClose);
+		if (t.IsExpired) return q;
 		var mid = (q.Bid.Value + q.Ask.Value) / 2m;
 		if (mid <= 0m) return q;
 		// Skip deep-ITM legs whose bid doesn't cover intrinsic: the back-solved IV is noise-dominated.

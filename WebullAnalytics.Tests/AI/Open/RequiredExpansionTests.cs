@@ -1,3 +1,4 @@
+using WebullAnalytics.Pricing;
 using WebullAnalytics.AI;
 using Xunit;
 
@@ -33,7 +34,7 @@ public class RequiredExpansionTests
 		cfg.Structures.ShortVertical.WidthSteps = new List<int> { 2, 4 };
 
 		// SPXW 0DTE: spot 5500, timeYears 0.00074, iv 0.15, step 5.0
-		var expand = cfg.ComputeRequiredExpansionPct(5500m, timeYears: 0.0, iv: 0.15m, strikeStep: 5.0m, riskFreeRate: 0.043);
+		var expand = cfg.ComputeRequiredExpansionPct(5500m, timeYears: OptionTime.Zero, iv: 0.15m, strikeStep: 5.0m, riskFreeRate: 0.043);
 		// Should be floored at 5% or tightly bounded (< 10%)
 		Assert.True(expand >= 0.05m && expand <= 0.10m, $"Expected 0DTE expansion between 5% and 10%, got {expand:P1}");
 	}
@@ -47,7 +48,7 @@ public class RequiredExpansionTests
 		cfg.Structures.ShortVertical.WidthSteps = new List<int> { 2, 4, 6, 8, 10 };
 
 		// AAPL 50DTE: spot 270, timeYears 50/365, iv 0.25, step 5.0
-		var expand = cfg.ComputeRequiredExpansionPct(270m, timeYears: 50.0 / 365.0, iv: 0.25m, strikeStep: 5.0m, riskFreeRate: 0.043);
+		var expand = cfg.ComputeRequiredExpansionPct(270m, timeYears: OptionTime.Calendar(50.0 / 365.0), iv: 0.25m, strikeStep: 5.0m, riskFreeRate: 0.043);
 		// 15 delta + 10 width steps on 50DTE AAPL reaches ~25-30% OTM, with 25% margin gives ~30-40%
 		Assert.True(expand >= 0.25m && expand <= 0.50m, $"Expected 50DTE expansion between 25% and 50%, got {expand:P1}");
 	}
@@ -61,7 +62,7 @@ public class RequiredExpansionTests
 		cfg.Structures.ShortVertical.WidthSteps = new List<int> { 2, 4 };
 
 		// GME 30DTE with 80% IV: spot 25, timeYears 30/365, iv 0.80, step 1.0
-		var expand = cfg.ComputeRequiredExpansionPct(25m, timeYears: 30.0 / 365.0, iv: 0.80m, strikeStep: 1.0m, riskFreeRate: 0.043);
+		var expand = cfg.ComputeRequiredExpansionPct(25m, timeYears: OptionTime.Calendar(30.0 / 365.0), iv: 0.80m, strikeStep: 1.0m, riskFreeRate: 0.043);
 		Assert.True(expand >= 0.35m && expand <= 0.70m, $"Expected high-vol expansion between 35% and 70%, got {expand:P1}");
 	}
 }

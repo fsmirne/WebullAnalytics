@@ -257,7 +257,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		foreach (var leg in position.Legs)
 		{
 			if (leg.Side != Side.Buy || leg.CallPut == null || !leg.Expiry.HasValue) continue;
-			var remainingYears = Math.Max(0.0, (leg.Expiry.Value.Date - shortExpiry).TotalDays / 365.0);
+			var remainingYears = MarketClock.CloseToClose(position.Ticker, shortExpiry, leg.Expiry.Value);
 			var iv = ctx.Quotes.TryGetValue(leg.Symbol, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m
 				? q.ImpliedVolatility.Value : ivDefault;
 			longValue += OptionMath.BlackScholes(spot, leg.Strike, remainingYears, OptionMath.RiskFreeRate, iv, leg.CallPut);
@@ -275,7 +275,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		foreach (var leg in legs)
 		{
 			if (leg.CallPut == null || !leg.Expiry.HasValue) continue;
-			var years = Math.Max(0.0, (leg.Expiry.Value.Date - asOf.Date).TotalDays / 365.0);
+			var years = MarketClock.CloseToClose(ParsingHelpers.UnderlyingRoot(leg.Symbol), asOf, leg.Expiry.Value);
 			var iv = quotes.TryGetValue(leg.Symbol, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m
 				? q.ImpliedVolatility.Value : ivDefault;
 			var delta = OptionMath.Delta(spot, leg.Strike, years, OptionMath.RiskFreeRate, iv, leg.CallPut);
@@ -295,7 +295,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 			var oldLeg = legs.FirstOrDefault(l => l.Symbol == oldShortSymbol);
 			if (oldLeg != null && oldLeg.CallPut != null && oldLeg.Expiry.HasValue)
 			{
-				var years = Math.Max(0.0, (oldLeg.Expiry.Value.Date - asOf.Date).TotalDays / 365.0);
+				var years = MarketClock.CloseToClose(ParsingHelpers.UnderlyingRoot(oldLeg.Symbol), asOf, oldLeg.Expiry.Value);
 				var iv = quotes.TryGetValue(oldShortSymbol, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m
 					? q.ImpliedVolatility.Value : ivDefault;
 				netDelta += OptionMath.Delta(spot, oldLeg.Strike, years, OptionMath.RiskFreeRate, iv, oldLeg.CallPut); // undo -delta
@@ -303,7 +303,7 @@ internal sealed class OpportunisticRollRule : IManagementRule
 		}
 
 		// Add new short's contribution (-delta).
-		var newYears = Math.Max(0.0, (newShort.ExpiryDate.Date - asOf.Date).TotalDays / 365.0);
+		var newYears = MarketClock.CloseToClose(newShort.Root, asOf, newShort.ExpiryDate);
 		// IV for new short: live quote → old short's IV proxy → default
 		decimal newIv;
 		if (quotes.TryGetValue(newShortSymbol, out var newQ) && newQ.ImpliedVolatility.HasValue && newQ.ImpliedVolatility.Value > 0m)

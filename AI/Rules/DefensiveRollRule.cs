@@ -144,8 +144,8 @@ internal sealed class DefensiveRollRule : IManagementRule
 
 			var sign = leg.Side == Side.Buy ? 1m : -1m;
 			var weight = leg.Qty / qtyRef;
-			var remainingYears = (leg.Expiry.Value.Date + OptionMath.MarketClose - shortExpiry).TotalDays / 365.0;
-			var value = remainingYears > 0
+			var remainingYears = MarketClock.Between(position.Ticker, shortExpiry, leg.Expiry.Value.Date + OptionMath.MarketClose);
+			var value = !remainingYears.IsExpired
 				? OptionMath.BlackScholes(underlyingPrice, leg.Strike, remainingYears, OptionMath.RiskFreeRate, ResolveIv(leg, underlyingPrice, ctx, shortExpiry), leg.CallPut)
 				: OptionMath.Intrinsic(underlyingPrice, leg.Strike, leg.CallPut);
 			netValuePerShare += sign * weight * value;
@@ -163,8 +163,8 @@ internal sealed class DefensiveRollRule : IManagementRule
 		{
 			var mid = (bid + ask) / 2m;
 			var expiryTime = leg.Expiry.Value.Date + OptionMath.MarketClose;
-			var timeYears = (expiryTime - valuationTime).TotalDays / 365.0;
-			if (timeYears > 0)
+			var timeYears = MarketClock.Between(ParsingHelpers.UnderlyingRoot(leg.Symbol), valuationTime, expiryTime);
+			if (!timeYears.IsExpired)
 				return OptionMath.ImpliedVol(spot, leg.Strike, timeYears, OptionMath.RiskFreeRate, mid, leg.CallPut!);
 		}
 

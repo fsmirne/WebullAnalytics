@@ -21,7 +21,7 @@ internal sealed record InitChain(decimal? Spot, decimal StrikeStep, IReadOnlyLis
 /// <item>DTE window — a per-structure horizon, widened to the nearest listed expiry when none falls inside it.</item>
 /// <item>Widths — a step count means wildly different things per ticker (2 steps = 0.3% of spot on SPY, 3.8% on
 /// PBR), so widths are set as fractions of the 1σ expected move at the window's reference expiry
-/// (spot × ATM IV × √(DTE/365)) and converted to strike steps.</item>
+/// (spot × ATM IV × √T on the ticker's market clock) and converted to strike steps.</item>
 /// <item>Iron/long condor body — <c>bodyWidthSteps</c> is a filter on the distance between the two delta-band
 /// shorts, so it is read off the chain: the ladder-step distances the band actually produces, ±1 step.</item>
 /// </list>
@@ -124,7 +124,7 @@ internal static class AIConfigInitStructures
 		foreach (var exp in chain.Expiries.Where(e => (e - today).Days >= dteMin && (e - today).Days <= dteMax).OrderBy(e => Math.Abs((e - today).Days - mid)))
 		{
 			if (AtmIv(chain, exp, spot) is not { } iv) continue;
-			var sigma = spot * iv * (decimal)Math.Sqrt((exp - today).Days / 365.0);
+			var sigma = spot * iv * (decimal)Math.Sqrt(MarketClock.CloseToClose(chain.Contracts[0].P.Root, today, exp).VarianceYears);
 			return (sigma, exp, iv);
 		}
 		return null;
@@ -149,8 +149,9 @@ internal static class AIConfigInitStructures
 		{
 			var legs = chain.Contracts.Where(c => MarketCalendar.PreviousOpenOnOrBefore(c.P.ExpiryDate) == exp).ToList();
 			var ladder = legs.Select(c => c.P.Strike).Distinct().OrderBy(k => k).ToList();
-			var years = (exp.Date + OptionMath.MarketClose - anchor).TotalDays / 365.0;
-			if (years <= 0) continue;
+			if (legs.Count == 0) continue;
+			var years = MarketClock.Between(legs[0].P.Root, anchor, exp.Date + OptionMath.MarketClose);
+			if (years.IsExpired) continue;
 			var inBand = legs
 				.Where(c => c.Q.ImpliedVolatility is > 0m && (c.P.CallPut == "P" ? c.P.Strike < spot : c.P.Strike > spot))
 				.Where(c => Math.Abs(OptionMath.Delta(spot, c.P.Strike, years, OptionMath.RiskFreeRate, c.Q.ImpliedVolatility!.Value, c.P.CallPut)) is var d && d >= deltaMin && d <= deltaMax)

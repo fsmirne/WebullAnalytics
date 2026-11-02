@@ -14,7 +14,7 @@ public class PathExitModelTests
 	{
 		var target = Call.ExpiryDate.Date + OptionMath.MarketClose;
 		var years = (target - AsOf).TotalDays / 365.0;
-		var premium = OptionMath.BlackScholes(Spot, Call.Strike, years, OptionMath.RiskFreeRate, Iv, "C") * 100m;
+		var premium = OptionMath.BlackScholes(Spot, Call.Strike, OptionTime.Calendar(years), OptionMath.RiskFreeRate, Iv, "C") * 100m;
 		var sigmaTotal = (double)Iv * Math.Sqrt(years);
 		var forward = Spot * (decimal)Math.Exp(OptionMath.RiskFreeRate * years);
 		var center = CandidateScorer.ScenarioCenter(forward, sigmaTotal, 0);
@@ -45,7 +45,7 @@ public class PathExitModelTests
 		var (pathEv, premium) = LongCallEv(takeProfit: null, stopLoss: 300m);
 		var target = Call.ExpiryDate.Date + OptionMath.MarketClose;
 		var years = (target - AsOf).TotalDays / 365.0;
-		var grid = CandidateScorer.BuildScenarioGrid(Spot * (decimal)Math.Exp(OptionMath.RiskFreeRate * years), Iv, years);
+		var grid = CandidateScorer.BuildScenarioGrid(Spot * (decimal)Math.Exp(OptionMath.RiskFreeRate * years), Iv, OptionTime.Calendar(years));
 		var flooredEv = grid.Sum(p => p.Weight * Math.Max(Math.Max(0m, p.SpotAtExpiry - Call.Strike) * 100m - premium, -300m));
 		Assert.True(pathEv < flooredEv - 50m, $"path EV {pathEv:F2} should sit well below the terminal-floor EV {flooredEv:F2}");
 	}

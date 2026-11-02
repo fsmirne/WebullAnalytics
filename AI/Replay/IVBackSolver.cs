@@ -28,14 +28,13 @@ internal sealed class IVBackSolver
 		var anchor = list.OrderBy(f => Math.Abs((f.ts - asOf).TotalSeconds)).First();
 		if (Math.Abs((anchor.ts - asOf).TotalDays) > 30) return null;
 
-		var dte = Math.Max(1, (expiry.Date - anchor.ts.Date).Days);
-		var timeYears = dte / 365.0;
+		var time = MarketClock.CloseToClose(ParsingHelpers.UnderlyingRoot(symbol), anchor.ts, expiry, minDays: 1);
 		var riskFreeRate = OptionMath.RiskFreeRate;
 
 		return OptionMath.ImpliedVol(
 			spot: anchor.underlying,
 			strike: strike,
-			timeYears: timeYears,
+			time: time,
 			riskFreeRate: riskFreeRate,
 			marketPrice: anchor.price,
 			callPut: callPut

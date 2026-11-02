@@ -53,7 +53,7 @@ internal static class ProfitProjector
 				var netValuePerShare = 0m;
 				foreach (var (leg, parsed, iv) in legData)
 				{
-					var years = Math.Max(0.0, (parsed.ExpiryDate.Date - date).TotalDays / 365.0);
+					var years = MarketClock.CloseToClose(parsed.Root, date, parsed.ExpiryDate);
 					var legValue = OptionMath.BlackScholes(price, parsed.Strike, years, RiskFreeRate, iv, parsed.CallPut);
 					netValuePerShare += leg.Side == Side.Buy ? legValue : -legValue;
 				}

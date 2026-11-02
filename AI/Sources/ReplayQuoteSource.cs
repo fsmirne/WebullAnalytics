@@ -51,9 +51,8 @@ internal sealed class ReplayQuoteSource : IQuoteSource
 			decimal price;
 			if (iv.HasValue)
 			{
-				var dte = Math.Max(1, (parsed.ExpiryDate.Date - asOf.Date).Days);
-				var timeYears = dte / 365.0;
-				price = OptionMath.BlackScholes(S, parsed.Strike, timeYears, _riskFreeRate, iv.Value, parsed.CallPut);
+				var time = MarketClock.CloseToClose(parsed.Root, asOf, parsed.ExpiryDate, minDays: 1);
+				price = OptionMath.BlackScholes(S, parsed.Strike, time, _riskFreeRate, iv.Value, parsed.CallPut);
 			}
 			else
 			{

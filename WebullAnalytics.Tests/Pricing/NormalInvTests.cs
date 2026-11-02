@@ -28,7 +28,7 @@ public class NormalInvTests
 	public void DeltaToStrike_ConsistentWithDelta()
 	{
 		const decimal spot = 100m;
-		const double timeYears = 0.25;
+		var timeYears = OptionTime.Calendar(0.25);
 		const double r = 0.04;
 		const decimal iv = 0.20m;
 		const decimal targetDelta = 0.20m;

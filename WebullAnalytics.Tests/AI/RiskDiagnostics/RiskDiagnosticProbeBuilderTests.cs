@@ -76,7 +76,7 @@ public class RiskDiagnosticProbeBuilderTests
 		cfg.Structures.ShortVertical.ShortDeltaMin = 0.15m;
 		cfg.Structures.ShortVertical.ShortDeltaMax = 0.35m;
 
-		var t = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, expiry);
+		var t = OpenerExpiryHelpers.TimeToExpiry("GME", asOf, expiry);
 		var defaultIvDelta = Math.Abs(OptionMath.Delta(spot, 25.5m, t, OptionMath.RiskFreeRate, 0.40m, "C"));
 		var liveIvDelta = Math.Abs(OptionMath.Delta(spot, 25.5m, t, OptionMath.RiskFreeRate, 0.80m, "C"));
 		Assert.InRange(defaultIvDelta, 0.15m, 0.35m);
@@ -127,7 +127,7 @@ public class RiskDiagnosticProbeBuilderTests
 		cfg.Structures.ShortVertical.ShortDeltaMin = 0.15m;
 		cfg.Structures.ShortVertical.ShortDeltaMax = 0.35m;
 
-		var t = OpenerExpiryHelpers.TimeYearsToExpiry(asOf, expiry);
+		var t = OpenerExpiryHelpers.TimeToExpiry("GME", asOf, expiry);
 		var defaultIvDelta = Math.Abs(OptionMath.Delta(spot, 25.5m, t, OptionMath.RiskFreeRate, 0.40m, "C"));
 
 		var probe = RiskDiagnosticProbeBuilder.Build(

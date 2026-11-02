@@ -132,7 +132,7 @@ internal static class GexSqueezeScreener
 
 	/// <summary>Delta-weighted call share of day volume: (Σcall vol·|Δ| − Σput vol·|Δ|) / (sum of both). Null with no volume.</summary>
 	public static decimal? FlowShare(IEnumerable<GexContributor> contributors, decimal spot) =>
-		Share(contributors.Select(c => (c.IsCall, c.Volume * Math.Abs(OptionMath.Delta(spot, c.Strike, c.TimeYears, OptionMath.RiskFreeRate, c.Iv, c.IsCall ? "C" : "P")))));
+		Share(contributors.Select(c => (c.IsCall, c.Volume * Math.Abs(OptionMath.Delta(spot, c.Strike, c.Time, OptionMath.RiskFreeRate, c.Iv, c.IsCall ? "C" : "P")))));
 
 	/// <summary>Delta-weighted call share of the open-interest CHANGE since a prior snapshot, signed: (Σcall ΔOI·|Δ| − Σput ΔOI·|Δ|) /
 	/// Σ|ΔOI|·|Δ|, with |Δ| taken from the PRIOR snapshot (<see cref="PriorContract.AbsDelta"/>). OI is fixed for the session, so the

@@ -122,6 +122,9 @@ public static partial class ParsingHelpers
 	/// <summary>
 	/// Returns "Call" or "Put" for the given OCC call/put code ("C" or "P").
 	/// </summary>
+	/// <summary>The underlying root of an OCC option symbol, or the symbol itself when it isn't one (a stock/ETF ticker).</summary>
+	public static string UnderlyingRoot(string symbol) => ParseOptionSymbol(symbol)?.Root ?? symbol;
+
 	public static string CallPutDisplayName(string callPut) => callPut == "C" ? "Call" : "Put";
 
 	private static readonly string[] IndexRootPair = ["SPX", "SPXW"];

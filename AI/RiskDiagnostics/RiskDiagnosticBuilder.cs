@@ -60,8 +60,8 @@ internal static class RiskDiagnosticBuilder
 			// would price a 0DTE option as if it had a full day left, inflating extrinsic dramatically
 			// (e.g., theoretical $30 vs market $0.13 on a 0DTE OTM SPX put at end of day).
 			var expirationTime = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
-			var t = Math.Max(0.0, (expirationTime - asOf).TotalDays / 365.0);
-			var tTomorrow = Math.Max(0.0, (expirationTime - asOf.AddDays(1)).TotalDays / 365.0);
+			var t = MarketClock.Between(leg.Parsed.Root, asOf, expirationTime);
+			var tTomorrow = MarketClock.Between(leg.Parsed.Root, asOf.AddDays(1), expirationTime);
 			// Ex-dividend-adjusted spot per eval date: a leg trading through an ex-date prices on the
 			// lowered forward. Recomputed for tomorrow so theta captures the real ex-date price drop when
 			// the dividend goes ex between today and tomorrow.
@@ -148,7 +148,7 @@ internal static class RiskDiagnosticBuilder
 				if (leg.Parsed.ExpiryDate.Date <= earliestShortExpiry) continue; // expired with (or before) the short
 				var iv = ivResolver(leg.Symbol);
 				var legExpiryInstant = leg.Parsed.ExpiryDate.Date + OptionMath.MarketClose;
-				var tPost = Math.Max(0.0, (legExpiryInstant - shortExpiryInstant).TotalDays / 365.0);
+				var tPost = MarketClock.Between(leg.Parsed.Root, shortExpiryInstant, legExpiryInstant);
 				var spotPost = OptionMath.DividendAdjustedSpot(spot, dividends, shortExpiryInstant, legExpiryInstant, OptionMath.RiskFreeRate);
 				var delta = OptionMath.Delta(spotPost, leg.Parsed.Strike, tPost, OptionMath.RiskFreeRate, iv, leg.Parsed.CallPut);
 				residualSum += (leg.IsLong ? 1m : -1m) * leg.Qty * delta;
