@@ -63,11 +63,32 @@ internal static class MarketClock
 	/// else the calendar clock.</summary>
 	internal static ClockWeights WeightsFor(string root, DateTime at) => FittedWeights(root, at) ?? ClockWeights.Calendar;
 
-	/// <summary>The newest fit's weights before day <paramref name="at"/>, or null when <paramref name="root"/> has none.</summary>
-	private static ClockWeights? FittedWeights(string root, DateTime at) => Resolved.GetOrAdd((root, DateOnly.FromDateTime(at)), static key => Resolve(key.Root, key.Day.ToDateTime(TimeOnly.MinValue)));
+	/// <summary>The newest fit's weights before day <paramref name="at"/>, or null when <paramref name="root"/> has none. Each thread
+	/// remembers its last answer: a pricing loop asks for the same root and day millions of times, and the shared map costs a string hash each time.</summary>
+	private static ClockWeights? FittedWeights(string root, DateTime at)
+	{
+		var day = DateOnly.FromDateTime(at);
+		var generation = Volatile.Read(ref _generation);
+		var last = _lastResolved;
+		if (last != null && last.Generation == generation && last.Day == day && ReferenceEquals(last.Root, root)) return last.Weights;
+		var weights = Resolved.GetOrAdd((root, day), static key => Resolve(key.Root, key.Day.ToDateTime(TimeOnly.MinValue)));
+		_lastResolved = new LastResolved(root, day, weights, generation);
+		return weights;
+	}
+
+	private sealed record LastResolved(string Root, DateOnly Day, ClockWeights? Weights, int Generation);
+
+	[ThreadStatic] private static LastResolved? _lastResolved;
+
+	/// <summary>Bumped by <see cref="ResetResolved"/> so every thread's remembered answer goes stale with the shared map.</summary>
+	private static int _generation;
 
 	/// <summary>Forgets resolved weights — after a refit in-process, or when a test swaps <see cref="FitLookup"/>.</summary>
-	internal static void ResetResolved() => Resolved.Clear();
+	internal static void ResetResolved()
+	{
+		Resolved.Clear();
+		Interlocked.Increment(ref _generation);
+	}
 
 	private static ClockWeights? Resolve(string root, DateTime at)
 	{
@@ -93,8 +114,8 @@ internal static class MarketClock
 		if (to <= from) return OptionTime.Zero;
 		var day = KnowledgeDay;
 		if (FittedWeights(root, day) is { } fitted) return Between(fitted, from, to);
-		var mix = HourMixOf(from, to);
-		if (mix.Overnight + mix.Closed > 0)
+		// Warned is checked first: the message would otherwise be formatted on every call of a hot loop for a root that has no fit.
+		if (!Warned.ContainsKey(root) && HourMixOf(from, to) is var mix && mix.Overnight + mix.Closed > 0)
 			WarnOnce(root, $"no trading-time clock fit for {Clock.ClockFits.ClockRoot(root)} before {day:yyyy-MM-dd}: pricing across nights/weekends on the calendar clock (run `wa data clock {Clock.ClockFits.ClockRoot(root)}`)");
 		return Between(ClockWeights.Calendar, from, to);
 	}
@@ -139,41 +160,46 @@ internal static class MarketClock
 	/// weights off one split.</summary>
 	internal static HourMix HourMixOf(DateTime from, DateTime to) => to <= from ? default : Cumulative(to) - Cumulative(from);
 
-	/// <summary>First day of the prefix-sum table; instants before it fall back to a day walk from it (none occur in practice).</summary>
+	/// <summary>First day of the day table; instants outside it are an error (it spans 2000–2049).</summary>
 	private static readonly DateTime TableStart = new(2000, 1, 1);
 	private const int TableDays = 50 * 366;
 
-	/// <summary>Cumulative hours of each kind from <see cref="TableStart"/> to each table day's midnight, so any interval's split is two
-	/// lookups instead of a walk over its days — the pricing hot loops (the scorer, the backtest) measure millions of intervals per run.</summary>
-	private static readonly Lazy<HourMix[]> MidnightTotals = new(() =>
+	/// <summary>Per calendar day from <see cref="TableStart"/>: cumulative hours of each kind up to its midnight, and its close in hours after
+	/// midnight (0 = closed all day). Any interval's split is then two array reads and some arithmetic — no calendar lookups — since the
+	/// pricing hot loops (the scorer, the backtest) measure millions of intervals per run.</summary>
+	private sealed record DayTable(HourMix[] MidnightTotals, double[] CloseHours);
+
+	private static readonly Lazy<DayTable> Days = new(() =>
 	{
 		var totals = new HourMix[TableDays + 1];
+		var closeHours = new double[TableDays];
 		for (var i = 0; i < TableDays; i++)
-			totals[i + 1] = totals[i] + DayMix(TableStart.AddDays(i), TableStart.AddDays(i), TableStart.AddDays(i + 1));
-		return totals;
+		{
+			var day = TableStart.AddDays(i);
+			closeHours[i] = MarketCalendar.IsOpen(day) ? MarketCalendar.CloseTimeEt(day).TotalHours : 0.0;
+			totals[i + 1] = totals[i] + IntradayMix(closeHours[i], 24.0);
+		}
+		return new DayTable(totals, closeHours);
 	});
+
+	private static readonly double OpenHours = OptionMath.MarketOpen.TotalHours;
 
 	/// <summary>Hours of each kind from <see cref="TableStart"/> to <paramref name="t"/>.</summary>
 	private static HourMix Cumulative(DateTime t)
 	{
-		var index = (int)(t.Date - TableStart).TotalDays;
+		var index = (int)((t.Ticks - TableStart.Ticks) / TimeSpan.TicksPerDay);
 		if (index < 0 || index >= TableDays) throw new ArgumentOutOfRangeException(nameof(t), t, $"market clock covers {TableStart:yyyy-MM-dd} to {TableStart.AddDays(TableDays):yyyy-MM-dd}");
-		return MidnightTotals.Value[index] + DayMix(t.Date, t.Date, t);
+		var days = Days.Value;
+		return days.MidnightTotals[index] + IntradayMix(days.CloseHours[index], t.TimeOfDay.TotalHours);
 	}
 
-	/// <summary>The split of [<paramref name="start"/>, <paramref name="end"/>) within calendar day <paramref name="day"/>: session hours run
-	/// 09:30 to the day's close (13:00 on half-days); the rest of a trading day is overnight; a weekend/holiday is all closed.</summary>
-	private static HourMix DayMix(DateTime day, DateTime start, DateTime end)
+	/// <summary>The split of a day's first <paramref name="hours"/> hours: session runs 09:30 to <paramref name="closeHours"/> (13:00 on
+	/// half-days); the rest of a trading day is overnight; a closed day (<paramref name="closeHours"/> = 0) is all closed.</summary>
+	private static HourMix IntradayMix(double closeHours, double hours)
 	{
-		if (end <= start) return default;
-		var span = (end - start).TotalHours;
-		if (!MarketCalendar.IsOpen(day)) return new HourMix(0.0, 0.0, span);
-		var open = day + OptionMath.MarketOpen;
-		var close = day + MarketCalendar.CloseTimeEt(day);
-		var sessionStart = start > open ? start : open;
-		var sessionEnd = end < close ? end : close;
-		var inSession = sessionEnd > sessionStart ? (sessionEnd - sessionStart).TotalHours : 0.0;
-		return new HourMix(inSession, span - inSession, 0.0);
+		if (closeHours == 0.0) return new HourMix(0.0, 0.0, hours);
+		var inSession = Math.Clamp(hours, OpenHours, closeHours) - OpenHours;
+		return new HourMix(inSession, hours - inSession, 0.0);
 	}
 }
 
