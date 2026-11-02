@@ -48,9 +48,8 @@ public class ManagementAutoExecutorTests
 
 	private static EvaluationContext CtxAtEt(int hour, int minute, OpenPosition p)
 	{
-		var et = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 		var localDt = new DateTime(2026, 5, 1, hour, minute, 0, DateTimeKind.Unspecified);
-		var utc = TimeZoneInfo.ConvertTimeToUtc(localDt, et);
+		var utc = MarketTime.EtToUtc(localDt);
 		return new EvaluationContext(
 			Now: utc.ToLocalTime(),
 			OpenPositions: new Dictionary<string, OpenPosition> { [p.Key] = p },
@@ -146,9 +145,8 @@ public class ManagementAutoExecutorTests
 		Assert.Equal(0, await exec.HandleAsync(Results(CloseProposal(pos, emergency: true)), CtxAtEt(11, 5, pos), CancellationToken.None));
 
 		// Next-day tick: build a context one day later in ET.
-		var et = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 		var nextDayLocal = new DateTime(2026, 5, 2, 11, 0, 0, DateTimeKind.Unspecified);
-		var nextDayUtc = TimeZoneInfo.ConvertTimeToUtc(nextDayLocal, et);
+		var nextDayUtc = MarketTime.EtToUtc(nextDayLocal);
 		var nextDayCtx = new EvaluationContext(
 			Now: nextDayUtc.ToLocalTime(),
 			OpenPositions: new Dictionary<string, OpenPosition> { [pos.Key] = pos },

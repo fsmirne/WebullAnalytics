@@ -16,7 +16,6 @@ namespace WebullAnalytics.AI.Sources;
 /// created; the resulting bars land in <c>data/intraday/SPXW/</c> alongside RTH SPX data.</summary>
 internal static class WebullIntradayBars
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	// SPX family — tickers whose underlying is the S&P 500 cash index (or a fixed fraction of it),
 	// which Webull serves with no extended-hours coverage. These transparently merge SPY pre/post-
@@ -139,8 +138,8 @@ internal static class WebullIntradayBars
 		// runs to 20:00 ET. The pagination anchor is end-side; we walk backward to the start-side.
 		var startEt = new DateTime(startNyDate.Year, startNyDate.Month, startNyDate.Day, 4, 0, 0, DateTimeKind.Unspecified);
 		var endEt = new DateTime(endNyDate.Year, endNyDate.Month, endNyDate.Day, 20, 0, 0, DateTimeKind.Unspecified);
-		var startUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(startEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
-		var endUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+		var startUnix = MarketTime.EtToInstant(startEt).ToUnixTimeSeconds();
+		var endUnix = MarketTime.EtToInstant(endEt).ToUnixTimeSeconds();
 
 		IReadOnlyList<MinuteBar> primaryBars;
 		IReadOnlyList<MinuteBar> spyBars = Array.Empty<MinuteBar>();
@@ -214,7 +213,7 @@ internal static class WebullIntradayBars
 		var byDate = new Dictionary<DateTime, List<MinuteBar>>();
 		foreach (var b in bars)
 		{
-			var d = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).Date;
+			var d = MarketTime.ToEt(b.Timestamp).Date;
 			if (!byDate.TryGetValue(d, out var list)) byDate[d] = list = new List<MinuteBar>();
 			list.Add(b);
 		}

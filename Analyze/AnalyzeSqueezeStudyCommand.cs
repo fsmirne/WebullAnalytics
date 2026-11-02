@@ -228,14 +228,13 @@ internal sealed class AnalyzeSqueezeStudyCommand : AsyncCommand<AnalyzeSqueezeSt
 		var bars = new SortedDictionary<TimeSpan, Bar>();
 		var path = Program.ResolvePath($"data/intraday/{ticker}/{date:yyyy-MM-dd}.csv");
 		if (!File.Exists(path)) return bars;
-		var ny = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 		foreach (var line in File.ReadLines(path).Skip(1))
 		{
 			var f = line.Split(',');
 			if (f.Length < 5 || !DateTimeOffset.TryParse(f[0], CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var utc)) continue;
 			decimal? N(string s) => decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : null;
 			if (N(f[1]) is not { } o || N(f[2]) is not { } h || N(f[3]) is not { } l || N(f[4]) is not { } c) continue;
-			var tod = TimeZoneInfo.ConvertTimeFromUtc(utc.UtcDateTime, ny).TimeOfDay;
+			var tod = MarketTime.ToEt(utc).TimeOfDay;
 			if (tod >= AnalyzeGexSettings.RthOpen && tod < AnalyzeGexSettings.RthClose) bars[tod] = new Bar(o, h, l, c);
 		}
 		return bars;

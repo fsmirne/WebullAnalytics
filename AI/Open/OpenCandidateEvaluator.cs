@@ -18,7 +18,6 @@ namespace WebullAnalytics.AI;
 /// </summary>
 internal sealed class OpenCandidateEvaluator
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	private readonly AIConfig _config;
 	private readonly IQuoteSource _quotes;
@@ -583,7 +582,7 @@ internal sealed class OpenCandidateEvaluator
 			// without needing to instrument the scorer.
 			if (debug)
 			{
-				var asOfEt = TimeZoneInfo.ConvertTime(ctx.Now, NyTz);
+				var asOfEt = MarketTime.ToEt(ctx.Now);
 				foreach (var kv in scoredByStructure.OrderBy(k => k.Key.ToString()))
 				{
 					var scores = kv.Value.Select(p => p.FinalScore ?? 0m).ToList();
@@ -1155,7 +1154,7 @@ internal sealed class OpenCandidateEvaluator
 				var interval = ParseBarInterval(tapeCfg.BarIntervalCode);
 				var asOfUtc = asOf.Kind == DateTimeKind.Utc
 					? new DateTimeOffset(asOf, TimeSpan.Zero)
-					: new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(asOf, DateTimeKind.Unspecified), NyTz), TimeSpan.Zero);
+					: MarketTime.EtToInstant(asOf);
 				// Live: include boundary bar (partial current minute). Backtest: exclude (look-ahead guard).
 				var toUtc = includeCurrentBar ? asOfUtc : asOfUtc.AddTicks(-1);
 				var fromUtc = toUtc.AddMinutes(-Math.Max(60, tapeCfg.LookbackMinutes));
@@ -1185,12 +1184,12 @@ internal sealed class OpenCandidateEvaluator
 				{
 					DateTimeKind.Utc => new DateTimeOffset(asOf, TimeSpan.Zero),
 					DateTimeKind.Local => new DateTimeOffset(asOf.ToUniversalTime(), TimeSpan.Zero),
-					_ => new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(asOf, DateTimeKind.Unspecified), NyTz), TimeSpan.Zero)
+					_ => MarketTime.EtToInstant(asOf)
 				};
 				var toUtc = includeCurrentBar ? asOfUtc : asOfUtc.AddTicks(-1);
-				var nowEt = TimeZoneInfo.ConvertTime(asOfUtc, NyTz);
+				var nowEt = MarketTime.ToEt(asOfUtc);
 				var openEtUnspecified = new DateTime(nowEt.Year, nowEt.Month, nowEt.Day, 9, 30, 0, DateTimeKind.Unspecified);
-				var fromUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(openEtUnspecified, NyTz), TimeSpan.Zero);
+				var fromUtc = MarketTime.EtToInstant(openEtUnspecified);
 				if (fromUtc <= toUtc)
 				{
 					var raw = await intradayCache.GetBarsAsync(ticker, fromUtc, toUtc, BarInterval.M1, includeExtended: false, cancellation);
@@ -1213,7 +1212,7 @@ internal sealed class OpenCandidateEvaluator
 	/// compares against. The three callers hand this three different kinds and they must not be conflated:
 	/// <list type="bullet">
 	///   <item><description><b>Unspecified</b> — the backtest's per-minute <c>minuteEt</c>, already ET by
-	///     construction (<c>DateTime.SpecifyKind(ConvertTimeFromUtc(..., NyTz), Unspecified)</c>). Pass through.</description></item>
+	///     construction (<c>DateTime.SpecifyKind(ConvertTimeFromUtc(..., MarketTime.Zone), Unspecified)</c>). Pass through.</description></item>
 	///   <item><description><b>Local</b> — live <c>DateTime.Now</c> from <c>wa ai watch</c>/<c>scan</c>. On a
 	///     machine that is not set to New York this is NOT ET, so it must be converted. Treating it as ET
 	///     would shift every entry-window boundary by the machine's UTC offset — a European clock would open
@@ -1222,8 +1221,8 @@ internal sealed class OpenCandidateEvaluator
 	/// </list></summary>
 	internal static DateTime ToEasternWallClock(DateTime instant) => instant.Kind switch
 	{
-		DateTimeKind.Utc => DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(instant, NyTz), DateTimeKind.Unspecified),
-		DateTimeKind.Local => DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(instant, NyTz), DateTimeKind.Unspecified),
+		DateTimeKind.Utc => DateTime.SpecifyKind(MarketTime.UtcToEt(instant), DateTimeKind.Unspecified),
+		DateTimeKind.Local => DateTime.SpecifyKind(MarketTime.ToEt(instant), DateTimeKind.Unspecified),
 		_ => instant
 	};
 
@@ -1232,7 +1231,7 @@ internal sealed class OpenCandidateEvaluator
 
 	private static bool IsRegularSessionEt(DateTimeOffset ts)
 	{
-		var tod = TimeZoneInfo.ConvertTime(ts, NyTz).TimeOfDay;
+		var tod = MarketTime.ToEt(ts).TimeOfDay;
 		return tod >= RegularSessionStartEt && tod < RegularSessionEndEt;
 	}
 

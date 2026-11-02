@@ -8,13 +8,12 @@ namespace WebullAnalytics.Tests.Core;
 /// weekends, full holidays, and early-close half-days (so the guard doesn't cry wolf off-hours).</summary>
 public class MarketCalendarTests
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	// Build a DateTimeOffset at a given ET wall-clock time, using the correct EST/EDT offset for that date.
 	private static DateTimeOffset Et(int y, int mo, int d, int h, int mi)
 	{
 		var local = new DateTime(y, mo, d, h, mi, 0);
-		return new DateTimeOffset(local, NyTz.GetUtcOffset(local));
+		return new DateTimeOffset(local, MarketTime.Zone.GetUtcOffset(local));
 	}
 
 	[Theory]

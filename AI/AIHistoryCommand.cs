@@ -79,7 +79,6 @@ internal sealed class AIHistorySettings : CommandSettings
 
 internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	private static readonly HashSet<string> VixDrivenTickers = new(StringComparer.OrdinalIgnoreCase)
 	{
@@ -214,7 +213,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		// simply isn't a session. Mirror HistoricalBarCache.ClampToSettled: a day's bar publishes
 		// ~17:00 ET, so before then the latest settled session is the prior trading day; walk back
 		// over weekends/holidays either way.
-		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(asOf.Kind == DateTimeKind.Utc ? asOf : asOf.ToUniversalTime(), NyTz);
+		var nowNy = MarketTime.UtcToEt(asOf.Kind == DateTimeKind.Utc ? asOf : asOf.ToUniversalTime());
 		var settled = MarketCalendar.PreviousOpenOnOrBefore(nowNy.TimeOfDay >= TimeSpan.FromHours(17) ? nowNy.Date : nowNy.Date.AddDays(-1));
 
 		// A single session can be absent from a vendor's series even when the fetch fully succeeded — e.g.
@@ -273,7 +272,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	/// will have published a SMILE value for by the time this runs (evening or later).</summary>
 	private static DateTime PriorSettledSession(DateTime asOf)
 	{
-		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(asOf.Kind == DateTimeKind.Utc ? asOf : asOf.ToUniversalTime(), NyTz);
+		var nowNy = MarketTime.UtcToEt(asOf.Kind == DateTimeKind.Utc ? asOf : asOf.ToUniversalTime());
 		return MarketCalendar.PreviousOpenOnOrBefore(nowNy.Date.AddDays(-1));
 	}
 
@@ -292,8 +291,8 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 	/// command, since the sentiment factor is opt-in scoring.</summary>
 	private static async Task RefreshSentimentCacheAsync(DateTime earliest, DateTime asOf, CancellationToken cancellation)
 	{
-		var earliestNy = TimeZoneInfo.ConvertTime(earliest, NyTz).Date;
-		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
+		var earliestNy = MarketTime.ToEt(earliest).Date;
+		var todayNy = MarketTime.ToEt(asOf).Date;
 
 		var written = await FearGreedClient.SyncHistoryAsync(earliestNy, cancellation);
 		if (written == null)
@@ -433,7 +432,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 		var written = new List<DateTime>();
 		var skipped = new List<(DateTime Date, string Reason)>();
-		var todayNy = TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz).Date;
+		var todayNy = MarketTime.TodayEt();
 
 		// Classify each date: "needs-new" (no CSV), "needs-repair" (CSV exists but lacks pre-market
 		// = previous SPY fetch failed), or "complete" (CSV exists with pre-market). Re-running the
@@ -533,7 +532,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 		Directory.CreateDirectory(intradayDir);
 		var sealedPath = Path.Combine(intradayDir, "sealed.json");
 		var sealedDates = IntradayTapeBackfill.LoadSealedManifest(sealedPath);
-		var todayNy = TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz).Date;
+		var todayNy = MarketTime.TodayEt();
 
 		var written = 0;
 		var alreadyComplete = 0;
@@ -597,7 +596,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			var firstComma = line.IndexOf(',');
 			if (firstComma <= 0) continue;
 			if (!DateTimeOffset.TryParse(line.AsSpan(0, firstComma), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var ts)) continue;
-			var et = TimeZoneInfo.ConvertTime(ts, NyTz);
+			var et = MarketTime.ToEt(ts);
 			if (et.Hour * 60 + et.Minute < 9 * 60 + 30) return true;
 		}
 		return false;
@@ -618,7 +617,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 			return 2;
 		}
 
-		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
+		var todayNy = MarketTime.ToEt(asOf).Date;
 		var audit = IntradayTapeBackfill.AuditIntraday(ticker, earliestOnDisk.Value, todayNy);
 		var totalDays = audit.Complete.Count + audit.Partial.Count + audit.Missing.Count;
 		var latestNy = todayNy.AddDays(-1);

@@ -27,7 +27,6 @@ internal sealed record ProposalReplayOpen(DateTime OpenEt, string Ticker, OpenSt
 /// </summary>
 internal static class ProposalReplayLoader
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan MarketOpen = new(9, 30, 0);
 	private static readonly TimeSpan MarketClose = new(16, 0, 0);
 
@@ -140,7 +139,7 @@ internal static class ProposalReplayLoader
 	private static DateTime? ParseEasternTs(string? ts)
 	{
 		if (string.IsNullOrWhiteSpace(ts)) return null;
-		return DateTimeOffset.TryParse(ts, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dto) ? TimeZoneInfo.ConvertTime(dto, NyTz).DateTime : null;
+		return DateTimeOffset.TryParse(ts, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dto) ? MarketTime.ToEt(dto).DateTime : null;
 	}
 
 	private static string? Str(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;

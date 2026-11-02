@@ -21,7 +21,6 @@ internal delegate Task<IReadOnlyList<MinuteBar>> IntradayBarFetcher(string ticke
 /// yesterday's file in one round trip.</summary>
 internal sealed class IntradayBarCache
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private const int ColdStartCount = 500;
 	private const int WarmGapCount = 30;
 
@@ -171,9 +170,9 @@ internal sealed class IntradayBarCache
 		return _utcNow() - lastBar.Timestamp < _freshnessThreshold;
 	}
 
-	private DateTime TodayNyDate() => TimeZoneInfo.ConvertTime(_utcNow(), NyTz).Date;
+	private DateTime TodayNyDate() => MarketTime.ToEt(_utcNow()).Date;
 
-	private static DateTime NyDateOf(DateTimeOffset ts) => TimeZoneInfo.ConvertTime(ts, NyTz).Date;
+	private static DateTime NyDateOf(DateTimeOffset ts) => MarketTime.ToEt(ts).Date;
 
 	private static IEnumerable<DateTime> EnumerateNyDates(DateTimeOffset fromUtc, DateTimeOffset toUtc)
 	{

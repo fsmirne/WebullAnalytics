@@ -51,7 +51,6 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 	private readonly decimal? _defaultIv;
 	private readonly decimal? _strikeStep;
 	private readonly IntradayBarCache? _intradayBars;
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	/// <param name="parametric">The trade-bar/BS source used ONLY for counterfactual reprices
 	/// (<see cref="GetIntradayQuotesAsync"/>) that real NBBO can't answer. All real marks/fills use the store.</param>
@@ -86,7 +85,7 @@ internal sealed class QuotesQuoteSource : IBacktestQuoteSource
 	private async Task<decimal?> SpotAtBookAsync(string ticker, DateTime asOf, CancellationToken cancellation)
 	{
 		if (_intradayBars == null) return null;
-		var instantUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(QuoteStoreCache.BookInstant(asOf), DateTimeKind.Unspecified), NyTz), TimeSpan.Zero);
+		var instantUtc = MarketTime.EtToInstant(QuoteStoreCache.BookInstant(asOf));
 		var bars = await _intradayBars.GetBarsAsync(ticker, instantUtc.AddMinutes(-5), instantUtc.AddTicks(-1), BarInterval.M1, includeExtended: false, cancellation);
 		return bars.Count > 0 ? bars[^1].Close : null;
 	}

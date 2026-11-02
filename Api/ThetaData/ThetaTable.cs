@@ -12,7 +12,6 @@ internal sealed class ThetaTable
 	// Price.value is a scaled int; Price.type indexes the scale. Same table and same double multiply as the library, so decoded
 	// prices are bit-identical to what the Python backfill stored.
 	private static readonly double[] PriceTypeFactors = [0.0, 0.000000001, 0.00000001, 0.0000001, 0.000001, 0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 100000000.0, 1000000000.0];
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	internal static readonly ThetaTable Empty = new([], []);
 
@@ -87,6 +86,6 @@ internal sealed class ThetaTable
 	private static DateTimeOffset DecodeTimestamp(ZonedDateTime timestamp)
 	{
 		var utc = DateTimeOffset.FromUnixTimeMilliseconds((long)timestamp.EpochMs);
-		return timestamp.Zone == Proto.TimeZone.NewYork ? TimeZoneInfo.ConvertTime(utc, NyTz) : utc;
+		return timestamp.Zone == Proto.TimeZone.NewYork ? MarketTime.ToEt(utc) : utc;
 	}
 }

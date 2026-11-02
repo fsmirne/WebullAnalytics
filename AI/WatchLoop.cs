@@ -189,7 +189,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 					var regimePositions = await positions.GetOpenPositionsAsync(now, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { config.Ticker }, cancellation);
 					await Rules.ExpiryRegimeHost.PopulateAsync(expiryRegimes, config.Rules.CloseBeforeShortExpiry.Regime, regimePositions.Values, quotes, now, cancellation);
 				}
-				var etTimeOfDay = TimeZoneInfo.ConvertTime(now, NyTz).TimeOfDay;
+				var etTimeOfDay = MarketTime.ToEt(now).TimeOfDay;
 				var outsideWindow = !config.Opener.IsWithinEntryWindow(etTimeOfDay);
 				var state = !outsideWindow ? null : ParsingHelpers.TryParseClockTime(config.Opener.EarliestEntryTimeEt, out var earliest) && etTimeOfDay < earliest ? "before" : "after";
 				if (state != windowState)
@@ -276,7 +276,6 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 	// NYSE regular session, hardcoded. The watch loop is the only consumer; every other code path
 	// reuses MarketCalendar.IsOpen for day-of-week / holiday handling. If we ever need to support a
 	// different exchange, lift these constants — but the rest of the app assumes US equity/options too.
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan MarketCloseEt = new(16, 0, 0);
 
 	private static DateTime ComputeStopTime(AIWatchSettings s)
@@ -284,18 +283,18 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		if (s.Duration != null && AIWatchSettings.TryParseDuration(s.Duration, out var span))
 			return DateTime.Now + span;
 		// Default: today's market close in ET.
-		var nowLocal = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var nowLocal = MarketTime.NowEt();
 		var closeLocal = new DateTime(nowLocal.Year, nowLocal.Month, nowLocal.Day, MarketCloseEt.Hours, MarketCloseEt.Minutes, 0, DateTimeKind.Unspecified);
-		return TimeZoneInfo.ConvertTimeToUtc(closeLocal, NyTz).ToLocalTime();
+		return MarketTime.EtToUtc(closeLocal).ToLocalTime();
 	}
 
 	/// <summary>Parses HH:mm or HH:mm:ss as today's ET time-of-day and returns the equivalent local DateTime.</summary>
 	private static DateTime ComputeStartTime(string hhmm)
 	{
 		var t = TimeOnly.Parse(hhmm, CultureInfo.InvariantCulture);
-		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var nowEt = MarketTime.NowEt();
 		var targetEt = new DateTime(nowEt.Year, nowEt.Month, nowEt.Day, t.Hour, t.Minute, t.Second, DateTimeKind.Unspecified);
-		return TimeZoneInfo.ConvertTimeToUtc(targetEt, NyTz).ToLocalTime();
+		return MarketTime.EtToUtc(targetEt).ToLocalTime();
 	}
 
 	private static bool IsMarketOpen()

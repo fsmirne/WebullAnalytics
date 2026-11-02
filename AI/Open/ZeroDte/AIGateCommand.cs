@@ -70,7 +70,6 @@ internal sealed class AIGateSettings : AISingleTickerSubcommandSettings
 /// floor), which need a priced book.</para></summary>
 internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan RthStart = new(9, 30, 0);
 	private static readonly TimeSpan RthEnd = new(16, 0, 0);
 	// How far back the gate heals past sessions. Webull's SPX paginator only walks ~3 trading days back before
@@ -104,7 +103,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 	/// <summary>One session, minute by minute: the tape facts alongside the state they produce.</summary>
 	private async Task<int> RenderSessionAsync(AIConfig config, ZeroDteGateConfig cfg, IntradayBarCache bars, HistoricalPriceCache closes, AIGateSettings settings, CancellationToken cancellation)
 	{
-		var date = settings.Date != null ? DateTime.ParseExact(settings.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : TodayEt();
+		var date = settings.Date != null ? DateTime.ParseExact(settings.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : MarketTime.TodayEt();
 		await HealTapeAsync(config.Ticker, date, date, cancellation);
 		var sessionBars = await LoadSessionAsync(bars, config.Ticker, date, cancellation);
 		if (sessionBars.Count == 0)
@@ -136,7 +135,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 			// Bars [0..i] are the tape "as of" bar i's minute — the same causal slice the backtest's
 			// per-minute opener sees, so a row here is reproducible by the opener at that minute.
 			var slice = sessionBars.Take(i + 1).ToList();
-			var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(sessionBars[i].Timestamp, NyTz).DateTime, DateTimeKind.Unspecified);
+			var minuteEt = MarketTime.ToEt(sessionBars[i].Timestamp).DateTime;
 			var verdict = ZeroDteSessionGate.Evaluate(cfg, slice, prevClose, compositeBias: null, minuteEt);
 			stateCounts[verdict.State] = stateCounts.GetValueOrDefault(verdict.State) + 1;
 			if (firstEntry == null && verdict.AllowsEntry) { firstEntry = verdict; firstEntryEt = minuteEt; }
@@ -163,7 +162,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 		}
 
 		AnsiConsole.Write(table);
-		var gapTape = ZeroDteSessionGate.Evaluate(cfg, sessionBars, prevClose, null, DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(sessionBars[^1].Timestamp, NyTz).DateTime, DateTimeKind.Unspecified)).Tape;
+		var gapTape = ZeroDteSessionGate.Evaluate(cfg, sessionBars, prevClose, null, MarketTime.ToEt(sessionBars[^1].Timestamp).DateTime).Tape;
 		AnsiConsole.MarkupLine($"[dim]prev RTH close {(prevClose?.ToString("N2") ?? "unavailable")}, session open {gapTape?.SessionOpen:N2}, gap {gapTape?.GapPct:+0.00;-0.00}% → {gapTape?.Gap}[/]");
 		if (firstEntry != null)
 			AnsiConsole.MarkupLine($"[green]First entry-eligible minute: {firstEntryEt:HH:mm} ET — {Markup.Escape(firstEntry.Summary)}[/]");
@@ -177,7 +176,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 	private async Task<int> RenderRangeAsync(AIConfig config, ZeroDteGateConfig cfg, IntradayBarCache bars, HistoricalPriceCache closes, AIGateSettings settings, CancellationToken cancellation)
 	{
 		var since = DateTime.ParseExact(settings.Since!, "yyyy-MM-dd", CultureInfo.InvariantCulture);
-		var until = settings.Until != null ? DateTime.ParseExact(settings.Until, "yyyy-MM-dd", CultureInfo.InvariantCulture) : TodayEt();
+		var until = settings.Until != null ? DateTime.ParseExact(settings.Until, "yyyy-MM-dd", CultureInfo.InvariantCulture) : MarketTime.TodayEt();
 		if (until < since) { Console.Error.WriteLine("--until must be on or after --since"); return 1; }
 		await HealTapeAsync(config.Ticker, since, until, cancellation);
 
@@ -198,7 +197,7 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 			DateTime? entryEt = null;
 			for (var i = 0; i < sessionBars.Count; i++)
 			{
-				var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(sessionBars[i].Timestamp, NyTz).DateTime, DateTimeKind.Unspecified);
+				var minuteEt = MarketTime.ToEt(sessionBars[i].Timestamp).DateTime;
 				var v = ZeroDteSessionGate.Evaluate(cfg, sessionBars.Take(i + 1).ToList(), prevClose, null, minuteEt);
 				trace?.WriteLine($"{date:yyyy-MM-dd},{minuteEt:HH:mm},{v.State}");
 				if (entryEt == null && v.AllowsEntry) { outcomes.Add((date, v.State, minuteEt, v.Summary)); entryEt = minuteEt; if (trace == null) break; }
@@ -251,30 +250,29 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 	private static async Task HealTapeAsync(string ticker, DateTime firstNy, DateTime lastNy, CancellationToken cancellation)
 	{
 		var nowUtc = DateTime.UtcNow;
-		var today = TodayEt();
+		var today = MarketTime.TodayEt();
 		var healFrom = firstNy.Date > today.AddDays(-HealLookbackDays) ? firstNy.Date : today.AddDays(-HealLookbackDays);
 		var healTo = lastNy.Date < today ? lastNy.Date : today.AddDays(-1);
 		if (healFrom <= healTo)
-			await IntradayTapeBackfill.BackfillAsync(ticker, TimeZoneInfo.ConvertTimeToUtc(healFrom.AddHours(12), NyTz), nowUtc, cancellation, latestNy: healTo);
+			await IntradayTapeBackfill.BackfillAsync(ticker, MarketTime.EtToUtc(healFrom.AddHours(12)), nowUtc, cancellation, latestNy: healTo);
 		if (lastNy.Date >= today && IntradayTapeBackfill.IsTodayBehind(ticker, nowUtc))
 			await IntradayTapeBackfill.CaptureTodayAsync(ticker, nowUtc, cancellation);
 	}
 
 	/// <summary>Today's session date in ET, Kind=Unspecified. Not DateTime.Today: that is the machine's date with
-	/// Kind=Local, which ConvertTimeToUtc(_, NyTz) rejects whenever NyTz isn't the very zone object TimeZoneInfo.Local
+	/// Kind=Local, which ConvertTimeToUtc(_, MarketTime.Zone) rejects whenever MarketTime.Zone isn't the very zone object TimeZoneInfo.Local
 	/// (always the case on Windows, where Local is "Eastern Standard Time", not "America/New_York").</summary>
-	private static DateTime TodayEt() => TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz).Date;
 
 	/// <summary>Today's regular-session bars for the ticker, oldest first. RTH-only, matching the contract
 	/// <see cref="SessionTape"/> expects (the cache serves every row on disk, pre-market included).</summary>
 	private static async Task<List<MinuteBar>> LoadSessionAsync(IntradayBarCache bars, string ticker, DateTime date, CancellationToken cancellation)
 	{
-		var fromUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(date.Date.Add(RthStart), NyTz), TimeSpan.Zero);
-		var toUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(date.Date.Add(RthEnd), NyTz), TimeSpan.Zero);
+		var fromUtc = MarketTime.EtToInstant(date.Date.Add(RthStart));
+		var toUtc = MarketTime.EtToInstant(date.Date.Add(RthEnd));
 		var raw = await bars.GetBarsAsync(ticker, fromUtc, toUtc, BarInterval.M1, includeExtended: false, cancellation);
 		return raw.Where(b =>
 		{
-			var tod = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).TimeOfDay;
+			var tod = MarketTime.ToEt(b.Timestamp).TimeOfDay;
 			return tod >= RthStart && tod < RthEnd;
 		}).OrderBy(b => b.Timestamp).ToList();
 	}

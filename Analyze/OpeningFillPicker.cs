@@ -31,9 +31,8 @@ internal static class OpeningFillPicker
 		public DateTime PlacedEt => ToEt(PlacedMs);
 	}
 
-	private static readonly TimeZoneInfo EtZone = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-	private static DateTime ToEt(long epochMs) => TimeZoneInfo.ConvertTime(DateTimeOffset.FromUnixTimeMilliseconds(epochMs).UtcDateTime, EtZone);
+	private static DateTime ToEt(long epochMs) => MarketTime.ToEt(DateTimeOffset.FromUnixTimeMilliseconds(epochMs).UtcDateTime);
 
 	/// <summary>trade/position path: pick an unexpired opening fill and return it as a <c>&lt;spec&gt;</c> at its
 	/// real per-leg fill prices. Returns a clean error string, never throws.</summary>
@@ -62,7 +61,7 @@ internal static class OpeningFillPicker
 		var account = TradeConfig.Resolve(config, null, quiet: true);
 		if (account == null) return (null, null, "--fill: no defaultAccount in api-config.json");
 
-		var todayEt = TimeZoneInfo.ConvertTime(DateTime.UtcNow, EtZone).Date;
+		var todayEt = MarketTime.TodayEt();
 		List<WebullOpenApiClient.OpenOrder> orders;
 		try
 		{

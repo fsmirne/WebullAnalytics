@@ -15,7 +15,6 @@ namespace WebullAnalytics.Scraper;
 /// <c>data/oi/<TICKER>/<date>.jsonl</c>.</summary>
 internal sealed class Program
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	private static int Main(string[] args)
 	{
@@ -77,7 +76,6 @@ internal sealed class ScrapeSettings : CommandSettings
 
 internal sealed class ScrapeCommand : AsyncCommand<ScrapeSettings>
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	protected override async Task<int> ExecuteAsync(CommandContext context, ScrapeSettings settings, CancellationToken cancellation)
 	{
@@ -133,7 +131,7 @@ internal sealed class ScrapeCommand : AsyncCommand<ScrapeSettings>
 		}
 		AnsiConsole.MarkupLine($"[dim]chain vendor = {vendorName}[/]");
 
-		var todayEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz).Date;
+		var todayEt = MarketTime.TodayEt();
 		var startEt = ParseEtTimeToday(config.StartTime, todayEt);
 		var endEt = ParseEtTimeToday(config.EndTime, todayEt);
 		if (endEt <= startEt)

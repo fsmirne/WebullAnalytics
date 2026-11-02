@@ -6,9 +6,8 @@ namespace WebullAnalytics.Tests.AI.Replay;
 
 public class IntradayTapeBackfillTests
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-	private static DateTime EtToUtc(int y, int mo, int d, int h, int mi) => TimeZoneInfo.ConvertTimeToUtc(new DateTime(y, mo, d, h, mi, 0, DateTimeKind.Unspecified), NyTz);
+	private static DateTime EtToUtc(int y, int mo, int d, int h, int mi) => MarketTime.EtToUtc(new DateTime(y, mo, d, h, mi, 0, DateTimeKind.Unspecified));
 
 	private static MinuteBar Bar(DateTime utc) => new(new DateTimeOffset(utc, TimeSpan.Zero), 100m, 100m, 100m, 100m, 0);
 
@@ -17,7 +16,7 @@ public class IntradayTapeBackfillTests
 	{
 		var bars = new List<MinuteBar>();
 		for (var t = new DateTime(2026, 10, 20, 9, 30, 0); t <= new DateTime(2026, 10, 20, lastHh, lastMm, 0); t = t.AddMinutes(1))
-			bars.Add(Bar(TimeZoneInfo.ConvertTimeToUtc(t, NyTz)));
+			bars.Add(Bar(MarketTime.EtToUtc(t)));
 		return bars;
 	}
 
@@ -66,7 +65,7 @@ public class IntradayTapeBackfillTests
 		// 2026-11-27, day after Thanksgiving, closes 13:00.
 		var bars = new List<MinuteBar>();
 		for (var t = new DateTime(2026, 11, 27, 9, 30, 0); t <= new DateTime(2026, 11, 27, 12, 59, 0); t = t.AddMinutes(1))
-			bars.Add(Bar(TimeZoneInfo.ConvertTimeToUtc(t, NyTz)));
+			bars.Add(Bar(MarketTime.EtToUtc(t)));
 		Assert.False(IntradayTapeBackfill.IsBehind(bars, EtToUtc(2026, 11, 27, 15, 0)));
 	}
 }

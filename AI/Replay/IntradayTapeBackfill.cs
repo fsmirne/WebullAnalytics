@@ -15,7 +15,6 @@ namespace WebullAnalytics.AI.Replay;
 /// heals the sessions it is about to replay).</summary>
 internal static class IntradayTapeBackfill
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	/// <summary>Tickers whose intraday tape comes from Yahoo's trailing-week 1m endpoint — forward
 	/// capture only, for CBOE indices with no deep-history source anywhere (see FetchRangeAsync).</summary>
@@ -53,8 +52,8 @@ internal static class IntradayTapeBackfill
 			return;
 		}
 
-		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
-		var earliestNy = TimeZoneInfo.ConvertTime(earliest, NyTz).Date;
+		var todayNy = MarketTime.ToEt(asOf).Date;
+		var earliestNy = MarketTime.ToEt(earliest).Date;
 		// Yahoo-forward-capture tapes (VXN): the 1m endpoint serves only the trailing ~7 days, so days
 		// older than that are unreachable by construction — clamp the audit window to what the source
 		// can serve, or every daily run reports years of forever-missing days.
@@ -234,8 +233,8 @@ internal static class IntradayTapeBackfill
 		}
 		var startEt = new DateTime(startNyDate.Year, startNyDate.Month, startNyDate.Day, 4, 0, 0, DateTimeKind.Unspecified);
 		var endEt = new DateTime(endNyDate.Year, endNyDate.Month, endNyDate.Day, 20, 0, 0, DateTimeKind.Unspecified);
-		var startUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(startEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
-		var endUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+		var startUnix = MarketTime.EtToInstant(startEt).ToUnixTimeSeconds();
+		var endUnix = MarketTime.EtToInstant(endEt).ToUnixTimeSeconds();
 		AnsiConsole.MarkupLine($"    paginating {Markup.Escape(ticker)} from Webull ({startNyDate:yyyy-MM-dd} → {endNyDate:yyyy-MM-dd})");
 		var bars = await WebullChartsClient.FetchPaginatedHistoricalMinuteBarsAsync(
 			apiConfig, tickerId, startUnix, endUnix,
@@ -279,8 +278,8 @@ internal static class IntradayTapeBackfill
 		// path is for the small recent gap (yesterday's missing CSV after a late `wa ai watch` shutdown).
 		var endEt = new DateTime(endNyDate.Year, endNyDate.Month, endNyDate.Day, 20, 0, 0, DateTimeKind.Unspecified);
 		var startEt = new DateTime(startNyDate.Year, startNyDate.Month, startNyDate.Day, 4, 0, 0, DateTimeKind.Unspecified);
-		var endUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
-		var startUnix = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(startEt, NyTz), TimeSpan.Zero).ToUnixTimeSeconds();
+		var endUnix = MarketTime.EtToInstant(endEt).ToUnixTimeSeconds();
+		var startUnix = MarketTime.EtToInstant(startEt).ToUnixTimeSeconds();
 		// Resolve the RTH chart id from the ticker: SPX/SPXW → 913354362 (S&P 500 cash index),
 		// XSP → 925377660 (Mini-SPX index, ~SPX/10). The SPY ext-hours merge scales to this level.
 		var rthTickerId = WebullChartsClient.TryResolveKnownChartTickerId(ticker, out var resolvedId) ? resolvedId : 913354362L;
@@ -320,7 +319,7 @@ internal static class IntradayTapeBackfill
 		var by = new Dictionary<DateTime, List<MinuteBar>>();
 		foreach (var b in bars)
 		{
-			var d = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).Date;
+			var d = MarketTime.ToEt(b.Timestamp).Date;
 			if (!by.TryGetValue(d, out var list)) by[d] = list = new List<MinuteBar>();
 			list.Add(b);
 		}
@@ -446,7 +445,7 @@ internal static class IntradayTapeBackfill
 			return 1;
 		}
 
-		var todayNy = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
+		var todayNy = MarketTime.ToEt(asOf).Date;
 		AnsiConsole.MarkupLine($"[bold]Capturing partial intraday for {Markup.Escape(ticker)}[/] {todayNy:yyyy-MM-dd} (full pre-market 04:00 ET → now, not sealed)");
 
 		// Use the range-based fetch (same path the backfill uses), not the count-capped live fetcher.
@@ -482,7 +481,7 @@ internal static class IntradayTapeBackfill
 		// than every other day's and skew the tape signal's pre-market-open anchor. Drop < 04:00 ET so
 		// the file matches the rest of the dataset.
 		var premarketOpen = new TimeSpan(4, 0, 0);
-		var clamped = bars.Where(b => TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).TimeOfDay >= premarketOpen).ToList();
+		var clamped = bars.Where(b => MarketTime.ToEt(b.Timestamp).TimeOfDay >= premarketOpen).ToList();
 		if (clamped.Count == 0)
 		{
 			AnsiConsole.MarkupLine("  [yellow]no bars at or after 04:00 ET[/] — nothing to write");
@@ -544,7 +543,7 @@ internal static class IntradayTapeBackfill
 		int lastRthMinute = -1;
 		foreach (var b in bars)
 		{
-			var et = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz);
+			var et = MarketTime.ToEt(b.Timestamp);
 			var minuteOfDay = et.Hour * 60 + et.Minute;
 			if (minuteOfDay < 9 * 60 + 30 || minuteOfDay >= 16 * 60) continue;
 			rthCount++;
@@ -571,7 +570,7 @@ internal static class IntradayTapeBackfill
 	/// minute — the session is under way (or over) and nothing has been writing the file. See <see cref="IsBehind"/>.</summary>
 	internal static bool IsTodayBehind(string ticker, DateTime asOfUtc)
 	{
-		var today = TimeZoneInfo.ConvertTime(asOfUtc, NyTz).Date;
+		var today = MarketTime.ToEt(asOfUtc).Date;
 		var path = Path.Combine(Program.ResolvePath("data/intraday"), ticker.ToUpperInvariant(), $"{today:yyyy-MM-dd}.csv");
 		return IsBehind(File.Exists(path) ? ReadIntradayCsv(path) : new List<MinuteBar>(), asOfUtc);
 	}
@@ -582,7 +581,7 @@ internal static class IntradayTapeBackfill
 	/// and on non-trading days. Internal for tests.</summary>
 	internal static bool IsBehind(IReadOnlyList<MinuteBar> bars, DateTime asOfUtc)
 	{
-		var nowEt = TimeZoneInfo.ConvertTime(asOfUtc, NyTz);
+		var nowEt = MarketTime.ToEt(asOfUtc);
 		if (!MarketCalendar.IsOpen(nowEt.Date)) return false;
 		var openMinute = 9 * 60 + 30;
 		var closeMinute = MarketCalendar.IsEarlyClose(nowEt.Date) ? 13 * 60 : 16 * 60;
@@ -592,7 +591,7 @@ internal static class IntradayTapeBackfill
 		var lastRth = -1;
 		foreach (var b in bars)
 		{
-			var et = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz);
+			var et = MarketTime.ToEt(b.Timestamp);
 			var m = et.Hour * 60 + et.Minute;
 			if (m >= openMinute && m < closeMinute && m > lastRth) lastRth = m;
 		}

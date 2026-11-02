@@ -6,7 +6,6 @@ namespace WebullAnalytics.Tests.AI.Replay;
 
 public class HistoricalPriceCacheTests
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	[Fact]
 	public async Task ExistingCsvIsRefreshedWhenAsOfIsNewerThanLastCachedDate()
@@ -145,6 +144,6 @@ public class HistoricalPriceCacheTests
 	private static DateTime NyDateTimeToUtc(int year, int month, int day, int hour, int minute)
 	{
 		var local = new DateTime(year, month, day, hour, minute, 0, DateTimeKind.Unspecified);
-		return TimeZoneInfo.ConvertTimeToUtc(local, NyTz);
+		return MarketTime.EtToUtc(local);
 	}
 }

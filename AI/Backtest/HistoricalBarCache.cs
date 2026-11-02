@@ -16,7 +16,6 @@ namespace WebullAnalytics.AI.Backtest;
 /// </summary>
 internal sealed class HistoricalBarCache
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan SettlementCutoff = TimeSpan.FromHours(17);
 
 	private readonly string _cacheDir;
@@ -163,7 +162,7 @@ internal sealed class HistoricalBarCache
 
 	private DateTime ClampToSettled(DateTime neededThrough, bool cboeLagTolerant = false)
 	{
-		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(_utcNow(), NyTz);
+		var nowNy = MarketTime.UtcToEt(_utcNow());
 		var settled = nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
 		// Yahoo never prints a bar on weekends or NYSE holidays — walk BOTH the settled ceiling and the
 		// requested end back to the most recent open trading day, so neither a Saturday "today" nor a

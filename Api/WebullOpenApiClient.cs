@@ -324,10 +324,9 @@ internal sealed class WebullOpenApiClient : IDisposable
 	/// <summary>Returns today's orders (any status) by pulling the 7-day history and filtering to today (ET).</summary>
 	internal async Task<List<OpenOrder>> ListTodayOrdersAsync(CancellationToken ct = default)
 	{
-		var etTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-		var todayEt = TimeZoneInfo.ConvertTime(DateTime.UtcNow, etTz).Date;
+		var todayEt = MarketTime.TodayEt();
 		var all = await ListOrderHistoryAsync(ct: ct);
-		return all.Where(co => IsToday(co, todayEt, etTz)).ToList();
+		return all.Where(co => IsToday(co, todayEt)).ToList();
 	}
 
 	/// <summary>Diagnostic: GETs /openapi/trade/order/history with optional start_date/end_date (yyyy-MM-dd)
@@ -356,16 +355,16 @@ internal sealed class WebullOpenApiClient : IDisposable
 	/// inner order has two timestamp fields: <c>place_time</c> is epoch milliseconds as a string,
 	/// <c>place_time_at</c> is ISO 8601 UTC. We prefer ISO when available because it's easier to
 	/// parse confidently; epoch is the fallback.</summary>
-	private static bool IsToday(OpenOrder combo, DateTime todayEtDate, TimeZoneInfo etTz)
+	private static bool IsToday(OpenOrder combo, DateTime todayEtDate)
 	{
 		var inner = combo.Orders?.FirstOrDefault();
 		if (inner == null) return false;
 		if (!string.IsNullOrEmpty(inner.PlaceTimeAt) && DateTime.TryParse(inner.PlaceTimeAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var iso))
-			return TimeZoneInfo.ConvertTime(iso, etTz).Date == todayEtDate;
+			return MarketTime.ToEt(iso).Date == todayEtDate;
 		if (!string.IsNullOrEmpty(inner.PlaceTime) && long.TryParse(inner.PlaceTime, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var ms))
 		{
 			var dt = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
-			return TimeZoneInfo.ConvertTime(dt, etTz).Date == todayEtDate;
+			return MarketTime.ToEt(dt).Date == todayEtDate;
 		}
 		return false;
 	}

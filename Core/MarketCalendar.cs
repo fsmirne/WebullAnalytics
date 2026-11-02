@@ -8,7 +8,6 @@ namespace WebullAnalytics;
 /// </summary>
 internal static class MarketCalendar
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan RegularOpenEt = new(9, 30, 0);
 	private static readonly TimeSpan RegularCloseEt = new(16, 0, 0);
 	private static readonly TimeSpan EarlyCloseEt = new(13, 0, 0);
@@ -26,7 +25,7 @@ internal static class MarketCalendar
 	/// guard, which is meaningless off-hours (after the close every quote is legitimately minutes-to-hours old).</summary>
 	internal static bool IsRegularHours(DateTimeOffset now)
 	{
-		var et = TimeZoneInfo.ConvertTime(now, NyTz);
+		var et = MarketTime.ToEt(now);
 		if (!IsOpen(et.Date)) return false;
 		var t = et.TimeOfDay;
 		return t >= RegularOpenEt && t <= CloseTimeEt(et.Date);

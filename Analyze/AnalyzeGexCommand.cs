@@ -1457,7 +1457,6 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		AnsiConsole.Write(grid);
 	}
 
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	/// <summary>Reads data/intraday/<TICKER>/<date>.csv (header timestamp_utc,open,high,low,close,volume; UTC ISO
 	/// timestamps), converts each row to ET, keeps the RTH window (09:30–16:00 ET), and returns ET-time-of-day → close.
@@ -1471,8 +1470,8 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		try
 		{
 			var cache = new WebullAnalytics.AI.Replay.IntradayBarCache(WebullAnalytics.AI.Sources.WebullIntradayBars.CreateFetcher(apiConfig));
-			var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
-			var openUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(nowEt.Date.AddHours(9).AddMinutes(30), NyTz));
+			var nowEt = MarketTime.NowEt();
+			var openUtc = MarketTime.EtToInstant(nowEt.Date.AddHours(9).AddMinutes(30));
 			await cache.GetBarsAsync(ticker, openUtc, DateTimeOffset.UtcNow, BarInterval.M1, includeExtended: true, cancellation);
 		}
 		catch (Exception ex)
@@ -1498,7 +1497,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 			if (parts.Length < 5) continue;
 			if (!DateTimeOffset.TryParse(parts[0], CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var utc)) continue;
 			if (!decimal.TryParse(parts[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var close)) continue;
-			var et = TimeZoneInfo.ConvertTimeFromUtc(utc.UtcDateTime, NyTz);
+			var et = MarketTime.UtcToEt(utc.UtcDateTime);
 			var tod = et.TimeOfDay;
 			if (tod < rthOpen || tod > rthClose) continue;
 			spots[tod] = close;
@@ -2090,7 +2089,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// source field keeps interleaved webull/schwab runs separable in the same day file.</summary>
 	private static void AppendGexLog(string ticker, decimal spot, GexMatrix matrix, AnalyzeGexSettings settings)
 	{
-		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var nowEt = MarketTime.NowEt();
 		var rows = new List<GexLogExpiry>();
 		foreach (var exp in matrix.Expiries)
 		{
@@ -2112,7 +2111,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// the heatmap uses; the row format and file layout live in the shared store.</summary>
 	private static void AppendIvDump(string ticker, decimal spot, Dictionary<string, OptionContractQuote> quotes, AnalyzeGexSettings settings, DateTime asOf, DateTime? expiryFilter)
 	{
-		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var nowEt = MarketTime.NowEt();
 		var band = settings.StrikeRangePct / 100m;
 		var inWindow = quotes.Values.Where(q =>
 		{

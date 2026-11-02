@@ -14,7 +14,6 @@ namespace WebullAnalytics.AI;
 /// is a weighted average per <paramref name="cfg"/>.</summary>
 internal static class IntradayTapeIndicators
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	// Regular trading hours in ET: [09:30, 16:00). The tape signal is defined strictly on RTH —
 	// gap = prior RTH close → today's RTH open; open-to-now = today's RTH open → now; VWAP over RTH
@@ -25,7 +24,7 @@ internal static class IntradayTapeIndicators
 
 	private static bool IsRth(DateTimeOffset ts)
 	{
-		var et = TimeZoneInfo.ConvertTime(ts, NyTz).TimeOfDay;
+		var et = MarketTime.ToEt(ts).TimeOfDay;
 		return et >= RthStart && et < RthEnd;
 	}
 
@@ -34,7 +33,7 @@ internal static class IntradayTapeIndicators
 		if (bars.Count == 0) return null;
 		if (cfg.GapWeight + cfg.OpenToNowWeight + cfg.VwapDeviationWeight <= 0m) return null;
 
-		var asOfNyDate = TimeZoneInfo.ConvertTime(asOf, NyTz).Date;
+		var asOfNyDate = MarketTime.ToEt(asOf).Date;
 		// RTH-only (default): today's regular-session bars, excluding pre/post-market, so the "open"
 		// anchor is the 09:30 print — not a 04:00 ET pre-market bar — and the gap measures the true
 		// prior-RTH-close → today's-RTH-open move. The intraday CSVs carry 04:00–17:25 ET, so this
@@ -42,7 +41,7 @@ internal static class IntradayTapeIndicators
 		// every row on disk regardless). IncludeExtended=true keeps the legacy all-session behavior.
 		var rthOnly = !cfg.IncludeExtended;
 		var todaysBars = bars.Where(b =>
-			TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).Date == asOfNyDate && (!rthOnly || IsRth(b.Timestamp))).ToList();
+			MarketTime.ToEt(b.Timestamp).Date == asOfNyDate && (!rthOnly || IsRth(b.Timestamp))).ToList();
 		if (todaysBars.Count < cfg.MinBars) return null;
 
 		var todayOpen = todaysBars[0].Open;
@@ -75,7 +74,7 @@ internal static class IntradayTapeIndicators
 		// reference is the prior session's ~16:00 ET RTH close, not a 17:25 ET after-hours tick.
 		for (int i = bars.Count - 1; i >= 0; i--)
 		{
-			var bd = TimeZoneInfo.ConvertTime(bars[i].Timestamp, NyTz).Date;
+			var bd = MarketTime.ToEt(bars[i].Timestamp).Date;
 			if (bd < nyDate && (!rthOnly || IsRth(bars[i].Timestamp))) return bars[i].Close;
 		}
 		return null;

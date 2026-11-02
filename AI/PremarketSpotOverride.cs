@@ -14,7 +14,6 @@ namespace WebullAnalytics.AI;
 /// </summary>
 internal static class PremarketSpotOverride
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan PremarketStart = new(4, 0, 0);
 	private static readonly TimeSpan RthOpen = new(9, 30, 0);
 
@@ -169,7 +168,7 @@ internal static class PremarketSpotOverride
 	{
 		var apiConfig = OpenCandidateEvaluator.TryLoadApiConfig();
 		if (apiConfig == null) return null;
-		var nowUtc = now.Kind == DateTimeKind.Utc ? new DateTimeOffset(now, TimeSpan.Zero) : new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(now, DateTimeKind.Unspecified), NyTz), TimeSpan.Zero);
+		var nowUtc = now.Kind == DateTimeKind.Utc ? new DateTimeOffset(now, TimeSpan.Zero) : MarketTime.EtToInstant(now);
 		try
 		{
 			var cache = new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig));

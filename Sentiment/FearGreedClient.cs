@@ -27,7 +27,6 @@ internal static class FearGreedClient
 {
 	private const string Endpoint = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata";
 	private const string CacheDir = "data/sentiment-cache";
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan SettlementCutoff = TimeSpan.FromHours(17);
 
 	private static readonly HttpClient Http = CreateHttpClient();
@@ -156,7 +155,7 @@ internal static class FearGreedClient
 	/// Internal so tests can verify the cutoff logic without depending on wall-clock time.</summary>
 	internal static bool IsSettled(DateTime asOf, DateTime utcNow)
 	{
-		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(utcNow, NyTz);
+		var nowNy = MarketTime.UtcToEt(utcNow);
 		var latestSettled = nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1);
 		return asOf.Date <= latestSettled;
 	}
@@ -180,7 +179,7 @@ internal static class FearGreedClient
 			if (!root.TryGetProperty("fear_and_greed", out var fg)) return null;
 			if (!fg.TryGetProperty("score", out var scoreEl)) return null;
 
-			if (forDate.HasValue && TimeZoneInfo.ConvertTimeFromUtc(TryParseCompositeTimestamp(fg), NyTz).Date != forDate.Value.Date)
+			if (forDate.HasValue && MarketTime.UtcToEt(TryParseCompositeTimestamp(fg)).Date != forDate.Value.Date)
 			{
 				var pt = FindHistoricalPoint(root, forDate.Value.Date);
 				if (pt == null) return null;
@@ -246,7 +245,7 @@ internal static class FearGreedClient
 			using var doc = JsonDocument.Parse(body);
 			var root = doc.RootElement;
 			if (!root.TryGetProperty("fear_and_greed", out var fg)) return null;
-			if (TimeZoneInfo.ConvertTimeFromUtc(TryParseCompositeTimestamp(fg), NyTz).Date == date.Date) return body;
+			if (MarketTime.UtcToEt(TryParseCompositeTimestamp(fg)).Date == date.Date) return body;
 
 			var pt = FindHistoricalPoint(root, date.Date);
 			if (pt == null) return null;

@@ -9,7 +9,6 @@ namespace WebullAnalytics.AI.RiskDiagnostics;
 internal static class TrendFetcher
 {
 	private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly ConcurrentDictionary<string, (DateTime CachedAt, TrendSnapshot Snapshot)> MemoryCache = new(StringComparer.OrdinalIgnoreCase);
 	private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(2);
 
@@ -68,7 +67,7 @@ internal static class TrendFetcher
 			{
 				for (var i = closes.Count - 1; i >= 0; i--)
 				{
-					var nyDate = TimeZoneInfo.ConvertTime(DateTimeOffset.FromUnixTimeSeconds(tsArr[i].GetInt64()), NyTz).Date;
+					var nyDate = MarketTime.ToEt(DateTimeOffset.FromUnixTimeSeconds(tsArr[i].GetInt64())).Date;
 					if (nyDate < asOf.Date) { prior = i; priorNyDate = nyDate; break; }
 				}
 			}
@@ -80,7 +79,7 @@ internal static class TrendFetcher
 			var priorCloseVal = prior >= 0 ? closes[prior] : 0m;
 			if (priorCloseVal <= 0m && priorNyDate is DateTime pd
 				&& meta.TryGetProperty("regularMarketTime", out var rmt) && rmt.ValueKind == JsonValueKind.Number
-				&& TimeZoneInfo.ConvertTime(DateTimeOffset.FromUnixTimeSeconds(rmt.GetInt64()), NyTz).Date == pd)
+				&& MarketTime.ToEt(DateTimeOffset.FromUnixTimeSeconds(rmt.GetInt64())).Date == pd)
 				priorCloseVal = spot;
 
 			return Compute(closes, highs, lows, prior, priorCloseVal, spot, asOf);

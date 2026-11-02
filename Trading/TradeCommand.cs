@@ -741,8 +741,7 @@ internal sealed class TradeHistoryCommand : AsyncCommand<TradeHistorySettings>
 		//   neither flag → [today, today+1)
 		//   only --start-date X → [X, X+1)? no — extend through today+1 so "from X to now" works
 		//   only --end-date Y → [Y-1, Y) — single-day window ending at Y
-		var etTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-		var todayEt = TimeZoneInfo.ConvertTime(DateTime.UtcNow, etTz).Date;
+		var todayEt = MarketTime.TodayEt();
 		var dateFmt = "yyyy-MM-dd";
 		var ci = System.Globalization.CultureInfo.InvariantCulture;
 		string startDate, endDate;
@@ -799,14 +798,14 @@ internal sealed class TradeHistoryCommand : AsyncCommand<TradeHistorySettings>
 		{
 			var o = combo.Orders?.FirstOrDefault();
 			if (o == null) continue;
-			RenderHistoryOrder(combo, o, etTz);
+			RenderHistoryOrder(combo, o);
 		}
 		return 0;
 	}
 
-	private static void RenderHistoryOrder(WebullOpenApiClient.OpenOrder combo, WebullOpenApiClient.OrderDetailOrder o, TimeZoneInfo etTz)
+	private static void RenderHistoryOrder(WebullOpenApiClient.OpenOrder combo, WebullOpenApiClient.OrderDetailOrder o)
 	{
-		var when = FormatEtTimestamp(o.FilledTimeAt ?? o.PlaceTimeAt, etTz);
+		var when = FormatEtTimestamp(o.FilledTimeAt ?? o.PlaceTimeAt);
 		var intent = AbbrevPositionIntent(o.PositionIntent) ?? (o.Side ?? "?");
 		var priceSuffix = !string.IsNullOrEmpty(o.FilledPrice) ? $" @ {Markup.Escape(o.FilledPrice!)}" : "";
 		var qty = $"{Markup.Escape(o.FilledQuantity ?? "0")}/{Markup.Escape(o.TotalQuantity ?? "?")}";
@@ -851,11 +850,11 @@ internal sealed class TradeHistoryCommand : AsyncCommand<TradeHistorySettings>
 		_ => null
 	};
 
-	private static string FormatEtTimestamp(string? iso, TimeZoneInfo etTz)
+	private static string FormatEtTimestamp(string? iso)
 	{
 		if (string.IsNullOrEmpty(iso)) return "-";
 		if (!DateTime.TryParse(iso, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var utc)) return iso;
-		return TimeZoneInfo.ConvertTimeFromUtc(utc, etTz).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + " ET";
+		return MarketTime.UtcToEt(utc).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + " ET";
 	}
 
 	private static string ShortenOrderId(string? id) => string.IsNullOrEmpty(id) ? "?" : id.Length <= 10 ? id : id[..8];

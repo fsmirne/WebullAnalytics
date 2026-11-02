@@ -135,13 +135,12 @@ internal sealed class DipAnalysisSettings : CommandSettings
 /// session close. Read-only research; opens no positions.</summary>
 internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan RthOpen = new(9, 30, 0);
 	private static readonly TimeSpan RthClose = new(16, 0, 0);
 
 	protected override async Task<int> ExecuteAsync(CommandContext context, DipAnalysisSettings settings, CancellationToken cancellation)
 	{
-		var nyNow = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, NyTz);
+		var nyNow = MarketTime.ToEt(DateTimeOffset.UtcNow);
 		var since = DateTime.ParseExact(settings.Since, "yyyy-MM-dd", CultureInfo.InvariantCulture);
 		var until = string.IsNullOrWhiteSpace(settings.Until) ? nyNow.Date : DateTime.ParseExact(settings.Until, "yyyy-MM-dd", CultureInfo.InvariantCulture);
 
@@ -163,12 +162,12 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 				{
 					var cache = new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig));
 					var openEt = nyNow.Date + RthOpen;
-					var fromUtc = new DateTimeOffset(openEt, NyTz.GetUtcOffset(openEt)).ToUniversalTime();
+					var fromUtc = new DateTimeOffset(openEt, MarketTime.Zone.GetUtcOffset(openEt)).ToUniversalTime();
 					var todays = await cache.GetBarsAsync(settings.Ticker.ToUpperInvariant(), fromUtc, DateTimeOffset.UtcNow, BarInterval.M1, includeExtended: false, cancellation);
-					var fetched = todays.Where(b => { var et = TimeZoneInfo.ConvertTime(b.Timestamp, NyTz); return et.Date == nyNow.Date && et.TimeOfDay >= RthOpen && et.TimeOfDay < RthClose; }).ToList();
+					var fetched = todays.Where(b => { var et = MarketTime.ToEt(b.Timestamp); return et.Date == nyNow.Date && et.TimeOfDay >= RthOpen && et.TimeOfDay < RthClose; }).ToList();
 					if (fetched.Count > 0)
 					{
-						var replaced = rthBars.RemoveAll(b => TimeZoneInfo.ConvertTime(b.Timestamp, NyTz).Date == nyNow.Date);
+						var replaced = rthBars.RemoveAll(b => MarketTime.ToEt(b.Timestamp).Date == nyNow.Date);
 						rthBars.AddRange(fetched);
 						rthBars.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
 						if (fetched.Count > replaced) AnsiConsole.MarkupLine($"[dim]Today topped up live via Webull ({fetched.Count} RTH bars, {fetched.Count - replaced} new).[/]");
@@ -180,7 +179,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 
 		if (rthBars.Count == 0) { AnsiConsole.MarkupLine("[yellow]No RTH bars in range.[/]"); return 1; }
 
-		var bars = DipSignalAnalyzer.AggregateToMinutes(rthBars, ts => TimeZoneInfo.ConvertTime(ts, NyTz).DateTime, settings.Interval);
+		var bars = DipSignalAnalyzer.AggregateToMinutes(rthBars, ts => MarketTime.ToEt(ts).DateTime, settings.Interval);
 
 		if (!string.IsNullOrWhiteSpace(settings.Dump)) { Dump(bars, settings.Dump); return 0; }
 
@@ -257,7 +256,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 				var c = line.Split(',');
 				if (c.Length < 6) continue;
 				if (!DateTimeOffset.TryParse(c[0], CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var ts)) continue;
-				var et = TimeZoneInfo.ConvertTime(ts, NyTz).TimeOfDay;
+				var et = MarketTime.ToEt(ts).TimeOfDay;
 				if (et < RthOpen || et >= RthClose) continue; // RTH only — SPXW pre/post is SPY-synthetic
 				if (!decimal.TryParse(c[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var o)) continue;
 				if (!decimal.TryParse(c[2], NumberStyles.Any, CultureInfo.InvariantCulture, out var h)) continue;

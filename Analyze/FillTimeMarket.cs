@@ -30,7 +30,6 @@ internal static class FillTimeMarket
 	/// <param name="BookSource">Where the leg books came from (the quote store or ThetaData), for the report header.</param>
 	internal sealed record Snapshot(DateTime Instant, IReadOnlyDictionary<string, OptionContractQuote> Quotes, decimal Spot, decimal SessionHigh, decimal SessionLow, string BookSource);
 
-	private static readonly TimeZoneInfo EtZone = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	public static async Task<(Snapshot? Market, string? Error)> LoadAsync(string ticker, IReadOnlyCollection<string> symbols, DateTime fillEt, IntradayBarCache intradayCache, CancellationToken cancellation)
 	{
@@ -57,8 +56,8 @@ internal static class FillTimeMarket
 
 		// Bars are start-of-bar labeled: those starting before the instant are complete at it, and the last one's
 		// close is the price at the instant.
-		var openUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(fillEt.Date + OptionMath.MarketOpen, EtZone));
-		var instantUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(instant, EtZone));
+		var openUtc = MarketTime.EtToInstant(fillEt.Date + OptionMath.MarketOpen);
+		var instantUtc = MarketTime.EtToInstant(instant);
 		var bars = (await intradayCache.GetBarsAsync(ticker, openUtc, instantUtc, BarInterval.M1, includeExtended: false, cancellation)).Where(b => b.Timestamp < instantUtc).ToList();
 		if (bars.Count == 0) return (null, $"no {ticker} 1-minute bars for {fillEt:yyyy-MM-dd} up to {instant:HH:mm} ET");
 
@@ -100,9 +99,9 @@ internal static class FillTimeMarket
 	/// fetch. Best effort: the backfill logs its own failures, and a session still without bars is reported by the caller.</summary>
 	private static async Task HealPastSessionTapeAsync(string ticker, DateTime sessionEt, CancellationToken cancellation)
 	{
-		var todayEt = TimeZoneInfo.ConvertTime(DateTime.UtcNow, EtZone).Date;
+		var todayEt = MarketTime.TodayEt();
 		if (sessionEt.Date >= todayEt || IntradayTapeBackfill.AuditIntraday(ticker, sessionEt.Date, sessionEt.Date.AddDays(1)).Complete.Contains(sessionEt.Date)) return;
-		await IntradayTapeBackfill.BackfillAsync(ticker, TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(sessionEt.Date.AddHours(12), DateTimeKind.Unspecified), EtZone), DateTime.UtcNow, cancellation, latestNy: sessionEt.Date);
+		await IntradayTapeBackfill.BackfillAsync(ticker, MarketTime.EtToUtc(sessionEt.Date.AddHours(12)), DateTime.UtcNow, cancellation, latestNy: sessionEt.Date);
 	}
 
 	/// <summary>Every leg's book from <paramref name="bookOf"/>, or null when any leg has none.</summary>

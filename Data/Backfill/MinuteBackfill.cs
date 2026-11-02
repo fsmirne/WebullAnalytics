@@ -30,7 +30,6 @@ internal sealed record MinuteBackfillOptions(IReadOnlyList<(string Ticker, int D
 /// in the dataset's known-holes table. Two passes per run: the second retries only what failed in the first.</summary>
 internal sealed class MinuteBackfill(ThetaDataClient client, SqliteConnection db, MinuteDataset dataset, MinuteBackfillOptions options, BackfillLog log)
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	// SQLite is single-writer and the connection isn't thread-safe; the network pulls overlap, the store reads and writes queue here.
 	private readonly SemaphoreSlim _dbGate = new(1, 1);
@@ -518,7 +517,7 @@ internal sealed class MinuteBackfill(ThetaDataClient client, SqliteConnection db
 	}
 
 	/// <summary>The trading calendar's today: sessions, expirations and seals are ET-dated, never machine-local.</summary>
-	internal static DateOnly EtToday() => DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz));
+	internal static DateOnly EtToday() => DateOnly.FromDateTime(MarketTime.NowEt());
 
 	private static string Iso(DateOnly date) => ThetaDataClient.Date(date);
 	private static DateOnly Max(DateOnly a, DateOnly b) => a > b ? a : b;

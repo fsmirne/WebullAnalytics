@@ -6,11 +6,10 @@ namespace WebullAnalytics.Tests.AI.Replay;
 
 public class IntradayBarCacheTests
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	// 2026-05-18 is a Monday. Use 14:30 UTC = 10:30 ET for the test "now".
 	private static DateTimeOffset NyTime(int hour, int minute) =>
-		new DateTimeOffset(new DateTime(2026, 5, 18, hour, minute, 0, DateTimeKind.Unspecified), NyTz.GetUtcOffset(new DateTime(2026, 5, 18, hour, minute, 0)));
+		new DateTimeOffset(new DateTime(2026, 5, 18, hour, minute, 0, DateTimeKind.Unspecified), MarketTime.Zone.GetUtcOffset(new DateTime(2026, 5, 18, hour, minute, 0)));
 
 	private static MinuteBar Bar(DateTimeOffset ts, decimal close = 100m, long volume = 100) =>
 		new MinuteBar(ts.ToUniversalTime(), close, close + 0.5m, close - 0.5m, close, volume);
@@ -100,8 +99,8 @@ public class IntradayBarCacheTests
 			var cache = new IntradayBarCache(fetcher, dir, utcNow: () => NyTime(10, 30));
 
 			// Both bounds within Friday's NY-local session date so the cache only enumerates one date.
-			var fridayOpen = new DateTimeOffset(2026, 5, 15, 9, 30, 0, NyTz.GetUtcOffset(new DateTime(2026, 5, 15)));
-			var fridayClose = new DateTimeOffset(2026, 5, 15, 16, 0, 0, NyTz.GetUtcOffset(new DateTime(2026, 5, 15)));
+			var fridayOpen = new DateTimeOffset(2026, 5, 15, 9, 30, 0, MarketTime.Zone.GetUtcOffset(new DateTime(2026, 5, 15)));
+			var fridayClose = new DateTimeOffset(2026, 5, 15, 16, 0, 0, MarketTime.Zone.GetUtcOffset(new DateTime(2026, 5, 15)));
 			var bars = await cache.GetBarsAsync("SPX", fridayOpen, fridayClose, BarInterval.M1, false, CancellationToken.None);
 
 			Assert.Single(bars);

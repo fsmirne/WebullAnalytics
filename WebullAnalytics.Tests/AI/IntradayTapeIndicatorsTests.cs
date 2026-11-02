@@ -6,10 +6,9 @@ namespace WebullAnalytics.Tests.AI;
 
 public class IntradayTapeIndicatorsTests
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	private static DateTimeOffset NyMoment(int hour, int minute) =>
-		new DateTimeOffset(new DateTime(2026, 5, 18, hour, minute, 0, DateTimeKind.Unspecified), NyTz.GetUtcOffset(new DateTime(2026, 5, 18, hour, minute, 0))).ToUniversalTime();
+		new DateTimeOffset(new DateTime(2026, 5, 18, hour, minute, 0, DateTimeKind.Unspecified), MarketTime.Zone.GetUtcOffset(new DateTime(2026, 5, 18, hour, minute, 0))).ToUniversalTime();
 
 	private static MinuteBar Bar(DateTimeOffset ts, decimal close, long volume = 0) =>
 		new MinuteBar(ts, close, close + 0.5m, close - 0.5m, close, volume);

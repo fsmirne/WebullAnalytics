@@ -20,7 +20,6 @@ namespace WebullAnalytics.AI.Backtest;
 internal sealed class SmileIndexCache
 {
 	private const string Endpoint = "https://cdn.cboe.com/api/global/us_indices/daily_prices/SMILE_History.csv";
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan SettlementCutoff = TimeSpan.FromHours(17);
 
 	private readonly string _cachePath;
@@ -113,7 +112,7 @@ internal sealed class SmileIndexCache
 
 	private DateTime ClampToSettled(DateTime utcNow)
 	{
-		var nowNy = TimeZoneInfo.ConvertTimeFromUtc(utcNow.Kind == DateTimeKind.Utc ? utcNow : DateTime.SpecifyKind(utcNow, DateTimeKind.Utc), NyTz);
+		var nowNy = MarketTime.UtcToEt(utcNow.Kind == DateTimeKind.Utc ? utcNow : DateTime.SpecifyKind(utcNow, DateTimeKind.Utc));
 		return MarketCalendar.PreviousOpenOnOrBefore(nowNy.TimeOfDay >= SettlementCutoff ? nowNy.Date : nowNy.Date.AddDays(-1));
 	}
 

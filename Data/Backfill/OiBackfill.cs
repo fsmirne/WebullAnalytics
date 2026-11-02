@@ -19,7 +19,6 @@ internal sealed record OiBackfillOptions(IReadOnlyList<string> Tickers, DateOnly
 /// every run retries it.</summary>
 internal sealed class OiBackfill(ThetaDataClient client, OiBackfillOptions options, BackfillLog log)
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private readonly UnderlyingCloses _closes = new(client, log);
 
 	internal async Task RunAsync(CancellationToken cancellation)
@@ -127,7 +126,7 @@ internal sealed class OiBackfill(ThetaDataClient client, OiBackfillOptions optio
 			// One settled EOD record per day, stamped 16:00 ET — overwritten whole (idempotent), including an intraday live-capture
 			// snapshot of the same day.
 			var close = new DateTime(day.Year, day.Month, day.Day, 16, 0, 0);
-			var closeEt = new DateTimeOffset(close, NyTz.GetUtcOffset(close));
+			var closeEt = new DateTimeOffset(close, MarketTime.Zone.GetUtcOffset(close));
 			var record = new
 			{
 				tsUtc = closeEt.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ", CultureInfo.InvariantCulture),

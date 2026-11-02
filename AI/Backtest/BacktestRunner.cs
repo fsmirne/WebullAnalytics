@@ -22,7 +22,6 @@ namespace WebullAnalytics.AI.Backtest;
 /// </summary>
 internal sealed class BacktestRunner
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	private readonly AIConfig _config;
 	private readonly SimulatedBook _book;
@@ -657,8 +656,8 @@ internal sealed class BacktestRunner
 			// 09:30 itself belongs to the daily rule pass; the walk owns everything after it.
 			var walkStartEt = step.Date.Add(MarketOpenTime).AddMinutes(1);
 			var walkEndEt = step.Date.Add(MarketCloseTime);
-			var startUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(walkStartEt, NyTz), TimeSpan.Zero);
-			var endUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(walkEndEt, NyTz), TimeSpan.Zero);
+			var startUtc = MarketTime.EtToInstant(walkStartEt);
+			var endUtc = MarketTime.EtToInstant(walkEndEt);
 			var minuteBars = await _intradayBars.GetBarsAsync(ticker, startUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
 			var oneTicker = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker };
 			// Look-ahead quote snapshots. A minute's snapshot depends only on the held set and the store, never on the walk's
@@ -744,7 +743,7 @@ internal sealed class BacktestRunner
 	/// close-of-day vol spike — lookahead). The prior close is both the missing-tape fallback and the base of the day's move.</summary>
 	private async Task<(IReadOnlyList<MinuteBar> Bars, decimal? PriorClose)> LoadVixDayAsync(DateTime step, DateTimeOffset endUtc, CancellationToken cancellation)
 	{
-		var rthStartUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(step.Date.Add(MarketOpenTime), NyTz), TimeSpan.Zero);
+		var rthStartUtc = MarketTime.EtToInstant(step.Date.Add(MarketOpenTime));
 		var bars = await _intradayBars.GetBarsAsync("VIX", rthStartUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
 		decimal? priorClose = null;
 		for (var i = 1; i <= 5 && priorClose == null; i++)
@@ -766,7 +765,7 @@ internal sealed class BacktestRunner
 		return vb.Timestamp == minuteUtc ? vb.Open : vb.Close;
 	}
 
-	private static DateTime MinuteEt(MinuteBar bar) => DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(bar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+	private static DateTime MinuteEt(MinuteBar bar) => MarketTime.ToEt(bar.Timestamp).DateTime;
 
 	/// <summary>Population at a walk minute: still open, and (for today's opens) strictly past their fill minute — live's first
 	/// management look at a fresh open is the tick AFTER the fill.</summary>
@@ -843,7 +842,7 @@ internal sealed class BacktestRunner
 			var symbols = pos.Legs.Where(l => l.CallPut != null).Select(l => l.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
 			if (symbols.Count == 0) { confirmed.Add(r); continue; } // nothing priced to confirm against — don't block on it
 
-			var nextEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(nextBar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+			var nextEt = MarketTime.ToEt(nextBar.Timestamp).DateTime;
 			var nextSpot = nextBar.Close;
 			var nextMinutesToClose = Math.Max(1.0, (endUtc - (nextBar.Timestamp + QuoteStoreCache.BookLag)).TotalMinutes);
 			var nextOverrides = new QuoteOverrides(
@@ -1002,8 +1001,8 @@ internal sealed class BacktestRunner
 		var walkEndEt = step.Date.Add(MarketCloseTime);
 		if (walkStartEt >= walkEndEt) return false;
 
-		var startUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(walkStartEt, NyTz), TimeSpan.Zero);
-		var endUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(walkEndEt, NyTz), TimeSpan.Zero);
+		var startUtc = MarketTime.EtToInstant(walkStartEt);
+		var endUtc = MarketTime.EtToInstant(walkEndEt);
 		var minuteBars = await _intradayBars.GetBarsAsync(pos.Ticker, startUtc, endUtc, BarInterval.M1, includeExtended: false, cancellation);
 		if (minuteBars.Count == 0) return false;
 
@@ -1117,7 +1116,7 @@ internal sealed class BacktestRunner
 			// path — otherwise the SL/TP mark and the close fill diverge from the entry's captured-bar pricing,
 			// producing phantom early exits (e.g. a $1-wide credit spread opened at a captured $0.12 credit but
 			// marked at a Black-Scholes $0.01 → fake ~90% TakeProfit). BS stays the fallback for legs with no bar.
-			var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+			var minuteEt = MarketTime.ToEt(minuteUtc).DateTime;
 			var minuteOverrides = new QuoteOverrides(
 				Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot },
 				ZeroDteTimeYears: minuteZeroDteTimeYears);
@@ -1135,7 +1134,7 @@ internal sealed class BacktestRunner
 			// makes this a benign approximation for 0DTE).
 			if (legInRule != null)
 			{
-				var legInMinuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+				var legInMinuteEt = MarketTime.ToEt(minuteUtc).DateTime;
 				var stillOpen = new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { { pos.Key, pos } };
 				var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot };
 				var emptySignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
@@ -1242,7 +1241,7 @@ internal sealed class BacktestRunner
 			if (mwi + 1 < minuteBars.Count)
 			{
 				var nextBar = minuteBars[mwi + 1];
-				var nextMinuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(nextBar.Timestamp.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+				var nextMinuteEt = MarketTime.ToEt(nextBar.Timestamp).DateTime;
 				var nextSpot = nextBar.Close;
 				var nextMinutesToClose = Math.Max(1.0, (endUtc - (nextBar.Timestamp + QuoteStoreCache.BookLag)).TotalMinutes);
 				var nextOverrides = new QuoteOverrides(
@@ -1426,8 +1425,8 @@ internal sealed class BacktestRunner
 		// minute under our normalized start-of-bar convention; see `MarketOpenTime`).
 		var openEt = new DateTime(step.Date.Year, step.Date.Month, step.Date.Day, 9, 30, 0, DateTimeKind.Unspecified);
 		var closeEt = new DateTime(step.Date.Year, step.Date.Month, step.Date.Day, 16, 0, 0, DateTimeKind.Unspecified);
-		var openUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(openEt, NyTz), TimeSpan.Zero);
-		var closeUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(closeEt, NyTz), TimeSpan.Zero);
+		var openUtc = MarketTime.EtToInstant(openEt);
+		var closeUtc = MarketTime.EtToInstant(closeEt);
 
 		var barsByTicker = new Dictionary<string, IReadOnlyList<MinuteBar>>(StringComparer.OrdinalIgnoreCase);
 		foreach (var t in tickerSet)
@@ -1515,7 +1514,7 @@ internal sealed class BacktestRunner
 		if (!_oracle && (earliestEntry.HasValue || latestEntry.HasValue) && timestampList.Count > 0)
 			timestampList = timestampList.Where(t =>
 			{
-				var tod = TimeZoneInfo.ConvertTime(t, NyTz).TimeOfDay;
+				var tod = MarketTime.ToEt(t).TimeOfDay;
 				return (!earliestEntry.HasValue || tod >= earliestEntry.Value) && (!latestEntry.HasValue || tod <= latestEntry.Value);
 			}).ToList();
 
@@ -1565,7 +1564,7 @@ internal sealed class BacktestRunner
 
 				if (opened >= _topNPerStep) break;
 				if (entryDecided) break;
-				var minuteTimeEt = TimeZoneInfo.ConvertTime(minuteUtc2, NyTz).TimeOfDay;
+				var minuteTimeEt = MarketTime.ToEt(minuteUtc2).TimeOfDay;
 				if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
 				if (latestEntry.HasValue && minuteTimeEt > latestEntry.Value) continue;
 				if (openProposals.Count > 0)
@@ -1618,7 +1617,7 @@ internal sealed class BacktestRunner
 					if (mr == null) continue;
 					var (minuteUtc2, minuteEt, openProposals) = mr.Value;
 
-					var minuteTimeEt = TimeZoneInfo.ConvertTime(minuteUtc2, NyTz).TimeOfDay;
+					var minuteTimeEt = MarketTime.ToEt(minuteUtc2).TimeOfDay;
 					if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
 					if (latestEntry.HasValue && minuteTimeEt > latestEntry.Value) continue;
 					if (openProposals.Count > 0)
@@ -1691,7 +1690,7 @@ internal sealed class BacktestRunner
 
 		// Convert the bar's UTC timestamp back to ET-naive (DateTimeKind.Unspecified) so it matches
 		// the simulator's ET-wall-clock convention.
-		var minuteEt = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(minuteUtc.UtcDateTime, NyTz), DateTimeKind.Unspecified);
+		var minuteEt = MarketTime.ToEt(minuteUtc).DateTime;
 
 		var minuteOverrides = new QuoteOverrides(Spots: minuteSpots, ZeroDteTimeYears: minuteZeroDteTimeYears);
 		var postQuotes = await AIPipelineHelper.FetchQuotesWithHypotheticals(postMgmt, tickerSet, minuteEt, _quotes, _config, cancellation, minuteOverrides);

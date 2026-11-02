@@ -12,7 +12,6 @@ namespace WebullAnalytics.Scraper;
 /// boundary — drop a tick rather than fire late).</summary>
 internal sealed class ScraperLoop
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 	private static readonly TimeSpan MarketOpenEt = new(9, 30, 0);
 	private static readonly TimeSpan MarketCloseEt = new(16, 0, 0);
 
@@ -46,7 +45,7 @@ internal sealed class ScraperLoop
 		var nextFire = firstFire;
 		var ticksRun = 0;
 		var failures = 0;
-		var endLocal = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(endEt, DateTimeKind.Unspecified), NyTz).ToLocalTime();
+		var endLocal = MarketTime.EtToUtc(endEt).ToLocalTime();
 
 		while (!cancellation.IsCancellationRequested && DateTime.Now < endLocal)
 		{
@@ -132,8 +131,8 @@ internal sealed class ScraperLoop
 	/// is the 09:30 fire labeled 09:29 — the auction-boundary row, exactly like ThetaData's.</summary>
 	private async Task<(int Count, decimal? Spot)> TickOnceAsync(DateTime fireWallClock, CancellationToken cancellation)
 	{
-		var fireEt = TimeZoneInfo.ConvertTime(fireWallClock, NyTz);
-		var fireUtc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(fireEt, DateTimeKind.Unspecified), NyTz);
+		var fireEt = MarketTime.ToEt(fireWallClock);
+		var fireUtc = MarketTime.EtToUtc(fireEt);
 
 		// Retry the chain fetch when the vendor returns no contracts for this minute (throttle, dropped
 		// session, transient empty response) OR a degenerate chain with contracts but no usable quotes —
@@ -284,7 +283,7 @@ internal sealed class ScraperLoop
 	/// downstream consumers join against bar timestamps.</summary>
 	private DateTime ComputeFirstFire(DateTime startEt)
 	{
-		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var nowEt = MarketTime.NowEt();
 		var target = startEt > nowEt ? startEt : nowEt;
 		return AlignToBoundary(target, _config.IntervalSeconds, ceilingIfNotAligned: true);
 	}
@@ -296,7 +295,7 @@ internal sealed class ScraperLoop
 	/// fixed-cadence-but-drifting.</summary>
 	private static DateTime AdvanceToNext(DateTime prevFire, int intervalSeconds)
 	{
-		var nowEt = TimeZoneInfo.ConvertTime(DateTime.Now, NyTz);
+		var nowEt = MarketTime.NowEt();
 		var next = prevFire.AddSeconds(intervalSeconds);
 		while (next <= nowEt) next = next.AddSeconds(intervalSeconds);
 		return next;
@@ -314,7 +313,7 @@ internal sealed class ScraperLoop
 	/// computed in local-wall-clock terms (so the OS DST handling matches what TZ conversion did).</summary>
 	private static async Task DelayUntilLocalAsync(DateTime etTarget, CancellationToken ct)
 	{
-		var utcTarget = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(etTarget, DateTimeKind.Unspecified), NyTz);
+		var utcTarget = MarketTime.EtToUtc(etTarget);
 		var localTarget = utcTarget.ToLocalTime();
 		var delay = localTarget - DateTime.Now;
 		if (delay > TimeSpan.Zero)
@@ -323,7 +322,7 @@ internal sealed class ScraperLoop
 
 	private static bool IsMarketOpen(DateTime nowLocal)
 	{
-		var nowEt = TimeZoneInfo.ConvertTime(nowLocal, NyTz);
+		var nowEt = MarketTime.ToEt(nowLocal);
 		if (!MarketCalendar.IsOpen(nowEt.Date)) return false;
 		var t = nowEt.TimeOfDay;
 		return t >= MarketOpenEt && t <= MarketCloseEt;

@@ -34,7 +34,6 @@ internal sealed class AnalyzeTopSettings : CommandSettings
 
 internal sealed class AnalyzeTopCommand : AsyncCommand<AnalyzeTopSettings>
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	protected override async Task<int> ExecuteAsync(CommandContext context, AnalyzeTopSettings settings, CancellationToken cancellation)
 	{
@@ -66,7 +65,7 @@ internal sealed class AnalyzeTopCommand : AsyncCommand<AnalyzeTopSettings>
 			return 1;
 		}
 
-		var asOf = page.UpdatedAt is { } ts ? TimeZoneInfo.ConvertTime(ts, NyTz).ToString("yyyy-MM-dd HH:mm 'ET'", CultureInfo.InvariantCulture) : "unknown";
+		var asOf = page.UpdatedAt is { } ts ? MarketTime.ToEt(ts).ToString("yyyy-MM-dd HH:mm 'ET'", CultureInfo.InvariantCulture) : "unknown";
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).Title($"[bold]Top options by {Markup.Escape(settings.By.ToLowerInvariant())}[/]  [dim]as of {asOf}[/]");
 		table.AddColumn(new TableColumn("#").RightAligned().NoWrap());
 		table.AddColumn(new TableColumn("Underlying").NoWrap());

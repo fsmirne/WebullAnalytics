@@ -25,7 +25,6 @@ namespace WebullAnalytics.AI;
 /// </summary>
 internal sealed class BrokerStateService
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	private readonly TradeAccount _account;
 	// Same-day ledger of orders this machine placed. Webull's today-orders endpoint lags fills by 10+
@@ -144,7 +143,7 @@ internal sealed class BrokerStateService
 
 		if (_ledger != null)
 		{
-			var etToday = TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz).Date;
+			var etToday = MarketTime.TodayEt();
 			MergeLedgerEntries(_ledger.ReadFor(etToday), reportedClientIds, fingerprints, working, rootCount);
 		}
 
@@ -178,7 +177,7 @@ internal sealed class BrokerStateService
 	{
 		var fp = FingerprintProposal(legs);
 		var root = ticker.ToUpperInvariant();
-		try { _ledger?.Append(root, isOpen, fp, clientOrderId, TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz)); }
+		try { _ledger?.Append(root, isOpen, fp, clientOrderId, MarketTime.NowEt()); }
 		catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]local order ledger append failed:[/] {Markup.Escape(ex.Message)} — dedup holds in-memory for this run only."); }
 		if (_activeFingerprintCounts != null)
 			_activeFingerprintCounts[fp] = _activeFingerprintCounts.TryGetValue(fp, out var c) ? c + 1 : 1;

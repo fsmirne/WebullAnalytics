@@ -42,12 +42,11 @@ internal sealed class DataThetaSettings : CommandSettings
 /// the unsupported direct client: its output lines up column-for-column with the Python library's DataFrame.</summary>
 internal sealed class DataThetaCommand : AsyncCommand<DataThetaSettings>
 {
-	private static readonly TimeZoneInfo NyTz = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
 	protected override async Task<int> ExecuteAsync(CommandContext context, DataThetaSettings settings, CancellationToken cancellation)
 	{
 		var contract = OptionContract.FromOcc(settings.Occ)!;
-		var date = settings.Date != null ? DateOnly.ParseExact(settings.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTime.UtcNow, NyTz));
+		var date = settings.Date != null ? DateOnly.ParseExact(settings.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : DateOnly.FromDateTime(MarketTime.NowEt());
 		try
 		{
 			using var client = await ThetaDataClient.ConnectAsync(ThetaDataClient.DefaultCredsPath(), maxConcurrent: 1, stallTimeout: TimeSpan.FromMinutes(3), cancellation);
