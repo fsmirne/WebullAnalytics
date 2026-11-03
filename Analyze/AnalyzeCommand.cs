@@ -692,7 +692,7 @@ internal static class AnalyzeCommon
 
 		// Compute current market roll net: short-roll = new_bid - old_ask; long-roll = old_bid - new_ask.
 		var currentCredit = isLong ? (oldBid ?? 0m) - (newAsk ?? 0m) : (newBid ?? 0m) - (oldAsk ?? 0m);
-		Console.WriteLine($"Current roll net (natural, {sideLabel}): ${currentCredit:N4}/contract = ${currentCredit * qty * 100m:N2} total");
+		Console.WriteLine($"Current roll net (natural, {sideLabel}): ${currentCredit:N4}/share = ${currentCredit * 100m:N2}/contract = ${currentCredit * qty * 100m:N2} total");
 
 		if (!isLong)
 		{
@@ -862,8 +862,8 @@ internal static class AnalyzeCommon
 
 		AnsiConsole.Write(table);
 		var maxDateLabel = isIntraday ? $"at {maxCreditDate:h:mm tt}" : $"on {maxCreditDate:dd MMM}";
-		AnsiConsole.MarkupLine($"  [bold underline green]max net ({sideLabel})[/] (${maxCredit:N4} @ ${maxCreditPrice:N2} {maxDateLabel})    [bold yellow]current price[/]    [green]price with max net[/]");
-		Console.WriteLine($"  Each cell: Close|Open|Net per contract. Total for {qty}x: max ${maxCredit * qty * 100m:N2}");
+		AnsiConsole.MarkupLine($"  [bold underline green]max net ({sideLabel})[/] (${maxCredit:N4}/share @ ${maxCreditPrice:N2} {maxDateLabel})    [bold yellow]current price[/]    [green]price with max net[/]");
+		Console.WriteLine($"  Each cell: Close|Open|Net per share (×100 per contract). Total for {qty}x: max ${maxCredit * qty * 100m:N2}");
 		Console.WriteLine();
 
 		return 0;
