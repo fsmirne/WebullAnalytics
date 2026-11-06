@@ -207,6 +207,8 @@ public static class TableBuilder
 					var legendOrder = string.Join("|", result.Grid.LegLabels);
 					items.Add(new Markup($"[dim]Each cell: {Markup.Escape(legendOrder)}|Net (per share). Legs are Black-Scholes contract values.[/]"));
 				}
+				else if (showLegs && result.Grid.LegLabels != null && result.Grid.LegLabels.Count > 1)
+					items.Add(new Markup($"[dim]Net P&L only — the {result.Grid.LegLabels.Count} per-leg values don't fit this terminal width; widen it to see them.[/]"));
 			}
 			else
 			{

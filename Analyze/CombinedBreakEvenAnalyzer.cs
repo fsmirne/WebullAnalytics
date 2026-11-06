@@ -254,7 +254,7 @@ public static class CombinedBreakEvenAnalyzer
 					.DefaultIfEmpty(0)
 					.Max();
 				var initialMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs, maxLegCount: optionLegs.Count, maxLegValueWidth: maxLegWidth, gridTableOuterBorders: gridTableHasBorder ? 2 : 0);
-				grid = BuildFittedGrid(build, initialMax, terminalWidth, displayMode, showLegs, gridTableHasBorder ? 2 : 0);
+				grid = TimeDecayGridBuilder.BuildFitted(build, initialMax, terminalWidth, displayMode, showLegs, gridTableHasBorder ? 2 : 0);
 			}
 
 			if (stockLeg != null)
@@ -315,37 +315,6 @@ public static class CombinedBreakEvenAnalyzer
 			EntryBasis: netPremium * normalizingQty * 100m,
 			CurrentPnl: combinedCurrentPnl
 		);
-	}
-
-	private static TimeDecayGrid BuildFittedGrid(Func<int, TimeDecayGrid> buildGrid, int initialMaxColumns, int terminalWidth, string displayMode, bool showLegs, int gridTableOuterBorders)
-	{
-		var maxColumns = Math.Max(3, initialMaxColumns);
-		var grid = buildGrid(maxColumns);
-		var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
-
-		while (required > terminalWidth && maxColumns > 3)
-		{
-			maxColumns--;
-			grid = buildGrid(maxColumns);
-			required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
-		}
-
-		for (int i = 0; i < 5; i++)
-		{
-			var tryMax = maxColumns + 1;
-			var expanded = buildGrid(tryMax);
-			if (expanded.DateColumns.Count <= grid.DateColumns.Count)
-				break;
-
-			var expandedRequired = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
-			if (expandedRequired > terminalWidth)
-				break;
-
-			grid = expanded;
-			maxColumns = tryMax;
-		}
-
-		return grid;
 	}
 
 	private static string BuildTitle(string ticker, List<MergedLeg> merged)

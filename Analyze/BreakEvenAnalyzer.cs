@@ -160,7 +160,7 @@ public static class BreakEvenAnalyzer
 			{
 				var legWidth = premium.ToString("N2", CultureInfo.InvariantCulture).Length;
 				var initialMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs, maxLegCount: 1, maxLegValueWidth: legWidth, gridTableOuterBorders: gridTableHasBorder ? 2 : 0);
-				grid = BuildFittedGrid(build, initialMax, terminalWidth, displayMode, showLegs, gridTableHasBorder ? 2 : 0);
+				grid = TimeDecayGridBuilder.BuildFitted(build, initialMax, terminalWidth, displayMode, showLegs, gridTableHasBorder ? 2 : 0);
 			}
 		}
 
@@ -349,7 +349,7 @@ public static class BreakEvenAnalyzer
 					.DefaultIfEmpty(0)
 					.Max();
 				var initialMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs, maxLegCount: parsedLegs.Count, maxLegValueWidth: maxLegWidth, gridTableOuterBorders: gridTableHasBorder ? 2 : 0);
-				grid = BuildFittedGrid(build, initialMax, terminalWidth, displayMode, showLegs, gridTableHasBorder ? 2 : 0);
+				grid = TimeDecayGridBuilder.BuildFitted(build, initialMax, terminalWidth, displayMode, showLegs, gridTableHasBorder ? 2 : 0);
 			}
 		}
 
@@ -441,39 +441,6 @@ public static class BreakEvenAnalyzer
 			return legs.Where(l => l.parsed.ExpiryDate.Date > evaluationExpiry.Date).Any(l => OptionMath.GetLegIv(l.row.Side, l.symbol, opts).HasValue);
 
 		return legs.Any(l => OptionMath.GetLegIv(l.row.Side, l.symbol, opts).HasValue);
-	}
-
-	private static TimeDecayGrid BuildFittedGrid(Func<int, TimeDecayGrid> buildGrid, int initialMaxColumns, int terminalWidth, string displayMode, bool showLegs, int gridTableOuterBorders)
-	{
-		var maxColumns = Math.Max(3, initialMaxColumns);
-		var grid = buildGrid(maxColumns);
-		var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
-
-		while (required > terminalWidth && maxColumns > 3)
-		{
-			maxColumns--;
-			grid = buildGrid(maxColumns);
-			required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
-		}
-
-		// Expand opportunistically if the next date column still fits the terminal width.
-		// This avoids leaving unused space in wide terminals, especially for combined panels.
-		for (int i = 0; i < 5; i++)
-		{
-			var tryMax = maxColumns + 1;
-			var expanded = buildGrid(tryMax);
-			if (expanded.DateColumns.Count <= grid.DateColumns.Count)
-				break;
-
-			var expandedRequired = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
-			if (expandedRequired > terminalWidth)
-				break;
-
-			grid = expanded;
-			maxColumns = tryMax;
-		}
-
-		return grid;
 	}
 
 	private static string? TryFormatQuote(string symbol, AnalysisOptions opts)

@@ -1,5 +1,6 @@
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Utils;
 
 namespace WebullAnalytics.Analyze;
 
@@ -8,6 +9,56 @@ namespace WebullAnalytics.Analyze;
 /// </summary>
 internal static class TimeDecayGridBuilder
 {
+	/// <summary>
+	/// Builds the widest grid (most date columns) whose rendering fits <paramref name="terminalWidth"/>. When even the
+	/// narrowest grid can't fit with per-leg values — a many-leg combined book, where every cell carries one value per leg —
+	/// the leg values are dropped (LegValues null, LegLabels kept so the panel can say so) and the grid is refit on net P&L
+	/// alone. Rendering it anyway made Spectre squeeze every column, the price column included, and wrap each cell over
+	/// several lines.
+	/// </summary>
+	internal static TimeDecayGrid BuildFitted(Func<int, TimeDecayGrid> buildGrid, int initialMaxColumns, int terminalWidth, string displayMode, bool showLegs, int gridTableOuterBorders)
+	{
+		var grid = FitColumns(buildGrid, initialMaxColumns, terminalWidth, displayMode, showLegs, gridTableOuterBorders);
+		if (!showLegs || grid.LegValues == null || TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs: true, gridTableOuterBorders) <= terminalWidth)
+			return grid;
+
+		var netOnlyMax = TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode, showLegs: false, gridTableOuterBorders: gridTableOuterBorders);
+		return FitColumns(cols => buildGrid(cols) with { LegValues = null }, netOnlyMax, terminalWidth, displayMode, showLegs: false, gridTableOuterBorders);
+	}
+
+	private static TimeDecayGrid FitColumns(Func<int, TimeDecayGrid> buildGrid, int initialMaxColumns, int terminalWidth, string displayMode, bool showLegs, int gridTableOuterBorders)
+	{
+		var maxColumns = Math.Max(3, initialMaxColumns);
+		var grid = buildGrid(maxColumns);
+		var required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
+
+		while (required > terminalWidth && maxColumns > 3)
+		{
+			maxColumns--;
+			grid = buildGrid(maxColumns);
+			required = TableBuilder.ComputeTimeDecayGridRequiredWidth(grid, displayMode, showLegs, gridTableOuterBorders);
+		}
+
+		// Expand opportunistically if the next date column still fits the terminal width.
+		// This avoids leaving unused space in wide terminals, especially for combined panels.
+		for (int i = 0; i < 5; i++)
+		{
+			var tryMax = maxColumns + 1;
+			var expanded = buildGrid(tryMax);
+			if (expanded.DateColumns.Count <= grid.DateColumns.Count)
+				break;
+
+			var expandedRequired = TableBuilder.ComputeTimeDecayGridRequiredWidth(expanded, displayMode, showLegs, gridTableOuterBorders);
+			if (expandedRequired > terminalWidth)
+				break;
+
+			grid = expanded;
+			maxColumns = tryMax;
+		}
+
+		return grid;
+	}
+
 	/// <summary>
 	/// Builds a 2D grid of option values across dates and underlying prices.
 	/// </summary>
