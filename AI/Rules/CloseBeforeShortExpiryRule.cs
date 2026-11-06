@@ -10,8 +10,9 @@ namespace WebullAnalytics.AI.Rules;
 ///
 /// Triggers:
 /// 1. Short leg has DTE == 0 (we're inside the expiry session).
-/// 2. Mark-to-market profit on the position is at least <c>minProfitPct</c> of initial debit
-///    (default 30%) — locking in a real win, not bailing on a marginal trade.
+/// 2. Mark-to-market profit on the position (mark − roll-adjusted cost basis) is at least
+///    <c>minProfitPct</c> of the initial debit (default 30%) — locking in a real win, not bailing on a
+///    marginal trade.
 /// 3. Emergency override: spot is past the calendar/diagonal break-even band (with the configured
 ///    buffer), in which case we close regardless of profit threshold — past BE every additional
 ///    tick is realized loss.
@@ -74,15 +75,19 @@ internal sealed class CloseBeforeShortExpiryRule : IManagementRule
 			&& ctx.Now.TimeOfDay < deferUntil)
 			return null;
 
-		// Profit gate: mark-to-market value vs. initial debit.
+		// Profit gate (debit structures only): lifecycle profit = mark − AdjustedNetDebit, the cumulative cost
+		// after roll credits/debits (same basis as TakeProfitRule), as a fraction of the original debit paid.
+		// Measuring against InitialNetDebit ignored roll credits, so a rolled position could never clear the
+		// gate. Credit structures (InitialNetDebit ≤ 0) are not gated here — they never fired under the old
+		// mark − |credit| formula either.
 		var markPerContract = ComputeMarkPerContract(position, ctx);
 		if (markPerContract == null) return null;
 
-		var initialDebit = Math.Abs(position.InitialNetDebit);
+		var initialDebit = position.InitialNetDebit;
 		if (initialDebit <= 0m) return null;
 
 		var effectiveMinProfitPct = regime == ExpiryDayRegime.Amplification ? _config.MinProfitPct * _config.Regime.AmpMinProfitPctFactor : _config.MinProfitPct;
-		var profitPerContract = markPerContract.Value - initialDebit;
+		var profitPerContract = markPerContract.Value - position.AdjustedNetDebit;
 		var profitPct = profitPerContract / initialDebit;
 		if (profitPct < effectiveMinProfitPct) return null;
 

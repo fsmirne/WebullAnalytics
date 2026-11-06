@@ -90,6 +90,21 @@ public class CloseBeforeShortExpiryRuleTests
 	}
 
 	[Fact]
+	public void Fires_OnRolledPosition_WhenProfitAgainstAdjustedBasisClearsThreshold()
+	{
+		var rule = new CloseBeforeShortExpiryRule(DefaultConfig()); // 30% threshold
+		// Opened at 0.50, rolls collected 0.30 → adjusted basis 0.20.
+		var position = GmePutCalendar(initialDebit: 0.50m, adjDebit: 0.20m, qty: 300);
+		// mark = 0.60 - 0.20 = 0.40. Lifecycle profit = 0.40 - 0.20 = 0.20 = 40% of the 0.50 initial debit.
+		// Measured against the initial debit alone (0.40 - 0.50) it would read as a loss.
+		var ctx = CtxOnExpiry(spot: 25.00m, shortMid: 0.20m, longMid: 0.60m, position: position);
+		var p = rule.Evaluate(position, ctx);
+		Assert.NotNull(p);
+		Assert.Equal(ProposalKind.Close, p!.Kind);
+		Assert.Contains("40.0%", p.Rationale);
+	}
+
+	[Fact]
 	public void EmergencyClose_FiresPastLowerBreakEven_RegardlessOfProfit()
 	{
 		var rule = new CloseBeforeShortExpiryRule(DefaultConfig());
