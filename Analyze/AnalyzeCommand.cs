@@ -827,7 +827,7 @@ internal static class AnalyzeCommon
 		table.AddColumn(new TableColumn("[bold]Price[/]").RightAligned().NoWrap());
 		foreach (var t in evalTimes)
 		{
-			var label = isIntraday ? t.ToString("h tt") : (t == evalTimes[^1] ? "At Exp" : t.ToString("dd MMM"));
+			var label = isIntraday ? t.ToString("h tt") : TableBuilder.DateColumnHeaderMarkup(t, t == evalTimes[^1]);
 			table.AddColumn(new TableColumn($"[bold]{label}[/]").RightAligned().NoWrap());
 		}
 

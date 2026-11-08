@@ -290,6 +290,17 @@ public static class TableBuilder
 		return new Markup(markup);
 	}
 
+	/// <summary>Plain-text header for a time-decay grid date column: "At Exp" for the terminal (expiry-close) column, else "dd MMM".</summary>
+	internal static string DateColumnLabel(DateTime date, bool atExpiry) => atExpiry ? "At Exp" : date.ToString("dd MMM", CultureInfo.InvariantCulture);
+
+	/// <summary>Markup header for a time-decay grid date column: a day the market is closed (weekend or NYSE holiday) renders grey so
+	/// non-tradable columns stand out from sessions where the position can actually be traded.</summary>
+	internal static string DateColumnHeaderMarkup(DateTime date, bool atExpiry)
+	{
+		var label = DateColumnLabel(date, atExpiry);
+		return MarketCalendar.IsOpen(date.Date) ? label : $"[grey]{label}[/]";
+	}
+
 	private static Table BuildTimeDecayGridTable(TimeDecayGrid grid, List<decimal> breakEvens, decimal? underlyingPrice, string displayMode, TableBorder? tableBorder, bool showLegs = false)
 	{
 		var showPnL = displayMode == "pnl";
@@ -299,10 +310,7 @@ public static class TableBuilder
 
 		table.AddColumn(new TableColumn("Price").RightAligned().NoWrap());
 		foreach (var date in grid.DateColumns)
-		{
-			var label = date == grid.DateColumns[^1] ? "At Exp" : date.ToString("dd MMM", CultureInfo.InvariantCulture);
-			table.AddColumn(new TableColumn(label).RightAligned().NoWrap());
-		}
+			table.AddColumn(new TableColumn(DateColumnHeaderMarkup(date, date == grid.DateColumns[^1])).RightAligned().NoWrap());
 
 		// Pre-format all leg/net text and compute per-segment max widths so that slashes line up vertically across rows.
 		// Use a figure space (U+2007) for padding: it is the width of a digit in monospace fonts and is not collapsed by Spectre's markup renderer.
@@ -674,9 +682,7 @@ public static class TableBuilder
 		for (int di = 0; di < grid.DateColumns.Count; di++)
 		{
 			var date = grid.DateColumns[di];
-			var header = date == grid.DateColumns[^1]
-				? "At Exp"
-				: date.ToString("dd MMM", CultureInfo.InvariantCulture);
+			var header = DateColumnLabel(date, date == grid.DateColumns[^1]);
 
 			var perColMax = Math.Max(header.Length, globalNetWidth);
 			if (legCount > 0)
