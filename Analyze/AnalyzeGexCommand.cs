@@ -196,6 +196,11 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var analyzeConfig = Program.LoadAppConfig("analyze");
 		if (analyzeConfig != null) settings.ApplyViewConfig(analyzeConfig);
 
+		return await settings.RunWithOutputAsync("AnalyzeGex", () => RenderAsync(settings, cancellation));
+	}
+
+	private static async Task<int> RenderAsync(AnalyzeGexSettings settings, CancellationToken cancellation)
+	{
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var ticker = settings.Ticker.ToUpperInvariant();

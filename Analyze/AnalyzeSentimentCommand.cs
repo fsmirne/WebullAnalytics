@@ -22,6 +22,11 @@ internal sealed class AnalyzeSentimentCommand : AsyncCommand<AnalyzeSentimentSet
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
+		return await settings.RunWithOutputAsync("AnalyzeSentiment", () => RenderAsync(settings, cancellation));
+	}
+
+	private static async Task<int> RenderAsync(AnalyzeSentimentSettings settings, CancellationToken cancellation)
+	{
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var asOf = settings.EvaluationDateOverride ?? DateTime.Now;

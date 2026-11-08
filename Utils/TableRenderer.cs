@@ -39,10 +39,7 @@ public static class TableRenderer
 				}
 			}
 
-			int terminalWidth;
-			try { terminalWidth = Console.WindowWidth; }
-			catch { terminalWidth = 200; }
-			WriteBreakEvenPanels(console, positions, opts, range, terminalWidth, displayMode, showLegs, ascii: false);
+			WriteBreakEvenPanels(console, positions, opts, range, displayMode, showLegs, ascii: false);
 		}
 		else
 		{
@@ -55,8 +52,11 @@ public static class TableRenderer
 
 	/// <summary>The time-decay break-even panel of every position, each ticker's combined panel following its last position —
 	/// the grid section shared by `report` (console and text) and `analyze trade`, which renders nothing else.</summary>
-	internal static void WriteBreakEvenPanels(IAnsiConsole console, List<PositionRow> positions, AnalysisOptions opts, decimal range, int terminalWidth, string displayMode, bool showLegs, bool ascii)
+	/// <summary>Grids are fitted to <paramref name="console"/>'s own width, so a capture console (text export) and the
+	/// terminal each get a layout that fits what they actually render.</summary>
+	internal static void WriteBreakEvenPanels(IAnsiConsole console, List<PositionRow> positions, AnalysisOptions opts, decimal range, string displayMode, bool showLegs, bool ascii)
 	{
+		var terminalWidth = console.Profile.Width;
 		var box = ascii ? BoxBorder.Ascii : BoxBorder.Rounded;
 		var border = ascii ? TableBorder.Ascii : TableBorder.Rounded;
 		// Grids render with an outer-bordered table, whose left/right borders cost 2 chars; the width estimate must

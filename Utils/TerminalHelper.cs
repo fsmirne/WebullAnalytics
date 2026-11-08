@@ -41,6 +41,11 @@ static class TerminalHelper
 	/// </summary>
 	public static void EnsureTerminalWidth(bool simplified = false, bool autoExpand = false, int? maxWidth = null)
 	{
+		// Captured/redirected output (--output text, a pipe) has no terminal to resize and can't answer the prompt;
+		// its layout is sized from the capture console's own width instead.
+		if (!AnsiConsole.Profile.Capabilities.Interactive)
+			return;
+
 		var minimumWidth = simplified ? SimplifiedMinWidth : DetailedMinWidth;
 		if (maxWidth.HasValue)
 			minimumWidth = Math.Min(minimumWidth, maxWidth.Value);

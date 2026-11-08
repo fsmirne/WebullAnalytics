@@ -11,6 +11,9 @@ internal sealed class AIConfigShowSettings : AISingleTickerSubcommandSettings { 
 internal sealed class AIConfigShowCommand : AsyncCommand<AIConfigShowSettings>
 {
 	protected override Task<int> ExecuteAsync(CommandContext context, AIConfigShowSettings settings, CancellationToken cancellationToken)
+		=> AITextOutput.RunAsync(settings, "AIConfigShow", () => Show(settings));
+
+	private static Task<int> Show(AIConfigShowSettings settings)
 	{
 		var layers = AIContext.ResolveLayers(settings, out var ticker, out var strategy);
 		if (layers == null) return Task.FromResult(1);

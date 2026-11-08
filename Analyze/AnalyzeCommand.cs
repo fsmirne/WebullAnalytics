@@ -94,16 +94,13 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		if (settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase))
 		{
 			var writer = new StringWriter();
-			TableRenderer.WriteBreakEvenPanels(TextFileExporter.CreateTextConsole(writer), positionRows, opts, settings.Range, terminalWidth: 200, displayMode, settings.ShowLegs, ascii: true);
+			TableRenderer.WriteBreakEvenPanels(TextFileExporter.CreateTextConsole(writer), positionRows, opts, settings.Range, displayMode, settings.ShowLegs, ascii: true);
 			TextFileExporter.WriteConsoleOutputToTextFile(writer, settings.OutputPath ?? AnalyzeCommon.DefaultTextOutputName("trade"), "Trade analysis exported to");
 			return 0;
 		}
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
-		int terminalWidth;
-		try { terminalWidth = Console.WindowWidth; }
-		catch { terminalWidth = 200; }
-		TableRenderer.WriteBreakEvenPanels(AnsiConsole.Console, positionRows, opts, settings.Range, terminalWidth, displayMode, settings.ShowLegs, ascii: false);
+		TableRenderer.WriteBreakEvenPanels(AnsiConsole.Console, positionRows, opts, settings.Range, displayMode, settings.ShowLegs, ascii: false);
 		return 0;
 	}
 
@@ -151,16 +148,9 @@ internal sealed class AnalyzeRollSettings : AnalyzeBaseSettings
 	[Description("Grid granularity: rows per strike gap in the roll-credit grid. Default 0 = auto. Pass a positive value to override (higher = more rows).")]
 	public decimal Range { get; set; } = 0;
 
-	[CommandOption("--view")]
-	[DefaultValue("detailed")]
-	[Description("Grid width: 'detailed' (default) or 'simplified' (narrower terminal layout)")]
-	public string View { get; set; } = "detailed";
-
 	[CommandOption("--levels")]
 	[Description("Additional reference price levels to show in the roll-credit grid. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30)")]
 	public string? Levels { get; set; }
-
-	public bool Simplified => View.Equals("simplified", StringComparison.OrdinalIgnoreCase);
 
 	public override ValidationResult Validate()
 	{
@@ -230,10 +220,6 @@ internal sealed class AnalyzeRollSettings : AnalyzeBaseSettings
 		if (Range < 0)
 			return ValidationResult.Error("--range must be 0 (auto) or a positive number");
 
-		var view = View.ToLowerInvariant();
-		if (view is not ("detailed" or "simplified"))
-			return ValidationResult.Error("--view must be 'detailed' or 'simplified'");
-
 		if (Levels != null)
 		{
 			foreach (var pair in Levels.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -266,7 +252,7 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
 		}
 
-		return await AnalyzeCommon.RunRollAnalysis(settings, cancellation);
+		return await settings.RunWithOutputAsync("AnalyzeRoll", () => AnalyzeCommon.RunRollAnalysis(settings, cancellation));
 	}
 }
 
@@ -593,6 +579,11 @@ internal static class AnalyzeCommon
 		return result;
 	}
 
+	/// <summary>Rendered width of the roll grid's bordered table: 1 (left border) + (price column + 2 padding + 1 separator)
+	/// + per date column (old|new|net cell, min 6, + 2 padding + 1 separator).</summary>
+	private static int RollGridTableWidth(int priceColWidth, int dateColumns, int oldWidth, int newWidth, int creditWidth)
+		=> 1 + priceColWidth + 3 + dateColumns * (Math.Max(6, oldWidth + 1 + newWidth + 1 + creditWidth) + 3);
+
 	internal static async Task<int> RunRollAnalysis(AnalyzeRollSettings settings, CancellationToken cancellation)
 	{
 		TerminalHelper.EnsureTerminalWidthFromConfig();
@@ -737,8 +728,9 @@ internal static class AnalyzeCommon
 		// Each cell renders old|new|net, so size columns based on the widest leg/credit text rather than
 		// the strike string length. This avoids overestimating how many date columns fit and prevents the
 		// last columns from wrapping in narrower detailed windows.
-		var terminalWidth = settings.Simplified ? TerminalHelper.SimplifiedMinWidth : TerminalHelper.DetailedMinWidth;
-		try { terminalWidth = Math.Max(terminalWidth, Console.WindowWidth); } catch { /* use default */ }
+		// Fit to the console the grid is rendered on (the terminal, or the --output text capture). Flooring this at a
+		// nominal minimum made the fitter pick more columns than a narrower render target holds, and Spectre squeezed them.
+		var terminalWidth = AnsiConsole.Profile.Width;
 		var maxLegValueWidth = Math.Max(oldBid ?? 0m, Math.Max(oldAsk ?? 0m, Math.Max(newBid ?? 0m, newAsk ?? 0m))).ToString("N2", CultureInfo.InvariantCulture).Length;
 		var maxCols = Math.Max(3, TableBuilder.ComputeMaxGridColumns(terminalWidth, displayMode: "value", showLegs: true, maxLegCount: 2, maxLegValueWidth: maxLegValueWidth, gridTableOuterBorders: 2));
 
@@ -804,19 +796,26 @@ internal static class AnalyzeCommon
 		var (oldGrid, newGrid, creditGrid, maxCredit, maxCreditPrice, maxCreditDate, oldWidth, newWidth, creditWidth) =
 			ComputeRollGrid(priceList, evalTimes, oldParsed, newParsed, oldExpiry, newExpiry, isLong, oldIv.Value, newIv.Value, rfr, today);
 
-		// Opportunistically expand date columns using actual cell widths (mirrors BuildFittedGrid in BreakEvenAnalyzer).
+		// Fit date columns to the render width using the actual cell widths (mirrors TimeDecayGridBuilder.BuildFitted). The
+		// initial maxCols comes from the current quotes' value width, which understates cells deep in the money (a $13.17
+		// leg vs a $2.46 quote), so shrink first until the measured table fits, then expand opportunistically.
 		if (!isIntraday)
 		{
 			var priceColWidth = priceList.Max(p => $"${p:N2}".Length);
+			while (maxCols > 3 && RollGridTableWidth(priceColWidth, evalTimes.Count, oldWidth, newWidth, creditWidth) > terminalWidth)
+			{
+				maxCols--;
+				evalTimes = TimeDecayGridBuilder.BuildDateColumns(oldExpiry, maxCols);
+				(oldGrid, newGrid, creditGrid, maxCredit, maxCreditPrice, maxCreditDate, oldWidth, newWidth, creditWidth) =
+					ComputeRollGrid(priceList, evalTimes, oldParsed, newParsed, oldExpiry, newExpiry, isLong, oldIv.Value, newIv.Value, rfr, today);
+			}
+
 			for (int extra = 1; extra <= 5; extra++)
 			{
 				var moreTimes = TimeDecayGridBuilder.BuildDateColumns(oldExpiry, maxCols + extra);
 				if (moreTimes.Count <= evalTimes.Count) break;
 				var (og2, ng2, cg2, mc2, mcp2, mcd2, ow2, nw2, cw2) = ComputeRollGrid(priceList, moreTimes, oldParsed, newParsed, oldExpiry, newExpiry, isLong, oldIv.Value, newIv.Value, rfr, today);
-				var cellW = Math.Max(6, ow2 + 1 + nw2 + 1 + cw2);
-				// Rounded Spectre table: 1 (left\u2502) + (priceColWidth+2+1) + N*(cellW+2+1)
-				var tableW = 1 + priceColWidth + 3 + moreTimes.Count * (cellW + 3);
-				if (tableW > terminalWidth) break;
+				if (RollGridTableWidth(priceColWidth, moreTimes.Count, ow2, nw2, cw2) > terminalWidth) break;
 				(evalTimes, oldGrid, newGrid, creditGrid, maxCredit, maxCreditPrice, maxCreditDate, oldWidth, newWidth, creditWidth) =
 					(moreTimes, og2, ng2, cg2, mc2, mcp2, mcd2, ow2, nw2, cw2);
 			}

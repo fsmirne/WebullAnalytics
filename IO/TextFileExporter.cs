@@ -16,7 +16,7 @@ public static partial class TextFileExporter
 	[GeneratedRegex(@"^(Webull|Yahoo): .*(\r?\n)?", RegexOptions.Multiline)]
 	private static partial Regex ProviderStatusLineRegex();
 
-	public static IAnsiConsole CreateTextConsole(StringWriter stringWriter, int width = 200)
+	public static IAnsiConsole CreateTextConsole(StringWriter stringWriter, int width = TerminalHelper.DetailedMinWidth)
 	{
 		var settings = new AnsiConsoleSettings
 		{
@@ -29,6 +29,39 @@ public static partial class TextFileExporter
 		var console = AnsiConsole.Create(settings);
 		console.Profile.Width = width;
 		return console;
+	}
+
+	/// <summary>Runs <paramref name="action"/> with stdout and the static <see cref="AnsiConsole"/> redirected into a
+	/// <see cref="CreateTextConsole"/> buffer, then writes the buffer to <paramref name="outputPath"/>. Every layout fitter
+	/// sizes itself from <c>AnsiConsole.Profile.Width</c>, so the captured report is laid out for the file's width rather
+	/// than squeezed into whatever the real terminal (or an 80-column pipe) reports. Stderr is held and replayed to the
+	/// real stderr afterwards so warnings and errors stay out of the file but still reach the user.</summary>
+	public static async Task<int> CaptureToFileAsync(string outputPath, string exportMessage, Func<Task<int>> action)
+	{
+		var originalOut = Console.Out;
+		var originalErr = Console.Error;
+		var originalAnsi = AnsiConsole.Console;
+		using var stringWriter = new StringWriter();
+		using var stderrWriter = new StringWriter();
+		AnsiConsole.Console = CreateTextConsole(stringWriter);
+		Console.SetOut(stringWriter);
+		Console.SetError(stderrWriter);
+		int exitCode;
+		try
+		{
+			exitCode = await action();
+		}
+		finally
+		{
+			Console.SetOut(originalOut);
+			Console.SetError(originalErr);
+			AnsiConsole.Console = originalAnsi;
+		}
+
+		if (stderrWriter.GetStringBuilder().Length > 0)
+			originalErr.Write(stderrWriter.ToString());
+		WriteConsoleOutputToTextFile(stringWriter, outputPath, exportMessage);
+		return exitCode;
 	}
 
 	public static void WriteConsoleOutputToTextFile(StringWriter stringWriter, string outputPath, string exportMessage)
@@ -45,7 +78,7 @@ public static partial class TextFileExporter
 	public static void ExportToTextFile(List<ReportRow> rows, List<PositionRow> positions, Dictionary<string, List<Lot>> lotsByMatchKey, decimal running, decimal initialAmount, string outputPath, bool simplified, AnalysisOptions opts, decimal range = 2, string displayMode = "pnl", List<PriceBreakdown>? adjustmentBreakdowns = null, bool showLegs = false)
 	{
 		var stringWriter = new StringWriter();
-		var console = CreateTextConsole(stringWriter);
+		var console = CreateTextConsole(stringWriter, simplified ? TerminalHelper.SimplifiedMinWidth : TerminalHelper.DetailedMinWidth);
 
 		if (rows.Count > 0)
 		{
@@ -71,7 +104,7 @@ public static partial class TextFileExporter
 				}
 			}
 
-			TableRenderer.WriteBreakEvenPanels(console, positions, opts, range, terminalWidth: 200, displayMode, showLegs, ascii: true);
+			TableRenderer.WriteBreakEvenPanels(console, positions, opts, range, displayMode, showLegs, ascii: true);
 		}
 		else
 		{

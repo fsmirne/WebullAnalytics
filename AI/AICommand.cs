@@ -103,37 +103,8 @@ internal abstract class AILiveTickerSubcommandSettings : AISingleTickerSubcomman
 
 internal static class AITextOutput
 {
-	internal static async Task<int> RunAsync(AISubcommandSettings settings, string stem, Func<Task<int>> action)
-	{
-		if (!settings.UseTextOutput)
-			return await action();
-
-		var originalOut = Console.Out;
-		var originalErr = Console.Error;
-		using var stringWriter = new StringWriter();
-		using var stderrWriter = new StringWriter();
-		var console = TextFileExporter.CreateTextConsole(stringWriter);
-		AnsiConsole.Console = console;
-		Console.SetOut(stringWriter);
-		Console.SetError(stderrWriter);
-		int exitCode;
-		try
-		{
-			exitCode = await action();
-		}
-		finally
-		{
-			Console.SetOut(originalOut);
-			Console.SetError(originalErr);
-			AnsiConsole.Console = AnsiConsole.Create(new AnsiConsoleSettings());
-		}
-
-		if (stderrWriter.GetStringBuilder().Length > 0)
-			originalErr.Write(stderrWriter.ToString());
-		var outputPath = settings.ResolveTextOutputPath(stem);
-		TextFileExporter.WriteConsoleOutputToTextFile(stringWriter, outputPath, "Text AI output exported to");
-		return exitCode;
-	}
+	internal static Task<int> RunAsync(AISubcommandSettings settings, string stem, Func<Task<int>> action)
+		=> settings.UseTextOutput ? TextFileExporter.CaptureToFileAsync(settings.ResolveTextOutputPath(stem), "Text AI output exported to", action) : action();
 }
 
 internal static class AIContext
@@ -680,6 +651,7 @@ internal sealed class AIReplaySettings : AISingleTickerSubcommandSettings
 internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 {
 	protected override async Task<int> ExecuteAsync(CommandContext context, AIReplaySettings settings, CancellationToken cancellation)
+		=> await AITextOutput.RunAsync(settings, "AIReplay", async () =>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
@@ -716,7 +688,7 @@ internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 
 		var runner = new Replay.ReplayRunner(config, positions, quotes, trades, priceCache);
 		return await runner.RunAsync(since, until, settings.Granularity, cancellation);
-	}
+	});
 }
 
 /// <summary>`ai backtest` — simulate opening/managing positions from scratch over a historical window

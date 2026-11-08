@@ -44,6 +44,11 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	[Description("Path for output file (used with --output text)")]
 	public string? OutputPath { get; set; }
 
+	/// <summary>Runs a subcommand body under <c>--output text</c> when requested: everything it writes to the console is
+	/// captured into <c>--output-path</c> (default WebullAnalytics_<paramref name="label"/>_yyyyMMdd.txt) instead.</summary>
+	internal Task<int> RunWithOutputAsync(string label, Func<Task<int>> action)
+		=> OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase) ? WebullAnalytics.IO.TextFileExporter.CaptureToFileAsync(OutputPath ?? AnalyzeCommon.DefaultTextOutputName(label), "Text output exported to", action) : action();
+
 	internal DateTime? EvaluationDateOverride =>
 		Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
 
