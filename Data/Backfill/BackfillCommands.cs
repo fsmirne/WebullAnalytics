@@ -82,13 +82,6 @@ internal sealed class QuotesBackfillSettings : MinuteBackfillSettings
 	public bool Supplement { get; set; }
 }
 
-internal sealed class OhlcvBackfillSettings : MinuteBackfillSettings
-{
-	[CommandOption("--range <N>")]
-	[Description("Server-side ATM strike window: n listed strikes above/below ATM, trimming the endpoint's dense zero-volume grid before transfer. Default 80 (about ±20% on a $1 grid — wider than the ±10% band even across a crash week); 0 = full chain.")]
-	public int Range { get; set; } = 80;
-}
-
 internal sealed class OiBackfillSettings : BackfillSettings
 {
 	[CommandOption("--dte <DAYS>")]
@@ -113,14 +106,14 @@ internal sealed class OiBackfillSettings : BackfillSettings
 internal sealed class QuotesBackfillCommand : AsyncCommand<QuotesBackfillSettings>
 {
 	protected override Task<int> ExecuteAsync(CommandContext context, QuotesBackfillSettings settings, CancellationToken cancellation) =>
-		BackfillRunner.RunMinuteAsync(MinuteDataset.Quotes, settings, settings.Supplement, strikeRange: null, cancellation);
+		BackfillRunner.RunMinuteAsync(MinuteDataset.Quotes, settings, settings.Supplement, cancellation);
 }
 
 /// <summary>`wa data backfill ohlcv`: minute trade bars from ThetaData into data/quotes.db's ohlcv table.</summary>
-internal sealed class OhlcvBackfillCommand : AsyncCommand<OhlcvBackfillSettings>
+internal sealed class OhlcvBackfillCommand : AsyncCommand<MinuteBackfillSettings>
 {
-	protected override Task<int> ExecuteAsync(CommandContext context, OhlcvBackfillSettings settings, CancellationToken cancellation) =>
-		BackfillRunner.RunMinuteAsync(MinuteDataset.Ohlcv, settings, supplement: false, settings.Range > 0 ? settings.Range : null, cancellation);
+	protected override Task<int> ExecuteAsync(CommandContext context, MinuteBackfillSettings settings, CancellationToken cancellation) =>
+		BackfillRunner.RunMinuteAsync(MinuteDataset.Ohlcv, settings, supplement: false, cancellation);
 }
 
 /// <summary>`wa data backfill oi`: daily full-chain EOD + open interest into data/oi (see <see cref="OiBackfill"/>).</summary>
@@ -140,12 +133,12 @@ internal sealed class OiBackfillCommand : AsyncCommand<OiBackfillSettings>
 
 internal static class BackfillRunner
 {
-	internal static async Task<int> RunMinuteAsync(MinuteDataset dataset, MinuteBackfillSettings settings, bool supplement, int? strikeRange, CancellationToken cancellation)
+	internal static async Task<int> RunMinuteAsync(MinuteDataset dataset, MinuteBackfillSettings settings, bool supplement, CancellationToken cancellation)
 	{
 		using var log = new BackfillLog(dataset.Name, settings.Log);
 		var dbPath = settings.Db ?? Program.ResolvePath("data/quotes.db");
-		log.Info($"{dataset.Name} store = {dbPath} (minute, ±{settings.Band:P0} band, per-ticker DTE{(strikeRange is int r ? $", server strike window ±{r}" : "")})");
-		var options = new MinuteBackfillOptions(settings.TickerDtes, settings.StartDate, settings.EndDate, settings.Chunk, settings.Concurrency, settings.Band, supplement, strikeRange);
+		log.Info($"{dataset.Name} store = {dbPath} (minute, ±{settings.Band:P0} band, per-ticker DTE)");
+		var options = new MinuteBackfillOptions(settings.TickerDtes, settings.StartDate, settings.EndDate, settings.Chunk, settings.Concurrency, settings.Band, supplement);
 		return await WithSessionAsync(log, settings.Concurrency, settings.Timeout, async client =>
 		{
 			using var db = QuoteStoreSchema.OpenWal(dbPath);

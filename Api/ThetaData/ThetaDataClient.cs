@@ -27,11 +27,17 @@ internal sealed class ThetaStallException(string message) : TimeoutException(mes
 /// if it's free; dispose to release both. Concurrent calls on one instance share the session (the library's
 /// existing_authorized_client pattern) and are capped at the tier's in-flight limit. Responses stream as chunks; a call that
 /// receives no chunk for the stall timeout is cancelled with <see cref="ThetaStallException"/>. A stall bound rather than a
-/// whole-call deadline because a large minute window legitimately streams for minutes.</summary>
+/// whole-call deadline because a large minute window legitimately streams for minutes.
+///
+/// The endpoints' strike_range parameter (n listed strikes either side of ATM) is deliberately not exposed. Its ATM is each day's
+/// PRIOR close and its reach is in listed strikes, so a fixed n can't be sized to a band around the day's own spot: n = 80 cut
+/// SPXW (5-point grid) to ±400 points and dropped 17.6% of the in-band traded bars of the 2026-11-05 selloff, some on every day.
+/// It doesn't buy speed on the minute pulls either — a 5-day SPY minute-quote window takes ~17-25 s whether it returns 23k rows
+/// or 927k (measured 2026-11-09), the cost being the server's. Every chain request takes the whole chain and bands client-side.</summary>
 internal sealed class ThetaDataClient : IDisposable
 {
 	/// <summary>The thetadata library version the protos and request shapes were taken from.</summary>
-	internal const string LibraryVersion = "1.0.15";
+	internal const string LibraryVersion = "1.0.17";
 
 	private const string AuthUrl = "https://nexus-api.thetadata.us/identity/terminal/auth_user";
 	// The library sends this fixed key on every sign-in; it identifies the client software, not the account.
@@ -125,18 +131,11 @@ internal sealed class ThetaDataClient : IDisposable
 		return Stream(options => _stub.GetOptionHistoryQuote(request, options), cancellation);
 	}
 
-	/// <summary>option_history_ohlc: trade bars per <paramref name="interval"/> for one expiration over [start, end]. A
-	/// <paramref name="strikeRange"/> trims the chain server-side to that many listed strikes either side of ATM.</summary>
-	internal IAsyncEnumerable<ThetaTable> OptionHistoryOhlc(OptionContract contract, string interval, DateOnly startDate, DateOnly endDate, int? strikeRange, CancellationToken cancellation)
+	/// <summary>option_history_ohlc: trade bars per <paramref name="interval"/> for one expiration over [start, end].</summary>
+	internal IAsyncEnumerable<ThetaTable> OptionHistoryOhlc(OptionContract contract, string interval, DateOnly startDate, DateOnly endDate, CancellationToken cancellation)
 	{
 		var query = new OptionHistoryOhlcRequestQuery { ContractSpec = contract.Spec(), Interval = interval, StartTime = SessionStart, EndTime = SessionEnd, StartDate = Date(startDate), EndDate = Date(endDate) };
-		(string, string)[] parameters = [.. contract.Parameters(), ("interval", interval), ("start_time", SessionStart), ("end_time", SessionEnd), ("start_date", Date(startDate)), ("end_date", Date(endDate))];
-		if (strikeRange is int range)
-		{
-			query.StrikeRange = range;
-			parameters = [.. parameters, ("strike_range", range.ToString(CultureInfo.InvariantCulture))];
-		}
-		var request = new OptionHistoryOhlcRequest { QueryInfo = Info(parameters), Params = query };
+		var request = new OptionHistoryOhlcRequest { QueryInfo = Info([.. contract.Parameters(), ("interval", interval), ("start_time", SessionStart), ("end_time", SessionEnd), ("start_date", Date(startDate)), ("end_date", Date(endDate))]), Params = query };
 		return Stream(options => _stub.GetOptionHistoryOhlc(request, options), cancellation);
 	}
 
@@ -162,13 +161,12 @@ internal sealed class ThetaDataClient : IDisposable
 
 	/// <summary>option_at_time_quote: the last NBBO at <paramref name="timeOfDay"/> ET on each date in [start, end]. ThetaData warns
 	/// that sub-minute times can make the request hang; pass minute boundaries. With a wildcard expiration, <paramref name="maxDte"/> keeps
-	/// expirations within that many days of each date and <paramref name="strikeRange"/> keeps that many listed strikes either side of ATM.</summary>
-	internal IAsyncEnumerable<ThetaTable> OptionAtTimeQuote(OptionContract contract, DateOnly startDate, DateOnly endDate, TimeOnly timeOfDay, CancellationToken cancellation, int? maxDte = null, int? strikeRange = null)
+	/// expirations within that many days of each date.</summary>
+	internal IAsyncEnumerable<ThetaTable> OptionAtTimeQuote(OptionContract contract, DateOnly startDate, DateOnly endDate, TimeOnly timeOfDay, CancellationToken cancellation, int? maxDte = null)
 	{
 		var query = new OptionAtTimeQuoteRequestQuery { ContractSpec = contract.Spec(), StartDate = Date(startDate), EndDate = Date(endDate), TimeOfDay = Time(timeOfDay) };
 		(string, string)[] parameters = [.. contract.Parameters(), ("start_date", Date(startDate)), ("end_date", Date(endDate)), ("time_of_day", Time(timeOfDay))];
 		if (maxDte is int dte) { query.MaxDte = dte; parameters = [.. parameters, ("max_dte", dte.ToString(CultureInfo.InvariantCulture))]; }
-		if (strikeRange is int range) { query.StrikeRange = range; parameters = [.. parameters, ("strike_range", range.ToString(CultureInfo.InvariantCulture))]; }
 		var request = new OptionAtTimeQuoteRequest { QueryInfo = Info(parameters), Params = query };
 		return Stream(options => _stub.GetOptionAtTimeQuote(request, options), cancellation);
 	}

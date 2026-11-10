@@ -118,16 +118,12 @@ internal sealed class ClockSeeder : IDisposable
 
 	// --- ThetaData ---
 
-	/// <summary>Listed strikes kept either side of the money per request — wider than the ±5% store band on every root's ladder
-	/// (SPXW's 5-point grid needs ~70 at a 7000 index), so the band filter, not the request, decides what's stored.</summary>
-	private const int StrikeRange = 80;
-
-	/// <summary>Trading days per request (every expiration within <see cref="ClockStore.MaxDte"/>, banded around the money). ThetaData
+	/// <summary>Trading days per request (every expiration within <see cref="ClockStore.MaxDte"/>, every strike). ThetaData
 	/// only accepts a wildcard expiration for a single date.</summary>
 	private const int DaysPerRequest = 1;   // a wildcard expiration requires start == end
 
 	/// <summary>The close and 09:46 books for <paramref name="dates"/>: one at-time request per instant per run of up to
-	/// <see cref="DaysPerRequest"/> consecutive wanted days, every expiration at once (wildcard expiration, max DTE, strike range) —
+	/// <see cref="DaysPerRequest"/> consecutive wanted days, every expiration at once (wildcard expiration, max DTE) —
 	/// each response cut to per-day, per-expiry banded books as it arrives.</summary>
 	private static async Task<Dictionary<DateOnly, ClockDay>> ReadThetaDaysAsync(ThetaDataClient client, string root, IReadOnlyList<DateOnly> dates, Action<string> progress, CancellationToken cancellation)
 	{
@@ -140,8 +136,8 @@ internal sealed class ClockSeeder : IDisposable
 		await Parallel.ForEachAsync(chunks, new ParallelOptions { MaxDegreeOfParallelism = ThetaConcurrency, CancellationToken = cancellation }, async (chunk, token) =>
 		{
 			var (start, end) = (chunk[0], chunk[^1]);
-			var closeTable = await ThetaRetry.CollectAsync(t => client.OptionAtTimeQuote(contract, start, end, ClockStore.CloseTime, t, ClockStore.MaxDte, StrikeRange), token);
-			var openTable = await ThetaRetry.CollectAsync(t => client.OptionAtTimeQuote(contract, start, end, ClockStore.OpenTime, t, ClockStore.MaxDte, StrikeRange), token);
+			var closeTable = await ThetaRetry.CollectAsync(t => client.OptionAtTimeQuote(contract, start, end, ClockStore.CloseTime, t, ClockStore.MaxDte), token);
+			var openTable = await ThetaRetry.CollectAsync(t => client.OptionAtTimeQuote(contract, start, end, ClockStore.OpenTime, t, ClockStore.MaxDte), token);
 			var closeBooks = Books(closeTable, wanted).Where(b => !IsHalfDay(b.Date)).ToList();
 			var openBooks = Books(openTable, wanted).ToList();
 			lock (close)

@@ -919,18 +919,12 @@ def process_one_expiration_ohlcv(client, ticker, exp, dte, rate, out_root, gstar
     exp_int = ymd_int(exp_d.isoformat())
     db_path = _quotes_db_path(out_root)
     total_rows, days, saw_bars, first_write = 0, set(), False, True
-    # Server-side ATM strike window (BF_OHLCV_RANGE, set by --range; env so multiprocessing-spawn workers
-    # inherit it like BF_LOG_FILE). The endpoint ships a DENSE minute grid — every listed strike × every
-    # minute, ~80% zero-volume filler — so trimming strikes at the server is the only real throughput lever
-    # (validated 2026-08-19 on SPY 2023-09-15: strike_range=60 returned the identical in-band traded set at
-    # 1.8x speed; the shipped default of 80 keeps ~±20%+ coverage so a crash week's drifting ±10%-of-spot
-    # band still fits; 40 clipped the band and lost rows). "n strikes" counts LISTED strikes on the mixed
-    # $1/$5 grid, so the dollar reach is grid-dependent — keep it generous, the client-side band still rules.
-    srange = int(os.environ.get("BF_OHLCV_RANGE", "0")) or None
-    skw = {"strike_range": srange} if srange else {"strike": "*"}
+    # Full chain, banded client-side. The endpoint's strike_range (n listed strikes either side of ATM) was used here until
+    # 2026-11-09 and is deliberately gone: its ATM is each day's PRIOR close and its reach is in listed strikes, so n=80 cut
+    # SPXW's 5-point grid to +-400 points and dropped in-band traded bars every day (17.6% of rows on the 2026-11-05 selloff).
     for ms, me in windows(start_d, end_d, chunk_days):
         df = thetacall(client.option_history_ohlc, symbol=ticker, expiration=exp_d, interval="1m",
-                       start_date=ms, end_date=me, **skw)
+                       start_date=ms, end_date=me, strike="*")
         if df is None or len(df) == 0:
             # Same empty-chunk discipline as the quote pull: pre-listing chunks skip silently; an empty chunk
             # after data began, covering a real session, gets one retry then a loud warning.
@@ -939,7 +933,7 @@ def process_one_expiration_ohlcv(client, ticker, exp, dte, rate, out_root, gstar
             if not any(ms.isoformat() <= d <= me.isoformat() for d in unders):
                 continue
             df = thetacall(client.option_history_ohlc, symbol=ticker, expiration=exp_d, interval="1m",
-                           start_date=ms, end_date=me, **skw)
+                           start_date=ms, end_date=me, strike="*")
             if df is None or len(df) == 0:
                 log.info(f"    [warn] {ticker} {exp_d}: ohlcv chunk {ms}..{me} EMPTY after data began — possible internal hole; sessions left unfilled")
                 continue
@@ -1519,7 +1513,6 @@ def main():
     ap.add_argument("--run", action="store_true", help="run the daily EOD backfill")
     ap.add_argument("--quotes", action="store_true", help="run the minute-NBBO quote pull (+-10pct band, per-ticker DTE)")
     ap.add_argument("--ohlcv", action="store_true", help="run the minute trade-OHLCV pull into quotes.db's ohlcv table (same band/DTE/seal mechanics as --quotes, its own ohlcv_sealed bookkeeping; traded bars only, START-of-bar labels as served)")
-    ap.add_argument("--range", type=int, default=80, help="--ohlcv only: server-side ATM strike window (n listed strikes above/below ATM) to trim the endpoint's dense zero-filled grid before transfer (default 80 ≈ ±20%%+ on a $1 grid, safely wider than the ±10%% band even across a crash week; 0 = full chain, the pre-2026-08-19 behavior)")
     ap.add_argument("--quotes-probe", action="store_true", help="print minute-quote schema for one ticker")
     ap.add_argument("--verify-quotes", action="store_true", help="integrity-scan the quote store for empty/truncated files + stray .tmp")
     ap.add_argument("--ticker", help="single ticker (NAME or NAME:DTE); overrides --tickers for ALL modes")
@@ -1607,9 +1600,7 @@ def main():
         if missing:
             sys.exit(f"--ohlcv needs a DTE for {missing}: pass {missing[0]}:DTE (e.g. {missing[0]}:45) or --max-dte")
         qout = Path(args.quote_out) if args.quote_out else data_dir / "quotes"  # base for the DB sibling, not a CSV dir
-        if args.range:
-            os.environ["BF_OHLCV_RANGE"] = str(args.range)   # env so spawned workers inherit it (like BF_LOG_FILE)
-        log.info(f"data dir = {data_dir}\nohlcv store = {_quotes_db_path(qout)} (ohlcv table; minute trade bars ±10%, per-ticker DTE, server strike window ±{args.range or 'ALL'})")
+        log.info(f"data dir = {data_dir}\nohlcv store = {_quotes_db_path(qout)} (ohlcv table; minute trade bars ±10%, per-ticker DTE)")
         n_failed = run_quotes(tickers, args.start, args.end, qout, dte_map, args.rate,
                               args.creds, args.timeout, args.retries, args.quote_chunk_days, args.concurrency,
                               band=args.band, dataset="ohlcv")

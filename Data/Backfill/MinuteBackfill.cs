@@ -17,8 +17,7 @@ internal sealed record MinuteDataset(string Name, string Table, string StagingTa
 /// <param name="ChunkDays">Calendar days per request window — small windows keep a request from stalling at the server and a true stall cheap to retry.</param>
 /// <param name="Band">Strike band as a fraction of each day's spot close.</param>
 /// <param name="Supplement">Additive patch mode (quotes only): pull sealed expiries too, INSERT OR IGNORE straight into the live table, never delete or (re)seal.</param>
-/// <param name="StrikeRange">ohlcv only: server-side ATM strike window (listed strikes either side) trimming the dense zero-volume grid before transfer; null = full chain.</param>
-internal sealed record MinuteBackfillOptions(IReadOnlyList<(string Ticker, int Dte)> Tickers, DateOnly Start, DateOnly End, int ChunkDays, int Concurrency, double Band, bool Supplement, int? StrikeRange);
+internal sealed record MinuteBackfillOptions(IReadOnlyList<(string Ticker, int Dte)> Tickers, DateOnly Start, DateOnly End, int ChunkDays, int Concurrency, double Band, bool Supplement);
 
 /// <summary>The minute pull into <c>data/quotes.db</c> — a port of scripts/backfill_thetadata.py's --quotes / --ohlcv modes, rule for
 /// rule. The unit of work is one expiration (ThetaData's minute endpoints take a single expiration per multi-day request) across its
@@ -336,7 +335,7 @@ internal sealed class MinuteBackfill(ThetaDataClient client, SqliteConnection db
 		{
 			var window = new OhlcvWindow(false, [], []);
 			var anyRows = false;
-			await foreach (var table in client.OptionHistoryOhlc(contract, "1m", from, to, options.StrikeRange, token))
+			await foreach (var table in client.OptionHistoryOhlc(contract, "1m", from, to, token))
 			{
 				if (table.RowCount == 0) continue;
 				anyRows = true;

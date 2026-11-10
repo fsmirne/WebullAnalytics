@@ -8,7 +8,7 @@
 # thetadata transitive dependency its package metadata fails to declare, so it's pinned explicitly.
 # Pinned to the version the C# client (Api/ThetaData) mirrors — ThetaDataClient.LibraryVersion. Upgrade both together:
 # bump here, pip install, re-run scripts/thetadata_proto_extract.py, bump LibraryVersion.
-thetadata==1.0.15
+thetadata==1.0.17
 pandas
 numpy
 tzdata
