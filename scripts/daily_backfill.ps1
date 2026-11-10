@@ -29,13 +29,16 @@
 	gates run on the ET clock (the trading calendar), not local time.
 
 .PARAMETER Tickers
-	Scope the quotes/ohlcv roots with per-ticker DTE, e.g. 'SPY:60','XSP:0'. Default = the daily set
-	(SPXW:0 XSP:0 SPY:60). QQQ is OPT-IN (dropped from every default 2026-10-08: no live strategy trades it, and
+	Scope the quotes/ohlcv roots with per-ticker DTE, e.g. 'SPY:60','SPXW:0'. Default = the daily set
+	(SPXW:0 SPY:60). QQQ is OPT-IN (dropped from every default 2026-10-08: no live strategy trades it, and
 	its 60-DTE quote+ohlcv pull pushed the morning run past the open). Pull it on demand at 60 DTE (the QQQ.DC
 	long leg is 30-45 DTE; a :30 pull truncates it):
 	  ./daily_backfill.ps1 -Tickers QQQ:60 -OiTickers QQQ -Verify QQQ -HistoryTickers QQQ
 	No gap accrues while it is off: the pull floor is `wa data backfill`'s default -Start and sealed data is
 	skipped, so the next run that names QQQ fills everything since its last pull.
+	XSP is OPT-IN too (dropped from every default 2026-11-09: SPXW is the 0DTE data source). Its ohlcv rows were
+	deleted from the store; quotes and OI were kept and resume from their last pull when named:
+	  ./daily_backfill.ps1 -Tickers XSP:0 -OiTickers XSP -Verify XSP -HistoryTickers XSP -Steps history,quotes,oi,verify
 
 .PARAMETER OiTickers
 	Scope the OI roots (bare names, no DTE — OI is a daily full-chain snapshot, not DTE-windowed like
@@ -44,7 +47,7 @@
 	on monthly expiries.
 
 .PARAMETER HistoryTickers
-	Scope the `wa ai history` step (bare names, no DTE). Default = SPY XSP SPXW.
+	Scope the `wa ai history` step (bare names, no DTE). Default = SPY SPXW.
 
 .PARAMETER Steps
 	Which of the six steps to run (default all): history,quotes,ohlcv,oi,verify,clock. Kept byte-identical in meaning
@@ -53,7 +56,7 @@
 	skips history.
 
 .PARAMETER Verify
-	Scope the verify roots (bare names). Default = SPXW XSP SPY.
+	Scope the verify roots (bare names). Default = SPXW SPY.
 
 .EXAMPLE
 	# Normal daily run
@@ -103,7 +106,7 @@ $Conc = 2
 # --- Ticker sets (defaults = the daily set; -Tickers / -Verify override, matching the .sh env knobs). --------
 if (-not $Tickers -or $Tickers.Count -eq 0) {
 	if ($env:BACKFILL_TICKERS) { $Tickers = $env:BACKFILL_TICKERS -split '\s+' }
-	else { $Tickers = @('SPXW:0','XSP:0','SPY:60') }
+	else { $Tickers = @('SPXW:0','SPY:60') }
 }
 # OI is a daily-snapshot instrument (one full-chain capture/day, not a DTE-windowed pull like
 # quotes/ohlcv): `wa data backfill oi` takes bare names and one global --dte across every ticker passed. SPX (legacy AM-settled root) is included but untraded: on a standard-monthly (3rd Friday)
@@ -112,11 +115,11 @@ if (-not $Tickers -or $Tickers.Count -eq 0) {
 # minute-NBBO quotes/ohlcv pull for it - OI (+ the EOD-solved IV alongside it) is all ComputeGex needs.
 if (-not $OiTickers -or $OiTickers.Count -eq 0) {
 	if ($env:BACKFILL_OI_TICKERS) { $OiTickers = $env:BACKFILL_OI_TICKERS -split '\s+' }
-	else { $OiTickers = @('SPXW','XSP','SPY','SPX') }
+	else { $OiTickers = @('SPXW','SPY','SPX') }
 }
 if (-not $Verify -or $Verify.Count -eq 0) {
 	if ($env:BACKFILL_VERIFY) { $Verify = $env:BACKFILL_VERIFY -split '\s+' }
-	else { $Verify = @('SPXW','XSP','SPY') }
+	else { $Verify = @('SPXW','SPY') }
 }
 
 # --- Step selection (default all six; identical semantics to daily_backfill.sh --steps). --------------------
@@ -135,7 +138,7 @@ if (-not (Has-Step 'history')) {
 } elseif ($env:BACKFILL_HISTORY_TICKERS) {
 	$HistoryList = $env:BACKFILL_HISTORY_TICKERS -split '\s+'
 } else {
-	$HistoryList = @('SPY','XSP','SPXW')
+	$HistoryList = @('SPY','SPXW')
 }
 
 # --- Resolve the wa executable (published alongside this script by install.bat; else PATH). ------------------
