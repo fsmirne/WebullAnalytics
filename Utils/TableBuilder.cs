@@ -481,7 +481,8 @@ public static class TableBuilder
 		items.Add(new Text($"Avg Net Cost: {FormatSignedCost(avgNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = {PerContract(avgNetCost, b.Qty)}/contract"));
 		items.Add(new Text($"After-Roll Net Cost: {FormatSignedCost(afterRollNetCost)} {(ascii ? "/" : "÷")} ({b.Qty} x $100) = {PerContract(afterRollNetCost, b.Qty)}/contract"));
 
-		var averagingChange = avgNetCost - openNetCost;
+		// Open cost is for the opening order's quantity; restate it at the current quantity so a partial close or an add doesn't read as a cost change.
+		var averagingChange = avgNetCost - (b.OpenQty > 0 ? openNetCost * b.Qty / b.OpenQty : openNetCost);
 		var rollChange = afterRollNetCost - avgNetCost;
 		if (averagingChange != 0m)
 		{

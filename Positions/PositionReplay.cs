@@ -30,6 +30,10 @@ internal static class PositionReplay
 		public DateTime FirstEntryTimestamp;
 		public List<NetDebitTrade> TradeHistory = new();
 		public Dictionary<string, int> StockShareCount = new(StringComparer.Ordinal); // share count for stock matchKeys; option legs absent
+		// Last balanced state (every open leg at the same quantity), the reference ApplyPartialCloseBasis scales from.
+		public string BalancedLegs = "";
+		public int BalancedUnitQty;
+		public decimal BalancedCash;
 	}
 
 	/// <summary>One state-machine input — either a strategy order (multiple trades sharing ParentStrategySeq) or a standalone trade.</summary>
@@ -210,6 +214,9 @@ internal static class PositionReplay
 			if (minQty == maxQty) continue;
 			TrySplitSharedLegFanOut(lin, active, ref lineageIdCounter, minQty);
 		}
+
+		foreach (var lin in active)
+			RecordBalancedState(lin);
 
 		AssertInvariants(active, $"after event at {evt.Timestamp}");
 	}
@@ -433,6 +440,7 @@ internal static class PositionReplay
 
 		target.RunningCash += donor.RunningCash;
 		target.FirstEntryCash += donor.FirstEntryCash;
+		target.BalancedUnitQty = 0; // the merged lineage is a different position; its next balanced state starts a new record
 		target.TradeHistory.AddRange(donor.TradeHistory);
 		target.UnitQty = target.OpenLegs.Values.Count > 0 ? target.OpenLegs.Values.Min(v => v.Qty) : 0;
 	}
@@ -512,9 +520,37 @@ internal static class PositionReplay
 		// UnitQty = min of leg qtys across open legs (balanced after strategy orders in the common case).
 		lin.UnitQty = lin.OpenLegs.Values.Count > 0 ? lin.OpenLegs.Values.Min(v => v.Qty) : 0;
 
+		ApplyPartialCloseBasis(lin);
+
 		// Imbalance (if any) is deferred to end-of-replay settlement via SettleImbalances —
 		// partial-fill strategy orders temporarily imbalance lineages mid-replay but usually
 		// self-resolve before the replay ends.
+	}
+
+	private static bool IsBalanced(Lineage lin) => lin.OpenLegs.Count > 0 && lin.OpenLegs.Values.Min(v => v.Qty) == lin.OpenLegs.Values.Max(v => v.Qty);
+
+	private static string LegSignature(Lineage lin) => string.Join("|", lin.OpenLegs.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Key}:{kv.Value.Side}"));
+
+	/// <summary>Remembers a balanced lineage's legs, unit quantity and running cash. An imbalanced lineage keeps its previous record.</summary>
+	private static void RecordBalancedState(Lineage lin)
+	{
+		if (!IsBalanced(lin)) return;
+		lin.BalancedLegs = LegSignature(lin);
+		lin.BalancedUnitQty = lin.OpenLegs.Values.Min(v => v.Qty);
+		lin.BalancedCash = lin.RunningCash;
+	}
+
+	/// <summary>
+	/// A lineage that is balanced again on the same legs at a smaller quantity has had part of the whole position closed, in one combo order or leg by leg.
+	/// The closed units' P&L is realized, so the surviving units keep their own per-unit basis: RunningCash becomes the last balanced cash scaled to the remaining quantity instead of carrying the closing proceeds.
+	/// Opens, adds and rolls change the leg set or grow the quantity, so their cash stays netted into the basis.
+	/// </summary>
+	private static void ApplyPartialCloseBasis(Lineage lin)
+	{
+		if (!IsBalanced(lin)) return;
+		var unitQty = lin.OpenLegs.Values.Min(v => v.Qty);
+		if (unitQty >= lin.BalancedUnitQty || LegSignature(lin) != lin.BalancedLegs) return;
+		lin.RunningCash = lin.BalancedCash * unitQty / lin.BalancedUnitQty;
 	}
 
 	private static Dictionary<string, ReductionPool> BuildReductionPools(Event evt, IReadOnlyDictionary<string, (Side Side, int Qty)> preEventOpenLegs, IReadOnlyDictionary<string, (decimal InitPrice, decimal AdjPrice)> preEventLegPrices)

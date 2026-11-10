@@ -314,4 +314,53 @@ public class PositionReplayTests
 		Assert.Equal(6, rolledPanel.NetDebitTrades!.Count);
 		Assert.Contains(rolledPanel.NetDebitTrades, t => t.Instrument.Contains("15 May 2026") && t.Side == Side.Buy);
 	}
+
+	[Theory]
+	[InlineData(true)]
+	[InlineData(false)]
+	public void Execute_PartialCloseKeepsPerUnitBasisOfRemainingLots(bool comboOrder)
+	{
+		var longExpiry = new DateTime(2026, 11, 30);
+		var firstShortExpiry = new DateTime(2026, 11, 10);
+		var rolledShortExpiry = new DateTime(2026, 11, 17);
+		var longSymbol = MatchKeys.OccSymbol("SPY", longExpiry, 765m, "C");
+		var firstShortSymbol = MatchKeys.OccSymbol("SPY", firstShortExpiry, 767m, "C");
+		var rolledShortSymbol = MatchKeys.OccSymbol("SPY", rolledShortExpiry, 765m, "C");
+		var opened = new DateTime(2026, 11, 4, 13, 37, 26, DateTimeKind.Utc);
+		var rolled = new DateTime(2026, 11, 6, 10, 29, 7, DateTimeKind.Utc);
+		var closed = new DateTime(2026, 11, 10, 9, 39, 33, DateTimeKind.Utc);
+
+		var trades = new List<Trade>
+		{
+			// Open 30 diagonals at 7.81, roll the short down and out for a 0.99 credit (after-roll basis 6.82), then close half the position at 2.82.
+			new(1, opened, "SPY 30 Nov 2026", "strategy:Diagonal:SPY:2026-11-30:C765,C767", Asset.OptionStrategy, "Diagonal", Side.Buy, 30, 7.81m, Trade.OptionMultiplier, longExpiry),
+			new(2, opened, Formatters.FormatOptionDisplay("SPY", longExpiry, 765m), MatchKeys.Option(longSymbol), Asset.Option, "Call", Side.Buy, 30, 13.84m, Trade.OptionMultiplier, longExpiry, 1),
+			new(3, opened, Formatters.FormatOptionDisplay("SPY", firstShortExpiry, 767m), MatchKeys.Option(firstShortSymbol), Asset.Option, "Call", Side.Sell, 30, 6.03m, Trade.OptionMultiplier, firstShortExpiry, 1),
+			new(4, rolled, Formatters.FormatOptionDisplay("SPY", firstShortExpiry, 767m), MatchKeys.Option(firstShortSymbol), Asset.Option, "Call", Side.Buy, 30, 0.14m, Trade.OptionMultiplier, firstShortExpiry),
+			new(5, rolled.AddSeconds(50), Formatters.FormatOptionDisplay("SPY", rolledShortExpiry, 765m), MatchKeys.Option(rolledShortSymbol), Asset.Option, "Call", Side.Sell, 30, 1.13m, Trade.OptionMultiplier, rolledShortExpiry),
+		};
+		if (comboOrder)
+		{
+			trades.Add(new(6, closed, "SPY 30 Nov 2026", "strategy:Calendar:SPY:2026-11-30:C765", Asset.OptionStrategy, "Calendar", Side.Sell, 15, 2.82m, Trade.OptionMultiplier, longExpiry));
+			trades.Add(new(7, closed, Formatters.FormatOptionDisplay("SPY", longExpiry, 765m), MatchKeys.Option(longSymbol), Asset.Option, "Call", Side.Sell, 15, 4.02m, Trade.OptionMultiplier, longExpiry, 6));
+			trades.Add(new(8, closed, Formatters.FormatOptionDisplay("SPY", rolledShortExpiry, 765m), MatchKeys.Option(rolledShortSymbol), Asset.Option, "Call", Side.Buy, 15, 1.20m, Trade.OptionMultiplier, rolledShortExpiry, 6));
+		}
+		else
+		{
+			// The same close legged out as two single-leg orders.
+			trades.Add(new(6, closed, Formatters.FormatOptionDisplay("SPY", longExpiry, 765m), MatchKeys.Option(longSymbol), Asset.Option, "Call", Side.Sell, 15, 4.02m, Trade.OptionMultiplier, longExpiry));
+			trades.Add(new(7, closed.AddSeconds(30), Formatters.FormatOptionDisplay("SPY", rolledShortExpiry, 765m), MatchKeys.Option(rolledShortSymbol), Asset.Option, "Call", Side.Buy, 15, 1.20m, Trade.OptionMultiplier, rolledShortExpiry));
+		}
+
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: closed.Date);
+		var parent = rows.Single(r => r.Asset == Asset.OptionStrategy);
+		var longLeg = rows.Single(r => r.Asset == Asset.Option && r.IsStrategyLeg && r.MatchKey == MatchKeys.Option(longSymbol));
+		var shortLeg = rows.Single(r => r.Asset == Asset.Option && r.IsStrategyLeg && r.MatchKey == MatchKeys.Option(rolledShortSymbol));
+
+		Assert.Equal("Calendar", parent.OptionKind);
+		Assert.Equal(15, parent.Qty);
+		Assert.Equal(6.82m, decimal.Round(parent.AdjustedAvgPrice!.Value, 2));
+		Assert.Equal(7.95m, decimal.Round(longLeg.AdjustedAvgPrice!.Value, 2));
+		Assert.Equal(1.13m, decimal.Round(shortLeg.AdjustedAvgPrice!.Value, 2));
+	}
 }
