@@ -20,7 +20,7 @@ namespace WebullAnalytics.Analyze;
 
 // ─── `analyze position` ───────────────────────────────────────────────────────
 
-internal sealed class AnalyzePositionSettings : AnalyzeBaseSettings
+internal sealed class AnalyzePositionSettings : AnalyzeIvOverrideSettings
 {
 	[CommandArgument(0, "[spec]")]
 	[Description("Open position. Format: ACTION:SYMBOL:QTY@PRICE,... where PRICE is your cost basis per leg. Example: sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499@1.11. Omit to select from open positions interactively.")]

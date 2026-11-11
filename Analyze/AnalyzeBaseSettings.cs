@@ -15,7 +15,8 @@ namespace WebullAnalytics.Analyze;
 ///
 /// Subcommands that need additional report options (e.g., <c>--range</c>/<c>--view</c>/<c>--levels</c>
 /// for the grid in <c>analyze roll</c>) declare them locally rather than inheriting the entire
-/// report option set.
+/// report option set. An option only some subcommands read lives on an intermediate base
+/// (<see cref="AnalyzeIvOverrideSettings"/>) so the others reject it instead of silently ignoring it.
 /// </summary>
 internal abstract class AnalyzeBaseSettings : CommandSettings
 {
@@ -26,10 +27,6 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	[CommandOption("--spot")]
 	[Description("Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88). Comma-separated for multiple tickers (e.g., GME:24.88,SPY:580.50)")]
 	public string? Spot { get; set; }
-
-	[CommandOption("--iv")]
-	[Description("Override implied volatility per option leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple legs.")]
-	public string? IvOverrides { get; set; }
 
 	[CommandOption("--vendor <VENDOR>")]
 	[Description("Live option-chain quote vendor: 'webull' (sniffed-session chain) or 'schwab' (chains-API NBBO; needs `wa schwab login`). When omitted, the top-level `vendor` in config.json applies (default webull). Overrides it for this run.")]
@@ -66,7 +63,6 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	{
 		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) OutputFormat = output;
 		if (!Program.HasCliOption("output-path") && cfg.TryGetString("outputPath", out var outputPath)) OutputPath = outputPath;
-		if (!Program.HasCliOption("iv") && cfg.TryGetString("iv", out var iv)) IvOverrides = iv;
 		if (!Program.HasCliOption("spot") && cfg.TryGetString("spot", out var spot)) Spot = spot;
 	}
 
@@ -93,5 +89,21 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 		}
 
 		return ValidationResult.Success();
+	}
+}
+
+/// <summary>Base for the analyze subcommands that honour a per-leg <c>--iv</c> override
+/// (<c>analyze position</c>, <c>analyze roll</c>). The other subcommands (gex, cascade, risk, sentiment) never read one
+/// and do not inherit it.</summary>
+internal abstract class AnalyzeIvOverrideSettings : AnalyzeBaseSettings
+{
+	[CommandOption("--iv")]
+	[Description("Override implied volatility per option leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple legs.")]
+	public string? IvOverrides { get; set; }
+
+	internal override void ApplyConfig(Dictionary<string, JsonElement> cfg)
+	{
+		base.ApplyConfig(cfg);
+		if (!Program.HasCliOption("iv") && cfg.TryGetString("iv", out var iv)) IvOverrides = iv;
 	}
 }

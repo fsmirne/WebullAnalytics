@@ -5,8 +5,8 @@ namespace WebullAnalytics;
 /// <summary>Single owner of the per-day vendor-chain CSV archive <c>data/iv/&lt;TICKER&gt;/&lt;ET date&gt;.csv</c>
 /// (header <c>date,time,source,expiry,strike,right,bid,ask,iv,oi,spot,volume</c>): the per-strike vendor inputs —
 /// bid/ask, vendor IV, OI, cumulative day volume — behind a live fetch, which exist nowhere on disk after the fact.
-/// Writers: `analyze gex --dump`, the running-day `analyze gex --intraday` chain capture, and wa-scraper's per-minute
-/// vendor capture; readers: the running-day --intraday heatmap's capture slices and its volume tape (per-bucket
+/// Writers: `analyze gex --dump`, the running-day `analyze gex --intraday` chain capture, every live `analyze cascade`
+/// run, and wa-scraper's per-minute vendor capture; readers: the running-day --intraday heatmap's capture slices and its volume tape (per-bucket
 /// Δvolume = the difference of consecutive captures' cumulative counts). Source-tagged so interleaved webull/schwab
 /// rows land in one day file and join on (time, expiry, strike, right); null vendor fields dump as empty (a vendor
 /// null is itself data); the time column is the actual ET fetch time, not a bar label. The volume column was added

@@ -92,6 +92,31 @@ public class CascadeScreenerTests
 	}
 
 	[Fact]
+	public void LogRow_CarriesTheWholeReadingWithNamedEnums()
+	{
+		var (t, i) = BullCascadeSession();
+		var r = CascadeScreener.Evaluate(t, i);
+		var row = CascadeLog.Serialize("SPXW", "schwab", new DateTime(2026, 11, 9, 9, 50, 12), new DateTime(2026, 11, 9, 9, 50, 12), spotOverridden: false, r);
+		Assert.DoesNotContain('\n', row);
+
+		var root = System.Text.Json.JsonDocument.Parse(row).RootElement;
+		Assert.Equal("analyze_cascade", root.GetProperty("type").GetString());
+		Assert.Equal("2026-11-09T09:50:12", root.GetProperty("runEt").GetString());
+		Assert.Equal("SPXW", root.GetProperty("ticker").GetString());
+		Assert.Equal("schwab", root.GetProperty("vendor").GetString());
+		Assert.False(root.GetProperty("spotOverridden").GetBoolean());
+
+		var reading = root.GetProperty("reading");
+		Assert.Equal("BullCascade", reading.GetProperty("primaryRegime").GetString());
+		Assert.True(reading.GetProperty("active").GetBoolean());
+		Assert.Equal(r.LeadingSetup.Score, reading.GetProperty("leadingSetup").GetProperty("score").GetInt32());
+		Assert.Equal(4, reading.GetProperty("setups").EnumerateObject().Count());
+		Assert.Equal(5, reading.GetProperty("setups").GetProperty("BearTrap").GetProperty("factors").GetArrayLength());
+		Assert.Equal(7056m, reading.GetProperty("terrain").GetProperty("front").GetProperty("spot").GetDecimal());
+		Assert.Equal("Above", reading.GetProperty("inputs").GetProperty("tape").GetProperty("side").GetString());
+	}
+
+	[Fact]
 	public void BullCascade_ConfirmsOnTrendUpWithVixCrushAndCallFlow()
 	{
 		var (t, i) = BullCascadeSession();

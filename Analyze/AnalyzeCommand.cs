@@ -123,7 +123,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 
 // --- `analyze roll` -----------------------------------------------------------
 
-internal sealed class AnalyzeRollSettings : AnalyzeBaseSettings
+internal sealed class AnalyzeRollSettings : AnalyzeIvOverrideSettings
 {
 	[CommandArgument(0, "<spec>")]
 	[Description("Roll spec. Format: OLD_SYMBOL>NEW_SYMBOL:QTY. Example: GME260410C00023000>GME260417C00023000:300")]

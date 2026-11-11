@@ -15,7 +15,8 @@ namespace WebullAnalytics.Analyze;
 /// <summary>
 /// `wa analyze cascade &lt;TICKER&gt;` — Classifies the market regime into Bear Cascade, Bear Trap,
 /// Bull Cascade, or Bull Trap (plus Neutral) and renders a Spectre.Console screener panel. Descriptive only:
-/// it reads the session so far and feeds nothing into the opener.
+/// it reads the session so far and feeds nothing into the opener. Every live run appends its chain to data/iv (the
+/// volume-pace factor's input) and its reading to data/cascade (<see cref="CascadeLog"/>); a past --date replay writes nothing.
 /// Reuses <see cref="GexMatrix"/>, <see cref="GexSqueezeScreener"/>, <see cref="AnalyzeGexCommand"/> chain/quote loaders,
 /// <see cref="CascadeScreener"/>, and <see cref="CascadePanel"/>.
 /// </summary>
@@ -53,10 +54,6 @@ internal sealed class AnalyzeCascadeSettings : AnalyzeBaseSettings
 	[Description("On a past --date replay, price front-expiry IVs from the prior trading day's snapshot when minute NBBO is unavailable.")]
 	public bool Exante { get; set; }
 
-	[CommandOption("--dump")]
-	[Description("Append in-window contracts from this live fetch to data/iv/<TICKER>/<ET-date>.csv.")]
-	public bool Dump { get; set; }
-
 	public override ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
@@ -73,7 +70,6 @@ internal sealed class AnalyzeCascadeSettings : AnalyzeBaseSettings
 			if (t < AnalyzeGexSettings.RthOpen || t > AnalyzeGexSettings.RthClose)
 				return ValidationResult.Error($"--time: must be within RTH 09:30-16:00 ET, got '{Time}'");
 		}
-		if (Dump && EvaluationDateOverride.HasValue) return ValidationResult.Error("--dump applies to live fetches only (no --date)");
 		return ValidationResult.Success();
 	}
 }
@@ -230,7 +226,7 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 		}
 		else
 		{
-			// Live run: append a data/iv capture so consecutive runs feed the volume-pace factor
+			// Live run: always append a data/iv capture — the volume-pace factor is the difference of consecutive captures
 			var band = settings.StrikeRangePct / 100m;
 			var inWindow = quotes.Values.Where(q =>
 			{
@@ -277,6 +273,7 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 		var reading = CascadeScreener.Evaluate(terrain, inputs, settings.TriggerScore);
 		var scope = $"{gexMatrix.Expiries.Count} expiration(s) ≤{settings.Dte}DTE";
 		CascadePanel.Render(ticker, asOfEt, scope, reading);
+		if (!isOfflineHistorical) CascadeLog.Append(ticker, settings.VendorName, nowEt, asOfEt, explicitSpotOverride.HasValue, reading);
 		return 0;
 	}
 }
