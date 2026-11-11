@@ -102,7 +102,10 @@ internal static class MarketClock
 
 	private static void WarnOnce(string root, string message)
 	{
-		if (Warned.TryAdd(root, 0)) Console.Error.WriteLine($"warning: {message}");
+		// Keyed on the clock root as well as the raw one: SPX and SPXW share a fit, so one run over both would otherwise print the same warning twice.
+		var first = Warned.TryAdd(Clock.ClockFits.ClockRoot(root), 0);
+		Warned.TryAdd(root, 0);
+		if (first) Console.Error.WriteLine($"warning: {message}");
 	}
 
 	/// <summary><see cref="OptionTime"/> from <paramref name="from"/> to <paramref name="to"/> (both ET wall-clock) on <paramref name="root"/>'s
