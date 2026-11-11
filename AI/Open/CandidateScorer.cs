@@ -1181,6 +1181,10 @@ internal static class CandidateScorer
 		_ => null
 	};
 
+	/// <summary>" (11/17 expiry)" — names the expiry a per-expiry indicator (max pain, GEX gravity) was read from, so it is not
+	/// mistaken for today's 0DTE book. Empty when the expiry is unknown (a proposal built before the field existed).</summary>
+	private static string ExpiryTag(DateTime? expiry) => expiry is { } e ? $" ({e.ToString("MM'/'dd", System.Globalization.CultureInfo.InvariantCulture)} expiry)" : "";
+
 	public static string BuildRationale(OpenProposal p, decimal bias, OpenerConfig cfg)
 	{
 		var cashSide = p.DebitOrCreditPerContract >= 0m
@@ -1278,7 +1282,7 @@ internal static class CandidateScorer
 			indicatorParts.Add($"rep IV {ivStr}% / underlying HV {hvStr}% = {richness:F2}x{vegaStr}");
 		}
 		if (p.TargetExpiryMaxPain.HasValue)
-			indicatorParts.Add($"max-pain target ${p.TargetExpiryMaxPain.Value:F2}");
+			indicatorParts.Add($"max-pain target ${p.TargetExpiryMaxPain.Value:F2}{ExpiryTag(p.TargetExpiry)}");
 		// γ-regime is a SCORE multiplier — it only enters the factors line when its weight is active.
 		if (p.GammaRegimeFactor.HasValue)
 			factorParts.Add($"γ-regime {p.GammaRegimeFactor.Value:F2}");
@@ -1290,7 +1294,7 @@ internal static class CandidateScorer
 			var envStr = p.NetGexFraction.HasValue ? $", net gamma {p.NetGexFraction.Value:+0.00;-0.00}" : "";
 			var regimeStr = p.GammaRegimeFactor.HasValue ? $"γ-regime {p.GammaRegimeFactor.Value:F2}" : "γ-regime off";
 			var pullStr = p.GexBiasPullSigmas.HasValue ? $"bias-pull {p.GexBiasPullSigmas.Value:+0.00;-0.00}σ" : "bias-pull off";
-			indicatorParts.Add($"GEX gravity ${p.GexGravity.Value:F2}{envStr} → {regimeStr}, {pullStr}");
+			indicatorParts.Add($"GEX gravity ${p.GexGravity.Value:F2}{ExpiryTag(p.TargetExpiry)}{envStr} → {regimeStr}, {pullStr}");
 		}
 		if (p.AssignmentRiskFactor.HasValue)
 			factorParts.Add($"assign {p.AssignmentRiskFactor.Value:F2}");
@@ -1582,6 +1586,7 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
+			TargetExpiry: skel.TargetExpiry.Date,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
@@ -1742,6 +1747,7 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
+			TargetExpiry: skel.TargetExpiry.Date,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
@@ -2338,6 +2344,7 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
+			TargetExpiry: skel.TargetExpiry.Date,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
@@ -2572,6 +2579,7 @@ internal static class CandidateScorer
 			PremiumRatio: premiumRatio,
 			ImpliedVolatilityAnnual: representativeIv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
+			TargetExpiry: skel.TargetExpiry.Date,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,
@@ -2765,6 +2773,7 @@ internal static class CandidateScorer
 			PremiumRatio: null,   // single-leg: ratio collapses to 1 (no shorts), don't display "prem 1.00x"
 			ImpliedVolatilityAnnual: iv,
 			HistoricalVolatilityAnnual: historicalVolAnnual,
+			TargetExpiry: skel.TargetExpiry.Date,
 			TargetExpiryMaxPain: maxPain,
 			GexGravity: gex.GexGravity,
 			NetGexFraction: gex.NetGexFraction,

@@ -68,6 +68,7 @@ public enum OpenStructureKind
 /// where the ratio collapses to 1. Surfaced separately so the rationale can render it without recomputing.</param>
 /// <param name="ImpliedVolatilityAnnual">Representative annualized IV used for ranking, as a fraction (0.40 = 40%).</param>
 /// <param name="HistoricalVolatilityAnnual">Annualized realized volatility over the configured lookback, as a fraction.</param>
+/// <param name="TargetExpiry">The expiry <see cref="TargetExpiryMaxPain"/>, <see cref="GexGravity"/> and <see cref="NetGexFraction"/> are computed from — the skeleton's target expiry (a calendar or diagonal's short leg), not necessarily today's 0DTE book. Shown beside them in the rationale.</param>
 /// <param name="TargetExpiryMaxPain">Max-pain price inferred from open interest for the proposal's target expiry (display only; the directional max-pain pull lives in the maxPainBiasPull grid magnet).</param>
 /// <param name="GexGravity">Strike with the highest gross gamma×OI (calls + puts) at the target expiry — the gravity / pin point where dealer hedging is most concentrated, matching the convention used by Barchart and most public GEX tools. Drives the gexBiasPull grid magnet.</param>
 /// <param name="NetGexFraction">Net dealer gamma exposure normalized to [−1, +1]: positive = call gamma dominates (dealers net long gamma, suppressive regime); negative = put gamma dominates (amplifying regime).</param>
@@ -109,6 +110,7 @@ internal sealed record OpenProposal(
 	decimal? PremiumRatio = null,
 	decimal? ImpliedVolatilityAnnual = null,
 	decimal? HistoricalVolatilityAnnual = null,
+	DateTime? TargetExpiry = null,
 	decimal? TargetExpiryMaxPain = null,
 	decimal? GexGravity = null,
 	decimal? NetGexFraction = null,

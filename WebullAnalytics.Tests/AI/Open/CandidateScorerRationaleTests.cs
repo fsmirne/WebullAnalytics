@@ -130,7 +130,7 @@ public class CandidateScorerRationaleTests
 	}
 
 	[Fact]
-	public void BuildRationalePlacesMaxPainTargetOnIndicatorsLine()
+	public void BuildRationaleNamesTheExpiryOnMaxPainAndGravity()
 	{
 		var proposal = new OpenProposal(
 			Ticker: "GME",
@@ -155,14 +155,18 @@ public class CandidateScorerRationaleTests
 			Rationale: "",
 			Fingerprint: "fp",
 			PremiumRatio: 3.06m,
+			TargetExpiry: new DateTime(2026, 5, 1),
 			TargetExpiryMaxPain: 24.50m,
+			GexGravity: 25.00m,
+			NetGexFraction: 0.31m,
 			FinalScore: 0.010000m);
 
 		var rationale = CandidateScorer.BuildRationale(proposal, bias: 0.13m, cfg: new OpenerConfig());
 
 		// Max-pain is now display-only (the directional pull moved to the maxPainBiasPull grid magnet), so the
 		// indicators line shows the target price with no "→ pain" multiplier.
-		Assert.Contains("max-pain target $24.50", rationale);
+		Assert.Contains("max-pain target $24.50 (05/01 expiry)", rationale);
+		Assert.Contains("GEX gravity $25.00 (05/01 expiry), net gamma +0.31", rationale);
 		Assert.DoesNotContain("→ pain", rationale);
 	}
 
