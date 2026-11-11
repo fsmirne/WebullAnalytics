@@ -10,11 +10,14 @@ internal static class ThetaQuotes
 {
 	/// <summary>The book in an option quote table's first row (an at-time or snapshot response for one contract), or null when the
 	/// table is empty or neither side printed.</summary>
-	internal static QuoteStoreCache.QuoteAt? FirstBook(ThetaTable table)
+	internal static QuoteStoreCache.QuoteAt? FirstBook(ThetaTable table) => table.RowCount == 0 ? null : BookAt(table, 0);
+
+	/// <summary>The book in row <paramref name="row"/> of an option quote table (one row per contract in an expiry-wide response), or null
+	/// when neither side printed.</summary>
+	internal static QuoteStoreCache.QuoteAt? BookAt(ThetaTable table, int row)
 	{
-		if (table.RowCount == 0) return null;
-		var (bid, ask) = (QuoteStoreSchema.Tick(table.Price(0, table.Column("bid"))), QuoteStoreSchema.Tick(table.Price(0, table.Column("ask"))));
+		var (bid, ask) = (QuoteStoreSchema.Tick(table.Price(row, table.Column("bid"))), QuoteStoreSchema.Tick(table.Price(row, table.Column("ask"))));
 		if ((bid == null && ask == null) || bid < 0 || ask < 0) return null;
-		return new QuoteStoreCache.QuoteAt((bid ?? 0) / 10000m, (ask ?? 0) / 10000m, (int)table.Number(0, table.Column("bid_size")), (int)table.Number(0, table.Column("ask_size")), AgeMinutes: 0);
+		return new QuoteStoreCache.QuoteAt((bid ?? 0) / 10000m, (ask ?? 0) / 10000m, (int)table.Number(row, table.Column("bid_size")), (int)table.Number(row, table.Column("ask_size")), AgeMinutes: 0);
 	}
 }

@@ -23,6 +23,12 @@ namespace WebullAnalytics.Analyze;
 /// never a substitute price. Open interest likewise falls back to ThetaData (<see cref="AsOfOpenInterest"/>). A past session's
 /// spot bars missing from the on-disk tape (Webull's live m1 feed only reaches back ~5 days) are healed first by the tape
 /// backfill's deep-history sources (Webull's paginator, massive), the way `wa ai history` fills them.
+///
+/// The snapshot also carries each leg expiry's chain within ±<see cref="ChainBand"/> of spot at the same instant and from the same
+/// source as the legs (the store's minute books, or one expiry-wide ThetaData request), with that expiry's open interest for the day.
+/// The diagnostic's chain-wide reads — GEX gravity, net gamma, max pain, walls, relative OI — need the expiry's whole book: built from the
+/// legs alone they collapse onto the legs' own strikes (a lone short call read as max pain and gravity at its strike, net gamma +1.00).
+/// An expiry whose chain neither source has is an error naming why, never a legs-only stand-in.
 /// </summary>
 internal static class FillTimeMarket
 {
@@ -31,6 +37,9 @@ internal static class FillTimeMarket
 	internal sealed record Snapshot(DateTime Instant, IReadOnlyDictionary<string, OptionContractQuote> Quotes, decimal Spot, decimal SessionHigh, decimal SessionLow, string BookSource);
 
 
+	/// <summary>Strike window of each leg expiry's chain, as a fraction of spot — the GEX/max-pain window the live chain paths use.</summary>
+	private const decimal ChainBand = 0.20m;
+
 	public static async Task<(Snapshot? Market, string? Error)> LoadAsync(string ticker, IReadOnlyCollection<string> symbols, DateTime fillEt, IntradayBarCache intradayCache, CancellationToken cancellation)
 	{
 		var before = fillEt.Date + TimeSpan.FromMinutes(Math.Floor(fillEt.TimeOfDay.TotalMinutes));
@@ -38,7 +47,9 @@ internal static class FillTimeMarket
 		var boundaries = fillEt - before <= after - fillEt ? new[] { before, after } : new[] { after, before };
 
 		using var theta = ThetaFallback.TryCreate();
-		var (books, instant, bookSource, storeMiss) = StoreBooks(symbols, fillEt, boundaries);
+		var store = OpenStore(fillEt);
+		var (books, instant, bookSource, storeMiss) = StoreBooks(store, symbols, fillEt, boundaries);
+		var fromStore = books != null;
 		if (books == null)
 		{
 			if (theta == null)
@@ -49,9 +60,6 @@ internal static class FillTimeMarket
 			if (books == null)
 				return (null, $"no NBBO at {before:HH:mm} or {after:HH:mm} for every leg ({string.Join(", ", symbols)}) — quote store: {storeMiss}; ThetaData: {thetaMiss}");
 		}
-		var oi = await AsOfOpenInterest.LoadAsync(symbols, fillEt.Date, theta, cancellation);
-		var quotes = books.ToDictionary(kv => kv.Key, kv => new OptionContractQuote(kv.Key, LastPrice: kv.Value.Mid, Bid: kv.Value.Bid, Ask: kv.Value.Ask, Change: null, PercentChange: null, Volume: null, OpenInterest: oi.TryGetValue(kv.Key, out var o) ? o : null, ImpliedVolatility: null, HistoricalVolatility: null, BidSize: kv.Value.BidSize, AskSize: kv.Value.AskSize), StringComparer.OrdinalIgnoreCase);
-
 		await HealPastSessionTapeAsync(ticker, fillEt.Date, cancellation);
 
 		// Bars are start-of-bar labeled: those starting before the instant are complete at it, and the last one's
@@ -60,20 +68,56 @@ internal static class FillTimeMarket
 		var instantUtc = MarketTime.EtToInstant(instant);
 		var bars = (await intradayCache.GetBarsAsync(ticker, openUtc, instantUtc, BarInterval.M1, includeExtended: false, cancellation)).Where(b => b.Timestamp < instantUtc).ToList();
 		if (bars.Count == 0) return (null, $"no {ticker} 1-minute bars for {fillEt:yyyy-MM-dd} up to {instant:HH:mm} ET");
+		var spot = bars[^1].Close;
 
-		return (new Snapshot(instant, quotes, bars[^1].Close, bars.Max(b => b.High), bars.Min(b => b.Low), bookSource), null);
+		// Each leg expiry's chain at the same instant and from the same source as the legs, plus that expiry's open interest for the day.
+		var chainBooks = new Dictionary<string, QuoteStoreCache.QuoteAt>(StringComparer.OrdinalIgnoreCase);
+		var oi = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+		foreach (var (root, expiry) in symbols.Select(ParsingHelpers.ParseOptionSymbol).Where(p => p != null).Select(p => (p!.Root.ToUpperInvariant(), p.ExpiryDate.Date)).Distinct())
+		{
+			var (expiryBooks, chainMiss) = fromStore ? StoreChain(store!, root, expiry, instant, spot) : await ThetaChainAsync(theta!, root, expiry, instant, spot, cancellation);
+			if (expiryBooks == null) return (null, $"no {root} {expiry:yyyy-MM-dd} chain at {instant:HH:mm} ET for the chain-wide reads (GEX, max pain, relative OI) — {chainMiss}");
+			foreach (var (sym, book) in expiryBooks) chainBooks[sym] = book;
+			var (expiryOi, oiMiss) = await AsOfOpenInterest.LoadExpiryAsync(root, expiry, fillEt.Date, theta, cancellation);
+			if (oiMiss != null) return (null, $"no {root} {expiry:yyyy-MM-dd} open interest for {fillEt:yyyy-MM-dd} — {oiMiss}");
+			foreach (var (sym, o) in expiryOi) oi[sym] = o;
+		}
+		foreach (var (sym, book) in books) chainBooks[sym] = book;
+
+		var quotes = chainBooks.ToDictionary(kv => kv.Key, kv => new OptionContractQuote(kv.Key, LastPrice: kv.Value.Mid, Bid: kv.Value.Bid, Ask: kv.Value.Ask, Change: null, PercentChange: null, Volume: null, OpenInterest: oi.TryGetValue(kv.Key, out var o) ? o : null, ImpliedVolatility: null, HistoricalVolatility: null, BidSize: kv.Value.BidSize, AskSize: kv.Value.AskSize), StringComparer.OrdinalIgnoreCase);
+		return (new Snapshot(instant, quotes, spot, bars.Max(b => b.High), bars.Min(b => b.Low), $"{bookSource} ({quotes.Count} contracts across the leg expiries)"), null);
+	}
+
+	/// <summary>The fill day's quote store (exact-minute books only: a boundary without one falls to the other boundary, never to an older
+	/// minute), or null when quotes.db doesn't exist.</summary>
+	private static QuoteStoreCache? OpenStore(DateTime fillEt)
+	{
+		var dbPath = Program.ResolvePath("data/quotes.db");
+		return File.Exists(dbPath) ? new QuoteStoreCache(dbPath, maxStaleMinutes: 0, since: fillEt.Date, until: fillEt.Date) : null;
+	}
+
+	/// <summary>One expiry's stored books at <paramref name="instant"/> within the chain band, or null with why when the store has none.</summary>
+	private static (Dictionary<string, QuoteStoreCache.QuoteAt>? Books, string? Miss) StoreChain(QuoteStoreCache store, string root, DateTime expiry, DateTime instant, decimal spot)
+	{
+		var books = new Dictionary<string, QuoteStoreCache.QuoteAt>(StringComparer.OrdinalIgnoreCase);
+		foreach (var sym in store.ContractsOn(root, expiry, instant.Date, spot * (1m - ChainBand), spot * (1m + ChainBand)))
+			if (store.NbboAt(sym, instant - QuoteStoreCache.BookLag) is { } book) books[sym] = book;
+		return books.Count > 0 ? (books, null) : (null, "the quote store has no books for that expiry at that minute");
+	}
+
+	/// <summary>One expiry's ThetaData books at <paramref name="instant"/> within the chain band (one expiry-wide request), or null with why.</summary>
+	private static async Task<(Dictionary<string, QuoteStoreCache.QuoteAt>? Books, string? Miss)> ThetaChainAsync(ThetaFallback theta, string root, DateTime expiry, DateTime instant, decimal spot, CancellationToken cancellation)
+	{
+		var (all, error) = await theta.ExpiryBooksAtAsync(root, expiry, instant, cancellation);
+		var books = all.Where(kv => ParsingHelpers.ParseOptionSymbol(kv.Key) is { } p && Math.Abs(p.Strike - spot) <= spot * ChainBand).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+		return books.Count > 0 ? (books, null) : (null, $"ThetaData: {error ?? "no books for that expiry at that instant"}");
 	}
 
 	/// <summary>Every leg's stored book at the first boundary that has one for all of them, or the reason none does.</summary>
-	private static (Dictionary<string, QuoteStoreCache.QuoteAt>? Books, DateTime Instant, string Source, string? Miss) StoreBooks(IReadOnlyCollection<string> symbols, DateTime fillEt, DateTime[] boundaries)
+	private static (Dictionary<string, QuoteStoreCache.QuoteAt>? Books, DateTime Instant, string Source, string? Miss) StoreBooks(QuoteStoreCache? store, IReadOnlyCollection<string> symbols, DateTime fillEt, DateTime[] boundaries)
 	{
 		const string source = "the nearest stored minute book";
-		var dbPath = Program.ResolvePath("data/quotes.db");
-		if (!File.Exists(dbPath)) return (null, default, source, $"not found ({dbPath})");
-
-		// maxStaleMinutes 0: only the exact minute's book — a boundary without one falls to the other boundary,
-		// never to an older minute.
-		var store = new QuoteStoreCache(dbPath, maxStaleMinutes: 0, since: fillEt.Date, until: fillEt.Date);
+		if (store == null) return (null, default, source, $"not found ({Program.ResolvePath("data/quotes.db")})");
 		foreach (var boundary in boundaries)
 			if (BooksAt(symbols, symbol => store.NbboAt(symbol, boundary - QuoteStoreCache.BookLag)) is { } books)
 				return (books, boundary, source, null);

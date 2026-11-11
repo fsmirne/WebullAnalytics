@@ -88,6 +88,18 @@ public class ThetaDataClientTests
 		Assert.Null(ThetaQuotes.FirstBook(ThetaTable.Empty));
 	}
 
+	/// <summary>An expiry-wide at-time response holds one row per contract; each row's book is read from that row, so a chain fetched
+	/// in one request encodes exactly like per-contract requests.</summary>
+	[Fact]
+	public void BookAtReadsEachRowOfAnExpiryWideTable()
+	{
+		var table = ThetaDataClient.DecodeChunk(Chunk(QuoteTable(Row(Price(9541, 8), Price(9874, 8)), Row(Price(0, 0), Price(0, 0)), Row(Price(120, 8), Price(130, 8))), zstd: false));
+
+		Assert.Equal(95.41m, ThetaQuotes.BookAt(table, 0)!.Value.Bid);
+		Assert.Null(ThetaQuotes.BookAt(table, 1));
+		Assert.Equal((1.20m, 1.30m), (ThetaQuotes.BookAt(table, 2)!.Value.Bid, ThetaQuotes.BookAt(table, 2)!.Value.Ask));
+	}
+
 	[Fact]
 	public void TickRoundsHalfToEvenLikePython()
 	{

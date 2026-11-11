@@ -49,6 +49,42 @@ internal sealed class ThetaFallback : IDisposable
 			return openInterest;
 		}, new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase), cancellation);
 
+	/// <summary>Every contract's book in one expiry at <paramref name="instantEt"/> — one wildcard (all strikes, both rights) at-time request,
+	/// each row encoded like <see cref="BooksAtAsync"/>. Keyed by OCC symbol; contracts without a book are absent.</summary>
+	internal Task<(Dictionary<string, QuoteStoreCache.QuoteAt> Books, string? Error)> ExpiryBooksAtAsync(string root, DateTime expiry, DateTime instantEt, CancellationToken cancellation) =>
+		RunAsync(async client =>
+		{
+			var (date, time) = (DateOnly.FromDateTime(instantEt), TimeOnly.FromDateTime(instantEt));
+			var table = await ThetaRetry.CollectAsync(token => client.OptionAtTimeQuote(new OptionContract(root, DateOnly.FromDateTime(expiry)), date, date, time, token), cancellation);
+			var books = new Dictionary<string, QuoteStoreCache.QuoteAt>(StringComparer.OrdinalIgnoreCase);
+			if (table.RowCount == 0) return books;
+			var (strikeCol, rightCol) = (table.Column("strike"), ThetaCells.Pick(table, "right", "type"));
+			for (var row = 0; row < table.RowCount; row++)
+				if (ThetaQuotes.BookAt(table, row) is { } book) books[Occ(root, expiry, table.Double(row, strikeCol), ThetaCells.Right(table, row, rightCol))] = book;
+			return books;
+		}, new Dictionary<string, QuoteStoreCache.QuoteAt>(StringComparer.OrdinalIgnoreCase), cancellation);
+
+	/// <summary>Every contract's open interest in one expiry as reported on <paramref name="date"/> — one wildcard request. Keyed by OCC
+	/// symbol; contracts without a report are absent.</summary>
+	internal Task<(Dictionary<string, long> OpenInterest, string? Error)> ExpiryOpenInterestAsync(string root, DateTime expiry, DateTime date, CancellationToken cancellation) =>
+		RunAsync(async client =>
+		{
+			var day = DateOnly.FromDateTime(date);
+			var table = await ThetaRetry.CollectAsync(token => client.OptionHistoryOpenInterest(new OptionContract(root, DateOnly.FromDateTime(expiry)), day, day, maxDte: null, token), cancellation);
+			var openInterest = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+			if (table.RowCount == 0) return openInterest;
+			var (strikeCol, rightCol, oiCol) = (table.Column("strike"), ThetaCells.Pick(table, "right", "type"), ThetaCells.Pick(table, "open_interest", "oi"));
+			for (var row = 0; row < table.RowCount; row++)
+			{
+				var oi = table.Double(row, oiCol);
+				if (!double.IsNaN(oi)) openInterest[Occ(root, expiry, table.Double(row, strikeCol), ThetaCells.Right(table, row, rightCol))] = (long)oi;
+			}
+			return openInterest;
+		}, new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase), cancellation);
+
+	/// <summary>The app's OCC symbol for one row of an expiry-wide table (the backfill's own encoding).</summary>
+	private static string Occ(string root, DateTime expiry, double strike, char right) => $"{root.ToUpperInvariant()}{expiry:yyMMdd}{right}{QuoteStoreSchema.StrikeMilli(strike):D8}";
+
 	/// <summary><paramref name="ticker"/>'s daily close on <paramref name="date"/> (equity EOD, else index EOD — see
 	/// <see cref="UnderlyingCloses.FetchEodAsync"/>), null when neither feed has the day.</summary>
 	internal async Task<(decimal? Close, string? Error)> DailyCloseAsync(string ticker, DateTime date, CancellationToken cancellation)

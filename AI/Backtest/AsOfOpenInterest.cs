@@ -21,4 +21,15 @@ internal static class AsOfOpenInterest
 				openInterest[symbol] = oi;
 		return openInterest;
 	}
+
+	/// <summary>Every contract's open interest in one expiry as reported on <paramref name="date"/>: the day's snapshot when one exists
+	/// (it holds the whole chain), else one expiry-wide ThetaData request. Returns the map plus, when neither source has the expiry, why.</summary>
+	internal static async Task<(IReadOnlyDictionary<string, long> OpenInterest, string? Miss)> LoadExpiryAsync(string root, DateTime expiry, DateTime date, ThetaFallback? theta, CancellationToken cancellation)
+	{
+		if (new ChainSnapshotOiCache().ByExpiry(root, date).TryGetValue(expiry.Date, out var contracts) && contracts.Count > 0)
+			return (contracts.ToDictionary(c => c.Symbol, c => c.Oi, StringComparer.OrdinalIgnoreCase), null);
+		if (theta == null) return (new Dictionary<string, long>(), $"no data/oi snapshot for {date:yyyy-MM-dd} and no ThetaData login configured");
+		var (openInterest, error) = await theta.ExpiryOpenInterestAsync(root, expiry, date, cancellation);
+		return openInterest.Count > 0 ? (openInterest, null) : (openInterest, $"no data/oi snapshot for {date:yyyy-MM-dd}; ThetaData: {error ?? "no open interest reported"}");
+	}
 }
