@@ -947,6 +947,23 @@ internal static class CascadeScreener
 		return causal;
 	}
 
+	// ── Chain → Reading (the panel and `analyze cascade-study`) ───────────────────────────────────────────
+
+	/// <summary>The panel's pipeline from a resolved chain onward: builds the ≤<paramref name="dte"/> gamma matrix, the terrain, the
+	/// inputs and the reading. One owner, so the study's readings are the panel's readings. Null when no strike falls inside the
+	/// window; otherwise the reading and the number of expiries the matrix spans.</summary>
+	internal static async Task<(CascadeReading Reading, int ExpiryCount)?> ReadChainAsync(
+		string ticker, decimal spot, DateTime asOfEt, Dictionary<string, OptionContractQuote> quotes, int dte, decimal strikeRangeFraction, int maxStrikes, int triggerScore,
+		IReadOnlyList<MinuteBar> rthBars, IntradayBarCache? intradayCache, HistoricalPriceCache priceCache, SmileIndexCache smileCache, string vendorName, CancellationToken cancellation)
+	{
+		var gexMatrix = GexMatrix.Build(quotes, ticker, spot, asOfEt, expiryFilter: null, strikeRangeFraction, dte, maxStrikes, GreekKind.Gamma);
+		if (gexMatrix.Strikes.Count == 0 || gexMatrix.Expiries.Count == 0) return null;
+
+		var terrain = TerrainFrom(gexMatrix, vexMatrix: null, spot, asOfEt);
+		var inputs = await BuildInputsAsync(ticker, spot, asOfEt, gexMatrix, priceCache, intradayCache, smileCache, preloadedSessionRthBars: rthBars, vendorName: vendorName, strikeRangeFraction: strikeRangeFraction, includeCurrentBar: true, cancellation: cancellation);
+		return (Evaluate(terrain, inputs, triggerScore), gexMatrix.Expiries.Count);
+	}
+
 	// ── Shared Input Builder (CLI + Opener / WatchLoop / BacktestRunner) ───────────────────────────────────
 
 	/// <summary>

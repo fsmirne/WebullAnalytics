@@ -11,7 +11,7 @@ namespace WebullAnalytics.Analyze;
 /// <c>spotOverridden</c> marks a --spot run — both are hypothetical readings a study of live rows should drop.</summary>
 internal static class CascadeLog
 {
-	private static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Converters = { new JsonStringEnumConverter() } };
+	internal static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Converters = { new JsonStringEnumConverter() } };
 
 	internal static void Append(string ticker, string vendor, DateTime runEt, DateTime asOfEt, bool spotOverridden, CascadeReading reading)
 	{

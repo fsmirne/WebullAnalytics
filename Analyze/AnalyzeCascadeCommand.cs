@@ -244,34 +244,15 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 			AnsiConsole.MarkupLine($"[yellow]The vendor returned no open interest for any unexpired {Markup.Escape(ticker)} contract (overnight OI blackout — OI is zeroed until the next morning's OCC update), and the terrain is built from OI. Re-run during market hours, or use --date with a captured data/oi snapshot.[/]");
 			return 1;
 		}
-		var strikeRange = settings.StrikeRangePct / 100m;
-		var gexMatrix = GexMatrix.Build(quotes, ticker, spot.Value, asOfEt, expiryFilter: null, strikeRange, settings.Dte, settings.MaxStrikes, GreekKind.Gamma);
-
-		if (gexMatrix.Strikes.Count == 0 || gexMatrix.Expiries.Count == 0)
+		var read = await CascadeScreener.ReadChainAsync(ticker, spot.Value, asOfEt, quotes, settings.Dte, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.TriggerScore, rthBars, intradayCache, new HistoricalPriceCache(), new SmileIndexCache(offline: isOfflineHistorical), settings.VendorName, cancellation);
+		if (read == null)
 		{
 			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
 			return 1;
 		}
 
-		var priceCache = new HistoricalPriceCache();
-		var smileCache = new SmileIndexCache(offline: isOfflineHistorical);
-		var terrain = CascadeScreener.TerrainFrom(gexMatrix, vexMatrix: null, spot.Value, asOfEt);
-		var inputs = await CascadeScreener.BuildInputsAsync(
-			ticker: ticker,
-			spot: spot.Value,
-			asOfEt: asOfEt,
-			gexMatrix: gexMatrix,
-			priceCache: priceCache,
-			intradayCache: intradayCache,
-			smileCache: smileCache,
-			preloadedSessionRthBars: rthBars,
-			vendorName: settings.VendorName,
-			strikeRangeFraction: strikeRange,
-			includeCurrentBar: true,
-			cancellation: cancellation);
-
-		var reading = CascadeScreener.Evaluate(terrain, inputs, settings.TriggerScore);
-		var scope = $"{gexMatrix.Expiries.Count} expiration(s) ≤{settings.Dte}DTE";
+		var (reading, expiryCount) = read.Value;
+		var scope = $"{expiryCount} expiration(s) ≤{settings.Dte}DTE";
 		CascadePanel.Render(ticker, asOfEt, scope, reading);
 		if (!isOfflineHistorical) CascadeLog.Append(ticker, settings.VendorName, nowEt, asOfEt, explicitSpotOverride.HasValue, reading);
 		return 0;

@@ -113,6 +113,7 @@ class Program
 				analyze.AddCommand<AnalyzePositionCommand>("position");
 				analyze.AddCommand<AnalyzeGexCommand>("gex");
 				analyze.AddCommand<AnalyzeCascadeCommand>("cascade");
+				analyze.AddCommand<AnalyzeCascadeStudyCommand>("cascade-study").IsHidden();
 				analyze.AddCommand<AnalyzeSentimentCommand>("sentiment");
 				analyze.AddCommand<AnalyzeRegimeCommand>("regime");
 				analyze.AddCommand<AnalyzeTopCommand>("top");
