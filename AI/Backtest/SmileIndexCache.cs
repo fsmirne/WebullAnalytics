@@ -57,6 +57,51 @@ internal sealed class SmileIndexCache
 		return null;
 	}
 
+	/// <summary>Returns the most recent settled SMILE value strictly before <paramref name="date"/>,
+	/// its 1-day change vs the prior settled session, and its rolling z-score over the trailing
+	/// <paramref name="window"/> settled sessions so the secularly drifting SMILE level is normalized
+	/// into a stationary standard-deviation reading across 1986–present.</summary>
+	public async Task<(decimal? Value, decimal? Change1d, decimal? ZScore)> GetTrailingStatsAsync(
+		DateTime date,
+		int window = 20,
+		CancellationToken cancellation = default)
+	{
+		var map = await EnsureLoadedAsync(cancellation);
+		decimal? latest = null;
+		DateTime latestDate = default;
+		for (var i = 1; i <= 6; i++)
+		{
+			var d = date.Date.AddDays(-i);
+			if (map.TryGetValue(d, out var v))
+			{
+				latest = v;
+				latestDate = d;
+				break;
+			}
+		}
+		if (!latest.HasValue) return (null, null, null);
+
+		var series = new List<decimal>(window) { latest.Value };
+		var cursor = latestDate.AddDays(-1);
+		var floor = latestDate.AddDays(-Math.Max(window * 3, 60));
+		while (cursor >= floor && series.Count < window)
+		{
+			if (map.TryGetValue(cursor, out var v))
+				series.Add(v);
+			cursor = cursor.AddDays(-1);
+		}
+		decimal? change1d = series.Count >= 2 ? latest.Value - series[1] : null;
+		decimal? zScore = null;
+		if (series.Count >= 10)
+		{
+			var mean = series.Average();
+			var sumSq = series.Sum(x => (double)((x - mean) * (x - mean)));
+			var std = (decimal)Math.Sqrt(sumSq / (series.Count - 1));
+			zScore = std > 0.5m ? (latest.Value - mean) / std : 0m;
+		}
+		return (latest, change1d, zScore);
+	}
+
 	public async Task<bool> HasCoverageAsync(DateTime from, DateTime to, CancellationToken cancellation)
 	{
 		var map = await EnsureLoadedAsync(cancellation);

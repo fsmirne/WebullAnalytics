@@ -334,7 +334,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// Chain-wide OI absence = vendor OI blackout (Schwab zeroes openInterest overnight until the next OCC
 		// update posts), not "every contract is a fresh listing" — every OI-dependent panel must know the field
 		// is unusable rather than treat 0 as a real standing-interest reading.
-		var chainHasOi = quotes.Values.Any(q => q.OpenInterest is > 0);
+		var chainHasOi = !IsOiBlackout(quotes, ticker, asOf.Date);
 
 		// Unusual opening activity: strikes trading a multiple of their standing OI — arithmetically
 		// guaranteed opening flow, no print signing needed. Rendered in both the normal and --intraday views;
@@ -402,11 +402,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var both = settings.BothGreeks;
 		var matrix = GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, greek);
 		var vannaMatrix = both ? GexMatrix.Build(quotes, ticker, spot.Value, asOf, expiryFilter, settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, GreekKind.Vanna) : null;
+		if (!chainHasOi)
+		{
+			AnsiConsole.MarkupLine($"[yellow]The vendor returned no open interest for any unexpired {Markup.Escape(ticker)} contract among the {quotes.Count} fetched (overnight OI blackout — OI is zeroed until the next morning's OCC update) and GEX is built from OI, so there is nothing to compute. Re-run during market hours, or use --date with a captured data/oi snapshot.[/]");
+			return 1;
+		}
 		if (matrix.Strikes.Count == 0 || matrix.Expiries.Count == 0)
 		{
-			AnsiConsole.MarkupLine(chainHasOi
-				? $"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]"
-				: $"[yellow]The vendor returned no open interest for any of the {quotes.Count} fetched contracts (overnight OI blackout — OI is zeroed until the next morning's OCC update) and GEX is built from OI, so there is nothing to compute. Re-run during market hours, or use --date with a captured data/oi snapshot.[/]");
+			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
 			return 1;
 		}
 
@@ -547,6 +550,27 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		public void Deconstruct(out decimal? spot, out Dictionary<string, OptionContractQuote> quotes) => (spot, quotes) = (Spot, Quotes);
 	}
 
+	/// <summary>True when the chain's open interest is unusable: no contract carries any, or every expiry after
+	/// <paramref name="asOfDate"/> reads zero. The second case is the overnight vendor blackout as it actually arrives —
+	/// OI is zeroed on every live contract while the session's just-expired contracts keep theirs (2026-11-10 23:09 ET:
+	/// 62 of 9,918 SPXW contracts with OI, all on the expired 11-10 expiry), so "any OI anywhere" passes and the
+	/// terrain would be built from the dead expiry alone.</summary>
+	internal static bool IsOiBlackout(IReadOnlyDictionary<string, OptionContractQuote> quotes, string ticker, DateTime asOfDate)
+	{
+		bool anyOi = false, anyLater = false;
+		foreach (var (sym, q) in quotes)
+		{
+			var p = ParsingHelpers.ParseOptionSymbol(sym);
+			if (p == null || !ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate)) continue;
+			var hasOi = q.OpenInterest is > 0;
+			anyOi |= hasOi;
+			if (p.ExpiryDate.Date <= asOfDate.Date) continue;
+			if (hasOi) return false;
+			anyLater = true;
+		}
+		return !anyOi || anyLater;
+	}
+
 	internal static OiSnapshot LoadOiSnapshot(string path)
 	{
 		var quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
@@ -586,7 +610,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// each bucket's historical spot — which leaks the day's outcome into every column (a put that finished ITM has a
 	/// fat EOD mid, back-solves to an inflated IV, and its gamma re-shapes by where the day closed). Contracts with no
 	/// usable prior-day IV or mid are removed so Build cannot fall back to the leaky same-day solve.</summary>
-	private static bool ApplyExanteIvs(string ticker, DateTime date, DateTime expiry, Dictionary<string, OptionContractQuote> quotes)
+	internal static bool ApplyExanteIvs(string ticker, DateTime date, DateTime expiry, Dictionary<string, OptionContractQuote> quotes)
 	{
 		var dir = Program.ResolvePath($"data/oi/{ticker}");
 		DateTime? priorDate = null;
@@ -650,7 +674,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// came back from strategy/list with missing OI or IV, then refreshes them via Webull's queryBatch.
 	/// Pre-filters expiries to those within <paramref name="maxDteDays"/> days-to-expiry when no explicit
 	/// --expiry is set so we don't waste batches on far-dated stub contracts the user won't see.</summary>
-	private static async Task<int> RefreshInWindowContractsAsync(
+	internal static async Task<int> RefreshInWindowContractsAsync(
 		ApiConfig apiConfig,
 		IDictionary<string, OptionContractQuote> chain,
 		IReadOnlyDictionary<string, long> derivativeIds,
@@ -707,7 +731,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	}
 
 
-	private static decimal? ResolveSpotOverride(string? spotSpec, string ticker)
+	internal static decimal? ResolveSpotOverride(string? spotSpec, string ticker)
 	{
 		if (string.IsNullOrWhiteSpace(spotSpec)) return null;
 		foreach (var pair in spotSpec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -728,7 +752,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 	/// jump, visible the day it was being built. Thresholds fixed on purpose: vol ≥ 2× max(OI,1) and
 	/// vol ≥ 250 (the OI floor keeps fresh listings from flooding the list), top 12 by volume, listed by
 	/// expiry then strike-descending (matching the heatmap ladder) then volume. When the vendor is in its
-	/// overnight OI blackout (chainHasOi false — no contract anywhere in the fetch carries OI), the screen is
+	/// overnight OI blackout (chainHasOi false — see <see cref="IsOiBlackout"/>), the screen is
 	/// skipped with a note instead of rendered: every ratio would be vol/1, turning the panel into a plain
 	/// volume leaderboard wearing an "unusual" label.</summary>
 	// Thresholds shared by both unusual-activity screens: 2× the standing interest, with an absolute floor that
@@ -2142,7 +2166,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		return $"{sign}{abs:F0}";
 	}
 
-	private static string FormatCompactDollars(decimal v)
+	internal static string FormatCompactDollars(decimal v)
 	{
 		var abs = Math.Abs(v);
 		if (abs >= 1_000_000_000m) return $"${abs / 1_000_000_000m:F2}B";
