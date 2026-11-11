@@ -428,9 +428,8 @@ internal static class CascadeScreener
 		var f = t.Front;
 		var move = Math.Max(f.DailyMove ?? 0m, f.Spot * 0.006m);
 		var gapPct = inp.Tape?.GapPct ?? 0m;
-		var gapMoves = inp.Tape != null && f.Spot > 0m ? (gapPct / 100m * f.Spot) / move : 0m;
-		var dipMoves = inp.Tape != null ? Math.Max(0m, inp.Tape.SessionOpen - inp.Tape.SessionLow) / move : 0m;
-		var stretchMoves = Math.Max(-gapMoves, dipMoves);
+		// The stretch runs from the higher of the prior close and the open down to the session low, so a gap down that keeps falling counts as one move.
+		var stretchMoves = inp.Tape is { } st ? Math.Max(0m, Math.Max(st.SessionOpen, st.PrevClose ?? st.SessionOpen) - st.SessionLow) / move : 0m;
 		var bounceMoves = inp.Tape != null ? Math.Max(0m, f.Spot - inp.Tape.SessionLow) / move : (decimal?)null;
 
 		// Factor 1: Initial Bearish Stretch (20 pts)
@@ -518,9 +517,8 @@ internal static class CascadeScreener
 		var f = t.Front;
 		var move = Math.Max(f.DailyMove ?? 0m, f.Spot * 0.006m);
 		var gapPct = inp.Tape?.GapPct ?? 0m;
-		var gapMoves = inp.Tape != null && f.Spot > 0m ? (gapPct / 100m * f.Spot) / move : 0m;
-		var rallyMoves = inp.Tape != null ? Math.Max(0m, inp.Tape.SessionHigh - inp.Tape.SessionOpen) / move : 0m;
-		var stretchMoves = Math.Max(gapMoves, rallyMoves);
+		// The stretch runs from the lower of the prior close and the open up to the session high, so a gap up that keeps rallying counts as one move.
+		var stretchMoves = inp.Tape is { } st ? Math.Max(0m, st.SessionHigh - Math.Min(st.SessionOpen, st.PrevClose ?? st.SessionOpen)) / move : 0m;
 		var fadeMoves = inp.Tape != null ? Math.Max(0m, inp.Tape.SessionHigh - f.Spot) / move : (decimal?)null;
 		var rejectedCallWall = !t.FrontSettled && f.CallWall.HasValue && inp.Tape != null
 			&& inp.Tape.SessionHigh >= f.CallWall.Value - 0.15m * move
@@ -546,7 +544,7 @@ internal static class CascadeScreener
 				skewWarnPts += 3m * Ramp(bwd, 0.01m, 0.05m);
 			f2Pts = RoundPts(vixDivergePts + skewWarnPts);
 		}
-		var f2Detail = $"VIX vs open {(inp.VixChangeFromOpenPct.HasValue ? $"{inp.VixChangeFromOpenPct.Value:+0.0;-0.0}%" : "n/a")}, SMILE z20 {(inp.SmileZScore20d.HasValue ? $"{inp.SmileZScore20d.Value:+0.0;-0.0}σ" : "n/a")}";
+		var f2Detail = $"VIX vs open {(inp.VixChangeFromOpenPct.HasValue ? $"{inp.VixChangeFromOpenPct.Value:+0.0;-0.0}%" : "n/a")}, SMILE z20 {(inp.SmileZScore20d.HasValue ? $"{inp.SmileZScore20d.Value:+0.0;-0.0}σ" : "n/a")}{(inp.MaxPriorVix9dOverVix.HasValue ? $", 3d VIX9D/VIX {inp.MaxPriorVix9dOverVix.Value * 100m:+0.0;-0.0}%" : "")}";
 
 		// Factor 3: Downward Gravity / Wall Rejection Drag (20 pts)
 		decimal dragPts = 0m;

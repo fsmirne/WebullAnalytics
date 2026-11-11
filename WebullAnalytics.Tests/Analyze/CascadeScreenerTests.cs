@@ -143,6 +143,19 @@ public class CascadeScreenerTests
 		Assert.Equal(early.Setups[CascadeRegime.BearTrap].Score, late.Setups[CascadeRegime.BearTrap].Score);
 	}
 
+	[Fact]
+	public void Traps_MeasureStretchFromPriorCloseThroughTheGap()
+	{
+		// A 0.3 EM gap that extends another 0.3 EM from the open is one 0.6 EM stretch, not the larger of its two halves.
+		var (bullT, bullI) = BullTrapSession();
+		var bull = CascadeScreener.Evaluate(bullT, bullI with { Tape = bullI.Tape! with { PrevClose = Open - 21m, SessionHigh = Open + 21m } });
+		Assert.Contains("bull stretch 0.60 EM", bull.Setups[CascadeRegime.BullTrap].Factors[0].Detail);
+
+		var (bearT, bearI) = BearTrapSession();
+		var bear = CascadeScreener.Evaluate(bearT, bearI with { Tape = bearI.Tape! with { PrevClose = Open + 21m, SessionLow = Open - 21m } });
+		Assert.Contains("bear stretch 0.60 EM", bear.Setups[CascadeRegime.BearTrap].Factors[0].Detail);
+	}
+
 	// The same session with the front expiry above its flip and the multi-expiry book at the given net GEX.
 	private static CascadeTerrain FrontLongGamma(CascadeTerrain t, decimal netGexMulti) => t with { Front = t.Front with { ShortGamma = false, Trigger = t.Front.Spot - 30m }, NetGexFractionMulti = netGexMulti };
 
