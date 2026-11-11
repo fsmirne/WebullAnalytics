@@ -50,7 +50,14 @@ internal sealed record CascadeTerrain(
 	decimal? OtmPutWall0Dte = null,
 	decimal? CallWallMulti = null,
 	decimal? PutWallMulti = null,
-	decimal FrontNetGexFraction = 0m);
+	decimal FrontNetGexFraction = 0m,
+	/// <summary>The as-of instant is at or after the regular-session close of its date (13:00 on a half-day). The reading is
+	/// then a recap of the finished session — whole-day flow and tape — and no regime confirms.</summary>
+	bool SessionClosed = false,
+	/// <summary>The front expiry has stopped trading: it expires on the as-of date and the session has closed, or it expired
+	/// earlier. Its gamma collapses onto the strikes beside the settlement price (flip, gravity and walls all land at the
+	/// money), so the factors read from it are left unscored.</summary>
+	bool FrontSettled = false);
 
 /// <summary>
 /// Point-in-time flow, volatility, skew, and intraday tape inputs to <see cref="CascadeScreener.Evaluate"/>.
@@ -174,6 +181,8 @@ internal static class CascadeScreener
 				if (strike <= spot - minHeadroom && -cell.Net > bestOtmPutNet) { bestOtmPutNet = -cell.Net; otmPutWall0Dte = strike; }
 			}
 		}
+		var sessionClosed = asOf.TimeOfDay >= MarketCalendar.CloseTimeEt(asOf.Date);
+		var frontSettled = frontExp.HasValue && (frontExp.Value.Date < asOf.Date || (frontExp.Value.Date == asOf.Date && sessionClosed));
 		var (frontCallWall, frontPutWall) = frontExp.HasValue ? gexMatrix.FindWalls(frontExp.Value) : (null, null);
 		var frontShortGamma = frontFlip.HasValue ? spot < frontFlip.Value : (frontCallGex - frontPutGex) < 0m;
 		var frontGross = frontCallGex + frontPutGex;
@@ -181,19 +190,24 @@ internal static class CascadeScreener
 
 		var frontTerrain = new SqueezeTerrain(
 			Spot: spot,
-			Trigger: frontFlip ?? baseTerrain.Trigger,
-			ShortGamma: frontShortGamma,
-			CallWall: callWallAbove ?? frontCallWall ?? baseTerrain.CallWall,
-			PutWall: putWallBelow ?? frontPutWall ?? baseTerrain.PutWall,
+			Trigger: frontSettled ? null : frontFlip ?? baseTerrain.Trigger,
+			ShortGamma: !frontSettled && frontShortGamma,
+			CallWall: frontSettled ? null : callWallAbove ?? frontCallWall ?? baseTerrain.CallWall,
+			PutWall: frontSettled ? null : putWallBelow ?? frontPutWall ?? baseTerrain.PutWall,
 			DailyMove: baseTerrain.DailyMove);
 
-		var gravity0Dte = frontExp.HasValue ? gexMatrix.GravityByExpiry.GetValueOrDefault(frontExp.Value) : null;
-		var centroid0Dte = frontExp.HasValue ? gexMatrix.GrossCentroidByExpiry.GetValueOrDefault(frontExp.Value) : null;
-		var netPull0Dte = frontExp.HasValue ? gexMatrix.NetPullByExpiry.GetValueOrDefault(frontExp.Value) : null;
+		var frontLive = frontExp.HasValue && !frontSettled;
+		var gravity0Dte = frontLive ? gexMatrix.GravityByExpiry.GetValueOrDefault(frontExp!.Value) : null;
+		var centroid0Dte = frontLive ? gexMatrix.GrossCentroidByExpiry.GetValueOrDefault(frontExp!.Value) : null;
+		var netPull0Dte = frontLive ? gexMatrix.NetPullByExpiry.GetValueOrDefault(frontExp!.Value) : null;
 
-		var flipMulti = gexMatrix.FindGammaFlip(spot);
-		var totalGexGross = gexMatrix.TotalCallGex + gexMatrix.TotalPutGex;
-		var netGexFractionMulti = totalGexGross > 0m ? (gexMatrix.TotalCallGex - gexMatrix.TotalPutGex) / totalGexGross : 0m;
+		// A settled front expiry is taken out of the multi-expiry book: its gamma is a spike on the strikes beside the
+		// settlement price, not standing dealer exposure. The whole-book flip cannot be recomputed without it, so it is dropped.
+		var liveCallGex = gexMatrix.TotalCallGex - (frontSettled ? frontCallGex : 0m);
+		var livePutGex = gexMatrix.TotalPutGex - (frontSettled ? frontPutGex : 0m);
+		var flipMulti = frontSettled ? null : gexMatrix.FindGammaFlip(spot);
+		var totalGexGross = liveCallGex + livePutGex;
+		var netGexFractionMulti = totalGexGross > 0m ? (liveCallGex - livePutGex) / totalGexGross : 0m;
 
 		decimal netVexMulti = 0m, netVexFractionMulti = 0m;
 		if (vexMatrix != null)
@@ -218,11 +232,13 @@ internal static class CascadeScreener
 			NetVexMulti: netVexMulti,
 			NetVexFractionMulti: netVexFractionMulti,
 			ExpiryCount: gexMatrix.Expiries.Count,
-			OtmCallWall0Dte: otmCallWall0Dte,
-			OtmPutWall0Dte: otmPutWall0Dte,
+			OtmCallWall0Dte: frontSettled ? null : otmCallWall0Dte,
+			OtmPutWall0Dte: frontSettled ? null : otmPutWall0Dte,
 			CallWallMulti: baseTerrain.CallWall,
 			PutWallMulti: baseTerrain.PutWall,
-			FrontNetGexFraction: frontNetGexFraction);
+			FrontNetGexFraction: frontNetGexFraction,
+			SessionClosed: sessionClosed,
+			FrontSettled: frontSettled);
 	}
 
 	/// <summary>Evaluates all four regimes and selects the active or leading classification.</summary>
@@ -247,7 +263,8 @@ internal static class CascadeScreener
 			.FirstOrDefault();
 
 		var leading = confirmed ?? setups.Values.OrderByDescending(s => s.Score).First();
-		var primary = confirmed?.Regime ?? CascadeRegime.Neutral;
+		// After the close the reading is a recap of the finished session: the leading setup is reported, nothing confirms.
+		var primary = terrain.SessionClosed ? CascadeRegime.Neutral : confirmed?.Regime ?? CascadeRegime.Neutral;
 
 		return new CascadeReading(primary, leading, setups, terrain, inputs, triggerScore);
 	}
@@ -256,12 +273,18 @@ internal static class CascadeScreener
 
 	/// <summary>The terrain both cascades require: dealers short gamma, so their hedging chases a move in either direction
 	/// instead of damping it. True when the front expiry sits below its gamma flip or the multi-expiry book is net short.</summary>
-	private static bool HasShortGammaTerrain(CascadeTerrain t) => t.Front.ShortGamma || t.NetGexFractionMulti <= -0.15m;
+	private static bool HasShortGammaTerrain(CascadeTerrain t) => FrontShortGamma(t) || t.NetGexFractionMulti <= -0.15m;
+
+	/// <summary>The front expiry sits below its gamma flip — read only while that expiry is still trading.</summary>
+	private static bool FrontShortGamma(CascadeTerrain t) => !t.FrontSettled && t.Front.ShortGamma;
+
+	private const string FrontSettledDetail = "front expiry settled — its gamma levels are not scored";
 
 	/// <summary>Factor 1 of both cascades (<see cref="ScoreCascade"/>): up to 10 points for the front expiry's depth below its flip and up to 10 for
 	/// the multi-expiry book's net short gamma. Direction-blind by design — the direction comes from the other factors.</summary>
-	private static (int Points, string Detail) ShortGammaTerrainFactor(CascadeTerrain t, decimal move)
+	private static (int? Points, string Detail) ShortGammaTerrainFactor(CascadeTerrain t, decimal move)
 	{
+		if (t.FrontSettled) return (null, $"{FrontSettledDetail}; {t.ExpiryCount}exp net GEX {t.NetGexFractionMulti:+0%;-0%}");
 		var f = t.Front;
 		var pts0Dte = f.ShortGamma
 			? (f.Trigger.HasValue ? 6m + 4m * Ramp(f.Trigger.Value - f.Spot, 0m, 0.5m * move) : 8m)
@@ -272,7 +295,7 @@ internal static class CascadeScreener
 	}
 
 	private static SetupNote ShortGammaTerrainNote(CascadeTerrain t, string dampedMove) => HasShortGammaTerrain(t)
-		? new SetupNote(NoteSeverity.Confirm, $"Short-gamma amplification active (front expiry {(t.Front.ShortGamma ? "below flip" : "above flip")}, {t.ExpiryCount}-exp net GEX {t.NetGexFractionMulti:+0%;-0%})")
+		? new SetupNote(NoteSeverity.Confirm, $"Short-gamma amplification active (front expiry {(t.FrontSettled ? "settled" : t.Front.ShortGamma ? "below flip" : "above flip")}, {t.ExpiryCount}-exp net GEX {t.NetGexFractionMulti:+0%;-0%})")
 		: new SetupNote(NoteSeverity.Conflict, $"Long-gamma cushion ({t.ExpiryCount}-exp net GEX {t.NetGexFractionMulti:+0%;-0%}) — dealers dampen {dampedMove}");
 
 	// ── 1 & 3. BEAR CASCADE / BULL CASCADE (Continuation) ──────────────────────────────────────────────────
@@ -338,8 +361,8 @@ internal static class CascadeScreener
 			gravPts = Math.Max(gravPts, 10m * Ramp(pullWith, 0.10m, 0.65m));
 		if (wallAhead >= 0.15m * move)
 			gravPts += wallAhead.Value <= 1.5m * move ? 10m * Ramp(wallAhead.Value, 0.15m * move, 0.50m * move) : 5m;
-		var f4Pts = RoundPts(gravPts);
-		var f4Detail = $"front gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, pull {(t.NetPull0Dte.HasValue ? $"{t.NetPull0Dte.Value:+0.00;-0.00}σ" : "—")}, target {(bull ? "C" : "P")}-wall {(targetWall.HasValue ? $"${targetWall.Value:N0} ({targetWall.Value - f.Spot:+0;-0} pts)" : "—")}";
+		int? f4Pts = t.FrontSettled ? null : RoundPts(gravPts);
+		var f4Detail = t.FrontSettled ? FrontSettledDetail : $"front gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, pull {(t.NetPull0Dte.HasValue ? $"{t.NetPull0Dte.Value:+0.00;-0.00}σ" : "—")}, target {(bull ? "C" : "P")}-wall {(targetWall.HasValue ? $"${targetWall.Value:N0} ({targetWall.Value - f.Spot:+0;-0} pts)" : "—")}";
 
 		// Factor 5: Session Tape & VWAP Hold (20 pts)
 		int? f5Pts = null;
@@ -412,10 +435,10 @@ internal static class CascadeScreener
 
 		// Factor 1: Initial Bearish Stretch (20 pts)
 		decimal stretchPts = 14m * Ramp(stretchMoves, 0.20m, 0.80m);
-		if (stretchMoves >= 0.20m && (f.ShortGamma || t.NetGexFractionMulti < -0.15m))
+		if (stretchMoves >= 0.20m && (FrontShortGamma(t) || t.NetGexFractionMulti < -0.15m))
 			stretchPts += 6m;
 		var f1Pts = RoundPts(stretchPts);
-		var f1Detail = $"bear stretch {stretchMoves:F2} EM (gap {gapPct:+0.00;-0.00}%), {(f.ShortGamma ? "0DTE short γ" : "0DTE long γ")}, 30d GEX {t.NetGexFractionMulti:+0%;-0%}";
+		var f1Detail = $"bear stretch {stretchMoves:F2} EM (gap {gapPct:+0.00;-0.00}%), {(t.FrontSettled ? "front expiry settled" : f.ShortGamma ? "0DTE short γ" : "0DTE long γ")}, 30d GEX {t.NetGexFractionMulti:+0%;-0%}";
 
 		// Factor 2: Intraday VIX Stall / Drop from Open (20 pts) — null when intraday VIX is absent
 		int? f2Pts = null;
@@ -433,8 +456,8 @@ internal static class CascadeScreener
 			overheadPts = 20m * Ramp(anchor.Value - f.Spot, 0.05m * move, 0.60m * move);
 		if (t.NetPull0Dte is { } pull && pull > 0m)
 			overheadPts = Math.Max(overheadPts, 20m * Ramp(pull, 0.05m, 0.45m));
-		var f3Pts = RoundPts(overheadPts);
-		var f3Detail = $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}, pull {(t.NetPull0Dte.HasValue ? $"{t.NetPull0Dte.Value:+0.00;-0.00}σ" : "—")}";
+		int? f3Pts = t.FrontSettled ? null : RoundPts(overheadPts);
+		var f3Detail = t.FrontSettled ? FrontSettledDetail : $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}, pull {(t.NetPull0Dte.HasValue ? $"{t.NetPull0Dte.Value:+0.00;-0.00}σ" : "—")}";
 
 		// Factor 4: Reversal / Trapped Flow (20 pts)
 		decimal crowdPts = 0m;
@@ -499,7 +522,7 @@ internal static class CascadeScreener
 		var rallyMoves = inp.Tape != null ? Math.Max(0m, inp.Tape.SessionHigh - inp.Tape.SessionOpen) / move : 0m;
 		var stretchMoves = Math.Max(gapMoves, rallyMoves);
 		var fadeMoves = inp.Tape != null ? Math.Max(0m, inp.Tape.SessionHigh - f.Spot) / move : (decimal?)null;
-		var rejectedCallWall = f.CallWall.HasValue && inp.Tape != null
+		var rejectedCallWall = !t.FrontSettled && f.CallWall.HasValue && inp.Tape != null
 			&& inp.Tape.SessionHigh >= f.CallWall.Value - 0.15m * move
 			&& f.Spot <= f.CallWall.Value
 			&& (fadeMoves ?? 0m) >= 0.20m;
@@ -534,8 +557,8 @@ internal static class CascadeScreener
 			dragPts = Math.Max(dragPts, 20m * Ramp(-pull, 0.05m, 0.45m));
 		if (rejectedCallWall && fadeMoves.HasValue)
 			dragPts = Math.Max(dragPts, 14m + 6m * Ramp(fadeMoves.Value, 0.20m, 0.50m));
-		var f3Pts = RoundPts(dragPts);
-		var f3Detail = rejectedCallWall
+		int? f3Pts = t.FrontSettled ? null : RoundPts(dragPts);
+		var f3Detail = t.FrontSettled ? FrontSettledDetail : rejectedCallWall
 			? $"rejected 0DTE call wall ${f.CallWall:N0} (high ${inp.Tape!.SessionHigh:N2} → ${f.Spot:N2})"
 			: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}, pull {(t.NetPull0Dte.HasValue ? $"{t.NetPull0Dte.Value:+0.00;-0.00}σ" : "—")}";
 
@@ -637,6 +660,10 @@ internal static class CascadeScreener
 		return notes;
 	}
 
+	private static string FrontStructureDetail(CascadeTerrain t, CascadeInputs inp) => t.FrontSettled
+		? $"flow {inp.FlowShare ?? 0m:+0.00;-0.00}"
+		: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, pull {t.NetPull0Dte ?? 0m:+0.00;-0.00}σ, flow {inp.FlowShare ?? 0m:+0.00;-0.00}";
+
 	private static List<SetupNote> BuildNotesBearTrap(CascadeTerrain t, CascadeInputs inp, decimal stretchMoves, bool hadBearStretch, bool vixNotExpanding, bool reclaimedVwap, bool upwardStructure)
 	{
 		var notes = new List<SetupNote>();
@@ -650,7 +677,7 @@ internal static class CascadeScreener
 			: new SetupNote(NoteSeverity.Conflict, $"VIX is expanding intraday ({FormatVixMoves(inp)}) — points to Bear Cascade, not a trap"));
 
 		notes.Add(upwardStructure
-			? new SetupNote(NoteSeverity.Confirm, $"Upward structure support (0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, pull {t.NetPull0Dte ?? 0m:+0.00;-0.00}σ, flow {inp.FlowShare ?? 0m:+0.00;-0.00})")
+			? new SetupNote(NoteSeverity.Confirm, $"Upward structure support ({FrontStructureDetail(t, inp)})")
 			: new SetupNote(NoteSeverity.Warn, $"0DTE gravity/pull/flow still leaning below spot"));
 
 		if (inp.Tape is { } tape)
@@ -678,7 +705,7 @@ internal static class CascadeScreener
 			notes.Add(new SetupNote(NoteSeverity.Confirm, $"Rejected 0DTE Call Wall at ${f.CallWall:N0} (tagged ${inp.Tape.SessionHigh:N2}, now ${f.Spot:N2})"));
 		else
 			notes.Add(downwardStructure
-				? new SetupNote(NoteSeverity.Confirm, $"Downward drag active (0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, pull {t.NetPull0Dte ?? 0m:+0.00;-0.00}σ, flow {inp.FlowShare ?? 0m:+0.00;-0.00})")
+				? new SetupNote(NoteSeverity.Confirm, $"Downward drag active ({FrontStructureDetail(t, inp)})")
 				: new SetupNote(NoteSeverity.Warn, "0DTE gravity/pull/flow still leaning above spot"));
 
 		if (inp.Tape is { } tape)

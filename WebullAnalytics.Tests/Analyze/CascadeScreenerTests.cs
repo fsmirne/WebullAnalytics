@@ -220,6 +220,40 @@ public class CascadeScreenerTests
 	}
 
 	[Fact]
+	public void AfterTheClose_TheReadingIsARecap_NothingConfirms_AndSettledFrontLevelsAreUnscored()
+	{
+		// Every textbook session, re-read after the close with its front expiry settled.
+		foreach (var (t, i) in new[] { BullCascadeSession(), BearCascadeSession(), BearTrapSession(), BullTrapSession() })
+		{
+			var live = CascadeScreener.Evaluate(t, i);
+			Assert.True(live.Active);
+
+			var recap = CascadeScreener.Evaluate(t with { SessionClosed = true, FrontSettled = true }, i);
+			Assert.Equal(CascadeRegime.Neutral, recap.PrimaryRegime);
+			Assert.All(recap.Setups.Values, s => Assert.False(s.Complete));
+			// The recap still names the same session shape.
+			Assert.Equal(live.LeadingSetup.Regime, recap.LeadingSetup.Regime);
+		}
+
+		var (ct, ci) = BullCascadeSession();
+		var cascade = CascadeScreener.Evaluate(ct with { SessionClosed = true, FrontSettled = true }, ci).Setups[CascadeRegime.BullCascade];
+		Assert.Null(cascade.Factors.Single(f => f.Name == "Short-Gamma Terrain").Points);
+		Assert.Null(cascade.Factors.Single(f => f.Name == "Gravity Pull & Target Wall").Points);
+		var (tt, ti) = BearTrapSession();
+		Assert.Null(CascadeScreener.Evaluate(tt with { SessionClosed = true, FrontSettled = true }, ti).Setups[CascadeRegime.BearTrap].Factors.Single(f => f.Name == "Overhead Gravity Magnet").Points);
+	}
+
+	[Fact]
+	public void AfterTheClose_WithALaterFrontExpiry_FactorsStayScored_ButNothingConfirms()
+	{
+		var (t, i) = BearCascadeSession();
+		var recap = CascadeScreener.Evaluate(t with { SessionClosed = true }, i);
+		Assert.Equal(CascadeRegime.Neutral, recap.PrimaryRegime);
+		Assert.Equal(CascadeRegime.BearCascade, recap.LeadingSetup.Regime);
+		Assert.All(recap.LeadingSetup.Factors, f => Assert.NotNull(f.Points));
+	}
+
+	[Fact]
 	public void QuietSession_IsNeutral_AndNoSetupCompletes()
 	{
 		var t = Terrain(7001m, shortGamma: false, netGexMulti: 0.10m, gravity: 7000m, pull: 0m, callWall: 7050m, putWall: 6950m);

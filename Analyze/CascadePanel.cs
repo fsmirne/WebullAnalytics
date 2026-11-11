@@ -17,8 +17,9 @@ internal static class CascadePanel
 		var lead = reading.LeadingSetup;
 		var active = reading.Active;
 		var regimeColor = RegimeColor(reading.PrimaryRegime, lead.Regime);
-		var badgeText = active
-			? $" {CascadeReading.RegimeLabel(reading.PrimaryRegime)} "
+		var closed = reading.Terrain.SessionClosed;
+		var badgeText = closed ? $" RECAP · {CascadeReading.RegimeLabel(lead.Regime)} "
+			: active ? $" {CascadeReading.RegimeLabel(reading.PrimaryRegime)} "
 			: $" NEUTRAL · LEAN {CascadeReading.RegimeLabel(lead.Regime)} ";
 
 		var headerGrid = new Grid().Expand()
@@ -33,12 +34,16 @@ internal static class CascadePanel
 		headerGrid.AddEmptyRow();
 
 		var headlineGlyph = reading.DirectionalSign > 0 ? "▲" : "▼";
-		var statusLabel = active
-			? (lead.Score >= CascadeScreener.StrongScore ? "CONFIRMED · STRONG SCORE" : "CONFIRMED")
+		var statusLabel = closed ? "SESSION CLOSED"
+			: active ? (lead.Score >= CascadeScreener.StrongScore ? "CONFIRMED · STRONG SCORE" : "CONFIRMED")
 			: (lead.Complete ? "BELOW TRIGGER" : "UNCONFIRMED");
 		headerGrid.AddRow(
 			new Markup($"[bold {regimeColor}]{headlineGlyph} {Markup.Escape(CascadeReading.RegimeLabel(lead.Regime))}[/]"),
 			new Markup($"[bold {regimeColor}]{statusLabel}[/]"));
+		if (closed)
+			headerGrid.AddRow(
+				new Markup($"[yellow]The session has closed: this is a recap of the whole day (full-session flow and tape), and nothing confirms after the close.{(reading.Terrain.FrontSettled ? " The front expiry has settled, so its gamma levels are not scored." : "")}[/]"),
+				new Text(""));
 		headerGrid.AddEmptyRow();
 
 		var earned = lead.Factors.Sum(f => f.Points ?? 0);
@@ -50,7 +55,7 @@ internal static class CascadePanel
 			new Markup($"[bold {regimeColor}]{lead.Score}[/][bold]/100[/]"));
 		headerGrid.AddRow(
 			new Text(""),
-			new Markup(lead.Complete ? $"[dim]{coverage}[/]" : $"[yellow]{coverage} · awaiting confirmation gates[/]"));
+			new Markup(closed ? $"[dim]{coverage} · recap[/]" : lead.Complete ? $"[dim]{coverage}[/]" : $"[yellow]{coverage} · awaiting confirmation gates[/]"));
 
 		var rows = new List<Spectre.Console.Rendering.IRenderable>
 		{
@@ -146,39 +151,45 @@ internal static class CascadePanel
 				new Markup($"[bold]${tape.Vwap:N2}[/] ({vwapSide} {tape.MinutesHeldOnSide}m, {tape.VwapFlips} flips · L ${tape.SessionLow:N2} – H ${tape.SessionHigh:N2})"));
 		}
 
-		grid.AddRow(
-			new Markup("[grey]0DTE Gamma Flip[/]"),
-			new Markup(f.Trigger.HasValue
-				? $"{PctTag(f.Trigger.Value, f.Spot)} [bold {(f.ShortGamma ? "red" : "green")}]${f.Trigger.Value:N2}[/] [dim]({(f.ShortGamma ? "short γ" : "long γ")})[/]"
-				: $"[dim]— ({(f.ShortGamma ? "net short γ" : "net long γ")})[/]"));
+		if (t.FrontSettled)
+			grid.AddRow(new Markup("[grey]Front Expiry[/]"), new Markup($"[dim]{t.FrontExpiry:yyyy-MM-dd} settled at the close — flip, gravity and walls not shown[/]"));
+		else
+			grid.AddRow(
+				new Markup("[grey]0DTE Gamma Flip[/]"),
+				new Markup(f.Trigger.HasValue
+					? $"{PctTag(f.Trigger.Value, f.Spot)} [bold {(f.ShortGamma ? "red" : "green")}]${f.Trigger.Value:N2}[/] [dim]({(f.ShortGamma ? "short γ" : "long γ")})[/]"
+					: $"[dim]— ({(f.ShortGamma ? "net short γ" : "net long γ")})[/]"));
 
 		grid.AddRow(
 			new Markup($"[grey]Multi-Expiry GEX ({t.ExpiryCount} exp)[/]"),
 			new Markup($"{(t.FlipMulti.HasValue ? $"flip [bold]${t.FlipMulti.Value:N2}[/] · " : "")}net [bold {(t.NetGexFractionMulti >= 0m ? "green" : "red")}]{t.NetGexFractionMulti:+0.0%;-0.0%}[/]"));
 
-		var pullText = t.NetPull0Dte.HasValue
-			? $" · pull [{(t.NetPull0Dte.Value >= 0m ? "green" : "red")}]{t.NetPull0Dte.Value:+0.00;-0.00}σ[/]"
-			: "";
-		grid.AddRow(
-			new Markup("[grey]0DTE Gravity Magnet[/]"),
-			new Markup(t.Gravity0Dte.HasValue
-				? $"{PctTag(t.Gravity0Dte.Value, f.Spot)} [bold]${t.Gravity0Dte.Value:N2}[/]{pullText}"
-				: "[dim]—[/]"));
+		if (!t.FrontSettled)
+		{
+			var pullText = t.NetPull0Dte.HasValue
+				? $" · pull [{(t.NetPull0Dte.Value >= 0m ? "green" : "red")}]{t.NetPull0Dte.Value:+0.00;-0.00}σ[/]"
+				: "";
+			grid.AddRow(
+				new Markup("[grey]0DTE Gravity Magnet[/]"),
+				new Markup(t.Gravity0Dte.HasValue
+					? $"{PctTag(t.Gravity0Dte.Value, f.Spot)} [bold]${t.Gravity0Dte.Value:N2}[/]{pullText}"
+					: "[dim]—[/]"));
 
-		var move = Math.Max(f.DailyMove ?? 0m, f.Spot * 0.005m);
-		var callWallText = f.CallWall.HasValue
-			? ((f.CallWall.Value - f.Spot) < 0.15m * move && t.OtmCallWall0Dte.HasValue && t.OtmCallWall0Dte.Value > f.CallWall.Value
-				? $"[green]${f.CallWall.Value:N0}[/] [dim](ATM)[/] → [bold green]${t.OtmCallWall0Dte.Value:N0}[/]"
-				: $"[green]${f.CallWall.Value:N0}[/]")
-			: "[dim]—[/]";
-		var putWallText = f.PutWall.HasValue
-			? ((f.Spot - f.PutWall.Value) < 0.15m * move && t.OtmPutWall0Dte.HasValue && t.OtmPutWall0Dte.Value < f.PutWall.Value
-				? $"[red]${f.PutWall.Value:N0}[/] [dim](ATM)[/] → [bold red]${t.OtmPutWall0Dte.Value:N0}[/]"
-				: $"[red]${f.PutWall.Value:N0}[/]")
-			: "[dim]—[/]";
-		grid.AddRow(
-			new Markup("[grey]0DTE Call / Put Walls[/]"),
-			new Markup($"C {callWallText} · P {putWallText}"));
+			var move = Math.Max(f.DailyMove ?? 0m, f.Spot * 0.005m);
+			var callWallText = f.CallWall.HasValue
+				? ((f.CallWall.Value - f.Spot) < 0.15m * move && t.OtmCallWall0Dte.HasValue && t.OtmCallWall0Dte.Value > f.CallWall.Value
+					? $"[green]${f.CallWall.Value:N0}[/] [dim](ATM)[/] → [bold green]${t.OtmCallWall0Dte.Value:N0}[/]"
+					: $"[green]${f.CallWall.Value:N0}[/]")
+				: "[dim]—[/]";
+			var putWallText = f.PutWall.HasValue
+				? ((f.Spot - f.PutWall.Value) < 0.15m * move && t.OtmPutWall0Dte.HasValue && t.OtmPutWall0Dte.Value < f.PutWall.Value
+					? $"[red]${f.PutWall.Value:N0}[/] [dim](ATM)[/] → [bold red]${t.OtmPutWall0Dte.Value:N0}[/]"
+					: $"[red]${f.PutWall.Value:N0}[/]")
+				: "[dim]—[/]";
+			grid.AddRow(
+				new Markup("[grey]0DTE Call / Put Walls[/]"),
+				new Markup($"C {callWallText} · P {putWallText}"));
+		}
 
 		if (t.NetVexMulti != 0m)
 		{
