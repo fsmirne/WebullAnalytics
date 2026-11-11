@@ -40,6 +40,12 @@ internal static class OptionMath
 	/// anchor agree on when the book was struck.</summary>
 	internal static DateTimeOffset? LiveQuotesStruckAt { get; set; }
 
+	/// <summary>The ET instant a past --date run's quotes were actually struck, when the command loaded an as-of market at a known
+	/// instant (`analyze position --date` reads the session's close book). Overrides the past-date default of that session's 09:30 open
+	/// in <see cref="ObservationInstant(DateTime, DateTimeOffset?)"/>, so the IV back-solve, the grid's evaluation instant and every
+	/// leg mark price on the clock the books came from. Ignored unless it falls on the pinned evaluation date.</summary>
+	internal static DateTime? HistoricalQuotesStruckAt { get; set; }
+
 	/// <summary><see cref="ObservationInstant()"/> with the clock (<paramref name="now"/>, machine-local = ET) and the
 	/// book's timestamp injected, so the branch logic is testable.</summary>
 	internal static DateTime ObservationInstant(DateTime now, DateTimeOffset? quotesStruckAt)
@@ -50,7 +56,7 @@ internal static class OptionMath
 		// TO a future date's open is handled separately (see LegMarkPerShare), but the quote anchor itself is
 		// always "now". This keeps a same-day --date identical to no --date (real run-time, not a phantom 9:30).
 		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date < DateTime.Today)
-			return EvaluationDate.Today + MarketOpen;
+			return HistoricalQuotesStruckAt is { } struckAt && struckAt.Date == EvaluationDate.Today.Date ? struckAt : EvaluationDate.Today + MarketOpen;
 		var todayTrades = MarketCalendar.IsOpen(now.Date);
 		if (todayTrades && now >= now.Date + MarketOpen && now <= now.Date + MarketClose) return now;   // live RTH
 		if (todayTrades && now > now.Date + MarketClose) return now.Date + MarketClose;                  // after today's close

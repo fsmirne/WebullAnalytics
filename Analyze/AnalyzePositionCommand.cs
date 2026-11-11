@@ -185,18 +185,38 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
 		var positionSymbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-		// Single vendor seam. targetExpiries drives the Webull arm's near-ATM OI/IV refresh so max-pain/GEX see
-		// the full chain rather than just the position's strike; Schwab's range=ALL chain already carries that
-		// breadth. HV is backfilled uniformly inside the seam so the diagnostic reads consistently across vendors.
-		var targetExpiries = positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().ToList();
-		try
+		var structure = ClassifyStructure(positionLegs);
+
+		// A past --date is that session as it closed: the legs' and their expiries' books, the day's OI and spot all come from the as-of
+		// market (the --fill loader), never today's live chain priced on the past date's clock.
+		FillTimeMarket.Snapshot? asOfMarket = null;
+		if (IsPastDate(settings))
 		{
-			(quotes, underlyingPrices) = await AnalyzeCommon.FetchLiveChainByVendor(positionSymbols, settings.ResolvedVendor, cancellation, targetExpiries);
+			var (market, error) = await LoadAsOfMarketAsync(ticker, positionLegs, structure, settings, cancellation);
+			if (market == null)
+			{
+				Console.Error.WriteLine($"Error: --date {settings.Date}: can't rebuild that session's market — {error}.");
+				return 1;
+			}
+			asOfMarket = market;
+			quotes = market.Quotes;
+			underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = market.Spot };
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		else
 		{
-			var hint = settings.ResolvedVendor == QuoteVendor.Schwab ? "Re-run 'wa schwab login' if the token expired, or pass --vendor webull." : "Run 'wa sniff' to refresh Webull headers, or pass --vendor schwab.";
-			Console.Error.WriteLine($"Warning: live chain fetch failed ({settings.VendorName}): {ex.Message} {hint}");
+			// Single vendor seam. targetExpiries drives the Webull arm's near-ATM OI/IV refresh so max-pain/GEX see
+			// the full chain rather than just the position's strike; Schwab's range=ALL chain already carries that
+			// breadth. HV is backfilled uniformly inside the seam so the diagnostic reads consistently across vendors.
+			var targetExpiries = positionLegs.Select(l => l.Parsed.ExpiryDate.Date).Distinct().ToList();
+			try
+			{
+				(quotes, underlyingPrices) = await AnalyzeCommon.FetchLiveChainByVendor(positionSymbols, settings.ResolvedVendor, cancellation, targetExpiries);
+			}
+			catch (Exception ex) when (ex is not OperationCanceledException)
+			{
+				var hint = settings.ResolvedVendor == QuoteVendor.Schwab ? "Re-run 'wa schwab login' if the token expired, or pass --vendor webull." : "Run 'wa sniff' to refresh Webull headers, or pass --vendor schwab.";
+				Console.Error.WriteLine($"Warning: live chain fetch failed ({settings.VendorName}): {ex.Message} {hint}");
+			}
 		}
 
 		var spot = ResolveSpot(ticker, settings, underlyingPrices);
@@ -206,9 +226,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			return 1;
 		}
 
-		var structure = ClassifyStructure(positionLegs);
-
-		// Phase 2: fetch quotes for the hypothetical-scenario symbols we couldn't enumerate without spot.
+		// Phase 2: fetch quotes for the hypothetical-scenario symbols we couldn't enumerate without spot. An as-of market already
+		// carries their expiries' chains (loaded at the session's own spot).
+		if (asOfMarket == null)
 		{
 			var alreadyFetched = quotes ?? new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 			// Under --log-level debug, also pull the same-strike PUT at each position expiry so the
@@ -244,7 +264,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var tickerForTrend = positionLegs.Count > 0 ? positionLegs[0].Parsed.Root : null;
 		TrendSnapshot? trendSnap = null;
 		if (!string.IsNullOrEmpty(tickerForTrend))
-			trendSnap = await TrendFetcher.FetchAsync(tickerForTrend, asOfForDiagnostic, cancellation);
+			trendSnap = asOfMarket != null
+				? await TrendFetcher.BuildAsOfAsync(tickerForTrend, asOfMarket.Instant, asOfMarket.Spot, asOfMarket.SessionHigh, asOfMarket.SessionLow, new AI.Backtest.HistoricalBarCache(), cancellation)
+				: await TrendFetcher.FetchAsync(tickerForTrend, asOfForDiagnostic, cancellation);
 
 		// Shared price cache for both regime and vol-fit fetches — avoids a redundant disk read for the ticker's closes.
 		var priceCache = new HistoricalPriceCache();
@@ -260,7 +282,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var apiConfig = OpenCandidateEvaluator.TryLoadApiConfig();
 		var intradayCache = apiConfig != null ? new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)) : null;
 		var dteCalendar = positionLegs.Count > 0 ? Math.Max(1, (positionLegs.Min(l => l.Parsed.ExpiryDate.Date) - asOfForDiagnostic.Date).Days) : 5;
-		var regimeComponents = aiCfg != null ? (await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, DateTime.Now, priceCache, intradayCache, includeCurrentBar: true, cancellation)).Components : default;
+		var regimeComponents = aiCfg != null ? (await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, asOfMarket?.Instant ?? DateTime.Now, priceCache, intradayCache, includeCurrentBar: asOfMarket == null, cancellation)).Components : default;
 		var technicalBias = aiCfg != null ? RegimeAnalyzer.BlendBias(regimeComponents, aiCfg.Opener, dteCalendar) : 0m;
 
 		var (historicalVolAnnual, realizedVol) = await RiskDiagnosticProbeBuilder.TryLoadVolInputsAsync(ticker, asOfForDiagnostic, priceCache, cancellation);
@@ -279,16 +301,19 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// 'wa report --calibrated'. Legs whose mid can't back-solve keep the broker IV; explicit --iv
 		// overrides still win (ResolveIV checks them first). Skipped at hypothetical spots (--spot): the
 		// stale mids no longer reflect the overridden spot, so the inversion would fold the spot move into vol.
-		if (settings.Calibrated && quotes != null && string.IsNullOrEmpty(settings.Spot))
+		// An as-of market carries books only (no vendor IV), so its IVs are always solved, from the session's own spot — a --spot override
+		// then reprices those IVs at the hypothetical spot like any other run.
+		if (quotes != null && (asOfMarket != null || (settings.Calibrated && string.IsNullOrEmpty(settings.Spot))))
 		{
-			var asOfCal = OptionMath.ObservationInstant(); // when the loaded quotes were struck (now live / last close off-hours); same anchor as report
+			var calibrationSpot = asOfMarket?.Spot ?? spot.Value;
+			var asOfCal = OptionMath.ObservationInstant(); // when the loaded quotes were struck (now live / last close off-hours / the as-of market's instant); same anchor as report
 			var recalibratedQuotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 			var recalibrated = 0;
 			foreach (var (sym, q) in quotes)
 			{
 				var parsed = ParsingHelpers.ParseOptionSymbol(sym);
 				if (parsed == null) { recalibratedQuotes[sym] = q; continue; }
-				var adjustedSpot = OptionMath.DividendAdjustedSpot(spot.Value, dividends, asOfCal, parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate);
+				var adjustedSpot = OptionMath.DividendAdjustedSpot(calibrationSpot, dividends, asOfCal, parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate);
 				var iv = OptionMath.TryMarketImpliedIv(sym, parsed, adjustedSpot, asOfCal, quotes);
 				recalibratedQuotes[sym] = iv.HasValue ? q with { ImpliedVolatility = iv.Value, VendorImpliedVolatility = q.VendorImpliedVolatility ?? q.ImpliedVolatility } : q;
 				if (iv.HasValue) recalibrated++;
@@ -1852,6 +1877,33 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (quotes != null && quotes.TryGetValue(symbol, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m)
 			return q.ImpliedVolatility.Value;
 		return settings.IvDefault / 100m;
+	}
+
+	/// <summary>True when --date pins a session before today (ET): that run reads the as-of market, not the live chain.</summary>
+	private static bool IsPastDate(AnalyzePositionSettings settings) => settings.EvaluationDateOverride is { } date && date.Date < MarketTime.TodayEt();
+
+	/// <summary>The --date session's market at its close (13:00 on a half-day) through the --fill loader: the legs' books, each leg expiry's
+	/// chain and the scenario roll targets' expiries' chains, the day's open interest, and spot from the minute bars. Pins the quote anchor
+	/// (<see cref="OptionMath.HistoricalQuotesStruckAt"/>) and that session's risk-free rate, so every IV solve and mark prices on the books' clock.</summary>
+	private static async Task<(FillTimeMarket.Snapshot? Market, string? Error)> LoadAsOfMarketAsync(string ticker, IReadOnlyList<PositionSnapshot> positionLegs, StructureKind structure, AnalyzePositionSettings settings, CancellationToken cancellation)
+	{
+		var date = settings.EvaluationDateOverride!.Value.Date;
+		if (!MarketCalendar.IsOpen(date)) return (null, $"{date:yyyy-MM-dd} is not a trading session");
+		var apiConfig = OpenCandidateEvaluator.TryLoadApiConfig();
+		if (apiConfig == null) return (null, "the session's spot comes from the Webull minute-bar cache, and api-config.json is missing (run 'wa sniff')");
+
+		var close = date + MarketCalendar.CloseTimeEt(date);
+		var symbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+		var (market, error) = await FillTimeMarket.LoadAsync(ticker, symbols, close, new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)), cancellation, extraSymbols: spot => EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot));
+		if (market == null) return (null, error);
+
+		OptionMath.HistoricalQuotesStruckAt = market.Instant;
+		if (AI.Backtest.HistoricalRateCache.RateOn(await new AI.Backtest.HistoricalRateCache().GetAsync(cancellation), date) is double dayRate)
+			OptionMath.RiskFreeRate = dayRate;
+		AnsiConsole.MarkupLine($"[dim]As of {date:yyyy-MM-dd} close: market at {market.Instant:HH:mm} ET from {Markup.Escape(market.BookSource)}, spot ${market.Spot:F2}.[/]");
+		foreach (var miss in market.ChainMisses)
+			AnsiConsole.MarkupLine($"[yellow]Scenario expiry without an as-of chain: {Markup.Escape(miss)} — its scenarios price on --iv-default.[/]");
+		return (market, null);
 	}
 
 	internal static decimal? ResolveSpot(string ticker, AnalyzePositionSettings settings, IReadOnlyDictionary<string, decimal>? underlyingPrices)

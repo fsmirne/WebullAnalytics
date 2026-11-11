@@ -24,23 +24,27 @@ namespace WebullAnalytics.Analyze;
 /// spot bars missing from the on-disk tape (Webull's live m1 feed only reaches back ~5 days) are healed first by the tape
 /// backfill's deep-history sources (Webull's paginator, massive), the way `wa ai history` fills them.
 ///
-/// The snapshot also carries each leg expiry's chain within ±<see cref="ChainBand"/> of spot at the same instant and from the same
-/// source as the legs (the store's minute books, or one expiry-wide ThetaData request), with that expiry's open interest for the day.
+/// The snapshot also carries each leg expiry's chain within ±<see cref="ChainBand"/> of spot at the same instant (the store's minute
+/// books, else one expiry-wide ThetaData request), with that expiry's open interest for the day.
 /// The diagnostic's chain-wide reads — GEX gravity, net gamma, max pain, walls, relative OI — need the expiry's whole book: built from the
 /// legs alone they collapse onto the legs' own strikes (a lone short call read as max pain and gravity at its strike, net gamma +1.00).
-/// An expiry whose chain neither source has is an error naming why, never a legs-only stand-in.
+/// An expiry whose chain neither source has is an error naming why, never a legs-only stand-in. A caller can ask for more expiries'
+/// chains (scenario roll targets) through the extra-symbols hook; those are context, so a miss there is listed in
+/// <see cref="Snapshot.ChainMisses"/> rather than failing the load.
 /// </summary>
 internal static class FillTimeMarket
 {
 	/// <param name="Instant">The minute boundary the market is read at (ET) — report its offset from the fill.</param>
 	/// <param name="BookSource">Where the leg books came from (the quote store or ThetaData), for the report header.</param>
-	internal sealed record Snapshot(DateTime Instant, IReadOnlyDictionary<string, OptionContractQuote> Quotes, decimal Spot, decimal SessionHigh, decimal SessionLow, string BookSource);
+	/// <param name="ChainMisses">Extra expiries whose chain no source had, each with why (empty when every one loaded).</param>
+	internal sealed record Snapshot(DateTime Instant, IReadOnlyDictionary<string, OptionContractQuote> Quotes, decimal Spot, decimal SessionHigh, decimal SessionLow, string BookSource, IReadOnlyList<string> ChainMisses);
 
 
 	/// <summary>Strike window of each leg expiry's chain, as a fraction of spot — the GEX/max-pain window the live chain paths use.</summary>
 	private const decimal ChainBand = 0.20m;
 
-	public static async Task<(Snapshot? Market, string? Error)> LoadAsync(string ticker, IReadOnlyCollection<string> symbols, DateTime fillEt, IntradayBarCache intradayCache, CancellationToken cancellation)
+	/// <param name="extraSymbols">Given the instant's spot, more contracts whose expiries' chains to load as context (non-fatal).</param>
+	public static async Task<(Snapshot? Market, string? Error)> LoadAsync(string ticker, IReadOnlyCollection<string> symbols, DateTime fillEt, IntradayBarCache intradayCache, CancellationToken cancellation, Func<decimal, IEnumerable<string>>? extraSymbols = null)
 	{
 		var before = fillEt.Date + TimeSpan.FromMinutes(Math.Floor(fillEt.TimeOfDay.TotalMinutes));
 		var after = before.AddMinutes(1);
@@ -49,7 +53,6 @@ internal static class FillTimeMarket
 		using var theta = ThetaFallback.TryCreate();
 		var store = OpenStore(fillEt);
 		var (books, instant, bookSource, storeMiss) = StoreBooks(store, symbols, fillEt, boundaries);
-		var fromStore = books != null;
 		if (books == null)
 		{
 			if (theta == null)
@@ -70,22 +73,41 @@ internal static class FillTimeMarket
 		if (bars.Count == 0) return (null, $"no {ticker} 1-minute bars for {fillEt:yyyy-MM-dd} up to {instant:HH:mm} ET");
 		var spot = bars[^1].Close;
 
-		// Each leg expiry's chain at the same instant and from the same source as the legs, plus that expiry's open interest for the day.
+		// Each leg expiry's chain at the instant plus that expiry's open interest for the day (required), then any extra expiries (context).
 		var chainBooks = new Dictionary<string, QuoteStoreCache.QuoteAt>(StringComparer.OrdinalIgnoreCase);
 		var oi = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-		foreach (var (root, expiry) in symbols.Select(ParsingHelpers.ParseOptionSymbol).Where(p => p != null).Select(p => (p!.Root.ToUpperInvariant(), p.ExpiryDate.Date)).Distinct())
+		var legExpiries = Expiries(symbols).ToList();
+		foreach (var (root, expiry) in legExpiries)
 		{
-			var (expiryBooks, chainMiss) = fromStore ? StoreChain(store!, root, expiry, instant, spot) : await ThetaChainAsync(theta!, root, expiry, instant, spot, cancellation);
-			if (expiryBooks == null) return (null, $"no {root} {expiry:yyyy-MM-dd} chain at {instant:HH:mm} ET for the chain-wide reads (GEX, max pain, relative OI) — {chainMiss}");
-			foreach (var (sym, book) in expiryBooks) chainBooks[sym] = book;
-			var (expiryOi, oiMiss) = await AsOfOpenInterest.LoadExpiryAsync(root, expiry, fillEt.Date, theta, cancellation);
-			if (oiMiss != null) return (null, $"no {root} {expiry:yyyy-MM-dd} open interest for {fillEt:yyyy-MM-dd} — {oiMiss}");
-			foreach (var (sym, o) in expiryOi) oi[sym] = o;
+			var miss = await AddChainAsync(store, theta, root, expiry, instant, spot, chainBooks, oi, cancellation);
+			if (miss != null) return (null, $"{miss} — the chain-wide reads (GEX, max pain, relative OI) need it");
 		}
+		var chainMisses = new List<string>();
+		var extraExpiries = Expiries(extraSymbols?.Invoke(spot) ?? []).Except(legExpiries).ToList();
+		foreach (var (root, expiry) in extraExpiries)
+			if (await AddChainAsync(store, theta, root, expiry, instant, spot, chainBooks, oi, cancellation) is { } miss) chainMisses.Add(miss);
 		foreach (var (sym, book) in books) chainBooks[sym] = book;
 
 		var quotes = chainBooks.ToDictionary(kv => kv.Key, kv => new OptionContractQuote(kv.Key, LastPrice: kv.Value.Mid, Bid: kv.Value.Bid, Ask: kv.Value.Ask, Change: null, PercentChange: null, Volume: null, OpenInterest: oi.TryGetValue(kv.Key, out var o) ? o : null, ImpliedVolatility: null, HistoricalVolatility: null, BidSize: kv.Value.BidSize, AskSize: kv.Value.AskSize), StringComparer.OrdinalIgnoreCase);
-		return (new Snapshot(instant, quotes, spot, bars.Max(b => b.High), bars.Min(b => b.Low), $"{bookSource} ({quotes.Count} contracts across the leg expiries)"), null);
+		return (new Snapshot(instant, quotes, spot, bars.Max(b => b.High), bars.Min(b => b.Low), $"{bookSource} ({quotes.Count} contracts across {legExpiries.Count + extraExpiries.Count - chainMisses.Count} expiries)", chainMisses), null);
+	}
+
+	private static IEnumerable<(string Root, DateTime Expiry)> Expiries(IEnumerable<string> symbols) =>
+		symbols.Select(ParsingHelpers.ParseOptionSymbol).Where(p => p != null).Select(p => (p!.Root.ToUpperInvariant(), p.ExpiryDate.Date)).Distinct();
+
+	/// <summary>Adds one expiry's chain at <paramref name="instant"/> (store first, else ThetaData) and its open interest for the day; returns why
+	/// when either is unavailable (nothing is added then).</summary>
+	private static async Task<string?> AddChainAsync(QuoteStoreCache? store, ThetaFallback? theta, string root, DateTime expiry, DateTime instant, decimal spot, Dictionary<string, QuoteStoreCache.QuoteAt> chainBooks, Dictionary<string, long> oi, CancellationToken cancellation)
+	{
+		var (expiryBooks, storeMiss) = store != null ? StoreChain(store, root, expiry, instant, spot) : (null, "no quote store");
+		string? thetaMiss = null;
+		if (expiryBooks == null && theta != null) (expiryBooks, thetaMiss) = await ThetaChainAsync(theta, root, expiry, instant, spot, cancellation);
+		if (expiryBooks == null) return $"no {root} {expiry:yyyy-MM-dd} chain at {instant:HH:mm} ET ({storeMiss}; {thetaMiss ?? "no ThetaData login configured"})";
+		var (expiryOi, oiMiss) = await AsOfOpenInterest.LoadExpiryAsync(root, expiry, instant.Date, theta, cancellation);
+		if (oiMiss != null) return $"no {root} {expiry:yyyy-MM-dd} open interest for {instant:yyyy-MM-dd} ({oiMiss})";
+		foreach (var (sym, book) in expiryBooks) chainBooks[sym] = book;
+		foreach (var (sym, o) in expiryOi) oi[sym] = o;
+		return null;
 	}
 
 	/// <summary>The fill day's quote store (exact-minute books only: a boundary without one falls to the other boundary, never to an older

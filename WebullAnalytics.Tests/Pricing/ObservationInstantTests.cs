@@ -12,13 +12,31 @@ namespace WebullAnalytics.Tests.Pricing;
 [Collection("EvaluationDate")]
 public class ObservationInstantTests : IDisposable
 {
-	public void Dispose() => EvaluationDate.Reset();
+	public void Dispose()
+	{
+		EvaluationDate.Reset();
+		OptionMath.HistoricalQuotesStruckAt = null;
+	}
 
 	[Fact]
 	public void PastOverride_AnchorsAtThatDatesSessionOpen()
 	{
 		var past = DateTime.Today.AddDays(-30);
 		EvaluationDate.Set(past);
+		Assert.Equal(past + OptionMath.MarketOpen, OptionMath.ObservationInstant());
+	}
+
+	/// <summary>`analyze position --date` loads the past session's close book: the anchor is that instant, so its IV solve does not run a
+	/// close-of-day mid over an extra 6.5 hours of life. A struck-at instant on another date is stale and ignored.</summary>
+	[Fact]
+	public void PastOverride_AnchorsAtTheHistoricalQuotesInstantWhenSetForThatDate()
+	{
+		var past = DateTime.Today.AddDays(-30);
+		EvaluationDate.Set(past);
+		OptionMath.HistoricalQuotesStruckAt = past + new TimeSpan(16, 0, 0);
+		Assert.Equal(past + new TimeSpan(16, 0, 0), OptionMath.ObservationInstant());
+
+		OptionMath.HistoricalQuotesStruckAt = past.AddDays(-1) + new TimeSpan(16, 0, 0);
 		Assert.Equal(past + OptionMath.MarketOpen, OptionMath.ObservationInstant());
 	}
 
