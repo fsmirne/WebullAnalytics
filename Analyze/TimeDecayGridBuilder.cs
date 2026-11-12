@@ -335,16 +335,21 @@ internal static class TimeDecayGridBuilder
 	/// Slots are filled by priority: trading days first, then holidays, then weekends.
 	/// Each tier is shown in full before drawing from the next; within a tier, selection is evenly spaced.
 	/// </summary>
-	internal static List<DateTime> BuildDateColumns(DateTime expiry, int maxColumns)
+	internal static List<DateTime> BuildDateColumns(DateTime expiry, int maxColumns) => BuildDateColumns(expiry, maxColumns, DateTime.Now);
+
+	/// <summary><see cref="BuildDateColumns(DateTime, int)"/> on one reading of the clock (<paramref name="now"/>, machine-local = ET): the
+	/// anchor and the eval instant must come from the same reading, or during RTH — where both are "now" — the later read lands microseconds
+	/// after the earlier and reads as a future instant, adding a second column for today.</summary>
+	internal static List<DateTime> BuildDateColumns(DateTime expiry, int maxColumns, DateTime now)
 	{
-		var today = EvaluationDate.Today;
+		var today = EvaluationDate.Instant?.Date ?? now.Date;
 
 		// Today's columns are always present and never subject to the even-spacing trim: the observation-instant
 		// anchor (live now / last close off-hours), plus the instant the headline is evaluated TO when it lies ahead of
 		// the anchor (a future --date), else — pre-open on a trading day — today's 09:30 open, so a market-open day
 		// always shows the projected open even when the expiry is far enough to trim future days.
-		var anchor = OptionMath.ObservationInstant();
-		var evalInstant = OptionMath.EvaluationInstant(DateTime.Now);
+		var anchor = OptionMath.ObservationInstant(now, OptionMath.LiveQuotesStruckAt);
+		var evalInstant = OptionMath.EvaluationInstant(now);
 		var todayColumns = new List<DateTime> { anchor };
 		if (evalInstant > anchor) todayColumns.Add(evalInstant);
 		else if (MarketCalendar.IsOpen(today) && anchor.Date < today.Date) todayColumns.Add(today.Date + OptionMath.MarketOpen);
