@@ -215,12 +215,13 @@ public class RiskDiagnosticRendererTests
 					DaysToTarget: 7,
 					RawScore: 0.01m,
 					BiasAdjustedScore: 0.01m,
-					Rationale: "credit $38.00\nraw 0.010000")));
+					Rationale: "credit $38.00\nraw 0.010000",
+					MarginPerContract: 100m)));   // a $1-wide credit vertical holds its width (MarginCalculator), not width − credit
 
 		var text = Render(diagnostic);
 		Assert.Contains("Margin:", text);
-		Assert.Contains("$15,500.00 total", text);
-		Assert.Contains("$62.00/contract", text);
+		Assert.Contains("$25,000.00 total", text);
+		Assert.Contains("$100.00/contract", text);
 	}
 
 	[Fact]

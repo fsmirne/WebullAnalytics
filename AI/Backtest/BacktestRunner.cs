@@ -489,28 +489,28 @@ internal sealed class BacktestRunner
 		if (_fixedContracts.HasValue) return _fixedContracts.Value;
 		if (p.CashReserveBlocked) return 0;
 		if (p.Qty < 1) return 0;
-		// Margin requirement per contract: for credit structures the broker holds the full spread
-		// width as collateral (CapitalAtRisk + credit received); for debit structures the cost is
-		// already out of cash so margin = CapitalAtRisk alone.
-		var marginPerContract = p.CapitalAtRiskPerContract + Math.Max(0m, p.DebitOrCreditPerContract);
+		// Buying power a new contract needs: its margin (MarginCalculator — the collateral, e.g. a credit vertical's width or an inverted
+		// diagonal's strike loss) plus the debit it pays; a credit received lands in cash. Existing positions hold their own margin,
+		// which the cash balance doesn't reflect (a debit already left cash; collateral never did). The backtest scores one ticker, so
+		// the proposal's spot prices any naked short in the book.
+		var marginPerContract = MarginCalculator.Requirement(MarginLegs(p.Legs.Select(l => (l.Symbol, string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase), l.Qty)), p.Legs), p.Spot).Total / Math.Max(1, p.Qty)
+			+ Math.Max(0m, -p.DebitOrCreditPerContract);
 		if (marginPerContract <= 0m) return 0;
-		// Buying power = cash minus margin held by existing credit positions whose collateral isn't
-		// reflected in the cash balance (their credit inflated cash, but the broker locks the full
-		// spread width). Debit positions already reduced cash on open — no additional hold needed.
 		var marginHeld = 0m;
 		foreach (var pos in _book.OpenPositions.Values)
-		{
-			if (pos.InitialNetDebit >= 0m) continue; // debit — already paid from cash
-			var maxLoss = pos.MaxLossPerShare ?? 0m;
-			// spreadWidth per share = maxLoss - InitialNetDebit (InitialNetDebit < 0 → subtracting adds)
-			var spreadWidthPerShare = maxLoss - pos.InitialNetDebit;
-			marginHeld += spreadWidthPerShare * 100m * pos.Quantity;
-		}
+			marginHeld += MarginCalculator.Requirement(MarginLegs(pos.Legs.Select(l => (l.Symbol, l.Side == Side.Buy, l.Qty)), null), p.Spot).Total;
 		var buyingPower = _book.Cash - marginHeld;
 		var affordableQty = (int)Math.Floor(buyingPower / marginPerContract);
 		var qty = Math.Min(p.Qty, affordableQty);
 		return qty < 1 ? 0 : qty;
 	}
+
+	/// <summary>Option legs as <see cref="MarginCalculator"/> takes them; a short's premium comes from its proposal leg when there is one.</summary>
+	private static List<MarginLeg> MarginLegs(IEnumerable<(string Symbol, bool IsLong, int Qty)> legs, IReadOnlyList<ProposalLeg>? priced) =>
+		legs.Select(l => (l, Parsed: ParsingHelpers.ParseOptionSymbol(l.Symbol)))
+			.Where(x => x.Parsed != null)
+			.Select(x => new MarginLeg(x.Parsed!, x.l.Qty, x.l.IsLong, priced?.FirstOrDefault(pl => pl.Symbol == x.l.Symbol)?.PricePerShare ?? 0m))
+			.ToList();
 
 	/// <summary>For opener proposals, the candidate scorer has already priced each leg from the same quote
 	/// source: <c>PricePerShare</c> is the mid, <c>ExecutionPricePerShare</c> the conservative cross-the-spread

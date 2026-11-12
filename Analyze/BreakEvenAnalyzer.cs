@@ -171,7 +171,7 @@ public static class BreakEvenAnalyzer
 
 		decimal? margin = null;
 		if (!isLong && spot.HasValue)
-			margin = AnalyzeCommon.ComputeLegMargin(parsed, qty, spot.Value, premium, null, null, 0, 0m, isExisting: false).Total;
+			margin = MarginCalculator.Requirement([new MarginLeg(parsed, qty, IsLong: false, premium)], spot.Value).Total;
 
 		return new BreakEvenResult(title, details, qty, [breakEven], maxProfit, maxLoss, dte, ladder, Note: null, Legs: legsDisplay, ChartData: chartData, EarlyExercise: earlyExercise, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(parsed.Root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice, EntryBasis: (isLong ? 1 : -1) * premium * qty * 100m, CurrentPnl: ComputeCurrentPnl(new List<(PositionRow row, OptionParsed parsed, string symbol)> { (row, parsed, symbol) }, qty, (isLong ? 1 : -1) * premium * qty * 100m, opts));
 	}
@@ -356,22 +356,8 @@ public static class BreakEvenAnalyzer
 		decimal? margin = null;
 		if (spot.HasValue)
 		{
-			var shortLegs = parsedLegs.Where(l => l.row.Side == Side.Sell).ToList();
-			if (shortLegs.Count > 0)
-			{
-				var longLegs = parsedLegs.Where(l => l.row.Side == Side.Buy).ToList();
-				decimal totalMargin = 0m;
-				foreach (var sl in shortLegs)
-				{
-					var shortPremium = OptionMath.GetPremium(sl.row);
-					var coveringLong = longLegs.Where(l => l.parsed.CallPut == sl.parsed.CallPut && l.parsed.ExpiryDate >= sl.parsed.ExpiryDate).OrderBy(l => l.parsed.ExpiryDate).FirstOrDefault();
-					var longParsed = coveringLong != default ? (OptionParsed?)coveringLong.parsed : null;
-					var longPremium = coveringLong != default ? OptionMath.GetPremium(coveringLong.row) : 0m;
-					var longQty = coveringLong != default ? qty : 0;
-					totalMargin += AnalyzeCommon.ComputeLegMargin(sl.parsed, qty, spot.Value, shortPremium, longParsed, null, longQty, longPremium, isExisting: false).Total;
-				}
-				margin = totalMargin;
-			}
+			if (parsedLegs.Any(l => l.row.Side == Side.Sell))
+				margin = MarginCalculator.Requirement(parsedLegs.Select(l => new MarginLeg(l.parsed, l.row.Qty, l.row.Side == Side.Buy, OptionMath.GetPremium(l.row))).ToList(), spot.Value).Total;
 		}
 
 		return new BreakEvenResult(title, details, qty, breakEvens, maxProfit, maxLoss, dte, ladder, note, legDescriptions, chartData, Grid: grid, UnderlyingPrice: spot, OriginalUnderlyingPrice: LookupOriginalUnderlyingPrice(root, opts), Margin: margin, MaxProfitPrice: maxProfitPrice, MaxLossPrice: maxLossPrice, EntryBasis: (parent.Side == Side.Buy ? 1 : -1) * netPremium * qty * 100m, CurrentPnl: ComputeCurrentPnl(parsedLegs, qty, (parent.Side == Side.Buy ? 1 : -1) * netPremium * qty * 100m, opts));

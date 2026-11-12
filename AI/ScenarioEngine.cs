@@ -190,7 +190,7 @@ internal static class ScenarioEngine
 		var shortCloseNow = BuyPrice(shortMidNow, shortAskNow, opt.PricingMode);
 		var longCloseNow = SellPrice(longMidNow, longBidNow, opt.PricingMode);
 
-		var currentMargin = AnalyzeCommon.ComputeLegMargin(shortLeg.Parsed, 1, spot, shortMidNow, longLeg.Parsed, null, 1, longMidNow, isExisting: true).Total;
+		var currentMargin = MarginCalculator.PairPerContract(shortLeg.Parsed, shortMidNow, longLeg.Parsed, spot);
 
 		decimal LongValueAtShortExpiry(decimal longStrike, DateTime shortExpiry) =>
 			(decimal)OptionMath.BlackScholes(spot, longStrike, MarketClock.CloseToClose(longLeg.Parsed.Root, shortExpiry, longLeg.Parsed.ExpiryDate, minDays: 1), OptionMath.RiskFreeRate, ivLong, callPut);
@@ -245,7 +245,7 @@ internal static class ScenarioEngine
 					var shortAtNewShortExp = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
 					var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 					var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, shortLeg.Parsed.Strike);
-					var newMargin = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
+					var newMargin = MarginCalculator.PairPerContract(newShortParsed, newShortMidExec, longLeg.Parsed, spot);
 					var marginDelta = newMargin - currentMargin;
 					EmitRoll(list, qty, $"Roll short ({newExp:MM-dd}, same strike)",
 					  shortLeg.Symbol, newSym, oldShortPrice: shortMidNow, newShortPrice: newShortMidExec, oldShortExecutionPrice: shortAskNow, newShortExecutionPrice: newShortBid, cashPerShare, newProjectedPerShare, holdNetPerShare, marginDelta, initialDebit, dteNewShort, opt.AvailableCash,
@@ -271,7 +271,7 @@ internal static class ScenarioEngine
 				var newShortIntrinsicAtExp = Intrinsic(spot, newStrike, callPut);
 				var projSameExpPerShare = longAtOrigExp - newShortIntrinsicAtExp;
 				var sameExpShortParsed = new OptionParsed(shortLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate, callPut, newStrike);
-				var sameExpMargin = AnalyzeCommon.ComputeLegMargin(sameExpShortParsed, 1, spot, newShortMidSameExp, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
+				var sameExpMargin = MarginCalculator.PairPerContract(sameExpShortParsed, newShortMidSameExp, longLeg.Parsed, spot);
 				var sameExpMarginDelta = sameExpMargin - currentMargin;
 				var sameExpStructure = StructureLabel(callPut, newStrike, longLeg.Parsed.Strike);
 
@@ -298,7 +298,7 @@ internal static class ScenarioEngine
 				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, newStrike);
-				var newMargin = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, longLeg.Parsed, null, 1, longMidNow, isExisting: false).Total;
+				var newMargin = MarginCalculator.PairPerContract(newShortParsed, newShortMidExec, longLeg.Parsed, spot);
 				var marginDelta = newMargin - currentMargin;
 				var structureLabel = StructureLabel(callPut, newStrike, longLeg.Parsed.Strike);
 
@@ -335,7 +335,7 @@ internal static class ScenarioEngine
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newShortExp, callPut, newStrike);
 				var newLongParsed = new OptionParsed(longLeg.Parsed.Root, newLongExp, callPut, newStrike);
-				var newMargin = AnalyzeCommon.ComputeLegMargin(newShortParsed, 1, spot, newShortMidExec, newLongParsed, null, 1, newLongMidExec, isExisting: false).Total;
+				var newMargin = MarginCalculator.PairPerContract(newShortParsed, newShortMidExec, newLongParsed, spot);
 				var marginDelta = newMargin - currentMargin;
 
 				EmitReset(list, qty, $"Reset to ${newStrike:F2} calendar",

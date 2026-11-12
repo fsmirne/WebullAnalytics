@@ -131,7 +131,7 @@ internal static class RiskDiagnosticProbeBuilder
 				BiasAdjustedScore: o.biasScore,
 				Rationale: o.rationale,
 				ThetaPerDayPerContract: o.thetaPerDayPerContract,
-				MarginPerContract: ComputeMarginPerContract(o.structure, legs, o.risk));
+				MarginPerContract: ComputeMarginPerContract(legs, spot));
 		}
 		else
 		{
@@ -226,7 +226,7 @@ internal static class RiskDiagnosticProbeBuilder
 							Rationale: rationale,
 							ThetaPerDayPerContract: scored.ThetaPerDayPerContract,
 							FinalScore: scored.FinalScore,
-							MarginPerContract: ComputeMarginPerContract(scored.StructureKind.ToString(), legs, scored.CapitalAtRiskPerContract));
+							MarginPerContract: ComputeMarginPerContract(legs, spot));
 					}
 				}
 			}
@@ -387,44 +387,12 @@ internal static class RiskDiagnosticProbeBuilder
 		return null;
 	}
 
-	/// <summary>
-	/// Broker margin per contract for the proposal. Short verticals and iron spreads collateralize
-	/// the full capital-at-risk. Long calendars and covered diagonals hold no broker margin — the
-	/// debit is cash, not collateral. Inverted diagonals (long strike past the short for calls,
-	/// below for puts) realize the strike gap on assignment, so collateral = strike_loss × 100 +
-	/// debit × 100 per AnalyzeCommand.ComputeLegMargin.
-	/// </summary>
-	private static decimal? ComputeMarginPerContract(string structure, IReadOnlyList<DiagnosticLeg> legs, decimal capitalAtRisk)
+	/// <summary>Broker margin per contract (one unit of the structure) for the legs (<see cref="MarginCalculator"/>): collateral only,
+	/// never the debit. The unit is the legs' common quantity, since the legs carry the position's size and the score may not.</summary>
+	private static decimal ComputeMarginPerContract(IReadOnlyList<DiagnosticLeg> legs, decimal spot)
 	{
-		if (structure.Equals(nameof(OpenStructureKind.ShortPutVertical), StringComparison.OrdinalIgnoreCase)
-			|| structure.Equals(nameof(OpenStructureKind.ShortCallVertical), StringComparison.OrdinalIgnoreCase)
-			|| structure.Equals(nameof(OpenStructureKind.IronButterfly), StringComparison.OrdinalIgnoreCase)
-			|| structure.Equals(nameof(OpenStructureKind.IronCondor), StringComparison.OrdinalIgnoreCase))
-			return capitalAtRisk;
-
-		if (structure.Equals(nameof(OpenStructureKind.LongCalendar), StringComparison.OrdinalIgnoreCase)
-			|| structure.Equals(nameof(OpenStructureKind.LongDiagonal), StringComparison.OrdinalIgnoreCase)
-			|| structure.Equals(nameof(OpenStructureKind.DoubleCalendar), StringComparison.OrdinalIgnoreCase)
-			|| structure.Equals(nameof(OpenStructureKind.DoubleDiagonal), StringComparison.OrdinalIgnoreCase))
-		{
-			decimal totalGapPerShare = 0m;
-			decimal totalDebitPerShare = 0m;
-			foreach (var s in legs.Where(l => !l.IsLong))
-			{
-				var match = legs.FirstOrDefault(l => l.IsLong && l.Parsed.CallPut == s.Parsed.CallPut);
-				if (match == null) continue;
-				var gap = s.Parsed.CallPut == "C"
-					? Math.Max(match.Parsed.Strike - s.Parsed.Strike, 0m)
-					: Math.Max(s.Parsed.Strike - match.Parsed.Strike, 0m);
-				totalGapPerShare += gap;
-				var sPx = s.PricePerShare ?? s.CostBasisPerShare ?? 0m;
-				var lPx = match.PricePerShare ?? match.CostBasisPerShare ?? 0m;
-				totalDebitPerShare += Math.Max(lPx - sPx, 0m);
-			}
-			return totalGapPerShare == 0m ? 0m : (totalGapPerShare + totalDebitPerShare) * 100m;
-		}
-
-		return 0m;
+		var unit = legs.Select(l => Math.Abs(l.Qty)).Where(q => q > 0).Aggregate(0, (g, q) => g == 0 ? q : (int)System.Numerics.BigInteger.GreatestCommonDivisor(g, q));
+		return MarginCalculator.Requirement(legs.Select(l => new MarginLeg(l.Parsed, l.Qty, l.IsLong, l.PricePerShare ?? l.CostBasisPerShare ?? 0m)).ToList(), spot).Total / Math.Max(1, unit);
 	}
 
 	private static IReadOnlyDictionary<string, OptionContractQuote> OverrideBidAskWithCostBasis(

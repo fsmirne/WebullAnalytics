@@ -615,20 +615,16 @@ internal static class AnalyzeCommon
 		OptionParsed? longOpt = null;
 		string? longStockTicker = null;
 		int longQty = 0;
-		string? pairOccSymbol = null;
 		if (!string.IsNullOrEmpty(settings.Pair))
 		{
 			var parts = settings.Pair.Split(':');
 			longQty = int.Parse(parts[1], CultureInfo.InvariantCulture);
 			longOpt = ParsingHelpers.ParseOptionSymbol(parts[0]);
 			if (longOpt == null) longStockTicker = parts[0];
-			else pairOccSymbol = parts[0];
 		}
 
-		// Fetch quotes for both legs to get IV and current prices
-		var allSymbols = pairOccSymbol != null
-			? new[] { oldSymbol, newSymbol, pairOccSymbol }
-			: new[] { oldSymbol, newSymbol };
+		// Fetch quotes for both legs to get IV and current prices (the --pair leg only covers; margin doesn't price it)
+		var allSymbols = new[] { oldSymbol, newSymbol };
 
 		IReadOnlyDictionary<string, OptionContractQuote> quotes;
 		IReadOnlyDictionary<string, decimal> underlyingPrices;
@@ -680,12 +676,6 @@ internal static class AnalyzeCommon
 		var newBid = quotes.TryGetValue(newSymbol, out var nbq) ? nbq.Bid : null;
 		var newAsk = quotes.TryGetValue(newSymbol, out var naq) ? naq.Ask : null;
 
-		decimal pairMid = 0m;
-		if (pairOccSymbol != null && quotes.TryGetValue(pairOccSymbol, out var pq))
-		{
-			if (pq.Bid.HasValue && pq.Ask.HasValue) pairMid = (pq.Bid.Value + pq.Ask.Value) / 2m;
-		}
-
 		// Build price grid: roll credit at various underlying prices
 		var rangeFactor = settings.Range > 0 ? settings.Range : 2m;
 		var loStrike = Math.Min(oldParsed.Strike, newParsed.Strike);
@@ -714,15 +704,15 @@ internal static class AnalyzeCommon
 			var oldMarketMid = (oldBid.HasValue && oldAsk.HasValue) ? (oldBid.Value + oldAsk.Value) / 2m : 0m;
 			var newMarketMid = (newBid.HasValue && newAsk.HasValue) ? (newBid.Value + newAsk.Value) / 2m : 0m;
 
-			var oldCov = ComputeLegMargin(oldParsed, qty, spot, oldMarketMid, longOpt, longStockTicker, longQty, pairMid, isExisting: true);
-			var newCov = ComputeLegMargin(newParsed, qty, spot, newMarketMid, longOpt, longStockTicker, longQty, pairMid, isExisting: false);
+			var oldCov = RollMargin(oldParsed, qty, spot, oldMarketMid, longOpt, longStockTicker, longQty);
+			var newCov = RollMargin(newParsed, qty, spot, newMarketMid, longOpt, longStockTicker, longQty);
 
 			var header = settings.Pair != null
 				? $"Margin analysis (Reg-T estimate, at spot ${spot:N2}, with pair {Markup.Escape(settings.Pair)}):"
 				: $"Margin analysis (Reg-T estimate, at spot ${spot:N2}):";
 			Console.WriteLine(header);
-			Console.WriteLine($"  Current requirement:  {oldCov.StatusLabel} = ${oldCov.Total:N2} total");
-			Console.WriteLine($"  New requirement:      {newCov.StatusLabel} = ${newCov.Total:N2} total");
+			Console.WriteLine($"  Current requirement:  {oldCov.Label} = ${oldCov.Total:N2} total");
+			Console.WriteLine($"  New requirement:      {newCov.Label} = ${newCov.Total:N2} total");
 			var deltaMargin = newCov.Total - oldCov.Total;
 			var deltaSign = deltaMargin >= 0 ? "+" : "-";
 			Console.WriteLine($"  BP delta:             {deltaSign}${Math.Abs(deltaMargin):N2} total");
@@ -892,102 +882,14 @@ internal static class AnalyzeCommon
 		return 0;
 	}
 
-	/// <summary>
-	/// Reg-T naked short option margin estimate (per contract, = per 100-share unit).
-	/// Formula: max(0.20 * spot * 100 - OTM_amount * 100, 0.10 * strike * 100) + premium * 100.
-	/// For calls, OTM_amount = max(strike - spot, 0).
-	/// For puts,  OTM_amount = max(spot - strike, 0).
-	/// premium is the per-share option value used to anchor the collateral (pass the market mid if available, else 0 for a conservative lower bound).
-	/// </summary>
-	internal static decimal EstimateNakedShortMargin(decimal spot, decimal strike, string callPut, decimal premium)
+	/// <summary>The roll analysis's requirement for <paramref name="qty"/> shorts paired with the --pair long option or long stock (stock
+	/// covers short calls on its own underlying only) — <see cref="MarginCalculator"/>.</summary>
+	private static MarginRequirement RollMargin(OptionParsed shortLeg, int qty, decimal spot, decimal shortPremium, OptionParsed? longOpt, string? longStockTicker, int longQty)
 	{
-		var otm = callPut == "C" ? Math.Max(strike - spot, 0m) : Math.Max(spot - strike, 0m);
-		var primary = 0.20m * spot * 100m - otm * 100m;
-		var floor = 0.10m * strike * 100m;
-		return Math.Max(primary, floor) + premium * 100m;
-	}
-
-	/// <summary>
-	/// Holds a per-leg combined margin result: status label for display plus the total margin in dollars.
-	/// </summary>
-	internal sealed record LegMargin(string StatusLabel, decimal Total);
-
-	/// <summary>
-	/// Computes combined margin for a single short leg paired with an optional static long leg.
-  /// Covered time spreads / debit spreads do not require broker margin here — the debit is cash paid,
-	/// not collateral. We therefore surface only true Reg-T-style collateral requirements:
-	///   - naked shorts => naked margin
-	///   - protected credit spreads / inverted diagonals => strike-width collateral on the covered leg
-	///   - calendars / covered diagonals / debit verticals => 0
-	/// where strike_loss = long_strike - short_strike for calls, short_strike - long_strike for puts.
-	///
-	/// Cases still treated as naked: no pair, wrong ticker, wrong call/put type, long expires before
-	/// short, or long stock paired with a short put (long stock covers only short calls).
-	/// </summary>
-	internal static LegMargin ComputeLegMargin(OptionParsed shortLeg, int shortQty, decimal spot, decimal shortPremium, OptionParsed? longOpt, string? longStockTicker, int longQty, decimal longPremium, bool isExisting)
-	{
-		var naked = EstimateNakedShortMargin(spot, shortLeg.Strike, shortLeg.CallPut, shortPremium);
-
-      // No pair ? naked on all contracts.
-		if (longOpt == null && string.IsNullOrEmpty(longStockTicker))
-         return new LegMargin($"naked  ${naked:N2}/contract × {shortQty}", naked * shortQty);
-
-		// Long stock.
-		if (longStockTicker != null)
-		{
-            if (!string.Equals(longStockTicker, shortLeg.Root, StringComparison.OrdinalIgnoreCase))
-				return new LegMargin($"no cover (stock ticker '{longStockTicker}' ? '{shortLeg.Root}')  ${naked:N2}/contract × {shortQty}", naked * shortQty);
-			if (shortLeg.CallPut != "C")
-             return new LegMargin($"no cover (long stock does not cover short puts)  ${naked:N2}/contract × {shortQty}", naked * shortQty);
-			var coverable = Math.Min(shortQty, longQty / 100);
-			var uncovered = shortQty - coverable;
-			var total = uncovered * naked;
-            var label = uncovered == 0
-				? $"covered by stock (long {longQty} shares)  $0.00/contract × {shortQty}"
-				: $"partial cover ({coverable} covered by stock, {uncovered} naked @ ${naked:N2})";
-			return new LegMargin(label, total);
-		}
-
-      // Long option — longOpt is guaranteed non-null here.
-		var lo = longOpt!;
-		if (shortLeg.CallPut != lo.CallPut)
-         return new LegMargin($"no cover (long {(lo.CallPut == "C" ? "call" : "put")} does not cover short {(shortLeg.CallPut == "C" ? "call" : "put")})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
-
-		if (lo.ExpiryDate < shortLeg.ExpiryDate)
-         return new LegMargin($"no cover (long expires {lo.ExpiryDate:yyyy-MM-dd} < short expires {shortLeg.ExpiryDate:yyyy-MM-dd})  ${naked:N2}/contract × {shortQty}", naked * shortQty);
-
-		// Covered spread / diagonal collateral:
-		// - calendars / covered diagonals / debit verticals => $0
-		// - credit verticals => strike-width collateral
-		// - inverted diagonals => strike-width assignment loss + entry debit
-		var strikeLoss = shortLeg.CallPut == "C"
-			? Math.Max(lo.Strike - shortLeg.Strike, 0m)
-			: Math.Max(shortLeg.Strike - lo.Strike, 0m);
-		var isTimeSpread = lo.ExpiryDate > shortLeg.ExpiryDate;
-		var debit = Math.Max(longPremium - shortPremium, 0m);
-		var coveredPer = strikeLoss == 0m
-			? 0m
-			: isTimeSpread
-				? strikeLoss * 100m + debit * 100m
-				: strikeLoss * 100m;
-
-		var coverableOpt = Math.Min(shortQty, longQty);
-		var uncoveredOpt = shortQty - coverableOpt;
-		var totalOpt = coverableOpt * coveredPer + uncoveredOpt * naked;
-
-        // Label explains the structure: strike_loss = 0 ? no-margin covered structure; positive ? margin-capped spread.
-		var structureLabel = strikeLoss == 0m
-		  ? (lo.Strike == shortLeg.Strike ? "calendar" : lo.ExpiryDate == shortLeg.ExpiryDate ? "debit vertical" : "covered diagonal")
-			: lo.ExpiryDate == shortLeg.ExpiryDate ? $"credit vertical (width ${strikeLoss * 100m:N2})" : $"inverted diagonal (strike loss ${strikeLoss * 100m:N2})";
-		var costBreakdown = coveredPer == 0m
-			? "$0.00 margin/contract"
-		  : isTimeSpread && strikeLoss > 0m
-				? $"${strikeLoss * 100m:N2} strike + ${debit * 100m:N2} debit = ${coveredPer:N2} margin/contract"
-			: $"${coveredPer:N2} margin/contract";
-        var labelOpt = uncoveredOpt == 0
-			? $"{structureLabel}  {costBreakdown} × {shortQty}"
-			: $"partial cover ({structureLabel}: {coverableOpt} @ ${coveredPer:N2}, {uncoveredOpt} naked @ ${naked:N2})";
-		return new LegMargin(labelOpt, totalOpt);
+		var legs = new List<MarginLeg> { new(shortLeg, qty, IsLong: false, shortPremium) };
+		if (longOpt != null) legs.Add(new(longOpt, longQty, IsLong: true));
+		var shares = longStockTicker != null && string.Equals(longStockTicker, shortLeg.Root, StringComparison.OrdinalIgnoreCase) ? longQty : 0;
+		return MarginCalculator.Requirement(legs, spot, shares);
 	}
 
 	private static (decimal[,] OldGrid, decimal[,] NewGrid, decimal[,] CreditGrid, decimal MaxCredit, decimal MaxCreditPrice, DateTime MaxCreditDate, int OldWidth, int NewWidth, int CreditWidth)
