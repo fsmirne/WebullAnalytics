@@ -81,16 +81,23 @@ internal sealed class AnalyzeCascadeStudyCommand : AsyncCommand<AnalyzeCascadeSt
 			if (MarketCalendar.IsOpen(d)) sessions.Add(d);
 
 		var threads = settings.Threads ?? Math.Max(1, Environment.ProcessorCount / 2);
+		var minuteVolume = new System.Collections.Concurrent.ConcurrentDictionary<(string, DateTime, DateTime), Lazy<SortedDictionary<TimeSpan, long>?>>();
 		var rows = new System.Collections.Concurrent.ConcurrentBag<(DateTime Date, TimeSpan Time, string Json)>();
 		var skipped = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
 		var done = 0;
+		var clock = System.Diagnostics.Stopwatch.StartNew();
 		AnsiConsole.MarkupLine($"[dim]{sessions.Count} session(s) {since:yyyy-MM-dd}..{until:yyyy-MM-dd}, checkpoints {string.Join(",", checkpoints.Select(c => c.ToString(@"hh\:mm")))}, {threads} thread(s).[/]");
 		await Parallel.ForEachAsync(sessions, new ParallelOptions { MaxDegreeOfParallelism = threads, CancellationToken = cancellation }, async (date, ct) =>
 		{
-			var reason = await StudySessionAsync(ticker, date, checkpoints, rows, ct);
+			var reason = await StudySessionAsync(ticker, date, checkpoints, new CascadeReplayCache(minuteVolume), rows, ct);
 			if (reason != null) skipped.AddOrUpdate(reason, 1, (_, n) => n + 1);
 			var n = Interlocked.Increment(ref done);
-			if (n % 50 == 0) AnsiConsole.MarkupLine($"[dim]{n}/{sessions.Count} sessions ({rows.Count} readings)[/]");
+			if (n % 25 == 0 || n == sessions.Count)
+			{
+				var elapsed = clock.Elapsed;
+				var eta = TimeSpan.FromSeconds(elapsed.TotalSeconds / n * (sessions.Count - n));
+				Console.Error.WriteLine($"{DateTime.Now:HH:mm:ss} {n}/{sessions.Count} sessions ({n * 100 / sessions.Count}%, {rows.Count} readings), elapsed {elapsed:hh\\:mm\\:ss}, ETA {eta:hh\\:mm\\:ss}");
+			}
 		});
 
 		var path = Path.IsPathRooted(settings.Out) ? settings.Out : Path.GetFullPath(settings.Out);
@@ -103,8 +110,9 @@ internal sealed class AnalyzeCascadeStudyCommand : AsyncCommand<AnalyzeCascadeSt
 	}
 
 	/// <summary>Replays one session at every checkpoint; returns a skip reason, or null when it produced readings. Each session gets
-	/// its own price and SMILE caches: neither is thread-safe, and both read their on-disk caches without fetching for past dates.</summary>
-	private static async Task<string?> StudySessionAsync(string ticker, DateTime date, IReadOnlyList<TimeSpan> checkpoints, System.Collections.Concurrent.ConcurrentBag<(DateTime, TimeSpan, string)> rows, CancellationToken ct)
+	/// its own price and SMILE caches (neither is thread-safe; both read their on-disk caches without fetching for past dates) and its
+	/// own replay memo, so the session-level loads run once per session rather than once per checkpoint.</summary>
+	private static async Task<string?> StudySessionAsync(string ticker, DateTime date, IReadOnlyList<TimeSpan> checkpoints, CascadeReplayCache cache, System.Collections.Concurrent.ConcurrentBag<(DateTime, TimeSpan, string)> rows, CancellationToken ct)
 	{
 		var oiPath = Program.ResolvePath($"data/oi/{ticker}/{date:yyyy-MM-dd}.jsonl");
 		if (!File.Exists(oiPath)) return "no data/oi snapshot";
@@ -127,9 +135,9 @@ internal sealed class AnalyzeCascadeStudyCommand : AsyncCommand<AnalyzeCascadeSt
 			if (rthBars.Count == 0 || after.Count == 0) continue;
 			var spot = rthBars[^1].Close;
 
-			var quotes = CascadeScreener.BuildCausalHistoricalChain(ticker, asOfEt, snapshot.Quotes, forceExante: false, out _);
+			var quotes = CascadeScreener.BuildCausalHistoricalChain(ticker, asOfEt, snapshot.Quotes, forceExante: false, out _, cache);
 			if (AnalyzeGexCommand.IsOiBlackout(quotes, ticker, date)) continue;
-			var read = await CascadeScreener.ReadChainAsync(ticker, spot, asOfEt, quotes, Dte, StrikeRangeFraction, MaxStrikes, CascadeScreener.DefaultTriggerScore, rthBars, null, priceCache, smileCache, "schwab", ct);
+			var read = await CascadeScreener.ReadChainAsync(ticker, spot, asOfEt, quotes, Dte, StrikeRangeFraction, MaxStrikes, CascadeScreener.DefaultTriggerScore, rthBars, null, priceCache, smileCache, "schwab", ct, cache);
 			if (read == null) continue;
 
 			var row = new

@@ -793,7 +793,14 @@ internal static class CascadeScreener
 		var rootKey = ticker.ToUpperInvariant();
 		if (PriorMultiExpiryCache.TryGetValue(rootKey, out var cached) && cached.Date == date.Date)
 			return (cached.PriorDate, cached.Quotes);
+		var (foundDate, result) = LoadCausalPriorDayChain(rootKey, date);
+		PriorMultiExpiryCache[rootKey] = (date.Date, foundDate, result);
+		return (foundDate, result);
+	}
 
+	/// <summary>The uncached load behind <see cref="GetCausalPriorDayChain"/>.</summary>
+	private static (DateTime? PriorDate, Dictionary<string, OptionContractQuote> Quotes) LoadCausalPriorDayChain(string rootKey, DateTime date)
+	{
 		var result = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		DateTime? foundDate = null;
 		for (var d = date.Date.AddDays(-1); d >= date.Date.AddDays(-7); d = d.AddDays(-1))
@@ -838,8 +845,6 @@ internal static class CascadeScreener
 			}
 			break;
 		}
-
-		PriorMultiExpiryCache[rootKey] = (date.Date, foundDate, result);
 		return (foundDate, result);
 	}
 
@@ -855,10 +860,11 @@ internal static class CascadeScreener
 		DateTime asOfEt,
 		Dictionary<string, OptionContractQuote> rawDayQuotes,
 		bool forceExante,
-		out string provenanceNote)
+		out string provenanceNote,
+		CascadeReplayCache? cache = null)
 	{
 		var date = asOfEt.Date;
-		var (priorDate, priorChain) = GetCausalPriorDayChain(ticker, date);
+		var (priorDate, priorChain) = cache != null ? cache.PriorChain(ticker, date, () => LoadCausalPriorDayChain(ticker.ToUpperInvariant(), date)) : GetCausalPriorDayChain(ticker, date);
 		var frontExpiry = rawDayQuotes.Keys
 			.Select(ParsingHelpers.ParseOptionSymbol)
 			.Where(p => p != null && ParsingHelpers.RootsMatchForAggregation(p.Root, ticker, p.ExpiryDate) && p.ExpiryDate.Date >= date)
@@ -898,7 +904,7 @@ internal static class CascadeScreener
 		{
 			if (!forceExante)
 			{
-				var slice = AnalyzeGexCommand.IntradayQuoteSlice.Open(ticker, date, frontExpiry, rawDayQuotes);
+				var slice = cache != null ? cache.QuoteSlice(ticker, date, frontExpiry, () => AnalyzeGexCommand.IntradayQuoteSlice.Open(ticker, date, frontExpiry, rawDayQuotes)) : AnalyzeGexCommand.IntradayQuoteSlice.Open(ticker, date, frontExpiry, rawDayQuotes);
 				var timedQuotes = slice?.At(asOfEt);
 				if (timedQuotes is { Count: > 0 })
 				{
@@ -954,13 +960,13 @@ internal static class CascadeScreener
 	/// window; otherwise the reading and the number of expiries the matrix spans.</summary>
 	internal static async Task<(CascadeReading Reading, int ExpiryCount)?> ReadChainAsync(
 		string ticker, decimal spot, DateTime asOfEt, Dictionary<string, OptionContractQuote> quotes, int dte, decimal strikeRangeFraction, int maxStrikes, int triggerScore,
-		IReadOnlyList<MinuteBar> rthBars, IntradayBarCache? intradayCache, HistoricalPriceCache priceCache, SmileIndexCache smileCache, string vendorName, CancellationToken cancellation)
+		IReadOnlyList<MinuteBar> rthBars, IntradayBarCache? intradayCache, HistoricalPriceCache priceCache, SmileIndexCache smileCache, string vendorName, CancellationToken cancellation, CascadeReplayCache? cache = null)
 	{
 		var gexMatrix = GexMatrix.Build(quotes, ticker, spot, asOfEt, expiryFilter: null, strikeRangeFraction, dte, maxStrikes, GreekKind.Gamma);
 		if (gexMatrix.Strikes.Count == 0 || gexMatrix.Expiries.Count == 0) return null;
 
 		var terrain = TerrainFrom(gexMatrix, vexMatrix: null, spot, asOfEt);
-		var inputs = await BuildInputsAsync(ticker, spot, asOfEt, gexMatrix, priceCache, intradayCache, smileCache, preloadedSessionRthBars: rthBars, vendorName: vendorName, strikeRangeFraction: strikeRangeFraction, includeCurrentBar: true, cancellation: cancellation);
+		var inputs = await BuildInputsAsync(ticker, spot, asOfEt, gexMatrix, priceCache, intradayCache, smileCache, preloadedSessionRthBars: rthBars, vendorName: vendorName, strikeRangeFraction: strikeRangeFraction, includeCurrentBar: true, cancellation: cancellation, cache: cache);
 		return (Evaluate(terrain, inputs, triggerScore), gexMatrix.Expiries.Count);
 	}
 
@@ -984,7 +990,8 @@ internal static class CascadeScreener
 		string? vendorName = null,
 		decimal strikeRangeFraction = 0.20m,
 		bool includeCurrentBar = true,
-		CancellationToken cancellation = default)
+		CancellationToken cancellation = default,
+		CascadeReplayCache? cache = null)
 	{
 		vendorName ??= LiveQuoteSource.VendorName(LiveQuoteSource.ResolveVendor(null));
 		var date = asOfEt.Date;
@@ -997,7 +1004,7 @@ internal static class CascadeScreener
 		if (frontExp.HasValue)
 		{
 			var frontContribs = gexMatrix.Contributors.Where(c => c.Expiry == frontExp.Value).ToList();
-			var storeTape = AnalyzeGexCommand.LoadStoreTape(ticker, date, frontExp.Value);
+			var storeTape = cache != null ? cache.StoreTape(ticker, date, frontExp.Value) : AnalyzeGexCommand.LoadStoreTape(ticker, date, frontExp.Value);
 			var hasLiveContribVol = frontContribs.Any(c => c.Volume > 0);
 			if (storeTape.Count > 0 && (date < MarketTime.NowEt().Date || !hasLiveContribVol))
 			{
@@ -1051,13 +1058,13 @@ internal static class CascadeScreener
 				var history = GexSqueezeScreener.SameWindowHistory(
 					date,
 					window,
-					d => AnalyzeGexCommand.StoreMinuteVolume(ticker, d, d.AddDays((frontExp.Value - date).Days)));
+					d => cache != null ? cache.MinuteVolume(ticker, d, d.AddDays((frontExp.Value - date).Days)) : AnalyzeGexCommand.StoreMinuteVolume(ticker, d, d.AddDays((frontExp.Value - date).Days)));
 				volumePace = GexSqueezeScreener.VolumePaceFrom(window, AnalyzeGexSettings.RthOpen, history);
 			}
 		}
 
 		// 2. Prior-day ΔOI share
-		var (priorOiDate, priorOi) = AnalyzeGexCommand.LoadPriorOi(ticker, date);
+		var (priorOiDate, priorOi) = cache != null ? cache.PriorOi(ticker, date) : AnalyzeGexCommand.LoadPriorOi(ticker, date);
 		var deltaOiShare = priorOi != null ? GexSqueezeScreener.DeltaOiShare(gexMatrix.Contributors, priorOi) : null;
 
 		// 3. Prior daily closes (ticker, VIX, VIX9D) for PrevClose, VixPriorClose, VIX9D/VIX backwardation, and HV3/HV30
