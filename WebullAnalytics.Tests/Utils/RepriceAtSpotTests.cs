@@ -9,12 +9,12 @@ namespace WebullAnalytics.Tests.Utils;
 /// without an override the raw mid is used; with an override the position is repriced at the
 /// hypothetical spot via the grid's own dividend-aware path (LegContractValueWithBs), shifting the
 /// observed mid by the model's value change from the real market spot to the override.</summary>
-// ComputeOpenPositionsMarketValue short-circuits when EvaluationDate.Today is in the past. Pin it to
-// today (and join the EvaluationDate collection so a parallel test can't leave a stale past override).
+// ComputeOpenPositionsMarketValue short-circuits at a past evaluation instant. Start live (and join the EvaluationDate collection so a
+// parallel test can't leave a stale past override).
 [Collection("EvaluationDate")]
 public class RepriceAtSpotTests : IDisposable
 {
-	public RepriceAtSpotTests() => EvaluationDate.Set(DateTime.Today);
+	public RepriceAtSpotTests() => EvaluationDate.Reset();
 	public void Dispose() => EvaluationDate.Reset();
 
 	private const decimal MarketSpot = 757.09m;
@@ -118,14 +118,14 @@ public class RepriceAtSpotTests : IDisposable
 
 		try
 		{
-			EvaluationDate.Set(DateTime.Today.AddDays(10));
+			EvaluationDate.Set(DateTime.Today.AddDays(10) + AsOf.DefaultTime);
 			var future = TableBuilder.ComputeOpenPositionsMarketValue(lots, opts)!.Value;
 			// Short position value = -(cost to buy back). Ten days of decay lowers the buy-back, raising the value.
 			Assert.True(future > sameDay, $"future-dated short value {future} should exceed same-day {sameDay} by the decay");
 		}
 		finally
 		{
-			EvaluationDate.Set(DateTime.Today); // restore the collection's pinned baseline for sibling tests
+			EvaluationDate.Reset(); // restore the collection's live baseline for sibling tests
 		}
 	}
 

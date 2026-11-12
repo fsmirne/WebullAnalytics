@@ -4,11 +4,10 @@ using Xunit;
 
 namespace WebullAnalytics.Tests.Pricing;
 
-/// <summary>Pins the observation-anchor semantics for a pinned evaluation date. A PAST/TODAY --date
-/// (historical replay, report --until, proposal-snapshot replay, backtest) anchors quotes at that date's
-/// session open. A FUTURE --date is a forward what-if on quotes struck NOW, so the anchor must stay at the
-/// real observation moment — otherwise calibration/greeks use the future date's shorter DTE and forward
-/// pricing shows zero elapsed decay.</summary>
+/// <summary>Pins the observation-anchor semantics for a pinned evaluation instant (<see cref="AsOf"/>). A PAST instant (--date, a fill,
+/// report --until, proposal-snapshot replay) anchors quotes at that instant — or at the minute its books were struck. A FUTURE instant is a
+/// forward what-if on quotes struck NOW, so the anchor must stay at the real observation moment — otherwise calibration/greeks use the
+/// future instant's shorter life and forward pricing shows zero elapsed decay — while the eval-TO instant is the pinned one.</summary>
 [Collection("EvaluationDate")]
 public class ObservationInstantTests : IDisposable
 {
@@ -19,97 +18,75 @@ public class ObservationInstantTests : IDisposable
 	}
 
 	[Fact]
-	public void PastOverride_AnchorsAtThatDatesSessionOpen()
+	public void PastOverride_AnchorsAtThePinnedInstant()
 	{
-		var past = DateTime.Today.AddDays(-30);
+		var past = DateTime.Today.AddDays(-30) + AsOf.DefaultTime;
 		EvaluationDate.Set(past);
-		Assert.Equal(past + OptionMath.MarketOpen, OptionMath.ObservationInstant());
+		Assert.Equal(past, OptionMath.ObservationInstant());
 	}
 
-	/// <summary>`analyze position --date` loads the past session's close book: the anchor is that instant, so its IV solve does not run a
-	/// close-of-day mid over an extra 6.5 hours of life. A struck-at instant on another date is stale and ignored.</summary>
+	/// <summary>A fill is read at the minute boundary nearest it: the anchor is that boundary, so its IV solve runs on the books' own clock. A
+	/// struck-at instant on another date is stale and ignored.</summary>
 	[Fact]
 	public void PastOverride_AnchorsAtTheHistoricalQuotesInstantWhenSetForThatDate()
 	{
-		var past = DateTime.Today.AddDays(-30);
-		EvaluationDate.Set(past);
-		OptionMath.HistoricalQuotesStruckAt = past + new TimeSpan(16, 0, 0);
-		Assert.Equal(past + new TimeSpan(16, 0, 0), OptionMath.ObservationInstant());
+		var fill = DateTime.Today.AddDays(-30) + new TimeSpan(14, 7, 41);
+		EvaluationDate.Set(fill);
+		OptionMath.HistoricalQuotesStruckAt = fill.Date + new TimeSpan(14, 8, 0);
+		Assert.Equal(fill.Date + new TimeSpan(14, 8, 0), OptionMath.ObservationInstant());
 
-		OptionMath.HistoricalQuotesStruckAt = past.AddDays(-1) + new TimeSpan(16, 0, 0);
-		Assert.Equal(past + OptionMath.MarketOpen, OptionMath.ObservationInstant());
+		OptionMath.HistoricalQuotesStruckAt = fill.Date.AddDays(-1) + new TimeSpan(16, 0, 0);
+		Assert.Equal(fill, OptionMath.ObservationInstant());
 	}
 
 	[Fact]
-	public void TodayOverride_UsesLiveInstant_NotPinnedOpen()
+	public void FutureOverride_AnchorsAtRealObservationMoment_NotTheFutureInstant()
 	{
-		// A same-day --date is NOT historical: it must price at the live run-time instant (RTH now / last
-		// close off-hours), identical to no override — not a phantom 09:30 that ignores the day's elapsed theta.
-		EvaluationDate.Reset();
-		var live = OptionMath.ObservationInstant();
-		EvaluationDate.Set(DateTime.Today);
-		var pinned = OptionMath.ObservationInstant();
-		Assert.Equal(live.Date, pinned.Date);
-		Assert.True(Math.Abs((pinned - live).TotalMinutes) < 1, $"today-override {pinned} should track the live instant {live}, not pin to 09:30");
-	}
-
-	[Fact]
-	public void FutureOverride_AnchorsAtRealObservationMoment_NotTheFutureDate()
-	{
-		var future = DateTime.Today.AddDays(7);
+		var future = DateTime.Today.AddDays(7) + AsOf.DefaultTime;
 		EvaluationDate.Set(future);
 		var anchor = OptionMath.ObservationInstant();
 
-		// Must NOT anchor at the future date (that would zero the elapsed decay); the quotes were struck now.
-		Assert.NotEqual(future + OptionMath.MarketOpen, anchor);
-		Assert.True(anchor.Date <= DateTime.Today, $"future-date anchor should be at/before today, got {anchor:yyyy-MM-dd HH:mm}");
+		// Must NOT anchor at the future instant (that would zero the elapsed decay); the quotes were struck now.
+		Assert.NotEqual(future, anchor);
+		Assert.True(anchor.Date <= DateTime.Today, $"future-instant anchor should be at/before today, got {anchor:yyyy-MM-dd HH:mm}");
 	}
 
 	// EvaluationInstant is the eval-TO instant (where the mark is projected), distinct from the quote anchor
 	// above. `now` is injected so the branch logic is deterministic regardless of the wall clock at test time.
 
 	[Fact]
-	public void EvaluationInstant_FutureDate_IsThatDaysOpen()
+	public void EvaluationInstant_FutureInstant_IsThatInstant()
 	{
 		var now = MondayNoon();
-		EvaluationDate.Set(now.Date.AddDays(7));
-		Assert.Equal(now.Date.AddDays(7) + OptionMath.MarketOpen, OptionMath.EvaluationInstant(now));
+		var future = now.Date.AddDays(7) + new TimeSpan(14, 30, 0);
+		EvaluationDate.Set(future);
+		Assert.Equal(future, OptionMath.EvaluationInstant(now));
 	}
 
 	[Fact]
-	public void EvaluationInstant_ExplicitToday_PreOpenTradingDay_ProjectsToTodaysOpen()
+	public void EvaluationInstant_LaterToday_IsThatInstant()
 	{
-		// The regression this guards: a --date that was "future" at 23:59 must not collapse to the previous
-		// close one minute after midnight. Pre-open on the same trading day → today's 09:30 open, not last close.
-		var preOpen = MondayNoon().Date + new TimeSpan(2, 0, 0); // 02:00 on a trading day
-		EvaluationDate.Set(preOpen.Date);
-		Assert.Equal(preOpen.Date + OptionMath.MarketOpen, OptionMath.EvaluationInstant(preOpen));
+		// A --date for later today (run pre-open, or before the pinned minute) is still ahead: the live market projected forward to it.
+		var preOpen = MondayNoon().Date + new TimeSpan(2, 0, 0);
+		EvaluationDate.Set(preOpen.Date + AsOf.DefaultTime);
+		Assert.Equal(preOpen.Date + AsOf.DefaultTime, OptionMath.EvaluationInstant(preOpen));
 	}
 
 	[Fact]
-	public void EvaluationInstant_ExplicitToday_AfterOpen_UsesObservationInstant_NotPhantomOpen()
+	public void EvaluationInstant_PastInstant_IsTheObservationInstant()
 	{
-		// Once RTH begins the explicit same-day --date must track the run time (ObservationInstant), not pin 09:30.
-		EvaluationDate.Reset();
-		var live = OptionMath.ObservationInstant();
-		EvaluationDate.Set(DateTime.Today);
-		var afterOpenNow = DateTime.Today + new TimeSpan(12, 0, 0);
-		// Compare within a tolerance: during RTH ObservationInstant() returns the live wall-clock, so two calls
-		// differ by microseconds — a phantom 09:30 would be off by hours, which this still catches.
-		var expected = OptionMath.ObservationInstant();
-		Assert.True(Math.Abs((OptionMath.EvaluationInstant(afterOpenNow) - expected).TotalSeconds) < 2, "explicit-today after-open must track ObservationInstant (run-time now), not a phantom 09:30");
+		var past = MondayNoon().AddDays(-7);
+		EvaluationDate.Set(past);
+		Assert.Equal(past, OptionMath.EvaluationInstant(MondayNoon()));
 	}
 
 	[Fact]
 	public void EvaluationInstant_NoOverride_PreOpen_StaysObservationInstant_NotTodaysOpen()
 	{
-		// The pre-open→today's-open projection is scoped to an EXPLICIT same-day --date. With no --date the
-		// "current" value must remain the honest last-known mark (ObservationInstant), never a phantom 09:30.
+		// With no --date the "current" value must remain the honest last-known mark (ObservationInstant), never a phantom 09:30.
 		EvaluationDate.Reset();
 		var preOpen = MondayNoon().Date + new TimeSpan(2, 0, 0);
-		// Tolerance for the same reason as above: RTH ObservationInstant() is the live clock, not a fixed value.
-		var expected = OptionMath.ObservationInstant();
-		Assert.True(Math.Abs((OptionMath.EvaluationInstant(preOpen) - expected).TotalSeconds) < 2, "no-override must track ObservationInstant, never a phantom today's-open");
+		Assert.Equal(OptionMath.ObservationInstant(preOpen, OptionMath.LiveQuotesStruckAt), OptionMath.EvaluationInstant(preOpen));
 	}
 
 	// Live quote-stamp branch (pre-open). The stamp decides whether a premarket book is today's (priced for the

@@ -138,7 +138,7 @@ internal sealed class AnalyzeGexSettings : AnalyzeBaseSettings
 		if (Intraday && !BothGreeks && TryParseGreek(Greek, out var g) && g != GreekKind.Gamma) return ValidationResult.Error("--intraday maps the gamma gravity migration and has no vanna equivalent; drop --greek vanna");
 		if (TopWalls < 1 || TopWalls > 25) return ValidationResult.Error($"--top-walls: must be in [1, 25], got {TopWalls}");
 		if (Lookback < 0 || Lookback > 30) return ValidationResult.Error($"--lookback: must be in [0, 30] sessions, got {Lookback}");
-		if (Dump && EvaluationDateOverride.HasValue) return ValidationResult.Error("--dump applies to live fetches only (no --date)");
+		if (Dump && PinnedInstant.HasValue) return ValidationResult.Error("--dump applies to live fetches only (no --date)");
 		if (View?.Trim().ToLowerInvariant() is not ("detailed" or "simplified" or "squeeze")) return ValidationResult.Error($"--view: expected 'detailed', 'simplified' or 'squeeze', got '{View}'");
 		if (Squeeze && Intraday) return ValidationResult.Error("--view squeeze is a point-in-time panel; drop --intraday");
 		if (Squeeze && !BothGreeks && TryParseGreek(Greek, out var sg) && sg != GreekKind.Gamma) return ValidationResult.Error("--view squeeze reads the gamma terrain; drop --greek vanna");
@@ -204,7 +204,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var ticker = settings.Ticker.ToUpperInvariant();
-		var asOf = settings.EvaluationDateOverride ?? DateTime.Now;
+		var pinned = settings.PinnedInstant;
+		var asOf = pinned ?? DateTime.Now;
+		var pastInstant = pinned < DateTime.Now;
 		DateTime? expiryFilter = settings.Expiry != null
 			? DateTime.ParseExact(settings.Expiry, "yyyy-MM-dd", CultureInfo.InvariantCulture)
 			: null;
@@ -214,12 +216,14 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var isOfflineHistorical = false;
 		ApiConfig? apiConfig = null;   // set on the live-fetch path; the running-day --intraday tape refresh reuses it
 
-		// Historical/offline: for an explicit --date (today included) with a captured chain in data/oi (ThetaData
-		// backfill or the live scraper), read that day's snapshot — OI + IV + spot are inlined for the full chain —
-		// instead of the live Webull fetch. Lets `analyze gex SPY --date 2026-06-03` show THAT day's real magnet,
-		// not today's. With --date <today> this trades the live fetch for the morning snapshot's IV/spot.
+		// A past --date is the chart as it stood at that instant, read from the session's data/oi snapshot (ThetaData backfill or the live
+		// scraper) — never a live fetch, which would be today's book wearing that instant's label. Only what was knowable then is used: the
+		// snapshot's open interest is the pre-open OCC count (the prior session's close), its 16:00 prices/IVs/volumes are stripped, back
+		// expiries take the prior session's settled IVs, the front expiry its minute NBBO at the instant, every contract its volume traded
+		// up to the instant (the store's ohlcv tape), and spot the last complete minute bar. --intraday replays the whole --date session
+		// itself (--start/--end), so it takes the raw snapshot.
 		var oiPath = Program.ResolvePath($"data/oi/{ticker}/{asOf:yyyy-MM-dd}.jsonl");
-		if (settings.EvaluationDateOverride.HasValue && asOf.Date <= DateTime.Today && File.Exists(oiPath))
+		if (pastInstant && File.Exists(oiPath))
 		{
 			var (snapSpot, snapQuotes) = LoadOiSnapshot(oiPath);
 			if (snapQuotes.Count == 0)
@@ -227,15 +231,31 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 				AnsiConsole.MarkupLine($"[red]Empty data/oi snapshot for {ticker} {asOf:yyyy-MM-dd}.[/]");
 				return 1;
 			}
-			quotes = snapQuotes;
-			spot = ResolveSpotOverride(settings.Spot, ticker) ?? snapSpot;
-			AnsiConsole.MarkupLine($"[dim]Historical GEX from {Markup.Escape(oiPath)} ({quotes.Count} contracts; offline — no live fetch).[/]");
 			isOfflineHistorical = true;
+			if (settings.Intraday)
+			{
+				quotes = snapQuotes;
+				spot = snapSpot;
+				AnsiConsole.MarkupLine($"[dim]Historical session from {Markup.Escape(oiPath)} ({quotes.Count} contracts; offline — no live fetch).[/]");
+			}
+			else
+			{
+				var bars = await CascadeScreener.LoadSessionRthBarsAsync(ticker, asOf, intradayCache: null, includeCurrentBar: false, cancellation);
+				if (bars.Count == 0)
+				{
+					AnsiConsole.MarkupLine($"[red]No {Markup.Escape(ticker)} 1-minute bars for {asOf:yyyy-MM-dd} before {asOf:HH:mm} ET — the spot at the instant comes from the intraday tape (data/intraday).[/]");
+					return 1;
+				}
+				spot = bars[^1].Close;
+				quotes = CascadeScreener.BuildCausalHistoricalChain(ticker, asOf, snapQuotes, settings.Exante, out var provenanceNote);
+				var volumeNote = ApplyVolumeThrough(ticker, asOf, quotes);
+				AnsiConsole.MarkupLine($"[dim]GEX as of {asOf:yyyy-MM-dd HH:mm} ET from {Markup.Escape(oiPath)}: pre-open OI, spot ${spot:F2} (last complete minute bar). {Markup.Escape(provenanceNote)} {Markup.Escape(volumeNote)}[/]");
+			}
 		}
-		else if (settings.EvaluationDateOverride.HasValue && asOf.Date < DateTime.Today)
+		else if (pastInstant)
 		{
 			// A PAST --date with no captured snapshot can never be served by a live fetch (the chain would be
-			// today's book wearing yesterday's label — and roots only the scraper ever covered, like SPCX, just
+			// today's book wearing that instant's label — and roots only the scraper ever covered, like SPCX, just
 			// produce a confusing vendor 400). Fail fast and say what IS available instead.
 			var dir = Program.ResolvePath($"data/oi/{ticker}");
 			var available = Directory.Exists(dir)
@@ -418,7 +438,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		// numbers are otherwise irreproducible; the --intraday heatmap reads this log back as its "Gravity" row.
 		// data/gex carries gamma anchors (gravity/walls/flip/max-pain) and is read back by --intraday; a vanna run
 		// has none of those, so it stays out of the log rather than writing rows the readers would misinterpret.
-		if (!settings.EvaluationDateOverride.HasValue)
+		if (!pinned.HasValue)
 		{
 			if (greek == GreekKind.Gamma) AppendGexLog(ticker, spot.Value, matrix, settings);
 			// The squeeze view's volume-pace factor compares data/iv captures, so each live squeeze run records one.
@@ -488,6 +508,40 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var reading = GexSqueezeScreener.Evaluate(GexSqueezeScreener.TerrainFrom(matrix, spot, asOf), inputs);
 		var scope = expiryFilter.HasValue ? $"expiry {expiryFilter.Value:yyyy-MM-dd}" : $"{matrix.Expiries.Count} expiration(s) ≤{settings.Dte}DTE";
 		GexSqueezePanel.Render(ticker, asOf, scope, reading);
+	}
+
+	/// <summary>Sets each contract's volume to what it had traded up to <paramref name="asOfEt"/>: the store's ohlcv minute bars (START-of-bar
+	/// labeled, so a bar counts once it has closed by the instant), per expiry. A monthly book split across roots (SPX + SPXW) is credited to
+	/// one of its symbols so it isn't counted twice. Contracts of an expiry the tape doesn't cover keep no volume. Returns a note naming the
+	/// coverage.</summary>
+	internal static string ApplyVolumeThrough(string ticker, DateTime asOfEt, Dictionary<string, OptionContractQuote> quotes)
+	{
+		var byExpiry = quotes.Keys.Select(sym => (Sym: sym, P: ParsingHelpers.ParseOptionSymbol(sym))).Where(x => x.P != null).GroupBy(x => x.P!.ExpiryDate.Date).ToList();
+		var uncovered = new List<DateTime>();
+		foreach (var expiry in byExpiry)
+		{
+			var tape = LoadStoreTape(ticker, asOfEt.Date, expiry.Key);
+			if (tape.Count == 0) { uncovered.Add(expiry.Key); continue; }
+			var traded = new Dictionary<(decimal Strike, bool IsCall), decimal>();
+			foreach (var (minute, byStrike) in tape)
+			{
+				if (minute + TimeSpan.FromMinutes(1) > asOfEt.TimeOfDay) continue;
+				foreach (var (strike, v) in byStrike)
+				{
+					traded[(strike, true)] = traded.GetValueOrDefault((strike, true)) + v.C;
+					traded[(strike, false)] = traded.GetValueOrDefault((strike, false)) + v.P;
+				}
+			}
+			var credited = new HashSet<(decimal, bool)>();
+			foreach (var (sym, p) in expiry)
+			{
+				var key = (p!.Strike, p.CallPut == "C");
+				quotes[sym] = quotes[sym] with { Volume = credited.Add(key) ? (long)traded.GetValueOrDefault(key) : 0 };
+			}
+		}
+		return uncovered.Count == 0
+			? $"Volume traded through {asOfEt:HH:mm} ET from the store's ohlcv tape."
+			: $"Volume traded through {asOfEt:HH:mm} ET from the store's ohlcv tape; none for {string.Join(", ", uncovered.Select(e => e.ToString("MM/dd")))} (not in the tape).";
 	}
 
 	/// <summary>Per-minute traded volume (calls + puts, all strikes) for one (ticker, date, expiry) from the store's ohlcv

@@ -185,7 +185,7 @@ public static class BreakEvenAnalyzer
 	/// exact (mirrors <see cref="TableBuilder.ComputeOpenPositionsMarketValue"/>'s guard).</summary>
 	private static decimal? ComputeCurrentPnl(IReadOnlyList<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty, decimal entryBasis, AnalysisOptions opts)
 	{
-		if (EvaluationDate.Today < DateTime.Today && !opts.MarksAsOfEvalDate) return null;
+		if (EvaluationDate.IsPast && !opts.MarksAsOfEvalDate) return null;
 		decimal value = 0m;
 		foreach (var leg in legs)
 		{

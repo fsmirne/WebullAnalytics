@@ -31,8 +31,10 @@ internal sealed class AnalyzeTradeSettings : GridSettings
 	public string? Proposal { get; set; }
 
 	[CommandOption("--fill [N]")]
-	[Description("Evaluate one of your recent unexpired OPENING fills (Webull order history, last 30 days, any ticker) against the live market now, its per-leg fill prices as the cost basis. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
+	[Description("Evaluate one of your recent OPENING fills (Webull order history, last 30 days, any ticker), its per-leg fill prices as the cost basis, at --date: the live market now by default, --date fill for the market at the fill itself. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
 	public FlagValue<int>? Fill { get; set; }
+
+	protected override bool FillAllowed => Fill?.IsSet == true;
 
 	public override ValidationResult Validate()
 	{
@@ -67,17 +69,18 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		if (settings.Proposal != null && !ReconstructSpecFromProposal(settings))
 			return 1;
 
+		ReportCommand.ApplyEvaluationDate(settings);
+		var atFill = false;
 		if (settings.Fill?.IsSet == true)
 		{
-			var (spec, error) = await OpeningFillPicker.ResolveSpecAsync(settings.Fill.Value, cancellation);
+			var (spec, _, error) = await OpeningFillPicker.ResolveAtAsync(settings.Fill.Value, settings.DateSpec, cancellation);
 			if (spec == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
 			settings.Spec = spec;
+			atFill = settings.DateSpec.Kind == AsOfKind.Fill;
 		}
 
-		ReportCommand.ApplyEvaluationDate(settings);
-
 		var trades = new List<Trade>();
-		var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Spec, DateTime.Now, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
+		var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Spec, EvaluationDate.IsPast ? EvaluationDate.Instant!.Value : DateTime.Now, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
 		if (added == null) return 1;
 
 		var closeLookup = await ReportCommand.BuildUnderlyingCloseLookup(trades, cancellation);
@@ -89,7 +92,8 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 			return 0;
 		}
 
-		var opts = await ReportCommand.BuildAnalysisOptions(settings, positionRows, cancellation, added.Value.Quotes, added.Value.Underlyings);
+		var (opts, optsError) = await ReportCommand.BuildAnalysisOptions(settings, positionRows, cancellation, added.Value.Quotes, added.Value.Underlyings, preloadedAsOf: added.Value.AsOf, nearestBoundary: atFill);
+		if (opts == null) { Console.Error.WriteLine($"Error: {optsError}"); return 1; }
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 		if (settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase))
 		{
@@ -246,11 +250,7 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
 
-		if (settings.EvaluationDateOverride.HasValue)
-		{
-			EvaluationDate.Set(settings.EvaluationDateOverride.Value);
-			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
-		}
+		if (settings.PinnedInstant is { } instant) ReportCommand.PinEvaluation(instant);
 
 		return await settings.RunWithOutputAsync("AnalyzeRoll", () => AnalyzeCommon.RunRollAnalysis(settings, cancellation));
 	}
@@ -330,19 +330,32 @@ internal static class AnalyzeCommon
 	/// <summary>Appends <paramref name="tradesSpec"/> to <paramref name="trades"/> as synthetic trades stamped at <paramref name="baseTime"/>
 	/// (sequenced after the existing ones), first fetching live quotes when a leg prices at BID|MID|ASK. Returns the quotes and
 	/// underlyings that fetch loaded (empty when none was needed), or null after printing the error when it failed.</summary>
-	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? Underlyings)?> AppendSyntheticTrades(List<Trade> trades, string tradesSpec, DateTime baseTime, QuoteVendor vendor, CancellationToken cancellation)
+	/// <summary>Appends the spec's trades, resolving BID/MID/ASK prices from the market at the evaluation instant. <c>AsOf</c> is true when
+	/// those quotes are a past instant's real books (the report pipeline then reuses them instead of loading them again).</summary>
+	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? Underlyings, bool AsOf)?> AppendSyntheticTrades(List<Trade> trades, string tradesSpec, DateTime baseTime, QuoteVendor vendor, CancellationToken cancellation)
 	{
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		IReadOnlyDictionary<string, decimal>? underlyings = null;
+		var asOf = false;
 		if (NeedsMarketPrices(tradesSpec))
 		{
 			var symbols = ParseAllLegs(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-			(quotes, underlyings) = await FetchQuotesAndUnderlyingForSymbolList(symbols, vendor, cancellation);
-			if (quotes == null) return null;
+			// BID/MID/ASK at a past evaluation instant are that instant's books, not today's.
+			if (EvaluationDate.IsPast)
+			{
+				var (market, error) = await HistoricalMarkOverlay.ApplyAsync(EvaluationDate.Instant!.Value, nearest: false, symbols, null, null, cancellation);
+				if (market == null) { Console.Error.WriteLine($"Error: can't price BID/MID/ASK at {EvaluationDate.Instant:yyyy-MM-dd HH:mm} ET — {error}"); return null; }
+				(quotes, underlyings, asOf) = (market.Quotes, market.UnderlyingPrices, true);
+			}
+			else
+			{
+				(quotes, underlyings) = await FetchQuotesAndUnderlyingForSymbolList(symbols, vendor, cancellation);
+				if (quotes == null) return null;
+			}
 		}
 		var nextSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
 		trades.AddRange(ParseSyntheticTrades(tradesSpec, nextSeq, baseTime, quotes));
-		return (quotes, underlyings);
+		return (quotes, underlyings, asOf);
 	}
 
 	internal static bool NeedsMarketPrices(string tradesSpec) =>
@@ -619,16 +632,27 @@ internal static class AnalyzeCommon
 
 		IReadOnlyDictionary<string, OptionContractQuote> quotes;
 		IReadOnlyDictionary<string, decimal> underlyingPrices;
-		try
+		if (EvaluationDate.IsPast)
 		{
-			(quotes, underlyingPrices) = await FetchLiveChainByVendor(allSymbols, settings.ResolvedVendor, cancellation);
-			YahooOptionsClient.ApplyToOptionMath(await AI.Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation));
+			// A past instant: the legs' real books and spot at that minute, their IVs solved from those books on the books' clock.
+			var (market, error) = await HistoricalMarkOverlay.ApplyAsync(EvaluationDate.Instant!.Value, nearest: false, allSymbols, null, null, cancellation);
+			if (market == null) { Console.WriteLine($"Error: can't rebuild the market at {EvaluationDate.Instant:yyyy-MM-dd HH:mm} ET — {error}"); return 1; }
+			underlyingPrices = market.UnderlyingPrices;
+			quotes = RecalibrateQuotesToMid(market.Quotes, underlyingPrices, dividends: null, OptionMath.ObservationInstant());
 		}
-		catch (Exception ex)
+		else
 		{
-			if (ex is OperationCanceledException) throw;
-			Console.WriteLine($"Error: Failed to fetch option data: {ex.Message}");
-			return 1;
+			try
+			{
+				(quotes, underlyingPrices) = await FetchLiveChainByVendor(allSymbols, settings.ResolvedVendor, cancellation);
+				YahooOptionsClient.ApplyToOptionMath(await AI.Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation));
+			}
+			catch (Exception ex)
+			{
+				if (ex is OperationCanceledException) throw;
+				Console.WriteLine($"Error: Failed to fetch option data: {ex.Message}");
+				return 1;
+			}
 		}
 
 		// Resolve IVs (--iv overrides take priority)

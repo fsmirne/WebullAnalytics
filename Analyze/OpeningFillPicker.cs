@@ -36,19 +36,31 @@ internal static class OpeningFillPicker
 
 	/// <summary>trade/position path: pick an unexpired opening fill and return it as a <c>&lt;spec&gt;</c> at its
 	/// real per-leg fill prices. Returns a clean error string, never throws.</summary>
-	public static async Task<(string? Spec, string? Error)> ResolveSpecAsync(int index, CancellationToken cancellation)
+	/// <summary>Resolves --fill against --date. A pinned --date instant must already be set (<see cref="EvaluationDate"/>): fills are listed
+	/// unexpired as of it. <c>--date fill</c> lists every opening fill and pins the evaluation at the picked fill's own instant.</summary>
+	public static async Task<(string? Spec, OpeningFill? Fill, string? Error)> ResolveAtAsync(int index, AsOf asOf, CancellationToken cancellation)
 	{
-		var (config, fills, error) = await LoadAsync(unexpiredOnly: true, cancellation);
-		if (fills == null) return (null, error);
+		var atFill = asOf.Kind == AsOfKind.Fill;
+		var (spec, fill, error) = await ResolveSpecAsync(index, unexpiredOnly: !atFill, cancellation);
+		if (spec != null && atFill) Report.ReportCommand.PinEvaluation(fill!.FilledEt);
+		return (spec, fill, error);
+	}
+
+	/// <param name="unexpiredOnly">List only fills whose legs are all unexpired on the evaluation date (a live or forward evaluation can't price
+	/// an expired leg); false lists every opening fill (--date fill evaluates each at its own instant).</param>
+	public static async Task<(string? Spec, OpeningFill? Fill, string? Error)> ResolveSpecAsync(int index, bool unexpiredOnly, CancellationToken cancellation)
+	{
+		var (config, fills, error) = await LoadAsync(unexpiredOnly, cancellation);
+		if (fills == null) return (null, null, error);
 
 		var (fill, pickError) = Pick(fills, index, "Select an opening fill to analyze:");
-		if (fill == null) return (null, pickError);
+		if (fill == null) return (null, null, pickError);
 
 		var (legs, source, priceError) = await PriceLegsAsync(config!, fill, cancellation);
-		if (legs == null) return (null, priceError);
+		if (legs == null) return (null, null, priceError);
 
-		Console.WriteLine($"Opening fill: {FormatLabel(fill)} — leg prices from {source}; evaluating against the live market now.");
-		return (string.Join(",", legs.Select(l => $"{(l.Leg.Action == LegAction.Buy ? "buy" : "sell")}:{l.Leg.Symbol}:{l.Leg.Qty}@{l.Price.ToString(CultureInfo.InvariantCulture)}")), null);
+		Console.WriteLine($"Opening fill: {FormatLabel(fill)} — leg prices from {source}.");
+		return (string.Join(",", legs.Select(l => $"{(l.Leg.Action == LegAction.Buy ? "buy" : "sell")}:{l.Leg.Symbol}:{l.Leg.Qty}@{l.Price.ToString(CultureInfo.InvariantCulture)}")), fill, null);
 	}
 
 	/// <summary>Pulls the default account's order history and keeps filled option orders whose

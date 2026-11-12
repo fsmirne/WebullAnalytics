@@ -30,7 +30,8 @@ internal static class OptionMath
 	/// <item>Live pre-open (book from a prior session or unstamped) / weekend / holiday → the most recent trading
 	/// session's 16:00 close (the last real quotes — e.g. Friday's close when run on a Saturday), so an off-hours
 	/// report shows the position's value as of the last close rather than a phantom value decayed against a dead clock.</item>
-	/// <item>Historical --date run → that date's session open (wall-clock "now" is meaningless).</item>
+	/// <item>A pinned instant in the past (--date, a fill, a replay) → that instant, or the minute its books were actually struck
+	/// (<see cref="HistoricalQuotesStruckAt"/>) when a loader read them at a neighbouring boundary.</item>
 	/// </list></summary>
 	internal static DateTime ObservationInstant() => ObservationInstant(DateTime.Now, LiveQuotesStruckAt);
 
@@ -40,23 +41,21 @@ internal static class OptionMath
 	/// anchor agree on when the book was struck.</summary>
 	internal static DateTimeOffset? LiveQuotesStruckAt { get; set; }
 
-	/// <summary>The ET instant a past --date run's quotes were actually struck, when the command loaded an as-of market at a known
-	/// instant (`analyze position --date` reads the session's close book). Overrides the past-date default of that session's 09:30 open
-	/// in <see cref="ObservationInstant(DateTime, DateTimeOffset?)"/>, so the IV back-solve, the grid's evaluation instant and every
-	/// leg mark price on the clock the books came from. Ignored unless it falls on the pinned evaluation date.</summary>
+	/// <summary>The ET instant a past run's quotes were actually struck, when the command loaded an as-of market at a known minute
+	/// boundary (a fill reads the boundary nearest it). Overrides the pinned instant in <see cref="ObservationInstant(DateTime, DateTimeOffset?)"/>,
+	/// so the IV back-solve, the grid's evaluation instant and every leg mark price on the clock the books came from. Ignored unless it
+	/// falls on the pinned evaluation date.</summary>
 	internal static DateTime? HistoricalQuotesStruckAt { get; set; }
 
 	/// <summary><see cref="ObservationInstant()"/> with the clock (<paramref name="now"/>, machine-local = ET) and the
 	/// book's timestamp injected, so the branch logic is testable.</summary>
 	internal static DateTime ObservationInstant(DateTime now, DateTimeOffset? quotesStruckAt)
 	{
-		// A pinned eval date in the PAST (historical replay, report --until, proposal-snapshot replay, backtest
-		// step) anchors the quotes at that date's session open — that IS when those quotes were struck. A TODAY
-		// or FUTURE pin uses live quotes struck NOW, so it falls through to the real observation moment; pricing
-		// TO a future date's open is handled separately (see LegMarkPerShare), but the quote anchor itself is
-		// always "now". This keeps a same-day --date identical to no --date (real run-time, not a phantom 9:30).
-		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date < DateTime.Today)
-			return HistoricalQuotesStruckAt is { } struckAt && struckAt.Date == EvaluationDate.Today.Date ? struckAt : EvaluationDate.Today + MarketOpen;
+		// A pinned instant in the PAST (--date, a fill, report --until, a proposal-snapshot replay) is when those quotes were struck. A
+		// FUTURE pin uses live quotes struck NOW, so it falls through to the real observation moment; pricing TO the future instant is
+		// EvaluationInstant's job, but the quote anchor itself is always "now".
+		if (EvaluationDate.Instant is { } pin && pin < now)
+			return HistoricalQuotesStruckAt is { } struckAt && struckAt.Date == pin.Date ? struckAt : pin;
 		var todayTrades = MarketCalendar.IsOpen(now.Date);
 		if (todayTrades && now >= now.Date + MarketOpen && now <= now.Date + MarketClose) return now;   // live RTH
 		if (todayTrades && now > now.Date + MarketClose) return now.Date + MarketClose;                  // after today's close
@@ -64,28 +63,12 @@ internal static class OptionMath
 		return MarketCalendar.PreviousOpenOnOrBefore(now.Date.AddDays(-1)) + MarketClose;                // pre-open / weekend / holiday
 	}
 
-	/// <summary>The instant a mark is evaluated TO — distinct from <see cref="ObservationInstant"/>, which is
-	/// where the quotes were STRUCK. Encodes the --date semantics so the headline and the grid's eval column
-	/// reconcile:
-	/// <list type="bullet">
-	/// <item>FUTURE --date → that day's 09:30 open (a forward what-if starts at the open).</item>
-	/// <item>Explicit same-day --date, run BEFORE today's open on a trading day → today's 09:30 open. This keeps
-	/// a --date that was "future" at 23:59 continuous one minute after midnight: without it, the eval collapses
-	/// back to the previous close and drops the overnight/weekend theta the position will have carried at the
-	/// open (the "07/24 vs 07/27" jump).</item>
-	/// <item>Everything else (RTH, after close, no --date, past --date) → the observation instant (run-time now /
-	/// last close), so an open-market eval reflects the actual run time, not a phantom 09:30.</item>
-	/// </list>
+	/// <summary>The instant a mark is evaluated TO — distinct from <see cref="ObservationInstant"/>, which is where the quotes were STRUCK.
+	/// A pinned instant still ahead of <paramref name="now"/> (a future --date) is that instant: the live market projected forward to it.
+	/// Everything else (no pin, a past pin) is the observation instant, so the headline and the grid's eval column reconcile.
 	/// Takes <paramref name="now"/> explicitly so the branch logic is testable without touching the wall clock.</summary>
-	internal static DateTime EvaluationInstant(DateTime now)
-	{
-		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date > now.Date)
-			return EvaluationDate.Today + MarketOpen;
-		if (EvaluationDate.IsOverridden && EvaluationDate.Today.Date == now.Date
-			&& MarketCalendar.IsOpen(now.Date) && now < now.Date + MarketOpen)
-			return now.Date + MarketOpen;
-		return ObservationInstant();
-	}
+	internal static DateTime EvaluationInstant(DateTime now) =>
+		EvaluationDate.Instant is { } pin && pin >= now ? pin : ObservationInstant(now, LiveQuotesStruckAt);
 
 	// --- Black-Scholes ---
 
@@ -348,15 +331,9 @@ internal static class OptionMath
 	/// </list></summary>
 	internal static decimal? LegMarkPerShare(OptionParsed parsed, string symbol, Side side, AnalysisOptions opts)
 	{
-		// Price TO the same instant the grid's eval-date column uses so the headline and grid reconcile
-		// exactly: a pinned --date means "at that day's market open" (canonical, and independent of what
-		// wall-clock time the command is run — the old EvaluationDate.Now made P&L drift with run time).
-		// No pin → the live observation instant (RTH now / last close off-hours), matching the grid's today
-		// column. The market-spot reference is always the observation instant (where the mid was struck), so
-		// a future --date's delta carries both the spot move and the elapsed theta.
-		// Price TO the eval instant (FUTURE --date → its 09:30 open; explicit same-day --date pre-open → today's
-		// 09:30 open; else run-time now / last close — see EvaluationInstant). refInstant (where the mid was
-		// struck) is always the live observation instant, so an override delta carries both spot move and theta.
+		// Price TO the eval instant the grid's eval column uses, so the headline and grid reconcile (a future --date → that instant; else
+		// the observation instant — see EvaluationInstant). refInstant (where the mid was struck) is always the observation instant, so an
+		// override delta carries both the spot move and the elapsed theta.
 		var evalInstant = EvaluationInstant(DateTime.Now);
 		var refInstant = ObservationInstant();
 		if (opts.Theoretical)

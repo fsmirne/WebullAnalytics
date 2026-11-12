@@ -279,7 +279,7 @@ public static class CombinedBreakEvenAnalyzer
 		// construction: (grid per-pair value − netPremium) × normalizingQty × 100 + stock == this. Null (panel
 		// falls back to the grid cell) if a leg can't be marked or the eval date is in the past.
 		decimal? combinedCurrentPnl = null;
-		if (EvaluationDate.Today.Date >= DateTime.Today.Date && optionLegs.Count > 0 && spot.HasValue)
+		if (!EvaluationDate.IsPast && optionLegs.Count > 0 && spot.HasValue)
 		{
 			decimal optsValue = 0m;
 			var allMarked = true;

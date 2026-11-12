@@ -26,7 +26,7 @@ class GridSettings : CommandSettings
 	public string? Vendor { get; set; }
 
 	[CommandOption("--date")]
-	[Description("Override 'today' for evaluation (YYYY-MM-DD): positions forward-project to that date with theta decay — pair with --spot to predict their value at that date. Shared by `report` and `analyze trade`, same code path. A future date prices at that day's 09:30 ET open; today prices at the current run time.")]
+	[Description(AsOf.Help + " Shared by `report` and `analyze trade`, same code path; pair a future --date with --spot to predict a position's value then.")]
 	public string? Date { get; set; }
 
 	[Description("Output format: 'console' or 'text' ('excel' too for `report`)")]
@@ -79,7 +79,14 @@ class GridSettings : CommandSettings
 
 	// The evaluation-anchor override (--date), parsed once here so `report` and `analyze trade` set EvaluationDate
 	// the same way and share the forward-pricing path.
-	internal DateTime? EvaluationDateOverride => Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
+	/// <summary>The parsed --date (<see cref="AsOf.Now"/> when omitted).</summary>
+	internal AsOf DateSpec => AsOf.Parse(Date);
+
+	/// <summary>The instant --date pins, or null for now (and for fill, resolved once the fill is picked).</summary>
+	internal DateTime? PinnedInstant => DateSpec.Instant;
+
+	/// <summary>True for `analyze trade --fill`, the only place --date fill means something.</summary>
+	protected virtual bool FillAllowed => false;
 
 	/// <summary>Applies config.json's `report` block defaults for any grid option not explicitly passed on the CLI.</summary>
 	internal virtual void ApplyConfig(Dictionary<string, JsonElement> cfg)
@@ -98,8 +105,8 @@ class GridSettings : CommandSettings
 
 	public override ValidationResult Validate()
 	{
-		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
-			return ValidationResult.Error("--date must be in YYYY-MM-DD format");
+		if (AsOf.Validate(Date, FillAllowed, Spot) is { } dateError)
+			return ValidationResult.Error(dateError);
 
 		if (Vendor != null && Vendor.Trim().ToLowerInvariant() is not ("webull" or "schwab"))
 			return ValidationResult.Error($"--vendor: expected webull or schwab, got '{Vendor}'");
@@ -260,18 +267,23 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : DateTime.Now;
 			var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Trade, baseTime, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
 			if (added == null) return 1;
-			(preloadedQuotes, preloadedUnderlyings) = added.Value;
+			(preloadedQuotes, preloadedUnderlyings, _) = added.Value;
 		}
 
 		return await RunReportPipeline(settings, trades, feeLookup, cancellation, preloadedQuotes, preloadedUnderlyings);
 	}
 
-	/// <summary>Sets the evaluation anchor from --date (no-op without it), announcing the override.</summary>
+	/// <summary>Pins the evaluation instant from --date (no-op for now), announcing it.</summary>
 	internal static void ApplyEvaluationDate(GridSettings settings)
 	{
-		if (!settings.EvaluationDateOverride.HasValue) return;
-		EvaluationDate.Set(settings.EvaluationDateOverride.Value);
-		Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
+		if (settings.PinnedInstant is { } instant) PinEvaluation(instant);
+	}
+
+	/// <summary>Pins the evaluation instant and announces it — one line every --date consumer prints.</summary>
+	internal static void PinEvaluation(DateTime instantEt)
+	{
+		EvaluationDate.Set(instantEt);
+		Console.WriteLine($"Evaluating as of {instantEt:yyyy-MM-dd HH:mm} ET.");
 	}
 
 	internal static (List<Trade> trades, Dictionary<(DateTime, Side, int), decimal>? feeLookup, int errorCode) LoadTrades(ReportSettings settings)
@@ -333,10 +345,12 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		if (settings.Until != null)
 		{
 			trades.RemoveAll(t => t.Timestamp.Date > settings.UntilDate.Date);
-			// --until doubles as the historical as-of anchor, BUT --date (set in ExecuteAsync) is the explicit
-			// evaluation override and wins — so only anchor to --until when no --date was given.
-			if (!settings.EvaluationDateOverride.HasValue)
-				EvaluationDate.Set(settings.UntilDate);
+			// A past --until doubles as the historical as-of anchor — trades through that date, so its session's close — BUT --date (set in
+			// ExecuteAsync) is the explicit evaluation instant and wins, so only anchor to --until when no --date was given. An --until whose
+			// close hasn't happened yet is the live market.
+			var untilClose = settings.UntilDate.Date + MarketCalendar.CloseTimeEt(settings.UntilDate);
+			if (!settings.PinnedInstant.HasValue && untilClose < MarketTime.NowEt())
+				EvaluationDate.Set(untilClose);
 		}
 
 		var initialAmount = settings.InitialAmount;
@@ -346,7 +360,8 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var (positionRows, strategyAdjustments, singleLegStandalones) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
-		var opts = await BuildAnalysisOptions(settings, positionRows, cancellation, preloadedQuotes, preloadedUnderlyingPrices);
+		var (opts, optsError) = await BuildAnalysisOptions(settings, positionRows, cancellation, preloadedQuotes, preloadedUnderlyingPrices);
+		if (opts == null) { Console.Error.WriteLine($"Error: {optsError}"); return 1; }
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
 		var adjustmentBreakdowns = AdjustmentReportBuilder.Build(positionRows, trades, positions, strategyAdjustments, singleLegStandalones);
@@ -371,9 +386,12 @@ class ReportCommand : AsyncCommand<ReportSettings>
 	}
 
 	/// <summary>Everything the break-even panels and time-decay grids price from, for <paramref name="positionRows"/>: the live
-	/// chain (or, for a past --date, the real as-of close marks — quote store, else ThetaData), dividends, the risk-free rate, and the --spot/--iv/--levels/
-	/// calibration overrides. Shared by `report` and `analyze trade` so both grids price identically.</summary>
-	internal static async Task<AnalysisOptions> BuildAnalysisOptions(GridSettings settings, List<PositionRow> positionRows, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null)
+	/// chain (or, at a past evaluation instant, the real as-of marks and spot — quote store, else ThetaData), dividends, the risk-free rate, and the
+	/// --spot/--iv/--levels/calibration overrides. Shared by `report` and `analyze trade` so both grids price identically. Null with why when a past
+	/// instant's market can't be rebuilt for every leg.</summary>
+	/// <param name="preloadedAsOf">The preloaded quotes are already the past instant's real books (BID/MID/ASK resolution loaded them).</param>
+	/// <param name="nearestBoundary">The pinned instant is a fill's (read at the minute boundary nearest it), not an exact --date minute.</param>
+	internal static async Task<(AnalysisOptions? Options, string? Error)> BuildAnalysisOptions(GridSettings settings, List<PositionRow> positionRows, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null, bool preloadedAsOf = false, bool nearestBoundary = false)
 	{
 		// Fetch live option chain + risk-free rate so break-even panels show the time-decay grid with
 		// current IV / spot / theta. Failures (no api-config.json, expired headers, network blip) degrade
@@ -426,19 +444,21 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			}
 		}
 
-		// Past --date: replace live quotes/spots with the real NBBO (quote store, else ThetaData) and daily close as of
-		// that date (per-leg; misses keep the live quote and are warned). Live quotes struck today are only honest
-		// marks for today/future evals — un-decaying them to a past date runs on vendor IVs that an after-hours
-		// one-sided book renders garbage (the 145%-IV dead-residue reprice). MarksAsOfEvalDate is set only when
-		// every leg was marked from as-of NBBO, which is what lets the mid-based current-P&L paths run for a past date.
-		var pastDateEval = EvaluationDate.IsOverridden && EvaluationDate.Today < DateTime.Today;
+		// A past evaluation instant: replace live quotes/spots with the real NBBO and spot at that instant. Live quotes struck today are only
+		// honest marks for now/future evals — un-decaying them to a past instant runs on vendor IVs that an after-hours one-sided book renders
+		// garbage (the 145%-IV dead-residue reprice). Every leg is marked from as-of NBBO or the run fails, which is what lets the mid-based
+		// current-P&L paths (MarksAsOfEvalDate) run for a past instant.
 		var marksAsOfEvalDate = false;
-		if (pastDateEval && positionRows.Count > 0)
+		var positionSymbols = OptionSymbolsFromRows(positionRows);
+		if (EvaluationDate.IsPast && preloadedAsOf && positionSymbols.All(s => preloadedQuotes!.ContainsKey(s)))
+			marksAsOfEvalDate = true;
+		else if (EvaluationDate.IsPast && positionRows.Count > 0)
 		{
-			var overlay = await HistoricalMarkOverlay.ApplyAsync(EvaluationDate.Today, OptionSymbolsFromRows(positionRows), optionQuotesBySymbol, underlyingPrices, cancellation);
+			var (overlay, overlayError) = await HistoricalMarkOverlay.ApplyAsync(EvaluationDate.Instant!.Value, nearestBoundary, positionSymbols, optionQuotesBySymbol, underlyingPrices, cancellation);
+			if (overlay == null) return (null, $"can't rebuild the market at {EvaluationDate.Instant:yyyy-MM-dd HH:mm} ET — {overlayError}");
 			optionQuotesBySymbol = overlay.Quotes;
 			underlyingPrices = overlay.UnderlyingPrices;
-			marksAsOfEvalDate = overlay.AllLegsCovered;
+			marksAsOfEvalDate = true;
 		}
 
 		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null;
@@ -466,17 +486,16 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		}
 
 		IReadOnlyDictionary<string, decimal>? calibratedIv = null;
-		// A past --date always calibrates: overlaid legs get the IV implied by their stored as-of mid (the
-		// surface the grid decays on), and fallback legs get today's mid-implied IV — either way the reprice
-		// never rests on a vendor-reported IV, which an off-hours book can render meaningless.
-		if ((settings.Calibrated || pastDateEval) && optionQuotesBySymbol != null && underlyingPrices != null)
+		// A past instant always calibrates: every leg gets the IV implied by its stored as-of mid (the surface the grid decays on), never a
+		// vendor-reported IV, which an off-hours book can render meaningless.
+		if ((settings.Calibrated || marksAsOfEvalDate) && optionQuotesBySymbol != null && underlyingPrices != null)
 		{
 			calibratedIv = BuildCalibratedIv(optionQuotesBySymbol, underlyingPrices, ivOverrides, dividends);
 			if (calibratedIv != null)
 				WebullAnalytics.Utils.Log.Debug($"Calibration: solved mid-implied IV for {calibratedIv.Count} contract(s); future grid values anchored to the live mid surface.");
 		}
 
-		return new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends, calibratedIv, marksAsOfEvalDate);
+		return (new AnalysisOptions(optionQuotesBySymbol, underlyingPrices, underlyingPriceOverrides, settings.Theoretical, extraLevels, ivOverrides, dividends, calibratedIv, marksAsOfEvalDate), null);
 	}
 
 	/// <summary>

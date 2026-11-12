@@ -21,7 +21,7 @@ namespace WebullAnalytics.Analyze;
 internal abstract class AnalyzeBaseSettings : CommandSettings
 {
 	[CommandOption("--date")]
-	[Description("Override 'today' for evaluation. Simulates running on a different date (e.g., after short leg expiration). Format: YYYY-MM-DD")]
+	[Description(AsOf.Help)]
 	public string? Date { get; set; }
 
 	[CommandOption("--spot")]
@@ -46,8 +46,14 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	internal Task<int> RunWithOutputAsync(string label, Func<Task<int>> action)
 		=> OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase) ? WebullAnalytics.IO.TextFileExporter.CaptureToFileAsync(OutputPath ?? AnalyzeCommon.DefaultTextOutputName(label), "Text output exported to", action) : action();
 
-	internal DateTime? EvaluationDateOverride =>
-		Date != null ? DateTime.ParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture) : null;
+	/// <summary>The parsed --date (<see cref="AsOf.Now"/> when omitted).</summary>
+	internal AsOf DateSpec => AsOf.Parse(Date);
+
+	/// <summary>The instant --date pins, or null for now (and for fill, resolved once the fill is picked).</summary>
+	internal DateTime? PinnedInstant => DateSpec.Instant;
+
+	/// <summary>True for subcommands analyzing a --fill, the only place --date fill means something.</summary>
+	protected virtual bool FillAllowed => false;
 
 	/// <summary>Resolved live quote vendor: <c>--vendor</c> flag, else config.json's top-level <c>vendor</c>, else Webull.</summary>
 	internal WebullAnalytics.AI.Sources.QuoteVendor ResolvedVendor => WebullAnalytics.AI.Sources.LiveQuoteSource.ResolveVendor(Vendor);
@@ -68,8 +74,8 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 
 	public override ValidationResult Validate()
 	{
-		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
-			return ValidationResult.Error($"--date: expected format YYYY-MM-DD, got '{Date}'");
+		if (AsOf.Validate(Date, FillAllowed, Spot) is { } dateError)
+			return ValidationResult.Error(dateError);
 
 		var format = OutputFormat.ToLowerInvariant();
 		if (format is not ("console" or "text"))

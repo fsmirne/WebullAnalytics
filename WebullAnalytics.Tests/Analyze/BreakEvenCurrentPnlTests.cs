@@ -14,7 +14,7 @@ namespace WebullAnalytics.Tests.Analyze;
 [Collection("EvaluationDate")]
 public class BreakEvenCurrentPnlTests : IDisposable
 {
-	public BreakEvenCurrentPnlTests() => EvaluationDate.Set(DateTime.Today);
+	public BreakEvenCurrentPnlTests() => EvaluationDate.Reset();
 	public void Dispose() => EvaluationDate.Reset();
 
 	private static PositionRow Leg(string occ, Side side, int qty, decimal price, DateTime expiry, string callPut)
@@ -57,7 +57,7 @@ public class BreakEvenCurrentPnlTests : IDisposable
 			Theoretical = true,
 		};
 
-		if (forwardDays > 0) EvaluationDate.Set(DateTime.Today.AddDays(forwardDays));
+		if (forwardDays > 0) EvaluationDate.Set(DateTime.Today.AddDays(forwardDays) + AsOf.DefaultTime);
 
 		var res = BreakEvenAnalyzer.Analyze(group, opts).Single(r => r.CurrentPnl.HasValue);
 
@@ -99,7 +99,7 @@ public class BreakEvenCurrentPnlTests : IDisposable
 			Theoretical = false,
 		};
 
-		EvaluationDate.Set(FutureTradingDay(15));  // future eval; short still ~30 DTE so intraday theta is negligible
+		EvaluationDate.Set(FutureTradingDay(15) + AsOf.DefaultTime);  // future eval; short still ~30 DTE so intraday theta is negligible
 
 		var res = BreakEvenAnalyzer.Analyze(group, opts).Single(r => r.Grid != null && r.CurrentPnl.HasValue);
 		var grid = res.Grid!;
@@ -148,7 +148,7 @@ public class BreakEvenCurrentPnlTests : IDisposable
 			Theoretical = false,
 		};
 
-		EvaluationDate.Set(FutureTradingDay(15));
+		EvaluationDate.Set(FutureTradingDay(15) + AsOf.DefaultTime);
 
 		var res = CombinedBreakEvenAnalyzer.Analyze(rows, opts).Single(r => r.Grid != null && r.CurrentPnl.HasValue);
 		var grid = res.Grid!;

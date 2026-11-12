@@ -34,7 +34,7 @@ public class LivePositionSourceTests : IDisposable
 		// expiration trades for any leg whose expiry is before EvaluationDate.Today (PositionTracker.cs
 		// ~line 140); without pinning, this test starts failing on 2026-05-08 when the short leg's
 		// expiry slips into the past and gets auto-closed, collapsing the leg-set lookup.
-		EvaluationDate.Set(new DateTime(2026, 4, 30));
+		EvaluationDate.Set(new DateTime(2026, 4, 30) + AsOf.DefaultTime);
 
 		var ticker = "GME";
 		var shortExpiry = new DateTime(2026, 5, 8);

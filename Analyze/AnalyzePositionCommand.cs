@@ -12,6 +12,7 @@ using WebullAnalytics.Api;
 using WebullAnalytics.IO;
 using WebullAnalytics.Positions;
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Report;
 using WebullAnalytics.Sentiment;
 using WebullAnalytics.Trading;
 using WebullAnalytics.Utils;
@@ -31,8 +32,10 @@ internal sealed class AnalyzePositionSettings : AnalyzeIvOverrideSettings
 	public string? Proposal { get; set; }
 
 	[CommandOption("--fill [N]")]
-	[Description("Analyze one of your recent unexpired OPENING fills (Webull order history, last 30 days, any ticker) against the live market now, its per-leg fill prices as the cost basis, whether or not it is still held. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
+	[Description("Analyze one of your recent OPENING fills (Webull order history, last 30 days, any ticker), its per-leg fill prices as the cost basis, whether or not it is still held, at --date: the live market now by default, --date fill for the market at the fill itself. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
 	public FlagValue<int>? Fill { get; set; }
+
+	protected override bool FillAllowed => Fill?.IsSet == true;
 
 	[CommandOption("--iv-default")]
 	[Description("Fallback implied volatility for hypothetical legs when no live quote exists. Percent, default 40.")]
@@ -129,22 +132,20 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
 
-		if (settings.EvaluationDateOverride.HasValue)
-		{
-			EvaluationDate.Set(settings.EvaluationDateOverride.Value);
-			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
-		}
+		if (settings.PinnedInstant is { } instant) ReportCommand.PinEvaluation(instant);
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		if (settings.Proposal != null && !TryLoadProposalSpec(settings))
 			return 1;
 
+		var atFill = false;
 		if (settings.Fill?.IsSet == true)
 		{
-			var (spec, error) = await OpeningFillPicker.ResolveSpecAsync(settings.Fill.Value, cancellation);
+			var (spec, _, error) = await OpeningFillPicker.ResolveAtAsync(settings.Fill.Value, settings.DateSpec, cancellation);
 			if (spec == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
 			settings.Spec = spec;
+			atFill = settings.DateSpec.Kind == AsOfKind.Fill;
 		}
 
 		List<PositionSnapshot> positionLegs;
@@ -187,15 +188,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var positionSymbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 		var structure = ClassifyStructure(positionLegs);
 
-		// A past --date is that session as it closed: the legs' and their expiries' books, the day's OI and spot all come from the as-of
-		// market (the --fill loader), never today's live chain priced on the past date's clock.
+		// A past evaluation instant (--date, or --date fill) is the market at that minute: the legs' and their expiries' books, the day's OI
+		// and spot all come from the as-of market (the --fill loader), never today's live chain priced on the past instant's clock.
 		FillTimeMarket.Snapshot? asOfMarket = null;
-		if (IsPastDate(settings))
+		if (EvaluationDate.IsPast)
 		{
-			var (market, error) = await LoadAsOfMarketAsync(ticker, positionLegs, structure, settings, cancellation);
+			var (market, error) = await LoadAsOfMarketAsync(ticker, positionLegs, structure, settings, atFill, cancellation);
 			if (market == null)
 			{
-				Console.Error.WriteLine($"Error: --date {settings.Date}: can't rebuild that session's market — {error}.");
+				Console.Error.WriteLine($"Error: can't rebuild the market at {EvaluationDate.Instant:yyyy-MM-dd HH:mm} ET — {error}.");
 				return 1;
 			}
 			asOfMarket = market;
@@ -777,7 +778,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var shortExpiry = shortPut.Parsed.ExpiryDate;
 		var longExpiry = longPut.Parsed.ExpiryDate;
 		var shortDte = Math.Max(1, (shortExpiry.Date - asOf.Date).Days);
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
+		var quotesForPricing = settings.DateSpec.Kind != AsOfKind.Now || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		var ivShortPut = ResolveIV(shortPut.Symbol, settings, quotes);
 		var ivLongPut = ResolveIV(longPut.Symbol, settings, quotes);
@@ -873,7 +874,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var longCall = legs.First(l => l.Action == LegAction.Buy && l.Parsed.CallPut == "C");
 		var expiry = shortPut.Parsed.ExpiryDate;
 		var expiryDte = Math.Max(1, (expiry.Date - asOf.Date).Days);
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
+		var quotesForPricing = settings.DateSpec.Kind != AsOfKind.Now || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		// Helper: intrinsic value of the whole 4-leg position at a given expiration spot. Per-share,
 		// signed so a positive number is what we'd receive if we closed at that intrinsic.
@@ -966,7 +967,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var ordered = legs.OrderBy(l => l.Parsed.Strike).ToList(); // K1 < K2 < K3 < K4
 		var expiry = ordered[0].Parsed.ExpiryDate;
 		var expiryDte = Math.Max(1, (expiry.Date - asOf.Date).Days);
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
+		var quotesForPricing = settings.DateSpec.Kind != AsOfKind.Now || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		// Signed intrinsic of the whole position held to expiry at spot s (per share): longs add their
 		// intrinsic, shorts subtract it. Right-agnostic, so it covers both put and call condors.
@@ -1004,7 +1005,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var list = new List<Scenario>();
 		var iv = ResolveIV(longLeg.Symbol, settings, quotes);
 		var callPut = longLeg.Parsed.CallPut;
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
+		var quotesForPricing = settings.DateSpec.Kind != AsOfKind.Now || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		// 1. Hold (do nothing) — value at expiry = intrinsic.
 		var valueAtExpiry = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
@@ -1050,7 +1051,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var callPut = shortLeg.Parsed.CallPut;
 		var ivShort = ResolveIV(shortLeg.Symbol, settings, quotes);
 		var ivLong = ResolveIV(longLeg.Symbol, settings, quotes);
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
+		var quotesForPricing = settings.DateSpec.Kind != AsOfKind.Now || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		var expiry = shortLeg.Parsed.ExpiryDate;
 		var expiryDte = Math.Max(1, (expiry.Date - asOf.Date).Days);
@@ -1230,7 +1231,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// When a date override is active, live bid/ask reflects today's market prices, not the
 		// evaluation date's. Null out quotes for pricing so LiveOrBsMid/LiveBidAsk always use
 		// Black-Scholes with the correct DTE from asOf. IV is still sourced from live quotes above.
-		var quotesForPricing = settings.EvaluationDateOverride.HasValue || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
+		var quotesForPricing = settings.DateSpec.Kind != AsOfKind.Now || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
 		var shortMidNow = LiveOrBsMid(quotesForPricing, shortLeg.Symbol, spot, shortLeg.Parsed.Strike, Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivShort, callPut, dividends);
 		var longMidNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days), ivLong, callPut, dividends);
@@ -1880,27 +1881,24 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	}
 
 	/// <summary>True when --date pins a session before today (ET): that run reads the as-of market, not the live chain.</summary>
-	private static bool IsPastDate(AnalyzePositionSettings settings) => settings.EvaluationDateOverride is { } date && date.Date < MarketTime.TodayEt();
-
-	/// <summary>The --date session's market at its close (13:00 on a half-day) through the --fill loader: the legs' books, each leg expiry's
-	/// chain and the scenario roll targets' expiries' chains, the day's open interest, and spot from the minute bars. Pins the quote anchor
-	/// (<see cref="OptionMath.HistoricalQuotesStruckAt"/>) and that session's risk-free rate, so every IV solve and mark prices on the books' clock.</summary>
-	private static async Task<(FillTimeMarket.Snapshot? Market, string? Error)> LoadAsOfMarketAsync(string ticker, IReadOnlyList<PositionSnapshot> positionLegs, StructureKind structure, AnalyzePositionSettings settings, CancellationToken cancellation)
+	/// <summary>The market at the pinned past instant through the --fill loader: the legs' books, each leg expiry's chain and the scenario
+	/// roll targets' expiries' chains, the day's open interest, and spot from the minute bars — at exactly that minute for a --date, at the
+	/// boundary nearest it for a fill (<paramref name="nearest"/>). Pins the quote anchor (<see cref="OptionMath.HistoricalQuotesStruckAt"/>)
+	/// and that session's risk-free rate, so every IV solve and mark prices on the books' clock.</summary>
+	private static async Task<(FillTimeMarket.Snapshot? Market, string? Error)> LoadAsOfMarketAsync(string ticker, IReadOnlyList<PositionSnapshot> positionLegs, StructureKind structure, AnalyzePositionSettings settings, bool nearest, CancellationToken cancellation)
 	{
-		var date = settings.EvaluationDateOverride!.Value.Date;
-		if (!MarketCalendar.IsOpen(date)) return (null, $"{date:yyyy-MM-dd} is not a trading session");
+		var at = EvaluationDate.Instant!.Value;
+		if (!MarketCalendar.IsOpen(at.Date)) return (null, $"{at:yyyy-MM-dd} is not a trading session");
 		var apiConfig = OpenCandidateEvaluator.TryLoadApiConfig();
 		if (apiConfig == null) return (null, "the session's spot comes from the Webull minute-bar cache, and api-config.json is missing (run 'wa sniff')");
 
-		var close = date + MarketCalendar.CloseTimeEt(date);
 		var symbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-		var (market, error) = await FillTimeMarket.LoadAsync(ticker, symbols, close, new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)), cancellation, extraSymbols: spot => EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot));
+		var (market, error) = await FillTimeMarket.LoadAsync(ticker, symbols, at, nearest, new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)), cancellation, extraSymbols: spot => EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot));
 		if (market == null) return (null, error);
 
 		OptionMath.HistoricalQuotesStruckAt = market.Instant;
-		if (AI.Backtest.HistoricalRateCache.RateOn(await new AI.Backtest.HistoricalRateCache().GetAsync(cancellation), date) is double dayRate)
-			OptionMath.RiskFreeRate = dayRate;
-		AnsiConsole.MarkupLine($"[dim]As of {date:yyyy-MM-dd} close: market at {market.Instant:HH:mm} ET from {Markup.Escape(market.BookSource)}, spot ${market.Spot:F2}.[/]");
+		await FillTimeMarket.ApplySessionRateAsync(at.Date, cancellation);
+		AnsiConsole.MarkupLine($"[dim]Market as of {market.Instant:yyyy-MM-dd HH:mm} ET from {Markup.Escape(market.BookSource)}, spot ${market.Spot:F2}.[/]");
 		foreach (var miss in market.ChainMisses)
 			AnsiConsole.MarkupLine($"[yellow]Scenario expiry without an as-of chain: {Markup.Escape(miss)} — its scenarios price on --iv-default.[/]");
 		return (market, null);

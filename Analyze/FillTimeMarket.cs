@@ -7,16 +7,17 @@ using WebullAnalytics.Pricing;
 namespace WebullAnalytics.Analyze;
 
 /// <summary>
-/// The market at a past fill, from the same stores the backtest prices from: each leg's real NBBO
+/// The market at a past instant — a fill, or a --date (<see cref="AsOf"/>) — from the same stores the backtest prices from: each leg's real NBBO
 /// (quotes.db, ThetaData minute snapshots), that day's causal open interest (the daily OI snapshot), and the
 /// underlying's spot plus session high/low from 1-minute bars. The store's resolution is one book per minute:
 /// the row labeled M (app standard — 09:30 is the first minute) is the book at the END of minute M, i.e. at
-/// M+1:00. So the market is read at the minute boundary NEAREST the fill (either side — this describes a fill
-/// that already happened, the fill price itself carries that moment; it is not a decision that must not see the
-/// future), falling back to the other boundary when the nearer one has no book (the 09:30:00 boundary is
-/// pre-open). Every input is taken at that one instant. Nothing is approximated beyond that minute resolution.
+/// M+1:00. A fill is read at the minute boundary NEAREST it (either side — this describes a fill that already
+/// happened, the fill price itself carries that moment; it is not a decision that must not see the future),
+/// falling back to the other boundary when the nearer one has no book (the 09:30:00 boundary is pre-open); a
+/// --date instant at exactly its minute (<see cref="Boundaries"/>). Every input is taken at that one instant.
+/// Nothing is approximated beyond that minute resolution.
 ///
-/// When the store has no book for every leg at either boundary — today's fills before the evening backfill, roots or strikes
+/// When the store has no book for every leg at the boundary — today's fills before the evening backfill, roots or strikes
 /// the backfill doesn't cover (manual trades on any ticker) — and a ThetaData login is configured, the books come from ThetaData
 /// directly: option_at_time_quote at the boundary instant is the same vendor book the backfill stores for that boundary (its
 /// END-of-minute stamp T is stored under label T-1), encoded by the store's rule. A leg no source covers is an error naming why,
@@ -43,35 +44,29 @@ internal static class FillTimeMarket
 	/// <summary>Strike window of each leg expiry's chain, as a fraction of spot — the GEX/max-pain window the live chain paths use.</summary>
 	private const decimal ChainBand = 0.20m;
 
-	/// <param name="extraSymbols">Given the instant's spot, more contracts whose expiries' chains to load as context (non-fatal).</param>
-	public static async Task<(Snapshot? Market, string? Error)> LoadAsync(string ticker, IReadOnlyCollection<string> symbols, DateTime fillEt, IntradayBarCache intradayCache, CancellationToken cancellation, Func<decimal, IEnumerable<string>>? extraSymbols = null)
+	/// <summary>The minute boundaries a market at <paramref name="et"/> is read at, in preference order. A fill (<paramref name="nearest"/>)
+	/// already happened at a sub-minute instant its price carries, so it reads the boundary nearest it, falling back to the other when
+	/// the nearer has no book (the 09:30:00 boundary is pre-open). A --date instant is a whole minute and reads exactly that boundary:
+	/// never a neighbouring one, so the same --date always reads the same market.</summary>
+	internal static DateTime[] Boundaries(DateTime et, bool nearest)
 	{
-		var before = fillEt.Date + TimeSpan.FromMinutes(Math.Floor(fillEt.TimeOfDay.TotalMinutes));
+		var before = et.Date + TimeSpan.FromMinutes(Math.Floor(et.TimeOfDay.TotalMinutes));
+		if (!nearest) return [before];
 		var after = before.AddMinutes(1);
-		var boundaries = fillEt - before <= after - fillEt ? new[] { before, after } : new[] { after, before };
+		return et - before <= after - et ? [before, after] : [after, before];
+	}
 
+	/// <param name="nearest">A fill's instant (read at the boundary nearest it) rather than a --date instant (read exactly there); see <see cref="Boundaries"/>.</param>
+	/// <param name="extraSymbols">Given the instant's spot, more contracts whose expiries' chains to load as context (non-fatal).</param>
+	public static async Task<(Snapshot? Market, string? Error)> LoadAsync(string ticker, IReadOnlyCollection<string> symbols, DateTime et, bool nearest, IntradayBarCache intradayCache, CancellationToken cancellation, Func<decimal, IEnumerable<string>>? extraSymbols = null)
+	{
 		using var theta = ThetaFallback.TryCreate();
-		var store = OpenStore(fillEt);
-		var (books, instant, bookSource, storeMiss) = StoreBooks(store, symbols, fillEt, boundaries);
-		if (books == null)
-		{
-			if (theta == null)
-				return (null, $"no NBBO at {before:HH:mm} or {after:HH:mm} for every leg ({string.Join(", ", symbols)}) — quote store: {storeMiss}; no ThetaData login configured ({ThetaDataClient.DefaultCredsPath()}) to fetch it");
-			string? thetaMiss;
-			(books, instant, thetaMiss) = await ThetaBooksAsync(theta, symbols, boundaries, cancellation);
-			bookSource = "ThetaData at-time NBBO";
-			if (books == null)
-				return (null, $"no NBBO at {before:HH:mm} or {after:HH:mm} for every leg ({string.Join(", ", symbols)}) — quote store: {storeMiss}; ThetaData: {thetaMiss}");
-		}
-		await HealPastSessionTapeAsync(ticker, fillEt.Date, cancellation);
+		var store = OpenStore(et.Date);
+		var (books, instant, bookSource, booksError) = await LegBooksAsync(store, theta, symbols, Boundaries(et, nearest), cancellation);
+		if (books == null) return (null, booksError);
 
-		// Bars are start-of-bar labeled: those starting before the instant are complete at it, and the last one's
-		// close is the price at the instant.
-		var openUtc = MarketTime.EtToInstant(fillEt.Date + OptionMath.MarketOpen);
-		var instantUtc = MarketTime.EtToInstant(instant);
-		var bars = (await intradayCache.GetBarsAsync(ticker, openUtc, instantUtc, BarInterval.M1, includeExtended: false, cancellation)).Where(b => b.Timestamp < instantUtc).ToList();
-		if (bars.Count == 0) return (null, $"no {ticker} 1-minute bars for {fillEt:yyyy-MM-dd} up to {instant:HH:mm} ET");
-		var spot = bars[^1].Close;
+		var (spot, high, low, spotError) = await SpotAtAsync(ticker, instant, intradayCache, cancellation);
+		if (spotError != null) return (null, spotError);
 
 		// Each leg expiry's chain at the instant plus that expiry's open interest for the day (required), then any extra expiries (context).
 		var chainBooks = new Dictionary<string, QuoteStoreCache.QuoteAt>(StringComparer.OrdinalIgnoreCase);
@@ -88,8 +83,47 @@ internal static class FillTimeMarket
 			if (await AddChainAsync(store, theta, root, expiry, instant, spot, chainBooks, oi, cancellation) is { } miss) chainMisses.Add(miss);
 		foreach (var (sym, book) in books) chainBooks[sym] = book;
 
-		var quotes = chainBooks.ToDictionary(kv => kv.Key, kv => new OptionContractQuote(kv.Key, LastPrice: kv.Value.Mid, Bid: kv.Value.Bid, Ask: kv.Value.Ask, Change: null, PercentChange: null, Volume: null, OpenInterest: oi.TryGetValue(kv.Key, out var o) ? o : null, ImpliedVolatility: null, HistoricalVolatility: null, BidSize: kv.Value.BidSize, AskSize: kv.Value.AskSize), StringComparer.OrdinalIgnoreCase);
-		return (new Snapshot(instant, quotes, spot, bars.Max(b => b.High), bars.Min(b => b.Low), $"{bookSource} ({quotes.Count} contracts across {legExpiries.Count + extraExpiries.Count - chainMisses.Count} expiries)", chainMisses), null);
+		var quotes = chainBooks.ToDictionary(kv => kv.Key, kv => ToQuote(kv.Key, kv.Value, oi.TryGetValue(kv.Key, out var o) ? o : null), StringComparer.OrdinalIgnoreCase);
+		return (new Snapshot(instant, quotes, spot, high, low, $"{bookSource} ({quotes.Count} contracts across {legExpiries.Count + extraExpiries.Count - chainMisses.Count} expiries)", chainMisses), null);
+	}
+
+	/// <summary>A stored or ThetaData book as a quote: its bid/ask and mid, the day's open interest, and no IV (every consumer solves it from
+	/// the book at the instant it was struck; a vendor IV struck at another time has no business pricing it).</summary>
+	internal static OptionContractQuote ToQuote(string symbol, QuoteStoreCache.QuoteAt book, long? openInterest) =>
+		new(symbol, LastPrice: book.Mid, Bid: book.Bid, Ask: book.Ask, Change: null, PercentChange: null, Volume: null, OpenInterest: openInterest, ImpliedVolatility: null, HistoricalVolatility: null, BidSize: book.BidSize, AskSize: book.AskSize);
+
+	/// <summary>Every leg's book at the first of <paramref name="boundaries"/> that has one for all of them: the quote store first, else
+	/// ThetaData when a login is configured. Null with why when no source covers every leg — never a substitute price.</summary>
+	internal static async Task<(Dictionary<string, QuoteStoreCache.QuoteAt>? Books, DateTime Instant, string Source, string? Error)> LegBooksAsync(QuoteStoreCache? store, ThetaFallback? theta, IReadOnlyCollection<string> symbols, DateTime[] boundaries, CancellationToken cancellation)
+	{
+		var (books, instant, source, storeMiss) = StoreBooks(store, symbols, boundaries);
+		if (books != null) return (books, instant, source, null);
+		var at = string.Join(" or ", boundaries.Select(b => b.ToString("HH:mm")));
+		if (theta == null)
+			return (null, default, source, $"no NBBO at {at} ET for every leg ({string.Join(", ", symbols)}) — quote store: {storeMiss}; no ThetaData login configured ({ThetaDataClient.DefaultCredsPath()}) to fetch it");
+		(books, instant, var thetaMiss) = await ThetaBooksAsync(theta, symbols, boundaries, cancellation);
+		return books != null
+			? (books, instant, "ThetaData at-time NBBO", null)
+			: (null, default, source, $"no NBBO at {at} ET for every leg ({string.Join(", ", symbols)}) — quote store: {storeMiss}; ThetaData: {thetaMiss}");
+	}
+
+	/// <summary>The underlying's price at <paramref name="instant"/> and its session high/low so far, from 1-minute bars. Bars are start-of-bar
+	/// labeled: those starting before the instant are complete at it, and the last one's close is the price at the instant. A past session's
+	/// missing tape is healed first.</summary>
+	internal static async Task<(decimal Spot, decimal High, decimal Low, string? Error)> SpotAtAsync(string ticker, DateTime instant, IntradayBarCache intradayCache, CancellationToken cancellation)
+	{
+		await HealPastSessionTapeAsync(ticker, instant.Date, cancellation);
+		var openUtc = MarketTime.EtToInstant(instant.Date + OptionMath.MarketOpen);
+		var instantUtc = MarketTime.EtToInstant(instant);
+		var bars = (await intradayCache.GetBarsAsync(ticker, openUtc, instantUtc, BarInterval.M1, includeExtended: false, cancellation)).Where(b => b.Timestamp < instantUtc).ToList();
+		return bars.Count == 0 ? (0m, 0m, 0m, $"no {ticker} 1-minute bars for {instant:yyyy-MM-dd} up to {instant:HH:mm} ET") : (bars[^1].Close, bars.Max(b => b.High), bars.Min(b => b.Low), null);
+	}
+
+	/// <summary>Prices on the session's own risk-free rate (^IRX that day) when the rate history has it.</summary>
+	internal static async Task ApplySessionRateAsync(DateTime date, CancellationToken cancellation)
+	{
+		if (HistoricalRateCache.RateOn(await new HistoricalRateCache().GetAsync(cancellation), date) is double dayRate)
+			OptionMath.RiskFreeRate = dayRate;
 	}
 
 	private static IEnumerable<(string Root, DateTime Expiry)> Expiries(IEnumerable<string> symbols) =>
@@ -110,12 +144,12 @@ internal static class FillTimeMarket
 		return null;
 	}
 
-	/// <summary>The fill day's quote store (exact-minute books only: a boundary without one falls to the other boundary, never to an older
-	/// minute), or null when quotes.db doesn't exist.</summary>
-	private static QuoteStoreCache? OpenStore(DateTime fillEt)
+	/// <summary>The session's quote store (exact-minute books only: a boundary without one falls to the next boundary asked for, never to an
+	/// older minute), or null when quotes.db doesn't exist.</summary>
+	internal static QuoteStoreCache? OpenStore(DateTime session)
 	{
 		var dbPath = Program.ResolvePath("data/quotes.db");
-		return File.Exists(dbPath) ? new QuoteStoreCache(dbPath, maxStaleMinutes: 0, since: fillEt.Date, until: fillEt.Date) : null;
+		return File.Exists(dbPath) ? new QuoteStoreCache(dbPath, maxStaleMinutes: 0, since: session.Date, until: session.Date) : null;
 	}
 
 	/// <summary>One expiry's stored books at <paramref name="instant"/> within the chain band, or null with why when the store has none.</summary>
@@ -136,14 +170,14 @@ internal static class FillTimeMarket
 	}
 
 	/// <summary>Every leg's stored book at the first boundary that has one for all of them, or the reason none does.</summary>
-	private static (Dictionary<string, QuoteStoreCache.QuoteAt>? Books, DateTime Instant, string Source, string? Miss) StoreBooks(QuoteStoreCache? store, IReadOnlyCollection<string> symbols, DateTime fillEt, DateTime[] boundaries)
+	private static (Dictionary<string, QuoteStoreCache.QuoteAt>? Books, DateTime Instant, string Source, string? Miss) StoreBooks(QuoteStoreCache? store, IReadOnlyCollection<string> symbols, DateTime[] boundaries)
 	{
-		const string source = "the nearest stored minute book";
+		const string source = "the stored minute book";
 		if (store == null) return (null, default, source, $"not found ({Program.ResolvePath("data/quotes.db")})");
 		foreach (var boundary in boundaries)
 			if (BooksAt(symbols, symbol => store.NbboAt(symbol, boundary - QuoteStoreCache.BookLag)) is { } books)
 				return (books, boundary, source, null);
-		return (null, default, source, MissingReason(store, symbols, fillEt));
+		return (null, default, source, MissingReason(store, symbols, boundaries[0]));
 	}
 
 	/// <summary>Every leg's ThetaData book at the first boundary that has one for all of them, or why none does (no data, or the
@@ -157,7 +191,7 @@ internal static class FillTimeMarket
 			if (BooksAt(symbols, symbol => found.TryGetValue(symbol, out var book) ? book : null) is { } books)
 				return (books, boundary, null);
 		}
-		return (null, default, "no book at either boundary for every leg");
+		return (null, default, "no book at that minute for every leg");
 	}
 
 	/// <summary>Re-pulls a past session's spot tape when the on-disk file is missing or partial — before the bar cache reads it, since the cache
@@ -182,13 +216,13 @@ internal static class FillTimeMarket
 		return books;
 	}
 
-	/// <summary>Why neither boundary has a book: the session isn't stored yet, the store has a gap there, or the
+	/// <summary>Why no boundary has a book: the session isn't stored yet, the store has a gap there, or the
 	/// contracts aren't backfilled at all.</summary>
-	private static string MissingReason(QuoteStoreCache store, IReadOnlyCollection<string> symbols, DateTime fillEt)
+	private static string MissingReason(QuoteStoreCache store, IReadOnlyCollection<string> symbols, DateTime at)
 	{
-		if (symbols.All(sym => new[] { 12, 15 }.Any(h => store.NbboAt(sym, fillEt.Date.AddHours(h)) != null)))
-			return "the store has a gap in these contracts' quotes at the fill";
-		return fillEt.Date >= DateTime.Today
+		if (symbols.All(sym => new[] { 12, 15 }.Any(h => store.NbboAt(sym, at.Date.AddHours(h)) != null)))
+			return "the store has a gap in these contracts' quotes at that minute";
+		return at.Date >= DateTime.Today
 			? "today's quotes reach quotes.db only with the evening ThetaData backfill"
 			: "the backfill doesn't cover these contracts (root, expiry or strike band)";
 	}

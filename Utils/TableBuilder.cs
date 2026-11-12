@@ -554,7 +554,7 @@ public static class TableBuilder
 
 		// A past eval date can't be marked from quotes struck today — unless every leg's quote was replaced
 		// with the store's as-of NBBO (MarksAsOfEvalDate), making the mids exact past-date marks.
-		if (EvaluationDate.Today < DateTime.Today && !opts.MarksAsOfEvalDate)
+		if (EvaluationDate.IsPast && !opts.MarksAsOfEvalDate)
 			return null;
 
 		decimal total = 0;

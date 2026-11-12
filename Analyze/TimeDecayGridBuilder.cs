@@ -340,11 +340,14 @@ internal static class TimeDecayGridBuilder
 		var today = EvaluationDate.Today;
 
 		// Today's columns are always present and never subject to the even-spacing trim: the observation-instant
-		// anchor (live now / last close off-hours), plus — pre-open on a trading day — today's 09:30 open, so a
-		// market-open day always shows the projected open even when the expiry is far enough to trim future days.
+		// anchor (live now / last close off-hours), plus the instant the headline is evaluated TO when it lies ahead of
+		// the anchor (a future --date), else — pre-open on a trading day — today's 09:30 open, so a market-open day
+		// always shows the projected open even when the expiry is far enough to trim future days.
 		var anchor = OptionMath.ObservationInstant();
+		var evalInstant = OptionMath.EvaluationInstant(DateTime.Now);
 		var todayColumns = new List<DateTime> { anchor };
-		if (MarketCalendar.IsOpen(today) && anchor.Date < today.Date) todayColumns.Add(today.Date + OptionMath.MarketOpen);
+		if (evalInstant > anchor) todayColumns.Add(evalInstant);
+		else if (MarketCalendar.IsOpen(today) && anchor.Date < today.Date) todayColumns.Add(today.Date + OptionMath.MarketOpen);
 
 		// Same-day expiry: no interior days. Keep the today columns (so a pre-open run still shows today's open,
 		// not just yesterday's anchor and "At Exp") and cap with today's close.

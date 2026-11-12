@@ -29,7 +29,7 @@ internal sealed class AnalyzeSentimentCommand : AsyncCommand<AnalyzeSentimentSet
 	{
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
-		var asOf = settings.EvaluationDateOverride ?? DateTime.Now;
+		var asOf = settings.PinnedInstant ?? DateTime.Now;
 		var snapshot = await FearGreedClient.FetchAsync(asOf, cancellation);
 		if (snapshot == null)
 		{

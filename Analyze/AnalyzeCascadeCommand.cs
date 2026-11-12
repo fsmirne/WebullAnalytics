@@ -26,10 +26,6 @@ internal sealed class AnalyzeCascadeSettings : AnalyzeBaseSettings
 	[Description("Underlying ticker symbol (e.g., SPXW, SPY, QQQ).")]
 	public string Ticker { get; set; } = "";
 
-	[CommandOption("--time <HH:MM>")]
-	[Description("ET time-of-day to evaluate (09:30–16:00). On a past --date replay, defaults to 10:00 ET so the screener evaluates the morning decision window rather than the 16:00 post-expiry close.")]
-	public string? Time { get; set; }
-
 	[CommandOption("--dte <N>")]
 	[DefaultValue(30)]
 	[Description("Multi-expiry horizon in days-to-expiry (default 30) for the 30-day GEX flip, net GEX fraction, and net Vanna (VEX) exposure.")]
@@ -63,13 +59,7 @@ internal sealed class AnalyzeCascadeSettings : AnalyzeBaseSettings
 		if (MaxStrikes < 1 || MaxStrikes > 200) return ValidationResult.Error($"--max-strikes: must be in [1, 200], got {MaxStrikes}");
 		if (Dte < 0 || Dte > 60) return ValidationResult.Error($"--dte: must be in [0, 60], got {Dte}");
 		if (TriggerScore < 1 || TriggerScore > 100) return ValidationResult.Error($"--trigger: must be in [1, 100], got {TriggerScore}");
-		if (Time != null)
-		{
-			if (AnalyzeGexSettings.ParseEtTime(Time) is not { } t)
-				return ValidationResult.Error($"--time: expected HH:MM (ET), got '{Time}'");
-			if (t < AnalyzeGexSettings.RthOpen || t > AnalyzeGexSettings.RthClose)
-				return ValidationResult.Error($"--time: must be within RTH 09:30-16:00 ET, got '{Time}'");
-		}
+		if (PinnedInstant > MarketTime.NowEt()) return ValidationResult.Error("--date: the cascade reads the market at an instant that has happened; a future one has none");
 		return ValidationResult.Success();
 	}
 }
@@ -90,18 +80,8 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 
 		var ticker = settings.Ticker.ToUpperInvariant();
 		var nowEt = MarketTime.NowEt();
-		var requestedTime = AnalyzeGexSettings.ParseEtTime(settings.Time);
-		DateTime asOfEt;
-		if (settings.EvaluationDateOverride.HasValue)
-		{
-			var d = settings.EvaluationDateOverride.Value.Date;
-			var tod = requestedTime ?? (d < nowEt.Date ? new TimeSpan(10, 0, 0) : nowEt.TimeOfDay);
-			asOfEt = d + tod;
-		}
-		else
-		{
-			asOfEt = requestedTime.HasValue ? nowEt.Date + requestedTime.Value : nowEt;
-		}
+		var pinned = settings.PinnedInstant;
+		var asOfEt = pinned ?? nowEt;
 
 		Dictionary<string, OptionContractQuote> quotes;
 		decimal? spot;
@@ -109,7 +89,7 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 		ApiConfig? apiConfig = null;
 
 		var oiPath = Program.ResolvePath($"data/oi/{ticker}/{asOfEt:yyyy-MM-dd}.jsonl");
-		if (settings.EvaluationDateOverride.HasValue && asOfEt.Date <= DateTime.Today && File.Exists(oiPath))
+		if (pinned.HasValue && File.Exists(oiPath))
 		{
 			var (snapSpot, snapQuotes) = AnalyzeGexCommand.LoadOiSnapshot(oiPath);
 			if (snapQuotes.Count == 0)
@@ -122,7 +102,7 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 			AnsiConsole.MarkupLine($"[dim]Historical chain from {Markup.Escape(oiPath)} ({quotes.Count} contracts; offline — no live fetch).[/]");
 			isOfflineHistorical = true;
 		}
-		else if (settings.EvaluationDateOverride.HasValue && asOfEt.Date < DateTime.Today)
+		else if (pinned.HasValue)
 		{
 			var dir = Program.ResolvePath($"data/oi/{ticker}");
 			var available = Directory.Exists(dir)
@@ -208,7 +188,7 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 		// Load RTH 1-minute bars up to asOfEt so historical/intraday evaluations use the true spot at asOfEt
 		var rthBars = await CascadeScreener.LoadSessionRthBarsAsync(ticker, asOfEt, intradayCache, includeCurrentBar: true, cancellation);
 		var explicitSpotOverride = AnalyzeGexCommand.ResolveSpotOverride(settings.Spot, ticker);
-		if (!explicitSpotOverride.HasValue && (isOfflineHistorical || requestedTime.HasValue) && rthBars.Count > 0)
+		if (!explicitSpotOverride.HasValue && (isOfflineHistorical || pinned.HasValue) && rthBars.Count > 0)
 			spot = rthBars[^1].Close;
 
 		if (!spot.HasValue || spot.Value <= 0m)

@@ -142,9 +142,10 @@ wa report --range 4
 # Override the current underlying price (for "what-if" evaluation)
 wa report --spot GME:24.88,SPY:580.50
 
-# Evaluate open positions AS OF a future/past date (forward P&L) — pairs with --spot to answer
-# "what will these be worth at the 07/28 open if SPY is 585?". Same evaluation path as `analyze trade --date`.
+# Evaluate open positions AS OF a future/past instant — a future one pairs with --spot to answer
+# "what will these be worth at 10:00 on 07/28 if SPY is 585?". Same evaluation path as `analyze trade --date`.
 wa report --date 2026-07-28 --spot SPY:585
+wa report --date 2026-07-28T15:30 --spot SPY:585
 
 # Use Black-Scholes theoretical prices instead of market mid for today's grid column
 wa report --theoretical
@@ -183,7 +184,7 @@ Options:
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --grid <layout>           Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg values '1.23|0.45|$0.78')
   --spot <prices>           Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
-  --date <date>             Evaluate open positions AS OF this date (YYYY-MM-DD) instead of now — forward/backward P&L with options decayed to that date (a same-day pre-open date evaluates at that day's 09:30 open). Distinct from --since/--until, which only filter which trades are included. Shares the evaluation path with `analyze trade --date`.
+  --date <when>             Evaluate open positions AS OF this instant (ET) instead of now: 'now' (default), YYYY-MM-DD (that session at 10:00 ET), or YYYY-MM-DDTHH:MM (that minute, inside the regular session). A past instant marks every leg from the real NBBO and spot at exactly that minute (quote store, else ThetaData) and fails naming the leg when neither has it; a future one projects the live market forward. Distinct from --since/--until, which only filter which trades are included. Shares the evaluation path with `analyze trade --date`.
   --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
   --calibrated              Back-solve each leg's IV from its live bid/ask mid so the today column reproduces market mid and future columns decay on the mid-consistent surface (instead of Webull's reported IV)
   --levels <prices>         Additional reference price levels (support/resistance, targets) to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
@@ -205,14 +206,14 @@ The `analyze` command has eight subcommands:
 - `analyze regime` — show the blended directional bias the live opener uses (daily technical composite + VIX term structure + intraday tape), its decomposition, and a per-structure-family ranking with flip-margin sweep.
 - `analyze top` — list Webull's market-wide top option contracts by volume, turnover, open interest, OI change, or IV.
 
-All subcommands accept `--date` for simulating a future evaluation date. Some subcommands add extra flags documented below.
+All subcommands accept `--date <when>` for the evaluation instant (ET): `now` (default), `YYYY-MM-DD` (that session at 10:00 ET — a fixed minute past the opening auction's noise, inside every session including half-days), or `YYYY-MM-DDTHH:MM` (that minute). A past instant reads the market as it stood then, at exactly that minute; a future one projects the live market forward to it. With `--fill`, `--date fill` is the fill's own instant: `analyze risk --fill` defaults to it, `analyze position --fill` and `analyze trade --fill` default to `now`. `--spot` applies only to `now` or a future instant. Some subcommands add extra flags documented below.
 
 #### `analyze trade`
 
 Judges a trade on its own: renders only the time-decay grid (break-even panel) of the legs you pass — no trade history, positions, rolls, or summary. To see how a trade changes your book (its legs merged into the positions you hold), use `wa report --trade "<spec>"`.
 
 ```
-wa analyze trade "<spec>" [--date <YYYY-MM-DD>] [grid options]
+wa analyze trade "<spec>" [--date <when>] [grid options]
 wa analyze trade --proposal <FILE[:LINE]> | --fill [N]
 ```
 
@@ -253,7 +254,7 @@ wa analyze trade --fill 1
 Computes the theoretical roll credit/debit at various underlying prices using Black-Scholes, helping you find the optimal moment to roll a leg.
 
 ```
-wa analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--cash <amount>] [--iv <overrides>] [--date <YYYY-MM-DD>] [report options]
+wa analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--cash <amount>] [--iv <overrides>] [--date <when>] [report options]
 ```
 
 The `<spec>` is `OLD_SYMBOL>NEW_SYMBOL:QTY`. Live Webull quotes are fetched automatically (requires sniffed headers via the `sniff` command).
@@ -318,7 +319,7 @@ Reference levels from `--levels` are included as additional rows in the grid.
 Evaluates an option structure with current market quotes and prints the same structured risk diagnostics used by the AI pipeline.
 
 ```
-wa analyze risk "<spec>" [--iv-default <pct>] [--spot <TICKER:PRICE>] [--date <YYYY-MM-DD>] [report options]
+wa analyze risk "<spec>" [--iv-default <pct>] [--spot <TICKER:PRICE>] [--date <when>] [report options]
 ```
 
 The `<spec>` format is:
@@ -352,7 +353,7 @@ The command appends a machine-readable record to `data/analyze-risk.jsonl` after
 Loads an existing open option strategy from `data/orders.jsonl` or accepts a manual position spec, then ranks hold/roll/reset scenarios with projected P&L and buying-power impact.
 
 ```
-wa analyze position ["<spec>"] [--iv-default <pct>] [--strike-step <step>] [--cash <amount>] [--account <alias>] [--date <YYYY-MM-DD>] [--log-level <level>] [report options]
+wa analyze position ["<spec>"] [--iv-default <pct>] [--strike-step <step>] [--cash <amount>] [--account <alias>] [--fill [N]] [--date <when>] [--log-level <level>] [report options]
 ```
 
 If `<spec>` is omitted, the command scans open strategy positions from the trade log and lets you pick one interactively.
@@ -385,7 +386,7 @@ The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa
 Renders a 2D gamma-exposure heatmap over the option chain — rows = strikes (descending), columns = expirations (ascending). Cell hue encodes net polarity (green = call-dominated, red = put-dominated); cell brightness encodes |net GEX| relative to the chain max. Bold + underlined cells mark the per-expiry gravity strike (max gross gamma — call gamma×OI + put gamma×OI). The bold yellow strike row is the at-the-money strike. Below the heatmap, the command prints chain totals (call GEX, put GEX, gross, net, net fraction) and the top call walls (resistance) and put walls (support) ranked across the visible window.
 
 ```
-wa analyze gex <ticker> [--expiry <YYYY-MM-DD>] [--dte <n>] [--strike-range <pct>] [--max-strikes <n>] [--top-walls <n>] [--source webull|schwab] [--dump] [--intraday [--interval <min>] [--exante]] [--spot <TICKER:PRICE>] [--date <YYYY-MM-DD>]
+wa analyze gex <ticker> [--expiry <YYYY-MM-DD>] [--dte <n>] [--strike-range <pct>] [--max-strikes <n>] [--top-walls <n>] [--source webull|schwab] [--dump] [--intraday [--interval <min>] [--exante]] [--spot <TICKER:PRICE>] [--date <when>]
 ```
 
 Per-strike call GEX = `gamma(strike, spot, dte, iv) × callOI × 100 × spot`. Put GEX is the same with putOI. Net = call GEX − put GEX (signed); gross = call GEX + put GEX (always non-negative).
@@ -403,11 +404,15 @@ wa analyze gex GME --expiry 2026-05-15
 # Cross-check vendors (Schwab needs `wa schwab login`) and capture the raw per-strike IV/OI inputs
 wa analyze gex SPY --source schwab --dump
 
-# Historical/offline: rebuild the heatmap for a past date from the data/oi snapshot (no network)
+# Historical/offline: the chart as it stood at a past instant (10:00 ET for a bare date), no network: the snapshot's
+# pre-open OI (the prior session's close), prior-day settled IVs for back expiries, the front expiry's minute NBBO,
+# volume traded up to the instant (the store's ohlcv tape) and the last complete minute bar's spot
 wa analyze gex SPY --date 2026-06-05
+wa analyze gex SPY --date 2026-06-05T14:30
 
 # 0DTE intraday heatmap — GEX recomputed at each 30-min bucket's spot; --exante uses prior-day IVs
-# so the picture shows what was hedgeable at the time instead of leaking the session's EOD outcome
+# so the picture shows what was hedgeable at the time instead of leaking the session's EOD outcome.
+# --intraday replays the whole --date session (--start/--end), not its instant
 wa analyze gex SPY --date 2026-06-05 --intraday --exante
 ```
 
@@ -435,11 +440,11 @@ The directional-trend companion to `analyze gex` / `analyze sentiment`. Shows th
 # Live regime read for the ticker's merged AI config
 wa analyze regime XSP
 
-# Historical: score the regime as of a past day/time from the captured minute NBBO (data/quotes.db)
-wa analyze regime XSP --date 2026-06-12 --time 09:35
+# Historical: score the regime as of a past instant from the captured minute NBBO (data/quotes.db)
+wa analyze regime XSP --date 2026-06-12T09:35
 ```
 
-It accepts the shared AI ticker/config options (`--strategy`, `--source`, `--log-level`, …) plus `--account` for the live position read, and `--date <YYYY-MM-DD>` / `--time <HH:mm>` for offline historical mode.
+It accepts the shared AI ticker/config options (`--strategy`, `--source`, `--log-level`, …) plus `--account` for the live position read, and `--date <when>` for offline historical mode (a bare date is 10:00 ET).
 
 #### `analyze top`
 
@@ -460,8 +465,8 @@ wa analyze top --by oi-up --count 100
 All `analyze` subcommands accept all `report` options, plus:
 
 ```
-  --date <date>           Override 'today' for evaluation (YYYY-MM-DD). Simulates running on a future date — options expiring
-                          on or before this date generate synthetic expirations, and all DTE/Black-Scholes calculations use it.
+  --date <when>           Evaluation instant (ET): now (default), fill (with --fill), YYYY-MM-DD (10:00 ET) or YYYY-MM-DDTHH:MM.
+                          Options expiring before it generate synthetic expirations, and all DTE/Black-Scholes calculations use it.
 
 analyze risk only:
   --iv-default <pct>      Fallback implied volatility used when live IV is unavailable.

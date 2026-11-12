@@ -30,21 +30,20 @@ internal sealed class AnalyzeRegimeSettings : AILiveTickerSubcommandSettings
 	public string? Account { get; set; }
 
 	[CommandOption("--date <DATE>")]
-	[System.ComponentModel.Description("Offline historical mode (YYYY-MM-DD): score the regime against the captured minute NBBO in data/quotes.db for that past RTH day instead of the live chain. Lets you inspect any prior day (or work off-hours). Pairs with --time.")]
+	[System.ComponentModel.Description("Evaluation instant (ET): 'now' (default, the live chain), YYYY-MM-DD (that session at 10:00 ET) or YYYY-MM-DDTHH:MM (that minute). A past instant scores the regime offline against the captured minute NBBO in data/quotes.db, with the intraday tape and spot read as of that minute.")]
 	public string? Date { get; set; }
 
-	[CommandOption("--time <HH:mm>")]
-	[System.ComponentModel.Description("ET time-of-day for --date (default 10:00). The intraday-tape and spot are read as of this minute, so you can see the regime at the open vs mid-session.")]
-	public string Time { get; set; } = "10:00";
+	/// <summary>The past instant --date pins, or null for the live chain.</summary>
+	internal DateTime? PinnedInstant => AsOf.Parse(Date).Instant;
 
 	public override Spectre.Console.ValidationResult Validate()
 	{
 		var baseResult = base.Validate();
 		if (!baseResult.Successful) return baseResult;
-		if (Date != null && !DateTime.TryParseExact(Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
-			return Spectre.Console.ValidationResult.Error($"--date: expected YYYY-MM-DD, got '{Date}'");
-		if (!ParsingHelpers.TryParseClockTime(Time, out _))
-			return Spectre.Console.ValidationResult.Error($"--time: expected HH:mm, got '{Time}'");
+		if (AsOf.Validate(Date, fillAllowed: false, spot: null) is { } dateError)
+			return Spectre.Console.ValidationResult.Error(dateError);
+		if (PinnedInstant > MarketTime.NowEt())
+			return Spectre.Console.ValidationResult.Error("--date: the regime is scored against the market at an instant that has happened; a future one has none");
 		return Spectre.Console.ValidationResult.Success();
 	}
 }
@@ -68,7 +67,7 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 		// structure as Informational) so the per-family table is complete, not just the global top-N.
 		config.LogLevel = "debug";
 
-		return settings.Date != null
+		return settings.PinnedInstant.HasValue
 			? await RunAsync(config, settings, await BuildOfflineContextAsync(config, settings, cancellation), cancellation)
 			: await RunAsync(config, settings, await BuildLiveContextAsync(config, settings, cancellation), cancellation);
 	});
@@ -115,9 +114,8 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 	/// account value is used since regime scoring/components are independent of cash sizing.</summary>
 	private static async Task<RegimeContext> BuildOfflineContextAsync(AIConfig config, AnalyzeRegimeSettings settings, CancellationToken cancellation)
 	{
-		var date = DateTime.ParseExact(settings.Date!, "yyyy-MM-dd", CultureInfo.InvariantCulture);
-		var tod = TimeSpan.Parse(settings.Time, CultureInfo.InvariantCulture);
-		var asOf = DateTime.SpecifyKind(date.Date + tod, DateTimeKind.Unspecified); // ET-naive, matching backtest ctx.Now
+		var asOf = DateTime.SpecifyKind(settings.PinnedInstant!.Value, DateTimeKind.Unspecified); // ET-naive, matching backtest ctx.Now
+		var date = asOf.Date;
 		var tickerSet = config.TickerSet();
 
 		var bars = new Backtest.HistoricalBarCache(offline: true);
@@ -165,7 +163,7 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 		if (!rc.Evaluator.LastRegimeComponents.TryGetValue(ticker, out var components))
 		{
 			if (rc.Offline)
-				AnsiConsole.MarkupLine($"[red]No regime components for {ticker} at {asOf:yyyy-MM-dd HH:mm} ET.[/] No captured NBBO for that minute in data/quotes.db? Try another --date/--time (RTH), or check the backfill covers that day.");
+				AnsiConsole.MarkupLine($"[red]No regime components for {ticker} at {asOf:yyyy-MM-dd HH:mm} ET.[/] No captured NBBO for that minute in data/quotes.db? Try another --date instant (RTH), or check the backfill covers that day.");
 			else
 				AnsiConsole.MarkupLine($"[red]No regime components computed for {ticker}.[/] No spot/chain at {asOf:yyyy-MM-dd HH:mm}? Market is closed — pass [yellow]--date YYYY-MM-DD[/] to inspect a past RTH day from data/quotes.db.");
 			return 1;

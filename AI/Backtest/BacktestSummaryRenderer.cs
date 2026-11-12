@@ -89,9 +89,10 @@ internal static class BacktestSummaryRenderer
 	{
 		if (result.Fills.Count == 0) return;
 
-		var priorOverride = EvaluationDate.IsOverridden ? EvaluationDate.Today : (DateTime?)null;
+		var priorOverride = EvaluationDate.Instant;
 		var baseTime = result.Fills[^1].Date;
-		EvaluationDate.Set(result.EquityCurve.Count > 0 ? result.EquityCurve[^1].Date : baseTime);
+		var windowEnd = (result.EquityCurve.Count > 0 ? result.EquityCurve[^1].Date : baseTime).Date;
+		EvaluationDate.Set(windowEnd + MarketCalendar.CloseTimeEt(windowEnd));
 		try
 		{
 			var allRows = new List<PositionRow>();

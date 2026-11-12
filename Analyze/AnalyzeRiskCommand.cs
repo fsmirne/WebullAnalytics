@@ -9,6 +9,7 @@ using WebullAnalytics.AI.Replay;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.AI.RiskDiagnostics;
 using WebullAnalytics.Pricing;
+using WebullAnalytics.Report;
 using WebullAnalytics.Sentiment;
 using WebullAnalytics.Trading;
 using WebullAnalytics.Utils;
@@ -26,8 +27,14 @@ internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 	public string? Proposal { get; set; }
 
 	[CommandOption("--fill [N]")]
-	[Description("Risk diagnostic of one of your recent OPENING fills (Webull order history, last 30 days, opener-placed or manual) as it stood AT THE FILL: your actual per-leg fill prices against the market at that instant (stored minute NBBO from quotes.db, minute-bar spot, as-of trend/regime). When quotes.db doesn't cover the legs at that minute (today's fills until the evening backfill; un-backfilled roots/strikes, e.g. manual trades on any ticker) the same NBBO is fetched from ThetaData if a ThetaData login is configured; refuses when no source has it. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
+	[Description("Risk diagnostic of one of your recent OPENING fills (Webull order history, last 30 days, opener-placed or manual), your actual per-leg fill prices as the cost basis, as it stood AT THE FILL by default: the market at that instant (stored minute NBBO from quotes.db, minute-bar spot, as-of trend/regime). --date now evaluates the fill against the live market instead, --date YYYY-MM-DD[THH:MM] at that instant. When quotes.db doesn't cover the legs at that minute (today's fills until the evening backfill; un-backfilled roots/strikes, e.g. manual trades on any ticker) the same NBBO is fetched from ThetaData if a ThetaData login is configured; refuses when no source has it. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
 	public FlagValue<int>? Fill { get; set; }
+
+	protected override bool FillAllowed => Fill?.IsSet == true;
+
+	/// <summary>The evaluation instant: --date, except that a --fill without one is evaluated at the fill (risk's question is what the trade
+	/// looked like when it was opened).</summary>
+	internal AsOf EffectiveDate => Date == null && Fill?.IsSet == true ? new AsOf(AsOfKind.Fill, default) : DateSpec;
 
 	[CommandOption("--iv-default")]
 	[Description("Fallback implied volatility for theoretical pricing when no live IV exists. Percent, default 40.")]
@@ -52,8 +59,8 @@ internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 			return ValidationResult.Success();
 		if (Fill?.IsSet == true && Fill.Value < 0)
 			return ValidationResult.Error($"--fill: N must be ≥ 1, got {Fill.Value}");
-		if (Fill?.IsSet == true && (!string.IsNullOrEmpty(Spot) || EvaluationDateOverride.HasValue))
-			return ValidationResult.Error("--fill evaluates at the fill's own instant and spot; --spot/--date don't apply");
+		if (Fill?.IsSet == true && Date == null && !string.IsNullOrEmpty(Spot))
+			return ValidationResult.Error("--fill evaluates at the fill's own instant by default, where the spot is the stored market's; pass --date now to use --spot");
 
 		if (!string.IsNullOrWhiteSpace(Spec))
 		{
@@ -106,21 +113,26 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
 
-		if (settings.EvaluationDateOverride.HasValue)
-		{
-			EvaluationDate.Set(settings.EvaluationDateOverride.Value);
-			Console.WriteLine($"Evaluation date override: {EvaluationDate.Today:yyyy-MM-dd}");
-		}
+		var asOf = settings.EffectiveDate;
+		if (asOf.Instant is { } instant) ReportCommand.PinEvaluation(instant);
 
 		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		if (settings.Proposal != null)
 			return RenderFromProposal(settings);
 
+		OpeningFillPicker.OpeningFill? fill = null;
 		if (settings.Fill?.IsSet == true)
-			return await RenderFromFillAsync(settings, cancellation);
+		{
+			(var spec, fill, var error) = await OpeningFillPicker.ResolveAtAsync(settings.Fill.Value, asOf, cancellation);
+			if (spec == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
+			settings.Spec = spec;
+		}
 
 		var parsedLegs = AnalyzeRiskSettings.ParseRiskLegs(settings.Spec);
+		if (EvaluationDate.IsPast)
+			return await RenderAtPastInstantAsync(settings, parsedLegs, fill, nearest: asOf.Kind == AsOfKind.Fill, cancellation);
+
 		var symbols = parsedLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
 		var riskFreeTask = AI.Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation);
@@ -141,11 +153,11 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		YahooOptionsClient.ApplyToOptionMath(await riskFreeTask);
 
 		// Two anchors, same as the scanner:
-		// asOf = DateTime.Now: how much time the trade has left as of RIGHT NOW — DTE display, EV/POP
+		// now = DateTime.Now: how much time the trade has left as of RIGHT NOW — DTE display, EV/POP
 		//   scenario grid, score divisor. On Sunday this says "5 days to Friday expiry," matching the scan.
 		// quoteAsOf = ObservationInstant(): when the loaded quotes were struck — correct T for greeks,
 		//   expected-move, and the IV back-solve that inverts the option mid to find the market-implied IV.
-		var asOf = DateTime.Now;
+		var now = DateTime.Now;
 		var quoteAsOf = OptionMath.ObservationInstant();
 
 		// Re-base IV to the live mid surface (default; --calibrated false shows raw vendor IV for debugging).
@@ -153,8 +165,8 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		if (settings.Calibrated && string.IsNullOrEmpty(settings.Spot))
 			quotes = AnalyzeCommon.RecalibrateQuotesToMid(quotes, underlyingPrices!, dividends: null, quoteAsOf);
 
-		var trend = await TrendFetcher.FetchAsync(ticker, asOf, cancellation);
-		var riskContext = new RiskContext(asOf, quoteAsOf, trend, IncludeCurrentBar: true, ScoreAtCostBasis: false, Mode: "analyze_risk");
+		var trend = await TrendFetcher.FetchAsync(ticker, now, cancellation);
+		var riskContext = new RiskContext(now, quoteAsOf, trend, IncludeCurrentBar: true, ScoreAtCostBasis: false, Mode: "analyze_risk");
 		return await EvaluateAndRenderAsync(settings, parsedLegs, quotes, spot.Value, riskContext, CreateIntradayCache(), cancellation);
 	}
 
@@ -308,43 +320,33 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		return 0;
 	}
 
-	/// <summary>--fill: the risk of a real opening fill as it stood AT THE FILL — your actual per-leg fill prices
-	/// as the cost basis, against the market at the nearest stored minute book (each leg's NBBO, the minute-bar spot,
-	/// as-of trend/regime/vol/sentiment and that day's rate). Covers any fill, opener-placed or manual; books the quote store
-	/// lacks come from ThetaData when a login is configured (see <see cref="FillTimeMarket"/>); refuses (naming why) when no source covers the legs.</summary>
-	private static async Task<int> RenderFromFillAsync(AnalyzeRiskSettings settings, CancellationToken cancellation)
+	/// <summary>A past evaluation instant (--date, or a --fill at its own instant): the legs' risk against the market at that instant — each leg's
+	/// NBBO and its expiries' chains at that minute (the boundary nearest a fill, <paramref name="nearest"/>), the minute-bar spot, as-of
+	/// trend/regime/vol/sentiment and that day's rate. Covers any fill, opener-placed or manual; books the quote store lacks come from ThetaData
+	/// when a login is configured (see <see cref="FillTimeMarket"/>); refuses (naming why) when no source covers the legs. A fill scores at
+	/// its own fill prices.</summary>
+	private static async Task<int> RenderAtPastInstantAsync(AnalyzeRiskSettings settings, List<ParsedLeg> parsedLegs, OpeningFillPicker.OpeningFill? fill, bool nearest, CancellationToken cancellation)
 	{
-		var (config, fills, error) = await OpeningFillPicker.LoadAsync(unexpiredOnly: false, cancellation);
-		if (fills == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
-
-		var (fill, pickError) = OpeningFillPicker.Pick(fills, settings.Fill!.Value, "Select an opening fill (risk as of its fill):");
-		if (fill == null) { Console.Error.WriteLine($"Error: {pickError}"); return 1; }
-
-		var (legs, source, priceError) = await OpeningFillPicker.PriceLegsAsync(config!, fill, cancellation);
-		if (legs == null) { Console.Error.WriteLine($"Error: {priceError}"); return 1; }
-
 		var intradayCache = CreateIntradayCache();
-		if (intradayCache == null) { Console.Error.WriteLine("Error: --fill: api-config.json has no Webull session headers for the 1-minute spot bars."); return 1; }
+		if (intradayCache == null) { Console.Error.WriteLine("Error: api-config.json has no Webull session headers for the 1-minute spot bars."); return 1; }
 
-		var fillEt = fill.FilledEt;
-		var (market, marketError) = await FillTimeMarket.LoadAsync(fill.Ticker, legs.Select(l => l.Leg.Symbol).ToList(), fillEt, intradayCache, cancellation);
-		if (market == null) { Console.Error.WriteLine($"Error: --fill: can't rebuild the market at {fillEt:yyyy-MM-dd HH:mm:ss} ET — {marketError}."); return 1; }
+		var at = EvaluationDate.Instant!.Value;
+		var ticker = fill?.Ticker ?? parsedLegs[0].Option!.Root;
+		var (market, marketError) = await FillTimeMarket.LoadAsync(ticker, parsedLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), at, nearest, intradayCache, cancellation);
+		if (market == null) { Console.Error.WriteLine($"Error: can't rebuild the market at {at:yyyy-MM-dd HH:mm:ss} ET — {marketError}."); return 1; }
 
-		// Pin "today" to the fill's session (DTE display, BS fallback marks) and that day's rate: the prior ^IRX
-		// close, exactly what the backtest applies to a session.
-		EvaluationDate.Set(fillEt.Date);
-		if (AI.Backtest.HistoricalRateCache.RateOn(await new AI.Backtest.HistoricalRateCache().GetAsync(cancellation), fillEt.Date) is double dayRate)
-			OptionMath.RiskFreeRate = dayRate;
+		// The books' clock and that day's rate: the prior ^IRX close, exactly what the backtest applies to a session.
+		OptionMath.HistoricalQuotesStruckAt = market.Instant;
+		await FillTimeMarket.ApplySessionRateAsync(at.Date, cancellation);
 
-		var underlying = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [fill.Ticker] = market.Spot };
+		var underlying = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = market.Spot };
 		var quotes = settings.Calibrated ? AnalyzeCommon.RecalibrateQuotesToMid(market.Quotes, underlying, dividends: null, market.Instant) : market.Quotes;
-		var trend = await TrendFetcher.BuildAsOfAsync(fill.Ticker, market.Instant, market.Spot, market.SessionHigh, market.SessionLow, new AI.Backtest.HistoricalBarCache(), cancellation);
+		var trend = await TrendFetcher.BuildAsOfAsync(ticker, market.Instant, market.Spot, market.SessionHigh, market.SessionLow, new AI.Backtest.HistoricalBarCache(), cancellation);
 
-		var spec = string.Join(",", legs.Select(l => $"{(l.Leg.Action == LegAction.Buy ? "buy" : "sell")}:{l.Leg.Symbol}:{l.Leg.Qty}@{l.Price.ToString(CultureInfo.InvariantCulture)}"));
-		var offsetSec = (int)Math.Round((market.Instant - fillEt).TotalSeconds);
-		AnsiConsole.MarkupLine($"[dim]Opening fill: {Markup.Escape(OpeningFillPicker.FormatLabel(fill))} — filled {fillEt:yyyy-MM-dd HH:mm:ss} ET, leg prices from {Markup.Escape(source!)}; market as of {market.Instant:HH:mm:ss} ET, {Markup.Escape(market.BookSource)} ({Math.Abs(offsetSec)} s {(offsetSec < 0 ? "before" : "after")} the fill), spot ${market.Spot:F2}[/]");
-		var context = new RiskContext(market.Instant, market.Instant, trend, IncludeCurrentBar: false, ScoreAtCostBasis: true, Mode: "analyze_risk_fill");
-		return await EvaluateAndRenderAsync(settings, AnalyzeRiskSettings.ParseRiskLegs(spec), quotes, market.Spot, context, intradayCache, cancellation);
+		var offset = nearest ? $" ({Math.Abs((int)Math.Round((market.Instant - at).TotalSeconds))} s {(market.Instant < at ? "before" : "after")} the fill)" : "";
+		AnsiConsole.MarkupLine($"[dim]Market as of {market.Instant:yyyy-MM-dd HH:mm:ss} ET{offset}, {Markup.Escape(market.BookSource)}, spot ${market.Spot:F2}[/]");
+		var context = new RiskContext(market.Instant, market.Instant, trend, IncludeCurrentBar: false, ScoreAtCostBasis: fill != null, Mode: fill != null ? "analyze_risk_fill" : "analyze_risk_asof");
+		return await EvaluateAndRenderAsync(settings, parsedLegs, quotes, market.Spot, context, intradayCache, cancellation);
 	}
 
 	/// <summary>--proposal: re-render the risk diagnostic exactly as it was stored in the proposal snapshot,
@@ -356,8 +358,8 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		if (snap == null) { Console.Error.WriteLine($"Error: {error}"); return 1; }
 		if (snap.Diagnostic == null) { Console.Error.WriteLine($"Error: proposal line {snap.LineNumber} of '{snap.SourcePath}' has no diagnostic block to render."); return 1; }
 
-		if (!settings.EvaluationDateOverride.HasValue)
-			EvaluationDate.Set(snap.AsOf.Date);
+		if (!settings.PinnedInstant.HasValue)
+			EvaluationDate.Set(snap.AsOf);
 
 		var positionLegs = snap.Legs
 			.Select(l => new AnalyzePositionCommand.PositionSnapshot(Symbol: l.Symbol, Action: l.Action, Qty: l.Qty, CostBasis: snap.CostBasis(l.Symbol), Parsed: l.Parsed))
