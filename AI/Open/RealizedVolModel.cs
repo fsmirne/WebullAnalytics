@@ -14,9 +14,10 @@ namespace WebullAnalytics.AI;
 ///
 /// <see cref="TodayScale"/> and <see cref="ForwardScale"/> rescale the per-session variances for the forecast day itself and for every later
 /// session (<see cref="ImpliedVolForecast"/> calibrates them against VIX1D / VIX9D when <c>opener.impliedVolForecast</c> is on); both
-/// default to 1, the trailing-EWMA forecast alone.
+/// default to 1, the trailing-EWMA forecast alone. <see cref="Profile"/> spreads a session's variance across its minutes the way the
+/// ticker's tape does (front-loaded); without one it is spread evenly.
 /// </summary>
-internal sealed record RealizedVolModel(double OvernightVariance, double SessionVariance, double TodayScale = 1.0, double ForwardScale = 1.0)
+internal sealed record RealizedVolModel(double OvernightVariance, double SessionVariance, double TodayScale = 1.0, double ForwardScale = 1.0, IntradayVarianceProfile? Profile = null)
 {
 	/// <summary>EWMA half-life, in sessions. Calibrated 2026-10-14 by QLIKE on next-1 and next-5-session realized variance
 	/// (overnight + session), SPY / SPXW / QQQ 2022-01..2026-10: half-life 5–10 beat simple 10/20/40/60/120-day means on every
@@ -50,11 +51,20 @@ internal sealed record RealizedVolModel(double OvernightVariance, double Session
 
 	/// <summary>Loads the trailing <see cref="HistorySessions"/> sessions strictly before <paramref name="asOf"/> and builds the
 	/// model; null when the history is too short. <paramref name="impliedForecast"/> (opener.impliedVolForecast) rescales it
-	/// against the market's short-dated implied vol (<see cref="ImpliedVolForecast"/>).</summary>
+	/// against the market's short-dated implied vol (<see cref="ImpliedVolForecast"/>); the ticker's intraday profile shapes each session.</summary>
 	internal static async Task<RealizedVolModel?> LoadAsync(HistoricalPriceCache priceCache, string ticker, DateTime asOf, bool impliedForecast, CancellationToken cancellation)
 	{
 		var model = FromBars(await priceCache.GetRecentBarsAsync(ticker, HistorySessions + 1, asOf, cancellation));
-		return model != null && impliedForecast ? await ImpliedVolForecast.ApplyAsync(model, priceCache, ticker, asOf, cancellation) : model;
+		if (model == null) return null;
+		if (impliedForecast) model = await ImpliedVolForecast.ApplyAsync(model, priceCache, ticker, asOf, cancellation);
+		return model with { Profile = IntradayVarianceProfile.Lookup(ticker, asOf) };
+	}
+
+	/// <summary>Share of a session's variance still to come from <paramref name="start"/> (clamped into the session) to its close.</summary>
+	private double SessionShareLeft(DateTime start, DateTime open, DateTime close)
+	{
+		var elapsed = (start - open).TotalMinutes / (close - open).TotalMinutes;
+		return Profile?.RemainingShare(elapsed) ?? 1.0 - Math.Clamp(elapsed, 0.0, 1.0);
 	}
 
 	/// <summary>The overnight gap and full-session variance of trading day <paramref name="day"/>, as forecast from <paramref name="asOf"/>.</summary>
@@ -79,7 +89,7 @@ internal sealed record RealizedVolModel(double OvernightVariance, double Session
 			var (overnight, session) = VariancesOn(day, asOf);
 			if (asOf < open) variance += overnight;
 			var start = asOf > open ? asOf : open;
-			variance += session * (close - start).TotalMinutes / (close - open).TotalMinutes;
+			variance += session * SessionShareLeft(start, open, close);
 		}
 		return variance;
 	}
@@ -94,7 +104,7 @@ internal sealed record RealizedVolModel(double OvernightVariance, double Session
 
 	/// <summary>Inverse of <see cref="VarianceTo"/>: the clock time by which <paramref name="fraction"/> of the variance
 	/// left until the target close has accrued. An overnight gap accrues all at once at the open, so a fraction that lands
-	/// inside a gap maps to that open; inside a session it maps proportionally through the session's minutes.</summary>
+	/// inside a gap maps to that open; inside a session it maps through the session's variance profile.</summary>
 	internal DateTime TimeAtVarianceFraction(DateTime asOf, DateTime targetExpiry, double fraction)
 	{
 		var remaining = VarianceTo(asOf, targetExpiry) * Math.Clamp(fraction, 0.0, 1.0);
@@ -112,9 +122,15 @@ internal sealed record RealizedVolModel(double OvernightVariance, double Session
 				remaining -= overnight;
 			}
 			var start = asOf > open ? asOf : open;
-			var sessionLeft = session * (close - start).TotalMinutes / (close - open).TotalMinutes;
+			var shareLeft = SessionShareLeft(start, open, close);
+			var sessionLeft = session * shareLeft;
 			if (remaining <= sessionLeft)
-				return session > 0 ? start.AddMinutes(remaining / session * (close - open).TotalMinutes) : close;
+			{
+				if (session <= 0) return close;
+				var shareAt = shareLeft - remaining / session;
+				var elapsed = Profile?.ElapsedAt(shareAt) ?? 1.0 - shareAt;
+				return open.AddMinutes(elapsed * (close - open).TotalMinutes);
+			}
 			remaining -= sessionLeft;
 			last = close;
 		}
