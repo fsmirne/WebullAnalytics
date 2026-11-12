@@ -24,6 +24,18 @@ public class RealizedVolModelTests
 		Assert.Equal(expectedSession, m.SessionVariance, 12);
 	}
 
+	/// <summary>TodayScale rescales only the forecast day's remaining variance, ForwardScale every later session; the session count the
+	/// path model steps on ignores both.</summary>
+	[Fact]
+	public void Scales_ApplyToTheirOwnDaysAndLeaveTheSessionCountAlone()
+	{
+		var asOf = new DateTime(2026, 10, 14, 12, 45, 0);   // Wed: half of today's session left, then Thu gap + session
+		var scaled = Model with { TodayScale = 2.0, ForwardScale = 3.0 };
+		Assert.Equal(2.0 * 0.0004 * 0.5 + 3.0 * (0.0001 + 0.0004), scaled.VarianceTo(asOf, new DateTime(2026, 10, 15)), 12);
+		Assert.Equal(Model.SessionsTo(asOf, new DateTime(2026, 10, 15)), scaled.SessionsTo(asOf, new DateTime(2026, 10, 15)), 12);
+		Assert.Equal(1.4, Model.SessionsTo(asOf, new DateTime(2026, 10, 15)), 12);
+	}
+
 	[Fact]
 	public void FromBars_TooShortIsNull() => Assert.Null(RealizedVolModel.FromBars(new[] { Bar(new(2026, 10, 5), 100m, 100m) }));
 

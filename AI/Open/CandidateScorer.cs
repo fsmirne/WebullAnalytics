@@ -965,7 +965,7 @@ internal static class CandidateScorer
 		var targetCenter = ScenarioCenter(forward, sigmaTotal, (double)biasShiftSigmas * sigmaTotal);
 		var targetClose = targetExpiry.Date + OptionMath.MarketClose;
 		var sessions = realizedVol != null && realizedVol.OvernightVariance + realizedVol.SessionVariance > 0
-			? realizedVol.VarianceTo(asOf, targetExpiry) / (realizedVol.OvernightVariance + realizedVol.SessionVariance)
+			? realizedVol.SessionsTo(asOf, targetExpiry)
 			: years.VarianceYears * 252.0;
 		var steps = PathExitModel.StepCount(sessions);
 		var stepTimes = new DateTime[steps];

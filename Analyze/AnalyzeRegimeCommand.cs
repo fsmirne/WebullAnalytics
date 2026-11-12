@@ -195,7 +195,9 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 		var closes = await rc.PriceCache.GetRecentClosesAsync(ticker, op.VolatilityLookbackDays + 1, asOf, cancellation);
 		var h = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
 		decimal? hv = h is > 0m ? h : null;
-		var realizedVol = await RealizedVolModel.LoadAsync(rc.PriceCache, ticker, asOf, cancellation);
+		var realizedVol = await RealizedVolModel.LoadAsync(rc.PriceCache, ticker, asOf, op.ImpliedVolForecast, cancellation);
+		RenderVolForecast(await RealizedVolModel.LoadAsync(rc.PriceCache, ticker, asOf, impliedForecast: true, cancellation), op.ImpliedVolForecast);
+		AnsiConsole.WriteLine();
 		decimal? sentiment = null;
 		if (op.Weights.Sentiment > 0m)
 		{
@@ -240,6 +242,18 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 
 	private static bool IsLongDebitCall(FamilyBest f) => f.Kind is OpenStructureKind.LongCall or OpenStructureKind.LongCallVertical;
 	private static bool IsLongDebitPut(FamilyBest f) => f.Kind is OpenStructureKind.LongPut or OpenStructureKind.LongPutVertical;
+
+	/// <summary>The scoring distribution's realized-vol forecast per session (annualized): the trailing EWMA, and the implied-calibrated
+	/// levels for the rest of today and later sessions with their scales (<see cref="ImpliedVolForecast"/>), plus which one scores.</summary>
+	private static void RenderVolForecast(RealizedVolModel? calibrated, bool enabled)
+	{
+		if (calibrated == null) return;
+		var unit = calibrated.OvernightVariance + calibrated.SessionVariance;
+		var scoring = enabled ? "[green]implied-calibrated[/]" : "[yellow]EWMA[/] (opener.impliedVolForecast off)";
+		AnsiConsole.MarkupLine($"[bold]Vol forecast[/] (per session, annualized)  EWMA {Vol(unit)}  ·  calibrated today {Vol(unit * calibrated.TodayScale)} (×{calibrated.TodayScale:F2}), next sessions {Vol(unit * calibrated.ForwardScale)} (×{calibrated.ForwardScale:F2})  ·  scoring on {scoring}");
+	}
+
+	private static string Vol(double sessionVariance) => (Math.Sqrt(sessionVariance * 252.0) * 100.0).ToString("F1", CultureInfo.InvariantCulture) + "%";
 
 	private static void RenderHeader(string ticker, decimal spot, DateTime asOf, int repDte, decimal blended, RegimeAnalyzer.RegimeClassification c, bool offline)
 	{

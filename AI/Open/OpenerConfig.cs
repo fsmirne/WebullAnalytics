@@ -143,6 +143,11 @@ internal sealed class OpenerConfig
 	/// <c>rules.takeProfit</c>, top-level <c>execution</c>); this flag only toggles the model. Default true.</summary>
 	[JsonPropertyName("realizedEvScoring")] public bool RealizedEvScoring { get; set; } = true;
 
+	/// <summary>Calibrates the scoring distribution's realized-vol forecast against VIX1D (the rest of today) and VIX9D (later sessions)
+	/// — see <see cref="ImpliedVolForecast"/>. Changes the EV/POP every candidate is ranked on, so contract selection, for DC2 and 0DTE
+	/// alike. Default false (the trailing EWMA alone) until a backtest says otherwise.</summary>
+	[JsonPropertyName("impliedVolForecast")] public bool ImpliedVolForecast { get; set; } = false;
+
 	/// <summary>Runtime-only bundle of the resolved realized-EV inputs the scorer reads (it receives only
 	/// <see cref="OpenerConfig"/>). Populated by AIConfigLoader.PopulateRealizedEv at load from the flag
 	/// above plus rules.stopLoss/takeProfit and execution — never deserialized directly, hence [JsonIgnore].</summary>

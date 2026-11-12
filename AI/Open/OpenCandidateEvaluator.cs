@@ -401,7 +401,7 @@ internal sealed class OpenCandidateEvaluator
 		var realizedVolByTicker = new Dictionary<string, RealizedVolModel>(StringComparer.OrdinalIgnoreCase);
 		foreach (var ticker in new[] { _config.Ticker })
 		{
-			if (await RealizedVolModel.LoadAsync(_priceCache, ticker, ctx.Now, cancellation) is { } model)
+			if (await RealizedVolModel.LoadAsync(_priceCache, ticker, ctx.Now, cfg.ImpliedVolForecast, cancellation) is { } model)
 				realizedVolByTicker[ticker] = model;
 		}
 

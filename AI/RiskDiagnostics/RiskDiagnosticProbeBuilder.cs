@@ -466,7 +466,7 @@ internal static class RiskDiagnosticProbeBuilder
 			// Full merge chain (base + ticker + strategy) so a strategy layer's weights and lookback are visible.
 			var cfg = TryLoadAiConfigQuiet(ticker, out _);
 			if (cfg == null) return (null, null);
-			var realizedVol = await RealizedVolModel.LoadAsync(priceCache, ticker, asOf, cancellation);
+			var realizedVol = await RealizedVolModel.LoadAsync(priceCache, ticker, asOf, cfg.Opener.ImpliedVolForecast, cancellation);
 			var closes = await priceCache.GetRecentClosesAsync(ticker, cfg.Opener.VolatilityLookbackDays + 1, asOf, cancellation);
 			var hv = CandidateScorer.ComputeHistoricalVolatilityAnnualized(closes);
 			return (hv is decimal v && v > 0m ? v : null, realizedVol);
