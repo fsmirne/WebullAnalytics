@@ -145,7 +145,12 @@ internal sealed class OpenerConfig
 
 	/// <summary>Calibrates the scoring distribution's realized-vol forecast against VIX1D (the rest of today) and VIX9D (later sessions)
 	/// — see <see cref="ImpliedVolForecast"/>. Changes the EV/POP every candidate is ranked on, so contract selection, for DC2 and 0DTE
-	/// alike. Default false (the trailing EWMA alone) until a backtest says otherwise.</summary>
+	/// alike. Default false (the trailing EWMA alone), deliberately, although it is the more accurate forecast: walk-forward QLIKE on SPY
+	/// improves 31-42% a year on the next five sessions and 22-61% on the rest of today, yet the EWMA picks better DC2 trades. SPY DC2
+	/// 2023-09-01..2026-11-10 at 1 lot: EWMA $16,171 PF 1.55 max DD $2,192; calibrated, with minScoreToOpen re-swept (0.0005-0.003), at
+	/// best $10,430 PF 1.36 max DD $3,684 (0.001), flat to negative in 2023-2025 at every gate. Why accuracy hurts selection is unknown
+	/// (one guess: DC2 profits from the EWMA's lag after a vol spike) — find out before turning it on for DC2. For 0DTE it is better
+	/// (SPY -$9,762 PF 0.64 → -$5,973 PF 0.80) but no 0DTE configuration tested is profitable.</summary>
 	[JsonPropertyName("impliedVolForecast")] public bool ImpliedVolForecast { get; set; } = false;
 
 	/// <summary>Runtime-only bundle of the resolved realized-EV inputs the scorer reads (it receives only
