@@ -79,7 +79,6 @@ internal sealed class AnalyzeSqueezeStudyCommand : AsyncCommand<AnalyzeSqueezeSt
 {
 	private const decimal StrikeRangeFraction = 0.20m;
 	private const int MaxStrikes = 200;
-	private static readonly TimeSpan OneMinute = TimeSpan.FromMinutes(1);
 	private static readonly int[] Horizons = [30, 60];
 
 	private sealed record Bar(decimal Open, decimal High, decimal Low, decimal Close);
@@ -169,7 +168,7 @@ internal sealed class AnalyzeSqueezeStudyCommand : AsyncCommand<AnalyzeSqueezeSt
 			}
 			if (PriceAt(bars, t) is not { } spot) continue;
 			var asOf = date + t;
-			var quotes = slice.At(asOf - OneMinute);
+			var quotes = slice.At(asOf);
 			if (quotes.Count == 0) continue;
 			foreach (var sym in quotes.Keys.ToList())
 			{

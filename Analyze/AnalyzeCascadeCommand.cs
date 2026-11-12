@@ -185,8 +185,9 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 		// Minute bars have one source (Webull's chart endpoint) whatever the quote vendor: `vendor` only picks between the Webull and Schwab option-chain clients.
 		var intradayCache = apiConfig != null && !isOfflineHistorical ? new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)) : null;
 
-		// Load RTH 1-minute bars up to asOfEt so historical/intraday evaluations use the true spot at asOfEt
-		var rthBars = await CascadeScreener.LoadSessionRthBarsAsync(ticker, asOfEt, intradayCache, includeCurrentBar: true, cancellation);
+		// Load RTH 1-minute bars up to asOfEt so historical/intraday evaluations use the true spot at asOfEt.
+		// A replay sees only the bars that closed by the instant (the last one's close is the price AT it); a live read includes the forming minute.
+		var rthBars = await CascadeScreener.LoadSessionRthBarsAsync(ticker, asOfEt, intradayCache, includeCurrentBar: !isOfflineHistorical, cancellation);
 		var explicitSpotOverride = AnalyzeGexCommand.ResolveSpotOverride(settings.Spot, ticker);
 		if (!explicitSpotOverride.HasValue && (isOfflineHistorical || pinned.HasValue) && rthBars.Count > 0)
 			spot = rthBars[^1].Close;
@@ -224,7 +225,7 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 			AnsiConsole.MarkupLine($"[yellow]The vendor returned no open interest for any unexpired {Markup.Escape(ticker)} contract (overnight OI blackout — OI is zeroed until the next morning's OCC update), and the terrain is built from OI. Re-run during market hours, or use --date with a captured data/oi snapshot.[/]");
 			return 1;
 		}
-		var read = await CascadeScreener.ReadChainAsync(ticker, spot.Value, asOfEt, quotes, settings.Dte, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.TriggerScore, rthBars, intradayCache, new HistoricalPriceCache(), new SmileIndexCache(offline: isOfflineHistorical), settings.VendorName, cancellation);
+		var read = await CascadeScreener.ReadChainAsync(ticker, spot.Value, asOfEt, quotes, settings.Dte, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.TriggerScore, rthBars, intradayCache, new HistoricalPriceCache(), new SmileIndexCache(offline: isOfflineHistorical), settings.VendorName, includeCurrentBar: !isOfflineHistorical, cancellation);
 		if (read == null)
 		{
 			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");

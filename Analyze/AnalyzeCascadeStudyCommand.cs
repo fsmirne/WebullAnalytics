@@ -130,14 +130,16 @@ internal sealed class AnalyzeCascadeStudyCommand : AsyncCommand<AnalyzeCascadeSt
 		{
 			if (t >= close) continue;
 			var asOfEt = date + t;
-			var rthBars = dayBars.Where(b => MarketTime.ToEt(b.Timestamp).TimeOfDay <= t).ToList();
-			var after = dayBars.Where(b => MarketTime.ToEt(b.Timestamp).TimeOfDay > t).ToList();
+			// START-of-bar labels: the bars that closed by the checkpoint are the reading's (the last close is the price AT it); the bar that
+			// starts at the checkpoint is the first one after it.
+			var rthBars = dayBars.Where(b => MarketTime.ToEt(b.Timestamp).TimeOfDay < t).ToList();
+			var after = dayBars.Where(b => MarketTime.ToEt(b.Timestamp).TimeOfDay >= t).ToList();
 			if (rthBars.Count == 0 || after.Count == 0) continue;
 			var spot = rthBars[^1].Close;
 
 			var quotes = CascadeScreener.BuildCausalHistoricalChain(ticker, asOfEt, snapshot.Quotes, forceExante: false, out _, cache);
 			if (AnalyzeGexCommand.IsOiBlackout(quotes, ticker, date)) continue;
-			var read = await CascadeScreener.ReadChainAsync(ticker, spot, asOfEt, quotes, Dte, StrikeRangeFraction, MaxStrikes, CascadeScreener.DefaultTriggerScore, rthBars, null, priceCache, smileCache, "schwab", ct, cache);
+			var read = await CascadeScreener.ReadChainAsync(ticker, spot, asOfEt, quotes, Dte, StrikeRangeFraction, MaxStrikes, CascadeScreener.DefaultTriggerScore, rthBars, null, priceCache, smileCache, "schwab", includeCurrentBar: false, ct, cache);
 			if (read == null) continue;
 
 			var row = new

@@ -151,6 +151,8 @@ internal sealed record CascadeReading(
 /// </summary>
 internal static class CascadeScreener
 {
+	private static readonly TimeSpan OneMinute = TimeSpan.FromMinutes(1);
+
 	public const int DefaultTriggerScore = 65;
 	public const int StrongScore = 80;
 	private const int FactorMax = 20;
@@ -957,16 +959,17 @@ internal static class CascadeScreener
 
 	/// <summary>The panel's pipeline from a resolved chain onward: builds the ≤<paramref name="dte"/> gamma matrix, the terrain, the
 	/// inputs and the reading. One owner, so the study's readings are the panel's readings. Null when no strike falls inside the
-	/// window; otherwise the reading and the number of expiries the matrix spans.</summary>
+	/// window; otherwise the reading and the number of expiries the matrix spans. <paramref name="includeCurrentBar"/> is true only for a live
+	/// read (the forming minute is real data now); a replay at an instant sees only the bars that closed by it.</summary>
 	internal static async Task<(CascadeReading Reading, int ExpiryCount)?> ReadChainAsync(
 		string ticker, decimal spot, DateTime asOfEt, Dictionary<string, OptionContractQuote> quotes, int dte, decimal strikeRangeFraction, int maxStrikes, int triggerScore,
-		IReadOnlyList<MinuteBar> rthBars, IntradayBarCache? intradayCache, HistoricalPriceCache priceCache, SmileIndexCache smileCache, string vendorName, CancellationToken cancellation, CascadeReplayCache? cache = null)
+		IReadOnlyList<MinuteBar> rthBars, IntradayBarCache? intradayCache, HistoricalPriceCache priceCache, SmileIndexCache smileCache, string vendorName, bool includeCurrentBar, CancellationToken cancellation, CascadeReplayCache? cache = null)
 	{
 		var gexMatrix = GexMatrix.Build(quotes, ticker, spot, asOfEt, expiryFilter: null, strikeRangeFraction, dte, maxStrikes, GreekKind.Gamma);
 		if (gexMatrix.Strikes.Count == 0 || gexMatrix.Expiries.Count == 0) return null;
 
 		var terrain = TerrainFrom(gexMatrix, vexMatrix: null, spot, asOfEt);
-		var inputs = await BuildInputsAsync(ticker, spot, asOfEt, gexMatrix, priceCache, intradayCache, smileCache, preloadedSessionRthBars: rthBars, vendorName: vendorName, strikeRangeFraction: strikeRangeFraction, includeCurrentBar: true, cancellation: cancellation, cache: cache);
+		var inputs = await BuildInputsAsync(ticker, spot, asOfEt, gexMatrix, priceCache, intradayCache, smileCache, preloadedSessionRthBars: rthBars, vendorName: vendorName, strikeRangeFraction: strikeRangeFraction, includeCurrentBar: includeCurrentBar, cancellation: cancellation, cache: cache);
 		return (Evaluate(terrain, inputs, triggerScore), gexMatrix.Expiries.Count);
 	}
 
@@ -1009,9 +1012,10 @@ internal static class CascadeScreener
 			if (storeTape.Count > 0 && (date < MarketTime.NowEt().Date || !hasLiveContribVol))
 			{
 				var cumByStrike = new Dictionary<decimal, (long C, long P)>();
+				// The store's ohlcv minutes are START-of-bar labeled: a minute counts once it has closed by the instant.
 				foreach (var (ts, byStrike) in storeTape)
 				{
-					if (ts > tod) break;
+					if (ts + OneMinute > tod) break;
 					foreach (var (k, v) in byStrike)
 					{
 						cumByStrike.TryGetValue(k, out var cur);
@@ -1044,7 +1048,7 @@ internal static class CascadeScreener
 				long winVol = 0, sessionVol = 0;
 				foreach (var (ts, byStrike) in storeTape)
 				{
-					if (ts > tod) break;
+					if (ts + OneMinute > tod) break;
 					long barVol = 0;
 					foreach (var (_, v) in byStrike) barVol += (long)(v.C + v.P);
 					sessionVol += barVol;

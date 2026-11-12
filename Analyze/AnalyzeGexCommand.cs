@@ -2011,14 +2011,15 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 
 		/// <summary>The mapped expiry's contracts as of <paramref name="instantEt"/>, carrying real two-sided books
-		/// only. Empty when the store has nothing within the staleness window — the caller drops that bucket rather
-		/// than mixing a frozen-IV column in among time-matched ones.</summary>
+		/// only: the store row labeled one minute earlier, which is the book struck AT the instant (<see cref="QuoteStoreCache.BookLag"/>);
+		/// the row labeled with the instant itself is struck a minute later. Empty when the store has nothing within the
+		/// staleness window — the caller drops that bucket rather than mixing a frozen-IV column in among time-matched ones.</summary>
 		public Dictionary<string, OptionContractQuote> At(DateTime instantEt)
 		{
 			var set = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 			foreach (var c in _contracts)
 			{
-				if (_cache.NbboAt(c.ContractSymbol, instantEt) is not { } nbbo || nbbo.Bid <= 0m || nbbo.Ask <= 0m) continue;
+				if (_cache.NbboAt(c.ContractSymbol, instantEt - QuoteStoreCache.BookLag) is not { } nbbo || nbbo.Bid <= 0m || nbbo.Ask <= 0m) continue;
 				set[c.ContractSymbol] = c with { Bid = nbbo.Bid, Ask = nbbo.Ask, ImpliedVolatility = null };
 			}
 			return set;
