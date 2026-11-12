@@ -197,6 +197,11 @@ internal sealed class QuoteStoreCache
 			var rows = new Dictionary<(long StrikeMilli, char Cp), Row[]>();
 			using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
 			conn.Open();
+			// The raw statement bypasses Microsoft.Data.Sqlite's SQLITE_BUSY retry, so wait out a transient lock here, as the writers do:
+			// concurrent read-only opens race for the brief exclusive lock that rebuilds the WAL index (Prefetch opens one connection
+			// per slice in parallel), and a writer's checkpoint takes it too. Without it the loser failed at once with "database is
+			// locked" (2026-11-11: analyze regime --date failed every run; 16 parallel opens lost 1-2 at timeout 0, none at 5 s).
+			raw.sqlite3_busy_timeout(conn.Handle, 60000);
 			// Raw SQLitePCL statement instead of SqliteDataReader: the reader's per-value type/null checks cost ~2x
 			// SQLite's own row stepping on these multi-million-row loads. date/expiry are INTEGER yyyymmdd;
 			// unicode(right) reads the C/P code point without a string per row.
