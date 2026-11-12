@@ -128,6 +128,10 @@ internal sealed class DipAnalysisSettings : CommandSettings
 	[CommandOption("--legs <LIST>")]
 	[Description("Comma-separated real-chain structures to price: naked-call, call-vert, put-credit. Default all three.")]
 	public string Legs { get; set; } = "naked-call,call-vert,put-credit";
+
+	[CommandOption("--out <PATH>")]
+	[Description("Write every DIP and TOP trigger in the window to a CSV (kind, entry ET, entry price, RSI, band, MACD hist) for joining with other studies, then exit.")]
+	public string? Out { get; set; }
 }
 
 /// <summary>`ai dip` — historical study of the strict MACD+RSI+Bollinger "buy the dip" signal on 5-minute RTH
@@ -137,6 +141,18 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 {
 	private static readonly TimeSpan RthOpen = new(9, 30, 0);
 	private static readonly TimeSpan RthClose = new(16, 0, 0);
+
+	/// <summary>`--out`: every DIP and TOP trigger as one CSV row, entry = the open of the bar after the trigger bar (the analyzers' own
+	/// entry), so another study can join on the instant a trigger was knowable.</summary>
+	private static void WriteTriggers(IReadOnlyList<IntradayBar> bars, DipParams p, int interval, string path)
+	{
+		var inv = CultureInfo.InvariantCulture;
+		var lines = new List<string> { "kind,entry_et,entry_price,rsi,band,macd_hist" };
+		lines.AddRange(DipSignalAnalyzer.Analyze(bars, p, interval).Signals.Select(s => string.Join(',', "dip", s.EntryEt.ToString("yyyy-MM-ddTHH:mm", inv), s.EntryPrice.ToString(inv), s.Rsi.ToString("F2", inv), s.LowerBand.ToString(inv), s.MacdHist.ToString(inv))));
+		lines.AddRange(DipSignalAnalyzer.AnalyzeShort(bars, p, interval, 0m, 0m).Signals.Select(s => string.Join(',', "top", s.EntryEt.ToString("yyyy-MM-ddTHH:mm", inv), s.EntryPrice.ToString(inv), s.Rsi.ToString("F2", inv), s.UpperBand.ToString(inv), s.MacdHist.ToString(inv))));
+		File.WriteAllLines(path, lines);
+		AnsiConsole.MarkupLine($"Wrote {lines.Count - 1} trigger(s) to {Markup.Escape(path)}.");
+	}
 
 	protected override async Task<int> ExecuteAsync(CommandContext context, DipAnalysisSettings settings, CancellationToken cancellation)
 	{
@@ -184,6 +200,7 @@ internal sealed class DipAnalysisCommand : AsyncCommand<DipAnalysisSettings>
 		if (!string.IsNullOrWhiteSpace(settings.Dump)) { Dump(bars, settings.Dump); return 0; }
 
 		var p = new DipParams(RsiLow: settings.RsiLow, RsiHigh: settings.RsiHigh, BbK: settings.BbK);
+		if (!string.IsNullOrWhiteSpace(settings.Out)) { WriteTriggers(bars, p, settings.Interval, settings.Out); return 0; }
 
 		if (settings.Capital > 0m)
 		{
