@@ -12,7 +12,7 @@ public class CascadeScreenerTests
 	private const decimal Open = 7000m;
 	private const decimal Move = 70m;   // one-day expected move: 1% of spot, above the 0.6% floor
 
-	private static CascadeTerrain Terrain(decimal spot, bool shortGamma, decimal netGexMulti, decimal? gravity, decimal? pull, decimal? callWall = null, decimal? putWall = null) => new(
+	private static CascadeTerrain Terrain(decimal spot, bool shortGamma, decimal netGexMulti, decimal? gravity, decimal? pull, decimal? callWall = null, decimal? putWall = null, decimal? callWallAtHigh = null) => new(
 		Front: new SqueezeTerrain(spot, Trigger: shortGamma ? spot + 30m : spot - 30m, shortGamma, callWall, putWall, Move),
 		FrontExpiry: new DateTime(2026, 11, 9),
 		Gravity0Dte: gravity,
@@ -22,7 +22,8 @@ public class CascadeScreenerTests
 		NetGexFractionMulti: netGexMulti,
 		NetVexMulti: 0m,
 		NetVexFractionMulti: 0m,
-		ExpiryCount: 20);
+		ExpiryCount: 20,
+		CallWallAtHigh0Dte: callWallAtHigh);
 
 	private static SessionTape Tape(decimal spot, VwapSide side, int held, decimal high, decimal low, decimal? windowLow = null, decimal gapPct = 0m, int flips = 0) => new(
 		SessionOpen: Open,
@@ -87,7 +88,7 @@ public class CascadeScreenerTests
 	private static (CascadeTerrain T, CascadeInputs I) BullTrapSession()
 	{
 		const decimal spot = 7014m;
-		return (Terrain(spot, shortGamma: false, netGexMulti: -0.30m, gravity: 6970m, pull: -0.45m, callWall: 7060m, putWall: 6950m),
+		return (Terrain(spot, shortGamma: false, netGexMulti: -0.30m, gravity: 6970m, pull: -0.45m, callWall: 7060m, putWall: 6950m, callWallAtHigh: 7060m),
 			Inputs(Tape(spot, VwapSide.Below, held: 8, high: 7056m, low: 6999m), flow: -0.35m, vixOpen: 20m, vixNow: 20.4m));
 	}
 
@@ -164,6 +165,22 @@ public class CascadeScreenerTests
 		var r = CascadeScreener.Evaluate(t, i);
 		Assert.Equal(CascadeRegime.BearTrap, r.PrimaryRegime);
 		Assert.Equal(1, r.DirectionalSign);
+	}
+
+	// A call wall is rejected only by a rally that topped AT it: SPXW 2026-11-13 ran 72 points (1.2 EM) through the 7,550 wall to
+	// 7,621.78 and the screener still scored "rejected 0DTE call wall $7,550" 20/20, because the check had no upper bound on the high.
+	// The fixture's high is 7,056 with one EM = 70: walls within 0.15 EM of it either side were tested; walls further off were not.
+	[Theory]
+	[InlineData(7060, true)]    // topped 4 below the wall
+	[InlineData(7050, true)]    // poked 6 through it and fell back
+	[InlineData(7000, false)]   // ran 56 (0.8 EM) through it
+	[InlineData(7120, false)]   // topped 64 short of it: never tested
+	public void BullTrap_RejectedCallWall_NeedsTheHighAtTheWall(int wall, bool rejected)
+	{
+		var (t, i) = BullTrapSession();
+		var r = CascadeScreener.Evaluate(t with { CallWallAtHigh0Dte = wall }, i);
+		var detail = r.Setups[CascadeRegime.BullTrap].Factors.Single(f => f.Name == "Wall Rejection / Gravity").Detail;
+		Assert.Equal(rejected, detail.StartsWith($"rejected 0DTE call wall ${wall:N0}"));
 	}
 
 	[Fact]

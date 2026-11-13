@@ -57,7 +57,11 @@ internal sealed record CascadeTerrain(
 	/// <summary>The front expiry has stopped trading: it expires on the as-of date and the session has closed, or it expired
 	/// earlier. Its gamma collapses onto the strikes beside the settlement price (flip, gravity and walls all land at the
 	/// money), so the factors read from it are left unscored.</summary>
-	bool FrontSettled = false);
+	bool FrontSettled = false,
+	/// <summary>The front expiry's call wall as it stood at the session high (<see cref="GexMatrix.FindCallWallAt"/>): the largest
+	/// call-gamma strike no more than <see cref="CascadeScreener.WallTouchMoves"/> expected moves below the high, gamma judged with the
+	/// underlying at the high. The level a rally that topped there ran into; null when the front has settled or there is no tape.</summary>
+	decimal? CallWallAtHigh0Dte = null);
 
 /// <summary>
 /// Point-in-time flow, volatility, skew, and intraday tape inputs to <see cref="CascadeScreener.Evaluate"/>.
@@ -156,9 +160,14 @@ internal static class CascadeScreener
 	public const int DefaultTriggerScore = 65;
 	public const int StrongScore = 80;
 	private const int FactorMax = 20;
+	/// <summary>How close, in daily expected moves, a session extreme must come to a wall, from either side, to have tested it.</summary>
+	internal const decimal WallTouchMoves = 0.15m;
+
+	/// <summary>The yardstick every excursion is measured in: the front's one-day expected move, floored at 0.6% of spot.</summary>
+	private static decimal ExpectedMove(SqueezeTerrain f) => Math.Max(f.DailyMove ?? 0m, f.Spot * 0.006m);
 
 	/// <summary>Extracts the 0DTE + multi-expiry GEX terrain from the built exposure matrix.</summary>
-	public static CascadeTerrain TerrainFrom(GexMatrix gexMatrix, GexMatrix? vexMatrix, decimal spot, DateTime asOf)
+	public static CascadeTerrain TerrainFrom(GexMatrix gexMatrix, GexMatrix? vexMatrix, decimal spot, DateTime asOf, decimal? sessionHigh = null)
 	{
 		// Build a 0DTE-scoped view for the front expiry so 0DTE flip/walls/gravity aren't diluted by 30DTE OI.
 		var frontExp = gexMatrix.Expiries.Count > 0 ? gexMatrix.Expiries[0] : (DateTime?)null;
@@ -202,6 +211,9 @@ internal static class CascadeScreener
 		var gravity0Dte = frontLive ? gexMatrix.GravityByExpiry.GetValueOrDefault(frontExp!.Value) : null;
 		var centroid0Dte = frontLive ? gexMatrix.GrossCentroidByExpiry.GetValueOrDefault(frontExp!.Value) : null;
 		var netPull0Dte = frontLive ? gexMatrix.NetPullByExpiry.GetValueOrDefault(frontExp!.Value) : null;
+		var callWallAtHigh = frontLive && sessionHigh is { } high && high > 0m
+			? gexMatrix.FindCallWallAt(frontExp!.Value, high, high - WallTouchMoves * ExpectedMove(frontTerrain))
+			: null;
 
 		// A settled front expiry is taken out of the multi-expiry book: its gamma is a spike on the strikes beside the
 		// settlement price, not standing dealer exposure. The whole-book flip cannot be recomputed without it, so it is dropped.
@@ -240,7 +252,8 @@ internal static class CascadeScreener
 			PutWallMulti: baseTerrain.PutWall,
 			FrontNetGexFraction: frontNetGexFraction,
 			SessionClosed: sessionClosed,
-			FrontSettled: frontSettled);
+			FrontSettled: frontSettled,
+			CallWallAtHigh0Dte: callWallAtHigh);
 	}
 
 	/// <summary>Evaluates all four regimes and selects the active or leading classification.</summary>
@@ -312,7 +325,7 @@ internal static class CascadeScreener
 		var bull = regime == CascadeRegime.BullCascade;
 		var dir = bull ? 1m : -1m;
 		var f = t.Front;
-		var move = Math.Max(f.DailyMove ?? 0m, f.Spot * 0.006m);
+		var move = ExpectedMove(f);
 		var withMoves = inp.Tape is { SessionOpen: > 0m } tp ? dir * (f.Spot - tp.SessionOpen) / move : (decimal?)null;
 		var vixWithOpen = -dir * inp.VixChangeFromOpenPct;
 		var vixWithClose = -dir * inp.VixChangeFromClosePct;
@@ -426,7 +439,7 @@ internal static class CascadeScreener
 	private static CascadeSetupEvaluation ScoreBearTrap(CascadeTerrain t, CascadeInputs inp)
 	{
 		var f = t.Front;
-		var move = Math.Max(f.DailyMove ?? 0m, f.Spot * 0.006m);
+		var move = ExpectedMove(f);
 		var gapPct = inp.Tape?.GapPct ?? 0m;
 		// The stretch runs from the higher of the prior close and the open down to the session low, so a gap down that keeps falling counts as one move.
 		var stretchMoves = inp.Tape is { } st ? Math.Max(0m, Math.Max(st.SessionOpen, st.PrevClose ?? st.SessionOpen) - st.SessionLow) / move : 0m;
@@ -512,14 +525,18 @@ internal static class CascadeScreener
 	private static CascadeSetupEvaluation ScoreBullTrap(CascadeTerrain t, CascadeInputs inp)
 	{
 		var f = t.Front;
-		var move = Math.Max(f.DailyMove ?? 0m, f.Spot * 0.006m);
+		var move = ExpectedMove(f);
 		var gapPct = inp.Tape?.GapPct ?? 0m;
 		// The stretch runs from the lower of the prior close and the open up to the session high, so a gap up that keeps rallying counts as one move.
 		var stretchMoves = inp.Tape is { } st ? Math.Max(0m, st.SessionHigh - Math.Min(st.SessionOpen, st.PrevClose ?? st.SessionOpen)) / move : 0m;
 		var fadeMoves = inp.Tape != null ? Math.Max(0m, inp.Tape.SessionHigh - f.Spot) / move : (decimal?)null;
-		var rejectedCallWall = !t.FrontSettled && f.CallWall.HasValue && inp.Tape != null
-			&& inp.Tape.SessionHigh >= f.CallWall.Value - 0.15m * move
-			&& f.Spot <= f.CallWall.Value
+		// A rejection is a rally that topped AT the wall it ran into: the high within WallTouchMoves of it from either side, price back
+		// under it and faded. The wall is the one standing at the high (CallWallAtHigh0Dte), not today's wall above spot: a rally that
+		// ran far through a wall was not rejected by it, and the strike ranked from where spot sits now is not what the high tested.
+		var testedWall = t.FrontSettled ? null : t.CallWallAtHigh0Dte;
+		var rejectedCallWall = testedWall.HasValue && inp.Tape != null
+			&& Math.Abs(inp.Tape.SessionHigh - testedWall.Value) <= WallTouchMoves * move
+			&& f.Spot <= testedWall.Value
 			&& (fadeMoves ?? 0m) >= 0.20m;
 
 		// Factor 1: Initial Bullish Stretch into Gamma Ceiling (20 pts)
@@ -552,7 +569,7 @@ internal static class CascadeScreener
 			dragPts = Math.Max(dragPts, 14m + 6m * Ramp(fadeMoves.Value, 0.20m, 0.50m));
 		int? f3Pts = t.FrontSettled ? null : RoundPts(dragPts);
 		var f3Detail = t.FrontSettled ? FrontSettledDetail : rejectedCallWall
-			? $"rejected 0DTE call wall ${f.CallWall:N0} (high ${inp.Tape!.SessionHigh:N2} → ${f.Spot:N2})"
+			? $"rejected 0DTE call wall ${t.CallWallAtHigh0Dte:N0} (high ${inp.Tape!.SessionHigh:N2} → ${f.Spot:N2})"
 			: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}";
 
 		// Factor 4: Reversal / Exhaustion Flow (20 pts)
@@ -614,7 +631,7 @@ internal static class CascadeScreener
 		var notes = new List<SetupNote>();
 		var f = t.Front;
 		var dir = bull ? 1m : -1m;
-		var move = Math.Max(f.DailyMove ?? 0m, f.Spot * 0.006m);
+		var move = ExpectedMove(f);
 		var side = bull ? "call" : "put";
 		var oppositeTrap = bull ? "Bull Trap" : "Bear Trap";
 		notes.Add(ShortGammaTerrainNote(t, bull ? "rallies" : "selloffs"));
@@ -694,7 +711,7 @@ internal static class CascadeScreener
 			: new SetupNote(NoteSeverity.Conflict, $"VIX is crushing ({FormatVixMoves(inp)}) — favors genuine Bull Cascade"));
 
 		if (rejectedCallWall && inp.Tape != null)
-			notes.Add(new SetupNote(NoteSeverity.Confirm, $"Rejected 0DTE Call Wall at ${f.CallWall:N0} (tagged ${inp.Tape.SessionHigh:N2}, now ${f.Spot:N2})"));
+			notes.Add(new SetupNote(NoteSeverity.Confirm, $"Rejected 0DTE Call Wall at ${t.CallWallAtHigh0Dte:N0} (tagged ${inp.Tape.SessionHigh:N2}, now ${f.Spot:N2})"));
 		else
 			notes.Add(downwardStructure
 				? new SetupNote(NoteSeverity.Confirm, $"Downward drag active ({FrontStructureDetail(t, inp)})")
@@ -960,7 +977,7 @@ internal static class CascadeScreener
 		var gexMatrix = GexMatrix.Build(quotes, ticker, spot, asOfEt, expiryFilter: null, strikeRangeFraction, dte, maxStrikes, GreekKind.Gamma);
 		if (gexMatrix.Strikes.Count == 0 || gexMatrix.Expiries.Count == 0) return null;
 
-		var terrain = TerrainFrom(gexMatrix, vexMatrix: null, spot, asOfEt);
+		var terrain = TerrainFrom(gexMatrix, vexMatrix: null, spot, asOfEt, sessionHigh: rthBars.Count > 0 ? rthBars.Max(b => b.High) : null);
 		var inputs = await BuildInputsAsync(ticker, spot, asOfEt, gexMatrix, priceCache, intradayCache, smileCache, preloadedSessionRthBars: rthBars, vendorName: vendorName, strikeRangeFraction: strikeRangeFraction, includeCurrentBar: includeCurrentBar, cancellation: cancellation, cache: cache);
 		return (Evaluate(terrain, inputs, triggerScore), gexMatrix.Expiries.Count);
 	}
