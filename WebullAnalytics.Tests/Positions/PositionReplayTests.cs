@@ -147,6 +147,37 @@ public class PositionReplayTests
 	}
 
 	[Fact]
+	public void Execute_ThreeDiagonalOrdersSharingALongStaySeparate()
+	{
+		// 2026-11-12 regression: `analyze trade` with ';'-separated alternatives sharing the long SPY 759P. The second order
+		// spawned a sibling lineage, but the third touched both and merged everything into one 5-leg "DiagonalVertical".
+		var shortExpiry = new DateTime(2026, 11, 17);
+		var longExpiry = new DateTime(2026, 11, 27);
+		var longSymbol = MatchKeys.OccSymbol("SPY", longExpiry, 759m, "P");
+		var timestamp = new DateTime(2026, 11, 12, 16, 0, 0, DateTimeKind.Utc);
+		var trades = new List<Trade>();
+		var seq = 1;
+		foreach (var (shortStrike, shortPrice) in new[] { (760m, 5.705m), (761m, 6.215m), (762m, 6.76m) })
+		{
+			var shortSymbol = MatchKeys.OccSymbol("SPY", shortExpiry, shortStrike, "P");
+			var parentSeq = seq++;
+			var at = timestamp.AddSeconds(parentSeq);
+			trades.Add(new(parentSeq, at, "SPY 27 Nov 2026", $"strategy:Diagonal:SPY:2026-11-27:P759,P{shortStrike}", Asset.OptionStrategy, "Diagonal", Side.Buy, 100, 8.485m - shortPrice, Trade.OptionMultiplier, longExpiry));
+			trades.Add(new(seq++, at, Formatters.FormatOptionDisplay("SPY", shortExpiry, shortStrike), MatchKeys.Option(shortSymbol), Asset.Option, "Put", Side.Sell, 100, shortPrice, Trade.OptionMultiplier, shortExpiry, parentSeq));
+			trades.Add(new(seq++, at, Formatters.FormatOptionDisplay("SPY", longExpiry, 759m), MatchKeys.Option(longSymbol), Asset.Option, "Put", Side.Buy, 100, 8.485m, Trade.OptionMultiplier, longExpiry, parentSeq));
+		}
+
+		var (rows, _, _) = PositionReplay.Execute(new Dictionary<string, List<Lot>>(), new Dictionary<string, Trade>(), trades, asOf: timestamp.Date);
+		var parents = rows.Where(r => r.Asset == Asset.OptionStrategy).ToList();
+
+		Assert.Equal(3, parents.Count);
+		Assert.All(parents, row => { Assert.Equal("Diagonal", row.OptionKind); Assert.Equal(100, row.Qty); });
+		Assert.Equal(new[] { 1.725m, 2.27m, 2.78m }, parents.Select(row => decimal.Round(row.InitialAvgPrice!.Value, 3)).OrderBy(p => p));
+		Assert.Equal(3, rows.Count(row => row.Asset == Asset.Option && row.IsStrategyLeg && row.MatchKey == MatchKeys.Option(longSymbol) && row.Qty == 100));
+		Assert.DoesNotContain(rows, row => row.Asset == Asset.Option && !row.IsStrategyLeg);
+	}
+
+	[Fact]
 	public void Execute_DoesNotMergeSingleLegOrphansWhenContractCountsDoNotMatch()
 	{
 		var shortExpiry = new DateTime(2026, 5, 1);

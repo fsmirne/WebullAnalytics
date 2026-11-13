@@ -340,15 +340,7 @@ internal static class PositionReplay
 			target = touchedLineages.First();
 			if (ShouldSpawnSiblingLineageForStrategyAdd(target, evt))
 			{
-				var sibling = new Lineage
-				{
-					Id = ++lineageIdCounter,
-					Underlying = underlying,
-					Multiplier = (int)evt.Trades[0].Multiplier,
-					FirstEntryTimestamp = evt.Timestamp
-				};
-				active.Add(sibling);
-				ApplyEventToLineage(sibling, evt, isNewLineage: true, active, ref lineageIdCounter);
+				SpawnSiblingLineage(active, evt, underlying, ref lineageIdCounter);
 				return;
 			}
 		}
@@ -365,6 +357,13 @@ internal static class PositionReplay
 			{
 				target = fullyMatched[0];
 			}
+			else if (touchedLineages.All(lin => ShouldSpawnSiblingLineageForStrategyAdd(lin, evt)))
+			{
+				// A new structure that only adds, same direction, to a leg several lineages already share (a third diagonal
+				// on the same long, opened as its own order): its own lineage, exactly as with one touched lineage.
+				SpawnSiblingLineage(active, evt, underlying, ref lineageIdCounter);
+				return;
+			}
 			else
 			{
 				// Handles earlier routing that produced overlapping lineages spanning a shared leg.
@@ -378,6 +377,19 @@ internal static class PositionReplay
 		}
 
 		ApplyEventToLineage(target, evt, isNewLineage: touchedLineages.Count == 0, active, ref lineageIdCounter);
+	}
+
+	private static void SpawnSiblingLineage(List<Lineage> active, Event evt, string underlying, ref int lineageIdCounter)
+	{
+		var sibling = new Lineage
+		{
+			Id = ++lineageIdCounter,
+			Underlying = underlying,
+			Multiplier = (int)evt.Trades[0].Multiplier,
+			FirstEntryTimestamp = evt.Timestamp
+		};
+		active.Add(sibling);
+		ApplyEventToLineage(sibling, evt, isNewLineage: true, active, ref lineageIdCounter);
 	}
 
 	private static bool ShouldSpawnSiblingLineageForStrategyAdd(Lineage lin, Event evt)
