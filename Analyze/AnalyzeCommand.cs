@@ -34,6 +34,10 @@ internal sealed class AnalyzeTradeSettings : GridSettings
 	[Description("Evaluate one of your recent OPENING fills (Webull order history, last 30 days, any ticker), its per-leg fill prices as the cost basis, at --date: the live market now by default, --date fill for the market at the fill itself. Bare --fill picks interactively; N is the 1-based position in that list, newest first (not a file line).")]
 	public FlagValue<int>? Fill { get; set; }
 
+	[CommandOption("--compare")]
+	[Description("After the panels, a table with one row per ';' group, each evaluated as if it were the only trade: net at the spec's prices and at the natural (ask/bid), margin, max profit/loss, profit/margin, break-evens, and the opener scorer's POP and EV (as `analyze risk` scores that group). The panels are unchanged.")]
+	public bool Compare { get; set; }
+
 	protected override bool FillAllowed => Fill?.IsSet == true;
 
 	public override ValidationResult Validate()
@@ -80,7 +84,8 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		}
 
 		var trades = new List<Trade>();
-		var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Spec, EvaluationDate.IsPast ? EvaluationDate.Instant!.Value : DateTime.Now, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
+		var baseTime = EvaluationDate.IsPast ? EvaluationDate.Instant!.Value : DateTime.Now;
+		var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Spec, baseTime, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
 		if (added == null) return 1;
 
 		var closeLookup = await ReportCommand.BuildUnderlyingCloseLookup(trades, cancellation);
@@ -95,16 +100,17 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		var (opts, optsError) = await ReportCommand.BuildAnalysisOptions(settings, positionRows, cancellation, added.Value.Quotes, added.Value.Underlyings, preloadedAsOf: added.Value.AsOf, nearestBoundary: atFill);
 		if (opts == null) { Console.Error.WriteLine($"Error: {optsError}"); return 1; }
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
-		if (settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase))
+		var toText = settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase);
+		var writer = toText ? new StringWriter() : null;
+		if (!toText) TerminalHelper.EnsureTerminalWidthFromConfig();
+		var console = writer != null ? TextFileExporter.CreateTextConsole(writer) : AnsiConsole.Console;
+		TableRenderer.WriteBreakEvenPanels(console, positionRows, opts, settings.Range, displayMode, settings.ShowLegs, ascii: toText);
+		if (settings.Compare)
 		{
-			var writer = new StringWriter();
-			TableRenderer.WriteBreakEvenPanels(TextFileExporter.CreateTextConsole(writer), positionRows, opts, settings.Range, displayMode, settings.ShowLegs, ascii: true);
-			TextFileExporter.WriteConsoleOutputToTextFile(writer, settings.OutputPath ?? AnalyzeCommon.DefaultTextOutputName("trade"), "Trade analysis exported to");
-			return 0;
+			var comparison = await TradeComparison.BuildAsync(settings.Spec, opts, added.Value.Quotes, settings, baseTime, closeLookup, console.Profile.Width, scoreAtCostBasis: settings.Fill?.IsSet == true, cancellation);
+			TradeComparison.Render(console, comparison, opts, ascii: toText);
 		}
-
-		TerminalHelper.EnsureTerminalWidthFromConfig();
-		TableRenderer.WriteBreakEvenPanels(AnsiConsole.Console, positionRows, opts, settings.Range, displayMode, settings.ShowLegs, ascii: false);
+		if (writer != null) TextFileExporter.WriteConsoleOutputToTextFile(writer, settings.OutputPath ?? AnalyzeCommon.DefaultTextOutputName("trade"), "Trade analysis exported to");
 		return 0;
 	}
 

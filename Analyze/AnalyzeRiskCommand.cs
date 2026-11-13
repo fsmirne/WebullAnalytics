@@ -38,7 +38,10 @@ internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 
 	[CommandOption("--iv-default")]
 	[Description("Fallback implied volatility for theoretical pricing when no live IV exists. Percent, default 40.")]
-	public decimal IvDefault { get; set; } = 40m;
+	public decimal IvDefault { get; set; } = DefaultIvPct;
+
+	/// <summary>--iv-default's default, also the fallback IV analyze trade --compare scores with.</summary>
+	internal const decimal DefaultIvPct = 40m;
 
 	[CommandOption("--calibrated")]
 	[Description("ON by default: back-solve each leg's IV from its live bid/ask mid (the mid-consistent surface the engine prices on). Pass --calibrated false to instead trust Webull's reported IV field — a debugging view only; the vendor field is 10–50 vol pts off at 0DTE.")]
@@ -175,7 +178,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 	/// instant, the forming bar excluded (its close lies after the fill), scored at the fill's cost basis.</summary>
 	private sealed record RiskContext(DateTime AsOf, DateTime QuoteAsOf, TrendSnapshot? Trend, bool IncludeCurrentBar, bool ScoreAtCostBasis, string Mode);
 
-	private static IntradayBarCache? CreateIntradayCache()
+	internal static IntradayBarCache? CreateIntradayCache()
 	{
 		var apiConfig = OpenCandidateEvaluator.TryLoadApiConfig();
 		return apiConfig != null ? new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)) : null;
@@ -238,48 +241,9 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 				distinctStrikes: positionLegs.Select(l => l.Parsed.Strike).Distinct().Count(),
 				distinctCallPut: positionLegs.Select(l => l.Parsed.CallPut).Distinct().Count());
 
-		// Compute the regime components via the same shared static pipeline the scanner uses so that
-		// bias, EV, and final score are byte-identical between wa ai scan and wa analyze risk.
-		var dteCalendar = positionLegs.Count > 0 ? Math.Max(1, (positionLegs.Min(l => l.Parsed.ExpiryDate.Date) - asOf.Date).Days) : 5;
-		var priceCache = new HistoricalPriceCache();
-		var aiCfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
-		decimal macroBias = 0m;
-		if (aiCfg?.Indicators.TechnicalFilter.Enabled == true)
-		{
-			var filter = aiCfg.Indicators.TechnicalFilter;
-			var effectiveLookback = filter.Sma200Weight > 0m ? Math.Max(filter.LookbackDays, 200) : filter.LookbackDays;
-			var closes = await priceCache.GetRecentClosesAsync(ticker, effectiveLookback, asOf, cancellation);
-			macroBias = TechnicalIndicators.Compute(closes, filter)?.Score ?? 0m;
-		}
-		var regimeComponents = aiCfg != null ? (await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, asOf, priceCache, intradayCache, includeCurrentBar: context.IncludeCurrentBar, cancellation)).Components : default;
-		var technicalBias = aiCfg != null ? RegimeAnalyzer.BlendBias(regimeComponents, aiCfg.Opener, dteCalendar) : 0m;
-
-		decimal ResolveIv(string sym) =>
-			quotes.TryGetValue(sym, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m
-				? q.ImpliedVolatility.Value
-				: settings.IvDefault / 100m;
-
-		decimal ResolveLegMark(string sym)
-		{
-			var leg = positionLegs.FirstOrDefault(l => l.Symbol == sym);
-			if (leg == null) return 0m;
-			var iv = ResolveIv(sym);
-			var dte = Math.Max(1, (leg.Parsed.ExpiryDate - asOf.Date).Days);
-			return AnalyzePositionCommand.LiveOrBsMid(quotes, sym, spot, leg.Parsed.Strike, dte, iv, leg.Parsed.CallPut);
-		}
-
-		var diagLegs = positionLegs.Select(l => new DiagnosticLeg(
-			Symbol: l.Symbol,
-			Parsed: l.Parsed,
-			IsLong: l.Action == LegAction.Buy,
-			Qty: l.Qty,
-			PricePerShare: ResolveLegMark(l.Symbol),
-			CostBasisPerShare: l.CostBasis)).ToList();
-
-		var (historicalVolAnnual, realizedVol) = await RiskDiagnosticProbeBuilder.TryLoadVolInputsAsync(ticker, asOf, priceCache, cancellation);
-		var sentiment = await FearGreedClient.FetchAsync(asOf, cancellation);
-
-		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, quoteAsOf, ResolveIv, trend, quotes, sentiment);
+		var inputs = await LoadOpenerScoringInputsAsync(ticker, asOf, context.IncludeCurrentBar, intradayCache, cancellation);
+		var diagLegs = BuildDiagnosticLegs(positionLegs, quotes, spot, asOf, settings.IvDefault);
+		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, quoteAsOf, sym => ResolveIv(quotes, sym, settings.IvDefault), trend, quotes, inputs.Sentiment);
 		// At hypothetical spots (--spot override), the leg market mids are stale and back-solving IV
 		// against them produces a nonsense IV. Use broker IV in that case for an internally-consistent
 		// projection.
@@ -288,7 +252,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		// useMarketImpliedIv and use broker IV, diverging from the scan). A fill is a trade that HAPPENED: score
 		// it at what was paid — cost-basis mode — whose IV comes from the quotes' IV field, already
 		// recalibrated to the fill-time mid surface.
-		var probe = RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, ResolveIv, quotes, opener: null, technicalBiasOverride: technicalBias, useCostBasisForOpenerScore: context.ScoreAtCostBasis, historicalVolAnnual: historicalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: sentiment?.Score, ivSolveAsOf: quoteAsOf, realizedVol: realizedVol);
+		var probe = BuildProbe(diagLegs, spot, asOf, quoteAsOf, quotes, inputs, settings.IvDefault, context.ScoreAtCostBasis, useMarketImpliedIv);
 		diagnostic = diagnostic with { Probe = probe };
 
 		var logPath = Program.ResolvePath("data/analyze-risk.jsonl");
@@ -319,6 +283,60 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		}
 		return 0;
 	}
+
+	/// <summary>Everything the opener scorer reads about a ticker besides the legs and their quotes — regime components, the
+	/// 20-session HV and realized-vol model, sentiment, and the ticker's ai-config — loaded once per ticker and instant so several
+	/// structures on the same underlying (analyze trade --compare) score against the same inputs. Ai is null when the ticker has
+	/// no ai-config; the probe then falls back to its unscored rationale.</summary>
+	internal sealed record OpenerScoringInputs(AIConfig? Ai, RegimeAnalyzer.RegimeComponents Components, decimal? HistoricalVolAnnual, RealizedVolModel? RealizedVol, SentimentSnapshot? Sentiment)
+	{
+		/// <summary>The blended regime bias the scanner uses for a structure, horizon = calendar days to its earliest expiry (≥ 1).</summary>
+		internal decimal TechnicalBias(IEnumerable<OptionParsed> legs, DateTime asOf)
+		{
+			if (Ai == null) return 0m;
+			var expiries = legs.Select(l => l.ExpiryDate.Date).ToList();
+			var dteCalendar = expiries.Count > 0 ? Math.Max(1, (expiries.Min() - asOf.Date).Days) : 5;
+			return RegimeAnalyzer.BlendBias(Components, Ai.Opener, dteCalendar);
+		}
+	}
+
+	/// <summary>Loads <see cref="OpenerScoringInputs"/> through the same shared static pipeline the scanner uses, so bias, EV
+	/// and final score are byte-identical between wa ai scan and wa analyze risk.</summary>
+	internal static async Task<OpenerScoringInputs> LoadOpenerScoringInputsAsync(string ticker, DateTime asOf, bool includeCurrentBar, IntradayBarCache? intradayCache, CancellationToken cancellation)
+	{
+		var priceCache = new HistoricalPriceCache();
+		var aiCfg = RiskDiagnosticProbeBuilder.TryLoadAiConfigQuiet(ticker, out _);
+		decimal macroBias = 0m;
+		if (aiCfg?.Indicators.TechnicalFilter.Enabled == true)
+		{
+			var filter = aiCfg.Indicators.TechnicalFilter;
+			var effectiveLookback = filter.Sma200Weight > 0m ? Math.Max(filter.LookbackDays, 200) : filter.LookbackDays;
+			var closes = await priceCache.GetRecentClosesAsync(ticker, effectiveLookback, asOf, cancellation);
+			macroBias = TechnicalIndicators.Compute(closes, filter)?.Score ?? 0m;
+		}
+		var regimeComponents = aiCfg != null ? (await OpenCandidateEvaluator.ComputeRegimeComponentsAsync(ticker, aiCfg.Opener, macroBias, asOf, priceCache, intradayCache, includeCurrentBar, cancellation)).Components : default;
+		var (historicalVolAnnual, realizedVol) = await RiskDiagnosticProbeBuilder.TryLoadVolInputsAsync(ticker, asOf, priceCache, cancellation);
+		var sentiment = await FearGreedClient.FetchAsync(asOf, cancellation);
+		return new OpenerScoringInputs(aiCfg, regimeComponents, historicalVolAnnual, realizedVol, sentiment);
+	}
+
+	/// <summary>A leg's IV: the quote's (calibrated) IV, else <paramref name="ivDefaultPct"/>.</summary>
+	internal static decimal ResolveIv(IReadOnlyDictionary<string, OptionContractQuote> quotes, string symbol, decimal ivDefaultPct) =>
+		quotes.TryGetValue(symbol, out var q) && q.ImpliedVolatility.HasValue && q.ImpliedVolatility.Value > 0m ? q.ImpliedVolatility.Value : ivDefaultPct / 100m;
+
+	/// <summary>The legs as the diagnostic and probe read them: each marked at its live mid (Black-Scholes when the book is unusable),
+	/// with its cost basis.</summary>
+	internal static List<DiagnosticLeg> BuildDiagnosticLegs(IReadOnlyList<AnalyzePositionCommand.PositionSnapshot> positionLegs, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot, DateTime asOf, decimal ivDefaultPct) =>
+		positionLegs.Select(l =>
+		{
+			var dte = Math.Max(1, (l.Parsed.ExpiryDate - asOf.Date).Days);
+			var mark = AnalyzePositionCommand.LiveOrBsMid(quotes, l.Symbol, spot, l.Parsed.Strike, dte, ResolveIv(quotes, l.Symbol, ivDefaultPct), l.Parsed.CallPut);
+			return new DiagnosticLeg(Symbol: l.Symbol, Parsed: l.Parsed, IsLong: l.Action == LegAction.Buy, Qty: l.Qty, PricePerShare: mark, CostBasisPerShare: l.CostBasis);
+		}).ToList();
+
+	/// <summary>The opener-style probe (structure, POP, EV, score) for <paramref name="diagLegs"/>: the scanner's CandidateScorer on these inputs.</summary>
+	internal static RiskDiagnosticProbe BuildProbe(IReadOnlyList<DiagnosticLeg> diagLegs, decimal spot, DateTime asOf, DateTime quoteAsOf, IReadOnlyDictionary<string, OptionContractQuote> quotes, OpenerScoringInputs inputs, decimal ivDefaultPct, bool scoreAtCostBasis, bool useMarketImpliedIv) =>
+		RiskDiagnosticProbeBuilder.Build(diagLegs, spot, asOf, sym => ResolveIv(quotes, sym, ivDefaultPct), quotes, opener: null, technicalBiasOverride: inputs.TechnicalBias(diagLegs.Select(l => l.Parsed), asOf), useCostBasisForOpenerScore: scoreAtCostBasis, historicalVolAnnual: inputs.HistoricalVolAnnual, useMarketImpliedIv: useMarketImpliedIv, sentimentScore: inputs.Sentiment?.Score, ivSolveAsOf: quoteAsOf, realizedVol: inputs.RealizedVol);
 
 	/// <summary>A past evaluation instant (--date, or a --fill at its own instant): the legs' risk against the market at that instant — each leg's
 	/// NBBO and its expiries' chains at that minute (the boundary nearest a fill, <paramref name="nearest"/>), the minute-bar spot, as-of
