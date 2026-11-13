@@ -1944,7 +1944,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		}
 		else
 			AnsiConsole.Write(table);
-		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); [bold]Pull[/] = net-GEX-weighted lean from spot in ATM-expected-move units (raw points ÷ spot·σ_atm·√T for the remaining life — a static book holds roughly flat as the clock decays instead of bleeding to zero), [green]+[/] = the ladder's net exposure sits ABOVE spot, [red]−[/] = below. Both aggregate every in-range strike, not just the displayed rows. [green]Wall·C[/]/[red]Wall·P[/] = the strike carrying the largest call/put GEX that bucket (per-side argmax — a big two-sided strike can be a wall yet net toward dim in the map)." + (liveLog.Count > 0 ? " [cyan]·live[/] rows = the gravity/walls logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
+		AnsiConsole.MarkupLine("[dim]Cell = net GEX recomputed at each bucket's spot against the day's fixed OI. [green]Green[/] = call-dominated, [red]red[/] = put-dominated, brightness ∝ |net|. Bold + underlined cell = that bucket's gravity strike (max gross gamma), also spelled out in the [bold]Gravity[/] row. [bold]Centroid[/] = gross-gamma-weighted mean strike (gravity without the argmax flicker); " + GexLegends.PullLegendMarkup + " Centroid and Pull aggregate every in-range strike, not just the displayed rows. [green]Wall·C[/]/[red]Wall·P[/] = the strike carrying the largest call/put GEX that bucket (per-side argmax — a big two-sided strike can be a wall yet net toward dim in the map)." + (liveLog.Count > 0 ? " [cyan]·live[/] rows = the gravity/walls logged in real time by live `analyze gex` runs (data/gex) nearest each bucket." : "") + "[/]");
 		if (tapeHours.Count > 0)
 			AnsiConsole.MarkupLine($"[dim]Volume tape = contracts TRADED per bucket ({(hasStoreTape ? "summed from the store's ohlcv minute bars (data/quotes.db, ThetaData); the first mark has no trailing window and stays empty" : "Δ of the captures' cumulative day volume; the first column is volume since the open")}), cell = net call−put Δvolume on the same color language as the gamma map — [green]green[/] = call-side flow, [red]red[/] = put-side. Which side traded, NOT which way: open/close and buy/sell need signed prints. [bold]Σvol[/] = total contracts that bucket across the window. The book is static intraday (OI settles overnight); this tape is the only live axis.[/]");
 		else if (liveChain && !hasTape)
@@ -2242,6 +2242,12 @@ internal enum GreekKind
 /// <summary>One cell of the exposure matrix at a given (expiry, strike). CallGex/PutGex are the per-side dollar
 /// exposures (see <see cref="GexMatrix.Build"/>); non-negative for gamma, signed for vanna. Net = call − put
 /// (the dealer long-call / short-put convention), Gross = the magnitude concentration at the strike.</summary>
+/// <summary>Footer legend for the per-expiry Pull reading (<see cref="GexMatrix.NetPullByExpiry"/>), shared by analyze gex and analyze cascade.</summary>
+internal static class GexLegends
+{
+	internal const string PullLegendMarkup = "[bold]Pull[/] = Σ net GEX·(strike − spot) ÷ Σ |net GEX| (net = call − put GEX), in ATM expected moves for the remaining life (points ÷ spot·σ_atm·√T, so a static book holds roughly flat as the clock decays). It is NOT a call/put balance or a direction: call-heavy strikes ABOVE spot and put-heavy strikes BELOW spot both add [green]+[/], so the ordinary book (calls overhead, puts underneath) reads [green]+[/] and its size is how far out from spot that net gamma sits; [red]−[/] = an inverted book (puts above spot or calls below, e.g. after spot ran through its walls). Orientation only: as a magnet it has not predicted the move.";
+}
+
 internal sealed record GexCell(decimal CallGex, decimal PutGex)
 {
 	// Abs-sum, not a plain sum: identical to call+put for gamma (both sides already non-negative), and the
@@ -2283,9 +2289,10 @@ internal sealed class GexMatrix
 	/// Gravity is an argmax, so when the top strikes are near-tied it rattles between them minute to minute and a
 	/// coarse sampling grid turns that flicker into a false signal. The centroid moves continuously instead.</summary>
 	public Dictionary<DateTime, decimal?> GrossCentroidByExpiry { get; }
-	/// <summary>Net-GEX-weighted signed distance from spot per expiry, in strike points:
-	/// Σ(net_k × (K − S)) / Σ|net_k|. Positive = the net exposure sits ABOVE spot (a ladder that is green up top),
-	/// negative = below (red underneath). This is the whole-ladder reading rather than any single strike.</summary>
+	/// <summary>Net-GEX-weighted signed distance from spot per expiry, Σ(net_k × (K − S)) / Σ|net_k| (net = call − put GEX), in
+	/// remaining-life ATM expected moves. Not a call/put balance: a call-dominated strike above spot and a put-dominated strike below
+	/// it both add positive, so the ordinary book (calls overhead, puts underneath) reads positive and only an inverted one (puts above
+	/// spot or calls below) reads negative. This is the whole-ladder reading rather than any single strike.</summary>
 	public Dictionary<DateTime, decimal?> NetPullByExpiry { get; }
 	public IReadOnlyList<GexContributor> Contributors { get; }
 	/// <summary>Separate from <see cref="Contributors"/>: max pain sums total ITM payout across every listed

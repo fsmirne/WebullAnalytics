@@ -78,7 +78,7 @@ internal static class CascadePanel
 			rows.Add(new Markup($"{NoteGlyph(note.Severity)} {Markup.Escape(note.Text)}"));
 
 		AnsiConsole.Write(new Panel(new Rows(rows)).Border(BoxBorder.Rounded).BorderColor(Color.Grey).Padding(2, 1));
-		AnsiConsole.MarkupLine("[dim]Regimes: [red]BEAR CASCADE[/] = short-γ + put flow + intraday VIX expansion + VWAP breakdown. [aqua]BEAR TRAP[/] = gap-down / morning dip + intraday VIX stall + VWAP reclaim. [green]BULL CASCADE[/] = intraday VIX crush + call flow + overhead target wall + VWAP breakout. [yellow]BULL TRAP[/] = gap-up / morning rally + VIX failing to crush + VWAP roll-over. Describes the session so far, not what comes next: over 2022–2026 a confirmed regime at 09:50 ET showed no edge from there to the close.[/]");
+		AnsiConsole.MarkupLine("[dim]Regimes: [red]BEAR CASCADE[/] = short-γ + put flow + intraday VIX expansion + VWAP breakdown. [aqua]BEAR TRAP[/] = gap-down / morning dip + intraday VIX stall + VWAP reclaim. [green]BULL CASCADE[/] = intraday VIX crush + call flow + overhead target wall + VWAP breakout. [yellow]BULL TRAP[/] = gap-up / morning rally + VIX failing to crush + VWAP roll-over. Describes the session so far, not what comes next: over 2022–2026 a confirmed regime at 09:50 ET showed no edge from there to the close. 0DTE " + GexLegends.PullLegendMarkup + "[/]");
 	}
 
 	private static Table RegimeComparisonTable(CascadeReading reading)
