@@ -87,7 +87,8 @@ internal static class OrderRequestBuilder
 		string OrderType,         // "LIMIT" or "MARKET"
 		decimal? LimitPrice,      // absolute per-share combo price; null only when OrderType == MARKET
 		string TimeInForce,       // "DAY" or "GTC"
-		string? PositionIntent = null); // BUY_TO_OPEN | SELL_TO_OPEN | BUY_TO_CLOSE | SELL_TO_CLOSE; applied to order + every option leg
+		string? PositionIntent = null, // BUY_TO_OPEN | SELL_TO_OPEN | BUY_TO_CLOSE | SELL_TO_CLOSE; applied to order + every option leg
+		string TradingSession = "CORE"); // support_trading_session: CORE (09:30-16:00 ET) | ALL (04:00-20:00) | NIGHT (20:00-04:00) | ALL_DAY
 
 	internal static OrderRequestBody Build(BuildParams p)
 	{
@@ -99,6 +100,7 @@ internal static class OrderRequestBuilder
 			ClientOrderId = GenerateClientOrderId(),
 			OrderType = p.OrderType,
 			TimeInForce = p.TimeInForce,
+			SupportTradingSession = p.TradingSession,
 			LimitPrice = p.OrderType == "LIMIT" ? Math.Abs(p.LimitPrice!.Value).ToString("0.####", System.Globalization.CultureInfo.InvariantCulture) : null,
 		};
 		body.NewOrders.Add(order);

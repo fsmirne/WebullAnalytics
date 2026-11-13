@@ -229,6 +229,13 @@ internal sealed class TradePlaceSettings : TradeSubcommandSettings
 	[Description("Time-in-force: day|gtc. Default: day.")]
 	public string Tif { get; set; } = "day";
 
+	/// <summary>Webull's support_trading_session values, lower-cased as the CLI takes them.</summary>
+	internal static readonly string[] Sessions = ["core", "all", "night", "all_day"];
+
+	[CommandOption("--session <VALUE>")]
+	[Description("Trading sessions the order may work in: core (09:30-16:00 ET, default), all (04:00-20:00 ET, extended hours), night (20:00-04:00 ET) or all_day.")]
+	public string Session { get; set; } = "core";
+
 	[CommandOption("--strategy <VALUE>")]
 	[Description("Override auto-detected strategy. Values: single|stock|vertical|calendar|diagonal|iron_condor|iron_butterfly|butterfly|condor|straddle|strangle|covered_call|protective_put|collar.")]
 	public string? Strategy { get; set; }
@@ -274,6 +281,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		// 2b. Validate --tif.
 		var tifLower = s.Tif.ToLowerInvariant();
 		if (tifLower != "day" && tifLower != "gtc") { AnsiConsole.MarkupLine("[red]Error:[/] --tif must be 'day' or 'gtc'."); return 2; }
+		if (!TradePlaceSettings.Sessions.Contains(s.Session.ToLowerInvariant())) { AnsiConsole.MarkupLine($"[red]Error:[/] --session must be one of {string.Join(", ", TradePlaceSettings.Sessions)}."); return 2; }
 
 		decimal? limit = null;
 		if (type == "limit")
@@ -349,10 +357,11 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 			TimeInForce: s.Tif.ToUpperInvariant(),
 			// `trade place` opens positions, so default to {side}_TO_OPEN; --intent overrides (e.g. a manual
 			// buy_to_close). Ignored by the builder for pure-stock orders (position_intent is option-only).
-			PositionIntent: positionIntent
+			PositionIntent: positionIntent,
+			TradingSession: s.Session.ToUpperInvariant()
 		));
 
-		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]  [dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Side:[/] {Markup.Escape(side)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}");
+		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]  [dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Side:[/] {Markup.Escape(side)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}  [dim]Session:[/] {s.Session.ToUpperInvariant()}");
 		if (s.Debug)
 			AnsiConsole.MarkupLine($"[dim]Payload:[/] {Markup.Escape(OrderRequestBuilder.Serialize(body))}");
 
