@@ -27,7 +27,6 @@ internal sealed class AnalyzeSentimentCommand : AsyncCommand<AnalyzeSentimentSet
 
 	private static async Task<int> RenderAsync(AnalyzeSentimentSettings settings, CancellationToken cancellation)
 	{
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var asOf = settings.PinnedInstant ?? DateTime.Now;
 		var snapshot = await FearGreedClient.FetchAsync(asOf, cancellation);

@@ -102,7 +102,6 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 		var toText = settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase);
 		var writer = toText ? new StringWriter() : null;
-		if (!toText) TerminalHelper.EnsureTerminalWidthFromConfig();
 		var console = writer != null ? TextFileExporter.CreateTextConsole(writer) : AnsiConsole.Console;
 		TableRenderer.WriteBreakEvenPanels(console, positionRows, opts, settings.Range, displayMode, settings.ShowLegs, ascii: toText);
 		if (settings.Compare)
@@ -605,7 +604,6 @@ internal static class AnalyzeCommon
 
 	internal static async Task<int> RunRollAnalysis(AnalyzeRollSettings settings, CancellationToken cancellation)
 	{
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var gtIdx = settings.Spec.IndexOf('>');
 		var remaining = settings.Spec[(gtIdx + 1)..];

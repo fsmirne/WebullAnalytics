@@ -82,7 +82,6 @@ internal sealed class AIGateCommand : AsyncCommand<AIGateSettings>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var cfg = config.Opener.ZeroDteGate;
 		if (!cfg.Enabled)

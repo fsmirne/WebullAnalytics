@@ -3,7 +3,8 @@ using Spectre.Console;
 namespace WebullAnalytics.Utils;
 
 /// <summary>
-/// Checks terminal width before rendering wide console tables and offers to resize if too narrow.
+/// Checks terminal width before rendering wide console tables and offers to resize if too narrow. Runs once before every command
+/// (<see cref="TerminalWidthInterceptor"/>), so every command lays its panels out at the same width.
 /// </summary>
 static class TerminalHelper
 {
@@ -41,12 +42,19 @@ static class TerminalHelper
 	/// </summary>
 	public static void EnsureTerminalWidth(bool simplified = false, bool autoExpand = false, int? maxWidth = null)
 	{
-		// Captured/redirected output (--output text, a pipe) has no terminal to resize and can't answer the prompt;
-		// its layout is sized from the capture console's own width instead.
+		var layoutWidth = simplified ? SimplifiedMinWidth : DetailedMinWidth;
+		// Redirected output (a pipe, a file, a shell across WSL interop) has no window to measure or resize, and Spectre then lays
+		// everything out at 80 columns: every wide panel wraps inside its cells. It gets the --output text width instead.
+		if (Console.IsOutputRedirected)
+		{
+			AnsiConsole.Profile.Width = layoutWidth;
+			return;
+		}
+		// A console that can't answer the prompt (--output text's capture console) is sized by its creator.
 		if (!AnsiConsole.Profile.Capabilities.Interactive)
 			return;
 
-		var minimumWidth = simplified ? SimplifiedMinWidth : DetailedMinWidth;
+		var minimumWidth = layoutWidth;
 		if (maxWidth.HasValue)
 			minimumWidth = Math.Min(minimumWidth, maxWidth.Value);
 
@@ -90,5 +98,25 @@ static class TerminalHelper
 		}
 
 		return false;
+	}
+}
+
+/// <summary>Runs <see cref="TerminalHelper.EnsureTerminalWidthFromConfig"/> before every command, so no command renders at a width
+/// another one would have widened. Skipped when the command line sends the output to a file (--output text / excel): that output
+/// is laid out by its own capture console. An output format set only in config.json is applied by the command after this runs,
+/// so such a run still widens the terminal it is not writing to, which is harmless.</summary>
+internal sealed class TerminalWidthInterceptor : Spectre.Console.Cli.ICommandInterceptor
+{
+	public void Intercept(Spectre.Console.Cli.CommandContext context, Spectre.Console.Cli.CommandSettings settings)
+	{
+		var output = settings switch
+		{
+			WebullAnalytics.Analyze.AnalyzeBaseSettings a => a.OutputFormat,
+			WebullAnalytics.Report.GridSettings g => g.OutputFormat,
+			WebullAnalytics.AI.AISubcommandSettings ai => ai.Output,
+			_ => "console",
+		};
+		if (!output.Equals("console", StringComparison.OrdinalIgnoreCase)) return;
+		TerminalHelper.EnsureTerminalWidthFromConfig(simplified: settings is WebullAnalytics.Report.ReportSettings { Simplified: true });
 	}
 }

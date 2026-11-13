@@ -37,7 +37,6 @@ internal sealed class AnalyzeTopCommand : AsyncCommand<AnalyzeTopSettings>
 
 	protected override async Task<int> ExecuteAsync(CommandContext context, AnalyzeTopSettings settings, CancellationToken cancellation)
 	{
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var configPath = Program.ResolvePath(Program.ApiConfigPath);
 		var apiConfig = File.Exists(configPath) ? JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath)) : null;

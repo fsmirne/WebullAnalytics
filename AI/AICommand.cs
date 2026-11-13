@@ -407,7 +407,6 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 		if (string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase))
 			Console.Error.WriteLine($"[debug] wa ai scan: log-level=debug baseDir='{Program.BaseDir}' ticker={config.Ticker} proposals={settings.Proposals} theoretical={settings.Theoretical} submit={settings.Submit} submitOverride={settings.SubmitOverride}");
 
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		return settings.Theoretical
 			? await RunTheoreticalAsync(settings, config, cancellation)
@@ -656,7 +655,6 @@ internal sealed class AIReplayCommand : AsyncCommand<AIReplaySettings>
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
 
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		// Load all historical trades using the existing pipeline.
 		var reportSettings = new ReportSettings();
@@ -950,7 +948,6 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 			}
 		}
 
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var since = settings.Since != null
 			? DateTime.ParseExact(settings.Since, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)

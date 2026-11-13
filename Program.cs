@@ -103,6 +103,7 @@ class Program
 		{
 			config.SetApplicationName("WebullAnalytics");
 			config.Settings.StrictParsing = true;
+			config.SetInterceptor(new Utils.TerminalWidthInterceptor());
 			if (Environment.GetEnvironmentVariable("WA_DEBUG") == "1") config.PropagateExceptions();   // full stack traces instead of Spectre's bare "Error: <message>"
 			config.AddCommand<ReportCommand>("report");
 			config.AddBranch("analyze", analyze =>

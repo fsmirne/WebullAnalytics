@@ -134,7 +134,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		if (settings.PinnedInstant is { } instant) ReportCommand.PinEvaluation(instant);
 
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		if (settings.Proposal != null && !TryLoadProposalSpec(settings))
 			return 1;

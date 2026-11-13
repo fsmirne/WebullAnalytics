@@ -201,7 +201,6 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 
 	private static async Task<int> RenderAsync(AnalyzeGexSettings settings, CancellationToken cancellation)
 	{
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var ticker = settings.Ticker.ToUpperInvariant();
 		var pinned = settings.PinnedInstant;

@@ -85,7 +85,6 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		if (settings.Tif != null) { config.AutoExecute.Management.TimeInForce = settings.Tif.ToUpperInvariant(); config.AutoExecute.Opener.TimeInForce = settings.Tif.ToUpperInvariant(); }
 		if (settings.Start != null) config.Watch.StartTime = settings.Start;
 
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var tickSeconds = settings.Tick ?? config.Watch.TickIntervalSeconds;
 

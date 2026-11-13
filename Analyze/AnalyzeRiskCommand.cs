@@ -119,7 +119,6 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var asOf = settings.EffectiveDate;
 		if (asOf.Instant is { } instant) ReportCommand.PinEvaluation(instant);
 
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		if (settings.Proposal != null)
 			return RenderFromProposal(settings);

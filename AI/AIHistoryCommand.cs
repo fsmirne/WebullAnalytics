@@ -87,7 +87,6 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 
 	protected override async Task<int> ExecuteAsync(CommandContext context, AIHistorySettings settings, CancellationToken cancellation)
 	{
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 		var ticker = settings.Ticker.ToUpperInvariant();
 		var asOf = DateTime.UtcNow;
 		var earliest = asOf.AddYears(-settings.LookbackYears);

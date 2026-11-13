@@ -55,7 +55,6 @@ internal sealed class AnalyzeRegimeCommand : AsyncCommand<AnalyzeRegimeSettings>
 	{
 		var config = AIContext.ResolveConfig(settings);
 		if (config == null) return 1;
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		if (!config.Opener.Enabled)
 		{

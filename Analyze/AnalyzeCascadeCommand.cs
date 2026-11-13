@@ -76,7 +76,6 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 
 	private static async Task<int> RenderAsync(AnalyzeCascadeSettings settings, CancellationToken cancellation)
 	{
-		TerminalHelper.EnsureTerminalWidthFromConfig();
 
 		var ticker = settings.Ticker.ToUpperInvariant();
 		var nowEt = MarketTime.NowEt();
