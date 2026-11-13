@@ -352,19 +352,17 @@ internal static class CascadeScreener
 		var f3Pts = inp.FlowShare.HasValue ? RoundPts(flowPts + Math.Min(6m, pacePts)) : (int?)null;
 		var f3Detail = FormatFlowDetail(inp, bull);
 
-		// Factor 4: Gravity / Net Pull Ahead & Target Wall (20 pts)
+		// Factor 4: Gravity Ahead & Target Wall (20 pts)
 		var targetWall = CascadeTargetWall(t, bull, move);
 		var wallAhead = targetWall.HasValue ? dir * (targetWall.Value - f.Spot) : (decimal?)null;
 		decimal gravPts = 0m;
 		var anchor = t.Gravity0Dte ?? t.Centroid0Dte;
 		if (anchor.HasValue && dir * (anchor.Value - f.Spot) >= 0m)
 			gravPts = 10m * Ramp(dir * (anchor.Value - f.Spot), 0m, 0.50m * move);
-		if (dir * t.NetPull0Dte is { } pullWith && pullWith > 0m)
-			gravPts = Math.Max(gravPts, 10m * Ramp(pullWith, 0.10m, 0.65m));
 		if (wallAhead >= 0.15m * move)
 			gravPts += wallAhead.Value <= 1.5m * move ? 10m * Ramp(wallAhead.Value, 0.15m * move, 0.50m * move) : 5m;
 		int? f4Pts = t.FrontSettled ? null : RoundPts(gravPts);
-		var f4Detail = t.FrontSettled ? FrontSettledDetail : $"front gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, pull {(t.NetPull0Dte.HasValue ? $"{t.NetPull0Dte.Value:+0.00;-0.00}σ" : "—")}, target {(bull ? "C" : "P")}-wall {(targetWall.HasValue ? $"${targetWall.Value:N0} ({targetWall.Value - f.Spot:+0;-0} pts)" : "—")}";
+		var f4Detail = t.FrontSettled ? FrontSettledDetail : $"front gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, target {(bull ? "C" : "P")}-wall {(targetWall.HasValue ? $"${targetWall.Value:N0} ({targetWall.Value - f.Spot:+0;-0} pts)" : "—")}";
 
 		// Factor 5: Session Tape & VWAP Hold (20 pts)
 		int? f5Pts = null;
@@ -387,7 +385,7 @@ internal static class CascadeScreener
 			new("Short-Gamma Terrain", f1Pts, FactorMax, f1Detail),
 			new(bull ? "Intraday VIX Crush" : "Intraday VIX Expansion", f2Pts, FactorMax, f2Detail),
 			new(bull ? "Call Flow & Pace" : "Put Flow & Pace", f3Pts, FactorMax, f3Detail),
-			new("Gravity Pull & Target Wall", f4Pts, FactorMax, f4Detail),
+			new("Gravity & Target Wall", f4Pts, FactorMax, f4Detail),
 			new(bull ? "VWAP Breakout Tape" : "VWAP Breakdown Tape", f5Pts, FactorMax, f5Detail),
 		};
 
@@ -450,15 +448,13 @@ internal static class CascadeScreener
 		}
 		var f2Detail = $"VIX vs open {(inp.VixChangeFromOpenPct.HasValue ? $"{inp.VixChangeFromOpenPct.Value:+0.0;-0.0}%" : "n/a")}, vs close {(inp.VixChangeFromClosePct.HasValue ? $"{inp.VixChangeFromClosePct.Value:+0.0;-0.0}%" : "n/a")}";
 
-		// Factor 3: Overhead 0DTE Gravity / Pull Magnet (20 pts)
+		// Factor 3: Overhead 0DTE Gravity Magnet (20 pts)
 		decimal overheadPts = 0m;
 		var anchor = t.Gravity0Dte ?? t.Centroid0Dte;
 		if (anchor.HasValue && anchor.Value > f.Spot)
 			overheadPts = 20m * Ramp(anchor.Value - f.Spot, 0.05m * move, 0.60m * move);
-		if (t.NetPull0Dte is { } pull && pull > 0m)
-			overheadPts = Math.Max(overheadPts, 20m * Ramp(pull, 0.05m, 0.45m));
 		int? f3Pts = t.FrontSettled ? null : RoundPts(overheadPts);
-		var f3Detail = t.FrontSettled ? FrontSettledDetail : $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}, pull {(t.NetPull0Dte.HasValue ? $"{t.NetPull0Dte.Value:+0.00;-0.00}σ" : "—")}";
+		var f3Detail = t.FrontSettled ? FrontSettledDetail : $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}";
 
 		// Factor 4: Reversal / Trapped Flow (20 pts)
 		decimal crowdPts = 0m;
@@ -504,7 +500,6 @@ internal static class CascadeScreener
 		var vixNotExpanding = inp.VixChangeFromOpenPct is <= 0.5m;
 		var reclaimedVwap = inp.Tape is { Side: VwapSide.Above } && (bounceMoves ?? 0m) >= 0.25m;
 		var upwardStructure = (t.Gravity0Dte.HasValue && t.Gravity0Dte.Value > f.Spot)
-			|| (t.NetPull0Dte ?? 0m) > 0.05m
 			|| (inp.FlowShare ?? 0m) >= 0.10m;
 		var complete = allScored && hadBearStretch && vixNotExpanding && reclaimedVwap && upwardStructure;
 
@@ -553,14 +548,12 @@ internal static class CascadeScreener
 		var anchor = t.Gravity0Dte ?? t.Centroid0Dte;
 		if (anchor.HasValue && anchor.Value < f.Spot)
 			dragPts = 20m * Ramp(f.Spot - anchor.Value, 0.05m * move, 0.60m * move);
-		if (t.NetPull0Dte is { } pull && pull < 0m)
-			dragPts = Math.Max(dragPts, 20m * Ramp(-pull, 0.05m, 0.45m));
 		if (rejectedCallWall && fadeMoves.HasValue)
 			dragPts = Math.Max(dragPts, 14m + 6m * Ramp(fadeMoves.Value, 0.20m, 0.50m));
 		int? f3Pts = t.FrontSettled ? null : RoundPts(dragPts);
 		var f3Detail = t.FrontSettled ? FrontSettledDetail : rejectedCallWall
 			? $"rejected 0DTE call wall ${f.CallWall:N0} (high ${inp.Tape!.SessionHigh:N2} → ${f.Spot:N2})"
-			: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}, pull {(t.NetPull0Dte.HasValue ? $"{t.NetPull0Dte.Value:+0.00;-0.00}σ" : "—")}";
+			: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}";
 
 		// Factor 4: Reversal / Exhaustion Flow (20 pts)
 		decimal exhaustPts = 0m;
@@ -606,7 +599,6 @@ internal static class CascadeScreener
 		var vixNotCrushing = inp.VixChangeFromOpenPct is >= -0.5m;
 		var lostVwap = inp.Tape is { Side: VwapSide.Below } && (fadeMoves ?? 0m) >= 0.25m;
 		var downwardStructure = (t.Gravity0Dte.HasValue && t.Gravity0Dte.Value < f.Spot)
-			|| (t.NetPull0Dte ?? 0m) < -0.05m
 			|| (inp.FlowShare ?? 0m) <= -0.10m
 			|| rejectedCallWall;
 		var complete = allScored && hadBullStretch && vixNotCrushing && lostVwap && downwardStructure;
@@ -641,7 +633,7 @@ internal static class CascadeScreener
 		if (gravityVeto)
 			notes.Add(new SetupNote(NoteSeverity.Conflict, $"Front gravity (${t.Gravity0Dte:N0}) sits well {(bull ? "below" : "above")} spot (${f.Spot:N2}) while VIX is tame — {oppositeTrap} risk"));
 		else if (t.Gravity0Dte.HasValue)
-			notes.Add(new SetupNote(dir * (t.Gravity0Dte.Value - f.Spot) >= 0m ? NoteSeverity.Confirm : NoteSeverity.Warn, $"Front gravity at ${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0.0;-0.0} pts vs spot, pull {t.NetPull0Dte ?? 0m:+0.00;-0.00}σ)"));
+			notes.Add(new SetupNote(dir * (t.Gravity0Dte.Value - f.Spot) >= 0m ? NoteSeverity.Confirm : NoteSeverity.Warn, $"Front gravity at ${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0.0;-0.0} pts vs spot)"));
 
 		if (targetWall.HasValue)
 		{
@@ -662,7 +654,7 @@ internal static class CascadeScreener
 
 	private static string FrontStructureDetail(CascadeTerrain t, CascadeInputs inp) => t.FrontSettled
 		? $"flow {inp.FlowShare ?? 0m:+0.00;-0.00}"
-		: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, pull {t.NetPull0Dte ?? 0m:+0.00;-0.00}σ, flow {inp.FlowShare ?? 0m:+0.00;-0.00}";
+		: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, flow {inp.FlowShare ?? 0m:+0.00;-0.00}";
 
 	private static List<SetupNote> BuildNotesBearTrap(CascadeTerrain t, CascadeInputs inp, decimal stretchMoves, bool hadBearStretch, bool vixNotExpanding, bool reclaimedVwap, bool upwardStructure)
 	{
@@ -678,7 +670,7 @@ internal static class CascadeScreener
 
 		notes.Add(upwardStructure
 			? new SetupNote(NoteSeverity.Confirm, $"Upward structure support ({FrontStructureDetail(t, inp)})")
-			: new SetupNote(NoteSeverity.Warn, $"0DTE gravity/pull/flow still leaning below spot"));
+			: new SetupNote(NoteSeverity.Warn, "0DTE gravity/flow still leaning below spot"));
 
 		if (inp.Tape is { } tape)
 		{
@@ -706,7 +698,7 @@ internal static class CascadeScreener
 		else
 			notes.Add(downwardStructure
 				? new SetupNote(NoteSeverity.Confirm, $"Downward drag active ({FrontStructureDetail(t, inp)})")
-				: new SetupNote(NoteSeverity.Warn, "0DTE gravity/pull/flow still leaning above spot"));
+				: new SetupNote(NoteSeverity.Warn, "0DTE gravity/flow still leaning above spot"));
 
 		if (inp.Tape is { } tape)
 		{

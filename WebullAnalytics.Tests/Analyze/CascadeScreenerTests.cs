@@ -116,6 +116,26 @@ public class CascadeScreenerTests
 		Assert.Equal("Above", reading.GetProperty("inputs").GetProperty("tape").GetProperty("side").GetString());
 	}
 
+	// Pull is not a direction: calls overhead and puts underneath (the ordinary book) both read +, so a score that rewarded + as an
+	// upward magnet credited the bull side on most days. Flipping pull's sign, or dropping it, must not move any setup.
+	[Fact]
+	public void Pull_ScoresNothing()
+	{
+		foreach (var (t, i) in new[] { BullCascadeSession(), BearCascadeSession(), BearTrapSession(), BullTrapSession() })
+		{
+			var baseline = CascadeScreener.Evaluate(t, i);
+			foreach (var pull in new decimal?[] { -t.NetPull0Dte, null, 3m, -3m })
+			{
+				var r = CascadeScreener.Evaluate(t with { NetPull0Dte = pull }, i);
+				foreach (var (regime, setup) in baseline.Setups)
+				{
+					Assert.Equal(setup.Score, r.Setups[regime].Score);
+					Assert.Equal(setup.Complete, r.Setups[regime].Complete);
+				}
+			}
+		}
+	}
+
 	[Fact]
 	public void BullCascade_ConfirmsOnTrendUpWithVixCrushAndCallFlow()
 	{
@@ -276,7 +296,7 @@ public class CascadeScreenerTests
 		var (ct, ci) = BullCascadeSession();
 		var cascade = CascadeScreener.Evaluate(ct with { SessionClosed = true, FrontSettled = true }, ci).Setups[CascadeRegime.BullCascade];
 		Assert.Null(cascade.Factors.Single(f => f.Name == "Short-Gamma Terrain").Points);
-		Assert.Null(cascade.Factors.Single(f => f.Name == "Gravity Pull & Target Wall").Points);
+		Assert.Null(cascade.Factors.Single(f => f.Name == "Gravity & Target Wall").Points);
 		var (tt, ti) = BearTrapSession();
 		Assert.Null(CascadeScreener.Evaluate(tt with { SessionClosed = true, FrontSettled = true }, ti).Setups[CascadeRegime.BearTrap].Factors.Single(f => f.Name == "Overhead Gravity Magnet").Points);
 	}
