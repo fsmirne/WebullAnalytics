@@ -155,7 +155,7 @@ internal sealed class MinuteBackfill(ThetaDataClient client, SqliteConnection db
 		var (start, end) = (Max(options.Start, expiration.AddDays(-dte)), Min(options.End, expiration));
 		if (start > end) return;
 
-		var spots = await _closes.GetAsync(ticker, start, end, cancellation);
+		var spots = await BandSpotsAsync(ticker, start, end, cancellation);
 		var contract = new OptionContract(ticker, expiration);
 		var expInt = QuoteStoreSchema.YmdInt(expiration);
 		var (totalRows, sawQuotes, firstWrite) = (0L, false, true);
@@ -284,7 +284,7 @@ internal sealed class MinuteBackfill(ThetaDataClient client, SqliteConnection db
 		var (start, end) = (Max(options.Start, expiration.AddDays(-dte)), Min(options.End, expiration));
 		if (start > end) return;
 
-		var spots = await _closes.GetAsync(ticker, start, end, cancellation);
+		var spots = await BandSpotsAsync(ticker, start, end, cancellation);
 		var contract = new OptionContract(ticker, expiration);
 		var expInt = QuoteStoreSchema.YmdInt(expiration);
 		var (totalRows, sawBars, firstWrite) = (0L, false, true);
@@ -513,6 +513,20 @@ internal sealed class MinuteBackfill(ThetaDataClient client, SqliteConnection db
 			yield return (from, to);
 			from = to.AddDays(1);
 		}
+	}
+
+	/// <summary>Each session's band anchor: its underlying close. Today's session, once it has opened, has no close until EOD lands, so
+	/// a pull before then (an intraday look at the delayed feed) anchors today on the prior session's close; without it every quote of
+	/// today is dropped and an expiry with only today in its window fails as "no underlying spot". A day's move is small against the
+	/// ±band, and today is never sealed (only expiries before today seal), so the next pull re-anchors on the real close.</summary>
+	private async Task<Dictionary<DateOnly, double>> BandSpotsAsync(string ticker, DateOnly start, DateOnly end, CancellationToken cancellation)
+	{
+		var spots = await _closes.GetAsync(ticker, start, end, cancellation);
+		var today = EtToday();
+		if (end < today || spots.ContainsKey(today) || !MarketCalendar.HasSessionStarted(MarketTime.NowEt())) return spots;
+		var prior = await _closes.GetAsync(ticker, today.AddDays(-10), today.AddDays(-1), cancellation);
+		if (prior.Count > 0) spots[today] = prior[prior.Keys.Max()];
+		return spots;
 	}
 
 	/// <summary>The trading calendar's today: sessions, expirations and seals are ET-dated, never machine-local.</summary>

@@ -31,6 +31,9 @@ internal static class MarketCalendar
 		return t >= RegularOpenEt && t <= CloseTimeEt(et.Date);
 	}
 
+	/// <summary>True once <paramref name="et"/>'s regular session has opened (09:30 ET on a trading day), including after its close.</summary>
+	internal static bool HasSessionStarted(DateTime et) => IsOpen(et.Date) && et.TimeOfDay >= RegularOpenEt;
+
 	/// <summary>The regular-session close (ET time of day) on <paramref name="date"/>: 13:00 on an early-close half-day, else 16:00.</summary>
 	internal static TimeSpan CloseTimeEt(DateTime date) => IsEarlyClose(date) ? EarlyCloseEt : RegularCloseEt;
 
