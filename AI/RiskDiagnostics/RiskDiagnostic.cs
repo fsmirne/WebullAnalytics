@@ -83,7 +83,10 @@ internal sealed record RiskDiagnosticOpenerScore(
 	string? Rationale,
 	decimal? ThetaPerDayPerContract = null,
 	decimal? FinalScore = null,
-	decimal? MarginPerContract = null);
+	decimal? MarginPerContract = null,
+	// The EV the score ranks on: the configured take-profit / stop exits applied along the path, minus friction (null when
+	// realized-EV scoring is off). ExpectedValuePerContract above is the hold-to-expiry EV with neither.
+	decimal? ManagedExpectedValuePerContract = null);
 
 internal sealed record RiskRuleHit(
 	string Id,

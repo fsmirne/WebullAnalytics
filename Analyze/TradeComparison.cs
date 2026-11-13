@@ -22,7 +22,8 @@ internal sealed record TradeComparisonRow(
 	decimal? MaxLoss,
 	IReadOnlyList<decimal> BreakEvens,
 	decimal? ProbabilityOfProfit,
-	decimal? ExpectedValue);
+	decimal? HoldExpectedValue,
+	decimal? ManagedExpectedValue);
 
 /// <summary>`analyze trade --compare`: a table ranking each `;` group side by side. Each group is evaluated alone — its row never depends on the
 /// other groups — while the panels above it keep treating the spec as one book.</summary>
@@ -52,8 +53,8 @@ internal static class TradeComparison
 			var ticker = legs[0].Option!.Root;
 			var qty = legs[0].Quantity;
 			var net = legs.Sum(l => Sign(l) * AnalyzeCommon.ResolvePrice(l, priceQuotes) * l.Quantity) / qty;
-			var (pop, ev) = Score(legs, priceQuotes, scoring.GetValueOrDefault(ticker), scoreAtCostBasis);
-			rows.Add(new TradeComparisonRow(ticker, Describe(legs), qty, net, Natural(legs, priceQuotes), result.Margin, result.MaxProfit, result.MaxProfitPrice, result.MaxLoss, result.BreakEvens, pop, ev));
+			var (pop, holdEv, managedEv) = Score(legs, priceQuotes, scoring.GetValueOrDefault(ticker), scoreAtCostBasis);
+			rows.Add(new TradeComparisonRow(ticker, Describe(legs), qty, net, Natural(legs, priceQuotes), result.Margin, result.MaxProfit, result.MaxProfitPrice, result.MaxLoss, result.BreakEvens, pop, holdEv, managedEv));
 		}
 		return rows;
 	}
@@ -88,15 +89,17 @@ internal static class TradeComparison
 		return scoring;
 	}
 
-	/// <summary>POP (fraction) and EV in dollars for the whole group, from the same probe analyze risk builds. Null when the ticker has no
-	/// scoring, a leg has no quote, the legs differ in quantity (analyze risk refuses those), or the scorer can't score the structure.</summary>
-	private static (decimal? Pop, decimal? Ev) Score(IReadOnlyList<ParsedLeg> legs, IReadOnlyDictionary<string, OptionContractQuote>? priceQuotes, TickerScoring? scoring, bool scoreAtCostBasis)
+	/// <summary>POP (fraction) and the hold-to-expiry and managed EVs in dollars for the whole group, from the same probe analyze risk builds.
+	/// Null when the ticker has no scoring, a leg has no quote, the legs differ in quantity (analyze risk refuses those), or the scorer can't
+	/// score the structure.</summary>
+	private static (decimal? Pop, decimal? HoldEv, decimal? ManagedEv) Score(IReadOnlyList<ParsedLeg> legs, IReadOnlyDictionary<string, OptionContractQuote>? priceQuotes, TickerScoring? scoring, bool scoreAtCostBasis)
 	{
-		if (scoring == null || legs.Select(l => l.Quantity).Distinct().Count() != 1 || legs.Any(l => !scoring.Quotes.ContainsKey(l.Symbol))) return (null, null);
+		if (scoring == null || legs.Select(l => l.Quantity).Distinct().Count() != 1 || legs.Any(l => !scoring.Quotes.ContainsKey(l.Symbol))) return (null, null, null);
 		var positionLegs = legs.Select(l => new AnalyzePositionCommand.PositionSnapshot(l.Symbol, l.Action, l.Quantity, AnalyzeCommon.ResolvePrice(l, priceQuotes), l.Option!)).ToList();
 		var diagLegs = AnalyzeRiskCommand.BuildDiagnosticLegs(positionLegs, scoring.Quotes, scoring.Spot, scoring.AsOf, AnalyzeRiskSettings.DefaultIvPct);
 		var score = AnalyzeRiskCommand.BuildProbe(diagLegs, scoring.Spot, scoring.AsOf, scoring.QuoteAsOf, scoring.Quotes, scoring.Inputs, AnalyzeRiskSettings.DefaultIvPct, scoreAtCostBasis, scoring.UseMarketImpliedIv).OpenerScore;
-		return (score?.ProbabilityOfProfit, score?.ExpectedValuePerContract * legs[0].Quantity);
+		var qty = legs[0].Quantity;
+		return (score?.ProbabilityOfProfit, score?.ExpectedValuePerContract * qty, score?.ManagedExpectedValuePerContract * qty);
 	}
 
 	/// <summary>+1 for a leg that pays (buy), −1 for one that collects (sell): a positive net is a debit.</summary>
@@ -129,14 +132,11 @@ internal static class TradeComparison
 		if (rows.Count == 0) return;
 		var tickers = rows.Select(r => r.Ticker).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 		var spotText = tickers.Count == 1 && SpotFor(tickers[0], opts) is decimal spot ? $", spot ${spot:N2}" : "";
-		var table = new Table()
-			.Border(ascii ? TableBorder.Ascii : TableBorder.Rounded)
-			.BorderColor(Color.Cyan1)
-			.Title($"[bold cyan]{Markup.Escape(string.Join("/", tickers))} Compare[/] [grey]— {rows.Count} structures{spotText}[/]");
+		var table = new Table { Expand = true }.Border(ascii ? TableBorder.Ascii : TableBorder.Rounded);
 		var ratios = rows.Any(r => r.Qty != rows[0].Qty);
 		table.AddColumn("Structure");
 		if (ratios) table.AddColumn(new TableColumn("Qty").RightAligned());
-		foreach (var header in new[] { "Net", "Natural", "Margin", "Max profit", "Max loss", "Profit/margin", "Break-evens", "POP", "EV" })
+		foreach (var header in new[] { "Net", "Natural", "Margin", "Max profit", "Max loss", "Profit/margin", "Break-evens", "POP", "EV hold", "EV managed" })
 			table.AddColumn(new TableColumn(header).RightAligned());
 
 		foreach (var r in rows)
@@ -151,14 +151,22 @@ internal static class TradeComparison
 			cells.Add(r.MaxProfit is decimal p && r.Margin is decimal mg && mg > 0m ? (p / mg).ToString("0.00", CultureInfo.InvariantCulture) : "—");
 			cells.Add(r.BreakEvens.Count > 0 ? string.Join(" / ", r.BreakEvens.Select(b => b.ToString("0.00", CultureInfo.InvariantCulture))) : "—");
 			cells.Add(r.ProbabilityOfProfit is decimal pop ? $"{pop * 100m:0.0}%" : "—");
-			cells.Add(r.ExpectedValue is decimal ev ? PnlMarkup(ev) : "—");
+			cells.Add(r.HoldExpectedValue is decimal hold ? PnlMarkup(hold) : "—");
+			cells.Add(r.ManagedExpectedValue is decimal managed ? PnlMarkup(managed) : "—");
 			table.AddRow(cells.ToArray());
 		}
 
-		console.Write(table);
-		console.MarkupLine("[dim]  Net / Natural: per contract (negative = credit); Net at the spec's prices, Natural buys at the ask and sells at the bid.[/]");
-		console.MarkupLine("[dim]  Margin, Max profit/loss, Break-evens: each structure alone, at its first expiry, over its grid's price range (as its panel).[/]");
-		console.MarkupLine("[dim]  POP / EV: the opener scorer (as `analyze risk` on that structure), horizon its first expiry; EV for the whole quantity; — = not scored (e.g. a credit diagonal).[/]");
+		var items = new List<Spectre.Console.Rendering.IRenderable>
+		{
+			table,
+			new Markup("[dim]Net / Natural: per contract (negative = credit); Net at the spec's prices, Natural buys at the ask and sells at the bid.[/]"),
+			new Markup("[dim]Margin, Max profit/loss, Break-evens: each structure alone, at its first expiry, over its grid's price range (as its panel).[/]"),
+			new Markup("[dim]POP: chance spot ends between the break-evens at the first expiry, on the opener scorer's distribution (as `analyze risk`).[/]"),
+			new Markup("[dim]EV hold: expected P&L held to the first expiry on that distribution. EV managed: with the strategy's take-profit / stop exits along the path, less friction — what the opener ranks on. Both for the whole quantity; — = not scored (e.g. a credit diagonal).[/]"),
+		};
+		var panel = new Panel(new Rows(items)) { Header = new PanelHeader(Markup.Escape($"{string.Join("/", tickers)} Compare — {rows.Count} structures{spotText}")), Expand = true };
+		panel.Border = ascii ? BoxBorder.Ascii : BoxBorder.Rounded;
+		console.Write(panel);
 		console.WriteLine();
 	}
 

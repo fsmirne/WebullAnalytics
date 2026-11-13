@@ -226,7 +226,8 @@ internal static class RiskDiagnosticProbeBuilder
 							Rationale: rationale,
 							ThetaPerDayPerContract: scored.ThetaPerDayPerContract,
 							FinalScore: scored.FinalScore,
-							MarginPerContract: ComputeMarginPerContract(legs, spot));
+							MarginPerContract: ComputeMarginPerContract(legs, spot),
+							ManagedExpectedValuePerContract: scored.RealizedExpectedValuePerContract);
 					}
 				}
 			}
