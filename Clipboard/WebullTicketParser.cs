@@ -40,8 +40,13 @@ internal static class WebullTicketParser
 	/// leg of a ticket — and a 1-2 letter token is allowed between the strike and the expiry because the row's
 	/// dropdown caret OCRs as one ("110 vy 15 Jan 27"). Both are strictly narrower than the field they guard:
 	/// no side, type or quantity is ever inferred.</summary>
+	/// <summary>A leg row's strike: plain ("110", "21.5") or with Webull's thousands separator ("7,525", which SPX-family strikes always
+	/// carry), spaces tolerated around the comma and the decimal point as OCR inserts them ("7 ,525"). The comma form only takes complete
+	/// three-digit groups, so it never reaches across the space into the expiration's day.</summary>
+	private const string LegStrikePattern = @"\d{1,3}(?:\s*,\s*\d{3})+(?:\s*\.\s*\d+)?|\d+(?:\s*\.\s*\d+)?";
+
 	private static readonly Regex LegRx = new(
-		@"^Leg\s*\d+\s+(?<sym>[A-Z]{1,6})\s+[^\d]{0,2}(?<strike>\d+(?:\s*\.\s*\d+)?)(?:\s+[A-Za-z]{1,2})?\s+(?<d>\d{1,2})\s*(?<mon>[A-Za-z]{3})\s*(?<yr>\d{2})\W*(?:\(\s*\w+\s*\))?\s+(?<cp>Call|Put)\s+(?<side>Buy|Sell)\s+[^\d]{0,3}(?<qty>\d(?:[ ,]*\d)*)",
+		@"^Leg\s*\d+\s+(?<sym>[A-Z]{1,6})\s+[^\d]{0,2}(?<strike>" + LegStrikePattern + @")(?:\s+[A-Za-z]{1,2})?\s+(?<d>\d{1,2})\s*(?<mon>[A-Za-z]{3})\s*(?<yr>\d{2})\W*(?:\(\s*\w+\s*\))?\s+(?<cp>Call|Put)\s+(?<side>Buy|Sell)\s+[^\d]{0,3}(?<qty>\d(?:[ ,]*\d)*)",
 		RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
 	/// <summary>The header row's strike field: one slash-separated token per leg ("20.5/21.5/21.5/23").
@@ -226,7 +231,7 @@ internal static class WebullTicketParser
 
 			// Bind the row to a residual strike: the row's strike token (first number after the symbol) must
 			// digit-match exactly one residual header token; the header token's decimal form is authoritative.
-			var rowStrike = Regex.Match(row, @"^Leg\s*\d+\s+[A-Z]{1,6}\s+[^\d]{0,2}(\d+(?:\s*\.\s*\d+)?)\s", RegexOptions.IgnoreCase);
+			var rowStrike = Regex.Match(row, @"^Leg\s*\d+\s+[A-Z]{1,6}\s+[^\d]{0,2}(" + LegStrikePattern + @")\s", RegexOptions.IgnoreCase);
 			if (!rowStrike.Success) continue;
 			var rowDigits = Digits(rowStrike.Groups[1].Value);
 			var token = residual.Where(t => Digits(t) == rowDigits).Distinct().ToList();
@@ -295,7 +300,7 @@ internal static class WebullTicketParser
 			catch (FormatException) { problems.Add($"unparseable expiry in row: {t}"); continue; }
 			legs.Add(new TicketLeg(
 				m.Groups["sym"].Value.ToUpperInvariant(),
-				decimal.Parse(m.Groups["strike"].Value.Replace(" ", ""), CultureInfo.InvariantCulture),
+				decimal.Parse(Regex.Replace(m.Groups["strike"].Value, "[ ,]", ""), CultureInfo.InvariantCulture),
 				expiry,
 				m.Groups["cp"].Value[..1].ToUpperInvariant(),
 				m.Groups["side"].Value.ToLowerInvariant(),

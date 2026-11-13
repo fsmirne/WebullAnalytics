@@ -32,6 +32,29 @@ public class WebullTicketParserTests
 		Assert.Equal(1500, buy.Qty);
 	}
 
+	// Real OCR of an SPXW vertical (2026-11-13): SPX-family strikes carry Webull's thousands separator ("7,525"), which the leg rows'
+	// strike pattern rejected, so no leg parsed and the whole ticket failed. One pass also loses the red "Sell" word on the legs.
+	[Fact]
+	public void ParsesThousandsSeparatedStrikes()
+	{
+		var rows = new[]
+		{
+			"Strategy Symbol Strike =xpirauoer Type Siae Quaruty Oreer Type HIMut Price",
+			"Vertical SPXW 7,525/7,530 13 Nov 26(W) Call Sell 50 Limit $2.50 Day",
+			"Leg 1 SPXW 7,525 13 Nov 26(W) Call Sell 50",
+			"Leg 2 SPXW 7,530 13 Nov 26(W) Call Buy 50",
+		};
+		var p = WebullTicketParser.Parse(rows);
+		Assert.Empty(p.Problems);
+		Assert.Equal(2.50m, p.NetLimit);
+		Assert.Equal("SPXW261113C07525000", Assert.Single(p.Legs, l => l.Action == "sell").OccSymbol);
+		Assert.Equal("SPXW261113C07530000", Assert.Single(p.Legs, l => l.Action == "buy").OccSymbol);
+		Assert.All(p.Legs, l => Assert.Equal(50, l.Qty));
+
+		var spaced = WebullTicketParser.Parse(rows.Select(r => r.Replace("7,5", "7 ,5")).ToArray());
+		Assert.Equal([7525m, 7530m], spaced.Legs.Select(l => l.Strike).Order().ToArray());
+	}
+
 	[Fact]
 	public void HeaderDecimalDropIsForgiven()
 	{
