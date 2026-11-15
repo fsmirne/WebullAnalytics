@@ -21,6 +21,11 @@ public class GexCallWallAtTests
 			var symbol = MatchKeys.OccSymbol("SPXW", Expiry, strike, "C");
 			quotes[symbol] = new(ContractSymbol: symbol, LastPrice: null, Bid: bid, Ask: ask, Change: null, PercentChange: null, Volume: null, OpenInterest: 5000, ImpliedVolatility: 0.15m, HistoricalVolatility: null);
 		}
+		foreach (var (strike, bid, ask) in new[] { (7475m, 6.90m, 7.10m), (7375m, 0.20m, 0.25m) })
+		{
+			var symbol = MatchKeys.OccSymbol("SPXW", Expiry, strike, "P");
+			quotes[symbol] = new(ContractSymbol: symbol, LastPrice: null, Bid: bid, Ask: ask, Change: null, PercentChange: null, Volume: null, OpenInterest: 5000, ImpliedVolatility: 0.15m, HistoricalVolatility: null);
+		}
 		return GexMatrix.Build(quotes, "SPXW", Spot, AsOf, Expiry, strikeRangeFraction: 0.20m, maxDteDays: 7, maxStrikes: 50);
 	}
 
@@ -30,6 +35,8 @@ public class GexCallWallAtTests
 		var m = Matrix();
 		Assert.Equal(7525m, m.FindCallWallAt(Expiry, atSpot: Spot, minStrike: 0m));
 		Assert.Equal(7625m, m.FindCallWallAt(Expiry, atSpot: 7620m, minStrike: 0m));
+		Assert.Equal(7475m, m.FindPutWallAt(Expiry, atSpot: Spot, maxStrike: 9999m));
+		Assert.Equal(7375m, m.FindPutWallAt(Expiry, atSpot: 7380m, maxStrike: 9999m));
 	}
 
 	[Fact]
@@ -38,5 +45,7 @@ public class GexCallWallAtTests
 		var m = Matrix();
 		Assert.Equal(7625m, m.FindCallWallAt(Expiry, atSpot: Spot, minStrike: 7600m));
 		Assert.Null(m.FindCallWallAt(Expiry, atSpot: Spot, minStrike: 7700m));
+		Assert.Equal(7375m, m.FindPutWallAt(Expiry, atSpot: Spot, maxStrike: 7400m));
+		Assert.Null(m.FindPutWallAt(Expiry, atSpot: Spot, maxStrike: 7300m));
 	}
 }

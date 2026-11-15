@@ -2441,6 +2441,20 @@ internal sealed class GexMatrix
 		return byStrike.Values.Any(v => v > 0m) ? byStrike.MaxBy(kv => kv.Value).Key : null;
 	}
 
+	/// <summary>The put wall of <paramref name="expiry"/> as it stood with the underlying at <paramref name="atSpot"/>: each put
+	/// contract's dollar gamma re-evaluated at that spot on its own OI, IV and clock (OI is fixed intraday), summed per strike, argmax
+	/// over strikes at or below <paramref name="maxStrike"/>. Mirror of <see cref="FindCallWallAt"/>.</summary>
+	public decimal? FindPutWallAt(DateTime expiry, decimal atSpot, decimal maxStrike)
+	{
+		var byStrike = new Dictionary<decimal, decimal>();
+		foreach (var c in Contributors)
+		{
+			if (c.IsCall || c.Expiry != expiry.Date || c.Strike > maxStrike) continue;
+			byStrike[c.Strike] = byStrike.GetValueOrDefault(c.Strike) + OptionMath.Gamma(atSpot, c.Strike, c.Time, OptionMath.RiskFreeRate, c.Iv) * c.Oi * 100m * atSpot;
+		}
+		return byStrike.Values.Any(v => v > 0m) ? byStrike.MaxBy(kv => kv.Value).Key : null;
+	}
+
 	/// <summary>Chain-wide variant of <see cref="FindWalls(DateTime)"/>: per-strike call and put dollar gamma summed across every
 	/// kept expiry before the argmax, so the wall is the strike carrying the most gamma over the whole --dte window.</summary>
 	public (decimal? CallWall, decimal? PutWall) FindChainWalls()

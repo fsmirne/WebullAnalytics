@@ -183,6 +183,19 @@ public class CascadeScreenerTests
 		Assert.Equal(rejected, detail.StartsWith($"rejected 0DTE call wall ${wall:N0}"));
 	}
 
+	[Theory]
+	[InlineData(6940, true)]    // bottomed 4 above the wall (low 6944, one EM = 70)
+	[InlineData(6950, true)]    // poked 6 below it and bounced back above
+	[InlineData(7000, false)]   // ran 56 (0.8 EM) through it
+	[InlineData(6880, false)]   // bottomed 64 above it: never tested
+	public void BearTrap_RejectedPutWall_NeedsTheLowAtTheWall(int wall, bool rejected)
+	{
+		var (t, i) = BearTrapSession();
+		var r = CascadeScreener.Evaluate(t with { PutWallAtLow0Dte = wall }, i);
+		var detail = r.Setups[CascadeRegime.BearTrap].Factors.Single(f => f.Name == "Wall Rejection / Gravity").Detail;
+		Assert.Equal(rejected, detail.StartsWith($"rejected 0DTE put wall ${wall:N0}"));
+	}
+
 	[Fact]
 	public void BullTrap_ConfirmsOnRallyLostWithVixNotCrushing()
 	{
@@ -315,7 +328,7 @@ public class CascadeScreenerTests
 		Assert.Null(cascade.Factors.Single(f => f.Name == "Short-Gamma Terrain").Points);
 		Assert.Null(cascade.Factors.Single(f => f.Name == "Gravity & Target Wall").Points);
 		var (tt, ti) = BearTrapSession();
-		Assert.Null(CascadeScreener.Evaluate(tt with { SessionClosed = true, FrontSettled = true }, ti).Setups[CascadeRegime.BearTrap].Factors.Single(f => f.Name == "Overhead Gravity Magnet").Points);
+		Assert.Null(CascadeScreener.Evaluate(tt with { SessionClosed = true, FrontSettled = true }, ti).Setups[CascadeRegime.BearTrap].Factors.Single(f => f.Name == "Wall Rejection / Gravity").Points);
 	}
 
 	[Fact]

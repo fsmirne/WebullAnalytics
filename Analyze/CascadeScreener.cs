@@ -51,8 +51,8 @@ internal sealed record CascadeTerrain(
 	decimal? CallWallMulti = null,
 	decimal? PutWallMulti = null,
 	decimal FrontNetGexFraction = 0m,
-	/// <summary>The as-of instant is at or after the regular-session close of its date (13:00 on a half-day). The reading is
-	/// then a recap of the finished session — whole-day flow and tape — and no regime confirms.</summary>
+	/// <summary>The as-of instant is outside regular trading hours (weekend, holiday, pre-open, or at/after the regular-session
+	/// close — 13:00 on a half-day). The reading uses data from the close / previous close and no regime confirms.</summary>
 	bool SessionClosed = false,
 	/// <summary>The front expiry has stopped trading: it expires on the as-of date and the session has closed, or it expired
 	/// earlier. Its gamma collapses onto the strikes beside the settlement price (flip, gravity and walls all land at the
@@ -61,7 +61,11 @@ internal sealed record CascadeTerrain(
 	/// <summary>The front expiry's call wall as it stood at the session high (<see cref="GexMatrix.FindCallWallAt"/>): the largest
 	/// call-gamma strike no more than <see cref="CascadeScreener.WallTouchMoves"/> expected moves below the high, gamma judged with the
 	/// underlying at the high. The level a rally that topped there ran into; null when the front has settled or there is no tape.</summary>
-	decimal? CallWallAtHigh0Dte = null);
+	decimal? CallWallAtHigh0Dte = null,
+	/// <summary>The front expiry's put wall as it stood at the session low (<see cref="GexMatrix.FindPutWallAt"/>): the largest
+	/// put-gamma strike no more than <see cref="CascadeScreener.WallTouchMoves"/> expected moves above the low, gamma judged with the
+	/// underlying at the low. The level a selloff that bottomed there ran into; null when the front has settled or there is no tape.</summary>
+	decimal? PutWallAtLow0Dte = null);
 
 /// <summary>
 /// Point-in-time flow, volatility, skew, and intraday tape inputs to <see cref="CascadeScreener.Evaluate"/>.
@@ -158,6 +162,10 @@ internal static class CascadeScreener
 	private static readonly TimeSpan OneMinute = TimeSpan.FromMinutes(1);
 
 	public const int DefaultTriggerScore = 65;
+	/// <summary>The panel's default scope: the multi-expiry horizon in days, the strike window as ± percent of spot, and the matrix's strike rows.</summary>
+	public const int DefaultDte = 30;
+	public const int DefaultStrikeRangePct = 20;
+	public const int DefaultMaxStrikes = 200;
 	public const int StrongScore = 80;
 	private const int FactorMax = 20;
 	/// <summary>How close, in daily expected moves, a session extreme must come to a wall, from either side, to have tested it.</summary>
@@ -167,7 +175,7 @@ internal static class CascadeScreener
 	private static decimal ExpectedMove(SqueezeTerrain f) => Math.Max(f.DailyMove ?? 0m, f.Spot * 0.006m);
 
 	/// <summary>Extracts the 0DTE + multi-expiry GEX terrain from the built exposure matrix.</summary>
-	public static CascadeTerrain TerrainFrom(GexMatrix gexMatrix, GexMatrix? vexMatrix, decimal spot, DateTime asOf, decimal? sessionHigh = null)
+	public static CascadeTerrain TerrainFrom(GexMatrix gexMatrix, GexMatrix? vexMatrix, decimal spot, DateTime asOf, decimal? sessionHigh = null, decimal? sessionLow = null)
 	{
 		// Build a 0DTE-scoped view for the front expiry so 0DTE flip/walls/gravity aren't diluted by 30DTE OI.
 		var frontExp = gexMatrix.Expiries.Count > 0 ? gexMatrix.Expiries[0] : (DateTime?)null;
@@ -192,8 +200,9 @@ internal static class CascadeScreener
 				if (strike <= spot - minHeadroom && -cell.Net > bestOtmPutNet) { bestOtmPutNet = -cell.Net; otmPutWall0Dte = strike; }
 			}
 		}
-		var sessionClosed = asOf.TimeOfDay >= MarketCalendar.CloseTimeEt(asOf.Date);
-		var frontSettled = frontExp.HasValue && (frontExp.Value.Date < asOf.Date || (frontExp.Value.Date == asOf.Date && sessionClosed));
+		var afterClose = asOf.TimeOfDay >= MarketCalendar.CloseTimeEt(asOf.Date);
+		var sessionClosed = !MarketCalendar.IsOpen(asOf.Date) || asOf.TimeOfDay < AnalyzeGexSettings.RthOpen || afterClose;
+		var frontSettled = frontExp.HasValue && (frontExp.Value.Date < asOf.Date || (frontExp.Value.Date == asOf.Date && afterClose));
 		var (frontCallWall, frontPutWall) = frontExp.HasValue ? gexMatrix.FindWalls(frontExp.Value) : (null, null);
 		var frontShortGamma = frontFlip.HasValue ? spot < frontFlip.Value : (frontCallGex - frontPutGex) < 0m;
 		var frontGross = frontCallGex + frontPutGex;
@@ -213,6 +222,9 @@ internal static class CascadeScreener
 		var netPull0Dte = frontLive ? gexMatrix.NetPullByExpiry.GetValueOrDefault(frontExp!.Value) : null;
 		var callWallAtHigh = frontLive && sessionHigh is { } high && high > 0m
 			? gexMatrix.FindCallWallAt(frontExp!.Value, high, high - WallTouchMoves * ExpectedMove(frontTerrain))
+			: null;
+		var putWallAtLow = frontLive && sessionLow is { } low && low > 0m
+			? gexMatrix.FindPutWallAt(frontExp!.Value, low, low + WallTouchMoves * ExpectedMove(frontTerrain))
 			: null;
 
 		// A settled front expiry is taken out of the multi-expiry book: its gamma is a spike on the strikes beside the
@@ -253,7 +265,8 @@ internal static class CascadeScreener
 			FrontNetGexFraction: frontNetGexFraction,
 			SessionClosed: sessionClosed,
 			FrontSettled: frontSettled,
-			CallWallAtHigh0Dte: callWallAtHigh);
+			CallWallAtHigh0Dte: callWallAtHigh,
+			PutWallAtLow0Dte: putWallAtLow);
 	}
 
 	/// <summary>Evaluates all four regimes and selects the active or leading classification.</summary>
@@ -444,10 +457,18 @@ internal static class CascadeScreener
 		// The stretch runs from the higher of the prior close and the open down to the session low, so a gap down that keeps falling counts as one move.
 		var stretchMoves = inp.Tape is { } st ? Math.Max(0m, Math.Max(st.SessionOpen, st.PrevClose ?? st.SessionOpen) - st.SessionLow) / move : 0m;
 		var bounceMoves = inp.Tape != null ? Math.Max(0m, f.Spot - inp.Tape.SessionLow) / move : (decimal?)null;
+		// A rejection is a selloff that bottomed AT the wall it ran into: the low within WallTouchMoves of it from either side, price back
+		// at or above it and bounced. The wall is the one standing at the low (PutWallAtLow0Dte), not today's wall below spot: a selloff
+		// that ran far through a wall was not rejected by it, and the strike ranked from where spot sits now is not what the low tested.
+		var testedWall = t.FrontSettled ? null : t.PutWallAtLow0Dte;
+		var rejectedPutWall = testedWall.HasValue && inp.Tape != null
+			&& Math.Abs(inp.Tape.SessionLow - testedWall.Value) <= WallTouchMoves * move
+			&& f.Spot >= testedWall.Value
+			&& (bounceMoves ?? 0m) >= 0.20m;
 
 		// Factor 1: Initial Bearish Stretch (20 pts)
 		decimal stretchPts = 14m * Ramp(stretchMoves, 0.20m, 0.80m);
-		if (stretchMoves >= 0.20m && (FrontShortGamma(t) || t.NetGexFractionMulti < -0.15m))
+		if (stretchMoves >= 0.20m && (rejectedPutWall || FrontShortGamma(t) || t.NetGexFractionMulti < -0.15m))
 			stretchPts += 6m;
 		var f1Pts = RoundPts(stretchPts);
 		var f1Detail = $"bear stretch {stretchMoves:F2} EM (gap {gapPct:+0.00;-0.00}%), {(t.FrontSettled ? "front expiry settled" : f.ShortGamma ? "0DTE short γ" : "0DTE long γ")}, 30d GEX {t.NetGexFractionMulti:+0%;-0%}";
@@ -461,13 +482,17 @@ internal static class CascadeScreener
 		}
 		var f2Detail = $"VIX vs open {(inp.VixChangeFromOpenPct.HasValue ? $"{inp.VixChangeFromOpenPct.Value:+0.0;-0.0}%" : "n/a")}, vs close {(inp.VixChangeFromClosePct.HasValue ? $"{inp.VixChangeFromClosePct.Value:+0.0;-0.0}%" : "n/a")}";
 
-		// Factor 3: Overhead 0DTE Gravity Magnet (20 pts)
+		// Factor 3: Overhead 0DTE Gravity Magnet / Wall Rejection Bounce (20 pts)
 		decimal overheadPts = 0m;
 		var anchor = t.Gravity0Dte ?? t.Centroid0Dte;
 		if (anchor.HasValue && anchor.Value > f.Spot)
 			overheadPts = 20m * Ramp(anchor.Value - f.Spot, 0.05m * move, 0.60m * move);
+		if (rejectedPutWall && bounceMoves.HasValue)
+			overheadPts = Math.Max(overheadPts, 14m + 6m * Ramp(bounceMoves.Value, 0.20m, 0.50m));
 		int? f3Pts = t.FrontSettled ? null : RoundPts(overheadPts);
-		var f3Detail = t.FrontSettled ? FrontSettledDetail : $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}";
+		var f3Detail = t.FrontSettled ? FrontSettledDetail : rejectedPutWall
+			? $"rejected 0DTE put wall ${t.PutWallAtLow0Dte:N0} (low ${inp.Tape!.SessionLow:N2} → ${f.Spot:N2})"
+			: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0} ({t.Gravity0Dte.Value - f.Spot:+0;-0} pts)" : "—")}";
 
 		// Factor 4: Reversal / Trapped Flow (20 pts)
 		decimal crowdPts = 0m;
@@ -502,7 +527,7 @@ internal static class CascadeScreener
 		{
 			new("Initial Bear Stretch", f1Pts, FactorMax, f1Detail),
 			new("Intraday VIX Stall", f2Pts, FactorMax, f2Detail),
-			new("Overhead Gravity Magnet", f3Pts, FactorMax, f3Detail),
+			new("Wall Rejection / Gravity", f3Pts, FactorMax, f3Detail),
 			new("Trapped Put / Bid Flow", f4Pts, FactorMax, f4Detail),
 			new("VWAP Reclaim & Bounce", f5Pts, FactorMax, f5Detail),
 		};
@@ -513,10 +538,11 @@ internal static class CascadeScreener
 		var vixNotExpanding = inp.VixChangeFromOpenPct is <= 0.5m;
 		var reclaimedVwap = inp.Tape is { Side: VwapSide.Above } && (bounceMoves ?? 0m) >= 0.25m;
 		var upwardStructure = (t.Gravity0Dte.HasValue && t.Gravity0Dte.Value > f.Spot)
-			|| (inp.FlowShare ?? 0m) >= 0.10m;
+			|| (inp.FlowShare ?? 0m) >= 0.10m
+			|| rejectedPutWall;
 		var complete = allScored && hadBearStretch && vixNotExpanding && reclaimedVwap && upwardStructure;
 
-		var notes = BuildNotesBearTrap(t, inp, stretchMoves, hadBearStretch, vixNotExpanding, reclaimedVwap, upwardStructure);
+		var notes = BuildNotesBearTrap(t, inp, stretchMoves, hadBearStretch, vixNotExpanding, reclaimedVwap, upwardStructure, rejectedPutWall);
 		return new CascadeSetupEvaluation(CascadeRegime.BearTrap, total, complete, factors, notes);
 	}
 
@@ -673,7 +699,7 @@ internal static class CascadeScreener
 		? $"flow {inp.FlowShare ?? 0m:+0.00;-0.00}"
 		: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, flow {inp.FlowShare ?? 0m:+0.00;-0.00}";
 
-	private static List<SetupNote> BuildNotesBearTrap(CascadeTerrain t, CascadeInputs inp, decimal stretchMoves, bool hadBearStretch, bool vixNotExpanding, bool reclaimedVwap, bool upwardStructure)
+	private static List<SetupNote> BuildNotesBearTrap(CascadeTerrain t, CascadeInputs inp, decimal stretchMoves, bool hadBearStretch, bool vixNotExpanding, bool reclaimedVwap, bool upwardStructure, bool rejectedPutWall)
 	{
 		var notes = new List<SetupNote>();
 		var f = t.Front;
@@ -685,9 +711,12 @@ internal static class CascadeScreener
 			? new SetupNote(NoteSeverity.Confirm, $"VIX stalling/dropping from open ({FormatVixMoves(inp)}) — sellers lack vol follow-through")
 			: new SetupNote(NoteSeverity.Conflict, $"VIX is expanding intraday ({FormatVixMoves(inp)}) — points to Bear Cascade, not a trap"));
 
-		notes.Add(upwardStructure
-			? new SetupNote(NoteSeverity.Confirm, $"Upward structure support ({FrontStructureDetail(t, inp)})")
-			: new SetupNote(NoteSeverity.Warn, "0DTE gravity/flow still leaning below spot"));
+		if (rejectedPutWall && inp.Tape != null)
+			notes.Add(new SetupNote(NoteSeverity.Confirm, $"Rejected 0DTE Put Wall at ${t.PutWallAtLow0Dte:N0} (tagged ${inp.Tape.SessionLow:N2}, now ${f.Spot:N2})"));
+		else
+			notes.Add(upwardStructure
+				? new SetupNote(NoteSeverity.Confirm, $"Upward structure support ({FrontStructureDetail(t, inp)})")
+				: new SetupNote(NoteSeverity.Warn, "0DTE gravity/flow still leaning below spot"));
 
 		if (inp.Tape is { } tape)
 		{
@@ -977,7 +1006,13 @@ internal static class CascadeScreener
 		var gexMatrix = GexMatrix.Build(quotes, ticker, spot, asOfEt, expiryFilter: null, strikeRangeFraction, dte, maxStrikes, GreekKind.Gamma);
 		if (gexMatrix.Strikes.Count == 0 || gexMatrix.Expiries.Count == 0) return null;
 
-		var terrain = TerrainFrom(gexMatrix, vexMatrix: null, spot, asOfEt, sessionHigh: rthBars.Count > 0 ? rthBars.Max(b => b.High) : null);
+		var terrain = TerrainFrom(
+			gexMatrix,
+			vexMatrix: null,
+			spot,
+			asOfEt,
+			sessionHigh: rthBars.Count > 0 ? rthBars.Max(b => b.High) : null,
+			sessionLow: rthBars.Count > 0 ? rthBars.Min(b => b.Low) : null);
 		var inputs = await BuildInputsAsync(ticker, spot, asOfEt, gexMatrix, priceCache, intradayCache, smileCache, preloadedSessionRthBars: rthBars, vendorName: vendorName, strikeRangeFraction: strikeRangeFraction, includeCurrentBar: includeCurrentBar, cancellation: cancellation, cache: cache);
 		return (Evaluate(terrain, inputs, triggerScore), gexMatrix.Expiries.Count);
 	}

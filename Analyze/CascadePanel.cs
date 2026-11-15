@@ -12,7 +12,7 @@ internal static class CascadePanel
 	private const int ScoreBarWidth = 60;
 	private const int FactorBarWidth = 28;
 
-	public static void Render(string ticker, DateTime asOf, string scope, CascadeReading reading)
+	public static void Render(string ticker, DateTime asOf, string scope, CascadeReading reading, bool showLegend = true)
 	{
 		var lead = reading.LeadingSetup;
 		var active = reading.Active;
@@ -41,9 +41,14 @@ internal static class CascadePanel
 			new Markup($"[bold {regimeColor}]{headlineGlyph} {Markup.Escape(CascadeReading.RegimeLabel(lead.Regime))}[/]"),
 			new Markup($"[bold {regimeColor}]{statusLabel}[/]"));
 		if (closed)
+		{
+			var closedMsg = reading.Inputs.Tape != null
+				? "The session has closed: this is a recap of the whole day using data from the close (full-session flow and tape), and nothing confirms when the market is not open."
+				: "The market is not open: this reading uses data from the previous close (no current-day session tape), and nothing confirms when the market is not open.";
 			headerGrid.AddRow(
-				new Markup($"[yellow]The session has closed: this is a recap of the whole day (full-session flow and tape), and nothing confirms after the close.{(reading.Terrain.FrontSettled ? " The front expiry has settled, so its gamma levels are not scored." : "")}[/]"),
+				new Markup($"[yellow]{closedMsg}{(reading.Terrain.FrontSettled ? " The front expiry has settled, so its gamma levels are not scored." : "")}[/]"),
 				new Text(""));
+		}
 		headerGrid.AddEmptyRow();
 
 		var earned = lead.Factors.Sum(f => f.Points ?? 0);
@@ -78,7 +83,8 @@ internal static class CascadePanel
 			rows.Add(new Markup($"{NoteGlyph(note.Severity)} {Markup.Escape(note.Text)}"));
 
 		AnsiConsole.Write(new Panel(new Rows(rows)).Border(BoxBorder.Rounded).BorderColor(Color.Grey).Padding(2, 1));
-		AnsiConsole.MarkupLine("[dim]Regimes: [red]BEAR CASCADE[/] = short-γ + put flow + intraday VIX expansion + VWAP breakdown. [aqua]BEAR TRAP[/] = gap-down / morning dip + intraday VIX stall + VWAP reclaim. [green]BULL CASCADE[/] = intraday VIX crush + call flow + overhead target wall + VWAP breakout. [yellow]BULL TRAP[/] = gap-up / morning rally + VIX failing to crush + VWAP roll-over. Describes the session so far, not what comes next: over 2022–2026 a confirmed regime at 09:50 ET showed no edge from there to the close. 0DTE " + GexLegends.PullLegendMarkup + "[/]");
+		if (showLegend)
+			AnsiConsole.MarkupLine("[dim]Regimes: [red]BEAR CASCADE[/] = short-γ + put flow + intraday VIX expansion + VWAP breakdown. [aqua]BEAR TRAP[/] = gap-down / morning dip + intraday VIX stall + VWAP reclaim. [green]BULL CASCADE[/] = intraday VIX crush + call flow + overhead target wall + VWAP breakout. [yellow]BULL TRAP[/] = gap-up / morning rally + VIX failing to crush + VWAP roll-over. Describes the session so far, not what comes next: over 2022–2026 a confirmed regime at 09:50 ET showed no edge from there to the close. 0DTE " + GexLegends.PullLegendMarkup + "[/]");
 	}
 
 	private static Table RegimeComparisonTable(CascadeReading reading)
@@ -86,7 +92,6 @@ internal static class CascadePanel
 		var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey23).Expand();
 		foreach (var regime in new[] { CascadeRegime.BearCascade, CascadeRegime.BearTrap, CascadeRegime.BullCascade, CascadeRegime.BullTrap })
 		{
-			var eval = reading.Setups[regime];
 			var isPrimary = reading.PrimaryRegime == regime;
 			var isLeading = reading.LeadingSetup.Regime == regime;
 			var color = RegimeColor(isPrimary ? regime : CascadeRegime.Neutral, regime);
@@ -99,7 +104,7 @@ internal static class CascadePanel
 		var cells = new List<Markup>();
 		foreach (var regime in new[] { CascadeRegime.BearCascade, CascadeRegime.BearTrap, CascadeRegime.BullCascade, CascadeRegime.BullTrap })
 		{
-			var eval = reading.Setups[regime];
+			var eval = reading.Setups.TryGetValue(regime, out var e) ? e : new CascadeSetupEvaluation(regime, 0, false, Array.Empty<FactorScore>(), Array.Empty<SetupNote>());
 			var confirmed = eval.Complete && eval.Score >= reading.TriggerScore;
 			var color = confirmed ? RegimeColor(regime, regime) : (eval.Score >= 50 ? "yellow" : "grey");
 			var status = confirmed ? "[green]✔ confirmed[/]" : (eval.Complete ? "[yellow]gates ✔[/]" : "[dim]gates ✘[/]");
