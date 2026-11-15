@@ -14,11 +14,11 @@ A C# command-line tool for reviewing Webull trading activity end-to-end. It gene
   - Straddles/Strangles
   - Vertical Spreads
 - **Calendar Roll Tracking**: Intelligently groups rolled positions and tracks adjusted cost basis
-- **Scenario Analysis**: Evaluate hypothetical trades, roll grids, scenario-ranked position adjustments, and structured risk diagnostics
-- **GEX Heatmap**: 2D dealer-gamma-exposure heatmap over the option chain (strikes × expirations) with chain totals and call/put walls
-- **Broker Utilities**: Preview/place/cancel orders, close/flatten open option positions, inspect status and fill history, pull the cash-record ledger, list app subscriptions, check positions, and manage OpenAPI trade tokens
-- **AI Proposal Engine**: Run one-shot, watch-loop, historical-replay, or full historical-backtest evaluation for management proposals and new-opening ideas
-- **Real-NBBO Option Data**: The backtester prices every leg off real minute NBBO (the `data/quotes.db` SQLite store) with real open interest (`data/oi`) — vendor-independent stores filled by a ThetaData historical backfill and live Schwab/Webull capture (no synthetic-spread/trade-bar pricing)
+- **Scenario Analysis**: Evaluate hypothetical trades (`--compare`), roll grids, scenario-ranked position adjustments, and structured risk diagnostics (live, from stored proposals, or at historical fill instants)
+- **GEX, VEX & Cascade Screeners**: 2D dealer-gamma (GEX) and vanna (VEX) exposure heatmaps over the option chain (strikes × expirations, build-up, or intraday migration), gamma-squeeze screener, market-wide Top Options leaderboard (`analyze top`), and 0DTE intraday regime screener (`analyze cascade`: Bear Cascade, Bear Trap, Bull Cascade, Bull Trap, Neutral)
+- **Broker & Clipboard Utilities**: Preview/place/replace/cancel orders, close/flatten open option positions, OCR snipped Webull order tickets straight from the clipboard (`clipboard order`), inspect status and fill history, pull the cash-record ledger, list app subscriptions, check positions, and manage OpenAPI trade tokens
+- **AI Proposal & Auto-Execution Engine**: Run one-shot (`scan`), continuous loop (`watch`), historical-replay (`replay`), or full historical-backtest (`backtest`) evaluation for management rules (including `TrailingStopRule` with marketable close chasing) and opening ideas (scorer-ranked structures, `zeroDteGate`, and signal-driven `opener.cascade` 0DTE setups), with opt-in live order submission and automatic limit repricing
+- **Real-NBBO Option Data & Trading-Time Clock**: The backtester prices every leg off real minute NBBO (`data/quotes.db` SQLite store) with real open interest (`data/oi`) and a fitted trading-time clock (`data/clock`) — maintained via built-in ThetaData gRPC backfills (`wa data backfill quotes|ohlcv|oi`), post-backfill verification (`wa data verify`), and live Schwab/Webull capture
 - **Fee Tracking**: Commissions and fees embedded in the order data
 - **Cash Tracking**: Tracks current cash in hand starting from an optional initial amount
 - **Multiple Output Modes**:
@@ -86,16 +86,17 @@ By default this installs to `~/.local/bin`. You can specify a custom directory:
 
 ### Commands
 
-`wa` has nine top-level commands:
+`wa` has ten top-level commands:
 
 - `report` — generate realized P&L reports and open-position break-even analysis
-- `analyze` — run hypothetical trade, roll, position, risk, GEX, sentiment, and regime analysis
-- `fetch` — download order data from the Webull web API
+- `analyze` — run hypothetical trade, roll, position, risk, GEX, cascade, sentiment, regime, and top-options analysis
+- `fetch` — download order and cash-record data from the Webull web API
 - `ledger` — pull the Webull cash-record activity ledger (running-balance feed) on demand
 - `sniff` — capture fresh Webull session headers for the web API
-- `trade` — preview/place/cancel/close orders and inspect OpenAPI account state
-- `ai` — emit management and opening proposals from live or replayed data
-- `data` — back up/restore the local data directory and maintain the SQLite quote store
+- `clipboard` — OCR a snipped Webull order ticket from the clipboard into `wa trade place` and `wa analyze trade` commands
+- `trade` — preview/place/replace/cancel/close orders and inspect OpenAPI account state
+- `ai` — evaluate management rules and opening proposals (live scan/watch with optional auto-execution, replay, backtest, history, gate, dip, config)
+- `data` — back up/restore the local data directory, maintain/verify the SQLite quote store, backfill ThetaData quotes/OHLCV/OI, and calibrate the trading-time clock
 - `schwab` — authenticate the Schwab chains API used as an alternate live quote source
 
 ### Report Command
@@ -136,7 +137,7 @@ wa report --display pnl
 # Show each leg's contract value alongside the net in every grid cell
 wa report --grid verbose
 
-# Increase grid granularity (more rows between strikes, default: 2)
+# Increase grid granularity (rows per strike gap; default 0 = auto, targeting ~20 rows total)
 wa report --range 4
 
 # Override the current underlying price (for "what-if" evaluation)
@@ -150,9 +151,9 @@ wa report --date 2026-07-28T15:30 --spot SPY:585
 # Use Black-Scholes theoretical prices instead of market mid for today's grid column
 wa report --theoretical
 
-# Back-solve each leg's IV from its live bid/ask mid so the grid's future columns decay on the
-# market-consistent surface instead of Webull's reported IV (today's column already shows mid)
-wa report --calibrated
+# IV calibration (back-solving each leg's IV from its live bid/ask mid) is ON by default;
+# pass --calibrated false to use the vendor's raw reported IV field instead
+wa report --calibrated false
 
 # Add custom notable prices to break-even reports (e.g., support/resistance levels)
 wa report --levels GME:20/25/30
@@ -173,6 +174,7 @@ wa report --trade "sell:GME260501C00023000:100@0.70"
 ```
 Options:
   --source <source>         Data source: 'api', 'export', or 'none' (no trade history — with --trade, only the proposed trade) (default: api)
+  --vendor <vendor>         Live option-chain quote vendor: 'webull' (default, or config.json's top-level vendor) or 'schwab' (needs `wa schwab login`)
   --since <date>            Include only trades on or after this date (YYYY-MM-DD format)
   --until <date>            Include only trades on or before this date (YYYY-MM-DD format)
   --output <format>         Output format: 'console', 'excel', or 'text' (default: console)
@@ -180,13 +182,13 @@ Options:
   --initial-amount <amount> Initial portfolio amount in dollars (default: 0)
   --view <view>             Report view: 'detailed' or 'simplified' (default: detailed)
   --iv <overrides>          Override implied volatility per leg. Format: SYMBOL:IV% (e.g., GME260213C00025000:50). Comma-separated for multiple.
-  --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 2, higher = more rows)
+  --range <granularity>     Grid granularity: rows per strike gap in the time-decay grid (default: 0 = auto, target ~20 rows total; higher = more rows)
   --display <mode>          Grid display mode: 'value' (contract value, default) or 'pnl' (profit/loss)
   --grid <layout>           Grid cell layout: 'simple' (net only, default) or 'verbose' (per-leg values '1.23|0.45|$0.78')
   --spot <prices>           Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88,SPY:580.50)
   --date <when>             Evaluate open positions AS OF this instant (ET) instead of now: 'now' (default), YYYY-MM-DD (that session at 10:00 ET), or YYYY-MM-DDTHH:MM (that minute, inside the regular session). A past instant marks every leg from the real NBBO and spot at exactly that minute (quote store, else ThetaData) and fails naming the leg when neither has it; a future one projects the live market forward. Distinct from --since/--until, which only filter which trades are included. Shares the evaluation path with `analyze trade --date`.
   --theoretical             Use Black-Scholes theoretical price instead of market mid for today's grid column
-  --calibrated              Back-solve each leg's IV from its live bid/ask mid so the today column reproduces market mid and future columns decay on the mid-consistent surface (instead of Webull's reported IV)
+  --calibrated [true|false] ON by default: back-solve each leg's IV from its live bid/ask mid so the today column reproduces market mid and future columns decay on the mid-consistent surface. Pass --calibrated false to trust Webull's reported IV field instead.
   --levels <prices>         Additional reference price levels (support/resistance, targets) to show in break-even reports. Format: TICKER:P1/P2/P3 (e.g., GME:20/25/30,SPY:580/590)
   --tickers <list>          Show only these tickers in the report. Comma-separated (e.g., GME,SPY,AAPL)
   --trade <spec>            Add a proposed trade to the book (same spec as `analyze trade`) and report the combined result
@@ -195,13 +197,14 @@ Options:
 
 ### Analyze Command
 
-The `analyze` command has eight subcommands:
+The `analyze` command has nine subcommands:
 
-- `analyze trade` — the time-decay grid of a hypothetical trade, on its own.
+- `analyze trade` — the time-decay grid of a hypothetical trade, on its own (plus `--compare` across `;` groups).
 - `analyze roll` — show a 2D grid of theoretical roll credit/debit across underlying prices × times using Black-Scholes.
-- `analyze risk` — render a structured risk diagnostic for an option structure using live quotes.
-- `analyze position` — analyze an existing or manually specified option position and rank adjustment scenarios.
-- `analyze gex` — render a 2D dealer-gamma-exposure (GEX) heatmap over the option chain (strikes × expirations) plus chain totals and call/put walls.
+- `analyze risk` — render a structured risk diagnostic for an option structure using live quotes, a stored proposal, or a recent fill.
+- `analyze position` — analyze an existing, manually specified, proposed, or recently filled option position and rank adjustment scenarios.
+- `analyze gex` — render a 2D dealer-gamma (GEX) and vanna (VEX) exposure heatmap over the option chain (strikes × expirations, build-up, or intraday migration), unusual expiring-contract activity, and call/put walls.
+- `analyze cascade` — classify the intraday 0DTE market regime into Bear Cascade, Bear Trap, Bull Cascade, Bull Trap, or Neutral from multi-expiry and 0DTE dealer gamma/vanna, walls, squeeze score, and session tape.
 - `analyze sentiment` — render the current CNN Fear & Greed Index (score, rating, historical comparison, and component breakdown).
 - `analyze regime` — show the blended directional bias the live opener uses (daily technical composite + VIX term structure + intraday tape), its decomposition, and a per-structure-family ranking with flip-margin sweep.
 - `analyze top` — list Webull's market-wide top option contracts by volume, turnover, open interest, OI change, or IV.
@@ -210,11 +213,11 @@ All subcommands accept `--date <when>` for the evaluation instant (ET): `now` (d
 
 #### `analyze trade`
 
-Judges a trade on its own: renders only the time-decay grid (break-even panel) of the legs you pass — no trade history, positions, rolls, or summary. To see how a trade changes your book (its legs merged into the positions you hold), use `wa report --trade "<spec>"`.
+Judges a trade on its own: renders only the time-decay grid (break-even panel) of the legs you pass — no trade history, positions, rolls, or summary. Pass `--compare` to also print a comparison table with one row per `;` group (net at spec prices and natural ask/bid, margin, max profit/loss, profit/margin, break-evens, POP, and EV). To see how a trade changes your book (its legs merged into the positions you hold), use `wa report --trade "<spec>"`.
 
 ```
-wa analyze trade "<spec>" [--date <when>] [grid options]
-wa analyze trade --proposal <FILE[:LINE]> | --fill [N]
+wa analyze trade "<spec>" [--compare] [--date <when>] [grid options]
+wa analyze trade --proposal <FILE[:LINE]> | --fill [N] [--compare]
 ```
 
 The `<spec>` is a comma-separated list of legs; `;` separates strategy groups, each rendered as its own panel (plus a combined panel per ticker):
@@ -316,10 +319,11 @@ Reference levels from `--levels` are included as additional rows in the grid.
 
 #### `analyze risk`
 
-Evaluates an option structure with current market quotes and prints the same structured risk diagnostics used by the AI pipeline.
+Evaluates an option structure with current market quotes (or from a stored `--proposal <FILE[:LINE]>` snapshot or a recent `--fill [N]` opening fill) and prints the same structured risk diagnostics used by the AI pipeline.
 
 ```
-wa analyze risk "<spec>" [--iv-default <pct>] [--spot <TICKER:PRICE>] [--date <when>] [report options]
+wa analyze risk "<spec>" [--iv-default <pct>] [--calibrated [true|false]] [--spot <TICKER:PRICE>] [--date <when>] [report options]
+wa analyze risk --proposal <FILE[:LINE]> | --fill [N] [--date <when>]
 ```
 
 The `<spec>` format is:
@@ -344,16 +348,19 @@ wa analyze risk "sell:GME260501C00025500:10@0.38,buy:GME260522C00026000:10@0.12"
 
 # Supply spot manually instead of fetching an underlying quote
 wa analyze risk "sell:GME260501C00025500,buy:GME260522C00026000" --spot GME:24.88
+
+# Replay the diagnostic of a recent opening fill at the exact minute it filled
+wa analyze risk --fill 1
 ```
 
 The command appends a machine-readable record to `data/analyze-risk.jsonl` after each run.
 
 #### `analyze position`
 
-Loads an existing open option strategy from `data/orders.jsonl` or accepts a manual position spec, then ranks hold/roll/reset scenarios with projected P&L and buying-power impact.
+Loads an existing open option strategy from `data/orders.jsonl` (or a stored `--proposal`, a recent `--fill [N]`, or a manual `<spec>`), then ranks hold/roll/reset scenarios with projected P&L and buying-power impact.
 
 ```
-wa analyze position ["<spec>"] [--iv-default <pct>] [--strike-step <step>] [--cash <amount>] [--account <alias>] [--fill [N]] [--date <when>] [--log-level <level>] [report options]
+wa analyze position ["<spec>"] [--proposal <FILE[:LINE]>] [--fill [N]] [--iv-default <pct>] [--strike-step <step>] [--cash <amount>] [--risk <value>] [--account <alias>] [--calibrated [true|false]] [--theoretical] [--date <when>] [--log-level <level>] [report options]
 ```
 
 If `<spec>` is omitted, the command scans open strategy positions from the trade log and lets you pick one interactively.
@@ -383,10 +390,10 @@ The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa
 
 #### `analyze gex`
 
-Renders a 2D gamma-exposure heatmap over the option chain — rows = strikes (descending), columns = expirations (ascending). Cell hue encodes net polarity (green = call-dominated, red = put-dominated); cell brightness encodes |net GEX| relative to the chain max. Bold + underlined cells mark the per-expiry gravity strike (max gross gamma — call gamma×OI + put gamma×OI). The bold yellow strike row is the at-the-money strike. Below the heatmap, the command prints chain totals (call GEX, put GEX, gross, net, net fraction) and the top call walls (resistance) and put walls (support) ranked across the visible window.
+Renders 2D gamma-exposure (GEX) and vanna-exposure (VEX) heatmaps over the option chain — rows = strikes (descending), columns = expirations (ascending, or trading sessions in the `--expiry` build-up view, or RTH time buckets in `--intraday` mode). Cell hue encodes net polarity (green = call-dominated, red = put-dominated); cell brightness encodes |net exposure| relative to the chain max. Bold + underlined cells mark the per-expiry gravity strike (max gross gamma — call gamma×OI + put gamma×OI). The bold yellow strike row is the at-the-money strike. Below the heatmaps, the command prints unusual opening/expiring-contract activity screens, per-expiration summaries, chain totals, and the top call walls (resistance) and put walls (support) ranked across the visible window (or `--view squeeze` for a 0–100 gamma-squeeze screener panel).
 
 ```
-wa analyze gex <ticker> [--expiry <YYYY-MM-DD>] [--dte <n>] [--strike-range <pct>] [--max-strikes <n>] [--top-walls <n>] [--source webull|schwab] [--dump] [--intraday [--interval <min>] [--exante]] [--spot <TICKER:PRICE>] [--date <when>]
+wa analyze gex <ticker> [--greek both|gamma|vanna] [--expiry <YYYY-MM-DD> [--since <YYYY-MM-DD>]] [--dte <n>] [--strike-range <pct>] [--max-strikes <n>] [--top-walls <n>] [--lookback <days>] [--view detailed|simplified|squeeze] [--vendor webull|schwab] [--dump] [--intraday [--interval <min>] [--start <HH:MM>] [--end <HH:MM>] [--time <HH:MM>] [--exante] [--vanna] [--captured]] [--spot <TICKER:PRICE>] [--date <when>]
 ```
 
 Per-strike call GEX = `gamma(strike, spot, dte, iv) × callOI × 100 × spot`. Put GEX is the same with putOI. Net = call GEX − put GEX (signed); gross = call GEX + put GEX (always non-negative).
@@ -394,15 +401,18 @@ Per-strike call GEX = `gamma(strike, spot, dte, iv) × callOI × 100 × spot`. P
 Examples:
 
 ```bash
-# Daily grid: 0DTE through 14 days out, ±20% strike window, 50 strikes closest to spot
+# Daily grid: 0DTE through 14 days out, ±20% strike window, up to 200 strikes closest to spot
 wa analyze gex SPY
 
-# Today's 0DTE only, or a single pinned expiry
+# Today's 0DTE only, or a single pinned expiry (build-up view across recent sessions)
 wa analyze gex SPY --dte 0
 wa analyze gex GME --expiry 2026-05-15
 
+# Gamma-squeeze screener view
+wa analyze gex SPY --view squeeze
+
 # Cross-check vendors (Schwab needs `wa schwab login`) and capture the raw per-strike IV/OI inputs
-wa analyze gex SPY --source schwab --dump
+wa analyze gex SPY --vendor schwab --dump
 
 # Historical/offline: the chart as it stood at a past instant (10:00 ET for a bare date), no network: the snapshot's
 # pre-open OI (the prior session's close), prior-day settled IVs for back expiries, the front expiry's minute NBBO,
@@ -410,13 +420,33 @@ wa analyze gex SPY --source schwab --dump
 wa analyze gex SPY --date 2026-06-05
 wa analyze gex SPY --date 2026-06-05T14:30
 
-# 0DTE intraday heatmap — GEX recomputed at each 30-min bucket's spot; --exante uses prior-day IVs
-# so the picture shows what was hedgeable at the time instead of leaking the session's EOD outcome.
-# --intraday replays the whole --date session (--start/--end), not its instant
+# 0DTE intraday heatmap — GEX recomputed at each bucket's spot alongside the session's volume tape;
+# --exante uses prior-day IVs so the picture shows what was hedgeable at the time instead of leaking EOD outcome
 wa analyze gex SPY --date 2026-06-05 --intraday --exante
 ```
 
-Live runs require Webull API session headers (`data/api-config.json`) — run `wa sniff` first if missing (or `--source schwab` after `wa schwab login`). Yahoo isn't supported because chain-level GEX needs full OI + IV across every expiry, which only Webull's `strategy/list` + `queryBatch` combination reliably returns. Webull's `strategy/list` only inlines OI/IV for the front-most expiration, so the command refreshes in-window non-front-month contracts via `queryBatch` before computing the matrix. Every live run appends what it computed (gravity / walls / flip / max-pain per expiry, source-tagged) to `data/gex` so vendor-IV-dependent values stay reproducible later.
+Live runs require Webull API session headers (`data/api-config.json`) — run `wa sniff` first if missing (or `--vendor schwab` after `wa schwab login`). Yahoo isn't supported because chain-level GEX needs full OI + IV across every expiry, which only Webull's `strategy/list` + `queryBatch` combination reliably returns. Webull's `strategy/list` only inlines OI/IV for the front-most expiration, so the command refreshes in-window non-front-month contracts via `queryBatch` before computing the matrix. Every live run appends what it computed (gravity / walls / flip / max-pain per expiry, source-tagged) to `data/gex` so vendor-IV-dependent values stay reproducible later.
+
+#### `analyze cascade`
+
+Classifies the intraday 0DTE market regime into **Bear Cascade**, **Bear Trap**, **Bull Cascade**, **Bull Trap**, or **Neutral** (0–100 score per setup plus hard confirmation gates) and renders a Spectre.Console screener panel. It combines multi-expiry (default 30 DTE) GEX flip, net GEX fraction, and net Vanna (VEX) exposure with 0DTE call/put walls (`CallWall0Dte`, `PutWall0Dte`, `CallWallAtHigh0Dte`, `PutWallAtLow0Dte`), 0DTE gamma flip, the 0DTE squeeze screener, VIX1D/VIX9D/VIX term structure, and intraday RTH 1-minute tape (VWAP, opening range, session high/low wall tests and rejections).
+
+```
+wa analyze cascade <ticker> [--dte <n>] [--strike-range <pct>] [--max-strikes <n>] [--trigger <score>] [--exante] [--vendor webull|schwab] [--spot <TICKER:PRICE>] [--date <when>]
+```
+
+Every live run appends its chain to `data/iv` (feeding the volume-pace factor) and its regime reading to `data/cascade` (`CascadeLog`), and the same live reader (`CascadeLiveReader`) drives the opt-in `opener.cascade` 0DTE trades in `wa ai watch` and `wa ai scan`. A past `--date` (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`) replays causally offline from `data/oi/<TICKER>/<DATE>.jsonl` + `data/quotes.db` minute NBBO + RTH minute bars without touching disk.
+
+Examples:
+
+```bash
+# Live regime read for SPXW or SPY
+wa analyze cascade SPXW
+wa analyze cascade SPY --vendor schwab
+
+# Causal historical replay at a specific session minute
+wa analyze cascade SPXW --date 2026-06-05T10:30
+```
 
 #### `analyze sentiment`
 
@@ -444,7 +474,7 @@ wa analyze regime XSP
 wa analyze regime XSP --date 2026-06-12T09:35
 ```
 
-It accepts the shared AI ticker/config options (`--strategy`, `--source`, `--log-level`, …) plus `--account` for the live position read, and `--date <when>` for offline historical mode (a bare date is 10:00 ET).
+It accepts the shared AI ticker/config options (`--strategy`, `--vendor`, `--log-level`, …) plus `--account` for the live position read, and `--date <when>` for offline historical mode (a bare date is 10:00 ET).
 
 #### `analyze top`
 
@@ -462,21 +492,33 @@ wa analyze top --by oi-up --count 100
 
 #### Options
 
-All `analyze` subcommands accept all `report` options, plus:
+All `analyze` subcommands accept all `report` grid options (`--vendor`, `--date`, `--spot`, `--iv`, `--range`, `--display`, `--grid`, `--theoretical`, `--calibrated`, `--levels`, `--output`, `--output-path`), plus:
 
 ```
   --date <when>           Evaluation instant (ET): now (default), fill (with --fill), YYYY-MM-DD (10:00 ET) or YYYY-MM-DDTHH:MM.
                           Options expiring before it generate synthetic expirations, and all DTE/Black-Scholes calculations use it.
 
+analyze trade only:
+  --proposal <FILE[:LN]>  Reconstruct the trade from a stored proposal snapshot (legs + entry mids) and evaluate against live quotes.
+  --fill [N]              Evaluate a recent opening fill (1-based index newest-first, or omit N to pick interactively).
+  --compare               After the panels, print a comparison table across ';'-separated strategy groups.
+
 analyze risk only:
-  --iv-default <pct>      Fallback implied volatility used when live IV is unavailable.
+  --proposal <FILE[:LN]>  Render the risk diagnostic from a stored proposal snapshot instead of live quotes.
+  --fill [N]              Render the risk diagnostic of a recent opening fill (defaults to --date fill).
+  --iv-default <pct>      Fallback implied volatility used when live IV is unavailable (default: 40).
+  --calibrated [bool]     Back-solve each leg's IV from its live bid/ask mid (default: true).
 
 analyze position only:
-  --iv-default <pct>      Fallback implied volatility used when live IV is unavailable.
-  --strike-step <step>    Strike increment used for near-spot scenario generation.
+  --proposal <FILE[:LN]>  Render the position diagnostic and scenarios from a stored proposal snapshot.
+  --fill [N]              Analyze a recent opening fill (whether or not still held; defaults to --date now).
+  --iv-default <pct>      Fallback implied volatility used when live IV is unavailable (default: 40).
+  --strike-step <step>    Strike increment used for near-spot scenario generation (default: 0.50).
   --cash <amount>         Available cash/BP used to flag scenarios as fundable or not fundable.
+  --risk <value>          Risk-aversion weight for ranking scenarios by capital at stake (default: 0.5).
   --account <alias>       Account alias or ID from api-config.json used to auto-detect available cash/BP
                           when you select an existing open position.
+  --log-level <level>     error | information (default) | debug.
 
 analyze roll only:
   --side <long|short>     Position side. Default: short. See above for the math each side uses.
@@ -487,26 +529,41 @@ analyze roll only:
                           Only meaningful with --side short.
 
 analyze gex only:
-  --expiry <date>         Restrict to a single expiration (YYYY-MM-DD). Default: show the --dte window.
+  --greek <name>          Exposure to map: both (default — gamma + vanna side by side), gamma/gex, or vanna/vex.
+  --expiry <date>         Pin a single expiration (YYYY-MM-DD): switches to the multi-day build-up view (or pins the expiry for --intraday).
+  --since <date>          Build-up view (--expiry without --intraday) first session shown (YYYY-MM-DD).
   --dte <n>               Days-to-expiry cap: every expiry from 0DTE through N days out. Default: 14.
   --strike-range <pct>    Strike window as ± percent of spot. Default: 20.
-  --max-strikes <n>       Max strike rows. Picks the N strikes closest to spot within --strike-range. Default: 50.
+  --max-strikes <n>       Max strike rows retained in the raw ladder. Default: 200.
   --top-walls <n>         Number of top call/put walls to list in the resistance/support panels. Default: 5.
-  --source <vendor>       Chain vendor for the live fetch: webull (default) or schwab (needs `wa schwab login`).
+  --lookback <days>       Prior sessions scanned by the expiring-contracts unusual-activity panel (0 disables). Default: 5.
+  --view <mode>           detailed (default), simplified, or squeeze (0–100 gamma-squeeze screener panel).
+  --vendor <vendor>       Chain vendor for the live fetch: webull (default) or schwab (needs `wa schwab login`).
   --dump                  Append every in-window contract's raw bid/ask/IV/OI to data/iv/<TICKER>/<date>.csv, source-tagged.
-  --intraday              0DTE intraday heatmap (offline-only, needs --date + a data/oi snapshot): strikes × RTH time buckets.
-  --interval <min>        --intraday bucket size in minutes. Default: 30.
-  --exante                --intraday with the PRIOR day's snapshot IVs instead of back-solved same-day EOD mids (no outcome leakage).
+  --intraday              Intraday GEX migration across RTH time buckets (live running-day or offline --date replay).
+  --interval <min>        --intraday bucket size in minutes (1–120). Default: auto-fit to terminal width.
+  --start / --end <HH:MM> --intraday window bounds in ET (default: 09:30 to 16:00).
+  --time <HH:MM>          --intraday: narrow the VEX side panel to the single bucket nearest this ET time.
+  --exante                --intraday with the PRIOR day's snapshot IVs instead of back-solved same-day EOD mids.
+  --vanna                 --intraday: add the VEX migration panel as a third panel beside gamma and the volume tape.
+  --captured              --intraday: price buckets from vendor-reported IVs/OI archived in data/iv.
+
+analyze cascade only:
+  --dte <n>               Multi-expiry horizon in DTE for the 30-day GEX flip, net GEX fraction, and net VEX. Default: 30.
+  --strike-range <pct>    Strike window as ± percent of spot. Default: 20.
+  --max-strikes <n>       Max strike rows retained in the matrix ladder (1–200). Default: 200.
+  --trigger <score>       Minimum 0–100 score required (with confirmation gates) for a regime to confirm. Default: 65.
+  --exante                On a past --date replay, price front-expiry IVs from the prior trading day's snapshot when minute NBBO is absent.
 ```
 
 ### Fetch Command
 
 ```bash
-# Fetch order data from the Webull API
+# Fetch order and cash-record data from the Webull API
 wa fetch
 ```
 
-Reads API credentials from `data/api-config.json` and writes orders to `data/orders.jsonl`.
+Reads API credentials from `data/api-config.json` and writes cash-record activity to `data/cashrecord.jsonl` and orders to `data/orders.jsonl`.
 
 ### Ledger Command
 
@@ -533,11 +590,25 @@ Listens on loopback (`127.0.0.1:9223`) for a companion Tampermonkey userscript (
 - `scripts/webull-header-dump.user.js` installed in Tampermonkey (one-time setup)
 - An already-logged-in Webull tab, with at least one authenticated request made (e.g. open Orders) so the script has an `access_token` to capture
 
+### Clipboard Command
+
+`wa clipboard order` OCRs a snipped Webull order ticket straight off the clipboard (or from a file via `--path <file>`) using a multi-pass SkiaSharp + Tesseract ensemble, cross-checks the ticket's header fields against the parsed leg rows, and prints the matching `wa trade place` and `wa analyze trade` commands.
+
+```bash
+# Snip a Webull order ticket to the clipboard, then convert it to CLI commands
+wa clipboard order
+
+# Read from a saved screenshot instead of the clipboard, and print raw OCR rows
+wa clipboard order --path ticket.png --rows
+```
+
+If the header-vs-leg cross-check detects any discrepancy, the problems are highlighted in red, the `wa trade place` command is suppressed, and the command exits with code `3`. Even on a clean parse, the emitted `wa trade place` line never includes `--submit` — you review and add `--submit` yourself.
+
 ### Trade Command
 
-The `trade` command previews, places, cancels, lists, and inspects orders via the Webull OpenAPI. It also exposes account-subscription lookup, raw-position inspection, and token lifecycle helpers. It supports single-leg equity orders, single-leg option orders, and multi-leg option strategies (including stock+option combos like covered calls). Unlike `fetch` — which uses Webull's session-based web API — `trade` uses the OpenAPI with App Key + App Secret authentication.
+The `trade` command previews, places, replaces, cancels, closes, lists, and inspects orders via the Webull OpenAPI. It also exposes account-subscription lookup, raw-position inspection, and token lifecycle helpers. It supports single-leg equity orders, single-leg option orders, and multi-leg option strategies (including stock+option combos like covered calls). Unlike `fetch` — which uses Webull's session-based web API — `trade` uses the OpenAPI with App Key + App Secret authentication.
 
-Every `trade place` invocation runs a preview against the broker by default. The order is only submitted when you pass `--submit`, and every mutating action (`place --submit`, `cancel`, `cancel --all`) prompts interactively before sending.
+Every `trade place` invocation runs a preview against the broker first. Without `--submit`, `trade place` and `trade close` offer an interactive `[y/N]` confirmation prompt (default `N`) after the preview; passing `--submit` places the order immediately without prompting (matching `wa ai scan --submit` and `wa ai watch --submit`). `trade replace`, `trade cancel`, and `trade cancel --all` always prompt `[y/N]` before sending.
 
 #### Setup
 
@@ -565,6 +636,10 @@ wa trade place "buy:GME:100,sell:GME260501C00025000:1" --limit 23.50
 
 # Market order, single equity.
 wa trade place "buy:SPY:10" --type market --submit
+
+# Replace a working order's limit price (and optionally quantity) in place.
+wa trade replace <clientOrderId> --limit 0.80
+wa trade replace <clientOrderId> --limit 0.80 --qty 2
 
 # Cancel a single order.
 wa trade cancel <clientOrderId>
@@ -622,16 +697,24 @@ Per-leg prices (`@PRICE`) are **not** allowed in `trade` — combo orders use a 
 ```
 Options (place):
   <trade>                   Comma-separated legs in ACTION:SYMBOL:QTY format (positional, required).
-  --limit <net>            Absolute per-share net limit price. Required for --type limit.
-  --side <buy|sell>        Override inferred combo direction. Use only when auto-inference is not what you want.
+  --limit <net>             Absolute per-share net limit price. Required for --type limit.
+  --side <buy|sell>         Override inferred combo direction. Use only when auto-inference is not what you want.
   --type <type>             limit or market. Default: limit. Market is rejected for multi-leg orders.
   --tif <tif>               Time-in-force: day or gtc. Default: day.
+  --session <session>       Trading session: core (09:30–16:00 ET, default), all (04:00–20:00 ET), night (20:00–04:00 ET), or all_day.
   --strategy <name>         Override auto-detected strategy. Values: single, stock, vertical, calendar,
                             diagonal, iron_condor, iron_butterfly, butterfly, condor, straddle, strangle,
                             covered_call, protective_put, collar.
+  --intent <intent>         Option position_intent override: buy_to_open, sell_to_open, buy_to_close, or sell_to_close.
   --account <id-or-alias>   Pick an account from api-config.json. Defaults to defaultAccount.
-  --submit                  Actually place the order. Without this, runs preview only.
+  --submit                  Place the order immediately after preview without prompting.
   --debug                   Print the raw JSON payload that will be sent to the Webull API.
+
+Options (replace):
+  <clientOrderId>           Client order ID of the working order to modify in place.
+  --limit <price>           New absolute per-share net limit price (required).
+  --qty <n>                 New quantity. Defaults to the order's current quantity.
+  --account <id-or-alias>   Pick a non-default account.
 
 Options (cancel):
   <clientOrderId>           Client order ID of the order to cancel.
@@ -659,6 +742,7 @@ Options (status):
   --account <id-or-alias>   Pick a non-default account.
 
 Options (list):
+  --debug                   Dump the raw JSON response from /openapi/trade/order/open.
   --account <id-or-alias>   Pick a non-default account.
 
 Options (accounts / positions / token create / token check):
@@ -676,13 +760,13 @@ Options (accounts / positions / token create / token check):
 
 Each account in `api-config.json` has a `sandbox: true|false` flag. Sandbox accounts hit `https://us-openapi-alb.uat.webullbroker.com`; production accounts hit `https://api.webull.com`. A colored banner (green `[SANDBOX]` / red `[PRODUCTION]`) is printed at the top of every `trade` invocation so you always know which environment you are in.
 
-There is no `--yes` flag — every place, cancel, and cancel-all prompts interactively. Piped empty input aborts.
+There is no `--yes` flag — `place` and `close` require either `--submit` or an interactive `y` at the confirmation prompt, and `replace`, `cancel`, and `cancel --all` always prompt interactively. Piped empty input aborts.
 
 ### AI Command
 
-The `ai` command evaluates live or replayed positions and emits structured proposal logs. It can emit both management proposals (roll / take-profit / stop-loss / defensive-roll) and opening candidates for new positions. It is **read-only in phase 1**: the command never places orders.
+The `ai` command evaluates live or replayed positions, emits structured proposal logs for management rules (close / roll / leg-in / trailing-stop / take-profit / stop-loss) and opening candidates (scorer-ranked structures, `zeroDteGate`, and signal-driven `opener.cascade` 0DTE setups), and supports **opt-in live auto-execution** (`autoExecute` + `--submit`) with broker-truth deduplication, automatic limit repricing (`OrderRepricer`), and marketable close chasing (`MarketableCloseChaser`). By default, auto-execution is off and `scan` / `watch` run read-only or in dry-run logging mode.
 
-Eight subcommands — `scan` / `watch` / `replay` / `backtest` share one evaluation engine, `history` manages the caches they read, `config` inspects/creates the layered config files (`show` prints the fully-resolved effective config after all merges, `init` emits a complete base config with every parameter at its code default and everything disabled, `format` normalizes one), `gate` replays the 0DTE session gate's reasoning offline (see below), and `dip` is a standalone dip-signal research tool:
+Eight subcommands — `scan` / `watch` / `replay` / `backtest` share one evaluation engine, `history` manages the caches they read, `config` inspects/creates the layered config files (`show` prints the fully-resolved effective config after all merges, `init` emits a complete base config or scaffolds a ticker + starter strategy layer from the live chain, `format` normalizes a JSON file into house style), `gate` replays the 0DTE session gate's reasoning offline (see below), and `dip` is a standalone dip-signal research tool:
 
 ```bash
 # Continuous monitoring during market hours (default: until 4 PM ET)
@@ -967,7 +1051,7 @@ Shared AI options:
   --pricing <mode>         mid | bidask
 
 ai scan + watch (live commands):
-  --source <vendor>        Live option-chain vendor: webull (sniffed-session chain, default) or schwab (chains API NBBO;
+  --vendor <vendor>        Live option-chain vendor: webull (sniffed-session chain, default) or schwab (chains API NBBO;
                            needs `wa schwab login`). IV is re-based to the NBBO mid for both vendors.
   --dump                   Diagnostic: dump the first few raw Webull chain/queryBatch HTTP responses to data/quote-dumps/.
   --account <alias>        Account alias or ID from api-config.json; overrides defaultAccount for the position read and any executions.
@@ -976,6 +1060,7 @@ ai scan + watch (live commands):
 
 ai scan only:
   --top <N>                Override opener.topNPerTicker from ai-config.json
+  --all                    Ignore opener.minScoreToOpen for this run (emit full top-N even below threshold).
   --theoretical            Bypass the live chain; price via Black-Scholes against an explicit --spot (pre-market / weekend planning).
   --premarket              Live chain, but spot is back-solved from put-call parity on the ATM straddle (chain active, underlying not ticking yet).
   --date <date>            With --theoretical: asOf date. Default: next business day.
@@ -1000,6 +1085,23 @@ ai history only:
   --import-webull-spx <f>  One-time SPX deep-history bootstrap from a browser-captured bar dump.
   --partial                Capture today's incomplete intraday tape up to now (recovers a missed live watch session; file stays unsealed).
 
+ai gate only:
+  --date <date>            Single session to replay minute-by-minute (YYYY-MM-DD). Default: today.
+  --since / --until <date> Replay a date range (one outcome row per trading day + skip-reason tally).
+  --every <minutes>        Single-session mode: print a row every N minutes (default: 15).
+  --all                    Single-session mode: print every minute, ignoring --every.
+  --csv <path>             Range mode: write per-day outcomes (date, state, entry_et, summary) to CSV.
+  --trace <path>           Range mode: write every RTH minute's gate state (date, et, state) to CSV.
+
+ai config subcommands:
+  wa ai config show <ticker> [--strategy <tok>]
+                           Print the fully-resolved effective config with each leaf tagged by its source layer.
+  wa ai config init [<ticker>] [--strategy <tok>] [--structures <list>] [--vendor <vendor>] [--force] [--out <path>]
+                           Without <ticker>: emit a complete base config with all rules/structures disabled.
+                           With <ticker>: scaffold ai-config.<TICKER>.json + ai-config.<TICKER>.<STRATEGY>.json from the live chain.
+  wa ai config format <path>
+                           Rewrite an existing JSON config file in house style (tab-indented, LF, one-line structure blocks).
+
 ai backtest only:
   --since <date>           Start date YYYY-MM-DD. Default: Jan 1 of current year.
   --until <date>           End date YYYY-MM-DD. Default: today.
@@ -1016,17 +1118,22 @@ ai backtest only:
   --lots <n>               Fixed contracts per trade, cash gates bypassed — measures per-trade edge (expectancy,
                            profit factor) without the compounding/sizing feedback loop. Also OVERRIDES the recorded
                            quantity under --replay, so a replay run can be compared per-lot against a normal backtest.
+  --cross <fraction>       Fill model between mid (0) and bid/ask (1): each leg fills this fraction of its half-spread away from mid (requires --pricing mid).
   --replay                 Skip the opener and seed the book from the live proposal log
                            (data/ai-proposals.<TICKER>.<strategy>.jsonl): each trading day's first non-informational
                            open at/after 09:30 ET books at its recorded qty and submit price, then management rules,
                            intraday triggers, and expiry settlement run as normal — reconstructing what the live
                            opener actually proposed over [--since, --until]. Pair with --book-cmd for the matching
                            `wa report` line. Incompatible with --oracle.
+  --opens <fills.jsonl>    Skip the opener and book a prior backtest's opens from its --fills-jsonl ledger (fast exit-rule sweeps).
   --split                  Book split structures (double calendars/diagonals, diagonal/calendar verticals) as their
                            TWO combo orders, managed independently against their own debits — exactly how Webull holds them.
-  --tp / --sl <value>      Override rules.takeProfit.pctOfMaxProfit / rules.stopLoss.pctOfMaxLoss for this run (0..1; 1.0 = off).
+  --tp-pct <value>         Override rules.takeProfit.profitTargetPctOfPremium (and arm the rule; 0 = off).
+  --sl <value>             Override rules.stopLoss.pctOfMaxLoss (and arm the rule; 1.0 = off).
+  --exhaust <value>        Override rules.stopLoss.thetaExhaustShortMid for cross-expiry positions (0 = off).
   --show-fills             Print per-fill ledger in addition to the summary.
   --fills-jsonl <path>     Also write each fill as a JSON line. Useful for parameter-sweep scripts.
+  --book-cmd               Print a ready-to-paste `wa report --source none --trade` command reconstructing the window's book.
   --oracle                 Research mode (by-design lookahead): forward-simulate each minute's proposal to expiry
                            and open the (minute, proposal) pair with the highest realized P&L. Upper bound only.
   --profile                Print a per-step wall-time breakdown at the end of the run.
@@ -1079,7 +1186,7 @@ For Close proposals at or above `management.scaleOut.minQty` contracts, the exec
 
 #### Cash reserve
 
-Every proposal is funding-checked. Proposals that would leave free cash below the configured reserve get a `⚠ blocked by cash reserve` tag. This is informational in phase 1; no action is blocked since nothing executes.
+Every proposal is funding-checked. Proposals that would leave free cash below the configured reserve get a `⚠ blocked by cash reserve` tag and are skipped by the auto-executor.
 
 #### Historical replay: supplying price data
 
@@ -1156,47 +1263,57 @@ Key flags: `--rsi-low` / `--rsi-high` / `--bb-k` / `--interval` shape the signal
 
 `wa ai backtest` prices every leg off **real minute NBBO** — there is no synthetic-spread / trade-bar pricing path. Two canonical, vendor-independent stores back it (same format regardless of source, so a historical backfill and a live capture are interchangeable):
 
-- **`data/quotes.db`** — a single SQLite database of minute NBBO time-series (ticker, expiry, minute, strike, right, bid, ask, sizes). The price/fill foundation: marks at mid, fills cross the real spread. Override per run with `--quote-db`; maintain with `wa data vacuum / optimize / check / stats`.
-- **`data/oi/<TICKER>/<DATE>.jsonl`** — one daily full-chain snapshot (`underlyingPrice` + `options[]` with `openInterest` and `iv`). OI is constant intraday, so one record/day feeds the GEX / max-pain factors.
+- **`data/quotes.db`** — a single SQLite database of minute NBBO (`quotes`) and trade-bar (`ohlcv`) time-series (ticker, expiry, minute, strike, right, bid, ask, sizes / OHLCV). The price/fill foundation: marks at mid, fills cross the real spread. Override per run with `--quote-db`; maintain and verify with `wa data vacuum / optimize / check / stats / verify`.
+- **`data/oi/<TICKER>/<DATE>.jsonl`** — one daily full-chain snapshot (`underlyingPrice` + `options[]` with `openInterest` and `iv`). OI is constant intraday, so one record/day feeds the GEX / VEX / cascade / max-pain factors.
 
 How they're filled:
 
-- **Historical backfill** — `scripts/daily_backfill.sh` (published alongside the installed executable) drives `backfill_thetadata.py`, pulling minute NBBO and EOD open interest from ThetaData and importing into the SQLite store via `import_quotes_sqlite.py`. Tickers/DTE are passed at runtime (`--tickers NAME:DTE`); end-of-bar stamps are normalized to start-of-bar (−60s) at ingest. Run it evenings (≥19:00 ET) so the current day lands finalized; integrity checks via `backfill_thetadata.py --verify-quotes`. (ThetaData Value ≈ $40/mo, cancellable — re-subscribe to fill any gap.)
+- **Historical backfill** — built-in `wa data backfill quotes | ohlcv | oi` commands stream minute NBBO, minute trade bars, and daily EOD open interest directly from ThetaData over gRPC (normalized to start-of-bar stamps at ingest) into `data/quotes.db` and `data/oi`, driven by `scripts/daily_backfill.sh` in the evenings (≥19:00 ET) followed by `wa data verify` and `wa data clock`.
 - **Forward capture** — the `wa-scraper` (Schwab primary, Webull backup) writes the same stores live, ±10% strike-banded.
 
 > The old `wa options` subsystem (discover / backfill / audit / chain / reprice), the per-expiry CSV quote store, and the massive.com option-bar catalog were all retired with the move to real NBBO in SQLite. massive remains only as an underlying intraday-tape source (see the AI history section).
 
 ### Data Command
 
-`wa data` snapshots and restores the local data directory, and maintains the SQLite quote store.
+`wa data` snapshots and restores the local data directory, maintains and verifies the SQLite quote store, runs ThetaData backfills, and calibrates the trading-time clock.
 
 ```bash
-# Back up the top-level setting files (configs, orders, ledgers — ~MBs) to a timestamped tar.gz under <BaseDir>/backups/
+# Back up the top-level setting files (configs, orders, ledgers — ~MBs, excluding quotes.*) to a timestamped tar.gz under <BaseDir>/backups/
 wa data backup
 
-# Full backup including the market-data subdirectories (quotes/, oi/, intraday/, ... — many GB)
+# Full backup including the quote store (quotes.*) and market-data subdirectories (oi/, intraday/, ... — many GB)
 wa data backup --full
 
 # Back up to a specific path
 wa data backup -o /mnt/d/wa-backups/before-sweep.tar.gz
 
 # Restore the most recent backup (refuses to overwrite an existing data/ without --force);
-# --settings restores only the top-level setting files, leaving data subdirectories untouched
+# --settings restores only the top-level setting files, leaving data subdirectories and quotes.* untouched
 wa data restore
 wa data restore -i /mnt/d/wa-backups/before-sweep.tar.gz --force
 
-# SQLite quote-store maintenance (data/quotes.db; every command takes --db for an alternate store)
-wa data vacuum     # rebuild to reclaim freelist pages + truncate the WAL (slow; run while scraper/backfill are idle)
-wa data optimize   # PRAGMA optimize (cheap, safe any time); --analyze forces a full ANALYZE
-wa data check      # integrity check
-wa data stats      # row counts and on-disk footprint (incl. WAL sidecars)
+# SQLite quote-store maintenance & verification (data/quotes.db; every command takes --db for an alternate store)
+wa data vacuum              # rebuild to reclaim freelist pages + truncate the WAL (pass --force to defragment even when <256 MB reclaimable)
+wa data optimize            # PRAGMA optimize (cheap, safe any time); --analyze forces a full ANALYZE
+wa data check               # integrity_check (--quick for quick_check)
+wa data stats               # on-disk footprint, WAL size, freelist, and sealed expiries (--rows for full-table row coverage)
+wa data verify              # fast primary-key check of the freshest slice per root (--roots <list>, --full for whole-table scan)
+
+# ThetaData historical backfill (requires ThetaData credentials)
+wa data backfill quotes --tickers SPY:60,SPXW:0,XSP:0 --start 2025-01-01
+wa data backfill ohlcv  --tickers SPY:60,SPXW:0,XSP:0 --start 2025-01-01
+wa data backfill oi     --tickers SPY,SPXW,XSP        --start 2025-01-01 --dte 60
+
+# Calibrate the trading-time clock (overnight & weekend/holiday theta weights vs session hours)
+wa data clock               # refresh every tracked root in data/clock/
+wa data clock SPY           # seed and fit a specific root (--since YYYY-MM-DD to override start date)
 ```
 
-Backups default to **settings-only** (a full backup is opt-in via `--full`). With `--force`, `data restore` renames any existing `data/` to `data.bak.<timestamp>/` before restoring over it; a settings-only payload restores as an overlay.
+Backups default to **settings-only** (a full backup is opt-in via `--full`). With `--force`, `data restore` renames any existing `data/` to `data.bak.<timestamp>/` before restoring over it; a settings-only payload restores as an overlay without touching `quotes.*` or subdirectories.
 
 ### Schwab Command
 
-Authenticates the Schwab chains API, which serves as an alternate live option-quote source (`--source schwab` on `ai scan` / `ai watch` / `analyze gex` / `analyze regime`) and as the primary vendor for the `wa-scraper` forward capture. Credentials live in `api-config.json`.
+Authenticates the Schwab chains API, which serves as an alternate live option-quote source (`--vendor schwab` on `report` / `analyze` / `ai scan` / `ai watch`) and as the primary vendor for the `wa-scraper` forward capture. Credentials live in `api-config.json`.
 
 ```bash
 # Three-legged OAuth: prints the authorize URL, takes the pasted post-login redirect URL,
@@ -1251,24 +1368,38 @@ The `fetch` command requires an API config file. This file contains your Webull 
 
 ```json
 {
-  "secAccountId": "YOUR_ACCOUNT_ID",
-  "tickers": ["GME", "SPY"],
-  "startDate": "2026-01-01",
-  "endDate": "2026-12-31",
-  "limit": 10000,
-  "pin": "YOUR_6_DIGIT_UNLOCK_CODE",
-  "headers": {
-    "access_token": "dc_us_tech1.xxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "did": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "lzone": "dc_core_r001",
-    "osv": "xxxx",
-    "ph": "Windows Edge",
-    "t_time": "1234567890123",
-    "t_token": "xxxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "tz": "America/New_York",
-    "ver": "6.3.1",
-    "x-s": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "x-sv": "xxxxxxxx"
+  "webull": {
+    "secAccountId": "YOUR_ACCOUNT_ID",
+    "tickers": ["GME", "SPY"],
+    "startDate": "2026-01-01",
+    "endDate": "2026-12-31",
+    "limit": 10000,
+    "headers": {
+      "access_token": "dc_us_tech1.xxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "did": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "lzone": "dc_core_r001",
+      "osv": "xxxx",
+      "ph": "Windows Edge",
+      "t_time": "1234567890123",
+      "t_token": "xxxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "tz": "America/New_York",
+      "ver": "6.3.1",
+      "x-s": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "x-sv": "xxxxxxxx"
+    },
+    "defaultAccount": "test1",
+    "accounts": [
+      {
+        "alias": "test1",
+        "accountId": "YOUR_OPENAPI_ACCOUNT_ID",
+        "appKey": "YOUR_OPENAPI_APP_KEY",
+        "appSecret": "YOUR_OPENAPI_APP_SECRET",
+        "sandbox": true
+      }
+    ]
+  },
+  "massive": {
+    "apiKey": "YOUR_MASSIVE_DOT_COM_API_KEY"
   }
 }
 ```
@@ -1277,13 +1408,15 @@ The `fetch` command requires an API config file. This file contains your Webull 
 
 | Field | Description |
 |---|---|
-| `secAccountId` | Your Webull securities account ID (visible in the API request URL) |
-| `tickers` | Array of ticker symbols to fetch (e.g., `["GME", "SPY"]`). Each ticker produces one line in the JSONL output. |
-| `startDate` | Start of the date range to fetch (YYYY-MM-DD) |
-| `endDate` | End of the date range to fetch (YYYY-MM-DD) |
-| `limit` | Maximum number of orders to return per ticker (default: 10000) |
-| `pin` | Your 6-digit Webull unlock code. Required by the `sniff` command to automate header capture. Not used by `fetch`. |
-| `headers` | Authentication and session headers copied from your browser or captured by `sniff`. These are session-specific and will expire. |
+| `webull.secAccountId` | Your Webull securities account ID (visible in the web API request URL) |
+| `webull.tickers` | Array of ticker symbols to fetch (e.g., `["GME", "SPY"]`). Each ticker produces one line in `data/orders.jsonl`. |
+| `webull.startDate` | Start of the date range to fetch (YYYY-MM-DD) |
+| `webull.endDate` | End of the date range to fetch (YYYY-MM-DD) |
+| `webull.limit` | Maximum number of orders to return per ticker (default: 10000) |
+| `webull.headers` | Authentication and session headers captured by `wa sniff` (or copied from browser DevTools). These are session-specific and will expire. |
+| `webull.defaultAccount` | Default OpenAPI account alias used by `wa trade` and `wa ai` when `--account` is omitted |
+| `webull.accounts` | Array of Webull OpenAPI account configurations (`alias`, `accountId`, `appKey`, `appSecret`, `sandbox`) |
+| `massive.apiKey` | API key for massive.com (used by `wa ai history` to backfill underlying 1-minute bars) |
 
 ### Session Tokens
 
@@ -1296,6 +1429,12 @@ An optional `data/config.json` file provides default values for command-line opt
 ```json
 {
   "autoExpandTerminal": false,
+  "terminalWidth": null,
+  "log-level": "information",
+  "vendor": "webull",
+  "analyze": {
+    "view": "detailed"
+  },
   "report": {
     "source": "api",
     "since": null,
@@ -1304,20 +1443,20 @@ An optional `data/config.json` file provides default values for command-line opt
     "outputPath": null,
     "initialAmount": 0,
     "view": "detailed",
-    "currentUnderlyingPrice": null,
+    "spot": null,
     "iv": null,
-    "api": "yahoo",
-    "range": 2,
+    "range": 0,
     "display": "value",
     "grid": "simple",
     "theoretical": false,
+    "calibrated": true,
     "levels": null,
     "tickers": null
   }
 }
 ```
 
-Copy and customize from `config.example.json`. The `report` section maps directly to the report/analyze command options. The `autoExpandTerminal` flag, when `true`, automatically resizes the terminal to fit wide tables.
+Copy and customize from `config.example.json`. The `report` section maps directly to the report/analyze command options, `analyze.view` sets the default view for `analyze gex`, `vendor` sets the default live option-chain vendor (`webull` or `schwab`), and `log-level` sets the process-wide default verbosity (`error`, `information`, or `debug`). The `autoExpandTerminal` flag, when `true`, automatically resizes the terminal to fit wide tables.
 
 ## Output Formats
 
@@ -1420,7 +1559,7 @@ The IV value is color-coded based on the IV/HV ratio (volatility risk premium):
 
 The IV5 metric provides additional context: if IV5 is rising toward HV, a cheap signal may be closing; if IV5 is falling away from HV, a rich signal may be strengthening.
 
-These metrics are sourced from the Webull option chain API. Webull is the default option-quote source (Schwab's chains API is the cross-check alternative via `--source schwab`) — Yahoo Finance lacks Greeks, HV, and iv5 and runs on a delay, so it was retired from the quote path. Yahoo is still used for daily underlying closes (historical price cache), the earnings/ex-dividend calendar, and the risk-free rate (`^IRX`); the VIX-family index history (VIX / VIX1D / VIX9D) and the SMILE index come from CBOE's own daily-prices CSVs, never Yahoo.
+These metrics are sourced from the Webull option chain API. Webull is the default option-quote source (Schwab's chains API is the cross-check alternative via `--vendor schwab`) — Yahoo Finance lacks Greeks, HV, and iv5 and runs on a delay, so it was retired from the quote path. Yahoo is still used for daily underlying closes (historical price cache), the earnings/ex-dividend calendar, and the risk-free rate (`^IRX`); the VIX-family index history (VIX / VIX1D / VIX9D) and the SMILE index come from CBOE's own daily-prices CSVs, never Yahoo.
 
 ## Risk Diagnostic Panel
 
@@ -1911,7 +2050,9 @@ The parent strategy shows the net debit/credit and contributes to P&L calculatio
 - **Spectre.Console** (0.57.1): Console formatting and tables
 - **Spectre.Console.Cli** (0.55.0): Command-line argument parsing with validation
 - **EPPlus** (8.6.1): Excel file generation
-- **Microsoft.Data.Sqlite** (10.0.9): the minute-NBBO quote store (`data/quotes.db`)
+- **Microsoft.Data.Sqlite** (10.0.9): the minute-NBBO and OHLCV quote store (`data/quotes.db`)
+- **Grpc.Net.Client** (2.84.0), **Google.Protobuf** (3.36.2), **ZstdSharp.Port** (0.8.8): ThetaData gRPC streaming client for `wa data backfill` and `wa data clock`
+- **SkiaSharp** (3.119.1): Image preprocessing for `wa clipboard order` OCR
 
 ## License
 
