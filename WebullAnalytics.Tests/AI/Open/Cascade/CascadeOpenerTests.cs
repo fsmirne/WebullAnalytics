@@ -426,6 +426,51 @@ public class CascadeOpenerTests
 		Assert.Empty(ledger.Find(DateOnly.FromDateTime(nextDay.Now), "SPXW", CascadeRegime.BullTrap, live: false));
 	}
 
+	// ── Watch-loop panel ─────────────────────────────────────────────────────────────────────────────────
+
+	[Fact]
+	public async Task TheTradeSectionShowsTheTradeItsCommandsAndTheDay()
+	{
+		// The cascade proposal has no panel of its own: the day's outcomes, the notices, the trade and its three commands are a
+		// full-width subpanel at the bottom of the cascade panel.
+		var ledger = new CascadeSignalLedger();
+		var read = Read(CascadeRegime.BullTrap);
+		var opener = new CascadeOpener(Config(), live: false, ledger, (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, default));
+		opener.Acted(p);
+		var placed = ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false).Last();
+		var skipped = placed with { Setup = CascadeRegime.BearTrap, TimeEt = "11:02:00", Outcome = CascadeSignalLedger.Skipped, Detail = "credit 0.20 under the 0.50 floor" };
+
+		var text = Render(CascadeTradeSection.Build([new CascadeTradeSection.Trade(p, "BULL TRAP 76/100")], ["BEAR TRAP: no trade today — credit 0.20 under the 0.50 floor."], [new("BULL TRAP", placed), new("BEAR TRAP", skipped), new("BULL CASCADE", null)], live: false));
+
+		Assert.Contains("TRADE · TODAY (dry run)", text);
+		Assert.Matches(@"BULL TRAP\s+10:40 logged \(dry run\) · SELL " + Occ(7550m), text);
+		Assert.Matches(@"BEAR TRAP\s+11:02 no trade · credit 0.20 under the 0.50 floor", text);
+		Assert.Matches(@"BULL CASCADE\s+—", text);
+		Assert.Contains("BEAR TRAP: no trade today — credit 0.20 under the 0.50 floor.", text);
+		Assert.Contains($"▶ BULL TRAP 76/100 · ShortCallVertical SPXW x{p.Qty} · credit $", text);
+		Assert.Contains("max loss $", text);
+		Assert.Contains($"SELL {Occ(7550m)} x{p.Qty}, BUY {Occ(7560m)} x{p.Qty}", text);
+		Assert.Contains($"wa trade place \"sell:{Occ(7550m)}:{p.Qty},buy:{Occ(7560m)}:{p.Qty}\" --limit", text);
+		Assert.Contains($"wa analyze trade \"sell:{Occ(7550m)}:{p.Qty}@MID,buy:{Occ(7560m)}:{p.Qty}@MID\"", text);
+		Assert.Contains($"wa analyze risk \"sell:{Occ(7550m)}:{p.Qty},buy:{Occ(7560m)}:{p.Qty}\"", text);
+
+		// Nothing opening: the day's outcomes alone, under a TODAY title.
+		var quiet = Render(CascadeTradeSection.Build([], [], [new("BULL TRAP", placed)], live: true));
+		Assert.Contains("TODAY (live)", quiet);
+		Assert.DoesNotContain("TRADE", quiet);
+		Assert.Matches(@"BULL TRAP\s+10:40 placed · SELL", quiet);
+	}
+
+	private static string Render(Spectre.Console.Rendering.IRenderable panel)
+	{
+		var output = new StringWriter();
+		var console = Spectre.Console.AnsiConsole.Create(new Spectre.Console.AnsiConsoleSettings { Out = new Spectre.Console.AnsiConsoleOutput(output), Ansi = Spectre.Console.AnsiSupport.No, ColorSystem = Spectre.Console.ColorSystemSupport.NoColors });
+		console.Profile.Width = 240;
+		console.Write(panel);
+		return output.ToString();
+	}
+
 	[Fact]
 	public void SessionAnchors_SellTheFirstStrikeBeyondTheDaysExtreme()
 	{

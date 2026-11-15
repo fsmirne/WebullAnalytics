@@ -132,7 +132,8 @@ internal static class LiveTick
 			if (cascadeResults.Count > 0) guardBook = new OverlayQuoteDictionary(guardBook, deps.CascadeOpener!.LastQuotes);
 			var openFrozen = openResults.Count == 0 ? new HashSet<DateTime>() : LiveQuoteGuard.FrozenExpiries(guardBook, config.Ticker, ReportedSpot(quoteSnapshot, deps, config.Ticker), now, marketOpen, deps.VendorName, dividends, guardCfg, "opens");
 			var (feedStale, suspect) = LiveQuoteGuard.Inspect(guardBook, nowOffset, marketOpen, deps.VendorName, guardCfg, openResults, openFrozen, ref state.StaleUnverifiableNoted);
-			for (var i = 0; i < openResults.Count; i++) deps.OpenSink.Emit(openResults[i], rank: i + 1);
+			// A cascade trade is already shown in the cascade panel's trade section; it is only logged here.
+			for (var i = 0; i < openResults.Count; i++) deps.OpenSink.Emit(openResults[i], rank: i + 1, console: !cascadeResults.Contains(openResults[i]));
 			if (deps.OpenerExecutor != null)
 			{
 				// A stale feed poisons every quote → hold all opens this tick; otherwise drop only the

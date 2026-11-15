@@ -4,15 +4,21 @@ namespace WebullAnalytics.Analyze;
 
 /// <summary>
 /// Terminal rendering of a <see cref="CascadeReading"/>, styled after <see cref="GexSqueezePanel"/>:
-/// header with classified regime badge, 0–100 score bar,
-/// 4-regime comparison row, 5-factor breakdown bars, key levels &amp; telemetry, and the setup checklist.
+/// a header with the classified regime badge and the 4-regime comparison row across the full width, then two side-by-side subpanels
+/// (stacked on a terminal narrower than <see cref="SideBySideMinWidth"/>): where the setup stands (0–100 score bar, key levels &
+/// telemetry) and why (5-factor breakdown, setup checklist). The watch loop adds a full-width trade subpanel at the bottom.
 /// </summary>
 internal static class CascadePanel
 {
 	private const int ScoreBarWidth = 60;
 	private const int FactorBarWidth = 28;
 
-	public static void Render(string ticker, DateTime asOf, string scope, CascadeReading reading, bool showLegend = true)
+	/// <summary>Terminals at least this wide get the two side-by-side subpanels; narrower ones stack them.</summary>
+	private const int SideBySideMinWidth = 160;
+	private const int NarrowFactorBarWidth = 16;
+
+	/// <param name="trade">A full-width subpanel rendered at the bottom (the watch loop's trade section); null for none.</param>
+	public static void Render(string ticker, DateTime asOf, string scope, CascadeReading reading, bool showLegend = true, Spectre.Console.Rendering.IRenderable? trade = null)
 	{
 		var lead = reading.LeadingSetup;
 		var active = reading.Active;
@@ -49,43 +55,74 @@ internal static class CascadePanel
 				new Markup($"[yellow]{closedMsg}{(reading.Terrain.FrontSettled ? " The front expiry has settled, so its gamma levels are not scored." : "")}[/]"),
 				new Text(""));
 		}
-		headerGrid.AddEmptyRow();
 
+		var rows = new List<Spectre.Console.Rendering.IRenderable> { headerGrid, new Text(""), RegimeComparisonTable(reading) };
+		// Inside the parent panel: its two border columns and its padding of 2 on each side.
+		var inner = AnsiConsole.Profile.Width - 6;
+		var sideBySide = AnsiConsole.Profile.Width >= SideBySideMinWidth;
+		// The two columns and the one-column gap between them fill the inner width exactly.
+		var columnWidth = (inner - 1) / 2;
+		var rightWidth = inner - 1 - columnWidth;
+		// Each subpanel is titled by its first section; its second section keeps its own heading inside.
+		var left = SubPanel("SETUP SCORE", ScoreAndLevels(reading, lead, regimeColor, closed));
+		var right = SubPanel($"FACTOR BREAKDOWN ({CascadeReading.RegimeLabel(lead.Regime)})", FactorsAndNotes(lead, sideBySide ? NarrowFactorBarWidth : FactorBarWidth));
+		if (sideBySide)
+		{
+			// Equal heights, so the two bottom borders line up.
+			var height = Math.Max(HeightOf(left, columnWidth), HeightOf(right, rightWidth));
+			left.Height = height;
+			right.Height = height;
+			var body = new Grid().AddColumn(new GridColumn().Width(columnWidth).PadLeft(0).PadRight(1)).AddColumn(new GridColumn().Width(rightWidth).PadLeft(0).PadRight(0));
+			body.AddRow(left, right);
+			rows.Add(body);
+		}
+		else
+		{
+			rows.Add(left);
+			rows.Add(right);
+		}
+		if (trade != null) rows.Add(trade);
+
+		AnsiConsole.Write(new Panel(new Rows(rows)).Border(BoxBorder.Rounded).BorderColor(Color.Grey).Padding(2, 1).Expand());
+		if (showLegend)
+			AnsiConsole.MarkupLine("[dim]Regimes: [red]BEAR CASCADE[/] = short-γ + put flow + intraday VIX expansion + VWAP breakdown. [aqua]BEAR TRAP[/] = gap-down / morning dip + intraday VIX stall + VWAP reclaim. [green]BULL CASCADE[/] = intraday VIX crush + call flow + overhead target wall + VWAP breakout. [yellow]BULL TRAP[/] = gap-up / morning rally + VIX failing to crush + VWAP roll-over. Describes the session so far, not what comes next: over 2022–2026 a confirmed regime at 09:50 ET showed no edge from there to the close. 0DTE " + GexLegends.PullLegendMarkup + "[/]");
+	}
+
+	/// <summary>A titled subpanel of the cascade panel, in the house style.</summary>
+	internal static Panel SubPanel(string title, Spectre.Console.Rendering.IRenderable content) =>
+		new Panel(content).Header($"[bold grey]{Markup.Escape(title)}[/]").Border(BoxBorder.Rounded).BorderColor(Color.Grey).Expand();
+
+	/// <summary>Where the setup stands: its score against the trigger, and the key levels.</summary>
+	private static Rows ScoreAndLevels(CascadeReading reading, CascadeSetupEvaluation lead, string regimeColor, bool closed)
+	{
 		var earned = lead.Factors.Sum(f => f.Points ?? 0);
 		var possible = lead.Factors.Where(f => f.Points.HasValue).Sum(f => f.Max);
 		var scoredCount = lead.Factors.Count(f => f.Points.HasValue);
 		var coverage = $"{earned}/{possible} pts · {scoredCount} of {lead.Factors.Count} factors · trigger ≥{reading.TriggerScore}";
-		headerGrid.AddRow(
-			new Markup("[bold grey]SETUP SCORE[/]"),
-			new Markup($"[bold {regimeColor}]{lead.Score}[/][bold]/100[/]"));
-		headerGrid.AddRow(
-			new Text(""),
-			new Markup(closed ? $"[dim]{coverage} · recap[/]" : lead.Complete ? $"[dim]{coverage}[/]" : $"[yellow]{coverage} · awaiting confirmation gates[/]"));
-
-		var rows = new List<Spectre.Console.Rendering.IRenderable>
-		{
-			headerGrid,
+		// The subpanel's title names the score, so its first row is the score itself and how much of it was scored.
+		var score = new Grid().Expand().AddColumn(new GridColumn().NoWrap()).AddColumn(new GridColumn().RightAligned());
+		score.AddRow(new Markup($"[bold {regimeColor}]{lead.Score}[/][bold]/100[/]"), new Markup(closed ? $"[dim]{coverage} · recap[/]" : lead.Complete ? $"[dim]{coverage}[/]" : $"[yellow]{coverage} · awaiting confirmation gates[/]"));
+		return new Rows(
+			score,
 			new Markup(ScoreBar(lead.Score, reading.TriggerScore, regimeColor)),
 			new Markup($"[dim]{BandLabels(reading.TriggerScore)}[/]"),
 			new Text(""),
-			new Markup("[bold grey]REGIME COMPARISON[/]"),
-			RegimeComparisonTable(reading),
-			new Text(""),
-			new Markup($"[bold grey]FACTOR BREAKDOWN ({Markup.Escape(CascadeReading.RegimeLabel(lead.Regime))})[/]"),
-			FactorTable(lead.Factors),
-			new Text(""),
-			new Panel(KeyLevels(reading)).Header("[bold grey]KEY LEVELS & TELEMETRY[/]").Border(BoxBorder.Rounded).BorderColor(Color.Grey).Expand(),
-			new Text(""),
-			new Markup("[bold grey]SETUP ANALYSIS[/]"),
-		};
+			new Markup("[bold grey]KEY LEVELS & TELEMETRY[/]"),
+			KeyLevels(reading));
+	}
 
+	/// <summary>Why it scored that way: the factor breakdown and the setup checklist.</summary>
+	private static Rows FactorsAndNotes(CascadeSetupEvaluation lead, int barWidth)
+	{
+		var rows = new List<Spectre.Console.Rendering.IRenderable> { FactorTable(lead.Factors, barWidth), new Text(""), new Markup("[bold grey]SETUP ANALYSIS[/]") };
 		foreach (var note in lead.Notes)
 			rows.Add(new Markup($"{NoteGlyph(note.Severity)} {Markup.Escape(note.Text)}"));
-
-		AnsiConsole.Write(new Panel(new Rows(rows)).Border(BoxBorder.Rounded).BorderColor(Color.Grey).Padding(2, 1));
-		if (showLegend)
-			AnsiConsole.MarkupLine("[dim]Regimes: [red]BEAR CASCADE[/] = short-γ + put flow + intraday VIX expansion + VWAP breakdown. [aqua]BEAR TRAP[/] = gap-down / morning dip + intraday VIX stall + VWAP reclaim. [green]BULL CASCADE[/] = intraday VIX crush + call flow + overhead target wall + VWAP breakout. [yellow]BULL TRAP[/] = gap-up / morning rally + VIX failing to crush + VWAP roll-over. Describes the session so far, not what comes next: over 2022–2026 a confirmed regime at 09:50 ET showed no edge from there to the close. 0DTE " + GexLegends.PullLegendMarkup + "[/]");
+		return new Rows(rows);
 	}
+
+	/// <summary>The number of lines <paramref name="renderable"/> takes at <paramref name="width"/> on the current console.</summary>
+	private static int HeightOf(Spectre.Console.Rendering.IRenderable renderable, int width) =>
+		Spectre.Console.Rendering.Segment.SplitLines(renderable.Render(Spectre.Console.Rendering.RenderOptions.Create(AnsiConsole.Console), width), width).Count;
 
 	private static Table RegimeComparisonTable(CascadeReading reading)
 	{
@@ -114,7 +151,7 @@ internal static class CascadePanel
 		return table;
 	}
 
-	private static Table FactorTable(IReadOnlyList<FactorScore> factors)
+	private static Table FactorTable(IReadOnlyList<FactorScore> factors, int barWidth)
 	{
 		var table = new Table().NoBorder().HideHeaders()
 			.AddColumn(new TableColumn("").NoWrap())
@@ -123,7 +160,7 @@ internal static class CascadePanel
 			.AddColumn(new TableColumn(""));
 		foreach (var f in factors)
 		{
-			var bar = f.Points.HasValue ? FactorBar(f.Points.Value, f.Max) : $"[grey23]{new string('━', FactorBarWidth)}[/]";
+			var bar = f.Points.HasValue ? FactorBar(f.Points.Value, f.Max, barWidth) : $"[grey23]{new string('━', barWidth)}[/]";
 			var score = f.Points.HasValue ? $"[bold]{f.Points.Value,2}[/]/{f.Max}" : $"[dim]n/a/{f.Max}[/]";
 			table.AddRow(
 				new Markup(Markup.Escape(f.Name)),
@@ -268,12 +305,12 @@ internal static class CascadePanel
 		label.CopyTo(0, line, at, label.Length);
 	}
 
-	private static string FactorBar(int points, int max)
+	private static string FactorBar(int points, int max, int width)
 	{
-		var filled = max > 0 ? (int)Math.Round(FactorBarWidth * (decimal)points / max, MidpointRounding.AwayFromZero) : 0;
+		var filled = max > 0 ? (int)Math.Round(width * (decimal)points / max, MidpointRounding.AwayFromZero) : 0;
 		var share = max > 0 ? (decimal)points / max : 0m;
 		var color = share >= 0.70m ? "green" : share >= 0.35m ? "yellow" : "red";
-		return $"[{color}]{new string('━', filled)}[/][grey23]{new string('━', FactorBarWidth - filled)}[/]";
+		return $"[{color}]{new string('━', filled)}[/][grey23]{new string('━', width - filled)}[/]";
 	}
 
 	private static string NoteGlyph(NoteSeverity s) => s switch

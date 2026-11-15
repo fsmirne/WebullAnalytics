@@ -6,7 +6,8 @@ namespace WebullAnalytics.AI.Output;
 /// Builds the copy-pasteable command lines that reproduce an open proposal: one or two
 /// <c>wa trade place</c> lines (split structures — DiagonalVertical / CalendarVertical /
 /// DoubleCalendar / DoubleDiagonal — emit two, since Webull rejects a single 4-leg cross-expiry
-/// ticket) followed by a single <c>wa analyze trade</c> line covering the whole structure.
+/// ticket) followed by a single <c>wa analyze trade</c> line covering the whole structure, and optionally a <c>wa analyze risk</c>
+/// line for proposals whose panel does not carry the risk diagnostic itself.
 ///
 /// <para>Shared by the live proposal panel (<see cref="OpenProposalSink"/>) and the <c>--log-level debug</c>
 /// best-candidate trace in the opener, so the two render identically and can never drift. The caller
@@ -31,6 +32,8 @@ internal static class ReproductionCommands
 	private static string PlaceLine(IEnumerable<ProposalLeg> legs, decimal limitPerShare, string suffix = "") =>
 		$"wa trade place \"{TradesArg(legs)}\" --limit {limitPerShare.ToString("F2", CultureInfo.InvariantCulture)}{suffix}";
 
+	private static string RiskLine(IEnumerable<ProposalLeg> legs) => $"wa analyze risk \"{TradesArg(legs)}\"";
+
 	private static string TradesArg(IEnumerable<ProposalLeg> legs) => string.Join(",", legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
 
 	private static string AnalyzeLine(IEnumerable<ProposalLeg> legs, Func<ProposalLeg, string> priceOf) =>
@@ -39,7 +42,8 @@ internal static class ReproductionCommands
 	/// <param name="explicitAnalyzePrices">When true, the analyze legs are rendered at their concrete
 	/// per-share prices (the debug "exactly what the scorer saw, replayable offline" path) instead of the
 	/// MID/BID/ASK placeholder keywords the live panel uses (which re-fetch the current market on run).</param>
-	public static IReadOnlyList<string> Build(OpenProposal p, string suggestPricing, bool explicitAnalyzePrices = false)
+	/// <param name="includeRisk">Append a <c>wa analyze risk</c> line (live quotes) after the analyze line.</param>
+	public static IReadOnlyList<string> Build(OpenProposal p, string suggestPricing, bool explicitAnalyzePrices = false, bool includeRisk = false)
 	{
 		var lines = new List<string>();
 
@@ -57,6 +61,7 @@ internal static class ReproductionCommands
 		lines.Add(AnalyzeLine(p.Legs, l => explicitAnalyzePrices && l.PricePerShare.HasValue
 			? l.PricePerShare.Value.ToString("F2", CultureInfo.InvariantCulture)
 			: SuggestionPricing.AnalyzeKeywordFor(l, suggestPricing)));
+		if (includeRisk) lines.Add(RiskLine(p.Legs));
 
 		return lines;
 	}

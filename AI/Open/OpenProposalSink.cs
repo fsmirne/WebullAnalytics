@@ -37,10 +37,11 @@ internal sealed class OpenProposalSink
 		Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
 	}
 
-	public void Emit(OpenProposal p, int? rank = null)
+	/// <param name="console">False logs the proposal without its console panel: a cascade trade is shown inside the cascade panel.</param>
+	public void Emit(OpenProposal p, int? rank = null, bool console = true)
 	{
 		WriteJsonl(p, rank);
-		if (_consoleVerbosity != "error") WriteConsole(p, rank);
+		if (console && _consoleVerbosity != "error") WriteConsole(p, rank);
 	}
 
 	/// <summary>Writes one lean <c>type:"tick"</c> heartbeat line per watch tick (JSONL only, no console — the watch's own per-tick pulse covers the terminal). Records that the loop RAN and what the
