@@ -278,9 +278,12 @@ internal sealed class CascadeSetupConfig
 	internal const string AnchorAtm = "atm";
 	internal const string AnchorCallWallAtHigh = "callWallAtHigh";
 	internal const string AnchorPutWallAtLow = "putWallAtLow";
+	/// <summary>The session's own extremes: the first listed strike at or above the high (calls) / at or below the low (puts).</summary>
+	internal const string AnchorSessionHigh = "sessionHigh";
+	internal const string AnchorSessionLow = "sessionLow";
 	internal const string AnchorCallWall = "callWall";
 	internal const string AnchorPutWall = "putWall";
-	internal static readonly IReadOnlyList<string> Anchors = new[] { AnchorAtm, AnchorCallWallAtHigh, AnchorPutWallAtLow, AnchorCallWall, AnchorPutWall };
+	internal static readonly IReadOnlyList<string> Anchors = new[] { AnchorAtm, AnchorCallWallAtHigh, AnchorPutWallAtLow, AnchorCallWall, AnchorPutWall, AnchorSessionHigh, AnchorSessionLow };
 
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
 	/// <summary>One of <see cref="Structures"/> by name: LongCall, LongPut, ShortCallVertical, ShortPutVertical, LongCallVertical, LongPutVertical.</summary>
@@ -288,8 +291,9 @@ internal sealed class CascadeSetupConfig
 	/// <summary>The strike of the first leg — the long option, a debit vertical's long leg, a credit vertical's short leg:
 	/// <c>atm</c> (the first strike at or beyond spot: at or above for a call, at or below for a put), <c>callWallAtHigh</c> / <c>putWallAtLow</c>
 	/// (the 0DTE call wall the session high ran into / the 0DTE put wall the session low ran into), <c>callWall</c> / <c>putWall</c> (the 0DTE
-	/// call wall above spot / put wall below it). A wall anchor takes a structure on its own side (calls for a call wall, puts for a put wall),
-	/// and a wall that is not out of the money yields no trade.</summary>
+	/// call wall above spot / put wall below it), <c>sessionHigh</c> / <c>sessionLow</c> (the first strike at or above the session's high / at
+	/// or below its low). A wall or session anchor takes a structure on its own side (calls for a call wall or the high, puts for a put wall or
+	/// the low), and one that is not out of the money yields no trade.</summary>
 	[JsonPropertyName("anchor")] public string Anchor { get; set; } = AnchorAtm;
 	/// <summary>Shifts the anchor strike this many <c>indicators.strikeStep</c> steps further out of the money (up for a call, down for a put); negative shifts it toward the money.</summary>
 	[JsonPropertyName("offsetSteps")] public int OffsetSteps { get; set; } = 0;

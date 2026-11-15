@@ -1625,7 +1625,7 @@ internal sealed class BacktestRunner
 		var symbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 		foreach (var setup in setups)
 		{
-			var (first, second, skip) = Open.Cascade.CascadeOpener.TradeStrikes(moment.Spot, moment.Reading.Terrain, _config.Indicators.StrikeStep, setup);
+			var (first, second, skip) = Open.Cascade.CascadeOpener.TradeStrikes(moment.Spot, moment.Reading.Terrain, _config.Indicators.StrikeStep, setup, moment.Reading.Inputs.Tape);
 			if (skip != null) continue;
 			symbols.Add(MatchKeys.OccSymbol(ticker, date, first, setup.Right));
 			if (second is decimal wing) symbols.Add(MatchKeys.OccSymbol(ticker, date, wing, setup.Right));

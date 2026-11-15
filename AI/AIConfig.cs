@@ -701,7 +701,7 @@ internal static class AIConfigLoader
 			var at = $"opener.cascade.{name}";
 			if (setup.Kind == null) return $"{at}.structure: must be one of {string.Join("|", CascadeSetupConfig.Structures)}, got '{setup.Structure}'";
 			if (setup.AnchorName is not string anchor) return $"{at}.anchor: must be one of {string.Join("|", CascadeSetupConfig.Anchors)}, got '{setup.Anchor}'";
-			var wallRight = anchor is CascadeSetupConfig.AnchorPutWall or CascadeSetupConfig.AnchorPutWallAtLow ? "P" : anchor == CascadeSetupConfig.AnchorAtm ? setup.Right : "C";
+			var wallRight = anchor is CascadeSetupConfig.AnchorPutWall or CascadeSetupConfig.AnchorPutWallAtLow or CascadeSetupConfig.AnchorSessionLow ? "P" : anchor == CascadeSetupConfig.AnchorAtm ? setup.Right : "C";
 			if (wallRight != setup.Right) return $"{at}.anchor: '{anchor}' places a {(wallRight == "C" ? "call" : "put")} strike, but structure {setup.Kind} trades {(setup.Right == "C" ? "calls" : "puts")}";
 			if (setup.IsVertical && setup.WidthSteps < 1) return $"{at}.widthSteps: must be ≥ 1, got {setup.WidthSteps}";
 			if (setup.MinCredit < 0m) return $"{at}.minCredit: must be ≥ 0, got {setup.MinCredit}";

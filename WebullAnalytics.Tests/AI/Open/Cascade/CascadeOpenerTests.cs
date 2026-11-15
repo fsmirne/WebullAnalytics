@@ -427,6 +427,21 @@ public class CascadeOpenerTests
 	}
 
 	[Fact]
+	public void SessionAnchors_SellTheFirstStrikeBeyondTheDaysExtreme()
+	{
+		// High 7551.20 → first call strike at or above it, 7555; low 7448.90 → first put strike at or below it, 7445.
+		var tape = new WebullAnalytics.AI.Open.ZeroDte.SessionTape(7520m, 7510m, Spot, 7505m, 0.1m, WebullAnalytics.AI.Open.ZeroDte.GapDirection.Flat, WebullAnalytics.AI.Open.ZeroDte.VwapSide.Below, 5, 2, 7551.20m, 7448.90m, 7551.20m, 7448.90m, 1, 1, 0, 20, 60, 60);
+		Assert.Equal((7555m, 7575m, null), CascadeOpener.TradeStrikes(Spot, Terrain, 5m, Setup("ShortCallVertical", "sessionHigh", widthSteps: 4), tape));
+		Assert.Equal((7440m, 7420m, null), CascadeOpener.TradeStrikes(Spot, Terrain, 5m, Setup("ShortPutVertical", "sessionLow", offsetSteps: 1, widthSteps: 4), tape));
+		// Exactly on a strike takes that strike; no tape, no trade.
+		Assert.Equal(7550m, CascadeOpener.TradeStrikes(Spot, Terrain, 5m, Setup("ShortCallVertical", "sessionHigh"), tape with { SessionHigh = 7550m }).First);
+		Assert.Contains("no strike at the session high", CascadeOpener.TradeStrikes(Spot, Terrain, 5m, Setup("ShortCallVertical", "sessionHigh")).Skip);
+		// A session anchor takes a structure on its own side.
+		Assert.Contains("opener.cascade.bullTrap.anchor", Validate("BullTrap", Setup("ShortPutVertical", "sessionHigh")) ?? "");
+		Assert.Null(Validate("BearTrap", Setup("ShortPutVertical", "sessionLow")));
+	}
+
+	[Fact]
 	public void TradeStrikes_AreTheLegsBuildTradeLooksUp()
 	{
 		Assert.Equal((7550m, 7560m, null), CascadeOpener.TradeStrikes(Spot, Terrain, 5m, Setup("ShortCallVertical", "callWallAtHigh")));

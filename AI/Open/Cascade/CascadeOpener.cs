@@ -152,7 +152,7 @@ internal sealed class CascadeOpener
 		if (entries.Any(e => e.Outcome is CascadeSignalLedger.Placed or CascadeSignalLedger.Skipped)) return null;
 		if (first != null && (nowEt.TimeOfDay - TimeSpan.Parse(first.TimeEt)).TotalSeconds > _config.Opener.Cascade.RetrySeconds) return null;
 
-		var (skeleton, skip) = BuildTrade(ticker, nowEt.Date, read.Spot, reading.Terrain, read.Quotes, _config.Indicators.StrikeStep, trade);
+		var (skeleton, skip) = BuildTrade(ticker, nowEt.Date, read.Spot, reading.Terrain, read.Quotes, _config.Indicators.StrikeStep, trade, reading.Inputs.Tape);
 		var proposal = skeleton == null ? null : Propose(skeleton, read, ctx);
 		if (skeleton != null && proposal == null) skip = "the scorer could not price the legs";
 
@@ -190,10 +190,10 @@ internal sealed class CascadeOpener
 	/// <summary>The trade <paramref name="cfg"/> names, from the options expiring today: the first leg at the anchor strike (bought, or
 	/// sold for a credit vertical) and, for a vertical, the opposite leg <see cref="CascadeSetupConfig.WidthSteps"/> strike steps further
 	/// out of the money. Returns the reason when there is no such trade.</summary>
-	internal static (CandidateSkeleton? Skeleton, string? Skip) BuildTrade(string ticker, DateTime today, decimal spot, CascadeTerrain terrain, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal strikeStep, CascadeSetupConfig cfg)
+	internal static (CandidateSkeleton? Skeleton, string? Skip) BuildTrade(string ticker, DateTime today, decimal spot, CascadeTerrain terrain, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal strikeStep, CascadeSetupConfig cfg, AI.Open.ZeroDte.SessionTape? tape = null)
 	{
 		if (cfg.Kind is not OpenStructureKind kind) return (null, $"'{cfg.Structure}' is not a structure a cascade setup can open");
-		var (firstStrike, secondStrike, noStrikes) = TradeStrikes(spot, terrain, strikeStep, cfg);
+		var (firstStrike, secondStrike, noStrikes) = TradeStrikes(spot, terrain, strikeStep, cfg, tape);
 		if (noStrikes != null) return (null, noStrikes);
 		var right = cfg.Right;
 		var name = right == "C" ? "call" : "put";
@@ -223,7 +223,8 @@ internal sealed class CascadeOpener
 	/// <summary>The strikes of the trade <paramref name="cfg"/> names — the first leg at the anchor (shifted by its offset) and, for a
 	/// vertical, the second leg <see cref="CascadeSetupConfig.WidthSteps"/> steps further out of the money — or the reason there are none
 	/// (no wall, or a wall that is not out of the money). Whether those strikes are listed and quoted is <see cref="BuildTrade"/>'s check.</summary>
-	internal static (decimal First, decimal? Second, string? Skip) TradeStrikes(decimal spot, CascadeTerrain terrain, decimal strikeStep, CascadeSetupConfig cfg)
+	/// <param name="tape">The session so far; the session anchors read its high and low.</param>
+	internal static (decimal First, decimal? Second, string? Skip) TradeStrikes(decimal spot, CascadeTerrain terrain, decimal strikeStep, CascadeSetupConfig cfg, AI.Open.ZeroDte.SessionTape? tape = null)
 	{
 		var right = cfg.Right;
 		var outward = right == "C" ? strikeStep : -strikeStep;   // one strike step further out of the money
@@ -239,6 +240,9 @@ internal sealed class CascadeOpener
 				CascadeSetupConfig.AnchorPutWallAtLow => (terrain.PutWallAtLow0Dte, "put wall at the session low"),
 				CascadeSetupConfig.AnchorCallWall => (terrain.Front.CallWall, "call wall"),
 				CascadeSetupConfig.AnchorPutWall => (terrain.Front.PutWall, "put wall"),
+				// The first listed strike at or beyond the extreme: above the high for a call, below the low for a put.
+				CascadeSetupConfig.AnchorSessionHigh => (tape is { } hi ? Math.Ceiling(hi.SessionHigh / strikeStep) * strikeStep : (decimal?)null, "strike at the session high"),
+				CascadeSetupConfig.AnchorSessionLow => (tape is { } lo ? Math.Floor(lo.SessionLow / strikeStep) * strikeStep : (decimal?)null, "strike at the session low"),
 				_ => ((decimal?)null, $"'{cfg.Anchor}' anchor"),
 			};
 			if (wall is not decimal w) return (0m, null, $"no {label}");
