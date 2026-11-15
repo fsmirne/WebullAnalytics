@@ -40,6 +40,11 @@ internal sealed class ManagementAutoExecutor
 	private readonly OrderRepricer? _repricer;
 	private readonly BrokerStateService? _brokerState;
 	private readonly HashSet<string> _allowedRules;
+	private readonly MarketableCloseChaser? _chaser;
+	/// <summary>The live marketable close this process placed per (rule, position), so later ticks re-price that order instead of
+	/// stacking another — and keep leaving a filled one alone while the position list catches up. In-memory and reset daily, like the
+	/// tranche bookkeeping: after a restart the broker's working orders identify it instead.</summary>
+	private readonly Dictionary<(string Rule, string PositionKey), string> _marketableCloses = new();
 
 	// Per-day per-position tranche bookkeeping. Key: (rule, positionKey). Value: tranches submitted today.
 	// Still in-memory: tranches are a within-day schedule mechanic, and a tranche that didn't fill
@@ -47,8 +52,10 @@ internal sealed class ManagementAutoExecutor
 	private readonly Dictionary<(string Rule, string PositionKey), HashSet<int>> _firedTranches = new();
 	private DateOnly _trackingDate;
 
-	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null, OrderRepricer? repricer = null)
+	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null, OrderRepricer? repricer = null, IOrderGateway? gateway = null)
 	{
+		gateway ??= account != null ? new WebullOrderGateway(account) : null;
+		_chaser = gateway != null ? new MarketableCloseChaser(gateway) : null;
 		_config = config;
 		_account = account;
 		_brokerState = brokerState;
@@ -70,6 +77,7 @@ internal sealed class ManagementAutoExecutor
 		if (today != _trackingDate)
 		{
 			_firedTranches.Clear();
+			_marketableCloses.Clear();
 			_trackingDate = today;
 		}
 
@@ -101,7 +109,9 @@ internal sealed class ManagementAutoExecutor
 			var isEmergency = p.Rationale.StartsWith("[emergency]", StringComparison.OrdinalIgnoreCase);
 			if (isEmergency)
 			{
-				if (fired.Contains(0)) continue; // already fired emergency for this position-day
+				// Already fired emergency for this position-day — except a live marketable close (a stop), which comes back every
+				// tick it still fires so SubmitClose can re-price its resting order to the market.
+				if (fired.Contains(0) && !(p.Marketable && _config.Submit)) continue;
 				if (await SubmitClose(p, position, position.Quantity, "emergency", ctx, cancellation))
 				{
 					fired.Add(0);
@@ -268,21 +278,9 @@ internal sealed class ManagementAutoExecutor
 			})
 			.ToList();
 
-		// Broker-truth dedup: if the same closing combo is still working at the broker, skip — don't stack a
-		// second close. The in-memory _firedTranches bookkeeping can't see orders placed before a restart or
-		// by a concurrent watch/scan process; this leg-set match (the same mechanism the leg-in path uses)
-		// covers the "limit placed but unfilled, then relaunched" case. A FILLED close doesn't block: it
-		// already shrank position.Quantity, so tranches 2/3 (same leg set as tranche 1) close the remainder.
-		// Return false so we DON'T mark the tranche fired: broker truth keeps gating each tick while the
-		// order rests, and we re-fire once it fills or is canceled (fingerprint leaves the working set).
-		if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(legSpecs.Select(l => (l.Symbol, l.Action))))
-		{
-			AnsiConsole.MarkupLine($"[yellow]auto-execute skipped (broker pending):[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(position.Key)} close — matching order already at broker.");
-			return false;
-		}
-
 		// Compute net mid for the closing combo. When we close a long leg we sell at mid (receive),
 		// when we close a short leg we buy at mid (pay). Net = sum of leg mids signed by the close direction.
+		// A marketable proposal (a stop) prices each leg at the side that trades now instead: sell at the bid, buy at the ask.
 		decimal netMid = 0m;
 		foreach (var ls in legSpecs)
 		{
@@ -292,7 +290,7 @@ internal sealed class ManagementAutoExecutor
 				return false;
 			}
 			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-			netMid += ls.Action == "sell" ? mid : -mid;
+			netMid += ls.Action == "sell" ? (proposal.Marketable ? q.Bid.Value : mid) : -(proposal.Marketable ? q.Ask.Value : mid);
 		}
 
 		// Round to the exchange-required tick (single-leg vs SPX-complex vs penny-complex) so Webull
@@ -306,6 +304,30 @@ internal sealed class ManagementAutoExecutor
 
 		var argLegs = string.Join(",", legSpecs.Select(l => $"{l.Action}:{l.Symbol}:{l.LegQty}"));
 		var summary = $"close {qty}/{position.Quantity} {position.Ticker} @ ${limitAbs:F2} ({side.ToLowerInvariant()})";
+
+		// A marketable close (a stop) already at the broker is re-priced to the market instead of skipped; only when that order ended
+		// unfilled does this fall through to place a new one.
+		var closeKey = (proposal.Rule, proposal.PositionKey);
+		if (proposal.Marketable && _config.Submit && _chaser != null)
+		{
+			var restingId = _marketableCloses.GetValueOrDefault(closeKey)
+				?? _brokerState?.FindPendingMatching(legSpecs.Select(l => (l.Symbol, l.Action))).FirstOrDefault(o => BrokerOrder.State(o.Status) == OrderState.Working)?.ClientOrderId;
+			if (restingId != null && !await ChaseRestingCloseAsync(restingId, closeKey, side, limitAbs, label, position, cancellation)) return false;
+		}
+
+		// Broker-truth dedup: if the same closing combo is still working at the broker, skip — don't stack a
+		// second close. The in-memory _firedTranches bookkeeping can't see orders placed before a restart or
+		// by a concurrent watch/scan process; this leg-set match (the same mechanism the leg-in path uses)
+		// covers the "limit placed but unfilled, then relaunched" case. A FILLED close doesn't block: it
+		// already shrank position.Quantity, so tranches 2/3 (same leg set as tranche 1) close the remainder.
+		// Return false so we DON'T mark the tranche fired: broker truth keeps gating each tick while the
+		// order rests, and we re-fire once it fills or is canceled (fingerprint leaves the working set).
+		if (_config.Submit && _brokerState != null && _brokerState.HasPendingMatching(legSpecs.Select(l => (l.Symbol, l.Action))))
+		{
+			AnsiConsole.MarkupLine($"[yellow]auto-execute skipped (broker pending):[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(position.Key)} close — matching order already at broker.");
+			return false;
+		}
+
 
 		if (!_config.Submit || _account == null)
 		{
@@ -338,7 +360,9 @@ internal sealed class ManagementAutoExecutor
 			AnsiConsole.MarkupLine($"[green]auto-execute placed:[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
 			var clientOrderId = placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
 			_brokerState?.RecordLocalPlacement(position.Ticker, legSpecs.Select(l => (l.Symbol, l.Action)), clientOrderId, isOpen: false);
-			_repricer?.Track(build, clientOrderId, position.Ticker, isOpen: false);
+			// A marketable close is chased to the market by this executor every tick; the repricer's capped one-tick steps would fight it.
+			if (proposal.Marketable) _marketableCloses[closeKey] = clientOrderId;
+			else _repricer?.Track(build, clientOrderId, position.Ticker, isOpen: false);
 			return true;
 		}
 		catch (WebullOpenApiException ex)
@@ -351,6 +375,38 @@ internal sealed class ManagementAutoExecutor
 		{
 			AnsiConsole.MarkupLine($"[red]auto-execute network error:[/] {Markup.Escape(label)} {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
 			PrintFailureDiagnostics(body, ex);
+			return false;
+		}
+	}
+
+	/// <summary>Re-prices the resting marketable close of a position to the current market. Returns true only when that order ended
+	/// unfilled and a new close must be placed; false when the order still stands (re-priced, resting, partially filled or filled) or
+	/// the broker could not be reached this tick.</summary>
+	private async Task<bool> ChaseRestingCloseAsync(string clientOrderId, (string Rule, string PositionKey) closeKey, string side, decimal limit, string label, OpenPosition position, CancellationToken cancellation)
+	{
+		try
+		{
+			var (outcome, resting) = await _chaser!.ChaseAsync(clientOrderId, side, limit, cancellation);
+			_marketableCloses[closeKey] = clientOrderId;
+			var at = resting is decimal r ? $"${r:F2}" : "its limit";
+			switch (outcome)
+			{
+				case MarketableCloseChaser.Outcome.Repriced:
+					AnsiConsole.MarkupLine($"[green]auto-execute re-priced:[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(position.Key)} close {Markup.Escape(at)} → ${limit:F2} ({side.ToLowerInvariant()}) — the market moved through the resting stop.");
+					return false;
+				case MarketableCloseChaser.Outcome.PartiallyFilled:
+					AnsiConsole.MarkupLine($"[red bold]WARNING:[/] {Markup.Escape(position.Key)} close is PARTIALLY filled and its remainder rests at {Markup.Escape(at)} — not re-priced (the remaining quantity is not safely known). Close the remainder by hand if it does not fill.");
+					return false;
+				case MarketableCloseChaser.Outcome.Gone:
+					_marketableCloses.Remove(closeKey);
+					return true;
+				default:
+					return false;   // resting at or through the market, or already filled and the position list has not caught up
+			}
+		}
+		catch (Exception ex) when (ex is WebullOpenApiException or HttpRequestException)
+		{
+			AnsiConsole.MarkupLine($"[red]auto-execute re-price failed:[/] {Markup.Escape(label)} {Markup.Escape(position.Key)} — {Markup.Escape(ex.Message)}");
 			return false;
 		}
 	}

@@ -97,6 +97,11 @@
 		"takeProfit": {
 			"enabled": true
 		},
+		"trailingStop": {
+			"enabled": false,
+			"trailPct": 0.20,
+			"exclude": []
+		},
 		"defensiveRoll": {
 			"enabled": true,
 			"spotWithinPctOfShortStrike": 0.01,
@@ -162,6 +167,6 @@
 			"allowAddToHeldPosition": true,
 			"structures": []
 		},
-		"reprice": { "enabled": true, "stepSeconds": 60, "maxTicks": 2 }
+		"reprice": { "enabled": true, "stepSeconds": 60, "maxTicks": 2, "cancelSeconds": 0 }
 	}
 }

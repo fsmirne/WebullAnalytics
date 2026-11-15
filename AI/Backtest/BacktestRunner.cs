@@ -48,6 +48,10 @@ internal sealed class BacktestRunner
 	// Layer-2 expiry-day regime store (campaign: gex_layers) — populated per step for tickers whose
 	// short leg expires that day, read by CloseBeforeShortExpiryRule. Inert while the knob is off.
 	private readonly Rules.ExpiryRegimeProvider _expiryRegimes = new();
+	/// <summary>Peak marks of <see cref="Rules.TrailingStopRule"/>, shared by the rule the evaluator runs on the multi-day walks and the
+	/// one the 0DTE walk runs itself. In memory: a backtest's peaks die with the run.</summary>
+	private readonly Rules.TrailingStopStore _trailingStops = new();
+
 	// Proposal-replay mode (--proposals): non-null replaces the opener entirely — each day's recorded live
 	// proposal opens are booked at their recorded submit prices, then managed by the normal rule engine.
 	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
@@ -99,7 +103,7 @@ internal sealed class BacktestRunner
 	public async Task<BacktestResult> RunAsync(DateTime since, DateTime until, CancellationToken cancellation, Action<int, int, DateTime>? onStep = null)
 	{
 		var tickerSet = _config.TickerSet();
-		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(_config, expiryRegimes: _expiryRegimes), _config);
+		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(_config, expiryRegimes: _expiryRegimes, trailingStops: _trailingStops), _config);
 		var openEvaluator = new OpenCandidateEvaluator(_config, _quotes, SuggestionPricing.Mid, _closeCache, backtestMode: true, dividendsByRoot: _dividendsByRoot);
 
 		var equityCurve = new List<(DateTime Date, decimal Equity)>();
@@ -315,7 +319,7 @@ internal sealed class BacktestRunner
 			if (!openPositions.TryGetValue(p.PositionKey, out var pos)) continue;
 			if (p.Kind == ProposalKind.Close)
 			{
-				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
+				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes, p.Marketable);
 				if (legFills != null) { _book.Close(ts, p.PositionKey, legFills, p.Rule, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
 				else if (recordDrop) RecordUnfilledRuleAction(p, pos, quotes);
 			}
@@ -455,6 +459,9 @@ internal sealed class BacktestRunner
 		return ComboFill.LegPrice((bid + ask) / 2m, side == Side.Buy ? ask : bid, _cross);
 	}
 
+	/// <summary>The price a marketable order trades at: the ask to buy, the bid to sell.</summary>
+	private static decimal TouchPrice(Side side, decimal bid, decimal ask) => side == Side.Buy ? ask : bid;
+
 	/// <summary>For management proposals (close/roll), re-price each leg under the active pricing mode.
 	/// Returns null if any leg lacks a usable quote.</summary>
 	/// <summary>Fills every leg from <paramref name="quotes"/> for a rule-driven close/roll/leg-in, or
@@ -464,7 +471,9 @@ internal sealed class BacktestRunner
 	/// call, a real broker already won't fill one; see PassesFillSpreadGate's doc for the trade that
 	/// motivated this and CandidateScorer.PassesExitNoiseGate's doc for why this belongs in the simulator
 	/// rather than in StopLossRule/TakeProfitRule.</summary>
-	private IReadOnlyList<BacktestLegFill>? BuildLegFillsFromQuotes(IReadOnlyList<ProposalLeg> legs, int qty, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	/// <param name="marketable">The proposal is a marketable close (<see cref="ManagementProposal.Marketable"/> — a stop): live sends it at the side
+	/// that trades now, so each leg fills at its touch (sell at the bid, buy at the ask) whatever the pricing mode.</param>
+	private IReadOnlyList<BacktestLegFill>? BuildLegFillsFromQuotes(IReadOnlyList<ProposalLeg> legs, int qty, IReadOnlyDictionary<string, OptionContractQuote> quotes, bool marketable = false)
 	{
 		if (!CandidateScorer.PassesFillSpreadGate(legs.Select(l => l.Symbol), quotes, _config.Opener.Liquidity.MaxFillSpreadPctOfMid, _config.Opener.Liquidity.MinAbsFillSpreadDollars)) return null;
 		var fills = new List<BacktestLegFill>(legs.Count);
@@ -472,7 +481,7 @@ internal sealed class BacktestRunner
 		{
 			if (!quotes.TryGetValue(l.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) return null;
 			var side = string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase) ? Side.Buy : Side.Sell;
-			fills.Add(new BacktestLegFill(l.Symbol, side, qty, ExecPrice(side, q.Bid.Value, q.Ask.Value)));
+			fills.Add(new BacktestLegFill(l.Symbol, side, qty, marketable ? TouchPrice(side, q.Bid.Value, q.Ask.Value) : ExecPrice(side, q.Bid.Value, q.Ask.Value)));
 		}
 		return NoArb(fills);
 	}
@@ -840,7 +849,7 @@ internal sealed class BacktestRunner
 		{
 			var r = results[i];
 			var isPnlClose = r.Proposal.Kind == ProposalKind.Close
-				&& (string.Equals(r.Proposal.Rule, "StopLossRule", StringComparison.Ordinal) || string.Equals(r.Proposal.Rule, "TakeProfitRule", StringComparison.Ordinal));
+				&& (string.Equals(r.Proposal.Rule, "StopLossRule", StringComparison.Ordinal) || string.Equals(r.Proposal.Rule, "TakeProfitRule", StringComparison.Ordinal) || string.Equals(r.Proposal.Rule, "TrailingStopRule", StringComparison.Ordinal));
 			if (!isPnlClose)
 			{
 				confirmed?.Add(r);
@@ -1043,6 +1052,14 @@ internal sealed class BacktestRunner
 			? new Rules.CompleteCondorRule(_config.Rules.CompleteCondor)
 			: null;
 
+		// TrailingStop: the rule the evaluator runs on the multi-day walks. All-0DTE positions never reach those walks, so it is
+		// evaluated here — otherwise a 0DTE config with rules.trailingStop on backtests exactly as with it off (the same silent
+		// no-op take-profit once had on this path).
+		// A structure the stop excludes arms nothing here, so a held-to-expiry spread with no other exit skips the walk entirely.
+		var trailingRule = _config.Rules.TrailingStop.Enabled && !_config.Rules.TrailingStop.Exclude.Contains(pos.StrategyKind, StringComparer.OrdinalIgnoreCase)
+			? new Rules.TrailingStopRule(_config.Rules.TrailingStop, _trailingStops)
+			: null;
+
 		// Regime indicators for LegInShort / CompleteCondor: VIX and intraday range (tracked across the
 		// minute loop). Both null when not needed — keep the lookup cost off the hot path when neither
 		// rule's enabled flag is set. VIX is read causally per minute from the day's real intraday tape
@@ -1065,7 +1082,7 @@ internal sealed class BacktestRunner
 		// index options (XSP/SPXW) settle in cash with no assignment, so they're never force-closed.
 		var forceCloseActive = _config.Rules.CloseBeforeShortExpiry.Enabled
 			&& !OptionSettlement.CashSettledIndexRoots.Contains(pos.Ticker);
-		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null && completeCondorRule == null && !forceCloseActive) return false;
+		if (!slTarget.HasValue && !tpTarget.HasValue && legInRule == null && completeCondorRule == null && trailingRule == null && !forceCloseActive) return false;
 
 		// Track intraday range running from session start to the current minute. Used by LegInShort's
 		// trend-day filter. We use the first minute bar's open as the day's open reference (close to
@@ -1235,11 +1252,14 @@ internal sealed class BacktestRunner
 				if (!CandidateScorer.PassesExitNoiseGate(symbols, quotes, mark.Value - pos.AdjustedNetDebit, _config.Opener.MinEntryToNoiseRatio))
 					slFires = tpFires = false;
 			}
-			if (!slFires && !tpFires) continue;
+			// The trailing stop values the position at its closing side and skips a crossed quote itself, so the mid-based noise
+			// gate above is not applied to it.
+			var trailFires = trailingRule?.Evaluate(pos, SinglePositionContext(minuteEt, pos, spot, quotes, cash, accountValue, vixNow)) != null;
+			if (!slFires && !tpFires && !trailFires) continue;
 
 			// SL wins a tie it cannot actually have — the two thresholds sit on opposite sides of entry — but
 			// checking it first keeps the precedence explicit and matches the rules' own priority order.
-			var ruleName = slFires ? "StopLossRule" : "TakeProfitRule";
+			var ruleName = slFires ? "StopLossRule" : trailFires ? "TrailingStopRule" : "TakeProfitRule";
 
 			// Fill-realism check: don't honor the crossing unless it still holds one minute later, re-priced
 			// from scratch (mirrors ConfirmPnlClosesAsync's role for the shared-rule path — see its doc for
@@ -1261,14 +1281,15 @@ internal sealed class BacktestRunner
 				var nextTpFires = nextMark.HasValue && tpTarget.HasValue && nextMark.Value >= tpTarget.Value;
 				if ((nextSlFires || nextTpFires) && !CandidateScorer.PassesExitNoiseGate(symbols, nextQuotes, nextMark!.Value - pos.AdjustedNetDebit, _config.Opener.MinEntryToNoiseRatio))
 					nextSlFires = nextTpFires = false;
-				if (!nextSlFires && !nextTpFires) continue; // didn't persist — position stays open, next iteration re-checks for real
+				var nextTrailFires = trailFires && trailingRule!.Evaluate(pos, SinglePositionContext(nextMinuteEt, pos, nextSpot, nextQuotes, cash, accountValue, vixNow)) != null;
+				if (!nextSlFires && !nextTpFires && !nextTrailFires) continue; // didn't persist — position stays open, next iteration re-checks for real
 
 				// Confirmed: fill against the CONFIRMING minute's quotes, not the fleeting one that triggered
 				// the check — that's the price basis actually validated as real.
 				minuteEt = nextMinuteEt;
 				spot = nextSpot;
 				quotes = nextQuotes;
-				ruleName = nextSlFires ? "StopLossRule" : "TakeProfitRule";
+				ruleName = nextSlFires ? "StopLossRule" : nextTrailFires ? "TrailingStopRule" : "TakeProfitRule";
 			}
 
 			// Fill-realism check on the basis actually being used (the confirming minute's quotes, when a
@@ -1283,7 +1304,8 @@ internal sealed class BacktestRunner
 				if (leg.CallPut == null) continue;
 				if (!quotes.TryGetValue(leg.Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) { allLegsPriced = false; break; }
 				var closeSide = leg.Side == Side.Buy ? Side.Sell : Side.Buy;
-				legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
+				// The trailing stop is a marketable close: live sends it at the touch.
+				legFills.Add(new BacktestLegFill(leg.Symbol, closeSide, pos.Quantity, ruleName == "TrailingStopRule" ? TouchPrice(closeSide, q.Bid.Value, q.Ask.Value) : ExecPrice(closeSide, q.Bid.Value, q.Ask.Value)));
 			}
 			if (!allLegsPriced) continue;
 
@@ -1293,6 +1315,10 @@ internal sealed class BacktestRunner
 
 		return false;
 	}
+
+	/// <summary>The evaluation context of one position at one minute of the 0DTE walk, for a rule run outside the evaluator.</summary>
+	private static EvaluationContext SinglePositionContext(DateTime minuteEt, OpenPosition pos, decimal spot, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal cash, decimal accountValue, decimal? vix) =>
+		new(minuteEt, new Dictionary<string, OpenPosition>(StringComparer.OrdinalIgnoreCase) { [pos.Key] = pos }, new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [pos.Ticker] = spot }, quotes, cash, accountValue, new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase), vix);
 
 	// True when any short leg is ITM (bufferPct 0) or within bufferPct of the money — "at risk" of finishing
 	// ITM (short call: spot > strike×(1−b); short put: spot < strike×(1+b)).

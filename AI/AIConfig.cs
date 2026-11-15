@@ -90,6 +90,9 @@ internal sealed class RepriceConfig
 	[JsonPropertyName("stepSeconds")] public int StepSeconds { get; set; } = 60;
 	/// <summary>Most exchange ticks the limit may move from the original mid. 2 on a penny-tick combo = $0.02, the backtest's fill assumption; 0 disables.</summary>
 	[JsonPropertyName("maxTicks")] public int MaxTicks { get; set; } = 2;
+	/// <summary>Cancel an OPENING order still unfilled this many seconds after the repricer first saw it; 0 (default) leaves it resting. For entries whose signal goes
+	/// stale within minutes. A closing order is never cancelled, and a partially filled order is left alone.</summary>
+	[JsonPropertyName("cancelSeconds")] public int CancelSeconds { get; set; } = 0;
 }
 
 /// <summary>
@@ -228,6 +231,7 @@ internal sealed class RulesConfig
 	[JsonPropertyName("weekendClose")] public WeekendCloseConfig WeekendClose { get; set; } = new();
 	[JsonPropertyName("opportunisticRoll")] public OpportunisticRollConfig OpportunisticRoll { get; set; } = new();
 	[JsonPropertyName("takeProfit")] public TakeProfitConfig TakeProfit { get; set; } = new() { Enabled = false };
+	[JsonPropertyName("trailingStop")] public TrailingStopConfig TrailingStop { get; set; } = new();
 	[JsonPropertyName("defensiveRoll")] public DefensiveRollConfig DefensiveRoll { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("rollShortOnExpiry")] public RollShortOnExpiryConfig RollShortOnExpiry { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("closeBeforeShortExpiry")] public CloseBeforeShortExpiryConfig CloseBeforeShortExpiry { get; set; } = new() { Enabled = false };
@@ -393,6 +397,26 @@ internal sealed class TakeProfitConfig
 	/// exit at +25% of premium). For a credit structure this equals a fraction of max profit. Models the
 	/// discretionary "grab the win and recycle capital" policy. Default 0 = off.</summary>
 	[JsonPropertyName("profitTargetPctOfPremium")] public decimal ProfitTargetPctOfPremium { get; set; } = 0m;
+}
+
+/// <summary>Trailing stop on open positions (<see cref="Rules.TrailingStopRule"/>). Off by default. When enabled it trails every open
+/// position except the structures named in <see cref="Exclude"/>.</summary>
+internal sealed class TrailingStopConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>Close once the position has given back this fraction of what it had at risk at its best level since entry. For a long
+	/// option or any debit structure that is "this far below the peak" (0.20 = 20% off the highest closing value); for a credit spread
+	/// it is this fraction of the width still at risk at the peak. The peak starts at the first closing value seen after entry.</summary>
+	[JsonPropertyName("trailPct")] public decimal TrailPct { get; set; } = 0.20m;
+	/// <summary>Structures the stop leaves alone, by the position's structure name — any of <see cref="KnownStructures"/> (LongCalendar,
+	/// LongDiagonal, DoubleCalendar, IronCondor, ShortPutVertical, LongCall, …). Empty = every open position is trailed. The match is on
+	/// the structure, whichever strategy or hand opened the position; a name that is no structure is a config error, so a typo cannot
+	/// silently leave a structure trailed.</summary>
+	[JsonPropertyName("exclude")] public List<string> Exclude { get; set; } = new();
+
+	/// <summary>Every structure name an open position can carry: the opener's structures (which the backtest book and the live position
+	/// source both use) plus the short-side shapes only a live account can hold.</summary>
+	internal static IReadOnlyList<string> KnownStructures { get; } = Enum.GetNames<OpenStructureKind>().Concat(new[] { "ShortCall", "ShortPut", "ShortCalendar", "ShortDiagonal" }).ToList();
 }
 
 /// <summary>Fill-cost assumptions shared by the opener's scorer and the backtest simulator. These are
@@ -665,6 +689,12 @@ internal static class AIConfigLoader
 			&& ParsingHelpers.TryParseClockTime(op.LatestEntryTimeEt, out var leChk)
 			&& leChk <= eeChk)
 			return $"opener.latestEntryTimeEt ('{op.LatestEntryTimeEt}') must be later than earliestEntryTimeEt ('{op.EarliestEntryTimeEt}') — otherwise the window is empty and nothing ever opens";
+
+		var trail = c.Rules.TrailingStop;
+		if (trail.Enabled && (trail.TrailPct <= 0m || trail.TrailPct >= 1m)) return $"rules.trailingStop.trailPct: must be in (0, 1), got {trail.TrailPct}";
+		if (trail.Exclude.FirstOrDefault(name => !TrailingStopConfig.KnownStructures.Contains(name, StringComparer.OrdinalIgnoreCase)) is string unknown)
+			return $"rules.trailingStop.exclude: '{unknown}' is not a structure; use any of {string.Join(", ", TrailingStopConfig.KnownStructures)}";
+		if (c.AutoExecute.Reprice.CancelSeconds < 0) return $"autoExecute.reprice.cancelSeconds: must be ≥ 0, got {c.AutoExecute.Reprice.CancelSeconds}";
 
 		var zg = op.ZeroDteGate;
 		if (!string.IsNullOrWhiteSpace(zg.EarliestEntryEt) && !ParsingHelpers.TryParseClockTime(zg.EarliestEntryEt, out _))

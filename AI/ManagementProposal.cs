@@ -47,6 +47,7 @@ internal static class ProposalLegExtensions
 /// <param name="Rationale">Human-readable explanation of why the rule fired, with concrete numbers.</param>
 /// <param name="CashReserveBlocked">True if this proposal would violate the configured cash reserve.</param>
 /// <param name="CashReserveDetail">When blocked, a detail string like "free $Y, requires $X". Null otherwise.</param>
+/// <param name="Marketable">Auto-execute this close at the side that trades now (sell at the bid, buy at the ask) instead of the net mid — for a stop, which must not rest unfilled.</param>
 internal sealed record ManagementProposal(
 	string Rule,
 	string Ticker,
@@ -57,5 +58,6 @@ internal sealed record ManagementProposal(
 	string Rationale,
 	RiskDiagnostic? Diagnostic = null,
 	bool CashReserveBlocked = false,
-	string? CashReserveDetail = null
+	string? CashReserveDetail = null,
+	bool Marketable = false
 );

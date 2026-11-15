@@ -427,7 +427,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// OptionMath.RiskFreeRate); keeps scan, watch and analyze-risk consistent.
 			YahooOptionsClient.ApplyToOptionMath(await Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation));
 
-			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing), config);
+			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, trailingStops: Rules.TrailingStopStore.Default()), config);
 			var (mgmtExecutor, openerExecutor, _) = AIContext.BuildAutoExecutors(config, settings.Account);
 			ProposalSink? mgmtSink = settings.EmitManagementProposals
 				? new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput)

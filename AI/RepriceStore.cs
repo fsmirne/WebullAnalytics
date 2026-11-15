@@ -27,7 +27,11 @@ internal sealed class RepriceStore
 		[property: JsonPropertyName("steps")] int Steps,
 		// Null until the first tick that sees the order — every timestamp comes from the watch loop's clock.
 		[property: JsonPropertyName("lastStepAt")] DateTime? LastStepAt,
-		[property: JsonPropertyName("done")] bool Done = false);
+		[property: JsonPropertyName("done")] bool Done = false,
+		// When the repricer first saw the order (the clock RepriceConfig.CancelSeconds runs on). Null on lines written before the field existed: such an order is never cancelled.
+		[property: JsonPropertyName("firstSeenAt")] DateTime? FirstSeenAt = null,
+		// Seconds after FirstSeenAt at which a still-unfilled opening order is cancelled (the placing process's RepriceConfig.CancelSeconds); 0 = never.
+		[property: JsonPropertyName("cancelSeconds")] int CancelSeconds = 0);
 
 	private readonly string _path;
 	private readonly string _lockPath;

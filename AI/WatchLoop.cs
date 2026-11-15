@@ -119,7 +119,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
 		var quotes = AIContext.BuildLiveQuoteSource(vendor);
 		var expiryRegimes = new Rules.ExpiryRegimeProvider();
-		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, expiryRegimes), config);
+		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, expiryRegimes, Rules.TrailingStopStore.Default()), config);
 
 		// Auto-executors: turn proposals into real (or dry-run) order submissions. Both off by default;
 		// both honor enabled/submit gates independently. Shared with `wa ai scan` via AIContext.BuildAutoExecutors.

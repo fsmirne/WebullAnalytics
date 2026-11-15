@@ -123,7 +123,8 @@ internal sealed class RuleEvaluator
 	}
 
 	/// <summary>Constructs the default rule set from config.</summary>
-	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config, string pricingMode = SuggestionPricing.Mid, ExpiryRegimeProvider? expiryRegimes = null)
+	/// <param name="trailingStops">Where <see cref="TrailingStopRule"/> keeps each position's peak mark. Live callers pass the persisted store; the default is in-memory (backtest, replay).</param>
+	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config, string pricingMode = SuggestionPricing.Mid, ExpiryRegimeProvider? expiryRegimes = null, TrailingStopStore? trailingStops = null)
 	{
 		var debug = string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
 		var normalizedPricing = SuggestionPricing.Normalize(pricingMode);
@@ -133,6 +134,7 @@ internal sealed class RuleEvaluator
 			// TimeStop (priority 1, ties with StopLoss) — a time-budget exit, not P&L-driven, so it
 			// belongs at the same top tier rather than gated behind the roll/take-profit rules below.
 			new TimeStopRule(config.Rules.TimeStop),
+			new TrailingStopRule(config.Rules.TrailingStop, trailingStops ?? new TrailingStopStore()),
 			// CloseBeforeShortExpiry runs ahead of OpportunisticRoll/RollShortOnExpiry so a position
 			// scheduled for unwind on expiry day takes the close path instead of getting rolled forward.
 			// BreakEvenGuard (priority 2, B < C) ahead of CloseBeforeShortExpiry: an any-day proximity close

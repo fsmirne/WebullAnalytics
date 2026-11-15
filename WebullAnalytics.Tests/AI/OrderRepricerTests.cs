@@ -34,6 +34,14 @@ public class OrderRepricerTests
 			Replaces.Add((clientOrderId, quantity, limitPrice, legs));
 			return Task.CompletedTask;
 		}
+
+		public readonly List<string> Cancels = new();
+
+		public Task CancelOrderAsync(string clientOrderId, CancellationToken ct)
+		{
+			Cancels.Add(clientOrderId);
+			return Task.CompletedTask;
+		}
 	}
 
 	private static readonly DateTime T0 = new(2026, 10, 14, 12, 11, 0);
@@ -50,13 +58,13 @@ public class OrderRepricerTests
 		}
 	}
 
-	private static (OrderRepricer Repricer, FakeGateway Gateway, TempStore Store) Setup(string side = "BUY", int maxTicks = 2)
+	private static (OrderRepricer Repricer, FakeGateway Gateway, TempStore Store) Setup(string side = "BUY", int maxTicks = 2, int cancelSeconds = 0, bool isOpen = true)
 	{
 		var store = new TempStore();
 		var gw = new FakeGateway();
-		var r = new OrderRepricer(new RepriceConfig { Enabled = true, StepSeconds = 60, MaxTicks = maxTicks }, gw, store.Store, "acct");
+		var r = new OrderRepricer(new RepriceConfig { Enabled = true, StepSeconds = 60, MaxTicks = maxTicks, CancelSeconds = cancelSeconds }, gw, store.Store, "acct");
 		var legs = TradeLegParser.Parse("sell:SPY261019P00770000:15,buy:SPY261113P00771000:15");
-		r.Track(new OrderRequestBuilder.BuildParams("acct", legs, StrategyClassifier.Classify(legs)!, side, "LIMIT", 7.19m, "GTC"), "orig", "SPY", isOpen: true);
+		r.Track(new OrderRequestBuilder.BuildParams("acct", legs, StrategyClassifier.Classify(legs)!, side, "LIMIT", 7.19m, "GTC"), "orig", "SPY", isOpen);
 		return (r, gw, store);
 	}
 
@@ -200,5 +208,61 @@ public class OrderRepricerTests
 		Assert.Empty(gw.Replaces);
 		Tick(r, 61);
 		Assert.Single(gw.Replaces);
+	}
+
+	[Fact]
+	public void AnUnfilledOpeningOrderIsCancelledAfterCancelSeconds()
+	{
+		var (r, gw, tmp) = Setup(maxTicks: 2, cancelSeconds: 180);
+		using var _ = tmp;
+		Tick(r, 0);
+		Tick(r, 60);                // 7.19 → 7.20
+		Tick(r, 120);               // 7.20 → 7.21, at the tick cap but still tracked
+		Assert.Empty(gw.Cancels);
+		Assert.Equal(1, r.TrackedCount);
+		Tick(r, 180);               // 180s after first sight: cancel
+		Assert.Equal(["orig"], gw.Cancels);
+		Assert.Equal([7.20m, 7.21m], gw.Replaces.Select(x => x.Limit));
+		Assert.Equal(0, r.TrackedCount);
+	}
+
+	[Fact]
+	public void AnOrderThatFillsBeforeCancelSecondsIsNotCancelled()
+	{
+		var (r, gw, tmp) = Setup(maxTicks: 2, cancelSeconds: 180);
+		using var _ = tmp;
+		Tick(r, 0);
+		Tick(r, 60);
+		Tick(r, 120);
+		gw.Statuses.Enqueue("FILLED");
+		Tick(r, 180);
+		Assert.Empty(gw.Cancels);
+		Assert.Equal(0, r.TrackedCount);
+	}
+
+	[Fact]
+	public void AClosingOrderIsNeverCancelled()
+	{
+		var (r, gw, tmp) = Setup(maxTicks: 2, cancelSeconds: 180, isOpen: false);
+		using var _ = tmp;
+		Tick(r, 0);
+		Tick(r, 60);
+		Tick(r, 120);
+		Tick(r, 180);               // at cap: left resting, as without cancelSeconds
+		Tick(r, 600);
+		Assert.Empty(gw.Cancels);
+		Assert.Equal(0, r.TrackedCount);
+	}
+
+	[Fact]
+	public void CancelSecondsAloneKeepsTheRepricerOn()
+	{
+		var (r, gw, tmp) = Setup(maxTicks: 0, cancelSeconds: 120);
+		using var _ = tmp;
+		Tick(r, 0);
+		Tick(r, 60);
+		Tick(r, 120);
+		Assert.Empty(gw.Replaces);
+		Assert.Equal(["orig"], gw.Cancels);
 	}
 }
