@@ -15,10 +15,10 @@ internal static class ConfigJsonWriter
 	/// multi-line, each entry inline).</summary>
 	private static readonly HashSet<string> InlineObjectKeys = new(StringComparer.Ordinal) { "events", "execution" };
 
-	/// <summary>Container keys whose entries each collapse onto one line: a rule, structure, or autoExecute
-	/// section is a small flat knob bag, and one-per-line reads like a table (the style the newer strategy
-	/// layers use). A nested object inside an entry (e.g. a non-default scaleOut) inlines recursively.</summary>
-	private static readonly HashSet<string> InlineEntryContainers = new(StringComparer.Ordinal) { "structures", "rules", "autoExecute" };
+	/// <summary>Container keys whose entries each collapse onto one line: a rule, structure, autoExecute,
+	/// zeroDteGate, or cascade section is a small flat knob bag, and one-per-line reads like a table (the style
+	/// the newer strategy layers use). A nested object inside an entry (e.g. a non-default scaleOut) inlines recursively.</summary>
+	private static readonly HashSet<string> InlineEntryContainers = new(StringComparer.Ordinal) { "structures", "rules", "autoExecute", "zeroDteGate", "cascade" };
 
 	/// <summary>Canonical top-level key order (matches the AIConfig property order), so base/ticker/strategy
 	/// files all read consistently regardless of how they were built. Unlisted keys keep their order, after.</summary>
