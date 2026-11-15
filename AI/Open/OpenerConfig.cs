@@ -210,6 +210,105 @@ internal sealed class OpenerConfig
 	/// zeroes a 1-lot. Off by default (weight 0).</summary>
 	[JsonPropertyName("vexSizing")] public OpenerVexSizingConfig VexSizing { get; set; } = new();
 
+	/// <summary>Signal-driven 0DTE entries from the live `analyze cascade` regime read (<see cref="Open.Cascade.CascadeOpener"/>). They bypass
+	/// candidate enumeration and ranking: a confirmed setup places its one fixed trade. Off by default.</summary>
+	[JsonPropertyName("cascade")] public OpenerCascadeConfig Cascade { get; set; } = new();
+
+}
+
+internal sealed class OpenerCascadeConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>Seconds between cascade reads. Each read fetches the whole chain out to 30 DTE, so it runs on its own clock, not on every watch tick.</summary>
+	[JsonPropertyName("readSeconds")] public int ReadSeconds { get; set; } = 60;
+	/// <summary>How long after a setup's first confirmation its trade may still be proposed when the auto-executor has not acted on it yet (quote
+	/// guard, broker refresh failure, cash) and the setup is still confirmed. 0 = the first confirmation's tick only.</summary>
+	[JsonPropertyName("retrySeconds")] public int RetrySeconds { get; set; } = 180;
+	[JsonPropertyName("bullTrap")] public CascadeSetupConfig BullTrap { get; set; } = new();
+	[JsonPropertyName("bearTrap")] public CascadeSetupConfig BearTrap { get; set; } = new();
+	[JsonPropertyName("bullCascade")] public CascadeSetupConfig BullCascade { get; set; } = new();
+	[JsonPropertyName("bearCascade")] public CascadeSetupConfig BearCascade { get; set; } = new();
+
+	/// <summary>The setup block of a confirmed regime; null for Neutral.</summary>
+	public CascadeSetupConfig? For(Analyze.CascadeRegime regime) => regime switch
+	{
+		Analyze.CascadeRegime.BullTrap => BullTrap,
+		Analyze.CascadeRegime.BearTrap => BearTrap,
+		Analyze.CascadeRegime.BullCascade => BullCascade,
+		Analyze.CascadeRegime.BearCascade => BearCascade,
+		_ => null,
+	};
+
+	/// <summary>The four setups by config name, in the order they are documented.</summary>
+	[JsonIgnore] public IEnumerable<(string Name, CascadeSetupConfig Setup)> Setups => new[] { ("bullTrap", BullTrap), ("bearTrap", BearTrap), ("bullCascade", BullCascade), ("bearCascade", BearCascade) };
+}
+
+/// <summary>
+/// The one 0DTE trade a confirmed cascade setup opens. Unlike <see cref="OpenerStructuresConfig"/>, whose entries are DTE and delta
+/// bands the enumerator searches and the scorer ranks, this names a single trade outright: a structure, the strike its first leg
+/// sits at, and for a vertical the width. Every setup is off until its block enables it and names a structure.
+/// </summary>
+internal sealed class CascadeSetupConfig
+{
+	/// <summary>The structures a setup may open: single long options and two-leg verticals, all expiring today.</summary>
+	internal static readonly IReadOnlyList<OpenStructureKind> Structures = new[] { OpenStructureKind.LongCall, OpenStructureKind.LongPut, OpenStructureKind.ShortCallVertical, OpenStructureKind.ShortPutVertical, OpenStructureKind.LongCallVertical, OpenStructureKind.LongPutVertical };
+	internal const string AnchorAtm = "atm";
+	internal const string AnchorCallWallAtHigh = "callWallAtHigh";
+	internal const string AnchorPutWallAtLow = "putWallAtLow";
+	internal const string AnchorCallWall = "callWall";
+	internal const string AnchorPutWall = "putWall";
+	internal static readonly IReadOnlyList<string> Anchors = new[] { AnchorAtm, AnchorCallWallAtHigh, AnchorPutWallAtLow, AnchorCallWall, AnchorPutWall };
+
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>One of <see cref="Structures"/> by name: LongCall, LongPut, ShortCallVertical, ShortPutVertical, LongCallVertical, LongPutVertical.</summary>
+	[JsonPropertyName("structure")] public string Structure { get; set; } = "";
+	/// <summary>The strike of the first leg — the long option, a debit vertical's long leg, a credit vertical's short leg:
+	/// <c>atm</c> (the first strike at or beyond spot: at or above for a call, at or below for a put), <c>callWallAtHigh</c> / <c>putWallAtLow</c>
+	/// (the 0DTE call wall the session high ran into / the 0DTE put wall the session low ran into), <c>callWall</c> / <c>putWall</c> (the 0DTE
+	/// call wall above spot / put wall below it). A wall anchor takes a structure on its own side (calls for a call wall, puts for a put wall),
+	/// and a wall that is not out of the money yields no trade.</summary>
+	[JsonPropertyName("anchor")] public string Anchor { get; set; } = AnchorAtm;
+	/// <summary>Shifts the anchor strike this many <c>indicators.strikeStep</c> steps further out of the money (up for a call, down for a put); negative shifts it toward the money.</summary>
+	[JsonPropertyName("offsetSteps")] public int OffsetSteps { get; set; } = 0;
+	/// <summary>A vertical's width in strike steps (2 = $10 wide on SPXW's $5 grid): its second leg sits this far further out of the money. Unused by a single option.</summary>
+	[JsonPropertyName("widthSteps")] public int WidthSteps { get; set; } = 2;
+	/// <summary>Credit verticals only: no trade when the spread's mid credit per share is below this.</summary>
+	[JsonPropertyName("minCredit")] public decimal MinCredit { get; set; } = 0m;
+
+	// Entry conditions on the confirming reading. A reading that fails one is not an entry: the setup stays open for a later reading of
+	// the day that passes, so these narrow WHEN a setup trades, never which first confirmation counts. Each is off at its default.
+	/// <summary>Minimum setup score (0–100) of the confirming reading; 0 = the confirmation threshold alone (opener.cascade's regime trigger, 65).</summary>
+	[JsonPropertyName("minScore")] public int MinScore { get; set; } = 0;
+	/// <summary>VIX level band at the reading (index points, e.g. 20). Null = no bound.</summary>
+	[JsonPropertyName("minVix")] public decimal? MinVix { get; set; }
+	[JsonPropertyName("maxVix")] public decimal? MaxVix { get; set; }
+	/// <summary>Band on VIX's change since the prior session's close, as a fraction (0.05 = up 5%, −0.03 = down 3%). Null = no bound. A
+	/// reading with no intraday VIX fails a set bound.</summary>
+	[JsonPropertyName("minVixChange")] public decimal? MinVixChange { get; set; }
+	[JsonPropertyName("maxVixChange")] public decimal? MaxVixChange { get; set; }
+
+	/// <summary>The configured structure, or null when <see cref="Structure"/> names none a setup may open.</summary>
+	[JsonIgnore] public OpenStructureKind? Kind => Enum.TryParse<OpenStructureKind>(Structure, ignoreCase: true, out var kind) && Structures.Contains(kind) ? kind : null;
+	/// <summary>"C" or "P": the option right every leg of <see cref="Kind"/> shares.</summary>
+	[JsonIgnore] public string Right => Kind is OpenStructureKind.LongPut or OpenStructureKind.ShortPutVertical or OpenStructureKind.LongPutVertical ? "P" : "C";
+	[JsonIgnore] public bool IsVertical => Kind is not (OpenStructureKind.LongCall or OpenStructureKind.LongPut);
+	/// <summary>The first leg is sold (a credit vertical); otherwise it is bought.</summary>
+	[JsonIgnore] public bool IsCredit => Kind is OpenStructureKind.ShortCallVertical or OpenStructureKind.ShortPutVertical;
+	/// <summary>Null when <paramref name="reading"/> meets every entry condition; otherwise the first one it fails.</summary>
+	public string? EntryConditionFailure(Analyze.CascadeReading reading)
+	{
+		if (MinScore > 0 && reading.LeadingSetup.Score < MinScore) return $"score {reading.LeadingSetup.Score} < minScore {MinScore}";
+		var vix = reading.Inputs.VixNow;
+		if (MinVix is decimal lo && !(vix >= lo)) return vix is decimal v1 ? $"VIX {v1:F2} < minVix {lo:F2}" : "no intraday VIX for minVix";
+		if (MaxVix is decimal hi && !(vix <= hi)) return vix is decimal v2 ? $"VIX {v2:F2} > maxVix {hi:F2}" : "no intraday VIX for maxVix";
+		var change = reading.Inputs.VixChangeFromClosePct / 100m;
+		if (MinVixChange is decimal clo && !(change >= clo)) return change is decimal c1 ? $"VIX change {c1:+0.0%;-0.0%} < minVixChange {clo:+0.0%;-0.0%}" : "no intraday VIX for minVixChange";
+		if (MaxVixChange is decimal chi && !(change <= chi)) return change is decimal c2 ? $"VIX change {c2:+0.0%;-0.0%} > maxVixChange {chi:+0.0%;-0.0%}" : "no intraday VIX for maxVixChange";
+		return null;
+	}
+
+	/// <summary><see cref="Anchor"/> in its canonical spelling, or null when it names no anchor.</summary>
+	[JsonIgnore] public string? AnchorName => Anchors.FirstOrDefault(a => string.Equals(a, Anchor, StringComparison.OrdinalIgnoreCase));
 }
 
 /// <summary>Layer-1 short-strike placement veto — see the property doc on <see cref="OpenerConfig.PlacementVeto"/>.</summary>

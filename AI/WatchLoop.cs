@@ -155,7 +155,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var tickState = new LiveTickState();   // persists the one-time staleness note across ticks
 		// Watch = "one live tick in a loop". The opener never bypasses its daily cap here (that's a scan flag).
 		var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, autoExecutor, openEvaluator, sink, openSink, openerExecutor,
-			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false, Repricer: repricer);
+			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false, Repricer: repricer,
+			CascadeOpener: openEvaluator != null ? AIContext.BuildCascadeOpener(config, LiveQuoteSource.VendorName(vendor)) : null);
 
 		// Entry window (ET, opener.earliestEntryTimeEt..latestEntryTimeEt): outside it the watch loop stops SUBMITTING
 		// opens — nulling the opener executor for the tick suppresses ONLY auto-execution (proposals still render,

@@ -149,6 +149,15 @@ internal sealed class OpenCandidateEvaluator
 		LastPricedQuotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		LastTopCandidate = null;
 		lock (_gateVerdictLock) _lastGateVerdicts.Clear();
+		// No structure to enumerate (a layer that opens only signal-driven trades, e.g. opener.cascade): skip the chain probe and the daily
+		// snapshot sweep, which would fetch quotes every tick to build zero candidates.
+		if (!cfg.Structures.EnabledDteRanges().Any())
+		{
+			if (debug) Console.Error.WriteLine($"[debug] {_config.Ticker} no opener structure enabled; no candidates enumerated.");
+			LastUnderlyings = new Dictionary<string, decimal>(ctx.UnderlyingPrices, StringComparer.OrdinalIgnoreCase);
+			LastReportedUnderlyings = LastUnderlyings;
+			return Array.Empty<OpenProposal>();
+		}
 
 		// Phase A0: bootstrap spots + chains for tickers missing from ctx.UnderlyingPrices.
 		// The live-quote clients return the full chain plus the underlying spot for any OCC symbol,
@@ -354,8 +363,7 @@ internal sealed class OpenCandidateEvaluator
 			: null;
 
 		// Phase C: score per ticker.
-		var reserve = CashReserveHelper.ComputeReserve(_config.CashReserve.Mode, _config.CashReserve.Value, ctx.AccountValue);
-		var freeCash = Math.Max(0m, ctx.AccountCash - reserve);
+		var freeCash = FreeCash(_config, ctx);
 		// Fetch the contrarian Fear & Greed regime overlay once per scan. Same value applies to every
 		// ticker — F&G is a market-wide sentiment composite, not per-ticker. Null on outage; the scorer
 		// treats null as "skip the sentiment factor". In backtest we pass cacheOnly=true so the network
@@ -801,7 +809,11 @@ internal sealed class OpenCandidateEvaluator
 			.ToList();
 	}
 
-	private static OpenProposal ApplyCashSizing(OpenProposal p, decimal freeCash, decimal accountValue, OpenerConfig cfg, decimal bias, decimal sizingScalar = 1m)
+	/// <summary>Account cash left to open with once the configured cash reserve is set aside.</summary>
+	internal static decimal FreeCash(AIConfig config, EvaluationContext ctx) =>
+		Math.Max(0m, ctx.AccountCash - CashReserveHelper.ComputeReserve(config.CashReserve.Mode, config.CashReserve.Value, ctx.AccountValue));
+
+	internal static OpenProposal ApplyCashSizing(OpenProposal p, decimal freeCash, decimal accountValue, OpenerConfig cfg, decimal bias, decimal sizingScalar = 1m)
 	{
 		// Penny floor, not just <= 0: degenerate off-hours books (null/one-sided legs) can leave an
 		// epsilon-sized positive CapitalAtRiskPerContract (decimal residue), and freeCash / 1e-25

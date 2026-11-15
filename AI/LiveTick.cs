@@ -21,7 +21,8 @@ internal sealed record LiveTickDeps(
 	bool EmitManagement,
 	bool BypassOpenerDailyCap,
 	bool OutsideEntryWindow = false,
-	OrderRepricer? Repricer = null);
+	OrderRepricer? Repricer = null,
+	Open.Cascade.CascadeOpener? CascadeOpener = null);
 
 /// <summary>Mutable state that must persist across ticks (watch) but reset per run (scan).</summary>
 internal sealed class LiveTickState
@@ -94,13 +95,13 @@ internal static class LiveTick
 		var nowOffset = new DateTimeOffset(now);
 		var marketOpen = MarketCalendar.IsRegularHours(nowOffset);
 		var guardCfg = config.Opener.QuoteGuard;
-		var dividends = guardCfg is { Enabled: true } && marketOpen ? await LoadDividendsAsync(config, ReportedSpot(quoteSnapshot, deps.OpenEvaluator, config.Ticker) ?? 0m, now, cancellation) : null;
+		var dividends = guardCfg is { Enabled: true } && marketOpen ? await LoadDividendsAsync(config, ReportedSpot(quoteSnapshot, deps, config.Ticker) ?? 0m, now, cancellation) : null;
 
 		if (deps.MgmtExecutor != null)
 		{
 			// A frozen book misprices the marks every exit rule reads, so a take-profit/stop could fire (or miss) on numbers the
 			// market isn't trading: hold auto-execution of management proposals on frozen expiries. They still render above.
-			var mgmtFrozen = results.Count == 0 ? new HashSet<DateTime>() : LiveQuoteGuard.FrozenExpiries(quoteSnapshot.Options, config.Ticker, ReportedSpot(quoteSnapshot, deps.OpenEvaluator, config.Ticker), now, marketOpen, deps.VendorName, dividends, guardCfg, "management auto-execution");
+			var mgmtFrozen = results.Count == 0 ? new HashSet<DateTime>() : LiveQuoteGuard.FrozenExpiries(quoteSnapshot.Options, config.Ticker, ReportedSpot(quoteSnapshot, deps, config.Ticker), now, marketOpen, deps.VendorName, dividends, guardCfg, "management auto-execution");
 			var mgmtResults = mgmtFrozen.Count == 0 ? results : results.Where(r => !QuoteSanity.TouchesExpiry(r.Proposal.Legs, mgmtFrozen)).ToList();
 			await deps.MgmtExecutor.HandleAsync(mgmtResults, ctx, cancellation, cycleToken);
 		}
@@ -113,6 +114,10 @@ internal static class LiveTick
 			// or consumers that read the log as "what live would have placed" (wa ai backtest --replay, paper_vs_backtest)
 			// treat a 13:04 proposal past an 11:00 cutoff as a live open (2026-10-08).
 			if (deps.OutsideEntryWindow) openResults = openResults.Select(p => p with { Informational = true }).ToList();
+			// Cascade trades are signal-driven and enter once, at a setup's first confirmation: outside the entry window the signal is
+			// not read at all, so the first confirmation inside the window is the one that trades.
+			var cascadeResults = deps.CascadeOpener != null && !deps.OutsideEntryWindow ? await deps.CascadeOpener.EvaluateAsync(ctx, cancellation) : Array.Empty<OpenProposal>();
+			if (cascadeResults.Count > 0) openResults = openResults.Concat(cascadeResults).ToList();
 			openCount = openResults.Count;
 			// LIVE quote-integrity guard: warn loudly on a stale feed or torn NBBO (the 07-13 SPY case: long
 			// leg bid 10.36 / ask 20.36) and withhold the affected opens from auto-execution. Proposals still
@@ -122,8 +127,10 @@ internal static class LiveTick
 			// isn't today (GME) leaves ctx empty of the traded legs — the guard would mis-report staleness as
 			// "unverifiable" and skip torn-NBBO on legs it can't see. Falls back to ctx when the opener enumerated
 			// nothing (empty priced book → no proposals to guard anyway).
-			var guardBook = deps.OpenEvaluator?.LastPricedQuotes is { Count: > 0 } priced ? priced : quoteSnapshot.Options;
-			var openFrozen = openResults.Count == 0 ? new HashSet<DateTime>() : LiveQuoteGuard.FrozenExpiries(guardBook, config.Ticker, ReportedSpot(quoteSnapshot, deps.OpenEvaluator, config.Ticker), now, marketOpen, deps.VendorName, dividends, guardCfg, "opens");
+			IReadOnlyDictionary<string, OptionContractQuote> guardBook = deps.OpenEvaluator?.LastPricedQuotes is { Count: > 0 } priced ? priced : quoteSnapshot.Options;
+			// A cascade proposal was priced from the chain its reading was scored on.
+			if (cascadeResults.Count > 0) guardBook = new OverlayQuoteDictionary(guardBook, deps.CascadeOpener!.LastQuotes);
+			var openFrozen = openResults.Count == 0 ? new HashSet<DateTime>() : LiveQuoteGuard.FrozenExpiries(guardBook, config.Ticker, ReportedSpot(quoteSnapshot, deps, config.Ticker), now, marketOpen, deps.VendorName, dividends, guardCfg, "opens");
 			var (feedStale, suspect) = LiveQuoteGuard.Inspect(guardBook, nowOffset, marketOpen, deps.VendorName, guardCfg, openResults, openFrozen, ref state.StaleUnverifiableNoted);
 			for (var i = 0; i < openResults.Count; i++) deps.OpenSink.Emit(openResults[i], rank: i + 1);
 			if (deps.OpenerExecutor != null)
@@ -134,25 +141,35 @@ internal static class LiveTick
 				for (var i = 0; i < openResults.Count; i++)
 					if (!openResults[i].Informational && (feedStale || suspect.ContainsKey(i)))
 						deps.OpenSink.EmitAutoExecute(openResults[i], "skipped", "quote guard", feedStale ? "stale feed" : suspect[i]);
-				await deps.OpenerExecutor.HandleAsync(safeToOpen, openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: cycleToken, log: deps.OpenSink);
+				await deps.OpenerExecutor.HandleAsync(safeToOpen.Where(p => !cascadeResults.Contains(p)).ToList(), openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: cycleToken, log: deps.OpenSink);
+				// A cascade trade goes through on its own so its outcome is known: only one the executor acted on uses up its setup's
+				// signal for the day; one held back (quote guard above, or a skip inside the executor) is proposed again on a later read.
+				foreach (var cascadeOpen in safeToOpen.Where(cascadeResults.Contains))
+					if (await deps.OpenerExecutor.HandleAsync(new[] { cascadeOpen }, openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: cycleToken, log: deps.OpenSink) > 0)
+						deps.CascadeOpener!.Acted(cascadeOpen);
+			}
+			else
+			{
+				// No auto-executor: the proposals are display-only, so showing one is all that will ever happen to it.
+				foreach (var cascadeOpen in cascadeResults) deps.CascadeOpener!.Acted(cascadeOpen);
 			}
 		}
 
 		var spot = quoteSnapshot.Underlyings.TryGetValue(config.Ticker, out var s) ? s
 			: (deps.OpenEvaluator?.LastUnderlyings.TryGetValue(config.Ticker, out var hb) ?? false) ? hb
-			: (decimal?)null;
+			: deps.CascadeOpener?.LastSpot;
 		return new LiveTickResult(openPositions.Count, results.Count, openCount, spot, Aborted: false);
 	}
 
 	/// <summary>The vendor-reported spot the frozen-book guard checks the book against — never a <see cref="ParitySpotGuard"/>-corrected
 	/// one, which derives from the very book under test. Flat ticks carry no management-side spot, so the opener's pre-correction
-	/// bootstrap spot fills in.</summary>
-	private static decimal? ReportedSpot(QuoteSnapshot snapshot, OpenCandidateEvaluator? opener, string ticker)
+	/// bootstrap spot fills in, or the cascade opener's last read when the standard opener enumerates nothing.</summary>
+	private static decimal? ReportedSpot(QuoteSnapshot snapshot, LiveTickDeps deps, string ticker)
 	{
 		if (snapshot.ReportedUnderlyings != null && snapshot.ReportedUnderlyings.TryGetValue(ticker, out var reported)) return reported;
 		if (snapshot.Underlyings.TryGetValue(ticker, out var spot)) return spot;
-		if (opener != null && opener.LastReportedUnderlyings.TryGetValue(ticker, out var boot)) return boot;
-		return null;
+		if (deps.OpenEvaluator != null && deps.OpenEvaluator.LastReportedUnderlyings.TryGetValue(ticker, out var boot)) return boot;
+		return deps.CascadeOpener?.LastSpot;
 	}
 
 	/// <summary>The ticker's discrete dividend schedule (same source and fallback chain the scorer prices with), so parity on an expiry

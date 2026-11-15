@@ -264,6 +264,16 @@ internal static class AIContext
 		return (mgmt, opener, repricer);
 	}
 
+	/// <summary>The cascade opener (<c>opener.cascade</c>) reading the regime from <paramref name="vendorName"/>'s chain at the `analyze cascade` panel's
+	/// default scope, or null when it is off. Call after any --submit override: whether orders go live picks which ledger entries count.</summary>
+	internal static Open.Cascade.CascadeOpener? BuildCascadeOpener(AIConfig config, string vendorName)
+	{
+		if (!config.Opener.Enabled || !config.Opener.Cascade.Enabled) return null;
+		var request = new Analyze.CascadeLiveReader.Request(config.Ticker, vendorName, Analyze.CascadeScreener.DefaultDte, Analyze.CascadeScreener.DefaultStrikeRangePct, Analyze.CascadeScreener.DefaultMaxStrikes, Analyze.CascadeScreener.DefaultTriggerScore);
+		var live = config.AutoExecute.Opener is { Enabled: true, Submit: true };
+		return new Open.Cascade.CascadeOpener(config, live, Open.Cascade.CascadeSignalLedger.Default(), (nowEt, ct) => Analyze.CascadeLiveReader.ReadAsync(request, nowEt, ct));
+	}
+
 	/// <summary>Warns when --submit was requested but the matching executor is disabled via
 	/// <c>autoExecute.{opener,management}.enabled=false</c>. In that state the flag is inert:
 	/// <c>enabled</c> gates whether the executor is even constructed (see BuildAutoExecutors), while
@@ -443,7 +453,8 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// Scan = one live tick. The only scan-specific behaviour is --spot/--premarket (nonsensical in a watch
 			// loop) and --submit-override bypassing the opener's daily cap; everything else matches watch exactly.
 			var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, mgmtExecutor, openEvaluator, mgmtSink, openSink, openerExecutor,
-				config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: settings.SubmitOverride);
+				config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: settings.SubmitOverride,
+				CascadeOpener: openEvaluator != null ? AIContext.BuildCascadeOpener(config, LiveQuoteSource.VendorName(vendor)) : null);
 			var result = await LiveTick.EvaluateAsync(now, deps, new LiveTickState(),
 				snapshot => ApplySpotOverridesAsync(settings, config, snapshot, quotes, now, cancellation), cancellation);
 			if (result.Aborted) return 1;

@@ -690,6 +690,24 @@ internal static class AIConfigLoader
 			&& leChk <= eeChk)
 			return $"opener.latestEntryTimeEt ('{op.LatestEntryTimeEt}') must be later than earliestEntryTimeEt ('{op.EarliestEntryTimeEt}') — otherwise the window is empty and nothing ever opens";
 
+		var casc = op.Cascade;
+		if (casc.ReadSeconds < 1) return $"opener.cascade.readSeconds: must be ≥ 1, got {casc.ReadSeconds}";
+		if (casc.RetrySeconds < 0) return $"opener.cascade.retrySeconds: must be ≥ 0, got {casc.RetrySeconds}";
+		foreach (var (name, setup) in casc.Setups)
+		{
+			if (!setup.Enabled) continue;
+			var at = $"opener.cascade.{name}";
+			if (setup.Kind == null) return $"{at}.structure: must be one of {string.Join("|", CascadeSetupConfig.Structures)}, got '{setup.Structure}'";
+			if (setup.AnchorName is not string anchor) return $"{at}.anchor: must be one of {string.Join("|", CascadeSetupConfig.Anchors)}, got '{setup.Anchor}'";
+			var wallRight = anchor is CascadeSetupConfig.AnchorPutWall or CascadeSetupConfig.AnchorPutWallAtLow ? "P" : anchor == CascadeSetupConfig.AnchorAtm ? setup.Right : "C";
+			if (wallRight != setup.Right) return $"{at}.anchor: '{anchor}' places a {(wallRight == "C" ? "call" : "put")} strike, but structure {setup.Kind} trades {(setup.Right == "C" ? "calls" : "puts")}";
+			if (setup.IsVertical && setup.WidthSteps < 1) return $"{at}.widthSteps: must be ≥ 1, got {setup.WidthSteps}";
+			if (setup.MinCredit < 0m) return $"{at}.minCredit: must be ≥ 0, got {setup.MinCredit}";
+			if (setup.MinScore is < 0 or > 100) return $"{at}.minScore: must be in [0, 100], got {setup.MinScore}";
+			if (setup.MinVix > setup.MaxVix) return $"{at}.minVix ({setup.MinVix}) must not exceed maxVix ({setup.MaxVix})";
+			if (setup.MinVixChange > setup.MaxVixChange) return $"{at}.minVixChange ({setup.MinVixChange}) must not exceed maxVixChange ({setup.MaxVixChange})";
+			if (setup.MinVixChange is < -1m or > 5m || setup.MaxVixChange is < -1m or > 5m) return $"{at}.min/maxVixChange: a fraction of the prior close (0.05 = +5%), got {setup.MinVixChange} / {setup.MaxVixChange}";
+		}
 		var trail = c.Rules.TrailingStop;
 		if (trail.Enabled && (trail.TrailPct <= 0m || trail.TrailPct >= 1m)) return $"rules.trailingStop.trailPct: must be in (0, 1), got {trail.TrailPct}";
 		if (trail.Exclude.FirstOrDefault(name => !TrailingStopConfig.KnownStructures.Contains(name, StringComparer.OrdinalIgnoreCase)) is string unknown)

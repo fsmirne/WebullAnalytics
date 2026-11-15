@@ -14,9 +14,10 @@ namespace WebullAnalytics.Analyze;
 
 /// <summary>
 /// `wa analyze cascade &lt;TICKER&gt;` — Classifies the market regime into Bear Cascade, Bear Trap,
-/// Bull Cascade, or Bull Trap (plus Neutral) and renders a Spectre.Console screener panel. Descriptive only:
-/// it reads the session so far and feeds nothing into the opener. Every live run appends its chain to data/iv (the
-/// volume-pace factor's input) and its reading to data/cascade (<see cref="CascadeLog"/>); a past --date replay writes nothing.
+/// Bull Cascade, or Bull Trap (plus Neutral) and renders a Spectre.Console screener panel. It reads the session so far and
+/// scores no opener candidate; the same live read (<see cref="CascadeLiveReader"/>) triggers the opt-in <c>opener.cascade</c>
+/// trades of `wa ai watch`. Every live run appends its chain to data/iv (the volume-pace factor's input) and its reading to
+/// data/cascade (<see cref="CascadeLog"/>); a past --date replay writes nothing.
 /// Reuses <see cref="GexMatrix"/>, <see cref="GexSqueezeScreener"/>, <see cref="AnalyzeGexCommand"/> chain/quote loaders,
 /// <see cref="CascadeScreener"/>, and <see cref="CascadePanel"/>.
 /// </summary>
@@ -27,19 +28,19 @@ internal sealed class AnalyzeCascadeSettings : AnalyzeBaseSettings
 	public string Ticker { get; set; } = "";
 
 	[CommandOption("--dte <N>")]
-	[DefaultValue(30)]
+	[DefaultValue(CascadeScreener.DefaultDte)]
 	[Description("Multi-expiry horizon in days-to-expiry (default 30) for the 30-day GEX flip, net GEX fraction, and net Vanna (VEX) exposure.")]
-	public int Dte { get; set; } = 30;
+	public int Dte { get; set; } = CascadeScreener.DefaultDte;
 
 	[CommandOption("--strike-range <PCT>")]
-	[DefaultValue(20)]
+	[DefaultValue(CascadeScreener.DefaultStrikeRangePct)]
 	[Description("Strike window as ± percent of spot. Default: 20.")]
-	public int StrikeRangePct { get; set; } = 20;
+	public int StrikeRangePct { get; set; } = CascadeScreener.DefaultStrikeRangePct;
 
 	[CommandOption("--max-strikes <N>")]
-	[DefaultValue(200)]
+	[DefaultValue(CascadeScreener.DefaultMaxStrikes)]
 	[Description("Max strike rows retained in the matrix ladder (1–200). Default: 200.")]
-	public int MaxStrikes { get; set; } = 200;
+	public int MaxStrikes { get; set; } = CascadeScreener.DefaultMaxStrikes;
 
 	[CommandOption("--trigger <SCORE>")]
 	[DefaultValue(CascadeScreener.DefaultTriggerScore)]
@@ -79,29 +80,21 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 
 		var ticker = settings.Ticker.ToUpperInvariant();
 		var nowEt = MarketTime.NowEt();
-		var pinned = settings.PinnedInstant;
-		var asOfEt = pinned ?? nowEt;
-
-		Dictionary<string, OptionContractQuote> quotes;
-		decimal? spot;
-		var isOfflineHistorical = false;
-		ApiConfig? apiConfig = null;
-
-		var oiPath = Program.ResolvePath($"data/oi/{ticker}/{asOfEt:yyyy-MM-dd}.jsonl");
-		if (pinned.HasValue && File.Exists(oiPath))
+		if (settings.PinnedInstant is not DateTime asOfEt)
 		{
-			var (snapSpot, snapQuotes) = AnalyzeGexCommand.LoadOiSnapshot(oiPath);
-			if (snapQuotes.Count == 0)
+			var (live, error) = await CascadeLiveReader.ReadAsync(new CascadeLiveReader.Request(ticker, settings.VendorName, settings.Dte, settings.StrikeRangePct, settings.MaxStrikes, settings.TriggerScore, AnalyzeGexCommand.ResolveSpotOverride(settings.Spot, ticker)), nowEt, cancellation);
+			if (live == null)
 			{
-				AnsiConsole.MarkupLine($"[red]Empty data/oi snapshot for {ticker} {asOfEt:yyyy-MM-dd}.[/]");
+				AnsiConsole.MarkupLine(error!);
 				return 1;
 			}
-			quotes = snapQuotes;
-			spot = AnalyzeGexCommand.ResolveSpotOverride(settings.Spot, ticker) ?? snapSpot;
-			AnsiConsole.MarkupLine($"[dim]Historical chain from {Markup.Escape(oiPath)} ({quotes.Count} contracts; offline — no live fetch).[/]");
-			isOfflineHistorical = true;
+			CascadePanel.Render(ticker, nowEt, Scope(live.ExpiryCount, settings.Dte), live.Reading);
+			return 0;
 		}
-		else if (pinned.HasValue)
+
+		// A past --date renders only from a captured chain (no live fallback), and writes nothing.
+		var oiPath = Program.ResolvePath($"data/oi/{ticker}/{asOfEt:yyyy-MM-dd}.jsonl");
+		if (!File.Exists(oiPath))
 		{
 			var dir = Program.ResolvePath($"data/oi/{ticker}");
 			var available = Directory.Exists(dir)
@@ -113,128 +106,43 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 				: $"[dim]No snapshots exist under data/oi/{Markup.Escape(ticker)}/.[/]");
 			return 1;
 		}
-		else
+		var (snapSpot, quotes) = AnalyzeGexCommand.LoadOiSnapshot(oiPath);
+		if (quotes.Count == 0)
 		{
-			var configPath = Program.ResolvePath(Program.ApiConfigPath);
-			if (!File.Exists(configPath))
-			{
-				AnsiConsole.MarkupLine("[red]Error: api-config.json not found. Run 'sniff' first (or pass a past --date with a data/oi snapshot).[/]");
-				return 1;
-			}
-			apiConfig = JsonSerializer.Deserialize<ApiConfig>(File.ReadAllText(configPath));
-			if (settings.VendorName == "schwab")
-			{
-				if (apiConfig?.Schwab == null)
-				{
-					AnsiConsole.MarkupLine("[red]Error: schwab vendor needs Schwab credentials in api-config.json. Run 'wa schwab login' first.[/]");
-					return 1;
-				}
-				IReadOnlyList<OptionContractQuote> schwabQuotes;
-				decimal? schwabSpot;
-				try
-				{
-					var token = await SchwabAuthClient.GetAccessTokenAsync(apiConfig.Schwab, configPath, cancellation);
-					var fromExpiry = DateOnly.FromDateTime(asOfEt.Date);
-					var toExpiry = DateOnly.FromDateTime(asOfEt.Date).AddDays(settings.Dte);
-					(schwabSpot, schwabQuotes) = await SchwabOptionsClient.FetchChainAsync(token, ticker, fromExpiry, toExpiry, cancellation, strikeCount: 0);
-				}
-				catch (SchwabAuthException ex)
-				{
-					AnsiConsole.MarkupLine($"[red]Schwab auth failed: {Markup.Escape(ex.Message)} Re-run 'wa schwab login'.[/]");
-					return 1;
-				}
-				var fetched = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
-				foreach (var q in schwabQuotes)
-					fetched[q.ContractSymbol] = q;
-				quotes = schwabSpot is > 0m
-					? LiveQuoteSource.NormalizeIvs(fetched, new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = schwabSpot.Value })
-					: fetched;
-				if (quotes.Count == 0)
-				{
-					AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker} from Schwab.[/]");
-					return 1;
-				}
-				spot = AnalyzeGexCommand.ResolveSpotOverride(settings.Spot, ticker) ?? schwabSpot;
-			}
-			else
-			{
-				if (apiConfig == null || apiConfig.Webull.Headers.Count == 0)
-				{
-					AnsiConsole.MarkupLine("[red]Error: api-config.json is empty or missing headers. Run 'sniff' first.[/]");
-					return 1;
-				}
-				var (initialQuotes, fetchedSpot, derivativeIds) = await WebullOptionsClient.FetchChainAsync(apiConfig, ticker, cancellation);
-				if (initialQuotes.Count == 0)
-				{
-					AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker}.[/]");
-					return 1;
-				}
-				spot = AnalyzeGexCommand.ResolveSpotOverride(settings.Spot, ticker) ?? fetchedSpot;
-				quotes = new Dictionary<string, OptionContractQuote>(initialQuotes, StringComparer.OrdinalIgnoreCase);
-				if (spot.HasValue && spot.Value > 0m)
-				{
-					var refreshed = await AnalyzeGexCommand.RefreshInWindowContractsAsync(
-						apiConfig, quotes, derivativeIds, ticker, spot.Value, asOfEt, expiryFilter: null,
-						settings.StrikeRangePct / 100m, settings.Dte, settings.MaxStrikes, cancellation);
-					if (refreshed > 0) Log.Debug($"Refreshed {refreshed} in-window contract(s) via queryBatch.");
-				}
-			}
+			AnsiConsole.MarkupLine($"[red]Empty data/oi snapshot for {ticker} {asOfEt:yyyy-MM-dd}.[/]");
+			return 1;
 		}
+		AnsiConsole.MarkupLine($"[dim]Historical chain from {Markup.Escape(oiPath)} ({quotes.Count} contracts; offline — no live fetch).[/]");
 
-		// Minute bars have one source (Webull's chart endpoint) whatever the quote vendor: `vendor` only picks between the Webull and Schwab option-chain clients.
-		var intradayCache = apiConfig != null && !isOfflineHistorical ? new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)) : null;
-
-		// Load RTH 1-minute bars up to asOfEt so historical/intraday evaluations use the true spot at asOfEt.
-		// A replay sees only the bars that closed by the instant (the last one's close is the price AT it); a live read includes the forming minute.
-		var rthBars = await CascadeScreener.LoadSessionRthBarsAsync(ticker, asOfEt, intradayCache, includeCurrentBar: !isOfflineHistorical, cancellation);
-		var explicitSpotOverride = AnalyzeGexCommand.ResolveSpotOverride(settings.Spot, ticker);
-		if (!explicitSpotOverride.HasValue && (isOfflineHistorical || pinned.HasValue) && rthBars.Count > 0)
-			spot = rthBars[^1].Close;
-
-		if (!spot.HasValue || spot.Value <= 0m)
+		// RTH 1-minute bars that closed by the instant: the last one's close is the price AT it.
+		var rthBars = await CascadeScreener.LoadSessionRthBarsAsync(ticker, asOfEt, intradayCache: null, includeCurrentBar: false, cancellation);
+		var spot = AnalyzeGexCommand.ResolveSpotOverride(settings.Spot, ticker) ?? (rthBars.Count > 0 ? rthBars[^1].Close : snapSpot);
+		if (spot is not > 0m)
 		{
 			AnsiConsole.MarkupLine($"[red]No spot price available for {ticker}. Pass --spot {ticker}:PRICE to override.[/]");
 			return 1;
 		}
 
-		// On historical replays, strip all 16:00 EOD prices/IVs/volumes from the snapshot, price non-front expiries
-		// from the prior trading day's settled IVs, and price the front expiry from quotes.db minute NBBO at asOfEt.
-		if (isOfflineHistorical)
-		{
-			quotes = CascadeScreener.BuildCausalHistoricalChain(ticker, asOfEt, quotes, settings.Exante, out var provenanceNote);
-			AnsiConsole.MarkupLine($"[dim]{Markup.Escape(provenanceNote)}[/]");
-		}
-		else
-		{
-			// Live run: always append a data/iv capture — the volume-pace factor is the difference of consecutive captures
-			var band = settings.StrikeRangePct / 100m;
-			var inWindow = quotes.Values.Where(q =>
-			{
-				var parsed = ParsingHelpers.ParseOptionSymbol(q.ContractSymbol);
-				if (parsed == null || !ParsingHelpers.RootsMatchForAggregation(parsed.Root, ticker, parsed.ExpiryDate)) return false;
-				var exp = parsed.ExpiryDate.Date;
-				if (exp < asOfEt.Date || exp > asOfEt.Date.AddDays(settings.Dte)) return false;
-				return Math.Abs(parsed.Strike - spot.Value) / spot.Value <= band;
-			});
-			IvDumpStore.Append(ticker, settings.VendorName, nowEt, spot.Value, inWindow);
-		}
+		// Strip all 16:00 EOD prices/IVs/volumes from the snapshot, price non-front expiries from the prior trading day's
+		// settled IVs, and price the front expiry from quotes.db minute NBBO at asOfEt.
+		quotes = CascadeScreener.BuildCausalHistoricalChain(ticker, asOfEt, quotes, settings.Exante, out var provenanceNote);
+		AnsiConsole.MarkupLine($"[dim]{Markup.Escape(provenanceNote)}[/]");
 
 		if (AnalyzeGexCommand.IsOiBlackout(quotes, ticker, asOfEt.Date))
 		{
 			AnsiConsole.MarkupLine($"[yellow]The vendor returned no open interest for any unexpired {Markup.Escape(ticker)} contract (overnight OI blackout — OI is zeroed until the next morning's OCC update), and the terrain is built from OI. Re-run during market hours, or use --date with a captured data/oi snapshot.[/]");
 			return 1;
 		}
-		var read = await CascadeScreener.ReadChainAsync(ticker, spot.Value, asOfEt, quotes, settings.Dte, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.TriggerScore, rthBars, intradayCache, new HistoricalPriceCache(), new SmileIndexCache(offline: isOfflineHistorical), settings.VendorName, includeCurrentBar: !isOfflineHistorical, cancellation);
+		var read = await CascadeScreener.ReadChainAsync(ticker, spot.Value, asOfEt, quotes, settings.Dte, settings.StrikeRangePct / 100m, settings.MaxStrikes, settings.TriggerScore, rthBars, null, new HistoricalPriceCache(), new SmileIndexCache(offline: true), settings.VendorName, includeCurrentBar: false, cancellation);
 		if (read == null)
 		{
 			AnsiConsole.MarkupLine($"[yellow]No strikes match within ±{settings.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
 			return 1;
 		}
 
-		var (reading, expiryCount) = read.Value;
-		var scope = $"{expiryCount} expiration(s) ≤{settings.Dte}DTE";
-		CascadePanel.Render(ticker, asOfEt, scope, reading);
-		if (!isOfflineHistorical) CascadeLog.Append(ticker, settings.VendorName, nowEt, asOfEt, explicitSpotOverride.HasValue, reading);
+		CascadePanel.Render(ticker, asOfEt, Scope(read.Value.ExpiryCount, settings.Dte), read.Value.Reading);
 		return 0;
 	}
+
+	private static string Scope(int expiryCount, int dte) => $"{expiryCount} expiration(s) ≤{dte}DTE";
 }

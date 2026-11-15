@@ -815,6 +815,36 @@ Defaults are calibrated against 1,129 SPX sessions (2022-01 → 2026-09) rather 
 
 Use `wa ai gate <TICKER> [--strategy TOK]` to see what it decided and why — per minute for one session, or per day with a state tally over a range. Without it, "no proposals emitted" looks identical whether the session was rejected on the gap, on the VWAP hold, on chop, or on a missing tape file, and no threshold can be tuned honestly.
 
+**`opener.cascade`** — signal-driven 0DTE entries from the live `wa analyze cascade` regime read (off by default). These bypass candidate enumeration and ranking: each confirmed setup opens the one trade its block names, priced from the chain the reading was scored on and sized by the opener's own caps (`maxRiskPctPerProposal`, `maxDollarRiskPerProposal`, `maxQtyPerProposal`, cash reserve). `opener.structures` plays no part: its entries are DTE and delta bands the enumerator searches and the scorer ranks, whereas a cascade setup names a single trade outright.
+
+There is one block per setup — `bullTrap`, `bearTrap`, `bullCascade`, `bearCascade` — each off until it sets `enabled` and a `structure`:
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Trade this setup |
+| `structure` | — | `LongCall`, `LongPut`, `ShortCallVertical`, `ShortPutVertical`, `LongCallVertical` or `LongPutVertical`, all expiring today |
+| `anchor` | `atm` | Strike of the first leg (the long option, a debit vertical's long leg, a credit vertical's short leg): `atm` = first strike at or above spot for a call, at or below for a put; `callWallAtHigh` / `putWallAtLow` = the 0DTE call wall the session high ran into / the 0DTE put wall the session low ran into; `callWall` / `putWall` = the 0DTE call wall above spot / put wall below it. A wall anchor takes a structure on its own side (calls for a call wall, puts for a put wall), and a wall that is not out of the money yields no trade |
+| `offsetSteps` | `0` | Shift the anchor this many `indicators.strikeStep` steps further out of the money (negative = toward the money) |
+| `widthSteps` | `2` | Verticals: the second leg sits this many strike steps further out of the money (2 = $10 wide on SPXW) |
+| `minCredit` | `0` | Credit verticals: no trade when the mid credit per share is below this |
+| `minScore` | `0` | Entry condition: the confirming reading's setup score must reach this (0 = the confirmation threshold alone) |
+| `minVix` / `maxVix` | — | Entry condition: VIX level band at the reading, in index points |
+| `minVixChange` / `maxVixChange` | — | Entry condition: band on VIX's change since the prior close, as a fraction (`0.05` = up 5%, `-0.03` = down 3%); a reading without intraday VIX fails a set bound |
+
+A reading that fails an entry condition is not that setup's entry: nothing is recorded, and a later reading of the day that meets every condition can still trade.
+
+```json
+"cascade": {
+	"enabled": true,
+	"bullTrap": { "enabled": true, "structure": "ShortCallVertical", "anchor": "callWallAtHigh", "widthSteps": 2, "minCredit": 0.10 },
+	"bearTrap": { "enabled": true, "structure": "LongCall", "anchor": "atm" }
+}
+```
+
+Exits are the management rules': when `rules.trailingStop` is enabled it trails every open position, so a structure meant to be held to expiry must be named in `rules.trailingStop.exclude` (and `stopLoss`, `takeProfit` and `closeBeforeShortExpiry` kept off in the strategy layer).
+
+A setup trades **once a day, at its first confirmation** inside the opener's entry window (`earliestEntryTimeEt`..`latestEntryTimeEt`). A first confirmation that yields no trade (no wall out of the money, a credit under the floor) uses up the day's signal. One that yields a trade is used up when the auto-executor acts on it; if the executor held the order back (quote guard, broker refresh failure, cash), the trade is proposed again on later reads while the setup stays confirmed, until `retrySeconds` (default 180) after the first confirmation — nothing was opened, so a retry can never re-enter a position the stop already closed. `data/cascade/signals.jsonl` records each step (`signaled`, then `placed` or `skipped`), so a restart or a second process picks up where the last left off; dry-run and live runs keep separate entries. The regime is read every `readSeconds` (default 60), not on every watch tick — each read fetches the whole chain out to 30 DTE and, like `wa analyze cascade`, appends to `data/iv` and `data/cascade` — so `watch.tickIntervalSeconds` can run faster (15 seconds suits a trailing stop on a 0DTE option) without re-reading the chain each tick. Use it in its own strategy layer with every `opener.structures` entry disabled (the standard opener then fetches nothing), `autoExecute.opener.maxOrdersPerDay` at the number of enabled setups, `autoExecute.management.rules: ["TrailingStopRule"]`, and `autoExecute.reprice.cancelSeconds` set so an unfilled entry does not fill later on a stale signal. Hold a short vertical through expiry only on a cash-settled index root (SPXW); on SPY it carries assignment risk.
+
 **`rules`** — management rule triggers and thresholds. Each rule's config holds only the gates specific to that rule (stop-loss multipliers, take-profit percentages, roll-specific thresholds). The `opportunisticRoll` block contains `bullishBlockThreshold` / `bearishBlockThreshold` — composite-bias score boundaries that block call rolls in extended-bullish setups and put rolls in extended-bearish setups.
 
 **`watch`** — long-running `wa ai watch` loop knobs. `tickIntervalSeconds` sets the poll cadence (also the off-hours sleep when waiting for the bell). `startTime` (optional, format `HH:mm` or `HH:mm:ss` ET) schedules the first tick — useful when you want orders placed a few seconds after 09:30 rather than at the exact bell; CLI `--start` overrides.
