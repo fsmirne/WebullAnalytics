@@ -65,11 +65,6 @@ internal sealed class AnalyzeCascadeStudySettings : CommandSettings
 
 internal sealed class AnalyzeCascadeStudyCommand : AsyncCommand<AnalyzeCascadeStudySettings>
 {
-	// The panel's defaults (AnalyzeCascadeSettings), so a study row is what `analyze cascade --date --time` shows.
-	private const int Dte = 30;
-	private const decimal StrikeRangeFraction = 0.20m;
-	private const int MaxStrikes = 200;
-
 	protected override async Task<int> ExecuteAsync(CommandContext context, AnalyzeCascadeStudySettings settings, CancellationToken cancellation)
 	{
 		var ticker = settings.Ticker.ToUpperInvariant();
@@ -81,6 +76,8 @@ internal sealed class AnalyzeCascadeStudyCommand : AsyncCommand<AnalyzeCascadeSt
 			if (MarketCalendar.IsOpen(d)) sessions.Add(d);
 
 		var threads = settings.Threads ?? Math.Max(1, Environment.ProcessorCount / 2);
+		// Each session prices on its own day's rate (the prior ^IRX close), as `wa ai backtest` does for that day.
+		var rateHistory = await new AI.Backtest.HistoricalRateCache(offline: true).GetAsync(cancellation);
 		var minuteVolume = new System.Collections.Concurrent.ConcurrentDictionary<(string, DateTime, DateTime), Lazy<SortedDictionary<TimeSpan, long>?>>();
 		var rows = new System.Collections.Concurrent.ConcurrentBag<(DateTime Date, TimeSpan Time, string Json)>();
 		var skipped = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
@@ -89,7 +86,7 @@ internal sealed class AnalyzeCascadeStudyCommand : AsyncCommand<AnalyzeCascadeSt
 		AnsiConsole.MarkupLine($"[dim]{sessions.Count} session(s) {since:yyyy-MM-dd}..{until:yyyy-MM-dd}, checkpoints {string.Join(",", checkpoints.Select(c => c.ToString(@"hh\:mm")))}, {threads} thread(s).[/]");
 		await Parallel.ForEachAsync(sessions, new ParallelOptions { MaxDegreeOfParallelism = threads, CancellationToken = cancellation }, async (date, ct) =>
 		{
-			var reason = await StudySessionAsync(ticker, date, checkpoints, new CascadeReplayCache(minuteVolume), rows, ct);
+			var reason = await StudySessionAsync(ticker, date, checkpoints, new CascadeReplayCache(minuteVolume), AI.Backtest.HistoricalRateCache.RateOn(rateHistory, date), rows, ct);
 			if (reason != null) skipped.AddOrUpdate(reason, 1, (_, n) => n + 1);
 			var n = Interlocked.Increment(ref done);
 			if (n % 25 == 0 || n == sessions.Count)
@@ -109,50 +106,33 @@ internal sealed class AnalyzeCascadeStudyCommand : AsyncCommand<AnalyzeCascadeSt
 		return 0;
 	}
 
-	/// <summary>Replays one session at every checkpoint; returns a skip reason, or null when it produced readings. Each session gets
-	/// its own price and SMILE caches (neither is thread-safe; both read their on-disk caches without fetching for past dates) and its
-	/// own replay memo, so the session-level loads run once per session rather than once per checkpoint.</summary>
-	private static async Task<string?> StudySessionAsync(string ticker, DateTime date, IReadOnlyList<TimeSpan> checkpoints, CascadeReplayCache cache, System.Collections.Concurrent.ConcurrentBag<(DateTime, TimeSpan, string)> rows, CancellationToken ct)
+	/// <summary>Replays one session at every checkpoint (<see cref="CascadeReplaySession"/>); returns a skip reason, or null when it
+	/// produced readings.</summary>
+	private static async Task<string?> StudySessionAsync(string ticker, DateTime date, IReadOnlyList<TimeSpan> checkpoints, CascadeReplayCache cache, double? riskFreeRate, System.Collections.Concurrent.ConcurrentBag<(DateTime, TimeSpan, string)> rows, CancellationToken ct)
 	{
-		var oiPath = Program.ResolvePath($"data/oi/{ticker}/{date:yyyy-MM-dd}.jsonl");
-		if (!File.Exists(oiPath)) return "no data/oi snapshot";
-		var snapshot = AnalyzeGexCommand.LoadOiSnapshot(oiPath);
-		if (snapshot.Quotes.Count == 0) return "empty data/oi snapshot";
+		var (session, skip) = await CascadeReplaySession.OpenAsync(ticker, date, cache, riskFreeRate, ct);
+		if (session == null) return skip;
 
-		var close = MarketCalendar.CloseTimeEt(date);
-		var dayBars = await CascadeScreener.LoadSessionRthBarsAsync(ticker, date + close, intradayCache: null, includeCurrentBar: false, ct);
-		if (dayBars.Count == 0) return "no data/intraday tape";
-
-		var priceCache = new HistoricalPriceCache();
-		var smileCache = new SmileIndexCache(offline: true);
 		var produced = 0;
 		foreach (var t in checkpoints)
 		{
-			if (t >= close) continue;
-			var asOfEt = date + t;
-			// START-of-bar labels: the bars that closed by the checkpoint are the reading's (the last close is the price AT it); the bar that
-			// starts at the checkpoint is the first one after it.
-			var rthBars = dayBars.Where(b => MarketTime.ToEt(b.Timestamp).TimeOfDay < t).ToList();
-			var after = dayBars.Where(b => MarketTime.ToEt(b.Timestamp).TimeOfDay >= t).ToList();
-			if (rthBars.Count == 0 || after.Count == 0) continue;
-			var spot = rthBars[^1].Close;
-
-			var quotes = CascadeScreener.BuildCausalHistoricalChain(ticker, asOfEt, snapshot.Quotes, forceExante: false, out _, cache);
-			if (AnalyzeGexCommand.IsOiBlackout(quotes, ticker, date)) continue;
-			var read = await CascadeScreener.ReadChainAsync(ticker, spot, asOfEt, quotes, Dte, StrikeRangeFraction, MaxStrikes, CascadeScreener.DefaultTriggerScore, rthBars, null, priceCache, smileCache, "schwab", includeCurrentBar: false, ct, cache);
+			// The bar that starts at the checkpoint is the first one after it.
+			var after = session.DayBars.Where(b => MarketTime.ToEt(b.Timestamp).TimeOfDay >= t).ToList();
+			if (after.Count == 0) continue;
+			var read = await session.ReadAsync(t, ct);
 			if (read == null) continue;
 
 			var row = new
 			{
 				date = date.ToString("yyyy-MM-dd"),
 				time = t.ToString(@"hh\:mm"),
-				spot,
+				spot = read.Spot,
 				close = after[^1].Close,
 				hiAfter = after.Max(b => b.High),
 				loAfter = after.Min(b => b.Low),
 				fwd30 = after.Count >= 30 ? after[29].Close : (decimal?)null,
 				fwd60 = after.Count >= 60 ? after[59].Close : (decimal?)null,
-				reading = read.Value.Reading,
+				reading = read.Reading,
 			};
 			rows.Add((date, t, JsonSerializer.Serialize(row, CascadeLog.Options)));
 			produced++;

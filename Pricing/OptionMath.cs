@@ -11,7 +11,31 @@ internal static class OptionMath
 	private const double InvSqrt2 = 0.70710678118654752440084436210485; // 1.0 / Math.Sqrt(2.0)
 	private const double InvSqrt2Pi = 0.39894228040143267793994605993438; // 1.0 / Math.Sqrt(2.0 * Math.PI)
 
-	internal static double RiskFreeRate = 0.043; // default; updated at runtime from ^IRX when available
+	private static double _riskFreeRate = 0.043; // default; updated at runtime from ^IRX when available
+	private static readonly AsyncLocal<double?> ScopedRiskFreeRate = new();
+
+	/// <summary>The rate every pricing call uses: the process-wide value, unless the current async flow has pinned its own
+	/// (<see cref="PinRiskFreeRate"/>). Assigning sets the process-wide value.</summary>
+	internal static double RiskFreeRate
+	{
+		get => ScopedRiskFreeRate.Value ?? _riskFreeRate;
+		set => _riskFreeRate = value;
+	}
+
+	/// <summary>Pins the rate for the current async flow — the code awaited from here on, and nothing running beside it — until disposed.
+	/// For work that prices a different day than the process (a backtest's sessions replayed ahead of its day loop, which re-sets the
+	/// process-wide rate every simulated day).</summary>
+	internal static IDisposable PinRiskFreeRate(double rate)
+	{
+		var prior = ScopedRiskFreeRate.Value;
+		ScopedRiskFreeRate.Value = rate;
+		return new Restore(() => ScopedRiskFreeRate.Value = prior);
+	}
+
+	private sealed class Restore(Action undo) : IDisposable
+	{
+		public void Dispose() => undo();
+	}
 	internal static readonly TimeSpan MarketOpen = new(9, 30, 0);
 	// 16:00 ET — equity options cease trading and PM-settled index options settle on the 4:00 close print.
 	internal static readonly TimeSpan MarketClose = new(16, 0, 0);

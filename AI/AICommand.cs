@@ -728,6 +728,14 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	[Description("Open-scan minute stride: evaluate every Nth minute for entries. Default 1 (every minute), matching live watch's per-tick cadence — coarser strides alias past the minutes where a marginal score crosses minScoreToOpen and silently under-count opens vs reality. Raise N to speed up multi-year sweeps (~Nx fewer candidate enumerations) at the cost of missing single-minute threshold crossings.")]
 	public int ScanStride { get; set; } = 1;
 
+	[CommandOption("--cadence <MINUTES>")]
+	[Description("Cascade strategies (opener.cascade) only: minutes between cascade readings, from the opener's earliest entry time to its latest. Default 10. Each reading replays the whole chain, so a backtest reads on this grid instead of live's once a minute; a setup confirms at the first grid instant it shows at.")]
+	public int Cadence { get; set; } = 10;
+
+	[CommandOption("--recache")]
+	[Description("Cascade strategies only: ignore the stored cascade readings (data/cascade-cache) and replay every session again. Needed only after re-backfilling past sessions in the quote store; a new build or changed chain/tape files are detected on their own.")]
+	public bool Recache { get; set; }
+
 
 	[CommandOption("--iv-hv-premium <RATIO>")]
 	[Description("IV/HV multiplier for non-SPY tickers (SPY uses real VIX). Default: 1.15.")]
@@ -843,6 +851,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 		if (!baseResult.Successful) return baseResult;
 		if (Cross is < 0m or > 1m)
 			return ValidationResult.Error($"--cross: must be in [0, 1], got {Cross}");
+		if (Cadence < 1 || Cadence > 390)
+			return ValidationResult.Error($"--cadence: must be in [1, 390] minutes, got {Cadence}");
 		if (Cross.HasValue && SuggestionPricing.Normalize(Pricing) != SuggestionPricing.Mid)
 			return ValidationResult.Error("--cross: requires --pricing mid (bidask already crosses the full spread)");
 		if (TpPctOverride.HasValue && TpPctOverride.Value < 0m)
@@ -1102,7 +1112,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		var feePerContract = settings.FeePerContract ?? Backtest.SimulatedBook.DefaultFeePerContractFor(settings.Ticker);
 		var book = new Backtest.SimulatedBook(settings.StartingCash, feePerContract, config.Opener.RealizedExpectancy);
 		var positions = new Backtest.BacktestPositionSource(book, quotes);
-		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, cross: settings.Cross, scanStride: settings.ScanStride, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split, replayOpens: replayOpens, rateHistory: rateHistory, intradayBars: intradayBars);
+		var runner = new Backtest.BacktestRunner(config, book, positions, quotes, bars, closes, settings.TopPerStep, oracle: settings.Oracle, profile: settings.Profile, fixedContracts: settings.Lots, pricingMode: settings.Pricing, cross: settings.Cross, scanStride: settings.ScanStride, cascadeCadenceMinutes: settings.Cadence, cascadeRecache: settings.Recache, dividendsByRoot: dividendsByRoot, splitStructures: settings.Split, replayOpens: replayOpens, rateHistory: rateHistory, intradayBars: intradayBars);
 
 		AnsiConsole.MarkupLine($"[bold]Backtest:[/] {since:yyyy-MM-dd} → {until:yyyy-MM-dd} | ticker {Markup.Escape(config.Ticker)} | start ${settings.StartingCash:N0} | fee ${feePerContract}/contract | smile={settings.Smile} | fills={(settings.Cross.HasValue ? $"mid+{settings.Cross:0.##}×half-spread" : SuggestionPricing.Normalize(settings.Pricing))}{(settings.Replay ? " | [yellow]PROPOSAL REPLAY (opener off)[/]" : "")}{(settings.Oracle ? " | [yellow]ORACLE (lookahead)[/]" : "")}{(settings.Lots.HasValue ? $" | [yellow]FIXED {settings.Lots} lot(s) — no compounding[/]" : "")}");
 		AnsiConsole.WriteLine();
@@ -1150,6 +1160,7 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		if (!string.IsNullOrWhiteSpace(settings.FillsJsonlPath))
 			WriteFillsJsonl(Path.IsPathRooted(settings.FillsJsonlPath) ? settings.FillsJsonlPath : Path.GetFullPath(settings.FillsJsonlPath), result.Fills);
 		Backtest.BacktestSummaryRenderer.Render(result, settings.ShowFills, settings.BookCmd);
+		foreach (var line in runner.CascadeSummary()) AnsiConsole.MarkupLine($"[dim]{Markup.Escape(line)}[/]");
 		AnsiConsole.MarkupLine($"[dim]Wall time: {runStopwatch.Elapsed.TotalMinutes:F1} min ({runStartedAt:HH:mm:ss} → {DateTime.Now:HH:mm:ss})[/]");
 
 		return 0;

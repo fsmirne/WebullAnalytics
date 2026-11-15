@@ -50,8 +50,30 @@ internal static class MarketClock
 	private static readonly ConcurrentDictionary<(string Root, DateOnly Day), ClockWeights?> Resolved = new();
 
 	/// <summary>The simulated day a historical run prices on (the backtest pins it every step, like the day's risk-free rate). Null =
-	/// live: today, or a past --date (<see cref="EvaluationDate"/>).</summary>
-	internal static DateOnly? PinnedDay { get; set; }
+	/// live: today, or a past --date (<see cref="EvaluationDate"/>). Reads the current async flow's own day when one is pinned
+	/// (<see cref="PinDay"/>); assigning sets the process-wide day.</summary>
+	internal static DateOnly? PinnedDay
+	{
+		get => ScopedDay.Value ?? _pinnedDay;
+		set => _pinnedDay = value;
+	}
+
+	private static DateOnly? _pinnedDay;
+	private static readonly AsyncLocal<DateOnly?> ScopedDay = new();
+
+	/// <summary>Pins the simulated day for the current async flow — the code awaited from here on, and nothing running beside it — until
+	/// disposed. For a session replayed ahead of a backtest's day loop, which re-pins the process-wide day every simulated day.</summary>
+	internal static IDisposable PinDay(DateOnly day)
+	{
+		var prior = ScopedDay.Value;
+		ScopedDay.Value = day;
+		return new Restore(() => ScopedDay.Value = prior);
+	}
+
+	private sealed class Restore(Action undo) : IDisposable
+	{
+		public void Dispose() => undo();
+	}
 
 	/// <summary>The day whose calibration is in force. ONE fit per pricing context — chosen by when the pricing happens, never by the
 	/// interval priced — so an IV solved at an anchor and the projection it later feeds share one clock, and a backtest never reaches a

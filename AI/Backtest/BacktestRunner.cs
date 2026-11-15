@@ -52,6 +52,16 @@ internal sealed class BacktestRunner
 	/// one the 0DTE walk runs itself. In memory: a backtest's peaks die with the run.</summary>
 	private readonly Rules.TrailingStopStore _trailingStops = new();
 
+	private readonly int _cascadeCadenceMinutes;
+	private readonly bool _cascadeRecache;
+	/// <summary>Each session's cascade readings, replayed in the background ahead of the day loop (<see cref="StartCascadeReplay"/>); null when <c>opener.cascade</c> is off.</summary>
+	private Dictionary<DateTime, TaskCompletionSource<IReadOnlyList<Analyze.CascadeMoment>>>? _cascadeReads;
+	private Open.Cascade.CascadeOpener? _cascadeOpener;
+	private Open.Cascade.CascadeSignalLedger? _cascadeLedger;
+	/// <summary>Cascade trades the opener proposed that the book did not take, by setup, with the reason (sized to zero, refused by the book).</summary>
+	private readonly List<(Analyze.CascadeRegime Setup, string Reason)> _cascadeUnfilled = new();
+	/// <summary>The reading the cascade opener's reader hands back: set by the day loop just before each evaluation.</summary>
+	private Analyze.CascadeLiveRead? _cascadeRead;
 	// Proposal-replay mode (--proposals): non-null replaces the opener entirely — each day's recorded live
 	// proposal opens are booked at their recorded submit prices, then managed by the normal rule engine.
 	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
@@ -71,13 +81,15 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, decimal? cross = null, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null, IReadOnlyList<(DateTime Date, double Rate)>? rateHistory = null, IntradayBarCache? intradayBars = null)
+	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, decimal? cross = null, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null, IReadOnlyList<(DateTime Date, double Rate)>? rateHistory = null, IntradayBarCache? intradayBars = null, int cascadeCadenceMinutes = 10, bool cascadeRecache = false)
 	{
 		_rateHistory = rateHistory;
 		_replayOpensByDate = replayOpens?.GroupBy(o => o.OpenEt.Date).ToDictionary(g => g.Key, g => g.OrderBy(o => o.OpenEt).ToList());
 		_config = config;
 		_cross = cross ?? (SuggestionPricing.Normalize(pricingMode) == SuggestionPricing.BidAsk ? 1m : 0m);
 		_scanStride = Math.Max(1, scanStride);
+		_cascadeCadenceMinutes = Math.Max(1, cascadeCadenceMinutes);
+		_cascadeRecache = cascadeRecache;
 		_splitStructures = splitStructures;
 		_dividendsByRoot = dividendsByRoot;
 		_book = book;
@@ -112,6 +124,9 @@ internal sealed class BacktestRunner
 		var maxDrawdown = 0m;
 		var maxDrawdownPct = 0m;
 		var steps = EnumerateTradingDays(since, until).ToList();
+		// The scorer-driven opener has nothing to do when no structure is enabled (a layer of signal-driven trades only).
+		var scoredOpener = _config.Opener.Structures.EnabledDteRanges().Any();
+		if (_config.Opener.Enabled && _config.Opener.Cascade.Enabled && _replayOpensByDate == null) StartCascadeReplay(steps, cancellation);
 
 		// Per-step timing diagnostic. Enabled via --profile on `wa ai backtest`; off otherwise (zero
 		// overhead in normal runs). Surfaces where wall time is going across the simulator's loop —
@@ -198,7 +213,7 @@ internal sealed class BacktestRunner
 					foreach (var o in todaysOpens)
 						OpenLegsIntoBook(o.OpenEt, o.Ticker, o.StructureKind, o.Legs, _fixedContracts ?? o.Qty, o.Spot, o.RawScore, o.FinalScore, o.RepIv, o.ApplySlippage);
 			}
-			else
+			else if (scoredOpener)
 			{
 				var openedAtMinute = await TryOpenAcrossDayAsync(step, tickerSet, openEvaluator, cancellation);
 				// Fallback: if there is no intraday data for this day (dates before the massive.com/Polygon
@@ -216,6 +231,9 @@ internal sealed class BacktestRunner
 					}
 				}
 			}
+
+			// Signal-driven cascade trades (opener.cascade): each confirmed setup's one trade, at its first confirmation of the day.
+			await OpenCascadeTradesAsync(step, tickerSet, cancellation);
 
 			if (profile) { msStep3 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
 
@@ -1440,6 +1458,160 @@ internal sealed class BacktestRunner
 	/// per-minute scan ran (we found minute data for every configured ticker); when false the caller
 	/// must execute the legacy 09:30 single-call path using <c>LegacyProposals</c>.</summary>
 	private readonly record struct DailyOpenScanResult(bool HasIntraday, IReadOnlyList<OpenProposal> LegacyProposals);
+
+	// ── Cascade trades (opener.cascade) ────────────────────────────────────────────────────────────────────
+
+	/// <summary>The instants of a session the cascade is read at: from the opener's earliest entry time (or one cadence after the open)
+	/// every <c>--cadence</c> minutes through its latest entry time. Live reads every <c>opener.cascade.readSeconds</c>; a backtest reads
+	/// on this coarser grid because each reading replays the whole chain — the same trade-off `analyze cascade-study` makes with its
+	/// checkpoints. A setup therefore confirms at the first grid instant it is seen at, up to one cadence later than live would.</summary>
+	private List<TimeSpan> CascadeReadTimes()
+	{
+		var cadence = TimeSpan.FromMinutes(_cascadeCadenceMinutes);
+		var first = ParsingHelpers.TryParseClockTime(_config.Opener.EarliestEntryTimeEt, out var earliest) ? earliest : MarketOpenTime + cadence;
+		var last = ParsingHelpers.TryParseClockTime(_config.Opener.LatestEntryTimeEt, out var latest) ? latest : MarketCloseTime - TimeSpan.FromMinutes(1);
+		var times = new List<TimeSpan>();
+		for (var t = first; t <= last; t += cadence) times.Add(t);
+		return times;
+	}
+
+	/// <summary>Starts replaying every session's cascade readings in the background, several sessions at a time and in date order, so
+	/// the day loop finds each day's readings ready (or waits for just that day). A reading depends only on stored market data, never
+	/// on the book, so it can run ahead; this is what lets a cascade backtest take minutes, as `analyze cascade-study` does. Only the
+	/// reading and its spot are kept — a session's chain is large, and the legs of the rare trade are priced from the quote store.
+	/// Readings are kept on disk (<see cref="Analyze.CascadeReadingCache"/>), so a later run of the same build reads them back instead.</summary>
+	private void StartCascadeReplay(IReadOnlyList<DateTime> steps, CancellationToken cancellation)
+	{
+		var times = CascadeReadTimes();
+		var ticker = _config.Ticker;
+		var reads = steps.ToDictionary(d => d.Date, _ => new TaskCompletionSource<IReadOnlyList<Analyze.CascadeMoment>>(TaskCreationOptions.RunContinuationsAsynchronously));
+		_cascadeReads = reads;
+		// The opener itself is the live one: same setups, trade construction, sizing and once-a-day ledger (in memory here, and silent).
+		_cascadeLedger = new Open.Cascade.CascadeSignalLedger();
+		_cascadeOpener = new Open.Cascade.CascadeOpener(_config, live: false, _cascadeLedger,
+			(_, _) => Task.FromResult<(Analyze.CascadeLiveRead? Read, string? Error)>((_cascadeRead, null)), quiet: true, toEt: et => et);
+
+		var minuteVolume = new System.Collections.Concurrent.ConcurrentDictionary<(string, DateTime, DateTime), Lazy<SortedDictionary<TimeSpan, long>?>>();
+		var options = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2), CancellationToken = cancellation };
+		var store = new Analyze.CascadeReadingCache(ticker, times, _cascadeRecache);
+		_ = Task.Run(async () =>
+		{
+			try
+			{
+				await Parallel.ForEachAsync(steps, options, async (day, ct) =>
+				{
+					try
+					{
+						var fingerprint = Analyze.CascadeReadingCache.Fingerprint(ticker, day.Date);
+						var moments = store.TryLoad(day.Date, fingerprint);
+						if (moments == null)
+						{
+							var rate = _rateHistory != null ? HistoricalRateCache.RateOn(_rateHistory, day.Date) : null;
+							moments = await ReplayCascadeSessionAsync(ticker, day.Date, times, new Analyze.CascadeReplayCache(minuteVolume), rate, ct);
+							store.Save(day.Date, fingerprint, moments);
+						}
+						reads[day.Date].TrySetResult(moments);
+					}
+					catch (Exception ex) { reads[day.Date].TrySetException(ex); }
+				});
+			}
+			catch (OperationCanceledException) { }
+			finally { foreach (var pending in reads.Values) pending.TrySetCanceled(); }
+		}, CancellationToken.None);
+	}
+
+	/// <summary>One session's readings on the read grid; empty when the session cannot be replayed (no captured chain or tape).</summary>
+	/// <param name="riskFreeRate">The session's rate — the one the day loop uses for that day; null leaves the process-wide rate.</param>
+	private static async Task<IReadOnlyList<Analyze.CascadeMoment>> ReplayCascadeSessionAsync(string ticker, DateTime date, IReadOnlyList<TimeSpan> times, Analyze.CascadeReplayCache cache, double? riskFreeRate, CancellationToken ct)
+	{
+		var (session, _) = await Analyze.CascadeReplaySession.OpenAsync(ticker, date, cache, riskFreeRate, ct);
+		var moments = new List<Analyze.CascadeMoment>();
+		if (session == null) return moments;
+		foreach (var t in times)
+			if (await session.ReadAsync(t, ct) is { } read) moments.Add(new Analyze.CascadeMoment(t, read.Reading, read.Spot));
+		return moments;
+	}
+
+	/// <summary>Runs the day's cascade readings through the cascade opener in time order and books the trades it proposes. A reading is
+	/// of an instant T; the book struck at T is the quote store's row T−1:00 (<see cref="QuoteStoreCache"/>'s book instant), so the trade is
+	/// priced from and stamped at that minute — decision and fill on the same book, as for every other backtest open.</summary>
+	private async Task OpenCascadeTradesAsync(DateTime step, HashSet<string> tickerSet, CancellationToken cancellation)
+	{
+		if (_cascadeReads == null || !_cascadeReads.TryGetValue(step.Date, out var pending)) return;
+		var ticker = _config.Ticker;
+		var noSignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
+		var noQuotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		// Live's per-day cap on opens (autoExecute.opener.maxOrdersPerDay), counted across the day's cascade trades: with more setups
+		// enabled than the cap allows, the later confirmations of the day are not placed, as live would not place them.
+		var cap = _config.AutoExecute.Opener.MaxOrdersPerDay;
+		var openedToday = 0;
+		foreach (var moment in await pending.Task)
+		{
+			cancellation.ThrowIfCancellationRequested();
+			var minuteEt = step.Date + moment.TimeEt - TimeSpan.FromMinutes(1);
+			var quotes = _config.Opener.Cascade.For(moment.Reading.PrimaryRegime) is { Enabled: true } setup
+				? await CascadeLegQuotesAsync(ticker, step.Date, minuteEt, moment, setup, cancellation)
+				: noQuotes;
+			_cascadeRead = new Analyze.CascadeLiveRead(moment.Reading, moment.Reading.Terrain.ExpiryCount, moment.Spot, quotes);
+
+			var positions = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
+			var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
+			var ctx = new EvaluationContext(step.Date + moment.TimeEt, positions, new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = moment.Spot }, quotes, cash, accountValue, noSignals);
+			foreach (var p in await _cascadeOpener!.EvaluateAsync(ctx, cancellation))
+			{
+				if (openedToday >= cap) { _cascadeUnfilled.Add((moment.Reading.PrimaryRegime, $"daily cap of {cap} open(s) reached (autoExecute.opener.maxOrdersPerDay)")); continue; }
+				var qty = ResolveOpenQty(p);
+				if (qty >= 1 && OpenProposalIntoBook(minuteEt, p, qty)) { _cascadeOpener.Acted(p); openedToday++; }
+				else _cascadeUnfilled.Add((moment.Reading.PrimaryRegime, qty < 1 ? $"sized to zero ({p.CashReserveDetail ?? "no contracts affordable"})" : "refused by the book (leg collision or unpriced leg)"));
+			}
+		}
+	}
+
+	/// <summary>What became of the run's cascade signals, one line per traded setup — first confirmations, trades opened, and why the rest
+	/// were not — so a setup that never trades (a credit floor, an account too small for the option) is visible rather than a quiet zero.
+	/// Empty when <c>opener.cascade</c> is off.</summary>
+	public IReadOnlyList<string> CascadeSummary()
+	{
+		if (_cascadeLedger == null) return Array.Empty<string>();
+		var times = CascadeReadTimes();
+		var lines = new List<string> { $"Cascade signals — read every {_cascadeCadenceMinutes} min, {times.FirstOrDefault():hh\\:mm}–{times.LastOrDefault():hh\\:mm} ET ({times.Count} reads a session; --cadence changes it):" };
+		var entries = _cascadeLedger.Entries;
+		foreach (var (name, setup) in _config.Opener.Cascade.Setups.Where(x => x.Setup.Enabled))
+		{
+			var regime = Enum.Parse<Analyze.CascadeRegime>(name, ignoreCase: true);
+			var mine = entries.Where(e => e.Setup == regime).ToList();
+			var confirmed = mine.Count(e => e.Outcome != Open.Cascade.CascadeSignalLedger.Placed);   // one Signaled or Skipped line per first confirmation
+			var opened = mine.Count(e => e.Outcome == Open.Cascade.CascadeSignalLedger.Placed);
+			var gatedDays = _cascadeOpener!.GatedReadings.Count(g => g.Setup == regime);
+			var reasons = mine.Where(e => e.Outcome == Open.Cascade.CascadeSignalLedger.Skipped).Select(e => e.Detail)
+				.Concat(_cascadeUnfilled.Where(u => u.Setup == regime).Select(u => u.Reason))
+				.GroupBy(ReasonKind).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()}× {g.Key}").ToList();
+			lines.Add($"  {Analyze.CascadeReading.RegimeLabel(regime)} → {setup.Kind}: {confirmed} first confirmation(s), {opened} opened{(reasons.Count > 0 ? "; not opened: " + string.Join(", ", reasons) : "")}{(gatedDays > 0 ? $"; {gatedDays} confirmed reading(s) held back by an entry condition ({string.Join(", ", _cascadeOpener.GatedReadings.Where(g => g.Setup == regime).GroupBy(g => ReasonKind(g.Reason)).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()}× {g.Key}"))})" : "")}");
+		}
+		return lines;
+	}
+
+	/// <summary>A skip reason with its numbers blanked, so "the $7,650/$7,660 call spread mid credit $0.07 is under minCredit $0.10" and the
+	/// same reason at other strikes count as one kind.</summary>
+	private static string ReasonKind(string reason) => System.Text.RegularExpressions.Regex.Replace(reason, @"\$?-?\d[\d,]*(\.\d+)?", "#");
+
+	/// <summary>The quote-store book, at the trade's minute, of exactly the legs the setup's trade would use — asked for by symbol, so a
+	/// strike the store never captured simply is not there and the opener reports it as unlisted.</summary>
+	private async Task<IReadOnlyDictionary<string, OptionContractQuote>> CascadeLegQuotesAsync(string ticker, DateTime date, DateTime minuteEt, Analyze.CascadeMoment moment, CascadeSetupConfig setup, CancellationToken cancellation)
+	{
+		var (first, second, skip) = Open.Cascade.CascadeOpener.TradeStrikes(moment.Spot, moment.Reading.Terrain, _config.Indicators.StrikeStep, setup);
+		var symbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		if (skip == null)
+		{
+			symbols.Add(MatchKeys.OccSymbol(ticker, date, first, setup.Right));
+			if (second is decimal wing) symbols.Add(MatchKeys.OccSymbol(ticker, date, wing, setup.Right));
+		}
+		if (symbols.Count == 0) return new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		var overrides = new QuoteOverrides(Spots: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = moment.Spot }, ZeroDteWindow: ZeroDteWindow(MarketTime.EtToInstant(minuteEt), MarketTime.EtToInstant(date.Add(MarketCloseTime))));
+		var snapshot = await _quotes.GetQuotesAsync(minuteEt, symbols, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ticker }, cancellation, overrides);
+		// Only the legs asked for: the store expands a requested expiry into its near-money chain, which the trade must not pick from.
+		return snapshot.Options.Where(kv => symbols.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+	}
 
 	/// <summary>Scans each minute of the trading day (09:30 → 16:00 ET — see <see cref="MarketOpenTime"/>) and opens the first proposal
 	/// that clears the score + cash gates. Spot is taken from the per-minute close of the configured
