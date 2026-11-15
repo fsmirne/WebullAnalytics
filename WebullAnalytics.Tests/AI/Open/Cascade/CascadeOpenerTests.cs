@@ -417,7 +417,8 @@ public class CascadeOpenerTests
 		opener.Acted(p);
 		Assert.Empty(await opener.EvaluateAsync(ctx with { Now = ctx.Now.AddMinutes(30) }, default));   // once a day, as live
 
-		Assert.Equal([(CascadeSignalLedger.Signaled, "10:40:00"), (CascadeSignalLedger.Placed, "10:40:00")], ledger.Entries.Select(e => (e.Outcome, e.TimeEt)));
+		// The regime's confirmation is recorded first (the neutral setup reads it), then the trade's signal and its placement.
+		Assert.Equal([(CascadeSignalLedger.Confirmed, "10:40:00"), (CascadeSignalLedger.Signaled, "10:40:00"), (CascadeSignalLedger.Placed, "10:40:00")], ledger.Entries.Select(e => (e.Outcome, e.TimeEt)));
 		Assert.All(ledger.Entries, e => Assert.Equal("2026-11-10", e.Date));
 
 		// The next session starts clean.
@@ -492,6 +493,144 @@ public class CascadeOpenerTests
 		Assert.Contains("minVixChange", Validate("BearCascade", With(Setup("LongPut"), s => { s.MinVixChange = 0.1m; s.MaxVixChange = 0.05m; })) ?? "");
 		Assert.Contains("minScore", Validate("BearTrap", With(Setup("LongCall"), s => { s.MinScore = 150; })) ?? "");
 		Assert.Contains("fraction", Validate("BearCascade", With(Setup("LongPut"), s => { s.MinVixChange = 8m; })) ?? "");   // 8 = +800%: a percent, not a fraction
+	}
+
+	// ── Neutral setup ─────────────────────────────────────────────────────────────────────────────────────
+
+	/// <summary>The trap setups as in <see cref="Config"/>, plus the neutral setup from 11:00 (Ctx minute 15): a call spread at the call wall at
+	/// the high (7550/7560) and a put spread at the put wall at the low (7450/7440).</summary>
+	private static AIConfig NeutralConfig()
+	{
+		var config = Config();
+		config.Opener.Cascade.Neutral = new CascadeNeutralConfig
+		{
+			Enabled = true,
+			AfterTimeEt = "11:00",
+			Call = Setup("ShortCallVertical", "callWallAtHigh", minCredit: 0.10m),
+			Put = Setup("ShortPutVertical", "putWallAtLow", minCredit: 0.10m),
+		};
+		return config;
+	}
+
+	private static CascadeLiveRead NeutralRead() => Read(CascadeRegime.Neutral) with { Reading = Read(CascadeRegime.Neutral).Reading with { Terrain = Terrain with { PutWallAtLow0Dte = 7450m } } };
+
+	[Fact]
+	public async Task OnADayNothingConfirms_TheNeutralSetupSellsBothSidesFromItsTime()
+	{
+		using var h = new Harness { Next = NeutralRead() };
+		var opener = h.Opener(config: NeutralConfig());
+		Assert.Empty(await opener.EvaluateAsync(Ctx(14), default));   // 10:59: before its time
+		var proposals = await opener.EvaluateAsync(Ctx(15), default);
+		Assert.Equal([OpenStructureKind.ShortCallVertical, OpenStructureKind.ShortPutVertical], proposals.Select(p => p.StructureKind));
+		Assert.Equal([("sell", Occ(7550m)), ("buy", Occ(7560m))], proposals[0].Legs.Select(l => (l.Action, l.Symbol)));
+		Assert.Equal([("sell", Occ(7450m, right: "P")), ("buy", Occ(7440m, right: "P"))], proposals[1].Legs.Select(l => (l.Action, l.Symbol)));
+		Assert.StartsWith("cascade NEUTRAL call", proposals[0].Rationale, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task EachNeutralSideTradesOnceADay_AndAHeldBackSideIsRetried()
+	{
+		using var h = new Harness { Next = NeutralRead() };
+		var opener = h.Opener(config: NeutralConfig());
+		var first = await opener.EvaluateAsync(Ctx(15), default);
+		opener.Acted(first[0]);                                       // the call side placed, the put side held back
+		var retry = Assert.Single(await opener.EvaluateAsync(Ctx(16), default));
+		Assert.Equal(OpenStructureKind.ShortPutVertical, retry.StructureKind);
+		opener.Acted(retry);
+		Assert.Empty(await opener.EvaluateAsync(Ctx(17), default));
+		Assert.Empty(await h.Opener(config: NeutralConfig()).EvaluateAsync(Ctx(18), default));   // and after a restart
+	}
+
+	[Fact]
+	public async Task AnyConfirmationEarlierInTheDayRulesOutTheNeutralSetup()
+	{
+		// Bull Cascade is off in this config, but its confirmation at 10:45 still means the day is not neutral — also after a restart.
+		using var h = new Harness { Next = Read(CascadeRegime.BullCascade) };
+		Assert.Empty(await h.Opener(config: NeutralConfig()).EvaluateAsync(Ctx(0), default));
+		h.Next = NeutralRead();
+		Assert.Empty(await h.Opener(config: NeutralConfig()).EvaluateAsync(Ctx(20), default));
+	}
+
+	[Fact]
+	public async Task TheNeutralSetupIsOffByDefaultAndItsSidesCanBeSwitchedOffApart()
+	{
+		using var h = new Harness { Next = NeutralRead() };
+		Assert.Empty(await h.Opener().EvaluateAsync(Ctx(20), default));
+		var config = NeutralConfig();
+		config.Opener.Cascade.Neutral.Call.Enabled = false;
+		Assert.Equal(OpenStructureKind.ShortPutVertical, Assert.Single(await h.Opener(config: config).EvaluateAsync(Ctx(21), default)).StructureKind);
+	}
+
+	[Fact]
+	public void NeutralConfigIsValidatedWhenEnabled()
+	{
+		var config = NeutralConfig();
+		config.Opener.Cascade.Neutral.AfterTimeEt = "noon";
+		Assert.Contains("opener.cascade.neutral.afterTimeEt", AIConfigLoader.Validate(config) ?? "");
+		config = NeutralConfig();
+		config.Opener.Cascade.Neutral.Put = Setup("ShortPutVertical", "callWallAtHigh");
+		Assert.Contains("opener.cascade.neutral.put.anchor", AIConfigLoader.Validate(config) ?? "");
+		config.Opener.Cascade.Neutral.Enabled = false;
+		Assert.Null(AIConfigLoader.Validate(config));   // a disabled neutral setup is not validated
+	}
+
+	// ── Lean entries ──────────────────────────────────────────────────────────────────────────────────────
+
+	/// <summary>A reading that did not confirm and leans to <paramref name="lead"/> with <paramref name="score"/>.</summary>
+	private static CascadeLiveRead Lean(CascadeRegime lead, int score)
+	{
+		var r = Read(lead);
+		var setup = r.Reading.LeadingSetup with { Score = score, Complete = false };
+		return r with { Reading = r.Reading with { PrimaryRegime = CascadeRegime.Neutral, LeadingSetup = setup, Setups = new Dictionary<CascadeRegime, CascadeSetupEvaluation> { [lead] = setup } } };
+	}
+
+	private static AIConfig LeanConfig(int minLean)
+	{
+		var config = Config();
+		config.Opener.Cascade.BullTrap.MinLeanScore = minLean;
+		return config;
+	}
+
+	[Fact]
+	public async Task ALeanStrongEnoughTradesTheSetup_AWeakerOneDoesNot()
+	{
+		using var h = new Harness { Next = Lean(CascadeRegime.BullTrap, 54) };
+		var opener = h.Opener(config: LeanConfig(55));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default));
+		h.Next = Lean(CascadeRegime.BullTrap, 58);
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx(1), default));
+		Assert.Equal(OpenStructureKind.ShortCallVertical, p.StructureKind);
+		Assert.StartsWith("cascade BULL TRAP (lean 58)", p.Rationale, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task LeansDoNotTradeUnlessTheBlockAllowsThem()
+	{
+		using var h = new Harness { Next = Lean(CascadeRegime.BullTrap, 64) };
+		Assert.Empty(await h.Opener().EvaluateAsync(Ctx(0), default));                 // minLeanScore 0
+		h.Next = Lean(CascadeRegime.BullCascade, 64);
+		Assert.Empty(await h.Opener(config: LeanConfig(50)).EvaluateAsync(Ctx(1), default));   // leans to a setup that is off
+	}
+
+	[Fact]
+	public async Task ALeanEntryIsTheSetupsOneEntryOfTheDay()
+	{
+		using var h = new Harness { Next = Lean(CascadeRegime.BullTrap, 60) };
+		var opener = h.Opener(config: LeanConfig(55));
+		opener.Acted(Assert.Single(await opener.EvaluateAsync(Ctx(0), default)));
+		h.Next = Read(CascadeRegime.BullTrap);                                       // confirms later the same day
+		Assert.Empty(await opener.EvaluateAsync(Ctx(1), default));
+	}
+
+	[Fact]
+	public async Task ALeanIsNotAConfirmation_TheNeutralSetupStillTrades()
+	{
+		var config = NeutralConfig();
+		config.Opener.Cascade.BullTrap.MinLeanScore = 55;
+		using var h = new Harness { Next = Lean(CascadeRegime.BullTrap, 60) with { Reading = Lean(CascadeRegime.BullTrap, 60).Reading with { Terrain = Terrain with { PutWallAtLow0Dte = 7450m } } } };
+		var proposals = await h.Opener(config: config).EvaluateAsync(Ctx(15), default);
+		Assert.Equal(3, proposals.Count);   // the lean's call spread, and both neutral sides
+		Assert.Empty(h.Ledger.Entries.Where(e => e.Outcome == CascadeSignalLedger.Confirmed));
 	}
 
 	// ── Config validation ─────────────────────────────────────────────────────────────────────────────────

@@ -17,6 +17,10 @@ namespace WebullAnalytics.AI.Open.Cascade;
 /// first confirmation. Nothing was opened in that case, so a retry can never re-enter a position the stop already closed. The
 /// proposal is priced from the chain the reading was scored on and sized by the opener's own cash and risk caps.
 ///
+/// The neutral setup (<see cref="CascadeNeutralConfig"/>) is the absence of the others: from its time on, on a day no regime has
+/// confirmed, each of its two sides trades once under the same rules. Every regime's first confirmation of the day is recorded in the
+/// ledger, so a restarted loop knows the day is not neutral.
+///
 /// The reading runs on its own clock (<see cref="OpenerCascadeConfig.ReadSeconds"/>), not on every watch tick.
 /// </summary>
 internal sealed class CascadeOpener
@@ -31,8 +35,10 @@ internal sealed class CascadeOpener
 	private readonly bool _quiet;
 	private readonly Func<DateTime, DateTime> _toEt;
 	private DateTime? _lastReadAt;
-	/// <summary>The proposal handed out and not yet reported acted on: what <see cref="Acted"/> turns into the ledger's final entry.</summary>
-	private (string Fingerprint, CascadeSignalLedger.Entry Entry)? _pending;
+	/// <summary>Proposals handed out and not yet reported acted on, by fingerprint: what <see cref="Acted"/> turns into each one's final entry.</summary>
+	private readonly Dictionary<string, CascadeSignalLedger.Entry> _pending = new(StringComparer.Ordinal);
+	/// <summary>Regimes this process has already recorded as confirmed, per day, so the ledger is written once per regime and day.</summary>
+	private readonly HashSet<(DateOnly Day, CascadeRegime Regime)> _confirmed = new();
 
 	/// <param name="live">True when the opener's auto-executor places real orders; a dry run keeps its own ledger entries.</param>
 	/// <param name="quiet">Print nothing (no panel, no notices): a backtest replays thousands of readings under a progress bar.</param>
@@ -80,49 +86,96 @@ internal sealed class CascadeOpener
 		if (!_quiet) CascadePanel.Render(ticker, nowEt, $"{read.ExpiryCount} expiration(s) ≤{CascadeScreener.DefaultDte}DTE", reading, showLegend: false);
 
 		var setup = reading.PrimaryRegime;
-		var trade = cfg.For(setup);
-		if (trade is not { Enabled: true }) return Array.Empty<OpenProposal>();
+		var today = DateOnly.FromDateTime(nowEt);
+		if (setup != CascadeRegime.Neutral) RecordConfirmation(today, ticker, setup, nowEt, reading, read.Spot);
+
+		var proposals = new List<OpenProposal>();
+		if (setup != CascadeRegime.Neutral)
+		{
+			if (cfg.For(setup) is { Enabled: true } trade && TryEntry(setup, null, trade, read, ctx, nowEt) is { } p) proposals.Add(p);
+			return proposals;
+		}
+		// A reading that leans one way may trade that setup, when its block allows leans and the lean is strong enough.
+		if (LeanSetup(reading) is { } lean && TryEntry(lean.Regime, null, lean.Trade, read, ctx, nowEt, leanScore: reading.LeadingSetup.Score) is { } leaned) proposals.Add(leaned);
+		if (NeutralDue(cfg.Neutral, today, ticker, nowEt))
+		{
+			foreach (var (side, trade) in cfg.Neutral.EnabledSides)
+				if (TryEntry(CascadeRegime.Neutral, side, trade, read, ctx, nowEt) is { } p) proposals.Add(p);
+		}
+		return proposals;
+	}
+
+	/// <summary>The setup an unconfirmed <paramref name="reading"/> leans to, when that setup is enabled and its <see cref="CascadeSetupConfig.MinLeanScore"/>
+	/// is set and met; null otherwise.</summary>
+	internal (CascadeRegime Regime, CascadeSetupConfig Trade)? LeanSetup(CascadeReading reading)
+	{
+		var lead = reading.LeadingSetup;
+		return reading.PrimaryRegime == CascadeRegime.Neutral && _config.Opener.Cascade.For(lead.Regime) is { Enabled: true, MinLeanScore: > 0 } trade && lead.Score >= trade.MinLeanScore
+			? (lead.Regime, trade)
+			: null;
+	}
+
+	/// <summary>True when the neutral setup may trade at <paramref name="nowEt"/>: enabled, at or past its time, and no regime has confirmed today.</summary>
+	private bool NeutralDue(CascadeNeutralConfig neutral, DateOnly today, string ticker, DateTime nowEt) =>
+		neutral.Enabled
+		&& ParsingHelpers.TryParseClockTime(neutral.AfterTimeEt, out var after) && nowEt.TimeOfDay >= after
+		&& !_confirmed.Any(c => c.Day == today)
+		&& _ledger.ConfirmedRegimes(today, ticker).Count == 0;
+
+	/// <summary>Records the regime's first confirmation of the day, once per process and day (the ledger keeps it across restarts).</summary>
+	private void RecordConfirmation(DateOnly today, string ticker, CascadeRegime regime, DateTime nowEt, CascadeReading reading, decimal spot)
+	{
+		if (!_confirmed.Add((today, regime))) return;
+		if (_ledger.ConfirmedRegimes(today, ticker).Contains(regime)) return;
+		_ledger.Append(new CascadeSignalLedger.Entry(today.ToString("yyyy-MM-dd"), ticker, regime, nowEt.ToString("HH:mm:ss"), _live, reading.LeadingSetup.Score, spot, CascadeSignalLedger.Confirmed, ""));
+	}
+
+	/// <summary>The setup's (or neutral side's) trade on this reading, if it is due: entry conditions met, not yet final today, within its
+	/// retry window, and buildable. Null otherwise, with the ledger and notices updated.</summary>
+	/// <param name="leanScore">Set when the reading did not confirm and this is a lean entry: the leading setup's score, shown in the notices.</param>
+	private OpenProposal? TryEntry(CascadeRegime setup, string? side, CascadeSetupConfig trade, CascadeLiveRead read, EvaluationContext ctx, DateTime nowEt, int? leanScore = null)
+	{
+		var reading = read.Reading;
+		var ticker = _config.Ticker;
+		var label = side != null ? $"{CascadeReading.RegimeLabel(setup)} {side}" : leanScore is int lean ? $"{CascadeReading.RegimeLabel(setup)} (lean {lean})" : CascadeReading.RegimeLabel(setup);
 		// Entry conditions (VIX, score) are checked before the ledger: a reading that fails one is not this setup's entry, so a later reading
 		// of the day that passes may still be.
 		if (trade.EntryConditionFailure(reading) is string gated)
 		{
 			GatedReadings.Add((setup, gated));
-			return Array.Empty<OpenProposal>();
+			return null;
 		}
 		var today = DateOnly.FromDateTime(nowEt);
 		// Done for the day once an entry is final (acted on, or a first confirmation with no trade) or the retry window has passed.
-		var entries = _ledger.Find(today, ticker, setup, _live);
-		var first = entries.FirstOrDefault();
-		if (entries.Any(e => e.Outcome != CascadeSignalLedger.Signaled)) return Array.Empty<OpenProposal>();
-		if (first != null && (nowEt.TimeOfDay - TimeSpan.Parse(first.TimeEt)).TotalSeconds > cfg.RetrySeconds) return Array.Empty<OpenProposal>();
+		var entries = _ledger.Find(today, ticker, setup, _live, side);
+		var first = entries.FirstOrDefault(e => e.Outcome == CascadeSignalLedger.Signaled);
+		if (entries.Any(e => e.Outcome is CascadeSignalLedger.Placed or CascadeSignalLedger.Skipped)) return null;
+		if (first != null && (nowEt.TimeOfDay - TimeSpan.Parse(first.TimeEt)).TotalSeconds > _config.Opener.Cascade.RetrySeconds) return null;
 
 		var (skeleton, skip) = BuildTrade(ticker, nowEt.Date, read.Spot, reading.Terrain, read.Quotes, _config.Indicators.StrikeStep, trade);
 		var proposal = skeleton == null ? null : Propose(skeleton, read, ctx);
 		if (skeleton != null && proposal == null) skip = "the scorer could not price the legs";
 
-		var label = CascadeReading.RegimeLabel(setup);
-		var entry = new CascadeSignalLedger.Entry(today.ToString("yyyy-MM-dd"), ticker, setup, nowEt.ToString("HH:mm:ss"), _live, reading.LeadingSetup.Score, read.Spot, CascadeSignalLedger.Signaled, proposal?.Legs.Describe() ?? skip!);
+		var entry = new CascadeSignalLedger.Entry(today.ToString("yyyy-MM-dd"), ticker, setup, nowEt.ToString("HH:mm:ss"), _live, reading.LeadingSetup.Score, read.Spot, CascadeSignalLedger.Signaled, proposal?.Legs.Describe() ?? skip!, side);
 		if (proposal == null)
 		{
 			// A retry that cannot build the trade any more just waits out the window; only the first confirmation is final.
-			if (first != null) return Array.Empty<OpenProposal>();
+			if (first != null) return null;
 			_ledger.Append(entry with { Outcome = CascadeSignalLedger.Skipped });
 			if (!_quiet) AnsiConsole.MarkupLine($"[yellow]cascade {Markup.Escape(label)}: no trade today[/] — {Markup.Escape(skip!)}. The first confirmation is the day's only entry.");
-			return Array.Empty<OpenProposal>();
+			return null;
 		}
 		if (first == null) _ledger.Append(entry);
 		else if (!_quiet) AnsiConsole.MarkupLine($"[dim]cascade {Markup.Escape(label)}: first confirmed at {Markup.Escape(first.TimeEt)} ET and not yet placed — proposing again.[/]");
-		_pending = (proposal.Fingerprint, entry with { Outcome = CascadeSignalLedger.Placed });
-		return new[] { proposal with { Rationale = $"cascade {label} {reading.LeadingSetup.Score}/100 — {proposal.Rationale}", Spot = read.Spot } };
+		_pending[proposal.Fingerprint] = entry with { Outcome = CascadeSignalLedger.Placed };
+		return proposal with { Rationale = $"cascade {label} {reading.LeadingSetup.Score}/100 — {proposal.Rationale}", Spot = read.Spot };
 	}
 
 	/// <summary>Reports that <paramref name="proposal"/> (one this opener returned) was acted on — an order placed, or logged by a dry
 	/// run — or was only ever for display. Its setup is then done for the day.</summary>
 	public void Acted(OpenProposal proposal)
 	{
-		if (_pending is not { } pending || pending.Fingerprint != proposal.Fingerprint) return;
-		_ledger.Append(pending.Entry);
-		_pending = null;
+		if (_pending.Remove(proposal.Fingerprint, out var entry)) _ledger.Append(entry);
 	}
 
 	/// <summary>Prices the skeleton on the reading's chain (the scorer's liquidity and veto gates off: the signal picked the trade)

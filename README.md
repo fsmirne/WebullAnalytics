@@ -915,7 +915,11 @@ There is one block per setup — `bullTrap`, `bearTrap`, `bullCascade`, `bearCas
 | `minVix` / `maxVix` | — | Entry condition: VIX level band at the reading, in index points |
 | `minVixChange` / `maxVixChange` | — | Entry condition: band on VIX's change since the prior close, as a fraction (`0.05` = up 5%, `-0.03` = down 3%); a reading without intraday VIX fails a set bound |
 
+| `minLeanScore` | `0` | Also trade a reading that did not confirm but leans this way (`NEUTRAL · LEAN BULL TRAP`): the setup leads with at least this score. 0 = confirmed readings only. A lean entry is the setup's one entry of the day, and it is not a confirmation |
+
 A reading that fails an entry condition is not that setup's entry: nothing is recorded, and a later reading of the day that meets every condition can still trade.
+
+**`opener.cascade.neutral`** (off by default) trades the days nothing confirms: from `afterTimeEt` (default `12:00`), on a day no regime has confirmed — any regime, enabled or not — it opens its `call` and `put` blocks, by default a call spread at the call wall the high ran into and a put spread at the put wall the low ran into (both 4 steps wide, `minCredit` 0.30). Each side is its own block with the fields above, its own 2-leg position, and its own once-a-day entry, so either can be switched off; together they use two of `maxOrdersPerDay`. Every regime's first confirmation of the day is written to `data/cascade/signals.jsonl`, so a restarted loop still knows the day is not neutral.
 
 ```json
 "cascade": {

@@ -228,6 +228,7 @@ internal sealed class OpenerCascadeConfig
 	[JsonPropertyName("bearTrap")] public CascadeSetupConfig BearTrap { get; set; } = new();
 	[JsonPropertyName("bullCascade")] public CascadeSetupConfig BullCascade { get; set; } = new();
 	[JsonPropertyName("bearCascade")] public CascadeSetupConfig BearCascade { get; set; } = new();
+	[JsonPropertyName("neutral")] public CascadeNeutralConfig Neutral { get; set; } = new();
 
 	/// <summary>The setup block of a confirmed regime; null for Neutral.</summary>
 	public CascadeSetupConfig? For(Analyze.CascadeRegime regime) => regime switch
@@ -239,8 +240,30 @@ internal sealed class OpenerCascadeConfig
 		_ => null,
 	};
 
+	/// <summary>Every trade block a config can name, by its config path under opener.cascade: the four setups, then the neutral setup's two sides.</summary>
+	[JsonIgnore] public IEnumerable<(string Name, CascadeSetupConfig Setup)> TradeBlocks => Setups.Concat(new[] { ("neutral.call", Neutral.Call), ("neutral.put", Neutral.Put) });
+
 	/// <summary>The four setups by config name, in the order they are documented.</summary>
 	[JsonIgnore] public IEnumerable<(string Name, CascadeSetupConfig Setup)> Setups => new[] { ("bullTrap", BullTrap), ("bearTrap", BearTrap), ("bullCascade", BullCascade), ("bearCascade", BearCascade) };
+}
+
+/// <summary>
+/// The neutral setup: on a day no regime has confirmed by <see cref="AfterTimeEt"/>, sell premium on both sides of the range the session
+/// has already tested — by default a call spread at the call wall the high ran into and a put spread at the put wall the low ran into.
+/// The two sides are separate trades (two 2-leg orders and positions, which the live loop and the backtest both manage), each named by its
+/// own block and each trading at most once a day. A confirmation earlier in the day, of any regime and whether or not its setup is
+/// enabled, rules the day out. Off by default.
+/// </summary>
+internal sealed class CascadeNeutralConfig
+{
+	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
+	/// <summary>ET time from which the setup may trade (HH:mm): the first reading at or after it on a day nothing has confirmed.</summary>
+	[JsonPropertyName("afterTimeEt")] public string AfterTimeEt { get; set; } = "12:00";
+	[JsonPropertyName("call")] public CascadeSetupConfig Call { get; set; } = new() { Enabled = true, Structure = "ShortCallVertical", Anchor = CascadeSetupConfig.AnchorCallWallAtHigh, WidthSteps = 4, MinCredit = 0.30m };
+	[JsonPropertyName("put")] public CascadeSetupConfig Put { get; set; } = new() { Enabled = true, Structure = "ShortPutVertical", Anchor = CascadeSetupConfig.AnchorPutWallAtLow, WidthSteps = 4, MinCredit = 0.30m };
+
+	/// <summary>The enabled sides, by ledger side name.</summary>
+	[JsonIgnore] public IEnumerable<(string Side, CascadeSetupConfig Trade)> EnabledSides => new[] { ("call", Call), ("put", Put) }.Where(x => x.Item2.Enabled);
 }
 
 /// <summary>
@@ -279,6 +302,11 @@ internal sealed class CascadeSetupConfig
 	// the day that passes, so these narrow WHEN a setup trades, never which first confirmation counts. Each is off at its default.
 	/// <summary>Minimum setup score (0–100) of the confirming reading; 0 = the confirmation threshold alone (opener.cascade's regime trigger, 65).</summary>
 	[JsonPropertyName("minScore")] public int MinScore { get; set; } = 0;
+	/// <summary>Also trade on a reading that did not confirm but LEANS this way — "NEUTRAL · LEAN BULL TRAP": the setup is the reading's
+	/// leading one with at least this score, below the trigger or with a confirmation condition unmet. 0 = confirmed readings only. A lean
+	/// entry is the setup's one entry of the day (a later confirmation does not trade again), and it is not a confirmation: the neutral
+	/// setup still sees a day of leans as a day nothing confirmed.</summary>
+	[JsonPropertyName("minLeanScore")] public int MinLeanScore { get; set; } = 0;
 	/// <summary>VIX level band at the reading (index points, e.g. 20). Null = no bound.</summary>
 	[JsonPropertyName("minVix")] public decimal? MinVix { get; set; }
 	[JsonPropertyName("maxVix")] public decimal? MaxVix { get; set; }

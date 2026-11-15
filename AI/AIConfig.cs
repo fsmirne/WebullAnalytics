@@ -693,9 +693,11 @@ internal static class AIConfigLoader
 		var casc = op.Cascade;
 		if (casc.ReadSeconds < 1) return $"opener.cascade.readSeconds: must be ≥ 1, got {casc.ReadSeconds}";
 		if (casc.RetrySeconds < 0) return $"opener.cascade.retrySeconds: must be ≥ 0, got {casc.RetrySeconds}";
-		foreach (var (name, setup) in casc.Setups)
+		if (casc.Neutral.Enabled && !ParsingHelpers.TryParseClockTime(casc.Neutral.AfterTimeEt, out _))
+			return $"opener.cascade.neutral.afterTimeEt: must be HH:mm, got '{casc.Neutral.AfterTimeEt}'";
+		foreach (var (name, setup) in casc.TradeBlocks)
 		{
-			if (!setup.Enabled) continue;
+			if (!setup.Enabled || (name.StartsWith("neutral.", StringComparison.Ordinal) && !casc.Neutral.Enabled)) continue;
 			var at = $"opener.cascade.{name}";
 			if (setup.Kind == null) return $"{at}.structure: must be one of {string.Join("|", CascadeSetupConfig.Structures)}, got '{setup.Structure}'";
 			if (setup.AnchorName is not string anchor) return $"{at}.anchor: must be one of {string.Join("|", CascadeSetupConfig.Anchors)}, got '{setup.Anchor}'";
@@ -704,6 +706,7 @@ internal static class AIConfigLoader
 			if (setup.IsVertical && setup.WidthSteps < 1) return $"{at}.widthSteps: must be ≥ 1, got {setup.WidthSteps}";
 			if (setup.MinCredit < 0m) return $"{at}.minCredit: must be ≥ 0, got {setup.MinCredit}";
 			if (setup.MinScore is < 0 or > 100) return $"{at}.minScore: must be in [0, 100], got {setup.MinScore}";
+			if (setup.MinLeanScore is < 0 or > 100) return $"{at}.minLeanScore: must be in [0, 100], got {setup.MinLeanScore}";
 			if (setup.MinVix > setup.MaxVix) return $"{at}.minVix ({setup.MinVix}) must not exceed maxVix ({setup.MaxVix})";
 			if (setup.MinVixChange > setup.MaxVixChange) return $"{at}.minVixChange ({setup.MinVixChange}) must not exceed maxVixChange ({setup.MaxVixChange})";
 			if (setup.MinVixChange is < -1m or > 5m || setup.MaxVixChange is < -1m or > 5m) return $"{at}.min/maxVixChange: a fraction of the prior close (0.05 = +5%), got {setup.MinVixChange} / {setup.MaxVixChange}";

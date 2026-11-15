@@ -58,8 +58,8 @@ internal sealed class BacktestRunner
 	private Dictionary<DateTime, TaskCompletionSource<IReadOnlyList<Analyze.CascadeMoment>>>? _cascadeReads;
 	private Open.Cascade.CascadeOpener? _cascadeOpener;
 	private Open.Cascade.CascadeSignalLedger? _cascadeLedger;
-	/// <summary>Cascade trades the opener proposed that the book did not take, by setup, with the reason (sized to zero, refused by the book).</summary>
-	private readonly List<(Analyze.CascadeRegime Setup, string Reason)> _cascadeUnfilled = new();
+	/// <summary>Cascade trades the opener proposed that the book did not take, by setup (and neutral side), with the reason (sized to zero, refused by the book, the daily cap).</summary>
+	private readonly List<(Analyze.CascadeRegime Setup, string? Side, string Reason)> _cascadeUnfilled = new();
 	/// <summary>The reading the cascade opener's reader hands back: set by the day loop just before each evaluation.</summary>
 	private Analyze.CascadeLiveRead? _cascadeRead;
 	// Proposal-replay mode (--proposals): non-null replaces the opener entirely — each day's recorded live
@@ -1549,9 +1549,8 @@ internal sealed class BacktestRunner
 		{
 			cancellation.ThrowIfCancellationRequested();
 			var minuteEt = step.Date + moment.TimeEt - TimeSpan.FromMinutes(1);
-			var quotes = _config.Opener.Cascade.For(moment.Reading.PrimaryRegime) is { Enabled: true } setup
-				? await CascadeLegQuotesAsync(ticker, step.Date, minuteEt, moment, setup, cancellation)
-				: noQuotes;
+			var trades = CascadeTradesToPrice(moment);
+			var quotes = trades.Count > 0 ? await CascadeLegQuotesAsync(ticker, step.Date, minuteEt, moment, trades, cancellation) : noQuotes;
 			_cascadeRead = new Analyze.CascadeLiveRead(moment.Reading, moment.Reading.Terrain.ExpiryCount, moment.Spot, quotes);
 
 			var positions = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
@@ -1559,13 +1558,33 @@ internal sealed class BacktestRunner
 			var ctx = new EvaluationContext(step.Date + moment.TimeEt, positions, new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = moment.Spot }, quotes, cash, accountValue, noSignals);
 			foreach (var p in await _cascadeOpener!.EvaluateAsync(ctx, cancellation))
 			{
-				if (openedToday >= cap) { _cascadeUnfilled.Add((moment.Reading.PrimaryRegime, $"daily cap of {cap} open(s) reached (autoExecute.opener.maxOrdersPerDay)")); continue; }
+				var regime = moment.Reading.PrimaryRegime;
+				var side = regime == Analyze.CascadeRegime.Neutral ? NeutralSide(p.StructureKind) : null;
+				if (openedToday >= cap) { _cascadeUnfilled.Add((regime, side, $"daily cap of {cap} open(s) reached (autoExecute.opener.maxOrdersPerDay)")); continue; }
 				var qty = ResolveOpenQty(p);
 				if (qty >= 1 && OpenProposalIntoBook(minuteEt, p, qty)) { _cascadeOpener.Acted(p); openedToday++; }
-				else _cascadeUnfilled.Add((moment.Reading.PrimaryRegime, qty < 1 ? $"sized to zero ({p.CashReserveDetail ?? "no contracts affordable"})" : "refused by the book (leg collision or unpriced leg)"));
+				else _cascadeUnfilled.Add((regime, side, qty < 1 ? $"sized to zero ({p.CashReserveDetail ?? "no contracts affordable"})" : "refused by the book (leg collision or unpriced leg)"));
 			}
 		}
 	}
+
+	/// <summary>The trades a reading could open, whose legs must be priced before the opener sees it: the confirmed setup's, or on a neutral
+	/// reading the setup it leans to (when that block trades leans) and, from the neutral setup's time on, its enabled sides (the opener
+	/// itself decides whether the day is neutral).</summary>
+	private List<CascadeSetupConfig> CascadeTradesToPrice(Analyze.CascadeMoment moment)
+	{
+		var cfg = _config.Opener.Cascade;
+		if (moment.Reading.PrimaryRegime != Analyze.CascadeRegime.Neutral)
+			return cfg.For(moment.Reading.PrimaryRegime) is { Enabled: true } setup ? [setup] : [];
+		var trades = new List<CascadeSetupConfig>();
+		if (_cascadeOpener!.LeanSetup(moment.Reading) is { } lean) trades.Add(lean.Trade);
+		if (cfg.Neutral.Enabled && ParsingHelpers.TryParseClockTime(cfg.Neutral.AfterTimeEt, out var after) && moment.TimeEt >= after)
+			trades.AddRange(cfg.Neutral.EnabledSides.Select(x => x.Trade));
+		return trades;
+	}
+
+	/// <summary>The neutral side a proposal belongs to, from the right of its structure.</summary>
+	private static string NeutralSide(OpenStructureKind kind) => kind is OpenStructureKind.ShortCallVertical or OpenStructureKind.LongCallVertical or OpenStructureKind.LongCall ? "call" : "put";
 
 	/// <summary>What became of the run's cascade signals, one line per traded setup — first confirmations, trades opened, and why the rest
 	/// were not — so a setup that never trades (a credit floor, an account too small for the option) is visible rather than a quiet zero.
@@ -1576,17 +1595,21 @@ internal sealed class BacktestRunner
 		var times = CascadeReadTimes();
 		var lines = new List<string> { $"Cascade signals — read every {_cascadeCadenceMinutes} min, {times.FirstOrDefault():hh\\:mm}–{times.LastOrDefault():hh\\:mm} ET ({times.Count} reads a session; --cadence changes it):" };
 		var entries = _cascadeLedger.Entries;
-		foreach (var (name, setup) in _config.Opener.Cascade.Setups.Where(x => x.Setup.Enabled))
+		var blocks = _config.Opener.Cascade.Setups.Where(x => x.Setup.Enabled).Select(x => (Regime: Enum.Parse<Analyze.CascadeRegime>(x.Name, ignoreCase: true), Side: (string?)null, x.Setup)).ToList();
+		if (_config.Opener.Cascade.Neutral.Enabled)
+			blocks.AddRange(_config.Opener.Cascade.Neutral.EnabledSides.Select(x => (Analyze.CascadeRegime.Neutral, (string?)x.Side, x.Trade)));
+		foreach (var (regime, side, setup) in blocks)
 		{
-			var regime = Enum.Parse<Analyze.CascadeRegime>(name, ignoreCase: true);
-			var mine = entries.Where(e => e.Setup == regime).ToList();
-			var confirmed = mine.Count(e => e.Outcome != Open.Cascade.CascadeSignalLedger.Placed);   // one Signaled or Skipped line per first confirmation
+			var mine = entries.Where(e => e.Setup == regime && e.Side == side && e.Outcome != Open.Cascade.CascadeSignalLedger.Confirmed).ToList();
+			var confirmed = mine.Count(e => e.Outcome is Open.Cascade.CascadeSignalLedger.Signaled or Open.Cascade.CascadeSignalLedger.Skipped);   // one line per first confirmation
 			var opened = mine.Count(e => e.Outcome == Open.Cascade.CascadeSignalLedger.Placed);
-			var gatedDays = _cascadeOpener!.GatedReadings.Count(g => g.Setup == regime);
+			var gated = _cascadeOpener!.GatedReadings.Where(g => g.Setup == regime).ToList();
 			var reasons = mine.Where(e => e.Outcome == Open.Cascade.CascadeSignalLedger.Skipped).Select(e => e.Detail)
-				.Concat(_cascadeUnfilled.Where(u => u.Setup == regime).Select(u => u.Reason))
+				.Concat(_cascadeUnfilled.Where(u => u.Setup == regime && u.Side == side).Select(u => u.Reason))
 				.GroupBy(ReasonKind).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()}× {g.Key}").ToList();
-			lines.Add($"  {Analyze.CascadeReading.RegimeLabel(regime)} → {setup.Kind}: {confirmed} first confirmation(s), {opened} opened{(reasons.Count > 0 ? "; not opened: " + string.Join(", ", reasons) : "")}{(gatedDays > 0 ? $"; {gatedDays} confirmed reading(s) held back by an entry condition ({string.Join(", ", _cascadeOpener.GatedReadings.Where(g => g.Setup == regime).GroupBy(g => ReasonKind(g.Reason)).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()}× {g.Key}"))})" : "")}");
+			var name = side == null ? Analyze.CascadeReading.RegimeLabel(regime) : $"NEUTRAL {side.ToUpperInvariant()}";
+			var what = side == null ? "first confirmation(s)" : "neutral day(s)";
+			lines.Add($"  {name} → {setup.Kind}: {confirmed} {what}, {opened} opened{(reasons.Count > 0 ? "; not opened: " + string.Join(", ", reasons) : "")}{(gated.Count > 0 ? $"; {gated.Count} reading(s) held back by an entry condition ({string.Join(", ", gated.GroupBy(g => ReasonKind(g.Reason)).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()}× {g.Key}"))})" : "")}");
 		}
 		return lines;
 	}
@@ -1595,14 +1618,15 @@ internal sealed class BacktestRunner
 	/// same reason at other strikes count as one kind.</summary>
 	private static string ReasonKind(string reason) => System.Text.RegularExpressions.Regex.Replace(reason, @"\$?-?\d[\d,]*(\.\d+)?", "#");
 
-	/// <summary>The quote-store book, at the trade's minute, of exactly the legs the setup's trade would use — asked for by symbol, so a
+	/// <summary>The quote-store book, at the trade's minute, of exactly the legs the setups' trades would use — asked for by symbol, so a
 	/// strike the store never captured simply is not there and the opener reports it as unlisted.</summary>
-	private async Task<IReadOnlyDictionary<string, OptionContractQuote>> CascadeLegQuotesAsync(string ticker, DateTime date, DateTime minuteEt, Analyze.CascadeMoment moment, CascadeSetupConfig setup, CancellationToken cancellation)
+	private async Task<IReadOnlyDictionary<string, OptionContractQuote>> CascadeLegQuotesAsync(string ticker, DateTime date, DateTime minuteEt, Analyze.CascadeMoment moment, IEnumerable<CascadeSetupConfig> setups, CancellationToken cancellation)
 	{
-		var (first, second, skip) = Open.Cascade.CascadeOpener.TradeStrikes(moment.Spot, moment.Reading.Terrain, _config.Indicators.StrikeStep, setup);
 		var symbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-		if (skip == null)
+		foreach (var setup in setups)
 		{
+			var (first, second, skip) = Open.Cascade.CascadeOpener.TradeStrikes(moment.Spot, moment.Reading.Terrain, _config.Indicators.StrikeStep, setup);
+			if (skip != null) continue;
 			symbols.Add(MatchKeys.OccSymbol(ticker, date, first, setup.Right));
 			if (second is decimal wing) symbols.Add(MatchKeys.OccSymbol(ticker, date, wing, setup.Right));
 		}
