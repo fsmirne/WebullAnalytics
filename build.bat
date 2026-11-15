@@ -10,7 +10,6 @@ if %errorLevel% neq 0 (
     echo ERROR: .NET SDK is not installed!
     echo Please download and install .NET 10.0 SDK from:
     echo https://dotnet.microsoft.com/download
-    pause
     exit /b 1
 )
 
@@ -22,7 +21,6 @@ dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=
 if %errorLevel% neq 0 (
     echo.
     echo ERROR: Build failed!
-    pause
     exit /b 1
 )
 
@@ -34,4 +32,3 @@ echo.
 echo Output location:
 echo bin\Release\net10.0\win-x64\publish\
 echo.
-pause

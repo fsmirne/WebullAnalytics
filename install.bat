@@ -38,7 +38,6 @@ if %errorLevel% neq 0 (
     echo ERROR: .NET SDK is not installed!
     echo Please download and install .NET 10.0 SDK from:
     echo https://dotnet.microsoft.com/download
-    pause
     exit /b 1
 )
 
@@ -49,7 +48,6 @@ dotnet publish WebullAnalytics.csproj -c Release -r win-x64 --self-contained tru
 if %errorLevel% neq 0 (
     echo.
     echo ERROR: Build failed!
-    pause
     exit /b 1
 )
 
@@ -57,7 +55,6 @@ dotnet publish WebullAnalytics.Scraper\WebullAnalytics.Scraper.csproj -c Release
 if %errorLevel% neq 0 (
     echo.
     echo ERROR: Scraper build failed!
-    pause
     exit /b 1
 )
 
@@ -71,7 +68,6 @@ if not exist "%INSTALL_DIR%" (
     mkdir "%INSTALL_DIR%"
     if %errorLevel% neq 0 (
         echo ERROR: Failed to create install directory.
-        pause
         exit /b 1
     )
 )
@@ -96,7 +92,6 @@ if %errorLevel% neq 0 (
 )
 if %errorLevel% neq 0 (
     echo ERROR: Failed to copy executable.
-    pause
     exit /b 1
 )
 
@@ -109,7 +104,6 @@ if %errorLevel% neq 0 (
 )
 if %errorLevel% neq 0 (
     echo ERROR: Failed to copy scraper executable.
-    pause
     exit /b 1
 )
 
@@ -165,4 +159,3 @@ echo.
 echo You can now run: wa
 echo Capture a day's chain snapshots with: wa-scraper SPXW
 echo.
-pause
