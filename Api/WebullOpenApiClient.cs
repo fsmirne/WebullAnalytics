@@ -248,13 +248,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 			["account_id"] = _account.AccountId,
 			["page_size"] = "100",
 		};
-		const string path = "/openapi/trade/order/open";
-		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null, _account.AppId);
-		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
-		var uri = $"{path}?{qs}";
-		using var req = new HttpRequestMessage(HttpMethod.Get, uri);
-		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
-		using var resp = await _http.SendAsync(req, ct);
+		using var resp = await SendGetAsync("/openapi/trade/order/open", query, ct);
 		return await resp.Content.ReadAsStringAsync(ct);
 	}
 
@@ -341,13 +335,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		};
 		if (!string.IsNullOrEmpty(startDate)) query["start_date"] = startDate;
 		if (!string.IsNullOrEmpty(endDate)) query["end_date"] = endDate;
-		const string path = "/openapi/trade/order/history";
-		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null, _account.AppId);
-		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
-		using var req = new HttpRequestMessage(HttpMethod.Get, $"{path}?{qs}");
-		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
-		ApplyAccessTokenHeader(req, path);
-		using var resp = await _http.SendAsync(req, ct);
+		using var resp = await SendGetAsync("/openapi/trade/order/history", query, ct);
 		return await resp.Content.ReadAsStringAsync(ct);
 	}
 
@@ -493,13 +481,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 			["account_id"] = _account.AccountId,
 			["page_size"] = "100",
 		};
-		const string path = "/openapi/assets/positions";
-		var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null, _account.AppId);
-		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
-		using var req = new HttpRequestMessage(HttpMethod.Get, $"{path}?{qs}");
-		foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
-		ApplyAccessTokenHeader(req, path);
-		using var resp = await _http.SendAsync(req, ct);
+		using var resp = await SendGetAsync("/openapi/assets/positions", query, ct);
 		return await resp.Content.ReadAsStringAsync(ct);
 	}
 
@@ -627,39 +609,46 @@ internal sealed class WebullOpenApiClient : IDisposable
 		return await ReadWithRaw<T>(resp);
 	}
 
-	// Webull's production read endpoints (order history, open orders, order detail, positions, balance) are each capped
-	// at 2 requests / 2 s per app_key, shared by every process using the key — a concurrent `wa trade`/`wa report` or a
-	// second watch can land in the same window as a watch tick. GETs are read-only, so one retry after the window clears
-	// is safe; POSTs (place/cancel/preview) are never retried here. Webull warns that repeatedly exceeding the limits can
-	// draw a temporary IP block, hence a single bounded retry rather than a loop.
-	private const int MaxGetAttempts = 2;
-	private static readonly TimeSpan DefaultRateLimitWait = TimeSpan.FromSeconds(2);
+	// Webull's production read endpoints (order history, open orders, order detail, positions, balance) are each rate-limited per
+	// app_key (a burst of 2, then one request per 2 s), shared by every process using the key. WebullRateGate spaces this machine's
+	// processes under that cap before each send. A 429 can still arrive — another machine on the key, or a gate file that could not be taken — and
+	// GETs are read-only, so the call is retried once the window has cleared; POSTs (place/cancel/preview) are never retried
+	// here. Webull warns that repeatedly exceeding the limits can draw a temporary IP block, hence a small bounded count, not a loop.
+	private const int MaxGetAttempts = 3;
+	// Longer than the 2 s one request takes to refill: a retry sent 2.0 s after a 429 drew a second one (measured 2026-11-14).
+	private static readonly TimeSpan DefaultRateLimitWait = WebullRateGate.DefaultInterval;
 	private static readonly TimeSpan MaxRateLimitWait = TimeSpan.FromSeconds(5);
 
 	private async Task<T> GetAsync<T>(string path, IReadOnlyDictionary<string, string> query, CancellationToken ct)
+	{
+		using var resp = await SendGetAsync(path, query, ct);
+		return await Read<T>(resp);
+	}
+
+	/// <summary>The one way a GET leaves this client: rate-gated, signed, and retried on a 429. The caller disposes the response.</summary>
+	private async Task<HttpResponseMessage> SendGetAsync(string path, IReadOnlyDictionary<string, string> query, CancellationToken ct)
 	{
 		var qs = string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
 		var uri = string.IsNullOrEmpty(qs) ? path : $"{path}?{qs}";
 		for (var attempt = 1; ; attempt++)
 		{
+			await WebullRateGate.Default.WaitAsync(Host, _account.AppKey, path, ct);
 			// Signed per attempt: the signature carries a timestamp and nonce, so a replayed header set would be rejected.
 			var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null, _account.AppId);
 			using var req = new HttpRequestMessage(HttpMethod.Get, uri);
 			foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
 			ApplyAccessTokenHeader(req, path);
-			using var resp = await _http.SendAsync(req, ct);
-			if (resp.StatusCode == System.Net.HttpStatusCode.TooManyRequests && attempt < MaxGetAttempts)
-			{
-				var wait = RateLimitWait(resp);
-				Console.WriteLine($"Webull: HTTP 429 on {path}; retrying once in {wait.TotalSeconds:F1}s.");
-				await Task.Delay(wait, ct);
-				continue;
-			}
-			return await Read<T>(resp);
+			var resp = await _http.SendAsync(req, ct);
+			if (resp.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt >= MaxGetAttempts) return resp;
+
+			var wait = RateLimitWait(resp);
+			resp.Dispose();
+			Console.WriteLine($"Webull: HTTP 429 on {path}; retry {attempt} of {MaxGetAttempts - 1} in {wait.TotalSeconds:F1}s.");
+			await Task.Delay(wait, ct);
 		}
 	}
 
-	/// <summary>Retry-After when Webull sends it (delta or date), clamped to <see cref="MaxRateLimitWait"/>; otherwise the 2-s window.</summary>
+	/// <summary>Retry-After when Webull sends it (delta or date), clamped to <see cref="MaxRateLimitWait"/>; otherwise <see cref="DefaultRateLimitWait"/>.</summary>
 	private static TimeSpan RateLimitWait(HttpResponseMessage resp)
 	{
 		var retryAfter = resp.Headers.RetryAfter;

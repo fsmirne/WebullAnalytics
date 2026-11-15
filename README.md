@@ -1021,6 +1021,8 @@ ai backtest sweep knobs (override the merged config for this run — parameter e
 - Manually-placed orders (user's `wa trade place` or Webull-app orders also block bot duplicates)
 - The "limit placed but never filled" case (position still looks single-leg but a working order exists)
 
+**Webull read rate limit.** Webull's production read endpoints (positions, balance, open orders, order history, order detail) are each rate-limited per app key across every process using it: a burst of 2 requests, then one more every 2 seconds. Every read the app sends — from `wa ai watch` / `scan`, `wa trade`, `wa analyze position` alike — first passes a shared gate (`data/rate-gate/`, one small file per endpoint) that spaces all processes on this machine to a burst of 2 and then one call per 3 seconds, so concurrent watch loops and manual commands queue for a moment instead of drawing HTTP 429. A 429 that still arrives (another machine on the same key) is retried up to twice, 3 seconds apart. Order place / replace / cancel are not gated (their limit is far higher) and are never retried.
+
 **Fail-closed on API errors.** If the broker query fails, the executor returns 0 and does nothing this tick — an order not placed is reversible, an over-placed order is not. There is no local-cache fallback by design.
 
 **Opener per-day cap:** `autoExecute.opener.maxOrdersPerDay` (default 1, matching the backtest's `--top-per-step 1`) caps total LIVE opens per trading day. The count is `today's-opened positions` (from the position source's `OpenedAt` field) + opens issued in this tick. Dry-runs are NOT capped — they continue to emit so you can monitor what would be placed.
