@@ -250,6 +250,18 @@ public class CascadeOpenerTests
 	}
 
 	[Fact]
+	public async Task OutsideTheEntryWindowTheRegimeIsReadButNothingIsRecordedOrTraded()
+	{
+		// Before opener.earliestEntryTimeEt the watch loop still shows the panel; the first confirmation inside the window is the one that trades.
+		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
+		var opener = h.Opener();
+		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default, entryWindowOpen: false));
+		Assert.Equal(1, h.Reads);
+		Assert.Empty(h.Ledger.ConfirmedRegimes(DateOnly.FromDateTime(Today), "SPXW"));
+		Assert.Single(await opener.EvaluateAsync(Ctx(1), default));
+	}
+
+	[Fact]
 	public async Task ATradeTheExecutorHeldBackIsProposedAgainUntilTheRetryWindowEnds()
 	{
 		// retrySeconds 180: the quote guard or a broker refresh failure held the order back, so nothing was opened and nothing is final.
@@ -439,12 +451,12 @@ public class CascadeOpenerTests
 		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, default));
 		opener.Acted(p);
 		var placed = ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false).Last();
-		var skipped = placed with { Setup = CascadeRegime.BearTrap, TimeEt = "11:02:00", Outcome = CascadeSignalLedger.Skipped, Detail = "credit 0.20 under the 0.50 floor" };
+		var skipped = placed with { Setup = CascadeRegime.BearTrap, TimeEt = "11:02:00", Outcome = CascadeSignalLedger.Skipped, Detail = "credit 0.20 under the 0.50 floor", Structure = null, Qty = null, NetPerShare = null };
 
 		var text = Render(CascadeTradeSection.Build([new CascadeTradeSection.Trade(p, "BULL TRAP 76/100")], ["BEAR TRAP: no trade today — credit 0.20 under the 0.50 floor."], [new("BULL TRAP", placed), new("BEAR TRAP", skipped), new("BULL CASCADE", null)], live: false));
 
 		Assert.Contains("TRADE · TODAY (dry run)", text);
-		Assert.Matches(@"BULL TRAP\s+10:40 logged \(dry run\) · SELL " + Occ(7550m), text);
+		Assert.Matches(@"BULL TRAP\s+10:40 logged \(dry run\) · ShortCallVertical SELL " + Occ(7550m) + @" x10, BUY " + Occ(7560m) + @" x10 · credit \$0\.90 · spot", text);
 		Assert.Matches(@"BEAR TRAP\s+11:02 no trade · credit 0.20 under the 0.50 floor", text);
 		Assert.Matches(@"BULL CASCADE\s+—", text);
 		Assert.Contains("BEAR TRAP: no trade today — credit 0.20 under the 0.50 floor.", text);
@@ -459,7 +471,43 @@ public class CascadeOpenerTests
 		var quiet = Render(CascadeTradeSection.Build([], [], [new("BULL TRAP", placed)], live: true));
 		Assert.Contains("TODAY (live)", quiet);
 		Assert.DoesNotContain("TRADE", quiet);
-		Assert.Matches(@"BULL TRAP\s+10:40 placed · SELL", quiet);
+		Assert.Matches(@"BULL TRAP\s+10:40 placed · ShortCallVertical SELL", quiet);
+	}
+
+	[Fact]
+	public async Task ATradeSizedToZeroIsShownAsNotPlacedAndTheDayRecordsWhy()
+	{
+		// 2026-11-16 10:02: a LongPut at $1,810 a contract against a $1,802 risk budget. The executor skips a zero-sized proposal, so the
+		// panel must not say it is awaiting one, show the unscaled one-lot legs as the size, or offer a one-lot wa trade place.
+		var ledger = new CascadeSignalLedger();
+		var read = Read(CascadeRegime.BearTrap);
+		var opener = new CascadeOpener(Config(), live: false, ledger, (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(2), AccountValue = 10_000m }, default));
+		Assert.Equal(0, p.Qty);
+		var signaled = ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BearTrap, live: false).Single();
+		Assert.Equal(CascadeSignalLedger.Signaled, signaled.Outcome);
+		Assert.Equal($"BUY {Occ(7505m)} x0", signaled.Detail);
+		Assert.Equal(("LongCall", 0), (signaled.Structure, signaled.Qty));
+		Assert.Equal(p.DebitOrCreditPerContract / 100m, signaled.NetPerShare);
+		Assert.Equal("risk budget $1000 (10% of $10000) below $1520 per contract", signaled.Note);
+
+		var retrying = Render(CascadeTradeSection.Build([new CascadeTradeSection.Trade(p, "BEAR TRAP 76/100")], [], [new("BEAR TRAP", signaled, new TimeSpan(10, 5, 0))], live: false));
+		Assert.Contains("TODAY (dry run)", retrying);
+		Assert.DoesNotContain("TRADE", retrying);
+		Assert.DoesNotContain("awaiting the executor", retrying);
+		// One line: status, trade at its size, price, why it was sized to 0, the reading.
+		Assert.Matches(@"│ BEAR TRAP\s+10:02 confirmed, retrying until 10:05 · LongCall BUY " + Occ(7505m) + @" x0 · debit \$15\.20 · risk budget \$1000 \(10% of \$10000\) below \$1520 per contract · spot \$7,500\.50 · score 76\s*│", retrying);
+		Assert.Contains("▷ BEAR TRAP 76/100 · LongCall SPXW · debit $", retrying);
+		Assert.Contains($"per contract: BUY {Occ(7505m)}", retrying);
+		Assert.Contains("not placed: sized to 0 contracts — risk budget $1000", retrying);
+		Assert.DoesNotContain("wa trade place", retrying);
+
+		var expired = Render(CascadeTradeSection.Build([], [], [new("BEAR TRAP", signaled)], live: false));
+		Assert.Matches(@"BEAR TRAP\s+10:02 confirmed, never placed · LongCall BUY " + Occ(7505m) + " x0", expired);
+
+		// An entry written before the trade fields were recorded: its legs, then the reading.
+		var legacy = Render(CascadeTradeSection.Build([], [], [new("BEAR TRAP", signaled with { Detail = $"BUY {Occ(7505m)} x1", Structure = null, Qty = null, NetPerShare = null, Note = null })], live: false));
+		Assert.Matches(@"BEAR TRAP\s+10:02 confirmed, never placed · BUY " + Occ(7505m) + @" x1 · spot \$7,500\.50 · score 76", legacy);
 	}
 
 	private static string Render(Spectre.Console.Rendering.IRenderable panel)

@@ -17,6 +17,10 @@ namespace WebullAnalytics.AI.Open.Cascade;
 internal sealed class CascadeSignalLedger
 {
 	/// <param name="Outcome"><see cref="Signaled"/>, <see cref="Placed"/> or <see cref="Skipped"/>; <paramref name="Detail"/> is the trade's legs, or why there was none.</param>
+	/// <param name="Structure">The trade's structure; null when there was none (and on entries written before it was recorded).</param>
+	/// <param name="Qty">Contracts the trade was sized to; 0 when the sizing caps allowed none (its legs then read x0).</param>
+	/// <param name="NetPerShare">The price the trade was proposed at: its net mid per share, positive for a credit, negative for a debit.</param>
+	/// <param name="Note">Why the sizing caps allowed no contracts, when <paramref name="Qty"/> is 0; null otherwise.</param>
 	internal sealed record Entry(
 		[property: JsonPropertyName("date")] string Date,
 		[property: JsonPropertyName("ticker")] string Ticker,
@@ -28,7 +32,11 @@ internal sealed class CascadeSignalLedger
 		[property: JsonPropertyName("outcome")] string Outcome,
 		[property: JsonPropertyName("detail")] string Detail,
 		// The neutral setup's two trades ("call" / "put") are tracked apart; null for a trap or cascade setup.
-		[property: JsonPropertyName("side")] string? Side = null);
+		[property: JsonPropertyName("side")] string? Side = null,
+		[property: JsonPropertyName("structure")] string? Structure = null,
+		[property: JsonPropertyName("qty")] int? Qty = null,
+		[property: JsonPropertyName("netPerShare")] decimal? NetPerShare = null,
+		[property: JsonPropertyName("note")] string? Note = null);
 
 	/// <summary>A trade was built and handed to the auto-executor; not final until it is <see cref="Placed"/>.</summary>
 	internal const string Signaled = "signaled";

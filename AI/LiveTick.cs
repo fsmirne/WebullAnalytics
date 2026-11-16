@@ -114,9 +114,9 @@ internal static class LiveTick
 			// or consumers that read the log as "what live would have placed" (wa ai backtest --replay, paper_vs_backtest)
 			// treat a 13:04 proposal past an 11:00 cutoff as a live open (2026-10-08).
 			if (deps.OutsideEntryWindow) openResults = openResults.Select(p => p with { Informational = true }).ToList();
-			// Cascade trades are signal-driven and enter once, at a setup's first confirmation: outside the entry window the signal is
-			// not read at all, so the first confirmation inside the window is the one that trades.
-			var cascadeResults = deps.CascadeOpener != null && !deps.OutsideEntryWindow ? await deps.CascadeOpener.EvaluateAsync(ctx, cancellation) : Array.Empty<OpenProposal>();
+			// Cascade trades are signal-driven and enter once, at a setup's first confirmation: outside the entry window the regime is
+			// read and its panel shown, but no confirmation is recorded, so the first confirmation inside the window is the one that trades.
+			var cascadeResults = deps.CascadeOpener != null ? await deps.CascadeOpener.EvaluateAsync(ctx, cancellation, entryWindowOpen: !deps.OutsideEntryWindow) : Array.Empty<OpenProposal>();
 			if (cascadeResults.Count > 0) openResults = openResults.Concat(cascadeResults).ToList();
 			openCount = openResults.Count;
 			// LIVE quote-integrity guard: warn loudly on a stale feed or torn NBBO (the 07-13 SPY case: long

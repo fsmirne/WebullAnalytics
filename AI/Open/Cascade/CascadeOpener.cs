@@ -64,7 +64,9 @@ internal sealed class CascadeOpener
 	public IReadOnlyDictionary<string, OptionContractQuote> LastQuotes { get; private set; } = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 
 	/// <summary>Reads the regime when a read is due and returns the trade of a setup confirming for the first time today, if any.</summary>
-	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation)
+	/// <param name="entryWindowOpen">False outside the opener's entry window: the reading is still taken and shown, but nothing is recorded or
+	/// traded, so the first confirmation inside the window is the one that trades.</param>
+	public async Task<IReadOnlyList<OpenProposal>> EvaluateAsync(EvaluationContext ctx, CancellationToken cancellation, bool entryWindowOpen = true)
 	{
 		var cfg = _config.Opener.Cascade;
 		if (!cfg.Enabled) return Array.Empty<OpenProposal>();
@@ -85,10 +87,16 @@ internal sealed class CascadeOpener
 		var ticker = _config.Ticker;
 		var setup = reading.PrimaryRegime;
 		var today = DateOnly.FromDateTime(nowEt);
-		if (setup != CascadeRegime.Neutral) RecordConfirmation(today, ticker, setup, nowEt, reading, read.Spot);
-
 		var trades = new List<CascadeTradeSection.Trade>();
 		var notices = new List<string>();
+		if (!entryWindowOpen)
+		{
+			notices.Add($"[dim]outside the opener entry window ({Markup.Escape(_config.Opener.EarliestEntryTimeEt ?? "open")}–{Markup.Escape(_config.Opener.LatestEntryTimeEt ?? "close")} ET): reading only, no confirmation recorded, nothing traded[/]");
+			if (!_quiet) CascadePanel.Render(ticker, nowEt, $"{read.ExpiryCount} expiration(s) ≤{CascadeScreener.DefaultDte}DTE", reading, showLegend: false, trade: CascadeTradeSection.Build(trades, notices, Today(today, ticker, nowEt), _live));
+			return Array.Empty<OpenProposal>();
+		}
+
+		if (setup != CascadeRegime.Neutral) RecordConfirmation(today, ticker, setup, nowEt, reading, read.Spot);
 		if (setup != CascadeRegime.Neutral)
 		{
 			if (cfg.For(setup) is { Enabled: true } trade) TryEntry(setup, null, trade, read, ctx, nowEt, trades, notices);
@@ -104,28 +112,35 @@ internal sealed class CascadeOpener
 		}
 
 		// The reading, what it is opening and the day so far, in one panel.
-		if (!_quiet) CascadePanel.Render(ticker, nowEt, $"{read.ExpiryCount} expiration(s) ≤{CascadeScreener.DefaultDte}DTE", reading, showLegend: false, trade: CascadeTradeSection.Build(trades, notices, Today(today, ticker), _live));
+		if (!_quiet) CascadePanel.Render(ticker, nowEt, $"{read.ExpiryCount} expiration(s) ≤{CascadeScreener.DefaultDte}DTE", reading, showLegend: false, trade: CascadeTradeSection.Build(trades, notices, Today(today, ticker, nowEt), _live));
 		return trades.Select(t => t.Proposal).ToList();
 	}
 
 	/// <summary>What became of each enabled setup (and neutral side) today in this mode, from the ledger: one row each, in config order.</summary>
-	private IReadOnlyList<CascadeTradeSection.Outcome> Today(DateOnly today, string ticker)
+	private IReadOnlyList<CascadeTradeSection.Outcome> Today(DateOnly today, string ticker, DateTime nowEt)
 	{
 		var cfg = _config.Opener.Cascade;
 		var rows = new List<CascadeTradeSection.Outcome>();
 		foreach (var regime in new[] { CascadeRegime.BullTrap, CascadeRegime.BearTrap, CascadeRegime.BullCascade, CascadeRegime.BearCascade })
-			if (cfg.For(regime) is { Enabled: true }) rows.Add(OutcomeOf(today, ticker, regime, null));
+			if (cfg.For(regime) is { Enabled: true }) rows.Add(OutcomeOf(today, ticker, regime, null, nowEt));
 		if (cfg.Neutral.Enabled)
-			foreach (var (side, _) in cfg.Neutral.EnabledSides) rows.Add(OutcomeOf(today, ticker, CascadeRegime.Neutral, side));
+			foreach (var (side, _) in cfg.Neutral.EnabledSides) rows.Add(OutcomeOf(today, ticker, CascadeRegime.Neutral, side, nowEt));
 		return rows;
 	}
 
-	private CascadeTradeSection.Outcome OutcomeOf(DateOnly today, string ticker, CascadeRegime regime, string? side)
+	/// <param name="nowEt">Decides whether a confirmation not yet placed is still inside its retry window.</param>
+	private CascadeTradeSection.Outcome OutcomeOf(DateOnly today, string ticker, CascadeRegime regime, string? side, DateTime nowEt)
 	{
 		var label = side != null ? $"{CascadeReading.RegimeLabel(regime)} {side}" : CascadeReading.RegimeLabel(regime);
 		var entries = _ledger.Find(today, ticker, regime, _live, side);
 		var final = entries.LastOrDefault(e => e.Outcome is CascadeSignalLedger.Placed or CascadeSignalLedger.Skipped) ?? entries.LastOrDefault();
-		return new CascadeTradeSection.Outcome(label, final);
+		TimeSpan? retryUntil = null;
+		if (final is { Outcome: CascadeSignalLedger.Signaled } && TimeSpan.TryParse(final.TimeEt, out var signaledAt))
+		{
+			var until = signaledAt + TimeSpan.FromSeconds(_config.Opener.Cascade.RetrySeconds);
+			if (nowEt.TimeOfDay <= until) retryUntil = until;
+		}
+		return new CascadeTradeSection.Outcome(label, final, retryUntil);
 	}
 
 	/// <summary>The setup an unconfirmed <paramref name="reading"/> leans to, when that setup is enabled and its <see cref="CascadeSetupConfig.MinLeanScore"/>
@@ -181,6 +196,15 @@ internal sealed class CascadeOpener
 		if (skeleton != null && proposal == null) skip = "the scorer could not price the legs";
 
 		var entry = new CascadeSignalLedger.Entry(today.ToString("yyyy-MM-dd"), ticker, setup, nowEt.ToString("HH:mm:ss"), _live, reading.LeadingSetup.Score, read.Spot, CascadeSignalLedger.Signaled, proposal?.Legs.Describe() ?? skip!, side);
+		// The trade as proposed: what it is, its size and the price it was proposed at. A trade the sizing caps zero out keeps the unscaled
+		// one-lot skeleton as its legs, so the signal records its legs at the size it was given (x0) and why.
+		if (proposal != null)
+			entry = entry with
+			{
+				Detail = proposal.Qty >= 1 ? proposal.Legs.Describe() : proposal.Legs.Select(l => l with { Qty = 0 }).Describe(),
+				Structure = proposal.StructureKind.ToString(), Qty = proposal.Qty, NetPerShare = proposal.DebitOrCreditPerContract / 100m,
+				Note = proposal.Qty >= 1 ? null : proposal.CashReserveDetail ?? "the sizing caps allow none",
+			};
 		if (proposal == null)
 		{
 			// A retry that cannot build the trade any more just waits out the window; only the first confirmation is final.
@@ -191,7 +215,7 @@ internal sealed class CascadeOpener
 		}
 		if (first == null) _ledger.Append(entry);
 		else notices.Add($"[dim]{Markup.Escape(label)}: first confirmed at {Markup.Escape(first.TimeEt)} ET and not yet placed — proposing again.[/]");
-		_pending[proposal.Fingerprint] = entry with { Outcome = CascadeSignalLedger.Placed };
+		_pending[proposal.Fingerprint] = entry with { Outcome = CascadeSignalLedger.Placed, Detail = proposal.Legs.Describe() };
 		trades.Add(new CascadeTradeSection.Trade(proposal with { Rationale = $"cascade {label} {reading.LeadingSetup.Score}/100 — {proposal.Rationale}", Spot = read.Spot }, $"{label} {reading.LeadingSetup.Score}/100"));
 	}
 
