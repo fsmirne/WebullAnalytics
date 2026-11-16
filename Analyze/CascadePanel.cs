@@ -14,8 +14,10 @@ internal static class CascadePanel
 	private const int FactorBarWidth = 28;
 
 	/// <summary>Terminals at least this wide get the two side-by-side subpanels; narrower ones stack them.</summary>
-	private const int SideBySideMinWidth = 160;
+	private const int SideBySideMinWidth = 190;
 	private const int NarrowFactorBarWidth = 16;
+	/// <summary>A subpanel's border and padding: one column of each on either side.</summary>
+	private const int SubPanelChrome = 4;
 
 	/// <param name="trade">A full-width subpanel rendered at the bottom (the watch loop's trade section); null for none.</param>
 	public static void Render(string ticker, DateTime asOf, string scope, CascadeReading reading, bool showLegend = true, Spectre.Console.Rendering.IRenderable? trade = null)
@@ -60,14 +62,22 @@ internal static class CascadePanel
 		// Inside the parent panel: its two border columns and its padding of 2 on each side.
 		var inner = AnsiConsole.Profile.Width - 6;
 		var sideBySide = AnsiConsole.Profile.Width >= SideBySideMinWidth;
-		// The two columns and the one-column gap between them fill the inner width exactly.
-		var columnWidth = (inner - 1) / 2;
-		var rightWidth = inner - 1 - columnWidth;
 		// Each subpanel is titled by its first section; its second section keeps its own heading inside.
-		var left = SubPanel("SETUP SCORE", ScoreAndLevels(reading, lead, regimeColor, closed));
-		var right = SubPanel($"FACTOR BREAKDOWN ({CascadeReading.RegimeLabel(lead.Regime)})", FactorsAndNotes(lead, sideBySide ? NarrowFactorBarWidth : FactorBarWidth));
+		var leftContent = ScoreAndLevels(reading, lead, regimeColor, closed, expand: true);
+		var rightContent = FactorsAndNotes(lead, sideBySide ? NarrowFactorBarWidth : FactorBarWidth);
+		var left = SubPanel("SETUP SCORE", leftContent);
+		var right = SubPanel($"FACTOR BREAKDOWN ({CascadeReading.RegimeLabel(lead.Regime)})", rightContent);
 		if (sideBySide)
 		{
+			// The two columns and the one-column gap between them fill the inner width exactly. The left keeps the natural width of its
+			// label/value rows (measured on a copy whose grids do not stretch); the right gets what its factor details and notes ask for,
+			// at least half when the left can spare it, never under two fifths; the left takes the rest. A long right line then wraps
+			// inside its own cell rather than a key level breaking across two rows.
+			var options = Spectre.Console.Rendering.RenderOptions.Create(AnsiConsole.Console);
+			var leftNeeds = ((Spectre.Console.Rendering.IRenderable)ScoreAndLevels(reading, lead, regimeColor, closed, expand: false)).Measure(options, inner).Max + SubPanelChrome;
+			var rightWants = ((Spectre.Console.Rendering.IRenderable)rightContent).Measure(options, inner).Max + SubPanelChrome;
+			var rightWidth = Math.Max((inner - 1) * 2 / 5, Math.Min(Math.Max(rightWants, (inner - 1) / 2), inner - 1 - leftNeeds));
+			var columnWidth = inner - 1 - rightWidth;
 			// Equal heights, so the two bottom borders line up.
 			var height = Math.Max(HeightOf(left, columnWidth), HeightOf(right, rightWidth));
 			left.Height = height;
@@ -93,14 +103,15 @@ internal static class CascadePanel
 		new Panel(content).Header($"[bold grey]{Markup.Escape(title)}[/]").Border(BoxBorder.Rounded).BorderColor(Color.Grey).Expand();
 
 	/// <summary>Where the setup stands: its score against the trigger, and the key levels.</summary>
-	private static Rows ScoreAndLevels(CascadeReading reading, CascadeSetupEvaluation lead, string regimeColor, bool closed)
+	/// <param name="expand">Stretch the score row and the key levels to the subpanel's width; false gives their natural width, for sizing.</param>
+	private static Rows ScoreAndLevels(CascadeReading reading, CascadeSetupEvaluation lead, string regimeColor, bool closed, bool expand)
 	{
 		var earned = lead.Factors.Sum(f => f.Points ?? 0);
 		var possible = lead.Factors.Where(f => f.Points.HasValue).Sum(f => f.Max);
 		var scoredCount = lead.Factors.Count(f => f.Points.HasValue);
 		var coverage = $"{earned}/{possible} pts · {scoredCount} of {lead.Factors.Count} factors · trigger ≥{reading.TriggerScore}";
 		// The subpanel's title names the score, so its first row is the score itself and how much of it was scored.
-		var score = new Grid().Expand().AddColumn(new GridColumn().NoWrap()).AddColumn(new GridColumn().RightAligned());
+		var score = new Grid { Expand = expand }.AddColumn(new GridColumn().NoWrap().PadRight(2)).AddColumn(new GridColumn().RightAligned());
 		score.AddRow(new Markup($"[bold {regimeColor}]{lead.Score}[/][bold]/100[/]"), new Markup(closed ? $"[dim]{coverage} · recap[/]" : lead.Complete ? $"[dim]{coverage}[/]" : $"[yellow]{coverage} · awaiting confirmation gates[/]"));
 		return new Rows(
 			score,
@@ -108,7 +119,7 @@ internal static class CascadePanel
 			new Markup($"[dim]{BandLabels(reading.TriggerScore)}[/]"),
 			new Text(""),
 			new Markup("[bold grey]KEY LEVELS & TELEMETRY[/]"),
-			KeyLevels(reading));
+			KeyLevels(reading, expand));
 	}
 
 	/// <summary>Why it scored that way: the factor breakdown and the setup checklist.</summary>
@@ -153,11 +164,12 @@ internal static class CascadePanel
 
 	private static Table FactorTable(IReadOnlyList<FactorScore> factors, int barWidth)
 	{
+		// One space between columns and none at the edges: the table sits in a half-width subpanel.
 		var table = new Table().NoBorder().HideHeaders()
-			.AddColumn(new TableColumn("").NoWrap())
-			.AddColumn(new TableColumn("").NoWrap())
-			.AddColumn(new TableColumn("").RightAligned().NoWrap())
-			.AddColumn(new TableColumn(""));
+			.AddColumn(new TableColumn("").NoWrap().PadLeft(0).PadRight(1))
+			.AddColumn(new TableColumn("").NoWrap().PadLeft(0).PadRight(1))
+			.AddColumn(new TableColumn("").RightAligned().NoWrap().PadLeft(0).PadRight(1))
+			.AddColumn(new TableColumn("").PadLeft(0).PadRight(0));
 		foreach (var f in factors)
 		{
 			var bar = f.Points.HasValue ? FactorBar(f.Points.Value, f.Max, barWidth) : $"[grey23]{new string('━', barWidth)}[/]";
@@ -171,13 +183,13 @@ internal static class CascadePanel
 		return table;
 	}
 
-	private static Grid KeyLevels(CascadeReading reading)
+	private static Grid KeyLevels(CascadeReading reading, bool expand)
 	{
 		var t = reading.Terrain;
 		var f = t.Front;
 		var inp = reading.Inputs;
-		var grid = new Grid().Expand()
-			.AddColumn(new GridColumn().NoWrap())
+		var grid = new Grid { Expand = expand }
+			.AddColumn(new GridColumn().NoWrap().PadRight(2))
 			.AddColumn(new GridColumn().RightAligned().NoWrap());
 
 		var otnTag = inp.SpotOpenToNowPct is { } otn
