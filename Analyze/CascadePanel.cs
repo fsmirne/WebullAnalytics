@@ -69,20 +69,17 @@ internal static class CascadePanel
 		var rightTitle = $"FACTOR BREAKDOWN ({CascadeReading.RegimeLabel(lead.Regime)})";
 		if (sideBySide)
 		{
-			// The two columns and the one-column gap between them fill the inner width exactly. The left keeps the natural width of its
-			// label/value rows (measured on a copy whose grids do not stretch). The right's factor bars shorten, down to a floor, until
-			// its factor details and notes fit what is left (a five-digit underlying makes them longer); it then gets what its content
-			// asks for, at least half when the left can spare it, never under two fifths, and the left takes the rest. Whatever still
-			// does not fit wraps inside its own cell rather than a key level breaking across two rows.
+			// The two columns and the one-column gap between them fill the inner width exactly. The left is as wide as its label/value rows
+			// need (measured on a copy whose grids do not stretch) and no wider, so its values sit next to their labels; the right takes
+			// the rest (never under two fifths), its factor details and notes being the long lines. Its factor bars shorten, down to a
+			// floor, until those lines fit (a five-digit underlying makes them longer); whatever still does not fit wraps inside its cell.
 			var options = Spectre.Console.Rendering.RenderOptions.Create(AnsiConsole.Console);
 			var leftNeeds = Width(ScoreAndLevels(reading, lead, regimeColor, closed, expand: false), options, inner) + SubPanelChrome;
-			var rightRoom = Math.Max((inner - 1) / 2, inner - 1 - leftNeeds);
-			var barWidth = NarrowFactorBarWidth;
-			while (barWidth > MinFactorBarWidth && Width(FactorsAndNotes(lead, barWidth), options, inner) + SubPanelChrome > rightRoom) barWidth--;
-			var rightContent = FactorsAndNotes(lead, barWidth);
-			var rightWants = Width(rightContent, options, inner) + SubPanelChrome;
-			var rightWidth = Math.Max((inner - 1) * 2 / 5, Math.Min(Math.Max(rightWants, (inner - 1) / 2), inner - 1 - leftNeeds));
+			var rightWidth = Math.Max((inner - 1) * 2 / 5, inner - 1 - leftNeeds);
 			var columnWidth = inner - 1 - rightWidth;
+			var barWidth = NarrowFactorBarWidth;
+			while (barWidth > MinFactorBarWidth && Width(FactorsAndNotes(lead, barWidth), options, inner) + SubPanelChrome > rightWidth) barWidth--;
+			var rightContent = FactorsAndNotes(lead, barWidth);
 			var left = SubPanel(leftTitle, ScoreAndLevels(reading, lead, regimeColor, closed, expand: true));
 			var right = SubPanel(rightTitle, rightContent);
 			// Equal heights, so the two bottom borders line up.
@@ -210,9 +207,9 @@ internal static class CascadePanel
 		if (inp.Tape is { } tape)
 		{
 			var vwapSide = tape.Side == AI.Open.ZeroDte.VwapSide.Above ? "[green]above[/]" : tape.Side == AI.Open.ZeroDte.VwapSide.Below ? "[red]below[/]" : "[yellow]at[/]";
-			grid.AddRow(
-				new Markup("[grey]Session VWAP & Range[/]"),
-				new Markup($"[bold]${tape.Vwap:N2}[/] ({vwapSide} {tape.MinutesHeldOnSide}m, {tape.VwapFlips} flips · L ${tape.SessionLow:N2} – H ${tape.SessionHigh:N2})"));
+			// VWAP and range on separate rows: together they were the widest row and set the width of the subpanel.
+			grid.AddRow(new Markup("[grey]Session VWAP[/]"), new Markup($"[bold]${tape.Vwap:N2}[/] ({vwapSide} {tape.MinutesHeldOnSide}m, {tape.VwapFlips} flips)"));
+			grid.AddRow(new Markup("[grey]Session Range[/]"), new Markup($"L ${tape.SessionLow:N2} – H ${tape.SessionHigh:N2}"));
 		}
 
 		if (t.FrontSettled)
@@ -279,8 +276,9 @@ internal static class CascadePanel
 			var bwdStr = inp.MaxPriorVix9dOverVix.HasValue
 				? $"3d VIX9D/VIX [bold {(inp.MaxPriorVix9dOverVix.Value > 0m ? "red" : "green")}]{inp.MaxPriorVix9dOverVix.Value * 100m:+0.0;-0.0}%[/]"
 				: "";
-			var sep = smileStr.Length > 0 && bwdStr.Length > 0 ? " · " : "";
-			grid.AddRow(new Markup("[grey]Skew & Term Structure[/]"), new Markup($"{smileStr}{sep}{bwdStr}"));
+			// Skew and term structure on separate rows, for the same reason.
+			if (smileStr.Length > 0) grid.AddRow(new Markup("[grey]Skew[/]"), new Markup(smileStr));
+			if (bwdStr.Length > 0) grid.AddRow(new Markup("[grey]Term Structure[/]"), new Markup(bwdStr));
 		}
 
 		if (f.DailyMove.HasValue && f.DailyMove.Value > 0m)
