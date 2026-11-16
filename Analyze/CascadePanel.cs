@@ -15,7 +15,9 @@ internal static class CascadePanel
 
 	/// <summary>Terminals at least this wide get the two side-by-side subpanels; narrower ones stack them.</summary>
 	private const int SideBySideMinWidth = 190;
+	/// <summary>The factor bars side by side, and how short they may get to keep the factor details on one line.</summary>
 	private const int NarrowFactorBarWidth = 16;
+	private const int MinFactorBarWidth = 8;
 	/// <summary>A subpanel's border and padding: one column of each on either side.</summary>
 	private const int SubPanelChrome = 4;
 
@@ -63,21 +65,26 @@ internal static class CascadePanel
 		var inner = AnsiConsole.Profile.Width - 6;
 		var sideBySide = AnsiConsole.Profile.Width >= SideBySideMinWidth;
 		// Each subpanel is titled by its first section; its second section keeps its own heading inside.
-		var leftContent = ScoreAndLevels(reading, lead, regimeColor, closed, expand: true);
-		var rightContent = FactorsAndNotes(lead, sideBySide ? NarrowFactorBarWidth : FactorBarWidth);
-		var left = SubPanel("SETUP SCORE", leftContent);
-		var right = SubPanel($"FACTOR BREAKDOWN ({CascadeReading.RegimeLabel(lead.Regime)})", rightContent);
+		const string leftTitle = "SETUP SCORE";
+		var rightTitle = $"FACTOR BREAKDOWN ({CascadeReading.RegimeLabel(lead.Regime)})";
 		if (sideBySide)
 		{
 			// The two columns and the one-column gap between them fill the inner width exactly. The left keeps the natural width of its
-			// label/value rows (measured on a copy whose grids do not stretch); the right gets what its factor details and notes ask for,
-			// at least half when the left can spare it, never under two fifths; the left takes the rest. A long right line then wraps
-			// inside its own cell rather than a key level breaking across two rows.
+			// label/value rows (measured on a copy whose grids do not stretch). The right's factor bars shorten, down to a floor, until
+			// its factor details and notes fit what is left (a five-digit underlying makes them longer); it then gets what its content
+			// asks for, at least half when the left can spare it, never under two fifths, and the left takes the rest. Whatever still
+			// does not fit wraps inside its own cell rather than a key level breaking across two rows.
 			var options = Spectre.Console.Rendering.RenderOptions.Create(AnsiConsole.Console);
-			var leftNeeds = ((Spectre.Console.Rendering.IRenderable)ScoreAndLevels(reading, lead, regimeColor, closed, expand: false)).Measure(options, inner).Max + SubPanelChrome;
-			var rightWants = ((Spectre.Console.Rendering.IRenderable)rightContent).Measure(options, inner).Max + SubPanelChrome;
+			var leftNeeds = Width(ScoreAndLevels(reading, lead, regimeColor, closed, expand: false), options, inner) + SubPanelChrome;
+			var rightRoom = Math.Max((inner - 1) / 2, inner - 1 - leftNeeds);
+			var barWidth = NarrowFactorBarWidth;
+			while (barWidth > MinFactorBarWidth && Width(FactorsAndNotes(lead, barWidth), options, inner) + SubPanelChrome > rightRoom) barWidth--;
+			var rightContent = FactorsAndNotes(lead, barWidth);
+			var rightWants = Width(rightContent, options, inner) + SubPanelChrome;
 			var rightWidth = Math.Max((inner - 1) * 2 / 5, Math.Min(Math.Max(rightWants, (inner - 1) / 2), inner - 1 - leftNeeds));
 			var columnWidth = inner - 1 - rightWidth;
+			var left = SubPanel(leftTitle, ScoreAndLevels(reading, lead, regimeColor, closed, expand: true));
+			var right = SubPanel(rightTitle, rightContent);
 			// Equal heights, so the two bottom borders line up.
 			var height = Math.Max(HeightOf(left, columnWidth), HeightOf(right, rightWidth));
 			left.Height = height;
@@ -88,8 +95,8 @@ internal static class CascadePanel
 		}
 		else
 		{
-			rows.Add(left);
-			rows.Add(right);
+			rows.Add(SubPanel(leftTitle, ScoreAndLevels(reading, lead, regimeColor, closed, expand: true)));
+			rows.Add(SubPanel(rightTitle, FactorsAndNotes(lead, FactorBarWidth)));
 		}
 		if (trade != null) rows.Add(trade);
 
@@ -130,6 +137,9 @@ internal static class CascadePanel
 			rows.Add(new Markup($"{NoteGlyph(note.Severity)} {Markup.Escape(note.Text)}"));
 		return new Rows(rows);
 	}
+
+	/// <summary>The natural (widest) width of <paramref name="renderable"/> within <paramref name="maxWidth"/>.</summary>
+	private static int Width(Spectre.Console.Rendering.IRenderable renderable, Spectre.Console.Rendering.RenderOptions options, int maxWidth) => renderable.Measure(options, maxWidth).Max;
 
 	/// <summary>The number of lines <paramref name="renderable"/> takes at <paramref name="width"/> on the current console.</summary>
 	private static int HeightOf(Spectre.Console.Rendering.IRenderable renderable, int width) =>
