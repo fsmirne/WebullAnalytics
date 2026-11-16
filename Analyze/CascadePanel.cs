@@ -16,11 +16,21 @@ internal static class CascadePanel
 	/// <summary>The factor bars side by side, and how short they may get to keep the factor details on one line.</summary>
 	private const int NarrowFactorBarWidth = 16;
 	private const int MinFactorBarWidth = 8;
+	/// <summary>The narrowest the factor-detail column may get side by side; a detail longer than its column wraps within it, as the notes do.</summary>
+	private const int MinFactorDetailWidth = 40;
 	/// <summary>A subpanel's border and padding: one column of each on either side.</summary>
 	private const int SubPanelChrome = 4;
 
 	/// <param name="trade">A full-width subpanel rendered at the bottom (the watch loop's trade section); null for none.</param>
 	public static void Render(string ticker, DateTime asOf, string scope, CascadeReading reading, bool showLegend = true, Spectre.Console.Rendering.IRenderable? trade = null)
+	{
+		AnsiConsole.Write(Build(AnsiConsole.Console, ticker, asOf, scope, reading, trade));
+		if (showLegend)
+			AnsiConsole.MarkupLine("[dim]Regimes: [red]BEAR CASCADE[/] = short-γ + put flow + intraday VIX expansion + VWAP breakdown. [aqua]BEAR TRAP[/] = gap-down / morning dip + intraday VIX stall + VWAP reclaim. [green]BULL CASCADE[/] = intraday VIX crush + call flow + overhead target wall + VWAP breakout. [yellow]BULL TRAP[/] = gap-up / morning rally + VIX failing to crush + VWAP roll-over. Describes the session so far, not what comes next: over 2022–2026 a confirmed regime at 09:50 ET showed no edge from there to the close. 0DTE " + GexLegends.PullLegendMarkup + "[/]");
+	}
+
+	/// <summary>The panel, laid out for <paramref name="console"/>'s width.</summary>
+	internal static Panel Build(IAnsiConsole console, string ticker, DateTime asOf, string scope, CascadeReading reading, Spectre.Console.Rendering.IRenderable? trade)
 	{
 		var lead = reading.LeadingSetup;
 		var active = reading.Active;
@@ -60,32 +70,34 @@ internal static class CascadePanel
 
 		var rows = new List<Spectre.Console.Rendering.IRenderable> { headerGrid, new Text(""), RegimeComparisonTable(reading) };
 		// Inside the parent panel: its two border columns and its padding of 2 on each side.
-		var inner = AnsiConsole.Profile.Width - 6;
+		var inner = console.Profile.Width - 6;
 		// Each subpanel is titled by its first section; its second section keeps its own heading inside.
 		const string leftTitle = "SETUP SCORE";
 		var rightTitle = $"FACTOR BREAKDOWN ({CascadeReading.RegimeLabel(lead.Regime)})";
 		// What each subpanel's content needs: the left its label/value rows (measured on a copy whose grids do not stretch), the right its
-		// factor details and notes, at full bar length and at the shortest bars allowed.
-		var options = Spectre.Console.Rendering.RenderOptions.Create(AnsiConsole.Console);
+		// factor details and notes unwrapped at full bar length. The right's floor is its factor name, bar and points columns at the shortest
+		// bars allowed plus the narrowest detail column: details and notes are prose and wrap, so their length never decides the layout
+		// (a long VIX detail or VWAP note stacked the panel at 200 columns, and the layout flipped between readings as their text changed).
+		var options = Spectre.Console.Rendering.RenderOptions.Create(console);
 		var leftNeeds = Width(ScoreAndLevels(reading, lead, regimeColor, closed, expand: false), options, inner) + SubPanelChrome;
 		var rightNeeds = Width(FactorsAndNotes(lead, NarrowFactorBarWidth), options, inner) + SubPanelChrome;
-		var rightNeedsAtMost = Width(FactorsAndNotes(lead, MinFactorBarWidth), options, inner) + SubPanelChrome;
+		var rightFloor = Width(FactorTable(lead.Factors, MinFactorBarWidth, details: false), options, inner) + MinFactorDetailWidth + SubPanelChrome;
 		// Side by side whenever both fit on one line with the one-column gap between them; stacked otherwise.
-		if (leftNeeds + 1 + rightNeedsAtMost <= inner)
+		if (leftNeeds + 1 + rightFloor <= inner)
 		{
 			// The two columns and the gap fill the inner width exactly. Each first gets what its content needs and the columns to spare are
-			// split evenly, so neither side is cramped while the other has room. When there are none to spare (a five-digit underlying
-			// makes the factor details longer), the right's bars shorten, down to the floor, until those lines fit.
+			// split evenly, so neither side is cramped while the other has room. When there are none to spare, the right's bars shorten,
+			// down to the floor, until the factor details fit on one line; past the floor the longest details wrap within their column.
 			var spare = Math.Max(0, inner - 1 - leftNeeds - rightNeeds);
 			var rightWidth = inner - 1 - leftNeeds - spare / 2;
 			var columnWidth = inner - 1 - rightWidth;
 			var barWidth = NarrowFactorBarWidth;
-			while (barWidth > MinFactorBarWidth && Width(FactorsAndNotes(lead, barWidth), options, inner) + SubPanelChrome > rightWidth) barWidth--;
+			while (barWidth > MinFactorBarWidth && Width(FactorTable(lead.Factors, barWidth), options, inner) + SubPanelChrome > rightWidth) barWidth--;
 			var rightContent = FactorsAndNotes(lead, barWidth);
 			var left = SubPanel(leftTitle, ScoreAndLevels(reading, lead, regimeColor, closed, expand: true));
 			var right = SubPanel(rightTitle, rightContent);
 			// Equal heights, so the two bottom borders line up.
-			var height = Math.Max(HeightOf(left, columnWidth), HeightOf(right, rightWidth));
+			var height = Math.Max(HeightOf(left, options, columnWidth), HeightOf(right, options, rightWidth));
 			left.Height = height;
 			right.Height = height;
 			var body = new Grid().AddColumn(new GridColumn().Width(columnWidth).PadLeft(0).PadRight(1)).AddColumn(new GridColumn().Width(rightWidth).PadLeft(0).PadRight(0));
@@ -99,9 +111,7 @@ internal static class CascadePanel
 		}
 		if (trade != null) rows.Add(trade);
 
-		AnsiConsole.Write(new Panel(new Rows(rows)).Border(BoxBorder.Rounded).BorderColor(Color.Grey).Padding(2, 1).Expand());
-		if (showLegend)
-			AnsiConsole.MarkupLine("[dim]Regimes: [red]BEAR CASCADE[/] = short-γ + put flow + intraday VIX expansion + VWAP breakdown. [aqua]BEAR TRAP[/] = gap-down / morning dip + intraday VIX stall + VWAP reclaim. [green]BULL CASCADE[/] = intraday VIX crush + call flow + overhead target wall + VWAP breakout. [yellow]BULL TRAP[/] = gap-up / morning rally + VIX failing to crush + VWAP roll-over. Describes the session so far, not what comes next: over 2022–2026 a confirmed regime at 09:50 ET showed no edge from there to the close. 0DTE " + GexLegends.PullLegendMarkup + "[/]");
+		return new Panel(new Rows(rows)).Border(BoxBorder.Rounded).BorderColor(Color.Grey).Padding(2, 1).Expand();
 	}
 
 	/// <summary>A titled subpanel of the cascade panel, in the house style.</summary>
@@ -140,9 +150,9 @@ internal static class CascadePanel
 	/// <summary>The natural (widest) width of <paramref name="renderable"/> within <paramref name="maxWidth"/>.</summary>
 	private static int Width(Spectre.Console.Rendering.IRenderable renderable, Spectre.Console.Rendering.RenderOptions options, int maxWidth) => renderable.Measure(options, maxWidth).Max;
 
-	/// <summary>The number of lines <paramref name="renderable"/> takes at <paramref name="width"/> on the current console.</summary>
-	private static int HeightOf(Spectre.Console.Rendering.IRenderable renderable, int width) =>
-		Spectre.Console.Rendering.Segment.SplitLines(renderable.Render(Spectre.Console.Rendering.RenderOptions.Create(AnsiConsole.Console), width), width).Count;
+	/// <summary>The number of lines <paramref name="renderable"/> takes at <paramref name="width"/>.</summary>
+	private static int HeightOf(Spectre.Console.Rendering.IRenderable renderable, Spectre.Console.Rendering.RenderOptions options, int width) =>
+		Spectre.Console.Rendering.Segment.SplitLines(renderable.Render(options, width), width).Count;
 
 	private static Table RegimeComparisonTable(CascadeReading reading)
 	{
@@ -171,7 +181,8 @@ internal static class CascadePanel
 		return table;
 	}
 
-	private static Table FactorTable(IReadOnlyList<FactorScore> factors, int barWidth)
+	/// <param name="details">False leaves the detail column empty: the width of the name, bar and points columns, for sizing.</param>
+	private static Table FactorTable(IReadOnlyList<FactorScore> factors, int barWidth, bool details = true)
 	{
 		// One space between columns and none at the edges: the table sits in a half-width subpanel.
 		var table = new Table().NoBorder().HideHeaders()
@@ -187,7 +198,7 @@ internal static class CascadePanel
 				new Markup(Markup.Escape(f.Name)),
 				new Markup(bar),
 				new Markup(score),
-				new Markup($"[dim]{Markup.Escape(f.Detail)}[/]"));
+				new Markup(details ? $"[dim]{Markup.Escape(f.Detail)}[/]" : ""));
 		}
 		return table;
 	}
