@@ -247,7 +247,10 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				ticksRun++;
 				failures = 0;
 			}
-			catch (OperationCanceledException) { break; }
+			// Only a cancellation of the loop's own token ends it. An HTTP timeout surfaces as TaskCanceledException (an OperationCanceledException)
+			// with that token untouched: it is a failed tick, counted toward the circuit breaker below, not a request to stop (2026-11-16 09:52, a
+			// timed-out tick ended the loop silently: "Loop exited. ticks=5 proposals=0 failures=0").
+			catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
 			catch (UnauthorizedAccessException ex)
 			{
 				Console.Error.WriteLine($"Auth failure: {ex.Message}. Exiting.");
