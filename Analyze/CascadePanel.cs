@@ -69,13 +69,16 @@ internal static class CascadePanel
 		var rightTitle = $"FACTOR BREAKDOWN ({CascadeReading.RegimeLabel(lead.Regime)})";
 		if (sideBySide)
 		{
-			// The two columns and the one-column gap between them fill the inner width exactly. The left is as wide as its label/value rows
-			// need (measured on a copy whose grids do not stretch) and no wider, so its values sit next to their labels; the right takes
-			// the rest (never under two fifths), its factor details and notes being the long lines. Its factor bars shorten, down to a
-			// floor, until those lines fit (a five-digit underlying makes them longer); whatever still does not fit wraps inside its cell.
+			// The two columns and the one-column gap between them fill the inner width exactly. Each first gets what its content needs — the
+			// left its label/value rows (measured on a copy whose grids do not stretch), the right its factor details and notes at full bar
+			// length — and the columns to spare are split evenly, so neither side is cramped while the other has room (the right never
+			// under two fifths). When there are none to spare (a five-digit underlying makes the factor details longer), the right's bars
+			// shorten, down to a floor, until those lines fit; whatever still does not fit wraps inside its cell.
 			var options = Spectre.Console.Rendering.RenderOptions.Create(AnsiConsole.Console);
 			var leftNeeds = Width(ScoreAndLevels(reading, lead, regimeColor, closed, expand: false), options, inner) + SubPanelChrome;
-			var rightWidth = Math.Max((inner - 1) * 2 / 5, inner - 1 - leftNeeds);
+			var rightNeeds = Width(FactorsAndNotes(lead, NarrowFactorBarWidth), options, inner) + SubPanelChrome;
+			var spare = Math.Max(0, inner - 1 - leftNeeds - rightNeeds);
+			var rightWidth = Math.Max((inner - 1) * 2 / 5, inner - 1 - leftNeeds - spare / 2);
 			var columnWidth = inner - 1 - rightWidth;
 			var barWidth = NarrowFactorBarWidth;
 			while (barWidth > MinFactorBarWidth && Width(FactorsAndNotes(lead, barWidth), options, inner) + SubPanelChrome > rightWidth) barWidth--;
