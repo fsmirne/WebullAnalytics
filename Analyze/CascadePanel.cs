@@ -5,7 +5,7 @@ namespace WebullAnalytics.Analyze;
 /// <summary>
 /// Terminal rendering of a <see cref="CascadeReading"/>, styled after <see cref="GexSqueezePanel"/>:
 /// a header with the classified regime badge and the 4-regime comparison row across the full width, then two side-by-side subpanels
-/// (stacked on a terminal narrower than <see cref="SideBySideMinWidth"/>): where the setup stands (0–100 score bar, key levels &
+/// (stacked when the terminal is too narrow for both): where the setup stands (0–100 score bar, key levels &
 /// telemetry) and why (5-factor breakdown, setup checklist). The watch loop adds a full-width trade subpanel at the bottom.
 /// </summary>
 internal static class CascadePanel
@@ -13,8 +13,6 @@ internal static class CascadePanel
 	private const int ScoreBarWidth = 60;
 	private const int FactorBarWidth = 28;
 
-	/// <summary>Terminals at least this wide get the two side-by-side subpanels; narrower ones stack them.</summary>
-	private const int SideBySideMinWidth = 190;
 	/// <summary>The factor bars side by side, and how short they may get to keep the factor details on one line.</summary>
 	private const int NarrowFactorBarWidth = 16;
 	private const int MinFactorBarWidth = 8;
@@ -63,22 +61,23 @@ internal static class CascadePanel
 		var rows = new List<Spectre.Console.Rendering.IRenderable> { headerGrid, new Text(""), RegimeComparisonTable(reading) };
 		// Inside the parent panel: its two border columns and its padding of 2 on each side.
 		var inner = AnsiConsole.Profile.Width - 6;
-		var sideBySide = AnsiConsole.Profile.Width >= SideBySideMinWidth;
 		// Each subpanel is titled by its first section; its second section keeps its own heading inside.
 		const string leftTitle = "SETUP SCORE";
 		var rightTitle = $"FACTOR BREAKDOWN ({CascadeReading.RegimeLabel(lead.Regime)})";
-		if (sideBySide)
+		// What each subpanel's content needs: the left its label/value rows (measured on a copy whose grids do not stretch), the right its
+		// factor details and notes, at full bar length and at the shortest bars allowed.
+		var options = Spectre.Console.Rendering.RenderOptions.Create(AnsiConsole.Console);
+		var leftNeeds = Width(ScoreAndLevels(reading, lead, regimeColor, closed, expand: false), options, inner) + SubPanelChrome;
+		var rightNeeds = Width(FactorsAndNotes(lead, NarrowFactorBarWidth), options, inner) + SubPanelChrome;
+		var rightNeedsAtMost = Width(FactorsAndNotes(lead, MinFactorBarWidth), options, inner) + SubPanelChrome;
+		// Side by side whenever both fit on one line with the one-column gap between them; stacked otherwise.
+		if (leftNeeds + 1 + rightNeedsAtMost <= inner)
 		{
-			// The two columns and the one-column gap between them fill the inner width exactly. Each first gets what its content needs — the
-			// left its label/value rows (measured on a copy whose grids do not stretch), the right its factor details and notes at full bar
-			// length — and the columns to spare are split evenly, so neither side is cramped while the other has room (the right never
-			// under two fifths). When there are none to spare (a five-digit underlying makes the factor details longer), the right's bars
-			// shorten, down to a floor, until those lines fit; whatever still does not fit wraps inside its cell.
-			var options = Spectre.Console.Rendering.RenderOptions.Create(AnsiConsole.Console);
-			var leftNeeds = Width(ScoreAndLevels(reading, lead, regimeColor, closed, expand: false), options, inner) + SubPanelChrome;
-			var rightNeeds = Width(FactorsAndNotes(lead, NarrowFactorBarWidth), options, inner) + SubPanelChrome;
+			// The two columns and the gap fill the inner width exactly. Each first gets what its content needs and the columns to spare are
+			// split evenly, so neither side is cramped while the other has room. When there are none to spare (a five-digit underlying
+			// makes the factor details longer), the right's bars shorten, down to the floor, until those lines fit.
 			var spare = Math.Max(0, inner - 1 - leftNeeds - rightNeeds);
-			var rightWidth = Math.Max((inner - 1) * 2 / 5, inner - 1 - leftNeeds - spare / 2);
+			var rightWidth = inner - 1 - leftNeeds - spare / 2;
 			var columnWidth = inner - 1 - rightWidth;
 			var barWidth = NarrowFactorBarWidth;
 			while (barWidth > MinFactorBarWidth && Width(FactorsAndNotes(lead, barWidth), options, inner) + SubPanelChrome > rightWidth) barWidth--;
