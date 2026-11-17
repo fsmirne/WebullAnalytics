@@ -7,6 +7,7 @@ namespace WebullAnalytics.Tests.Utils;
 /// <summary>Locks the invariant the backtest progress bar depends on: while a deferral is open NOTHING
 /// reaches the terminal, and on release everything written meanwhile replays on its original stream, in
 /// order. Writes leaking through mid-run are what shredded the bar in the first place.</summary>
+[Collection("ProcessConsole")]
 public class ConsoleDeferralTests
 {
 	[Fact]
@@ -76,3 +77,9 @@ public class ConsoleDeferralTests
 		}
 	}
 }
+
+/// <summary>Swaps the process-wide console (stdout, stderr and the static AnsiConsole), so its tests must not overlap any other test
+/// class: a warning another test prints while the swap is in place lands in the captured streams and fails the "nothing reached the
+/// terminal" assertions.</summary>
+[CollectionDefinition("ProcessConsole", DisableParallelization = true)]
+public class ProcessConsoleCollection { }
