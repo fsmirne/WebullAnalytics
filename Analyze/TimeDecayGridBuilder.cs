@@ -79,17 +79,11 @@ internal static class TimeDecayGridBuilder
 			for (int pi = 0; pi < priceRows.Count; pi++)
 			{
 				var price = priceRows[pi];
-				decimal totalPnL = 0m;
-				for (int li = 0; li < legs.Count; li++)
-				{
-					var l = legs[li];
-					totalPnL += OptionMath.LegPnLWithBs(price, l.parsed, l.symbol, l.row.Side, qty, OptionMath.GetPremium(l.row), evalDate, opts);
-					if (legValues != null)
-						legValues[li, pi, di] = Math.Round(OptionMath.LegContractValueWithBs(price, l.parsed, l.symbol, l.row.Side, evalDate, opts), 4);
-				}
+				if (legValues != null)
+					for (int li = 0; li < legs.Count; li++)
+						legValues[li, pi, di] = Math.Round(OptionMath.LegContractValueWithBs(price, legs[li].parsed, legs[li].symbol, legs[li].row.Side, evalDate, opts), 4);
 
-				var value = parentSide == Side.Buy ? netPremium + totalPnL / (qty * 100m) : netPremium - totalPnL / (qty * 100m);
-				values[pi, di] = Math.Round(value, 4);
+				values[pi, di] = Math.Round(CellValue(legs, qty, parentSide, netPremium, price, evalDate, opts), 4);
 				var displayValue = Math.Round(values[pi, di], 2, MidpointRounding.AwayFromZero);
 				pnls[pi, di] = parentSide == Side.Buy ? Math.Round((displayValue - netPremium) * qty * 100m, 2) : Math.Round((netPremium - displayValue) * qty * 100m, 2);
 			}
@@ -130,8 +124,8 @@ internal static class TimeDecayGridBuilder
 				var allQuoted = true;
 				for (int li = 0; li < legs.Count && allQuoted; li++)
 				{
-					if (!opts.OptionQuotes.TryGetValue(legs[li].symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) { allQuoted = false; break; }
-					legAdj[li] = legValues[li, closestRow, 0] - (q.Bid.Value + q.Ask.Value) / 2m;
+					if (MarketBasis(priceRows[closestRow], legs[li].parsed, legs[li].symbol, legs[li].row.Side, dates[0], opts) is not { } basis) { allQuoted = false; break; }
+					legAdj[li] = basis;
 				}
 				if (allQuoted)
 				{
@@ -142,8 +136,9 @@ internal static class TimeDecayGridBuilder
 							for (int li = 0; li < legs.Count; li++)
 							{
 								if (dates[di] >= legs[li].parsed.ExpiryDate.Date + OptionMath.MarketClose) continue; // expired → intrinsic, no basis
-								legValues[li, pi, di] = Math.Round(legValues[li, pi, di] - legAdj[li], 4);
-								cellAdj += (legs[li].row.Side == Side.Buy ? 1m : -1m) * legAdj[li];
+								var anchored = AnchoredLegValue(legValues[li, pi, di], legAdj[li], 1m);
+								cellAdj += (legs[li].row.Side == Side.Buy ? 1m : -1m) * (legValues[li, pi, di] - anchored);
+								legValues[li, pi, di] = anchored;
 							}
 							values[pi, di] = Math.Round(values[pi, di] - cellAdj, 4);
 							var adjV = Math.Round(values[pi, di], 2);
@@ -159,7 +154,7 @@ internal static class TimeDecayGridBuilder
 				if (marketMid.HasValue)
 				{
 					var marketValue = parentSide == Side.Sell ? -marketMid.Value : marketMid.Value;
-					var adjustment = values[closestRow, 0] - marketValue;
+					var adjustment = CellValue(legs, qty, parentSide, netPremium, priceRows[closestRow], dates[0], OptionMath.MarketState(opts)) - marketValue;
 					var legExpClose = legs[0].parsed.ExpiryDate.Date + OptionMath.MarketClose;
 					if (adjustment != 0)
 						for (int di = 0; di < dates.Count; di++)
@@ -167,7 +162,7 @@ internal static class TimeDecayGridBuilder
 							if (dates[di] >= legExpClose) continue;
 							for (int pi = 0; pi < priceRows.Count; pi++)
 							{
-								values[pi, di] = Math.Round(values[pi, di] - adjustment, 4);
+								values[pi, di] = AnchoredLegValue(values[pi, di], adjustment, marketValue < 0m ? -1m : 1m);
 								var adjV = Math.Round(values[pi, di], 2);
 								pnls[pi, di] = parentSide == Side.Buy ? Math.Round((adjV - netPremium) * qty * 100, 2) : Math.Round((netPremium - adjV) * qty * 100, 2);
 							}
@@ -213,19 +208,11 @@ internal static class TimeDecayGridBuilder
 			for (int pi = 0; pi < priceRows.Count; pi++)
 			{
 				var price = priceRows[pi];
-				decimal perPairValue = 0m;
-				for (int li = 0; li < optionLegs.Count; li++)
-				{
-					var l = optionLegs[li];
-					var legBs = OptionMath.LegContractValueWithBs(price, l.Parsed!, l.Symbol, l.Side, evalDate, opts);
-					var signed = l.Side == Side.Buy ? 1 : -1;
-					var weight = normalizingQty > 0 ? (decimal)l.Qty / normalizingQty : 0m;
-					perPairValue += signed * weight * legBs;
-					if (legValues != null)
-						legValues[li, pi, di] = Math.Round(legBs, 4);
-				}
+				if (legValues != null)
+					for (int li = 0; li < optionLegs.Count; li++)
+						legValues[li, pi, di] = Math.Round(OptionMath.LegContractValueWithBs(price, optionLegs[li].Parsed!, optionLegs[li].Symbol, optionLegs[li].Side, evalDate, opts), 4);
 
-				values[pi, di] = Math.Round(perPairValue, 4);
+				values[pi, di] = Math.Round(PairValue(optionLegs, normalizingQty, price, evalDate, opts), 4);
 				var displayValue = Math.Round(values[pi, di], 2, MidpointRounding.AwayFromZero);
 				pnls[pi, di] = Math.Round((displayValue - netPremium) * normalizingQty * 100m, 2);
 			}
@@ -261,8 +248,8 @@ internal static class TimeDecayGridBuilder
 				var allQuoted = true;
 				for (int li = 0; li < optionLegs.Count && allQuoted; li++)
 				{
-					if (!opts.OptionQuotes.TryGetValue(optionLegs[li].Symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) { allQuoted = false; break; }
-					legAdj[li] = legValues[li, closestRow, 0] - (q.Bid.Value + q.Ask.Value) / 2m;
+					if (MarketBasis(priceRows[closestRow], optionLegs[li].Parsed!, optionLegs[li].Symbol, optionLegs[li].Side, dates[0], opts) is not { } basis) { allQuoted = false; break; }
+					legAdj[li] = basis;
 				}
 				if (allQuoted)
 				{
@@ -273,10 +260,11 @@ internal static class TimeDecayGridBuilder
 							for (int li = 0; li < optionLegs.Count; li++)
 							{
 								if (dates[di] >= optionLegs[li].Parsed!.ExpiryDate.Date + OptionMath.MarketClose) continue;
-								legValues[li, pi, di] = Math.Round(legValues[li, pi, di] - legAdj[li], 4);
+								var anchored = AnchoredLegValue(legValues[li, pi, di], legAdj[li], 1m);
 								var signed = optionLegs[li].Side == Side.Buy ? 1m : -1m;
 								var weight = normalizingQty > 0 ? (decimal)optionLegs[li].Qty / normalizingQty : 0m;
-								cellAdj += signed * weight * legAdj[li];
+								cellAdj += signed * weight * (legValues[li, pi, di] - anchored);
+								legValues[li, pi, di] = anchored;
 							}
 							values[pi, di] = Math.Round(values[pi, di] - cellAdj, 4);
 							var adjV = Math.Round(values[pi, di], 2, MidpointRounding.AwayFromZero);
@@ -289,7 +277,7 @@ internal static class TimeDecayGridBuilder
 				var marketMid = ComputeMergedMarketMid(optionLegs, normalizingQty, opts.OptionQuotes);
 				if (marketMid.HasValue)
 				{
-					var perPairAdjustment = values[closestRow, 0] - marketMid.Value;
+					var perPairAdjustment = PairValue(optionLegs, normalizingQty, priceRows[closestRow], dates[0], OptionMath.MarketState(opts)) - marketMid.Value;
 					var legExpClose = optionLegs[0].Parsed!.ExpiryDate.Date + OptionMath.MarketClose;
 					if (perPairAdjustment != 0)
 						for (int di = 0; di < dates.Count; di++)
@@ -297,7 +285,7 @@ internal static class TimeDecayGridBuilder
 							if (dates[di] >= legExpClose) continue;
 							for (int pi = 0; pi < priceRows.Count; pi++)
 							{
-								values[pi, di] = Math.Round(values[pi, di] - perPairAdjustment, 4);
+								values[pi, di] = AnchoredLegValue(values[pi, di], perPairAdjustment, optionLegs[0].Side == Side.Buy ? 1m : -1m);
 								var adjV = Math.Round(values[pi, di], 2, MidpointRounding.AwayFromZero);
 								pnls[pi, di] = Math.Round((adjV - netPremium) * normalizingQty * 100m, 2);
 							}
@@ -307,6 +295,50 @@ internal static class TimeDecayGridBuilder
 		}
 
 		return new TimeDecayGrid(dates, priceRows, values, pnls, strikes, legValues, legLabels);
+	}
+
+	/// <summary>Per-share value of the uniform-qty structure at <paramref name="price"/> and <paramref name="evalDate"/> (signed by the parent
+	/// side, on the scale of <paramref name="netPremium"/>).</summary>
+	private static decimal CellValue(List<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty, Side parentSide, decimal netPremium, decimal price, DateTime evalDate, AnalysisOptions opts)
+	{
+		decimal totalPnL = 0m;
+		foreach (var l in legs)
+			totalPnL += OptionMath.LegPnLWithBs(price, l.parsed, l.symbol, l.row.Side, qty, OptionMath.GetPremium(l.row), evalDate, opts);
+		return parentSide == Side.Buy ? netPremium + totalPnL / (qty * 100m) : netPremium - totalPnL / (qty * 100m);
+	}
+
+	/// <summary>Per-pair signed value of merged option legs: Σ sign × (legQty/normalizingQty) × leg value.</summary>
+	private static decimal PairValue(List<MergedLeg> optionLegs, int normalizingQty, decimal price, DateTime evalDate, AnalysisOptions opts)
+	{
+		decimal total = 0m;
+		foreach (var l in optionLegs)
+		{
+			var weight = normalizingQty > 0 ? (decimal)l.Qty / normalizingQty : 0m;
+			total += (l.Side == Side.Buy ? 1m : -1m) * weight * OptionMath.LegContractValueWithBs(price, l.Parsed!, l.Symbol, l.Side, evalDate, opts);
+		}
+		return total;
+	}
+
+	/// <summary>A leg's anchor basis (model − market mid), measured at the market state: the row nearest the real spot, the anchor column,
+	/// and the market's IV (calibrated, else vendor) — never a --iv override. An --iv value is a scenario priced ON TOP of the anchored
+	/// market, as --spot is (the basis is measured at the real spot); measured with the override, the basis absorbed the whole IV change
+	/// and the anchored grid priced the scenario straight back to the mid (a 22% → 15% IV crush read as no change at all). Null when the
+	/// leg isn't quoted two-sided.</summary>
+	private static decimal? MarketBasis(decimal price, OptionParsed parsed, string symbol, Side side, DateTime anchor, AnalysisOptions opts)
+	{
+		if (opts.OptionQuotes == null || !opts.OptionQuotes.TryGetValue(symbol, out var q) || !q.Bid.HasValue || !q.Ask.HasValue) return null;
+		return OptionMath.LegContractValueWithBs(price, parsed, symbol, side, anchor, OptionMath.MarketState(opts)) - (q.Bid.Value + q.Ask.Value) / 2m;
+	}
+
+	/// <summary>A model value less its anchor basis, never past zero: an option is worth at least nothing. The basis is one constant carried
+	/// across the whole grid while the model value decays toward zero away from the money and toward expiry, so subtracting it unbounded
+	/// priced a 723P at −$7.98 a share (and the diagonal holding it above its own long leg) under a high --iv.
+	/// <paramref name="direction"/> is the cell's sign: +1 for a leg's contract value, the leg's direction for a single-leg cell that
+	/// carries it (a short leg's cell is ≤ 0).</summary>
+	private static decimal AnchoredLegValue(decimal value, decimal basis, decimal direction)
+	{
+		var anchored = Math.Round(value - basis, 4);
+		return direction > 0m ? Math.Max(0m, anchored) : Math.Min(0m, anchored);
 	}
 
 	/// <summary>

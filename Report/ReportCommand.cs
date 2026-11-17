@@ -486,7 +486,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		// vendor-reported IV, which an off-hours book can render meaningless.
 		if ((settings.Calibrated || marksAsOfEvalDate) && optionQuotesBySymbol != null && underlyingPrices != null)
 		{
-			calibratedIv = BuildCalibratedIv(optionQuotesBySymbol, underlyingPrices, ivOverrides, dividends);
+			calibratedIv = BuildCalibratedIv(optionQuotesBySymbol, underlyingPrices, dividends);
 			if (calibratedIv != null)
 				WebullAnalytics.Utils.Log.Debug($"Calibration: solved mid-implied IV for {calibratedIv.Count} contract(s); future grid values anchored to the live mid surface.");
 		}
@@ -555,13 +555,14 @@ class ReportCommand : AsyncCommand<ReportSettings>
 	/// override wins regardless), as are legs whose mid cannot be inverted (no two-sided quote, mid ≤
 	/// intrinsic, expired, or non-convergent) — those fall through to the broker IV unchanged.
 	/// </summary>
-	private static IReadOnlyDictionary<string, decimal>? BuildCalibratedIv(IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> underlyingPrices, IReadOnlyDictionary<string, decimal>? ivOverrides, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends)
+	private static IReadOnlyDictionary<string, decimal>? BuildCalibratedIv(IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> underlyingPrices, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividends)
 	{
 		var asOf = OptionMath.ObservationInstant(); // when the loaded quotes were struck (now live / last close off-hours); matches the grid's leftmost column
 		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		// Every quoted leg, --iv overridden ones too: the override still wins in GetLegIv, and the calibrated IV is the market state an
+		// IV scenario is measured from (OptionMath.MarketState).
 		foreach (var symbol in quotes.Keys)
 		{
-			if (ivOverrides != null && ivOverrides.ContainsKey(symbol)) continue;
 			var parsed = ParsingHelpers.ParseOptionSymbol(symbol);
 			if (parsed == null) continue;
 

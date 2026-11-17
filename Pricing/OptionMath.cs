@@ -371,14 +371,22 @@ internal static class OptionMath
 		if (opts.OptionQuotes == null || !opts.OptionQuotes.TryGetValue(symbol, out var quote) || !quote.Bid.HasValue || !quote.Ask.HasValue)
 			return null;
 		var mark = (quote.Bid.Value + quote.Ask.Value) / 2m;
-		if (opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var ovSpot)
-			&& opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var mktSpot))
+		// A --spot or --iv scenario shifts the mid by the model's change from the market state (real spot, market IV, when the mid was
+		// struck) to the scenario. The reference must be the market's IV: priced with the override on both sides, an IV scenario's own
+		// effect cancels out and the mark stays at the mid.
+		var spotOverride = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(parsed.Root, out var ovSpot) ? ovSpot : (decimal?)null;
+		var ivOverride = opts.IvOverrides != null && opts.IvOverrides.ContainsKey(symbol);
+		if ((spotOverride.HasValue || ivOverride) && opts.UnderlyingPrices != null && opts.UnderlyingPrices.TryGetValue(parsed.Root, out var mktSpot))
 		{
-			mark += LegContractValueWithBs(ovSpot, parsed, symbol, side, evalInstant, opts)
-				  - LegContractValueWithBs(mktSpot, parsed, symbol, side, refInstant, opts);
+			mark += LegContractValueWithBs(spotOverride ?? mktSpot, parsed, symbol, side, evalInstant, opts)
+				  - LegContractValueWithBs(mktSpot, parsed, symbol, side, refInstant, MarketState(opts));
 		}
 		return mark;
 	}
+
+	/// <summary><paramref name="opts"/> without its --iv scenario: legs price on the market's IV (calibrated, else vendor). The reference
+	/// a scenario is measured from — the market-anchored grid's basis and the headline mark's shift.</summary>
+	internal static AnalysisOptions MarketState(AnalysisOptions opts) => opts.IvOverrides == null ? opts : opts with { IvOverrides = null };
 
 	/// <summary>Computes total P&L at expiration for all legs (intrinsic value only).</summary>
 	internal static decimal StrategyPnLAtExpiration(decimal underlyingPrice, List<(PositionRow row, OptionParsed parsed, string symbol)> legs, int qty) =>

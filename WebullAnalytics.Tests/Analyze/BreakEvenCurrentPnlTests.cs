@@ -164,4 +164,71 @@ public class BreakEvenCurrentPnlTests : IDisposable
 		Assert.True(Math.Abs(grid.PnLs[row, col] - res.CurrentPnl!.Value) < 25m,
 			$"combined grid eval cell {grid.PnLs[row, col]} vs combined Current P&L {res.CurrentPnl} must reconcile");
 	}
+
+	private static (List<PositionRow> Group, string ShortOcc, string LongOcc) GmeDiagonal(DateTime near, DateTime far)
+	{
+		var shortOcc = MatchKeys.OccSymbol("GME", near, 25m, "C");
+		var longOcc = MatchKeys.OccSymbol("GME", far, 25m, "C");
+		var parent = new PositionRow(Instrument: "GME Diagonal", Asset: Asset.OptionStrategy, OptionKind: "Diagonal",
+			Side: Side.Buy, Qty: 10, AvgPrice: 1.80m, Expiry: near, IsStrategyLeg: false, MatchKey: "GME-DIAG");
+		return (new List<PositionRow> { parent, Leg(longOcc, Side.Buy, 10, 3.00m, far, "C"), Leg(shortOcc, Side.Sell, 10, 1.20m, near, "C") }, shortOcc, longOcc);
+	}
+
+	private static decimal ValueAt(string occ, AnalysisOptions opts, DateTime when) => OptionMath.LegContractValueWithBs(24.50m, ParsingHelpers.ParseOptionSymbol(occ)!, occ, Side.Buy, when, opts);
+
+	/// <summary>An --iv scenario is priced ON TOP of the market: the headline mark moves off the mid by the model's change from the market's
+	/// IV to the scenario's, and the anchored grid's today column agrees. The regression: the grid's anchor basis was measured with the
+	/// override, so it absorbed the whole IV change and an IV crush read as no change at all (today's column stayed at the mid).</summary>
+	[Fact]
+	public void IvScenario_MovesTheHeadlineAndTheGridOffTheMid()
+	{
+		var (group, shortOcc, longOcc) = GmeDiagonal(DateTime.Today.AddDays(45), DateTime.Today.AddDays(90));
+		var market = new AnalysisOptions
+		{
+			OptionQuotes = new Dictionary<string, OptionContractQuote> { [longOcc] = TestQuote.Q(2.95m, 3.05m, iv: 0.55m), [shortOcc] = TestQuote.Q(1.15m, 1.25m, iv: 0.60m) },
+			UnderlyingPrices = new Dictionary<string, decimal> { ["GME"] = 24.50m },
+			Theoretical = false,
+		};
+		var crush = market with { IvOverrides = new Dictionary<string, decimal> { [shortOcc] = 0.30m, [longOcc] = 0.30m } };
+
+		var atMarket = BreakEvenAnalyzer.Analyze(group, market).Single(r => r.Grid != null && r.CurrentPnl.HasValue);
+		var atCrush = BreakEvenAnalyzer.Analyze(group, crush).Single(r => r.Grid != null && r.CurrentPnl.HasValue);
+
+		// Expected shift: per share, Σ sign × (value at the scenario IV − value at the market IV), at the real spot, now; × qty × 100.
+		var now = DateTime.Now;
+		var expectedShift = ((ValueAt(longOcc, crush, now) - ValueAt(longOcc, market, now)) - (ValueAt(shortOcc, crush, now) - ValueAt(shortOcc, market, now))) * 10 * 100;
+		Assert.True(expectedShift < -100m, $"the fixture must be a real IV crush on a long-vega diagonal (shift {expectedShift})");
+		Assert.Equal(expectedShift, atCrush.CurrentPnl!.Value - atMarket.CurrentPnl!.Value, 0);
+
+		var grid = atCrush.Grid!;
+		int row = 0; var best = decimal.MaxValue;
+		for (int r = 0; r < grid.PriceRows.Count; r++) { var d = Math.Abs(grid.PriceRows[r] - 24.50m); if (d < best) { best = d; row = r; } }
+		var rowShift = Math.Abs(grid.PriceRows[row] - 24.50m);
+		Assert.True(Math.Abs(grid.PnLs[row, 0] - atCrush.CurrentPnl!.Value) < 25m + rowShift * 1000m,
+			$"grid today cell {grid.PnLs[row, 0]} vs headline {atCrush.CurrentPnl} — the IV scenario must show in both");
+	}
+
+	/// <summary>An anchored leg value is never below zero. The basis (model − mid) is one constant carried across the grid while the model
+	/// value decays toward zero away from the money and toward expiry; a vendor IV far above the mid-implied one makes that basis large, and
+	/// subtracting it unbounded priced options at negative values (a 723P at −$7.98 a share).</summary>
+	[Fact]
+	public void AnchoredLegValues_NeverGoNegative()
+	{
+		var (group, shortOcc, longOcc) = GmeDiagonal(DateTime.Today.AddDays(10), DateTime.Today.AddDays(40));
+		var opts = new AnalysisOptions
+		{
+			// The short's vendor IV (250%) is far above what its 1.20 mid implies → a large positive basis on the short leg.
+			OptionQuotes = new Dictionary<string, OptionContractQuote> { [longOcc] = TestQuote.Q(2.95m, 3.05m, iv: 0.55m), [shortOcc] = TestQuote.Q(1.15m, 1.25m, iv: 2.50m) },
+			UnderlyingPrices = new Dictionary<string, decimal> { ["GME"] = 24.50m },
+			Theoretical = false,
+		};
+
+		var grid = BreakEvenAnalyzer.Analyze(group, opts).Single(r => r.Grid != null).Grid!;
+
+		Assert.NotNull(grid.LegValues);
+		for (int li = 0; li < grid.LegValues!.GetLength(0); li++)
+			for (int pi = 0; pi < grid.LegValues.GetLength(1); pi++)
+				for (int di = 0; di < grid.LegValues.GetLength(2); di++)
+					Assert.True(grid.LegValues[li, pi, di] >= 0m, $"leg {li} at {grid.PriceRows[pi]} on {grid.DateColumns[di]:MM-dd} priced {grid.LegValues[li, pi, di]}");
+	}
 }
