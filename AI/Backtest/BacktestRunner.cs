@@ -51,6 +51,12 @@ internal sealed class BacktestRunner
 	/// <summary>Peak marks of <see cref="Rules.TrailingStopRule"/>, shared by the rule the evaluator runs on the multi-day walks and the
 	/// one the 0DTE walk runs itself. In memory: a backtest's peaks die with the run.</summary>
 	private readonly Rules.TrailingStopStore _trailingStops = new();
+	/// <summary>The session minute (ET) up to which today's intraday management has run (<see cref="ManageTodayThroughAsync"/>); minutes before it
+	/// are already managed. <see cref="DateTime.MinValue"/> at the start of each step.</summary>
+	private DateTime _managedThroughEt;
+	/// <summary>Lineages a 0DTE walk rule consumed for the day without closing them (a leg-in or condor completion: the result rides to expiry),
+	/// so a later stretch of the same session's walk leaves them alone.</summary>
+	private readonly HashSet<long> _zeroDteConsumed = new();
 
 	private readonly int _cascadeCadenceMinutes;
 	private readonly bool _cascadeRecache;
@@ -145,6 +151,8 @@ internal sealed class BacktestRunner
 				Pricing.OptionMath.RiskFreeRate = dayRate;
 			// The trading-time clock as calibrated through the prior session (a fit is only used after its last session).
 			Pricing.MarketClock.PinnedDay = DateOnly.FromDateTime(step);
+			_managedThroughEt = DateTime.MinValue;
+			_zeroDteConsumed.Clear();
 			var swSection = profile ? System.Diagnostics.Stopwatch.StartNew() : null;
 
 			// Step 1: management rules. Run BEFORE settlement so CloseBeforeShortExpiryRule (and
@@ -184,7 +192,7 @@ internal sealed class BacktestRunner
 			// riding to a 16:00 intrinsic settle (2026-07-29: a diagonal at +17% at 09:30 — under every
 			// gate — rode the sell-off to a ~0% ITM expiry that live's assignment-risk trigger would have
 			// closed near +30% at the strike cross).
-			await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: false, cancellation);
+			await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: false, DateTime.MinValue, step.Date.Add(MarketCloseTime), cancellation);
 			ReportUnfilledRuleActions(step);
 
 			if (profile) { msStep1 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
@@ -232,23 +240,15 @@ internal sealed class BacktestRunner
 				}
 			}
 
-			// Signal-driven cascade trades (opener.cascade): each confirmed setup's one trade, at its first confirmation of the day.
-			await OpenCascadeTradesAsync(step, tickerSet, cancellation);
+			// Signal-driven cascade trades (opener.cascade): each confirmed setup's one trade, at its first confirmation of the day. Today's
+			// positions are managed up to each reading before it is evaluated, so the opener sees the book as it stands at that minute.
+			await OpenCascadeTradesAsync(step, evaluator, tickerSet, cancellation);
 
 			if (profile) { msStep3 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
 
-			// Intraday SL/TP simulation: re-price each open position at the day's bar.High and bar.Low
-			// (with mid-session TTE for 0DTE) and fire StopLossRule / TakeProfitRule against both
-			// extremes. Without this, 0DTE positions never see their stops or profit targets because
-			// the daily-step engine jumps straight from open to expiry. Closes here happen BEFORE
-			// settlement so any 0DTE position that would have stopped intraday doesn't double-count
-			// at expiration.
-			await RunIntradayTriggersAsync(step, evaluator, cancellation);
-
-			// Positions opened THIS step get the same management minute-walk from the minute after their
-			// fill — live manages a fresh open on its very next tick. Runs after the opener so the fills
-			// exist, and before the settlement pass below for the same reason as Step 1.5.
-			await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: true, cancellation);
+			// The rest of the session's intraday management (whatever the cascade loop above has not already walked). Closes here
+			// happen BEFORE settlement so any 0DTE position that would have stopped intraday doesn't double-count at expiration.
+			await ManageTodayThroughAsync(step, evaluator, tickerSet, step.Date.Add(MarketCloseTime), cancellation);
 
 			// 0DTE: a position opened this step whose short leg expires today must settle today, not
 			// roll over to tomorrow and pick up the wrong bar. The second pass is a no-op when none
@@ -667,7 +667,22 @@ internal sealed class BacktestRunner
 	/// carry-over positions, walked between the daily rule pass and settlement (an expiry-day short must be
 	/// closeable BEFORE <see cref="SettleExpirationsAsync"/> sweeps it); true = positions opened this step,
 	/// walked after the opener so the fills exist, starting the minute after each fill (live's next tick).</summary>
-	private async Task RunManagementMinuteWalkAsync(DateTime step, RuleEvaluator evaluator, IReadOnlySet<string> tickerSet, bool openedToday, CancellationToken cancellation)
+	/// <summary>Today's intraday management through the minutes before <paramref name="untilEt"/>, resuming where the last call stopped:
+	/// the 0DTE trigger walk (intraday SL/TP/trailing/leg-in — the daily-step engine would otherwise jump a 0DTE position straight from
+	/// open to expiry), then the minute walk of multi-DTE positions opened today, which live manages from the tick after their fill.
+	/// Called once to the close on a plain day; the cascade loop calls it up to each reading first, so a position a rule closed before
+	/// the reading is out of the book (cash, held legs) when the opener looks at it, as it would be live.</summary>
+	private async Task ManageTodayThroughAsync(DateTime step, RuleEvaluator evaluator, IReadOnlySet<string> tickerSet, DateTime untilEt, CancellationToken cancellation)
+	{
+		if (untilEt <= _managedThroughEt) return;
+		await RunIntradayTriggersAsync(step, _managedThroughEt, untilEt, cancellation);
+		await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: true, _managedThroughEt, untilEt, cancellation);
+		_managedThroughEt = untilEt;
+	}
+
+	/// <param name="fromEt">First minute walked (earlier minutes were walked by a previous call).</param>
+	/// <param name="untilEt">Walk stops before this minute.</param>
+	private async Task RunManagementMinuteWalkAsync(DateTime step, RuleEvaluator evaluator, IReadOnlySet<string> tickerSet, bool openedToday, DateTime fromEt, DateTime untilEt, CancellationToken cancellation)
 	{
 		var byTicker = _book.OpenPositions.Values
 			.Where(p => !IsAllZeroDte(p, step) && (p.OpenedAt.HasValue && p.OpenedAt.Value.Date == step.Date) == openedToday)
@@ -706,6 +721,8 @@ internal sealed class BacktestRunner
 			{
 				var minuteBar = minuteBars[mwi];
 				cancellation.ThrowIfCancellationRequested();
+				if (MinuteEt(minuteBar) >= untilEt) break;
+				if (MinuteEt(minuteBar) < fromEt) continue;
 				if (pending.RemoveWhere(k => !_book.OpenPositions.ContainsKey(k)) > 0) lookaheadValidFrom = int.MaxValue;
 				if (pending.Count == 0) break;
 				var minuteEt = MinuteEt(minuteBar);
@@ -763,6 +780,8 @@ internal sealed class BacktestRunner
 					if (pending.Contains(c.Result.Proposal.PositionKey)) // not already acted on at M (ApplyManagementResults reads the M snapshot)
 						pending.ExceptWith(ApplyManagementResults(c.MinuteEt, new[] { c.Result }, stillOpen, c.Quotes, c.Underlyings, recordDrop: false));
 			}
+			// Look-ahead snapshots past where the walk stopped read the book; settle them before the caller (an opener, the next group) changes it.
+			await Task.WhenAll(lookahead.Where(t => t != null)).ContinueWith(_ => { }, TaskScheduler.Default);
 		}
 	}
 
@@ -906,7 +925,9 @@ internal sealed class BacktestRunner
 		return (confirmed ?? results, (IReadOnlyList<ConfirmedClose>?)atNext ?? Array.Empty<ConfirmedClose>());
 	}
 
-	private async Task RunIntradayTriggersAsync(DateTime step, RuleEvaluator evaluator, CancellationToken cancellation)
+	/// <param name="fromEt">First minute walked (earlier minutes were walked by a previous call).</param>
+	/// <param name="untilEt">Walk stops before this minute.</param>
+	private async Task RunIntradayTriggersAsync(DateTime step, DateTime fromEt, DateTime untilEt, CancellationToken cancellation)
 	{
 		if (_book.OpenPositions.Count == 0) return;
 		var realizedExpectancy = _config.Opener.RealizedExpectancy;
@@ -933,14 +954,17 @@ internal sealed class BacktestRunner
 			// captured-bar basis as entry, so entry and management never disagree. This specialized SL/TP
 			// walk stays all-0DTE-only.
 			if (!IsAllZeroDte(pos, step)) continue;
+			if (_book.LineageFor(pos.Key) is { } lineage && _zeroDteConsumed.Contains(lineage)) continue;
 
 			// Prefer the minute-walk: walks minute bars chronologically and triggers at the first
 			// minute the position mark crosses SL or TP. Removes the bar.Low / bar.High pessimism
 			// of the 2-point sampling (which fires SL on intraday spikes that never realized as
 			// actual fills, especially for 0DTE near-the-money positions). Falls back to the
 			// legacy 2-point logic when no minute data exists for this date.
-			var triggered = await TryMinuteWalkTriggerAsync(step, pos, cash, accountValue, realizedExpectancy, cancellation);
+			var triggered = await TryMinuteWalkTriggerAsync(step, pos, fromEt, untilEt, cash, accountValue, realizedExpectancy, cancellation);
 			if (triggered) continue;
+			// The whole-day 2-point fallback below belongs to the session's last stretch only: an earlier stretch would evaluate minutes it has not reached.
+			if (untilEt < step.Date.Add(MarketCloseTime)) continue;
 
 			// The 2-point fallback below evaluates the WHOLE day's bar Low/High — including minutes BEFORE
 			// the position opened — and stamps the close at `step` (~09:30) with a bisected threshold-spot.
@@ -1015,7 +1039,9 @@ internal sealed class BacktestRunner
 		return pos.AdjustedNetDebit + pct * entryPremium;
 	}
 
-	private async Task<bool> TryMinuteWalkTriggerAsync(DateTime step, OpenPosition pos, decimal cash, decimal accountValue, OpenerRealizedExpectancyConfig realizedExpectancy, CancellationToken cancellation)
+	/// <param name="fromEt">First minute the rules are evaluated at; the minutes before it (walked by a previous call) only feed the running intraday range.</param>
+	/// <param name="untilEt">Walk stops before this minute.</param>
+	private async Task<bool> TryMinuteWalkTriggerAsync(DateTime step, OpenPosition pos, DateTime fromEt, DateTime untilEt, decimal cash, decimal accountValue, OpenerRealizedExpectancyConfig realizedExpectancy, CancellationToken cancellation)
 	{
 		var symbols = pos.Legs
 			.Where(l => l.CallPut != null)
@@ -1119,9 +1145,12 @@ internal sealed class BacktestRunner
 			var spot = minuteBar.Close;
 			var minutesToClose = Math.Max(1.0, (endUtc - (minuteUtc + QuoteStoreCache.BookLag)).TotalMinutes);
 
+			if (MinuteEt(minuteBar) >= untilEt) break;
+
 			// Update intraday range with this minute's H/L (complete at the book instant).
 			if (minuteBar.High > dayHigh) dayHigh = minuteBar.High;
 			if (minuteBar.Low < dayLow) dayLow = minuteBar.Low;
+			if (MinuteEt(minuteBar) < fromEt) continue;
 
 			var vixNow = CausalVix(vixBars, ref vixCursor, minuteUtc + QuoteStoreCache.BookLag, fallbackVix);
 
@@ -1201,6 +1230,7 @@ internal sealed class BacktestRunner
 						else
 							newStructure = string.Equals(pos.StrategyKind, "LongCall", StringComparison.OrdinalIgnoreCase) ? OpenStructureKind.LongCallVertical : OpenStructureKind.LongPutVertical;
 						var legInFills = new[] { new BacktestLegFill(shortLeg.Symbol, Side.Sell, pos.Quantity, ExecPrice(Side.Sell, sBid, sAsk)) };
+						ConsumeForDay(pos);
 						_book.LegIn(legInMinuteEt, pos.Key, legInFills, "LegInShortRule", newStructure, spot);
 						return true; // mirror SL/TP semantics: a fired rule consumes the position for the day.
 					}
@@ -1232,6 +1262,7 @@ internal sealed class BacktestRunner
 							new BacktestLegFill(sellLeg.Symbol, Side.Sell, pos.Quantity, ExecPrice(Side.Sell, csBid, csAsk)),
 							new BacktestLegFill(buyLeg.Symbol, Side.Buy, pos.Quantity, ExecPrice(Side.Buy, cbBid, cbAsk))
 						};
+						ConsumeForDay(pos);
 						_book.LegIn(minuteEt, pos.Key, NoArb(condorFills), "CompleteCondorRule", OpenStructureKind.IronCondor, spot);
 						return true;
 					}
@@ -1332,6 +1363,12 @@ internal sealed class BacktestRunner
 		}
 
 		return false;
+	}
+
+	/// <summary>Marks <paramref name="pos"/>'s lineage as done with the 0DTE walk for the day: a leg-in or condor completion re-keys it, and the result rides to expiry.</summary>
+	private void ConsumeForDay(OpenPosition pos)
+	{
+		if (_book.LineageFor(pos.Key) is { } lineage) _zeroDteConsumed.Add(lineage);
 	}
 
 	/// <summary>The evaluation context of one position at one minute of the 0DTE walk, for a rule run outside the evaluator.</summary>
@@ -1535,7 +1572,9 @@ internal sealed class BacktestRunner
 	/// <summary>Runs the day's cascade readings through the cascade opener in time order and books the trades it proposes. A reading is
 	/// of an instant T; the book struck at T is the quote store's row T−1:00 (<see cref="QuoteStoreCache"/>'s book instant), so the trade is
 	/// priced from and stamped at that minute — decision and fill on the same book, as for every other backtest open.</summary>
-	private async Task OpenCascadeTradesAsync(DateTime step, HashSet<string> tickerSet, CancellationToken cancellation)
+	/// <remarks>Before each reading, today's positions are managed through the minutes before its book minute (<see cref="ManageTodayThroughAsync"/>):
+	/// a trade a rule closed earlier in the session no longer holds legs, cash or a place in the book when a later setup confirms.</remarks>
+	private async Task OpenCascadeTradesAsync(DateTime step, RuleEvaluator evaluator, HashSet<string> tickerSet, CancellationToken cancellation)
 	{
 		if (_cascadeReads == null || !_cascadeReads.TryGetValue(step.Date, out var pending)) return;
 		var ticker = _config.Ticker;
@@ -1549,6 +1588,7 @@ internal sealed class BacktestRunner
 		{
 			cancellation.ThrowIfCancellationRequested();
 			var minuteEt = step.Date + moment.TimeEt - TimeSpan.FromMinutes(1);
+			await ManageTodayThroughAsync(step, evaluator, tickerSet, minuteEt, cancellation);
 			var trades = CascadeTradesToPrice(moment);
 			var quotes = trades.Count > 0 ? await CascadeLegQuotesAsync(ticker, step.Date, minuteEt, moment, trades, cancellation) : noQuotes;
 			_cascadeRead = new Analyze.CascadeLiveRead(moment.Reading, moment.Reading.Terrain.ExpiryCount, moment.Spot, quotes);
