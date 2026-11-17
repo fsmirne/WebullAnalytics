@@ -57,6 +57,10 @@ internal sealed class BacktestRunner
 	/// <summary>Lineages a 0DTE walk rule consumed for the day without closing them (a leg-in or condor completion: the result rides to expiry),
 	/// so a later stretch of the same session's walk leaves them alone.</summary>
 	private readonly HashSet<long> _zeroDteConsumed = new();
+	/// <summary>Lineages a management minute walk acted on today (a close, roll or leg-in). The walk runs in stretches up to each opener
+	/// decision, and a roll or leg-in re-keys the position, so without this a later stretch would pick the re-keyed position up and manage
+	/// it again the same day — a result that would depend on where the opener's decision minutes split the session.</summary>
+	private readonly HashSet<long> _walkConsumed = new();
 
 	private readonly int _cascadeCadenceMinutes;
 	private readonly bool _cascadeRecache;
@@ -68,6 +72,11 @@ internal sealed class BacktestRunner
 	private readonly List<(Analyze.CascadeRegime Setup, string? Side, string Reason)> _cascadeUnfilled = new();
 	/// <summary>The reading the cascade opener's reader hands back: set by the day loop just before each evaluation.</summary>
 	private Analyze.CascadeLiveRead? _cascadeRead;
+	/// <summary>Today's cascade readings (null without any), the next one <see cref="AdvanceDayThroughAsync"/> evaluates, and today's
+	/// cascade opens so far (for live's daily cap).</summary>
+	private IReadOnlyList<Analyze.CascadeMoment>? _cascadeToday;
+	private int _cascadeNext;
+	private int _cascadeOpenedToday;
 	// Proposal-replay mode (--proposals): non-null replaces the opener entirely — each day's recorded live
 	// proposal opens are booked at their recorded submit prices, then managed by the normal rule engine.
 	private readonly IReadOnlyDictionary<DateTime, List<ProposalReplayOpen>>? _replayOpensByDate;
@@ -139,7 +148,7 @@ internal sealed class BacktestRunner
 		// useful when a recent change makes the backtest noticeably slower than before.
 		var profile = _profile;
 		var swTotal = profile ? System.Diagnostics.Stopwatch.StartNew() : null;
-		long msStep1 = 0, msStep2 = 0, msStep3 = 0, msTriggers = 0, msMtm = 0;
+		long msStep1 = 0, msStep3 = 0, msTriggers = 0, msMtm = 0;
 		var done = 0;
 
 		foreach (var step in steps)
@@ -153,6 +162,7 @@ internal sealed class BacktestRunner
 			Pricing.MarketClock.PinnedDay = DateOnly.FromDateTime(step);
 			_managedThroughEt = DateTime.MinValue;
 			_zeroDteConsumed.Clear();
+			_walkConsumed.Clear();
 			var swSection = profile ? System.Diagnostics.Stopwatch.StartNew() : null;
 
 			// Step 1: management rules. Run BEFORE settlement so CloseBeforeShortExpiryRule (and
@@ -185,26 +195,19 @@ internal sealed class BacktestRunner
 				ApplyManagementResults(step, results, openPositions, quoteSnapshot.Options, quoteSnapshot.Underlyings, recordDrop: true);
 			}
 
-			// Step 1.5: intraday management minute-walk for carry-over multi-DTE positions — live watch
-			// re-evaluates the full rule set every ~60s, so exits fire mid-session (ITM assignment
-			// force-close, TakeProfit crossing), not just at the open. Must run BEFORE settlement so an
-			// expiry-day short that goes ITM intraday is closed the way live would close it, rather than
-			// riding to a 16:00 intrinsic settle (2026-07-29: a diagonal at +17% at 09:30 — under every
-			// gate — rode the sell-off to a ~0% ITM expiry that live's assignment-risk trigger would have
-			// closed near +30% at the strike cross).
-			await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: false, DateTime.MinValue, step.Date.Add(MarketCloseTime), cancellation);
-			ReportUnfilledRuleActions(step);
-
 			if (profile) { msStep1 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
 
-			// Step 2: settle anything that's still in the book and has reached expiry. Anything still
-			// here at this point is either (a) the rule engine didn't decide to close it, or (b) the
-			// position has only-OTM short legs and is harmless to let expire worthless.
-			await SettleExpirationsAsync(step, cancellation);
+			// The rest of the session runs in time order on one clock (AdvanceDayThroughAsync): the intraday management walk (live
+			// re-evaluates every rule each ~60s, so an ITM expiry-day short is force-closed and a TakeProfit fires at the minute it
+			// crosses) advances only up to each opener decision, so an open is sized from the cash and checked against the positions the
+			// book holds at its minute. Walking the whole session (and settling 16:00 expirations) before the opener let a 09:30 open spend
+			// cash from closes later that day: cash went negative on the 09:30 fill (2026-01-29: 21 lots at −$2,634, funded by 09:43–09:48
+			// TakeProfits) and every compounding size was inflated by same-day future proceeds.
+			_cascadeToday = _cascadeReads != null && _cascadeReads.TryGetValue(step.Date, out var cascadePending) ? await cascadePending.Task : null;
+			_cascadeNext = 0;
+			_cascadeOpenedToday = 0;
 
-			if (profile) { msStep2 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
-
-			// Step 3: opener — scan intraday minute by minute. Previously fired once at 09:30 ET
+			// Step 2: opener — scan intraday minute by minute. Previously fired once at 09:30 ET
 			// because there was no minute data to anchor any other moment; with backfilled
 			// data/intraday/<TICKER>/<date>.csv we can now re-evaluate at each minute and let the
 			// existing score gate (cfg.MinScoreToOpen) decide when conditions warrant a fill. Top-N
@@ -219,11 +222,14 @@ internal sealed class BacktestRunner
 			{
 				if (_replayOpensByDate.TryGetValue(step.Date, out var todaysOpens))
 					foreach (var o in todaysOpens)
+					{
+						await AdvanceDayThroughAsync(step, evaluator, tickerSet, o.OpenEt, cancellation);
 						OpenLegsIntoBook(o.OpenEt, o.Ticker, o.StructureKind, o.Legs, _fixedContracts ?? o.Qty, o.Spot, o.RawScore, o.FinalScore, o.RepIv, o.ApplySlippage);
+					}
 			}
 			else if (scoredOpener)
 			{
-				var openedAtMinute = await TryOpenAcrossDayAsync(step, tickerSet, openEvaluator, cancellation);
+				var openedAtMinute = await TryOpenAcrossDayAsync(step, tickerSet, evaluator, openEvaluator, cancellation);
 				// Fallback: if there is no intraday data for this day (dates before the massive.com/Polygon
 				// tape, which covers SPY from 2021-07-19, or any future hole), use the legacy 09:30 single-call path.
 				if (!openedAtMinute.HasIntraday)
@@ -240,19 +246,16 @@ internal sealed class BacktestRunner
 				}
 			}
 
-			// Signal-driven cascade trades (opener.cascade): each confirmed setup's one trade, at its first confirmation of the day. Today's
-			// positions are managed up to each reading before it is evaluated, so the opener sees the book as it stands at that minute.
-			await OpenCascadeTradesAsync(step, evaluator, tickerSet, cancellation);
-
 			if (profile) { msStep3 += swSection!.ElapsedMilliseconds; swSection.Restart(); }
 
-			// The rest of the session's intraday management (whatever the cascade loop above has not already walked). Closes here
-			// happen BEFORE settlement so any 0DTE position that would have stopped intraday doesn't double-count at expiration.
-			await ManageTodayThroughAsync(step, evaluator, tickerSet, step.Date.Add(MarketCloseTime), cancellation);
+			// The rest of the session: the cascade readings and management minutes the opener scan has not reached. Closes here happen
+			// BEFORE settlement, so an expiry-day short that goes ITM intraday is closed the way live would close it rather than riding
+			// to a 16:00 intrinsic settle, and a 0DTE position that stopped intraday doesn't double-count at expiration.
+			await AdvanceDayThroughAsync(step, evaluator, tickerSet, step.Date.Add(MarketCloseTime), cancellation);
+			ReportUnfilledRuleActions(step);
 
-			// 0DTE: a position opened this step whose short leg expires today must settle today, not
-			// roll over to tomorrow and pick up the wrong bar. The second pass is a no-op when none
-			// of the opens are 0DTE.
+			// Settle anything still in the book that has reached expiry: either no rule decided to close it, or its short legs are OTM
+			// and harmless to let expire worthless. A position opened today whose short expires today settles here too.
 			await SettleExpirationsAsync(step, cancellation);
 
 			if (profile) { msTriggers += swSection!.ElapsedMilliseconds; swSection.Restart(); }
@@ -284,9 +287,8 @@ internal sealed class BacktestRunner
 			Console.WriteLine();
 			Console.WriteLine($"[profile] backtest wall time: {total:N0} ms ({steps.Count} trading days, {(double)total / Math.Max(1, steps.Count):F1} ms/day avg)");
 			Console.WriteLine($"[profile]   step 1 (rules):              {msStep1:N0} ms ({(double)msStep1 * 100 / Math.Max(1, total):F1}%)");
-			Console.WriteLine($"[profile]   step 2 (settle pre-open):    {msStep2:N0} ms ({(double)msStep2 * 100 / Math.Max(1, total):F1}%)");
-			Console.WriteLine($"[profile]   step 3 (opener minute loop): {msStep3:N0} ms ({(double)msStep3 * 100 / Math.Max(1, total):F1}%)");
-			Console.WriteLine($"[profile]   intraday triggers + settle:  {msTriggers:N0} ms ({(double)msTriggers * 100 / Math.Max(1, total):F1}%)");
+			Console.WriteLine($"[profile]   opener (+ mgmt to its minute): {msStep3:N0} ms ({(double)msStep3 * 100 / Math.Max(1, total):F1}%)");
+			Console.WriteLine($"[profile]   rest of session + settle:    {msTriggers:N0} ms ({(double)msTriggers * 100 / Math.Max(1, total):F1}%)");
 			Console.WriteLine($"[profile]   end-of-step MTM:             {msMtm:N0} ms ({(double)msMtm * 100 / Math.Max(1, total):F1}%)");
 		}
 
@@ -517,11 +519,13 @@ internal sealed class BacktestRunner
 		if (p.CashReserveBlocked) return 0;
 		if (p.Qty < 1) return 0;
 		// Buying power a new contract needs: its margin (MarginCalculator — the collateral, e.g. a credit vertical's width or an inverted
-		// diagonal's strike loss) plus the debit it pays; a credit received lands in cash. Existing positions hold their own margin,
-		// which the cash balance doesn't reflect (a debit already left cash; collateral never did). The backtest scores one ticker, so
-		// the proposal's spot prices any naked short in the book.
+		// diagonal's strike loss) plus the cash the book takes for it — the debit at the price it fills at, slippage and fees, exactly as
+		// SimulatedBook.Open charges them (the scorer's mid debit left those out, so a cap sized to the last dollar overdrew cash on the
+		// fill); a net credit received lands in cash. Existing positions hold their own margin, which the cash balance doesn't reflect
+		// (a debit already left cash; collateral never did). The backtest scores one ticker, so the proposal's spot prices any naked short.
+		if (BuildLegFillsFromProposal(p.Legs, 1) is not { } fillsForOne) return 0;
 		var marginPerContract = MarginCalculator.Requirement(MarginLegs(p.Legs.Select(l => (l.Symbol, string.Equals(l.Action, "buy", StringComparison.OrdinalIgnoreCase), l.Qty)), p.Legs), p.Spot).Total / Math.Max(1, p.Qty)
-			+ Math.Max(0m, -p.DebitOrCreditPerContract);
+			+ Math.Max(0m, _book.OpenCashOutPerContract(p.StructureKind, fillsForOne, applySlippage: true));
 		if (marginPerContract <= 0m) return 0;
 		var marginHeld = 0m;
 		foreach (var pos in _book.OpenPositions.Values)
@@ -663,29 +667,50 @@ internal sealed class BacktestRunner
 	/// divergence — marks here are real minute NBBO, the same basis as entry. Days with no minute tape keep the
 	/// daily-pass-only behavior. A position that fires any rule is consumed for the day (same semantics as the
 	/// 0DTE walk; live would keep managing a rolled position intraday — the next daily pass picks it up).
-	/// <paramref name="openedToday"/> selects the population so the two call sites never double-walk: false =
-	/// carry-over positions, walked between the daily rule pass and settlement (an expiry-day short must be
-	/// closeable BEFORE <see cref="SettleExpirationsAsync"/> sweeps it); true = positions opened this step,
-	/// walked after the opener so the fills exist, starting the minute after each fill (live's next tick).</summary>
+	/// <paramref name="openedToday"/> selects the population so the two walks never overlap: false = carry-over positions, walked from
+	/// the minute after the daily rule pass; true = positions opened this step, walked from the minute after each fill (live's next tick).
+	/// Both run before <see cref="SettleExpirationsAsync"/>, so an expiry-day short is closeable before settlement sweeps it.</summary>
 	/// <summary>Today's intraday management through the minutes before <paramref name="untilEt"/>, resuming where the last call stopped:
-	/// the 0DTE trigger walk (intraday SL/TP/trailing/leg-in — the daily-step engine would otherwise jump a 0DTE position straight from
-	/// open to expiry), then the minute walk of multi-DTE positions opened today, which live manages from the tick after their fill.
-	/// Called once to the close on a plain day; the cascade loop calls it up to each reading first, so a position a rule closed before
-	/// the reading is out of the book (cash, held legs) when the opener looks at it, as it would be live.</summary>
+	/// the minute walk of carry-over multi-DTE positions, the 0DTE trigger walk (intraday SL/TP/trailing/leg-in — the daily-step engine
+	/// would otherwise jump a 0DTE position straight from open to expiry), then the minute walk of multi-DTE positions opened today.
+	/// The day's openers call it (through <see cref="AdvanceDayThroughAsync"/>) up to each decision minute, so a position a rule closed
+	/// earlier in the session is out of the book (cash, held legs) when an opener looks at it, and one a rule closes later is still in it.</summary>
 	private async Task ManageTodayThroughAsync(DateTime step, RuleEvaluator evaluator, IReadOnlySet<string> tickerSet, DateTime untilEt, CancellationToken cancellation)
 	{
 		if (untilEt <= _managedThroughEt) return;
+		await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: false, _managedThroughEt, untilEt, cancellation);
 		await RunIntradayTriggersAsync(step, _managedThroughEt, untilEt, cancellation);
 		await RunManagementMinuteWalkAsync(step, evaluator, tickerSet, openedToday: true, _managedThroughEt, untilEt, cancellation);
 		_managedThroughEt = untilEt;
 	}
+
+	/// <summary>Advances the session to <paramref name="untilEt"/> in time order: each of today's cascade readings whose book minute is
+	/// before it is evaluated (and its trade booked) after management has walked up to that minute, then management walks the rest of
+	/// the way. The scored opener calls it before each minute it decides on, so its opens and the cascade's interleave on one clock.</summary>
+	private async Task AdvanceDayThroughAsync(DateTime step, RuleEvaluator evaluator, IReadOnlySet<string> tickerSet, DateTime untilEt, CancellationToken cancellation)
+	{
+		while (_cascadeToday != null && _cascadeNext < _cascadeToday.Count)
+		{
+			var moment = _cascadeToday[_cascadeNext];
+			var minuteEt = CascadeBookMinute(step, moment);
+			if (minuteEt >= untilEt) break;
+			_cascadeNext++;
+			await ManageTodayThroughAsync(step, evaluator, tickerSet, minuteEt, cancellation);
+			await OpenCascadeReadingAsync(step, tickerSet, moment, minuteEt, cancellation);
+		}
+		await ManageTodayThroughAsync(step, evaluator, tickerSet, untilEt, cancellation);
+	}
+
+	/// <summary>The book minute of a cascade reading of instant T: the quote store's row T−1:00 (<see cref="QuoteStoreCache"/>'s book
+	/// instant), which the trade is priced from and stamped at.</summary>
+	private static DateTime CascadeBookMinute(DateTime step, Analyze.CascadeMoment moment) => step.Date + moment.TimeEt - TimeSpan.FromMinutes(1);
 
 	/// <param name="fromEt">First minute walked (earlier minutes were walked by a previous call).</param>
 	/// <param name="untilEt">Walk stops before this minute.</param>
 	private async Task RunManagementMinuteWalkAsync(DateTime step, RuleEvaluator evaluator, IReadOnlySet<string> tickerSet, bool openedToday, DateTime fromEt, DateTime untilEt, CancellationToken cancellation)
 	{
 		var byTicker = _book.OpenPositions.Values
-			.Where(p => !IsAllZeroDte(p, step) && (p.OpenedAt.HasValue && p.OpenedAt.Value.Date == step.Date) == openedToday)
+			.Where(p => !IsAllZeroDte(p, step) && (p.OpenedAt.HasValue && p.OpenedAt.Value.Date == step.Date) == openedToday && !(_book.LineageFor(p.Key) is { } lineage && _walkConsumed.Contains(lineage)))
 			.GroupBy(p => p.Ticker, StringComparer.OrdinalIgnoreCase)
 			.ToList();
 		if (byTicker.Count == 0) return;
@@ -697,6 +722,7 @@ internal sealed class BacktestRunner
 		{
 			var ticker = group.Key;
 			var pending = group.Select(p => p.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+			var lineageByKey = group.ToDictionary(p => p.Key, p => _book.LineageFor(p.Key), StringComparer.OrdinalIgnoreCase);
 			// 09:30 itself belongs to the daily rule pass; the walk owns everything after it.
 			var walkStartEt = step.Date.Add(MarketOpenTime).AddMinutes(1);
 			var walkEndEt = step.Date.Add(MarketCloseTime);
@@ -732,7 +758,9 @@ internal sealed class BacktestRunner
 				if (mwi < lookaheadValidFrom || lookahead[mwi] == null)
 				{
 					var held = pending.ToList();
-					for (var j = mwi; j < Math.Min(minuteBars.Count, mwi + batch); j++)
+					// Bounded by untilEt too: the walk advances in short stretches up to each opener decision, and pricing minutes past
+					// the stretch would be discarded (and waited on) at its end.
+					for (var j = mwi; j < Math.Min(minuteBars.Count, mwi + batch) && MinuteEt(minuteBars[j]) < untilEt; j++)
 					{
 						var bar = minuteBars[j];
 						lookahead[j] = Task.Run(() => MinuteSnapshotAsync(held, bar, ticker, oneTicker, endUtc, openedToday, cancellation), cancellation);
@@ -775,14 +803,22 @@ internal sealed class BacktestRunner
 					await Task.WhenAll(lookahead.Where(t => t != null)).ContinueWith(_ => { }, TaskScheduler.Default);
 					lookaheadValidFrom = int.MaxValue;
 				}
-				pending.ExceptWith(ApplyManagementResults(minuteEt, now, stillOpen, snap.Options, underlyings, recordDrop: false));
+				pending.ExceptWith(ConsumeForDay(ApplyManagementResults(minuteEt, now, stillOpen, snap.Options, underlyings, recordDrop: false), lineageByKey));
 				foreach (var c in atNext)
 					if (pending.Contains(c.Result.Proposal.PositionKey)) // not already acted on at M (ApplyManagementResults reads the M snapshot)
-						pending.ExceptWith(ApplyManagementResults(c.MinuteEt, new[] { c.Result }, stillOpen, c.Quotes, c.Underlyings, recordDrop: false));
+						pending.ExceptWith(ConsumeForDay(ApplyManagementResults(c.MinuteEt, new[] { c.Result }, stillOpen, c.Quotes, c.Underlyings, recordDrop: false), lineageByKey));
 			}
 			// Look-ahead snapshots past where the walk stopped read the book; settle them before the caller (an opener, the next group) changes it.
 			await Task.WhenAll(lookahead.Where(t => t != null)).ContinueWith(_ => { }, TaskScheduler.Default);
 		}
+	}
+
+	/// <summary>Marks the lineages of the positions a walk acted on as consumed for the day (<see cref="_walkConsumed"/>); returns the keys.</summary>
+	private HashSet<string> ConsumeForDay(HashSet<string> acted, IReadOnlyDictionary<string, long?> lineageByKey)
+	{
+		foreach (var key in acted)
+			if (lineageByKey.GetValueOrDefault(key) is { } lineage) _walkConsumed.Add(lineage);
+		return acted;
 	}
 
 	/// <summary>The day's RTH VIX minute tape (data/intraday/VIX/) plus the most recent settled close STRICTLY BEFORE
@@ -1569,42 +1605,32 @@ internal sealed class BacktestRunner
 		return moments;
 	}
 
-	/// <summary>Runs the day's cascade readings through the cascade opener in time order and books the trades it proposes. A reading is
-	/// of an instant T; the book struck at T is the quote store's row T−1:00 (<see cref="QuoteStoreCache"/>'s book instant), so the trade is
-	/// priced from and stamped at that minute — decision and fill on the same book, as for every other backtest open.</summary>
-	/// <remarks>Before each reading, today's positions are managed through the minutes before its book minute (<see cref="ManageTodayThroughAsync"/>):
-	/// a trade a rule closed earlier in the session no longer holds legs, cash or a place in the book when a later setup confirms.</remarks>
-	private async Task OpenCascadeTradesAsync(DateTime step, RuleEvaluator evaluator, HashSet<string> tickerSet, CancellationToken cancellation)
+	/// <summary>Runs one cascade reading through the cascade opener and books the trades it proposes. A reading is of an instant T; the
+	/// trade is priced from and stamped at its book minute <paramref name="minuteEt"/> (<see cref="CascadeBookMinute"/>) — decision and
+	/// fill on the same book, as for every other backtest open. <see cref="AdvanceDayThroughAsync"/> calls it in time order after managing
+	/// today's positions up to that minute, so a trade a rule closed earlier in the session no longer holds legs, cash or a place in the book.</summary>
+	private async Task OpenCascadeReadingAsync(DateTime step, IReadOnlySet<string> tickerSet, Analyze.CascadeMoment moment, DateTime minuteEt, CancellationToken cancellation)
 	{
-		if (_cascadeReads == null || !_cascadeReads.TryGetValue(step.Date, out var pending)) return;
+		cancellation.ThrowIfCancellationRequested();
 		var ticker = _config.Ticker;
-		var noSignals = new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase);
-		var noQuotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		var trades = CascadeTradesToPrice(moment);
+		var quotes = trades.Count > 0 ? await CascadeLegQuotesAsync(ticker, step.Date, minuteEt, moment, trades, cancellation) : new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		_cascadeRead = new Analyze.CascadeLiveRead(moment.Reading, moment.Reading.Terrain.ExpiryCount, moment.Spot, quotes);
+
+		var positions = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
+		var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
+		var ctx = new EvaluationContext(step.Date + moment.TimeEt, positions, new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = moment.Spot }, quotes, cash, accountValue, new Dictionary<string, TechnicalBias>(StringComparer.OrdinalIgnoreCase));
 		// Live's per-day cap on opens (autoExecute.opener.maxOrdersPerDay), counted across the day's cascade trades: with more setups
 		// enabled than the cap allows, the later confirmations of the day are not placed, as live would not place them.
 		var cap = _config.AutoExecute.Opener.MaxOrdersPerDay;
-		var openedToday = 0;
-		foreach (var moment in await pending.Task)
+		foreach (var p in await _cascadeOpener!.EvaluateAsync(ctx, cancellation))
 		{
-			cancellation.ThrowIfCancellationRequested();
-			var minuteEt = step.Date + moment.TimeEt - TimeSpan.FromMinutes(1);
-			await ManageTodayThroughAsync(step, evaluator, tickerSet, minuteEt, cancellation);
-			var trades = CascadeTradesToPrice(moment);
-			var quotes = trades.Count > 0 ? await CascadeLegQuotesAsync(ticker, step.Date, minuteEt, moment, trades, cancellation) : noQuotes;
-			_cascadeRead = new Analyze.CascadeLiveRead(moment.Reading, moment.Reading.Terrain.ExpiryCount, moment.Spot, quotes);
-
-			var positions = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
-			var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
-			var ctx = new EvaluationContext(step.Date + moment.TimeEt, positions, new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = moment.Spot }, quotes, cash, accountValue, noSignals);
-			foreach (var p in await _cascadeOpener!.EvaluateAsync(ctx, cancellation))
-			{
-				var regime = moment.Reading.PrimaryRegime;
-				var side = regime == Analyze.CascadeRegime.Neutral ? NeutralSide(p.StructureKind) : null;
-				if (openedToday >= cap) { _cascadeUnfilled.Add((regime, side, $"daily cap of {cap} open(s) reached (autoExecute.opener.maxOrdersPerDay)")); continue; }
-				var qty = ResolveOpenQty(p);
-				if (qty >= 1 && OpenProposalIntoBook(minuteEt, p, qty)) { _cascadeOpener.Acted(p); openedToday++; }
-				else _cascadeUnfilled.Add((regime, side, qty < 1 ? $"sized to zero ({p.CashReserveDetail ?? "no contracts affordable"})" : "refused by the book (leg collision or unpriced leg)"));
-			}
+			var regime = moment.Reading.PrimaryRegime;
+			var side = regime == Analyze.CascadeRegime.Neutral ? NeutralSide(p.StructureKind) : null;
+			if (_cascadeOpenedToday >= cap) { _cascadeUnfilled.Add((regime, side, $"daily cap of {cap} open(s) reached (autoExecute.opener.maxOrdersPerDay)")); continue; }
+			var qty = ResolveOpenQty(p);
+			if (qty >= 1 && OpenProposalIntoBook(minuteEt, p, qty)) { _cascadeOpener.Acted(p); _cascadeOpenedToday++; }
+			else _cascadeUnfilled.Add((regime, side, qty < 1 ? $"sized to zero ({p.CashReserveDetail ?? "no contracts affordable"})" : "refused by the book (leg collision or unpriced leg)"));
 		}
 	}
 
@@ -1681,10 +1707,11 @@ internal sealed class BacktestRunner
 	/// that clears the score + cash gates. Spot is taken from the per-minute close of the configured
 	/// ticker's intraday CSV; 0DTE TTE shrinks linearly to 16:00. One open per day max (early-exit on
 	/// first fill). Returns <c>HasIntraday=false</c> when minute data is missing for any ticker —
-	/// caller falls back to the legacy once-per-day fill.</summary>
-	private async Task<DailyOpenScanResult> TryOpenAcrossDayAsync(DateTime step, HashSet<string> tickerSet, OpenCandidateEvaluator openEvaluator, CancellationToken cancellation)
+	/// caller falls back to the legacy once-per-day fill. The session advances (<see cref="AdvanceDayThroughAsync"/>) to each minute
+	/// before its decision, so every open is sized and guarded against the book at that minute.</summary>
+	private async Task<DailyOpenScanResult> TryOpenAcrossDayAsync(DateTime step, HashSet<string> tickerSet, RuleEvaluator evaluator, OpenCandidateEvaluator openEvaluator, CancellationToken cancellation)
 	{
-		// Shared per-day inputs — these depend only on the date, not the minute.
+		// The book after the 09:30 rule pass (the legacy and oracle paths score against it) and the day's signals (date-only).
 		var postMgmt = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
 		var (postCash, postAccount) = await _positions.GetAccountStateAsync(step, cancellation);
 		var postSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, _closeCache, _config.Indicators.TechnicalFilter, step, cancellation);
@@ -1730,13 +1757,8 @@ internal sealed class BacktestRunner
 		foreach (var bars in barsByTicker.Values)
 			foreach (var b in bars) allTimestamps.Add(b.Timestamp);
 
-		// Oracle mode: scan every minute, forward-simulate every proposal to expiry using the day's
-		// known bar.Close intrinsic, and open the single (minute, proposal) pair with the highest
-		// realized P&L. By design lookahead — research / upper-bound tool, not realistic.
-		(DateTime MinuteEt, OpenProposal Proposal, IReadOnlyList<BacktestLegFill> LegFills, decimal Pnl)? bestOracle = null;
-
 		// Parallel minute evaluation. EvaluateMinuteAsync is a pure function over its inputs (no
-		// shared mutable state) so all minutes can be evaluated concurrently. The results are then
+		// shared mutable state) so minutes can be evaluated concurrently. The results are then
 		// processed in chronological order for entry-decision / oracle logic.
 		// Earliest-entry gate: withhold opens until a configured ET wall-clock time so the intraday tape
 		// can form and blend into the bias before the directional read is committed (vs trading the stale
@@ -1788,135 +1810,94 @@ internal sealed class BacktestRunner
 				return (!earliestEntry.HasValue || tod >= earliestEntry.Value) && (!latestEntry.HasValue || tod <= latestEntry.Value);
 			}).ToList();
 
-		// In non-oracle mode we only need the first qualifying minute. Evaluate in parallel batches of
-		// ProcessorCount and stop as soon as any minute in the batch yields a qualifying entry. This gives
-		// ~Nx speedup while preserving chronological entry semantics. Oracle mode needs every minute
-		// evaluated, so it runs the full parallel pass.
-		var needAllMinutes = _oracle;
 		var batchSize = Math.Max(1, Environment.ProcessorCount);
 		var parallelOpts = new ParallelOptions { MaxDegreeOfParallelism = batchSize, CancellationToken = cancellation };
 
+		// Oracle (a lookahead research benchmark, not a simulation): score every minute against the book after the 09:30 pass, pick the
+		// (minute, proposal) pair with the best expiry P&L, then advance the session to that minute and size the open from the book there.
+		if (_oracle)
+		{
+			var minuteResults = new (DateTime MinuteEt, IReadOnlyList<OpenProposal> Proposals)?[timestampList.Count];
+			await Parallel.ForEachAsync(Enumerable.Range(0, timestampList.Count), parallelOpts, async (idx, ct) =>
+				minuteResults[idx] = await EvaluateMinuteAsync(timestampList[idx], closeUtc, tickerSet, barIndexByTicker, postMgmt, postCash, postAccount, postSignals, openEvaluator, ct));
+
+			(DateTime MinuteEt, OpenProposal Proposal, decimal Pnl)? best = null;
+			foreach (var mr in minuteResults)
+			{
+				if (mr == null) continue;
+				foreach (var p in mr.Value.Proposals)
+				{
+					var qty = ResolveOpenQty(p);
+					if (qty < 1 || BuildLegFillsFromProposal(p.Legs, qty) == null) continue;
+					var eodPnl = await ComputeOracleEodPnlAsync(p, step.Date, cancellation);
+					if (eodPnl != null && (best == null || eodPnl.Value > best.Value.Pnl))
+						best = (mr.Value.MinuteEt, p, eodPnl.Value);
+				}
+			}
+			if (best is { } b)
+			{
+				await AdvanceDayThroughAsync(step, evaluator, tickerSet, b.MinuteEt, cancellation);
+				var qty = ResolveOpenQty(b.Proposal);
+				if (qty >= 1 && BuildLegFillsFromProposal(b.Proposal.Legs, qty) is { } legFills)
+					_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, legFills, qty, b.Proposal.Spot, b.Proposal.RawScore, b.Proposal.FinalScore, b.Proposal.ImpliedVolatilityAnnual);
+			}
+			return new DailyOpenScanResult(HasIntraday: true, LegacyProposals: Array.Empty<OpenProposal>());
+		}
+
+		// Only the first qualifying minute is needed. Adaptive batch with early exit: a fixed ProcessorCount-wide batch evaluated ~32
+		// minutes just to use minute 1 — and since the chain-seeding fix every minute carries a full chain, the FIRST scanned minute
+		// almost always qualifies, so those other 31 minutes (each scoring ~6k skeletons) were pure waste and dominated the runtime.
+		// Start with a 1-minute probe and double the batch only when early minutes don't qualify: the common case scores 1 minute, while
+		// rare late/no-open days still grow to full parallel width. Chronological "first qualifying minute" semantics preserved.
+		// A batch is scored against the book as it stands at its first minute; the session then advances minute by minute as its results
+		// are read (management, cascade trades). When the book changes inside the batch (a close, a roll, a cascade open), the minutes from
+		// there on were scored against a stale book (cash, held legs, position count), so the scan re-scores from that minute.
 		var opened = 0;
 		var entryDecided = false;
-
-		if (needAllMinutes)
+		var scanBatch = 1;
+		for (int batchStart = 0; batchStart < timestampList.Count && !entryDecided && opened < _topNPerStep; )
 		{
-			// Full parallel pass: evaluate all minutes, then process sequentially.
-			var minuteResults = new (DateTimeOffset MinuteUtc, DateTime MinuteEt, IReadOnlyList<OpenProposal> Proposals)?[timestampList.Count];
-			await Parallel.ForEachAsync(Enumerable.Range(0, timestampList.Count), parallelOpts, async (idx, ct) =>
+			cancellation.ThrowIfCancellationRequested();
+			await AdvanceDayThroughAsync(step, evaluator, tickerSet, MarketTime.ToEt(timestampList[batchStart]).DateTime, cancellation);
+			var positions = await _positions.GetOpenPositionsAsync(step, tickerSet, cancellation);
+			var (cash, accountValue) = await _positions.GetAccountStateAsync(step, cancellation);
+			var bookVersion = _book.Fills.Count;
+			var batchCount = Math.Min(scanBatch, timestampList.Count - batchStart);
+			var batchResults = new (DateTime MinuteEt, IReadOnlyList<OpenProposal> Proposals)?[batchCount];
+			var first = batchStart;
+			await Parallel.ForEachAsync(Enumerable.Range(0, batchCount), parallelOpts, async (idx, ct) =>
+				batchResults[idx] = await EvaluateMinuteAsync(timestampList[first + idx], closeUtc, tickerSet, barIndexByTicker, positions, cash, accountValue, postSignals, openEvaluator, ct));
+
+			// Process batch results in chronological order.
+			var next = batchStart + batchCount;
+			for (int i = 0; i < batchCount && !entryDecided && opened < _topNPerStep; i++)
 			{
-				var result = await EvaluateMinuteAsync(timestampList[idx], closeUtc, tickerSet, barIndexByTicker, postMgmt, postCash, postAccount, postSignals, openEvaluator, ct);
-				if (result != null)
-					minuteResults[idx] = (timestampList[idx], result.Value.MinuteEt, result.Value.Proposals);
-			});
+				var minuteUtc = timestampList[batchStart + i];
+				await AdvanceDayThroughAsync(step, evaluator, tickerSet, MarketTime.ToEt(minuteUtc).DateTime, cancellation);
+				if (_book.Fills.Count != bookVersion) { next = batchStart + i; break; }
+				if (batchResults[i] is not { } mr) continue;
 
-			for (int i = 0; i < minuteResults.Length; i++)
-			{
-				var mr = minuteResults[i];
-				if (mr == null) continue;
-				var (minuteUtc2, minuteEt, openProposals) = mr.Value;
-
-				if (_oracle)
-				{
-					foreach (var p in openProposals)
-					{
-						var qty = ResolveOpenQty(p);
-						if (qty < 1) continue;
-						var legFills = BuildLegFillsFromProposal(p.Legs, qty);
-						if (legFills == null) continue;
-						var eodPnl = await ComputeOracleEodPnlAsync(p, step.Date, cancellation);
-						if (eodPnl == null) continue;
-						if (bestOracle == null || eodPnl.Value > bestOracle.Value.Pnl)
-							bestOracle = (minuteEt, p, legFills, eodPnl.Value);
-					}
-					continue;
-				}
-
-				if (opened >= _topNPerStep) break;
-				if (entryDecided) break;
-				var minuteTimeEt = MarketTime.ToEt(minuteUtc2).TimeOfDay;
+				var minuteTimeEt = MarketTime.ToEt(minuteUtc).TimeOfDay;
 				if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
 				if (latestEntry.HasValue && minuteTimeEt > latestEntry.Value) continue;
-				if (openProposals.Count > 0)
+				// Only the top-ranked candidate(s) up to _topNPerStep are ever attempted — never a lower-ranked fallback. entryDecided
+				// latches ONLY on an actual successful open, not on merely having a candidate: a top pick refused by a downstream guard
+				// (e.g. HeldLegGuard — it collides with an already-held position on the opposite side) must not forfeit the rest of the
+				// day. The scan keeps checking later minutes (bounded by latestEntryTimeEt) for the SAME best-scoring opportunity to
+				// clear, exactly as live re-evaluates every tick.
+				foreach (var p in mr.Proposals.Take(_topNPerStep - opened))
 				{
-					// Only the top-ranked candidate(s) up to _topNPerStep are ever attempted — never a
-					// lower-ranked fallback. entryDecided latches ONLY on an actual successful open, not on
-					// merely having a candidate: a top pick refused by a downstream guard (e.g. HeldLegGuard —
-					// it collides with an already-held position on the opposite side) must not forfeit the
-					// rest of the day. The scan keeps checking later minutes (bounded by latestEntryTimeEt)
-					// for the SAME best-scoring opportunity to clear, exactly as live re-evaluates every tick.
-					foreach (var p in openProposals.Take(_topNPerStep - opened))
+					var qty = ResolveOpenQty(p);
+					if (qty < 1) continue;
+					if (OpenProposalIntoBook(mr.MinuteEt, p, qty))
 					{
-						var qty = ResolveOpenQty(p);
-						if (qty < 1) continue;
-						if (OpenProposalIntoBook(minuteEt, p, qty))
-						{
-							opened++;
-							entryDecided = true;
-						}
+						opened++;
+						entryDecided = true;
 					}
 				}
 			}
-		}
-		else
-		{
-			// Adaptive batch with early exit. A fixed ProcessorCount-wide batch evaluated ~32 minutes just to
-			// use minute 1 — and since the chain-seeding fix every minute carries a full chain, the FIRST
-			// scanned minute almost always qualifies, so those other 31 minutes (each scoring ~6k skeletons)
-			// were pure waste and dominated the runtime. Start with a 1-minute probe and double the batch only
-			// when early minutes don't qualify: the common case scores 1 minute, while rare late/no-open days
-			// still grow to full parallel width. Chronological "first qualifying minute" semantics preserved.
-			var scanBatch = 1;
-			for (int batchStart = 0; batchStart < timestampList.Count && !entryDecided && opened < _topNPerStep; )
-			{
-				cancellation.ThrowIfCancellationRequested();
-				var batchCount = Math.Min(scanBatch, timestampList.Count - batchStart);
-				var batchResults = new (DateTimeOffset MinuteUtc, DateTime MinuteEt, IReadOnlyList<OpenProposal> Proposals)?[batchCount];
-
-				await Parallel.ForEachAsync(Enumerable.Range(0, batchCount), parallelOpts, async (idx, ct) =>
-				{
-					var result = await EvaluateMinuteAsync(timestampList[batchStart + idx], closeUtc, tickerSet, barIndexByTicker, postMgmt, postCash, postAccount, postSignals, openEvaluator, ct);
-					if (result != null)
-						batchResults[idx] = (timestampList[batchStart + idx], result.Value.MinuteEt, result.Value.Proposals);
-				});
-
-				// Process batch results in chronological order.
-				for (int i = 0; i < batchCount && !entryDecided && opened < _topNPerStep; i++)
-				{
-					var mr = batchResults[i];
-					if (mr == null) continue;
-					var (minuteUtc2, minuteEt, openProposals) = mr.Value;
-
-					var minuteTimeEt = MarketTime.ToEt(minuteUtc2).TimeOfDay;
-					if (earliestEntry.HasValue && minuteTimeEt < earliestEntry.Value) continue;
-					if (latestEntry.HasValue && minuteTimeEt > latestEntry.Value) continue;
-					if (openProposals.Count > 0)
-					{
-						// See the needAllMinutes branch above: entryDecided latches ONLY on an actual
-						// successful open, not merely on having a candidate, so a top pick refused by
-						// HeldLegGuard (or any other downstream guard) doesn't forfeit the rest of the day.
-						foreach (var p in openProposals.Take(_topNPerStep - opened))
-						{
-							var qty = ResolveOpenQty(p);
-							if (qty < 1) continue;
-							if (OpenProposalIntoBook(minuteEt, p, qty))
-							{
-								opened++;
-								entryDecided = true;
-							}
-						}
-					}
-				}
-				batchStart += batchCount;
-				scanBatch = Math.Min(scanBatch * 2, batchSize);
-			}
-		}
-
-		// Oracle: open the single best proposal across all minutes.
-		if (_oracle && bestOracle != null)
-		{
-			var b = bestOracle.Value;
-			_book.Open(b.MinuteEt, b.Proposal.Ticker, b.Proposal.StructureKind, b.LegFills, b.Proposal.Qty, b.Proposal.Spot, b.Proposal.RawScore, b.Proposal.FinalScore, b.Proposal.ImpliedVolatilityAnnual);
+			batchStart = next;
+			scanBatch = Math.Min(scanBatch * 2, batchSize);
 		}
 
 		return new DailyOpenScanResult(HasIntraday: true, LegacyProposals: Array.Empty<OpenProposal>());

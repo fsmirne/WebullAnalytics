@@ -100,6 +100,19 @@ internal sealed class SimulatedBook
 	private decimal ComputeSlippage(OpenStructureKind structureKind, int qty) =>
 		RealizedExpectancy.ComputeFrictionPerOrderPerContract(_slippageConfig, structureKind) * Math.Abs(qty);
 
+	/// <summary>An open's cash flow (credit positive, debit negative, net of slippage when <paramref name="applySlippage"/>, which is deducted
+	/// so realized P&L matches the friction-aware EV the scorer used) and its fees.</summary>
+	private (decimal CashFlow, decimal Fees) OpenCashFlow(OpenStructureKind structureKind, IReadOnlyList<BacktestLegFill> legFills, int qty, bool applySlippage) =>
+		(ComputeCashFlow(legFills) - (applySlippage ? ComputeSlippage(structureKind, qty) : 0m), Math.Abs(qty) * legFills.Count * _feePerContract);
+
+	/// <summary>Cash one contract of an open takes out of the book — debit, slippage and fees, exactly as <see cref="Open"/> charges them
+	/// (a net credit comes back negative). <paramref name="legFillsForOne"/> are the open's leg fills at quantity 1.</summary>
+	public decimal OpenCashOutPerContract(OpenStructureKind structureKind, IReadOnlyList<BacktestLegFill> legFillsForOne, bool applySlippage)
+	{
+		var (cashFlow, fees) = OpenCashFlow(structureKind, legFillsForOne, 1, applySlippage);
+		return fees - cashFlow;
+	}
+
 	public decimal Cash { get; private set; }
 	public IReadOnlyDictionary<string, OpenPosition> OpenPositions => _positions;
 	public IReadOnlyList<BacktestFill> Fills => _fills;
@@ -150,9 +163,7 @@ internal sealed class SimulatedBook
 			return false;
 		}
 
-		// Deduct slippage from cash flow so realized P&L matches the friction-aware EV the scorer used.
-		var cashFlow = ComputeCashFlow(legFills) - (applySlippage ? ComputeSlippage(structureKind, qty) : 0m);
-		var fees = Math.Abs(qty) * legFills.Count * _feePerContract;
+		var (cashFlow, fees) = OpenCashFlow(structureKind, legFills, qty, applySlippage);
 		Cash += cashFlow - fees;
 
 		// Track InitialNetDebit / AdjustedNetDebit in PER-SHARE dollars to match the broker / live-source
@@ -196,8 +207,7 @@ internal sealed class SimulatedBook
 		if (!heldSet.SequenceEqual(addSet)) return false;
 
 		var key = held.Key;
-		var cashFlow = ComputeCashFlow(legFills) - (applySlippage ? ComputeSlippage(structureKind, qty) : 0m);
-		var fees = Math.Abs(qty) * legFills.Count * _feePerContract;
+		var (cashFlow, fees) = OpenCashFlow(structureKind, legFills, qty, applySlippage);
 		Cash += cashFlow - fees;
 
 		var addDebitPerShare = -cashFlow / (qty * Multiplier);
