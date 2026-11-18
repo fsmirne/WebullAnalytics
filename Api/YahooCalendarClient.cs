@@ -186,7 +186,7 @@ internal static class YahooCalendarClient
 				using var seed = await client.GetAsync(url, cancellation);
 				if (seed.IsSuccessStatusCode) break;
 			}
-			catch (Exception ex) when (!cancellation.IsCancellationRequested) { /* try the next candidate */ }
+			catch (Exception) when (!cancellation.IsCancellationRequested) { /* try the next candidate */ }
 		}
 
 		try
@@ -197,7 +197,7 @@ internal static class YahooCalendarClient
 			if (string.IsNullOrWhiteSpace(crumb) || crumb.StartsWith('{')) return null;
 			return crumb;
 		}
-		catch (Exception ex) when (!cancellation.IsCancellationRequested)
+		catch (Exception) when (!cancellation.IsCancellationRequested)
 		{
 			return null;
 		}
@@ -277,7 +277,7 @@ internal static class YahooCalendarClient
 			if (!resp.IsSuccessStatusCode) return null;
 			return ParseNextDividendFromChart(await resp.Content.ReadAsStringAsync(cancellation), asOf);
 		}
-		catch (Exception ex) when (!cancellation.IsCancellationRequested)
+		catch (Exception) when (!cancellation.IsCancellationRequested)
 		{
 			return null;
 		}
@@ -370,7 +370,7 @@ internal static class YahooCalendarClient
 			if (!resp.IsSuccessStatusCode) return Array.Empty<DividendEvent>();
 			return ParseDividendHistoryFromChart(await resp.Content.ReadAsStringAsync(cancellation));
 		}
-		catch (Exception ex) when (!cancellation.IsCancellationRequested)
+		catch (Exception) when (!cancellation.IsCancellationRequested)
 		{
 			return Array.Empty<DividendEvent>();
 		}
@@ -392,7 +392,7 @@ internal static class YahooCalendarClient
 			if (!resp.IsSuccessStatusCode) return Array.Empty<(DateTime, decimal)>();
 			return ParseDailyCloseHistory(await resp.Content.ReadAsStringAsync(cancellation));
 		}
-		catch (Exception ex) when (!cancellation.IsCancellationRequested)
+		catch (Exception) when (!cancellation.IsCancellationRequested)
 		{
 			return Array.Empty<(DateTime, decimal)>();
 		}

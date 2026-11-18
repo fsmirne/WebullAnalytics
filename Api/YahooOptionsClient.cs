@@ -267,7 +267,7 @@ internal static class YahooOptionsClient
 			}
 			return map;
 		}
-		catch (Exception ex) when (!cancellation.IsCancellationRequested)
+		catch (Exception) when (!cancellation.IsCancellationRequested)
 		{
 			return null;
 		}
