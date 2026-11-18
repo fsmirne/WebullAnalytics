@@ -441,6 +441,33 @@ public class CascadeOpenerTests
 	// ── Watch-loop panel ─────────────────────────────────────────────────────────────────────────────────
 
 	[Fact]
+	public async Task ALongSingleEntryRecordsItsOrderLineWithTheBracketStopWhenTheBrokerStopIsOn()
+	{
+		var config = Config();
+		config.Rules.TrailingStop.Enabled = true;
+		config.AutoExecute.Management.Enabled = true;
+		config.AutoExecute.Management.Rules.Add("TrailingStopRule");
+		var ledger = new CascadeSignalLedger();
+		var read = Read(CascadeRegime.BearTrap);
+		var opener = new CascadeOpener(config, live: false, ledger, (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, default));
+		opener.Acted(p);
+
+		var entry = ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BearTrap, live: false).Last();
+		var line = Assert.Single(entry.Commands!);
+		var m = System.Text.RegularExpressions.Regex.Match(line, @"^wa trade place ""buy:(\S+):(\d+)"" --side buy --limit (\d+\.\d\d) --protect (\d+\.\d\d) --submit$");
+		Assert.True(m.Success, line);
+		Assert.Equal(0.8m * decimal.Parse(m.Groups[3].Value), decimal.Parse(m.Groups[4].Value), 1);   // trailPct under the entry, to the tick
+
+		// Without the broker stop the same entry has no --protect.
+		var plain = new CascadeSignalLedger();
+		var plainOpener = new CascadeOpener(Config(), live: false, plain, (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
+		var q = Assert.Single(await plainOpener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, default));
+		plainOpener.Acted(q);
+		Assert.DoesNotContain("--protect", Assert.Single(plain.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BearTrap, live: false).Last().Commands!));
+	}
+
+	[Fact]
 	public async Task TheTradeSectionShowsTheTradeItsCommandsAndTheDay()
 	{
 		// The cascade proposal has no panel of its own: the day's outcomes, the notices, the trade and its three commands are a
@@ -451,12 +478,13 @@ public class CascadeOpenerTests
 		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, default));
 		opener.Acted(p);
 		var placed = ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false).Last();
-		var skipped = placed with { Setup = CascadeRegime.BearTrap, TimeEt = "11:02:00", Outcome = CascadeSignalLedger.Skipped, Detail = "credit 0.20 under the 0.50 floor", Structure = null, Qty = null, NetPerShare = null };
+		var skipped = placed with { Setup = CascadeRegime.BearTrap, TimeEt = "11:02:00", Outcome = CascadeSignalLedger.Skipped, Detail = "credit 0.20 under the 0.50 floor", Structure = null, Qty = null, NetPerShare = null, Commands = null };
 
 		var text = Render(CascadeTradeSection.Build([new CascadeTradeSection.Trade(p, "BULL TRAP 76/100")], ["BEAR TRAP: no trade today — credit 0.20 under the 0.50 floor."], [new("BULL TRAP", placed), new("BEAR TRAP", skipped), new("BULL CASCADE", null)], live: false));
 
 		Assert.Contains("TRADE · TODAY (dry run)", text);
-		Assert.Matches(@"BULL TRAP\s+10:40 logged \(dry run\) · ShortCallVertical SELL " + Occ(7550m) + @" x10, BUY " + Occ(7560m) + @" x10 · credit \$0\.90 · spot", text);
+		// One line: the structure, the reading's spot and score, then the order it went out as (or would have, in a dry run).
+		Assert.Matches(@"BULL TRAP\s+10:40 logged \(dry run\) · ShortCallVertical · spot \$[\d,.]+ · score \d+ · wa trade place ""sell:" + Occ(7550m) + @":10,buy:" + Occ(7560m) + @":10"" --side sell --limit 0\.90 --submit", text);
 		Assert.Matches(@"BEAR TRAP\s+11:02 no trade · credit 0.20 under the 0.50 floor", text);
 		Assert.Matches(@"BULL CASCADE\s+—", text);
 		Assert.Contains("BEAR TRAP: no trade today — credit 0.20 under the 0.50 floor.", text);
@@ -471,7 +499,13 @@ public class CascadeOpenerTests
 		var quiet = Render(CascadeTradeSection.Build([], [], [new("BULL TRAP", placed)], live: true));
 		Assert.Contains("TODAY (live)", quiet);
 		Assert.DoesNotContain("TRADE", quiet);
-		Assert.Matches(@"BULL TRAP\s+10:40 placed · ShortCallVertical SELL", quiet);
+		Assert.Matches(@"BULL TRAP\s+10:40 placed · ShortCallVertical · spot", quiet);
+		Assert.Contains("wa trade place", quiet);
+
+		// Too narrow for one line: the command moves to a line of its own, whole, rather than wrapping.
+		var narrow = Render(CascadeTradeSection.Build([], [], [new("BULL TRAP", placed)], live: false), width: 150);
+		Assert.Matches(@"BULL TRAP\s+10:40 logged \(dry run\) · ShortCallVertical · spot \$[\d,.]+ · score \d+\s*│", narrow);
+		Assert.Matches($@"│\s+wa trade place ""sell:{Occ(7550m)}:10,buy:{Occ(7560m)}:10"" --side sell --limit 0\.90 --submit\s*│", narrow);
 	}
 
 	[Fact]
@@ -506,15 +540,15 @@ public class CascadeOpenerTests
 		Assert.Matches(@"BEAR TRAP\s+10:02 confirmed, never placed · LongCall BUY " + Occ(7505m) + " x0", expired);
 
 		// An entry written before the trade fields were recorded: its legs, then the reading.
-		var legacy = Render(CascadeTradeSection.Build([], [], [new("BEAR TRAP", signaled with { Detail = $"BUY {Occ(7505m)} x1", Structure = null, Qty = null, NetPerShare = null, Note = null })], live: false));
+		var legacy = Render(CascadeTradeSection.Build([], [], [new("BEAR TRAP", signaled with { Detail = $"BUY {Occ(7505m)} x1", Structure = null, Qty = null, NetPerShare = null, Note = null, Commands = null })], live: false));
 		Assert.Matches(@"BEAR TRAP\s+10:02 confirmed, never placed · BUY " + Occ(7505m) + @" x1 · spot \$7,500\.50 · score 76", legacy);
 	}
 
-	private static string Render(Spectre.Console.Rendering.IRenderable panel)
+	private static string Render(Spectre.Console.Rendering.IRenderable panel, int width = 240)
 	{
 		var output = new StringWriter();
 		var console = Spectre.Console.AnsiConsole.Create(new Spectre.Console.AnsiConsoleSettings { Out = new Spectre.Console.AnsiConsoleOutput(output), Ansi = Spectre.Console.AnsiSupport.No, ColorSystem = Spectre.Console.ColorSystemSupport.NoColors });
-		console.Profile.Width = 240;
+		console.Profile.Width = width;
 		console.Write(panel);
 		return output.ToString();
 	}

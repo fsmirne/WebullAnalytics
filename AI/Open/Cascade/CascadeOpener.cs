@@ -204,6 +204,7 @@ internal sealed class CascadeOpener
 				Detail = proposal.Qty >= 1 ? proposal.Legs.Describe() : proposal.Legs.Select(l => l with { Qty = 0 }).Describe(),
 				Structure = proposal.StructureKind.ToString(), Qty = proposal.Qty, NetPerShare = proposal.DebitOrCreditPerContract / 100m,
 				Note = proposal.Qty >= 1 ? null : proposal.CashReserveDetail ?? "the sizing caps allow none",
+				Commands = proposal.Qty >= 1 ? OpenerAutoExecutor.PlaceCommands(proposal, BrokerStopManager.ConfigFor(_config)) : null,
 			};
 		if (proposal == null)
 		{

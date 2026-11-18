@@ -21,6 +21,7 @@ internal sealed class CascadeSignalLedger
 	/// <param name="Qty">Contracts the trade was sized to; 0 when the sizing caps allowed none (its legs then read x0).</param>
 	/// <param name="NetPerShare">The price the trade was proposed at: its net mid per share, positive for a credit, negative for a debit.</param>
 	/// <param name="Note">Why the sizing caps allowed no contracts, when <paramref name="Qty"/> is 0; null otherwise.</param>
+	/// <param name="Commands">The <c>wa trade place</c> line(s) the trade goes out as; null when nothing is placeable (and on entries written before they were recorded).</param>
 	internal sealed record Entry(
 		[property: JsonPropertyName("date")] string Date,
 		[property: JsonPropertyName("ticker")] string Ticker,
@@ -36,7 +37,8 @@ internal sealed class CascadeSignalLedger
 		[property: JsonPropertyName("structure")] string? Structure = null,
 		[property: JsonPropertyName("qty")] int? Qty = null,
 		[property: JsonPropertyName("netPerShare")] decimal? NetPerShare = null,
-		[property: JsonPropertyName("note")] string? Note = null);
+		[property: JsonPropertyName("note")] string? Note = null,
+		[property: JsonPropertyName("commands")] IReadOnlyList<string>? Commands = null);
 
 	/// <summary>A trade was built and handed to the auto-executor; not final until it is <see cref="Placed"/>.</summary>
 	internal const string Signaled = "signaled";
