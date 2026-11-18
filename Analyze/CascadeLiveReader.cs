@@ -35,6 +35,13 @@ internal static class CascadeLiveReader
 		var spot = request.SpotOverride ?? vendorSpot;
 		if (spot is not > 0m) return (null, $"[red]No spot price available for {Markup.Escape(ticker)}. Pass --spot {Markup.Escape(ticker)}:PRICE to override.[/]");
 
+		// A cascade trades today's expiration, so a chain without it is a partial response, not a market with nothing to trade: reading the regime off it
+		// would confirm a setup on a book missing its front expiry, and the setup's trade ("no call expiring today at $7,550") would be recorded as the day's
+		// final entry. Failing the read lets the next one (a minute later) retry. Seen live 2026-11-18 10:30:59: Schwab returned 4,092 contracts, none
+		// expiring that day, where every other read of the week had about 10,000.
+		if (!HasContractExpiring(quotes.Keys, ticker, nowEt.Date))
+			return (null, $"[yellow]The vendor's {Markup.Escape(ticker)} chain has no contract expiring today ({quotes.Count:N0} contracts, a partial response) — skipping this read.[/]");
+
 		// Minute bars have one source (Webull's chart endpoint) whatever the quote vendor: the vendor only picks between the Webull and Schwab option-chain clients.
 		var intradayCache = apiConfig != null ? new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)) : null;
 		// A live read includes the forming minute.
@@ -62,6 +69,10 @@ internal static class CascadeLiveReader
 		CascadeLog.Append(ticker, request.VendorName, nowEt, nowEt, request.SpotOverride.HasValue, reading);
 		return (new CascadeLiveRead(reading, expiryCount, spot.Value, quotes), null);
 	}
+
+	/// <summary>True when any of <paramref name="symbols"/> is a <paramref name="ticker"/> option expiring on <paramref name="date"/>.</summary>
+	internal static bool HasContractExpiring(IEnumerable<string> symbols, string ticker, DateTime date) =>
+		symbols.Any(symbol => ParsingHelpers.ParseOptionSymbol(symbol) is { } parsed && parsed.ExpiryDate.Date == date.Date && ParsingHelpers.RootsMatchForAggregation(parsed.Root, ticker, parsed.ExpiryDate));
 
 	/// <summary>The vendor's chain out to the horizon and its spot; a null chain carries the reason as console markup.</summary>
 	private static async Task<(Dictionary<string, OptionContractQuote>? Quotes, decimal? Spot, ApiConfig? ApiConfig, string? Error)> FetchChainAsync(Request request, string ticker, DateTime nowEt, CancellationToken cancellation)
