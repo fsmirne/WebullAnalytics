@@ -138,7 +138,7 @@ internal sealed class MinuteBackfill(ThetaDataClient client, SqliteConnection db
 
 	private async Task<List<DateOnly>> ExpirationsAsync(string ticker, CancellationToken cancellation)
 	{
-		var table = await ThetaRetry.CollectAsync(token => client.OptionListExpirations(ticker, token), cancellation);
+		var table = await ThetaRetry.CollectAsync(token => client.OptionListExpirations(ticker, token), cancellation, log, $"expirations {ticker}");
 		if (table.RowCount == 0) return [];
 		var column = table.ColumnOrNull("expiration") ?? table.ColumnOrNull("date") ?? table.ColumnOrNull("expirations") ?? 0;
 		return [.. Enumerable.Range(0, table.RowCount).Select(row => ThetaCells.Date(table, row, column))];
@@ -239,7 +239,7 @@ internal sealed class MinuteBackfill(ThetaDataClient client, SqliteConnection db
 				}
 			}
 			return window with { AnyRows = anyRows };
-		}, cancellation);
+		}, cancellation, log, $"quotes {ticker} {Iso(contract.Expiration!.Value)} {Iso(from)}..{Iso(to)}");
 
 	/// <summary>Seal-time STRIKE-completeness gate: a session can be present yet missing near-money strikes the vendor served on
 	/// neighboring sessions (SPY 07-29 expiry on 07-28 omitted 738P and neighbors while 07-27 had the full ladder, silently corrupting a
@@ -358,7 +358,7 @@ internal sealed class MinuteBackfill(ThetaDataClient client, SqliteConnection db
 				}
 			}
 			return window with { AnyRows = anyRows };
-		}, cancellation);
+		}, cancellation, log, $"ohlcv {ticker} {Iso(contract.Expiration!.Value)} {Iso(from)}..{Iso(to)}");
 
 	// ----- shared gates and store access ----------------------------------------------------------------------------------------------
 

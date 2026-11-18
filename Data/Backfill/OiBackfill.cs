@@ -74,8 +74,8 @@ internal sealed class OiBackfill(ThetaDataClient client, OiBackfillOptions optio
 	private async Task<List<DateOnly>> PullChunkAsync(string ticker, string dir, DateOnly from, DateOnly to, CancellationToken cancellation)
 	{
 		var chain = new OptionContract(ticker, Expiration: null);
-		var eod = await ThetaRetry.CollectAsync(token => client.OptionHistoryEod(chain, from, to, options.MaxDte, token), cancellation);
-		var oi = await ThetaRetry.CollectAsync(token => client.OptionHistoryOpenInterest(chain, from, to, options.MaxDte, token), cancellation);
+		var eod = await ThetaRetry.CollectAsync(token => client.OptionHistoryEod(chain, from, to, options.MaxDte, token), cancellation, log, $"eod {ticker} {Iso(from)}..{Iso(to)}");
+		var oi = await ThetaRetry.CollectAsync(token => client.OptionHistoryOpenInterest(chain, from, to, options.MaxDte, token), cancellation, log, $"oi {ticker} {Iso(from)}..{Iso(to)}");
 		if (eod.RowCount == 0)
 		{
 			log.Info("    (no EOD rows)");
