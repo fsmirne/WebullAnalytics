@@ -249,7 +249,7 @@ internal static class AIContext
 	/// dry-run logging — same fallback the watch loop has always used. The <see cref="OrderRepricer"/> is shared by both
 	/// executors (they register the live orders they place) and is null without an account or when disabled; only the
 	/// watch loop drives it, and through its persisted store it also steps orders a scan placed.</summary>
-	internal static (ManagementAutoExecutor? Management, OpenerAutoExecutor? Opener, OrderRepricer? Repricer) BuildAutoExecutors(AIConfig config, string? accountOverride = null)
+	internal static (ManagementAutoExecutor? Management, OpenerAutoExecutor? Opener, OrderRepricer? Repricer, BrokerStopManager? Stops) BuildAutoExecutors(AIConfig config, string? accountOverride = null)
 	{
 		TradeAccount? account = null;
 		if (config.AutoExecute.Management.Enabled || config.AutoExecute.Opener.Enabled)
@@ -259,9 +259,14 @@ internal static class AIContext
 		}
 		var brokerState = account != null ? new BrokerStateService(account, LocalOrderLedger.Default()) : null;
 		var repricer = account != null && config.AutoExecute.Reprice.Enabled ? new OrderRepricer(config.AutoExecute.Reprice, new WebullOrderGateway(account), RepriceStore.Default(), account.AccountId) : null;
-		var mgmt = config.AutoExecute.Management.Enabled ? new ManagementAutoExecutor(config.AutoExecute.Management, account, brokerState, repricer) : null;
-		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account, brokerState, repricer) : null;
-		return (mgmt, opener, repricer);
+		// The live trailing stop is a stop order at the broker, owned by the management side: it exists when trailingStop is on and management may act on it.
+		var mgmtConfig = config.AutoExecute.Management;
+		var stops = account != null && brokerState != null && BrokerStopManager.ConfigFor(config) is { } trailing
+			? new BrokerStopManager(trailing, Rules.TrailingStopStore.Default(), BrokerStopStore.Default(), new WebullOrderGateway(account), brokerState, account.AccountId, mgmtConfig.Submit)
+			: null;
+		var mgmt = mgmtConfig.Enabled ? new ManagementAutoExecutor(mgmtConfig, account, brokerState, repricer, stops: stops) : null;
+		var opener = config.AutoExecute.Opener.Enabled ? new OpenerAutoExecutor(config.AutoExecute.Opener, account, brokerState, repricer, stops) : null;
+		return (mgmt, opener, repricer, stops);
 	}
 
 	/// <summary>The cascade opener (<c>opener.cascade</c>) reading the regime from <paramref name="vendorName"/>'s chain at the `analyze cascade` panel's
@@ -437,8 +442,8 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// OptionMath.RiskFreeRate); keeps scan, watch and analyze-risk consistent.
 			YahooOptionsClient.ApplyToOptionMath(await Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation));
 
-			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, trailingStops: Rules.TrailingStopStore.Default()), config);
-			var (mgmtExecutor, openerExecutor, _) = AIContext.BuildAutoExecutors(config, settings.Account);
+			var (mgmtExecutor, openerExecutor, _, brokerStops) = AIContext.BuildAutoExecutors(config, settings.Account);
+			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, trailingStops: Rules.TrailingStopStore.Default(), brokerProtected: brokerStops != null ? brokerStops.IsProtected : null), config);
 			ProposalSink? mgmtSink = settings.EmitManagementProposals
 				? new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput)
 				: null;
@@ -453,7 +458,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			// Scan = one live tick. The only scan-specific behaviour is --spot/--premarket (nonsensical in a watch
 			// loop) and --submit-override bypassing the opener's daily cap; everything else matches watch exactly.
 			var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, mgmtExecutor, openEvaluator, mgmtSink, openSink, openerExecutor,
-				config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: settings.SubmitOverride,
+				config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: settings.SubmitOverride, Stops: brokerStops,
 				CascadeOpener: openEvaluator != null ? AIContext.BuildCascadeOpener(config, LiveQuoteSource.VendorName(vendor)) : null);
 			var result = await LiveTick.EvaluateAsync(now, deps, new LiveTickState(),
 				snapshot => ApplySpotOverridesAsync(settings, config, snapshot, quotes, now, cancellation), cancellation);
@@ -604,7 +609,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			tickerSet, priceCache, config.Indicators.TechnicalFilter, asOf, cancellation);
 
 		var ctx = new EvaluationContext(asOf, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals);
-		var (_, openerExecutor, _) = AIContext.BuildAutoExecutors(config, settings.Account);
+		var (_, openerExecutor, _, _) = AIContext.BuildAutoExecutors(config, settings.Account);
 
 		var openCount = 0;
 		var openerOrdersThisRun = 0;

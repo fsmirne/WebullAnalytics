@@ -28,10 +28,10 @@ public class OrderRepricerTests
 			return Task.FromResult(new WebullOpenApiClient.OrderDetail("NORMAL", null, [order]));
 		}
 
-		public Task ReplaceOrderAsync(string clientOrderId, int quantity, decimal limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs, CancellationToken ct)
+		public Task ReplaceOrderAsync(string clientOrderId, int quantity, decimal? limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs, CancellationToken ct, decimal? stopPrice = null)
 		{
 			if (FailNextReplace) { FailNextReplace = false; throw new HttpRequestException("boom"); }
-			Replaces.Add((clientOrderId, quantity, limitPrice, legs));
+			Replaces.Add((clientOrderId, quantity, limitPrice!.Value, legs));
 			return Task.CompletedTask;
 		}
 
@@ -42,6 +42,8 @@ public class OrderRepricerTests
 			Cancels.Add(clientOrderId);
 			return Task.CompletedTask;
 		}
+
+		public Task<WebullOpenApiClient.PlaceResult> PlaceOrderAsync(OrderRequestBody body, CancellationToken ct) => throw new NotSupportedException();
 	}
 
 	private static readonly DateTime T0 = new(2026, 10, 14, 12, 11, 0);

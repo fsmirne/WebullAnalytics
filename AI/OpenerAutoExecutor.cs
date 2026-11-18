@@ -30,9 +30,11 @@ internal sealed class OpenerAutoExecutor
 	private readonly BrokerStateService? _brokerState;
 	private readonly OrderRepricer? _repricer;
 	private readonly HashSet<string> _allowedStructures;
+	private readonly BrokerStopManager? _stops;
 
-	public OpenerAutoExecutor(OpenerAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null, OrderRepricer? repricer = null)
+	public OpenerAutoExecutor(OpenerAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null, OrderRepricer? repricer = null, BrokerStopManager? stops = null)
 	{
+		_stops = stops;
 		_config = config;
 		_account = account;
 		_brokerState = brokerState;
@@ -210,12 +212,8 @@ internal sealed class OpenerAutoExecutor
 			var reason = _account == null ? "no account configured" : "submit=false";
 			var orderWord = groups.Count == 1 ? "1 order" : $"{groups.Count} orders";
 			AnsiConsole.MarkupLine($"[cyan]opener auto-execute (dry-run, {Markup.Escape(reason)}):[/] open {p.StructureKind} {Markup.Escape(p.Ticker)} x{p.Qty} ({orderWord})");
-			foreach (var g in groups)
-			{
-				var spec = BuildOrderSpec(g.Legs, p.Ticker);
-				var suffix = string.IsNullOrEmpty(g.Label) ? "" : $"  # {g.Label}";
-				AnsiConsole.MarkupLine($"  [grey50]wa trade place \"{Markup.Escape(spec.ArgLegs)}\" --side {spec.Side.ToLowerInvariant()} --limit {spec.LimitAbs:F2} --submit{suffix}[/]");
-			}
+			foreach (var line in PlaceCommands(p, _stops?.Config))
+				AnsiConsole.MarkupLine($"  [grey50]{Markup.Escape(line)}[/]");
 			log?.EmitAutoExecute(p, "dry-run", reason);
 			return new SubmitResult(SubmitOutcome.DryRun);
 		}
@@ -267,7 +265,9 @@ internal sealed class OpenerAutoExecutor
 					OrderType: "LIMIT",
 					LimitPrice: spec.LimitAbs,
 					TimeInForce: _config.TimeInForce.ToUpperInvariant(),
-					PositionIntent: OrderRequestBuilder.DeriveOptionIntent(spec.Side, opening: true));
+					PositionIntent: OrderRequestBuilder.DeriveOptionIntent(spec.Side, opening: true),
+					// A long single option goes out with its trailing stop attached, so it is never open without one (see BrokerStopManager.EntryStop).
+					ProtectiveStop: _stops?.EntryStop(p.Ticker, p.StructureKind.ToString(), legs.Count, spec.Side, spec.LimitAbs));
 				body = OrderRequestBuilder.Build(build);
 
 				using var client = new WebullOpenApiClient(_account);
@@ -276,6 +276,11 @@ internal sealed class OpenerAutoExecutor
 				log?.EmitAutoExecute(p, "placed", null, summary, placed.OrderId);
 				var clientOrderId = placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
 				_brokerState?.RecordLocalPlacement(p.Ticker, g.Legs.Select(l => (l.Symbol, l.Action)), clientOrderId, isOpen: true);
+				if (build.ProtectiveStop != null && body.NewOrders.Count > 1)
+				{
+					_stops?.RecordBracket(body.NewOrders[1].ClientOrderId, g.Legs.Select(l => (l.Symbol, l.Action)), DateTime.Now);
+					AnsiConsole.MarkupLine($"  [green]with a stop:[/] ${build.ProtectiveStop:F2} (stop-market, active once it fills; the watch loop raises it as the price rises)");
+				}
 				_repricer?.Track(build, clientOrderId, p.Ticker, isOpen: true, (outcome, detail) => log?.EmitAutoExecute(p, $"reprice {outcome}", null, detail));
 				placedCount++;
 				firstOrderId ??= placed.OrderId;
@@ -310,6 +315,17 @@ internal sealed class OpenerAutoExecutor
 			return $"worst-leg relative OI {relOi:P0} < {_config.MinRelativeOpenInterest:P0} (sub-grid strike)";
 		return null;
 	}
+
+	/// <summary>The <c>wa trade place</c> line per order this proposal goes out as (two for a split structure): what auto-execute sends, or what a dry run would. With
+	/// <paramref name="trailing"/> it carries the bracket stop (<c>--protect</c>) a long single option's entry would have.</summary>
+	internal static IReadOnlyList<string> PlaceCommands(OpenProposal p, TrailingStopConfig? trailing) =>
+		StructureOrderSplit.Split(p.StructureKind, p.Legs).Select(g =>
+		{
+			var spec = BuildOrderSpec(g.Legs, p.Ticker);
+			var protect = trailing != null ? BrokerStopManager.EntryStopPrice(trailing, p.Ticker, p.StructureKind.ToString(), g.Legs.Count, spec.Side, spec.LimitAbs) : null;
+			var label = string.IsNullOrEmpty(g.Label) ? "" : $"  # {g.Label}";
+			return $"wa trade place \"{spec.ArgLegs}\" --side {spec.Side.ToLowerInvariant()} --limit {spec.LimitAbs:F2}{(protect is decimal stop ? $" --protect {stop:F2}" : "")} --submit{label}";
+		}).ToList();
 
 	/// <summary>Per-order limit/side/leg-arg from the leg set. PricePerShare is signed by action ("buy"
 	/// pays, "sell" collects); positive net = credit → SELL the combo at the absolute price, negative =

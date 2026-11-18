@@ -189,8 +189,18 @@ internal sealed class TradeCloseCommand : AsyncCommand<TradeCloseSettings>
 		if (!await brokerState.TryRefreshAsync(cancellation)) return 3;
 
 		var placed = 0; var failed = 0;
+		var stopStore = BrokerStopStore.Default();
+		var stopGateway = new WebullOrderGateway(account);
 		foreach (var (pos, legSpecs, side, limitAbs, argLegs, summary) in plans)
 		{
+			// A stop the watch loop keeps on this position must go first, or its trigger would sell what this close is about to.
+			try { await BrokerStopManager.CancelOursAsync(brokerState, stopStore, stopGateway, account.AccountId, legSpecs.Select(l => (l.Symbol, l.Action)), cancellation); }
+			catch (Exception ex) when (ex is WebullOpenApiException or HttpRequestException)
+			{
+				AnsiConsole.MarkupLine($"[red]skipped (could not cancel the position's broker stop: {Markup.Escape(ex.Message)}):[/] {Markup.Escape(pos.Key)}");
+				failed++;
+				continue;
+			}
 			if (brokerState.HasPendingMatching(legSpecs.Select(l => (l.Symbol, l.Action))))
 			{
 				AnsiConsole.MarkupLine($"[yellow]skipped (matching close already at broker):[/] {Markup.Escape(pos.Key)}");

@@ -8,8 +8,9 @@ namespace WebullAnalytics.AI;
 internal interface IOrderGateway
 {
 	Task<WebullOpenApiClient.OrderDetail> GetOrderAsync(string clientOrderId, CancellationToken ct);
-	Task ReplaceOrderAsync(string clientOrderId, int quantity, decimal limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs, CancellationToken ct);
+	Task ReplaceOrderAsync(string clientOrderId, int quantity, decimal? limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs, CancellationToken ct, decimal? stopPrice = null);
 	Task CancelOrderAsync(string clientOrderId, CancellationToken ct);
+	Task<WebullOpenApiClient.PlaceResult> PlaceOrderAsync(OrderRequestBody body, CancellationToken ct);
 }
 
 internal sealed class WebullOrderGateway(TradeAccount account) : IOrderGateway
@@ -20,10 +21,16 @@ internal sealed class WebullOrderGateway(TradeAccount account) : IOrderGateway
 		return await client.GetOrderAsync(clientOrderId, ct);
 	}
 
-	public async Task ReplaceOrderAsync(string clientOrderId, int quantity, decimal limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs, CancellationToken ct)
+	public async Task ReplaceOrderAsync(string clientOrderId, int quantity, decimal? limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs, CancellationToken ct, decimal? stopPrice = null)
 	{
 		using var client = new WebullOpenApiClient(account);
-		await client.ReplaceOrderAsync(clientOrderId, quantity, limitPrice, legs, ct);
+		await client.ReplaceOrderAsync(clientOrderId, quantity, limitPrice, legs, stopPrice, ct);
+	}
+
+	public async Task<WebullOpenApiClient.PlaceResult> PlaceOrderAsync(OrderRequestBody body, CancellationToken ct)
+	{
+		using var client = new WebullOpenApiClient(account);
+		return await client.PlaceOrderAsync(body, ct);
 	}
 
 	public async Task CancelOrderAsync(string clientOrderId, CancellationToken ct)
@@ -48,6 +55,9 @@ internal static class BrokerOrder
 			return OrderState.Ended;
 		return OrderState.Working;
 	}
+
+	/// <summary>True for a stop order type (<c>STOP_LOSS</c> / <c>STOP_LOSS_LIMIT</c>), which rests until its trigger and so is not yet a close.</summary>
+	internal static bool IsStop(string? orderType) => orderType != null && orderType.StartsWith("STOP_LOSS", StringComparison.OrdinalIgnoreCase);
 
 	internal static decimal? Number(string? raw) =>
 		decimal.TryParse(raw, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : null;

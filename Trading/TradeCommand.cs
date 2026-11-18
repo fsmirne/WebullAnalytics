@@ -222,8 +222,28 @@ internal sealed class TradePlaceSettings : TradeSubcommandSettings
 	public string? Side { get; set; }
 
 	[CommandOption("--type <VALUE>")]
-	[Description("Order type: limit|market. Default: limit. Market is rejected for multi-leg orders.")]
+	[Description("Order type: limit|market|stop_loss|stop_loss_limit|trailing_stop_loss. Default: limit. Market is rejected for multi-leg orders.")]
 	public string Type { get; set; } = "limit";
+
+	[CommandOption("--stop <VALUE>")]
+	[Description("Stop trigger price (per share) for --type stop_loss|stop_loss_limit.")]
+	public string? Stop { get; set; }
+
+	[CommandOption("--protect <VALUE>")]
+	[Description("Attach a GTC stop-loss at this per-share trigger price, which Webull activates once the order fills.")]
+	public string? Protect { get; set; }
+
+	[CommandOption("--protect-limit <VALUE>")]
+	[Description("With --protect: make the attached stop a stop-limit with this per-share limit price.")]
+	public string? ProtectLimit { get; set; }
+
+	[CommandOption("--trail <VALUE>")]
+	[Description("Trail distance for --type trailing_stop_loss, in --trail-type units.")]
+	public string? Trail { get; set; }
+
+	[CommandOption("--trail-type <VALUE>")]
+	[Description("percentage|amount. Default: percentage.")]
+	public string TrailType { get; set; } = "percentage";
 
 	[CommandOption("--tif <VALUE>")]
 	[Description("Time-in-force: day|gtc. Default: day.")]
@@ -231,6 +251,9 @@ internal sealed class TradePlaceSettings : TradeSubcommandSettings
 
 	/// <summary>Webull's support_trading_session values, lower-cased as the CLI takes them.</summary>
 	internal static readonly string[] Sessions = ["core", "all", "night", "all_day"];
+
+	/// <summary>Webull's order_type values, lower-cased as the CLI takes them.</summary>
+	internal static readonly string[] OrderTypes = ["limit", "market", "stop_loss", "stop_loss_limit", "trailing_stop_loss"];
 
 	[CommandOption("--session <VALUE>")]
 	[Description("Trading sessions the order may work in: core (09:30-16:00 ET, default), all (04:00-20:00 ET, extended hours), night (20:00-04:00 ET) or all_day.")]
@@ -255,6 +278,14 @@ internal sealed class TradePlaceSettings : TradeSubcommandSettings
 
 internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 {
+	private static bool TryParsePositive(string text, string flag, out decimal? value)
+	{
+		value = null;
+		if (!decimal.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) || v <= 0m) { AnsiConsole.MarkupLine($"[red]Error:[/] {flag} '{Markup.Escape(text)}' must be a positive decimal."); return false; }
+		value = v;
+		return true;
+	}
+
 	protected override async Task<int> ExecuteAsync(CommandContext context, TradePlaceSettings s, CancellationToken cancellationToken)
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
@@ -271,12 +302,23 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 			return 2;
 		}
 
-		// 2. Validate --type / --limit compatibility.
+		// 2. Validate --type and the price fields it needs.
 		var type = s.Type.ToLowerInvariant();
-		if (type != "limit" && type != "market") { AnsiConsole.MarkupLine("[red]Error:[/] --type must be 'limit' or 'market'."); return 2; }
-		if (type == "market" && !string.IsNullOrEmpty(s.Limit)) { AnsiConsole.MarkupLine("[red]Error:[/] --limit is not allowed with --type market."); return 2; }
-		if (type == "limit" && string.IsNullOrEmpty(s.Limit)) { AnsiConsole.MarkupLine("[red]Error:[/] --limit is required with --type limit."); return 2; }
+		if (!TradePlaceSettings.OrderTypes.Contains(type)) { AnsiConsole.MarkupLine($"[red]Error:[/] --type must be one of {string.Join(", ", TradePlaceSettings.OrderTypes)}."); return 2; }
+		var needsLimit = type is "limit" or "stop_loss_limit";
+		var needsStop = type is "stop_loss" or "stop_loss_limit";
+		var needsTrail = type == "trailing_stop_loss";
+		if (needsLimit != !string.IsNullOrEmpty(s.Limit)) { AnsiConsole.MarkupLine(needsLimit ? $"[red]Error:[/] --limit is required with --type {type}." : $"[red]Error:[/] --limit is not allowed with --type {type}."); return 2; }
+		if (needsStop != !string.IsNullOrEmpty(s.Stop)) { AnsiConsole.MarkupLine(needsStop ? $"[red]Error:[/] --stop is required with --type {type}." : $"[red]Error:[/] --stop is only for stop_loss|stop_loss_limit."); return 2; }
+		if (needsTrail != !string.IsNullOrEmpty(s.Trail)) { AnsiConsole.MarkupLine(needsTrail ? "[red]Error:[/] --trail is required with --type trailing_stop_loss." : "[red]Error:[/] --trail is only for trailing_stop_loss."); return 2; }
 		if (type == "market" && legs.Count > 1) { AnsiConsole.MarkupLine("[red]Error:[/] multi-leg combo orders must be limit."); return 2; }
+		var trailType = s.TrailType.ToLowerInvariant();
+		if (trailType != "percentage" && trailType != "amount") { AnsiConsole.MarkupLine("[red]Error:[/] --trail-type must be 'percentage' or 'amount'."); return 2; }
+		decimal? stop = null, trail = null, protect = null, protectLimit = null;
+		if (!string.IsNullOrEmpty(s.Protect) && !TryParsePositive(s.Protect, "--protect", out protect)) return 2;
+		if (!string.IsNullOrEmpty(s.ProtectLimit) && (protect == null || !TryParsePositive(s.ProtectLimit, "--protect-limit", out protectLimit))) { if (protect == null) AnsiConsole.MarkupLine("[red]Error:[/] --protect-limit needs --protect."); return 2; }
+		if (needsStop && !TryParsePositive(s.Stop!, "--stop", out stop)) return 2;
+		if (needsTrail && !TryParsePositive(s.Trail!, "--trail", out trail)) return 2;
 
 		// 2b. Validate --tif.
 		var tifLower = s.Tif.ToLowerInvariant();
@@ -284,7 +326,7 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 		if (!TradePlaceSettings.Sessions.Contains(s.Session.ToLowerInvariant())) { AnsiConsole.MarkupLine($"[red]Error:[/] --session must be one of {string.Join(", ", TradePlaceSettings.Sessions)}."); return 2; }
 
 		decimal? limit = null;
-		if (type == "limit")
+		if (needsLimit)
 		{
 			if (!decimal.TryParse(s.Limit, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedLimit))
 			{ AnsiConsole.MarkupLine($"[red]Error:[/] --limit '{Markup.Escape(s.Limit!)}' is not a valid decimal."); return 2; }
@@ -358,7 +400,12 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 			// `trade place` opens positions, so default to {side}_TO_OPEN; --intent overrides (e.g. a manual
 			// buy_to_close). Ignored by the builder for pure-stock orders (position_intent is option-only).
 			PositionIntent: positionIntent,
-			TradingSession: s.Session.ToUpperInvariant()
+			TradingSession: s.Session.ToUpperInvariant(),
+			StopPrice: stop,
+			TrailingType: needsTrail ? trailType.ToUpperInvariant() : null,
+			TrailingStep: trail,
+			ProtectiveStop: protect,
+			ProtectiveLimit: protectLimit
 		));
 
 		AnsiConsole.MarkupLine($"[dim]Client order ID:[/] [bold]{Markup.Escape(body.NewOrders[0].ClientOrderId)}[/]  [dim]Strategy:[/] {Markup.Escape(strategy)}  [dim]Side:[/] {Markup.Escape(side)}  [dim]Type:[/] {type.ToUpperInvariant()}  [dim]TIF:[/] {s.Tif.ToUpperInvariant()}  [dim]Session:[/] {s.Session.ToUpperInvariant()}");
@@ -569,7 +616,11 @@ internal sealed class TradeReplaceSettings : TradeSubcommandSettings
 
 	[CommandOption("--limit <PRICE>")]
 	[Description("New absolute limit price (per share; combo net).")]
-	public decimal Limit { get; set; }
+	public decimal? Limit { get; set; }
+
+	[CommandOption("--stop <PRICE>")]
+	[Description("New stop trigger price (per share) of a stop_loss / stop_loss_limit order.")]
+	public decimal? Stop { get; set; }
 
 	[CommandOption("--qty <N>")]
 	[Description("New quantity. Defaults to the order's current quantity.")]
@@ -584,7 +635,8 @@ internal sealed class TradeReplaceCommand : AsyncCommand<TradeReplaceSettings>
 	{
 		var account = TradeContext.ResolveOrExit(s.Account);
 		if (account == null) return 2;
-		if (s.Limit <= 0m) { AnsiConsole.MarkupLine("[red]Error:[/] --limit must be positive."); return 2; }
+		if (s.Limit == null && s.Stop == null) { AnsiConsole.MarkupLine("[red]Error:[/] pass --limit and/or --stop."); return 2; }
+		if (s.Limit <= 0m || s.Stop <= 0m) { AnsiConsole.MarkupLine("[red]Error:[/] --limit and --stop must be positive."); return 2; }
 
 		using var client = new WebullOpenApiClient(account);
 		try
@@ -596,8 +648,8 @@ internal sealed class TradeReplaceCommand : AsyncCommand<TradeReplaceSettings>
 			var legs = order.Legs?.Where(l => !string.IsNullOrEmpty(l.Id))
 				.Select(l => (l.Id!, (int.TryParse(l.Quantity?.Split('.')[0], out var lq) ? lq : currentQty) * qty / currentQty))
 				.ToList();
-			if (!TradeContext.Confirm($"Replace order {s.ClientOrderId} → qty {qty} @ {s.Limit}?")) { AnsiConsole.MarkupLine("[dim]Aborted.[/]"); return 0; }
-			var result = await client.ReplaceOrderAsync(s.ClientOrderId, qty, s.Limit, legs is { Count: > 0 } ? legs : null, cancellation);
+			if (!TradeContext.Confirm($"Replace order {s.ClientOrderId} → qty {qty}{(s.Limit != null ? $" limit {s.Limit}" : "")}{(s.Stop != null ? $" stop {s.Stop}" : "")}?")) { AnsiConsole.MarkupLine("[dim]Aborted.[/]"); return 0; }
+			var result = await client.ReplaceOrderAsync(s.ClientOrderId, qty, s.Limit, legs is { Count: > 0 } ? legs : null, s.Stop, cancellation);
 			AnsiConsole.MarkupLine($"[green]Replaced.[/] order_id={Markup.Escape(result.OrderId ?? "-")}  client_order_id={Markup.Escape(result.ClientOrderId ?? s.ClientOrderId)}");
 			return 0;
 		}

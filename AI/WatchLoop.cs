@@ -119,11 +119,11 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var positions = AIContext.BuildLivePositionSource(config, settings.Account);
 		var quotes = AIContext.BuildLiveQuoteSource(vendor);
 		var expiryRegimes = new Rules.ExpiryRegimeProvider();
-		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, expiryRegimes, Rules.TrailingStopStore.Default()), config);
 
 		// Auto-executors: turn proposals into real (or dry-run) order submissions. Both off by default;
 		// both honor enabled/submit gates independently. Shared with `wa ai scan` via AIContext.BuildAutoExecutors.
-		var (autoExecutor, openerExecutor, repricer) = AIContext.BuildAutoExecutors(config, settings.Account);
+		var (autoExecutor, openerExecutor, repricer, brokerStops) = AIContext.BuildAutoExecutors(config, settings.Account);
+		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, expiryRegimes, Rules.TrailingStopStore.Default(), brokerStops != null ? brokerStops.IsProtected : null), config);
 
 		// Apply the live 13-week T-bill risk-free rate once (mirrors `wa ai scan`): the opener's IV back-solve
 		// and BS pricing read OptionMath.RiskFreeRate, so watch must set it too or it prices against a stale
@@ -155,7 +155,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var tickState = new LiveTickState();   // persists the one-time staleness note across ticks
 		// Watch = "one live tick in a loop". The opener never bypasses its daily cap here (that's a scan flag).
 		var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, autoExecutor, openEvaluator, sink, openSink, openerExecutor,
-			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false, Repricer: repricer,
+			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false, Repricer: repricer, Stops: brokerStops,
 			CascadeOpener: openEvaluator != null ? AIContext.BuildCascadeOpener(config, LiveQuoteSource.VendorName(vendor)) : null);
 
 		// Entry window (ET, opener.earliestEntryTimeEt..latestEntryTimeEt): outside it the watch loop stops SUBMITTING

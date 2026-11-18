@@ -408,6 +408,15 @@ internal sealed class TrailingStopConfig
 	/// option or any debit structure that is "this far below the peak" (0.20 = 20% off the highest closing value); for a credit spread
 	/// it is this fraction of the width still at risk at the peak. The peak starts at the first closing value seen after entry.</summary>
 	[JsonPropertyName("trailPct")] public decimal TrailPct { get; set; } = 0.20m;
+	/// <summary>Live only (<see cref="Rules.BrokerStopManager"/>): how far below the stop trigger the broker stop order's limit sits, as a fraction of the
+	/// trigger price (0.05 = the limit is 5% under the stop, never less than one exchange tick). The stop is a stop-limit, so a fast drop through
+	/// the trigger sells no lower than this; a wider offset fills more reliably, a narrower one gives a better price. Applies to every stop placed after
+	/// the entry fills (every spread, and a single option when <see cref="BracketSingles"/> is off); a single option's bracket stop is a stop-market,
+	/// because Webull rejects a stop-limit child on a bracket.</summary>
+	[JsonPropertyName("stopLimitPct")] public decimal StopLimitPct { get; set; } = 0.05m;
+	/// <summary>Live only: send a long single option's entry as a Webull bracket (the entry plus a stop-market child that activates on the fill), so the
+	/// position is never open without its stop. Off = the stop-limit is placed once the entry shows as a position, a few seconds to minutes later.</summary>
+	[JsonPropertyName("bracketSingles")] public bool BracketSingles { get; set; } = true;
 	/// <summary>Structures the stop leaves alone, by the position's structure name — any of <see cref="KnownStructures"/> (LongCalendar,
 	/// LongDiagonal, DoubleCalendar, IronCondor, ShortPutVertical, LongCall, …). Empty = every open position is trailed. The match is on
 	/// the structure, whichever strategy or hand opened the position; a name that is no structure is a config error, so a typo cannot
@@ -713,6 +722,7 @@ internal static class AIConfigLoader
 		}
 		var trail = c.Rules.TrailingStop;
 		if (trail.Enabled && (trail.TrailPct <= 0m || trail.TrailPct >= 1m)) return $"rules.trailingStop.trailPct: must be in (0, 1), got {trail.TrailPct}";
+		if (trail.Enabled && (trail.StopLimitPct < 0m || trail.StopLimitPct >= 1m)) return $"rules.trailingStop.stopLimitPct: must be in [0, 1), got {trail.StopLimitPct}";
 		if (trail.Exclude.FirstOrDefault(name => !TrailingStopConfig.KnownStructures.Contains(name, StringComparer.OrdinalIgnoreCase)) is string unknown)
 			return $"rules.trailingStop.exclude: '{unknown}' is not a structure; use any of {string.Join(", ", TrailingStopConfig.KnownStructures)}";
 		if (c.AutoExecute.Reprice.CancelSeconds < 0) return $"autoExecute.reprice.cancelSeconds: must be ≥ 0, got {c.AutoExecute.Reprice.CancelSeconds}";

@@ -205,7 +205,8 @@ internal sealed class WebullOpenApiClient : IDisposable
 	{
 		[JsonPropertyName("client_order_id")] public string ClientOrderId { get; set; } = "";
 		[JsonPropertyName("quantity")] public string Quantity { get; set; } = "";
-		[JsonPropertyName("limit_price")] public string LimitPrice { get; set; } = "";
+		[JsonPropertyName("limit_price"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? LimitPrice { get; set; }
+		[JsonPropertyName("stop_price"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? StopPrice { get; set; }
 		[JsonPropertyName("legs")][JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public List<ModifyLeg>? Legs { get; set; }
 	}
 
@@ -218,7 +219,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 	/// <summary>Modifies a working order's limit price and quantity in place (the only fields Webull lets change). An option
 	/// order must also list every leg by its id from <see cref="GetOrderAsync"/> with its new quantity — Webull's US sample
 	/// shape; without the legs an option replace is rejected ("Parameter error, invalid orders"). Equities omit legs.</summary>
-	internal async Task<PlaceResult> ReplaceOrderAsync(string clientOrderId, int quantity, decimal limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs = null, CancellationToken ct = default) =>
+	internal async Task<PlaceResult> ReplaceOrderAsync(string clientOrderId, int quantity, decimal? limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs = null, decimal? stopPrice = null, CancellationToken ct = default) =>
 		await PostAsync<PlaceResult>("/openapi/trade/order/replace", new ReplaceRequest
 		{
 			AccountId = _account.AccountId,
@@ -226,7 +227,8 @@ internal sealed class WebullOpenApiClient : IDisposable
 			{
 				ClientOrderId = clientOrderId,
 				Quantity = quantity.ToString(CultureInfo.InvariantCulture),
-				LimitPrice = limitPrice.ToString("0.####", CultureInfo.InvariantCulture),
+				LimitPrice = limitPrice?.ToString("0.####", CultureInfo.InvariantCulture),
+				StopPrice = stopPrice?.ToString("0.####", CultureInfo.InvariantCulture),
 				Legs = legs?.Select(l => new ModifyLeg { Id = l.Id, Quantity = l.Quantity.ToString(CultureInfo.InvariantCulture) }).ToList(),
 			}],
 		}, ct);
@@ -384,7 +386,9 @@ internal sealed class WebullOpenApiClient : IDisposable
 		[property: JsonPropertyName("filled_time_at")] string? FilledTimeAt,
 		[property: JsonPropertyName("position_intent")] string? PositionIntent,
 		[property: JsonPropertyName("option_strategy")] string? OptionStrategy,
-		[property: JsonPropertyName("legs")] List<OrderDetailLeg>? Legs);
+		[property: JsonPropertyName("legs")] List<OrderDetailLeg>? Legs,
+		[property: JsonPropertyName("order_type")] string? OrderType = null,
+		[property: JsonPropertyName("stop_price")] string? StopPrice = null);
 
 	internal sealed record OrderDetail(
 		[property: JsonPropertyName("combo_type")] string? ComboType,

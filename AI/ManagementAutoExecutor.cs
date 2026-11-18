@@ -41,6 +41,7 @@ internal sealed class ManagementAutoExecutor
 	private readonly BrokerStateService? _brokerState;
 	private readonly HashSet<string> _allowedRules;
 	private readonly MarketableCloseChaser? _chaser;
+	private readonly BrokerStopManager? _stops;
 	/// <summary>The live marketable close this process placed per (rule, position), so later ticks re-price that order instead of
 	/// stacking another — and keep leaving a filled one alone while the position list catches up. In-memory and reset daily, like the
 	/// tranche bookkeeping: after a restart the broker's working orders identify it instead.</summary>
@@ -52,8 +53,9 @@ internal sealed class ManagementAutoExecutor
 	private readonly Dictionary<(string Rule, string PositionKey), HashSet<int>> _firedTranches = new();
 	private DateOnly _trackingDate;
 
-	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null, OrderRepricer? repricer = null, IOrderGateway? gateway = null)
+	public ManagementAutoExecutor(ManagementAutoExecuteConfig config, TradeAccount? account, BrokerStateService? brokerState = null, OrderRepricer? repricer = null, IOrderGateway? gateway = null, BrokerStopManager? stops = null)
 	{
+		_stops = stops;
 		gateway ??= account != null ? new WebullOrderGateway(account) : null;
 		_chaser = gateway != null ? new MarketableCloseChaser(gateway) : null;
 		_config = config;
@@ -313,6 +315,18 @@ internal sealed class ManagementAutoExecutor
 			var restingId = _marketableCloses.GetValueOrDefault(closeKey)
 				?? _brokerState?.FindPendingMatching(legSpecs.Select(l => (l.Symbol, l.Action))).FirstOrDefault(o => BrokerOrder.State(o.Status) == OrderState.Working)?.ClientOrderId;
 			if (restingId != null && !await ChaseRestingCloseAsync(restingId, closeKey, side, limitAbs, label, position, cancellation)) return false;
+		}
+
+		// A broker stop sized for the whole position must not outlive a close of part of it: its trigger would sell what is no longer held. Cancel it
+		// first (the trailing rule itself never gets here while a stop guards the position; its tranche-free emergency close is the fallback).
+		if (_config.Submit && _stops != null && proposal.Rule != "TrailingStopRule")
+		{
+			try { await _stops.CancelForAsync(legSpecs.Select(l => (l.Symbol, l.Action)), cancellation); }
+			catch (Exception ex) when (ex is WebullOpenApiException or HttpRequestException)
+			{
+				AnsiConsole.MarkupLine($"[red]auto-execute skipped:[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(position.Key)} close — could not cancel its broker stop ({Markup.Escape(ex.Message)}); closing now could leave the stop to sell what is gone.");
+				return false;
+			}
 		}
 
 		// Broker-truth dedup: if the same closing combo is still working at the broker, skip — don't stack a

@@ -22,7 +22,8 @@ internal sealed record LiveTickDeps(
 	bool BypassOpenerDailyCap,
 	bool OutsideEntryWindow = false,
 	OrderRepricer? Repricer = null,
-	Open.Cascade.CascadeOpener? CascadeOpener = null);
+	Open.Cascade.CascadeOpener? CascadeOpener = null,
+	BrokerStopManager? Stops = null);
 
 /// <summary>Mutable state that must persist across ticks (watch) but reset per run (scan).</summary>
 internal sealed class LiveTickState
@@ -105,6 +106,11 @@ internal static class LiveTick
 			var mgmtResults = mgmtFrozen.Count == 0 ? results : results.Where(r => !QuoteSanity.TouchesExpiry(r.Proposal.Legs, mgmtFrozen)).ToList();
 			await deps.MgmtExecutor.HandleAsync(mgmtResults, ctx, cancellation, cycleToken);
 		}
+
+		// Keep each position's broker stop at its trail level. After the management executor, so a close it just sent cancelled the stop first; the stop
+		// manager only looks at positions that still exist.
+		if (deps.Stops != null)
+			await deps.Stops.SyncAsync(ctx, cycleToken, cancellation);
 
 		var openCount = 0;
 		if (deps.OpenEvaluator != null && deps.OpenSink != null)

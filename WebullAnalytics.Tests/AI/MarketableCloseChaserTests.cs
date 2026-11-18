@@ -1,5 +1,6 @@
 using WebullAnalytics.AI;
 using WebullAnalytics.Api;
+using WebullAnalytics.Trading;
 using Xunit;
 
 namespace WebullAnalytics.Tests.AI;
@@ -25,9 +26,9 @@ public class MarketableCloseChaserTests
 			return Task.FromResult(new WebullOpenApiClient.OrderDetail("NORMAL", null, [order]));
 		}
 
-		public Task ReplaceOrderAsync(string clientOrderId, int quantity, decimal limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs, CancellationToken ct)
+		public Task ReplaceOrderAsync(string clientOrderId, int quantity, decimal? limitPrice, IReadOnlyList<(string Id, int Quantity)>? legs, CancellationToken ct, decimal? stopPrice = null)
 		{
-			Replaces.Add((clientOrderId, quantity, limitPrice, legs));
+			Replaces.Add((clientOrderId, quantity, limitPrice!.Value, legs));
 			return Task.CompletedTask;
 		}
 
@@ -36,6 +37,8 @@ public class MarketableCloseChaserTests
 			Cancels.Add(clientOrderId);
 			return Task.CompletedTask;
 		}
+
+		public Task<WebullOpenApiClient.PlaceResult> PlaceOrderAsync(OrderRequestBody body, CancellationToken ct) => throw new NotSupportedException();
 	}
 
 	private static MarketableCloseChaser.Outcome Chase(FakeGateway gw, string side, decimal limit) =>

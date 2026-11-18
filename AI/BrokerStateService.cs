@@ -105,7 +105,15 @@ internal sealed class BrokerStateService
 		// and a second order-history call seconds later is what tripped Webull's 2-req/2-s limit (HTTP 429).
 		var todayOrders = await TodayOrdersFeed.For(_account).GetAsync(cycleToken, cancellation);
 		var openOrders = await client.ListOpenOrdersAsync(cancellation);
+		var ledgerEntries = _ledger?.ReadFor(MarketTime.TodayEt());
+		LoadSnapshot(todayOrders, openOrders, ledgerEntries);
+	}
 
+	/// <summary>Builds the snapshot from already-fetched orders (what <see cref="RefreshAsync"/> does after its two calls), so it can run without the network.
+	/// With a <paramref name="cycleToken"/> the snapshot also stands as that tick's refresh, so <see cref="TryRefreshAsync"/> on the same token reuses it.</summary>
+	internal void LoadSnapshot(IEnumerable<WebullOpenApiClient.OpenOrder> todayOrders, IEnumerable<WebullOpenApiClient.OpenOrder> openOrders, IReadOnlyList<LocalOrderLedger.Entry>? ledgerEntries, object? cycleToken = null)
+	{
+		if (cycleToken != null) { _lastCycleToken = cycleToken; _lastCycleResult = true; }
 		var seenClientIds = new HashSet<string>(StringComparer.Ordinal);
 		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
 		var byFingerprint = new Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>(StringComparer.Ordinal);
@@ -128,10 +136,13 @@ internal sealed class BrokerStateService
 					if (!string.IsNullOrEmpty(order.ClientOrderId) && !seenClientIds.Add(order.ClientOrderId)) continue;
 					var fp = FingerprintLegs(order.Legs);
 					if (string.IsNullOrEmpty(fp)) continue;
-					fingerprints[fp] = fingerprints.TryGetValue(fp, out var fpCount) ? fpCount + 1 : 1;
-					if (!IsFilledStatus(order.Status)) working.Add(fp);
 					if (!byFingerprint.TryGetValue(fp, out var list)) byFingerprint[fp] = list = new List<WebullOpenApiClient.OrderDetailOrder>();
 					list.Add(order);
+					// A resting stop is a guard, not a close: it must neither net against the day's opens (a position with a stop on it is still open)
+					// nor block a real close of the same legs (the closer cancels the stop first). Only a filled stop counts as the close it became.
+					if (BrokerOrder.IsStop(order.OrderType) && !IsFilledStatus(order.Status)) continue;
+					fingerprints[fp] = fingerprints.TryGetValue(fp, out var fpCount) ? fpCount + 1 : 1;
+					if (!IsFilledStatus(order.Status)) working.Add(fp);
 					var root = RootOf(order.Legs);
 					if (root != null && !IsCloseIntent(order.PositionIntent)) rootCount[root] = rootCount.TryGetValue(root, out var c) ? c + 1 : 1;
 				}
@@ -141,11 +152,8 @@ internal sealed class BrokerStateService
 		Ingest(todayOrders);
 		Ingest(openOrders);
 
-		if (_ledger != null)
-		{
-			var etToday = MarketTime.TodayEt();
-			MergeLedgerEntries(_ledger.ReadFor(etToday), reportedClientIds, fingerprints, working, rootCount);
-		}
+		if (ledgerEntries != null)
+			MergeLedgerEntries(ledgerEntries, reportedClientIds, fingerprints, working, rootCount);
 
 		_activeFingerprintCounts = fingerprints;
 		_activeByFingerprint = byFingerprint;
@@ -264,6 +272,8 @@ internal sealed class BrokerStateService
 	/// (e.g. <c>SPXW260526C07375000</c>); we parse each to extract (Root, Expiry, Strike, CallPut)
 	/// so the fingerprint shape matches what <see cref="FingerprintLegs"/> produces from the broker
 	/// representation. Non-OCC symbols fall through to a stock-leg key.</summary>
+	internal static string Fingerprint(IEnumerable<(string Symbol, string Action)> legs) => FingerprintProposal(legs);
+
 	private static string FingerprintProposal(IEnumerable<(string Symbol, string Action)> legs) =>
 		string.Join("|", legs.Select(l =>
 		{

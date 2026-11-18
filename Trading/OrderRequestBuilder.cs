@@ -28,6 +28,9 @@ internal sealed class NewOrder
 	[JsonPropertyName("support_trading_session")] public string SupportTradingSession { get; set; } = "CORE";
 	[JsonPropertyName("quantity"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Quantity { get; set; }
 	[JsonPropertyName("limit_price"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? LimitPrice { get; set; }
+	[JsonPropertyName("stop_price"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? StopPrice { get; set; }
+	[JsonPropertyName("trailing_type"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? TrailingType { get; set; }
+	[JsonPropertyName("trailing_stop_step"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? TrailingStopStep { get; set; }
 	[JsonPropertyName("option_strategy"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? OptionStrategy { get; set; }
 	[JsonPropertyName("position_intent"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? PositionIntent { get; set; }
 	[JsonPropertyName("legs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public List<OrderLeg>? Legs { get; set; }
@@ -88,7 +91,12 @@ internal static class OrderRequestBuilder
 		decimal? LimitPrice,      // absolute per-share combo price; null only when OrderType == MARKET
 		string TimeInForce,       // "DAY" or "GTC"
 		string? PositionIntent = null, // BUY_TO_OPEN | SELL_TO_OPEN | BUY_TO_CLOSE | SELL_TO_CLOSE; applied to order + every option leg
-		string TradingSession = "CORE"); // support_trading_session: CORE (09:30-16:00 ET) | ALL (04:00-20:00) | NIGHT (20:00-04:00) | ALL_DAY
+		string TradingSession = "CORE", // support_trading_session: CORE (09:30-16:00 ET) | ALL (04:00-20:00) | NIGHT (20:00-04:00) | ALL_DAY
+		decimal? StopPrice = null,      // STOP_LOSS / STOP_LOSS_LIMIT trigger (absolute per-share)
+		string? TrailingType = null,    // TRAILING_STOP_LOSS: PERCENTAGE | AMOUNT
+		decimal? TrailingStep = null,   // TRAILING_STOP_LOSS: trail distance (percent or amount per TrailingType)
+		decimal? ProtectiveStop = null,  // attach a STOP_LOSS child that Webull activates when this order fills (MASTER + STOP_LOSS combo)
+		decimal? ProtectiveLimit = null); // with ProtectiveStop: make the child a STOP_LOSS_LIMIT at this limit instead of a stop-market
 
 	internal static OrderRequestBody Build(BuildParams p)
 	{
@@ -101,7 +109,10 @@ internal static class OrderRequestBuilder
 			OrderType = p.OrderType,
 			TimeInForce = p.TimeInForce,
 			SupportTradingSession = p.TradingSession,
-			LimitPrice = p.OrderType == "LIMIT" ? Math.Abs(p.LimitPrice!.Value).ToString("0.####", System.Globalization.CultureInfo.InvariantCulture) : null,
+			LimitPrice = p.LimitPrice is decimal lp ? Math.Abs(lp).ToString("0.####", System.Globalization.CultureInfo.InvariantCulture) : null,
+			StopPrice = p.StopPrice is decimal sp ? sp.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture) : null,
+			TrailingType = p.TrailingType,
+			TrailingStopStep = p.TrailingStep is decimal ts ? ts.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture) : null,
 		};
 		body.NewOrders.Add(order);
 
@@ -132,6 +143,7 @@ internal static class OrderRequestBuilder
 			order.OptionStrategy = OptionStrategyEnum["Single"];
 			order.PositionIntent = p.PositionIntent; // option-only field; set on the order (MASTER), never per leg
 			order.Legs = new List<OrderLeg> { BuildOptionLeg(leg) };
+			if (p.ProtectiveStop is decimal stop) AttachStopLoss(body, order, optionLegs, stop, p.ProtectiveLimit);
 			return body;
 		}
 
@@ -149,7 +161,35 @@ internal static class OrderRequestBuilder
 		order.Legs = new List<OrderLeg>();
 		foreach (var leg in stockLegs) order.Legs.Add(BuildStockLeg(leg));
 		foreach (var leg in optionLegs) order.Legs.Add(BuildOptionLeg(leg));
+		if (p.ProtectiveStop is decimal comboStop) AttachStopLoss(body, order, optionLegs, comboStop, p.ProtectiveLimit);
 		return body;
+	}
+
+	/// <summary>Turns <paramref name="master"/> into the MASTER of a combo and appends a STOP_LOSS child that closes the same contract
+	/// once the master fills (every leg flipped; the stop is on the net price). The child is GTC (Webull's documented example) and carries the opposite side with a *_TO_CLOSE intent.</summary>
+	private static void AttachStopLoss(OrderRequestBody body, NewOrder master, IReadOnlyList<ParsedLeg> optionLegs, decimal stop, decimal? limit)
+	{
+		body.ClientComboOrderId = GenerateClientOrderId();
+		master.ComboType = "MASTER";
+		var closeSide = master.Side == "BUY" ? "SELL" : "BUY";
+		var closeLegs = optionLegs.Select(l => { var c = BuildOptionLeg(l); c.Side = c.Side == "BUY" ? "SELL" : "BUY"; return c; }).ToList();
+		body.NewOrders.Add(new NewOrder
+		{
+			ClientOrderId = GenerateClientOrderId(),
+			ComboType = "STOP_LOSS",
+			InstrumentType = "OPTION",
+			OrderType = limit == null ? "STOP_LOSS" : "STOP_LOSS_LIMIT",
+			LimitPrice = limit?.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture),
+			Side = closeSide,
+			Symbol = master.Symbol,
+			Quantity = master.Quantity,
+			TimeInForce = "GTC",
+			SupportTradingSession = master.SupportTradingSession,
+			StopPrice = stop.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture),
+			OptionStrategy = master.OptionStrategy,
+			PositionIntent = DeriveOptionIntent(closeSide, opening: false),
+			Legs = closeLegs,
+		});
 	}
 
 	private static OrderLeg BuildStockLeg(ParsedLeg leg) => new()
