@@ -9,8 +9,8 @@ namespace WebullAnalytics.AI.Open.Cascade;
 /// (<see cref="Confirmed"/> — what the neutral setup waits on: it trades only on a day nothing has confirmed). A setup trades once a day, so the
 /// ledger is what stops a watch loop from re-entering after its trailing stop closed the position, after a restart, or from a
 /// second process. A confirmation that builds a trade writes <see cref="Signaled"/>, then <see cref="Placed"/> once the auto-executor
-/// acted on it; one that builds none writes <see cref="Skipped"/>. Placed and Skipped are final; a setup that is only Signaled may be
-/// proposed again until its retry window ends. Append-only JSONL shared by every process on the machine. A dry run and a live run
+/// acted on it; one that builds none writes <see cref="Waiting"/> (and is tried again on later reads) or, with retrySkipped off,
+/// <see cref="Skipped"/>. Placed and Skipped are final; a setup that is only Signaled may be proposed again until its retry window ends. Append-only JSONL shared by every process on the machine. A dry run and a live run
 /// keep separate books: a morning dry run must not use up the signal a later --submit run trades. Without a path (a backtest)
 /// the entries live in memory and die with the run.
 /// </summary>
@@ -44,8 +44,11 @@ internal sealed class CascadeSignalLedger
 	internal const string Signaled = "signaled";
 	/// <summary>The auto-executor acted on the trade: an order placed, or logged by a dry run.</summary>
 	internal const string Placed = "placed";
-	/// <summary>The first confirmation produced no trade.</summary>
+	/// <summary>The first confirmation produced no trade and, with <see cref="OpenerCascadeConfig.RetrySkipped"/> off, that is final.</summary>
 	internal const string Skipped = "skipped";
+	/// <summary>The setup is confirmed but its trade could not be built or priced on this read (<paramref name="Detail"/> says why). Not final: the next read tries again, and
+	/// one line is written per change of reason, so the panel shows the latest. Only <see cref="Placed"/> ends the setup's day.</summary>
+	internal const string Waiting = "waiting";
 	/// <summary>The regime confirmed for the first time today, whether or not its setup is enabled; a market fact, so it counts in every mode.</summary>
 	internal const string Confirmed = "confirmed";
 

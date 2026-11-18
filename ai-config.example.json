@@ -69,6 +69,7 @@
 			"enabled": false,
 			"readSeconds": 60,
 			"retrySeconds": 180,
+			"retrySkipped": true,
 			"bullTrap": { "enabled": false, "structure": "ShortCallVertical", "anchor": "callWallAtHigh", "offsetSteps": 0, "widthSteps": 2, "minCredit": 0.10 },
 			"bearTrap": { "enabled": false, "structure": "LongCall", "anchor": "atm", "offsetSteps": 0 },
 			"bullCascade": { "enabled": false, "structure": "LongCall", "anchor": "atm", "offsetSteps": 0 },

@@ -10,8 +10,9 @@ namespace WebullAnalytics.AI.Open.Cascade;
 /// own trade in a <see cref="CascadeSetupConfig"/>: a structure, the strike its first leg sits at, and for a vertical the width.
 /// Exits are the management rules' business (<c>rules.trailingStop</c>, with structures opted out via <c>rules.trailingStop.exclude</c>; none configured = held to expiry).
 ///
-/// A setup trades once a day, at its first confirmation (<see cref="CascadeSignalLedger"/>): a first confirmation that yields no
-/// trade (no wall out of the money, a credit under the floor) uses up the day's signal. One that yields a trade is used up when the
+/// A setup trades once a day (<see cref="CascadeSignalLedger"/>), at the first read that yields a trade: a confirmation whose trade cannot be built or
+/// priced (no wall out of the money, a credit under the floor) is not the day's entry, so the setup is tried again on each later read while it is still the
+/// primary regime and its entry conditions pass (<see cref="OpenerCascadeConfig.RetrySkipped"/>; off = that first skip is final). A trade is used up when the
 /// auto-executor acts on it (<see cref="Acted"/>); if the executor held it back (quote guard, broker refresh failure, cash), the
 /// setup is proposed again on later reads while it stays confirmed, until <see cref="OpenerCascadeConfig.RetrySeconds"/> after the
 /// first confirmation. Nothing was opened in that case, so a retry can never re-enter a position the stop already closed. The
@@ -208,8 +209,16 @@ internal sealed class CascadeOpener
 			};
 		if (proposal == null)
 		{
-			// A retry that cannot build the trade any more just waits out the window; only the first confirmation is final.
+			// A retry that cannot build the trade any more just waits out the window.
 			if (first != null) return;
+			if (_config.Opener.Cascade.RetrySkipped)
+			{
+				// Not the day's entry: say why (once per change of reason, so the ledger is not a line per read) and try again on the next read.
+				if (entries.LastOrDefault() is not { Outcome: CascadeSignalLedger.Waiting } last || last.Detail != skip)
+					_ledger.Append(entry with { Outcome = CascadeSignalLedger.Waiting });
+				notices.Add($"[yellow]{Markup.Escape(label)}: no trade yet[/] — {Markup.Escape(skip!)}. Tried again on each read while the setup holds.");
+				return;
+			}
 			_ledger.Append(entry with { Outcome = CascadeSignalLedger.Skipped });
 			notices.Add($"[yellow]{Markup.Escape(label)}: no trade today[/] — {Markup.Escape(skip!)}. The first confirmation is the day's only entry.");
 			return;

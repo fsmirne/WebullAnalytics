@@ -1667,12 +1667,17 @@ internal sealed class BacktestRunner
 		foreach (var (regime, side, setup) in blocks)
 		{
 			var mine = entries.Where(e => e.Setup == regime && e.Side == side && e.Outcome != Open.Cascade.CascadeSignalLedger.Confirmed).ToList();
-			var confirmed = mine.Count(e => e.Outcome is Open.Cascade.CascadeSignalLedger.Signaled or Open.Cascade.CascadeSignalLedger.Skipped);   // one line per first confirmation
+			// One per session a setup confirmed on: a trade built (Signaled), a first confirmation that was final (Skipped), or a confirmation that only ever
+			// waited (Waiting, one line per change of reason, so counted by day).
+			var confirmed = mine.Where(e => e.Outcome is Open.Cascade.CascadeSignalLedger.Signaled or Open.Cascade.CascadeSignalLedger.Skipped or Open.Cascade.CascadeSignalLedger.Waiting).Select(e => e.Date).Distinct().Count();
 			var opened = mine.Count(e => e.Outcome == Open.Cascade.CascadeSignalLedger.Placed);
-			var gated = _cascadeOpener!.GatedReadings.Where(g => g.Setup == regime).ToList();
-			var reasons = mine.Where(e => e.Outcome == Open.Cascade.CascadeSignalLedger.Skipped).Select(e => e.Detail)
+			var openedDays = mine.Where(e => e.Outcome == Open.Cascade.CascadeSignalLedger.Placed).Select(e => e.Date).ToHashSet();
+			// Why a session ended with no trade: its last reason (a final skip, or what it was still waiting on at the close).
+			var reasons = mine.Where(e => e.Outcome is Open.Cascade.CascadeSignalLedger.Skipped or Open.Cascade.CascadeSignalLedger.Waiting && !openedDays.Contains(e.Date))
+				.GroupBy(e => e.Date).Select(g => g.Last().Detail)
 				.Concat(_cascadeUnfilled.Where(u => u.Setup == regime && u.Side == side).Select(u => u.Reason))
 				.GroupBy(ReasonKind).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()}× {g.Key}").ToList();
+			var gated = _cascadeOpener!.GatedReadings.Where(g => g.Setup == regime).ToList();
 			var name = side == null ? Analyze.CascadeReading.RegimeLabel(regime) : $"NEUTRAL {side.ToUpperInvariant()}";
 			var what = side == null ? "first confirmation(s)" : "neutral day(s)";
 			lines.Add($"  {name} → {setup.Kind}: {confirmed} {what}, {opened} opened{(reasons.Count > 0 ? "; not opened: " + string.Join(", ", reasons) : "")}{(gated.Count > 0 ? $"; {gated.Count} reading(s) held back by an entry condition ({string.Join(", ", gated.GroupBy(g => ReasonKind(g.Reason)).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()}× {g.Key}"))})" : "")}");

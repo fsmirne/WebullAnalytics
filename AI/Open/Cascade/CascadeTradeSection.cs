@@ -94,6 +94,7 @@ internal static class CascadeTradeSection
 		{
 			CascadeSignalLedger.Placed => $"[green]{at} {(live ? "placed" : "logged (dry run)")}[/] · {detail}",
 			CascadeSignalLedger.Skipped => $"[yellow]{at} no trade[/] · {detail}",
+			CascadeSignalLedger.Waiting => $"[yellow]{at} no trade yet, trying each read[/] · {detail}",
 			_ => retryUntil is TimeSpan until ? $"{at} confirmed, retrying until {until:hh\\:mm} · {detail}" : $"[yellow]{at} confirmed, never placed[/] · {detail}",
 		};
 	}

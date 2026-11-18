@@ -324,13 +324,49 @@ public class CascadeOpenerTests
 	}
 
 	[Fact]
-	public async Task AConfirmationWithNoTradeUsesUpTheDaysSignal()
+	public async Task AConfirmationWithNoTradeDoesNotUseUpTheDay_TheNextReadThatYieldsATradePlacesIt()
 	{
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap, callWallAtHigh: null) };
 		var opener = h.Opener();
 		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default));
+		var waiting = Assert.Single(h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false));
+		Assert.Equal(CascadeSignalLedger.Waiting, waiting.Outcome);
+
 		h.Next = Read(CascadeRegime.BullTrap, callWallAtHigh: 7550m);
-		Assert.Empty(await opener.EvaluateAsync(Ctx(1), default));    // the first confirmation was the day's only entry
+		Assert.Single(await h.ActedRead(opener, 1));                         // the conditions cleared: it trades
+		Assert.Empty(await opener.EvaluateAsync(Ctx(2), default));          // and only a placed trade uses the day up
+		Assert.Equal(CascadeSignalLedger.Placed, h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false).Last().Outcome);
+	}
+
+	[Fact]
+	public async Task AWaitingSetupIsRecordedOncePerReason_NotOncePerRead()
+	{
+		using var h = new Harness { Next = Read(CascadeRegime.BullTrap, callWallAtHigh: null) };
+		var opener = h.Opener();
+		await opener.EvaluateAsync(Ctx(0), default);
+		await opener.EvaluateAsync(Ctx(1), default);
+		await opener.EvaluateAsync(Ctx(2), default);
+		var entries = h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false);
+		Assert.Single(entries);
+		Assert.Equal(3, h.Reads);
+
+		// A different reason is a new line, so the panel shows the latest.
+		h.Next = Read(CascadeRegime.BullTrap, callWallAtHigh: 7552m);
+		await opener.EvaluateAsync(Ctx(3), default);
+		Assert.Equal(2, h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false).Count);
+	}
+
+	[Fact]
+	public async Task WithRetrySkippedOff_TheFirstConfirmationIsTheDaysOnlyEntry()
+	{
+		var config = Config();
+		config.Opener.Cascade.RetrySkipped = false;
+		using var h = new Harness { Next = Read(CascadeRegime.BullTrap, callWallAtHigh: null) };
+		var opener = h.Opener(config: config);
+		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default));
+		Assert.Equal(CascadeSignalLedger.Skipped, Assert.Single(h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false)).Outcome);
+		h.Next = Read(CascadeRegime.BullTrap, callWallAtHigh: 7550m);
+		Assert.Empty(await opener.EvaluateAsync(Ctx(1), default));
 	}
 
 	[Fact]
@@ -501,6 +537,10 @@ public class CascadeOpenerTests
 		Assert.DoesNotContain("TRADE", quiet);
 		Assert.Matches(@"BULL TRAP\s+10:40 placed · ShortCallVertical · spot", quiet);
 		Assert.Contains("wa trade place", quiet);
+
+		// A setup still waiting on its trade says so, with the reason, and is not final.
+		var waiting = placed with { Setup = CascadeRegime.BearTrap, TimeEt = "12:26:00", Outcome = CascadeSignalLedger.Waiting, Detail = "put spread mid credit $0.48 is under minCredit $0.50", Structure = null, Qty = null, NetPerShare = null, Commands = null };
+		Assert.Matches(@"BEAR TRAP\s+12:26 no trade yet, trying each read · put spread mid credit \$0\.48 is under minCredit \$0\.50 · spot", Render(CascadeTradeSection.Build([], [], [new("BEAR TRAP", waiting)], live: false)));
 
 		// Too narrow for one line: the command moves to a line of its own, whole, rather than wrapping.
 		var narrow = Render(CascadeTradeSection.Build([], [], [new("BULL TRAP", placed)], live: false), width: 150);

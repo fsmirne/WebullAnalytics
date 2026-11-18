@@ -224,6 +224,11 @@ internal sealed class OpenerCascadeConfig
 	/// <summary>How long after a setup's first confirmation its trade may still be proposed when the auto-executor has not acted on it yet (quote
 	/// guard, broker refresh failure, cash) and the setup is still confirmed. 0 = the first confirmation's tick only.</summary>
 	[JsonPropertyName("retrySeconds")] public int RetrySeconds { get; set; } = 180;
+	/// <summary>A confirmed setup whose trade cannot be built or priced on a read (a credit under <c>minCredit</c>, no two-sided quote, no wall out of the money,
+	/// a strike not listed) is tried again on the next read instead of being recorded as the day's final "no trade": while the setup is still the primary
+	/// regime and its entry conditions pass, the first read that yields a trade places it, and only a placed trade uses up the day. False = the first
+	/// confirmation is the day's only entry, so a skip on it is final (the behavior before this knob, which the backtest can A/B).</summary>
+	[JsonPropertyName("retrySkipped")] public bool RetrySkipped { get; set; } = true;
 	[JsonPropertyName("bullTrap")] public CascadeSetupConfig BullTrap { get; set; } = new();
 	[JsonPropertyName("bearTrap")] public CascadeSetupConfig BearTrap { get; set; } = new();
 	[JsonPropertyName("bullCascade")] public CascadeSetupConfig BullCascade { get; set; } = new();
