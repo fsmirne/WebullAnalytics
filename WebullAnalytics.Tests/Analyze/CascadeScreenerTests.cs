@@ -9,6 +9,17 @@ namespace WebullAnalytics.Tests.Analyze;
 /// bounce from the SESSION low rather than the trailing range window's.</summary>
 public class CascadeScreenerTests
 {
+	// The stretch gates compare the exact value to 0.25. A stretch of 0.246 once printed as "0.25 EM; need ≥0.25 EM"; it now reads 0.24, and a value
+	// that passes always reads 0.25 or more.
+	[Theory]
+	[InlineData(0.246, "0.24")]
+	[InlineData(0.2499, "0.24")]
+	[InlineData(0.25, "0.25")]
+	[InlineData(0.254, "0.25")]
+	[InlineData(0, "0.00")]
+	public void Em_TruncatesSoAValueUnderTheBarNeverReadsAsTheBar(double moves, string expected) =>
+		Assert.Equal(expected, CascadeScreener.Em((decimal)moves));
+
 	private const decimal Open = 7000m;
 	private const decimal Move = 70m;   // one-day expected move: 1% of spot, above the 0.6% floor
 

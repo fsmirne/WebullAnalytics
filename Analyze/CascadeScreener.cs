@@ -471,7 +471,7 @@ internal static class CascadeScreener
 		if (stretchMoves >= 0.20m && (rejectedPutWall || FrontShortGamma(t) || t.NetGexFractionMulti < -0.15m))
 			stretchPts += 6m;
 		var f1Pts = RoundPts(stretchPts);
-		var f1Detail = $"bear stretch {stretchMoves:F2} EM (gap {gapPct:+0.00;-0.00}%), {(t.FrontSettled ? "front expiry settled" : f.ShortGamma ? "0DTE short γ" : "0DTE long γ")}, 30d GEX {t.NetGexFractionMulti:+0%;-0%}";
+		var f1Detail = $"bear stretch {Em(stretchMoves)} EM (gap {gapPct:+0.00;-0.00}%), {(t.FrontSettled ? "front expiry settled" : f.ShortGamma ? "0DTE short γ" : "0DTE long γ")}, 30d GEX {t.NetGexFractionMulti:+0%;-0%}";
 
 		// Factor 2: Intraday VIX Stall / Drop from Open (20 pts) — null when intraday VIX is absent
 		int? f2Pts = null;
@@ -570,7 +570,7 @@ internal static class CascadeScreener
 		if (stretchMoves >= 0.20m && (rejectedCallWall || t.NetGexFractionMulti < -0.15m))
 			ceilingPts += 6m;
 		var f1Pts = RoundPts(ceilingPts);
-		var f1Detail = $"bull stretch {stretchMoves:F2} EM (gap {gapPct:+0.00;-0.00}%), 0DTE call wall {(f.CallWall.HasValue ? $"${f.CallWall.Value:N0}" : "—")}";
+		var f1Detail = $"bull stretch {Em(stretchMoves)} EM (gap {gapPct:+0.00;-0.00}%), 0DTE call wall {(f.CallWall.HasValue ? $"${f.CallWall.Value:N0}" : "—")}";
 
 		// Factor 2: Intraday VIX Non-Confirmation & Skew Stress (20 pts) — null when intraday VIX is absent
 		int? f2Pts = null;
@@ -699,13 +699,17 @@ internal static class CascadeScreener
 		? $"flow {inp.FlowShare ?? 0m:+0.00;-0.00}"
 		: $"0DTE gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, flow {inp.FlowShare ?? 0m:+0.00;-0.00}";
 
+	/// <summary>An expected-move multiple at two decimals, truncated, not rounded: the stretch gates compare the exact value to 0.25, so a stretch of 0.246 must
+	/// read 0.24 (under the bar), never 0.25 beside "need ≥0.25 EM". A value that passes the gate always reads 0.25 or more.</summary>
+	internal static string Em(decimal moves) => (Math.Floor(moves * 100m) / 100m).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+
 	private static List<SetupNote> BuildNotesBearTrap(CascadeTerrain t, CascadeInputs inp, decimal stretchMoves, bool hadBearStretch, bool vixNotExpanding, bool reclaimedVwap, bool upwardStructure, bool rejectedPutWall)
 	{
 		var notes = new List<SetupNote>();
 		var f = t.Front;
 		notes.Add(hadBearStretch
-			? new SetupNote(NoteSeverity.Confirm, $"Initial bearish stretch present ({stretchMoves:F2} EM, gap {inp.Tape?.GapPct ?? 0m:+0.00;-0.00}%)")
-			: new SetupNote(NoteSeverity.Warn, $"Insufficient morning bear stretch ({stretchMoves:F2} EM; need ≥0.25 EM)"));
+			? new SetupNote(NoteSeverity.Confirm, $"Initial bearish stretch present ({Em(stretchMoves)} EM, gap {inp.Tape?.GapPct ?? 0m:+0.00;-0.00}%)")
+			: new SetupNote(NoteSeverity.Warn, $"Insufficient morning bear stretch ({Em(stretchMoves)} EM; need ≥0.25 EM)"));
 
 		notes.Add(vixNotExpanding
 			? new SetupNote(NoteSeverity.Confirm, $"VIX stalling/dropping from open ({FormatVixMoves(inp)}) — sellers lack vol follow-through")
@@ -732,8 +736,8 @@ internal static class CascadeScreener
 		var notes = new List<SetupNote>();
 		var f = t.Front;
 		notes.Add(hadBullStretch
-			? new SetupNote(NoteSeverity.Confirm, $"Initial bullish stretch present ({stretchMoves:F2} EM, high ${inp.Tape?.SessionHigh ?? f.Spot:N2})")
-			: new SetupNote(NoteSeverity.Warn, $"Insufficient morning bull stretch ({stretchMoves:F2} EM; need ≥0.25 EM)"));
+			? new SetupNote(NoteSeverity.Confirm, $"Initial bullish stretch present ({Em(stretchMoves)} EM, high ${inp.Tape?.SessionHigh ?? f.Spot:N2})")
+			: new SetupNote(NoteSeverity.Warn, $"Insufficient morning bull stretch ({Em(stretchMoves)} EM; need ≥0.25 EM)"));
 
 		notes.Add(vixNotCrushing
 			? new SetupNote(NoteSeverity.Confirm, $"VIX refusing to crush from open ({FormatVixMoves(inp)}) — rally lacks vol confirmation")
