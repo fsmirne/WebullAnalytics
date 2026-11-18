@@ -107,7 +107,7 @@ internal static class TrendFetcher
 			var lows = prior.Select(b => b.Low).Append(sessionLow).ToList();
 			return Compute(closes, highs, lows, prior.Count - 1, prior[^1].Close, spot, asOf);
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!ct.IsCancellationRequested)
 		{
 			return null;
 		}

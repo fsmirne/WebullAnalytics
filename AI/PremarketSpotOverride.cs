@@ -175,7 +175,7 @@ internal static class PremarketSpotOverride
 			var bars = await cache.GetBarsAsync(ticker, nowUtc.AddMinutes(-90), nowUtc, BarInterval.M1, includeExtended: true, cancellation);
 			return bars.Count > 0 ? bars[^1].Close : null;
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			Console.Error.WriteLine($"premarket spot: bar fetch failed for {ticker}: {ex.Message}");
 			return null;

@@ -468,7 +468,7 @@ internal sealed class AIHistoryCommand : AsyncCommand<AIHistorySettings>
 				apiConfig.Massive.ApiKey, "SPY",
 				DateOnly.FromDateTime(spyStart), DateOnly.FromDateTime(spyEnd), cancellation);
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			AnsiConsole.MarkupLine($"  [red]massive SPY pull failed[/]: {Markup.Escape(ex.Message)}");
 			return 1;

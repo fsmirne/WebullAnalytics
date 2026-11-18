@@ -103,7 +103,7 @@ internal sealed class IntradayBarCache
 			{
 				fetched = await _fetcher(ticker, interval, count, includeExtended, cancellation);
 			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
+			catch (Exception ex) when (!cancellation.IsCancellationRequested)
 			{
 				Console.WriteLine($"Intraday cache: fetcher threw for {ticker} {nyDate:yyyy-MM-dd}: {ex.Message}");
 				fetched = Array.Empty<MinuteBar>();

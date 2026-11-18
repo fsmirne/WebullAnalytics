@@ -89,7 +89,7 @@ internal static class MassivePolygonClient
 				{
 					response = await client.GetAsync(url, cancellation);
 				}
-				catch (Exception ex) when (ex is not OperationCanceledException)
+				catch (Exception ex) when (!cancellation.IsCancellationRequested)
 				{
 					// Transient transport error (TLS handshake drop, connection reset). Retry a couple
 					// of times with a short backoff before giving up — the shared pooled client usually

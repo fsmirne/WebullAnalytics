@@ -90,7 +90,7 @@ internal static class IntradayTapeBackfill
 		{
 			barsByDate = await FetchRangeAsync(apiConfig, inputTicker, isSpxFamily, earliestMissing, latestMissing, cancellation, vendor);
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			AnsiConsole.MarkupLine($"  intraday/{Markup.Escape(inputTicker)}: [red]failed[/] ({Markup.Escape(ex.Message)})");
 			return;
@@ -463,7 +463,7 @@ internal static class IntradayTapeBackfill
 				log: msg => AnsiConsole.MarkupLine($"  [dim]{Markup.Escape(msg)}[/]"),
 				cancellation);
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			AnsiConsole.MarkupLine($"  [red]capture failed[/]: {Markup.Escape(ex.Message)}");
 			return 1;

@@ -31,6 +31,13 @@ internal static class YahooCalendarClient
 	// these files, so the first read stands for the process; the asOf freshness check still runs per call.
 	private static readonly ConcurrentDictionary<string, CacheEnvelope?> CacheOnlyEnvelopes = new(StringComparer.OrdinalIgnoreCase);
 
+	// A ticker whose fetch failed (timeout, error) or returned nothing is not retried for this long. Without it a live watch loop re-asked Yahoo
+	// every tick, each attempt costing up to 15 s per call; 2026-11-18 14:34 three consecutive ticks timed out. The outcome is the same as the failed
+	// attempt itself (the ticker is absent from the result, i.e. "no events known"), so this only changes how often the attempt is made. A real
+	// failure still prints its warning on every attempt that is made. Process-local; never consulted by the cache-only (backtest) path.
+	private static readonly TimeSpan FailureBackoff = TimeSpan.FromMinutes(5);
+	private static readonly ConcurrentDictionary<string, DateTime> FailedAtUtc = new(StringComparer.OrdinalIgnoreCase);
+
 	/// <summary>Batch-fetch events for a set of tickers. Uses one HttpClient + cookie jar across the
 	/// batch so the crumb is reused. Per-ticker failures are swallowed — the returned dictionary only
 	/// contains tickers we successfully resolved. The caller treats absent tickers as "no events known"
@@ -63,7 +70,7 @@ internal static class YahooCalendarClient
 			var cached = FreshEvents(envelope, asOf);
 			if (cached != null)
 				result[ticker] = cached;
-			else
+			else if (cacheOnly || !FailedAtUtc.TryGetValue(ticker, out var failedAt) || DateTime.UtcNow - failedAt >= FailureBackoff)
 				needsFetch.Add(ticker);
 		}
 
@@ -112,8 +119,13 @@ internal static class YahooCalendarClient
 							};
 				}
 
-				if (parsed == null) continue;
+				if (parsed == null)
+				{
+					FailedAtUtc[ticker] = DateTime.UtcNow;
+					continue;
+				}
 
+				FailedAtUtc.TryRemove(ticker, out _);
 				result[ticker] = parsed;
 				try
 				{
@@ -122,8 +134,9 @@ internal static class YahooCalendarClient
 				}
 				catch (IOException) { /* cache is best-effort */ }
 			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
+			catch (Exception ex) when (!cancellation.IsCancellationRequested)
 			{
+				FailedAtUtc[ticker] = DateTime.UtcNow;
 				Console.WriteLine($"Warning: Yahoo calendar fetch failed for {ticker}: {ex.Message}");
 			}
 		}
@@ -173,7 +186,7 @@ internal static class YahooCalendarClient
 				using var seed = await client.GetAsync(url, cancellation);
 				if (seed.IsSuccessStatusCode) break;
 			}
-			catch (Exception ex) when (ex is not OperationCanceledException) { /* try the next candidate */ }
+			catch (Exception ex) when (!cancellation.IsCancellationRequested) { /* try the next candidate */ }
 		}
 
 		try
@@ -184,7 +197,7 @@ internal static class YahooCalendarClient
 			if (string.IsNullOrWhiteSpace(crumb) || crumb.StartsWith('{')) return null;
 			return crumb;
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			return null;
 		}
@@ -264,7 +277,7 @@ internal static class YahooCalendarClient
 			if (!resp.IsSuccessStatusCode) return null;
 			return ParseNextDividendFromChart(await resp.Content.ReadAsStringAsync(cancellation), asOf);
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			return null;
 		}
@@ -357,7 +370,7 @@ internal static class YahooCalendarClient
 			if (!resp.IsSuccessStatusCode) return Array.Empty<DividendEvent>();
 			return ParseDividendHistoryFromChart(await resp.Content.ReadAsStringAsync(cancellation));
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			return Array.Empty<DividendEvent>();
 		}
@@ -379,7 +392,7 @@ internal static class YahooCalendarClient
 			if (!resp.IsSuccessStatusCode) return Array.Empty<(DateTime, decimal)>();
 			return ParseDailyCloseHistory(await resp.Content.ReadAsStringAsync(cancellation));
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			return Array.Empty<(DateTime, decimal)>();
 		}

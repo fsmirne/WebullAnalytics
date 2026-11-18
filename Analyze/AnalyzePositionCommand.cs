@@ -212,7 +212,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			{
 				(quotes, underlyingPrices) = await AnalyzeCommon.FetchLiveChainByVendor(positionSymbols, settings.ResolvedVendor, cancellation, targetExpiries);
 			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
+			catch (Exception ex) when (!cancellation.IsCancellationRequested)
 			{
 				var hint = settings.ResolvedVendor == QuoteVendor.Schwab ? "Re-run 'wa schwab login' if the token expired, or pass --vendor webull." : "Run 'wa sniff' to refresh Webull headers, or pass --vendor schwab.";
 				Console.Error.WriteLine($"Warning: live chain fetch failed ({settings.VendorName}): {ex.Message} {hint}");

@@ -1127,7 +1127,7 @@ internal sealed class OpenCandidateEvaluator
 				if (vixCloses.Count > 0 && vix9dCloses.Count > 0)
 					vixTermScore = VixTermStructureIndicator.Compute(vixCloses[^1], vix9dCloses[^1]);
 			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
+			catch (Exception ex) when (!cancellation.IsCancellationRequested)
 			{
 				Console.WriteLine($"VIX term structure: fetch failed: {ex.Message}");
 			}
@@ -1174,7 +1174,7 @@ internal sealed class OpenCandidateEvaluator
 				if (bars.Count > 0)
 					intradayBias = IntradayTapeIndicators.Compute(bars, prevClose, toUtc, new IntradayTapeConfig { MinBars = tapeCfg.MinBars, GapWeight = tapeCfg.GapWeight, OpenToNowWeight = tapeCfg.OpenToNowWeight, VwapDeviationWeight = tapeCfg.VwapDeviationWeight, IncludeExtended = tapeCfg.IncludeExtended });
 			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
+			catch (Exception ex) when (!cancellation.IsCancellationRequested)
 			{
 				Console.WriteLine($"Intraday tape: bar fetch failed for {ticker}: {ex.Message}");
 			}
@@ -1211,7 +1211,7 @@ internal sealed class OpenCandidateEvaluator
 					sessionBars = raw.Where(b => IsRegularSessionEt(b.Timestamp)).ToList();
 				}
 			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
+			catch (Exception ex) when (!cancellation.IsCancellationRequested)
 			{
 				Console.WriteLine($"0DTE gate: session bar fetch failed for {ticker}: {ex.Message}");
 			}

@@ -175,7 +175,7 @@ internal static class YahooOptionsClient
 			}
 			return bars;
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			Console.Error.WriteLine($"Warning: Yahoo intraday fetch for {ticker} failed: {ex.Message}");
 			return Array.Empty<MinuteBar>();
@@ -267,7 +267,7 @@ internal static class YahooOptionsClient
 			}
 			return map;
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			return null;
 		}

@@ -1133,7 +1133,7 @@ internal static class CascadeScreener
 				hv3OverHv30 = ComputeHvRatio(closes, shortWindow: 3, longWindow: 30);
 			}
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			Log.Debug($"CascadeScreener close lookup failed for {ticker}: {ex.Message}");
 		}
@@ -1157,7 +1157,7 @@ internal static class CascadeScreener
 					maxPriorVix9dOverVix = ratio;
 			}
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			Log.Debug($"CascadeScreener VIX/VIX9D lookup failed: {ex.Message}");
 		}
@@ -1188,7 +1188,7 @@ internal static class CascadeScreener
 			var sc = smileCache ?? new SmileIndexCache(offline: true);
 			(smileIndex, smileChange1d, smileZScore20d) = await sc.GetTrailingStatsAsync(date, window: 20, cancellation);
 		}
-		catch (Exception ex) when (ex is not OperationCanceledException)
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
 		{
 			Log.Debug($"CascadeScreener SMILE lookup failed: {ex.Message}");
 		}
@@ -1236,7 +1236,7 @@ internal static class CascadeScreener
 					if (rth.Count > 0) return rth;
 				}
 			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
+			catch (Exception ex) when (!cancellation.IsCancellationRequested)
 			{
 				Log.Debug($"CascadeScreener intradayCache failed for {ticker}: {ex.Message}");
 			}
