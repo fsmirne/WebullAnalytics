@@ -35,6 +35,18 @@ public class WatchLoopTests
 		Assert.Equal(TimeSpan.Zero, span);
 	}
 
+	[Theory]
+	[InlineData(5, 3, 2)]       // a 3 s tick on a 5 s interval sleeps the other 2 s
+	[InlineData(5, 0, 5)]
+	[InlineData(5, 4.5, 1)]     // under the minimum gap: held to it
+	[InlineData(5, 8, 1)]       // an overrun starts the next tick after the minimum gap, not never and not at once
+	[InlineData(60, 21.5, 38.5)]
+	public void NextTickDelay_KeepsTicksOneIntervalApart(double intervalSeconds, double elapsedSeconds, double expectedSeconds)
+	{
+		var delay = AIWatchCommand.NextTickDelay(TimeSpan.FromSeconds(intervalSeconds), TimeSpan.FromSeconds(elapsedSeconds));
+		Assert.Equal(expectedSeconds, delay.TotalSeconds, 3);
+	}
+
 	[Fact]
 	public void Validate_TickRange_ValidatesCorrectly()
 	{

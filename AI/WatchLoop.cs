@@ -176,6 +176,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				continue;
 			}
 
+			var iterationClock = System.Diagnostics.Stopwatch.StartNew();
+
 			// An opener run that hit an auth failure or too many consecutive failures ends the watch, as the same faults do for a management tick.
 			if (opener.Unauthorized) return 2;
 			if (opener.ConsecutiveFailures >= WatchOpenerRunner.WatchFailureLimit)
@@ -249,7 +251,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 				}
 			}
 
-			try { await Task.Delay(TimeSpan.FromSeconds(mgmtSeconds), cancellation); } catch (OperationCanceledException) { break; }
+			try { await Task.Delay(NextTickDelay(TimeSpan.FromSeconds(mgmtSeconds), iterationClock.Elapsed), cancellation); } catch (OperationCanceledException) { break; }
 		}
 
 		await opener.DrainAsync();
@@ -257,6 +259,12 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		AnsiConsole.MarkupLine($"[dim]Loop exited. ticks={ticksRun} proposals={proposalsEmitted} failures={failures}[/]");
 		return 0;
 	});
+
+	/// <summary>The shortest pause between two ticks, so a tick that overruns its interval cannot turn the loop into back-to-back broker and quote calls.</summary>
+	internal static readonly TimeSpan MinTickGap = TimeSpan.FromSeconds(1);
+
+	/// <summary>How long to sleep after a tick that took <paramref name="elapsed"/>, so ticks start <paramref name="interval"/> apart (a fixed rate, not an interval after each tick ends).</summary>
+	internal static TimeSpan NextTickDelay(TimeSpan interval, TimeSpan elapsed) => interval - elapsed > MinTickGap ? interval - elapsed : MinTickGap;
 
 	// NYSE regular session, hardcoded. The watch loop is the only consumer; every other code path
 	// reuses MarketCalendar.IsOpen for day-of-week / holiday handling. If we ever need to support a
