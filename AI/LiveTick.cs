@@ -36,6 +36,9 @@ internal sealed class LiveTickState
 /// line). <see cref="Aborted"/> is true only when a spot-override hook rejected the tick.</summary>
 internal readonly record struct LiveTickResult(int PositionCount, int MgmtCount, int OpenCount, decimal? Spot, bool Aborted);
 
+/// <summary>Everything one tick reads once and hands to both phases: the broker-state cycle token, open positions, the corrected quote snapshot and the assembled evaluation context.</summary>
+internal sealed record LiveTickFrame(DateTime Now, object CycleToken, IReadOnlyDictionary<string, OpenPosition> OpenPositions, QuoteSnapshot Quotes, EvaluationContext Context, bool MarketOpen, IReadOnlyList<DividendEvent>? Dividends);
+
 /// <summary>The single live evaluation tick shared by <c>wa ai watch</c> (run in a loop) and <c>wa ai scan</c>
 /// (run once): pull positions + account, fetch quotes, correct premarket spot, compute technicals, evaluate
 /// management + opener proposals, emit them, run the quote-integrity guard, and auto-execute the survivors.
@@ -45,6 +48,17 @@ internal readonly record struct LiveTickResult(int PositionCount, int MgmtCount,
 internal static class LiveTick
 {
 	public static async Task<LiveTickResult> EvaluateAsync(DateTime now, LiveTickDeps deps, LiveTickState state, Func<QuoteSnapshot, Task<QuoteSnapshot?>>? applySpotOverrides, CancellationToken cancellation)
+	{
+		var (frame, positionCount) = await BuildFrameAsync(now, deps, applySpotOverrides, cancellation);
+		if (frame == null) return new LiveTickResult(positionCount, 0, 0, null, Aborted: true);
+		var mgmtCount = await ManageAsync(frame, deps, cancellation);
+		var (openCount, spot) = await OpenAsync(frame, deps, state, cancellation);
+		return new LiveTickResult(positionCount, mgmtCount, openCount, spot, Aborted: false);
+	}
+
+	/// <summary>The shared read phase of a tick: broker state, quotes (with the premarket/--spot corrections), technicals and realized vol, assembled into
+	/// the <see cref="EvaluationContext"/> both the management and opener phases read. Returns a null frame when a spot-override hook rejected the tick.</summary>
+	private static async Task<(LiveTickFrame? Frame, int PositionCount)> BuildFrameAsync(DateTime now, LiveTickDeps deps, Func<QuoteSnapshot, Task<QuoteSnapshot?>>? applySpotOverrides, CancellationToken cancellation)
 	{
 		var config = deps.Config;
 		var tickerSet = config.TickerSet();
@@ -63,7 +77,7 @@ internal static class LiveTick
 		if (applySpotOverrides != null)
 		{
 			var overridden = await applySpotOverrides(quoteSnapshot);
-			if (overridden == null) return new LiveTickResult(openPositions.Count, 0, 0, null, Aborted: true);
+			if (overridden == null) return (null, openPositions.Count);
 			quoteSnapshot = overridden;
 		}
 		var technicalSignals = await AIPipelineHelper.ComputeTechnicalSignalsAsync(tickerSet, deps.PriceCache, config.Indicators.TechnicalFilter, now, cancellation);
@@ -85,18 +99,25 @@ internal static class LiveTick
 				realizedVolByTicker[ticker] = model;
 
 		var ctx = new EvaluationContext(now, openPositions, quoteSnapshot.Underlyings, quoteSnapshot.Options, cash, accountValue, technicalSignals, HistoricalVolByTicker: historicalVolByTicker, RealizedVolByTicker: realizedVolByTicker);
+		// Frozen-book guard inputs (see QuoteSanity.ParityGaps): RTH-only, and the dividend schedule only when it will be used.
+		var marketOpen = MarketCalendar.IsRegularHours(new DateTimeOffset(now));
+		var guardCfg = config.Opener.QuoteGuard;
+		var dividends = guardCfg is { Enabled: true } && marketOpen ? await LoadDividendsAsync(config, ReportedSpot(quoteSnapshot, deps, config.Ticker) ?? 0m, now, cancellation) : null;
+		return (new LiveTickFrame(now, cycleToken, openPositions, quoteSnapshot, ctx, marketOpen, dividends), openPositions.Count);
+	}
+
+	/// <summary>The management phase: evaluate the rules, emit proposals, step resting limits, auto-execute the survivors and keep each position's broker stop at its trail level. Returns the number of rule results.</summary>
+	private static async Task<int> ManageAsync(LiveTickFrame frame, LiveTickDeps deps, CancellationToken cancellation)
+	{
+		var (now, cycleToken, _, quoteSnapshot, ctx, marketOpen, dividends) = frame;
+		var config = deps.Config;
+		var guardCfg = config.Opener.QuoteGuard;
 		var results = deps.Evaluator.Evaluate(ctx);
 		if (deps.EmitManagement && deps.MgmtSink != null)
 			foreach (var r in results) deps.MgmtSink.Emit(r.Proposal, r.IsRepeat);
 		// Step resting auto-execute limits (in-place replace — same order ids, so dedup and the daily cap are unaffected).
 		if (deps.Repricer != null)
 			await deps.Repricer.TickAsync(now, cancellation);
-
-		// Frozen-book guard inputs (see QuoteSanity.ParityGaps): RTH-only, and the dividend schedule only when it will be used.
-		var nowOffset = new DateTimeOffset(now);
-		var marketOpen = MarketCalendar.IsRegularHours(nowOffset);
-		var guardCfg = config.Opener.QuoteGuard;
-		var dividends = guardCfg is { Enabled: true } && marketOpen ? await LoadDividendsAsync(config, ReportedSpot(quoteSnapshot, deps, config.Ticker) ?? 0m, now, cancellation) : null;
 
 		if (deps.MgmtExecutor != null)
 		{
@@ -112,6 +133,16 @@ internal static class LiveTick
 		if (deps.Stops != null)
 			await deps.Stops.SyncAsync(ctx, cycleToken, cancellation);
 
+		return results.Count;
+	}
+
+	/// <summary>The opener phase: enumerate and score open candidates (plus cascade), emit them, run the live quote-integrity guard and auto-execute the survivors. Returns the open-proposal count and the ticker's spot for the caller's pulse.</summary>
+	private static async Task<(int OpenCount, decimal? Spot)> OpenAsync(LiveTickFrame frame, LiveTickDeps deps, LiveTickState state, CancellationToken cancellation)
+	{
+		var (now, cycleToken, openPositions, quoteSnapshot, ctx, marketOpen, dividends) = frame;
+		var config = deps.Config;
+		var guardCfg = config.Opener.QuoteGuard;
+		var nowOffset = new DateTimeOffset(now);
 		var openCount = 0;
 		if (deps.OpenEvaluator != null && deps.OpenSink != null)
 		{
@@ -165,7 +196,7 @@ internal static class LiveTick
 		var spot = quoteSnapshot.Underlyings.TryGetValue(config.Ticker, out var s) ? s
 			: (deps.OpenEvaluator?.LastUnderlyings.TryGetValue(config.Ticker, out var hb) ?? false) ? hb
 			: deps.CascadeOpener?.LastSpot;
-		return new LiveTickResult(openPositions.Count, results.Count, openCount, spot, Aborted: false);
+		return (openCount, spot);
 	}
 
 	/// <summary>The vendor-reported spot the frozen-book guard checks the book against — never a <see cref="ParitySpotGuard"/>-corrected
