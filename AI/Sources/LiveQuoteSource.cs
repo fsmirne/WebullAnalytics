@@ -63,7 +63,9 @@ internal sealed class LiveQuoteSource : IQuoteSource
 		// Record when this book was struck BEFORE the back-solve: ObservationInstant() reads it to tell a live premarket
 		// book (anchor today's open) from a prior session's leftover book (anchor last close). Schwab stamps every quote
 		// (quoteTimeInLong); Webull's QuoteTime is a last-trade time, so it clears the stamp and the clock rule applies.
-		OptionMath.LiveQuotesStruckAt = _vendor == QuoteVendor.Schwab ? QuoteSanity.FreshestQuoteTime(options) : null;
+		OptionMath.LiveQuotesStruckAt = _vendor == QuoteVendor.Schwab
+			? QuoteSanity.FreshestLiveQuoteTimeForAnchor(options, MarketTime.NowEt())
+			: (WebullOptionsClient.LastFetchHadLivePremarketBook ? MarketTime.EtToInstant(MarketTime.NowEt()) : null);
 		var rebased = NormalizeIvs(options, spots);
 
 		// Filter spots to the tickers requested.

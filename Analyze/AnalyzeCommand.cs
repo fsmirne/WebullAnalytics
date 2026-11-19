@@ -458,6 +458,9 @@ internal static class AnalyzeCommon
 				WebullAnalytics.Utils.Log.Debug($"Webull: fetching quotes for {symbols.Count} symbol(s)...");
 				(quotes, underlyings) = await WebullOptionsClient.FetchOptionQuotesAsync(config, minimalRows, cancellation);
 			}
+			OptionMath.LiveQuotesStruckAt = WebullOptionsClient.LastFetchHadLivePremarketBook
+				? MarketTime.EtToInstant(MarketTime.NowEt())
+				: null;
 			// The Schwab branch normalizes inside LiveQuoteSource; this direct Webull fetch gets the same clock-consistent IVs here.
 			quotes = LiveQuoteSource.NormalizeIvs(quotes, underlyings);
 		}
@@ -491,7 +494,18 @@ internal static class AnalyzeCommon
 			{
 				var extSpots = await ResolveExtendedSpotsAsync(missing, vendor, cancellation, rthSpots);
 				foreach (var (t, price) in extSpots)
+				{
+					// When the chain fetch already detected that the option book is live in premarket (so rthSpots[t]
+					// is already the live extended-hours spot rather than yesterday's 16:00 close), only record an
+					// override if the extended-hours spot meaningfully differs from the book's own live spot.
+					if (rthSpots != null && ParsingHelpers.TryResolveForRoot(rthSpots, t, out var bookSpot) && bookSpot > 0m
+						&& WebullOptionsClient.LastFetchHadLivePremarketBook && vendor == QuoteVendor.Webull)
+						continue;
+					if (rthSpots != null && ParsingHelpers.TryResolveForRoot(rthSpots, t, out var schwabBookSpot) && schwabBookSpot > 0m
+						&& Math.Round(schwabBookSpot, 2) == Math.Round(price, 2))
+						continue;
 					overrides[t] = price;
+				}
 			}
 		}
 

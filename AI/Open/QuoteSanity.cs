@@ -31,6 +31,15 @@ internal static class QuoteSanity
 	public static double? FreshestQuoteAgeSeconds(IReadOnlyDictionary<string, OptionContractQuote> book, DateTimeOffset now) =>
 		FreshestQuoteTime(book) is { } t ? (now - t).TotalSeconds : null;
 
+	/// <summary>Earliest ET time of day on a trading day that counts as a live premarket option quote for
+	/// <see cref="OptionMath.ObservationInstant(DateTime, DateTimeOffset?)"/>. OPRA pushes a system-wide morning
+	/// refresh around 06:30 ET that re-stamps the prior session's closing quotes with a 06:30 ET timestamp even on
+	/// options that haven't traded or updated since 16:00 yesterday (e.g. GME/USO/EBAY all carry 06:30:07–06:30:17 ET
+	/// quoteTimeInLong while their bids/asks are still yesterday's close). Pre-market option quoting begins at 07:00+ ET
+	/// (GTH / premarket session), so requiring the pre-open quote stamp to be at or after 07:00 ET prevents the 06:30
+	/// OPRA reset from misclassifying a frozen prior-close book as a live premarket book.</summary>
+	internal static readonly TimeSpan PremarketLiveQuoteStartEt = new(7, 0, 0);
+
 	/// <summary>Latest vendor timestamp among <paramref name="book"/>'s two-sided quotes, or null when none is stamped.</summary>
 	public static DateTimeOffset? FreshestQuoteTime(IReadOnlyDictionary<string, OptionContractQuote> book)
 	{
@@ -41,6 +50,19 @@ internal static class QuoteSanity
 			if (q.Bid is not > 0m || q.Ask is not > 0m) continue;
 			if (freshest is null || t > freshest.Value) freshest = t;
 		}
+		return freshest;
+	}
+
+	/// <summary>Timestamp for <see cref="OptionMath.LiveQuotesStruckAt"/>: during pre-open on a trading day, ignores
+	/// OPRA's ~06:30 ET morning refresh stamp (before 07:00 ET) so a book still frozen at yesterday's close anchors
+	/// at yesterday's 16:00 close rather than today's 09:30 open.</summary>
+	public static DateTimeOffset? FreshestLiveQuoteTimeForAnchor(IReadOnlyDictionary<string, OptionContractQuote> book, DateTime nowEt)
+	{
+		var freshest = FreshestQuoteTime(book);
+		if (freshest is not { } t) return null;
+		var struckEt = MarketTime.ToEt(t);
+		if (struckEt.Date == nowEt.Date && nowEt.TimeOfDay < OptionMath.MarketOpen && struckEt.TimeOfDay < PremarketLiveQuoteStartEt)
+			return null;
 		return freshest;
 	}
 

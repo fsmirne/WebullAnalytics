@@ -262,6 +262,7 @@ internal static class WebullOptionsClient
 	{
 		var result = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		var underlyingPrices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		LastFetchHadLivePremarketBook = false;
 
 		foreach (var root in roots)
 		{
@@ -306,7 +307,7 @@ internal static class WebullOptionsClient
 
 				var json = await response.Content.ReadAsStringAsync(cancellationToken);
 				MaybeDumpRaw("strategylist", root, json);
-				var parsed = ParseStrategyListResponse(json, derivativeIdMap);
+				var parsed = ParseStrategyListResponse(json, derivativeIdMap, root);
 				if (parsed.UnderlyingPrice.HasValue)
 					underlyingPrices[root] = parsed.UnderlyingPrice.Value;
 				foreach (var quote in parsed.Quotes)
@@ -451,16 +452,21 @@ internal static class WebullOptionsClient
 	/// <c>wantedSymbols</c> filter that used to live here was removed so a single chain fetch populates the
 	/// entire chain — the opener bootstrap pass (which only knows a placeholder symbol) needs all contracts
 	/// downstream, and other callers tolerate the larger dictionary because they look up by symbol anyway.</summary>
-	private static (List<OptionContractQuote> Quotes, decimal? UnderlyingPrice) ParseStrategyListResponse(string json, Dictionary<string, long> derivativeIdMap)
+	internal static (List<OptionContractQuote> Quotes, decimal? UnderlyingPrice) ParseStrategyListResponse(string json, Dictionary<string, long> derivativeIdMap, string? requestedRoot = null, DateTime? nowEtOverride = null)
 	{
 		var quotes = new List<OptionContractQuote>();
 		using var doc = JsonDocument.Parse(json);
 		var root = doc.RootElement;
 
-		decimal? underlyingPrice = GetDecimal(root, "close");
+		decimal? closePrice = GetDecimal(root, "close");
+		decimal? topBid = GetBestPrice(root, "bidList");
+		decimal? topAsk = GetBestPrice(root, "askList");
+		decimal? liveMid = topBid is > 0m && topAsk is > 0m && topAsk.Value >= topBid.Value
+			? Math.Round((topBid.Value + topAsk.Value) / 2m, 2)
+			: null;
 
 		if (!root.TryGetProperty("expireDateList", out var expiryList) || expiryList.ValueKind != JsonValueKind.Array)
-			return (quotes, underlyingPrice);
+			return (quotes, closePrice);
 
 		foreach (var expiry in expiryList.EnumerateArray())
 		{
@@ -493,7 +499,79 @@ internal static class WebullOptionsClient
 			}
 		}
 
+		var underlyingPrice = ResolveStrategyListSpot(requestedRoot, closePrice, liveMid, quotes, nowEtOverride);
 		return (quotes, underlyingPrice);
+	}
+
+	private const decimal FrozenBookParityTolerance = 0.0025m;
+
+	/// <summary>True when the most recent pre-open Webull chain fetch detected an option book whose put-call parity
+	/// has already moved away from yesterday's regular-session close (i.e. a live premarket / GTH book rather than a
+	/// frozen 16:00 book), so <see cref="Pricing.OptionMath.LiveQuotesStruckAt"/> can anchor at today's 09:30 open.</summary>
+	internal static bool LastFetchHadLivePremarketBook { get; private set; }
+
+	/// <summary>Outside RTH, Webull's strategy/list keeps top-level <c>close</c> pinned at the prior regular-session close
+	/// while top-level <c>bidList</c>/<c>askList</c> quotes the live extended-hours equity NBBO (and for GTH/premarket-eligible
+	/// tickers like SPY/QQQ/SPXW/XSP, the option quotes in <paramref name="quotes"/> update live in premarket, whereas standard
+	/// equities like USO stay frozen at the 16:00 close while USO stock trades in premarket). Compares put-call parity on the
+	/// option book against <paramref name="closePrice"/> and <paramref name="liveMid"/> so the returned spot is always the one
+	/// the option book is actually priced against.</summary>
+	private static decimal? ResolveStrategyListSpot(string? requestedRoot, decimal? closePrice, decimal? liveMid, List<OptionContractQuote> quotes, DateTime? nowEtOverride = null)
+	{
+		var nowEt = nowEtOverride ?? MarketTime.NowEt();
+		if (SchwabOptionsClient.IsRegularTradingHours(nowEt) || quotes.Count == 0)
+			return closePrice ?? liveMid;
+
+		var ticker = requestedRoot;
+		if (string.IsNullOrWhiteSpace(ticker))
+			ticker = ParsingHelpers.ParseOptionSymbol(quotes[0].ContractSymbol)?.Root;
+		if (string.IsNullOrWhiteSpace(ticker))
+			return closePrice ?? liveMid;
+
+		var quoteDict = new Dictionary<string, OptionContractQuote>(quotes.Count, StringComparer.OrdinalIgnoreCase);
+		foreach (var q in quotes) quoteDict[q.ContractSymbol] = q;
+
+		var parityTicker = string.Equals(ticker, "SPX", StringComparison.OrdinalIgnoreCase) ? "SPXW" : ticker;
+		var parity = AI.PremarketSpotOverride.DeriveSpotFromParity(parityTicker, quoteDict, Pricing.OptionMath.RiskFreeRate, nowEt, allowLastPrice: false);
+		if (parity is not { Spot: > 0m } p)
+			return closePrice ?? liveMid;
+
+		var isPreOpenTradingDay = MarketCalendar.IsOpen(nowEt.Date) && nowEt.TimeOfDay < Pricing.OptionMath.MarketOpen;
+
+		// Cash indexes (SPXW/SPX/XSP) carry no top-level equity bidList/askList; when parity on the live GTH option book
+		// diverges from the prior 16:00 index close by more than 25 bp, the option book is pricing the parity-implied index level.
+		if (AI.Sources.WebullIntradayBars.SpxFamilyTickers.Contains(parityTicker))
+		{
+			if (closePrice is > 0m && Math.Abs(p.Spot - closePrice.Value) / closePrice.Value > FrozenBookParityTolerance)
+			{
+				if (isPreOpenTradingDay) LastFetchHadLivePremarketBook = true;
+				return Math.Round(p.Spot, 2);
+			}
+			return closePrice;
+		}
+
+		// Equities/ETFs: if we have a live extended-hours equity mid that differs from the 16:00 close, pick whichever
+		// the option book's put-call parity actually tracks (e.g. SPY premarket options track liveMid ~$739, while USO
+		// premarket options stay frozen at closePrice $136.11 even when USO's liveMid is $138.71).
+		if (liveMid is > 0m && closePrice is > 0m && liveMid.Value != closePrice.Value)
+		{
+			var distLive = Math.Abs(p.Spot - liveMid.Value);
+			var distClose = Math.Abs(p.Spot - closePrice.Value);
+			if (distLive < distClose)
+			{
+				if (isPreOpenTradingDay) LastFetchHadLivePremarketBook = true;
+				return liveMid;
+			}
+			return closePrice;
+		}
+
+		if (closePrice is > 0m && Math.Abs(p.Spot - closePrice.Value) / closePrice.Value > FrozenBookParityTolerance)
+		{
+			if (isPreOpenTradingDay) LastFetchHadLivePremarketBook = true;
+			return Math.Round(p.Spot, 2);
+		}
+
+		return closePrice ?? liveMid;
 	}
 
 	private static decimal? GetBestPrice(JsonElement contract, string listProp)

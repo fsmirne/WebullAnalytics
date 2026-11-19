@@ -147,7 +147,7 @@ internal static class SchwabOptionsClient
 		}
 	}
 
-	internal static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes) ParseChain(string json, string symbol, bool? isRth = null)
+	internal static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes) ParseChain(string json, string symbol, bool? isRth = null, DateTime? nowEtOverride = null)
 	{
 		var quotes = new List<OptionContractQuote>();
 		using var doc = JsonDocument.Parse(json);
@@ -161,21 +161,10 @@ internal static class SchwabOptionsClient
 			return (null, quotes);
 		}
 
-		// During RTH (09:30–close ET), keep top-level underlyingPrice unchanged so live scan/watch/scraper loops
-		// see the exact same live underlying mark as before. Outside RTH (after close, overnight, weekends,
-		// holidays, pre-open), prefer underlying.last (the regular-session 16:00 close) so frozen closing option
-		// quotes are paired with the closing spot they were struck at, while caching the extended-hours
-		// underlyingPrice in LastExtendedSpots for --extended.
 		var hasUnderlying = root.TryGetProperty("underlying", out var u) && u.ValueKind == JsonValueKind.Object;
 		var topUnderlyingPrice = PositiveOrNull(GetDecimal(root, "underlyingPrice"));
 		var regularLast = hasUnderlying ? PositiveOrNull(GetDecimal(u, "last")) : null;
 		var extSpot = topUnderlyingPrice ?? (hasUnderlying ? PositiveOrNull(GetDecimal(u, "mark")) : null);
-		var inRth = isRth ?? IsRegularTradingHours(MarketTime.NowEt());
-		decimal? spot = inRth
-			? topUnderlyingPrice ?? regularLast
-			: regularLast ?? topUnderlyingPrice;
-		if ((extSpot ?? spot) is decimal recordedExt && recordedExt > 0m)
-			LastExtendedSpots[symbol.TrimStart('$')] = recordedExt;
 
 		foreach (var mapName in new[] { "callExpDateMap", "putExpDateMap" })
 		{
@@ -208,7 +197,111 @@ internal static class SchwabOptionsClient
 			}
 		}
 
+		// During RTH (09:30–close ET), keep top-level underlyingPrice unchanged so live scan/watch/scraper loops
+		// see the exact same live underlying mark as before. Outside RTH, inspect the option book itself to detect
+		// whether the option quotes are live (e.g. premarket GTH / OPRA quotes already pricing the extended-hours
+		// underlying level) or frozen at the regular-session 16:00 close:
+		//   1. For cash indexes ($SPX / $XSP), Schwab freezes top-level underlyingPrice and underlying.last at the
+		//      prior 16:00 close until 09:30 ET even while SPXW/XSP option quotes trade live in GTH; when put-call
+		//      parity on the two-sided book diverges from the reported close, use the parity-implied spot.
+		//   2. For equities/ETFs, when top-level underlyingPrice has moved away from underlying.last (or when only
+		//      one side is present in a partial chain), check whether the option book tracks the extended-hours spot
+		//      (via put-call parity when both calls and puts are present, else via quote timestamps after the 07:00 ET
+		//      OPRA premarket start). If the option book is live, pair it with topUnderlyingPrice; if frozen at the
+		//      16:00 close, pair it with regularLast and cache extSpot in LastExtendedSpots for --extended.
+		var nowEt = nowEtOverride ?? MarketTime.NowEt();
+		var inRth = isRth ?? IsRegularTradingHours(nowEt);
+		decimal? spot = ResolveChainSpot(symbol, topUnderlyingPrice, regularLast, extSpot, quotes, inRth, nowEt);
+		if ((extSpot ?? spot) is decimal recordedExt && recordedExt > 0m)
+			LastExtendedSpots[symbol.TrimStart('$')] = recordedExt;
+
+		// Once the chain is parsed, record whether it carries a live pre-open book (07:00+ ET on a trading day)
+		// so direct callers of SchwabOptionsClient.FetchChainAsync (analyze gex, analyze cascade) get the same
+		// 09:30 ObservationInstant anchor that LiveQuoteSource sets. Skip when isRth was explicitly injected (unit tests).
+		if (!isRth.HasValue && !nowEtOverride.HasValue)
+		{
+			Pricing.OptionMath.LiveQuotesStruckAt = HasLivePremarketQuoteStamp(quotes, nowEt)
+				? MarketTime.EtToInstant(nowEt)
+				: null;
+		}
+
 		return (spot, quotes);
+	}
+
+	private static readonly TimeSpan PremarketOptionQuoteStart = new(7, 0, 0);
+	private const decimal FrozenBookParityTolerance = 0.0025m;
+
+	private static decimal? ResolveChainSpot(
+		string symbol,
+		decimal? topUnderlyingPrice,
+		decimal? regularLast,
+		decimal? extSpot,
+		IReadOnlyList<OptionContractQuote> quotes,
+		bool inRth,
+		DateTime nowEt)
+	{
+		if (inRth)
+			return topUnderlyingPrice ?? regularLast;
+
+		var baselineSpot = regularLast ?? topUnderlyingPrice;
+		if (quotes.Count == 0)
+			return baselineSpot;
+
+		var quoteDict = new Dictionary<string, OptionContractQuote>(quotes.Count, StringComparer.OrdinalIgnoreCase);
+		foreach (var q in quotes) quoteDict[q.ContractSymbol] = q;
+
+		var cleanRoot = symbol.TrimStart('$');
+		var parityTicker = string.Equals(cleanRoot, "SPX", StringComparison.OrdinalIgnoreCase) ? "SPXW" : cleanRoot;
+		var parity = AI.PremarketSpotOverride.DeriveSpotFromParity(parityTicker, quoteDict, Pricing.OptionMath.RiskFreeRate, nowEt, allowLastPrice: false);
+
+		// Cash indexes ($SPX / $XSP): Schwab's underlyingPrice & underlying.last both sit at the prior 16:00 close
+		// until 09:30 ET, while SPXW/XSP option quotes update live during GTH. If parity on two-sided quotes has
+		// moved more than 25 bp away from the reported close and the quotes are stamped today after 07:00 ET, the
+		// option book is live at the parity-implied index level.
+		if (AI.Sources.WebullIntradayBars.SpxFamilyTickers.Contains(parityTicker))
+		{
+			if (parity is { Spot: > 0m } idxParity && baselineSpot is > 0m
+				&& Math.Abs(idxParity.Spot - baselineSpot.Value) / baselineSpot.Value > FrozenBookParityTolerance
+				&& HasLivePremarketQuoteStamp(quotes, nowEt))
+			{
+				return Math.Round(idxParity.Spot, 2);
+			}
+			return baselineSpot;
+		}
+
+		// Equities/ETFs: if both extended spot (topUnderlyingPrice) and regular close (regularLast) are present
+		// and differ, decide which spot the option book is actually priced against.
+		if (extSpot is > 0m && regularLast is > 0m && extSpot.Value != regularLast.Value)
+		{
+			if (parity is { Spot: > 0m } eqParity)
+			{
+				var distExt = Math.Abs(eqParity.Spot - extSpot.Value);
+				var distLast = Math.Abs(eqParity.Spot - regularLast.Value);
+				return distExt < distLast ? extSpot : regularLast;
+			}
+			// Partial chain (e.g. calls only or single-leg fetch where parity has no same-strike pair): fall back
+			// to whether the two-sided quotes carry a live premarket quote timestamp (after 07:00 ET today).
+			// OPRA's 06:30 ET morning refresh re-stamps yesterday's closing quotes, whereas live premarket market-maker
+			// quotes stream after 07:00 ET.
+			if (HasLivePremarketQuoteStamp(quotes, nowEt))
+				return extSpot;
+		}
+
+		return baselineSpot;
+	}
+
+	private static bool HasLivePremarketQuoteStamp(IReadOnlyList<OptionContractQuote> quotes, DateTime nowEt)
+	{
+		if (!MarketCalendar.IsOpen(nowEt.Date) || nowEt.TimeOfDay < PremarketOptionQuoteStart || nowEt.TimeOfDay >= Pricing.OptionMath.MarketOpen)
+			return false;
+		foreach (var q in quotes)
+		{
+			if (q.QuoteTime is not { } qt || q.Bid is not > 0m || q.Ask is not > 0m) continue;
+			var qtEt = MarketTime.ToEt(qt);
+			if (qtEt.Date == nowEt.Date && qtEt.TimeOfDay >= PremarketOptionQuoteStart)
+				return true;
+		}
+		return false;
 	}
 
 	/// <summary>Schwab pads the OCC root to 6 chars (e.g. <c>"SPY   260620C00500000"</c>); strip the spaces to

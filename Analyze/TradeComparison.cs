@@ -74,17 +74,17 @@ internal static class TradeComparison
 		var past = EvaluationDate.IsPast;
 		var asOf = past ? EvaluationDate.Instant!.Value : DateTime.Now;
 		var quoteAsOf = past ? EvaluationDate.Instant!.Value : OptionMath.ObservationInstant();
-		var useMarketImpliedIv = string.IsNullOrEmpty(settings.Spot) && !settings.Extended;
 		var quotes = (settings.Calibrated || opts.MarksAsOfEvalDate) ? AnalyzeCommon.RecalibrateQuotesToMid(opts.OptionQuotes, opts.UnderlyingPrices, dividends: null, quoteAsOf) : opts.OptionQuotes;
 		var intradayCache = AnalyzeRiskCommand.CreateIntradayCache();
 
 		foreach (var ticker in tickers)
 		{
 			decimal spot = 0m;
-			var hasSpot = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(ticker, out spot) || ParsingHelpers.TryResolveForRoot(opts.UnderlyingPrices, ticker, out spot);
+			var hasOverride = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(ticker, out spot);
+			var hasSpot = hasOverride || ParsingHelpers.TryResolveForRoot(opts.UnderlyingPrices, ticker, out spot);
 			if (!hasSpot || spot <= 0m) continue;
 			var inputs = await AnalyzeRiskCommand.LoadOpenerScoringInputsAsync(ticker, asOf, includeCurrentBar: !past, intradayCache, cancellation);
-			scoring[ticker] = new TickerScoring(spot, quotes, asOf, quoteAsOf, inputs, useMarketImpliedIv);
+			scoring[ticker] = new TickerScoring(spot, quotes, asOf, quoteAsOf, inputs, !hasOverride);
 		}
 		return scoring;
 	}
