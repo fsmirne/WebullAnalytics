@@ -203,13 +203,14 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 					else if (state == "after") AnsiConsole.MarkupLine($"[dim]past latest-entry {config.Opener.LatestEntryTimeEt} ET — opens no longer submitted (managing only).[/]");
 					windowState = state;
 				}
+				var tickClock = System.Diagnostics.Stopwatch.StartNew();
 				var tick = await LiveTick.ManagementTickAsync(now, deps, cancellation);
 				var mgmtEmitted = settings.EmitManagementProposals ? tick.MgmtCount : 0;
 				proposalsEmitted += mgmtEmitted;
 
 				// Per-tick pulse. With an opener configured it prints its own line per run, so a management tick speaks only when it emitted something; with none, every tick
 				// still gets a timestamped line so a quiet watch is anchored in time (no silent blinking caret). Suppressed at debug, where the [debug] line carries it.
-				if (debug) Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={tick.Spot} positions={tick.PositionCount} mgmtResults={tick.MgmtCount}");
+				if (debug) Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={tick.Spot} positions={tick.PositionCount} mgmtResults={tick.MgmtCount} took={tickClock.Elapsed.TotalSeconds:0.0}s");
 				else if (openEvaluator == null || mgmtEmitted > 0)
 				{
 					var spotStr = tick.Spot.HasValue ? tick.Spot.Value.ToString("0.00") : "?";

@@ -40,11 +40,12 @@ internal sealed class WatchOpenerRunner(LiveTickDeps deps, OpenCandidateEvaluato
 	private async Task RunAsync(LiveTickFrame frame, int mgmtCount, LiveTickDeps runDeps, CancellationToken cancellation)
 	{
 		var config = deps.Config;
+		var clock = System.Diagnostics.Stopwatch.StartNew();
 		try
 		{
 			var (openCount, spot) = await LiveTick.OpenerTickAsync(frame, runDeps, _state, cancellation);
 			ProposalsEmitted += openCount;
-			Pulse(frame.Now, spot, openCount, mgmtCount);
+			Pulse(frame.Now, spot, openCount, mgmtCount, clock.Elapsed);
 			NarrateGate();
 			// Persisted heartbeat: the console pulse dies with the terminal, so in the proposal LOG a day suppressed by MinScoreToOpen was indistinguishable from a watch
 			// that never ran (2026-08-03). One lean type:"tick" line per successful run records liveness plus the best pre-gate candidate's score; type=="open" consumers never see them.
@@ -76,13 +77,14 @@ internal sealed class WatchOpenerRunner(LiveTickDeps deps, OpenCandidateEvaluato
 		return chain.ToString();
 	}
 
-	/// <summary>A timestamped line per run so a proposal and a quiet run are both anchored in time. Suppressed at debug, where the [debug] summary carries it.</summary>
-	private void Pulse(DateTime now, decimal? spot, int openCount, int mgmtCount)
+	/// <summary>A line per run so a proposal and a quiet run are both anchored in time: stamped with the time the run started, and with how long it took, so a slow run reads
+	/// as one rather than as a late launch. At debug the [debug] line replaces it.</summary>
+	private void Pulse(DateTime now, decimal? spot, int openCount, int mgmtCount, TimeSpan took)
 	{
 		var config = deps.Config;
-		if (debug) { Console.Error.WriteLine($"[debug] {now:HH:mm:ss} opener run: spot={spot} openProposals={openCount} mgmtResults={mgmtCount}"); return; }
+		if (debug) { Console.Error.WriteLine($"[debug] {now:HH:mm:ss} opener run: spot={spot} openProposals={openCount} mgmtResults={mgmtCount} took={took.TotalSeconds:0.0}s"); return; }
 		var spotStr = spot.HasValue ? spot.Value.ToString("0.00") : "?";
-		AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} — {(openCount == 0 ? "no open proposals emitted" : $"{openCount} open proposal(s) emitted")}[/]");
+		AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} — {(openCount == 0 ? "no open proposals emitted" : $"{openCount} open proposal(s) emitted")} ({took.TotalSeconds:0.0}s)[/]");
 	}
 
 	/// <summary>The 0DTE gate's verdict, printed on every state CHANGE (a 90-minute wait is one line) and once when the day closes; without it a session the gate
