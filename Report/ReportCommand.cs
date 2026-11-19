@@ -63,6 +63,11 @@ class GridSettings : CommandSettings
 	[CommandOption("--spot")]
 	public string? Spot { get; set; }
 
+	[Description("Project positions at the latest extended-hours (pre/post-market) underlying spot while keeping IV calibration and market-basis anchoring at the regular-session close. Explicit --spot entries win per ticker.")]
+	[CommandOption("--extended")]
+	[DefaultValue(false)]
+	public bool Extended { get; set; }
+
 	[Description("Use Black-Scholes theoretical price instead of market mid for today's option value in the time-decay grid")]
 	[CommandOption("--theoretical")]
 	[DefaultValue(false)]
@@ -98,6 +103,7 @@ class GridSettings : CommandSettings
 		if (!Program.HasCliOption("display") && cfg.TryGetString("display", out var display)) DisplayMode = display;
 		if (!Program.HasCliOption("grid") && cfg.TryGetString("grid", out var grid)) Grid = grid;
 		if (!Program.HasCliOption("spot") && cfg.TryGetString("spot", out var cup)) Spot = cup;
+		if (!Program.HasCliOption("extended") && cfg.TryGetBool("extended", out var extended)) Extended = extended;
 		if (!Program.HasCliOption("theoretical") && cfg.TryGetBool("theoretical", out var theoretical)) Theoretical = theoretical;
 		if (!Program.HasCliOption("calibrated") && cfg.TryGetBool("calibrated", out var calibrated)) Calibrated = calibrated;
 		if (!Program.HasCliOption("levels") && cfg.TryGetString("levels", out var levels)) Levels = levels;
@@ -105,7 +111,7 @@ class GridSettings : CommandSettings
 
 	public override ValidationResult Validate()
 	{
-		if (AsOf.Validate(Date, FillAllowed, Spot) is { } dateError)
+		if (AsOf.Validate(Date, FillAllowed, Spot, Extended) is { } dateError)
 			return ValidationResult.Error(dateError);
 
 		if (Vendor != null && Vendor.Trim().ToLowerInvariant() is not ("webull" or "schwab"))
@@ -457,13 +463,9 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			marksAsOfEvalDate = true;
 		}
 
-		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = null;
-		if (settings.Spot != null)
-		{
-			var overrides = ParseUnderlyingPriceOverrides(settings.Spot);
-			if (overrides.Count > 0)
-				underlyingPriceOverrides = overrides;
-		}
+		var targetTickers = (IEnumerable<string>?)underlyingPrices?.Keys
+			?? positionRows.Where(r => r.MatchKey != null).Select(r => MatchKeys.GetTicker(r.MatchKey!)).Where(t => !string.IsNullOrEmpty(t)).Select(t => t!);
+		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, targetTickers, vendor, underlyingPrices, cancellation);
 
 		IReadOnlyDictionary<string, List<decimal>>? extraLevels = null;
 		if (settings.Levels != null)

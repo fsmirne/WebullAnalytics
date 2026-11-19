@@ -51,4 +51,72 @@ public class SchwabSymbolTests
 	[InlineData("AAPL", "AAPL")]
 	public void ToSchwabUnderlying_MapsIndexRootsToDollarSymbols(string root, string expected) =>
 		Assert.Equal(expected, SchwabOptionsClient.ToSchwabUnderlying(root));
+
+	[Fact]
+	public void ParseChain_OffHours_PrefersUnderlyingLastOverAfterHoursUnderlyingPrice()
+	{
+		const string json = """
+		{
+			"symbol": "SPY",
+			"status": "SUCCESS",
+			"underlyingPrice": 735.63,
+			"underlying": {
+				"symbol": "SPY",
+				"last": 730.20,
+				"mark": 735.56,
+				"close": 732.44
+			},
+			"callExpDateMap": {},
+			"putExpDateMap": {}
+		}
+		""";
+
+		var (spot, _) = SchwabOptionsClient.ParseChain(json, "SPY", isRth: false);
+		Assert.Equal(730.20m, spot);
+		Assert.Equal(735.63m, SchwabOptionsClient.TryGetExtendedSpot("SPY"));
+	}
+
+	[Fact]
+	public void ParseChain_DuringRth_KeepsUnderlyingPriceUnchanged()
+	{
+		const string json = """
+		{
+			"symbol": "SPY",
+			"status": "SUCCESS",
+			"underlyingPrice": 735.63,
+			"underlying": {
+				"symbol": "SPY",
+				"last": 735.50,
+				"mark": 735.63,
+				"close": 732.44
+			},
+			"callExpDateMap": {},
+			"putExpDateMap": {}
+		}
+		""";
+
+		var (spot, _) = SchwabOptionsClient.ParseChain(json, "SPY", isRth: true);
+		Assert.Equal(735.63m, spot);
+	}
+
+	[Fact]
+	public void ParseChain_FallsBackToUnderlyingPriceWhenUnderlyingLastMissingOrZero()
+	{
+		const string json = """
+		{
+			"symbol": "$SPX",
+			"status": "SUCCESS",
+			"underlyingPrice": 7323.63,
+			"underlying": {
+				"symbol": "$SPX",
+				"last": 0.0
+			},
+			"callExpDateMap": {},
+			"putExpDateMap": {}
+		}
+		""";
+
+		var (spot, _) = SchwabOptionsClient.ParseChain(json, "$SPX", isRth: false);
+		Assert.Equal(7323.63m, spot);
+	}
 }

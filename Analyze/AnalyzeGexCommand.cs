@@ -317,7 +317,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 					AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker} from Schwab.[/]");
 					return 1;
 				}
-				spot = ResolveSpotOverride(settings.Spot, ticker) ?? schwabSpot;
+				var rthMap = schwabSpot is > 0m ? new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = schwabSpot.Value } : null;
+				var ovMap = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, [ticker], settings.ResolvedVendor, rthMap, cancellation);
+				spot = ovMap != null && ParsingHelpers.TryResolveForRoot(ovMap, ticker, out var ovS) ? ovS : schwabSpot;
 			}
 			else
 			{
@@ -332,7 +334,9 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 					AnsiConsole.MarkupLine($"[red]No option chain data returned for {ticker}.[/]");
 					return 1;
 				}
-				spot = ResolveSpotOverride(settings.Spot, ticker) ?? fetchedSpot;
+				var rthMap = fetchedSpot is > 0m ? new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = fetchedSpot.Value } : null;
+				var ovMap = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, [ticker], settings.ResolvedVendor, rthMap, cancellation);
+				spot = ovMap != null && ParsingHelpers.TryResolveForRoot(ovMap, ticker, out var ovW) ? ovW : fetchedSpot;
 				quotes = new Dictionary<string, OptionContractQuote>(initialQuotes, StringComparer.OrdinalIgnoreCase);
 				// Webull's strategy/list only inlines OI/IV for the front-most expiration; re-pull in-window contracts
 				// via queryBatch to populate the heatmap. (Offline data/oi snapshots already carry the full chain.)

@@ -74,8 +74,8 @@ internal static class TradeComparison
 		var past = EvaluationDate.IsPast;
 		var asOf = past ? EvaluationDate.Instant!.Value : DateTime.Now;
 		var quoteAsOf = past ? EvaluationDate.Instant!.Value : OptionMath.ObservationInstant();
-		var useMarketImpliedIv = string.IsNullOrEmpty(settings.Spot);
-		var quotes = (settings.Calibrated || opts.MarksAsOfEvalDate) && useMarketImpliedIv ? AnalyzeCommon.RecalibrateQuotesToMid(opts.OptionQuotes, opts.UnderlyingPrices, dividends: null, quoteAsOf) : opts.OptionQuotes;
+		var useMarketImpliedIv = string.IsNullOrEmpty(settings.Spot) && !settings.Extended;
+		var quotes = (settings.Calibrated || opts.MarksAsOfEvalDate) ? AnalyzeCommon.RecalibrateQuotesToMid(opts.OptionQuotes, opts.UnderlyingPrices, dividends: null, quoteAsOf) : opts.OptionQuotes;
 		var intradayCache = AnalyzeRiskCommand.CreateIntradayCache();
 
 		foreach (var ticker in tickers)

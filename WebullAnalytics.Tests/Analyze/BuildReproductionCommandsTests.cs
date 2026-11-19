@@ -127,4 +127,12 @@ public class BuildReproductionCommandsTests
 		var closeAll = Assert.Single(scenarios, s => s.Name == "Close all");
 		Assert.Equal($"BUY {shortSymbol} x100 @0.2, SELL {longSymbol} x100 @0.7", closeAll.ActionSummary);
 	}
+
+	[Fact]
+	public void BuildReproductionCommands_ForwardsExtendedFlagWhenSpotIsNotExplicit()
+	{
+		var sc = MakeScenario("BUY GME260424C00025000 x100 @0.07, SELL GME260501C00025000 x100 @0.50", isRoll: true, cashImpactPerContract: 43m);
+		var (_, analyze) = AnalyzePositionCommand.BuildReproductionCommands(sc, new AnalyzePositionSettings { Extended = true });
+		Assert.Equal("wa analyze trade \"buy:GME260424C00025000:100@0.07,sell:GME260501C00025000:100@0.50\" --extended", analyze);
+	}
 }

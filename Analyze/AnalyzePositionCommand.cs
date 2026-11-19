@@ -219,7 +219,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 		}
 
-		var spot = ResolveSpot(ticker, settings, underlyingPrices);
+		var spotOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, [ticker], settings.ResolvedVendor, underlyingPrices, cancellation);
+		var spot = spotOverrides != null && ParsingHelpers.TryResolveForRoot(spotOverrides, ticker, out var ovSpot) ? ovSpot
+			: ResolveSpot(ticker, settings, underlyingPrices);
 		if (spot == null)
 		{
 			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or run 'wa sniff' to refresh Webull headers.");
@@ -303,7 +305,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// stale mids no longer reflect the overridden spot, so the inversion would fold the spot move into vol.
 		// An as-of market carries books only (no vendor IV), so its IVs are always solved, from the session's own spot — a --spot override
 		// then reprices those IVs at the hypothetical spot like any other run.
-		if (quotes != null && (asOfMarket != null || (settings.Calibrated && string.IsNullOrEmpty(settings.Spot))))
+		if (quotes != null && (asOfMarket != null || (settings.Calibrated && string.IsNullOrEmpty(settings.Spot) && !settings.Extended)))
 		{
 			var calibrationSpot = asOfMarket?.Spot ?? spot.Value;
 			var asOfCal = OptionMath.ObservationInstant(); // when the loaded quotes were struck (now live / last close off-hours / the as-of market's instant); same anchor as report
@@ -346,7 +348,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			// At hypothetical spots (--spot override), the leg market mids are stale and back-solving
 			// IV against them produces a nonsense IV that collapses calendar/diagonal residual time
 			// value. Use the broker's reported IV instead so the projection is internally consistent.
-			useMarketImpliedIv: string.IsNullOrEmpty(settings.Spot),
+			useMarketImpliedIv: string.IsNullOrEmpty(settings.Spot) && !settings.Extended,
 			sentiment: sentiment,
 			events: positionEvents);
 
@@ -2146,6 +2148,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 		var extras = new List<string>();
 		if (!string.IsNullOrEmpty(settings.Spot)) extras.Add($"--spot {settings.Spot}");
+		else if (settings.Extended) extras.Add("--extended");
 		if (!string.IsNullOrEmpty(settings.Date)) extras.Add($"--date {settings.Date}");
 		var suffix = extras.Count > 0 ? " " + string.Join(" ", extras) : "";
 		var analyze = $"wa analyze trade \"{string.Join(";", analyzeGroups)}\"{suffix}";

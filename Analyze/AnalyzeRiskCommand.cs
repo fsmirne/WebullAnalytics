@@ -62,8 +62,8 @@ internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 			return ValidationResult.Success();
 		if (Fill?.IsSet == true && Fill.Value < 0)
 			return ValidationResult.Error($"--fill: N must be ≥ 1, got {Fill.Value}");
-		if (Fill?.IsSet == true && Date == null && !string.IsNullOrEmpty(Spot))
-			return ValidationResult.Error("--fill evaluates at the fill's own instant by default, where the spot is the stored market's; pass --date now to use --spot");
+		if (Fill?.IsSet == true && Date == null && (!string.IsNullOrEmpty(Spot) || Extended))
+			return ValidationResult.Error($"--fill evaluates at the fill's own instant by default, where the spot is the stored market's; pass --date now to use {(Extended ? "--extended" : "--spot")}");
 
 		if (!string.IsNullOrWhiteSpace(Spec))
 		{
@@ -142,7 +142,9 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		if (quotes == null) return 1;
 
 		var ticker = parsedLegs[0].Option!.Root;
-		var spot = ResolveSpot(ticker, settings.Spot, underlyingPrices);
+		var spotOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, [ticker], settings.ResolvedVendor, underlyingPrices, cancellation);
+		var spot = spotOverrides != null && ParsingHelpers.TryResolveForRoot(spotOverrides, ticker, out var ovSpot) ? ovSpot
+			: ResolveSpot(ticker, settings.Spot, underlyingPrices);
 		if (spot == null || spot.Value <= 0m)
 		{
 			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or run 'wa sniff' to refresh Webull headers.");
@@ -164,7 +166,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 
 		// Re-base IV to the live mid surface (default; --calibrated false shows raw vendor IV for debugging).
 		// A --spot override makes the leg mids stale, so the back-solve would be nonsense — skip it then.
-		if (settings.Calibrated && string.IsNullOrEmpty(settings.Spot))
+		if (settings.Calibrated && string.IsNullOrEmpty(settings.Spot) && !settings.Extended)
 			quotes = AnalyzeCommon.RecalibrateQuotesToMid(quotes, underlyingPrices!, dividends: null, quoteAsOf);
 
 		var trend = await TrendFetcher.FetchAsync(ticker, now, cancellation);
@@ -243,10 +245,10 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var inputs = await LoadOpenerScoringInputsAsync(ticker, asOf, context.IncludeCurrentBar, intradayCache, cancellation);
 		var diagLegs = BuildDiagnosticLegs(positionLegs, quotes, spot, asOf, settings.IvDefault);
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, quoteAsOf, sym => ResolveIv(quotes, sym, settings.IvDefault), trend, quotes, inputs.Sentiment);
-		// At hypothetical spots (--spot override), the leg market mids are stale and back-solving IV
-		// against them produces a nonsense IV. Use broker IV in that case for an internally-consistent
-		// projection.
-		var useMarketImpliedIv = string.IsNullOrEmpty(settings.Spot);
+		// At hypothetical spots (--spot / --extended override), the leg market mids are stale and back-solving IV
+		// against them produces a nonsense IV. Use the quotes' already-normalized IV in that case for an
+		// internally-consistent projection.
+		var useMarketImpliedIv = string.IsNullOrEmpty(settings.Spot) && !settings.Extended;
 		// A spec is a hypothetical new trade: score it at the real bid/ask (cost-basis mode would suppress
 		// useMarketImpliedIv and use broker IV, diverging from the scan). A fill is a trade that HAPPENED: score
 		// it at what was paid — cost-basis mode — whose IV comes from the quotes' IV field, already

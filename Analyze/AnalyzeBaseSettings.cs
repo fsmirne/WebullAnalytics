@@ -28,6 +28,11 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	[Description("Override underlying spot price(s). Format: TICKER:PRICE (e.g., GME:24.88). Comma-separated for multiple tickers (e.g., GME:24.88,SPY:580.50)")]
 	public string? Spot { get; set; }
 
+	[CommandOption("--extended")]
+	[DefaultValue(false)]
+	[Description("Project at the latest extended-hours (pre/post-market) underlying spot while keeping IV calibration at the regular-session close. Explicit --spot entries win per ticker.")]
+	public bool Extended { get; set; }
+
 	[CommandOption("--vendor <VENDOR>")]
 	[Description("Live option-chain quote vendor: 'webull' (sniffed-session chain) or 'schwab' (chains-API NBBO; needs `wa schwab login`). When omitted, the top-level `vendor` in config.json applies (default webull). Overrides it for this run.")]
 	public string? Vendor { get; set; }
@@ -70,11 +75,12 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 		if (!Program.HasCliOption("output") && cfg.TryGetString("output", out var output)) OutputFormat = output;
 		if (!Program.HasCliOption("output-path") && cfg.TryGetString("outputPath", out var outputPath)) OutputPath = outputPath;
 		if (!Program.HasCliOption("spot") && cfg.TryGetString("spot", out var spot)) Spot = spot;
+		if (!Program.HasCliOption("extended") && cfg.TryGetBool("extended", out var extended)) Extended = extended;
 	}
 
 	public override ValidationResult Validate()
 	{
-		if (AsOf.Validate(Date, FillAllowed, Spot) is { } dateError)
+		if (AsOf.Validate(Date, FillAllowed, Spot, Extended) is { } dateError)
 			return ValidationResult.Error(dateError);
 
 		var format = OutputFormat.ToLowerInvariant();

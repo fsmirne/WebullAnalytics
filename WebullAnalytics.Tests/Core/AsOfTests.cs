@@ -76,4 +76,13 @@ public class AsOfTests
 		Assert.Null(AsOf.Validate("now", fillAllowed: false, spot: "SPY:700"));
 		Assert.Null(AsOf.Validate(DateTime.Today.AddDays(30).ToString("yyyy-MM-dd"), fillAllowed: false, spot: "SPY:700"));
 	}
+
+	[Fact]
+	public void Extended_IsRejectedAtAPastInstant()
+	{
+		Assert.NotNull(AsOf.Validate("2026-10-09", fillAllowed: false, spot: null, extended: true));
+		Assert.NotNull(AsOf.Validate("fill", fillAllowed: true, spot: null, extended: true));
+		Assert.Null(AsOf.Validate("now", fillAllowed: false, spot: null, extended: true));
+		Assert.Null(AsOf.Validate(DateTime.Today.AddDays(30).ToString("yyyy-MM-dd"), fillAllowed: false, spot: null, extended: true));
+	}
 }

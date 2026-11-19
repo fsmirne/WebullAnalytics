@@ -51,13 +51,14 @@ internal readonly record struct AsOf(AsOfKind Kind, DateTime Et)
 		return true;
 	}
 
-	/// <summary>Validates a --date value for a command: <c>fill</c> only where a --fill is being analyzed, and no --spot at a past
+	/// <summary>Validates a --date value for a command: <c>fill</c> only where a --fill is being analyzed, and no --spot/--extended at a past
 	/// instant (its spot is the stored market's). Null when valid.</summary>
-	internal static string? Validate(string? text, bool fillAllowed, string? spot)
+	internal static string? Validate(string? text, bool fillAllowed, string? spot, bool extended = false)
 	{
 		if (!TryParse(text, out var value, out var error)) return error;
 		if (value.Kind == AsOfKind.Fill && !fillAllowed) return "--date fill needs --fill";
 		if (value.IsPast && !string.IsNullOrEmpty(spot)) return "--spot doesn't apply at a past --date: the spot is the stored market's at that instant";
+		if (value.IsPast && extended) return "--extended doesn't apply at a past --date: the spot is the stored market's at that instant";
 		return null;
 	}
 

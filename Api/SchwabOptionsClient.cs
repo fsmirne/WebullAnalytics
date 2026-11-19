@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
@@ -13,6 +14,17 @@ namespace WebullAnalytics.Api;
 internal static class SchwabOptionsClient
 {
 	private const string ChainsUrl = "https://api.schwabapi.com/marketdata/v1/chains";
+
+	/// <summary>Most recent extended-hours (top-level <c>underlyingPrice</c> / <c>underlying.mark</c>) price seen per
+	/// Schwab underlying symbol (stripped of any leading <c>$</c>), populated as a zero-cost side effect of every
+	/// <see cref="ParseChain"/> call so <c>--extended</c> can project at the after-hours / premarket equity mark while
+	/// <c>Spot</c> stays at <c>underlying.last</c> (the regular-session close the option book is priced against).</summary>
+	private static readonly ConcurrentDictionary<string, decimal> LastExtendedSpots = new(StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>Returns the most recent extended-hours spot captured for <paramref name="root"/> by a Schwab chain
+	/// fetch in this process, or null when none has been recorded.</summary>
+	internal static decimal? TryGetExtendedSpot(string root) =>
+		LastExtendedSpots.TryGetValue(ToSchwabUnderlying(root).TrimStart('$'), out var s) && s > 0m ? s : null;
 
 	/// <summary>Internal ticker root → Schwab underlying symbol. Index options use a '$' prefix; requesting
 	/// <c>$SPX</c> returns BOTH the SPX (AM monthly) and SPXW (PM weekly) roots, so a single call covers the
@@ -135,7 +147,7 @@ internal static class SchwabOptionsClient
 		}
 	}
 
-	private static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes) ParseChain(string json, string symbol)
+	internal static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes) ParseChain(string json, string symbol, bool? isRth = null)
 	{
 		var quotes = new List<OptionContractQuote>();
 		using var doc = JsonDocument.Parse(json);
@@ -149,7 +161,21 @@ internal static class SchwabOptionsClient
 			return (null, quotes);
 		}
 
-		decimal? spot = GetDecimal(root, "underlyingPrice");
+		// During RTH (09:30–close ET), keep top-level underlyingPrice unchanged so live scan/watch/scraper loops
+		// see the exact same live underlying mark as before. Outside RTH (after close, overnight, weekends,
+		// holidays, pre-open), prefer underlying.last (the regular-session 16:00 close) so frozen closing option
+		// quotes are paired with the closing spot they were struck at, while caching the extended-hours
+		// underlyingPrice in LastExtendedSpots for --extended.
+		var hasUnderlying = root.TryGetProperty("underlying", out var u) && u.ValueKind == JsonValueKind.Object;
+		var topUnderlyingPrice = PositiveOrNull(GetDecimal(root, "underlyingPrice"));
+		var regularLast = hasUnderlying ? PositiveOrNull(GetDecimal(u, "last")) : null;
+		var extSpot = topUnderlyingPrice ?? (hasUnderlying ? PositiveOrNull(GetDecimal(u, "mark")) : null);
+		var inRth = isRth ?? IsRegularTradingHours(MarketTime.NowEt());
+		decimal? spot = inRth
+			? topUnderlyingPrice ?? regularLast
+			: regularLast ?? topUnderlyingPrice;
+		if ((extSpot ?? spot) is decimal recordedExt && recordedExt > 0m)
+			LastExtendedSpots[symbol.TrimStart('$')] = recordedExt;
 
 		foreach (var mapName in new[] { "callExpDateMap", "putExpDateMap" })
 		{
@@ -188,6 +214,11 @@ internal static class SchwabOptionsClient
 	/// <summary>Schwab pads the OCC root to 6 chars (e.g. <c>"SPY   260620C00500000"</c>); strip the spaces to
 	/// get the compact OCC symbol (<c>"SPY260620C00500000"</c>) the rest of the pipeline parses.</summary>
 	internal static string NormalizeSymbol(string schwabSymbol) => schwabSymbol.Replace(" ", "");
+
+	internal static bool IsRegularTradingHours(DateTime nowEt) =>
+		MarketCalendar.IsOpen(nowEt.Date)
+		&& nowEt.TimeOfDay >= Pricing.OptionMath.MarketOpen
+		&& nowEt.TimeOfDay < MarketCalendar.CloseTimeEt(nowEt.Date);
 
 	private static decimal? ToFraction(decimal? pct) => pct is { } v && v >= 0m ? v / 100m : null;
 

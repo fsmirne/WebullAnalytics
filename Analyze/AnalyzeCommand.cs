@@ -466,6 +466,146 @@ internal static class AnalyzeCommon
 		return (quotes, underlyings);
 	}
 
+	/// <summary>Merges explicit <c>--spot</c> entries with <c>--extended</c> extended-hours prices for
+	/// <paramref name="tickers"/>. Explicit <c>--spot</c> entries win per ticker; <c>--extended</c> fills in any
+	/// remaining tickers (no-op at a past <c>--date</c>). Returns null when neither flag yields an override.</summary>
+	internal static async Task<Dictionary<string, decimal>?> ResolveSpotOverrideMapAsync(
+		string? spotSpec,
+		bool extended,
+		IEnumerable<string> tickers,
+		QuoteVendor vendor,
+		IReadOnlyDictionary<string, decimal>? rthSpots,
+		CancellationToken cancellation)
+	{
+		var overrides = !string.IsNullOrWhiteSpace(spotSpec)
+			? ReportCommand.ParseUnderlyingPriceOverrides(spotSpec)
+			: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+		if (extended && !EvaluationDate.IsPast)
+		{
+			var missing = tickers
+				.Where(t => !string.IsNullOrWhiteSpace(t) && !ParsingHelpers.TryResolveForRoot(overrides, t, out _))
+				.Distinct(StringComparer.OrdinalIgnoreCase)
+				.ToList();
+			if (missing.Count > 0)
+			{
+				var extSpots = await ResolveExtendedSpotsAsync(missing, vendor, cancellation, rthSpots);
+				foreach (var (t, price) in extSpots)
+					overrides[t] = price;
+			}
+		}
+
+		return overrides.Count > 0 ? overrides : null;
+	}
+
+	/// <summary>Resolves the latest extended-hours (pre/post-market) spot price for each ticker in <paramref name="tickers"/>.
+	/// On Schwab, non-index tickers read the extended-hours <c>underlyingPrice</c> already captured by the chain fetch (zero
+	/// extra round-trips). On Webull — and for SPX-family cash indexes (<c>SPXW</c>/<c>SPX</c>/<c>XSP</c>) on either vendor,
+	/// which have no extended-hours index print of their own — pulls the latest extended-hours 1-minute bar via
+	/// <see cref="WebullIntradayBars"/> (which splices and rescales SPY's extended-hours tape onto the index's RTH level).
+	/// If Webull headers are unavailable on a Schwab index run, rescales the index's RTH spot by Schwab's SPY extended/RTH ratio.</summary>
+	internal static async Task<Dictionary<string, decimal>> ResolveExtendedSpotsAsync(
+		IEnumerable<string> tickers,
+		QuoteVendor vendor,
+		CancellationToken cancellation,
+		IReadOnlyDictionary<string, decimal>? rthSpots = null)
+	{
+		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		var distinct = tickers
+			.Where(t => !string.IsNullOrWhiteSpace(t))
+			.Select(t => t.Trim().ToUpperInvariant())
+			.Distinct(StringComparer.OrdinalIgnoreCase)
+			.ToList();
+		if (distinct.Count == 0) return result;
+
+		var apiConfig = AI.OpenCandidateEvaluator.TryLoadApiConfig();
+		AI.Replay.IntradayBarFetcher? webullFetcher = apiConfig is { Webull.Headers.Count: > 0 }
+			? WebullIntradayBars.CreateFetcher(apiConfig)
+			: null;
+
+		foreach (var ticker in distinct)
+		{
+			var isSpxFamily = WebullIntradayBars.SpxFamilyTickers.Contains(ticker);
+			decimal? extSpot = null;
+
+			if (vendor == QuoteVendor.Schwab && !isSpxFamily)
+			{
+				extSpot = SchwabOptionsClient.TryGetExtendedSpot(ticker)
+					?? await TryFetchSchwabExtendedSpotAsync(apiConfig, ticker, cancellation);
+			}
+
+			if (extSpot is not > 0m && webullFetcher != null)
+			{
+				try
+				{
+					var bars = await webullFetcher(ticker, BarInterval.M1, count: 5, includeExtended: true, cancellation);
+					if (bars.Count > 0 && bars[^1].Close > 0m)
+						extSpot = bars[^1].Close;
+				}
+				catch (Exception ex) when (!cancellation.IsCancellationRequested)
+				{
+					Log.Debug($"Extended spot: Webull bar fetch failed for {ticker}: {ex.Message}");
+				}
+			}
+
+			if (extSpot is not > 0m && isSpxFamily && rthSpots != null
+				&& ParsingHelpers.TryResolveForRoot(rthSpots, ticker, out var idxRth) && idxRth > 0m)
+			{
+				var spyRatio = await TryGetSchwabSpyExtendedRatioAsync(apiConfig, cancellation);
+				if (spyRatio is > 0m)
+					extSpot = Math.Round(idxRth * spyRatio.Value, 2);
+			}
+
+			if (extSpot is not > 0m && !isSpxFamily && vendor != QuoteVendor.Schwab)
+			{
+				extSpot = SchwabOptionsClient.TryGetExtendedSpot(ticker)
+					?? await TryFetchSchwabExtendedSpotAsync(apiConfig, ticker, cancellation);
+			}
+
+			if (extSpot is > 0m)
+				result[ticker] = Math.Round(extSpot.Value, 2);
+		}
+
+		return result;
+	}
+
+	private static async Task<decimal?> TryFetchSchwabExtendedSpotAsync(ApiConfig? apiConfig, string ticker, CancellationToken cancellation)
+	{
+		if (apiConfig?.Schwab is null || string.IsNullOrEmpty(apiConfig.Schwab.RefreshToken)) return null;
+		try
+		{
+			var configPath = Program.ResolvePath(Program.ApiConfigPath);
+			var token = await SchwabAuthClient.GetAccessTokenAsync(apiConfig.Schwab, configPath, cancellation);
+			var today = DateOnly.FromDateTime(EvaluationDate.Today);
+			await SchwabOptionsClient.FetchChainAsync(token, ticker, today, today.AddDays(7), cancellation, strikeCount: 1);
+			return SchwabOptionsClient.TryGetExtendedSpot(ticker);
+		}
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
+		{
+			Log.Debug($"Extended spot: Schwab fallback failed for {ticker}: {ex.Message}");
+			return null;
+		}
+	}
+
+	private static async Task<decimal?> TryGetSchwabSpyExtendedRatioAsync(ApiConfig? apiConfig, CancellationToken cancellation)
+	{
+		if (apiConfig?.Schwab is null || string.IsNullOrEmpty(apiConfig.Schwab.RefreshToken)) return null;
+		try
+		{
+			var configPath = Program.ResolvePath(Program.ApiConfigPath);
+			var token = await SchwabAuthClient.GetAccessTokenAsync(apiConfig.Schwab, configPath, cancellation);
+			var today = DateOnly.FromDateTime(EvaluationDate.Today);
+			var (spyRth, _) = await SchwabOptionsClient.FetchChainAsync(token, "SPY", today, today.AddDays(7), cancellation, strikeCount: 1);
+			var spyExt = SchwabOptionsClient.TryGetExtendedSpot("SPY");
+			return spyRth is > 0m && spyExt is > 0m ? spyExt.Value / spyRth.Value : null;
+		}
+		catch (Exception ex) when (!cancellation.IsCancellationRequested)
+		{
+			Log.Debug($"Extended spot: Schwab SPY ratio fetch failed: {ex.Message}");
+			return null;
+		}
+	}
+
 	/// <summary>Sets every leg's HistoricalVolatility to its underlying's 20-session annualized close-to-close
 	/// realized vol — the SAME metric the opener scores on (<see cref="WebullAnalytics.AI.CandidateScorer.ComputeHistoricalVolatilityAnnualized"/>,
 	/// <c>volatilityLookbackDays</c> default 20) — so HV means one consistent thing regardless of vendor.
@@ -667,11 +807,9 @@ internal static class AnalyzeCommon
 		}
 
 		var spot = ParsingHelpers.TryResolveForRoot(underlyingPrices, oldParsed.Root, out var sp) ? sp : 0m;
-		if (settings.Spot != null)
-		{
-			var overrides = ReportCommand.ParseUnderlyingPriceOverrides(settings.Spot);
-			if (ParsingHelpers.TryResolveForRoot(overrides, oldParsed.Root, out var ovr)) spot = ovr;
-		}
+		var spotOverrides = await ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, [oldParsed.Root], settings.ResolvedVendor, underlyingPrices, cancellation);
+		if (spotOverrides != null && ParsingHelpers.TryResolveForRoot(spotOverrides, oldParsed.Root, out var ovr))
+			spot = ovr;
 		if (spot == 0) { Console.WriteLine($"Error: Could not determine underlying price for {oldParsed.Root}"); return 1; }
 
 		// Current market prices
