@@ -226,10 +226,12 @@ public class BrokerStopManagerTests
 		Assert.Equal(("child-1", 7, (decimal?)null, (decimal?)2.40m), Assert.Single(rig.Gateway.Replaced));
 	}
 
-	[Fact]
-	public async Task AStopTheUserPlacedByHand_IsLeftAloneAndCountsAsProtection()
+	[Theory]
+	[InlineData("STOP_LOSS_LIMIT")]
+	[InlineData("TRAILING_STOP_LOSS")]
+	public async Task AStopTheUserPlacedByHand_IsLeftAloneAndCountsAsProtection(string orderType)
 	{
-		var rig = new Rig(true, WorkingStop("app-stop", "STOP_LOSS_LIMIT", 2.00m, 1.90m, qty: 7));
+		var rig = new Rig(true, WorkingStop("app-stop", orderType, 2.00m, orderType == "STOP_LOSS_LIMIT" ? 1.90m : null, qty: 7));
 		var position = Diagonal();
 		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, default);
 
@@ -270,10 +272,12 @@ public class BrokerStopManagerTests
 		Assert.False(rig.Store.Owns("acct", "ours"));
 	}
 
-	[Fact]
-	public void ARestingStop_DoesNotNetAgainstTheDaysOpensOrBlockACloseOfTheSameLegs()
+	[Theory]
+	[InlineData("STOP_LOSS_LIMIT")]
+	[InlineData("TRAILING_STOP_LOSS")]
+	public void ARestingStop_DoesNotNetAgainstTheDaysOpensOrBlockACloseOfTheSameLegs(string orderType)
 	{
-		var rig = new Rig(true, WorkingStop("ours", "STOP_LOSS_LIMIT", 2.00m, 1.90m, qty: 7));
+		var rig = new Rig(true, WorkingStop("ours", orderType, 2.00m, orderType == "STOP_LOSS_LIMIT" ? 1.90m : null, qty: 7));
 		Assert.False(rig.Broker.HasPendingMatching([(Long, "sell"), (Short, "buy")]));
 		Assert.Single(rig.Broker.FindPendingMatching([(Long, "sell"), (Short, "buy")]));
 	}

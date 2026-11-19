@@ -56,8 +56,8 @@ internal static class BrokerOrder
 		return OrderState.Working;
 	}
 
-	/// <summary>True for a stop order type (<c>STOP_LOSS</c> / <c>STOP_LOSS_LIMIT</c>), which rests until its trigger and so is not yet a close.</summary>
-	internal static bool IsStop(string? orderType) => orderType != null && orderType.StartsWith("STOP_LOSS", StringComparison.OrdinalIgnoreCase);
+	/// <summary>True for a stop order type (<c>STOP_LOSS</c> / <c>STOP_LOSS_LIMIT</c> / <c>TRAILING_STOP_LOSS</c>), which rests until its trigger and so is not yet a close.</summary>
+	internal static bool IsStop(string? orderType) => orderType != null && (orderType.StartsWith("STOP_LOSS", StringComparison.OrdinalIgnoreCase) || string.Equals(orderType, "TRAILING_STOP_LOSS", StringComparison.OrdinalIgnoreCase));
 
 	internal static decimal? Number(string? raw) =>
 		decimal.TryParse(raw, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : null;
