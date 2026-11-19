@@ -158,7 +158,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		// The gate serializes the two halves' broker-state pulls and order submissions (BrokerStateService / TodayOrdersFeed each hold one cycle token).
 		var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, autoExecutor, openEvaluator, sink, openSink, openerExecutor,
 			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false, Repricer: repricer, Stops: brokerStops,
-			CascadeOpener: openEvaluator != null ? AIContext.BuildCascadeOpener(config, LiveQuoteSource.VendorName(vendor)) : null, ActionGate: new SemaphoreSlim(1, 1));
+			CascadeOpener: openEvaluator != null ? AIContext.BuildCascadeOpener(config, LiveQuoteSource.VendorName(vendor)) : null, ActionGate: new SemaphoreSlim(1, 1), Latest: new LatestCycle());
 		var opener = new WatchOpenerRunner(deps, openEvaluator, openSink, debug);
 		var openerDueAt = DateTime.MinValue;
 

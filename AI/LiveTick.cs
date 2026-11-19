@@ -24,10 +24,19 @@ internal sealed record LiveTickDeps(
 	OrderRepricer? Repricer = null,
 	Open.Cascade.CascadeOpener? CascadeOpener = null,
 	BrokerStopManager? Stops = null,
-	SemaphoreSlim? ActionGate = null);
+	SemaphoreSlim? ActionGate = null,
+	LatestCycle? Latest = null);
 
 /// <summary>Outcome of a management-only tick: the frame it read (which the opener can score on) and what the watch pulse reports.</summary>
 internal readonly record struct ManagementTickResult(LiveTickFrame? Frame, int PositionCount, int MgmtCount, decimal? Spot);
+
+/// <summary>The broker-state cycle token of the most recent completed management tick. The opener executes against it instead of its own older frame's token, so the
+/// order snapshot the management tick just pulled is reused rather than pulled again (each pull is two gated Webull reads).</summary>
+internal sealed class LatestCycle
+{
+	private object? _token;
+	public object? Token { get => Volatile.Read(ref _token); set => Volatile.Write(ref _token, value); }
+}
 
 /// <summary>Mutable state that must persist across ticks (watch) but reset per run (scan).</summary>
 internal sealed class LiveTickState
@@ -67,6 +76,7 @@ internal static class LiveTick
 		using var lease = await EnterAsync(deps.ActionGate, cancellation);
 		var (frame, positionCount) = await BuildFrameAsync(now, deps, null, cancellation);
 		var mgmtCount = await ManageAsync(frame!, deps, cancellation);
+		if (deps.Latest != null) deps.Latest.Token = frame!.CycleToken;
 		return new ManagementTickResult(frame, positionCount, mgmtCount, frame!.Quotes.Underlyings.TryGetValue(deps.Config.Ticker, out var spot) ? spot : null);
 	}
 
@@ -208,11 +218,13 @@ internal static class LiveTick
 					if (!openResults[i].Informational && (feedStale || suspect.ContainsKey(i)))
 						deps.OpenSink.EmitAutoExecute(openResults[i], "skipped", "quote guard", feedStale ? "stale feed" : suspect[i]);
 				using var lease = await EnterAsync(deps.ActionGate, cancellation);
-				await deps.OpenerExecutor.HandleAsync(safeToOpen.Where(p => !cascadeResults.Contains(p)).ToList(), openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: cycleToken, log: deps.OpenSink);
+				// Read inside the gate: no management tick can run while this holds it, so this is the freshest snapshot there will be.
+				var executionToken = deps.Latest?.Token ?? cycleToken;
+				await deps.OpenerExecutor.HandleAsync(safeToOpen.Where(p => !cascadeResults.Contains(p)).ToList(), openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: executionToken, log: deps.OpenSink);
 				// A cascade trade goes through on its own so its outcome is known: only one the executor acted on uses up its setup's
 				// signal for the day; one held back (quote guard above, or a skip inside the executor) is proposed again on a later read.
 				foreach (var cascadeOpen in safeToOpen.Where(cascadeResults.Contains))
-					if (await deps.OpenerExecutor.HandleAsync(new[] { cascadeOpen }, openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: cycleToken, log: deps.OpenSink) > 0)
+					if (await deps.OpenerExecutor.HandleAsync(new[] { cascadeOpen }, openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: executionToken, log: deps.OpenSink) > 0)
 						deps.CascadeOpener!.Acted(cascadeOpen);
 			}
 			else
