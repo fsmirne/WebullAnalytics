@@ -55,13 +55,49 @@ internal static class SchwabOptionsClient
 		string accessToken, string root, DateOnly fromExpiry, DateOnly toExpiry, CancellationToken ct, int strikeCount = 0)
 	{
 		var symbol = ToSchwabUnderlying(root);
-		return await FetchChainRangeAsync(accessToken, symbol, fromExpiry, toExpiry, strikeCount, ct);
+		var maxSpan = FittingSpanDays.TryGetValue((symbol, strikeCount), out var span) ? span : int.MaxValue;
+		var windows = PlanWindows(fromExpiry, toExpiry, maxSpan);
+		var parts = await Task.WhenAll(windows.Select(w => FetchChainRangeAsync(accessToken, symbol, w.From, w.To, strikeCount, ct)));
+		return Merge(parts);
+	}
+
+	/// <summary>The widest expiry window (in days) known to fit under Schwab's body cap, per underlying and strike bound: the half of the last window that overflowed it. A dense
+	/// index chain overflows at range=ALL over a multi-week window, and the overflow is only reported after Schwab has built the response (a rejected 30-day $SPX request took
+	/// 10.5 s, more than the two requests that then succeeded together), so once a window is known too wide the next fetch starts from windows that fit instead of paying for it
+	/// again. Only ever narrows, and lasts the process: density shifts slowly, and a narrower window costs one more parallel request, not a failure.</summary>
+	private static readonly ConcurrentDictionary<(string Symbol, int StrikeCount), int> FittingSpanDays = new();
+
+	/// <summary>Splits [<paramref name="from"/>, <paramref name="to"/>] into consecutive windows of at most <paramref name="maxSpanDays"/> days each.</summary>
+	internal static IReadOnlyList<(DateOnly From, DateOnly To)> PlanWindows(DateOnly from, DateOnly to, int maxSpanDays)
+	{
+		var span = Math.Max(1, maxSpanDays);
+		if (to <= from || to.DayNumber - from.DayNumber < span) return [(from, to)];
+		var windows = new List<(DateOnly, DateOnly)>();
+		for (var start = from; start <= to; start = start.AddDays(span))
+		{
+			windows.Add((start, to.DayNumber - start.DayNumber < span ? to : start.AddDays(span - 1)));
+		}
+		return windows;
+	}
+
+	/// <summary>The windows' chains as one: contracts keyed by symbol (a later window wins a repeat), and the first spot any of them carried.</summary>
+	private static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes) Merge(IEnumerable<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)> parts)
+	{
+		var merged = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		decimal? spot = null;
+		foreach (var part in parts)
+		{
+			spot ??= part.Spot;
+			foreach (var q in part.Quotes) merged[q.ContractSymbol] = q;
+		}
+		return (spot, merged.Values.ToList());
 	}
 
 	/// <summary>Fetches [<paramref name="from"/>, <paramref name="to"/>] in one request and, when Schwab
 	/// rejects the response body as too large (HTTP 502 <c>protocol.http.TooBigBody</c> — dense index roots
-	/// like $SPX over a multi-day window with <c>range=ALL</c>), recursively halves the expiry window and
-	/// merges the halves. Self-tunes to chain density: sparse equities resolve in one call, a 45-DTE $SPX
+	/// like $SPX over a multi-day window with <c>range=ALL</c>), halves the expiry window, fetches both halves
+	/// at once and merges them, remembering the narrower span (<see cref="FittingSpanDays"/>) for the next fetch.
+	/// Self-tunes to chain density: sparse equities resolve in one call, a 45-DTE $SPX
 	/// request splits until each chunk fits — full strike coverage preserved, no per-ticker tuning, and no
 	/// caller (analyze gex or the scraper, at any <c>--max-dte</c>) can overflow.</summary>
 	private static async Task<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)> FetchChainRangeAsync(
@@ -83,13 +119,11 @@ internal static class SchwabOptionsClient
 			return (null, Array.Empty<OptionContractQuote>());
 		}
 
+		var spanDays = to.DayNumber - from.DayNumber + 1;
+		FittingSpanDays.AddOrUpdate((symbol, strikeCount), spanDays / 2, (_, known) => Math.Min(known, spanDays / 2));
 		var mid = from.AddDays((to.DayNumber - from.DayNumber) / 2);
-		var lower = await FetchChainRangeAsync(accessToken, symbol, from, mid, strikeCount, ct);
-		var upper = await FetchChainRangeAsync(accessToken, symbol, mid.AddDays(1), to, strikeCount, ct);
-		var merged = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
-		foreach (var q in lower.Quotes) merged[q.ContractSymbol] = q;
-		foreach (var q in upper.Quotes) merged[q.ContractSymbol] = q;
-		return (lower.Spot ?? upper.Spot, merged.Values.ToList());
+		var halves = await Task.WhenAll(FetchChainRangeAsync(accessToken, symbol, from, mid, strikeCount, ct), FetchChainRangeAsync(accessToken, symbol, mid.AddDays(1), to, strikeCount, ct));
+		return Merge(halves);
 	}
 
 	/// <summary>One chains GET. Returns <c>TooBig=true</c> (with empty quotes) on the 502 body-overflow so the
