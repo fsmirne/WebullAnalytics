@@ -39,6 +39,12 @@ internal sealed class AIConfig
 internal sealed class WatchConfig
 {
 	[JsonPropertyName("tickIntervalSeconds")] public int TickIntervalSeconds { get; set; } = 60;
+	/// <summary>How often the watch loop reads broker state and runs the management rules and the broker-stop sync. Null = <see cref="TickIntervalSeconds"/>.
+	/// Webull's read gate refills one call per 3 s per endpoint, so a value under <see cref="MinManagementIntervalSeconds"/> only queues behind it.</summary>
+	[JsonPropertyName("managementIntervalSeconds")] public int? ManagementIntervalSeconds { get; set; }
+	/// <summary>How often the opener runs (candidate scoring plus the open auto-execute), at the next management tick after it is due. Null = <see cref="TickIntervalSeconds"/>.</summary>
+	[JsonPropertyName("openerIntervalSeconds")] public int? OpenerIntervalSeconds { get; set; }
+	public const int MinManagementIntervalSeconds = 3;
 	/// <summary>Scheduled first-tick time (ET, format "HH:mm" or "HH:mm:ss"). The watch loop sleeps until
 	/// this time before evaluating its first tick. Defaults to just after the open (09:30:30) — a global
 	/// setting, kept in the base config rather than per-ticker. Set null/empty to tick immediately when
@@ -563,6 +569,8 @@ internal static class AIConfigLoader
 	internal static string? Validate(AIConfig c)
 	{
 		if (c.Watch.TickIntervalSeconds < 1 || c.Watch.TickIntervalSeconds > 3600) return $"watch.tickIntervalSeconds: must be in [1, 3600], got {c.Watch.TickIntervalSeconds}";
+		if (c.Watch.ManagementIntervalSeconds is { } mgmtInterval && (mgmtInterval < WatchConfig.MinManagementIntervalSeconds || mgmtInterval > 3600)) return $"watch.managementIntervalSeconds: must be in [{WatchConfig.MinManagementIntervalSeconds}, 3600], got {mgmtInterval}";
+		if (c.Watch.OpenerIntervalSeconds is { } openerInterval && (openerInterval < 1 || openerInterval > 3600)) return $"watch.openerIntervalSeconds: must be in [1, 3600], got {openerInterval}";
 		if (!string.IsNullOrWhiteSpace(c.Watch.StartTime) && !TimeOnly.TryParse(c.Watch.StartTime, CultureInfo.InvariantCulture, out _))
 			return $"watch.startTime: must be HH:mm or HH:mm:ss (ET), got '{c.Watch.StartTime}'";
 		if (c.AutoExecute.Reprice.StepSeconds < 10) return $"autoExecute.reprice.stepSeconds: must be ≥ 10, got {c.AutoExecute.Reprice.StepSeconds}";

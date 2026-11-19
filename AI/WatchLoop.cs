@@ -12,7 +12,7 @@ namespace WebullAnalytics.AI;
 internal sealed class AIWatchSettings : AILiveTickerSubcommandSettings
 {
 	[CommandOption("--tick <SECONDS>")]
-	[Description("Override watch.tickIntervalSeconds.")]
+	[Description("Override watch.tickIntervalSeconds, managementIntervalSeconds and openerIntervalSeconds.")]
 	public int? Tick { get; set; }
 
 	[CommandOption("--duration <DURATION>")]
@@ -86,7 +86,9 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		if (settings.Start != null) config.Watch.StartTime = settings.Start;
 
 
-		var tickSeconds = settings.Tick ?? config.Watch.TickIntervalSeconds;
+		// --tick overrides every interval; otherwise each falls back to tickIntervalSeconds. The loop runs at the management cadence and starts the opener when it is due.
+		var mgmtSeconds = settings.Tick ?? config.Watch.ManagementIntervalSeconds ?? config.Watch.TickIntervalSeconds;
+		var openerInterval = TimeSpan.FromSeconds(settings.Tick ?? config.Watch.OpenerIntervalSeconds ?? config.Watch.TickIntervalSeconds);
 
 		// Optional scheduled first-tick: wait until config.Watch.StartTime (ET) before entering the loop.
 		// stopAt is computed AFTER the wait so --duration is relative to the start time, not launch time.
@@ -141,7 +143,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			openEvaluator = new OpenCandidateEvaluator(config, quotes, settings.Pricing, priceCache, enableChainSnapshot: true);
 		}
 
-		AnsiConsole.MarkupLine($"[bold]ai watch[/] ticker={config.Ticker} tick={tickSeconds}s stopAt={stopAt:HH:mm:ss} source={LiveQuoteSource.VendorName(vendor)}");
+		AnsiConsole.MarkupLine($"[bold]ai watch[/] ticker={config.Ticker} manage={mgmtSeconds}s opener={openerInterval.TotalSeconds:0}s stopAt={stopAt:HH:mm:ss} source={LiveQuoteSource.VendorName(vendor)}");
 
 		// Mirror `wa ai scan`'s debug banner so watch is never silent in debug mode: when the opener
 		// finds nothing the only other debug output (the per-structure breakdown) doesn't fire, leaving
@@ -152,11 +154,13 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var failures = 0;
 		var ticksRun = 0;
 		var proposalsEmitted = 0;
-		var tickState = new LiveTickState();   // persists the one-time staleness note across ticks
-		// Watch = "one live tick in a loop". The opener never bypasses its daily cap here (that's a scan flag).
+		// Watch = "one live management tick in a loop, plus the opener on its own cadence". The opener never bypasses its daily cap here (that's a scan flag).
+		// The gate serializes the two halves' broker-state pulls and order submissions (BrokerStateService / TodayOrdersFeed each hold one cycle token).
 		var deps = new LiveTickDeps(positions, quotes, priceCache, evaluator, autoExecutor, openEvaluator, sink, openSink, openerExecutor,
 			config, LiveQuoteSource.VendorName(vendor), settings.EmitManagementProposals, BypassOpenerDailyCap: false, Repricer: repricer, Stops: brokerStops,
-			CascadeOpener: openEvaluator != null ? AIContext.BuildCascadeOpener(config, LiveQuoteSource.VendorName(vendor)) : null);
+			CascadeOpener: openEvaluator != null ? AIContext.BuildCascadeOpener(config, LiveQuoteSource.VendorName(vendor)) : null, ActionGate: new SemaphoreSlim(1, 1));
+		var opener = new WatchOpenerRunner(deps, openEvaluator, openSink, debug);
+		var openerDueAt = DateTime.MinValue;
 
 		// Entry window (ET, opener.earliestEntryTimeEt..latestEntryTimeEt): outside it the watch loop stops SUBMITTING
 		// opens — nulling the opener executor for the tick suppresses ONLY auto-execution (proposals still render,
@@ -164,19 +168,20 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		// the earliest end was previously honored by the backtest only. Watch-only by construction: scan builds its
 		// own deps and never nulls, so `wa ai scan --submit` is never time-gated.
 		string? windowState = null;   // last state announced: "before" / "after" / null (inside)
-		// 0DTE session gate: remember the last state rendered so a long "waiting" stretch prints once per
-		// state change rather than once per tick, and remember whether the day has been declared closed so
-		// the close is announced exactly once — as "no trade today" only if no minute ever allowed an entry.
-		var lastGateState = (Open.ZeroDte.ZeroDteGateState?)null;
-		var gateDayClosedNoted = false;
-		var gateEverAllowedEntry = false;
-
 		while (!cancellation.IsCancellationRequested && DateTime.Now < stopAt)
 		{
 			if (!settings.IgnoreMarketHours && !IsMarketOpen())
 			{
-				try { await Task.Delay(TimeSpan.FromSeconds(tickSeconds), cancellation); } catch (OperationCanceledException) { break; }
+				try { await Task.Delay(TimeSpan.FromSeconds(mgmtSeconds), cancellation); } catch (OperationCanceledException) { break; }
 				continue;
+			}
+
+			// An opener run that hit an auth failure or too many consecutive failures ends the watch, as the same faults do for a management tick.
+			if (opener.Unauthorized) return 2;
+			if (opener.ConsecutiveFailures >= WatchOpenerRunner.WatchFailureLimit)
+			{
+				Console.Error.WriteLine($"Circuit breaker: {WatchOpenerRunner.WatchFailureLimit} consecutive opener run failures. Exiting.");
+				return 3;
 			}
 
 			try
@@ -198,51 +203,25 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 					else if (state == "after") AnsiConsole.MarkupLine($"[dim]past latest-entry {config.Opener.LatestEntryTimeEt} ET — opens no longer submitted (managing only).[/]");
 					windowState = state;
 				}
-				var tickDeps = outsideWindow ? deps with { OpenerExecutor = null, OutsideEntryWindow = true } : deps;
-				var tick = await LiveTick.EvaluateAsync(now, tickDeps, tickState, applySpotOverrides: null, cancellation);
+				var tick = await LiveTick.ManagementTickAsync(now, deps, cancellation);
 				var mgmtEmitted = settings.EmitManagementProposals ? tick.MgmtCount : 0;
-				proposalsEmitted += mgmtEmitted + tick.OpenCount;
+				proposalsEmitted += mgmtEmitted;
 
-				// Per-tick pulse: a timestamped line EVERY tick so proposals and quiet ticks are anchored in time
-				// (no silent blinking caret). Suppressed at debug, where the [debug] summary below already carries it.
-				var tickEmitted = mgmtEmitted + tick.OpenCount;
-				if (!debug)
+				// Per-tick pulse. With an opener configured it prints its own line per run, so a management tick speaks only when it emitted something; with none, every tick
+				// still gets a timestamped line so a quiet watch is anchored in time (no silent blinking caret). Suppressed at debug, where the [debug] line carries it.
+				if (debug) Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={tick.Spot} positions={tick.PositionCount} mgmtResults={tick.MgmtCount}");
+				else if (openEvaluator == null || mgmtEmitted > 0)
 				{
 					var spotStr = tick.Spot.HasValue ? tick.Spot.Value.ToString("0.00") : "?";
-					var summary = tickEmitted == 0 ? "no proposals emitted" : $"{tickEmitted} proposal(s) emitted";
-					AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} — {summary}[/]");
-				}
-				else
-				{
-					Console.Error.WriteLine($"[debug] {now:HH:mm:ss} tick {ticksRun + 1}: spot={tick.Spot} positions={tick.PositionCount} mgmtResults={tick.MgmtCount} openProposals={tick.OpenCount}");
+					AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} — {(mgmtEmitted == 0 ? "no proposals emitted" : $"{mgmtEmitted} proposal(s) emitted")}[/]");
 				}
 
-				// 0DTE gate narration. The pulse above says "no proposals emitted"; without this the user cannot
-				// tell a session the gate is deliberately sitting out from one where nothing scored. Printed on
-				// every state CHANGE (so a 90-minute wait is one line, not 90) and once when the day closes.
-				if (config.Opener.ZeroDteGate.Enabled && openEvaluator != null && openEvaluator.LastGateVerdicts.TryGetValue(config.Ticker, out var gateVerdict))
+				// The opener runs in the background off this tick's frame once it is due and the previous run has finished, so scoring never delays the next management tick.
+				if (openEvaluator != null && tick.Frame != null && opener.Idle && now >= openerDueAt)
 				{
-					if (gateVerdict.State != lastGateState)
-					{
-						var color = gateVerdict.AllowsEntry ? "green" : gateVerdict.DayClosed ? "yellow" : "dim";
-						AnsiConsole.MarkupLine($"[{color}]gate {gateVerdict.State}: {Markup.Escape(gateVerdict.Summary)}[/]");
-						lastGateState = gateVerdict.State;
-					}
-					gateEverAllowedEntry |= gateVerdict.AllowsEntry;
-					if (gateVerdict.DayClosed && !gateDayClosedNoted)
-					{
-						AnsiConsole.MarkupLine(gateEverAllowedEntry
-							? $"[yellow]Entry window closed at {Markup.Escape(config.Opener.ZeroDteGate.LatestEntryEt ?? "")} ET — no new 0DTE entries today. Still managing open positions.[/]"
-							: $"[yellow]No trade today — the session never satisfied the entry conditions. Still managing open positions.[/]");
-						gateDayClosedNoted = true;
-					}
+					opener.Start(tick.Frame, tick.MgmtCount, outsideWindow, cancellation);
+					openerDueAt = now + openerInterval;
 				}
-
-				// Persisted heartbeat: the console pulse above dies with the terminal, so in the proposal LOG a day
-				// suppressed by MinScoreToOpen was indistinguishable from a watch that never ran (2026-08-03: watch
-				// ran all day, nothing cleared the gate, zero rows). One lean type:"tick" line per successful tick
-				// records liveness plus the best pre-gate candidate's score; type=="open" consumers never see them.
-				if (!tick.Aborted) openSink?.EmitTick(tick.Spot, tick.OpenCount, tick.MgmtCount, openEvaluator?.LastTopCandidate, config.Opener.MinScoreToOpen);
 
 				ticksRun++;
 				failures = 0;
@@ -254,24 +233,26 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			catch (UnauthorizedAccessException ex)
 			{
 				Console.Error.WriteLine($"Auth failure: {ex.Message}. Exiting.");
+				await opener.DrainAsync();
 				return 2;
 			}
 			catch (Exception ex)
 			{
 				failures++;
-				var chain = new System.Text.StringBuilder(ex.Message);
-				for (var inner = ex.InnerException; inner != null; inner = inner.InnerException) chain.Append(" -> ").Append(inner.GetType().Name).Append(": ").Append(inner.Message);
-				AnsiConsole.MarkupLine($"[red]Tick {ticksRun + 1} failed ({failures}/5): {Markup.Escape(chain.ToString())}[/]");
-				if (failures >= 5)
+				AnsiConsole.MarkupLine($"[red]Tick {ticksRun + 1} failed ({failures}/{WatchOpenerRunner.WatchFailureLimit}): {Markup.Escape(WatchOpenerRunner.ExceptionChain(ex))}[/]");
+				if (failures >= WatchOpenerRunner.WatchFailureLimit)
 				{
-					Console.Error.WriteLine("Circuit breaker: 5 consecutive tick failures. Exiting.");
+					Console.Error.WriteLine($"Circuit breaker: {WatchOpenerRunner.WatchFailureLimit} consecutive tick failures. Exiting.");
+					await opener.DrainAsync();
 					return 3;
 				}
 			}
 
-			try { await Task.Delay(TimeSpan.FromSeconds(tickSeconds), cancellation); } catch (OperationCanceledException) { break; }
+			try { await Task.Delay(TimeSpan.FromSeconds(mgmtSeconds), cancellation); } catch (OperationCanceledException) { break; }
 		}
 
+		await opener.DrainAsync();
+		proposalsEmitted += opener.ProposalsEmitted;
 		AnsiConsole.MarkupLine($"[dim]Loop exited. ticks={ticksRun} proposals={proposalsEmitted} failures={failures}[/]");
 		return 0;
 	});

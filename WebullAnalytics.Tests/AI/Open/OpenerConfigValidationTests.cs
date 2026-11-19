@@ -24,6 +24,43 @@ public class OpenerConfigValidationTests
 	}
 
 	[Fact]
+	public void WatchIntervalsDefaultToTheTickInterval()
+	{
+		var cfg = MinimalValidConfig();
+		Assert.Null(cfg.Watch.ManagementIntervalSeconds);
+		Assert.Null(cfg.Watch.OpenerIntervalSeconds);
+		Assert.Null(AIConfigLoader.Validate(cfg));
+	}
+
+	[Theory]
+	[InlineData(2)]
+	[InlineData(3601)]
+	public void ManagementIntervalMustBeBetweenTheGateRefillAndAnHour(int seconds)
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Watch.ManagementIntervalSeconds = seconds;
+		Assert.Contains("watch.managementIntervalSeconds", AIConfigLoader.Validate(cfg) ?? "");
+	}
+
+	[Fact]
+	public void ManagementIntervalAtTheGateRefillIsValid()
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Watch.ManagementIntervalSeconds = WatchConfig.MinManagementIntervalSeconds;
+		Assert.Null(AIConfigLoader.Validate(cfg));
+	}
+
+	[Theory]
+	[InlineData(0)]
+	[InlineData(3601)]
+	public void OpenerIntervalMustBeBetweenOneSecondAndAnHour(int seconds)
+	{
+		var cfg = MinimalValidConfig();
+		cfg.Watch.OpenerIntervalSeconds = seconds;
+		Assert.Contains("watch.openerIntervalSeconds", AIConfigLoader.Validate(cfg) ?? "");
+	}
+
+	[Fact]
 	public void TopNPerTickerMustBePositive()
 	{
 		var cfg = MinimalValidConfig();

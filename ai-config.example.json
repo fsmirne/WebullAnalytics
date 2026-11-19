@@ -1,6 +1,8 @@
 {
 	"watch": {
 		"tickIntervalSeconds": 60,
+		"managementIntervalSeconds": 60,
+		"openerIntervalSeconds": 60,
 		"startTime": "09:30:00"
 	},
 	"cashReserve": {

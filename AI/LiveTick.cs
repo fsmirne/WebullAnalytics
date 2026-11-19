@@ -23,7 +23,11 @@ internal sealed record LiveTickDeps(
 	bool OutsideEntryWindow = false,
 	OrderRepricer? Repricer = null,
 	Open.Cascade.CascadeOpener? CascadeOpener = null,
-	BrokerStopManager? Stops = null);
+	BrokerStopManager? Stops = null,
+	SemaphoreSlim? ActionGate = null);
+
+/// <summary>Outcome of a management-only tick: the frame it read (which the opener can score on) and what the watch pulse reports.</summary>
+internal readonly record struct ManagementTickResult(LiveTickFrame? Frame, int PositionCount, int MgmtCount, decimal? Spot);
 
 /// <summary>Mutable state that must persist across ticks (watch) but reset per run (scan).</summary>
 internal sealed class LiveTickState
@@ -54,6 +58,30 @@ internal static class LiveTick
 		var mgmtCount = await ManageAsync(frame, deps, cancellation);
 		var (openCount, spot) = await OpenAsync(frame, deps, state, cancellation);
 		return new LiveTickResult(positionCount, mgmtCount, openCount, spot, Aborted: false);
+	}
+
+	/// <summary>The management half of a tick, for a loop that runs the opener on its own cadence: reads broker state and quotes, runs the rules and syncs the broker stops, all under
+	/// <see cref="LiveTickDeps.ActionGate"/> so the broker-state pulls and order submissions of the two halves never interleave. The returned frame is what the opener scores on.</summary>
+	public static async Task<ManagementTickResult> ManagementTickAsync(DateTime now, LiveTickDeps deps, CancellationToken cancellation)
+	{
+		using var lease = await EnterAsync(deps.ActionGate, cancellation);
+		var (frame, positionCount) = await BuildFrameAsync(now, deps, null, cancellation);
+		var mgmtCount = await ManageAsync(frame!, deps, cancellation);
+		return new ManagementTickResult(frame, positionCount, mgmtCount, frame!.Quotes.Underlyings.TryGetValue(deps.Config.Ticker, out var spot) ? spot : null);
+	}
+
+	/// <summary>The opener half of a tick, scored on a frame a management tick read. Only the order-submitting end runs under <see cref="LiveTickDeps.ActionGate"/>; scoring does not, so it never holds up management.</summary>
+	public static Task<(int OpenCount, decimal? Spot)> OpenerTickAsync(LiveTickFrame frame, LiveTickDeps deps, LiveTickState state, CancellationToken cancellation) => OpenAsync(frame, deps, state, cancellation);
+
+	private sealed class GateLease(SemaphoreSlim? gate) : IDisposable
+	{
+		public void Dispose() => gate?.Release();
+	}
+
+	private static async Task<IDisposable> EnterAsync(SemaphoreSlim? gate, CancellationToken cancellation)
+	{
+		if (gate != null) await gate.WaitAsync(cancellation);
+		return new GateLease(gate);
 	}
 
 	/// <summary>The shared read phase of a tick: broker state, quotes (with the premarket/--spot corrections), technicals and realized vol, assembled into
@@ -179,6 +207,7 @@ internal static class LiveTick
 				for (var i = 0; i < openResults.Count; i++)
 					if (!openResults[i].Informational && (feedStale || suspect.ContainsKey(i)))
 						deps.OpenSink.EmitAutoExecute(openResults[i], "skipped", "quote guard", feedStale ? "stale feed" : suspect[i]);
+				using var lease = await EnterAsync(deps.ActionGate, cancellation);
 				await deps.OpenerExecutor.HandleAsync(safeToOpen.Where(p => !cascadeResults.Contains(p)).ToList(), openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: cycleToken, log: deps.OpenSink);
 				// A cascade trade goes through on its own so its outcome is known: only one the executor acted on uses up its setup's
 				// signal for the day; one held back (quote guard above, or a skip inside the executor) is proposed again on a later read.

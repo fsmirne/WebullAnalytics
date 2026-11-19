@@ -23,6 +23,8 @@ internal sealed class HistoricalBarCache
 	private readonly Func<DateTime> _utcNow;
 	private readonly bool _offline;
 	private readonly Dictionary<string, Dictionary<DateTime, YahooOptionsClient.HistoricalBar>> _memory = new(StringComparer.OrdinalIgnoreCase);
+	// The memory map and the on-disk CSV are read-modify-written by LoadOrFetchAsync, and the live watch loop reads this cache from its management and opener tasks at once.
+	private readonly SemaphoreSlim _loadGate = new(1, 1);
 
 	public HistoricalBarCache(string? cacheDir = null, bool offline = false) : this(cacheDir, DispatchFetchAsync, offline: offline) { }
 
@@ -91,6 +93,13 @@ internal sealed class HistoricalBarCache
 	}
 
 	private async Task<Dictionary<DateTime, YahooOptionsClient.HistoricalBar>> LoadOrFetchAsync(string ticker, DateTime neededThrough, CancellationToken cancellation, DateTime? desiredFrom = null)
+	{
+		await _loadGate.WaitAsync(cancellation);
+		try { return await LoadOrFetchUnlockedAsync(ticker, neededThrough, cancellation, desiredFrom); }
+		finally { _loadGate.Release(); }
+	}
+
+	private async Task<Dictionary<DateTime, YahooOptionsClient.HistoricalBar>> LoadOrFetchUnlockedAsync(string ticker, DateTime neededThrough, CancellationToken cancellation, DateTime? desiredFrom)
 	{
 		var effectiveThrough = ClampToSettled(neededThrough);
 		// Fetch floor = normally two years back (InitialFetchFrom), but an explicit deep-history request
