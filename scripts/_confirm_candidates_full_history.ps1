@@ -1,4 +1,4 @@
-<#
+﻿<#
 _confirm_candidates_full_history.ps1 - Runs a fixed list of candidate SV configs over the FULL 2022-01-01..now
 window (--lots 1, sizing-neutral, matching how the original PF 2.99 baseline was established) — the point
 being that every promising config found so far was discovered on the 2025-01-01..now sweep window, which is
@@ -27,7 +27,7 @@ param(
   [string]$Stage2WinnerJson = ''  # optional: path to corrected stage 2's winner.json, added as an extra candidate
 )
 
-$RepoRoot = 'C:\dev\WebullAnalytics'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 if (-not $Wa) { $Wa = "$RepoRoot\.sweep-bin\wa.dll" }
 $UseDotnet = $Wa.ToLower().EndsWith('.dll')

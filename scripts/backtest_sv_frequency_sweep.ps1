@@ -1,4 +1,4 @@
-<#
+﻿<#
 backtest_sv_frequency_sweep.ps1 - STAGE 1 of a two-stage sweep for SPY SV trade frequency, aimed at "trade
 as many days as possible while keeping a similar profit factor to the 2022-2026 baseline (PF 2.99, 124
 distinct positions / 1163 trading days = 13.8% of days)". Stage 2 (scorer-weight tuning) is
@@ -36,7 +36,7 @@ ThetaData backfill). RUNTIME below is unmeasured for this exact grid, budget gen
 is incremental and Ctrl-C-safe.
 
 Run on Windows (leave the window open):
-  powershell -ExecutionPolicy Bypass -File .\scripts\backtest_sv_frequency_sweep.ps1 -Wa 'C:\dev\WebullAnalytics\.sweep-bin\wa.dll'
+  powershell -ExecutionPolicy Bypass -File .\scripts\backtest_sv_frequency_sweep.ps1 -Wa '.\.sweep-bin\wa.dll'
 Watch progress in another window:
   Get-Content "$env:LOCALAPPDATA\WebullAnalytics\sweeps\sv-freq-sweep-*\sweep.log" -Wait -Tail 20
 Resume after an interruption (same RunId, already-completed cells are skipped via results.csv):
@@ -97,7 +97,7 @@ foreach ($d in $DeltaGrid) { if (-not $DeltaBandPresets.ContainsKey($d)) { Write
 
 if (-not $Wa) { $cmd = Get-Command wa -ErrorAction SilentlyContinue; if ($cmd) { $Wa = $cmd.Source } }
 if (-not $Wa) { $candidate = Join-Path $env:LOCALAPPDATA 'WebullAnalytics\wa.exe'; if (Test-Path $candidate) { $Wa = $candidate } }
-if (-not $Wa -or -not (Test-Path $Wa)) { Write-Host "FATAL: wa binary not found. Pass -Wa 'C:\dev\WebullAnalytics\.sweep-bin\wa.dll' or install wa first."; exit 1 }
+if (-not $Wa -or -not (Test-Path $Wa)) { Write-Host "FATAL: wa binary not found. Pass -Wa '.\.sweep-bin\wa.dll' or install wa first."; exit 1 }
 $UseDotnet = $Wa.ToLower().EndsWith('.dll')
 
 $DataDir = Join-Path $env:LOCALAPPDATA 'WebullAnalytics\data'

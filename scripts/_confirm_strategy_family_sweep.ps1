@@ -30,7 +30,7 @@ param(
   [string]$RunDirName = 'strategy_family_sweep_20260826'
 )
 
-$RepoRoot = 'C:\dev\WebullAnalytics'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 $Wa = "$RepoRoot\.sweep-bin\wa.dll"
 if (-not (Test-Path $Wa)) { Write-Host "FATAL: $Wa not found. Build it first: dotnet build WebullAnalytics.csproj -c Release -o .sweep-bin"; exit 1 }

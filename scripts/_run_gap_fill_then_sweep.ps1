@@ -1,4 +1,4 @@
-<#
+﻿<#
 _run_gap_fill_then_sweep.ps1 - Unattended driver: waits for the in-progress 2022-11/12 wide-band backfill
 (window A) to finish, then runs the remaining wide-band supplement pulls (B-F) SEQUENTIALLY, then launches
 the comprehensive SV frequency sweep. Built so the whole multi-hour/multi-day queue runs from ONE invocation
@@ -29,7 +29,7 @@ Run on Windows (leave the window open, or run detached — see the launcher):
 #>
 
 $ErrorActionPreference = 'Stop'
-$RepoRoot = 'C:\dev\WebullAnalytics'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 $env:PYTHONUTF8 = '1'
 

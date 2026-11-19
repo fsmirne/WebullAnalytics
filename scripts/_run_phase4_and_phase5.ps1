@@ -1,4 +1,4 @@
-<#
+﻿<#
 _run_phase4_and_phase5.ps1 - Runs the two remaining queued phases that never actually executed:
 
   Phase 4 never ran: the original _run_remaining_phases.ps1 process had its whole script body parsed into
@@ -18,7 +18,7 @@ _run_phase4_and_phase5.ps1 - Runs the two remaining queued phases that never act
 #>
 
 $ErrorActionPreference = 'Stop'
-$RepoRoot = 'C:\dev\WebullAnalytics'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 function Log($msg) {

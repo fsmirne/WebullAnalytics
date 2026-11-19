@@ -8,7 +8,7 @@ whether the two candidates just compound differently). Compares:
 Both at --starting-cash 50000, no --lots override (real risk-scaled sizing), same 2025-01-01..now window.
 #>
 
-$RepoRoot = 'C:\dev\WebullAnalytics'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 $DataDir = Join-Path $env:LOCALAPPDATA 'WebullAnalytics\data'
 $BaseConfigPath = Join-Path $DataDir 'ai-config.SPY.SV.json'

@@ -1,4 +1,4 @@
-<#
+﻿<#
 backtest_tp_sweep.ps1 - 1D sweep over the SPY DC take-profit target (Target A: profitTargetPctOfPremium).
 
 Modeled on the retired backtest_sweep.ps1 (the GEX-signal sweep, deleted with its concluded campaign);
@@ -20,7 +20,7 @@ installed wa.exe AFTER running install.bat to deploy the fix + the new --tp-pct 
 
 Run on Windows (leave the window open):
   # against the pinned fixed build (no install.bat needed):
-  powershell -ExecutionPolicy Bypass -File .\scripts\backtest_tp_sweep.ps1 -Wa 'C:\dev\WebullAnalytics\.sweep-bin\wa.dll'
+  powershell -ExecutionPolicy Bypass -File .\scripts\backtest_tp_sweep.ps1 -Wa '.\.sweep-bin\wa.dll'
   # or against the installed binary after install.bat:
   powershell -ExecutionPolicy Bypass -File .\scripts\backtest_tp_sweep.ps1
 Watch progress in another window:
@@ -85,7 +85,7 @@ if (-not $Wa) {
   if (Test-Path $candidate) { $Wa = $candidate }
 }
 if (-not $Wa -or -not (Test-Path $Wa)) {
-  Write-Host "FATAL: wa binary not found. Pass -Wa 'C:\dev\WebullAnalytics\.sweep-bin\wa.dll' or install wa first."
+  Write-Host "FATAL: wa binary not found. Pass -Wa '.\.sweep-bin\wa.dll' or install wa first."
   exit 1
 }
 $UseDotnet = $Wa.ToLower().EndsWith('.dll')

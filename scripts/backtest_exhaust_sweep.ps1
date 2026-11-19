@@ -1,4 +1,4 @@
-<#
+﻿<#
 backtest_exhaust_sweep.ps1 - 1D sweep over the SPY DC theta-exhaustion stop floor (rules.stopLoss.thetaExhaustShortMid).
 
 Modeled on backtest_tp_sweep.ps1 (same fills.jsonl parser, closed-lifecycles-only). The axis: close an UNDERWATER
@@ -26,7 +26,7 @@ Point -Wa at the FIXED binary: either the pinned dev build (...\.sweep-bin\wa.dl
 wa.exe AFTER running install.bat to deploy the --exhaust flag.
 
 Run on Windows (leave the window open):
-  pwsh -ExecutionPolicy Bypass -File .\scripts\backtest_exhaust_sweep.ps1 -Wa 'C:\dev\WebullAnalytics\.sweep-bin\wa.dll'
+  pwsh -ExecutionPolicy Bypass -File .\scripts\backtest_exhaust_sweep.ps1 -Wa '.\.sweep-bin\wa.dll'
 Watch progress in another window:
   Get-Content "$env:LOCALAPPDATA\WebullAnalytics\sweeps\exhaust-sweep-*\sweep.log" -Wait -Tail 20
 
@@ -79,7 +79,7 @@ if (-not $Wa) {
   if (Test-Path $candidate) { $Wa = $candidate }
 }
 if (-not $Wa -or -not (Test-Path $Wa)) {
-  Write-Host "FATAL: wa binary not found. Pass -Wa 'C:\dev\WebullAnalytics\.sweep-bin\wa.dll' or install wa first."
+  Write-Host "FATAL: wa binary not found. Pass -Wa '.\.sweep-bin\wa.dll' or install wa first."
   exit 1
 }
 $UseDotnet = $Wa.ToLower().EndsWith('.dll')

@@ -1,4 +1,4 @@
-<#
+﻿<#
 _run_remaining_phases.ps1 - Chains the phases queued after the (wrong-base) stage 2 run finishes:
   1. Compounding comparison: SL40/TP75 vs SL60/TP75 at --starting-cash 50000, real sizing (no --lots)
   2. Corrected Stage 2: coordinate-wise weight sweep with SL60/cur/TP75 as the base (not the frequency-
@@ -16,7 +16,7 @@ on quotes.db.
 #>
 
 $ErrorActionPreference = 'Stop'
-$RepoRoot = 'C:\dev\WebullAnalytics'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 function Log($msg) {

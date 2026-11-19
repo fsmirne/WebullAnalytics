@@ -25,7 +25,7 @@ UNTIL=2025-03-31
 WAHOME="$(ls -d /mnt/c/Users/*/AppData/Local/WebullAnalytics 2>/dev/null | head -1)"
 WINUSER="$(echo "$WAHOME" | cut -d/ -f5)"
 WA="$WAHOME/wa.exe"
-BASELINE="/mnt/c/dev/WebullAnalytics/scripts/golden_master.${STRATEGY}.baseline.json"
+BASELINE="$(cd "$(dirname "$0")" && pwd)/golden_master.${STRATEGY}.baseline.json"
 WINFILLS="C:\\Users\\$WINUSER\\AppData\\Local\\WebullAnalytics\\sweeps\\golden_master.jsonl"
 LXFILLS="$WAHOME/sweeps/golden_master.jsonl"
 UPDATE=0; [ "${1:-}" = "--update" ] && UPDATE=1

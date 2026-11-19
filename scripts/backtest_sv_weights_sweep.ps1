@@ -1,4 +1,4 @@
-<#
+﻿<#
 backtest_sv_weights_sweep.ps1 - STAGE 2 of the two-stage SV frequency sweep. Takes stage 1's winning
 StopLoss/DeltaBand/TakeProfit combo (backtest_sv_frequency_sweep.ps1's winner.json, or explicit -BaseSlPct
 etc.) as a FIXED base, then sweeps the opener's 11 scorer weights PLUS balanceRrExponent COORDINATE-WISE:
@@ -31,7 +31,7 @@ Runs SEQUENTIALLY — nothing else may touch quotes.db while this is live.
 
 Run on Windows, pointing at stage 1's winner file:
   powershell -ExecutionPolicy Bypass -File .\scripts\backtest_sv_weights_sweep.ps1 `
-    -WinnerJson "$env:LOCALAPPDATA\WebullAnalytics\sweeps\sv-freq-sweep-.../winner.json" -Wa 'C:\dev\WebullAnalytics\.sweep-bin\wa.dll'
+    -WinnerJson "$env:LOCALAPPDATA\WebullAnalytics\sweeps\sv-freq-sweep-.../winner.json" -Wa '.\.sweep-bin\wa.dll'
 Or with explicit values instead of a winner file:
   powershell -ExecutionPolicy Bypass -File .\scripts\backtest_sv_weights_sweep.ps1 -BaseSlOff -BaseDelta cur -BaseTp 75 -Wa '...'
 Resume: re-run with the same -RunId; already-completed cells (by Tag in results.csv) are skipped.
@@ -92,7 +92,7 @@ $baseTpFraction = $baseTpVal / 100.0
 
 if (-not $Wa) { $cmd = Get-Command wa -ErrorAction SilentlyContinue; if ($cmd) { $Wa = $cmd.Source } }
 if (-not $Wa) { $candidate = Join-Path $env:LOCALAPPDATA 'WebullAnalytics\wa.exe'; if (Test-Path $candidate) { $Wa = $candidate } }
-if (-not $Wa -or -not (Test-Path $Wa)) { Write-Host "FATAL: wa binary not found. Pass -Wa 'C:\dev\WebullAnalytics\.sweep-bin\wa.dll' or install wa first."; exit 1 }
+if (-not $Wa -or -not (Test-Path $Wa)) { Write-Host "FATAL: wa binary not found. Pass -Wa '.\.sweep-bin\wa.dll' or install wa first."; exit 1 }
 $UseDotnet = $Wa.ToLower().EndsWith('.dll')
 
 $DataDir = Join-Path $env:LOCALAPPDATA 'WebullAnalytics\data'

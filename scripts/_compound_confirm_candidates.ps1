@@ -1,4 +1,4 @@
-<#
+﻿<#
 _compound_confirm_candidates.ps1 - Re-runs ALL of phase 3's full-history candidates with real compounding
 (--starting-cash 50000, no --lots) over the same 2022-01-01..now window, instead of just the sizing-neutral
 winner. Justified directly by what phase 1 found: SL40/TP75 had LESS sizing-neutral total P&L than SL60/TP75
@@ -12,7 +12,7 @@ by ending equity (the real answer to "which config would you actually want to tr
 #>
 
 param(
-  [string]$ResultsCsvPath = (Join-Path 'C:\dev\WebullAnalytics' 'full_history_confirm\results.csv'),
+  [string]$ResultsCsvPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'full_history_confirm\results.csv'),
   [string]$Since = '2022-01-01',
   [string]$Until = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd'),
   [double]$StartingCash = 50000,
@@ -20,7 +20,7 @@ param(
   [string]$RunDirName = 'full_history_compound_confirm'
 )
 
-$RepoRoot = 'C:\dev\WebullAnalytics'
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 $Wa = "$RepoRoot\.sweep-bin\wa.dll"
 $DataDir = Join-Path $env:LOCALAPPDATA 'WebullAnalytics\data'
