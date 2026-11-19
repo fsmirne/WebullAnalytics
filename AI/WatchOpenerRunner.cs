@@ -45,7 +45,7 @@ internal sealed class WatchOpenerRunner(LiveTickDeps deps, OpenCandidateEvaluato
 		{
 			var (openCount, spot) = await LiveTick.OpenerTickAsync(frame, runDeps, _state, cancellation);
 			ProposalsEmitted += openCount;
-			Pulse(frame.Now, spot, openCount, mgmtCount, clock.Elapsed);
+			Pulse(frame.Now, spot, openCount, mgmtCount, clock.Elapsed, CascadeNote(frame.Now));
 			NarrateGate();
 			// Persisted heartbeat: the console pulse dies with the terminal, so in the proposal LOG a day suppressed by MinScoreToOpen was indistinguishable from a watch
 			// that never ran (2026-08-03). One lean type:"tick" line per successful run records liveness plus the best pre-gate candidate's score; type=="open" consumers never see them.
@@ -79,13 +79,26 @@ internal sealed class WatchOpenerRunner(LiveTickDeps deps, OpenCandidateEvaluato
 
 	/// <summary>A line per run so a proposal and a quiet run are both anchored in time: stamped with the time the run started, and with how long it took, so a slow run reads
 	/// as one rather than as a late launch. At debug the [debug] line replaces it.</summary>
-	private void Pulse(DateTime now, decimal? spot, int openCount, int mgmtCount, TimeSpan took)
+	private void Pulse(DateTime now, decimal? spot, int openCount, int mgmtCount, TimeSpan took, string? cascadeNote)
 	{
 		var config = deps.Config;
-		if (debug) { Console.Error.WriteLine($"[debug] {now:HH:mm:ss} opener run: spot={spot} openProposals={openCount} mgmtResults={mgmtCount} took={took.TotalSeconds:0.0}s"); return; }
+		var note = cascadeNote == null ? "" : $", {cascadeNote}";
+		if (debug) { Console.Error.WriteLine($"[debug] {now:HH:mm:ss} opener run: spot={spot} openProposals={openCount} mgmtResults={mgmtCount} took={FormatTook(took)}{note}"); return; }
 		var spotStr = spot.HasValue ? spot.Value.ToString("0.00") : "?";
-		AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} — {(openCount == 0 ? "no open proposals emitted" : $"{openCount} open proposal(s) emitted")} ({took.TotalSeconds:0.0}s)[/]");
+		AnsiConsole.MarkupLine($"[dim]{now:HH:mm:ss}  {config.Ticker} {spotStr} — {(openCount == 0 ? "no open proposals emitted" : $"{openCount} open proposal(s) emitted")} ({FormatTook(took)}{note})[/]");
 	}
+
+	/// <summary>What the cascade opener did this run: the read it took, or how long until its next one. A run with no read due does no work, so its duration is a few milliseconds
+	/// and this is what says why. Null when no cascade opener runs.</summary>
+	private string? CascadeNote(DateTime runStart)
+	{
+		if (deps.CascadeOpener == null) return null;
+		if (deps.CascadeOpener.LastReadAt == runStart) return "cascade read";
+		return deps.CascadeOpener.SecondsUntilNextRead(DateTime.Now) is { } until ? $"cascade read in {until:0}s" : null;
+	}
+
+	/// <summary>Milliseconds under a tenth of a second, so a run that did nothing reads as that rather than as 0.0s.</summary>
+	private static string FormatTook(TimeSpan took) => took.TotalSeconds < 0.1 ? $"{took.TotalMilliseconds:0} ms" : $"{took.TotalSeconds:0.0}s";
 
 	/// <summary>The 0DTE gate's verdict, printed on every state CHANGE (a 90-minute wait is one line) and once when the day closes; without it a session the gate
 	/// deliberately sits out looks the same as one where nothing scored.</summary>

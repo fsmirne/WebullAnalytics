@@ -11,7 +11,8 @@ namespace WebullAnalytics.Analyze;
 /// <summary>One live cascade reading with the chain it was read from.</summary>
 /// <param name="Spot">The spot the reading was scored at.</param>
 /// <param name="Quotes">The fetched chain (every expiry within the horizon), keyed by OCC symbol.</param>
-internal sealed record CascadeLiveRead(CascadeReading Reading, int ExpiryCount, decimal Spot, IReadOnlyDictionary<string, OptionContractQuote> Quotes);
+/// <param name="Timings">Where a live read spent its time; null for a replayed one.</param>
+internal sealed record CascadeLiveRead(CascadeReading Reading, int ExpiryCount, decimal Spot, IReadOnlyDictionary<string, OptionContractQuote> Quotes, PhaseTimer? Timings = null);
 
 /// <summary>
 /// The live read behind `wa analyze cascade` and the cascade opener of `wa ai watch`: fetch the chain from the quote vendor, load the
@@ -29,7 +30,9 @@ internal static class CascadeLiveReader
 	internal static async Task<(CascadeLiveRead? Read, string? Error)> ReadAsync(Request request, DateTime nowEt, CancellationToken cancellation)
 	{
 		var ticker = request.Ticker.ToUpperInvariant();
+		var timer = new PhaseTimer();
 		var (quotes, vendorSpot, apiConfig, fetchError) = await FetchChainAsync(request, ticker, nowEt, cancellation);
+		timer.Lap("chain");
 		if (quotes == null) return (null, fetchError);
 
 		var spot = request.SpotOverride ?? vendorSpot;
@@ -46,6 +49,7 @@ internal static class CascadeLiveReader
 		var intradayCache = apiConfig != null ? new IntradayBarCache(WebullIntradayBars.CreateFetcher(apiConfig)) : null;
 		// A live read includes the forming minute.
 		var rthBars = await CascadeScreener.LoadSessionRthBarsAsync(ticker, nowEt, intradayCache, includeCurrentBar: true, cancellation);
+		timer.Lap("session bars");
 
 		// Always append a data/iv capture — the volume-pace factor is the difference of consecutive captures.
 		var band = request.StrikeRangePct / 100m;
@@ -58,16 +62,18 @@ internal static class CascadeLiveReader
 			return Math.Abs(parsed.Strike - spot.Value) / spot.Value <= band;
 		});
 		IvDumpStore.Append(ticker, request.VendorName, nowEt, spot.Value, inWindow);
+		timer.Lap("iv capture");
 
 		if (AnalyzeGexCommand.IsOiBlackout(quotes, ticker, nowEt.Date))
 			return (null, $"[yellow]The vendor returned no open interest for any unexpired {Markup.Escape(ticker)} contract (overnight OI blackout — OI is zeroed until the next morning's OCC update), and the terrain is built from OI. Re-run during market hours, or use --date with a captured data/oi snapshot.[/]");
 
-		var read = await CascadeScreener.ReadChainAsync(ticker, spot.Value, nowEt, quotes, request.Dte, band, request.MaxStrikes, request.TriggerScore, rthBars, intradayCache, new HistoricalPriceCache(), new SmileIndexCache(offline: false), request.VendorName, includeCurrentBar: true, cancellation);
+		var read = await CascadeScreener.ReadChainAsync(ticker, spot.Value, nowEt, quotes, request.Dte, band, request.MaxStrikes, request.TriggerScore, rthBars, intradayCache, new HistoricalPriceCache(), new SmileIndexCache(offline: false), request.VendorName, includeCurrentBar: true, cancellation, timer: timer);
 		if (read == null) return (null, $"[yellow]No strikes match within ±{request.StrikeRangePct}% of spot ${spot:F2} for the selected expirations.[/]");
 
 		var (reading, expiryCount) = read.Value;
 		CascadeLog.Append(ticker, request.VendorName, nowEt, nowEt, request.SpotOverride.HasValue, reading);
-		return (new CascadeLiveRead(reading, expiryCount, spot.Value, quotes), null);
+		timer.Lap("reading log");
+		return (new CascadeLiveRead(reading, expiryCount, spot.Value, quotes, timer), null);
 	}
 
 	/// <summary>True when any of <paramref name="symbols"/> is a <paramref name="ticker"/> option expiring on <paramref name="date"/>.</summary>

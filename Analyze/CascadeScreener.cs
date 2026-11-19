@@ -1005,7 +1005,7 @@ internal static class CascadeScreener
 	/// read (the forming minute is real data now); a replay at an instant sees only the bars that closed by it.</summary>
 	internal static async Task<(CascadeReading Reading, int ExpiryCount)?> ReadChainAsync(
 		string ticker, decimal spot, DateTime asOfEt, Dictionary<string, OptionContractQuote> quotes, int dte, decimal strikeRangeFraction, int maxStrikes, int triggerScore,
-		IReadOnlyList<MinuteBar> rthBars, IntradayBarCache? intradayCache, HistoricalPriceCache priceCache, SmileIndexCache smileCache, string vendorName, bool includeCurrentBar, CancellationToken cancellation, CascadeReplayCache? cache = null)
+		IReadOnlyList<MinuteBar> rthBars, IntradayBarCache? intradayCache, HistoricalPriceCache priceCache, SmileIndexCache smileCache, string vendorName, bool includeCurrentBar, CancellationToken cancellation, CascadeReplayCache? cache = null, PhaseTimer? timer = null)
 	{
 		var gexMatrix = GexMatrix.Build(quotes, ticker, spot, asOfEt, expiryFilter: null, strikeRangeFraction, dte, maxStrikes, GreekKind.Gamma);
 		if (gexMatrix.Strikes.Count == 0 || gexMatrix.Expiries.Count == 0) return null;
@@ -1017,8 +1017,11 @@ internal static class CascadeScreener
 			asOfEt,
 			sessionHigh: rthBars.Count > 0 ? rthBars.Max(b => b.High) : null,
 			sessionLow: rthBars.Count > 0 ? rthBars.Min(b => b.Low) : null);
-		var inputs = await BuildInputsAsync(ticker, spot, asOfEt, gexMatrix, priceCache, intradayCache, smileCache, preloadedSessionRthBars: rthBars, vendorName: vendorName, strikeRangeFraction: strikeRangeFraction, includeCurrentBar: includeCurrentBar, cancellation: cancellation, cache: cache);
-		return (Evaluate(terrain, inputs, triggerScore), gexMatrix.Expiries.Count);
+		timer?.Lap("gamma terrain");
+		var inputs = await BuildInputsAsync(ticker, spot, asOfEt, gexMatrix, priceCache, intradayCache, smileCache, preloadedSessionRthBars: rthBars, vendorName: vendorName, strikeRangeFraction: strikeRangeFraction, includeCurrentBar: includeCurrentBar, cancellation: cancellation, cache: cache, timer: timer);
+		var reading = Evaluate(terrain, inputs, triggerScore);
+		timer?.Lap("evaluate");
+		return (reading, gexMatrix.Expiries.Count);
 	}
 
 	// ── Shared Input Builder (CLI + Opener / WatchLoop / BacktestRunner) ───────────────────────────────────
@@ -1042,7 +1045,8 @@ internal static class CascadeScreener
 		decimal strikeRangeFraction = 0.20m,
 		bool includeCurrentBar = true,
 		CancellationToken cancellation = default,
-		CascadeReplayCache? cache = null)
+		CascadeReplayCache? cache = null,
+		PhaseTimer? timer = null)
 	{
 		vendorName ??= LiveQuoteSource.VendorName(LiveQuoteSource.ResolveVendor(null));
 		var date = asOfEt.Date;
@@ -1115,9 +1119,13 @@ internal static class CascadeScreener
 			}
 		}
 
+		timer?.Lap("flow + volume pace");
+
 		// 2. Prior-day ΔOI share
 		var (priorOiDate, priorOi) = cache != null ? cache.PriorOi(ticker, date) : AnalyzeGexCommand.LoadPriorOi(ticker, date);
 		var deltaOiShare = priorOi != null ? GexSqueezeScreener.DeltaOiShare(gexMatrix.Contributors, priorOi) : null;
+
+		timer?.Lap("prior OI");
 
 		// 3. Prior daily closes (ticker, VIX, VIX9D) for PrevClose, VixPriorClose, VIX9D/VIX backwardation, and HV3/HV30
 		decimal? prevClose = preloadedPrevClose;
@@ -1138,6 +1146,7 @@ internal static class CascadeScreener
 			Log.Debug($"CascadeScreener close lookup failed for {ticker}: {ex.Message}");
 		}
 
+		timer?.Lap("daily closes");
 		decimal? vixPriorClose = null;
 		decimal? maxPriorVix9dOverVix = null;
 		try
@@ -1162,6 +1171,7 @@ internal static class CascadeScreener
 			Log.Debug($"CascadeScreener VIX/VIX9D lookup failed: {ex.Message}");
 		}
 
+		timer?.Lap("VIX closes");
 		// 4. Underlying RTH session tape up to asOfEt
 		var rthBars = preloadedSessionRthBars;
 		if (rthBars == null || rthBars.Count == 0)
@@ -1172,6 +1182,7 @@ internal static class CascadeScreener
 		if (tape != null && spot > 0m && Math.Abs(tape.Spot - spot) > 0.01m)
 			tape = tape with { Spot = spot };
 
+		timer?.Lap("session tape");
 		// 5. Intraday VIX open & current up to asOfEt
 		decimal? vixOpen = null, vixNow = null;
 		var vixBars = await LoadSessionRthBarsAsync("VIX", asOfEt, intradayCache, includeCurrentBar, cancellation);
@@ -1181,6 +1192,7 @@ internal static class CascadeScreener
 			vixNow = vixBars[^1].Close;
 		}
 
+		timer?.Lap("VIX bars");
 		// 6. Settled CBOE SMILE index, 1-day change, and stationary 20-day z-score (strictly before `date`)
 		decimal? smileIndex = null, smileChange1d = null, smileZScore20d = null;
 		try
@@ -1193,6 +1205,7 @@ internal static class CascadeScreener
 			Log.Debug($"CascadeScreener SMILE lookup failed: {ex.Message}");
 		}
 
+		timer?.Lap("SMILE index");
 		return new CascadeInputs(
 			FlowShare: flowShare,
 			Volume: volumePace,

@@ -392,6 +392,22 @@ public class CascadeOpenerTests
 	}
 
 	[Fact]
+	public async Task SaysWhenTheNextReadIsDue()
+	{
+		using var h = new Harness { Next = Read(CascadeRegime.Neutral) };
+		var opener = h.Opener();
+		var t0 = Ctx(0);
+		Assert.Null(opener.LastReadAt);
+		Assert.Null(opener.SecondsUntilNextRead(t0.Now));
+		await opener.EvaluateAsync(t0, default);
+		Assert.Equal(t0.Now, opener.LastReadAt);
+		Assert.Equal(40d, opener.SecondsUntilNextRead(t0.Now.AddSeconds(20))!.Value, 3);
+		await opener.EvaluateAsync(t0 with { Now = t0.Now.AddSeconds(20) }, default);   // no read due: the last one stays the last
+		Assert.Equal(t0.Now, opener.LastReadAt);
+		Assert.Equal(0d, opener.SecondsUntilNextRead(t0.Now.AddSeconds(90))!.Value);
+	}
+
+	[Fact]
 	public async Task EachOfTheFourSetupsOpensItsOwnConfiguredTrade()
 	{
 		using var h = new Harness();

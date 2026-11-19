@@ -58,6 +58,12 @@ internal sealed class CascadeOpener
 	/// <summary>Confirmed readings an entry condition held back, with the condition: the backtest's summary counts them.</summary>
 	public List<(CascadeRegime Setup, string Reason)> GatedReadings { get; } = new();
 
+	/// <summary>The instant of the most recent read attempt; null before the first. A run that finds no read due leaves it alone.</summary>
+	public DateTime? LastReadAt => _lastReadAt;
+
+	/// <summary>Seconds until the next read is due at <paramref name="now"/>; null before the first read, zero when one is due.</summary>
+	public double? SecondsUntilNextRead(DateTime now) => _lastReadAt is DateTime last ? Math.Max(0d, _config.Opener.Cascade.ReadSeconds - (now - last).TotalSeconds) : null;
+
 	/// <summary>The vendor-reported spot of the most recent reading; null before the first one.</summary>
 	public decimal? LastSpot { get; private set; }
 
@@ -83,6 +89,8 @@ internal sealed class CascadeOpener
 		}
 		LastQuotes = read.Quotes;
 		LastSpot = read.Spot;
+		// A read is the slow part of a run; say where its time went so a slow one is explained, not just felt.
+		if (!_quiet && read.Timings != null) AnsiConsole.MarkupLine($"[dim]cascade read {read.Timings.Total.TotalSeconds:0.0}s: {Markup.Escape(read.Timings.ToString())}[/]");
 
 		var reading = read.Reading;
 		var ticker = _config.Ticker;
