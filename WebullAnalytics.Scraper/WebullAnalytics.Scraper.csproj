@@ -26,4 +26,13 @@
 		<ProjectReference Include="..\WebullAnalytics.csproj" />
 	</ItemGroup>
 
+	<!-- WebullAnalytics.csproj is an Exe, so its ProjectReference flows wa.runtimeconfig.json into publish.
+	     The single-file bundler ignores secondary *.runtimeconfig.json files (wa-scraper has its own) and emits
+	     NETSDK1236 on .NET 11 SDK; drop it from ResolvedFileToPublish before bundling. -->
+	<Target Name="_StripReferencedExeRuntimeConfig" AfterTargets="ComputeFilesToPublish" BeforeTargets="_ComputeFilesToBundle">
+		<ItemGroup>
+			<ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'wa.runtimeconfig.json'" />
+		</ItemGroup>
+	</Target>
+
 </Project>
