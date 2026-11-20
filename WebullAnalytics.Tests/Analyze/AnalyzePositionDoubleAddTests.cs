@@ -70,7 +70,7 @@ public class AnalyzePositionDoubleAddTests
 	}
 
 	[Fact]
-	public void GenerateScenarios_FlagsExactlyOneBestDoubleAddAndReportsIncrementalEvReturn()
+	public void GenerateScenarios_ReportsExpectedProfitAndFlagsAtMostOneBestDoubleAdd()
 	{
 		var settings = new AnalyzePositionSettings { IvDefault = 40m, StrikeStep = 0.50m };
 		var scenarios = AnalyzePositionCommand.GenerateScenarios(
@@ -78,9 +78,21 @@ public class AnalyzePositionDoubleAddTests
 
 		var doubleAdds = scenarios.Where(s => s.Name.Contains("double ", StringComparison.Ordinal)).ToList();
 		Assert.Equal(2, doubleAdds.Count);
-		Assert.All(doubleAdds, a => Assert.Contains("incremental EV return", a.Rationale, StringComparison.Ordinal));
-		Assert.Single(doubleAdds, a => a.Rationale.Contains("best add", StringComparison.Ordinal));
+		Assert.All(doubleAdds, a => Assert.Contains("expected profit", a.Rationale, StringComparison.Ordinal));
+		// The best add is starred only when it is expected to make money, so there is at most one.
+		var best = doubleAdds.Where(a => a.Rationale.Contains("best add", StringComparison.Ordinal)).ToList();
+		Assert.True(best.Count <= 1);
+		Assert.All(best, a => Assert.DoesNotContain("expected profit -", a.Rationale, StringComparison.Ordinal));
 	}
+
+	[Theory]
+	// The 2026-11-20 SPY 731/732 diagonal scale-up: expected value $5.24 for a $5.015 debit is +4.5%, not the 104% value/cost once shown.
+	[InlineData(5.24, 5.015, 501.5, 0.0449)]
+	[InlineData(5.00, 5.00, 500, 0)]
+	[InlineData(4.00, 5.00, 500, -0.2)]
+	[InlineData(4.00, 5.00, 0, 0)]
+	public void ExpectedProfitReturn_IsProfitPerAddedDollar_ZeroAtBreakEven(decimal ev, decimal debit, decimal margin, decimal expected)
+		=> Assert.Equal(expected, Math.Round(AnalyzePositionCommand.ExpectedProfitReturn(ev, debit, margin), 4));
 
 	[Fact]
 	public void GenerateScenarios_PopulatesEvOnHoldAndAdds()

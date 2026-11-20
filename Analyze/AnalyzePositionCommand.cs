@@ -1559,8 +1559,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// Legs are priced live where the chain has a quote, Black-Scholes otherwise (flagged "estimated").
 		// IMPORTANT: this is NOT free return for the same risk — the added side is its own debit, so it
 		// roughly doubles capital at risk and adds two more legs of slippage. What it buys is a wider, more
-		// neutral profit tent. Each add reports its incremental return per added-margin so the trade-off is
-		// explicit, and the most capital-efficient add is flagged ★.
+		// neutral profit tent. Each add reports its expected profit per added dollar so the trade-off is
+		// explicit, and the most capital-efficient add is flagged ★ when that profit is positive.
 		{
 			var oppCp = callPut == "C" ? "P" : "C";
 			var addShortExp = shortLeg.Parsed.ExpiryDate;
@@ -1626,18 +1626,18 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var evNewPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, newLegsForEv, origShortExp, asOf, spot, ivNewShort, dividends);
 				var newMargin = Math.Max(-cashPerShare, 0m) * 100m;           // long debit spread: margin = debit paid
 				var estimated = !Quoted(newShortSym) || !Quoted(newLongSym);
-				var efficiency = newMargin > 0m ? evNewPerShare * 100m / newMargin : 0m; // EV return per added $ of risk
+				var efficiency = ExpectedProfitReturn(evNewPerShare, -cashPerShare, newMargin);
 				pending.Add((variant, longStrike, newLongSym, newLongMidExec, cashPerShare, newPositionValuePerShare, evNewPerShare, newMargin, estimated, efficiency));
 			}
 
 			var bestEfficiency = pending.Count > 0 ? pending.Max(x => x.efficiency) : 0m;
 			foreach (var a in pending)
 			{
-				var isBest = pending.Count > 1 && a.efficiency == bestEfficiency && a.efficiency > 0m;
+				var isBest = pending.Count > 1 && a.efficiency == bestEfficiency && a.efficiency > 0m; // > 0 = the add is expected to make money
 				var est = a.estimated ? " [estimated]" : "";
 				var strikeDesc = a.variant == "double calendar" ? $"${oppShortStrike:F2}" : $"${oppShortStrike:F2}/${a.longStrike:F2}";
-				var effPct = a.newMargin > 0m ? $"{a.efficiency * 100m:F0}% on added ${a.newMargin:N0}" : "n/a";
-				var bestNote = isBest ? " — best add (highest EV return on added capital)" : "";
+				var effPct = FormatExpectedProfitReturn(a.evNewPerShare, -a.cashPerShare, a.newMargin, a.efficiency);
+				var bestNote = isBest ? " — best add (highest expected profit on added capital)" : "";
 				EmitAdd(list, legs, settings.Cash,
 					name: $"Add {sideLabel} {strikeDesc} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({a.variant}, keep existing){est}",
 					newShortSym: newShortSym,
@@ -1649,7 +1649,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					marginPerContract: a.newMargin,
 					daysToTarget: origShortDte,
-					rationale: $"add a {sideLabel} {a.variant.Split(' ')[1]} at {strikeDesc} (debit ${-a.cashPerShare:F2}/share, +2 legs of slippage){(a.estimated ? ", BS-estimated (leg not live-quoted)" : "")}; new spread EV ${a.evNewPerShare:F2}/share (pinned ${a.newPositionValuePerShare:F2}); incremental EV return {effPct}{bestNote}",
+					rationale: $"add a {sideLabel} {a.variant.Split(' ')[1]} at {strikeDesc} (debit ${-a.cashPerShare:F2}/share at mid, 2 legs of slippage not deducted){(a.estimated ? ", BS-estimated (leg not live-quoted)" : "")}; new spread expected value ${a.evNewPerShare:F2}/share (pinned ${a.newPositionValuePerShare:F2}); {effPct}{bestNote}",
 					expectedUnchangedPerShare: holdEvPerShare,
 					expectedNewPerShare: a.evNewPerShare);
 			}
@@ -1661,7 +1661,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (scaleUpDebit > 0m)
 			{
 				var scaleUpMargin = scaleUpDebit * 100m;
-				var scaleUpEff = scaleUpMargin > 0m ? holdEvPerShare * 100m / scaleUpMargin : 0m;
+				var scaleUpEff = ExpectedProfitReturn(holdEvPerShare, scaleUpDebit, scaleUpMargin);
 				EmitAdd(list, legs, settings.Cash,
 					name: $"Add 1x more of existing {(callPut == "C" ? "call" : "put")} {(shortLeg.Parsed.Strike == longLeg.Parsed.Strike ? "calendar" : "diagonal")} (scale up, keep existing)",
 					newShortSym: shortLeg.Symbol,
@@ -1673,7 +1673,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					marginPerContract: scaleUpMargin,
 					daysToTarget: origShortDte,
-					rationale: $"open one more of the SAME structure at current mid (debit ${scaleUpDebit:F2}/share); same payoff → new spread EV ${holdEvPerShare:F2}/share; incremental EV return {(scaleUpMargin > 0m ? $"{scaleUpEff * 100m:F0}% on added ${scaleUpMargin:N0}" : "n/a")} — baseline the doubles must beat",
+					rationale: $"open one more of the SAME structure at current mid (debit ${scaleUpDebit:F2}/share, 2 legs of slippage not deducted); same payoff → new spread expected value ${holdEvPerShare:F2}/share; {FormatExpectedProfitReturn(holdEvPerShare, scaleUpDebit, scaleUpMargin, scaleUpEff)} — baseline the doubles must beat",
 					expectedUnchangedPerShare: holdEvPerShare,
 					expectedNewPerShare: holdEvPerShare);
 			}
@@ -1681,6 +1681,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
 	}
+
+	/// <summary>An add's expected profit per added dollar of margin: (expected value at the target − debit paid) × 100 / margin, so 0 is
+	/// break-even. Not expected value / margin, which reads 100% at break-even. 0 when no margin is added.</summary>
+	internal static decimal ExpectedProfitReturn(decimal expectedValuePerShare, decimal debitPerShare, decimal marginPerContract) =>
+		marginPerContract > 0m ? (expectedValuePerShare - debitPerShare) * 100m / marginPerContract : 0m;
+
+	/// <summary>"expected profit $X/share (Y% on added $Z)", or "expected profit n/a" when no margin is added.</summary>
+	private static string FormatExpectedProfitReturn(decimal expectedValuePerShare, decimal debitPerShare, decimal marginPerContract, decimal efficiency) =>
+		marginPerContract > 0m ? $"expected profit {expectedValuePerShare - debitPerShare:+$0.00;-$0.00}/share ({efficiency * 100m:+0.0;-0.0}% on added ${marginPerContract:N0})" : "expected profit n/a";
 
 	/// <summary>Appends an "add new position alongside existing" scenario. Existing untouched;
 	/// new position adds margin and debit. Combined projection = existing hold + new position value at target.
