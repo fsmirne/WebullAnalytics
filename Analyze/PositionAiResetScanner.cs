@@ -98,64 +98,34 @@ internal static class PositionAiResetScanner
 		var closePnLTotal = closePnLPerContract * origQty;
 		var closeProceedsTotal = closeNetPerShare * 100m * origQty;
 
-		// 1. Unified opener scoring for Hold and ALL Roll scenarios (both full and partial — same scorer as `analyze roll` / `analyze risk`).
+		// 1. Every scenario that says what it leaves held (its Book) is re-valued on the unified opener scorer — the same one `analyze roll` and
+		// `wa ai scan` use — so Hold, Close, Rolls and Adds are ranked on one model: the P&L of marking everything to mid now, plus the scorer's
+		// forward EV of each structure still held. Without this the adds kept the lognormal EV while Hold and Rolls had the scorer's, and the
+		// gap between the two models' value of the SAME existing lots ranked an add above Hold (2026-11-20: +$2.8k of model mismatch).
+		var scanCfg = PrepareResetScanConfig(aiCfg, ticker);
+		var perOrderFriction = RealizedExpectancy.FrictionPerOrderContract(scanCfg.Opener.RealizedExpectancy);
 		var scoringInputs = await AnalyzeRiskCommand.LoadOpenerScoringInputsAsync(ticker, asOf, includeCurrentBar: !EvaluationDate.IsPast, intradayCache, cancellation);
-		var holdScored = ScoreLegs(positionLegs, quotes, spot, asOf, quoteAsOf, scoringInputs, settings.IvDefault, useMarketImpliedIv);
-		decimal? holdForwardEvPerContract = holdScored?.ManagedExpectedValuePerContract ?? holdScored?.ExpectedValuePerContract;
+		var scoreCache = new Dictionary<string, AI.RiskDiagnostics.RiskDiagnosticOpenerScore?>(StringComparer.Ordinal);
+		var existingSymbols = positionLegs.Select(l => l.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
 		var updated = new List<AnalyzePositionCommand.Scenario>(scenarios.Count);
-
+		var oppositeSideAdds = new List<(int Index, decimal Return)>();
 		foreach (var sc in scenarios)
 		{
 			// Drop naive hardcoded "Reset to $X calendar" — replaced by real AI scan reset proposals below.
 			if (sc.Name.StartsWith("Reset to ", StringComparison.Ordinal))
 				continue;
-
-			if (sc.ActionSummary == "—")
-			{
-				if (holdForwardEvPerContract.HasValue)
-				{
-					updated.Add(sc with
-					{
-						ExpectedPnLPerContract = closePnLPerContract + holdForwardEvPerContract.Value,
-						ProbabilityOfProfit = holdScored!.ProbabilityOfProfit
-					});
-					continue;
-				}
-			}
-			else if (sc.IsRoll)
-			{
-				// 2-leg roll (full OR partial): reconstruct resulting legs (static long + new rolled short) and score.
-				var (newShortSym, rolledQty) = ExtractRolledNewShort(sc.ActionSummary, shortLeg.Symbol, origQty);
-				if (newShortSym != null && ParsingHelpers.ParseOptionSymbol(newShortSym) is { } newShortParsed && quotes.ContainsKey(newShortSym))
-				{
-					var newShortMid = MidOf(quotes, newShortSym) ?? 0m;
-					var postRollLegs = new List<AnalyzePositionCommand.PositionSnapshot>
-					{
-						new(longLeg.Symbol, LegAction.Buy, rolledQty, longMidNow, longLeg.Parsed),
-						new(newShortSym, LegAction.Sell, rolledQty, newShortMid, newShortParsed)
-					};
-					var scored = ScoreLegs(postRollLegs, quotes, spot, asOf, quoteAsOf, scoringInputs, settings.IvDefault, useMarketImpliedIv);
-					if (scored != null && (scored.ManagedExpectedValuePerContract ?? scored.ExpectedValuePerContract) is decimal rollForwardEvPerContract)
-					{
-						var unchangedQty = Math.Max(0, origQty - rolledQty);
-						var totalForwardEv = rollForwardEvPerContract * rolledQty + (holdForwardEvPerContract ?? 0m) * unchangedQty;
-						var campaignEvPerContract = closePnLPerContract + totalForwardEv / origQty;
-						updated.Add(sc with
-						{
-							ExpectedPnLPerContract = campaignEvPerContract,
-							ProbabilityOfProfit = rolledQty == origQty ? scored.ProbabilityOfProfit : sc.ProbabilityOfProfit
-						});
-						continue;
-					}
-				}
-			}
-
-			updated.Add(sc);
+			if (sc.Book == null) { updated.Add(sc); continue; }
+			var (revalued, addedReturn) = Revalue(sc, origQty, closePnLPerContract, perOrderFriction, s => ScoreCached(scoreCache, s.Legs, quotes, spot, asOf, quoteAsOf, scoringInputs, settings.IvDefault, useMarketImpliedIv));
+			// The scale-up adds the existing structure again: it is the baseline the opposite-side adds are judged against, not a candidate.
+			if (addedReturn is decimal r && sc.Book.Any(b => b.Label == "added" && !b.Legs.All(l => existingSymbols.Contains(l.Symbol))))
+				oppositeSideAdds.Add((updated.Count, r));
+			updated.Add(revalued);
 		}
+		FlagBestAdd(updated, oppositeSideAdds);
 
 		// 2. Run OpenCandidateEvaluator (in-memory, zero extra network calls) to find the best AI scan reset(s).
 		var resetScenarios = await BuildAiScanResetScenariosAsync(
-			aiCfg, ticker, shortLeg, longLeg, shortMidNow, longMidNow, closeNetPerShare, closePnLTotal, closeProceedsTotal,
+			scanCfg, perOrderFriction, ticker, shortLeg, longLeg, shortMidNow, longMidNow, closeNetPerShare, closePnLTotal, closeProceedsTotal,
 			origQty, initialDebitPerShare, settings, spot, asOf, quotes, priceCache, cancellation);
 
 		updated.AddRange(resetScenarios);
@@ -163,7 +133,8 @@ internal static class PositionAiResetScanner
 	}
 
 	private static async Task<List<AnalyzePositionCommand.Scenario>> BuildAiScanResetScenariosAsync(
-		AIConfig aiCfg,
+		AIConfig scanCfg,
+		decimal perOrderFriction,
 		string ticker,
 		AnalyzePositionCommand.PositionSnapshot shortLeg,
 		AnalyzePositionCommand.PositionSnapshot longLeg,
@@ -184,7 +155,6 @@ internal static class PositionAiResetScanner
 		var results = new List<AnalyzePositionCommand.Scenario>();
 		try
 		{
-			var scanCfg = PrepareResetScanConfig(aiCfg, ticker);
 			var underlyings = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { [ticker] = spot };
 			var quoteSource = new StaticQuoteSource(quotes, underlyings);
 
@@ -230,7 +200,8 @@ internal static class PositionAiResetScanner
 				var openDebitOrCreditTotal = prop.DebitOrCreditPerContract * propQty; // negative = debit paid
 				var netCashTotal = closeProceedsTotal + openDebitOrCreditTotal;
 				var forwardEvPerContract = prop.RealizedExpectedValuePerContract ?? prop.ExpectedValuePerContract;
-				var campaignEvTotal = closePnLTotal + forwardEvPerContract * propQty;
+				// The scorer's EV already pays the new structure's own crossings; closing the existing one is a further order now.
+				var campaignEvTotal = closePnLTotal + forwardEvPerContract * propQty - perOrderFriction * origQty;
 				var newMarginTotal = EstimateProposalMarginTotal(prop, propQty, spot, quotes);
 				var marginDeltaTotal = newMarginTotal - currentMarginTotal;
 
@@ -277,6 +248,85 @@ internal static class PositionAiResetScanner
 		return results;
 	}
 
+	/// <summary><paramref name="sc"/> valued on the opener scorer: the P&amp;L of closing everything at mid now plus each held structure's forward EV
+	/// (managed when the scorer models exits) times its contracts. A structure the scorer cannot value leaves the scenario without an EV.</summary>
+	/// <returns>The scenario, and for an add with margin, the added structure's expected profit per added dollar.</returns>
+	/// <param name="perOrderFriction">One broker order's friction per contract (<see cref="RealizedExpectancy.FrictionPerOrderContract"/>). The scorer
+	/// charges every structure it values the friction of its whole life, as if opened now, opening order included; a scenario instead pays for
+	/// the orders it places now (<see cref="AnalyzePositionCommand.Scenario.OrderContractsNow"/>). So each held structure's opening order is refunded
+	/// and the orders placed now are charged: Close all pays its closing order, Hold pays nothing now, and an add pays its one opening order.</param>
+	internal static (AnalyzePositionCommand.Scenario Scenario, decimal? AddedReturn) Revalue(
+		AnalyzePositionCommand.Scenario sc,
+		int origQty,
+		decimal closePnLPerContract,
+		decimal perOrderFriction,
+		Func<AnalyzePositionCommand.BookStructure, AI.RiskDiagnostics.RiskDiagnosticOpenerScore?> score)
+	{
+		var book = sc.Book!;
+		var chargedNow = perOrderFriction * sc.OrderContractsNow;
+		if (book.Count == 0) return (sc with { ExpectedPnLPerContract = closePnLPerContract - chargedNow / origQty, EvNote = chargedNow > 0m ? $"trading costs {Signed(-chargedNow)} (closing order)" : null }, null);
+
+		var parts = new List<(AnalyzePositionCommand.BookStructure Structure, decimal EvPerContract, decimal? Pop, int Orders)>();
+		foreach (var structure in book.Where(b => b.Qty > 0))
+		{
+			var scored = score(structure);
+			if ((scored?.ManagedExpectedValuePerContract ?? scored?.ExpectedValuePerContract) is not decimal ev)
+				return (sc with { ExpectedPnLPerContract = null, ProbabilityOfProfit = null, EvNote = $"the opener scorer could not value the {structure.Label} structure, so no EV" }, null);
+			parts.Add((structure, ev, scored!.ProbabilityOfProfit, OrdersOf(scored)));
+		}
+
+		var refunded = perOrderFriction * parts.Sum(p => p.Orders * p.Structure.Qty);
+		var forwardTotal = parts.Sum(p => p.EvPerContract * p.Structure.Qty) + refunded - chargedNow;
+		var note = "opener scorer EV from now: " + string.Join(", ", parts.Select(p => $"{p.Structure.Label} {Signed(p.EvPerContract)}/contract × {p.Structure.Qty}"));
+		if (refunded != chargedNow) note += $"; trading costs {Signed(refunded - chargedNow)} (orders now vs. the scorer's opening order per structure)";
+		decimal? addedReturn = null;
+		if (parts.FirstOrDefault(p => p.Structure.Label == "added") is { Structure: not null } added)
+		{
+			var addedTotal = added.EvPerContract * added.Structure.Qty;
+			var addedMargin = sc.MarginDeltaPerContract * sc.Qty;
+			if (addedMargin > 0m) addedReturn = addedTotal / addedMargin;
+			note += $"; expected profit on the add {Signed(addedTotal)}" + (addedReturn is decimal r ? $" ({r * 100m:+0.0;-0.0}% on added ${addedMargin:N0})" : "");
+		}
+		// A probability of profit only describes the scenario when one structure carries every contract.
+		var pop = parts.Count == 1 && parts[0].Structure.Qty == origQty ? parts[0].Pop : null;
+		return (sc with { ExpectedPnLPerContract = closePnLPerContract + forwardTotal / origQty, ProbabilityOfProfit = pop ?? sc.ProbabilityOfProfit, EvNote = note }, addedReturn);
+	}
+
+	/// <summary>Marks the opposite-side add (double calendar/diagonal) expected to make the most per added dollar, when there is a choice and that
+	/// return is positive. Full and partial sizes of one add share its return, so both carry the mark.</summary>
+	internal static void FlagBestAdd(List<AnalyzePositionCommand.Scenario> scenarios, IReadOnlyList<(int Index, decimal Return)> adds)
+	{
+		if (adds.Count < 2) return;
+		var best = adds.Max(a => a.Return);
+		if (best <= 0m) return;
+		foreach (var (index, _) in adds.Where(a => a.Return == best))
+			scenarios[index] = scenarios[index] with { EvNote = $"{scenarios[index].EvNote} — best add (highest expected profit on added capital)" };
+	}
+
+	/// <summary>Broker orders the scored structure takes to open; 1 when its kind is not recognized.</summary>
+	private static int OrdersOf(AI.RiskDiagnostics.RiskDiagnosticOpenerScore scored) =>
+		Enum.TryParse<OpenStructureKind>(scored.Structure, out var kind) ? RealizedExpectancy.OrdersForStructure(kind) : 1;
+
+	private static string Signed(decimal dollars) => dollars >= 0m ? $"+${dollars:N2}" : $"-${Math.Abs(dollars):N2}";
+
+	/// <summary><see cref="ScoreLegs"/> once per distinct structure: Hold, the scale-up and every partial share the existing legs' score.</summary>
+	private static AI.RiskDiagnostics.RiskDiagnosticOpenerScore? ScoreCached(
+		Dictionary<string, AI.RiskDiagnostics.RiskDiagnosticOpenerScore?> cache,
+		IReadOnlyList<AnalyzePositionCommand.PositionSnapshot> legs,
+		IReadOnlyDictionary<string, OptionContractQuote> quotes,
+		decimal spot,
+		DateTime asOf,
+		DateTime quoteAsOf,
+		AnalyzeRiskCommand.OpenerScoringInputs scoringInputs,
+		decimal ivDefault,
+		bool useMarketImpliedIv)
+	{
+		var key = string.Join("|", legs.Select(l => $"{l.Action}:{l.Symbol}").Order(StringComparer.Ordinal));
+		if (!cache.TryGetValue(key, out var scored))
+			cache[key] = scored = ScoreLegs(legs, quotes, spot, asOf, quoteAsOf, scoringInputs, ivDefault, useMarketImpliedIv);
+		return scored;
+	}
+
 	private static AI.RiskDiagnostics.RiskDiagnosticOpenerScore? ScoreLegs(
 		IReadOnlyList<AnalyzePositionCommand.PositionSnapshot> legs,
 		IReadOnlyDictionary<string, OptionContractQuote> quotes,
@@ -289,23 +339,6 @@ internal static class PositionAiResetScanner
 	{
 		var diagLegs = AnalyzeRiskCommand.BuildDiagnosticLegs(legs, quotes, spot, asOf, ivDefault);
 		return AnalyzeRiskCommand.BuildProbe(diagLegs, spot, asOf, quoteAsOf, quotes, scoringInputs, ivDefault, scoreAtCostBasis: false, useMarketImpliedIv).OpenerScore;
-	}
-
-	private static (string? Symbol, int Qty) ExtractRolledNewShort(string actionSummary, string oldShortSymbol, int defaultQty)
-	{
-		foreach (var part in actionSummary.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-		{
-			var tokens = part.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-			if (tokens.Length >= 3 && tokens[0].Equals("SELL", StringComparison.OrdinalIgnoreCase)
-				&& !tokens[1].Equals(oldShortSymbol, StringComparison.OrdinalIgnoreCase))
-			{
-				var qty = int.TryParse(tokens[2].TrimStart('x'), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedQty) && parsedQty > 0
-					? parsedQty
-					: defaultQty;
-				return (tokens[1], qty);
-			}
-		}
-		return (null, defaultQty);
 	}
 
 	private static decimal EstimateProposalMarginTotal(OpenProposal prop, int qty, decimal spot, IReadOnlyDictionary<string, OptionContractQuote> quotes)

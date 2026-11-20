@@ -78,11 +78,11 @@ public class AnalyzePositionDoubleAddTests
 
 		var doubleAdds = scenarios.Where(s => s.Name.Contains("double ", StringComparison.Ordinal)).ToList();
 		Assert.Equal(2, doubleAdds.Count);
-		Assert.All(doubleAdds, a => Assert.Contains("expected profit", a.Rationale, StringComparison.Ordinal));
+		Assert.All(doubleAdds, a => Assert.Contains("expected profit", a.DisplayRationale, StringComparison.Ordinal));
 		// The best add is starred only when it is expected to make money, so there is at most one.
-		var best = doubleAdds.Where(a => a.Rationale.Contains("best add", StringComparison.Ordinal)).ToList();
+		var best = doubleAdds.Where(a => a.DisplayRationale.Contains("best add", StringComparison.Ordinal)).ToList();
 		Assert.True(best.Count <= 1);
-		Assert.All(best, a => Assert.DoesNotContain("expected profit -", a.Rationale, StringComparison.Ordinal));
+		Assert.All(best, a => Assert.DoesNotContain("expected profit -", a.DisplayRationale, StringComparison.Ordinal));
 	}
 
 	[Fact]
@@ -97,8 +97,8 @@ public class AnalyzePositionDoubleAddTests
 		var scenarios = AnalyzePositionCommand.GenerateScenarios(legs, AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, AsOf, Chain());
 		var partials = scenarios.Where(s => s.Name.Contains("double ", StringComparison.Ordinal) && s.Name.Contains("· partial", StringComparison.Ordinal)).ToList();
 		Assert.NotEmpty(partials);
-		Assert.All(partials, p => Assert.Contains("expected profit", p.Rationale, StringComparison.Ordinal));
-		Assert.All(partials, p => Assert.Contains("full size would need", p.Rationale, StringComparison.Ordinal));
+		Assert.All(partials, p => Assert.Contains("expected profit", p.DisplayRationale, StringComparison.Ordinal));
+		Assert.All(partials, p => Assert.Contains("full size would need", p.DisplayRationale, StringComparison.Ordinal));
 	}
 
 	[Theory]
@@ -133,7 +133,7 @@ public class AnalyzePositionDoubleAddTests
 
 		var scaleUp = Assert.Single(scenarios, s => s.Name.Contains("scale up", StringComparison.Ordinal));
 		Assert.NotNull(scaleUp.ExpectedPnLPerContract);
-		Assert.Contains("baseline the doubles must beat", scaleUp.Rationale, StringComparison.Ordinal);
+		Assert.Contains("baseline the doubles must beat", scaleUp.DisplayRationale, StringComparison.Ordinal);
 	}
 
 	[Fact]

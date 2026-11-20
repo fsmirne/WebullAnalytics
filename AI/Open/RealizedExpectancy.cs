@@ -21,11 +21,12 @@ internal static class RealizedExpectancy
 	/// ordersForStructure × 100</c>. The backtest deducts this on each fill (open / close / roll) so
 	/// realized cash flow matches the friction-aware EV the scorer used to rank the trade.
 	/// Roundtrips is irrelevant here — each fill represents exactly one execution.</summary>
-	public static decimal ComputeFrictionPerOrderPerContract(OpenerRealizedExpectancyConfig cfg, OpenStructureKind structureKind)
-	{
-		if (!cfg.Enabled || cfg.SlippagePerSharePerOrder <= 0m) return 0m;
-		return cfg.SlippagePerSharePerOrder * OrdersForStructure(structureKind) * 100m;
-	}
+	public static decimal ComputeFrictionPerOrderPerContract(OpenerRealizedExpectancyConfig cfg, OpenStructureKind structureKind) =>
+		FrictionPerOrderContract(cfg) * OrdersForStructure(structureKind);
+
+	/// <summary>One broker order's friction per contract: <c>slippagePerSharePerOrder × 100</c>, 0 when the feature is off.</summary>
+	public static decimal FrictionPerOrderContract(OpenerRealizedExpectancyConfig cfg) =>
+		cfg.Enabled && cfg.SlippagePerSharePerOrder > 0m ? cfg.SlippagePerSharePerOrder * 100m : 0m;
 
 	/// <summary>Number of independent broker orders required to enter <paramref name="kind"/>.
 	/// Double calendar/diagonal and the diagonal-from-verticals need 2 orders on Webull (the broker

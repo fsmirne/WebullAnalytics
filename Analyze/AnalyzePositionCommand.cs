@@ -355,15 +355,17 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			sentiment: sentiment,
 			events: positionEvents);
 
-		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias, dividends);
-		if (aiCfg != null && quotes != null && !settings.Theoretical)
+		// When the opener scorer will re-value the scenarios, every swept roll is kept for it and the shortlist is chosen afterwards on its EV.
+		var rescore = aiCfg != null && quotes != null && !settings.Theoretical;
+		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias, dividends, shortlistRolls: !rescore);
+		if (rescore)
 		{
 			var asOfNow = asOfMarket?.Instant ?? DateTime.Now;
 			var quoteAsOf = asOfMarket?.Instant ?? OptionMath.ObservationInstant();
 			scenarios = await PositionAiResetScanner.ApplyAsync(
-				scenarios, positionLegs, structure, settings, aiCfg, spot.Value,
-				asOfNow, quoteAsOf, quotes, priceCache, intradayCache, !hasSpotOverride, cancellation);
-			scenarios = OrderScenariosForDisplay(scenarios, settings.Cash, settings.Risk);
+				scenarios, positionLegs, structure, settings, aiCfg!, spot.Value,
+				asOfNow, quoteAsOf, quotes!, priceCache, intradayCache, !hasSpotOverride, cancellation);
+			scenarios = OrderScenariosForDisplay(ShortlistSweptRolls(scenarios, settings.Cash, settings.Risk), settings.Cash, settings.Risk);
 		}
 
 		var toText = settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase);
@@ -445,6 +447,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	// ─── Input model ──────────────────────────────────────────────────────────
 
 	internal sealed record PositionSnapshot(string Symbol, LegAction Action, int Qty, decimal CostBasis, OptionParsed Parsed);
+
+	/// <summary>One structure held after a scenario: its legs for one contract (Qty 1) and how many contracts of it. The opener scorer values it
+	/// at the live market, from now; a leg's CostBasis is only the price it was opened or would be opened at. <paramref name="Label"/> names its
+	/// role in the scenario's EV note: "existing", "rolled", "long only" or "added".</summary>
+	internal sealed record BookStructure(string Label, IReadOnlyList<PositionSnapshot> Legs, int Qty);
 
 	internal enum StructureKind { SingleLong, SingleShort, Calendar, Diagonal, Vertical, IronButterfly, IronCondor, Condor, DoubleCalendar, DoubleDiagonal, Unsupported }
 
@@ -681,8 +688,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal AssignmentPenaltyPerContract = 0m,	// per-contract assignment-risk charge (verticals only); subtracted in the risk-adjusted rank.
 		decimal PeakCashPerContract = 0m,			// up-front cash of the FIRST order when the scenario executes as sequential single-leg orders (non-calendar rolls: the buy-to-close cost) — the sell credit isn't available until that order fills. 0 when one net-priced combo covers the whole change.
 		IReadOnlyList<decimal>? BreakEvens = null,	// campaign break-even spot price(s) at this scenario's target expiry (null for Close all or unsupported shapes).
-		decimal? ProbabilityOfProfit = null)		// probability of profit [0, 1] from the opener scorer when available.
+		decimal? ProbabilityOfProfit = null,		// probability of profit [0, 1] from the opener scorer when available.
+		IReadOnlyList<BookStructure>? Book = null,	// the structures held after the scenario (empty = flat); lets the opener scorer value every scenario on one model. Null when not modeled.
+		string? EvNote = null,						// how ExpectedPnLPerContract was reached, shown after Rationale; replaced when the opener scorer re-values the scenario.
+		decimal OrderContractsNow = 0m,				// broker orders the scenario places now × the contracts each covers (Close all on 22 lots = 22; a two-order roll on 7 = 14). Prices its friction.
+		bool SweptRoll = false)						// one of the swept roll candidates, shortlisted by ShortlistSweptRolls once every candidate has its EV.
 	{
+		/// <summary>The rationale as displayed: the scenario's description, then how its EV was reached.</summary>
+		public string DisplayRationale => string.IsNullOrEmpty(EvNote) ? Rationale : $"{Rationale}; {EvNote}";
+
 		/// <summary>Per-contract buying power the scenario actually consumes. Margin delta alone is wrong for
 		/// rolls: a roll can be margin-neutral yet cost a large cash debit, and a split (two-order) roll must
 		/// fund its buy-to-close leg in full before the sell credit lands.</summary>
@@ -761,12 +775,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		List<PositionSnapshot> legs, StructureKind kind,
 		AnalyzePositionSettings settings, decimal spot, DateTime asOf,
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes,
-		decimal technicalBias = 0m, IReadOnlyList<DividendEvent>? dividends = null) =>
+		decimal technicalBias = 0m, IReadOnlyList<DividendEvent>? dividends = null, bool shortlistRolls = true) =>
 		kind switch
 		{
 			StructureKind.SingleLong => GenerateSingleLongScenarios(legs[0], settings, spot, asOf, quotes, dividends),
 			StructureKind.Vertical => GenerateVerticalScenarios(legs, settings, spot, asOf, quotes, technicalBias, dividends),
-			StructureKind.Calendar or StructureKind.Diagonal => GenerateSpreadScenarios(legs, settings, spot, asOf, kind, quotes, dividends),
+			StructureKind.Calendar or StructureKind.Diagonal => GenerateSpreadScenarios(legs, settings, spot, asOf, kind, quotes, dividends, shortlistRolls),
 			StructureKind.IronButterfly or StructureKind.IronCondor => GenerateIronScenarios(legs, settings, spot, asOf, quotes, dividends),
 			StructureKind.Condor => GenerateCondorScenarios(legs, settings, spot, asOf, quotes, dividends),
 			StructureKind.DoubleCalendar or StructureKind.DoubleDiagonal => GenerateDoubleSpreadScenarios(legs, settings, spot, asOf, kind, quotes, dividends),
@@ -1186,7 +1200,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				unchangedProjectedPerShare: holdNetPerShare,
 				marginPerContract: marginDelta,
 				daysToTarget: expiryDte,
-				rationale: $"add the opposite-side {wingLabel} wing at the same expiry; combined iron condor stays within current width collateral, so additional margin is ${marginDelta:N0}. At expiry: existing ${holdNetPerShare:F2} + new ${newPositionValuePerShare:F2} = ${holdNetPerShare + newPositionValuePerShare:F2}/share");
+				rationale: $"add the opposite-side {wingLabel} wing at the same expiry; combined iron condor stays within current width collateral, so additional margin is ${marginDelta:N0}. At expiry: existing ${holdNetPerShare:F2} + new ${newPositionValuePerShare:F2} = ${holdNetPerShare + newPositionValuePerShare:F2}/share",
+				addedLegs: [UnitLeg(newShortSym, LegAction.Sell, newShortMidExec, newShortParsed), UnitLeg(newLongSym, LegAction.Buy, newLongMidExec, newLongParsed)]);
 		}
 
 		var newExpiry = NextWeekly(expiry);
@@ -1234,7 +1249,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			.ToList(), settings.Cash, settings.Risk);
 	}
 
-	private static List<Scenario> GenerateSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? dividends = null)
+	/// <param name="shortlistRolls">False keeps every swept roll candidate (flagged <see cref="Scenario.SweptRoll"/>) for the caller to shortlist with
+	/// <see cref="ShortlistSweptRolls"/> after re-valuing them, so the shortlist is chosen on the same EV the scenarios are ranked on.</param>
+	private static List<Scenario> GenerateSpreadScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, StructureKind kind, IReadOnlyDictionary<string, OptionContractQuote>? quotes, IReadOnlyList<DividendEvent>? dividends = null, bool shortlistRolls = true)
 	{
 		var list = new List<Scenario>();
 		var shortLeg = legs.First(l => l.Action == LegAction.Sell);
@@ -1282,9 +1299,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// 1. Hold to short expiry.
 		list.Add(NewScenarioSpread("Hold to short expiry", legs, "—",
 			cashNow: 0m, valueAtTarget: holdNetPerShare, marginDeltaPerContract: 0m, daysToTarget: origShortDte,
-			rationale: $"at {shortLeg.Parsed.ExpiryDate:yyyy-MM-dd}: long ${longAtOriginalExp:F2} - short ${shortAtOriginalExp:F2} intrinsic = ${holdNetPerShare:F2} (pinned); EV ${holdEvPerShare:F2}/share across the spot distribution",
+			rationale: $"at {shortLeg.Parsed.ExpiryDate:yyyy-MM-dd}: long ${longAtOriginalExp:F2} - short ${shortAtOriginalExp:F2} intrinsic = ${holdNetPerShare:F2} (pinned)",
 			expectedValueAtTarget: holdEvPerShare,
-			breakEvens: holdBreakEvens));
+			breakEvens: holdBreakEvens,
+			book: [new BookStructure("existing", UnitLegs(legs), legs[0].Qty)],
+			evNote: $"EV ${holdEvPerShare:F2}/share across the spot distribution"));
 
 		// 2. Close short only (mid basis).
 		{
@@ -1298,9 +1317,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			list.Add(NewScenarioSpread("Close short only", legs,
 				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortMidNow)}",
 				cashNow: cash, valueAtTarget: longAtExpiry, marginDeltaPerContract: marginDelta, daysToTarget: origShortDte,
-				rationale: $"buy back short at mid ${shortMidNow:F2}/share; keep long → ${longAtExpiry:F2}/share (pinned), EV ${longEvAtExpiry:F2}/share at short exp",
+				rationale: $"buy back short at mid ${shortMidNow:F2}/share; keep long → ${longAtExpiry:F2}/share (pinned)",
 				expectedValueAtTarget: longEvAtExpiry,
-				breakEvens: longBe));
+				breakEvens: longBe,
+				book: [new BookStructure("long only", UnitLegs([longLeg]), longLeg.Qty)],
+				evNote: $"EV ${longEvAtExpiry:F2}/share at short exp",
+				orderContractsNow: shortLeg.Qty));
 		}
 
 		// 3. Close all at the default mid basis (deterministic — EV equals locked-in P&L).
@@ -1311,7 +1333,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				$"BUY {shortLeg.Symbol} x{shortLeg.Qty} @{FmtPrice(shortMidNow)}, SELL {longLeg.Symbol} x{longLeg.Qty} @{FmtPrice(longMidNow)}",
 				cashNow: cash, valueAtTarget: 0m, marginDeltaPerContract: marginDelta, daysToTarget: 1,
 				rationale: $"close at mid prices → net ${cash:+0.00;-0.00}/share",
-				expectedValueAtTarget: 0m));
+				expectedValueAtTarget: 0m,
+				book: [],
+				orderContractsNow: shortLeg.Qty));
 		}
 
 		var newExp = NextWeekly(shortLeg.Parsed.ExpiryDate);
@@ -1365,28 +1389,21 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					marginPerContract: marginDelta,
 					daysToTarget: dteNewShort,
-					rationale: $"roll at mid net ${cashPerShare:+0.00;-0.00}/share; EV ${newEvPerShare:F2}/share (pinned ${newProjectedPerShare:F2}) at {candExp:MM-dd}",
+					rationale: $"roll at mid net ${cashPerShare:+0.00;-0.00}/share (pinned ${newProjectedPerShare:F2} at {candExp:MM-dd})",
 					isRoll: true,
 					peakCashPerContract: peakCash,
 					newExpectedPerShare: newEvPerShare,
 					unchangedExpectedPerShare: holdEvPerShare,
-					breakEvens: newBreakEvens);
+					breakEvens: newBreakEvens,
+					resultingLegs: [UnitLeg(longLeg.Symbol, LegAction.Buy, longMidNow, longLeg.Parsed), UnitLeg(cand.Symbol, LegAction.Sell, newShortMidExec, cand.Parsed)],
+					evNote: $"EV ${newEvPerShare:F2}/share at {candExp:MM-dd}");
 			}
 		}
 
 		if (sweptRolls.Count > 0)
 		{
-			var rankedRolls = OrderScenariosForDisplay(sweptRolls, settings.Cash, settings.Risk);
-			var selectedRolls = rankedRolls.Take(3).ToList();
-			// Always include the top pure-EV fundable roll (e.g. an inverted diagonal that --risk penalized) if not already shown.
-			var bestPureEv = sweptRolls
-				.Where(r => IsScenarioFundable(r, settings.Cash) && !selectedRolls.Contains(r))
-				.OrderByDescending(r => r.ExpectedPnLPerContract ?? r.TotalPnLPerContract)
-				.FirstOrDefault();
-			if (bestPureEv != null) selectedRolls.Add(bestPureEv);
-			var bestZeroBp = rankedRolls.FirstOrDefault(r => r.MarginDeltaPerContract <= 0m && !selectedRolls.Contains(r));
-			if (bestZeroBp != null) selectedRolls.Add(bestZeroBp);
-			list.AddRange(selectedRolls);
+			var flagged = sweptRolls.Select(r => r with { SweptRoll = true }).ToList();
+			list.AddRange(shortlistRolls ? ShortlistSweptRolls(flagged, settings.Cash, settings.Risk) : flagged);
 		}
 		else if (newExp < longLeg.Parsed.ExpiryDate)
 		{
@@ -1415,10 +1432,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 						unchangedProjectedPerShare: holdNetPerShare,
 						marginPerContract: marginDelta,
 						daysToTarget: dteNewShort,
-						rationale: $"roll at mid prices for net ${cashPerShare:+0.00;-0.00}/share; EV ${newEvPerShare:F2}/share (pinned ${newProjectedPerShare:F2})",
+						rationale: $"roll at mid prices for net ${cashPerShare:+0.00;-0.00}/share (pinned ${newProjectedPerShare:F2})",
 						isRoll: true,
 						newExpectedPerShare: newEvPerShare,
-						unchangedExpectedPerShare: holdEvPerShare);
+						unchangedExpectedPerShare: holdEvPerShare,
+						resultingLegs: [UnitLeg(longLeg.Symbol, LegAction.Buy, longMidNow, longLeg.Parsed), UnitLeg(newSym, LegAction.Sell, newShortMidExec, newShortParsed)],
+						evNote: $"EV ${newEvPerShare:F2}/share");
 				}
 			}
 
@@ -1453,10 +1472,12 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					marginPerContract: sameExpMarginDelta,
 					daysToTarget: dteSameExp,
-					rationale: $"shift to ${newStrike:F2} strike, keep {shortLeg.Parsed.ExpiryDate:MM-dd} expiry; mid net ${cashPerShareSameExp:+0.00;-0.00}/share; EV ${evSameExpPerShare:F2}/share",
+					rationale: $"shift to ${newStrike:F2} strike, keep {shortLeg.Parsed.ExpiryDate:MM-dd} expiry; mid net ${cashPerShareSameExp:+0.00;-0.00}/share",
 					isRoll: true,
 					newExpectedPerShare: evSameExpPerShare,
-					unchangedExpectedPerShare: holdEvPerShare);
+					unchangedExpectedPerShare: holdEvPerShare,
+					resultingLegs: [UnitLeg(longLeg.Symbol, LegAction.Buy, longMidNow, longLeg.Parsed), UnitLeg(sameExpSym, LegAction.Sell, newShortMidSameExp, sameExpShortParsed)],
+					evNote: $"EV ${evSameExpPerShare:F2}/share");
 			}
 
 			// 5. Roll short to bracket strikes near spot (one per strike).
@@ -1489,11 +1510,13 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					marginPerContract: marginDelta,
 					daysToTarget: dteNewShort,
-					rationale: $"step short to ${newStrike:F2} (spot ${spot:F2}); mid net ${cashPerShare:+0.00;-0.00}/share; EV ${newEvPerShare:F2}/share",
+					rationale: $"step short to ${newStrike:F2} (spot ${spot:F2}); mid net ${cashPerShare:+0.00;-0.00}/share",
 					isRoll: true,
 					peakCashPerContract: shortMidNow * 100m,
 					newExpectedPerShare: newEvPerShare,
-					unchangedExpectedPerShare: holdEvPerShare);
+					unchangedExpectedPerShare: holdEvPerShare,
+					resultingLegs: [UnitLeg(longLeg.Symbol, LegAction.Buy, longMidNow, longLeg.Parsed), UnitLeg(newSym, LegAction.Sell, newShortMidExec, newShortParsed)],
+					evNote: $"EV ${newEvPerShare:F2}/share");
 			}
 		}
 
@@ -1540,11 +1563,13 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					marginPerContract: marginDelta,
 					daysToTarget: dteNewShort,
-					rationale: $"close net ${closeNet:+0.00;-0.00}, open new net ${openNet:+0.00;-0.00} at mid; EV ${resetEvPerShare:F2}/share (pinned ${newProjectedPerShare:F2})",
+					rationale: $"close net ${closeNet:+0.00;-0.00}, open new net ${openNet:+0.00;-0.00} at mid (pinned ${newProjectedPerShare:F2})",
 					isRoll: true,
 					newExpectedPerShare: resetEvPerShare,
 					unchangedExpectedPerShare: holdEvPerShare,
-					breakEvens: resetBreakEvens);
+					breakEvens: resetBreakEvens,
+					resultingLegs: [UnitLeg(newLongSym, LegAction.Buy, newLongMidExec, newLongParsed), UnitLeg(newShortSym, LegAction.Sell, newShortMidExec, newShortParsed)],
+					evNote: $"EV ${resetEvPerShare:F2}/share");
 			}
 		}
 
@@ -1649,9 +1674,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					marginPerContract: a.newMargin,
 					daysToTarget: origShortDte,
-					rationale: $"add a {sideLabel} {a.variant.Split(' ')[1]} at {strikeDesc} (debit ${-a.cashPerShare:F2}/share at mid, 2 legs of slippage not deducted){(a.estimated ? ", BS-estimated (leg not live-quoted)" : "")}; new spread expected value ${a.evNewPerShare:F2}/share (pinned ${a.newPositionValuePerShare:F2}); {effPct}{bestNote}",
+					rationale: $"add a {sideLabel} {a.variant.Split(' ')[1]} at {strikeDesc} (debit ${-a.cashPerShare:F2}/share at mid){(a.estimated ? ", BS-estimated (leg not live-quoted)" : "")}; pinned ${a.newPositionValuePerShare:F2}",
+					addedLegs: [UnitLeg(newShortSym, LegAction.Sell, newShortMidExec, new OptionParsed(shortLeg.Parsed.Root, addShortExp, oppCp, oppShortStrike)), UnitLeg(a.newLongSym, LegAction.Buy, a.newLongMidExec, new OptionParsed(longLeg.Parsed.Root, addLongExp, oppCp, a.longStrike))],
 					expectedUnchangedPerShare: holdEvPerShare,
-					expectedNewPerShare: a.evNewPerShare);
+					expectedNewPerShare: a.evNewPerShare,
+					evNote: $"new spread expected value ${a.evNewPerShare:F2}/share, 2 legs of slippage not deducted; {effPct}{bestNote}");
 			}
 
 			// Comparator: scale up the EXISTING structure instead of adding an opposite side. Same payoff shape,
@@ -1673,9 +1700,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					unchangedProjectedPerShare: holdNetPerShare,
 					marginPerContract: scaleUpMargin,
 					daysToTarget: origShortDte,
-					rationale: $"open one more of the SAME structure at current mid (debit ${scaleUpDebit:F2}/share, 2 legs of slippage not deducted); same payoff → new spread expected value ${holdEvPerShare:F2}/share; {FormatExpectedProfitReturn(holdEvPerShare, scaleUpDebit, scaleUpMargin, scaleUpEff)} — baseline the doubles must beat",
+					rationale: $"open one more of the SAME structure at current mid (debit ${scaleUpDebit:F2}/share) — baseline the doubles must beat",
+					addedLegs: [UnitLeg(shortLeg.Symbol, LegAction.Sell, shortMidNow, shortLeg.Parsed), UnitLeg(longLeg.Symbol, LegAction.Buy, longMidNow, longLeg.Parsed)],
 					expectedUnchangedPerShare: holdEvPerShare,
-					expectedNewPerShare: holdEvPerShare);
+					expectedNewPerShare: holdEvPerShare,
+					evNote: $"same payoff → new spread expected value ${holdEvPerShare:F2}/share, 2 legs of slippage not deducted; {FormatExpectedProfitReturn(holdEvPerShare, scaleUpDebit, scaleUpMargin, scaleUpEff)}");
 			}
 		}
 
@@ -1688,7 +1717,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		marginPerContract > 0m ? (expectedValuePerShare - debitPerShare) * 100m / marginPerContract : 0m;
 
 	/// <summary>"expected profit $X/share (Y% on added $Z)", or "expected profit n/a" when no margin is added.</summary>
-	private static string FormatExpectedProfitReturn(decimal expectedValuePerShare, decimal debitPerShare, decimal marginPerContract, decimal efficiency) =>
+	internal static string FormatExpectedProfitReturn(decimal expectedValuePerShare, decimal debitPerShare, decimal marginPerContract, decimal efficiency) =>
 		marginPerContract > 0m ? $"expected profit {expectedValuePerShare - debitPerShare:+$0.00;-$0.00}/share ({efficiency * 100m:+0.0;-0.0}% on added ${marginPerContract:N0})" : "expected profit n/a";
 
 	/// <summary>Appends an "add new position alongside existing" scenario. Existing untouched;
@@ -1709,8 +1738,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal marginPerContract,
 		int daysToTarget,
 		string rationale,
+		IReadOnlyList<PositionSnapshot> addedLegs,
 		decimal? expectedUnchangedPerShare = null,
-		decimal? expectedNewPerShare = null)
+		decimal? expectedNewPerShare = null,
+		string? evNote = null)
 	{
 		var fullQty = legs[0].Qty;
 		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
@@ -1742,7 +1773,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				Qty: fullQty,
 				DaysToTarget: daysToTarget,
 				Rationale: rationale,
-				ExpectedPnLPerContract: fullEvPnL));
+				ExpectedPnLPerContract: fullEvPnL,
+				Book: [new BookStructure("existing", UnitLegs(legs), fullQty), new BookStructure("added", addedLegs, fullQty)],
+				EvNote: evNote,
+				OrderContractsNow: fullQty));
 		}
 
 		if (!availableCash.HasValue || marginPerContract <= 0m) return;
@@ -1768,7 +1802,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			Qty: fullQty,
 			DaysToTarget: daysToTarget,
 			Rationale: $"{rationale}; partial: add {maxPartial} new contract(s) (${marginPerContract * maxPartial:N0} margin; full size would need ${fullMarginTotal:N0}); keep all {fullQty} existing",
-			ExpectedPnLPerContract: partialEvPnL));
+			ExpectedPnLPerContract: partialEvPnL,
+			Book: [new BookStructure("existing", UnitLegs(legs), fullQty), new BookStructure("added", addedLegs, maxPartial)],
+			EvNote: evNote,
+			OrderContractsNow: maxPartial));
 	}
 
 	/// <summary>Appends a full-quantity scenario to the list. If the full margin delta exceeds available
@@ -1793,11 +1830,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal peakCashPerContract = 0m,
 		decimal? newExpectedPerShare = null,
 		decimal? unchangedExpectedPerShare = null,
-		IReadOnlyList<decimal>? breakEvens = null)
+		IReadOnlyList<decimal>? breakEvens = null,
+		IReadOnlyList<PositionSnapshot>? resultingLegs = null,
+		string? evNote = null)
 	{
 		var fullQty = legs[0].Qty;
 		var initialDebitPerShare = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
 		var initialDebitPerContract = initialDebitPerShare * 100m;
+		// A change that cannot go as one combo is two orders: buy to close first (the peak cash it needs), then the open.
+		var ordersPerContract = peakCashPerContract > 0m ? 2 : 1;
 		// Fundability gates on the BP the change actually consumes — max of margin delta, net cash debit, and
 		// the peak first-order cost for split rolls — not margin alone (a margin-neutral roll still spends cash).
 		var fundingPerContract = Math.Max(Math.Max(Math.Max(marginPerContract, 0m), Math.Max(-cashPerShareOfChange * 100m, 0m)), peakCashPerContract);
@@ -1827,7 +1868,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				IsRoll: isRoll,
 				ExpectedPnLPerContract: fullEvPerContract,
 				PeakCashPerContract: peakCashPerContract,
-				BreakEvens: breakEvens));
+				BreakEvens: breakEvens,
+				Book: resultingLegs == null ? null : [new BookStructure("rolled", resultingLegs, fullQty)],
+				EvNote: evNote,
+				OrderContractsNow: ordersPerContract * fullQty));
 		}
 
 		// Partial variant: only emit if the change consumes BP and cash is constrained below full.
@@ -1853,7 +1897,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			Rationale: $"{rationale}; partial: execute on {maxPartial} contracts (${fundingPerContract * maxPartial:N0} BP; full size would need ${fullFundingTotal:N0}); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp",
 			IsRoll: isRoll,
 			ExpectedPnLPerContract: partialEvPerContract,
-			PeakCashPerContract: peakCashPerContract * maxPartial / fullQty));
+			PeakCashPerContract: peakCashPerContract * maxPartial / fullQty,
+			Book: resultingLegs == null ? null : [new BookStructure("rolled", resultingLegs, maxPartial), new BookStructure("existing", UnitLegs(legs), fullQty - maxPartial)],
+			EvNote: evNote,
+			OrderContractsNow: ordersPerContract * maxPartial));
 	}
 
 	// ─── Helpers ─────────────────────────────────────────────────────────────
@@ -1867,7 +1914,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, marginDeltaPerContract, longLeg.Qty, daysToTarget, rationale, isRoll, RankScore: totalPerContract / Math.Max(1m, daysToTarget));
 	}
 
-	private static Scenario NewScenarioSpread(string name, IReadOnlyList<PositionSnapshot> legs, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal marginDeltaPerContract, int daysToTarget, string rationale, bool isRoll = false, decimal? expectedValueAtTarget = null, IReadOnlyList<decimal>? breakEvens = null)
+	private static Scenario NewScenarioSpread(string name, IReadOnlyList<PositionSnapshot> legs, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal marginDeltaPerContract, int daysToTarget, string rationale, bool isRoll = false, decimal? expectedValueAtTarget = null, IReadOnlyList<decimal>? breakEvens = null, IReadOnlyList<BookStructure>? book = null, string? evNote = null, decimal orderContractsNow = 0m)
 	{
 		var initialDebit = legs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
 		var qty = legs[0].Qty;
@@ -1875,8 +1922,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var valuePerContract = valueAtTarget * 100m;
 		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
 		decimal? evPnL = expectedValueAtTarget.HasValue ? expectedValueAtTarget.Value * 100m + cashPerContract - initialDebit * 100m : null;
-		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, marginDeltaPerContract, qty, daysToTarget, rationale, isRoll, RankScore: (evPnL ?? totalPerContract) / Math.Max(1m, daysToTarget), ExpectedPnLPerContract: evPnL, BreakEvens: breakEvens);
+		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, marginDeltaPerContract, qty, daysToTarget, rationale, isRoll, RankScore: (evPnL ?? totalPerContract) / Math.Max(1m, daysToTarget), ExpectedPnLPerContract: evPnL, BreakEvens: breakEvens, Book: book, EvNote: evNote, OrderContractsNow: orderContractsNow);
 	}
+
+	/// <summary>One contract of <paramref name="legs"/> as a <see cref="BookStructure"/> leg set (Qty 1, each leg kept at its own price).</summary>
+	internal static IReadOnlyList<PositionSnapshot> UnitLegs(IReadOnlyList<PositionSnapshot> legs) => legs.Select(l => l with { Qty = 1 }).ToList();
+
+	/// <summary>One contract's leg at <paramref name="price"/>.</summary>
+	private static PositionSnapshot UnitLeg(string symbol, LegAction action, decimal price, OptionParsed parsed) => new(symbol, action, 1, price, parsed);
 
 	// Rank on probability-weighted EV when we have it (the honest figure), falling back to the spot-pinned
 	// P&L only for scenario types where EV isn't computed. Without this, capital-deploying scenarios (adds)
@@ -1892,8 +1945,29 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return baseReturn - riskAversion * capitalAtStake - sc.AssignmentPenaltyPerContract;
 	}
 
-	private static List<Scenario> OrderScenariosForDisplay(IEnumerable<Scenario> scenarios, decimal? availableCash, decimal riskAversion) => scenarios
+	/// <summary>Keeps, of the swept roll candidates in <paramref name="scenarios"/>, the top 3 by rank, the best pure-EV fundable one (e.g. an inverted
+	/// diagonal that --risk penalized) and the best that needs no added margin; every other scenario passes through.</summary>
+	internal static List<Scenario> ShortlistSweptRolls(IReadOnlyList<Scenario> scenarios, decimal? availableCash, decimal riskAversion)
+	{
+		var swept = scenarios.Where(s => s.SweptRoll).ToList();
+		if (swept.Count == 0) return scenarios.ToList();
+		var ranked = OrderScenariosForDisplay(swept, availableCash, riskAversion);
+		var selected = new HashSet<Scenario>(ranked.Take(3), ReferenceEqualityComparer.Instance);
+		var bestPureEv = swept
+			.Where(r => IsScenarioFundable(r, availableCash) && r.ExpectedPnLPerContract.HasValue && !selected.Contains(r))
+			.OrderByDescending(r => r.ExpectedPnLPerContract!.Value)
+			.FirstOrDefault();
+		if (bestPureEv != null) selected.Add(bestPureEv);
+		var bestZeroBp = ranked.FirstOrDefault(r => r.MarginDeltaPerContract <= 0m && !selected.Contains(r));
+		if (bestZeroBp != null) selected.Add(bestZeroBp);
+		return scenarios.Where(s => !s.SweptRoll || selected.Contains(s)).ToList();
+	}
+
+	/// <remarks>A modeled scenario left without an EV (the opener scorer could not value one of its structures) ranks after every one with an EV:
+	/// its fallback, the spot-pinned P&amp;L, is a best case, not a figure comparable with the others' EV.</remarks>
+	internal static List<Scenario> OrderScenariosForDisplay(IEnumerable<Scenario> scenarios, decimal? availableCash, decimal riskAversion) => scenarios
 		.OrderByDescending(s => IsScenarioFundable(s, availableCash))
+		.ThenByDescending(s => s.ExpectedPnLPerContract.HasValue || s.Book == null)
 		.ThenByDescending(s => RiskAdjustedRankScore(s, riskAversion))
 		.ToList();
 
@@ -2292,7 +2366,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var fundMarker = !fundable ? $" [red](not fundable — needs ~${fundingTotal:N0} BP, have ${availableCash!.Value:N0})[/]" : "";
 			var prefix = isRecommended ? "★ " : "";
 
-			var rationaleText = WebullAnalytics.IO.TextFileExporter.NormalizeArrows(ascii, sc.Rationale);
+			var rationaleText = WebullAnalytics.IO.TextFileExporter.NormalizeArrows(ascii, sc.DisplayRationale);
 			var nameText = WebullAnalytics.IO.TextFileExporter.NormalizeArrows(ascii, sc.Name);
 
 			var lines = new List<IRenderable>
