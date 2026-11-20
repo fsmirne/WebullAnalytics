@@ -390,7 +390,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 		else
 		{
-			RenderScenarioTable(scenarios, settings, renderConsole, ascii: toText);
+			RenderScenarioTable(scenarios, positionLegs, settings, renderConsole, ascii: toText);
 		}
 
 		if (toText)
@@ -2194,7 +2194,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 	}
 
-	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, AnalyzePositionSettings settings, IAnsiConsole console, bool ascii)
+	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, IReadOnlyList<PositionSnapshot> positionLegs, AnalyzePositionSettings settings, IAnsiConsole console, bool ascii)
 	{
 		var availableCash = settings.Cash;
 
@@ -2292,7 +2292,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				new Markup($"[dim]{Markup.Escape(rationaleText)}[/]"),
 			};
 			var leadIn = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(ascii);
-			var (tradeCmds, analyzeCmd) = BuildReproductionCommands(sc, settings);
+			var (tradeCmds, analyzeCmd) = BuildReproductionCommands(sc, settings, positionLegs);
 			if (tradeCmds != null)
 				foreach (var cmd in tradeCmds)
 					lines.Add(new Markup($"[grey50]{leadIn} {Markup.Escape(cmd)}[/]"));
@@ -2325,7 +2325,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	///   - Non-calendar rolls (2 legs, diagonal/vertical) → two single-leg lines; Webull's combo engine rejects roll reversals across diagonals.
 	///   - 4-leg resets (close existing position + open new one) → two combo lines (close half + open half); Webull's combo engine only accepts 3-leg butterflies and 4-leg iron condor/butterfly as 4-leg shapes, so resets can't ride as a single combo. Split by position — EmitReset's contract is legs[0..1] close existing, legs[2..3] open new.
 	/// Returns (null, null) for hold/no-op scenarios.</summary>
-	internal static (IReadOnlyList<string>? Trades, string? Analyze) BuildReproductionCommands(Scenario sc, AnalyzePositionSettings settings)
+	internal static (IReadOnlyList<string>? Trades, string? Analyze) BuildReproductionCommands(Scenario sc, AnalyzePositionSettings settings, IReadOnlyList<PositionSnapshot>? positionLegs = null)
 	{
 		if (string.IsNullOrWhiteSpace(sc.ActionSummary) || sc.ActionSummary == "—") return (null, null);
 		var parts = sc.ActionSummary.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -2341,30 +2341,71 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			legs.Add((action, tokens[1], tokens[2].TrimStart('x'), tokens[3].TrimStart('@')));
 		}
 
-		// Analyze-trade line mirrors the executable broker order grouping: unsupported roll reversals
-		// must be separated with ';' so the synthetic replay doesn't force them into one combo event.
-		var analyzeGroups = new List<string>();
-		var analyzeLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}").ToList();
-		var splittable = sc.IsRoll && legs.Count == 2 && !RollShape.SupportsComboRoll(legs.Select(l => l.Symbol));
-		if (sc.IsRoll && legs.Count == 4)
-		{
-			analyzeGroups.Add(string.Join(",", analyzeLegs.Take(2)));
-			analyzeGroups.Add(string.Join(",", analyzeLegs.Skip(2)));
-		}
-		else if (splittable)
-		{
-			analyzeGroups.AddRange(analyzeLegs);
-		}
-		else
-		{
-			analyzeGroups.Add(string.Join(",", analyzeLegs));
-		}
 		var extras = new List<string>();
 		if (!string.IsNullOrEmpty(settings.Spot)) extras.Add($"--spot {settings.Spot}");
 		else if (settings.Extended) extras.Add("--extended");
 		if (!string.IsNullOrEmpty(settings.Date)) extras.Add($"--date {settings.Date}");
 		var suffix = extras.Count > 0 ? " " + string.Join(" ", extras) : "";
-		var analyze = $"wa analyze trade \"{string.Join(";", analyzeGroups)}\"{suffix}";
+
+		var splittable = sc.IsRoll && legs.Count == 2 && !RollShape.SupportsComboRoll(legs.Select(l => l.Symbol));
+
+		// Build the `wa analyze trade` command:
+		//  • 2-leg roll with position context → full post-roll position (new rolled leg with roll credit/debit
+		//    folded into its cost basis + static remaining leg(s) at their original cost basis), so `analyze trade`
+		//    shows the complete resulting structure and true campaign break-evens.
+		//  • 4-leg reset with position context → the new position being opened (legs[2..3]) rather than
+		//    rendering a bogus panel for the closing legs.
+		//  • Fallback (no position context, adds, closes) → the action's legs directly.
+		string analyze;
+		if (positionLegs is { Count: > 0 } && sc.IsRoll && legs.Count == 2
+			&& decimal.TryParse(legs[0].Price, NumberStyles.Any, CultureInfo.InvariantCulture, out var closeLegPrice)
+			&& decimal.TryParse(legs[1].Price, NumberStyles.Any, CultureInfo.InvariantCulture, out var openLegPrice)
+			&& int.TryParse(legs[0].Qty, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rollQty))
+		{
+			var matched = positionLegs.FirstOrDefault(p => p.Symbol.Equals(legs[0].Symbol, StringComparison.OrdinalIgnoreCase));
+			if (matched != null)
+			{
+				var rollNet = matched.Action == LegAction.Sell ? openLegPrice - closeLegPrice : closeLegPrice - openLegPrice;
+				var rolledPosLeg = new RollPositionLeg(matched.Symbol, matched.Action, rollQty, matched.Parsed, matched.CostBasis, null);
+				var staticPosLegs = positionLegs
+					.Where(p => !p.Symbol.Equals(matched.Symbol, StringComparison.OrdinalIgnoreCase))
+					.Select(p => new RollPositionLeg(p.Symbol, p.Action, rollQty, p.Parsed, p.CostBasis, null))
+					.ToList();
+				var postRollSpec = RollGridRenderer.BuildPostRollSpec(rolledPosLeg, legs[1].Symbol, staticPosLegs, rollNet);
+				analyze = postRollSpec != null
+					? $"wa analyze trade \"{postRollSpec}\"{suffix}"
+					: $"wa analyze trade \"{string.Join(",", legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}"))}\"{suffix}";
+			}
+			else
+			{
+				var analyzeLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}").ToList();
+				analyze = $"wa analyze trade \"{(splittable ? string.Join(";", analyzeLegs) : string.Join(",", analyzeLegs))}\"{suffix}";
+			}
+		}
+		else if (positionLegs is { Count: > 0 } && sc.IsRoll && legs.Count == 4)
+		{
+			var newPosLegs = legs.Skip(2).Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}");
+			analyze = $"wa analyze trade \"{string.Join(",", newPosLegs)}\"{suffix}";
+		}
+		else
+		{
+			var analyzeGroups = new List<string>();
+			var analyzeLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}").ToList();
+			if (sc.IsRoll && legs.Count == 4)
+			{
+				analyzeGroups.Add(string.Join(",", analyzeLegs.Take(2)));
+				analyzeGroups.Add(string.Join(",", analyzeLegs.Skip(2)));
+			}
+			else if (splittable)
+			{
+				analyzeGroups.AddRange(analyzeLegs);
+			}
+			else
+			{
+				analyzeGroups.Add(string.Join(",", analyzeLegs));
+			}
+			analyze = $"wa analyze trade \"{string.Join(";", analyzeGroups)}\"{suffix}";
+		}
 
 		// 4-leg reset: split into close-half and open-half combos.
 		if (sc.IsRoll && legs.Count == 4)

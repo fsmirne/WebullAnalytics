@@ -332,4 +332,28 @@ public sealed class AnalyzeRollTests
 		Assert.Equal(2, clone.Opener.Structures.LongCalendar.ShortDteMin);
 		Assert.False(source.Opener.Structures.LongCalendar.Enabled);
 	}
+
+	[Fact]
+	public void BuildReproductionCommands_WithPositionLegs_IncludesStaticLegAndAdjustedBasis()
+	{
+		var oldShortSym = "SPY261123C00732000";
+		var newShortSym = "SPY261127C00731000";
+		var longSym = "SPY261211C00731000";
+		var positionLegs = new List<AnalyzePositionCommand.PositionSnapshot>
+		{
+			new(oldShortSym, LegAction.Sell, 22, 3.92m, ParsingHelpers.ParseOptionSymbol(oldShortSym)!),
+			new(longSym, LegAction.Buy, 22, 12.47m, ParsingHelpers.ParseOptionSymbol(longSym)!)
+		};
+
+		var sc = new AnalyzePositionCommand.Scenario(
+			Name: "Roll short to $731.00 (11-27, calendar)",
+			ActionSummary: $"BUY {oldShortSym} x22 @1.5, SELL {newShortSym} x22 @4.265",
+			CashImpactPerContract: 276.50m, ProjectedValuePerContract: 698.50m, TotalPnLPerContract: 120m,
+			MarginDeltaPerContract: 0m, Qty: 22, DaysToTarget: 8, Rationale: "", IsRoll: true);
+
+		var (_, analyze) = AnalyzePositionCommand.BuildReproductionCommands(sc, new AnalyzePositionSettings(), positionLegs);
+
+		// 3.92 original short + (4.265 - 1.50 = 2.765) roll credit = 6.685 → 6.69; long stays at 12.47
+		Assert.Equal($"wa analyze trade \"sell:{newShortSym}:22@6.69,buy:{longSym}:22@12.47\"", analyze);
+	}
 }
