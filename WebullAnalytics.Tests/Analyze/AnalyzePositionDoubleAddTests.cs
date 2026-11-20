@@ -85,6 +85,22 @@ public class AnalyzePositionDoubleAddTests
 		Assert.All(best, a => Assert.DoesNotContain("expected profit -", a.Rationale, StringComparison.Ordinal));
 	}
 
+	[Fact]
+	public void GenerateScenarios_PartialAddKeepsTheAddsExpectedProfit()
+	{
+		// Cash for one added contract only: the partial must still say what the add is expected to make, not just how it was sized.
+		var settings = new AnalyzePositionSettings { IvDefault = 40m, StrikeStep = 0.50m };
+		var legs = CallCalendar().Select(l => l with { Qty = 5 }).ToList();
+		var full = AnalyzePositionCommand.GenerateScenarios(legs, AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, AsOf, Chain());
+		var add = full.First(s => s.Name.Contains("double ", StringComparison.Ordinal));
+		settings.Cash = add.MarginDeltaPerContract * 1.5m;
+		var scenarios = AnalyzePositionCommand.GenerateScenarios(legs, AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, AsOf, Chain());
+		var partials = scenarios.Where(s => s.Name.Contains("double ", StringComparison.Ordinal) && s.Name.Contains("· partial", StringComparison.Ordinal)).ToList();
+		Assert.NotEmpty(partials);
+		Assert.All(partials, p => Assert.Contains("expected profit", p.Rationale, StringComparison.Ordinal));
+		Assert.All(partials, p => Assert.Contains("full size would need", p.Rationale, StringComparison.Ordinal));
+	}
+
 	[Theory]
 	// The 2026-11-20 SPY 731/732 diagonal scale-up: expected value $5.24 for a $5.015 debit is +4.5%, not the 104% value/cost once shown.
 	[InlineData(5.24, 5.015, 501.5, 0.0449)]

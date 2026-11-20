@@ -1767,7 +1767,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			MarginDeltaPerContract: marginPerContract * maxPartial / fullQty,
 			Qty: fullQty,
 			DaysToTarget: daysToTarget,
-			Rationale: $"add {maxPartial} new contract(s) (${marginPerContract * maxPartial:N0} margin; full size would need ${fullMarginTotal:N0}); keep all {fullQty} existing",
+			Rationale: $"{rationale}; partial: add {maxPartial} new contract(s) (${marginPerContract * maxPartial:N0} margin; full size would need ${fullMarginTotal:N0}); keep all {fullQty} existing",
 			ExpectedPnLPerContract: partialEvPnL));
 	}
 
@@ -1850,7 +1850,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			MarginDeltaPerContract: marginPerContract * maxPartial / fullQty,
 			Qty: fullQty,
 			DaysToTarget: daysToTarget,
-			Rationale: $"execute on {maxPartial} contracts (${fundingPerContract * maxPartial:N0} BP; full size would need ${fullFundingTotal:N0}); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp",
+			Rationale: $"{rationale}; partial: execute on {maxPartial} contracts (${fundingPerContract * maxPartial:N0} BP; full size would need ${fullFundingTotal:N0}); hold remaining {fullQty - maxPartial} as original → ${unchangedProjectedPerShare:F2}/share at original exp",
 			IsRoll: isRoll,
 			ExpectedPnLPerContract: partialEvPerContract,
 			PeakCashPerContract: peakCashPerContract * maxPartial / fullQty));
