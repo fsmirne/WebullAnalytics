@@ -133,6 +133,11 @@ internal sealed record CascadeReading(
 	/// <summary>True when the leading setup cleared both <see cref="TriggerScore"/> and its core confirmation gates.</summary>
 	public bool Active => PrimaryRegime != CascadeRegime.Neutral;
 
+	/// <summary>Every setup that cleared <see cref="TriggerScore"/> and its gates, best score first; empty on a neutral reading. <see cref="PrimaryRegime"/> is the first.</summary>
+	public IReadOnlyList<CascadeSetupEvaluation> ConfirmedSetups => PrimaryRegime == CascadeRegime.Neutral
+		? Array.Empty<CascadeSetupEvaluation>()
+		: Setups.Values.Where(s => s.Complete && s.Score >= TriggerScore).OrderByDescending(s => s.Score).ToList();
+
 	/// <summary>Direction the leading setup describes (confirmed or not): +1 for Bull Cascade / Bear Trap, −1 for Bear Cascade / Bull Trap.
 	/// Descriptive only: over 2022–2026 a confirmed regime at 09:50 ET showed no edge in the move from there to the close.</summary>
 	public int DirectionalSign => LeadingSetup.Regime is CascadeRegime.BullCascade or CascadeRegime.BearTrap ? 1 : -1;

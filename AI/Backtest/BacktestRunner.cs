@@ -1625,8 +1625,7 @@ internal sealed class BacktestRunner
 		var cap = _config.AutoExecute.Opener.MaxOrdersPerDay;
 		foreach (var p in await _cascadeOpener!.EvaluateAsync(ctx, cancellation))
 		{
-			var regime = moment.Reading.PrimaryRegime;
-			var side = regime == Analyze.CascadeRegime.Neutral ? NeutralSide(p.StructureKind) : null;
+			var (regime, side) = _cascadeOpener.SetupOf(p) ?? (moment.Reading.PrimaryRegime, null);
 			if (_cascadeOpenedToday >= cap) { _cascadeUnfilled.Add((regime, side, $"daily cap of {cap} open(s) reached (autoExecute.opener.maxOrdersPerDay)")); continue; }
 			var qty = ResolveOpenQty(p);
 			if (qty >= 1 && OpenProposalIntoBook(minuteEt, p, qty)) { _cascadeOpener.Acted(p); _cascadeOpenedToday++; }
@@ -1641,7 +1640,7 @@ internal sealed class BacktestRunner
 	{
 		var cfg = _config.Opener.Cascade;
 		if (moment.Reading.PrimaryRegime != Analyze.CascadeRegime.Neutral)
-			return cfg.For(moment.Reading.PrimaryRegime) is { Enabled: true } setup ? [setup] : [];
+			return _cascadeOpener!.SetupsToTrade(moment.Reading).Select(s => cfg.For(s.Regime)).Where(t => t is { Enabled: true }).Select(t => t!).ToList();
 		var trades = new List<CascadeSetupConfig>();
 		if (_cascadeOpener!.LeanSetup(moment.Reading) is { } lean) trades.Add(lean.Trade);
 		if (cfg.Neutral.Enabled && ParsingHelpers.TryParseClockTime(cfg.Neutral.AfterTimeEt, out var after) && moment.TimeEt >= after)

@@ -229,6 +229,9 @@ internal sealed class OpenerCascadeConfig
 	/// regime and its entry conditions pass, the first read that yields a trade places it, and only a placed trade uses up the day. False = the first
 	/// confirmation is the day's only entry, so a skip on it is final (the behavior before this knob, which the backtest can A/B).</summary>
 	[JsonPropertyName("retrySkipped")] public bool RetrySkipped { get; set; } = true;
+	/// <summary>False (default) = only the primary regime (the highest-scoring confirmed setup) trades on a read. True = every enabled setup
+	/// that is confirmed trades, each once a day, whether or not it leads (the backtest can A/B this).</summary>
+	[JsonPropertyName("tradeAllConfirmed")] public bool TradeAllConfirmed { get; set; } = false;
 	[JsonPropertyName("bullTrap")] public CascadeSetupConfig BullTrap { get; set; } = new();
 	[JsonPropertyName("bearTrap")] public CascadeSetupConfig BearTrap { get; set; } = new();
 	[JsonPropertyName("bullCascade")] public CascadeSetupConfig BullCascade { get; set; } = new();
@@ -332,9 +335,11 @@ internal sealed class CascadeSetupConfig
 	/// <summary>The first leg is sold (a credit vertical); otherwise it is bought.</summary>
 	[JsonIgnore] public bool IsCredit => Kind is OpenStructureKind.ShortCallVertical or OpenStructureKind.ShortPutVertical;
 	/// <summary>Null when <paramref name="reading"/> meets every entry condition; otherwise the first one it fails.</summary>
-	public string? EntryConditionFailure(Analyze.CascadeReading reading)
+	/// <param name="score">The score of the setup being traded; the leading setup's when null.</param>
+	public string? EntryConditionFailure(Analyze.CascadeReading reading, int? score = null)
 	{
-		if (MinScore > 0 && reading.LeadingSetup.Score < MinScore) return $"score {reading.LeadingSetup.Score} < minScore {MinScore}";
+		var s = score ?? reading.LeadingSetup.Score;
+		if (MinScore > 0 && s < MinScore) return $"score {s} < minScore {MinScore}";
 		var vix = reading.Inputs.VixNow;
 		if (MinVix is decimal lo && !(vix >= lo)) return vix is decimal v1 ? $"VIX {v1:F2} < minVix {lo:F2}" : "no intraday VIX for minVix";
 		if (MaxVix is decimal hi && !(vix <= hi)) return vix is decimal v2 ? $"VIX {v2:F2} > maxVix {hi:F2}" : "no intraday VIX for maxVix";

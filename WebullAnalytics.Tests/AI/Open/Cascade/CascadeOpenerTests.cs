@@ -369,6 +369,37 @@ public class CascadeOpenerTests
 		Assert.Empty(await opener.EvaluateAsync(Ctx(1), default));
 	}
 
+	/// <summary>A read where Bull Trap (76) leads and Bear Trap (70) is also confirmed.</summary>
+	private static CascadeLiveRead TwoConfirmed()
+	{
+		var read = Read(CascadeRegime.BullTrap);
+		var second = new CascadeSetupEvaluation(CascadeRegime.BearTrap, 70, true, Array.Empty<FactorScore>(), Array.Empty<SetupNote>());
+		var setups = new Dictionary<CascadeRegime, CascadeSetupEvaluation>(read.Reading.Setups) { [CascadeRegime.BearTrap] = second };
+		return read with { Reading = read.Reading with { Setups = setups } };
+	}
+
+	[Fact]
+	public async Task ByDefault_OnlyThePrimaryConfirmedSetupTrades()
+	{
+		using var h = new Harness { Next = TwoConfirmed() };
+		var p = Assert.Single(await h.Opener().EvaluateAsync(Ctx(0), default));
+		Assert.Equal(OpenStructureKind.ShortCallVertical, p.StructureKind);
+	}
+
+	[Fact]
+	public async Task WithTradeAllConfirmed_EveryConfirmedEnabledSetupTradesWithItsOwnScore()
+	{
+		var config = Config();
+		config.Opener.Cascade.TradeAllConfirmed = true;
+		using var h = new Harness { Next = TwoConfirmed() };
+		var opener = h.Opener(config: config);
+		var proposals = await opener.EvaluateAsync(Ctx(0), default);
+		Assert.Equal(2, proposals.Count);
+		Assert.Contains(proposals, p => p.StructureKind == OpenStructureKind.ShortCallVertical && p.Rationale.Contains("76/100"));
+		Assert.Contains(proposals, p => p.StructureKind == OpenStructureKind.LongCall && p.Rationale.Contains("70/100"));
+		Assert.Equal(CascadeRegime.BearTrap, opener.SetupOf(proposals.Single(p => p.StructureKind == OpenStructureKind.LongCall))!.Value.Setup);
+	}
+
 	[Fact]
 	public async Task ADryRunDoesNotUseUpTheLiveSignal()
 	{

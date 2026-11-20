@@ -105,10 +105,13 @@ internal sealed class CascadeOpener
 			return Array.Empty<OpenProposal>();
 		}
 
-		if (setup != CascadeRegime.Neutral) RecordConfirmation(today, ticker, setup, nowEt, reading, read.Spot);
 		if (setup != CascadeRegime.Neutral)
 		{
-			if (cfg.For(setup) is { Enabled: true } trade) TryEntry(setup, null, trade, read, ctx, nowEt, trades, notices);
+			foreach (var confirmed in SetupsToTrade(reading))
+			{
+				RecordConfirmation(today, ticker, confirmed.Regime, nowEt, confirmed.Score, read.Spot);
+				if (cfg.For(confirmed.Regime) is { Enabled: true } trade) TryEntry(confirmed.Regime, null, trade, read, ctx, nowEt, trades, notices, setupScore: confirmed.Score);
+			}
 		}
 		else
 		{
@@ -152,6 +155,14 @@ internal sealed class CascadeOpener
 		return new CascadeTradeSection.Outcome(label, final, retryUntil);
 	}
 
+	/// <summary>The confirmed setups of <paramref name="reading"/> that may trade: just the primary one, or with
+	/// <see cref="OpenerCascadeConfig.TradeAllConfirmed"/> every confirmed one, best score first.</summary>
+	internal IReadOnlyList<CascadeSetupEvaluation> SetupsToTrade(CascadeReading reading)
+	{
+		var confirmed = reading.ConfirmedSetups;
+		return _config.Opener.Cascade.TradeAllConfirmed ? confirmed : confirmed.Take(1).ToList();
+	}
+
 	/// <summary>The setup an unconfirmed <paramref name="reading"/> leans to, when that setup is enabled and its <see cref="CascadeSetupConfig.MinLeanScore"/>
 	/// is set and met; null otherwise.</summary>
 	internal (CascadeRegime Regime, CascadeSetupConfig Trade)? LeanSetup(CascadeReading reading)
@@ -170,25 +181,26 @@ internal sealed class CascadeOpener
 		&& _ledger.ConfirmedRegimes(today, ticker).Count == 0;
 
 	/// <summary>Records the regime's first confirmation of the day, once per process and day (the ledger keeps it across restarts).</summary>
-	private void RecordConfirmation(DateOnly today, string ticker, CascadeRegime regime, DateTime nowEt, CascadeReading reading, decimal spot)
+	private void RecordConfirmation(DateOnly today, string ticker, CascadeRegime regime, DateTime nowEt, int score, decimal spot)
 	{
 		if (!_confirmed.Add((today, regime))) return;
 		if (_ledger.ConfirmedRegimes(today, ticker).Contains(regime)) return;
-		_ledger.Append(new CascadeSignalLedger.Entry(today.ToString("yyyy-MM-dd"), ticker, regime, nowEt.ToString("HH:mm:ss"), _live, reading.LeadingSetup.Score, spot, CascadeSignalLedger.Confirmed, ""));
+		_ledger.Append(new CascadeSignalLedger.Entry(today.ToString("yyyy-MM-dd"), ticker, regime, nowEt.ToString("HH:mm:ss"), _live, score, spot, CascadeSignalLedger.Confirmed, ""));
 	}
 
 	/// <summary>Adds the setup's (or neutral side's) trade on this reading to <paramref name="trades"/>, if it is due: entry conditions met, not
 	/// yet final today, within its retry window, and buildable. Otherwise the ledger is updated and the reason, when worth showing, goes to
 	/// <paramref name="notices"/> (console markup).</summary>
 	/// <param name="leanScore">Set when the reading did not confirm and this is a lean entry: the leading setup's score, shown in the notices.</param>
-	private void TryEntry(CascadeRegime setup, string? side, CascadeSetupConfig trade, CascadeLiveRead read, EvaluationContext ctx, DateTime nowEt, List<CascadeTradeSection.Trade> trades, List<string> notices, int? leanScore = null)
+	private void TryEntry(CascadeRegime setup, string? side, CascadeSetupConfig trade, CascadeLiveRead read, EvaluationContext ctx, DateTime nowEt, List<CascadeTradeSection.Trade> trades, List<string> notices, int? leanScore = null, int? setupScore = null)
 	{
 		var reading = read.Reading;
 		var ticker = _config.Ticker;
+		var score = setupScore ?? reading.LeadingSetup.Score;
 		var label = side != null ? $"{CascadeReading.RegimeLabel(setup)} {side}" : leanScore is int lean ? $"{CascadeReading.RegimeLabel(setup)} (lean {lean})" : CascadeReading.RegimeLabel(setup);
 		// Entry conditions (VIX, score) are checked before the ledger: a reading that fails one is not this setup's entry, so a later reading
 		// of the day that passes may still be.
-		if (trade.EntryConditionFailure(reading) is string gated)
+		if (trade.EntryConditionFailure(reading, score) is string gated)
 		{
 			GatedReadings.Add((setup, gated));
 			return;
@@ -204,7 +216,7 @@ internal sealed class CascadeOpener
 		var proposal = skeleton == null ? null : Propose(skeleton, read, ctx);
 		if (skeleton != null && proposal == null) skip = "the scorer could not price the legs";
 
-		var entry = new CascadeSignalLedger.Entry(today.ToString("yyyy-MM-dd"), ticker, setup, nowEt.ToString("HH:mm:ss"), _live, reading.LeadingSetup.Score, read.Spot, CascadeSignalLedger.Signaled, proposal?.Legs.Describe() ?? skip!, side);
+		var entry = new CascadeSignalLedger.Entry(today.ToString("yyyy-MM-dd"), ticker, setup, nowEt.ToString("HH:mm:ss"), _live, score, read.Spot, CascadeSignalLedger.Signaled, proposal?.Legs.Describe() ?? skip!, side);
 		// The trade as proposed: what it is, its size and the price it was proposed at. A trade the sizing caps zero out keeps the unscaled
 		// one-lot skeleton as its legs, so the signal records its legs at the size it was given (x0) and why.
 		if (proposal != null)
@@ -234,8 +246,11 @@ internal sealed class CascadeOpener
 		if (first == null) _ledger.Append(entry);
 		else notices.Add($"[dim]{Markup.Escape(label)}: first confirmed at {Markup.Escape(first.TimeEt)} ET and not yet placed — proposing again.[/]");
 		_pending[proposal.Fingerprint] = entry with { Outcome = CascadeSignalLedger.Placed, Detail = proposal.Legs.Describe() };
-		trades.Add(new CascadeTradeSection.Trade(proposal with { Rationale = $"cascade {label} {reading.LeadingSetup.Score}/100 — {proposal.Rationale}", Spot = read.Spot }, $"{label} {reading.LeadingSetup.Score}/100"));
+		trades.Add(new CascadeTradeSection.Trade(proposal with { Rationale = $"cascade {label} {score}/100 — {proposal.Rationale}", Spot = read.Spot }, $"{label} {score}/100"));
 	}
+
+	/// <summary>The setup (and neutral side) a proposal this opener returned belongs to; null once it has been acted on.</summary>
+	public (CascadeRegime Setup, string? Side)? SetupOf(OpenProposal proposal) => _pending.TryGetValue(proposal.Fingerprint, out var e) ? (e.Setup, e.Side) : null;
 
 	/// <summary>Reports that <paramref name="proposal"/> (one this opener returned) was acted on — an order placed, or logged by a dry
 	/// run — or was only ever for display. Its setup is then done for the day.</summary>
