@@ -241,7 +241,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var pcpPutSymbols = settings.IsDebug
 				? positionLegs.Select(l => $"{l.Parsed.Root}{l.Parsed.ExpiryDate:yyMMdd}P{(int)Math.Round(l.Parsed.Strike * 1000m):00000000}")
 				: Enumerable.Empty<string>();
-			var hypotheticalSymbols = EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot.Value)
+			var hypotheticalSymbols = EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot.Value, quotes)
 				.Concat(pcpPutSymbols)
 				.Where(s => !alreadyFetched.ContainsKey(s))
 				.Distinct(StringComparer.OrdinalIgnoreCase)
@@ -705,7 +705,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	/// <summary>Hypothetical OCC symbols the scenario generators will reference. Pre-enumerated so we can
 	/// include them in a single up-front quote fetch.</summary>
-	private static IEnumerable<string> EnumerateHypotheticalSymbols(IReadOnlyList<PositionSnapshot> legs, StructureKind kind, AnalyzePositionSettings settings, decimal spot)
+	/// <param name="quotes">The chain fetched so far, whose front expiry lists the strikes the opposite-side adds snap to; null when none.</param>
+	internal static IEnumerable<string> EnumerateHypotheticalSymbols(IReadOnlyList<PositionSnapshot> legs, StructureKind kind, AnalyzePositionSettings settings, decimal spot, IReadOnlyDictionary<string, OptionContractQuote>? quotes = null)
 	{
 		if (legs.Count == 0) yield break;
 		var root = legs[0].Parsed.Root;
@@ -738,6 +739,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 																										 // "Add" scenarios: same-side second calendar + opposite-side double calendar/diagonal.
 				yield return MatchKeys.OccSymbol(root, newExpiry, strike, oppositeCp);
 				yield return MatchKeys.OccSymbol(root, newLongExp, strike, oppositeCp);
+			}
+			// The double calendar/diagonal adds use the position's own expiries: without their legs here, the far one is BS-estimated and the opener
+			// scorer cannot value the add.
+			var addGeometries = DoubleAddGeometries(ListedStrikes(quotes, root, shortLeg.Parsed.ExpiryDate, oppositeCp), ListedStrikes(quotes, longLeg.Parsed.Root, longLeg.Parsed.ExpiryDate, oppositeCp), spot, oppositeCp);
+			foreach (var (_, addShort, addLong) in addGeometries)
+			{
+				yield return MatchKeys.OccSymbol(root, shortLeg.Parsed.ExpiryDate, addShort, oppositeCp);
+				yield return MatchKeys.OccSymbol(longLeg.Parsed.Root, longLeg.Parsed.ExpiryDate, addLong, oppositeCp);
 			}
 		}
 		else if (kind == StructureKind.Vertical)
@@ -1597,45 +1606,25 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 			bool Listed(string sym) => quotes != null && quotes.ContainsKey(sym);
 			bool Quoted(string sym) => quotes != null && HasLiveQuote(quotes, sym);
-			// Strikes the chain actually lists for (root, expiry, side), ascending. Snapping to these instead
-			// of a fixed StrikeStep grid keeps the add on real contracts (SPY lists $1 near spot, not $0.50).
-			List<decimal> ListedStrikes(DateTime exp, string cp) => quotes == null ? new List<decimal>()
-				: quotes.Keys.Select(ParsingHelpers.ParseOptionSymbol)
-					.Where(p => p != null && ParsingHelpers.RootsMatchForAggregation(p.Root, shortLeg.Parsed.Root, exp) && p.ExpiryDate.Date == exp.Date && p.CallPut == cp)
-					.Select(p => p!.Strike).Distinct().OrderBy(s => s).ToList();
 
-			// Strike grid comes from the FRONT (short) expiry, which the chain fetch populates fully. The far
-			// expiry's snapshot holds only the existing position's own leg (the chain endpoint returns the
-			// front expiry in full and far expiries only on explicit request), so we can't read its ladder —
-			// but SPY lists the same near-spot $1 strikes across expiries (the existing far long proves it),
-			// so the front grid is a sound proxy. Far legs are BS-priced and the add is flagged "estimated".
-			var grid = ListedStrikes(addShortExp, oppCp);
-			var oppShortStrike = oppCp == "P"
-				? grid.Where(s => s <= spot).DefaultIfEmpty(0m).Max()
-				: grid.Where(s => s >= spot).DefaultIfEmpty(0m).Min();
-			// Diagonal long = next grid strike further OTM than the short.
-			var diagLongStrike = oppCp == "P"
-				? grid.Where(s => s < oppShortStrike).DefaultIfEmpty(0m).Max()
-				: grid.Where(s => s > oppShortStrike).DefaultIfEmpty(0m).Min();
-
-			var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, addShortExp, oppShortStrike, oppCp);
-			var ivNewShort = ResolveIV(newShortSym, settings, quotes);
-			var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, oppShortStrike, dteNewShort, ivNewShort, oppCp, dividends);
-			var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, origShortExp.Date + OptionMath.MarketClose, addShortExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), oppShortStrike, MarketClock.CloseToClose(shortLeg.Parsed.Root, origShortExp, addShortExp, minDays: 1), OptionMath.RiskFreeRate, ivNewShort, oppCp);
+			// Strikes come from what each expiry actually lists: the short from the front expiry, the long from the far one (whose chain the up-front
+			// fetch requests). The far expiry can list fewer strikes than the front — on 2026-11-20 SPY listed a 690 put for Dec 11 but no 691 — so a
+			// calendar takes a strike both list. Without a far-expiry chain the front grid stands in, and the far leg is BS-priced ("estimated").
+			var frontGrid = ListedStrikes(quotes, shortLeg.Parsed.Root, addShortExp, oppCp);
+			var farGrid = ListedStrikes(quotes, longLeg.Parsed.Root, addLongExp, oppCp);
 
 			// Build both add geometries, then flag the one with the best incremental EV per added margin.
-			var pending = new List<(string variant, decimal longStrike, string newLongSym, decimal newLongMidExec, decimal cashPerShare, decimal newPositionValuePerShare, decimal evNewPerShare, decimal newMargin, bool estimated, decimal efficiency)>();
-			foreach (var (variant, longStrike) in new[]
+			var pending = new List<(string variant, decimal shortStrike, string newShortSym, decimal newShortMidExec, decimal longStrike, string newLongSym, decimal newLongMidExec, decimal cashPerShare, decimal newPositionValuePerShare, decimal evNewPerShare, decimal newMargin, bool estimated, decimal efficiency)>();
+			foreach (var geometry in DoubleAddGeometries(frontGrid, farGrid, spot, oppCp))
 			{
-				("double calendar", oppShortStrike),
-				("double diagonal", diagLongStrike)
-			})
-			{
-				if (oppShortStrike <= 0m || longStrike <= 0m) continue;
+				var (variant, shortStrike, longStrike) = geometry;
+				var newShortSym = MatchKeys.OccSymbol(shortLeg.Parsed.Root, addShortExp, shortStrike, oppCp);
 				var newLongSym = MatchKeys.OccSymbol(longLeg.Parsed.Root, addLongExp, longStrike, oppCp);
-				// Require the SHORT leg to be a listed front-expiry strike (avoids phantom near legs). The far
-				// long leg's existence is inferred from the front grid; it's BS-priced when not live-quoted.
-				if (quotes != null && !Listed(newShortSym)) continue;
+				// Both legs must be listed contracts when there is a chain: no phantom near legs, and no far leg the far expiry does not list.
+				if (quotes != null && (!Listed(newShortSym) || (farGrid.Count > 0 && !Listed(newLongSym)))) continue;
+				var ivNewShort = ResolveIV(newShortSym, settings, quotes);
+				var newShortMidExec = LiveOrBsMid(quotesForPricing, newShortSym, spot, shortStrike, dteNewShort, ivNewShort, oppCp, dividends);
+				var newShortAtOrigExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, origShortExp.Date + OptionMath.MarketClose, addShortExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), shortStrike, MarketClock.CloseToClose(shortLeg.Parsed.Root, origShortExp, addShortExp, minDays: 1), OptionMath.RiskFreeRate, ivNewShort, oppCp);
 				var ivNewLong = ResolveIV(newLongSym, settings, quotes);
 				var newLongMidExec = LiveOrBsMid(quotesForPricing, newLongSym, spot, longStrike, dteNewLong, ivNewLong, oppCp, dividends);
 				var cashPerShare = newShortMidExec - newLongMidExec; // debit (negative) to open the new spread
@@ -1646,13 +1635,13 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var newLegsForEv = new List<(decimal, DateTime, decimal, bool, string)>
 				{
 					(longStrike, addLongExp, ivNewLong, true, oppCp),
-					(oppShortStrike, addShortExp, ivNewShort, false, oppCp),
+					(shortStrike, addShortExp, ivNewShort, false, oppCp),
 				};
 				var evNewPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, newLegsForEv, origShortExp, asOf, spot, ivNewShort, dividends);
 				var newMargin = Math.Max(-cashPerShare, 0m) * 100m;           // long debit spread: margin = debit paid
 				var estimated = !Quoted(newShortSym) || !Quoted(newLongSym);
 				var efficiency = ExpectedProfitReturn(evNewPerShare, -cashPerShare, newMargin);
-				pending.Add((variant, longStrike, newLongSym, newLongMidExec, cashPerShare, newPositionValuePerShare, evNewPerShare, newMargin, estimated, efficiency));
+				pending.Add((variant, shortStrike, newShortSym, newShortMidExec, longStrike, newLongSym, newLongMidExec, cashPerShare, newPositionValuePerShare, evNewPerShare, newMargin, estimated, efficiency));
 			}
 
 			var bestEfficiency = pending.Count > 0 ? pending.Max(x => x.efficiency) : 0m;
@@ -1660,14 +1649,14 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			{
 				var isBest = pending.Count > 1 && a.efficiency == bestEfficiency && a.efficiency > 0m; // > 0 = the add is expected to make money
 				var est = a.estimated ? " [estimated]" : "";
-				var strikeDesc = a.variant == "double calendar" ? $"${oppShortStrike:F2}" : $"${oppShortStrike:F2}/${a.longStrike:F2}";
+				var strikeDesc = a.shortStrike == a.longStrike ? $"${a.shortStrike:F2}" : $"${a.shortStrike:F2}/${a.longStrike:F2}";
 				var effPct = FormatExpectedProfitReturn(a.evNewPerShare, -a.cashPerShare, a.newMargin, a.efficiency);
 				var bestNote = isBest ? " — best add (highest expected profit on added capital)" : "";
 				EmitAdd(list, legs, settings.Cash,
 					name: $"Add {sideLabel} {strikeDesc} {addShortExp:MM-dd}/{addLongExp:MM-dd} ({a.variant}, keep existing){est}",
-					newShortSym: newShortSym,
+					newShortSym: a.newShortSym,
 					newLongSym: a.newLongSym,
-					newShortPrice: newShortMidExec,
+					newShortPrice: a.newShortMidExec,
 					newLongPrice: a.newLongMidExec,
 					cashPerShareOfChange: a.cashPerShare,
 					newProjectedPerShare: a.newPositionValuePerShare,
@@ -1675,7 +1664,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					marginPerContract: a.newMargin,
 					daysToTarget: origShortDte,
 					rationale: $"add a {sideLabel} {a.variant.Split(' ')[1]} at {strikeDesc} (debit ${-a.cashPerShare:F2}/share at mid){(a.estimated ? ", BS-estimated (leg not live-quoted)" : "")}; pinned ${a.newPositionValuePerShare:F2}",
-					addedLegs: [UnitLeg(newShortSym, LegAction.Sell, newShortMidExec, new OptionParsed(shortLeg.Parsed.Root, addShortExp, oppCp, oppShortStrike)), UnitLeg(a.newLongSym, LegAction.Buy, a.newLongMidExec, new OptionParsed(longLeg.Parsed.Root, addLongExp, oppCp, a.longStrike))],
+					addedLegs: [UnitLeg(a.newShortSym, LegAction.Sell, a.newShortMidExec, new OptionParsed(shortLeg.Parsed.Root, addShortExp, oppCp, a.shortStrike)), UnitLeg(a.newLongSym, LegAction.Buy, a.newLongMidExec, new OptionParsed(longLeg.Parsed.Root, addLongExp, oppCp, a.longStrike))],
 					expectedUnchangedPerShare: holdEvPerShare,
 					expectedNewPerShare: a.evNewPerShare,
 					evNote: $"new spread expected value ${a.evNewPerShare:F2}/share, 2 legs of slippage not deducted; {effPct}{bestNote}");
@@ -1710,6 +1699,31 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
 	}
+
+	/// <summary>Strikes the chain lists for (<paramref name="root"/>, <paramref name="expiry"/>, <paramref name="callPut"/>), ascending; empty without a chain.
+	/// Snapping to these instead of a fixed StrikeStep grid keeps an add on real contracts (SPY lists $1 near spot, not $0.50).</summary>
+	internal static List<decimal> ListedStrikes(IReadOnlyDictionary<string, OptionContractQuote>? quotes, string root, DateTime expiry, string callPut) => quotes == null ? []
+		: quotes.Keys.Select(ParsingHelpers.ParseOptionSymbol)
+			.Where(p => p != null && ParsingHelpers.RootsMatchForAggregation(p.Root, root, expiry) && p.ExpiryDate.Date == expiry.Date && p.CallPut == callPut)
+			.Select(p => p!.Strike).Distinct().OrderBy(k => k).ToList();
+
+	/// <summary>The opposite-side adds' strikes: the double diagonal's short at the first <paramref name="frontGrid"/> strike at or beyond spot on its
+	/// side (puts at or below, calls at or above) and its long at the next <paramref name="farGrid"/> strike further out of the money; the double
+	/// calendar at the first strike at or beyond spot that both expiries list. An empty <paramref name="farGrid"/> (far expiry not fetched) falls
+	/// back to the front grid. A geometry whose strikes the grids cannot supply is left out.</summary>
+	internal static IEnumerable<(string Variant, decimal ShortStrike, decimal LongStrike)> DoubleAddGeometries(IReadOnlyList<decimal> frontGrid, IReadOnlyList<decimal> farGrid, decimal spot, string callPut)
+	{
+		var far = farGrid.Count > 0 ? farGrid : frontGrid;
+		var calendarStrike = FirstAtOrBeyond(frontGrid.Intersect(far).ToList(), spot, callPut);
+		if (calendarStrike > 0m) yield return ("double calendar", calendarStrike, calendarStrike);
+		var diagonalShort = FirstAtOrBeyond(frontGrid, spot, callPut);
+		var diagonalLong = diagonalShort <= 0m ? 0m : callPut == "P" ? far.Where(k => k < diagonalShort).DefaultIfEmpty(0m).Max() : far.Where(k => k > diagonalShort).DefaultIfEmpty(0m).Min();
+		if (diagonalShort > 0m && diagonalLong > 0m) yield return ("double diagonal", diagonalShort, diagonalLong);
+	}
+
+	/// <summary>The first strike at or below spot for puts, at or above for calls; 0 when there is none.</summary>
+	private static decimal FirstAtOrBeyond(IReadOnlyList<decimal> grid, decimal spot, string callPut) =>
+		callPut == "P" ? grid.Where(k => k <= spot).DefaultIfEmpty(0m).Max() : grid.Where(k => k >= spot).DefaultIfEmpty(0m).Min();
 
 	/// <summary>An add's expected profit per added dollar of margin: (expected value at the target − debit paid) × 100 / margin, so 0 is
 	/// break-even. Not expected value / margin, which reads 100% at break-even. 0 when no margin is added.</summary>

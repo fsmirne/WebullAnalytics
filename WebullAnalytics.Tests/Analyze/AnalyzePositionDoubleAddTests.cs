@@ -101,6 +101,41 @@ public class AnalyzePositionDoubleAddTests
 		Assert.All(partials, p => Assert.Contains("full size would need", p.DisplayRationale, StringComparison.Ordinal));
 	}
 
+	[Fact]
+	public void HypotheticalFetch_RequestsTheDoubleAddsLegsAtThePositionsOwnExpiries()
+	{
+		// 2026-11-20: the far long of the put double diagonal (position's long expiry) was never fetched, so it was BS-estimated and unscoreable.
+		var symbols = AnalyzePositionCommand.EnumerateHypotheticalSymbols(CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, new AnalyzePositionSettings { StrikeStep = 0.50m }, Spot, Chain()).ToHashSet();
+		Assert.Contains(MatchKeys.OccSymbol("SPY", ShortExp, 756m, "P"), symbols);   // short: first listed put at or below spot
+		Assert.Contains(MatchKeys.OccSymbol("SPY", LongExp, 756m, "P"), symbols);    // double calendar long
+		Assert.Contains(MatchKeys.OccSymbol("SPY", LongExp, 755m, "P"), symbols);    // double diagonal long
+	}
+
+	[Fact]
+	public void HypotheticalFetch_StrikesMatchTheAddsTheGeneratorBuilds()
+	{
+		var settings = new AnalyzePositionSettings { IvDefault = 40m, StrikeStep = 0.50m };
+		var symbols = AnalyzePositionCommand.EnumerateHypotheticalSymbols(CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, Chain()).ToHashSet();
+		var adds = AnalyzePositionCommand.GenerateScenarios(CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, AsOf, Chain()).Where(s => s.Name.Contains("double ", StringComparison.Ordinal));
+		Assert.All(adds.SelectMany(a => a.Book!.Single(b => b.Label == "added").Legs), l => Assert.Contains(l.Symbol, symbols));
+	}
+
+	[Fact]
+	public void DoubleAddGeometries_TakeTheFarLegFromWhatTheFarExpiryLists()
+	{
+		// 2026-11-20, spot $691.29: Nov 23 listed 690 and 691 puts, Dec 11 listed 690 but no 691. The calendar moves to 690 (listed on both), the
+		// diagonal keeps its 691 short and buys the next Dec 11 put below it, 690. Neither reaches for the unlisted Dec 11 691.
+		var geometries = AnalyzePositionCommand.DoubleAddGeometries([689m, 690m, 691m, 692m], [685m, 690m, 695m], 691.29m, "P").ToList();
+		Assert.Equal([("double calendar", 690m, 690m), ("double diagonal", 691m, 690m)], geometries);
+	}
+
+	[Fact]
+	public void DoubleAddGeometries_WithoutAFarChain_UseTheFrontGrid()
+	{
+		Assert.Equal([("double calendar", 756m, 756m), ("double diagonal", 756m, 755m)], AnalyzePositionCommand.DoubleAddGeometries([754m, 755m, 756m, 757m], [], Spot, "P").ToList());
+		Assert.Equal([("double calendar", 757m, 757m), ("double diagonal", 757m, 758m)], AnalyzePositionCommand.DoubleAddGeometries([754m, 755m, 756m, 757m, 758m], [], Spot, "C").ToList());
+	}
+
 	[Theory]
 	// The 2026-11-20 SPY 731/732 diagonal scale-up: expected value $5.24 for a $5.015 debit is +4.5%, not the 104% value/cost once shown.
 	[InlineData(5.24, 5.015, 501.5, 0.0449)]
