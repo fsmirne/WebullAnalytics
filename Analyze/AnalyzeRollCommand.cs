@@ -595,6 +595,7 @@ internal static class RollGridRenderer
 
 		var tradeCmds = BuildTradePlaceCommands(rolledLeg, newSymbol, effectiveCredit, oldBid, oldAsk, newBid, newAsk, settings.UseBidAsk);
 		var postRollSpec = BuildPostRollSpec(rolledLeg, newSymbol, staticLegs, effectiveCredit);
+		var analyzeTradeCmd = BuildAnalyzeTradeCommand(rolledLeg, newSymbol, staticLegs, oldBid, oldAsk, newBid, newAsk, settings.UseBidAsk);
 		console.WriteLine();
 		console.MarkupLine("[dim]Commands:[/]");
 		if (tradeCmds.Count == 1)
@@ -607,10 +608,9 @@ internal static class RollGridRenderer
 			console.MarkupLine($"  [dim]Open: [/] {Markup.Escape(tradeCmds[1])}");
 		}
 		if (postRollSpec != null)
-		{
 			console.MarkupLine($"  [dim]Risk: [/] {Markup.Escape($"wa analyze risk \"{postRollSpec}\"")}");
-			console.MarkupLine($"  [dim]Trade:[/] {Markup.Escape($"wa analyze trade \"{postRollSpec}\"")}");
-		}
+		if (analyzeTradeCmd != null)
+			console.MarkupLine($"  [dim]Trade:[/] {Markup.Escape(analyzeTradeCmd)}");
 
 		console.WriteLine();
 
@@ -787,7 +787,53 @@ internal static class RollGridRenderer
 		];
 	}
 
-	/// <summary>Builds the post-roll option leg spec for <c>wa analyze risk</c> and <c>wa analyze trade</c>,
+	/// <summary>Builds a transparent multi-trade <c>wa analyze trade</c> command containing the original position
+	/// followed by the roll leg(s), letting <see cref="PositionTracker"/> compute the exact after-roll basis natively.</summary>
+	internal static string? BuildAnalyzeTradeCommand(
+		RollPositionLeg rolledLeg,
+		string newSymbol,
+		IReadOnlyList<RollPositionLeg> staticLegs,
+		decimal? oldBid,
+		decimal? oldAsk,
+		decimal? newBid,
+		decimal? newAsk,
+		bool useBidAsk = false)
+	{
+		var origParts = new List<string>();
+		var allOrig = new List<RollPositionLeg> { rolledLeg };
+		allOrig.AddRange(staticLegs.Where(l => l.Option != null));
+		foreach (var leg in allOrig)
+		{
+			var action = leg.Action == LegAction.Buy ? "buy" : "sell";
+			var priceToken = leg.ExplicitPrice is decimal p && p > 0m
+				? p.ToString("0.00", CultureInfo.InvariantCulture)
+				: "MID";
+			origParts.Add($"{action}:{leg.Symbol}:{leg.Qty}@{priceToken}");
+		}
+		if (origParts.Count == 0) return null;
+
+		var closeAction = rolledLeg.Action == LegAction.Sell ? "buy" : "sell";
+		var openAction = rolledLeg.Action == LegAction.Sell ? "sell" : "buy";
+		decimal? closePrice = useBidAsk
+			? (rolledLeg.Action == LegAction.Sell ? (oldAsk ?? oldBid) : (oldBid ?? oldAsk))
+			: (oldBid.HasValue && oldAsk.HasValue ? (oldBid.Value + oldAsk.Value) / 2m : (oldAsk ?? oldBid));
+		decimal? openPrice = useBidAsk
+			? (rolledLeg.Action == LegAction.Sell ? (newBid ?? newAsk) : (newAsk ?? newBid))
+			: (newBid.HasValue && newAsk.HasValue ? (newBid.Value + newAsk.Value) / 2m : (newBid ?? newAsk));
+
+		var closeToken = closePrice is decimal cp && cp > 0m ? cp.ToString("0.00", CultureInfo.InvariantCulture) : "MID";
+		var openToken = openPrice is decimal op && op > 0m ? op.ToString("0.00", CultureInfo.InvariantCulture) : "MID";
+		var closeLeg = $"{closeAction}:{rolledLeg.Symbol}:{rolledLeg.Qty}@{closeToken}";
+		var openLeg = $"{openAction}:{newSymbol}:{rolledLeg.Qty}@{openToken}";
+
+		var rollGroup = RollShape.SupportsComboRoll([rolledLeg.Symbol, newSymbol])
+			? $"{closeLeg},{openLeg}"
+			: $"{closeLeg};{openLeg}";
+
+		return $"wa analyze trade \"{string.Join(",", origParts)};{rollGroup}\"";
+	}
+
+	/// <summary>Builds the post-roll option leg spec for <c>wa analyze risk</c>,
 	/// keeping static legs at their original cost basis and folding the roll credit/debit into the new leg's
 	/// effective cost basis (short: oldBasis + rollNet; long: oldBasis − rollNet). Falls back to @MID when
 	/// no original cost basis is available or the adjusted basis is non-positive.</summary>

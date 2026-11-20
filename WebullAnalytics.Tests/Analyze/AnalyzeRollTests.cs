@@ -334,7 +334,25 @@ public sealed class AnalyzeRollTests
 	}
 
 	[Fact]
-	public void BuildReproductionCommands_WithPositionLegs_IncludesStaticLegAndAdjustedBasis()
+	public void BuildAnalyzeTradeCommand_ReplaysOriginalPositionThenRoll()
+	{
+		var oldShortSym = "SPY261123C00732000";
+		var newShortSym = "SPY261125C00727000";
+		var longSym = "SPY261211C00731000";
+		var rolledShort = new RollPositionLeg(oldShortSym, LegAction.Sell, 22, ParsingHelpers.ParseOptionSymbol(oldShortSym), 3.92m, null);
+		var staticLegs = new List<RollPositionLeg>
+		{
+			new(longSym, LegAction.Buy, 22, ParsingHelpers.ParseOptionSymbol(longSym), 12.47m, null)
+		};
+
+		var cmd = RollGridRenderer.BuildAnalyzeTradeCommand(rolledShort, newShortSym, staticLegs, 1.48m, 1.52m, 4.86m, 4.92m);
+		Assert.Equal(
+			$"wa analyze trade \"sell:{oldShortSym}:22@3.92,buy:{longSym}:22@12.47;buy:{oldShortSym}:22@1.50;sell:{newShortSym}:22@4.89\"",
+			cmd);
+	}
+
+	[Fact]
+	public void BuildReproductionCommands_WithPositionLegs_ReplaysOriginalPositionThenRoll()
 	{
 		var oldShortSym = "SPY261123C00732000";
 		var newShortSym = "SPY261127C00731000";
@@ -353,7 +371,8 @@ public sealed class AnalyzeRollTests
 
 		var (_, analyze) = AnalyzePositionCommand.BuildReproductionCommands(sc, new AnalyzePositionSettings(), positionLegs);
 
-		// 3.92 original short + (4.265 - 1.50 = 2.765) roll credit = 6.685 → 6.69; long stays at 12.47
-		Assert.Equal($"wa analyze trade \"sell:{newShortSym}:22@6.69,buy:{longSym}:22@12.47\"", analyze);
+		Assert.Equal(
+			$"wa analyze trade \"sell:{oldShortSym}:22@3.92,buy:{longSym}:22@12.47;buy:{oldShortSym}:22@1.5;sell:{newShortSym}:22@4.265\"",
+			analyze);
 	}
 }

@@ -2350,37 +2350,19 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var splittable = sc.IsRoll && legs.Count == 2 && !RollShape.SupportsComboRoll(legs.Select(l => l.Symbol));
 
 		// Build the `wa analyze trade` command:
-		//  • 2-leg roll with position context → full post-roll position (new rolled leg with roll credit/debit
-		//    folded into its cost basis + static remaining leg(s) at their original cost basis), so `analyze trade`
-		//    shows the complete resulting structure and true campaign break-evens.
+		//  • 2-leg roll with position context → original position followed by the roll leg(s) separated by ';',
+		//    letting PositionTracker compute the exact after-roll basis natively (works for both full and partial rolls).
 		//  • 4-leg reset with position context → the new position being opened (legs[2..3]) rather than
 		//    rendering a bogus panel for the closing legs.
 		//  • Fallback (no position context, adds, closes) → the action's legs directly.
 		string analyze;
-		if (positionLegs is { Count: > 0 } && sc.IsRoll && legs.Count == 2
-			&& decimal.TryParse(legs[0].Price, NumberStyles.Any, CultureInfo.InvariantCulture, out var closeLegPrice)
-			&& decimal.TryParse(legs[1].Price, NumberStyles.Any, CultureInfo.InvariantCulture, out var openLegPrice)
-			&& int.TryParse(legs[0].Qty, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rollQty))
+		if (positionLegs is { Count: > 0 } && sc.IsRoll && legs.Count == 2)
 		{
-			var matched = positionLegs.FirstOrDefault(p => p.Symbol.Equals(legs[0].Symbol, StringComparison.OrdinalIgnoreCase));
-			if (matched != null)
-			{
-				var rollNet = matched.Action == LegAction.Sell ? openLegPrice - closeLegPrice : closeLegPrice - openLegPrice;
-				var rolledPosLeg = new RollPositionLeg(matched.Symbol, matched.Action, rollQty, matched.Parsed, matched.CostBasis, null);
-				var staticPosLegs = positionLegs
-					.Where(p => !p.Symbol.Equals(matched.Symbol, StringComparison.OrdinalIgnoreCase))
-					.Select(p => new RollPositionLeg(p.Symbol, p.Action, rollQty, p.Parsed, p.CostBasis, null))
-					.ToList();
-				var postRollSpec = RollGridRenderer.BuildPostRollSpec(rolledPosLeg, legs[1].Symbol, staticPosLegs, rollNet);
-				analyze = postRollSpec != null
-					? $"wa analyze trade \"{postRollSpec}\"{suffix}"
-					: $"wa analyze trade \"{string.Join(",", legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}"))}\"{suffix}";
-			}
-			else
-			{
-				var analyzeLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}").ToList();
-				analyze = $"wa analyze trade \"{(splittable ? string.Join(";", analyzeLegs) : string.Join(",", analyzeLegs))}\"{suffix}";
-			}
+			var origGroup = string.Join(",", positionLegs.Select(p =>
+				$"{(p.Action == LegAction.Buy ? "buy" : "sell")}:{p.Symbol}:{p.Qty}@{FmtPrice(p.CostBasis)}"));
+			var rollLegs = legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{l.Price}").ToList();
+			var rollGroups = splittable ? string.Join(";", rollLegs) : string.Join(",", rollLegs);
+			analyze = $"wa analyze trade \"{origGroup};{rollGroups}\"{suffix}";
 		}
 		else if (positionLegs is { Count: > 0 } && sc.IsRoll && legs.Count == 4)
 		{
