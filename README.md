@@ -200,7 +200,7 @@ Options:
 The `analyze` command has nine subcommands:
 
 - `analyze trade` — the time-decay grid of a hypothetical trade, on its own (plus `--compare` across `;` groups).
-- `analyze roll` — show a 2D grid of theoretical roll credit/debit across underlying prices × times using Black-Scholes.
+- `analyze roll` — interactively pick an open position (or pass a `<spec>`), sweep `±strikes` × `±exp` on the live option chain to rank candidate rolls side-by-side (with `Hold` pinned at row 0), and drill into the Black-Scholes price-by-time roll-credit grid.
 - `analyze risk` — render a structured risk diagnostic for an option structure using live quotes, a stored proposal, or a recent fill.
 - `analyze position` — analyze an existing, manually specified, proposed, or recently filled option position and rank adjustment scenarios.
 - `analyze gex` — render a 2D dealer-gamma (GEX) and vanna (VEX) exposure heatmap over the option chain (strikes × expirations, build-up, or intraday migration), unusual expiring-contract activity, and call/put walls.
@@ -257,7 +257,7 @@ wa analyze trade --fill 1
 Compares candidate rolls on the live option chain side-by-side (similar to `analyze trade --compare`, with your current "Hold" position pinned as row 0), and lets you drill into the Black-Scholes price-by-time roll-credit grid to find the best time to execute.
 
 ```
-wa analyze roll ["<spec>"] [--leg <OCC|short|long>] [--to <OCC>] [--strikes <N>] [--exp <N>] [--credit-only] [--sort <metric>] [--top <N>] [--cash <amount>] [--account <alias>] [--iv <overrides>] [--date <when>] [report options]
+wa analyze roll ["<spec>"] [--leg <OCC|short|long>] [--to <OCC>] [--strikes <N>] [--exp <N>] [--credit-only] [--sort <metric>] [--top <N>] [--pricing <mid|bidask>] [--cash <amount>] [--account <alias>] [--iv <overrides>] [--date <when>] [report options]
 ```
 
 * **Interactive mode (omit `<spec>`)**: picks from your current open positions (auto-detecting cash/BP), lets you choose which leg to roll (short leg first), prompts for `±strikes` and `±exp`, renders the comparison table, and offers an interactive drill-down into any candidate's price-by-time grid.
@@ -270,8 +270,11 @@ Examples:
 # Interactive: pick an open position, leg, ±strikes, ±exp, then drill into any roll's grid
 wa analyze roll
 
-# Interactive position picker with pre-filled sweep bounds
-wa analyze roll --strikes 3 --exp 3 --credit-only
+# Interactive position picker with pre-filled sweep bounds, showing all candidates
+wa analyze roll --strikes 5 --exp 7 --top 0
+
+# Filter to net-credit rolls priced at bid/ask (natural)
+wa analyze roll --strikes 3 --exp 3 --credit-only --pricing bidask
 
 # Direct chain sweep on a diagonal (rolls the short leg by default, ±2 strikes, ±2 expiries)
 wa analyze roll "sell:GME260424C00025000:10@0.48,buy:GME260515C00025000:10@1.11" --strikes 2 --exp 2
@@ -283,30 +286,20 @@ wa analyze roll "sell:GME260515C00025000:5,buy:GME:500" --strikes 2 --exp 3 --so
 wa analyze roll "sell:GME260424C00025000:499,buy:GME260515C00025000:499" --to GME260424C00024500 --cash 23015
 ```
 
-The output is a 2D grid of roll net values across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-net cell (globally) in **bold underline green**, and any row whose max net matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
+**Comparison table** (chain sweep mode):
 
-When `--side short`, the command also prints a Reg-T margin analysis at the current spot. It shows three numbers: the **current requirement** (ongoing BPR of the pre-roll position), the **new requirement** (BPR required to open the post-roll position as a fresh order), and the **BP delta** between them. This answers "how much additional buying power do I need to free up to execute this roll?" — useful for gauging collateral impact alongside the credit/debit grid.
+- Pins your current **Hold** position as row 0 so every roll is compared apples-to-apples against doing nothing.
+- Columns: `Target (+DTE)`, `Roll Net` (mid), `Natural` (bid/ask), `Cr/Day`, `Delta Δ`, `BP Δ` (red if exceeding available cash), `Margin`, `Max profit`, `Max loss`, `Break-evens`, `POP`, `EV hold`, and `EV managed`.
+- Indicators: `~` marks an expiration where the anchor strike is not listed (snapped to the nearest listed strike, e.g. $5-wide expiries); `⚠` marks a short-leg roll whose target expiry is later than a paired long leg's expiry; `★` highlights an explicit `--to` anchor.
+- Defaults to **MID** pricing everywhere; pass `--pricing bidask` to use natural bid/ask for `Cr/Day`, `--credit-only`, funding checks, and generated commands.
 
-The two sides use different (but realistic) formulas:
+**Price-by-time roll-credit grid** (drill-down or `--to <OCC>`):
 
-- **Current requirement** is the ongoing BPR of the existing position. The debit you paid at entry is treated as sunk (already deducted from cash long ago), so covered structures (standard calendars, bull call/put spreads, covered calls, protective puts) show **$0** here. Inverted diagonals show only the strike-loss collateral. Naked shorts use the Reg-T naked formula.
-- **New requirement** is the BPR required at order time to open the post-roll position from scratch. Covered structures charge the market debit (cash out). Inverted diagonals charge strike-loss collateral plus debit. Naked shorts use the Reg-T naked formula.
-
-Both sides apply to whichever pair type you provide:
-
-- **Without `--pair`**: both sides are treated as naked Reg-T.
-- **With `--pair <SYMBOL:QTY>` (long stock)**: covers short calls one contract per 100 shares (drops to $0 for covered contracts); doesn't cover short puts.
-- **With `--pair <SYMBOL:QTY>` (long option)**: must be the same underlying root and same call/put type. Coverage is valid when — for calls — long strike ≤ short strike and long expiry ≥ short expiry, or — for puts — long strike ≥ short strike and long expiry ≥ short expiry. When the strike relationship is inverted but the expiry relationship holds, the position is an inverted diagonal with a bounded max loss (strike-loss collateral required); when the expiry relationship fails, the long doesn't cover at all and the short falls back to naked.
-
-The output line for each side labels its structure (`calendar`, `covered vertical`, `inverted diagonal (strike loss $X)`, `covered by stock`, `naked`, `no cover (reason)`) and shows the cost breakdown for that side.
-
-If you pass `--cash <amount>`, a funding-check block is printed after the margin analysis:
-
-- **Available** = cash + roll credit (or − roll debit). The roll's natural-market credit/debit is added here because it's received or paid at the moment of execution.
-- **Required** = BP delta.
-- **Net** = Available − Required. A positive value means the roll is fundable; a negative value means you're short that amount in free BP to execute.
-
-Reference levels from `--levels` are included as additional rows in the grid.
+- Shows theoretical roll net values across underlying prices (rows) and times (columns) using Black-Scholes—hourly on expiry day (0–1 DTE) or daily across multi-day horizons. Each cell shows `Close|Open|Net` per share (current price in **bold yellow**, global max net in **bold underline green**). Reference levels from `--levels` are included as extra rows.
+- Prints **Reg-T margin analysis** (current requirement, new requirement, and **BP delta**) automatically using any static paired option or equity legs in the position, plus a **Funding check** when `--cash` is supplied or auto-detected (`Available = cash + roll net`, `Required = BP delta`, `Net = Available − Required`).
+- Emits ready-to-run **Commands** below the header:
+  - **Roll** (or **Close** + **Open**): `wa trade place` priced at mid (or bid/ask with `--pricing bidask`), emitting a single combo order for verticals and same-strike calendars and splitting diagonals into two single-leg orders to match Webull's combo engine rules.
+  - **Risk** and **Trade**: `wa analyze risk` and `wa analyze trade` for the post-roll structure with static legs kept at their original cost basis and the roll credit/debit folded into the new leg (`oldBasis + rollNet` for short rolls, `oldBasis − rollNet` for long rolls), giving exact cumulative campaign break-evens and P&L.
 
 #### `analyze risk`
 
@@ -377,7 +370,11 @@ wa analyze position "sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499
 wa analyze position "buy:GME260620C00025000:10@1.25" --strike-step 0.50 --spot GME:24.88
 ```
 
-The command prints ranked scenarios, emits ready-to-run `wa trade place` and `wa analyze trade` reproduction commands, and appends a machine-readable record to `data/analyze-position.jsonl`. The scenario table shows a probability-weighted **EV** P&L alongside the spot-pinned **Projected** value and ranks scenarios by EV-P&L-per-day; it also includes a "scale up existing" comparator that any proposed add must beat. For a held calendar/diagonal, the add block proposes the opposite-side double (calendar = same strike, diagonal = one strike further OTM), Black-Scholes-pricing the unquoted far leg (marked `[estimated]`), and flags the best add by incremental return per added margin.
+The command prints a compact **Scenario Comparison** summary table (`Cash Δ`, `BP Δ`, `Break-evens`, `POP`, `EV (Total)`, `P&L (Pinned)`), followed by detailed scenario cards with ready-to-run `wa trade place` and `wa analyze trade` reproduction commands, and appends a machine-readable record to `data/analyze-position.jsonl`. For calendars and diagonals on a live chain:
+
+- **Chain-wide roll sweep:** sweeps `±5` strikes × `±7` expiries via `RollCandidateEnumerator` instead of testing only fixed ATM/next-weekly guesses, surfacing the top fundable rolls alongside the best `$0`-BP roll.
+- **AI-scan-powered Reset & unified opener scoring:** when `ai-config` is present, `Hold` and full-size `Roll` scenarios are scored on the same opener scorer as `wa analyze risk` / `wa analyze roll` (managed EV + POP), and `Reset` scenarios come from an in-memory `OpenCandidateEvaluator` (`wa ai scan`) run over the live chain (with `LongCalendar` enabled alongside the strategy's configured structures so calendars compete fairly under the same liquidity, regime, and EV gates).
+- **Pure EV ranking by default:** `--risk` defaults to `0` (pure EV); pass a positive value (e.g. `--risk 0.5`) to penalize scenarios by newly deployed margin/cash.
 
 #### `analyze gex`
 
