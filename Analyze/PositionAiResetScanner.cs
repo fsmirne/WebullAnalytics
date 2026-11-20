@@ -78,25 +78,14 @@ internal static class PositionAiResetScanner
 		bool useMarketImpliedIv,
 		CancellationToken cancellation)
 	{
-		if (kind is not (AnalyzePositionCommand.StructureKind.Calendar or AnalyzePositionCommand.StructureKind.Diagonal))
-			return scenarios;
-		if (positionLegs.Count != 2)
+		if (positionLegs.Count == 0 || !scenarios.Any(s => s.Book != null))
 			return scenarios;
 
-		var shortLeg = positionLegs.FirstOrDefault(l => l.Action == LegAction.Sell);
-		var longLeg = positionLegs.FirstOrDefault(l => l.Action == LegAction.Buy);
-		if (shortLeg == null || longLeg == null) return scenarios;
-
-		var ticker = shortLeg.Parsed.Root;
+		var ticker = positionLegs[0].Parsed.Root;
 		var origQty = positionLegs[0].Qty;
 		var initialDebitPerShare = positionLegs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * l.CostBasis);
-
-		var shortMidNow = MidOf(quotes, shortLeg.Symbol) ?? shortLeg.CostBasis;
-		var longMidNow = MidOf(quotes, longLeg.Symbol) ?? longLeg.CostBasis;
-		var closeNetPerShare = longMidNow - shortMidNow;
+		var closeNetPerShare = positionLegs.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * (MidOf(quotes, l.Symbol) ?? l.CostBasis));
 		var closePnLPerContract = (closeNetPerShare - initialDebitPerShare) * 100m;
-		var closePnLTotal = closePnLPerContract * origQty;
-		var closeProceedsTotal = closeNetPerShare * 100m * origQty;
 
 		// 1. Every scenario that says what it leaves held (its Book) is re-valued on the unified opener scorer — the same one `analyze roll` and
 		// `wa ai scan` use — so Hold, Close, Rolls and Adds are ranked on one model: the P&L of marking everything to mid now, plus the scorer's
@@ -123,10 +112,15 @@ internal static class PositionAiResetScanner
 		}
 		FlagBestAdd(updated, oppositeSideAdds);
 
-		// 2. Run OpenCandidateEvaluator (in-memory, zero extra network calls) to find the best AI scan reset(s).
+		// 2. Run OpenCandidateEvaluator (in-memory, zero extra network calls) to find the best AI scan reset(s) — for a two-leg calendar/diagonal,
+		// whose close order and margin the reset rows are written for.
+		var shortLeg = positionLegs.FirstOrDefault(l => l.Action == LegAction.Sell);
+		var longLeg = positionLegs.FirstOrDefault(l => l.Action == LegAction.Buy);
+		if (kind is not (AnalyzePositionCommand.StructureKind.Calendar or AnalyzePositionCommand.StructureKind.Diagonal) || positionLegs.Count != 2 || shortLeg == null || longLeg == null)
+			return updated;
 		var resetScenarios = await BuildAiScanResetScenariosAsync(
-			scanCfg, perOrderFriction, ticker, shortLeg, longLeg, shortMidNow, longMidNow, closeNetPerShare, closePnLTotal, closeProceedsTotal,
-			origQty, initialDebitPerShare, settings, spot, asOf, quotes, priceCache, cancellation);
+			scanCfg, perOrderFriction, ticker, shortLeg, longLeg, MidOf(quotes, shortLeg.Symbol) ?? shortLeg.CostBasis, MidOf(quotes, longLeg.Symbol) ?? longLeg.CostBasis, closeNetPerShare,
+			closePnLPerContract * origQty, closeNetPerShare * 100m * origQty, origQty, initialDebitPerShare, settings, spot, asOf, quotes, priceCache, cancellation);
 
 		updated.AddRange(resetScenarios);
 		return updated;

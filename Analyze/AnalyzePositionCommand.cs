@@ -1045,19 +1045,28 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var callPut = longLeg.Parsed.CallPut;
 		var quotesForPricing = settings.DateSpec.Kind != AsOfKind.Now || settings.Theoretical ? null : quotes; // --theoretical: force BS pricing even with a live chain
 
-		// 1. Hold (do nothing) — value at expiry = intrinsic.
+		var longOnlyLegs = new List<(decimal, DateTime, decimal, bool, string)> { (longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, iv, true, callPut) };
+
+		// 1. Hold (do nothing). The pinned value is intrinsic at today's spot — for an OTM long, the whole premium lost — so the ranking uses the EV.
 		var valueAtExpiry = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
 		var holdDte = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
-		list.Add(NewScenario("Hold to expiry", longLeg, "—",
+		var holdEvPerShare = ExpectedPositionValuePerShare(longLeg.Parsed.Root, longOnlyLegs, longLeg.Parsed.ExpiryDate, asOf, spot, iv, dividends);
+		list.Add(NewScenarioSpread("Hold to expiry", [longLeg], "—",
 			cashNow: 0m, valueAtTarget: valueAtExpiry, marginDeltaPerContract: 0m, daysToTarget: holdDte,
-			rationale: $"value at expiry ({longLeg.Parsed.ExpiryDate:yyyy-MM-dd}) = intrinsic ${valueAtExpiry:F2}/share"));
+			rationale: $"value at expiry ({longLeg.Parsed.ExpiryDate:yyyy-MM-dd}) = intrinsic ${valueAtExpiry:F2}/share (pinned)",
+			expectedValueAtTarget: holdEvPerShare,
+			book: [new BookStructure("existing", UnitLegs([longLeg]), longLeg.Qty)],
+			evNote: $"EV ${holdEvPerShare:F2}/share at expiry across the spot distribution"));
 
 		// 2. Close now at theoretical mid (or live mid if available).
 		var dteNow = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
 		var midNow = LiveOrBsMid(quotesForPricing, longLeg.Symbol, spot, longLeg.Parsed.Strike, dteNow, iv, callPut, dividends);
-		list.Add(NewScenario("Close now", longLeg, $"SELL {longLeg.Symbol} x{longLeg.Qty} @{FmtPrice(midNow)}",
+		list.Add(NewScenarioSpread("Close now", [longLeg], $"SELL {longLeg.Symbol} x{longLeg.Qty} @{FmtPrice(midNow)}",
 			cashNow: midNow, valueAtTarget: 0m, marginDeltaPerContract: 0m, daysToTarget: 1,
-			rationale: $"sell at mid ${midNow:F2}/share → close position"));
+			rationale: $"sell at mid ${midNow:F2}/share → close position",
+			expectedValueAtTarget: 0m,
+			book: [],
+			orderContractsNow: longLeg.Qty));
 
 		// 3. Convert to calendar: sell a near-expiry short at same strike.
 		var shortExpiry = NextWeeklyFromToday();
@@ -1071,11 +1080,18 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var longAtShortExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, shortExpiry.Date + OptionMath.MarketClose, longLeg.Parsed.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longLeg.Parsed.Strike, MarketClock.CloseToClose(longLeg.Parsed.Root, shortExpiry, longLeg.Parsed.ExpiryDate, minDays: 1), OptionMath.RiskFreeRate, iv, callPut);
 			var shortAtShortExp = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
 			var net = longAtShortExp - shortAtShortExp;
+			var calendarLegs = new List<(decimal, DateTime, decimal, bool, string)> { (longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, iv, true, callPut), (longLeg.Parsed.Strike, shortExpiry, ivNewShort, false, callPut) };
+			var calendarEvPerShare = ExpectedPositionValuePerShare(longLeg.Parsed.Root, calendarLegs, shortExpiry, asOf, spot, ivNewShort, dividends);
+			var newShort = UnitLeg(newShortSym, LegAction.Sell, shortMid, new OptionParsed(longLeg.Parsed.Root, shortExpiry, callPut, longLeg.Parsed.Strike));
 			// margin delta: becomes a calendar (strike_loss = 0). Current is single long (no margin). Delta = 0.
-			list.Add(NewScenario($"Convert to calendar (sell {shortExpiry:yyyy-MM-dd} @ ${longLeg.Parsed.Strike:F2})",
-				longLeg, $"SELL {newShortSym} x{longLeg.Qty} @{FmtPrice(shortMid)}",
+			list.Add(NewScenarioSpread($"Convert to calendar (sell {shortExpiry:yyyy-MM-dd} @ ${longLeg.Parsed.Strike:F2})",
+				[longLeg], $"SELL {newShortSym} x{longLeg.Qty} @{FmtPrice(shortMid)}",
 				cashNow: shortMid, valueAtTarget: net, marginDeltaPerContract: 0m, daysToTarget: dteShort,
-				rationale: $"collect ${shortMid:F2}/share short premium; at short exp: long ${longAtShortExp:F2} - short ${shortAtShortExp:F2} = ${net:F2}"));
+				rationale: $"collect ${shortMid:F2}/share short premium; at short exp: long ${longAtShortExp:F2} - short ${shortAtShortExp:F2} = ${net:F2} (pinned)",
+				expectedValueAtTarget: calendarEvPerShare,
+				book: [new BookStructure("calendar", [.. UnitLegs([longLeg]), newShort], longLeg.Qty)],
+				evNote: $"EV ${calendarEvPerShare:F2}/share at short exp",
+				orderContractsNow: longLeg.Qty));
 		}
 
 		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
@@ -1918,15 +1934,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	}
 
 	// ─── Helpers ─────────────────────────────────────────────────────────────
-
-	private static Scenario NewScenario(string name, PositionSnapshot longLeg, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal marginDeltaPerContract, int daysToTarget, string rationale, bool isRoll = false)
-	{
-		var initialDebit = longLeg.CostBasis;
-		var cashPerContract = cashNow * 100m;
-		var valuePerContract = valueAtTarget * 100m;
-		var totalPerContract = valuePerContract + cashPerContract - initialDebit * 100m;
-		return new Scenario(name, actionSummary, cashPerContract, valuePerContract, totalPerContract, marginDeltaPerContract, longLeg.Qty, daysToTarget, rationale, isRoll, RankScore: totalPerContract / Math.Max(1m, daysToTarget));
-	}
 
 	private static Scenario NewScenarioSpread(string name, IReadOnlyList<PositionSnapshot> legs, string actionSummary, decimal cashNow, decimal valueAtTarget, decimal marginDeltaPerContract, int daysToTarget, string rationale, bool isRoll = false, decimal? expectedValueAtTarget = null, IReadOnlyList<decimal>? breakEvens = null, IReadOnlyList<BookStructure>? book = null, string? evNote = null, decimal orderContractsNow = 0m)
 	{

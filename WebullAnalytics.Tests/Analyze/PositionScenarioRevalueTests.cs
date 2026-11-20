@@ -164,4 +164,24 @@ public class PositionScenarioRevalueTests
 		Assert.All(scenarios.Where(s => s.IsRoll && s.Name.StartsWith("Roll", StringComparison.Ordinal)), r => Assert.Contains(r.Book!, b => b.Label == "rolled"));
 		Assert.All(scenarios.Where(s => s.Book != null).SelectMany(s => s.Book!).SelectMany(b => b.Legs), l => Assert.Equal(1, l.Qty));
 	}
+
+	[Fact]
+	public void SingleLongScenariosAreValuedNotPinned()
+	{
+		// The 11-20 lone 731C x22: Hold pinned at today's intrinsic ($0, the whole premium lost) ranked last, so "Close now" always won.
+		var longLeg = new AnalyzePositionCommand.PositionSnapshot(Existing[1].Symbol, LegAction.Buy, 22, 8.64m, Existing[1].Parsed);
+		var scenarios = AnalyzePositionCommand.GenerateScenarios([longLeg], AnalyzePositionCommand.StructureKind.SingleLong, new AnalyzePositionSettings { IvDefault = 24m, StrikeStep = 1m }, 691m, new DateTime(2026, 11, 20), quotes: null);
+
+		var hold = Assert.Single(scenarios, s => s.Name == "Hold to expiry");
+		Assert.True(hold.ExpectedPnLPerContract > hold.TotalPnLPerContract);   // an OTM call is worth more than its intrinsic
+		Assert.Equal(("existing", 22), (Assert.Single(hold.Book!).Label, hold.Book![0].Qty));
+		var close = Assert.Single(scenarios, s => s.Name == "Close now");
+		Assert.Empty(close.Book!);
+		Assert.Equal(22m, close.OrderContractsNow);
+		var calendar = Assert.Single(scenarios, s => s.Name.StartsWith("Convert to calendar", StringComparison.Ordinal));
+		var held = Assert.Single(calendar.Book!);
+		Assert.Equal([LegAction.Buy, LegAction.Sell], held.Legs.Select(l => l.Action));
+		Assert.All(held.Legs, l => Assert.Equal(1, l.Qty));
+		Assert.NotNull(calendar.ExpectedPnLPerContract);
+	}
 }
