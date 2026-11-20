@@ -408,7 +408,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return true;
 	}
 
-	private static async Task<(decimal Cash, string AccountAlias)?> TryResolveAvailableCashAsync(string? accountFlag, CancellationToken cancellation)
+	internal static async Task<(decimal Cash, string AccountAlias)?> TryResolveAvailableCashAsync(string? accountFlag, CancellationToken cancellation)
 	{
 		var config = TradeConfig.Load(quiet: true);
 		if (config == null) return null;
@@ -441,7 +441,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	// ─── Load from trade log ──────────────────────────────────────────────────
 
-	private static (List<PositionSnapshot>? snapshots, string? error) SelectPositionFromLog()
+	internal static (List<PositionSnapshot>? snapshots, string? error) SelectPositionFromLog(string title = "Select a position to analyze:")
 	{
 		var ordersPath = Program.ResolvePath(Program.OrdersPath);
 		if (!File.Exists(ordersPath))
@@ -460,7 +460,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var chosen = strategies.Count == 1
 			? strategies[0]
 			: AnsiConsole.Prompt(new SelectionPrompt<(PositionRow parent, List<PositionRow> legs)>()
-				.Title("Select a position to analyze:")
+				.Title(title)
 				.UseConverter(item => FormatPositionLabel(item.parent, item.legs))
 				.AddChoices(strategies));
 

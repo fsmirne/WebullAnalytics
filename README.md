@@ -254,42 +254,33 @@ wa analyze trade --fill 1
 
 #### `analyze roll`
 
-Computes the theoretical roll credit/debit at various underlying prices using Black-Scholes, helping you find the optimal moment to roll a leg.
+Compares candidate rolls on the live option chain side-by-side (similar to `analyze trade --compare`, with your current "Hold" position pinned as row 0), and lets you drill into the Black-Scholes price-by-time roll-credit grid to find the best time to execute.
 
 ```
-wa analyze roll "<spec>" [--side long|short] [--pair <SYMBOL:QTY>] [--cash <amount>] [--iv <overrides>] [--date <when>] [report options]
+wa analyze roll ["<spec>"] [--leg <OCC|short|long>] [--to <OCC>] [--strikes <N>] [--exp <N>] [--credit-only] [--sort <metric>] [--top <N>] [--cash <amount>] [--account <alias>] [--iv <overrides>] [--date <when>] [report options]
 ```
 
-The `<spec>` is `OLD_SYMBOL>NEW_SYMBOL:QTY`. Live Webull quotes are fetched automatically (requires sniffed headers via the `sniff` command).
-
-`--side` selects the math:
-
-- **`short`** (default): closes a short on the OLD strike (buy at ask), opens a short on the NEW strike (sell at bid). Credit = `new_bid − old_ask`.
-- **`long`**: closes a long on the OLD strike (sell at bid), opens a long on the NEW strike (buy at ask). Credit = `old_bid − new_ask`.
+* **Interactive mode (omit `<spec>`)**: picks from your current open positions (auto-detecting cash/BP), lets you choose which leg to roll (short leg first), prompts for `±strikes` and `±exp`, renders the comparison table, and offers an interactive drill-down into any candidate's price-by-time grid.
+* **Direct mode (pass `<spec>`)**: uses the same `ACTION:SYMBOL:QTY[@PRICE],...` format as `analyze position` / `analyze trade` (`@PRICE` optional, defaults to `MID`), skips all prompts, and outputs directly—ideal for scripts, `--output text`, or LLMs.
+* **Price-by-time grid**: pass `--to <NEW_SYMBOL>` without `--strikes`/`--exp` to jump straight to the 2D roll-credit grid (or combine `--to` with `--strikes`/`--exp` to anchor the sweep on that contract).
 
 Examples:
 
 ```bash
-# Short-side roll of the $23 short from Apr 10 to Apr 17 (300 contracts)
-wa analyze roll "GME260410C00023000>GME260417C00023000:300"
+# Interactive: pick an open position, leg, ±strikes, ±exp, then drill into any roll's grid
+wa analyze roll
 
-# Same roll but I'm long the old position
-wa analyze roll "GME260410C00023000>GME260417C00023000:300" --side long
+# Interactive position picker with pre-filled sweep bounds
+wa analyze roll --strikes 3 --exp 3 --credit-only
 
-# Roll to a different strike
-wa analyze roll "GME260410C00023000>GME260417C00023500:300"
+# Direct chain sweep on a diagonal (rolls the short leg by default, ±2 strikes, ±2 expiries)
+wa analyze roll "sell:GME260424C00025000:10@0.48,buy:GME260515C00025000:10@1.11" --strikes 2 --exp 2
 
-# Override IV for the analysis
-wa analyze roll "GME260410C00023000>GME260417C00023000:300" --iv GME260410C00023000:37,GME260417C00023000:31
+# Direct chain sweep on a covered call, sorted by credit/day
+wa analyze roll "sell:GME260515C00025000:5,buy:GME:500" --strikes 2 --exp 3 --sort credit-day
 
-# Short-side roll paired with a static long call leg (calendar/diagonal margin)
-wa analyze roll "GME260424C00025000>GME260424C00024500:499" --pair GME260515C00025000:499
-
-# Short-side roll paired with long stock (covered-call margin)
-wa analyze roll "GME260515C00025000>GME260522C00025000:5" --pair GME:500
-
-# Check whether your available cash is enough to fund the roll
-wa analyze roll "GME260424C00025000>GME260424C00024500:499" --pair GME260515C00025000:499 --cash 23015
+# Direct price-by-time roll-credit grid for a specific target contract with cash check
+wa analyze roll "sell:GME260424C00025000:499,buy:GME260515C00025000:499" --to GME260424C00024500 --cash 23015
 ```
 
 The output is a 2D grid of roll net values across underlying prices (rows) and times (columns). For intraday scenarios (0–1 DTE), columns are hourly from 9:30 AM to 4 PM. For multi-day scenarios, columns are daily, adapting to terminal width. Each cell shows `Close|Open|Net` per contract (leg values in grey, net color-coded green for credit / red for debit). The current-price row is rendered in **bold yellow**, the best-net cell (globally) in **bold underline green**, and any row whose max net matches the global best in **green**. Live market credit from bid/ask quotes is shown below the grid.
@@ -521,12 +512,18 @@ analyze position only:
   --log-level <level>     error | information (default) | debug.
 
 analyze roll only:
-  --side <long|short>     Position side. Default: short. See above for the math each side uses.
-  --pair <SYMBOL:QTY>     Static paired leg for spread margin calculation. SYMBOL is an equity ticker or OCC option
-                          symbol; QTY is a positive integer. Only meaningful with --side short.
-  --cash <amount>         Available cash for funding the roll. Prints a Net surplus/shortfall line that combines
-                          cash with the roll's natural-market credit/debit and compares against the BP delta.
-                          Only meaningful with --side short.
+  --leg <OCC|short|long>  Which option leg to roll (defaults to the short leg, or prompted interactively).
+  --to <OCC>              Target OCC option symbol: alone renders its price-by-time grid directly; combined with
+                          --strikes/--exp anchors the chain sweep on that contract.
+  --strikes <n>           Compare ±n listed strikes around the anchor strike (default: 2).
+  --exp <n>               Compare ±n listed expirations around the anchor expiry, clamped at today (default: 2).
+  --credit-only           Show only candidate rolls with net credit ≥ 0 at mid.
+  --sort <metric>         ev (default), pop, credit, natural, credit-day, margin, exp, or strike.
+  --top <n>               Maximum candidate rows to display (default: 15, 0 = all).
+  --cash <amount>         Available cash/BP for funding checks (auto-detected from --account when interactive).
+  --account <alias>       Account alias or ID from api-config.json for cash/BP auto-detection.
+  --pricing <mid|bidask>  Price basis for roll credits, funding checks, and generated commands (default: mid).
+  --calibrated <bool>     Back-solve IV from live bid/ask mid before scoring/pricing (default: true).
 
 analyze gex only:
   --greek <name>          Exposure to map: both (default — gamma + vanna side by side), gamma/gex, or vanna/vex.
