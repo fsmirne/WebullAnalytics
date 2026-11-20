@@ -98,8 +98,10 @@ internal static class PositionAiResetScanner
 		var closePnLTotal = closePnLPerContract * origQty;
 		var closeProceedsTotal = closeNetPerShare * 100m * origQty;
 
-		// 1. Unified opener scoring for Hold and full-size Roll scenarios (same scorer as `analyze roll` / `analyze risk`).
+		// 1. Unified opener scoring for Hold and ALL Roll scenarios (both full and partial — same scorer as `analyze roll` / `analyze risk`).
 		var scoringInputs = await AnalyzeRiskCommand.LoadOpenerScoringInputsAsync(ticker, asOf, includeCurrentBar: !EvaluationDate.IsPast, intradayCache, cancellation);
+		var holdScored = ScoreLegs(positionLegs, quotes, spot, asOf, quoteAsOf, scoringInputs, settings.IvDefault, useMarketImpliedIv);
+		decimal? holdForwardEvPerContract = holdScored?.ManagedExpectedValuePerContract ?? holdScored?.ExpectedValuePerContract;
 		var updated = new List<AnalyzePositionCommand.Scenario>(scenarios.Count);
 
 		foreach (var sc in scenarios)
@@ -110,39 +112,38 @@ internal static class PositionAiResetScanner
 
 			if (sc.ActionSummary == "—")
 			{
-				// Hold scenario: score existing legs at current mid.
-				var scored = ScoreLegs(positionLegs, quotes, spot, asOf, quoteAsOf, scoringInputs, settings.IvDefault, useMarketImpliedIv);
-				if (scored != null && (scored.ManagedExpectedValuePerContract ?? scored.ExpectedValuePerContract) is decimal forwardEvPerContract)
+				if (holdForwardEvPerContract.HasValue)
 				{
-					var campaignEvPerContract = closePnLPerContract + forwardEvPerContract;
 					updated.Add(sc with
 					{
-						ExpectedPnLPerContract = campaignEvPerContract,
-						ProbabilityOfProfit = scored.ProbabilityOfProfit
+						ExpectedPnLPerContract = closePnLPerContract + holdForwardEvPerContract.Value,
+						ProbabilityOfProfit = holdScored!.ProbabilityOfProfit
 					});
 					continue;
 				}
 			}
-			else if (sc.IsRoll && !sc.Name.Contains("· partial", StringComparison.Ordinal))
+			else if (sc.IsRoll)
 			{
-				// Full-size 2-leg roll: reconstruct resulting legs (static long + new rolled short) and score.
-				var newShortSym = ExtractRolledNewShortSymbol(sc.ActionSummary, shortLeg.Symbol);
+				// 2-leg roll (full OR partial): reconstruct resulting legs (static long + new rolled short) and score.
+				var (newShortSym, rolledQty) = ExtractRolledNewShort(sc.ActionSummary, shortLeg.Symbol, origQty);
 				if (newShortSym != null && ParsingHelpers.ParseOptionSymbol(newShortSym) is { } newShortParsed && quotes.ContainsKey(newShortSym))
 				{
 					var newShortMid = MidOf(quotes, newShortSym) ?? 0m;
 					var postRollLegs = new List<AnalyzePositionCommand.PositionSnapshot>
 					{
-						new(longLeg.Symbol, LegAction.Buy, origQty, longMidNow, longLeg.Parsed),
-						new(newShortSym, LegAction.Sell, origQty, newShortMid, newShortParsed)
+						new(longLeg.Symbol, LegAction.Buy, rolledQty, longMidNow, longLeg.Parsed),
+						new(newShortSym, LegAction.Sell, rolledQty, newShortMid, newShortParsed)
 					};
 					var scored = ScoreLegs(postRollLegs, quotes, spot, asOf, quoteAsOf, scoringInputs, settings.IvDefault, useMarketImpliedIv);
-					if (scored != null && (scored.ManagedExpectedValuePerContract ?? scored.ExpectedValuePerContract) is decimal forwardEvPerContract)
+					if (scored != null && (scored.ManagedExpectedValuePerContract ?? scored.ExpectedValuePerContract) is decimal rollForwardEvPerContract)
 					{
-						var campaignEvPerContract = closePnLPerContract + forwardEvPerContract;
+						var unchangedQty = Math.Max(0, origQty - rolledQty);
+						var totalForwardEv = rollForwardEvPerContract * rolledQty + (holdForwardEvPerContract ?? 0m) * unchangedQty;
+						var campaignEvPerContract = closePnLPerContract + totalForwardEv / origQty;
 						updated.Add(sc with
 						{
 							ExpectedPnLPerContract = campaignEvPerContract,
-							ProbabilityOfProfit = scored.ProbabilityOfProfit
+							ProbabilityOfProfit = rolledQty == origQty ? scored.ProbabilityOfProfit : sc.ProbabilityOfProfit
 						});
 						continue;
 					}
@@ -290,16 +291,21 @@ internal static class PositionAiResetScanner
 		return AnalyzeRiskCommand.BuildProbe(diagLegs, spot, asOf, quoteAsOf, quotes, scoringInputs, ivDefault, scoreAtCostBasis: false, useMarketImpliedIv).OpenerScore;
 	}
 
-	private static string? ExtractRolledNewShortSymbol(string actionSummary, string oldShortSymbol)
+	private static (string? Symbol, int Qty) ExtractRolledNewShort(string actionSummary, string oldShortSymbol, int defaultQty)
 	{
 		foreach (var part in actionSummary.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
 		{
 			var tokens = part.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-			if (tokens.Length >= 2 && tokens[0].Equals("SELL", StringComparison.OrdinalIgnoreCase)
+			if (tokens.Length >= 3 && tokens[0].Equals("SELL", StringComparison.OrdinalIgnoreCase)
 				&& !tokens[1].Equals(oldShortSymbol, StringComparison.OrdinalIgnoreCase))
-				return tokens[1];
+			{
+				var qty = int.TryParse(tokens[2].TrimStart('x'), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedQty) && parsedQty > 0
+					? parsedQty
+					: defaultQty;
+				return (tokens[1], qty);
+			}
 		}
-		return null;
+		return (null, defaultQty);
 	}
 
 	private static decimal EstimateProposalMarginTotal(OpenProposal prop, int qty, decimal spot, IReadOnlyDictionary<string, OptionContractQuote> quotes)

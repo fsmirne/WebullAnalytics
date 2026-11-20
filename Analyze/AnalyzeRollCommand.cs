@@ -284,13 +284,17 @@ internal static class RollCandidateEnumerator
 		return (candidates, skippedIlliquid);
 	}
 
-	/// <summary>A candidate is usable when it has a two-sided quote (bid and ask) and the side we execute on is non-zero
-	/// (selling requires bid &gt; 0; buying requires ask &gt; 0).</summary>
+	/// <summary>A candidate is usable when it has a two-sided quote (bid and ask), the execution side is non-zero,
+	/// it is not a dead zero-OI/zero-volume contract, and its spread isn't grossly wide (&gt;15% on $1+ options).</summary>
 	internal static bool IsLiquidEnough(OptionContractQuote quote, LegAction rolledAction)
 	{
 		if (quote.Bid is not decimal bid || quote.Ask is not decimal ask) return false;
 		if (ask <= 0m) return false;
-		return rolledAction == LegAction.Sell ? bid > 0m : ask > 0m;
+		if (rolledAction == LegAction.Sell && bid <= 0m) return false;
+		if (quote.OpenInterest is 0 && (quote.Volume ?? 0) == 0) return false;
+		var mid = (bid + ask) / 2m;
+		if (mid >= 1.00m && (ask - bid) / mid > 0.15m) return false;
+		return true;
 	}
 
 	private static int FindNearestIndex<T>(IReadOnlyList<T> sorted, T target, Func<T, T, double> distance)
