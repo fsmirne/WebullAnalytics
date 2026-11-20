@@ -278,4 +278,37 @@ public sealed class AnalyzeRollTests
 		var noBasis = RollGridRenderer.BuildPostRollSpec(rolledShort with { ExplicitPrice = null }, newShortSym, [staticLegs[0] with { ExplicitPrice = null }], +3.34m);
 		Assert.Equal("sell:SPY261125C00727000:22@MID,buy:SPY261211C00731000:22@MID", noBasis);
 	}
+
+	[Fact]
+	public void AnalyzePosition_SpreadScenarios_AllPopulateExpectedPnL()
+	{
+		var asOf = new DateTime(2026, 11, 19);
+		var shortExp = new DateTime(2026, 11, 23);
+		var nextExp = new DateTime(2026, 11, 27);
+		var longExp = new DateTime(2026, 12, 11);
+
+		var quotes = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
+		foreach (var kv in BuildChain("SPY", "C", [shortExp, nextExp, longExp], [715m, 727m, 731m, 732m], bid: 4.00m, ask: 4.10m))
+			quotes[kv.Key] = kv.Value;
+
+		var shortSym = MatchKeys.OccSymbol("SPY", shortExp, 732m, "C");
+		var longSym = MatchKeys.OccSymbol("SPY", longExp, 731m, "C");
+		quotes[shortSym] = Quote(shortSym, 1.48m, 1.52m, iv: 0.24m);
+		quotes[longSym] = Quote(longSym, 9.93m, 10.01m, iv: 0.23m);
+
+		var legs = new List<AnalyzePositionCommand.PositionSnapshot>
+		{
+			new(shortSym, LegAction.Sell, 10, 3.92m, ParsingHelpers.ParseOptionSymbol(shortSym)!),
+			new(longSym, LegAction.Buy, 10, 12.47m, ParsingHelpers.ParseOptionSymbol(longSym)!)
+		};
+
+		var scenarios = AnalyzePositionCommand.GenerateScenarios(
+			legs, AnalyzePositionCommand.StructureKind.Diagonal, new AnalyzePositionSettings { StrikeStep = 1m },
+			spot: 715m, asOf: asOf, quotes: quotes);
+
+		Assert.NotEmpty(scenarios);
+		Assert.Contains(scenarios, s => s.IsRoll);
+		Assert.Contains(scenarios, s => s.Name.StartsWith("Reset to ", StringComparison.Ordinal));
+		Assert.All(scenarios, s => Assert.True(s.ExpectedPnLPerContract.HasValue, $"Scenario '{s.Name}' is missing ExpectedPnLPerContract"));
+	}
 }
