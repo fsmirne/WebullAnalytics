@@ -506,7 +506,7 @@ analyze position only:
   --iv-default <pct>      Fallback implied volatility used when live IV is unavailable (default: 40).
   --strike-step <step>    Strike increment used for near-spot scenario generation (default: 0.50).
   --cash <amount>         Available cash/BP used to flag scenarios as fundable or not fundable.
-  --risk <value>          Risk-aversion weight for ranking scenarios by capital at stake (default: 0.5).
+  --risk <value>          Risk-aversion weight for ranking scenarios by capital at stake (default: 0, pure EV).
   --account <alias>       Account alias or ID from api-config.json used to auto-detect available cash/BP
                           when you select an existing open position.
   --log-level <level>     error | information (default) | debug.

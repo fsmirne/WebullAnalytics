@@ -50,8 +50,8 @@ internal sealed class AnalyzePositionSettings : AnalyzeIvOverrideSettings
 	public decimal? Cash { get; set; }
 
 	[CommandOption("--risk <VALUE>")]
-	[Description("Risk-aversion weight for ranking: each $1 of capital put at stake (added margin + net debit deployed) discounts the suggestion's expected $ by this much, so de-risking (close/reduce) ranks higher. 0 = pure projected return (legacy). Default 0.5.")]
-	public decimal Risk { get; set; } = 0.5m;
+	[Description("Risk-aversion weight for ranking: each $1 of capital put at stake (added margin + net debit deployed) discounts the suggestion's expected $ by this much, so de-risking (close/reduce) ranks higher. Default 0 = pure EV.")]
+	public decimal Risk { get; set; } = 0m;
 
 	[CommandOption("--account <VALUE>")]
 	[Description("Account alias or ID from api-config.json used to auto-detect cash/BP when selecting an existing open position.")]
@@ -356,6 +356,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			events: positionEvents);
 
 		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, EvaluationDate.Today, quotes, technicalBias, dividends);
+		if (aiCfg != null && quotes != null && !settings.Theoretical)
+		{
+			var asOfNow = asOfMarket?.Instant ?? DateTime.Now;
+			var quoteAsOf = asOfMarket?.Instant ?? OptionMath.ObservationInstant();
+			scenarios = await PositionAiResetScanner.ApplyAsync(
+				scenarios, positionLegs, structure, settings, aiCfg, spot.Value,
+				asOfNow, quoteAsOf, quotes, priceCache, intradayCache, !hasSpotOverride, cancellation);
+			scenarios = OrderScenariosForDisplay(scenarios, settings.Cash, settings.Risk);
+		}
 
 		var toText = settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase);
 		StringWriter? stringWriter = null;
@@ -671,7 +680,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal? ExpectedPnLPerContract = null,	// probability-weighted EV at target (lognormal spot grid), vs the spot-pinned ProjectedValue. Null when not computed for this scenario type.
 		decimal AssignmentPenaltyPerContract = 0m,	// per-contract assignment-risk charge (verticals only); subtracted in the risk-adjusted rank.
 		decimal PeakCashPerContract = 0m,			// up-front cash of the FIRST order when the scenario executes as sequential single-leg orders (non-calendar rolls: the buy-to-close cost) — the sell credit isn't available until that order fills. 0 when one net-priced combo covers the whole change.
-		IReadOnlyList<decimal>? BreakEvens = null)	// campaign break-even spot price(s) at this scenario's target expiry (null for Close all or unsupported shapes).
+		IReadOnlyList<decimal>? BreakEvens = null,	// campaign break-even spot price(s) at this scenario's target expiry (null for Close all or unsupported shapes).
+		decimal? ProbabilityOfProfit = null)		// probability of profit [0, 1] from the opener scorer when available.
 	{
 		/// <summary>Per-contract buying power the scenario actually consumes. Margin delta alone is wrong for
 		/// rolls: a roll can be margin-neutral yet cost a large cash debit, and a split (two-order) roll must
@@ -2201,7 +2211,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		{
 			var summary = new Table { Expand = true }.Border(ascii ? TableBorder.Ascii : TableBorder.Rounded);
 			summary.AddColumn("Scenario");
-			foreach (var header in new[] { "Cash Δ", "BP Δ", "Break-evens", "EV (Total)", "P&L (Pinned)" })
+			foreach (var header in new[] { "Cash Δ", "BP Δ", "Break-evens", "POP", "EV (Total)", "P&L (Pinned)" })
 				summary.AddColumn(new TableColumn(header).RightAligned());
 
 			foreach (var sc in scenarios)
@@ -2221,6 +2231,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var beCell = sc.BreakEvens is { Count: > 0 }
 					? string.Join(" / ", sc.BreakEvens.Select(b => b.ToString("0.00", CultureInfo.InvariantCulture)))
 					: "—";
+				var popCell = sc.ProbabilityOfProfit is decimal pop ? $"{pop * 100m:0.0}%" : "—";
 				var evCell = sc.ExpectedPnLPerContract.HasValue
 					? (sc.ExpectedPnLPerContract.Value * sc.Qty >= 0m
 						? $"[green]+${sc.ExpectedPnLPerContract.Value * sc.Qty:N0}[/]"
@@ -2229,12 +2240,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var pnlTotal = sc.TotalPnLPerContract * sc.Qty;
 				var pnlCell = pnlTotal >= 0m ? $"[green]+${pnlTotal:N0}[/]" : $"[red]-${Math.Abs(pnlTotal):N0}[/]";
 
-				summary.AddRow(nameCell, cashCell, bpCell, beCell, evCell, pnlCell);
+				summary.AddRow(nameCell, cashCell, bpCell, beCell, popCell, evCell, pnlCell);
 			}
 
+			var rankHeader = settings.Risk > 0m
+				? $"Scenario Comparison — ranked by risk-adjusted EV (risk={settings.Risk:0.##})"
+				: "Scenario Comparison — ranked by EV";
 			var summaryPanel = new Panel(summary)
 			{
-				Header = new PanelHeader($"Scenario Comparison — ranked by risk-adjusted EV (risk={settings.Risk:0.##})"),
+				Header = new PanelHeader(rankHeader),
 				Expand = true,
 				Border = ascii ? BoxBorder.Ascii : BoxBorder.Rounded
 			};

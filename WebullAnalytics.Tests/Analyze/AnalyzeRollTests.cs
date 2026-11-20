@@ -311,4 +311,25 @@ public sealed class AnalyzeRollTests
 		Assert.Contains(scenarios, s => s.Name.StartsWith("Reset to ", StringComparison.Ordinal));
 		Assert.All(scenarios, s => Assert.True(s.ExpectedPnLPerContract.HasValue, $"Scenario '{s.Name}' is missing ExpectedPnLPerContract"));
 	}
+
+	[Fact]
+	public void PrepareResetScanConfig_EnablesCalendarWithoutMutatingSource()
+	{
+		var source = new WebullAnalytics.AI.AIConfig();
+		source.Opener.Structures.LongDiagonal.Enabled = true;
+		source.Opener.Structures.LongDiagonal.ShortDteMin = 2;
+		source.Opener.Structures.LongDiagonal.ShortDteMax = 8;
+		source.Opener.Structures.LongDiagonal.LongDteMin = 15;
+		source.Opener.Structures.LongDiagonal.LongDteMax = 35;
+		source.Opener.Structures.LongCalendar.Enabled = false;
+		source.Opener.Structures.LongCalendar.ShortDteMin = 0;
+
+		var clone = PositionAiResetScanner.PrepareResetScanConfig(source, "spy");
+
+		Assert.Equal("SPY", clone.Ticker);
+		Assert.True(clone.Opener.Enabled);
+		Assert.True(clone.Opener.Structures.LongCalendar.Enabled);
+		Assert.Equal(2, clone.Opener.Structures.LongCalendar.ShortDteMin);
+		Assert.False(source.Opener.Structures.LongCalendar.Enabled);
+	}
 }
