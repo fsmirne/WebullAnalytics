@@ -614,13 +614,13 @@ internal sealed class WebullOpenApiClient : IDisposable
 	}
 
 	// Webull's production read endpoints (order history, open orders, order detail, positions, balance) are each rate-limited per
-	// app_key (a burst of 2, then one request per 2 s), shared by every process using the key. WebullRateGate spaces this machine's
+	// app_key (a burst of 2, then one request per 2 s), shared by every process using the key. RateGate.Webull spaces this machine's
 	// processes under that cap before each send. A 429 can still arrive — another machine on the key, or a gate file that could not be taken — and
 	// GETs are read-only, so the call is retried once the window has cleared; POSTs (place/cancel/preview) are never retried
 	// here. Webull warns that repeatedly exceeding the limits can draw a temporary IP block, hence a small bounded count, not a loop.
 	private const int MaxGetAttempts = 3;
 	// Longer than the 2 s one request takes to refill: a retry sent 2.0 s after a 429 drew a second one (measured 2026-11-14).
-	private static readonly TimeSpan DefaultRateLimitWait = WebullRateGate.DefaultInterval;
+	private static readonly TimeSpan DefaultRateLimitWait = RateGate.Webull.Interval;
 	private static readonly TimeSpan MaxRateLimitWait = TimeSpan.FromSeconds(5);
 
 	private async Task<T> GetAsync<T>(string path, IReadOnlyDictionary<string, string> query, CancellationToken ct)
@@ -636,7 +636,7 @@ internal sealed class WebullOpenApiClient : IDisposable
 		var uri = string.IsNullOrEmpty(qs) ? path : $"{path}?{qs}";
 		for (var attempt = 1; ; attempt++)
 		{
-			await WebullRateGate.Default.WaitAsync(Host, _account.AppKey, path, ct);
+			await RateGate.Webull.WaitAsync(Host, _account.AppKey, path, ct);
 			// Signed per attempt: the signature carries a timestamp and nonce, so a replayed header set would be rejected.
 			var headers = OpenApiSigner.SignRequest(_account.AppKey, _account.AppSecret, Host, path, query, null, _account.AppId);
 			using var req = new HttpRequestMessage(HttpMethod.Get, uri);
@@ -645,20 +645,11 @@ internal sealed class WebullOpenApiClient : IDisposable
 			var resp = await _http.SendAsync(req, ct);
 			if (resp.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt >= MaxGetAttempts) return resp;
 
-			var wait = RateLimitWait(resp);
+			var wait = RateGate.RetryAfter(resp, DefaultRateLimitWait, MaxRateLimitWait);
 			resp.Dispose();
 			Console.WriteLine($"Webull: HTTP 429 on {path}; retry {attempt} of {MaxGetAttempts - 1} in {wait.TotalSeconds:F1}s.");
 			await Task.Delay(wait, ct);
 		}
-	}
-
-	/// <summary>Retry-After when Webull sends it (delta or date), clamped to <see cref="MaxRateLimitWait"/>; otherwise <see cref="DefaultRateLimitWait"/>.</summary>
-	private static TimeSpan RateLimitWait(HttpResponseMessage resp)
-	{
-		var retryAfter = resp.Headers.RetryAfter;
-		var requested = retryAfter?.Delta ?? (retryAfter?.Date is { } date ? date - DateTimeOffset.UtcNow : null);
-		if (requested is not { } wait || wait <= TimeSpan.Zero) return DefaultRateLimitWait;
-		return wait > MaxRateLimitWait ? MaxRateLimitWait : wait;
 	}
 
 	private static async Task<T> Read<T>(HttpResponseMessage resp)

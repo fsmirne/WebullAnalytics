@@ -4,17 +4,17 @@ using Xunit;
 namespace WebullAnalytics.Tests.Api;
 
 // The gate spaces every local process's reads of one Webull endpoint as a token bucket: a burst of 2, then one call per 3 s.
-public class WebullRateGateTests : IDisposable
+public class RateGateTests : IDisposable
 {
 	private readonly string _dir = Path.Combine(Path.GetTempPath(), $"rate-gate-{Guid.NewGuid():N}");
 	private static readonly DateTime T0 = new(2026, 11, 16, 14, 30, 0, DateTimeKind.Utc);
 	private const string Positions = "api.webull.com|key|/openapi/assets/positions";
 	private const string Balance = "api.webull.com|key|/openapi/assets/balance";
 
-	private WebullRateGate Gate() => new(_dir, burst: 2, interval: TimeSpan.FromSeconds(3));
+	private RateGate Gate() => new(_dir, burst: 2, interval: TimeSpan.FromSeconds(3));
 
 	/// <summary>Asks for a slot <paramref name="at"/> seconds after T0 and returns when it was given, in seconds after T0.</summary>
-	private static double Slot(WebullRateGate gate, double at, string key = Positions) => (gate.Reserve(key, T0.AddSeconds(at)) - T0).TotalSeconds;
+	private static double Slot(RateGate gate, double at, string key = Positions) => (gate.Reserve(key, T0.AddSeconds(at)) - T0).TotalSeconds;
 
 	public void Dispose()
 	{

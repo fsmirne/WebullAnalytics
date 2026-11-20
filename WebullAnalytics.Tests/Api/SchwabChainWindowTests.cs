@@ -52,4 +52,22 @@ public class SchwabChainWindowTests
 		var windows = SchwabOptionsClient.PlanWindows(Start, Start.AddDays(2), 0);
 		Assert.Equal(3, windows.Count);
 	}
+
+	private static OptionContractQuote Quote(string symbol) => new(symbol, null, 1m, 1.1m, null, null, null, 100, 0.2m);
+
+	[Fact]
+	public void WindowsMergeIntoOneChain()
+	{
+		var merged = SchwabOptionsClient.Merge([(7000m, [Quote("SPXW261120C07000000")]), (null, [Quote("SPXW261127C07000000")])]);
+		Assert.NotNull(merged);
+		Assert.Equal(7000m, merged.Value.Spot);
+		Assert.Equal(2, merged.Value.Quotes.Count);
+	}
+
+	[Fact]
+	public void AFailedWindowFailsTheWholeChain()
+	{
+		// One window drew a 429: the rest are not a chain missing a span of expiries, they are no chain.
+		Assert.Null(SchwabOptionsClient.Merge([(7000m, [Quote("SPXW261120C07000000")]), null]));
+	}
 }

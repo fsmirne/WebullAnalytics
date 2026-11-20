@@ -13,7 +13,9 @@ namespace WebullAnalytics.Api;
 /// pipeline uses.</summary>
 internal static class SchwabOptionsClient
 {
-	private const string ChainsUrl = "https://api.schwabapi.com/marketdata/v1/chains";
+	private const string Host = "api.schwabapi.com";
+	private const string ChainsPath = "/marketdata/v1/chains";
+	private const string ChainsUrl = "https://" + Host + ChainsPath;
 
 	/// <summary>Most recent extended-hours (top-level <c>underlyingPrice</c> / <c>underlying.mark</c>) price seen per
 	/// Schwab underlying symbol (stripped of any leading <c>$</c>), populated as a zero-cost side effect of every
@@ -45,7 +47,8 @@ internal static class SchwabOptionsClient
 
 	/// <summary>Fetches the full chain for <paramref name="root"/> between the given expiry dates (inclusive).
 	/// Returns the underlying spot and every quoted contract. An empty result (e.g. an unsupported index symbol)
-	/// comes back as <c>(null, empty)</c> rather than throwing, so the capture loop treats it as a soft miss.</summary>
+	/// comes back as <c>(null, empty)</c> rather than throwing, so the capture loop treats it as a soft miss. So does a fetch
+	/// any of whose expiry windows failed: the chain is whole or absent, never missing a span of expiries.</summary>
 	/// <param name="strikeCount">When > 0, asks Schwab to return only this many strikes around the
 	/// at-the-money price (per expiration) instead of the full <c>range=ALL</c> ladder. A caller that only
 	/// needs near-money strikes (e.g. <c>analyze gex</c>) sets this so the common case is a single small
@@ -58,7 +61,7 @@ internal static class SchwabOptionsClient
 		var maxSpan = FittingSpanDays.TryGetValue((symbol, strikeCount), out var span) ? span : int.MaxValue;
 		var windows = PlanWindows(fromExpiry, toExpiry, maxSpan);
 		var parts = await Task.WhenAll(windows.Select(w => FetchChainRangeAsync(accessToken, symbol, w.From, w.To, strikeCount, ct)));
-		return Merge(parts);
+		return Merge(parts) ?? (null, Array.Empty<OptionContractQuote>());
 	}
 
 	/// <summary>The widest expiry window (in days) known to fit under Schwab's body cap, per underlying and strike bound: the half of the last window that overflowed it. A dense
@@ -80,15 +83,17 @@ internal static class SchwabOptionsClient
 		return windows;
 	}
 
-	/// <summary>The windows' chains as one: contracts keyed by symbol (a later window wins a repeat), and the first spot any of them carried.</summary>
-	private static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes) Merge(IEnumerable<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)> parts)
+	/// <summary>The windows' chains as one: contracts keyed by symbol (a later window wins a repeat), and the first spot any of them carried.
+	/// Null when any window failed (null): merging the rest would hand the caller a chain missing those expiries as if it were whole.</summary>
+	internal static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)? Merge(IEnumerable<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)?> parts)
 	{
 		var merged = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase);
 		decimal? spot = null;
 		foreach (var part in parts)
 		{
-			spot ??= part.Spot;
-			foreach (var q in part.Quotes) merged[q.ContractSymbol] = q;
+			if (part is not { } p) return null;
+			spot ??= p.Spot;
+			foreach (var q in p.Quotes) merged[q.ContractSymbol] = q;
 		}
 		return (spot, merged.Values.ToList());
 	}
@@ -99,12 +104,12 @@ internal static class SchwabOptionsClient
 	/// at once and merges them, remembering the narrower span (<see cref="FittingSpanDays"/>) for the next fetch.
 	/// Self-tunes to chain density: sparse equities resolve in one call, a 45-DTE $SPX
 	/// request splits until each chunk fits — full strike coverage preserved, no per-ticker tuning, and no
-	/// caller (analyze gex or the scraper, at any <c>--max-dte</c>) can overflow.</summary>
-	private static async Task<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)> FetchChainRangeAsync(
+	/// caller (analyze gex or the scraper, at any <c>--max-dte</c>) can overflow. Null when a request failed.</summary>
+	private static async Task<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)?> FetchChainRangeAsync(
 		string accessToken, string symbol, DateOnly from, DateOnly to, int strikeCount, CancellationToken ct)
 	{
-		var (spot, quotes, tooBig) = await FetchChainOnceAsync(accessToken, symbol, from, to, strikeCount, ct);
-		if (!tooBig) return (spot, quotes);
+		var (result, tooBig) = await FetchChainOnceAsync(accessToken, symbol, from, to, strikeCount, ct);
+		if (!tooBig) return result;
 
 		if (from >= to)
 		{
@@ -112,8 +117,8 @@ internal static class SchwabOptionsClient
 			// return the near-money chain rather than nothing. (Not expected in practice: 0DTE range=ALL fits.)
 			if (strikeCount is 0 or > 250)
 			{
-				var (s, q, stillTooBig) = await FetchChainOnceAsync(accessToken, symbol, from, to, 250, ct);
-				if (!stillTooBig) return (s, q);
+				var (bounded, stillTooBig) = await FetchChainOnceAsync(accessToken, symbol, from, to, 250, ct);
+				if (!stillTooBig) return bounded;
 			}
 			Console.WriteLine($"Schwab: chain for {symbol} on {from:yyyy-MM-dd} exceeds the body cap even bounded; skipping that day.");
 			return (null, Array.Empty<OptionContractQuote>());
@@ -126,9 +131,9 @@ internal static class SchwabOptionsClient
 		return Merge(halves);
 	}
 
-	/// <summary>One chains GET. Returns <c>TooBig=true</c> (with empty quotes) on the 502 body-overflow so the
-	/// caller can split the window; other non-success statuses are logged and returned as a soft miss.</summary>
-	private static async Task<(decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes, bool TooBig)> FetchChainOnceAsync(
+	/// <summary>One chains GET. Returns <c>TooBig=true</c> on the 502 body-overflow so the caller can split the window;
+	/// other non-success statuses are logged and returned as a failure (null result).</summary>
+	private static async Task<((decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes)? Result, bool TooBig)> FetchChainOnceAsync(
 		string accessToken, string symbol, DateOnly from, DateOnly to, int strikeCount, CancellationToken ct)
 	{
 		var url = $"{ChainsUrl}?symbol={Uri.EscapeDataString(symbol)}&contractType=ALL&strategy=SINGLE&range=ALL"
@@ -143,11 +148,10 @@ internal static class SchwabOptionsClient
 			var tooBig = (int)statusCode == 502 && body.Contains("TooBigBody", StringComparison.OrdinalIgnoreCase);
 			if (!tooBig)
 				Console.WriteLine($"Schwab: chains returned {(int)statusCode} for {symbol}: {Truncate(body, 200)}");
-			return (null, Array.Empty<OptionContractQuote>(), tooBig);
+			return (null, tooBig);
 		}
 
-		var (spot, quotes) = ParseChain(body, symbol);
-		return (spot, quotes, false);
+		return (ParseChain(body, symbol), false);
 	}
 
 	private static bool IsSuccess(HttpStatusCode code) => (int)code is >= 200 and <= 299;
@@ -157,7 +161,9 @@ internal static class SchwabOptionsClient
 	/// <c>SocketException</c> "forcibly closed by the remote host") that show up as intermittent single-tick failures
 	/// in the live watch loop. Sends through the pooled <see cref="SchwabHttp.Client"/> (see its comment: churning a
 	/// fresh client per call is what provokes the RST in the first place); a fresh request message is used per attempt.
-	/// Non-transport failures (auth, 502 TooBig, timeouts) propagate to the caller unchanged.</summary>
+	/// Every attempt waits its turn at <see cref="RateGate.Schwab"/>, shared by every local process, and a 429 that still arrives
+	/// (the cap is unmeasured) is retried after its Retry-After, a bounded number of times. Other failures (auth, 502 TooBig, timeouts)
+	/// propagate to the caller unchanged.</summary>
 	private static async Task<(HttpStatusCode Status, string Body)> SendWithTransientRetryAsync(string url, string accessToken, CancellationToken ct)
 	{
 		const int maxAttempts = 3;
@@ -165,11 +171,19 @@ internal static class SchwabOptionsClient
 		{
 			try
 			{
+				await RateGate.Schwab.WaitAsync(Host, "", ChainsPath, ct);
 				using var request = new HttpRequestMessage(HttpMethod.Get, url);
 				request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
 				request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
 				using var response = await SchwabHttp.Client.SendAsync(request, ct);
+				if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
+				{
+					var wait = RateGate.RetryAfter(response, RateLimitWait, MaxRateLimitWait);
+					Console.WriteLine($"Schwab: chains HTTP 429; retry {attempt} of {maxAttempts - 1} in {wait.TotalSeconds:F1}s.");
+					await Task.Delay(wait, ct);
+					continue;
+				}
 				var body = await response.Content.ReadAsStringAsync(ct);
 				return (response.StatusCode, body);
 			}
@@ -180,6 +194,10 @@ internal static class SchwabOptionsClient
 			}
 		}
 	}
+
+	/// <summary>The wait after a 429 that sends no Retry-After, and the longest one honored: a read retried later than this is stale for its tick.</summary>
+	private static readonly TimeSpan RateLimitWait = TimeSpan.FromSeconds(2);
+	private static readonly TimeSpan MaxRateLimitWait = TimeSpan.FromSeconds(5);
 
 	internal static (decimal? Spot, IReadOnlyList<OptionContractQuote> Quotes) ParseChain(string json, string symbol, bool? isRth = null, DateTime? nowEtOverride = null)
 	{
