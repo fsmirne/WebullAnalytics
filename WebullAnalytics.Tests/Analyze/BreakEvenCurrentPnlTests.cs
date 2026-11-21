@@ -194,8 +194,10 @@ public class BreakEvenCurrentPnlTests : IDisposable
 		var atMarket = BreakEvenAnalyzer.Analyze(group, market).Single(r => r.Grid != null && r.CurrentPnl.HasValue);
 		var atCrush = BreakEvenAnalyzer.Analyze(group, crush).Single(r => r.Grid != null && r.CurrentPnl.HasValue);
 
-		// Expected shift: per share, Σ sign × (value at the scenario IV − value at the market IV), at the real spot, now; × qty × 100.
-		var now = DateTime.Now;
+		// Expected shift: per share, Σ sign × (value at the scenario IV − value at the market IV), at the real spot, at the instant the analyzer
+		// prices to; × qty × 100. With no --date pin both the mark's instants are the observation instant, which off-hours is the last close —
+		// not the wall clock (pricing at DateTime.Now made this pass only during RTH).
+		var now = OptionMath.ObservationInstant();
 		var expectedShift = ((ValueAt(longOcc, crush, now) - ValueAt(longOcc, market, now)) - (ValueAt(shortOcc, crush, now) - ValueAt(shortOcc, market, now))) * 10 * 100;
 		Assert.True(expectedShift < -100m, $"the fixture must be a real IV crush on a long-vega diagonal (shift {expectedShift})");
 		Assert.Equal(expectedShift, atCrush.CurrentPnl!.Value - atMarket.CurrentPnl!.Value, 0);
