@@ -186,7 +186,7 @@ internal static class LiveTick
 		{
 			var openResults = await deps.OpenEvaluator.EvaluateAsync(ctx, cancellation);
 			// Outside the entry window watch submits nothing, so every proposal is display-only: log it as informational,
-			// or consumers that read the log as "what live would have placed" (wa ai backtest --replay, paper_vs_backtest)
+			// or consumers that read the log as "what live would have placed" (wa ai backtest --replay, wa ai verify)
 			// treat a 13:04 proposal past an 11:00 cutoff as a live open (2026-10-08).
 			if (deps.OutsideEntryWindow) openResults = openResults.Select(p => p with { Informational = true }).ToList();
 			// Cascade trades are signal-driven and enter once, at a setup's first confirmation: outside the entry window the regime is
