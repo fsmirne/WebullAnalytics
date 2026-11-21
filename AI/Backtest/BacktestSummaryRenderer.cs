@@ -249,7 +249,7 @@ internal static class BacktestSummaryRenderer
 	}
 
 	/// <summary>Short rule label for the fill ledger: drops the "Rule" suffix and abbreviates the long ones.</summary>
-	private static string ShortRule(string? rule) => rule switch
+	internal static string ShortRule(string? rule) => rule switch
 	{
 		null or "" => "—",
 		"CloseBeforeShortExpiryRule" => "CloseAtExp",
@@ -269,10 +269,13 @@ internal static class BacktestSummaryRenderer
 	/// positionally with the expiry arrow: a call diagonal short 736C 08/05 / long 735C 08/31 renders
 	/// "736C/735C @ 08/05→08/31" — sorting strikes independently of expiries implied the wrong legs.
 	/// Examples: "685C @ 01/09→02/13" (LongCalendar), "680P/685P/685C/690C @ 01/16" (IronCondor).</summary>
-	private static string FormatLegDetail(IReadOnlyList<BacktestLegFill> legs)
+	private static string FormatLegDetail(IReadOnlyList<BacktestLegFill> legs) => FormatLegDetail(legs.Select(l => l.Symbol));
+
+	/// <summary><see cref="FormatLegDetail(IReadOnlyList{BacktestLegFill})"/> over bare OCC symbols — the format only reads the legs' symbols.</summary>
+	internal static string FormatLegDetail(IEnumerable<string> symbols)
 	{
-		var parsed = legs
-			.Select(l => ParsingHelpers.ParseOptionSymbol(l.Symbol))
+		var parsed = symbols
+			.Select(ParsingHelpers.ParseOptionSymbol)
 			.Where(p => p != null)
 			.Cast<OptionParsed>()
 			.ToList();

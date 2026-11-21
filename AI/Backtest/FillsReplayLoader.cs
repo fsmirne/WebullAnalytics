@@ -50,6 +50,16 @@ internal static class FillsReplayLoader
 		return (opens, warnings);
 	}
 
+	/// <summary>A backtest Open fill as a replay open: the same mapping <see cref="Load"/> applies to a ledger line (leg prices as
+	/// booked, slippage re-applied on open), for callers holding the fill itself rather than a <c>--fills-jsonl</c> file.</summary>
+	public static ProposalReplayOpen FromOpenFill(BacktestFill open)
+	{
+		if (open.Kind != BacktestFillKind.Open) throw new ArgumentException($"expected an Open fill, got {open.Kind}", nameof(open));
+		if (!Enum.TryParse<OpenStructureKind>(open.StrategyKind, ignoreCase: false, out var kind)) throw new ArgumentException($"unknown strategy '{open.StrategyKind}'", nameof(open));
+		var legs = open.Legs.Select(l => new ProposalLeg(l.Side == Side.Buy ? "buy" : "sell", l.Symbol, l.Qty, l.PricePerShare)).ToList();
+		return new ProposalReplayOpen(open.Date, open.Ticker, kind, open.Qty, legs, open.Spot, open.RawScore, open.FinalScore, open.RepIv, ApplySlippage: true);
+	}
+
 	private static string? Str(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
 	private static decimal? Dec(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDecimal() : null;

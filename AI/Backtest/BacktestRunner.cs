@@ -2253,6 +2253,9 @@ internal sealed record BacktestResult(
 
 	public decimal TotalPnL => RealizedPnL + UnrealizedPnL;
 
+	/// <summary>True when any lifecycle is still open at the window end (its P&L includes a final mark, not only realized cash).</summary>
+	public bool HasOpenAtEnd => Fills.GroupBy(f => f.LineageId).Any(IsOpenAtEnd);
+
 	public decimal EndingEquity => StartingCash + TotalPnL;
 
 	/// <summary>Per-lifecycle wins/losses (closed lineages only).</summary>
