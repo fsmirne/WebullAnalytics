@@ -49,6 +49,10 @@
 .PARAMETER HistoryTickers
 	Scope the `wa ai history` step (bare names, no DTE). Default = SPY SPXW.
 
+.PARAMETER ClockTickers
+	Scope the `wa data clock` step (bare names, no DTE). Default = SPXW SPY. Other roots already in the clock
+	store (e.g. a one-off AAPL seed) are left alone.
+
 .PARAMETER Steps
 	Which of the six steps to run (default all): history,quotes,ohlcv,oi,verify,clock. Kept byte-identical in meaning
 	to daily_backfill.sh --steps. E.g. -Steps history runs ONLY the history refresh (no ThetaData session,
@@ -73,6 +77,7 @@ param(
 	[string[]]$Tickers,
 	[string[]]$OiTickers,
 	[string[]]$HistoryTickers,
+	[string[]]$ClockTickers,
 	[string[]]$Steps,
 	[string[]]$Verify
 )
@@ -120,6 +125,12 @@ if (-not $OiTickers -or $OiTickers.Count -eq 0) {
 if (-not $Verify -or $Verify.Count -eq 0) {
 	if ($env:BACKFILL_VERIFY) { $Verify = $env:BACKFILL_VERIFY -split '\s+' }
 	else { $Verify = @('SPXW','SPY') }
+}
+# Clock roots are named explicitly: a bare `wa data clock` refreshes EVERY root in the clock store, which would
+# keep re-seeding/refitting any root seeded once by hand (e.g. AAPL).
+if (-not $ClockTickers -or $ClockTickers.Count -eq 0) {
+	if ($env:BACKFILL_CLOCK_TICKERS) { $ClockTickers = $env:BACKFILL_CLOCK_TICKERS -split '\s+' }
+	else { $ClockTickers = @('SPXW','SPY') }
 }
 
 # --- Step selection (default all six; identical semantics to daily_backfill.sh --steps). --------------------
@@ -223,7 +234,7 @@ if (Has-Step 'verify') {
 }
 
 if (Has-Step 'clock') {
-	Invoke-Step "(6/6) trading-time clock calibration" $WA @('data','clock')
+	Invoke-Step "(6/6) trading-time clock calibration" $WA (@('data','clock') + $ClockTickers)
 }
 
 if ($script:rc -eq 0) {

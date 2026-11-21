@@ -8,9 +8,9 @@ namespace WebullAnalytics.Data;
 
 internal sealed class DataClockSettings : CommandSettings
 {
-	[CommandArgument(0, "[ticker]")]
-	[Description("Ticker to seed and fit (once per ticker whose positions cross nights). Omit to refresh every ticker already in the clock store.")]
-	public string? Ticker { get; set; }
+	[CommandArgument(0, "[tickers]")]
+	[Description("Tickers to seed and fit (once per ticker whose positions cross nights). Omit to refresh every ticker already in the clock store.")]
+	public string[] Tickers { get; set; } = [];
 
 	[CommandOption("--since <yyyy-MM-dd>")]
 	[Description("Seed from this date (backtest coverage). Default: the day after the newest stored session, or one fit window (365 days) back for a new ticker.")]
@@ -22,14 +22,14 @@ internal sealed class DataClockSettings : CommandSettings
 			: ValidationResult.Success();
 }
 
-/// <summary>`wa data clock [TICKER]`: keeps the trading-time clock calibrated. Seeds the ticker's close/09:45 book store for missing
+/// <summary>`wa data clock [TICKERS...]`: keeps the trading-time clock calibrated. Seeds the ticker's close/09:45 book store for missing
 /// completed sessions (quotes.db when it has a usable book, else ThetaData), then refits the clock weights — a monthly history for
 /// backtests plus the newest window for live pricing — and prints what the newest fit found against the calendar clock.</summary>
 internal sealed class DataClockCommand : AsyncCommand<DataClockSettings>
 {
 	protected override async Task<int> ExecuteAsync(CommandContext context, DataClockSettings settings, CancellationToken cancellation)
 	{
-		var tickers = settings.Ticker != null ? [ClockFits.ClockRoot(settings.Ticker)] : TrackedRoots();
+		var tickers = settings.Tickers.Length > 0 ? settings.Tickers.Select(ClockFits.ClockRoot).Distinct(StringComparer.OrdinalIgnoreCase).ToList() : TrackedRoots();
 		if (tickers.Count == 0)
 		{
 			AnsiConsole.MarkupLine("[yellow]No tickers in the clock store yet: seed one, e.g. `wa data clock SPY`.[/]");

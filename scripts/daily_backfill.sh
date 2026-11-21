@@ -39,7 +39,7 @@
 #
 # Overrides (env): BACKFILL_END=YYYY-MM-DD (last day); BACKFILL_START=YYYY-MM-DD (extend the quotes+OI
 # floor back for a one-time history fill — sealed data is still skipped); BACKFILL_TICKERS / BACKFILL_OI_TICKERS
-# / BACKFILL_VERIFY / BACKFILL_HISTORY_TICKERS (scope the roots). E.g. a one-off 4-year SPY fill (no 0DTE roots dragged in):
+# / BACKFILL_VERIFY / BACKFILL_HISTORY_TICKERS / BACKFILL_CLOCK_TICKERS (scope the roots). E.g. a one-off 4-year SPY fill (no 0DTE roots dragged in):
 #   BACKFILL_START=2022-07-18 BACKFILL_TICKERS="SPY:60" BACKFILL_VERIFY="SPY" BACKFILL_HISTORY_TICKERS="SPY" bash daily_backfill.sh
 #
 # NOTE: re-pulling an unsealed expiration REPLACES its rows (staged, then promoted in one transaction),
@@ -68,9 +68,11 @@ set -uo pipefail
 #                           whose OI/IV is needed to fix SPXW GEX on monthly expiries
 #   --verify 'SPY ...'      scope the verify roots
 #   --history-tickers 'SPY ...'   scope the `wa ai history` step roots
+#   --clock-tickers 'SPY ...'     scope the `wa data clock` step roots (default SPXW SPY; other roots already in
+#                                 the clock store, e.g. a one-off AAPL seed, are left alone)
 #   --steps history,quotes,oi,verify   which steps to run (comma/space list; default all four). Kept
 #                                       byte-identical to daily_backfill.ps1 -Steps.
-CLI_START=""; CLI_END=""; CLI_TICKERS=""; CLI_OI_TICKERS=""; CLI_HISTORY=""; CLI_VERIFY=""; CLI_STEPS=""
+CLI_START=""; CLI_END=""; CLI_TICKERS=""; CLI_OI_TICKERS=""; CLI_HISTORY=""; CLI_VERIFY=""; CLI_STEPS=""; CLI_CLOCK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --start)           CLI_START="${2:?--start needs a date}"; shift 2 ;;
@@ -78,9 +80,10 @@ while [ $# -gt 0 ]; do
     --tickers)         CLI_TICKERS="${2:?--tickers needs a value}"; shift 2 ;;
     --oi-tickers)      CLI_OI_TICKERS="${2:?--oi-tickers needs a value}"; shift 2 ;;
     --history-tickers) CLI_HISTORY="${2:?--history-tickers needs a value}"; shift 2 ;;
+    --clock-tickers)   CLI_CLOCK="${2:?--clock-tickers needs a value}"; shift 2 ;;
     --steps)           CLI_STEPS="${2:?--steps needs a value}"; shift 2 ;;
     --verify)          CLI_VERIFY="${2:?--verify needs a value}"; shift 2 ;;
-    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--oi-tickers 'SPY ...'] [--history-tickers 'SPY ...'] [--steps history,quotes,ohlcv,oi,verify,clock] [--verify 'SPY ...']"; exit 0 ;;
+    -h|--help)         echo "usage: daily_backfill.sh [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--tickers 'SPY:60 ...'] [--oi-tickers 'SPY ...'] [--history-tickers 'SPY ...'] [--clock-tickers 'SPY ...'] [--steps history,quotes,ohlcv,oi,verify,clock] [--verify 'SPY ...']"; exit 0 ;;
     *)                 echo "[daily_backfill] unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -116,6 +119,9 @@ fi
 # 4-year SPY pull) without dragging the 0DTE index roots into a multi-year pull. Defaults = the daily set.
 TICKERS="${CLI_TICKERS:-${BACKFILL_TICKERS:-SPXW:0 SPY:60}}"   # quotes + ohlcv (per-ticker DTE)
 VERIFY="${CLI_VERIFY:-${BACKFILL_VERIFY:-SPXW SPY}}"                 # verify (bare names, no DTE)
+# Clock roots are named explicitly: a bare `wa data clock` refreshes EVERY root in the clock store, which would
+# keep re-seeding/refitting any root seeded once by hand (e.g. AAPL).
+CLOCK_TICKERS="${CLI_CLOCK:-${BACKFILL_CLOCK_TICKERS:-SPXW SPY}}"    # clock (bare names, no DTE)
 # OI is a daily-snapshot instrument (one full-chain capture/day, not a DTE-windowed pull like quotes/ohlcv):
 # `wa data backfill oi` takes bare names and one global --dte across every ticker passed.
 # SPX (legacy AM-settled root) is included but untraded: on a standard-monthly (3rd Friday) expiry real open
@@ -207,7 +213,7 @@ has_step quotes && step "(2/6) minute-NBBO quotes -> data/quotes.db"  "$WA" data
 has_step ohlcv  && step "(3/6) minute trade OHLCV -> data/quotes.db"  "$WA" data backfill ohlcv  --tickers "${TICKERS// /,}" --end "$(resolve_end)"       ${START_OPT[@]+"${START_OPT[@]}"} --concurrency "$CONC"
 has_step oi     && step "(4/6) EOD open interest -> data/oi"          "$WA" data backfill oi     --tickers "${OI_TICKERS// /,}" --end "$(resolve_end_oi)" ${START_OPT[@]+"${START_OPT[@]}"}
 has_step verify && step "(5/6) quote-store coverage + integrity"      "$WA" data verify --roots "${VERIFY// /,}"
-has_step clock  && step "(6/6) trading-time clock calibration"        "$WA" data clock
+has_step clock  && step "(6/6) trading-time clock calibration"        "$WA" data clock $CLOCK_TICKERS
 
 if [ "$rc" -eq 0 ]; then
   echo "[$(ts)] === ALL OK ==="
