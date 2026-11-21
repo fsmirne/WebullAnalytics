@@ -105,7 +105,7 @@ public class AnalyzePositionDoubleAddTests
 	public void HypotheticalFetch_RequestsTheDoubleAddsLegsAtThePositionsOwnExpiries()
 	{
 		// 2026-11-20: the far long of the put double diagonal (position's long expiry) was never fetched, so it was BS-estimated and unscoreable.
-		var symbols = AnalyzePositionCommand.EnumerateHypotheticalSymbols(CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, new AnalyzePositionSettings { StrikeStep = 0.50m }, Spot, Chain()).ToHashSet();
+		var symbols = AnalyzePositionCommand.EnumerateHypotheticalSymbols(CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, new AnalyzePositionSettings { StrikeStep = 0.50m }, Spot, new DateTime(2026, 11, 20), Chain()).ToHashSet();
 		Assert.Contains(MatchKeys.OccSymbol("SPY", ShortExp, 756m, "P"), symbols);   // short: first listed put at or below spot
 		Assert.Contains(MatchKeys.OccSymbol("SPY", LongExp, 756m, "P"), symbols);    // double calendar long
 		Assert.Contains(MatchKeys.OccSymbol("SPY", LongExp, 755m, "P"), symbols);    // double diagonal long
@@ -115,7 +115,7 @@ public class AnalyzePositionDoubleAddTests
 	public void HypotheticalFetch_StrikesMatchTheAddsTheGeneratorBuilds()
 	{
 		var settings = new AnalyzePositionSettings { IvDefault = 40m, StrikeStep = 0.50m };
-		var symbols = AnalyzePositionCommand.EnumerateHypotheticalSymbols(CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, Chain()).ToHashSet();
+		var symbols = AnalyzePositionCommand.EnumerateHypotheticalSymbols(CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, new DateTime(2026, 11, 20), Chain()).ToHashSet();
 		var adds = AnalyzePositionCommand.GenerateScenarios(CallCalendar(), AnalyzePositionCommand.StructureKind.Calendar, settings, Spot, AsOf, Chain()).Where(s => s.Name.Contains("double ", StringComparison.Ordinal));
 		Assert.All(adds.SelectMany(a => a.Book!.Single(b => b.Label == "added").Legs), l => Assert.Contains(l.Symbol, symbols));
 	}

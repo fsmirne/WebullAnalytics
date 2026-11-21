@@ -333,7 +333,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		positionLegs.Select(l =>
 		{
 			var dte = Math.Max(1, (l.Parsed.ExpiryDate - asOf.Date).Days);
-			var mark = AnalyzePositionCommand.LiveOrBsMid(quotes, l.Symbol, spot, l.Parsed.Strike, dte, ResolveIv(quotes, l.Symbol, ivDefaultPct), l.Parsed.CallPut);
+			var mark = AnalyzePositionCommand.LiveOrBsMid(quotes, l.Symbol, spot, l.Parsed.Strike, dte, ResolveIv(quotes, l.Symbol, ivDefaultPct), l.Parsed.CallPut, asOf);
 			return new DiagnosticLeg(Symbol: l.Symbol, Parsed: l.Parsed, IsLong: l.Action == LegAction.Buy, Qty: l.Qty, PricePerShare: mark, CostBasisPerShare: l.CostBasis);
 		}).ToList();
 
