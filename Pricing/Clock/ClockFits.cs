@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.Pricing.Clock;
 
@@ -32,7 +33,7 @@ internal static class ClockFits
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		var ordered = fits.OrderBy(f => f.FittedThrough).ToList();
 		File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(ordered, Json));
-		File.Move(path + ".tmp", path, overwrite: true);
+		AtomicFile.Replace(path + ".tmp", path);
 		Cache[ClockRoot(root)] = ordered;
 	}
 

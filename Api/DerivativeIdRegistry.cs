@@ -1,4 +1,5 @@
 using System.Text.Json;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.Api;
 
@@ -243,10 +244,12 @@ internal static class DerivativeIdRegistry
 					: new Dictionary<string, object?> { ["id"] = e.Id, ["asof"] = e.AsOf, ["tradeable"] = e.Tradeable, ["oi"] = e.OpenInterest };
 			var tmp = path + ".tmp";
 			File.WriteAllText(tmp, JsonSerializer.Serialize(ordered, JsonDefaults.Indented));
-			File.Move(tmp, path, overwrite: true);
+			AtomicFile.Replace(tmp, path);
 		}
-		catch (IOException ex)
+		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
 		{
+			// A lock that outlasted AtomicFile's retries: keep the in-memory registry and try again on the next flush rather than fail the
+			// chain fetch or snapshot that triggered this one.
 			Console.WriteLine($"derivative-ids: failed to write {path}: {ex.Message}");
 		}
 	}

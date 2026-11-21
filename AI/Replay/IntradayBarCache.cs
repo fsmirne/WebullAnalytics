@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using WebullAnalytics.Api;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.AI.Replay;
 
@@ -235,6 +236,6 @@ internal sealed class IntradayBarCache
 		// Atomic write: temp + replace. Protects sealed historical files from a crash mid-write.
 		var tmp = path + ".tmp";
 		File.WriteAllText(tmp, sb.ToString());
-		File.Move(tmp, path, overwrite: true);
+		AtomicFile.Replace(tmp, path);
 	}
 }

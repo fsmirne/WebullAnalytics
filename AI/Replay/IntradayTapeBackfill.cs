@@ -5,6 +5,7 @@ using System.Text.Json;
 using WebullAnalytics.AI.Sources;
 using WebullAnalytics.Api;
 using WebullAnalytics.Utils;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.AI.Replay;
 
@@ -416,7 +417,7 @@ internal static class IntradayTapeBackfill
 		var json = JsonSerializer.Serialize(doc, JsonDefaults.Indented);
 		var tmp = path + ".tmp";
 		File.WriteAllText(tmp, json);
-		File.Move(tmp, path, overwrite: true);
+		AtomicFile.Replace(tmp, path);
 	}
 
 	private sealed class SealedManifest
@@ -632,6 +633,6 @@ internal static class IntradayTapeBackfill
 		}
 		var tmp = path + ".tmp";
 		File.WriteAllText(tmp, sb.ToString());
-		File.Move(tmp, path, overwrite: true);
+		AtomicFile.Replace(tmp, path);
 	}
 }

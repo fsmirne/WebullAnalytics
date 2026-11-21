@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.Pricing.Clock;
 
@@ -64,7 +65,7 @@ internal static class ClockStore
 		var tmp = path + ".tmp";
 		using (var gz = new GZipStream(File.Create(tmp), CompressionLevel.SmallestSize))
 			JsonSerializer.Serialize(gz, day, Json);
-		File.Move(tmp, path, overwrite: true);
+		AtomicFile.Replace(tmp, path);
 	}
 
 	/// <summary>Builds one expiry's stored book from raw two-sided quotes (strike, isCall, bid, ask): the forward from put-call parity

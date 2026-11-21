@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.Analyze;
 
@@ -67,7 +68,7 @@ internal sealed class CascadeReadingCache
 		var temp = path + $".{Environment.ProcessId}.tmp";
 		using (var gz = new GZipStream(File.Create(temp), CompressionLevel.Fastest))
 			JsonSerializer.Serialize(gz, new Stored(fingerprint, moments), Options);
-		File.Move(temp, path, overwrite: true);
+		AtomicFile.Replace(temp, path);
 	}
 
 	/// <summary>The session inputs a reading is built from, by size and write time; empty parts for a missing file.</summary>

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using WebullAnalytics.Api.ThetaData;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.Data.Backfill;
 
@@ -160,7 +161,7 @@ internal sealed class OiBackfill(ThetaDataClient client, OiBackfillOptions optio
 	{
 		var (path, tmp) = (Path.Combine(dir, "sealed.json"), Path.Combine(dir, "sealed.json.tmp"));
 		File.WriteAllText(tmp, JsonSerializer.Serialize(new { @sealed = sealedDays.Order().Select(Iso) }, new JsonSerializerOptions { WriteIndented = true }));
-		File.Move(tmp, path, overwrite: true);   // atomic replace
+		AtomicFile.Replace(tmp, path);   // atomic replace
 	}
 
 	/// <summary>&lt;=1-month windows covering [start, end], split at month boundaries.</summary>

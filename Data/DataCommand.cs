@@ -3,6 +3,7 @@ using Spectre.Console.Cli;
 using System.ComponentModel;
 using System.Formats.Tar;
 using System.IO.Compression;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.Data;
 
@@ -73,7 +74,7 @@ internal sealed class DataBackupCommand : AsyncCommand<DataBackupSettings>
 					}
 					progress.Value = progress.MaxValue;
 				});
-			File.Move(tmpPath, outputPath, overwrite: true);
+			AtomicFile.Replace(tmpPath, outputPath);
 		}
 		catch
 		{
@@ -244,7 +245,7 @@ internal sealed class DataRestoreCommand : AsyncCommand<DataRestoreSettings>
 						File.Copy(target, Path.Combine(bakDir, Path.GetFileName(staged)), overwrite: true);
 						replaced++;
 					}
-					File.Move(staged, target, overwrite: true);
+					AtomicFile.Replace(staged, target);
 					restored++;
 				}
 				AnsiConsole.MarkupLine($"  [green]restored {restored} setting file(s)[/] into data/ — subdirectories untouched");

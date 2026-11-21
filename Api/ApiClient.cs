@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using WebullAnalytics.Trading;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.Api;
 
@@ -63,7 +64,7 @@ internal static class ApiClient
 			throw new InvalidOperationException("No valid orderList responses were returned; refusing to overwrite existing orders file.");
 		}
 
-		File.Move(tmpPath, outputPath, overwrite: true);
+		AtomicFile.Replace(tmpPath, outputPath);
 	}
 
 	/// <summary>One ticker's filled-order list from the web session (<c>orderList/v2</c>) as raw JSON — one
@@ -180,7 +181,7 @@ internal static class ApiClient
 			throw new InvalidOperationException("Cash record returned no items; refusing to overwrite the existing file.");
 		}
 
-		File.Move(tmpPath, outputPath, overwrite: true);
+		AtomicFile.Replace(tmpPath, outputPath);
 		return total;
 	}
 

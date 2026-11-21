@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using WebullAnalytics.IO;
 
 namespace WebullAnalytics.Api;
 
@@ -121,7 +122,7 @@ internal static class SchwabAuthClient
 		var json = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true, IndentCharacter = '\t', IndentSize = 1 });
 		var tmp = apiConfigPath + ".tmp";
 		File.WriteAllText(tmp, json);
-		File.Move(tmp, apiConfigPath, overwrite: true);
+		AtomicFile.Replace(tmp, apiConfigPath);
 	}
 
 	/// <summary>Schwab nests the upstream OAuth error as a JSON string inside error_description, e.g.
