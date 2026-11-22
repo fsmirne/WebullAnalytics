@@ -734,8 +734,8 @@ internal sealed class AIBacktestSettings : AISingleTickerSubcommandSettings
 	public int ScanStride { get; set; } = 1;
 
 	[CommandOption("--cadence <MINUTES>")]
-	[Description("Cascade strategies (opener.cascade) only: minutes between cascade readings, from the opener's earliest entry time to its latest. Default 10. Each reading replays the whole chain, so a backtest reads on this grid instead of live's once a minute; a setup confirms at the first grid instant it shows at.")]
-	public int Cadence { get; set; } = 10;
+	[Description("Cascade strategies (opener.cascade) only: minutes between cascade readings, from the opener's earliest entry time to its latest. Default 1 (every minute, as live reads). A coarser grid is faster but a setup confirms only at the first grid instant it shows at, so it misses confirmations that last less than the cadence and enters later than live.")]
+	public int Cadence { get; set; } = 1;
 
 	[CommandOption("--recache")]
 	[Description("Cascade strategies only: ignore the stored cascade readings (data/cascade-cache) and replay every session again. Needed only after re-backfilling past sessions in the quote store; a new build or changed chain/tape files are detected on their own.")]

@@ -37,8 +37,8 @@ internal sealed class AIVerifySettings : CommandSettings
 	public string? Until { get; set; }
 
 	[CommandOption("--cadence <MINUTES>")]
-	[Description("Cascade strategies only: backtest grid cadence in minutes. Default: 10 (matching `wa ai backtest`).")]
-	public int Cadence { get; set; } = 10;
+	[Description("Cascade strategies only: backtest grid cadence in minutes. Default: 1 (every minute, as live reads; matching `wa ai backtest`).")]
+	public int Cadence { get; set; } = 1;
 
 	[CommandOption("--quote-db <PATH>")]
 	[Description("Override the SQLite quote-store path (default data/quotes.db).")]
