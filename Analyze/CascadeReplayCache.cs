@@ -3,7 +3,8 @@ using System.Collections.Concurrent;
 namespace WebullAnalytics.Analyze;
 
 /// <summary>Memo of the cascade replay's session-level loads — the inputs that depend on the session and expiry, never on the checkpoint:
-/// the prior day's causal chain, the prior day's ΔOI basis, the front expiry's minute-NBBO slice, and the store's volume tape. The panel
+/// the prior day's causal chain, the prior day's ΔOI basis, the front expiry's minute-NBBO slice, the store's volume tape and the day's
+/// data/iv volume captures. The panel
 /// evaluates one instant and passes none (each load runs once anyway); `analyze cascade-study` evaluates a dozen checkpoints per session
 /// and passes one per session, so each load runs once per session instead of once per checkpoint. The same-window volume baseline reads
 /// up to twenty prior sessions per checkpoint; its per-day minute totals are immutable store data, so that one map is shared across
@@ -14,6 +15,7 @@ internal sealed class CascadeReplayCache(ConcurrentDictionary<(string Ticker, Da
 	private readonly ConcurrentDictionary<(string, DateTime), Lazy<(DateTime? Date, Dictionary<(DateTime Expiry, decimal Strike, bool IsCall), PriorContract>? Oi)>> _priorOi = new();
 	private readonly ConcurrentDictionary<(string, DateTime, DateTime), Lazy<AnalyzeGexCommand.IntradayQuoteSlice?>> _slices = new();
 	private readonly ConcurrentDictionary<(string, DateTime, DateTime), Lazy<SortedDictionary<TimeSpan, Dictionary<decimal, (decimal C, decimal P)>>>> _tapes = new();
+	private readonly ConcurrentDictionary<(string, DateTime, string, DateTime), Lazy<SortedDictionary<TimeSpan, Dictionary<(DateTime Expiry, decimal Strike, string Right), long>>>> _captures = new();
 
 	internal (DateTime? PriorDate, Dictionary<string, OptionContractQuote> Quotes) PriorChain(string ticker, DateTime date, Func<(DateTime?, Dictionary<string, OptionContractQuote>)> load) =>
 		Memo(_priorChain, (ticker.ToUpperInvariant(), date.Date), load);
@@ -26,6 +28,11 @@ internal sealed class CascadeReplayCache(ConcurrentDictionary<(string Ticker, Da
 
 	internal SortedDictionary<TimeSpan, Dictionary<decimal, (decimal C, decimal P)>> StoreTape(string ticker, DateTime date, DateTime expiry) =>
 		Memo(_tapes, (ticker.ToUpperInvariant(), date.Date, expiry.Date), () => AnalyzeGexCommand.LoadStoreTape(ticker, date, expiry));
+
+	/// <summary>The session's data/iv volume captures for one expiry, every strike: the day file is hundreds of MB (2026-11-20: 371 MB,
+	/// 3.8M rows), so parsing it per checkpoint was 95% of a reading's cost. Each reading cuts its own strike band and instant from this.</summary>
+	internal SortedDictionary<TimeSpan, Dictionary<(DateTime Expiry, decimal Strike, string Right), long>> VolumeCaptures(string ticker, DateTime date, string source, DateTime expiry) =>
+		Memo(_captures, (ticker.ToUpperInvariant(), date.Date, source.ToLowerInvariant(), expiry.Date), () => IvDumpStore.LoadVolumeSeries(ticker, date, source, (exp, _) => exp == expiry.Date));
 
 	internal SortedDictionary<TimeSpan, long>? MinuteVolume(string ticker, DateTime date, DateTime expiry) =>
 		Memo(sharedMinuteVolume, (ticker.ToUpperInvariant(), date.Date, expiry.Date), () => AnalyzeGexCommand.StoreMinuteVolume(ticker, date, expiry));

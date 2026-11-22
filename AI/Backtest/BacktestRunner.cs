@@ -1675,17 +1675,22 @@ internal sealed class BacktestRunner
 			var reasons = mine.Where(e => e.Outcome is Open.Cascade.CascadeSignalLedger.Skipped or Open.Cascade.CascadeSignalLedger.Waiting && !openedDays.Contains(e.Date))
 				.GroupBy(e => e.Date).Select(g => g.Last().Detail)
 				.Concat(_cascadeUnfilled.Where(u => u.Setup == regime && u.Side == side).Select(u => u.Reason))
-				.GroupBy(ReasonKind).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()}× {g.Key}").ToList();
+				.ToList();
 			var gated = _cascadeOpener!.GatedReadings.Where(g => g.Setup == regime).ToList();
 			var name = side == null ? Analyze.CascadeReading.RegimeLabel(regime) : $"NEUTRAL {side.ToUpperInvariant()}";
 			var what = side == null ? "first confirmation(s)" : "neutral day(s)";
-			lines.Add($"  {name} → {setup.Kind}: {confirmed} {what}, {opened} opened{(reasons.Count > 0 ? "; not opened: " + string.Join(", ", reasons) : "")}{(gated.Count > 0 ? $"; {gated.Count} reading(s) held back by an entry condition ({string.Join(", ", gated.GroupBy(g => ReasonKind(g.Reason)).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()}× {g.Key}"))})" : "")}");
+			lines.Add($"  {name} → {setup.Kind}: {confirmed} {what}, {opened} opened{(reasons.Count > 0 ? "; not opened: " + SummarizeReasons(reasons) : "")}{(gated.Count > 0 ? $"; {gated.Count} reading(s) held back by an entry condition ({SummarizeReasons(gated.Select(g => g.Reason))})" : "")}");
 		}
 		return lines;
 	}
 
+	/// <summary>Skip reasons counted by kind, most frequent first. A kind seen once reads as the reason itself, numbers and all; one seen more
+	/// often reads as its count and its latest instance ("3×, latest: $7,650/$7,660 call spread mid credit $0.07 is under minCredit $0.10").</summary>
+	internal static string SummarizeReasons(IEnumerable<string> reasons) =>
+		string.Join(", ", reasons.GroupBy(ReasonKind).OrderByDescending(g => g.Count()).Select(g => g.Count() == 1 ? $"1× {g.Last()}" : $"{g.Count()}×, latest: {g.Last()}"));
+
 	/// <summary>A skip reason with its numbers blanked, so "the $7,650/$7,660 call spread mid credit $0.07 is under minCredit $0.10" and the
-	/// same reason at other strikes count as one kind.</summary>
+	/// same reason at other strikes count as one kind. Only a grouping key: never shown.</summary>
 	private static string ReasonKind(string reason) => System.Text.RegularExpressions.Regex.Replace(reason, @"\$?-?\d[\d,]*(\.\d+)?", "#");
 
 	/// <summary>The quote-store book, at the trade's minute, of exactly the legs the setups' trades would use — asked for by symbol, so a

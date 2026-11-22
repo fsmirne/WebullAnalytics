@@ -1093,10 +1093,16 @@ internal static class CascadeScreener
 				flowShare = GexSqueezeScreener.FlowShare(frontContribs, spot);
 			}
 
-			var rawCaptures = IvDumpStore.LoadVolumeSeries(ticker, date, vendorName, (exp, strike) => exp == frontExp.Value && Math.Abs(strike - spot) / spot <= strikeRangeFraction);
+			// The front expiry's captures, every strike (parsed once per session under a replay cache), cut to this reading's strike band and
+			// instant. A capture with no row in the band is dropped, as if the band had filtered the file.
+			var frontCaptures = cache != null ? cache.VolumeCaptures(ticker, date, vendorName, frontExp.Value) : IvDumpStore.LoadVolumeSeries(ticker, date, vendorName, (exp, _) => exp == frontExp.Value);
 			var captures = new SortedDictionary<TimeSpan, Dictionary<(DateTime Expiry, decimal Strike, string Right), long>>();
-			foreach (var (ts, map) in rawCaptures)
-				if (ts <= tod) captures[ts] = map;
+			foreach (var (ts, map) in frontCaptures)
+			{
+				if (ts > tod) break;
+				var inBand = map.Where(kv => Math.Abs(kv.Key.Strike - spot) / spot <= strikeRangeFraction).ToDictionary(kv => kv.Key, kv => kv.Value);
+				if (inBand.Count > 0) captures[ts] = inBand;
+			}
 			var window = GexSqueezeScreener.RecentVolumeWindow(captures, AnalyzeGexSettings.RthOpen);
 			if (window == null && storeTape.Count > 0 && tod >= new TimeSpan(9, 35, 0))
 			{
