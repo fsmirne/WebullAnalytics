@@ -7,7 +7,7 @@ sweep costs one replay plus the trade management of each cell. Backtests run one
 
 A grid file is JSON: {"cells": [{"id": "bt_call_o1_t30", "setup": "bearTrap", "overrides": {...}}, ...]}. Overrides are merged into
 the base layer; "setup" names the one cascade setup the cell enables (the others are switched off), so every trade in the cell's
-ledger belongs to it.
+ledger belongs to it — or is "all", which leaves the base layer's setups as they are (for knobs that act across setups, like the daily cap).
 
 Ranking follows the project's convention: total P&L ranks, profit factor gates quality. Every cell is also scored on a training span
 and a held-out span (--split), and without its two best trades, so a cell that wins on one outlier day or only in-sample is visible.
@@ -116,7 +116,8 @@ def main():
     say(f"{len(cells)} cell(s), {len(done)} already done, {len(todo)} to run; log {log_path}")
     started = time.time()
     for i, cell in enumerate(todo, 1):
-        layer = deep_merge(base, {"opener": {"cascade": {s: {"enabled": s == cell["setup"]} for s in SETUPS}}})
+        # A cell naming one setup trades only that setup; "all" keeps the base layer's setups as they are, so they compete for the daily cap.
+        layer = base if cell["setup"] == "all" else deep_merge(base, {"opener": {"cascade": {s: {"enabled": s == cell["setup"]} for s in SETUPS}}})
         layer = deep_merge(layer, cell.get("overrides", {}))
         token = f"{args.prefix}{i}"
         layer_path = os.path.join(args.data, f"ai-config.{args.ticker}.{token}.json")
