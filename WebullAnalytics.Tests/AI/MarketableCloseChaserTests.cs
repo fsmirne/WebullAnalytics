@@ -21,6 +21,8 @@ public class MarketableCloseChaserTests
 		public Task<WebullOpenApiClient.OrderDetail> GetOrderAsync(string clientOrderId, CancellationToken ct)
 		{
 			if (Status == "MISSING") return Task.FromResult(new WebullOpenApiClient.OrderDetail("NORMAL", null, []));
+			// What Webull actually answers for an id it has no order for (observed 2026-11-21).
+			if (Status == "NOT_PRESENT") throw new WebullOpenApiException("OPENAPI_PARAM_ERR", "Parameter error, Order not present.", 400);
 			var legs = new List<WebullOpenApiClient.OrderDetailLeg> { new("SPXW", Side, Quantity, "CALL", "7600", "2026-11-12", Id: "leg-1") };
 			var order = new WebullOpenApiClient.OrderDetailOrder(clientOrderId, "oid", Status, "SPXW", Side, Quantity, "0", null, Limit, null, null, null, null, null, null, legs);
 			return Task.FromResult(new WebullOpenApiClient.OrderDetail("NORMAL", null, [order]));
@@ -85,7 +87,7 @@ public class MarketableCloseChaserTests
 	[Fact]
 	public void AnOrderThatEndedUnfilledIsGone()
 	{
-		foreach (var status in new[] { "CANCELLED", "REJECTED", "EXPIRED", "MISSING" })
+		foreach (var status in new[] { "CANCELLED", "REJECTED", "EXPIRED", "MISSING", "NOT_PRESENT" })
 			Assert.Equal(MarketableCloseChaser.Outcome.Gone, Chase(new FakeGateway { Status = status }, "SELL", 6.50m));
 	}
 

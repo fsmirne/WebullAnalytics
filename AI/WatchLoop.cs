@@ -84,7 +84,8 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		if (settings.Submit) { config.AutoExecute.Management.Submit = true; config.AutoExecute.Opener.Submit = true; AIContext.WarnIfSubmitInert(config); }
 		if (settings.Tif != null) { config.AutoExecute.Management.TimeInForce = settings.Tif.ToUpperInvariant(); config.AutoExecute.Opener.TimeInForce = settings.Tif.ToUpperInvariant(); }
 		if (settings.Start != null) config.Watch.StartTime = settings.Start;
-
+		// Held from here, not from the first tick: a machine that idles to sleep while waiting for startTime never starts the watch at all.
+		using var awake = SleepInhibitor.Acquire("wa ai watch is managing positions");
 
 		// --tick overrides every interval; otherwise each falls back to tickIntervalSeconds. The loop runs at the management cadence and starts the opener when it is due.
 		var mgmtSeconds = settings.Tick ?? config.Watch.ManagementIntervalSeconds ?? config.Watch.TickIntervalSeconds;
@@ -151,7 +152,9 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		var debug = string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
 		if (debug) Console.Error.WriteLine($"[debug] wa ai watch: log-level=debug ticker={config.Ticker} opener.enabled={config.Opener.Enabled} emitOpen={settings.EmitOpenProposals} emitMgmt={settings.EmitManagementProposals} ignoreMktHours={settings.IgnoreMarketHours}");
 
+		// Consecutive failed ticks that were not an outage (see OutageTracker): those, and only those, trip the circuit breaker.
 		var failures = 0;
+		var outage = new OutageTracker("management ticks");
 		var ticksRun = 0;
 		var proposalsEmitted = 0;
 		// Watch = "one live management tick in a loop, plus the opener on its own cadence". The opener never bypasses its daily cap here (that's a scan flag).
@@ -228,10 +231,11 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 
 				ticksRun++;
 				failures = 0;
+				outage.Succeeded(DateTime.Now);
 			}
 			// Only a cancellation of the loop's own token ends it. An HTTP timeout surfaces as TaskCanceledException (an OperationCanceledException)
-			// with that token untouched: it is a failed tick, counted toward the circuit breaker below, not a request to stop (2026-11-16 09:52, a
-			// timed-out tick ended the loop silently: "Loop exited. ticks=5 proposals=0 failures=0").
+			// with that token untouched: it is a failed tick (an outage, see below), not a request to stop (2026-11-16 09:52, a timed-out tick ended
+			// the loop silently: "Loop exited. ticks=5 proposals=0 failures=0").
 			catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
 			catch (UnauthorizedAccessException ex)
 			{
@@ -241,13 +245,18 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 			}
 			catch (Exception ex)
 			{
-				failures++;
-				AnsiConsole.MarkupLine($"[red]Tick {ticksRun + 1} failed ({failures}/{WatchOpenerRunner.WatchFailureLimit}): {Markup.Escape(WatchOpenerRunner.ExceptionChain(ex))}[/]");
-				if (failures >= WatchOpenerRunner.WatchFailureLimit)
+				// An outage (network down, an API unreachable or failing server-side) is waited out, not counted: exiting would leave every position
+				// unmanaged until a restart, while ticking on resumes management the moment it ends.
+				if (!outage.Failed(ex, DateTime.Now))
 				{
-					Console.Error.WriteLine($"Circuit breaker: {WatchOpenerRunner.WatchFailureLimit} consecutive tick failures. Exiting.");
-					await opener.DrainAsync();
-					return 3;
+					failures++;
+					AnsiConsole.MarkupLine($"[red]Tick {ticksRun + 1} failed ({failures}/{WatchOpenerRunner.WatchFailureLimit}): {Markup.Escape(WatchOpenerRunner.ExceptionChain(ex))}[/]");
+					if (failures >= WatchOpenerRunner.WatchFailureLimit)
+					{
+						Console.Error.WriteLine($"Circuit breaker: {WatchOpenerRunner.WatchFailureLimit} consecutive tick failures. Exiting.");
+						await opener.DrainAsync();
+						return 3;
+					}
 				}
 			}
 

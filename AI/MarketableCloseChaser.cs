@@ -20,7 +20,11 @@ internal sealed class MarketableCloseChaser(IOrderGateway gateway)
 	/// <param name="limit">The current marketable limit, already rounded to the exchange tick.</param>
 	public async Task<(Outcome Outcome, decimal? RestingLimit)> ChaseAsync(string clientOrderId, string side, decimal limit, CancellationToken ct)
 	{
-		var order = (await gateway.GetOrderAsync(clientOrderId, ct)).Orders?.FirstOrDefault();
+		WebullOpenApiClient.OrderDetailOrder? order;
+		// Webull answers a lookup of an id it has no order for with an error, not an empty list: that order is missing, so the position still
+		// needs a close. Read as a failure instead, a close whose send went unanswered and never reached Webull would block its own replacement.
+		try { order = (await gateway.GetOrderAsync(clientOrderId, ct)).Orders?.FirstOrDefault(); }
+		catch (WebullOpenApiException ex) when (ex.IsOrderNotFound) { return (Outcome.Gone, null); }
 		var resting = BrokerOrder.Number(order?.LimitPrice);
 		switch (BrokerOrder.State(order?.Status))
 		{

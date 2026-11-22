@@ -44,6 +44,9 @@ internal sealed class BrokerStateService
 	// active multiset: a FILLED close has already shrunk the broker position, so it must not block the next
 	// close of the remainder (scale-out tranches 2/3, an auto take-profit after a manual trim).
 	private HashSet<string>? _workingFingerprints;
+	// Fingerprints of orders this machine sent with no broker acknowledgement on record (ledger state "sending", not yet reported by
+	// the broker): they block re-sends like any working order, and the opener will not complete a split structure around one.
+	private HashSet<string>? _unconfirmedFingerprints;
 	// Active-order count keyed by underlying root, so the daily cap can be scoped to the running ticker.
 	private Dictionary<string, int>? _activeOrderCountByRoot;
 
@@ -106,8 +109,54 @@ internal sealed class BrokerStateService
 		var todayOrders = await TodayOrdersFeed.For(_account).GetAsync(cycleToken, cancellation);
 		var openOrders = await client.ListOpenOrdersAsync(cancellation);
 		var ledgerEntries = _ledger?.ReadFor(MarketTime.TodayEt());
-		LoadSnapshot(todayOrders, openOrders, ledgerEntries);
+		var (resolved, voided) = ledgerEntries == null ? ([], []) : await ResolveUnconfirmedAsync(client, ledgerEntries, ReportedClientIds(todayOrders.Concat(openOrders)), cancellation);
+		LoadSnapshot(todayOrders, openOrders.Concat(resolved), ledgerEntries?.Where(e => e.ClientOrderId == null || !voided.Contains(e.ClientOrderId)).ToList());
 	}
+
+	/// <summary>How long a sent-but-unacknowledged order must stay unknown to the broker before a not-found lookup is taken to mean it was never
+	/// placed. Order detail is read seconds after a placement elsewhere (the marketable-close chaser), but an order that does exist and is voided
+	/// by a lookup that came too early is a duplicate — so a missing order is believed only after this.</summary>
+	internal static readonly TimeSpan UnconfirmedNotFoundGrace = TimeSpan.FromMinutes(2);
+
+	/// <summary>True when an unconfirmed order sent at <paramref name="sentAt"/> has been unknown to the broker long enough, at
+	/// <paramref name="now"/>, to be voided. An entry without a send time (never written by this build) is never voided this way.</summary>
+	internal static bool PastNotFoundGrace(DateTime? sentAt, DateTime now) => sentAt is DateTime at && now - at >= UnconfirmedNotFoundGrace;
+
+	/// <summary>Looks up each unconfirmed ledger order the broker's lists don't show yet. One Webull returns is passed back to join the
+	/// snapshot (broker truth then governs it, including rejected = free to retry). One Webull has no order for (it answers
+	/// <see cref="WebullOpenApiException.IsOrderNotFound"/>; an empty detail reads the same) is voided once
+	/// <see cref="PastNotFoundGrace"/>. A lookup that fails any other way leaves the order unconfirmed, so it keeps blocking (fail-closed).</summary>
+	private async Task<(List<WebullOpenApiClient.OpenOrder> Resolved, HashSet<string> Voided)> ResolveUnconfirmedAsync(WebullOpenApiClient client, IReadOnlyList<LocalOrderLedger.Entry> ledgerEntries, HashSet<string> reportedClientIds, CancellationToken cancellation)
+	{
+		var resolved = new List<WebullOpenApiClient.OpenOrder>();
+		var voided = new HashSet<string>(StringComparer.Ordinal);
+		foreach (var e in ledgerEntries)
+		{
+			if (!e.Unconfirmed || string.IsNullOrEmpty(e.ClientOrderId) || reportedClientIds.Contains(e.ClientOrderId)) continue;
+			WebullOpenApiClient.OrderDetail? detail;
+			try { detail = await client.GetOrderAsync(e.ClientOrderId, cancellation); }
+			catch (WebullOpenApiException ex) when (ex.IsOrderNotFound) { detail = null; }
+			catch (Exception ex) when (!cancellation.IsCancellationRequested)
+			{
+				AnsiConsole.MarkupLine($"[dim]unconfirmed order {Markup.Escape(e.ClientOrderId)}: lookup failed ({Markup.Escape(ex.Message)}) — still held as placed.[/]");
+				continue;
+			}
+			if (detail?.Orders is { Count: > 0 } orders)
+			{
+				resolved.Add(new WebullOpenApiClient.OpenOrder(null, detail.ComboType, detail.ComboOrderId, orders));
+				continue;
+			}
+			if (!PastNotFoundGrace(e.At, MarketTime.NowEt())) continue;
+			AppendLedger(e.Root, e.Open, e.Fingerprint, e.ClientOrderId, LocalOrderLedger.Void);
+			voided.Add(e.ClientOrderId);
+			AnsiConsole.MarkupLine($"[yellow]unconfirmed order {Markup.Escape(e.ClientOrderId)} is not at the broker {UnconfirmedNotFoundGrace.TotalMinutes:0} min after it was sent — treated as never placed.[/]");
+		}
+		return (resolved, voided);
+	}
+
+	/// <summary>Every client_order_id the broker reported, any status.</summary>
+	private static HashSet<string> ReportedClientIds(IEnumerable<WebullOpenApiClient.OpenOrder> combos) =>
+		combos.SelectMany(c => c.Orders ?? []).Select(o => o.ClientOrderId).OfType<string>().Where(id => id.Length > 0).ToHashSet(StringComparer.Ordinal);
 
 	/// <summary>Builds the snapshot from already-fetched orders (what <see cref="RefreshAsync"/> does after its two calls), so it can run without the network.
 	/// With a <paramref name="cycleToken"/> the snapshot also stands as that tick's refresh, so <see cref="TryRefreshAsync"/> on the same token reuses it.</summary>
@@ -118,6 +167,7 @@ internal sealed class BrokerStateService
 		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
 		var byFingerprint = new Dictionary<string, List<WebullOpenApiClient.OrderDetailOrder>>(StringComparer.Ordinal);
 		var working = new HashSet<string>(StringComparer.Ordinal);
+		var unconfirmed = new HashSet<string>(StringComparer.Ordinal);
 		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 		// Every client_order_id the broker reported, ANY status (unlike seenClientIds, which is
 		// active-only). A local-ledger entry whose id appears here has been caught up by the broker —
@@ -153,11 +203,12 @@ internal sealed class BrokerStateService
 		Ingest(openOrders);
 
 		if (ledgerEntries != null)
-			MergeLedgerEntries(ledgerEntries, reportedClientIds, fingerprints, working, rootCount);
+			MergeLedgerEntries(ledgerEntries, reportedClientIds, fingerprints, working, rootCount, unconfirmed);
 
 		_activeFingerprintCounts = fingerprints;
 		_activeByFingerprint = byFingerprint;
 		_workingFingerprints = working;
+		_unconfirmedFingerprints = unconfirmed;
 		_activeOrderCountByRoot = rootCount;
 	}
 
@@ -165,33 +216,84 @@ internal sealed class BrokerStateService
 	/// broker reports its client_order_id (any status — broker truth, including canceled/rejected = retryable,
 	/// governs from then on). Surviving entries count into the fingerprint multiset and the working set (status
 	/// unknown — it may have filled, but the broker hasn't said so yet, so fail closed), and opening entries
-	/// count toward the per-root daily cap.</summary>
-	internal static void MergeLedgerEntries(IReadOnlyList<LocalOrderLedger.Entry> entries, HashSet<string> reportedClientIds, Dictionary<string, int> fingerprints, HashSet<string> working, Dictionary<string, int> rootCount)
+	/// count toward the per-root daily cap. Entries never acknowledged by the broker are also collected into
+	/// <paramref name="unconfirmed"/>.</summary>
+	internal static void MergeLedgerEntries(IReadOnlyList<LocalOrderLedger.Entry> entries, HashSet<string> reportedClientIds, Dictionary<string, int> fingerprints, HashSet<string> working, Dictionary<string, int> rootCount, HashSet<string>? unconfirmed = null)
 	{
 		foreach (var e in entries)
 		{
 			if (!string.IsNullOrEmpty(e.ClientOrderId) && reportedClientIds.Contains(e.ClientOrderId)) continue;
 			fingerprints[e.Fingerprint] = fingerprints.TryGetValue(e.Fingerprint, out var c) ? c + 1 : 1;
 			working.Add(e.Fingerprint);
+			if (e.Unconfirmed) unconfirmed?.Add(e.Fingerprint);
 			if (e.Open) rootCount[e.Root] = rootCount.TryGetValue(e.Root, out var rc) ? rc + 1 : 1;
 		}
 	}
 
-	/// <summary>Records a successful PlaceOrder issued by this process, so the snapshot sees it immediately
-	/// instead of waiting out the broker's history lag: appends to the persisted ledger (cross-restart,
-	/// cross-process) and patches the in-memory snapshot in place for the rest of this tick. Opening orders
-	/// (<paramref name="isOpen"/>) count toward the daily cap; closes participate in leg-set dedup only.</summary>
-	public void RecordLocalPlacement(string ticker, IEnumerable<(string Symbol, string Action)> legs, string? clientOrderId, bool isOpen)
+	/// <summary>An order about to be sent, as <see cref="RecordSending"/> recorded it — what <see cref="RecordPlaced"/> and
+	/// <see cref="RecordVoid"/> need to settle it.</summary>
+	internal sealed record PendingPlacement(string Fingerprint, string Root, bool IsOpen, string ClientOrderId, bool WasWorking);
+
+	/// <summary>Records an order this process is about to send, BEFORE the send, so the snapshot and the persisted ledger (cross-restart,
+	/// cross-process) see it whatever the send's outcome — instead of waiting out the broker's history lag. Patches the in-memory snapshot
+	/// in place for the rest of this tick. Opening orders (<paramref name="isOpen"/>) count toward the daily cap; closes participate in leg-set
+	/// dedup only. Settle it with <see cref="RecordPlaced"/> or <see cref="RecordVoid"/>; left unsettled (no answer came back) it stays
+	/// unconfirmed and blocks like a placed order.</summary>
+	public PendingPlacement RecordSending(string ticker, IEnumerable<(string Symbol, string Action)> legs, string clientOrderId, bool isOpen)
 	{
 		var fp = FingerprintProposal(legs);
-		var root = ticker.ToUpperInvariant();
-		try { _ledger?.Append(root, isOpen, fp, clientOrderId, MarketTime.NowEt()); }
-		catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]local order ledger append failed:[/] {Markup.Escape(ex.Message)} — dedup holds in-memory for this run only."); }
+		var pending = new PendingPlacement(fp, ticker.ToUpperInvariant(), isOpen, clientOrderId, _workingFingerprints?.Contains(fp) ?? false);
+		AppendLedger(pending.Root, isOpen, pending.Fingerprint, clientOrderId, LocalOrderLedger.Sending);
 		if (_activeFingerprintCounts != null)
-			_activeFingerprintCounts[fp] = _activeFingerprintCounts.TryGetValue(fp, out var c) ? c + 1 : 1;
-		_workingFingerprints?.Add(fp);
+			_activeFingerprintCounts[pending.Fingerprint] = _activeFingerprintCounts.GetValueOrDefault(pending.Fingerprint) + 1;
+		_workingFingerprints?.Add(pending.Fingerprint);
+		_unconfirmedFingerprints?.Add(pending.Fingerprint);
 		if (isOpen && _activeOrderCountByRoot != null)
-			_activeOrderCountByRoot[root] = _activeOrderCountByRoot.TryGetValue(root, out var rc) ? rc + 1 : 1;
+			_activeOrderCountByRoot[pending.Root] = _activeOrderCountByRoot.GetValueOrDefault(pending.Root) + 1;
+		return pending;
+	}
+
+	/// <summary>The broker acknowledged <paramref name="pending"/>. Webull echoes the client_order_id it was sent; should it ever answer with
+	/// another, the order is re-keyed to the broker's id so the broker reporting it releases the ledger entry.</summary>
+	public void RecordPlaced(PendingPlacement pending, string? brokerClientOrderId)
+	{
+		if (!string.IsNullOrEmpty(brokerClientOrderId) && brokerClientOrderId != pending.ClientOrderId)
+		{
+			AppendLedger(pending.Root, pending.IsOpen, pending.Fingerprint, pending.ClientOrderId, LocalOrderLedger.Void);
+			AppendLedger(pending.Root, pending.IsOpen, pending.Fingerprint, brokerClientOrderId, LocalOrderLedger.Placed);
+		}
+		else AppendLedger(pending.Root, pending.IsOpen, pending.Fingerprint, pending.ClientOrderId, LocalOrderLedger.Placed);
+		_unconfirmedFingerprints?.Remove(pending.Fingerprint);
+	}
+
+	/// <summary><paramref name="pending"/> definitely never became an order: undoes <see cref="RecordSending"/>, so the same leg set may be
+	/// tried again and the daily cap is not spent on it.</summary>
+	public void RecordVoid(PendingPlacement pending)
+	{
+		AppendLedger(pending.Root, pending.IsOpen, pending.Fingerprint, pending.ClientOrderId, LocalOrderLedger.Void);
+		if (_activeFingerprintCounts != null && _activeFingerprintCounts.TryGetValue(pending.Fingerprint, out var c))
+		{
+			if (c <= 1) _activeFingerprintCounts.Remove(pending.Fingerprint);
+			else _activeFingerprintCounts[pending.Fingerprint] = c - 1;
+		}
+		if (!pending.WasWorking) _workingFingerprints?.Remove(pending.Fingerprint);
+		_unconfirmedFingerprints?.Remove(pending.Fingerprint);
+		if (pending.IsOpen && _activeOrderCountByRoot != null && _activeOrderCountByRoot.TryGetValue(pending.Root, out var rc))
+		{
+			if (rc <= 1) _activeOrderCountByRoot.Remove(pending.Root);
+			else _activeOrderCountByRoot[pending.Root] = rc - 1;
+		}
+	}
+
+	/// <summary>True when the leg set matches an order sent with no broker acknowledgement on record. The opener holds a split structure while
+	/// one half is in this state: completing it around a half that may never have been placed would leave the other half open on its own.</summary>
+	public bool HasUnconfirmedMatching(IEnumerable<(string Symbol, string Action)> proposalLegs) =>
+		_unconfirmedFingerprints != null && _unconfirmedFingerprints.Contains(FingerprintProposal(proposalLegs));
+
+	private void AppendLedger(string root, bool isOpen, string fingerprint, string clientOrderId, string state)
+	{
+		try { _ledger?.Append(root, isOpen, fingerprint, clientOrderId, MarketTime.NowEt(), state); }
+		catch (Exception ex) { AnsiConsole.MarkupLine($"[yellow]local order ledger append failed:[/] {Markup.Escape(ex.Message)} — dedup holds in-memory for this run only."); }
 	}
 
 	/// <summary>Underlying root of an order's leg set (all legs of one combo share it). Used to scope the
@@ -320,6 +422,7 @@ internal sealed class BrokerStateService
 			_activeFingerprintCounts = null;
 			_activeByFingerprint = null;
 			_workingFingerprints = null;
+			_unconfirmedFingerprints = null;
 			_activeOrderCountByRoot = null;
 			LastRefreshError = ex.Message;
 			ok = false;

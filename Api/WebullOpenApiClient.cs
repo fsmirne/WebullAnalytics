@@ -21,6 +21,12 @@ internal sealed class WebullOpenApiException : Exception
 		HttpStatus = httpStatus;
 		RawBody = rawBody;
 	}
+
+	/// <summary>True for the order-detail lookup's answer to a client_order_id Webull has no order for. Webull answers with an error, not an
+	/// empty order list: <c>[OPENAPI_PARAM_ERR] Parameter error, Order not present.</c> (observed 2026-11-21). The code alone also covers
+	/// malformed parameters, so the message must say the order is not present.</summary>
+	internal bool IsOrderNotFound =>
+		string.Equals(ErrorCode, "OPENAPI_PARAM_ERR", StringComparison.OrdinalIgnoreCase) && Message.Contains("not present", StringComparison.OrdinalIgnoreCase);
 }
 
 internal sealed class WebullOpenApiClient : IDisposable

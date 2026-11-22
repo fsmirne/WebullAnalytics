@@ -1,3 +1,4 @@
+using Spectre.Console;
 using WebullAnalytics.AI.Output;
 using WebullAnalytics.AI.Sources;
 
@@ -218,6 +219,15 @@ internal static class LiveTick
 					if (!openResults[i].Informational && (feedStale || suspect.ContainsKey(i)))
 						deps.OpenSink.EmitAutoExecute(openResults[i], "skipped", "quote guard", feedStale ? "stale feed" : suspect[i]);
 				using var lease = await EnterAsync(deps.ActionGate, cancellation);
+				// A frame older than MaxSubmitFrameAge priced these proposals off a market that has moved on: the machine slept through the run, or a
+				// call in it hung. The quote guard above cannot see that (it measures staleness against the frame's own clock), so submit nothing; the
+				// next run scores a fresh frame. A cascade setup held here is not spent, so it is proposed again on that run.
+				if (IsStaleForSubmit(now, DateTime.Now))
+				{
+					AnsiConsole.MarkupLine($"[yellow]opener auto-execute held:[/] these proposals were priced at {now:HH:mm:ss}, {(DateTime.Now - now).TotalMinutes:0.0} min ago — nothing submitted; the next run re-scores.");
+					foreach (var p in safeToOpen.Where(p => !p.Informational)) deps.OpenSink.EmitAutoExecute(p, "skipped", "stale frame", $"priced at {now:HH:mm:ss}");
+					return (openCount, SpotOf(quoteSnapshot, deps, config.Ticker));
+				}
 				// Read inside the gate: no management tick can run while this holds it, so this is the freshest snapshot there will be.
 				var executionToken = deps.Latest?.Token ?? cycleToken;
 				await deps.OpenerExecutor.HandleAsync(safeToOpen.Where(p => !cascadeResults.Contains(p)).ToList(), openPositions, now, cancellation, bypassDailyCap: deps.BypassOpenerDailyCap, cycleToken: executionToken, log: deps.OpenSink);
@@ -234,11 +244,22 @@ internal static class LiveTick
 			}
 		}
 
-		var spot = quoteSnapshot.Underlyings.TryGetValue(config.Ticker, out var s) ? s
-			: (deps.OpenEvaluator?.LastUnderlyings.TryGetValue(config.Ticker, out var hb) ?? false) ? hb
-			: deps.CascadeOpener?.LastSpot;
-		return (openCount, spot);
+		return (openCount, SpotOf(quoteSnapshot, deps, config.Ticker));
 	}
+
+	/// <summary>The ticker's spot for the caller's pulse: the frame's, else the opener's bootstrap spot, else the cascade opener's last read.</summary>
+	private static decimal? SpotOf(QuoteSnapshot quoteSnapshot, LiveTickDeps deps, string ticker) =>
+		quoteSnapshot.Underlyings.TryGetValue(ticker, out var s) ? s
+			: (deps.OpenEvaluator?.LastUnderlyings.TryGetValue(ticker, out var hb) ?? false) ? hb
+			: deps.CascadeOpener?.LastSpot;
+
+	/// <summary>How old a frame may be when its opens are submitted. A normal run, scoring included, takes seconds; a frame older than this
+	/// outlived a suspend or a hung call.</summary>
+	internal static readonly TimeSpan MaxSubmitFrameAge = TimeSpan.FromMinutes(2);
+
+	/// <summary>True when a frame read at <paramref name="frameNow"/> is too old at <paramref name="wallNow"/> to submit opens from. Both are
+	/// wall-clock readings, which (unlike a stopwatch) keep counting while the machine is suspended.</summary>
+	internal static bool IsStaleForSubmit(DateTime frameNow, DateTime wallNow) => wallNow - frameNow > MaxSubmitFrameAge;
 
 	/// <summary>The vendor-reported spot the frozen-book guard checks the book against — never a <see cref="ParitySpotGuard"/>-corrected
 	/// one, which derives from the very book under test. Flat ticks carry no management-side spot, so the opener's pre-correction

@@ -40,6 +40,51 @@ public class LocalOrderLedgerTests : IDisposable
 	}
 
 	[Fact]
+	public void Read_LatestStateWins_VoidedOrdersDrop_UnsettledStayUnconfirmed()
+	{
+		var ledger = new LocalOrderLedger(_path);
+		var today = new DateTime(2026, 6, 11, 10, 0, 0);
+		ledger.Append("SPY", open: true, "fp-a", "cid-a", today, LocalOrderLedger.Sending);
+		ledger.Append("SPY", open: true, "fp-a", "cid-a", today.AddSeconds(1), LocalOrderLedger.Placed);
+		ledger.Append("SPY", open: true, "fp-b", "cid-b", today, LocalOrderLedger.Sending);
+		ledger.Append("SPY", open: true, "fp-b", "cid-b", today.AddSeconds(1), LocalOrderLedger.Void);
+		ledger.Append("SPY", open: true, "fp-c", "cid-c", today, LocalOrderLedger.Sending);
+
+		var entries = ledger.ReadFor(today);
+
+		Assert.Equal(["cid-a", "cid-c"], entries.Select(e => e.ClientOrderId));
+		Assert.False(entries[0].Unconfirmed);
+		Assert.True(entries[1].Unconfirmed);
+		Assert.Equal(today, entries[1].At);   // when it was sent, for the not-found grace
+	}
+
+	[Fact]
+	public void Read_LineWithoutState_IsPlaced()
+	{
+		// Ledgers written before states existed.
+		File.WriteAllText(_path, """{"date":"2026-06-11","root":"SPY","open":true,"fingerprint":"fp","clientOrderId":"cid-1"}""" + "\n");
+
+		var e = Assert.Single(new LocalOrderLedger(_path).ReadFor(new DateTime(2026, 6, 11)));
+		Assert.False(e.Unconfirmed);
+	}
+
+	[Fact]
+	public void Merge_UnconfirmedEntry_IsCollected()
+	{
+		var entries = new[] { new LocalOrderLedger.Entry("2026-06-11", "SPY", true, "fp-sent", "cid-1", LocalOrderLedger.Sending) };
+		var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
+		var working = new HashSet<string>(StringComparer.Ordinal);
+		var unconfirmed = new HashSet<string>(StringComparer.Ordinal);
+		var rootCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+		BrokerStateService.MergeLedgerEntries(entries, new HashSet<string>(StringComparer.Ordinal), fingerprints, working, rootCount, unconfirmed);
+
+		Assert.Contains("fp-sent", unconfirmed);
+		Assert.Contains("fp-sent", working);   // blocks like any working order
+		Assert.Equal(1, rootCount["SPY"]);
+	}
+
+	[Fact]
 	public void Merge_UnreportedOpenEntry_CountsTowardCapAndDedup()
 	{
 		// The live failure: order placed and filled, broker history hasn't caught up yet.

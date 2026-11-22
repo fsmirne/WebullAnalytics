@@ -8,11 +8,12 @@ namespace WebullAnalytics.AI;
 /// broker stops and exit rules on a short cadence. The loop starts a run from a management tick's frame when the opener is due and none is still running;
 /// everything the old per-tick tail did for the opener (the pulse, the 0DTE gate narration, the persisted heartbeat) happens here when the run ends.
 /// A failed run is counted, not thrown: the loop reads <see cref="ConsecutiveFailures"/> and <see cref="Unauthorized"/> on its next tick, which keeps the
-/// circuit breaker and the auth exit where they were.
+/// circuit breaker and the auth exit where they were. A run that failed on an outage is not counted (see <see cref="OutageTracker"/>).
 /// </summary>
 internal sealed class WatchOpenerRunner(LiveTickDeps deps, OpenCandidateEvaluator? openEvaluator, OpenProposalSink? openSink, bool debug)
 {
 	private readonly LiveTickState _state = new();
+	private readonly OutageTracker _outage = new("opener runs");
 	// 0DTE session gate: the last state rendered, so a long "waiting" stretch prints once per state change rather than once per run, and whether the day
 	// has been declared closed so the close is announced exactly once — as "no trade today" only if no run ever allowed an entry.
 	private Open.ZeroDte.ZeroDteGateState? _lastGateState;
@@ -51,6 +52,7 @@ internal sealed class WatchOpenerRunner(LiveTickDeps deps, OpenCandidateEvaluato
 			// that never ran (2026-08-03). One lean type:"tick" line per successful run records liveness plus the best pre-gate candidate's score; type=="open" consumers never see them.
 			openSink?.EmitTick(spot, openCount, mgmtCount, openEvaluator?.LastTopCandidate, config.Opener.MinScoreToOpen);
 			ConsecutiveFailures = 0;
+			_outage.Succeeded(DateTime.Now);
 		}
 		// Only a cancellation of the loop's own token ends a run quietly. An HTTP timeout surfaces as TaskCanceledException with that token untouched: a failed run.
 		catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
@@ -61,6 +63,8 @@ internal sealed class WatchOpenerRunner(LiveTickDeps deps, OpenCandidateEvaluato
 		}
 		catch (Exception ex)
 		{
+			// An outage is waited out, not counted toward the circuit breaker (see OutageTracker).
+			if (_outage.Failed(ex, DateTime.Now)) return;
 			ConsecutiveFailures++;
 			AnsiConsole.MarkupLine($"[red]Opener run failed ({ConsecutiveFailures}/{WatchFailureLimit}): {Markup.Escape(ExceptionChain(ex))}[/]");
 		}

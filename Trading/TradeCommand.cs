@@ -471,15 +471,20 @@ internal sealed class TradePlaceCommand : AsyncCommand<TradePlaceSettings>
 
 		try
 		{
-			var placed = await client.PlaceOrderAsync(body);
-			AnsiConsole.MarkupLine($"[green]Placed.[/] order_id={Markup.Escape(placed.OrderId ?? "-")}  client_order_id={Markup.Escape(placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId)}");
-			// Record it in the shared local-order ledger, exactly as the auto-executors do: Webull's order history can lag a fill by
+			// Sent through the shared local-order ledger, exactly as the auto-executors do: Webull's order history can lag a fill by
 			// 10+ minutes, and until then a running `wa ai watch --submit` would not see this order — so a manual open would not
 			// count toward the opener's daily cap, and the opener could stack its own open (or add to this position) in that window.
 			var root = ParsingHelpers.ParseOptionSymbol(legs[0].Symbol)?.Root ?? legs[0].Symbol;
-			brokerState.RecordLocalPlacement(root, legsForFp, placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: !positionIntent.EndsWith("_TO_CLOSE", StringComparison.Ordinal));
+			var placed = await AI.OrderPlacement.PlaceAsync(ct => client.PlaceOrderAsync(body, ct), body, brokerState, root, legsForFp, isOpen: !positionIntent.EndsWith("_TO_CLOSE", StringComparison.Ordinal), CancellationToken.None);
+			AnsiConsole.MarkupLine($"[green]Placed.[/] order_id={Markup.Escape(placed.OrderId ?? "-")}  client_order_id={Markup.Escape(placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId)}");
 			AnsiConsole.MarkupLine($"[dim]Check status with:[/] wa trade status {Markup.Escape(placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId)}");
 			return 0;
+		}
+		catch (AI.OrderOutcomeUnknownException ex)
+		{
+			AnsiConsole.MarkupLine($"[red bold]Outcome unknown:[/] {Markup.Escape(ex.Message)}");
+			AnsiConsole.MarkupLine("[dim](Do not re-submit until `wa trade status` shows whether it was placed.)[/]");
+			return 3;
 		}
 		catch (WebullOpenApiException ex)
 		{

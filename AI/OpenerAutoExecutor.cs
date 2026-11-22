@@ -218,11 +218,21 @@ internal sealed class OpenerAutoExecutor
 			return new SubmitResult(SubmitOutcome.DryRun);
 		}
 
+		// A split structure is completed only around halves the broker has acknowledged: one sent with no answer back may never have been
+		// placed, and finishing the other half around it would leave that half open on its own. Held until the broker or a lookup settles it.
+		if (groups.Count > 1 && _brokerState != null && groups.Any(g => _brokerState.HasUnconfirmedMatching(g.Legs.Select(l => (l.Symbol, l.Action)))))
+		{
+			Skip(p, "unconfirmed order", "one half of this structure was sent with no answer from Webull; waiting for the broker to report it", log);
+			return new SubmitResult(SubmitOutcome.NotActed);
+		}
+
 		// Live: place each group. Per-group broker dedup keeps this idempotent — if a prior tick already
 		// placed one leg-set (e.g. the process died between the two orders), we place only what's missing
 		// rather than duplicating. A failure after the first order leaves a partial structure: warn loudly.
 		string? firstOrderId = null, firstClientId = null;
 		var placedCount = 0;
+		// Orders sent with no answer back: they may be live, so they count as submitted (the daily cap and this tick's order count).
+		var unknownCount = 0;
 		for (var i = 0; i < groups.Count; i++)
 		{
 			var g = groups[i];
@@ -271,11 +281,10 @@ internal sealed class OpenerAutoExecutor
 				body = OrderRequestBuilder.Build(build);
 
 				using var client = new WebullOpenApiClient(_account);
-				var placed = await client.PlaceOrderAsync(body);
+				var placed = await OrderPlacement.PlaceAsync(ct => client.PlaceOrderAsync(body, ct), body, _brokerState, p.Ticker, g.Legs.Select(l => (l.Symbol, l.Action)), isOpen: true, CancellationToken.None);
 				AnsiConsole.MarkupLine($"[green]opener auto-execute placed:[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
 				log?.EmitAutoExecute(p, "placed", null, summary, placed.OrderId);
 				var clientOrderId = placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
-				_brokerState?.RecordLocalPlacement(p.Ticker, g.Legs.Select(l => (l.Symbol, l.Action)), clientOrderId, isOpen: true);
 				if (build.ProtectiveStop != null && body.NewOrders.Count > 1)
 				{
 					_stops?.RecordBracket(body.NewOrders[1].ClientOrderId, g.Legs.Select(l => (l.Symbol, l.Action)), DateTime.Now);
@@ -285,6 +294,15 @@ internal sealed class OpenerAutoExecutor
 				placedCount++;
 				firstOrderId ??= placed.OrderId;
 				firstClientId ??= placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
+			}
+			catch (OrderOutcomeUnknownException ex)
+			{
+				unknownCount++;
+				AnsiConsole.MarkupLine($"[red bold]opener auto-execute outcome UNKNOWN:[/] {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
+				if (groups.Count > 1)
+					AnsiConsole.MarkupLine($"[red bold]WARNING:[/] {Markup.Escape(p.Ticker)} {p.StructureKind} may be PARTIALLY open — {placedCount} of {groups.Count} order(s) confirmed, 1 unanswered. The rest is held until the broker reports it.");
+				log?.EmitAutoExecute(p, "unknown", "no answer from webull", $"{summary} — {ex.Message}; {placedCount} of {groups.Count} order(s) confirmed");
+				break;
 			}
 			catch (Exception ex) when (ex is WebullOpenApiException or HttpRequestException or InvalidOperationException)
 			{
@@ -299,7 +317,7 @@ internal sealed class OpenerAutoExecutor
 			}
 		}
 
-		return placedCount > 0
+		return placedCount + unknownCount > 0
 			? new SubmitResult(SubmitOutcome.Submitted, firstOrderId, firstClientId)
 			: new SubmitResult(SubmitOutcome.NotActed);
 	}

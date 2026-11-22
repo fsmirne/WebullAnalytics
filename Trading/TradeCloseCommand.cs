@@ -226,10 +226,14 @@ internal sealed class TradeCloseCommand : AsyncCommand<TradeCloseSettings>
 			try
 			{
 				using var client = new WebullOpenApiClient(account);
-				var result = await client.PlaceOrderAsync(body, cancellation);
+				var result = await OrderPlacement.PlaceAsync(ct => client.PlaceOrderAsync(body, ct), body, brokerState, pos.Ticker, legSpecs.Select(l => (l.Symbol, l.Action)), isOpen: false, cancellation);
 				AnsiConsole.MarkupLine($"[green]placed:[/] {Markup.Escape(summary)}  order_id={Markup.Escape(result.OrderId ?? "-")}");
-				brokerState.RecordLocalPlacement(pos.Ticker, legSpecs.Select(l => (l.Symbol, l.Action)), result.ClientOrderId ?? body.NewOrders[0].ClientOrderId, isOpen: false);
 				placed++;
+			}
+			catch (OrderOutcomeUnknownException ex)
+			{
+				AnsiConsole.MarkupLine($"[red bold]outcome unknown:[/] {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
+				failed++;
 			}
 			catch (Exception ex) when (ex is WebullOpenApiException or HttpRequestException)
 			{

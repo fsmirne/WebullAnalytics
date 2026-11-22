@@ -217,11 +217,16 @@ internal sealed class ManagementAutoExecutor
 		try
 		{
 			using var client = new WebullOpenApiClient(_account);
-			var placed = await client.PlaceOrderAsync(body);
+			var placed = await OrderPlacement.PlaceAsync(ct => client.PlaceOrderAsync(body, ct), body, _brokerState, position.Ticker, p.Legs.Select(l => (l.Symbol, l.Action)), isOpen: true, CancellationToken.None);
 			AnsiConsole.MarkupLine($"[green]auto-execute placed:[/] [dim]{Markup.Escape(p.Rule)}[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
 			var clientOrderId = placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
-			_brokerState?.RecordLocalPlacement(position.Ticker, p.Legs.Select(l => (l.Symbol, l.Action)), clientOrderId, isOpen: true);
 			_repricer?.Track(build, clientOrderId, position.Ticker, isOpen: true);
+			return true;
+		}
+		catch (OrderOutcomeUnknownException ex)
+		{
+			// Acted on: the order may be live, and its ledger entry already blocks a re-send.
+			AnsiConsole.MarkupLine($"[red bold]auto-execute outcome UNKNOWN:[/] [dim]{Markup.Escape(p.Rule)}[/] {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
 			return true;
 		}
 		catch (WebullOpenApiException ex)
@@ -370,13 +375,20 @@ internal sealed class ManagementAutoExecutor
 		try
 		{
 			using var client = new WebullOpenApiClient(_account);
-			var placed = await client.PlaceOrderAsync(body);
+			var placed = await OrderPlacement.PlaceAsync(ct => client.PlaceOrderAsync(body, ct), body, _brokerState, position.Ticker, legSpecs.Select(l => (l.Symbol, l.Action)), isOpen: false, CancellationToken.None);
 			AnsiConsole.MarkupLine($"[green]auto-execute placed:[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(summary)}  order_id={Markup.Escape(placed.OrderId ?? "-")}");
 			var clientOrderId = placed.ClientOrderId ?? body.NewOrders[0].ClientOrderId;
-			_brokerState?.RecordLocalPlacement(position.Ticker, legSpecs.Select(l => (l.Symbol, l.Action)), clientOrderId, isOpen: false);
 			// A marketable close is chased to the market by this executor every tick; the repricer's capped one-tick steps would fight it.
 			if (proposal.Marketable) _marketableCloses[closeKey] = clientOrderId;
 			else _repricer?.Track(build, clientOrderId, position.Ticker, isOpen: false);
+			return true;
+		}
+		catch (OrderOutcomeUnknownException ex)
+		{
+			// Acted on: the close may be live, and its ledger entry already blocks a second one. A marketable close is still chased by its id: re-priced
+			// if it rests; if it never reached the broker, a new close goes out once the ledger releases it (BrokerStateService.UnconfirmedNotFoundGrace).
+			AnsiConsole.MarkupLine($"[red bold]auto-execute outcome UNKNOWN:[/] [dim]{Markup.Escape(label)}[/] {Markup.Escape(summary)} — {Markup.Escape(ex.Message)}");
+			if (proposal.Marketable) _marketableCloses[closeKey] = ex.ClientOrderId;
 			return true;
 		}
 		catch (WebullOpenApiException ex)
