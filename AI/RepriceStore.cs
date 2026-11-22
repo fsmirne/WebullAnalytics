@@ -48,7 +48,7 @@ internal sealed class RepriceStore
 	{
 		var dir = Path.GetDirectoryName(_path);
 		if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-		File.AppendAllText(_path, JsonSerializer.Serialize(state) + "\n");
+		IO.SharedFileAppender.AppendLine(_path, JsonSerializer.Serialize(state));
 	}
 
 	/// <summary>Latest state of every unfinished order on <paramref name="accountId"/>, in first-tracked order. Corrupt
@@ -58,7 +58,7 @@ internal sealed class RepriceStore
 		if (!File.Exists(_path)) return Array.Empty<State>();
 		var latest = new Dictionary<string, State>();
 		var order = new List<string>();
-		foreach (var line in File.ReadAllLines(_path))
+		foreach (var line in IO.SharedFileReader.ReadAllLines(_path))
 		{
 			if (string.IsNullOrWhiteSpace(line)) continue;
 			State? s = null;

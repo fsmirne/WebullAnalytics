@@ -2190,7 +2190,7 @@ internal sealed class AnalyzeGexCommand : AsyncCommand<AnalyzeGexSettings>
 		var record = new GexLogRecord(nowEt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture), settings.VendorName, spot, settings.StrikeRangePct, settings.MaxStrikes, settings.Dte, rows);
 		var path = Program.ResolvePath($"data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl");
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-		File.AppendAllText(path, JsonSerializer.Serialize(record) + "\n");
+		IO.SharedFileAppender.AppendLine(path, JsonSerializer.Serialize(record));
 		AnsiConsole.MarkupLine($"[dim]Logged to data/gex/{ticker}/{nowEt:yyyy-MM-dd}.jsonl (the --intraday heatmap reads this back as its \"Gravity\" row).[/]");
 	}
 

@@ -14,6 +14,22 @@ public class SharedFileAppenderTests : IDisposable
 	public void Dispose()
 	{
 		if (File.Exists(_path)) File.Delete(_path);
+		if (File.Exists(_path + SharedFileAppender.LockSuffix)) File.Delete(_path + SharedFileAppender.LockSuffix);
+	}
+
+	[Fact]
+	public void HeaderIfNew_IsWrittenOnce_AheadOfConcurrentWriters()
+	{
+		const string header = "date,value\n";
+		Parallel.For(0, 8, new ParallelOptions { MaxDegreeOfParallelism = 8 }, w =>
+		{
+			for (var i = 0; i < 20; i++) SharedFileAppender.Append(_path, $"{w},{i}\n", header);
+		});
+
+		var lines = SharedFileReader.ReadAllLines(_path);
+		Assert.Equal("date,value", lines[0]);
+		Assert.Equal(1, lines.Count(l => l == "date,value"));
+		Assert.Equal(1 + 8 * 20, lines.Length);
 	}
 
 	[Fact]

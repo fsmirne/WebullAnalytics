@@ -38,8 +38,8 @@ internal static class IvDumpStore
 		if (rows == 0) return 0;
 		var path = Program.ResolvePath($"data/iv/{ticker}/{nowEt:yyyy-MM-dd}.csv");
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-		if (!File.Exists(path)) File.WriteAllText(path, "date,time,source,expiry,strike,right,bid,ask,iv,oi,spot,volume\n");
-		File.AppendAllText(path, sb.ToString());
+		// The scraper, the watch loop's cascade reads and `analyze gex` all append to the same day file.
+		IO.SharedFileAppender.Append(path, sb.ToString(), headerIfNew: "date,time,source,expiry,strike,right,bid,ask,iv,oi,spot,volume\n");
 		return rows;
 	}
 
@@ -51,7 +51,7 @@ internal static class IvDumpStore
 		var series = new SortedDictionary<TimeSpan, Dictionary<(DateTime, decimal, string), long>>();
 		var path = Program.ResolvePath($"data/iv/{ticker}/{date:yyyy-MM-dd}.csv");
 		if (!File.Exists(path)) return series;
-		foreach (var line in File.ReadLines(path).Skip(1))
+		foreach (var line in IO.SharedFileReader.ReadLines(path).Skip(1))
 		{
 			var f = line.Split(',');
 			if (f.Length < 12 || !string.Equals(f[2], source, StringComparison.OrdinalIgnoreCase)) continue;
