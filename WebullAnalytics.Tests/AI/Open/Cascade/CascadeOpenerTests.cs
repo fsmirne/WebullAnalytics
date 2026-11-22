@@ -80,7 +80,7 @@ public class CascadeOpenerTests
 		/// <summary>One read at <paramref name="minute"/>; a proposal is reported acted on, as the auto-executor does once it places (or dry-runs) it.</summary>
 		public async Task<IReadOnlyList<OpenProposal>> ActedRead(CascadeOpener opener, int minute)
 		{
-			var proposals = await opener.EvaluateAsync(Ctx(minute), default);
+			var proposals = await opener.EvaluateAsync(Ctx(minute), TestContext.Current.CancellationToken);
 			foreach (var p in proposals) opener.Acted(p);
 			return proposals;
 		}
@@ -216,7 +216,7 @@ public class CascadeOpenerTests
 	public async Task ABullTrapConfirmationProposesTheSizedSpread()
 	{
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
-		var p = Assert.Single(await h.Opener().EvaluateAsync(Ctx(), default));
+		var p = Assert.Single(await h.Opener().EvaluateAsync(Ctx(), TestContext.Current.CancellationToken));
 		Assert.Equal(OpenStructureKind.ShortCallVertical, p.StructureKind);
 		Assert.False(p.Informational);
 		Assert.True(p.Qty >= 1);
@@ -231,7 +231,7 @@ public class CascadeOpenerTests
 	public async Task ABearTrapConfirmationProposesTheLongCall()
 	{
 		using var h = new Harness { Next = Read(CascadeRegime.BearTrap) };
-		var p = Assert.Single(await h.Opener().EvaluateAsync(Ctx(), default));
+		var p = Assert.Single(await h.Opener().EvaluateAsync(Ctx(), TestContext.Current.CancellationToken));
 		Assert.Equal(OpenStructureKind.LongCall, p.StructureKind);
 		Assert.Equal(Occ(7505m), p.Legs.Single().Symbol);
 		Assert.Equal(6, p.Qty);   // $15.20 call = $1,520 a contract against a $10,000 risk budget
@@ -243,10 +243,10 @@ public class CascadeOpenerTests
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
 		var opener = h.Opener();
 		Assert.Single(await h.ActedRead(opener, 0));
-		Assert.Empty(await opener.EvaluateAsync(Ctx(1), default));    // still confirmed a minute later
-		Assert.Empty(await h.Opener().EvaluateAsync(Ctx(2), default));   // and after a restart
+		Assert.Empty(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));    // still confirmed a minute later
+		Assert.Empty(await h.Opener().EvaluateAsync(Ctx(2), TestContext.Current.CancellationToken));   // and after a restart
 		h.Next = Read(CascadeRegime.BearTrap);
-		Assert.Single(await opener.EvaluateAsync(Ctx(3), default));   // the other setup still has its own entry
+		Assert.Single(await opener.EvaluateAsync(Ctx(3), TestContext.Current.CancellationToken));   // the other setup still has its own entry
 	}
 
 	[Fact]
@@ -255,10 +255,10 @@ public class CascadeOpenerTests
 		// Before opener.earliestEntryTimeEt the watch loop still shows the panel; the first confirmation inside the window is the one that trades.
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
 		var opener = h.Opener();
-		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default, entryWindowOpen: false));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken, entryWindowOpen: false));
 		Assert.Equal(1, h.Reads);
 		Assert.Empty(h.Ledger.ConfirmedRegimes(DateOnly.FromDateTime(Today), "SPXW"));
-		Assert.Single(await opener.EvaluateAsync(Ctx(1), default));
+		Assert.Single(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));
 	}
 
 	[Fact]
@@ -267,11 +267,11 @@ public class CascadeOpenerTests
 		// retrySeconds 180: the quote guard or a broker refresh failure held the order back, so nothing was opened and nothing is final.
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
 		var opener = h.Opener();
-		Assert.Single(await opener.EvaluateAsync(Ctx(0), default));
-		Assert.Single(await opener.EvaluateAsync(Ctx(1), default));
-		Assert.Single(await h.Opener().EvaluateAsync(Ctx(2), default));   // a restarted loop picks the retry up from the ledger
-		Assert.Single(await opener.EvaluateAsync(Ctx(3), default));       // 180s after the first confirmation: still inside
-		Assert.Empty(await opener.EvaluateAsync(Ctx(4), default));        // 240s: the signal is stale, the day is done
+		Assert.Single(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
+		Assert.Single(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));
+		Assert.Single(await h.Opener().EvaluateAsync(Ctx(2), TestContext.Current.CancellationToken));   // a restarted loop picks the retry up from the ledger
+		Assert.Single(await opener.EvaluateAsync(Ctx(3), TestContext.Current.CancellationToken));       // 180s after the first confirmation: still inside
+		Assert.Empty(await opener.EvaluateAsync(Ctx(4), TestContext.Current.CancellationToken));        // 240s: the signal is stale, the day is done
 		Assert.Equal([CascadeSignalLedger.Signaled], h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false).Select(e => e.Outcome));
 	}
 
@@ -280,9 +280,9 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
 		var opener = h.Opener();
-		Assert.Single(await opener.EvaluateAsync(Ctx(0), default));   // held back
+		Assert.Single(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));   // held back
 		Assert.Single(await h.ActedRead(opener, 1));                  // placed on the retry
-		Assert.Empty(await opener.EvaluateAsync(Ctx(2), default));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(2), TestContext.Current.CancellationToken));
 		var entries = h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false);
 		Assert.Equal([CascadeSignalLedger.Signaled, CascadeSignalLedger.Placed], entries.Select(e => e.Outcome));
 		Assert.Equal(["10:45:00", "10:46:00"], entries.Select(e => e.TimeEt));
@@ -293,13 +293,13 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
 		var opener = h.Opener();
-		Assert.Single(await opener.EvaluateAsync(Ctx(0), default));
+		Assert.Single(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
 		h.Next = Read(CascadeRegime.Neutral);
-		Assert.Empty(await opener.EvaluateAsync(Ctx(1), default));    // no longer confirmed
+		Assert.Empty(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));    // no longer confirmed
 		h.Next = Read(CascadeRegime.BullTrap, callWallAtHigh: null);
-		Assert.Empty(await opener.EvaluateAsync(Ctx(2), default));    // confirmed, but no wall to sell: waits, the retry stays open
+		Assert.Empty(await opener.EvaluateAsync(Ctx(2), TestContext.Current.CancellationToken));    // confirmed, but no wall to sell: waits, the retry stays open
 		h.Next = Read(CascadeRegime.BullTrap);
-		Assert.Single(await opener.EvaluateAsync(Ctx(3), default));
+		Assert.Single(await opener.EvaluateAsync(Ctx(3), TestContext.Current.CancellationToken));
 	}
 
 	[Fact]
@@ -309,8 +309,8 @@ public class CascadeOpenerTests
 		var config = Config();
 		config.Opener.Cascade.RetrySeconds = 0;
 		var opener = h.Opener(config: config);
-		Assert.Single(await opener.EvaluateAsync(Ctx(0), default));
-		Assert.Empty(await opener.EvaluateAsync(Ctx(1), default));
+		Assert.Single(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));
 	}
 
 	[Fact]
@@ -318,9 +318,9 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
 		var opener = h.Opener();
-		var p = Assert.Single(await opener.EvaluateAsync(Ctx(0), default));
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
 		opener.Acted(p with { Fingerprint = "someone-else" });
-		Assert.Single(await opener.EvaluateAsync(Ctx(1), default));   // still pending
+		Assert.Single(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));   // still pending
 	}
 
 	[Fact]
@@ -328,13 +328,13 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap, callWallAtHigh: null) };
 		var opener = h.Opener();
-		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
 		var waiting = Assert.Single(h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false));
 		Assert.Equal(CascadeSignalLedger.Waiting, waiting.Outcome);
 
 		h.Next = Read(CascadeRegime.BullTrap, callWallAtHigh: 7550m);
 		Assert.Single(await h.ActedRead(opener, 1));                         // the conditions cleared: it trades
-		Assert.Empty(await opener.EvaluateAsync(Ctx(2), default));          // and only a placed trade uses the day up
+		Assert.Empty(await opener.EvaluateAsync(Ctx(2), TestContext.Current.CancellationToken));          // and only a placed trade uses the day up
 		Assert.Equal(CascadeSignalLedger.Placed, h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false).Last().Outcome);
 	}
 
@@ -343,16 +343,16 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap, callWallAtHigh: null) };
 		var opener = h.Opener();
-		await opener.EvaluateAsync(Ctx(0), default);
-		await opener.EvaluateAsync(Ctx(1), default);
-		await opener.EvaluateAsync(Ctx(2), default);
+		await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken);
+		await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken);
+		await opener.EvaluateAsync(Ctx(2), TestContext.Current.CancellationToken);
 		var entries = h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false);
 		Assert.Single(entries);
 		Assert.Equal(3, h.Reads);
 
 		// A different reason is a new line, so the panel shows the latest.
 		h.Next = Read(CascadeRegime.BullTrap, callWallAtHigh: 7552m);
-		await opener.EvaluateAsync(Ctx(3), default);
+		await opener.EvaluateAsync(Ctx(3), TestContext.Current.CancellationToken);
 		Assert.Equal(2, h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false).Count);
 	}
 
@@ -363,10 +363,10 @@ public class CascadeOpenerTests
 		config.Opener.Cascade.RetrySkipped = false;
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap, callWallAtHigh: null) };
 		var opener = h.Opener(config: config);
-		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
 		Assert.Equal(CascadeSignalLedger.Skipped, Assert.Single(h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false)).Outcome);
 		h.Next = Read(CascadeRegime.BullTrap, callWallAtHigh: 7550m);
-		Assert.Empty(await opener.EvaluateAsync(Ctx(1), default));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));
 	}
 
 	/// <summary>A read where Bull Trap (76) leads and Bear Trap (70) is also confirmed.</summary>
@@ -382,7 +382,7 @@ public class CascadeOpenerTests
 	public async Task ByDefault_OnlyThePrimaryConfirmedSetupTrades()
 	{
 		using var h = new Harness { Next = TwoConfirmed() };
-		var p = Assert.Single(await h.Opener().EvaluateAsync(Ctx(0), default));
+		var p = Assert.Single(await h.Opener().EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
 		Assert.Equal(OpenStructureKind.ShortCallVertical, p.StructureKind);
 	}
 
@@ -393,7 +393,7 @@ public class CascadeOpenerTests
 		config.Opener.Cascade.TradeAllConfirmed = true;
 		using var h = new Harness { Next = TwoConfirmed() };
 		var opener = h.Opener(config: config);
-		var proposals = await opener.EvaluateAsync(Ctx(0), default);
+		var proposals = await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken);
 		Assert.Equal(2, proposals.Count);
 		Assert.Contains(proposals, p => p.StructureKind == OpenStructureKind.ShortCallVertical && p.Rationale.Contains("76/100"));
 		Assert.Contains(proposals, p => p.StructureKind == OpenStructureKind.LongCall && p.Rationale.Contains("70/100"));
@@ -406,7 +406,7 @@ public class CascadeOpenerTests
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
 		Assert.Single(await h.ActedRead(h.Opener(live: false), 0));
 		Assert.Single(await h.ActedRead(h.Opener(live: true), 1));
-		Assert.Empty(await h.Opener(live: true).EvaluateAsync(Ctx(2), default));
+		Assert.Empty(await h.Opener(live: true).EvaluateAsync(Ctx(2), TestContext.Current.CancellationToken));
 	}
 
 	[Fact]
@@ -415,10 +415,10 @@ public class CascadeOpenerTests
 		using var h = new Harness { Next = Read(CascadeRegime.Neutral) };
 		var opener = h.Opener();
 		var t0 = Ctx(0);
-		await opener.EvaluateAsync(t0, default);
-		await opener.EvaluateAsync(t0 with { Now = t0.Now.AddSeconds(20) }, default);   // a watch tick inside readSeconds
+		await opener.EvaluateAsync(t0, TestContext.Current.CancellationToken);
+		await opener.EvaluateAsync(t0 with { Now = t0.Now.AddSeconds(20) }, TestContext.Current.CancellationToken);   // a watch tick inside readSeconds
 		Assert.Equal(1, h.Reads);
-		await opener.EvaluateAsync(t0 with { Now = t0.Now.AddSeconds(60) }, default);
+		await opener.EvaluateAsync(t0 with { Now = t0.Now.AddSeconds(60) }, TestContext.Current.CancellationToken);
 		Assert.Equal(2, h.Reads);
 	}
 
@@ -430,10 +430,10 @@ public class CascadeOpenerTests
 		var t0 = Ctx(0);
 		Assert.Null(opener.LastReadAt);
 		Assert.Null(opener.SecondsUntilNextRead(t0.Now));
-		await opener.EvaluateAsync(t0, default);
+		await opener.EvaluateAsync(t0, TestContext.Current.CancellationToken);
 		Assert.Equal(t0.Now, opener.LastReadAt);
 		Assert.Equal(40d, opener.SecondsUntilNextRead(t0.Now.AddSeconds(20))!.Value, 3);
-		await opener.EvaluateAsync(t0 with { Now = t0.Now.AddSeconds(20) }, default);   // no read due: the last one stays the last
+		await opener.EvaluateAsync(t0 with { Now = t0.Now.AddSeconds(20) }, TestContext.Current.CancellationToken);   // no read due: the last one stays the last
 		Assert.Equal(t0.Now, opener.LastReadAt);
 		Assert.Equal(0d, opener.SecondsUntilNextRead(t0.Now.AddSeconds(90))!.Value);
 	}
@@ -456,7 +456,7 @@ public class CascadeOpenerTests
 		foreach (var (regime, kind) in expected)
 		{
 			h.Next = Read(regime);
-			Assert.Equal(kind, Assert.Single(await h.Opener(config: config).EvaluateAsync(Ctx(minute++), default)).StructureKind);
+			Assert.Equal(kind, Assert.Single(await h.Opener(config: config).EvaluateAsync(Ctx(minute++), TestContext.Current.CancellationToken)).StructureKind);
 		}
 	}
 
@@ -467,14 +467,14 @@ public class CascadeOpenerTests
 		foreach (var regime in new[] { CascadeRegime.Neutral, CascadeRegime.BullCascade, CascadeRegime.BearCascade })   // the cascades are off in this config
 		{
 			h.Next = Read(regime);
-			Assert.Empty(await h.Opener().EvaluateAsync(Ctx(), default));
+			Assert.Empty(await h.Opener().EvaluateAsync(Ctx(), TestContext.Current.CancellationToken));
 		}
 		var config = Config();
 		config.Opener.Cascade.BullTrap.Enabled = false;
 		h.Next = Read(CascadeRegime.BullTrap);
-		Assert.Empty(await h.Opener(config: config).EvaluateAsync(Ctx(), default));
+		Assert.Empty(await h.Opener(config: config).EvaluateAsync(Ctx(), TestContext.Current.CancellationToken));
 		// A disabled setup's confirmation is not recorded, so enabling it later the same day still trades.
-		Assert.Single(await h.Opener().EvaluateAsync(Ctx(1), default));
+		Assert.Single(await h.Opener().EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));
 	}
 
 	[Fact]
@@ -482,9 +482,9 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = null };
 		var opener = h.Opener();
-		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
 		h.Next = Read(CascadeRegime.BullTrap);
-		Assert.Single(await opener.EvaluateAsync(Ctx(1), default));
+		Assert.Single(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));
 	}
 
 	[Fact]
@@ -493,7 +493,7 @@ public class CascadeOpenerTests
 		using var h = new Harness { Next = Read(CascadeRegime.BullTrap) };
 		var config = Config();
 		config.Opener.Cascade = new OpenerCascadeConfig();
-		Assert.Empty(await h.Opener(config: config).EvaluateAsync(Ctx(), default));
+		Assert.Empty(await h.Opener(config: config).EvaluateAsync(Ctx(), TestContext.Current.CancellationToken));
 		Assert.Equal(0, h.Reads);
 	}
 
@@ -508,9 +508,9 @@ public class CascadeOpenerTests
 		var opener = new CascadeOpener(Config(), live: false, ledger, (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
 		var ctx = Ctx() with { Now = Today.AddHours(10).AddMinutes(40) };
 
-		var p = Assert.Single(await opener.EvaluateAsync(ctx, default));
+		var p = Assert.Single(await opener.EvaluateAsync(ctx, TestContext.Current.CancellationToken));
 		opener.Acted(p);
-		Assert.Empty(await opener.EvaluateAsync(ctx with { Now = ctx.Now.AddMinutes(30) }, default));   // once a day, as live
+		Assert.Empty(await opener.EvaluateAsync(ctx with { Now = ctx.Now.AddMinutes(30) }, TestContext.Current.CancellationToken));   // once a day, as live
 
 		// The regime's confirmation is recorded first (the neutral setup reads it), then the trade's signal and its placement.
 		Assert.Equal([(CascadeSignalLedger.Confirmed, "10:40:00"), (CascadeSignalLedger.Signaled, "10:40:00"), (CascadeSignalLedger.Placed, "10:40:00")], ledger.Entries.Select(e => (e.Outcome, e.TimeEt)));
@@ -533,7 +533,7 @@ public class CascadeOpenerTests
 		var ledger = new CascadeSignalLedger();
 		var read = Read(CascadeRegime.BearTrap);
 		var opener = new CascadeOpener(config, live: false, ledger, (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
-		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, default));
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, TestContext.Current.CancellationToken));
 		opener.Acted(p);
 
 		var entry = ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BearTrap, live: false).Last();
@@ -545,7 +545,7 @@ public class CascadeOpenerTests
 		// Without the broker stop the same entry has no --protect.
 		var plain = new CascadeSignalLedger();
 		var plainOpener = new CascadeOpener(Config(), live: false, plain, (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
-		var q = Assert.Single(await plainOpener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, default));
+		var q = Assert.Single(await plainOpener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, TestContext.Current.CancellationToken));
 		plainOpener.Acted(q);
 		Assert.DoesNotContain("--protect", Assert.Single(plain.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BearTrap, live: false).Last().Commands!));
 	}
@@ -558,7 +558,7 @@ public class CascadeOpenerTests
 		var ledger = new CascadeSignalLedger();
 		var read = Read(CascadeRegime.BullTrap);
 		var opener = new CascadeOpener(Config(), live: false, ledger, (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
-		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, default));
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, TestContext.Current.CancellationToken));
 		opener.Acted(p);
 		var placed = ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BullTrap, live: false).Last();
 		var skipped = placed with { Setup = CascadeRegime.BearTrap, TimeEt = "11:02:00", Outcome = CascadeSignalLedger.Skipped, Detail = "credit 0.20 under the 0.50 floor", Structure = null, Qty = null, NetPerShare = null, Commands = null };
@@ -603,7 +603,7 @@ public class CascadeOpenerTests
 		var ledger = new CascadeSignalLedger();
 		var read = Read(CascadeRegime.BearTrap);
 		var opener = new CascadeOpener(Config(), live: false, ledger, (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
-		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(2), AccountValue = 10_000m }, default));
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(2), AccountValue = 10_000m }, TestContext.Current.CancellationToken));
 		Assert.Equal(0, p.Qty);
 		var signaled = ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BearTrap, live: false).Single();
 		Assert.Equal(CascadeSignalLedger.Signaled, signaled.Outcome);
@@ -690,12 +690,12 @@ public class CascadeOpenerTests
 		var opener = h.Opener(config: config);
 
 		h.Next = ReadWithVix(CascadeRegime.BearCascade, vixNow: 21m);
-		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
 		Assert.Contains("VIX change +5.0% < minVixChange +8.0%", opener.GatedReadings.Single().Reason, StringComparison.Ordinal);
 		Assert.Empty(h.Ledger.Find(DateOnly.FromDateTime(Today), "SPXW", CascadeRegime.BearCascade, live: false));   // not an entry: nothing used up
 
 		h.Next = ReadWithVix(CascadeRegime.BearCascade, vixNow: 22m);
-		Assert.Equal(OpenStructureKind.LongPut, Assert.Single(await opener.EvaluateAsync(Ctx(1), default)).StructureKind);
+		Assert.Equal(OpenStructureKind.LongPut, Assert.Single(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken)).StructureKind);
 	}
 
 	[Fact]
@@ -748,8 +748,8 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = NeutralRead() };
 		var opener = h.Opener(config: NeutralConfig());
-		Assert.Empty(await opener.EvaluateAsync(Ctx(14), default));   // 10:59: before its time
-		var proposals = await opener.EvaluateAsync(Ctx(15), default);
+		Assert.Empty(await opener.EvaluateAsync(Ctx(14), TestContext.Current.CancellationToken));   // 10:59: before its time
+		var proposals = await opener.EvaluateAsync(Ctx(15), TestContext.Current.CancellationToken);
 		Assert.Equal([OpenStructureKind.ShortCallVertical, OpenStructureKind.ShortPutVertical], proposals.Select(p => p.StructureKind));
 		Assert.Equal([("sell", Occ(7550m)), ("buy", Occ(7560m))], proposals[0].Legs.Select(l => (l.Action, l.Symbol)));
 		Assert.Equal([("sell", Occ(7450m, right: "P")), ("buy", Occ(7440m, right: "P"))], proposals[1].Legs.Select(l => (l.Action, l.Symbol)));
@@ -761,13 +761,13 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = NeutralRead() };
 		var opener = h.Opener(config: NeutralConfig());
-		var first = await opener.EvaluateAsync(Ctx(15), default);
+		var first = await opener.EvaluateAsync(Ctx(15), TestContext.Current.CancellationToken);
 		opener.Acted(first[0]);                                       // the call side placed, the put side held back
-		var retry = Assert.Single(await opener.EvaluateAsync(Ctx(16), default));
+		var retry = Assert.Single(await opener.EvaluateAsync(Ctx(16), TestContext.Current.CancellationToken));
 		Assert.Equal(OpenStructureKind.ShortPutVertical, retry.StructureKind);
 		opener.Acted(retry);
-		Assert.Empty(await opener.EvaluateAsync(Ctx(17), default));
-		Assert.Empty(await h.Opener(config: NeutralConfig()).EvaluateAsync(Ctx(18), default));   // and after a restart
+		Assert.Empty(await opener.EvaluateAsync(Ctx(17), TestContext.Current.CancellationToken));
+		Assert.Empty(await h.Opener(config: NeutralConfig()).EvaluateAsync(Ctx(18), TestContext.Current.CancellationToken));   // and after a restart
 	}
 
 	[Fact]
@@ -775,19 +775,19 @@ public class CascadeOpenerTests
 	{
 		// Bull Cascade is off in this config, but its confirmation at 10:45 still means the day is not neutral — also after a restart.
 		using var h = new Harness { Next = Read(CascadeRegime.BullCascade) };
-		Assert.Empty(await h.Opener(config: NeutralConfig()).EvaluateAsync(Ctx(0), default));
+		Assert.Empty(await h.Opener(config: NeutralConfig()).EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
 		h.Next = NeutralRead();
-		Assert.Empty(await h.Opener(config: NeutralConfig()).EvaluateAsync(Ctx(20), default));
+		Assert.Empty(await h.Opener(config: NeutralConfig()).EvaluateAsync(Ctx(20), TestContext.Current.CancellationToken));
 	}
 
 	[Fact]
 	public async Task TheNeutralSetupIsOffByDefaultAndItsSidesCanBeSwitchedOffApart()
 	{
 		using var h = new Harness { Next = NeutralRead() };
-		Assert.Empty(await h.Opener().EvaluateAsync(Ctx(20), default));
+		Assert.Empty(await h.Opener().EvaluateAsync(Ctx(20), TestContext.Current.CancellationToken));
 		var config = NeutralConfig();
 		config.Opener.Cascade.Neutral.Call.Enabled = false;
-		Assert.Equal(OpenStructureKind.ShortPutVertical, Assert.Single(await h.Opener(config: config).EvaluateAsync(Ctx(21), default)).StructureKind);
+		Assert.Equal(OpenStructureKind.ShortPutVertical, Assert.Single(await h.Opener(config: config).EvaluateAsync(Ctx(21), TestContext.Current.CancellationToken)).StructureKind);
 	}
 
 	[Fact]
@@ -825,9 +825,9 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = Lean(CascadeRegime.BullTrap, 54) };
 		var opener = h.Opener(config: LeanConfig(55));
-		Assert.Empty(await opener.EvaluateAsync(Ctx(0), default));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));
 		h.Next = Lean(CascadeRegime.BullTrap, 58);
-		var p = Assert.Single(await opener.EvaluateAsync(Ctx(1), default));
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));
 		Assert.Equal(OpenStructureKind.ShortCallVertical, p.StructureKind);
 		Assert.StartsWith("cascade BULL TRAP (lean 58)", p.Rationale, StringComparison.Ordinal);
 	}
@@ -836,9 +836,9 @@ public class CascadeOpenerTests
 	public async Task LeansDoNotTradeUnlessTheBlockAllowsThem()
 	{
 		using var h = new Harness { Next = Lean(CascadeRegime.BullTrap, 64) };
-		Assert.Empty(await h.Opener().EvaluateAsync(Ctx(0), default));                 // minLeanScore 0
+		Assert.Empty(await h.Opener().EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken));                 // minLeanScore 0
 		h.Next = Lean(CascadeRegime.BullCascade, 64);
-		Assert.Empty(await h.Opener(config: LeanConfig(50)).EvaluateAsync(Ctx(1), default));   // leans to a setup that is off
+		Assert.Empty(await h.Opener(config: LeanConfig(50)).EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));   // leans to a setup that is off
 	}
 
 	[Fact]
@@ -846,9 +846,9 @@ public class CascadeOpenerTests
 	{
 		using var h = new Harness { Next = Lean(CascadeRegime.BullTrap, 60) };
 		var opener = h.Opener(config: LeanConfig(55));
-		opener.Acted(Assert.Single(await opener.EvaluateAsync(Ctx(0), default)));
+		opener.Acted(Assert.Single(await opener.EvaluateAsync(Ctx(0), TestContext.Current.CancellationToken)));
 		h.Next = Read(CascadeRegime.BullTrap);                                       // confirms later the same day
-		Assert.Empty(await opener.EvaluateAsync(Ctx(1), default));
+		Assert.Empty(await opener.EvaluateAsync(Ctx(1), TestContext.Current.CancellationToken));
 	}
 
 	[Fact]
@@ -857,9 +857,9 @@ public class CascadeOpenerTests
 		var config = NeutralConfig();
 		config.Opener.Cascade.BullTrap.MinLeanScore = 55;
 		using var h = new Harness { Next = Lean(CascadeRegime.BullTrap, 60) with { Reading = Lean(CascadeRegime.BullTrap, 60).Reading with { Terrain = Terrain with { PutWallAtLow0Dte = 7450m } } } };
-		var proposals = await h.Opener(config: config).EvaluateAsync(Ctx(15), default);
+		var proposals = await h.Opener(config: config).EvaluateAsync(Ctx(15), TestContext.Current.CancellationToken);
 		Assert.Equal(3, proposals.Count);   // the lean's call spread, and both neutral sides
-		Assert.Empty(h.Ledger.Entries.Where(e => e.Outcome == CascadeSignalLedger.Confirmed));
+		Assert.DoesNotContain(h.Ledger.Entries, e => e.Outcome == CascadeSignalLedger.Confirmed);
 	}
 
 	// ── Config validation ─────────────────────────────────────────────────────────────────────────────────

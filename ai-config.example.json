@@ -113,6 +113,7 @@
 		"trailingStop": {
 			"enabled": false,
 			"trailPct": 0.20,
+			"activateAtProfitPct": null,
 			"stopLimitPct": 0.05,
 			"bracketSingles": true,
 			"exclude": []

@@ -23,6 +23,9 @@ namespace WebullAnalytics.AI.Rules;
 /// (sell at the bid, buy at the ask, re-priced every tick until it fills) and <c>[emergency]</c> (the whole position at once, outside
 /// the scale-out schedule): a stop resting at a price the market has already left is not a stop.
 ///
+/// With <see cref="TrailingStopConfig.ActivateAtProfitPct"/> set, nothing guards a position until its peak has reached that profit on the entry (see
+/// <see cref="IsArmed"/>); the peak is tracked from the first value all the same, so the trail starts from the true best once it arms.
+///
 /// When enabled it trails every open position except the structures named in <see cref="TrailingStopConfig.Exclude"/>. The peak is
 /// keyed by the position and its entry price, so a position re-opened on the same contract(s) at another price starts a fresh peak.
 /// </summary>
@@ -51,7 +54,8 @@ internal sealed class TrailingStopRule : IManagementRule
 	public string Name => "TrailingStopRule";
 	public int Priority => 1;
 
-	/// <summary>Reads the position's trailing stop at <paramref name="now"/> (raising its stored peak), or null when the position is not trailed or cannot be valued this tick.</summary>
+	/// <summary>Reads the position's trailing stop at <paramref name="now"/> (raising its stored peak), or null when the position is not trailed, cannot be valued this
+	/// tick, or its stop is not armed yet (<see cref="IsArmed"/>).</summary>
 	internal static Reading? Measure(TrailingStopConfig config, TrailingStopStore store, OpenPosition position, IReadOnlyDictionary<string, OptionContractQuote> quotes, DateTime now)
 	{
 		if (!config.Enabled || config.TrailPct <= 0m || config.TrailPct >= 1m) return null;
@@ -71,11 +75,19 @@ internal sealed class TrailingStopRule : IManagementRule
 		}
 
 		var key = $"{position.Key}|{position.InitialNetDebit:0.####}";
+		// The peak is raised whether or not the stop is armed: arming is read from it.
 		var peak = store.Raise(key, value, now);
+		if (!IsArmed(config, position.InitialNetDebit, peak)) return null;
 		var atRisk = peak - (position.InitialNetDebit - maxLoss);
 		if (atRisk <= 0m) return null;
 		return new Reading(value, peak, atRisk, peak - config.TrailPct * atRisk, closeLegs);
 	}
+
+	/// <summary>True once the best closing value <paramref name="peak"/> has reached <see cref="TrailingStopConfig.ActivateAtProfitPct"/> of profit on
+	/// <paramref name="entry"/> (signed: a debit positive, a credit negative), always true without a threshold. One formula for both: a $10 debit arms
+	/// at a $15 peak at 0.50, a $2.00 credit (entry −2.00) once closing costs at most $1.00 (peak ≥ −1.00).</summary>
+	internal static bool IsArmed(TrailingStopConfig config, decimal entry, decimal peak) =>
+		config.ActivateAtProfitPct is not decimal threshold || (peak - entry) / Math.Abs(entry) >= threshold;
 
 	public ManagementProposal? Evaluate(OpenPosition position, EvaluationContext ctx)
 	{

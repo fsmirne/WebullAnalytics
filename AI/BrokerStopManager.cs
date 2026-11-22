@@ -92,6 +92,8 @@ internal sealed class BrokerStopManager
 	internal static decimal? EntryStopPrice(TrailingStopConfig config, string ticker, string structure, int legCount, string side, decimal limit)
 	{
 		if (!config.Enabled || !config.BracketSingles || legCount != 1 || !string.Equals(side, "BUY", StringComparison.OrdinalIgnoreCase)) return null;
+		// A stop that arms only at a profit has nothing to attach at entry: the first one is placed by the per-tick sync once the peak arms it.
+		if (config.ActivateAtProfitPct != null) return null;
 		if (config.Exclude.Contains(structure, StringComparer.OrdinalIgnoreCase)) return null;
 		return Plan(limit * (1m - config.TrailPct), 1, ticker, config.StopLimitPct, stopMarket: true)?.Stop;
 	}

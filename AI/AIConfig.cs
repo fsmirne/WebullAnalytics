@@ -414,6 +414,11 @@ internal sealed class TrailingStopConfig
 	/// option or any debit structure that is "this far below the peak" (0.20 = 20% off the highest closing value); for a credit spread
 	/// it is this fraction of the width still at risk at the peak. The peak starts at the first closing value seen after entry.</summary>
 	[JsonPropertyName("trailPct")] public decimal TrailPct { get; set; } = 0.20m;
+	/// <summary>Arm the stop only once the position's best closing value has reached this profit on its entry (0.50 = +50%): for a debit,
+	/// a peak at least 1.5× the entry debit; for a credit, a peak cost to close at most half the credit. Until then nothing guards the
+	/// position — no close, no broker stop, and no stop bracket on a long single's entry — and from then on it trails as without it. The
+	/// peak never falls, so an armed stop stays armed. Null = armed from entry.</summary>
+	[JsonPropertyName("activateAtProfitPct")] public decimal? ActivateAtProfitPct { get; set; }
 	/// <summary>Live only (<see cref="Rules.BrokerStopManager"/>): how far below the stop trigger the broker stop order's limit sits, as a fraction of the
 	/// trigger price (0.05 = the limit is 5% under the stop, never less than one exchange tick). The stop is a stop-limit, so a fast drop through
 	/// the trigger sells no lower than this; a wider offset fills more reliably, a narrower one gives a better price. Applies to every stop placed after
@@ -731,6 +736,7 @@ internal static class AIConfigLoader
 		var trail = c.Rules.TrailingStop;
 		if (trail.Enabled && (trail.TrailPct <= 0m || trail.TrailPct >= 1m)) return $"rules.trailingStop.trailPct: must be in (0, 1), got {trail.TrailPct}";
 		if (trail.Enabled && (trail.StopLimitPct < 0m || trail.StopLimitPct >= 1m)) return $"rules.trailingStop.stopLimitPct: must be in [0, 1), got {trail.StopLimitPct}";
+		if (trail.Enabled && trail.ActivateAtProfitPct is <= 0m) return $"rules.trailingStop.activateAtProfitPct: must be > 0 (or unset to arm from entry), got {trail.ActivateAtProfitPct}";
 		if (trail.Exclude.FirstOrDefault(name => !TrailingStopConfig.KnownStructures.Contains(name, StringComparer.OrdinalIgnoreCase)) is string unknown)
 			return $"rules.trailingStop.exclude: '{unknown}' is not a structure; use any of {string.Join(", ", TrailingStopConfig.KnownStructures)}";
 		if (c.AutoExecute.Reprice.CancelSeconds < 0) return $"autoExecute.reprice.cancelSeconds: must be ≥ 0, got {c.AutoExecute.Reprice.CancelSeconds}";

@@ -129,6 +129,32 @@ public class BrokerStopManagerTests
 	}
 
 	[Fact]
+	public void EntryStop_IsOff_WhenTheStopArmsOnlyAtAProfit()
+	{
+		// A bracket would put a stop 20% under the entry from the first second — exactly what an activation threshold rules out.
+		var rig = new Rig();
+		rig.Config.ActivateAtProfitPct = 0.50m;
+		Assert.Null(rig.Manager.EntryStop("SPY", "LongCall", 1, "BUY", 5.00m));
+	}
+
+	[Fact]
+	public async Task WithAnActivationThreshold_NoStopIsPlacedUntilThePeakArmsIt()
+	{
+		var rig = new Rig();
+		rig.Config.ActivateAtProfitPct = 0.50m;
+		var position = Diagonal(debit: 3.00m);
+
+		await rig.Manager.SyncAsync(Ctx(position, longBid: 5.00m), rig.Tick, TestContext.Current.CancellationToken);   // closing value 3.00: flat
+		await rig.Manager.SyncAsync(Ctx(position, longBid: 6.40m), rig.Tick, TestContext.Current.CancellationToken);   // 4.40: +47%
+		Assert.Empty(rig.Gateway.Placed);
+
+		await rig.Manager.SyncAsync(Ctx(position, longBid: 6.50m), rig.Tick, TestContext.Current.CancellationToken);   // 4.50: +50%, armed
+		var order = Assert.Single(Assert.Single(rig.Gateway.Placed).NewOrders);
+		Assert.Equal("STOP_LOSS_LIMIT", order.OrderType);
+		Assert.Equal("3.6", order.StopPrice);   // the trail from the 4.50 peak: 4.50 − 20% × 4.50
+	}
+
+	[Fact]
 	public void EntryStop_IsOffInADryRun()
 	{
 		Assert.Null(new Rig(submit: false).Manager.EntryStop("SPY", "LongCall", 1, "BUY", 5.00m));
@@ -141,7 +167,7 @@ public class BrokerStopManagerTests
 	{
 		var rig = new Rig();
 		var position = Diagonal();
-		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, default);
+		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, TestContext.Current.CancellationToken);
 
 		var order = Assert.Single(Assert.Single(rig.Gateway.Placed).NewOrders);
 		Assert.Equal("STOP_LOSS_LIMIT", order.OrderType);
@@ -161,8 +187,8 @@ public class BrokerStopManagerTests
 	{
 		var rig = new Rig();
 		var position = Diagonal();
-		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, default);
-		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, default);   // the broker's order list has not caught up yet
+		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, TestContext.Current.CancellationToken);
+		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, TestContext.Current.CancellationToken);   // the broker's order list has not caught up yet
 		Assert.Single(rig.Gateway.Placed);
 	}
 
@@ -172,7 +198,7 @@ public class BrokerStopManagerTests
 		var rig = new Rig();
 		rig.Gateway.RejectGtc = true;
 		var position = Diagonal();
-		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, default);
+		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, TestContext.Current.CancellationToken);
 		Assert.Equal("DAY", Assert.Single(rig.Gateway.Placed).NewOrders[0].TimeInForce);
 		Assert.True(rig.Manager.IsProtected(position));
 	}
@@ -183,7 +209,7 @@ public class BrokerStopManagerTests
 		var stop = WorkingStop("stop-1", "STOP_LOSS_LIMIT", 2.00m, 1.90m, qty: 7);
 		var rig = new Rig(true, stop);
 		rig.Store.Add("acct", "stop-1", BrokerStateService.Fingerprint([(Long, "sell"), (Short, "buy")]), Now.AddDays(-1));
-		await rig.Manager.SyncAsync(Ctx(Diagonal()), rig.Tick, default);
+		await rig.Manager.SyncAsync(Ctx(Diagonal()), rig.Tick, TestContext.Current.CancellationToken);
 
 		var replaced = Assert.Single(rig.Gateway.Replaced);
 		Assert.Equal(("stop-1", 7, (decimal?)2.28m, (decimal?)2.40m), replaced);
@@ -197,7 +223,7 @@ public class BrokerStopManagerTests
 		var rig = new Rig(true, stop);
 		rig.Store.Add("acct", "stop-1", BrokerStateService.Fingerprint([(Long, "sell"), (Short, "buy")]), Now.AddDays(-1));
 		var position = Diagonal();
-		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, default);
+		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, TestContext.Current.CancellationToken);
 
 		Assert.Empty(rig.Gateway.Replaced);
 		Assert.Empty(rig.Gateway.Placed);
@@ -210,7 +236,7 @@ public class BrokerStopManagerTests
 		var stop = WorkingStop("stop-1", "STOP_LOSS_LIMIT", 2.90m, 2.75m, qty: 7);
 		var rig = new Rig(true, stop);
 		rig.Store.Add("acct", "stop-1", BrokerStateService.Fingerprint([(Long, "sell"), (Short, "buy")]), Now.AddDays(-1));
-		await rig.Manager.SyncAsync(Ctx(Diagonal(qty: 4)), rig.Tick, default);
+		await rig.Manager.SyncAsync(Ctx(Diagonal(qty: 4)), rig.Tick, TestContext.Current.CancellationToken);
 
 		Assert.Equal(("stop-1", 4, (decimal?)2.75m, (decimal?)2.90m), Assert.Single(rig.Gateway.Replaced));
 	}
@@ -221,7 +247,7 @@ public class BrokerStopManagerTests
 		var stop = WorkingStop("child-1", "STOP_LOSS", 2.00m, null, qty: 7);
 		var rig = new Rig(true, stop);
 		rig.Store.Add("acct", "child-1", BrokerStateService.Fingerprint([(Long, "sell"), (Short, "buy")]), Now.AddDays(-1));
-		await rig.Manager.SyncAsync(Ctx(Diagonal()), rig.Tick, default);
+		await rig.Manager.SyncAsync(Ctx(Diagonal()), rig.Tick, TestContext.Current.CancellationToken);
 
 		Assert.Equal(("child-1", 7, (decimal?)null, (decimal?)2.40m), Assert.Single(rig.Gateway.Replaced));
 	}
@@ -233,7 +259,7 @@ public class BrokerStopManagerTests
 	{
 		var rig = new Rig(true, WorkingStop("app-stop", orderType, 2.00m, orderType == "STOP_LOSS_LIMIT" ? 1.90m : null, qty: 7));
 		var position = Diagonal();
-		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, default);
+		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, TestContext.Current.CancellationToken);
 
 		Assert.Empty(rig.Gateway.Placed);
 		Assert.Empty(rig.Gateway.Replaced);
@@ -245,7 +271,7 @@ public class BrokerStopManagerTests
 	{
 		var rig = new Rig(submit: false);
 		var position = Diagonal();
-		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, default);
+		await rig.Manager.SyncAsync(Ctx(position), rig.Tick, TestContext.Current.CancellationToken);
 		Assert.Empty(rig.Gateway.Placed);
 		Assert.False(rig.Manager.IsProtected(position));
 	}
@@ -255,7 +281,7 @@ public class BrokerStopManagerTests
 	{
 		var rig = new Rig();
 		var credit = Diagonal(debit: -0.90m);
-		await rig.Manager.SyncAsync(Ctx(credit), rig.Tick, default);
+		await rig.Manager.SyncAsync(Ctx(credit), rig.Tick, TestContext.Current.CancellationToken);
 		Assert.Empty(rig.Gateway.Placed);
 		Assert.False(rig.Manager.IsProtected(credit));
 	}
@@ -265,7 +291,7 @@ public class BrokerStopManagerTests
 	{
 		var rig = new Rig(true, WorkingStop("ours", "STOP_LOSS_LIMIT", 2.00m, 1.90m, qty: 7), WorkingStop("app-stop", "STOP_LOSS_LIMIT", 1.00m, 0.90m, qty: 7));
 		rig.Store.Add("acct", "ours", BrokerStateService.Fingerprint([(Long, "sell"), (Short, "buy")]), Now.AddDays(-1));
-		var cancelled = await rig.Manager.CancelForAsync([(Long, "sell"), (Short, "buy")], default);
+		var cancelled = await rig.Manager.CancelForAsync([(Long, "sell"), (Short, "buy")], TestContext.Current.CancellationToken);
 
 		Assert.Equal(1, cancelled);
 		Assert.Equal(["ours"], rig.Gateway.Cancelled);

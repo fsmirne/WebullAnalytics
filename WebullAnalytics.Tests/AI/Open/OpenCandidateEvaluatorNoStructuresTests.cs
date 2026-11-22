@@ -42,7 +42,7 @@ public class OpenCandidateEvaluatorNoStructuresTests
 	public async Task NoEnabledStructure_FetchesNothing()
 	{
 		var quotes = new CountingQuoteSource();
-		Assert.Empty(await new OpenCandidateEvaluator(Config(anyStructure: false), quotes).EvaluateAsync(FlatContext(), default));
+		Assert.Empty(await new OpenCandidateEvaluator(Config(anyStructure: false), quotes).EvaluateAsync(FlatContext(), TestContext.Current.CancellationToken));
 		Assert.Equal(0, quotes.Calls);
 	}
 
@@ -50,7 +50,7 @@ public class OpenCandidateEvaluatorNoStructuresTests
 	public async Task AnEnabledStructure_StillProbesTheChain()
 	{
 		var quotes = new CountingQuoteSource();
-		await new OpenCandidateEvaluator(Config(anyStructure: true), quotes).EvaluateAsync(FlatContext(), default);
+		await new OpenCandidateEvaluator(Config(anyStructure: true), quotes).EvaluateAsync(FlatContext(), TestContext.Current.CancellationToken);
 		Assert.True(quotes.Calls > 0);
 	}
 }

@@ -26,8 +26,8 @@ public class OrderPlacementTests : IDisposable
 
 	private static OrderRequestBody Body(string clientOrderId = "cid-1") => new() { NewOrders = [new NewOrder { ClientOrderId = clientOrderId }] };
 
-	private Task<WebullOpenApiClient.PlaceResult> Place(Func<CancellationToken, Task<WebullOpenApiClient.PlaceResult>> send, CancellationToken ct = default) =>
-		OrderPlacement.PlaceAsync(send, Body(), _broker, "SPY", Legs, isOpen: true, ct);
+	private Task<WebullOpenApiClient.PlaceResult> Place(Func<CancellationToken, Task<WebullOpenApiClient.PlaceResult>> send) =>
+		OrderPlacement.PlaceAsync(send, Body(), _broker, "SPY", Legs, isOpen: true, TestContext.Current.CancellationToken);
 
 	private static Task<WebullOpenApiClient.PlaceResult> Throw(Exception ex) => Task.FromException<WebullOpenApiClient.PlaceResult>(ex);
 
@@ -103,7 +103,7 @@ public class OrderPlacementTests : IDisposable
 		using var cts = new CancellationTokenSource();
 		cts.Cancel();
 
-		await Assert.ThrowsAsync<OperationCanceledException>(() => Place(ct => Throw(new OperationCanceledException(ct)), cts.Token));
+		await Assert.ThrowsAsync<OperationCanceledException>(() => OrderPlacement.PlaceAsync(ct => Throw(new OperationCanceledException(ct)), Body(), _broker, "SPY", Legs, isOpen: true, cts.Token));
 		Assert.True(Assert.IsType<LocalOrderLedger.Entry>(Recorded()).Unconfirmed);
 	}
 

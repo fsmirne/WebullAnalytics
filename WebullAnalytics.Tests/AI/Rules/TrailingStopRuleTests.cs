@@ -58,6 +58,56 @@ public class TrailingStopRuleTests
 	private static TrailingStopRule Rule(decimal trailPct = 0.20m, TrailingStopStore? store = null, params string[] exclude) =>
 		new(new TrailingStopConfig { Enabled = true, TrailPct = trailPct, Exclude = exclude.ToList() }, store ?? new TrailingStopStore());
 
+	private static TrailingStopRule ArmedAt(decimal activateAtProfitPct, decimal trailPct = 0.20m, TrailingStopStore? store = null) =>
+		new(new TrailingStopConfig { Enabled = true, TrailPct = trailPct, ActivateAtProfitPct = activateAtProfitPct }, store ?? new TrailingStopStore());
+
+	// ── Activation threshold ──────────────────────────────────────────────────────────────────────────────
+
+	[Fact]
+	public void BelowTheThreshold_NothingGuardsThePosition_HoweverFarItFalls()
+	{
+		// "If it opens, it goes all the way" until it has made +50%: a $10 call that only ever falls is never stopped.
+		var rule = ArmedAt(0.50m);
+		var p = LongCall(entry: 10.00m);
+		Assert.Null(rule.Evaluate(p, Tick(p, 14.90m, 0)));   // +49%: not armed
+		Assert.Null(rule.Evaluate(p, Tick(p, 2.00m, 1)));    // −80% from its peak, still not armed
+	}
+
+	[Fact]
+	public void OnceArmed_ItTrailsFromThePeak_AndStaysArmed()
+	{
+		var rule = ArmedAt(0.50m);
+		var p = LongCall(entry: 10.00m);
+		Assert.Null(rule.Evaluate(p, Tick(p, 15.00m, 0)));   // +50% at the bid: armed, stop $12.00
+		Assert.Null(rule.Evaluate(p, Tick(p, 20.00m, 1)));   // peak $20, stop $16.00
+		Assert.Null(rule.Evaluate(p, Tick(p, 16.10m, 2)));
+		var close = rule.Evaluate(p, Tick(p, 16.00m, 3));     // the trail, from the peak that armed it and rose since
+		Assert.NotNull(close);
+		Assert.Contains("peak $20.00", close!.Rationale, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void TheThresholdIsReadAtTheBid_NotTheMid()
+	{
+		// A +50% the market will not pay does not arm it: a 14.80 / 15.40 market is +51% at the mid but +48% at the bid.
+		var rule = ArmedAt(0.50m);
+		var p = LongCall(entry: 10.00m);
+		Assert.Null(rule.Evaluate(p, Ctx(p, 0, Q(Call, 14.80m, 15.40m))));
+		Assert.Null(rule.Evaluate(p, Ctx(p, 1, Q(Call, 1.00m, 1.20m))));   // so this collapse is not stopped
+	}
+
+	[Theory]
+	[InlineData(10.00, 15.00, true)]     // debit: +50%
+	[InlineData(10.00, 14.99, false)]
+	[InlineData(-2.00, -1.00, true)]     // credit $2.00: closing for $1.00 keeps half of it
+	[InlineData(-2.00, -1.01, false)]
+	public void IsArmed_OneFormulaForDebitsAndCredits(double entry, double peak, bool armed) =>
+		Assert.Equal(armed, TrailingStopRule.IsArmed(new TrailingStopConfig { ActivateAtProfitPct = 0.50m }, (decimal)entry, (decimal)peak));
+
+	[Fact]
+	public void WithoutAThreshold_ItIsArmedFromEntry() =>
+		Assert.True(TrailingStopRule.IsArmed(new TrailingStopConfig(), 10.00m, 1.00m));
+
 	// ── Long option ───────────────────────────────────────────────────────────────────────────────────────
 
 	[Fact]
@@ -319,5 +369,16 @@ public class TrailingStopRuleTests
 		// A typo must not silently leave the structure trailed.
 		Assert.Contains("rules.trailingStop.exclude: 'ShortCallVerticle'", Validate("ShortCallVerticle") ?? "");
 		Assert.Contains("rules.trailingStop.exclude: 'bullTrap'", Validate("LongCall", "bullTrap") ?? "");
+	}
+
+	[Fact]
+	public void AnActivationThresholdMustBePositive()
+	{
+		var c = new AIConfig { Ticker = "SPXW", Indicators = new IndicatorsConfig { IvDefaultPct = 0.18m, StrikeStep = 5m } };
+		c.Opener.Indicators = c.Indicators;
+		c.Rules.TrailingStop = new TrailingStopConfig { Enabled = true, ActivateAtProfitPct = 0m };
+		Assert.Contains("rules.trailingStop.activateAtProfitPct", AIConfigLoader.Validate(c) ?? "");
+		c.Rules.TrailingStop.ActivateAtProfitPct = 0.50m;
+		Assert.Null(AIConfigLoader.Validate(c));
 	}
 }
