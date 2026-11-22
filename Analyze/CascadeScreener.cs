@@ -65,7 +65,14 @@ internal sealed record CascadeTerrain(
 	/// <summary>The front expiry's put wall as it stood at the session low (<see cref="GexMatrix.FindPutWallAt"/>): the largest
 	/// put-gamma strike no more than <see cref="CascadeScreener.WallTouchMoves"/> expected moves above the low, gamma judged with the
 	/// underlying at the low. The level a selloff that bottomed there ran into; null when the front has settled or there is no tape.</summary>
-	decimal? PutWallAtLow0Dte = null);
+	decimal? PutWallAtLow0Dte = null,
+	/// <summary>The 0DTE strike with the second-most net call GEX beyond the OTM headroom (<see cref="OtmCallWall0Dte"/> has the most), and its
+	/// net GEX as a share of the leader's. Two near-equal walls are blended instead of one flipping to the other on noise.</summary>
+	decimal? OtmCallRunnerUp0Dte = null,
+	decimal OtmCallRunnerUpShare = 0m,
+	/// <summary>The put-side counterpart of <see cref="OtmCallRunnerUp0Dte"/>.</summary>
+	decimal? OtmPutRunnerUp0Dte = null,
+	decimal OtmPutRunnerUpShare = 0m);
 
 /// <summary>
 /// Point-in-time flow, volatility, skew, and intraday tape inputs to <see cref="CascadeScreener.Evaluate"/>.
@@ -190,8 +197,8 @@ internal static class CascadeScreener
 		decimal frontCallGex = 0m, frontPutGex = 0m;
 		decimal? callWallAbove = null, putWallBelow = null;
 		decimal bestCallAbove = 0m, bestPutBelow = 0m;
-		decimal? otmCallWall0Dte = null, otmPutWall0Dte = null;
-		decimal bestOtmCallNet = 0m, bestOtmPutNet = 0m;
+		decimal? otmCallWall0Dte = null, otmPutWall0Dte = null, otmCallRunnerUp = null, otmPutRunnerUp = null;
+		decimal bestOtmCallNet = 0m, bestOtmPutNet = 0m, secondOtmCallNet = 0m, secondOtmPutNet = 0m;
 		if (frontExp.HasValue)
 		{
 			foreach (var ((exp, strike), cell) in gexMatrix.FullCells)
@@ -201,8 +208,8 @@ internal static class CascadeScreener
 				frontPutGex += cell.PutGex;
 				if (strike >= spot && cell.CallGex > bestCallAbove) { bestCallAbove = cell.CallGex; callWallAbove = strike; }
 				if (strike <= spot && cell.PutGex > bestPutBelow) { bestPutBelow = cell.PutGex; putWallBelow = strike; }
-				if (strike >= spot + minHeadroom && cell.Net > bestOtmCallNet) { bestOtmCallNet = cell.Net; otmCallWall0Dte = strike; }
-				if (strike <= spot - minHeadroom && -cell.Net > bestOtmPutNet) { bestOtmPutNet = -cell.Net; otmPutWall0Dte = strike; }
+				if (strike >= spot + minHeadroom) RankWall(strike, cell.Net, ref otmCallWall0Dte, ref bestOtmCallNet, ref otmCallRunnerUp, ref secondOtmCallNet);
+				if (strike <= spot - minHeadroom) RankWall(strike, -cell.Net, ref otmPutWall0Dte, ref bestOtmPutNet, ref otmPutRunnerUp, ref secondOtmPutNet);
 			}
 		}
 		var afterClose = asOf.TimeOfDay >= MarketCalendar.CloseTimeEt(asOf.Date);
@@ -271,7 +278,18 @@ internal static class CascadeScreener
 			SessionClosed: sessionClosed,
 			FrontSettled: frontSettled,
 			CallWallAtHigh0Dte: callWallAtHigh,
-			PutWallAtLow0Dte: putWallAtLow);
+			PutWallAtLow0Dte: putWallAtLow,
+			OtmCallRunnerUp0Dte: frontSettled ? null : otmCallRunnerUp,
+			OtmCallRunnerUpShare: bestOtmCallNet > 0m ? secondOtmCallNet / bestOtmCallNet : 0m,
+			OtmPutRunnerUp0Dte: frontSettled ? null : otmPutRunnerUp,
+			OtmPutRunnerUpShare: bestOtmPutNet > 0m ? secondOtmPutNet / bestOtmPutNet : 0m);
+	}
+
+	/// <summary>Keeps the strongest and second-strongest positive <paramref name="gex"/> seen, with their strikes.</summary>
+	private static void RankWall(decimal strike, decimal gex, ref decimal? best, ref decimal bestGex, ref decimal? second, ref decimal secondGex)
+	{
+		if (gex > bestGex) { (second, secondGex) = (best, bestGex); (best, bestGex) = (strike, gex); }
+		else if (gex > secondGex) (second, secondGex) = (strike, gex);
 	}
 
 	/// <summary>Evaluates all four regimes and selects the active or leading classification.</summary>
@@ -384,14 +402,12 @@ internal static class CascadeScreener
 		var f3Detail = FormatFlowDetail(inp, bull);
 
 		// Factor 4: Gravity Ahead & Target Wall (20 pts)
-		var targetWall = CascadeTargetWall(t, bull, move);
-		var wallAhead = targetWall.HasValue ? dir * (targetWall.Value - f.Spot) : (decimal?)null;
+		var (wallPts, targetWall) = TargetWallPoints(t, bull, move);
 		decimal gravPts = 0m;
 		var anchor = t.Gravity0Dte ?? t.Centroid0Dte;
 		if (anchor.HasValue && dir * (anchor.Value - f.Spot) >= 0m)
 			gravPts = 10m * Ramp(dir * (anchor.Value - f.Spot), 0m, 0.50m * move);
-		if (wallAhead >= 0.15m * move)
-			gravPts += wallAhead.Value <= 1.5m * move ? 10m * Ramp(wallAhead.Value, 0.15m * move, 0.50m * move) : 5m;
+		gravPts += wallPts;
 		int? f4Pts = t.FrontSettled ? null : RoundPts(gravPts);
 		var f4Detail = t.FrontSettled ? FrontSettledDetail : $"front gravity {(t.Gravity0Dte.HasValue ? $"${t.Gravity0Dte.Value:N0}" : "—")}, target {(bull ? "C" : "P")}-wall {(targetWall.HasValue ? $"${targetWall.Value:N0} ({targetWall.Value - f.Spot:+0;-0} pts)" : "—")}";
 
@@ -437,20 +453,51 @@ internal static class CascadeScreener
 		return new CascadeSetupEvaluation(regime, total, complete, factors, notes);
 	}
 
-	/// <summary>The wall a cascade is travelling toward — call side for bull, put side for bear: the front expiry's wall
-	/// when it sits at least 0.15 expected moves ahead of spot, else the front expiry's largest out-of-the-money wall,
-	/// else the multi-expiry wall if that is far enough ahead, else the (at-the-money) front wall.</summary>
-	private static decimal? CascadeTargetWall(CascadeTerrain t, bool bull, decimal move)
+	/// <summary>The target-wall half of Gravity & Target Wall (0–10 points) and the wall it mostly reads, for the detail line. The wall a cascade
+	/// travels toward — call side for bull, put side for bear — is the front expiry's wall when it sits far enough ahead of spot, else the front
+	/// expiry's largest out-of-the-money wall, else the multi-expiry wall. Each choice used to be a hard switch, so a few points of spot or a
+	/// near-tie between two strikes moved the factor 5–9 points (2026-11-20: 10:00 bull cascade 67 in the backtest vs 64 live, 10:30 bear
+	/// cascade 62 vs 71). Every switch is now a blend, and the score is continuous in its inputs:
+	/// <list type="bullet">
+	/// <item><description>front wall vs the next wall out: weighted by the front wall's distance over 0.10–0.20 EM (all next wall below,
+	/// all front wall above — the old switch sat at 0.15);</description></item>
+	/// <item><description>the OTM wall vs its runner-up: once the runner-up has ≥ 80% of the leader's net GEX, up to an even split at a tie;</description></item>
+	/// <item><description>points by distance (<see cref="WallDistancePoints"/>): 0 at 0.15 EM rising to 10 at 0.50, then easing to 5 over
+	/// 1.5–2.0 EM where it used to drop at once.</description></item>
+	/// </list>
+	/// Away from those bands every score is what it was.</summary>
+	internal static (decimal Points, decimal? Wall) TargetWallPoints(CascadeTerrain t, bool bull, decimal move)
 	{
 		var f = t.Front;
 		var dir = bull ? 1m : -1m;
 		var frontWall = bull ? f.CallWall : f.PutWall;
-		if (frontWall.HasValue && dir * (frontWall.Value - f.Spot) >= 0.15m * move) return frontWall;
 		var otmWall = bull ? t.OtmCallWall0Dte : t.OtmPutWall0Dte;
-		if (otmWall.HasValue) return otmWall;
+		var runnerUp = bull ? t.OtmCallRunnerUp0Dte : t.OtmPutRunnerUp0Dte;
+		var runnerUpShare = bull ? t.OtmCallRunnerUpShare : t.OtmPutRunnerUpShare;
 		var multiWall = bull ? t.CallWallMulti : t.PutWallMulti;
-		return multiWall.HasValue && dir * (multiWall.Value - f.Spot) >= 0.15m * move ? multiWall : frontWall;
+
+		// The wall past the front one: the OTM wall (blended with a near-equal runner-up), else the multi-expiry wall, else nothing.
+		decimal nextPts;
+		decimal? nextWall;
+		if (otmWall is decimal otm)
+		{
+			var runnerWeight = runnerUp.HasValue ? 0.5m * Ramp(runnerUpShare, 0.80m, 1.00m) : 0m;
+			nextPts = (1m - runnerWeight) * WallDistancePoints(dir * (otm - f.Spot), move) + (runnerWeight > 0m ? runnerWeight * WallDistancePoints(dir * (runnerUp!.Value - f.Spot), move) : 0m);
+			nextWall = otm;
+		}
+		else if (multiWall is decimal multi) { nextPts = WallDistancePoints(dir * (multi - f.Spot), move); nextWall = multi; }
+		else { nextPts = 0m; nextWall = null; }
+
+		if (frontWall is not decimal front) return (nextPts, nextWall);
+		var frontWeight = nextWall == null ? 1m : Ramp(dir * (front - f.Spot), 0.10m * move, 0.20m * move);
+		var points = frontWeight * WallDistancePoints(dir * (front - f.Spot), move) + (1m - frontWeight) * nextPts;
+		return (points, frontWeight >= 0.5m ? front : nextWall);
 	}
+
+	/// <summary>Points for a target wall <paramref name="ahead"/> of spot (negative = behind it): none within 0.15 EM (no room to run), 10 from
+	/// 0.50 EM, easing to 5 between 1.5 and 2.0 EM (a wall that far is a weaker magnet for the session).</summary>
+	internal static decimal WallDistancePoints(decimal ahead, decimal move) =>
+		10m * Ramp(ahead, 0.15m * move, 0.50m * move) - 5m * Ramp(ahead, 1.50m * move, 2.00m * move);
 
 	// ── 2. BEAR TRAP (Failed Breakdown / Squeeze Up) ───────────────────────────────────────────────────────
 
