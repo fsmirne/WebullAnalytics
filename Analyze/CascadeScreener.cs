@@ -1140,9 +1140,10 @@ internal static class CascadeScreener
 				flowShare = GexSqueezeScreener.FlowShare(frontContribs, spot);
 			}
 
-			// The front expiry's captures, every strike (parsed once per session under a replay cache), cut to this reading's strike band and
-			// instant. A capture with no row in the band is dropped, as if the band had filtered the file.
-			var frontCaptures = cache != null ? cache.VolumeCaptures(ticker, date, vendorName, frontExp.Value) : IvDumpStore.LoadVolumeSeries(ticker, date, vendorName, (exp, _) => exp == frontExp.Value);
+			// The front expiry's captures, every strike — parsed once per session under a replay cache, and tailed (only what was appended since
+			// the last read) for a live read — cut to this reading's strike band and instant. A capture with no row in the band is dropped, as if
+			// the band had filtered the file.
+			var frontCaptures = cache != null ? cache.VolumeCaptures(ticker, date, vendorName, frontExp.Value) : IvVolumeTail.Captures(ticker, date, vendorName, frontExp.Value);
 			var captures = new SortedDictionary<TimeSpan, Dictionary<(DateTime Expiry, decimal Strike, string Right), long>>();
 			foreach (var (ts, map) in frontCaptures)
 			{

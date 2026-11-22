@@ -36,7 +36,7 @@ internal static class IvDumpStore
 			rows++;
 		}
 		if (rows == 0) return 0;
-		var path = Program.ResolvePath($"data/iv/{ticker}/{nowEt:yyyy-MM-dd}.csv");
+		var path = PathFor(ticker, nowEt);
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 		// The scraper, the watch loop's cascade reads and `analyze gex` all append to the same day file.
 		IO.SharedFileAppender.Append(path, sb.ToString(), headerIfNew: "date,time,source,expiry,strike,right,bid,ask,iv,oi,spot,volume\n");
@@ -49,19 +49,27 @@ internal static class IvDumpStore
 	internal static SortedDictionary<TimeSpan, Dictionary<(DateTime Expiry, decimal Strike, string Right), long>> LoadVolumeSeries(string ticker, DateTime date, string source, Func<DateTime, decimal, bool> include)
 	{
 		var series = new SortedDictionary<TimeSpan, Dictionary<(DateTime, decimal, string), long>>();
-		var path = Program.ResolvePath($"data/iv/{ticker}/{date:yyyy-MM-dd}.csv");
+		var path = PathFor(ticker, date);
 		if (!File.Exists(path)) return series;
 		foreach (var line in IO.SharedFileReader.ReadLines(path).Skip(1))
-		{
-			var f = line.Split(',');
-			if (f.Length < 12 || !string.Equals(f[2], source, StringComparison.OrdinalIgnoreCase)) continue;
-			if (!TimeSpan.TryParseExact(f[1], @"hh\:mm\:ss", CultureInfo.InvariantCulture, out var ts)) continue;
-			if (!DateTime.TryParseExact(f[3], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry)) continue;
-			if (!decimal.TryParse(f[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var strike) || !include(expiry, strike)) continue;
-			if (!long.TryParse(f[11], NumberStyles.Integer, CultureInfo.InvariantCulture, out var volume)) continue;
-			if (!series.TryGetValue(ts, out var capture)) series[ts] = capture = new Dictionary<(DateTime, decimal, string), long>();
-			capture[(expiry, strike, f[5])] = volume;
-		}
+			AddVolumeRow(line, source, include, series);
 		return series;
+	}
+
+	/// <summary>The day file's path for <paramref name="ticker"/> on <paramref name="date"/>.</summary>
+	internal static string PathFor(string ticker, DateTime date) => Program.ResolvePath($"data/iv/{ticker}/{date:yyyy-MM-dd}.csv");
+
+	/// <summary>Adds one CSV row's volume to <paramref name="series"/> when it is a <paramref name="source"/> row <paramref name="include"/> accepts and
+	/// carries a volume. Anything else — the header, another vendor's row, a pre-volume row, a malformed line — is skipped.</summary>
+	internal static void AddVolumeRow(string line, string source, Func<DateTime, decimal, bool> include, SortedDictionary<TimeSpan, Dictionary<(DateTime Expiry, decimal Strike, string Right), long>> series)
+	{
+		var f = line.Split(',');
+		if (f.Length < 12 || !string.Equals(f[2], source, StringComparison.OrdinalIgnoreCase)) return;
+		if (!TimeSpan.TryParseExact(f[1], @"hh\:mm\:ss", CultureInfo.InvariantCulture, out var ts)) return;
+		if (!DateTime.TryParseExact(f[3], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry)) return;
+		if (!decimal.TryParse(f[4], NumberStyles.Any, CultureInfo.InvariantCulture, out var strike) || !include(expiry, strike)) return;
+		if (!long.TryParse(f[11], NumberStyles.Integer, CultureInfo.InvariantCulture, out var volume)) return;
+		if (!series.TryGetValue(ts, out var capture)) series[ts] = capture = new Dictionary<(DateTime, decimal, string), long>();
+		capture[(expiry, strike, f[5])] = volume;
 	}
 }
